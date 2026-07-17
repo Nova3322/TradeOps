@@ -15,6 +15,7 @@ from tests.integration.test_execution import (
     prepare_authorization,
     seed_execution_policy,
 )
+from tests.reconciliation_fixtures import complete_successful_reconciliation
 from tests.sender_fencing_fixtures import (
     WORKER_ID,
     acquire_envelope,
@@ -33,6 +34,7 @@ from trading_control_plane.commands import CommandStatus
 from trading_control_plane.database import Database
 from trading_control_plane.execution_models import OrderIntent, OrderIntentState
 from trading_control_plane.models import AuditEvent, CapabilityGate, OutboxMessage
+from trading_control_plane.reconciliation_models import ExecutionReconciliationRunState
 from trading_control_plane.sender_fencing import (
     SenderLeaseAction,
     SenderLeaseValidationRequest,
@@ -342,6 +344,27 @@ def test_shadow_claim_requires_closed_live_gate_current_lease_and_active_certifi
     assert acquired.status is CommandStatus.COMPLETED
 
     claim_time = now + timedelta(seconds=2)
+    unreconciled = execute_claim(
+        database,
+        claim_envelope(
+            scope,
+            intent.order_intent_id,
+            lease_id,
+            1,
+            uuid4(),
+            now=claim_time,
+        ),
+        now=claim_time,
+    )
+    assert unreconciled.status is CommandStatus.REJECTED
+    assert unreconciled.error_code == "RECONCILIATION_SUCCESS_REQUIRED"
+    reconciliation_run_id = complete_successful_reconciliation(
+        database,
+        scope,
+        lease_id,
+        1,
+        now=now + timedelta(milliseconds=1500),
+    )
     with database.session_factory.begin() as session:
         gate = session.get(CapabilityGate, "LIVE_ORDER_SEND")
         assert gate is not None
@@ -349,7 +372,14 @@ def test_shadow_claim_requires_closed_live_gate_current_lease_and_active_certifi
         gate.version += 1
     blocked = execute_claim(
         database,
-        claim_envelope(scope, intent.order_intent_id, lease_id, 1, now=claim_time),
+        claim_envelope(
+            scope,
+            intent.order_intent_id,
+            lease_id,
+            1,
+            reconciliation_run_id,
+            now=claim_time,
+        ),
         now=claim_time,
     )
     assert blocked.status is CommandStatus.REJECTED
@@ -365,6 +395,7 @@ def test_shadow_claim_requires_closed_live_gate_current_lease_and_active_certifi
         intent.order_intent_id,
         lease_id,
         1,
+        reconciliation_run_id,
         now=claim_time,
         idempotency_key="shadow-claim-replay",
     )
@@ -384,6 +415,7 @@ def test_shadow_claim_requires_closed_live_gate_current_lease_and_active_certifi
             intent.order_intent_id,
             lease_id,
             1,
+            reconciliation_run_id,
             now=claim_time + timedelta(milliseconds=1),
         ),
         now=claim_time + timedelta(milliseconds=1),
@@ -416,6 +448,13 @@ def test_database_rejects_non_monotonic_sender_state_and_cross_scope_claim(
         acquire_envelope(scope, now=acquired_at, lease_id=lease_id),
         now=acquired_at,
     )
+    reconciliation_run_id = complete_successful_reconciliation(
+        database,
+        scope,
+        lease_id,
+        1,
+        now=now + timedelta(milliseconds=1500),
+    )
     with pytest.raises(DBAPIError, match="invalid sender scope identity, version, time, or token"):
         with database.session_factory.begin() as session:
             state = session.execute(select(ExecutionSenderScopeState)).scalar_one()
@@ -430,10 +469,15 @@ def test_database_rejects_non_monotonic_sender_state_and_cross_scope_claim(
             lease = session.get(ExecutionSenderLease, lease_id)
             state = session.execute(select(ExecutionSenderScopeState)).scalar_one()
             certificate = session.get(CapabilityCertificate, intent.capability_certificate_ref)
+            reconciliation_state = session.get(
+                ExecutionReconciliationRunState, reconciliation_run_id
+            )
             sender_scope = session.get(ExecutionSenderScope, sender_scope_id(scope))
             assert lease is not None
             assert state.lease_expires_at is not None
             assert certificate is not None
+            assert reconciliation_state is not None
+            assert reconciliation_state.result_hash is not None
             assert sender_scope is not None
             session.add(
                 ShadowDispatchClaim(
@@ -448,6 +492,8 @@ def test_database_rejects_non_monotonic_sender_state_and_cross_scope_claim(
                     worker_config_hash=lease.worker_config_hash,
                     credential_fingerprint=lease.credential_fingerprint,
                     capability_certificate_ref=certificate.certificate_id,
+                    reconciliation_run_id=reconciliation_run_id,
+                    reconciliation_result_hash=reconciliation_state.result_hash,
                     execution_mode="SHADOW",
                     external_send_permitted=False,
                     live_gate_status="DISABLED",
@@ -471,6 +517,7 @@ def test_database_rejects_non_monotonic_sender_state_and_cross_scope_claim(
             intent.order_intent_id,
             lease_id,
             1,
+            reconciliation_run_id,
             now=now + timedelta(seconds=2),
         ),
         now=now + timedelta(seconds=2),

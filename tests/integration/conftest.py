@@ -44,6 +44,12 @@ def reset_database(database: Database) -> None:
                 """
                 TRUNCATE TABLE
                     shadow_dispatch_claims,
+                    execution_reconciliation_run_state_history,
+                    execution_reconciliation_run_states,
+                    execution_reconciliation_finding_resolutions,
+                    execution_reconciliation_findings,
+                    execution_reconciliation_inputs,
+                    execution_reconciliation_runs,
                     execution_sender_scope_state_history,
                     execution_sender_scope_states,
                     execution_sender_leases,

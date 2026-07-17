@@ -38,6 +38,10 @@ from trading_control_plane.metrics import (
     SHADOW_DISPATCH_CLAIMS,
 )
 from trading_control_plane.models import CapabilityGate
+from trading_control_plane.reconciliation_models import (
+    ExecutionReconciliationRun,
+    ExecutionReconciliationRunState,
+)
 from trading_control_plane.sender_fencing_models import (
     ExecutionSenderLease,
     ExecutionSenderScope,
@@ -140,6 +144,7 @@ class ClaimShadowOrderIntentRequest(BaseModel):
     scope: SenderScopeBinding
     lease_id: UUID
     fencing_token: int = Field(gt=0)
+    reconciliation_run_id: UUID
     worker_observed_at: datetime
     reason_code: str = Field(min_length=3, max_length=160)
 
@@ -218,6 +223,30 @@ def _lease_contract(lease: ExecutionSenderLease) -> dict[str, Any]:
         "issued_at": _iso(lease.issued_at),
         "initial_expires_at": _iso(lease.initial_expires_at),
         "max_expires_at": _iso(lease.max_expires_at),
+    }
+
+
+def _reconciliation_run_contract(run: ExecutionReconciliationRun) -> dict[str, Any]:
+    return {
+        "run_id": str(run.run_id),
+        "organization_id": run.organization_id,
+        "scope_id": run.scope_id,
+        "lease_id": str(run.lease_id),
+        "fencing_token": run.fencing_token,
+        "trigger_type": run.trigger_type,
+        "environment": run.environment,
+        "live_dispatch_eligible": run.live_dispatch_eligible,
+        "required_source_types": run.required_source_types,
+        "observation_window_start": _iso(run.observation_window_start),
+        "observation_window_end": _iso(run.observation_window_end),
+        "supersedes_run_id": (
+            str(run.supersedes_run_id) if run.supersedes_run_id is not None else None
+        ),
+        "initiated_by": run.initiated_by,
+        "reason_code": run.reason_code,
+        "source_ref": run.source_ref,
+        "started_at": _iso(run.started_at),
+        "deadline_at": _iso(run.deadline_at),
     }
 
 
@@ -662,6 +691,48 @@ class SenderFencingService:
             raise CommandRejected(
                 lease_validation.reason_codes[0], "sender lease validation failed closed"
             )
+        reconciliation_run = session.get(ExecutionReconciliationRun, request.reconciliation_run_id)
+        reconciliation_state = session.get(
+            ExecutionReconciliationRunState, request.reconciliation_run_id
+        )
+        latest_reconciliation = session.execute(
+            select(ExecutionReconciliationRun)
+            .where(
+                ExecutionReconciliationRun.scope_id == scope_id,
+                ExecutionReconciliationRun.lease_id == lease.lease_id,
+                ExecutionReconciliationRun.fencing_token == lease.fencing_token,
+            )
+            .order_by(
+                ExecutionReconciliationRun.started_at.desc(),
+                ExecutionReconciliationRun.run_id.desc(),
+            )
+            .limit(1)
+        ).scalar_one_or_none()
+        if (
+            reconciliation_run is None
+            or reconciliation_state is None
+            or latest_reconciliation is None
+            or latest_reconciliation.run_id != reconciliation_run.run_id
+            or reconciliation_state.status != "SUCCEEDED"
+            or reconciliation_state.result_snapshot is None
+            or reconciliation_state.result_hash is None
+            or reconciliation_run.run_hash
+            != hash_json(_reconciliation_run_contract(reconciliation_run))
+            or reconciliation_state.result_hash != hash_json(reconciliation_state.result_snapshot)
+            or reconciliation_state.completed_at is None
+            or reconciliation_state.completed_at > now
+            or reconciliation_run.organization_id != request.scope.organization_id
+            or reconciliation_run.scope_id != scope_id
+            or reconciliation_run.lease_id != lease.lease_id
+            or reconciliation_run.fencing_token != lease.fencing_token
+            or reconciliation_run.started_at < lease.issued_at
+            or reconciliation_run.environment != "SHADOW"
+            or reconciliation_run.live_dispatch_eligible
+        ):
+            raise CommandRejected(
+                "RECONCILIATION_SUCCESS_REQUIRED",
+                "claim requires a successful run bound to the current sender lease",
+            )
         if (
             session.execute(
                 select(ShadowDispatchClaim).where(
@@ -754,6 +825,8 @@ class SenderFencingService:
             "worker_config_hash": lease.worker_config_hash,
             "credential_fingerprint": lease.credential_fingerprint,
             "capability_certificate_ref": certificate.certificate_id,
+            "reconciliation_run_id": str(reconciliation_run.run_id),
+            "reconciliation_result_hash": reconciliation_state.result_hash,
             "execution_mode": "SHADOW",
             "external_send_permitted": False,
             "live_gate_status": "DISABLED",
@@ -778,6 +851,8 @@ class SenderFencingService:
             worker_config_hash=lease.worker_config_hash,
             credential_fingerprint=lease.credential_fingerprint,
             capability_certificate_ref=certificate.certificate_id,
+            reconciliation_run_id=reconciliation_run.run_id,
+            reconciliation_result_hash=reconciliation_state.result_hash,
             execution_mode="SHADOW",
             external_send_permitted=False,
             live_gate_status="DISABLED",
@@ -805,6 +880,8 @@ class SenderFencingService:
                 "scope_id": scope_id,
                 "lease_id": str(lease.lease_id),
                 "fencing_token": lease.fencing_token,
+                "reconciliation_run_id": str(reconciliation_run.run_id),
+                "reconciliation_result_hash": reconciliation_state.result_hash,
                 "client_order_id": client_order_id,
                 "execution_mode": "SHADOW",
                 "external_send_permitted": False,
@@ -821,6 +898,7 @@ class SenderFencingService:
                         "scope_id": scope_id,
                         "lease_id": str(lease.lease_id),
                         "fencing_token": lease.fencing_token,
+                        "reconciliation_run_id": str(reconciliation_run.run_id),
                         "client_order_id": client_order_id,
                         "external_send_permitted": False,
                     },

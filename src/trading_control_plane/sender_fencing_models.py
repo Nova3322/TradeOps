@@ -228,6 +228,11 @@ class ShadowDispatchClaim(Base):
             "AND length(claim_hash) = 64",
             name="ck_shadow_dispatch_claims_hashes",
         ),
+        CheckConstraint(
+            "(reconciliation_run_id IS NULL AND reconciliation_result_hash IS NULL) OR "
+            "(reconciliation_run_id IS NOT NULL AND length(reconciliation_result_hash) = 64)",
+            name="ck_shadow_dispatch_claims_reconciliation",
+        ),
         ForeignKeyConstraint(
             ["scope_id", "organization_id"],
             ["execution_sender_scopes.scope_id", "execution_sender_scopes.organization_id"],
@@ -250,6 +255,17 @@ class ShadowDispatchClaim(Base):
             name="fk_shadow_dispatch_claims_certificate_org",
             ondelete="RESTRICT",
         ),
+        ForeignKeyConstraint(
+            ["reconciliation_run_id", "scope_id", "lease_id", "fencing_token"],
+            [
+                "execution_reconciliation_runs.run_id",
+                "execution_reconciliation_runs.scope_id",
+                "execution_reconciliation_runs.lease_id",
+                "execution_reconciliation_runs.fencing_token",
+            ],
+            name="fk_shadow_dispatch_claims_reconciliation_binding",
+            ondelete="RESTRICT",
+        ),
         UniqueConstraint("order_intent_id", name="uq_shadow_dispatch_claims_order_intent"),
         UniqueConstraint(
             "scope_id", "client_order_id", name="uq_shadow_dispatch_claims_client_order_id"
@@ -270,6 +286,8 @@ class ShadowDispatchClaim(Base):
     worker_config_hash: Mapped[str] = mapped_column(String(64), nullable=False)
     credential_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
     capability_certificate_ref: Mapped[str] = mapped_column(String(255), nullable=False)
+    reconciliation_run_id: Mapped[UUID | None] = mapped_column(Uuid(as_uuid=True), nullable=True)
+    reconciliation_result_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
     execution_mode: Mapped[str] = mapped_column(String(20), nullable=False)
     external_send_permitted: Mapped[bool] = mapped_column(Boolean, nullable=False)
     live_gate_status: Mapped[str] = mapped_column(String(20), nullable=False)

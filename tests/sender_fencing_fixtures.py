@@ -166,6 +166,7 @@ def claim_envelope(
     order_intent_id: UUID,
     lease_id: UUID,
     fencing_token: int,
+    reconciliation_run_id: UUID,
     *,
     now: datetime,
     owner_worker_id: str = WORKER_ID,
@@ -175,6 +176,7 @@ def claim_envelope(
         scope=scope,
         lease_id=lease_id,
         fencing_token=fencing_token,
+        reconciliation_run_id=reconciliation_run_id,
         worker_observed_at=now,
         reason_code="TEST_SHADOW_DISPATCH_CLAIM",
     )

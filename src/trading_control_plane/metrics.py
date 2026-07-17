@@ -104,3 +104,21 @@ SHADOW_DISPATCH_CLAIMS = Counter(
     "Non-dispatchable shadow intent claims by bounded result.",
     labelnames=("result",),
 )
+
+RECONCILIATION_RUN_TRANSITIONS = Counter(
+    "trading_reconciliation_run_transitions_total",
+    "Durable execution-reconciliation transitions by bounded status and phase.",
+    labelnames=("from_status", "to_status", "phase"),
+)
+
+RECONCILIATION_INPUTS = Counter(
+    "trading_reconciliation_inputs_total",
+    "Immutable reconciliation input snapshots by required source and collection result.",
+    labelnames=("source_type", "collection_status"),
+)
+
+RECONCILIATION_FINDINGS = Counter(
+    "trading_reconciliation_findings_total",
+    "Immutable reconciliation finding events by severity and lifecycle fact.",
+    labelnames=("severity", "disposition"),
+)

@@ -11,6 +11,7 @@ from trading_control_plane import (  # noqa: F401
     iam_models,
     models,
     proposal_models,
+    reconciliation_models,
     risk_models,
     sender_fencing_models,
     trading_authorization_models,
