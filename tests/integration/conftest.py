@@ -43,6 +43,10 @@ def reset_database(database: Database) -> None:
             text(
                 """
                 TRUNCATE TABLE
+                    capability_certificate_state_history,
+                    capability_certificate_states,
+                    capability_certificates,
+                    capability_evidence_bundles,
                     risk_exposure_state_history,
                     order_intent_state_history,
                     risk_ledger_entries,

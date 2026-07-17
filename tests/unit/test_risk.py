@@ -228,6 +228,19 @@ def test_precheck_requires_every_fact_and_scope_type() -> None:
         RiskPrecheckRequest.model_validate(payload)
 
 
+def test_caller_supplied_certificate_boolean_is_rejected_and_derived_invalidity_denies() -> None:
+    payload = make_request().model_dump(mode="python")
+    payload["capability_certificate_valid"] = True
+
+    with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
+        RiskPrecheckRequest.model_validate(payload)
+
+    result = RiskEvaluator().evaluate(make_evaluation(capability_valid=False))
+    assert result.result is RiskDecisionResult.DENY
+    assert result.primary_reason_code == "CAPABILITY_CERTIFICATE_INVALID"
+    assert result.max_safe_quantity == 0
+
+
 @given(
     frozen_capital=st.decimals(
         min_value=Decimal("1000"),

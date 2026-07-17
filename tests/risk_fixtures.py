@@ -6,6 +6,7 @@ from typing import Any
 from uuid import UUID
 
 from trading_control_plane.authorization import RiskTier, SystemRiskState
+from trading_control_plane.capability_certificates import CapabilityValidationResult
 from trading_control_plane.commands import hash_json
 from trading_control_plane.risk import (
     CapitalInput,
@@ -118,7 +119,6 @@ def make_request(
     fact_age: timedelta = timedelta(milliseconds=100),
     scope_risks: tuple[ScopeRiskInput, ...] | None = None,
     instrument_classified: bool = True,
-    capability_certificate_valid: bool = True,
     protection_available: bool = True,
 ) -> RiskPrecheckRequest:
     observed_at = now or datetime.now(UTC)
@@ -145,22 +145,39 @@ def make_request(
         policy_version="risk-shadow-test-v1",
         risk_tier=risk_tier,
         binding=CertificationBinding(
+            proposal_source="SYSTEM",
             strategy_id="strategy-test",
             strategy_version="strategy-test-v1",
             strategy_parameter_version="strategy-params-test-v1",
             authorization_policy_version="authorization-policy-test-v1",
             instrument_identity="BINANCE:BTCUSDT-PERP",
+            contract_multiplier=Decimal("1"),
+            underlying_id="BTC",
+            sector_id="CRYPTO",
+            risk_cluster_id="CRYPTO_MAJOR",
             venue="BINANCE",
             execution_domain="BINANCE_USDM",
             account_id="account-1",
             account_abstraction="STANDARD",
+            position_mode="ONE_WAY",
             margin_mode="CROSS",
             collateral_scope="USDT",
             collateral_pool_id="BINANCE:USDT-CROSS",
+            settlement_asset="USDT",
             adapter_version="adapter-test-v1",
+            worker_id="worker-test-1",
+            worker_config_hash="a" * 64,
+            credential_fingerprint="b" * 64,
             freqtrade_worker_version="worker-test-v1",
             account_capability_version="account-capability-test-v1",
+            credential_permission_profile_version="trade-no-withdraw-test-v1",
+            venue_client_version="venue-client-test-v1",
+            instrument_scope_version="instrument-scope-test-v1",
             catalog_version="catalog-test-v1",
+            execution_capability_version="shadow-only-test-v1",
+            position_management_template_version="position-template-test-v1",
+            add_milestone_policy_version="add-milestones-test-v1",
+            requested_add_count=0,
             capability_certificate_ref="test-only:certificate-fixture",
         ),
         market=market
@@ -209,7 +226,6 @@ def make_request(
             for fact_type in FactType
         ),
         instrument_classified=instrument_classified,
-        capability_certificate_valid=capability_certificate_valid,
         protection_available=protection_available,
     )
 
@@ -220,8 +236,12 @@ def make_evaluation(
     request: RiskPrecheckRequest | None = None,
     policy: RiskPolicyParameters | None = None,
     system_risk_state: SystemRiskState = SystemRiskState.NORMAL,
+    capability_valid: bool = True,
 ) -> RiskEvaluationInput:
     decision_time = now or datetime.now(UTC)
+    certificate_valid_until = (
+        decision_time + timedelta(days=1) if capability_valid else decision_time
+    )
     return RiskEvaluationInput(
         request=request or make_request(now=decision_time),
         risk_policy_id=UUID("00000000-0000-0000-0000-000000000004"),
@@ -229,5 +249,20 @@ def make_evaluation(
         policy_valid_from=decision_time - timedelta(days=1),
         policy_valid_until=decision_time + timedelta(days=1),
         system_risk_state=system_risk_state,
+        capability_validation=CapabilityValidationResult(
+            valid=capability_valid,
+            certificate_id="test-only:certificate-fixture",
+            status="ACTIVE" if capability_valid else "UNKNOWN",
+            reason_codes=() if capability_valid else ("CAPABILITY_CERTIFICATE_NOT_FOUND",),
+            certificate_hash="1" * 64 if capability_valid else None,
+            scope_hash="2" * 64 if capability_valid else None,
+            policy_versions_hash="3" * 64 if capability_valid else None,
+            evidence_bundle_hash="4" * 64 if capability_valid else None,
+            valid_until=certificate_valid_until,
+            validation_snapshot={
+                "certificate_id": "test-only:certificate-fixture",
+                "valid": capability_valid,
+            },
+        ),
         decision_time=decision_time,
     )

@@ -68,3 +68,21 @@ EXECUTION_FACT_RESULTS = Counter(
     "Reconciliation fact outcomes by target order-intent status and bounded result.",
     labelnames=("target_status", "result"),
 )
+
+CAPABILITY_CERTIFICATE_ISSUANCE = Counter(
+    "trading_capability_certificate_issuance_total",
+    "Shadow-only capability certificate issuance by type, environment, and result.",
+    labelnames=("certificate_type", "environment", "result"),
+)
+
+CAPABILITY_CERTIFICATE_TRANSITIONS = Counter(
+    "trading_capability_certificate_transitions_total",
+    "Monotonic certificate tightening transitions and propagated authorization invalidations.",
+    labelnames=("action", "target_status", "result"),
+)
+
+CAPABILITY_CERTIFICATE_VALIDATIONS = Counter(
+    "trading_capability_certificate_validations_total",
+    "Durable exact-scope capability certificate validation results.",
+    labelnames=("result", "primary_reason"),
+)

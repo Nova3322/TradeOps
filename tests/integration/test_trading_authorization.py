@@ -9,6 +9,7 @@ from sqlalchemy import func, select, text
 from sqlalchemy.exc import DBAPIError, IntegrityError
 from sqlalchemy.orm import Session
 
+from tests.capability_fixtures import issue_shadow_certificate_for_proposal
 from tests.integration.test_review import (
     approval_assurance,
     execute_review,
@@ -168,9 +169,18 @@ def set_system_risk_state(database: Database, status: str) -> None:
         state.updated_at = datetime.now(UTC)
 
 
-def prepare_approved(database: Database, *, risk_tier: str = "LOW", **proposal_kwargs: object):
+def prepare_approved(
+    database: Database,
+    *,
+    risk_tier: str = "LOW",
+    issue_certificate: bool = True,
+    **proposal_kwargs: object,
+):
     proposal = seed_proposal(database, risk_tier=risk_tier, **proposal_kwargs)
     decision = approve_proposal(database, proposal.proposal_version_id, risk_tier)
+    certificate_ref = proposal.spec.get("capability_certificate_ref")
+    if issue_certificate and isinstance(certificate_ref, str) and certificate_ref:
+        issue_shadow_certificate_for_proposal(database, proposal)
     return proposal, decision
 
 
@@ -332,6 +342,29 @@ def test_missing_promoted_binding_fails_closed_after_valid_human_approval(
 
     assert result.status is CommandStatus.REJECTED
     assert result.error_code == "AUTHORIZATION_BINDING_INVALID"
+    with database.session_factory.begin() as session:
+        assert count_rows(session, TradingAuthorization) == 0
+
+
+def test_unpersisted_capability_certificate_fails_closed_after_valid_approval(
+    database: Database,
+) -> None:
+    proposal, decision = prepare_approved(database, issue_certificate=False)
+
+    result = execute_issue(
+        database,
+        issue_envelope(
+            proposal.proposal_version_id,
+            proposal.version,
+            proposal.spec_hash,
+            proposal.risk_summary_hash,
+            decision.approval_decision_id,
+        ),
+    )
+
+    assert result.status is CommandStatus.REJECTED
+    assert result.error_code == "CAPABILITY_CERTIFICATE_INVALID"
+    assert result.data["message"] == "CAPABILITY_CERTIFICATE_NOT_FOUND"
     with database.session_factory.begin() as session:
         assert count_rows(session, TradingAuthorization) == 0
 

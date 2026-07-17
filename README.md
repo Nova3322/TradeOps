@@ -55,8 +55,8 @@
 
 ## 当前工程节点
 
-当前已完成六个本地工程工作包：从 [WP-0001：耐久控制面基础](docs/08-implementation/WP-0001-耐久控制面基础.md) 的命令幂等、不可变审计和 outbox/inbox，推进到 [WP-0006：原子风险预留与 Shadow OrderIntent](docs/08-implementation/WP-0006-原子风险预留与ShadowOrderIntent.md) 的 final risk precheck、RiskReservation、守恒账本、Initial/Add claim 及部分/零/Unknown 对账。中间包覆盖服务端 IAM 判定、冻结提案审核、确定性风险预检和 TradingAuthorization/Campaign。技术选择见 [ADR-0001](docs/08-implementation/ADR-0001-生产技术栈与首包边界.md)，逐包验证证据位于 [docs/08-implementation/evidence](docs/08-implementation/evidence/)。
+当前已完成七个本地工程工作包：从 [WP-0001：耐久控制面基础](docs/08-implementation/WP-0001-耐久控制面基础.md) 的命令幂等、不可变审计和 outbox/inbox，推进到 [WP-0007：耐久 CapabilityCertificate 与失效传播](docs/08-implementation/WP-0007-耐久CapabilityCertificate与失效传播.md) 的不可变证据包、精确 scope/版本/额度校验、证书单向状态和 Initial/Add 授权失效传播。WP-0006 已完成 final risk precheck、RiskReservation、守恒账本、Initial/Add claim 及部分/零/Unknown 对账；中间包覆盖服务端 IAM 判定、冻结提案审核、确定性风险预检和 TradingAuthorization/Campaign。技术选择见 [ADR-0001](docs/08-implementation/ADR-0001-生产技术栈与首包边界.md)，逐包验证证据位于 [docs/08-implementation/evidence](docs/08-implementation/evidence/)。
 
-当前代码仍只有不可发送的 SHADOW OrderIntent，没有 sender/fencing、Freqtrade/VenueAdapter、VenueOrder/Fill、真实 position/protection 事实、CapabilityCertificate 存储、Web/PWA、Telegram、Margin、Vault/CTO 或场所认证证据。`LIVE_ORDER_SEND`、`CAPITAL_TRANSFER`、`AUTO_ADD` 均为 `DISABLED`；工程节点不等于获得实盘授权。
+当前代码仍只有不可发送的 SHADOW OrderIntent 和只允许 `real_funds_eligible=false` 的 SHADOW 证书控制合同，没有 production/small-live 证书签发、sender/fencing、Freqtrade/VenueAdapter、VenueOrder/Fill、真实 position/protection 事实、Web/PWA、Telegram、Margin、Vault/CTO 或场所认证证据。迁移不 seed 证书；`LIVE_ORDER_SEND`、`CAPITAL_TRANSFER`、`AUTO_ADD` 均为 `DISABLED`。工程节点不等于获得实盘授权。
 
 `OPEN` 只表示缺少真实外部事实；`RESEARCH_REQUIRED` 表示必须靠研究或执行证据冻结。两者都不能签发现实交易权限，也不用于删减完整工程目标。

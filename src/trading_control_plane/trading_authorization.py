@@ -10,6 +10,12 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from trading_control_plane.capability_certificates import (
+    CapabilityCertificateValidator,
+    CapabilityPolicyVersions,
+    CapabilityScope,
+    CapabilityValidationRequest,
+)
 from trading_control_plane.commands import (
     CommandChannel,
     CommandEnvelope,
@@ -65,13 +71,19 @@ class FrozenAuthorizationBinding(BaseModel):
     collateral_scope: str = Field(min_length=1, max_length=120)
     collateral_pool_id: str = Field(min_length=1, max_length=160)
     settlement_asset: str = Field(min_length=1, max_length=80)
+    contract_multiplier: Decimal = Field(gt=0)
     authorization_policy_version: str = Field(min_length=1, max_length=120)
     position_management_template_version: str = Field(min_length=1, max_length=120)
     add_milestone_policy_version: str = Field(min_length=1, max_length=120)
     adapter_version: str = Field(min_length=1, max_length=120)
     worker_id: str = Field(min_length=1, max_length=160)
+    worker_config_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    credential_fingerprint: str = Field(pattern=r"^[0-9a-f]{64}$")
     freqtrade_worker_version: str = Field(min_length=1, max_length=120)
     account_capability_version: str = Field(min_length=1, max_length=120)
+    credential_permission_profile_version: str = Field(min_length=1, max_length=120)
+    venue_client_version: str = Field(min_length=1, max_length=120)
+    instrument_scope_version: str = Field(min_length=1, max_length=120)
     capability_certificate_ref: str = Field(min_length=1, max_length=255)
 
 
@@ -98,12 +110,80 @@ class TightenAuthorizationRequest(BaseModel):
     reason_code: str = Field(min_length=3, max_length=160)
 
 
+def authorization_capability_validation_request(
+    proposal: FrozenProposalVersion,
+    binding: FrozenAuthorizationBinding,
+    validation_time: datetime,
+) -> CapabilityValidationRequest:
+    price_reference = proposal.limit_price or proposal.trigger_price
+    if price_reference is None or price_reference <= 0:
+        raise CommandRejected("PRICE_REFERENCE_MISSING", "a positive frozen price is required")
+    return CapabilityValidationRequest(
+        organization_id=proposal.organization_id,
+        certificate_id=binding.capability_certificate_ref,
+        expected_scope=CapabilityScope(
+            proposal_source=proposal.source,
+            strategy_id=binding.strategy_id,
+            strategy_version=binding.strategy_version,
+            venue=proposal.venue,
+            execution_domain=proposal.execution_domain,
+            account_id=proposal.account_id,
+            account_abstraction=binding.account_abstraction,
+            position_mode=binding.position_mode,
+            margin_mode=binding.margin_mode,
+            collateral_scope=binding.collateral_scope,
+            collateral_pool_id=binding.collateral_pool_id,
+            instrument_id=proposal.instrument_id,
+            contract_multiplier=binding.contract_multiplier,
+            underlying_id=binding.underlying_id,
+            sector_id=proposal.sector,
+            risk_cluster_id=binding.risk_cluster_id,
+            direction=proposal.direction,
+            risk_tier=proposal.risk_tier,
+            max_add_count=proposal.requested_add_count,
+            settlement_asset=binding.settlement_asset,
+            worker_id=binding.worker_id,
+            worker_config_hash=binding.worker_config_hash,
+            credential_fingerprint=binding.credential_fingerprint,
+            capital_transfer_capability="NOT_APPLICABLE",
+        ),
+        expected_policy_versions=CapabilityPolicyVersions(
+            strategy_parameter_version=binding.strategy_parameter_version,
+            risk_policy_version=proposal.risk_policy_version,
+            authorization_policy_version=binding.authorization_policy_version,
+            catalog_version=proposal.catalog_version,
+            execution_capability_version=proposal.execution_capability_version,
+            adapter_version=binding.adapter_version,
+            freqtrade_worker_version=binding.freqtrade_worker_version,
+            account_capability_version=binding.account_capability_version,
+            credential_permission_profile_version=(binding.credential_permission_profile_version),
+            venue_client_version=binding.venue_client_version,
+            instrument_scope_version=binding.instrument_scope_version,
+            position_management_template_version=(binding.position_management_template_version),
+            add_milestone_policy_version=binding.add_milestone_policy_version,
+        ),
+        requested_order_notional=(
+            proposal.risk_approved_quantity
+            * price_reference
+            * (Decimal("1") + proposal.max_slippage_bps / Decimal("10000"))
+            * binding.contract_multiplier
+        ),
+        requested_trade_loss=proposal.frozen_trade_loss_cap,
+        validation_time=validation_time,
+    )
+
+
 class TradingAuthorizationService:
     issue_command_type = "trading.authorization.issue.v1"
     tighten_command_type = "trading.authorization.tighten.v1"
 
-    def __init__(self, clock: Callable[[], datetime] | None = None) -> None:
+    def __init__(
+        self,
+        clock: Callable[[], datetime] | None = None,
+        certificate_validator: CapabilityCertificateValidator | None = None,
+    ) -> None:
         self._clock = clock or (lambda: datetime.now(UTC))
+        self._certificate_validator = certificate_validator or CapabilityCertificateValidator()
 
     def issue(self, session: Session, envelope: CommandEnvelope) -> CommandOutcome:
         self._require_internal(envelope, self.issue_command_type, "ProposalVersion")
@@ -179,6 +259,17 @@ class TradingAuthorizationService:
         if decision is None or risk_state is None:  # pragma: no cover - validated above
             raise RuntimeError("validated issuance facts unexpectedly missing")
 
+        capability_validation = self._certificate_validator.validate(
+            session,
+            authorization_capability_validation_request(proposal, binding, now),
+            lock=True,
+        )
+        if not capability_validation.valid:
+            raise CommandRejected(
+                "CAPABILITY_CERTIFICATE_INVALID",
+                capability_validation.reason_codes[0],
+            )
+
         authorization_id = uuid4()
         campaign_id = uuid4()
         initial_id = uuid4()
@@ -224,6 +315,7 @@ class TradingAuthorizationService:
                 "policy_version": risk_state.policy_version,
             },
             "binding": binding.model_dump(mode="json"),
+            "capability_validation": capability_validation.validation_snapshot,
             "execution_eligible": False,
         }
         authorization = TradingAuthorization(

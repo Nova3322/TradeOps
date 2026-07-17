@@ -12,6 +12,13 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from trading_control_plane.authorization import RiskTier, SystemRiskState
+from trading_control_plane.capability_certificates import (
+    CapabilityCertificateValidator,
+    CapabilityPolicyVersions,
+    CapabilityScope,
+    CapabilityValidationRequest,
+    CapabilityValidationResult,
+)
 from trading_control_plane.commands import (
     CommandChannel,
     CommandEnvelope,
@@ -201,24 +208,41 @@ class RiskPolicyParameters(BaseModel):
 
 
 class CertificationBinding(BaseModel):
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
+    proposal_source: str = Field(pattern=r"^(SYSTEM|MANUAL)$")
     strategy_id: str = Field(min_length=1, max_length=160)
     strategy_version: str = Field(min_length=1, max_length=120)
     strategy_parameter_version: str = Field(min_length=1, max_length=120)
     authorization_policy_version: str = Field(min_length=1, max_length=120)
     instrument_identity: str = Field(min_length=1, max_length=255)
+    contract_multiplier: Decimal = Field(gt=0)
+    underlying_id: str = Field(min_length=1, max_length=160)
+    sector_id: str = Field(min_length=1, max_length=160)
+    risk_cluster_id: str = Field(min_length=1, max_length=160)
     venue: str = Field(min_length=1, max_length=80)
     execution_domain: str = Field(min_length=1, max_length=120)
     account_id: str = Field(min_length=1, max_length=160)
     account_abstraction: str = Field(min_length=1, max_length=80)
+    position_mode: str = Field(min_length=1, max_length=80)
     margin_mode: str = Field(min_length=1, max_length=80)
     collateral_scope: str = Field(min_length=1, max_length=120)
     collateral_pool_id: str = Field(min_length=1, max_length=160)
+    settlement_asset: str = Field(min_length=1, max_length=80)
     adapter_version: str = Field(min_length=1, max_length=120)
+    worker_id: str = Field(min_length=1, max_length=160)
+    worker_config_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    credential_fingerprint: str = Field(pattern=r"^[0-9a-f]{64}$")
     freqtrade_worker_version: str = Field(min_length=1, max_length=120)
     account_capability_version: str = Field(min_length=1, max_length=120)
+    credential_permission_profile_version: str = Field(min_length=1, max_length=120)
+    venue_client_version: str = Field(min_length=1, max_length=120)
+    instrument_scope_version: str = Field(min_length=1, max_length=120)
     catalog_version: str = Field(min_length=1, max_length=120)
+    execution_capability_version: str = Field(min_length=1, max_length=120)
+    position_management_template_version: str = Field(min_length=1, max_length=120)
+    add_milestone_policy_version: str = Field(min_length=1, max_length=120)
+    requested_add_count: int = Field(ge=0, le=3)
     capability_certificate_ref: str = Field(min_length=1, max_length=255)
 
 
@@ -357,7 +381,7 @@ class FactObservation(BaseModel):
 
 
 class RiskPrecheckRequest(BaseModel):
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
     organization_id: str = Field(min_length=1, max_length=120)
     proposal_ref: str = Field(min_length=1, max_length=255)
@@ -375,7 +399,6 @@ class RiskPrecheckRequest(BaseModel):
     scope_risks: tuple[ScopeRiskInput, ...]
     facts: tuple[FactObservation, ...]
     instrument_classified: bool
-    capability_certificate_valid: bool
     protection_available: bool
 
     @model_validator(mode="after")
@@ -402,6 +425,7 @@ class RiskEvaluationInput(BaseModel):
     policy_valid_from: datetime
     policy_valid_until: datetime
     system_risk_state: SystemRiskState
+    capability_validation: CapabilityValidationResult
     decision_time: datetime
 
     @model_validator(mode="after")
@@ -454,6 +478,67 @@ class RiskEvaluationResult(BaseModel):
     valid_until: datetime
     execution_eligible: bool = False
     reservation_created: bool = False
+
+
+def capability_validation_request(
+    request: RiskPrecheckRequest,
+    validation_time: datetime,
+) -> CapabilityValidationRequest:
+    """Build the exact durable certificate lookup from risk facts, not caller booleans."""
+
+    binding = request.binding
+    return CapabilityValidationRequest(
+        organization_id=request.organization_id,
+        certificate_id=binding.capability_certificate_ref,
+        expected_scope=CapabilityScope(
+            proposal_source=binding.proposal_source,
+            strategy_id=binding.strategy_id,
+            strategy_version=binding.strategy_version,
+            venue=binding.venue,
+            execution_domain=binding.execution_domain,
+            account_id=binding.account_id,
+            account_abstraction=binding.account_abstraction,
+            position_mode=binding.position_mode,
+            margin_mode=binding.margin_mode,
+            collateral_scope=binding.collateral_scope,
+            collateral_pool_id=binding.collateral_pool_id,
+            instrument_id=binding.instrument_identity,
+            contract_multiplier=binding.contract_multiplier,
+            underlying_id=binding.underlying_id,
+            sector_id=binding.sector_id,
+            risk_cluster_id=binding.risk_cluster_id,
+            direction=request.market.direction.value,
+            risk_tier=request.risk_tier.value,
+            max_add_count=binding.requested_add_count,
+            settlement_asset=binding.settlement_asset,
+            worker_id=binding.worker_id,
+            worker_config_hash=binding.worker_config_hash,
+            credential_fingerprint=binding.credential_fingerprint,
+            capital_transfer_capability="NOT_APPLICABLE",
+        ),
+        expected_policy_versions=CapabilityPolicyVersions(
+            strategy_parameter_version=binding.strategy_parameter_version,
+            risk_policy_version=request.policy_version,
+            authorization_policy_version=binding.authorization_policy_version,
+            catalog_version=binding.catalog_version,
+            execution_capability_version=binding.execution_capability_version,
+            adapter_version=binding.adapter_version,
+            freqtrade_worker_version=binding.freqtrade_worker_version,
+            account_capability_version=binding.account_capability_version,
+            credential_permission_profile_version=(binding.credential_permission_profile_version),
+            venue_client_version=binding.venue_client_version,
+            instrument_scope_version=binding.instrument_scope_version,
+            position_management_template_version=(binding.position_management_template_version),
+            add_milestone_policy_version=binding.add_milestone_policy_version,
+        ),
+        requested_order_notional=(
+            request.requested.requested_quantity
+            * request.market.executable_price
+            * request.market.contract_multiplier
+        ),
+        requested_trade_loss=request.requested.proposal_requested_loss_cap,
+        validation_time=validation_time,
+    )
 
 
 def _floor_to_step(value: Decimal, step: Decimal) -> Decimal:
@@ -535,7 +620,7 @@ class RiskEvaluator:
         if not request.instrument_classified:
             reasons.append("INSTRUMENT_UNCLASSIFIED")
             hard_failure = True
-        if not request.capability_certificate_valid:
+        if not evaluation.capability_validation.valid:
             reasons.append("CAPABILITY_CERTIFICATE_INVALID")
             hard_failure = True
         if not request.protection_available:
@@ -705,7 +790,13 @@ class RiskEvaluator:
         ordered_reasons = _ordered_unique_reasons(reasons)
         allowed = not ordered_reasons
         result = RiskDecisionResult.ALLOW if allowed else RiskDecisionResult.DENY
-        valid_until_candidate = min([evaluation.policy_valid_until, *fact_expiries])
+        valid_until_candidate = min(
+            [
+                evaluation.policy_valid_until,
+                evaluation.capability_validation.valid_until,
+                *fact_expiries,
+            ]
+        )
         valid_until = max(now, valid_until_candidate) if allowed else now
 
         return RiskEvaluationResult(
@@ -740,8 +831,13 @@ class RiskPrecheckService:
 
     command_type = "risk.precheck.evaluate.v1"
 
-    def __init__(self, evaluator: RiskEvaluator | None = None) -> None:
+    def __init__(
+        self,
+        evaluator: RiskEvaluator | None = None,
+        certificate_validator: CapabilityCertificateValidator | None = None,
+    ) -> None:
         self._evaluator = evaluator or RiskEvaluator()
+        self._certificate_validator = certificate_validator or CapabilityCertificateValidator()
 
     def evaluate(self, session: Session, envelope: CommandEnvelope) -> CommandOutcome:
         started = time.monotonic()
@@ -794,6 +890,11 @@ class RiskPrecheckService:
                 "RISK_POLICY_INVALID", "risk policy violates the fixed business contract"
             ) from exc
 
+        decided_at = datetime.now(UTC)
+        capability_validation = self._certificate_validator.validate(
+            session,
+            capability_validation_request(request, decided_at),
+        )
         state_record = session.execute(
             select(SystemRiskStateRecord)
             .where(SystemRiskStateRecord.organization_id == request.organization_id)
@@ -804,7 +905,6 @@ class RiskPrecheckService:
             if state_record is not None
             else SystemRiskState.UNKNOWN
         )
-        decided_at = datetime.now(UTC)
         evaluation_input = RiskEvaluationInput(
             request=request,
             risk_policy_id=policy_record.risk_policy_id,
@@ -812,6 +912,7 @@ class RiskPrecheckService:
             policy_valid_from=policy_record.valid_from,
             policy_valid_until=policy_record.valid_until,
             system_risk_state=system_state,
+            capability_validation=capability_validation,
             decision_time=decided_at,
         )
         result = self._evaluator.evaluate(evaluation_input)

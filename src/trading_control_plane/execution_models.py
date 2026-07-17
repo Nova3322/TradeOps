@@ -276,7 +276,11 @@ class OrderIntent(Base):
     margin_mode: Mapped[str] = mapped_column(String(80), nullable=False)
     collateral_scope: Mapped[str] = mapped_column(String(120), nullable=False)
     collateral_pool_id: Mapped[str] = mapped_column(String(160), nullable=False)
-    capability_certificate_ref: Mapped[str] = mapped_column(String(255), nullable=False)
+    capability_certificate_ref: Mapped[str] = mapped_column(
+        String(255),
+        ForeignKey("capability_certificates.certificate_id", ondelete="RESTRICT"),
+        nullable=False,
+    )
     execution_mode: Mapped[str] = mapped_column(String(20), nullable=False)
     dispatch_eligible: Mapped[bool] = mapped_column(Boolean, nullable=False)
     intent_snapshot: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)

@@ -84,6 +84,15 @@ class TradingAuthorization(Base):
             name="fk_trading_auth_approval_proposal_binding",
             ondelete="RESTRICT",
         ),
+        ForeignKeyConstraint(
+            ["capability_certificate_ref", "organization_id"],
+            [
+                "capability_certificates.certificate_id",
+                "capability_certificates.organization_id",
+            ],
+            name="fk_trading_auth_capability_certificate",
+            ondelete="RESTRICT",
+        ),
         Index("ix_trading_auth_org_issued", "organization_id", "issued_at"),
     )
 
@@ -107,7 +116,10 @@ class TradingAuthorization(Base):
     authorization_policy_version: Mapped[str] = mapped_column(String(120), nullable=False)
     catalog_version: Mapped[str] = mapped_column(String(120), nullable=False)
     execution_capability_version: Mapped[str] = mapped_column(String(120), nullable=False)
-    capability_certificate_ref: Mapped[str] = mapped_column(String(255), nullable=False)
+    capability_certificate_ref: Mapped[str] = mapped_column(
+        String(255),
+        nullable=False,
+    )
     proposal_spec_hash: Mapped[str] = mapped_column(String(64), nullable=False)
     risk_summary_hash: Mapped[str] = mapped_column(String(64), nullable=False)
     authorization_mode: Mapped[str] = mapped_column(String(20), nullable=False)

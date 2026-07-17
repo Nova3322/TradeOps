@@ -13,6 +13,7 @@ from sqlalchemy import select, text
 from sqlalchemy.orm import Session
 
 from trading_control_plane.authorization import SystemRiskState
+from trading_control_plane.capability_certificates import CapabilityCertificateValidator
 from trading_control_plane.commands import (
     CommandChannel,
     CommandEnvelope,
@@ -46,6 +47,7 @@ from trading_control_plane.risk import (
     RiskPolicyParameters,
     RiskPrecheckRequest,
     ScopeType,
+    capability_validation_request,
 )
 from trading_control_plane.risk_models import RiskPolicyRecord
 from trading_control_plane.trading_authorization import FrozenAuthorizationBinding
@@ -201,9 +203,11 @@ class ExecutionIntentService:
     def __init__(
         self,
         evaluator: RiskEvaluator | None = None,
+        certificate_validator: CapabilityCertificateValidator | None = None,
         clock: Callable[[], datetime] | None = None,
     ) -> None:
         self._evaluator = evaluator or RiskEvaluator()
+        self._certificate_validator = certificate_validator or CapabilityCertificateValidator()
         self._clock = clock or (lambda: datetime.now(UTC))
 
     def create(self, session: Session, envelope: CommandEnvelope) -> CommandOutcome:
@@ -289,6 +293,11 @@ class ExecutionIntentService:
         )
         self._validate_durable_exposure(session, request, campaign)
 
+        capability_validation = self._certificate_validator.validate(
+            session,
+            capability_validation_request(request.risk_request, now),
+            lock=True,
+        )
         evaluation_input = RiskEvaluationInput(
             request=request.risk_request,
             risk_policy_id=policy_record.risk_policy_id,
@@ -296,6 +305,7 @@ class ExecutionIntentService:
             policy_valid_from=policy_record.valid_from,
             policy_valid_until=policy_record.valid_until,
             system_risk_state=system_state,
+            capability_validation=capability_validation,
             decision_time=now,
         )
         evaluation = self._evaluator.evaluate(evaluation_input)
@@ -932,22 +942,41 @@ class ExecutionIntentService:
     ) -> None:
         risk = request.risk_request
         expected_binding = {
+            "proposal_source": authorization.source,
             "strategy_id": campaign.strategy_id,
             "strategy_version": campaign.strategy_version,
             "strategy_parameter_version": binding.strategy_parameter_version,
             "authorization_policy_version": authorization.authorization_policy_version,
             "instrument_identity": campaign.instrument_id,
+            "contract_multiplier": binding.contract_multiplier,
+            "underlying_id": binding.underlying_id,
+            "sector_id": proposal.sector,
+            "risk_cluster_id": binding.risk_cluster_id,
             "venue": campaign.venue,
             "execution_domain": campaign.execution_domain,
             "account_id": campaign.account_id,
             "account_abstraction": binding.account_abstraction,
+            "position_mode": binding.position_mode,
             "margin_mode": binding.margin_mode,
             "collateral_scope": binding.collateral_scope,
             "collateral_pool_id": binding.collateral_pool_id,
+            "settlement_asset": binding.settlement_asset,
             "adapter_version": binding.adapter_version,
+            "worker_id": binding.worker_id,
+            "worker_config_hash": binding.worker_config_hash,
+            "credential_fingerprint": binding.credential_fingerprint,
             "freqtrade_worker_version": binding.freqtrade_worker_version,
             "account_capability_version": binding.account_capability_version,
+            "credential_permission_profile_version": (
+                binding.credential_permission_profile_version
+            ),
+            "venue_client_version": binding.venue_client_version,
+            "instrument_scope_version": binding.instrument_scope_version,
             "catalog_version": authorization.catalog_version,
+            "execution_capability_version": authorization.execution_capability_version,
+            "position_management_template_version": (binding.position_management_template_version),
+            "add_milestone_policy_version": binding.add_milestone_policy_version,
+            "requested_add_count": authorization.requested_add_count,
             "capability_certificate_ref": authorization.capability_certificate_ref,
         }
         if risk.binding.model_dump(mode="python") != expected_binding:
@@ -961,6 +990,7 @@ class ExecutionIntentService:
             or risk.capital.total_capital_snapshot_0 != authorization.total_capital_snapshot_0
             or risk.market.direction.value != campaign.direction
             or risk.market.initial_invalidation_price != proposal.initial_invalidation_price
+            or risk.market.contract_multiplier != binding.contract_multiplier
             or risk.market.max_slippage_bps != proposal.max_slippage_bps
             or request.order_type != proposal.order_type
         ):

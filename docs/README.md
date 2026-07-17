@@ -84,10 +84,18 @@ docs/
     ├── WP-0001-耐久控制面基础.md
     ├── WP-0002-服务端授权判定核心.md
     ├── WP-0003-冻结提案审核内核.md
+    ├── WP-0004-确定性风险预检与风险状态基础.md
+    ├── WP-0005-TradingAuthorization与Campaign授权基础.md
+    ├── WP-0006-原子风险预留与ShadowOrderIntent.md
+    ├── WP-0007-耐久CapabilityCertificate与失效传播.md
     └── evidence/
         ├── WP-0001-validation-20260718.md
         ├── WP-0002-validation-20260718.md
-        └── WP-0003-validation-20260718.md
+        ├── WP-0003-validation-20260718.md
+        ├── WP-0004-validation-20260718.md
+        ├── WP-0005-validation-20260718.md
+        ├── WP-0006-validation-20260718.md
+        └── WP-0007-validation-20260718.md
 ```
 
 ### 专项索引
@@ -123,6 +131,7 @@ docs/
 | 实现 | [WP-0004：确定性风险预检与风险状态基础](08-implementation/WP-0004-确定性风险预检与风险状态基础.md) | 最新 MTM/UPNL、九类事实、七类 scope 与单向风险状态收紧 |
 | 实现 | [WP-0005：TradingAuthorization 与 Campaign 授权基础](08-implementation/WP-0005-TradingAuthorization与Campaign授权基础.md) | 人工批准后的冻结授权、Campaign、Initial 与 30/50/100 AddUnit |
 | 实现 | [WP-0006：原子风险预留与 Shadow OrderIntent](08-implementation/WP-0006-原子风险预留与ShadowOrderIntent.md) | final precheck、原子 Reservation/Intent、部分/零/Unknown 对账 |
+| 实现 | [WP-0007：耐久 CapabilityCertificate 与失效传播](08-implementation/WP-0007-耐久CapabilityCertificate与失效传播.md) | SHADOW 证书/证据事实、精确 scope 校验、单向状态与授权失效传播 |
 
 ## 完整交付与能力激活
 

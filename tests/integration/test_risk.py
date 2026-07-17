@@ -10,6 +10,7 @@ from sqlalchemy import func, select, text, update
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.orm import Session
 
+from tests.capability_fixtures import issue_shadow_certificate_for_risk_request
 from tests.risk_fixtures import make_policy, make_request
 from trading_control_plane.authorization import SystemRiskState
 from trading_control_plane.command_executor import IdempotentCommandExecutor
@@ -36,6 +37,13 @@ from trading_control_plane.risk_models import (
 )
 
 pytestmark = pytest.mark.integration
+
+
+@pytest.fixture(autouse=True)
+def seed_default_shadow_certificate(database: Database, reset_database: None) -> None:
+    del reset_database
+    result = issue_shadow_certificate_for_risk_request(database, make_request())
+    assert result.status is CommandStatus.COMPLETED
 
 
 def count_rows(session: Session, model: type[object]) -> int:
@@ -171,8 +179,22 @@ def test_allow_precheck_persists_immutable_snapshot_audit_and_outbox(
         assert snapshot.reservation_created is False
         assert hash_json(snapshot.input_snapshot) == snapshot.input_hash
         assert hash_json(snapshot.decision) == snapshot.decision_hash
-        assert count_rows(session, AuditEvent) == 1
-        assert count_rows(session, OutboxMessage) == 1
+        assert (
+            session.execute(
+                select(func.count())
+                .select_from(AuditEvent)
+                .where(AuditEvent.event_type == "RiskPrecheckDecisionRecorded")
+            ).scalar_one()
+            == 1
+        )
+        assert (
+            session.execute(
+                select(func.count())
+                .select_from(OutboxMessage)
+                .where(OutboxMessage.event_type == "RiskPrecheckDecisionRecorded")
+            ).scalar_one()
+            == 1
+        )
         assert session.execute(text("SELECT count(*) FROM risk_reservations")).scalar_one() == 0
         assert session.execute(text("SELECT count(*) FROM order_intents")).scalar_one() == 0
 
@@ -212,6 +234,33 @@ def test_missing_system_state_is_persisted_as_fail_closed_unknown(
         assert snapshot.system_risk_state == "UNKNOWN"
 
 
+def test_missing_durable_certificate_is_persisted_as_fail_closed_deny(
+    database: Database,
+) -> None:
+    now = datetime.now(UTC)
+    seed_policy(database, now=now)
+    seed_state(database)
+    baseline = make_request(now=now)
+    missing = baseline.model_copy(
+        update={
+            "binding": baseline.binding.model_copy(
+                update={"capability_certificate_ref": "capability:missing-durable-fact"}
+            )
+        }
+    )
+
+    result = execute_precheck(database, risk_envelope(missing))
+
+    assert result.status is CommandStatus.COMPLETED
+    assert result.data["result"] == "DENY"
+    assert result.data["primary_reason_code"] == "CAPABILITY_CERTIFICATE_INVALID"
+    with database.session_factory.begin() as session:
+        snapshot = session.execute(select(RiskDecisionSnapshot)).scalar_one()
+        validation = snapshot.input_snapshot["capability_validation"]
+        assert validation["valid"] is False
+        assert validation["reason_codes"] == ["CAPABILITY_CERTIFICATE_NOT_FOUND"]
+
+
 def test_idempotent_replay_never_creates_second_risk_snapshot(database: Database) -> None:
     now = datetime.now(UTC)
     seed_policy(database, now=now)
@@ -226,8 +275,22 @@ def test_idempotent_replay_never_creates_second_risk_snapshot(database: Database
     assert replay.replayed is True
     with database.session_factory.begin() as session:
         assert count_rows(session, RiskDecisionSnapshot) == 1
-        assert count_rows(session, AuditEvent) == 1
-        assert count_rows(session, OutboxMessage) == 1
+        assert (
+            session.execute(
+                select(func.count())
+                .select_from(AuditEvent)
+                .where(AuditEvent.event_type == "RiskPrecheckDecisionRecorded")
+            ).scalar_one()
+            == 1
+        )
+        assert (
+            session.execute(
+                select(func.count())
+                .select_from(OutboxMessage)
+                .where(OutboxMessage.event_type == "RiskPrecheckDecisionRecorded")
+            ).scalar_one()
+            == 1
+        )
 
 
 def test_missing_or_tampered_policy_fails_before_any_allow_snapshot(
@@ -374,8 +437,22 @@ def test_state_tightening_command_atomically_writes_history_audit_and_outbox(
     assert replay.status is CommandStatus.ALREADY_PROCESSED
     with database.session_factory.begin() as session:
         assert count_rows(session, SystemRiskStateTransition) == 2
-        assert count_rows(session, AuditEvent) == 1
-        assert count_rows(session, OutboxMessage) == 1
+        assert (
+            session.execute(
+                select(func.count())
+                .select_from(AuditEvent)
+                .where(AuditEvent.event_type == "SystemRiskStateTightened")
+            ).scalar_one()
+            == 1
+        )
+        assert (
+            session.execute(
+                select(func.count())
+                .select_from(OutboxMessage)
+                .where(OutboxMessage.event_type == "SystemRiskStateTightened")
+            ).scalar_one()
+            == 1
+        )
 
 
 def test_state_tightening_command_rejects_stale_expected_version(
