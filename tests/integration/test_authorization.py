@@ -95,6 +95,7 @@ def create_assurance(
     principal_id: UUID,
     object_id: str = "proposal-1:v1",
     auth_context_ref: str | None = None,
+    channel: str = "WEB",
 ) -> tuple[UUID, str]:
     now = datetime.now(UTC)
     assurance_id = uuid4()
@@ -106,7 +107,7 @@ def create_assurance(
                 principal_id=principal_id,
                 auth_context_ref=context_ref,
                 device_ref="device-1",
-                channel="WEB",
+                channel=channel,
                 action_id="ACT-PROPOSAL-APPROVE",
                 object_type="ProposalVersion",
                 object_id=object_id,
@@ -278,12 +279,7 @@ def test_independent_reviewer_gets_fixed_quorum_but_no_approval_fact(
         assurance = session.get(ActionAssurance, assurance_id)
         assert decision.required_quorum == expected_quorum
         assert assurance is not None and assurance.used_at is not None
-        assert (
-            session.execute(
-                text("SELECT to_regclass('public.reviewer_votes')")
-            ).scalar_one_or_none()
-            is None
-        )
+        assert session.execute(text("SELECT count(*) FROM reviewer_votes")).scalar_one() == 0
 
 
 def test_abac_scope_mismatch_denies_before_mfa_consumption(database: Database) -> None:

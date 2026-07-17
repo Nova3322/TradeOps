@@ -83,9 +83,11 @@ docs/
     ├── ADR-0001-生产技术栈与首包边界.md
     ├── WP-0001-耐久控制面基础.md
     ├── WP-0002-服务端授权判定核心.md
+    ├── WP-0003-冻结提案审核内核.md
     └── evidence/
         ├── WP-0001-validation-20260718.md
-        └── WP-0002-validation-20260718.md
+        ├── WP-0002-validation-20260718.md
+        └── WP-0003-validation-20260718.md
 ```
 
 ### 专项索引
@@ -117,6 +119,7 @@ docs/
 | 实现 | [ADR-0001：生产技术栈与首包边界](08-implementation/ADR-0001-生产技术栈与首包边界.md) | 当前工程技术选择、边界和失效条件 |
 | 实现 | [WP-0001：耐久控制面基础](08-implementation/WP-0001-耐久控制面基础.md) | 首包事务合同、安全默认、验证和回滚 |
 | 实现 | [WP-0002：服务端授权判定核心](08-implementation/WP-0002-服务端授权判定核心.md) | 默认拒绝、RBAC/ABAC、自审、动作级认证和判定审计 |
+| 实现 | [WP-0003：冻结提案审核内核](08-implementation/WP-0003-冻结提案审核内核.md) | 冻结风险快照、ReviewerVote、并发 quorum 和唯一终态 |
 
 ## 完整交付与能力激活
 

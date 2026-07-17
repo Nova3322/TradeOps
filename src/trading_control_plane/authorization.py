@@ -200,6 +200,7 @@ class AuthorizationRequest(BaseModel):
     device_ref: str | None = Field(default=None, max_length=255)
     assurance_id: UUID | None = None
     resource_creator_id: UUID | None = None
+    resource_creator_service_principal: str | None = Field(default=None, max_length=255)
     resource_status: str | None = Field(default=None, max_length=80)
     resource_valid_until: datetime | None = None
     risk_engine_status: RiskEngineStatus = RiskEngineStatus.UNKNOWN
@@ -341,7 +342,11 @@ class AuthorizationEvaluator:
             request.action_id in REVIEW_ACTIONS
             and request.resource_creator_id == request.principal_id
         )
-        if request.action_id in REVIEW_ACTIONS and request.resource_creator_id is None:
+        if (
+            request.action_id in REVIEW_ACTIONS
+            and request.resource_creator_id is None
+            and request.resource_creator_service_principal is None
+        ):
             return self._persist(
                 session,
                 envelope,
@@ -462,10 +467,10 @@ class AuthorizationEvaluator:
     ) -> str | None:
         if request.action_id not in SENSITIVE_ACTIONS:
             return None
-        if request.device_ref is None:
-            return "DEVICE_ASSURANCE_REQUIRED"
         if request.assurance_id is None:
             return "MFA_REQUIRED"
+        if request.device_ref is None:
+            return "DEVICE_ASSURANCE_REQUIRED"
         assurance = session.execute(
             select(ActionAssurance)
             .where(ActionAssurance.assurance_id == request.assurance_id)
