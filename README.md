@@ -1,7 +1,7 @@
 # Trading 交易系统
 
 > 文档入口版本：2026-07-18
-> 当前状态：产品与系统设计阶段；不构成实盘授权，也不表示现有原型已经满足目标方案
+> 当前状态：产品与系统设计完成首轮基线，耐久控制面首包已实现；不构成实盘授权，也不表示现有原型已经满足目标方案
 
 本目录用于设计一套由人工决定初仓、由程序在有限授权内管理风险和仓位的完整交易系统。目标范围同时包含 Binance USDⓈ-M Futures 与 Hyperliquid 的 U 本位永续合约，覆盖加密货币、美股及股指、贵金属、商品及商品期货参考资产四类板块；真实交易只限逐账户、执行域、保证金模式和标的完成认证的范围。其他交易场所只保留稳定 Venue Port 边界，没有现实需求时不实现适配器。
 
@@ -53,6 +53,10 @@
 
 本机开发凭据统一放在 `/Users/vireo/Documents/trading/.env.local`，可提交的变量名模板为 `.env.example`。当前 Telegram Bot 使用变量 `TELEGRAM_BOT_TOKEN`；文档和日志只记录变量名与文件地址，绝不记录密钥值。由于当前 Token 曾出现在对话中，第一次联调前必须通过 BotFather 重新生成并原位替换。详细保管、轮换和读取边界见 [SLO、可观测性、故障恢复与 Runbook](docs/06-operations/SLO可观测性故障恢复与Runbook.md#本地开发凭据与轮换)。
 
-## 本轮交付边界
+## 当前工程节点
 
-本轮只完善产品和系统设计文档与本地凭据治理，不修改交易代码。`OPEN` 只表示缺少真实外部事实；`RESEARCH_REQUIRED` 表示必须靠研究或执行证据冻结。两者都不能签发现实交易权限，但不用于删减完整工程目标。
+当前已进入工程实现，首包是 [WP-0001：耐久控制面基础](docs/08-implementation/WP-0001-耐久控制面基础.md)：统一命令信封、PostgreSQL command receipt、不可变审计、transactional outbox、consumer inbox、健康检查和能力门种子。技术选择见 [ADR-0001](docs/08-implementation/ADR-0001-生产技术栈与首包边界.md)，验证结果见 [WP-0001 验证证据](docs/08-implementation/evidence/WP-0001-validation-20260718.md)。
+
+首包不包含 Proposal、Approval、Risk、OMS、Freqtrade、VenueAdapter、Vault/CTO、Telegram 或 Web 页面，也没有订单、签名、资金划转和能力启用接口。`LIVE_ORDER_SEND`、`CAPITAL_TRANSFER`、`AUTO_ADD` 均由迁移建立为 `DISABLED`；工程完成不等于获得实盘授权。
+
+`OPEN` 只表示缺少真实外部事实；`RESEARCH_REQUIRED` 表示必须靠研究或执行证据冻结。两者都不能签发现实交易权限，也不用于删减完整工程目标。
