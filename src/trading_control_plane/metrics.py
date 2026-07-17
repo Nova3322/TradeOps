@@ -86,3 +86,21 @@ CAPABILITY_CERTIFICATE_VALIDATIONS = Counter(
     "Durable exact-scope capability certificate validation results.",
     labelnames=("result", "primary_reason"),
 )
+
+SENDER_LEASE_OPERATIONS = Counter(
+    "trading_sender_lease_operations_total",
+    "Shadow sender-lease authority operations by bounded operation and result.",
+    labelnames=("operation", "result"),
+)
+
+SENDER_LEASE_VALIDATIONS = Counter(
+    "trading_sender_lease_validations_total",
+    "Exact-scope current fencing-token validation results.",
+    labelnames=("result", "primary_reason"),
+)
+
+SHADOW_DISPATCH_CLAIMS = Counter(
+    "trading_shadow_dispatch_claims_total",
+    "Non-dispatchable shadow intent claims by bounded result.",
+    labelnames=("result",),
+)

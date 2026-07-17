@@ -12,6 +12,7 @@ from trading_control_plane import (  # noqa: F401
     models,
     proposal_models,
     risk_models,
+    sender_fencing_models,
     trading_authorization_models,
 )
 from trading_control_plane.config import get_settings

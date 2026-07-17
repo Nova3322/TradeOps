@@ -88,6 +88,7 @@ docs/
     ├── WP-0005-TradingAuthorization与Campaign授权基础.md
     ├── WP-0006-原子风险预留与ShadowOrderIntent.md
     ├── WP-0007-耐久CapabilityCertificate与失效传播.md
+    ├── WP-0008-耐久SenderFencing与ShadowClaim.md
     └── evidence/
         ├── WP-0001-validation-20260718.md
         ├── WP-0002-validation-20260718.md
@@ -95,7 +96,8 @@ docs/
         ├── WP-0004-validation-20260718.md
         ├── WP-0005-validation-20260718.md
         ├── WP-0006-validation-20260718.md
-        └── WP-0007-validation-20260718.md
+        ├── WP-0007-validation-20260718.md
+        └── WP-0008-validation-20260718.md
 ```
 
 ### 专项索引
@@ -132,6 +134,7 @@ docs/
 | 实现 | [WP-0005：TradingAuthorization 与 Campaign 授权基础](08-implementation/WP-0005-TradingAuthorization与Campaign授权基础.md) | 人工批准后的冻结授权、Campaign、Initial 与 30/50/100 AddUnit |
 | 实现 | [WP-0006：原子风险预留与 Shadow OrderIntent](08-implementation/WP-0006-原子风险预留与ShadowOrderIntent.md) | final precheck、原子 Reservation/Intent、部分/零/Unknown 对账 |
 | 实现 | [WP-0007：耐久 CapabilityCertificate 与失效传播](08-implementation/WP-0007-耐久CapabilityCertificate与失效传播.md) | SHADOW 证书/证据事实、精确 scope 校验、单向状态与授权失效传播 |
+| 实现 | [WP-0008：耐久 Sender Fencing 与 Shadow Claim](08-implementation/WP-0008-耐久SenderFencing与ShadowClaim.md) | exact-scope sender authority、单调 fencing token、短租约与不可发送 claim |
 
 ## 完整交付与能力激活
 
