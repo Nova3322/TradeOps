@@ -538,7 +538,7 @@ class ExecutionFact(Base):
             name="ck_execution_facts_hashes",
         ),
         CheckConstraint(
-            "fact_contract_version IN (1, 2)",
+            "fact_contract_version IN (1, 2, 3)",
             name="ck_execution_facts_contract_version",
         ),
         CheckConstraint(
@@ -546,7 +546,9 @@ class ExecutionFact(Base):
             "AND shadow_dispatch_claim_id IS NULL AND reconciliation_run_id IS NULL "
             "AND reconciliation_input_id IS NULL AND reconciliation_source_type IS NULL "
             "AND reconciliation_run_hash IS NULL AND reconciliation_input_hash IS NULL "
-            "AND dispatch_claim_hash IS NULL) OR "
+            "AND dispatch_claim_hash IS NULL AND venue_order_observation_id IS NULL "
+            "AND venue_fill_id IS NULL AND venue_fact_input_link_id IS NULL "
+            "AND venue_fact_hash IS NULL AND canonical_venue_order_id IS NULL) OR "
             "(fact_contract_version = 2 "
             "AND fact_kind IN ('WORKER_RECEIPT', 'VENUE_ORDER', 'VENUE_FILL', "
             "'VENUE_POSITION', 'VENUE_PROTECTION') "
@@ -558,7 +560,31 @@ class ExecutionFact(Base):
             "AND length(reconciliation_run_hash) = 64 "
             "AND length(reconciliation_input_hash) = 64 "
             "AND length(dispatch_claim_hash) = 64 "
-            "AND reconciliation_run_ref IS NULL)",
+            "AND reconciliation_run_ref IS NULL "
+            "AND venue_order_observation_id IS NULL AND venue_fill_id IS NULL "
+            "AND venue_fact_input_link_id IS NULL AND venue_fact_hash IS NULL "
+            "AND canonical_venue_order_id IS NULL) OR "
+            "(fact_contract_version = 3 "
+            "AND fact_kind IN ('WORKER_RECEIPT', 'VENUE_ORDER', 'VENUE_FILL', "
+            "'VENUE_POSITION', 'VENUE_PROTECTION') "
+            "AND shadow_dispatch_claim_id IS NOT NULL AND reconciliation_run_id IS NOT NULL "
+            "AND reconciliation_input_id IS NOT NULL "
+            "AND reconciliation_source_type IN ('TRADING_LEDGER', 'VENUE_ORDERS', "
+            "'VENUE_FILLS', 'VENUE_POSITIONS', 'VENUE_BALANCES', "
+            "'VENUE_PROTECTION', 'WORKER_LOCAL') "
+            "AND length(reconciliation_run_hash) = 64 "
+            "AND length(reconciliation_input_hash) = 64 "
+            "AND length(dispatch_claim_hash) = 64 AND reconciliation_run_ref IS NULL "
+            "AND ((fact_kind = 'VENUE_ORDER' AND venue_order_observation_id IS NOT NULL "
+            "AND venue_fill_id IS NULL AND venue_fact_input_link_id IS NOT NULL "
+            "AND length(venue_fact_hash) = 64 AND canonical_venue_order_id IS NOT NULL) OR "
+            "(fact_kind = 'VENUE_FILL' AND venue_order_observation_id IS NULL "
+            "AND venue_fill_id IS NOT NULL AND venue_fact_input_link_id IS NOT NULL "
+            "AND length(venue_fact_hash) = 64 AND canonical_venue_order_id IS NOT NULL) OR "
+            "(fact_kind NOT IN ('VENUE_ORDER', 'VENUE_FILL') "
+            "AND venue_order_observation_id IS NULL AND venue_fill_id IS NULL "
+            "AND venue_fact_input_link_id IS NULL AND venue_fact_hash IS NULL "
+            "AND canonical_venue_order_id IS NULL)))",
             name="ck_execution_facts_reconciled_binding",
         ),
         UniqueConstraint(
@@ -570,6 +596,14 @@ class ExecutionFact(Base):
             "account_id",
             "external_fact_id",
             name="uq_execution_facts_external_identity",
+        ),
+        UniqueConstraint(
+            "venue_order_observation_id",
+            name="uq_execution_facts_venue_order_observation",
+        ),
+        UniqueConstraint("venue_fill_id", name="uq_execution_facts_venue_fill"),
+        UniqueConstraint(
+            "venue_fact_input_link_id", name="uq_execution_facts_venue_fact_input_link"
         ),
         Index("ix_execution_facts_intent_time", "order_intent_id", "event_time"),
         Index(
@@ -611,6 +645,19 @@ class ExecutionFact(Base):
     reconciliation_run_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
     reconciliation_input_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
     dispatch_claim_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    venue_order_observation_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("venue_order_observations.venue_order_observation_id", ondelete="RESTRICT"),
+        nullable=True,
+    )
+    venue_fill_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("venue_fills.venue_fill_id", ondelete="RESTRICT"), nullable=True
+    )
+    venue_fact_input_link_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("venue_fact_input_links.venue_fact_input_link_id", ondelete="RESTRICT"),
+        nullable=True,
+    )
+    venue_fact_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    canonical_venue_order_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
     source_ref: Mapped[str] = mapped_column(String(255), nullable=False)
     source_version: Mapped[str] = mapped_column(String(120), nullable=False)
     payload: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)

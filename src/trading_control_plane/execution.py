@@ -34,6 +34,7 @@ from trading_control_plane.execution_models import (
     RiskReservation,
 )
 from trading_control_plane.metrics import (
+    EXECUTION_CANONICAL_FACT_BINDINGS,
     EXECUTION_FACT_AUTHORITY_MODES,
     EXECUTION_FACT_BINDINGS,
     EXECUTION_FACT_RESULTS,
@@ -59,6 +60,7 @@ from trading_control_plane.risk import (
 )
 from trading_control_plane.risk_models import RiskPolicyRecord
 from trading_control_plane.sender_fencing_models import (
+    ExecutionSenderScope,
     ExecutionSenderScopeState,
     ShadowDispatchClaim,
 )
@@ -73,6 +75,11 @@ from trading_control_plane.trading_authorization_models import (
     InitialAuthorizationState,
     InitialOrderAuthorization,
     TradingAuthorization,
+)
+from trading_control_plane.venue_fact_models import (
+    VenueFactInputLink,
+    VenueFill,
+    VenueOrderObservation,
 )
 
 ZERO = Decimal("0")
@@ -135,7 +142,7 @@ EXECUTION_FACT_SOURCE_STATUS_MATRIX: dict[
         {(ExecutionFactKind.VENUE_ORDER, ReconciliationSourceType.VENUE_ORDERS)}
     ),
     "CANCELLED_PARTIAL": frozenset(
-        {(ExecutionFactKind.VENUE_FILL, ReconciliationSourceType.VENUE_FILLS)}
+        {(ExecutionFactKind.VENUE_ORDER, ReconciliationSourceType.VENUE_ORDERS)}
     ),
     "REJECTED_ZERO_FILL": frozenset(
         {(ExecutionFactKind.VENUE_ORDER, ReconciliationSourceType.VENUE_ORDERS)}
@@ -158,7 +165,6 @@ EXECUTION_FACT_SOURCE_STATUS_MATRIX: dict[
     "FAILED_SAFE": frozenset(
         {
             (ExecutionFactKind.WORKER_RECEIPT, ReconciliationSourceType.WORKER_LOCAL),
-            (ExecutionFactKind.VENUE_ORDER, ReconciliationSourceType.VENUE_ORDERS),
             (ExecutionFactKind.VENUE_POSITION, ReconciliationSourceType.VENUE_POSITIONS),
             (ExecutionFactKind.VENUE_PROTECTION, ReconciliationSourceType.VENUE_PROTECTION),
         }
@@ -252,6 +258,10 @@ class RecordExecutionFactRequest(BaseModel):
     reconciliation_run_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
     reconciliation_input_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
     dispatch_claim_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    venue_order_observation_id: UUID | None = None
+    venue_fill_id: UUID | None = None
+    venue_fact_input_link_id: UUID | None = None
+    venue_fact_hash: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
     source_ref: str = Field(min_length=1, max_length=255)
     source_version: str = Field(min_length=1, max_length=120)
     payload: dict[str, Any]
@@ -263,6 +273,29 @@ class RecordExecutionFactRequest(BaseModel):
 
     @model_validator(mode="after")
     def evidence_is_self_consistent(self) -> Self:
+        if self.fact_kind is ExecutionFactKind.VENUE_ORDER:
+            exact_venue_binding = (
+                self.venue_order_observation_id is not None
+                and self.venue_fill_id is None
+                and self.venue_fact_input_link_id is not None
+                and self.venue_fact_hash is not None
+            )
+        elif self.fact_kind is ExecutionFactKind.VENUE_FILL:
+            exact_venue_binding = (
+                self.venue_order_observation_id is None
+                and self.venue_fill_id is not None
+                and self.venue_fact_input_link_id is not None
+                and self.venue_fact_hash is not None
+            )
+        else:
+            exact_venue_binding = (
+                self.venue_order_observation_id is None
+                and self.venue_fill_id is None
+                and self.venue_fact_input_link_id is None
+                and self.venue_fact_hash is None
+            )
+        if not exact_venue_binding:
+            raise ValueError("execution fact canonical venue binding is invalid")
         if self.event_time.tzinfo is None or self.received_at.tzinfo is None:
             raise ValueError("execution fact timestamps must be timezone-aware")
         if self.event_time > self.received_at:
@@ -1362,7 +1395,7 @@ class ExecutionIntentService:
 
 
 class ExecutionReconciliationService:
-    command_type = "execution.fact.record-reconciled.v2"
+    command_type = "execution.fact.record-reconciled.v3"
 
     def __init__(self, clock: Callable[[], datetime] | None = None) -> None:
         self._clock = clock or (lambda: datetime.now(UTC))
@@ -1422,7 +1455,7 @@ class ExecutionReconciliationService:
                 or existing.payload_hash != request.payload_hash
                 or existing.evidence_hash != request.evidence_hash
                 or existing.fact_sequence != request.fact_sequence
-                or existing.fact_contract_version != 2
+                or existing.fact_contract_version != 3
                 or existing.fact_kind != request.fact_kind.value
                 or existing.shadow_dispatch_claim_id != request.shadow_dispatch_claim_id
                 or existing.reconciliation_run_id != request.reconciliation_run_id
@@ -1431,24 +1464,46 @@ class ExecutionReconciliationService:
                 or existing.reconciliation_run_hash != request.reconciliation_run_hash
                 or existing.reconciliation_input_hash != request.reconciliation_input_hash
                 or existing.dispatch_claim_hash != request.dispatch_claim_hash
+                or existing.venue_order_observation_id != request.venue_order_observation_id
+                or existing.venue_fill_id != request.venue_fill_id
+                or existing.venue_fact_input_link_id != request.venue_fact_input_link_id
+                or existing.venue_fact_hash != request.venue_fact_hash
             ):
                 raise CommandRejected(
                     "EXTERNAL_FACT_ID_CONFLICT",
                     "external fact id belongs to different semantics",
                 )
+            if request.fact_kind in {
+                ExecutionFactKind.VENUE_ORDER,
+                ExecutionFactKind.VENUE_FILL,
+            }:
+                EXECUTION_CANONICAL_FACT_BINDINGS.labels(request.fact_kind.value, "REPLAYED").inc()
             return self._existing_fact_outcome(session, state, existing)
 
         now = self._clock()
         authority_mode = self._validate_reconciliation_binding(
             session, intent, reservation, request, now
         )
+        try:
+            canonical_venue_order_id = self._validate_canonical_venue_fact(
+                session, intent, state, request
+            )
+        except CommandRejected:
+            if request.fact_kind in {
+                ExecutionFactKind.VENUE_ORDER,
+                ExecutionFactKind.VENUE_FILL,
+            }:
+                EXECUTION_CANONICAL_FACT_BINDINGS.labels(request.fact_kind.value, "REJECTED").inc()
+            raise
+        if canonical_venue_order_id is not None:
+            EXECUTION_CANONICAL_FACT_BINDINGS.labels(request.fact_kind.value, "APPLIED").inc()
         self._validate_progression(state, request, now)
         fact_id = uuid4()
         fact = ExecutionFact(
             execution_fact_id=fact_id,
             order_intent_id=order_intent_id,
             fact_sequence=request.fact_sequence,
-            fact_contract_version=2,
+            fact_contract_version=3,
             fact_kind=request.fact_kind.value,
             target_status=request.target_status,
             venue=request.venue,
@@ -1469,6 +1524,11 @@ class ExecutionReconciliationService:
             reconciliation_run_hash=request.reconciliation_run_hash,
             reconciliation_input_hash=request.reconciliation_input_hash,
             dispatch_claim_hash=request.dispatch_claim_hash,
+            venue_order_observation_id=request.venue_order_observation_id,
+            venue_fill_id=request.venue_fill_id,
+            venue_fact_input_link_id=request.venue_fact_input_link_id,
+            venue_fact_hash=request.venue_fact_hash,
+            canonical_venue_order_id=canonical_venue_order_id,
             source_ref=request.source_ref,
             source_version=request.source_version,
             payload=request.payload,
@@ -1777,6 +1837,203 @@ class ExecutionReconciliationService:
         if run.lease_id == claim.lease_id and run.fencing_token == claim.fencing_token:
             return "ORIGINAL_LEASE"
         return "SUCCESSOR_LEASE"
+
+    @staticmethod
+    def _validate_canonical_venue_fact(
+        session: Session,
+        intent: OrderIntent,
+        state: OrderIntentState,
+        request: RecordExecutionFactRequest,
+    ) -> str | None:
+        if request.fact_kind not in {
+            ExecutionFactKind.VENUE_ORDER,
+            ExecutionFactKind.VENUE_FILL,
+        }:
+            return None
+        claim = session.get(ShadowDispatchClaim, request.shadow_dispatch_claim_id)
+        scope = session.get(ExecutionSenderScope, claim.scope_id) if claim is not None else None
+        link = session.get(VenueFactInputLink, request.venue_fact_input_link_id)
+        if claim is None or scope is None or link is None:
+            raise CommandRejected(
+                "EXECUTION_FACT_CANONICAL_REFERENCE_NOT_FOUND",
+                "canonical venue fact authority is unavailable",
+            )
+        if (
+            link.run_id != request.reconciliation_run_id
+            or link.reconciliation_input_id != request.reconciliation_input_id
+            or link.organization_id != claim.organization_id
+            or link.source_type != request.reconciliation_source_type.value
+            or link.input_hash != request.reconciliation_input_hash
+            or link.fact_hash != request.venue_fact_hash
+        ):
+            raise CommandRejected(
+                "EXECUTION_FACT_CANONICAL_LINK_MISMATCH",
+                "canonical venue fact is not a member of the exact reconciliation input",
+            )
+
+        expected_position_side = (
+            "BOTH" if scope.position_mode == "ONE_WAY" else intent.position_side
+        )
+        canonical_order_id: str
+        fact_event_time: datetime
+        if request.fact_kind is ExecutionFactKind.VENUE_ORDER:
+            observation = session.get(VenueOrderObservation, request.venue_order_observation_id)
+            if observation is None:
+                raise CommandRejected(
+                    "EXECUTION_FACT_CANONICAL_REFERENCE_NOT_FOUND",
+                    "venue order observation is unavailable",
+                )
+            if (
+                link.venue_order_observation_id != observation.venue_order_observation_id
+                or link.venue_fill_id is not None
+                or observation.observation_hash != request.venue_fact_hash
+            ):
+                raise CommandRejected(
+                    "EXECUTION_FACT_CANONICAL_LINK_MISMATCH",
+                    "venue order observation and input membership disagree",
+                )
+            if (
+                observation.organization_id != claim.organization_id
+                or observation.venue != intent.venue
+                or observation.execution_domain != intent.execution_domain
+                or observation.account_id != intent.account_id
+                or observation.instrument_id != intent.instrument_id
+                or observation.observed_client_order_id != claim.client_order_id
+                or observation.side != intent.side
+                or observation.position_side != expected_position_side
+                or observation.reduce_only != intent.reduce_only
+                or observation.order_type != intent.order_type
+                or observation.time_in_force != intent.time_in_force
+            ):
+                raise CommandRejected(
+                    "EXECUTION_FACT_CANONICAL_OWNERSHIP_MISMATCH",
+                    "venue order observation does not belong to the claimed intent",
+                )
+            canonical_order_id = observation.venue_order_id
+            fact_event_time = observation.event_time
+            if (
+                observation.original_quantity != state.intent_quantity
+                or observation.cumulative_filled_quantity != state.cumulative_filled_quantity
+            ):
+                raise CommandRejected(
+                    "EXECUTION_FACT_CANONICAL_QUANTITY_MISMATCH",
+                    "venue order observation cannot create unconfirmed fill quantity",
+                )
+            expected_target = ExecutionReconciliationService._order_observation_target(observation)
+            expected_cumulative = observation.cumulative_filled_quantity
+            expected_remaining = observation.known_remaining_quantity
+            expected_zero = observation.zero_fill_confirmed
+            expected_terminal = observation.terminal
+            fact_id = observation.venue_order_observation_id
+            fact_type = "VENUE_ORDER_OBSERVATION"
+        else:
+            fill = session.get(VenueFill, request.venue_fill_id)
+            if fill is None:
+                raise CommandRejected(
+                    "EXECUTION_FACT_CANONICAL_REFERENCE_NOT_FOUND",
+                    "venue fill is unavailable",
+                )
+            if (
+                link.venue_fill_id != fill.venue_fill_id
+                or link.venue_order_observation_id is not None
+                or fill.fill_hash != request.venue_fact_hash
+            ):
+                raise CommandRejected(
+                    "EXECUTION_FACT_CANONICAL_LINK_MISMATCH",
+                    "venue fill and input membership disagree",
+                )
+            if (
+                fill.organization_id != claim.organization_id
+                or fill.venue != intent.venue
+                or fill.execution_domain != intent.execution_domain
+                or fill.account_id != intent.account_id
+                or fill.instrument_id != intent.instrument_id
+                or fill.observed_client_order_id != claim.client_order_id
+                or fill.side != intent.side
+                or fill.position_side != expected_position_side
+                or fill.reduce_only != intent.reduce_only
+            ):
+                raise CommandRejected(
+                    "EXECUTION_FACT_CANONICAL_OWNERSHIP_MISMATCH",
+                    "venue fill does not belong to the claimed intent",
+                )
+            canonical_order_id = fill.venue_order_id
+            fact_event_time = fill.event_time
+            expected_cumulative = state.cumulative_filled_quantity + fill.quantity
+            if expected_cumulative > state.intent_quantity:
+                raise CommandRejected(
+                    "EXECUTION_FACT_CANONICAL_QUANTITY_MISMATCH",
+                    "venue fill exceeds the frozen intent quantity",
+                )
+            expected_remaining = state.intent_quantity - expected_cumulative
+            expected_target = "FILLED" if expected_remaining == ZERO else "PARTIALLY_FILLED"
+            expected_zero = False
+            expected_terminal = expected_remaining == ZERO
+            fact_id = fill.venue_fill_id
+            fact_type = "VENUE_FILL"
+
+        existing_order_id = session.execute(
+            select(ExecutionFact.canonical_venue_order_id)
+            .where(
+                ExecutionFact.order_intent_id == intent.order_intent_id,
+                ExecutionFact.fact_contract_version == 3,
+                ExecutionFact.canonical_venue_order_id.is_not(None),
+            )
+            .limit(1)
+        ).scalar_one_or_none()
+        if existing_order_id is not None and existing_order_id != canonical_order_id:
+            raise CommandRejected(
+                "EXECUTION_FACT_CANONICAL_ORDER_ID_MISMATCH",
+                "claimed intent cannot change its canonical venue order identity",
+            )
+        expected_payload = {
+            "venue_fact_type": fact_type,
+            "venue_fact_id": str(fact_id),
+            "venue_fact_hash": request.venue_fact_hash,
+            "venue_fact_input_link_id": str(link.venue_fact_input_link_id),
+            "canonical_venue_order_id": canonical_order_id,
+        }
+        if (
+            request.external_fact_id != str(fact_id)
+            or request.target_status != expected_target
+            or request.cumulative_filled_quantity != expected_cumulative
+            or request.known_remaining_quantity != expected_remaining
+            or request.zero_fill_confirmed != expected_zero
+            or request.venue_order_terminal != expected_terminal
+            or request.position_reconciled
+            or request.protection_confirmed
+            or request.event_time != fact_event_time
+            or request.received_at != link.received_at
+            or request.source_ref != link.raw_payload_ref
+            or request.evidence_ref != link.evidence_ref
+            or request.payload != expected_payload
+        ):
+            raise CommandRejected(
+                "EXECUTION_FACT_CANONICAL_SEMANTICS_MISMATCH",
+                "execution transition is not an exact projection of the canonical venue fact",
+            )
+        return canonical_order_id
+
+    @staticmethod
+    def _order_observation_target(observation: VenueOrderObservation) -> str:
+        if observation.status == "OPEN":
+            return "VENUE_ACKNOWLEDGED"
+        if observation.status == "CANCEL_PENDING":
+            return "CANCEL_PENDING"
+        if observation.status == "REJECTED":
+            return "REJECTED_ZERO_FILL"
+        if observation.status in {"CANCELLED", "EXPIRED"}:
+            return (
+                "CANCELLED_ZERO_FILL"
+                if observation.cumulative_filled_quantity == ZERO
+                else "CANCELLED_PARTIAL"
+            )
+        if observation.status == "UNKNOWN":
+            return "RESULT_UNKNOWN"
+        raise CommandRejected(
+            "EXECUTION_FACT_CANONICAL_STATUS_UNSUPPORTED",
+            "venue order status requires fill authority or has no execution transition",
+        )
 
     @staticmethod
     def _validate_progression(

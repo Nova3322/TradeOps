@@ -81,6 +81,12 @@ EXECUTION_FACT_AUTHORITY_MODES = Counter(
     labelnames=("authority_mode", "result"),
 )
 
+EXECUTION_CANONICAL_FACT_BINDINGS = Counter(
+    "trading_execution_canonical_fact_bindings_total",
+    "Canonical venue facts bound to execution transitions by type and bounded result.",
+    labelnames=("fact_type", "result"),
+)
+
 CAPABILITY_CERTIFICATE_ISSUANCE = Counter(
     "trading_capability_certificate_issuance_total",
     "Shadow-only capability certificate issuance by type, environment, and result.",

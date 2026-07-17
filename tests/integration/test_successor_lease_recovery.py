@@ -87,25 +87,28 @@ def test_successor_lease_reconciles_late_fact_for_original_claim(database: Datab
     assert reacquired.status is CommandStatus.COMPLETED
     assert int(reacquired.data["fencing_token"]) > original_token
 
-    claim, run, reconciliation_input, event_time = prepare_active_fact_run(
-        database,
-        order_intent_id,
-        ReconciliationSourceType.VENUE_FILLS,
-        now=reacquired_at + timedelta(milliseconds=1),
-    )
     late_fill = fact_request(
         sequence=1,
         status="PARTIALLY_FILLED",
         filled=Decimal("0.2"),
         remaining=Decimal("0.3"),
     )
+    claim, run, reconciliation_input, event_time, canonical_context = prepare_active_fact_run(
+        database,
+        order_intent_id,
+        ReconciliationSourceType.VENUE_FILLS,
+        now=reacquired_at + timedelta(milliseconds=1),
+        draft=late_fill,
+    )
+    assert canonical_context is not None
     request = bind_fact_request(
         late_fill,
         claim,
         run,
         reconciliation_input,
         event_time=event_time,
-        received_at=event_time + timedelta(milliseconds=1),
+        received_at=canonical_context.input_link.received_at,
+        canonical_context=canonical_context,
     )
 
     result = execute_bound_fact(database, order_intent_id, request)

@@ -7,6 +7,10 @@
 > 《SLO、可观测性、故障恢复与 Runbook》第 6、8 节
 > 前置包：WP-0001..0010
 
+> 事实来源补充：WP-0013 保留本文的 current successor authority 与 lineage 规则，但把唯一新写入口升级为
+> `execution.fact.record-reconciled.v3`；order/fill 必须同时引用 exact canonical venue fact 和 input membership。
+> 本文的 v2 入口仅为历史合同。
+
 ## 问题与边界
 
 WP-0010 首次关闭弱执行事实入口时，要求结果 ReconciliationRun 与原 ShadowDispatchClaim 使用完全相同的

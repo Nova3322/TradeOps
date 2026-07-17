@@ -33,6 +33,12 @@ from tests.sender_fencing_fixtures import (
     execute_claim,
     make_sender_scope,
 )
+from tests.venue_fact_fixtures import (
+    execute_venue_fact,
+    fill_request,
+    order_observation_request,
+    venue_fact_envelope,
+)
 from trading_control_plane.capability_certificate_models import CapabilityCertificate
 from trading_control_plane.capability_certificates import CapabilityScope
 from trading_control_plane.command_executor import IdempotentCommandExecutor
@@ -50,6 +56,7 @@ from trading_control_plane.execution_models import (
     ExecutionFact,
     ExecutionRiskDecision,
     OrderIntent,
+    OrderIntentState,
     OrderIntentStateHistory,
     RiskExposureState,
     RiskExposureStateHistory,
@@ -95,6 +102,18 @@ from trading_control_plane.trading_authorization_models import (
     CampaignState,
     InitialAuthorizationState,
     InitialOrderAuthorization,
+)
+from trading_control_plane.venue_fact_models import (
+    VenueFactInputLink,
+    VenueFill,
+    VenueOrderObservation,
+)
+from trading_control_plane.venue_facts import (
+    FeeEffect,
+    VenueFactNormalizationService,
+    VenueOrderStatus,
+    VenuePositionSide,
+    VenueSide,
 )
 
 pytestmark = pytest.mark.integration
@@ -412,6 +431,12 @@ class ExecutionFactDraft:
     external_fact_id: str
 
 
+@dataclass(frozen=True)
+class CanonicalVenueFactContext:
+    fact: VenueOrderObservation | VenueFill
+    input_link: VenueFactInputLink
+
+
 def fact_request(
     *,
     sequence: int,
@@ -440,7 +465,7 @@ def fact_request(
 def _fact_kind_and_source(
     status: str,
 ) -> tuple[ExecutionFactKind, ReconciliationSourceType]:
-    if status in {"PARTIALLY_FILLED", "FILLED", "CANCELLED_PARTIAL"}:
+    if status in {"PARTIALLY_FILLED", "FILLED"}:
         return ExecutionFactKind.VENUE_FILL, ReconciliationSourceType.VENUE_FILLS
     if status == "POSITION_RECONCILED":
         return ExecutionFactKind.VENUE_POSITION, ReconciliationSourceType.VENUE_POSITIONS
@@ -574,7 +599,16 @@ def prepare_active_fact_run(
     source_type: ReconciliationSourceType,
     *,
     now: datetime | None = None,
-) -> tuple[ShadowDispatchClaim, ExecutionReconciliationRun, ExecutionReconciliationInput, datetime]:
+    draft: ExecutionFactDraft | None = None,
+    canonical_client_order_id: str | None = None,
+    canonical_venue_order_id: str | None = None,
+) -> tuple[
+    ShadowDispatchClaim,
+    ExecutionReconciliationRun,
+    ExecutionReconciliationInput,
+    datetime,
+    CanonicalVenueFactContext | None,
+]:
     base_time = now or datetime.now(UTC)
     claim, scope = ensure_shadow_claim(database, order_intent_id, now=base_time)
     with database.session_factory.begin() as session:
@@ -591,10 +625,13 @@ def prepare_active_fact_run(
             )
             .limit(1)
         ).scalar_one()
+        latest_state = session.get(ExecutionReconciliationRunState, latest.run_id)
+        assert latest_state is not None and latest_state.completed_at is not None
     run_at = max(
         base_time,
         claim.claimed_at + timedelta(milliseconds=1),
         latest.started_at + timedelta(milliseconds=1),
+        latest_state.completed_at + timedelta(milliseconds=1),
     )
     run_id = uuid4()
     started = execute_reconciliation(
@@ -611,18 +648,16 @@ def prepare_active_fact_run(
         now=run_at,
     )
     assert started.status is CommandStatus.COMPLETED
-    version = collect_complete_inputs(database, run_id, now=run_at)
-    compared = execute_reconciliation(
+    canonical_source = source_type in {
+        ReconciliationSourceType.VENUE_ORDERS,
+        ReconciliationSourceType.VENUE_FILLS,
+    }
+    version = collect_complete_inputs(
         database,
-        phase_envelope(
-            run_id,
-            ReconciliationPhase.COMPARING,
-            now=run_at,
-            expected_version=version,
-        ),
+        run_id,
         now=run_at,
+        item_counts={source_type: 1} if canonical_source and draft is not None else None,
     )
-    assert compared.status is CommandStatus.COMPLETED
     with database.session_factory.begin() as session:
         run = session.get(ExecutionReconciliationRun, run_id)
         reconciliation_input = session.execute(
@@ -632,8 +667,138 @@ def prepare_active_fact_run(
             )
         ).scalar_one()
         claim = session.get(ShadowDispatchClaim, claim.claim_id)
-        assert run is not None and claim is not None
-    return claim, run, reconciliation_input, run_at
+        intent = session.get(OrderIntent, order_intent_id)
+        intent_state = session.get(OrderIntentState, order_intent_id)
+        assert run is not None and claim is not None and intent is not None
+        assert intent_state is not None
+    canonical_context = None
+    phase_at = run_at
+    if canonical_source and draft is not None:
+        phase_at = run_at
+        canonical_context = _normalize_execution_venue_fact(
+            database,
+            run,
+            reconciliation_input,
+            claim,
+            scope,
+            intent,
+            intent_state,
+            draft,
+            event_time=run_at,
+            normalized_at=phase_at,
+            canonical_client_order_id=canonical_client_order_id,
+            canonical_venue_order_id=canonical_venue_order_id,
+        )
+    compared = execute_reconciliation(
+        database,
+        phase_envelope(
+            run_id,
+            ReconciliationPhase.COMPARING,
+            now=phase_at,
+            expected_version=version,
+        ),
+        now=phase_at,
+    )
+    assert compared.status is CommandStatus.COMPLETED
+    event_time = canonical_context.fact.event_time if canonical_context is not None else run_at
+    return claim, run, reconciliation_input, event_time, canonical_context
+
+
+def _normalize_execution_venue_fact(
+    database: Database,
+    run: ExecutionReconciliationRun,
+    reconciliation_input: ExecutionReconciliationInput,
+    claim: ShadowDispatchClaim,
+    scope: SenderScopeBinding,
+    intent: OrderIntent,
+    intent_state: OrderIntentState,
+    draft: ExecutionFactDraft,
+    *,
+    event_time: datetime,
+    normalized_at: datetime,
+    canonical_client_order_id: str | None,
+    canonical_venue_order_id: str | None,
+) -> CanonicalVenueFactContext:
+    venue_order_id = canonical_venue_order_id or f"shadow-{claim.client_order_id}"
+    observed_client_order_id = canonical_client_order_id or claim.client_order_id
+    position_side = (
+        VenuePositionSide.BOTH
+        if scope.position_mode == "ONE_WAY"
+        else VenuePositionSide(intent.position_side)
+    )
+    if reconciliation_input.source_type == ReconciliationSourceType.VENUE_FILLS.value:
+        fill_quantity = draft.filled - intent_state.cumulative_filled_quantity
+        request = fill_request(
+            reconciliation_input,
+            now=normalized_at,
+            venue_trade_id=draft.external_fact_id,
+            venue_order_id=venue_order_id,
+            observed_client_order_id=observed_client_order_id,
+            instrument_id=intent.instrument_id,
+            side=VenueSide(intent.side),
+            position_side=position_side,
+            reduce_only=intent.reduce_only,
+            quantity=fill_quantity,
+            fee_amount=Decimal("0"),
+            fee_effect=FeeEffect.ZERO,
+            event_time=event_time,
+            venue_observed_at=event_time,
+            received_at=normalized_at,
+        )
+        command_type = VenueFactNormalizationService.fill_command_type
+    else:
+        order_status = {
+            "VENUE_ACKNOWLEDGED": VenueOrderStatus.OPEN,
+            "CANCEL_PENDING": VenueOrderStatus.CANCEL_PENDING,
+            "CANCELLED_ZERO_FILL": VenueOrderStatus.CANCELLED,
+            "CANCELLED_PARTIAL": VenueOrderStatus.CANCELLED,
+            "REJECTED_ZERO_FILL": VenueOrderStatus.REJECTED,
+            "RESULT_UNKNOWN": VenueOrderStatus.UNKNOWN,
+        }[draft.status]
+        request = order_observation_request(
+            reconciliation_input,
+            now=normalized_at,
+            venue_order_id=venue_order_id,
+            venue_update_id=draft.external_fact_id,
+            observed_client_order_id=observed_client_order_id,
+            instrument_id=intent.instrument_id,
+            side=VenueSide(intent.side),
+            position_side=position_side,
+            reduce_only=intent.reduce_only,
+            order_type=intent.order_type,
+            time_in_force=intent.time_in_force,
+            status=order_status,
+            original_quantity=intent_state.intent_quantity,
+            cumulative_filled_quantity=draft.filled,
+            known_remaining_quantity=draft.remaining,
+            zero_fill_confirmed=draft.zero,
+            terminal=draft.terminal,
+            event_time=event_time,
+            venue_observed_at=event_time,
+            received_at=normalized_at,
+        )
+        command_type = VenueFactNormalizationService.order_command_type
+    result = execute_venue_fact(
+        database,
+        venue_fact_envelope(
+            run.run_id,
+            command_type,
+            request.model_dump(mode="json"),
+            now=normalized_at,
+        ),
+        now=normalized_at,
+    )
+    assert result.status is CommandStatus.COMPLETED
+    fact_id = UUID(str(result.data["venue_fact_id"]))
+    link_id = UUID(str(result.data["venue_fact_input_link_id"]))
+    with database.session_factory.begin() as session:
+        if command_type == VenueFactNormalizationService.fill_command_type:
+            fact = session.get(VenueFill, fact_id)
+        else:
+            fact = session.get(VenueOrderObservation, fact_id)
+        input_link = session.get(VenueFactInputLink, link_id)
+        assert fact is not None and input_link is not None
+    return CanonicalVenueFactContext(fact=fact, input_link=input_link)
 
 
 def bind_fact_request(
@@ -644,14 +809,50 @@ def bind_fact_request(
     *,
     event_time: datetime,
     received_at: datetime,
+    canonical_context: CanonicalVenueFactContext | None = None,
 ) -> RecordExecutionFactRequest:
     fact_kind, source_type = _fact_kind_and_source(draft.status)
-    payload = {
-        "sequence": draft.sequence,
-        "status": draft.status,
-        "filled": str(draft.filled),
-        "remaining": str(draft.remaining),
-    }
+    venue_order_observation_id = None
+    venue_fill_id = None
+    venue_fact_input_link_id = None
+    venue_fact_hash = None
+    if canonical_context is None:
+        payload = {
+            "sequence": draft.sequence,
+            "status": draft.status,
+            "filled": str(draft.filled),
+            "remaining": str(draft.remaining),
+        }
+        external_fact_id = draft.external_fact_id
+        source_ref = f"test-only:{source_type.value.lower()}-fact"
+        evidence_ref = f"test-only:evidence:{draft.sequence}:{draft.status}"
+    else:
+        fact = canonical_context.fact
+        input_link = canonical_context.input_link
+        venue_fact_input_link_id = input_link.venue_fact_input_link_id
+        source_ref = input_link.raw_payload_ref
+        evidence_ref = input_link.evidence_ref
+        event_time = fact.event_time
+        received_at = input_link.received_at
+        if isinstance(fact, VenueOrderObservation):
+            venue_order_observation_id = fact.venue_order_observation_id
+            venue_fact_hash = fact.observation_hash
+            canonical_venue_order_id = fact.venue_order_id
+            venue_fact_type = "VENUE_ORDER_OBSERVATION"
+            external_fact_id = str(fact.venue_order_observation_id)
+        else:
+            venue_fill_id = fact.venue_fill_id
+            venue_fact_hash = fact.fill_hash
+            canonical_venue_order_id = fact.venue_order_id
+            venue_fact_type = "VENUE_FILL"
+            external_fact_id = str(fact.venue_fill_id)
+        payload = {
+            "venue_fact_type": venue_fact_type,
+            "venue_fact_id": external_fact_id,
+            "venue_fact_hash": venue_fact_hash,
+            "venue_fact_input_link_id": str(venue_fact_input_link_id),
+            "canonical_venue_order_id": canonical_venue_order_id,
+        }
     values: dict[str, Any] = {
         "fact_sequence": draft.sequence,
         "fact_kind": fact_kind,
@@ -659,7 +860,7 @@ def bind_fact_request(
         "venue": "BINANCE",
         "execution_domain": "BINANCE_USDM",
         "account_id": "account-1",
-        "external_fact_id": draft.external_fact_id,
+        "external_fact_id": external_fact_id,
         "cumulative_filled_quantity": draft.filled,
         "known_remaining_quantity": draft.remaining,
         "zero_fill_confirmed": draft.zero,
@@ -673,11 +874,15 @@ def bind_fact_request(
         "reconciliation_run_hash": run.run_hash,
         "reconciliation_input_hash": reconciliation_input.input_hash,
         "dispatch_claim_hash": claim.claim_hash,
-        "source_ref": f"test-only:{source_type.value.lower()}-fact",
+        "venue_order_observation_id": venue_order_observation_id,
+        "venue_fill_id": venue_fill_id,
+        "venue_fact_input_link_id": venue_fact_input_link_id,
+        "venue_fact_hash": venue_fact_hash,
+        "source_ref": source_ref,
         "source_version": reconciliation_input.source_version,
         "payload": payload,
         "payload_hash": hash_json(payload),
-        "evidence_ref": f"test-only:evidence:{draft.sequence}:{draft.status}",
+        "evidence_ref": evidence_ref,
         "event_time": event_time,
         "received_at": received_at,
     }
@@ -711,10 +916,14 @@ def fact_envelope(order_intent_id: UUID, request: RecordExecutionFactRequest) ->
 
 def execute_fact(database: Database, order_intent_id: UUID, draft: ExecutionFactDraft):
     _, source_type = _fact_kind_and_source(draft.status)
-    claim, run, reconciliation_input, event_time = prepare_active_fact_run(
-        database, order_intent_id, source_type
+    claim, run, reconciliation_input, event_time, canonical_context = prepare_active_fact_run(
+        database, order_intent_id, source_type, draft=draft
     )
-    received_at = event_time + timedelta(milliseconds=1)
+    received_at = (
+        canonical_context.input_link.received_at
+        if canonical_context is not None
+        else event_time + timedelta(milliseconds=1)
+    )
     request = bind_fact_request(
         draft,
         claim,
@@ -722,6 +931,7 @@ def execute_fact(database: Database, order_intent_id: UUID, draft: ExecutionFact
         reconciliation_input,
         event_time=event_time,
         received_at=received_at,
+        canonical_context=canonical_context,
     )
     result = IdempotentCommandExecutor(database.session_factory).execute(
         fact_envelope(order_intent_id, request),
@@ -840,6 +1050,56 @@ def test_partial_fill_consumes_initial_then_unknown_locks_remaining_risk(
         assert initial_state is not None and initial_state.status == "CONSUMED"
         assert campaign_state is not None and campaign_state.status == "OPEN"
         assert count_rows(session, RiskLedgerEntry) == 3
+
+
+def test_partial_fill_then_canonical_cancel_releases_only_unfilled_quantity(
+    database: Database,
+) -> None:
+    now = datetime.now(UTC)
+    proposal, campaign, initial = prepare_authorization(database)
+    seed_execution_policy(database, now)
+    created = execute_create(database, create_intent_envelope(proposal, campaign, initial, now=now))
+    order_intent_id = UUID(str(created.data["order_intent_id"]))
+
+    partial = execute_fact(
+        database,
+        order_intent_id,
+        fact_request(
+            sequence=1,
+            status="PARTIALLY_FILLED",
+            filled=Decimal("0.2"),
+            remaining=Decimal("0.3"),
+        ),
+    )
+    cancelled = execute_fact(
+        database,
+        order_intent_id,
+        fact_request(
+            sequence=2,
+            status="CANCELLED_PARTIAL",
+            filled=Decimal("0.2"),
+            remaining=Decimal("0"),
+            terminal=True,
+        ),
+    )
+
+    assert partial.status is CommandStatus.COMPLETED
+    assert cancelled.status is CommandStatus.COMPLETED
+    with database.session_factory.begin() as session:
+        exposure = session.execute(select(RiskExposureState)).scalar_one()
+        facts = list(
+            session.scalars(
+                select(ExecutionFact)
+                .where(ExecutionFact.order_intent_id == order_intent_id)
+                .order_by(ExecutionFact.fact_sequence)
+            )
+        )
+        assert exposure.open_quantity == Decimal("0.2")
+        assert exposure.released_quantity == Decimal("0.3")
+        assert exposure.reserved_quantity == 0
+        assert [fact.fact_kind for fact in facts] == ["VENUE_FILL", "VENUE_ORDER"]
+        assert all(fact.fact_contract_version == 3 for fact in facts)
+        assert facts[0].canonical_venue_order_id == facts[1].canonical_venue_order_id
 
 
 def test_terminal_zero_fill_releases_risk_and_allows_new_initial_candidate(

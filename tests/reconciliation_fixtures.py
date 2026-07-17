@@ -256,12 +256,19 @@ def collect_complete_inputs(
     *,
     now: datetime,
     first_version: int = 1,
+    item_counts: dict[ReconciliationSourceType, int] | None = None,
 ) -> int:
     version = first_version
     for source_type in REQUIRED_RECONCILIATION_SOURCES:
         result = execute_reconciliation(
             database,
-            input_envelope(run_id, source_type, now=now, expected_version=version),
+            input_envelope(
+                run_id,
+                source_type,
+                now=now,
+                expected_version=version,
+                item_count=(item_counts or {}).get(source_type, 0),
+            ),
             now=now,
         )
         assert result.object_version == version + 1

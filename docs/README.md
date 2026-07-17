@@ -93,6 +93,7 @@ docs/
     ├── WP-0010-对账绑定执行事实入口.md
     ├── WP-0011-继任Lease对账接管.md
     ├── WP-0012-Canonical-VenueOrder与VenueFill事实.md
+    ├── WP-0013-Canonical-VenueFact执行强绑定.md
     └── evidence/
         ├── WP-0001-validation-20260718.md
         ├── WP-0002-validation-20260718.md
@@ -105,7 +106,8 @@ docs/
         ├── WP-0009-validation-20260718.md
         ├── WP-0010-validation-20260718.md
         ├── WP-0011-validation-20260718.md
-        └── WP-0012-validation-20260718.md
+        ├── WP-0012-validation-20260718.md
+        └── WP-0013-validation-20260718.md
 ```
 
 ### 专项索引
@@ -147,6 +149,7 @@ docs/
 | 实现 | [WP-0010：对账绑定执行事实入口](08-implementation/WP-0010-对账绑定执行事实入口.md) | claim/run/input 绑定、事实来源矩阵、旧 v1 封锁与现有状态机防绕过 |
 | 实现 | [WP-0011：继任 Lease 对账接管](08-implementation/WP-0011-继任Lease对账接管.md) | 更高 token 的 current successor 经连续 lineage 收敛旧 claim，保持发送权关闭 |
 | 实现 | [WP-0012：Canonical VenueOrder 与 VenueFill 事实](08-implementation/WP-0012-Canonical-VenueOrder与VenueFill事实.md) | 私有场所订单观察、成交全局去重、逐输入 membership、费用和 exact count 门 |
+| 实现 | [WP-0013：Canonical Venue Fact 执行强绑定](08-implementation/WP-0013-Canonical-VenueFact执行强绑定.md) | v3 exact fact/link/claim ownership、成交增量推导、订单身份连续和状态/风险原子应用 |
 
 ## 完整交付与能力激活
 
