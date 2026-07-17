@@ -38,3 +38,15 @@ SYSTEM_RISK_STATE_TRANSITIONS = Counter(
     "Automatic monotonic risk-state tightening transitions.",
     labelnames=("from_state", "to_state"),
 )
+
+AUTHORIZATION_ISSUANCE = Counter(
+    "trading_authorization_issuance_total",
+    "Successful TradingAuthorization issuance by bounded result and system risk state.",
+    labelnames=("result", "system_risk_state"),
+)
+
+AUTHORIZATION_TIGHTENING = Counter(
+    "trading_authorization_tightening_total",
+    "Risk-decreasing authorization lifecycle commands by action and system risk state.",
+    labelnames=("action", "system_risk_state"),
+)

@@ -28,6 +28,7 @@ from trading_control_plane.proposal_models import (
     SystemRiskStateRecord,
 )
 from trading_control_plane.review import ProposalReviewService, ReviewChoice
+from trading_control_plane.trading_authorization_models import TradingAuthorization
 
 pytestmark = pytest.mark.integration
 
@@ -57,6 +58,9 @@ def seed_proposal(
     source: str = "MANUAL",
     risk_summary_hash_override: str | None = None,
     one_r_override: Decimal | None = None,
+    auto_add_enabled: bool = False,
+    requested_add_count: int = 0,
+    spec_overrides: dict[str, object] | None = None,
 ) -> FrozenProposalVersion:
     now = datetime.now(UTC)
     proposal_version_id = uuid4()
@@ -70,7 +74,23 @@ def seed_proposal(
         "instrument_id": "BINANCE:BTCUSDT-PERP",
         "direction": "LONG",
         "requested_quantity": "1",
+        "strategy_id": "trend-breakout",
+        "strategy_version": "1.0.0",
+        "strategy_parameter_version": "params-v1",
+        "account_abstraction": "UNIFIED",
+        "margin_mode": "ISOLATED",
+        "collateral_scope": "ACCOUNT",
+        "collateral_pool_id": "pool-usdt-1",
+        "authorization_policy_version": "authorization-policy-v1",
+        "position_management_template_version": "position-template-v1",
+        "add_milestone_policy_version": "add-milestones-30-50-100-v1",
+        "adapter_version": "binance-adapter-v1",
+        "freqtrade_worker_version": "freqtrade-worker-v1",
+        "account_capability_version": "account-capability-v1",
+        "capability_certificate_ref": "capability:test-shadow-only",
     }
+    if spec_overrides:
+        spec.update(spec_overrides)
     multiplier = {"LOW": Decimal("1"), "MEDIUM": Decimal("2"), "HIGH": Decimal("3")}
     leverage = {"LOW": Decimal("3"), "MEDIUM": Decimal("5"), "HIGH": Decimal("10")}
     creator = creator_id or uuid4()
@@ -103,8 +123,8 @@ def seed_proposal(
         initial_invalidation_price=Decimal("90"),
         requested_max_r=multiplier[risk_tier],
         risk_tier=risk_tier,
-        auto_add_enabled=False,
-        requested_add_count=0,
+        auto_add_enabled=auto_add_enabled,
+        requested_add_count=requested_add_count,
         target_leverage_min=Decimal("1"),
         target_leverage_max=leverage[risk_tier],
         hypothesis="trend continuation",
@@ -141,17 +161,18 @@ def seed_proposal(
                 updated_at=now,
             )
         )
-        session.add(
-            SystemRiskStateRecord(
-                organization_id="org-1",
-                status="NORMAL",
-                version=1,
-                reason_code="INTEGRATION_FIXTURE",
-                policy_version="risk-state-v1",
-                transition_source_ref="test-only:review-fixture",
-                updated_at=now,
+        if session.get(SystemRiskStateRecord, "org-1") is None:
+            session.add(
+                SystemRiskStateRecord(
+                    organization_id="org-1",
+                    status="NORMAL",
+                    version=1,
+                    reason_code="INTEGRATION_FIXTURE",
+                    policy_version="risk-state-v1",
+                    transition_source_ref="test-only:review-fixture",
+                    updated_at=now,
+                )
             )
-        )
     return proposal
 
 
@@ -238,12 +259,7 @@ def test_low_risk_independent_vote_finalizes_without_authorization(
         assert count_rows(session, ReviewerVote) == 1
         decision = session.execute(select(ApprovalDecision)).scalar_one()
         assert (decision.approved_count, decision.required_quorum) == (1, 1)
-        assert (
-            session.execute(
-                text("SELECT to_regclass('public.trading_authorizations')")
-            ).scalar_one_or_none()
-            is None
-        )
+        assert count_rows(session, TradingAuthorization) == 0
 
 
 def test_high_risk_first_vote_stays_pending_until_second_reviewer(

@@ -43,6 +43,16 @@ def reset_database(database: Database) -> None:
             text(
                 """
                 TRUNCATE TABLE
+                    authorization_state_transitions,
+                    add_unit_states,
+                    add_units,
+                    add_authorization_package_states,
+                    add_authorization_packages,
+                    initial_authorization_states,
+                    initial_order_authorizations,
+                    campaign_states,
+                    campaigns,
+                    trading_authorizations,
                     risk_decision_snapshots,
                     risk_policies,
                     system_risk_state_transitions,

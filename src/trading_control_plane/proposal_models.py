@@ -232,6 +232,11 @@ class ApprovalDecision(Base):
             name="ck_approval_decisions_terminal_fields",
         ),
         UniqueConstraint("proposal_version_id", name="uq_approval_decisions_proposal_version"),
+        UniqueConstraint(
+            "approval_decision_id",
+            "proposal_version_id",
+            name="uq_approval_decisions_identity_binding",
+        ),
     )
 
     approval_decision_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True)
