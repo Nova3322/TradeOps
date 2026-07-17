@@ -537,6 +537,30 @@ class ExecutionFact(Base):
             "length(payload_hash) = 64 AND length(evidence_hash) = 64",
             name="ck_execution_facts_hashes",
         ),
+        CheckConstraint(
+            "fact_contract_version IN (1, 2)",
+            name="ck_execution_facts_contract_version",
+        ),
+        CheckConstraint(
+            "(fact_contract_version = 1 AND fact_kind IS NULL "
+            "AND shadow_dispatch_claim_id IS NULL AND reconciliation_run_id IS NULL "
+            "AND reconciliation_input_id IS NULL AND reconciliation_source_type IS NULL "
+            "AND reconciliation_run_hash IS NULL AND reconciliation_input_hash IS NULL "
+            "AND dispatch_claim_hash IS NULL) OR "
+            "(fact_contract_version = 2 "
+            "AND fact_kind IN ('WORKER_RECEIPT', 'VENUE_ORDER', 'VENUE_FILL', "
+            "'VENUE_POSITION', 'VENUE_PROTECTION') "
+            "AND shadow_dispatch_claim_id IS NOT NULL AND reconciliation_run_id IS NOT NULL "
+            "AND reconciliation_input_id IS NOT NULL "
+            "AND reconciliation_source_type IN ('TRADING_LEDGER', 'VENUE_ORDERS', "
+            "'VENUE_FILLS', 'VENUE_POSITIONS', 'VENUE_BALANCES', "
+            "'VENUE_PROTECTION', 'WORKER_LOCAL') "
+            "AND length(reconciliation_run_hash) = 64 "
+            "AND length(reconciliation_input_hash) = 64 "
+            "AND length(dispatch_claim_hash) = 64 "
+            "AND reconciliation_run_ref IS NULL)",
+            name="ck_execution_facts_reconciled_binding",
+        ),
         UniqueConstraint(
             "order_intent_id", "fact_sequence", name="uq_execution_facts_intent_sequence"
         ),
@@ -548,6 +572,11 @@ class ExecutionFact(Base):
             name="uq_execution_facts_external_identity",
         ),
         Index("ix_execution_facts_intent_time", "order_intent_id", "event_time"),
+        Index(
+            "ix_execution_facts_reconciliation_binding",
+            "reconciliation_run_id",
+            "reconciliation_input_id",
+        ),
     )
 
     execution_fact_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True)
@@ -555,6 +584,8 @@ class ExecutionFact(Base):
         ForeignKey("order_intents.order_intent_id", ondelete="RESTRICT"), nullable=False
     )
     fact_sequence: Mapped[int] = mapped_column(Integer, nullable=False)
+    fact_contract_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    fact_kind: Mapped[str | None] = mapped_column(String(32), nullable=True)
     target_status: Mapped[str] = mapped_column(String(32), nullable=False)
     venue: Mapped[str] = mapped_column(String(80), nullable=False)
     execution_domain: Mapped[str] = mapped_column(String(120), nullable=False)
@@ -567,6 +598,19 @@ class ExecutionFact(Base):
     position_reconciled: Mapped[bool] = mapped_column(Boolean, nullable=False)
     protection_confirmed: Mapped[bool] = mapped_column(Boolean, nullable=False)
     reconciliation_run_ref: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    shadow_dispatch_claim_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("shadow_dispatch_claims.claim_id", ondelete="RESTRICT"), nullable=True
+    )
+    reconciliation_run_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("execution_reconciliation_runs.run_id", ondelete="RESTRICT"), nullable=True
+    )
+    reconciliation_input_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("execution_reconciliation_inputs.input_id", ondelete="RESTRICT"), nullable=True
+    )
+    reconciliation_source_type: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    reconciliation_run_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    reconciliation_input_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    dispatch_claim_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
     source_ref: Mapped[str] = mapped_column(String(255), nullable=False)
     source_version: Mapped[str] = mapped_column(String(120), nullable=False)
     payload: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)

@@ -69,6 +69,12 @@ EXECUTION_FACT_RESULTS = Counter(
     labelnames=("target_status", "result"),
 )
 
+EXECUTION_FACT_BINDINGS = Counter(
+    "trading_execution_fact_bindings_total",
+    "Reconciliation-bound execution facts by kind, exact source, and bounded result.",
+    labelnames=("fact_kind", "source_type", "result"),
+)
+
 CAPABILITY_CERTIFICATE_ISSUANCE = Counter(
     "trading_capability_certificate_issuance_total",
     "Shadow-only capability certificate issuance by type, environment, and result.",

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Any
@@ -16,13 +17,31 @@ from tests.integration.test_trading_authorization import (
     issue_envelope,
     prepare_approved,
 )
+from tests.reconciliation_fixtures import (
+    collect_complete_inputs,
+    complete_successful_reconciliation,
+    execute_reconciliation,
+    finish_envelope,
+    phase_envelope,
+    start_envelope,
+)
 from tests.risk_fixtures import make_capital, make_policy, make_request, make_requested
+from tests.sender_fencing_fixtures import (
+    acquire_envelope,
+    claim_envelope,
+    execute_acquire,
+    execute_claim,
+    make_sender_scope,
+)
+from trading_control_plane.capability_certificate_models import CapabilityCertificate
+from trading_control_plane.capability_certificates import CapabilityScope
 from trading_control_plane.command_executor import IdempotentCommandExecutor
 from trading_control_plane.commands import CommandChannel, CommandEnvelope, CommandStatus, hash_json
 from trading_control_plane.database import Database
 from trading_control_plane.execution import (
     EXECUTION_INTENT_SERVICE_PRINCIPAL,
     EXECUTION_RECONCILIATION_SERVICE_PRINCIPAL,
+    ExecutionFactKind,
     ExecutionIntentService,
     ExecutionReconciliationService,
     RecordExecutionFactRequest,
@@ -39,6 +58,17 @@ from trading_control_plane.execution_models import (
 )
 from trading_control_plane.models import AuditEvent, OutboxMessage
 from trading_control_plane.proposal_models import FrozenProposalVersion
+from trading_control_plane.reconciliation import (
+    ReconciliationPhase,
+    ReconciliationSourceType,
+    ReconciliationStatus,
+    ReconciliationTriggerType,
+)
+from trading_control_plane.reconciliation_models import (
+    ExecutionReconciliationInput,
+    ExecutionReconciliationRun,
+    ExecutionReconciliationRunState,
+)
 from trading_control_plane.risk import (
     CertificationBinding,
     MarketRiskInput,
@@ -50,6 +80,12 @@ from trading_control_plane.risk import (
     TradeLossComponents,
 )
 from trading_control_plane.risk_models import RiskPolicyRecord
+from trading_control_plane.sender_fencing import SenderScopeBinding, sender_scope_id
+from trading_control_plane.sender_fencing_models import (
+    ExecutionSenderScope,
+    ExecutionSenderScopeState,
+    ShadowDispatchClaim,
+)
 from trading_control_plane.trading_authorization_models import (
     AddAuthorizationPackage,
     AddAuthorizationPackageState,
@@ -363,6 +399,19 @@ def execute_create(database: Database, envelope: CommandEnvelope):
     )
 
 
+@dataclass(frozen=True)
+class ExecutionFactDraft:
+    sequence: int
+    status: str
+    filled: Decimal
+    remaining: Decimal
+    zero: bool
+    terminal: bool
+    reconciled: bool
+    protected: bool
+    external_fact_id: str
+
+
 def fact_request(
     *,
     sequence: int,
@@ -374,35 +423,259 @@ def fact_request(
     reconciled: bool = False,
     protected: bool = False,
     external_fact_id: str | None = None,
+) -> ExecutionFactDraft:
+    return ExecutionFactDraft(
+        sequence=sequence,
+        status=status,
+        filled=filled,
+        remaining=remaining,
+        zero=zero,
+        terminal=terminal,
+        reconciled=reconciled,
+        protected=protected,
+        external_fact_id=external_fact_id or f"venue-fact-{uuid4()}",
+    )
+
+
+def _fact_kind_and_source(
+    status: str,
+) -> tuple[ExecutionFactKind, ReconciliationSourceType]:
+    if status in {"PARTIALLY_FILLED", "FILLED", "CANCELLED_PARTIAL"}:
+        return ExecutionFactKind.VENUE_FILL, ReconciliationSourceType.VENUE_FILLS
+    if status == "POSITION_RECONCILED":
+        return ExecutionFactKind.VENUE_POSITION, ReconciliationSourceType.VENUE_POSITIONS
+    if status in {"PROTECTION_CONFIRMED", "COMPLETED"}:
+        return ExecutionFactKind.VENUE_PROTECTION, ReconciliationSourceType.VENUE_PROTECTION
+    if status == "DISPATCHING":
+        return ExecutionFactKind.WORKER_RECEIPT, ReconciliationSourceType.WORKER_LOCAL
+    return ExecutionFactKind.VENUE_ORDER, ReconciliationSourceType.VENUE_ORDERS
+
+
+def _scope_from_persisted(row: ExecutionSenderScope) -> SenderScopeBinding:
+    return SenderScopeBinding(
+        organization_id=row.organization_id,
+        venue=row.venue,
+        execution_domain=row.execution_domain,
+        account_id=row.account_id,
+        account_abstraction=row.account_abstraction,
+        position_mode=row.position_mode,
+        margin_mode=row.margin_mode,
+        collateral_scope=row.collateral_scope,
+        collateral_pool_id=row.collateral_pool_id,
+    )
+
+
+def ensure_shadow_claim(
+    database: Database, order_intent_id: UUID, *, now: datetime
+) -> tuple[ShadowDispatchClaim, SenderScopeBinding]:
+    with database.session_factory.begin() as session:
+        existing_claim = session.execute(
+            select(ShadowDispatchClaim).where(
+                ShadowDispatchClaim.order_intent_id == order_intent_id
+            )
+        ).scalar_one_or_none()
+        if existing_claim is not None:
+            scope_row = session.get(ExecutionSenderScope, existing_claim.scope_id)
+            assert scope_row is not None
+            return existing_claim, _scope_from_persisted(scope_row)
+        intent = session.get(OrderIntent, order_intent_id)
+        assert intent is not None
+        certificate = session.get(CapabilityCertificate, intent.capability_certificate_ref)
+        assert certificate is not None
+        certificate_scope = CapabilityScope.model_validate(certificate.scope)
+
+    scope = make_sender_scope(
+        organization_id="org-1",
+        venue=certificate_scope.venue,
+        execution_domain=certificate_scope.execution_domain,
+        account_id=certificate_scope.account_id,
+        account_abstraction=certificate_scope.account_abstraction,
+        position_mode=certificate_scope.position_mode,
+        margin_mode=certificate_scope.margin_mode,
+        collateral_scope=certificate_scope.collateral_scope,
+        collateral_pool_id=certificate_scope.collateral_pool_id,
+    )
+    with database.session_factory.begin() as session:
+        sender_state = session.get(ExecutionSenderScopeState, sender_scope_id(scope))
+        latest_run = session.execute(
+            select(ExecutionReconciliationRun)
+            .where(ExecutionReconciliationRun.scope_id == sender_scope_id(scope))
+            .order_by(
+                ExecutionReconciliationRun.started_at.desc(),
+                ExecutionReconciliationRun.run_id.desc(),
+            )
+            .limit(1)
+        ).scalar_one_or_none()
+        latest_run_state = (
+            session.get(ExecutionReconciliationRunState, latest_run.run_id)
+            if latest_run is not None
+            else None
+        )
+
+    if sender_state is None:
+        lease_id = uuid4()
+        acquired = execute_acquire(
+            database,
+            acquire_envelope(
+                scope,
+                now=now,
+                lease_id=lease_id,
+                ttl_seconds=300,
+                max_lifetime_seconds=600,
+            ),
+            now=now,
+        )
+        assert acquired.status is CommandStatus.COMPLETED
+        fencing_token = int(acquired.data["fencing_token"])
+        startup_at = now + timedelta(milliseconds=1)
+        startup_run_id = complete_successful_reconciliation(
+            database,
+            scope,
+            lease_id,
+            fencing_token,
+            now=startup_at,
+        )
+        claimed_at = startup_at + timedelta(milliseconds=1)
+    else:
+        assert sender_state.status == "LEASED"
+        assert sender_state.active_lease_id is not None
+        assert latest_run is not None
+        assert latest_run_state is not None and latest_run_state.status == "SUCCEEDED"
+        lease_id = sender_state.active_lease_id
+        fencing_token = sender_state.current_fencing_token
+        startup_run_id = latest_run.run_id
+        assert latest_run_state.completed_at is not None
+        claimed_at = max(now, latest_run_state.completed_at + timedelta(milliseconds=1))
+    claimed = execute_claim(
+        database,
+        claim_envelope(
+            scope,
+            order_intent_id,
+            lease_id,
+            fencing_token,
+            startup_run_id,
+            now=claimed_at,
+        ),
+        now=claimed_at,
+    )
+    assert claimed.status is CommandStatus.COMPLETED
+    with database.session_factory.begin() as session:
+        claim = session.execute(
+            select(ShadowDispatchClaim).where(
+                ShadowDispatchClaim.order_intent_id == order_intent_id
+            )
+        ).scalar_one()
+    return claim, scope
+
+
+def prepare_active_fact_run(
+    database: Database,
+    order_intent_id: UUID,
+    source_type: ReconciliationSourceType,
+    *,
+    now: datetime | None = None,
+) -> tuple[ShadowDispatchClaim, ExecutionReconciliationRun, ExecutionReconciliationInput, datetime]:
+    base_time = now or datetime.now(UTC)
+    claim, scope = ensure_shadow_claim(database, order_intent_id, now=base_time)
+    with database.session_factory.begin() as session:
+        latest = session.execute(
+            select(ExecutionReconciliationRun)
+            .where(ExecutionReconciliationRun.scope_id == claim.scope_id)
+            .order_by(
+                ExecutionReconciliationRun.started_at.desc(),
+                ExecutionReconciliationRun.run_id.desc(),
+            )
+            .limit(1)
+        ).scalar_one()
+    run_at = max(
+        base_time,
+        claim.claimed_at + timedelta(milliseconds=1),
+        latest.started_at + timedelta(milliseconds=1),
+    )
+    run_id = uuid4()
+    started = execute_reconciliation(
+        database,
+        start_envelope(
+            run_id,
+            scope,
+            claim.lease_id,
+            claim.fencing_token,
+            now=run_at,
+            trigger_type=ReconciliationTriggerType.PRIVATE_STREAM_RECONNECT,
+            supersedes_run_id=latest.run_id,
+        ),
+        now=run_at,
+    )
+    assert started.status is CommandStatus.COMPLETED
+    version = collect_complete_inputs(database, run_id, now=run_at)
+    compared = execute_reconciliation(
+        database,
+        phase_envelope(
+            run_id,
+            ReconciliationPhase.COMPARING,
+            now=run_at,
+            expected_version=version,
+        ),
+        now=run_at,
+    )
+    assert compared.status is CommandStatus.COMPLETED
+    with database.session_factory.begin() as session:
+        run = session.get(ExecutionReconciliationRun, run_id)
+        reconciliation_input = session.execute(
+            select(ExecutionReconciliationInput).where(
+                ExecutionReconciliationInput.run_id == run_id,
+                ExecutionReconciliationInput.source_type == source_type.value,
+            )
+        ).scalar_one()
+        claim = session.get(ShadowDispatchClaim, claim.claim_id)
+        assert run is not None and claim is not None
+    return claim, run, reconciliation_input, run_at
+
+
+def bind_fact_request(
+    draft: ExecutionFactDraft,
+    claim: ShadowDispatchClaim,
+    run: ExecutionReconciliationRun,
+    reconciliation_input: ExecutionReconciliationInput,
+    *,
+    event_time: datetime,
+    received_at: datetime,
 ) -> RecordExecutionFactRequest:
-    received = datetime.now(UTC)
+    fact_kind, source_type = _fact_kind_and_source(draft.status)
     payload = {
-        "sequence": sequence,
-        "status": status,
-        "filled": str(filled),
-        "remaining": str(remaining),
+        "sequence": draft.sequence,
+        "status": draft.status,
+        "filled": str(draft.filled),
+        "remaining": str(draft.remaining),
     }
     values: dict[str, Any] = {
-        "fact_sequence": sequence,
-        "target_status": status,
+        "fact_sequence": draft.sequence,
+        "fact_kind": fact_kind,
+        "target_status": draft.status,
         "venue": "BINANCE",
         "execution_domain": "BINANCE_USDM",
         "account_id": "account-1",
-        "external_fact_id": external_fact_id or f"venue-fact-{uuid4()}",
-        "cumulative_filled_quantity": filled,
-        "known_remaining_quantity": remaining,
-        "zero_fill_confirmed": zero,
-        "venue_order_terminal": terminal,
-        "position_reconciled": reconciled,
-        "protection_confirmed": protected,
-        "reconciliation_run_ref": "test-only:reconciliation-run",
-        "source_ref": "test-only:venue-private-order-fact",
-        "source_version": "venue-adapter-test-v1",
+        "external_fact_id": draft.external_fact_id,
+        "cumulative_filled_quantity": draft.filled,
+        "known_remaining_quantity": draft.remaining,
+        "zero_fill_confirmed": draft.zero,
+        "venue_order_terminal": draft.terminal,
+        "position_reconciled": draft.reconciled,
+        "protection_confirmed": draft.protected,
+        "shadow_dispatch_claim_id": claim.claim_id,
+        "reconciliation_run_id": run.run_id,
+        "reconciliation_input_id": reconciliation_input.input_id,
+        "reconciliation_source_type": source_type,
+        "reconciliation_run_hash": run.run_hash,
+        "reconciliation_input_hash": reconciliation_input.input_hash,
+        "dispatch_claim_hash": claim.claim_hash,
+        "source_ref": f"test-only:{source_type.value.lower()}-fact",
+        "source_version": reconciliation_input.source_version,
         "payload": payload,
         "payload_hash": hash_json(payload),
-        "evidence_ref": f"test-only:evidence:{sequence}:{status}",
-        "event_time": received - timedelta(milliseconds=10),
-        "received_at": received,
+        "evidence_ref": f"test-only:evidence:{draft.sequence}:{draft.status}",
+        "event_time": event_time,
+        "received_at": received_at,
     }
     provisional = RecordExecutionFactRequest.model_construct(**values, evidence_hash="0" * 64)
     values["evidence_hash"] = hash_json(
@@ -412,10 +685,10 @@ def fact_request(
 
 
 def fact_envelope(order_intent_id: UUID, request: RecordExecutionFactRequest) -> CommandEnvelope:
-    now = datetime.now(UTC)
+    now = request.received_at
     return CommandEnvelope(
         idempotency_key=f"execution-fact-{uuid4()}",
-        command_type="execution.fact.record.v1",
+        command_type=ExecutionReconciliationService.command_type,
         object_type="OrderIntent",
         object_id=str(order_intent_id),
         expected_version=request.fact_sequence,
@@ -432,10 +705,41 @@ def fact_envelope(order_intent_id: UUID, request: RecordExecutionFactRequest) ->
     )
 
 
-def execute_fact(database: Database, order_intent_id: UUID, request: RecordExecutionFactRequest):
-    return IdempotentCommandExecutor(database.session_factory).execute(
-        fact_envelope(order_intent_id, request), ExecutionReconciliationService().record
+def execute_fact(database: Database, order_intent_id: UUID, draft: ExecutionFactDraft):
+    _, source_type = _fact_kind_and_source(draft.status)
+    claim, run, reconciliation_input, event_time = prepare_active_fact_run(
+        database, order_intent_id, source_type
     )
+    received_at = event_time + timedelta(milliseconds=1)
+    request = bind_fact_request(
+        draft,
+        claim,
+        run,
+        reconciliation_input,
+        event_time=event_time,
+        received_at=received_at,
+    )
+    result = IdempotentCommandExecutor(database.session_factory).execute(
+        fact_envelope(order_intent_id, request),
+        ExecutionReconciliationService(clock=lambda: received_at).record,
+    )
+    with database.session_factory.begin() as session:
+        state = session.get(ExecutionReconciliationRunState, run.run_id)
+        assert state is not None
+        state_version = state.version
+    finished_at = received_at + timedelta(milliseconds=1)
+    finished = execute_reconciliation(
+        database,
+        finish_envelope(
+            run.run_id,
+            ReconciliationStatus.SUCCEEDED,
+            now=finished_at,
+            expected_version=state_version,
+        ),
+        now=finished_at,
+    )
+    assert finished.status is CommandStatus.COMPLETED
+    return result
 
 
 def test_initial_intent_atomically_persists_decision_reservation_ledger_and_histories(

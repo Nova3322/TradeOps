@@ -34,11 +34,18 @@ from trading_control_plane.execution_models import (
     RiskReservation,
 )
 from trading_control_plane.metrics import (
+    EXECUTION_FACT_BINDINGS,
     EXECUTION_FACT_RESULTS,
     EXECUTION_RISK_DECISIONS,
     RISK_RESERVATION_TRANSITIONS,
 )
 from trading_control_plane.proposal_models import FrozenProposalVersion, SystemRiskStateRecord
+from trading_control_plane.reconciliation import ReconciliationSourceType
+from trading_control_plane.reconciliation_models import (
+    ExecutionReconciliationInput,
+    ExecutionReconciliationRun,
+    ExecutionReconciliationRunState,
+)
 from trading_control_plane.risk import (
     RiskDecisionResult,
     RiskEvaluationInput,
@@ -50,6 +57,10 @@ from trading_control_plane.risk import (
     capability_validation_request,
 )
 from trading_control_plane.risk_models import RiskPolicyRecord
+from trading_control_plane.sender_fencing_models import (
+    ExecutionSenderScopeState,
+    ShadowDispatchClaim,
+)
 from trading_control_plane.trading_authorization import FrozenAuthorizationBinding
 from trading_control_plane.trading_authorization_models import (
     AddAuthorizationPackage,
@@ -93,6 +104,65 @@ BLOCKING_INITIAL_STATUSES = frozenset(
         "FAILED_SAFE",
     }
 )
+
+
+class ExecutionFactKind(StrEnum):
+    WORKER_RECEIPT = "WORKER_RECEIPT"
+    VENUE_ORDER = "VENUE_ORDER"
+    VENUE_FILL = "VENUE_FILL"
+    VENUE_POSITION = "VENUE_POSITION"
+    VENUE_PROTECTION = "VENUE_PROTECTION"
+
+
+EXECUTION_FACT_SOURCE_STATUS_MATRIX: dict[
+    str, frozenset[tuple[ExecutionFactKind, ReconciliationSourceType]]
+] = {
+    "DISPATCHING": frozenset(
+        {(ExecutionFactKind.WORKER_RECEIPT, ReconciliationSourceType.WORKER_LOCAL)}
+    ),
+    "VENUE_ACKNOWLEDGED": frozenset(
+        {(ExecutionFactKind.VENUE_ORDER, ReconciliationSourceType.VENUE_ORDERS)}
+    ),
+    "PARTIALLY_FILLED": frozenset(
+        {(ExecutionFactKind.VENUE_FILL, ReconciliationSourceType.VENUE_FILLS)}
+    ),
+    "FILLED": frozenset({(ExecutionFactKind.VENUE_FILL, ReconciliationSourceType.VENUE_FILLS)}),
+    "CANCEL_PENDING": frozenset(
+        {(ExecutionFactKind.VENUE_ORDER, ReconciliationSourceType.VENUE_ORDERS)}
+    ),
+    "CANCELLED_ZERO_FILL": frozenset(
+        {(ExecutionFactKind.VENUE_ORDER, ReconciliationSourceType.VENUE_ORDERS)}
+    ),
+    "CANCELLED_PARTIAL": frozenset(
+        {(ExecutionFactKind.VENUE_FILL, ReconciliationSourceType.VENUE_FILLS)}
+    ),
+    "REJECTED_ZERO_FILL": frozenset(
+        {(ExecutionFactKind.VENUE_ORDER, ReconciliationSourceType.VENUE_ORDERS)}
+    ),
+    "RESULT_UNKNOWN": frozenset(
+        {
+            (ExecutionFactKind.WORKER_RECEIPT, ReconciliationSourceType.WORKER_LOCAL),
+            (ExecutionFactKind.VENUE_ORDER, ReconciliationSourceType.VENUE_ORDERS),
+        }
+    ),
+    "POSITION_RECONCILED": frozenset(
+        {(ExecutionFactKind.VENUE_POSITION, ReconciliationSourceType.VENUE_POSITIONS)}
+    ),
+    "PROTECTION_CONFIRMED": frozenset(
+        {(ExecutionFactKind.VENUE_PROTECTION, ReconciliationSourceType.VENUE_PROTECTION)}
+    ),
+    "COMPLETED": frozenset(
+        {(ExecutionFactKind.VENUE_PROTECTION, ReconciliationSourceType.VENUE_PROTECTION)}
+    ),
+    "FAILED_SAFE": frozenset(
+        {
+            (ExecutionFactKind.WORKER_RECEIPT, ReconciliationSourceType.WORKER_LOCAL),
+            (ExecutionFactKind.VENUE_ORDER, ReconciliationSourceType.VENUE_ORDERS),
+            (ExecutionFactKind.VENUE_POSITION, ReconciliationSourceType.VENUE_POSITIONS),
+            (ExecutionFactKind.VENUE_PROTECTION, ReconciliationSourceType.VENUE_PROTECTION),
+        }
+    ),
+}
 
 
 class IntentKind(StrEnum):
@@ -159,9 +229,10 @@ class CreateExecutionIntentRequest(BaseModel):
 
 
 class RecordExecutionFactRequest(BaseModel):
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
     fact_sequence: int = Field(ge=1)
+    fact_kind: ExecutionFactKind
     target_status: str = Field(min_length=3, max_length=32)
     venue: str = Field(min_length=1, max_length=80)
     execution_domain: str = Field(min_length=1, max_length=120)
@@ -173,7 +244,13 @@ class RecordExecutionFactRequest(BaseModel):
     venue_order_terminal: bool
     position_reconciled: bool
     protection_confirmed: bool
-    reconciliation_run_ref: str | None = Field(default=None, max_length=255)
+    shadow_dispatch_claim_id: UUID
+    reconciliation_run_id: UUID
+    reconciliation_input_id: UUID
+    reconciliation_source_type: ReconciliationSourceType
+    reconciliation_run_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    reconciliation_input_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    dispatch_claim_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
     source_ref: str = Field(min_length=1, max_length=255)
     source_version: str = Field(min_length=1, max_length=120)
     payload: dict[str, Any]
@@ -1284,7 +1361,7 @@ class ExecutionIntentService:
 
 
 class ExecutionReconciliationService:
-    command_type = "execution.fact.record.v1"
+    command_type = "execution.fact.record-reconciled.v2"
 
     def __init__(self, clock: Callable[[], datetime] | None = None) -> None:
         self._clock = clock or (lambda: datetime.now(UTC))
@@ -1344,6 +1421,15 @@ class ExecutionReconciliationService:
                 or existing.payload_hash != request.payload_hash
                 or existing.evidence_hash != request.evidence_hash
                 or existing.fact_sequence != request.fact_sequence
+                or existing.fact_contract_version != 2
+                or existing.fact_kind != request.fact_kind.value
+                or existing.shadow_dispatch_claim_id != request.shadow_dispatch_claim_id
+                or existing.reconciliation_run_id != request.reconciliation_run_id
+                or existing.reconciliation_input_id != request.reconciliation_input_id
+                or existing.reconciliation_source_type != request.reconciliation_source_type.value
+                or existing.reconciliation_run_hash != request.reconciliation_run_hash
+                or existing.reconciliation_input_hash != request.reconciliation_input_hash
+                or existing.dispatch_claim_hash != request.dispatch_claim_hash
             ):
                 raise CommandRejected(
                     "EXTERNAL_FACT_ID_CONFLICT",
@@ -1352,12 +1438,15 @@ class ExecutionReconciliationService:
             return self._existing_fact_outcome(state, existing)
 
         now = self._clock()
+        self._validate_reconciliation_binding(session, intent, reservation, request, now)
         self._validate_progression(state, request, now)
         fact_id = uuid4()
         fact = ExecutionFact(
             execution_fact_id=fact_id,
             order_intent_id=order_intent_id,
             fact_sequence=request.fact_sequence,
+            fact_contract_version=2,
+            fact_kind=request.fact_kind.value,
             target_status=request.target_status,
             venue=request.venue,
             execution_domain=request.execution_domain,
@@ -1369,7 +1458,14 @@ class ExecutionReconciliationService:
             venue_order_terminal=request.venue_order_terminal,
             position_reconciled=request.position_reconciled,
             protection_confirmed=request.protection_confirmed,
-            reconciliation_run_ref=request.reconciliation_run_ref,
+            reconciliation_run_ref=None,
+            shadow_dispatch_claim_id=request.shadow_dispatch_claim_id,
+            reconciliation_run_id=request.reconciliation_run_id,
+            reconciliation_input_id=request.reconciliation_input_id,
+            reconciliation_source_type=request.reconciliation_source_type.value,
+            reconciliation_run_hash=request.reconciliation_run_hash,
+            reconciliation_input_hash=request.reconciliation_input_hash,
+            dispatch_claim_hash=request.dispatch_claim_hash,
             source_ref=request.source_ref,
             source_version=request.source_version,
             payload=request.payload,
@@ -1413,6 +1509,11 @@ class ExecutionReconciliationService:
         state.updated_at = now
         self._apply_authorization_lifecycle(session, intent, reservation, request, now)
         session.flush()
+        EXECUTION_FACT_BINDINGS.labels(
+            request.fact_kind.value,
+            request.reconciliation_source_type.value,
+            "APPLIED",
+        ).inc()
         EXECUTION_FACT_RESULTS.labels(request.target_status, "APPLIED").inc()
         return CommandOutcome(
             status=CommandStatus.COMPLETED,
@@ -1436,7 +1537,12 @@ class ExecutionReconciliationService:
                     payload={
                         "execution_fact_id": str(fact_id),
                         "fact_sequence": request.fact_sequence,
+                        "fact_kind": request.fact_kind.value,
                         "target_status": request.target_status,
+                        "shadow_dispatch_claim_id": str(request.shadow_dispatch_claim_id),
+                        "reconciliation_run_id": str(request.reconciliation_run_id),
+                        "reconciliation_input_id": str(request.reconciliation_input_id),
+                        "reconciliation_source_type": request.reconciliation_source_type.value,
                         "risk_exposure_status": exposure.status,
                         "cumulative_filled_quantity": str(request.cumulative_filled_quantity),
                     },
@@ -1485,6 +1591,183 @@ class ExecutionReconciliationService:
             or request.account_id != intent.account_id
         ):
             raise CommandRejected("EXECUTION_ROUTE_MISMATCH", "execution route changed")
+
+    @staticmethod
+    def _validate_reconciliation_binding(
+        session: Session,
+        intent: OrderIntent,
+        reservation: RiskReservation,
+        request: RecordExecutionFactRequest,
+        now: datetime,
+    ) -> None:
+        allowed_bindings = EXECUTION_FACT_SOURCE_STATUS_MATRIX.get(request.target_status)
+        requested_binding = (request.fact_kind, request.reconciliation_source_type)
+        if allowed_bindings is None or requested_binding not in allowed_bindings:
+            raise CommandRejected(
+                "EXECUTION_FACT_SOURCE_STATUS_MISMATCH",
+                "fact kind and reconciliation source cannot prove the target status",
+            )
+
+        claim = session.execute(
+            select(ShadowDispatchClaim).where(
+                ShadowDispatchClaim.claim_id == request.shadow_dispatch_claim_id
+            )
+        ).scalar_one_or_none()
+        if claim is None:
+            raise CommandRejected(
+                "EXECUTION_FACT_CLAIM_NOT_FOUND", "shadow dispatch claim is unavailable"
+            )
+        if (
+            claim.order_intent_id != intent.order_intent_id
+            or claim.organization_id != reservation.organization_id
+            or claim.claim_hash != request.dispatch_claim_hash
+            or claim.execution_mode != "SHADOW"
+            or claim.external_send_permitted
+            or claim.live_gate_status != "DISABLED"
+            or claim.reconciliation_run_id is None
+        ):
+            raise CommandRejected(
+                "EXECUTION_FACT_CLAIM_MISMATCH",
+                "shadow dispatch claim does not match the immutable intent authority",
+            )
+
+        run = session.execute(
+            select(ExecutionReconciliationRun).where(
+                ExecutionReconciliationRun.run_id == request.reconciliation_run_id
+            )
+        ).scalar_one_or_none()
+        if run is None:
+            raise CommandRejected(
+                "EXECUTION_FACT_RECONCILIATION_RUN_NOT_FOUND",
+                "execution reconciliation run is unavailable",
+            )
+        run_state = session.execute(
+            select(ExecutionReconciliationRunState)
+            .where(ExecutionReconciliationRunState.run_id == request.reconciliation_run_id)
+            .with_for_update()
+        ).scalar_one()
+        if (
+            run.organization_id != claim.organization_id
+            or run.scope_id != claim.scope_id
+            or run.lease_id != claim.lease_id
+            or run.fencing_token != claim.fencing_token
+            or run.environment != "SHADOW"
+            or run.live_dispatch_eligible
+            or run.run_hash != request.reconciliation_run_hash
+            or run.started_at <= claim.claimed_at
+        ):
+            raise CommandRejected(
+                "EXECUTION_FACT_RECONCILIATION_RUN_MISMATCH",
+                "reconciliation run is not a post-claim run on the exact shadow lease",
+            )
+        if now >= run.deadline_at:
+            raise CommandRejected(
+                "EXECUTION_FACT_RECONCILIATION_RUN_EXPIRED",
+                "execution reconciliation run deadline has elapsed",
+            )
+        if run_state.status != "RUNNING" or run_state.phase not in {"COMPARING", "ADJUSTING"}:
+            raise CommandRejected(
+                "EXECUTION_FACT_RECONCILIATION_RUN_NOT_ACTIVE",
+                "execution facts require an active comparison or adjustment phase",
+            )
+
+        latest_run_id = session.execute(
+            select(ExecutionReconciliationRun.run_id)
+            .where(ExecutionReconciliationRun.scope_id == run.scope_id)
+            .order_by(
+                ExecutionReconciliationRun.started_at.desc(),
+                ExecutionReconciliationRun.run_id.desc(),
+            )
+            .limit(1)
+        ).scalar_one()
+        if latest_run_id != run.run_id:
+            raise CommandRejected(
+                "EXECUTION_FACT_RECONCILIATION_RUN_NOT_LATEST",
+                "execution facts require the latest exact-scope reconciliation run",
+            )
+
+        lineage_matches = bool(
+            session.execute(
+                text(
+                    """
+                    WITH RECURSIVE lineage(run_id, supersedes_run_id) AS (
+                        SELECT run_id, supersedes_run_id
+                        FROM execution_reconciliation_runs WHERE run_id = :run_id
+                        UNION ALL
+                        SELECT parent.run_id, parent.supersedes_run_id
+                        FROM execution_reconciliation_runs parent
+                        JOIN lineage child ON parent.run_id = child.supersedes_run_id
+                    )
+                    SELECT EXISTS(
+                        SELECT 1 FROM lineage WHERE run_id = :claim_reconciliation_run_id
+                    )
+                    """
+                ),
+                {
+                    "run_id": str(run.run_id),
+                    "claim_reconciliation_run_id": str(claim.reconciliation_run_id),
+                },
+            ).scalar_one()
+        )
+        if not lineage_matches:
+            raise CommandRejected(
+                "EXECUTION_FACT_RECONCILIATION_LINEAGE_MISMATCH",
+                "reconciliation run does not descend from the claim-authorizing result",
+            )
+
+        reconciliation_input = session.execute(
+            select(ExecutionReconciliationInput).where(
+                ExecutionReconciliationInput.input_id == request.reconciliation_input_id
+            )
+        ).scalar_one_or_none()
+        if reconciliation_input is None:
+            raise CommandRejected(
+                "EXECUTION_FACT_RECONCILIATION_INPUT_NOT_FOUND",
+                "reconciliation input is unavailable",
+            )
+        if (
+            reconciliation_input.run_id != run.run_id
+            or reconciliation_input.organization_id != claim.organization_id
+            or reconciliation_input.source_type != request.reconciliation_source_type.value
+            or reconciliation_input.collection_status != "COMPLETE"
+            or reconciliation_input.source_version != request.source_version
+            or reconciliation_input.input_hash != request.reconciliation_input_hash
+        ):
+            raise CommandRejected(
+                "EXECUTION_FACT_RECONCILIATION_INPUT_MISMATCH",
+                "fact is not bound to the exact complete source input",
+            )
+        if not (
+            reconciliation_input.observed_from
+            <= request.event_time
+            <= reconciliation_input.observed_through
+        ):
+            raise CommandRejected(
+                "EXECUTION_FACT_OUTSIDE_INPUT_WINDOW",
+                "fact event is outside the bound source input watermark",
+            )
+        if request.event_time < claim.claimed_at:
+            raise CommandRejected(
+                "EXECUTION_FACT_PRE_CLAIM_EVENT",
+                "pre-claim execution events cannot be replayed as new business facts",
+            )
+
+        sender_state = session.execute(
+            select(ExecutionSenderScopeState)
+            .where(ExecutionSenderScopeState.scope_id == claim.scope_id)
+            .with_for_update()
+        ).scalar_one()
+        if (
+            sender_state.status != "LEASED"
+            or sender_state.active_lease_id != claim.lease_id
+            or sender_state.current_fencing_token != claim.fencing_token
+            or sender_state.lease_expires_at is None
+            or now >= sender_state.lease_expires_at
+        ):
+            raise CommandRejected(
+                "EXECUTION_FACT_SENDER_LEASE_STALE",
+                "execution fact authority is fenced or expired",
+            )
 
     @staticmethod
     def _validate_progression(
@@ -1892,6 +2175,11 @@ class ExecutionReconciliationService:
 
     @staticmethod
     def _existing_fact_outcome(state: OrderIntentState, fact: ExecutionFact) -> CommandOutcome:
+        EXECUTION_FACT_BINDINGS.labels(
+            fact.fact_kind or "LEGACY",
+            fact.reconciliation_source_type or "UNBOUND",
+            "ALREADY_RECORDED",
+        ).inc()
         EXECUTION_FACT_RESULTS.labels(fact.target_status, "ALREADY_RECORDED").inc()
         return CommandOutcome(
             status=CommandStatus.COMPLETED,
