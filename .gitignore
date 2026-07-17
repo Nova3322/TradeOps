@@ -1,0 +1,12 @@
+# Local operating-system and editor state
+.DS_Store
+.obsidian/
+
+# Local secrets and environment overrides
+.env
+.env.*
+!.env.example
+.secrets/
+secrets/
+*.pem
+*.key
