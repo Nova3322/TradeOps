@@ -75,6 +75,12 @@ EXECUTION_FACT_BINDINGS = Counter(
     labelnames=("fact_kind", "source_type", "result"),
 )
 
+EXECUTION_FACT_AUTHORITY_MODES = Counter(
+    "trading_execution_fact_authority_modes_total",
+    "Applied execution facts by original-lease or successor-lease reconciliation authority.",
+    labelnames=("authority_mode", "result"),
+)
+
 CAPABILITY_CERTIFICATE_ISSUANCE = Counter(
     "trading_capability_certificate_issuance_total",
     "Shadow-only capability certificate issuance by type, environment, and result.",

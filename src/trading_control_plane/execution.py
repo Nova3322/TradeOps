@@ -34,6 +34,7 @@ from trading_control_plane.execution_models import (
     RiskReservation,
 )
 from trading_control_plane.metrics import (
+    EXECUTION_FACT_AUTHORITY_MODES,
     EXECUTION_FACT_BINDINGS,
     EXECUTION_FACT_RESULTS,
     EXECUTION_RISK_DECISIONS,
@@ -1435,10 +1436,12 @@ class ExecutionReconciliationService:
                     "EXTERNAL_FACT_ID_CONFLICT",
                     "external fact id belongs to different semantics",
                 )
-            return self._existing_fact_outcome(state, existing)
+            return self._existing_fact_outcome(session, state, existing)
 
         now = self._clock()
-        self._validate_reconciliation_binding(session, intent, reservation, request, now)
+        authority_mode = self._validate_reconciliation_binding(
+            session, intent, reservation, request, now
+        )
         self._validate_progression(state, request, now)
         fact_id = uuid4()
         fact = ExecutionFact(
@@ -1514,6 +1517,7 @@ class ExecutionReconciliationService:
             request.reconciliation_source_type.value,
             "APPLIED",
         ).inc()
+        EXECUTION_FACT_AUTHORITY_MODES.labels(authority_mode, "APPLIED").inc()
         EXECUTION_FACT_RESULTS.labels(request.target_status, "APPLIED").inc()
         return CommandOutcome(
             status=CommandStatus.COMPLETED,
@@ -1527,6 +1531,7 @@ class ExecutionReconciliationService:
                 "risk_exposure_status": exposure.status,
                 "cumulative_filled_quantity": str(state.cumulative_filled_quantity),
                 "known_remaining_quantity": str(state.known_remaining_quantity),
+                "authority_mode": authority_mode,
                 "dispatch_eligible": False,
             },
             events=(
@@ -1543,6 +1548,7 @@ class ExecutionReconciliationService:
                         "reconciliation_run_id": str(request.reconciliation_run_id),
                         "reconciliation_input_id": str(request.reconciliation_input_id),
                         "reconciliation_source_type": request.reconciliation_source_type.value,
+                        "authority_mode": authority_mode,
                         "risk_exposure_status": exposure.status,
                         "cumulative_filled_quantity": str(request.cumulative_filled_quantity),
                     },
@@ -1599,7 +1605,7 @@ class ExecutionReconciliationService:
         reservation: RiskReservation,
         request: RecordExecutionFactRequest,
         now: datetime,
-    ) -> None:
+    ) -> str:
         allowed_bindings = EXECUTION_FACT_SOURCE_STATUS_MATRIX.get(request.target_status)
         requested_binding = (request.fact_kind, request.reconciliation_source_type)
         if allowed_bindings is None or requested_binding not in allowed_bindings:
@@ -1649,8 +1655,8 @@ class ExecutionReconciliationService:
         if (
             run.organization_id != claim.organization_id
             or run.scope_id != claim.scope_id
-            or run.lease_id != claim.lease_id
-            or run.fencing_token != claim.fencing_token
+            or run.fencing_token < claim.fencing_token
+            or (run.fencing_token == claim.fencing_token and run.lease_id != claim.lease_id)
             or run.environment != "SHADOW"
             or run.live_dispatch_eligible
             or run.run_hash != request.reconciliation_run_hash
@@ -1658,7 +1664,7 @@ class ExecutionReconciliationService:
         ):
             raise CommandRejected(
                 "EXECUTION_FACT_RECONCILIATION_RUN_MISMATCH",
-                "reconciliation run is not a post-claim run on the exact shadow lease",
+                "reconciliation run is not a valid post-claim original or successor authority",
             )
         if now >= run.deadline_at:
             raise CommandRejected(
@@ -1759,8 +1765,8 @@ class ExecutionReconciliationService:
         ).scalar_one()
         if (
             sender_state.status != "LEASED"
-            or sender_state.active_lease_id != claim.lease_id
-            or sender_state.current_fencing_token != claim.fencing_token
+            or sender_state.active_lease_id != run.lease_id
+            or sender_state.current_fencing_token != run.fencing_token
             or sender_state.lease_expires_at is None
             or now >= sender_state.lease_expires_at
         ):
@@ -1768,6 +1774,9 @@ class ExecutionReconciliationService:
                 "EXECUTION_FACT_SENDER_LEASE_STALE",
                 "execution fact authority is fenced or expired",
             )
+        if run.lease_id == claim.lease_id and run.fencing_token == claim.fencing_token:
+            return "ORIGINAL_LEASE"
+        return "SUCCESSOR_LEASE"
 
     @staticmethod
     def _validate_progression(
@@ -2174,12 +2183,24 @@ class ExecutionReconciliationService:
                     state.updated_at = now
 
     @staticmethod
-    def _existing_fact_outcome(state: OrderIntentState, fact: ExecutionFact) -> CommandOutcome:
+    def _existing_fact_outcome(
+        session: Session, state: OrderIntentState, fact: ExecutionFact
+    ) -> CommandOutcome:
+        claim = session.get(ShadowDispatchClaim, fact.shadow_dispatch_claim_id)
+        run = session.get(ExecutionReconciliationRun, fact.reconciliation_run_id)
+        authority_mode = "LEGACY_UNBOUND"
+        if claim is not None and run is not None:
+            authority_mode = (
+                "ORIGINAL_LEASE"
+                if run.lease_id == claim.lease_id and run.fencing_token == claim.fencing_token
+                else "SUCCESSOR_LEASE"
+            )
         EXECUTION_FACT_BINDINGS.labels(
             fact.fact_kind or "LEGACY",
             fact.reconciliation_source_type or "UNBOUND",
             "ALREADY_RECORDED",
         ).inc()
+        EXECUTION_FACT_AUTHORITY_MODES.labels(authority_mode, "ALREADY_RECORDED").inc()
         EXECUTION_FACT_RESULTS.labels(fact.target_status, "ALREADY_RECORDED").inc()
         return CommandOutcome(
             status=CommandStatus.COMPLETED,
@@ -2190,6 +2211,7 @@ class ExecutionReconciliationService:
                 "execution_fact_id": str(fact.execution_fact_id),
                 "order_intent_id": str(fact.order_intent_id),
                 "intent_status": state.status,
+                "authority_mode": authority_mode,
                 "already_recorded": True,
                 "dispatch_eligible": False,
             },

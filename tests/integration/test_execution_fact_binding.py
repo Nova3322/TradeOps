@@ -200,6 +200,7 @@ def test_exact_claim_run_input_binding_is_persisted_and_replayable_after_restart
     restarted_service_result = execute_bound_fact(database, order_intent_id, request)
 
     assert first.status is CommandStatus.COMPLETED
+    assert first.data["authority_mode"] == "ORIGINAL_LEASE"
     assert restarted_service_result.status is CommandStatus.COMPLETED
     assert restarted_service_result.data["already_recorded"] is True
     with database.session_factory.begin() as session:

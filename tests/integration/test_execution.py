@@ -578,6 +578,10 @@ def prepare_active_fact_run(
     base_time = now or datetime.now(UTC)
     claim, scope = ensure_shadow_claim(database, order_intent_id, now=base_time)
     with database.session_factory.begin() as session:
+        sender_state = session.get(ExecutionSenderScopeState, claim.scope_id)
+        assert sender_state is not None
+        assert sender_state.status == "LEASED"
+        assert sender_state.active_lease_id is not None
         latest = session.execute(
             select(ExecutionReconciliationRun)
             .where(ExecutionReconciliationRun.scope_id == claim.scope_id)
@@ -598,8 +602,8 @@ def prepare_active_fact_run(
         start_envelope(
             run_id,
             scope,
-            claim.lease_id,
-            claim.fencing_token,
+            sender_state.active_lease_id,
+            sender_state.current_fencing_token,
             now=run_at,
             trigger_type=ReconciliationTriggerType.PRIVATE_STREAM_RECONNECT,
             supersedes_run_id=latest.run_id,

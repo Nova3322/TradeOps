@@ -91,6 +91,7 @@ docs/
     ├── WP-0008-耐久SenderFencing与ShadowClaim.md
     ├── WP-0009-耐久ReconciliationRun与最新成功门.md
     ├── WP-0010-对账绑定执行事实入口.md
+    ├── WP-0011-继任Lease对账接管.md
     └── evidence/
         ├── WP-0001-validation-20260718.md
         ├── WP-0002-validation-20260718.md
@@ -101,7 +102,8 @@ docs/
         ├── WP-0007-validation-20260718.md
         ├── WP-0008-validation-20260718.md
         ├── WP-0009-validation-20260718.md
-        └── WP-0010-validation-20260718.md
+        ├── WP-0010-validation-20260718.md
+        └── WP-0011-validation-20260718.md
 ```
 
 ### 专项索引
@@ -141,6 +143,7 @@ docs/
 | 实现 | [WP-0008：耐久 Sender Fencing 与 Shadow Claim](08-implementation/WP-0008-耐久SenderFencing与ShadowClaim.md) | exact-scope sender authority、单调 fencing token、短租约与不可发送 claim |
 | 实现 | [WP-0009：耐久 ReconciliationRun 与最新成功门](08-implementation/WP-0009-耐久ReconciliationRun与最新成功门.md) | 七源输入水位、不可变差异/关闭证据、不可逆终态与 latest-success claim gate |
 | 实现 | [WP-0010：对账绑定执行事实入口](08-implementation/WP-0010-对账绑定执行事实入口.md) | claim/run/input 绑定、事实来源矩阵、旧 v1 封锁与现有状态机防绕过 |
+| 实现 | [WP-0011：继任 Lease 对账接管](08-implementation/WP-0011-继任Lease对账接管.md) | 更高 token 的 current successor 经连续 lineage 收敛旧 claim，保持发送权关闭 |
 
 ## 完整交付与能力激活
 
