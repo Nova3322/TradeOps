@@ -134,3 +134,15 @@ RECONCILIATION_FINDINGS = Counter(
     "Immutable reconciliation finding events by severity and lifecycle fact.",
     labelnames=("severity", "disposition"),
 )
+
+VENUE_FACT_NORMALIZATIONS = Counter(
+    "trading_venue_fact_normalizations_total",
+    "Canonical private-venue facts normalized by bounded type and result.",
+    labelnames=("fact_type", "result"),
+)
+
+VENUE_FACT_INPUT_LINKS = Counter(
+    "trading_venue_fact_input_links_total",
+    "Immutable reconciliation-input memberships by source and result.",
+    labelnames=("source_type", "result"),
+)

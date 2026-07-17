@@ -15,6 +15,7 @@ from trading_control_plane import (  # noqa: F401
     risk_models,
     sender_fencing_models,
     trading_authorization_models,
+    venue_fact_models,
 )
 from trading_control_plane.config import get_settings
 from trading_control_plane.database import Base

@@ -39,6 +39,7 @@ from trading_control_plane.sender_fencing import (
     sender_scope_id,
 )
 from trading_control_plane.sender_fencing_models import ExecutionSenderLease, ExecutionSenderScope
+from trading_control_plane.venue_fact_models import VenueFactInputLink
 
 RECONCILIATION_SERVICE_PRINCIPAL = "execution-reconciliation-service"
 
@@ -507,7 +508,7 @@ class ExecutionReconciliationService:
             )
         inputs = self._inputs(session, run.run_id)
         if request.target_phase is ReconciliationPhase.COMPARING:
-            self._require_complete_manifest(run, inputs)
+            self._require_complete_manifest(session, run, inputs)
         now = self._now(session)
         if now >= run.deadline_at:
             raise CommandRejected("RECONCILIATION_DEADLINE_EXPIRED", "expired run cannot advance")
@@ -710,7 +711,7 @@ class ExecutionReconciliationService:
                 raise CommandRejected(
                     "RECONCILIATION_PHASE_INVALID", "success requires completed comparison"
                 )
-            self._require_complete_manifest(run, inputs)
+            self._require_complete_manifest(session, run, inputs)
             if state.unresolved_blocking_count != 0:
                 raise CommandRejected(
                     "RECONCILIATION_BLOCKING_FINDINGS_OPEN",
@@ -833,6 +834,7 @@ class ExecutionReconciliationService:
 
     @staticmethod
     def _require_complete_manifest(
+        session: Session,
         run: ExecutionReconciliationRun,
         inputs: list[ExecutionReconciliationInput],
     ) -> None:
@@ -845,6 +847,27 @@ class ExecutionReconciliationService:
             raise CommandRejected(
                 "RECONCILIATION_INPUTS_INCOMPLETE",
                 "every frozen source requires one complete watermark snapshot",
+            )
+        normalized_sources = {
+            ReconciliationSourceType.VENUE_ORDERS.value,
+            ReconciliationSourceType.VENUE_FILLS.value,
+        }
+        linked_counts: dict[str, int] = {
+            source_type: count
+            for source_type, count in session.execute(
+                select(VenueFactInputLink.source_type, func.count())
+                .where(VenueFactInputLink.run_id == run.run_id)
+                .group_by(VenueFactInputLink.source_type)
+            ).tuples()
+        }
+        if any(
+            item.source_type in normalized_sources
+            and linked_counts.get(item.source_type, 0) != item.item_count
+            for item in inputs
+        ):
+            raise CommandRejected(
+                "RECONCILIATION_NORMALIZED_FACT_COUNT_MISMATCH",
+                "venue order and fill inputs require exact immutable fact membership",
             )
 
     @staticmethod

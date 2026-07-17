@@ -99,6 +99,7 @@ def input_envelope(
     status: ReconciliationCollectionStatus = ReconciliationCollectionStatus.COMPLETE,
     observed_from: datetime | None = None,
     observed_through: datetime | None = None,
+    item_count: int = 0,
 ) -> CommandEnvelope:
     input_id = uuid4()
     request = RecordReconciliationInputRequest(
@@ -111,7 +112,7 @@ def input_envelope(
         observed_from=observed_from or now - timedelta(minutes=5),
         observed_through=observed_through or now,
         observed_at=now,
-        item_count=0,
+        item_count=item_count,
         payload_ref=f"test-only:payload:{input_id}",
         payload_hash=hash_json({"source": source_type.value, "items": []}),
         evidence_ref=f"test-only:evidence:{input_id}",
