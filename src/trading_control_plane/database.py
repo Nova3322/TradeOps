@@ -3,6 +3,8 @@ from __future__ import annotations
 from sqlalchemy import Engine, create_engine, text
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 
+REQUIRED_SCHEMA_REVISION = "20260718_0002"
+
 
 class Base(DeclarativeBase):
     pass
@@ -38,8 +40,13 @@ class Database:
                         """
                     )
                 ).scalar_one()
+                revision = connection.execute(
+                    text("SELECT version_num FROM alembic_version")
+                ).scalar_one_or_none()
             if count != 3:
                 return False, "CONTROL_GATES_MISSING"
+            if revision != REQUIRED_SCHEMA_REVISION:
+                return False, "SCHEMA_REVISION_MISMATCH"
             return True, None
         except Exception:
             return False, "DATABASE_UNAVAILABLE"

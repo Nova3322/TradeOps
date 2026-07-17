@@ -55,8 +55,8 @@
 
 ## 当前工程节点
 
-当前已进入工程实现，首包是 [WP-0001：耐久控制面基础](docs/08-implementation/WP-0001-耐久控制面基础.md)：统一命令信封、PostgreSQL command receipt、不可变审计、transactional outbox、consumer inbox、健康检查和能力门种子。技术选择见 [ADR-0001](docs/08-implementation/ADR-0001-生产技术栈与首包边界.md)，验证结果见 [WP-0001 验证证据](docs/08-implementation/evidence/WP-0001-validation-20260718.md)。
+当前已进入工程实现。首包 [WP-0001：耐久控制面基础](docs/08-implementation/WP-0001-耐久控制面基础.md) 建立统一命令信封、PostgreSQL command receipt、不可变审计、transactional outbox、consumer inbox、健康检查和能力门种子；第二包 [WP-0002：服务端授权判定核心](docs/08-implementation/WP-0002-服务端授权判定核心.md) 建立当前身份/角色/作用域、显式拒绝、禁止自审和一次性动作级 Passkey/WebAuthn 判定。技术选择见 [ADR-0001](docs/08-implementation/ADR-0001-生产技术栈与首包边界.md)，逐包验证证据位于 [docs/08-implementation/evidence](docs/08-implementation/evidence/)。
 
-首包不包含 Proposal、Approval、Risk、OMS、Freqtrade、VenueAdapter、Vault/CTO、Telegram 或 Web 页面，也没有订单、签名、资金划转和能力启用接口。`LIVE_ORDER_SEND`、`CAPITAL_TRANSFER`、`AUTO_ADD` 均由迁移建立为 `DISABLED`；工程完成不等于获得实盘授权。
+当前两包仍不包含 Proposal、ReviewerVote、ApprovalDecision、TradingAuthorization、Risk、OMS、Freqtrade、VenueAdapter、Vault/CTO、Telegram 或 Web 页面，也没有订单、签名、资金划转和能力启用接口。`LIVE_ORDER_SEND`、`CAPITAL_TRANSFER`、`AUTO_ADD` 均由迁移建立为 `DISABLED`；工程完成不等于获得实盘授权。
 
 `OPEN` 只表示缺少真实外部事实；`RESEARCH_REQUIRED` 表示必须靠研究或执行证据冻结。两者都不能签发现实交易权限，也不用于删减完整工程目标。

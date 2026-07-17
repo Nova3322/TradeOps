@@ -5,7 +5,7 @@ from logging.config import fileConfig
 from alembic import context
 from sqlalchemy import engine_from_config, pool
 
-from trading_control_plane import models  # noqa: F401
+from trading_control_plane import iam_models, models  # noqa: F401
 from trading_control_plane.config import get_settings
 from trading_control_plane.database import Base
 
