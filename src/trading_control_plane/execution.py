@@ -1,0 +1,1886 @@
+from __future__ import annotations
+
+from collections import defaultdict
+from collections.abc import Callable
+from datetime import UTC, datetime
+from decimal import ROUND_DOWN, Decimal
+from enum import StrEnum
+from typing import Any, Self
+from uuid import UUID, uuid4
+
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
+from sqlalchemy import select, text
+from sqlalchemy.orm import Session
+
+from trading_control_plane.authorization import SystemRiskState
+from trading_control_plane.commands import (
+    CommandChannel,
+    CommandEnvelope,
+    CommandOutcome,
+    CommandRejected,
+    CommandStatus,
+    DomainEvent,
+    hash_json,
+)
+from trading_control_plane.execution_models import (
+    ORDER_INTENT_STATUSES,
+    ExecutionFact,
+    ExecutionRiskDecision,
+    OrderIntent,
+    OrderIntentState,
+    RiskExposureState,
+    RiskLedgerEntry,
+    RiskReservation,
+)
+from trading_control_plane.metrics import (
+    EXECUTION_FACT_RESULTS,
+    EXECUTION_RISK_DECISIONS,
+    RISK_RESERVATION_TRANSITIONS,
+)
+from trading_control_plane.proposal_models import FrozenProposalVersion, SystemRiskStateRecord
+from trading_control_plane.risk import (
+    RiskDecisionResult,
+    RiskEvaluationInput,
+    RiskEvaluationResult,
+    RiskEvaluator,
+    RiskPolicyParameters,
+    RiskPrecheckRequest,
+    ScopeType,
+)
+from trading_control_plane.risk_models import RiskPolicyRecord
+from trading_control_plane.trading_authorization import FrozenAuthorizationBinding
+from trading_control_plane.trading_authorization_models import (
+    AddAuthorizationPackage,
+    AddAuthorizationPackageState,
+    AddUnit,
+    AddUnitState,
+    Campaign,
+    CampaignState,
+    InitialAuthorizationState,
+    InitialOrderAuthorization,
+    TradingAuthorization,
+)
+
+ZERO = Decimal("0")
+QUANTUM = Decimal("0.000000000000000001")
+EXECUTION_INTENT_SERVICE_PRINCIPAL = "oms-risk-reservation-service"
+EXECUTION_RECONCILIATION_SERVICE_PRINCIPAL = "execution-reconciliation-service"
+ZERO_TERMINAL_STATUSES = frozenset({"CANCELLED_ZERO_FILL", "REJECTED_ZERO_FILL"})
+POSITIVE_TERMINAL_STATUSES = frozenset(
+    {
+        "FILLED",
+        "CANCELLED_PARTIAL",
+        "POSITION_RECONCILED",
+        "PROTECTION_CONFIRMED",
+        "COMPLETED",
+    }
+)
+BLOCKING_INITIAL_STATUSES = frozenset(
+    {
+        "INTENT_CREATED",
+        "DISPATCHING",
+        "VENUE_ACKNOWLEDGED",
+        "PARTIALLY_FILLED",
+        "FILLED",
+        "CANCEL_PENDING",
+        "CANCELLED_PARTIAL",
+        "RESULT_UNKNOWN",
+        "POSITION_RECONCILED",
+        "PROTECTION_CONFIRMED",
+        "COMPLETED",
+        "FAILED_SAFE",
+    }
+)
+
+
+class IntentKind(StrEnum):
+    INITIAL = "INITIAL"
+    ADD = "ADD"
+
+
+class AddEligibilitySnapshot(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    frozen_return_pct: Decimal
+    trend_valid: bool
+    protection_valid: bool
+    authorization_valid: bool
+    current_effective_leverage: Decimal = Field(ge=0)
+    target_effective_leverage: Decimal = Field(gt=0)
+    current_position_equity: Decimal = Field(gt=0)
+    position_snapshot_ref: str = Field(min_length=1, max_length=255)
+    position_snapshot_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    protection_snapshot_ref: str = Field(min_length=1, max_length=255)
+    protection_snapshot_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
+class CreateExecutionIntentRequest(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    intent_kind: IntentKind
+    candidate_ref: str = Field(min_length=1, max_length=255)
+    initial_authorization_id: UUID | None = None
+    add_package_id: UUID | None = None
+    add_unit_id: UUID | None = None
+    current_position_quantity: Decimal = Field(ge=0)
+    target_position_quantity: Decimal = Field(gt=0)
+    order_type: str = Field(min_length=1, max_length=40)
+    time_in_force: str = Field(min_length=1, max_length=40)
+    risk_currency: str = Field(min_length=1, max_length=80)
+    valuation_price_source_ref: str = Field(min_length=1, max_length=255)
+    risk_request: RiskPrecheckRequest
+    add_eligibility: AddEligibilitySnapshot | None = None
+
+    @model_validator(mode="after")
+    def authorization_kind_matches(self) -> Self:
+        if self.intent_kind is IntentKind.INITIAL:
+            if (
+                self.initial_authorization_id is None
+                or self.add_package_id is not None
+                or self.add_unit_id is not None
+                or self.add_eligibility is not None
+            ):
+                raise ValueError("INITIAL requires only initial_authorization_id")
+        elif (
+            self.initial_authorization_id is not None
+            or self.add_package_id is None
+            or self.add_unit_id is None
+            or self.add_eligibility is None
+        ):
+            raise ValueError("ADD requires package, unit, and eligibility evidence")
+        if (
+            self.target_position_quantity - self.current_position_quantity
+            != self.risk_request.requested.requested_quantity
+        ):
+            raise ValueError("target delta must equal the exact risk-request quantity")
+        return self
+
+
+class RecordExecutionFactRequest(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    fact_sequence: int = Field(ge=1)
+    target_status: str = Field(min_length=3, max_length=32)
+    venue: str = Field(min_length=1, max_length=80)
+    execution_domain: str = Field(min_length=1, max_length=120)
+    account_id: str = Field(min_length=1, max_length=160)
+    external_fact_id: str = Field(min_length=1, max_length=255)
+    cumulative_filled_quantity: Decimal = Field(ge=0)
+    known_remaining_quantity: Decimal = Field(ge=0)
+    zero_fill_confirmed: bool
+    venue_order_terminal: bool
+    position_reconciled: bool
+    protection_confirmed: bool
+    reconciliation_run_ref: str | None = Field(default=None, max_length=255)
+    source_ref: str = Field(min_length=1, max_length=255)
+    source_version: str = Field(min_length=1, max_length=120)
+    payload: dict[str, Any]
+    payload_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    evidence_ref: str = Field(min_length=1, max_length=255)
+    evidence_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    event_time: datetime
+    received_at: datetime
+
+    @model_validator(mode="after")
+    def evidence_is_self_consistent(self) -> Self:
+        if self.event_time.tzinfo is None or self.received_at.tzinfo is None:
+            raise ValueError("execution fact timestamps must be timezone-aware")
+        if self.event_time > self.received_at:
+            raise ValueError("execution fact event_time cannot follow received_at")
+        if hash_json(self.payload) != self.payload_hash:
+            raise ValueError("execution fact payload hash mismatch")
+        material = self.model_dump(mode="json", exclude={"evidence_hash"})
+        if hash_json(material) != self.evidence_hash:
+            raise ValueError("execution fact evidence hash mismatch")
+        return self
+
+
+class ExecutionIntentService:
+    command_type = "execution.intent.create.v1"
+
+    def __init__(
+        self,
+        evaluator: RiskEvaluator | None = None,
+        clock: Callable[[], datetime] | None = None,
+    ) -> None:
+        self._evaluator = evaluator or RiskEvaluator()
+        self._clock = clock or (lambda: datetime.now(UTC))
+
+    def create(self, session: Session, envelope: CommandEnvelope) -> CommandOutcome:
+        self._require_internal(envelope)
+        if envelope.object_id is None:  # pragma: no cover - validated above
+            raise RuntimeError("missing campaign id")
+        try:
+            campaign_id = UUID(envelope.object_id)
+            request = CreateExecutionIntentRequest.model_validate(envelope.payload)
+        except (ValueError, ValidationError) as exc:
+            raise CommandRejected("EXECUTION_INPUT_INVALID", "execution input is invalid") from exc
+
+        campaign = session.execute(
+            select(Campaign).where(Campaign.campaign_id == campaign_id).with_for_update()
+        ).scalar_one_or_none()
+        if campaign is None:
+            raise CommandRejected("CAMPAIGN_NOT_FOUND", "campaign is unavailable")
+        if envelope.scope.get("organization_id") != campaign.organization_id:
+            raise CommandRejected("SCOPE_MISMATCH", "organization scope changed")
+
+        authorization = session.execute(
+            select(TradingAuthorization)
+            .where(TradingAuthorization.authorization_id == campaign.authorization_id)
+            .with_for_update()
+        ).scalar_one()
+        proposal = session.execute(
+            select(FrozenProposalVersion).where(
+                FrozenProposalVersion.proposal_version_id == campaign.proposal_version_id
+            )
+        ).scalar_one()
+        campaign_state = session.execute(
+            select(CampaignState).where(CampaignState.campaign_id == campaign_id).with_for_update()
+        ).scalar_one()
+        system_state_record = session.execute(
+            select(SystemRiskStateRecord)
+            .where(SystemRiskStateRecord.organization_id == campaign.organization_id)
+            .with_for_update()
+        ).scalar_one_or_none()
+        system_state = (
+            SystemRiskState(system_state_record.status)
+            if system_state_record is not None
+            else SystemRiskState.UNKNOWN
+        )
+        now = self._clock()
+        binding = self._validate_root_integrity(authorization, campaign, proposal, request, now)
+        authorization_rows = self._lock_and_validate_authorization_kind(
+            session,
+            request,
+            campaign,
+            campaign_state,
+            authorization,
+            system_state,
+            now,
+        )
+        self._lock_competing_scopes(session, request, campaign, proposal, binding)
+
+        candidate_hash = hash_json(request.model_dump(mode="json"))
+        existing = session.execute(
+            select(OrderIntent).where(
+                OrderIntent.campaign_id == campaign_id,
+                OrderIntent.candidate_ref == request.candidate_ref,
+            )
+        ).scalar_one_or_none()
+        if existing is not None:
+            if existing.candidate_hash != candidate_hash:
+                raise CommandRejected(
+                    "CANDIDATE_BINDING_MISMATCH",
+                    "candidate reference already belongs to different semantics",
+                )
+            return self._existing_outcome(session, existing)
+
+        policy_record, policy = self._load_policy(
+            session, campaign.organization_id, request.risk_request.policy_version
+        )
+        self._validate_risk_bindings(
+            request,
+            authorization,
+            campaign,
+            proposal,
+            binding,
+            system_state,
+            authorization_rows,
+        )
+        self._validate_durable_exposure(session, request, campaign)
+
+        evaluation_input = RiskEvaluationInput(
+            request=request.risk_request,
+            risk_policy_id=policy_record.risk_policy_id,
+            policy=policy,
+            policy_valid_from=policy_record.valid_from,
+            policy_valid_until=policy_record.valid_until,
+            system_risk_state=system_state,
+            decision_time=now,
+        )
+        evaluation = self._evaluator.evaluate(evaluation_input)
+        if request.intent_kind is IntentKind.ADD and system_state is not SystemRiskState.NORMAL:
+            return self._record_denial(
+                session,
+                request,
+                campaign,
+                authorization,
+                policy_record,
+                evaluation_input,
+                evaluation,
+                now,
+                "ADD_REQUIRES_NORMAL_SYSTEM_STATE",
+            )
+        if evaluation.result is not RiskDecisionResult.ALLOW:
+            return self._record_denial(
+                session,
+                request,
+                campaign,
+                authorization,
+                policy_record,
+                evaluation_input,
+                evaluation,
+                now,
+                evaluation.primary_reason_code,
+            )
+
+        funding_after = (
+            request.risk_request.capital.funding_used
+            + request.risk_request.capital.funding_reserved
+            + request.risk_request.requested.requested_funding
+        )
+        if funding_after > authorization.funding_envelope_0:
+            return self._record_denial(
+                session,
+                request,
+                campaign,
+                authorization,
+                policy_record,
+                evaluation_input,
+                evaluation,
+                now,
+                "FROZEN_FUNDING_ENVELOPE_EXCEEDED",
+            )
+
+        reserved_heat = request.risk_request.requested.incremental_worst_case_loss
+        if (
+            request.risk_request.current_trade_loss.total + reserved_heat
+            > authorization.authorized_loss_capacity
+        ):
+            return self._record_denial(
+                session,
+                request,
+                campaign,
+                authorization,
+                policy_record,
+                evaluation_input,
+                evaluation,
+                now,
+                "FROZEN_AUTHORIZATION_CAPACITY_EXCEEDED",
+            )
+
+        decision_id = uuid4()
+        order_intent_id = uuid4()
+        risk_reservation_id = uuid4()
+        valid_until = min(evaluation.valid_until, authorization.valid_until)
+        if valid_until <= now:
+            return self._record_denial(
+                session,
+                request,
+                campaign,
+                authorization,
+                policy_record,
+                evaluation_input,
+                evaluation,
+                now,
+                "EXECUTION_VALIDITY_EXPIRED",
+            )
+        input_snapshot = self._input_snapshot(
+            envelope,
+            request,
+            evaluation_input,
+            authorization,
+            authorization_rows,
+        )
+        decision_payload = evaluation.model_dump(mode="json")
+        decision_payload["approved_reserved_heat"] = str(reserved_heat)
+        decision_payload["execution_eligible"] = False
+        decision_payload["reservation_created"] = True
+        decision_payload["order_intent_created"] = True
+        initial_id, add_package_id, add_unit_id = self._authorization_ids(request)
+        session.add(
+            ExecutionRiskDecision(
+                execution_risk_decision_id=decision_id,
+                decision_stage="ORDER_PRECHECK",
+                intent_kind=request.intent_kind.value,
+                organization_id=campaign.organization_id,
+                authorization_id=authorization.authorization_id,
+                campaign_id=campaign.campaign_id,
+                initial_authorization_id=initial_id,
+                add_package_id=add_package_id,
+                add_unit_id=add_unit_id,
+                risk_policy_id=policy_record.risk_policy_id,
+                risk_policy_version=policy_record.policy_version,
+                system_risk_state=system_state.value,
+                result="ALLOW",
+                primary_reason_code="ORDER_PRECHECK_PASSED",
+                requested_quantity=evaluation.requested_quantity,
+                max_safe_quantity=evaluation.requested_quantity,
+                final_quantity=evaluation.requested_quantity,
+                approved_reserved_heat=reserved_heat,
+                approved_funding=request.risk_request.requested.requested_funding,
+                approved_margin=request.risk_request.requested.requested_margin,
+                current_portfolio_mtm_equity=evaluation.current_portfolio_mtm_equity,
+                current_unrealized_pnl=evaluation.current_unrealized_pnl,
+                input_snapshot=input_snapshot,
+                input_hash=hash_json(input_snapshot),
+                decision=decision_payload,
+                decision_hash=hash_json(decision_payload),
+                execution_eligible=False,
+                reservation_created=True,
+                order_intent_created=True,
+                decided_at=now,
+                valid_until=valid_until,
+            )
+        )
+        session.flush()
+
+        price_reference, price_lower, price_upper = self._price_contract(
+            request, authorization_rows
+        )
+        intent_snapshot = {
+            "request": request.model_dump(mode="json"),
+            "decision_id": str(decision_id),
+            "reservation_id": str(risk_reservation_id),
+            "execution_mode": "SHADOW",
+            "dispatch_eligible": False,
+        }
+        intent = OrderIntent(
+            order_intent_id=order_intent_id,
+            execution_risk_decision_id=decision_id,
+            proposal_id=campaign.proposal_id,
+            proposal_version_id=campaign.proposal_version_id,
+            authorization_id=authorization.authorization_id,
+            campaign_id=campaign.campaign_id,
+            initial_authorization_id=initial_id,
+            add_package_id=add_package_id,
+            add_unit_id=add_unit_id,
+            intent_kind=request.intent_kind.value,
+            candidate_ref=request.candidate_ref,
+            candidate_hash=candidate_hash,
+            strategy_owner=campaign.strategy_id,
+            venue=campaign.venue,
+            execution_domain=campaign.execution_domain,
+            account_id=campaign.account_id,
+            worker_id=binding.worker_id,
+            instrument_id=campaign.instrument_id,
+            side="BUY" if campaign.direction == "LONG" else "SELL",
+            position_side=campaign.direction,
+            reduce_only=False,
+            current_position_quantity=request.current_position_quantity,
+            target_position_quantity=request.target_position_quantity,
+            expected_quantity=evaluation.requested_quantity,
+            max_quantity=(
+                authorization_rows["initial"].max_quantity
+                if request.intent_kind is IntentKind.INITIAL
+                else evaluation.requested_quantity
+            ),
+            quantity_source=(
+                "INITIAL_RISK_APPROVED"
+                if request.intent_kind is IntentKind.INITIAL
+                else "TARGET_LEVERAGE_DELTA"
+            ),
+            order_type=request.order_type,
+            time_in_force=request.time_in_force,
+            trigger_price=proposal.trigger_price,
+            limit_price=proposal.limit_price,
+            price_reference=price_reference,
+            price_lower_bound=price_lower,
+            price_upper_bound=price_upper,
+            max_slippage_bps=proposal.max_slippage_bps,
+            risk_currency=request.risk_currency,
+            margin_mode=binding.margin_mode,
+            collateral_scope=binding.collateral_scope,
+            collateral_pool_id=binding.collateral_pool_id,
+            capability_certificate_ref=authorization.capability_certificate_ref,
+            execution_mode="SHADOW",
+            dispatch_eligible=False,
+            intent_snapshot=intent_snapshot,
+            intent_snapshot_hash=hash_json(intent_snapshot),
+            valid_from=now,
+            valid_until=valid_until,
+            created_at=now,
+        )
+        session.add(intent)
+        session.flush()
+
+        scope_allocations = [
+            {
+                "scope_type": scope.scope_type.value,
+                "scope_id": scope.scope_id,
+                "planned_loss": str(scope.requested_incremental_planned_loss),
+                "stress_loss": str(scope.requested_incremental_stress_loss),
+            }
+            for scope in sorted(
+                request.risk_request.scope_risks,
+                key=lambda item: (item.scope_type.value, item.scope_id),
+            )
+        ]
+        funding = request.risk_request.requested.requested_funding
+        margin = request.risk_request.requested.requested_margin
+        reservation = RiskReservation(
+            risk_reservation_id=risk_reservation_id,
+            execution_risk_decision_id=decision_id,
+            order_intent_id=order_intent_id,
+            organization_id=campaign.organization_id,
+            authorization_id=authorization.authorization_id,
+            campaign_id=campaign.campaign_id,
+            initial_authorization_id=initial_id,
+            add_package_id=add_package_id,
+            add_unit_id=add_unit_id,
+            intent_kind=request.intent_kind.value,
+            account_id=campaign.account_id,
+            instrument_id=campaign.instrument_id,
+            collateral_pool_id=binding.collateral_pool_id,
+            risk_currency=request.risk_currency,
+            valuation_price=request.risk_request.market.executable_price,
+            valuation_price_source_ref=request.valuation_price_source_ref,
+            reserved_quantity=evaluation.requested_quantity,
+            reserved_heat=reserved_heat,
+            funding_reserved=funding,
+            margin_reserved=margin,
+            scope_allocations=scope_allocations,
+            valid_until=valid_until,
+            created_at=now,
+        )
+        session.add(reservation)
+        session.flush()
+
+        reserve_evidence_ref = f"execution-risk-decision:{decision_id}"
+        reserve_evidence_hash = hash_json(decision_payload)
+        session.add(
+            RiskLedgerEntry(
+                risk_ledger_entry_id=uuid4(),
+                risk_reservation_id=risk_reservation_id,
+                order_intent_id=order_intent_id,
+                execution_fact_id=None,
+                entry_sequence=1,
+                entry_type="RESERVE",
+                from_bucket="AUTHORIZED",
+                to_bucket="RESERVED",
+                quantity=evaluation.requested_quantity,
+                heat=reserved_heat,
+                funding=funding,
+                margin=margin,
+                evidence_ref=reserve_evidence_ref,
+                evidence_hash=reserve_evidence_hash,
+                occurred_at=now,
+            )
+        )
+        session.flush()
+        session.add_all(
+            (
+                OrderIntentState(
+                    order_intent_id=order_intent_id,
+                    status="INTENT_CREATED",
+                    version=1,
+                    intent_quantity=evaluation.requested_quantity,
+                    cumulative_filled_quantity=ZERO,
+                    known_remaining_quantity=evaluation.requested_quantity,
+                    zero_fill_confirmed=False,
+                    venue_order_terminal=False,
+                    position_reconciled=False,
+                    protection_confirmed=False,
+                    last_fact_sequence=0,
+                    last_fact_hash=None,
+                    reason_code="ATOMIC_RISK_RESERVATION_CREATED",
+                    updated_at=now,
+                ),
+                RiskExposureState(
+                    risk_reservation_id=risk_reservation_id,
+                    status="RESERVED",
+                    version=1,
+                    ledger_sequence=1,
+                    total_quantity=evaluation.requested_quantity,
+                    reserved_quantity=evaluation.requested_quantity,
+                    open_quantity=ZERO,
+                    unknown_quantity=ZERO,
+                    released_quantity=ZERO,
+                    total_heat=reserved_heat,
+                    reserved_heat=reserved_heat,
+                    open_heat=ZERO,
+                    unknown_heat=ZERO,
+                    released_heat=ZERO,
+                    total_funding=funding,
+                    funding_reserved=funding,
+                    funding_used=ZERO,
+                    funding_unknown=ZERO,
+                    funding_released=ZERO,
+                    total_margin=margin,
+                    margin_reserved=margin,
+                    margin_used=ZERO,
+                    margin_unknown=ZERO,
+                    margin_released=ZERO,
+                    last_evidence_ref=reserve_evidence_ref,
+                    last_evidence_hash=reserve_evidence_hash,
+                    reason_code="ATOMIC_RISK_RESERVATION_CREATED",
+                    updated_at=now,
+                ),
+            )
+        )
+        if request.intent_kind is IntentKind.ADD:
+            add_state = authorization_rows["add_unit_state"]
+            add_state.status = "CLAIMED"
+            add_state.version += 1
+            add_state.reason_code = "ORDER_INTENT_RISK_RESERVED"
+            add_state.updated_at = now
+        session.flush()
+        EXECUTION_RISK_DECISIONS.labels(
+            request.intent_kind.value, "ALLOW", "ORDER_PRECHECK_PASSED"
+        ).inc()
+        RISK_RESERVATION_TRANSITIONS.labels("AUTHORIZED_TO_RESERVED").inc()
+        return CommandOutcome(
+            status=CommandStatus.COMPLETED,
+            object_type="OrderIntent",
+            object_id=str(order_intent_id),
+            object_version=1,
+            data={
+                "execution_risk_decision_id": str(decision_id),
+                "order_intent_id": str(order_intent_id),
+                "risk_reservation_id": str(risk_reservation_id),
+                "intent_status": "INTENT_CREATED",
+                "risk_exposure_status": "RESERVED",
+                "execution_mode": "SHADOW",
+                "dispatch_eligible": False,
+                "reservation_created": True,
+            },
+            events=(
+                DomainEvent(
+                    event_type="ShadowOrderIntentRiskReserved",
+                    aggregate_type="OrderIntent",
+                    aggregate_id=str(order_intent_id),
+                    payload={
+                        "campaign_id": str(campaign_id),
+                        "intent_kind": request.intent_kind.value,
+                        "execution_risk_decision_id": str(decision_id),
+                        "risk_reservation_id": str(risk_reservation_id),
+                        "dispatch_eligible": False,
+                    },
+                ),
+            ),
+        )
+
+    @staticmethod
+    def _require_internal(envelope: CommandEnvelope) -> None:
+        if envelope.command_type != ExecutionIntentService.command_type:
+            raise CommandRejected("COMMAND_TYPE_MISMATCH", "unexpected command type")
+        if (
+            envelope.channel is not CommandChannel.INTERNAL
+            or envelope.service_principal != EXECUTION_INTENT_SERVICE_PRINCIPAL
+        ):
+            raise CommandRejected(
+                "EXECUTION_SERVICE_REQUIRED",
+                "only the Trading OMS risk-reservation service may create intents",
+            )
+        if envelope.object_type != "Campaign" or envelope.object_id is None:
+            raise CommandRejected("OBJECT_BINDING_MISMATCH", "Campaign binding is required")
+
+    @staticmethod
+    def _authorization_ids(
+        request: CreateExecutionIntentRequest,
+    ) -> tuple[UUID | None, UUID | None, UUID | None]:
+        return (
+            request.initial_authorization_id,
+            request.add_package_id,
+            request.add_unit_id,
+        )
+
+    @staticmethod
+    def _validate_root_integrity(
+        authorization: TradingAuthorization,
+        campaign: Campaign,
+        proposal: FrozenProposalVersion,
+        request: CreateExecutionIntentRequest,
+        now: datetime,
+    ) -> FrozenAuthorizationBinding:
+        if (
+            authorization.authorization_mode != "SHADOW"
+            or authorization.execution_eligible
+            or hash_json(authorization.issuance_snapshot) != authorization.issuance_snapshot_hash
+        ):
+            raise CommandRejected(
+                "AUTHORIZATION_INTEGRITY_FAILED", "authorization root integrity failed"
+            )
+        if (
+            authorization.proposal_version_id != proposal.proposal_version_id
+            or authorization.authorization_id != campaign.authorization_id
+            or authorization.proposal_spec_hash != proposal.spec_hash
+            or authorization.risk_summary_hash != proposal.risk_summary_hash
+        ):
+            raise CommandRejected(
+                "AUTHORIZATION_BINDING_MISMATCH", "frozen authorization bindings changed"
+            )
+        if now >= authorization.valid_until or now >= proposal.valid_until:
+            raise CommandRejected("AUTHORIZATION_EXPIRED", "frozen authorization expired")
+        if request.order_type != proposal.order_type:
+            raise CommandRejected("ORDER_TYPE_CHANGED", "frozen order type changed")
+        try:
+            return FrozenAuthorizationBinding.model_validate(
+                authorization.issuance_snapshot.get("binding")
+            )
+        except ValidationError as exc:
+            raise CommandRejected(
+                "AUTHORIZATION_BINDING_INVALID", "authorization binding is incomplete"
+            ) from exc
+
+    @staticmethod
+    def _lock_and_validate_authorization_kind(
+        session: Session,
+        request: CreateExecutionIntentRequest,
+        campaign: Campaign,
+        campaign_state: CampaignState,
+        authorization: TradingAuthorization,
+        system_state: SystemRiskState,
+        now: datetime,
+    ) -> dict[str, Any]:
+        initial = session.execute(
+            select(InitialOrderAuthorization)
+            .where(InitialOrderAuthorization.campaign_id == campaign.campaign_id)
+            .with_for_update()
+        ).scalar_one()
+        initial_state = session.execute(
+            select(InitialAuthorizationState)
+            .where(
+                InitialAuthorizationState.initial_authorization_id
+                == initial.initial_authorization_id
+            )
+            .with_for_update()
+        ).scalar_one()
+        rows: dict[str, Any] = {
+            "initial": initial,
+            "initial_state": initial_state,
+        }
+        if request.intent_kind is IntentKind.INITIAL:
+            if request.initial_authorization_id != initial.initial_authorization_id:
+                raise CommandRejected(
+                    "INITIAL_AUTHORIZATION_MISMATCH", "initial authorization binding changed"
+                )
+            if initial_state.status != "ACTIVE" or campaign_state.status != "PENDING_ENTRY":
+                raise CommandRejected(
+                    "INITIAL_AUTHORIZATION_UNAVAILABLE", "initial authorization is unavailable"
+                )
+            if now < initial.valid_from or now >= initial.valid_until:
+                raise CommandRejected(
+                    "INITIAL_AUTHORIZATION_EXPIRED", "initial authorization expired"
+                )
+            if request.risk_request.requested.requested_quantity > initial.max_quantity:
+                raise CommandRejected(
+                    "INITIAL_QUANTITY_EXCEEDS_AUTHORIZATION",
+                    "initial quantity exceeds frozen authorization",
+                )
+            blocking = session.execute(
+                select(OrderIntentState.status)
+                .join(OrderIntent, OrderIntent.order_intent_id == OrderIntentState.order_intent_id)
+                .where(
+                    OrderIntent.initial_authorization_id == initial.initial_authorization_id,
+                    OrderIntentState.status.in_(BLOCKING_INITIAL_STATUSES),
+                )
+                .with_for_update()
+            ).first()
+            if blocking is not None:
+                raise CommandRejected(
+                    "INITIAL_INTENT_ALREADY_ACTIVE",
+                    "an unresolved or positively filled initial intent already exists",
+                )
+            return rows
+
+        if not authorization.auto_add_enabled:
+            raise CommandRejected("AUTO_ADD_DISABLED", "auto-add was not frozen as enabled")
+        package = session.execute(
+            select(AddAuthorizationPackage)
+            .where(AddAuthorizationPackage.add_package_id == request.add_package_id)
+            .with_for_update()
+        ).scalar_one_or_none()
+        unit = session.execute(
+            select(AddUnit).where(AddUnit.add_unit_id == request.add_unit_id).with_for_update()
+        ).scalar_one_or_none()
+        if (
+            package is None
+            or unit is None
+            or package.authorization_id != authorization.authorization_id
+            or package.campaign_id != campaign.campaign_id
+            or unit.add_package_id != package.add_package_id
+        ):
+            raise CommandRejected("ADD_AUTHORIZATION_MISMATCH", "add authorization changed")
+        package_state = session.execute(
+            select(AddAuthorizationPackageState)
+            .where(AddAuthorizationPackageState.add_package_id == package.add_package_id)
+            .with_for_update()
+        ).scalar_one()
+        unit_states = tuple(
+            session.execute(
+                select(AddUnit, AddUnitState)
+                .join(AddUnitState, AddUnitState.add_unit_id == AddUnit.add_unit_id)
+                .where(AddUnit.add_package_id == package.add_package_id)
+                .order_by(AddUnit.ordinal)
+                .with_for_update()
+            ).all()
+        )
+        selected_state = next(state for candidate, state in unit_states if candidate == unit)
+        eligibility = request.add_eligibility
+        if eligibility is None:  # pragma: no cover - Pydantic enforces
+            raise RuntimeError("missing add eligibility")
+        if (
+            package_state.status != "ACTIVE"
+            or selected_state.status != "AVAILABLE"
+            or campaign_state.status != "OPEN"
+            or initial_state.status != "CONSUMED"
+            or system_state is not SystemRiskState.NORMAL
+        ):
+            raise CommandRejected("ADD_AUTHORIZATION_UNAVAILABLE", "add authorization unavailable")
+        if now < package.valid_from or now >= package.valid_until:
+            raise CommandRejected("ADD_AUTHORIZATION_EXPIRED", "add authorization expired")
+        if any(
+            state.status != "CONSUMED"
+            for candidate, state in unit_states
+            if candidate.ordinal < unit.ordinal
+        ):
+            raise CommandRejected("ADD_SEQUENCE_NOT_READY", "earlier AddUnit is not consumed")
+        if any(
+            state.status not in {"AVAILABLE", "INVALIDATED", "EXPIRED"}
+            for candidate, state in unit_states
+            if candidate.ordinal > unit.ordinal
+        ):
+            raise CommandRejected("LATER_ADD_UNIT_LOCKED", "later AddUnit state is inconsistent")
+        if eligibility.frozen_return_pct < Decimal(unit.unlock_milestone_pct):
+            raise CommandRejected("ADD_MILESTONE_NOT_MET", "frozen-return milestone is not met")
+        if not (
+            eligibility.trend_valid
+            and eligibility.protection_valid
+            and eligibility.authorization_valid
+        ):
+            raise CommandRejected("ADD_ELIGIBILITY_FAILED", "add hard gate failed")
+        if eligibility.current_effective_leverage >= package.target_leverage_min:
+            raise CommandRejected(
+                "ADD_LEVERAGE_NOT_BELOW_MINIMUM",
+                "effective leverage is not below the frozen minimum",
+            )
+        if not (
+            package.target_leverage_min
+            <= eligibility.target_effective_leverage
+            <= package.target_leverage_max
+        ):
+            raise CommandRejected("ADD_TARGET_LEVERAGE_INVALID", "target leverage changed")
+        rows.update(
+            {
+                "add_package": package,
+                "add_package_state": package_state,
+                "add_unit": unit,
+                "add_unit_state": selected_state,
+                "add_unit_states": unit_states,
+            }
+        )
+        return rows
+
+    @staticmethod
+    def _lock_competing_scopes(
+        session: Session,
+        request: CreateExecutionIntentRequest,
+        campaign: Campaign,
+        proposal: FrozenProposalVersion,
+        binding: FrozenAuthorizationBinding,
+    ) -> None:
+        expected = {
+            ScopeType.UNDERLYING: binding.underlying_id,
+            ScopeType.RISK_CLUSTER: binding.risk_cluster_id,
+            ScopeType.SECTOR: proposal.sector,
+            ScopeType.EXECUTION_DOMAIN: campaign.execution_domain,
+            ScopeType.VENUE: campaign.venue,
+            ScopeType.COLLATERAL_POOL: binding.collateral_pool_id,
+            ScopeType.PORTFOLIO: campaign.organization_id,
+        }
+        actual = {item.scope_type: item.scope_id for item in request.risk_request.scope_risks}
+        if actual != expected:
+            raise CommandRejected("RISK_SCOPE_BINDING_MISMATCH", "risk scopes changed")
+        keys = {f"risk-scope:{scope.value}:{scope_id}" for scope, scope_id in expected.items()}
+        keys.update(
+            {
+                f"campaign:{campaign.campaign_id}",
+                f"account:{campaign.venue}:{campaign.execution_domain}:{campaign.account_id}",
+                f"instrument:{campaign.venue}:{campaign.instrument_id}",
+                f"collateral:{binding.collateral_pool_id}",
+            }
+        )
+        for key in sorted(keys):
+            session.execute(
+                text("SELECT pg_advisory_xact_lock(hashtextextended(:lock_key, 0))"),
+                {"lock_key": key},
+            )
+
+    @staticmethod
+    def _load_policy(
+        session: Session, organization_id: str, policy_version: str
+    ) -> tuple[RiskPolicyRecord, RiskPolicyParameters]:
+        record = session.execute(
+            select(RiskPolicyRecord).where(
+                RiskPolicyRecord.organization_id == organization_id,
+                RiskPolicyRecord.policy_version == policy_version,
+            )
+        ).scalar_one_or_none()
+        if record is None:
+            raise CommandRejected("RISK_POLICY_UNAVAILABLE", "risk policy is unavailable")
+        if (
+            record.policy_mode != "SHADOW"
+            or hash_json(record.parameters) != record.policy_hash
+            or not record.evidence_refs
+        ):
+            raise CommandRejected("RISK_POLICY_INTEGRITY_FAILED", "risk policy integrity failed")
+        try:
+            return record, RiskPolicyParameters.model_validate(record.parameters)
+        except ValidationError as exc:
+            raise CommandRejected("RISK_POLICY_INVALID", "risk policy is invalid") from exc
+
+    @staticmethod
+    def _validate_risk_bindings(
+        request: CreateExecutionIntentRequest,
+        authorization: TradingAuthorization,
+        campaign: Campaign,
+        proposal: FrozenProposalVersion,
+        binding: FrozenAuthorizationBinding,
+        system_state: SystemRiskState,
+        rows: dict[str, Any],
+    ) -> None:
+        risk = request.risk_request
+        expected_binding = {
+            "strategy_id": campaign.strategy_id,
+            "strategy_version": campaign.strategy_version,
+            "strategy_parameter_version": binding.strategy_parameter_version,
+            "authorization_policy_version": authorization.authorization_policy_version,
+            "instrument_identity": campaign.instrument_id,
+            "venue": campaign.venue,
+            "execution_domain": campaign.execution_domain,
+            "account_id": campaign.account_id,
+            "account_abstraction": binding.account_abstraction,
+            "margin_mode": binding.margin_mode,
+            "collateral_scope": binding.collateral_scope,
+            "collateral_pool_id": binding.collateral_pool_id,
+            "adapter_version": binding.adapter_version,
+            "freqtrade_worker_version": binding.freqtrade_worker_version,
+            "account_capability_version": binding.account_capability_version,
+            "catalog_version": authorization.catalog_version,
+            "capability_certificate_ref": authorization.capability_certificate_ref,
+        }
+        if risk.binding.model_dump(mode="python") != expected_binding:
+            raise CommandRejected("CERTIFICATION_BINDING_MISMATCH", "certification binding changed")
+        if (
+            risk.organization_id != campaign.organization_id
+            or risk.proposal_ref != str(proposal.proposal_version_id)
+            or risk.candidate_version != proposal.version
+            or risk.policy_version != authorization.risk_policy_version
+            or risk.risk_tier.value != authorization.risk_tier
+            or risk.capital.total_capital_snapshot_0 != authorization.total_capital_snapshot_0
+            or risk.market.direction.value != campaign.direction
+            or risk.market.initial_invalidation_price != proposal.initial_invalidation_price
+            or risk.market.max_slippage_bps != proposal.max_slippage_bps
+            or request.order_type != proposal.order_type
+        ):
+            raise CommandRejected("FROZEN_RISK_BINDING_MISMATCH", "frozen risk input changed")
+        if request.intent_kind is IntentKind.INITIAL:
+            initial = rows["initial"]
+            if not (
+                initial.price_lower_bound
+                <= risk.market.executable_price
+                <= initial.price_upper_bound
+            ):
+                raise CommandRejected(
+                    "INITIAL_PRICE_OUTSIDE_AUTHORIZATION",
+                    "execution price left the frozen authorization boundary",
+                )
+        elif system_state is not SystemRiskState.NORMAL:
+            raise CommandRejected("ADD_REQUIRES_NORMAL_SYSTEM_STATE", "add requires NORMAL")
+        else:
+            eligibility = request.add_eligibility
+            if eligibility is None:  # pragma: no cover - Pydantic enforces
+                raise RuntimeError("missing add eligibility")
+            price_per_unit = risk.market.executable_price * risk.market.contract_multiplier
+            raw_delta = (
+                eligibility.current_position_equity * eligibility.target_effective_leverage
+                - request.current_position_quantity * price_per_unit
+            ) / price_per_unit
+            expected_delta = ExecutionIntentService._floor_to_step(
+                raw_delta, risk.requested.quantity_step
+            )
+            if expected_delta <= ZERO or expected_delta != risk.requested.requested_quantity:
+                raise CommandRejected(
+                    "ADD_TARGET_DELTA_MISMATCH",
+                    "add quantity is not the equity-based target-leverage delta",
+                )
+        if request.risk_currency != binding.settlement_asset:
+            raise CommandRejected("RISK_CURRENCY_MISMATCH", "settlement currency changed")
+
+    @staticmethod
+    def _floor_to_step(value: Decimal, step: Decimal) -> Decimal:
+        if value <= ZERO:
+            return ZERO
+        return (value / step).to_integral_value(rounding=ROUND_DOWN) * step
+
+    @staticmethod
+    def _validate_durable_exposure(
+        session: Session,
+        request: CreateExecutionIntentRequest,
+        campaign: Campaign,
+    ) -> None:
+        rows = tuple(
+            session.execute(
+                select(RiskReservation, RiskExposureState)
+                .join(
+                    RiskExposureState,
+                    RiskExposureState.risk_reservation_id == RiskReservation.risk_reservation_id,
+                )
+                .where(RiskReservation.organization_id == campaign.organization_id)
+                .with_for_update(of=RiskExposureState)
+            ).all()
+        )
+        campaign_open = ZERO
+        campaign_reserved = ZERO
+        campaign_unknown = ZERO
+        global_funding_used = ZERO
+        global_funding_reserved = ZERO
+        global_margin_reserved = ZERO
+        global_unknown = ZERO
+        durable_scope_planned: defaultdict[tuple[str, str], Decimal] = defaultdict(lambda: ZERO)
+        durable_scope_stress: defaultdict[tuple[str, str], Decimal] = defaultdict(lambda: ZERO)
+        for reservation, state in rows:
+            active_heat = state.open_heat + state.reserved_heat + state.unknown_heat
+            if active_heat == ZERO:
+                continue
+            if reservation.campaign_id == campaign.campaign_id:
+                campaign_open += state.open_heat
+                campaign_reserved += state.reserved_heat
+                campaign_unknown += state.unknown_heat
+            global_funding_used += state.funding_used
+            global_funding_reserved += state.funding_reserved + state.funding_unknown
+            global_margin_reserved += state.margin_reserved + state.margin_unknown
+            global_unknown += state.unknown_heat
+            ratio = active_heat / state.total_heat
+            for allocation in reservation.scope_allocations:
+                key = (str(allocation["scope_type"]), str(allocation["scope_id"]))
+                durable_scope_planned[key] += Decimal(str(allocation["planned_loss"])) * ratio
+                durable_scope_stress[key] += Decimal(str(allocation["stress_loss"])) * ratio
+        risk = request.risk_request
+        if (
+            risk.current_trade_loss.open_heat < campaign_open
+            or risk.current_trade_loss.reserved_heat < campaign_reserved
+            or risk.current_trade_loss.unknown_heat < campaign_unknown
+            or risk.capital.funding_used < global_funding_used
+            or risk.capital.funding_reserved < global_funding_reserved
+        ):
+            raise CommandRejected(
+                "DURABLE_EXPOSURE_UNDER_REPORTED",
+                "risk request under-reports durable open, reserved, unknown, or funding exposure",
+            )
+        if global_unknown > ZERO:
+            raise CommandRejected(
+                "ORDER_RESULT_UNKNOWN", "organization has unresolved order quantity"
+            )
+        if global_margin_reserved + risk.requested.requested_margin > risk.capital.available_margin:
+            raise CommandRejected(
+                "DURABLE_MARGIN_CAPACITY_EXCEEDED",
+                "durable margin reservations leave insufficient available margin",
+            )
+        for scope in risk.scope_risks:
+            key = (scope.scope_type.value, scope.scope_id)
+            if (
+                scope.current_planned_loss < durable_scope_planned[key]
+                or scope.current_stress_loss < durable_scope_stress[key]
+            ):
+                raise CommandRejected(
+                    "DURABLE_SCOPE_EXPOSURE_UNDER_REPORTED",
+                    "risk scope under-reports durable exposure",
+                )
+
+    @staticmethod
+    def _input_snapshot(
+        envelope: CommandEnvelope,
+        request: CreateExecutionIntentRequest,
+        evaluation_input: RiskEvaluationInput,
+        authorization: TradingAuthorization,
+        rows: dict[str, Any],
+    ) -> dict[str, Any]:
+        snapshot: dict[str, Any] = {
+            "request": request.model_dump(mode="json"),
+            "evaluation": evaluation_input.model_dump(mode="json"),
+            "authorization": {
+                "authorization_id": str(authorization.authorization_id),
+                "issuance_snapshot_hash": authorization.issuance_snapshot_hash,
+                "valid_until": authorization.valid_until.isoformat(),
+            },
+            "command_context": {
+                "command_id": str(envelope.command_id),
+                "correlation_id": str(envelope.correlation_id),
+                "caller_id": envelope.caller_id,
+                "auth_context_ref": envelope.auth_context_ref,
+            },
+        }
+        if request.intent_kind is IntentKind.ADD:
+            snapshot["add_state_versions"] = {
+                "package": rows["add_package_state"].version,
+                "unit": rows["add_unit_state"].version,
+            }
+        else:
+            snapshot["initial_state_version"] = rows["initial_state"].version
+        return snapshot
+
+    @staticmethod
+    def _price_contract(
+        request: CreateExecutionIntentRequest, rows: dict[str, Any]
+    ) -> tuple[Decimal, Decimal, Decimal]:
+        if request.intent_kind is IntentKind.INITIAL:
+            initial = rows["initial"]
+            return (
+                initial.price_reference,
+                initial.price_lower_bound,
+                initial.price_upper_bound,
+            )
+        reference = request.risk_request.market.executable_price
+        slippage = request.risk_request.market.max_slippage_bps / Decimal("10000")
+        lower = reference * (Decimal("1") - slippage)
+        upper = reference * (Decimal("1") + slippage)
+        if lower <= ZERO:
+            raise CommandRejected("PRICE_BOUNDARY_INVALID", "add price boundary is invalid")
+        return reference, lower, upper
+
+    @staticmethod
+    def _record_denial(
+        session: Session,
+        request: CreateExecutionIntentRequest,
+        campaign: Campaign,
+        authorization: TradingAuthorization,
+        policy_record: RiskPolicyRecord,
+        evaluation_input: RiskEvaluationInput,
+        evaluation: RiskEvaluationResult,
+        now: datetime,
+        reason_code: str,
+    ) -> CommandOutcome:
+        decision_id = uuid4()
+        initial_id, add_package_id, add_unit_id = ExecutionIntentService._authorization_ids(request)
+        input_snapshot = {
+            "request": request.model_dump(mode="json"),
+            "evaluation": evaluation_input.model_dump(mode="json"),
+            "authorization_id": str(authorization.authorization_id),
+            "authorization_snapshot_hash": authorization.issuance_snapshot_hash,
+        }
+        decision_payload = evaluation.model_dump(mode="json")
+        decision_payload["result"] = "DENY"
+        decision_payload["primary_reason_code"] = reason_code
+        decision_payload["final_quantity"] = "0"
+        decision_payload["execution_eligible"] = False
+        decision_payload["reservation_created"] = False
+        decision_payload["order_intent_created"] = False
+        session.add(
+            ExecutionRiskDecision(
+                execution_risk_decision_id=decision_id,
+                decision_stage="ORDER_PRECHECK",
+                intent_kind=request.intent_kind.value,
+                organization_id=campaign.organization_id,
+                authorization_id=authorization.authorization_id,
+                campaign_id=campaign.campaign_id,
+                initial_authorization_id=initial_id,
+                add_package_id=add_package_id,
+                add_unit_id=add_unit_id,
+                risk_policy_id=policy_record.risk_policy_id,
+                risk_policy_version=policy_record.policy_version,
+                system_risk_state=evaluation_input.system_risk_state.value,
+                result="DENY",
+                primary_reason_code=reason_code,
+                requested_quantity=request.risk_request.requested.requested_quantity,
+                max_safe_quantity=ZERO,
+                final_quantity=ZERO,
+                approved_reserved_heat=ZERO,
+                approved_funding=ZERO,
+                approved_margin=ZERO,
+                current_portfolio_mtm_equity=evaluation.current_portfolio_mtm_equity,
+                current_unrealized_pnl=evaluation.current_unrealized_pnl,
+                input_snapshot=input_snapshot,
+                input_hash=hash_json(input_snapshot),
+                decision=decision_payload,
+                decision_hash=hash_json(decision_payload),
+                execution_eligible=False,
+                reservation_created=False,
+                order_intent_created=False,
+                decided_at=now,
+                valid_until=now,
+            )
+        )
+        session.flush()
+        EXECUTION_RISK_DECISIONS.labels(request.intent_kind.value, "DENY", reason_code).inc()
+        return CommandOutcome(
+            status=CommandStatus.COMPLETED,
+            object_type="ExecutionRiskDecision",
+            object_id=str(decision_id),
+            object_version=1,
+            data={
+                "execution_risk_decision_id": str(decision_id),
+                "result": "DENY",
+                "primary_reason_code": reason_code,
+                "dispatch_eligible": False,
+                "reservation_created": False,
+                "order_intent_created": False,
+            },
+            events=(
+                DomainEvent(
+                    event_type="ExecutionRiskIncreaseDenied",
+                    aggregate_type="ExecutionRiskDecision",
+                    aggregate_id=str(decision_id),
+                    payload={
+                        "campaign_id": str(campaign.campaign_id),
+                        "intent_kind": request.intent_kind.value,
+                        "primary_reason_code": reason_code,
+                    },
+                ),
+            ),
+        )
+
+    @staticmethod
+    def _existing_outcome(session: Session, intent: OrderIntent) -> CommandOutcome:
+        reservation = session.execute(
+            select(RiskReservation).where(RiskReservation.order_intent_id == intent.order_intent_id)
+        ).scalar_one()
+        state = session.get(OrderIntentState, intent.order_intent_id)
+        return CommandOutcome(
+            status=CommandStatus.COMPLETED,
+            object_type="OrderIntent",
+            object_id=str(intent.order_intent_id),
+            object_version=state.version if state is not None else 1,
+            data={
+                "order_intent_id": str(intent.order_intent_id),
+                "execution_risk_decision_id": str(intent.execution_risk_decision_id),
+                "risk_reservation_id": str(reservation.risk_reservation_id),
+                "intent_status": state.status if state is not None else "INTENT_CREATED",
+                "already_created": True,
+                "execution_mode": "SHADOW",
+                "dispatch_eligible": False,
+                "reservation_created": True,
+            },
+            events=(
+                DomainEvent(
+                    event_type="ShadowOrderIntentAlreadyExists",
+                    aggregate_type="OrderIntent",
+                    aggregate_id=str(intent.order_intent_id),
+                    payload={"candidate_ref": intent.candidate_ref},
+                ),
+            ),
+        )
+
+
+class ExecutionReconciliationService:
+    command_type = "execution.fact.record.v1"
+
+    def __init__(self, clock: Callable[[], datetime] | None = None) -> None:
+        self._clock = clock or (lambda: datetime.now(UTC))
+
+    def record(self, session: Session, envelope: CommandEnvelope) -> CommandOutcome:
+        self._require_internal(envelope)
+        if envelope.object_id is None:  # pragma: no cover - validated above
+            raise RuntimeError("missing OrderIntent id")
+        try:
+            order_intent_id = UUID(envelope.object_id)
+            request = RecordExecutionFactRequest.model_validate(envelope.payload)
+        except (ValueError, ValidationError) as exc:
+            raise CommandRejected("EXECUTION_FACT_INVALID", "execution fact is invalid") from exc
+        if request.target_status not in ORDER_INTENT_STATUSES:
+            raise CommandRejected("EXECUTION_STATUS_INVALID", "target status is unsupported")
+
+        intent = session.execute(
+            select(OrderIntent)
+            .where(OrderIntent.order_intent_id == order_intent_id)
+            .with_for_update()
+        ).scalar_one_or_none()
+        if intent is None:
+            raise CommandRejected("ORDER_INTENT_NOT_FOUND", "OrderIntent is unavailable")
+        if envelope.scope.get("organization_id") is None:
+            raise CommandRejected("SCOPE_MISMATCH", "organization scope is required")
+        reservation = session.execute(
+            select(RiskReservation)
+            .where(RiskReservation.order_intent_id == order_intent_id)
+            .with_for_update()
+        ).scalar_one()
+        if envelope.scope.get("organization_id") != reservation.organization_id:
+            raise CommandRejected("SCOPE_MISMATCH", "organization scope changed")
+        state = session.execute(
+            select(OrderIntentState)
+            .where(OrderIntentState.order_intent_id == order_intent_id)
+            .with_for_update()
+        ).scalar_one()
+        exposure = session.execute(
+            select(RiskExposureState)
+            .where(RiskExposureState.risk_reservation_id == reservation.risk_reservation_id)
+            .with_for_update()
+        ).scalar_one()
+        self._lock_reconciliation_scope(session, intent, reservation)
+        self._validate_route(intent, request)
+
+        existing = session.execute(
+            select(ExecutionFact).where(
+                ExecutionFact.venue == request.venue,
+                ExecutionFact.execution_domain == request.execution_domain,
+                ExecutionFact.account_id == request.account_id,
+                ExecutionFact.external_fact_id == request.external_fact_id,
+            )
+        ).scalar_one_or_none()
+        if existing is not None:
+            if (
+                existing.order_intent_id != order_intent_id
+                or existing.payload_hash != request.payload_hash
+                or existing.evidence_hash != request.evidence_hash
+                or existing.fact_sequence != request.fact_sequence
+            ):
+                raise CommandRejected(
+                    "EXTERNAL_FACT_ID_CONFLICT",
+                    "external fact id belongs to different semantics",
+                )
+            return self._existing_fact_outcome(state, existing)
+
+        now = self._clock()
+        self._validate_progression(state, request, now)
+        fact_id = uuid4()
+        fact = ExecutionFact(
+            execution_fact_id=fact_id,
+            order_intent_id=order_intent_id,
+            fact_sequence=request.fact_sequence,
+            target_status=request.target_status,
+            venue=request.venue,
+            execution_domain=request.execution_domain,
+            account_id=request.account_id,
+            external_fact_id=request.external_fact_id,
+            cumulative_filled_quantity=request.cumulative_filled_quantity,
+            known_remaining_quantity=request.known_remaining_quantity,
+            zero_fill_confirmed=request.zero_fill_confirmed,
+            venue_order_terminal=request.venue_order_terminal,
+            position_reconciled=request.position_reconciled,
+            protection_confirmed=request.protection_confirmed,
+            reconciliation_run_ref=request.reconciliation_run_ref,
+            source_ref=request.source_ref,
+            source_version=request.source_version,
+            payload=request.payload,
+            payload_hash=request.payload_hash,
+            evidence_ref=request.evidence_ref,
+            evidence_hash=request.evidence_hash,
+            event_time=request.event_time,
+            received_at=request.received_at,
+            recorded_at=now,
+        )
+        session.add(fact)
+        session.flush()
+
+        old_quantities = self._quantity_buckets(exposure)
+        new_quantities = self._desired_quantity_buckets(state.intent_quantity, request)
+        transfers = self._bucket_transfers(old_quantities, new_quantities)
+        if transfers:
+            self._append_ledger_transfers(
+                session,
+                intent,
+                reservation,
+                exposure,
+                fact_id,
+                request,
+                transfers,
+                now,
+            )
+            self._apply_exposure_state(exposure, new_quantities, request, len(transfers), now)
+
+        state.status = request.target_status
+        state.version += 1
+        state.cumulative_filled_quantity = request.cumulative_filled_quantity
+        state.known_remaining_quantity = request.known_remaining_quantity
+        state.zero_fill_confirmed = request.zero_fill_confirmed
+        state.venue_order_terminal = request.venue_order_terminal
+        state.position_reconciled = request.position_reconciled
+        state.protection_confirmed = request.protection_confirmed
+        state.last_fact_sequence = request.fact_sequence
+        state.last_fact_hash = request.evidence_hash
+        state.reason_code = f"EXECUTION_FACT_{request.target_status}"
+        state.updated_at = now
+        self._apply_authorization_lifecycle(session, intent, reservation, request, now)
+        session.flush()
+        EXECUTION_FACT_RESULTS.labels(request.target_status, "APPLIED").inc()
+        return CommandOutcome(
+            status=CommandStatus.COMPLETED,
+            object_type="OrderIntent",
+            object_id=str(order_intent_id),
+            object_version=state.version,
+            data={
+                "execution_fact_id": str(fact_id),
+                "order_intent_id": str(order_intent_id),
+                "intent_status": state.status,
+                "risk_exposure_status": exposure.status,
+                "cumulative_filled_quantity": str(state.cumulative_filled_quantity),
+                "known_remaining_quantity": str(state.known_remaining_quantity),
+                "dispatch_eligible": False,
+            },
+            events=(
+                DomainEvent(
+                    event_type="ExecutionFactReconciled",
+                    aggregate_type="OrderIntent",
+                    aggregate_id=str(order_intent_id),
+                    payload={
+                        "execution_fact_id": str(fact_id),
+                        "fact_sequence": request.fact_sequence,
+                        "target_status": request.target_status,
+                        "risk_exposure_status": exposure.status,
+                        "cumulative_filled_quantity": str(request.cumulative_filled_quantity),
+                    },
+                ),
+            ),
+        )
+
+    @staticmethod
+    def _require_internal(envelope: CommandEnvelope) -> None:
+        if envelope.command_type != ExecutionReconciliationService.command_type:
+            raise CommandRejected("COMMAND_TYPE_MISMATCH", "unexpected command type")
+        if (
+            envelope.channel is not CommandChannel.INTERNAL
+            or envelope.service_principal != EXECUTION_RECONCILIATION_SERVICE_PRINCIPAL
+        ):
+            raise CommandRejected(
+                "RECONCILIATION_SERVICE_REQUIRED",
+                "only the Trading reconciliation service may record execution facts",
+            )
+        if envelope.object_type != "OrderIntent" or envelope.object_id is None:
+            raise CommandRejected("OBJECT_BINDING_MISMATCH", "OrderIntent binding is required")
+
+    @staticmethod
+    def _lock_reconciliation_scope(
+        session: Session, intent: OrderIntent, reservation: RiskReservation
+    ) -> None:
+        keys = sorted(
+            {
+                f"campaign:{intent.campaign_id}",
+                f"order-intent:{intent.order_intent_id}",
+                f"account:{intent.venue}:{intent.execution_domain}:{intent.account_id}",
+                f"collateral:{reservation.collateral_pool_id}",
+            }
+        )
+        for key in keys:
+            session.execute(
+                text("SELECT pg_advisory_xact_lock(hashtextextended(:lock_key, 0))"),
+                {"lock_key": key},
+            )
+
+    @staticmethod
+    def _validate_route(intent: OrderIntent, request: RecordExecutionFactRequest) -> None:
+        if (
+            request.venue != intent.venue
+            or request.execution_domain != intent.execution_domain
+            or request.account_id != intent.account_id
+        ):
+            raise CommandRejected("EXECUTION_ROUTE_MISMATCH", "execution route changed")
+
+    @staticmethod
+    def _validate_progression(
+        state: OrderIntentState,
+        request: RecordExecutionFactRequest,
+        now: datetime,
+    ) -> None:
+        if request.received_at > now:
+            raise CommandRejected("EXECUTION_FACT_FROM_FUTURE", "fact is from the future")
+        if request.fact_sequence != state.last_fact_sequence + 1:
+            raise CommandRejected("EXECUTION_FACT_OUT_OF_ORDER", "fact sequence is not next")
+        if state.status in ZERO_TERMINAL_STATUSES or state.status == "COMPLETED":
+            raise CommandRejected("ORDER_INTENT_ALREADY_TERMINAL", "intent is already terminal")
+        if request.cumulative_filled_quantity < state.cumulative_filled_quantity:
+            raise CommandRejected("FILLED_QUANTITY_REGRESSION", "filled quantity regressed")
+        if request.cumulative_filled_quantity > state.intent_quantity:
+            raise CommandRejected("FILLED_QUANTITY_EXCEEDED", "filled quantity exceeds intent")
+        if (
+            request.cumulative_filled_quantity + request.known_remaining_quantity
+            > state.intent_quantity
+        ):
+            raise CommandRejected("EXECUTION_QUANTITY_OVERFLOW", "execution quantity overflows")
+        if request.zero_fill_confirmed and request.target_status not in ZERO_TERMINAL_STATUSES:
+            raise CommandRejected(
+                "EXECUTION_FACT_SEMANTICS_INVALID",
+                "zero-fill proof cannot accompany a non-zero-terminal status",
+            )
+        if request.target_status in ZERO_TERMINAL_STATUSES:
+            valid = (
+                request.zero_fill_confirmed
+                and request.venue_order_terminal
+                and request.cumulative_filled_quantity == ZERO
+                and request.known_remaining_quantity == ZERO
+            )
+        elif request.target_status == "PARTIALLY_FILLED":
+            valid = (
+                request.cumulative_filled_quantity > ZERO
+                and request.known_remaining_quantity > ZERO
+                and not request.venue_order_terminal
+                and request.cumulative_filled_quantity + request.known_remaining_quantity
+                == state.intent_quantity
+            )
+        elif request.target_status == "FILLED":
+            valid = (
+                request.cumulative_filled_quantity == state.intent_quantity
+                and request.known_remaining_quantity == ZERO
+                and request.venue_order_terminal
+            )
+        elif request.target_status == "CANCELLED_PARTIAL":
+            valid = (
+                request.cumulative_filled_quantity > ZERO
+                and request.known_remaining_quantity == ZERO
+                and request.venue_order_terminal
+            )
+        elif request.target_status == "RESULT_UNKNOWN":
+            valid = request.known_remaining_quantity == ZERO and not request.zero_fill_confirmed
+        elif request.target_status in {
+            "POSITION_RECONCILED",
+            "PROTECTION_CONFIRMED",
+            "COMPLETED",
+        }:
+            valid = request.position_reconciled
+            if request.target_status in {"PROTECTION_CONFIRMED", "COMPLETED"}:
+                valid = (
+                    valid
+                    and request.protection_confirmed
+                    and request.cumulative_filled_quantity > ZERO
+                    and request.known_remaining_quantity == ZERO
+                    and request.venue_order_terminal
+                )
+        else:
+            valid = (
+                not request.venue_order_terminal
+                and not request.zero_fill_confirmed
+                and request.cumulative_filled_quantity + request.known_remaining_quantity
+                == state.intent_quantity
+            )
+        if not valid:
+            raise CommandRejected(
+                "EXECUTION_FACT_SEMANTICS_INVALID", "fact does not prove target status"
+            )
+
+    @staticmethod
+    def _quantity_buckets(exposure: RiskExposureState) -> dict[str, Decimal]:
+        return {
+            "RESERVED": exposure.reserved_quantity,
+            "OPEN": exposure.open_quantity,
+            "UNKNOWN": exposure.unknown_quantity,
+            "RELEASED": exposure.released_quantity,
+        }
+
+    @staticmethod
+    def _desired_quantity_buckets(
+        total: Decimal, request: RecordExecutionFactRequest
+    ) -> dict[str, Decimal]:
+        filled = request.cumulative_filled_quantity
+        if request.target_status in ZERO_TERMINAL_STATUSES:
+            return {"RESERVED": ZERO, "OPEN": ZERO, "UNKNOWN": ZERO, "RELEASED": total}
+        if request.target_status == "RESULT_UNKNOWN":
+            return {
+                "RESERVED": ZERO,
+                "OPEN": filled,
+                "UNKNOWN": total - filled,
+                "RELEASED": ZERO,
+            }
+        released = total - filled if request.venue_order_terminal else ZERO
+        reserved = ZERO if request.venue_order_terminal else request.known_remaining_quantity
+        return {
+            "RESERVED": reserved,
+            "OPEN": filled,
+            "UNKNOWN": ZERO,
+            "RELEASED": released,
+        }
+
+    @staticmethod
+    def _bucket_transfers(
+        old: dict[str, Decimal], new: dict[str, Decimal]
+    ) -> list[tuple[str, str, Decimal]]:
+        sources: list[tuple[str, Decimal]] = [
+            (bucket, old[bucket] - new[bucket])
+            for bucket in ("RESERVED", "UNKNOWN", "OPEN", "RELEASED")
+            if old[bucket] > new[bucket]
+        ]
+        targets: list[tuple[str, Decimal]] = [
+            (bucket, new[bucket] - old[bucket])
+            for bucket in ("OPEN", "RESERVED", "UNKNOWN", "RELEASED")
+            if new[bucket] > old[bucket]
+        ]
+        transfers: list[tuple[str, str, Decimal]] = []
+        source_index = 0
+        target_index = 0
+        while source_index < len(sources) and target_index < len(targets):
+            source, source_quantity = sources[source_index]
+            target, target_quantity = targets[target_index]
+            quantity = min(source_quantity, target_quantity)
+            if quantity > ZERO:
+                transfers.append((str(source), str(target), quantity))
+            source_remaining = source_quantity - quantity
+            target_remaining = target_quantity - quantity
+            sources[source_index] = (source, source_remaining)
+            targets[target_index] = (target, target_remaining)
+            if source_remaining == ZERO:
+                source_index += 1
+            if target_remaining == ZERO:
+                target_index += 1
+        if source_index != len(sources) or target_index != len(targets):
+            raise CommandRejected(
+                "RISK_BUCKET_CONSERVATION_FAILED", "risk bucket transfer does not conserve quantity"
+            )
+        return transfers
+
+    @staticmethod
+    def _proportional(total: Decimal, quantity: Decimal, total_quantity: Decimal) -> Decimal:
+        if total == ZERO or quantity == ZERO:
+            return ZERO
+        if quantity == total_quantity:
+            return total
+        return (total * quantity / total_quantity).quantize(QUANTUM, rounding=ROUND_DOWN)
+
+    def _append_ledger_transfers(
+        self,
+        session: Session,
+        intent: OrderIntent,
+        reservation: RiskReservation,
+        exposure: RiskExposureState,
+        fact_id: UUID,
+        request: RecordExecutionFactRequest,
+        transfers: list[tuple[str, str, Decimal]],
+        now: datetime,
+    ) -> None:
+        for offset, (source, target, quantity) in enumerate(transfers, start=1):
+            transition = f"{source}_TO_{target}"
+            session.add(
+                RiskLedgerEntry(
+                    risk_ledger_entry_id=uuid4(),
+                    risk_reservation_id=reservation.risk_reservation_id,
+                    order_intent_id=intent.order_intent_id,
+                    execution_fact_id=fact_id,
+                    entry_sequence=exposure.ledger_sequence + offset,
+                    entry_type="RELEASE" if target == "RELEASED" else "MIGRATE",
+                    from_bucket=source,
+                    to_bucket=target,
+                    quantity=quantity,
+                    heat=self._proportional(exposure.total_heat, quantity, exposure.total_quantity),
+                    funding=self._proportional(
+                        exposure.total_funding, quantity, exposure.total_quantity
+                    ),
+                    margin=self._proportional(
+                        exposure.total_margin, quantity, exposure.total_quantity
+                    ),
+                    evidence_ref=request.evidence_ref,
+                    evidence_hash=request.evidence_hash,
+                    occurred_at=now,
+                )
+            )
+            RISK_RESERVATION_TRANSITIONS.labels(transition).inc()
+        session.flush()
+
+    def _apply_exposure_state(
+        self,
+        exposure: RiskExposureState,
+        quantities: dict[str, Decimal],
+        request: RecordExecutionFactRequest,
+        ledger_entries: int,
+        now: datetime,
+    ) -> None:
+        dimensions = {
+            "heat": exposure.total_heat,
+            "funding": exposure.total_funding,
+            "margin": exposure.total_margin,
+        }
+        allocated: dict[str, dict[str, Decimal]] = {}
+        for name, total in dimensions.items():
+            open_amount = self._proportional(total, quantities["OPEN"], exposure.total_quantity)
+            unknown_amount = self._proportional(
+                total, quantities["UNKNOWN"], exposure.total_quantity
+            )
+            released_amount = self._proportional(
+                total, quantities["RELEASED"], exposure.total_quantity
+            )
+            reserved_amount = total - open_amount - unknown_amount - released_amount
+            allocated[name] = {
+                "RESERVED": reserved_amount,
+                "OPEN": open_amount,
+                "UNKNOWN": unknown_amount,
+                "RELEASED": released_amount,
+            }
+        exposure.reserved_quantity = quantities["RESERVED"]
+        exposure.open_quantity = quantities["OPEN"]
+        exposure.unknown_quantity = quantities["UNKNOWN"]
+        exposure.released_quantity = quantities["RELEASED"]
+        exposure.reserved_heat = allocated["heat"]["RESERVED"]
+        exposure.open_heat = allocated["heat"]["OPEN"]
+        exposure.unknown_heat = allocated["heat"]["UNKNOWN"]
+        exposure.released_heat = allocated["heat"]["RELEASED"]
+        exposure.funding_reserved = allocated["funding"]["RESERVED"]
+        exposure.funding_used = allocated["funding"]["OPEN"]
+        exposure.funding_unknown = allocated["funding"]["UNKNOWN"]
+        exposure.funding_released = allocated["funding"]["RELEASED"]
+        exposure.margin_reserved = allocated["margin"]["RESERVED"]
+        exposure.margin_used = allocated["margin"]["OPEN"]
+        exposure.margin_unknown = allocated["margin"]["UNKNOWN"]
+        exposure.margin_released = allocated["margin"]["RELEASED"]
+        exposure.status = self._exposure_status(quantities)
+        exposure.version += 1
+        exposure.ledger_sequence += ledger_entries
+        exposure.last_evidence_ref = request.evidence_ref
+        exposure.last_evidence_hash = request.evidence_hash
+        exposure.reason_code = f"EXECUTION_FACT_{request.target_status}"
+        exposure.updated_at = now
+
+    @staticmethod
+    def _exposure_status(quantities: dict[str, Decimal]) -> str:
+        if quantities["UNKNOWN"] > ZERO:
+            return "UNKNOWN"
+        if quantities["RESERVED"] > ZERO and quantities["OPEN"] > ZERO:
+            return "PARTIAL"
+        if quantities["RESERVED"] > ZERO:
+            return "RESERVED"
+        if quantities["OPEN"] > ZERO:
+            return "OPEN"
+        return "RELEASED"
+
+    @staticmethod
+    def _apply_authorization_lifecycle(
+        session: Session,
+        intent: OrderIntent,
+        reservation: RiskReservation,
+        request: RecordExecutionFactRequest,
+        now: datetime,
+    ) -> None:
+        system_state = session.execute(
+            select(SystemRiskStateRecord)
+            .where(SystemRiskStateRecord.organization_id == reservation.organization_id)
+            .with_for_update()
+        ).scalar_one_or_none()
+        system_status = system_state.status if system_state is not None else "UNKNOWN"
+        campaign_state = session.execute(
+            select(CampaignState)
+            .where(CampaignState.campaign_id == intent.campaign_id)
+            .with_for_update()
+        ).scalar_one()
+        if intent.intent_kind == "INITIAL":
+            initial_state = session.execute(
+                select(InitialAuthorizationState)
+                .where(
+                    InitialAuthorizationState.initial_authorization_id
+                    == intent.initial_authorization_id
+                )
+                .with_for_update()
+            ).scalar_one()
+            if request.cumulative_filled_quantity > ZERO and initial_state.status == "ACTIVE":
+                initial_state.status = "CONSUMED"
+                initial_state.version += 1
+                initial_state.reason_code = "POSITIVE_INITIAL_FILL_CONFIRMED"
+                initial_state.updated_at = now
+                if campaign_state.status == "PENDING_ENTRY":
+                    campaign_state.status = "OPEN"
+                    campaign_state.version += 1
+                    campaign_state.reason_code = "POSITIVE_INITIAL_FILL_CONFIRMED"
+                    campaign_state.updated_at = now
+            if request.target_status in {"PROTECTION_CONFIRMED", "COMPLETED"}:
+                ExecutionReconciliationService._activate_or_invalidate_add_package(
+                    session, intent, system_status, now
+                )
+            return
+
+        add_state = session.execute(
+            select(AddUnitState)
+            .where(AddUnitState.add_unit_id == intent.add_unit_id)
+            .with_for_update()
+        ).scalar_one()
+        package = session.execute(
+            select(AddAuthorizationPackage)
+            .where(AddAuthorizationPackage.add_package_id == intent.add_package_id)
+            .with_for_update()
+        ).scalar_one()
+        package_state = session.execute(
+            select(AddAuthorizationPackageState)
+            .where(AddAuthorizationPackageState.add_package_id == intent.add_package_id)
+            .with_for_update()
+        ).scalar_one()
+        if request.cumulative_filled_quantity > ZERO and add_state.status == "CLAIMED":
+            add_state.status = "CONSUMED"
+            add_state.version += 1
+            add_state.reason_code = "POSITIVE_ADD_FILL_CONFIRMED"
+            add_state.updated_at = now
+        elif request.target_status in ZERO_TERMINAL_STATUSES and add_state.status == "CLAIMED":
+            reusable = (
+                package_state.status == "ACTIVE"
+                and package.valid_from <= now < package.valid_until
+                and system_status == "NORMAL"
+            )
+            add_state.status = "AVAILABLE" if reusable else "INVALIDATED"
+            add_state.version += 1
+            add_state.reason_code = (
+                "TERMINAL_ZERO_FILL_RELEASED"
+                if reusable
+                else "TERMINAL_ZERO_FILL_AUTHORIZATION_INVALID"
+            )
+            add_state.updated_at = now
+        if add_state.status == "CONSUMED" and package_state.status == "ACTIVE":
+            persisted_unit_statuses = tuple(
+                session.execute(
+                    select(AddUnit.add_unit_id, AddUnitState.status)
+                    .join(AddUnit, AddUnit.add_unit_id == AddUnitState.add_unit_id)
+                    .where(AddUnit.add_package_id == package.add_package_id)
+                ).all()
+            )
+            unit_statuses = tuple(
+                add_state.status if unit_id == intent.add_unit_id else status
+                for unit_id, status in persisted_unit_statuses
+            )
+            if unit_statuses and all(status == "CONSUMED" for status in unit_statuses):
+                package_state.status = "EXHAUSTED"
+                package_state.version += 1
+                package_state.reason_code = "ALL_ADD_UNITS_CONSUMED"
+                package_state.updated_at = now
+
+    @staticmethod
+    def _activate_or_invalidate_add_package(
+        session: Session,
+        intent: OrderIntent,
+        system_status: str,
+        now: datetime,
+    ) -> None:
+        package = session.execute(
+            select(AddAuthorizationPackage)
+            .where(AddAuthorizationPackage.campaign_id == intent.campaign_id)
+            .with_for_update()
+        ).scalar_one_or_none()
+        if package is None:
+            return
+        package_state = session.execute(
+            select(AddAuthorizationPackageState)
+            .where(AddAuthorizationPackageState.add_package_id == package.add_package_id)
+            .with_for_update()
+        ).scalar_one()
+        if package_state.status != "DORMANT":
+            return
+        activate = system_status == "NORMAL" and package.valid_from <= now < package.valid_until
+        package_state.status = "ACTIVE" if activate else "INVALIDATED"
+        package_state.version += 1
+        package_state.reason_code = (
+            "INITIAL_POSITION_RECONCILED_AND_PROTECTED"
+            if activate
+            else "ADD_ACTIVATION_SAFETY_GATE_FAILED"
+        )
+        package_state.updated_at = now
+        if not activate:
+            unit_states = tuple(
+                session.execute(
+                    select(AddUnitState)
+                    .join(AddUnit, AddUnit.add_unit_id == AddUnitState.add_unit_id)
+                    .where(AddUnit.add_package_id == package.add_package_id)
+                    .with_for_update()
+                ).scalars()
+            )
+            for state in unit_states:
+                if state.status == "AVAILABLE":
+                    state.status = "INVALIDATED"
+                    state.version += 1
+                    state.reason_code = "ADD_ACTIVATION_SAFETY_GATE_FAILED"
+                    state.updated_at = now
+
+    @staticmethod
+    def _existing_fact_outcome(state: OrderIntentState, fact: ExecutionFact) -> CommandOutcome:
+        EXECUTION_FACT_RESULTS.labels(fact.target_status, "ALREADY_RECORDED").inc()
+        return CommandOutcome(
+            status=CommandStatus.COMPLETED,
+            object_type="OrderIntent",
+            object_id=str(fact.order_intent_id),
+            object_version=state.version,
+            data={
+                "execution_fact_id": str(fact.execution_fact_id),
+                "order_intent_id": str(fact.order_intent_id),
+                "intent_status": state.status,
+                "already_recorded": True,
+                "dispatch_eligible": False,
+            },
+            events=(
+                DomainEvent(
+                    event_type="ExecutionFactAlreadyRecorded",
+                    aggregate_type="OrderIntent",
+                    aggregate_id=str(fact.order_intent_id),
+                    payload={"external_fact_id": fact.external_fact_id},
+                ),
+            ),
+        )

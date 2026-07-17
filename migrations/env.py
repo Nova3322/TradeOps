@@ -6,6 +6,7 @@ from alembic import context
 from sqlalchemy import engine_from_config, pool
 
 from trading_control_plane import (  # noqa: F401
+    execution_models,
     iam_models,
     models,
     proposal_models,

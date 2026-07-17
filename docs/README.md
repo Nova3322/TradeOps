@@ -120,6 +120,9 @@ docs/
 | 实现 | [WP-0001：耐久控制面基础](08-implementation/WP-0001-耐久控制面基础.md) | 首包事务合同、安全默认、验证和回滚 |
 | 实现 | [WP-0002：服务端授权判定核心](08-implementation/WP-0002-服务端授权判定核心.md) | 默认拒绝、RBAC/ABAC、自审、动作级认证和判定审计 |
 | 实现 | [WP-0003：冻结提案审核内核](08-implementation/WP-0003-冻结提案审核内核.md) | 冻结风险快照、ReviewerVote、并发 quorum 和唯一终态 |
+| 实现 | [WP-0004：确定性风险预检与风险状态基础](08-implementation/WP-0004-确定性风险预检与风险状态基础.md) | 最新 MTM/UPNL、九类事实、七类 scope 与单向风险状态收紧 |
+| 实现 | [WP-0005：TradingAuthorization 与 Campaign 授权基础](08-implementation/WP-0005-TradingAuthorization与Campaign授权基础.md) | 人工批准后的冻结授权、Campaign、Initial 与 30/50/100 AddUnit |
+| 实现 | [WP-0006：原子风险预留与 Shadow OrderIntent](08-implementation/WP-0006-原子风险预留与ShadowOrderIntent.md) | final precheck、原子 Reservation/Intent、部分/零/Unknown 对账 |
 
 ## 完整交付与能力激活
 

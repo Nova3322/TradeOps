@@ -173,13 +173,8 @@ def test_allow_precheck_persists_immutable_snapshot_audit_and_outbox(
         assert hash_json(snapshot.decision) == snapshot.decision_hash
         assert count_rows(session, AuditEvent) == 1
         assert count_rows(session, OutboxMessage) == 1
-        assert (
-            session.execute(text("SELECT to_regclass('public.risk_reservations')")).scalar_one()
-            is None
-        )
-        assert (
-            session.execute(text("SELECT to_regclass('public.order_intents')")).scalar_one() is None
-        )
+        assert session.execute(text("SELECT count(*) FROM risk_reservations")).scalar_one() == 0
+        assert session.execute(text("SELECT count(*) FROM order_intents")).scalar_one() == 0
 
 
 def test_stale_precheck_is_durable_deny_not_silent_failure(database: Database) -> None:

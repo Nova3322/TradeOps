@@ -210,13 +210,8 @@ def test_issue_creates_shadow_root_campaign_and_initial_without_execution_side_e
         assert initial_state.status == "ACTIVE"
         assert count_rows(session, AddAuthorizationPackage) == 0
         assert count_rows(session, AuthorizationStateTransition) == 2
-        assert (
-            session.execute(text("SELECT to_regclass('public.risk_reservations')")).scalar_one()
-            is None
-        )
-        assert (
-            session.execute(text("SELECT to_regclass('public.order_intents')")).scalar_one() is None
-        )
+        assert session.execute(text("SELECT count(*) FROM risk_reservations")).scalar_one() == 0
+        assert session.execute(text("SELECT count(*) FROM order_intents")).scalar_one() == 0
 
 
 def test_high_risk_add_package_preserves_quorum_and_30_50_100_units(

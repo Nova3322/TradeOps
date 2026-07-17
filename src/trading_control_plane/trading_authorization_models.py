@@ -190,6 +190,12 @@ class InitialOrderAuthorization(Base):
         CheckConstraint("valid_until > valid_from", name="ck_initial_auth_valid_window"),
         UniqueConstraint("authorization_id", name="uq_initial_auth_root"),
         UniqueConstraint("campaign_id", name="uq_initial_auth_campaign"),
+        UniqueConstraint(
+            "initial_authorization_id",
+            "campaign_id",
+            "authorization_id",
+            name="uq_initial_auth_identity_binding",
+        ),
         ForeignKeyConstraint(
             ["campaign_id", "authorization_id"],
             ["campaigns.campaign_id", "campaigns.authorization_id"],
@@ -251,6 +257,12 @@ class AddAuthorizationPackage(Base):
         CheckConstraint("valid_until > valid_from", name="ck_add_packages_valid_window"),
         UniqueConstraint("authorization_id", name="uq_add_packages_root"),
         UniqueConstraint("campaign_id", name="uq_add_packages_campaign"),
+        UniqueConstraint(
+            "add_package_id",
+            "campaign_id",
+            "authorization_id",
+            name="uq_add_packages_identity_binding",
+        ),
         ForeignKeyConstraint(
             ["campaign_id", "authorization_id"],
             ["campaigns.campaign_id", "campaigns.authorization_id"],
@@ -303,6 +315,7 @@ class AddUnit(Base):
             name="ck_add_units_milestone",
         ),
         UniqueConstraint("add_package_id", "ordinal", name="uq_add_units_package_ordinal"),
+        UniqueConstraint("add_unit_id", "add_package_id", name="uq_add_units_identity_binding"),
     )
 
     add_unit_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True)

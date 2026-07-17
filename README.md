@@ -55,8 +55,8 @@
 
 ## 当前工程节点
 
-当前已进入工程实现。首包 [WP-0001：耐久控制面基础](docs/08-implementation/WP-0001-耐久控制面基础.md) 建立命令幂等、不可变审计、outbox/inbox 和能力门；第二包 [WP-0002：服务端授权判定核心](docs/08-implementation/WP-0002-服务端授权判定核心.md) 建立当前身份/角色/作用域、显式拒绝、禁止自审和一次性动作级 Passkey/WebAuthn 判定；第三包 [WP-0003：冻结提案审核内核](docs/08-implementation/WP-0003-冻结提案审核内核.md) 建立不可变冻结快照、ReviewerVote 和 1/1/2 quorum 聚合。技术选择见 [ADR-0001](docs/08-implementation/ADR-0001-生产技术栈与首包边界.md)，逐包验证证据位于 [docs/08-implementation/evidence](docs/08-implementation/evidence/)。
+当前已完成六个本地工程工作包：从 [WP-0001：耐久控制面基础](docs/08-implementation/WP-0001-耐久控制面基础.md) 的命令幂等、不可变审计和 outbox/inbox，推进到 [WP-0006：原子风险预留与 Shadow OrderIntent](docs/08-implementation/WP-0006-原子风险预留与ShadowOrderIntent.md) 的 final risk precheck、RiskReservation、守恒账本、Initial/Add claim 及部分/零/Unknown 对账。中间包覆盖服务端 IAM 判定、冻结提案审核、确定性风险预检和 TradingAuthorization/Campaign。技术选择见 [ADR-0001](docs/08-implementation/ADR-0001-生产技术栈与首包边界.md)，逐包验证证据位于 [docs/08-implementation/evidence](docs/08-implementation/evidence/)。
 
-当前三包已有冻结 Proposal 的审核事实，但仍不包含 Proposal 创建/风险预检写服务、TradingAuthorization、Risk Reservation、OMS、Freqtrade、VenueAdapter、Vault/CTO、Telegram Bot 或 Web 页面，也没有订单、签名、资金划转和能力启用接口。`LIVE_ORDER_SEND`、`CAPITAL_TRANSFER`、`AUTO_ADD` 均为 `DISABLED`；工程完成不等于获得实盘授权。
+当前代码仍只有不可发送的 SHADOW OrderIntent，没有 sender/fencing、Freqtrade/VenueAdapter、VenueOrder/Fill、真实 position/protection 事实、CapabilityCertificate 存储、Web/PWA、Telegram、Margin、Vault/CTO 或场所认证证据。`LIVE_ORDER_SEND`、`CAPITAL_TRANSFER`、`AUTO_ADD` 均为 `DISABLED`；工程节点不等于获得实盘授权。
 
 `OPEN` 只表示缺少真实外部事实；`RESEARCH_REQUIRED` 表示必须靠研究或执行证据冻结。两者都不能签发现实交易权限，也不用于删减完整工程目标。

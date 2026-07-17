@@ -50,3 +50,21 @@ AUTHORIZATION_TIGHTENING = Counter(
     "Risk-decreasing authorization lifecycle commands by action and system risk state.",
     labelnames=("action", "system_risk_state"),
 )
+
+EXECUTION_RISK_DECISIONS = Counter(
+    "trading_execution_risk_decisions_total",
+    "Final order-precheck decisions by intent kind, bounded result, and primary reason.",
+    labelnames=("intent_kind", "result", "primary_reason"),
+)
+
+RISK_RESERVATION_TRANSITIONS = Counter(
+    "trading_risk_reservation_transitions_total",
+    "Risk-reservation bucket migrations by bounded transition.",
+    labelnames=("transition",),
+)
+
+EXECUTION_FACT_RESULTS = Counter(
+    "trading_execution_fact_results_total",
+    "Reconciliation fact outcomes by target order-intent status and bounded result.",
+    labelnames=("target_status", "result"),
+)
