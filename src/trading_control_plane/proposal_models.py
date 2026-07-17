@@ -208,6 +208,7 @@ class SystemRiskStateRecord(Base):
     version: Mapped[int] = mapped_column(Integer, nullable=False)
     reason_code: Mapped[str] = mapped_column(String(160), nullable=False)
     policy_version: Mapped[str] = mapped_column(String(120), nullable=False)
+    transition_source_ref: Mapped[str] = mapped_column(String(255), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
 

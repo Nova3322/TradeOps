@@ -1,0 +1,233 @@
+from __future__ import annotations
+
+from datetime import UTC, datetime, timedelta
+from decimal import Decimal
+from typing import Any
+from uuid import UUID
+
+from trading_control_plane.authorization import RiskTier, SystemRiskState
+from trading_control_plane.commands import hash_json
+from trading_control_plane.risk import (
+    CapitalInput,
+    CertificationBinding,
+    FactFreshnessLimit,
+    FactObservation,
+    FactStatus,
+    FactType,
+    MarketRiskInput,
+    PositionDirection,
+    RequestedRiskIncrease,
+    RiskEvaluationInput,
+    RiskInclusionMode,
+    RiskPolicyParameters,
+    RiskPrecheckRequest,
+    ScopeLimit,
+    ScopeRiskInput,
+    ScopeType,
+    TradeLossComponents,
+)
+
+SCOPE_IDS = {
+    ScopeType.UNDERLYING: "BTC",
+    ScopeType.RISK_CLUSTER: "CRYPTO_MAJOR",
+    ScopeType.SECTOR: "CRYPTO",
+    ScopeType.EXECUTION_DOMAIN: "BINANCE_USDM",
+    ScopeType.VENUE: "BINANCE",
+    ScopeType.COLLATERAL_POOL: "BINANCE:USDT-CROSS",
+    ScopeType.PORTFOLIO: "org-1",
+}
+
+
+def make_policy(**updates: Any) -> RiskPolicyParameters:
+    values: dict[str, Any] = {
+        "one_r_fraction": Decimal("0.005"),
+        "low_loss_multiplier": Decimal("1"),
+        "medium_loss_multiplier": Decimal("2"),
+        "high_loss_multiplier": Decimal("3"),
+        "low_max_leverage": Decimal("3"),
+        "medium_max_leverage": Decimal("5"),
+        "high_max_leverage": Decimal("10"),
+        # Test-only shadow input. No migration or runtime default uses this value.
+        "trade_funding_pct": Decimal("0.02"),
+        "absolute_trade_loss_cap": None,
+        "consistency_window_ms": 1_000,
+        "max_future_skew_ms": 1_000,
+        "fact_freshness_limits": tuple(
+            FactFreshnessLimit(fact_type=fact_type, max_age_ms=5_000) for fact_type in FactType
+        ),
+        "scope_limits": tuple(
+            ScopeLimit(
+                scope_type=scope_type,
+                scope_id=scope_id,
+                planned_loss_cap=Decimal("10000"),
+                stress_loss_cap=Decimal("15000"),
+            )
+            for scope_type, scope_id in SCOPE_IDS.items()
+        ),
+    }
+    values.update(updates)
+    return RiskPolicyParameters.model_validate(values)
+
+
+def make_capital(**updates: Any) -> CapitalInput:
+    values: dict[str, Any] = {
+        "risk_inclusion_mode": RiskInclusionMode.EXCHANGE_ONLY,
+        "exchange_settled_equity_ex_upnl": Decimal("100000"),
+        "current_unrealized_pnl": Decimal("0"),
+        "eligible_vault_equity": Decimal("0"),
+        "exchange_risk_equity": Decimal("100000"),
+        "total_capital_snapshot_0": Decimal("100000"),
+        "funding_used": Decimal("0"),
+        "funding_reserved": Decimal("0"),
+        "available_margin": Decimal("10000"),
+    }
+    values.update(updates)
+    if "exchange_risk_equity" not in updates:
+        settled = Decimal(values["exchange_settled_equity_ex_upnl"])
+        unrealized = Decimal(values["current_unrealized_pnl"])
+        values["exchange_risk_equity"] = max(Decimal("0"), min(settled, settled + unrealized))
+    return CapitalInput.model_validate(values)
+
+
+def make_requested(**updates: Any) -> RequestedRiskIncrease:
+    values: dict[str, Any] = {
+        "requested_quantity": Decimal("1"),
+        "quantity_step": Decimal("0.001"),
+        "requested_reserved_heat": Decimal("100"),
+        "requested_protected_profit_giveback": Decimal("0"),
+        "requested_cost_stress_add_on": Decimal("10"),
+        "requested_funding": Decimal("1000"),
+        "requested_margin": Decimal("1000"),
+        "requested_effective_leverage": Decimal("2"),
+        "venue_leverage_cap": Decimal("20"),
+        "proposal_requested_loss_cap": Decimal("500"),
+    }
+    values.update(updates)
+    return RequestedRiskIncrease.model_validate(values)
+
+
+def make_request(
+    *,
+    now: datetime | None = None,
+    capital: CapitalInput | None = None,
+    requested: RequestedRiskIncrease | None = None,
+    current_trade_loss: TradeLossComponents | None = None,
+    market: MarketRiskInput | None = None,
+    risk_tier: RiskTier = RiskTier.LOW,
+    fact_status: FactStatus = FactStatus.KNOWN,
+    fact_age: timedelta = timedelta(milliseconds=100),
+    scope_risks: tuple[ScopeRiskInput, ...] | None = None,
+    instrument_classified: bool = True,
+    capability_certificate_valid: bool = True,
+    protection_available: bool = True,
+) -> RiskPrecheckRequest:
+    observed_at = now or datetime.now(UTC)
+    event_time = observed_at - fact_age
+    if scope_risks is None:
+        scope_risks = tuple(
+            ScopeRiskInput(
+                scope_type=scope_type,
+                scope_id=scope_id,
+                current_planned_loss=Decimal("0"),
+                requested_incremental_planned_loss=Decimal("110"),
+                current_stress_loss=Decimal("0"),
+                requested_incremental_stress_loss=Decimal("150"),
+            )
+            for scope_type, scope_id in SCOPE_IDS.items()
+        )
+    return RiskPrecheckRequest(
+        organization_id="org-1",
+        proposal_ref="proposal-candidate-1",
+        candidate_version=1,
+        originating_caller_ref="user:test-proposer",
+        originating_channel="WEB",
+        originating_auth_context_ref="test-only:origin-auth",
+        policy_version="risk-shadow-test-v1",
+        risk_tier=risk_tier,
+        binding=CertificationBinding(
+            strategy_id="strategy-test",
+            strategy_version="strategy-test-v1",
+            strategy_parameter_version="strategy-params-test-v1",
+            authorization_policy_version="authorization-policy-test-v1",
+            instrument_identity="BINANCE:BTCUSDT-PERP",
+            venue="BINANCE",
+            execution_domain="BINANCE_USDM",
+            account_id="account-1",
+            account_abstraction="STANDARD",
+            margin_mode="CROSS",
+            collateral_scope="USDT",
+            collateral_pool_id="BINANCE:USDT-CROSS",
+            adapter_version="adapter-test-v1",
+            freqtrade_worker_version="worker-test-v1",
+            account_capability_version="account-capability-test-v1",
+            catalog_version="catalog-test-v1",
+            capability_certificate_ref="test-only:certificate-fixture",
+        ),
+        market=market
+        or MarketRiskInput(
+            direction=PositionDirection.LONG,
+            mark_price=Decimal("100"),
+            index_price=Decimal("100"),
+            executable_price=Decimal("100.5"),
+            initial_invalidation_price=Decimal("90"),
+            contract_multiplier=Decimal("1"),
+            tick_size=Decimal("0.1"),
+            minimum_quantity=Decimal("0.001"),
+            minimum_notional=Decimal("5"),
+            funding_rate=Decimal("0.0001"),
+            max_slippage_bps=Decimal("20"),
+            contract_rules_version="rules-test-v1",
+            loss_model_version="loss-model-test-v1",
+            loss_calculation_ref="test-only:loss-calculation-fixture",
+        ),
+        capital=capital or make_capital(),
+        current_trade_loss=current_trade_loss
+        or TradeLossComponents(
+            open_heat=Decimal("0"),
+            reserved_heat=Decimal("0"),
+            unknown_heat=Decimal("0"),
+            protected_profit_giveback=Decimal("0"),
+            cost_stress_add_on=Decimal("0"),
+        ),
+        requested=requested or make_requested(),
+        scope_risks=scope_risks,
+        facts=tuple(
+            FactObservation(
+                fact_type=fact_type,
+                status=fact_status,
+                source_ref=f"test-only:{fact_type.value.lower()}",
+                source_version="test-source-v1",
+                payload_hash=hash_json(
+                    {
+                        "fact_type": fact_type.value,
+                        "event_time": event_time.isoformat(),
+                    }
+                ),
+                event_time=event_time,
+                received_at=event_time + timedelta(milliseconds=10),
+            )
+            for fact_type in FactType
+        ),
+        instrument_classified=instrument_classified,
+        capability_certificate_valid=capability_certificate_valid,
+        protection_available=protection_available,
+    )
+
+
+def make_evaluation(
+    *,
+    now: datetime | None = None,
+    request: RiskPrecheckRequest | None = None,
+    policy: RiskPolicyParameters | None = None,
+    system_risk_state: SystemRiskState = SystemRiskState.NORMAL,
+) -> RiskEvaluationInput:
+    decision_time = now or datetime.now(UTC)
+    return RiskEvaluationInput(
+        request=request or make_request(now=decision_time),
+        risk_policy_id=UUID("00000000-0000-0000-0000-000000000004"),
+        policy=policy or make_policy(),
+        policy_valid_from=decision_time - timedelta(days=1),
+        policy_valid_until=decision_time + timedelta(days=1),
+        system_risk_state=system_risk_state,
+        decision_time=decision_time,
+    )

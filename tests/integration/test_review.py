@@ -148,6 +148,7 @@ def seed_proposal(
                 version=1,
                 reason_code="INTEGRATION_FIXTURE",
                 policy_version="risk-state-v1",
+                transition_source_ref="test-only:review-fixture",
                 updated_at=now,
             )
         )
