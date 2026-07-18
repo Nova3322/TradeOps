@@ -1,5 +1,8 @@
 # WP-0031：Canonical 保护风险接入最终预检
 
+> 后续状态：WP-0032 已升级到 v5，删除 caller `requested_incremental_stress_loss`，并由 per-scope
+> 版本化压力场景派生 Reservation stress allocation；本文件保留 v4 历史合同。
+
 ## 1. 交付目标与权威边界
 
 WP-0030 已能从 current position/protection 事实互斥派生 Open Heat 与 Protected-Profit Giveback，但
@@ -131,7 +134,7 @@ v4 新建 Reservation 的 `protected_profit_giveback_reserved=0`。数据库列�
 ## 7. 明确未完成范围
 
 - canonical current risk 目前只在 ADD 最终预检时强绑定；持续风险监控和退出仲裁尚未消费该投影；
-- scope 的 caller `requested_incremental_stress_loss` 尚未由版本化情景模型完全派生；
+- WP-0032 已移除 caller scope stress 并完成版本化派生；持续 current stress 重估与正式参数认证仍未完成；
 - 已有 v3 shadow Reservation 的历史非零 giveback 列仍按旧合同可读，不进行破坏性回写；
 - 真实 Binance/Hyperliquid collector、正式 cost 参数、FX/USD、稳定币折扣与脱锚证据仍未完成；
 - 真实 OMS/Freqtrade/VenueAdapter、Web/PWA、Telegram、Margin、Vault/CTO、PnL 与运维仍未完成；

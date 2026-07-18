@@ -22,6 +22,7 @@ from trading_control_plane.projections import CurrentAccountEquityScope
 from trading_control_plane.risk import (
     CANONICAL_COST_STRESS_MODEL_VERSION,
     CANONICAL_LOSS_MODEL_VERSION,
+    CANONICAL_SCOPE_STRESS_MODEL_VERSION,
     CapitalInput,
     CapitalProjectionBinding,
     CertificationBinding,
@@ -38,6 +39,7 @@ from trading_control_plane.risk import (
     RiskPrecheckRequest,
     ScopeLimit,
     ScopeRiskInput,
+    ScopeStressPolicyParameters,
     ScopeType,
     TradeLossComponents,
 )
@@ -132,6 +134,14 @@ SCOPE_IDS = {
     ScopeType.PORTFOLIO: "org-1",
 }
 
+TEST_SCOPE_STRESS_SCENARIO = ScopeStressPolicyParameters(
+    model_version=CANONICAL_SCOPE_STRESS_MODEL_VERSION,
+    gap_bps=Decimal("50"),
+    liquidity_degradation_bps=Decimal("100"),
+    unprotected_window_bps=Decimal("25"),
+    source_ref="test-only:scope-stress-research-v1",
+)
+
 
 def make_policy(**updates: Any) -> RiskPolicyParameters:
     values: dict[str, Any] = {
@@ -163,6 +173,7 @@ def make_policy(**updates: Any) -> RiskPolicyParameters:
                 scope_id=scope_id,
                 planned_loss_cap=Decimal("10000"),
                 stress_loss_cap=Decimal("15000"),
+                stress_scenario=TEST_SCOPE_STRESS_SCENARIO,
             )
             for scope_type, scope_id in SCOPE_IDS.items()
         ),
@@ -238,11 +249,6 @@ def make_request(
         loss_model_version=CANONICAL_LOSS_MODEL_VERSION,
         loss_calculation_ref="test-only:loss-calculation-fixture",
     )
-    incremental_loss = (
-        abs(effective_market.executable_price - effective_market.initial_invalidation_price)
-        * effective_requested.requested_quantity
-        * effective_market.contract_multiplier
-    )
     if scope_risks is None:
         scope_risks = tuple(
             ScopeRiskInput(
@@ -250,7 +256,6 @@ def make_request(
                 scope_id=scope_id,
                 current_planned_loss=Decimal("0"),
                 current_stress_loss=Decimal("0"),
-                requested_incremental_stress_loss=incremental_loss + Decimal("40"),
             )
             for scope_type, scope_id in SCOPE_IDS.items()
         )

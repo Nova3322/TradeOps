@@ -60,8 +60,8 @@ cost stress add-on
 `NUMERIC(38,18)` 精度。这样风险决策不会小于后续数据库保存值，decision、reservation 和 durable
 exposure 的金额边界一致。
 
-> 历史说明：WP-0031 已把命令升级到 v4，删除 caller-reported giveback；当前仓位 Giveback 改由
-> canonical current protected-position risk 进入 `current_trade_loss`。本节保留 v3 当时的合同记录。
+> 历史说明：WP-0031 已把命令升级到 v4，删除 caller-reported giveback；WP-0032 再升级到 v5，删除
+> caller scope stress 并从 per-scope 冻结场景派生。本节保留 v3 当时的合同记录。
 
 最终新增损失为：
 
@@ -84,7 +84,7 @@ risk.precheck.evaluate.v3      payload_schema_version=3
 execution.intent.create.v3     payload_schema_version=3
 ```
 
-以上为本包历史版本；当前版本见 WP-0031 的 v4 合同。
+以上为本包历史版本；当前版本见 WP-0032 的 v5 合同。
 
 v1/v2 命令返回 `COMMAND_TYPE_MISMATCH`；v3 携带非 3 schema 返回
 `PAYLOAD_SCHEMA_VERSION_MISMATCH`。v3 请求删除：

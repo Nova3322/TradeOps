@@ -579,8 +579,8 @@ class DurableExposureResolver:
 
 
 class ExecutionIntentService:
-    command_type = "execution.intent.create.v4"
-    payload_schema_version = 4
+    command_type = "execution.intent.create.v5"
+    payload_schema_version = 5
 
     def __init__(
         self,
@@ -957,11 +957,11 @@ class ExecutionIntentService:
             {
                 "scope_type": scope.scope_type.value,
                 "scope_id": scope.scope_id,
-                "planned_loss": str(evaluation.requested_incremental_worst_case_loss),
-                "stress_loss": str(scope.requested_incremental_stress_loss),
+                "planned_loss": str(scope.incremental_planned_loss),
+                "stress_loss": str(scope.incremental_stress_loss),
             }
             for scope in sorted(
-                request.risk_request.scope_risks,
+                evaluation.scope_decisions,
                 key=lambda item: (item.scope_type.value, item.scope_id),
             )
         ]

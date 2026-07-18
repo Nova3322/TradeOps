@@ -30,6 +30,7 @@ from tests.reconciliation_fixtures import (
 from tests.risk_fixtures import (
     TEST_EXECUTION_CAPITAL_PROJECTION_BINDING,
     TEST_EXECUTION_CAPITAL_SCOPE_MANIFEST,
+    TEST_SCOPE_STRESS_SCENARIO,
     make_capital,
     make_policy,
     make_request,
@@ -166,6 +167,7 @@ def seed_execution_policy(database: Database, now: datetime) -> None:
                 scope_id=scope_id,
                 planned_loss_cap=Decimal("10000"),
                 stress_loss_cap=Decimal("15000"),
+                stress_scenario=TEST_SCOPE_STRESS_SCENARIO,
             )
             for scope_type, scope_id in EXECUTION_SCOPE_IDS.items()
         )
@@ -285,15 +287,12 @@ def execution_risk_request(
         requested_effective_leverage=Decimal("2"),
         proposal_requested_loss_cap=Decimal("500"),
     )
-    base_heat = abs(market_price - Decimal("90")) * quantity
-    incremental_loss = base_heat
     scopes = tuple(
         ScopeRiskInput(
             scope_type=scope_type,
             scope_id=scope_id,
             current_planned_loss=scope_current_planned,
             current_stress_loss=scope_current_stress,
-            requested_incremental_stress_loss=incremental_loss + Decimal("40"),
         )
         for scope_type, scope_id in EXECUTION_SCOPE_IDS.items()
     )
@@ -388,7 +387,7 @@ def create_intent_envelope(
     request = risk_request or execution_risk_request(proposal, now=now)
     return CommandEnvelope(
         idempotency_key=idempotency_key or f"execution-intent-{uuid4()}",
-        command_type="execution.intent.create.v4",
+        command_type="execution.intent.create.v5",
         object_type="Campaign",
         object_id=str(campaign.campaign_id),
         expected_version=1,
@@ -399,7 +398,7 @@ def create_intent_envelope(
         issued_at=now,
         expires_at=now + timedelta(minutes=2),
         auth_context_ref="internal:oms-risk-reservation-service",
-        payload_schema_version=4,
+        payload_schema_version=5,
         reason="create non-dispatchable shadow intent",
         payload={
             "intent_kind": "INITIAL",
@@ -434,7 +433,7 @@ def proposal_precheck_envelope(request: RiskPrecheckRequest) -> CommandEnvelope:
         issued_at=now,
         expires_at=now + timedelta(minutes=2),
         auth_context_ref="test-only:proposal-precheck-auth",
-        payload_schema_version=4,
+        payload_schema_version=5,
         reason="evaluate proposal against existing durable exposure",
         payload=request.model_dump(mode="json"),
     )
@@ -483,12 +482,12 @@ def create_add_envelope(
         current_cost_stress_add_on=Decimal("0.1608"),
         funding_used=Decimal("500"),
         scope_current_planned=Decimal("5.1608"),
-        scope_current_stress=Decimal("45"),
+        scope_current_stress=Decimal("6.040175"),
         market_price=Decimal("120"),
     )
     return CommandEnvelope(
         idempotency_key=f"execution-add-{uuid4()}",
-        command_type="execution.intent.create.v4",
+        command_type="execution.intent.create.v5",
         object_type="Campaign",
         object_id=str(campaign.campaign_id),
         expected_version=2,
@@ -499,7 +498,7 @@ def create_add_envelope(
         issued_at=now,
         expires_at=now + timedelta(minutes=2),
         auth_context_ref="internal:oms-risk-reservation-service",
-        payload_schema_version=4,
+        payload_schema_version=5,
         reason="create non-dispatchable shadow add intent",
         payload={
             "intent_kind": "ADD",
@@ -1182,7 +1181,7 @@ def execute_fact(
     return result
 
 
-def test_execution_intent_legacy_commands_and_wrong_v4_schema_are_rejected(
+def test_execution_intent_legacy_commands_and_wrong_v5_schema_are_rejected(
     database: Database,
 ) -> None:
     proposal, campaign, initial = prepare_authorization(database)
@@ -1195,6 +1194,17 @@ def test_execution_intent_legacy_commands_and_wrong_v4_schema_are_rejected(
     v3 = create_intent_envelope(proposal, campaign, initial, now=datetime.now(UTC)).model_copy(
         update={"command_type": "execution.intent.create.v3"}
     )
+    v4 = create_intent_envelope(proposal, campaign, initial, now=datetime.now(UTC)).model_copy(
+        update={"command_type": "execution.intent.create.v4"}
+    )
+    old_field = create_intent_envelope(proposal, campaign, initial, now=datetime.now(UTC))
+    old_payload = dict(old_field.payload)
+    old_risk_request = dict(old_payload["risk_request"])
+    old_scopes = [dict(scope) for scope in old_risk_request["scope_risks"]]
+    old_scopes[0]["requested_incremental_stress_loss"] = "1"
+    old_risk_request["scope_risks"] = old_scopes
+    old_payload["risk_request"] = old_risk_request
+    old_field = old_field.model_copy(update={"payload": old_payload})
     wrong_schema = create_intent_envelope(
         proposal,
         campaign,
@@ -1205,6 +1215,8 @@ def test_execution_intent_legacy_commands_and_wrong_v4_schema_are_rejected(
     v1_result = execute_create(database, v1)
     v2_result = execute_create(database, v2)
     v3_result = execute_create(database, v3)
+    v4_result = execute_create(database, v4)
+    old_field_result = execute_create(database, old_field)
     schema_result = execute_create(database, wrong_schema)
 
     assert v1_result.status is CommandStatus.REJECTED
@@ -1213,6 +1225,10 @@ def test_execution_intent_legacy_commands_and_wrong_v4_schema_are_rejected(
     assert v2_result.error_code == "COMMAND_TYPE_MISMATCH"
     assert v3_result.status is CommandStatus.REJECTED
     assert v3_result.error_code == "COMMAND_TYPE_MISMATCH"
+    assert v4_result.status is CommandStatus.REJECTED
+    assert v4_result.error_code == "COMMAND_TYPE_MISMATCH"
+    assert old_field_result.status is CommandStatus.REJECTED
+    assert old_field_result.error_code == "EXECUTION_INPUT_INVALID"
     assert schema_result.status is CommandStatus.REJECTED
     assert schema_result.error_code == "PAYLOAD_SCHEMA_VERSION_MISMATCH"
 
@@ -1265,6 +1281,21 @@ def test_initial_intent_atomically_persists_decision_reservation_ledger_and_hist
             "5.410800000000000000"
         )
         assert decision.decision["cost_stress_model_version"] == ("fee-stop-funding-stress-v1")
+        underlying_stress = next(
+            scope
+            for scope in decision.decision["scope_decisions"]
+            if scope["scope_type"] == "UNDERLYING"
+        )
+        assert Decimal(underlying_stress["incremental_planned_loss"]) == Decimal("5.4108")
+        assert Decimal(underlying_stress["gap_stress_add_on"]) == Decimal("0.25125")
+        assert Decimal(underlying_stress["liquidity_degradation_stress_add_on"]) == Decimal(
+            "0.5025"
+        )
+        assert Decimal(underlying_stress["unprotected_window_stress_add_on"]) == Decimal("0.125625")
+        assert Decimal(underlying_stress["incremental_stress_loss"]) == Decimal("6.290175")
+        assert (
+            underlying_stress["scope_stress_model_version"] == "planned-loss-plus-scope-shocks-v1"
+        )
         assert (
             "requested_reserved_heat"
             not in decision.input_snapshot["request"]["risk_request"]["requested"]
@@ -1281,12 +1312,21 @@ def test_initial_intent_atomically_persists_decision_reservation_ledger_and_hist
             "requested_incremental_planned_loss" not in scope
             for scope in decision.input_snapshot["request"]["risk_request"]["scope_risks"]
         )
+        assert all(
+            "requested_incremental_stress_loss" not in scope
+            for scope in decision.input_snapshot["request"]["risk_request"]["scope_risks"]
+        )
         assert intent.dispatch_eligible is False
         assert reservation.order_intent_id == intent.order_intent_id
         assert reservation.reserved_heat == Decimal("5.4108")
         assert reservation.base_heat_reserved == Decimal("5.25")
         assert reservation.protected_profit_giveback_reserved == 0
         assert reservation.cost_stress_add_on_reserved == Decimal("0.1608")
+        assert all(
+            Decimal(allocation["planned_loss"]) == Decimal("5.4108")
+            and Decimal(allocation["stress_loss"]) == Decimal("6.290175")
+            for allocation in reservation.scope_allocations
+        )
         assert exposure.status == "RESERVED"
         assert exposure.total_heat == Decimal("5.4108")
         assert count_rows(session, RiskLedgerEntry) == 1
@@ -1447,7 +1487,7 @@ def test_durable_exposure_snapshot_subtracts_internal_margin_reservations(
         current_cost_stress_add_on=Decimal("0.1608"),
         funding_reserved=Decimal("500"),
         scope_current_planned=Decimal("5.4108"),
-        scope_current_stress=Decimal("45.25"),
+        scope_current_stress=Decimal("6.290175"),
     )
     exact_request = CreateExecutionIntentRequest.model_validate(
         create_intent_envelope(
@@ -1509,7 +1549,7 @@ def test_proposal_precheck_derives_other_campaign_funding_margin_and_scope(
         now=datetime.now(UTC),
         funding_reserved=Decimal("500"),
         scope_current_planned=Decimal("5.4108"),
-        scope_current_stress=Decimal("45.25"),
+        scope_current_stress=Decimal("6.290175"),
     )
     allowed = IdempotentCommandExecutor(database.session_factory).execute(
         proposal_precheck_envelope(exact),
@@ -1559,7 +1599,7 @@ def test_durable_exposure_resolver_blocks_internal_margin_overcommit(database: D
         current_cost_stress_add_on=Decimal("0.1608"),
         funding_reserved=Decimal("500"),
         scope_current_planned=Decimal("5.4108"),
-        scope_current_stress=Decimal("45.25"),
+        scope_current_stress=Decimal("6.290175"),
     )
     risk_request = risk_request.model_copy(
         update={
@@ -1781,7 +1821,7 @@ def test_partial_fill_then_canonical_cancel_releases_only_unfilled_quantity(
         current_cost_stress_add_on=Decimal("0.06432"),
         funding_used=Decimal("200"),
         scope_current_planned=Decimal("2.16432"),
-        scope_current_stress=Decimal("18.10"),
+        scope_current_stress=Decimal("2.51607"),
     )
     request = CreateExecutionIntentRequest.model_validate(
         create_intent_envelope(
@@ -1973,7 +2013,7 @@ def test_add_zero_fill_releases_unit_then_positive_fill_consumes_it(
         derived_scopes = add_decision.input_snapshot["request"]["risk_request"]["scope_risks"]
         assert all(
             Decimal(scope["current_planned_loss"]) == Decimal("5.1608")
-            and Decimal(scope["current_stress_loss"]) == Decimal("45")
+            and Decimal(scope["current_stress_loss"]) == Decimal("6.040175")
             for scope in derived_scopes
         )
         assert add_reservation.protected_profit_giveback_reserved == 0

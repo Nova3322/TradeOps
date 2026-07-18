@@ -1,5 +1,8 @@
 # WP-0026：规范化 Base Heat 与 Scope 增量
 
+> 后续状态：WP-0032 已升级到 v5，删除 caller `requested_incremental_stress_loss`，并由每个 scope 的
+> 版本化 Risk Policy 场景派生 Stress；本文件保留 v2 历史合同。
+
 > 后续状态：WP-0031 已删除 v4 请求中的 `requested_protected_profit_giveback`，当前仓位 Open Heat 与
 > Giveback 改由 canonical current protected-position risk 派生；本文中的该字段仅保留为 v2 历史合同。
 

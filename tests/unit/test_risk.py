@@ -10,6 +10,7 @@ from pydantic import ValidationError
 
 from tests.risk_fixtures import (
     SCOPE_IDS,
+    TEST_SCOPE_STRESS_SCENARIO,
     make_capital,
     make_evaluation,
     make_policy,
@@ -27,6 +28,7 @@ from trading_control_plane.risk import (
     RiskPolicyParameters,
     RiskPrecheckRequest,
     ScopeLimit,
+    ScopeRiskDecision,
     ScopeType,
     TradeLossComponents,
 )
@@ -145,6 +147,7 @@ def test_scope_limit_denies_manual_request_and_reports_safe_quantity_without_exe
                     Decimal("10") if scope_type is ScopeType.UNDERLYING else Decimal("10000")
                 ),
                 stress_loss_cap=Decimal("15000"),
+                stress_scenario=TEST_SCOPE_STRESS_SCENARIO,
             )
             for scope_type, scope_id in SCOPE_IDS.items()
         )
@@ -205,11 +208,25 @@ def test_requested_base_heat_is_canonical_for_long_short_and_decision_evidence()
     assert result.requested_cost_stress_add_on == Decimal("0.3216")
     assert result.requested_incremental_worst_case_loss == Decimal("10.8216")
     assert result.cost_stress_model_version == "fee-stop-funding-stress-v1"
+    assert all(
+        decision.incremental_planned_loss == Decimal("10.8216")
+        and decision.gap_stress_add_on == Decimal("0.5025")
+        and decision.liquidity_degradation_stress_add_on == Decimal("1.005")
+        and decision.unprotected_window_stress_add_on == Decimal("0.25125")
+        and decision.incremental_stress_loss == Decimal("12.58035")
+        and decision.scope_stress_model_version == "planned-loss-plus-scope-shocks-v1"
+        and decision.scope_stress_source_ref == "test-only:scope-stress-research-v1"
+        for decision in result.scope_decisions
+    )
     assert short_result.requested_fee_stress == Decimal("0.18")
     assert short_result.requested_stop_penetration_stress == Decimal("0.36")
     assert short_result.requested_adverse_funding_stress == Decimal("0.036")
     assert short_result.requested_cost_stress_add_on == Decimal("0.576")
     assert short_result.requested_incremental_worst_case_loss == Decimal("20.576")
+    assert all(
+        decision.incremental_stress_loss == Decimal("23.726")
+        for decision in short_result.scope_decisions
+    )
 
 
 @pytest.mark.parametrize(
@@ -219,6 +236,7 @@ def test_requested_base_heat_is_canonical_for_long_short_and_decision_evidence()
         (("requested", "requested_cost_stress_add_on"), Decimal("1")),
         (("requested", "requested_protected_profit_giveback"), Decimal("1")),
         (("scope_risks", 0, "requested_incremental_planned_loss"), Decimal("1")),
+        (("scope_risks", 0, "requested_incremental_stress_loss"), Decimal("1")),
     ),
 )
 def test_v1_caller_reported_base_or_scope_planned_loss_is_rejected(
@@ -246,13 +264,6 @@ def test_contract_multiplier_and_canonical_loss_model_are_exactly_bound() -> Non
     with pytest.raises(ValidationError, match="directional-entry-to-invalidation-v1"):
         RiskPrecheckRequest.model_validate(model_payload)
 
-    stress_payload = make_request().model_dump(mode="python")
-    stress_payload["scope_risks"][0]["requested_incremental_stress_loss"] = Decimal("10")
-    stress_request = RiskPrecheckRequest.model_validate(stress_payload)
-    stress_result = RiskEvaluator().evaluate(make_evaluation(request=stress_request))
-    assert stress_result.result is RiskDecisionResult.DENY
-    assert stress_result.primary_reason_code == "SCOPE_STRESS_INPUT_INVALID"
-
 
 def test_cost_stress_policy_has_no_default_and_favorable_funding_is_not_charged() -> None:
     missing = make_policy().model_dump(mode="python")
@@ -275,6 +286,58 @@ def test_cost_stress_policy_has_no_default_and_favorable_funding_is_not_charged(
     assert result.requested_cost_stress_add_on == Decimal("0.3015")
 
 
+def test_scope_stress_policy_has_no_default_or_unattributed_source() -> None:
+    missing = make_policy().model_dump(mode="python")
+    missing["scope_limits"][0].pop("stress_scenario")
+    with pytest.raises(ValidationError, match="stress_scenario"):
+        RiskPolicyParameters.model_validate(missing)
+
+    invalid_source = make_policy().model_dump(mode="python")
+    invalid_source["scope_limits"][0]["stress_scenario"]["source_ref"] = ""
+    with pytest.raises(ValidationError, match="source_ref"):
+        RiskPolicyParameters.model_validate(invalid_source)
+
+
+def test_scope_stress_limit_uses_policy_derived_scenario_not_planned_loss() -> None:
+    policy = make_policy(
+        scope_limits=tuple(
+            limit.model_copy(
+                update={
+                    "stress_loss_cap": (
+                        Decimal("12")
+                        if limit.scope_type is ScopeType.UNDERLYING
+                        else limit.stress_loss_cap
+                    )
+                }
+            )
+            for limit in make_policy().scope_limits
+        )
+    )
+
+    result = RiskEvaluator().evaluate(make_evaluation(policy=policy))
+
+    underlying = next(
+        decision
+        for decision in result.scope_decisions
+        if decision.scope_type is ScopeType.UNDERLYING
+    )
+    assert result.result is RiskDecisionResult.DENY
+    assert "SCOPE_STRESS_LIMIT_EXCEEDED" in result.reason_codes
+    assert underlying.incremental_planned_loss == Decimal("10.8216")
+    assert underlying.incremental_stress_loss == Decimal("12.58035")
+    assert underlying.planned_passed is True
+    assert underlying.stress_passed is False
+
+
+def test_scope_decision_rejects_inconsistent_derived_stress_evidence() -> None:
+    decision = RiskEvaluator().evaluate(make_evaluation()).scope_decisions[0]
+    payload = decision.model_dump(mode="python")
+    payload["incremental_stress_loss"] = decision.incremental_planned_loss
+
+    with pytest.raises(ValidationError, match="planned loss plus scenario add-ons"):
+        ScopeRiskDecision.model_validate(payload)
+
+
 def test_base_and_cost_amounts_round_up_to_database_precision() -> None:
     baseline = make_request()
     precise = make_request(
@@ -289,6 +352,12 @@ def test_base_and_cost_amounts_round_up_to_database_precision() -> None:
     assert result.requested_fee_stress == Decimal("0.100500000000000001")
     assert result.requested_stop_penetration_stress == Decimal("0.201000000000000001")
     assert result.requested_adverse_funding_stress == Decimal("0.020100000000000001")
+    assert all(
+        decision.gap_stress_add_on == Decimal("0.502500000000000001")
+        and decision.liquidity_degradation_stress_add_on == Decimal("1.005000000000000001")
+        and decision.unprotected_window_stress_add_on == Decimal("0.251250000000000001")
+        for decision in result.scope_decisions
+    )
 
 
 def test_initial_precheck_obeys_formal_risk_state_action_matrix() -> None:

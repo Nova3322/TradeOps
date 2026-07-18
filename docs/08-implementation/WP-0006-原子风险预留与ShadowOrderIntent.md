@@ -1,8 +1,8 @@
 # WP-0006：原子风险预留与 Shadow OrderIntent
 
-> 后续状态：WP-0031 已将创建命令升级为 `execution.intent.create.v4` / payload schema 4，并移除调用方
-> 自报 base Heat、cost、protected-profit giveback 与 scope planned loss；当前输入合同以
-> [WP-0031](WP-0031-Canonical保护风险接入最终预检.md) 为准。本文件保留 WP-0006 当时的状态机交付证据。
+> 后续状态：WP-0032 已将创建命令升级为 `execution.intent.create.v5` / payload schema 5；WP-0031/0032
+> 先后移除 caller giveback 与 scope stress，base Heat、cost、planned/stress 均由 Risk Engine 派生。
+> 当前输入合同以 [WP-0032](WP-0032-Scope-Stress策略派生.md) 为准。本文件保留 WP-0006 历史证据。
 
 > 状态：Implemented
 > 上位合同：《风险引擎规格》第 5、8、11 节、《领域模型与状态机》第 7、10、11 节、

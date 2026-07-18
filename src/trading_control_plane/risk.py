@@ -62,6 +62,7 @@ ONE_R_FRACTION = Decimal("0.005")
 RISK_AMOUNT_QUANTUM = Decimal("0.000000000000000001")
 CANONICAL_LOSS_MODEL_VERSION = "directional-entry-to-invalidation-v1"
 CANONICAL_COST_STRESS_MODEL_VERSION = "fee-stop-funding-stress-v1"
+CANONICAL_SCOPE_STRESS_MODEL_VERSION = "planned-loss-plus-scope-shocks-v1"
 
 
 class RiskDecisionResult(StrEnum):
@@ -132,7 +133,6 @@ REASON_PRIORITY = (
     "PROTECTION_UNAVAILABLE",
     "SYSTEM_RISK_STATE_DENY",
     "SCOPE_POLICY_MISSING",
-    "SCOPE_STRESS_INPUT_INVALID",
     "PROPOSAL_RISK_CAP_INVALID",
     "INVALIDATION_PRICE_INVALID",
     "TRADING_RULE_VIOLATION",
@@ -154,13 +154,26 @@ class FactFreshnessLimit(BaseModel):
     max_age_ms: int = Field(gt=0)
 
 
+class ScopeStressPolicyParameters(BaseModel):
+    """Per-scope frozen stress scenario; intentionally has no production defaults."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    model_version: Literal["planned-loss-plus-scope-shocks-v1"]
+    gap_bps: Decimal = Field(ge=0)
+    liquidity_degradation_bps: Decimal = Field(ge=0)
+    unprotected_window_bps: Decimal = Field(ge=0)
+    source_ref: str = Field(min_length=1, max_length=255)
+
+
 class ScopeLimit(BaseModel):
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
     scope_type: ScopeType
     scope_id: str = Field(min_length=1, max_length=255)
     planned_loss_cap: Decimal = Field(ge=0)
     stress_loss_cap: Decimal = Field(ge=0)
+    stress_scenario: ScopeStressPolicyParameters
 
     @property
     def key(self) -> tuple[ScopeType, str]:
@@ -385,7 +398,6 @@ class ScopeRiskInput(BaseModel):
     scope_id: str = Field(min_length=1, max_length=255)
     current_planned_loss: Decimal = Field(ge=0)
     current_stress_loss: Decimal = Field(ge=0)
-    requested_incremental_stress_loss: Decimal = Field(ge=0)
 
     @property
     def key(self) -> tuple[ScopeType, str]:
@@ -471,6 +483,18 @@ class CostStressBreakdown(BaseModel):
         return self.fee_stress + self.stop_penetration_stress + self.adverse_funding_stress
 
 
+class ScopeStressBreakdown(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    gap_stress: Decimal = Field(ge=0)
+    liquidity_degradation_stress: Decimal = Field(ge=0)
+    unprotected_window_stress: Decimal = Field(ge=0)
+
+    @property
+    def scenario_add_on(self) -> Decimal:
+        return self.gap_stress + self.liquidity_degradation_stress + self.unprotected_window_stress
+
+
 def _quantize_risk_amount(value: Decimal) -> Decimal:
     if value == ZERO:
         return ZERO
@@ -502,6 +526,28 @@ def derive_cost_stress(
         ),
         adverse_funding_stress=_quantize_risk_amount(
             notional * adverse_funding_rate * parameters.funding_interval_count
+        ),
+    )
+
+
+def derive_scope_stress(
+    request: RiskPrecheckRequest,
+    parameters: ScopeStressPolicyParameters,
+) -> ScopeStressBreakdown:
+    """Derive scope-only shocks from the same requested notional as planned loss."""
+
+    notional = (
+        request.requested.requested_quantity
+        * request.market.executable_price
+        * request.binding.contract_multiplier
+    )
+    return ScopeStressBreakdown(
+        gap_stress=_quantize_risk_amount(notional * parameters.gap_bps / Decimal("10000")),
+        liquidity_degradation_stress=_quantize_risk_amount(
+            notional * parameters.liquidity_degradation_bps / Decimal("10000")
+        ),
+        unprotected_window_stress=_quantize_risk_amount(
+            notional * parameters.unprotected_window_bps / Decimal("10000")
         ),
     )
 
@@ -579,12 +625,38 @@ class ScopeRiskDecision(BaseModel):
 
     scope_type: ScopeType
     scope_id: str
+    incremental_planned_loss: Decimal = Field(ge=0)
+    incremental_stress_loss: Decimal = Field(ge=0)
+    gap_stress_add_on: Decimal = Field(ge=0)
+    liquidity_degradation_stress_add_on: Decimal = Field(ge=0)
+    unprotected_window_stress_add_on: Decimal = Field(ge=0)
+    scope_stress_model_version: str | None
+    scope_stress_source_ref: str | None
     planned_loss_after: Decimal
     planned_loss_cap: Decimal
     stress_loss_after: Decimal
     stress_loss_cap: Decimal
     planned_passed: bool
     stress_passed: bool
+
+    @model_validator(mode="after")
+    def derived_amounts_and_outcomes_are_consistent(self) -> Self:
+        scenario_add_on = (
+            self.gap_stress_add_on
+            + self.liquidity_degradation_stress_add_on
+            + self.unprotected_window_stress_add_on
+        )
+        if self.incremental_stress_loss != self.incremental_planned_loss + scenario_add_on:
+            raise ValueError("scope stress loss must equal planned loss plus scenario add-ons")
+        if (self.scope_stress_model_version is None) != (self.scope_stress_source_ref is None):
+            raise ValueError("scope stress model and source must be present together")
+        if self.scope_stress_model_version is None and scenario_add_on != ZERO:
+            raise ValueError("scope stress add-ons require a versioned scenario")
+        if self.planned_passed != (self.planned_loss_after <= self.planned_loss_cap):
+            raise ValueError("scope planned outcome is inconsistent with its cap")
+        if self.stress_passed != (self.stress_loss_after <= self.stress_loss_cap):
+            raise ValueError("scope stress outcome is inconsistent with its cap")
+        return self
 
 
 class RiskEvaluationResult(BaseModel):
@@ -1038,12 +1110,6 @@ class RiskEvaluator:
         current_trade_loss = request.current_trade_loss.total
         cost_stress = derive_cost_stress(request, policy)
         incremental_trade_loss = request.requested_base_heat + cost_stress.total
-        if any(
-            item.requested_incremental_stress_loss < incremental_trade_loss
-            for item in request.scope_risks
-        ):
-            reasons.append("SCOPE_STRESS_INPUT_INVALID")
-            hard_failure = True
         trade_loss_after = current_trade_loss + incremental_trade_loss
         trade_ratio = _capacity_ratio(
             effective_trade_cap,
@@ -1110,11 +1176,16 @@ class RiskEvaluator:
                     ScopeRiskDecision(
                         scope_type=scope.scope_type,
                         scope_id=scope.scope_id,
+                        incremental_planned_loss=incremental_trade_loss,
+                        incremental_stress_loss=incremental_trade_loss,
+                        gap_stress_add_on=ZERO,
+                        liquidity_degradation_stress_add_on=ZERO,
+                        unprotected_window_stress_add_on=ZERO,
+                        scope_stress_model_version=None,
+                        scope_stress_source_ref=None,
                         planned_loss_after=(scope.current_planned_loss + incremental_trade_loss),
                         planned_loss_cap=ZERO,
-                        stress_loss_after=(
-                            scope.current_stress_loss + scope.requested_incremental_stress_loss
-                        ),
+                        stress_loss_after=(scope.current_stress_loss + incremental_trade_loss),
                         stress_loss_cap=ZERO,
                         planned_passed=False,
                         stress_passed=False,
@@ -1122,8 +1193,10 @@ class RiskEvaluator:
                 )
                 continue
 
+            stress = derive_scope_stress(request, limit.stress_scenario)
+            incremental_stress_loss = incremental_trade_loss + stress.scenario_add_on
             planned_after = scope.current_planned_loss + incremental_trade_loss
-            stress_after = scope.current_stress_loss + scope.requested_incremental_stress_loss
+            stress_after = scope.current_stress_loss + incremental_stress_loss
             planned_ratio = _capacity_ratio(
                 limit.planned_loss_cap,
                 scope.current_planned_loss,
@@ -1132,7 +1205,7 @@ class RiskEvaluator:
             stress_ratio = _capacity_ratio(
                 limit.stress_loss_cap,
                 scope.current_stress_loss,
-                scope.requested_incremental_stress_loss,
+                incremental_stress_loss,
             )
             ratios.extend((planned_ratio, stress_ratio))
             if planned_ratio < ONE:
@@ -1143,6 +1216,13 @@ class RiskEvaluator:
                 ScopeRiskDecision(
                     scope_type=scope.scope_type,
                     scope_id=scope.scope_id,
+                    incremental_planned_loss=incremental_trade_loss,
+                    incremental_stress_loss=incremental_stress_loss,
+                    gap_stress_add_on=stress.gap_stress,
+                    liquidity_degradation_stress_add_on=(stress.liquidity_degradation_stress),
+                    unprotected_window_stress_add_on=stress.unprotected_window_stress,
+                    scope_stress_model_version=limit.stress_scenario.model_version,
+                    scope_stress_source_ref=limit.stress_scenario.source_ref,
                     planned_loss_after=planned_after,
                     planned_loss_cap=limit.planned_loss_cap,
                     stress_loss_after=stress_after,
@@ -1218,8 +1298,8 @@ class RiskEvaluator:
 class RiskPrecheckService:
     """Persists one immutable shadow precheck and emits audit/outbox evidence."""
 
-    command_type = "risk.precheck.evaluate.v4"
-    payload_schema_version = 4
+    command_type = "risk.precheck.evaluate.v5"
+    payload_schema_version = 5
 
     def __init__(
         self,

@@ -112,6 +112,7 @@ docs/
     ├── WP-0029-可重建当前保护投影.md
     ├── WP-0030-当前保护风险互斥分解.md
     ├── WP-0031-Canonical保护风险接入最终预检.md
+    ├── WP-0032-Scope-Stress策略派生.md
     └── evidence/
         ├── WP-0001-validation-20260718.md
         ├── WP-0002-validation-20260718.md
@@ -143,7 +144,8 @@ docs/
         ├── WP-0028-validation-20260718.md
         ├── WP-0029-validation-20260718.md
         ├── WP-0030-validation-20260718.md
-        └── WP-0031-validation-20260718.md
+        ├── WP-0031-validation-20260718.md
+        └── WP-0032-validation-20260718.md
 ```
 
 ### 专项索引
@@ -204,6 +206,7 @@ docs/
 | 实现 | [WP-0029：可重建当前保护投影](08-implementation/WP-0029-可重建当前保护投影.md) | exact-scope 保护 current view、事件时间排序、退化/冲突/陈旧遮蔽和 current-position 强绑定 |
 | 实现 | [WP-0030：当前保护风险互斥分解](08-implementation/WP-0030-当前保护风险互斥分解.md) | current Mark 到保护价总损失、Open Heat/Giveback 互斥分解、结算币种保留和计算 hash |
 | 实现 | [WP-0031：Canonical 保护风险接入最终预检](08-implementation/WP-0031-Canonical保护风险接入最终预检.md) | v4 移除 caller giveback、ADD current-risk 强绑定、七层 scope replacement delta 与有效期 |
+| 实现 | [WP-0032：Scope Stress 策略派生](08-implementation/WP-0032-Scope-Stress策略派生.md) | v5 移除 caller scope stress、per-scope 冻结场景派生与 Reservation allocation |
 
 ## 完整交付与能力激活
 
