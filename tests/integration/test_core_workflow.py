@@ -143,6 +143,9 @@ def create_approved_proposal(
         idempotency_key=key,
         strategy_id=strategy_id,
         strategy_version=strategy_version,
+        source_candidate_id="pt_test_candidate" if source is ProposalSource.SYSTEM else None,
+        source_observed_at=NOW if source is ProposalSource.SYSTEM else None,
+        source_readiness="READY" if source is ProposalSource.SYSTEM else None,
         now=NOW,
     )
     service.submit_proposal(proposal_id, proposer_id, now=NOW)
@@ -1967,6 +1970,9 @@ def test_human_cannot_spoof_system_proposal_and_strategy_identity_is_frozen(
             idempotency_key="human-system-spoof",
             strategy_id="spoofed",
             strategy_version="v1",
+            source_candidate_id="pt_spoofed",
+            source_observed_at=NOW,
+            source_readiness="READY",
             now=NOW,
         )
     proposal_id = create_approved_proposal(

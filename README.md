@@ -1,7 +1,7 @@
 # Trading 交易系统
 
-> 状态日期：2026-07-18
-> 当前状态：紧凑的预生产 SHADOW 交易核心；没有实盘授权
+> 状态日期：2026-07-19
+> 当前状态：M1 内部提案与审核工作台；没有实盘授权
 
 本项目面向一个资本所有者、一个内部组织和多个内部用户。用户可以提交和审核提案、查看仓位、处理异常；系统在风险可控的前提下辅助执行交易并判断是否赚钱。不开放外部注册，不管理第三方资金，不建设机构级多租户、通用合规或通用认证平台。
 
@@ -28,16 +28,19 @@
 - 场所真实订单、成交、仓位、保护、余额和资金费必须与内部预期分开并对账。
 - 每个 execution scope 只有一个有效 sender；新 owner 接管后旧 fencing token 无效。
 - `LIVE_ORDER_SEND`、`CAPITAL_TRANSFER`、`AUTO_ADD` 默认 `DISABLED`。
-- Web/PWA、Telegram、真实 VenueAdapter、实盘发送、Margin、Vault/CTO 尚未实现，文档愿景不能冒充代码能力。
+- Telegram 当前只有不联网的 Mock 通知/深链适配器；真实 Bot、真实 VenueAdapter、实盘发送、Margin、Vault/CTO 尚未实现，文档愿景不能冒充代码能力。
 
 ## 当前代码入口
 
 - 进程：`uv run trading-api`
-- HTTP：`/health/live`、`/health/ready`、`/metrics`
+- Web/PWA：`/opportunities`、`/proposals/new`、`/reviews`、`/proposals/{id}`
+- HTTP：健康检查、内部会话、Perptape 机会、Proposal、Review、RiskDecision 和 TradingAuthorization API
 - 内部业务：`trading_control_plane.service.TradingService`
 - 纯计算：`evaluate_risk`、`select_target_position`、`compute_pnl`
 - 数据库：PostgreSQL，Alembic head `20260718_0001`
 - 订单边界：当前只有合成 SHADOW 场所事实，不连接交易所、不发送真实订单
+
+正式身份源按冻结决策使用托管 IdP 与 Passkey，但外部 IdP 尚未接入。本地/测试环境可显式启用仅识别已存在内部用户的 Mock 会话和 Mock step-up；生产环境硬拒绝启用 Mock 身份。Perptape 使用其现有 `GET /api/v1/breakouts` 窄合同，需单独配置平台 API Key，未配置时机会入口明确返回不可用。
 
 ## 本地开发
 
@@ -60,7 +63,7 @@ TRADING_DATABASE_URL='postgresql+psycopg://.../trading_test' uv run alembic upgr
 | --- | --- | --- |
 | `docs/08-implementation/` | 当前实现、核心不变量、路线与收敛记录 | 是 |
 | `交易系统总体方案.md` | 长期产品原则与愿景 | 原则真源，不代表已实现 |
-| `策略合同与数值化验收门.md` | 策略研究与未来能力验收 | 研究输入，不代表已实现 |
+| `策略合同与数值化验收门.md` | 历史研究材料 | 不驱动当前实现；本仓库不建设回测或通用策略平台 |
 | `docs/` 其他专项文档 | 产品、领域、执行、质量和运维长期合同 | 按状态和当前基线解释 |
 | `DynamicPositionSizing-/` | 历史原型参考 | 否 |
 | `low_vol_breakout_bn/` | 历史原型参考 | 否 |

@@ -72,3 +72,24 @@ def test_metrics_endpoint_exposes_control_plane_metrics() -> None:
 
     assert response.status_code == 200
     assert "trading_database_ready" in response.text
+
+
+def test_web_shell_is_served_without_claiming_business_readiness() -> None:
+    response = get(create_app(settings(), FakeDatabase(ready=False)), "/")
+
+    assert response.status_code == 200
+    assert "Trading Console" in response.text
+
+
+def test_mock_login_is_not_available_unless_explicitly_enabled() -> None:
+    async def post() -> Response:
+        app = create_app(settings(), FakeDatabase())
+        async with app.router.lifespan_context(app):
+            async with AsyncClient(
+                transport=ASGITransport(app=app), base_url="http://test"
+            ) as client:
+                return await client.post("/api/auth/mock/login", json={"username": "admin"})
+
+    response = asyncio.run(post())
+
+    assert response.status_code == 404

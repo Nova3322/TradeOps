@@ -6,6 +6,8 @@ from typing import Literal
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+DEFAULT_SESSION_SECRET = "local-development-session-secret-change-me"  # noqa: S105
+
 
 class Settings(BaseSettings):
     """Server-side configuration.
@@ -25,6 +27,20 @@ class Settings(BaseSettings):
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = "INFO"
     api_host: str = "127.0.0.1"
     api_port: int = Field(default=8000, ge=1, le=65535)
+    public_base_url: str = "http://127.0.0.1:8000"
+    session_signing_secret: str = Field(
+        default=DEFAULT_SESSION_SECRET,
+        min_length=32,
+        repr=False,
+    )
+    allow_mock_identity: bool = False
+    session_ttl_seconds: int = Field(default=28_800, ge=300, le=86_400)
+    action_token_ttl_seconds: int = Field(default=300, ge=30, le=900)
+    perptape_base_url: str = "http://127.0.0.1:8787"
+    perptape_api_key: str | None = Field(default=None, repr=False)
+    perptape_service_username: str = "perptape"
+    perptape_contract_version: str = "breakouts-v1"
+    perptape_cache_seconds: int = Field(default=60, ge=1, le=300)
 
     @field_validator("database_url")
     @classmethod
@@ -32,6 +48,15 @@ class Settings(BaseSettings):
         if not value.startswith(("postgresql://", "postgresql+psycopg://")):
             raise ValueError("database_url must use PostgreSQL with the psycopg driver")
         return value
+
+    def validate_runtime_security(self) -> None:
+        if self.environment == "production" and self.allow_mock_identity:
+            raise ValueError("mock identity must be disabled in production")
+        if (
+            self.environment == "production"
+            and self.session_signing_secret == DEFAULT_SESSION_SECRET
+        ):
+            raise ValueError("production requires an explicit session signing secret")
 
 
 @lru_cache(maxsize=1)

@@ -17,6 +17,7 @@ from trading_control_plane.domain import (
     Direction,
     DomainRejected,
     EconomicFill,
+    ExecutionEnvironment,
     FactStatus,
     IdempotencyConflict,
     IntentCreation,
@@ -495,6 +496,13 @@ class TradingService:
         idempotency_key: str,
         strategy_id: str | None = None,
         strategy_version: str | None = None,
+        environment: ExecutionEnvironment = ExecutionEnvironment.SHADOW,
+        source_candidate_id: str | None = None,
+        source_link: str | None = None,
+        source_observed_at: datetime | None = None,
+        source_readiness: str | None = None,
+        details: dict[str, Any] | None = None,
+        idempotency_payload: dict[str, Any] | None = None,
         now: datetime,
     ) -> UUID:
         payload = {
@@ -509,6 +517,14 @@ class TradingService:
             "expires_at": expires_at.isoformat(),
             "strategy_id": strategy_id,
             "strategy_version": strategy_version,
+            "environment": environment.value,
+            "source_candidate_id": source_candidate_id,
+            "source_link": source_link,
+            "source_observed_at": (
+                None if source_observed_at is None else source_observed_at.isoformat()
+            ),
+            "source_readiness": source_readiness,
+            "details": details or {},
         }
         operation = "proposal.create"
         with self.database.session_factory.begin() as session:
@@ -518,7 +534,7 @@ class TradingService:
                 caller_id=str(actor_id),
                 operation=operation,
                 idempotency_key=idempotency_key,
-                payload=payload,
+                payload=payload if idempotency_payload is None else idempotency_payload,
             )
             if response is not None:
                 return _as_uuid(str(response["proposal_id"]))
@@ -530,14 +546,21 @@ class TradingService:
                     _reject("PROPOSAL_SOURCE_INVALID", "MANUAL proposals require a human")
                 if strategy_id is not None or strategy_version is not None:
                     _reject("PROPOSAL_STRATEGY_INVALID", "MANUAL proposals do not bind a strategy")
+                if source_candidate_id is not None:
+                    _reject(
+                        "PROPOSAL_SOURCE_INVALID",
+                        "MANUAL proposals cannot bind a source candidate",
+                    )
             elif (
                 principal.principal_type != PrincipalType.SERVICE.value
                 or not strategy_id
                 or not strategy_version
+                or not source_candidate_id
+                or source_observed_at is None
             ):
                 _reject(
                     "PROPOSAL_SOURCE_INVALID",
-                    "SYSTEM proposals require a service principal and strategy version",
+                    "SYSTEM proposals require a service principal, strategy version and candidate",
                 )
             instrument = session.get(Instrument, instrument_id)
             if instrument is None or not instrument.active or instrument.venue != venue:
@@ -547,9 +570,14 @@ class TradingService:
             correlation_id = uuid4()
             proposal = Proposal(
                 source=source.value,
+                environment=environment.value,
                 proposer_id=actor_id,
                 strategy_id=strategy_id,
                 strategy_version=strategy_version,
+                source_candidate_id=source_candidate_id,
+                source_link=source_link,
+                source_observed_at=source_observed_at,
+                source_readiness=source_readiness,
                 status=ProposalStatus.DRAFT.value,
                 version=1,
                 risk_tier=risk_tier.value,
@@ -647,6 +675,7 @@ class TradingService:
         reviewer_id: UUID,
         decision: ReviewDecision,
         reason: str,
+        expected_version: int | None = None,
         *,
         now: datetime,
     ) -> ProposalStatus:
@@ -656,6 +685,8 @@ class TradingService:
             proposal = session.get(Proposal, proposal_id, with_for_update=True)
             if proposal is None:
                 _reject("PROPOSAL_NOT_FOUND", "proposal does not exist")
+            if expected_version is not None and proposal.version != expected_version:
+                _reject("VERSION_CONFLICT", "proposal version changed; refresh before reviewing")
             if proposal.proposer_id == reviewer_id:
                 _reject("SELF_REVIEW_FORBIDDEN", "a proposer cannot review the same proposal")
             self._require_role(

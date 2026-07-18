@@ -36,6 +36,8 @@ class User(Base):
 
     user_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid4)
     username: Mapped[str] = mapped_column(String(120), nullable=False, unique=True)
+    identity_subject: Mapped[str | None] = mapped_column(String(255), nullable=True, unique=True)
+    telegram_chat_id: Mapped[str | None] = mapped_column(String(120), nullable=True, unique=True)
     principal_type: Mapped[str] = mapped_column(String(16), nullable=False)
     active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     created_at: Mapped[datetime] = mapped_column(
@@ -91,6 +93,9 @@ class Proposal(Base):
     __tablename__ = "proposals"
     __table_args__ = (
         CheckConstraint("source IN ('SYSTEM','MANUAL')", name="ck_proposals_source"),
+        CheckConstraint(
+            "environment IN ('SHADOW','TESTNET','LIVE')", name="ck_proposals_environment"
+        ),
         CheckConstraint("risk_tier IN ('LOW','MEDIUM','HIGH')", name="ck_proposals_risk_tier"),
         CheckConstraint("direction IN ('LONG','SHORT')", name="ck_proposals_direction"),
         CheckConstraint(
@@ -104,13 +109,26 @@ class Proposal(Base):
             name="ck_proposals_system_strategy",
         ),
         Index("ix_proposals_status_expires", "status", "expires_at"),
+        Index(
+            "uq_proposals_system_candidate",
+            "source_candidate_id",
+            unique=True,
+            postgresql_where=text("source = 'SYSTEM' AND source_candidate_id IS NOT NULL"),
+        ),
     )
 
     proposal_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid4)
     source: Mapped[str] = mapped_column(String(16), nullable=False)
+    environment: Mapped[str] = mapped_column(String(16), nullable=False, default="SHADOW")
     proposer_id: Mapped[UUID] = mapped_column(ForeignKey("users.user_id"), nullable=False)
     strategy_id: Mapped[str | None] = mapped_column(String(120), nullable=True)
     strategy_version: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    source_candidate_id: Mapped[str | None] = mapped_column(String(160), nullable=True)
+    source_link: Mapped[str | None] = mapped_column(Text, nullable=True)
+    source_observed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    source_readiness: Mapped[str | None] = mapped_column(String(32), nullable=True)
     status: Mapped[str] = mapped_column(String(32), nullable=False)
     version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
     risk_tier: Mapped[str] = mapped_column(String(16), nullable=False)

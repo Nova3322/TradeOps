@@ -38,6 +38,12 @@ class PrincipalType(StrEnum):
     SERVICE = "SERVICE"
 
 
+class ExecutionEnvironment(StrEnum):
+    SHADOW = "SHADOW"
+    TESTNET = "TESTNET"
+    LIVE = "LIVE"
+
+
 class ProposalSource(StrEnum):
     SYSTEM = "SYSTEM"
     MANUAL = "MANUAL"

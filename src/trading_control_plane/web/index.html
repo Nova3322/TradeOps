@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+    <meta name="theme-color" content="#101616">
+    <meta name="description" content="内部 SHADOW 交易提案、审核与风险控制台">
+    <link rel="manifest" href="/manifest.webmanifest">
+    <link rel="icon" href="/assets/icon.svg" type="image/svg+xml">
+    <link rel="stylesheet" href="/assets/styles.css">
+    <title>Trading Console · SHADOW</title>
+  </head>
+  <body>
+    <div class="app-shell">
+      <header class="topbar">
+        <a class="brand" href="/opportunities" data-link>
+          <span class="brand-mark" aria-hidden="true">T</span>
+          <span><b>Trading Console</b><small>Internal control plane</small></span>
+        </a>
+        <div class="topbar-actions">
+          <span class="env-badge">SHADOW</span>
+          <button id="theme-toggle" class="icon-button" aria-label="切换主题">◐</button>
+          <div id="identity-chip" class="identity-chip" hidden></div>
+        </div>
+      </header>
+
+      <aside id="sidebar" class="sidebar" hidden>
+        <nav aria-label="主导航">
+          <a href="/opportunities" data-link><span>⌁</span>机会</a>
+          <a href="/proposals/new" data-link><span>＋</span>人工提案</a>
+          <a href="/reviews" data-link><span>✓</span>审核队列</a>
+          <a href="/proposals" data-link><span>≡</span>全部提案</a>
+        </nav>
+        <div class="sidebar-foot">
+          <div><span class="status-dot"></span> PostgreSQL 权威事实</div>
+          <div>真实发送 · Disabled</div>
+          <button id="logout-button" class="text-button">退出当前会话</button>
+        </div>
+      </aside>
+
+      <main id="main" class="main-content" aria-live="polite">
+        <section class="loading-state"><span class="spinner"></span><p>正在读取当前事实…</p></section>
+      </main>
+    </div>
+
+    <dialog id="system-proposal-dialog">
+      <form id="system-proposal-form" method="dialog" class="dialog-form">
+        <div class="dialog-head">
+          <div><p class="eyebrow">PERPTAPE → SYSTEM PROPOSAL</p><h2>冻结候选并提交审核</h2></div>
+          <button type="button" class="icon-button" data-close-dialog aria-label="关闭">×</button>
+        </div>
+        <input name="candidate_id" type="hidden">
+        <div class="field-grid">
+          <label>账户<input name="account_id" value="acct-1" required></label>
+          <label>风险档位<select name="risk_tier"><option>LOW</option><option selected>MEDIUM</option><option>HIGH</option></select></label>
+          <label>请求数量<input name="quantity" type="number" step="any" min="0" required></label>
+          <label>最大风险<input name="max_risk" type="number" step="any" min="0" required></label>
+          <label>失效价格<input name="invalidation_price" type="number" step="any" min="0" required></label>
+          <label>有效分钟<input name="expires_in_minutes" type="number" min="5" max="1440" value="120" required></label>
+        </div>
+        <label>人工补充理由<textarea name="rationale" rows="3" required>Perptape 候选进入人工审核，尚未形成任何订单。</textarea></label>
+        <p class="safety-note">提交只创建 SHADOW 提案。Perptape 信号不会直接产生订单。</p>
+        <div id="system-form-error" class="form-error" role="alert"></div>
+        <div class="dialog-actions"><button type="button" class="secondary" data-close-dialog>取消</button><button class="primary" type="submit">创建并提交审核</button></div>
+      </form>
+    </dialog>
+    <div id="toast" class="toast" role="status" aria-live="polite"></div>
+    <script type="module" src="/assets/app.js"></script>
+  </body>
+</html>

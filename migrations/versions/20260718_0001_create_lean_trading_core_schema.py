@@ -182,6 +182,8 @@ def upgrade() -> None:
         "users",
         sa.Column("user_id", sa.Uuid(), nullable=False),
         sa.Column("username", sa.String(length=120), nullable=False),
+        sa.Column("identity_subject", sa.String(length=255), nullable=True),
+        sa.Column("telegram_chat_id", sa.String(length=120), nullable=True),
         sa.Column("principal_type", sa.String(length=16), nullable=False),
         sa.Column("active", sa.Boolean(), nullable=False),
         sa.Column(
@@ -192,6 +194,8 @@ def upgrade() -> None:
         ),
         sa.CheckConstraint("principal_type IN ('HUMAN','SERVICE')", name="ck_users_principal_type"),
         sa.PrimaryKeyConstraint("user_id"),
+        sa.UniqueConstraint("identity_subject"),
+        sa.UniqueConstraint("telegram_chat_id"),
         sa.UniqueConstraint("username"),
     )
     op.create_table(
@@ -218,9 +222,14 @@ def upgrade() -> None:
         "proposals",
         sa.Column("proposal_id", sa.Uuid(), nullable=False),
         sa.Column("source", sa.String(length=16), nullable=False),
+        sa.Column("environment", sa.String(length=16), nullable=False),
         sa.Column("proposer_id", sa.Uuid(), nullable=False),
         sa.Column("strategy_id", sa.String(length=120), nullable=True),
         sa.Column("strategy_version", sa.String(length=120), nullable=True),
+        sa.Column("source_candidate_id", sa.String(length=160), nullable=True),
+        sa.Column("source_link", sa.Text(), nullable=True),
+        sa.Column("source_observed_at", sa.DateTime(timezone=True), nullable=True),
+        sa.Column("source_readiness", sa.String(length=32), nullable=True),
         sa.Column("status", sa.String(length=32), nullable=False),
         sa.Column("version", sa.Integer(), nullable=False),
         sa.Column("risk_tier", sa.String(length=16), nullable=False),
@@ -238,6 +247,9 @@ def upgrade() -> None:
         sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
         sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
         sa.CheckConstraint("direction IN ('LONG','SHORT')", name="ck_proposals_direction"),
+        sa.CheckConstraint(
+            "environment IN ('SHADOW','TESTNET','LIVE')", name="ck_proposals_environment"
+        ),
         sa.CheckConstraint("risk_tier IN ('LOW','MEDIUM','HIGH')", name="ck_proposals_risk_tier"),
         sa.CheckConstraint("source IN ('SYSTEM','MANUAL')", name="ck_proposals_source"),
         sa.CheckConstraint(
@@ -262,6 +274,13 @@ def upgrade() -> None:
     )
     op.create_index(
         "ix_proposals_status_expires", "proposals", ["status", "expires_at"], unique=False
+    )
+    op.create_index(
+        "uq_proposals_system_candidate",
+        "proposals",
+        ["source_candidate_id"],
+        unique=True,
+        postgresql_where=sa.text("source = 'SYSTEM' AND source_candidate_id IS NOT NULL"),
     )
     op.create_table(
         "role_assignments",
@@ -673,6 +692,11 @@ def downgrade() -> None:
     op.drop_table("approvals")
     op.drop_index("ix_role_assignments_user", table_name="role_assignments")
     op.drop_table("role_assignments")
+    op.drop_index(
+        "uq_proposals_system_candidate",
+        table_name="proposals",
+        postgresql_where=sa.text("source = 'SYSTEM' AND source_candidate_id IS NOT NULL"),
+    )
     op.drop_index("ix_proposals_status_expires", table_name="proposals")
     op.drop_table("proposals")
     op.drop_table("positions")

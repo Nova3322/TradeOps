@@ -1,0 +1,10 @@
+{
+  "name": "Trading Console SHADOW",
+  "short_name": "Trading",
+  "description": "Internal proposal, review and risk console",
+  "start_url": "/opportunities",
+  "display": "standalone",
+  "background_color": "#f1f4f0",
+  "theme_color": "#101616",
+  "icons": [{"src": "/assets/icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any maskable"}]
+}
