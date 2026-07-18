@@ -10,6 +10,7 @@ from sqlalchemy import select
 from trading_control_plane.database import Database
 from trading_control_plane.domain import DomainRejected, PrincipalType, Role
 from trading_control_plane.models import (
+    AccountEquity,
     Approval,
     Campaign,
     FundingPayment,
@@ -200,6 +201,7 @@ class TradingQueries:
                     if authorization is None
                     else {
                         "authorization_id": str(authorization.authorization_id),
+                        "environment": authorization.environment,
                         "quantity_limit": str(authorization.quantity_limit),
                         "risk_limit": str(authorization.risk_limit),
                         "allowed_adds": authorization.allowed_adds,
@@ -287,6 +289,7 @@ class TradingQueries:
                 select(Position).where(
                     Position.account_id == campaign.account_id,
                     Position.venue == campaign.venue,
+                    Position.environment == campaign.environment,
                     Position.instrument_id == campaign.instrument_id,
                 )
             )
@@ -304,7 +307,11 @@ class TradingQueries:
                 .where(FundingPayment.campaign_id == campaign_id)
                 .order_by(FundingPayment.paid_at)
             ).all()
-            scope = f"{campaign.account_id}:{campaign.venue}"
+            scope = (
+                f"{campaign.account_id}:{campaign.venue}"
+                if campaign.environment == "SHADOW"
+                else f"{campaign.environment}:{campaign.account_id}:{campaign.venue}"
+            )
             reconciliation = session.scalar(
                 select(ReconciliationRun)
                 .where(ReconciliationRun.execution_scope == scope)
@@ -326,6 +333,7 @@ class TradingQueries:
                     if authorization is None
                     else {
                         "authorization_id": str(authorization.authorization_id),
+                        "environment": authorization.environment,
                         "active": authorization.active,
                         "quantity_limit": str(authorization.quantity_limit),
                         "used_quantity": str(authorization.used_quantity),
@@ -481,6 +489,174 @@ class TradingQueries:
                 )
         return exceptions
 
+    def venue_facts(
+        self,
+        user_id: UUID,
+        account_id: str,
+        venue: str,
+        environment: str,
+    ) -> dict[str, Any]:
+        if not self.service.can_user(user_id, "view", account_id, venue):
+            raise DomainRejected("RBAC_DENIED", "venue facts are outside the current scope")
+        with self.database.session_factory() as session:
+            instruments = session.scalars(
+                select(Instrument).where(Instrument.venue == venue).order_by(Instrument.symbol)
+            ).all()
+            instrument_by_id = {item.instrument_id: item for item in instruments}
+            positions = session.scalars(
+                select(Position).where(
+                    Position.account_id == account_id,
+                    Position.venue == venue,
+                    Position.environment == environment,
+                )
+            ).all()
+            protections = (
+                session.scalars(
+                    select(ProtectionOrder).where(
+                        ProtectionOrder.position_id.in_([item.position_id for item in positions])
+                    )
+                ).all()
+                if positions
+                else []
+            )
+            protection_by_position = {item.position_id: item for item in protections}
+            orders = session.scalars(
+                select(VenueOrder)
+                .where(
+                    VenueOrder.account_id == account_id,
+                    VenueOrder.venue == venue,
+                    VenueOrder.environment == environment,
+                )
+                .order_by(VenueOrder.observed_at.desc())
+            ).all()
+            fills = session.scalars(
+                select(VenueFill)
+                .where(
+                    VenueFill.account_id == account_id,
+                    VenueFill.venue == venue,
+                    VenueFill.environment == environment,
+                )
+                .order_by(VenueFill.executed_at.desc())
+            ).all()
+            funding = session.scalars(
+                select(FundingPayment)
+                .where(
+                    FundingPayment.account_id == account_id,
+                    FundingPayment.venue == venue,
+                    FundingPayment.environment == environment,
+                )
+                .order_by(FundingPayment.paid_at.desc())
+            ).all()
+            equity = session.scalar(
+                select(AccountEquity).where(
+                    AccountEquity.account_id == account_id,
+                    AccountEquity.venue == venue,
+                    AccountEquity.environment == environment,
+                )
+            )
+            return {
+                "account_id": account_id,
+                "venue": venue,
+                "environment": environment,
+                "instruments": [
+                    {
+                        "instrument_id": str(item.instrument_id),
+                        "symbol": item.symbol,
+                        "tick_size": str(item.tick_size),
+                        "lot_size": str(item.lot_size),
+                        "minimum_notional": str(item.minimum_notional),
+                        "active": item.active,
+                        "updated_at": _iso(item.updated_at),
+                    }
+                    for item in instruments
+                ],
+                "positions": [
+                    {
+                        "position_id": str(item.position_id),
+                        "instrument_id": str(item.instrument_id),
+                        "symbol": instrument_by_id[item.instrument_id].symbol,
+                        "quantity": str(item.quantity),
+                        "average_entry_price": str(item.average_entry_price),
+                        "mark_price": str(item.mark_price),
+                        "fact_status": item.fact_status,
+                        "observed_at": _iso(item.observed_at),
+                        "protection": (
+                            None
+                            if item.position_id not in protection_by_position
+                            else {
+                                "venue_order_id": protection_by_position[
+                                    item.position_id
+                                ].venue_order_id,
+                                "quantity": str(protection_by_position[item.position_id].quantity),
+                                "trigger_price": str(
+                                    protection_by_position[item.position_id].trigger_price
+                                ),
+                                "status": protection_by_position[item.position_id].status,
+                                "fully_covered": protection_by_position[
+                                    item.position_id
+                                ].fully_covered,
+                                "observed_at": _iso(
+                                    protection_by_position[item.position_id].observed_at
+                                ),
+                            }
+                        ),
+                    }
+                    for item in positions
+                ],
+                "orders": [
+                    {
+                        "venue_order_id": item.venue_order_id,
+                        "instrument_id": str(item.instrument_id),
+                        "symbol": instrument_by_id[item.instrument_id].symbol,
+                        "intent_id": (
+                            None if item.order_intent_id is None else str(item.order_intent_id)
+                        ),
+                        "status": item.status,
+                        "ordered_quantity": str(item.ordered_quantity),
+                        "filled_quantity": str(item.filled_quantity),
+                        "observed_at": _iso(item.observed_at),
+                    }
+                    for item in orders
+                ],
+                "fills": [
+                    {
+                        "venue_fill_id": item.venue_fill_id,
+                        "instrument_id": str(item.instrument_id),
+                        "symbol": instrument_by_id[item.instrument_id].symbol,
+                        "intent_id": (
+                            None if item.order_intent_id is None else str(item.order_intent_id)
+                        ),
+                        "side": item.side,
+                        "quantity": str(item.quantity),
+                        "price": str(item.price),
+                        "fee": str(item.fee),
+                        "fee_currency": item.fee_currency,
+                        "executed_at": _iso(item.executed_at),
+                    }
+                    for item in fills
+                ],
+                "funding": [
+                    {
+                        "venue_payment_id": item.venue_payment_id,
+                        "instrument_id": str(item.instrument_id),
+                        "symbol": instrument_by_id[item.instrument_id].symbol,
+                        "amount": str(item.amount),
+                        "currency": item.currency,
+                        "paid_at": _iso(item.paid_at),
+                    }
+                    for item in funding
+                ],
+                "equity": None
+                if equity is None
+                else {
+                    "equity": str(equity.equity),
+                    "available_balance": str(equity.available_balance),
+                    "currency": equity.currency,
+                    "fact_status": equity.fact_status,
+                    "observed_at": _iso(equity.observed_at),
+                },
+            }
+
     @staticmethod
     def _exception(
         campaign_id: str,
@@ -519,6 +695,7 @@ class TradingQueries:
             "authorization_id": str(campaign.authorization_id),
             "account_id": campaign.account_id,
             "venue": campaign.venue,
+            "environment": campaign.environment,
             "instrument_id": str(campaign.instrument_id),
             "direction": campaign.direction,
             "status": campaign.status,

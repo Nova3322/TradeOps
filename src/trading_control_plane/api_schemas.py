@@ -185,3 +185,8 @@ class ReconciliationRequest(BaseModel):
 
 class ReconciliationReasonRequest(BaseModel):
     reason: str = Field(min_length=2, max_length=1_000)
+
+
+class BinanceReadOnlySyncRequest(BaseModel):
+    account_id: str = Field(min_length=1, max_length=120)
+    symbol: str = Field(min_length=1, max_length=64, pattern=r"^[A-Z0-9_]+$")

@@ -25,6 +25,7 @@ def upgrade() -> None:
         sa.Column("account_equity_id", sa.Uuid(), nullable=False),
         sa.Column("account_id", sa.String(length=120), nullable=False),
         sa.Column("venue", sa.String(length=64), nullable=False),
+        sa.Column("environment", sa.String(length=16), nullable=False),
         sa.Column("equity", sa.Numeric(precision=38, scale=18), nullable=False),
         sa.Column("available_balance", sa.Numeric(precision=38, scale=18), nullable=False),
         sa.Column("currency", sa.String(length=32), nullable=False),
@@ -36,8 +37,12 @@ def upgrade() -> None:
             "available_balance >= 0", name="ck_account_equities_balance_nonnegative"
         ),
         sa.CheckConstraint("equity >= 0", name="ck_account_equities_equity_nonnegative"),
+        sa.CheckConstraint(
+            "environment IN ('SHADOW','TESTNET','LIVE')",
+            name="ck_account_equities_environment",
+        ),
         sa.PrimaryKeyConstraint("account_equity_id"),
-        sa.UniqueConstraint("account_id", "venue", name="uq_account_equities_scope"),
+        sa.UniqueConstraint("environment", "account_id", "venue", name="uq_account_equities_scope"),
     )
     op.create_table(
         "audit_events",
@@ -203,6 +208,7 @@ def upgrade() -> None:
         sa.Column("position_id", sa.Uuid(), nullable=False),
         sa.Column("account_id", sa.String(length=120), nullable=False),
         sa.Column("venue", sa.String(length=64), nullable=False),
+        sa.Column("environment", sa.String(length=16), nullable=False),
         sa.Column("instrument_id", sa.Uuid(), nullable=False),
         sa.Column("quantity", sa.Numeric(precision=38, scale=18), nullable=False),
         sa.Column("average_entry_price", sa.Numeric(precision=38, scale=18), nullable=False),
@@ -211,12 +217,21 @@ def upgrade() -> None:
         sa.Column("observed_at", sa.DateTime(timezone=True), nullable=False),
         sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
         sa.CheckConstraint("fact_status IN ('KNOWN','UNKNOWN')", name="ck_positions_fact_status"),
+        sa.CheckConstraint(
+            "environment IN ('SHADOW','TESTNET','LIVE')", name="ck_positions_environment"
+        ),
         sa.ForeignKeyConstraint(
             ["instrument_id"],
             ["instruments.instrument_id"],
         ),
         sa.PrimaryKeyConstraint("position_id"),
-        sa.UniqueConstraint("account_id", "venue", "instrument_id", name="uq_positions_scope"),
+        sa.UniqueConstraint(
+            "environment",
+            "account_id",
+            "venue",
+            "instrument_id",
+            name="uq_positions_scope",
+        ),
     )
     op.create_table(
         "proposals",
@@ -375,6 +390,7 @@ def upgrade() -> None:
         sa.Column("risk_decision_id", sa.Uuid(), nullable=False),
         sa.Column("account_id", sa.String(length=120), nullable=False),
         sa.Column("venue", sa.String(length=64), nullable=False),
+        sa.Column("environment", sa.String(length=16), nullable=False),
         sa.Column("instrument_id", sa.Uuid(), nullable=False),
         sa.Column("direction", sa.String(length=16), nullable=False),
         sa.Column("quantity_limit", sa.Numeric(precision=38, scale=18), nullable=False),
@@ -387,6 +403,10 @@ def upgrade() -> None:
         sa.Column("actor_id", sa.String(length=255), nullable=False),
         sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
         sa.CheckConstraint("direction IN ('LONG','SHORT')", name="ck_authorizations_direction"),
+        sa.CheckConstraint(
+            "environment IN ('SHADOW','TESTNET','LIVE')",
+            name="ck_authorizations_environment",
+        ),
         sa.CheckConstraint("allowed_adds >= 0", name="ck_authorizations_adds_nonnegative"),
         sa.CheckConstraint("quantity_limit > 0", name="ck_authorizations_quantity_positive"),
         sa.CheckConstraint("risk_limit > 0", name="ck_authorizations_risk_positive"),
@@ -419,6 +439,7 @@ def upgrade() -> None:
         sa.Column("authorization_id", sa.Uuid(), nullable=False),
         sa.Column("account_id", sa.String(length=120), nullable=False),
         sa.Column("venue", sa.String(length=64), nullable=False),
+        sa.Column("environment", sa.String(length=16), nullable=False),
         sa.Column("instrument_id", sa.Uuid(), nullable=False),
         sa.Column("direction", sa.String(length=16), nullable=False),
         sa.Column("status", sa.String(length=24), nullable=False),
@@ -433,6 +454,9 @@ def upgrade() -> None:
         sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
         sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
         sa.CheckConstraint("direction IN ('LONG','SHORT')", name="ck_campaigns_direction"),
+        sa.CheckConstraint(
+            "environment IN ('SHADOW','TESTNET','LIVE')", name="ck_campaigns_environment"
+        ),
         sa.CheckConstraint(
             "status IN ('OPENING','OPEN','REDUCING','CLOSING','CLOSED','UNKNOWN')",
             name="ck_campaigns_status",
@@ -457,30 +481,53 @@ def upgrade() -> None:
     op.create_index(
         "uq_campaigns_one_unclosed_scope",
         "campaigns",
-        ["account_id", "venue", "instrument_id"],
+        ["account_id", "venue", "environment", "instrument_id"],
         unique=True,
         postgresql_where=sa.text("status <> 'CLOSED'"),
     )
     op.create_table(
         "funding_payments",
         sa.Column("funding_payment_id", sa.Uuid(), nullable=False),
-        sa.Column("campaign_id", sa.Uuid(), nullable=False),
+        sa.Column("campaign_id", sa.Uuid(), nullable=True),
+        sa.Column("account_id", sa.String(length=120), nullable=False),
         sa.Column("venue", sa.String(length=64), nullable=False),
+        sa.Column("environment", sa.String(length=16), nullable=False),
+        sa.Column("instrument_id", sa.Uuid(), nullable=False),
         sa.Column("venue_payment_id", sa.String(length=255), nullable=False),
         sa.Column("amount", sa.Numeric(precision=38, scale=18), nullable=False),
         sa.Column("currency", sa.String(length=32), nullable=False),
         sa.Column("paid_at", sa.DateTime(timezone=True), nullable=False),
+        sa.CheckConstraint(
+            "environment IN ('SHADOW','TESTNET','LIVE')",
+            name="ck_funding_payments_environment",
+        ),
         sa.ForeignKeyConstraint(
             ["campaign_id"],
             ["campaigns.campaign_id"],
         ),
+        sa.ForeignKeyConstraint(
+            ["instrument_id"],
+            ["instruments.instrument_id"],
+        ),
         sa.PrimaryKeyConstraint("funding_payment_id"),
-        sa.UniqueConstraint("venue", "venue_payment_id", name="uq_funding_payments_external"),
+        sa.UniqueConstraint(
+            "environment",
+            "account_id",
+            "venue",
+            "venue_payment_id",
+            name="uq_funding_payments_external",
+        ),
     )
     op.create_index(
         "ix_funding_payments_campaign_time",
         "funding_payments",
         ["campaign_id", "paid_at"],
+        unique=False,
+    )
+    op.create_index(
+        "ix_funding_payments_scope",
+        "funding_payments",
+        ["environment", "account_id", "venue", "instrument_id"],
         unique=False,
     )
     op.create_table(
@@ -608,8 +655,11 @@ def upgrade() -> None:
         sa.Column("venue_fill_fact_id", sa.Uuid(), nullable=False),
         sa.Column("venue", sa.String(length=64), nullable=False),
         sa.Column("venue_fill_id", sa.String(length=255), nullable=False),
-        sa.Column("order_intent_id", sa.Uuid(), nullable=False),
-        sa.Column("campaign_id", sa.Uuid(), nullable=False),
+        sa.Column("order_intent_id", sa.Uuid(), nullable=True),
+        sa.Column("campaign_id", sa.Uuid(), nullable=True),
+        sa.Column("account_id", sa.String(length=120), nullable=False),
+        sa.Column("environment", sa.String(length=16), nullable=False),
+        sa.Column("instrument_id", sa.Uuid(), nullable=False),
         sa.Column("side", sa.String(length=8), nullable=False),
         sa.Column("quantity", sa.Numeric(precision=38, scale=18), nullable=False),
         sa.Column("price", sa.Numeric(precision=38, scale=18), nullable=False),
@@ -618,6 +668,10 @@ def upgrade() -> None:
         sa.Column("slippage_cost", sa.Numeric(precision=38, scale=18), nullable=False),
         sa.Column("executed_at", sa.DateTime(timezone=True), nullable=False),
         sa.CheckConstraint("side IN ('BUY','SELL')", name="ck_venue_fills_side"),
+        sa.CheckConstraint(
+            "environment IN ('SHADOW','TESTNET','LIVE')",
+            name="ck_venue_fills_environment",
+        ),
         sa.CheckConstraint("fee >= 0", name="ck_venue_fills_fee_nonnegative"),
         sa.CheckConstraint("price > 0", name="ck_venue_fills_price_positive"),
         sa.CheckConstraint("quantity > 0", name="ck_venue_fills_quantity_positive"),
@@ -627,20 +681,39 @@ def upgrade() -> None:
             ["campaigns.campaign_id"],
         ),
         sa.ForeignKeyConstraint(
+            ["instrument_id"],
+            ["instruments.instrument_id"],
+        ),
+        sa.ForeignKeyConstraint(
             ["order_intent_id"],
             ["order_intents.intent_id"],
         ),
         sa.PrimaryKeyConstraint("venue_fill_fact_id"),
-        sa.UniqueConstraint("venue", "venue_fill_id", name="uq_venue_fills_external"),
+        sa.UniqueConstraint(
+            "environment",
+            "account_id",
+            "venue",
+            "venue_fill_id",
+            name="uq_venue_fills_external",
+        ),
     )
     op.create_index(
         "ix_venue_fills_campaign_time", "venue_fills", ["campaign_id", "executed_at"], unique=False
     )
+    op.create_index(
+        "ix_venue_fills_scope",
+        "venue_fills",
+        ["environment", "account_id", "venue", "instrument_id"],
+        unique=False,
+    )
     op.create_table(
         "venue_orders",
         sa.Column("venue_order_fact_id", sa.Uuid(), nullable=False),
-        sa.Column("order_intent_id", sa.Uuid(), nullable=False),
+        sa.Column("order_intent_id", sa.Uuid(), nullable=True),
+        sa.Column("account_id", sa.String(length=120), nullable=False),
         sa.Column("venue", sa.String(length=64), nullable=False),
+        sa.Column("environment", sa.String(length=16), nullable=False),
+        sa.Column("instrument_id", sa.Uuid(), nullable=False),
         sa.Column("venue_order_id", sa.String(length=255), nullable=False),
         sa.Column("status", sa.String(length=32), nullable=False),
         sa.Column("ordered_quantity", sa.Numeric(precision=38, scale=18), nullable=False),
@@ -651,22 +724,44 @@ def upgrade() -> None:
             "status IN ('SENT','PARTIALLY_FILLED','FILLED','CANCELLED','REJECTED','UNKNOWN')",
             name="ck_venue_orders_status",
         ),
+        sa.CheckConstraint(
+            "environment IN ('SHADOW','TESTNET','LIVE')",
+            name="ck_venue_orders_environment",
+        ),
         sa.CheckConstraint("filled_quantity >= 0", name="ck_venue_orders_filled_nonnegative"),
-        sa.CheckConstraint("ordered_quantity > 0", name="ck_venue_orders_quantity_positive"),
+        sa.CheckConstraint("ordered_quantity >= 0", name="ck_venue_orders_quantity_nonnegative"),
+        sa.ForeignKeyConstraint(
+            ["instrument_id"],
+            ["instruments.instrument_id"],
+        ),
         sa.ForeignKeyConstraint(
             ["order_intent_id"],
             ["order_intents.intent_id"],
         ),
         sa.PrimaryKeyConstraint("venue_order_fact_id"),
         sa.UniqueConstraint("order_intent_id", name="uq_venue_orders_intent"),
-        sa.UniqueConstraint("venue", "venue_order_id", name="uq_venue_orders_external"),
+        sa.UniqueConstraint(
+            "environment",
+            "account_id",
+            "venue",
+            "venue_order_id",
+            name="uq_venue_orders_external",
+        ),
+    )
+    op.create_index(
+        "ix_venue_orders_scope",
+        "venue_orders",
+        ["environment", "account_id", "venue", "instrument_id"],
+        unique=False,
     )
     # ### end Alembic commands ###
 
 
 def downgrade() -> None:
     # ### commands auto generated by Alembic - please adjust! ###
+    op.drop_index("ix_venue_orders_scope", table_name="venue_orders")
     op.drop_table("venue_orders")
+    op.drop_index("ix_venue_fills_scope", table_name="venue_fills")
     op.drop_index("ix_venue_fills_campaign_time", table_name="venue_fills")
     op.drop_table("venue_fills")
     op.drop_index(
@@ -682,6 +777,7 @@ def downgrade() -> None:
     op.drop_table("risk_reservations")
     op.drop_index("ix_reconciliation_scope_completed", table_name="reconciliation_runs")
     op.drop_table("reconciliation_runs")
+    op.drop_index("ix_funding_payments_scope", table_name="funding_payments")
     op.drop_index("ix_funding_payments_campaign_time", table_name="funding_payments")
     op.drop_table("funding_payments")
     op.drop_table("campaigns")

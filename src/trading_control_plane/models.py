@@ -219,6 +219,10 @@ class TradingAuthorization(Base):
     __table_args__ = (
         UniqueConstraint("proposal_id", name="uq_trading_authorizations_proposal"),
         CheckConstraint("direction IN ('LONG','SHORT')", name="ck_authorizations_direction"),
+        CheckConstraint(
+            "environment IN ('SHADOW','TESTNET','LIVE')",
+            name="ck_authorizations_environment",
+        ),
         CheckConstraint("quantity_limit > 0", name="ck_authorizations_quantity_positive"),
         CheckConstraint("used_quantity >= 0", name="ck_authorizations_used_nonnegative"),
         CheckConstraint(
@@ -238,6 +242,7 @@ class TradingAuthorization(Base):
     risk_decision_id: Mapped[UUID] = mapped_column(ForeignKey("risk_decisions.decision_id"))
     account_id: Mapped[str] = mapped_column(String(120), nullable=False)
     venue: Mapped[str] = mapped_column(String(64), nullable=False)
+    environment: Mapped[str] = mapped_column(String(16), nullable=False)
     instrument_id: Mapped[UUID] = mapped_column(ForeignKey("instruments.instrument_id"))
     direction: Mapped[str] = mapped_column(String(16), nullable=False)
     quantity_limit: Mapped[Decimal] = mapped_column(AMOUNT, nullable=False)
@@ -257,6 +262,9 @@ class Campaign(Base):
         UniqueConstraint("authorization_id", name="uq_campaigns_authorization"),
         CheckConstraint("direction IN ('LONG','SHORT')", name="ck_campaigns_direction"),
         CheckConstraint(
+            "environment IN ('SHADOW','TESTNET','LIVE')", name="ck_campaigns_environment"
+        ),
+        CheckConstraint(
             "status IN ('OPENING','OPEN','REDUCING','CLOSING','CLOSED','UNKNOWN')",
             name="ck_campaigns_status",
         ),
@@ -266,6 +274,7 @@ class Campaign(Base):
             "uq_campaigns_one_unclosed_scope",
             "account_id",
             "venue",
+            "environment",
             "instrument_id",
             unique=True,
             postgresql_where=text("status <> 'CLOSED'"),
@@ -279,6 +288,7 @@ class Campaign(Base):
     )
     account_id: Mapped[str] = mapped_column(String(120), nullable=False)
     venue: Mapped[str] = mapped_column(String(64), nullable=False)
+    environment: Mapped[str] = mapped_column(String(16), nullable=False)
     instrument_id: Mapped[UUID] = mapped_column(ForeignKey("instruments.instrument_id"))
     direction: Mapped[str] = mapped_column(String(16), nullable=False)
     status: Mapped[str] = mapped_column(String(24), nullable=False)
@@ -391,21 +401,43 @@ class CommandReceipt(Base):
 class VenueOrder(Base):
     __tablename__ = "venue_orders"
     __table_args__ = (
-        UniqueConstraint("venue", "venue_order_id", name="uq_venue_orders_external"),
+        UniqueConstraint(
+            "environment",
+            "account_id",
+            "venue",
+            "venue_order_id",
+            name="uq_venue_orders_external",
+        ),
         UniqueConstraint("order_intent_id", name="uq_venue_orders_intent"),
         CheckConstraint(
             "status IN ('SENT','PARTIALLY_FILLED','FILLED','CANCELLED','REJECTED','UNKNOWN')",
             name="ck_venue_orders_status",
         ),
-        CheckConstraint("ordered_quantity > 0", name="ck_venue_orders_quantity_positive"),
+        CheckConstraint(
+            "environment IN ('SHADOW','TESTNET','LIVE')",
+            name="ck_venue_orders_environment",
+        ),
+        CheckConstraint("ordered_quantity >= 0", name="ck_venue_orders_quantity_nonnegative"),
         CheckConstraint("filled_quantity >= 0", name="ck_venue_orders_filled_nonnegative"),
+        Index(
+            "ix_venue_orders_scope",
+            "environment",
+            "account_id",
+            "venue",
+            "instrument_id",
+        ),
     )
 
     venue_order_fact_id: Mapped[UUID] = mapped_column(
         Uuid(as_uuid=True), primary_key=True, default=uuid4
     )
-    order_intent_id: Mapped[UUID] = mapped_column(ForeignKey("order_intents.intent_id"))
+    order_intent_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("order_intents.intent_id"), nullable=True
+    )
+    account_id: Mapped[str] = mapped_column(String(120), nullable=False)
     venue: Mapped[str] = mapped_column(String(64), nullable=False)
+    environment: Mapped[str] = mapped_column(String(16), nullable=False)
+    instrument_id: Mapped[UUID] = mapped_column(ForeignKey("instruments.instrument_id"))
     venue_order_id: Mapped[str] = mapped_column(String(255), nullable=False)
     status: Mapped[str] = mapped_column(String(32), nullable=False)
     ordered_quantity: Mapped[Decimal] = mapped_column(AMOUNT, nullable=False)
@@ -417,13 +449,30 @@ class VenueOrder(Base):
 class VenueFill(Base):
     __tablename__ = "venue_fills"
     __table_args__ = (
-        UniqueConstraint("venue", "venue_fill_id", name="uq_venue_fills_external"),
+        UniqueConstraint(
+            "environment",
+            "account_id",
+            "venue",
+            "venue_fill_id",
+            name="uq_venue_fills_external",
+        ),
+        CheckConstraint(
+            "environment IN ('SHADOW','TESTNET','LIVE')",
+            name="ck_venue_fills_environment",
+        ),
         CheckConstraint("side IN ('BUY','SELL')", name="ck_venue_fills_side"),
         CheckConstraint("quantity > 0", name="ck_venue_fills_quantity_positive"),
         CheckConstraint("price > 0", name="ck_venue_fills_price_positive"),
         CheckConstraint("fee >= 0", name="ck_venue_fills_fee_nonnegative"),
         CheckConstraint("slippage_cost >= 0", name="ck_venue_fills_slippage_nonnegative"),
         Index("ix_venue_fills_campaign_time", "campaign_id", "executed_at"),
+        Index(
+            "ix_venue_fills_scope",
+            "environment",
+            "account_id",
+            "venue",
+            "instrument_id",
+        ),
     )
 
     venue_fill_fact_id: Mapped[UUID] = mapped_column(
@@ -431,8 +480,15 @@ class VenueFill(Base):
     )
     venue: Mapped[str] = mapped_column(String(64), nullable=False)
     venue_fill_id: Mapped[str] = mapped_column(String(255), nullable=False)
-    order_intent_id: Mapped[UUID] = mapped_column(ForeignKey("order_intents.intent_id"))
-    campaign_id: Mapped[UUID] = mapped_column(ForeignKey("campaigns.campaign_id"))
+    order_intent_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("order_intents.intent_id"), nullable=True
+    )
+    campaign_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("campaigns.campaign_id"), nullable=True
+    )
+    account_id: Mapped[str] = mapped_column(String(120), nullable=False)
+    environment: Mapped[str] = mapped_column(String(16), nullable=False)
+    instrument_id: Mapped[UUID] = mapped_column(ForeignKey("instruments.instrument_id"))
     side: Mapped[str] = mapped_column(String(8), nullable=False)
     quantity: Mapped[Decimal] = mapped_column(AMOUNT, nullable=False)
     price: Mapped[Decimal] = mapped_column(AMOUNT, nullable=False)
@@ -445,13 +501,23 @@ class VenueFill(Base):
 class Position(Base):
     __tablename__ = "positions"
     __table_args__ = (
-        UniqueConstraint("account_id", "venue", "instrument_id", name="uq_positions_scope"),
+        UniqueConstraint(
+            "environment",
+            "account_id",
+            "venue",
+            "instrument_id",
+            name="uq_positions_scope",
+        ),
+        CheckConstraint(
+            "environment IN ('SHADOW','TESTNET','LIVE')", name="ck_positions_environment"
+        ),
         CheckConstraint("fact_status IN ('KNOWN','UNKNOWN')", name="ck_positions_fact_status"),
     )
 
     position_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid4)
     account_id: Mapped[str] = mapped_column(String(120), nullable=False)
     venue: Mapped[str] = mapped_column(String(64), nullable=False)
+    environment: Mapped[str] = mapped_column(String(16), nullable=False)
     instrument_id: Mapped[UUID] = mapped_column(ForeignKey("instruments.instrument_id"))
     quantity: Mapped[Decimal] = mapped_column(AMOUNT, nullable=False)
     average_entry_price: Mapped[Decimal] = mapped_column(AMOUNT, nullable=False)
@@ -486,7 +552,11 @@ class ProtectionOrder(Base):
 class AccountEquity(Base):
     __tablename__ = "account_equities"
     __table_args__ = (
-        UniqueConstraint("account_id", "venue", name="uq_account_equities_scope"),
+        UniqueConstraint("environment", "account_id", "venue", name="uq_account_equities_scope"),
+        CheckConstraint(
+            "environment IN ('SHADOW','TESTNET','LIVE')",
+            name="ck_account_equities_environment",
+        ),
         CheckConstraint("fact_status IN ('KNOWN','UNKNOWN')", name="ck_account_equities_status"),
         CheckConstraint("equity >= 0", name="ck_account_equities_equity_nonnegative"),
         CheckConstraint("available_balance >= 0", name="ck_account_equities_balance_nonnegative"),
@@ -497,6 +567,7 @@ class AccountEquity(Base):
     )
     account_id: Mapped[str] = mapped_column(String(120), nullable=False)
     venue: Mapped[str] = mapped_column(String(64), nullable=False)
+    environment: Mapped[str] = mapped_column(String(16), nullable=False)
     equity: Mapped[Decimal] = mapped_column(AMOUNT, nullable=False)
     available_balance: Mapped[Decimal] = mapped_column(AMOUNT, nullable=False)
     currency: Mapped[str] = mapped_column(String(32), nullable=False)
@@ -508,15 +579,37 @@ class AccountEquity(Base):
 class FundingPayment(Base):
     __tablename__ = "funding_payments"
     __table_args__ = (
-        UniqueConstraint("venue", "venue_payment_id", name="uq_funding_payments_external"),
+        UniqueConstraint(
+            "environment",
+            "account_id",
+            "venue",
+            "venue_payment_id",
+            name="uq_funding_payments_external",
+        ),
+        CheckConstraint(
+            "environment IN ('SHADOW','TESTNET','LIVE')",
+            name="ck_funding_payments_environment",
+        ),
         Index("ix_funding_payments_campaign_time", "campaign_id", "paid_at"),
+        Index(
+            "ix_funding_payments_scope",
+            "environment",
+            "account_id",
+            "venue",
+            "instrument_id",
+        ),
     )
 
     funding_payment_id: Mapped[UUID] = mapped_column(
         Uuid(as_uuid=True), primary_key=True, default=uuid4
     )
-    campaign_id: Mapped[UUID] = mapped_column(ForeignKey("campaigns.campaign_id"))
+    campaign_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("campaigns.campaign_id"), nullable=True
+    )
+    account_id: Mapped[str] = mapped_column(String(120), nullable=False)
     venue: Mapped[str] = mapped_column(String(64), nullable=False)
+    environment: Mapped[str] = mapped_column(String(16), nullable=False)
+    instrument_id: Mapped[UUID] = mapped_column(ForeignKey("instruments.instrument_id"))
     venue_payment_id: Mapped[str] = mapped_column(String(255), nullable=False)
     amount: Mapped[Decimal] = mapped_column(AMOUNT, nullable=False)
     currency: Mapped[str] = mapped_column(String(32), nullable=False)

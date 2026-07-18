@@ -1,9 +1,9 @@
 # Binance USDⓈ-M Futures 执行认证清单
 
 > 文档编号：EXEC-CERT-BN-001
-> 版本：Draft 0.1
-> 日期：2026-07-18
-> 状态：待验证清单；不代表 Binance 真实账户、Freqtrade 或任何订单能力已经通过
+> 版本：Draft 0.2
+> 日期：2026-07-19
+> 状态：M3 只读软件合同已实现；真实账户和任何订单能力仍未验证
 > 上位文档：`交易系统总体方案.md`、`策略合同与数值化验收门.md`、`docs/04-execution/OMS-Freqtrade-VenueAdapter执行规范.md`
 
 ---
@@ -11,6 +11,17 @@
 ## 1. 使用说明
 
 本清单是 Binance 执行证书的验收模板。每个条目必须留下可复查证据，不能只填写“支持”。
+
+当前基础版本不建设 CapabilityCertificate、证据包或证书状态机软件平台。本清单只是未来启用外部副作用前的人工验收材料；代码、自动化测试、Git 历史和普通运行记录已经足够表达当前只读实现。
+
+### 当前 M3 只读实现边界
+
+- 生产代码仅调用 GET：`/fapi/v1/exchangeInfo`、`/fapi/v3/positionRisk`、`/fapi/v3/balance`、`/fapi/v1/openOrders`、`/fapi/v1/userTrades`、`/fapi/v1/income`。
+- 签名 USER_DATA 请求使用显式只读 Key/Secret；秘密不进入数据库、Web、日志或提交文件。
+- `Instrument`、订单、成交、仓位、保护、权益和资金费按外部身份去重，并以 `SHADOW|TESTNET|LIVE` 隔离。
+- 当前净仓模型只接受 one-way `BOTH` 仓位；非零 Hedge Mode 仓位 fail closed。
+- Adapter 没有下单、撤单、调整保证金或划转方法；`LIVE_ORDER_SEND` 仍为 `DISABLED`。
+- 本地合同和 PostgreSQL 集成测试已经覆盖映射、去重、RBAC、环境隔离、差异和禁用路径；没有真实凭据，因此真实账户连通性仍为“待验证”。
 
 状态值只有四种；它们是检查项状态，不是 `capability_status`：
 

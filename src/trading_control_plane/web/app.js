@@ -73,6 +73,7 @@ async function route() {
     if (path === '/orders') return await renderCampaignFacts('orders');
     if (path === '/risk') return await renderCampaignFacts('risk');
     if (path === '/exceptions') return await renderExceptions();
+    if (path === '/venues/binance') return await renderBinanceReadOnly();
     const campaignMatch = path.match(/^\/campaigns\/([0-9a-f-]+)$/i);
     if (campaignMatch) return await renderCampaignDetail(campaignMatch[1]);
     const match = path.match(/^\/proposals\/([0-9a-f-]+)$/i);
@@ -283,6 +284,59 @@ async function renderExceptions() {
   main.innerHTML = `<section class="page"><header class="page-head"><div><p class="eyebrow">FAIL CLOSED</p><h1>异常处理</h1><p class="lede">Unknown、保护不足与对账差异均阻止新增风险或自动重发。这里只显示可由权威状态派生的当前异常。</p></div><button class="secondary" data-refresh>重新计算视图</button></header>
     ${items.length ? `<div class="card-grid">${items.map(item => `<article class="card"><span class="tag">${escapeHtml(item.severity)}</span><h2 style="margin-top:16px">${escapeHtml(item.code)}</h2><p class="subtle">Campaign ${shortId(item.campaign_id)}</p>${item.details.length ? `<pre>${escapeHtml(item.details.join('\n'))}</pre>` : ''}<a class="primary" href="/campaigns/${item.campaign_id}" data-link>处理 Campaign</a></article>`).join('')}</div>` : '<section class="empty-state"><div><h2>当前没有派生异常</h2><p>这只表示当前数据库事实未触发异常条件。</p></div></section>'}</section>`;
   document.querySelector('[data-refresh]')?.addEventListener('click', route);
+}
+
+async function renderBinanceReadOnly() {
+  const binanceRole = session.roles.find((item) => item.venue_scope === 'BINANCE' && item.account_scope);
+  const accountId = new URLSearchParams(location.search).get('account_id') || binanceRole?.account_scope || 'acct-1';
+  const [status, response] = await Promise.all([
+    api('/api/venues/binance/status'),
+    api(`/api/venues/binance/facts?account_id=${encodeURIComponent(accountId)}`),
+  ]);
+  const facts = response.data;
+  const canSync = status.enabled && status.configured;
+  main.innerHTML = `<section class="page"><header class="page-head"><div><p class="eyebrow">${escapeHtml(status.fact_environment)} · BINANCE USDⓈ-M · USER_DATA</p><h1>Binance 私有事实</h1><p class="lede">只读同步 Instrument、订单、成交、仓位、保护、权益和资金费。此适配器没有下单方法，LIVE_ORDER_SEND 仍为 DISABLED。</p></div><div class="toolbar"><button class="secondary" data-refresh>刷新本地事实</button></div></header>
+    <div class="stats"><div class="stat"><small>读取开关</small><b style="font-size:14px">${status.enabled ? 'ENABLED' : 'DISABLED'}</b></div><div class="stat"><small>凭据配置</small><b style="font-size:14px">${status.configured ? 'CONFIGURED' : 'NOT CONFIGURED'}</b></div><div class="stat"><small>订单发送</small><b style="font-size:14px">UNAVAILABLE</b></div><div class="stat"><small>本地事实截止</small><b style="font-size:14px">${fmtDate(response.as_of)}</b></div></div>
+    <article class="card"><h2>读取作用域</h2><form id="binance-account-form" class="inline-form"><label>内部账户<input name="account_id" value="${escapeHtml(accountId)}" required></label><button class="secondary">查看本地事实</button></form>${canSync ? `<form id="binance-sync-form" class="inline-form"><input name="account_id" type="hidden" value="${escapeHtml(accountId)}"><label>Binance Symbol<input name="symbol" value="BTCUSDT" pattern="[A-Z0-9_]+" required></label><button class="primary">从 Binance 只读同步</button><span class="form-error" role="alert"></span></form>` : '<p class="safety-note">真实 USER_DATA 读取保持关闭或未配置。页面只展示已持久化事实；不会尝试网络连接。</p>'}</article>
+    ${venueFactSections(facts)}
+  </section>`;
+  document.querySelector('[data-refresh]')?.addEventListener('click', route);
+  document.querySelector('#binance-account-form')?.addEventListener('submit', (event) => {
+    event.preventDefault();
+    const next = new FormData(event.currentTarget).get('account_id');
+    navigate(`/venues/binance?account_id=${encodeURIComponent(next)}`);
+  });
+  document.querySelector('#binance-sync-form')?.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    const form = event.currentTarget;
+    const payload = Object.fromEntries(new FormData(form));
+    const button = form.querySelector('button');
+    button.disabled = true;
+    try {
+      const result = await api('/api/venues/binance/sync', {method:'POST', body:JSON.stringify(payload)});
+      showToast(`只读同步完成；对账 ${result.reconciliation.status}`);
+      await route();
+    } catch (error) {
+      form.querySelector('.form-error').textContent = `${error.code}: ${error.message}`;
+      button.disabled = false;
+    }
+  });
+}
+
+function venueFactSections(facts) {
+  const positions = facts.positions.map(item => `<tr><td>${escapeHtml(item.symbol)}</td><td>${fmtNumber(item.quantity)} @ ${fmtNumber(item.average_entry_price)}</td><td>${fmtNumber(item.mark_price)}</td><td>${escapeHtml(item.fact_status)}</td><td>${item.protection ? `${escapeHtml(item.protection.status)} · ${item.protection.fully_covered ? '足额' : '不足'}` : '无保护事实'}</td><td>${fmtDate(item.observed_at)}</td></tr>`).join('');
+  const orders = facts.orders.map(item => `<tr><td>${escapeHtml(item.venue_order_id)}</td><td>${escapeHtml(item.symbol)}</td><td>${escapeHtml(item.status)}</td><td>${fmtNumber(item.filled_quantity)} / ${fmtNumber(item.ordered_quantity)}</td><td>${item.intent_id ? shortId(item.intent_id) : '外部未绑定'}</td><td>${fmtDate(item.observed_at)}</td></tr>`).join('');
+  const fills = facts.fills.map(item => `<tr><td>${escapeHtml(item.venue_fill_id)}</td><td>${escapeHtml(item.symbol)}</td><td>${escapeHtml(item.side)} ${fmtNumber(item.quantity)}</td><td>${fmtNumber(item.price)}</td><td>${fmtNumber(item.fee)} ${escapeHtml(item.fee_currency)}</td><td>${fmtDate(item.executed_at)}</td></tr>`).join('');
+  const funding = facts.funding.map(item => `<tr><td>${escapeHtml(item.venue_payment_id)}</td><td>${escapeHtml(item.symbol)}</td><td>${fmtNumber(item.amount)} ${escapeHtml(item.currency)}</td><td>${fmtDate(item.paid_at)}</td></tr>`).join('');
+  return `<div class="stats"><div class="stat"><small>权益</small><b>${fmtNumber(facts.equity?.equity)}</b></div><div class="stat"><small>可用余额</small><b>${fmtNumber(facts.equity?.available_balance)}</b></div><div class="stat"><small>权益状态</small><b style="font-size:14px">${escapeHtml(facts.equity?.fact_status || 'UNKNOWN')}</b></div><div class="stat"><small>观测时间</small><b style="font-size:14px">${fmtDate(facts.equity?.observed_at)}</b></div></div>
+    ${factTable('仓位与保护', '<th>标的</th><th>数量 / 入场</th><th>标记价</th><th>事实</th><th>保护</th><th>观测时间</th>', positions)}
+    ${factTable('当前场所订单', '<th>Venue Order</th><th>标的</th><th>状态</th><th>成交 / 委托</th><th>内部意图</th><th>观测时间</th>', orders)}
+    ${factTable('最近成交', '<th>Venue Fill</th><th>标的</th><th>方向 / 数量</th><th>价格</th><th>手续费</th><th>成交时间</th>', fills)}
+    ${factTable('资金费', '<th>Payment</th><th>标的</th><th>金额</th><th>支付时间</th>', funding)}`;
+}
+
+function factTable(title, headers, rows) {
+  return `<section><h2>${escapeHtml(title)}</h2>${rows ? `<div class="table-wrap"><table><thead><tr>${headers}</tr></thead><tbody>${rows}</tbody></table></div>` : '<div class="callout">当前没有已持久化事实。</div>'}</section>`;
 }
 
 async function renderCampaignDetail(id) {

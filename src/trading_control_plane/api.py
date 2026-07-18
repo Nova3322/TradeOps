@@ -19,6 +19,7 @@ from trading_control_plane import __version__
 from trading_control_plane.api_schemas import (
     AccountEquityFactRequest,
     AuthorizationRequest,
+    BinanceReadOnlySyncRequest,
     CampaignTargetRequest,
     FundingFactRequest,
     IntentReleaseRequest,
@@ -40,6 +41,7 @@ from trading_control_plane.api_schemas import (
     SystemProposalRequest,
 )
 from trading_control_plane.auth import SessionIdentity, SignedTokenService
+from trading_control_plane.binance import BinanceReadOnlyClient
 from trading_control_plane.config import Settings, get_settings
 from trading_control_plane.database import Database
 from trading_control_plane.domain import (
@@ -100,8 +102,16 @@ def _domain_status(code: str) -> int:
         "PROPOSAL_NOT_APPROVED",
     }:
         return status.HTTP_409_CONFLICT
-    if code in {"PERPTAPE_UNAVAILABLE", "PERPTAPE_NOT_CONFIGURED"}:
+    if code in {
+        "PERPTAPE_UNAVAILABLE",
+        "PERPTAPE_NOT_CONFIGURED",
+        "BINANCE_READ_ONLY_DISABLED",
+        "BINANCE_READ_ONLY_NOT_CONFIGURED",
+        "BINANCE_READ_ONLY_UNAVAILABLE",
+    }:
         return status.HTTP_503_SERVICE_UNAVAILABLE
+    if code == "BINANCE_RESPONSE_INVALID":
+        return status.HTTP_502_BAD_GATEWAY
     return status.HTTP_422_UNPROCESSABLE_CONTENT
 
 
@@ -110,6 +120,7 @@ def create_app(
     database: ReadinessDatabase | None = None,
     perptape_client: PerptapeClient | None = None,
     telegram_gateway: MockTelegramGateway | None = None,
+    binance_client: BinanceReadOnlyClient | None = None,
 ) -> FastAPI:
     resolved_settings = settings or get_settings()
     resolved_settings.validate_runtime_security()
@@ -123,6 +134,12 @@ def create_app(
         cache_ttl=timedelta(seconds=resolved_settings.perptape_cache_seconds),
     )
     resolved_telegram = telegram_gateway or MockTelegramGateway()
+    resolved_binance = binance_client or BinanceReadOnlyClient(
+        base_url=resolved_settings.binance_futures_base_url,
+        api_key=resolved_settings.binance_api_key,
+        api_secret=resolved_settings.binance_api_secret,
+        recv_window_ms=resolved_settings.binance_recv_window_ms,
+    )
 
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
@@ -141,6 +158,7 @@ def create_app(
     app.state.database = resolved_database
     app.state.perptape_client = resolved_perptape
     app.state.telegram_gateway = resolved_telegram
+    app.state.binance_client = resolved_binance
 
     @app.exception_handler(DomainRejected)
     async def domain_rejected(_: Request, exc: DomainRejected) -> JSONResponse:
@@ -150,7 +168,8 @@ def create_app(
                 "error": {
                     "code": exc.code,
                     "message": exc.detail,
-                    "retryable": exc.code in {"PERPTAPE_UNAVAILABLE"},
+                    "retryable": exc.code
+                    in {"PERPTAPE_UNAVAILABLE", "BINANCE_READ_ONLY_UNAVAILABLE"},
                 }
             },
         )
@@ -582,6 +601,94 @@ def create_app(
             )
         )
 
+    @app.get("/api/venues/binance/status")
+    def binance_read_only_status(
+        identity: SessionIdentity = identity_dependency,
+    ) -> dict[str, Any]:
+        del identity
+        return {
+            "venue": "BINANCE",
+            "mode": "USER_DATA_READ_ONLY",
+            "enabled": resolved_settings.binance_read_only_enabled,
+            "configured": resolved_binance.configured,
+            "order_send_available": False,
+            "fact_environment": resolved_settings.binance_fact_environment,
+            "environment": resolved_settings.environment,
+        }
+
+    @app.get("/api/venues/binance/facts")
+    def binance_read_only_facts(
+        account_id: str,
+        identity: SessionIdentity = identity_dependency,
+    ) -> dict[str, Any]:
+        return {
+            "mode": "USER_DATA_READ_ONLY",
+            "data": queries().venue_facts(
+                identity.user_id,
+                account_id,
+                "BINANCE",
+                resolved_settings.binance_fact_environment,
+            ),
+            "as_of": _now().isoformat(),
+        }
+
+    @app.post("/api/venues/binance/sync")
+    def sync_binance_read_only_facts(
+        payload: BinanceReadOnlySyncRequest,
+        identity: SessionIdentity = identity_dependency,
+    ) -> dict[str, Any]:
+        if not resolved_settings.binance_read_only_enabled:
+            raise DomainRejected(
+                "BINANCE_READ_ONLY_DISABLED",
+                "Binance USER_DATA read-only synchronization is disabled",
+            )
+        if not resolved_binance.configured:
+            raise DomainRejected(
+                "BINANCE_READ_ONLY_NOT_CONFIGURED",
+                "Binance read-only credentials are not configured",
+            )
+        if not service().can_user(identity.user_id, "venue.record", payload.account_id, "BINANCE"):
+            raise DomainRejected(
+                "RBAC_DENIED", "Binance facts are outside the current operator scope"
+            )
+        now = _now()
+        snapshot = resolved_binance.read_snapshot(payload.symbol, now=now)
+        persisted = service().ingest_binance_read_only_snapshot(
+            payload.account_id,
+            identity.user_id,
+            snapshot,
+            environment=ExecutionEnvironment(resolved_settings.binance_fact_environment),
+            now=now,
+        )
+        execution_scope = (
+            f"{resolved_settings.binance_fact_environment}:{payload.account_id}:BINANCE"
+        )
+        reconciliation_id = service().reconcile_scope(
+            execution_scope,
+            identity.user_id,
+            now=now,
+        )
+        reconciliation_status = service().reconciliation_status(reconciliation_id)
+        return {
+            "source": "BINANCE_USER_DATA",
+            "mode": "READ_ONLY",
+            "environment": resolved_settings.binance_fact_environment,
+            "symbol": payload.symbol,
+            "observed_at": snapshot.observed_at.isoformat(),
+            "persisted": persisted,
+            "reconciliation": {
+                "reconciliation_id": str(reconciliation_id),
+                "execution_scope": execution_scope,
+                "status": reconciliation_status.value,
+            },
+            "facts": queries().venue_facts(
+                identity.user_id,
+                payload.account_id,
+                "BINANCE",
+                resolved_settings.binance_fact_environment,
+            ),
+        }
+
     @app.get("/api/campaigns")
     def campaigns(
         identity: SessionIdentity = identity_dependency,
@@ -999,6 +1106,7 @@ def create_app(
         @app.get("/orders", include_in_schema=False)
         @app.get("/risk", include_in_schema=False)
         @app.get("/exceptions", include_in_schema=False)
+        @app.get("/venues/binance", include_in_schema=False)
         @app.get("/proposals/{proposal_id}", include_in_schema=False)
         @app.get("/campaigns/{campaign_id}", include_in_schema=False)
         def web_app(proposal_id: str | None = None, campaign_id: str | None = None) -> FileResponse:

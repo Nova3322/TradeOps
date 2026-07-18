@@ -1,7 +1,7 @@
 # Trading 交易系统
 
 > 状态日期：2026-07-19
-> 当前状态：M2 SHADOW Campaign 运营台；没有真实场所接入或实盘授权
+> 当前状态：M3 Binance USDⓈ-M 私有事实只读适配；真实凭据未配置，订单发送仍不可用
 
 本项目面向一个资本所有者、一个内部组织和多个内部用户。用户可以提交和审核提案、查看仓位、处理异常；系统在风险可控的前提下辅助执行交易并判断是否赚钱。不开放外部注册，不管理第三方资金，不建设机构级多租户、通用合规或通用认证平台。
 
@@ -25,22 +25,24 @@
 - 数据陈旧、仓位未知、保护未知或订单结果 Unknown 时禁止新增风险。
 - Reservation、OrderIntent 和幂等回执必须原子提交；Unknown 不能提前释放或自动重发。
 - 多个退出候选合并为唯一更小目标仓位；有活动 OrderIntent 时不重复生成减仓意图。
-- 场所真实订单、成交、仓位、保护、余额和资金费必须与内部预期分开并对账。
+- 场所真实订单、成交、仓位、保护、余额和资金费必须与内部预期分开并对账；SHADOW、TESTNET、LIVE 使用独立事实作用域。
 - 每个 execution scope 只有一个有效 sender；新 owner 接管后旧 fencing token 无效。
 - `LIVE_ORDER_SEND`、`CAPITAL_TRANSFER`、`AUTO_ADD` 默认 `DISABLED`。
-- Telegram 当前只有不联网的 Mock 提案、成交、保护和异常通知适配器；真实 Bot、真实 VenueAdapter、实盘发送、Margin、Vault/CTO 尚未实现，文档愿景不能冒充代码能力。
+- Telegram 当前只有不联网的 Mock 提案、成交、保护和异常通知适配器；Binance 当前只有默认关闭的 USER_DATA GET 适配器，没有订单写方法。真实 Bot、真实账户验证、实盘发送、Margin、Vault/CTO 尚未实现，文档愿景不能冒充代码能力。
 
 ## 当前代码入口
 
 - 进程：`uv run trading-api`
-- Web/PWA：提案/审核页面，以及 `/campaigns`、`/positions`、`/orders`、`/risk`、`/exceptions` 和 Campaign 详情运营页
-- HTTP：健康检查、内部会话、Perptape 机会、Proposal/Review/Risk/Authorization，以及 SHADOW Campaign、事实、订单、保护、目标、对账和 PnL API
+- Web/PWA：提案/审核页面，Campaign 运营页，以及 `/venues/binance` 的只读场所事实页
+- HTTP：健康检查、内部会话、Perptape 机会、Proposal/Review/Risk/Authorization、SHADOW Campaign，以及 Binance 只读状态/事实/同步 API
 - 内部业务：`trading_control_plane.service.TradingService`
 - 纯计算：`evaluate_risk`、`select_target_position`、`compute_pnl`
 - 数据库：PostgreSQL，Alembic head `20260718_0001`
-- 订单边界：当前只有合成 SHADOW 场所事实，不连接交易所、不发送真实订单
+- 场所边界：`binance.py` 只实现 GET；默认不读取网络，配置只读凭据后可读取规则、订单、成交、仓位、权益和资金费。没有发送、撤销或保证金写方法，`LIVE_ORDER_SEND` 仍为 `DISABLED`
 
 正式身份源按冻结决策使用托管 IdP 与 Passkey，但外部 IdP 尚未接入。本地/测试环境可显式启用仅识别已存在内部用户的 Mock 会话和 Mock step-up；生产环境硬拒绝启用 Mock 身份。Perptape 使用其现有 `GET /api/v1/breakouts` 窄合同，需单独配置平台 API Key，未配置时机会入口明确返回不可用。
+
+Binance 私有事实读取必须同时显式配置 `TRADING_BINANCE_READ_ONLY_ENABLED=true`、只读 API Key/Secret 和 `TRADING_BINANCE_FACT_ENVIRONMENT=TESTNET|LIVE`。当前仓库没有真实凭据或账户验证结果；未配置时页面只显示 PostgreSQL 已保存事实，不尝试联网。
 
 ## 本地开发
 

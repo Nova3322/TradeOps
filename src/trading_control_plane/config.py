@@ -41,6 +41,12 @@ class Settings(BaseSettings):
     perptape_service_username: str = "perptape"
     perptape_contract_version: str = "breakouts-v1"
     perptape_cache_seconds: int = Field(default=60, ge=1, le=300)
+    binance_read_only_enabled: bool = False
+    binance_fact_environment: Literal["TESTNET", "LIVE"] = "LIVE"
+    binance_futures_base_url: str = "https://fapi.binance.com"
+    binance_api_key: str | None = Field(default=None, repr=False)
+    binance_api_secret: str | None = Field(default=None, repr=False)
+    binance_recv_window_ms: int = Field(default=5_000, ge=1_000, le=10_000)
 
     @field_validator("database_url")
     @classmethod
@@ -57,6 +63,10 @@ class Settings(BaseSettings):
             and self.session_signing_secret == DEFAULT_SESSION_SECRET
         ):
             raise ValueError("production requires an explicit session signing secret")
+        if self.binance_read_only_enabled and bool(self.binance_api_key) != bool(
+            self.binance_api_secret
+        ):
+            raise ValueError("Binance read-only key and secret must be configured together")
 
 
 @lru_cache(maxsize=1)

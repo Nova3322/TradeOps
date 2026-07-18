@@ -10,6 +10,7 @@ from uuid import UUID, uuid4
 from sqlalchemy import func, select, text
 from sqlalchemy.orm import Session
 
+from trading_control_plane.binance import BinanceReadOnlySnapshot
 from trading_control_plane.database import Database
 from trading_control_plane.domain import (
     CampaignStatus,
@@ -142,13 +143,33 @@ def _as_uuid(value: str) -> UUID:
     return UUID(value)
 
 
-def _scope_parts(execution_scope: str) -> tuple[str, str]:
-    if execution_scope.count(":") != 1:
-        _reject("EXECUTION_SCOPE_INVALID", "execution scope must be account:venue")
-    account_id, venue = execution_scope.split(":", 1)
+def _scope_key(environment: str, account_id: str, venue: str) -> str:
+    return (
+        f"{account_id}:{venue}"
+        if environment == ExecutionEnvironment.SHADOW.value
+        else f"{environment}:{account_id}:{venue}"
+    )
+
+
+def _scope_parts(execution_scope: str) -> tuple[ExecutionEnvironment, str, str]:
+    parts = execution_scope.split(":")
+    if len(parts) == 2:
+        environment = ExecutionEnvironment.SHADOW
+        account_id, venue = parts
+    elif len(parts) == 3:
+        try:
+            environment = ExecutionEnvironment(parts[0])
+        except ValueError:
+            _reject("EXECUTION_SCOPE_INVALID", "execution scope environment is invalid")
+        account_id, venue = parts[1:]
+    else:
+        _reject(
+            "EXECUTION_SCOPE_INVALID",
+            "execution scope must be account:venue or environment:account:venue",
+        )
     if not account_id or not venue or account_id.strip() != account_id or venue.strip() != venue:
         _reject("EXECUTION_SCOPE_INVALID", "execution scope must contain non-empty exact parts")
-    return account_id, venue
+    return environment, account_id, venue
 
 
 class TradingService:
@@ -806,6 +827,7 @@ class TradingService:
             .where(
                 Position.account_id == proposal.account_id,
                 Position.venue == proposal.venue,
+                Position.environment == proposal.environment,
                 Position.instrument_id == proposal.instrument_id,
             )
             .with_for_update()
@@ -815,6 +837,7 @@ class TradingService:
             .where(
                 AccountEquity.account_id == proposal.account_id,
                 AccountEquity.venue == proposal.venue,
+                AccountEquity.environment == proposal.environment,
             )
             .with_for_update()
         )
@@ -1055,6 +1078,7 @@ class TradingService:
                 risk_decision_id=decision.decision_id,
                 account_id=proposal.account_id,
                 venue=proposal.venue,
+                environment=proposal.environment,
                 instrument_id=proposal.instrument_id,
                 direction=proposal.direction,
                 quantity_limit=decision.approved_quantity,
@@ -1202,6 +1226,7 @@ class TradingService:
                 .where(
                     Position.account_id == account_id,
                     Position.venue == venue,
+                    Position.environment == proposal.environment,
                     Position.instrument_id == instrument_id,
                 )
                 .with_for_update()
@@ -1222,6 +1247,7 @@ class TradingService:
                     .where(
                         Campaign.account_id == account_id,
                         Campaign.venue == venue,
+                        Campaign.environment == proposal.environment,
                         Campaign.instrument_id == instrument_id,
                         Campaign.status != CampaignStatus.CLOSED.value,
                     )
@@ -1237,6 +1263,7 @@ class TradingService:
                         authorization_id=authorization_id,
                         account_id=authorization.account_id,
                         venue=authorization.venue,
+                        environment=proposal.environment,
                         instrument_id=authorization.instrument_id,
                         direction=authorization.direction,
                         status=CampaignStatus.OPENING.value,
@@ -1504,7 +1531,7 @@ class TradingService:
         lease_duration: timedelta = timedelta(minutes=1),
     ) -> int:
         with self.database.session_factory.begin() as session:
-            account_id, venue = _scope_parts(execution_scope)
+            _environment, account_id, venue = _scope_parts(execution_scope)
             if not owner_id or lease_duration <= timedelta(0):
                 _reject("SENDER_LEASE_INVALID", "owner and positive lease duration are required")
             self._require_role(session, actor_id, "sender.manage", account_id, venue)
@@ -1620,7 +1647,7 @@ class TradingService:
             campaign = session.get(Campaign, intent.campaign_id)
             if campaign is None:
                 _reject("CAMPAIGN_NOT_FOUND", "intent campaign is missing")
-            expected_scope = f"{campaign.account_id}:{campaign.venue}"
+            expected_scope = _scope_key(campaign.environment, campaign.account_id, campaign.venue)
             if execution_scope != expected_scope:
                 _reject("EXECUTION_SCOPE_MISMATCH", "sender scope does not match campaign scope")
             self._require_role(
@@ -1628,7 +1655,10 @@ class TradingService:
             )
             fact = VenueOrder(
                 order_intent_id=intent_id,
+                account_id=campaign.account_id,
                 venue=campaign.venue,
+                environment=campaign.environment,
+                instrument_id=campaign.instrument_id,
                 venue_order_id=venue_order_id,
                 status=VenueOrderStatus.SENT.value,
                 ordered_quantity=intent.quantity,
@@ -1682,6 +1712,8 @@ class TradingService:
             )
             existing = session.scalar(
                 select(VenueFill).where(
+                    VenueFill.environment == campaign.environment,
+                    VenueFill.account_id == campaign.account_id,
                     VenueFill.venue == campaign.venue,
                     VenueFill.venue_fill_id == venue_fill_id,
                 )
@@ -1728,6 +1760,9 @@ class TradingService:
                 venue_fill_id=venue_fill_id,
                 order_intent_id=intent_id,
                 campaign_id=campaign.campaign_id,
+                account_id=campaign.account_id,
+                environment=campaign.environment,
+                instrument_id=campaign.instrument_id,
                 side=side,
                 quantity=quantity,
                 price=price,
@@ -1785,6 +1820,7 @@ class TradingService:
         known: bool,
         actor_id: UUID,
         *,
+        environment: ExecutionEnvironment = ExecutionEnvironment.SHADOW,
         observed_at: datetime | None = None,
         now: datetime,
     ) -> UUID:
@@ -1797,6 +1833,7 @@ class TradingService:
                 select(Position).where(
                     Position.account_id == account_id,
                     Position.venue == venue,
+                    Position.environment == environment.value,
                     Position.instrument_id == instrument_id,
                 )
             )
@@ -1804,6 +1841,7 @@ class TradingService:
                 position = Position(
                     account_id=account_id,
                     venue=venue,
+                    environment=environment.value,
                     instrument_id=instrument_id,
                     quantity=quantity,
                     average_entry_price=average_entry_price,
@@ -1914,6 +1952,7 @@ class TradingService:
         known: bool,
         actor_id: UUID,
         *,
+        environment: ExecutionEnvironment = ExecutionEnvironment.SHADOW,
         observed_at: datetime | None = None,
         now: datetime,
     ) -> UUID:
@@ -1926,12 +1965,14 @@ class TradingService:
                 select(AccountEquity).where(
                     AccountEquity.account_id == account_id,
                     AccountEquity.venue == venue,
+                    AccountEquity.environment == environment.value,
                 )
             )
             if fact is None:
                 fact = AccountEquity(
                     account_id=account_id,
                     venue=venue,
+                    environment=environment.value,
                     equity=equity,
                     available_balance=available_balance,
                     currency=currency,
@@ -1975,6 +2016,8 @@ class TradingService:
                 _reject("PNL_CURRENCY_MISMATCH", "funding currency lacks an FX conversion")
             existing = session.scalar(
                 select(FundingPayment).where(
+                    FundingPayment.environment == campaign.environment,
+                    FundingPayment.account_id == campaign.account_id,
                     FundingPayment.venue == venue,
                     FundingPayment.venue_payment_id == venue_payment_id,
                 )
@@ -1989,7 +2032,10 @@ class TradingService:
                 raise IdempotencyConflict
             payment = FundingPayment(
                 campaign_id=campaign_id,
+                account_id=campaign.account_id,
                 venue=venue,
+                environment=campaign.environment,
+                instrument_id=campaign.instrument_id,
                 venue_payment_id=venue_payment_id,
                 amount=amount,
                 currency=currency,
@@ -1998,6 +2044,371 @@ class TradingService:
             session.add(payment)
             session.flush()
             return payment.funding_payment_id
+
+    def ingest_binance_read_only_snapshot(
+        self,
+        account_id: str,
+        actor_id: UUID,
+        snapshot: BinanceReadOnlySnapshot,
+        *,
+        environment: ExecutionEnvironment,
+        now: datetime,
+    ) -> dict[str, Any]:
+        """Persist one Binance USER_DATA snapshot without any venue-side mutation."""
+
+        if snapshot.observed_at > now + timedelta(seconds=5):
+            _reject("FACT_TIME_INVALID", "Binance snapshot is unexpectedly in the future")
+        with self.database.session_factory.begin() as session:
+            self._require_role(session, actor_id, "venue.record", account_id, "BINANCE")
+            instrument = session.scalar(
+                select(Instrument)
+                .where(
+                    Instrument.venue == "BINANCE",
+                    Instrument.symbol == snapshot.symbol,
+                )
+                .with_for_update()
+            )
+            if instrument is None:
+                instrument = Instrument(
+                    venue="BINANCE",
+                    symbol=snapshot.symbol,
+                    tick_size=snapshot.instrument.tick_size,
+                    lot_size=snapshot.instrument.lot_size,
+                    minimum_notional=snapshot.instrument.minimum_notional,
+                    contract_multiplier=Decimal(1),
+                    quote_currency=snapshot.instrument.quote_currency,
+                    collateral_currency=snapshot.instrument.collateral_currency,
+                    active=snapshot.instrument.active,
+                    protection_supported=True,
+                    updated_at=now,
+                )
+                session.add(instrument)
+                session.flush()
+            else:
+                instrument.tick_size = snapshot.instrument.tick_size
+                instrument.lot_size = snapshot.instrument.lot_size
+                instrument.minimum_notional = snapshot.instrument.minimum_notional
+                instrument.quote_currency = snapshot.instrument.quote_currency
+                instrument.collateral_currency = snapshot.instrument.collateral_currency
+                instrument.active = snapshot.instrument.active
+                instrument.updated_at = now
+
+            position = session.scalar(
+                select(Position)
+                .where(
+                    Position.account_id == account_id,
+                    Position.venue == "BINANCE",
+                    Position.environment == environment.value,
+                    Position.instrument_id == instrument.instrument_id,
+                )
+                .with_for_update()
+            )
+            if position is None:
+                position = Position(
+                    account_id=account_id,
+                    venue="BINANCE",
+                    environment=environment.value,
+                    instrument_id=instrument.instrument_id,
+                    quantity=snapshot.position.quantity,
+                    average_entry_price=snapshot.position.average_entry_price,
+                    mark_price=snapshot.position.mark_price,
+                    fact_status=FactStatus.KNOWN.value,
+                    observed_at=snapshot.position.observed_at,
+                    updated_at=now,
+                )
+                session.add(position)
+                session.flush()
+            else:
+                position.quantity = snapshot.position.quantity
+                position.average_entry_price = snapshot.position.average_entry_price
+                position.mark_price = snapshot.position.mark_price
+                position.fact_status = FactStatus.KNOWN.value
+                position.observed_at = snapshot.position.observed_at
+                position.updated_at = now
+
+            equity = session.scalar(
+                select(AccountEquity)
+                .where(
+                    AccountEquity.account_id == account_id,
+                    AccountEquity.venue == "BINANCE",
+                    AccountEquity.environment == environment.value,
+                )
+                .with_for_update()
+            )
+            if equity is None:
+                equity = AccountEquity(
+                    account_id=account_id,
+                    venue="BINANCE",
+                    environment=environment.value,
+                    equity=snapshot.equity.equity,
+                    available_balance=snapshot.equity.available_balance,
+                    currency=snapshot.equity.currency,
+                    fact_status=FactStatus.KNOWN.value,
+                    observed_at=snapshot.equity.observed_at,
+                    updated_at=now,
+                )
+                session.add(equity)
+            else:
+                equity.equity = snapshot.equity.equity
+                equity.available_balance = snapshot.equity.available_balance
+                equity.currency = snapshot.equity.currency
+                equity.fact_status = FactStatus.KNOWN.value
+                equity.observed_at = snapshot.equity.observed_at
+                equity.updated_at = now
+
+            order_count = 0
+            for external_order in snapshot.orders:
+                intent: OrderIntent | None = None
+                if external_order.client_order_id.startswith("tcp-"):
+                    try:
+                        candidate = _as_uuid(external_order.client_order_id.removeprefix("tcp-"))
+                    except ValueError:
+                        candidate = None
+                    if candidate is not None:
+                        intent = session.get(OrderIntent, candidate)
+                if intent is not None:
+                    campaign = session.get(Campaign, intent.campaign_id)
+                    if (
+                        campaign is None
+                        or campaign.account_id != account_id
+                        or campaign.venue != "BINANCE"
+                        or campaign.environment != environment.value
+                        or campaign.instrument_id != instrument.instrument_id
+                    ):
+                        _reject(
+                            "BINANCE_ORDER_BINDING_INVALID",
+                            "client order identity does not match its internal scope",
+                        )
+                current_order = session.scalar(
+                    select(VenueOrder)
+                    .where(
+                        VenueOrder.environment == environment.value,
+                        VenueOrder.account_id == account_id,
+                        VenueOrder.venue == "BINANCE",
+                        VenueOrder.venue_order_id == external_order.order_id,
+                    )
+                    .with_for_update()
+                )
+                if current_order is None:
+                    current_order = VenueOrder(
+                        order_intent_id=None if intent is None else intent.intent_id,
+                        account_id=account_id,
+                        venue="BINANCE",
+                        environment=environment.value,
+                        instrument_id=instrument.instrument_id,
+                        venue_order_id=external_order.order_id,
+                        status=external_order.status,
+                        ordered_quantity=external_order.ordered_quantity,
+                        filled_quantity=external_order.filled_quantity,
+                        observed_at=external_order.observed_at,
+                        updated_at=now,
+                    )
+                    session.add(current_order)
+                else:
+                    if (
+                        current_order.account_id != account_id
+                        or current_order.instrument_id != instrument.instrument_id
+                        or (
+                            current_order.order_intent_id is not None
+                            and intent is not None
+                            and current_order.order_intent_id != intent.intent_id
+                        )
+                    ):
+                        _reject("BINANCE_FACT_CONFLICT", "venue order identity changed scope")
+                    if current_order.order_intent_id is None and intent is not None:
+                        current_order.order_intent_id = intent.intent_id
+                    current_order.status = external_order.status
+                    current_order.ordered_quantity = external_order.ordered_quantity
+                    current_order.filled_quantity = external_order.filled_quantity
+                    current_order.observed_at = external_order.observed_at
+                    current_order.updated_at = now
+                order_count += 1
+            session.flush()
+
+            fill_count = 0
+            for external_fill in snapshot.fills:
+                current_fill = session.scalar(
+                    select(VenueFill).where(
+                        VenueFill.environment == environment.value,
+                        VenueFill.account_id == account_id,
+                        VenueFill.venue == "BINANCE",
+                        VenueFill.venue_fill_id == external_fill.fill_id,
+                    )
+                )
+                venue_order = session.scalar(
+                    select(VenueOrder).where(
+                        VenueOrder.environment == environment.value,
+                        VenueOrder.account_id == account_id,
+                        VenueOrder.venue == "BINANCE",
+                        VenueOrder.venue_order_id == external_fill.order_id,
+                    )
+                )
+                intent = (
+                    session.get(OrderIntent, venue_order.order_intent_id)
+                    if venue_order is not None and venue_order.order_intent_id is not None
+                    else None
+                )
+                campaign_id = None if intent is None else intent.campaign_id
+                if current_fill is None:
+                    session.add(
+                        VenueFill(
+                            venue="BINANCE",
+                            venue_fill_id=external_fill.fill_id,
+                            order_intent_id=None if intent is None else intent.intent_id,
+                            campaign_id=campaign_id,
+                            account_id=account_id,
+                            environment=environment.value,
+                            instrument_id=instrument.instrument_id,
+                            side=external_fill.side,
+                            quantity=external_fill.quantity,
+                            price=external_fill.price,
+                            fee=external_fill.fee,
+                            fee_currency=external_fill.fee_currency,
+                            slippage_cost=Decimal(0),
+                            executed_at=external_fill.executed_at,
+                        )
+                    )
+                elif (
+                    current_fill.account_id != account_id
+                    or current_fill.instrument_id != instrument.instrument_id
+                    or current_fill.side != external_fill.side
+                    or current_fill.quantity != external_fill.quantity
+                    or current_fill.price != external_fill.price
+                    or current_fill.fee != external_fill.fee
+                    or current_fill.fee_currency != external_fill.fee_currency
+                ):
+                    _reject("BINANCE_FACT_CONFLICT", "venue fill identity changed semantics")
+                fill_count += 1
+
+            funding_count = 0
+            for external_funding in snapshot.funding:
+                current_funding = session.scalar(
+                    select(FundingPayment).where(
+                        FundingPayment.environment == environment.value,
+                        FundingPayment.account_id == account_id,
+                        FundingPayment.venue == "BINANCE",
+                        FundingPayment.venue_payment_id == external_funding.payment_id,
+                    )
+                )
+                if current_funding is None:
+                    session.add(
+                        FundingPayment(
+                            campaign_id=None,
+                            account_id=account_id,
+                            venue="BINANCE",
+                            environment=environment.value,
+                            instrument_id=instrument.instrument_id,
+                            venue_payment_id=external_funding.payment_id,
+                            amount=external_funding.amount,
+                            currency=external_funding.currency,
+                            paid_at=external_funding.paid_at,
+                        )
+                    )
+                elif (
+                    current_funding.account_id != account_id
+                    or current_funding.instrument_id != instrument.instrument_id
+                    or current_funding.amount != external_funding.amount
+                    or current_funding.currency != external_funding.currency
+                ):
+                    _reject("BINANCE_FACT_CONFLICT", "funding identity changed semantics")
+                funding_count += 1
+
+            protection = session.scalar(
+                select(ProtectionOrder)
+                .where(ProtectionOrder.position_id == position.position_id)
+                .with_for_update()
+            )
+            if snapshot.position.quantity != 0:
+                observed_protection = snapshot.protection
+                covered = (
+                    observed_protection is not None
+                    and observed_protection.quantity >= abs(snapshot.position.quantity)
+                    and observed_protection.trigger_price > 0
+                )
+                if protection is None:
+                    protection = ProtectionOrder(
+                        position_id=position.position_id,
+                        venue_order_id=(
+                            f"BINANCE:UNKNOWN:{snapshot.symbol}"
+                            if observed_protection is None
+                            else observed_protection.order_id
+                        ),
+                        quantity=(
+                            Decimal(0)
+                            if observed_protection is None
+                            else observed_protection.quantity
+                        ),
+                        trigger_price=(
+                            Decimal(0)
+                            if observed_protection is None
+                            else observed_protection.trigger_price
+                        ),
+                        status=(
+                            ProtectionStatus.ACTIVE.value
+                            if covered
+                            else ProtectionStatus.UNKNOWN.value
+                            if observed_protection is None
+                            else ProtectionStatus.DEGRADED.value
+                        ),
+                        fully_covered=covered,
+                        observed_at=(
+                            snapshot.observed_at
+                            if observed_protection is None
+                            else observed_protection.observed_at
+                        ),
+                        updated_at=now,
+                    )
+                    session.add(protection)
+                else:
+                    protection.venue_order_id = (
+                        f"BINANCE:UNKNOWN:{snapshot.symbol}"
+                        if observed_protection is None
+                        else observed_protection.order_id
+                    )
+                    protection.quantity = (
+                        Decimal(0) if observed_protection is None else observed_protection.quantity
+                    )
+                    protection.trigger_price = (
+                        Decimal(0)
+                        if observed_protection is None
+                        else observed_protection.trigger_price
+                    )
+                    protection.status = (
+                        ProtectionStatus.ACTIVE.value
+                        if covered
+                        else ProtectionStatus.UNKNOWN.value
+                        if observed_protection is None
+                        else ProtectionStatus.DEGRADED.value
+                    )
+                    protection.fully_covered = covered
+                    protection.observed_at = (
+                        snapshot.observed_at
+                        if observed_protection is None
+                        else observed_protection.observed_at
+                    )
+                    protection.updated_at = now
+            elif protection is not None:
+                session.delete(protection)
+            self._audit(
+                session,
+                actor_id=str(actor_id),
+                event_type="BINANCE_READ_ONLY_SYNCED",
+                object_type="Instrument",
+                object_id=instrument.instrument_id,
+                reason=(
+                    f"orders={order_count},fills={fill_count},funding={funding_count},"
+                    f"position={snapshot.position.quantity}"
+                ),
+                correlation_id=uuid4(),
+                object_version=1,
+                now=now,
+            )
+            return {
+                "instrument_id": str(instrument.instrument_id),
+                "orders": order_count,
+                "fills": fill_count,
+                "funding": funding_count,
+            }
 
     def update_campaign_target(
         self,
@@ -2023,6 +2434,7 @@ class TradingService:
                 .where(
                     Position.account_id == campaign.account_id,
                     Position.venue == campaign.venue,
+                    Position.environment == campaign.environment,
                     Position.instrument_id == campaign.instrument_id,
                 )
                 .with_for_update()
@@ -2078,6 +2490,7 @@ class TradingService:
                 select(Position).where(
                     Position.account_id == campaign.account_id,
                     Position.venue == campaign.venue,
+                    Position.environment == campaign.environment,
                     Position.instrument_id == campaign.instrument_id,
                 )
             )
@@ -2168,7 +2581,7 @@ class TradingService:
                 "MATCH must be computed and RESOLVED requires a manual transition",
             )
         with self.database.session_factory.begin() as session:
-            account_id, venue = _scope_parts(execution_scope)
+            _environment, account_id, venue = _scope_parts(execution_scope)
             self._require_role(session, actor_id, "reconcile", account_id, venue)
             run = ReconciliationRun(
                 execution_scope=execution_scope,
@@ -2194,7 +2607,7 @@ class TradingService:
             run = session.get(ReconciliationRun, reconciliation_id, with_for_update=True)
             if run is None:
                 _reject("RECONCILIATION_NOT_FOUND", "run does not exist")
-            account_id, venue = _scope_parts(run.execution_scope)
+            _environment, account_id, venue = _scope_parts(run.execution_scope)
             self._require_role(session, actor_id, "reconcile", account_id, venue)
             if run.status not in {
                 ReconciliationStatus.DIFFERENCE.value,
@@ -2216,7 +2629,7 @@ class TradingService:
             run = session.get(ReconciliationRun, reconciliation_id, with_for_update=True)
             if run is None:
                 _reject("RECONCILIATION_NOT_FOUND", "run does not exist")
-            account_id, venue = _scope_parts(run.execution_scope)
+            _environment, account_id, venue = _scope_parts(run.execution_scope)
             self._require_role(session, actor_id, "reconcile", account_id, venue)
             if run.status != ReconciliationStatus.MANUAL_REQUIRED.value:
                 _reject(
@@ -2246,7 +2659,7 @@ class TradingService:
         *,
         now: datetime,
     ) -> UUID:
-        account_id, venue = _scope_parts(execution_scope)
+        environment, account_id, venue = _scope_parts(execution_scope)
         with self.database.session_factory.begin() as session:
             self._require_role(session, actor_id, "reconcile", account_id, venue)
             policy = session.scalar(select(RiskPolicy).where(RiskPolicy.active))
@@ -2260,6 +2673,7 @@ class TradingService:
                 .where(
                     Campaign.account_id == account_id,
                     Campaign.venue == venue,
+                    Campaign.environment == environment.value,
                     Campaign.status != CampaignStatus.CLOSED.value,
                 )
                 .order_by(Campaign.created_at, Campaign.campaign_id)
@@ -2267,7 +2681,11 @@ class TradingService:
             ).all()
             equity = session.scalar(
                 select(AccountEquity)
-                .where(AccountEquity.account_id == account_id, AccountEquity.venue == venue)
+                .where(
+                    AccountEquity.account_id == account_id,
+                    AccountEquity.venue == venue,
+                    AccountEquity.environment == environment.value,
+                )
                 .with_for_update()
             )
             differences: list[str] = []
@@ -2278,6 +2696,42 @@ class TradingService:
                 unknown.append("ACCOUNT_EQUITY_UNKNOWN")
             elif self._fact_is_stale(equity.observed_at, now, max_age):
                 unknown.append("ACCOUNT_EQUITY_STALE")
+
+            unbound_orders = session.scalars(
+                select(VenueOrder).where(
+                    VenueOrder.account_id == account_id,
+                    VenueOrder.venue == venue,
+                    VenueOrder.environment == environment.value,
+                    VenueOrder.order_intent_id.is_(None),
+                    VenueOrder.status.in_(
+                        {
+                            VenueOrderStatus.SENT.value,
+                            VenueOrderStatus.PARTIALLY_FILLED.value,
+                            VenueOrderStatus.UNKNOWN.value,
+                        }
+                    ),
+                )
+            ).all()
+            for unbound_order in unbound_orders:
+                if unbound_order.status == VenueOrderStatus.UNKNOWN.value:
+                    unknown.append(f"EXTERNAL_ORDER_UNKNOWN:{unbound_order.venue_order_id}")
+                else:
+                    differences.append(f"EXTERNAL_ORDER_UNBOUND:{unbound_order.venue_order_id}")
+
+            active_instrument_ids = {campaign.instrument_id for campaign in campaigns}
+            scope_positions = session.scalars(
+                select(Position).where(
+                    Position.account_id == account_id,
+                    Position.venue == venue,
+                    Position.environment == environment.value,
+                )
+            ).all()
+            for scope_position in scope_positions:
+                if (
+                    scope_position.quantity != 0
+                    and scope_position.instrument_id not in active_instrument_ids
+                ):
+                    differences.append(f"EXTERNAL_POSITION_UNBOUND:{scope_position.instrument_id}")
 
             for campaign in campaigns:
                 scope_suffix = str(campaign.campaign_id)
@@ -2311,7 +2765,7 @@ class TradingService:
                         fill for fill in fills if fill.order_intent_id == intent.intent_id
                     ]
                     intent_fill_quantity = sum((fill.quantity for fill in intent_fills), Decimal(0))
-                    order = session.scalar(
+                    intent_order = session.scalar(
                         select(VenueOrder)
                         .where(VenueOrder.order_intent_id == intent.intent_id)
                         .with_for_update()
@@ -2322,16 +2776,16 @@ class TradingService:
                         OrderIntentStatus.FILLED.value,
                         OrderIntentStatus.UNKNOWN.value,
                     }
-                    if order is None and order_required:
+                    if intent_order is None and order_required:
                         differences.append(f"VENUE_ORDER_MISSING:{intent.intent_id}")
-                    elif order is not None:
-                        if order.venue != venue:
+                    elif intent_order is not None:
+                        if intent_order.venue != venue:
                             differences.append(f"VENUE_ORDER_SCOPE_MISMATCH:{intent.intent_id}")
-                        if order.filled_quantity != intent_fill_quantity:
+                        if intent_order.filled_quantity != intent_fill_quantity:
                             differences.append(f"ORDER_FILL_MISMATCH:{intent.intent_id}")
-                        if order.status == VenueOrderStatus.UNKNOWN.value:
+                        if intent_order.status == VenueOrderStatus.UNKNOWN.value:
                             unknown.append(f"VENUE_ORDER_UNKNOWN:{intent.intent_id}")
-                        elif self._fact_is_stale(order.observed_at, now, max_age):
+                        elif self._fact_is_stale(intent_order.observed_at, now, max_age):
                             unknown.append(f"VENUE_ORDER_STALE:{intent.intent_id}")
                     if intent_fill_quantity > intent.quantity:
                         differences.append(f"ORDER_INTENT_OVERFILLED:{intent.intent_id}")
@@ -2347,6 +2801,7 @@ class TradingService:
                     .where(
                         Position.account_id == campaign.account_id,
                         Position.venue == campaign.venue,
+                        Position.environment == campaign.environment,
                         Position.instrument_id == campaign.instrument_id,
                     )
                     .with_for_update()
@@ -2413,12 +2868,16 @@ class TradingService:
         *,
         now: datetime,
     ) -> UUID:
-        account_id, venue = _scope_parts(execution_scope)
+        environment, account_id, venue = _scope_parts(execution_scope)
         with self.database.session_factory() as session:
             campaign = session.get(Campaign, campaign_id)
             if campaign is None:
                 _reject("CAMPAIGN_NOT_FOUND", "campaign does not exist")
-            if campaign.account_id != account_id or campaign.venue != venue:
+            if (
+                campaign.account_id != account_id
+                or campaign.venue != venue
+                or campaign.environment != environment.value
+            ):
                 _reject("EXECUTION_SCOPE_MISMATCH", "campaign is outside reconciliation scope")
         return self.reconcile_scope(execution_scope, actor_id, now=now)
 
@@ -2438,6 +2897,7 @@ class TradingService:
                 .where(
                     Position.account_id == campaign.account_id,
                     Position.venue == campaign.venue,
+                    Position.environment == campaign.environment,
                     Position.instrument_id == campaign.instrument_id,
                 )
                 .with_for_update()
@@ -2471,7 +2931,7 @@ class TradingService:
             }
             if exit_intent is None or exit_intent.status not in terminal_statuses:
                 _reject("CAMPAIGN_EXIT_NOT_TERMINAL", "campaign exit is not terminal")
-            scope = f"{campaign.account_id}:{campaign.venue}"
+            scope = _scope_key(campaign.environment, campaign.account_id, campaign.venue)
             latest = session.scalar(
                 select(ReconciliationRun)
                 .where(ReconciliationRun.execution_scope == scope)
@@ -2539,6 +2999,7 @@ class TradingService:
                 select(Position).where(
                     Position.account_id == campaign.account_id,
                     Position.venue == campaign.venue,
+                    Position.environment == campaign.environment,
                     Position.instrument_id == campaign.instrument_id,
                 )
             )
