@@ -39,7 +39,13 @@ class Database:
                 ).scalar_one_or_none()
             if revision != REQUIRED_SCHEMA_REVISION:
                 return False, "SCHEMA_REVISION_MISMATCH"
-            if set(gate_rows) != {"LIVE_ORDER_SEND", "CAPITAL_TRANSFER", "AUTO_ADD"}:
+            if set(gate_rows) != {
+                "LIVE_ORDER_SEND",
+                "CAPITAL_TRANSFER",
+                "AUTO_ADD",
+                "AUTO_PROFIT_SWEEP",
+                "AUTO_OPERATING_REFILL",
+            }:
                 return False, "CONTROL_GATES_INVALID"
             if any(value not in {"DISABLED", "ENABLED"} for value in gate_rows.values()):
                 return False, "CONTROL_GATES_INVALID"

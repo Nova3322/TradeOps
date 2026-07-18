@@ -38,6 +38,8 @@ def test_initial_schema_seeds_only_disabled_capability_gates(database: Database)
         "LIVE_ORDER_SEND": "DISABLED",
         "CAPITAL_TRANSFER": "DISABLED",
         "AUTO_ADD": "DISABLED",
+        "AUTO_PROFIT_SWEEP": "DISABLED",
+        "AUTO_OPERATING_REFILL": "DISABLED",
     }
 
 

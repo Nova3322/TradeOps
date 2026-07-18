@@ -14,6 +14,7 @@ from trading_control_plane.models import (
     Approval,
     Campaign,
     CapabilityGate,
+    CapitalAutomationPolicy,
     CapitalTransfer,
     FundingPayment,
     Instrument,
@@ -441,6 +442,13 @@ class TradingQueries:
             transfers = session.scalars(
                 select(CapitalTransfer).order_by(CapitalTransfer.updated_at.desc())
             ).all()
+            policies = session.scalars(
+                select(CapitalAutomationPolicy).order_by(
+                    CapitalAutomationPolicy.environment,
+                    CapitalAutomationPolicy.venue,
+                    CapitalAutomationPolicy.account_id,
+                )
+            ).all()
             visible_transfers = [
                 item
                 for item in transfers
@@ -500,6 +508,10 @@ class TradingQueries:
                     }
                 )
             gate = session.get(CapabilityGate, "CAPITAL_TRANSFER")
+            automation_gates = {
+                key: (None if (value := session.get(CapabilityGate, key)) is None else value.status)
+                for key in ("AUTO_PROFIT_SWEEP", "AUTO_OPERATING_REFILL")
+            }
             return {
                 "real_transfer_gate": None if gate is None else gate.status,
                 "real_transfer_reason": None if gate is None else gate.reason,
@@ -538,6 +550,34 @@ class TradingQueries:
                     if self.service.can_user(user_id, "capital.view", item.account_id, item.venue)
                 ],
                 "transfers": [self._capital_transfer_summary(item) for item in visible_transfers],
+                "automation": {
+                    "gates": automation_gates,
+                    "policies": [
+                        {
+                            "policy_id": str(item.policy_id),
+                            "environment": item.environment,
+                            "account_id": item.account_id,
+                            "venue": item.venue,
+                            "vault_id": item.vault_id,
+                            "asset": item.asset,
+                            "network": item.network,
+                            "operating_low": str(item.operating_low),
+                            "operating_target": str(item.operating_target),
+                            "operating_high": str(item.operating_high),
+                            "vault_minimum_reserve": str(item.vault_minimum_reserve),
+                            "minimum_transfer": str(item.minimum_transfer),
+                            "maximum_transfer": str(item.maximum_transfer),
+                            "max_fee": str(item.max_fee),
+                            "active": item.active,
+                            "version": item.version,
+                            "updated_at": _iso(item.updated_at),
+                        }
+                        for item in policies
+                        if self.service.can_user(
+                            user_id, "capital.view", item.account_id, item.venue
+                        )
+                    ],
+                },
             }
 
     def list_campaigns(self, user_id: UUID) -> list[dict[str, Any]]:

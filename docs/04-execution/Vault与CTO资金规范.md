@@ -3,7 +3,7 @@
 > 文档编号：FUND-SPEC-001
 > 版本：Draft 0.1
 > 日期：2026-07-18
-> 状态：产品与工程设计基线；M7 已实现只读事实录入、Web 资金中心和 SHADOW/TESTNET Mock 人工双向流程，不代表 Vault、提款或自动划转能力已经认证
+> 状态：产品与工程设计基线；M8 已实现默认关闭的 SHADOW/TESTNET 自动资金候选，不代表 Vault、提款或自动划转能力已经认证
 > 上位文档：`交易系统总体方案.md`、`策略合同与数值化验收门.md`
 > 适用范围：RiskControl / NoTilt Vault、Capital Transfer Orchestrator、CapitalTransferAdapter、交易所运营资金与 Trading 风险账本
 
@@ -19,7 +19,7 @@
 - 浮亏、清算压力或活动仓位触发 Vault 救援。
 - 交易执行凭证获得提款或 Vault owner 权限。
 
-当前实现只用三张独立资金生命周期表表达 `TransferProposal`、`TransferAuthorization` 与 `CapitalTransfer`；Vault/场所资本事实复用 `AccountEquity`。Mock Adapter 没有网络、签名器或凭据，真实 `CAPITAL_TRANSFER` 保持关闭。M8 的自动利润归集和自动运营补充仍未实现，不能由本文描述推断为可用。
+当前实现用三张独立资金生命周期表表达 `TransferProposal`、`TransferAuthorization` 与 `CapitalTransfer`，并用一张当前 `CapitalAutomationPolicy` 保存每个非生产作用域的运营阈值；Vault/场所资本事实复用 `AccountEquity`。Mock Adapter 没有网络、签名器或凭据。`CAPITAL_TRANSFER`、`AUTO_PROFIT_SWEEP` 和 `AUTO_OPERATING_REFILL` 均默认关闭；自动候选仍需双人复核和独立授权，不能由本文描述推断为真实资金可用。
 
 本文不冻结具体链、资产、签名托管、比例、金额、费用、确认数或自动化阈值。这些事项只通过 `DEC-FUND-*` 与 `DEC-RISK-*` 决策记录冻结。
 

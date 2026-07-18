@@ -353,6 +353,62 @@ class CapitalTransfer(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
 
+class CapitalAutomationPolicy(Base):
+    __tablename__ = "capital_automation_policies"
+    __table_args__ = (
+        UniqueConstraint(
+            "environment",
+            "account_id",
+            "venue",
+            "asset",
+            name="uq_capital_automation_policies_scope",
+        ),
+        CheckConstraint(
+            "environment IN ('SHADOW','TESTNET')",
+            name="ck_capital_automation_policies_environment",
+        ),
+        CheckConstraint(
+            "operating_low >= 0 AND operating_low <= operating_target "
+            "AND operating_target <= operating_high",
+            name="ck_capital_automation_policies_thresholds",
+        ),
+        CheckConstraint(
+            "vault_minimum_reserve >= 0",
+            name="ck_capital_automation_policies_vault_reserve",
+        ),
+        CheckConstraint(
+            "minimum_transfer > 0 AND maximum_transfer >= minimum_transfer",
+            name="ck_capital_automation_policies_transfer_limits",
+        ),
+        CheckConstraint(
+            "max_fee >= 0 AND max_fee < minimum_transfer",
+            name="ck_capital_automation_policies_fee",
+        ),
+    )
+
+    policy_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid4)
+    environment: Mapped[str] = mapped_column(String(16), nullable=False)
+    account_id: Mapped[str] = mapped_column(String(120), nullable=False)
+    venue: Mapped[str] = mapped_column(String(64), nullable=False)
+    vault_id: Mapped[str] = mapped_column(String(160), nullable=False)
+    asset: Mapped[str] = mapped_column(String(32), nullable=False)
+    network: Mapped[str] = mapped_column(String(64), nullable=False)
+    vault_destination_reference: Mapped[str] = mapped_column(String(255), nullable=False)
+    venue_destination_reference: Mapped[str] = mapped_column(String(255), nullable=False)
+    operating_low: Mapped[Decimal] = mapped_column(AMOUNT, nullable=False)
+    operating_target: Mapped[Decimal] = mapped_column(AMOUNT, nullable=False)
+    operating_high: Mapped[Decimal] = mapped_column(AMOUNT, nullable=False)
+    vault_minimum_reserve: Mapped[Decimal] = mapped_column(AMOUNT, nullable=False)
+    minimum_transfer: Mapped[Decimal] = mapped_column(AMOUNT, nullable=False)
+    maximum_transfer: Mapped[Decimal] = mapped_column(AMOUNT, nullable=False)
+    max_fee: Mapped[Decimal] = mapped_column(AMOUNT, nullable=False)
+    active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    actor_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
 class RiskPolicy(Base):
     __tablename__ = "risk_policies"
     __table_args__ = (
@@ -900,7 +956,8 @@ class CapabilityGate(Base):
     __tablename__ = "capability_gates"
     __table_args__ = (
         CheckConstraint(
-            "capability_key IN ('LIVE_ORDER_SEND','CAPITAL_TRANSFER','AUTO_ADD')",
+            "capability_key IN ('LIVE_ORDER_SEND','CAPITAL_TRANSFER','AUTO_ADD',"
+            "'AUTO_PROFIT_SWEEP','AUTO_OPERATING_REFILL')",
             name="ck_capability_gates_key",
         ),
         CheckConstraint("status IN ('DISABLED','ENABLED')", name="ck_capability_gates_status"),

@@ -26,6 +26,8 @@ from trading_control_plane.api_schemas import (
     BinanceTestnetActionRequest,
     BinanceTestnetProtectionRequest,
     CampaignTargetRequest,
+    CapitalAutomationEvaluateRequest,
+    CapitalAutomationPolicyRequest,
     CapitalBalanceFactRequest,
     CapitalScopeReconciliationRequest,
     CapitalTransferCreateRequest,
@@ -2174,6 +2176,67 @@ def create_app(
             now=_now(),
         )
         return {"reconciliation_id": str(reconciliation_id)}
+
+    @app.post("/api/capital/automation/policies")
+    def set_capital_automation_policy(
+        payload: CapitalAutomationPolicyRequest,
+        identity: SessionIdentity = identity_dependency,
+    ) -> dict[str, Any]:
+        policy_id = service().set_capital_automation_policy(
+            actor_id=identity.user_id,
+            environment=ExecutionEnvironment(payload.environment),
+            account_id=payload.account_id,
+            venue=payload.venue,
+            vault_id=payload.vault_id,
+            asset=payload.asset,
+            network=payload.network,
+            vault_destination_reference=payload.vault_destination_reference,
+            venue_destination_reference=payload.venue_destination_reference,
+            operating_low=payload.operating_low,
+            operating_target=payload.operating_target,
+            operating_high=payload.operating_high,
+            vault_minimum_reserve=payload.vault_minimum_reserve,
+            minimum_transfer=payload.minimum_transfer,
+            maximum_transfer=payload.maximum_transfer,
+            max_fee=payload.max_fee,
+            idempotency_key=payload.idempotency_key,
+            now=_now(),
+        )
+        return {
+            "policy_id": str(policy_id),
+            "data": queries().capital_center(identity.user_id),
+        }
+
+    @app.post("/api/capital/automation/policies/{policy_id}/evaluate")
+    def evaluate_capital_automation_policy(
+        policy_id: UUID,
+        payload: CapitalAutomationEvaluateRequest,
+        identity: SessionIdentity = identity_dependency,
+    ) -> dict[str, Any]:
+        proposal_id, reason = service().create_capital_automation_candidate(
+            policy_id,
+            payload.purpose,
+            identity.user_id,
+            payload.idempotency_key,
+            now=_now(),
+        )
+        if proposal_id is not None:
+            detail = queries().transfer_proposal_detail(identity.user_id, proposal_id)
+            notify_capital(
+                object_id=proposal_id,
+                object_type="TransferProposal",
+                event_type="PENDING_REVIEW",
+                environment=str(detail["environment"]),
+                account_id=str(detail["account_id"]),
+                venue=str(detail["venue"]),
+                object_version=int(detail["version"]),
+                summary=(f"{payload.purpose} candidate requires two independent Treasury reviews"),
+            )
+        return {
+            "transfer_proposal_id": None if proposal_id is None else str(proposal_id),
+            "reason": reason,
+            "data": queries().capital_center(identity.user_id),
+        }
 
     @app.post("/api/capital/proposals")
     def create_transfer_proposal(

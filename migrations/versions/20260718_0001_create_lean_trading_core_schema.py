@@ -101,7 +101,8 @@ def upgrade() -> None:
         sa.Column("operator_id", sa.String(length=255), nullable=False),
         sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
         sa.CheckConstraint(
-            "capability_key IN ('LIVE_ORDER_SEND','CAPITAL_TRANSFER','AUTO_ADD')",
+            "capability_key IN ('LIVE_ORDER_SEND','CAPITAL_TRANSFER','AUTO_ADD',"
+            "'AUTO_PROFIT_SWEEP','AUTO_OPERATING_REFILL')",
             name="ck_capability_gates_key",
         ),
         sa.CheckConstraint("status IN ('DISABLED','ENABLED')", name="ck_capability_gates_status"),
@@ -132,7 +133,74 @@ def upgrade() -> None:
                 "operator_id": "migration",
                 "updated_at": seeded_at,
             },
+            {
+                "capability_key": "AUTO_PROFIT_SWEEP",
+                "status": "DISABLED",
+                "reason": "Automatic profit sweep is default-off",
+                "operator_id": "migration",
+                "updated_at": seeded_at,
+            },
+            {
+                "capability_key": "AUTO_OPERATING_REFILL",
+                "status": "DISABLED",
+                "reason": "Automatic operating refill is default-off",
+                "operator_id": "migration",
+                "updated_at": seeded_at,
+            },
         ],
+    )
+    op.create_table(
+        "capital_automation_policies",
+        sa.Column("policy_id", sa.Uuid(), nullable=False),
+        sa.Column("environment", sa.String(length=16), nullable=False),
+        sa.Column("account_id", sa.String(length=120), nullable=False),
+        sa.Column("venue", sa.String(length=64), nullable=False),
+        sa.Column("vault_id", sa.String(length=160), nullable=False),
+        sa.Column("asset", sa.String(length=32), nullable=False),
+        sa.Column("network", sa.String(length=64), nullable=False),
+        sa.Column("vault_destination_reference", sa.String(length=255), nullable=False),
+        sa.Column("venue_destination_reference", sa.String(length=255), nullable=False),
+        sa.Column("operating_low", sa.Numeric(precision=38, scale=18), nullable=False),
+        sa.Column("operating_target", sa.Numeric(precision=38, scale=18), nullable=False),
+        sa.Column("operating_high", sa.Numeric(precision=38, scale=18), nullable=False),
+        sa.Column("vault_minimum_reserve", sa.Numeric(precision=38, scale=18), nullable=False),
+        sa.Column("minimum_transfer", sa.Numeric(precision=38, scale=18), nullable=False),
+        sa.Column("maximum_transfer", sa.Numeric(precision=38, scale=18), nullable=False),
+        sa.Column("max_fee", sa.Numeric(precision=38, scale=18), nullable=False),
+        sa.Column("active", sa.Boolean(), nullable=False),
+        sa.Column("actor_id", sa.String(length=255), nullable=False),
+        sa.Column("version", sa.Integer(), nullable=False),
+        sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
+        sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
+        sa.CheckConstraint(
+            "environment IN ('SHADOW','TESTNET')",
+            name="ck_capital_automation_policies_environment",
+        ),
+        sa.CheckConstraint(
+            "operating_low >= 0 AND operating_low <= operating_target "
+            "AND operating_target <= operating_high",
+            name="ck_capital_automation_policies_thresholds",
+        ),
+        sa.CheckConstraint(
+            "vault_minimum_reserve >= 0",
+            name="ck_capital_automation_policies_vault_reserve",
+        ),
+        sa.CheckConstraint(
+            "minimum_transfer > 0 AND maximum_transfer >= minimum_transfer",
+            name="ck_capital_automation_policies_transfer_limits",
+        ),
+        sa.CheckConstraint(
+            "max_fee >= 0 AND max_fee < minimum_transfer",
+            name="ck_capital_automation_policies_fee",
+        ),
+        sa.PrimaryKeyConstraint("policy_id"),
+        sa.UniqueConstraint(
+            "environment",
+            "account_id",
+            "venue",
+            "asset",
+            name="uq_capital_automation_policies_scope",
+        ),
     )
     op.create_table(
         "command_receipts",
@@ -1062,6 +1130,7 @@ def downgrade() -> None:
     op.drop_table("risk_policies")
     op.drop_table("instruments")
     op.drop_table("command_receipts")
+    op.drop_table("capital_automation_policies")
     op.drop_table("capability_gates")
     op.drop_index("ix_audit_events_object", table_name="audit_events")
     op.drop_index("ix_audit_events_correlation", table_name="audit_events")

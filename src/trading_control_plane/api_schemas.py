@@ -298,6 +298,45 @@ class CapitalScopeReconciliationRequest(BaseModel):
         return value.upper()
 
 
+class CapitalAutomationPolicyRequest(BaseModel):
+    environment: Literal["SHADOW", "TESTNET"] = "TESTNET"
+    account_id: str = Field(min_length=1, max_length=120)
+    venue: str = Field(min_length=1, max_length=64)
+    vault_id: str = Field(min_length=1, max_length=160)
+    asset: str = Field(min_length=1, max_length=32)
+    network: str = Field(min_length=1, max_length=64)
+    vault_destination_reference: str = Field(min_length=1, max_length=255)
+    venue_destination_reference: str = Field(min_length=1, max_length=255)
+    operating_low: Decimal = Field(ge=0)
+    operating_target: Decimal = Field(ge=0)
+    operating_high: Decimal = Field(ge=0)
+    vault_minimum_reserve: Decimal = Field(ge=0)
+    minimum_transfer: Decimal = Field(gt=0)
+    maximum_transfer: Decimal = Field(gt=0)
+    max_fee: Decimal = Field(ge=0)
+    idempotency_key: str = Field(min_length=1, max_length=160)
+
+    @field_validator("venue", "asset")
+    @classmethod
+    def normalize_automation_identifier(cls, value: str) -> str:
+        return value.upper()
+
+    @model_validator(mode="after")
+    def validate_thresholds(self) -> CapitalAutomationPolicyRequest:
+        if not self.operating_low <= self.operating_target <= self.operating_high:
+            raise ValueError("operating thresholds must be low <= target <= high")
+        if self.maximum_transfer < self.minimum_transfer:
+            raise ValueError("maximum_transfer cannot be below minimum_transfer")
+        if self.max_fee >= self.minimum_transfer:
+            raise ValueError("max_fee must be below minimum_transfer")
+        return self
+
+
+class CapitalAutomationEvaluateRequest(BaseModel):
+    purpose: Literal["AUTO_PROFIT_SWEEP", "AUTO_OPERATING_REFILL"]
+    idempotency_key: str = Field(min_length=1, max_length=160)
+
+
 class ProtectionFactRequest(BaseModel):
     position_id: UUID
     venue_order_id: str = Field(min_length=1, max_length=255)

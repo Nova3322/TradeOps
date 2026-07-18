@@ -869,6 +869,8 @@ def test_capability_gates_are_default_disabled(database: Database) -> None:
 
     assert [(gate.capability_key, gate.status) for gate in gates] == [
         ("AUTO_ADD", CapabilityStatus.DISABLED.value),
+        ("AUTO_OPERATING_REFILL", CapabilityStatus.DISABLED.value),
+        ("AUTO_PROFIT_SWEEP", CapabilityStatus.DISABLED.value),
         ("CAPITAL_TRANSFER", CapabilityStatus.DISABLED.value),
         ("LIVE_ORDER_SEND", CapabilityStatus.DISABLED.value),
     ]
