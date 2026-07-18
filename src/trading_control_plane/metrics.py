@@ -99,6 +99,12 @@ CAMPAIGN_FILL_ECONOMIC_ENTRIES = Counter(
     labelnames=("result",),
 )
 
+CAMPAIGN_OPENING_FILL_PROJECTIONS = Counter(
+    "trading_campaign_opening_fill_projections_total",
+    "Rebuildable Campaign opening-fill projection outcomes by bounded result.",
+    labelnames=("result",),
+)
+
 CAPABILITY_CERTIFICATE_ISSUANCE = Counter(
     "trading_capability_certificate_issuance_total",
     "Shadow-only capability certificate issuance by type, environment, and result.",

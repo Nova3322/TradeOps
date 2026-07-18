@@ -1,5 +1,9 @@
 # WP-0043：Canonical 成交费用归属账本
 
+> 后续状态：WP-0044 已从 immutable opening fill entries 重建累计数量/名义价值、原生费用和
+> realized PnL 完整性，并固定声明 Campaign equity 不可用；当前经济投影合同以
+> [WP-0044](WP-0044-可重建Opening-Fill经济投影.md) 为准。本文件保留 WP-0043 的逐笔归属合同。
+
 ## 1. 交付目标与边界
 
 WP-0042 已冻结 isolated INITIAL 的初始保证金分母，但 Campaign 仍没有一条不可变链路把每笔已接受

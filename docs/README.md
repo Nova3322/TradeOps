@@ -222,6 +222,7 @@ docs/
 | 实现 | [WP-0041：INITIAL Canonical 空仓强绑定](08-implementation/WP-0041-INITIAL-Canonical空仓强绑定.md) | Execution v14 要求 exact fresh canonical FLAT，并将仓位快照 ID/hash 与 TTL 绑定最终预检 |
 | 实现 | [WP-0042：INITIAL 冻结保证金经济基线](08-implementation/WP-0042-INITIAL冻结保证金经济基线.md) | INITIAL POSITION_RECONCILED 原子冻结 isolated 初始保证金参考额，未认证 cross/缺失数值失败关闭 |
 | 实现 | [WP-0043：Canonical 成交费用归属账本](08-implementation/WP-0043-Canonical成交费用归属账本.md) | accepted VenueFill 原子归属 Campaign/INITIAL/ADD，保留原生费用与 UNKNOWN realized PnL |
+| 实现 | [WP-0044：可重建 Opening Fill 经济投影](08-implementation/WP-0044-可重建Opening-Fill经济投影.md) | 确定性重建 opening fill 数量/名义价值/原生费用/完整性，同时固定 Campaign equity 为 UNAVAILABLE |
 
 ## 完整交付与能力激活
 
