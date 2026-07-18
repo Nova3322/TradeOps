@@ -1,8 +1,8 @@
 # WP-0033：不可变 Instrument Catalog 分类强绑定
 
-> 后续状态：WP-0035 已将风险/意图命令升级为 v8；WP-0034 删除 caller `protection_available`，WP-0035
-> 再删除 caller `facts` 并绑定不可变完整 Risk Fact Set。当前输入合同以
-> [WP-0035](WP-0035-不可变Risk-Fact-Set强绑定.md) 为准；本文件保留 WP-0033 历史证据。
+> 后续状态：WP-0036 已将风险/意图命令升级为 v9；WP-0034 删除 caller `protection_available`，WP-0035
+> 删除 caller `facts`，WP-0036 再绑定 KNOWN MARKET payload。当前输入合同以
+> [WP-0036](WP-0036-MARKET-Observation内容强绑定.md) 为准；本文件保留 WP-0033 历史证据。
 
 ## 1. 交付目标与边界
 

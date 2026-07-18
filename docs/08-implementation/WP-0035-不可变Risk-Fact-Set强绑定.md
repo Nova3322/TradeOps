@@ -1,5 +1,9 @@
 # WP-0035：不可变 Risk Fact Set 强绑定
 
+> 后续状态：WP-0036 已将风险/意图命令升级为 v9，并把客观 `MarketRiskInput` 内容强绑定到
+> [KNOWN MARKET observation](WP-0036-MARKET-Observation内容强绑定.md) 的 payload hash。本文件保留
+> WP-0035 的 v8 历史合同。
+
 ## 1. 交付目标与边界
 
 WP-0034 后，`RiskPrecheckRequest.facts` 仍允许调用方直接提交 MARKET、ACCOUNT、VAULT、POSITIONS、

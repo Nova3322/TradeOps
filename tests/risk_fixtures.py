@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Any
@@ -43,6 +44,7 @@ from trading_control_plane.risk import (
     ScopeStressPolicyParameters,
     ScopeType,
     TradeLossComponents,
+    market_risk_fact_payload_hash,
 )
 from trading_control_plane.risk_fact_sets import RiskFactSetValidationResult
 from trading_control_plane.risk_facts import FactObservation, FactStatus, FactType
@@ -224,6 +226,7 @@ def make_fact_observations(
     now: datetime | None = None,
     fact_status: FactStatus = FactStatus.KNOWN,
     fact_age: timedelta = timedelta(milliseconds=100),
+    payload_hashes: Mapping[FactType, str] | None = None,
 ) -> tuple[FactObservation, ...]:
     observed_at = now or datetime.now(UTC)
     event_time = observed_at - fact_age
@@ -233,11 +236,15 @@ def make_fact_observations(
             status=fact_status,
             source_ref=f"test-only:{fact_type.value.lower()}",
             source_version="test-source-v1",
-            payload_hash=hash_json(
-                {
-                    "fact_type": fact_type.value,
-                    "event_time": event_time.isoformat(),
-                }
+            payload_hash=(
+                payload_hashes[fact_type]
+                if payload_hashes is not None and fact_type in payload_hashes
+                else hash_json(
+                    {
+                        "fact_type": fact_type.value,
+                        "event_time": event_time.isoformat(),
+                    }
+                )
             ),
             event_time=event_time,
             received_at=event_time + timedelta(milliseconds=10),
@@ -358,11 +365,12 @@ def make_evaluation(
     fact_age: timedelta = timedelta(milliseconds=100),
 ) -> RiskEvaluationInput:
     decision_time = now or datetime.now(UTC)
+    effective_request = request or make_request(now=decision_time)
     certificate_valid_until = (
         decision_time + timedelta(days=1) if capability_valid else decision_time
     )
     return RiskEvaluationInput(
-        request=request or make_request(now=decision_time),
+        request=effective_request,
         risk_policy_id=UUID("00000000-0000-0000-0000-000000000004"),
         policy=policy or make_policy(),
         policy_valid_from=decision_time - timedelta(days=1),
@@ -434,6 +442,9 @@ def make_evaluation(
                     now=decision_time,
                     fact_status=fact_status,
                     fact_age=fact_age,
+                    payload_hashes={
+                        FactType.MARKET: market_risk_fact_payload_hash(effective_request.market)
+                    },
                 )
                 if fact_set_valid
                 else ()

@@ -8,7 +8,7 @@ from tests.risk_fixtures import make_fact_observations
 from trading_control_plane.command_executor import IdempotentCommandExecutor
 from trading_control_plane.commands import CommandChannel, CommandEnvelope
 from trading_control_plane.database import Database
-from trading_control_plane.risk import RiskPrecheckRequest
+from trading_control_plane.risk import RiskPrecheckRequest, market_risk_fact_payload_hash
 from trading_control_plane.risk_fact_sets import (
     RISK_FACT_AGGREGATOR_SERVICE_PRINCIPAL,
     RegisterRiskFactSetDraft,
@@ -18,7 +18,7 @@ from trading_control_plane.risk_fact_sets import (
     risk_fact_set_evidence_hash,
     risk_fact_set_record_hash,
 )
-from trading_control_plane.risk_facts import FactStatus
+from trading_control_plane.risk_facts import FactStatus, FactType
 
 
 def risk_fact_set_request_for_risk(
@@ -59,6 +59,7 @@ def risk_fact_set_request_for_risk(
             now=now,
             fact_status=fact_status,
             fact_age=fact_age,
+            payload_hashes={FactType.MARKET: market_risk_fact_payload_hash(risk_request.market)},
         ),
         "environment": RiskFactSetEnvironment.SHADOW,
         "real_funds_eligible": False,

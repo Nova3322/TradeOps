@@ -439,7 +439,7 @@ def create_intent_envelope(
     request = risk_request or execution_risk_request(proposal, now=now)
     return CommandEnvelope(
         idempotency_key=idempotency_key or f"execution-intent-{uuid4()}",
-        command_type="execution.intent.create.v8",
+        command_type="execution.intent.create.v9",
         object_type="Campaign",
         object_id=str(campaign.campaign_id),
         expected_version=1,
@@ -450,7 +450,7 @@ def create_intent_envelope(
         issued_at=now,
         expires_at=now + timedelta(minutes=2),
         auth_context_ref="internal:oms-risk-reservation-service",
-        payload_schema_version=8,
+        payload_schema_version=9,
         reason="create non-dispatchable shadow intent",
         payload={
             "intent_kind": "INITIAL",
@@ -485,7 +485,7 @@ def proposal_precheck_envelope(request: RiskPrecheckRequest) -> CommandEnvelope:
         issued_at=now,
         expires_at=now + timedelta(minutes=2),
         auth_context_ref="test-only:proposal-precheck-auth",
-        payload_schema_version=8,
+        payload_schema_version=9,
         reason="evaluate proposal against existing durable exposure",
         payload=request.model_dump(mode="json"),
     )
@@ -537,9 +537,15 @@ def create_add_envelope(
         scope_current_stress=Decimal("6.040175"),
         market_price=Decimal("120"),
     )
+    fact_set = risk_fact_set_request_for_risk(
+        request,
+        now=now,
+        fact_set_version=f"risk-fact-set-{candidate_ref}",
+    )
+    assert register_risk_fact_set(database, fact_set, now=now).status is CommandStatus.COMPLETED
     return CommandEnvelope(
         idempotency_key=f"execution-add-{uuid4()}",
-        command_type="execution.intent.create.v8",
+        command_type="execution.intent.create.v9",
         object_type="Campaign",
         object_id=str(campaign.campaign_id),
         expected_version=2,
@@ -550,7 +556,7 @@ def create_add_envelope(
         issued_at=now,
         expires_at=now + timedelta(minutes=2),
         auth_context_ref="internal:oms-risk-reservation-service",
-        payload_schema_version=8,
+        payload_schema_version=9,
         reason="create non-dispatchable shadow add intent",
         payload={
             "intent_kind": "ADD",
@@ -1233,7 +1239,7 @@ def execute_fact(
     return result
 
 
-def test_execution_intent_legacy_commands_and_wrong_v8_schema_are_rejected(
+def test_execution_intent_legacy_commands_and_wrong_v9_schema_are_rejected(
     database: Database,
 ) -> None:
     proposal, campaign, initial = prepare_authorization(database)
@@ -1257,6 +1263,9 @@ def test_execution_intent_legacy_commands_and_wrong_v8_schema_are_rejected(
     )
     v7 = create_intent_envelope(proposal, campaign, initial, now=datetime.now(UTC)).model_copy(
         update={"command_type": "execution.intent.create.v7"}
+    )
+    v8 = create_intent_envelope(proposal, campaign, initial, now=datetime.now(UTC)).model_copy(
+        update={"command_type": "execution.intent.create.v8"}
     )
     old_field = create_intent_envelope(proposal, campaign, initial, now=datetime.now(UTC))
     old_payload = dict(old_field.payload)
@@ -1310,6 +1319,7 @@ def test_execution_intent_legacy_commands_and_wrong_v8_schema_are_rejected(
     v5_result = execute_create(database, v5)
     v6_result = execute_create(database, v6)
     v7_result = execute_create(database, v7)
+    v8_result = execute_create(database, v8)
     old_field_result = execute_create(database, old_field)
     caller_boolean_result = execute_create(database, caller_boolean)
     protection_boolean_result = execute_create(database, protection_boolean)
@@ -1330,6 +1340,8 @@ def test_execution_intent_legacy_commands_and_wrong_v8_schema_are_rejected(
     assert v6_result.error_code == "COMMAND_TYPE_MISMATCH"
     assert v7_result.status is CommandStatus.REJECTED
     assert v7_result.error_code == "COMMAND_TYPE_MISMATCH"
+    assert v8_result.status is CommandStatus.REJECTED
+    assert v8_result.error_code == "COMMAND_TYPE_MISMATCH"
     assert old_field_result.status is CommandStatus.REJECTED
     assert old_field_result.error_code == "EXECUTION_INPUT_INVALID"
     assert caller_boolean_result.status is CommandStatus.REJECTED
@@ -1400,6 +1412,10 @@ def test_initial_intent_atomically_persists_decision_reservation_ledger_and_hist
         assert decision.risk_fact_set_record_hash == fact_set.record_hash
         assert decision.input_snapshot["evaluation"]["risk_fact_set"]["valid"] is True
         assert decision.decision["risk_fact_set_record_hash"] == fact_set.record_hash
+        assert (
+            decision.decision["market_fact_payload_hash"]
+            == decision.decision["market_observation_payload_hash"]
+        )
         assert (
             hash_json(decision.input_snapshot["capital_projection"])
             == decision.capital_projection_hash
@@ -1561,6 +1577,43 @@ def test_final_precheck_denies_when_exact_risk_fact_set_is_missing(
         assert decision.protection_capability_record_id is not None
         assert decision.risk_fact_set_id is None
         assert decision.valid_until == now
+        assert count_rows(session, OrderIntent) == 0
+        assert count_rows(session, RiskReservation) == 0
+
+
+def test_final_precheck_denies_market_payload_not_bound_to_durable_observation(
+    database: Database,
+) -> None:
+    proposal, campaign, initial = prepare_authorization(database)
+    now = datetime.now(UTC)
+    seed_execution_policy(database, now)
+    request = execution_risk_request(proposal, now=now)
+    tampered = request.model_copy(
+        update={"market": request.market.model_copy(update={"funding_rate": Decimal("0.0002")})}
+    )
+
+    result = execute_create(
+        database,
+        create_intent_envelope(
+            proposal,
+            campaign,
+            initial,
+            now=now,
+            risk_request=tampered,
+        ),
+        ExecutionIntentService(clock=lambda: now),
+    )
+
+    assert result.status is CommandStatus.COMPLETED
+    assert result.data["result"] == "DENY"
+    assert result.data["primary_reason_code"] == "MARKET_FACT_BINDING_MISMATCH"
+    assert result.data["market_fact_payload_hash"] != result.data["market_observation_payload_hash"]
+    with database.session_factory.begin() as session:
+        decision = session.execute(select(ExecutionRiskDecision)).scalar_one()
+        assert (
+            decision.decision["market_fact_payload_hash"]
+            != decision.decision["market_observation_payload_hash"]
+        )
         assert count_rows(session, OrderIntent) == 0
         assert count_rows(session, RiskReservation) == 0
 

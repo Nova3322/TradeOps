@@ -125,6 +125,7 @@ RISK_STATE_RANK = {
 REASON_PRIORITY = (
     "RISK_POLICY_OUTSIDE_VALID_WINDOW",
     "RISK_FACT_SET_UNAVAILABLE",
+    "MARKET_FACT_BINDING_MISMATCH",
     "FACTS_UNKNOWN",
     "FACT_TIMESTAMP_IN_FUTURE",
     "FACT_TIME_ORDER_INVALID",
@@ -312,6 +313,33 @@ class MarketRiskInput(BaseModel):
     contract_rules_version: str = Field(min_length=1, max_length=120)
     loss_model_version: Literal["directional-entry-to-invalidation-v1"]
     loss_calculation_ref: str = Field(min_length=1, max_length=255)
+
+
+def _canonical_decimal(value: Decimal) -> str:
+    normalized = format(value, "f")
+    if "." in normalized:
+        normalized = normalized.rstrip("0").rstrip(".")
+    return "0" if normalized in {"", "-0"} else normalized
+
+
+def market_risk_fact_payload(market: MarketRiskInput) -> dict[str, str]:
+    """Canonical objective market/rules payload attested by the MARKET observation."""
+
+    return {
+        "mark_price": _canonical_decimal(market.mark_price),
+        "index_price": _canonical_decimal(market.index_price),
+        "executable_price": _canonical_decimal(market.executable_price),
+        "contract_multiplier": _canonical_decimal(market.contract_multiplier),
+        "tick_size": _canonical_decimal(market.tick_size),
+        "minimum_quantity": _canonical_decimal(market.minimum_quantity),
+        "minimum_notional": _canonical_decimal(market.minimum_notional),
+        "funding_rate": _canonical_decimal(market.funding_rate),
+        "contract_rules_version": market.contract_rules_version,
+    }
+
+
+def market_risk_fact_payload_hash(market: MarketRiskInput) -> str:
+    return hash_json(market_risk_fact_payload(market))
 
 
 class CapitalInput(BaseModel):
@@ -767,6 +795,11 @@ class RiskEvaluationResult(BaseModel):
         pattern=r"^[0-9a-f]{64}$",
     )
     risk_fact_set_reason_codes: tuple[str, ...]
+    market_fact_payload_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    market_observation_payload_hash: str | None = Field(
+        default=None,
+        pattern=r"^[0-9a-f]{64}$",
+    )
     requested_base_heat: Decimal
     requested_fee_stress: Decimal
     requested_stop_penetration_stress: Decimal
@@ -1112,6 +1145,21 @@ class RiskEvaluator:
         if not evaluation.risk_fact_set.valid:
             reasons.append("RISK_FACT_SET_UNAVAILABLE")
             hard_failure = True
+        market_payload_hash = market_risk_fact_payload_hash(request.market)
+        market_observation = next(
+            (fact for fact in facts if fact.fact_type is FactType.MARKET),
+            None,
+        )
+        market_observation_payload_hash = (
+            market_observation.payload_hash if market_observation is not None else None
+        )
+        if (
+            market_observation is not None
+            and market_observation.status is FactStatus.KNOWN
+            and market_observation.payload_hash != market_payload_hash
+        ):
+            reasons.append("MARKET_FACT_BINDING_MISMATCH")
+            hard_failure = True
         for fact in facts:
             max_age = timedelta(milliseconds=freshness[fact.fact_type])
             max_skew = timedelta(milliseconds=policy.max_future_skew_ms)
@@ -1386,6 +1434,8 @@ class RiskEvaluator:
             risk_fact_set_record_hash=evaluation.risk_fact_set.record_hash,
             risk_fact_set_evidence_hash=evaluation.risk_fact_set.evidence_hash,
             risk_fact_set_reason_codes=evaluation.risk_fact_set.reason_codes,
+            market_fact_payload_hash=market_payload_hash,
+            market_observation_payload_hash=market_observation_payload_hash,
             requested_base_heat=request.requested_base_heat,
             requested_fee_stress=cost_stress.fee_stress,
             requested_stop_penetration_stress=cost_stress.stop_penetration_stress,
@@ -1406,8 +1456,8 @@ class RiskEvaluator:
 class RiskPrecheckService:
     """Persists one immutable shadow precheck and emits audit/outbox evidence."""
 
-    command_type = "risk.precheck.evaluate.v8"
-    payload_schema_version = 8
+    command_type = "risk.precheck.evaluate.v9"
+    payload_schema_version = 9
 
     def __init__(
         self,
@@ -1703,6 +1753,8 @@ class RiskPrecheckService:
                 "risk_fact_set_version": risk_fact_set.fact_set_version,
                 "risk_fact_set_record_hash": risk_fact_set.record_hash,
                 "risk_fact_set_reason_codes": list(risk_fact_set.reason_codes),
+                "market_fact_payload_hash": result.market_fact_payload_hash,
+                "market_observation_payload_hash": (result.market_observation_payload_hash),
                 "valid_until": result.valid_until.isoformat(),
                 "execution_eligible": False,
                 "reservation_created": False,
@@ -1750,6 +1802,8 @@ class RiskPrecheckService:
                         ),
                         "risk_fact_set_version": risk_fact_set.fact_set_version,
                         "risk_fact_set_record_hash": risk_fact_set.record_hash,
+                        "market_fact_payload_hash": result.market_fact_payload_hash,
+                        "market_observation_payload_hash": (result.market_observation_payload_hash),
                         "execution_eligible": False,
                         "reservation_created": False,
                     },

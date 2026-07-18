@@ -29,6 +29,7 @@ from trading_control_plane.risk import (
     ScopeRiskDecision,
     ScopeType,
     TradeLossComponents,
+    market_risk_fact_payload_hash,
 )
 from trading_control_plane.risk_facts import FactStatus, FactType
 
@@ -136,6 +137,44 @@ def test_stale_or_unknown_fact_fails_closed_with_zero_safe_quantity() -> None:
     assert unknown.result is RiskDecisionResult.DENY
     assert unknown.primary_reason_code == "FACTS_UNKNOWN"
     assert unknown.max_safe_quantity == 0
+
+
+def test_known_market_observation_must_bind_the_canonical_market_payload() -> None:
+    evaluation = make_evaluation(now=datetime(2026, 7, 18, 12, tzinfo=UTC))
+    canonical_hash = market_risk_fact_payload_hash(evaluation.request.market)
+    scaled_market = evaluation.request.market.model_copy(update={"mark_price": Decimal("100.0000")})
+    assert market_risk_fact_payload_hash(scaled_market) == canonical_hash
+    proposal_bound_only = evaluation.request.market.model_copy(
+        update={
+            "direction": PositionDirection.SHORT,
+            "initial_invalidation_price": Decimal("120"),
+            "max_slippage_bps": Decimal("999"),
+            "loss_calculation_ref": "test-only:different-calculation-ref",
+        }
+    )
+    assert market_risk_fact_payload_hash(proposal_bound_only) == canonical_hash
+
+    mismatched_observations = tuple(
+        observation.model_copy(update={"payload_hash": "0" * 64})
+        if observation.fact_type is FactType.MARKET
+        else observation
+        for observation in evaluation.risk_fact_set.observations
+    )
+    mismatched = evaluation.model_copy(
+        update={
+            "risk_fact_set": evaluation.risk_fact_set.model_copy(
+                update={"observations": mismatched_observations}
+            )
+        }
+    )
+
+    result = RiskEvaluator().evaluate(mismatched)
+
+    assert result.result is RiskDecisionResult.DENY
+    assert result.primary_reason_code == "MARKET_FACT_BINDING_MISMATCH"
+    assert result.market_fact_payload_hash == canonical_hash
+    assert result.market_observation_payload_hash == "0" * 64
+    assert result.max_safe_quantity == 0
 
 
 def test_scope_limit_denies_manual_request_and_reports_safe_quantity_without_execution() -> None:

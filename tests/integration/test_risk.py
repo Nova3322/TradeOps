@@ -196,7 +196,7 @@ def risk_envelope(request: RiskPrecheckRequest) -> CommandEnvelope:
     now = datetime.now(UTC)
     return CommandEnvelope(
         idempotency_key=f"risk-precheck-{uuid4()}",
-        command_type="risk.precheck.evaluate.v8",
+        command_type="risk.precheck.evaluate.v9",
         object_type="ProposalCandidate",
         object_id=request.proposal_ref,
         expected_version=request.candidate_version,
@@ -207,7 +207,7 @@ def risk_envelope(request: RiskPrecheckRequest) -> CommandEnvelope:
         issued_at=now,
         expires_at=now + timedelta(minutes=2),
         auth_context_ref="test-only:risk-precheck-auth",
-        payload_schema_version=8,
+        payload_schema_version=9,
         reason="evaluate proposal candidate",
         payload=request.model_dump(mode="json"),
     )
@@ -308,6 +308,10 @@ def test_allow_precheck_persists_immutable_snapshot_audit_and_outbox(
         assert snapshot.input_snapshot["risk_fact_set"]["valid"] is True
         assert snapshot.decision["risk_fact_set_record_hash"] == fact_set.record_hash
         assert (
+            snapshot.decision["market_fact_payload_hash"]
+            == snapshot.decision["market_observation_payload_hash"]
+        )
+        assert (
             hash_json(snapshot.input_snapshot["capital_projection"])
             == snapshot.capital_projection_hash
         )
@@ -398,6 +402,32 @@ def test_allow_precheck_persists_immutable_snapshot_audit_and_outbox(
         )
         assert session.execute(text("SELECT count(*) FROM risk_reservations")).scalar_one() == 0
         assert session.execute(text("SELECT count(*) FROM order_intents")).scalar_one() == 0
+
+
+def test_precheck_denies_when_market_payload_differs_from_durable_observation(
+    database: Database,
+) -> None:
+    now = datetime.now(UTC)
+    seed_policy(database, now=now)
+    seed_state(database)
+    request = make_request(now=now)
+    tampered = request.model_copy(
+        update={"market": request.market.model_copy(update={"funding_rate": Decimal("0.0002")})}
+    )
+
+    result = execute_precheck(database, risk_envelope(tampered), now=now)
+
+    assert result.status is CommandStatus.COMPLETED
+    assert result.data["result"] == "DENY"
+    assert result.data["primary_reason_code"] == "MARKET_FACT_BINDING_MISMATCH"
+    assert result.data["market_fact_payload_hash"] != result.data["market_observation_payload_hash"]
+    with database.session_factory.begin() as session:
+        snapshot = session.execute(select(RiskDecisionSnapshot)).scalar_one()
+        assert (
+            snapshot.decision["market_fact_payload_hash"]
+            != snapshot.decision["market_observation_payload_hash"]
+        )
+        assert snapshot.final_quantity == 0
 
 
 def test_precheck_denies_when_exact_catalog_version_is_missing(database: Database) -> None:
@@ -824,7 +854,7 @@ def test_web_actor_cannot_call_internal_risk_precheck_handler_directly(
         assert count_rows(session, RiskDecisionSnapshot) == 0
 
 
-def test_risk_precheck_legacy_commands_and_wrong_v8_schema_are_rejected(
+def test_risk_precheck_legacy_commands_and_wrong_v9_schema_are_rejected(
     database: Database,
 ) -> None:
     v1 = risk_envelope(make_request()).model_copy(
@@ -847,6 +877,9 @@ def test_risk_precheck_legacy_commands_and_wrong_v8_schema_are_rejected(
     )
     v7 = risk_envelope(make_request()).model_copy(
         update={"command_type": "risk.precheck.evaluate.v7"}
+    )
+    v8 = risk_envelope(make_request()).model_copy(
+        update={"command_type": "risk.precheck.evaluate.v8"}
     )
     old_field = risk_envelope(make_request())
     old_payload = dict(old_field.payload)
@@ -877,6 +910,7 @@ def test_risk_precheck_legacy_commands_and_wrong_v8_schema_are_rejected(
     v5_result = execute_precheck(database, v5)
     v6_result = execute_precheck(database, v6)
     v7_result = execute_precheck(database, v7)
+    v8_result = execute_precheck(database, v8)
     old_field_result = execute_precheck(database, old_field)
     caller_boolean_result = execute_precheck(database, caller_boolean)
     protection_boolean_result = execute_precheck(database, protection_boolean)
@@ -897,6 +931,8 @@ def test_risk_precheck_legacy_commands_and_wrong_v8_schema_are_rejected(
     assert v6_result.error_code == "COMMAND_TYPE_MISMATCH"
     assert v7_result.status is CommandStatus.REJECTED
     assert v7_result.error_code == "COMMAND_TYPE_MISMATCH"
+    assert v8_result.status is CommandStatus.REJECTED
+    assert v8_result.error_code == "COMMAND_TYPE_MISMATCH"
     assert old_field_result.status is CommandStatus.REJECTED
     assert old_field_result.error_code == "RISK_INPUT_INVALID"
     assert caller_boolean_result.status is CommandStatus.REJECTED

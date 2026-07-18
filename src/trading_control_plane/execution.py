@@ -585,8 +585,8 @@ class DurableExposureResolver:
 
 
 class ExecutionIntentService:
-    command_type = "execution.intent.create.v8"
-    payload_schema_version = 8
+    command_type = "execution.intent.create.v9"
+    payload_schema_version = 9
 
     def __init__(
         self,
@@ -1185,6 +1185,8 @@ class ExecutionIntentService:
                 "risk_fact_set_version": risk_fact_set.fact_set_version,
                 "risk_fact_set_record_hash": risk_fact_set.record_hash,
                 "risk_fact_set_reason_codes": list(risk_fact_set.reason_codes),
+                "market_fact_payload_hash": evaluation.market_fact_payload_hash,
+                "market_observation_payload_hash": (evaluation.market_observation_payload_hash),
                 "execution_mode": "SHADOW",
                 "dispatch_eligible": False,
                 "reservation_created": True,
@@ -1220,6 +1222,10 @@ class ExecutionIntentService:
                         ),
                         "risk_fact_set_version": risk_fact_set.fact_set_version,
                         "risk_fact_set_record_hash": risk_fact_set.record_hash,
+                        "market_fact_payload_hash": evaluation.market_fact_payload_hash,
+                        "market_observation_payload_hash": (
+                            evaluation.market_observation_payload_hash
+                        ),
                         "dispatch_eligible": False,
                     },
                 ),
@@ -1839,6 +1845,8 @@ class ExecutionIntentService:
                 "risk_fact_set_version": evaluation_input.risk_fact_set.fact_set_version,
                 "risk_fact_set_record_hash": evaluation_input.risk_fact_set.record_hash,
                 "risk_fact_set_reason_codes": list(evaluation_input.risk_fact_set.reason_codes),
+                "market_fact_payload_hash": evaluation.market_fact_payload_hash,
+                "market_observation_payload_hash": (evaluation.market_observation_payload_hash),
                 "dispatch_eligible": False,
                 "reservation_created": False,
                 "order_intent_created": False,
@@ -1883,6 +1891,10 @@ class ExecutionIntentService:
                         ),
                         "risk_fact_set_version": (evaluation_input.risk_fact_set.fact_set_version),
                         "risk_fact_set_record_hash": (evaluation_input.risk_fact_set.record_hash),
+                        "market_fact_payload_hash": evaluation.market_fact_payload_hash,
+                        "market_observation_payload_hash": (
+                            evaluation.market_observation_payload_hash
+                        ),
                     },
                 ),
             ),
