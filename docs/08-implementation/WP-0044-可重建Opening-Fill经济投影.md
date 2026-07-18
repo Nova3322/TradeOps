@@ -1,5 +1,9 @@
 # WP-0044：可重建 Opening Fill 经济投影
 
+> 后续状态：WP-0045 已把本投影与冻结 INITIAL 基线及 fresh canonical current position 建立
+> opening-only exact consistency binding；当前仓位拼接合同以
+> [WP-0045](WP-0045-Opening-Only当前仓位一致性绑定.md) 为准。本文件保留 opening fill 聚合合同。
+
 ## 1. 交付目标与边界
 
 WP-0043 已把每个 accepted canonical VenueFill 及原生费用逐笔归属到 Campaign，但下游仍缺少一个

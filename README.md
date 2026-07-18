@@ -55,8 +55,8 @@
 
 ## 当前工程节点
 
-当前已完成四十四个本地工程工作包：从 [WP-0001：耐久控制面基础](docs/08-implementation/WP-0001-耐久控制面基础.md) 推进到 [WP-0044：可重建 Opening Fill 经济投影](docs/08-implementation/WP-0044-可重建Opening-Fill经济投影.md)。WP-0041 要求 INITIAL 从 exact fresh canonical FLAT 开始，WP-0042 冻结 isolated 初始保证金分母，WP-0043 逐笔归属 canonical fill/原生费用，WP-0044 再确定性重建 opening prefix，同时明确 Campaign equity 仍为 `UNAVAILABLE`。完整逐包索引见 [文档中心](docs/README.md)，验证证据位于 [docs/08-implementation/evidence](docs/08-implementation/evidence/)。
+当前已完成四十五个本地工程工作包：从 [WP-0001：耐久控制面基础](docs/08-implementation/WP-0001-耐久控制面基础.md) 推进到 [WP-0045：Opening-Only 当前仓位一致性绑定](docs/08-implementation/WP-0045-Opening-Only当前仓位一致性绑定.md)。WP-0042 冻结 isolated 初始保证金分母，WP-0043/0044 逐笔归属并重建 opening fill prefix，WP-0045 再把它与 fresh canonical current position exact 绑定，同时保持 exclusive ownership 与 Campaign equity 为 `UNAVAILABLE`。完整逐包索引见 [文档中心](docs/README.md)，验证证据位于 [docs/08-implementation/evidence](docs/08-implementation/evidence/)。
 
-当前代码仍只有不可发送的 SHADOW OrderIntent、SHADOW 证书/lease/claim、canonical 私有场所事实、风险与策略控制合同、isolated Campaign 初始保证金基线、opening fill/fee entry 及其只读重建投影。WP-0044 可重建累计增仓数量/名义价值、原生费用与 realized PnL 完整性，但固定返回 `economic_equity_status=UNAVAILABLE`；current position、成本基础、reduce/exit、资金费、FX、Frozen Return 分子或 `E_campaign` 尚未完成。真实 aggregator/collector、OMS/Freqtrade/VenueAdapter、持续风险监控、Web/PWA、Telegram、Margin、Vault/CTO、报表和运维认证仍未完成；cross margin 经济归属仍为 `RESEARCH_REQUIRED`。所有迁移都不 seed 现实能力，`LIVE_ORDER_SEND`、`CAPITAL_TRANSFER`、`AUTO_ADD` 均为 `DISABLED`。工程节点不等于获得实盘授权。
+当前代码仍只有不可发送的 SHADOW OrderIntent、SHADOW 证书/lease/claim、canonical 私有场所事实、风险与策略控制合同、isolated Campaign 初始保证金基线、opening fill/fee entry 及只读投影。WP-0045 可证明 opening-only 当前数量/方向/scope/time 与 fresh venue position 一致，但 controlled sole outlet 尚未认证，因此 exclusive ownership、成本基础、reduce/exit、资金费、FX、Frozen Return 分子和 `E_campaign` 仍不可用。真实 aggregator/collector、OMS/Freqtrade/VenueAdapter、持续风险监控、Web/PWA、Telegram、Margin、Vault/CTO、报表和运维认证仍未完成；cross margin 经济归属仍为 `RESEARCH_REQUIRED`。所有迁移都不 seed 现实能力，`LIVE_ORDER_SEND`、`CAPITAL_TRANSFER`、`AUTO_ADD` 均为 `DISABLED`。工程节点不等于获得实盘授权。
 
 `OPEN` 只表示缺少真实外部事实；`RESEARCH_REQUIRED` 表示必须靠研究或执行证据冻结。两者都不能签发现实交易权限，也不用于删减完整工程目标。

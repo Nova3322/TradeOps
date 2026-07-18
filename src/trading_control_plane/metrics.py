@@ -105,6 +105,12 @@ CAMPAIGN_OPENING_FILL_PROJECTIONS = Counter(
     labelnames=("result",),
 )
 
+CAMPAIGN_CURRENT_POSITION_BINDINGS = Counter(
+    "trading_campaign_current_position_bindings_total",
+    "Opening-only Campaign current-position binding outcomes by bounded result.",
+    labelnames=("result",),
+)
+
 CAPABILITY_CERTIFICATE_ISSUANCE = Counter(
     "trading_capability_certificate_issuance_total",
     "Shadow-only capability certificate issuance by type, environment, and result.",
