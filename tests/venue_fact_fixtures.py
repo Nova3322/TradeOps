@@ -8,6 +8,7 @@ from trading_control_plane.command_executor import IdempotentCommandExecutor
 from trading_control_plane.commands import CommandChannel, CommandEnvelope, CommandResult, hash_json
 from trading_control_plane.database import Database
 from trading_control_plane.reconciliation_models import ExecutionReconciliationInput
+from trading_control_plane.venue_fact_models import VenuePositionSnapshot
 from trading_control_plane.venue_facts import (
     VENUE_FACT_SERVICE_PRINCIPAL,
     FeeEffect,
@@ -15,16 +16,20 @@ from trading_control_plane.venue_facts import (
     RecordVenueFillRequest,
     RecordVenueOrderObservationRequest,
     RecordVenuePositionSnapshotRequest,
+    RecordVenueProtectionSnapshotRequest,
     VenueFactNormalizationService,
     VenueOrderStatus,
     VenuePositionDirection,
     VenuePositionMode,
     VenuePositionSide,
     VenuePositionState,
+    VenueProtectedDirection,
+    VenueProtectionState,
     VenueSide,
     _fill_contract,
     _order_observation_contract,
     _position_snapshot_contract,
+    _protection_snapshot_contract,
 )
 
 
@@ -328,6 +333,137 @@ def position_snapshot_request(
     )
 
 
+def protection_snapshot_request(
+    reconciliation_input: ExecutionReconciliationInput,
+    position_snapshot: VenuePositionSnapshot,
+    *,
+    now: datetime,
+    venue_protection_snapshot_id: UUID | None = None,
+    venue_fact_input_link_id: UUID | None = None,
+    venue_update_id: str = "protection-update-1",
+    protection_state: VenueProtectionState = VenueProtectionState.CONFIRMED,
+    protected_direction: VenueProtectedDirection | None = None,
+    position_quantity: Decimal | None = None,
+    covered_quantity: Decimal | None = None,
+    uncovered_quantity: Decimal | None = None,
+    active_stop_order_count: int | None = None,
+    venue_native: bool | None = None,
+    reduce_only_confirmed: bool | None = None,
+    replacement_in_progress: bool | None = None,
+    order_set_hash: str | None = None,
+    event_time: datetime | None = None,
+    venue_observed_at: datetime | None = None,
+    received_at: datetime | None = None,
+) -> RecordVenueProtectionSnapshotRequest:
+    observed_event = event_time or now - timedelta(seconds=2)
+    if protection_state is VenueProtectionState.CONFIRMED:
+        effective_direction = protected_direction or VenueProtectedDirection(
+            position_snapshot.direction
+        )
+        effective_position_quantity = (
+            position_quantity if position_quantity is not None else position_snapshot.quantity
+        )
+        effective_covered = (
+            covered_quantity if covered_quantity is not None else effective_position_quantity
+        )
+        effective_uncovered = uncovered_quantity if uncovered_quantity is not None else Decimal("0")
+        effective_count = active_stop_order_count if active_stop_order_count is not None else 1
+        effective_native = venue_native if venue_native is not None else True
+        effective_reduce_only = reduce_only_confirmed if reduce_only_confirmed is not None else True
+        effective_replacement = (
+            replacement_in_progress if replacement_in_progress is not None else False
+        )
+    elif protection_state is VenueProtectionState.DEGRADED:
+        effective_direction = protected_direction or VenueProtectedDirection(
+            position_snapshot.direction
+        )
+        effective_position_quantity = (
+            position_quantity if position_quantity is not None else position_snapshot.quantity
+        )
+        assert effective_position_quantity is not None
+        effective_uncovered = (
+            uncovered_quantity if uncovered_quantity is not None else Decimal("0.1")
+        )
+        effective_covered = (
+            covered_quantity
+            if covered_quantity is not None
+            else effective_position_quantity - effective_uncovered
+        )
+        effective_count = active_stop_order_count if active_stop_order_count is not None else 1
+        effective_native = venue_native if venue_native is not None else True
+        effective_reduce_only = reduce_only_confirmed if reduce_only_confirmed is not None else True
+        effective_replacement = (
+            replacement_in_progress if replacement_in_progress is not None else False
+        )
+    else:
+        effective_direction = VenueProtectedDirection.UNKNOWN
+        effective_position_quantity = None
+        effective_covered = None
+        effective_uncovered = None
+        effective_count = None
+        effective_native = False
+        effective_reduce_only = False
+        effective_replacement = False
+    effective_order_set_hash = order_set_hash or hash_json(
+        {
+            "venue_update_id": venue_update_id,
+            "active_stop_order_count": effective_count,
+            "protection_state": protection_state.value,
+        }
+    )
+    values: dict[str, object] = {
+        "venue_fact_input_link_id": venue_fact_input_link_id or uuid4(),
+        "reconciliation_input_id": reconciliation_input.input_id,
+        "reconciliation_input_hash": reconciliation_input.input_hash,
+        "venue": position_snapshot.venue,
+        "execution_domain": position_snapshot.execution_domain,
+        "account_id": position_snapshot.account_id,
+        "instrument_id": position_snapshot.instrument_id,
+        "source_version": reconciliation_input.source_version,
+        "normalization_version": "venue-protection-normalizer-v1",
+        "normalized_payload": {
+            "venue_update_id": venue_update_id,
+            "position_snapshot_id": str(position_snapshot.venue_position_snapshot_id),
+            "protection_state": protection_state.value,
+            "order_set_hash": effective_order_set_hash,
+        },
+        "raw_payload_ref": f"test-only:raw-protection:{venue_update_id}",
+        "raw_payload_hash": hash_json({"raw_protection_update_id": venue_update_id}),
+        "evidence_ref": f"test-only:protection-evidence:{venue_update_id}",
+        "event_time": observed_event,
+        "venue_observed_at": venue_observed_at or now - timedelta(seconds=1),
+        "received_at": received_at or now,
+        "venue_protection_snapshot_id": venue_protection_snapshot_id or uuid4(),
+        "venue_position_snapshot_id": position_snapshot.venue_position_snapshot_id,
+        "venue_update_id": venue_update_id,
+        "position_mode": VenuePositionMode(position_snapshot.position_mode),
+        "position_side": VenuePositionSide(position_snapshot.position_side),
+        "margin_mode": position_snapshot.margin_mode,
+        "collateral_pool_id": position_snapshot.collateral_pool_id,
+        "protection_state": protection_state,
+        "protected_direction": effective_direction,
+        "position_quantity": effective_position_quantity,
+        "covered_quantity": effective_covered,
+        "uncovered_quantity": effective_uncovered,
+        "active_stop_order_count": effective_count,
+        "venue_native": effective_native,
+        "reduce_only_confirmed": effective_reduce_only,
+        "replacement_in_progress": effective_replacement,
+        "order_set_hash": effective_order_set_hash,
+    }
+    draft = RecordVenueProtectionSnapshotRequest.model_construct(
+        **values, snapshot_hash="0" * 64, evidence_hash="0" * 64
+    )
+    snapshot_hash = hash_json(_protection_snapshot_contract(draft))
+    evidence_draft = RecordVenueProtectionSnapshotRequest.model_construct(
+        **values, snapshot_hash=snapshot_hash, evidence_hash="0" * 64
+    )
+    evidence_hash = hash_json(evidence_draft.model_dump(mode="json", exclude={"evidence_hash"}))
+    return RecordVenueProtectionSnapshotRequest.model_validate(
+        {**values, "snapshot_hash": snapshot_hash, "evidence_hash": evidence_hash}
+    )
+
+
 def execute_venue_fact(
     database: Database,
     envelope: CommandEnvelope,
@@ -339,6 +475,7 @@ def execute_venue_fact(
         service.order_command_type: service.record_order_observation,
         service.fill_command_type: service.record_fill,
         service.position_command_type: service.record_position_snapshot,
+        service.protection_command_type: service.record_protection_snapshot,
     }
     return IdempotentCommandExecutor(database.session_factory).execute(
         envelope, handlers[envelope.command_type]

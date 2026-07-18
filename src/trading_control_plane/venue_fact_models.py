@@ -12,6 +12,7 @@ from sqlalchemy import (
     ForeignKey,
     ForeignKeyConstraint,
     Index,
+    Integer,
     Numeric,
     String,
     UniqueConstraint,
@@ -419,6 +420,144 @@ class VenuePositionSnapshot(Base):
     recorded_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
 
+class VenueProtectionSnapshot(Base):
+    """One immutable private-venue snapshot of the active native protection set."""
+
+    __tablename__ = "venue_protection_snapshots"
+    __table_args__ = (
+        CheckConstraint(
+            "protection_state IN ('CONFIRMED', 'DEGRADED', 'UNKNOWN')",
+            name="ck_venue_protection_snapshots_state",
+        ),
+        CheckConstraint(
+            "position_mode IN ('ONE_WAY', 'HEDGE') "
+            "AND position_side IN ('LONG', 'SHORT', 'BOTH') "
+            "AND protected_direction IN ('LONG', 'SHORT', 'UNKNOWN')",
+            name="ck_venue_protection_snapshots_shape",
+        ),
+        CheckConstraint(
+            "(position_mode = 'ONE_WAY' AND position_side = 'BOTH') OR "
+            "(position_mode = 'HEDGE' AND position_side IN ('LONG', 'SHORT'))",
+            name="ck_venue_protection_snapshots_mode_side",
+        ),
+        CheckConstraint(
+            "(protection_state = 'CONFIRMED' "
+            "AND protected_direction IN ('LONG', 'SHORT') "
+            "AND position_quantity > 0 AND covered_quantity = position_quantity "
+            "AND uncovered_quantity = 0 AND active_stop_order_count >= 1 "
+            "AND venue_native AND reduce_only_confirmed AND NOT replacement_in_progress) OR "
+            "(protection_state = 'DEGRADED' "
+            "AND protected_direction IN ('LONG', 'SHORT') "
+            "AND position_quantity > 0 AND covered_quantity >= 0 "
+            "AND uncovered_quantity >= 0 "
+            "AND covered_quantity + uncovered_quantity = position_quantity "
+            "AND active_stop_order_count >= 0 "
+            "AND (uncovered_quantity > 0 OR active_stop_order_count = 0 "
+            "OR NOT venue_native OR NOT reduce_only_confirmed OR replacement_in_progress)) OR "
+            "(protection_state = 'UNKNOWN' AND protected_direction = 'UNKNOWN' "
+            "AND position_quantity IS NULL AND covered_quantity IS NULL "
+            "AND uncovered_quantity IS NULL AND active_stop_order_count IS NULL "
+            "AND NOT venue_native AND NOT reduce_only_confirmed "
+            "AND NOT replacement_in_progress)",
+            name="ck_venue_protection_snapshots_coverage",
+        ),
+        CheckConstraint(
+            "event_time <= venue_observed_at AND venue_observed_at <= first_received_at "
+            "AND first_received_at <= recorded_at",
+            name="ck_venue_protection_snapshots_time_order",
+        ),
+        CheckConstraint(
+            "venue_confirmed AND fact_authority = 'VENUE_PRIVATE' "
+            "AND environment = 'SHADOW' AND live_dispatch_eligible = false",
+            name="ck_venue_protection_snapshots_authority",
+        ),
+        CheckConstraint(
+            "jsonb_typeof(normalized_payload) = 'object' "
+            "AND length(order_set_hash) = 64 AND length(raw_payload_hash) = 64 "
+            "AND length(evidence_hash) = 64 AND length(snapshot_hash) = 64",
+            name="ck_venue_protection_snapshots_integrity",
+        ),
+        ForeignKeyConstraint(
+            ["first_seen_run_id", "organization_id"],
+            [
+                "execution_reconciliation_runs.run_id",
+                "execution_reconciliation_runs.organization_id",
+            ],
+            name="fk_venue_protection_snapshots_first_run_org",
+            ondelete="RESTRICT",
+        ),
+        UniqueConstraint(
+            "organization_id",
+            "venue",
+            "execution_domain",
+            "account_id",
+            "instrument_id",
+            "position_mode",
+            "position_side",
+            "margin_mode",
+            "collateral_pool_id",
+            "venue_update_id",
+            name="uq_venue_protection_snapshots_external_update",
+        ),
+        Index(
+            "ix_venue_protection_snapshots_scope_time",
+            "venue",
+            "execution_domain",
+            "account_id",
+            "instrument_id",
+            "position_side",
+            "event_time",
+        ),
+    )
+
+    venue_protection_snapshot_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True)
+    organization_id: Mapped[str] = mapped_column(String(120), nullable=False)
+    first_seen_run_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), nullable=False)
+    first_seen_input_id: Mapped[UUID] = mapped_column(
+        ForeignKey("execution_reconciliation_inputs.input_id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    venue_position_snapshot_id: Mapped[UUID] = mapped_column(
+        ForeignKey("venue_position_snapshots.venue_position_snapshot_id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    venue: Mapped[str] = mapped_column(String(80), nullable=False)
+    execution_domain: Mapped[str] = mapped_column(String(120), nullable=False)
+    account_id: Mapped[str] = mapped_column(String(160), nullable=False)
+    instrument_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    venue_update_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    position_mode: Mapped[str] = mapped_column(String(80), nullable=False)
+    position_side: Mapped[str] = mapped_column(String(20), nullable=False)
+    margin_mode: Mapped[str] = mapped_column(String(80), nullable=False)
+    collateral_pool_id: Mapped[str] = mapped_column(String(160), nullable=False)
+    protection_state: Mapped[str] = mapped_column(String(20), nullable=False)
+    protected_direction: Mapped[str] = mapped_column(String(20), nullable=False)
+    position_quantity: Mapped[Decimal | None] = mapped_column(Numeric(38, 18), nullable=True)
+    covered_quantity: Mapped[Decimal | None] = mapped_column(Numeric(38, 18), nullable=True)
+    uncovered_quantity: Mapped[Decimal | None] = mapped_column(Numeric(38, 18), nullable=True)
+    active_stop_order_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    venue_native: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    reduce_only_confirmed: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    replacement_in_progress: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    order_set_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    venue_confirmed: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    fact_authority: Mapped[str] = mapped_column(String(32), nullable=False)
+    environment: Mapped[str] = mapped_column(String(20), nullable=False)
+    live_dispatch_eligible: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    source_version: Mapped[str] = mapped_column(String(160), nullable=False)
+    normalization_version: Mapped[str] = mapped_column(String(160), nullable=False)
+    normalized_payload: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    raw_payload_ref: Mapped[str] = mapped_column(String(255), nullable=False)
+    raw_payload_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    evidence_ref: Mapped[str] = mapped_column(String(255), nullable=False)
+    evidence_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    snapshot_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    event_time: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    venue_observed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    first_received_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    recorded_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
 class VenueFactInputLink(Base):
     """Immutable membership of one canonical venue fact in one reconciliation input."""
 
@@ -426,11 +565,17 @@ class VenueFactInputLink(Base):
     __table_args__ = (
         CheckConstraint(
             "(source_type = 'VENUE_ORDERS' AND venue_order_observation_id IS NOT NULL "
-            "AND venue_fill_id IS NULL AND venue_position_snapshot_id IS NULL) OR "
+            "AND venue_fill_id IS NULL AND venue_position_snapshot_id IS NULL "
+            "AND venue_protection_snapshot_id IS NULL) OR "
             "(source_type = 'VENUE_FILLS' AND venue_order_observation_id IS NULL "
-            "AND venue_fill_id IS NOT NULL AND venue_position_snapshot_id IS NULL) OR "
+            "AND venue_fill_id IS NOT NULL AND venue_position_snapshot_id IS NULL "
+            "AND venue_protection_snapshot_id IS NULL) OR "
             "(source_type = 'VENUE_POSITIONS' AND venue_order_observation_id IS NULL "
-            "AND venue_fill_id IS NULL AND venue_position_snapshot_id IS NOT NULL)",
+            "AND venue_fill_id IS NULL AND venue_position_snapshot_id IS NOT NULL "
+            "AND venue_protection_snapshot_id IS NULL) OR "
+            "(source_type = 'VENUE_PROTECTION' AND venue_order_observation_id IS NULL "
+            "AND venue_fill_id IS NULL AND venue_position_snapshot_id IS NULL "
+            "AND venue_protection_snapshot_id IS NOT NULL)",
             name="ck_venue_fact_input_links_exact_fact",
         ),
         CheckConstraint(
@@ -467,6 +612,11 @@ class VenueFactInputLink(Base):
             "venue_position_snapshot_id",
             name="uq_venue_fact_input_links_position_fact",
         ),
+        UniqueConstraint(
+            "reconciliation_input_id",
+            "venue_protection_snapshot_id",
+            name="uq_venue_fact_input_links_protection_fact",
+        ),
         Index("ix_venue_fact_input_links_run_source", "run_id", "source_type"),
     )
 
@@ -487,6 +637,10 @@ class VenueFactInputLink(Base):
     )
     venue_position_snapshot_id: Mapped[UUID | None] = mapped_column(
         ForeignKey("venue_position_snapshots.venue_position_snapshot_id", ondelete="RESTRICT"),
+        nullable=True,
+    )
+    venue_protection_snapshot_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("venue_protection_snapshots.venue_protection_snapshot_id", ondelete="RESTRICT"),
         nullable=True,
     )
     input_hash: Mapped[str] = mapped_column(String(64), nullable=False)

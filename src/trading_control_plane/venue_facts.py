@@ -36,6 +36,7 @@ from trading_control_plane.venue_fact_models import (
     VenueFill,
     VenueOrderObservation,
     VenuePositionSnapshot,
+    VenueProtectionSnapshot,
 )
 
 VENUE_FACT_SERVICE_PRINCIPAL = "execution-reconciliation-service"
@@ -78,6 +79,18 @@ class VenuePositionDirection(StrEnum):
     LONG = "LONG"
     SHORT = "SHORT"
     FLAT = "FLAT"
+    UNKNOWN = "UNKNOWN"
+
+
+class VenueProtectionState(StrEnum):
+    CONFIRMED = "CONFIRMED"
+    DEGRADED = "DEGRADED"
+    UNKNOWN = "UNKNOWN"
+
+
+class VenueProtectedDirection(StrEnum):
+    LONG = "LONG"
+    SHORT = "SHORT"
     UNKNOWN = "UNKNOWN"
 
 
@@ -297,6 +310,96 @@ class RecordVenuePositionSnapshotRequest(VenueFactCollectionBinding):
         return self
 
 
+class RecordVenueProtectionSnapshotRequest(VenueFactCollectionBinding):
+    venue_protection_snapshot_id: UUID
+    venue_position_snapshot_id: UUID
+    venue_update_id: str = Field(min_length=1, max_length=255)
+    position_mode: VenuePositionMode
+    position_side: VenuePositionSide
+    margin_mode: str = Field(min_length=1, max_length=80)
+    collateral_pool_id: str = Field(min_length=1, max_length=160)
+    protection_state: VenueProtectionState
+    protected_direction: VenueProtectedDirection
+    position_quantity: Decimal | None = None
+    covered_quantity: Decimal | None = None
+    uncovered_quantity: Decimal | None = None
+    active_stop_order_count: int | None = Field(default=None, ge=0)
+    venue_native: bool
+    reduce_only_confirmed: bool
+    replacement_in_progress: bool
+    order_set_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    snapshot_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+    @model_validator(mode="after")
+    def protection_is_self_consistent(self) -> Self:
+        if self.position_mode is VenuePositionMode.ONE_WAY:
+            if self.position_side is not VenuePositionSide.BOTH:
+                raise ValueError("one-way protection must use BOTH position side")
+        elif self.position_side is VenuePositionSide.BOTH:
+            raise ValueError("hedge protection must use LONG or SHORT position side")
+
+        if self.protection_state is VenueProtectionState.CONFIRMED:
+            valid = (
+                self.protected_direction
+                in {VenueProtectedDirection.LONG, VenueProtectedDirection.SHORT}
+                and self.position_quantity is not None
+                and self.position_quantity > 0
+                and self.covered_quantity == self.position_quantity
+                and self.uncovered_quantity == 0
+                and self.active_stop_order_count is not None
+                and self.active_stop_order_count >= 1
+                and self.venue_native
+                and self.reduce_only_confirmed
+                and not self.replacement_in_progress
+            )
+        elif self.protection_state is VenueProtectionState.DEGRADED:
+            known_quantities = (
+                self.position_quantity is not None
+                and self.position_quantity > 0
+                and self.covered_quantity is not None
+                and self.covered_quantity >= 0
+                and self.uncovered_quantity is not None
+                and self.uncovered_quantity >= 0
+                and self.covered_quantity + self.uncovered_quantity == self.position_quantity
+                and self.active_stop_order_count is not None
+            )
+            deficient = (
+                self.uncovered_quantity is not None
+                and self.active_stop_order_count is not None
+                and (
+                    self.uncovered_quantity > 0
+                    or self.active_stop_order_count == 0
+                    or not self.venue_native
+                    or not self.reduce_only_confirmed
+                    or self.replacement_in_progress
+                )
+            )
+            valid = (
+                self.protected_direction
+                in {VenueProtectedDirection.LONG, VenueProtectedDirection.SHORT}
+                and known_quantities
+                and deficient
+            )
+        else:
+            valid = (
+                self.protected_direction is VenueProtectedDirection.UNKNOWN
+                and self.position_quantity is None
+                and self.covered_quantity is None
+                and self.uncovered_quantity is None
+                and self.active_stop_order_count is None
+                and not self.venue_native
+                and not self.reduce_only_confirmed
+                and not self.replacement_in_progress
+            )
+        if not valid:
+            raise ValueError("venue protection state semantics are inconsistent")
+        if self.snapshot_hash != hash_json(_protection_snapshot_contract(self)):
+            raise ValueError("venue protection snapshot hash mismatch")
+        if self.evidence_hash != hash_json(self.model_dump(mode="json", exclude={"evidence_hash"})):
+            raise ValueError("venue protection evidence hash mismatch")
+        return self
+
+
 def _iso(value: datetime) -> str:
     return value.astimezone(UTC).isoformat()
 
@@ -392,10 +495,39 @@ def _position_snapshot_contract(
     }
 
 
+def _protection_snapshot_contract(
+    request: RecordVenueProtectionSnapshotRequest,
+) -> dict[str, Any]:
+    return {
+        "venue": request.venue,
+        "execution_domain": request.execution_domain,
+        "account_id": request.account_id,
+        "instrument_id": request.instrument_id,
+        "venue_position_snapshot_id": str(request.venue_position_snapshot_id),
+        "venue_update_id": request.venue_update_id,
+        "position_mode": request.position_mode.value,
+        "position_side": request.position_side.value,
+        "margin_mode": request.margin_mode,
+        "collateral_pool_id": request.collateral_pool_id,
+        "protection_state": request.protection_state.value,
+        "protected_direction": request.protected_direction.value,
+        "position_quantity": _optional_decimal(request.position_quantity),
+        "covered_quantity": _optional_decimal(request.covered_quantity),
+        "uncovered_quantity": _optional_decimal(request.uncovered_quantity),
+        "active_stop_order_count": request.active_stop_order_count,
+        "venue_native": request.venue_native,
+        "reduce_only_confirmed": request.reduce_only_confirmed,
+        "replacement_in_progress": request.replacement_in_progress,
+        "order_set_hash": request.order_set_hash,
+        "event_time": _iso(request.event_time),
+    }
+
+
 class VenueFactNormalizationService:
     order_command_type = "execution.venue-order-observation.record.v1"
     fill_command_type = "execution.venue-fill.record.v1"
     position_command_type = "execution.venue-position-snapshot.record.v1"
+    protection_command_type = "execution.venue-protection-snapshot.record.v1"
 
     def __init__(self, clock: Callable[[], datetime] | None = None) -> None:
         self._clock = clock or (lambda: datetime.now(UTC))
@@ -504,6 +636,7 @@ class VenueFactNormalizationService:
             existing.venue_order_observation_id,
             None,
             None,
+            None,
             existing.observation_hash,
             new_fact,
             now,
@@ -608,6 +741,7 @@ class VenueFactNormalizationService:
             "FILL",
             None,
             existing.venue_fill_id,
+            None,
             None,
             existing.fill_hash,
             new_fact,
@@ -739,6 +873,169 @@ class VenueFactNormalizationService:
             None,
             None,
             existing.venue_position_snapshot_id,
+            None,
+            existing.snapshot_hash,
+            new_fact,
+            now,
+        )
+
+    def record_protection_snapshot(
+        self, session: Session, envelope: CommandEnvelope
+    ) -> CommandOutcome:
+        run_id = self._run_id(envelope, self.protection_command_type)
+        try:
+            request = RecordVenueProtectionSnapshotRequest.model_validate(envelope.payload)
+        except ValidationError as exc:
+            raise CommandRejected("VENUE_PROTECTION_SNAPSHOT_INVALID", str(exc)) from exc
+        now = self._clock()
+        self._lock_external_identity(
+            session,
+            f"venue-protection:{envelope.scope.get('organization_id')}:{request.venue}:"
+            f"{request.execution_domain}:{request.account_id}:{request.instrument_id}:"
+            f"{request.position_mode.value}:{request.position_side.value}:"
+            f"{request.margin_mode}:{request.collateral_pool_id}:{request.venue_update_id}",
+        )
+        run, reconciliation_input = self._validate_collection_context(
+            session,
+            envelope,
+            run_id,
+            request,
+            ReconciliationSourceType.VENUE_PROTECTION,
+            now,
+        )
+        scope = session.get(ExecutionSenderScope, run.scope_id)
+        position = session.get(VenuePositionSnapshot, request.venue_position_snapshot_id)
+        assert scope is not None
+        if (
+            request.position_mode.value != scope.position_mode
+            or request.margin_mode != scope.margin_mode
+            or request.collateral_pool_id != scope.collateral_pool_id
+        ):
+            raise CommandRejected(
+                "VENUE_PROTECTION_SCOPE_MISMATCH",
+                "position mode, margin mode, or collateral pool changed",
+            )
+        if position is None:
+            raise CommandRejected(
+                "VENUE_PROTECTION_POSITION_NOT_FOUND",
+                "canonical venue position snapshot is unavailable",
+            )
+        expected_position_side = position.position_side
+        expected_direction = position.direction
+        if (
+            position.organization_id != run.organization_id
+            or position.venue != request.venue
+            or position.execution_domain != request.execution_domain
+            or position.account_id != request.account_id
+            or position.instrument_id != request.instrument_id
+            or position.position_mode != request.position_mode.value
+            or expected_position_side != request.position_side.value
+            or position.margin_mode != request.margin_mode
+            or position.collateral_pool_id != request.collateral_pool_id
+            or position.position_state != "OPEN"
+            or request.event_time < position.event_time
+        ):
+            raise CommandRejected(
+                "VENUE_PROTECTION_POSITION_MISMATCH",
+                "protection snapshot does not bind the exact open venue position",
+            )
+        if request.protection_state is not VenueProtectionState.UNKNOWN and (
+            request.protected_direction.value != expected_direction
+            or request.position_quantity != position.quantity
+        ):
+            raise CommandRejected(
+                "VENUE_PROTECTION_COVERAGE_MISMATCH",
+                "protection direction or quantity differs from the bound position",
+            )
+        existing = session.execute(
+            select(VenueProtectionSnapshot).where(
+                VenueProtectionSnapshot.organization_id == run.organization_id,
+                VenueProtectionSnapshot.venue == request.venue,
+                VenueProtectionSnapshot.execution_domain == request.execution_domain,
+                VenueProtectionSnapshot.account_id == request.account_id,
+                VenueProtectionSnapshot.instrument_id == request.instrument_id,
+                VenueProtectionSnapshot.position_mode == request.position_mode.value,
+                VenueProtectionSnapshot.position_side == request.position_side.value,
+                VenueProtectionSnapshot.margin_mode == request.margin_mode,
+                VenueProtectionSnapshot.collateral_pool_id == request.collateral_pool_id,
+                VenueProtectionSnapshot.venue_update_id == request.venue_update_id,
+            )
+        ).scalar_one_or_none()
+        identity_owner = session.get(VenueProtectionSnapshot, request.venue_protection_snapshot_id)
+        if identity_owner is not None and (
+            existing is None
+            or identity_owner.venue_protection_snapshot_id != existing.venue_protection_snapshot_id
+        ):
+            raise CommandRejected(
+                "VENUE_PROTECTION_SNAPSHOT_ID_CONFLICT",
+                "venue protection snapshot identity already exists",
+            )
+        new_fact = existing is None
+        if existing is None:
+            self._require_new_fact_link_possible(session, reconciliation_input, request)
+            existing = VenueProtectionSnapshot(
+                venue_protection_snapshot_id=request.venue_protection_snapshot_id,
+                organization_id=run.organization_id,
+                first_seen_run_id=run.run_id,
+                first_seen_input_id=reconciliation_input.input_id,
+                venue_position_snapshot_id=request.venue_position_snapshot_id,
+                venue=request.venue,
+                execution_domain=request.execution_domain,
+                account_id=request.account_id,
+                instrument_id=request.instrument_id,
+                venue_update_id=request.venue_update_id,
+                position_mode=request.position_mode.value,
+                position_side=request.position_side.value,
+                margin_mode=request.margin_mode,
+                collateral_pool_id=request.collateral_pool_id,
+                protection_state=request.protection_state.value,
+                protected_direction=request.protected_direction.value,
+                position_quantity=request.position_quantity,
+                covered_quantity=request.covered_quantity,
+                uncovered_quantity=request.uncovered_quantity,
+                active_stop_order_count=request.active_stop_order_count,
+                venue_native=request.venue_native,
+                reduce_only_confirmed=request.reduce_only_confirmed,
+                replacement_in_progress=request.replacement_in_progress,
+                order_set_hash=request.order_set_hash,
+                venue_confirmed=True,
+                fact_authority="VENUE_PRIVATE",
+                environment="SHADOW",
+                live_dispatch_eligible=False,
+                source_version=request.source_version,
+                normalization_version=request.normalization_version,
+                normalized_payload=request.normalized_payload,
+                raw_payload_ref=request.raw_payload_ref,
+                raw_payload_hash=request.raw_payload_hash,
+                evidence_ref=request.evidence_ref,
+                evidence_hash=request.evidence_hash,
+                snapshot_hash=request.snapshot_hash,
+                event_time=request.event_time,
+                venue_observed_at=request.venue_observed_at,
+                first_received_at=request.received_at,
+                recorded_at=now,
+            )
+            session.add(existing)
+            session.flush()
+        elif (
+            existing.organization_id != run.organization_id
+            or existing.snapshot_hash != request.snapshot_hash
+        ):
+            raise CommandRejected(
+                "VENUE_PROTECTION_SNAPSHOT_CONFLICT",
+                "venue protection update identity has different immutable semantics",
+            )
+        return self._link_and_outcome(
+            session,
+            run,
+            reconciliation_input,
+            request,
+            ReconciliationSourceType.VENUE_PROTECTION,
+            "PROTECTION_SNAPSHOT",
+            None,
+            None,
+            None,
+            existing.venue_protection_snapshot_id,
             existing.snapshot_hash,
             new_fact,
             now,
@@ -877,6 +1174,7 @@ class VenueFactNormalizationService:
         order_observation_id: UUID | None,
         fill_id: UUID | None,
         position_snapshot_id: UUID | None,
+        protection_snapshot_id: UUID | None,
         fact_hash: str,
         new_fact: bool,
         now: datetime,
@@ -885,9 +1183,13 @@ class VenueFactNormalizationService:
             fact_identity = VenueFactInputLink.venue_order_observation_id == order_observation_id
         elif fill_id is not None:
             fact_identity = VenueFactInputLink.venue_fill_id == fill_id
-        else:
-            assert position_snapshot_id is not None
+        elif position_snapshot_id is not None:
             fact_identity = VenueFactInputLink.venue_position_snapshot_id == position_snapshot_id
+        else:
+            assert protection_snapshot_id is not None
+            fact_identity = (
+                VenueFactInputLink.venue_protection_snapshot_id == protection_snapshot_id
+            )
         existing_link = session.execute(
             select(VenueFactInputLink).where(
                 VenueFactInputLink.reconciliation_input_id == reconciliation_input.input_id,
@@ -912,6 +1214,8 @@ class VenueFactNormalizationService:
         }
         if position_snapshot_id is not None:
             link_values["venue_position_snapshot_id"] = str(position_snapshot_id)
+        if protection_snapshot_id is not None:
+            link_values["venue_protection_snapshot_id"] = str(protection_snapshot_id)
         link_hash = hash_json(link_values)
         if existing_link is not None:
             if existing_link.link_hash != link_hash:
@@ -927,6 +1231,7 @@ class VenueFactNormalizationService:
                 order_observation_id,
                 fill_id,
                 position_snapshot_id,
+                protection_snapshot_id,
                 existing_link.venue_fact_input_link_id,
                 fact_hash,
                 new_fact=False,
@@ -955,6 +1260,7 @@ class VenueFactNormalizationService:
             venue_order_observation_id=order_observation_id,
             venue_fill_id=fill_id,
             venue_position_snapshot_id=position_snapshot_id,
+            venue_protection_snapshot_id=protection_snapshot_id,
             input_hash=reconciliation_input.input_hash,
             fact_hash=fact_hash,
             raw_payload_ref=request.raw_payload_ref,
@@ -978,6 +1284,7 @@ class VenueFactNormalizationService:
             order_observation_id,
             fill_id,
             position_snapshot_id,
+            protection_snapshot_id,
             link.venue_fact_input_link_id,
             fact_hash,
             new_fact=new_fact,
@@ -1012,13 +1319,14 @@ class VenueFactNormalizationService:
         order_observation_id: UUID | None,
         fill_id: UUID | None,
         position_snapshot_id: UUID | None,
+        protection_snapshot_id: UUID | None,
         link_id: UUID,
         fact_hash: str,
         *,
         new_fact: bool,
         new_link: bool,
     ) -> CommandOutcome:
-        fact_id = order_observation_id or fill_id or position_snapshot_id
+        fact_id = order_observation_id or fill_id or position_snapshot_id or protection_snapshot_id
         assert fact_id is not None
         if order_observation_id is not None:
             event_type = "VenueOrderObserved"
@@ -1026,9 +1334,12 @@ class VenueFactNormalizationService:
         elif fill_id is not None:
             event_type = "VenueFillObserved"
             object_type = "VenueFill"
-        else:
+        elif position_snapshot_id is not None:
             event_type = "VenuePositionSnapshotObserved"
             object_type = "VenuePositionSnapshot"
+        else:
+            event_type = "VenueProtectionSnapshotObserved"
+            object_type = "VenueProtectionSnapshot"
         return CommandOutcome(
             status=CommandStatus.COMPLETED,
             object_type=object_type,
