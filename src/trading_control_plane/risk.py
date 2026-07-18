@@ -45,7 +45,11 @@ from trading_control_plane.metrics import (
     RISK_STALE_INPUTS,
     SYSTEM_RISK_STATE_TRANSITIONS,
 )
-from trading_control_plane.projections import ProjectionQueryContext
+from trading_control_plane.projections import (
+    CurrentProtectedPositionRiskProjection,
+    ProjectionQueryContext,
+    ProjectionState,
+)
 from trading_control_plane.proposal_models import SystemRiskStateRecord
 from trading_control_plane.risk_models import (
     RiskDecisionSnapshot,
@@ -367,7 +371,6 @@ class RequestedRiskIncrease(BaseModel):
 
     requested_quantity: Decimal = Field(gt=0)
     quantity_step: Decimal = Field(gt=0)
-    requested_protected_profit_giveback: Decimal = Field(ge=0)
     requested_funding: Decimal = Field(ge=0)
     requested_margin: Decimal = Field(ge=0)
     requested_effective_leverage: Decimal = Field(gt=0)
@@ -455,10 +458,6 @@ class RiskPrecheckRequest(BaseModel):
             * self.binding.contract_multiplier
         )
 
-    @property
-    def requested_protected_profit_giveback(self) -> Decimal:
-        return _quantize_risk_amount(self.requested.requested_protected_profit_giveback)
-
 
 class CostStressBreakdown(BaseModel):
     model_config = ConfigDict(frozen=True)
@@ -507,6 +506,27 @@ def derive_cost_stress(
     )
 
 
+class VerifiedProtectedPositionRisk(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    projection: CurrentProtectedPositionRiskProjection
+    max_age_ms: int = Field(gt=0)
+    valid_until: datetime
+
+    @model_validator(mode="after")
+    def projection_is_confirmed_and_time_bounded(self) -> Self:
+        if self.valid_until.tzinfo is None or self.valid_until.utcoffset() is None:
+            raise ValueError("protected-position risk expiry must be timezone-aware")
+        if (
+            self.projection.projection_state is not ProjectionState.CONFIRMED
+            or self.projection.facts_as_of is None
+            or self.valid_until
+            != self.projection.facts_as_of + timedelta(milliseconds=self.max_age_ms)
+        ):
+            raise ValueError("protected-position risk must have a canonical expiry")
+        return self
+
+
 class RiskEvaluationInput(BaseModel):
     model_config = ConfigDict(frozen=True)
 
@@ -518,6 +538,7 @@ class RiskEvaluationInput(BaseModel):
     system_risk_state: SystemRiskState
     capability_validation: CapabilityValidationResult
     decision_time: datetime
+    protected_position_risk: VerifiedProtectedPositionRisk | None = None
 
     @model_validator(mode="after")
     def timestamps_are_aware(self) -> Self:
@@ -527,6 +548,29 @@ class RiskEvaluationInput(BaseModel):
             or self.decision_time.tzinfo is None
         ):
             raise ValueError("risk evaluation timestamps must be timezone-aware")
+        protected = self.protected_position_risk
+        if protected is not None:
+            projection = protected.projection
+            binding = self.request.binding
+            if (
+                projection.projection_state is not ProjectionState.CONFIRMED
+                or projection.scope.organization_id != self.request.organization_id
+                or projection.scope.venue != binding.venue
+                or projection.scope.execution_domain != binding.execution_domain
+                or projection.scope.account_id != binding.account_id
+                or projection.scope.instrument_id != binding.instrument_identity
+                or projection.scope.position_mode != binding.position_mode
+                or projection.scope.margin_mode != binding.margin_mode
+                or projection.scope.collateral_pool_id != binding.collateral_pool_id
+                or projection.scope.settlement_currency != binding.settlement_asset
+                or projection.direction.value != self.request.market.direction.value
+                or projection.mark_price != self.request.market.mark_price
+                or projection.contract_multiplier != binding.contract_multiplier
+                or self.request.current_trade_loss.open_heat != projection.open_heat
+                or self.request.current_trade_loss.protected_profit_giveback
+                != projection.protected_profit_giveback
+            ):
+                raise ValueError("protected-position risk binding is inconsistent")
         return self
 
 
@@ -560,8 +604,12 @@ class RiskEvaluationResult(BaseModel):
     effective_trade_loss_cap: Decimal
     trade_worst_case_loss_before: Decimal
     trade_worst_case_loss_after: Decimal
+    current_trade_loss: TradeLossComponents
+    current_protected_position_risk_calculation_hash: str | None = Field(
+        default=None,
+        pattern=r"^[0-9a-f]{64}$",
+    )
     requested_base_heat: Decimal
-    requested_protected_profit_giveback: Decimal
     requested_fee_stress: Decimal
     requested_stop_penetration_stress: Decimal
     requested_adverse_funding_stress: Decimal
@@ -989,11 +1037,7 @@ class RiskEvaluator:
 
         current_trade_loss = request.current_trade_loss.total
         cost_stress = derive_cost_stress(request, policy)
-        incremental_trade_loss = (
-            request.requested_base_heat
-            + request.requested_protected_profit_giveback
-            + cost_stress.total
-        )
+        incremental_trade_loss = request.requested_base_heat + cost_stress.total
         if any(
             item.requested_incremental_stress_loss < incremental_trade_loss
             for item in request.scope_risks
@@ -1122,6 +1166,11 @@ class RiskEvaluator:
                 evaluation.policy_valid_until,
                 evaluation.capability_validation.valid_until,
                 *fact_expiries,
+                *(
+                    [evaluation.protected_position_risk.valid_until]
+                    if evaluation.protected_position_risk is not None
+                    else []
+                ),
             ]
         )
         valid_until = max(now, valid_until_candidate) if allowed else now
@@ -1143,8 +1192,13 @@ class RiskEvaluator:
             effective_trade_loss_cap=effective_trade_cap,
             trade_worst_case_loss_before=current_trade_loss,
             trade_worst_case_loss_after=trade_loss_after,
+            current_trade_loss=request.current_trade_loss,
+            current_protected_position_risk_calculation_hash=(
+                evaluation.protected_position_risk.projection.calculation_hash
+                if evaluation.protected_position_risk is not None
+                else None
+            ),
             requested_base_heat=request.requested_base_heat,
-            requested_protected_profit_giveback=(request.requested_protected_profit_giveback),
             requested_fee_stress=cost_stress.fee_stress,
             requested_stop_penetration_stress=cost_stress.stop_penetration_stress,
             requested_adverse_funding_stress=cost_stress.adverse_funding_stress,
@@ -1164,8 +1218,8 @@ class RiskEvaluator:
 class RiskPrecheckService:
     """Persists one immutable shadow precheck and emits audit/outbox evidence."""
 
-    command_type = "risk.precheck.evaluate.v3"
-    payload_schema_version = 3
+    command_type = "risk.precheck.evaluate.v4"
+    payload_schema_version = 4
 
     def __init__(
         self,

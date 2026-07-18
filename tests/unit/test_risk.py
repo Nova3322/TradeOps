@@ -197,7 +197,8 @@ def test_requested_base_heat_is_canonical_for_long_short_and_decision_evidence()
     result = RiskEvaluator().evaluate(make_evaluation(request=long_request))
     short_result = RiskEvaluator().evaluate(make_evaluation(request=short_request))
     assert result.requested_base_heat == Decimal("10.5")
-    assert result.requested_protected_profit_giveback == 0
+    assert result.current_trade_loss.protected_profit_giveback == 0
+    assert result.current_protected_position_risk_calculation_hash is None
     assert result.requested_fee_stress == Decimal("0.1005")
     assert result.requested_stop_penetration_stress == Decimal("0.201")
     assert result.requested_adverse_funding_stress == Decimal("0.0201")
@@ -216,6 +217,7 @@ def test_requested_base_heat_is_canonical_for_long_short_and_decision_evidence()
     (
         (("requested", "requested_reserved_heat"), Decimal("1")),
         (("requested", "requested_cost_stress_add_on"), Decimal("1")),
+        (("requested", "requested_protected_profit_giveback"), Decimal("1")),
         (("scope_risks", 0, "requested_incremental_planned_loss"), Decimal("1")),
     ),
 )
@@ -279,15 +281,11 @@ def test_base_and_cost_amounts_round_up_to_database_precision() -> None:
         market=baseline.market.model_copy(
             update={"executable_price": Decimal("100.5000000000000000001")}
         ),
-        requested=make_requested(
-            requested_protected_profit_giveback=Decimal("0.0000000000000000001")
-        ),
     )
 
     result = RiskEvaluator().evaluate(make_evaluation(request=precise))
 
     assert precise.requested_base_heat == Decimal("10.500000000000000001")
-    assert result.requested_protected_profit_giveback == Decimal("0.000000000000000001")
     assert result.requested_fee_stress == Decimal("0.100500000000000001")
     assert result.requested_stop_penetration_stress == Decimal("0.201000000000000001")
     assert result.requested_adverse_funding_stress == Decimal("0.020100000000000001")

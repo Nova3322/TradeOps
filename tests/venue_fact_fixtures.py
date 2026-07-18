@@ -242,6 +242,7 @@ def position_snapshot_request(
     leverage: Decimal | None = None,
     initial_margin: Decimal | None = None,
     maintenance_margin: Decimal | None = None,
+    settlement_currency: str = "USDT",
     event_time: datetime | None = None,
     venue_observed_at: datetime | None = None,
     received_at: datetime | None = None,
@@ -326,7 +327,7 @@ def position_snapshot_request(
         "leverage": effective_leverage,
         "initial_margin": effective_initial_margin,
         "maintenance_margin": effective_maintenance_margin,
-        "settlement_currency": "USDT",
+        "settlement_currency": settlement_currency,
     }
     draft = RecordVenuePositionSnapshotRequest.model_construct(
         **values, snapshot_hash="0" * 64, evidence_hash="0" * 64

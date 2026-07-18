@@ -195,7 +195,6 @@ def make_requested(**updates: Any) -> RequestedRiskIncrease:
     values: dict[str, Any] = {
         "requested_quantity": Decimal("1"),
         "quantity_step": Decimal("0.001"),
-        "requested_protected_profit_giveback": Decimal("0"),
         "requested_funding": Decimal("1000"),
         "requested_margin": Decimal("1000"),
         "requested_effective_leverage": Decimal("2"),
@@ -243,7 +242,6 @@ def make_request(
         abs(effective_market.executable_price - effective_market.initial_invalidation_price)
         * effective_requested.requested_quantity
         * effective_market.contract_multiplier
-        + effective_requested.requested_protected_profit_giveback
     )
     if scope_risks is None:
         scope_risks = tuple(

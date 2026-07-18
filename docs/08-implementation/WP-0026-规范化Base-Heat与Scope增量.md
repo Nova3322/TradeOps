@@ -1,5 +1,8 @@
 # WP-0026：规范化 Base Heat 与 Scope 增量
 
+> 后续状态：WP-0031 已删除 v4 请求中的 `requested_protected_profit_giveback`，当前仓位 Open Heat 与
+> Giveback 改由 canonical current protected-position risk 派生；本文中的该字段仅保留为 v2 历史合同。
+
 > 后续状态：WP-0027 已移除 caller-reported cost，Risk Engine 改从无默认的版本化 Risk Policy 参数
 > 派生 fee、stop penetration 与 adverse funding stress，并将命令升级为 v3。当前合同以
 > [WP-0027](WP-0027-策略绑定Cost-Stress.md) 为准。本文件保留 WP-0026 的 base/scope 共源证据。

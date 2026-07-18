@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import ROUND_DOWN, Decimal
 from enum import StrEnum
 from typing import Any, Self
@@ -44,6 +44,12 @@ from trading_control_plane.metrics import (
     EXECUTION_RISK_DECISIONS,
     RISK_RESERVATION_TRANSITIONS,
 )
+from trading_control_plane.projections import (
+    CurrentProtectionScope,
+    ProjectionQueryContext,
+    ProjectionState,
+    VenueCurrentProjectionService,
+)
 from trading_control_plane.proposal_models import FrozenProposalVersion, SystemRiskStateRecord
 from trading_control_plane.reconciliation import ReconciliationSourceType
 from trading_control_plane.reconciliation_models import (
@@ -54,6 +60,7 @@ from trading_control_plane.reconciliation_models import (
 from trading_control_plane.risk import (
     CapitalProjectionBinding,
     CapitalProjectionResolver,
+    FactType,
     RiskDecisionResult,
     RiskEvaluationInput,
     RiskEvaluationResult,
@@ -63,6 +70,7 @@ from trading_control_plane.risk import (
     ScopeType,
     TradeLossComponents,
     VerifiedCapitalProjection,
+    VerifiedProtectedPositionRisk,
     capability_validation_request,
 )
 from trading_control_plane.risk_models import RiskPolicyRecord
@@ -246,6 +254,7 @@ class VerifiedDurableExposure(BaseModel):
     risk_request: RiskPrecheckRequest
     snapshot: DurableExposureSnapshot
     snapshot_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    protected_position_risk: VerifiedProtectedPositionRisk | None = None
 
 
 class RecordExecutionFactRequest(BaseModel):
@@ -347,6 +356,91 @@ class RecordExecutionFactRequest(BaseModel):
         return self
 
 
+class CurrentProtectedPositionRiskResolver:
+    """Binds ADD risk to fresh canonical position and native protection facts."""
+
+    @staticmethod
+    def resolve(
+        session: Session,
+        request: CreateExecutionIntentRequest,
+        campaign: Campaign,
+        policy: RiskPolicyParameters,
+        as_of: datetime,
+    ) -> VerifiedProtectedPositionRisk:
+        if request.intent_kind is not IntentKind.ADD or request.add_eligibility is None:
+            raise CommandRejected(
+                "CURRENT_PROTECTED_POSITION_RISK_NOT_APPLICABLE",
+                "current protected-position risk is required only for ADD",
+            )
+        freshness_limits = {
+            item.fact_type: item.max_age_ms for item in policy.fact_freshness_limits
+        }
+        max_age_ms = min(
+            freshness_limits[FactType.POSITIONS],
+            freshness_limits[FactType.PROTECTION],
+        )
+        binding = request.risk_request.binding
+        scope = CurrentProtectionScope(
+            organization_id=campaign.organization_id,
+            venue=campaign.venue,
+            execution_domain=campaign.execution_domain,
+            account_id=campaign.account_id,
+            instrument_id=campaign.instrument_id,
+            position_mode=binding.position_mode,
+            position_side="BOTH" if binding.position_mode == "ONE_WAY" else campaign.direction,
+            margin_mode=binding.margin_mode,
+            collateral_pool_id=binding.collateral_pool_id,
+            settlement_currency=request.risk_currency,
+        )
+        projection = VenueCurrentProjectionService.current_protected_position_risk(
+            session,
+            scope,
+            ProjectionQueryContext(as_of=as_of, max_age_ms=max_age_ms),
+        )
+        if projection.projection_state is not ProjectionState.CONFIRMED:
+            raise CommandRejected(
+                "CURRENT_PROTECTED_POSITION_RISK_UNAVAILABLE",
+                f"current protected-position risk unavailable: {projection.reason_code}",
+            )
+        if (
+            projection.quantity != request.current_position_quantity
+            or projection.direction.value != campaign.direction
+            or projection.mark_price != request.risk_request.market.mark_price
+            or projection.contract_multiplier != binding.contract_multiplier
+            or projection.scope.settlement_currency != request.risk_currency
+        ):
+            raise CommandRejected(
+                "CURRENT_PROTECTED_POSITION_RISK_BINDING_MISMATCH",
+                "current position quantity, direction, Mark, multiplier, or currency changed",
+            )
+        eligibility = request.add_eligibility
+        expected_position_ref = f"venue-position-snapshot:{projection.position_snapshot_id}"
+        expected_protection_ref = f"venue-protection-snapshot:{projection.protection_snapshot_id}"
+        if (
+            eligibility.position_snapshot_ref != expected_position_ref
+            or eligibility.position_snapshot_hash != projection.position_snapshot_hash
+            or eligibility.protection_snapshot_ref != expected_protection_ref
+            or eligibility.protection_snapshot_hash != projection.protection_snapshot_hash
+        ):
+            raise CommandRejected(
+                "ADD_ELIGIBILITY_CANONICAL_FACT_MISMATCH",
+                "Add eligibility does not reference the current canonical protection facts",
+            )
+        if projection.facts_as_of is None:  # pragma: no cover - confirmed model enforces
+            raise RuntimeError("confirmed protected-position risk lacks facts_as_of")
+        valid_until = projection.facts_as_of + timedelta(milliseconds=max_age_ms)
+        if valid_until <= as_of:
+            raise CommandRejected(
+                "CURRENT_PROTECTED_POSITION_RISK_UNAVAILABLE",
+                "current protected-position risk has no remaining validity",
+            )
+        return VerifiedProtectedPositionRisk(
+            projection=projection,
+            max_age_ms=max_age_ms,
+            valid_until=valid_until,
+        )
+
+
 class DurableExposureResolver:
     """Rebuilds current funding, Heat, margin, and scope usage from durable state."""
 
@@ -355,6 +449,7 @@ class DurableExposureResolver:
         session: Session,
         request: CreateExecutionIntentRequest,
         campaign: Campaign,
+        protected_position_risk: VerifiedProtectedPositionRisk | None = None,
     ) -> VerifiedDurableExposure:
         snapshot = DurableExposureSnapshotService.query(
             session,
@@ -379,23 +474,54 @@ class DurableExposureResolver:
                 "durable margin reservations leave insufficient available margin",
             )
 
+        if request.intent_kind is IntentKind.ADD and protected_position_risk is None:
+            raise CommandRejected(
+                "CURRENT_PROTECTED_POSITION_RISK_REQUIRED",
+                "ADD durable exposure requires canonical protected-position risk",
+            )
+        projection = (
+            protected_position_risk.projection if protected_position_risk is not None else None
+        )
+        replacement_delta = ZERO
+        canonical_open_heat = snapshot.campaign_open_heat
+        canonical_giveback = snapshot.campaign_protected_profit_giveback
+        if projection is not None:
+            if projection.open_heat is None or projection.protected_profit_giveback is None:
+                raise CommandRejected(
+                    "CURRENT_PROTECTED_POSITION_RISK_UNAVAILABLE",
+                    "confirmed protected-position risk lacks loss components",
+                )
+            canonical_open_heat = projection.open_heat
+            canonical_giveback = projection.protected_profit_giveback
+            replacement_delta = (
+                canonical_open_heat
+                + canonical_giveback
+                - snapshot.campaign_open_heat
+                - snapshot.campaign_protected_profit_giveback
+            )
         derived_trade_loss = TradeLossComponents(
-            open_heat=snapshot.campaign_open_heat,
+            open_heat=canonical_open_heat,
             reserved_heat=snapshot.campaign_reserved_heat,
             unknown_heat=snapshot.campaign_unknown_heat,
-            protected_profit_giveback=snapshot.campaign_protected_profit_giveback,
+            protected_profit_giveback=canonical_giveback,
             cost_stress_add_on=snapshot.campaign_cost_stress_add_on,
         )
         derived_scope_by_key = {item.key: item for item in snapshot.scope_exposures}
         derived_scope_risks = tuple(
             item.model_copy(
                 update={
-                    "current_planned_loss": derived_scope_by_key[
-                        item.scope_type.value, item.scope_id
-                    ].current_planned_loss,
-                    "current_stress_loss": derived_scope_by_key[
-                        item.scope_type.value, item.scope_id
-                    ].current_stress_loss,
+                    "current_planned_loss": (
+                        derived_scope_by_key[
+                            item.scope_type.value, item.scope_id
+                        ].current_planned_loss
+                        + replacement_delta
+                    ),
+                    "current_stress_loss": (
+                        derived_scope_by_key[
+                            item.scope_type.value, item.scope_id
+                        ].current_stress_loss
+                        + replacement_delta
+                    ),
                 }
             )
             for item in request.risk_request.scope_risks
@@ -417,6 +543,14 @@ class DurableExposureResolver:
             item.key: (item.current_planned_loss, item.current_stress_loss)
             for item in derived_scope_risks
         }
+        if any(
+            item.current_planned_loss < ZERO or item.current_stress_loss < ZERO
+            for item in derived_scope_risks
+        ):
+            raise CommandRejected(
+                "DURABLE_EXPOSURE_INTEGRITY_FAILED",
+                "canonical protected risk adjustment made scope exposure negative",
+            )
         if (
             request.risk_request.capital.funding_used != snapshot.global_funding_used
             or request.risk_request.capital.funding_reserved
@@ -440,12 +574,13 @@ class DurableExposureResolver:
             ),
             snapshot=snapshot,
             snapshot_hash=snapshot_hash,
+            protected_position_risk=protected_position_risk,
         )
 
 
 class ExecutionIntentService:
-    command_type = "execution.intent.create.v3"
-    payload_schema_version = 3
+    command_type = "execution.intent.create.v4"
+    payload_schema_version = 4
 
     def __init__(
         self,
@@ -453,6 +588,7 @@ class ExecutionIntentService:
         certificate_validator: CapabilityCertificateValidator | None = None,
         capital_projection_resolver: CapitalProjectionResolver | None = None,
         durable_exposure_resolver: DurableExposureResolver | None = None,
+        protected_position_risk_resolver: CurrentProtectedPositionRiskResolver | None = None,
         clock: Callable[[], datetime] | None = None,
     ) -> None:
         self._evaluator = evaluator or RiskEvaluator()
@@ -461,6 +597,9 @@ class ExecutionIntentService:
             capital_projection_resolver or CapitalProjectionResolver()
         )
         self._durable_exposure_resolver = durable_exposure_resolver or DurableExposureResolver()
+        self._protected_position_risk_resolver = (
+            protected_position_risk_resolver or CurrentProtectedPositionRiskResolver()
+        )
         self._clock = clock or (lambda: datetime.now(UTC))
 
     def create(self, session: Session, envelope: CommandEnvelope) -> CommandOutcome:
@@ -565,7 +704,23 @@ class ExecutionIntentService:
                 )
             }
         )
-        verified_exposure = self._durable_exposure_resolver.resolve(session, request, campaign)
+        protected_position_risk = (
+            self._protected_position_risk_resolver.resolve(
+                session,
+                request,
+                campaign,
+                policy,
+                now,
+            )
+            if request.intent_kind is IntentKind.ADD
+            else None
+        )
+        verified_exposure = self._durable_exposure_resolver.resolve(
+            session,
+            request,
+            campaign,
+            protected_position_risk,
+        )
         request = request.model_copy(update={"risk_request": verified_exposure.risk_request})
 
         capability_validation = self._certificate_validator.validate(
@@ -582,6 +737,7 @@ class ExecutionIntentService:
             system_risk_state=system_state,
             capability_validation=capability_validation,
             decision_time=now,
+            protected_position_risk=verified_exposure.protected_position_risk,
         )
         evaluation = self._evaluator.evaluate(evaluation_input)
         if request.intent_kind is IntentKind.ADD and system_state is not SystemRiskState.NORMAL:
@@ -812,7 +968,7 @@ class ExecutionIntentService:
         funding = request.risk_request.requested.requested_funding
         margin = request.risk_request.requested.requested_margin
         base_heat = request.risk_request.requested_base_heat
-        protected_profit_giveback = evaluation.requested_protected_profit_giveback
+        protected_profit_giveback = ZERO
         cost_stress_add_on = evaluation.requested_cost_stress_add_on
         reservation = RiskReservation(
             risk_reservation_id=risk_reservation_id,
@@ -1384,6 +1540,16 @@ class ExecutionIntentService:
             "capital_projection_hash": verified_capital.projection_hash,
             "durable_exposure_snapshot": verified_exposure.snapshot.model_dump(mode="json"),
             "durable_exposure_snapshot_hash": verified_exposure.snapshot_hash,
+            "protected_position_risk": (
+                verified_exposure.protected_position_risk.projection.model_dump(mode="json")
+                if verified_exposure.protected_position_risk is not None
+                else None
+            ),
+            "protected_position_risk_valid_until": (
+                verified_exposure.protected_position_risk.valid_until.isoformat()
+                if verified_exposure.protected_position_risk is not None
+                else None
+            ),
             "command_context": {
                 "command_id": str(envelope.command_id),
                 "correlation_id": str(envelope.correlation_id),

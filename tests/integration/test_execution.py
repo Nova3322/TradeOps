@@ -265,7 +265,6 @@ def execution_risk_request(
     *,
     now: datetime,
     quantity: Decimal = Decimal("0.5"),
-    requested_giveback: Decimal = Decimal("0"),
     requested_funding: Decimal = Decimal("500"),
     current_open_heat: Decimal = Decimal("0"),
     current_reserved_heat: Decimal = Decimal("0"),
@@ -276,18 +275,18 @@ def execution_risk_request(
     funding_reserved: Decimal = Decimal("0"),
     scope_current_planned: Decimal = Decimal("0"),
     scope_current_stress: Decimal = Decimal("0"),
+    market_price: Decimal = Decimal("100.5"),
     fact_age: timedelta = timedelta(milliseconds=100),
 ) -> RiskPrecheckRequest:
     requested = make_requested(
         requested_quantity=quantity,
-        requested_protected_profit_giveback=requested_giveback,
         requested_funding=requested_funding,
         requested_margin=Decimal("500"),
         requested_effective_leverage=Decimal("2"),
         proposal_requested_loss_cap=Decimal("500"),
     )
-    base_heat = abs(Decimal("100.5") - Decimal("90")) * quantity
-    incremental_loss = base_heat + requested_giveback
+    base_heat = abs(market_price - Decimal("90")) * quantity
+    incremental_loss = base_heat
     scopes = tuple(
         ScopeRiskInput(
             scope_type=scope_type,
@@ -311,9 +310,9 @@ def execution_risk_request(
         ),
         market=MarketRiskInput(
             direction=PositionDirection.LONG,
-            mark_price=Decimal("100.5"),
-            index_price=Decimal("100.4"),
-            executable_price=Decimal("100.5"),
+            mark_price=market_price,
+            index_price=market_price - Decimal("0.1"),
+            executable_price=market_price,
             initial_invalidation_price=Decimal("90"),
             contract_multiplier=Decimal("1"),
             tick_size=Decimal("0.1"),
@@ -389,7 +388,7 @@ def create_intent_envelope(
     request = risk_request or execution_risk_request(proposal, now=now)
     return CommandEnvelope(
         idempotency_key=idempotency_key or f"execution-intent-{uuid4()}",
-        command_type="execution.intent.create.v3",
+        command_type="execution.intent.create.v4",
         object_type="Campaign",
         object_id=str(campaign.campaign_id),
         expected_version=1,
@@ -400,7 +399,7 @@ def create_intent_envelope(
         issued_at=now,
         expires_at=now + timedelta(minutes=2),
         auth_context_ref="internal:oms-risk-reservation-service",
-        payload_schema_version=3,
+        payload_schema_version=4,
         reason="create non-dispatchable shadow intent",
         payload={
             "intent_kind": "INITIAL",
@@ -435,13 +434,14 @@ def proposal_precheck_envelope(request: RiskPrecheckRequest) -> CommandEnvelope:
         issued_at=now,
         expires_at=now + timedelta(minutes=2),
         auth_context_ref="test-only:proposal-precheck-auth",
-        payload_schema_version=3,
+        payload_schema_version=4,
         reason="evaluate proposal against existing durable exposure",
         payload=request.model_dump(mode="json"),
     )
 
 
 def create_add_envelope(
+    database: Database,
     proposal: FrozenProposalVersion,
     campaign: Campaign,
     package: AddAuthorizationPackage,
@@ -450,20 +450,45 @@ def create_add_envelope(
     now: datetime,
     candidate_ref: str,
 ) -> CommandEnvelope:
+    with database.session_factory.begin() as session:
+        position = (
+            session.execute(
+                select(VenuePositionSnapshot).order_by(
+                    VenuePositionSnapshot.event_time.desc(),
+                    VenuePositionSnapshot.venue_position_snapshot_id.desc(),
+                )
+            )
+            .scalars()
+            .first()
+        )
+        protection = (
+            session.execute(
+                select(VenueProtectionSnapshot).order_by(
+                    VenueProtectionSnapshot.event_time.desc(),
+                    VenueProtectionSnapshot.venue_protection_snapshot_id.desc(),
+                )
+            )
+            .scalars()
+            .first()
+        )
+        assert position is not None and protection is not None
+        assert protection.venue_position_snapshot_id == position.venue_position_snapshot_id
     request = execution_risk_request(
         proposal,
         now=now,
         quantity=Decimal("0.1"),
         requested_funding=Decimal("200"),
-        current_open_heat=Decimal("5.25"),
+        current_open_heat=Decimal("0"),
+        current_protected_profit_giveback=Decimal("5"),
         current_cost_stress_add_on=Decimal("0.1608"),
         funding_used=Decimal("500"),
-        scope_current_planned=Decimal("5.4108"),
-        scope_current_stress=Decimal("45.25"),
+        scope_current_planned=Decimal("5.1608"),
+        scope_current_stress=Decimal("45"),
+        market_price=Decimal("120"),
     )
     return CommandEnvelope(
         idempotency_key=f"execution-add-{uuid4()}",
-        command_type="execution.intent.create.v3",
+        command_type="execution.intent.create.v4",
         object_type="Campaign",
         object_id=str(campaign.campaign_id),
         expected_version=2,
@@ -474,7 +499,7 @@ def create_add_envelope(
         issued_at=now,
         expires_at=now + timedelta(minutes=2),
         auth_context_ref="internal:oms-risk-reservation-service",
-        payload_schema_version=3,
+        payload_schema_version=4,
         reason="create non-dispatchable shadow add intent",
         payload={
             "intent_kind": "ADD",
@@ -496,11 +521,15 @@ def create_add_envelope(
                 "authorization_valid": True,
                 "current_effective_leverage": "0.5",
                 "target_effective_leverage": "1",
-                "current_position_equity": "60.3",
-                "position_snapshot_ref": "test-only:position-snapshot",
-                "position_snapshot_hash": hash_json({"position": "initial-open"}),
-                "protection_snapshot_ref": "test-only:protection-snapshot",
-                "protection_snapshot_hash": hash_json({"protection": "confirmed"}),
+                "current_position_equity": "72",
+                "position_snapshot_ref": (
+                    f"venue-position-snapshot:{position.venue_position_snapshot_id}"
+                ),
+                "position_snapshot_hash": position.snapshot_hash,
+                "protection_snapshot_ref": (
+                    f"venue-protection-snapshot:{protection.venue_protection_snapshot_id}"
+                ),
+                "protection_snapshot_hash": protection.snapshot_hash,
             },
         },
     )
@@ -863,6 +892,7 @@ def _normalize_execution_venue_fact(
             "position_side": position_side,
             "margin_mode": scope.margin_mode,
             "collateral_pool_id": scope.collateral_pool_id,
+            "settlement_currency": intent.risk_currency,
             "direction": VenuePositionDirection(intent.position_side),
             "quantity": intent.current_position_quantity + draft.filled,
             "event_time": event_time,
@@ -1098,10 +1128,22 @@ def fact_envelope(order_intent_id: UUID, request: RecordExecutionFactRequest) ->
     )
 
 
-def execute_fact(database: Database, order_intent_id: UUID, draft: ExecutionFactDraft):
+def execute_fact(
+    database: Database,
+    order_intent_id: UUID,
+    draft: ExecutionFactDraft,
+    *,
+    position_snapshot_overrides: dict[str, Any] | None = None,
+    protection_snapshot_overrides: dict[str, Any] | None = None,
+):
     _, source_type = _fact_kind_and_source(draft.status)
     claim, run, reconciliation_input, event_time, canonical_context = prepare_active_fact_run(
-        database, order_intent_id, source_type, draft=draft
+        database,
+        order_intent_id,
+        source_type,
+        draft=draft,
+        position_snapshot_overrides=position_snapshot_overrides,
+        protection_snapshot_overrides=protection_snapshot_overrides,
     )
     received_at = (
         canonical_context.input_link.received_at
@@ -1140,7 +1182,7 @@ def execute_fact(database: Database, order_intent_id: UUID, draft: ExecutionFact
     return result
 
 
-def test_execution_intent_legacy_commands_and_wrong_v3_schema_are_rejected(
+def test_execution_intent_legacy_commands_and_wrong_v4_schema_are_rejected(
     database: Database,
 ) -> None:
     proposal, campaign, initial = prepare_authorization(database)
@@ -1149,6 +1191,9 @@ def test_execution_intent_legacy_commands_and_wrong_v3_schema_are_rejected(
     )
     v2 = create_intent_envelope(proposal, campaign, initial, now=datetime.now(UTC)).model_copy(
         update={"command_type": "execution.intent.create.v2"}
+    )
+    v3 = create_intent_envelope(proposal, campaign, initial, now=datetime.now(UTC)).model_copy(
+        update={"command_type": "execution.intent.create.v3"}
     )
     wrong_schema = create_intent_envelope(
         proposal,
@@ -1159,12 +1204,15 @@ def test_execution_intent_legacy_commands_and_wrong_v3_schema_are_rejected(
 
     v1_result = execute_create(database, v1)
     v2_result = execute_create(database, v2)
+    v3_result = execute_create(database, v3)
     schema_result = execute_create(database, wrong_schema)
 
     assert v1_result.status is CommandStatus.REJECTED
     assert v1_result.error_code == "COMMAND_TYPE_MISMATCH"
     assert v2_result.status is CommandStatus.REJECTED
     assert v2_result.error_code == "COMMAND_TYPE_MISMATCH"
+    assert v3_result.status is CommandStatus.REJECTED
+    assert v3_result.error_code == "COMMAND_TYPE_MISMATCH"
     assert schema_result.status is CommandStatus.REJECTED
     assert schema_result.error_code == "PAYLOAD_SCHEMA_VERSION_MISMATCH"
 
@@ -1207,7 +1255,8 @@ def test_initial_intent_atomically_persists_decision_reservation_ledger_and_hist
         )
         assert decision.input_snapshot["durable_exposure_snapshot"]["components"] == []
         assert decision.decision["requested_base_heat"] == "5.250000000000000000"
-        assert decision.decision["requested_protected_profit_giveback"] == "0"
+        assert decision.decision["current_trade_loss"]["protected_profit_giveback"] == "0"
+        assert decision.decision["current_protected_position_risk_calculation_hash"] is None
         assert decision.decision["requested_fee_stress"] == "0.050250000000000000"
         assert decision.decision["requested_stop_penetration_stress"] == ("0.100500000000000000")
         assert decision.decision["requested_adverse_funding_stress"] == ("0.010050000000000000")
@@ -1222,6 +1271,10 @@ def test_initial_intent_atomically_persists_decision_reservation_ledger_and_hist
         )
         assert (
             "requested_cost_stress_add_on"
+            not in decision.input_snapshot["request"]["risk_request"]["requested"]
+        )
+        assert (
+            "requested_protected_profit_giveback"
             not in decision.input_snapshot["request"]["risk_request"]["requested"]
         )
         assert all(
@@ -1383,11 +1436,7 @@ def test_durable_exposure_snapshot_subtracts_internal_margin_reservations(
             initial,
             now=now,
             candidate_ref="durable-margin-source",
-            risk_request=execution_risk_request(
-                proposal,
-                now=now,
-                requested_giveback=Decimal("10"),
-            ),
+            risk_request=execution_risk_request(proposal, now=now),
         ),
     )
     assert created.status is CommandStatus.COMPLETED
@@ -1395,11 +1444,10 @@ def test_durable_exposure_snapshot_subtracts_internal_margin_reservations(
         proposal,
         now=datetime.now(UTC),
         current_reserved_heat=Decimal("5.25"),
-        current_protected_profit_giveback=Decimal("10"),
         current_cost_stress_add_on=Decimal("0.1608"),
         funding_reserved=Decimal("500"),
-        scope_current_planned=Decimal("15.4108"),
-        scope_current_stress=Decimal("55.25"),
+        scope_current_planned=Decimal("5.4108"),
+        scope_current_stress=Decimal("45.25"),
     )
     exact_request = CreateExecutionIntentRequest.model_validate(
         create_intent_envelope(
@@ -1417,11 +1465,11 @@ def test_durable_exposure_snapshot_subtracts_internal_margin_reservations(
 
     assert verified.risk_request.capital.available_margin == Decimal("9500")
     assert verified.risk_request.current_trade_loss.reserved_heat == Decimal("5.25")
-    assert verified.risk_request.current_trade_loss.protected_profit_giveback == Decimal("10")
+    assert verified.risk_request.current_trade_loss.protected_profit_giveback == 0
     assert verified.risk_request.current_trade_loss.cost_stress_add_on == Decimal("0.1608")
     assert verified.snapshot.global_margin_reserved == Decimal("500")
     assert verified.snapshot.campaign_reserved_heat == Decimal("5.25")
-    assert verified.snapshot.campaign_protected_profit_giveback == Decimal("10")
+    assert verified.snapshot.campaign_protected_profit_giveback == 0
     assert verified.snapshot.campaign_cost_stress_add_on == Decimal("0.1608")
     assert verified.snapshot.snapshot_version == "durable-risk-exposure-v2"
     assert verified.snapshot.components[0].base_heat_reserved == Decimal("5.25")
@@ -1834,16 +1882,59 @@ def test_add_zero_fill_releases_unit_then_positive_fill_consumes_it(
         ),
     )
     for fact in facts:
-        assert execute_fact(database, initial_intent_id, fact).status is CommandStatus.COMPLETED
+        assert (
+            execute_fact(
+                database,
+                initial_intent_id,
+                fact,
+                position_snapshot_overrides=(
+                    {
+                        "entry_price": Decimal("100.5"),
+                        "mark_price": Decimal("120"),
+                        "notional": Decimal("60"),
+                        "unrealized_pnl": Decimal("9.75"),
+                    }
+                    if fact.status == "POSITION_RECONCILED"
+                    else None
+                ),
+                protection_snapshot_overrides=(
+                    {"worst_active_trigger_price": Decimal("110")}
+                    if fact.status == "PROTECTION_CONFIRMED"
+                    else None
+                ),
+            ).status
+            is CommandStatus.COMPLETED
+        )
     with database.session_factory.begin() as session:
         package = session.execute(select(AddAuthorizationPackage)).scalar_one()
         unit = session.execute(select(AddUnit)).scalar_one()
         package_state = session.get(AddAuthorizationPackageState, package.add_package_id)
         assert package_state is not None and package_state.status == "ACTIVE"
 
+    tampered = create_add_envelope(
+        database,
+        proposal,
+        campaign,
+        package,
+        unit,
+        now=datetime.now(UTC),
+        candidate_ref="add-tampered-protection-evidence",
+    )
+    tampered_payload = dict(tampered.payload)
+    tampered_eligibility = dict(tampered_payload["add_eligibility"])
+    tampered_eligibility["protection_snapshot_hash"] = "f" * 64
+    tampered_payload["add_eligibility"] = tampered_eligibility
+    tampered_result = execute_create(
+        database,
+        tampered.model_copy(update={"payload": tampered_payload}),
+    )
+    assert tampered_result.status is CommandStatus.REJECTED
+    assert tampered_result.error_code == "ADD_ELIGIBILITY_CANONICAL_FACT_MISMATCH"
+
     first_add = execute_create(
         database,
         create_add_envelope(
+            database,
             proposal,
             campaign,
             package,
@@ -1854,6 +1945,38 @@ def test_add_zero_fill_releases_unit_then_positive_fill_consumes_it(
     )
     assert first_add.status is CommandStatus.COMPLETED
     first_add_id = UUID(str(first_add.data["order_intent_id"]))
+    with database.session_factory.begin() as session:
+        add_decision = session.execute(
+            select(ExecutionRiskDecision).where(ExecutionRiskDecision.intent_kind == "ADD")
+        ).scalar_one()
+        add_reservation = session.execute(
+            select(RiskReservation).where(RiskReservation.order_intent_id == first_add_id)
+        ).scalar_one()
+        protected = add_decision.input_snapshot["protected_position_risk"]
+        assert Decimal(protected["current_to_protection_loss"]) == Decimal("5")
+        assert Decimal(protected["open_heat"]) == 0
+        assert Decimal(protected["protected_profit_giveback"]) == Decimal("5")
+        assert protected["scope"]["settlement_currency"] == "USD"
+        assert protected["calculation_hash"] is not None
+        assert (
+            add_decision.decision["current_protected_position_risk_calculation_hash"]
+            == protected["calculation_hash"]
+        )
+        protected_valid_until = datetime.fromisoformat(
+            add_decision.input_snapshot["protected_position_risk_valid_until"]
+        )
+        assert add_decision.valid_until <= protected_valid_until
+        assert Decimal(add_decision.decision["current_trade_loss"]["open_heat"]) == 0
+        assert Decimal(
+            add_decision.decision["current_trade_loss"]["protected_profit_giveback"]
+        ) == Decimal("5")
+        derived_scopes = add_decision.input_snapshot["request"]["risk_request"]["scope_risks"]
+        assert all(
+            Decimal(scope["current_planned_loss"]) == Decimal("5.1608")
+            and Decimal(scope["current_stress_loss"]) == Decimal("45")
+            for scope in derived_scopes
+        )
+        assert add_reservation.protected_profit_giveback_reserved == 0
     zero_result = execute_fact(
         database,
         first_add_id,
@@ -1874,6 +1997,7 @@ def test_add_zero_fill_releases_unit_then_positive_fill_consumes_it(
     second_add = execute_create(
         database,
         create_add_envelope(
+            database,
             proposal,
             campaign,
             package,
