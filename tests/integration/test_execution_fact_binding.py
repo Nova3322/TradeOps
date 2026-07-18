@@ -47,7 +47,7 @@ from trading_control_plane.reconciliation_models import (
     ExecutionReconciliationRun,
     ExecutionReconciliationRunState,
 )
-from trading_control_plane.sender_fencing import SenderLeaseAction
+from trading_control_plane.sender_fencing import SenderLeaseAction, sender_scope_id
 from trading_control_plane.sender_fencing_models import (
     ExecutionSenderScopeState,
     ShadowDispatchClaim,
@@ -671,7 +671,11 @@ def test_fenced_sender_lease_cannot_authorize_a_fact(database: Database) -> None
     order_intent_id = create_order_intent(database)
     request, _ = prepare_bound_request(database, order_intent_id)
     with database.session_factory.begin() as session:
-        sender_state = session.execute(select(ExecutionSenderScopeState)).scalar_one()
+        sender_state = session.get(
+            ExecutionSenderScopeState,
+            sender_scope_id(make_sender_scope()),
+        )
+        assert sender_state is not None
         scope_id = sender_state.scope_id
         state_version = sender_state.version
     fenced_at = request.received_at

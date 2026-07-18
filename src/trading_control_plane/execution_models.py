@@ -126,6 +126,12 @@ class ExecutionRiskDecision(Base):
             "AND jsonb_typeof(decision) = 'object'",
             name="ck_exec_risk_snapshot_integrity",
         ),
+        CheckConstraint(
+            "length(capital_scope_manifest_hash) = 64 "
+            "AND length(capital_projection_hash) = 64 "
+            "AND capital_projection_version ~ '^portfolio-mtm-v[0-9]+$'",
+            name="ck_exec_risk_capital_binding_integrity",
+        ),
         CheckConstraint("execution_eligible = false", name="ck_exec_risk_shadow_only"),
         ForeignKeyConstraint(
             ["risk_policy_id", "organization_id", "risk_policy_version"],
@@ -135,6 +141,20 @@ class ExecutionRiskDecision(Base):
                 "risk_policies.policy_version",
             ],
             name="fk_exec_risk_policy_binding",
+            ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            [
+                "capital_scope_manifest_id",
+                "organization_id",
+                "capital_scope_manifest_version",
+            ],
+            [
+                "managed_capital_scope_manifests.manifest_id",
+                "managed_capital_scope_manifests.organization_id",
+                "managed_capital_scope_manifests.manifest_version",
+            ],
+            name="fk_exec_risk_capital_scope_manifest",
             ondelete="RESTRICT",
         ),
         *_authorization_binding_constraints("exec_risk"),
@@ -152,6 +172,11 @@ class ExecutionRiskDecision(Base):
     add_unit_id: Mapped[UUID | None] = mapped_column(Uuid(as_uuid=True), nullable=True)
     risk_policy_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), nullable=False)
     risk_policy_version: Mapped[str] = mapped_column(String(120), nullable=False)
+    capital_scope_manifest_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), nullable=False)
+    capital_scope_manifest_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    capital_scope_manifest_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    capital_projection_version: Mapped[str] = mapped_column(String(40), nullable=False)
+    capital_projection_hash: Mapped[str] = mapped_column(String(64), nullable=False)
     system_risk_state: Mapped[str] = mapped_column(String(32), nullable=False)
     result: Mapped[str] = mapped_column(String(20), nullable=False)
     primary_reason_code: Mapped[str] = mapped_column(String(160), nullable=False)

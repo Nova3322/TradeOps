@@ -503,11 +503,14 @@ def test_newer_run_invalidates_old_success_and_requires_supersedes_chain(
     ):
         with database.session_factory.begin() as session:
             lease = session.get(ExecutionSenderLease, lease_id)
-            sender_scope = session.execute(select(ExecutionSenderScope)).scalar_one()
-            sender_state = session.execute(select(ExecutionSenderScopeState)).scalar_one()
+            scope_id = sender_scope_id(scope)
+            sender_scope = session.get(ExecutionSenderScope, scope_id)
+            sender_state = session.get(ExecutionSenderScopeState, scope_id)
             certificate = session.get(CapabilityCertificate, intent.capability_certificate_ref)
             first_state = session.get(ExecutionReconciliationRunState, first_run_id)
             assert lease is not None
+            assert sender_scope is not None
+            assert sender_state is not None
             assert sender_state.lease_expires_at is not None
             assert certificate is not None
             assert first_state is not None and first_state.result_hash is not None

@@ -17,6 +17,7 @@ from tests.integration.test_review import (
     seed_proposal,
     seed_reviewer,
 )
+from tests.risk_fixtures import TEST_EXECUTION_CAPITAL_PROJECTION_BINDING
 from trading_control_plane.command_executor import IdempotentCommandExecutor
 from trading_control_plane.commands import CommandChannel, CommandEnvelope, CommandStatus, hash_json
 from trading_control_plane.database import Database
@@ -212,6 +213,9 @@ def test_issue_creates_shadow_root_campaign_and_initial_without_execution_side_e
         initial = session.execute(select(InitialOrderAuthorization)).scalar_one()
         initial_state = session.execute(select(InitialAuthorizationState)).scalar_one()
         assert root.issuance_snapshot_hash == hash_json(root.issuance_snapshot)
+        assert root.issuance_snapshot[
+            "capital_projection_binding"
+        ] == TEST_EXECUTION_CAPITAL_PROJECTION_BINDING.model_dump(mode="json")
         assert root.execution_eligible is False
         assert campaign.authorization_id == root.authorization_id
         assert campaign_state.status == "PENDING_ENTRY"
@@ -222,6 +226,29 @@ def test_issue_creates_shadow_root_campaign_and_initial_without_execution_side_e
         assert count_rows(session, AuthorizationStateTransition) == 2
         assert session.execute(text("SELECT count(*) FROM risk_reservations")).scalar_one() == 0
         assert session.execute(text("SELECT count(*) FROM order_intents")).scalar_one() == 0
+
+
+def test_issue_has_no_legacy_authorization_without_frozen_capital_scope(
+    database: Database,
+) -> None:
+    proposal = seed_proposal(database, include_capital_projection_binding=False)
+    decision = approve_proposal(database, proposal.proposal_version_id, proposal.risk_tier)
+
+    result = execute_issue(
+        database,
+        issue_envelope(
+            proposal.proposal_version_id,
+            proposal.version,
+            proposal.spec_hash,
+            proposal.risk_summary_hash,
+            decision.approval_decision_id,
+        ),
+    )
+
+    assert result.status is CommandStatus.REJECTED
+    assert result.error_code == "CAPITAL_PROJECTION_BINDING_INVALID"
+    with database.session_factory.begin() as session:
+        assert count_rows(session, TradingAuthorization) == 0
 
 
 def test_high_risk_add_package_preserves_quorum_and_30_50_100_units(

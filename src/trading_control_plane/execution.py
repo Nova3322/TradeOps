@@ -49,6 +49,8 @@ from trading_control_plane.reconciliation_models import (
     ExecutionReconciliationRunState,
 )
 from trading_control_plane.risk import (
+    CapitalProjectionBinding,
+    CapitalProjectionResolver,
     RiskDecisionResult,
     RiskEvaluationInput,
     RiskEvaluationResult,
@@ -56,6 +58,7 @@ from trading_control_plane.risk import (
     RiskPolicyParameters,
     RiskPrecheckRequest,
     ScopeType,
+    VerifiedCapitalProjection,
     capability_validation_request,
 )
 from trading_control_plane.risk_models import RiskPolicyRecord
@@ -339,10 +342,14 @@ class ExecutionIntentService:
         self,
         evaluator: RiskEvaluator | None = None,
         certificate_validator: CapabilityCertificateValidator | None = None,
+        capital_projection_resolver: CapitalProjectionResolver | None = None,
         clock: Callable[[], datetime] | None = None,
     ) -> None:
         self._evaluator = evaluator or RiskEvaluator()
         self._certificate_validator = certificate_validator or CapabilityCertificateValidator()
+        self._capital_projection_resolver = (
+            capital_projection_resolver or CapitalProjectionResolver()
+        )
         self._clock = clock or (lambda: datetime.now(UTC))
 
     def create(self, session: Session, envelope: CommandEnvelope) -> CommandOutcome:
@@ -387,7 +394,13 @@ class ExecutionIntentService:
             else SystemRiskState.UNKNOWN
         )
         now = self._clock()
+        if now.tzinfo is None or now.utcoffset() is None:
+            raise CommandRejected(
+                "EXECUTION_CLOCK_INVALID",
+                "final order precheck clock must be timezone-aware",
+            )
         binding = self._validate_root_integrity(authorization, campaign, proposal, request, now)
+        frozen_capital_binding = self._frozen_capital_projection_binding(authorization)
         authorization_rows = self._lock_and_validate_authorization_kind(
             session,
             request,
@@ -423,8 +436,23 @@ class ExecutionIntentService:
             campaign,
             proposal,
             binding,
+            frozen_capital_binding,
             system_state,
             authorization_rows,
+        )
+        verified_capital = self._capital_projection_resolver.resolve(
+            session,
+            request.risk_request,
+            policy,
+            now,
+            frozen_total_capital_snapshot_0=authorization.total_capital_snapshot_0,
+        )
+        request = request.model_copy(
+            update={
+                "risk_request": request.risk_request.model_copy(
+                    update={"capital": verified_capital.capital}
+                )
+            }
         )
         self._validate_durable_exposure(session, request, campaign)
 
@@ -453,6 +481,7 @@ class ExecutionIntentService:
                 policy_record,
                 evaluation_input,
                 evaluation,
+                verified_capital,
                 now,
                 "ADD_REQUIRES_NORMAL_SYSTEM_STATE",
             )
@@ -465,6 +494,7 @@ class ExecutionIntentService:
                 policy_record,
                 evaluation_input,
                 evaluation,
+                verified_capital,
                 now,
                 evaluation.primary_reason_code,
             )
@@ -483,6 +513,7 @@ class ExecutionIntentService:
                 policy_record,
                 evaluation_input,
                 evaluation,
+                verified_capital,
                 now,
                 "FROZEN_FUNDING_ENVELOPE_EXCEEDED",
             )
@@ -500,6 +531,7 @@ class ExecutionIntentService:
                 policy_record,
                 evaluation_input,
                 evaluation,
+                verified_capital,
                 now,
                 "FROZEN_AUTHORIZATION_CAPACITY_EXCEEDED",
             )
@@ -517,6 +549,7 @@ class ExecutionIntentService:
                 policy_record,
                 evaluation_input,
                 evaluation,
+                verified_capital,
                 now,
                 "EXECUTION_VALIDITY_EXPIRED",
             )
@@ -526,6 +559,7 @@ class ExecutionIntentService:
             evaluation_input,
             authorization,
             authorization_rows,
+            verified_capital,
         )
         decision_payload = evaluation.model_dump(mode="json")
         decision_payload["approved_reserved_heat"] = str(reserved_heat)
@@ -546,6 +580,11 @@ class ExecutionIntentService:
                 add_unit_id=add_unit_id,
                 risk_policy_id=policy_record.risk_policy_id,
                 risk_policy_version=policy_record.policy_version,
+                capital_scope_manifest_id=verified_capital.projection.manifest_id,
+                capital_scope_manifest_version=verified_capital.projection.manifest_version,
+                capital_scope_manifest_hash=verified_capital.projection.manifest_hash,
+                capital_projection_version=verified_capital.projection.projection_version,
+                capital_projection_hash=verified_capital.projection_hash,
                 system_risk_state=system_state.value,
                 result="ALLOW",
                 primary_reason_code="ORDER_PRECHECK_PASSED",
@@ -775,6 +814,7 @@ class ExecutionIntentService:
                 "risk_reservation_id": str(risk_reservation_id),
                 "intent_status": "INTENT_CREATED",
                 "risk_exposure_status": "RESERVED",
+                "capital_projection_hash": verified_capital.projection_hash,
                 "execution_mode": "SHADOW",
                 "dispatch_eligible": False,
                 "reservation_created": True,
@@ -789,6 +829,7 @@ class ExecutionIntentService:
                         "intent_kind": request.intent_kind.value,
                         "execution_risk_decision_id": str(decision_id),
                         "risk_reservation_id": str(risk_reservation_id),
+                        "capital_projection_hash": verified_capital.projection_hash,
                         "dispatch_eligible": False,
                     },
                 ),
@@ -856,6 +897,20 @@ class ExecutionIntentService:
         except ValidationError as exc:
             raise CommandRejected(
                 "AUTHORIZATION_BINDING_INVALID", "authorization binding is incomplete"
+            ) from exc
+
+    @staticmethod
+    def _frozen_capital_projection_binding(
+        authorization: TradingAuthorization,
+    ) -> CapitalProjectionBinding:
+        try:
+            return CapitalProjectionBinding.model_validate(
+                authorization.issuance_snapshot.get("capital_projection_binding")
+            )
+        except ValidationError as exc:
+            raise CommandRejected(
+                "CAPITAL_PROJECTION_BINDING_INVALID",
+                "authorization lacks the frozen capital projection binding",
             ) from exc
 
     @staticmethod
@@ -1072,6 +1127,7 @@ class ExecutionIntentService:
         campaign: Campaign,
         proposal: FrozenProposalVersion,
         binding: FrozenAuthorizationBinding,
+        frozen_capital_binding: CapitalProjectionBinding,
         system_state: SystemRiskState,
         rows: dict[str, Any],
     ) -> None:
@@ -1116,6 +1172,11 @@ class ExecutionIntentService:
         }
         if risk.binding.model_dump(mode="python") != expected_binding:
             raise CommandRejected("CERTIFICATION_BINDING_MISMATCH", "certification binding changed")
+        if risk.capital_projection_binding != frozen_capital_binding:
+            raise CommandRejected(
+                "FROZEN_CAPITAL_SCOPE_BINDING_MISMATCH",
+                "final precheck capital scope differs from the frozen authorization",
+            )
         if (
             risk.organization_id != campaign.organization_id
             or risk.proposal_ref != str(proposal.proposal_version_id)
@@ -1251,6 +1312,7 @@ class ExecutionIntentService:
         evaluation_input: RiskEvaluationInput,
         authorization: TradingAuthorization,
         rows: dict[str, Any],
+        verified_capital: VerifiedCapitalProjection,
     ) -> dict[str, Any]:
         snapshot: dict[str, Any] = {
             "request": request.model_dump(mode="json"),
@@ -1260,6 +1322,8 @@ class ExecutionIntentService:
                 "issuance_snapshot_hash": authorization.issuance_snapshot_hash,
                 "valid_until": authorization.valid_until.isoformat(),
             },
+            "capital_projection": verified_capital.projection.model_dump(mode="json"),
+            "capital_projection_hash": verified_capital.projection_hash,
             "command_context": {
                 "command_id": str(envelope.command_id),
                 "correlation_id": str(envelope.correlation_id),
@@ -1304,6 +1368,7 @@ class ExecutionIntentService:
         policy_record: RiskPolicyRecord,
         evaluation_input: RiskEvaluationInput,
         evaluation: RiskEvaluationResult,
+        verified_capital: VerifiedCapitalProjection,
         now: datetime,
         reason_code: str,
     ) -> CommandOutcome:
@@ -1314,6 +1379,8 @@ class ExecutionIntentService:
             "evaluation": evaluation_input.model_dump(mode="json"),
             "authorization_id": str(authorization.authorization_id),
             "authorization_snapshot_hash": authorization.issuance_snapshot_hash,
+            "capital_projection": verified_capital.projection.model_dump(mode="json"),
+            "capital_projection_hash": verified_capital.projection_hash,
         }
         decision_payload = evaluation.model_dump(mode="json")
         decision_payload["result"] = "DENY"
@@ -1335,6 +1402,11 @@ class ExecutionIntentService:
                 add_unit_id=add_unit_id,
                 risk_policy_id=policy_record.risk_policy_id,
                 risk_policy_version=policy_record.policy_version,
+                capital_scope_manifest_id=verified_capital.projection.manifest_id,
+                capital_scope_manifest_version=verified_capital.projection.manifest_version,
+                capital_scope_manifest_hash=verified_capital.projection.manifest_hash,
+                capital_projection_version=verified_capital.projection.projection_version,
+                capital_projection_hash=verified_capital.projection_hash,
                 system_risk_state=evaluation_input.system_risk_state.value,
                 result="DENY",
                 primary_reason_code=reason_code,
@@ -1368,6 +1440,7 @@ class ExecutionIntentService:
                 "execution_risk_decision_id": str(decision_id),
                 "result": "DENY",
                 "primary_reason_code": reason_code,
+                "capital_projection_hash": verified_capital.projection_hash,
                 "dispatch_eligible": False,
                 "reservation_created": False,
                 "order_intent_created": False,
@@ -1381,6 +1454,7 @@ class ExecutionIntentService:
                         "campaign_id": str(campaign.campaign_id),
                         "intent_kind": request.intent_kind.value,
                         "primary_reason_code": reason_code,
+                        "capital_projection_hash": verified_capital.projection_hash,
                     },
                 ),
             ),

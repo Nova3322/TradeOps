@@ -515,6 +515,8 @@ class CapitalProjectionResolver:
         request: RiskPrecheckRequest,
         policy: RiskPolicyParameters,
         as_of: datetime,
+        *,
+        frozen_total_capital_snapshot_0: Decimal | None = None,
     ) -> VerifiedCapitalProjection:
         account_max_age_ms = next(
             item.max_age_ms
@@ -590,7 +592,11 @@ class CapitalProjectionResolver:
             current_unrealized_pnl=projection.current_unrealized_pnl,
             eligible_vault_equity=projection.eligible_vault_equity,
             exchange_risk_equity=exchange_risk_equity,
-            total_capital_snapshot_0=projection.current_portfolio_mtm_equity,
+            total_capital_snapshot_0=(
+                projection.current_portfolio_mtm_equity
+                if frozen_total_capital_snapshot_0 is None
+                else frozen_total_capital_snapshot_0
+            ),
             funding_used=request.capital.funding_used,
             funding_reserved=request.capital.funding_reserved,
             available_margin=projection.available_margin,

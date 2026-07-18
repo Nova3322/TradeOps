@@ -102,6 +102,7 @@ docs/
     ├── WP-0019-可重建当前Venue投影.md
     ├── WP-0020-不可变托管资金范围与组合MTM.md
     ├── WP-0021-RiskPrecheck可信资本强绑定.md
+    ├── WP-0022-最终ORDER-PRECHECK可信资本强绑定.md
     └── evidence/
         ├── WP-0001-validation-20260718.md
         ├── WP-0002-validation-20260718.md
@@ -123,7 +124,8 @@ docs/
         ├── WP-0018-validation-20260718.md
         ├── WP-0019-validation-20260718.md
         ├── WP-0020-validation-20260718.md
-        └── WP-0021-validation-20260718.md
+        ├── WP-0021-validation-20260718.md
+        └── WP-0022-validation-20260718.md
 ```
 
 ### 专项索引
@@ -174,6 +176,7 @@ docs/
 | 实现 | [WP-0019：可重建当前 Venue 投影](08-implementation/WP-0019-可重建当前Venue投影.md) | 仓位/账户权益当前只读视图、事件时间排序、冲突/Unknown/陈旧遮蔽及可重复重建 |
 | 实现 | [WP-0020：不可变托管资金范围与组合 MTM](08-implementation/WP-0020-不可变托管资金范围与组合MTM.md) | 完整受管账户 manifest、EXCHANGE_ONLY USD MTM、跨币种 FX 缺失与整组失败关闭 |
 | 实现 | [WP-0021：RiskPrecheck 可信资本强绑定](08-implementation/WP-0021-RiskPrecheck可信资本强绑定.md) | 提案风险事务内资本重算、manifest/projection/source 强绑定和自报数值拒绝 |
+| 实现 | [WP-0022：最终 ORDER_PRECHECK 可信资本强绑定](08-implementation/WP-0022-最终ORDER-PRECHECK可信资本强绑定.md) | 授权冻结资金范围、执行前刷新 MTM/UPNL/available margin、保持 Snapshot_0/1R 不变并落库最终证据 |
 
 ## 完整交付与能力激活
 

@@ -457,7 +457,8 @@ def test_database_rejects_non_monotonic_sender_state_and_cross_scope_claim(
     )
     with pytest.raises(DBAPIError, match="invalid sender scope identity, version, time, or token"):
         with database.session_factory.begin() as session:
-            state = session.execute(select(ExecutionSenderScopeState)).scalar_one()
+            state = session.get(ExecutionSenderScopeState, sender_scope_id(scope))
+            assert state is not None
             state.version += 1
             state.current_fencing_token = 0
             state.updated_at = now + timedelta(seconds=2)
@@ -467,13 +468,14 @@ def test_database_rejects_non_monotonic_sender_state_and_cross_scope_claim(
     ):
         with database.session_factory.begin() as session:
             lease = session.get(ExecutionSenderLease, lease_id)
-            state = session.execute(select(ExecutionSenderScopeState)).scalar_one()
+            state = session.get(ExecutionSenderScopeState, sender_scope_id(scope))
             certificate = session.get(CapabilityCertificate, intent.capability_certificate_ref)
             reconciliation_state = session.get(
                 ExecutionReconciliationRunState, reconciliation_run_id
             )
             sender_scope = session.get(ExecutionSenderScope, sender_scope_id(scope))
             assert lease is not None
+            assert state is not None
             assert state.lease_expires_at is not None
             assert certificate is not None
             assert reconciliation_state is not None

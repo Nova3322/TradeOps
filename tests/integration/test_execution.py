@@ -12,6 +12,8 @@ from sqlalchemy import func, select, text, update
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.orm import Session
 
+from tests.integration.test_capital_scope import _register
+from tests.integration.test_projections import _prepare_collecting_run, _record_account_equity
 from tests.integration.test_trading_authorization import (
     execute_issue,
     issue_envelope,
@@ -25,7 +27,14 @@ from tests.reconciliation_fixtures import (
     phase_envelope,
     start_envelope,
 )
-from tests.risk_fixtures import make_capital, make_policy, make_request, make_requested
+from tests.risk_fixtures import (
+    TEST_EXECUTION_CAPITAL_PROJECTION_BINDING,
+    TEST_EXECUTION_CAPITAL_SCOPE_MANIFEST,
+    make_capital,
+    make_policy,
+    make_request,
+    make_requested,
+)
 from tests.sender_fencing_fixtures import (
     acquire_envelope,
     claim_envelope,
@@ -169,6 +178,52 @@ def seed_execution_policy(database: Database, now: datetime) -> None:
         )
 
 
+def record_execution_capital_equity(
+    database: Database,
+    *,
+    exchange_margin_equity: Decimal = Decimal("100000"),
+    total_unrealized_pnl: Decimal = Decimal("0"),
+    available_margin: Decimal = Decimal("10000"),
+) -> datetime:
+    collector_scope = make_sender_scope(
+        account_abstraction=f"CAPITAL_COLLECTOR_{uuid4().hex}",
+        margin_mode="ISOLATED",
+        collateral_pool_id="pool-usdt-1",
+    )
+    run_id, _, run_time, inputs = _prepare_collecting_run(
+        database,
+        balance_count=1,
+        sender_scope=collector_scope,
+    )
+    normalized_at = run_time + timedelta(seconds=1)
+    request, recorded = _record_account_equity(
+        database,
+        run_id,
+        inputs[ReconciliationSourceType.VENUE_BALANCES],
+        now=normalized_at,
+        venue_update_id=f"execution-equity-{uuid4()}",
+        margin_mode="ISOLATED",
+        collateral_pool_id="pool-usdt-1",
+        settlement_currency="USD",
+        wallet_balance=exchange_margin_equity - total_unrealized_pnl,
+        exchange_margin_equity=exchange_margin_equity,
+        available_margin=available_margin,
+        total_unrealized_pnl=total_unrealized_pnl,
+    )
+    assert recorded.status is CommandStatus.COMPLETED
+    return request.event_time
+
+
+def seed_execution_capital_projection(database: Database) -> datetime:
+    registered = _register(
+        database,
+        TEST_EXECUTION_CAPITAL_SCOPE_MANIFEST,
+        now=datetime.now(UTC),
+    )
+    assert registered.status is CommandStatus.COMPLETED
+    return record_execution_capital_equity(database)
+
+
 def prepare_authorization(
     database: Database, *, auto_add: bool = False
 ) -> tuple[FrozenProposalVersion, Campaign, InitialOrderAuthorization]:
@@ -188,6 +243,7 @@ def prepare_authorization(
         ),
     )
     assert result.status is CommandStatus.COMPLETED
+    seed_execution_capital_projection(database)
     with database.session_factory.begin() as session:
         campaign = session.execute(select(Campaign)).scalar_one()
         initial = session.execute(select(InitialOrderAuthorization)).scalar_one()
@@ -267,6 +323,7 @@ def execution_risk_request(
             "proposal_ref": str(proposal.proposal_version_id),
             "candidate_version": proposal.version,
             "policy_version": "risk-policy-v1",
+            "capital_projection_binding": TEST_EXECUTION_CAPITAL_PROJECTION_BINDING,
             "binding": CertificationBinding(
                 proposal_source=proposal.source,
                 strategy_id="trend-breakout",
@@ -286,7 +343,7 @@ def execution_risk_request(
                 margin_mode="ISOLATED",
                 collateral_scope="ACCOUNT",
                 collateral_pool_id="pool-usdt-1",
-                settlement_asset="USDT",
+                settlement_asset="USD",
                 adapter_version="binance-adapter-v1",
                 worker_id="freqtrade-binance-account-1-isolated",
                 worker_config_hash="a" * 64,
@@ -344,7 +401,7 @@ def create_intent_envelope(
             "target_position_quantity": str(request.requested.requested_quantity),
             "order_type": "LIMIT",
             "time_in_force": "GTC",
-            "risk_currency": "USDT",
+            "risk_currency": "USD",
             "valuation_price_source_ref": "test-only:mark-price-snapshot",
             "risk_request": request.model_dump(mode="json"),
             "add_eligibility": None,
@@ -398,7 +455,7 @@ def create_add_envelope(
             "target_position_quantity": "0.6",
             "order_type": "LIMIT",
             "time_in_force": "GTC",
-            "risk_currency": "USDT",
+            "risk_currency": "USD",
             "valuation_price_source_ref": "test-only:add-mark-price-snapshot",
             "risk_request": request.model_dump(mode="json"),
             "add_eligibility": {
@@ -418,9 +475,13 @@ def create_add_envelope(
     )
 
 
-def execute_create(database: Database, envelope: CommandEnvelope):
+def execute_create(
+    database: Database,
+    envelope: CommandEnvelope,
+    service: ExecutionIntentService | None = None,
+):
     return IdempotentCommandExecutor(database.session_factory).execute(
-        envelope, ExecutionIntentService().create
+        envelope, (service or ExecutionIntentService()).create
     )
 
 
@@ -1067,6 +1128,19 @@ def test_initial_intent_atomically_persists_decision_reservation_ledger_and_hist
         reservation = session.execute(select(RiskReservation)).scalar_one()
         exposure = session.execute(select(RiskExposureState)).scalar_one()
         assert decision.result == "ALLOW"
+        assert (
+            decision.capital_scope_manifest_id == TEST_EXECUTION_CAPITAL_SCOPE_MANIFEST.manifest_id
+        )
+        assert decision.capital_scope_manifest_version == 1
+        assert (
+            decision.capital_scope_manifest_hash
+            == TEST_EXECUTION_CAPITAL_SCOPE_MANIFEST.manifest_hash
+        )
+        assert decision.capital_projection_version == "portfolio-mtm-v2"
+        assert (
+            hash_json(decision.input_snapshot["capital_projection"])
+            == decision.capital_projection_hash
+        )
         assert intent.dispatch_eligible is False
         assert reservation.order_intent_id == intent.order_intent_id
         assert exposure.status == "RESERVED"
@@ -1077,6 +1151,126 @@ def test_initial_intent_atomically_persists_decision_reservation_ledger_and_hist
         audit_count = count_rows(session, AuditEvent)
         assert audit_count >= 3
         assert count_rows(session, OutboxMessage) == audit_count
+
+
+def test_final_precheck_refreshes_current_mtm_without_rewriting_frozen_one_r(
+    database: Database,
+) -> None:
+    proposal, campaign, initial = prepare_authorization(database)
+    record_execution_capital_equity(
+        database,
+        exchange_margin_equity=Decimal("90000"),
+        total_unrealized_pnl=Decimal("-10000"),
+        available_margin=Decimal("8000"),
+    )
+    now = datetime.now(UTC)
+    seed_execution_policy(database, now)
+    current_capital = make_capital(
+        exchange_settled_equity_ex_upnl=Decimal("100000"),
+        current_unrealized_pnl=Decimal("-10000"),
+        total_capital_snapshot_0=Decimal("100000"),
+        available_margin=Decimal("8000"),
+    )
+    risk_request = execution_risk_request(proposal, now=now).model_copy(
+        update={"capital": current_capital}
+    )
+
+    result = execute_create(
+        database,
+        create_intent_envelope(
+            proposal,
+            campaign,
+            initial,
+            now=now,
+            risk_request=risk_request,
+        ),
+    )
+
+    assert result.status is CommandStatus.COMPLETED
+    with database.session_factory.begin() as session:
+        decision = session.execute(select(ExecutionRiskDecision)).scalar_one()
+        evaluated_capital = decision.input_snapshot["evaluation"]["request"]["capital"]
+        assert decision.current_portfolio_mtm_equity == Decimal("90000")
+        assert decision.current_unrealized_pnl == Decimal("-10000")
+        assert Decimal(str(evaluated_capital["total_capital_snapshot_0"])) == Decimal("100000")
+        assert Decimal(str(decision.decision["one_r_0"])) == Decimal("500")
+        assert Decimal(str(decision.decision["dynamic_trade_loss_cap"])) == Decimal("450")
+
+
+def test_final_precheck_rejects_caller_capital_older_than_canonical_projection(
+    database: Database,
+) -> None:
+    proposal, campaign, initial = prepare_authorization(database)
+    record_execution_capital_equity(
+        database,
+        exchange_margin_equity=Decimal("90000"),
+        total_unrealized_pnl=Decimal("-10000"),
+        available_margin=Decimal("8000"),
+    )
+    now = datetime.now(UTC)
+    seed_execution_policy(database, now)
+
+    result = execute_create(
+        database,
+        create_intent_envelope(proposal, campaign, initial, now=now),
+    )
+
+    assert result.status is CommandStatus.REJECTED
+    assert result.error_code == "CAPITAL_INPUT_MISMATCH"
+    with database.session_factory.begin() as session:
+        assert count_rows(session, ExecutionRiskDecision) == 0
+        assert count_rows(session, OrderIntent) == 0
+        assert count_rows(session, RiskReservation) == 0
+
+
+def test_final_precheck_cannot_replace_frozen_capital_scope(database: Database) -> None:
+    proposal, campaign, initial = prepare_authorization(database)
+    now = datetime.now(UTC)
+    seed_execution_policy(database, now)
+    baseline = execution_risk_request(proposal, now=now)
+    changed = baseline.model_copy(
+        update={
+            "capital_projection_binding": baseline.capital_projection_binding.model_copy(
+                update={"manifest_hash": "f" * 64}
+            )
+        }
+    )
+
+    result = execute_create(
+        database,
+        create_intent_envelope(
+            proposal,
+            campaign,
+            initial,
+            now=now,
+            risk_request=changed,
+        ),
+    )
+
+    assert result.status is CommandStatus.REJECTED
+    assert result.error_code == "FROZEN_CAPITAL_SCOPE_BINDING_MISMATCH"
+    with database.session_factory.begin() as session:
+        assert count_rows(session, ExecutionRiskDecision) == 0
+        assert count_rows(session, OrderIntent) == 0
+
+
+def test_stale_canonical_capital_fails_before_final_risk_math(database: Database) -> None:
+    proposal, campaign, initial = prepare_authorization(database)
+    now = datetime.now(UTC)
+    seed_execution_policy(database, now)
+    service = ExecutionIntentService(clock=lambda: now + timedelta(seconds=10))
+
+    result = execute_create(
+        database,
+        create_intent_envelope(proposal, campaign, initial, now=now),
+        service,
+    )
+
+    assert result.status is CommandStatus.REJECTED
+    assert result.error_code == "CAPITAL_ACCOUNT_SCOPE_INCOMPLETE"
+    with database.session_factory.begin() as session:
+        assert count_rows(session, ExecutionRiskDecision) == 0
+        assert count_rows(session, OrderIntent) == 0
 
 
 def test_stale_final_precheck_is_durable_deny_without_intent_or_reservation(
@@ -1096,7 +1290,13 @@ def test_stale_final_precheck_is_durable_deny_without_intent_or_reservation(
     assert result.data["result"] == "DENY"
     assert result.data["primary_reason_code"] == "FACTS_STALE"
     with database.session_factory.begin() as session:
-        assert session.execute(select(ExecutionRiskDecision.result)).scalar_one() == "DENY"
+        decision = session.execute(select(ExecutionRiskDecision)).scalar_one()
+        assert decision.result == "DENY"
+        assert decision.capital_projection_version == "portfolio-mtm-v2"
+        assert (
+            hash_json(decision.input_snapshot["capital_projection"])
+            == decision.capital_projection_hash
+        )
         assert count_rows(session, OrderIntent) == 0
         assert count_rows(session, RiskReservation) == 0
 
@@ -1392,6 +1592,9 @@ def test_fact_sequence_and_immutable_root_are_database_enforced(database: Databa
                 .where(OrderIntent.order_intent_id == order_intent_id)
                 .values(dispatch_eligible=True)
             )
+    with pytest.raises(DBAPIError, match="execution_risk_decisions is immutable"):
+        with database.session_factory.begin() as session:
+            session.execute(update(ExecutionRiskDecision).values(capital_projection_hash="f" * 64))
     with database.session_factory.begin() as session:
         assert count_rows(session, ExecutionFact) == 0
         assert session.get(OrderIntent, order_intent_id).dispatch_eligible is False
@@ -1438,6 +1641,9 @@ def test_database_rejects_orphan_allow_decision_at_deferred_commit(
                         organization_id, authorization_id, campaign_id,
                         initial_authorization_id, add_package_id, add_unit_id,
                         risk_policy_id, risk_policy_version, system_risk_state,
+                        capital_scope_manifest_id, capital_scope_manifest_version,
+                        capital_scope_manifest_hash, capital_projection_version,
+                        capital_projection_hash,
                         result, primary_reason_code, requested_quantity,
                         max_safe_quantity, final_quantity, approved_reserved_heat,
                         approved_funding, approved_margin,
@@ -1451,6 +1657,9 @@ def test_database_rejects_orphan_allow_decision_at_deferred_commit(
                         organization_id, authorization_id, campaign_id,
                         initial_authorization_id, add_package_id, add_unit_id,
                         risk_policy_id, risk_policy_version, system_risk_state,
+                        capital_scope_manifest_id, capital_scope_manifest_version,
+                        capital_scope_manifest_hash, capital_projection_version,
+                        capital_projection_hash,
                         result, primary_reason_code, requested_quantity,
                         max_safe_quantity, final_quantity, approved_reserved_heat,
                         approved_funding, approved_margin,

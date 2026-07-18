@@ -33,6 +33,7 @@ from trading_control_plane.proposal_models import (
     ReviewerVote,
     SystemRiskStateRecord,
 )
+from trading_control_plane.risk import CapitalProjectionBinding
 from trading_control_plane.trading_authorization_models import (
     AddAuthorizationPackage,
     AddAuthorizationPackageState,
@@ -256,6 +257,7 @@ class TradingAuthorizationService:
             request,
             now,
         )
+        capital_projection_binding = self._capital_projection_binding(proposal)
         if decision is None or risk_state is None:  # pragma: no cover - validated above
             raise RuntimeError("validated issuance facts unexpectedly missing")
 
@@ -315,6 +317,7 @@ class TradingAuthorizationService:
                 "policy_version": risk_state.policy_version,
             },
             "binding": binding.model_dump(mode="json"),
+            "capital_projection_binding": capital_projection_binding.model_dump(mode="json"),
             "capability_validation": capability_validation.validation_snapshot,
             "execution_eligible": False,
         }
@@ -688,6 +691,20 @@ class TradingAuthorizationService:
         ):
             raise CommandRejected("STRATEGY_BINDING_MISMATCH", "system strategy binding changed")
         return binding
+
+    @staticmethod
+    def _capital_projection_binding(
+        proposal: FrozenProposalVersion,
+    ) -> CapitalProjectionBinding:
+        try:
+            return CapitalProjectionBinding.model_validate(
+                proposal.risk_summary.get("capital_projection_binding")
+            )
+        except ValidationError as exc:
+            raise CommandRejected(
+                "CAPITAL_PROJECTION_BINDING_INVALID",
+                "frozen proposal risk summary lacks an exact capital projection binding",
+            ) from exc
 
     @staticmethod
     def _create_add_package(

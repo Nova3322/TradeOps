@@ -78,6 +78,48 @@ TEST_CAPITAL_PROJECTION_BINDING = CapitalProjectionBinding(
     projection_version="portfolio-mtm-v2",
 )
 
+TEST_EXECUTION_CAPITAL_SCOPE_MANIFEST_ID = UUID("00000000-0000-0000-0000-000000000022")
+TEST_EXECUTION_CAPITAL_SCOPE = CurrentAccountEquityScope(
+    organization_id="org-1",
+    venue="BINANCE",
+    execution_domain="BINANCE_USDM",
+    account_id="account-1",
+    margin_mode="ISOLATED",
+    collateral_pool_id="pool-usdt-1",
+    settlement_currency="USD",
+)
+_TEST_EXECUTION_CAPITAL_SCOPE_MANIFEST_DRAFT = RegisterManagedCapitalScopeManifestDraft(
+    manifest_id=TEST_EXECUTION_CAPITAL_SCOPE_MANIFEST_ID,
+    organization_id="org-1",
+    manifest_version=1,
+    environment=CapitalEnvironment.SHADOW,
+    real_funds_eligible=False,
+    risk_inclusion_mode=CapitalScopeRiskInclusionMode.EXCHANGE_ONLY,
+    report_currency="USD",
+    account_scopes=(TEST_EXECUTION_CAPITAL_SCOPE,),
+    valid_from=datetime(2020, 1, 1, tzinfo=UTC),
+    valid_until=datetime(2100, 1, 1, tzinfo=UTC),
+    evidence_refs=("test-only:execution-capital-scope-binding",),
+    source_ref="test-only:execution-capital-scope",
+)
+TEST_EXECUTION_CAPITAL_SCOPE_MANIFEST = RegisterManagedCapitalScopeManifestRequest.model_validate(
+    {
+        **_TEST_EXECUTION_CAPITAL_SCOPE_MANIFEST_DRAFT.model_dump(mode="json"),
+        "manifest_hash": managed_capital_scope_manifest_hash(
+            _TEST_EXECUTION_CAPITAL_SCOPE_MANIFEST_DRAFT
+        ),
+        "evidence_hash": managed_capital_scope_evidence_hash(
+            _TEST_EXECUTION_CAPITAL_SCOPE_MANIFEST_DRAFT
+        ),
+    }
+)
+TEST_EXECUTION_CAPITAL_PROJECTION_BINDING = CapitalProjectionBinding(
+    manifest_id=TEST_EXECUTION_CAPITAL_SCOPE_MANIFEST.manifest_id,
+    manifest_version=TEST_EXECUTION_CAPITAL_SCOPE_MANIFEST.manifest_version,
+    manifest_hash=TEST_EXECUTION_CAPITAL_SCOPE_MANIFEST.manifest_hash,
+    projection_version="portfolio-mtm-v2",
+)
+
 SCOPE_IDS = {
     ScopeType.UNDERLYING: "BTC",
     ScopeType.RISK_CLUSTER: "CRYPTO_MAJOR",

@@ -31,7 +31,7 @@ from trading_control_plane.commands import CommandStatus
 from trading_control_plane.database import Database
 from trading_control_plane.execution_models import ExecutionFact
 from trading_control_plane.reconciliation import ReconciliationSourceType
-from trading_control_plane.sender_fencing import SenderLeaseAction
+from trading_control_plane.sender_fencing import SenderLeaseAction, sender_scope_id
 from trading_control_plane.sender_fencing_models import (
     ExecutionSenderScopeState,
     ShadowDispatchClaim,
@@ -50,7 +50,11 @@ def test_successor_lease_reconciles_late_fact_for_original_claim(database: Datab
     )
     with database.session_factory.begin() as session:
         original_claim = session.get(ShadowDispatchClaim, original_request.shadow_dispatch_claim_id)
-        sender_state = session.execute(select(ExecutionSenderScopeState)).scalar_one()
+        sender_state = session.get(
+            ExecutionSenderScopeState,
+            sender_scope_id(make_sender_scope()),
+        )
+        assert sender_state is not None
         assert original_claim is not None
         original_lease_id = original_claim.lease_id
         original_token = original_claim.fencing_token
@@ -123,7 +127,11 @@ def test_successor_lease_reconciles_late_fact_for_original_claim(database: Datab
     assert replay.data["authority_mode"] == "SUCCESSOR_LEASE"
     with database.session_factory.begin() as session:
         fact = session.execute(select(ExecutionFact)).scalar_one()
-        current_state = session.execute(select(ExecutionSenderScopeState)).scalar_one()
+        current_state = session.get(
+            ExecutionSenderScopeState,
+            sender_scope_id(make_sender_scope()),
+        )
+        assert current_state is not None
         assert fact.shadow_dispatch_claim_id == original_claim.claim_id
         assert fact.reconciliation_run_id == run.run_id
         assert run.lease_id == successor_lease_id
@@ -144,7 +152,11 @@ def test_original_terminal_run_cannot_be_reused_after_successor_takeover(
         now=original_request.received_at + timedelta(milliseconds=1),
     )
     with database.session_factory.begin() as session:
-        sender_state = session.execute(select(ExecutionSenderScopeState)).scalar_one()
+        sender_state = session.get(
+            ExecutionSenderScopeState,
+            sender_scope_id(make_sender_scope()),
+        )
+        assert sender_state is not None
         original_claim = session.get(ShadowDispatchClaim, original_request.shadow_dispatch_claim_id)
         assert original_claim is not None
 
@@ -192,7 +204,11 @@ def test_successor_lease_reconciles_canonical_position_for_original_claim(
     order_intent_id, fill_request = prepare_filled_intent(database)
     with database.session_factory.begin() as session:
         original_claim = session.get(ShadowDispatchClaim, fill_request.shadow_dispatch_claim_id)
-        sender_state = session.execute(select(ExecutionSenderScopeState)).scalar_one()
+        sender_state = session.get(
+            ExecutionSenderScopeState,
+            sender_scope_id(make_sender_scope()),
+        )
+        assert sender_state is not None
         assert original_claim is not None
 
     scope = make_sender_scope()
@@ -265,7 +281,11 @@ def test_successor_lease_reconciles_canonical_position_for_original_claim(
         position_fact = session.execute(
             select(ExecutionFact).where(ExecutionFact.fact_kind == "VENUE_POSITION")
         ).scalar_one()
-        current_state = session.execute(select(ExecutionSenderScopeState)).scalar_one()
+        current_state = session.get(
+            ExecutionSenderScopeState,
+            sender_scope_id(make_sender_scope()),
+        )
+        assert current_state is not None
         assert position_fact.shadow_dispatch_claim_id == original_claim.claim_id
         assert position_fact.venue_position_snapshot_id == request.venue_position_snapshot_id
         assert run.lease_id == successor_lease_id
@@ -279,7 +299,11 @@ def test_successor_lease_confirms_canonical_protection_for_original_claim(
     order_intent_id, position_request = prepare_position_reconciled_intent(database)
     with database.session_factory.begin() as session:
         original_claim = session.get(ShadowDispatchClaim, position_request.shadow_dispatch_claim_id)
-        sender_state = session.execute(select(ExecutionSenderScopeState)).scalar_one()
+        sender_state = session.get(
+            ExecutionSenderScopeState,
+            sender_scope_id(make_sender_scope()),
+        )
+        assert sender_state is not None
         assert original_claim is not None
 
     scope = make_sender_scope()
@@ -353,7 +377,11 @@ def test_successor_lease_confirms_canonical_protection_for_original_claim(
         protection_fact = session.execute(
             select(ExecutionFact).where(ExecutionFact.fact_kind == "VENUE_PROTECTION")
         ).scalar_one()
-        current_state = session.execute(select(ExecutionSenderScopeState)).scalar_one()
+        current_state = session.get(
+            ExecutionSenderScopeState,
+            sender_scope_id(make_sender_scope()),
+        )
+        assert current_state is not None
         assert protection_fact.shadow_dispatch_claim_id == original_claim.claim_id
         assert protection_fact.venue_protection_snapshot_id == request.venue_protection_snapshot_id
         assert run.lease_id == successor_lease_id

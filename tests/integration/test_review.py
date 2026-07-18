@@ -11,6 +11,7 @@ from sqlalchemy.exc import DBAPIError, IntegrityError
 from sqlalchemy.orm import Session
 
 from tests.integration.test_authorization import create_assurance, seed_principal
+from tests.risk_fixtures import TEST_EXECUTION_CAPITAL_PROJECTION_BINDING
 from trading_control_plane.command_executor import IdempotentCommandExecutor
 from trading_control_plane.commands import (
     CommandChannel,
@@ -61,6 +62,7 @@ def seed_proposal(
     auto_add_enabled: bool = False,
     requested_add_count: int = 0,
     spec_overrides: dict[str, object] | None = None,
+    include_capital_projection_binding: bool = True,
 ) -> FrozenProposalVersion:
     now = datetime.now(UTC)
     proposal_version_id = uuid4()
@@ -70,6 +72,10 @@ def seed_proposal(
         "total_capital_snapshot_0": "100000",
         "one_r_0": "500",
     }
+    if include_capital_projection_binding:
+        risk_summary["capital_projection_binding"] = (
+            TEST_EXECUTION_CAPITAL_PROJECTION_BINDING.model_dump(mode="json")
+        )
     spec = {
         "instrument_id": "BINANCE:BTCUSDT-PERP",
         "direction": "LONG",
@@ -84,7 +90,7 @@ def seed_proposal(
         "margin_mode": "ISOLATED",
         "collateral_scope": "ACCOUNT",
         "collateral_pool_id": "pool-usdt-1",
-        "settlement_asset": "USDT",
+        "settlement_asset": "USD",
         "contract_multiplier": "1",
         "authorization_policy_version": "authorization-policy-v1",
         "position_management_template_version": "position-template-v1",

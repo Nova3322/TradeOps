@@ -99,13 +99,14 @@ canonical source snapshot ID/hash、source/normalization version、facts-as-of �
 
 本包只关闭提案阶段 `RiskPrecheckService` 的当前资本信任缺口：
 
-- `ExecutionIntentService` 的最终 ORDER_PRECHECK 尚未调用同一 resolver；
+- `ExecutionIntentService` 的最终 ORDER_PRECHECK 在本包交付时尚未调用同一 resolver；该缺口已由
+  [WP-0022](WP-0022-最终ORDER-PRECHECK可信资本强绑定.md) 关闭；
 - funding used/reserved、open/reserved/unknown heat 与 scope exposure 仍需继续绑定不可变 Ledger；
 - 非 USD FX/stablecoin/depeg 事实仍未实现，因此相关提案保持失败关闭；
 - 没有真实部署 manifest、私有 collector、场所公式认证或真钱能力；
 - 三项现实能力闸门继续 `DISABLED`。
 
-这不是目标范围缩减。最终下单预检绑定是紧接的工作包，完整产品仍包含全部 Web/PWA、Telegram、
+这不是目标范围缩减。最终下单预检绑定已在 WP-0022 完成，完整产品仍包含全部 Web/PWA、Telegram、
 Binance、Hyperliquid、Freqtrade、Margin、Vault/CTO、PnL 与运维目标。
 
 按用户特别约束，Codex Security 及其审计 Skill、插件和模块保持停用；本包只执行常规工程设计、
