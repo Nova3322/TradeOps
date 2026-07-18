@@ -52,6 +52,7 @@ from trading_control_plane.sender_fencing_models import (
     ExecutionSenderScopeState,
     ShadowDispatchClaim,
 )
+from trading_control_plane.venue_facts import VenuePositionDirection, VenuePositionState
 
 pytestmark = pytest.mark.integration
 
@@ -102,7 +103,7 @@ def fact_row(
         execution_fact_id=uuid4(),
         order_intent_id=order_intent_id,
         fact_sequence=request.fact_sequence,
-        fact_contract_version=3,
+        fact_contract_version=4,
         fact_kind=request.fact_kind.value,
         target_status=request.target_status,
         venue=request.venue,
@@ -125,6 +126,7 @@ def fact_row(
         dispatch_claim_hash=request.dispatch_claim_hash,
         venue_order_observation_id=request.venue_order_observation_id,
         venue_fill_id=request.venue_fill_id,
+        venue_position_snapshot_id=request.venue_position_snapshot_id,
         venue_fact_input_link_id=request.venue_fact_input_link_id,
         venue_fact_hash=request.venue_fact_hash,
         canonical_venue_order_id=request.payload.get("canonical_venue_order_id"),
@@ -183,6 +185,61 @@ def prepare_bound_request(
     return request, run.run_id
 
 
+def prepare_filled_intent(database: Database) -> tuple[UUID, RecordExecutionFactRequest]:
+    order_intent_id = create_order_intent(database)
+    fill_request, run_id = prepare_bound_request(
+        database,
+        order_intent_id,
+        fact_request(
+            sequence=1,
+            status="FILLED",
+            filled=Decimal("0.5"),
+            remaining=Decimal("0"),
+            terminal=True,
+        ),
+    )
+    filled = execute_bound_fact(database, order_intent_id, fill_request)
+    assert filled.status is CommandStatus.COMPLETED
+    finish_run(database, run_id, now=fill_request.received_at + timedelta(milliseconds=1))
+    return order_intent_id, fill_request
+
+
+def prepare_position_request(
+    database: Database,
+    order_intent_id: UUID,
+    fill_request: RecordExecutionFactRequest,
+    *,
+    position_snapshot_overrides: dict[str, Any] | None = None,
+) -> tuple[RecordExecutionFactRequest, UUID]:
+    draft = fact_request(
+        sequence=2,
+        status="POSITION_RECONCILED",
+        filled=Decimal("0.5"),
+        remaining=Decimal("0"),
+        terminal=True,
+        reconciled=True,
+    )
+    claim, run, reconciliation_input, event_time, canonical_context = prepare_active_fact_run(
+        database,
+        order_intent_id,
+        ReconciliationSourceType.VENUE_POSITIONS,
+        now=fill_request.received_at + timedelta(milliseconds=2),
+        draft=draft,
+        position_snapshot_overrides=position_snapshot_overrides,
+    )
+    assert canonical_context is not None
+    request = bind_fact_request(
+        draft,
+        claim,
+        run,
+        reconciliation_input,
+        event_time=event_time,
+        received_at=canonical_context.input_link.received_at,
+        canonical_context=canonical_context,
+    )
+    return request, run.run_id
+
+
 def finish_run(database: Database, run_id: UUID, *, now: datetime) -> None:
     with database.session_factory.begin() as session:
         state = session.get(ExecutionReconciliationRunState, run_id)
@@ -216,7 +273,7 @@ def test_exact_claim_run_input_binding_is_persisted_and_replayable_after_restart
     assert restarted_service_result.data["already_recorded"] is True
     with database.session_factory.begin() as session:
         fact = session.execute(select(ExecutionFact)).scalar_one()
-        assert fact.fact_contract_version == 3
+        assert fact.fact_contract_version == 4
         assert fact.fact_kind == "VENUE_ORDER"
         assert fact.shadow_dispatch_claim_id == request.shadow_dispatch_claim_id
         assert fact.reconciliation_run_id == request.reconciliation_run_id
@@ -225,13 +282,14 @@ def test_exact_claim_run_input_binding_is_persisted_and_replayable_after_restart
         assert fact.reconciliation_run_ref is None
         assert fact.venue_order_observation_id == request.venue_order_observation_id
         assert fact.venue_fill_id is None
+        assert fact.venue_position_snapshot_id is None
         assert fact.venue_fact_input_link_id == request.venue_fact_input_link_id
         assert fact.venue_fact_hash == request.venue_fact_hash
         assert fact.canonical_venue_order_id == request.payload["canonical_venue_order_id"]
     finish_run(database, run_id, now=request.received_at + timedelta(milliseconds=1))
 
 
-def test_historical_v1_v2_commands_and_database_inserts_are_closed(
+def test_historical_v1_v2_v3_commands_and_database_inserts_are_closed(
     database: Database,
 ) -> None:
     order_intent_id = create_order_intent(database)
@@ -256,21 +314,39 @@ def test_historical_v1_v2_commands_and_database_inserts_are_closed(
     )
     assert old_v2_rejected.status is CommandStatus.REJECTED
     assert old_v2_rejected.error_code == "COMMAND_TYPE_MISMATCH"
+    old_v3_envelope = fact_envelope(order_intent_id, request).model_copy(
+        update={"command_type": "execution.fact.record-reconciled.v3"}
+    )
+    old_v3_rejected = IdempotentCommandExecutor(database.session_factory).execute(
+        old_v3_envelope,
+        ExecutionReconciliationService(clock=lambda: request.received_at).record,
+    )
+    assert old_v3_rejected.status is CommandStatus.REJECTED
+    assert old_v3_rejected.error_code == "COMMAND_TYPE_MISMATCH"
 
     old_v2_row = fact_row(order_intent_id, request, recorded_at=request.received_at)
     old_v2_row.fact_contract_version = 2
     old_v2_row.venue_order_observation_id = None
     old_v2_row.venue_fill_id = None
+    old_v2_row.venue_position_snapshot_id = None
     old_v2_row.venue_fact_input_link_id = None
     old_v2_row.venue_fact_hash = None
     old_v2_row.canonical_venue_order_id = None
-    with pytest.raises(DBAPIError, match="reconciled v3 contract"):
+    with pytest.raises(DBAPIError, match="reconciled v4 contract"):
         with database.session_factory.begin() as session:
             session.add(old_v2_row)
             session.flush()
 
+    old_v3_row = fact_row(order_intent_id, request, recorded_at=request.received_at)
+    old_v3_row.fact_contract_version = 3
+    old_v3_row.external_fact_id = f"old-v3-{uuid4()}"
+    with pytest.raises(DBAPIError, match="reconciled v4 contract"):
+        with database.session_factory.begin() as session:
+            session.add(old_v3_row)
+            session.flush()
+
     payload = {"legacy": True}
-    with pytest.raises(DBAPIError, match="reconciled v3 contract"):
+    with pytest.raises(DBAPIError, match="reconciled v4 contract"):
         with database.session_factory.begin() as session:
             session.add(
                 ExecutionFact(
@@ -658,3 +734,205 @@ def test_claimed_intent_cannot_switch_canonical_venue_order_id(
         state = session.get(OrderIntentState, order_intent_id)
         assert state is not None and state.status == "PARTIALLY_FILLED"
         assert session.scalar(select(func.count()).select_from(ExecutionFact)) == 1
+
+
+def test_exact_open_position_snapshot_reconciles_and_replays(database: Database) -> None:
+    order_intent_id, fill_request = prepare_filled_intent(database)
+    request, run_id = prepare_position_request(database, order_intent_id, fill_request)
+
+    reconciled = execute_bound_fact(database, order_intent_id, request)
+    replay = execute_bound_fact(database, order_intent_id, request)
+
+    assert reconciled.status is CommandStatus.COMPLETED
+    assert replay.status is CommandStatus.COMPLETED
+    assert replay.data["already_recorded"] is True
+    with database.session_factory.begin() as session:
+        state = session.get(OrderIntentState, order_intent_id)
+        fact = session.execute(
+            select(ExecutionFact).where(ExecutionFact.fact_kind == "VENUE_POSITION")
+        ).scalar_one()
+        assert state is not None and state.status == "POSITION_RECONCILED"
+        assert state.position_reconciled is True
+        assert fact.fact_contract_version == 4
+        assert fact.venue_position_snapshot_id == request.venue_position_snapshot_id
+        assert fact.venue_fact_input_link_id == request.venue_fact_input_link_id
+        assert fact.canonical_venue_order_id is None
+    finish_run(database, run_id, now=request.received_at + timedelta(milliseconds=1))
+
+
+@pytest.mark.parametrize(
+    "position_snapshot_overrides",
+    [
+        {
+            "position_state": VenuePositionState.FLAT,
+            "direction": VenuePositionDirection.FLAT,
+        },
+        {
+            "position_state": VenuePositionState.UNKNOWN,
+            "direction": VenuePositionDirection.UNKNOWN,
+        },
+    ],
+)
+def test_flat_or_unknown_position_cannot_advance_reconciliation(
+    database: Database,
+    position_snapshot_overrides: dict[str, Any],
+) -> None:
+    order_intent_id, fill_request = prepare_filled_intent(database)
+    request, _ = prepare_position_request(
+        database,
+        order_intent_id,
+        fill_request,
+        position_snapshot_overrides=position_snapshot_overrides,
+    )
+
+    result = execute_bound_fact(database, order_intent_id, request)
+
+    assert result.status is CommandStatus.REJECTED
+    assert result.error_code == "EXECUTION_FACT_CANONICAL_POSITION_MISMATCH"
+    with database.session_factory.begin() as session:
+        state = session.get(OrderIntentState, order_intent_id)
+        assert state is not None and state.status == "FILLED"
+        assert (
+            session.scalar(
+                select(func.count())
+                .select_from(ExecutionFact)
+                .where(ExecutionFact.fact_kind == "VENUE_POSITION")
+            )
+            == 0
+        )
+
+
+def test_position_snapshot_with_wrong_instrument_ownership_is_rejected(
+    database: Database,
+) -> None:
+    order_intent_id, fill_request = prepare_filled_intent(database)
+    request, _ = prepare_position_request(
+        database,
+        order_intent_id,
+        fill_request,
+        position_snapshot_overrides={"instrument_id": "ETHUSDT-PERP"},
+    )
+
+    result = execute_bound_fact(database, order_intent_id, request)
+
+    assert result.status is CommandStatus.REJECTED
+    assert result.error_code == "EXECUTION_FACT_CANONICAL_OWNERSHIP_MISMATCH"
+
+
+def test_position_snapshot_with_wrong_post_intent_quantity_is_rejected(
+    database: Database,
+) -> None:
+    order_intent_id, fill_request = prepare_filled_intent(database)
+    request, _ = prepare_position_request(
+        database,
+        order_intent_id,
+        fill_request,
+        position_snapshot_overrides={"quantity": Decimal("0.6")},
+    )
+
+    result = execute_bound_fact(database, order_intent_id, request)
+
+    assert result.status is CommandStatus.REJECTED
+    assert result.error_code == "EXECUTION_FACT_CANONICAL_POSITION_MISMATCH"
+
+
+def test_position_snapshot_cannot_skip_terminal_fill_evidence(database: Database) -> None:
+    order_intent_id = create_order_intent(database)
+    draft = fact_request(
+        sequence=1,
+        status="POSITION_RECONCILED",
+        filled=Decimal("0"),
+        remaining=Decimal("0"),
+        terminal=True,
+        reconciled=True,
+    )
+    claim, run, reconciliation_input, event_time, canonical_context = prepare_active_fact_run(
+        database,
+        order_intent_id,
+        ReconciliationSourceType.VENUE_POSITIONS,
+        draft=draft,
+        position_snapshot_overrides={"quantity": Decimal("0.5")},
+    )
+    assert canonical_context is not None
+    request = bind_fact_request(
+        draft,
+        claim,
+        run,
+        reconciliation_input,
+        event_time=event_time,
+        received_at=canonical_context.input_link.received_at,
+        canonical_context=canonical_context,
+    )
+
+    result = execute_bound_fact(database, order_intent_id, request)
+
+    assert result.status is CommandStatus.REJECTED
+    assert result.error_code == "EXECUTION_FACT_CANONICAL_POSITION_MISMATCH"
+    with database.session_factory.begin() as session:
+        state = session.get(OrderIntentState, order_intent_id)
+        assert state is not None and state.status == "INTENT_CREATED"
+
+
+def test_position_snapshot_older_than_fill_evidence_is_rejected(database: Database) -> None:
+    order_intent_id, fill_request = prepare_filled_intent(database)
+    stale_at = fill_request.event_time - timedelta(microseconds=1)
+    request, _ = prepare_position_request(
+        database,
+        order_intent_id,
+        fill_request,
+        position_snapshot_overrides={
+            "event_time": stale_at,
+            "venue_observed_at": stale_at,
+        },
+    )
+
+    result = execute_bound_fact(database, order_intent_id, request)
+
+    assert result.status is CommandStatus.REJECTED
+    assert result.error_code == "EXECUTION_FACT_CANONICAL_POSITION_STALE"
+
+
+def test_position_source_cannot_self_report_failed_safe(database: Database) -> None:
+    order_intent_id, fill_request = prepare_filled_intent(database)
+    request, _ = prepare_position_request(database, order_intent_id, fill_request)
+
+    result = execute_bound_fact(
+        database,
+        order_intent_id,
+        mutate_request(request, target_status="FAILED_SAFE"),
+    )
+
+    assert result.status is CommandStatus.REJECTED
+    assert result.error_code == "EXECUTION_FACT_SOURCE_STATUS_MISMATCH"
+
+
+def test_direct_database_insert_cannot_promote_flat_position_snapshot(
+    database: Database,
+) -> None:
+    order_intent_id, fill_request = prepare_filled_intent(database)
+    request, _ = prepare_position_request(
+        database,
+        order_intent_id,
+        fill_request,
+        position_snapshot_overrides={
+            "position_state": VenuePositionState.FLAT,
+            "direction": VenuePositionDirection.FLAT,
+        },
+    )
+    forged = fact_row(order_intent_id, request, recorded_at=request.received_at)
+
+    with pytest.raises(DBAPIError, match="canonical position quantity is invalid"):
+        with database.session_factory.begin() as session:
+            session.add(forged)
+            session.flush()
+    with database.session_factory.begin() as session:
+        state = session.get(OrderIntentState, order_intent_id)
+        assert state is not None and state.status == "FILLED"
+        assert (
+            session.scalar(
+                select(func.count())
+                .select_from(ExecutionFact)
+                .where(ExecutionFact.fact_kind == "VENUE_POSITION")
+            )
+            == 0
+        )

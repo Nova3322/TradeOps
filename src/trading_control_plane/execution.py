@@ -80,6 +80,7 @@ from trading_control_plane.venue_fact_models import (
     VenueFactInputLink,
     VenueFill,
     VenueOrderObservation,
+    VenuePositionSnapshot,
 )
 
 ZERO = Decimal("0")
@@ -165,7 +166,6 @@ EXECUTION_FACT_SOURCE_STATUS_MATRIX: dict[
     "FAILED_SAFE": frozenset(
         {
             (ExecutionFactKind.WORKER_RECEIPT, ReconciliationSourceType.WORKER_LOCAL),
-            (ExecutionFactKind.VENUE_POSITION, ReconciliationSourceType.VENUE_POSITIONS),
             (ExecutionFactKind.VENUE_PROTECTION, ReconciliationSourceType.VENUE_PROTECTION),
         }
     ),
@@ -260,6 +260,7 @@ class RecordExecutionFactRequest(BaseModel):
     dispatch_claim_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
     venue_order_observation_id: UUID | None = None
     venue_fill_id: UUID | None = None
+    venue_position_snapshot_id: UUID | None = None
     venue_fact_input_link_id: UUID | None = None
     venue_fact_hash: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
     source_ref: str = Field(min_length=1, max_length=255)
@@ -277,6 +278,7 @@ class RecordExecutionFactRequest(BaseModel):
             exact_venue_binding = (
                 self.venue_order_observation_id is not None
                 and self.venue_fill_id is None
+                and self.venue_position_snapshot_id is None
                 and self.venue_fact_input_link_id is not None
                 and self.venue_fact_hash is not None
             )
@@ -284,6 +286,15 @@ class RecordExecutionFactRequest(BaseModel):
             exact_venue_binding = (
                 self.venue_order_observation_id is None
                 and self.venue_fill_id is not None
+                and self.venue_position_snapshot_id is None
+                and self.venue_fact_input_link_id is not None
+                and self.venue_fact_hash is not None
+            )
+        elif self.fact_kind is ExecutionFactKind.VENUE_POSITION:
+            exact_venue_binding = (
+                self.venue_order_observation_id is None
+                and self.venue_fill_id is None
+                and self.venue_position_snapshot_id is not None
                 and self.venue_fact_input_link_id is not None
                 and self.venue_fact_hash is not None
             )
@@ -291,6 +302,7 @@ class RecordExecutionFactRequest(BaseModel):
             exact_venue_binding = (
                 self.venue_order_observation_id is None
                 and self.venue_fill_id is None
+                and self.venue_position_snapshot_id is None
                 and self.venue_fact_input_link_id is None
                 and self.venue_fact_hash is None
             )
@@ -1395,7 +1407,7 @@ class ExecutionIntentService:
 
 
 class ExecutionReconciliationService:
-    command_type = "execution.fact.record-reconciled.v3"
+    command_type = "execution.fact.record-reconciled.v4"
 
     def __init__(self, clock: Callable[[], datetime] | None = None) -> None:
         self._clock = clock or (lambda: datetime.now(UTC))
@@ -1455,7 +1467,7 @@ class ExecutionReconciliationService:
                 or existing.payload_hash != request.payload_hash
                 or existing.evidence_hash != request.evidence_hash
                 or existing.fact_sequence != request.fact_sequence
-                or existing.fact_contract_version != 3
+                or existing.fact_contract_version != 4
                 or existing.fact_kind != request.fact_kind.value
                 or existing.shadow_dispatch_claim_id != request.shadow_dispatch_claim_id
                 or existing.reconciliation_run_id != request.reconciliation_run_id
@@ -1466,6 +1478,7 @@ class ExecutionReconciliationService:
                 or existing.dispatch_claim_hash != request.dispatch_claim_hash
                 or existing.venue_order_observation_id != request.venue_order_observation_id
                 or existing.venue_fill_id != request.venue_fill_id
+                or existing.venue_position_snapshot_id != request.venue_position_snapshot_id
                 or existing.venue_fact_input_link_id != request.venue_fact_input_link_id
                 or existing.venue_fact_hash != request.venue_fact_hash
             ):
@@ -1476,6 +1489,7 @@ class ExecutionReconciliationService:
             if request.fact_kind in {
                 ExecutionFactKind.VENUE_ORDER,
                 ExecutionFactKind.VENUE_FILL,
+                ExecutionFactKind.VENUE_POSITION,
             }:
                 EXECUTION_CANONICAL_FACT_BINDINGS.labels(request.fact_kind.value, "REPLAYED").inc()
             return self._existing_fact_outcome(session, state, existing)
@@ -1485,17 +1499,18 @@ class ExecutionReconciliationService:
             session, intent, reservation, request, now
         )
         try:
-            canonical_venue_order_id = self._validate_canonical_venue_fact(
-                session, intent, state, request
+            canonical_venue_order_id, venue_position_snapshot_id = (
+                self._validate_canonical_venue_fact(session, intent, state, request)
             )
         except CommandRejected:
             if request.fact_kind in {
                 ExecutionFactKind.VENUE_ORDER,
                 ExecutionFactKind.VENUE_FILL,
+                ExecutionFactKind.VENUE_POSITION,
             }:
                 EXECUTION_CANONICAL_FACT_BINDINGS.labels(request.fact_kind.value, "REJECTED").inc()
             raise
-        if canonical_venue_order_id is not None:
+        if canonical_venue_order_id is not None or venue_position_snapshot_id is not None:
             EXECUTION_CANONICAL_FACT_BINDINGS.labels(request.fact_kind.value, "APPLIED").inc()
         self._validate_progression(state, request, now)
         fact_id = uuid4()
@@ -1503,7 +1518,7 @@ class ExecutionReconciliationService:
             execution_fact_id=fact_id,
             order_intent_id=order_intent_id,
             fact_sequence=request.fact_sequence,
-            fact_contract_version=3,
+            fact_contract_version=4,
             fact_kind=request.fact_kind.value,
             target_status=request.target_status,
             venue=request.venue,
@@ -1526,6 +1541,7 @@ class ExecutionReconciliationService:
             dispatch_claim_hash=request.dispatch_claim_hash,
             venue_order_observation_id=request.venue_order_observation_id,
             venue_fill_id=request.venue_fill_id,
+            venue_position_snapshot_id=venue_position_snapshot_id,
             venue_fact_input_link_id=request.venue_fact_input_link_id,
             venue_fact_hash=request.venue_fact_hash,
             canonical_venue_order_id=canonical_venue_order_id,
@@ -1844,12 +1860,13 @@ class ExecutionReconciliationService:
         intent: OrderIntent,
         state: OrderIntentState,
         request: RecordExecutionFactRequest,
-    ) -> str | None:
+    ) -> tuple[str | None, UUID | None]:
         if request.fact_kind not in {
             ExecutionFactKind.VENUE_ORDER,
             ExecutionFactKind.VENUE_FILL,
+            ExecutionFactKind.VENUE_POSITION,
         }:
-            return None
+            return None, None
         claim = session.get(ShadowDispatchClaim, request.shadow_dispatch_claim_id)
         scope = session.get(ExecutionSenderScope, claim.scope_id) if claim is not None else None
         link = session.get(VenueFactInputLink, request.venue_fact_input_link_id)
@@ -1886,6 +1903,7 @@ class ExecutionReconciliationService:
             if (
                 link.venue_order_observation_id != observation.venue_order_observation_id
                 or link.venue_fill_id is not None
+                or link.venue_position_snapshot_id is not None
                 or observation.observation_hash != request.venue_fact_hash
             ):
                 raise CommandRejected(
@@ -1926,7 +1944,7 @@ class ExecutionReconciliationService:
             expected_terminal = observation.terminal
             fact_id = observation.venue_order_observation_id
             fact_type = "VENUE_ORDER_OBSERVATION"
-        else:
+        elif request.fact_kind is ExecutionFactKind.VENUE_FILL:
             fill = session.get(VenueFill, request.venue_fill_id)
             if fill is None:
                 raise CommandRejected(
@@ -1936,6 +1954,7 @@ class ExecutionReconciliationService:
             if (
                 link.venue_fill_id != fill.venue_fill_id
                 or link.venue_order_observation_id is not None
+                or link.venue_position_snapshot_id is not None
                 or fill.fill_hash != request.venue_fact_hash
             ):
                 raise CommandRejected(
@@ -1971,12 +1990,100 @@ class ExecutionReconciliationService:
             expected_terminal = expected_remaining == ZERO
             fact_id = fill.venue_fill_id
             fact_type = "VENUE_FILL"
+        else:
+            snapshot = session.get(VenuePositionSnapshot, request.venue_position_snapshot_id)
+            if snapshot is None:
+                raise CommandRejected(
+                    "EXECUTION_FACT_CANONICAL_REFERENCE_NOT_FOUND",
+                    "venue position snapshot is unavailable",
+                )
+            if (
+                link.venue_position_snapshot_id != snapshot.venue_position_snapshot_id
+                or link.venue_order_observation_id is not None
+                or link.venue_fill_id is not None
+                or snapshot.snapshot_hash != request.venue_fact_hash
+            ):
+                raise CommandRejected(
+                    "EXECUTION_FACT_CANONICAL_LINK_MISMATCH",
+                    "venue position snapshot and input membership disagree",
+                )
+            if (
+                snapshot.organization_id != claim.organization_id
+                or snapshot.venue != intent.venue
+                or snapshot.execution_domain != intent.execution_domain
+                or snapshot.account_id != intent.account_id
+                or snapshot.instrument_id != intent.instrument_id
+                or snapshot.position_mode != scope.position_mode
+                or snapshot.position_side != expected_position_side
+                or snapshot.margin_mode != scope.margin_mode
+                or snapshot.collateral_pool_id != scope.collateral_pool_id
+                or (
+                    snapshot.position_state == "OPEN" and snapshot.direction != intent.position_side
+                )
+            ):
+                raise CommandRejected(
+                    "EXECUTION_FACT_CANONICAL_OWNERSHIP_MISMATCH",
+                    "venue position snapshot does not belong to the claimed intent scope",
+                )
+            expected_position_quantity = (
+                intent.current_position_quantity + state.cumulative_filled_quantity
+            )
+            if (
+                state.status not in {"FILLED", "CANCELLED_PARTIAL"}
+                or snapshot.position_state != "OPEN"
+                or snapshot.quantity != expected_position_quantity
+            ):
+                raise CommandRejected(
+                    "EXECUTION_FACT_CANONICAL_POSITION_MISMATCH",
+                    "venue position does not prove the exact post-intent open quantity",
+                )
+            latest_order_or_fill_time = session.execute(
+                select(ExecutionFact.event_time)
+                .where(
+                    ExecutionFact.order_intent_id == intent.order_intent_id,
+                    ExecutionFact.fact_kind.in_(("VENUE_ORDER", "VENUE_FILL")),
+                )
+                .order_by(ExecutionFact.event_time.desc(), ExecutionFact.fact_sequence.desc())
+                .limit(1)
+            ).scalar_one_or_none()
+            if latest_order_or_fill_time is None or snapshot.event_time < latest_order_or_fill_time:
+                raise CommandRejected(
+                    "EXECUTION_FACT_CANONICAL_POSITION_STALE",
+                    "venue position snapshot predates the intent execution evidence",
+                )
+            expected_payload = {
+                "venue_fact_type": "VENUE_POSITION_SNAPSHOT",
+                "venue_fact_id": str(snapshot.venue_position_snapshot_id),
+                "venue_fact_hash": request.venue_fact_hash,
+                "venue_fact_input_link_id": str(link.venue_fact_input_link_id),
+            }
+            if (
+                request.external_fact_id != str(snapshot.venue_position_snapshot_id)
+                or request.target_status != "POSITION_RECONCILED"
+                or request.cumulative_filled_quantity != state.cumulative_filled_quantity
+                or request.known_remaining_quantity != state.known_remaining_quantity
+                or request.zero_fill_confirmed
+                or not request.venue_order_terminal
+                or not state.venue_order_terminal
+                or not request.position_reconciled
+                or request.protection_confirmed
+                or request.event_time != snapshot.event_time
+                or request.received_at != link.received_at
+                or request.source_ref != link.raw_payload_ref
+                or request.evidence_ref != link.evidence_ref
+                or request.payload != expected_payload
+            ):
+                raise CommandRejected(
+                    "EXECUTION_FACT_CANONICAL_SEMANTICS_MISMATCH",
+                    "position reconciliation is not an exact canonical snapshot projection",
+                )
+            return None, snapshot.venue_position_snapshot_id
 
         existing_order_id = session.execute(
             select(ExecutionFact.canonical_venue_order_id)
             .where(
                 ExecutionFact.order_intent_id == intent.order_intent_id,
-                ExecutionFact.fact_contract_version == 3,
+                ExecutionFact.fact_contract_version.in_((3, 4)),
                 ExecutionFact.canonical_venue_order_id.is_not(None),
             )
             .limit(1)
@@ -2012,7 +2119,7 @@ class ExecutionReconciliationService:
                 "EXECUTION_FACT_CANONICAL_SEMANTICS_MISMATCH",
                 "execution transition is not an exact projection of the canonical venue fact",
             )
-        return canonical_order_id
+        return canonical_order_id, None
 
     @staticmethod
     def _order_observation_target(observation: VenueOrderObservation) -> str:

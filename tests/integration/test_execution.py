@@ -37,6 +37,7 @@ from tests.venue_fact_fixtures import (
     execute_venue_fact,
     fill_request,
     order_observation_request,
+    position_snapshot_request,
     venue_fact_envelope,
 )
 from trading_control_plane.capability_certificate_models import CapabilityCertificate
@@ -107,11 +108,14 @@ from trading_control_plane.venue_fact_models import (
     VenueFactInputLink,
     VenueFill,
     VenueOrderObservation,
+    VenuePositionSnapshot,
 )
 from trading_control_plane.venue_facts import (
     FeeEffect,
     VenueFactNormalizationService,
     VenueOrderStatus,
+    VenuePositionDirection,
+    VenuePositionMode,
     VenuePositionSide,
     VenueSide,
 )
@@ -433,7 +437,7 @@ class ExecutionFactDraft:
 
 @dataclass(frozen=True)
 class CanonicalVenueFactContext:
-    fact: VenueOrderObservation | VenueFill
+    fact: VenueOrderObservation | VenueFill | VenuePositionSnapshot
     input_link: VenueFactInputLink
 
 
@@ -602,6 +606,7 @@ def prepare_active_fact_run(
     draft: ExecutionFactDraft | None = None,
     canonical_client_order_id: str | None = None,
     canonical_venue_order_id: str | None = None,
+    position_snapshot_overrides: dict[str, Any] | None = None,
 ) -> tuple[
     ShadowDispatchClaim,
     ExecutionReconciliationRun,
@@ -651,6 +656,7 @@ def prepare_active_fact_run(
     canonical_source = source_type in {
         ReconciliationSourceType.VENUE_ORDERS,
         ReconciliationSourceType.VENUE_FILLS,
+        ReconciliationSourceType.VENUE_POSITIONS,
     }
     version = collect_complete_inputs(
         database,
@@ -688,6 +694,7 @@ def prepare_active_fact_run(
             normalized_at=phase_at,
             canonical_client_order_id=canonical_client_order_id,
             canonical_venue_order_id=canonical_venue_order_id,
+            position_snapshot_overrides=position_snapshot_overrides,
         )
     compared = execute_reconciliation(
         database,
@@ -718,6 +725,7 @@ def _normalize_execution_venue_fact(
     normalized_at: datetime,
     canonical_client_order_id: str | None,
     canonical_venue_order_id: str | None,
+    position_snapshot_overrides: dict[str, Any] | None,
 ) -> CanonicalVenueFactContext:
     venue_order_id = canonical_venue_order_id or f"shadow-{claim.client_order_id}"
     observed_client_order_id = canonical_client_order_id or claim.client_order_id
@@ -746,6 +754,27 @@ def _normalize_execution_venue_fact(
             received_at=normalized_at,
         )
         command_type = VenueFactNormalizationService.fill_command_type
+    elif reconciliation_input.source_type == ReconciliationSourceType.VENUE_POSITIONS.value:
+        position_values: dict[str, Any] = {
+            "venue_update_id": draft.external_fact_id,
+            "instrument_id": intent.instrument_id,
+            "position_mode": VenuePositionMode(scope.position_mode),
+            "position_side": position_side,
+            "margin_mode": scope.margin_mode,
+            "collateral_pool_id": scope.collateral_pool_id,
+            "direction": VenuePositionDirection(intent.position_side),
+            "quantity": intent.current_position_quantity + draft.filled,
+            "event_time": event_time,
+            "venue_observed_at": event_time,
+            "received_at": normalized_at,
+        }
+        position_values.update(position_snapshot_overrides or {})
+        request = position_snapshot_request(
+            reconciliation_input,
+            now=normalized_at,
+            **position_values,
+        )
+        command_type = VenueFactNormalizationService.position_command_type
     else:
         order_status = {
             "VENUE_ACKNOWLEDGED": VenueOrderStatus.OPEN,
@@ -794,6 +823,8 @@ def _normalize_execution_venue_fact(
     with database.session_factory.begin() as session:
         if command_type == VenueFactNormalizationService.fill_command_type:
             fact = session.get(VenueFill, fact_id)
+        elif command_type == VenueFactNormalizationService.position_command_type:
+            fact = session.get(VenuePositionSnapshot, fact_id)
         else:
             fact = session.get(VenueOrderObservation, fact_id)
         input_link = session.get(VenueFactInputLink, link_id)
@@ -814,6 +845,7 @@ def bind_fact_request(
     fact_kind, source_type = _fact_kind_and_source(draft.status)
     venue_order_observation_id = None
     venue_fill_id = None
+    venue_position_snapshot_id = None
     venue_fact_input_link_id = None
     venue_fact_hash = None
     if canonical_context is None:
@@ -840,19 +872,25 @@ def bind_fact_request(
             canonical_venue_order_id = fact.venue_order_id
             venue_fact_type = "VENUE_ORDER_OBSERVATION"
             external_fact_id = str(fact.venue_order_observation_id)
-        else:
+        elif isinstance(fact, VenueFill):
             venue_fill_id = fact.venue_fill_id
             venue_fact_hash = fact.fill_hash
             canonical_venue_order_id = fact.venue_order_id
             venue_fact_type = "VENUE_FILL"
             external_fact_id = str(fact.venue_fill_id)
+        else:
+            venue_position_snapshot_id = fact.venue_position_snapshot_id
+            venue_fact_hash = fact.snapshot_hash
+            venue_fact_type = "VENUE_POSITION_SNAPSHOT"
+            external_fact_id = str(fact.venue_position_snapshot_id)
         payload = {
             "venue_fact_type": venue_fact_type,
             "venue_fact_id": external_fact_id,
             "venue_fact_hash": venue_fact_hash,
             "venue_fact_input_link_id": str(venue_fact_input_link_id),
-            "canonical_venue_order_id": canonical_venue_order_id,
         }
+        if not isinstance(fact, VenuePositionSnapshot):
+            payload["canonical_venue_order_id"] = canonical_venue_order_id
     values: dict[str, Any] = {
         "fact_sequence": draft.sequence,
         "fact_kind": fact_kind,
@@ -876,6 +914,7 @@ def bind_fact_request(
         "dispatch_claim_hash": claim.claim_hash,
         "venue_order_observation_id": venue_order_observation_id,
         "venue_fill_id": venue_fill_id,
+        "venue_position_snapshot_id": venue_position_snapshot_id,
         "venue_fact_input_link_id": venue_fact_input_link_id,
         "venue_fact_hash": venue_fact_hash,
         "source_ref": source_ref,
@@ -1098,7 +1137,7 @@ def test_partial_fill_then_canonical_cancel_releases_only_unfilled_quantity(
         assert exposure.released_quantity == Decimal("0.3")
         assert exposure.reserved_quantity == 0
         assert [fact.fact_kind for fact in facts] == ["VENUE_FILL", "VENUE_ORDER"]
-        assert all(fact.fact_contract_version == 3 for fact in facts)
+        assert all(fact.fact_contract_version == 4 for fact in facts)
         assert facts[0].canonical_venue_order_id == facts[1].canonical_venue_order_id
 
 
