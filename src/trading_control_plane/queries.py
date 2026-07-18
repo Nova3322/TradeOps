@@ -5,13 +5,14 @@ from decimal import Decimal
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import select
+from sqlalchemy import select, text
 
 from trading_control_plane.database import Database
 from trading_control_plane.domain import DomainRejected, PrincipalType, Role
 from trading_control_plane.models import (
     AccountEquity,
     Approval,
+    AuditEvent,
     Campaign,
     CapabilityGate,
     CapitalAutomationPolicy,
@@ -39,6 +40,13 @@ from trading_control_plane.service import TradingService
 
 def _iso(value: datetime | None) -> str | None:
     return None if value is None else value.astimezone(UTC).isoformat()
+
+
+def _uuid_or_none(value: str) -> UUID | None:
+    try:
+        return UUID(value)
+    except ValueError:
+        return None
 
 
 class TradingQueries:
@@ -577,6 +585,386 @@ class TradingQueries:
                             user_id, "capital.view", item.account_id, item.venue
                         )
                     ],
+                },
+            }
+
+    def actual_results(
+        self,
+        user_id: UUID,
+        environment: str,
+        *,
+        source: str | None = None,
+        source_type: str | None = None,
+        source_candidate_id: str | None = None,
+        source_version: str | None = None,
+        venue: str | None = None,
+        account_id: str | None = None,
+        instrument_id: UUID | None = None,
+        direction: str | None = None,
+        risk_tier: str | None = None,
+        campaign_id: UUID | None = None,
+        from_time: datetime | None = None,
+        to_time: datetime | None = None,
+    ) -> dict[str, Any]:
+        if environment not in {"SHADOW", "TESTNET", "LIVE"}:
+            raise DomainRejected("ENVIRONMENT_INVALID", "results require an exact environment")
+        if from_time is not None and to_time is not None and from_time > to_time:
+            raise DomainRejected("TIME_RANGE_INVALID", "results from_time must not exceed to_time")
+        with self.database.session_factory() as session:
+            campaign_query = select(Campaign).where(Campaign.environment == environment)
+            for field, value in (
+                (Campaign.venue, venue),
+                (Campaign.account_id, account_id),
+                (Campaign.instrument_id, instrument_id),
+                (Campaign.direction, direction),
+                (Campaign.campaign_id, campaign_id),
+            ):
+                if value is not None:
+                    campaign_query = campaign_query.where(field == value)
+            if from_time is not None:
+                campaign_query = campaign_query.where(Campaign.updated_at >= from_time)
+            if to_time is not None:
+                campaign_query = campaign_query.where(Campaign.updated_at <= to_time)
+            campaigns = [
+                item
+                for item in session.scalars(
+                    campaign_query.order_by(Campaign.updated_at, Campaign.campaign_id)
+                ).all()
+                if self.service.can_user(user_id, "view", item.account_id, item.venue)
+            ]
+            rows: list[dict[str, Any]] = []
+            totals: dict[str, dict[str, Decimal]] = {}
+            for campaign in campaigns:
+                proposal = session.get(Proposal, campaign.proposal_id)
+                proposal_source_type = (
+                    None
+                    if proposal is None
+                    else (proposal.strategy_id if proposal.source == "SYSTEM" else "MANUAL")
+                )
+                if source is not None and (proposal is None or proposal.source != source):
+                    continue
+                if source_type is not None and proposal_source_type != source_type:
+                    continue
+                if source_candidate_id is not None and (
+                    proposal is None or proposal.source_candidate_id != source_candidate_id
+                ):
+                    continue
+                if source_version is not None and (
+                    proposal is None or proposal.strategy_version != source_version
+                ):
+                    continue
+                if risk_tier is not None and (proposal is None or proposal.risk_tier != risk_tier):
+                    continue
+                instrument = session.get(Instrument, campaign.instrument_id)
+                intents = session.scalars(
+                    select(OrderIntent).where(OrderIntent.campaign_id == campaign.campaign_id)
+                ).all()
+                intent_ids = [item.intent_id for item in intents]
+                fills = (
+                    session.scalars(
+                        select(VenueFill)
+                        .where(VenueFill.order_intent_id.in_(intent_ids))
+                        .order_by(VenueFill.executed_at, VenueFill.venue_fill_id)
+                    ).all()
+                    if intent_ids
+                    else []
+                )
+                funding = session.scalars(
+                    select(FundingPayment).where(FundingPayment.campaign_id == campaign.campaign_id)
+                ).all()
+                currency = "UNKNOWN" if instrument is None else instrument.collateral_currency
+                fees = sum((item.fee for item in fills), Decimal(0))
+                slippage = sum((item.slippage_cost for item in fills), Decimal(0))
+                funding_total = sum((item.amount for item in funding), Decimal(0))
+                bucket = totals.setdefault(
+                    currency,
+                    {
+                        "realized_pnl": Decimal(0),
+                        "unrealized_pnl": Decimal(0),
+                        "final_pnl": Decimal(0),
+                        "fees": Decimal(0),
+                        "funding": Decimal(0),
+                        "slippage": Decimal(0),
+                    },
+                )
+                bucket["realized_pnl"] += campaign.realized_pnl
+                bucket["unrealized_pnl"] += campaign.unrealized_pnl
+                bucket["final_pnl"] += campaign.final_pnl
+                bucket["fees"] += fees
+                bucket["funding"] += funding_total
+                bucket["slippage"] += slippage
+                rows.append(
+                    {
+                        "campaign_id": str(campaign.campaign_id),
+                        "environment": campaign.environment,
+                        "actuality": {
+                            "SHADOW": "SYNTHETIC_RECORDED_FACTS",
+                            "TESTNET": "NON_PRODUCTION_RECORDED_FACTS",
+                            "LIVE": "LIVE_RECORDED_FACTS",
+                        }[campaign.environment],
+                        "status": campaign.status,
+                        "account_id": campaign.account_id,
+                        "venue": campaign.venue,
+                        "instrument_id": str(campaign.instrument_id),
+                        "symbol": None if instrument is None else instrument.symbol,
+                        "currency": currency,
+                        "direction": campaign.direction,
+                        "source": None if proposal is None else proposal.source,
+                        "source_type": proposal_source_type,
+                        "source_candidate_id": (
+                            None if proposal is None else proposal.source_candidate_id
+                        ),
+                        "source_version": (None if proposal is None else proposal.strategy_version),
+                        "risk_tier": None if proposal is None else proposal.risk_tier,
+                        "fill_count": len(fills),
+                        "filled_quantity": str(sum((item.quantity for item in fills), Decimal(0))),
+                        "realized_pnl": str(campaign.realized_pnl),
+                        "unrealized_pnl": str(campaign.unrealized_pnl),
+                        "final_pnl": str(campaign.final_pnl),
+                        "fees": str(fees),
+                        "funding": str(funding_total),
+                        "slippage": str(slippage),
+                        "created_at": _iso(campaign.created_at),
+                        "updated_at": _iso(campaign.updated_at),
+                    }
+                )
+
+            curves: dict[str, dict[str, Any]] = {}
+            for currency in totals:
+                cumulative = Decimal(0)
+                peak = Decimal(0)
+                maximum_drawdown = Decimal(0)
+                points: list[dict[str, str | None]] = []
+                for row in rows:
+                    if row["currency"] != currency or row["status"] != "CLOSED":
+                        continue
+                    cumulative += Decimal(str(row["final_pnl"]))
+                    peak = max(peak, cumulative)
+                    drawdown = peak - cumulative
+                    maximum_drawdown = max(maximum_drawdown, drawdown)
+                    points.append(
+                        {
+                            "campaign_id": str(row["campaign_id"]),
+                            "at": None if row["updated_at"] is None else str(row["updated_at"]),
+                            "cumulative_pnl": str(cumulative),
+                            "running_peak": str(peak),
+                            "drawdown": str(drawdown),
+                        }
+                    )
+                curves[currency] = {
+                    "points": points,
+                    "maximum_drawdown": str(maximum_drawdown),
+                    "unit": currency,
+                    "percentage_available": False,
+                }
+            return {
+                "environment": environment,
+                "filters": {
+                    "source": source,
+                    "source_type": source_type,
+                    "source_candidate_id": source_candidate_id,
+                    "source_version": source_version,
+                    "venue": venue,
+                    "account_id": account_id,
+                    "instrument_id": None if instrument_id is None else str(instrument_id),
+                    "direction": direction,
+                    "risk_tier": risk_tier,
+                    "campaign_id": None if campaign_id is None else str(campaign_id),
+                    "from": _iso(from_time),
+                    "to": _iso(to_time),
+                },
+                "environment_notice": {
+                    "SHADOW": "Synthetic facts; not exchange execution or profit",
+                    "TESTNET": "Recorded non-production facts; not live profit",
+                    "LIVE": "Recorded LIVE facts; no profitability guarantee",
+                }[environment],
+                "campaigns": rows,
+                "totals_by_currency": {
+                    currency: {key: str(value) for key, value in values.items()}
+                    for currency, values in totals.items()
+                },
+                "curves_by_currency": curves,
+            }
+
+    def audit_timeline(
+        self, user_id: UUID, environment: str, *, limit: int = 200
+    ) -> list[dict[str, Any]]:
+        if environment not in {"SHADOW", "TESTNET", "LIVE"}:
+            raise DomainRejected("ENVIRONMENT_INVALID", "audit requires an exact environment")
+        with self.database.session_factory() as session:
+            object_ids: set[str] = set()
+            proposals = [
+                item
+                for item in session.scalars(
+                    select(Proposal).where(Proposal.environment == environment)
+                ).all()
+                if self.service.can_user(user_id, "view", item.account_id, item.venue)
+            ]
+            proposal_ids = [item.proposal_id for item in proposals]
+            object_ids.update(str(item.proposal_id) for item in proposals)
+            campaigns = [
+                item
+                for item in session.scalars(
+                    select(Campaign).where(Campaign.environment == environment)
+                ).all()
+                if self.service.can_user(user_id, "view", item.account_id, item.venue)
+            ]
+            campaign_ids = [item.campaign_id for item in campaigns]
+            object_ids.update(str(item.campaign_id) for item in campaigns)
+            if proposal_ids:
+                object_ids.update(
+                    str(item.decision_id)
+                    for item in session.scalars(
+                        select(RiskDecision).where(RiskDecision.proposal_id.in_(proposal_ids))
+                    ).all()
+                )
+                object_ids.update(
+                    str(item.authorization_id)
+                    for item in session.scalars(
+                        select(TradingAuthorization).where(
+                            TradingAuthorization.proposal_id.in_(proposal_ids)
+                        )
+                    ).all()
+                )
+            if campaign_ids:
+                intents = session.scalars(
+                    select(OrderIntent).where(OrderIntent.campaign_id.in_(campaign_ids))
+                ).all()
+                intent_ids = [item.intent_id for item in intents]
+                object_ids.update(str(item.intent_id) for item in intents)
+                object_ids.update(
+                    str(item.reservation_id)
+                    for item in session.scalars(
+                        select(RiskReservation).where(RiskReservation.campaign_id.in_(campaign_ids))
+                    ).all()
+                )
+                object_ids.update(
+                    str(item.funding_payment_id)
+                    for item in session.scalars(
+                        select(FundingPayment).where(FundingPayment.campaign_id.in_(campaign_ids))
+                    ).all()
+                )
+                object_ids.update(
+                    str(item.reconciliation_id)
+                    for item in session.scalars(
+                        select(ReconciliationRun).where(
+                            ReconciliationRun.campaign_id.in_(campaign_ids)
+                        )
+                    ).all()
+                )
+                if intent_ids:
+                    object_ids.update(
+                        str(item.venue_order_fact_id)
+                        for item in session.scalars(
+                            select(VenueOrder).where(VenueOrder.order_intent_id.in_(intent_ids))
+                        ).all()
+                    )
+                    object_ids.update(
+                        str(item.venue_fill_fact_id)
+                        for item in session.scalars(
+                            select(VenueFill).where(VenueFill.order_intent_id.in_(intent_ids))
+                        ).all()
+                    )
+            transfer_proposals = [
+                item
+                for item in session.scalars(
+                    select(TransferProposal).where(TransferProposal.environment == environment)
+                ).all()
+                if self.service.can_user(user_id, "capital.view", item.account_id, item.venue)
+            ]
+            transfer_proposal_ids = [item.transfer_proposal_id for item in transfer_proposals]
+            object_ids.update(str(item) for item in transfer_proposal_ids)
+            if transfer_proposal_ids:
+                transfer_authorizations = session.scalars(
+                    select(TransferAuthorization).where(
+                        TransferAuthorization.transfer_proposal_id.in_(transfer_proposal_ids)
+                    )
+                ).all()
+                authorization_ids = [
+                    item.transfer_authorization_id for item in transfer_authorizations
+                ]
+                object_ids.update(str(item) for item in authorization_ids)
+                if authorization_ids:
+                    object_ids.update(
+                        str(item.capital_transfer_id)
+                        for item in session.scalars(
+                            select(CapitalTransfer).where(
+                                CapitalTransfer.transfer_authorization_id.in_(authorization_ids)
+                            )
+                        ).all()
+                    )
+            policies = [
+                item
+                for item in session.scalars(
+                    select(CapitalAutomationPolicy).where(
+                        CapitalAutomationPolicy.environment == environment
+                    )
+                ).all()
+                if self.service.can_user(user_id, "capital.view", item.account_id, item.venue)
+            ]
+            object_ids.update(str(item.policy_id) for item in policies)
+            if not object_ids:
+                return []
+            events = session.scalars(
+                select(AuditEvent)
+                .where(AuditEvent.object_id.in_(object_ids))
+                .order_by(AuditEvent.created_at.desc(), AuditEvent.audit_event_id)
+                .limit(limit)
+            ).all()
+            parsed_actor_ids = {
+                item.actor_id: parsed
+                for item in events
+                if (parsed := _uuid_or_none(item.actor_id)) is not None
+            }
+            actors = {
+                item.user_id: item.username
+                for item in session.scalars(
+                    select(User).where(User.user_id.in_(parsed_actor_ids.values()))
+                ).all()
+            }
+            return [
+                {
+                    "audit_event_id": str(item.audit_event_id),
+                    "actor_id": item.actor_id,
+                    "actor": actors.get(parsed_actor_ids[item.actor_id], item.actor_id)
+                    if item.actor_id in parsed_actor_ids
+                    else item.actor_id,
+                    "event_type": item.event_type,
+                    "object_type": item.object_type,
+                    "object_id": item.object_id,
+                    "reason": item.reason,
+                    "correlation_id": str(item.correlation_id),
+                    "idempotency_key": item.idempotency_key,
+                    "object_version": item.object_version,
+                    "created_at": _iso(item.created_at),
+                }
+                for item in events
+            ]
+
+    def runtime_snapshot(self, user_id: UUID) -> dict[str, Any]:
+        self.user_context(user_id)
+        with self.database.session_factory() as session:
+            gates = session.scalars(
+                select(CapabilityGate).order_by(CapabilityGate.capability_key)
+            ).all()
+            revision = session.execute(text("SELECT version_num FROM alembic_version")).scalar_one()
+            table_count = session.execute(
+                text(
+                    "SELECT count(*) FROM information_schema.tables "
+                    "WHERE table_schema = 'public' AND table_name <> 'alembic_version'"
+                )
+            ).scalar_one()
+            return {
+                "database_ready": self.database.is_ready()[0],
+                "schema_revision": revision,
+                "business_table_count": int(table_count),
+                "capability_gates": {
+                    item.capability_key: {
+                        "status": item.status,
+                        "reason": item.reason,
+                        "updated_at": _iso(item.updated_at),
+                    }
+                    for item in gates
                 },
             }
 

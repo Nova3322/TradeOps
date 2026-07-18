@@ -1,7 +1,7 @@
 # Trading 交易系统
 
 > 状态日期：2026-07-19
-> 当前状态：M8 默认关闭的自动利润归集与下一周期运营补充候选；LIVE 订单和真实资金发送不可用
+> 当前状态：M9 已提供分环境实际结果、作用域审计、运行状态和可恢复备份基线；LIVE 订单和真实资金发送不可用
 
 本项目面向一个资本所有者、一个内部组织和多个内部用户。用户可以提交和审核提案、查看仓位、处理异常；系统在风险可控的前提下辅助执行交易并判断是否赚钱。不开放外部注册，不管理第三方资金，不建设机构级多租户、通用合规或通用认证平台。
 
@@ -36,8 +36,8 @@
 ## 当前代码入口
 
 - 进程：`uv run trading-api`
-- Web/PWA：提案/审核、Campaign、AUTO_ADD 候选、原子减仓/退出、全局只收紧风险动作、`/venues/binance` 只读场所事实页和 `/capital` 资金中心；Hyperliquid 当前只有 HTTP 入口，没有专属页面
-- HTTP：健康检查、内部会话、Perptape 机会、Proposal/Review/Risk/Authorization、SHADOW/TESTNET Campaign、AUTO_ADD/减仓/退出、资金事实/提案/授权/Mock 划转，以及 Binance、Hyperliquid Core 的只读和受控 TESTNET API
+- Web/PWA：提案/审核、Campaign、AUTO_ADD 候选、原子减仓/退出、全局只收紧风险动作、`/venues/binance` 只读场所事实页、`/capital` 资金中心和 `/results` 实际结果/审计/运行状态页；Hyperliquid 当前只有 HTTP 入口，没有专属页面
+- HTTP：健康检查、内部会话、Perptape 机会、Proposal/Review/Risk/Authorization、SHADOW/TESTNET Campaign、AUTO_ADD/减仓/退出、资金事实/提案/授权/Mock 划转、按环境结果/审计/运行状态，以及 Binance、Hyperliquid Core 的只读和受控 TESTNET API
 - 内部业务：`trading_control_plane.service.TradingService`
 - 纯计算：`evaluate_risk`、`select_target_position`、`compute_pnl`
 - 数据库：PostgreSQL，Alembic head `20260718_0001`
@@ -61,9 +61,12 @@ uv run ruff check src tests
 uv run mypy src
 TEST_DATABASE_URL='postgresql+psycopg://.../trading_test' uv run pytest --cov=trading_control_plane
 TRADING_DATABASE_URL='postgresql+psycopg://.../trading_test' uv run alembic upgrade head
+TRADING_DATABASE_URL='postgresql+psycopg://.../trading_test' ./scripts/backup_postgres.sh /absolute/path/trading.dump
+TRADING_DATABASE_URL='postgresql+psycopg://.../trading_restore_test' ./scripts/restore_test_postgres.sh /absolute/path/trading.dump
 ```
 
 集成测试数据库名必须以 `_test` 结尾。测试夹具会删除并重建其 `public` schema，禁止指向任何真实交易数据库。
+恢复脚本同样硬限制到预先创建、可丢弃的 `*_test` 数据库；当前不存在生产恢复自动化，不能把本地演练命令用于真实数据库。
 
 本机敏感值只放在 `.env.local`；可提交变量名模板为 `.env.example`。不得把密钥值写入代码、文档、日志或测试制品。
 

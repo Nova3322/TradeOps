@@ -222,7 +222,25 @@ Binance、Hyperliquid Core、每个 HIP-3 DEX、账户 / 子账户、margin mode
 - 历史账不得直接修改；更正使用可追踪补偿事件。
 - 备份恢复演练必须证明授权、意图、订单、成交、保护、Heat、权限、资金和审计时间线一致。
 - 恢复成功不等于可增险；还需根因、修复回放、冷却和人工逐级解锁。
-- 演练结果进入 `docs/05-quality/测试验证与发布计划.md` 的证据包。
+- 演练结果直接记录在当前实现基线、变更提交或事故复盘中；不为每次演练建立独立证据平台。
+
+当前预生产脚本入口：
+
+```bash
+TRADING_DATABASE_URL="$SOURCE_TEST_DATABASE_URL" \
+  ./scripts/backup_postgres.sh /absolute/path/trading.dump
+
+TRADING_DATABASE_URL="$DISPOSABLE_RESTORE_DATABASE_URL" \
+  ./scripts/restore_test_postgres.sh /absolute/path/trading.dump
+```
+
+目标恢复数据库必须预先创建，名称必须以 `_test` 结尾；脚本会清理并覆盖该目标，硬拒绝其他名称。容器内 PostgreSQL 可额外设置 `TRADING_PG_CONTAINER`。当前脚本不是生产灾备自动化，不能指向共享库或真实交易库。
+
+2026-07-19 已完成一次本地演练：custom-format 归档可由 `pg_restore --list` 解析；独立 `trading_m9_restore_test` 恢复后有 26 张业务表、Alembic revision `20260718_0001`、五个默认关闭 Gate，数据库 readiness 与 `alembic check` 均通过；演练库和归档随后删除。
+
+### 10.1 当前本地资源观测
+
+在单个 FastAPI 进程和单个一次性 PostgreSQL 容器上，对 readiness 连续请求 20 次后进行一次观测：API 约 91,440 KiB RSS、0.1% CPU；PostgreSQL 容器约 166.9 MiB、0.03% CPU、7 个进程。当前实现没有常驻自动资金、Telegram、Perptape、Binance 或 Hyperliquid worker。上述数字只描述该开发机、该时刻，不是压测结果、容量规划或生产 SLO；真实部署前仍需在目标环境测量延迟、连接数、数据库增长和峰值资源。
 
 ## 11. 错误预算与持续改进
 

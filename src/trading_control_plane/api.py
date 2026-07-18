@@ -11,7 +11,7 @@ from typing import Any, Protocol
 from urllib.parse import quote
 from uuid import UUID
 
-from fastapi import Cookie, Depends, FastAPI, HTTPException, Request, Response, status
+from fastapi import Cookie, Depends, FastAPI, HTTPException, Query, Request, Response, status
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
@@ -2132,6 +2132,101 @@ def create_app(
     ) -> dict[str, Any]:
         return {"data": queries().capital_center(identity.user_id), "as_of": _now().isoformat()}
 
+    @app.get("/api/results")
+    def actual_results(
+        environment: str = Query(default="SHADOW", pattern="^(SHADOW|TESTNET|LIVE)$"),
+        source: str | None = Query(default=None, pattern="^(SYSTEM|MANUAL)$"),
+        source_type: str | None = Query(default=None, min_length=1, max_length=120),
+        source_candidate_id: str | None = Query(default=None, min_length=1, max_length=160),
+        source_version: str | None = Query(default=None, min_length=1, max_length=120),
+        venue: str | None = Query(default=None, min_length=1, max_length=64),
+        account_id: str | None = Query(default=None, min_length=1, max_length=120),
+        instrument_id: UUID | None = None,
+        direction: str | None = Query(default=None, pattern="^(LONG|SHORT)$"),
+        risk_tier: str | None = Query(default=None, pattern="^(LOW|MEDIUM|HIGH)$"),
+        campaign_id: UUID | None = None,
+        from_time: datetime | None = None,
+        to_time: datetime | None = None,
+        identity: SessionIdentity = identity_dependency,
+    ) -> dict[str, Any]:
+        return {
+            "data": queries().actual_results(
+                identity.user_id,
+                environment,
+                source=source,
+                source_type=source_type,
+                source_candidate_id=source_candidate_id,
+                source_version=source_version,
+                venue=venue,
+                account_id=account_id,
+                instrument_id=instrument_id,
+                direction=direction,
+                risk_tier=risk_tier,
+                campaign_id=campaign_id,
+                from_time=from_time,
+                to_time=to_time,
+            ),
+            "as_of": _now().isoformat(),
+        }
+
+    @app.get("/api/audit")
+    def audit_timeline(
+        environment: str = Query(default="SHADOW", pattern="^(SHADOW|TESTNET|LIVE)$"),
+        limit: int = Query(default=200, ge=1, le=500),
+        identity: SessionIdentity = identity_dependency,
+    ) -> dict[str, Any]:
+        return {
+            "environment": environment,
+            "data": queries().audit_timeline(identity.user_id, environment, limit=limit),
+            "as_of": _now().isoformat(),
+        }
+
+    @app.get("/api/runtime/status")
+    def runtime_status(
+        identity: SessionIdentity = identity_dependency,
+    ) -> dict[str, Any]:
+        snapshot = queries().runtime_snapshot(identity.user_id)
+        snapshot.update(
+            {
+                "application_version": __version__,
+                "runtime_environment": resolved_settings.environment,
+                "process_model": "one FastAPI process plus PostgreSQL",
+                "external_boundaries": {
+                    "perptape": {
+                        "configured": bool(resolved_settings.perptape_api_key),
+                        "mode": "READ_ONLY",
+                    },
+                    "binance_read_only": {
+                        "enabled": resolved_settings.binance_read_only_enabled,
+                        "configured": bool(
+                            resolved_settings.binance_api_key
+                            and resolved_settings.binance_api_secret
+                        ),
+                        "fact_environment": resolved_settings.binance_fact_environment,
+                    },
+                    "binance_testnet_send": {
+                        "enabled": resolved_settings.binance_testnet_order_send_enabled,
+                        "configured": bool(
+                            resolved_settings.binance_testnet_api_key
+                            and resolved_settings.binance_testnet_api_secret
+                        ),
+                    },
+                    "hyperliquid_read_only": {
+                        "enabled": resolved_settings.hyperliquid_read_only_enabled,
+                        "configured": bool(resolved_settings.hyperliquid_account_address),
+                        "fact_environment": resolved_settings.hyperliquid_fact_environment,
+                    },
+                    "hyperliquid_testnet_send": {
+                        "enabled": resolved_settings.hyperliquid_testnet_order_send_enabled,
+                        "signer_injected": resolved_hyperliquid_testnet.configured,
+                    },
+                    "capital_transfer": {"mode": "MOCK_ONLY", "real_configured": False},
+                    "telegram": {"mode": "MOCK_ONLY", "network_configured": False},
+                },
+            }
+        )
+        return {"data": snapshot, "as_of": _now().isoformat()}
+
     @app.post("/api/capital/balances/mock")
     def record_mock_capital_balance(
         payload: CapitalBalanceFactRequest,
@@ -2590,6 +2685,7 @@ def create_app(
         @app.get("/risk", include_in_schema=False)
         @app.get("/exceptions", include_in_schema=False)
         @app.get("/capital", include_in_schema=False)
+        @app.get("/results", include_in_schema=False)
         @app.get("/venues/binance", include_in_schema=False)
         @app.get("/proposals/{proposal_id}", include_in_schema=False)
         @app.get("/campaigns/{campaign_id}", include_in_schema=False)
