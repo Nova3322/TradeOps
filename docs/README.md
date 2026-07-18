@@ -229,6 +229,7 @@ docs/
 | 实现 | [WP-0048：唯一目标仓位仲裁器](08-implementation/WP-0048-唯一目标仓位仲裁器.md) | 纯规则合并硬止损、趋势、去杠杆与系统减仓候选，分别选择更小 target 和更高 urgency，固定 reduce-only |
 | 实现 | [WP-0049：服务端当前仓位目标仲裁绑定](08-implementation/WP-0049-服务端当前仓位目标仲裁绑定.md) | 服务端解析 fresh canonical binding/quantity 后仲裁，拒绝 caller current-position substitution，不生成 OrderIntent |
 | 实现 | [WP-0050：Canonical 保护失效退出候选](08-implementation/WP-0050-Canonical保护失效退出候选.md) | exact protection 返回 CLEAR；缺失、陈旧、UNKNOWN 或 binding conflict 生成服务端 zero-target IMMEDIATE 候选，不发送订单 |
+| 实现 | [WP-0051：Campaign 耐久目标仓位事实](08-implementation/WP-0051-Campaign耐久目标仓位事实.md) | Campaign 保存不可变、版本化、只收紧 target/reason fact；zero target 原子进入 CLOSING，仍不创建 OrderIntent |
 
 ## 完整交付与能力激活
 

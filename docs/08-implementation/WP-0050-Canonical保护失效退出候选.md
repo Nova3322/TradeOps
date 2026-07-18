@@ -7,8 +7,8 @@ WP-0050 新增 `CampaignProtectionExitCandidateService`：服务端读取 WP-004
 binding 和 exact-scope canonical current protection；保护缺失、陈旧、来自未来、UNKNOWN 或与当前仓位不一致时，
 生成 `target=0 / IMMEDIATE` 的系统风险退出候选。
 
-本包只产生 query-time evaluation 和 WP-0048 输入，不持久化 target、不创建 OrderIntent、不申请 sender claim，
-也不调用 OMS、Freqtrade、VenueAdapter 或场所接口。
+本包只产生 query-time evaluation 和 WP-0048 输入，不创建 OrderIntent、不申请 sender claim，也不调用 OMS、
+Freqtrade、VenueAdapter 或场所接口。后续 WP-0051 已由 Campaign 保存不可变 target/reason fact。
 
 ## 2. 保护健康判定
 
@@ -74,7 +74,7 @@ trading_campaign_protection_exit_evaluations_total{result}
 
 仍未完成：
 
-- durable Campaign target fact、revision、去重/替换与并发锁；
+- durable fact 已由 WP-0051 建立；与活动/Unknown 退出 intent 的 revision、替换和并发互斥仍待实现；
 - 独立 stop-policy/market observation、趋势退出、动态去杠杆及其他系统风险候选；
 - reduce-only OrderIntent、sender claim、部分成交、Unknown、重复/超量退出防护与 position reconciliation；
 - 原生保护成交与控制面退出之间的单一所有权、互斥和恢复语义；

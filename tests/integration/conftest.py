@@ -43,6 +43,7 @@ def reset_database(database: Database) -> None:
             text(
                 """
                 TRUNCATE TABLE
+                    campaign_target_position_facts,
                     campaign_fill_economic_entries,
                     campaign_economic_baselines,
                     strategy_evaluation_records,
