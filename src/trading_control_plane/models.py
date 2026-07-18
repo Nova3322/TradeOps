@@ -49,7 +49,7 @@ class RoleAssignment(Base):
     __tablename__ = "role_assignments"
     __table_args__ = (
         CheckConstraint(
-            "role IN ('OBSERVER','PROPOSER','REVIEWER','OPERATOR','SYSTEM_ADMIN')",
+            "role IN ('OBSERVER','PROPOSER','REVIEWER','OPERATOR','TREASURY_ADMIN','SYSTEM_ADMIN')",
             name="ck_role_assignments_role",
         ),
         Index("ix_role_assignments_user", "user_id"),
@@ -147,21 +147,210 @@ class Proposal(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
 
+class TransferProposal(Base):
+    __tablename__ = "transfer_proposals"
+    __table_args__ = (
+        CheckConstraint(
+            "environment IN ('SHADOW','TESTNET','LIVE')",
+            name="ck_transfer_proposals_environment",
+        ),
+        CheckConstraint(
+            "direction IN ('VAULT_TO_VENUE','VENUE_TO_VAULT')",
+            name="ck_transfer_proposals_direction",
+        ),
+        CheckConstraint(
+            "status IN ('DRAFT','PENDING_REVIEW','APPROVED','REJECTED','EXPIRED')",
+            name="ck_transfer_proposals_status",
+        ),
+        CheckConstraint(
+            "((direction = 'VAULT_TO_VENUE' "
+            "AND source_type = 'VAULT' AND destination_type = 'VENUE') "
+            "OR (direction = 'VENUE_TO_VAULT' "
+            "AND source_type = 'VENUE' AND destination_type = 'VAULT'))",
+            name="ck_transfer_proposals_endpoint_direction",
+        ),
+        CheckConstraint("amount > 0", name="ck_transfer_proposals_amount_positive"),
+        CheckConstraint("max_fee >= 0", name="ck_transfer_proposals_fee_nonnegative"),
+        CheckConstraint(
+            "min_received > 0 AND min_received <= amount",
+            name="ck_transfer_proposals_min_received",
+        ),
+        Index("ix_transfer_proposals_status_expires", "status", "expires_at"),
+    )
+
+    transfer_proposal_id: Mapped[UUID] = mapped_column(
+        Uuid(as_uuid=True), primary_key=True, default=uuid4
+    )
+    proposer_id: Mapped[UUID] = mapped_column(ForeignKey("users.user_id"), nullable=False)
+    environment: Mapped[str] = mapped_column(String(16), nullable=False)
+    direction: Mapped[str] = mapped_column(String(24), nullable=False)
+    purpose: Mapped[str] = mapped_column(String(32), nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False)
+    version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    account_id: Mapped[str] = mapped_column(String(120), nullable=False)
+    venue: Mapped[str] = mapped_column(String(64), nullable=False)
+    source_type: Mapped[str] = mapped_column(String(16), nullable=False)
+    source_id: Mapped[str] = mapped_column(String(160), nullable=False)
+    destination_type: Mapped[str] = mapped_column(String(16), nullable=False)
+    destination_id: Mapped[str] = mapped_column(String(160), nullable=False)
+    asset: Mapped[str] = mapped_column(String(32), nullable=False)
+    network: Mapped[str] = mapped_column(String(64), nullable=False)
+    destination_reference: Mapped[str] = mapped_column(String(255), nullable=False)
+    amount: Mapped[Decimal] = mapped_column(AMOUNT, nullable=False)
+    max_fee: Mapped[Decimal] = mapped_column(AMOUNT, nullable=False)
+    min_received: Mapped[Decimal] = mapped_column(AMOUNT, nullable=False)
+    reason: Mapped[str] = mapped_column(Text, nullable=False)
+    frozen_payload: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    semantic_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    frozen_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    correlation_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
 class Approval(Base):
     __tablename__ = "approvals"
     __table_args__ = (
-        UniqueConstraint("proposal_id", "reviewer_id", name="uq_approvals_proposal_reviewer"),
+        CheckConstraint(
+            "(proposal_id IS NOT NULL) <> (transfer_proposal_id IS NOT NULL)",
+            name="ck_approvals_one_parent",
+        ),
         CheckConstraint("decision IN ('APPROVE','REJECT')", name="ck_approvals_decision"),
+        Index(
+            "uq_approvals_proposal_reviewer",
+            "proposal_id",
+            "reviewer_id",
+            unique=True,
+            postgresql_where=text("proposal_id IS NOT NULL"),
+        ),
+        Index(
+            "uq_approvals_transfer_reviewer",
+            "transfer_proposal_id",
+            "reviewer_id",
+            unique=True,
+            postgresql_where=text("transfer_proposal_id IS NOT NULL"),
+        ),
     )
 
     approval_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid4)
-    proposal_id: Mapped[UUID] = mapped_column(
-        ForeignKey("proposals.proposal_id", ondelete="CASCADE"), nullable=False
+    proposal_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("proposals.proposal_id", ondelete="CASCADE"), nullable=True
+    )
+    transfer_proposal_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("transfer_proposals.transfer_proposal_id", ondelete="CASCADE"), nullable=True
     )
     reviewer_id: Mapped[UUID] = mapped_column(ForeignKey("users.user_id"), nullable=False)
     decision: Mapped[str] = mapped_column(String(16), nullable=False)
     reason: Mapped[str] = mapped_column(Text, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class TransferAuthorization(Base):
+    __tablename__ = "transfer_authorizations"
+    __table_args__ = (
+        UniqueConstraint("transfer_proposal_id", name="uq_transfer_authorizations_proposal"),
+        CheckConstraint(
+            "environment IN ('SHADOW','TESTNET','LIVE')",
+            name="ck_transfer_authorizations_environment",
+        ),
+        CheckConstraint(
+            "direction IN ('VAULT_TO_VENUE','VENUE_TO_VAULT')",
+            name="ck_transfer_authorizations_direction",
+        ),
+        CheckConstraint("amount_limit > 0", name="ck_transfer_authorizations_amount_positive"),
+        CheckConstraint("max_fee >= 0", name="ck_transfer_authorizations_fee_nonnegative"),
+        CheckConstraint(
+            "min_received > 0 AND min_received <= amount_limit",
+            name="ck_transfer_authorizations_min_received",
+        ),
+    )
+
+    transfer_authorization_id: Mapped[UUID] = mapped_column(
+        Uuid(as_uuid=True), primary_key=True, default=uuid4
+    )
+    transfer_proposal_id: Mapped[UUID] = mapped_column(
+        ForeignKey("transfer_proposals.transfer_proposal_id"), nullable=False
+    )
+    environment: Mapped[str] = mapped_column(String(16), nullable=False)
+    direction: Mapped[str] = mapped_column(String(24), nullable=False)
+    purpose: Mapped[str] = mapped_column(String(32), nullable=False)
+    account_id: Mapped[str] = mapped_column(String(120), nullable=False)
+    venue: Mapped[str] = mapped_column(String(64), nullable=False)
+    source_type: Mapped[str] = mapped_column(String(16), nullable=False)
+    source_id: Mapped[str] = mapped_column(String(160), nullable=False)
+    destination_type: Mapped[str] = mapped_column(String(16), nullable=False)
+    destination_id: Mapped[str] = mapped_column(String(160), nullable=False)
+    asset: Mapped[str] = mapped_column(String(32), nullable=False)
+    network: Mapped[str] = mapped_column(String(64), nullable=False)
+    destination_reference: Mapped[str] = mapped_column(String(255), nullable=False)
+    amount_limit: Mapped[Decimal] = mapped_column(AMOUNT, nullable=False)
+    max_fee: Mapped[Decimal] = mapped_column(AMOUNT, nullable=False)
+    min_received: Mapped[Decimal] = mapped_column(AMOUNT, nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    actor_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    correlation_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), nullable=False)
+    version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class CapitalTransfer(Base):
+    __tablename__ = "capital_transfers"
+    __table_args__ = (
+        UniqueConstraint("transfer_authorization_id", name="uq_capital_transfers_authorization"),
+        CheckConstraint(
+            "status IN ('SOURCE_RESERVED','SUBMITTED','IN_FLIGHT','DESTINATION_CONFIRMED',"
+            "'SETTLED','UNKNOWN','FAILED_SOURCE_RESTORED','MANUAL_REQUIRED')",
+            name="ck_capital_transfers_status",
+        ),
+        CheckConstraint("gross_amount > 0", name="ck_capital_transfers_gross_positive"),
+        CheckConstraint(
+            "reserved_amount = gross_amount", name="ck_capital_transfers_reserved_exact"
+        ),
+        CheckConstraint(
+            "fee_amount IS NULL OR fee_amount >= 0", name="ck_capital_transfers_fee_nonnegative"
+        ),
+        CheckConstraint(
+            "net_received IS NULL OR net_received > 0",
+            name="ck_capital_transfers_net_positive",
+        ),
+        Index("ix_capital_transfers_status_updated", "status", "updated_at"),
+    )
+
+    capital_transfer_id: Mapped[UUID] = mapped_column(
+        Uuid(as_uuid=True), primary_key=True, default=uuid4
+    )
+    transfer_authorization_id: Mapped[UUID] = mapped_column(
+        ForeignKey("transfer_authorizations.transfer_authorization_id"), nullable=False
+    )
+    environment: Mapped[str] = mapped_column(String(16), nullable=False)
+    account_id: Mapped[str] = mapped_column(String(120), nullable=False)
+    venue: Mapped[str] = mapped_column(String(64), nullable=False)
+    direction: Mapped[str] = mapped_column(String(24), nullable=False)
+    source_id: Mapped[str] = mapped_column(String(160), nullable=False)
+    destination_id: Mapped[str] = mapped_column(String(160), nullable=False)
+    asset: Mapped[str] = mapped_column(String(32), nullable=False)
+    network: Mapped[str] = mapped_column(String(64), nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False)
+    gross_amount: Mapped[Decimal] = mapped_column(AMOUNT, nullable=False)
+    reserved_amount: Mapped[Decimal] = mapped_column(AMOUNT, nullable=False)
+    source_balance_before: Mapped[Decimal] = mapped_column(AMOUNT, nullable=False)
+    destination_balance_before: Mapped[Decimal] = mapped_column(AMOUNT, nullable=False)
+    fee_amount: Mapped[Decimal | None] = mapped_column(AMOUNT, nullable=True)
+    net_received: Mapped[Decimal | None] = mapped_column(AMOUNT, nullable=True)
+    external_transfer_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    transaction_reference: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    reconciliation_status: Mapped[str] = mapped_column(String(32), nullable=False)
+    reconciliation_details: Mapped[list[str]] = mapped_column(JSONB, nullable=False)
+    actor_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    correlation_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), nullable=False)
+    idempotency_key: Mapped[str] = mapped_column(String(160), nullable=False)
+    version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    observed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    reconciled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
 
 class RiskPolicy(Base):
@@ -586,6 +775,21 @@ class AccountEquity(Base):
         CheckConstraint("fact_status IN ('KNOWN','UNKNOWN')", name="ck_account_equities_status"),
         CheckConstraint("equity >= 0", name="ck_account_equities_equity_nonnegative"),
         CheckConstraint("available_balance >= 0", name="ck_account_equities_balance_nonnegative"),
+        CheckConstraint(
+            "withdrawable_balance IS NULL OR withdrawable_balance >= 0",
+            name="ck_account_equities_withdrawable_nonnegative",
+        ),
+        CheckConstraint(
+            "location_type IN ('VENUE','VAULT')", name="ck_account_equities_location_type"
+        ),
+        CheckConstraint(
+            "control_status IN ('CONTROLLED','READ_ONLY','UNKNOWN')",
+            name="ck_account_equities_control_status",
+        ),
+        CheckConstraint(
+            "deposit_status IN ('READY','PENDING','UNKNOWN')",
+            name="ck_account_equities_deposit_status",
+        ),
     )
 
     account_equity_id: Mapped[UUID] = mapped_column(
@@ -596,7 +800,19 @@ class AccountEquity(Base):
     environment: Mapped[str] = mapped_column(String(16), nullable=False)
     equity: Mapped[Decimal] = mapped_column(AMOUNT, nullable=False)
     available_balance: Mapped[Decimal] = mapped_column(AMOUNT, nullable=False)
+    withdrawable_balance: Mapped[Decimal | None] = mapped_column(AMOUNT, nullable=True)
     currency: Mapped[str] = mapped_column(String(32), nullable=False)
+    location_type: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="VENUE", server_default="VENUE"
+    )
+    control_status: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="READ_ONLY", server_default="READ_ONLY"
+    )
+    deposit_status: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="READY", server_default="READY"
+    )
+    network: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    address_reference: Mapped[str | None] = mapped_column(String(255), nullable=True)
     fact_status: Mapped[str] = mapped_column(String(16), nullable=False)
     observed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)

@@ -28,13 +28,36 @@ def upgrade() -> None:
         sa.Column("environment", sa.String(length=16), nullable=False),
         sa.Column("equity", sa.Numeric(precision=38, scale=18), nullable=False),
         sa.Column("available_balance", sa.Numeric(precision=38, scale=18), nullable=False),
+        sa.Column("withdrawable_balance", sa.Numeric(precision=38, scale=18), nullable=True),
         sa.Column("currency", sa.String(length=32), nullable=False),
+        sa.Column("location_type", sa.String(length=16), server_default="VENUE", nullable=False),
+        sa.Column(
+            "control_status", sa.String(length=16), server_default="READ_ONLY", nullable=False
+        ),
+        sa.Column("deposit_status", sa.String(length=16), server_default="READY", nullable=False),
+        sa.Column("network", sa.String(length=64), nullable=True),
+        sa.Column("address_reference", sa.String(length=255), nullable=True),
         sa.Column("fact_status", sa.String(length=16), nullable=False),
         sa.Column("observed_at", sa.DateTime(timezone=True), nullable=False),
         sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
         sa.CheckConstraint("fact_status IN ('KNOWN','UNKNOWN')", name="ck_account_equities_status"),
         sa.CheckConstraint(
             "available_balance >= 0", name="ck_account_equities_balance_nonnegative"
+        ),
+        sa.CheckConstraint(
+            "withdrawable_balance IS NULL OR withdrawable_balance >= 0",
+            name="ck_account_equities_withdrawable_nonnegative",
+        ),
+        sa.CheckConstraint(
+            "location_type IN ('VENUE','VAULT')", name="ck_account_equities_location_type"
+        ),
+        sa.CheckConstraint(
+            "control_status IN ('CONTROLLED','READ_ONLY','UNKNOWN')",
+            name="ck_account_equities_control_status",
+        ),
+        sa.CheckConstraint(
+            "deposit_status IN ('READY','PENDING','UNKNOWN')",
+            name="ck_account_equities_deposit_status",
         ),
         sa.CheckConstraint("equity >= 0", name="ck_account_equities_equity_nonnegative"),
         sa.CheckConstraint(
@@ -298,6 +321,69 @@ def upgrade() -> None:
         postgresql_where=sa.text("source = 'SYSTEM' AND source_candidate_id IS NOT NULL"),
     )
     op.create_table(
+        "transfer_proposals",
+        sa.Column("transfer_proposal_id", sa.Uuid(), nullable=False),
+        sa.Column("proposer_id", sa.Uuid(), nullable=False),
+        sa.Column("environment", sa.String(length=16), nullable=False),
+        sa.Column("direction", sa.String(length=24), nullable=False),
+        sa.Column("purpose", sa.String(length=32), nullable=False),
+        sa.Column("status", sa.String(length=32), nullable=False),
+        sa.Column("version", sa.Integer(), nullable=False),
+        sa.Column("account_id", sa.String(length=120), nullable=False),
+        sa.Column("venue", sa.String(length=64), nullable=False),
+        sa.Column("source_type", sa.String(length=16), nullable=False),
+        sa.Column("source_id", sa.String(length=160), nullable=False),
+        sa.Column("destination_type", sa.String(length=16), nullable=False),
+        sa.Column("destination_id", sa.String(length=160), nullable=False),
+        sa.Column("asset", sa.String(length=32), nullable=False),
+        sa.Column("network", sa.String(length=64), nullable=False),
+        sa.Column("destination_reference", sa.String(length=255), nullable=False),
+        sa.Column("amount", sa.Numeric(precision=38, scale=18), nullable=False),
+        sa.Column("max_fee", sa.Numeric(precision=38, scale=18), nullable=False),
+        sa.Column("min_received", sa.Numeric(precision=38, scale=18), nullable=False),
+        sa.Column("reason", sa.Text(), nullable=False),
+        sa.Column("frozen_payload", postgresql.JSONB(astext_type=sa.Text()), nullable=False),
+        sa.Column("semantic_hash", sa.String(length=64), nullable=False),
+        sa.Column("frozen_at", sa.DateTime(timezone=True), nullable=True),
+        sa.Column("expires_at", sa.DateTime(timezone=True), nullable=False),
+        sa.Column("correlation_id", sa.Uuid(), nullable=False),
+        sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
+        sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
+        sa.CheckConstraint(
+            "environment IN ('SHADOW','TESTNET','LIVE')",
+            name="ck_transfer_proposals_environment",
+        ),
+        sa.CheckConstraint(
+            "direction IN ('VAULT_TO_VENUE','VENUE_TO_VAULT')",
+            name="ck_transfer_proposals_direction",
+        ),
+        sa.CheckConstraint(
+            "status IN ('DRAFT','PENDING_REVIEW','APPROVED','REJECTED','EXPIRED')",
+            name="ck_transfer_proposals_status",
+        ),
+        sa.CheckConstraint(
+            "((direction = 'VAULT_TO_VENUE' "
+            "AND source_type = 'VAULT' AND destination_type = 'VENUE') "
+            "OR (direction = 'VENUE_TO_VAULT' "
+            "AND source_type = 'VENUE' AND destination_type = 'VAULT'))",
+            name="ck_transfer_proposals_endpoint_direction",
+        ),
+        sa.CheckConstraint("amount > 0", name="ck_transfer_proposals_amount_positive"),
+        sa.CheckConstraint("max_fee >= 0", name="ck_transfer_proposals_fee_nonnegative"),
+        sa.CheckConstraint(
+            "min_received > 0 AND min_received <= amount",
+            name="ck_transfer_proposals_min_received",
+        ),
+        sa.ForeignKeyConstraint(["proposer_id"], ["users.user_id"]),
+        sa.PrimaryKeyConstraint("transfer_proposal_id"),
+    )
+    op.create_index(
+        "ix_transfer_proposals_status_expires",
+        "transfer_proposals",
+        ["status", "expires_at"],
+        unique=False,
+    )
+    op.create_table(
         "role_assignments",
         sa.Column("assignment_id", sa.Uuid(), nullable=False),
         sa.Column("user_id", sa.Uuid(), nullable=False),
@@ -306,7 +392,7 @@ def upgrade() -> None:
         sa.Column("venue_scope", sa.String(length=64), nullable=True),
         sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
         sa.CheckConstraint(
-            "role IN ('OBSERVER','PROPOSER','REVIEWER','OPERATOR','SYSTEM_ADMIN')",
+            "role IN ('OBSERVER','PROPOSER','REVIEWER','OPERATOR','TREASURY_ADMIN','SYSTEM_ADMIN')",
             name="ck_role_assignments_role",
         ),
         sa.ForeignKeyConstraint(["user_id"], ["users.user_id"], ondelete="CASCADE"),
@@ -316,19 +402,150 @@ def upgrade() -> None:
     op.create_table(
         "approvals",
         sa.Column("approval_id", sa.Uuid(), nullable=False),
-        sa.Column("proposal_id", sa.Uuid(), nullable=False),
+        sa.Column("proposal_id", sa.Uuid(), nullable=True),
+        sa.Column("transfer_proposal_id", sa.Uuid(), nullable=True),
         sa.Column("reviewer_id", sa.Uuid(), nullable=False),
         sa.Column("decision", sa.String(length=16), nullable=False),
         sa.Column("reason", sa.Text(), nullable=False),
         sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
+        sa.CheckConstraint(
+            "(proposal_id IS NOT NULL) <> (transfer_proposal_id IS NOT NULL)",
+            name="ck_approvals_one_parent",
+        ),
         sa.CheckConstraint("decision IN ('APPROVE','REJECT')", name="ck_approvals_decision"),
         sa.ForeignKeyConstraint(["proposal_id"], ["proposals.proposal_id"], ondelete="CASCADE"),
+        sa.ForeignKeyConstraint(
+            ["transfer_proposal_id"],
+            ["transfer_proposals.transfer_proposal_id"],
+            ondelete="CASCADE",
+        ),
         sa.ForeignKeyConstraint(
             ["reviewer_id"],
             ["users.user_id"],
         ),
         sa.PrimaryKeyConstraint("approval_id"),
-        sa.UniqueConstraint("proposal_id", "reviewer_id", name="uq_approvals_proposal_reviewer"),
+    )
+    op.create_index(
+        "uq_approvals_proposal_reviewer",
+        "approvals",
+        ["proposal_id", "reviewer_id"],
+        unique=True,
+        postgresql_where=sa.text("proposal_id IS NOT NULL"),
+    )
+    op.create_index(
+        "uq_approvals_transfer_reviewer",
+        "approvals",
+        ["transfer_proposal_id", "reviewer_id"],
+        unique=True,
+        postgresql_where=sa.text("transfer_proposal_id IS NOT NULL"),
+    )
+    op.create_table(
+        "transfer_authorizations",
+        sa.Column("transfer_authorization_id", sa.Uuid(), nullable=False),
+        sa.Column("transfer_proposal_id", sa.Uuid(), nullable=False),
+        sa.Column("environment", sa.String(length=16), nullable=False),
+        sa.Column("direction", sa.String(length=24), nullable=False),
+        sa.Column("purpose", sa.String(length=32), nullable=False),
+        sa.Column("account_id", sa.String(length=120), nullable=False),
+        sa.Column("venue", sa.String(length=64), nullable=False),
+        sa.Column("source_type", sa.String(length=16), nullable=False),
+        sa.Column("source_id", sa.String(length=160), nullable=False),
+        sa.Column("destination_type", sa.String(length=16), nullable=False),
+        sa.Column("destination_id", sa.String(length=160), nullable=False),
+        sa.Column("asset", sa.String(length=32), nullable=False),
+        sa.Column("network", sa.String(length=64), nullable=False),
+        sa.Column("destination_reference", sa.String(length=255), nullable=False),
+        sa.Column("amount_limit", sa.Numeric(precision=38, scale=18), nullable=False),
+        sa.Column("max_fee", sa.Numeric(precision=38, scale=18), nullable=False),
+        sa.Column("min_received", sa.Numeric(precision=38, scale=18), nullable=False),
+        sa.Column("expires_at", sa.DateTime(timezone=True), nullable=False),
+        sa.Column("active", sa.Boolean(), nullable=False),
+        sa.Column("actor_id", sa.String(length=255), nullable=False),
+        sa.Column("correlation_id", sa.Uuid(), nullable=False),
+        sa.Column("version", sa.Integer(), nullable=False),
+        sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
+        sa.CheckConstraint(
+            "environment IN ('SHADOW','TESTNET','LIVE')",
+            name="ck_transfer_authorizations_environment",
+        ),
+        sa.CheckConstraint(
+            "direction IN ('VAULT_TO_VENUE','VENUE_TO_VAULT')",
+            name="ck_transfer_authorizations_direction",
+        ),
+        sa.CheckConstraint("amount_limit > 0", name="ck_transfer_authorizations_amount_positive"),
+        sa.CheckConstraint("max_fee >= 0", name="ck_transfer_authorizations_fee_nonnegative"),
+        sa.CheckConstraint(
+            "min_received > 0 AND min_received <= amount_limit",
+            name="ck_transfer_authorizations_min_received",
+        ),
+        sa.ForeignKeyConstraint(
+            ["transfer_proposal_id"], ["transfer_proposals.transfer_proposal_id"]
+        ),
+        sa.PrimaryKeyConstraint("transfer_authorization_id"),
+        sa.UniqueConstraint("transfer_proposal_id", name="uq_transfer_authorizations_proposal"),
+    )
+    op.create_table(
+        "capital_transfers",
+        sa.Column("capital_transfer_id", sa.Uuid(), nullable=False),
+        sa.Column("transfer_authorization_id", sa.Uuid(), nullable=False),
+        sa.Column("environment", sa.String(length=16), nullable=False),
+        sa.Column("account_id", sa.String(length=120), nullable=False),
+        sa.Column("venue", sa.String(length=64), nullable=False),
+        sa.Column("direction", sa.String(length=24), nullable=False),
+        sa.Column("source_id", sa.String(length=160), nullable=False),
+        sa.Column("destination_id", sa.String(length=160), nullable=False),
+        sa.Column("asset", sa.String(length=32), nullable=False),
+        sa.Column("network", sa.String(length=64), nullable=False),
+        sa.Column("status", sa.String(length=32), nullable=False),
+        sa.Column("gross_amount", sa.Numeric(precision=38, scale=18), nullable=False),
+        sa.Column("reserved_amount", sa.Numeric(precision=38, scale=18), nullable=False),
+        sa.Column("source_balance_before", sa.Numeric(precision=38, scale=18), nullable=False),
+        sa.Column("destination_balance_before", sa.Numeric(precision=38, scale=18), nullable=False),
+        sa.Column("fee_amount", sa.Numeric(precision=38, scale=18), nullable=True),
+        sa.Column("net_received", sa.Numeric(precision=38, scale=18), nullable=True),
+        sa.Column("external_transfer_id", sa.String(length=255), nullable=True),
+        sa.Column("transaction_reference", sa.String(length=255), nullable=True),
+        sa.Column("reconciliation_status", sa.String(length=32), nullable=False),
+        sa.Column(
+            "reconciliation_details", postgresql.JSONB(astext_type=sa.Text()), nullable=False
+        ),
+        sa.Column("actor_id", sa.String(length=255), nullable=False),
+        sa.Column("correlation_id", sa.Uuid(), nullable=False),
+        sa.Column("idempotency_key", sa.String(length=160), nullable=False),
+        sa.Column("version", sa.Integer(), nullable=False),
+        sa.Column("observed_at", sa.DateTime(timezone=True), nullable=False),
+        sa.Column("reconciled_at", sa.DateTime(timezone=True), nullable=True),
+        sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
+        sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
+        sa.CheckConstraint(
+            "status IN ('SOURCE_RESERVED','SUBMITTED','IN_FLIGHT','DESTINATION_CONFIRMED',"
+            "'SETTLED','UNKNOWN','FAILED_SOURCE_RESTORED','MANUAL_REQUIRED')",
+            name="ck_capital_transfers_status",
+        ),
+        sa.CheckConstraint("gross_amount > 0", name="ck_capital_transfers_gross_positive"),
+        sa.CheckConstraint(
+            "reserved_amount = gross_amount", name="ck_capital_transfers_reserved_exact"
+        ),
+        sa.CheckConstraint(
+            "fee_amount IS NULL OR fee_amount >= 0",
+            name="ck_capital_transfers_fee_nonnegative",
+        ),
+        sa.CheckConstraint(
+            "net_received IS NULL OR net_received > 0",
+            name="ck_capital_transfers_net_positive",
+        ),
+        sa.ForeignKeyConstraint(
+            ["transfer_authorization_id"],
+            ["transfer_authorizations.transfer_authorization_id"],
+        ),
+        sa.PrimaryKeyConstraint("capital_transfer_id"),
+        sa.UniqueConstraint("transfer_authorization_id", name="uq_capital_transfers_authorization"),
+    )
+    op.create_index(
+        "ix_capital_transfers_status_updated",
+        "capital_transfers",
+        ["status", "updated_at"],
+        unique=False,
     )
     op.create_table(
         "protection_orders",
@@ -809,9 +1026,24 @@ def downgrade() -> None:
     op.drop_index("ix_risk_decisions_proposal_created", table_name="risk_decisions")
     op.drop_table("risk_decisions")
     op.drop_table("protection_orders")
+    op.drop_index("ix_capital_transfers_status_updated", table_name="capital_transfers")
+    op.drop_table("capital_transfers")
+    op.drop_table("transfer_authorizations")
+    op.drop_index(
+        "uq_approvals_transfer_reviewer",
+        table_name="approvals",
+        postgresql_where=sa.text("transfer_proposal_id IS NOT NULL"),
+    )
+    op.drop_index(
+        "uq_approvals_proposal_reviewer",
+        table_name="approvals",
+        postgresql_where=sa.text("proposal_id IS NOT NULL"),
+    )
     op.drop_table("approvals")
     op.drop_index("ix_role_assignments_user", table_name="role_assignments")
     op.drop_table("role_assignments")
+    op.drop_index("ix_transfer_proposals_status_expires", table_name="transfer_proposals")
+    op.drop_table("transfer_proposals")
     op.drop_index(
         "uq_proposals_system_candidate",
         table_name="proposals",

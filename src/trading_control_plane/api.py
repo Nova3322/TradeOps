@@ -26,6 +26,10 @@ from trading_control_plane.api_schemas import (
     BinanceTestnetActionRequest,
     BinanceTestnetProtectionRequest,
     CampaignTargetRequest,
+    CapitalBalanceFactRequest,
+    CapitalScopeReconciliationRequest,
+    CapitalTransferCreateRequest,
+    CapitalTransferObservationRequest,
     FundingFactRequest,
     HyperliquidReadOnlySyncRequest,
     HyperliquidTestnetProtectionRequest,
@@ -49,6 +53,9 @@ from trading_control_plane.api_schemas import (
     ShadowSendRequest,
     SystemProposalRequest,
     TelegramCampaignActionRequest,
+    TransferAuthorizationRequest,
+    TransferProposalRequest,
+    TransferReviewRequest,
 )
 from trading_control_plane.auth import SessionIdentity, SignedTokenService
 from trading_control_plane.binance import BinanceReadOnlyClient
@@ -58,10 +65,13 @@ from trading_control_plane.binance_execution import (
     BinanceTestnetOrderCommand,
     BinanceTestnetProtectionCommand,
 )
+from trading_control_plane.capital import MockCapitalTransferAdapter
 from trading_control_plane.config import Settings, get_settings
 from trading_control_plane.database import Database
 from trading_control_plane.domain import (
     AddCandidateFacts,
+    CapitalDirection,
+    CapitalTransferStatus,
     DomainRejected,
     ExecutionEnvironment,
     IntentKind,
@@ -86,6 +96,7 @@ from trading_control_plane.queries import TradingQueries
 from trading_control_plane.service import TradingService
 from trading_control_plane.telegram import (
     CampaignNotification,
+    CapitalNotification,
     MockTelegramGateway,
     ProposalNotification,
 )
@@ -168,6 +179,7 @@ def create_app(
     binance_testnet_reader: BinanceReadOnlyClient | None = None,
     hyperliquid_client: HyperliquidReadOnlyClient | None = None,
     hyperliquid_testnet_client: HyperliquidTestnetClient | None = None,
+    capital_transfer_adapter: MockCapitalTransferAdapter | None = None,
 ) -> FastAPI:
     resolved_settings = settings or get_settings()
     resolved_settings.validate_runtime_security()
@@ -211,6 +223,7 @@ def create_app(
         vault_address=resolved_settings.hyperliquid_vault_address,
         dex=resolved_settings.hyperliquid_core_dex,
     )
+    resolved_capital_transfer = capital_transfer_adapter or MockCapitalTransferAdapter()
 
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
@@ -234,6 +247,7 @@ def create_app(
     app.state.binance_testnet_reader = resolved_binance_testnet_reader
     app.state.hyperliquid_client = resolved_hyperliquid
     app.state.hyperliquid_testnet_client = resolved_hyperliquid_testnet
+    app.state.capital_transfer_adapter = resolved_capital_transfer
 
     @app.exception_handler(DomainRejected)
     async def domain_rejected(_: Request, exc: DomainRejected) -> JSONResponse:
@@ -379,17 +393,23 @@ def create_app(
             and resolved_settings.environment in {"local", "test"}
         ):
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND)
-        current_version = queries().proposal_version(payload.object_id)
+        if payload.action == "proposal.approve":
+            current_version = queries().proposal_version(payload.object_id)
+            detail = queries().proposal_detail(identity.user_id, payload.object_id)
+            review_action = "proposal.review"
+        else:
+            current_version = queries().transfer_proposal_version(payload.object_id)
+            detail = queries().transfer_proposal_detail(identity.user_id, payload.object_id)
+            review_action = "capital.review"
         if current_version != payload.object_version:
             raise DomainRejected("VERSION_CONFLICT", "proposal changed before step-up")
-        detail = queries().proposal_detail(identity.user_id, payload.object_id)
         if not service().can_user(
             identity.user_id,
-            "proposal.review",
+            review_action,
             str(detail["account_id"]),
             str(detail["venue"]),
         ):
-            raise DomainRejected("RBAC_DENIED", "proposal approval is outside the current scope")
+            raise DomainRejected("RBAC_DENIED", "approval is outside the current scope")
         token = token_service.issue_action_grant(
             user_id=identity.user_id,
             action=payload.action,
@@ -438,6 +458,36 @@ def create_app(
                     summary=f"{environment} proposal {proposal_id} is pending review",
                     review_code=code,
                     review_url=review_url,
+                    created_at=_now(),
+                )
+            )
+
+    def notify_capital(
+        *,
+        object_id: UUID,
+        object_type: str,
+        event_type: str,
+        environment: str,
+        account_id: str,
+        venue: str,
+        object_version: int,
+        summary: str,
+    ) -> None:
+        for recipient in queries().treasury_users(account_id, venue):
+            notification_key = (
+                f"{object_type}:{object_id}:{event_type}:{object_version}:{recipient.user_id}"
+            )
+            resolved_telegram.send_capital(
+                CapitalNotification(
+                    notification_id="tg_"
+                    + hashlib.sha256(notification_key.encode()).hexdigest()[:20],
+                    recipient_id=recipient.user_id,
+                    object_id=object_id,
+                    object_type=object_type,
+                    event_type=event_type,
+                    environment=environment,
+                    summary=summary,
+                    object_version=object_version,
                     created_at=_now(),
                 )
             )
@@ -2074,6 +2124,258 @@ def create_app(
         )
         return queries().campaign_detail(identity.user_id, campaign_id)
 
+    @app.get("/api/capital")
+    def capital_center(
+        identity: SessionIdentity = identity_dependency,
+    ) -> dict[str, Any]:
+        return {"data": queries().capital_center(identity.user_id), "as_of": _now().isoformat()}
+
+    @app.post("/api/capital/balances/mock")
+    def record_mock_capital_balance(
+        payload: CapitalBalanceFactRequest,
+        identity: SessionIdentity = identity_dependency,
+    ) -> dict[str, Any]:
+        if resolved_settings.environment not in {"local", "test"}:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND)
+        fact_id = service().record_capital_balance(
+            actor_id=identity.user_id,
+            environment=ExecutionEnvironment(payload.environment),
+            location_type=payload.location_type,
+            location_id=payload.location_id,
+            venue=payload.venue,
+            equity=payload.equity,
+            available_balance=payload.available_balance,
+            withdrawable_balance=payload.withdrawable_balance,
+            asset=payload.asset,
+            control_status=payload.control_status,
+            deposit_status=payload.deposit_status,
+            network=payload.network,
+            address_reference=payload.address_reference,
+            known=payload.known,
+            observed_at=_now(),
+            now=_now(),
+        )
+        return {
+            "transport": "MOCK_READ_ONLY_FACT",
+            "account_equity_id": str(fact_id),
+            "data": queries().capital_center(identity.user_id),
+        }
+
+    @app.post("/api/capital/reconciliations")
+    def reconcile_capital_scope(
+        payload: CapitalScopeReconciliationRequest,
+        identity: SessionIdentity = identity_dependency,
+    ) -> dict[str, str]:
+        reconciliation_id = service().record_capital_scope_reconciliation(
+            actor_id=identity.user_id,
+            environment=ExecutionEnvironment(payload.environment),
+            account_id=payload.account_id,
+            venue=payload.venue,
+            now=_now(),
+        )
+        return {"reconciliation_id": str(reconciliation_id)}
+
+    @app.post("/api/capital/proposals")
+    def create_transfer_proposal(
+        payload: TransferProposalRequest,
+        identity: SessionIdentity = identity_dependency,
+    ) -> dict[str, Any]:
+        now = _now()
+        proposal_id = service().create_transfer_proposal(
+            actor_id=identity.user_id,
+            environment=ExecutionEnvironment(payload.environment),
+            direction=CapitalDirection(payload.direction),
+            account_id=payload.account_id,
+            venue=payload.venue,
+            vault_id=payload.vault_id,
+            asset=payload.asset,
+            network=payload.network,
+            destination_reference=payload.destination_reference,
+            amount=payload.amount,
+            max_fee=payload.max_fee,
+            min_received=payload.min_received,
+            reason=payload.reason,
+            expires_at=now + timedelta(minutes=payload.expires_in_minutes),
+            idempotency_key=payload.idempotency_key,
+            now=now,
+        )
+        return queries().transfer_proposal_detail(identity.user_id, proposal_id)
+
+    @app.post("/api/capital/proposals/{transfer_proposal_id}/submit")
+    def submit_transfer_proposal(
+        transfer_proposal_id: UUID,
+        identity: SessionIdentity = identity_dependency,
+    ) -> dict[str, Any]:
+        service().submit_transfer_proposal(transfer_proposal_id, identity.user_id, now=_now())
+        detail = queries().transfer_proposal_detail(identity.user_id, transfer_proposal_id)
+        notify_capital(
+            object_id=transfer_proposal_id,
+            object_type="TransferProposal",
+            event_type="PENDING_REVIEW",
+            environment=str(detail["environment"]),
+            account_id=str(detail["account_id"]),
+            venue=str(detail["venue"]),
+            object_version=int(detail["version"]),
+            summary="Capital transfer proposal requires two independent Treasury reviews",
+        )
+        return detail
+
+    @app.post("/api/capital/proposals/{transfer_proposal_id}/reviews")
+    def review_transfer_proposal(
+        transfer_proposal_id: UUID,
+        payload: TransferReviewRequest,
+        identity: SessionIdentity = identity_dependency,
+    ) -> dict[str, Any]:
+        now = _now()
+        if payload.decision == "APPROVE":
+            if payload.action_grant is None:
+                raise DomainRejected(
+                    "ACTION_GRANT_REQUIRED", "capital approval requires action-level step-up"
+                )
+            token_service.verify_action_grant(
+                payload.action_grant,
+                user_id=identity.user_id,
+                action="capital.approve",
+                object_id=transfer_proposal_id,
+                object_version=payload.expected_version,
+                now=now,
+            )
+        service().review_transfer_proposal(
+            transfer_proposal_id,
+            identity.user_id,
+            ReviewDecision(payload.decision),
+            payload.reason,
+            payload.expected_version,
+            now=now,
+        )
+        detail = queries().transfer_proposal_detail(identity.user_id, transfer_proposal_id)
+        notify_capital(
+            object_id=transfer_proposal_id,
+            object_type="TransferProposal",
+            event_type=f"REVIEW_{payload.decision}",
+            environment=str(detail["environment"]),
+            account_id=str(detail["account_id"]),
+            venue=str(detail["venue"]),
+            object_version=int(detail["version"]),
+            summary=f"Capital transfer review recorded: {payload.decision}",
+        )
+        return detail
+
+    @app.post("/api/capital/proposals/{transfer_proposal_id}/authorizations")
+    def issue_transfer_authorization(
+        transfer_proposal_id: UUID,
+        payload: TransferAuthorizationRequest,
+        identity: SessionIdentity = identity_dependency,
+    ) -> dict[str, Any]:
+        now = _now()
+        proposal = queries().transfer_proposal_detail(identity.user_id, transfer_proposal_id)
+        expires_at = min(
+            datetime.fromisoformat(str(proposal["expires_at"])),
+            now + timedelta(minutes=payload.expires_in_minutes),
+        )
+        authorization_id = service().issue_transfer_authorization(
+            transfer_proposal_id,
+            identity.user_id,
+            expires_at,
+            payload.idempotency_key,
+            now=now,
+        )
+        return {
+            "transfer_authorization_id": str(authorization_id),
+            "detail": queries().transfer_proposal_detail(identity.user_id, transfer_proposal_id),
+        }
+
+    @app.post("/api/capital/authorizations/{transfer_authorization_id}/transfers/mock")
+    def submit_mock_capital_transfer(
+        transfer_authorization_id: UUID,
+        payload: CapitalTransferCreateRequest,
+        identity: SessionIdentity = identity_dependency,
+    ) -> dict[str, Any]:
+        if resolved_settings.environment not in {"local", "test"}:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND)
+        now = _now()
+        transfer_id = service().reserve_capital_transfer(
+            transfer_authorization_id,
+            identity.user_id,
+            payload.idempotency_key,
+            now=now,
+        )
+        detail = queries().capital_transfer_detail(identity.user_id, transfer_id)
+        if detail["status"] == CapitalTransferStatus.SOURCE_RESERVED.value:
+            command = service().capital_transfer_command(transfer_id, identity.user_id, now=now)
+            submission = resolved_capital_transfer.submit(command, now=now)
+            service().record_capital_submission(transfer_id, identity.user_id, submission, now=now)
+            detail = queries().capital_transfer_detail(identity.user_id, transfer_id)
+        notify_capital(
+            object_id=transfer_id,
+            object_type="CapitalTransfer",
+            event_type=str(detail["status"]),
+            environment=str(detail["environment"]),
+            account_id=str(detail["account_id"]),
+            venue=str(detail["venue"]),
+            object_version=int(detail["version"]),
+            summary="Mock capital transfer submitted; no real funds moved",
+        )
+        return {"transport": "MOCK_ONLY", "detail": detail}
+
+    @app.get("/api/capital/transfers/{capital_transfer_id}")
+    def capital_transfer_detail(
+        capital_transfer_id: UUID,
+        identity: SessionIdentity = identity_dependency,
+    ) -> dict[str, Any]:
+        return queries().capital_transfer_detail(identity.user_id, capital_transfer_id)
+
+    @app.post("/api/capital/transfers/{capital_transfer_id}/observations/mock")
+    def observe_mock_capital_transfer(
+        capital_transfer_id: UUID,
+        payload: CapitalTransferObservationRequest,
+        identity: SessionIdentity = identity_dependency,
+    ) -> dict[str, Any]:
+        if resolved_settings.environment not in {"local", "test"}:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND)
+        service().record_capital_observation(
+            capital_transfer_id,
+            identity.user_id,
+            CapitalTransferStatus(payload.status),
+            transaction_reference=payload.transaction_reference,
+            fee_amount=payload.fee_amount,
+            net_received=payload.net_received,
+            now=_now(),
+        )
+        detail = queries().capital_transfer_detail(identity.user_id, capital_transfer_id)
+        notify_capital(
+            object_id=capital_transfer_id,
+            object_type="CapitalTransfer",
+            event_type=str(detail["status"]),
+            environment=str(detail["environment"]),
+            account_id=str(detail["account_id"]),
+            venue=str(detail["venue"]),
+            object_version=int(detail["version"]),
+            summary=f"Capital transfer state changed to {detail['status']}",
+        )
+        return {"transport": "MOCK_ONLY", "detail": detail}
+
+    @app.post("/api/capital/transfers/{capital_transfer_id}/reconcile")
+    def reconcile_capital_transfer(
+        capital_transfer_id: UUID,
+        identity: SessionIdentity = identity_dependency,
+    ) -> dict[str, Any]:
+        result = service().reconcile_capital_transfer(
+            capital_transfer_id, identity.user_id, now=_now()
+        )
+        detail = queries().capital_transfer_detail(identity.user_id, capital_transfer_id)
+        notify_capital(
+            object_id=capital_transfer_id,
+            object_type="CapitalTransfer",
+            event_type=f"RECONCILIATION_{result}",
+            environment=str(detail["environment"]),
+            account_id=str(detail["account_id"]),
+            venue=str(detail["venue"]),
+            object_version=int(detail["version"]),
+            summary=f"Capital reconciliation result: {result}",
+        )
+        return {"reconciliation_status": result, "detail": detail}
+
     @app.get("/api/telegram/mock/notifications")
     def mock_telegram_notifications(
         identity: SessionIdentity = identity_dependency,
@@ -2108,10 +2410,25 @@ def create_app(
             for item in resolved_telegram.campaign_notifications()
             if item.recipient_id == identity.user_id
         ]
+        capital_data = [
+            {
+                "notification_id": item.notification_id,
+                "object_id": str(item.object_id),
+                "object_type": item.object_type,
+                "event_type": item.event_type,
+                "environment": item.environment,
+                "summary": item.summary,
+                "object_version": item.object_version,
+                "created_at": item.created_at.isoformat(),
+            }
+            for item in resolved_telegram.capital_notifications()
+            if item.recipient_id == identity.user_id
+        ]
         return {
             "transport": "MOCK_ONLY",
             "data": data,
             "campaign_data": campaign_data,
+            "capital_data": capital_data,
         }
 
     @app.post("/api/telegram/mock/campaign-actions")
@@ -2209,6 +2526,7 @@ def create_app(
         @app.get("/orders", include_in_schema=False)
         @app.get("/risk", include_in_schema=False)
         @app.get("/exceptions", include_in_schema=False)
+        @app.get("/capital", include_in_schema=False)
         @app.get("/venues/binance", include_in_schema=False)
         @app.get("/proposals/{proposal_id}", include_in_schema=False)
         @app.get("/campaigns/{campaign_id}", include_in_schema=False)

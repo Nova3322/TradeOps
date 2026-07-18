@@ -30,6 +30,7 @@ class Role(StrEnum):
     PROPOSER = "PROPOSER"
     REVIEWER = "REVIEWER"
     OPERATOR = "OPERATOR"
+    TREASURY_ADMIN = "TREASURY_ADMIN"
     SYSTEM_ADMIN = "SYSTEM_ADMIN"
 
 
@@ -60,6 +61,22 @@ class ProposalStatus(StrEnum):
 class ReviewDecision(StrEnum):
     APPROVE = "APPROVE"
     REJECT = "REJECT"
+
+
+class CapitalDirection(StrEnum):
+    VAULT_TO_VENUE = "VAULT_TO_VENUE"
+    VENUE_TO_VAULT = "VENUE_TO_VAULT"
+
+
+class CapitalTransferStatus(StrEnum):
+    SOURCE_RESERVED = "SOURCE_RESERVED"
+    SUBMITTED = "SUBMITTED"
+    IN_FLIGHT = "IN_FLIGHT"
+    DESTINATION_CONFIRMED = "DESTINATION_CONFIRMED"
+    SETTLED = "SETTLED"
+    UNKNOWN = "UNKNOWN"
+    FAILED_SOURCE_RESTORED = "FAILED_SOURCE_RESTORED"
+    MANUAL_REQUIRED = "MANUAL_REQUIRED"
 
 
 class RiskTier(StrEnum):

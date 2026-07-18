@@ -1,7 +1,7 @@
 # Trading 交易系统
 
 > 状态日期：2026-07-19
-> 当前状态：M6 SHADOW Campaign 自动 Add、风险减仓与冻结失效退出入口；真实外部能力默认关闭，LIVE 发送不可用
+> 当前状态：M7 Vault/场所资金只读中心与人工双向 Mock 划转；真实外部能力默认关闭，LIVE 订单和真实资金发送不可用
 
 本项目面向一个资本所有者、一个内部组织和多个内部用户。用户可以提交和审核提案、查看仓位、处理异常；系统在风险可控的前提下辅助执行交易并判断是否赚钱。不开放外部注册，不管理第三方资金，不建设机构级多租户、通用合规或通用认证平台。
 
@@ -27,19 +27,21 @@
 - 多个退出候选合并为唯一更小目标仓位；有活动 OrderIntent 时不重复生成减仓意图。
 - 场所真实订单、成交、仓位、保护、余额和资金费必须与内部预期分开并对账；SHADOW、TESTNET、LIVE 使用独立事实作用域。
 - 每个 execution scope 只有一个有效 sender；新 owner 接管后旧 fencing token 无效。
-- `LIVE_ORDER_SEND`、`CAPITAL_TRANSFER`、`AUTO_ADD` 默认 `DISABLED`。
+- `LIVE_ORDER_SEND`、`CAPITAL_TRANSFER`、`AUTO_ADD` 默认 `DISABLED`；M8 的 `AUTO_PROFIT_SWEEP` 与 `AUTO_OPERATING_REFILL` 尚未加入 Schema，也不可用。
 - AUTO_ADD 只有管理员显式开启 Gate 后才可能执行；每个 Add 仍需冻结 Proposal、分档 AddUnit、后续 Perptape 候选、盈利仓位、足额保护、新鲜事实、剩余授权和最终 Risk Engine 同时通过。只有首个正成交消费 AddUnit，零成交取消/拒绝不消费，Unknown 冻结后续新增风险。
-- Telegram 当前只有不联网的 Mock 通知与受限收紧风险动作合同；真实 Bot、账号绑定和消息送达未实现。Binance 和 Hyperliquid Core 的只读/TESTNET 窄合同全部默认关闭。TESTNET 合同不等于真实测试账户实证，LIVE 没有发送入口。真实账户验证、实盘发送、HIP-3、Margin、Vault/CTO 尚未实现，文档愿景不能冒充代码能力。
+- 资金 Proposal、双人独立复核、Capital Transfer Authorization、源端预留、在途、目的端确认和对账与交易授权分离；活动仓位、未解决订单或 Unknown 禁止 Vault 救仓，Unknown 不释放或重发。
+- Telegram 当前只有不联网的 Mock 通知与受限收紧风险动作合同；资金通知不包含批准或执行入口。Binance 和 Hyperliquid Core 的只读/TESTNET 窄合同全部默认关闭。TESTNET/Mock 合同不等于真实账户实证，LIVE 没有发送入口。真实账户验证、实盘发送、HIP-3、Margin、真实 Vault/CTO 适配器与真实资金划转尚未实现，文档愿景不能冒充代码能力。
 
 ## 当前代码入口
 
 - 进程：`uv run trading-api`
-- Web/PWA：提案/审核、Campaign、AUTO_ADD 候选、原子减仓/退出、全局只收紧风险动作，以及 `/venues/binance` 的只读场所事实页；Hyperliquid 当前只有 HTTP 入口，没有专属页面
-- HTTP：健康检查、内部会话、Perptape 机会、Proposal/Review/Risk/Authorization、SHADOW/TESTNET Campaign、AUTO_ADD/减仓/退出，以及 Binance、Hyperliquid Core 的只读和受控 TESTNET API
+- Web/PWA：提案/审核、Campaign、AUTO_ADD 候选、原子减仓/退出、全局只收紧风险动作、`/venues/binance` 只读场所事实页和 `/capital` 资金中心；Hyperliquid 当前只有 HTTP 入口，没有专属页面
+- HTTP：健康检查、内部会话、Perptape 机会、Proposal/Review/Risk/Authorization、SHADOW/TESTNET Campaign、AUTO_ADD/减仓/退出、资金事实/提案/授权/Mock 划转，以及 Binance、Hyperliquid Core 的只读和受控 TESTNET API
 - 内部业务：`trading_control_plane.service.TradingService`
 - 纯计算：`evaluate_risk`、`select_target_position`、`compute_pnl`
 - 数据库：PostgreSQL，Alembic head `20260718_0001`
 - 场所边界：`binance.py`/`binance_execution.py` 只覆盖 USDⓈ-M 只读与官方 TESTNET；`hyperliquid.py`/`hyperliquid_execution.py` 只覆盖 Core Info 与官方 TESTNET Exchange 合同。Hyperliquid “市价”固定为带显式批准价格的 IOC，不使用隐含 5% 滑点；HIP-3、LIVE、保证金和资金写入口不存在，`LIVE_ORDER_SEND` 仍为 `DISABLED`
+- 资金边界：`capital.py` 只提供确定性的 SHADOW/TESTNET Mock 提交合同，没有网络、签名器或凭据字段；真实 `CAPITAL_TRANSFER` Gate 保持 `DISABLED`
 
 正式身份源按冻结决策使用托管 IdP 与 Passkey，但外部 IdP 尚未接入。本地/测试环境可显式启用仅识别已存在内部用户的 Mock 会话和 Mock step-up；生产环境硬拒绝启用 Mock 身份。Perptape 使用其现有 `GET /api/v1/breakouts` 窄合同，需单独配置平台 API Key，未配置时机会入口明确返回不可用。
 

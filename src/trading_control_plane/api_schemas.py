@@ -6,7 +6,13 @@ from uuid import UUID
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
-from trading_control_plane.domain import Direction, RiskTier, TargetUrgency
+from trading_control_plane.domain import (
+    CapitalDirection,
+    CapitalTransferStatus,
+    Direction,
+    RiskTier,
+    TargetUrgency,
+)
 
 
 class MockLoginRequest(BaseModel):
@@ -93,7 +99,7 @@ class ReviewRequest(BaseModel):
 
 
 class MockStepUpRequest(BaseModel):
-    action: Literal["proposal.approve"]
+    action: Literal["proposal.approve", "capital.approve"]
     object_id: UUID
     object_version: int = Field(ge=1)
 
@@ -182,6 +188,113 @@ class AccountEquityFactRequest(BaseModel):
     @field_validator("venue")
     @classmethod
     def normalize_venue(cls, value: str) -> str:
+        return value.upper()
+
+
+class CapitalBalanceFactRequest(BaseModel):
+    environment: Literal["SHADOW", "TESTNET"] = "TESTNET"
+    location_type: Literal["VAULT", "VENUE"]
+    location_id: str = Field(min_length=1, max_length=160)
+    venue: str = Field(min_length=1, max_length=64)
+    equity: Decimal = Field(ge=0)
+    available_balance: Decimal = Field(ge=0)
+    withdrawable_balance: Decimal = Field(ge=0)
+    asset: str = Field(min_length=1, max_length=32)
+    control_status: Literal["CONTROLLED", "READ_ONLY", "UNKNOWN"]
+    deposit_status: Literal["READY", "PENDING", "UNKNOWN"]
+    network: str | None = Field(default=None, max_length=64)
+    address_reference: str | None = Field(default=None, max_length=255)
+    known: bool = True
+
+    @field_validator("venue", "asset")
+    @classmethod
+    def normalize_capital_identifier(cls, value: str) -> str:
+        return value.upper()
+
+    @model_validator(mode="after")
+    def validate_balances(self) -> CapitalBalanceFactRequest:
+        if self.withdrawable_balance > self.available_balance:
+            raise ValueError("withdrawable_balance cannot exceed available_balance")
+        if self.available_balance > self.equity:
+            raise ValueError("available_balance cannot exceed equity")
+        return self
+
+
+class TransferProposalRequest(BaseModel):
+    environment: Literal["SHADOW", "TESTNET"] = "TESTNET"
+    direction: CapitalDirection
+    account_id: str = Field(min_length=1, max_length=120)
+    venue: str = Field(min_length=1, max_length=64)
+    vault_id: str = Field(min_length=1, max_length=160)
+    asset: str = Field(min_length=1, max_length=32)
+    network: str = Field(min_length=1, max_length=64)
+    destination_reference: str = Field(min_length=1, max_length=255)
+    amount: Decimal = Field(gt=0)
+    max_fee: Decimal = Field(ge=0)
+    min_received: Decimal = Field(gt=0)
+    reason: str = Field(min_length=3, max_length=1_000)
+    expires_in_minutes: int = Field(default=120, ge=5, le=1_440)
+    idempotency_key: str = Field(min_length=1, max_length=160)
+
+    @field_validator("venue", "asset")
+    @classmethod
+    def normalize_transfer_identifier(cls, value: str) -> str:
+        return value.upper()
+
+    @model_validator(mode="after")
+    def validate_amounts(self) -> TransferProposalRequest:
+        if self.min_received > self.amount:
+            raise ValueError("min_received cannot exceed amount")
+        if self.min_received + self.max_fee > self.amount:
+            raise ValueError("minimum receipt and maximum fee cannot exceed gross amount")
+        return self
+
+
+class TransferReviewRequest(BaseModel):
+    decision: Literal["APPROVE", "REJECT"]
+    reason: str = Field(min_length=2, max_length=1_000)
+    expected_version: int = Field(ge=1)
+    action_grant: str | None = None
+
+
+class TransferAuthorizationRequest(BaseModel):
+    idempotency_key: str = Field(min_length=1, max_length=160)
+    expires_in_minutes: int = Field(default=30, ge=1, le=120)
+
+
+class CapitalTransferCreateRequest(BaseModel):
+    idempotency_key: str = Field(min_length=1, max_length=160)
+
+
+class CapitalTransferObservationRequest(BaseModel):
+    status: Literal[
+        "IN_FLIGHT",
+        "DESTINATION_CONFIRMED",
+        "UNKNOWN",
+        "FAILED_SOURCE_RESTORED",
+        "MANUAL_REQUIRED",
+    ]
+    transaction_reference: str | None = Field(default=None, max_length=255)
+    fee_amount: Decimal | None = Field(default=None, ge=0)
+    net_received: Decimal | None = Field(default=None, gt=0)
+
+    @model_validator(mode="after")
+    def validate_destination_evidence(self) -> CapitalTransferObservationRequest:
+        if self.status == CapitalTransferStatus.DESTINATION_CONFIRMED.value and (
+            self.fee_amount is None or self.net_received is None
+        ):
+            raise ValueError("destination confirmation requires fee_amount and net_received")
+        return self
+
+
+class CapitalScopeReconciliationRequest(BaseModel):
+    environment: Literal["SHADOW", "TESTNET"] = "TESTNET"
+    account_id: str = Field(min_length=1, max_length=120)
+    venue: str = Field(min_length=1, max_length=64)
+
+    @field_validator("venue")
+    @classmethod
+    def normalize_capital_venue(cls, value: str) -> str:
         return value.upper()
 
 

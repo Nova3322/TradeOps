@@ -14,6 +14,7 @@ from trading_control_plane.models import (
     Approval,
     Campaign,
     CapabilityGate,
+    CapitalTransfer,
     FundingPayment,
     Instrument,
     OrderIntent,
@@ -26,6 +27,8 @@ from trading_control_plane.models import (
     RoleAssignment,
     SenderLease,
     TradingAuthorization,
+    TransferAuthorization,
+    TransferProposal,
     User,
     VenueFill,
     VenueOrder,
@@ -242,6 +245,300 @@ class TradingQueries:
             for user in users:
                 session.expunge(user)
             return list(users)
+
+    def treasury_reviewers_for_transfer(self, transfer_proposal_id: UUID) -> list[User]:
+        with self.database.session_factory() as session:
+            proposal = session.get(TransferProposal, transfer_proposal_id)
+            if proposal is None:
+                raise DomainRejected(
+                    "TRANSFER_PROPOSAL_NOT_FOUND", "transfer proposal does not exist"
+                )
+            assignments = session.scalars(
+                select(RoleAssignment).where(RoleAssignment.role == Role.TREASURY_ADMIN.value)
+            ).all()
+            reviewer_ids = {
+                item.user_id
+                for item in assignments
+                if (item.account_scope is None or item.account_scope == proposal.account_id)
+                and (item.venue_scope is None or item.venue_scope == proposal.venue)
+                and item.user_id != proposal.proposer_id
+            }
+            users = session.scalars(
+                select(User).where(User.user_id.in_(reviewer_ids), User.active)
+            ).all()
+            for user in users:
+                session.expunge(user)
+            return list(users)
+
+    def treasury_users(self, account_id: str, venue: str) -> list[User]:
+        with self.database.session_factory() as session:
+            assignments = session.scalars(
+                select(RoleAssignment).where(RoleAssignment.role == Role.TREASURY_ADMIN.value)
+            ).all()
+            user_ids = {
+                item.user_id
+                for item in assignments
+                if (item.account_scope is None or item.account_scope == account_id)
+                and (item.venue_scope is None or item.venue_scope == venue)
+            }
+            users = session.scalars(
+                select(User).where(User.user_id.in_(user_ids), User.active)
+            ).all()
+            for user in users:
+                session.expunge(user)
+            return list(users)
+
+    def transfer_proposal_version(self, transfer_proposal_id: UUID) -> int:
+        with self.database.session_factory() as session:
+            proposal = session.get(TransferProposal, transfer_proposal_id)
+            if proposal is None:
+                raise DomainRejected(
+                    "TRANSFER_PROPOSAL_NOT_FOUND", "transfer proposal does not exist"
+                )
+            return proposal.version
+
+    @staticmethod
+    def _transfer_proposal_summary(item: TransferProposal) -> dict[str, Any]:
+        return {
+            "transfer_proposal_id": str(item.transfer_proposal_id),
+            "proposer_id": str(item.proposer_id),
+            "environment": item.environment,
+            "direction": item.direction,
+            "purpose": item.purpose,
+            "status": item.status,
+            "version": item.version,
+            "account_id": item.account_id,
+            "venue": item.venue,
+            "source_type": item.source_type,
+            "source_id": item.source_id,
+            "destination_type": item.destination_type,
+            "destination_id": item.destination_id,
+            "asset": item.asset,
+            "network": item.network,
+            "destination_reference": item.destination_reference,
+            "amount": str(item.amount),
+            "max_fee": str(item.max_fee),
+            "min_received": str(item.min_received),
+            "reason": item.reason,
+            "frozen_at": _iso(item.frozen_at),
+            "expires_at": _iso(item.expires_at),
+            "created_at": _iso(item.created_at),
+            "updated_at": _iso(item.updated_at),
+        }
+
+    def transfer_proposal_detail(self, user_id: UUID, transfer_proposal_id: UUID) -> dict[str, Any]:
+        with self.database.session_factory() as session:
+            proposal = session.get(TransferProposal, transfer_proposal_id)
+            if proposal is None:
+                raise DomainRejected(
+                    "TRANSFER_PROPOSAL_NOT_FOUND", "transfer proposal does not exist"
+                )
+            if not self.service.can_user(
+                user_id, "capital.view", proposal.account_id, proposal.venue
+            ):
+                raise DomainRejected("RBAC_DENIED", "transfer proposal is outside scope")
+            approvals = session.scalars(
+                select(Approval)
+                .where(Approval.transfer_proposal_id == transfer_proposal_id)
+                .order_by(Approval.created_at)
+            ).all()
+            authorization = session.scalar(
+                select(TransferAuthorization).where(
+                    TransferAuthorization.transfer_proposal_id == transfer_proposal_id
+                )
+            )
+            result = self._transfer_proposal_summary(proposal)
+            result.update(
+                {
+                    "approvals": [
+                        {
+                            "approval_id": str(item.approval_id),
+                            "reviewer_id": str(item.reviewer_id),
+                            "decision": item.decision,
+                            "reason": item.reason,
+                            "created_at": _iso(item.created_at),
+                        }
+                        for item in approvals
+                    ],
+                    "authorization": None
+                    if authorization is None
+                    else {
+                        "transfer_authorization_id": str(authorization.transfer_authorization_id),
+                        "active": authorization.active,
+                        "version": authorization.version,
+                        "expires_at": _iso(authorization.expires_at),
+                        "amount_limit": str(authorization.amount_limit),
+                    },
+                }
+            )
+            return result
+
+    @staticmethod
+    def _capital_transfer_summary(item: CapitalTransfer) -> dict[str, Any]:
+        return {
+            "capital_transfer_id": str(item.capital_transfer_id),
+            "transfer_authorization_id": str(item.transfer_authorization_id),
+            "environment": item.environment,
+            "account_id": item.account_id,
+            "venue": item.venue,
+            "direction": item.direction,
+            "source_id": item.source_id,
+            "destination_id": item.destination_id,
+            "asset": item.asset,
+            "network": item.network,
+            "status": item.status,
+            "gross_amount": str(item.gross_amount),
+            "reserved_amount": str(item.reserved_amount),
+            "fee_amount": None if item.fee_amount is None else str(item.fee_amount),
+            "net_received": None if item.net_received is None else str(item.net_received),
+            "external_transfer_id": item.external_transfer_id,
+            "transaction_reference": item.transaction_reference,
+            "reconciliation_status": item.reconciliation_status,
+            "reconciliation_details": item.reconciliation_details,
+            "version": item.version,
+            "observed_at": _iso(item.observed_at),
+            "reconciled_at": _iso(item.reconciled_at),
+            "updated_at": _iso(item.updated_at),
+        }
+
+    def capital_transfer_detail(self, user_id: UUID, capital_transfer_id: UUID) -> dict[str, Any]:
+        with self.database.session_factory() as session:
+            transfer = session.get(CapitalTransfer, capital_transfer_id)
+            if transfer is None:
+                raise DomainRejected("CAPITAL_TRANSFER_NOT_FOUND", "capital transfer is missing")
+            if not self.service.can_user(
+                user_id, "capital.view", transfer.account_id, transfer.venue
+            ):
+                raise DomainRejected("RBAC_DENIED", "capital transfer is outside scope")
+            return self._capital_transfer_summary(transfer)
+
+    def capital_center(self, user_id: UUID) -> dict[str, Any]:
+        with self.database.session_factory() as session:
+            capital_roles = {
+                Role.OBSERVER.value,
+                Role.PROPOSER.value,
+                Role.REVIEWER.value,
+                Role.OPERATOR.value,
+                Role.TREASURY_ADMIN.value,
+            }
+            assignments = session.scalars(
+                select(RoleAssignment).where(RoleAssignment.user_id == user_id)
+            ).all()
+            if not any(item.role in capital_roles for item in assignments):
+                raise DomainRejected("RBAC_DENIED", "capital center access is not assigned")
+            balances = session.scalars(
+                select(AccountEquity).order_by(
+                    AccountEquity.location_type,
+                    AccountEquity.venue,
+                    AccountEquity.account_id,
+                )
+            ).all()
+            proposals = session.scalars(
+                select(TransferProposal).order_by(TransferProposal.updated_at.desc())
+            ).all()
+            authorizations = session.scalars(select(TransferAuthorization)).all()
+            authorization_by_proposal = {item.transfer_proposal_id: item for item in authorizations}
+            transfers = session.scalars(
+                select(CapitalTransfer).order_by(CapitalTransfer.updated_at.desc())
+            ).all()
+            visible_transfers = [
+                item
+                for item in transfers
+                if self.service.can_user(user_id, "capital.view", item.account_id, item.venue)
+            ]
+            occupied_statuses = {
+                "SOURCE_RESERVED",
+                "SUBMITTED",
+                "IN_FLIGHT",
+                "DESTINATION_CONFIRMED",
+                "UNKNOWN",
+                "MANUAL_REQUIRED",
+            }
+            balance_data: list[dict[str, Any]] = []
+            for item in balances:
+                can_view = (
+                    self.service.can_user(user_id, "capital.view", item.account_id, item.venue)
+                    if item.location_type == "VENUE"
+                    else self.service.can_user(user_id, "capital.view")
+                )
+                if not can_view:
+                    continue
+                occupied = sum(
+                    (
+                        transfer.reserved_amount
+                        for transfer in visible_transfers
+                        if transfer.environment == item.environment
+                        and transfer.source_id == item.account_id
+                        and transfer.asset == item.currency
+                        and transfer.status in occupied_statuses
+                    ),
+                    Decimal(0),
+                )
+                confirmed_available = (
+                    item.available_balance
+                    if item.withdrawable_balance is None
+                    else item.withdrawable_balance
+                )
+                balance_data.append(
+                    {
+                        "account_equity_id": str(item.account_equity_id),
+                        "environment": item.environment,
+                        "location_type": item.location_type,
+                        "location_id": item.account_id,
+                        "venue": item.venue,
+                        "asset": item.currency,
+                        "equity": str(item.equity),
+                        "confirmed_available": str(confirmed_available),
+                        "source_reserved": str(occupied),
+                        "effective_available": str(max(Decimal(0), confirmed_available - occupied)),
+                        "control_status": item.control_status,
+                        "deposit_status": item.deposit_status,
+                        "network": item.network,
+                        "address_reference": item.address_reference,
+                        "fact_status": item.fact_status,
+                        "observed_at": _iso(item.observed_at),
+                    }
+                )
+            gate = session.get(CapabilityGate, "CAPITAL_TRANSFER")
+            return {
+                "real_transfer_gate": None if gate is None else gate.status,
+                "real_transfer_reason": None if gate is None else gate.reason,
+                "balances": balance_data,
+                "in_transit": str(
+                    sum(
+                        (
+                            item.reserved_amount
+                            for item in visible_transfers
+                            if item.status in occupied_statuses
+                        ),
+                        Decimal(0),
+                    )
+                ),
+                "proposals": [
+                    {
+                        **self._transfer_proposal_summary(item),
+                        "authorization": (
+                            None
+                            if (
+                                authorization := authorization_by_proposal.get(
+                                    item.transfer_proposal_id
+                                )
+                            )
+                            is None
+                            else {
+                                "transfer_authorization_id": str(
+                                    authorization.transfer_authorization_id
+                                ),
+                                "active": authorization.active,
+                                "expires_at": _iso(authorization.expires_at),
+                            }
+                        ),
+                    }
+                    for item in proposals
+                    if self.service.can_user(user_id, "capital.view", item.account_id, item.venue)
+                ],
+                "transfers": [self._capital_transfer_summary(item) for item in visible_transfers],
+            }
 
     def list_campaigns(self, user_id: UUID) -> list[dict[str, Any]]:
         with self.database.session_factory() as session:

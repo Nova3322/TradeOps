@@ -32,6 +32,19 @@ class CampaignNotification:
     created_at: datetime
 
 
+@dataclass(frozen=True)
+class CapitalNotification:
+    notification_id: str
+    recipient_id: UUID
+    object_id: UUID
+    object_type: str
+    event_type: str
+    environment: str
+    summary: str
+    object_version: int
+    created_at: datetime
+
+
 class MockTelegramGateway:
     """Deterministic nonproduction sink. It never contacts Telegram's network."""
 
@@ -39,6 +52,7 @@ class MockTelegramGateway:
         self._lock = Lock()
         self._notifications: list[ProposalNotification] = []
         self._campaign_notifications: list[CampaignNotification] = []
+        self._capital_notifications: list[CapitalNotification] = []
 
     def send(self, notification: ProposalNotification) -> None:
         with self._lock:
@@ -62,3 +76,15 @@ class MockTelegramGateway:
     def campaign_notifications(self) -> list[CampaignNotification]:
         with self._lock:
             return list(self._campaign_notifications)
+
+    def send_capital(self, notification: CapitalNotification) -> None:
+        with self._lock:
+            if all(
+                item.notification_id != notification.notification_id
+                for item in self._capital_notifications
+            ):
+                self._capital_notifications.append(notification)
+
+    def capital_notifications(self) -> list[CapitalNotification]:
+        with self._lock:
+            return list(self._capital_notifications)
