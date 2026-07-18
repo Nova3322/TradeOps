@@ -463,10 +463,16 @@ def test_protection_projection_confirms_only_current_position_binding(
     assert protection_result.status is CommandStatus.COMPLETED
 
     with database.session_factory.begin() as session:
+        context = _context(as_of=normalized_at + timedelta(seconds=1))
         projection = VenueCurrentProjectionService.current_protection(
             session,
             _protection_scope(),
-            _context(as_of=normalized_at + timedelta(seconds=1)),
+            context,
+        )
+        protected_risk = VenueCurrentProjectionService.current_protected_position_risk(
+            session,
+            _protection_scope(),
+            context,
         )
 
     assert projection.projection_state is ProjectionState.CONFIRMED
@@ -484,6 +490,17 @@ def test_protection_projection_confirms_only_current_position_binding(
     assert projection.reduce_only_confirmed is True
     assert projection.replacement_in_progress is False
     assert projection.order_set_hash == protection_request.order_set_hash
+    assert protected_risk.projection_state is ProjectionState.CONFIRMED
+    assert protected_risk.scope.settlement_currency == "USDT"
+    assert protected_risk.position_snapshot_id == position_request.venue_position_snapshot_id
+    assert protected_risk.protection_snapshot_id == protection_request.venue_protection_snapshot_id
+    assert protected_risk.current_to_protection_loss == Decimal("50")
+    assert protected_risk.open_heat == 0
+    assert protected_risk.protected_profit_giveback == Decimal("50")
+    assert protected_risk.current_to_protection_loss == (
+        protected_risk.open_heat + protected_risk.protected_profit_giveback
+    )
+    assert protected_risk.calculation_hash is not None
 
 
 @pytest.mark.parametrize(
@@ -528,6 +545,11 @@ def test_protection_projection_nonconfirmed_stale_and_missing_hide_semantics(
             _protection_scope(),
             _context(as_of=normalized_at + timedelta(seconds=1)),
         )
+        source_risk = VenueCurrentProjectionService.current_protected_position_risk(
+            session,
+            _protection_scope(),
+            _context(as_of=normalized_at + timedelta(seconds=1)),
+        )
         missing = VenueCurrentProjectionService.current_protection(
             session,
             _protection_scope(instrument_id="ETHUSDT-PERP"),
@@ -539,6 +561,11 @@ def test_protection_projection_nonconfirmed_stale_and_missing_hide_semantics(
     assert source_projection.source_position_snapshot_id is None
     assert source_projection.worst_active_trigger_price is None
     assert source_projection.covered_quantity is None
+    assert source_risk.projection_state is ProjectionState.UNKNOWN
+    assert source_risk.reason_code == f"PROTECTION_{expected_reason}"
+    assert source_risk.current_to_protection_loss is None
+    assert source_risk.open_heat is None
+    assert source_risk.protected_profit_giveback is None
     assert missing.freshness is ProjectionFreshness.MISSING
     assert missing.reason_code == "SOURCE_MISSING"
 

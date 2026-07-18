@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta
-from decimal import Decimal
+from decimal import ROUND_CEILING, Decimal, localcontext
 from enum import StrEnum
 from typing import Any, Self
 from uuid import UUID
@@ -10,12 +10,16 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
+from trading_control_plane.commands import hash_json
 from trading_control_plane.metrics import (
     VENUE_CURRENT_PROJECTION_AGE,
     VENUE_CURRENT_PROJECTION_QUERIES,
 )
 
 PROJECTION_VERSION = "venue-current-v1"
+PROTECTED_POSITION_RISK_VERSION = "protected-position-risk-v1"
+RISK_AMOUNT_QUANTUM = Decimal("0.000000000000000001")
+ZERO = Decimal("0")
 
 
 class ProjectionState(StrEnum):
@@ -322,6 +326,78 @@ class CurrentProtectionProjection(BaseModel):
         return self
 
 
+class CurrentProtectedPositionRiskProjection(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    scope: CurrentProtectionScope
+    projection_state: ProjectionState
+    reason_code: str | None
+    direction: CurrentProtectionDirection
+    position_snapshot_id: UUID | None
+    position_snapshot_hash: str | None
+    protection_snapshot_id: UUID | None
+    protection_snapshot_hash: str | None
+    quantity: Decimal | None
+    entry_price: Decimal | None
+    mark_price: Decimal | None
+    protection_trigger_price: Decimal | None
+    contract_multiplier: Decimal | None
+    current_to_protection_loss: Decimal | None
+    open_heat: Decimal | None
+    protected_profit_giveback: Decimal | None
+    facts_as_of: datetime | None
+    calculation_version: str = Field(pattern=r"^protected-position-risk-v[0-9]+$")
+    calculation_hash: str | None
+
+    @model_validator(mode="after")
+    def loss_components_are_complete_or_hidden(self) -> Self:
+        economics = (
+            self.quantity,
+            self.entry_price,
+            self.mark_price,
+            self.protection_trigger_price,
+            self.contract_multiplier,
+            self.current_to_protection_loss,
+            self.open_heat,
+            self.protected_profit_giveback,
+        )
+        sources = (
+            self.position_snapshot_id,
+            self.position_snapshot_hash,
+            self.protection_snapshot_id,
+            self.protection_snapshot_hash,
+        )
+        if self.projection_state is ProjectionState.UNKNOWN:
+            if (
+                self.reason_code is None
+                or self.direction is not CurrentProtectionDirection.UNKNOWN
+                or any(value is not None for value in economics)
+                or any(value is not None for value in sources)
+                or self.facts_as_of is not None
+                or self.calculation_hash is not None
+            ):
+                raise ValueError("unknown protected-position risk cannot expose economics")
+        elif (
+            self.reason_code is not None
+            or self.direction
+            not in {CurrentProtectionDirection.LONG, CurrentProtectionDirection.SHORT}
+            or any(value is None for value in economics)
+            or any(value is None for value in sources)
+            or self.facts_as_of is None
+            or self.calculation_hash is None
+            or self.current_to_protection_loss is None
+            or self.open_heat is None
+            or self.protected_profit_giveback is None
+            or self.current_to_protection_loss < ZERO
+            or self.open_heat < ZERO
+            or self.protected_profit_giveback < ZERO
+            or self.current_to_protection_loss != self.open_heat + self.protected_profit_giveback
+            or self.calculation_hash != hash_json(_protected_position_risk_contract(self))
+        ):
+            raise ValueError("confirmed protected-position risk is inconsistent")
+        return self
+
+
 class VenueCurrentProjectionService:
     """Reads deterministic SQL views; it has no business-command or write path."""
 
@@ -623,6 +699,34 @@ class VenueCurrentProjectionService:
         _observe("PROTECTION", result.projection_state, result.freshness, result.age_ms)
         return result
 
+    @staticmethod
+    def current_protected_position_risk(
+        session: Session,
+        scope: CurrentProtectionScope,
+        context: ProjectionQueryContext,
+    ) -> CurrentProtectedPositionRiskProjection:
+        position = VenueCurrentProjectionService.current_position(
+            session,
+            CurrentPositionScope.model_validate(scope.model_dump()),
+            context,
+        )
+        if position.projection_state is ProjectionState.UNKNOWN:
+            return _unknown_protected_position_risk(
+                scope,
+                f"POSITION_{position.reason_code or 'UNKNOWN'}",
+            )
+        protection = VenueCurrentProjectionService.current_protection(
+            session,
+            scope,
+            context,
+        )
+        if protection.projection_state is ProjectionState.UNKNOWN:
+            return _unknown_protected_position_risk(
+                scope,
+                f"PROTECTION_{protection.reason_code or 'UNKNOWN'}",
+            )
+        return derive_protected_position_risk(position, protection)
+
 
 class _ProjectionStatus(BaseModel):
     model_config = ConfigDict(frozen=True)
@@ -690,3 +794,192 @@ def _observe(
     ).inc()
     if age_ms is not None:
         VENUE_CURRENT_PROJECTION_AGE.labels(projection_type).observe(age_ms / 1000)
+
+
+def derive_protected_position_risk(
+    position: CurrentPositionProjection,
+    protection: CurrentProtectionProjection,
+) -> CurrentProtectedPositionRiskProjection:
+    scope = protection.scope
+    if position.scope.model_dump() != scope.model_dump():
+        return _unknown_protected_position_risk(scope, "SCOPE_MISMATCH")
+    if position.projection_state is not ProjectionState.CONFIRMED:
+        return _unknown_protected_position_risk(scope, "POSITION_UNKNOWN")
+    if protection.projection_state is not ProjectionState.CONFIRMED:
+        return _unknown_protected_position_risk(scope, "PROTECTION_UNKNOWN")
+    if position.position_state is not CurrentPositionState.OPEN:
+        return _unknown_protected_position_risk(scope, "POSITION_NOT_OPEN")
+    if protection.source_position_snapshot_id != position.source_snapshot_id:
+        return _unknown_protected_position_risk(scope, "SOURCE_BINDING_MISMATCH")
+    if position.direction.value != protection.protected_direction.value:
+        return _unknown_protected_position_risk(scope, "DIRECTION_MISMATCH")
+    if position.quantity != protection.position_quantity:
+        return _unknown_protected_position_risk(scope, "QUANTITY_MISMATCH")
+    inputs = (
+        position.source_snapshot_id,
+        position.source_snapshot_hash,
+        protection.source_snapshot_id,
+        protection.source_snapshot_hash,
+        position.quantity,
+        position.entry_price,
+        position.mark_price,
+        protection.worst_active_trigger_price,
+        position.contract_multiplier,
+        position.facts_as_of,
+        protection.facts_as_of,
+    )
+    if any(value is None for value in inputs):
+        return _unknown_protected_position_risk(scope, "ECONOMICS_MISSING")
+    assert position.quantity is not None
+    assert position.entry_price is not None
+    assert position.mark_price is not None
+    assert protection.worst_active_trigger_price is not None
+    assert position.contract_multiplier is not None
+    assert position.source_snapshot_id is not None
+    assert position.source_snapshot_hash is not None
+    assert protection.source_snapshot_id is not None
+    assert protection.source_snapshot_hash is not None
+    assert position.facts_as_of is not None
+    assert protection.facts_as_of is not None
+    if (
+        position.quantity <= ZERO
+        or position.entry_price <= ZERO
+        or position.mark_price <= ZERO
+        or protection.worst_active_trigger_price <= ZERO
+        or position.contract_multiplier <= ZERO
+    ):
+        return _unknown_protected_position_risk(scope, "ECONOMICS_INVALID")
+
+    quantity_multiplier = position.quantity * position.contract_multiplier
+    if position.direction is CurrentPositionDirection.LONG:
+        if protection.worst_active_trigger_price >= position.mark_price:
+            return _unknown_protected_position_risk(scope, "TRIGGER_SIDE_INVALID")
+        raw_total = (
+            position.mark_price - protection.worst_active_trigger_price
+        ) * quantity_multiplier
+        raw_open = (
+            max(
+                ZERO,
+                min(position.entry_price, position.mark_price)
+                - protection.worst_active_trigger_price,
+            )
+            * quantity_multiplier
+        )
+        direction = CurrentProtectionDirection.LONG
+    elif position.direction is CurrentPositionDirection.SHORT:
+        if protection.worst_active_trigger_price <= position.mark_price:
+            return _unknown_protected_position_risk(scope, "TRIGGER_SIDE_INVALID")
+        raw_total = (
+            protection.worst_active_trigger_price - position.mark_price
+        ) * quantity_multiplier
+        raw_open = (
+            max(
+                ZERO,
+                protection.worst_active_trigger_price
+                - max(position.entry_price, position.mark_price),
+            )
+            * quantity_multiplier
+        )
+        direction = CurrentProtectionDirection.SHORT
+    else:
+        return _unknown_protected_position_risk(scope, "DIRECTION_INVALID")
+
+    total = _quantize_risk_amount(raw_total)
+    open_heat = min(total, _quantize_risk_amount(raw_open))
+    giveback = total - open_heat
+    result = CurrentProtectedPositionRiskProjection.model_construct(
+        scope=scope,
+        projection_state=ProjectionState.CONFIRMED,
+        reason_code=None,
+        direction=direction,
+        position_snapshot_id=position.source_snapshot_id,
+        position_snapshot_hash=position.source_snapshot_hash,
+        protection_snapshot_id=protection.source_snapshot_id,
+        protection_snapshot_hash=protection.source_snapshot_hash,
+        quantity=position.quantity,
+        entry_price=position.entry_price,
+        mark_price=position.mark_price,
+        protection_trigger_price=protection.worst_active_trigger_price,
+        contract_multiplier=position.contract_multiplier,
+        current_to_protection_loss=total,
+        open_heat=open_heat,
+        protected_profit_giveback=giveback,
+        facts_as_of=min(position.facts_as_of, protection.facts_as_of),
+        calculation_version=PROTECTED_POSITION_RISK_VERSION,
+        calculation_hash=None,
+    )
+    calculation_hash = hash_json(_protected_position_risk_contract(result))
+    return CurrentProtectedPositionRiskProjection.model_validate(
+        {**result.model_dump(mode="python"), "calculation_hash": calculation_hash}
+    )
+
+
+def _unknown_protected_position_risk(
+    scope: CurrentProtectionScope,
+    reason_code: str,
+) -> CurrentProtectedPositionRiskProjection:
+    return CurrentProtectedPositionRiskProjection(
+        scope=scope,
+        projection_state=ProjectionState.UNKNOWN,
+        reason_code=reason_code,
+        direction=CurrentProtectionDirection.UNKNOWN,
+        position_snapshot_id=None,
+        position_snapshot_hash=None,
+        protection_snapshot_id=None,
+        protection_snapshot_hash=None,
+        quantity=None,
+        entry_price=None,
+        mark_price=None,
+        protection_trigger_price=None,
+        contract_multiplier=None,
+        current_to_protection_loss=None,
+        open_heat=None,
+        protected_profit_giveback=None,
+        facts_as_of=None,
+        calculation_version=PROTECTED_POSITION_RISK_VERSION,
+        calculation_hash=None,
+    )
+
+
+def _quantize_risk_amount(value: Decimal) -> Decimal:
+    if value <= ZERO:
+        return ZERO
+    with localcontext() as context:
+        context.prec = 80
+        return value.quantize(RISK_AMOUNT_QUANTUM, rounding=ROUND_CEILING)
+
+
+def _protected_position_risk_contract(
+    projection: CurrentProtectedPositionRiskProjection,
+) -> dict[str, str]:
+    assert projection.position_snapshot_id is not None
+    assert projection.position_snapshot_hash is not None
+    assert projection.protection_snapshot_id is not None
+    assert projection.protection_snapshot_hash is not None
+    assert projection.quantity is not None
+    assert projection.entry_price is not None
+    assert projection.mark_price is not None
+    assert projection.protection_trigger_price is not None
+    assert projection.contract_multiplier is not None
+    assert projection.current_to_protection_loss is not None
+    assert projection.open_heat is not None
+    assert projection.protected_profit_giveback is not None
+    assert projection.facts_as_of is not None
+    return {
+        "scope": hash_json(projection.scope.model_dump(mode="json")),
+        "direction": projection.direction.value,
+        "position_snapshot_id": str(projection.position_snapshot_id),
+        "position_snapshot_hash": projection.position_snapshot_hash,
+        "protection_snapshot_id": str(projection.protection_snapshot_id),
+        "protection_snapshot_hash": projection.protection_snapshot_hash,
+        "quantity": str(projection.quantity),
+        "entry_price": str(projection.entry_price),
+        "mark_price": str(projection.mark_price),
+        "protection_trigger_price": str(projection.protection_trigger_price),
+        "contract_multiplier": str(projection.contract_multiplier),
+        "current_to_protection_loss": str(projection.current_to_protection_loss),
+        "open_heat": str(projection.open_heat),
+        "protected_profit_giveback": str(projection.protected_profit_giveback),
+        "facts_as_of": projection.facts_as_of.isoformat(),
+        "calculation_version": projection.calculation_version,
+    }

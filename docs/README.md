@@ -110,6 +110,7 @@ docs/
     ├── WP-0027-策略绑定Cost-Stress.md
     ├── WP-0028-Canonical保护触发价事实.md
     ├── WP-0029-可重建当前保护投影.md
+    ├── WP-0030-当前保护风险互斥分解.md
     └── evidence/
         ├── WP-0001-validation-20260718.md
         ├── WP-0002-validation-20260718.md
@@ -139,7 +140,8 @@ docs/
         ├── WP-0026-validation-20260718.md
         ├── WP-0027-validation-20260718.md
         ├── WP-0028-validation-20260718.md
-        └── WP-0029-validation-20260718.md
+        ├── WP-0029-validation-20260718.md
+        └── WP-0030-validation-20260718.md
 ```
 
 ### 专项索引
@@ -198,6 +200,7 @@ docs/
 | 实现 | [WP-0027：策略绑定 Cost Stress](08-implementation/WP-0027-策略绑定Cost-Stress.md) | v3 风险/意图命令、无默认 cost policy、fee/穿透/不利 funding 规范计算和 18 位保守金额 |
 | 实现 | [WP-0028：Canonical 保护触发价事实](08-implementation/WP-0028-Canonical保护触发价事实.md) | 保护 v2 命令、完整集合最差活动触发价、Mark 保护侧双层约束和防数据丢失迁移 |
 | 实现 | [WP-0029：可重建当前保护投影](08-implementation/WP-0029-可重建当前保护投影.md) | exact-scope 保护 current view、事件时间排序、退化/冲突/陈旧遮蔽和 current-position 强绑定 |
+| 实现 | [WP-0030：当前保护风险互斥分解](08-implementation/WP-0030-当前保护风险互斥分解.md) | current Mark 到保护价总损失、Open Heat/Giveback 互斥分解、结算币种保留和计算 hash |
 
 ## 完整交付与能力激活
 
