@@ -20,7 +20,7 @@ Trading 必须拥有独立 Instrument Catalog 和市场数据健康判断，回�
 - Perptape 候选或人工提案引用的是哪个精确 Instrument 和数据版本。
 - Instrument 从“可发现”到“可真实交易”经过了哪些批准和认证。
 
-Perptape 负责发现机会，不是交易数据或 Instrument 资格的唯一事实源。Trading 必须直接从目标场所取得可成交价格、合约规则、私有账户能力和健康事实，再由 Risk Engine 与有效 `CapabilityCertificate` 决定是否可交易。
+Perptape 负责发现机会，不是交易数据或 Instrument 资格的唯一事实源。Trading 必须直接从目标场所取得可成交价格、合约规则、私有账户能力和健康事实，再由 Catalog、Risk Engine、简单 Capability Gate 与当前运行验证决定是否可交易。
 
 本文覆盖 Binance、Hyperliquid Core 和所有可发现的 HIP-3 DEX；范围包含加密货币、美股及股指、贵金属、商品及商品期货参考资产的永续衍生品。发现全部不等于全部获准实盘。
 
@@ -30,7 +30,7 @@ Perptape 负责发现机会，不是交易数据或 Instrument 资格的唯一�
 
 ### 2.1 Venue 与 execution domain
 
-- Binance 是一个 venue，其账户/保证金/worker 仍按 `CapabilityCertificate.scope` 进一步隔离。
+- Binance 是一个 venue，其账户、保证金模式和 worker 按明确运行配置与 RBAC/执行作用域隔离。
 - Hyperliquid 是一个 venue；Core 与每个 HIP-3 DEX 是不同 execution domain。
 - execution domain 绑定市场运营、预言机、订单空间、限速、抵押品和故障结论。
 
@@ -75,7 +75,7 @@ Instrument 映射到：
 | 市场运营 | market operator、oracle/benchmark、交易时段、暂停/退市状态 |
 | 数据 | 支持的数据类型、来源、sequence/time 语义、新鲜度和质量 |
 | 正交资格事实 | discoverable、classification completeness、approval scope、listing/operability、data/account health |
-| 版本与证书 | metadata version、classification version、`CapabilityCertificate` 引用、valid from/to |
+| 版本与验证 | metadata version、classification version、运行配置版本、valid from/to |
 | 证据 | 原始场所元数据引用、观察时间、审核与变更原因 |
 
 场所实时规则优先于缓存。Catalog 版本不能让过期 tick/lot、杠杆或交易状态继续执行。
@@ -91,7 +91,7 @@ Catalog 不维护把所有维度排列组合成 `DISCOVERED → CLASSIFIED → C
 | 场所存在性 | `discoverable`、原生 listing status、首次/最后观察时间 |
 | 身份与分类 | Instrument identity、underlying、sector、risk cluster、classification version/completeness |
 | 产品允许范围 | `approval_scope = NONE / OBSERVE / RESEARCH / LIVE` 及批准版本 |
-| 能力证据 | 按 [API、事件、数据与审计契约](API事件数据与审计契约.md) 统一 Schema 保存的 `CapabilityCertificate` 引用 |
+| 能力门 | 简单 Capability Gate、批准的运行配置与对应发布验证结果；不建设证书实体 |
 | 实时可运营性 | trading/reduce-only/halted/delisting/retired、规则新鲜度、预言机/benchmark 和交易时段 |
 | 数据与账户健康 | market/private data、账户、margin mode、collateral pool、worker/adapter 当前健康 |
 | 系统风险门 | 当前 Risk Engine 状态及作用域容量 |
@@ -100,11 +100,11 @@ Catalog 不维护把所有维度排列组合成 `DISCOVERED → CLASSIFIED → C
 
 - Instrument 可发现、身份唯一、分类完整且 `approval_scope = LIVE`。
 - listing/operability 允许新增风险，规则与所需市场数据均在认证新鲜度内。
-- 当前策略、venue、execution domain、账户、margin mode、adapter、worker 和风险作用域所需的 `CapabilityCertificate` 均为 `ACTIVE` 且版本匹配。
+- 当前策略、venue、execution domain、账户、margin mode、adapter、worker 和风险作用域配置已经验证，所需简单 Gate 明确启用且版本匹配。
 - 私有账户事实、价格、盘口、预言机/benchmark 和交易时段健康。
 - Risk Engine 当前允许该作用域新增风险。
 
-任一输入为缺失、陈旧、冲突或 `UNKNOWN` 时，`eligible_to_trade = false`；现有 Campaign 仍按保护、减仓、退出与对账合同管理。事实恢复不能复活旧 Proposal 或 Authorization，新动作必须重新风险求值。其他 Venue 若以后独立立项，也使用同一派生规则，且不能继承 Binance/Hyperliquid 的 `CapabilityCertificate`。
+任一输入为缺失、陈旧、冲突或 `UNKNOWN` 时，`eligible_to_trade = false`；现有 Campaign 仍按保护、减仓、退出与对账合同管理。事实恢复不能复活旧 Proposal 或 Authorization，新动作必须重新风险求值。其他 Venue 若以后独立立项，也使用同一派生规则，且不能继承 Binance/Hyperliquid 的运行验证结论。
 
 ---
 

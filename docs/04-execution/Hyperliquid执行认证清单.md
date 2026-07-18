@@ -321,7 +321,7 @@
 | Add-2 / Add-3 | 逐层独立认证 | 在证书内 |
 | normalization | 按 capability 单独认证 | 在证书内 |
 
-这些环境是完整产品的能力认证证据，不是功能分期。Core 的通过不授予任何 HIP-3 DEX；一个 HIP-3 DEX 的通过也不授予另一个。isolated 的通过不授予 cross。
+这些环境只验证对应已实现流程。Core 的通过不授予任何 HIP-3 DEX；一个 HIP-3 DEX 的通过也不授予另一个，isolated 的通过不授予 cross。其他作用域按后续端到端里程碑分别开发和验证。
 
 ---
 

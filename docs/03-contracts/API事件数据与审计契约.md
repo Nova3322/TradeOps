@@ -238,7 +238,7 @@ MANUAL 草稿、预检与冻结命令至少携带：方向、触发价、委托�
 | 域 | 核心事实 |
 | --- | --- |
 | Identity | 内部 user/service-principal 映射、label、ABAC scope、撤权事实和外部 `auth_context_ref`；会话、MFA challenge 与设备注册优先由托管 IdP 管理 |
-| Market Catalog | venue、execution domain、instrument、underlying、sector、risk cluster、`CapabilityCertificate` 引用 |
+| Market Catalog | venue、execution domain、instrument、underlying、sector、risk cluster、交易规则、active 与数据时间 |
 | Strategy | strategy、parameter version、signal/candidate evidence |
 | Proposal/Review | versioned proposal、ReviewerVote、ApprovalDecision、TradingAuthorization |
 | Campaign | 唯一经济仓位生命周期、AddUnit、target、protection requirement、exit reason |
@@ -251,22 +251,11 @@ MANUAL 草稿、预检与冻结命令至少携带：方向、触发价、委托�
 
 所有外部事实保留原始不可变证据引用与归一化版本；敏感原始载荷按最小化、加密和访问审计处理。场所仓位只是由场所事实与账本重建的投影，不建立第二个经济仓位生命周期。
 
-### 11.1 `CapabilityCertificate` 统一 Schema
+### 11.1 简单 Capability Gate 与发布验证
 
-系统只使用一个能力证书对象；不同能力以 `certificate_type` 区分，不创建平行证书实体。Schema 至少包含：
+当前只持久化简单 Capability Gate：`capability_key`、`status`、`reason`、`operator_id` 和 `updated_at`。Gate 仅表达显式启用/禁用，不能替代 RBAC、Approval、RiskDecision、TradingAuthorization、reconciliation 或 sender fencing。
 
-| 字段 | 合同 |
-| --- | --- |
-| `certificate_id / schema_version` | 全局唯一身份与 Schema 版本 |
-| `certificate_type` | `STRATEGY_EVIDENCE`、`EXECUTION`、`RISK_COVERAGE` 或 `MARGIN_NORMALIZATION` |
-| `subject_ref / scope` | 精确绑定策略/参数、来源、板块、方向、Instrument、venue/execution domain、adapter、worker/config、账户、margin mode、collateral pool、风险档位和 Add 层级；不适用维度显式为 `NOT_APPLICABLE` |
-| `evidence_refs / policy_versions` | 不可变证据及其策略、风险、Catalog、Adapter 和执行版本 |
-| `status` | `ACTIVE`、`SUSPENDED`、`REVOKED` 或 `EXPIRED`；只有 `ACTIVE` 可满足资格门 |
-| `issued_at / valid_from / expires_at` | 签发与有效时间边界 |
-| `issuer_principal / approval_ref` | 签发主体和批准证据；不能是被认证的执行 worker 自签 |
-| `invalidation_conditions / supersedes` | 规则、版本、账户、作用域或证据变化时的确定性失效条件和替代关系 |
-
-证书不授予人工审核权限，也不授予任何辅助建议源交易/资金密钥、签名、下单、划转或覆盖风控的权限。人工权限继续由 RBAC/ABAC、职责分离、MFA 和 Approval 事实决定。
+场所、账户、adapter、worker、margin mode 和风险档位的未来发布验证保存在测试/发布材料和版本化配置中；没有真实消费者前，不建设 CapabilityCertificate、证据包、证书状态机或平行认证实体。若未来真实外部副作用证明需要额外持久状态，应以当时的具体恢复合同另行设计。
 
 ---
 
@@ -313,7 +302,7 @@ MANUAL 草稿、预检与冻结命令至少携带：方向、触发价、委托�
 - 每个命令的原始业务字段 hash、actor、channel、session、device、MFA 和权限结果。
 - 每次允许/拒绝的规则、政策版本和解释。
 - Proposal、Approval、Authorization、Risk、Order、Fill、Protection、Margin、Capital 的全部迁移。
-- 标签、作用域、自审、密钥、配置、`CapabilityCertificate` 和发布变更。
+- 标签、作用域、自审、密钥、配置、Capability Gate 和发布变更。
 - 任何 break-glass、外部人工交易、修正、重放和数据导出。
 
 审计数据只追加；修正通过新事件关联原记录。访问审计、加密、保留、防篡改和删除政策由 `DEC-GOV-002`、`DEC-SEC-002` 冻结。
