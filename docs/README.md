@@ -224,6 +224,7 @@ docs/
 | 实现 | [WP-0043：Canonical 成交费用归属账本](08-implementation/WP-0043-Canonical成交费用归属账本.md) | accepted VenueFill 原子归属 Campaign/INITIAL/ADD，保留原生费用与 UNKNOWN realized PnL |
 | 实现 | [WP-0044：可重建 Opening Fill 经济投影](08-implementation/WP-0044-可重建Opening-Fill经济投影.md) | 确定性重建 opening fill 数量/名义价值/原生费用/完整性，同时固定 Campaign equity 为 UNAVAILABLE |
 | 实现 | [WP-0045：Opening-Only 当前仓位一致性绑定](08-implementation/WP-0045-Opening-Only当前仓位一致性绑定.md) | exact 绑定冻结基线、opening prefix 与 fresh current position，未认证 ownership/equity 继续 UNAVAILABLE |
+| 实现 | [WP-0046：Canonical 场所资金费支付事实](08-implementation/WP-0046-Canonical场所资金费支付事实.md) | immutable settled funding PAYMENT/RECEIPT 与 reconciliation v2 八来源完整水位，不推断 Campaign 归属或 FX |
 
 ## 完整交付与能力激活
 

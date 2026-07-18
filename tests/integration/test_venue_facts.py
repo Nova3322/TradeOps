@@ -26,6 +26,7 @@ from tests.venue_fact_fixtures import (
     account_equity_snapshot_request,
     execute_venue_fact,
     fill_request,
+    funding_payment_request,
     order_observation_request,
     position_snapshot_request,
     protection_snapshot_request,
@@ -49,12 +50,14 @@ from trading_control_plane.venue_fact_models import (
     VenueAccountEquitySnapshot,
     VenueFactInputLink,
     VenueFill,
+    VenueFundingPayment,
     VenueOrderObservation,
     VenuePositionSnapshot,
     VenueProtectionSnapshot,
 )
 from trading_control_plane.venue_facts import (
     FeeEffect,
+    FundingEffect,
     VenueAccountEquityState,
     VenueFactNormalizationService,
     VenueOrderStatus,
@@ -74,6 +77,7 @@ def _prepare_collecting_run(
     *,
     order_count: int = 0,
     fill_count: int = 0,
+    funding_count: int = 0,
     position_count: int = 0,
     balance_count: int = 0,
     protection_count: int = 0,
@@ -121,6 +125,8 @@ def _prepare_collecting_run(
             item_count = order_count
         elif source_type is ReconciliationSourceType.VENUE_FILLS:
             item_count = fill_count
+        elif source_type is ReconciliationSourceType.VENUE_FUNDING:
+            item_count = funding_count
         elif source_type is ReconciliationSourceType.VENUE_POSITIONS:
             item_count = position_count
         elif source_type is ReconciliationSourceType.VENUE_BALANCES:
@@ -182,6 +188,24 @@ def _record_position(
     envelope = venue_fact_envelope(
         run_id,
         VenueFactNormalizationService.position_command_type,
+        request.model_dump(mode="json"),
+        now=now,
+    )
+    return request, execute_venue_fact(database, envelope, now=now)
+
+
+def _record_funding(
+    database: Database,
+    run_id: UUID,
+    reconciliation_input: ExecutionReconciliationInput,
+    *,
+    now: datetime,
+    **updates: object,
+):
+    request = funding_payment_request(reconciliation_input, now=now, **updates)
+    envelope = venue_fact_envelope(
+        run_id,
+        VenueFactNormalizationService.funding_command_type,
         request.model_dump(mode="json"),
         now=now,
     )
@@ -407,6 +431,101 @@ def test_order_and_fill_facts_are_canonical_immutable_and_unlock_comparison(
                 update(VenueFill)
                 .where(VenueFill.venue_fill_id == fill.venue_fill_id)
                 .values(fee_amount=Decimal("999"))
+            )
+
+
+def test_funding_payments_preserve_native_signed_cost_and_unlock_comparison(
+    database: Database,
+) -> None:
+    run_id, _, version, run_time, inputs = _prepare_collecting_run(
+        database,
+        funding_count=2,
+    )
+    normalized_at = run_time + timedelta(seconds=1)
+    funding_input = inputs[ReconciliationSourceType.VENUE_FUNDING]
+    payment, payment_result = _record_funding(
+        database,
+        run_id,
+        funding_input,
+        now=normalized_at,
+        venue_payment_id="funding-debit-1",
+        funding_amount=Decimal("2.5"),
+        funding_currency="USDT",
+        funding_effect=FundingEffect.PAYMENT,
+    )
+    receipt, receipt_result = _record_funding(
+        database,
+        run_id,
+        funding_input,
+        now=normalized_at,
+        venue_payment_id="funding-credit-1",
+        funding_amount=Decimal("-1.25"),
+        funding_currency="USDT",
+        funding_effect=FundingEffect.RECEIPT,
+    )
+
+    assert payment_result.status is CommandStatus.COMPLETED
+    assert receipt_result.status is CommandStatus.COMPLETED
+    assert payment_result.data["fact_type"] == "FUNDING_PAYMENT"
+    invalid_payload = dict(payment.model_dump(mode="json"))
+    invalid_payload["funding_effect"] = "RECEIPT"
+    invalid = execute_venue_fact(
+        database,
+        venue_fact_envelope(
+            run_id,
+            VenueFactNormalizationService.funding_command_type,
+            invalid_payload,
+            now=normalized_at,
+        ),
+        now=normalized_at,
+    )
+    assert invalid.status is CommandStatus.REJECTED
+    assert invalid.error_code == "VENUE_FUNDING_PAYMENT_INVALID"
+
+    compared = execute_reconciliation(
+        database,
+        phase_envelope(
+            run_id,
+            ReconciliationPhase.COMPARING,
+            now=normalized_at,
+            expected_version=version,
+        ),
+        now=normalized_at,
+    )
+    assert compared.status is CommandStatus.COMPLETED
+    with database.session_factory.begin() as session:
+        stored_payment = session.get(
+            VenueFundingPayment,
+            payment.venue_funding_payment_id,
+        )
+        stored_receipt = session.get(
+            VenueFundingPayment,
+            receipt.venue_funding_payment_id,
+        )
+        assert stored_payment is not None and stored_receipt is not None
+        assert stored_payment.funding_amount == Decimal("2.5")
+        assert stored_payment.funding_effect == "PAYMENT"
+        assert stored_receipt.funding_amount == Decimal("-1.25")
+        assert stored_receipt.funding_effect == "RECEIPT"
+        assert stored_payment.funding_currency == stored_receipt.funding_currency == "USDT"
+        links = tuple(
+            session.scalars(
+                select(VenueFactInputLink).where(VenueFactInputLink.source_type == "VENUE_FUNDING")
+            )
+        )
+        assert {link.venue_funding_payment_id for link in links} == {
+            payment.venue_funding_payment_id,
+            receipt.venue_funding_payment_id,
+        }
+
+    with pytest.raises(DBAPIError, match="venue_funding_payments is immutable"):
+        with database.session_factory.begin() as session:
+            session.execute(
+                update(VenueFundingPayment)
+                .where(
+                    VenueFundingPayment.venue_funding_payment_id == payment.venue_funding_payment_id
+                )
+                .values(funding_amount=Decimal("3"))
             )
 
 
@@ -1290,7 +1409,7 @@ def test_protection_snapshot_v2_rejects_legacy_command_and_schema(
         assert session.scalar(select(func.count()).select_from(VenueProtectionSnapshot)) == 0
 
 
-def test_protection_trigger_migration_round_trip_and_data_loss_guard(
+def test_venue_fact_migration_round_trip_and_newer_evidence_guard(
     database: Database,
 ) -> None:
     alembic_config = Config("alembic.ini")
@@ -1317,9 +1436,7 @@ def test_protection_trigger_migration_round_trip_and_data_loss_guard(
 
     with pytest.raises(
         DBAPIError,
-        match=(
-            "cannot remove canonical protection trigger prices while protection snapshots remain"
-        ),
+        match="cannot downgrade while canonical funding or v2 reconciliation evidence exists",
     ):
         command.downgrade(alembic_config, "20260718_0025")
     assert database.is_ready() == (True, None)

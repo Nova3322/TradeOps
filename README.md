@@ -53,10 +53,12 @@
 
 本机开发凭据统一放在 `/Users/vireo/Documents/trading/.env.local`，可提交的变量名模板为 `.env.example`。当前 Telegram Bot 使用变量 `TELEGRAM_BOT_TOKEN`；文档和日志只记录变量名与文件地址，绝不记录密钥值。由于当前 Token 曾出现在对话中，第一次联调前必须通过 BotFather 重新生成并原位替换。详细保管、轮换和读取边界见 [SLO、可观测性、故障恢复与 Runbook](docs/06-operations/SLO可观测性故障恢复与Runbook.md#本地开发凭据与轮换)。
 
+当前产品尚未进入 Codex Security 审计阶段。按用户明确约束，Codex Security 及其所有审计 Skill、插件和模块保持停用；除非用户以后明确重新授权，否则工程只执行常规架构约束、代码检查、测试和数据库一致性验证。
+
 ## 当前工程节点
 
-当前已完成四十五个本地工程工作包：从 [WP-0001：耐久控制面基础](docs/08-implementation/WP-0001-耐久控制面基础.md) 推进到 [WP-0045：Opening-Only 当前仓位一致性绑定](docs/08-implementation/WP-0045-Opening-Only当前仓位一致性绑定.md)。WP-0042 冻结 isolated 初始保证金分母，WP-0043/0044 逐笔归属并重建 opening fill prefix，WP-0045 再把它与 fresh canonical current position exact 绑定，同时保持 exclusive ownership 与 Campaign equity 为 `UNAVAILABLE`。完整逐包索引见 [文档中心](docs/README.md)，验证证据位于 [docs/08-implementation/evidence](docs/08-implementation/evidence/)。
+当前已完成四十六个本地工程工作包：从 [WP-0001：耐久控制面基础](docs/08-implementation/WP-0001-耐久控制面基础.md) 推进到 [WP-0046：Canonical 场所资金费支付事实](docs/08-implementation/WP-0046-Canonical场所资金费支付事实.md)。WP-0042 冻结 isolated 初始保证金分母，WP-0043/0044 逐笔归属并重建 opening fill prefix，WP-0045 将它与 fresh canonical current position exact 绑定，WP-0046 再补充 immutable settled venue funding PAYMENT/RECEIPT 与 reconciliation v2 八来源完整水位。完整逐包索引见 [文档中心](docs/README.md)，验证证据位于 [docs/08-implementation/evidence](docs/08-implementation/evidence/)。
 
-当前代码仍只有不可发送的 SHADOW OrderIntent、SHADOW 证书/lease/claim、canonical 私有场所事实、风险与策略控制合同、isolated Campaign 初始保证金基线、opening fill/fee entry 及只读投影。WP-0045 可证明 opening-only 当前数量/方向/scope/time 与 fresh venue position 一致，但 controlled sole outlet 尚未认证，因此 exclusive ownership、成本基础、reduce/exit、资金费、FX、Frozen Return 分子和 `E_campaign` 仍不可用。真实 aggregator/collector、OMS/Freqtrade/VenueAdapter、持续风险监控、Web/PWA、Telegram、Margin、Vault/CTO、报表和运维认证仍未完成；cross margin 经济归属仍为 `RESEARCH_REQUIRED`。所有迁移都不 seed 现实能力，`LIVE_ORDER_SEND`、`CAPITAL_TRANSFER`、`AUTO_ADD` 均为 `DISABLED`。工程节点不等于获得实盘授权。
+当前代码仍只有不可发送的 SHADOW OrderIntent、SHADOW 证书/lease/claim、canonical 私有场所事实、风险与策略控制合同、isolated Campaign 初始保证金基线、opening fill/fee entry 及只读投影。WP-0045 可证明 opening-only 当前数量/方向/scope/time 与 fresh venue position 一致；WP-0046 只证明已结算资金费的原生 signed cost 和完整对账水位。controlled sole outlet 尚未认证，资金费也未归属 Campaign，因此 exclusive ownership、成本基础、reduce/exit、FX、Frozen Return 分子和 `E_campaign` 仍不可用。真实 aggregator/collector、OMS/Freqtrade/VenueAdapter、持续风险监控、Web/PWA、Telegram、Margin、Vault/CTO、报表和运维认证仍未完成；cross margin 经济归属仍为 `RESEARCH_REQUIRED`。schema 当前为 `20260718_0035`；所有迁移都不 seed 现实能力，`LIVE_ORDER_SEND`、`CAPITAL_TRANSFER`、`AUTO_ADD` 均为 `DISABLED`。工程节点不等于获得实盘授权。
 
 `OPEN` 只表示缺少真实外部事实；`RESEARCH_REQUIRED` 表示必须靠研究或执行证据冻结。两者都不能签发现实交易权限，也不用于删减完整工程目标。

@@ -35,6 +35,7 @@ from trading_control_plane.venue_fact_models import (
     VenueAccountEquitySnapshot,
     VenueFactInputLink,
     VenueFill,
+    VenueFundingPayment,
     VenueOrderObservation,
     VenuePositionSnapshot,
     VenueProtectionSnapshot,
@@ -109,6 +110,12 @@ class LiquidityRole(StrEnum):
 class FeeEffect(StrEnum):
     CHARGE = "CHARGE"
     REBATE = "REBATE"
+    ZERO = "ZERO"
+
+
+class FundingEffect(StrEnum):
+    PAYMENT = "PAYMENT"
+    RECEIPT = "RECEIPT"
     ZERO = "ZERO"
 
 
@@ -229,6 +236,34 @@ class RecordVenueFillRequest(VenueFactCollectionBinding):
             raise ValueError("venue fill hash mismatch")
         if self.evidence_hash != hash_json(self.model_dump(mode="json", exclude={"evidence_hash"})):
             raise ValueError("venue fill evidence hash mismatch")
+        return self
+
+
+class RecordVenueFundingPaymentRequest(VenueFactCollectionBinding):
+    instrument_id: str = Field(min_length=1, max_length=255)
+    venue_funding_payment_id: UUID
+    venue_payment_id: str = Field(min_length=1, max_length=255)
+    position_side: VenuePositionSide
+    margin_mode: str = Field(min_length=1, max_length=80)
+    collateral_pool_id: str = Field(min_length=1, max_length=160)
+    funding_amount: Decimal
+    funding_currency: str = Field(min_length=1, max_length=80)
+    funding_effect: FundingEffect
+    funding_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+    @model_validator(mode="after")
+    def funding_is_self_consistent(self) -> Self:
+        valid = (
+            (self.funding_effect is FundingEffect.PAYMENT and self.funding_amount > 0)
+            or (self.funding_effect is FundingEffect.RECEIPT and self.funding_amount < 0)
+            or (self.funding_effect is FundingEffect.ZERO and self.funding_amount == 0)
+        )
+        if not valid:
+            raise ValueError("venue funding effect sign mismatch")
+        if self.funding_hash != hash_json(_funding_payment_contract(self)):
+            raise ValueError("venue funding payment hash mismatch")
+        if self.evidence_hash != hash_json(self.model_dump(mode="json", exclude={"evidence_hash"})):
+            raise ValueError("venue funding evidence hash mismatch")
         return self
 
 
@@ -529,6 +564,23 @@ def _fill_contract(request: RecordVenueFillRequest) -> dict[str, Any]:
     }
 
 
+def _funding_payment_contract(request: RecordVenueFundingPaymentRequest) -> dict[str, Any]:
+    return {
+        "venue": request.venue,
+        "execution_domain": request.execution_domain,
+        "account_id": request.account_id,
+        "instrument_id": request.instrument_id,
+        "venue_payment_id": request.venue_payment_id,
+        "position_side": request.position_side.value,
+        "margin_mode": request.margin_mode,
+        "collateral_pool_id": request.collateral_pool_id,
+        "funding_amount": _decimal(request.funding_amount),
+        "funding_currency": request.funding_currency,
+        "funding_effect": request.funding_effect.value,
+        "event_time": _iso(request.event_time),
+    }
+
+
 def _position_snapshot_contract(
     request: RecordVenuePositionSnapshotRequest,
 ) -> dict[str, Any]:
@@ -617,6 +669,7 @@ def _account_equity_snapshot_contract(
 class VenueFactNormalizationService:
     order_command_type = "execution.venue-order-observation.record.v1"
     fill_command_type = "execution.venue-fill.record.v1"
+    funding_command_type = "execution.venue-funding-payment.record.v1"
     position_command_type = "execution.venue-position-snapshot.record.v1"
     protection_command_type = "execution.venue-protection-snapshot.record.v2"
     account_equity_command_type = "execution.venue-account-equity-snapshot.record.v1"
@@ -730,6 +783,7 @@ class VenueFactNormalizationService:
             None,
             None,
             None,
+            None,
             existing.observation_hash,
             new_fact,
             now,
@@ -837,7 +891,123 @@ class VenueFactNormalizationService:
             None,
             None,
             None,
+            None,
             existing.fill_hash,
+            new_fact,
+            now,
+        )
+
+    def record_funding_payment(self, session: Session, envelope: CommandEnvelope) -> CommandOutcome:
+        run_id = self._run_id(envelope, self.funding_command_type, 1)
+        try:
+            request = RecordVenueFundingPaymentRequest.model_validate(envelope.payload)
+        except ValidationError as exc:
+            raise CommandRejected("VENUE_FUNDING_PAYMENT_INVALID", str(exc)) from exc
+        now = self._clock()
+        self._lock_external_identity(
+            session,
+            f"venue-funding:{envelope.scope.get('organization_id')}:{request.venue}:"
+            f"{request.execution_domain}:{request.account_id}:{request.venue_payment_id}",
+        )
+        run, reconciliation_input = self._validate_collection_context(
+            session,
+            envelope,
+            run_id,
+            request,
+            ReconciliationSourceType.VENUE_FUNDING,
+            now,
+        )
+        scope = session.get(ExecutionSenderScope, run.scope_id)
+        assert scope is not None
+        if (
+            request.margin_mode != scope.margin_mode
+            or request.collateral_pool_id != scope.collateral_pool_id
+        ):
+            raise CommandRejected(
+                "VENUE_FUNDING_SCOPE_MISMATCH",
+                "funding payment margin mode or collateral pool changed",
+            )
+        existing = session.execute(
+            select(VenueFundingPayment).where(
+                VenueFundingPayment.organization_id == run.organization_id,
+                VenueFundingPayment.venue == request.venue,
+                VenueFundingPayment.execution_domain == request.execution_domain,
+                VenueFundingPayment.account_id == request.account_id,
+                VenueFundingPayment.venue_payment_id == request.venue_payment_id,
+            )
+        ).scalar_one_or_none()
+        identity_owner = session.get(
+            VenueFundingPayment,
+            request.venue_funding_payment_id,
+        )
+        if identity_owner is not None and (
+            existing is None
+            or identity_owner.venue_funding_payment_id != existing.venue_funding_payment_id
+        ):
+            raise CommandRejected(
+                "VENUE_FUNDING_PAYMENT_ID_CONFLICT",
+                "venue funding payment identity already exists",
+            )
+        new_fact = existing is None
+        if existing is None:
+            self._require_new_fact_link_possible(session, reconciliation_input, request)
+            existing = VenueFundingPayment(
+                venue_funding_payment_id=request.venue_funding_payment_id,
+                organization_id=run.organization_id,
+                first_seen_run_id=run.run_id,
+                first_seen_input_id=reconciliation_input.input_id,
+                venue=request.venue,
+                execution_domain=request.execution_domain,
+                account_id=request.account_id,
+                instrument_id=request.instrument_id,
+                venue_payment_id=request.venue_payment_id,
+                position_side=request.position_side.value,
+                margin_mode=request.margin_mode,
+                collateral_pool_id=request.collateral_pool_id,
+                funding_amount=request.funding_amount,
+                funding_currency=request.funding_currency,
+                funding_effect=request.funding_effect.value,
+                venue_confirmed=True,
+                fact_authority="VENUE_PRIVATE",
+                environment="SHADOW",
+                live_dispatch_eligible=False,
+                source_version=request.source_version,
+                normalization_version=request.normalization_version,
+                normalized_payload=request.normalized_payload,
+                raw_payload_ref=request.raw_payload_ref,
+                raw_payload_hash=request.raw_payload_hash,
+                evidence_ref=request.evidence_ref,
+                evidence_hash=request.evidence_hash,
+                funding_hash=request.funding_hash,
+                event_time=request.event_time,
+                venue_observed_at=request.venue_observed_at,
+                first_received_at=request.received_at,
+                recorded_at=now,
+            )
+            session.add(existing)
+            session.flush()
+        elif (
+            existing.organization_id != run.organization_id
+            or existing.funding_hash != request.funding_hash
+        ):
+            raise CommandRejected(
+                "VENUE_FUNDING_PAYMENT_CONFLICT",
+                "venue funding payment identity has different immutable semantics",
+            )
+        return self._link_and_outcome(
+            session,
+            run,
+            reconciliation_input,
+            request,
+            ReconciliationSourceType.VENUE_FUNDING,
+            "FUNDING_PAYMENT",
+            None,
+            None,
+            None,
+            None,
+            None,
+            existing.venue_funding_payment_id,
+            existing.funding_hash,
             new_fact,
             now,
         )
@@ -967,6 +1137,7 @@ class VenueFactNormalizationService:
             None,
             None,
             existing.venue_position_snapshot_id,
+            None,
             None,
             None,
             existing.snapshot_hash,
@@ -1148,6 +1319,7 @@ class VenueFactNormalizationService:
             None,
             existing.venue_protection_snapshot_id,
             None,
+            None,
             existing.snapshot_hash,
             new_fact,
             now,
@@ -1276,6 +1448,7 @@ class VenueFactNormalizationService:
             None,
             None,
             existing.venue_account_equity_snapshot_id,
+            None,
             existing.snapshot_hash,
             new_fact,
             now,
@@ -1425,6 +1598,7 @@ class VenueFactNormalizationService:
         position_snapshot_id: UUID | None,
         protection_snapshot_id: UUID | None,
         account_equity_snapshot_id: UUID | None,
+        funding_payment_id: UUID | None,
         fact_hash: str,
         new_fact: bool,
         now: datetime,
@@ -1439,11 +1613,13 @@ class VenueFactNormalizationService:
             fact_identity = (
                 VenueFactInputLink.venue_protection_snapshot_id == protection_snapshot_id
             )
-        else:
-            assert account_equity_snapshot_id is not None
+        elif account_equity_snapshot_id is not None:
             fact_identity = (
                 VenueFactInputLink.venue_account_equity_snapshot_id == account_equity_snapshot_id
             )
+        else:
+            assert funding_payment_id is not None
+            fact_identity = VenueFactInputLink.venue_funding_payment_id == funding_payment_id
         existing_link = session.execute(
             select(VenueFactInputLink).where(
                 VenueFactInputLink.reconciliation_input_id == reconciliation_input.input_id,
@@ -1472,6 +1648,8 @@ class VenueFactNormalizationService:
             link_values["venue_protection_snapshot_id"] = str(protection_snapshot_id)
         if account_equity_snapshot_id is not None:
             link_values["venue_account_equity_snapshot_id"] = str(account_equity_snapshot_id)
+        if funding_payment_id is not None:
+            link_values["venue_funding_payment_id"] = str(funding_payment_id)
         link_hash = hash_json(link_values)
         if existing_link is not None:
             if existing_link.link_hash != link_hash:
@@ -1489,6 +1667,7 @@ class VenueFactNormalizationService:
                 position_snapshot_id,
                 protection_snapshot_id,
                 account_equity_snapshot_id,
+                funding_payment_id,
                 existing_link.venue_fact_input_link_id,
                 fact_hash,
                 new_fact=False,
@@ -1519,6 +1698,7 @@ class VenueFactNormalizationService:
             venue_position_snapshot_id=position_snapshot_id,
             venue_protection_snapshot_id=protection_snapshot_id,
             venue_account_equity_snapshot_id=account_equity_snapshot_id,
+            venue_funding_payment_id=funding_payment_id,
             input_hash=reconciliation_input.input_hash,
             fact_hash=fact_hash,
             raw_payload_ref=request.raw_payload_ref,
@@ -1544,6 +1724,7 @@ class VenueFactNormalizationService:
             position_snapshot_id,
             protection_snapshot_id,
             account_equity_snapshot_id,
+            funding_payment_id,
             link.venue_fact_input_link_id,
             fact_hash,
             new_fact=new_fact,
@@ -1580,6 +1761,7 @@ class VenueFactNormalizationService:
         position_snapshot_id: UUID | None,
         protection_snapshot_id: UUID | None,
         account_equity_snapshot_id: UUID | None,
+        funding_payment_id: UUID | None,
         link_id: UUID,
         fact_hash: str,
         *,
@@ -1592,6 +1774,7 @@ class VenueFactNormalizationService:
             or position_snapshot_id
             or protection_snapshot_id
             or account_equity_snapshot_id
+            or funding_payment_id
         )
         assert fact_id is not None
         if order_observation_id is not None:
@@ -1606,9 +1789,12 @@ class VenueFactNormalizationService:
         elif protection_snapshot_id is not None:
             event_type = "VenueProtectionSnapshotObserved"
             object_type = "VenueProtectionSnapshot"
-        else:
+        elif account_equity_snapshot_id is not None:
             event_type = "VenueAccountEquitySnapshotObserved"
             object_type = "VenueAccountEquitySnapshot"
+        else:
+            event_type = "VenueFundingPaymentObserved"
+            object_type = "VenueFundingPayment"
         return CommandOutcome(
             status=CommandStatus.COMPLETED,
             object_type=object_type,

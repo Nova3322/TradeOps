@@ -48,6 +48,7 @@ class ReconciliationSourceType(StrEnum):
     TRADING_LEDGER = "TRADING_LEDGER"
     VENUE_ORDERS = "VENUE_ORDERS"
     VENUE_FILLS = "VENUE_FILLS"
+    VENUE_FUNDING = "VENUE_FUNDING"
     VENUE_POSITIONS = "VENUE_POSITIONS"
     VENUE_BALANCES = "VENUE_BALANCES"
     VENUE_PROTECTION = "VENUE_PROTECTION"
@@ -344,7 +345,7 @@ class ExecutionReconciliationService:
         required_sources = [source.value for source in REQUIRED_RECONCILIATION_SOURCES]
         run = ExecutionReconciliationRun(
             run_id=request.run_id,
-            schema_version=1,
+            schema_version=2,
             organization_id=request.scope.organization_id,
             scope_id=scope_id,
             lease_id=lease.lease_id,
@@ -851,6 +852,7 @@ class ExecutionReconciliationService:
         normalized_sources = {
             ReconciliationSourceType.VENUE_ORDERS.value,
             ReconciliationSourceType.VENUE_FILLS.value,
+            ReconciliationSourceType.VENUE_FUNDING.value,
             ReconciliationSourceType.VENUE_POSITIONS.value,
             ReconciliationSourceType.VENUE_BALANCES.value,
             ReconciliationSourceType.VENUE_PROTECTION.value,
@@ -870,7 +872,8 @@ class ExecutionReconciliationService:
         ):
             raise CommandRejected(
                 "RECONCILIATION_NORMALIZED_FACT_COUNT_MISMATCH",
-                "venue order, fill, position, balance, and protection inputs require exact "
+                "venue order, fill, funding, position, balance, and protection inputs require "
+                "exact "
                 "immutable "
                 "fact membership",
             )

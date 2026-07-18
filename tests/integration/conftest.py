@@ -51,6 +51,7 @@ def reset_database(database: Database) -> None:
                     instrument_catalog_records,
                     managed_capital_scope_manifests,
                     venue_fact_input_links,
+                    venue_funding_payments,
                     venue_account_equity_snapshots,
                     venue_protection_snapshots,
                     venue_position_snapshots,

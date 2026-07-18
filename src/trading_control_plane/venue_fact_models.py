@@ -682,6 +682,100 @@ class VenueProtectionSnapshot(Base):
     recorded_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
 
+class VenueFundingPayment(Base):
+    """One globally deduplicated settled private-venue funding cash-flow fact."""
+
+    __tablename__ = "venue_funding_payments"
+    __table_args__ = (
+        CheckConstraint(
+            "position_side IN ('LONG', 'SHORT', 'BOTH')",
+            name="ck_venue_funding_payments_position_side",
+        ),
+        CheckConstraint(
+            "(funding_effect = 'PAYMENT' AND funding_amount > 0) OR "
+            "(funding_effect = 'RECEIPT' AND funding_amount < 0) OR "
+            "(funding_effect = 'ZERO' AND funding_amount = 0)",
+            name="ck_venue_funding_payments_effect",
+        ),
+        CheckConstraint(
+            "event_time <= venue_observed_at AND venue_observed_at <= first_received_at "
+            "AND first_received_at <= recorded_at",
+            name="ck_venue_funding_payments_time_order",
+        ),
+        CheckConstraint(
+            "venue_confirmed AND fact_authority = 'VENUE_PRIVATE' "
+            "AND environment = 'SHADOW' AND live_dispatch_eligible = false",
+            name="ck_venue_funding_payments_authority",
+        ),
+        CheckConstraint(
+            "jsonb_typeof(normalized_payload) = 'object' "
+            "AND length(raw_payload_hash) = 64 AND length(evidence_hash) = 64 "
+            "AND length(funding_hash) = 64",
+            name="ck_venue_funding_payments_integrity",
+        ),
+        ForeignKeyConstraint(
+            ["first_seen_run_id", "organization_id"],
+            [
+                "execution_reconciliation_runs.run_id",
+                "execution_reconciliation_runs.organization_id",
+            ],
+            name="fk_venue_funding_payments_first_run_org",
+            ondelete="RESTRICT",
+        ),
+        UniqueConstraint(
+            "organization_id",
+            "venue",
+            "execution_domain",
+            "account_id",
+            "venue_payment_id",
+            name="uq_venue_funding_payments_external_payment",
+        ),
+        Index(
+            "ix_venue_funding_payments_scope_time",
+            "venue",
+            "execution_domain",
+            "account_id",
+            "instrument_id",
+            "event_time",
+        ),
+    )
+
+    venue_funding_payment_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True)
+    organization_id: Mapped[str] = mapped_column(String(120), nullable=False)
+    first_seen_run_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), nullable=False)
+    first_seen_input_id: Mapped[UUID] = mapped_column(
+        ForeignKey("execution_reconciliation_inputs.input_id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    venue: Mapped[str] = mapped_column(String(80), nullable=False)
+    execution_domain: Mapped[str] = mapped_column(String(120), nullable=False)
+    account_id: Mapped[str] = mapped_column(String(160), nullable=False)
+    instrument_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    venue_payment_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    position_side: Mapped[str] = mapped_column(String(20), nullable=False)
+    margin_mode: Mapped[str] = mapped_column(String(80), nullable=False)
+    collateral_pool_id: Mapped[str] = mapped_column(String(160), nullable=False)
+    funding_amount: Mapped[Decimal] = mapped_column(Numeric(38, 18), nullable=False)
+    funding_currency: Mapped[str] = mapped_column(String(80), nullable=False)
+    funding_effect: Mapped[str] = mapped_column(String(20), nullable=False)
+    venue_confirmed: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    fact_authority: Mapped[str] = mapped_column(String(32), nullable=False)
+    environment: Mapped[str] = mapped_column(String(20), nullable=False)
+    live_dispatch_eligible: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    source_version: Mapped[str] = mapped_column(String(160), nullable=False)
+    normalization_version: Mapped[str] = mapped_column(String(160), nullable=False)
+    normalized_payload: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    raw_payload_ref: Mapped[str] = mapped_column(String(255), nullable=False)
+    raw_payload_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    evidence_ref: Mapped[str] = mapped_column(String(255), nullable=False)
+    evidence_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    funding_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    event_time: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    venue_observed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    first_received_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    recorded_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
 class VenueFactInputLink(Base):
     """Immutable membership of one canonical venue fact in one reconciliation input."""
 
@@ -691,23 +785,33 @@ class VenueFactInputLink(Base):
             "(source_type = 'VENUE_ORDERS' AND venue_order_observation_id IS NOT NULL "
             "AND venue_fill_id IS NULL AND venue_position_snapshot_id IS NULL "
             "AND venue_protection_snapshot_id IS NULL "
-            "AND venue_account_equity_snapshot_id IS NULL) OR "
+            "AND venue_account_equity_snapshot_id IS NULL "
+            "AND venue_funding_payment_id IS NULL) OR "
             "(source_type = 'VENUE_FILLS' AND venue_order_observation_id IS NULL "
             "AND venue_fill_id IS NOT NULL AND venue_position_snapshot_id IS NULL "
             "AND venue_protection_snapshot_id IS NULL "
-            "AND venue_account_equity_snapshot_id IS NULL) OR "
+            "AND venue_account_equity_snapshot_id IS NULL "
+            "AND venue_funding_payment_id IS NULL) OR "
+            "(source_type = 'VENUE_FUNDING' AND venue_order_observation_id IS NULL "
+            "AND venue_fill_id IS NULL AND venue_position_snapshot_id IS NULL "
+            "AND venue_protection_snapshot_id IS NULL "
+            "AND venue_account_equity_snapshot_id IS NULL "
+            "AND venue_funding_payment_id IS NOT NULL) OR "
             "(source_type = 'VENUE_POSITIONS' AND venue_order_observation_id IS NULL "
             "AND venue_fill_id IS NULL AND venue_position_snapshot_id IS NOT NULL "
             "AND venue_protection_snapshot_id IS NULL "
-            "AND venue_account_equity_snapshot_id IS NULL) OR "
+            "AND venue_account_equity_snapshot_id IS NULL "
+            "AND venue_funding_payment_id IS NULL) OR "
             "(source_type = 'VENUE_PROTECTION' AND venue_order_observation_id IS NULL "
             "AND venue_fill_id IS NULL AND venue_position_snapshot_id IS NULL "
             "AND venue_protection_snapshot_id IS NOT NULL "
-            "AND venue_account_equity_snapshot_id IS NULL) OR "
+            "AND venue_account_equity_snapshot_id IS NULL "
+            "AND venue_funding_payment_id IS NULL) OR "
             "(source_type = 'VENUE_BALANCES' AND venue_order_observation_id IS NULL "
             "AND venue_fill_id IS NULL AND venue_position_snapshot_id IS NULL "
             "AND venue_protection_snapshot_id IS NULL "
-            "AND venue_account_equity_snapshot_id IS NOT NULL)",
+            "AND venue_account_equity_snapshot_id IS NOT NULL "
+            "AND venue_funding_payment_id IS NULL)",
             name="ck_venue_fact_input_links_exact_fact",
         ),
         CheckConstraint(
@@ -754,6 +858,11 @@ class VenueFactInputLink(Base):
             "venue_account_equity_snapshot_id",
             name="uq_venue_fact_input_links_account_equity_fact",
         ),
+        UniqueConstraint(
+            "reconciliation_input_id",
+            "venue_funding_payment_id",
+            name="uq_venue_fact_input_links_funding_fact",
+        ),
         Index("ix_venue_fact_input_links_run_source", "run_id", "source_type"),
     )
 
@@ -785,6 +894,10 @@ class VenueFactInputLink(Base):
             "venue_account_equity_snapshots.venue_account_equity_snapshot_id",
             ondelete="RESTRICT",
         ),
+        nullable=True,
+    )
+    venue_funding_payment_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("venue_funding_payments.venue_funding_payment_id", ondelete="RESTRICT"),
         nullable=True,
     )
     input_hash: Mapped[str] = mapped_column(String(64), nullable=False)

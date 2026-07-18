@@ -115,7 +115,7 @@ def test_successful_run_persists_exact_manifest_terminal_evidence_and_replays(
     )
     assert compared.status is CommandStatus.COMPLETED
     assert finished.status is CommandStatus.COMPLETED
-    assert finished.object_version == 10
+    assert finished.object_version == 11
     assert finished.data["status"] == "SUCCEEDED"
     assert finished.data["external_send_permitted"] is False
 
@@ -125,12 +125,12 @@ def test_successful_run_persists_exact_manifest_terminal_evidence_and_replays(
         assert run is not None and state is not None
         assert run.required_source_types == [source.value for source in ReconciliationSourceType]
         assert state.status == "SUCCEEDED"
-        assert state.collected_source_count == 7
+        assert state.collected_source_count == 8
         assert state.result_snapshot is not None
         assert state.result_snapshot["no_historical_replay"] is True
         assert state.result_snapshot["external_send_permitted"] is False
-        assert count_rows(session, ExecutionReconciliationInput) == 7
-        assert count_rows(session, ExecutionReconciliationRunStateHistory) == 10
+        assert count_rows(session, ExecutionReconciliationInput) == 8
+        assert count_rows(session, ExecutionReconciliationRunStateHistory) == 11
 
     with pytest.raises(DBAPIError, match="execution_reconciliation_runs is immutable"):
         with database.session_factory.begin() as session:
@@ -562,7 +562,7 @@ def test_newer_run_invalidates_old_success_and_requires_supersedes_chain(
             session.add(
                 ExecutionReconciliationRun(
                     run_id=uuid4(),
-                    schema_version=1,
+                    schema_version=2,
                     organization_id="org-1",
                     scope_id=sender_scope_id(scope),
                     lease_id=lease_id,

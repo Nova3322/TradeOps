@@ -106,5 +106,9 @@ immutable facts 和 current projection。
 - 真实 collector、OMS/Freqtrade/VenueAdapter 和逐场所认证；
 - Web/PWA、Telegram、Margin、Vault/CTO、报表和运维认证。
 
+后续 [WP-0046](WP-0046-Canonical场所资金费支付事实.md) 已补充 settled private-venue funding 的
+canonical 原生事实和 reconciliation v2 完整水位，但尚未把资金费归属到 Campaign，因此本包的
+`FUNDING_FACTS_UNAVAILABLE` / `economic_equity_status=UNAVAILABLE` 结论不变。
+
 `LIVE_ORDER_SEND`、`CAPITAL_TRANSFER`、`AUTO_ADD` 继续为 `DISABLED`。按用户明确约束，Codex Security
 及其所有审计 Skill、插件和模块保持停用；本包只执行常规架构约束、代码检查、数据库约束与测试。

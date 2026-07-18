@@ -12,9 +12,11 @@ from trading_control_plane.venue_fact_models import VenuePositionSnapshot
 from trading_control_plane.venue_facts import (
     VENUE_FACT_SERVICE_PRINCIPAL,
     FeeEffect,
+    FundingEffect,
     LiquidityRole,
     RecordVenueAccountEquitySnapshotRequest,
     RecordVenueFillRequest,
+    RecordVenueFundingPaymentRequest,
     RecordVenueOrderObservationRequest,
     RecordVenuePositionSnapshotRequest,
     RecordVenueProtectionSnapshotRequest,
@@ -30,6 +32,7 @@ from trading_control_plane.venue_facts import (
     VenueSide,
     _account_equity_snapshot_contract,
     _fill_contract,
+    _funding_payment_contract,
     _order_observation_contract,
     _position_snapshot_contract,
     _protection_snapshot_contract,
@@ -142,6 +145,72 @@ def fill_request(
     evidence_hash = hash_json(evidence_draft.model_dump(mode="json", exclude={"evidence_hash"}))
     return RecordVenueFillRequest.model_validate(
         {**values, "fill_hash": fill_hash, "evidence_hash": evidence_hash}
+    )
+
+
+def funding_payment_request(
+    reconciliation_input: ExecutionReconciliationInput,
+    *,
+    now: datetime,
+    venue_funding_payment_id: UUID | None = None,
+    venue_fact_input_link_id: UUID | None = None,
+    venue_payment_id: str = "funding-payment-1",
+    instrument_id: str = "BTCUSDT-PERP",
+    position_side: VenuePositionSide = VenuePositionSide.BOTH,
+    margin_mode: str = "ISOLATED",
+    collateral_pool_id: str = "pool-usdt-1",
+    funding_amount: Decimal = Decimal("2.5"),
+    funding_currency: str = "USDT",
+    funding_effect: FundingEffect = FundingEffect.PAYMENT,
+    event_time: datetime | None = None,
+    venue_observed_at: datetime | None = None,
+    received_at: datetime | None = None,
+) -> RecordVenueFundingPaymentRequest:
+    observed_event = event_time or now - timedelta(seconds=2)
+    values: dict[str, object] = {
+        "venue_fact_input_link_id": venue_fact_input_link_id or uuid4(),
+        "reconciliation_input_id": reconciliation_input.input_id,
+        "reconciliation_input_hash": reconciliation_input.input_hash,
+        "venue": "BINANCE",
+        "execution_domain": "BINANCE_USDM",
+        "account_id": "account-1",
+        "instrument_id": instrument_id,
+        "source_version": reconciliation_input.source_version,
+        "normalization_version": "venue-funding-normalizer-v1",
+        "normalized_payload": {
+            "venue_payment_id": venue_payment_id,
+            "funding_amount": str(funding_amount),
+            "funding_currency": funding_currency,
+        },
+        "raw_payload_ref": f"test-only:raw-funding:{venue_payment_id}",
+        "raw_payload_hash": hash_json({"raw_funding_payment_id": venue_payment_id}),
+        "evidence_ref": f"test-only:funding-evidence:{venue_payment_id}",
+        "event_time": observed_event,
+        "venue_observed_at": venue_observed_at or now - timedelta(seconds=1),
+        "received_at": received_at or now,
+        "venue_funding_payment_id": venue_funding_payment_id or uuid4(),
+        "venue_payment_id": venue_payment_id,
+        "position_side": position_side,
+        "margin_mode": margin_mode,
+        "collateral_pool_id": collateral_pool_id,
+        "funding_amount": funding_amount,
+        "funding_currency": funding_currency,
+        "funding_effect": funding_effect,
+    }
+    draft = RecordVenueFundingPaymentRequest.model_construct(
+        **values,
+        funding_hash="0" * 64,
+        evidence_hash="0" * 64,
+    )
+    funding_hash = hash_json(_funding_payment_contract(draft))
+    evidence_draft = RecordVenueFundingPaymentRequest.model_construct(
+        **values,
+        funding_hash=funding_hash,
+        evidence_hash="0" * 64,
+    )
+    evidence_hash = hash_json(evidence_draft.model_dump(mode="json", exclude={"evidence_hash"}))
+    return RecordVenueFundingPaymentRequest.model_validate(
+        {**values, "funding_hash": funding_hash, "evidence_hash": evidence_hash}
     )
 
 
@@ -614,6 +683,7 @@ def execute_venue_fact(
     handlers = {
         service.order_command_type: service.record_order_observation,
         service.fill_command_type: service.record_fill,
+        service.funding_command_type: service.record_funding_payment,
         service.position_command_type: service.record_position_snapshot,
         service.protection_command_type: service.record_protection_snapshot,
         service.account_equity_command_type: service.record_account_equity_snapshot,

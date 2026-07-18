@@ -28,7 +28,11 @@ class ExecutionReconciliationRun(Base):
 
     __tablename__ = "execution_reconciliation_runs"
     __table_args__ = (
-        CheckConstraint("schema_version = 1", name="ck_execution_reconciliation_runs_schema"),
+        CheckConstraint(
+            "(schema_version = 1 AND jsonb_array_length(required_source_types) = 7) OR "
+            "(schema_version = 2 AND jsonb_array_length(required_source_types) = 8)",
+            name="ck_execution_reconciliation_runs_schema",
+        ),
         CheckConstraint(
             "environment = 'SHADOW' AND live_dispatch_eligible = false",
             name="ck_execution_reconciliation_runs_shadow_only",
@@ -39,8 +43,7 @@ class ExecutionReconciliationRun(Base):
             name="ck_execution_reconciliation_runs_trigger",
         ),
         CheckConstraint(
-            "jsonb_typeof(required_source_types) = 'array' "
-            "AND jsonb_array_length(required_source_types) = 7",
+            "jsonb_typeof(required_source_types) = 'array'",
             name="ck_execution_reconciliation_runs_sources",
         ),
         CheckConstraint(
@@ -122,7 +125,8 @@ class ExecutionReconciliationInput(Base):
     __table_args__ = (
         CheckConstraint(
             "source_type IN ('TRADING_LEDGER', 'VENUE_ORDERS', 'VENUE_FILLS', "
-            "'VENUE_POSITIONS', 'VENUE_BALANCES', 'VENUE_PROTECTION', 'WORKER_LOCAL')",
+            "'VENUE_FUNDING', 'VENUE_POSITIONS', 'VENUE_BALANCES', 'VENUE_PROTECTION', "
+            "'WORKER_LOCAL')",
             name="ck_execution_reconciliation_inputs_source",
         ),
         CheckConstraint(
