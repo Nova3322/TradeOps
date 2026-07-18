@@ -2,7 +2,8 @@
 
 > 后续状态：WP-0038 已把 ExecutionIntent 升级为 v11，删除 caller
 > `current_effective_leverage`，改由 canonical current notional 与 submitted `E_campaign` 服务端保守
-> 派生并哈希留证。当前执行合同以 [WP-0038](WP-0038-ADD当前有效杠杆服务端派生.md) 为准。
+> 派生并哈希留证；WP-0039 再将 canonical venue UPNL 纳入 v2 hash 并强制为正。
+> 当前执行合同以 [WP-0039](WP-0039-ADD-Canonical正UPNL硬门.md) 为准。
 > 本文件保留 WP-0037 历史合同。
 
 ## 1. 交付目标与边界

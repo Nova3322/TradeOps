@@ -494,6 +494,7 @@ def test_protection_projection_confirms_only_current_position_binding(
     assert protected_risk.scope.settlement_currency == "USDT"
     assert protected_risk.position_snapshot_id == position_request.venue_position_snapshot_id
     assert protected_risk.protection_snapshot_id == protection_request.venue_protection_snapshot_id
+    assert protected_risk.unrealized_pnl == Decimal("500")
     assert protected_risk.current_to_protection_loss == Decimal("50")
     assert protected_risk.open_heat == 0
     assert protected_risk.protected_profit_giveback == Decimal("50")
@@ -501,6 +502,7 @@ def test_protection_projection_confirms_only_current_position_binding(
         protected_risk.open_heat + protected_risk.protected_profit_giveback
     )
     assert protected_risk.calculation_hash is not None
+    assert protected_risk.calculation_version == "protected-position-risk-v2"
 
 
 @pytest.mark.parametrize(
@@ -566,6 +568,7 @@ def test_protection_projection_nonconfirmed_stale_and_missing_hide_semantics(
     assert source_risk.current_to_protection_loss is None
     assert source_risk.open_heat is None
     assert source_risk.protected_profit_giveback is None
+    assert source_risk.unrealized_pnl is None
     assert missing.freshness is ProjectionFreshness.MISSING
     assert missing.reason_code == "SOURCE_MISSING"
 

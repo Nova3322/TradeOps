@@ -17,7 +17,7 @@ from trading_control_plane.metrics import (
 )
 
 PROJECTION_VERSION = "venue-current-v1"
-PROTECTED_POSITION_RISK_VERSION = "protected-position-risk-v1"
+PROTECTED_POSITION_RISK_VERSION = "protected-position-risk-v2"
 RISK_AMOUNT_QUANTUM = Decimal("0.000000000000000001")
 ZERO = Decimal("0")
 
@@ -340,6 +340,7 @@ class CurrentProtectedPositionRiskProjection(BaseModel):
     quantity: Decimal | None
     entry_price: Decimal | None
     mark_price: Decimal | None
+    unrealized_pnl: Decimal | None
     protection_trigger_price: Decimal | None
     contract_multiplier: Decimal | None
     current_to_protection_loss: Decimal | None
@@ -355,6 +356,7 @@ class CurrentProtectedPositionRiskProjection(BaseModel):
             self.quantity,
             self.entry_price,
             self.mark_price,
+            self.unrealized_pnl,
             self.protection_trigger_price,
             self.contract_multiplier,
             self.current_to_protection_loss,
@@ -823,6 +825,7 @@ def derive_protected_position_risk(
         position.quantity,
         position.entry_price,
         position.mark_price,
+        position.unrealized_pnl,
         protection.worst_active_trigger_price,
         position.contract_multiplier,
         position.facts_as_of,
@@ -833,6 +836,7 @@ def derive_protected_position_risk(
     assert position.quantity is not None
     assert position.entry_price is not None
     assert position.mark_price is not None
+    assert position.unrealized_pnl is not None
     assert protection.worst_active_trigger_price is not None
     assert position.contract_multiplier is not None
     assert position.source_snapshot_id is not None
@@ -899,6 +903,7 @@ def derive_protected_position_risk(
         quantity=position.quantity,
         entry_price=position.entry_price,
         mark_price=position.mark_price,
+        unrealized_pnl=position.unrealized_pnl,
         protection_trigger_price=protection.worst_active_trigger_price,
         contract_multiplier=position.contract_multiplier,
         current_to_protection_loss=total,
@@ -930,6 +935,7 @@ def _unknown_protected_position_risk(
         quantity=None,
         entry_price=None,
         mark_price=None,
+        unrealized_pnl=None,
         protection_trigger_price=None,
         contract_multiplier=None,
         current_to_protection_loss=None,
@@ -959,6 +965,7 @@ def _protected_position_risk_contract(
     assert projection.quantity is not None
     assert projection.entry_price is not None
     assert projection.mark_price is not None
+    assert projection.unrealized_pnl is not None
     assert projection.protection_trigger_price is not None
     assert projection.contract_multiplier is not None
     assert projection.current_to_protection_loss is not None
@@ -975,6 +982,7 @@ def _protected_position_risk_contract(
         "quantity": str(projection.quantity),
         "entry_price": str(projection.entry_price),
         "mark_price": str(projection.mark_price),
+        "unrealized_pnl": str(projection.unrealized_pnl),
         "protection_trigger_price": str(projection.protection_trigger_price),
         "contract_multiplier": str(projection.contract_multiplier),
         "current_to_protection_loss": str(projection.current_to_protection_loss),

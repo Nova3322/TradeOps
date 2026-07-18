@@ -50,6 +50,7 @@ def _position(
     mark_price: str,
     quantity: str = "2",
     contract_multiplier: str = "1",
+    unrealized_pnl: str = "0",
 ) -> CurrentPositionProjection:
     return CurrentPositionProjection(
         scope=CurrentPositionScope(**_scope_values()),
@@ -68,7 +69,7 @@ def _position(
         mark_price=Decimal(mark_price),
         contract_multiplier=Decimal(contract_multiplier),
         notional=Decimal("200"),
-        unrealized_pnl=Decimal("0"),
+        unrealized_pnl=Decimal(unrealized_pnl),
         liquidation_price=None,
         leverage=Decimal("3"),
         initial_margin=Decimal("100"),
@@ -170,11 +171,42 @@ def test_protected_position_risk_is_mutually_exclusive(
     assert result.current_to_protection_loss == Decimal(expected_total)
     assert result.open_heat == Decimal(expected_open_heat)
     assert result.protected_profit_giveback == Decimal(expected_giveback)
+    assert result.unrealized_pnl == position.unrealized_pnl
     assert result.current_to_protection_loss == (
         result.open_heat + result.protected_profit_giveback
     )
     assert result.facts_as_of == position.facts_as_of
     assert result.calculation_hash is not None
+    assert result.calculation_version == "protected-position-risk-v2"
+
+
+def test_protected_position_risk_hash_binds_canonical_unrealized_pnl() -> None:
+    protection = _protection(
+        direction=CurrentProtectionDirection.LONG,
+        trigger_price="110",
+    )
+    positive = derive_protected_position_risk(
+        _position(
+            direction=CurrentPositionDirection.LONG,
+            entry_price="100",
+            mark_price="120",
+            unrealized_pnl="40",
+        ),
+        protection,
+    )
+    negative = derive_protected_position_risk(
+        _position(
+            direction=CurrentPositionDirection.LONG,
+            entry_price="100",
+            mark_price="120",
+            unrealized_pnl="-1",
+        ),
+        protection,
+    )
+
+    assert positive.unrealized_pnl == Decimal("40")
+    assert negative.unrealized_pnl == Decimal("-1")
+    assert positive.calculation_hash != negative.calculation_hash
 
 
 def test_protected_position_risk_rounds_total_up_and_uses_exact_residual() -> None:

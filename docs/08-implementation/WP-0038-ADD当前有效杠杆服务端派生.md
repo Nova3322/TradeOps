@@ -1,5 +1,9 @@
 # WP-0038：ADD 当前有效杠杆服务端派生
 
+> 后续状态：WP-0039 已把 ExecutionIntent 升级为 v12，将 canonical venue UPNL 纳入
+> `protected-position-risk-v2` 哈希，并在 UPNL 非正时阻断 ADD。当前执行合同以
+> [WP-0039](WP-0039-ADD-Canonical正UPNL硬门.md) 为准。本文件保留 WP-0038 历史合同。
+
 ## 1. 交付目标与边界
 
 WP-0037 后，ADD 调用方仍同时提交 `current_position_equity` 和

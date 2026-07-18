@@ -469,6 +469,13 @@ class CurrentProtectedPositionRiskResolver:
                 "ADD_ELIGIBILITY_CANONICAL_FACT_MISMATCH",
                 "Add eligibility does not reference the current canonical protection facts",
             )
+        if projection.unrealized_pnl is None:  # pragma: no cover - confirmed model enforces
+            raise RuntimeError("confirmed protected-position risk lacks unrealized PnL")
+        if projection.unrealized_pnl <= ZERO:
+            raise CommandRejected(
+                "ADD_CURRENT_UNREALIZED_PNL_NOT_POSITIVE",
+                "canonical current venue unrealized PnL must be strictly positive",
+            )
         if projection.facts_as_of is None:  # pragma: no cover - confirmed model enforces
             raise RuntimeError("confirmed protected-position risk lacks facts_as_of")
         valid_until = projection.facts_as_of + timedelta(milliseconds=max_age_ms)
@@ -622,8 +629,8 @@ class DurableExposureResolver:
 
 
 class ExecutionIntentService:
-    command_type = "execution.intent.create.v11"
-    payload_schema_version = 11
+    command_type = "execution.intent.create.v12"
+    payload_schema_version = 12
 
     def __init__(
         self,

@@ -440,7 +440,7 @@ def create_intent_envelope(
     request = risk_request or execution_risk_request(proposal, now=now)
     return CommandEnvelope(
         idempotency_key=idempotency_key or f"execution-intent-{uuid4()}",
-        command_type="execution.intent.create.v11",
+        command_type="execution.intent.create.v12",
         object_type="Campaign",
         object_id=str(campaign.campaign_id),
         expected_version=1,
@@ -451,7 +451,7 @@ def create_intent_envelope(
         issued_at=now,
         expires_at=now + timedelta(minutes=2),
         auth_context_ref="internal:oms-risk-reservation-service",
-        payload_schema_version=11,
+        payload_schema_version=12,
         reason="create non-dispatchable shadow intent",
         payload={
             "intent_kind": "INITIAL",
@@ -546,7 +546,7 @@ def create_add_envelope(
     assert register_risk_fact_set(database, fact_set, now=now).status is CommandStatus.COMPLETED
     return CommandEnvelope(
         idempotency_key=f"execution-add-{uuid4()}",
-        command_type="execution.intent.create.v11",
+        command_type="execution.intent.create.v12",
         object_type="Campaign",
         object_id=str(campaign.campaign_id),
         expected_version=2,
@@ -557,7 +557,7 @@ def create_add_envelope(
         issued_at=now,
         expires_at=now + timedelta(minutes=2),
         auth_context_ref="internal:oms-risk-reservation-service",
-        payload_schema_version=11,
+        payload_schema_version=12,
         reason="create non-dispatchable shadow add intent",
         payload={
             "intent_kind": "ADD",
@@ -1237,7 +1237,76 @@ def execute_fact(
     return result
 
 
-def test_execution_intent_legacy_commands_and_wrong_v11_schema_are_rejected(
+def prepare_open_add_campaign(
+    database: Database,
+    *,
+    unrealized_pnl: Decimal,
+) -> tuple[FrozenProposalVersion, Campaign, AddAuthorizationPackage, AddUnit]:
+    now = datetime.now(UTC)
+    proposal, campaign, initial = prepare_authorization(database, auto_add=True)
+    seed_execution_policy(database, now)
+    initial_result = execute_create(
+        database,
+        create_intent_envelope(proposal, campaign, initial, now=now),
+    )
+    initial_intent_id = UUID(str(initial_result.data["order_intent_id"]))
+    facts = (
+        fact_request(
+            sequence=1,
+            status="FILLED",
+            filled=Decimal("0.5"),
+            remaining=Decimal("0"),
+            terminal=True,
+        ),
+        fact_request(
+            sequence=2,
+            status="POSITION_RECONCILED",
+            filled=Decimal("0.5"),
+            remaining=Decimal("0"),
+            terminal=True,
+            reconciled=True,
+        ),
+        fact_request(
+            sequence=3,
+            status="PROTECTION_CONFIRMED",
+            filled=Decimal("0.5"),
+            remaining=Decimal("0"),
+            terminal=True,
+            reconciled=True,
+            protected=True,
+        ),
+    )
+    for fact in facts:
+        result = execute_fact(
+            database,
+            initial_intent_id,
+            fact,
+            position_snapshot_overrides=(
+                {
+                    "entry_price": Decimal("100.5"),
+                    "mark_price": Decimal("120"),
+                    "notional": Decimal("60"),
+                    "unrealized_pnl": unrealized_pnl,
+                }
+                if fact.status == "POSITION_RECONCILED"
+                else None
+            ),
+            protection_snapshot_overrides=(
+                {"worst_active_trigger_price": Decimal("110")}
+                if fact.status == "PROTECTION_CONFIRMED"
+                else None
+            ),
+        )
+        assert result.status is CommandStatus.COMPLETED
+    with database.session_factory.begin() as session:
+        package = session.execute(select(AddAuthorizationPackage)).scalar_one()
+        unit = session.execute(select(AddUnit)).scalar_one()
+        package_state = session.get(AddAuthorizationPackageState, package.add_package_id)
+        assert package_state is not None and package_state.status == "ACTIVE"
+    return proposal, campaign, package, unit
+
+
+def test_execution_intent_legacy_commands_and_wrong_v12_schema_are_rejected(
     database: Database,
 ) -> None:
     proposal, campaign, initial = prepare_authorization(database)
@@ -1270,6 +1339,9 @@ def test_execution_intent_legacy_commands_and_wrong_v11_schema_are_rejected(
     )
     v10 = create_intent_envelope(proposal, campaign, initial, now=datetime.now(UTC)).model_copy(
         update={"command_type": "execution.intent.create.v10"}
+    )
+    v11 = create_intent_envelope(proposal, campaign, initial, now=datetime.now(UTC)).model_copy(
+        update={"command_type": "execution.intent.create.v11"}
     )
     old_field = create_intent_envelope(proposal, campaign, initial, now=datetime.now(UTC))
     old_payload = dict(old_field.payload)
@@ -1326,6 +1398,7 @@ def test_execution_intent_legacy_commands_and_wrong_v11_schema_are_rejected(
     v8_result = execute_create(database, v8)
     v9_result = execute_create(database, v9)
     v10_result = execute_create(database, v10)
+    v11_result = execute_create(database, v11)
     old_field_result = execute_create(database, old_field)
     caller_boolean_result = execute_create(database, caller_boolean)
     protection_boolean_result = execute_create(database, protection_boolean)
@@ -1352,6 +1425,8 @@ def test_execution_intent_legacy_commands_and_wrong_v11_schema_are_rejected(
     assert v9_result.error_code == "COMMAND_TYPE_MISMATCH"
     assert v10_result.status is CommandStatus.REJECTED
     assert v10_result.error_code == "COMMAND_TYPE_MISMATCH"
+    assert v11_result.status is CommandStatus.REJECTED
+    assert v11_result.error_code == "COMMAND_TYPE_MISMATCH"
     assert old_field_result.status is CommandStatus.REJECTED
     assert old_field_result.error_code == "EXECUTION_INPUT_INVALID"
     assert caller_boolean_result.status is CommandStatus.REJECTED
@@ -2213,71 +2288,71 @@ def test_terminal_zero_fill_releases_risk_and_allows_new_initial_candidate(
         assert count_rows(session, OrderIntent) == 2
 
 
+@pytest.mark.parametrize(
+    "canonical_upnl",
+    (Decimal("0"), Decimal("-1")),
+    ids=("zero", "negative"),
+)
+def test_add_rejects_nonpositive_canonical_upnl_without_intent_or_reservation(
+    database: Database,
+    canonical_upnl: Decimal,
+) -> None:
+    proposal, campaign, package, unit = prepare_open_add_campaign(
+        database,
+        unrealized_pnl=canonical_upnl,
+    )
+
+    result = execute_create(
+        database,
+        create_add_envelope(
+            database,
+            proposal,
+            campaign,
+            package,
+            unit,
+            now=datetime.now(UTC),
+            candidate_ref=f"add-nonpositive-canonical-upnl-{canonical_upnl}",
+        ),
+    )
+
+    assert result.status is CommandStatus.REJECTED
+    assert result.error_code == "ADD_CURRENT_UNREALIZED_PNL_NOT_POSITIVE"
+    with database.session_factory.begin() as session:
+        assert (
+            session.execute(
+                select(func.count())
+                .select_from(ExecutionRiskDecision)
+                .where(ExecutionRiskDecision.intent_kind == "ADD")
+            ).scalar_one()
+            == 0
+        )
+        assert (
+            session.execute(
+                select(func.count())
+                .select_from(OrderIntent)
+                .where(OrderIntent.intent_kind == "ADD")
+            ).scalar_one()
+            == 0
+        )
+        assert (
+            session.execute(
+                select(func.count())
+                .select_from(RiskReservation)
+                .where(RiskReservation.add_package_id.is_not(None))
+            ).scalar_one()
+            == 0
+        )
+        unit_state = session.get(AddUnitState, unit.add_unit_id)
+        assert unit_state is not None and unit_state.status == "AVAILABLE"
+
+
 def test_add_zero_fill_releases_unit_then_positive_fill_consumes_it(
     database: Database,
 ) -> None:
-    now = datetime.now(UTC)
-    proposal, campaign, initial = prepare_authorization(database, auto_add=True)
-    seed_execution_policy(database, now)
-    initial_result = execute_create(
-        database, create_intent_envelope(proposal, campaign, initial, now=now)
+    proposal, campaign, package, unit = prepare_open_add_campaign(
+        database,
+        unrealized_pnl=Decimal("9.75"),
     )
-    initial_intent_id = UUID(str(initial_result.data["order_intent_id"]))
-    facts = (
-        fact_request(
-            sequence=1,
-            status="FILLED",
-            filled=Decimal("0.5"),
-            remaining=Decimal("0"),
-            terminal=True,
-        ),
-        fact_request(
-            sequence=2,
-            status="POSITION_RECONCILED",
-            filled=Decimal("0.5"),
-            remaining=Decimal("0"),
-            terminal=True,
-            reconciled=True,
-        ),
-        fact_request(
-            sequence=3,
-            status="PROTECTION_CONFIRMED",
-            filled=Decimal("0.5"),
-            remaining=Decimal("0"),
-            terminal=True,
-            reconciled=True,
-            protected=True,
-        ),
-    )
-    for fact in facts:
-        assert (
-            execute_fact(
-                database,
-                initial_intent_id,
-                fact,
-                position_snapshot_overrides=(
-                    {
-                        "entry_price": Decimal("100.5"),
-                        "mark_price": Decimal("120"),
-                        "notional": Decimal("60"),
-                        "unrealized_pnl": Decimal("9.75"),
-                    }
-                    if fact.status == "POSITION_RECONCILED"
-                    else None
-                ),
-                protection_snapshot_overrides=(
-                    {"worst_active_trigger_price": Decimal("110")}
-                    if fact.status == "PROTECTION_CONFIRMED"
-                    else None
-                ),
-            ).status
-            is CommandStatus.COMPLETED
-        )
-    with database.session_factory.begin() as session:
-        package = session.execute(select(AddAuthorizationPackage)).scalar_one()
-        unit = session.execute(select(AddUnit)).scalar_one()
-        package_state = session.get(AddAuthorizationPackageState, package.add_package_id)
-        assert package_state is not None and package_state.status == "ACTIVE"
 
     for legacy_field, legacy_value in (
         ("protection_valid", True),
@@ -2389,6 +2464,7 @@ def test_add_zero_fill_releases_unit_then_positive_fill_consumes_it(
             == add_event.payload["add_leverage_calculation_hash"]
         )
         assert Decimal(protected["current_to_protection_loss"]) == Decimal("5")
+        assert Decimal(protected["unrealized_pnl"]) == Decimal("9.75")
         assert Decimal(protected["open_heat"]) == 0
         assert Decimal(protected["protected_profit_giveback"]) == Decimal("5")
         assert protected["scope"]["settlement_currency"] == "USD"
