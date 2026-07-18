@@ -17,12 +17,26 @@ from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 
 from trading_control_plane import __version__
 from trading_control_plane.api_schemas import (
+    AccountEquityFactRequest,
     AuthorizationRequest,
+    CampaignTargetRequest,
+    FundingFactRequest,
+    IntentReleaseRequest,
+    IntentUnknownRequest,
     ManualProposalRequest,
     MockLoginRequest,
     MockStepUpRequest,
+    OrderIntentRequest,
+    PositionFactRequest,
+    ProtectionFactRequest,
+    ReconciliationReasonRequest,
+    ReconciliationRequest,
+    ReductionIntentRequest,
     ReviewRequest,
     RiskDecisionRequest,
+    SenderLeaseRequest,
+    ShadowFillRequest,
+    ShadowSendRequest,
     SystemProposalRequest,
 )
 from trading_control_plane.auth import SessionIdentity, SignedTokenService
@@ -32,16 +46,22 @@ from trading_control_plane.domain import (
     DomainRejected,
     ExecutionEnvironment,
     IntentKind,
+    OrderIntentStatus,
     ProposalSource,
     ProposalStatus,
     ReviewDecision,
+    TargetCandidate,
 )
 from trading_control_plane.logging import configure_logging
 from trading_control_plane.metrics import DATABASE_READY
 from trading_control_plane.perptape import PerptapeClient
 from trading_control_plane.queries import TradingQueries
 from trading_control_plane.service import TradingService
-from trading_control_plane.telegram import MockTelegramGateway, ProposalNotification
+from trading_control_plane.telegram import (
+    CampaignNotification,
+    MockTelegramGateway,
+    ProposalNotification,
+)
 
 logger = logging.getLogger(__name__)
 WEB_ROOT = Path(__file__).parent / "web"
@@ -82,7 +102,7 @@ def _domain_status(code: str) -> int:
         return status.HTTP_409_CONFLICT
     if code in {"PERPTAPE_UNAVAILABLE", "PERPTAPE_NOT_CONFIGURED"}:
         return status.HTTP_503_SERVICE_UNAVAILABLE
-    return status.HTTP_422_UNPROCESSABLE_ENTITY
+    return status.HTTP_422_UNPROCESSABLE_CONTENT
 
 
 def create_app(
@@ -542,6 +562,385 @@ def create_app(
             "detail": queries().proposal_detail(identity.user_id, proposal_id),
         }
 
+    def notify_campaign(
+        recipient_id: UUID,
+        campaign_id: UUID,
+        event_type: str,
+        event_key: str,
+        summary: str,
+    ) -> None:
+        notification_key = f"{campaign_id}:{event_type}:{event_key}:{recipient_id}"
+        resolved_telegram.send_campaign(
+            CampaignNotification(
+                notification_id="tg_" + hashlib.sha256(notification_key.encode()).hexdigest()[:20],
+                recipient_id=recipient_id,
+                campaign_id=campaign_id,
+                event_type=event_type,
+                environment="SHADOW",
+                summary=summary,
+                created_at=_now(),
+            )
+        )
+
+    @app.get("/api/campaigns")
+    def campaigns(
+        identity: SessionIdentity = identity_dependency,
+    ) -> dict[str, Any]:
+        return {"data": queries().list_campaigns(identity.user_id), "as_of": _now().isoformat()}
+
+    @app.get("/api/campaign-exceptions")
+    def campaign_exceptions(
+        identity: SessionIdentity = identity_dependency,
+    ) -> dict[str, Any]:
+        return {
+            "data": queries().list_exceptions(identity.user_id),
+            "as_of": _now().isoformat(),
+        }
+
+    @app.get("/api/campaigns/{campaign_id}")
+    def campaign_detail(
+        campaign_id: UUID,
+        identity: SessionIdentity = identity_dependency,
+    ) -> dict[str, Any]:
+        return queries().campaign_detail(identity.user_id, campaign_id)
+
+    @app.post("/api/authorizations/{authorization_id}/intents")
+    def create_order_intent(
+        authorization_id: UUID,
+        payload: OrderIntentRequest,
+        identity: SessionIdentity = identity_dependency,
+    ) -> dict[str, Any]:
+        created = service().create_order_intent(
+            authorization_id,
+            identity.user_id,
+            payload.kind,
+            payload.account_id,
+            payload.venue,
+            payload.instrument_id,
+            payload.direction,
+            payload.quantity,
+            payload.idempotency_key,
+            now=_now(),
+        )
+        return {
+            "campaign_id": str(created.campaign_id),
+            "reservation_id": str(created.reservation_id),
+            "intent_id": str(created.intent_id),
+            "detail": queries().campaign_detail(identity.user_id, created.campaign_id),
+        }
+
+    @app.post("/api/facts/positions")
+    def record_position(
+        payload: PositionFactRequest,
+        identity: SessionIdentity = identity_dependency,
+    ) -> dict[str, str]:
+        position_id = service().record_position(
+            payload.account_id,
+            payload.venue,
+            payload.instrument_id,
+            payload.quantity,
+            payload.average_entry_price,
+            payload.mark_price,
+            payload.known,
+            identity.user_id,
+            now=_now(),
+        )
+        return {"position_id": str(position_id), "environment": "SHADOW"}
+
+    @app.post("/api/facts/account-equity")
+    def record_account_equity(
+        payload: AccountEquityFactRequest,
+        identity: SessionIdentity = identity_dependency,
+    ) -> dict[str, str]:
+        fact_id = service().record_account_equity(
+            payload.account_id,
+            payload.venue,
+            payload.equity,
+            payload.available_balance,
+            payload.currency,
+            payload.known,
+            identity.user_id,
+            now=_now(),
+        )
+        return {"account_equity_id": str(fact_id), "environment": "SHADOW"}
+
+    @app.post("/api/sender-leases")
+    def acquire_sender(
+        payload: SenderLeaseRequest,
+        identity: SessionIdentity = identity_dependency,
+    ) -> dict[str, Any]:
+        now = _now()
+        token = service().acquire_sender(
+            payload.execution_scope,
+            payload.owner_id,
+            identity.user_id,
+            now,
+            lease_duration=timedelta(seconds=payload.lease_seconds),
+        )
+        return {
+            "execution_scope": payload.execution_scope,
+            "owner_id": payload.owner_id,
+            "fencing_token": token,
+            "expires_at": (now + timedelta(seconds=payload.lease_seconds)).isoformat(),
+        }
+
+    @app.post("/api/intents/{intent_id}/shadow-send")
+    def shadow_send(
+        intent_id: UUID,
+        payload: ShadowSendRequest,
+        identity: SessionIdentity = identity_dependency,
+    ) -> dict[str, Any]:
+        campaign_id = queries().campaign_id_for_intent(identity.user_id, intent_id)
+        fact_id = service().record_shadow_order(
+            intent_id,
+            identity.user_id,
+            payload.execution_scope,
+            payload.owner_id,
+            payload.fencing_token,
+            payload.venue_order_id,
+            now=_now(),
+        )
+        return {
+            "venue_order_fact_id": str(fact_id),
+            "environment": "SHADOW",
+            "detail": queries().campaign_detail(identity.user_id, campaign_id),
+        }
+
+    @app.post("/api/intents/{intent_id}/fills")
+    def record_fill(
+        intent_id: UUID,
+        payload: ShadowFillRequest,
+        identity: SessionIdentity = identity_dependency,
+    ) -> dict[str, Any]:
+        campaign_id = queries().campaign_id_for_intent(identity.user_id, intent_id)
+        fact_id = service().record_fill(
+            intent_id,
+            identity.user_id,
+            payload.venue_fill_id,
+            payload.side,
+            payload.quantity,
+            payload.price,
+            payload.fee,
+            payload.fee_currency,
+            payload.slippage_cost,
+            now=_now(),
+        )
+        notify_campaign(
+            identity.user_id,
+            campaign_id,
+            "SHADOW_FILL_RECORDED",
+            payload.venue_fill_id,
+            f"SHADOW fill {payload.venue_fill_id} recorded; no venue order was sent",
+        )
+        return {
+            "venue_fill_fact_id": str(fact_id),
+            "environment": "SHADOW",
+            "detail": queries().campaign_detail(identity.user_id, campaign_id),
+        }
+
+    @app.post("/api/intents/{intent_id}/unknown")
+    def mark_intent_unknown(
+        intent_id: UUID,
+        payload: IntentUnknownRequest,
+        identity: SessionIdentity = identity_dependency,
+    ) -> dict[str, Any]:
+        campaign_id = queries().campaign_id_for_intent(identity.user_id, intent_id)
+        service().mark_intent_unknown(intent_id, identity.user_id, payload.reason, now=_now())
+        notify_campaign(
+            identity.user_id,
+            campaign_id,
+            "ORDER_INTENT_UNKNOWN",
+            str(intent_id),
+            "Order outcome is UNKNOWN; risk remains occupied and automatic retry is blocked",
+        )
+        return queries().campaign_detail(identity.user_id, campaign_id)
+
+    @app.post("/api/intents/{intent_id}/release")
+    def release_intent(
+        intent_id: UUID,
+        payload: IntentReleaseRequest,
+        identity: SessionIdentity = identity_dependency,
+    ) -> dict[str, Any]:
+        campaign_id = queries().campaign_id_for_intent(identity.user_id, intent_id)
+        service().release_unfilled_intent(
+            intent_id,
+            identity.user_id,
+            OrderIntentStatus(payload.terminal_status),
+            payload.reason,
+            now=_now(),
+        )
+        return queries().campaign_detail(identity.user_id, campaign_id)
+
+    @app.post("/api/campaigns/{campaign_id}/protection")
+    def record_protection(
+        campaign_id: UUID,
+        payload: ProtectionFactRequest,
+        identity: SessionIdentity = identity_dependency,
+    ) -> dict[str, Any]:
+        queries().campaign_detail(identity.user_id, campaign_id)
+        protection_id = service().record_protection(
+            payload.position_id,
+            payload.venue_order_id,
+            payload.quantity,
+            payload.trigger_price,
+            payload.fully_covered,
+            identity.user_id,
+            known=payload.known,
+            now=_now(),
+        )
+        event_type = (
+            "PROTECTION_ACTIVE"
+            if payload.known and payload.fully_covered
+            else "PROTECTION_EXCEPTION"
+        )
+        notify_campaign(
+            identity.user_id,
+            campaign_id,
+            event_type,
+            f"{payload.position_id}:{payload.venue_order_id}",
+            "Protection fact recorded for SHADOW position",
+        )
+        return {
+            "protection_id": str(protection_id),
+            "detail": queries().campaign_detail(identity.user_id, campaign_id),
+        }
+
+    @app.post("/api/campaigns/{campaign_id}/funding")
+    def record_funding(
+        campaign_id: UUID,
+        payload: FundingFactRequest,
+        identity: SessionIdentity = identity_dependency,
+    ) -> dict[str, Any]:
+        payment_id = service().record_funding(
+            campaign_id,
+            payload.venue,
+            payload.venue_payment_id,
+            payload.amount,
+            payload.currency,
+            identity.user_id,
+            now=_now(),
+        )
+        return {
+            "funding_payment_id": str(payment_id),
+            "detail": queries().campaign_detail(identity.user_id, campaign_id),
+        }
+
+    @app.post("/api/campaigns/{campaign_id}/target")
+    def update_campaign_target(
+        campaign_id: UUID,
+        payload: CampaignTargetRequest,
+        identity: SessionIdentity = identity_dependency,
+    ) -> dict[str, Any]:
+        decision = service().update_campaign_target(
+            campaign_id,
+            identity.user_id,
+            tuple(
+                TargetCandidate(item.target_quantity, item.urgency, item.reason)
+                for item in payload.candidates
+            ),
+            now=_now(),
+        )
+        return {
+            "decision": {
+                "target_quantity": str(decision.target_quantity),
+                "urgency": decision.urgency.value,
+                "reasons": list(decision.reasons),
+            },
+            "detail": queries().campaign_detail(identity.user_id, campaign_id),
+        }
+
+    @app.post("/api/campaigns/{campaign_id}/reduction-intents")
+    def create_reduction_intent(
+        campaign_id: UUID,
+        payload: ReductionIntentRequest,
+        identity: SessionIdentity = identity_dependency,
+    ) -> dict[str, Any]:
+        intent_id = service().create_reduction_intent(
+            campaign_id, identity.user_id, payload.idempotency_key, now=_now()
+        )
+        return {
+            "intent_id": str(intent_id),
+            "detail": queries().campaign_detail(identity.user_id, campaign_id),
+        }
+
+    @app.post("/api/campaigns/{campaign_id}/reconcile")
+    def reconcile_campaign(
+        campaign_id: UUID,
+        payload: ReconciliationRequest,
+        identity: SessionIdentity = identity_dependency,
+    ) -> dict[str, Any]:
+        reconciliation_id = service().reconcile_campaign(
+            campaign_id, payload.execution_scope, identity.user_id, now=_now()
+        )
+        detail = queries().campaign_detail(identity.user_id, campaign_id)
+        reconciliation = detail["reconciliation"]
+        if reconciliation is not None and reconciliation["status"] != "MATCH":
+            notify_campaign(
+                identity.user_id,
+                campaign_id,
+                "RECONCILIATION_EXCEPTION",
+                str(reconciliation_id),
+                f"Reconciliation requires attention: {reconciliation['status']}",
+            )
+        return {"reconciliation_id": str(reconciliation_id), "detail": detail}
+
+    @app.post("/api/reconciliations/{reconciliation_id}/manual")
+    def require_manual_reconciliation(
+        reconciliation_id: UUID,
+        payload: ReconciliationReasonRequest,
+        identity: SessionIdentity = identity_dependency,
+    ) -> dict[str, str]:
+        result = service().require_manual_reconciliation(
+            reconciliation_id, identity.user_id, payload.reason, now=_now()
+        )
+        return {"reconciliation_id": str(result), "status": "MANUAL_REQUIRED"}
+
+    @app.post("/api/reconciliations/{reconciliation_id}/resolve")
+    def resolve_reconciliation(
+        reconciliation_id: UUID,
+        payload: ReconciliationReasonRequest,
+        identity: SessionIdentity = identity_dependency,
+    ) -> dict[str, str]:
+        result = service().resolve_reconciliation(
+            reconciliation_id, identity.user_id, payload.reason, now=_now()
+        )
+        return {"reconciliation_id": str(result), "status": "RESOLVED"}
+
+    @app.post("/api/campaigns/{campaign_id}/pnl")
+    def refresh_campaign_pnl(
+        campaign_id: UUID,
+        identity: SessionIdentity = identity_dependency,
+    ) -> dict[str, Any]:
+        pnl = service().refresh_campaign_pnl(campaign_id, identity.user_id, now=_now())
+        return {
+            "pnl": {
+                "realized_pnl": str(pnl.realized_pnl),
+                "unrealized_pnl": str(pnl.unrealized_pnl),
+                "fees": str(pnl.fees),
+                "funding": str(pnl.funding),
+                "slippage": str(pnl.slippage),
+                "total_pnl": str(pnl.total_pnl),
+                "open_quantity": str(pnl.open_quantity),
+                "average_entry_price": str(pnl.average_entry_price),
+            },
+            "detail": queries().campaign_detail(identity.user_id, campaign_id),
+        }
+
+    @app.post("/api/campaigns/{campaign_id}/close")
+    def close_campaign(
+        campaign_id: UUID,
+        identity: SessionIdentity = identity_dependency,
+    ) -> dict[str, Any]:
+        service().close_campaign(campaign_id, identity.user_id, now=_now())
+        notify_campaign(
+            identity.user_id,
+            campaign_id,
+            "CAMPAIGN_CLOSED",
+            str(campaign_id),
+            "SHADOW Campaign closed after flat position and reconciliation MATCH",
+        )
+        return queries().campaign_detail(identity.user_id, campaign_id)
+
     @app.get("/api/telegram/mock/notifications")
     def mock_telegram_notifications(
         identity: SessionIdentity = identity_dependency,
@@ -562,7 +961,23 @@ def create_app(
             for item in resolved_telegram.notifications()
             if item.reviewer_id == identity.user_id
         ]
-        return {"transport": "MOCK_ONLY", "data": data}
+        campaign_data = [
+            {
+                "notification_id": item.notification_id,
+                "campaign_id": str(item.campaign_id),
+                "event_type": item.event_type,
+                "environment": item.environment,
+                "summary": item.summary,
+                "created_at": item.created_at.isoformat(),
+            }
+            for item in resolved_telegram.campaign_notifications()
+            if item.recipient_id == identity.user_id
+        ]
+        return {
+            "transport": "MOCK_ONLY",
+            "data": data,
+            "campaign_data": campaign_data,
+        }
 
     if WEB_ROOT.exists():
         app.mount("/assets", StaticFiles(directory=WEB_ROOT), name="web-assets")
@@ -579,9 +994,16 @@ def create_app(
         @app.get("/opportunities", include_in_schema=False)
         @app.get("/proposals/new", include_in_schema=False)
         @app.get("/reviews", include_in_schema=False)
+        @app.get("/campaigns", include_in_schema=False)
+        @app.get("/positions", include_in_schema=False)
+        @app.get("/orders", include_in_schema=False)
+        @app.get("/risk", include_in_schema=False)
+        @app.get("/exceptions", include_in_schema=False)
         @app.get("/proposals/{proposal_id}", include_in_schema=False)
-        def web_app(proposal_id: str | None = None) -> FileResponse:
+        @app.get("/campaigns/{campaign_id}", include_in_schema=False)
+        def web_app(proposal_id: str | None = None, campaign_id: str | None = None) -> FileResponse:
             del proposal_id
+            del campaign_id
             return FileResponse(WEB_ROOT / "index.html")
 
     return app

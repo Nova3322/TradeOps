@@ -1,7 +1,7 @@
 # Trading 交易系统
 
 > 状态日期：2026-07-19
-> 当前状态：M1 内部提案与审核工作台；没有实盘授权
+> 当前状态：M2 SHADOW Campaign 运营台；没有真实场所接入或实盘授权
 
 本项目面向一个资本所有者、一个内部组织和多个内部用户。用户可以提交和审核提案、查看仓位、处理异常；系统在风险可控的前提下辅助执行交易并判断是否赚钱。不开放外部注册，不管理第三方资金，不建设机构级多租户、通用合规或通用认证平台。
 
@@ -28,13 +28,13 @@
 - 场所真实订单、成交、仓位、保护、余额和资金费必须与内部预期分开并对账。
 - 每个 execution scope 只有一个有效 sender；新 owner 接管后旧 fencing token 无效。
 - `LIVE_ORDER_SEND`、`CAPITAL_TRANSFER`、`AUTO_ADD` 默认 `DISABLED`。
-- Telegram 当前只有不联网的 Mock 通知/深链适配器；真实 Bot、真实 VenueAdapter、实盘发送、Margin、Vault/CTO 尚未实现，文档愿景不能冒充代码能力。
+- Telegram 当前只有不联网的 Mock 提案、成交、保护和异常通知适配器；真实 Bot、真实 VenueAdapter、实盘发送、Margin、Vault/CTO 尚未实现，文档愿景不能冒充代码能力。
 
 ## 当前代码入口
 
 - 进程：`uv run trading-api`
-- Web/PWA：`/opportunities`、`/proposals/new`、`/reviews`、`/proposals/{id}`
-- HTTP：健康检查、内部会话、Perptape 机会、Proposal、Review、RiskDecision 和 TradingAuthorization API
+- Web/PWA：提案/审核页面，以及 `/campaigns`、`/positions`、`/orders`、`/risk`、`/exceptions` 和 Campaign 详情运营页
+- HTTP：健康检查、内部会话、Perptape 机会、Proposal/Review/Risk/Authorization，以及 SHADOW Campaign、事实、订单、保护、目标、对账和 PnL API
 - 内部业务：`trading_control_plane.service.TradingService`
 - 纯计算：`evaluate_risk`、`select_target_position`、`compute_pnl`
 - 数据库：PostgreSQL，Alembic head `20260718_0001`

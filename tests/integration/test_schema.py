@@ -42,23 +42,48 @@ def test_initial_schema_seeds_only_disabled_capability_gates(database: Database)
 
 
 def test_database_readiness_checks_revision_and_valid_gates(database: Database) -> None:
-    assert database.is_ready() == (True, None)
+    try:
+        assert database.is_ready() == (True, None)
 
-    with database.engine.begin() as connection:
-        connection.execute(
-            text("UPDATE capability_gates SET status = 'ENABLED' WHERE capability_key = 'AUTO_ADD'")
-        )
-    assert database.is_ready() == (True, None)
+        with database.engine.begin() as connection:
+            connection.execute(
+                text(
+                    "UPDATE capability_gates SET status = 'ENABLED' "
+                    "WHERE capability_key = 'AUTO_ADD'"
+                )
+            )
+        assert database.is_ready() == (True, None)
 
-    with database.engine.begin() as connection:
-        connection.execute(
-            text("DELETE FROM capability_gates WHERE capability_key = 'CAPITAL_TRANSFER'")
-        )
-    assert database.is_ready() == (False, "CONTROL_GATES_INVALID")
+        with database.engine.begin() as connection:
+            connection.execute(
+                text("DELETE FROM capability_gates WHERE capability_key = 'CAPITAL_TRANSFER'")
+            )
+        assert database.is_ready() == (False, "CONTROL_GATES_INVALID")
 
-    with database.engine.begin() as connection:
-        connection.execute(text("UPDATE alembic_version SET version_num = 'stale'"))
-    assert database.is_ready() == (False, "SCHEMA_REVISION_MISMATCH")
+        with database.engine.begin() as connection:
+            connection.execute(text("UPDATE alembic_version SET version_num = 'stale'"))
+        assert database.is_ready() == (False, "SCHEMA_REVISION_MISMATCH")
+    finally:
+        with database.engine.begin() as connection:
+            connection.execute(
+                text("UPDATE alembic_version SET version_num = :revision"),
+                {"revision": REQUIRED_SCHEMA_REVISION},
+            )
+            connection.execute(
+                text(
+                    "INSERT INTO capability_gates "
+                    "(capability_key, status, reason, operator_id, updated_at) "
+                    "VALUES ('CAPITAL_TRANSFER', 'DISABLED', 'initial default', "
+                    "'migration', now()) ON CONFLICT (capability_key) DO UPDATE "
+                    "SET status = 'DISABLED'"
+                )
+            )
+            connection.execute(
+                text(
+                    "UPDATE capability_gates SET status = 'DISABLED' "
+                    "WHERE capability_key = 'AUTO_ADD'"
+                )
+            )
 
 
 def test_database_readiness_fails_closed_when_postgresql_is_unavailable() -> None:

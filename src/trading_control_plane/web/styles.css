@@ -107,6 +107,12 @@ textarea { resize: vertical; }
 .form-actions { margin-top: 22px; display: flex; justify-content: flex-end; }
 .form-error { color: var(--danger); font-size: 12px; min-height: 20px; margin-top: 10px; }
 .safety-note, .callout { padding: 12px 14px; border-left: 3px solid var(--accent); background: var(--accent-2); color: var(--muted); font-size: 12px; line-height: 1.55; margin: 18px 0; }
+.compact-form { max-width: none; }
+.action-panel { display: grid; gap: 11px; margin-top: 16px; padding: 15px; border: 1px solid var(--line); border-radius: 12px; background: var(--panel-strong); }
+.action-panel h3 { margin-bottom: 0; }
+.action-panel .primary, .action-panel .secondary, .action-panel .danger { justify-self: start; }
+.intent-row { display: flex; align-items: start; justify-content: space-between; gap: 12px; padding: 13px 0; border-top: 1px solid var(--line); }
+.intent-row:first-of-type { border-top: 0; }
 .detail-layout { display: grid; grid-template-columns: minmax(0, 1.4fr) minmax(280px, .6fr); gap: 16px; }
 .stack { display: grid; gap: 14px; }
 .definition-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 17px; margin: 0; }
@@ -136,8 +142,9 @@ dialog::backdrop { background: rgba(4, 12, 10, .56); backdrop-filter: blur(3px);
   .topbar { height: 64px; padding: 0 15px; }
   .brand small, .identity-chip, .env-badge { display: none; }
   .sidebar { position: fixed; z-index: 20; left: 0; right: 0; bottom: 0; height: 66px; border: 0; border-top: 1px solid var(--line); padding: 7px 10px; }
-  .sidebar nav { display: grid; grid-template-columns: repeat(4, 1fr); }
-  .sidebar nav a { display: grid; place-items: center; gap: 2px; padding: 5px; font-size: 10px; }
+  .sidebar nav { display: flex; overflow-x: auto; scrollbar-width: none; }
+  .sidebar nav::-webkit-scrollbar { display: none; }
+  .sidebar nav a { min-width: 72px; display: grid; place-items: center; gap: 2px; padding: 5px; font-size: 10px; }
   .sidebar nav a span { font-size: 17px; }
   .sidebar-foot { display: none; }
   .main-content { padding: 27px 15px 50px; }

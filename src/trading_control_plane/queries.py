@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from decimal import Decimal
 from typing import Any
 from uuid import UUID
 
@@ -10,12 +11,22 @@ from trading_control_plane.database import Database
 from trading_control_plane.domain import DomainRejected, PrincipalType, Role
 from trading_control_plane.models import (
     Approval,
+    Campaign,
+    FundingPayment,
     Instrument,
+    OrderIntent,
+    Position,
     Proposal,
+    ProtectionOrder,
+    ReconciliationRun,
     RiskDecision,
+    RiskReservation,
     RoleAssignment,
+    SenderLease,
     TradingAuthorization,
     User,
+    VenueFill,
+    VenueOrder,
 )
 from trading_control_plane.service import TradingService
 
@@ -228,6 +239,300 @@ class TradingQueries:
             for user in users:
                 session.expunge(user)
             return list(users)
+
+    def list_campaigns(self, user_id: UUID) -> list[dict[str, Any]]:
+        with self.database.session_factory() as session:
+            values = session.scalars(
+                select(Campaign).order_by(Campaign.updated_at.desc(), Campaign.campaign_id)
+            ).all()
+            return [
+                self._campaign_summary(item)
+                for item in values
+                if self.service.can_user(user_id, "view", item.account_id, item.venue)
+            ]
+
+    def campaign_detail(self, user_id: UUID, campaign_id: UUID) -> dict[str, Any]:
+        with self.database.session_factory() as session:
+            campaign = session.get(Campaign, campaign_id)
+            if campaign is None:
+                raise DomainRejected("CAMPAIGN_NOT_FOUND", "campaign does not exist")
+            if not self.service.can_user(user_id, "view", campaign.account_id, campaign.venue):
+                raise DomainRejected("RBAC_DENIED", "campaign is outside the current scope")
+            instrument = session.get(Instrument, campaign.instrument_id)
+            authorization = session.get(TradingAuthorization, campaign.authorization_id)
+            reservations = session.scalars(
+                select(RiskReservation)
+                .where(RiskReservation.campaign_id == campaign_id)
+                .order_by(RiskReservation.created_at)
+            ).all()
+            intents = session.scalars(
+                select(OrderIntent)
+                .where(OrderIntent.campaign_id == campaign_id)
+                .order_by(OrderIntent.created_at, OrderIntent.intent_id)
+            ).all()
+            intent_ids = [item.intent_id for item in intents]
+            orders = (
+                session.scalars(
+                    select(VenueOrder).where(VenueOrder.order_intent_id.in_(intent_ids))
+                ).all()
+                if intent_ids
+                else []
+            )
+            fills = session.scalars(
+                select(VenueFill)
+                .where(VenueFill.campaign_id == campaign_id)
+                .order_by(VenueFill.executed_at, VenueFill.venue_fill_fact_id)
+            ).all()
+            position = session.scalar(
+                select(Position).where(
+                    Position.account_id == campaign.account_id,
+                    Position.venue == campaign.venue,
+                    Position.instrument_id == campaign.instrument_id,
+                )
+            )
+            protection = (
+                session.scalar(
+                    select(ProtectionOrder).where(
+                        ProtectionOrder.position_id == position.position_id
+                    )
+                )
+                if position is not None
+                else None
+            )
+            funding = session.scalars(
+                select(FundingPayment)
+                .where(FundingPayment.campaign_id == campaign_id)
+                .order_by(FundingPayment.paid_at)
+            ).all()
+            scope = f"{campaign.account_id}:{campaign.venue}"
+            reconciliation = session.scalar(
+                select(ReconciliationRun)
+                .where(ReconciliationRun.execution_scope == scope)
+                .order_by(ReconciliationRun.completed_at.desc())
+                .limit(1)
+            )
+            lease = session.get(SenderLease, scope)
+            orders_by_intent = {item.order_intent_id: item for item in orders}
+            result = self._campaign_summary(campaign)
+            result.update(
+                {
+                    "instrument": None
+                    if instrument is None
+                    else {
+                        "symbol": instrument.symbol,
+                        "collateral_currency": instrument.collateral_currency,
+                    },
+                    "authorization": None
+                    if authorization is None
+                    else {
+                        "authorization_id": str(authorization.authorization_id),
+                        "active": authorization.active,
+                        "quantity_limit": str(authorization.quantity_limit),
+                        "used_quantity": str(authorization.used_quantity),
+                        "expires_at": _iso(authorization.expires_at),
+                    },
+                    "reservations": [
+                        {
+                            "reservation_id": str(item.reservation_id),
+                            "status": item.status,
+                            "amount": str(item.amount),
+                            "version": item.version,
+                        }
+                        for item in reservations
+                    ],
+                    "intents": [
+                        {
+                            "intent_id": str(item.intent_id),
+                            "kind": item.kind,
+                            "side": item.side,
+                            "quantity": str(item.quantity),
+                            "reduce_only": item.reduce_only,
+                            "status": item.status,
+                            "version": item.version,
+                            "created_at": _iso(item.created_at),
+                            "updated_at": _iso(item.updated_at),
+                            "order": self._order_summary(orders_by_intent.get(item.intent_id)),
+                        }
+                        for item in intents
+                    ],
+                    "fills": [
+                        {
+                            "fill_id": str(item.venue_fill_fact_id),
+                            "venue_fill_id": item.venue_fill_id,
+                            "intent_id": str(item.order_intent_id),
+                            "side": item.side,
+                            "quantity": str(item.quantity),
+                            "price": str(item.price),
+                            "fee": str(item.fee),
+                            "fee_currency": item.fee_currency,
+                            "slippage_cost": str(item.slippage_cost),
+                            "executed_at": _iso(item.executed_at),
+                        }
+                        for item in fills
+                    ],
+                    "position": None
+                    if position is None
+                    else {
+                        "position_id": str(position.position_id),
+                        "quantity": str(position.quantity),
+                        "average_entry_price": str(position.average_entry_price),
+                        "mark_price": str(position.mark_price),
+                        "fact_status": position.fact_status,
+                        "observed_at": _iso(position.observed_at),
+                    },
+                    "protection": None
+                    if protection is None
+                    else {
+                        "protection_id": str(protection.protection_id),
+                        "venue_order_id": protection.venue_order_id,
+                        "quantity": str(protection.quantity),
+                        "trigger_price": str(protection.trigger_price),
+                        "status": protection.status,
+                        "fully_covered": protection.fully_covered,
+                        "observed_at": _iso(protection.observed_at),
+                    },
+                    "funding": [
+                        {
+                            "venue_payment_id": item.venue_payment_id,
+                            "amount": str(item.amount),
+                            "currency": item.currency,
+                            "paid_at": _iso(item.paid_at),
+                        }
+                        for item in funding
+                    ],
+                    "reconciliation": None
+                    if reconciliation is None
+                    else {
+                        "reconciliation_id": str(reconciliation.reconciliation_id),
+                        "status": reconciliation.status,
+                        "is_computed": reconciliation.is_computed,
+                        "differences": reconciliation.differences,
+                        "resolution_reason": reconciliation.resolution_reason,
+                        "completed_at": _iso(reconciliation.completed_at),
+                    },
+                    "sender_lease": None
+                    if lease is None
+                    else {
+                        "execution_scope": lease.execution_scope,
+                        "owner_id": lease.owner_id,
+                        "fencing_token": lease.fencing_token,
+                        "expires_at": _iso(lease.expires_at),
+                    },
+                }
+            )
+            return result
+
+    def campaign_id_for_intent(self, user_id: UUID, intent_id: UUID) -> UUID:
+        with self.database.session_factory() as session:
+            intent = session.get(OrderIntent, intent_id)
+            if intent is None:
+                raise DomainRejected("ORDER_INTENT_NOT_FOUND", "intent does not exist")
+            campaign = session.get(Campaign, intent.campaign_id)
+            if campaign is None:
+                raise DomainRejected("CAMPAIGN_NOT_FOUND", "intent campaign is missing")
+            if not self.service.can_user(user_id, "view", campaign.account_id, campaign.venue):
+                raise DomainRejected("RBAC_DENIED", "intent is outside the current scope")
+            return campaign.campaign_id
+
+    def list_exceptions(self, user_id: UUID) -> list[dict[str, Any]]:
+        exceptions: list[dict[str, Any]] = []
+        for campaign in self.list_campaigns(user_id):
+            detail = self.campaign_detail(user_id, UUID(str(campaign["campaign_id"])))
+            campaign_id = str(campaign["campaign_id"])
+            if campaign["status"] == "UNKNOWN":
+                exceptions.append(self._exception(campaign_id, "CAMPAIGN_UNKNOWN", "BLOCKING"))
+            for reservation in detail["reservations"]:
+                if reservation["status"] == "UNKNOWN":
+                    exceptions.append(
+                        self._exception(campaign_id, "RISK_RESERVATION_UNKNOWN", "BLOCKING")
+                    )
+            for intent in detail["intents"]:
+                if intent["status"] == "UNKNOWN":
+                    exceptions.append(
+                        self._exception(
+                            campaign_id,
+                            "ORDER_INTENT_UNKNOWN",
+                            "BLOCKING",
+                            object_id=str(intent["intent_id"]),
+                        )
+                    )
+            position = detail["position"]
+            if position is None or position["fact_status"] == "UNKNOWN":
+                exceptions.append(self._exception(campaign_id, "POSITION_UNKNOWN", "BLOCKING"))
+            elif Decimal(str(position["quantity"])) != 0:
+                protection = detail["protection"]
+                if protection is None or protection["status"] == "UNKNOWN":
+                    exceptions.append(
+                        self._exception(campaign_id, "PROTECTION_UNKNOWN", "BLOCKING")
+                    )
+                elif not protection["fully_covered"]:
+                    exceptions.append(
+                        self._exception(campaign_id, "PROTECTION_INSUFFICIENT", "BLOCKING")
+                    )
+            reconciliation = detail["reconciliation"]
+            if reconciliation is not None and reconciliation["status"] != "MATCH":
+                exceptions.append(
+                    self._exception(
+                        campaign_id,
+                        f"RECONCILIATION_{reconciliation['status']}",
+                        "BLOCKING",
+                        details=list(reconciliation["differences"]),
+                    )
+                )
+        return exceptions
+
+    @staticmethod
+    def _exception(
+        campaign_id: str,
+        code: str,
+        severity: str,
+        *,
+        object_id: str | None = None,
+        details: list[str] | None = None,
+    ) -> dict[str, Any]:
+        return {
+            "campaign_id": campaign_id,
+            "object_id": object_id or campaign_id,
+            "code": code,
+            "severity": severity,
+            "details": details or [],
+        }
+
+    @staticmethod
+    def _order_summary(order: VenueOrder | None) -> dict[str, Any] | None:
+        if order is None:
+            return None
+        return {
+            "venue_order_fact_id": str(order.venue_order_fact_id),
+            "venue_order_id": order.venue_order_id,
+            "status": order.status,
+            "ordered_quantity": str(order.ordered_quantity),
+            "filled_quantity": str(order.filled_quantity),
+            "observed_at": _iso(order.observed_at),
+        }
+
+    @staticmethod
+    def _campaign_summary(campaign: Campaign) -> dict[str, Any]:
+        return {
+            "campaign_id": str(campaign.campaign_id),
+            "proposal_id": str(campaign.proposal_id),
+            "authorization_id": str(campaign.authorization_id),
+            "account_id": campaign.account_id,
+            "venue": campaign.venue,
+            "instrument_id": str(campaign.instrument_id),
+            "direction": campaign.direction,
+            "status": campaign.status,
+            "current_target_quantity": str(campaign.current_target_quantity),
+            "target_version": campaign.target_version,
+            "target_reason": campaign.target_reason,
+            "target_urgency": campaign.target_urgency,
+            "target_calculated_at": _iso(campaign.target_calculated_at),
+            "realized_pnl": str(campaign.realized_pnl),
+            "unrealized_pnl": str(campaign.unrealized_pnl),
+            "final_pnl": str(campaign.final_pnl),
+            "created_at": _iso(campaign.created_at),
+            "updated_at": _iso(campaign.updated_at),
+        }
 
     @staticmethod
     def _proposal_summary(proposal: Proposal) -> dict[str, Any]:

@@ -68,6 +68,13 @@ async function route() {
     if (path === '/proposals/new') return await renderManualProposal();
     if (path === '/reviews') return await renderProposalList('PENDING_REVIEW', '审核队列');
     if (path === '/proposals') return await renderProposalList(null, '全部提案');
+    if (path === '/campaigns') return await renderCampaignList();
+    if (path === '/positions') return await renderCampaignFacts('positions');
+    if (path === '/orders') return await renderCampaignFacts('orders');
+    if (path === '/risk') return await renderCampaignFacts('risk');
+    if (path === '/exceptions') return await renderExceptions();
+    const campaignMatch = path.match(/^\/campaigns\/([0-9a-f-]+)$/i);
+    if (campaignMatch) return await renderCampaignDetail(campaignMatch[1]);
     const match = path.match(/^\/proposals\/([0-9a-f-]+)$/i);
     if (match) return await renderProposalDetail(match[1]);
     main.innerHTML = '<section class="empty-state"><div><h2>页面不存在</h2><a class="primary" href="/opportunities" data-link>返回机会页</a></div></section>';
@@ -186,11 +193,12 @@ async function renderProposalDetail(id) {
       <article class="card"><h2>审核记录</h2>${item.approvals.length ? item.approvals.map(a => `<div class="callout"><b>${escapeHtml(a.decision)}</b> · ${escapeHtml(a.reason)}<br><span class="subtle">${shortId(a.reviewer_id)} · ${fmtDate(a.created_at)}</span></div>`).join('') : '<p class="subtle">尚无 Reviewer 投票。</p>'}</article></div>
       <aside class="stack"><article class="card"><h2>安全动作</h2><p class="subtle">批准要求对象版本绑定的短时 step-up。拒绝只会收紧，不生成授权。</p>${item.status === 'PENDING_REVIEW' && canReview ? `<label>审核理由<textarea id="review-reason" rows="3">已核对冻结字段与风险范围</textarea></label><div class="toolbar" style="margin-top:12px"><button class="primary" data-approve>Step-up 并批准</button><button class="danger" data-reject>拒绝</button></div><div class="form-error" id="review-error"></div>` : '<p class="safety-note">当前状态或角色没有可用审核动作。</p>'}</article>
       <article class="card"><h2>风险决定</h2>${item.risk_decision ? `<p><b class="status-${item.risk_decision.result}">${escapeHtml(item.risk_decision.result)}</b></p>${definition('批准数量', item.risk_decision.approved_quantity)}${definition('风险金额', item.risk_decision.risk_amount)}<p class="subtle">${escapeHtml(item.risk_decision.reasons.join(' · '))}</p>` : '<p class="subtle">尚未运行服务端确定性 Risk Engine。</p>'}${item.status === 'APPROVED' && canOperate && !item.risk_decision ? '<button class="primary" data-risk>运行 RiskDecision</button>' : ''}</article>
-      <article class="card"><h2>短期交易授权</h2>${item.authorization ? `<p><b>${shortId(item.authorization.authorization_id)}</b></p>${definition('数量上限', item.authorization.quantity_limit)}${definition('风险上限', item.authorization.risk_limit)}${definition('到期', fmtDate(item.authorization.expires_at))}` : '<p class="subtle">尚无 TradingAuthorization。</p>'}${item.risk_decision && item.risk_decision.result !== 'DENY' && canOperate && !item.authorization ? '<button class="primary" data-authorize>签发短期授权</button>' : ''}<p class="safety-note">授权仍不会发送真实订单。LIVE_ORDER_SEND 默认关闭。</p></article></aside></div></section>`;
+      <article class="card"><h2>短期交易授权</h2>${item.authorization ? `<p><b>${shortId(item.authorization.authorization_id)}</b></p>${definition('数量上限', item.authorization.quantity_limit)}${definition('风险上限', item.authorization.risk_limit)}${definition('到期', fmtDate(item.authorization.expires_at))}` : '<p class="subtle">尚无 TradingAuthorization。</p>'}${item.risk_decision && item.risk_decision.result !== 'DENY' && canOperate && !item.authorization ? '<button class="primary" data-authorize>签发短期授权</button>' : ''}${item.authorization?.active && canOperate ? '<button class="primary" data-initial style="margin-top:10px">创建 SHADOW 初仓意图</button>' : ''}<p class="safety-note">创建意图会原子预留风险，但不会连接交易所。必须先在仓位页记录当前 SHADOW 仓位与权益事实。</p></article></aside></div></section>`;
   document.querySelector('[data-approve]')?.addEventListener('click', () => approveProposal(item));
   document.querySelector('[data-reject]')?.addEventListener('click', () => rejectProposal(item));
   document.querySelector('[data-risk]')?.addEventListener('click', () => runRisk(item));
   document.querySelector('[data-authorize]')?.addEventListener('click', () => authorize(item));
+  document.querySelector('[data-initial]')?.addEventListener('click', () => createInitialIntent(item));
 }
 
 const definition = (label, value) => `<div><dt>${escapeHtml(label)}</dt><dd>${escapeHtml(value ?? '—')}</dd></div>`;
@@ -220,6 +228,95 @@ async function authorize(item) {
   try { await api(`/api/proposals/${item.proposal_id}/authorizations`, {method:'POST', body:JSON.stringify({idempotency_key:crypto.randomUUID(), expires_in_minutes:30, allowed_adds:0})}); showToast('短期授权已签发'); await route(); }
   catch (error) { showToast(`${error.code}: ${error.message}`); }
 }
+
+async function createInitialIntent(item) {
+  try {
+    const result = await api(`/api/authorizations/${item.authorization.authorization_id}/intents`, {method:'POST', body:JSON.stringify({kind:'INITIAL', account_id:item.account_id, venue:item.venue, instrument_id:item.instrument_id, direction:item.direction, quantity:item.authorization.quantity_limit, idempotency_key:crypto.randomUUID()})});
+    showToast('风险已原子预留，SHADOW 初仓意图已创建'); navigate(`/campaigns/${result.campaign_id}`);
+  } catch (error) { showToast(`${error.code}: ${error.message}`); }
+}
+
+async function loadCampaignDetails() {
+  const result = await api('/api/campaigns');
+  return Promise.all(result.data.map((item) => api(`/api/campaigns/${item.campaign_id}`)));
+}
+
+async function renderCampaignList() {
+  const result = await api('/api/campaigns');
+  const items = result.data;
+  main.innerHTML = `<section class="page"><header class="page-head"><div><p class="eyebrow">SHADOW OPERATIONS</p><h1>Campaign 运营台</h1><p class="lede">从短期授权、风险预留和订单意图，到成交、保护、减仓、对账和 PnL。所有发送动作均为本地 SHADOW 事实。</p></div><div class="toolbar"><a class="secondary" href="/proposals" data-link>全部提案</a></div></header>
+    <div class="stats"><div class="stat"><small>Campaign</small><b>${items.length}</b></div><div class="stat"><small>Open / Opening</small><b>${items.filter(i => ['OPEN','OPENING'].includes(i.status)).length}</b></div><div class="stat"><small>Unknown</small><b>${items.filter(i => i.status === 'UNKNOWN').length}</b></div><div class="stat"><small>环境</small><b style="font-size:14px">SHADOW ONLY</b></div></div>
+    ${items.length ? `<div class="table-wrap"><table><thead><tr><th>Campaign</th><th>范围</th><th>方向 / 目标</th><th>状态</th><th>PnL</th><th>更新时间</th></tr></thead><tbody>${items.map(item => `<tr data-href="/campaigns/${item.campaign_id}"><td><b>${shortId(item.campaign_id)}</b><br><span class="subtle">Proposal ${shortId(item.proposal_id)}</span></td><td>${escapeHtml(item.account_id)}<br><span class="subtle">${escapeHtml(item.venue)}</span></td><td class="${item.direction === 'LONG' ? 'direction-long' : 'direction-short'}">${escapeHtml(item.direction)} · ${fmtNumber(item.current_target_quantity)}</td><td><b class="status-${escapeHtml(item.status)}">${escapeHtml(item.status)}</b></td><td>${fmtNumber(item.final_pnl)}</td><td>${fmtDate(item.updated_at)}</td></tr>`).join('')}</tbody></table></div>` : '<section class="empty-state"><div><h2>尚无 Campaign</h2><p>批准提案并签发短期授权后，Operator 才能创建 SHADOW 初仓意图。</p></div></section>'}</section>`;
+  document.querySelectorAll('tr[data-href]').forEach(row => row.addEventListener('click', () => navigate(row.dataset.href)));
+}
+
+async function renderCampaignFacts(mode) {
+  const details = await loadCampaignDetails();
+  const titles = {positions:'仓位与保护', orders:'订单与成交', risk:'风险与目标'};
+  let rows = '';
+  if (mode === 'positions') rows = details.map(item => `<tr data-href="/campaigns/${item.campaign_id}"><td>${shortId(item.campaign_id)}</td><td>${escapeHtml(item.instrument?.symbol || shortId(item.instrument_id))}</td><td>${item.position ? `${fmtNumber(item.position.quantity)} @ ${fmtNumber(item.position.average_entry_price)}` : '无事实'}</td><td>${item.position ? escapeHtml(item.position.fact_status) : 'UNKNOWN'}</td><td>${item.protection ? `${escapeHtml(item.protection.status)} · ${item.protection.fully_covered ? '完整覆盖' : '覆盖不足'}` : '无保护事实'}</td><td>${fmtDate(item.position?.observed_at)}</td></tr>`).join('');
+  if (mode === 'orders') rows = details.flatMap(item => item.intents.map(intent => `<tr data-href="/campaigns/${item.campaign_id}"><td>${shortId(item.campaign_id)}</td><td>${escapeHtml(intent.kind)}${intent.reduce_only ? ' · reduce-only' : ''}</td><td>${escapeHtml(intent.side)} ${fmtNumber(intent.quantity)}</td><td>${escapeHtml(intent.status)}</td><td>${intent.order ? `${escapeHtml(intent.order.venue_order_id)} · ${escapeHtml(intent.order.status)}` : '未记录 SHADOW send'}</td><td>${fmtDate(intent.updated_at)}</td></tr>`)).join('');
+  if (mode === 'risk') rows = details.map(item => `<tr data-href="/campaigns/${item.campaign_id}"><td>${shortId(item.campaign_id)}</td><td>${escapeHtml(item.status)}</td><td>${item.reservations.map(r => `${escapeHtml(r.status)} ${fmtNumber(r.amount)}`).join(' · ') || '无预留'}</td><td>${fmtNumber(item.current_target_quantity)} · v${item.target_version}</td><td>${escapeHtml(item.target_urgency || '—')}</td><td>${escapeHtml(item.reconciliation?.status || '未对账')}</td></tr>`).join('');
+  const headers = mode === 'positions' ? '<th>Campaign</th><th>标的</th><th>仓位</th><th>事实</th><th>保护</th><th>观测时间</th>' : mode === 'orders' ? '<th>Campaign</th><th>意图</th><th>方向 / 数量</th><th>状态</th><th>SHADOW Order</th><th>更新时间</th>' : '<th>Campaign</th><th>状态</th><th>风险预留</th><th>目标</th><th>紧迫度</th><th>对账</th>';
+  main.innerHTML = `<section class="page"><header class="page-head"><div><p class="eyebrow">POSTGRESQL AUTHORITY</p><h1>${titles[mode]}</h1><p class="lede">这些页面直接读取当前权威状态；可重新计算的投影不另行持久化。</p></div></header>
+    ${mode === 'positions' ? shadowFactsForm() : ''}
+    ${rows ? `<div class="table-wrap"><table><thead><tr>${headers}</tr></thead><tbody>${rows}</tbody></table></div>` : '<section class="empty-state"><div><h2>当前没有可展示事实</h2></div></section>'}</section>`;
+  document.querySelectorAll('tr[data-href]').forEach(row => row.addEventListener('click', () => navigate(row.dataset.href)));
+  document.querySelector('#shadow-facts-form')?.addEventListener('submit', recordStartingFacts);
+}
+
+function shadowFactsForm() {
+  return `<form id="shadow-facts-form" class="form-panel compact-form"><h2>记录当前 SHADOW 事实</h2><p class="safety-note">这是 Operator 明确录入的合成非生产事实，不来自真实交易所，也不会被标记为真实账户数据。</p><div class="field-grid"><label>账户<input name="account_id" value="acct-1" required></label><label>场所<input name="venue" value="BINANCE" required></label><label>Instrument UUID<input name="instrument_id" required></label><label>仓位数量<input name="quantity" type="number" step="any" value="0" required></label><label>平均入场价<input name="average_entry_price" type="number" step="any" value="0" required></label><label>标记价<input name="mark_price" type="number" step="any" required></label><label>权益<input name="equity" type="number" step="any" required></label><label>可用余额<input name="available_balance" type="number" step="any" required></label><label>币种<input name="currency" value="USDT" required></label></div><div class="form-error"></div><div class="form-actions"><button class="primary">记录合成事实</button></div></form><div style="height:16px"></div>`;
+}
+
+async function recordStartingFacts(event) {
+  event.preventDefault(); const form = event.currentTarget; const data = Object.fromEntries(new FormData(form));
+  try {
+    await api('/api/facts/positions', {method:'POST', body:JSON.stringify({account_id:data.account_id, venue:data.venue, instrument_id:data.instrument_id, quantity:data.quantity, average_entry_price:data.average_entry_price, mark_price:data.mark_price, known:true})});
+    await api('/api/facts/account-equity', {method:'POST', body:JSON.stringify({account_id:data.account_id, venue:data.venue, equity:data.equity, available_balance:data.available_balance, currency:data.currency, known:true})});
+    showToast('当前 SHADOW 仓位与权益事实已记录'); await route();
+  } catch (error) { form.querySelector('.form-error').textContent = `${error.code}: ${error.message}`; }
+}
+
+async function renderExceptions() {
+  const result = await api('/api/campaign-exceptions'); const items = result.data;
+  main.innerHTML = `<section class="page"><header class="page-head"><div><p class="eyebrow">FAIL CLOSED</p><h1>异常处理</h1><p class="lede">Unknown、保护不足与对账差异均阻止新增风险或自动重发。这里只显示可由权威状态派生的当前异常。</p></div><button class="secondary" data-refresh>重新计算视图</button></header>
+    ${items.length ? `<div class="card-grid">${items.map(item => `<article class="card"><span class="tag">${escapeHtml(item.severity)}</span><h2 style="margin-top:16px">${escapeHtml(item.code)}</h2><p class="subtle">Campaign ${shortId(item.campaign_id)}</p>${item.details.length ? `<pre>${escapeHtml(item.details.join('\n'))}</pre>` : ''}<a class="primary" href="/campaigns/${item.campaign_id}" data-link>处理 Campaign</a></article>`).join('')}</div>` : '<section class="empty-state"><div><h2>当前没有派生异常</h2><p>这只表示当前数据库事实未触发异常条件。</p></div></section>'}</section>`;
+  document.querySelector('[data-refresh]')?.addEventListener('click', route);
+}
+
+async function renderCampaignDetail(id) {
+  const item = await api(`/api/campaigns/${id}`); const canOperate = roleNames().includes('OPERATOR') || roleNames().includes('SYSTEM_ADMIN');
+  const active = item.intents.find(intent => ['READY','SENT','PARTIALLY_FILLED','UNKNOWN'].includes(intent.status));
+  main.innerHTML = `<section class="page"><header class="page-head"><div><p class="eyebrow">SHADOW · ${escapeHtml(item.venue)}</p><h1>${escapeHtml(item.instrument?.symbol || 'Campaign')} ${shortId(item.campaign_id)}</h1><p class="lede"><b class="status-${escapeHtml(item.status)}">${escapeHtml(item.status)}</b> · ${escapeHtml(item.direction)} · 目标 ${fmtNumber(item.current_target_quantity)}</p></div><div class="toolbar"><a class="secondary" href="/campaigns" data-link>返回运营台</a><button class="secondary" data-pnl>刷新 PnL</button><button class="secondary" data-reconcile>运行对账</button></div></header>
+    <div class="stats"><div class="stat"><small>已实现 PnL</small><b>${fmtNumber(item.realized_pnl)}</b></div><div class="stat"><small>未实现 PnL</small><b>${fmtNumber(item.unrealized_pnl)}</b></div><div class="stat"><small>最终 / 当前 PnL</small><b>${fmtNumber(item.final_pnl)}</b></div><div class="stat"><small>对账</small><b style="font-size:14px">${escapeHtml(item.reconciliation?.status || 'NOT RUN')}</b></div></div>
+    <div class="detail-layout"><div class="stack"><article class="card"><h2>订单意图与成交</h2>${item.intents.length ? item.intents.map(intentCard).join('') : '<p class="subtle">无订单意图。</p>'}${active && canOperate ? operationForm(active, item) : ''}</article><article class="card"><h2>仓位与保护</h2><dl class="definition-grid">${definition('仓位', item.position ? fmtNumber(item.position.quantity) : 'UNKNOWN')}${definition('平均入场', item.position ? fmtNumber(item.position.average_entry_price) : '—')}${definition('标记价', item.position ? fmtNumber(item.position.mark_price) : '—')}${definition('观测时间', fmtDate(item.position?.observed_at))}${definition('保护状态', item.protection?.status || 'UNKNOWN')}${definition('保护数量', item.protection ? fmtNumber(item.protection.quantity) : '—')}</dl>${canOperate ? positionProtectionForms(item) : ''}</article></div>
+      <aside class="stack"><article class="card"><h2>风险与目标</h2>${item.reservations.map(r => `<div class="callout"><b>${escapeHtml(r.status)}</b> · ${fmtNumber(r.amount)}</div>`).join('') || '<p class="subtle">无风险预留。</p>'}<dl class="definition-grid">${definition('目标版本', `v${item.target_version}`)}${definition('紧迫度', item.target_urgency)}${definition('原因', item.target_reason)}</dl>${canOperate && item.position ? targetForm(item) : ''}</article><article class="card"><h2>Sender fencing</h2>${definition('Owner', item.sender_lease?.owner_id)}${definition('Token', item.sender_lease?.fencing_token)}${definition('到期', fmtDate(item.sender_lease?.expires_at))}<p class="safety-note">Web 动作只记录合成 SHADOW Order。LIVE_ORDER_SEND 仍为 DISABLED。</p></article><article class="card"><h2>对账差异</h2>${item.reconciliation ? `<p><b>${escapeHtml(item.reconciliation.status)}</b></p><pre>${escapeHtml(item.reconciliation.differences.join('\n') || 'MATCH')}</pre>` : '<p class="subtle">尚未运行对账。</p>'}</article></aside></div></section>`;
+  bindCampaignActions(item, active);
+}
+
+function intentCard(intent) { return `<div class="intent-row"><div><b>${escapeHtml(intent.kind)} · ${escapeHtml(intent.side)} ${fmtNumber(intent.quantity)}</b><br><span class="subtle">${shortId(intent.intent_id)} · ${intent.reduce_only ? 'REDUCE ONLY' : 'RISK ADDING'}</span></div><b class="status-${escapeHtml(intent.status)}">${escapeHtml(intent.status)}</b></div>${intent.order ? `<p class="subtle">SHADOW order ${escapeHtml(intent.order.venue_order_id)} · filled ${fmtNumber(intent.order.filled_quantity)}</p>` : ''}`; }
+
+function operationForm(intent, item) { if (intent.status === 'UNKNOWN') return '<p class="safety-note">结果为 UNKNOWN：风险保持占用，不提供重发或释放按钮。必须人工对账。</p>'; if (intent.status === 'READY') return `<div class="action-panel"><h3>记录 SHADOW send</h3><label>合成 Venue Order ID<input id="venue-order-id" value="shadow-${intent.intent_id.slice(0,8)}"></label><button class="primary" data-shadow-send>获取 lease 并记录</button><button class="danger" data-unknown>标记 UNKNOWN</button></div>`; return `<form id="fill-form" class="action-panel"><h3>记录合成成交</h3><div class="field-grid"><label>Fill ID<input name="venue_fill_id" value="fill-${crypto.randomUUID().slice(0,8)}" required></label><label>方向<select name="side"><option ${intent.side === 'BUY' ? 'selected' : ''}>BUY</option><option ${intent.side === 'SELL' ? 'selected' : ''}>SELL</option></select></label><label>数量<input name="quantity" type="number" step="any" value="${escapeHtml(intent.quantity)}" required></label><label>成交价<input name="price" type="number" step="any" required></label><label>手续费<input name="fee" type="number" step="any" value="0"></label><label>币种<input name="fee_currency" value="${escapeHtml(item.instrument?.collateral_currency || 'USDT')}"></label><label>滑点成本<input name="slippage_cost" type="number" step="any" value="0"></label></div><div class="toolbar" style="margin-top:12px"><button class="primary">记录 SHADOW fill</button><button type="button" class="danger" data-unknown>标记 UNKNOWN</button></div></form>`; }
+
+function positionProtectionForms(item) { return `<form id="position-form" class="action-panel"><h3>更新合成仓位事实</h3><div class="field-grid"><label>数量<input name="quantity" type="number" step="any" value="${escapeHtml(item.position?.quantity || '0')}" required></label><label>平均入场价<input name="average_entry_price" type="number" step="any" value="${escapeHtml(item.position?.average_entry_price || '0')}" required></label><label>标记价<input name="mark_price" type="number" step="any" value="${escapeHtml(item.position?.mark_price || '')}" required></label></div><button class="secondary">更新仓位</button></form>${item.position && Math.abs(Number(item.position.quantity)) > 0 ? `<form id="protection-form" class="action-panel"><h3>更新保护事实</h3><div class="field-grid"><label>保护 Order ID<input name="venue_order_id" value="${escapeHtml(item.protection?.venue_order_id || 'shadow-stop')}" required></label><label>保护数量<input name="quantity" type="number" step="any" value="${escapeHtml(Math.abs(Number(item.position.quantity)))}" required></label><label>触发价<input name="trigger_price" type="number" step="any" value="${escapeHtml(item.protection?.trigger_price || '')}" required></label><label>状态<select name="coverage"><option value="full">已知且完整</option><option value="degraded">已知但不足</option><option value="unknown">未知</option></select></label></div><button class="secondary">更新保护</button></form>` : ''}`; }
+
+function targetForm(item) { return `<form id="target-form" class="action-panel"><h3>计算唯一目标仓位</h3><label>目标数量<input name="target_quantity" type="number" step="any" min="0" max="${escapeHtml(Math.abs(Number(item.position.quantity)))}" required></label><label>紧迫度<select name="urgency"><option>NORMAL</option><option>URGENT</option><option>IMMEDIATE</option></select></label><label>原因<input name="reason" value="operator target" required></label><button class="secondary">更新目标</button><button type="button" class="primary" data-reduce>生成 reduce-only 意图</button></form>`; }
+
+function bindCampaignActions(item, active) {
+  document.querySelector('[data-pnl]')?.addEventListener('click', () => campaignAction(`/api/campaigns/${item.campaign_id}/pnl`, {}));
+  document.querySelector('[data-reconcile]')?.addEventListener('click', () => campaignAction(`/api/campaigns/${item.campaign_id}/reconcile`, {execution_scope:`${item.account_id}:${item.venue}`}));
+  document.querySelector('[data-shadow-send]')?.addEventListener('click', async () => { const owner = `web-${session.user_id.slice(0,8)}`; try { const lease = await api('/api/sender-leases', {method:'POST', body:JSON.stringify({execution_scope:`${item.account_id}:${item.venue}`, owner_id:owner, lease_seconds:60})}); await api(`/api/intents/${active.intent_id}/shadow-send`, {method:'POST', body:JSON.stringify({execution_scope:`${item.account_id}:${item.venue}`, owner_id:owner, fencing_token:lease.fencing_token, venue_order_id:document.querySelector('#venue-order-id').value})}); showToast('已记录 SHADOW send；没有连接交易所'); await route(); } catch (error) { showToast(`${error.code}: ${error.message}`); } });
+  document.querySelectorAll('[data-unknown]').forEach(button => button.addEventListener('click', () => campaignAction(`/api/intents/${active.intent_id}/unknown`, {reason:'operator marked uncertain SHADOW outcome'})));
+  document.querySelector('#fill-form')?.addEventListener('submit', event => submitNamedForm(event, `/api/intents/${active.intent_id}/fills`));
+  document.querySelector('#position-form')?.addEventListener('submit', event => { event.preventDefault(); const data = Object.fromEntries(new FormData(event.currentTarget)); campaignAction('/api/facts/positions', {...data, account_id:item.account_id, venue:item.venue, instrument_id:item.instrument_id, known:true}); });
+  document.querySelector('#protection-form')?.addEventListener('submit', event => { event.preventDefault(); const data = Object.fromEntries(new FormData(event.currentTarget)); campaignAction(`/api/campaigns/${item.campaign_id}/protection`, {position_id:item.position.position_id, venue_order_id:data.venue_order_id, quantity:data.quantity, trigger_price:data.trigger_price, fully_covered:data.coverage === 'full', known:data.coverage !== 'unknown'}); });
+  document.querySelector('#target-form')?.addEventListener('submit', event => { event.preventDefault(); const data = Object.fromEntries(new FormData(event.currentTarget)); campaignAction(`/api/campaigns/${item.campaign_id}/target`, {candidates:[{target_quantity:data.target_quantity, urgency:data.urgency, reason:data.reason}]}); });
+  document.querySelector('[data-reduce]')?.addEventListener('click', () => campaignAction(`/api/campaigns/${item.campaign_id}/reduction-intents`, {idempotency_key:crypto.randomUUID()}));
+}
+
+async function campaignAction(path, body) { try { await api(path, {method:'POST', body:JSON.stringify(body)}); showToast('SHADOW 权威状态已更新'); await route(); } catch (error) { showToast(`${error.code}: ${error.message}`); } }
+async function submitNamedForm(event, path) { event.preventDefault(); await campaignAction(path, Object.fromEntries(new FormData(event.currentTarget))); }
 
 function navigate(path) { history.pushState({}, '', path); route(); }
 function updateActiveNav() { document.querySelectorAll('nav a').forEach(link => link.classList.toggle('active', location.pathname === link.getAttribute('href'))); }
