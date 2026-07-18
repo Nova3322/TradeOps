@@ -141,6 +141,12 @@ CAMPAIGN_TARGET_FACT_RECORDINGS = Counter(
     labelnames=("result",),
 )
 
+CAMPAIGN_REDUCTION_PLAN_EVALUATIONS = Counter(
+    "trading_campaign_reduction_plan_evaluations_total",
+    "Read-only Campaign reduction execution-plan outcomes by bounded result.",
+    labelnames=("result",),
+)
+
 CAPABILITY_CERTIFICATE_ISSUANCE = Counter(
     "trading_capability_certificate_issuance_total",
     "Shadow-only capability certificate issuance by type, environment, and result.",
