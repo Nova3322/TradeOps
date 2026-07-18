@@ -3,7 +3,7 @@
 > 后续状态：WP-0041 已把 ExecutionIntent 升级为 v14，并为 INITIAL 增加 exact fresh canonical
 > FLAT position 绑定；WP-0042 又冻结 isolated INITIAL 的初始保证金经济基线。ADD 的 Strategy
 > Evaluation 合同保持不变；当前执行与经济基线合同以
-> [WP-0042](WP-0042-INITIAL冻结保证金经济基线.md) 为准。本文件保留 WP-0040 历史证据。
+> [WP-0043](WP-0043-Canonical成交费用归属账本.md) 为准。本文件保留 WP-0040 历史证据。
 
 ## 1. 交付目标与边界
 

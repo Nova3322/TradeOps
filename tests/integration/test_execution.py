@@ -73,6 +73,8 @@ from tests.venue_fact_fixtures import (
 )
 from trading_control_plane.campaign_economics import baseline_snapshot_from_record
 from trading_control_plane.campaign_economics_models import CampaignEconomicBaseline
+from trading_control_plane.campaign_fill_economics import fill_entry_snapshot_from_record
+from trading_control_plane.campaign_fill_economics_models import CampaignFillEconomicEntry
 from trading_control_plane.capability_certificate_models import CapabilityCertificate
 from trading_control_plane.capability_certificates import CapabilityScope
 from trading_control_plane.command_executor import IdempotentCommandExecutor
@@ -863,6 +865,7 @@ def prepare_active_fact_run(
     draft: ExecutionFactDraft | None = None,
     canonical_client_order_id: str | None = None,
     canonical_venue_order_id: str | None = None,
+    fill_overrides: dict[str, Any] | None = None,
     position_snapshot_overrides: dict[str, Any] | None = None,
     protection_snapshot_overrides: dict[str, Any] | None = None,
     protection_position_snapshot_id: UUID | None = None,
@@ -954,6 +957,7 @@ def prepare_active_fact_run(
             normalized_at=phase_at,
             canonical_client_order_id=canonical_client_order_id,
             canonical_venue_order_id=canonical_venue_order_id,
+            fill_overrides=fill_overrides,
             position_snapshot_overrides=position_snapshot_overrides,
             protection_snapshot_overrides=protection_snapshot_overrides,
             protection_position_snapshot_id=protection_position_snapshot_id,
@@ -987,6 +991,7 @@ def _normalize_execution_venue_fact(
     normalized_at: datetime,
     canonical_client_order_id: str | None,
     canonical_venue_order_id: str | None,
+    fill_overrides: dict[str, Any] | None,
     position_snapshot_overrides: dict[str, Any] | None,
     protection_snapshot_overrides: dict[str, Any] | None,
     protection_position_snapshot_id: UUID | None,
@@ -1000,22 +1005,26 @@ def _normalize_execution_venue_fact(
     )
     if reconciliation_input.source_type == ReconciliationSourceType.VENUE_FILLS.value:
         fill_quantity = draft.filled - intent_state.cumulative_filled_quantity
+        fill_values: dict[str, Any] = {
+            "venue_trade_id": draft.external_fact_id,
+            "venue_order_id": venue_order_id,
+            "observed_client_order_id": observed_client_order_id,
+            "instrument_id": intent.instrument_id,
+            "side": VenueSide(intent.side),
+            "position_side": position_side,
+            "reduce_only": intent.reduce_only,
+            "quantity": fill_quantity,
+            "fee_amount": Decimal("0"),
+            "fee_effect": FeeEffect.ZERO,
+            "event_time": event_time,
+            "venue_observed_at": event_time,
+            "received_at": normalized_at,
+        }
+        fill_values.update(fill_overrides or {})
         request = fill_request(
             reconciliation_input,
             now=normalized_at,
-            venue_trade_id=draft.external_fact_id,
-            venue_order_id=venue_order_id,
-            observed_client_order_id=observed_client_order_id,
-            instrument_id=intent.instrument_id,
-            side=VenueSide(intent.side),
-            position_side=position_side,
-            reduce_only=intent.reduce_only,
-            quantity=fill_quantity,
-            fee_amount=Decimal("0"),
-            fee_effect=FeeEffect.ZERO,
-            event_time=event_time,
-            venue_observed_at=event_time,
-            received_at=normalized_at,
+            **fill_values,
         )
         command_type = VenueFactNormalizationService.fill_command_type
     elif reconciliation_input.source_type == ReconciliationSourceType.VENUE_POSITIONS.value:
@@ -1267,6 +1276,7 @@ def execute_fact(
     order_intent_id: UUID,
     draft: ExecutionFactDraft,
     *,
+    fill_overrides: dict[str, Any] | None = None,
     position_snapshot_overrides: dict[str, Any] | None = None,
     protection_snapshot_overrides: dict[str, Any] | None = None,
 ):
@@ -1276,6 +1286,7 @@ def execute_fact(
         order_intent_id,
         source_type,
         draft=draft,
+        fill_overrides=fill_overrides,
         position_snapshot_overrides=position_snapshot_overrides,
         protection_snapshot_overrides=protection_snapshot_overrides,
     )
@@ -1434,6 +1445,91 @@ def test_initial_position_reconciliation_freezes_immutable_campaign_economic_bas
     with pytest.raises(DBAPIError, match="campaign_economic_baselines is immutable"):
         with database.engine.begin() as connection:
             connection.execute(delete(CampaignEconomicBaseline))
+
+
+def test_canonical_fill_records_immutable_campaign_fee_attribution(
+    database: Database,
+) -> None:
+    now = datetime.now(UTC)
+    proposal, campaign, initial = prepare_authorization(database)
+    seed_execution_policy(database, now)
+    created = execute_create(
+        database,
+        create_intent_envelope(proposal, campaign, initial, now=now),
+    )
+    order_intent_id = UUID(str(created.data["order_intent_id"]))
+    filled = execute_fact(
+        database,
+        order_intent_id,
+        fact_request(
+            sequence=1,
+            status="FILLED",
+            filled=Decimal("0.5"),
+            remaining=Decimal("0"),
+            terminal=True,
+        ),
+        fill_overrides={
+            "fee_amount": Decimal("0.002"),
+            "fee_currency": "BNB",
+            "fee_effect": FeeEffect.CHARGE,
+            "realized_pnl": None,
+            "settlement_currency": "USDT",
+        },
+    )
+
+    assert filled.status is CommandStatus.COMPLETED
+    with database.session_factory.begin() as session:
+        entry = session.execute(select(CampaignFillEconomicEntry)).scalar_one()
+        fact = session.get(ExecutionFact, entry.execution_fact_id)
+        venue_fill = session.get(VenueFill, entry.venue_fill_id)
+        fill_event = next(
+            item
+            for item in session.scalars(
+                select(OutboxMessage).where(OutboxMessage.event_type == "ExecutionFactReconciled")
+            )
+            if item.payload["target_status"] == "FILLED"
+        )
+        snapshot = fill_entry_snapshot_from_record(entry)
+
+        assert entry.campaign_id == campaign.campaign_id
+        assert entry.order_intent_id == order_intent_id
+        assert entry.intent_kind == "INITIAL"
+        assert entry.add_unit_id is None
+        assert entry.economic_effect == "POSITION_INCREASE"
+        assert entry.margin_mode == "ISOLATED"
+        assert entry.collateral_scope == "ACCOUNT"
+        assert entry.collateral_pool_id == "pool-usdt-1"
+        assert entry.risk_currency == "USD"
+        assert entry.quantity == Decimal("0.5")
+        assert entry.fee_amount == Decimal("0.002")
+        assert entry.fee_currency == "BNB"
+        assert entry.fee_effect == "CHARGE"
+        assert entry.realized_pnl is None
+        assert entry.realized_pnl_status == "UNKNOWN"
+        assert entry.settlement_currency == "USDT"
+        assert entry.environment == "SHADOW"
+        assert entry.real_funds_eligible is False
+        assert fact is not None and fact.fact_kind == "VENUE_FILL"
+        assert venue_fill is not None and entry.fill_hash == venue_fill.fill_hash
+        assert entry.execution_fact_evidence_hash == fact.evidence_hash
+        assert snapshot.entry_hash == entry.entry_hash
+        assert filled.data["campaign_fill_economic_entry_id"] == str(
+            entry.campaign_fill_economic_entry_id
+        )
+        assert filled.data["campaign_fill_economic_entry_hash"] == entry.entry_hash
+        assert fill_event.payload["campaign_fill_economic_entry_id"] == str(
+            entry.campaign_fill_economic_entry_id
+        )
+        assert fill_event.payload["campaign_fill_economic_entry_hash"] == entry.entry_hash
+
+    with pytest.raises(DBAPIError, match="campaign_fill_economic_entries is immutable"):
+        with database.engine.begin() as connection:
+            connection.execute(
+                update(CampaignFillEconomicEntry).values(fee_amount=Decimal("0.003"))
+            )
+    with pytest.raises(DBAPIError, match="campaign_fill_economic_entries is immutable"):
+        with database.engine.begin() as connection:
+            connection.execute(delete(CampaignFillEconomicEntry))
 
 
 def test_initial_position_reconciliation_rejects_missing_positive_margin_baseline(

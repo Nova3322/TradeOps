@@ -1,5 +1,9 @@
 # WP-0042：INITIAL 冻结保证金经济基线
 
+> 后续状态：WP-0043 已把 accepted canonical VenueFill 及原生手续费/返佣逐笔归属到 Campaign；
+> 当前经济事实合同以 [WP-0043](WP-0043-Canonical成交费用归属账本.md) 为准。本文件保留 WP-0042
+> 的 isolated 初始保证金分母合同。
+
 ## 1. 交付目标与边界
 
 WP-0041 已证明新 Campaign 的 INITIAL 从 exact canonical 空仓开始，但初仓成交后仍没有冻结 Frozen

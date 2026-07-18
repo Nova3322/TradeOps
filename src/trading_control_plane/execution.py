@@ -14,6 +14,8 @@ from sqlalchemy.orm import Session
 from trading_control_plane.authorization import SystemRiskState
 from trading_control_plane.campaign_economics import CampaignEconomicBaselineService
 from trading_control_plane.campaign_economics_models import CampaignEconomicBaseline
+from trading_control_plane.campaign_fill_economics import CampaignFillEconomicEntryService
+from trading_control_plane.campaign_fill_economics_models import CampaignFillEconomicEntry
 from trading_control_plane.capability_certificates import CapabilityCertificateValidator
 from trading_control_plane.commands import (
     CommandChannel,
@@ -2628,6 +2630,19 @@ class ExecutionReconciliationService:
         ):
             EXECUTION_CANONICAL_FACT_BINDINGS.labels(request.fact_kind.value, "APPLIED").inc()
         self._validate_progression(state, request, now)
+        campaign_fill_source = None
+        if request.fact_kind is ExecutionFactKind.VENUE_FILL:
+            if request.venue_fill_id is None:  # pragma: no cover
+                raise RuntimeError("canonical VENUE_FILL lacks a fill identity")
+            campaign_fill_source = session.get(VenueFill, request.venue_fill_id)
+            if campaign_fill_source is None:  # pragma: no cover
+                raise RuntimeError("canonical venue fill disappeared")
+            CampaignFillEconomicEntryService.validate_fill_source(
+                intent,
+                campaign_fill_source,
+                reservation.organization_id,
+                request.venue_fact_hash or "",
+            )
         initial_baseline_position = None
         if intent.intent_kind == "INITIAL" and request.target_status == "POSITION_RECONCILED":
             if venue_position_snapshot_id is None:  # pragma: no cover
@@ -2690,6 +2705,17 @@ class ExecutionReconciliationService:
         )
         session.add(fact)
         session.flush()
+
+        campaign_fill_economic_entry = None
+        if campaign_fill_source is not None:
+            campaign_fill_economic_entry = CampaignFillEconomicEntryService.record_fill(
+                session,
+                intent,
+                fact,
+                campaign_fill_source,
+                reservation.organization_id,
+                now,
+            )
 
         campaign_economic_baseline = None
         if initial_baseline_position is not None:
@@ -2762,6 +2788,16 @@ class ExecutionReconciliationService:
                     if campaign_economic_baseline is not None
                     else None
                 ),
+                "campaign_fill_economic_entry_id": (
+                    str(campaign_fill_economic_entry.campaign_fill_economic_entry_id)
+                    if campaign_fill_economic_entry is not None
+                    else None
+                ),
+                "campaign_fill_economic_entry_hash": (
+                    campaign_fill_economic_entry.entry_hash
+                    if campaign_fill_economic_entry is not None
+                    else None
+                ),
                 "dispatch_eligible": False,
             },
             events=(
@@ -2789,6 +2825,16 @@ class ExecutionReconciliationService:
                         "campaign_economic_baseline_hash": (
                             campaign_economic_baseline.baseline_hash
                             if campaign_economic_baseline is not None
+                            else None
+                        ),
+                        "campaign_fill_economic_entry_id": (
+                            str(campaign_fill_economic_entry.campaign_fill_economic_entry_id)
+                            if campaign_fill_economic_entry is not None
+                            else None
+                        ),
+                        "campaign_fill_economic_entry_hash": (
+                            campaign_fill_economic_entry.entry_hash
+                            if campaign_fill_economic_entry is not None
                             else None
                         ),
                     },
@@ -3836,6 +3882,11 @@ class ExecutionReconciliationService:
                 CampaignEconomicBaseline.initial_execution_fact_id == fact.execution_fact_id
             )
         ).scalar_one_or_none()
+        fill_entry = session.execute(
+            select(CampaignFillEconomicEntry).where(
+                CampaignFillEconomicEntry.execution_fact_id == fact.execution_fact_id
+            )
+        ).scalar_one_or_none()
         return CommandOutcome(
             status=CommandStatus.COMPLETED,
             object_type="OrderIntent",
@@ -3852,6 +3903,14 @@ class ExecutionReconciliationService:
                 ),
                 "campaign_economic_baseline_hash": (
                     baseline.baseline_hash if baseline is not None else None
+                ),
+                "campaign_fill_economic_entry_id": (
+                    str(fill_entry.campaign_fill_economic_entry_id)
+                    if fill_entry is not None
+                    else None
+                ),
+                "campaign_fill_economic_entry_hash": (
+                    fill_entry.entry_hash if fill_entry is not None else None
                 ),
                 "dispatch_eligible": False,
             },

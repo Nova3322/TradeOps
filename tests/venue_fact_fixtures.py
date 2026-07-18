@@ -84,7 +84,10 @@ def fill_request(
     quantity: Decimal = Decimal("0.2"),
     price: Decimal = Decimal("50000"),
     fee_amount: Decimal = Decimal("1.5"),
+    fee_currency: str = "USDT",
     fee_effect: FeeEffect = FeeEffect.CHARGE,
+    realized_pnl: Decimal | None = None,
+    settlement_currency: str = "USDT",
     event_time: datetime | None = None,
     venue_observed_at: datetime | None = None,
     received_at: datetime | None = None,
@@ -124,10 +127,10 @@ def fill_request(
         "notional": quantity * price,
         "liquidity_role": LiquidityRole.TAKER,
         "fee_amount": fee_amount,
-        "fee_currency": "USDT",
+        "fee_currency": fee_currency,
         "fee_effect": fee_effect,
-        "realized_pnl": None,
-        "settlement_currency": "USDT",
+        "realized_pnl": realized_pnl,
+        "settlement_currency": settlement_currency,
     }
     draft = RecordVenueFillRequest.model_construct(
         **values, fill_hash="0" * 64, evidence_hash="0" * 64

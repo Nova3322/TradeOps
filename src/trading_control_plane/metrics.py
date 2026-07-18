@@ -93,6 +93,12 @@ CAMPAIGN_ECONOMIC_BASELINES = Counter(
     labelnames=("result",),
 )
 
+CAMPAIGN_FILL_ECONOMIC_ENTRIES = Counter(
+    "trading_campaign_fill_economic_entries_total",
+    "Immutable Campaign fill-economic-entry outcomes by bounded result.",
+    labelnames=("result",),
+)
+
 CAPABILITY_CERTIFICATE_ISSUANCE = Counter(
     "trading_capability_certificate_issuance_total",
     "Shadow-only capability certificate issuance by type, environment, and result.",

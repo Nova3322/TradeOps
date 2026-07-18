@@ -1,7 +1,7 @@
 # WP-0041：INITIAL Canonical 空仓强绑定
 
 > 后续状态：WP-0042 已在 INITIAL `POSITION_RECONCILED` 时冻结 isolated 初始保证金经济基线；
-> 当前执行与经济基线合同以 [WP-0042](WP-0042-INITIAL冻结保证金经济基线.md) 为准。本文件保留
+> 当前执行与经济事实合同以 [WP-0043](WP-0043-Canonical成交费用归属账本.md) 为准。本文件保留
 > WP-0041 的初仓前空仓合同。
 
 ## 1. 交付目标与边界
