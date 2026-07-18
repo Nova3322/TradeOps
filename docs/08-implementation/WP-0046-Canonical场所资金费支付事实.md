@@ -64,6 +64,9 @@ organization + venue + execution_domain + account_id + venue_payment_id
 本包没有把 `VenueFundingPayment` 连接到某个 Campaign。即使 instrument、账户和时间相同，也不能在
 controlled sole outlet、exclusive ownership、仓位区间与归属规则未认证时自行推断经济所有者。
 
+后续 [WP-0047](WP-0047-Campaign资金费覆盖投影.md) 只把最新成功 v2 水位覆盖的 exact scope/time
+payments 列为候选，并继续固定 `campaign_attribution_status=UNAVAILABLE`；它没有改变本包的非归属边界。
+
 ## 5. 数据库迁移与降级边界
 
 Alembic revision 从 `20260718_0034` 升至 `20260718_0035`，新增：

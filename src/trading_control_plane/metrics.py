@@ -111,6 +111,12 @@ CAMPAIGN_CURRENT_POSITION_BINDINGS = Counter(
     labelnames=("result",),
 )
 
+CAMPAIGN_FUNDING_COVERAGE_PROJECTIONS = Counter(
+    "trading_campaign_funding_coverage_projections_total",
+    "Reconciled Campaign funding scope/interval coverage outcomes by bounded result.",
+    labelnames=("result",),
+)
+
 CAPABILITY_CERTIFICATE_ISSUANCE = Counter(
     "trading_capability_certificate_issuance_total",
     "Shadow-only capability certificate issuance by type, environment, and result.",
