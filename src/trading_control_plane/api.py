@@ -5,6 +5,7 @@ import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 from pathlib import Path
 from typing import Any, Protocol
 from urllib.parse import quote
@@ -20,6 +21,8 @@ from trading_control_plane.api_schemas import (
     AccountEquityFactRequest,
     AuthorizationRequest,
     BinanceReadOnlySyncRequest,
+    BinanceTestnetActionRequest,
+    BinanceTestnetProtectionRequest,
     CampaignTargetRequest,
     FundingFactRequest,
     IntentReleaseRequest,
@@ -42,6 +45,12 @@ from trading_control_plane.api_schemas import (
 )
 from trading_control_plane.auth import SessionIdentity, SignedTokenService
 from trading_control_plane.binance import BinanceReadOnlyClient
+from trading_control_plane.binance_execution import (
+    BinanceTestnetClient,
+    BinanceTestnetOrder,
+    BinanceTestnetOrderCommand,
+    BinanceTestnetProtectionCommand,
+)
 from trading_control_plane.config import Settings, get_settings
 from trading_control_plane.database import Database
 from trading_control_plane.domain import (
@@ -108,9 +117,13 @@ def _domain_status(code: str) -> int:
         "BINANCE_READ_ONLY_DISABLED",
         "BINANCE_READ_ONLY_NOT_CONFIGURED",
         "BINANCE_READ_ONLY_UNAVAILABLE",
+        "BINANCE_TESTNET_DISABLED",
+        "BINANCE_TESTNET_NOT_CONFIGURED",
+        "BINANCE_TESTNET_UNAVAILABLE",
+        "BINANCE_TESTNET_OUTCOME_UNKNOWN",
     }:
         return status.HTTP_503_SERVICE_UNAVAILABLE
-    if code == "BINANCE_RESPONSE_INVALID":
+    if code in {"BINANCE_RESPONSE_INVALID", "BINANCE_TESTNET_RESPONSE_INVALID"}:
         return status.HTTP_502_BAD_GATEWAY
     return status.HTTP_422_UNPROCESSABLE_CONTENT
 
@@ -121,6 +134,8 @@ def create_app(
     perptape_client: PerptapeClient | None = None,
     telegram_gateway: MockTelegramGateway | None = None,
     binance_client: BinanceReadOnlyClient | None = None,
+    binance_testnet_client: BinanceTestnetClient | None = None,
+    binance_testnet_reader: BinanceReadOnlyClient | None = None,
 ) -> FastAPI:
     resolved_settings = settings or get_settings()
     resolved_settings.validate_runtime_security()
@@ -138,6 +153,18 @@ def create_app(
         base_url=resolved_settings.binance_futures_base_url,
         api_key=resolved_settings.binance_api_key,
         api_secret=resolved_settings.binance_api_secret,
+        recv_window_ms=resolved_settings.binance_recv_window_ms,
+    )
+    resolved_binance_testnet = binance_testnet_client or BinanceTestnetClient(
+        base_url=resolved_settings.binance_testnet_base_url,
+        api_key=resolved_settings.binance_testnet_api_key,
+        api_secret=resolved_settings.binance_testnet_api_secret,
+        recv_window_ms=resolved_settings.binance_recv_window_ms,
+    )
+    resolved_binance_testnet_reader = binance_testnet_reader or BinanceReadOnlyClient(
+        base_url=resolved_settings.binance_testnet_base_url,
+        api_key=resolved_settings.binance_testnet_api_key,
+        api_secret=resolved_settings.binance_testnet_api_secret,
         recv_window_ms=resolved_settings.binance_recv_window_ms,
     )
 
@@ -159,6 +186,8 @@ def create_app(
     app.state.perptape_client = resolved_perptape
     app.state.telegram_gateway = resolved_telegram
     app.state.binance_client = resolved_binance
+    app.state.binance_testnet_client = resolved_binance_testnet
+    app.state.binance_testnet_reader = resolved_binance_testnet_reader
 
     @app.exception_handler(DomainRejected)
     async def domain_rejected(_: Request, exc: DomainRejected) -> JSONResponse:
@@ -331,7 +360,9 @@ def create_app(
     ) -> dict[str, Any]:
         return {"data": queries().list_instruments(identity.user_id), "as_of": _now().isoformat()}
 
-    def notify_reviewers(proposal_id: UUID, proposal_version: int) -> None:
+    def notify_reviewers(
+        proposal_id: UUID, proposal_version: int, environment: str = "SHADOW"
+    ) -> None:
         for reviewer in queries().reviewers_for_proposal(proposal_id):
             code = token_service.issue_review_reference(
                 user_id=reviewer.user_id,
@@ -352,8 +383,8 @@ def create_app(
                     reviewer_id=reviewer.user_id,
                     proposal_id=proposal_id,
                     proposal_version=proposal_version,
-                    environment="SHADOW",
-                    summary=f"SHADOW proposal {proposal_id} is pending review",
+                    environment=environment,
+                    summary=f"{environment} proposal {proposal_id} is pending review",
                     review_code=code,
                     review_url=review_url,
                     created_at=_now(),
@@ -435,7 +466,7 @@ def create_app(
         if current["status"] == ProposalStatus.DRAFT.value:
             service().submit_proposal(proposal_id, principal.user_id, now=now)
             current = queries().proposal_detail(identity.user_id, proposal_id)
-            notify_reviewers(proposal_id, int(current["version"]))
+            notify_reviewers(proposal_id, int(current["version"]), "SHADOW")
         return current
 
     @app.post("/api/proposals/manual")
@@ -456,7 +487,7 @@ def create_app(
             max_risk=payload.max_risk,
             expires_at=now + timedelta(minutes=payload.expires_in_minutes),
             idempotency_key=payload.idempotency_key,
-            environment=ExecutionEnvironment.SHADOW,
+            environment=ExecutionEnvironment(payload.environment),
             details={
                 "trigger_price": str(payload.trigger_price),
                 "limit_price": None if payload.limit_price is None else str(payload.limit_price),
@@ -465,6 +496,7 @@ def create_app(
             },
             idempotency_payload={
                 "source": "MANUAL",
+                "environment": payload.environment,
                 "account_id": payload.account_id,
                 "venue": payload.venue,
                 "instrument_id": str(payload.instrument_id),
@@ -484,7 +516,7 @@ def create_app(
         if current["status"] == ProposalStatus.DRAFT.value:
             service().submit_proposal(proposal_id, identity.user_id, now=now)
             current = queries().proposal_detail(identity.user_id, proposal_id)
-            notify_reviewers(proposal_id, int(current["version"]))
+            notify_reviewers(proposal_id, int(current["version"]), payload.environment)
         return current
 
     @app.get("/api/proposals")
@@ -587,6 +619,7 @@ def create_app(
         event_type: str,
         event_key: str,
         summary: str,
+        environment: str = "SHADOW",
     ) -> None:
         notification_key = f"{campaign_id}:{event_type}:{event_key}:{recipient_id}"
         resolved_telegram.send_campaign(
@@ -595,7 +628,7 @@ def create_app(
                 recipient_id=recipient_id,
                 campaign_id=campaign_id,
                 event_type=event_type,
-                environment="SHADOW",
+                environment=environment,
                 summary=summary,
                 created_at=_now(),
             )
@@ -614,6 +647,30 @@ def create_app(
             "order_send_available": False,
             "fact_environment": resolved_settings.binance_fact_environment,
             "environment": resolved_settings.environment,
+        }
+
+    def require_binance_testnet() -> None:
+        if not resolved_settings.binance_testnet_order_send_enabled:
+            raise DomainRejected(
+                "BINANCE_TESTNET_DISABLED", "Binance testnet order send is explicitly disabled"
+            )
+        if not resolved_binance_testnet.configured:
+            raise DomainRejected(
+                "BINANCE_TESTNET_NOT_CONFIGURED", "Binance testnet credentials are not configured"
+            )
+
+    @app.get("/api/venues/binance/testnet/status")
+    def binance_testnet_status(
+        identity: SessionIdentity = identity_dependency,
+    ) -> dict[str, Any]:
+        del identity
+        return {
+            "venue": "BINANCE",
+            "environment": "TESTNET",
+            "enabled": resolved_settings.binance_testnet_order_send_enabled,
+            "configured": resolved_binance_testnet.configured,
+            "live_order_send": False,
+            "capital_transfer": False,
         }
 
     @app.get("/api/venues/binance/facts")
@@ -686,6 +743,45 @@ def create_app(
                 payload.account_id,
                 "BINANCE",
                 resolved_settings.binance_fact_environment,
+            ),
+        }
+
+    @app.post("/api/venues/binance/testnet/sync")
+    def sync_binance_testnet_facts(
+        payload: BinanceReadOnlySyncRequest,
+        identity: SessionIdentity = identity_dependency,
+    ) -> dict[str, Any]:
+        require_binance_testnet()
+        if not resolved_binance_testnet_reader.configured:
+            raise DomainRejected(
+                "BINANCE_TESTNET_NOT_CONFIGURED", "Binance testnet facts are not configured"
+            )
+        if not service().can_user(identity.user_id, "venue.record", payload.account_id, "BINANCE"):
+            raise DomainRejected(
+                "RBAC_DENIED", "Binance testnet facts are outside the current operator scope"
+            )
+        now = _now()
+        snapshot = resolved_binance_testnet_reader.read_snapshot(payload.symbol, now=now)
+        persisted = service().ingest_binance_read_only_snapshot(
+            payload.account_id,
+            identity.user_id,
+            snapshot,
+            environment=ExecutionEnvironment.TESTNET,
+            now=now,
+        )
+        execution_scope = f"TESTNET:{payload.account_id}:BINANCE"
+        reconciliation_id = service().reconcile_scope(execution_scope, identity.user_id, now=now)
+        return {
+            "source": "BINANCE_TESTNET_USER_DATA",
+            "environment": "TESTNET",
+            "symbol": payload.symbol,
+            "persisted": persisted,
+            "reconciliation": {
+                "reconciliation_id": str(reconciliation_id),
+                "status": service().reconciliation_status(reconciliation_id).value,
+            },
+            "facts": queries().venue_facts(
+                identity.user_id, payload.account_id, "BINANCE", "TESTNET"
             ),
         }
 
@@ -810,6 +906,244 @@ def create_app(
         return {
             "venue_order_fact_id": str(fact_id),
             "environment": "SHADOW",
+            "detail": queries().campaign_detail(identity.user_id, campaign_id),
+        }
+
+    def rejected_testnet_order(
+        command: BinanceTestnetOrderCommand, now: datetime
+    ) -> BinanceTestnetOrder:
+        return BinanceTestnetOrder(
+            order_id=f"REJECTED:{command.client_order_id}",
+            client_order_id=command.client_order_id,
+            status="REJECTED",
+            side=command.side,
+            order_type="MARKET",
+            ordered_quantity=command.quantity,
+            filled_quantity=Decimal(0),
+            stop_price=Decimal(0),
+            reduce_only=command.reduce_only,
+            close_position=False,
+            observed_at=now,
+        )
+
+    @app.post("/api/intents/{intent_id}/binance-testnet/send")
+    def send_binance_testnet_order(
+        intent_id: UUID,
+        payload: BinanceTestnetActionRequest,
+        identity: SessionIdentity = identity_dependency,
+    ) -> dict[str, Any]:
+        require_binance_testnet()
+        now = _now()
+        command = service().prepare_binance_testnet_send(
+            intent_id,
+            identity.user_id,
+            payload.execution_scope,
+            payload.owner_id,
+            payload.fencing_token,
+            now=now,
+        )
+        try:
+            result = resolved_binance_testnet.ensure_order(command, now=now)
+        except DomainRejected as exc:
+            if exc.code == "BINANCE_TESTNET_REJECTED":
+                service().record_binance_testnet_order(
+                    intent_id,
+                    identity.user_id,
+                    payload.execution_scope,
+                    payload.owner_id,
+                    payload.fencing_token,
+                    command,
+                    rejected_testnet_order(command, now),
+                    now=now,
+                )
+            elif exc.code != "BINANCE_TESTNET_UNAVAILABLE":
+                service().record_binance_testnet_unknown(
+                    intent_id,
+                    identity.user_id,
+                    payload.execution_scope,
+                    payload.owner_id,
+                    payload.fencing_token,
+                    command,
+                    exc.code,
+                    now=now,
+                )
+            raise
+        fact_id = service().record_binance_testnet_order(
+            intent_id,
+            identity.user_id,
+            payload.execution_scope,
+            payload.owner_id,
+            payload.fencing_token,
+            command,
+            result,
+            now=now,
+        )
+        campaign_id = queries().campaign_id_for_intent(identity.user_id, intent_id)
+        return {
+            "venue_order_fact_id": str(fact_id),
+            "client_order_id": command.client_order_id,
+            "environment": "TESTNET",
+            "detail": queries().campaign_detail(identity.user_id, campaign_id),
+        }
+
+    @app.post("/api/intents/{intent_id}/binance-testnet/cancel")
+    def cancel_binance_testnet_order(
+        intent_id: UUID,
+        payload: BinanceTestnetActionRequest,
+        identity: SessionIdentity = identity_dependency,
+    ) -> dict[str, Any]:
+        require_binance_testnet()
+        now = _now()
+        command = service().prepare_binance_testnet_cancel(
+            intent_id,
+            identity.user_id,
+            payload.execution_scope,
+            payload.owner_id,
+            payload.fencing_token,
+            now=now,
+        )
+        try:
+            result = resolved_binance_testnet.cancel_order(command, now=now)
+        except DomainRejected as exc:
+            if exc.code != "BINANCE_TESTNET_UNAVAILABLE":
+                service().record_binance_testnet_unknown(
+                    intent_id,
+                    identity.user_id,
+                    payload.execution_scope,
+                    payload.owner_id,
+                    payload.fencing_token,
+                    command,
+                    exc.code,
+                    now=now,
+                )
+            raise
+        if result is None:
+            service().record_binance_testnet_unknown(
+                intent_id,
+                identity.user_id,
+                payload.execution_scope,
+                payload.owner_id,
+                payload.fencing_token,
+                command,
+                "BINANCE_TESTNET_ORDER_NOT_FOUND",
+                now=now,
+            )
+        else:
+            service().record_binance_testnet_order(
+                intent_id,
+                identity.user_id,
+                payload.execution_scope,
+                payload.owner_id,
+                payload.fencing_token,
+                command,
+                result,
+                now=now,
+            )
+        campaign_id = queries().campaign_id_for_intent(identity.user_id, intent_id)
+        return {
+            "environment": "TESTNET",
+            "confirmed": result is not None,
+            "detail": queries().campaign_detail(identity.user_id, campaign_id),
+        }
+
+    @app.post("/api/intents/{intent_id}/binance-testnet/recover")
+    def recover_binance_testnet_order(
+        intent_id: UUID,
+        payload: BinanceTestnetActionRequest,
+        identity: SessionIdentity = identity_dependency,
+    ) -> dict[str, Any]:
+        require_binance_testnet()
+        now = _now()
+        command = service().prepare_binance_testnet_recovery(
+            intent_id,
+            identity.user_id,
+            payload.execution_scope,
+            payload.owner_id,
+            payload.fencing_token,
+            now=now,
+        )
+        result = resolved_binance_testnet.recover_order(command, now=now)
+        if result is not None:
+            service().record_binance_testnet_order(
+                intent_id,
+                identity.user_id,
+                payload.execution_scope,
+                payload.owner_id,
+                payload.fencing_token,
+                command,
+                result,
+                now=now,
+            )
+        campaign_id = queries().campaign_id_for_intent(identity.user_id, intent_id)
+        return {
+            "environment": "TESTNET",
+            "recovered": result is not None,
+            "detail": queries().campaign_detail(identity.user_id, campaign_id),
+        }
+
+    def unknown_testnet_protection(
+        command: BinanceTestnetProtectionCommand, now: datetime
+    ) -> BinanceTestnetOrder:
+        return BinanceTestnetOrder(
+            order_id=f"UNKNOWN:{command.client_order_id}",
+            client_order_id=command.client_order_id,
+            status="UNKNOWN",
+            side=command.side,
+            order_type="STOP_MARKET",
+            ordered_quantity=Decimal(0),
+            filled_quantity=Decimal(0),
+            stop_price=command.trigger_price,
+            reduce_only=False,
+            close_position=True,
+            observed_at=now,
+        )
+
+    @app.post("/api/campaigns/{campaign_id}/binance-testnet/protection")
+    def create_binance_testnet_protection(
+        campaign_id: UUID,
+        payload: BinanceTestnetProtectionRequest,
+        identity: SessionIdentity = identity_dependency,
+    ) -> dict[str, Any]:
+        require_binance_testnet()
+        now = _now()
+        command = service().prepare_binance_testnet_protection(
+            campaign_id,
+            identity.user_id,
+            payload.execution_scope,
+            payload.owner_id,
+            payload.fencing_token,
+            payload.trigger_price,
+            now=now,
+        )
+        try:
+            result = resolved_binance_testnet.ensure_protection(command, now=now)
+        except DomainRejected as exc:
+            if exc.code != "BINANCE_TESTNET_UNAVAILABLE":
+                service().record_binance_testnet_protection(
+                    campaign_id,
+                    identity.user_id,
+                    payload.execution_scope,
+                    payload.owner_id,
+                    payload.fencing_token,
+                    command,
+                    unknown_testnet_protection(command, now),
+                    now=now,
+                )
+            raise
+        protection_id = service().record_binance_testnet_protection(
+            campaign_id,
+            identity.user_id,
+            payload.execution_scope,
+            payload.owner_id,
+            payload.fencing_token,
+            command,
+            result,
+            now=now,
+        )
+        return {
+            "protection_id": str(protection_id),
+            "client_order_id": command.client_order_id,
+            "environment": "TESTNET",
             "detail": queries().campaign_detail(identity.user_id, campaign_id),
         }
 

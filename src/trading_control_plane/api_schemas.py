@@ -14,6 +14,7 @@ class MockLoginRequest(BaseModel):
 
 
 class ManualProposalRequest(BaseModel):
+    environment: Literal["SHADOW", "TESTNET"] = "SHADOW"
     account_id: str = Field(min_length=1, max_length=120)
     venue: str = Field(min_length=1, max_length=64)
     instrument_id: UUID
@@ -190,3 +191,13 @@ class ReconciliationReasonRequest(BaseModel):
 class BinanceReadOnlySyncRequest(BaseModel):
     account_id: str = Field(min_length=1, max_length=120)
     symbol: str = Field(min_length=1, max_length=64, pattern=r"^[A-Z0-9_]+$")
+
+
+class BinanceTestnetActionRequest(BaseModel):
+    execution_scope: str = Field(min_length=3, max_length=255)
+    owner_id: str = Field(min_length=1, max_length=255)
+    fencing_token: int = Field(ge=1)
+
+
+class BinanceTestnetProtectionRequest(BinanceTestnetActionRequest):
+    trigger_price: Decimal = Field(gt=0)

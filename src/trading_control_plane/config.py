@@ -47,6 +47,10 @@ class Settings(BaseSettings):
     binance_api_key: str | None = Field(default=None, repr=False)
     binance_api_secret: str | None = Field(default=None, repr=False)
     binance_recv_window_ms: int = Field(default=5_000, ge=1_000, le=10_000)
+    binance_testnet_order_send_enabled: bool = False
+    binance_testnet_base_url: str = "https://testnet.binancefuture.com"
+    binance_testnet_api_key: str | None = Field(default=None, repr=False)
+    binance_testnet_api_secret: str | None = Field(default=None, repr=False)
 
     @field_validator("database_url")
     @classmethod
@@ -67,6 +71,12 @@ class Settings(BaseSettings):
             self.binance_api_secret
         ):
             raise ValueError("Binance read-only key and secret must be configured together")
+        if bool(self.binance_testnet_api_key) != bool(self.binance_testnet_api_secret):
+            raise ValueError("Binance testnet key and secret must be configured together")
+        if self.binance_testnet_order_send_enabled and not (
+            self.binance_testnet_api_key and self.binance_testnet_api_secret
+        ):
+            raise ValueError("enabled Binance testnet send requires explicit testnet credentials")
 
 
 @lru_cache(maxsize=1)

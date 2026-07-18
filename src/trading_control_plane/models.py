@@ -408,7 +408,15 @@ class VenueOrder(Base):
             "venue_order_id",
             name="uq_venue_orders_external",
         ),
+        UniqueConstraint(
+            "environment",
+            "account_id",
+            "venue",
+            "client_order_id",
+            name="uq_venue_orders_client_identity",
+        ),
         UniqueConstraint("order_intent_id", name="uq_venue_orders_intent"),
+        CheckConstraint("side IN ('BUY','SELL')", name="ck_venue_orders_side"),
         CheckConstraint(
             "status IN ('SENT','PARTIALLY_FILLED','FILLED','CANCELLED','REJECTED','UNKNOWN')",
             name="ck_venue_orders_status",
@@ -439,6 +447,10 @@ class VenueOrder(Base):
     environment: Mapped[str] = mapped_column(String(16), nullable=False)
     instrument_id: Mapped[UUID] = mapped_column(ForeignKey("instruments.instrument_id"))
     venue_order_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    client_order_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    side: Mapped[str] = mapped_column(String(8), nullable=False)
+    order_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    reduce_only: Mapped[bool] = mapped_column(Boolean, nullable=False)
     status: Mapped[str] = mapped_column(String(32), nullable=False)
     ordered_quantity: Mapped[Decimal] = mapped_column(AMOUNT, nullable=False)
     filled_quantity: Mapped[Decimal] = mapped_column(AMOUNT, nullable=False)

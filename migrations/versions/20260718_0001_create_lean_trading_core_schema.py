@@ -715,6 +715,10 @@ def upgrade() -> None:
         sa.Column("environment", sa.String(length=16), nullable=False),
         sa.Column("instrument_id", sa.Uuid(), nullable=False),
         sa.Column("venue_order_id", sa.String(length=255), nullable=False),
+        sa.Column("client_order_id", sa.String(length=64), nullable=False),
+        sa.Column("side", sa.String(length=8), nullable=False),
+        sa.Column("order_type", sa.String(length=32), nullable=False),
+        sa.Column("reduce_only", sa.Boolean(), nullable=False),
         sa.Column("status", sa.String(length=32), nullable=False),
         sa.Column("ordered_quantity", sa.Numeric(precision=38, scale=18), nullable=False),
         sa.Column("filled_quantity", sa.Numeric(precision=38, scale=18), nullable=False),
@@ -728,6 +732,7 @@ def upgrade() -> None:
             "environment IN ('SHADOW','TESTNET','LIVE')",
             name="ck_venue_orders_environment",
         ),
+        sa.CheckConstraint("side IN ('BUY','SELL')", name="ck_venue_orders_side"),
         sa.CheckConstraint("filled_quantity >= 0", name="ck_venue_orders_filled_nonnegative"),
         sa.CheckConstraint("ordered_quantity >= 0", name="ck_venue_orders_quantity_nonnegative"),
         sa.ForeignKeyConstraint(
@@ -740,6 +745,13 @@ def upgrade() -> None:
         ),
         sa.PrimaryKeyConstraint("venue_order_fact_id"),
         sa.UniqueConstraint("order_intent_id", name="uq_venue_orders_intent"),
+        sa.UniqueConstraint(
+            "environment",
+            "account_id",
+            "venue",
+            "client_order_id",
+            name="uq_venue_orders_client_identity",
+        ),
         sa.UniqueConstraint(
             "environment",
             "account_id",

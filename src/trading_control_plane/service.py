@@ -11,6 +11,11 @@ from sqlalchemy import func, select, text
 from sqlalchemy.orm import Session
 
 from trading_control_plane.binance import BinanceReadOnlySnapshot
+from trading_control_plane.binance_execution import (
+    BinanceTestnetOrder,
+    BinanceTestnetOrderCommand,
+    BinanceTestnetProtectionCommand,
+)
 from trading_control_plane.database import Database
 from trading_control_plane.domain import (
     CampaignStatus,
@@ -1626,6 +1631,702 @@ class TradingService:
         with self.database.session_factory() as session:
             self._validate_sender(session, execution_scope, owner_id, fencing_token, now)
 
+    @staticmethod
+    def _binance_client_order_id(intent_id: UUID) -> str:
+        return f"tcp-{intent_id.hex}"
+
+    @staticmethod
+    def _binance_protection_client_order_id(position_id: UUID) -> str:
+        return f"tpp-{position_id.hex}"
+
+    def _binance_testnet_command(
+        self,
+        session: Session,
+        intent_id: UUID,
+        actor_id: UUID,
+        execution_scope: str,
+        owner_id: str,
+        fencing_token: int,
+        now: datetime,
+        allowed_statuses: set[str],
+    ) -> BinanceTestnetOrderCommand:
+        self._validate_sender(session, execution_scope, owner_id, fencing_token, now)
+        intent = session.get(OrderIntent, intent_id)
+        if intent is None:
+            _reject("ORDER_INTENT_NOT_FOUND", "intent does not exist")
+        campaign = session.get(Campaign, intent.campaign_id)
+        if campaign is None:
+            _reject("CAMPAIGN_NOT_FOUND", "intent campaign is missing")
+        if (
+            campaign.environment != ExecutionEnvironment.TESTNET.value
+            or campaign.venue != "BINANCE"
+        ):
+            _reject(
+                "BINANCE_TESTNET_SCOPE_REQUIRED",
+                "Binance testnet execution only accepts TESTNET BINANCE campaigns",
+            )
+        if execution_scope != _scope_key(campaign.environment, campaign.account_id, campaign.venue):
+            _reject("EXECUTION_SCOPE_MISMATCH", "sender scope does not match campaign scope")
+        self._require_role(session, actor_id, "venue.record", campaign.account_id, campaign.venue)
+        if intent.status not in allowed_statuses:
+            _reject("ORDER_INTENT_STATE_INVALID", "intent state does not allow this venue action")
+        instrument = session.get(Instrument, campaign.instrument_id)
+        if instrument is None or not instrument.active:
+            _reject("INSTRUMENT_UNAVAILABLE", "campaign instrument is unavailable")
+        if intent.quantity % instrument.lot_size != 0:
+            _reject("INSTRUMENT_QUANTITY_INVALID", "intent quantity is not aligned to lot size")
+        if intent.status == OrderIntentStatus.READY.value and not intent.reduce_only:
+            authorization = session.get(TradingAuthorization, intent.authorization_id)
+            proposal = (
+                None if authorization is None else session.get(Proposal, authorization.proposal_id)
+            )
+            policy = session.scalar(select(RiskPolicy).where(RiskPolicy.active))
+            if (
+                authorization is None
+                or proposal is None
+                or not authorization.active
+                or authorization.expires_at <= now
+                or proposal.expires_at <= now
+            ):
+                _reject("AUTHORIZATION_EXPIRED", "new-risk intent authorization is no longer valid")
+            if policy is None:
+                _reject("RISK_POLICY_UNKNOWN", "active risk policy is unavailable")
+            state = SystemRiskState(policy.system_state)
+            if state is SystemRiskState.KILL_SWITCH:
+                _reject("KILL_SWITCH", "new-risk testnet send is blocked")
+            if state is SystemRiskState.REDUCE_ONLY:
+                _reject("REDUCE_ONLY", "new-risk testnet send is blocked")
+            if state is SystemRiskState.NO_PYRAMID and intent.kind == IntentKind.ADD.value:
+                _reject("PYRAMID_DISABLED", "Add testnet send is blocked")
+            position = session.scalar(
+                select(Position).where(
+                    Position.account_id == campaign.account_id,
+                    Position.venue == campaign.venue,
+                    Position.environment == campaign.environment,
+                    Position.instrument_id == campaign.instrument_id,
+                )
+            )
+            equity = session.scalar(
+                select(AccountEquity).where(
+                    AccountEquity.account_id == campaign.account_id,
+                    AccountEquity.venue == campaign.venue,
+                    AccountEquity.environment == campaign.environment,
+                )
+            )
+            max_age = timedelta(seconds=policy.max_fact_age_seconds)
+            if (
+                position is None
+                or position.fact_status != FactStatus.KNOWN.value
+                or self._fact_is_stale(position.observed_at, now, max_age)
+            ):
+                _reject("POSITION_UNKNOWN", "new-risk testnet send requires a fresh position")
+            if (
+                equity is None
+                or equity.fact_status != FactStatus.KNOWN.value
+                or self._fact_is_stale(equity.observed_at, now, max_age)
+            ):
+                _reject("EQUITY_UNKNOWN", "new-risk testnet send requires fresh equity")
+            if intent.kind == IntentKind.INITIAL.value and position.quantity != 0:
+                _reject("POSITION_NOT_FLAT", "INITIAL testnet send requires a flat position")
+            if intent.kind == IntentKind.ADD.value:
+                protection = session.scalar(
+                    select(ProtectionOrder).where(
+                        ProtectionOrder.position_id == position.position_id
+                    )
+                )
+                if (
+                    protection is None
+                    or protection.status != ProtectionStatus.ACTIVE.value
+                    or not protection.fully_covered
+                    or protection.quantity < abs(position.quantity)
+                    or self._fact_is_stale(protection.observed_at, now, max_age)
+                ):
+                    _reject("PROTECTION_UNKNOWN", "Add testnet send requires current protection")
+            if (
+                session.scalar(
+                    select(RiskReservation.reservation_id).where(
+                        RiskReservation.status == ReservationStatus.UNKNOWN.value
+                    )
+                )
+                is not None
+            ):
+                _reject("RISK_RESERVATION_UNKNOWN", "unresolved risk blocks new testnet sends")
+            notional = intent.quantity * position.mark_price * instrument.contract_multiplier
+            if notional < instrument.minimum_notional:
+                _reject("MINIMUM_NOTIONAL", "intent is below current instrument minimum notional")
+        return BinanceTestnetOrderCommand(
+            symbol=instrument.symbol,
+            side=intent.side,
+            quantity=intent.quantity,
+            reduce_only=intent.reduce_only,
+            client_order_id=self._binance_client_order_id(intent.intent_id),
+        )
+
+    def prepare_binance_testnet_send(
+        self,
+        intent_id: UUID,
+        actor_id: UUID,
+        execution_scope: str,
+        owner_id: str,
+        fencing_token: int,
+        *,
+        now: datetime,
+    ) -> BinanceTestnetOrderCommand:
+        with self.database.session_factory() as session:
+            return self._binance_testnet_command(
+                session,
+                intent_id,
+                actor_id,
+                execution_scope,
+                owner_id,
+                fencing_token,
+                now,
+                {
+                    OrderIntentStatus.READY.value,
+                    OrderIntentStatus.SENT.value,
+                    OrderIntentStatus.PARTIALLY_FILLED.value,
+                },
+            )
+
+    def prepare_binance_testnet_cancel(
+        self,
+        intent_id: UUID,
+        actor_id: UUID,
+        execution_scope: str,
+        owner_id: str,
+        fencing_token: int,
+        *,
+        now: datetime,
+    ) -> BinanceTestnetOrderCommand:
+        with self.database.session_factory() as session:
+            return self._binance_testnet_command(
+                session,
+                intent_id,
+                actor_id,
+                execution_scope,
+                owner_id,
+                fencing_token,
+                now,
+                {
+                    OrderIntentStatus.SENT.value,
+                    OrderIntentStatus.PARTIALLY_FILLED.value,
+                },
+            )
+
+    def prepare_binance_testnet_recovery(
+        self,
+        intent_id: UUID,
+        actor_id: UUID,
+        execution_scope: str,
+        owner_id: str,
+        fencing_token: int,
+        *,
+        now: datetime,
+    ) -> BinanceTestnetOrderCommand:
+        with self.database.session_factory() as session:
+            return self._binance_testnet_command(
+                session,
+                intent_id,
+                actor_id,
+                execution_scope,
+                owner_id,
+                fencing_token,
+                now,
+                {OrderIntentStatus.UNKNOWN.value},
+            )
+
+    @staticmethod
+    def _validate_binance_order_result(
+        intent: OrderIntent,
+        command: BinanceTestnetOrderCommand,
+        result: BinanceTestnetOrder,
+    ) -> None:
+        if (
+            result.client_order_id != command.client_order_id
+            or result.side != intent.side
+            or result.order_type != "MARKET"
+            or result.ordered_quantity != intent.quantity
+            or result.reduce_only != intent.reduce_only
+            or result.close_position
+            or result.filled_quantity > intent.quantity
+        ):
+            _reject(
+                "BINANCE_TESTNET_IDENTITY_CONFLICT",
+                "testnet order result does not match the frozen order intent",
+            )
+
+    def _release_zero_fill_in_session(
+        self,
+        session: Session,
+        intent: OrderIntent,
+        terminal_status: OrderIntentStatus,
+        confirmed_external: bool = False,
+        *,
+        now: datetime,
+    ) -> None:
+        reservation = (
+            session.get(RiskReservation, intent.reservation_id, with_for_update=True)
+            if intent.reservation_id is not None
+            else None
+        )
+        if reservation is not None and reservation.status != ReservationStatus.RELEASED.value:
+            if reservation.status == ReservationStatus.UNKNOWN.value and not confirmed_external:
+                _reject("RISK_RESERVATION_UNKNOWN", "unknown risk cannot be released")
+            reservation.status = ReservationStatus.RELEASED.value
+            reservation.updated_at = now
+            reservation.version += 1
+            authorization = session.get(
+                TradingAuthorization, intent.authorization_id, with_for_update=True
+            )
+            if authorization is None or authorization.used_quantity < intent.quantity:
+                _reject("AUTHORIZATION_USAGE_INVALID", "authorization usage is inconsistent")
+            authorization.used_quantity -= intent.quantity
+            if intent.kind == IntentKind.ADD.value:
+                if authorization.used_adds <= 0:
+                    _reject("AUTHORIZATION_USAGE_INVALID", "Add usage is inconsistent")
+                authorization.used_adds -= 1
+        intent.status = terminal_status.value
+        intent.updated_at = now
+        intent.version += 1
+
+    def record_binance_testnet_order(
+        self,
+        intent_id: UUID,
+        actor_id: UUID,
+        execution_scope: str,
+        owner_id: str,
+        fencing_token: int,
+        command: BinanceTestnetOrderCommand,
+        result: BinanceTestnetOrder,
+        *,
+        now: datetime,
+    ) -> UUID:
+        with self.database.session_factory.begin() as session:
+            self._validate_sender(session, execution_scope, owner_id, fencing_token, now)
+            intent = session.get(OrderIntent, intent_id, with_for_update=True)
+            if intent is None:
+                _reject("ORDER_INTENT_NOT_FOUND", "intent does not exist")
+            campaign = session.get(Campaign, intent.campaign_id, with_for_update=True)
+            if campaign is None:
+                _reject("CAMPAIGN_NOT_FOUND", "intent campaign is missing")
+            if (
+                campaign.environment != ExecutionEnvironment.TESTNET.value
+                or campaign.venue != "BINANCE"
+                or execution_scope
+                != _scope_key(campaign.environment, campaign.account_id, campaign.venue)
+            ):
+                _reject("EXECUTION_SCOPE_MISMATCH", "result is outside the TESTNET campaign scope")
+            self._require_role(
+                session, actor_id, "venue.record", campaign.account_id, campaign.venue
+            )
+            self._validate_binance_order_result(intent, command, result)
+            fact = session.scalar(
+                select(VenueOrder)
+                .where(VenueOrder.order_intent_id == intent.intent_id)
+                .with_for_update()
+            )
+            if fact is None:
+                fact = VenueOrder(
+                    order_intent_id=intent.intent_id,
+                    account_id=campaign.account_id,
+                    venue=campaign.venue,
+                    environment=campaign.environment,
+                    instrument_id=campaign.instrument_id,
+                    venue_order_id=result.order_id,
+                    client_order_id=result.client_order_id,
+                    side=result.side,
+                    order_type=result.order_type,
+                    reduce_only=result.reduce_only,
+                    status=result.status,
+                    ordered_quantity=result.ordered_quantity,
+                    filled_quantity=result.filled_quantity,
+                    observed_at=result.observed_at,
+                    updated_at=now,
+                )
+                session.add(fact)
+            elif (
+                fact.client_order_id != result.client_order_id
+                or fact.side != result.side
+                or fact.order_type != result.order_type
+                or fact.reduce_only != result.reduce_only
+            ):
+                _reject(
+                    "BINANCE_TESTNET_IDENTITY_CONFLICT",
+                    "persisted client order identity changed semantics",
+                )
+            else:
+                fact.venue_order_id = result.order_id
+                fact.status = result.status
+                fact.ordered_quantity = result.ordered_quantity
+                fact.filled_quantity = result.filled_quantity
+                fact.observed_at = result.observed_at
+                fact.updated_at = now
+
+            previous = intent.status
+            terminal = {
+                VenueOrderStatus.CANCELLED.value: OrderIntentStatus.CANCELLED,
+                VenueOrderStatus.REJECTED.value: OrderIntentStatus.REJECTED,
+            }
+            if result.status == VenueOrderStatus.UNKNOWN.value:
+                intent.status = OrderIntentStatus.UNKNOWN.value
+                if intent.reservation_id is not None:
+                    reservation = session.get(
+                        RiskReservation, intent.reservation_id, with_for_update=True
+                    )
+                    if reservation is not None:
+                        reservation.status = ReservationStatus.UNKNOWN.value
+                        reservation.updated_at = now
+                        reservation.version += 1
+                campaign.status = CampaignStatus.UNKNOWN.value
+            elif result.status in terminal and result.filled_quantity == 0:
+                self._release_zero_fill_in_session(
+                    session,
+                    intent,
+                    terminal[result.status],
+                    confirmed_external=True,
+                    now=now,
+                )
+            else:
+                if result.status == VenueOrderStatus.FILLED.value:
+                    intent.status = OrderIntentStatus.FILLED.value
+                elif result.status in terminal:
+                    intent.status = terminal[result.status].value
+                elif result.filled_quantity > 0:
+                    intent.status = OrderIntentStatus.PARTIALLY_FILLED.value
+                else:
+                    intent.status = OrderIntentStatus.SENT.value
+                intent.updated_at = now
+                intent.version += 1
+                if result.filled_quantity > 0 and intent.reservation_id is not None:
+                    reservation = session.get(
+                        RiskReservation, intent.reservation_id, with_for_update=True
+                    )
+                    if reservation is not None:
+                        reservation.status = ReservationStatus.OPEN.value
+                        reservation.updated_at = now
+                        reservation.version += 1
+                elif (
+                    previous == OrderIntentStatus.UNKNOWN.value
+                    and intent.reservation_id is not None
+                ):
+                    reservation = session.get(
+                        RiskReservation, intent.reservation_id, with_for_update=True
+                    )
+                    if reservation is not None:
+                        reservation.status = ReservationStatus.RESERVED.value
+                        reservation.updated_at = now
+                        reservation.version += 1
+                if result.filled_quantity > 0:
+                    if intent.kind in {IntentKind.INITIAL.value, IntentKind.ADD.value}:
+                        campaign.status = CampaignStatus.OPEN.value
+                    elif intent.kind == IntentKind.EXIT.value:
+                        campaign.status = CampaignStatus.CLOSING.value
+                    else:
+                        campaign.status = CampaignStatus.REDUCING.value
+                elif previous == OrderIntentStatus.UNKNOWN.value:
+                    if intent.kind in {IntentKind.INITIAL.value, IntentKind.ADD.value}:
+                        campaign.status = CampaignStatus.OPENING.value
+                    elif intent.kind == IntentKind.EXIT.value:
+                        campaign.status = CampaignStatus.CLOSING.value
+                    else:
+                        campaign.status = CampaignStatus.REDUCING.value
+            campaign.updated_at = now
+            session.flush()
+            self._audit(
+                session,
+                actor_id=str(actor_id),
+                event_type="BINANCE_TESTNET_ORDER_OBSERVED",
+                object_type="VenueOrder",
+                object_id=fact.venue_order_fact_id,
+                reason=f"{result.client_order_id}:{result.status}",
+                correlation_id=intent.correlation_id,
+                object_version=intent.version,
+                now=now,
+            )
+            if previous != intent.status:
+                INTENT_TRANSITIONS.labels(previous, intent.status).inc()
+            return fact.venue_order_fact_id
+
+    def record_binance_testnet_unknown(
+        self,
+        intent_id: UUID,
+        actor_id: UUID,
+        execution_scope: str,
+        owner_id: str,
+        fencing_token: int,
+        command: BinanceTestnetOrderCommand,
+        reason: str,
+        *,
+        now: datetime,
+    ) -> None:
+        with self.database.session_factory.begin() as session:
+            self._validate_sender(session, execution_scope, owner_id, fencing_token, now)
+            intent = session.get(OrderIntent, intent_id, with_for_update=True)
+            if intent is None:
+                _reject("ORDER_INTENT_NOT_FOUND", "intent does not exist")
+            campaign = session.get(Campaign, intent.campaign_id, with_for_update=True)
+            if campaign is None:
+                _reject("CAMPAIGN_NOT_FOUND", "intent campaign is missing")
+            if execution_scope != _scope_key(
+                campaign.environment, campaign.account_id, campaign.venue
+            ):
+                _reject("EXECUTION_SCOPE_MISMATCH", "sender scope does not match campaign scope")
+            self._require_role(
+                session, actor_id, "venue.record", campaign.account_id, campaign.venue
+            )
+            fact = session.scalar(
+                select(VenueOrder)
+                .where(VenueOrder.order_intent_id == intent.intent_id)
+                .with_for_update()
+            )
+            if fact is None:
+                fact = VenueOrder(
+                    order_intent_id=intent.intent_id,
+                    account_id=campaign.account_id,
+                    venue=campaign.venue,
+                    environment=campaign.environment,
+                    instrument_id=campaign.instrument_id,
+                    venue_order_id=f"UNKNOWN:{command.client_order_id}",
+                    client_order_id=command.client_order_id,
+                    side=command.side,
+                    order_type="MARKET",
+                    reduce_only=command.reduce_only,
+                    status=VenueOrderStatus.UNKNOWN.value,
+                    ordered_quantity=command.quantity,
+                    filled_quantity=Decimal(0),
+                    observed_at=now,
+                    updated_at=now,
+                )
+                session.add(fact)
+            else:
+                fact.status = VenueOrderStatus.UNKNOWN.value
+                fact.observed_at = now
+                fact.updated_at = now
+            previous = intent.status
+            intent.status = OrderIntentStatus.UNKNOWN.value
+            intent.updated_at = now
+            intent.version += 1
+            if intent.reservation_id is not None:
+                reservation = session.get(
+                    RiskReservation, intent.reservation_id, with_for_update=True
+                )
+                if reservation is not None:
+                    reservation.status = ReservationStatus.UNKNOWN.value
+                    reservation.updated_at = now
+                    reservation.version += 1
+            campaign.status = CampaignStatus.UNKNOWN.value
+            campaign.updated_at = now
+            self._audit(
+                session,
+                actor_id=str(actor_id),
+                event_type="BINANCE_TESTNET_OUTCOME_UNKNOWN",
+                object_type="OrderIntent",
+                object_id=intent.intent_id,
+                reason=reason,
+                correlation_id=intent.correlation_id,
+                object_version=intent.version,
+                now=now,
+            )
+            if previous != intent.status:
+                INTENT_TRANSITIONS.labels(previous, intent.status).inc()
+
+    def prepare_binance_testnet_protection(
+        self,
+        campaign_id: UUID,
+        actor_id: UUID,
+        execution_scope: str,
+        owner_id: str,
+        fencing_token: int,
+        trigger_price: Decimal,
+        *,
+        now: datetime,
+    ) -> BinanceTestnetProtectionCommand:
+        with self.database.session_factory() as session:
+            self._validate_sender(session, execution_scope, owner_id, fencing_token, now)
+            campaign = session.get(Campaign, campaign_id)
+            if campaign is None:
+                _reject("CAMPAIGN_NOT_FOUND", "campaign does not exist")
+            if (
+                campaign.environment != ExecutionEnvironment.TESTNET.value
+                or campaign.venue != "BINANCE"
+                or execution_scope
+                != _scope_key(campaign.environment, campaign.account_id, campaign.venue)
+            ):
+                _reject("EXECUTION_SCOPE_MISMATCH", "protection is outside TESTNET scope")
+            self._require_role(
+                session, actor_id, "venue.record", campaign.account_id, campaign.venue
+            )
+            if trigger_price <= 0:
+                _reject("PROTECTION_TRIGGER_INVALID", "protection trigger must be positive")
+            position = session.scalar(
+                select(Position).where(
+                    Position.account_id == campaign.account_id,
+                    Position.venue == campaign.venue,
+                    Position.environment == campaign.environment,
+                    Position.instrument_id == campaign.instrument_id,
+                )
+            )
+            policy = session.scalar(select(RiskPolicy).where(RiskPolicy.active))
+            if (
+                position is None
+                or position.fact_status != FactStatus.KNOWN.value
+                or position.quantity == 0
+                or policy is None
+                or self._fact_is_stale(
+                    position.observed_at,
+                    now,
+                    timedelta(seconds=policy.max_fact_age_seconds),
+                )
+            ):
+                _reject("POSITION_UNKNOWN", "native protection requires a fresh nonzero position")
+            instrument = session.get(Instrument, campaign.instrument_id)
+            if instrument is None or not instrument.protection_supported:
+                _reject("PROTECTION_UNSUPPORTED", "instrument does not support native protection")
+            side = "SELL" if position.quantity > 0 else "BUY"
+            return BinanceTestnetProtectionCommand(
+                symbol=instrument.symbol,
+                side=side,
+                trigger_price=trigger_price,
+                client_order_id=self._binance_protection_client_order_id(position.position_id),
+            )
+
+    def record_binance_testnet_protection(
+        self,
+        campaign_id: UUID,
+        actor_id: UUID,
+        execution_scope: str,
+        owner_id: str,
+        fencing_token: int,
+        command: BinanceTestnetProtectionCommand,
+        result: BinanceTestnetOrder,
+        *,
+        now: datetime,
+    ) -> UUID:
+        with self.database.session_factory.begin() as session:
+            self._validate_sender(session, execution_scope, owner_id, fencing_token, now)
+            campaign = session.get(Campaign, campaign_id)
+            if campaign is None:
+                _reject("CAMPAIGN_NOT_FOUND", "campaign does not exist")
+            if execution_scope != _scope_key(
+                campaign.environment, campaign.account_id, campaign.venue
+            ):
+                _reject("EXECUTION_SCOPE_MISMATCH", "protection is outside campaign scope")
+            self._require_role(
+                session, actor_id, "venue.record", campaign.account_id, campaign.venue
+            )
+            position = session.scalar(
+                select(Position)
+                .where(
+                    Position.account_id == campaign.account_id,
+                    Position.venue == campaign.venue,
+                    Position.environment == campaign.environment,
+                    Position.instrument_id == campaign.instrument_id,
+                )
+                .with_for_update()
+            )
+            if position is None or position.quantity == 0:
+                _reject("POSITION_UNKNOWN", "protection result requires a nonzero position")
+            if (
+                result.client_order_id != command.client_order_id
+                or result.side != command.side
+                or result.order_type != "STOP_MARKET"
+                or result.stop_price != command.trigger_price
+                or not result.close_position
+            ):
+                _reject(
+                    "BINANCE_TESTNET_IDENTITY_CONFLICT",
+                    "testnet protection result changed frozen semantics",
+                )
+            order = session.scalar(
+                select(VenueOrder)
+                .where(
+                    VenueOrder.environment == campaign.environment,
+                    VenueOrder.account_id == campaign.account_id,
+                    VenueOrder.venue == campaign.venue,
+                    VenueOrder.client_order_id == command.client_order_id,
+                )
+                .with_for_update()
+            )
+            if order is None:
+                order = VenueOrder(
+                    order_intent_id=None,
+                    account_id=campaign.account_id,
+                    venue=campaign.venue,
+                    environment=campaign.environment,
+                    instrument_id=campaign.instrument_id,
+                    venue_order_id=result.order_id,
+                    client_order_id=result.client_order_id,
+                    side=result.side,
+                    order_type=result.order_type,
+                    reduce_only=True,
+                    status=result.status,
+                    ordered_quantity=Decimal(0),
+                    filled_quantity=result.filled_quantity,
+                    observed_at=result.observed_at,
+                    updated_at=now,
+                )
+                session.add(order)
+            else:
+                order.venue_order_id = result.order_id
+                order.status = result.status
+                order.filled_quantity = result.filled_quantity
+                order.observed_at = result.observed_at
+                order.updated_at = now
+            active = result.status in {
+                VenueOrderStatus.SENT.value,
+                VenueOrderStatus.PARTIALLY_FILLED.value,
+            }
+            protection = session.scalar(
+                select(ProtectionOrder)
+                .where(ProtectionOrder.position_id == position.position_id)
+                .with_for_update()
+            )
+            if protection is None:
+                protection = ProtectionOrder(
+                    position_id=position.position_id,
+                    venue_order_id=result.order_id,
+                    quantity=abs(position.quantity) if active else Decimal(0),
+                    trigger_price=result.stop_price,
+                    status=(
+                        ProtectionStatus.ACTIVE.value
+                        if active
+                        else ProtectionStatus.UNKNOWN.value
+                        if result.status == VenueOrderStatus.UNKNOWN.value
+                        else ProtectionStatus.DEGRADED.value
+                    ),
+                    fully_covered=active,
+                    observed_at=result.observed_at,
+                    updated_at=now,
+                )
+                session.add(protection)
+            else:
+                protection.venue_order_id = result.order_id
+                protection.quantity = abs(position.quantity) if active else Decimal(0)
+                protection.trigger_price = result.stop_price
+                protection.status = (
+                    ProtectionStatus.ACTIVE.value
+                    if active
+                    else ProtectionStatus.UNKNOWN.value
+                    if result.status == VenueOrderStatus.UNKNOWN.value
+                    else ProtectionStatus.DEGRADED.value
+                )
+                protection.fully_covered = active
+                protection.observed_at = result.observed_at
+                protection.updated_at = now
+            session.flush()
+            self._audit(
+                session,
+                actor_id=str(actor_id),
+                event_type="BINANCE_TESTNET_PROTECTION_OBSERVED",
+                object_type="ProtectionOrder",
+                object_id=protection.protection_id,
+                reason=f"{result.client_order_id}:{result.status}",
+                correlation_id=uuid4(),
+                object_version=1,
+                now=now,
+            )
+            return protection.protection_id
+
     def record_shadow_order(
         self,
         intent_id: UUID,
@@ -1660,6 +2361,10 @@ class TradingService:
                 environment=campaign.environment,
                 instrument_id=campaign.instrument_id,
                 venue_order_id=venue_order_id,
+                client_order_id=venue_order_id,
+                side=intent.side,
+                order_type="MARKET",
+                reduce_only=intent.reduce_only,
                 status=VenueOrderStatus.SENT.value,
                 ordered_quantity=intent.quantity,
                 filled_quantity=Decimal(0),
@@ -2190,6 +2895,17 @@ class TradingService:
                     .with_for_update()
                 )
                 if current_order is None:
+                    current_order = session.scalar(
+                        select(VenueOrder)
+                        .where(
+                            VenueOrder.environment == environment.value,
+                            VenueOrder.account_id == account_id,
+                            VenueOrder.venue == "BINANCE",
+                            VenueOrder.client_order_id == external_order.client_order_id,
+                        )
+                        .with_for_update()
+                    )
+                if current_order is None:
                     current_order = VenueOrder(
                         order_intent_id=None if intent is None else intent.intent_id,
                         account_id=account_id,
@@ -2197,6 +2913,10 @@ class TradingService:
                         environment=environment.value,
                         instrument_id=instrument.instrument_id,
                         venue_order_id=external_order.order_id,
+                        client_order_id=external_order.client_order_id,
+                        side=external_order.side,
+                        order_type=external_order.order_type,
+                        reduce_only=external_order.reduce_only or external_order.close_position,
                         status=external_order.status,
                         ordered_quantity=external_order.ordered_quantity,
                         filled_quantity=external_order.filled_quantity,
@@ -2208,6 +2928,11 @@ class TradingService:
                     if (
                         current_order.account_id != account_id
                         or current_order.instrument_id != instrument.instrument_id
+                        or current_order.client_order_id != external_order.client_order_id
+                        or current_order.side != external_order.side
+                        or current_order.order_type != external_order.order_type
+                        or current_order.reduce_only
+                        != (external_order.reduce_only or external_order.close_position)
                         or (
                             current_order.order_intent_id is not None
                             and intent is not None
@@ -2217,6 +2942,7 @@ class TradingService:
                         _reject("BINANCE_FACT_CONFLICT", "venue order identity changed scope")
                     if current_order.order_intent_id is None and intent is not None:
                         current_order.order_intent_id = intent.intent_id
+                    current_order.venue_order_id = external_order.order_id
                     current_order.status = external_order.status
                     current_order.ordered_quantity = external_order.ordered_quantity
                     current_order.filled_quantity = external_order.filled_quantity
@@ -2280,7 +3006,114 @@ class TradingService:
                     _reject("BINANCE_FACT_CONFLICT", "venue fill identity changed semantics")
                 fill_count += 1
 
+            session.flush()
+            bound_orders = session.scalars(
+                select(VenueOrder)
+                .where(
+                    VenueOrder.environment == environment.value,
+                    VenueOrder.account_id == account_id,
+                    VenueOrder.venue == "BINANCE",
+                    VenueOrder.instrument_id == instrument.instrument_id,
+                    VenueOrder.order_intent_id.is_not(None),
+                )
+                .with_for_update()
+            ).all()
+            for bound_order in bound_orders:
+                if bound_order.order_intent_id is None:
+                    continue
+                bound_intent = session.get(
+                    OrderIntent, bound_order.order_intent_id, with_for_update=True
+                )
+                if bound_intent is None:
+                    _reject("BINANCE_ORDER_BINDING_INVALID", "bound order intent is missing")
+                bound_campaign = session.get(
+                    Campaign, bound_intent.campaign_id, with_for_update=True
+                )
+                if bound_campaign is None:
+                    _reject("BINANCE_ORDER_BINDING_INVALID", "bound order campaign is missing")
+                intent_fills = session.scalars(
+                    select(VenueFill).where(VenueFill.order_intent_id == bound_intent.intent_id)
+                ).all()
+                if any(fill.side != bound_intent.side for fill in intent_fills):
+                    _reject("FILL_SIDE_MISMATCH", "Binance fill side changed intent semantics")
+                filled = sum((fill.quantity for fill in intent_fills), Decimal(0))
+                if (
+                    filled > bound_intent.quantity
+                    or bound_order.filled_quantity > bound_intent.quantity
+                ):
+                    _reject("ORDER_INTENT_OVERFILLED", "Binance cumulative fill exceeds intent")
+                if filled > bound_order.filled_quantity:
+                    bound_order.filled_quantity = filled
+                previous = bound_intent.status
+                release_updated_intent = False
+                terminal = {
+                    VenueOrderStatus.CANCELLED.value: OrderIntentStatus.CANCELLED,
+                    VenueOrderStatus.REJECTED.value: OrderIntentStatus.REJECTED,
+                }
+                if bound_order.status == VenueOrderStatus.UNKNOWN.value:
+                    bound_intent.status = OrderIntentStatus.UNKNOWN.value
+                    if bound_intent.reservation_id is not None:
+                        reservation = session.get(
+                            RiskReservation, bound_intent.reservation_id, with_for_update=True
+                        )
+                        if reservation is not None:
+                            reservation.status = ReservationStatus.UNKNOWN.value
+                            reservation.updated_at = now
+                            reservation.version += 1
+                    bound_campaign.status = CampaignStatus.UNKNOWN.value
+                elif bound_order.status in terminal and filled == 0:
+                    self._release_zero_fill_in_session(
+                        session,
+                        bound_intent,
+                        terminal[bound_order.status],
+                        confirmed_external=True,
+                        now=now,
+                    )
+                    release_updated_intent = True
+                else:
+                    if filled == bound_intent.quantity:
+                        bound_intent.status = OrderIntentStatus.FILLED.value
+                        bound_order.status = VenueOrderStatus.FILLED.value
+                    elif filled > 0 and bound_order.status not in terminal:
+                        bound_intent.status = OrderIntentStatus.PARTIALLY_FILLED.value
+                        bound_order.status = VenueOrderStatus.PARTIALLY_FILLED.value
+                    elif bound_order.status in terminal:
+                        bound_intent.status = terminal[bound_order.status].value
+                    if filled > 0 and bound_intent.reservation_id is not None:
+                        reservation = session.get(
+                            RiskReservation, bound_intent.reservation_id, with_for_update=True
+                        )
+                        if reservation is not None:
+                            reservation.status = ReservationStatus.OPEN.value
+                            reservation.updated_at = now
+                            reservation.version += 1
+                    if filled > 0:
+                        if bound_intent.kind in {IntentKind.INITIAL.value, IntentKind.ADD.value}:
+                            bound_campaign.status = CampaignStatus.OPEN.value
+                        elif bound_intent.kind == IntentKind.EXIT.value:
+                            bound_campaign.status = CampaignStatus.CLOSING.value
+                        else:
+                            bound_campaign.status = CampaignStatus.REDUCING.value
+                if previous != bound_intent.status:
+                    if not release_updated_intent:
+                        bound_intent.updated_at = now
+                        bound_intent.version += 1
+                    INTENT_TRANSITIONS.labels(previous, bound_intent.status).inc()
+                bound_order.updated_at = now
+                bound_campaign.updated_at = now
+
             funding_count = 0
+            funding_campaign = session.scalar(
+                select(Campaign)
+                .where(
+                    Campaign.account_id == account_id,
+                    Campaign.venue == "BINANCE",
+                    Campaign.environment == environment.value,
+                    Campaign.instrument_id == instrument.instrument_id,
+                    Campaign.status != CampaignStatus.CLOSED.value,
+                )
+                .with_for_update()
+            )
             for external_funding in snapshot.funding:
                 current_funding = session.scalar(
                     select(FundingPayment).where(
@@ -2293,7 +3126,9 @@ class TradingService:
                 if current_funding is None:
                     session.add(
                         FundingPayment(
-                            campaign_id=None,
+                            campaign_id=(
+                                None if funding_campaign is None else funding_campaign.campaign_id
+                            ),
                             account_id=account_id,
                             venue="BINANCE",
                             environment=environment.value,
@@ -2311,6 +3146,8 @@ class TradingService:
                     or current_funding.currency != external_funding.currency
                 ):
                     _reject("BINANCE_FACT_CONFLICT", "funding identity changed semantics")
+                elif current_funding.campaign_id is None and funding_campaign is not None:
+                    current_funding.campaign_id = funding_campaign.campaign_id
                 funding_count += 1
 
             protection = session.scalar(
@@ -2388,6 +3225,23 @@ class TradingService:
                     )
                     protection.updated_at = now
             elif protection is not None:
+                protection_order = session.scalar(
+                    select(VenueOrder)
+                    .where(
+                        VenueOrder.environment == environment.value,
+                        VenueOrder.account_id == account_id,
+                        VenueOrder.venue == "BINANCE",
+                        VenueOrder.venue_order_id == protection.venue_order_id,
+                    )
+                    .with_for_update()
+                )
+                if protection_order is not None and protection_order.status in {
+                    VenueOrderStatus.SENT.value,
+                    VenueOrderStatus.PARTIALLY_FILLED.value,
+                }:
+                    protection_order.status = VenueOrderStatus.CANCELLED.value
+                    protection_order.observed_at = snapshot.observed_at
+                    protection_order.updated_at = now
                 session.delete(protection)
             self._audit(
                 session,
@@ -2697,6 +3551,17 @@ class TradingService:
             elif self._fact_is_stale(equity.observed_at, now, max_age):
                 unknown.append("ACCOUNT_EQUITY_STALE")
 
+            protection_order_ids = set(
+                session.scalars(
+                    select(ProtectionOrder.venue_order_id)
+                    .join(Position, ProtectionOrder.position_id == Position.position_id)
+                    .where(
+                        Position.account_id == account_id,
+                        Position.venue == venue,
+                        Position.environment == environment.value,
+                    )
+                ).all()
+            )
             unbound_orders = session.scalars(
                 select(VenueOrder).where(
                     VenueOrder.account_id == account_id,
@@ -2713,6 +3578,8 @@ class TradingService:
                 )
             ).all()
             for unbound_order in unbound_orders:
+                if unbound_order.venue_order_id in protection_order_ids:
+                    continue
                 if unbound_order.status == VenueOrderStatus.UNKNOWN.value:
                     unknown.append(f"EXTERNAL_ORDER_UNKNOWN:{unbound_order.venue_order_id}")
                 else:

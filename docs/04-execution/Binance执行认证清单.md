@@ -1,9 +1,9 @@
 # Binance USDⓈ-M Futures 执行认证清单
 
 > 文档编号：EXEC-CERT-BN-001
-> 版本：Draft 0.2
+> 版本：Draft 0.3
 > 日期：2026-07-19
-> 状态：M3 只读软件合同已实现；真实账户和任何订单能力仍未验证
+> 状态：M4 TESTNET 窄订单软件合同已实现；真实测试账户与任何实盘能力仍未验证
 > 上位文档：`交易系统总体方案.md`、`策略合同与数值化验收门.md`、`docs/04-execution/OMS-Freqtrade-VenueAdapter执行规范.md`
 
 ---
@@ -22,6 +22,15 @@
 - 当前净仓模型只接受 one-way `BOTH` 仓位；非零 Hedge Mode 仓位 fail closed。
 - Adapter 没有下单、撤单、调整保证金或划转方法；`LIVE_ORDER_SEND` 仍为 `DISABLED`。
 - 本地合同和 PostgreSQL 集成测试已经覆盖映射、去重、RBAC、环境隔离、差异和禁用路径；没有真实凭据，因此真实账户连通性仍为“待验证”。
+
+### 当前 M4 TESTNET 订单合同边界
+
+- 写客户端只接受 `https://testnet.binancefuture.com`，不接受 LIVE、HTTP 或任意替代主机。
+- `TRADING_BINANCE_TESTNET_ORDER_SEND_ENABLED` 默认 `false`；TESTNET Key/Secret 独立配置，`LIVE_ORDER_SEND` 仍为 `DISABLED`。
+- 市价订单使用由 OrderIntent UUID 派生、长度不超过 36 的稳定 `clientOrderId`；先查询，确认不存在才 POST。
+- 发送或撤销结果不确定时，Intent、Order、Reservation 与 Campaign 进入 `UNKNOWN`；重启恢复只按原 identity 查询，不自动重发。
+- 原生保护使用 `STOP_MARKET`、`closePosition=true` 和 `MARK_PRICE`，稳定身份由 Position UUID 派生。
+- 合同测试和 PostgreSQL 集成测试覆盖部分成交、零成交取消、明确拒绝、Unknown、fencing、恢复、保护、退出、对账和 PnL。它们没有访问 Binance 网络，不能填写真实账户证据项。
 
 状态值只有四种；它们是检查项状态，不是 `capability_status`：
 

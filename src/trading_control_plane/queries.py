@@ -606,12 +606,16 @@ class TradingQueries:
                 "orders": [
                     {
                         "venue_order_id": item.venue_order_id,
+                        "client_order_id": item.client_order_id,
                         "instrument_id": str(item.instrument_id),
                         "symbol": instrument_by_id[item.instrument_id].symbol,
                         "intent_id": (
                             None if item.order_intent_id is None else str(item.order_intent_id)
                         ),
                         "status": item.status,
+                        "side": item.side,
+                        "order_type": item.order_type,
+                        "reduce_only": item.reduce_only,
                         "ordered_quantity": str(item.ordered_quantity),
                         "filled_quantity": str(item.filled_quantity),
                         "observed_at": _iso(item.observed_at),
@@ -681,7 +685,11 @@ class TradingQueries:
         return {
             "venue_order_fact_id": str(order.venue_order_fact_id),
             "venue_order_id": order.venue_order_id,
+            "client_order_id": order.client_order_id,
             "status": order.status,
+            "side": order.side,
+            "order_type": order.order_type,
+            "reduce_only": order.reduce_only,
             "ordered_quantity": str(order.ordered_quantity),
             "filled_quantity": str(order.filled_quantity),
             "observed_at": _iso(order.observed_at),
