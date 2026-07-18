@@ -142,7 +142,7 @@ def risk_envelope(request: RiskPrecheckRequest) -> CommandEnvelope:
     now = datetime.now(UTC)
     return CommandEnvelope(
         idempotency_key=f"risk-precheck-{uuid4()}",
-        command_type="risk.precheck.evaluate.v1",
+        command_type="risk.precheck.evaluate.v2",
         object_type="ProposalCandidate",
         object_id=request.proposal_ref,
         expected_version=request.candidate_version,
@@ -153,7 +153,7 @@ def risk_envelope(request: RiskPrecheckRequest) -> CommandEnvelope:
         issued_at=now,
         expires_at=now + timedelta(minutes=2),
         auth_context_ref="test-only:risk-precheck-auth",
-        payload_schema_version=1,
+        payload_schema_version=2,
         reason="evaluate proposal candidate",
         payload=request.model_dump(mode="json"),
     )
@@ -252,6 +252,15 @@ def test_allow_precheck_persists_immutable_snapshot_audit_and_outbox(
         assert snapshot.one_r_0 == Decimal("500")
         assert snapshot.frozen_trade_loss_cap == Decimal("500")
         assert snapshot.dynamic_trade_loss_cap == Decimal("500")
+        assert snapshot.trade_worst_case_loss_after == Decimal("20.5")
+        assert snapshot.decision["requested_base_heat"] == "10.5"
+        assert snapshot.decision["requested_protected_profit_giveback"] == "0"
+        assert snapshot.decision["requested_cost_stress_add_on"] == "10"
+        assert "requested_reserved_heat" not in snapshot.input_snapshot["request"]["requested"]
+        assert all(
+            "requested_incremental_planned_loss" not in scope
+            for scope in snapshot.input_snapshot["request"]["scope_risks"]
+        )
         assert snapshot.execution_eligible is False
         assert snapshot.reservation_created is False
         assert hash_json(snapshot.input_snapshot) == snapshot.input_hash
@@ -614,6 +623,23 @@ def test_web_actor_cannot_call_internal_risk_precheck_handler_directly(
     assert result.error_code == "INTERNAL_SERVICE_REQUIRED"
     with database.session_factory.begin() as session:
         assert count_rows(session, RiskDecisionSnapshot) == 0
+
+
+def test_risk_precheck_v1_command_and_wrong_v2_schema_are_rejected(
+    database: Database,
+) -> None:
+    v1 = risk_envelope(make_request()).model_copy(
+        update={"command_type": "risk.precheck.evaluate.v1"}
+    )
+    wrong_schema = risk_envelope(make_request()).model_copy(update={"payload_schema_version": 1})
+
+    old_result = execute_precheck(database, v1)
+    schema_result = execute_precheck(database, wrong_schema)
+
+    assert old_result.status is CommandStatus.REJECTED
+    assert old_result.error_code == "COMMAND_TYPE_MISMATCH"
+    assert schema_result.status is CommandStatus.REJECTED
+    assert schema_result.error_code == "PAYLOAD_SCHEMA_VERSION_MISMATCH"
 
 
 def test_policy_decision_and_state_history_are_database_immutable(database: Database) -> None:

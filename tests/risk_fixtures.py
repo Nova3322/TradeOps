@@ -20,6 +20,7 @@ from trading_control_plane.capital_scope import (
 from trading_control_plane.commands import hash_json
 from trading_control_plane.projections import CurrentAccountEquityScope
 from trading_control_plane.risk import (
+    CANONICAL_LOSS_MODEL_VERSION,
     CapitalInput,
     CapitalProjectionBinding,
     CertificationBinding,
@@ -186,7 +187,6 @@ def make_requested(**updates: Any) -> RequestedRiskIncrease:
     values: dict[str, Any] = {
         "requested_quantity": Decimal("1"),
         "quantity_step": Decimal("0.001"),
-        "requested_reserved_heat": Decimal("100"),
         "requested_protected_profit_giveback": Decimal("0"),
         "requested_cost_stress_add_on": Decimal("10"),
         "requested_funding": Decimal("1000"),
@@ -215,15 +215,38 @@ def make_request(
 ) -> RiskPrecheckRequest:
     observed_at = now or datetime.now(UTC)
     event_time = observed_at - fact_age
+    effective_requested = requested or make_requested()
+    effective_market = market or MarketRiskInput(
+        direction=PositionDirection.LONG,
+        mark_price=Decimal("100"),
+        index_price=Decimal("100"),
+        executable_price=Decimal("100.5"),
+        initial_invalidation_price=Decimal("90"),
+        contract_multiplier=Decimal("1"),
+        tick_size=Decimal("0.1"),
+        minimum_quantity=Decimal("0.001"),
+        minimum_notional=Decimal("5"),
+        funding_rate=Decimal("0.0001"),
+        max_slippage_bps=Decimal("20"),
+        contract_rules_version="rules-test-v1",
+        loss_model_version=CANONICAL_LOSS_MODEL_VERSION,
+        loss_calculation_ref="test-only:loss-calculation-fixture",
+    )
+    incremental_loss = (
+        abs(effective_market.executable_price - effective_market.initial_invalidation_price)
+        * effective_requested.requested_quantity
+        * effective_market.contract_multiplier
+        + effective_requested.requested_protected_profit_giveback
+        + effective_requested.requested_cost_stress_add_on
+    )
     if scope_risks is None:
         scope_risks = tuple(
             ScopeRiskInput(
                 scope_type=scope_type,
                 scope_id=scope_id,
                 current_planned_loss=Decimal("0"),
-                requested_incremental_planned_loss=Decimal("110"),
                 current_stress_loss=Decimal("0"),
-                requested_incremental_stress_loss=Decimal("150"),
+                requested_incremental_stress_loss=incremental_loss + Decimal("40"),
             )
             for scope_type, scope_id in SCOPE_IDS.items()
         )
@@ -272,23 +295,7 @@ def make_request(
             requested_add_count=0,
             capability_certificate_ref="test-only:certificate-fixture",
         ),
-        market=market
-        or MarketRiskInput(
-            direction=PositionDirection.LONG,
-            mark_price=Decimal("100"),
-            index_price=Decimal("100"),
-            executable_price=Decimal("100.5"),
-            initial_invalidation_price=Decimal("90"),
-            contract_multiplier=Decimal("1"),
-            tick_size=Decimal("0.1"),
-            minimum_quantity=Decimal("0.001"),
-            minimum_notional=Decimal("5"),
-            funding_rate=Decimal("0.0001"),
-            max_slippage_bps=Decimal("20"),
-            contract_rules_version="rules-test-v1",
-            loss_model_version="loss-model-test-v1",
-            loss_calculation_ref="test-only:loss-calculation-fixture",
-        ),
+        market=effective_market,
         capital_projection_binding=TEST_CAPITAL_PROJECTION_BINDING,
         capital=capital or make_capital(),
         current_trade_loss=current_trade_loss
@@ -299,7 +306,7 @@ def make_request(
             protected_profit_giveback=Decimal("0"),
             cost_stress_add_on=Decimal("0"),
         ),
-        requested=requested or make_requested(),
+        requested=effective_requested,
         scope_risks=scope_risks,
         facts=tuple(
             FactObservation(

@@ -96,6 +96,7 @@ from trading_control_plane.reconciliation_models import (
     ExecutionReconciliationRunState,
 )
 from trading_control_plane.risk import (
+    CANONICAL_LOSS_MODEL_VERSION,
     CertificationBinding,
     MarketRiskInput,
     PositionDirection,
@@ -264,7 +265,6 @@ def execution_risk_request(
     *,
     now: datetime,
     quantity: Decimal = Decimal("0.5"),
-    requested_heat: Decimal = Decimal("100"),
     requested_giveback: Decimal = Decimal("0"),
     requested_cost: Decimal = Decimal("10"),
     requested_funding: Decimal = Decimal("500"),
@@ -281,7 +281,6 @@ def execution_risk_request(
 ) -> RiskPrecheckRequest:
     requested = make_requested(
         requested_quantity=quantity,
-        requested_reserved_heat=requested_heat,
         requested_protected_profit_giveback=requested_giveback,
         requested_cost_stress_add_on=requested_cost,
         requested_funding=requested_funding,
@@ -289,14 +288,15 @@ def execution_risk_request(
         requested_effective_leverage=Decimal("2"),
         proposal_requested_loss_cap=Decimal("500"),
     )
+    base_heat = abs(Decimal("100.5") - Decimal("90")) * quantity
+    incremental_loss = base_heat + requested_giveback + requested_cost
     scopes = tuple(
         ScopeRiskInput(
             scope_type=scope_type,
             scope_id=scope_id,
             current_planned_loss=scope_current_planned,
-            requested_incremental_planned_loss=requested.incremental_worst_case_loss,
             current_stress_loss=scope_current_stress,
-            requested_incremental_stress_loss=requested.incremental_worst_case_loss + Decimal("40"),
+            requested_incremental_stress_loss=incremental_loss + Decimal("40"),
         )
         for scope_type, scope_id in EXECUTION_SCOPE_IDS.items()
     )
@@ -324,7 +324,7 @@ def execution_risk_request(
             funding_rate=Decimal("0.0001"),
             max_slippage_bps=Decimal("20"),
             contract_rules_version="rules-test-v1",
-            loss_model_version="loss-model-test-v1",
+            loss_model_version=CANONICAL_LOSS_MODEL_VERSION,
             loss_calculation_ref="test-only:wp-0006-loss",
         ),
         scope_risks=scopes,
@@ -391,7 +391,7 @@ def create_intent_envelope(
     request = risk_request or execution_risk_request(proposal, now=now)
     return CommandEnvelope(
         idempotency_key=idempotency_key or f"execution-intent-{uuid4()}",
-        command_type="execution.intent.create.v1",
+        command_type="execution.intent.create.v2",
         object_type="Campaign",
         object_id=str(campaign.campaign_id),
         expected_version=1,
@@ -402,7 +402,7 @@ def create_intent_envelope(
         issued_at=now,
         expires_at=now + timedelta(minutes=2),
         auth_context_ref="internal:oms-risk-reservation-service",
-        payload_schema_version=1,
+        payload_schema_version=2,
         reason="create non-dispatchable shadow intent",
         payload={
             "intent_kind": "INITIAL",
@@ -437,7 +437,7 @@ def proposal_precheck_envelope(request: RiskPrecheckRequest) -> CommandEnvelope:
         issued_at=now,
         expires_at=now + timedelta(minutes=2),
         auth_context_ref="test-only:proposal-precheck-auth",
-        payload_schema_version=1,
+        payload_schema_version=2,
         reason="evaluate proposal against existing durable exposure",
         payload=request.model_dump(mode="json"),
     )
@@ -456,18 +456,17 @@ def create_add_envelope(
         proposal,
         now=now,
         quantity=Decimal("0.1"),
-        requested_heat=Decimal("50"),
         requested_cost=Decimal("5"),
         requested_funding=Decimal("200"),
-        current_open_heat=Decimal("100"),
+        current_open_heat=Decimal("5.25"),
         current_cost_stress_add_on=Decimal("10"),
         funding_used=Decimal("500"),
-        scope_current_planned=Decimal("110"),
-        scope_current_stress=Decimal("150"),
+        scope_current_planned=Decimal("15.25"),
+        scope_current_stress=Decimal("55.25"),
     )
     return CommandEnvelope(
         idempotency_key=f"execution-add-{uuid4()}",
-        command_type="execution.intent.create.v1",
+        command_type="execution.intent.create.v2",
         object_type="Campaign",
         object_id=str(campaign.campaign_id),
         expected_version=2,
@@ -478,7 +477,7 @@ def create_add_envelope(
         issued_at=now,
         expires_at=now + timedelta(minutes=2),
         auth_context_ref="internal:oms-risk-reservation-service",
-        payload_schema_version=1,
+        payload_schema_version=2,
         reason="create non-dispatchable shadow add intent",
         payload={
             "intent_kind": "ADD",
@@ -1144,6 +1143,29 @@ def execute_fact(database: Database, order_intent_id: UUID, draft: ExecutionFact
     return result
 
 
+def test_execution_intent_v1_command_and_wrong_v2_schema_are_rejected(
+    database: Database,
+) -> None:
+    proposal, campaign, initial = prepare_authorization(database)
+    v1 = create_intent_envelope(proposal, campaign, initial, now=datetime.now(UTC)).model_copy(
+        update={"command_type": "execution.intent.create.v1"}
+    )
+    wrong_schema = create_intent_envelope(
+        proposal,
+        campaign,
+        initial,
+        now=datetime.now(UTC),
+    ).model_copy(update={"payload_schema_version": 1})
+
+    old_result = execute_create(database, v1)
+    schema_result = execute_create(database, wrong_schema)
+
+    assert old_result.status is CommandStatus.REJECTED
+    assert old_result.error_code == "COMMAND_TYPE_MISMATCH"
+    assert schema_result.status is CommandStatus.REJECTED
+    assert schema_result.error_code == "PAYLOAD_SCHEMA_VERSION_MISMATCH"
+
+
 def test_initial_intent_atomically_persists_decision_reservation_ledger_and_histories(
     database: Database,
 ) -> None:
@@ -1181,14 +1203,25 @@ def test_initial_intent_atomically_persists_decision_reservation_ledger_and_hist
             == decision.durable_exposure_snapshot_hash
         )
         assert decision.input_snapshot["durable_exposure_snapshot"]["components"] == []
+        assert decision.decision["requested_base_heat"] == "5.25"
+        assert decision.decision["requested_protected_profit_giveback"] == "0"
+        assert decision.decision["requested_cost_stress_add_on"] == "10"
+        assert (
+            "requested_reserved_heat"
+            not in decision.input_snapshot["request"]["risk_request"]["requested"]
+        )
+        assert all(
+            "requested_incremental_planned_loss" not in scope
+            for scope in decision.input_snapshot["request"]["risk_request"]["scope_risks"]
+        )
         assert intent.dispatch_eligible is False
         assert reservation.order_intent_id == intent.order_intent_id
-        assert reservation.reserved_heat == Decimal("110")
-        assert reservation.base_heat_reserved == Decimal("100")
+        assert reservation.reserved_heat == Decimal("15.25")
+        assert reservation.base_heat_reserved == Decimal("5.25")
         assert reservation.protected_profit_giveback_reserved == 0
         assert reservation.cost_stress_add_on_reserved == Decimal("10")
         assert exposure.status == "RESERVED"
-        assert exposure.total_heat == Decimal("110")
+        assert exposure.total_heat == Decimal("15.25")
         assert count_rows(session, RiskLedgerEntry) == 1
         assert count_rows(session, OrderIntentStateHistory) == 1
         assert count_rows(session, RiskExposureStateHistory) == 1
@@ -1339,7 +1372,6 @@ def test_durable_exposure_snapshot_subtracts_internal_margin_reservations(
             risk_request=execution_risk_request(
                 proposal,
                 now=now,
-                requested_heat=Decimal("90"),
                 requested_giveback=Decimal("10"),
                 requested_cost=Decimal("10"),
             ),
@@ -1349,12 +1381,12 @@ def test_durable_exposure_snapshot_subtracts_internal_margin_reservations(
     exact_risk = execution_risk_request(
         proposal,
         now=datetime.now(UTC),
-        current_reserved_heat=Decimal("90"),
+        current_reserved_heat=Decimal("5.25"),
         current_protected_profit_giveback=Decimal("10"),
         current_cost_stress_add_on=Decimal("10"),
         funding_reserved=Decimal("500"),
-        scope_current_planned=Decimal("110"),
-        scope_current_stress=Decimal("150"),
+        scope_current_planned=Decimal("25.25"),
+        scope_current_stress=Decimal("65.25"),
     )
     exact_request = CreateExecutionIntentRequest.model_validate(
         create_intent_envelope(
@@ -1371,15 +1403,15 @@ def test_durable_exposure_snapshot_subtracts_internal_margin_reservations(
         verified = DurableExposureResolver.resolve(session, exact_request, campaign)
 
     assert verified.risk_request.capital.available_margin == Decimal("9500")
-    assert verified.risk_request.current_trade_loss.reserved_heat == Decimal("90")
+    assert verified.risk_request.current_trade_loss.reserved_heat == Decimal("5.25")
     assert verified.risk_request.current_trade_loss.protected_profit_giveback == Decimal("10")
     assert verified.risk_request.current_trade_loss.cost_stress_add_on == Decimal("10")
     assert verified.snapshot.global_margin_reserved == Decimal("500")
-    assert verified.snapshot.campaign_reserved_heat == Decimal("90")
+    assert verified.snapshot.campaign_reserved_heat == Decimal("5.25")
     assert verified.snapshot.campaign_protected_profit_giveback == Decimal("10")
     assert verified.snapshot.campaign_cost_stress_add_on == Decimal("10")
     assert verified.snapshot.snapshot_version == "durable-risk-exposure-v2"
-    assert verified.snapshot.components[0].base_heat_reserved == Decimal("90")
+    assert verified.snapshot.components[0].base_heat_reserved == Decimal("5.25")
     assert verified.snapshot.available_margin_after_internal_reservations == Decimal("9500")
     assert len(verified.snapshot.components) == 1
     assert hash_json(verified.snapshot.model_dump(mode="json")) == verified.snapshot_hash
@@ -1415,8 +1447,8 @@ def test_proposal_precheck_derives_other_campaign_funding_margin_and_scope(
         proposal,
         now=datetime.now(UTC),
         funding_reserved=Decimal("500"),
-        scope_current_planned=Decimal("110"),
-        scope_current_stress=Decimal("150"),
+        scope_current_planned=Decimal("15.25"),
+        scope_current_stress=Decimal("55.25"),
     )
     allowed = IdempotentCommandExecutor(database.session_factory).execute(
         proposal_precheck_envelope(exact),
@@ -1684,11 +1716,11 @@ def test_partial_fill_then_canonical_cancel_releases_only_unfilled_quantity(
     current = execution_risk_request(
         proposal,
         now=datetime.now(UTC),
-        current_open_heat=Decimal("40"),
+        current_open_heat=Decimal("2.10"),
         current_cost_stress_add_on=Decimal("4"),
         funding_used=Decimal("200"),
-        scope_current_planned=Decimal("44"),
-        scope_current_stress=Decimal("60"),
+        scope_current_planned=Decimal("6.10"),
+        scope_current_stress=Decimal("22.10"),
     )
     request = CreateExecutionIntentRequest.model_validate(
         create_intent_envelope(
@@ -1702,9 +1734,9 @@ def test_partial_fill_then_canonical_cancel_releases_only_unfilled_quantity(
     )
     with database.session_factory.begin() as session:
         verified = DurableExposureResolver.resolve(session, request, campaign)
-    assert verified.risk_request.current_trade_loss.open_heat == Decimal("40")
+    assert verified.risk_request.current_trade_loss.open_heat == Decimal("2.10")
     assert verified.risk_request.current_trade_loss.cost_stress_add_on == Decimal("4")
-    assert verified.risk_request.current_trade_loss.total == Decimal("44")
+    assert verified.risk_request.current_trade_loss.total == Decimal("6.10")
 
 
 def test_terminal_zero_fill_releases_risk_and_allows_new_initial_candidate(

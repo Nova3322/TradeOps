@@ -21,6 +21,7 @@ from trading_control_plane.commands import hash_json
 from trading_control_plane.risk import (
     FactStatus,
     FactType,
+    PositionDirection,
     RiskDecisionResult,
     RiskEvaluator,
     RiskPolicyParameters,
@@ -82,7 +83,13 @@ def test_equity_decline_and_latest_upnl_immediately_tighten_dynamic_capacity() -
             exchange_settled_equity_ex_upnl=Decimal("100000"),
             current_unrealized_pnl=Decimal("-20000"),
         ),
-        requested=make_requested(requested_reserved_heat=Decimal("395")),
+        current_trade_loss=TradeLossComponents(
+            open_heat=Decimal("390"),
+            reserved_heat=Decimal("0"),
+            unknown_heat=Decimal("0"),
+            protected_profit_giveback=Decimal("0"),
+            cost_stress_add_on=Decimal("0"),
+        ),
     )
     result = RiskEvaluator().evaluate(make_evaluation(request=request))
 
@@ -135,7 +142,7 @@ def test_scope_limit_denies_manual_request_and_reports_safe_quantity_without_exe
                 scope_type=scope_type,
                 scope_id=scope_id,
                 planned_loss_cap=(
-                    Decimal("50") if scope_type is ScopeType.UNDERLYING else Decimal("10000")
+                    Decimal("10") if scope_type is ScopeType.UNDERLYING else Decimal("10000")
                 ),
                 stress_loss_cap=Decimal("15000"),
             )
@@ -146,7 +153,7 @@ def test_scope_limit_denies_manual_request_and_reports_safe_quantity_without_exe
 
     assert result.result is RiskDecisionResult.DENY
     assert "SCOPE_PLANNED_LIMIT_EXCEEDED" in result.reason_codes
-    assert result.max_safe_quantity == Decimal("0.454")
+    assert result.max_safe_quantity == Decimal("0.487")
     assert result.final_quantity == 0
     assert result.execution_eligible is False
 
@@ -156,17 +163,80 @@ def test_known_unknown_heat_is_counted_and_never_released_by_precheck() -> None:
         current_trade_loss=TradeLossComponents(
             open_heat=Decimal("0"),
             reserved_heat=Decimal("0"),
-            unknown_heat=Decimal("450"),
+            unknown_heat=Decimal("490"),
             protected_profit_giveback=Decimal("0"),
             cost_stress_add_on=Decimal("0"),
         )
     )
     result = RiskEvaluator().evaluate(make_evaluation(request=request))
 
-    assert result.trade_worst_case_loss_before == Decimal("450")
-    assert result.trade_worst_case_loss_after == Decimal("560")
+    assert result.trade_worst_case_loss_before == Decimal("490")
+    assert result.trade_worst_case_loss_after == Decimal("510.5")
     assert result.result is RiskDecisionResult.DENY
-    assert result.max_safe_quantity == Decimal("0.454")
+    assert result.max_safe_quantity == Decimal("0.487")
+
+
+def test_requested_base_heat_is_canonical_for_long_short_and_decision_evidence() -> None:
+    long_request = make_request()
+    short_market = long_request.market.model_copy(
+        update={
+            "direction": PositionDirection.SHORT,
+            "executable_price": Decimal("90"),
+            "initial_invalidation_price": Decimal("100"),
+        }
+    )
+    short_request = make_request(
+        market=short_market,
+        requested=make_requested(requested_quantity=Decimal("2")),
+    )
+
+    assert long_request.requested_base_heat == Decimal("10.5")
+    assert long_request.incremental_worst_case_loss == Decimal("20.5")
+    assert short_request.requested_base_heat == Decimal("20")
+    assert short_request.incremental_worst_case_loss == Decimal("30")
+
+    result = RiskEvaluator().evaluate(make_evaluation(request=long_request))
+    assert result.requested_base_heat == Decimal("10.5")
+    assert result.requested_protected_profit_giveback == 0
+    assert result.requested_cost_stress_add_on == Decimal("10")
+
+
+@pytest.mark.parametrize(
+    ("legacy_path", "legacy_value"),
+    (
+        (("requested", "requested_reserved_heat"), Decimal("1")),
+        (("scope_risks", 0, "requested_incremental_planned_loss"), Decimal("1")),
+    ),
+)
+def test_v1_caller_reported_base_or_scope_planned_loss_is_rejected(
+    legacy_path: tuple[str | int, ...],
+    legacy_value: Decimal,
+) -> None:
+    payload = make_request().model_dump(mode="python")
+    target: object = payload
+    for key in legacy_path[:-1]:
+        target = target[key]  # type: ignore[index]
+    target[legacy_path[-1]] = legacy_value  # type: ignore[index]
+
+    with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
+        RiskPrecheckRequest.model_validate(payload)
+
+
+def test_contract_multiplier_and_canonical_loss_model_are_exactly_bound() -> None:
+    multiplier_payload = make_request().model_dump(mode="python")
+    multiplier_payload["market"]["contract_multiplier"] = Decimal("2")
+    with pytest.raises(ValidationError, match="certified binding"):
+        RiskPrecheckRequest.model_validate(multiplier_payload)
+
+    model_payload = make_request().model_dump(mode="python")
+    model_payload["market"]["loss_model_version"] = "caller-selected-loss-v1"
+    with pytest.raises(ValidationError, match="directional-entry-to-invalidation-v1"):
+        RiskPrecheckRequest.model_validate(model_payload)
+
+    stress_payload = make_request().model_dump(mode="python")
+    stress_payload["scope_risks"][0]["requested_incremental_stress_loss"] = Decimal("20")
+    with pytest.raises(ValidationError, match="below canonical planned loss"):
+        RiskPrecheckRequest.model_validate(stress_payload)
 
 
 def test_initial_precheck_obeys_formal_risk_state_action_matrix() -> None:

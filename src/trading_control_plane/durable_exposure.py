@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections import defaultdict
-from decimal import Decimal
+from decimal import ROUND_DOWN, ROUND_HALF_UP, Decimal, localcontext
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -15,6 +15,52 @@ from trading_control_plane.execution_models import (
 )
 
 ZERO = Decimal("0")
+NUMERIC_QUANTUM = Decimal("0.000000000000000001")
+
+
+def _proportional_amount(
+    value: Decimal,
+    numerator: Decimal,
+    denominator: Decimal,
+    *,
+    rounding: str = ROUND_HALF_UP,
+) -> Decimal:
+    if value == ZERO or numerator == ZERO:
+        return ZERO
+    if numerator == denominator:
+        return value
+    with localcontext() as context:
+        context.prec = 80
+        return (value * numerator / denominator).quantize(
+            NUMERIC_QUANTUM,
+            rounding=rounding,
+        )
+
+
+def _allocate_base_heat(
+    active_base_heat: Decimal,
+    open_heat: Decimal,
+    reserved_heat: Decimal,
+    unknown_heat: Decimal,
+) -> tuple[Decimal, Decimal, Decimal]:
+    weights = (open_heat, reserved_heat, unknown_heat)
+    active_heat = sum(weights, start=ZERO)
+    if active_base_heat == ZERO or active_heat == ZERO:
+        return (ZERO, ZERO, ZERO)
+    nonzero_indexes = [index for index, weight in enumerate(weights) if weight > ZERO]
+    allocations = [ZERO, ZERO, ZERO]
+    allocated = ZERO
+    for index in nonzero_indexes[:-1]:
+        amount = _proportional_amount(
+            active_base_heat,
+            weights[index],
+            active_heat,
+            rounding=ROUND_DOWN,
+        )
+        allocations[index] = amount
+        allocated += amount
+    allocations[nonzero_indexes[-1]] = active_base_heat - allocated
+    return (allocations[0], allocations[1], allocations[2])
 
 
 class DurableExposureComponent(BaseModel):
@@ -139,11 +185,27 @@ class DurableExposureSnapshotService:
                 )
             active_heat = state.open_heat + state.reserved_heat + state.unknown_heat
             active_ratio = active_heat / state.total_heat if active_heat > ZERO else ZERO
-            base_heat_ratio = reservation.base_heat_reserved / reservation.reserved_heat
-            active_protected_profit_giveback = (
-                reservation.protected_profit_giveback_reserved * active_ratio
+            active_protected_profit_giveback = _proportional_amount(
+                reservation.protected_profit_giveback_reserved,
+                active_heat,
+                state.total_heat,
+                rounding=ROUND_DOWN,
             )
-            active_cost_stress_add_on = reservation.cost_stress_add_on_reserved * active_ratio
+            active_cost_stress_add_on = _proportional_amount(
+                reservation.cost_stress_add_on_reserved,
+                active_heat,
+                state.total_heat,
+                rounding=ROUND_DOWN,
+            )
+            active_base_heat = (
+                active_heat - active_protected_profit_giveback - active_cost_stress_add_on
+            )
+            base_open_heat, base_reserved_heat, base_unknown_heat = _allocate_base_heat(
+                active_base_heat,
+                state.open_heat,
+                state.reserved_heat,
+                state.unknown_heat,
+            )
             components.append(
                 DurableExposureComponent(
                     risk_reservation_id=reservation.risk_reservation_id,
@@ -174,9 +236,9 @@ class DurableExposureSnapshotService:
                 )
             )
             if campaign_id is not None and reservation.campaign_id == campaign_id:
-                campaign_open += state.open_heat * base_heat_ratio
-                campaign_reserved += state.reserved_heat * base_heat_ratio
-                campaign_unknown += state.unknown_heat * base_heat_ratio
+                campaign_open += base_open_heat
+                campaign_reserved += base_reserved_heat
+                campaign_unknown += base_unknown_heat
                 campaign_protected_profit_giveback += active_protected_profit_giveback
                 campaign_cost_stress_add_on += active_cost_stress_add_on
             global_unknown += state.unknown_heat
@@ -189,8 +251,16 @@ class DurableExposureSnapshotService:
                 continue
             for allocation in reservation.scope_allocations:
                 key = (str(allocation["scope_type"]), str(allocation["scope_id"]))
-                scope_planned[key] += Decimal(str(allocation["planned_loss"])) * active_ratio
-                scope_stress[key] += Decimal(str(allocation["stress_loss"])) * active_ratio
+                scope_planned[key] += _proportional_amount(
+                    Decimal(str(allocation["planned_loss"])),
+                    active_heat,
+                    state.total_heat,
+                )
+                scope_stress[key] += _proportional_amount(
+                    Decimal(str(allocation["stress_loss"])),
+                    active_heat,
+                    state.total_heat,
+                )
 
         remaining_margin = max(
             ZERO,

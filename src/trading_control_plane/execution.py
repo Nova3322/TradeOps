@@ -444,7 +444,8 @@ class DurableExposureResolver:
 
 
 class ExecutionIntentService:
-    command_type = "execution.intent.create.v1"
+    command_type = "execution.intent.create.v2"
+    payload_schema_version = 2
 
     def __init__(
         self,
@@ -632,7 +633,7 @@ class ExecutionIntentService:
                 "FROZEN_FUNDING_ENVELOPE_EXCEEDED",
             )
 
-        reserved_heat = request.risk_request.requested.incremental_worst_case_loss
+        reserved_heat = request.risk_request.incremental_worst_case_loss
         if (
             request.risk_request.current_trade_loss.total + reserved_heat
             > authorization.authorized_loss_capacity
@@ -800,7 +801,7 @@ class ExecutionIntentService:
             {
                 "scope_type": scope.scope_type.value,
                 "scope_id": scope.scope_id,
-                "planned_loss": str(scope.requested_incremental_planned_loss),
+                "planned_loss": str(request.risk_request.incremental_worst_case_loss),
                 "stress_loss": str(scope.requested_incremental_stress_loss),
             }
             for scope in sorted(
@@ -810,7 +811,7 @@ class ExecutionIntentService:
         ]
         funding = request.risk_request.requested.requested_funding
         margin = request.risk_request.requested.requested_margin
-        base_heat = request.risk_request.requested.requested_reserved_heat
+        base_heat = request.risk_request.requested_base_heat
         protected_profit_giveback = (
             request.risk_request.requested.requested_protected_profit_giveback
         )
@@ -968,6 +969,11 @@ class ExecutionIntentService:
     def _require_internal(envelope: CommandEnvelope) -> None:
         if envelope.command_type != ExecutionIntentService.command_type:
             raise CommandRejected("COMMAND_TYPE_MISMATCH", "unexpected command type")
+        if envelope.payload_schema_version != ExecutionIntentService.payload_schema_version:
+            raise CommandRejected(
+                "PAYLOAD_SCHEMA_VERSION_MISMATCH",
+                "execution intent payload schema version is unsupported",
+            )
         if (
             envelope.channel is not CommandChannel.INTERNAL
             or envelope.service_principal != EXECUTION_INTENT_SERVICE_PRINCIPAL

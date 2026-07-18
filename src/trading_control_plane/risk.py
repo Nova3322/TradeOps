@@ -5,7 +5,7 @@ from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from decimal import ROUND_FLOOR, Decimal
 from enum import StrEnum
-from typing import Self
+from typing import Literal, Self
 from uuid import UUID, uuid4
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
@@ -55,6 +55,7 @@ from trading_control_plane.risk_models import (
 ZERO = Decimal("0")
 ONE = Decimal("1")
 ONE_R_FRACTION = Decimal("0.005")
+CANONICAL_LOSS_MODEL_VERSION = "directional-entry-to-invalidation-v1"
 
 
 class RiskDecisionResult(StrEnum):
@@ -273,7 +274,7 @@ class MarketRiskInput(BaseModel):
     funding_rate: Decimal
     max_slippage_bps: Decimal = Field(ge=0)
     contract_rules_version: str = Field(min_length=1, max_length=120)
-    loss_model_version: str = Field(min_length=1, max_length=120)
+    loss_model_version: Literal["directional-entry-to-invalidation-v1"]
     loss_calculation_ref: str = Field(min_length=1, max_length=255)
 
 
@@ -346,11 +347,10 @@ class TradeLossComponents(BaseModel):
 
 
 class RequestedRiskIncrease(BaseModel):
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
     requested_quantity: Decimal = Field(gt=0)
     quantity_step: Decimal = Field(gt=0)
-    requested_reserved_heat: Decimal = Field(gt=0)
     requested_protected_profit_giveback: Decimal = Field(ge=0)
     requested_cost_stress_add_on: Decimal = Field(ge=0)
     requested_funding: Decimal = Field(ge=0)
@@ -359,22 +359,13 @@ class RequestedRiskIncrease(BaseModel):
     venue_leverage_cap: Decimal = Field(gt=0)
     proposal_requested_loss_cap: Decimal = Field(gt=0)
 
-    @property
-    def incremental_worst_case_loss(self) -> Decimal:
-        return (
-            self.requested_reserved_heat
-            + self.requested_protected_profit_giveback
-            + self.requested_cost_stress_add_on
-        )
-
 
 class ScopeRiskInput(BaseModel):
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
     scope_type: ScopeType
     scope_id: str = Field(min_length=1, max_length=255)
     current_planned_loss: Decimal = Field(ge=0)
-    requested_incremental_planned_loss: Decimal = Field(ge=0)
     current_stress_loss: Decimal = Field(ge=0)
     requested_incremental_stress_loss: Decimal = Field(ge=0)
 
@@ -435,7 +426,32 @@ class RiskPrecheckRequest(BaseModel):
             raise ValueError("scope risk inputs must be unique")
         if frozenset(item.scope_type for item in self.scope_risks) != REQUIRED_SCOPE_TYPES:
             raise ValueError("scope risk inputs must cover every required scope type")
+        if self.market.contract_multiplier != self.binding.contract_multiplier:
+            raise ValueError("market contract multiplier must match the certified binding")
+        if any(
+            item.requested_incremental_stress_loss < self.incremental_worst_case_loss
+            for item in self.scope_risks
+        ):
+            raise ValueError("scope stress loss cannot be below canonical planned loss")
         return self
+
+    @property
+    def requested_base_heat(self) -> Decimal:
+        """Canonical directional loss from executable entry to frozen invalidation."""
+
+        return (
+            abs(self.market.executable_price - self.market.initial_invalidation_price)
+            * self.requested.requested_quantity
+            * self.binding.contract_multiplier
+        )
+
+    @property
+    def incremental_worst_case_loss(self) -> Decimal:
+        return (
+            self.requested_base_heat
+            + self.requested.requested_protected_profit_giveback
+            + self.requested.requested_cost_stress_add_on
+        )
 
 
 class RiskEvaluationInput(BaseModel):
@@ -491,6 +507,9 @@ class RiskEvaluationResult(BaseModel):
     effective_trade_loss_cap: Decimal
     trade_worst_case_loss_before: Decimal
     trade_worst_case_loss_after: Decimal
+    requested_base_heat: Decimal
+    requested_protected_profit_giveback: Decimal
+    requested_cost_stress_add_on: Decimal
     funding_envelope_0: Decimal
     funding_after: Decimal
     leverage_cap: Decimal
@@ -911,7 +930,7 @@ class RiskEvaluator:
         effective_trade_cap = min(trade_caps)
 
         current_trade_loss = request.current_trade_loss.total
-        incremental_trade_loss = request.requested.incremental_worst_case_loss
+        incremental_trade_loss = request.incremental_worst_case_loss
         trade_loss_after = current_trade_loss + incremental_trade_loss
         trade_ratio = _capacity_ratio(
             effective_trade_cap,
@@ -978,9 +997,7 @@ class RiskEvaluator:
                     ScopeRiskDecision(
                         scope_type=scope.scope_type,
                         scope_id=scope.scope_id,
-                        planned_loss_after=(
-                            scope.current_planned_loss + scope.requested_incremental_planned_loss
-                        ),
+                        planned_loss_after=(scope.current_planned_loss + incremental_trade_loss),
                         planned_loss_cap=ZERO,
                         stress_loss_after=(
                             scope.current_stress_loss + scope.requested_incremental_stress_loss
@@ -992,12 +1009,12 @@ class RiskEvaluator:
                 )
                 continue
 
-            planned_after = scope.current_planned_loss + scope.requested_incremental_planned_loss
+            planned_after = scope.current_planned_loss + incremental_trade_loss
             stress_after = scope.current_stress_loss + scope.requested_incremental_stress_loss
             planned_ratio = _capacity_ratio(
                 limit.planned_loss_cap,
                 scope.current_planned_loss,
-                scope.requested_incremental_planned_loss,
+                incremental_trade_loss,
             )
             stress_ratio = _capacity_ratio(
                 limit.stress_loss_cap,
@@ -1057,6 +1074,11 @@ class RiskEvaluator:
             effective_trade_loss_cap=effective_trade_cap,
             trade_worst_case_loss_before=current_trade_loss,
             trade_worst_case_loss_after=trade_loss_after,
+            requested_base_heat=request.requested_base_heat,
+            requested_protected_profit_giveback=(
+                request.requested.requested_protected_profit_giveback
+            ),
+            requested_cost_stress_add_on=request.requested.requested_cost_stress_add_on,
             funding_envelope_0=funding_envelope,
             funding_after=funding_after,
             leverage_cap=leverage_cap,
@@ -1070,7 +1092,8 @@ class RiskEvaluator:
 class RiskPrecheckService:
     """Persists one immutable shadow precheck and emits audit/outbox evidence."""
 
-    command_type = "risk.precheck.evaluate.v1"
+    command_type = "risk.precheck.evaluate.v2"
+    payload_schema_version = 2
 
     def __init__(
         self,
@@ -1094,6 +1117,11 @@ class RiskPrecheckService:
         started = time.monotonic()
         if envelope.command_type != self.command_type:
             raise CommandRejected("COMMAND_TYPE_MISMATCH", "unexpected command type")
+        if envelope.payload_schema_version != self.payload_schema_version:
+            raise CommandRejected(
+                "PAYLOAD_SCHEMA_VERSION_MISMATCH",
+                "risk precheck payload schema version is unsupported",
+            )
         if envelope.channel is not CommandChannel.INTERNAL or envelope.service_principal is None:
             raise CommandRejected(
                 "INTERNAL_SERVICE_REQUIRED",
