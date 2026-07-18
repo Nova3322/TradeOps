@@ -18,6 +18,7 @@ from tests.integration.test_execution_fact_binding import (
     finish_run,
     prepare_bound_request,
     prepare_filled_intent,
+    prepare_position_reconciled_intent,
 )
 from tests.sender_fencing_fixtures import (
     acquire_envelope,
@@ -267,6 +268,94 @@ def test_successor_lease_reconciles_canonical_position_for_original_claim(
         current_state = session.execute(select(ExecutionSenderScopeState)).scalar_one()
         assert position_fact.shadow_dispatch_claim_id == original_claim.claim_id
         assert position_fact.venue_position_snapshot_id == request.venue_position_snapshot_id
+        assert run.lease_id == successor_lease_id
+        assert current_state.active_lease_id == successor_lease_id
+    finish_run(database, run.run_id, now=request.received_at + timedelta(milliseconds=1))
+
+
+def test_successor_lease_confirms_canonical_protection_for_original_claim(
+    database: Database,
+) -> None:
+    order_intent_id, position_request = prepare_position_reconciled_intent(database)
+    with database.session_factory.begin() as session:
+        original_claim = session.get(ShadowDispatchClaim, position_request.shadow_dispatch_claim_id)
+        sender_state = session.execute(select(ExecutionSenderScopeState)).scalar_one()
+        assert original_claim is not None
+
+    scope = make_sender_scope()
+    fenced_at = position_request.received_at + timedelta(milliseconds=2)
+    fenced = execute_tighten(
+        database,
+        tighten_envelope(
+            scope,
+            action=SenderLeaseAction.FENCE,
+            now=fenced_at,
+            expected_version=sender_state.version,
+            lease_id=original_claim.lease_id,
+            fencing_token=original_claim.fencing_token,
+        ),
+        now=fenced_at,
+    )
+    assert fenced.status is CommandStatus.COMPLETED
+
+    successor_lease_id = uuid4()
+    reacquired_at = fenced_at + timedelta(milliseconds=1)
+    successor = execute_acquire(
+        database,
+        acquire_envelope(
+            scope,
+            now=reacquired_at,
+            lease_id=successor_lease_id,
+            expected_version=fenced.object_version,
+            ttl_seconds=300,
+            max_lifetime_seconds=600,
+        ),
+        now=reacquired_at,
+    )
+    assert successor.status is CommandStatus.COMPLETED
+
+    protection_draft = fact_request(
+        sequence=3,
+        status="PROTECTION_CONFIRMED",
+        filled=Decimal("0.5"),
+        remaining=Decimal("0"),
+        terminal=True,
+        reconciled=True,
+        protected=True,
+    )
+    claim, run, reconciliation_input, event_time, canonical_context = prepare_active_fact_run(
+        database,
+        order_intent_id,
+        ReconciliationSourceType.VENUE_PROTECTION,
+        now=reacquired_at + timedelta(milliseconds=1),
+        draft=protection_draft,
+    )
+    assert canonical_context is not None
+    request = bind_fact_request(
+        protection_draft,
+        claim,
+        run,
+        reconciliation_input,
+        event_time=event_time,
+        received_at=canonical_context.input_link.received_at,
+        canonical_context=canonical_context,
+    )
+
+    result = execute_bound_fact(database, order_intent_id, request)
+    replay = execute_bound_fact(database, order_intent_id, request)
+
+    assert result.status is CommandStatus.COMPLETED
+    assert result.data["authority_mode"] == "SUCCESSOR_LEASE"
+    assert replay.status is CommandStatus.COMPLETED
+    assert replay.data["already_recorded"] is True
+    assert replay.data["authority_mode"] == "SUCCESSOR_LEASE"
+    with database.session_factory.begin() as session:
+        protection_fact = session.execute(
+            select(ExecutionFact).where(ExecutionFact.fact_kind == "VENUE_PROTECTION")
+        ).scalar_one()
+        current_state = session.execute(select(ExecutionSenderScopeState)).scalar_one()
+        assert protection_fact.shadow_dispatch_claim_id == original_claim.claim_id
+        assert protection_fact.venue_protection_snapshot_id == request.venue_protection_snapshot_id
         assert run.lease_id == successor_lease_id
         assert current_state.active_lease_id == successor_lease_id
     finish_run(database, run.run_id, now=request.received_at + timedelta(milliseconds=1))

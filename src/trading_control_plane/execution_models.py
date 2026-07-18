@@ -538,7 +538,7 @@ class ExecutionFact(Base):
             name="ck_execution_facts_hashes",
         ),
         CheckConstraint(
-            "fact_contract_version IN (1, 2, 3, 4)",
+            "fact_contract_version IN (1, 2, 3, 4, 5)",
             name="ck_execution_facts_contract_version",
         ),
         CheckConstraint(
@@ -548,6 +548,7 @@ class ExecutionFact(Base):
             "AND reconciliation_run_hash IS NULL AND reconciliation_input_hash IS NULL "
             "AND dispatch_claim_hash IS NULL AND venue_order_observation_id IS NULL "
             "AND venue_fill_id IS NULL AND venue_position_snapshot_id IS NULL "
+            "AND venue_protection_snapshot_id IS NULL "
             "AND venue_fact_input_link_id IS NULL "
             "AND venue_fact_hash IS NULL AND canonical_venue_order_id IS NULL) OR "
             "(fact_contract_version = 2 "
@@ -564,6 +565,7 @@ class ExecutionFact(Base):
             "AND reconciliation_run_ref IS NULL "
             "AND venue_order_observation_id IS NULL AND venue_fill_id IS NULL "
             "AND venue_position_snapshot_id IS NULL "
+            "AND venue_protection_snapshot_id IS NULL "
             "AND venue_fact_input_link_id IS NULL AND venue_fact_hash IS NULL "
             "AND canonical_venue_order_id IS NULL) OR "
             "(fact_contract_version = 3 "
@@ -579,15 +581,18 @@ class ExecutionFact(Base):
             "AND length(dispatch_claim_hash) = 64 AND reconciliation_run_ref IS NULL "
             "AND ((fact_kind = 'VENUE_ORDER' AND venue_order_observation_id IS NOT NULL "
             "AND venue_fill_id IS NULL AND venue_position_snapshot_id IS NULL "
+            "AND venue_protection_snapshot_id IS NULL "
             "AND venue_fact_input_link_id IS NOT NULL "
             "AND length(venue_fact_hash) = 64 AND canonical_venue_order_id IS NOT NULL) OR "
             "(fact_kind = 'VENUE_FILL' AND venue_order_observation_id IS NULL "
             "AND venue_fill_id IS NOT NULL AND venue_position_snapshot_id IS NULL "
+            "AND venue_protection_snapshot_id IS NULL "
             "AND venue_fact_input_link_id IS NOT NULL "
             "AND length(venue_fact_hash) = 64 AND canonical_venue_order_id IS NOT NULL) OR "
             "(fact_kind NOT IN ('VENUE_ORDER', 'VENUE_FILL') "
             "AND venue_order_observation_id IS NULL AND venue_fill_id IS NULL "
             "AND venue_position_snapshot_id IS NULL "
+            "AND venue_protection_snapshot_id IS NULL "
             "AND venue_fact_input_link_id IS NULL AND venue_fact_hash IS NULL "
             "AND canonical_venue_order_id IS NULL))) OR "
             "(fact_contract_version = 4 "
@@ -603,20 +608,63 @@ class ExecutionFact(Base):
             "AND length(dispatch_claim_hash) = 64 AND reconciliation_run_ref IS NULL "
             "AND ((fact_kind = 'VENUE_ORDER' AND venue_order_observation_id IS NOT NULL "
             "AND venue_fill_id IS NULL AND venue_position_snapshot_id IS NULL "
+            "AND venue_protection_snapshot_id IS NULL "
             "AND venue_fact_input_link_id IS NOT NULL "
             "AND length(venue_fact_hash) = 64 AND canonical_venue_order_id IS NOT NULL) OR "
             "(fact_kind = 'VENUE_FILL' AND venue_order_observation_id IS NULL "
             "AND venue_fill_id IS NOT NULL AND venue_position_snapshot_id IS NULL "
+            "AND venue_protection_snapshot_id IS NULL "
             "AND venue_fact_input_link_id IS NOT NULL "
             "AND length(venue_fact_hash) = 64 AND canonical_venue_order_id IS NOT NULL) OR "
             "(fact_kind = 'VENUE_POSITION' AND venue_order_observation_id IS NULL "
             "AND venue_fill_id IS NULL AND venue_position_snapshot_id IS NOT NULL "
+            "AND venue_protection_snapshot_id IS NULL "
             "AND venue_fact_input_link_id IS NOT NULL AND length(venue_fact_hash) = 64 "
             "AND canonical_venue_order_id IS NULL) OR "
             "(fact_kind NOT IN ('VENUE_ORDER', 'VENUE_FILL', 'VENUE_POSITION') "
             "AND venue_order_observation_id IS NULL AND venue_fill_id IS NULL "
-            "AND venue_position_snapshot_id IS NULL AND venue_fact_input_link_id IS NULL "
-            "AND venue_fact_hash IS NULL AND canonical_venue_order_id IS NULL)))",
+            "AND venue_position_snapshot_id IS NULL "
+            "AND venue_protection_snapshot_id IS NULL "
+            "AND venue_fact_input_link_id IS NULL "
+            "AND venue_fact_hash IS NULL AND canonical_venue_order_id IS NULL))) OR "
+            "(fact_contract_version = 5 "
+            "AND fact_kind IN ('WORKER_RECEIPT', 'VENUE_ORDER', 'VENUE_FILL', "
+            "'VENUE_POSITION', 'VENUE_PROTECTION') "
+            "AND shadow_dispatch_claim_id IS NOT NULL AND reconciliation_run_id IS NOT NULL "
+            "AND reconciliation_input_id IS NOT NULL "
+            "AND reconciliation_source_type IN ('TRADING_LEDGER', 'VENUE_ORDERS', "
+            "'VENUE_FILLS', 'VENUE_POSITIONS', 'VENUE_BALANCES', "
+            "'VENUE_PROTECTION', 'WORKER_LOCAL') "
+            "AND length(reconciliation_run_hash) = 64 "
+            "AND length(reconciliation_input_hash) = 64 "
+            "AND length(dispatch_claim_hash) = 64 AND reconciliation_run_ref IS NULL "
+            "AND ((fact_kind = 'VENUE_ORDER' AND venue_order_observation_id IS NOT NULL "
+            "AND venue_fill_id IS NULL AND venue_position_snapshot_id IS NULL "
+            "AND venue_protection_snapshot_id IS NULL "
+            "AND venue_fact_input_link_id IS NOT NULL "
+            "AND length(venue_fact_hash) = 64 AND canonical_venue_order_id IS NOT NULL) OR "
+            "(fact_kind = 'VENUE_FILL' AND venue_order_observation_id IS NULL "
+            "AND venue_fill_id IS NOT NULL AND venue_position_snapshot_id IS NULL "
+            "AND venue_protection_snapshot_id IS NULL "
+            "AND venue_fact_input_link_id IS NOT NULL "
+            "AND length(venue_fact_hash) = 64 AND canonical_venue_order_id IS NOT NULL) OR "
+            "(fact_kind = 'VENUE_POSITION' AND venue_order_observation_id IS NULL "
+            "AND venue_fill_id IS NULL AND venue_position_snapshot_id IS NOT NULL "
+            "AND venue_protection_snapshot_id IS NULL "
+            "AND venue_fact_input_link_id IS NOT NULL AND length(venue_fact_hash) = 64 "
+            "AND canonical_venue_order_id IS NULL) OR "
+            "(fact_kind = 'VENUE_PROTECTION' AND venue_order_observation_id IS NULL "
+            "AND venue_fill_id IS NULL AND venue_position_snapshot_id IS NULL "
+            "AND venue_protection_snapshot_id IS NOT NULL "
+            "AND venue_fact_input_link_id IS NOT NULL AND length(venue_fact_hash) = 64 "
+            "AND canonical_venue_order_id IS NULL) OR "
+            "(fact_kind NOT IN ("
+            "'VENUE_ORDER', 'VENUE_FILL', 'VENUE_POSITION', 'VENUE_PROTECTION') "
+            "AND venue_order_observation_id IS NULL AND venue_fill_id IS NULL "
+            "AND venue_position_snapshot_id IS NULL "
+            "AND venue_protection_snapshot_id IS NULL "
+            "AND venue_fact_input_link_id IS NULL AND venue_fact_hash IS NULL "
+            "AND canonical_venue_order_id IS NULL)))",
             name="ck_execution_facts_reconciled_binding",
         ),
         UniqueConstraint(
@@ -636,6 +684,10 @@ class ExecutionFact(Base):
         UniqueConstraint("venue_fill_id", name="uq_execution_facts_venue_fill"),
         UniqueConstraint(
             "venue_position_snapshot_id", name="uq_execution_facts_venue_position_snapshot"
+        ),
+        UniqueConstraint(
+            "venue_protection_snapshot_id",
+            name="uq_execution_facts_venue_protection_snapshot",
         ),
         UniqueConstraint(
             "venue_fact_input_link_id", name="uq_execution_facts_venue_fact_input_link"
@@ -689,6 +741,10 @@ class ExecutionFact(Base):
     )
     venue_position_snapshot_id: Mapped[UUID | None] = mapped_column(
         ForeignKey("venue_position_snapshots.venue_position_snapshot_id", ondelete="RESTRICT"),
+        nullable=True,
+    )
+    venue_protection_snapshot_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("venue_protection_snapshots.venue_protection_snapshot_id", ondelete="RESTRICT"),
         nullable=True,
     )
     venue_fact_input_link_id: Mapped[UUID | None] = mapped_column(
