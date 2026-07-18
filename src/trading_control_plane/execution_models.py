@@ -362,6 +362,11 @@ class RiskReservation(Base):
         CheckConstraint("intent_kind IN ('INITIAL', 'ADD')", name="ck_risk_reservations_kind"),
         CheckConstraint(
             "reserved_quantity > 0 AND reserved_heat > 0 "
+            "AND base_heat_reserved > 0 "
+            "AND protected_profit_giveback_reserved >= 0 "
+            "AND cost_stress_add_on_reserved >= 0 "
+            "AND reserved_heat = base_heat_reserved "
+            "+ protected_profit_giveback_reserved + cost_stress_add_on_reserved "
             "AND funding_reserved >= 0 AND margin_reserved >= 0",
             name="ck_risk_reservations_amounts",
         ),
@@ -418,6 +423,11 @@ class RiskReservation(Base):
     valuation_price_source_ref: Mapped[str] = mapped_column(String(255), nullable=False)
     reserved_quantity: Mapped[Decimal] = mapped_column(Numeric(38, 18), nullable=False)
     reserved_heat: Mapped[Decimal] = mapped_column(Numeric(38, 18), nullable=False)
+    base_heat_reserved: Mapped[Decimal] = mapped_column(Numeric(38, 18), nullable=False)
+    protected_profit_giveback_reserved: Mapped[Decimal] = mapped_column(
+        Numeric(38, 18), nullable=False
+    )
+    cost_stress_add_on_reserved: Mapped[Decimal] = mapped_column(Numeric(38, 18), nullable=False)
     funding_reserved: Mapped[Decimal] = mapped_column(Numeric(38, 18), nullable=False)
     margin_reserved: Mapped[Decimal] = mapped_column(Numeric(38, 18), nullable=False)
     scope_allocations: Mapped[list[dict[str, Any]]] = mapped_column(JSONB, nullable=False)

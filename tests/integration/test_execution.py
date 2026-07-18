@@ -265,11 +265,14 @@ def execution_risk_request(
     now: datetime,
     quantity: Decimal = Decimal("0.5"),
     requested_heat: Decimal = Decimal("100"),
+    requested_giveback: Decimal = Decimal("0"),
     requested_cost: Decimal = Decimal("10"),
     requested_funding: Decimal = Decimal("500"),
     current_open_heat: Decimal = Decimal("0"),
     current_reserved_heat: Decimal = Decimal("0"),
     current_unknown_heat: Decimal = Decimal("0"),
+    current_protected_profit_giveback: Decimal = Decimal("0"),
+    current_cost_stress_add_on: Decimal = Decimal("0"),
     funding_used: Decimal = Decimal("0"),
     funding_reserved: Decimal = Decimal("0"),
     scope_current_planned: Decimal = Decimal("0"),
@@ -279,6 +282,7 @@ def execution_risk_request(
     requested = make_requested(
         requested_quantity=quantity,
         requested_reserved_heat=requested_heat,
+        requested_protected_profit_giveback=requested_giveback,
         requested_cost_stress_add_on=requested_cost,
         requested_funding=requested_funding,
         requested_margin=Decimal("500"),
@@ -304,8 +308,8 @@ def execution_risk_request(
             open_heat=current_open_heat,
             reserved_heat=current_reserved_heat,
             unknown_heat=current_unknown_heat,
-            protected_profit_giveback=Decimal("0"),
-            cost_stress_add_on=Decimal("0"),
+            protected_profit_giveback=current_protected_profit_giveback,
+            cost_stress_add_on=current_cost_stress_add_on,
         ),
         market=MarketRiskInput(
             direction=PositionDirection.LONG,
@@ -455,7 +459,8 @@ def create_add_envelope(
         requested_heat=Decimal("50"),
         requested_cost=Decimal("5"),
         requested_funding=Decimal("200"),
-        current_open_heat=Decimal("110"),
+        current_open_heat=Decimal("100"),
+        current_cost_stress_add_on=Decimal("10"),
         funding_used=Decimal("500"),
         scope_current_planned=Decimal("110"),
         scope_current_stress=Decimal("150"),
@@ -1178,6 +1183,10 @@ def test_initial_intent_atomically_persists_decision_reservation_ledger_and_hist
         assert decision.input_snapshot["durable_exposure_snapshot"]["components"] == []
         assert intent.dispatch_eligible is False
         assert reservation.order_intent_id == intent.order_intent_id
+        assert reservation.reserved_heat == Decimal("110")
+        assert reservation.base_heat_reserved == Decimal("100")
+        assert reservation.protected_profit_giveback_reserved == 0
+        assert reservation.cost_stress_add_on_reserved == Decimal("10")
         assert exposure.status == "RESERVED"
         assert exposure.total_heat == Decimal("110")
         assert count_rows(session, RiskLedgerEntry) == 1
@@ -1327,13 +1336,22 @@ def test_durable_exposure_snapshot_subtracts_internal_margin_reservations(
             initial,
             now=now,
             candidate_ref="durable-margin-source",
+            risk_request=execution_risk_request(
+                proposal,
+                now=now,
+                requested_heat=Decimal("90"),
+                requested_giveback=Decimal("10"),
+                requested_cost=Decimal("10"),
+            ),
         ),
     )
     assert created.status is CommandStatus.COMPLETED
     exact_risk = execution_risk_request(
         proposal,
         now=datetime.now(UTC),
-        current_reserved_heat=Decimal("110"),
+        current_reserved_heat=Decimal("90"),
+        current_protected_profit_giveback=Decimal("10"),
+        current_cost_stress_add_on=Decimal("10"),
         funding_reserved=Decimal("500"),
         scope_current_planned=Decimal("110"),
         scope_current_stress=Decimal("150"),
@@ -1353,7 +1371,15 @@ def test_durable_exposure_snapshot_subtracts_internal_margin_reservations(
         verified = DurableExposureResolver.resolve(session, exact_request, campaign)
 
     assert verified.risk_request.capital.available_margin == Decimal("9500")
+    assert verified.risk_request.current_trade_loss.reserved_heat == Decimal("90")
+    assert verified.risk_request.current_trade_loss.protected_profit_giveback == Decimal("10")
+    assert verified.risk_request.current_trade_loss.cost_stress_add_on == Decimal("10")
     assert verified.snapshot.global_margin_reserved == Decimal("500")
+    assert verified.snapshot.campaign_reserved_heat == Decimal("90")
+    assert verified.snapshot.campaign_protected_profit_giveback == Decimal("10")
+    assert verified.snapshot.campaign_cost_stress_add_on == Decimal("10")
+    assert verified.snapshot.snapshot_version == "durable-risk-exposure-v2"
+    assert verified.snapshot.components[0].base_heat_reserved == Decimal("90")
     assert verified.snapshot.available_margin_after_internal_reservations == Decimal("9500")
     assert len(verified.snapshot.components) == 1
     assert hash_json(verified.snapshot.model_dump(mode="json")) == verified.snapshot_hash
@@ -1436,7 +1462,8 @@ def test_durable_exposure_resolver_blocks_internal_margin_overcommit(database: D
     risk_request = execution_risk_request(
         proposal,
         now=datetime.now(UTC),
-        current_reserved_heat=Decimal("110"),
+        current_reserved_heat=Decimal("100"),
+        current_cost_stress_add_on=Decimal("10"),
         funding_reserved=Decimal("500"),
         scope_current_planned=Decimal("110"),
         scope_current_stress=Decimal("150"),
@@ -1653,6 +1680,31 @@ def test_partial_fill_then_canonical_cancel_releases_only_unfilled_quantity(
         assert [fact.fact_kind for fact in facts] == ["VENUE_FILL", "VENUE_ORDER"]
         assert all(fact.fact_contract_version == 5 for fact in facts)
         assert facts[0].canonical_venue_order_id == facts[1].canonical_venue_order_id
+
+    current = execution_risk_request(
+        proposal,
+        now=datetime.now(UTC),
+        current_open_heat=Decimal("40"),
+        current_cost_stress_add_on=Decimal("4"),
+        funding_used=Decimal("200"),
+        scope_current_planned=Decimal("44"),
+        scope_current_stress=Decimal("60"),
+    )
+    request = CreateExecutionIntentRequest.model_validate(
+        create_intent_envelope(
+            proposal,
+            campaign,
+            initial,
+            now=datetime.now(UTC),
+            candidate_ref="partial-release-loss-components",
+            risk_request=current,
+        ).payload
+    )
+    with database.session_factory.begin() as session:
+        verified = DurableExposureResolver.resolve(session, request, campaign)
+    assert verified.risk_request.current_trade_loss.open_heat == Decimal("40")
+    assert verified.risk_request.current_trade_loss.cost_stress_add_on == Decimal("4")
+    assert verified.risk_request.current_trade_loss.total == Decimal("44")
 
 
 def test_terminal_zero_fill_releases_risk_and_allows_new_initial_candidate(

@@ -8,6 +8,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select, text
 from sqlalchemy.orm import Session
 
+from trading_control_plane.commands import CommandRejected
 from trading_control_plane.execution_models import (
     RiskExposureState,
     RiskReservation,
@@ -26,6 +27,12 @@ class DurableExposureComponent(BaseModel):
     state_version: int = Field(ge=1)
     ledger_sequence: int = Field(ge=1)
     active_ratio: Decimal = Field(ge=0, le=1)
+    total_heat: Decimal = Field(gt=0)
+    base_heat_reserved: Decimal = Field(gt=0)
+    protected_profit_giveback_reserved: Decimal = Field(ge=0)
+    cost_stress_add_on_reserved: Decimal = Field(ge=0)
+    active_protected_profit_giveback: Decimal = Field(ge=0)
+    active_cost_stress_add_on: Decimal = Field(ge=0)
     open_heat: Decimal = Field(ge=0)
     reserved_heat: Decimal = Field(ge=0)
     unknown_heat: Decimal = Field(ge=0)
@@ -60,6 +67,8 @@ class DurableExposureSnapshot(BaseModel):
     campaign_open_heat: Decimal = Field(ge=0)
     campaign_reserved_heat: Decimal = Field(ge=0)
     campaign_unknown_heat: Decimal = Field(ge=0)
+    campaign_protected_profit_giveback: Decimal = Field(ge=0)
+    campaign_cost_stress_add_on: Decimal = Field(ge=0)
     global_unknown_heat: Decimal = Field(ge=0)
     global_funding_used: Decimal = Field(ge=0)
     global_funding_reserved: Decimal = Field(ge=0)
@@ -111,6 +120,8 @@ class DurableExposureSnapshotService:
         campaign_open = ZERO
         campaign_reserved = ZERO
         campaign_unknown = ZERO
+        campaign_protected_profit_giveback = ZERO
+        campaign_cost_stress_add_on = ZERO
         global_unknown = ZERO
         global_funding_used = ZERO
         global_funding_reserved = ZERO
@@ -121,8 +132,18 @@ class DurableExposureSnapshotService:
         scope_stress: defaultdict[tuple[str, str], Decimal] = defaultdict(lambda: ZERO)
         components: list[DurableExposureComponent] = []
         for reservation, state in rows:
+            if state.total_heat != reservation.reserved_heat:
+                raise CommandRejected(
+                    "DURABLE_EXPOSURE_INTEGRITY_FAILED",
+                    "reservation and exposure total Heat differ",
+                )
             active_heat = state.open_heat + state.reserved_heat + state.unknown_heat
-            ratio = active_heat / state.total_heat if active_heat > ZERO else ZERO
+            active_ratio = active_heat / state.total_heat if active_heat > ZERO else ZERO
+            base_heat_ratio = reservation.base_heat_reserved / reservation.reserved_heat
+            active_protected_profit_giveback = (
+                reservation.protected_profit_giveback_reserved * active_ratio
+            )
+            active_cost_stress_add_on = reservation.cost_stress_add_on_reserved * active_ratio
             components.append(
                 DurableExposureComponent(
                     risk_reservation_id=reservation.risk_reservation_id,
@@ -131,7 +152,15 @@ class DurableExposureSnapshotService:
                     status=state.status,
                     state_version=state.version,
                     ledger_sequence=state.ledger_sequence,
-                    active_ratio=ratio,
+                    active_ratio=active_ratio,
+                    total_heat=state.total_heat,
+                    base_heat_reserved=reservation.base_heat_reserved,
+                    protected_profit_giveback_reserved=(
+                        reservation.protected_profit_giveback_reserved
+                    ),
+                    cost_stress_add_on_reserved=reservation.cost_stress_add_on_reserved,
+                    active_protected_profit_giveback=active_protected_profit_giveback,
+                    active_cost_stress_add_on=active_cost_stress_add_on,
                     open_heat=state.open_heat,
                     reserved_heat=state.reserved_heat,
                     unknown_heat=state.unknown_heat,
@@ -145,9 +174,11 @@ class DurableExposureSnapshotService:
                 )
             )
             if campaign_id is not None and reservation.campaign_id == campaign_id:
-                campaign_open += state.open_heat
-                campaign_reserved += state.reserved_heat
-                campaign_unknown += state.unknown_heat
+                campaign_open += state.open_heat * base_heat_ratio
+                campaign_reserved += state.reserved_heat * base_heat_ratio
+                campaign_unknown += state.unknown_heat * base_heat_ratio
+                campaign_protected_profit_giveback += active_protected_profit_giveback
+                campaign_cost_stress_add_on += active_cost_stress_add_on
             global_unknown += state.unknown_heat
             global_funding_used += state.funding_used
             global_funding_reserved += state.funding_reserved
@@ -158,8 +189,8 @@ class DurableExposureSnapshotService:
                 continue
             for allocation in reservation.scope_allocations:
                 key = (str(allocation["scope_type"]), str(allocation["scope_id"]))
-                scope_planned[key] += Decimal(str(allocation["planned_loss"])) * ratio
-                scope_stress[key] += Decimal(str(allocation["stress_loss"])) * ratio
+                scope_planned[key] += Decimal(str(allocation["planned_loss"])) * active_ratio
+                scope_stress[key] += Decimal(str(allocation["stress_loss"])) * active_ratio
 
         remaining_margin = max(
             ZERO,
@@ -181,6 +212,8 @@ class DurableExposureSnapshotService:
             campaign_open_heat=campaign_open,
             campaign_reserved_heat=campaign_reserved,
             campaign_unknown_heat=campaign_unknown,
+            campaign_protected_profit_giveback=campaign_protected_profit_giveback,
+            campaign_cost_stress_add_on=campaign_cost_stress_add_on,
             global_unknown_heat=global_unknown,
             global_funding_used=global_funding_used,
             global_funding_reserved=global_funding_reserved,
@@ -189,5 +222,5 @@ class DurableExposureSnapshotService:
             global_margin_unknown=global_margin_unknown,
             available_margin_after_internal_reservations=remaining_margin,
             scope_exposures=scope_exposures,
-            snapshot_version="durable-risk-exposure-v1",
+            snapshot_version="durable-risk-exposure-v2",
         )

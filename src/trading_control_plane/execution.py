@@ -383,8 +383,8 @@ class DurableExposureResolver:
             open_heat=snapshot.campaign_open_heat,
             reserved_heat=snapshot.campaign_reserved_heat,
             unknown_heat=snapshot.campaign_unknown_heat,
-            protected_profit_giveback=ZERO,
-            cost_stress_add_on=ZERO,
+            protected_profit_giveback=snapshot.campaign_protected_profit_giveback,
+            cost_stress_add_on=snapshot.campaign_cost_stress_add_on,
         )
         derived_scope_by_key = {item.key: item for item in snapshot.scope_exposures}
         derived_scope_risks = tuple(
@@ -810,6 +810,11 @@ class ExecutionIntentService:
         ]
         funding = request.risk_request.requested.requested_funding
         margin = request.risk_request.requested.requested_margin
+        base_heat = request.risk_request.requested.requested_reserved_heat
+        protected_profit_giveback = (
+            request.risk_request.requested.requested_protected_profit_giveback
+        )
+        cost_stress_add_on = request.risk_request.requested.requested_cost_stress_add_on
         reservation = RiskReservation(
             risk_reservation_id=risk_reservation_id,
             execution_risk_decision_id=decision_id,
@@ -829,6 +834,9 @@ class ExecutionIntentService:
             valuation_price_source_ref=request.valuation_price_source_ref,
             reserved_quantity=evaluation.requested_quantity,
             reserved_heat=reserved_heat,
+            base_heat_reserved=base_heat,
+            protected_profit_giveback_reserved=protected_profit_giveback,
+            cost_stress_add_on_reserved=cost_stress_add_on,
             funding_reserved=funding,
             margin_reserved=margin,
             scope_allocations=scope_allocations,
