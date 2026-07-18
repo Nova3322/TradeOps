@@ -5,7 +5,9 @@ from decimal import Decimal
 from uuid import UUID, uuid4
 
 import pytest
-from sqlalchemy import func, select, update
+from alembic import command
+from alembic.config import Config
+from sqlalchemy import func, select, text, update
 from sqlalchemy.exc import DBAPIError
 
 from tests.reconciliation_fixtures import (
@@ -29,6 +31,7 @@ from tests.venue_fact_fixtures import (
     protection_snapshot_request,
     venue_fact_envelope,
 )
+from trading_control_plane.command_executor import IdempotentCommandExecutor
 from trading_control_plane.commands import CommandStatus, hash_json
 from trading_control_plane.database import Database
 from trading_control_plane.reconciliation import (
@@ -231,6 +234,7 @@ def _prepare_protection_run(
     database: Database,
     *,
     protection_count: int,
+    position_updates: dict[str, object] | None = None,
 ) -> tuple[
     UUID,
     UUID,
@@ -249,6 +253,7 @@ def _prepare_protection_run(
         position_run_id,
         inputs[ReconciliationSourceType.VENUE_POSITIONS],
         now=normalized_at,
+        **(position_updates or {}),
     )
     assert position_result.status is CommandStatus.COMPLETED
     compared = execute_reconciliation(
@@ -1172,15 +1177,23 @@ def test_protection_states_are_canonical_immutable_and_unlock_manifest(
         assert confirmed_row.protection_state == "CONFIRMED"
         assert confirmed_row.covered_quantity == position.quantity
         assert confirmed_row.uncovered_quantity == 0
+        assert (
+            confirmed_row.worst_active_trigger_price == confirmed_request.worst_active_trigger_price
+        )
+        assert confirmed_row.normalized_payload["worst_active_trigger_price"] == str(
+            confirmed_request.worst_active_trigger_price
+        )
         assert confirmed_row.venue_native is True
         assert confirmed_row.reduce_only_confirmed is True
         assert degraded_row is not None
         assert degraded_row.protection_state == "DEGRADED"
         assert degraded_row.uncovered_quantity == Decimal("0.1")
+        assert degraded_row.worst_active_trigger_price is None
         assert unknown_row is not None
         assert unknown_row.protection_state == "UNKNOWN"
         assert unknown_row.position_quantity is None
         assert unknown_row.covered_quantity is None
+        assert unknown_row.worst_active_trigger_price is None
         assert (
             session.scalar(
                 select(func.count())
@@ -1197,8 +1210,119 @@ def test_protection_states_are_canonical_immutable_and_unlock_manifest(
                     VenueProtectionSnapshot.venue_protection_snapshot_id
                     == confirmed_request.venue_protection_snapshot_id
                 )
-                .values(covered_quantity=Decimal("0.1"))
+                .values(worst_active_trigger_price=Decimal("1"))
             )
+
+
+@pytest.mark.parametrize(
+    "direction",
+    [VenuePositionDirection.LONG, VenuePositionDirection.SHORT],
+)
+def test_protection_trigger_must_remain_on_protective_side_of_mark(
+    database: Database,
+    direction: VenuePositionDirection,
+) -> None:
+    run_id, _, _, run_time, protection_input, position = _prepare_protection_run(
+        database,
+        protection_count=1,
+        position_updates={"direction": direction},
+    )
+    assert position.mark_price is not None
+
+    _, result = _record_protection(
+        database,
+        run_id,
+        protection_input,
+        position,
+        now=run_time + timedelta(seconds=1),
+        worst_active_trigger_price=position.mark_price,
+    )
+
+    assert result.status is CommandStatus.REJECTED
+    assert result.error_code == "VENUE_PROTECTION_TRIGGER_PRICE_INVALID"
+    with database.session_factory.begin() as session:
+        assert session.scalar(select(func.count()).select_from(VenueProtectionSnapshot)) == 0
+
+
+def test_protection_snapshot_v2_rejects_legacy_command_and_schema(
+    database: Database,
+) -> None:
+    run_id, _, _, run_time, protection_input, position = _prepare_protection_run(
+        database,
+        protection_count=1,
+    )
+    normalized_at = run_time + timedelta(seconds=1)
+    request = protection_snapshot_request(
+        protection_input,
+        position,
+        now=normalized_at,
+    )
+    current = venue_fact_envelope(
+        run_id,
+        VenueFactNormalizationService.protection_command_type,
+        request.model_dump(mode="json"),
+        now=normalized_at,
+        idempotency_key="protection-current-wrong-schema",
+        payload_schema_version=1,
+    )
+    service = VenueFactNormalizationService(clock=lambda: normalized_at)
+    schema_result = IdempotentCommandExecutor(database.session_factory).execute(
+        current,
+        service.record_protection_snapshot,
+    )
+    legacy = current.model_copy(
+        update={
+            "command_id": uuid4(),
+            "idempotency_key": "protection-legacy-v1-command",
+            "command_type": "execution.venue-protection-snapshot.record.v1",
+        }
+    )
+    command_result = IdempotentCommandExecutor(database.session_factory).execute(
+        legacy,
+        service.record_protection_snapshot,
+    )
+
+    assert schema_result.status is CommandStatus.REJECTED
+    assert schema_result.error_code == "PAYLOAD_SCHEMA_VERSION_MISMATCH"
+    assert command_result.status is CommandStatus.REJECTED
+    assert command_result.error_code == "COMMAND_TYPE_MISMATCH"
+    with database.session_factory.begin() as session:
+        assert session.scalar(select(func.count()).select_from(VenueProtectionSnapshot)) == 0
+
+
+def test_protection_trigger_migration_round_trip_and_data_loss_guard(
+    database: Database,
+) -> None:
+    alembic_config = Config("alembic.ini")
+    command.downgrade(alembic_config, "20260718_0025")
+    with database.engine.connect() as connection:
+        assert connection.execute(text("SELECT version_num FROM alembic_version")).scalar_one() == (
+            "20260718_0025"
+        )
+    command.upgrade(alembic_config, "head")
+    assert database.is_ready() == (True, None)
+
+    run_id, _, _, run_time, protection_input, position = _prepare_protection_run(
+        database,
+        protection_count=1,
+    )
+    _, recorded = _record_protection(
+        database,
+        run_id,
+        protection_input,
+        position,
+        now=run_time + timedelta(seconds=1),
+    )
+    assert recorded.status is CommandStatus.COMPLETED
+
+    with pytest.raises(
+        DBAPIError,
+        match=(
+            "cannot remove canonical protection trigger prices while protection snapshots remain"
+        ),
+    ):
+        command.downgrade(alembic_config, "20260718_0025")
+    assert database.is_ready() == (True, None)
 
 
 def test_protection_snapshot_is_global_relinkable_and_conflicts_on_changed_semantics(
@@ -1379,6 +1503,7 @@ def test_direct_protection_snapshot_without_first_link_is_rolled_back(
         covered_quantity=request.covered_quantity,
         uncovered_quantity=request.uncovered_quantity,
         active_stop_order_count=request.active_stop_order_count,
+        worst_active_trigger_price=request.worst_active_trigger_price,
         venue_native=request.venue_native,
         reduce_only_confirmed=request.reduce_only_confirmed,
         replacement_in_progress=request.replacement_in_progress,
@@ -1400,6 +1525,16 @@ def test_direct_protection_snapshot_without_first_link_is_rolled_back(
         first_received_at=request.received_at,
         recorded_at=normalized_at,
     )
+    assert position.mark_price is not None
+    direct_snapshot.worst_active_trigger_price = position.mark_price
+    with pytest.raises(
+        DBAPIError,
+        match="canonical venue protection trigger price is invalid",
+    ):
+        with database.session_factory.begin() as session:
+            session.add(direct_snapshot)
+            session.flush()
+    direct_snapshot.worst_active_trigger_price = request.worst_active_trigger_price
     with pytest.raises(
         DBAPIError, match="canonical venue fact requires its first immutable input link"
     ):

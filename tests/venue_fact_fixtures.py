@@ -43,6 +43,7 @@ def venue_fact_envelope(
     *,
     now: datetime,
     idempotency_key: str | None = None,
+    payload_schema_version: int | None = None,
 ) -> CommandEnvelope:
     return CommandEnvelope(
         idempotency_key=idempotency_key or f"venue-fact-{uuid4()}",
@@ -57,7 +58,11 @@ def venue_fact_envelope(
         issued_at=now,
         expires_at=now + timedelta(minutes=2),
         auth_context_ref="test-only:venue-fact-normalizer",
-        payload_schema_version=1,
+        payload_schema_version=(
+            payload_schema_version
+            if payload_schema_version is not None
+            else (2 if command_type == VenueFactNormalizationService.protection_command_type else 1)
+        ),
         reason="normalize immutable private venue fact",
         payload=payload,
     )
@@ -350,6 +355,7 @@ def protection_snapshot_request(
     covered_quantity: Decimal | None = None,
     uncovered_quantity: Decimal | None = None,
     active_stop_order_count: int | None = None,
+    worst_active_trigger_price: Decimal | None = None,
     venue_native: bool | None = None,
     reduce_only_confirmed: bool | None = None,
     replacement_in_progress: bool | None = None,
@@ -359,6 +365,7 @@ def protection_snapshot_request(
     received_at: datetime | None = None,
 ) -> RecordVenueProtectionSnapshotRequest:
     observed_event = event_time or now - timedelta(seconds=2)
+    effective_trigger_price: Decimal | None
     if protection_state is VenueProtectionState.CONFIRMED:
         effective_direction = protected_direction or VenueProtectedDirection(
             position_snapshot.direction
@@ -371,6 +378,16 @@ def protection_snapshot_request(
         )
         effective_uncovered = uncovered_quantity if uncovered_quantity is not None else Decimal("0")
         effective_count = active_stop_order_count if active_stop_order_count is not None else 1
+        assert position_snapshot.mark_price is not None
+        effective_trigger_price = (
+            worst_active_trigger_price
+            if worst_active_trigger_price is not None
+            else (
+                position_snapshot.mark_price - Decimal("100")
+                if effective_direction is VenueProtectedDirection.LONG
+                else position_snapshot.mark_price + Decimal("100")
+            )
+        )
         effective_native = venue_native if venue_native is not None else True
         effective_reduce_only = reduce_only_confirmed if reduce_only_confirmed is not None else True
         effective_replacement = (
@@ -393,6 +410,7 @@ def protection_snapshot_request(
             else effective_position_quantity - effective_uncovered
         )
         effective_count = active_stop_order_count if active_stop_order_count is not None else 1
+        effective_trigger_price = worst_active_trigger_price
         effective_native = venue_native if venue_native is not None else True
         effective_reduce_only = reduce_only_confirmed if reduce_only_confirmed is not None else True
         effective_replacement = (
@@ -404,6 +422,7 @@ def protection_snapshot_request(
         effective_covered = None
         effective_uncovered = None
         effective_count = None
+        effective_trigger_price = None
         effective_native = False
         effective_reduce_only = False
         effective_replacement = False
@@ -428,6 +447,9 @@ def protection_snapshot_request(
             "venue_update_id": venue_update_id,
             "position_snapshot_id": str(position_snapshot.venue_position_snapshot_id),
             "protection_state": protection_state.value,
+            "worst_active_trigger_price": (
+                str(effective_trigger_price) if effective_trigger_price is not None else None
+            ),
             "order_set_hash": effective_order_set_hash,
         },
         "raw_payload_ref": f"test-only:raw-protection:{venue_update_id}",
@@ -449,6 +471,7 @@ def protection_snapshot_request(
         "covered_quantity": effective_covered,
         "uncovered_quantity": effective_uncovered,
         "active_stop_order_count": effective_count,
+        "worst_active_trigger_price": effective_trigger_price,
         "venue_native": effective_native,
         "reduce_only_confirmed": effective_reduce_only,
         "replacement_in_progress": effective_replacement,

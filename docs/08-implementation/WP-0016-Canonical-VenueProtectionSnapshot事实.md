@@ -1,5 +1,9 @@
 # WP-0016：Canonical VenueProtectionSnapshot 事实
 
+> 历史说明：WP-0028 已把命令升级为 v2，并为保护集合增加 hash 绑定的
+> `worst_active_trigger_price`。本文件以下内容保留 WP-0016 当时的 v1 交付边界；当前合同以
+> [WP-0028](WP-0028-Canonical保护触发价事实.md) 为准。
+
 ## 1. 交付目标
 
 WP-0016 建立交易所私有保护集合的唯一规范事实：`VenueProtectionSnapshot`。

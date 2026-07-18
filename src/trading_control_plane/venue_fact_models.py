@@ -562,6 +562,8 @@ class VenueProtectionSnapshot(Base):
             "AND protected_direction IN ('LONG', 'SHORT') "
             "AND position_quantity > 0 AND covered_quantity = position_quantity "
             "AND uncovered_quantity = 0 AND active_stop_order_count >= 1 "
+            "AND worst_active_trigger_price IS NOT NULL "
+            "AND worst_active_trigger_price > 0 "
             "AND venue_native AND reduce_only_confirmed AND NOT replacement_in_progress) OR "
             "(protection_state = 'DEGRADED' "
             "AND protected_direction IN ('LONG', 'SHORT') "
@@ -569,11 +571,13 @@ class VenueProtectionSnapshot(Base):
             "AND uncovered_quantity >= 0 "
             "AND covered_quantity + uncovered_quantity = position_quantity "
             "AND active_stop_order_count >= 0 "
+            "AND (worst_active_trigger_price IS NULL OR worst_active_trigger_price > 0) "
             "AND (uncovered_quantity > 0 OR active_stop_order_count = 0 "
             "OR NOT venue_native OR NOT reduce_only_confirmed OR replacement_in_progress)) OR "
             "(protection_state = 'UNKNOWN' AND protected_direction = 'UNKNOWN' "
             "AND position_quantity IS NULL AND covered_quantity IS NULL "
             "AND uncovered_quantity IS NULL AND active_stop_order_count IS NULL "
+            "AND worst_active_trigger_price IS NULL "
             "AND NOT venue_native AND NOT reduce_only_confirmed "
             "AND NOT replacement_in_progress)",
             name="ck_venue_protection_snapshots_coverage",
@@ -653,6 +657,9 @@ class VenueProtectionSnapshot(Base):
     covered_quantity: Mapped[Decimal | None] = mapped_column(Numeric(38, 18), nullable=True)
     uncovered_quantity: Mapped[Decimal | None] = mapped_column(Numeric(38, 18), nullable=True)
     active_stop_order_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    worst_active_trigger_price: Mapped[Decimal | None] = mapped_column(
+        Numeric(38, 18), nullable=True
+    )
     venue_native: Mapped[bool] = mapped_column(Boolean, nullable=False)
     reduce_only_confirmed: Mapped[bool] = mapped_column(Boolean, nullable=False)
     replacement_in_progress: Mapped[bool] = mapped_column(Boolean, nullable=False)

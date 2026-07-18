@@ -334,6 +334,7 @@ class RecordVenueProtectionSnapshotRequest(VenueFactCollectionBinding):
     covered_quantity: Decimal | None = None
     uncovered_quantity: Decimal | None = None
     active_stop_order_count: int | None = Field(default=None, ge=0)
+    worst_active_trigger_price: Decimal | None = None
     venue_native: bool
     reduce_only_confirmed: bool
     replacement_in_progress: bool
@@ -358,6 +359,8 @@ class RecordVenueProtectionSnapshotRequest(VenueFactCollectionBinding):
                 and self.uncovered_quantity == 0
                 and self.active_stop_order_count is not None
                 and self.active_stop_order_count >= 1
+                and self.worst_active_trigger_price is not None
+                and self.worst_active_trigger_price > 0
                 and self.venue_native
                 and self.reduce_only_confirmed
                 and not self.replacement_in_progress
@@ -372,6 +375,7 @@ class RecordVenueProtectionSnapshotRequest(VenueFactCollectionBinding):
                 and self.uncovered_quantity >= 0
                 and self.covered_quantity + self.uncovered_quantity == self.position_quantity
                 and self.active_stop_order_count is not None
+                and (self.worst_active_trigger_price is None or self.worst_active_trigger_price > 0)
             )
             deficient = (
                 self.uncovered_quantity is not None
@@ -397,6 +401,7 @@ class RecordVenueProtectionSnapshotRequest(VenueFactCollectionBinding):
                 and self.covered_quantity is None
                 and self.uncovered_quantity is None
                 and self.active_stop_order_count is None
+                and self.worst_active_trigger_price is None
                 and not self.venue_native
                 and not self.reduce_only_confirmed
                 and not self.replacement_in_progress
@@ -574,6 +579,7 @@ def _protection_snapshot_contract(
         "covered_quantity": _optional_decimal(request.covered_quantity),
         "uncovered_quantity": _optional_decimal(request.uncovered_quantity),
         "active_stop_order_count": request.active_stop_order_count,
+        "worst_active_trigger_price": _optional_decimal(request.worst_active_trigger_price),
         "venue_native": request.venue_native,
         "reduce_only_confirmed": request.reduce_only_confirmed,
         "replacement_in_progress": request.replacement_in_progress,
@@ -612,7 +618,7 @@ class VenueFactNormalizationService:
     order_command_type = "execution.venue-order-observation.record.v1"
     fill_command_type = "execution.venue-fill.record.v1"
     position_command_type = "execution.venue-position-snapshot.record.v1"
-    protection_command_type = "execution.venue-protection-snapshot.record.v1"
+    protection_command_type = "execution.venue-protection-snapshot.record.v2"
     account_equity_command_type = "execution.venue-account-equity-snapshot.record.v1"
 
     def __init__(self, clock: Callable[[], datetime] | None = None) -> None:
@@ -621,7 +627,7 @@ class VenueFactNormalizationService:
     def record_order_observation(
         self, session: Session, envelope: CommandEnvelope
     ) -> CommandOutcome:
-        run_id = self._run_id(envelope, self.order_command_type)
+        run_id = self._run_id(envelope, self.order_command_type, 1)
         try:
             request = RecordVenueOrderObservationRequest.model_validate(envelope.payload)
         except ValidationError as exc:
@@ -730,7 +736,7 @@ class VenueFactNormalizationService:
         )
 
     def record_fill(self, session: Session, envelope: CommandEnvelope) -> CommandOutcome:
-        run_id = self._run_id(envelope, self.fill_command_type)
+        run_id = self._run_id(envelope, self.fill_command_type, 1)
         try:
             request = RecordVenueFillRequest.model_validate(envelope.payload)
         except ValidationError as exc:
@@ -839,7 +845,7 @@ class VenueFactNormalizationService:
     def record_position_snapshot(
         self, session: Session, envelope: CommandEnvelope
     ) -> CommandOutcome:
-        run_id = self._run_id(envelope, self.position_command_type)
+        run_id = self._run_id(envelope, self.position_command_type, 1)
         try:
             request = RecordVenuePositionSnapshotRequest.model_validate(envelope.payload)
         except ValidationError as exc:
@@ -971,7 +977,7 @@ class VenueFactNormalizationService:
     def record_protection_snapshot(
         self, session: Session, envelope: CommandEnvelope
     ) -> CommandOutcome:
-        run_id = self._run_id(envelope, self.protection_command_type)
+        run_id = self._run_id(envelope, self.protection_command_type, 2)
         try:
             request = RecordVenueProtectionSnapshotRequest.model_validate(envelope.payload)
         except ValidationError as exc:
@@ -1036,6 +1042,21 @@ class VenueFactNormalizationService:
                 "VENUE_PROTECTION_COVERAGE_MISMATCH",
                 "protection direction or quantity differs from the bound position",
             )
+        if request.worst_active_trigger_price is not None and (
+            position.mark_price is None
+            or (
+                request.protected_direction is VenueProtectedDirection.LONG
+                and request.worst_active_trigger_price >= position.mark_price
+            )
+            or (
+                request.protected_direction is VenueProtectedDirection.SHORT
+                and request.worst_active_trigger_price <= position.mark_price
+            )
+        ):
+            raise CommandRejected(
+                "VENUE_PROTECTION_TRIGGER_PRICE_INVALID",
+                "worst active trigger must remain on the protective side of current mark",
+            )
         existing = session.execute(
             select(VenueProtectionSnapshot).where(
                 VenueProtectionSnapshot.organization_id == run.organization_id,
@@ -1083,6 +1104,7 @@ class VenueFactNormalizationService:
                 covered_quantity=request.covered_quantity,
                 uncovered_quantity=request.uncovered_quantity,
                 active_stop_order_count=request.active_stop_order_count,
+                worst_active_trigger_price=request.worst_active_trigger_price,
                 venue_native=request.venue_native,
                 reduce_only_confirmed=request.reduce_only_confirmed,
                 replacement_in_progress=request.replacement_in_progress,
@@ -1134,7 +1156,7 @@ class VenueFactNormalizationService:
     def record_account_equity_snapshot(
         self, session: Session, envelope: CommandEnvelope
     ) -> CommandOutcome:
-        run_id = self._run_id(envelope, self.account_equity_command_type)
+        run_id = self._run_id(envelope, self.account_equity_command_type, 1)
         try:
             request = RecordVenueAccountEquitySnapshotRequest.model_validate(envelope.payload)
         except ValidationError as exc:
@@ -1260,9 +1282,18 @@ class VenueFactNormalizationService:
         )
 
     @staticmethod
-    def _run_id(envelope: CommandEnvelope, expected_command_type: str) -> UUID:
+    def _run_id(
+        envelope: CommandEnvelope,
+        expected_command_type: str,
+        expected_payload_schema_version: int,
+    ) -> UUID:
         if envelope.command_type != expected_command_type:
             raise CommandRejected("COMMAND_TYPE_MISMATCH", "unexpected command type")
+        if envelope.payload_schema_version != expected_payload_schema_version:
+            raise CommandRejected(
+                "PAYLOAD_SCHEMA_VERSION_MISMATCH",
+                "venue fact payload schema version is unsupported",
+            )
         if (
             envelope.channel is not CommandChannel.INTERNAL
             or envelope.service_principal != VENUE_FACT_SERVICE_PRINCIPAL

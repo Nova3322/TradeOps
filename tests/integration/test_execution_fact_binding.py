@@ -1043,6 +1043,8 @@ def test_confirmed_native_protection_advances_and_replays(database: Database) ->
         assert state.position_reconciled is True
         assert state.protection_confirmed is True
         assert protection is not None
+        assert protection.worst_active_trigger_price is not None
+        assert protection.worst_active_trigger_price > 0
         assert fact.fact_contract_version == 5
         assert fact.venue_protection_snapshot_id == protection.venue_protection_snapshot_id
         assert fact.venue_position_snapshot_id is None
