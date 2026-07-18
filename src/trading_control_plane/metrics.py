@@ -123,6 +123,12 @@ TARGET_POSITION_ARBITRATIONS = Counter(
     labelnames=("result",),
 )
 
+CAMPAIGN_TARGET_POSITION_EVALUATIONS = Counter(
+    "trading_campaign_target_position_evaluations_total",
+    "Server-bound Campaign target-position evaluations by bounded result.",
+    labelnames=("result",),
+)
+
 CAPABILITY_CERTIFICATE_ISSUANCE = Counter(
     "trading_capability_certificate_issuance_total",
     "Shadow-only capability certificate issuance by type, environment, and result.",

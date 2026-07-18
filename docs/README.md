@@ -227,6 +227,7 @@ docs/
 | 实现 | [WP-0046：Canonical 场所资金费支付事实](08-implementation/WP-0046-Canonical场所资金费支付事实.md) | immutable settled funding PAYMENT/RECEIPT 与 reconciliation v2 八来源完整水位，不推断 Campaign 归属或 FX |
 | 实现 | [WP-0047：Campaign 资金费覆盖投影](08-implementation/WP-0047-Campaign资金费覆盖投影.md) | latest successful v2 水位覆盖 opening/current 区间并列出 exact scope/time 候选，归属与 equity 固定 UNAVAILABLE |
 | 实现 | [WP-0048：唯一目标仓位仲裁器](08-implementation/WP-0048-唯一目标仓位仲裁器.md) | 纯规则合并硬止损、趋势、去杠杆与系统减仓候选，分别选择更小 target 和更高 urgency，固定 reduce-only |
+| 实现 | [WP-0049：服务端当前仓位目标仲裁绑定](08-implementation/WP-0049-服务端当前仓位目标仲裁绑定.md) | 服务端解析 fresh canonical binding/quantity 后仲裁，拒绝 caller current-position substitution，不生成 OrderIntent |
 
 ## 完整交付与能力激活
 
