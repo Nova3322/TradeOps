@@ -58,6 +58,7 @@ from trading_control_plane.risk import (
     RiskPolicyParameters,
     RiskPrecheckRequest,
     ScopeType,
+    TradeLossComponents,
     VerifiedCapitalProjection,
     capability_validation_request,
 )
@@ -236,6 +237,69 @@ class CreateExecutionIntentRequest(BaseModel):
         return self
 
 
+class DurableExposureComponent(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    risk_reservation_id: UUID
+    order_intent_id: UUID
+    campaign_id: UUID
+    status: str
+    state_version: int = Field(ge=1)
+    ledger_sequence: int = Field(ge=1)
+    active_ratio: Decimal = Field(ge=0, le=1)
+    open_heat: Decimal = Field(ge=0)
+    reserved_heat: Decimal = Field(ge=0)
+    unknown_heat: Decimal = Field(ge=0)
+    funding_used: Decimal = Field(ge=0)
+    funding_reserved: Decimal = Field(ge=0)
+    funding_unknown: Decimal = Field(ge=0)
+    margin_reserved: Decimal = Field(ge=0)
+    margin_unknown: Decimal = Field(ge=0)
+    last_evidence_ref: str = Field(min_length=1, max_length=255)
+    last_evidence_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
+class DurableScopeExposure(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    scope_type: ScopeType
+    scope_id: str = Field(min_length=1, max_length=255)
+    current_planned_loss: Decimal = Field(ge=0)
+    current_stress_loss: Decimal = Field(ge=0)
+
+    @property
+    def key(self) -> tuple[ScopeType, str]:
+        return (self.scope_type, self.scope_id)
+
+
+class DurableExposureSnapshot(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    organization_id: str = Field(min_length=1, max_length=120)
+    campaign_id: UUID
+    components: tuple[DurableExposureComponent, ...]
+    campaign_open_heat: Decimal = Field(ge=0)
+    campaign_reserved_heat: Decimal = Field(ge=0)
+    campaign_unknown_heat: Decimal = Field(ge=0)
+    global_unknown_heat: Decimal = Field(ge=0)
+    global_funding_used: Decimal = Field(ge=0)
+    global_funding_reserved: Decimal = Field(ge=0)
+    global_funding_unknown: Decimal = Field(ge=0)
+    global_margin_reserved: Decimal = Field(ge=0)
+    global_margin_unknown: Decimal = Field(ge=0)
+    available_margin_after_internal_reservations: Decimal = Field(ge=0)
+    scope_exposures: tuple[DurableScopeExposure, ...]
+    snapshot_version: str = Field(pattern=r"^durable-risk-exposure-v[0-9]+$")
+
+
+class VerifiedDurableExposure(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    risk_request: RiskPrecheckRequest
+    snapshot: DurableExposureSnapshot
+    snapshot_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
 class RecordExecutionFactRequest(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
@@ -335,6 +399,181 @@ class RecordExecutionFactRequest(BaseModel):
         return self
 
 
+class DurableExposureResolver:
+    """Rebuilds current funding, Heat, margin, and scope usage from durable state."""
+
+    @staticmethod
+    def resolve(
+        session: Session,
+        request: CreateExecutionIntentRequest,
+        campaign: Campaign,
+    ) -> VerifiedDurableExposure:
+        rows = tuple(
+            session.execute(
+                select(RiskReservation, RiskExposureState)
+                .join(
+                    RiskExposureState,
+                    RiskExposureState.risk_reservation_id == RiskReservation.risk_reservation_id,
+                )
+                .where(RiskReservation.organization_id == campaign.organization_id)
+                .order_by(RiskReservation.risk_reservation_id)
+                .with_for_update(of=RiskExposureState)
+            ).all()
+        )
+        campaign_open = ZERO
+        campaign_reserved = ZERO
+        campaign_unknown = ZERO
+        global_unknown = ZERO
+        global_funding_used = ZERO
+        global_funding_reserved = ZERO
+        global_funding_unknown = ZERO
+        global_margin_reserved = ZERO
+        global_margin_unknown = ZERO
+        scope_planned: defaultdict[tuple[str, str], Decimal] = defaultdict(lambda: ZERO)
+        scope_stress: defaultdict[tuple[str, str], Decimal] = defaultdict(lambda: ZERO)
+        components: list[DurableExposureComponent] = []
+        for reservation, state in rows:
+            active_heat = state.open_heat + state.reserved_heat + state.unknown_heat
+            ratio = active_heat / state.total_heat if active_heat > ZERO else ZERO
+            components.append(
+                DurableExposureComponent(
+                    risk_reservation_id=reservation.risk_reservation_id,
+                    order_intent_id=reservation.order_intent_id,
+                    campaign_id=reservation.campaign_id,
+                    status=state.status,
+                    state_version=state.version,
+                    ledger_sequence=state.ledger_sequence,
+                    active_ratio=ratio,
+                    open_heat=state.open_heat,
+                    reserved_heat=state.reserved_heat,
+                    unknown_heat=state.unknown_heat,
+                    funding_used=state.funding_used,
+                    funding_reserved=state.funding_reserved,
+                    funding_unknown=state.funding_unknown,
+                    margin_reserved=state.margin_reserved,
+                    margin_unknown=state.margin_unknown,
+                    last_evidence_ref=state.last_evidence_ref,
+                    last_evidence_hash=state.last_evidence_hash,
+                )
+            )
+            if active_heat == ZERO:
+                continue
+            if reservation.campaign_id == campaign.campaign_id:
+                campaign_open += state.open_heat
+                campaign_reserved += state.reserved_heat
+                campaign_unknown += state.unknown_heat
+            global_unknown += state.unknown_heat
+            global_funding_used += state.funding_used
+            global_funding_reserved += state.funding_reserved
+            global_funding_unknown += state.funding_unknown
+            global_margin_reserved += state.margin_reserved
+            global_margin_unknown += state.margin_unknown
+            for allocation in reservation.scope_allocations:
+                key = (str(allocation["scope_type"]), str(allocation["scope_id"]))
+                scope_planned[key] += Decimal(str(allocation["planned_loss"])) * ratio
+                scope_stress[key] += Decimal(str(allocation["stress_loss"])) * ratio
+
+        if global_unknown > ZERO:
+            raise CommandRejected(
+                "ORDER_RESULT_UNKNOWN",
+                "organization has unresolved durable order exposure",
+            )
+        raw_available_margin = request.risk_request.capital.available_margin
+        internal_margin_reservations = global_margin_reserved + global_margin_unknown
+        remaining_margin = max(ZERO, raw_available_margin - internal_margin_reservations)
+        if request.risk_request.requested.requested_margin > remaining_margin:
+            raise CommandRejected(
+                "DURABLE_MARGIN_CAPACITY_EXCEEDED",
+                "durable margin reservations leave insufficient available margin",
+            )
+
+        scope_exposures = tuple(
+            DurableScopeExposure(
+                scope_type=item.scope_type,
+                scope_id=item.scope_id,
+                current_planned_loss=scope_planned[item.key[0].value, item.key[1]],
+                current_stress_loss=scope_stress[item.key[0].value, item.key[1]],
+            )
+            for item in sorted(
+                request.risk_request.scope_risks,
+                key=lambda scope: (scope.scope_type.value, scope.scope_id),
+            )
+        )
+        derived_trade_loss = TradeLossComponents(
+            open_heat=campaign_open,
+            reserved_heat=campaign_reserved,
+            unknown_heat=campaign_unknown,
+            protected_profit_giveback=ZERO,
+            cost_stress_add_on=ZERO,
+        )
+        derived_scope_by_key = {item.key: item for item in scope_exposures}
+        derived_scope_risks = tuple(
+            item.model_copy(
+                update={
+                    "current_planned_loss": derived_scope_by_key[item.key].current_planned_loss,
+                    "current_stress_loss": derived_scope_by_key[item.key].current_stress_loss,
+                }
+            )
+            for item in request.risk_request.scope_risks
+        )
+        derived_capital = request.risk_request.capital.model_copy(
+            update={
+                "funding_used": global_funding_used,
+                "funding_reserved": global_funding_reserved + global_funding_unknown,
+                "available_margin": remaining_margin,
+            }
+        )
+        submitted_scope_usage = {
+            item.key: (item.current_planned_loss, item.current_stress_loss)
+            for item in request.risk_request.scope_risks
+        }
+        derived_scope_usage = {
+            item.key: (item.current_planned_loss, item.current_stress_loss)
+            for item in derived_scope_risks
+        }
+        if (
+            request.risk_request.capital.funding_used != global_funding_used
+            or request.risk_request.capital.funding_reserved
+            != global_funding_reserved + global_funding_unknown
+            or request.risk_request.current_trade_loss != derived_trade_loss
+            or submitted_scope_usage != derived_scope_usage
+        ):
+            raise CommandRejected(
+                "DURABLE_EXPOSURE_INPUT_MISMATCH",
+                "caller funding, Heat, or scope usage differs from durable risk state",
+            )
+
+        snapshot = DurableExposureSnapshot(
+            organization_id=campaign.organization_id,
+            campaign_id=campaign.campaign_id,
+            components=tuple(components),
+            campaign_open_heat=campaign_open,
+            campaign_reserved_heat=campaign_reserved,
+            campaign_unknown_heat=campaign_unknown,
+            global_unknown_heat=global_unknown,
+            global_funding_used=global_funding_used,
+            global_funding_reserved=global_funding_reserved,
+            global_funding_unknown=global_funding_unknown,
+            global_margin_reserved=global_margin_reserved,
+            global_margin_unknown=global_margin_unknown,
+            available_margin_after_internal_reservations=remaining_margin,
+            scope_exposures=scope_exposures,
+            snapshot_version="durable-risk-exposure-v1",
+        )
+        snapshot_hash = hash_json(snapshot.model_dump(mode="json"))
+        return VerifiedDurableExposure(
+            risk_request=request.risk_request.model_copy(
+                update={
+                    "capital": derived_capital,
+                    "current_trade_loss": derived_trade_loss,
+                    "scope_risks": derived_scope_risks,
+                }
+            ),
+            snapshot=snapshot,
+            snapshot_hash=snapshot_hash,
+        )
+
+
 class ExecutionIntentService:
     command_type = "execution.intent.create.v1"
 
@@ -343,6 +582,7 @@ class ExecutionIntentService:
         evaluator: RiskEvaluator | None = None,
         certificate_validator: CapabilityCertificateValidator | None = None,
         capital_projection_resolver: CapitalProjectionResolver | None = None,
+        durable_exposure_resolver: DurableExposureResolver | None = None,
         clock: Callable[[], datetime] | None = None,
     ) -> None:
         self._evaluator = evaluator or RiskEvaluator()
@@ -350,6 +590,7 @@ class ExecutionIntentService:
         self._capital_projection_resolver = (
             capital_projection_resolver or CapitalProjectionResolver()
         )
+        self._durable_exposure_resolver = durable_exposure_resolver or DurableExposureResolver()
         self._clock = clock or (lambda: datetime.now(UTC))
 
     def create(self, session: Session, envelope: CommandEnvelope) -> CommandOutcome:
@@ -454,7 +695,8 @@ class ExecutionIntentService:
                 )
             }
         )
-        self._validate_durable_exposure(session, request, campaign)
+        verified_exposure = self._durable_exposure_resolver.resolve(session, request, campaign)
+        request = request.model_copy(update={"risk_request": verified_exposure.risk_request})
 
         capability_validation = self._certificate_validator.validate(
             session,
@@ -482,6 +724,7 @@ class ExecutionIntentService:
                 evaluation_input,
                 evaluation,
                 verified_capital,
+                verified_exposure,
                 now,
                 "ADD_REQUIRES_NORMAL_SYSTEM_STATE",
             )
@@ -495,6 +738,7 @@ class ExecutionIntentService:
                 evaluation_input,
                 evaluation,
                 verified_capital,
+                verified_exposure,
                 now,
                 evaluation.primary_reason_code,
             )
@@ -514,6 +758,7 @@ class ExecutionIntentService:
                 evaluation_input,
                 evaluation,
                 verified_capital,
+                verified_exposure,
                 now,
                 "FROZEN_FUNDING_ENVELOPE_EXCEEDED",
             )
@@ -532,6 +777,7 @@ class ExecutionIntentService:
                 evaluation_input,
                 evaluation,
                 verified_capital,
+                verified_exposure,
                 now,
                 "FROZEN_AUTHORIZATION_CAPACITY_EXCEEDED",
             )
@@ -550,6 +796,7 @@ class ExecutionIntentService:
                 evaluation_input,
                 evaluation,
                 verified_capital,
+                verified_exposure,
                 now,
                 "EXECUTION_VALIDITY_EXPIRED",
             )
@@ -560,6 +807,7 @@ class ExecutionIntentService:
             authorization,
             authorization_rows,
             verified_capital,
+            verified_exposure,
         )
         decision_payload = evaluation.model_dump(mode="json")
         decision_payload["approved_reserved_heat"] = str(reserved_heat)
@@ -585,6 +833,7 @@ class ExecutionIntentService:
                 capital_scope_manifest_hash=verified_capital.projection.manifest_hash,
                 capital_projection_version=verified_capital.projection.projection_version,
                 capital_projection_hash=verified_capital.projection_hash,
+                durable_exposure_snapshot_hash=verified_exposure.snapshot_hash,
                 system_risk_state=system_state.value,
                 result="ALLOW",
                 primary_reason_code="ORDER_PRECHECK_PASSED",
@@ -815,6 +1064,7 @@ class ExecutionIntentService:
                 "intent_status": "INTENT_CREATED",
                 "risk_exposure_status": "RESERVED",
                 "capital_projection_hash": verified_capital.projection_hash,
+                "durable_exposure_snapshot_hash": verified_exposure.snapshot_hash,
                 "execution_mode": "SHADOW",
                 "dispatch_eligible": False,
                 "reservation_created": True,
@@ -830,6 +1080,7 @@ class ExecutionIntentService:
                         "execution_risk_decision_id": str(decision_id),
                         "risk_reservation_id": str(risk_reservation_id),
                         "capital_projection_hash": verified_capital.projection_hash,
+                        "durable_exposure_snapshot_hash": verified_exposure.snapshot_hash,
                         "dispatch_eligible": False,
                     },
                 ),
@@ -1231,81 +1482,6 @@ class ExecutionIntentService:
         return (value / step).to_integral_value(rounding=ROUND_DOWN) * step
 
     @staticmethod
-    def _validate_durable_exposure(
-        session: Session,
-        request: CreateExecutionIntentRequest,
-        campaign: Campaign,
-    ) -> None:
-        rows = tuple(
-            session.execute(
-                select(RiskReservation, RiskExposureState)
-                .join(
-                    RiskExposureState,
-                    RiskExposureState.risk_reservation_id == RiskReservation.risk_reservation_id,
-                )
-                .where(RiskReservation.organization_id == campaign.organization_id)
-                .with_for_update(of=RiskExposureState)
-            ).all()
-        )
-        campaign_open = ZERO
-        campaign_reserved = ZERO
-        campaign_unknown = ZERO
-        global_funding_used = ZERO
-        global_funding_reserved = ZERO
-        global_margin_reserved = ZERO
-        global_unknown = ZERO
-        durable_scope_planned: defaultdict[tuple[str, str], Decimal] = defaultdict(lambda: ZERO)
-        durable_scope_stress: defaultdict[tuple[str, str], Decimal] = defaultdict(lambda: ZERO)
-        for reservation, state in rows:
-            active_heat = state.open_heat + state.reserved_heat + state.unknown_heat
-            if active_heat == ZERO:
-                continue
-            if reservation.campaign_id == campaign.campaign_id:
-                campaign_open += state.open_heat
-                campaign_reserved += state.reserved_heat
-                campaign_unknown += state.unknown_heat
-            global_funding_used += state.funding_used
-            global_funding_reserved += state.funding_reserved + state.funding_unknown
-            global_margin_reserved += state.margin_reserved + state.margin_unknown
-            global_unknown += state.unknown_heat
-            ratio = active_heat / state.total_heat
-            for allocation in reservation.scope_allocations:
-                key = (str(allocation["scope_type"]), str(allocation["scope_id"]))
-                durable_scope_planned[key] += Decimal(str(allocation["planned_loss"])) * ratio
-                durable_scope_stress[key] += Decimal(str(allocation["stress_loss"])) * ratio
-        risk = request.risk_request
-        if (
-            risk.current_trade_loss.open_heat < campaign_open
-            or risk.current_trade_loss.reserved_heat < campaign_reserved
-            or risk.current_trade_loss.unknown_heat < campaign_unknown
-            or risk.capital.funding_used < global_funding_used
-            or risk.capital.funding_reserved < global_funding_reserved
-        ):
-            raise CommandRejected(
-                "DURABLE_EXPOSURE_UNDER_REPORTED",
-                "risk request under-reports durable open, reserved, unknown, or funding exposure",
-            )
-        if global_unknown > ZERO:
-            raise CommandRejected(
-                "ORDER_RESULT_UNKNOWN", "organization has unresolved order quantity"
-            )
-        if global_margin_reserved + risk.requested.requested_margin > risk.capital.available_margin:
-            raise CommandRejected(
-                "DURABLE_MARGIN_CAPACITY_EXCEEDED",
-                "durable margin reservations leave insufficient available margin",
-            )
-        for scope in risk.scope_risks:
-            key = (scope.scope_type.value, scope.scope_id)
-            if (
-                scope.current_planned_loss < durable_scope_planned[key]
-                or scope.current_stress_loss < durable_scope_stress[key]
-            ):
-                raise CommandRejected(
-                    "DURABLE_SCOPE_EXPOSURE_UNDER_REPORTED",
-                    "risk scope under-reports durable exposure",
-                )
-
-    @staticmethod
     def _input_snapshot(
         envelope: CommandEnvelope,
         request: CreateExecutionIntentRequest,
@@ -1313,6 +1489,7 @@ class ExecutionIntentService:
         authorization: TradingAuthorization,
         rows: dict[str, Any],
         verified_capital: VerifiedCapitalProjection,
+        verified_exposure: VerifiedDurableExposure,
     ) -> dict[str, Any]:
         snapshot: dict[str, Any] = {
             "request": request.model_dump(mode="json"),
@@ -1324,6 +1501,8 @@ class ExecutionIntentService:
             },
             "capital_projection": verified_capital.projection.model_dump(mode="json"),
             "capital_projection_hash": verified_capital.projection_hash,
+            "durable_exposure_snapshot": verified_exposure.snapshot.model_dump(mode="json"),
+            "durable_exposure_snapshot_hash": verified_exposure.snapshot_hash,
             "command_context": {
                 "command_id": str(envelope.command_id),
                 "correlation_id": str(envelope.correlation_id),
@@ -1369,6 +1548,7 @@ class ExecutionIntentService:
         evaluation_input: RiskEvaluationInput,
         evaluation: RiskEvaluationResult,
         verified_capital: VerifiedCapitalProjection,
+        verified_exposure: VerifiedDurableExposure,
         now: datetime,
         reason_code: str,
     ) -> CommandOutcome:
@@ -1381,6 +1561,8 @@ class ExecutionIntentService:
             "authorization_snapshot_hash": authorization.issuance_snapshot_hash,
             "capital_projection": verified_capital.projection.model_dump(mode="json"),
             "capital_projection_hash": verified_capital.projection_hash,
+            "durable_exposure_snapshot": verified_exposure.snapshot.model_dump(mode="json"),
+            "durable_exposure_snapshot_hash": verified_exposure.snapshot_hash,
         }
         decision_payload = evaluation.model_dump(mode="json")
         decision_payload["result"] = "DENY"
@@ -1407,6 +1589,7 @@ class ExecutionIntentService:
                 capital_scope_manifest_hash=verified_capital.projection.manifest_hash,
                 capital_projection_version=verified_capital.projection.projection_version,
                 capital_projection_hash=verified_capital.projection_hash,
+                durable_exposure_snapshot_hash=verified_exposure.snapshot_hash,
                 system_risk_state=evaluation_input.system_risk_state.value,
                 result="DENY",
                 primary_reason_code=reason_code,
@@ -1441,6 +1624,7 @@ class ExecutionIntentService:
                 "result": "DENY",
                 "primary_reason_code": reason_code,
                 "capital_projection_hash": verified_capital.projection_hash,
+                "durable_exposure_snapshot_hash": verified_exposure.snapshot_hash,
                 "dispatch_eligible": False,
                 "reservation_created": False,
                 "order_intent_created": False,
@@ -1455,6 +1639,7 @@ class ExecutionIntentService:
                         "intent_kind": request.intent_kind.value,
                         "primary_reason_code": reason_code,
                         "capital_projection_hash": verified_capital.projection_hash,
+                        "durable_exposure_snapshot_hash": verified_exposure.snapshot_hash,
                     },
                 ),
             ),

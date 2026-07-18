@@ -98,8 +98,9 @@ SHADOW 测试事实。仍有绑定执行决策时也拒绝 downgrade。
 
 ## 7. 明确未完成范围
 
-- funding used/reserved、open/reserved/unknown heat 与各 scope exposure 仍依赖上游申报加 durable
-  不得低报检查，尚未完全改为 Ledger 派生；
+- funding used/reserved、open/reserved/unknown heat 与各 scope exposure 在本包交付时仍依赖上游申报
+  加 durable 不得低报检查；最终预检的该缺口已由
+  [WP-0023](WP-0023-最终预检Durable-Exposure强绑定.md) 关闭；
 - 非 USD FX、stablecoin/depeg 认证事实尚未实现，相关交易继续失败关闭；
 - canonical 账户权益仍只由自动化测试构造，没有真实私有 venue collector 或已认证场所公式；
 - 没有真钱证书、真实 Freqtrade/VenueAdapter、Web/PWA、Telegram、Margin、Vault/CTO 或生产运维；

@@ -53,11 +53,19 @@ from tests.venue_fact_fixtures import (
 from trading_control_plane.capability_certificate_models import CapabilityCertificate
 from trading_control_plane.capability_certificates import CapabilityScope
 from trading_control_plane.command_executor import IdempotentCommandExecutor
-from trading_control_plane.commands import CommandChannel, CommandEnvelope, CommandStatus, hash_json
+from trading_control_plane.commands import (
+    CommandChannel,
+    CommandEnvelope,
+    CommandRejected,
+    CommandStatus,
+    hash_json,
+)
 from trading_control_plane.database import Database
 from trading_control_plane.execution import (
     EXECUTION_INTENT_SERVICE_PRINCIPAL,
     EXECUTION_RECONCILIATION_SERVICE_PRINCIPAL,
+    CreateExecutionIntentRequest,
+    DurableExposureResolver,
     ExecutionFactKind,
     ExecutionIntentService,
     ExecutionReconciliationService,
@@ -1141,6 +1149,11 @@ def test_initial_intent_atomically_persists_decision_reservation_ledger_and_hist
             hash_json(decision.input_snapshot["capital_projection"])
             == decision.capital_projection_hash
         )
+        assert (
+            hash_json(decision.input_snapshot["durable_exposure_snapshot"])
+            == decision.durable_exposure_snapshot_hash
+        )
+        assert decision.input_snapshot["durable_exposure_snapshot"]["components"] == []
         assert intent.dispatch_eligible is False
         assert reservation.order_intent_id == intent.order_intent_id
         assert exposure.status == "RESERVED"
@@ -1223,6 +1236,107 @@ def test_final_precheck_rejects_caller_capital_older_than_canonical_projection(
         assert count_rows(session, RiskReservation) == 0
 
 
+def test_final_precheck_rejects_both_high_and_low_durable_exposure_reports(
+    database: Database,
+) -> None:
+    proposal, campaign, initial = prepare_authorization(database)
+    now = datetime.now(UTC)
+    seed_execution_policy(database, now)
+    over_reported = execution_risk_request(
+        proposal,
+        now=now,
+        current_open_heat=Decimal("1"),
+        funding_used=Decimal("1"),
+        scope_current_planned=Decimal("1"),
+        scope_current_stress=Decimal("1"),
+    )
+
+    high = execute_create(
+        database,
+        create_intent_envelope(
+            proposal,
+            campaign,
+            initial,
+            now=now,
+            risk_request=over_reported,
+        ),
+    )
+
+    assert high.status is CommandStatus.REJECTED
+    assert high.error_code == "DURABLE_EXPOSURE_INPUT_MISMATCH"
+
+    valid = execute_create(
+        database,
+        create_intent_envelope(
+            proposal,
+            campaign,
+            initial,
+            now=datetime.now(UTC),
+            candidate_ref="durable-exposure-source",
+        ),
+    )
+    assert valid.status is CommandStatus.COMPLETED
+    under_reported_request = CreateExecutionIntentRequest.model_validate(
+        create_intent_envelope(
+            proposal,
+            campaign,
+            initial,
+            now=datetime.now(UTC),
+            candidate_ref="durable-exposure-under-report",
+        ).payload
+    )
+    with database.session_factory.begin() as session:
+        with pytest.raises(CommandRejected) as exc_info:
+            DurableExposureResolver.resolve(session, under_reported_request, campaign)
+    assert exc_info.value.error_code == "DURABLE_EXPOSURE_INPUT_MISMATCH"
+
+
+def test_durable_exposure_snapshot_subtracts_internal_margin_reservations(
+    database: Database,
+) -> None:
+    proposal, campaign, initial = prepare_authorization(database)
+    now = datetime.now(UTC)
+    seed_execution_policy(database, now)
+    created = execute_create(
+        database,
+        create_intent_envelope(
+            proposal,
+            campaign,
+            initial,
+            now=now,
+            candidate_ref="durable-margin-source",
+        ),
+    )
+    assert created.status is CommandStatus.COMPLETED
+    exact_risk = execution_risk_request(
+        proposal,
+        now=datetime.now(UTC),
+        current_reserved_heat=Decimal("110"),
+        funding_reserved=Decimal("500"),
+        scope_current_planned=Decimal("110"),
+        scope_current_stress=Decimal("150"),
+    )
+    exact_request = CreateExecutionIntentRequest.model_validate(
+        create_intent_envelope(
+            proposal,
+            campaign,
+            initial,
+            now=datetime.now(UTC),
+            candidate_ref="durable-margin-check",
+            risk_request=exact_risk,
+        ).payload
+    )
+
+    with database.session_factory.begin() as session:
+        verified = DurableExposureResolver.resolve(session, exact_request, campaign)
+
+    assert verified.risk_request.capital.available_margin == Decimal("9500")
+    assert verified.snapshot.global_margin_reserved == Decimal("500")
+    assert verified.snapshot.available_margin_after_internal_reservations == Decimal("9500")
+    assert len(verified.snapshot.components) == 1
+    assert hash_json(verified.snapshot.model_dump(mode="json")) == verified.snapshot_hash
+
+
 def test_final_precheck_cannot_replace_frozen_capital_scope(database: Database) -> None:
     proposal, campaign, initial = prepare_authorization(database)
     now = datetime.now(UTC)
@@ -1296,6 +1410,10 @@ def test_stale_final_precheck_is_durable_deny_without_intent_or_reservation(
         assert (
             hash_json(decision.input_snapshot["capital_projection"])
             == decision.capital_projection_hash
+        )
+        assert (
+            hash_json(decision.input_snapshot["durable_exposure_snapshot"])
+            == decision.durable_exposure_snapshot_hash
         )
         assert count_rows(session, OrderIntent) == 0
         assert count_rows(session, RiskReservation) == 0
@@ -1594,7 +1712,9 @@ def test_fact_sequence_and_immutable_root_are_database_enforced(database: Databa
             )
     with pytest.raises(DBAPIError, match="execution_risk_decisions is immutable"):
         with database.session_factory.begin() as session:
-            session.execute(update(ExecutionRiskDecision).values(capital_projection_hash="f" * 64))
+            session.execute(
+                update(ExecutionRiskDecision).values(durable_exposure_snapshot_hash="f" * 64)
+            )
     with database.session_factory.begin() as session:
         assert count_rows(session, ExecutionFact) == 0
         assert session.get(OrderIntent, order_intent_id).dispatch_eligible is False
@@ -1643,7 +1763,7 @@ def test_database_rejects_orphan_allow_decision_at_deferred_commit(
                         risk_policy_id, risk_policy_version, system_risk_state,
                         capital_scope_manifest_id, capital_scope_manifest_version,
                         capital_scope_manifest_hash, capital_projection_version,
-                        capital_projection_hash,
+                        capital_projection_hash, durable_exposure_snapshot_hash,
                         result, primary_reason_code, requested_quantity,
                         max_safe_quantity, final_quantity, approved_reserved_heat,
                         approved_funding, approved_margin,
@@ -1659,7 +1779,7 @@ def test_database_rejects_orphan_allow_decision_at_deferred_commit(
                         risk_policy_id, risk_policy_version, system_risk_state,
                         capital_scope_manifest_id, capital_scope_manifest_version,
                         capital_scope_manifest_hash, capital_projection_version,
-                        capital_projection_hash,
+                        capital_projection_hash, durable_exposure_snapshot_hash,
                         result, primary_reason_code, requested_quantity,
                         max_safe_quantity, final_quantity, approved_reserved_heat,
                         approved_funding, approved_margin,

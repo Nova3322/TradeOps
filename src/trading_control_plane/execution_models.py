@@ -129,6 +129,7 @@ class ExecutionRiskDecision(Base):
         CheckConstraint(
             "length(capital_scope_manifest_hash) = 64 "
             "AND length(capital_projection_hash) = 64 "
+            "AND length(durable_exposure_snapshot_hash) = 64 "
             "AND capital_projection_version ~ '^portfolio-mtm-v[0-9]+$'",
             name="ck_exec_risk_capital_binding_integrity",
         ),
@@ -177,6 +178,7 @@ class ExecutionRiskDecision(Base):
     capital_scope_manifest_hash: Mapped[str] = mapped_column(String(64), nullable=False)
     capital_projection_version: Mapped[str] = mapped_column(String(40), nullable=False)
     capital_projection_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    durable_exposure_snapshot_hash: Mapped[str] = mapped_column(String(64), nullable=False)
     system_risk_state: Mapped[str] = mapped_column(String(32), nullable=False)
     result: Mapped[str] = mapped_column(String(20), nullable=False)
     primary_reason_code: Mapped[str] = mapped_column(String(160), nullable=False)
