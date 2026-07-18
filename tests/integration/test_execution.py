@@ -77,6 +77,7 @@ from trading_control_plane.database import Database
 from trading_control_plane.execution import (
     EXECUTION_INTENT_SERVICE_PRINCIPAL,
     EXECUTION_RECONCILIATION_SERVICE_PRINCIPAL,
+    AddLeverageCalculation,
     CreateExecutionIntentRequest,
     DurableExposureResolver,
     ExecutionFactKind,
@@ -439,7 +440,7 @@ def create_intent_envelope(
     request = risk_request or execution_risk_request(proposal, now=now)
     return CommandEnvelope(
         idempotency_key=idempotency_key or f"execution-intent-{uuid4()}",
-        command_type="execution.intent.create.v10",
+        command_type="execution.intent.create.v11",
         object_type="Campaign",
         object_id=str(campaign.campaign_id),
         expected_version=1,
@@ -450,7 +451,7 @@ def create_intent_envelope(
         issued_at=now,
         expires_at=now + timedelta(minutes=2),
         auth_context_ref="internal:oms-risk-reservation-service",
-        payload_schema_version=10,
+        payload_schema_version=11,
         reason="create non-dispatchable shadow intent",
         payload={
             "intent_kind": "INITIAL",
@@ -545,7 +546,7 @@ def create_add_envelope(
     assert register_risk_fact_set(database, fact_set, now=now).status is CommandStatus.COMPLETED
     return CommandEnvelope(
         idempotency_key=f"execution-add-{uuid4()}",
-        command_type="execution.intent.create.v10",
+        command_type="execution.intent.create.v11",
         object_type="Campaign",
         object_id=str(campaign.campaign_id),
         expected_version=2,
@@ -556,7 +557,7 @@ def create_add_envelope(
         issued_at=now,
         expires_at=now + timedelta(minutes=2),
         auth_context_ref="internal:oms-risk-reservation-service",
-        payload_schema_version=10,
+        payload_schema_version=11,
         reason="create non-dispatchable shadow add intent",
         payload={
             "intent_kind": "ADD",
@@ -574,7 +575,6 @@ def create_add_envelope(
             "add_eligibility": {
                 "frozen_return_pct": "30",
                 "trend_valid": True,
-                "current_effective_leverage": "0.5",
                 "target_effective_leverage": "1",
                 "current_position_equity": "72",
                 "position_snapshot_ref": (
@@ -1237,7 +1237,7 @@ def execute_fact(
     return result
 
 
-def test_execution_intent_legacy_commands_and_wrong_v10_schema_are_rejected(
+def test_execution_intent_legacy_commands_and_wrong_v11_schema_are_rejected(
     database: Database,
 ) -> None:
     proposal, campaign, initial = prepare_authorization(database)
@@ -1267,6 +1267,9 @@ def test_execution_intent_legacy_commands_and_wrong_v10_schema_are_rejected(
     )
     v9 = create_intent_envelope(proposal, campaign, initial, now=datetime.now(UTC)).model_copy(
         update={"command_type": "execution.intent.create.v9"}
+    )
+    v10 = create_intent_envelope(proposal, campaign, initial, now=datetime.now(UTC)).model_copy(
+        update={"command_type": "execution.intent.create.v10"}
     )
     old_field = create_intent_envelope(proposal, campaign, initial, now=datetime.now(UTC))
     old_payload = dict(old_field.payload)
@@ -1322,6 +1325,7 @@ def test_execution_intent_legacy_commands_and_wrong_v10_schema_are_rejected(
     v7_result = execute_create(database, v7)
     v8_result = execute_create(database, v8)
     v9_result = execute_create(database, v9)
+    v10_result = execute_create(database, v10)
     old_field_result = execute_create(database, old_field)
     caller_boolean_result = execute_create(database, caller_boolean)
     protection_boolean_result = execute_create(database, protection_boolean)
@@ -1346,6 +1350,8 @@ def test_execution_intent_legacy_commands_and_wrong_v10_schema_are_rejected(
     assert v8_result.error_code == "COMMAND_TYPE_MISMATCH"
     assert v9_result.status is CommandStatus.REJECTED
     assert v9_result.error_code == "COMMAND_TYPE_MISMATCH"
+    assert v10_result.status is CommandStatus.REJECTED
+    assert v10_result.error_code == "COMMAND_TYPE_MISMATCH"
     assert old_field_result.status is CommandStatus.REJECTED
     assert old_field_result.error_code == "EXECUTION_INPUT_INVALID"
     assert caller_boolean_result.status is CommandStatus.REJECTED
@@ -1356,6 +1362,36 @@ def test_execution_intent_legacy_commands_and_wrong_v10_schema_are_rejected(
     assert caller_facts_result.error_code == "EXECUTION_INPUT_INVALID"
     assert schema_result.status is CommandStatus.REJECTED
     assert schema_result.error_code == "PAYLOAD_SCHEMA_VERSION_MISMATCH"
+
+
+def test_add_leverage_calculation_rejects_tampered_value_or_hash() -> None:
+    material = {
+        "position_snapshot_id": str(uuid4()),
+        "position_snapshot_hash": "a" * 64,
+        "current_position_quantity": "0.5",
+        "mark_price": "120",
+        "contract_multiplier": "1",
+        "submitted_campaign_equity": "72",
+        "campaign_equity_source": "CALLER_PENDING_CAMPAIGN_PNL_LEDGER",
+        "current_position_notional": "60.0",
+        "current_effective_leverage": "0.833333333333333334",
+        "calculation_version": "add-effective-leverage-v1",
+    }
+    calculation = AddLeverageCalculation.model_validate(
+        {**material, "calculation_hash": hash_json(material)}
+    )
+    assert calculation.current_effective_leverage == Decimal("0.833333333333333334")
+
+    with pytest.raises(ValueError, match="calculation is inconsistent"):
+        AddLeverageCalculation.model_validate(
+            {
+                **material,
+                "current_effective_leverage": "0.1",
+                "calculation_hash": hash_json(material),
+            }
+        )
+    with pytest.raises(ValueError, match="calculation hash mismatch"):
+        AddLeverageCalculation.model_validate({**material, "calculation_hash": "f" * 64})
 
 
 def test_initial_intent_atomically_persists_decision_reservation_ledger_and_histories(
@@ -2243,8 +2279,12 @@ def test_add_zero_fill_releases_unit_then_positive_fill_consumes_it(
         package_state = session.get(AddAuthorizationPackageState, package.add_package_id)
         assert package_state is not None and package_state.status == "ACTIVE"
 
-    for legacy_field in ("protection_valid", "authorization_valid"):
-        legacy_boolean = create_add_envelope(
+    for legacy_field, legacy_value in (
+        ("protection_valid", True),
+        ("authorization_valid", True),
+        ("current_effective_leverage", "0"),
+    ):
+        legacy_input = create_add_envelope(
             database,
             proposal,
             campaign,
@@ -2253,16 +2293,37 @@ def test_add_zero_fill_releases_unit_then_positive_fill_consumes_it(
             now=datetime.now(UTC),
             candidate_ref=f"add-legacy-{legacy_field}",
         )
-        legacy_payload = dict(legacy_boolean.payload)
+        legacy_payload = dict(legacy_input.payload)
         legacy_eligibility = dict(legacy_payload["add_eligibility"])
-        legacy_eligibility[legacy_field] = True
+        legacy_eligibility[legacy_field] = legacy_value
         legacy_payload["add_eligibility"] = legacy_eligibility
         legacy_result = execute_create(
             database,
-            legacy_boolean.model_copy(update={"payload": legacy_payload}),
+            legacy_input.model_copy(update={"payload": legacy_payload}),
         )
         assert legacy_result.status is CommandStatus.REJECTED
         assert legacy_result.error_code == "EXECUTION_INPUT_INVALID"
+
+    leverage_at_minimum = create_add_envelope(
+        database,
+        proposal,
+        campaign,
+        package,
+        unit,
+        now=datetime.now(UTC),
+        candidate_ref="add-derived-leverage-at-minimum",
+    )
+    leverage_payload = dict(leverage_at_minimum.payload)
+    leverage_eligibility = dict(leverage_payload["add_eligibility"])
+    leverage_eligibility["current_position_equity"] = "60"
+    leverage_eligibility["target_effective_leverage"] = "1.2"
+    leverage_payload["add_eligibility"] = leverage_eligibility
+    leverage_result = execute_create(
+        database,
+        leverage_at_minimum.model_copy(update={"payload": leverage_payload}),
+    )
+    assert leverage_result.status is CommandStatus.REJECTED
+    assert leverage_result.error_code == "ADD_LEVERAGE_NOT_BELOW_MINIMUM"
 
     tampered = create_add_envelope(
         database,
@@ -2305,7 +2366,28 @@ def test_add_zero_fill_releases_unit_then_positive_fill_consumes_it(
         add_reservation = session.execute(
             select(RiskReservation).where(RiskReservation.order_intent_id == first_add_id)
         ).scalar_one()
+        add_event = session.execute(
+            select(OutboxMessage).where(
+                OutboxMessage.event_type == "ShadowOrderIntentRiskReserved",
+                OutboxMessage.message_key == f"OrderIntent:{first_add_id}",
+            )
+        ).scalar_one()
         protected = add_decision.input_snapshot["protected_position_risk"]
+        leverage = add_decision.input_snapshot["add_leverage_calculation"]
+        assert Decimal(leverage["current_position_notional"]) == Decimal("60")
+        assert Decimal(leverage["submitted_campaign_equity"]) == Decimal("72")
+        assert Decimal(leverage["current_effective_leverage"]) == Decimal("0.833333333333333334")
+        assert leverage["campaign_equity_source"] == "CALLER_PENDING_CAMPAIGN_PNL_LEDGER"
+        assert (
+            hash_json({key: value for key, value in leverage.items() if key != "calculation_hash"})
+            == leverage["calculation_hash"]
+        )
+        assert (
+            add_decision.decision["add_leverage_calculation_hash"]
+            == leverage["calculation_hash"]
+            == first_add.data["add_leverage_calculation_hash"]
+            == add_event.payload["add_leverage_calculation_hash"]
+        )
         assert Decimal(protected["current_to_protection_loss"]) == Decimal("5")
         assert Decimal(protected["open_heat"]) == 0
         assert Decimal(protected["protected_profit_giveback"]) == Decimal("5")

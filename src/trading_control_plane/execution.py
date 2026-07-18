@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
-from decimal import ROUND_DOWN, Decimal
+from decimal import ROUND_CEILING, ROUND_DOWN, Decimal, DecimalException, localcontext
 from enum import StrEnum
 from typing import Any, Self
 from uuid import UUID, uuid4
@@ -201,13 +201,52 @@ class AddEligibilitySnapshot(BaseModel):
 
     frozen_return_pct: Decimal
     trend_valid: bool
-    current_effective_leverage: Decimal = Field(ge=0)
     target_effective_leverage: Decimal = Field(gt=0)
-    current_position_equity: Decimal = Field(gt=0)
+    current_position_equity: Decimal = Field(gt=0, max_digits=38, decimal_places=18)
     position_snapshot_ref: str = Field(min_length=1, max_length=255)
     position_snapshot_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
     protection_snapshot_ref: str = Field(min_length=1, max_length=255)
     protection_snapshot_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
+class AddLeverageCalculation(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    position_snapshot_id: UUID
+    position_snapshot_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    current_position_quantity: Decimal = Field(gt=0)
+    mark_price: Decimal = Field(gt=0)
+    contract_multiplier: Decimal = Field(gt=0)
+    submitted_campaign_equity: Decimal = Field(gt=0)
+    campaign_equity_source: str = Field(pattern=r"^CALLER_PENDING_CAMPAIGN_PNL_LEDGER$")
+    current_position_notional: Decimal = Field(gt=0)
+    current_effective_leverage: Decimal = Field(gt=0)
+    calculation_version: str = Field(pattern=r"^add-effective-leverage-v[0-9]+$")
+    calculation_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+    @model_validator(mode="after")
+    def calculation_is_self_consistent(self) -> Self:
+        try:
+            with localcontext() as context:
+                context.prec = 120
+                expected_notional = (
+                    self.current_position_quantity * self.mark_price * self.contract_multiplier
+                )
+                expected_leverage = (expected_notional / self.submitted_campaign_equity).quantize(
+                    QUANTUM,
+                    rounding=ROUND_CEILING,
+                )
+        except DecimalException as exc:
+            raise ValueError("add leverage calculation cannot be represented safely") from exc
+        if (
+            self.current_position_notional != expected_notional
+            or self.current_effective_leverage != expected_leverage
+        ):
+            raise ValueError("add leverage calculation is inconsistent")
+        material = self.model_dump(mode="json", exclude={"calculation_hash"})
+        if self.calculation_hash != hash_json(material):
+            raise ValueError("add leverage calculation hash mismatch")
+        return self
 
 
 class CreateExecutionIntentRequest(BaseModel):
@@ -583,8 +622,8 @@ class DurableExposureResolver:
 
 
 class ExecutionIntentService:
-    command_type = "execution.intent.create.v10"
-    payload_schema_version = 10
+    command_type = "execution.intent.create.v11"
+    payload_schema_version = 11
 
     def __init__(
         self,
@@ -729,6 +768,15 @@ class ExecutionIntentService:
             if request.intent_kind is IntentKind.ADD
             else None
         )
+        add_leverage_calculation = (
+            self._derive_and_validate_add_leverage(
+                request,
+                authorization_rows,
+                protected_position_risk,
+            )
+            if protected_position_risk is not None
+            else None
+        )
         verified_exposure = self._durable_exposure_resolver.resolve(
             session,
             request,
@@ -787,6 +835,7 @@ class ExecutionIntentService:
                 evaluation,
                 verified_capital,
                 verified_exposure,
+                add_leverage_calculation,
                 now,
                 "ADD_REQUIRES_NORMAL_SYSTEM_STATE",
             )
@@ -801,6 +850,7 @@ class ExecutionIntentService:
                 evaluation,
                 verified_capital,
                 verified_exposure,
+                add_leverage_calculation,
                 now,
                 evaluation.primary_reason_code,
             )
@@ -821,6 +871,7 @@ class ExecutionIntentService:
                 evaluation,
                 verified_capital,
                 verified_exposure,
+                add_leverage_calculation,
                 now,
                 "FROZEN_FUNDING_ENVELOPE_EXCEEDED",
             )
@@ -840,6 +891,7 @@ class ExecutionIntentService:
                 evaluation,
                 verified_capital,
                 verified_exposure,
+                add_leverage_calculation,
                 now,
                 "FROZEN_AUTHORIZATION_CAPACITY_EXCEEDED",
             )
@@ -859,6 +911,7 @@ class ExecutionIntentService:
                 evaluation,
                 verified_capital,
                 verified_exposure,
+                add_leverage_calculation,
                 now,
                 "EXECUTION_VALIDITY_EXPIRED",
             )
@@ -870,8 +923,14 @@ class ExecutionIntentService:
             authorization_rows,
             verified_capital,
             verified_exposure,
+            add_leverage_calculation,
         )
         decision_payload = evaluation.model_dump(mode="json")
+        decision_payload["add_leverage_calculation_hash"] = (
+            add_leverage_calculation.calculation_hash
+            if add_leverage_calculation is not None
+            else None
+        )
         decision_payload["approved_reserved_heat"] = str(reserved_heat)
         decision_payload["execution_eligible"] = False
         decision_payload["reservation_created"] = True
@@ -1185,6 +1244,11 @@ class ExecutionIntentService:
                 "risk_fact_set_reason_codes": list(risk_fact_set.reason_codes),
                 "market_fact_payload_hash": evaluation.market_fact_payload_hash,
                 "market_observation_payload_hash": (evaluation.market_observation_payload_hash),
+                "add_leverage_calculation_hash": (
+                    add_leverage_calculation.calculation_hash
+                    if add_leverage_calculation is not None
+                    else None
+                ),
                 "execution_mode": "SHADOW",
                 "dispatch_eligible": False,
                 "reservation_created": True,
@@ -1223,6 +1287,11 @@ class ExecutionIntentService:
                         "market_fact_payload_hash": evaluation.market_fact_payload_hash,
                         "market_observation_payload_hash": (
                             evaluation.market_observation_payload_hash
+                        ),
+                        "add_leverage_calculation_hash": (
+                            add_leverage_calculation.calculation_hash
+                            if add_leverage_calculation is not None
+                            else None
                         ),
                         "dispatch_eligible": False,
                     },
@@ -1435,11 +1504,6 @@ class ExecutionIntentService:
             raise CommandRejected("ADD_MILESTONE_NOT_MET", "frozen-return milestone is not met")
         if not eligibility.trend_valid:
             raise CommandRejected("ADD_ELIGIBILITY_FAILED", "add hard gate failed")
-        if eligibility.current_effective_leverage >= package.target_leverage_min:
-            raise CommandRejected(
-                "ADD_LEVERAGE_NOT_BELOW_MINIMUM",
-                "effective leverage is not below the frozen minimum",
-            )
         if not (
             package.target_leverage_min
             <= eligibility.target_effective_leverage
@@ -1456,6 +1520,67 @@ class ExecutionIntentService:
             }
         )
         return rows
+
+    @staticmethod
+    def _derive_and_validate_add_leverage(
+        request: CreateExecutionIntentRequest,
+        authorization_rows: dict[str, Any],
+        protected_position_risk: VerifiedProtectedPositionRisk,
+    ) -> AddLeverageCalculation:
+        eligibility = request.add_eligibility
+        if eligibility is None:  # pragma: no cover - Pydantic enforces
+            raise RuntimeError("missing add eligibility")
+        projection = protected_position_risk.projection
+        if (
+            projection.position_snapshot_id is None
+            or projection.position_snapshot_hash is None
+            or projection.quantity is None
+            or projection.mark_price is None
+            or projection.contract_multiplier is None
+        ):  # pragma: no cover - confirmed projection enforces
+            raise RuntimeError("confirmed protected-position risk lacks leverage inputs")
+        try:
+            with localcontext() as context:
+                context.prec = 120
+                current_notional = (
+                    projection.quantity * projection.mark_price * projection.contract_multiplier
+                )
+                current_effective_leverage = (
+                    current_notional / eligibility.current_position_equity
+                ).quantize(QUANTUM, rounding=ROUND_CEILING)
+        except DecimalException as exc:
+            raise CommandRejected(
+                "ADD_LEVERAGE_CALCULATION_INVALID",
+                "canonical current leverage cannot be represented safely",
+            ) from exc
+        draft = AddLeverageCalculation.model_construct(
+            position_snapshot_id=projection.position_snapshot_id,
+            position_snapshot_hash=projection.position_snapshot_hash,
+            current_position_quantity=projection.quantity,
+            mark_price=projection.mark_price,
+            contract_multiplier=projection.contract_multiplier,
+            submitted_campaign_equity=eligibility.current_position_equity,
+            campaign_equity_source="CALLER_PENDING_CAMPAIGN_PNL_LEDGER",
+            current_position_notional=current_notional,
+            current_effective_leverage=current_effective_leverage,
+            calculation_version="add-effective-leverage-v1",
+            calculation_hash="0" * 64,
+        )
+        calculation = AddLeverageCalculation.model_validate(
+            {
+                **draft.model_dump(mode="python"),
+                "calculation_hash": hash_json(
+                    draft.model_dump(mode="json", exclude={"calculation_hash"})
+                ),
+            }
+        )
+        package = authorization_rows["add_package"]
+        if calculation.current_effective_leverage >= package.target_leverage_min:
+            raise CommandRejected(
+                "ADD_LEVERAGE_NOT_BELOW_MINIMUM",
+                "canonical notional over submitted campaign equity is not below the frozen minimum",
+            )
+        return calculation
 
     @staticmethod
     def _lock_competing_scopes(
@@ -1634,6 +1759,7 @@ class ExecutionIntentService:
         rows: dict[str, Any],
         verified_capital: VerifiedCapitalProjection,
         verified_exposure: VerifiedDurableExposure,
+        add_leverage_calculation: AddLeverageCalculation | None,
     ) -> dict[str, Any]:
         snapshot: dict[str, Any] = {
             "request": request.model_dump(mode="json"),
@@ -1665,6 +1791,9 @@ class ExecutionIntentService:
             },
         }
         if request.intent_kind is IntentKind.ADD:
+            if add_leverage_calculation is None:  # pragma: no cover - service enforces
+                raise RuntimeError("ADD input snapshot lacks leverage calculation")
+            snapshot["add_leverage_calculation"] = add_leverage_calculation.model_dump(mode="json")
             snapshot["add_state_versions"] = {
                 "package": rows["add_package_state"].version,
                 "unit": rows["add_unit_state"].version,
@@ -1703,6 +1832,7 @@ class ExecutionIntentService:
         evaluation: RiskEvaluationResult,
         verified_capital: VerifiedCapitalProjection,
         verified_exposure: VerifiedDurableExposure,
+        add_leverage_calculation: AddLeverageCalculation | None,
         now: datetime,
         reason_code: str,
     ) -> CommandOutcome:
@@ -1718,7 +1848,16 @@ class ExecutionIntentService:
             "durable_exposure_snapshot": verified_exposure.snapshot.model_dump(mode="json"),
             "durable_exposure_snapshot_hash": verified_exposure.snapshot_hash,
         }
+        if add_leverage_calculation is not None:
+            input_snapshot["add_leverage_calculation"] = add_leverage_calculation.model_dump(
+                mode="json"
+            )
         decision_payload = evaluation.model_dump(mode="json")
+        decision_payload["add_leverage_calculation_hash"] = (
+            add_leverage_calculation.calculation_hash
+            if add_leverage_calculation is not None
+            else None
+        )
         decision_payload["result"] = "DENY"
         decision_payload["primary_reason_code"] = reason_code
         decision_payload["final_quantity"] = "0"
@@ -1841,6 +1980,11 @@ class ExecutionIntentService:
                 "risk_fact_set_reason_codes": list(evaluation_input.risk_fact_set.reason_codes),
                 "market_fact_payload_hash": evaluation.market_fact_payload_hash,
                 "market_observation_payload_hash": (evaluation.market_observation_payload_hash),
+                "add_leverage_calculation_hash": (
+                    add_leverage_calculation.calculation_hash
+                    if add_leverage_calculation is not None
+                    else None
+                ),
                 "dispatch_eligible": False,
                 "reservation_created": False,
                 "order_intent_created": False,
@@ -1888,6 +2032,11 @@ class ExecutionIntentService:
                         "market_fact_payload_hash": evaluation.market_fact_payload_hash,
                         "market_observation_payload_hash": (
                             evaluation.market_observation_payload_hash
+                        ),
+                        "add_leverage_calculation_hash": (
+                            add_leverage_calculation.calculation_hash
+                            if add_leverage_calculation is not None
+                            else None
                         ),
                     },
                 ),
