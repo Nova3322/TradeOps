@@ -133,6 +133,14 @@ class ExecutionRiskDecision(Base):
             "AND capital_projection_version ~ '^portfolio-mtm-v[0-9]+$'",
             name="ck_exec_risk_capital_binding_integrity",
         ),
+        CheckConstraint(
+            "(catalog_record_id IS NULL AND catalog_version IS NULL "
+            "AND catalog_classification_version IS NULL AND catalog_record_hash IS NULL) OR "
+            "(catalog_record_id IS NOT NULL AND catalog_version IS NOT NULL "
+            "AND catalog_classification_version IS NOT NULL "
+            "AND length(catalog_record_hash) = 64)",
+            name="ck_exec_risk_catalog_binding_integrity",
+        ),
         CheckConstraint("execution_eligible = false", name="ck_exec_risk_shadow_only"),
         ForeignKeyConstraint(
             ["risk_policy_id", "organization_id", "risk_policy_version"],
@@ -142,6 +150,22 @@ class ExecutionRiskDecision(Base):
                 "risk_policies.policy_version",
             ],
             name="fk_exec_risk_policy_binding",
+            ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            [
+                "catalog_record_id",
+                "organization_id",
+                "catalog_version",
+                "catalog_classification_version",
+            ],
+            [
+                "instrument_catalog_records.catalog_record_id",
+                "instrument_catalog_records.organization_id",
+                "instrument_catalog_records.catalog_version",
+                "instrument_catalog_records.classification_version",
+            ],
+            name="fk_exec_risk_instrument_catalog",
             ondelete="RESTRICT",
         ),
         ForeignKeyConstraint(
@@ -179,6 +203,10 @@ class ExecutionRiskDecision(Base):
     capital_projection_version: Mapped[str] = mapped_column(String(40), nullable=False)
     capital_projection_hash: Mapped[str] = mapped_column(String(64), nullable=False)
     durable_exposure_snapshot_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    catalog_record_id: Mapped[UUID | None] = mapped_column(Uuid(as_uuid=True), nullable=True)
+    catalog_version: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    catalog_classification_version: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    catalog_record_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
     system_risk_state: Mapped[str] = mapped_column(String(32), nullable=False)
     result: Mapped[str] = mapped_column(String(20), nullable=False)
     primary_reason_code: Mapped[str] = mapped_column(String(160), nullable=False)

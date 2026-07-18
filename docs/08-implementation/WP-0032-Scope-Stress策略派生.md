@@ -1,5 +1,8 @@
 # WP-0032：Scope Stress 策略派生
 
+> 后续状态：WP-0033 已将风险/意图命令升级为 v6，删除 caller `instrument_classified`，并由不可变
+> exact Instrument Catalog 记录验证分类。本文件保留 WP-0032 的 v5 历史合同。
+
 ## 1. 交付目标与权威边界
 
 权威策略合同要求 Stress Heat 使用冻结压力场景独立重算，不是调用方可填写的第四个风险余额，也不能

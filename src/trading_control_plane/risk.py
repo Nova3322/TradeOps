@@ -39,6 +39,11 @@ from trading_control_plane.durable_exposure import (
     DurableExposureSnapshot,
     DurableExposureSnapshotService,
 )
+from trading_control_plane.instrument_catalog import (
+    InstrumentCatalogValidator,
+    InstrumentClassificationValidationRequest,
+    InstrumentClassificationValidationResult,
+)
 from trading_control_plane.metrics import (
     RISK_DECISION_DURATION,
     RISK_DECISIONS,
@@ -441,7 +446,6 @@ class RiskPrecheckRequest(BaseModel):
     requested: RequestedRiskIncrease
     scope_risks: tuple[ScopeRiskInput, ...]
     facts: tuple[FactObservation, ...]
-    instrument_classified: bool
     protection_available: bool
 
     @model_validator(mode="after")
@@ -469,6 +473,27 @@ class RiskPrecheckRequest(BaseModel):
             * self.requested.requested_quantity
             * self.binding.contract_multiplier
         )
+
+
+def instrument_classification_validation_request(
+    request: RiskPrecheckRequest,
+    validation_time: datetime,
+) -> InstrumentClassificationValidationRequest:
+    binding = request.binding
+    return InstrumentClassificationValidationRequest(
+        organization_id=request.organization_id,
+        venue=binding.venue,
+        execution_domain=binding.execution_domain,
+        canonical_instrument_id=binding.instrument_identity,
+        catalog_version=binding.catalog_version,
+        classification_version=binding.instrument_scope_version,
+        expected_underlying_id=binding.underlying_id,
+        expected_sector=binding.sector_id,
+        expected_risk_cluster_id=binding.risk_cluster_id,
+        expected_settlement_asset=binding.settlement_asset,
+        expected_contract_multiplier=binding.contract_multiplier,
+        validation_time=validation_time,
+    )
 
 
 class CostStressBreakdown(BaseModel):
@@ -583,6 +608,7 @@ class RiskEvaluationInput(BaseModel):
     policy_valid_until: datetime
     system_risk_state: SystemRiskState
     capability_validation: CapabilityValidationResult
+    instrument_classification: InstrumentClassificationValidationResult
     decision_time: datetime
     protected_position_risk: VerifiedProtectedPositionRisk | None = None
 
@@ -681,6 +707,10 @@ class RiskEvaluationResult(BaseModel):
         default=None,
         pattern=r"^[0-9a-f]{64}$",
     )
+    catalog_record_id: UUID | None
+    catalog_record_hash: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+    catalog_evidence_hash: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+    catalog_validation_reason_codes: tuple[str, ...]
     requested_base_heat: Decimal
     requested_fee_stress: Decimal
     requested_stop_penetration_stress: Decimal
@@ -1055,7 +1085,7 @@ class RiskEvaluator:
         if current_mtm <= ZERO:
             reasons.append("PORTFOLIO_EQUITY_NON_POSITIVE")
             hard_failure = True
-        if not request.instrument_classified:
+        if not evaluation.instrument_classification.valid:
             reasons.append("INSTRUMENT_UNCLASSIFIED")
             hard_failure = True
         if not evaluation.capability_validation.valid:
@@ -1245,6 +1275,7 @@ class RiskEvaluator:
             [
                 evaluation.policy_valid_until,
                 evaluation.capability_validation.valid_until,
+                evaluation.instrument_classification.valid_until,
                 *fact_expiries,
                 *(
                     [evaluation.protected_position_risk.valid_until]
@@ -1278,6 +1309,10 @@ class RiskEvaluator:
                 if evaluation.protected_position_risk is not None
                 else None
             ),
+            catalog_record_id=evaluation.instrument_classification.catalog_record_id,
+            catalog_record_hash=evaluation.instrument_classification.record_hash,
+            catalog_evidence_hash=evaluation.instrument_classification.evidence_hash,
+            catalog_validation_reason_codes=(evaluation.instrument_classification.reason_codes),
             requested_base_heat=request.requested_base_heat,
             requested_fee_stress=cost_stress.fee_stress,
             requested_stop_penetration_stress=cost_stress.stop_penetration_stress,
@@ -1298,19 +1333,23 @@ class RiskEvaluator:
 class RiskPrecheckService:
     """Persists one immutable shadow precheck and emits audit/outbox evidence."""
 
-    command_type = "risk.precheck.evaluate.v5"
-    payload_schema_version = 5
+    command_type = "risk.precheck.evaluate.v6"
+    payload_schema_version = 6
 
     def __init__(
         self,
         evaluator: RiskEvaluator | None = None,
         certificate_validator: CapabilityCertificateValidator | None = None,
+        instrument_catalog_validator: InstrumentCatalogValidator | None = None,
         capital_projection_resolver: CapitalProjectionResolver | None = None,
         durable_exposure_resolver: ProposalDurableExposureResolver | None = None,
         clock: Callable[[], datetime] | None = None,
     ) -> None:
         self._evaluator = evaluator or RiskEvaluator()
         self._certificate_validator = certificate_validator or CapabilityCertificateValidator()
+        self._instrument_catalog_validator = (
+            instrument_catalog_validator or InstrumentCatalogValidator()
+        )
         self._capital_projection_resolver = (
             capital_projection_resolver or CapitalProjectionResolver()
         )
@@ -1393,6 +1432,10 @@ class RiskPrecheckService:
             session,
             capability_validation_request(verified_request, decided_at),
         )
+        instrument_classification = self._instrument_catalog_validator.validate(
+            session,
+            instrument_classification_validation_request(verified_request, decided_at),
+        )
         state_record = session.execute(
             select(SystemRiskStateRecord)
             .where(SystemRiskStateRecord.organization_id == request.organization_id)
@@ -1411,6 +1454,7 @@ class RiskPrecheckService:
             policy_valid_until=policy_record.valid_until,
             system_risk_state=system_state,
             capability_validation=capability_validation,
+            instrument_classification=instrument_classification,
             decision_time=decided_at,
         )
         result = self._evaluator.evaluate(evaluation_input)
@@ -1465,6 +1509,18 @@ class RiskPrecheckService:
                 capital_projection_version=verified_capital.projection.projection_version,
                 capital_projection_hash=verified_capital.projection_hash,
                 durable_exposure_snapshot_hash=verified_exposure.snapshot_hash,
+                catalog_record_id=instrument_classification.catalog_record_id,
+                catalog_version=(
+                    verified_request.binding.catalog_version
+                    if instrument_classification.catalog_record_id is not None
+                    else None
+                ),
+                catalog_classification_version=(
+                    verified_request.binding.instrument_scope_version
+                    if instrument_classification.catalog_record_id is not None
+                    else None
+                ),
+                catalog_record_hash=instrument_classification.record_hash,
                 requested_quantity=result.requested_quantity,
                 max_safe_quantity=result.max_safe_quantity,
                 final_quantity=result.final_quantity,
@@ -1515,6 +1571,13 @@ class RiskPrecheckService:
                 "capital_projection_version": verified_capital.projection.projection_version,
                 "capital_projection_hash": verified_capital.projection_hash,
                 "durable_exposure_snapshot_hash": verified_exposure.snapshot_hash,
+                "catalog_record_id": (
+                    str(instrument_classification.catalog_record_id)
+                    if instrument_classification.catalog_record_id is not None
+                    else None
+                ),
+                "catalog_record_hash": instrument_classification.record_hash,
+                "catalog_validation_reason_codes": list(instrument_classification.reason_codes),
                 "valid_until": result.valid_until.isoformat(),
                 "execution_eligible": False,
                 "reservation_created": False,
@@ -1540,6 +1603,15 @@ class RiskPrecheckService:
                         ),
                         "capital_projection_hash": verified_capital.projection_hash,
                         "durable_exposure_snapshot_hash": verified_exposure.snapshot_hash,
+                        "catalog_record_id": (
+                            str(instrument_classification.catalog_record_id)
+                            if instrument_classification.catalog_record_id is not None
+                            else None
+                        ),
+                        "catalog_record_hash": instrument_classification.record_hash,
+                        "catalog_validation_reason_codes": list(
+                            instrument_classification.reason_codes
+                        ),
                         "execution_eligible": False,
                         "reservation_created": False,
                     },

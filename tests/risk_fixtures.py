@@ -18,6 +18,7 @@ from trading_control_plane.capital_scope import (
     RiskInclusionMode as CapitalScopeRiskInclusionMode,
 )
 from trading_control_plane.commands import hash_json
+from trading_control_plane.instrument_catalog import InstrumentClassificationValidationResult
 from trading_control_plane.projections import CurrentAccountEquityScope
 from trading_control_plane.risk import (
     CANONICAL_COST_STRESS_MODEL_VERSION,
@@ -227,7 +228,6 @@ def make_request(
     fact_status: FactStatus = FactStatus.KNOWN,
     fact_age: timedelta = timedelta(milliseconds=100),
     scope_risks: tuple[ScopeRiskInput, ...] | None = None,
-    instrument_classified: bool = True,
     protection_available: bool = True,
 ) -> RiskPrecheckRequest:
     observed_at = now or datetime.now(UTC)
@@ -334,7 +334,6 @@ def make_request(
             )
             for fact_type in FactType
         ),
-        instrument_classified=instrument_classified,
         protection_available=protection_available,
     )
 
@@ -346,6 +345,7 @@ def make_evaluation(
     policy: RiskPolicyParameters | None = None,
     system_risk_state: SystemRiskState = SystemRiskState.NORMAL,
     capability_valid: bool = True,
+    classification_valid: bool = True,
 ) -> RiskEvaluationInput:
     decision_time = now or datetime.now(UTC)
     certificate_valid_until = (
@@ -371,6 +371,24 @@ def make_evaluation(
             validation_snapshot={
                 "certificate_id": "test-only:certificate-fixture",
                 "valid": capability_valid,
+            },
+        ),
+        instrument_classification=InstrumentClassificationValidationResult(
+            valid=classification_valid,
+            reason_codes=(() if classification_valid else ("INSTRUMENT_CATALOG_RECORD_NOT_FOUND",)),
+            catalog_record_id=(
+                UUID("00000000-0000-0000-0000-000000000033") if classification_valid else None
+            ),
+            record_hash="5" * 64 if classification_valid else None,
+            evidence_hash="6" * 64 if classification_valid else None,
+            valid_until=(
+                decision_time + timedelta(days=1) if classification_valid else decision_time
+            ),
+            validation_snapshot={
+                "catalog_record_id": (
+                    "00000000-0000-0000-0000-000000000033" if classification_valid else None
+                ),
+                "valid": classification_valid,
             },
         ),
         decision_time=decision_time,

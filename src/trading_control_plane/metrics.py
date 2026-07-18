@@ -177,3 +177,15 @@ PORTFOLIO_MTM_PROJECTION_QUERIES = Counter(
     "Managed-scope portfolio MTM queries by bounded state and primary reason.",
     labelnames=("projection_state", "primary_reason"),
 )
+
+INSTRUMENT_CATALOG_REGISTRATIONS = Counter(
+    "trading_instrument_catalog_registrations_total",
+    "Immutable SHADOW-only instrument catalog registrations by bounded result.",
+    labelnames=("result",),
+)
+
+INSTRUMENT_CATALOG_VALIDATIONS = Counter(
+    "trading_instrument_catalog_validations_total",
+    "Exact durable instrument classification validations by result and primary reason.",
+    labelnames=("result", "primary_reason"),
+)

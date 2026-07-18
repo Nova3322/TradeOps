@@ -10,6 +10,7 @@ from trading_control_plane import (  # noqa: F401
     capital_scope_models,
     execution_models,
     iam_models,
+    instrument_catalog_models,
     models,
     proposal_models,
     reconciliation_models,

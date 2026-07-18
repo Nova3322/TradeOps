@@ -440,6 +440,38 @@ def test_caller_supplied_certificate_boolean_is_rejected_and_derived_invalidity_
     assert result.max_safe_quantity == 0
 
 
+def test_caller_instrument_boolean_is_rejected_and_catalog_invalidity_denies() -> None:
+    payload = make_request().model_dump(mode="python")
+    payload["instrument_classified"] = True
+
+    with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
+        RiskPrecheckRequest.model_validate(payload)
+
+    result = RiskEvaluator().evaluate(make_evaluation(classification_valid=False))
+    assert result.result is RiskDecisionResult.DENY
+    assert result.primary_reason_code == "INSTRUMENT_UNCLASSIFIED"
+    assert result.catalog_record_id is None
+    assert result.catalog_validation_reason_codes == ("INSTRUMENT_CATALOG_RECORD_NOT_FOUND",)
+
+
+def test_allow_validity_is_bounded_by_exact_catalog_record() -> None:
+    now = datetime(2026, 7, 18, 12, tzinfo=UTC)
+    evaluation = make_evaluation(now=now)
+    catalog_valid_until = now + timedelta(seconds=1)
+    bounded = evaluation.model_copy(
+        update={
+            "instrument_classification": evaluation.instrument_classification.model_copy(
+                update={"valid_until": catalog_valid_until}
+            )
+        }
+    )
+
+    result = RiskEvaluator().evaluate(bounded)
+
+    assert result.result is RiskDecisionResult.ALLOW
+    assert result.valid_until == catalog_valid_until
+
+
 @given(
     frozen_capital=st.decimals(
         min_value=Decimal("1000"),

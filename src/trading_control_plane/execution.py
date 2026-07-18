@@ -36,6 +36,7 @@ from trading_control_plane.execution_models import (
     RiskLedgerEntry,
     RiskReservation,
 )
+from trading_control_plane.instrument_catalog import InstrumentCatalogValidator
 from trading_control_plane.metrics import (
     EXECUTION_CANONICAL_FACT_BINDINGS,
     EXECUTION_FACT_AUTHORITY_MODES,
@@ -72,6 +73,7 @@ from trading_control_plane.risk import (
     VerifiedCapitalProjection,
     VerifiedProtectedPositionRisk,
     capability_validation_request,
+    instrument_classification_validation_request,
 )
 from trading_control_plane.risk_models import RiskPolicyRecord
 from trading_control_plane.sender_fencing_models import (
@@ -579,13 +581,14 @@ class DurableExposureResolver:
 
 
 class ExecutionIntentService:
-    command_type = "execution.intent.create.v5"
-    payload_schema_version = 5
+    command_type = "execution.intent.create.v6"
+    payload_schema_version = 6
 
     def __init__(
         self,
         evaluator: RiskEvaluator | None = None,
         certificate_validator: CapabilityCertificateValidator | None = None,
+        instrument_catalog_validator: InstrumentCatalogValidator | None = None,
         capital_projection_resolver: CapitalProjectionResolver | None = None,
         durable_exposure_resolver: DurableExposureResolver | None = None,
         protected_position_risk_resolver: CurrentProtectedPositionRiskResolver | None = None,
@@ -593,6 +596,9 @@ class ExecutionIntentService:
     ) -> None:
         self._evaluator = evaluator or RiskEvaluator()
         self._certificate_validator = certificate_validator or CapabilityCertificateValidator()
+        self._instrument_catalog_validator = (
+            instrument_catalog_validator or InstrumentCatalogValidator()
+        )
         self._capital_projection_resolver = (
             capital_projection_resolver or CapitalProjectionResolver()
         )
@@ -728,6 +734,11 @@ class ExecutionIntentService:
             capability_validation_request(request.risk_request, now),
             lock=True,
         )
+        instrument_classification = self._instrument_catalog_validator.validate(
+            session,
+            instrument_classification_validation_request(request.risk_request, now),
+            lock=True,
+        )
         evaluation_input = RiskEvaluationInput(
             request=request.risk_request,
             risk_policy_id=policy_record.risk_policy_id,
@@ -736,6 +747,7 @@ class ExecutionIntentService:
             policy_valid_until=policy_record.valid_until,
             system_risk_state=system_state,
             capability_validation=capability_validation,
+            instrument_classification=instrument_classification,
             decision_time=now,
             protected_position_risk=verified_exposure.protected_position_risk,
         )
@@ -860,6 +872,18 @@ class ExecutionIntentService:
                 capital_projection_version=verified_capital.projection.projection_version,
                 capital_projection_hash=verified_capital.projection_hash,
                 durable_exposure_snapshot_hash=verified_exposure.snapshot_hash,
+                catalog_record_id=instrument_classification.catalog_record_id,
+                catalog_version=(
+                    request.risk_request.binding.catalog_version
+                    if instrument_classification.catalog_record_id is not None
+                    else None
+                ),
+                catalog_classification_version=(
+                    request.risk_request.binding.instrument_scope_version
+                    if instrument_classification.catalog_record_id is not None
+                    else None
+                ),
+                catalog_record_hash=instrument_classification.record_hash,
                 system_risk_state=system_state.value,
                 result="ALLOW",
                 primary_reason_code="ORDER_PRECHECK_PASSED",
@@ -1097,6 +1121,13 @@ class ExecutionIntentService:
                 "risk_exposure_status": "RESERVED",
                 "capital_projection_hash": verified_capital.projection_hash,
                 "durable_exposure_snapshot_hash": verified_exposure.snapshot_hash,
+                "catalog_record_id": (
+                    str(instrument_classification.catalog_record_id)
+                    if instrument_classification.catalog_record_id is not None
+                    else None
+                ),
+                "catalog_record_hash": instrument_classification.record_hash,
+                "catalog_validation_reason_codes": list(instrument_classification.reason_codes),
                 "execution_mode": "SHADOW",
                 "dispatch_eligible": False,
                 "reservation_created": True,
@@ -1113,6 +1144,12 @@ class ExecutionIntentService:
                         "risk_reservation_id": str(risk_reservation_id),
                         "capital_projection_hash": verified_capital.projection_hash,
                         "durable_exposure_snapshot_hash": verified_exposure.snapshot_hash,
+                        "catalog_record_id": (
+                            str(instrument_classification.catalog_record_id)
+                            if instrument_classification.catalog_record_id is not None
+                            else None
+                        ),
+                        "catalog_record_hash": instrument_classification.record_hash,
                         "dispatch_eligible": False,
                     },
                 ),
@@ -1637,6 +1674,18 @@ class ExecutionIntentService:
                 capital_projection_version=verified_capital.projection.projection_version,
                 capital_projection_hash=verified_capital.projection_hash,
                 durable_exposure_snapshot_hash=verified_exposure.snapshot_hash,
+                catalog_record_id=evaluation_input.instrument_classification.catalog_record_id,
+                catalog_version=(
+                    request.risk_request.binding.catalog_version
+                    if evaluation_input.instrument_classification.catalog_record_id is not None
+                    else None
+                ),
+                catalog_classification_version=(
+                    request.risk_request.binding.instrument_scope_version
+                    if evaluation_input.instrument_classification.catalog_record_id is not None
+                    else None
+                ),
+                catalog_record_hash=evaluation_input.instrument_classification.record_hash,
                 system_risk_state=evaluation_input.system_risk_state.value,
                 result="DENY",
                 primary_reason_code=reason_code,
@@ -1672,6 +1721,15 @@ class ExecutionIntentService:
                 "primary_reason_code": reason_code,
                 "capital_projection_hash": verified_capital.projection_hash,
                 "durable_exposure_snapshot_hash": verified_exposure.snapshot_hash,
+                "catalog_record_id": (
+                    str(evaluation_input.instrument_classification.catalog_record_id)
+                    if evaluation_input.instrument_classification.catalog_record_id is not None
+                    else None
+                ),
+                "catalog_record_hash": evaluation_input.instrument_classification.record_hash,
+                "catalog_validation_reason_codes": list(
+                    evaluation_input.instrument_classification.reason_codes
+                ),
                 "dispatch_eligible": False,
                 "reservation_created": False,
                 "order_intent_created": False,
@@ -1687,6 +1745,15 @@ class ExecutionIntentService:
                         "primary_reason_code": reason_code,
                         "capital_projection_hash": verified_capital.projection_hash,
                         "durable_exposure_snapshot_hash": verified_exposure.snapshot_hash,
+                        "catalog_record_id": (
+                            str(evaluation_input.instrument_classification.catalog_record_id)
+                            if evaluation_input.instrument_classification.catalog_record_id
+                            is not None
+                            else None
+                        ),
+                        "catalog_record_hash": (
+                            evaluation_input.instrument_classification.record_hash
+                        ),
                     },
                 ),
             ),

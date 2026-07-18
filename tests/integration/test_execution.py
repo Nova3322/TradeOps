@@ -12,6 +12,10 @@ from sqlalchemy import func, select, text, update
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.orm import Session
 
+from tests.instrument_catalog_fixtures import (
+    instrument_catalog_request_for_risk,
+    register_instrument_catalog,
+)
 from tests.integration.test_capital_scope import _register
 from tests.integration.test_projections import _prepare_collecting_run, _record_account_equity
 from tests.integration.test_trading_authorization import (
@@ -83,6 +87,7 @@ from trading_control_plane.execution_models import (
     RiskLedgerEntry,
     RiskReservation,
 )
+from trading_control_plane.instrument_catalog_models import InstrumentCatalogRecord
 from trading_control_plane.models import AuditEvent, OutboxMessage
 from trading_control_plane.proposal_models import FrozenProposalVersion
 from trading_control_plane.reconciliation import (
@@ -237,7 +242,10 @@ def seed_execution_capital_projection(database: Database) -> datetime:
 
 
 def prepare_authorization(
-    database: Database, *, auto_add: bool = False
+    database: Database,
+    *,
+    auto_add: bool = False,
+    register_catalog: bool = True,
 ) -> tuple[FrozenProposalVersion, Campaign, InitialOrderAuthorization]:
     proposal, decision = prepare_approved(
         database,
@@ -256,6 +264,14 @@ def prepare_authorization(
     )
     assert result.status is CommandStatus.COMPLETED
     seed_execution_capital_projection(database)
+    if register_catalog:
+        catalog_now = datetime.now(UTC)
+        catalog_request = instrument_catalog_request_for_risk(
+            execution_risk_request(proposal, now=catalog_now),
+            now=catalog_now,
+        )
+        catalog_result = register_instrument_catalog(database, catalog_request, now=catalog_now)
+        assert catalog_result.status is CommandStatus.COMPLETED
     with database.session_factory.begin() as session:
         campaign = session.execute(select(Campaign)).scalar_one()
         initial = session.execute(select(InitialOrderAuthorization)).scalar_one()
@@ -387,7 +403,7 @@ def create_intent_envelope(
     request = risk_request or execution_risk_request(proposal, now=now)
     return CommandEnvelope(
         idempotency_key=idempotency_key or f"execution-intent-{uuid4()}",
-        command_type="execution.intent.create.v5",
+        command_type="execution.intent.create.v6",
         object_type="Campaign",
         object_id=str(campaign.campaign_id),
         expected_version=1,
@@ -398,7 +414,7 @@ def create_intent_envelope(
         issued_at=now,
         expires_at=now + timedelta(minutes=2),
         auth_context_ref="internal:oms-risk-reservation-service",
-        payload_schema_version=5,
+        payload_schema_version=6,
         reason="create non-dispatchable shadow intent",
         payload={
             "intent_kind": "INITIAL",
@@ -433,7 +449,7 @@ def proposal_precheck_envelope(request: RiskPrecheckRequest) -> CommandEnvelope:
         issued_at=now,
         expires_at=now + timedelta(minutes=2),
         auth_context_ref="test-only:proposal-precheck-auth",
-        payload_schema_version=5,
+        payload_schema_version=6,
         reason="evaluate proposal against existing durable exposure",
         payload=request.model_dump(mode="json"),
     )
@@ -487,7 +503,7 @@ def create_add_envelope(
     )
     return CommandEnvelope(
         idempotency_key=f"execution-add-{uuid4()}",
-        command_type="execution.intent.create.v5",
+        command_type="execution.intent.create.v6",
         object_type="Campaign",
         object_id=str(campaign.campaign_id),
         expected_version=2,
@@ -498,7 +514,7 @@ def create_add_envelope(
         issued_at=now,
         expires_at=now + timedelta(minutes=2),
         auth_context_ref="internal:oms-risk-reservation-service",
-        payload_schema_version=5,
+        payload_schema_version=6,
         reason="create non-dispatchable shadow add intent",
         payload={
             "intent_kind": "ADD",
@@ -1181,7 +1197,7 @@ def execute_fact(
     return result
 
 
-def test_execution_intent_legacy_commands_and_wrong_v5_schema_are_rejected(
+def test_execution_intent_legacy_commands_and_wrong_v6_schema_are_rejected(
     database: Database,
 ) -> None:
     proposal, campaign, initial = prepare_authorization(database)
@@ -1197,6 +1213,9 @@ def test_execution_intent_legacy_commands_and_wrong_v5_schema_are_rejected(
     v4 = create_intent_envelope(proposal, campaign, initial, now=datetime.now(UTC)).model_copy(
         update={"command_type": "execution.intent.create.v4"}
     )
+    v5 = create_intent_envelope(proposal, campaign, initial, now=datetime.now(UTC)).model_copy(
+        update={"command_type": "execution.intent.create.v5"}
+    )
     old_field = create_intent_envelope(proposal, campaign, initial, now=datetime.now(UTC))
     old_payload = dict(old_field.payload)
     old_risk_request = dict(old_payload["risk_request"])
@@ -1205,6 +1224,12 @@ def test_execution_intent_legacy_commands_and_wrong_v5_schema_are_rejected(
     old_risk_request["scope_risks"] = old_scopes
     old_payload["risk_request"] = old_risk_request
     old_field = old_field.model_copy(update={"payload": old_payload})
+    caller_boolean = create_intent_envelope(proposal, campaign, initial, now=datetime.now(UTC))
+    caller_boolean_payload = dict(caller_boolean.payload)
+    caller_boolean_risk = dict(caller_boolean_payload["risk_request"])
+    caller_boolean_risk["instrument_classified"] = True
+    caller_boolean_payload["risk_request"] = caller_boolean_risk
+    caller_boolean = caller_boolean.model_copy(update={"payload": caller_boolean_payload})
     wrong_schema = create_intent_envelope(
         proposal,
         campaign,
@@ -1216,7 +1241,9 @@ def test_execution_intent_legacy_commands_and_wrong_v5_schema_are_rejected(
     v2_result = execute_create(database, v2)
     v3_result = execute_create(database, v3)
     v4_result = execute_create(database, v4)
+    v5_result = execute_create(database, v5)
     old_field_result = execute_create(database, old_field)
+    caller_boolean_result = execute_create(database, caller_boolean)
     schema_result = execute_create(database, wrong_schema)
 
     assert v1_result.status is CommandStatus.REJECTED
@@ -1227,8 +1254,12 @@ def test_execution_intent_legacy_commands_and_wrong_v5_schema_are_rejected(
     assert v3_result.error_code == "COMMAND_TYPE_MISMATCH"
     assert v4_result.status is CommandStatus.REJECTED
     assert v4_result.error_code == "COMMAND_TYPE_MISMATCH"
+    assert v5_result.status is CommandStatus.REJECTED
+    assert v5_result.error_code == "COMMAND_TYPE_MISMATCH"
     assert old_field_result.status is CommandStatus.REJECTED
     assert old_field_result.error_code == "EXECUTION_INPUT_INVALID"
+    assert caller_boolean_result.status is CommandStatus.REJECTED
+    assert caller_boolean_result.error_code == "EXECUTION_INPUT_INVALID"
     assert schema_result.status is CommandStatus.REJECTED
     assert schema_result.error_code == "PAYLOAD_SCHEMA_VERSION_MISMATCH"
 
@@ -1261,6 +1292,14 @@ def test_initial_intent_atomically_persists_decision_reservation_ledger_and_hist
             == TEST_EXECUTION_CAPITAL_SCOPE_MANIFEST.manifest_hash
         )
         assert decision.capital_projection_version == "portfolio-mtm-v2"
+        assert decision.catalog_record_id is not None
+        catalog_record = session.get(InstrumentCatalogRecord, decision.catalog_record_id)
+        assert catalog_record is not None
+        assert decision.catalog_version == catalog_record.catalog_version
+        assert decision.catalog_classification_version == catalog_record.classification_version
+        assert decision.catalog_record_hash == catalog_record.record_hash
+        assert decision.input_snapshot["evaluation"]["instrument_classification"]["valid"] is True
+        assert decision.decision["catalog_record_hash"] == catalog_record.record_hash
         assert (
             hash_json(decision.input_snapshot["capital_projection"])
             == decision.capital_projection_hash
@@ -1335,6 +1374,32 @@ def test_initial_intent_atomically_persists_decision_reservation_ledger_and_hist
         audit_count = count_rows(session, AuditEvent)
         assert audit_count >= 3
         assert count_rows(session, OutboxMessage) == audit_count
+
+
+def test_final_precheck_denies_when_exact_catalog_record_is_missing(
+    database: Database,
+) -> None:
+    proposal, campaign, initial = prepare_authorization(database, register_catalog=False)
+    now = datetime.now(UTC)
+    seed_execution_policy(database, now)
+
+    result = execute_create(
+        database,
+        create_intent_envelope(proposal, campaign, initial, now=now),
+        ExecutionIntentService(clock=lambda: now),
+    )
+
+    assert result.status is CommandStatus.COMPLETED
+    assert result.data["result"] == "DENY"
+    assert result.data["primary_reason_code"] == "INSTRUMENT_UNCLASSIFIED"
+    assert result.data["catalog_record_id"] is None
+    assert result.data["catalog_validation_reason_codes"] == ["INSTRUMENT_CATALOG_RECORD_NOT_FOUND"]
+    with database.session_factory.begin() as session:
+        decision = session.execute(select(ExecutionRiskDecision)).scalar_one()
+        assert decision.catalog_record_id is None
+        assert decision.valid_until == now
+        assert count_rows(session, OrderIntent) == 0
+        assert count_rows(session, RiskReservation) == 0
 
 
 def test_final_precheck_refreshes_current_mtm_without_rewriting_frozen_one_r(
