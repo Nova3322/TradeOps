@@ -11,7 +11,15 @@ from sqlalchemy.exc import DBAPIError
 from sqlalchemy.orm import Session
 
 from tests.capability_fixtures import issue_shadow_certificate_for_risk_request
-from tests.risk_fixtures import make_policy, make_request
+from tests.integration.test_capital_scope import _manifest_request, _register, _scope
+from tests.integration.test_projections import _prepare_collecting_run, _record_account_equity
+from tests.risk_fixtures import (
+    TEST_CAPITAL_SCOPE_MANIFEST,
+    make_capital,
+    make_policy,
+    make_request,
+)
+from tests.sender_fencing_fixtures import make_sender_scope
 from trading_control_plane.authorization import SystemRiskState
 from trading_control_plane.command_executor import IdempotentCommandExecutor
 from trading_control_plane.commands import (
@@ -24,7 +32,9 @@ from trading_control_plane.commands import (
 from trading_control_plane.database import Database
 from trading_control_plane.models import AuditEvent, OutboxMessage
 from trading_control_plane.proposal_models import SystemRiskStateRecord
+from trading_control_plane.reconciliation import ReconciliationSourceType
 from trading_control_plane.risk import (
+    CapitalProjectionBinding,
     RiskPrecheckRequest,
     RiskPrecheckService,
     SystemRiskStateCommandService,
@@ -44,6 +54,38 @@ def seed_default_shadow_certificate(database: Database, reset_database: None) ->
     del reset_database
     result = issue_shadow_certificate_for_risk_request(database, make_request())
     assert result.status is CommandStatus.COMPLETED
+
+
+@pytest.fixture(autouse=True)
+def seed_default_capital_projection(database: Database, reset_database: None) -> None:
+    del reset_database
+    now = datetime.now(UTC)
+    registered = _register(database, TEST_CAPITAL_SCOPE_MANIFEST, now=now)
+    assert registered.status is CommandStatus.COMPLETED
+    sender_scope = make_sender_scope(
+        margin_mode="CROSS",
+        collateral_pool_id="BINANCE:USDT-CROSS",
+    )
+    run_id, _, run_time, inputs = _prepare_collecting_run(
+        database,
+        balance_count=1,
+        sender_scope=sender_scope,
+    )
+    normalized_at = run_time + timedelta(seconds=1)
+    _, recorded = _record_account_equity(
+        database,
+        run_id,
+        inputs[ReconciliationSourceType.VENUE_BALANCES],
+        now=normalized_at,
+        margin_mode="CROSS",
+        collateral_pool_id="BINANCE:USDT-CROSS",
+        settlement_currency="USD",
+        wallet_balance=Decimal("100000"),
+        exchange_margin_equity=Decimal("100000"),
+        available_margin=Decimal("10000"),
+        total_unrealized_pnl=Decimal("0"),
+    )
+    assert recorded.status is CommandStatus.COMPLETED
 
 
 def count_rows(session: Session, model: type[object]) -> int:
@@ -117,10 +159,15 @@ def risk_envelope(request: RiskPrecheckRequest) -> CommandEnvelope:
     )
 
 
-def execute_precheck(database: Database, envelope: CommandEnvelope):
+def execute_precheck(
+    database: Database,
+    envelope: CommandEnvelope,
+    *,
+    now: datetime | None = None,
+):
     return IdempotentCommandExecutor(database.session_factory).execute(
         envelope,
-        RiskPrecheckService().evaluate,
+        RiskPrecheckService(clock=(lambda: now) if now is not None else None).evaluate,
     )
 
 
@@ -172,6 +219,20 @@ def test_allow_precheck_persists_immutable_snapshot_audit_and_outbox(
         snapshot = session.execute(select(RiskDecisionSnapshot)).scalar_one()
         assert snapshot.current_portfolio_mtm_equity == Decimal("100000")
         assert snapshot.current_unrealized_pnl == 0
+        assert snapshot.capital_scope_manifest_id == TEST_CAPITAL_SCOPE_MANIFEST.manifest_id
+        assert snapshot.capital_scope_manifest_version == 1
+        assert snapshot.capital_scope_manifest_hash == TEST_CAPITAL_SCOPE_MANIFEST.manifest_hash
+        assert snapshot.capital_projection_version == "portfolio-mtm-v2"
+        assert (
+            hash_json(snapshot.input_snapshot["capital_projection"])
+            == snapshot.capital_projection_hash
+        )
+        assert (
+            snapshot.input_snapshot["capital_projection"]["account_components"][0][
+                "source_snapshot_id"
+            ]
+            is not None
+        )
         assert snapshot.one_r_0 == Decimal("500")
         assert snapshot.frozen_trade_loss_cap == Decimal("500")
         assert snapshot.dynamic_trade_loss_cap == Decimal("500")
@@ -197,6 +258,170 @@ def test_allow_precheck_persists_immutable_snapshot_audit_and_outbox(
         )
         assert session.execute(text("SELECT count(*) FROM risk_reservations")).scalar_one() == 0
         assert session.execute(text("SELECT count(*) FROM order_intents")).scalar_one() == 0
+
+
+def test_caller_cannot_forge_current_capital_values(database: Database) -> None:
+    now = datetime.now(UTC)
+    seed_policy(database, now=now)
+    seed_state(database)
+    forged = make_request(
+        now=now,
+        capital=make_capital(
+            exchange_settled_equity_ex_upnl=Decimal("200000"),
+            total_capital_snapshot_0=Decimal("200000"),
+            available_margin=Decimal("20000"),
+        ),
+    )
+
+    result = execute_precheck(database, risk_envelope(forged), now=now)
+
+    assert result.status is CommandStatus.REJECTED
+    assert result.error_code == "CAPITAL_INPUT_MISMATCH"
+    with database.session_factory.begin() as session:
+        assert count_rows(session, RiskDecisionSnapshot) == 0
+
+
+@pytest.mark.parametrize(
+    ("binding_update", "expected_error"),
+    (
+        ({"manifest_hash": "f" * 64}, "CAPITAL_PROJECTION_BINDING_MISMATCH"),
+        (
+            {"manifest_id": UUID("00000000-0000-0000-0000-000000000099")},
+            "CAPITAL_PROJECTION_UNAVAILABLE",
+        ),
+    ),
+)
+def test_manifest_identity_hash_or_projection_binding_cannot_be_substituted(
+    database: Database,
+    binding_update: dict[str, object],
+    expected_error: str,
+) -> None:
+    now = datetime.now(UTC)
+    seed_policy(database, now=now)
+    seed_state(database)
+    baseline = make_request(now=now)
+    changed = baseline.model_copy(
+        update={
+            "capital_projection_binding": baseline.capital_projection_binding.model_copy(
+                update=binding_update
+            )
+        }
+    )
+
+    result = execute_precheck(database, risk_envelope(changed), now=now)
+
+    assert result.status is CommandStatus.REJECTED
+    assert result.error_code == expected_error
+    with database.session_factory.begin() as session:
+        assert count_rows(session, RiskDecisionSnapshot) == 0
+
+
+def test_trade_account_must_be_exact_member_of_capital_manifest(database: Database) -> None:
+    now = datetime.now(UTC)
+    seed_policy(database, now=now)
+    seed_state(database)
+    baseline = make_request(now=now)
+    changed = baseline.model_copy(
+        update={"binding": baseline.binding.model_copy(update={"account_id": "account-outside"})}
+    )
+
+    result = execute_precheck(database, risk_envelope(changed), now=now)
+
+    assert result.status is CommandStatus.REJECTED
+    assert result.error_code == "CAPITAL_TRADE_ACCOUNT_OUTSIDE_MANIFEST"
+
+
+def test_stale_capital_projection_and_expired_manifest_fail_before_risk_math(
+    database: Database,
+) -> None:
+    now = datetime.now(UTC)
+    seed_policy(database, now=now)
+    seed_state(database)
+    request = make_request(now=now)
+
+    stale = execute_precheck(
+        database,
+        risk_envelope(request),
+        now=now + timedelta(seconds=10),
+    )
+    expired = execute_precheck(
+        database,
+        risk_envelope(request),
+        now=datetime(2101, 1, 1, tzinfo=UTC),
+    )
+
+    assert stale.status is CommandStatus.REJECTED
+    assert stale.error_code == "CAPITAL_ACCOUNT_SCOPE_INCOMPLETE"
+    assert expired.status is CommandStatus.REJECTED
+    assert expired.error_code == "CAPITAL_PROJECTION_UNAVAILABLE"
+    with database.session_factory.begin() as session:
+        assert count_rows(session, RiskDecisionSnapshot) == 0
+
+
+def test_non_usd_manifest_requires_certified_fx_before_risk_math(database: Database) -> None:
+    now = datetime.now(UTC)
+    seed_policy(database, now=now)
+    seed_state(database)
+    fx_scope = _scope(
+        margin_mode="CROSS",
+        collateral_pool_id="BINANCE:USDT-CROSS-FX",
+        settlement_currency="USDT",
+    )
+    fx_manifest = _manifest_request(
+        (fx_scope,),
+        now=now,
+        manifest_version=2,
+    )
+    assert _register(database, fx_manifest, now=now).status is CommandStatus.COMPLETED
+    sender_scope = make_sender_scope(
+        margin_mode="CROSS",
+        collateral_pool_id="BINANCE:USDT-CROSS-FX",
+    )
+    run_id, _, run_time, inputs = _prepare_collecting_run(
+        database,
+        balance_count=1,
+        sender_scope=sender_scope,
+    )
+    normalized_at = run_time + timedelta(seconds=1)
+    _, recorded = _record_account_equity(
+        database,
+        run_id,
+        inputs[ReconciliationSourceType.VENUE_BALANCES],
+        now=normalized_at,
+        venue_update_id="risk-fx-usdt",
+        margin_mode="CROSS",
+        collateral_pool_id="BINANCE:USDT-CROSS-FX",
+        settlement_currency="USDT",
+        wallet_balance=Decimal("100000"),
+        exchange_margin_equity=Decimal("100000"),
+        available_margin=Decimal("10000"),
+        total_unrealized_pnl=Decimal("0"),
+    )
+    assert recorded.status is CommandStatus.COMPLETED
+    baseline = make_request(now=now)
+    request = baseline.model_copy(
+        update={
+            "capital_projection_binding": CapitalProjectionBinding(
+                manifest_id=fx_manifest.manifest_id,
+                manifest_version=fx_manifest.manifest_version,
+                manifest_hash=fx_manifest.manifest_hash,
+                projection_version="portfolio-mtm-v2",
+            ),
+            "binding": baseline.binding.model_copy(
+                update={
+                    "collateral_pool_id": "BINANCE:USDT-CROSS-FX",
+                    "settlement_asset": "USDT",
+                }
+            ),
+        }
+    )
+
+    result = execute_precheck(database, risk_envelope(request), now=normalized_at)
+
+    assert result.status is CommandStatus.REJECTED
+    assert result.error_code == "CAPITAL_FX_FACTS_REQUIRED"
+    with database.session_factory.begin() as session:
+        assert count_rows(session, RiskDecisionSnapshot) == 0
 
 
 def test_stale_precheck_is_durable_deny_not_silent_failure(database: Database) -> None:
@@ -348,7 +573,9 @@ def test_policy_decision_and_state_history_are_database_immutable(database: Data
             )
     with pytest.raises(DBAPIError, match="risk_decision_snapshots is immutable"):
         with database.session_factory.begin() as session:
-            session.execute(update(RiskDecisionSnapshot).values(result="DENY"))
+            session.execute(
+                update(RiskDecisionSnapshot).values(capital_scope_manifest_hash="f" * 64)
+            )
     with pytest.raises(DBAPIError, match="append-only"):
         with database.session_factory.begin() as session:
             session.execute(update(SystemRiskStateTransition).values(reason_code="mutated"))

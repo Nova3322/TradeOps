@@ -34,6 +34,7 @@ from trading_control_plane.reconciliation import (
     ReconciliationSourceType,
 )
 from trading_control_plane.reconciliation_models import ExecutionReconciliationInput
+from trading_control_plane.sender_fencing import SenderScopeBinding
 from trading_control_plane.venue_facts import (
     VenueAccountEquityState,
     VenueFactNormalizationService,
@@ -49,9 +50,10 @@ def _prepare_collecting_run(
     *,
     position_count: int = 0,
     balance_count: int = 0,
+    sender_scope: SenderScopeBinding | None = None,
 ) -> tuple[UUID, int, datetime, dict[ReconciliationSourceType, ExecutionReconciliationInput]]:
     acquired_at = datetime.now(UTC)
-    scope = make_sender_scope()
+    scope = sender_scope or make_sender_scope()
     lease_id = uuid4()
     acquired = execute_acquire(
         database,

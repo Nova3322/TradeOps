@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import time
+from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from decimal import ROUND_FLOOR, Decimal
 from enum import StrEnum
@@ -19,6 +20,12 @@ from trading_control_plane.capability_certificates import (
     CapabilityValidationRequest,
     CapabilityValidationResult,
 )
+from trading_control_plane.capital_scope import (
+    PortfolioMtmProjection,
+    PortfolioMtmProjectionService,
+    PortfolioMtmQuery,
+    PortfolioMtmState,
+)
 from trading_control_plane.commands import (
     CommandChannel,
     CommandEnvelope,
@@ -34,6 +41,7 @@ from trading_control_plane.metrics import (
     RISK_STALE_INPUTS,
     SYSTEM_RISK_STATE_TRANSITIONS,
 )
+from trading_control_plane.projections import ProjectionQueryContext
 from trading_control_plane.proposal_models import SystemRiskStateRecord
 from trading_control_plane.risk_models import (
     RiskDecisionSnapshot,
@@ -304,6 +312,15 @@ class CapitalInput(BaseModel):
         return self.exchange_margin_equity + self.eligible_vault_equity
 
 
+class CapitalProjectionBinding(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    manifest_id: UUID
+    manifest_version: int = Field(ge=1)
+    manifest_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    projection_version: str = Field(pattern=r"^portfolio-mtm-v[0-9]+$")
+
+
 class TradeLossComponents(BaseModel):
     model_config = ConfigDict(frozen=True)
 
@@ -393,6 +410,7 @@ class RiskPrecheckRequest(BaseModel):
     risk_tier: RiskTier
     binding: CertificationBinding
     market: MarketRiskInput
+    capital_projection_binding: CapitalProjectionBinding
     capital: CapitalInput
     current_trade_loss: TradeLossComponents
     requested: RequestedRiskIncrease
@@ -478,6 +496,116 @@ class RiskEvaluationResult(BaseModel):
     valid_until: datetime
     execution_eligible: bool = False
     reservation_created: bool = False
+
+
+class VerifiedCapitalProjection(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    capital: CapitalInput
+    projection: PortfolioMtmProjection
+    projection_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
+class CapitalProjectionResolver:
+    """Recomputes current capital from exact canonical scope/facts inside the transaction."""
+
+    @staticmethod
+    def resolve(
+        session: Session,
+        request: RiskPrecheckRequest,
+        policy: RiskPolicyParameters,
+        as_of: datetime,
+    ) -> VerifiedCapitalProjection:
+        account_max_age_ms = next(
+            item.max_age_ms
+            for item in policy.fact_freshness_limits
+            if item.fact_type is FactType.ACCOUNT
+        )
+        binding = request.capital_projection_binding
+        projection = PortfolioMtmProjectionService.query(
+            session,
+            PortfolioMtmQuery(
+                manifest_id=binding.manifest_id,
+                organization_id=request.organization_id,
+                manifest_version=binding.manifest_version,
+                context=ProjectionQueryContext(
+                    as_of=as_of,
+                    max_age_ms=account_max_age_ms,
+                ),
+            ),
+        )
+        if projection.projection_state is not PortfolioMtmState.CONFIRMED:
+            error_code = {
+                "FX_FACTS_REQUIRED": "CAPITAL_FX_FACTS_REQUIRED",
+                "ACCOUNT_SCOPE_INCOMPLETE": "CAPITAL_ACCOUNT_SCOPE_INCOMPLETE",
+            }.get(projection.reason_code or "UNKNOWN", "CAPITAL_PROJECTION_UNAVAILABLE")
+            raise CommandRejected(
+                error_code,
+                f"capital projection unavailable: {projection.reason_code}",
+            )
+        if (
+            projection.manifest_hash != binding.manifest_hash
+            or projection.projection_version != binding.projection_version
+        ):
+            raise CommandRejected(
+                "CAPITAL_PROJECTION_BINDING_MISMATCH",
+                "capital manifest hash or projection version changed",
+            )
+        trade_binding = request.binding
+        if not any(
+            component.scope.venue == trade_binding.venue
+            and component.scope.execution_domain == trade_binding.execution_domain
+            and component.scope.account_id == trade_binding.account_id
+            and component.scope.margin_mode == trade_binding.margin_mode
+            and component.scope.collateral_pool_id == trade_binding.collateral_pool_id
+            and component.scope.settlement_currency == trade_binding.settlement_asset
+            for component in projection.account_components
+        ):
+            raise CommandRejected(
+                "CAPITAL_TRADE_ACCOUNT_OUTSIDE_MANIFEST",
+                "proposal trading account is not an exact member of the capital manifest",
+            )
+        if (
+            projection.risk_inclusion_mode.value != RiskInclusionMode.EXCHANGE_ONLY.value
+            or projection.report_currency != "USD"
+            or projection.exchange_margin_equity is None
+            or projection.current_unrealized_pnl is None
+            or projection.available_margin is None
+            or projection.eligible_vault_equity is None
+            or projection.current_portfolio_mtm_equity is None
+        ):
+            raise CommandRejected(
+                "CAPITAL_PROJECTION_INTEGRITY_FAILED",
+                "confirmed capital projection violates risk input semantics",
+            )
+
+        exchange_settled = projection.exchange_margin_equity - projection.current_unrealized_pnl
+        exchange_risk_equity = max(
+            ZERO,
+            min(exchange_settled, projection.exchange_margin_equity),
+        )
+        derived = CapitalInput(
+            risk_inclusion_mode=RiskInclusionMode.EXCHANGE_ONLY,
+            exchange_settled_equity_ex_upnl=exchange_settled,
+            current_unrealized_pnl=projection.current_unrealized_pnl,
+            eligible_vault_equity=projection.eligible_vault_equity,
+            exchange_risk_equity=exchange_risk_equity,
+            total_capital_snapshot_0=projection.current_portfolio_mtm_equity,
+            funding_used=request.capital.funding_used,
+            funding_reserved=request.capital.funding_reserved,
+            available_margin=projection.available_margin,
+        )
+        if derived != request.capital:
+            raise CommandRejected(
+                "CAPITAL_INPUT_MISMATCH",
+                "caller capital values differ from the canonical portfolio projection",
+            )
+        projection_snapshot = projection.model_dump(mode="json")
+        return VerifiedCapitalProjection(
+            capital=derived,
+            projection=projection,
+            projection_hash=hash_json(projection_snapshot),
+        )
 
 
 def capability_validation_request(
@@ -835,9 +963,15 @@ class RiskPrecheckService:
         self,
         evaluator: RiskEvaluator | None = None,
         certificate_validator: CapabilityCertificateValidator | None = None,
+        capital_projection_resolver: CapitalProjectionResolver | None = None,
+        clock: Callable[[], datetime] | None = None,
     ) -> None:
         self._evaluator = evaluator or RiskEvaluator()
         self._certificate_validator = certificate_validator or CapabilityCertificateValidator()
+        self._capital_projection_resolver = (
+            capital_projection_resolver or CapitalProjectionResolver()
+        )
+        self._clock = clock or (lambda: datetime.now(UTC))
 
     def evaluate(self, session: Session, envelope: CommandEnvelope) -> CommandOutcome:
         started = time.monotonic()
@@ -890,10 +1024,21 @@ class RiskPrecheckService:
                 "RISK_POLICY_INVALID", "risk policy violates the fixed business contract"
             ) from exc
 
-        decided_at = datetime.now(UTC)
+        decided_at = self._clock()
+        if decided_at.tzinfo is None or decided_at.utcoffset() is None:
+            raise CommandRejected(
+                "RISK_CLOCK_INVALID", "risk precheck clock must be timezone-aware"
+            )
+        verified_capital = self._capital_projection_resolver.resolve(
+            session,
+            request,
+            policy,
+            decided_at,
+        )
+        verified_request = request.model_copy(update={"capital": verified_capital.capital})
         capability_validation = self._certificate_validator.validate(
             session,
-            capability_validation_request(request, decided_at),
+            capability_validation_request(verified_request, decided_at),
         )
         state_record = session.execute(
             select(SystemRiskStateRecord)
@@ -906,7 +1051,7 @@ class RiskPrecheckService:
             else SystemRiskState.UNKNOWN
         )
         evaluation_input = RiskEvaluationInput(
-            request=request,
+            request=verified_request,
             risk_policy_id=policy_record.risk_policy_id,
             policy=policy,
             policy_valid_from=policy_record.valid_from,
@@ -929,9 +1074,14 @@ class RiskPrecheckService:
             "channel": envelope.channel.value,
             "auth_context_ref": envelope.auth_context_ref,
         }
+        input_snapshot["submitted_capital"] = request.capital.model_dump(mode="json")
+        input_snapshot["capital_projection"] = verified_capital.projection.model_dump(mode="json")
+        input_snapshot["capital_projection_hash"] = verified_capital.projection_hash
         input_snapshot["derived_capital"] = {
-            "exchange_margin_equity": str(request.capital.exchange_margin_equity),
-            "current_portfolio_mtm_equity": str(request.capital.current_portfolio_mtm_equity),
+            "exchange_margin_equity": str(verified_request.capital.exchange_margin_equity),
+            "current_portfolio_mtm_equity": str(
+                verified_request.capital.current_portfolio_mtm_equity
+            ),
         }
         input_hash = hash_json(input_snapshot)
         decision = result.model_dump(mode="json")
@@ -949,12 +1099,17 @@ class RiskPrecheckService:
                 system_risk_state=system_state.value,
                 risk_policy_id=policy_record.risk_policy_id,
                 risk_policy_version=policy_record.policy_version,
+                capital_scope_manifest_id=verified_capital.projection.manifest_id,
+                capital_scope_manifest_version=verified_capital.projection.manifest_version,
+                capital_scope_manifest_hash=verified_capital.projection.manifest_hash,
+                capital_projection_version=verified_capital.projection.projection_version,
+                capital_projection_hash=verified_capital.projection_hash,
                 requested_quantity=result.requested_quantity,
                 max_safe_quantity=result.max_safe_quantity,
                 final_quantity=result.final_quantity,
                 current_unrealized_pnl=result.current_unrealized_pnl,
                 current_portfolio_mtm_equity=result.current_portfolio_mtm_equity,
-                total_capital_snapshot_0=request.capital.total_capital_snapshot_0,
+                total_capital_snapshot_0=verified_request.capital.total_capital_snapshot_0,
                 one_r_0=result.one_r_0,
                 frozen_trade_loss_cap=result.frozen_trade_loss_cap,
                 dynamic_trade_loss_cap=result.dynamic_trade_loss_cap,
@@ -993,6 +1148,11 @@ class RiskPrecheckService:
                 "final_quantity": str(result.final_quantity),
                 "input_hash": input_hash,
                 "decision_hash": decision_hash,
+                "capital_scope_manifest_id": str(verified_capital.projection.manifest_id),
+                "capital_scope_manifest_version": verified_capital.projection.manifest_version,
+                "capital_scope_manifest_hash": verified_capital.projection.manifest_hash,
+                "capital_projection_version": verified_capital.projection.projection_version,
+                "capital_projection_hash": verified_capital.projection_hash,
                 "valid_until": result.valid_until.isoformat(),
                 "execution_eligible": False,
                 "reservation_created": False,
@@ -1008,6 +1168,15 @@ class RiskPrecheckService:
                         "primary_reason_code": result.primary_reason_code,
                         "input_hash": input_hash,
                         "decision_hash": decision_hash,
+                        "capital_scope_manifest_id": str(verified_capital.projection.manifest_id),
+                        "capital_scope_manifest_version": (
+                            verified_capital.projection.manifest_version
+                        ),
+                        "capital_scope_manifest_hash": verified_capital.projection.manifest_hash,
+                        "capital_projection_version": (
+                            verified_capital.projection.projection_version
+                        ),
+                        "capital_projection_hash": verified_capital.projection_hash,
                         "execution_eligible": False,
                         "reservation_created": False,
                     },

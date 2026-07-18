@@ -7,9 +7,21 @@ from uuid import UUID
 
 from trading_control_plane.authorization import RiskTier, SystemRiskState
 from trading_control_plane.capability_certificates import CapabilityValidationResult
+from trading_control_plane.capital_scope import (
+    CapitalEnvironment,
+    RegisterManagedCapitalScopeManifestDraft,
+    RegisterManagedCapitalScopeManifestRequest,
+    managed_capital_scope_evidence_hash,
+    managed_capital_scope_manifest_hash,
+)
+from trading_control_plane.capital_scope import (
+    RiskInclusionMode as CapitalScopeRiskInclusionMode,
+)
 from trading_control_plane.commands import hash_json
+from trading_control_plane.projections import CurrentAccountEquityScope
 from trading_control_plane.risk import (
     CapitalInput,
+    CapitalProjectionBinding,
     CertificationBinding,
     FactFreshnessLimit,
     FactObservation,
@@ -26,6 +38,44 @@ from trading_control_plane.risk import (
     ScopeRiskInput,
     ScopeType,
     TradeLossComponents,
+)
+
+TEST_CAPITAL_SCOPE_MANIFEST_ID = UUID("00000000-0000-0000-0000-000000000020")
+TEST_CAPITAL_SCOPE = CurrentAccountEquityScope(
+    organization_id="org-1",
+    venue="BINANCE",
+    execution_domain="BINANCE_USDM",
+    account_id="account-1",
+    margin_mode="CROSS",
+    collateral_pool_id="BINANCE:USDT-CROSS",
+    settlement_currency="USD",
+)
+_TEST_CAPITAL_SCOPE_MANIFEST_DRAFT = RegisterManagedCapitalScopeManifestDraft(
+    manifest_id=TEST_CAPITAL_SCOPE_MANIFEST_ID,
+    organization_id="org-1",
+    manifest_version=1,
+    environment=CapitalEnvironment.SHADOW,
+    real_funds_eligible=False,
+    risk_inclusion_mode=CapitalScopeRiskInclusionMode.EXCHANGE_ONLY,
+    report_currency="USD",
+    account_scopes=(TEST_CAPITAL_SCOPE,),
+    valid_from=datetime(2020, 1, 1, tzinfo=UTC),
+    valid_until=datetime(2100, 1, 1, tzinfo=UTC),
+    evidence_refs=("test-only:capital-scope-risk-binding",),
+    source_ref="test-only:risk-capital-scope",
+)
+TEST_CAPITAL_SCOPE_MANIFEST = RegisterManagedCapitalScopeManifestRequest.model_validate(
+    {
+        **_TEST_CAPITAL_SCOPE_MANIFEST_DRAFT.model_dump(mode="json"),
+        "manifest_hash": managed_capital_scope_manifest_hash(_TEST_CAPITAL_SCOPE_MANIFEST_DRAFT),
+        "evidence_hash": managed_capital_scope_evidence_hash(_TEST_CAPITAL_SCOPE_MANIFEST_DRAFT),
+    }
+)
+TEST_CAPITAL_PROJECTION_BINDING = CapitalProjectionBinding(
+    manifest_id=TEST_CAPITAL_SCOPE_MANIFEST.manifest_id,
+    manifest_version=TEST_CAPITAL_SCOPE_MANIFEST.manifest_version,
+    manifest_hash=TEST_CAPITAL_SCOPE_MANIFEST.manifest_hash,
+    projection_version="portfolio-mtm-v2",
 )
 
 SCOPE_IDS = {
@@ -163,7 +213,7 @@ def make_request(
             margin_mode="CROSS",
             collateral_scope="USDT",
             collateral_pool_id="BINANCE:USDT-CROSS",
-            settlement_asset="USDT",
+            settlement_asset="USD",
             adapter_version="adapter-test-v1",
             worker_id="worker-test-1",
             worker_config_hash="a" * 64,
@@ -197,6 +247,7 @@ def make_request(
             loss_model_version="loss-model-test-v1",
             loss_calculation_ref="test-only:loss-calculation-fixture",
         ),
+        capital_projection_binding=TEST_CAPITAL_PROJECTION_BINDING,
         capital=capital or make_capital(),
         current_trade_loss=current_trade_loss
         or TradeLossComponents(

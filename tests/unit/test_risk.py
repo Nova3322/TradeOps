@@ -228,6 +228,14 @@ def test_precheck_requires_every_fact_and_scope_type() -> None:
         RiskPrecheckRequest.model_validate(payload)
 
 
+def test_precheck_has_no_legacy_unbound_capital_fallback() -> None:
+    payload = make_request().model_dump()
+    payload.pop("capital_projection_binding")
+
+    with pytest.raises(ValidationError, match="capital_projection_binding"):
+        RiskPrecheckRequest.model_validate(payload)
+
+
 def test_caller_supplied_certificate_boolean_is_rejected_and_derived_invalidity_denies() -> None:
     payload = make_request().model_dump(mode="python")
     payload["capability_certificate_valid"] = True

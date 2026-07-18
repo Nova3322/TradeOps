@@ -126,6 +126,12 @@ class RiskDecisionSnapshot(Base):
             name="ck_risk_decisions_hash_lengths",
         ),
         CheckConstraint(
+            "length(capital_scope_manifest_hash) = 64 "
+            "AND length(capital_projection_hash) = 64 "
+            "AND capital_projection_version ~ '^portfolio-mtm-v[0-9]+$'",
+            name="ck_risk_decisions_capital_binding_integrity",
+        ),
+        CheckConstraint(
             "jsonb_typeof(input_snapshot) = 'object' AND jsonb_typeof(decision) = 'object'",
             name="ck_risk_decisions_json_objects",
         ),
@@ -142,6 +148,20 @@ class RiskDecisionSnapshot(Base):
                 "risk_policies.policy_version",
             ],
             name="fk_risk_decisions_policy_binding",
+            ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            [
+                "capital_scope_manifest_id",
+                "organization_id",
+                "capital_scope_manifest_version",
+            ],
+            [
+                "managed_capital_scope_manifests.manifest_id",
+                "managed_capital_scope_manifests.organization_id",
+                "managed_capital_scope_manifests.manifest_version",
+            ],
+            name="fk_risk_decisions_capital_scope_manifest",
             ondelete="RESTRICT",
         ),
         Index(
@@ -168,6 +188,11 @@ class RiskDecisionSnapshot(Base):
     system_risk_state: Mapped[str] = mapped_column(String(32), nullable=False)
     risk_policy_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), nullable=False)
     risk_policy_version: Mapped[str] = mapped_column(String(120), nullable=False)
+    capital_scope_manifest_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), nullable=False)
+    capital_scope_manifest_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    capital_scope_manifest_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    capital_projection_version: Mapped[str] = mapped_column(String(40), nullable=False)
+    capital_projection_hash: Mapped[str] = mapped_column(String(64), nullable=False)
     requested_quantity: Mapped[Decimal] = mapped_column(Numeric(38, 18), nullable=False)
     max_safe_quantity: Mapped[Decimal] = mapped_column(Numeric(38, 18), nullable=False)
     final_quantity: Mapped[Decimal] = mapped_column(Numeric(38, 18), nullable=False)

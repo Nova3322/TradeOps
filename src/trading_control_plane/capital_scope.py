@@ -37,7 +37,7 @@ from trading_control_plane.projections import (
 )
 
 CAPITAL_SCOPE_CATALOG_SERVICE_PRINCIPAL = "capital-scope-catalog-service"
-PORTFOLIO_MTM_PROJECTION_VERSION = "portfolio-mtm-v1"
+PORTFOLIO_MTM_PROJECTION_VERSION = "portfolio-mtm-v2"
 
 
 class CapitalEnvironment(StrEnum):
@@ -143,16 +143,20 @@ class PortfolioAccountComponent(BaseModel):
     age_ms: int | None = Field(default=None, ge=0)
     exchange_margin_equity: Decimal | None
     current_unrealized_pnl: Decimal | None
+    available_margin: Decimal | None
 
     @model_validator(mode="after")
     def unknown_component_never_exposes_economics(self) -> Self:
         if self.projection_state is ProjectionState.UNKNOWN and (
-            self.exchange_margin_equity is not None or self.current_unrealized_pnl is not None
+            self.exchange_margin_equity is not None
+            or self.current_unrealized_pnl is not None
+            or self.available_margin is not None
         ):
             raise ValueError("unknown account component cannot expose economics")
         if self.projection_state is ProjectionState.CONFIRMED and (
             self.exchange_margin_equity is None
             or self.current_unrealized_pnl is None
+            or self.available_margin is None
             or self.reason_code is not None
             or self.freshness is not ProjectionFreshness.FRESH
             or self.maturity is not ProjectionMaturity.VENUE_CONFIRMED
@@ -175,6 +179,7 @@ class NativeCurrencyMtmComponent(BaseModel):
     account_scope_count: int = Field(ge=1)
     exchange_margin_equity: Decimal
     current_unrealized_pnl: Decimal
+    available_margin: Decimal
 
 
 class PortfolioMtmProjection(BaseModel):
@@ -195,6 +200,7 @@ class PortfolioMtmProjection(BaseModel):
     native_currency_components: tuple[NativeCurrencyMtmComponent, ...]
     exchange_margin_equity: Decimal | None
     current_unrealized_pnl: Decimal | None
+    available_margin: Decimal | None
     eligible_vault_equity: Decimal | None
     current_portfolio_mtm_equity: Decimal | None
     projection_version: str = Field(pattern=r"^portfolio-mtm-v[0-9]+$")
@@ -204,6 +210,7 @@ class PortfolioMtmProjection(BaseModel):
         economics = (
             self.exchange_margin_equity,
             self.current_unrealized_pnl,
+            self.available_margin,
             self.eligible_vault_equity,
             self.current_portfolio_mtm_equity,
         )
@@ -235,6 +242,11 @@ class PortfolioMtmProjection(BaseModel):
             or self.current_unrealized_pnl
             != sum(
                 (component.current_unrealized_pnl for component in self.native_currency_components),
+                Decimal(0),
+            )
+            or self.available_margin
+            != sum(
+                (component.available_margin for component in self.native_currency_components),
                 Decimal(0),
             )
             or self.eligible_vault_equity != 0
@@ -534,6 +546,14 @@ class PortfolioMtmProjectionService:
             native_currency_components=native_components,
             exchange_margin_equity=exchange_equity,
             current_unrealized_pnl=current_upnl,
+            available_margin=sum(
+                (
+                    projection.available_margin
+                    for projection in projections
+                    if projection.available_margin is not None
+                ),
+                Decimal(0),
+            ),
             eligible_vault_equity=Decimal(0),
             current_portfolio_mtm_equity=exchange_equity,
             projection_version=PORTFOLIO_MTM_PROJECTION_VERSION,
@@ -557,6 +577,7 @@ def _account_component(projection: CurrentAccountEquityProjection) -> PortfolioA
         age_ms=projection.age_ms,
         exchange_margin_equity=projection.exchange_margin_equity,
         current_unrealized_pnl=projection.total_unrealized_pnl,
+        available_margin=projection.available_margin,
     )
 
 
@@ -584,6 +605,10 @@ def _native_currency_components(
                     for item in items
                     if item.total_unrealized_pnl is not None
                 ),
+                Decimal(0),
+            ),
+            available_margin=sum(
+                (item.available_margin for item in items if item.available_margin is not None),
                 Decimal(0),
             ),
         )
@@ -619,6 +644,7 @@ def _unknown_portfolio(
         native_currency_components=native_components,
         exchange_margin_equity=None,
         current_unrealized_pnl=None,
+        available_margin=None,
         eligible_vault_equity=None,
         current_portfolio_mtm_equity=None,
         projection_version=PORTFOLIO_MTM_PROJECTION_VERSION,

@@ -97,7 +97,8 @@ current_portfolio_mtm_equity = null
 - organization、EXCHANGE_ONLY、USD 报告币种；
 - 每个账户的 exact scope、状态、原因、source snapshot ID/hash、facts-as-of 和 age；
 - 全部来源完整时的原生币种分组；
-- `portfolio-mtm-v1` projection version。
+- `portfolio-mtm-v2` projection version；v2 在 WP-0021 增加组合级 `available_margin` 并供
+  RiskPrecheck 强绑定，未改变 WP-0020 的账户全集和 FX 失败关闭语义。
 
 新增指标：
 

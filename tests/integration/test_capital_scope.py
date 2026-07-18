@@ -374,6 +374,7 @@ def test_all_usd_complete_manifest_produces_confirmed_exchange_only_mtm(
             account_scope_count=1,
             exchange_margin_equity=Decimal("10500"),
             current_unrealized_pnl=Decimal("500"),
+            available_margin=Decimal("9000"),
         ),
     )
     with pytest.raises(ValidationError):
