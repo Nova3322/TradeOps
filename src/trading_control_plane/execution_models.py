@@ -164,6 +164,13 @@ class ExecutionRiskDecision(Base):
             "AND length(strategy_evaluation_record_hash) = 64)",
             name="ck_exec_risk_strategy_evaluation_binding",
         ),
+        CheckConstraint(
+            "(initial_flat_position_snapshot_id IS NULL "
+            "AND initial_flat_position_snapshot_hash IS NULL) OR "
+            "(intent_kind = 'INITIAL' AND initial_flat_position_snapshot_id IS NOT NULL "
+            "AND length(initial_flat_position_snapshot_hash) = 64)",
+            name="ck_exec_risk_initial_flat_position_binding",
+        ),
         CheckConstraint("execution_eligible = false", name="ck_exec_risk_shadow_only"),
         ForeignKeyConstraint(
             ["risk_policy_id", "organization_id", "risk_policy_version"],
@@ -226,6 +233,12 @@ class ExecutionRiskDecision(Base):
             ondelete="RESTRICT",
         ),
         ForeignKeyConstraint(
+            ["initial_flat_position_snapshot_id"],
+            ["venue_position_snapshots.venue_position_snapshot_id"],
+            name="fk_exec_risk_initial_flat_position_snapshot",
+            ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(
             [
                 "capital_scope_manifest_id",
                 "organization_id",
@@ -275,6 +288,12 @@ class ExecutionRiskDecision(Base):
     strategy_evaluation_id: Mapped[UUID | None] = mapped_column(Uuid(as_uuid=True), nullable=True)
     strategy_evaluation_version: Mapped[str | None] = mapped_column(String(120), nullable=True)
     strategy_evaluation_record_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    initial_flat_position_snapshot_id: Mapped[UUID | None] = mapped_column(
+        Uuid(as_uuid=True), nullable=True
+    )
+    initial_flat_position_snapshot_hash: Mapped[str | None] = mapped_column(
+        String(64), nullable=True
+    )
     system_risk_state: Mapped[str] = mapped_column(String(32), nullable=False)
     result: Mapped[str] = mapped_column(String(20), nullable=False)
     primary_reason_code: Mapped[str] = mapped_column(String(160), nullable=False)

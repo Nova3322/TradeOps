@@ -46,6 +46,9 @@ from trading_control_plane.metrics import (
     RISK_RESERVATION_TRANSITIONS,
 )
 from trading_control_plane.projections import (
+    CurrentPositionProjection,
+    CurrentPositionScope,
+    CurrentPositionState,
     CurrentProtectionScope,
     ProjectionQueryContext,
     ProjectionState,
@@ -278,8 +281,11 @@ class CreateExecutionIntentRequest(BaseModel):
                 or self.add_package_id is not None
                 or self.add_unit_id is not None
                 or self.add_eligibility is not None
+                or self.current_position_quantity != ZERO
             ):
-                raise ValueError("INITIAL requires only initial_authorization_id")
+                raise ValueError(
+                    "INITIAL requires only initial_authorization_id and zero current quantity"
+                )
         elif (
             self.initial_authorization_id is not None
             or self.add_package_id is None
@@ -302,6 +308,16 @@ class VerifiedDurableExposure(BaseModel):
     snapshot: DurableExposureSnapshot
     snapshot_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
     protected_position_risk: VerifiedProtectedPositionRisk | None = None
+
+
+class VerifiedInitialFlatPosition(BaseModel):
+    """Fresh canonical venue position proving an INITIAL starts from flat."""
+
+    model_config = ConfigDict(frozen=True)
+
+    projection: CurrentPositionProjection
+    max_age_ms: int = Field(gt=0)
+    valid_until: datetime
 
 
 class RecordExecutionFactRequest(BaseModel):
@@ -495,6 +511,78 @@ class CurrentProtectedPositionRiskResolver:
         )
 
 
+class InitialFlatPositionResolver:
+    """Requires INITIAL to start from a fresh exact-scope canonical FLAT fact."""
+
+    @staticmethod
+    def resolve(
+        session: Session,
+        request: CreateExecutionIntentRequest,
+        campaign: Campaign,
+        policy: RiskPolicyParameters,
+        as_of: datetime,
+    ) -> VerifiedInitialFlatPosition:
+        if request.intent_kind is not IntentKind.INITIAL:
+            raise CommandRejected(
+                "INITIAL_FLAT_POSITION_NOT_APPLICABLE",
+                "initial flat-position evidence is required only for INITIAL",
+            )
+        max_age_ms = next(
+            item.max_age_ms
+            for item in policy.fact_freshness_limits
+            if item.fact_type is FactType.POSITIONS
+        )
+        binding = request.risk_request.binding
+        scope = CurrentPositionScope(
+            organization_id=campaign.organization_id,
+            venue=campaign.venue,
+            execution_domain=campaign.execution_domain,
+            account_id=campaign.account_id,
+            instrument_id=campaign.instrument_id,
+            position_mode=binding.position_mode,
+            position_side="BOTH" if binding.position_mode == "ONE_WAY" else campaign.direction,
+            margin_mode=binding.margin_mode,
+            collateral_pool_id=binding.collateral_pool_id,
+            settlement_currency=request.risk_currency,
+        )
+        projection = VenueCurrentProjectionService.current_position(
+            session,
+            scope,
+            ProjectionQueryContext(as_of=as_of, max_age_ms=max_age_ms),
+        )
+        if projection.projection_state is not ProjectionState.CONFIRMED:
+            raise CommandRejected(
+                "INITIAL_CURRENT_POSITION_UNAVAILABLE",
+                f"current position unavailable: {projection.reason_code}",
+            )
+        if (
+            projection.position_state is not CurrentPositionState.FLAT
+            or projection.quantity != ZERO
+            or request.current_position_quantity != ZERO
+        ):
+            raise CommandRejected(
+                "INITIAL_REQUIRES_CANONICAL_FLAT_POSITION",
+                "INITIAL requires a zero caller quantity and canonical FLAT venue position",
+            )
+        if (
+            projection.source_snapshot_id is None
+            or projection.source_snapshot_hash is None
+            or projection.facts_as_of is None
+        ):  # pragma: no cover - confirmed projection enforces
+            raise RuntimeError("confirmed initial position lacks source binding")
+        valid_until = projection.facts_as_of + timedelta(milliseconds=max_age_ms)
+        if valid_until <= as_of:
+            raise CommandRejected(
+                "INITIAL_CURRENT_POSITION_UNAVAILABLE",
+                "current flat position has no remaining validity",
+            )
+        return VerifiedInitialFlatPosition(
+            projection=projection,
+            max_age_ms=max_age_ms,
+            valid_until=valid_until,
+        )
+
+
 class DurableExposureResolver:
     """Rebuilds current funding, Heat, margin, and scope usage from durable state."""
 
@@ -633,8 +721,8 @@ class DurableExposureResolver:
 
 
 class ExecutionIntentService:
-    command_type = "execution.intent.create.v13"
-    payload_schema_version = 13
+    command_type = "execution.intent.create.v14"
+    payload_schema_version = 14
 
     def __init__(
         self,
@@ -646,6 +734,7 @@ class ExecutionIntentService:
         strategy_evaluation_validator: StrategyEvaluationValidator | None = None,
         capital_projection_resolver: CapitalProjectionResolver | None = None,
         durable_exposure_resolver: DurableExposureResolver | None = None,
+        initial_flat_position_resolver: InitialFlatPositionResolver | None = None,
         protected_position_risk_resolver: CurrentProtectedPositionRiskResolver | None = None,
         clock: Callable[[], datetime] | None = None,
     ) -> None:
@@ -665,6 +754,9 @@ class ExecutionIntentService:
             capital_projection_resolver or CapitalProjectionResolver()
         )
         self._durable_exposure_resolver = durable_exposure_resolver or DurableExposureResolver()
+        self._initial_flat_position_resolver = (
+            initial_flat_position_resolver or InitialFlatPositionResolver()
+        )
         self._protected_position_risk_resolver = (
             protected_position_risk_resolver or CurrentProtectedPositionRiskResolver()
         )
@@ -772,6 +864,17 @@ class ExecutionIntentService:
                 )
             }
         )
+        initial_flat_position = (
+            self._initial_flat_position_resolver.resolve(
+                session,
+                request,
+                campaign,
+                policy,
+                now,
+            )
+            if request.intent_kind is IntentKind.INITIAL
+            else None
+        )
         protected_position_risk = (
             self._protected_position_risk_resolver.resolve(
                 session,
@@ -858,6 +961,7 @@ class ExecutionIntentService:
                 evaluation,
                 verified_capital,
                 verified_exposure,
+                initial_flat_position,
                 add_leverage_calculation,
                 strategy_evaluation,
                 now,
@@ -874,6 +978,7 @@ class ExecutionIntentService:
                 evaluation,
                 verified_capital,
                 verified_exposure,
+                initial_flat_position,
                 add_leverage_calculation,
                 strategy_evaluation,
                 now,
@@ -897,6 +1002,7 @@ class ExecutionIntentService:
                 evaluation,
                 verified_capital,
                 verified_exposure,
+                initial_flat_position,
                 add_leverage_calculation,
                 strategy_evaluation,
                 now,
@@ -919,6 +1025,7 @@ class ExecutionIntentService:
                 evaluation,
                 verified_capital,
                 verified_exposure,
+                initial_flat_position,
                 add_leverage_calculation,
                 strategy_evaluation,
                 now,
@@ -940,6 +1047,7 @@ class ExecutionIntentService:
                 evaluation,
                 verified_capital,
                 verified_exposure,
+                initial_flat_position,
                 add_leverage_calculation,
                 strategy_evaluation,
                 now,
@@ -957,6 +1065,11 @@ class ExecutionIntentService:
                 if strategy_evaluation is not None
                 else authorization.valid_until
             ),
+            (
+                initial_flat_position.valid_until
+                if initial_flat_position is not None
+                else authorization.valid_until
+            ),
         )
         if valid_until <= now:
             return self._record_denial(
@@ -969,6 +1082,7 @@ class ExecutionIntentService:
                 evaluation,
                 verified_capital,
                 verified_exposure,
+                initial_flat_position,
                 add_leverage_calculation,
                 strategy_evaluation,
                 now,
@@ -982,6 +1096,7 @@ class ExecutionIntentService:
             authorization_rows,
             verified_capital,
             verified_exposure,
+            initial_flat_position,
             add_leverage_calculation,
             strategy_evaluation,
         )
@@ -993,6 +1108,11 @@ class ExecutionIntentService:
         )
         decision_payload["strategy_evaluation_record_hash"] = (
             strategy_evaluation.record_hash if strategy_evaluation is not None else None
+        )
+        decision_payload["initial_flat_position_snapshot_hash"] = (
+            initial_flat_position.projection.source_snapshot_hash
+            if initial_flat_position is not None
+            else None
         )
         decision_payload["approved_reserved_heat"] = str(reserved_heat)
         decision_payload["execution_eligible"] = False
@@ -1058,6 +1178,16 @@ class ExecutionIntentService:
                 ),
                 strategy_evaluation_record_hash=(
                     strategy_evaluation.record_hash if strategy_evaluation is not None else None
+                ),
+                initial_flat_position_snapshot_id=(
+                    initial_flat_position.projection.source_snapshot_id
+                    if initial_flat_position is not None
+                    else None
+                ),
+                initial_flat_position_snapshot_hash=(
+                    initial_flat_position.projection.source_snapshot_hash
+                    if initial_flat_position is not None
+                    else None
                 ),
                 system_risk_state=system_state.value,
                 result="ALLOW",
@@ -1334,6 +1464,16 @@ class ExecutionIntentService:
                 "strategy_evaluation_record_hash": (
                     strategy_evaluation.record_hash if strategy_evaluation is not None else None
                 ),
+                "initial_flat_position_snapshot_id": (
+                    str(initial_flat_position.projection.source_snapshot_id)
+                    if initial_flat_position is not None
+                    else None
+                ),
+                "initial_flat_position_snapshot_hash": (
+                    initial_flat_position.projection.source_snapshot_hash
+                    if initial_flat_position is not None
+                    else None
+                ),
                 "execution_mode": "SHADOW",
                 "dispatch_eligible": False,
                 "reservation_created": True,
@@ -1387,6 +1527,16 @@ class ExecutionIntentService:
                         "strategy_evaluation_record_hash": (
                             strategy_evaluation.record_hash
                             if strategy_evaluation is not None
+                            else None
+                        ),
+                        "initial_flat_position_snapshot_id": (
+                            str(initial_flat_position.projection.source_snapshot_id)
+                            if initial_flat_position is not None
+                            else None
+                        ),
+                        "initial_flat_position_snapshot_hash": (
+                            initial_flat_position.projection.source_snapshot_hash
+                            if initial_flat_position is not None
                             else None
                         ),
                         "dispatch_eligible": False,
@@ -1928,6 +2078,7 @@ class ExecutionIntentService:
         rows: dict[str, Any],
         verified_capital: VerifiedCapitalProjection,
         verified_exposure: VerifiedDurableExposure,
+        initial_flat_position: VerifiedInitialFlatPosition | None,
         add_leverage_calculation: AddLeverageCalculation | None,
         strategy_evaluation: StrategyEvaluationValidationResult | None,
     ) -> dict[str, Any]:
@@ -1951,6 +2102,16 @@ class ExecutionIntentService:
             "protected_position_risk_valid_until": (
                 verified_exposure.protected_position_risk.valid_until.isoformat()
                 if verified_exposure.protected_position_risk is not None
+                else None
+            ),
+            "initial_flat_position": (
+                initial_flat_position.projection.model_dump(mode="json")
+                if initial_flat_position is not None
+                else None
+            ),
+            "initial_flat_position_valid_until": (
+                initial_flat_position.valid_until.isoformat()
+                if initial_flat_position is not None
                 else None
             ),
             "command_context": {
@@ -2005,6 +2166,7 @@ class ExecutionIntentService:
         evaluation: RiskEvaluationResult,
         verified_capital: VerifiedCapitalProjection,
         verified_exposure: VerifiedDurableExposure,
+        initial_flat_position: VerifiedInitialFlatPosition | None,
         add_leverage_calculation: AddLeverageCalculation | None,
         strategy_evaluation: StrategyEvaluationValidationResult | None,
         now: datetime,
@@ -2021,6 +2183,16 @@ class ExecutionIntentService:
             "capital_projection_hash": verified_capital.projection_hash,
             "durable_exposure_snapshot": verified_exposure.snapshot.model_dump(mode="json"),
             "durable_exposure_snapshot_hash": verified_exposure.snapshot_hash,
+            "initial_flat_position": (
+                initial_flat_position.projection.model_dump(mode="json")
+                if initial_flat_position is not None
+                else None
+            ),
+            "initial_flat_position_valid_until": (
+                initial_flat_position.valid_until.isoformat()
+                if initial_flat_position is not None
+                else None
+            ),
         }
         if add_leverage_calculation is not None:
             input_snapshot["add_leverage_calculation"] = add_leverage_calculation.model_dump(
@@ -2036,6 +2208,11 @@ class ExecutionIntentService:
         )
         decision_payload["strategy_evaluation_record_hash"] = (
             strategy_evaluation.record_hash if strategy_evaluation is not None else None
+        )
+        decision_payload["initial_flat_position_snapshot_hash"] = (
+            initial_flat_position.projection.source_snapshot_hash
+            if initial_flat_position is not None
+            else None
         )
         decision_payload["result"] = "DENY"
         decision_payload["primary_reason_code"] = reason_code
@@ -2112,6 +2289,16 @@ class ExecutionIntentService:
                     if strategy_evaluation is not None
                     and strategy_evaluation.strategy_evaluation_id is not None
                     and strategy_evaluation.evaluation_version is not None
+                    else None
+                ),
+                initial_flat_position_snapshot_id=(
+                    initial_flat_position.projection.source_snapshot_id
+                    if initial_flat_position is not None
+                    else None
+                ),
+                initial_flat_position_snapshot_hash=(
+                    initial_flat_position.projection.source_snapshot_hash
+                    if initial_flat_position is not None
                     else None
                 ),
                 system_risk_state=evaluation_input.system_risk_state.value,
@@ -2199,6 +2386,16 @@ class ExecutionIntentService:
                     if strategy_evaluation is not None
                     else []
                 ),
+                "initial_flat_position_snapshot_id": (
+                    str(initial_flat_position.projection.source_snapshot_id)
+                    if initial_flat_position is not None
+                    else None
+                ),
+                "initial_flat_position_snapshot_hash": (
+                    initial_flat_position.projection.source_snapshot_hash
+                    if initial_flat_position is not None
+                    else None
+                ),
                 "dispatch_eligible": False,
                 "reservation_created": False,
                 "order_intent_created": False,
@@ -2261,6 +2458,16 @@ class ExecutionIntentService:
                         "strategy_evaluation_record_hash": (
                             strategy_evaluation.record_hash
                             if strategy_evaluation is not None
+                            else None
+                        ),
+                        "initial_flat_position_snapshot_id": (
+                            str(initial_flat_position.projection.source_snapshot_id)
+                            if initial_flat_position is not None
+                            else None
+                        ),
+                        "initial_flat_position_snapshot_hash": (
+                            initial_flat_position.projection.source_snapshot_hash
+                            if initial_flat_position is not None
                             else None
                         ),
                     },

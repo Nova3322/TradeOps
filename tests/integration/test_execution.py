@@ -17,7 +17,11 @@ from tests.instrument_catalog_fixtures import (
     register_instrument_catalog,
 )
 from tests.integration.test_capital_scope import _register
-from tests.integration.test_projections import _prepare_collecting_run, _record_account_equity
+from tests.integration.test_projections import (
+    _prepare_collecting_run,
+    _record_account_equity,
+    _record_position,
+)
 from tests.integration.test_trading_authorization import (
     execute_issue,
     issue_envelope,
@@ -162,6 +166,7 @@ from trading_control_plane.venue_facts import (
     VenuePositionDirection,
     VenuePositionMode,
     VenuePositionSide,
+    VenuePositionState,
     VenueSide,
 )
 
@@ -259,6 +264,44 @@ def seed_execution_capital_projection(database: Database) -> datetime:
     return record_execution_capital_equity(database)
 
 
+def record_execution_position(
+    database: Database,
+    *,
+    position_state: VenuePositionState = VenuePositionState.FLAT,
+    event_time: datetime | None = None,
+):
+    collector_scope = make_sender_scope(
+        account_abstraction=f"POSITION_COLLECTOR_{uuid4().hex}",
+        margin_mode="ISOLATED",
+        collateral_pool_id="pool-usdt-1",
+    )
+    run_id, _, run_time, inputs = _prepare_collecting_run(
+        database,
+        position_count=1,
+        sender_scope=collector_scope,
+    )
+    normalized_at = run_time + timedelta(seconds=1)
+    direction = {
+        VenuePositionState.FLAT: VenuePositionDirection.FLAT,
+        VenuePositionState.OPEN: VenuePositionDirection.LONG,
+        VenuePositionState.UNKNOWN: VenuePositionDirection.UNKNOWN,
+    }[position_state]
+    request, recorded = _record_position(
+        database,
+        run_id,
+        inputs[ReconciliationSourceType.VENUE_POSITIONS],
+        now=normalized_at,
+        venue_update_id=f"execution-position-{uuid4()}",
+        instrument_id="BINANCE:BTCUSDT-PERP",
+        position_state=position_state,
+        direction=direction,
+        settlement_currency="USD",
+        event_time=event_time or datetime.now(UTC) - timedelta(seconds=1),
+    )
+    assert recorded.status is CommandStatus.COMPLETED
+    return request
+
+
 def prepare_authorization(
     database: Database,
     *,
@@ -266,6 +309,9 @@ def prepare_authorization(
     register_catalog: bool = True,
     register_protection: bool = True,
     register_fact_set: bool = True,
+    register_position: bool = True,
+    position_state: VenuePositionState = VenuePositionState.FLAT,
+    position_event_time: datetime | None = None,
 ) -> tuple[FrozenProposalVersion, Campaign, InitialOrderAuthorization]:
     proposal, decision = prepare_approved(
         database,
@@ -284,6 +330,12 @@ def prepare_authorization(
     )
     assert result.status is CommandStatus.COMPLETED
     seed_execution_capital_projection(database)
+    if register_position:
+        record_execution_position(
+            database,
+            position_state=position_state,
+            event_time=position_event_time,
+        )
     fact_now = datetime.now(UTC)
     risk_request = execution_risk_request(proposal, now=fact_now)
     if register_catalog:
@@ -445,7 +497,7 @@ def create_intent_envelope(
     request = risk_request or execution_risk_request(proposal, now=now)
     return CommandEnvelope(
         idempotency_key=idempotency_key or f"execution-intent-{uuid4()}",
-        command_type="execution.intent.create.v13",
+        command_type="execution.intent.create.v14",
         object_type="Campaign",
         object_id=str(campaign.campaign_id),
         expected_version=1,
@@ -456,7 +508,7 @@ def create_intent_envelope(
         issued_at=now,
         expires_at=now + timedelta(minutes=2),
         auth_context_ref="internal:oms-risk-reservation-service",
-        payload_schema_version=13,
+        payload_schema_version=14,
         reason="create non-dispatchable shadow intent",
         payload={
             "intent_kind": "INITIAL",
@@ -572,7 +624,7 @@ def create_add_envelope(
         )
     return CommandEnvelope(
         idempotency_key=f"execution-add-{uuid4()}",
-        command_type="execution.intent.create.v13",
+        command_type="execution.intent.create.v14",
         object_type="Campaign",
         object_id=str(campaign.campaign_id),
         expected_version=2,
@@ -583,7 +635,7 @@ def create_add_envelope(
         issued_at=now,
         expires_at=now + timedelta(minutes=2),
         auth_context_ref="internal:oms-risk-reservation-service",
-        payload_schema_version=13,
+        payload_schema_version=14,
         reason="create non-dispatchable shadow add intent",
         payload={
             "intent_kind": "ADD",
@@ -1331,7 +1383,7 @@ def prepare_open_add_campaign(
     return proposal, campaign, package, unit
 
 
-def test_execution_intent_legacy_commands_and_wrong_v13_schema_are_rejected(
+def test_execution_intent_legacy_commands_and_wrong_v14_schema_are_rejected(
     database: Database,
 ) -> None:
     proposal, campaign, initial = prepare_authorization(database)
@@ -1370,6 +1422,9 @@ def test_execution_intent_legacy_commands_and_wrong_v13_schema_are_rejected(
     )
     v12 = create_intent_envelope(proposal, campaign, initial, now=datetime.now(UTC)).model_copy(
         update={"command_type": "execution.intent.create.v12"}
+    )
+    v13 = create_intent_envelope(proposal, campaign, initial, now=datetime.now(UTC)).model_copy(
+        update={"command_type": "execution.intent.create.v13"}
     )
     old_field = create_intent_envelope(proposal, campaign, initial, now=datetime.now(UTC))
     old_payload = dict(old_field.payload)
@@ -1428,6 +1483,7 @@ def test_execution_intent_legacy_commands_and_wrong_v13_schema_are_rejected(
     v10_result = execute_create(database, v10)
     v11_result = execute_create(database, v11)
     v12_result = execute_create(database, v12)
+    v13_result = execute_create(database, v13)
     old_field_result = execute_create(database, old_field)
     caller_boolean_result = execute_create(database, caller_boolean)
     protection_boolean_result = execute_create(database, protection_boolean)
@@ -1458,6 +1514,8 @@ def test_execution_intent_legacy_commands_and_wrong_v13_schema_are_rejected(
     assert v11_result.error_code == "COMMAND_TYPE_MISMATCH"
     assert v12_result.status is CommandStatus.REJECTED
     assert v12_result.error_code == "COMMAND_TYPE_MISMATCH"
+    assert v13_result.status is CommandStatus.REJECTED
+    assert v13_result.error_code == "COMMAND_TYPE_MISMATCH"
     assert old_field_result.status is CommandStatus.REJECTED
     assert old_field_result.error_code == "EXECUTION_INPUT_INVALID"
     assert caller_boolean_result.status is CommandStatus.REJECTED
@@ -1513,12 +1571,43 @@ def test_initial_intent_atomically_persists_decision_reservation_ledger_and_hist
     assert result.data["execution_mode"] == "SHADOW"
     assert result.data["dispatch_eligible"] is False
     assert result.data["reservation_created"] is True
+    assert result.data["initial_flat_position_snapshot_id"] is not None
+    assert result.data["initial_flat_position_snapshot_hash"] is not None
     with database.session_factory.begin() as session:
         decision = session.execute(select(ExecutionRiskDecision)).scalar_one()
         intent = session.execute(select(OrderIntent)).scalar_one()
         reservation = session.execute(select(RiskReservation)).scalar_one()
         exposure = session.execute(select(RiskExposureState)).scalar_one()
+        initial_event = session.execute(
+            select(OutboxMessage).where(
+                OutboxMessage.event_type == "ShadowOrderIntentRiskReserved",
+                OutboxMessage.message_key == f"OrderIntent:{intent.order_intent_id}",
+            )
+        ).scalar_one()
         assert decision.result == "ALLOW"
+        assert decision.initial_flat_position_snapshot_id is not None
+        flat_position = session.get(
+            VenuePositionSnapshot,
+            decision.initial_flat_position_snapshot_id,
+        )
+        assert flat_position is not None
+        assert flat_position.position_state == "FLAT"
+        assert flat_position.quantity == 0
+        assert decision.initial_flat_position_snapshot_hash == flat_position.snapshot_hash
+        assert decision.input_snapshot["initial_flat_position"]["source_snapshot_id"] == str(
+            flat_position.venue_position_snapshot_id
+        )
+        assert (
+            decision.decision["initial_flat_position_snapshot_hash"] == flat_position.snapshot_hash
+        )
+        assert initial_event.payload["initial_flat_position_snapshot_id"] == str(
+            flat_position.venue_position_snapshot_id
+        )
+        assert (
+            initial_event.payload["initial_flat_position_snapshot_hash"]
+            == flat_position.snapshot_hash
+        )
+        assert decision.valid_until <= flat_position.event_time + timedelta(seconds=5)
         assert (
             decision.capital_scope_manifest_id == TEST_EXECUTION_CAPITAL_SCOPE_MANIFEST.manifest_id
         )
@@ -1638,6 +1727,95 @@ def test_initial_intent_atomically_persists_decision_reservation_ledger_and_hist
         assert count_rows(session, OutboxMessage) == audit_count
 
 
+@pytest.mark.parametrize(
+    ("position_state", "event_age", "expected_error"),
+    (
+        (
+            VenuePositionState.OPEN,
+            timedelta(seconds=1),
+            "INITIAL_REQUIRES_CANONICAL_FLAT_POSITION",
+        ),
+        (
+            VenuePositionState.UNKNOWN,
+            timedelta(seconds=1),
+            "INITIAL_CURRENT_POSITION_UNAVAILABLE",
+        ),
+        (
+            VenuePositionState.FLAT,
+            timedelta(seconds=10),
+            "INITIAL_CURRENT_POSITION_UNAVAILABLE",
+        ),
+    ),
+)
+def test_initial_intent_rejects_nonflat_unknown_or_stale_canonical_position_without_side_effects(
+    database: Database,
+    position_state: VenuePositionState,
+    event_age: timedelta,
+    expected_error: str,
+) -> None:
+    position_time = datetime.now(UTC) - event_age
+    proposal, campaign, initial = prepare_authorization(
+        database,
+        position_state=position_state,
+        position_event_time=position_time,
+    )
+    now = datetime.now(UTC)
+    seed_execution_policy(database, now)
+
+    result = execute_create(
+        database,
+        create_intent_envelope(proposal, campaign, initial, now=now),
+        ExecutionIntentService(clock=lambda: now),
+    )
+
+    assert result.status is CommandStatus.REJECTED
+    assert result.error_code == expected_error
+    with database.session_factory.begin() as session:
+        assert count_rows(session, ExecutionRiskDecision) == 0
+        assert count_rows(session, OrderIntent) == 0
+        assert count_rows(session, RiskReservation) == 0
+
+
+def test_initial_intent_rejects_missing_canonical_position_without_side_effects(
+    database: Database,
+) -> None:
+    proposal, campaign, initial = prepare_authorization(database, register_position=False)
+    now = datetime.now(UTC)
+    seed_execution_policy(database, now)
+
+    result = execute_create(
+        database,
+        create_intent_envelope(proposal, campaign, initial, now=now),
+        ExecutionIntentService(clock=lambda: now),
+    )
+
+    assert result.status is CommandStatus.REJECTED
+    assert result.error_code == "INITIAL_CURRENT_POSITION_UNAVAILABLE"
+    with database.session_factory.begin() as session:
+        assert count_rows(session, ExecutionRiskDecision) == 0
+        assert count_rows(session, OrderIntent) == 0
+        assert count_rows(session, RiskReservation) == 0
+
+
+def test_initial_intent_rejects_nonzero_caller_position_quantity(
+    database: Database,
+) -> None:
+    proposal, campaign, initial = prepare_authorization(database)
+    envelope = create_intent_envelope(proposal, campaign, initial, now=datetime.now(UTC))
+    payload = dict(envelope.payload)
+    payload["current_position_quantity"] = "0.1"
+    payload["target_position_quantity"] = "0.6"
+
+    result = execute_create(database, envelope.model_copy(update={"payload": payload}))
+
+    assert result.status is CommandStatus.REJECTED
+    assert result.error_code == "EXECUTION_INPUT_INVALID"
+    with database.session_factory.begin() as session:
+        assert count_rows(session, ExecutionRiskDecision) == 0
+        assert count_rows(session, OrderIntent) == 0
+        assert count_rows(session, RiskReservation) == 0
+
+
 def test_final_precheck_denies_when_exact_catalog_record_is_missing(
     database: Database,
 ) -> None:
@@ -1655,10 +1833,15 @@ def test_final_precheck_denies_when_exact_catalog_record_is_missing(
     assert result.data["result"] == "DENY"
     assert result.data["primary_reason_code"] == "INSTRUMENT_UNCLASSIFIED"
     assert result.data["catalog_record_id"] is None
+    assert result.data["initial_flat_position_snapshot_id"] is not None
+    assert result.data["initial_flat_position_snapshot_hash"] is not None
     assert result.data["catalog_validation_reason_codes"] == ["INSTRUMENT_CATALOG_RECORD_NOT_FOUND"]
     with database.session_factory.begin() as session:
         decision = session.execute(select(ExecutionRiskDecision)).scalar_one()
         assert decision.catalog_record_id is None
+        assert decision.initial_flat_position_snapshot_id is not None
+        assert decision.initial_flat_position_snapshot_hash is not None
+        assert decision.input_snapshot["initial_flat_position"]["position_state"] == "FLAT"
         assert decision.valid_until == now
         assert count_rows(session, OrderIntent) == 0
         assert count_rows(session, RiskReservation) == 0

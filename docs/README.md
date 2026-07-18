@@ -219,6 +219,7 @@ docs/
 | 实现 | [WP-0038：ADD 当前有效杠杆服务端派生](08-implementation/WP-0038-ADD当前有效杠杆服务端派生.md) | Execution v11 删除 caller current leverage，canonical notional 服务端保守派生与哈希留证 |
 | 实现 | [WP-0039：ADD Canonical 正 UPNL 硬门](08-implementation/WP-0039-ADD-Canonical正UPNL硬门.md) | Execution v12 与 protected-position-risk-v2，canonical venue UPNL 非正时无副作用拒绝 |
 | 实现 | [WP-0040：ADD 不可变策略评估强绑定](08-implementation/WP-0040-ADD不可变策略评估强绑定.md) | Execution v13 删除 caller trend boolean，latest exact PASS Strategy Evaluation 与决策有效期强绑定 |
+| 实现 | [WP-0041：INITIAL Canonical 空仓强绑定](08-implementation/WP-0041-INITIAL-Canonical空仓强绑定.md) | Execution v14 要求 exact fresh canonical FLAT，并将仓位快照 ID/hash 与 TTL 绑定最终预检 |
 
 ## 完整交付与能力激活
 

@@ -1,5 +1,9 @@
 # WP-0040：ADD 不可变策略评估强绑定
 
+> 后续状态：WP-0041 已把 ExecutionIntent 升级为 v14，并为 INITIAL 增加 exact fresh canonical
+> FLAT position 绑定。ADD 的 Strategy Evaluation 合同保持不变；当前执行合同以
+> [WP-0041](WP-0041-INITIAL-Canonical空仓强绑定.md) 为准。本文件保留 WP-0040 历史证据。
+
 ## 1. 交付目标与边界
 
 WP-0039 后，ADD 调用方仍提交 `trend_valid`。该布尔值既没有绑定策略版本，也没有证明使用了

@@ -2,7 +2,7 @@
 
 > 后续状态：WP-0040 已把 ExecutionIntent 升级为 v13，删除 caller `trend_valid`，并要求同一
 > Risk Fact Set 与 exact position/protection 上的 latest immutable PASS Strategy Evaluation。
-> 当前执行合同以 [WP-0040](WP-0040-ADD不可变策略评估强绑定.md) 为准。本文件保留 WP-0039 历史合同。
+> 当前执行合同以 [WP-0041](WP-0041-INITIAL-Canonical空仓强绑定.md) 为准。本文件保留 WP-0039 历史合同。
 
 ## 1. 交付目标与边界
 
