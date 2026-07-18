@@ -1,8 +1,8 @@
 # WP-0006：原子风险预留与 Shadow OrderIntent
 
-> 后续状态：WP-0026 已将创建命令升级为 `execution.intent.create.v2` / payload schema 2，并移除调用方
-> 自报 base Heat 与 scope planned loss；当前输入合同以
-> [WP-0026](WP-0026-规范化Base-Heat与Scope增量.md) 为准。本文件保留 WP-0006 当时的状态机交付证据。
+> 后续状态：WP-0027 已将创建命令升级为 `execution.intent.create.v3` / payload schema 3，并移除调用方
+> 自报 base Heat、cost 与 scope planned loss；当前输入合同以
+> [WP-0027](WP-0027-策略绑定Cost-Stress.md) 为准。本文件保留 WP-0006 当时的状态机交付证据。
 
 > 状态：Implemented
 > 上位合同：《风险引擎规格》第 5、8、11 节、《领域模型与状态机》第 7、10、11 节、

@@ -153,7 +153,7 @@ def test_scope_limit_denies_manual_request_and_reports_safe_quantity_without_exe
 
     assert result.result is RiskDecisionResult.DENY
     assert "SCOPE_PLANNED_LIMIT_EXCEEDED" in result.reason_codes
-    assert result.max_safe_quantity == Decimal("0.487")
+    assert result.max_safe_quantity == Decimal("0.924")
     assert result.final_quantity == 0
     assert result.execution_eligible is False
 
@@ -171,9 +171,9 @@ def test_known_unknown_heat_is_counted_and_never_released_by_precheck() -> None:
     result = RiskEvaluator().evaluate(make_evaluation(request=request))
 
     assert result.trade_worst_case_loss_before == Decimal("490")
-    assert result.trade_worst_case_loss_after == Decimal("510.5")
+    assert result.trade_worst_case_loss_after == Decimal("500.8216")
     assert result.result is RiskDecisionResult.DENY
-    assert result.max_safe_quantity == Decimal("0.487")
+    assert result.max_safe_quantity == Decimal("0.924")
 
 
 def test_requested_base_heat_is_canonical_for_long_short_and_decision_evidence() -> None:
@@ -183,6 +183,7 @@ def test_requested_base_heat_is_canonical_for_long_short_and_decision_evidence()
             "direction": PositionDirection.SHORT,
             "executable_price": Decimal("90"),
             "initial_invalidation_price": Decimal("100"),
+            "funding_rate": Decimal("-0.0001"),
         }
     )
     short_request = make_request(
@@ -191,20 +192,30 @@ def test_requested_base_heat_is_canonical_for_long_short_and_decision_evidence()
     )
 
     assert long_request.requested_base_heat == Decimal("10.5")
-    assert long_request.incremental_worst_case_loss == Decimal("20.5")
     assert short_request.requested_base_heat == Decimal("20")
-    assert short_request.incremental_worst_case_loss == Decimal("30")
 
     result = RiskEvaluator().evaluate(make_evaluation(request=long_request))
+    short_result = RiskEvaluator().evaluate(make_evaluation(request=short_request))
     assert result.requested_base_heat == Decimal("10.5")
     assert result.requested_protected_profit_giveback == 0
-    assert result.requested_cost_stress_add_on == Decimal("10")
+    assert result.requested_fee_stress == Decimal("0.1005")
+    assert result.requested_stop_penetration_stress == Decimal("0.201")
+    assert result.requested_adverse_funding_stress == Decimal("0.0201")
+    assert result.requested_cost_stress_add_on == Decimal("0.3216")
+    assert result.requested_incremental_worst_case_loss == Decimal("10.8216")
+    assert result.cost_stress_model_version == "fee-stop-funding-stress-v1"
+    assert short_result.requested_fee_stress == Decimal("0.18")
+    assert short_result.requested_stop_penetration_stress == Decimal("0.36")
+    assert short_result.requested_adverse_funding_stress == Decimal("0.036")
+    assert short_result.requested_cost_stress_add_on == Decimal("0.576")
+    assert short_result.requested_incremental_worst_case_loss == Decimal("20.576")
 
 
 @pytest.mark.parametrize(
     ("legacy_path", "legacy_value"),
     (
         (("requested", "requested_reserved_heat"), Decimal("1")),
+        (("requested", "requested_cost_stress_add_on"), Decimal("1")),
         (("scope_risks", 0, "requested_incremental_planned_loss"), Decimal("1")),
     ),
 )
@@ -234,9 +245,52 @@ def test_contract_multiplier_and_canonical_loss_model_are_exactly_bound() -> Non
         RiskPrecheckRequest.model_validate(model_payload)
 
     stress_payload = make_request().model_dump(mode="python")
-    stress_payload["scope_risks"][0]["requested_incremental_stress_loss"] = Decimal("20")
-    with pytest.raises(ValidationError, match="below canonical planned loss"):
-        RiskPrecheckRequest.model_validate(stress_payload)
+    stress_payload["scope_risks"][0]["requested_incremental_stress_loss"] = Decimal("10")
+    stress_request = RiskPrecheckRequest.model_validate(stress_payload)
+    stress_result = RiskEvaluator().evaluate(make_evaluation(request=stress_request))
+    assert stress_result.result is RiskDecisionResult.DENY
+    assert stress_result.primary_reason_code == "SCOPE_STRESS_INPUT_INVALID"
+
+
+def test_cost_stress_policy_has_no_default_and_favorable_funding_is_not_charged() -> None:
+    missing = make_policy().model_dump(mode="python")
+    missing.pop("cost_stress")
+    with pytest.raises(ValidationError, match="cost_stress"):
+        RiskPolicyParameters.model_validate(missing)
+
+    invalid_source = make_policy().model_dump(mode="python")
+    invalid_source["cost_stress"]["source_ref"] = ""
+    with pytest.raises(ValidationError, match="source_ref"):
+        RiskPolicyParameters.model_validate(invalid_source)
+
+    baseline = make_request()
+    favorable = make_request(
+        market=baseline.market.model_copy(update={"funding_rate": Decimal("-0.0001")})
+    )
+    result = RiskEvaluator().evaluate(make_evaluation(request=favorable))
+
+    assert result.requested_adverse_funding_stress == 0
+    assert result.requested_cost_stress_add_on == Decimal("0.3015")
+
+
+def test_base_and_cost_amounts_round_up_to_database_precision() -> None:
+    baseline = make_request()
+    precise = make_request(
+        market=baseline.market.model_copy(
+            update={"executable_price": Decimal("100.5000000000000000001")}
+        ),
+        requested=make_requested(
+            requested_protected_profit_giveback=Decimal("0.0000000000000000001")
+        ),
+    )
+
+    result = RiskEvaluator().evaluate(make_evaluation(request=precise))
+
+    assert precise.requested_base_heat == Decimal("10.500000000000000001")
+    assert result.requested_protected_profit_giveback == Decimal("0.000000000000000001")
+    assert result.requested_fee_stress == Decimal("0.100500000000000001")
+    assert result.requested_stop_penetration_stress == Decimal("0.201000000000000001")
+    assert result.requested_adverse_funding_stress == Decimal("0.020100000000000001")
 
 
 def test_initial_precheck_obeys_formal_risk_state_action_matrix() -> None:

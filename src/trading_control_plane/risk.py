@@ -3,7 +3,7 @@ from __future__ import annotations
 import time
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
-from decimal import ROUND_FLOOR, Decimal
+from decimal import ROUND_CEILING, ROUND_FLOOR, Decimal, localcontext
 from enum import StrEnum
 from typing import Literal, Self
 from uuid import UUID, uuid4
@@ -55,7 +55,9 @@ from trading_control_plane.risk_models import (
 ZERO = Decimal("0")
 ONE = Decimal("1")
 ONE_R_FRACTION = Decimal("0.005")
+RISK_AMOUNT_QUANTUM = Decimal("0.000000000000000001")
 CANONICAL_LOSS_MODEL_VERSION = "directional-entry-to-invalidation-v1"
+CANONICAL_COST_STRESS_MODEL_VERSION = "fee-stop-funding-stress-v1"
 
 
 class RiskDecisionResult(StrEnum):
@@ -126,6 +128,7 @@ REASON_PRIORITY = (
     "PROTECTION_UNAVAILABLE",
     "SYSTEM_RISK_STATE_DENY",
     "SCOPE_POLICY_MISSING",
+    "SCOPE_STRESS_INPUT_INVALID",
     "PROPOSAL_RISK_CAP_INVALID",
     "INVALIDATION_PRICE_INVALID",
     "TRADING_RULE_VIOLATION",
@@ -160,10 +163,22 @@ class ScopeLimit(BaseModel):
         return (self.scope_type, self.scope_id)
 
 
+class CostStressPolicyParameters(BaseModel):
+    """Versioned research inputs; intentionally has no production defaults."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    model_version: Literal["fee-stop-funding-stress-v1"]
+    round_trip_fee_bps: Decimal = Field(ge=0)
+    stop_penetration_bps: Decimal = Field(ge=0)
+    funding_interval_count: int = Field(ge=0)
+    source_ref: str = Field(min_length=1, max_length=255)
+
+
 class RiskPolicyParameters(BaseModel):
     """Every research-dependent value is explicit; there are no production defaults."""
 
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
     one_r_fraction: Decimal
     low_loss_multiplier: Decimal
@@ -176,6 +191,7 @@ class RiskPolicyParameters(BaseModel):
     absolute_trade_loss_cap: Decimal | None = Field(default=None, gt=0)
     consistency_window_ms: int = Field(gt=0)
     max_future_skew_ms: int = Field(ge=0)
+    cost_stress: CostStressPolicyParameters
     fact_freshness_limits: tuple[FactFreshnessLimit, ...]
     scope_limits: tuple[ScopeLimit, ...]
 
@@ -352,7 +368,6 @@ class RequestedRiskIncrease(BaseModel):
     requested_quantity: Decimal = Field(gt=0)
     quantity_step: Decimal = Field(gt=0)
     requested_protected_profit_giveback: Decimal = Field(ge=0)
-    requested_cost_stress_add_on: Decimal = Field(ge=0)
     requested_funding: Decimal = Field(ge=0)
     requested_margin: Decimal = Field(ge=0)
     requested_effective_leverage: Decimal = Field(gt=0)
@@ -428,30 +443,68 @@ class RiskPrecheckRequest(BaseModel):
             raise ValueError("scope risk inputs must cover every required scope type")
         if self.market.contract_multiplier != self.binding.contract_multiplier:
             raise ValueError("market contract multiplier must match the certified binding")
-        if any(
-            item.requested_incremental_stress_loss < self.incremental_worst_case_loss
-            for item in self.scope_risks
-        ):
-            raise ValueError("scope stress loss cannot be below canonical planned loss")
         return self
 
     @property
     def requested_base_heat(self) -> Decimal:
         """Canonical directional loss from executable entry to frozen invalidation."""
 
-        return (
+        return _quantize_risk_amount(
             abs(self.market.executable_price - self.market.initial_invalidation_price)
             * self.requested.requested_quantity
             * self.binding.contract_multiplier
         )
 
     @property
-    def incremental_worst_case_loss(self) -> Decimal:
-        return (
-            self.requested_base_heat
-            + self.requested.requested_protected_profit_giveback
-            + self.requested.requested_cost_stress_add_on
-        )
+    def requested_protected_profit_giveback(self) -> Decimal:
+        return _quantize_risk_amount(self.requested.requested_protected_profit_giveback)
+
+
+class CostStressBreakdown(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    fee_stress: Decimal = Field(ge=0)
+    stop_penetration_stress: Decimal = Field(ge=0)
+    adverse_funding_stress: Decimal = Field(ge=0)
+
+    @property
+    def total(self) -> Decimal:
+        return self.fee_stress + self.stop_penetration_stress + self.adverse_funding_stress
+
+
+def _quantize_risk_amount(value: Decimal) -> Decimal:
+    if value == ZERO:
+        return ZERO
+    with localcontext() as context:
+        context.prec = 80
+        return value.quantize(RISK_AMOUNT_QUANTUM, rounding=ROUND_CEILING)
+
+
+def derive_cost_stress(
+    request: RiskPrecheckRequest,
+    policy: RiskPolicyParameters,
+) -> CostStressBreakdown:
+    parameters = policy.cost_stress
+    notional = (
+        request.requested.requested_quantity
+        * request.market.executable_price
+        * request.binding.contract_multiplier
+    )
+    if request.market.direction is PositionDirection.LONG:
+        adverse_funding_rate = max(ZERO, request.market.funding_rate)
+    else:
+        adverse_funding_rate = max(ZERO, -request.market.funding_rate)
+    return CostStressBreakdown(
+        fee_stress=_quantize_risk_amount(
+            notional * parameters.round_trip_fee_bps / Decimal("10000")
+        ),
+        stop_penetration_stress=_quantize_risk_amount(
+            notional * parameters.stop_penetration_bps / Decimal("10000")
+        ),
+        adverse_funding_stress=_quantize_risk_amount(
+            notional * adverse_funding_rate * parameters.funding_interval_count
+        ),
+    )
 
 
 class RiskEvaluationInput(BaseModel):
@@ -509,7 +562,12 @@ class RiskEvaluationResult(BaseModel):
     trade_worst_case_loss_after: Decimal
     requested_base_heat: Decimal
     requested_protected_profit_giveback: Decimal
+    requested_fee_stress: Decimal
+    requested_stop_penetration_stress: Decimal
+    requested_adverse_funding_stress: Decimal
     requested_cost_stress_add_on: Decimal
+    requested_incremental_worst_case_loss: Decimal
+    cost_stress_model_version: str
     funding_envelope_0: Decimal
     funding_after: Decimal
     leverage_cap: Decimal
@@ -930,7 +988,18 @@ class RiskEvaluator:
         effective_trade_cap = min(trade_caps)
 
         current_trade_loss = request.current_trade_loss.total
-        incremental_trade_loss = request.incremental_worst_case_loss
+        cost_stress = derive_cost_stress(request, policy)
+        incremental_trade_loss = (
+            request.requested_base_heat
+            + request.requested_protected_profit_giveback
+            + cost_stress.total
+        )
+        if any(
+            item.requested_incremental_stress_loss < incremental_trade_loss
+            for item in request.scope_risks
+        ):
+            reasons.append("SCOPE_STRESS_INPUT_INVALID")
+            hard_failure = True
         trade_loss_after = current_trade_loss + incremental_trade_loss
         trade_ratio = _capacity_ratio(
             effective_trade_cap,
@@ -1075,10 +1144,13 @@ class RiskEvaluator:
             trade_worst_case_loss_before=current_trade_loss,
             trade_worst_case_loss_after=trade_loss_after,
             requested_base_heat=request.requested_base_heat,
-            requested_protected_profit_giveback=(
-                request.requested.requested_protected_profit_giveback
-            ),
-            requested_cost_stress_add_on=request.requested.requested_cost_stress_add_on,
+            requested_protected_profit_giveback=(request.requested_protected_profit_giveback),
+            requested_fee_stress=cost_stress.fee_stress,
+            requested_stop_penetration_stress=cost_stress.stop_penetration_stress,
+            requested_adverse_funding_stress=cost_stress.adverse_funding_stress,
+            requested_cost_stress_add_on=cost_stress.total,
+            requested_incremental_worst_case_loss=incremental_trade_loss,
+            cost_stress_model_version=policy.cost_stress.model_version,
             funding_envelope_0=funding_envelope,
             funding_after=funding_after,
             leverage_cap=leverage_cap,
@@ -1092,8 +1164,8 @@ class RiskEvaluator:
 class RiskPrecheckService:
     """Persists one immutable shadow precheck and emits audit/outbox evidence."""
 
-    command_type = "risk.precheck.evaluate.v2"
-    payload_schema_version = 2
+    command_type = "risk.precheck.evaluate.v3"
+    payload_schema_version = 3
 
     def __init__(
         self,

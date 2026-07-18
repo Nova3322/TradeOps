@@ -444,8 +444,8 @@ class DurableExposureResolver:
 
 
 class ExecutionIntentService:
-    command_type = "execution.intent.create.v2"
-    payload_schema_version = 2
+    command_type = "execution.intent.create.v3"
+    payload_schema_version = 3
 
     def __init__(
         self,
@@ -633,7 +633,7 @@ class ExecutionIntentService:
                 "FROZEN_FUNDING_ENVELOPE_EXCEEDED",
             )
 
-        reserved_heat = request.risk_request.incremental_worst_case_loss
+        reserved_heat = evaluation.requested_incremental_worst_case_loss
         if (
             request.risk_request.current_trade_loss.total + reserved_heat
             > authorization.authorized_loss_capacity
@@ -801,7 +801,7 @@ class ExecutionIntentService:
             {
                 "scope_type": scope.scope_type.value,
                 "scope_id": scope.scope_id,
-                "planned_loss": str(request.risk_request.incremental_worst_case_loss),
+                "planned_loss": str(evaluation.requested_incremental_worst_case_loss),
                 "stress_loss": str(scope.requested_incremental_stress_loss),
             }
             for scope in sorted(
@@ -812,10 +812,8 @@ class ExecutionIntentService:
         funding = request.risk_request.requested.requested_funding
         margin = request.risk_request.requested.requested_margin
         base_heat = request.risk_request.requested_base_heat
-        protected_profit_giveback = (
-            request.risk_request.requested.requested_protected_profit_giveback
-        )
-        cost_stress_add_on = request.risk_request.requested.requested_cost_stress_add_on
+        protected_profit_giveback = evaluation.requested_protected_profit_giveback
+        cost_stress_add_on = evaluation.requested_cost_stress_add_on
         reservation = RiskReservation(
             risk_reservation_id=risk_reservation_id,
             execution_risk_decision_id=decision_id,

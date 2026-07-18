@@ -20,6 +20,7 @@ from trading_control_plane.capital_scope import (
 from trading_control_plane.commands import hash_json
 from trading_control_plane.projections import CurrentAccountEquityScope
 from trading_control_plane.risk import (
+    CANONICAL_COST_STRESS_MODEL_VERSION,
     CANONICAL_LOSS_MODEL_VERSION,
     CapitalInput,
     CapitalProjectionBinding,
@@ -146,6 +147,13 @@ def make_policy(**updates: Any) -> RiskPolicyParameters:
         "absolute_trade_loss_cap": None,
         "consistency_window_ms": 1_000,
         "max_future_skew_ms": 1_000,
+        "cost_stress": {
+            "model_version": CANONICAL_COST_STRESS_MODEL_VERSION,
+            "round_trip_fee_bps": Decimal("10"),
+            "stop_penetration_bps": Decimal("20"),
+            "funding_interval_count": 2,
+            "source_ref": "test-only:cost-stress-research-v1",
+        },
         "fact_freshness_limits": tuple(
             FactFreshnessLimit(fact_type=fact_type, max_age_ms=5_000) for fact_type in FactType
         ),
@@ -188,7 +196,6 @@ def make_requested(**updates: Any) -> RequestedRiskIncrease:
         "requested_quantity": Decimal("1"),
         "quantity_step": Decimal("0.001"),
         "requested_protected_profit_giveback": Decimal("0"),
-        "requested_cost_stress_add_on": Decimal("10"),
         "requested_funding": Decimal("1000"),
         "requested_margin": Decimal("1000"),
         "requested_effective_leverage": Decimal("2"),
@@ -237,7 +244,6 @@ def make_request(
         * effective_requested.requested_quantity
         * effective_market.contract_multiplier
         + effective_requested.requested_protected_profit_giveback
-        + effective_requested.requested_cost_stress_add_on
     )
     if scope_risks is None:
         scope_risks = tuple(

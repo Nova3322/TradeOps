@@ -142,7 +142,7 @@ def risk_envelope(request: RiskPrecheckRequest) -> CommandEnvelope:
     now = datetime.now(UTC)
     return CommandEnvelope(
         idempotency_key=f"risk-precheck-{uuid4()}",
-        command_type="risk.precheck.evaluate.v2",
+        command_type="risk.precheck.evaluate.v3",
         object_type="ProposalCandidate",
         object_id=request.proposal_ref,
         expected_version=request.candidate_version,
@@ -153,7 +153,7 @@ def risk_envelope(request: RiskPrecheckRequest) -> CommandEnvelope:
         issued_at=now,
         expires_at=now + timedelta(minutes=2),
         auth_context_ref="test-only:risk-precheck-auth",
-        payload_schema_version=2,
+        payload_schema_version=3,
         reason="evaluate proposal candidate",
         payload=request.model_dump(mode="json"),
     )
@@ -252,11 +252,19 @@ def test_allow_precheck_persists_immutable_snapshot_audit_and_outbox(
         assert snapshot.one_r_0 == Decimal("500")
         assert snapshot.frozen_trade_loss_cap == Decimal("500")
         assert snapshot.dynamic_trade_loss_cap == Decimal("500")
-        assert snapshot.trade_worst_case_loss_after == Decimal("20.5")
-        assert snapshot.decision["requested_base_heat"] == "10.5"
+        assert snapshot.trade_worst_case_loss_after == Decimal("10.8216")
+        assert snapshot.decision["requested_base_heat"] == "10.500000000000000000"
         assert snapshot.decision["requested_protected_profit_giveback"] == "0"
-        assert snapshot.decision["requested_cost_stress_add_on"] == "10"
+        assert snapshot.decision["requested_fee_stress"] == "0.100500000000000000"
+        assert snapshot.decision["requested_stop_penetration_stress"] == ("0.201000000000000000")
+        assert snapshot.decision["requested_adverse_funding_stress"] == ("0.020100000000000000")
+        assert snapshot.decision["requested_cost_stress_add_on"] == "0.321600000000000000"
+        assert snapshot.decision["requested_incremental_worst_case_loss"] == (
+            "10.821600000000000000"
+        )
+        assert snapshot.decision["cost_stress_model_version"] == ("fee-stop-funding-stress-v1")
         assert "requested_reserved_heat" not in snapshot.input_snapshot["request"]["requested"]
+        assert "requested_cost_stress_add_on" not in snapshot.input_snapshot["request"]["requested"]
         assert all(
             "requested_incremental_planned_loss" not in scope
             for scope in snapshot.input_snapshot["request"]["scope_risks"]
@@ -625,19 +633,25 @@ def test_web_actor_cannot_call_internal_risk_precheck_handler_directly(
         assert count_rows(session, RiskDecisionSnapshot) == 0
 
 
-def test_risk_precheck_v1_command_and_wrong_v2_schema_are_rejected(
+def test_risk_precheck_legacy_commands_and_wrong_v3_schema_are_rejected(
     database: Database,
 ) -> None:
     v1 = risk_envelope(make_request()).model_copy(
         update={"command_type": "risk.precheck.evaluate.v1"}
     )
-    wrong_schema = risk_envelope(make_request()).model_copy(update={"payload_schema_version": 1})
+    v2 = risk_envelope(make_request()).model_copy(
+        update={"command_type": "risk.precheck.evaluate.v2"}
+    )
+    wrong_schema = risk_envelope(make_request()).model_copy(update={"payload_schema_version": 2})
 
-    old_result = execute_precheck(database, v1)
+    v1_result = execute_precheck(database, v1)
+    v2_result = execute_precheck(database, v2)
     schema_result = execute_precheck(database, wrong_schema)
 
-    assert old_result.status is CommandStatus.REJECTED
-    assert old_result.error_code == "COMMAND_TYPE_MISMATCH"
+    assert v1_result.status is CommandStatus.REJECTED
+    assert v1_result.error_code == "COMMAND_TYPE_MISMATCH"
+    assert v2_result.status is CommandStatus.REJECTED
+    assert v2_result.error_code == "COMMAND_TYPE_MISMATCH"
     assert schema_result.status is CommandStatus.REJECTED
     assert schema_result.error_code == "PAYLOAD_SCHEMA_VERSION_MISMATCH"
 

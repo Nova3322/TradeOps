@@ -107,6 +107,7 @@ docs/
     ├── WP-0024-提案预检Durable-Exposure强绑定.md
     ├── WP-0025-风险预留损失组件冻结.md
     ├── WP-0026-规范化Base-Heat与Scope增量.md
+    ├── WP-0027-策略绑定Cost-Stress.md
     └── evidence/
         ├── WP-0001-validation-20260718.md
         ├── WP-0002-validation-20260718.md
@@ -133,7 +134,8 @@ docs/
         ├── WP-0023-validation-20260718.md
         ├── WP-0024-validation-20260718.md
         ├── WP-0025-validation-20260718.md
-        └── WP-0026-validation-20260718.md
+        ├── WP-0026-validation-20260718.md
+        └── WP-0027-validation-20260718.md
 ```
 
 ### 专项索引
@@ -189,6 +191,7 @@ docs/
 | 实现 | [WP-0024：提案预检 Durable Exposure 强绑定](08-implementation/WP-0024-提案预检Durable-Exposure强绑定.md) | 公共聚合器、组织级并发锁、新初仓零 Heat、提案 funding/margin/scope 真源和不可变 hash |
 | 实现 | [WP-0025：风险预留损失组件冻结](08-implementation/WP-0025-风险预留损失组件冻结.md) | reservation 三分量求和约束、snapshot v2、部分成交后五项当前 Trade Loss 可复算 |
 | 实现 | [WP-0026：规范化 Base Heat 与 Scope 增量](08-implementation/WP-0026-规范化Base-Heat与Scope增量.md) | v2 风险/意图命令、服务端 base Heat 公式、七层 planned loss 共源和 18 位定点分量守恒 |
+| 实现 | [WP-0027：策略绑定 Cost Stress](08-implementation/WP-0027-策略绑定Cost-Stress.md) | v3 风险/意图命令、无默认 cost policy、fee/穿透/不利 funding 规范计算和 18 位保守金额 |
 
 ## 完整交付与能力激活
 
