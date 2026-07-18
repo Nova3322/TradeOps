@@ -600,6 +600,9 @@ def upgrade() -> None:
         sa.Column("quantity", sa.Numeric(precision=38, scale=18), nullable=False),
         sa.Column("limit_price", sa.Numeric(precision=38, scale=18), nullable=True),
         sa.Column("reduce_only", sa.Boolean(), nullable=False),
+        sa.Column("trigger_source", sa.String(length=255), nullable=True),
+        sa.Column("trigger_observed_at", sa.DateTime(timezone=True), nullable=True),
+        sa.Column("add_unit_consumed", sa.Boolean(), nullable=False),
         sa.Column("target_version", sa.Integer(), nullable=True),
         sa.Column("position_id", sa.Uuid(), nullable=True),
         sa.Column("position_observed_at", sa.DateTime(timezone=True), nullable=True),
@@ -623,6 +626,10 @@ def upgrade() -> None:
         sa.CheckConstraint(
             "limit_price IS NULL OR limit_price > 0",
             name="ck_order_intents_limit_price_positive",
+        ),
+        sa.CheckConstraint(
+            "kind = 'ADD' OR add_unit_consumed = false",
+            name="ck_order_intents_add_unit_kind",
         ),
         sa.ForeignKeyConstraint(
             ["authorization_id"],

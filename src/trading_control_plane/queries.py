@@ -13,6 +13,7 @@ from trading_control_plane.models import (
     AccountEquity,
     Approval,
     Campaign,
+    CapabilityGate,
     FundingPayment,
     Instrument,
     OrderIntent,
@@ -261,7 +262,9 @@ class TradingQueries:
             if not self.service.can_user(user_id, "view", campaign.account_id, campaign.venue):
                 raise DomainRejected("RBAC_DENIED", "campaign is outside the current scope")
             instrument = session.get(Instrument, campaign.instrument_id)
+            proposal = session.get(Proposal, campaign.proposal_id)
             authorization = session.get(TradingAuthorization, campaign.authorization_id)
+            auto_add_gate = session.get(CapabilityGate, "AUTO_ADD")
             reservations = session.scalars(
                 select(RiskReservation)
                 .where(RiskReservation.campaign_id == campaign_id)
@@ -337,6 +340,8 @@ class TradingQueries:
                         "active": authorization.active,
                         "quantity_limit": str(authorization.quantity_limit),
                         "used_quantity": str(authorization.used_quantity),
+                        "allowed_adds": authorization.allowed_adds,
+                        "used_adds": authorization.used_adds,
                         "expires_at": _iso(authorization.expires_at),
                     },
                     "reservations": [
@@ -358,6 +363,9 @@ class TradingQueries:
                                 None if item.limit_price is None else str(item.limit_price)
                             ),
                             "reduce_only": item.reduce_only,
+                            "trigger_source": item.trigger_source,
+                            "trigger_observed_at": _iso(item.trigger_observed_at),
+                            "add_unit_consumed": item.add_unit_consumed,
                             "status": item.status,
                             "version": item.version,
                             "created_at": _iso(item.created_at),
@@ -428,6 +436,44 @@ class TradingQueries:
                         "owner_id": lease.owner_id,
                         "fencing_token": lease.fencing_token,
                         "expires_at": _iso(lease.expires_at),
+                    },
+                    "management": {
+                        "auto_add_gate": (
+                            "UNKNOWN" if auto_add_gate is None else auto_add_gate.status
+                        ),
+                        "allow_auto_add": bool(
+                            proposal is not None
+                            and isinstance(proposal.frozen_payload.get("details"), dict)
+                            and proposal.frozen_payload["details"].get("allow_auto_add") is True
+                        ),
+                        "initial_quantity": (
+                            None
+                            if proposal is None
+                            or not isinstance(proposal.frozen_payload.get("details"), dict)
+                            else proposal.frozen_payload["details"].get("initial_quantity")
+                        ),
+                        "add_trigger_price": (
+                            None
+                            if proposal is None
+                            or not isinstance(proposal.frozen_payload.get("details"), dict)
+                            else proposal.frozen_payload["details"].get("add_trigger_price")
+                        ),
+                        "requested_adds": (
+                            0
+                            if proposal is None
+                            or not isinstance(proposal.frozen_payload.get("details"), dict)
+                            else proposal.frozen_payload["details"].get("requested_adds", 0)
+                        ),
+                        "remaining_quantity": (
+                            "0"
+                            if authorization is None or not authorization.active
+                            else str(authorization.quantity_limit - authorization.used_quantity)
+                        ),
+                        "remaining_adds": (
+                            0
+                            if authorization is None or not authorization.active
+                            else authorization.allowed_adds - authorization.used_adds
+                        ),
                     },
                 }
             )

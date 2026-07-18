@@ -18,6 +18,7 @@ from trading_control_plane.binance_execution import (
 )
 from trading_control_plane.database import Database
 from trading_control_plane.domain import (
+    AddCandidateFacts,
     CampaignStatus,
     CapabilityStatus,
     Direction,
@@ -45,6 +46,7 @@ from trading_control_plane.domain import (
     SystemRiskState,
     TargetCandidate,
     TargetDecision,
+    TargetUrgency,
     VenueOrderStatus,
     compute_pnl,
     evaluate_risk,
@@ -124,9 +126,16 @@ ROLE_ACTIONS: dict[Role, frozenset[str]] = {
             "venue.record",
             "reconcile",
             "sender.manage",
+            "risk.tighten",
         }
     ),
     Role.SYSTEM_ADMIN: frozenset({"*"}),
+}
+
+MAX_ADD_UNITS: dict[RiskTier, int] = {
+    RiskTier.LOW: 1,
+    RiskTier.MEDIUM: 2,
+    RiskTier.HIGH: 3,
 }
 
 
@@ -1082,8 +1091,27 @@ class TradingService:
                 _reject("RISK_DECISION_NOT_ALLOWING", "latest risk decision does not allow risk")
             if expires_at <= now or expires_at > proposal.expires_at:
                 _reject("AUTHORIZATION_EXPIRY_INVALID", "authorization must be short-lived")
-            if allowed_adds < 0:
-                _reject("AUTHORIZATION_ADD_LIMIT_INVALID", "allowed Add count cannot be negative")
+            details = proposal.frozen_payload.get("details")
+            management = details if isinstance(details, dict) else {}
+            requested_adds_raw = management.get("requested_adds", 0)
+            try:
+                requested_adds = int(requested_adds_raw)
+            except (TypeError, ValueError):
+                _reject(
+                    "PROPOSAL_ADD_CONTRACT_INVALID",
+                    "frozen proposal AddUnit request is invalid",
+                )
+            tier_limit = MAX_ADD_UNITS[RiskTier(proposal.risk_tier)]
+            proposal_limit = min(requested_adds, tier_limit)
+            if (
+                allowed_adds < 0
+                or allowed_adds > proposal_limit
+                or (allowed_adds > 0 and management.get("allow_auto_add") is not True)
+            ):
+                _reject(
+                    "AUTHORIZATION_ADD_LIMIT_INVALID",
+                    "allowed Add count exceeds the frozen proposal and risk tier",
+                )
             authorization = TradingAuthorization(
                 proposal_id=proposal_id,
                 risk_decision_id=decision.decision_id,
@@ -1149,6 +1177,77 @@ class TradingService:
             _reject("PROPOSAL_PRICE_INVALID", "frozen proposal limit price is invalid")
         return value
 
+    @staticmethod
+    def _proposal_detail_decimal(proposal: Proposal, key: str) -> Decimal:
+        details = proposal.frozen_payload.get("details")
+        if not isinstance(details, dict) or details.get(key) is None:
+            _reject(
+                "PROPOSAL_ADD_CONTRACT_INVALID",
+                f"frozen proposal is missing {key}",
+            )
+        try:
+            value = Decimal(str(details[key]))
+        except (ArithmeticError, TypeError, ValueError):
+            _reject("PROPOSAL_ADD_CONTRACT_INVALID", f"frozen {key} is invalid")
+        if not value.is_finite() or value <= 0:
+            _reject("PROPOSAL_ADD_CONTRACT_INVALID", f"frozen {key} is invalid")
+        return value
+
+    @staticmethod
+    def _validate_add_candidate(
+        *,
+        proposal: Proposal,
+        instrument: Instrument,
+        candidate: AddCandidateFacts | None,
+        policy: RiskPolicy,
+        now: datetime,
+    ) -> None:
+        details = proposal.frozen_payload.get("details")
+        if not isinstance(details, dict) or details.get("allow_auto_add") is not True:
+            _reject("PROPOSAL_AUTO_ADD_DISABLED", "frozen proposal does not allow AUTO_ADD")
+        if candidate is None:
+            _reject(
+                "AUTO_ADD_CANDIDATE_REQUIRED",
+                "ADD requires a current Perptape candidate at the Trading boundary",
+            )
+        if (
+            candidate.readiness != "READY"
+            or candidate.venue != proposal.venue
+            or candidate.symbol != instrument.symbol
+            or candidate.direction.value != proposal.direction
+        ):
+            _reject(
+                "AUTO_ADD_CANDIDATE_SCOPE_INVALID",
+                "Perptape candidate does not match the frozen Campaign scope",
+            )
+        if proposal.source == ProposalSource.SYSTEM.value and (
+            candidate.contract_version != proposal.strategy_version
+            or candidate.candidate_id == proposal.source_candidate_id
+        ):
+            _reject(
+                "AUTO_ADD_CANDIDATE_VERSION_INVALID",
+                "SYSTEM Add requires a new candidate from the frozen Perptape contract",
+            )
+        baseline = proposal.source_observed_at or proposal.frozen_at or proposal.created_at
+        if proposal.source == ProposalSource.SYSTEM.value and candidate.observed_at <= baseline:
+            _reject(
+                "AUTO_ADD_CANDIDATE_NOT_SUBSEQUENT",
+                "Add candidate must be newer than the frozen Proposal facts",
+            )
+        age = now - candidate.observed_at
+        if age < timedelta(0) or age > timedelta(seconds=policy.max_fact_age_seconds):
+            _reject("AUTO_ADD_CANDIDATE_STALE", "Add candidate is not a current fact")
+        trigger_price = TradingService._proposal_detail_decimal(proposal, "add_trigger_price")
+        if proposal.direction == Direction.LONG.value:
+            passed = candidate.reference_price >= trigger_price
+        else:
+            passed = candidate.reference_price <= trigger_price
+        if not passed:
+            _reject(
+                "AUTO_ADD_TRIGGER_NOT_MET",
+                "Perptape candidate has not reached the frozen favorable-price gate",
+            )
+
     def create_order_intent(
         self,
         authorization_id: UUID,
@@ -1161,6 +1260,7 @@ class TradingService:
         quantity: Decimal,
         idempotency_key: str,
         *,
+        add_candidate: AddCandidateFacts | None = None,
         now: datetime,
     ) -> IntentCreation:
         if kind not in {IntentKind.INITIAL, IntentKind.ADD}:
@@ -1173,6 +1273,18 @@ class TradingService:
             "instrument_id": str(instrument_id),
             "direction": direction.value,
             "quantity": str(quantity),
+            "add_candidate": None
+            if add_candidate is None
+            else {
+                "candidate_id": add_candidate.candidate_id,
+                "contract_version": add_candidate.contract_version,
+                "venue": add_candidate.venue,
+                "symbol": add_candidate.symbol,
+                "direction": add_candidate.direction.value,
+                "observed_at": add_candidate.observed_at.isoformat(),
+                "reference_price": str(add_candidate.reference_price),
+                "readiness": add_candidate.readiness,
+            },
         }
         operation = "order.prepare"
         with self.database.session_factory.begin() as session:
@@ -1308,6 +1420,16 @@ class TradingService:
                 gate = session.get(CapabilityGate, "AUTO_ADD", with_for_update=True)
                 if gate is None or gate.status != CapabilityStatus.ENABLED.value:
                     _reject("AUTO_ADD_DISABLED", "automatic add capability is disabled")
+                instrument = session.get(Instrument, proposal.instrument_id)
+                if instrument is None:
+                    _reject("INSTRUMENT_UNAVAILABLE", "proposal instrument is unavailable")
+                self._validate_add_candidate(
+                    proposal=proposal,
+                    instrument=instrument,
+                    candidate=add_candidate,
+                    policy=policy,
+                    now=now,
+                )
                 if policy.system_state != SystemRiskState.NORMAL.value:
                     _reject("ADD_RISK_STATE_INVALID", "ADD requires NORMAL risk state")
                 if authorization.used_adds >= authorization.allowed_adds:
@@ -1357,6 +1479,11 @@ class TradingService:
                 quantity=quantity,
                 limit_price=self._proposal_limit_price(proposal),
                 reduce_only=False,
+                trigger_source=(
+                    None if add_candidate is None else f"PERPTAPE:{add_candidate.candidate_id}"
+                ),
+                trigger_observed_at=(None if add_candidate is None else add_candidate.observed_at),
+                add_unit_consumed=False,
                 target_version=None,
                 position_id=position.position_id,
                 position_observed_at=position.observed_at,
@@ -1370,8 +1497,6 @@ class TradingService:
             )
             session.add(intent)
             authorization.used_quantity += quantity
-            if kind is IntentKind.ADD:
-                authorization.used_adds += 1
             session.flush()
             result = {
                 "campaign_id": str(campaign.campaign_id),
@@ -1405,6 +1530,21 @@ class TradingService:
                 reservation_id=reservation.reservation_id,
                 intent_id=intent.intent_id,
             )
+
+    @staticmethod
+    def _consume_add_unit(session: Session, intent: OrderIntent) -> None:
+        if intent.kind != IntentKind.ADD.value or intent.add_unit_consumed:
+            return
+        authorization = session.get(
+            TradingAuthorization, intent.authorization_id, with_for_update=True
+        )
+        if authorization is None or authorization.used_adds >= authorization.allowed_adds:
+            _reject(
+                "AUTHORIZATION_ADD_LIMIT_INVALID",
+                "positive Add execution exceeds the authorized AddUnit count",
+            )
+        authorization.used_adds += 1
+        intent.add_unit_consumed = True
 
     def mark_intent_unknown(
         self, intent_id: UUID, actor_id: UUID, reason: str, *, now: datetime
@@ -1519,10 +1659,6 @@ class TradingService:
                             "AUTHORIZATION_USAGE_INVALID", "authorization usage is inconsistent"
                         )
                     authorization.used_quantity -= intent.quantity
-                    if intent.kind == IntentKind.ADD.value:
-                        if authorization.used_adds <= 0:
-                            _reject("AUTHORIZATION_USAGE_INVALID", "Add usage is inconsistent")
-                        authorization.used_adds -= 1
             venue_order = session.scalar(
                 select(VenueOrder).where(VenueOrder.order_intent_id == intent_id)
             )
@@ -2041,10 +2177,6 @@ class TradingService:
             if authorization is None or authorization.used_quantity < intent.quantity:
                 _reject("AUTHORIZATION_USAGE_INVALID", "authorization usage is inconsistent")
             authorization.used_quantity -= intent.quantity
-            if intent.kind == IntentKind.ADD.value:
-                if authorization.used_adds <= 0:
-                    _reject("AUTHORIZATION_USAGE_INVALID", "Add usage is inconsistent")
-                authorization.used_adds -= 1
         intent.status = terminal_status.value
         intent.updated_at = now
         intent.version += 1
@@ -2137,6 +2269,8 @@ class TradingService:
                 fact.observed_at = result.observed_at
                 fact.updated_at = now
 
+            if result.filled_quantity > 0:
+                self._consume_add_unit(session, intent)
             previous = intent.status
             terminal = {
                 VenueOrderStatus.CANCELLED.value: OrderIntentStatus.CANCELLED,
@@ -2868,6 +3002,7 @@ class TradingService:
             session.add(fact)
             session.flush()
             total_filled = current_filled + quantity
+            self._consume_add_unit(session, intent)
             previous = intent.status
             if total_filled == intent.quantity:
                 intent.status = OrderIntentStatus.FILLED.value
@@ -3487,6 +3622,8 @@ class TradingService:
                     )
                 if filled > bound_order.filled_quantity:
                     bound_order.filled_quantity = filled
+                if filled > 0:
+                    self._consume_add_unit(session, bound_intent)
                 previous = bound_intent.status
                 release_updated_intent = False
                 terminal = {
@@ -3773,6 +3910,8 @@ class TradingService:
         actor_id: UUID,
         idempotency_key: str,
         *,
+        candidates: tuple[TargetCandidate, ...] | None = None,
+        expected_target_version: int | None = None,
         limit_price: Decimal | None = None,
         now: datetime,
     ) -> UUID:
@@ -3802,13 +3941,29 @@ class TradingService:
             expected_long = campaign.direction == Direction.LONG.value
             if position.quantity == 0 or (position.quantity > 0) != expected_long:
                 _reject("POSITION_DIRECTION_MISMATCH", "position does not match campaign direction")
-            payload = {
-                "campaign_id": str(campaign_id),
-                "target_version": campaign.target_version,
-                "target_quantity": str(campaign.current_target_quantity),
-                "position_quantity": str(position.quantity),
-                "limit_price": None if limit_price is None else str(limit_price),
-            }
+            if candidates is None:
+                payload = {
+                    "campaign_id": str(campaign_id),
+                    "target_version": campaign.target_version,
+                    "target_quantity": str(campaign.current_target_quantity),
+                    "position_quantity": str(position.quantity),
+                    "limit_price": None if limit_price is None else str(limit_price),
+                    "expected_target_version": expected_target_version,
+                }
+            else:
+                payload = {
+                    "campaign_id": str(campaign_id),
+                    "candidates": [
+                        {
+                            "target_quantity": str(candidate.target_quantity),
+                            "urgency": candidate.urgency.value,
+                            "reason": candidate.reason,
+                        }
+                        for candidate in candidates
+                    ],
+                    "limit_price": None if limit_price is None else str(limit_price),
+                    "expected_target_version": expected_target_version,
+                }
             if limit_price is not None and (not limit_price.is_finite() or limit_price <= 0):
                 _reject("ORDER_LIMIT_PRICE_INVALID", "explicit reduction limit must be positive")
             digest, response = self._idempotency(
@@ -3820,6 +3975,11 @@ class TradingService:
             )
             if response is not None:
                 return _as_uuid(str(response["intent_id"]))
+            if (
+                expected_target_version is not None
+                and campaign.target_version != expected_target_version
+            ):
+                _reject("VERSION_CONFLICT", "Campaign target changed before the action")
             active = session.scalar(
                 select(OrderIntent.intent_id).where(
                     OrderIntent.campaign_id == campaign_id,
@@ -3828,6 +3988,36 @@ class TradingService:
             )
             if active is not None:
                 _reject("ACTIVE_ORDER_INTENT", "campaign already has unresolved intent")
+            if candidates is not None:
+                effective_candidates = candidates
+                if campaign.target_calculated_at is not None:
+                    try:
+                        existing_urgency = TargetUrgency(
+                            campaign.target_urgency or TargetUrgency.NORMAL.value
+                        )
+                    except ValueError:
+                        _reject("CAMPAIGN_TARGET_INVALID", "stored target urgency is invalid")
+                    effective_candidates += (
+                        TargetCandidate(
+                            campaign.current_target_quantity,
+                            existing_urgency,
+                            campaign.target_reason or "existing campaign target",
+                        ),
+                    )
+                decision = select_target_position(effective_candidates)
+                if decision.target_quantity > abs(position.quantity):
+                    _reject("TARGET_EXCEEDS_POSITION", "target cannot exceed the current position")
+                campaign.current_target_quantity = decision.target_quantity
+                campaign.target_version += 1
+                campaign.target_reason = ",".join(decision.reasons)
+                campaign.target_urgency = decision.urgency.value
+                campaign.target_calculated_at = now
+                campaign.status = (
+                    CampaignStatus.CLOSING.value
+                    if decision.target_quantity == 0
+                    else CampaignStatus.REDUCING.value
+                )
+                campaign.updated_at = now
             reduction_quantity = abs(position.quantity) - campaign.current_target_quantity
             if reduction_quantity <= 0:
                 _reject("TARGET_NOT_REDUCING", "target does not reduce current position")
@@ -3842,6 +4032,9 @@ class TradingService:
                 quantity=reduction_quantity,
                 limit_price=limit_price,
                 reduce_only=True,
+                trigger_source="CAMPAIGN_TARGET",
+                trigger_observed_at=position.observed_at,
+                add_unit_consumed=False,
                 target_version=campaign.target_version,
                 position_id=position.position_id,
                 position_observed_at=position.observed_at,
@@ -3865,7 +4058,371 @@ class TradingService:
                 response=result,
                 now=now,
             )
+            self._audit(
+                session,
+                actor_id=str(actor_id),
+                event_type="REDUCTION_INTENT_PREPARED",
+                object_type="OrderIntent",
+                object_id=intent.intent_id,
+                reason=campaign.target_reason or kind.value,
+                correlation_id=intent.correlation_id,
+                object_version=intent.version,
+                idempotency_key=idempotency_key,
+                now=now,
+            )
             return intent.intent_id
+
+    def create_automatic_exit_intent(
+        self,
+        campaign_id: UUID,
+        actor_id: UUID,
+        idempotency_key: str,
+        *,
+        limit_price: Decimal | None = None,
+        now: datetime,
+    ) -> tuple[str, UUID | None]:
+        operation = "campaign.auto_exit"
+        payload = {
+            "campaign_id": str(campaign_id),
+            "limit_price": None if limit_price is None else str(limit_price),
+        }
+        with self.database.session_factory.begin() as session:
+            campaign = session.get(Campaign, campaign_id, with_for_update=True)
+            if campaign is None:
+                _reject("CAMPAIGN_NOT_FOUND", "campaign does not exist")
+            self._require_role(
+                session, actor_id, "risk.tighten", campaign.account_id, campaign.venue
+            )
+            digest, response = self._idempotency(
+                session,
+                caller_id=str(actor_id),
+                operation=operation,
+                idempotency_key=idempotency_key,
+                payload=payload,
+            )
+            if response is not None:
+                intent_value = response.get("intent_id")
+                return (
+                    str(response["reason"]),
+                    None if intent_value is None else _as_uuid(str(intent_value)),
+                )
+            if limit_price is not None and (not limit_price.is_finite() or limit_price <= 0):
+                _reject("ORDER_LIMIT_PRICE_INVALID", "explicit exit limit must be positive")
+            proposal = session.get(Proposal, campaign.proposal_id)
+            position = session.scalar(
+                select(Position)
+                .where(
+                    Position.account_id == campaign.account_id,
+                    Position.venue == campaign.venue,
+                    Position.environment == campaign.environment,
+                    Position.instrument_id == campaign.instrument_id,
+                )
+                .with_for_update()
+            )
+            policy = self._active_risk_policy(session)
+            if proposal is None or policy is None:
+                _reject("CAMPAIGN_MANAGEMENT_INVALID", "campaign management facts are incomplete")
+            if position is None or position.fact_status != FactStatus.KNOWN.value:
+                _reject("POSITION_UNKNOWN", "automatic exit requires a known current position")
+            if self._fact_is_stale(
+                position.observed_at,
+                now,
+                timedelta(seconds=policy.max_fact_age_seconds),
+            ):
+                _reject("STALE_FACTS", "automatic exit requires a fresh position")
+            if position.quantity == 0:
+                result: dict[str, Any] = {"reason": "POSITION_FLAT", "intent_id": None}
+                self._save_receipt(
+                    session,
+                    caller_id=str(actor_id),
+                    operation=operation,
+                    idempotency_key=idempotency_key,
+                    semantic_hash=digest,
+                    response=result,
+                    now=now,
+                )
+                return "POSITION_FLAT", None
+            details = proposal.frozen_payload.get("details")
+            if not isinstance(details, dict) or details.get("invalidation_price") is None:
+                _reject(
+                    "PROPOSAL_EXIT_CONTRACT_INVALID",
+                    "frozen proposal lacks an invalidation price",
+                )
+            try:
+                invalidation = Decimal(str(details["invalidation_price"]))
+            except (ArithmeticError, TypeError, ValueError):
+                _reject(
+                    "PROPOSAL_EXIT_CONTRACT_INVALID",
+                    "frozen invalidation price is invalid",
+                )
+            if not invalidation.is_finite() or invalidation <= 0:
+                _reject(
+                    "PROPOSAL_EXIT_CONTRACT_INVALID",
+                    "frozen invalidation price is invalid",
+                )
+            kill_switch = policy.system_state == SystemRiskState.KILL_SWITCH.value
+            invalidated = (
+                position.mark_price <= invalidation
+                if campaign.direction == Direction.LONG.value
+                else position.mark_price >= invalidation
+            )
+            if not kill_switch and not invalidated:
+                result = {"reason": "EXIT_TRIGGER_NOT_MET", "intent_id": None}
+                self._save_receipt(
+                    session,
+                    caller_id=str(actor_id),
+                    operation=operation,
+                    idempotency_key=idempotency_key,
+                    semantic_hash=digest,
+                    response=result,
+                    now=now,
+                )
+                return "EXIT_TRIGGER_NOT_MET", None
+            reason = "KILL_SWITCH" if kill_switch else "FROZEN_INVALIDATION_REACHED"
+            active = session.scalar(
+                select(OrderIntent.intent_id).where(
+                    OrderIntent.campaign_id == campaign_id,
+                    OrderIntent.status.in_(ACTIVE_INTENT_STATUSES),
+                )
+            )
+            if active is not None:
+                _reject("ACTIVE_ORDER_INTENT", "campaign already has unresolved intent")
+            existing_reason = () if campaign.target_reason is None else (campaign.target_reason,)
+            target_reasons = tuple(sorted({*existing_reason, reason}))
+            campaign.current_target_quantity = Decimal(0)
+            campaign.target_version += 1
+            campaign.target_reason = ",".join(target_reasons)
+            campaign.target_urgency = TargetUrgency.IMMEDIATE.value
+            campaign.target_calculated_at = now
+            campaign.status = CampaignStatus.CLOSING.value
+            campaign.updated_at = now
+            intent = OrderIntent(
+                campaign_id=campaign_id,
+                authorization_id=campaign.authorization_id,
+                reservation_id=None,
+                kind=IntentKind.EXIT.value,
+                side="SELL" if position.quantity > 0 else "BUY",
+                quantity=abs(position.quantity),
+                limit_price=limit_price,
+                reduce_only=True,
+                trigger_source=reason,
+                trigger_observed_at=position.observed_at,
+                add_unit_consumed=False,
+                target_version=campaign.target_version,
+                position_id=position.position_id,
+                position_observed_at=position.observed_at,
+                status=OrderIntentStatus.READY.value,
+                semantic_hash=digest,
+                actor_id=str(actor_id),
+                correlation_id=uuid4(),
+                version=1,
+                created_at=now,
+                updated_at=now,
+            )
+            session.add(intent)
+            session.flush()
+            result = {"reason": reason, "intent_id": str(intent.intent_id)}
+            self._save_receipt(
+                session,
+                caller_id=str(actor_id),
+                operation=operation,
+                idempotency_key=idempotency_key,
+                semantic_hash=digest,
+                response=result,
+                now=now,
+            )
+            self._audit(
+                session,
+                actor_id=str(actor_id),
+                event_type="AUTOMATIC_EXIT_PREPARED",
+                object_type="OrderIntent",
+                object_id=intent.intent_id,
+                reason=reason,
+                correlation_id=intent.correlation_id,
+                object_version=intent.version,
+                idempotency_key=idempotency_key,
+                now=now,
+            )
+            return reason, intent.intent_id
+
+    def disable_campaign_auto_add(
+        self,
+        campaign_id: UUID,
+        actor_id: UUID,
+        idempotency_key: str,
+        *,
+        reason: str,
+        expected_target_version: int | None = None,
+        now: datetime,
+    ) -> int:
+        operation = "campaign.auto_add.disable"
+        payload = {
+            "campaign_id": str(campaign_id),
+            "reason": reason,
+            "expected_target_version": expected_target_version,
+        }
+        with self.database.session_factory.begin() as session:
+            campaign = session.get(Campaign, campaign_id, with_for_update=True)
+            if campaign is None:
+                _reject("CAMPAIGN_NOT_FOUND", "campaign does not exist")
+            self._require_role(
+                session, actor_id, "risk.tighten", campaign.account_id, campaign.venue
+            )
+            digest, response = self._idempotency(
+                session,
+                caller_id=str(actor_id),
+                operation=operation,
+                idempotency_key=idempotency_key,
+                payload=payload,
+            )
+            if response is not None:
+                return int(response["allowed_adds"])
+            if (
+                expected_target_version is not None
+                and campaign.target_version != expected_target_version
+            ):
+                _reject("VERSION_CONFLICT", "Campaign target changed before the action")
+            authorization = session.get(
+                TradingAuthorization, campaign.authorization_id, with_for_update=True
+            )
+            if authorization is None:
+                _reject("AUTHORIZATION_INACTIVE", "campaign authorization is missing")
+            unresolved_add = session.scalar(
+                select(OrderIntent.intent_id).where(
+                    OrderIntent.campaign_id == campaign_id,
+                    OrderIntent.kind == IntentKind.ADD.value,
+                    OrderIntent.add_unit_consumed.is_(False),
+                    OrderIntent.status.in_(ACTIVE_INTENT_STATUSES),
+                )
+            )
+            authorization.allowed_adds = authorization.used_adds + (
+                1 if unresolved_add is not None else 0
+            )
+            authorization.active = False
+            result = {"allowed_adds": authorization.allowed_adds}
+            self._save_receipt(
+                session,
+                caller_id=str(actor_id),
+                operation=operation,
+                idempotency_key=idempotency_key,
+                semantic_hash=digest,
+                response=result,
+                now=now,
+            )
+            self._audit(
+                session,
+                actor_id=str(actor_id),
+                event_type="CAMPAIGN_AUTO_ADD_DISABLED",
+                object_type="Campaign",
+                object_id=campaign.campaign_id,
+                reason=reason,
+                correlation_id=uuid4(),
+                object_version=campaign.target_version,
+                idempotency_key=idempotency_key,
+                now=now,
+            )
+            return authorization.allowed_adds
+
+    def disable_global_auto_add(
+        self,
+        actor_id: UUID,
+        idempotency_key: str,
+        *,
+        reason: str,
+        now: datetime,
+    ) -> None:
+        operation = "auto_add.disable"
+        payload = {"reason": reason}
+        with self.database.session_factory.begin() as session:
+            self._require_role(session, actor_id, "risk.tighten")
+            digest, response = self._idempotency(
+                session,
+                caller_id=str(actor_id),
+                operation=operation,
+                idempotency_key=idempotency_key,
+                payload=payload,
+            )
+            if response is not None:
+                return
+            gate = session.get(CapabilityGate, "AUTO_ADD", with_for_update=True)
+            if gate is None:
+                _reject("CAPABILITY_GATE_NOT_FOUND", "AUTO_ADD gate is missing")
+            gate.status = CapabilityStatus.DISABLED.value
+            gate.reason = reason
+            gate.operator_id = str(actor_id)
+            gate.updated_at = now
+            self._save_receipt(
+                session,
+                caller_id=str(actor_id),
+                operation=operation,
+                idempotency_key=idempotency_key,
+                semantic_hash=digest,
+                response={"status": gate.status},
+                now=now,
+            )
+            self._audit(
+                session,
+                actor_id=str(actor_id),
+                event_type="AUTO_ADD_DISABLED",
+                object_type="CapabilityGate",
+                object_id="AUTO_ADD",
+                reason=reason,
+                correlation_id=uuid4(),
+                object_version=1,
+                idempotency_key=idempotency_key,
+                now=now,
+            )
+
+    def pause_new_risk(
+        self,
+        actor_id: UUID,
+        idempotency_key: str,
+        *,
+        reason: str,
+        now: datetime,
+    ) -> SystemRiskState:
+        operation = "risk.pause_new"
+        payload = {"reason": reason}
+        with self.database.session_factory.begin() as session:
+            self._require_role(session, actor_id, "risk.tighten")
+            digest, response = self._idempotency(
+                session,
+                caller_id=str(actor_id),
+                operation=operation,
+                idempotency_key=idempotency_key,
+                payload=payload,
+            )
+            if response is not None:
+                return SystemRiskState(str(response["system_state"]))
+            self._lock_risk_capacity(session)
+            policy = self._active_risk_policy(session)
+            if policy.system_state != SystemRiskState.KILL_SWITCH.value:
+                policy.system_state = SystemRiskState.REDUCE_ONLY.value
+                policy.updated_by = str(actor_id)
+                policy.updated_at = now
+            result = {"system_state": policy.system_state}
+            self._save_receipt(
+                session,
+                caller_id=str(actor_id),
+                operation=operation,
+                idempotency_key=idempotency_key,
+                semantic_hash=digest,
+                response=result,
+                now=now,
+            )
+            self._audit(
+                session,
+                actor_id=str(actor_id),
+                event_type="NEW_RISK_PAUSED",
+                object_type="RiskPolicy",
+                object_id=policy.policy_id,
+                reason=reason,
+                correlation_id=uuid4(),
+                object_version=1,
+                idempotency_key=idempotency_key,
+                now=now,
+            )
+            return SystemRiskState(policy.system_state)
 
     def record_scope_reconciliation(
         self,

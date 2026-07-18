@@ -27,6 +27,8 @@ class CampaignNotification:
     event_type: str
     environment: str
     summary: str
+    campaign_version: int
+    action_references: tuple[tuple[str, str], ...]
     created_at: datetime
 
 

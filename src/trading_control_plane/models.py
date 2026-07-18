@@ -345,6 +345,10 @@ class OrderIntent(Base):
             "limit_price IS NULL OR limit_price > 0",
             name="ck_order_intents_limit_price_positive",
         ),
+        CheckConstraint(
+            "kind = 'ADD' OR add_unit_consumed = false",
+            name="ck_order_intents_add_unit_kind",
+        ),
         Index("ix_order_intents_campaign_status", "campaign_id", "status"),
         Index(
             "uq_order_intents_one_active_campaign",
@@ -369,6 +373,11 @@ class OrderIntent(Base):
     quantity: Mapped[Decimal] = mapped_column(AMOUNT, nullable=False)
     limit_price: Mapped[Decimal | None] = mapped_column(AMOUNT, nullable=True)
     reduce_only: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    trigger_source: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    trigger_observed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    add_unit_consumed: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     target_version: Mapped[int | None] = mapped_column(Integer, nullable=True)
     position_id: Mapped[UUID | None] = mapped_column(
         ForeignKey("positions.position_id"), nullable=True

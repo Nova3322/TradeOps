@@ -1,7 +1,7 @@
 # Trading 交易系统
 
 > 状态日期：2026-07-19
-> 当前状态：M5 Binance 与 Hyperliquid Core 窄适配合同；全部默认关闭且无真实账户实证，LIVE 发送不可用
+> 当前状态：M6 SHADOW Campaign 自动 Add、风险减仓与冻结失效退出入口；真实外部能力默认关闭，LIVE 发送不可用
 
 本项目面向一个资本所有者、一个内部组织和多个内部用户。用户可以提交和审核提案、查看仓位、处理异常；系统在风险可控的前提下辅助执行交易并判断是否赚钱。不开放外部注册，不管理第三方资金，不建设机构级多租户、通用合规或通用认证平台。
 
@@ -28,13 +28,14 @@
 - 场所真实订单、成交、仓位、保护、余额和资金费必须与内部预期分开并对账；SHADOW、TESTNET、LIVE 使用独立事实作用域。
 - 每个 execution scope 只有一个有效 sender；新 owner 接管后旧 fencing token 无效。
 - `LIVE_ORDER_SEND`、`CAPITAL_TRANSFER`、`AUTO_ADD` 默认 `DISABLED`。
-- Telegram 当前只有不联网的 Mock 适配器；Binance 和 Hyperliquid Core 的只读/TESTNET 窄合同全部默认关闭。TESTNET 合同不等于真实测试账户实证，LIVE 没有发送入口。真实 Bot、真实账户验证、实盘发送、HIP-3、Margin、Vault/CTO 尚未实现，文档愿景不能冒充代码能力。
+- AUTO_ADD 只有管理员显式开启 Gate 后才可能执行；每个 Add 仍需冻结 Proposal、分档 AddUnit、后续 Perptape 候选、盈利仓位、足额保护、新鲜事实、剩余授权和最终 Risk Engine 同时通过。只有首个正成交消费 AddUnit，零成交取消/拒绝不消费，Unknown 冻结后续新增风险。
+- Telegram 当前只有不联网的 Mock 通知与受限收紧风险动作合同；真实 Bot、账号绑定和消息送达未实现。Binance 和 Hyperliquid Core 的只读/TESTNET 窄合同全部默认关闭。TESTNET 合同不等于真实测试账户实证，LIVE 没有发送入口。真实账户验证、实盘发送、HIP-3、Margin、Vault/CTO 尚未实现，文档愿景不能冒充代码能力。
 
 ## 当前代码入口
 
 - 进程：`uv run trading-api`
-- Web/PWA：提案/审核页面、Campaign 运营页，以及 `/venues/binance` 的只读场所事实页；Hyperliquid 当前只有 HTTP 入口，没有专属页面
-- HTTP：健康检查、内部会话、Perptape 机会、Proposal/Review/Risk/Authorization、SHADOW/TESTNET Campaign，以及 Binance、Hyperliquid Core 的只读和受控 TESTNET API
+- Web/PWA：提案/审核、Campaign、AUTO_ADD 候选、原子减仓/退出、全局只收紧风险动作，以及 `/venues/binance` 的只读场所事实页；Hyperliquid 当前只有 HTTP 入口，没有专属页面
+- HTTP：健康检查、内部会话、Perptape 机会、Proposal/Review/Risk/Authorization、SHADOW/TESTNET Campaign、AUTO_ADD/减仓/退出，以及 Binance、Hyperliquid Core 的只读和受控 TESTNET API
 - 内部业务：`trading_control_plane.service.TradingService`
 - 纯计算：`evaluate_risk`、`select_target_position`、`compute_pnl`
 - 数据库：PostgreSQL，Alembic head `20260718_0001`

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import timedelta
+from datetime import datetime, timedelta
 from decimal import ROUND_DOWN, Decimal
 from enum import StrEnum
 from typing import Final
@@ -228,6 +228,20 @@ class IntentCreation:
     campaign_id: UUID
     reservation_id: UUID
     intent_id: UUID
+
+
+@dataclass(frozen=True)
+class AddCandidateFacts:
+    """Narrow, immutable facts accepted from the Perptape adapter for one Add decision."""
+
+    candidate_id: str
+    contract_version: str
+    venue: str
+    symbol: str
+    direction: Direction
+    observed_at: datetime
+    reference_price: Decimal
+    readiness: str
 
 
 def _amount(value: Decimal) -> Decimal:

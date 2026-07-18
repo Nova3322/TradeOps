@@ -38,6 +38,15 @@ class ActionGrant:
     authentication_method: str
 
 
+@dataclass(frozen=True)
+class ActionReference:
+    user_id: UUID
+    action: str
+    object_id: UUID
+    object_version: int
+    expires_at: datetime
+
+
 class SignedTokenService:
     """Small signed-token boundary used by non-production identity and future IdP callbacks."""
 
@@ -140,6 +149,61 @@ class SignedTokenService:
                 "object_version": object_version,
                 "exp": int((now + ttl).timestamp()),
             }
+        )
+
+    def issue_action_reference(
+        self,
+        *,
+        user_id: UUID,
+        action: str,
+        object_id: UUID,
+        object_version: int,
+        now: datetime,
+        ttl: timedelta,
+    ) -> str:
+        return self._sign(
+            {
+                "kind": "action-reference",
+                "sub": str(user_id),
+                "action": action,
+                "object_id": str(object_id),
+                "object_version": object_version,
+                "exp": int((now + ttl).timestamp()),
+            }
+        )
+
+    def verify_action_reference(
+        self,
+        token: str,
+        *,
+        user_id: UUID,
+        action: str,
+        object_id: UUID,
+        object_version: int,
+        now: datetime,
+    ) -> ActionReference:
+        payload = self._verify(token)
+        expires_at = datetime.fromtimestamp(int(payload.get("exp", 0)), tz=UTC)
+        expected = {
+            "kind": "action-reference",
+            "sub": str(user_id),
+            "action": action,
+            "object_id": str(object_id),
+            "object_version": object_version,
+        }
+        if any(payload.get(key) != value for key, value in expected.items()):
+            raise DomainRejected(
+                "ACTION_REFERENCE_SCOPE_INVALID",
+                "action reference does not match this user or campaign version",
+            )
+        if expires_at <= now:
+            raise DomainRejected("ACTION_REFERENCE_EXPIRED", "action reference has expired")
+        return ActionReference(
+            user_id=user_id,
+            action=action,
+            object_id=object_id,
+            object_version=object_version,
+            expires_at=expires_at,
         )
 
     def verify_action_grant(

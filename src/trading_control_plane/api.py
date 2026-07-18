@@ -20,6 +20,8 @@ from trading_control_plane import __version__
 from trading_control_plane.api_schemas import (
     AccountEquityFactRequest,
     AuthorizationRequest,
+    AutoAddRequest,
+    AutomaticExitRequest,
     BinanceReadOnlySyncRequest,
     BinanceTestnetActionRequest,
     BinanceTestnetProtectionRequest,
@@ -29,6 +31,7 @@ from trading_control_plane.api_schemas import (
     HyperliquidTestnetProtectionRequest,
     IntentReleaseRequest,
     IntentUnknownRequest,
+    ManagedReductionRequest,
     ManualProposalRequest,
     MockLoginRequest,
     MockStepUpRequest,
@@ -40,10 +43,12 @@ from trading_control_plane.api_schemas import (
     ReductionIntentRequest,
     ReviewRequest,
     RiskDecisionRequest,
+    RiskTightenRequest,
     SenderLeaseRequest,
     ShadowFillRequest,
     ShadowSendRequest,
     SystemProposalRequest,
+    TelegramCampaignActionRequest,
 )
 from trading_control_plane.auth import SessionIdentity, SignedTokenService
 from trading_control_plane.binance import BinanceReadOnlyClient
@@ -56,6 +61,7 @@ from trading_control_plane.binance_execution import (
 from trading_control_plane.config import Settings, get_settings
 from trading_control_plane.database import Database
 from trading_control_plane.domain import (
+    AddCandidateFacts,
     DomainRejected,
     ExecutionEnvironment,
     IntentKind,
@@ -64,6 +70,7 @@ from trading_control_plane.domain import (
     ProposalStatus,
     ReviewDecision,
     TargetCandidate,
+    TargetUrgency,
 )
 from trading_control_plane.hyperliquid import HyperliquidReadOnlyClient
 from trading_control_plane.hyperliquid_execution import (
@@ -107,6 +114,8 @@ def _domain_status(code: str) -> int:
         "ACTION_GRANT_REQUIRED",
         "ACTION_GRANT_SCOPE_INVALID",
         "ACTION_GRANT_EXPIRED",
+        "ACTION_REFERENCE_SCOPE_INVALID",
+        "ACTION_REFERENCE_EXPIRED",
     }:
         return status.HTTP_403_FORBIDDEN
     if code.endswith("_NOT_FOUND"):
@@ -490,6 +499,16 @@ def create_app(
             details={
                 "candidate": candidate.to_dict(),
                 "invalidation_price": str(payload.invalidation_price),
+                "initial_quantity": str(
+                    payload.quantity
+                    if payload.initial_quantity is None
+                    else payload.initial_quantity
+                ),
+                "allow_auto_add": payload.allow_auto_add,
+                "requested_adds": payload.requested_adds,
+                "add_trigger_price": (
+                    None if payload.add_trigger_price is None else str(payload.add_trigger_price)
+                ),
                 "rationale": payload.rationale,
             },
             idempotency_payload={
@@ -497,9 +516,17 @@ def create_app(
                 "account_id": payload.account_id,
                 "risk_tier": payload.risk_tier.value,
                 "quantity": str(payload.quantity),
+                "initial_quantity": (
+                    None if payload.initial_quantity is None else str(payload.initial_quantity)
+                ),
                 "max_risk": str(payload.max_risk),
                 "expires_in_minutes": payload.expires_in_minutes,
                 "invalidation_price": str(payload.invalidation_price),
+                "allow_auto_add": payload.allow_auto_add,
+                "requested_adds": payload.requested_adds,
+                "add_trigger_price": (
+                    None if payload.add_trigger_price is None else str(payload.add_trigger_price)
+                ),
                 "rationale": payload.rationale,
             },
             now=now,
@@ -534,6 +561,16 @@ def create_app(
                 "trigger_price": str(payload.trigger_price),
                 "limit_price": None if payload.limit_price is None else str(payload.limit_price),
                 "invalidation_price": str(payload.invalidation_price),
+                "initial_quantity": str(
+                    payload.quantity
+                    if payload.initial_quantity is None
+                    else payload.initial_quantity
+                ),
+                "allow_auto_add": payload.allow_auto_add,
+                "requested_adds": payload.requested_adds,
+                "add_trigger_price": (
+                    None if payload.add_trigger_price is None else str(payload.add_trigger_price)
+                ),
                 "rationale": payload.rationale,
             },
             idempotency_payload={
@@ -545,11 +582,19 @@ def create_app(
                 "direction": payload.direction.value,
                 "risk_tier": payload.risk_tier.value,
                 "quantity": str(payload.quantity),
+                "initial_quantity": (
+                    None if payload.initial_quantity is None else str(payload.initial_quantity)
+                ),
                 "max_risk": str(payload.max_risk),
                 "expires_in_minutes": payload.expires_in_minutes,
                 "trigger_price": str(payload.trigger_price),
                 "limit_price": (None if payload.limit_price is None else str(payload.limit_price)),
                 "invalidation_price": str(payload.invalidation_price),
+                "allow_auto_add": payload.allow_auto_add,
+                "requested_adds": payload.requested_adds,
+                "add_trigger_price": (
+                    None if payload.add_trigger_price is None else str(payload.add_trigger_price)
+                ),
                 "rationale": payload.rationale,
             },
             now=now,
@@ -663,6 +708,47 @@ def create_app(
         summary: str,
         environment: str = "SHADOW",
     ) -> None:
+        detail = queries().campaign_detail(recipient_id, campaign_id)
+        campaign_version = int(detail["target_version"])
+        action_references: list[tuple[str, str]] = []
+        if service().can_user(
+            recipient_id,
+            "risk.tighten",
+            str(detail["account_id"]),
+            str(detail["venue"]),
+        ):
+            for action in (
+                "DISABLE_CAMPAIGN_AUTO_ADD",
+                "EMERGENCY_REDUCE",
+                "EXIT",
+            ):
+                action_references.append(
+                    (
+                        action,
+                        token_service.issue_action_reference(
+                            user_id=recipient_id,
+                            action=action,
+                            object_id=campaign_id,
+                            object_version=campaign_version,
+                            now=_now(),
+                            ttl=timedelta(seconds=resolved_settings.action_token_ttl_seconds),
+                        ),
+                    )
+                )
+        if service().can_user(recipient_id, "risk.tighten"):
+            action_references.append(
+                (
+                    "PAUSE_NEW_RISK",
+                    token_service.issue_action_reference(
+                        user_id=recipient_id,
+                        action="PAUSE_NEW_RISK",
+                        object_id=campaign_id,
+                        object_version=campaign_version,
+                        now=_now(),
+                        ttl=timedelta(seconds=resolved_settings.action_token_ttl_seconds),
+                    ),
+                )
+            )
         notification_key = f"{campaign_id}:{event_type}:{event_key}:{recipient_id}"
         resolved_telegram.send_campaign(
             CampaignNotification(
@@ -672,6 +758,8 @@ def create_app(
                 event_type=event_type,
                 environment=environment,
                 summary=summary,
+                campaign_version=campaign_version,
+                action_references=tuple(action_references),
                 created_at=_now(),
             )
         )
@@ -973,6 +1061,184 @@ def create_app(
     ) -> dict[str, Any]:
         return queries().campaign_detail(identity.user_id, campaign_id)
 
+    @app.get("/api/campaigns/{campaign_id}/add-candidates")
+    def campaign_add_candidates(
+        campaign_id: UUID,
+        identity: SessionIdentity = identity_dependency,
+    ) -> dict[str, Any]:
+        detail = queries().campaign_detail(identity.user_id, campaign_id)
+        symbol = str(detail.get("instrument", {}).get("symbol", ""))
+        source_candidate_id = None
+        proposal = queries().proposal_detail(identity.user_id, UUID(str(detail["proposal_id"])))
+        source_candidate_id = proposal.get("source_candidate_id")
+        now = _now()
+        candidates = [
+            item
+            for item in resolved_perptape.list_candidates(now=now)
+            if item.venue == detail["venue"]
+            and item.symbol == symbol
+            and item.direction.value == detail["direction"]
+            and item.readiness == "READY"
+            and item.candidate_id != source_candidate_id
+        ]
+        return {
+            "source": "PERPTAPE",
+            "source_contract_version": resolved_settings.perptape_contract_version,
+            "as_of": now.isoformat(),
+            "data": [item.to_dict() for item in candidates],
+        }
+
+    @app.post("/api/campaigns/{campaign_id}/auto-add")
+    def create_auto_add_intent(
+        campaign_id: UUID,
+        payload: AutoAddRequest,
+        identity: SessionIdentity = identity_dependency,
+    ) -> dict[str, Any]:
+        now = _now()
+        detail = queries().campaign_detail(identity.user_id, campaign_id)
+        candidate = resolved_perptape.get_candidate(payload.candidate_id, now=now)
+        created = service().create_order_intent(
+            UUID(str(detail["authorization_id"])),
+            identity.user_id,
+            IntentKind.ADD,
+            str(detail["account_id"]),
+            str(detail["venue"]),
+            UUID(str(detail["instrument_id"])),
+            candidate.direction,
+            payload.quantity,
+            payload.idempotency_key,
+            add_candidate=AddCandidateFacts(
+                candidate_id=candidate.candidate_id,
+                contract_version=candidate.source_contract_version,
+                venue=candidate.venue,
+                symbol=candidate.symbol,
+                direction=candidate.direction,
+                observed_at=candidate.observed_at,
+                reference_price=candidate.reference_price,
+                readiness=candidate.readiness,
+            ),
+            now=now,
+        )
+        notify_campaign(
+            identity.user_id,
+            created.campaign_id,
+            "ADD_INTENT_READY",
+            str(created.intent_id),
+            "Perptape Add candidate passed the frozen gate and final risk check",
+            str(detail["environment"]),
+        )
+        return {
+            "campaign_id": str(created.campaign_id),
+            "reservation_id": str(created.reservation_id),
+            "intent_id": str(created.intent_id),
+            "detail": queries().campaign_detail(identity.user_id, created.campaign_id),
+        }
+
+    @app.post("/api/campaigns/{campaign_id}/managed-reductions")
+    def create_managed_reduction(
+        campaign_id: UUID,
+        payload: ManagedReductionRequest,
+        identity: SessionIdentity = identity_dependency,
+    ) -> dict[str, Any]:
+        intent_id = service().create_reduction_intent(
+            campaign_id,
+            identity.user_id,
+            payload.idempotency_key,
+            candidates=(TargetCandidate(payload.target_quantity, payload.urgency, payload.reason),),
+            limit_price=payload.limit_price,
+            now=_now(),
+        )
+        detail = queries().campaign_detail(identity.user_id, campaign_id)
+        notify_campaign(
+            identity.user_id,
+            campaign_id,
+            "RISK_REDUCTION_READY",
+            str(intent_id),
+            f"Reduce-only target {detail['current_target_quantity']} is ready",
+            str(detail["environment"]),
+        )
+        return {"intent_id": str(intent_id), "detail": detail}
+
+    @app.post("/api/campaigns/{campaign_id}/automatic-exit")
+    def evaluate_automatic_exit(
+        campaign_id: UUID,
+        payload: AutomaticExitRequest,
+        identity: SessionIdentity = identity_dependency,
+    ) -> dict[str, Any]:
+        reason, intent_id = service().create_automatic_exit_intent(
+            campaign_id,
+            identity.user_id,
+            payload.idempotency_key,
+            limit_price=payload.limit_price,
+            now=_now(),
+        )
+        detail = queries().campaign_detail(identity.user_id, campaign_id)
+        if intent_id is not None:
+            notify_campaign(
+                identity.user_id,
+                campaign_id,
+                "AUTOMATIC_EXIT_READY",
+                str(intent_id),
+                f"Automatic reduce-only exit is ready: {reason}",
+                str(detail["environment"]),
+            )
+        return {
+            "triggered": intent_id is not None,
+            "reason": reason,
+            "intent_id": None if intent_id is None else str(intent_id),
+            "detail": detail,
+        }
+
+    @app.post("/api/campaigns/{campaign_id}/auto-add/disable")
+    def disable_campaign_auto_add(
+        campaign_id: UUID,
+        payload: RiskTightenRequest,
+        identity: SessionIdentity = identity_dependency,
+    ) -> dict[str, Any]:
+        allowed_adds = service().disable_campaign_auto_add(
+            campaign_id,
+            identity.user_id,
+            payload.idempotency_key,
+            reason=payload.reason,
+            now=_now(),
+        )
+        detail = queries().campaign_detail(identity.user_id, campaign_id)
+        notify_campaign(
+            identity.user_id,
+            campaign_id,
+            "CAMPAIGN_AUTO_ADD_DISABLED",
+            payload.idempotency_key,
+            "Further AddUnits are disabled for this Campaign",
+            str(detail["environment"]),
+        )
+        return {"allowed_adds": allowed_adds, "detail": detail}
+
+    @app.post("/api/operations/auto-add/disable")
+    def disable_global_auto_add(
+        payload: RiskTightenRequest,
+        identity: SessionIdentity = identity_dependency,
+    ) -> dict[str, str]:
+        service().disable_global_auto_add(
+            identity.user_id,
+            payload.idempotency_key,
+            reason=payload.reason,
+            now=_now(),
+        )
+        return {"status": "DISABLED"}
+
+    @app.post("/api/operations/pause-new-risk")
+    def pause_new_risk(
+        payload: RiskTightenRequest,
+        identity: SessionIdentity = identity_dependency,
+    ) -> dict[str, str]:
+        state = service().pause_new_risk(
+            identity.user_id,
+            payload.idempotency_key,
+            reason=payload.reason,
+            now=_now(),
+        )
+        return {"system_state": state.value}
+
     @app.post("/api/authorizations/{authorization_id}/intents")
     def create_order_intent(
         authorization_id: UUID,
@@ -982,7 +1248,7 @@ def create_app(
         created = service().create_order_intent(
             authorization_id,
             identity.user_id,
-            payload.kind,
+            IntentKind(payload.kind),
             payload.account_id,
             payload.venue,
             payload.instrument_id,
@@ -1835,6 +2101,8 @@ def create_app(
                 "event_type": item.event_type,
                 "environment": item.environment,
                 "summary": item.summary,
+                "campaign_version": item.campaign_version,
+                "action_references": dict(item.action_references),
                 "created_at": item.created_at.isoformat(),
             }
             for item in resolved_telegram.campaign_notifications()
@@ -1844,6 +2112,81 @@ def create_app(
             "transport": "MOCK_ONLY",
             "data": data,
             "campaign_data": campaign_data,
+        }
+
+    @app.post("/api/telegram/mock/campaign-actions")
+    def mock_telegram_campaign_action(
+        payload: TelegramCampaignActionRequest,
+        identity: SessionIdentity = identity_dependency,
+    ) -> dict[str, Any]:
+        if resolved_settings.environment not in {"local", "test"}:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND)
+        campaign_id: UUID | None = None
+        for notification in resolved_telegram.campaign_notifications():
+            references = dict(notification.action_references)
+            if (
+                notification.recipient_id == identity.user_id
+                and references.get(payload.action) == payload.action_reference
+            ):
+                campaign_id = notification.campaign_id
+                break
+        if campaign_id is None:
+            raise DomainRejected(
+                "ACTION_REFERENCE_SCOPE_INVALID",
+                "Telegram action reference is not bound to this internal user",
+            )
+        now = _now()
+        token_service.verify_action_reference(
+            payload.action_reference,
+            user_id=identity.user_id,
+            action=payload.action,
+            object_id=campaign_id,
+            object_version=payload.campaign_version,
+            now=now,
+        )
+        if payload.action == "DISABLE_CAMPAIGN_AUTO_ADD":
+            service().disable_campaign_auto_add(
+                campaign_id,
+                identity.user_id,
+                payload.idempotency_key,
+                reason="Telegram operator disabled further Campaign AddUnits",
+                expected_target_version=payload.campaign_version,
+                now=now,
+            )
+        elif payload.action == "PAUSE_NEW_RISK":
+            service().pause_new_risk(
+                identity.user_id,
+                payload.idempotency_key,
+                reason="Telegram operator paused new risk",
+                now=now,
+            )
+        else:
+            target = Decimal(0) if payload.action == "EXIT" else payload.target_quantity
+            if target is None:
+                raise DomainRejected(
+                    "TELEGRAM_ACTION_INVALID",
+                    "emergency reduction requires a predefined target quantity",
+                )
+            service().create_reduction_intent(
+                campaign_id,
+                identity.user_id,
+                payload.idempotency_key,
+                candidates=(
+                    TargetCandidate(
+                        target,
+                        TargetUrgency.IMMEDIATE,
+                        f"TELEGRAM_{payload.action}",
+                    ),
+                ),
+                expected_target_version=payload.campaign_version,
+                limit_price=payload.limit_price,
+                now=now,
+            )
+        return {
+            "channel": "TELEGRAM_MOCK_ONLY",
+            "action": payload.action,
+            "campaign_id": str(campaign_id),
+            "detail": queries().campaign_detail(identity.user_id, campaign_id),
         }
 
     if WEB_ROOT.exists():

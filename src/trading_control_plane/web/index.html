@@ -7,7 +7,7 @@
     <meta name="description" content="内部 SHADOW 交易提案、审核与风险控制台">
     <link rel="manifest" href="/manifest.webmanifest">
     <link rel="icon" href="/assets/icon.svg" type="image/svg+xml">
-    <link rel="stylesheet" href="/assets/styles.css?v=5">
+    <link rel="stylesheet" href="/assets/styles.css?v=6">
     <title>Trading Console · SHADOW</title>
   </head>
   <body>
@@ -59,8 +59,12 @@
           <label>账户<input name="account_id" value="acct-1" required></label>
           <label>风险档位<select name="risk_tier"><option>LOW</option><option selected>MEDIUM</option><option>HIGH</option></select></label>
           <label>请求数量<input name="quantity" type="number" step="any" min="0" required></label>
+          <label>初仓数量<input name="initial_quantity" type="number" step="any" min="0"></label>
           <label>最大风险<input name="max_risk" type="number" step="any" min="0" required></label>
           <label>失效价格<input name="invalidation_price" type="number" step="any" min="0" required></label>
+          <label>允许 AUTO_ADD<select name="allow_auto_add"><option value="false" selected>否</option><option value="true">是</option></select></label>
+          <label>预授权 AddUnit<select name="requested_adds"><option value="0" selected>0</option><option value="1">1</option><option value="2">2</option><option value="3">3</option></select></label>
+          <label>Add 触发价格<input name="add_trigger_price" type="number" step="any" min="0"></label>
           <label>有效分钟<input name="expires_in_minutes" type="number" min="5" max="1440" value="120" required></label>
         </div>
         <label>人工补充理由<textarea name="rationale" rows="3" required>Perptape 候选进入人工审核，尚未形成任何订单。</textarea></label>
@@ -70,6 +74,6 @@
       </form>
     </dialog>
     <div id="toast" class="toast" role="status" aria-live="polite"></div>
-    <script type="module" src="/assets/app.js?v=5"></script>
+    <script type="module" src="/assets/app.js?v=6"></script>
   </body>
 </html>

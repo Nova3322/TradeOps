@@ -10,6 +10,7 @@ from sqlalchemy import func, select
 
 from trading_control_plane.database import Database
 from trading_control_plane.domain import (
+    AddCandidateFacts,
     CapabilityStatus,
     Direction,
     DomainRejected,
@@ -127,6 +128,7 @@ def create_approved_proposal(
     source: ProposalSource = ProposalSource.MANUAL,
     strategy_id: str | None = None,
     strategy_version: str | None = None,
+    allow_auto_add: bool = False,
 ) -> UUID:
     proposer_id = ids["proposer"] if actor_id is None else actor_id
     proposal_id = service.create_proposal(
@@ -146,6 +148,17 @@ def create_approved_proposal(
         source_candidate_id="pt_test_candidate" if source is ProposalSource.SYSTEM else None,
         source_observed_at=NOW if source is ProposalSource.SYSTEM else None,
         source_readiness="READY" if source is ProposalSource.SYSTEM else None,
+        details=(
+            {
+                "allow_auto_add": True,
+                "requested_adds": 1,
+                "add_trigger_price": "105",
+                "initial_quantity": "0.5",
+                "invalidation_price": "90",
+            }
+            if allow_auto_add
+            else None
+        ),
         now=NOW,
     )
     service.submit_proposal(proposal_id, proposer_id, now=NOW)
@@ -167,6 +180,19 @@ def create_approved_proposal(
     return proposal_id
 
 
+def current_add_candidate() -> AddCandidateFacts:
+    return AddCandidateFacts(
+        candidate_id="pt_test_add_candidate",
+        contract_version="breakouts-v1",
+        venue="BINANCE",
+        symbol="BTCUSDT",
+        direction=Direction.LONG,
+        observed_at=NOW,
+        reference_price=Decimal("110"),
+        readiness="READY",
+    )
+
+
 def issue_authorization(
     service: TradingService,
     ids: dict[str, UUID],
@@ -174,7 +200,7 @@ def issue_authorization(
     *,
     expires_at: datetime | None = None,
     requested_quantity: Decimal | None = None,
-    allowed_adds: int = 1,
+    allowed_adds: int = 0,
 ) -> UUID:
     service.decide_risk(
         proposal_id=proposal_id,
@@ -1202,9 +1228,13 @@ def test_add_requires_profit_position_protection_and_normal_risk_state(
 ) -> None:
     ids = seed(service)
     proposal_id = create_approved_proposal(
-        service, ids, risk_tier=RiskTier.LOW, key="add-invariants"
+        service,
+        ids,
+        risk_tier=RiskTier.LOW,
+        key="add-invariants",
+        allow_auto_add=True,
     )
-    authorization_id = issue_authorization(service, ids, proposal_id)
+    authorization_id = issue_authorization(service, ids, proposal_id, allowed_adds=1)
     opening = service.create_order_intent(
         authorization_id,
         ids["operator"],
@@ -1274,6 +1304,7 @@ def test_add_requires_profit_position_protection_and_normal_risk_state(
             Direction.LONG,
             Decimal("0.5"),
             "add-loss",
+            add_candidate=current_add_candidate(),
             now=NOW,
         )
     service.record_position(
@@ -1308,6 +1339,7 @@ def test_add_requires_profit_position_protection_and_normal_risk_state(
             Direction.LONG,
             Decimal("0.5"),
             "add-unprotected",
+            add_candidate=current_add_candidate(),
             now=NOW,
         )
     service.record_protection(
@@ -1341,6 +1373,7 @@ def test_add_requires_profit_position_protection_and_normal_risk_state(
             Direction.LONG,
             Decimal("0.5"),
             "add-no-position",
+            add_candidate=current_add_candidate(),
             now=NOW,
         )
     service.record_position(
@@ -1373,16 +1406,23 @@ def test_add_requires_profit_position_protection_and_normal_risk_state(
             Direction.LONG,
             Decimal("0.5"),
             "add-no-pyramid",
+            add_candidate=current_add_candidate(),
             now=NOW,
         )
 
 
-def test_cancelled_add_rolls_back_usage_once_and_requires_operator(
+def test_zero_fill_cancelled_add_does_not_consume_unit_and_requires_operator(
     database: Database, service: TradingService
 ) -> None:
     ids = seed(service)
-    proposal_id = create_approved_proposal(service, ids, risk_tier=RiskTier.LOW, key="add-cancel")
-    authorization_id = issue_authorization(service, ids, proposal_id)
+    proposal_id = create_approved_proposal(
+        service,
+        ids,
+        risk_tier=RiskTier.LOW,
+        key="add-cancel",
+        allow_auto_add=True,
+    )
+    authorization_id = issue_authorization(service, ids, proposal_id, allowed_adds=1)
     opening = service.create_order_intent(
         authorization_id,
         ids["operator"],
@@ -1450,6 +1490,7 @@ def test_cancelled_add_rolls_back_usage_once_and_requires_operator(
         Direction.LONG,
         Decimal("0.5"),
         "addition-to-cancel",
+        add_candidate=current_add_candidate(),
         now=NOW,
     )
 
@@ -1999,9 +2040,13 @@ def test_enabled_add_gate_keeps_database_ready_but_does_not_bypass_hard_checks(
 ) -> None:
     ids = seed(service)
     proposal_id = create_approved_proposal(
-        service, ids, risk_tier=RiskTier.LOW, key="gate-hard-check"
+        service,
+        ids,
+        risk_tier=RiskTier.LOW,
+        key="gate-hard-check",
+        allow_auto_add=True,
     )
-    authorization_id = issue_authorization(service, ids, proposal_id)
+    authorization_id = issue_authorization(service, ids, proposal_id, allowed_adds=1)
     service.set_capability_gate(
         "AUTO_ADD", CapabilityStatus.ENABLED, "explicit test", ids["admin"], now=NOW
     )
@@ -2018,6 +2063,7 @@ def test_enabled_add_gate_keeps_database_ready_but_does_not_bypass_hard_checks(
             Direction.LONG,
             Decimal("0.5"),
             "gate-is-not-authorization",
+            add_candidate=current_add_candidate(),
             now=NOW,
         )
 
