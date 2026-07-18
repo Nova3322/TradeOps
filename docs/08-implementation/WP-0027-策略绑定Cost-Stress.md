@@ -103,8 +103,8 @@ requested.requested_cost_stress_add_on
 
 - 仓库没有正式 Binance/Hyperliquid cost-stress 参数；`DEC-RISK-010` 仍需逐场所/标的研究和认证；
 - 当前 `funding_rate`、`executable_price` 与 policy source 仍由本地测试构造，尚未接入真实 collector；
-- WP-0028 已补齐 canonical 最差活动保护触发价，但 campaign peak、受保护盈利、币种换算与
-  giveback 公式仍未规范派生；
+- WP-0028/0029 已补齐 canonical 最差活动保护触发价及当前投影，但 current entry/Mark、保护价、
+  数量、乘数、币种换算与 giveback/Open Heat 互斥公式仍未规范绑定；
 - requested scope stress 的超出 planned 部分仍未由版本化 scope stress 场景推导；
 - 真实 VenueAdapter/Freqtrade、Web/PWA、Telegram、Margin、Vault/CTO、PnL、部署和运维仍未完成；
 - `LIVE_ORDER_SEND`、`CAPITAL_TRANSFER`、`AUTO_ADD` 继续为 `DISABLED`。

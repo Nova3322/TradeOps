@@ -48,6 +48,17 @@ class CurrentPositionDirection(StrEnum):
     UNKNOWN = "UNKNOWN"
 
 
+class CurrentProtectionState(StrEnum):
+    CONFIRMED = "CONFIRMED"
+    UNKNOWN = "UNKNOWN"
+
+
+class CurrentProtectionDirection(StrEnum):
+    LONG = "LONG"
+    SHORT = "SHORT"
+    UNKNOWN = "UNKNOWN"
+
+
 class ProjectionQueryContext(BaseModel):
     """Explicit query time and certified freshness limit; there is no runtime default."""
 
@@ -85,6 +96,21 @@ class CurrentAccountEquityScope(BaseModel):
     venue: str = Field(min_length=1, max_length=80)
     execution_domain: str = Field(min_length=1, max_length=120)
     account_id: str = Field(min_length=1, max_length=160)
+    margin_mode: str = Field(min_length=1, max_length=80)
+    collateral_pool_id: str = Field(min_length=1, max_length=160)
+    settlement_currency: str = Field(min_length=1, max_length=80)
+
+
+class CurrentProtectionScope(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    organization_id: str = Field(min_length=1, max_length=120)
+    venue: str = Field(min_length=1, max_length=80)
+    execution_domain: str = Field(min_length=1, max_length=120)
+    account_id: str = Field(min_length=1, max_length=160)
+    instrument_id: str = Field(min_length=1, max_length=255)
+    position_mode: str = Field(min_length=1, max_length=80)
+    position_side: str = Field(min_length=1, max_length=20)
     margin_mode: str = Field(min_length=1, max_length=80)
     collateral_pool_id: str = Field(min_length=1, max_length=160)
     settlement_currency: str = Field(min_length=1, max_length=80)
@@ -212,6 +238,87 @@ class CurrentAccountEquityProjection(BaseModel):
             or self.maturity is not ProjectionMaturity.VENUE_CONFIRMED
         ):
             raise ValueError("confirmed account projection lacks usable source semantics")
+        return self
+
+
+class CurrentProtectionProjection(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    scope: CurrentProtectionScope
+    projection_state: ProjectionState
+    freshness: ProjectionFreshness
+    maturity: ProjectionMaturity
+    reason_code: str | None
+    source_snapshot_id: UUID | None
+    source_snapshot_hash: str | None
+    source_version: str | None
+    normalization_version: str | None
+    source_position_snapshot_id: UUID | None
+    protection_state: CurrentProtectionState
+    protected_direction: CurrentProtectionDirection
+    position_quantity: Decimal | None
+    covered_quantity: Decimal | None
+    uncovered_quantity: Decimal | None
+    active_stop_order_count: int | None
+    worst_active_trigger_price: Decimal | None
+    venue_native: bool
+    reduce_only_confirmed: bool
+    replacement_in_progress: bool
+    order_set_hash: str | None
+    facts_as_of: datetime | None
+    venue_observed_at: datetime | None
+    received_at: datetime | None
+    age_ms: int | None = Field(ge=0)
+    max_event_candidate_count: int = Field(ge=0)
+    projection_version: str = Field(pattern=r"^venue-current-v[0-9]+$")
+
+    @model_validator(mode="after")
+    def unknown_never_exposes_protection_semantics(self) -> Self:
+        economics = (
+            self.position_quantity,
+            self.covered_quantity,
+            self.uncovered_quantity,
+            self.active_stop_order_count,
+            self.worst_active_trigger_price,
+        )
+        if self.projection_state is ProjectionState.UNKNOWN:
+            if (
+                self.source_position_snapshot_id is not None
+                or self.protection_state is not CurrentProtectionState.UNKNOWN
+                or self.protected_direction is not CurrentProtectionDirection.UNKNOWN
+                or any(value is not None for value in economics)
+                or self.venue_native
+                or self.reduce_only_confirmed
+                or self.replacement_in_progress
+                or self.order_set_hash is not None
+            ):
+                raise ValueError("unknown protection projection cannot expose semantics")
+        elif (
+            self.protection_state is not CurrentProtectionState.CONFIRMED
+            or self.protected_direction
+            not in {CurrentProtectionDirection.LONG, CurrentProtectionDirection.SHORT}
+            or self.source_snapshot_id is None
+            or self.source_snapshot_hash is None
+            or self.source_version is None
+            or self.normalization_version is None
+            or self.source_position_snapshot_id is None
+            or any(value is None for value in economics)
+            or self.position_quantity is None
+            or self.position_quantity <= 0
+            or self.position_quantity != self.covered_quantity
+            or self.uncovered_quantity != 0
+            or self.active_stop_order_count is None
+            or self.active_stop_order_count < 1
+            or self.worst_active_trigger_price is None
+            or self.worst_active_trigger_price <= 0
+            or not self.venue_native
+            or not self.reduce_only_confirmed
+            or self.replacement_in_progress
+            or self.order_set_hash is None
+            or self.freshness is not ProjectionFreshness.FRESH
+            or self.maturity is not ProjectionMaturity.VENUE_CONFIRMED
+        ):
+            raise ValueError("confirmed protection projection lacks usable source semantics")
         return self
 
 
@@ -405,6 +512,115 @@ class VenueCurrentProjectionService:
                 projection_version=values["projection_version"],
             )
         _observe("ACCOUNT_EQUITY", result.projection_state, result.freshness, result.age_ms)
+        return result
+
+    @staticmethod
+    def current_protection(
+        session: Session,
+        scope: CurrentProtectionScope,
+        context: ProjectionQueryContext,
+    ) -> CurrentProtectionProjection:
+        row = (
+            session.execute(
+                text(
+                    """
+                SELECT *
+                FROM venue_protection_current_projection
+                WHERE organization_id = :organization_id
+                  AND venue = :venue
+                  AND execution_domain = :execution_domain
+                  AND account_id = :account_id
+                  AND instrument_id = :instrument_id
+                  AND position_mode = :position_mode
+                  AND position_side = :position_side
+                  AND margin_mode = :margin_mode
+                  AND collateral_pool_id = :collateral_pool_id
+                  AND settlement_currency = :settlement_currency
+                """
+                ),
+                scope.model_dump(),
+            )
+            .mappings()
+            .one_or_none()
+        )
+        values = dict(row) if row is not None else None
+        status = _projection_status(values, context)
+        if values is None:
+            result = CurrentProtectionProjection(
+                scope=scope,
+                projection_state=ProjectionState.UNKNOWN,
+                freshness=ProjectionFreshness.MISSING,
+                maturity=ProjectionMaturity.UNKNOWN,
+                reason_code="SOURCE_MISSING",
+                source_snapshot_id=None,
+                source_snapshot_hash=None,
+                source_version=None,
+                normalization_version=None,
+                source_position_snapshot_id=None,
+                protection_state=CurrentProtectionState.UNKNOWN,
+                protected_direction=CurrentProtectionDirection.UNKNOWN,
+                position_quantity=None,
+                covered_quantity=None,
+                uncovered_quantity=None,
+                active_stop_order_count=None,
+                worst_active_trigger_price=None,
+                venue_native=False,
+                reduce_only_confirmed=False,
+                replacement_in_progress=False,
+                order_set_hash=None,
+                facts_as_of=None,
+                venue_observed_at=None,
+                received_at=None,
+                age_ms=None,
+                max_event_candidate_count=0,
+                projection_version=PROJECTION_VERSION,
+            )
+        else:
+            usable = status.state is ProjectionState.CONFIRMED
+            result = CurrentProtectionProjection(
+                scope=scope,
+                projection_state=status.state,
+                freshness=status.freshness,
+                maturity=ProjectionMaturity(values["maturity"]),
+                reason_code=status.reason_code,
+                source_snapshot_id=values["source_snapshot_id"],
+                source_snapshot_hash=values["source_snapshot_hash"],
+                source_version=values["source_version"],
+                normalization_version=values["normalization_version"],
+                source_position_snapshot_id=(
+                    values["source_position_snapshot_id"] if usable else None
+                ),
+                protection_state=(
+                    CurrentProtectionState(values["protection_state"])
+                    if usable
+                    else CurrentProtectionState.UNKNOWN
+                ),
+                protected_direction=(
+                    CurrentProtectionDirection(values["protected_direction"])
+                    if usable
+                    else CurrentProtectionDirection.UNKNOWN
+                ),
+                position_quantity=values["position_quantity"] if usable else None,
+                covered_quantity=values["covered_quantity"] if usable else None,
+                uncovered_quantity=values["uncovered_quantity"] if usable else None,
+                active_stop_order_count=(values["active_stop_order_count"] if usable else None),
+                worst_active_trigger_price=(
+                    values["worst_active_trigger_price"] if usable else None
+                ),
+                venue_native=bool(values["venue_native"]) if usable else False,
+                reduce_only_confirmed=(bool(values["reduce_only_confirmed"]) if usable else False),
+                replacement_in_progress=(
+                    bool(values["replacement_in_progress"]) if usable else False
+                ),
+                order_set_hash=values["order_set_hash"] if usable else None,
+                facts_as_of=values["facts_as_of"],
+                venue_observed_at=values["venue_observed_at"],
+                received_at=values["received_at"],
+                age_ms=status.age_ms,
+                max_event_candidate_count=values["max_event_candidate_count"],
+                projection_version=values["projection_version"],
+            )
+        _observe("PROTECTION", result.projection_state, result.freshness, result.age_ms)
         return result
 
 

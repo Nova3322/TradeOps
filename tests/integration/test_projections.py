@@ -14,6 +14,7 @@ from tests.venue_fact_fixtures import (
     account_equity_snapshot_request,
     execute_venue_fact,
     position_snapshot_request,
+    protection_snapshot_request,
     venue_fact_envelope,
 )
 from trading_control_plane.commands import CommandStatus
@@ -23,6 +24,9 @@ from trading_control_plane.projections import (
     CurrentPositionDirection,
     CurrentPositionScope,
     CurrentPositionState,
+    CurrentProtectionDirection,
+    CurrentProtectionScope,
+    CurrentProtectionState,
     ProjectionFreshness,
     ProjectionMaturity,
     ProjectionQueryContext,
@@ -35,11 +39,13 @@ from trading_control_plane.reconciliation import (
 )
 from trading_control_plane.reconciliation_models import ExecutionReconciliationInput
 from trading_control_plane.sender_fencing import SenderScopeBinding
+from trading_control_plane.venue_fact_models import VenuePositionSnapshot
 from trading_control_plane.venue_facts import (
     VenueAccountEquityState,
     VenueFactNormalizationService,
     VenuePositionDirection,
     VenuePositionState,
+    VenueProtectionState,
 )
 
 pytestmark = pytest.mark.integration
@@ -50,6 +56,7 @@ def _prepare_collecting_run(
     *,
     position_count: int = 0,
     balance_count: int = 0,
+    protection_count: int = 0,
     sender_scope: SenderScopeBinding | None = None,
 ) -> tuple[UUID, int, datetime, dict[ReconciliationSourceType, ExecutionReconciliationInput]]:
     acquired_at = datetime.now(UTC)
@@ -82,6 +89,8 @@ def _prepare_collecting_run(
             item_count = position_count
         elif source_type is ReconciliationSourceType.VENUE_BALANCES:
             item_count = balance_count
+        elif source_type is ReconciliationSourceType.VENUE_PROTECTION:
+            item_count = protection_count
         result = execute_reconciliation(
             database,
             input_envelope(
@@ -151,6 +160,37 @@ def _record_position(
     return request, result
 
 
+def _record_protection(
+    database: Database,
+    run_id: UUID,
+    reconciliation_input: ExecutionReconciliationInput,
+    position_snapshot_id: UUID,
+    *,
+    now: datetime,
+    **updates: object,
+):
+    with database.session_factory.begin() as session:
+        position = session.get(VenuePositionSnapshot, position_snapshot_id)
+        assert position is not None
+    request = protection_snapshot_request(
+        reconciliation_input,
+        position,
+        now=now,
+        **updates,
+    )
+    result = execute_venue_fact(
+        database,
+        venue_fact_envelope(
+            run_id,
+            VenueFactNormalizationService.protection_command_type,
+            request.model_dump(mode="json"),
+            now=now,
+        ),
+        now=now,
+    )
+    return request, result
+
+
 def _account_scope(**updates: str) -> CurrentAccountEquityScope:
     values = {
         "organization_id": "org-1",
@@ -167,6 +207,21 @@ def _account_scope(**updates: str) -> CurrentAccountEquityScope:
 
 def _position_scope(*, instrument_id: str = "BTCUSDT-PERP") -> CurrentPositionScope:
     return CurrentPositionScope(
+        organization_id="org-1",
+        venue="BINANCE",
+        execution_domain="BINANCE_USDM",
+        account_id="account-1",
+        instrument_id=instrument_id,
+        position_mode="ONE_WAY",
+        position_side="BOTH",
+        margin_mode="ISOLATED",
+        collateral_pool_id="pool-usdt-1",
+        settlement_currency="USDT",
+    )
+
+
+def _protection_scope(*, instrument_id: str = "BTCUSDT-PERP") -> CurrentProtectionScope:
+    return CurrentProtectionScope(
         organization_id="org-1",
         venue="BINANCE",
         execution_domain="BINANCE_USDM",
@@ -382,6 +437,234 @@ def test_position_projection_is_scope_exact_and_event_ordered(database: Database
     assert eth.unrealized_pnl is None
 
 
+def test_protection_projection_confirms_only_current_position_binding(
+    database: Database,
+) -> None:
+    run_id, _, run_time, inputs = _prepare_collecting_run(
+        database,
+        position_count=1,
+        protection_count=1,
+    )
+    normalized_at = run_time + timedelta(seconds=1)
+    position_request, position_result = _record_position(
+        database,
+        run_id,
+        inputs[ReconciliationSourceType.VENUE_POSITIONS],
+        now=normalized_at,
+    )
+    protection_request, protection_result = _record_protection(
+        database,
+        run_id,
+        inputs[ReconciliationSourceType.VENUE_PROTECTION],
+        position_request.venue_position_snapshot_id,
+        now=normalized_at,
+    )
+    assert position_result.status is CommandStatus.COMPLETED
+    assert protection_result.status is CommandStatus.COMPLETED
+
+    with database.session_factory.begin() as session:
+        projection = VenueCurrentProjectionService.current_protection(
+            session,
+            _protection_scope(),
+            _context(as_of=normalized_at + timedelta(seconds=1)),
+        )
+
+    assert projection.projection_state is ProjectionState.CONFIRMED
+    assert projection.freshness is ProjectionFreshness.FRESH
+    assert projection.maturity is ProjectionMaturity.VENUE_CONFIRMED
+    assert projection.source_snapshot_id == protection_request.venue_protection_snapshot_id
+    assert projection.source_position_snapshot_id == position_request.venue_position_snapshot_id
+    assert projection.protection_state is CurrentProtectionState.CONFIRMED
+    assert projection.protected_direction is CurrentProtectionDirection.LONG
+    assert projection.position_quantity == Decimal("0.5")
+    assert projection.covered_quantity == Decimal("0.5")
+    assert projection.uncovered_quantity == 0
+    assert projection.worst_active_trigger_price == Decimal("49900")
+    assert projection.venue_native is True
+    assert projection.reduce_only_confirmed is True
+    assert projection.replacement_in_progress is False
+    assert projection.order_set_hash == protection_request.order_set_hash
+
+
+@pytest.mark.parametrize(
+    ("source_state", "expected_reason"),
+    [
+        (VenueProtectionState.DEGRADED, "SOURCE_DEGRADED"),
+        (VenueProtectionState.UNKNOWN, "SOURCE_UNKNOWN"),
+    ],
+)
+def test_protection_projection_nonconfirmed_stale_and_missing_hide_semantics(
+    database: Database,
+    source_state: VenueProtectionState,
+    expected_reason: str,
+) -> None:
+    run_id, _, run_time, inputs = _prepare_collecting_run(
+        database,
+        position_count=1,
+        protection_count=2,
+    )
+    normalized_at = run_time + timedelta(seconds=1)
+    position_request, position_result = _record_position(
+        database,
+        run_id,
+        inputs[ReconciliationSourceType.VENUE_POSITIONS],
+        now=normalized_at,
+    )
+    source_request, source_result = _record_protection(
+        database,
+        run_id,
+        inputs[ReconciliationSourceType.VENUE_PROTECTION],
+        position_request.venue_position_snapshot_id,
+        now=normalized_at,
+        venue_update_id=f"protection-{source_state.value.lower()}-current",
+        protection_state=source_state,
+    )
+    assert position_result.status is CommandStatus.COMPLETED
+    assert source_result.status is CommandStatus.COMPLETED
+
+    with database.session_factory.begin() as session:
+        source_projection = VenueCurrentProjectionService.current_protection(
+            session,
+            _protection_scope(),
+            _context(as_of=normalized_at + timedelta(seconds=1)),
+        )
+        missing = VenueCurrentProjectionService.current_protection(
+            session,
+            _protection_scope(instrument_id="ETHUSDT-PERP"),
+            _context(as_of=normalized_at + timedelta(seconds=1)),
+        )
+    assert source_projection.projection_state is ProjectionState.UNKNOWN
+    assert source_projection.reason_code == expected_reason
+    assert source_projection.source_snapshot_id == source_request.venue_protection_snapshot_id
+    assert source_projection.source_position_snapshot_id is None
+    assert source_projection.worst_active_trigger_price is None
+    assert source_projection.covered_quantity is None
+    assert missing.freshness is ProjectionFreshness.MISSING
+    assert missing.reason_code == "SOURCE_MISSING"
+
+    confirmed_request, confirmed_result = _record_protection(
+        database,
+        run_id,
+        inputs[ReconciliationSourceType.VENUE_PROTECTION],
+        position_request.venue_position_snapshot_id,
+        now=normalized_at,
+        venue_update_id="protection-confirmed-newer",
+        event_time=run_time,
+    )
+    assert confirmed_result.status is CommandStatus.COMPLETED
+    with database.session_factory.begin() as session:
+        stale = VenueCurrentProjectionService.current_protection(
+            session,
+            _protection_scope(),
+            _context(as_of=normalized_at + timedelta(seconds=10), max_age_ms=1_000),
+        )
+    assert stale.projection_state is ProjectionState.UNKNOWN
+    assert stale.freshness is ProjectionFreshness.STALE
+    assert stale.reason_code == "SOURCE_STALE"
+    assert stale.source_snapshot_id == confirmed_request.venue_protection_snapshot_id
+    assert stale.source_position_snapshot_id is None
+    assert stale.worst_active_trigger_price is None
+
+
+def test_protection_projection_same_event_collision_fails_closed(
+    database: Database,
+) -> None:
+    run_id, _, run_time, inputs = _prepare_collecting_run(
+        database,
+        position_count=1,
+        protection_count=2,
+    )
+    normalized_at = run_time + timedelta(seconds=1)
+    position_request, position_result = _record_position(
+        database,
+        run_id,
+        inputs[ReconciliationSourceType.VENUE_POSITIONS],
+        now=normalized_at,
+    )
+    event_time = run_time
+    assert position_result.status is CommandStatus.COMPLETED
+    for venue_update_id in ("protection-collision-a", "protection-collision-b"):
+        _, result = _record_protection(
+            database,
+            run_id,
+            inputs[ReconciliationSourceType.VENUE_PROTECTION],
+            position_request.venue_position_snapshot_id,
+            now=normalized_at,
+            venue_update_id=venue_update_id,
+            event_time=event_time,
+        )
+        assert result.status is CommandStatus.COMPLETED
+
+    with database.session_factory.begin() as session:
+        projection = VenueCurrentProjectionService.current_protection(
+            session,
+            _protection_scope(),
+            _context(as_of=normalized_at + timedelta(seconds=1)),
+        )
+    assert projection.projection_state is ProjectionState.UNKNOWN
+    assert projection.reason_code == "MAX_EVENT_TIME_COLLISION"
+    assert projection.max_event_candidate_count == 2
+    assert projection.source_snapshot_id is None
+    assert projection.source_position_snapshot_id is None
+    assert projection.worst_active_trigger_price is None
+
+
+def test_protection_projection_rejects_snapshot_for_superseded_position(
+    database: Database,
+) -> None:
+    run_id, _, run_time, inputs = _prepare_collecting_run(
+        database,
+        position_count=2,
+        protection_count=1,
+    )
+    normalized_at = run_time + timedelta(seconds=1)
+    old_position, old_result = _record_position(
+        database,
+        run_id,
+        inputs[ReconciliationSourceType.VENUE_POSITIONS],
+        now=normalized_at,
+        venue_update_id="position-old-protected",
+        event_time=run_time - timedelta(seconds=3),
+    )
+    protection_request, protection_result = _record_protection(
+        database,
+        run_id,
+        inputs[ReconciliationSourceType.VENUE_PROTECTION],
+        old_position.venue_position_snapshot_id,
+        now=normalized_at,
+        event_time=run_time - timedelta(seconds=2),
+    )
+    new_position, new_result = _record_position(
+        database,
+        run_id,
+        inputs[ReconciliationSourceType.VENUE_POSITIONS],
+        now=normalized_at,
+        venue_update_id="position-new-unprotected",
+        event_time=run_time - timedelta(seconds=1),
+    )
+    assert old_result.status is CommandStatus.COMPLETED
+    assert protection_result.status is CommandStatus.COMPLETED
+    assert new_result.status is CommandStatus.COMPLETED
+
+    with database.session_factory.begin() as session:
+        current_position = VenueCurrentProjectionService.current_position(
+            session,
+            _position_scope(),
+            _context(as_of=normalized_at + timedelta(seconds=1)),
+        )
+        protection = VenueCurrentProjectionService.current_protection(
+            session,
+            _protection_scope(),
+            _context(as_of=normalized_at + timedelta(seconds=1)),
+        )
+    assert current_position.source_snapshot_id == new_position.venue_position_snapshot_id
+    assert protection.projection_state is ProjectionState.UNKNOWN
+    assert protection.reason_code == "POSITION_NOT_CURRENT"
+    assert protection.source_snapshot_id == protection_request.venue_protection_snapshot_id
+    assert protection.source_position_snapshot_id is None
+    assert protection.worst_active_trigger_price is None
+
+
 def test_projection_views_are_rebuildable_read_only_queries(database: Database) -> None:
     run_id, _, run_time, inputs = _prepare_collecting_run(database, balance_count=1)
     normalized_at = run_time + timedelta(seconds=1)
@@ -403,6 +686,16 @@ def test_projection_views_are_rebuildable_read_only_queries(database: Database) 
             )
         ).scalar_one()
         assert relkind == "v"
+        protection_relkind = session.execute(
+            text(
+                """
+                SELECT relkind
+                FROM pg_class
+                WHERE relname = 'venue_protection_current_projection'
+                """
+            )
+        ).scalar_one()
+        assert protection_relkind == "v"
     with pytest.raises(DBAPIError, match="cannot update view"):
         with database.session_factory.begin() as session:
             session.execute(
@@ -410,6 +703,17 @@ def test_projection_views_are_rebuildable_read_only_queries(database: Database) 
                     """
                     UPDATE venue_account_equity_current_projection
                     SET exchange_margin_equity = 999999
+                    WHERE organization_id = 'org-1'
+                    """
+                )
+            )
+    with pytest.raises(DBAPIError, match="cannot update view"):
+        with database.session_factory.begin() as session:
+            session.execute(
+                text(
+                    """
+                    UPDATE venue_protection_current_projection
+                    SET worst_active_trigger_price = 1
                     WHERE organization_id = 'org-1'
                     """
                 )

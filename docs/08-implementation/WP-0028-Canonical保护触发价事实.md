@@ -94,7 +94,7 @@ cannot remove canonical protection trigger prices while protection snapshots rem
 
 - 仓库尚无真实 Binance/Hyperliquid 私有保护 collector，无法从原始订单腿独立证明 LONG-min/SHORT-max；
 - `order_set_hash` 和 evidence 目前只绑定测试构造的 collector 声明，未形成场所认证证据；
-- 尚未持久化 campaign peak、受保护盈利、换算币种和 giveback 公式，protected-profit giveback 仍未规范派生；
+- 当前 entry/Mark、保护价、数量、乘数、换算币种和 giveback/Open Heat 互斥公式尚未规范绑定；
 - 触发价不是成交价，真实止损穿透继续依赖 `DEC-RISK-010` 的逐场所研究；
 - Web/PWA、Telegram、真实 OMS/Freqtrade/VenueAdapter、Margin、Vault/CTO、PnL 和运维仍未完成；
 - `LIVE_ORDER_SEND`、`CAPITAL_TRANSFER`、`AUTO_ADD` 继续为 `DISABLED`。

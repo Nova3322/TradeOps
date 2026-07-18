@@ -1,5 +1,9 @@
 # WP-0019：可重建当前 Venue 投影
 
+> 历史说明：WP-0029 已在相同只读、事件时间和失败关闭原则下增加 current protection projection，
+> 并要求保护事实仍精确绑定 current position source snapshot。当前保护投影合同以
+> [WP-0029](WP-0029-可重建当前保护投影.md) 为准。
+
 ## 1. 交付目标
 
 WP-0019 从 canonical `VenuePositionSnapshot` 与 `VenueAccountEquitySnapshot` 建立两张可丢弃、
