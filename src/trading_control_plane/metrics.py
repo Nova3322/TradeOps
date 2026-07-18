@@ -165,3 +165,15 @@ VENUE_CURRENT_PROJECTION_AGE = Histogram(
     labelnames=("projection_type",),
     buckets=(0.1, 0.5, 1, 2, 5, 10, 30, 60, 300, 900, 3600),
 )
+
+CAPITAL_SCOPE_MANIFEST_REGISTRATIONS = Counter(
+    "trading_capital_scope_manifest_registrations_total",
+    "Immutable managed-capital account-universe manifests by bounded result.",
+    labelnames=("result",),
+)
+
+PORTFOLIO_MTM_PROJECTION_QUERIES = Counter(
+    "trading_portfolio_mtm_projection_queries_total",
+    "Managed-scope portfolio MTM queries by bounded state and primary reason.",
+    labelnames=("projection_state", "primary_reason"),
+)

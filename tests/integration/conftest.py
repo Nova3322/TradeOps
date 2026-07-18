@@ -43,6 +43,7 @@ def reset_database(database: Database) -> None:
             text(
                 """
                 TRUNCATE TABLE
+                    managed_capital_scope_manifests,
                     venue_fact_input_links,
                     venue_account_equity_snapshots,
                     venue_protection_snapshots,
