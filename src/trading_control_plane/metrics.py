@@ -117,6 +117,12 @@ CAMPAIGN_FUNDING_COVERAGE_PROJECTIONS = Counter(
     labelnames=("result",),
 )
 
+TARGET_POSITION_ARBITRATIONS = Counter(
+    "trading_target_position_arbitrations_total",
+    "Pure Campaign target-position arbitration outcomes by bounded result.",
+    labelnames=("result",),
+)
+
 CAPABILITY_CERTIFICATE_ISSUANCE = Counter(
     "trading_capability_certificate_issuance_total",
     "Shadow-only capability certificate issuance by type, environment, and result.",
