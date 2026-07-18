@@ -6,6 +6,8 @@
 > 《风险引擎规格》的风险预留、事实优先级与守恒账本合同、
 > 《财务对账与 PnL 口径》的成交唯一性、费用与更正边界
 > 前置包：WP-0001..0012
+> 仓位事实补充：WP-0014 已建立 canonical VenuePositionSnapshot 与 `VENUE_POSITIONS` exact membership，
+> 但本包的 `VENUE_POSITION` v3 弱入口尚未切换到该事实；执行状态强绑定属于后续独立工作包
 
 ## 问题与边界
 

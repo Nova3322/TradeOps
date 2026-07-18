@@ -44,6 +44,7 @@ def reset_database(database: Database) -> None:
                 """
                 TRUNCATE TABLE
                     venue_fact_input_links,
+                    venue_position_snapshots,
                     venue_fills,
                     venue_order_observations,
                     shadow_dispatch_claims,

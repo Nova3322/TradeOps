@@ -851,6 +851,7 @@ class ExecutionReconciliationService:
         normalized_sources = {
             ReconciliationSourceType.VENUE_ORDERS.value,
             ReconciliationSourceType.VENUE_FILLS.value,
+            ReconciliationSourceType.VENUE_POSITIONS.value,
         }
         linked_counts: dict[str, int] = {
             source_type: count
@@ -867,7 +868,7 @@ class ExecutionReconciliationService:
         ):
             raise CommandRejected(
                 "RECONCILIATION_NORMALIZED_FACT_COUNT_MISMATCH",
-                "venue order and fill inputs require exact immutable fact membership",
+                "venue order, fill, and position inputs require exact immutable fact membership",
             )
 
     @staticmethod

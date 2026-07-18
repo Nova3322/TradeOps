@@ -24,6 +24,7 @@ from tests.venue_fact_fixtures import (
     execute_venue_fact,
     fill_request,
     order_observation_request,
+    position_snapshot_request,
     venue_fact_envelope,
 )
 from trading_control_plane.commands import CommandStatus, hash_json
@@ -43,11 +44,16 @@ from trading_control_plane.venue_fact_models import (
     VenueFactInputLink,
     VenueFill,
     VenueOrderObservation,
+    VenuePositionSnapshot,
 )
 from trading_control_plane.venue_facts import (
     FeeEffect,
     VenueFactNormalizationService,
     VenueOrderStatus,
+    VenuePositionDirection,
+    VenuePositionMode,
+    VenuePositionSide,
+    VenuePositionState,
 )
 
 pytestmark = pytest.mark.integration
@@ -58,13 +64,15 @@ def _prepare_collecting_run(
     *,
     order_count: int = 0,
     fill_count: int = 0,
+    position_count: int = 0,
     now: datetime | None = None,
     lease_id: UUID | None = None,
     fencing_token: int = 1,
     supersedes_run_id: UUID | None = None,
+    scope_updates: dict[str, str] | None = None,
 ) -> tuple[UUID, UUID, int, datetime, dict[ReconciliationSourceType, ExecutionReconciliationInput]]:
     acquired_at = now or datetime.now(UTC)
-    scope = make_sender_scope()
+    scope = make_sender_scope(**(scope_updates or {}))
     active_lease_id = lease_id or uuid4()
     if lease_id is None:
         acquired = execute_acquire(
@@ -101,6 +109,8 @@ def _prepare_collecting_run(
             item_count = order_count
         elif source_type is ReconciliationSourceType.VENUE_FILLS:
             item_count = fill_count
+        elif source_type is ReconciliationSourceType.VENUE_POSITIONS:
+            item_count = position_count
         result = execute_reconciliation(
             database,
             input_envelope(
@@ -138,6 +148,24 @@ def _record_fill(
     envelope = venue_fact_envelope(
         run_id,
         VenueFactNormalizationService.fill_command_type,
+        request.model_dump(mode="json"),
+        now=now,
+    )
+    return request, execute_venue_fact(database, envelope, now=now)
+
+
+def _record_position(
+    database: Database,
+    run_id: UUID,
+    reconciliation_input: ExecutionReconciliationInput,
+    *,
+    now: datetime,
+    **updates: object,
+):
+    request = position_snapshot_request(reconciliation_input, now=now, **updates)
+    envelope = venue_fact_envelope(
+        run_id,
+        VenueFactNormalizationService.position_command_type,
         request.model_dump(mode="json"),
         now=now,
     )
@@ -221,6 +249,28 @@ def test_order_and_fill_facts_are_canonical_immutable_and_unlock_comparison(
         assert stored_fill.venue_confirmed is True
         assert stored_rejected.zero_fill_confirmed is True
         assert stored_rejected.cumulative_filled_quantity == 0
+        fill_link = session.get(
+            VenueFactInputLink, UUID(str(fill_result.data["venue_fact_input_link_id"]))
+        )
+        assert fill_link is not None
+        assert fill_link.link_hash == hash_json(
+            {
+                "run_id": str(run_id),
+                "reconciliation_input_id": str(
+                    inputs[ReconciliationSourceType.VENUE_FILLS].input_id
+                ),
+                "organization_id": "org-1",
+                "source_type": ReconciliationSourceType.VENUE_FILLS.value,
+                "venue_order_observation_id": None,
+                "venue_fill_id": str(fill.venue_fill_id),
+                "input_hash": inputs[ReconciliationSourceType.VENUE_FILLS].input_hash,
+                "fact_hash": fill.fill_hash,
+                "raw_payload_hash": fill.raw_payload_hash,
+                "evidence_hash": fill.evidence_hash,
+                "observed_at": fill.venue_observed_at.astimezone(UTC).isoformat(),
+                "received_at": fill.received_at.astimezone(UTC).isoformat(),
+            }
+        )
         assert session.scalar(select(func.count()).select_from(VenueFactInputLink)) == 3
     with pytest.raises(DBAPIError, match="venue_fills is immutable"):
         with database.session_factory.begin() as session:
@@ -567,3 +617,343 @@ def test_direct_canonical_fact_without_first_link_is_rolled_back(
             session.add(direct_fill)
     with database.session_factory.begin() as session:
         assert session.scalar(select(func.count()).select_from(VenueFill)) == 0
+
+
+def test_position_open_flat_unknown_are_canonical_and_gate_comparison(
+    database: Database,
+) -> None:
+    run_id, _, version, run_time, inputs = _prepare_collecting_run(database, position_count=3)
+    normalized_at = run_time + timedelta(seconds=1)
+    with pytest.raises(DBAPIError, match="advanced reconciliation venue fact count mismatch"):
+        with database.session_factory.begin() as session:
+            session.execute(
+                update(ExecutionReconciliationRunState)
+                .where(ExecutionReconciliationRunState.run_id == run_id)
+                .values(
+                    phase="COMPARING",
+                    version=version + 1,
+                    reason_code="DIRECT_POSITION_MANIFEST_BYPASS",
+                    source_ref="test-only:direct-position-manifest-bypass",
+                    updated_at=normalized_at,
+                )
+            )
+    premature = execute_reconciliation(
+        database,
+        phase_envelope(
+            run_id,
+            ReconciliationPhase.COMPARING,
+            now=normalized_at,
+            expected_version=version,
+        ),
+        now=normalized_at,
+    )
+    assert premature.status is CommandStatus.REJECTED
+    assert premature.error_code == "RECONCILIATION_NORMALIZED_FACT_COUNT_MISMATCH"
+
+    position_input = inputs[ReconciliationSourceType.VENUE_POSITIONS]
+    open_request, open_result = _record_position(
+        database,
+        run_id,
+        position_input,
+        now=normalized_at,
+        venue_update_id="position-open-1",
+        instrument_id="BTCUSDT-PERP",
+    )
+    flat_request, flat_result = _record_position(
+        database,
+        run_id,
+        position_input,
+        now=normalized_at,
+        venue_update_id="position-flat-1",
+        instrument_id="ETHUSDT-PERP",
+        position_state=VenuePositionState.FLAT,
+        direction=VenuePositionDirection.FLAT,
+        mark_price=Decimal("3000"),
+    )
+    unknown_request, unknown_result = _record_position(
+        database,
+        run_id,
+        position_input,
+        now=normalized_at,
+        venue_update_id="position-unknown-1",
+        instrument_id="SOLUSDT-PERP",
+        position_state=VenuePositionState.UNKNOWN,
+        direction=VenuePositionDirection.UNKNOWN,
+    )
+    _, excess_result = _record_position(
+        database,
+        run_id,
+        position_input,
+        now=normalized_at,
+        venue_update_id="position-excess-1",
+        instrument_id="XRPUSDT-PERP",
+    )
+    assert open_result.status is CommandStatus.COMPLETED
+    assert flat_result.status is CommandStatus.COMPLETED
+    assert unknown_result.status is CommandStatus.COMPLETED
+    assert excess_result.status is CommandStatus.REJECTED
+    assert excess_result.error_code == "VENUE_FACT_INPUT_COUNT_EXCEEDED"
+
+    compared = execute_reconciliation(
+        database,
+        phase_envelope(
+            run_id,
+            ReconciliationPhase.COMPARING,
+            now=normalized_at,
+            expected_version=version,
+        ),
+        now=normalized_at,
+    )
+    assert compared.status is CommandStatus.COMPLETED
+    with database.session_factory.begin() as session:
+        open_snapshot = session.get(VenuePositionSnapshot, open_request.venue_position_snapshot_id)
+        flat_snapshot = session.get(VenuePositionSnapshot, flat_request.venue_position_snapshot_id)
+        unknown_snapshot = session.get(
+            VenuePositionSnapshot, unknown_request.venue_position_snapshot_id
+        )
+        assert open_snapshot is not None
+        assert open_snapshot.position_state == "OPEN"
+        assert open_snapshot.notional == Decimal("25000")
+        assert open_snapshot.unrealized_pnl == Decimal("500")
+        assert flat_snapshot is not None
+        assert flat_snapshot.position_state == "FLAT"
+        assert flat_snapshot.quantity == 0
+        assert flat_snapshot.notional == 0
+        assert unknown_snapshot is not None
+        assert unknown_snapshot.position_state == "UNKNOWN"
+        assert unknown_snapshot.quantity is None
+        assert session.scalar(select(func.count()).select_from(VenueFactInputLink)) == 3
+    with pytest.raises(DBAPIError, match="venue_position_snapshots is immutable"):
+        with database.session_factory.begin() as session:
+            session.execute(
+                update(VenuePositionSnapshot)
+                .where(
+                    VenuePositionSnapshot.venue_position_snapshot_id
+                    == open_request.venue_position_snapshot_id
+                )
+                .values(quantity=Decimal("99"))
+            )
+
+
+def test_position_snapshot_is_global_relinkable_and_conflicts_on_changed_semantics(
+    database: Database,
+) -> None:
+    run_id, lease_id, version, run_time, inputs = _prepare_collecting_run(
+        database, position_count=1
+    )
+    normalized_at = run_time + timedelta(seconds=1)
+    first_request, first_result = _record_position(
+        database,
+        run_id,
+        inputs[ReconciliationSourceType.VENUE_POSITIONS],
+        now=normalized_at,
+        venue_update_id="position-global-1",
+    )
+    assert first_result.status is CommandStatus.COMPLETED
+    compared = execute_reconciliation(
+        database,
+        phase_envelope(
+            run_id,
+            ReconciliationPhase.COMPARING,
+            now=normalized_at,
+            expected_version=version,
+        ),
+        now=normalized_at,
+    )
+    finished = execute_reconciliation(
+        database,
+        finish_envelope(
+            run_id,
+            ReconciliationStatus.SUCCEEDED,
+            now=normalized_at,
+            expected_version=compared.object_version or version + 1,
+        ),
+        now=normalized_at,
+    )
+    assert finished.status is CommandStatus.COMPLETED
+
+    second_run_id, _, _, second_run_time, second_inputs = _prepare_collecting_run(
+        database,
+        position_count=1,
+        now=normalized_at + timedelta(seconds=1),
+        lease_id=lease_id,
+        supersedes_run_id=run_id,
+    )
+    second_request, second_result = _record_position(
+        database,
+        second_run_id,
+        second_inputs[ReconciliationSourceType.VENUE_POSITIONS],
+        now=second_run_time + timedelta(seconds=1),
+        venue_update_id="position-global-1",
+        event_time=first_request.event_time,
+    )
+    assert second_result.status is CommandStatus.COMPLETED
+    assert second_result.data["venue_fact_id"] == str(first_request.venue_position_snapshot_id)
+    assert second_result.data["venue_fact_id"] != str(second_request.venue_position_snapshot_id)
+    assert second_result.data["new_fact"] is False
+    assert second_result.data["new_input_link"] is True
+    _, conflict = _record_position(
+        database,
+        second_run_id,
+        second_inputs[ReconciliationSourceType.VENUE_POSITIONS],
+        now=second_run_time + timedelta(seconds=1),
+        venue_update_id="position-global-1",
+        event_time=first_request.event_time,
+        mark_price=Decimal("51000"),
+    )
+    assert conflict.status is CommandStatus.REJECTED
+    assert conflict.error_code == "VENUE_POSITION_SNAPSHOT_CONFLICT"
+    with database.session_factory.begin() as session:
+        assert session.scalar(select(func.count()).select_from(VenuePositionSnapshot)) == 1
+        assert session.scalar(select(func.count()).select_from(VenueFactInputLink)) == 2
+
+
+def test_position_scope_and_tampered_economics_fail_closed(database: Database) -> None:
+    run_id, _, _, run_time, inputs = _prepare_collecting_run(database, position_count=1)
+    normalized_at = run_time + timedelta(seconds=1)
+    position_input = inputs[ReconciliationSourceType.VENUE_POSITIONS]
+    _, wrong_scope = _record_position(
+        database,
+        run_id,
+        position_input,
+        now=normalized_at,
+        margin_mode="CROSS",
+    )
+    assert wrong_scope.status is CommandStatus.REJECTED
+    assert wrong_scope.error_code == "VENUE_POSITION_SCOPE_MISMATCH"
+
+    request = position_snapshot_request(position_input, now=normalized_at)
+    tampered_payload = request.model_dump(mode="json")
+    tampered_payload["quantity"] = "0.6"
+    tampered = execute_venue_fact(
+        database,
+        venue_fact_envelope(
+            run_id,
+            VenueFactNormalizationService.position_command_type,
+            tampered_payload,
+            now=normalized_at,
+        ),
+        now=normalized_at,
+    )
+    assert tampered.status is CommandStatus.REJECTED
+    assert tampered.error_code == "VENUE_POSITION_SNAPSHOT_INVALID"
+    with database.session_factory.begin() as session:
+        assert session.scalar(select(func.count()).select_from(VenuePositionSnapshot)) == 0
+        assert session.scalar(select(func.count()).select_from(VenueFactInputLink)) == 0
+
+
+def test_hedge_position_lines_preserve_independent_long_and_short_sides(
+    database: Database,
+) -> None:
+    run_id, _, version, run_time, inputs = _prepare_collecting_run(
+        database,
+        position_count=2,
+        scope_updates={"position_mode": "HEDGE"},
+    )
+    normalized_at = run_time + timedelta(seconds=1)
+    position_input = inputs[ReconciliationSourceType.VENUE_POSITIONS]
+    long_request, long_result = _record_position(
+        database,
+        run_id,
+        position_input,
+        now=normalized_at,
+        venue_update_id="hedge-update-1",
+        position_mode=VenuePositionMode.HEDGE,
+        position_side=VenuePositionSide.LONG,
+        direction=VenuePositionDirection.LONG,
+    )
+    short_request, short_result = _record_position(
+        database,
+        run_id,
+        position_input,
+        now=normalized_at,
+        venue_update_id="hedge-update-1",
+        position_mode=VenuePositionMode.HEDGE,
+        position_side=VenuePositionSide.SHORT,
+        direction=VenuePositionDirection.SHORT,
+        quantity=Decimal("0.2"),
+    )
+    assert long_result.status is CommandStatus.COMPLETED
+    assert short_result.status is CommandStatus.COMPLETED
+    compared = execute_reconciliation(
+        database,
+        phase_envelope(
+            run_id,
+            ReconciliationPhase.COMPARING,
+            now=normalized_at,
+            expected_version=version,
+        ),
+        now=normalized_at,
+    )
+    assert compared.status is CommandStatus.COMPLETED
+    with database.session_factory.begin() as session:
+        long_snapshot = session.get(VenuePositionSnapshot, long_request.venue_position_snapshot_id)
+        short_snapshot = session.get(
+            VenuePositionSnapshot, short_request.venue_position_snapshot_id
+        )
+        assert long_snapshot is not None and short_snapshot is not None
+        assert (long_snapshot.position_side, long_snapshot.direction) == ("LONG", "LONG")
+        assert (short_snapshot.position_side, short_snapshot.direction) == (
+            "SHORT",
+            "SHORT",
+        )
+
+
+def test_direct_position_snapshot_without_first_link_is_rolled_back(
+    database: Database,
+) -> None:
+    run_id, _, _, run_time, inputs = _prepare_collecting_run(database, position_count=1)
+    normalized_at = run_time + timedelta(seconds=1)
+    reconciliation_input = inputs[ReconciliationSourceType.VENUE_POSITIONS]
+    request = position_snapshot_request(reconciliation_input, now=normalized_at)
+    direct_snapshot = VenuePositionSnapshot(
+        venue_position_snapshot_id=request.venue_position_snapshot_id,
+        organization_id="org-1",
+        first_seen_run_id=run_id,
+        first_seen_input_id=reconciliation_input.input_id,
+        venue=request.venue,
+        execution_domain=request.execution_domain,
+        account_id=request.account_id,
+        instrument_id=request.instrument_id,
+        venue_update_id=request.venue_update_id,
+        position_mode=request.position_mode.value,
+        position_side=request.position_side.value,
+        margin_mode=request.margin_mode,
+        collateral_pool_id=request.collateral_pool_id,
+        position_state=request.position_state.value,
+        direction=request.direction.value,
+        quantity=request.quantity,
+        entry_price=request.entry_price,
+        mark_price=request.mark_price,
+        contract_multiplier=request.contract_multiplier,
+        notional=request.notional,
+        unrealized_pnl=request.unrealized_pnl,
+        liquidation_price=request.liquidation_price,
+        leverage=request.leverage,
+        initial_margin=request.initial_margin,
+        maintenance_margin=request.maintenance_margin,
+        settlement_currency=request.settlement_currency,
+        venue_confirmed=True,
+        fact_authority="VENUE_PRIVATE",
+        environment="SHADOW",
+        live_dispatch_eligible=False,
+        source_version=request.source_version,
+        normalization_version=request.normalization_version,
+        normalized_payload=request.normalized_payload,
+        raw_payload_ref=request.raw_payload_ref,
+        raw_payload_hash=request.raw_payload_hash,
+        evidence_ref=request.evidence_ref,
+        evidence_hash=request.evidence_hash,
+        snapshot_hash=request.snapshot_hash,
+        event_time=request.event_time,
+        venue_observed_at=request.venue_observed_at,
+        first_received_at=request.received_at,
+        recorded_at=normalized_at,
+    )
+    with pytest.raises(
+        DBAPIError, match="canonical venue fact requires its first immutable input link"
+    ):
+        with database.session_factory.begin() as session:
+            session.add(direct_snapshot)
+    with database.session_factory.begin() as session:
+        assert session.scalar(select(func.count()).select_from(VenuePositionSnapshot)) == 0

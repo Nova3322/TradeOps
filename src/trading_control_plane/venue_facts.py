@@ -35,6 +35,7 @@ from trading_control_plane.venue_fact_models import (
     VenueFactInputLink,
     VenueFill,
     VenueOrderObservation,
+    VenuePositionSnapshot,
 )
 
 VENUE_FACT_SERVICE_PRINCIPAL = "execution-reconciliation-service"
@@ -62,6 +63,24 @@ class VenuePositionSide(StrEnum):
     BOTH = "BOTH"
 
 
+class VenuePositionMode(StrEnum):
+    ONE_WAY = "ONE_WAY"
+    HEDGE = "HEDGE"
+
+
+class VenuePositionState(StrEnum):
+    OPEN = "OPEN"
+    FLAT = "FLAT"
+    UNKNOWN = "UNKNOWN"
+
+
+class VenuePositionDirection(StrEnum):
+    LONG = "LONG"
+    SHORT = "SHORT"
+    FLAT = "FLAT"
+    UNKNOWN = "UNKNOWN"
+
+
 class LiquidityRole(StrEnum):
     MAKER = "MAKER"
     TAKER = "TAKER"
@@ -84,8 +103,6 @@ class VenueFactCollectionBinding(BaseModel):
     execution_domain: str = Field(min_length=1, max_length=120)
     account_id: str = Field(min_length=1, max_length=160)
     instrument_id: str = Field(min_length=1, max_length=255)
-    observed_client_order_id: str | None = Field(default=None, max_length=160)
-    venue_order_id: str = Field(min_length=1, max_length=255)
     source_version: str = Field(min_length=1, max_length=160)
     normalization_version: str = Field(min_length=1, max_length=160)
     normalized_payload: dict[str, Any]
@@ -109,6 +126,8 @@ class VenueFactCollectionBinding(BaseModel):
 
 class RecordVenueOrderObservationRequest(VenueFactCollectionBinding):
     venue_order_observation_id: UUID
+    observed_client_order_id: str | None = Field(default=None, max_length=160)
+    venue_order_id: str = Field(min_length=1, max_length=255)
     venue_update_id: str = Field(min_length=1, max_length=255)
     status: VenueOrderStatus
     side: VenueSide
@@ -156,6 +175,8 @@ class RecordVenueOrderObservationRequest(VenueFactCollectionBinding):
 
 class RecordVenueFillRequest(VenueFactCollectionBinding):
     venue_fill_id: UUID
+    observed_client_order_id: str | None = Field(default=None, max_length=160)
+    venue_order_id: str = Field(min_length=1, max_length=255)
     venue_trade_id: str = Field(min_length=1, max_length=255)
     side: VenueSide
     position_side: VenuePositionSide
@@ -190,6 +211,92 @@ class RecordVenueFillRequest(VenueFactCollectionBinding):
         return self
 
 
+class RecordVenuePositionSnapshotRequest(VenueFactCollectionBinding):
+    venue_position_snapshot_id: UUID
+    venue_update_id: str = Field(min_length=1, max_length=255)
+    position_mode: VenuePositionMode
+    position_side: VenuePositionSide
+    margin_mode: str = Field(min_length=1, max_length=80)
+    collateral_pool_id: str = Field(min_length=1, max_length=160)
+    position_state: VenuePositionState
+    direction: VenuePositionDirection
+    quantity: Decimal | None = None
+    entry_price: Decimal | None = None
+    mark_price: Decimal | None = None
+    contract_multiplier: Decimal = Field(gt=0)
+    notional: Decimal | None = None
+    unrealized_pnl: Decimal | None = None
+    liquidation_price: Decimal | None = None
+    leverage: Decimal | None = None
+    initial_margin: Decimal | None = None
+    maintenance_margin: Decimal | None = None
+    settlement_currency: str = Field(min_length=1, max_length=80)
+    snapshot_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+    @model_validator(mode="after")
+    def position_is_self_consistent(self) -> Self:
+        if self.position_mode is VenuePositionMode.ONE_WAY:
+            if self.position_side is not VenuePositionSide.BOTH:
+                raise ValueError("one-way position must use BOTH position side")
+        elif self.position_side is VenuePositionSide.BOTH:
+            raise ValueError("hedge position must use LONG or SHORT position side")
+
+        if self.position_state is VenuePositionState.OPEN:
+            valid = (
+                self.direction in {VenuePositionDirection.LONG, VenuePositionDirection.SHORT}
+                and self.quantity is not None
+                and self.quantity > 0
+                and self.entry_price is not None
+                and self.entry_price > 0
+                and self.mark_price is not None
+                and self.mark_price > 0
+                and self.notional == self.quantity * self.mark_price * self.contract_multiplier
+                and self.unrealized_pnl is not None
+                and (self.liquidation_price is None or self.liquidation_price > 0)
+                and (self.leverage is None or self.leverage > 0)
+                and (self.initial_margin is None or self.initial_margin >= 0)
+                and (self.maintenance_margin is None or self.maintenance_margin >= 0)
+            )
+            if (
+                self.position_mode is VenuePositionMode.HEDGE
+                and self.direction.value != self.position_side.value
+            ):
+                valid = False
+        elif self.position_state is VenuePositionState.FLAT:
+            valid = (
+                self.direction is VenuePositionDirection.FLAT
+                and self.quantity == 0
+                and self.entry_price is None
+                and (self.mark_price is None or self.mark_price > 0)
+                and self.notional == 0
+                and self.unrealized_pnl == 0
+                and self.liquidation_price is None
+                and self.leverage is None
+                and self.initial_margin in {None, Decimal("0")}
+                and self.maintenance_margin in {None, Decimal("0")}
+            )
+        else:
+            valid = (
+                self.direction is VenuePositionDirection.UNKNOWN
+                and self.quantity is None
+                and self.entry_price is None
+                and self.mark_price is None
+                and self.notional is None
+                and self.unrealized_pnl is None
+                and self.liquidation_price is None
+                and self.leverage is None
+                and self.initial_margin is None
+                and self.maintenance_margin is None
+            )
+        if not valid:
+            raise ValueError("venue position state semantics are inconsistent")
+        if self.snapshot_hash != hash_json(_position_snapshot_contract(self)):
+            raise ValueError("venue position snapshot hash mismatch")
+        if self.evidence_hash != hash_json(self.model_dump(mode="json", exclude={"evidence_hash"})):
+            raise ValueError("venue position evidence hash mismatch")
+        return self
+
+
 def _iso(value: datetime) -> str:
     return value.astimezone(UTC).isoformat()
 
@@ -199,6 +306,10 @@ def _decimal(value: Decimal) -> str:
     if "." in normalized:
         normalized = normalized.rstrip("0").rstrip(".")
     return "0" if normalized in {"", "-0"} else normalized
+
+
+def _optional_decimal(value: Decimal | None) -> str | None:
+    return None if value is None else _decimal(value)
 
 
 def _order_observation_contract(request: RecordVenueOrderObservationRequest) -> dict[str, Any]:
@@ -251,9 +362,40 @@ def _fill_contract(request: RecordVenueFillRequest) -> dict[str, Any]:
     }
 
 
+def _position_snapshot_contract(
+    request: RecordVenuePositionSnapshotRequest,
+) -> dict[str, Any]:
+    return {
+        "venue": request.venue,
+        "execution_domain": request.execution_domain,
+        "account_id": request.account_id,
+        "instrument_id": request.instrument_id,
+        "venue_update_id": request.venue_update_id,
+        "position_mode": request.position_mode.value,
+        "position_side": request.position_side.value,
+        "margin_mode": request.margin_mode,
+        "collateral_pool_id": request.collateral_pool_id,
+        "position_state": request.position_state.value,
+        "direction": request.direction.value,
+        "quantity": _optional_decimal(request.quantity),
+        "entry_price": _optional_decimal(request.entry_price),
+        "mark_price": _optional_decimal(request.mark_price),
+        "contract_multiplier": _decimal(request.contract_multiplier),
+        "notional": _optional_decimal(request.notional),
+        "unrealized_pnl": _optional_decimal(request.unrealized_pnl),
+        "liquidation_price": _optional_decimal(request.liquidation_price),
+        "leverage": _optional_decimal(request.leverage),
+        "initial_margin": _optional_decimal(request.initial_margin),
+        "maintenance_margin": _optional_decimal(request.maintenance_margin),
+        "settlement_currency": request.settlement_currency,
+        "event_time": _iso(request.event_time),
+    }
+
+
 class VenueFactNormalizationService:
     order_command_type = "execution.venue-order-observation.record.v1"
     fill_command_type = "execution.venue-fill.record.v1"
+    position_command_type = "execution.venue-position-snapshot.record.v1"
 
     def __init__(self, clock: Callable[[], datetime] | None = None) -> None:
         self._clock = clock or (lambda: datetime.now(UTC))
@@ -361,6 +503,7 @@ class VenueFactNormalizationService:
             "ORDER_OBSERVATION",
             existing.venue_order_observation_id,
             None,
+            None,
             existing.observation_hash,
             new_fact,
             now,
@@ -465,7 +608,138 @@ class VenueFactNormalizationService:
             "FILL",
             None,
             existing.venue_fill_id,
+            None,
             existing.fill_hash,
+            new_fact,
+            now,
+        )
+
+    def record_position_snapshot(
+        self, session: Session, envelope: CommandEnvelope
+    ) -> CommandOutcome:
+        run_id = self._run_id(envelope, self.position_command_type)
+        try:
+            request = RecordVenuePositionSnapshotRequest.model_validate(envelope.payload)
+        except ValidationError as exc:
+            raise CommandRejected("VENUE_POSITION_SNAPSHOT_INVALID", str(exc)) from exc
+        now = self._clock()
+        self._lock_external_identity(
+            session,
+            f"venue-position:{envelope.scope.get('organization_id')}:{request.venue}:"
+            f"{request.execution_domain}:{request.account_id}:{request.instrument_id}:"
+            f"{request.position_mode.value}:{request.position_side.value}:"
+            f"{request.margin_mode}:{request.collateral_pool_id}:{request.venue_update_id}",
+        )
+        run, reconciliation_input = self._validate_collection_context(
+            session,
+            envelope,
+            run_id,
+            request,
+            ReconciliationSourceType.VENUE_POSITIONS,
+            now,
+        )
+        scope = session.get(ExecutionSenderScope, run.scope_id)
+        assert scope is not None
+        if (
+            request.position_mode.value != scope.position_mode
+            or request.margin_mode != scope.margin_mode
+            or request.collateral_pool_id != scope.collateral_pool_id
+        ):
+            raise CommandRejected(
+                "VENUE_POSITION_SCOPE_MISMATCH",
+                "position mode, margin mode, or collateral pool changed",
+            )
+        existing = session.execute(
+            select(VenuePositionSnapshot).where(
+                VenuePositionSnapshot.organization_id == run.organization_id,
+                VenuePositionSnapshot.venue == request.venue,
+                VenuePositionSnapshot.execution_domain == request.execution_domain,
+                VenuePositionSnapshot.account_id == request.account_id,
+                VenuePositionSnapshot.instrument_id == request.instrument_id,
+                VenuePositionSnapshot.position_mode == request.position_mode.value,
+                VenuePositionSnapshot.position_side == request.position_side.value,
+                VenuePositionSnapshot.margin_mode == request.margin_mode,
+                VenuePositionSnapshot.collateral_pool_id == request.collateral_pool_id,
+                VenuePositionSnapshot.venue_update_id == request.venue_update_id,
+            )
+        ).scalar_one_or_none()
+        identity_owner = session.get(VenuePositionSnapshot, request.venue_position_snapshot_id)
+        if identity_owner is not None and (
+            existing is None
+            or identity_owner.venue_position_snapshot_id != existing.venue_position_snapshot_id
+        ):
+            raise CommandRejected(
+                "VENUE_POSITION_SNAPSHOT_ID_CONFLICT",
+                "venue position snapshot identity already exists",
+            )
+        new_fact = existing is None
+        if existing is None:
+            self._require_new_fact_link_possible(session, reconciliation_input, request)
+            existing = VenuePositionSnapshot(
+                venue_position_snapshot_id=request.venue_position_snapshot_id,
+                organization_id=run.organization_id,
+                first_seen_run_id=run.run_id,
+                first_seen_input_id=reconciliation_input.input_id,
+                venue=request.venue,
+                execution_domain=request.execution_domain,
+                account_id=request.account_id,
+                instrument_id=request.instrument_id,
+                venue_update_id=request.venue_update_id,
+                position_mode=request.position_mode.value,
+                position_side=request.position_side.value,
+                margin_mode=request.margin_mode,
+                collateral_pool_id=request.collateral_pool_id,
+                position_state=request.position_state.value,
+                direction=request.direction.value,
+                quantity=request.quantity,
+                entry_price=request.entry_price,
+                mark_price=request.mark_price,
+                contract_multiplier=request.contract_multiplier,
+                notional=request.notional,
+                unrealized_pnl=request.unrealized_pnl,
+                liquidation_price=request.liquidation_price,
+                leverage=request.leverage,
+                initial_margin=request.initial_margin,
+                maintenance_margin=request.maintenance_margin,
+                settlement_currency=request.settlement_currency,
+                venue_confirmed=True,
+                fact_authority="VENUE_PRIVATE",
+                environment="SHADOW",
+                live_dispatch_eligible=False,
+                source_version=request.source_version,
+                normalization_version=request.normalization_version,
+                normalized_payload=request.normalized_payload,
+                raw_payload_ref=request.raw_payload_ref,
+                raw_payload_hash=request.raw_payload_hash,
+                evidence_ref=request.evidence_ref,
+                evidence_hash=request.evidence_hash,
+                snapshot_hash=request.snapshot_hash,
+                event_time=request.event_time,
+                venue_observed_at=request.venue_observed_at,
+                first_received_at=request.received_at,
+                recorded_at=now,
+            )
+            session.add(existing)
+            session.flush()
+        elif (
+            existing.organization_id != run.organization_id
+            or existing.snapshot_hash != request.snapshot_hash
+        ):
+            raise CommandRejected(
+                "VENUE_POSITION_SNAPSHOT_CONFLICT",
+                "venue position update identity has different immutable semantics",
+            )
+        return self._link_and_outcome(
+            session,
+            run,
+            reconciliation_input,
+            request,
+            ReconciliationSourceType.VENUE_POSITIONS,
+            "POSITION_SNAPSHOT",
+            None,
+            None,
+            existing.venue_position_snapshot_id,
+            existing.snapshot_hash,
             new_fact,
             now,
         )
@@ -602,16 +876,22 @@ class VenueFactNormalizationService:
         fact_type: str,
         order_observation_id: UUID | None,
         fill_id: UUID | None,
+        position_snapshot_id: UUID | None,
         fact_hash: str,
         new_fact: bool,
         now: datetime,
     ) -> CommandOutcome:
+        if order_observation_id is not None:
+            fact_identity = VenueFactInputLink.venue_order_observation_id == order_observation_id
+        elif fill_id is not None:
+            fact_identity = VenueFactInputLink.venue_fill_id == fill_id
+        else:
+            assert position_snapshot_id is not None
+            fact_identity = VenueFactInputLink.venue_position_snapshot_id == position_snapshot_id
         existing_link = session.execute(
             select(VenueFactInputLink).where(
                 VenueFactInputLink.reconciliation_input_id == reconciliation_input.input_id,
-                VenueFactInputLink.venue_order_observation_id == order_observation_id
-                if order_observation_id is not None
-                else VenueFactInputLink.venue_fill_id == fill_id,
+                fact_identity,
             )
         ).scalar_one_or_none()
         link_values = {
@@ -630,6 +910,8 @@ class VenueFactNormalizationService:
             "observed_at": _iso(request.venue_observed_at),
             "received_at": _iso(request.received_at),
         }
+        if position_snapshot_id is not None:
+            link_values["venue_position_snapshot_id"] = str(position_snapshot_id)
         link_hash = hash_json(link_values)
         if existing_link is not None:
             if existing_link.link_hash != link_hash:
@@ -644,6 +926,7 @@ class VenueFactNormalizationService:
                 fact_type,
                 order_observation_id,
                 fill_id,
+                position_snapshot_id,
                 existing_link.venue_fact_input_link_id,
                 fact_hash,
                 new_fact=False,
@@ -671,6 +954,7 @@ class VenueFactNormalizationService:
             source_type=source_type.value,
             venue_order_observation_id=order_observation_id,
             venue_fill_id=fill_id,
+            venue_position_snapshot_id=position_snapshot_id,
             input_hash=reconciliation_input.input_hash,
             fact_hash=fact_hash,
             raw_payload_ref=request.raw_payload_ref,
@@ -693,6 +977,7 @@ class VenueFactNormalizationService:
             fact_type,
             order_observation_id,
             fill_id,
+            position_snapshot_id,
             link.venue_fact_input_link_id,
             fact_hash,
             new_fact=new_fact,
@@ -726,20 +1011,27 @@ class VenueFactNormalizationService:
         fact_type: str,
         order_observation_id: UUID | None,
         fill_id: UUID | None,
+        position_snapshot_id: UUID | None,
         link_id: UUID,
         fact_hash: str,
         *,
         new_fact: bool,
         new_link: bool,
     ) -> CommandOutcome:
-        fact_id = order_observation_id or fill_id
+        fact_id = order_observation_id or fill_id or position_snapshot_id
         assert fact_id is not None
-        event_type = (
-            "VenueOrderObserved" if fact_type == "ORDER_OBSERVATION" else "VenueFillObserved"
-        )
+        if order_observation_id is not None:
+            event_type = "VenueOrderObserved"
+            object_type = "VenueOrderObservation"
+        elif fill_id is not None:
+            event_type = "VenueFillObserved"
+            object_type = "VenueFill"
+        else:
+            event_type = "VenuePositionSnapshotObserved"
+            object_type = "VenuePositionSnapshot"
         return CommandOutcome(
             status=CommandStatus.COMPLETED,
-            object_type="VenueOrderObservation" if order_observation_id else "VenueFill",
+            object_type=object_type,
             object_id=str(fact_id),
             object_version=1,
             data={

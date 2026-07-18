@@ -277,6 +277,148 @@ class VenueFill(Base):
     recorded_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
 
+class VenuePositionSnapshot(Base):
+    """One immutable private-venue position line at a source event/update."""
+
+    __tablename__ = "venue_position_snapshots"
+    __table_args__ = (
+        CheckConstraint(
+            "position_state IN ('OPEN', 'FLAT', 'UNKNOWN')",
+            name="ck_venue_position_snapshots_state",
+        ),
+        CheckConstraint(
+            "position_mode IN ('ONE_WAY', 'HEDGE') "
+            "AND position_side IN ('LONG', 'SHORT', 'BOTH') "
+            "AND direction IN ('LONG', 'SHORT', 'FLAT', 'UNKNOWN')",
+            name="ck_venue_position_snapshots_shape",
+        ),
+        CheckConstraint(
+            "(position_mode = 'ONE_WAY' AND position_side = 'BOTH') OR "
+            "(position_mode = 'HEDGE' AND position_side IN ('LONG', 'SHORT'))",
+            name="ck_venue_position_snapshots_mode_side",
+        ),
+        CheckConstraint(
+            "contract_multiplier > 0 AND ("
+            "(position_state = 'OPEN' AND direction IN ('LONG', 'SHORT') "
+            "AND quantity > 0 AND entry_price > 0 AND mark_price > 0 "
+            "AND notional = quantity * mark_price * contract_multiplier "
+            "AND unrealized_pnl IS NOT NULL "
+            "AND (liquidation_price IS NULL OR liquidation_price > 0) "
+            "AND (leverage IS NULL OR leverage > 0) "
+            "AND (initial_margin IS NULL OR initial_margin >= 0) "
+            "AND (maintenance_margin IS NULL OR maintenance_margin >= 0)) OR "
+            "(position_state = 'FLAT' AND direction = 'FLAT' AND quantity = 0 "
+            "AND entry_price IS NULL AND (mark_price IS NULL OR mark_price > 0) "
+            "AND notional = 0 AND unrealized_pnl = 0 AND liquidation_price IS NULL "
+            "AND leverage IS NULL AND (initial_margin IS NULL OR initial_margin = 0) "
+            "AND (maintenance_margin IS NULL OR maintenance_margin = 0)) OR "
+            "(position_state = 'UNKNOWN' AND direction = 'UNKNOWN' "
+            "AND quantity IS NULL AND entry_price IS NULL AND mark_price IS NULL "
+            "AND notional IS NULL AND unrealized_pnl IS NULL "
+            "AND liquidation_price IS NULL AND leverage IS NULL "
+            "AND initial_margin IS NULL AND maintenance_margin IS NULL))",
+            name="ck_venue_position_snapshots_economics",
+        ),
+        CheckConstraint(
+            "(position_mode = 'ONE_WAY') OR position_state <> 'OPEN' OR direction = position_side",
+            name="ck_venue_position_snapshots_hedge_direction",
+        ),
+        CheckConstraint(
+            "event_time <= venue_observed_at AND venue_observed_at <= first_received_at "
+            "AND first_received_at <= recorded_at",
+            name="ck_venue_position_snapshots_time_order",
+        ),
+        CheckConstraint(
+            "venue_confirmed AND fact_authority = 'VENUE_PRIVATE' "
+            "AND environment = 'SHADOW' AND live_dispatch_eligible = false",
+            name="ck_venue_position_snapshots_authority",
+        ),
+        CheckConstraint(
+            "jsonb_typeof(normalized_payload) = 'object' "
+            "AND length(raw_payload_hash) = 64 AND length(evidence_hash) = 64 "
+            "AND length(snapshot_hash) = 64",
+            name="ck_venue_position_snapshots_integrity",
+        ),
+        ForeignKeyConstraint(
+            ["first_seen_run_id", "organization_id"],
+            [
+                "execution_reconciliation_runs.run_id",
+                "execution_reconciliation_runs.organization_id",
+            ],
+            name="fk_venue_position_snapshots_first_run_org",
+            ondelete="RESTRICT",
+        ),
+        UniqueConstraint(
+            "organization_id",
+            "venue",
+            "execution_domain",
+            "account_id",
+            "instrument_id",
+            "position_mode",
+            "position_side",
+            "margin_mode",
+            "collateral_pool_id",
+            "venue_update_id",
+            name="uq_venue_position_snapshots_external_update",
+        ),
+        Index(
+            "ix_venue_position_snapshots_scope_time",
+            "venue",
+            "execution_domain",
+            "account_id",
+            "instrument_id",
+            "position_side",
+            "event_time",
+        ),
+    )
+
+    venue_position_snapshot_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True)
+    organization_id: Mapped[str] = mapped_column(String(120), nullable=False)
+    first_seen_run_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), nullable=False)
+    first_seen_input_id: Mapped[UUID] = mapped_column(
+        ForeignKey("execution_reconciliation_inputs.input_id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    venue: Mapped[str] = mapped_column(String(80), nullable=False)
+    execution_domain: Mapped[str] = mapped_column(String(120), nullable=False)
+    account_id: Mapped[str] = mapped_column(String(160), nullable=False)
+    instrument_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    venue_update_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    position_mode: Mapped[str] = mapped_column(String(80), nullable=False)
+    position_side: Mapped[str] = mapped_column(String(20), nullable=False)
+    margin_mode: Mapped[str] = mapped_column(String(80), nullable=False)
+    collateral_pool_id: Mapped[str] = mapped_column(String(160), nullable=False)
+    position_state: Mapped[str] = mapped_column(String(20), nullable=False)
+    direction: Mapped[str] = mapped_column(String(20), nullable=False)
+    quantity: Mapped[Decimal | None] = mapped_column(Numeric(38, 18), nullable=True)
+    entry_price: Mapped[Decimal | None] = mapped_column(Numeric(38, 18), nullable=True)
+    mark_price: Mapped[Decimal | None] = mapped_column(Numeric(38, 18), nullable=True)
+    contract_multiplier: Mapped[Decimal] = mapped_column(Numeric(38, 18), nullable=False)
+    notional: Mapped[Decimal | None] = mapped_column(Numeric(38, 18), nullable=True)
+    unrealized_pnl: Mapped[Decimal | None] = mapped_column(Numeric(38, 18), nullable=True)
+    liquidation_price: Mapped[Decimal | None] = mapped_column(Numeric(38, 18), nullable=True)
+    leverage: Mapped[Decimal | None] = mapped_column(Numeric(38, 18), nullable=True)
+    initial_margin: Mapped[Decimal | None] = mapped_column(Numeric(38, 18), nullable=True)
+    maintenance_margin: Mapped[Decimal | None] = mapped_column(Numeric(38, 18), nullable=True)
+    settlement_currency: Mapped[str] = mapped_column(String(80), nullable=False)
+    venue_confirmed: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    fact_authority: Mapped[str] = mapped_column(String(32), nullable=False)
+    environment: Mapped[str] = mapped_column(String(20), nullable=False)
+    live_dispatch_eligible: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    source_version: Mapped[str] = mapped_column(String(160), nullable=False)
+    normalization_version: Mapped[str] = mapped_column(String(160), nullable=False)
+    normalized_payload: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    raw_payload_ref: Mapped[str] = mapped_column(String(255), nullable=False)
+    raw_payload_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    evidence_ref: Mapped[str] = mapped_column(String(255), nullable=False)
+    evidence_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    snapshot_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    event_time: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    venue_observed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    first_received_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    recorded_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
 class VenueFactInputLink(Base):
     """Immutable membership of one canonical venue fact in one reconciliation input."""
 
@@ -284,9 +426,11 @@ class VenueFactInputLink(Base):
     __table_args__ = (
         CheckConstraint(
             "(source_type = 'VENUE_ORDERS' AND venue_order_observation_id IS NOT NULL "
-            "AND venue_fill_id IS NULL) OR "
+            "AND venue_fill_id IS NULL AND venue_position_snapshot_id IS NULL) OR "
             "(source_type = 'VENUE_FILLS' AND venue_order_observation_id IS NULL "
-            "AND venue_fill_id IS NOT NULL)",
+            "AND venue_fill_id IS NOT NULL AND venue_position_snapshot_id IS NULL) OR "
+            "(source_type = 'VENUE_POSITIONS' AND venue_order_observation_id IS NULL "
+            "AND venue_fill_id IS NULL AND venue_position_snapshot_id IS NOT NULL)",
             name="ck_venue_fact_input_links_exact_fact",
         ),
         CheckConstraint(
@@ -318,6 +462,11 @@ class VenueFactInputLink(Base):
             "venue_fill_id",
             name="uq_venue_fact_input_links_fill_fact",
         ),
+        UniqueConstraint(
+            "reconciliation_input_id",
+            "venue_position_snapshot_id",
+            name="uq_venue_fact_input_links_position_fact",
+        ),
         Index("ix_venue_fact_input_links_run_source", "run_id", "source_type"),
     )
 
@@ -335,6 +484,10 @@ class VenueFactInputLink(Base):
     )
     venue_fill_id: Mapped[UUID | None] = mapped_column(
         ForeignKey("venue_fills.venue_fill_id", ondelete="RESTRICT"), nullable=True
+    )
+    venue_position_snapshot_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("venue_position_snapshots.venue_position_snapshot_id", ondelete="RESTRICT"),
+        nullable=True,
     )
     input_hash: Mapped[str] = mapped_column(String(64), nullable=False)
     fact_hash: Mapped[str] = mapped_column(String(64), nullable=False)
