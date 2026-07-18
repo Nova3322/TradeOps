@@ -95,6 +95,10 @@ docs/
     ├── WP-0012-Canonical-VenueOrder与VenueFill事实.md
     ├── WP-0013-Canonical-VenueFact执行强绑定.md
     ├── WP-0014-Canonical-VenuePositionSnapshot事实.md
+    ├── WP-0015-Canonical-VenuePosition执行强绑定.md
+    ├── WP-0016-Canonical-VenueProtectionSnapshot事实.md
+    ├── WP-0017-Canonical-VenueProtection执行强绑定.md
+    ├── WP-0018-Canonical-VenueAccountEquitySnapshot事实.md
     └── evidence/
         ├── WP-0001-validation-20260718.md
         ├── WP-0002-validation-20260718.md
@@ -109,7 +113,11 @@ docs/
         ├── WP-0011-validation-20260718.md
         ├── WP-0012-validation-20260718.md
         ├── WP-0013-validation-20260718.md
-        └── WP-0014-validation-20260718.md
+        ├── WP-0014-validation-20260718.md
+        ├── WP-0015-validation-20260718.md
+        ├── WP-0016-validation-20260718.md
+        ├── WP-0017-validation-20260718.md
+        └── WP-0018-validation-20260718.md
 ```
 
 ### 专项索引
@@ -153,6 +161,10 @@ docs/
 | 实现 | [WP-0012：Canonical VenueOrder 与 VenueFill 事实](08-implementation/WP-0012-Canonical-VenueOrder与VenueFill事实.md) | 私有场所订单观察、成交全局去重、逐输入 membership、费用和 exact count 门 |
 | 实现 | [WP-0013：Canonical Venue Fact 执行强绑定](08-implementation/WP-0013-Canonical-VenueFact执行强绑定.md) | v3 exact fact/link/claim ownership、成交增量推导、订单身份连续和状态/风险原子应用 |
 | 实现 | [WP-0014：Canonical VenuePositionSnapshot 事实](08-implementation/WP-0014-Canonical-VenuePositionSnapshot事实.md) | 私有仓位 OPEN/FLAT/UNKNOWN、ONE_WAY/HEDGE、margin/collateral exact scope、跨 run 去重和 exact membership |
+| 实现 | [WP-0015：Canonical VenuePosition 执行强绑定](08-implementation/WP-0015-Canonical-VenuePosition执行强绑定.md) | exact position fact/link、post-intent 数量与作用域校验、`POSITION_RECONCILED` 原子推进 |
+| 实现 | [WP-0016：Canonical VenueProtectionSnapshot 事实](08-implementation/WP-0016-Canonical-VenueProtectionSnapshot事实.md) | 原生保护 CONFIRMED/DEGRADED/UNKNOWN、仓位强引用、覆盖数量与 replacement 语义 |
+| 实现 | [WP-0017：Canonical VenueProtection 执行强绑定](08-implementation/WP-0017-Canonical-VenueProtection执行强绑定.md) | exact protection fact/link、全覆盖 reduce-only 保护、`PROTECTION_CONFIRMED` 原子推进 |
+| 实现 | [WP-0018：Canonical VenueAccountEquitySnapshot 事实](08-implementation/WP-0018-Canonical-VenueAccountEquitySnapshot事实.md) | 私有账户权益 CONFIRMED/UNKNOWN、margin/collateral/currency 精确作用域和 balance exact membership |
 
 ## 完整交付与能力激活
 

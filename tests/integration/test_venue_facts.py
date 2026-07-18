@@ -21,6 +21,7 @@ from tests.sender_fencing_fixtures import (
     make_sender_scope,
 )
 from tests.venue_fact_fixtures import (
+    account_equity_snapshot_request,
     execute_venue_fact,
     fill_request,
     order_observation_request,
@@ -42,6 +43,7 @@ from trading_control_plane.reconciliation_models import (
     ExecutionReconciliationRunState,
 )
 from trading_control_plane.venue_fact_models import (
+    VenueAccountEquitySnapshot,
     VenueFactInputLink,
     VenueFill,
     VenueOrderObservation,
@@ -50,6 +52,7 @@ from trading_control_plane.venue_fact_models import (
 )
 from trading_control_plane.venue_facts import (
     FeeEffect,
+    VenueAccountEquityState,
     VenueFactNormalizationService,
     VenueOrderStatus,
     VenuePositionDirection,
@@ -69,6 +72,7 @@ def _prepare_collecting_run(
     order_count: int = 0,
     fill_count: int = 0,
     position_count: int = 0,
+    balance_count: int = 0,
     protection_count: int = 0,
     now: datetime | None = None,
     lease_id: UUID | None = None,
@@ -116,6 +120,8 @@ def _prepare_collecting_run(
             item_count = fill_count
         elif source_type is ReconciliationSourceType.VENUE_POSITIONS:
             item_count = position_count
+        elif source_type is ReconciliationSourceType.VENUE_BALANCES:
+            item_count = balance_count
         elif source_type is ReconciliationSourceType.VENUE_PROTECTION:
             item_count = protection_count
         result = execute_reconciliation(
@@ -197,6 +203,24 @@ def _record_protection(
     envelope = venue_fact_envelope(
         run_id,
         VenueFactNormalizationService.protection_command_type,
+        request.model_dump(mode="json"),
+        now=now,
+    )
+    return request, execute_venue_fact(database, envelope, now=now)
+
+
+def _record_account_equity(
+    database: Database,
+    run_id: UUID,
+    reconciliation_input: ExecutionReconciliationInput,
+    *,
+    now: datetime,
+    **updates: object,
+):
+    request = account_equity_snapshot_request(reconciliation_input, now=now, **updates)
+    envelope = venue_fact_envelope(
+        run_id,
+        VenueFactNormalizationService.account_equity_command_type,
         request.model_dump(mode="json"),
         now=now,
     )
@@ -1383,3 +1407,295 @@ def test_direct_protection_snapshot_without_first_link_is_rolled_back(
             session.add(direct_snapshot)
     with database.session_factory.begin() as session:
         assert session.scalar(select(func.count()).select_from(VenueProtectionSnapshot)) == 0
+
+
+def test_account_equity_confirmed_unknown_and_exact_manifest_are_canonical(
+    database: Database,
+) -> None:
+    run_id, _, version, run_time, inputs = _prepare_collecting_run(database, balance_count=2)
+    normalized_at = run_time + timedelta(seconds=1)
+    balance_input = inputs[ReconciliationSourceType.VENUE_BALANCES]
+
+    premature = execute_reconciliation(
+        database,
+        phase_envelope(
+            run_id,
+            ReconciliationPhase.COMPARING,
+            now=normalized_at,
+            expected_version=version,
+        ),
+        now=normalized_at,
+    )
+    assert premature.status is CommandStatus.REJECTED
+    assert premature.error_code == "RECONCILIATION_NORMALIZED_FACT_COUNT_MISMATCH"
+
+    confirmed_request = account_equity_snapshot_request(
+        balance_input,
+        now=normalized_at,
+        venue_update_id="account-equity-confirmed-1",
+    )
+    confirmed_envelope = venue_fact_envelope(
+        run_id,
+        VenueFactNormalizationService.account_equity_command_type,
+        confirmed_request.model_dump(mode="json"),
+        now=normalized_at,
+        idempotency_key="account-equity-confirmed-idempotent",
+    )
+    first = execute_venue_fact(database, confirmed_envelope, now=normalized_at)
+    replay = execute_venue_fact(database, confirmed_envelope, now=normalized_at)
+    unknown_request, unknown = _record_account_equity(
+        database,
+        run_id,
+        balance_input,
+        now=normalized_at,
+        venue_update_id="account-equity-unknown-1",
+        equity_state=VenueAccountEquityState.UNKNOWN,
+    )
+    _, excess = _record_account_equity(
+        database,
+        run_id,
+        balance_input,
+        now=normalized_at,
+        venue_update_id="account-equity-excess-1",
+    )
+
+    assert first.status is CommandStatus.COMPLETED
+    assert replay.status is CommandStatus.ALREADY_PROCESSED
+    assert replay.replayed is True
+    assert replay.data["original_status"] == CommandStatus.COMPLETED.value
+    assert replay.data["original_data"] == first.data
+    assert unknown.status is CommandStatus.COMPLETED
+    assert excess.status is CommandStatus.REJECTED
+    assert excess.error_code == "VENUE_FACT_INPUT_COUNT_EXCEEDED"
+
+    compared = execute_reconciliation(
+        database,
+        phase_envelope(
+            run_id,
+            ReconciliationPhase.COMPARING,
+            now=normalized_at,
+            expected_version=version,
+        ),
+        now=normalized_at,
+    )
+    assert compared.status is CommandStatus.COMPLETED
+    with database.session_factory.begin() as session:
+        confirmed = session.get(
+            VenueAccountEquitySnapshot,
+            confirmed_request.venue_account_equity_snapshot_id,
+        )
+        unknown_row = session.get(
+            VenueAccountEquitySnapshot,
+            unknown_request.venue_account_equity_snapshot_id,
+        )
+        assert confirmed is not None
+        assert confirmed.equity_state == "CONFIRMED"
+        assert confirmed.wallet_balance == Decimal("10000")
+        assert confirmed.exchange_margin_equity == Decimal("10500")
+        assert confirmed.total_unrealized_pnl == Decimal("500")
+        assert confirmed.includes_unrealized_pnl is True
+        assert unknown_row is not None
+        assert unknown_row.equity_state == "UNKNOWN"
+        assert unknown_row.wallet_balance is None
+        assert unknown_row.exchange_margin_equity is None
+        assert unknown_row.total_unrealized_pnl is None
+        assert unknown_row.includes_unrealized_pnl is False
+        assert (
+            session.scalar(
+                select(func.count())
+                .select_from(VenueFactInputLink)
+                .where(VenueFactInputLink.source_type == "VENUE_BALANCES")
+            )
+            == 2
+        )
+    with pytest.raises(DBAPIError, match="venue_account_equity_snapshots is immutable"):
+        with database.session_factory.begin() as session:
+            session.execute(
+                update(VenueAccountEquitySnapshot)
+                .where(
+                    VenueAccountEquitySnapshot.venue_account_equity_snapshot_id
+                    == confirmed_request.venue_account_equity_snapshot_id
+                )
+                .values(exchange_margin_equity=Decimal("99999"))
+            )
+
+
+def test_account_equity_is_global_relinkable_and_conflicts_on_changed_semantics(
+    database: Database,
+) -> None:
+    run_id, lease_id, version, run_time, inputs = _prepare_collecting_run(database, balance_count=1)
+    normalized_at = run_time + timedelta(seconds=1)
+    first_request, first = _record_account_equity(
+        database,
+        run_id,
+        inputs[ReconciliationSourceType.VENUE_BALANCES],
+        now=normalized_at,
+        venue_update_id="account-equity-global-1",
+    )
+    assert first.status is CommandStatus.COMPLETED
+    compared = execute_reconciliation(
+        database,
+        phase_envelope(
+            run_id,
+            ReconciliationPhase.COMPARING,
+            now=normalized_at,
+            expected_version=version,
+        ),
+        now=normalized_at,
+    )
+    finished = execute_reconciliation(
+        database,
+        finish_envelope(
+            run_id,
+            ReconciliationStatus.SUCCEEDED,
+            now=normalized_at,
+            expected_version=compared.object_version or version + 1,
+        ),
+        now=normalized_at,
+    )
+    assert finished.status is CommandStatus.COMPLETED
+
+    second_run_id, _, _, second_run_time, second_inputs = _prepare_collecting_run(
+        database,
+        balance_count=1,
+        now=normalized_at + timedelta(seconds=1),
+        lease_id=lease_id,
+        supersedes_run_id=run_id,
+    )
+    second_request, second = _record_account_equity(
+        database,
+        second_run_id,
+        second_inputs[ReconciliationSourceType.VENUE_BALANCES],
+        now=second_run_time + timedelta(seconds=1),
+        venue_update_id="account-equity-global-1",
+        event_time=first_request.event_time,
+    )
+    assert second.status is CommandStatus.COMPLETED
+    assert second.data["venue_fact_id"] == str(first_request.venue_account_equity_snapshot_id)
+    assert second.data["venue_fact_id"] != str(second_request.venue_account_equity_snapshot_id)
+    assert second.data["new_fact"] is False
+    assert second.data["new_input_link"] is True
+
+    _, conflict = _record_account_equity(
+        database,
+        second_run_id,
+        second_inputs[ReconciliationSourceType.VENUE_BALANCES],
+        now=second_run_time + timedelta(seconds=1),
+        venue_update_id="account-equity-global-1",
+        event_time=first_request.event_time,
+        wallet_balance=Decimal("10001"),
+    )
+    assert conflict.status is CommandStatus.REJECTED
+    assert conflict.error_code == "VENUE_ACCOUNT_EQUITY_SNAPSHOT_CONFLICT"
+    with database.session_factory.begin() as session:
+        assert session.scalar(select(func.count()).select_from(VenueAccountEquitySnapshot)) == 1
+        assert (
+            session.scalar(
+                select(func.count())
+                .select_from(VenueFactInputLink)
+                .where(VenueFactInputLink.source_type == "VENUE_BALANCES")
+            )
+            == 2
+        )
+
+
+def test_account_equity_scope_and_unknown_zero_fail_closed(database: Database) -> None:
+    run_id, _, _, run_time, inputs = _prepare_collecting_run(database, balance_count=1)
+    normalized_at = run_time + timedelta(seconds=1)
+    balance_input = inputs[ReconciliationSourceType.VENUE_BALANCES]
+    _, wrong_scope = _record_account_equity(
+        database,
+        run_id,
+        balance_input,
+        now=normalized_at,
+        margin_mode="CROSS",
+    )
+    assert wrong_scope.status is CommandStatus.REJECTED
+    assert wrong_scope.error_code == "VENUE_ACCOUNT_EQUITY_SCOPE_MISMATCH"
+
+    unknown_request = account_equity_snapshot_request(
+        balance_input,
+        now=normalized_at,
+        equity_state=VenueAccountEquityState.UNKNOWN,
+    )
+    payload = unknown_request.model_dump(mode="json")
+    payload["wallet_balance"] = "0"
+    payload["evidence_hash"] = hash_json(
+        {key: value for key, value in payload.items() if key != "evidence_hash"}
+    )
+    unknown_as_zero = execute_venue_fact(
+        database,
+        venue_fact_envelope(
+            run_id,
+            VenueFactNormalizationService.account_equity_command_type,
+            payload,
+            now=normalized_at,
+        ),
+        now=normalized_at,
+    )
+    assert unknown_as_zero.status is CommandStatus.REJECTED
+    assert unknown_as_zero.error_code == "VENUE_ACCOUNT_EQUITY_SNAPSHOT_INVALID"
+    with database.session_factory.begin() as session:
+        assert session.scalar(select(func.count()).select_from(VenueAccountEquitySnapshot)) == 0
+
+
+def test_direct_account_equity_scope_or_missing_first_link_is_rolled_back(
+    database: Database,
+) -> None:
+    run_id, _, _, run_time, inputs = _prepare_collecting_run(database, balance_count=1)
+    normalized_at = run_time + timedelta(seconds=1)
+    balance_input = inputs[ReconciliationSourceType.VENUE_BALANCES]
+    request = account_equity_snapshot_request(balance_input, now=normalized_at)
+
+    def direct_snapshot(*, margin_mode: str) -> VenueAccountEquitySnapshot:
+        return VenueAccountEquitySnapshot(
+            venue_account_equity_snapshot_id=request.venue_account_equity_snapshot_id,
+            organization_id="org-1",
+            first_seen_run_id=run_id,
+            first_seen_input_id=balance_input.input_id,
+            venue=request.venue,
+            execution_domain=request.execution_domain,
+            account_id=request.account_id,
+            venue_update_id=request.venue_update_id,
+            margin_mode=margin_mode,
+            collateral_pool_id=request.collateral_pool_id,
+            settlement_currency=request.settlement_currency,
+            equity_state=request.equity_state.value,
+            wallet_balance=request.wallet_balance,
+            exchange_margin_equity=request.exchange_margin_equity,
+            available_margin=request.available_margin,
+            total_unrealized_pnl=request.total_unrealized_pnl,
+            total_initial_margin=request.total_initial_margin,
+            total_maintenance_margin=request.total_maintenance_margin,
+            total_liability=request.total_liability,
+            unsettled_fee=request.unsettled_fee,
+            unsettled_funding=request.unsettled_funding,
+            includes_unrealized_pnl=request.includes_unrealized_pnl,
+            venue_confirmed=True,
+            fact_authority="VENUE_PRIVATE",
+            environment="SHADOW",
+            live_dispatch_eligible=False,
+            source_version=request.source_version,
+            normalization_version=request.normalization_version,
+            normalized_payload=request.normalized_payload,
+            raw_payload_ref=request.raw_payload_ref,
+            raw_payload_hash=request.raw_payload_hash,
+            evidence_ref=request.evidence_ref,
+            evidence_hash=request.evidence_hash,
+            snapshot_hash=request.snapshot_hash,
+            event_time=request.event_time,
+            venue_observed_at=request.venue_observed_at,
+            first_received_at=request.received_at,
+            recorded_at=normalized_at,
+        )
+
+    with pytest.raises(DBAPIError, match="canonical venue account equity scope changed"):
+        with database.session_factory.begin() as session:
+            session.add(direct_snapshot(margin_mode="CROSS"))
+    with pytest.raises(
+        DBAPIError, match="canonical venue fact requires its first immutable input link"
+    ):
+        with database.session_factory.begin() as session:
+            session.add(direct_snapshot(margin_mode="ISOLATED"))
+    with database.session_factory.begin() as session:
+        assert session.scalar(select(func.count()).select_from(VenueAccountEquitySnapshot)) == 0

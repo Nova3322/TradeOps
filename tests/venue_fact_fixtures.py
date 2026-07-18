@@ -13,10 +13,12 @@ from trading_control_plane.venue_facts import (
     VENUE_FACT_SERVICE_PRINCIPAL,
     FeeEffect,
     LiquidityRole,
+    RecordVenueAccountEquitySnapshotRequest,
     RecordVenueFillRequest,
     RecordVenueOrderObservationRequest,
     RecordVenuePositionSnapshotRequest,
     RecordVenueProtectionSnapshotRequest,
+    VenueAccountEquityState,
     VenueFactNormalizationService,
     VenueOrderStatus,
     VenuePositionDirection,
@@ -26,6 +28,7 @@ from trading_control_plane.venue_facts import (
     VenueProtectedDirection,
     VenueProtectionState,
     VenueSide,
+    _account_equity_snapshot_contract,
     _fill_contract,
     _order_observation_contract,
     _position_snapshot_contract,
@@ -464,6 +467,116 @@ def protection_snapshot_request(
     )
 
 
+def account_equity_snapshot_request(
+    reconciliation_input: ExecutionReconciliationInput,
+    *,
+    now: datetime,
+    venue_account_equity_snapshot_id: UUID | None = None,
+    venue_fact_input_link_id: UUID | None = None,
+    venue_update_id: str = "account-equity-update-1",
+    margin_mode: str = "ISOLATED",
+    collateral_pool_id: str = "pool-usdt-1",
+    settlement_currency: str = "USDT",
+    equity_state: VenueAccountEquityState = VenueAccountEquityState.CONFIRMED,
+    wallet_balance: Decimal | None = None,
+    exchange_margin_equity: Decimal | None = None,
+    available_margin: Decimal | None = None,
+    total_unrealized_pnl: Decimal | None = None,
+    total_initial_margin: Decimal | None = None,
+    total_maintenance_margin: Decimal | None = None,
+    total_liability: Decimal | None = None,
+    unsettled_fee: Decimal | None = None,
+    unsettled_funding: Decimal | None = None,
+    includes_unrealized_pnl: bool | None = None,
+    event_time: datetime | None = None,
+    venue_observed_at: datetime | None = None,
+    received_at: datetime | None = None,
+) -> RecordVenueAccountEquitySnapshotRequest:
+    observed_event = event_time or now - timedelta(seconds=2)
+    if equity_state is VenueAccountEquityState.CONFIRMED:
+        effective_wallet = wallet_balance if wallet_balance is not None else Decimal("10000")
+        effective_equity = (
+            exchange_margin_equity if exchange_margin_equity is not None else Decimal("10500")
+        )
+        effective_available = available_margin if available_margin is not None else Decimal("9000")
+        effective_upnl = (
+            total_unrealized_pnl if total_unrealized_pnl is not None else Decimal("500")
+        )
+        effective_initial = (
+            total_initial_margin if total_initial_margin is not None else Decimal("1000")
+        )
+        effective_maintenance = (
+            total_maintenance_margin if total_maintenance_margin is not None else Decimal("250")
+        )
+        effective_liability = total_liability if total_liability is not None else Decimal("0")
+        effective_fee = unsettled_fee if unsettled_fee is not None else Decimal("0")
+        effective_funding = unsettled_funding if unsettled_funding is not None else Decimal("0")
+        effective_includes_upnl = (
+            includes_unrealized_pnl if includes_unrealized_pnl is not None else True
+        )
+    else:
+        effective_wallet = None
+        effective_equity = None
+        effective_available = None
+        effective_upnl = None
+        effective_initial = None
+        effective_maintenance = None
+        effective_liability = None
+        effective_fee = None
+        effective_funding = None
+        effective_includes_upnl = False
+    values: dict[str, object] = {
+        "venue_fact_input_link_id": venue_fact_input_link_id or uuid4(),
+        "reconciliation_input_id": reconciliation_input.input_id,
+        "reconciliation_input_hash": reconciliation_input.input_hash,
+        "venue": "BINANCE",
+        "execution_domain": "BINANCE_USDM",
+        "account_id": "account-1",
+        "instrument_id": None,
+        "source_version": reconciliation_input.source_version,
+        "normalization_version": "venue-account-equity-normalizer-v1",
+        "normalized_payload": {
+            "venue_update_id": venue_update_id,
+            "collateral_pool_id": collateral_pool_id,
+            "settlement_currency": settlement_currency,
+            "equity_state": equity_state.value,
+        },
+        "raw_payload_ref": f"test-only:raw-account-equity:{venue_update_id}",
+        "raw_payload_hash": hash_json({"raw_account_equity_update_id": venue_update_id}),
+        "evidence_ref": f"test-only:account-equity-evidence:{venue_update_id}",
+        "event_time": observed_event,
+        "venue_observed_at": venue_observed_at or now - timedelta(seconds=1),
+        "received_at": received_at or now,
+        "venue_account_equity_snapshot_id": venue_account_equity_snapshot_id or uuid4(),
+        "venue_update_id": venue_update_id,
+        "margin_mode": margin_mode,
+        "collateral_pool_id": collateral_pool_id,
+        "settlement_currency": settlement_currency,
+        "equity_state": equity_state,
+        "wallet_balance": effective_wallet,
+        "exchange_margin_equity": effective_equity,
+        "available_margin": effective_available,
+        "total_unrealized_pnl": effective_upnl,
+        "total_initial_margin": effective_initial,
+        "total_maintenance_margin": effective_maintenance,
+        "total_liability": effective_liability,
+        "unsettled_fee": effective_fee,
+        "unsettled_funding": effective_funding,
+        "includes_unrealized_pnl": effective_includes_upnl,
+    }
+    draft = RecordVenueAccountEquitySnapshotRequest.model_construct(
+        **values, snapshot_hash="0" * 64, evidence_hash="0" * 64
+    )
+    snapshot_hash = hash_json(_account_equity_snapshot_contract(draft))
+    evidence_draft = RecordVenueAccountEquitySnapshotRequest.model_construct(
+        **values, snapshot_hash=snapshot_hash, evidence_hash="0" * 64
+    )
+    evidence_hash = hash_json(evidence_draft.model_dump(mode="json", exclude={"evidence_hash"}))
+    return RecordVenueAccountEquitySnapshotRequest.model_validate(
+        {**values, "snapshot_hash": snapshot_hash, "evidence_hash": evidence_hash}
+    )
+
+
 def execute_venue_fact(
     database: Database,
     envelope: CommandEnvelope,
@@ -476,6 +589,7 @@ def execute_venue_fact(
         service.fill_command_type: service.record_fill,
         service.position_command_type: service.record_position_snapshot,
         service.protection_command_type: service.record_protection_snapshot,
+        service.account_equity_command_type: service.record_account_equity_snapshot,
     }
     return IdempotentCommandExecutor(database.session_factory).execute(
         envelope, handlers[envelope.command_type]

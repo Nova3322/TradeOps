@@ -420,6 +420,123 @@ class VenuePositionSnapshot(Base):
     recorded_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
 
+class VenueAccountEquitySnapshot(Base):
+    """One immutable private-venue account/collateral-pool equity snapshot."""
+
+    __tablename__ = "venue_account_equity_snapshots"
+    __table_args__ = (
+        CheckConstraint(
+            "equity_state IN ('CONFIRMED', 'UNKNOWN')",
+            name="ck_venue_account_equity_snapshots_state",
+        ),
+        CheckConstraint(
+            "(equity_state = 'CONFIRMED' "
+            "AND wallet_balance IS NOT NULL AND exchange_margin_equity IS NOT NULL "
+            "AND available_margin IS NOT NULL AND total_unrealized_pnl IS NOT NULL "
+            "AND total_initial_margin >= 0 AND total_maintenance_margin >= 0 "
+            "AND total_liability >= 0 AND unsettled_fee IS NOT NULL "
+            "AND unsettled_funding IS NOT NULL AND includes_unrealized_pnl) OR "
+            "(equity_state = 'UNKNOWN' AND wallet_balance IS NULL "
+            "AND exchange_margin_equity IS NULL AND available_margin IS NULL "
+            "AND total_unrealized_pnl IS NULL AND total_initial_margin IS NULL "
+            "AND total_maintenance_margin IS NULL AND total_liability IS NULL "
+            "AND unsettled_fee IS NULL AND unsettled_funding IS NULL "
+            "AND NOT includes_unrealized_pnl)",
+            name="ck_venue_account_equity_snapshots_economics",
+        ),
+        CheckConstraint(
+            "event_time <= venue_observed_at AND venue_observed_at <= first_received_at "
+            "AND first_received_at <= recorded_at",
+            name="ck_venue_account_equity_snapshots_time_order",
+        ),
+        CheckConstraint(
+            "venue_confirmed AND fact_authority = 'VENUE_PRIVATE' "
+            "AND environment = 'SHADOW' AND live_dispatch_eligible = false",
+            name="ck_venue_account_equity_snapshots_authority",
+        ),
+        CheckConstraint(
+            "jsonb_typeof(normalized_payload) = 'object' "
+            "AND length(raw_payload_hash) = 64 AND length(evidence_hash) = 64 "
+            "AND length(snapshot_hash) = 64",
+            name="ck_venue_account_equity_snapshots_integrity",
+        ),
+        ForeignKeyConstraint(
+            ["first_seen_run_id", "organization_id"],
+            [
+                "execution_reconciliation_runs.run_id",
+                "execution_reconciliation_runs.organization_id",
+            ],
+            name="fk_venue_account_equity_snapshots_first_run_org",
+            ondelete="RESTRICT",
+        ),
+        UniqueConstraint(
+            "organization_id",
+            "venue",
+            "execution_domain",
+            "account_id",
+            "margin_mode",
+            "collateral_pool_id",
+            "settlement_currency",
+            "venue_update_id",
+            name="uq_venue_account_equity_snapshots_external_update",
+        ),
+        Index(
+            "ix_venue_account_equity_snapshots_scope_time",
+            "venue",
+            "execution_domain",
+            "account_id",
+            "margin_mode",
+            "collateral_pool_id",
+            "settlement_currency",
+            "event_time",
+        ),
+    )
+
+    venue_account_equity_snapshot_id: Mapped[UUID] = mapped_column(
+        Uuid(as_uuid=True), primary_key=True
+    )
+    organization_id: Mapped[str] = mapped_column(String(120), nullable=False)
+    first_seen_run_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), nullable=False)
+    first_seen_input_id: Mapped[UUID] = mapped_column(
+        ForeignKey("execution_reconciliation_inputs.input_id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    venue: Mapped[str] = mapped_column(String(80), nullable=False)
+    execution_domain: Mapped[str] = mapped_column(String(120), nullable=False)
+    account_id: Mapped[str] = mapped_column(String(160), nullable=False)
+    venue_update_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    margin_mode: Mapped[str] = mapped_column(String(80), nullable=False)
+    collateral_pool_id: Mapped[str] = mapped_column(String(160), nullable=False)
+    settlement_currency: Mapped[str] = mapped_column(String(80), nullable=False)
+    equity_state: Mapped[str] = mapped_column(String(20), nullable=False)
+    wallet_balance: Mapped[Decimal | None] = mapped_column(Numeric(38, 18), nullable=True)
+    exchange_margin_equity: Mapped[Decimal | None] = mapped_column(Numeric(38, 18), nullable=True)
+    available_margin: Mapped[Decimal | None] = mapped_column(Numeric(38, 18), nullable=True)
+    total_unrealized_pnl: Mapped[Decimal | None] = mapped_column(Numeric(38, 18), nullable=True)
+    total_initial_margin: Mapped[Decimal | None] = mapped_column(Numeric(38, 18), nullable=True)
+    total_maintenance_margin: Mapped[Decimal | None] = mapped_column(Numeric(38, 18), nullable=True)
+    total_liability: Mapped[Decimal | None] = mapped_column(Numeric(38, 18), nullable=True)
+    unsettled_fee: Mapped[Decimal | None] = mapped_column(Numeric(38, 18), nullable=True)
+    unsettled_funding: Mapped[Decimal | None] = mapped_column(Numeric(38, 18), nullable=True)
+    includes_unrealized_pnl: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    venue_confirmed: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    fact_authority: Mapped[str] = mapped_column(String(32), nullable=False)
+    environment: Mapped[str] = mapped_column(String(20), nullable=False)
+    live_dispatch_eligible: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    source_version: Mapped[str] = mapped_column(String(160), nullable=False)
+    normalization_version: Mapped[str] = mapped_column(String(160), nullable=False)
+    normalized_payload: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    raw_payload_ref: Mapped[str] = mapped_column(String(255), nullable=False)
+    raw_payload_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    evidence_ref: Mapped[str] = mapped_column(String(255), nullable=False)
+    evidence_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    snapshot_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    event_time: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    venue_observed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    first_received_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    recorded_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
 class VenueProtectionSnapshot(Base):
     """One immutable private-venue snapshot of the active native protection set."""
 
@@ -566,16 +683,24 @@ class VenueFactInputLink(Base):
         CheckConstraint(
             "(source_type = 'VENUE_ORDERS' AND venue_order_observation_id IS NOT NULL "
             "AND venue_fill_id IS NULL AND venue_position_snapshot_id IS NULL "
-            "AND venue_protection_snapshot_id IS NULL) OR "
+            "AND venue_protection_snapshot_id IS NULL "
+            "AND venue_account_equity_snapshot_id IS NULL) OR "
             "(source_type = 'VENUE_FILLS' AND venue_order_observation_id IS NULL "
             "AND venue_fill_id IS NOT NULL AND venue_position_snapshot_id IS NULL "
-            "AND venue_protection_snapshot_id IS NULL) OR "
+            "AND venue_protection_snapshot_id IS NULL "
+            "AND venue_account_equity_snapshot_id IS NULL) OR "
             "(source_type = 'VENUE_POSITIONS' AND venue_order_observation_id IS NULL "
             "AND venue_fill_id IS NULL AND venue_position_snapshot_id IS NOT NULL "
-            "AND venue_protection_snapshot_id IS NULL) OR "
+            "AND venue_protection_snapshot_id IS NULL "
+            "AND venue_account_equity_snapshot_id IS NULL) OR "
             "(source_type = 'VENUE_PROTECTION' AND venue_order_observation_id IS NULL "
             "AND venue_fill_id IS NULL AND venue_position_snapshot_id IS NULL "
-            "AND venue_protection_snapshot_id IS NOT NULL)",
+            "AND venue_protection_snapshot_id IS NOT NULL "
+            "AND venue_account_equity_snapshot_id IS NULL) OR "
+            "(source_type = 'VENUE_BALANCES' AND venue_order_observation_id IS NULL "
+            "AND venue_fill_id IS NULL AND venue_position_snapshot_id IS NULL "
+            "AND venue_protection_snapshot_id IS NULL "
+            "AND venue_account_equity_snapshot_id IS NOT NULL)",
             name="ck_venue_fact_input_links_exact_fact",
         ),
         CheckConstraint(
@@ -617,6 +742,11 @@ class VenueFactInputLink(Base):
             "venue_protection_snapshot_id",
             name="uq_venue_fact_input_links_protection_fact",
         ),
+        UniqueConstraint(
+            "reconciliation_input_id",
+            "venue_account_equity_snapshot_id",
+            name="uq_venue_fact_input_links_account_equity_fact",
+        ),
         Index("ix_venue_fact_input_links_run_source", "run_id", "source_type"),
     )
 
@@ -641,6 +771,13 @@ class VenueFactInputLink(Base):
     )
     venue_protection_snapshot_id: Mapped[UUID | None] = mapped_column(
         ForeignKey("venue_protection_snapshots.venue_protection_snapshot_id", ondelete="RESTRICT"),
+        nullable=True,
+    )
+    venue_account_equity_snapshot_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey(
+            "venue_account_equity_snapshots.venue_account_equity_snapshot_id",
+            ondelete="RESTRICT",
+        ),
         nullable=True,
     )
     input_hash: Mapped[str] = mapped_column(String(64), nullable=False)

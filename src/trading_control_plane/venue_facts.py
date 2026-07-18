@@ -32,6 +32,7 @@ from trading_control_plane.sender_fencing_models import (
     ExecutionSenderScopeState,
 )
 from trading_control_plane.venue_fact_models import (
+    VenueAccountEquitySnapshot,
     VenueFactInputLink,
     VenueFill,
     VenueOrderObservation,
@@ -88,6 +89,11 @@ class VenueProtectionState(StrEnum):
     UNKNOWN = "UNKNOWN"
 
 
+class VenueAccountEquityState(StrEnum):
+    CONFIRMED = "CONFIRMED"
+    UNKNOWN = "UNKNOWN"
+
+
 class VenueProtectedDirection(StrEnum):
     LONG = "LONG"
     SHORT = "SHORT"
@@ -115,7 +121,7 @@ class VenueFactCollectionBinding(BaseModel):
     venue: str = Field(min_length=1, max_length=80)
     execution_domain: str = Field(min_length=1, max_length=120)
     account_id: str = Field(min_length=1, max_length=160)
-    instrument_id: str = Field(min_length=1, max_length=255)
+    instrument_id: str | None = Field(default=None, min_length=1, max_length=255)
     source_version: str = Field(min_length=1, max_length=160)
     normalization_version: str = Field(min_length=1, max_length=160)
     normalized_payload: dict[str, Any]
@@ -138,6 +144,7 @@ class VenueFactCollectionBinding(BaseModel):
 
 
 class RecordVenueOrderObservationRequest(VenueFactCollectionBinding):
+    instrument_id: str = Field(min_length=1, max_length=255)
     venue_order_observation_id: UUID
     observed_client_order_id: str | None = Field(default=None, max_length=160)
     venue_order_id: str = Field(min_length=1, max_length=255)
@@ -187,6 +194,7 @@ class RecordVenueOrderObservationRequest(VenueFactCollectionBinding):
 
 
 class RecordVenueFillRequest(VenueFactCollectionBinding):
+    instrument_id: str = Field(min_length=1, max_length=255)
     venue_fill_id: UUID
     observed_client_order_id: str | None = Field(default=None, max_length=160)
     venue_order_id: str = Field(min_length=1, max_length=255)
@@ -225,6 +233,7 @@ class RecordVenueFillRequest(VenueFactCollectionBinding):
 
 
 class RecordVenuePositionSnapshotRequest(VenueFactCollectionBinding):
+    instrument_id: str = Field(min_length=1, max_length=255)
     venue_position_snapshot_id: UUID
     venue_update_id: str = Field(min_length=1, max_length=255)
     position_mode: VenuePositionMode
@@ -311,6 +320,7 @@ class RecordVenuePositionSnapshotRequest(VenueFactCollectionBinding):
 
 
 class RecordVenueProtectionSnapshotRequest(VenueFactCollectionBinding):
+    instrument_id: str = Field(min_length=1, max_length=255)
     venue_protection_snapshot_id: UUID
     venue_position_snapshot_id: UUID
     venue_update_id: str = Field(min_length=1, max_length=255)
@@ -397,6 +407,55 @@ class RecordVenueProtectionSnapshotRequest(VenueFactCollectionBinding):
             raise ValueError("venue protection snapshot hash mismatch")
         if self.evidence_hash != hash_json(self.model_dump(mode="json", exclude={"evidence_hash"})):
             raise ValueError("venue protection evidence hash mismatch")
+        return self
+
+
+class RecordVenueAccountEquitySnapshotRequest(VenueFactCollectionBinding):
+    venue_account_equity_snapshot_id: UUID
+    venue_update_id: str = Field(min_length=1, max_length=255)
+    margin_mode: str = Field(min_length=1, max_length=80)
+    collateral_pool_id: str = Field(min_length=1, max_length=160)
+    settlement_currency: str = Field(min_length=1, max_length=80)
+    equity_state: VenueAccountEquityState
+    wallet_balance: Decimal | None = None
+    exchange_margin_equity: Decimal | None = None
+    available_margin: Decimal | None = None
+    total_unrealized_pnl: Decimal | None = None
+    total_initial_margin: Decimal | None = Field(default=None, ge=0)
+    total_maintenance_margin: Decimal | None = Field(default=None, ge=0)
+    total_liability: Decimal | None = Field(default=None, ge=0)
+    unsettled_fee: Decimal | None = None
+    unsettled_funding: Decimal | None = None
+    includes_unrealized_pnl: bool
+    snapshot_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+    @model_validator(mode="after")
+    def account_equity_is_self_consistent(self) -> Self:
+        economics = (
+            self.wallet_balance,
+            self.exchange_margin_equity,
+            self.available_margin,
+            self.total_unrealized_pnl,
+            self.total_initial_margin,
+            self.total_maintenance_margin,
+            self.total_liability,
+            self.unsettled_fee,
+            self.unsettled_funding,
+        )
+        if self.instrument_id is not None:
+            raise ValueError("account equity snapshot cannot claim instrument scope")
+        if self.equity_state is VenueAccountEquityState.CONFIRMED:
+            valid = all(value is not None for value in economics)
+            valid = valid and self.includes_unrealized_pnl
+        else:
+            valid = all(value is None for value in economics)
+            valid = valid and not self.includes_unrealized_pnl
+        if not valid:
+            raise ValueError("venue account equity state semantics are inconsistent")
+        if self.snapshot_hash != hash_json(_account_equity_snapshot_contract(self)):
+            raise ValueError("venue account equity snapshot hash mismatch")
+        if self.evidence_hash != hash_json(self.model_dump(mode="json", exclude={"evidence_hash"})):
+            raise ValueError("venue account equity evidence hash mismatch")
         return self
 
 
@@ -523,11 +582,38 @@ def _protection_snapshot_contract(
     }
 
 
+def _account_equity_snapshot_contract(
+    request: RecordVenueAccountEquitySnapshotRequest,
+) -> dict[str, Any]:
+    return {
+        "venue": request.venue,
+        "execution_domain": request.execution_domain,
+        "account_id": request.account_id,
+        "venue_update_id": request.venue_update_id,
+        "margin_mode": request.margin_mode,
+        "collateral_pool_id": request.collateral_pool_id,
+        "settlement_currency": request.settlement_currency,
+        "equity_state": request.equity_state.value,
+        "wallet_balance": _optional_decimal(request.wallet_balance),
+        "exchange_margin_equity": _optional_decimal(request.exchange_margin_equity),
+        "available_margin": _optional_decimal(request.available_margin),
+        "total_unrealized_pnl": _optional_decimal(request.total_unrealized_pnl),
+        "total_initial_margin": _optional_decimal(request.total_initial_margin),
+        "total_maintenance_margin": _optional_decimal(request.total_maintenance_margin),
+        "total_liability": _optional_decimal(request.total_liability),
+        "unsettled_fee": _optional_decimal(request.unsettled_fee),
+        "unsettled_funding": _optional_decimal(request.unsettled_funding),
+        "includes_unrealized_pnl": request.includes_unrealized_pnl,
+        "event_time": _iso(request.event_time),
+    }
+
+
 class VenueFactNormalizationService:
     order_command_type = "execution.venue-order-observation.record.v1"
     fill_command_type = "execution.venue-fill.record.v1"
     position_command_type = "execution.venue-position-snapshot.record.v1"
     protection_command_type = "execution.venue-protection-snapshot.record.v1"
+    account_equity_command_type = "execution.venue-account-equity-snapshot.record.v1"
 
     def __init__(self, clock: Callable[[], datetime] | None = None) -> None:
         self._clock = clock or (lambda: datetime.now(UTC))
@@ -637,6 +723,7 @@ class VenueFactNormalizationService:
             None,
             None,
             None,
+            None,
             existing.observation_hash,
             new_fact,
             now,
@@ -741,6 +828,7 @@ class VenueFactNormalizationService:
             "FILL",
             None,
             existing.venue_fill_id,
+            None,
             None,
             None,
             existing.fill_hash,
@@ -873,6 +961,7 @@ class VenueFactNormalizationService:
             None,
             None,
             existing.venue_position_snapshot_id,
+            None,
             None,
             existing.snapshot_hash,
             new_fact,
@@ -1036,6 +1125,135 @@ class VenueFactNormalizationService:
             None,
             None,
             existing.venue_protection_snapshot_id,
+            None,
+            existing.snapshot_hash,
+            new_fact,
+            now,
+        )
+
+    def record_account_equity_snapshot(
+        self, session: Session, envelope: CommandEnvelope
+    ) -> CommandOutcome:
+        run_id = self._run_id(envelope, self.account_equity_command_type)
+        try:
+            request = RecordVenueAccountEquitySnapshotRequest.model_validate(envelope.payload)
+        except ValidationError as exc:
+            raise CommandRejected("VENUE_ACCOUNT_EQUITY_SNAPSHOT_INVALID", str(exc)) from exc
+        now = self._clock()
+        self._lock_external_identity(
+            session,
+            f"venue-account-equity:{envelope.scope.get('organization_id')}:"
+            f"{request.venue}:{request.execution_domain}:{request.account_id}:"
+            f"{request.margin_mode}:{request.collateral_pool_id}:"
+            f"{request.settlement_currency}:{request.venue_update_id}",
+        )
+        run, reconciliation_input = self._validate_collection_context(
+            session,
+            envelope,
+            run_id,
+            request,
+            ReconciliationSourceType.VENUE_BALANCES,
+            now,
+        )
+        scope = session.get(ExecutionSenderScope, run.scope_id)
+        assert scope is not None
+        if (
+            request.margin_mode != scope.margin_mode
+            or request.collateral_pool_id != scope.collateral_pool_id
+        ):
+            raise CommandRejected(
+                "VENUE_ACCOUNT_EQUITY_SCOPE_MISMATCH",
+                "margin mode or collateral pool changed",
+            )
+        existing = session.execute(
+            select(VenueAccountEquitySnapshot).where(
+                VenueAccountEquitySnapshot.organization_id == run.organization_id,
+                VenueAccountEquitySnapshot.venue == request.venue,
+                VenueAccountEquitySnapshot.execution_domain == request.execution_domain,
+                VenueAccountEquitySnapshot.account_id == request.account_id,
+                VenueAccountEquitySnapshot.margin_mode == request.margin_mode,
+                VenueAccountEquitySnapshot.collateral_pool_id == request.collateral_pool_id,
+                VenueAccountEquitySnapshot.settlement_currency == request.settlement_currency,
+                VenueAccountEquitySnapshot.venue_update_id == request.venue_update_id,
+            )
+        ).scalar_one_or_none()
+        identity_owner = session.get(
+            VenueAccountEquitySnapshot, request.venue_account_equity_snapshot_id
+        )
+        if identity_owner is not None and (
+            existing is None
+            or identity_owner.venue_account_equity_snapshot_id
+            != existing.venue_account_equity_snapshot_id
+        ):
+            raise CommandRejected(
+                "VENUE_ACCOUNT_EQUITY_SNAPSHOT_ID_CONFLICT",
+                "venue account equity snapshot identity already exists",
+            )
+        new_fact = existing is None
+        if existing is None:
+            self._require_new_fact_link_possible(session, reconciliation_input, request)
+            existing = VenueAccountEquitySnapshot(
+                venue_account_equity_snapshot_id=request.venue_account_equity_snapshot_id,
+                organization_id=run.organization_id,
+                first_seen_run_id=run.run_id,
+                first_seen_input_id=reconciliation_input.input_id,
+                venue=request.venue,
+                execution_domain=request.execution_domain,
+                account_id=request.account_id,
+                venue_update_id=request.venue_update_id,
+                margin_mode=request.margin_mode,
+                collateral_pool_id=request.collateral_pool_id,
+                settlement_currency=request.settlement_currency,
+                equity_state=request.equity_state.value,
+                wallet_balance=request.wallet_balance,
+                exchange_margin_equity=request.exchange_margin_equity,
+                available_margin=request.available_margin,
+                total_unrealized_pnl=request.total_unrealized_pnl,
+                total_initial_margin=request.total_initial_margin,
+                total_maintenance_margin=request.total_maintenance_margin,
+                total_liability=request.total_liability,
+                unsettled_fee=request.unsettled_fee,
+                unsettled_funding=request.unsettled_funding,
+                includes_unrealized_pnl=request.includes_unrealized_pnl,
+                venue_confirmed=True,
+                fact_authority="VENUE_PRIVATE",
+                environment="SHADOW",
+                live_dispatch_eligible=False,
+                source_version=request.source_version,
+                normalization_version=request.normalization_version,
+                normalized_payload=request.normalized_payload,
+                raw_payload_ref=request.raw_payload_ref,
+                raw_payload_hash=request.raw_payload_hash,
+                evidence_ref=request.evidence_ref,
+                evidence_hash=request.evidence_hash,
+                snapshot_hash=request.snapshot_hash,
+                event_time=request.event_time,
+                venue_observed_at=request.venue_observed_at,
+                first_received_at=request.received_at,
+                recorded_at=now,
+            )
+            session.add(existing)
+            session.flush()
+        elif (
+            existing.organization_id != run.organization_id
+            or existing.snapshot_hash != request.snapshot_hash
+        ):
+            raise CommandRejected(
+                "VENUE_ACCOUNT_EQUITY_SNAPSHOT_CONFLICT",
+                "venue account equity update identity has different immutable semantics",
+            )
+        return self._link_and_outcome(
+            session,
+            run,
+            reconciliation_input,
+            request,
+            ReconciliationSourceType.VENUE_BALANCES,
+            "ACCOUNT_EQUITY_SNAPSHOT",
+            None,
+            None,
+            None,
+            None,
+            existing.venue_account_equity_snapshot_id,
             existing.snapshot_hash,
             new_fact,
             now,
@@ -1175,6 +1393,7 @@ class VenueFactNormalizationService:
         fill_id: UUID | None,
         position_snapshot_id: UUID | None,
         protection_snapshot_id: UUID | None,
+        account_equity_snapshot_id: UUID | None,
         fact_hash: str,
         new_fact: bool,
         now: datetime,
@@ -1185,10 +1404,14 @@ class VenueFactNormalizationService:
             fact_identity = VenueFactInputLink.venue_fill_id == fill_id
         elif position_snapshot_id is not None:
             fact_identity = VenueFactInputLink.venue_position_snapshot_id == position_snapshot_id
-        else:
-            assert protection_snapshot_id is not None
+        elif protection_snapshot_id is not None:
             fact_identity = (
                 VenueFactInputLink.venue_protection_snapshot_id == protection_snapshot_id
+            )
+        else:
+            assert account_equity_snapshot_id is not None
+            fact_identity = (
+                VenueFactInputLink.venue_account_equity_snapshot_id == account_equity_snapshot_id
             )
         existing_link = session.execute(
             select(VenueFactInputLink).where(
@@ -1216,6 +1439,8 @@ class VenueFactNormalizationService:
             link_values["venue_position_snapshot_id"] = str(position_snapshot_id)
         if protection_snapshot_id is not None:
             link_values["venue_protection_snapshot_id"] = str(protection_snapshot_id)
+        if account_equity_snapshot_id is not None:
+            link_values["venue_account_equity_snapshot_id"] = str(account_equity_snapshot_id)
         link_hash = hash_json(link_values)
         if existing_link is not None:
             if existing_link.link_hash != link_hash:
@@ -1232,6 +1457,7 @@ class VenueFactNormalizationService:
                 fill_id,
                 position_snapshot_id,
                 protection_snapshot_id,
+                account_equity_snapshot_id,
                 existing_link.venue_fact_input_link_id,
                 fact_hash,
                 new_fact=False,
@@ -1261,6 +1487,7 @@ class VenueFactNormalizationService:
             venue_fill_id=fill_id,
             venue_position_snapshot_id=position_snapshot_id,
             venue_protection_snapshot_id=protection_snapshot_id,
+            venue_account_equity_snapshot_id=account_equity_snapshot_id,
             input_hash=reconciliation_input.input_hash,
             fact_hash=fact_hash,
             raw_payload_ref=request.raw_payload_ref,
@@ -1285,6 +1512,7 @@ class VenueFactNormalizationService:
             fill_id,
             position_snapshot_id,
             protection_snapshot_id,
+            account_equity_snapshot_id,
             link.venue_fact_input_link_id,
             fact_hash,
             new_fact=new_fact,
@@ -1320,13 +1548,20 @@ class VenueFactNormalizationService:
         fill_id: UUID | None,
         position_snapshot_id: UUID | None,
         protection_snapshot_id: UUID | None,
+        account_equity_snapshot_id: UUID | None,
         link_id: UUID,
         fact_hash: str,
         *,
         new_fact: bool,
         new_link: bool,
     ) -> CommandOutcome:
-        fact_id = order_observation_id or fill_id or position_snapshot_id or protection_snapshot_id
+        fact_id = (
+            order_observation_id
+            or fill_id
+            or position_snapshot_id
+            or protection_snapshot_id
+            or account_equity_snapshot_id
+        )
         assert fact_id is not None
         if order_observation_id is not None:
             event_type = "VenueOrderObserved"
@@ -1337,9 +1572,12 @@ class VenueFactNormalizationService:
         elif position_snapshot_id is not None:
             event_type = "VenuePositionSnapshotObserved"
             object_type = "VenuePositionSnapshot"
-        else:
+        elif protection_snapshot_id is not None:
             event_type = "VenueProtectionSnapshotObserved"
             object_type = "VenueProtectionSnapshot"
+        else:
+            event_type = "VenueAccountEquitySnapshotObserved"
+            object_type = "VenueAccountEquitySnapshot"
         return CommandOutcome(
             status=CommandStatus.COMPLETED,
             object_type=object_type,
