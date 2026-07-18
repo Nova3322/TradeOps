@@ -69,6 +69,9 @@ trading_campaign_reduction_plan_evaluations_total{result}
 
 本包不新增表或 migration；schema 仍为 `20260718_0036`。
 
+后续 WP-0054 已把 exact plan 保存为单 target 唯一、不可变、不可派发的准备快照；仍未创建 OrderIntent 或
+sender claim。
+
 仍未完成：
 
 - 逐场所 reduce-only order type/TIF/price/trigger/slippage 合同与证书；

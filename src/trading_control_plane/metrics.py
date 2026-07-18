@@ -147,6 +147,12 @@ CAMPAIGN_REDUCTION_PLAN_EVALUATIONS = Counter(
     labelnames=("result",),
 )
 
+CAMPAIGN_REDUCTION_PLAN_PREPARATIONS = Counter(
+    "trading_campaign_reduction_plan_preparations_total",
+    "Immutable non-dispatchable Campaign reduction-plan preparations by bounded result.",
+    labelnames=("result",),
+)
+
 CAPABILITY_CERTIFICATE_ISSUANCE = Counter(
     "trading_capability_certificate_issuance_total",
     "Shadow-only capability certificate issuance by type, environment, and result.",

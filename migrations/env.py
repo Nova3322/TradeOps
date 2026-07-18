@@ -8,6 +8,7 @@ from sqlalchemy import engine_from_config, pool
 from trading_control_plane import (  # noqa: F401
     campaign_economics_models,
     campaign_fill_economics_models,
+    campaign_reduction_models,
     campaign_target_models,
     capability_certificate_models,
     capital_scope_models,
