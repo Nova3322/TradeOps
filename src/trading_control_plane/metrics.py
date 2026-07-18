@@ -87,6 +87,12 @@ EXECUTION_CANONICAL_FACT_BINDINGS = Counter(
     labelnames=("fact_type", "result"),
 )
 
+CAMPAIGN_ECONOMIC_BASELINES = Counter(
+    "trading_campaign_economic_baselines_total",
+    "Immutable Campaign economic-baseline outcomes by bounded result.",
+    labelnames=("result",),
+)
+
 CAPABILITY_CERTIFICATE_ISSUANCE = Counter(
     "trading_capability_certificate_issuance_total",
     "Shadow-only capability certificate issuance by type, environment, and result.",

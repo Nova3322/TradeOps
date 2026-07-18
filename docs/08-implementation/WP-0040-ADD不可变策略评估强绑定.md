@@ -1,8 +1,9 @@
 # WP-0040：ADD 不可变策略评估强绑定
 
 > 后续状态：WP-0041 已把 ExecutionIntent 升级为 v14，并为 INITIAL 增加 exact fresh canonical
-> FLAT position 绑定。ADD 的 Strategy Evaluation 合同保持不变；当前执行合同以
-> [WP-0041](WP-0041-INITIAL-Canonical空仓强绑定.md) 为准。本文件保留 WP-0040 历史证据。
+> FLAT position 绑定；WP-0042 又冻结 isolated INITIAL 的初始保证金经济基线。ADD 的 Strategy
+> Evaluation 合同保持不变；当前执行与经济基线合同以
+> [WP-0042](WP-0042-INITIAL冻结保证金经济基线.md) 为准。本文件保留 WP-0040 历史证据。
 
 ## 1. 交付目标与边界
 
@@ -127,7 +128,7 @@ submitted `current_position_equity` / `E_campaign` 仍未由 Campaign PnL Ledger
 仍未完成：
 
 - 真实 Strategy Evaluation evaluator、算法与数据源认证；
-- Campaign PnL Ledger、`E_campaign`、冻结初始保证金参考额和净平仓成本；
+- Campaign PnL Ledger、`E_campaign` 和净平仓成本；WP-0042 已冻结 isolated 初始保证金参考额；
 - frozen return 30%/50%/100% 的服务端派生；
 - 真实 collector、OMS/Freqtrade/VenueAdapter、Web/PWA、Telegram、Margin、Vault/CTO、PnL 与运维；
 - production/small-live CapabilityCertificate 和发送权限。

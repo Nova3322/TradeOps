@@ -12,6 +12,8 @@ from sqlalchemy import select, text
 from sqlalchemy.orm import Session
 
 from trading_control_plane.authorization import SystemRiskState
+from trading_control_plane.campaign_economics import CampaignEconomicBaselineService
+from trading_control_plane.campaign_economics_models import CampaignEconomicBaseline
 from trading_control_plane.capability_certificates import CapabilityCertificateValidator
 from trading_control_plane.commands import (
     CommandChannel,
@@ -2626,6 +2628,23 @@ class ExecutionReconciliationService:
         ):
             EXECUTION_CANONICAL_FACT_BINDINGS.labels(request.fact_kind.value, "APPLIED").inc()
         self._validate_progression(state, request, now)
+        initial_baseline_position = None
+        if intent.intent_kind == "INITIAL" and request.target_status == "POSITION_RECONCILED":
+            if venue_position_snapshot_id is None:  # pragma: no cover
+                raise RuntimeError("INITIAL position reconciliation lacks canonical snapshot")
+            initial_baseline_position = session.get(
+                VenuePositionSnapshot,
+                venue_position_snapshot_id,
+            )
+            if initial_baseline_position is None:  # pragma: no cover
+                raise RuntimeError("canonical INITIAL position snapshot disappeared")
+            CampaignEconomicBaselineService.validate_initial_margin_source(
+                intent,
+                initial_baseline_position,
+                reservation.organization_id,
+                request.cumulative_filled_quantity,
+                request.venue_fact_hash or "",
+            )
         fact_id = uuid4()
         fact = ExecutionFact(
             execution_fact_id=fact_id,
@@ -2671,6 +2690,17 @@ class ExecutionReconciliationService:
         )
         session.add(fact)
         session.flush()
+
+        campaign_economic_baseline = None
+        if initial_baseline_position is not None:
+            campaign_economic_baseline = CampaignEconomicBaselineService.freeze_initial_margin(
+                session,
+                intent,
+                fact,
+                initial_baseline_position,
+                reservation.organization_id,
+                now,
+            )
 
         old_quantities = self._quantity_buckets(exposure)
         new_quantities = self._desired_quantity_buckets(state.intent_quantity, request)
@@ -2722,6 +2752,16 @@ class ExecutionReconciliationService:
                 "cumulative_filled_quantity": str(state.cumulative_filled_quantity),
                 "known_remaining_quantity": str(state.known_remaining_quantity),
                 "authority_mode": authority_mode,
+                "campaign_economic_baseline_id": (
+                    str(campaign_economic_baseline.campaign_economic_baseline_id)
+                    if campaign_economic_baseline is not None
+                    else None
+                ),
+                "campaign_economic_baseline_hash": (
+                    campaign_economic_baseline.baseline_hash
+                    if campaign_economic_baseline is not None
+                    else None
+                ),
                 "dispatch_eligible": False,
             },
             events=(
@@ -2741,6 +2781,16 @@ class ExecutionReconciliationService:
                         "authority_mode": authority_mode,
                         "risk_exposure_status": exposure.status,
                         "cumulative_filled_quantity": str(request.cumulative_filled_quantity),
+                        "campaign_economic_baseline_id": (
+                            str(campaign_economic_baseline.campaign_economic_baseline_id)
+                            if campaign_economic_baseline is not None
+                            else None
+                        ),
+                        "campaign_economic_baseline_hash": (
+                            campaign_economic_baseline.baseline_hash
+                            if campaign_economic_baseline is not None
+                            else None
+                        ),
                     },
                 ),
             ),
@@ -3781,6 +3831,11 @@ class ExecutionReconciliationService:
         ).inc()
         EXECUTION_FACT_AUTHORITY_MODES.labels(authority_mode, "ALREADY_RECORDED").inc()
         EXECUTION_FACT_RESULTS.labels(fact.target_status, "ALREADY_RECORDED").inc()
+        baseline = session.execute(
+            select(CampaignEconomicBaseline).where(
+                CampaignEconomicBaseline.initial_execution_fact_id == fact.execution_fact_id
+            )
+        ).scalar_one_or_none()
         return CommandOutcome(
             status=CommandStatus.COMPLETED,
             object_type="OrderIntent",
@@ -3792,6 +3847,12 @@ class ExecutionReconciliationService:
                 "intent_status": state.status,
                 "authority_mode": authority_mode,
                 "already_recorded": True,
+                "campaign_economic_baseline_id": (
+                    str(baseline.campaign_economic_baseline_id) if baseline is not None else None
+                ),
+                "campaign_economic_baseline_hash": (
+                    baseline.baseline_hash if baseline is not None else None
+                ),
                 "dispatch_eligible": False,
             },
             events=(

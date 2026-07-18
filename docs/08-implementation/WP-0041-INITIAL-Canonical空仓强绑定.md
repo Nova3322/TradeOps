@@ -1,5 +1,9 @@
 # WP-0041：INITIAL Canonical 空仓强绑定
 
+> 后续状态：WP-0042 已在 INITIAL `POSITION_RECONCILED` 时冻结 isolated 初始保证金经济基线；
+> 当前执行与经济基线合同以 [WP-0042](WP-0042-INITIAL冻结保证金经济基线.md) 为准。本文件保留
+> WP-0041 的初仓前空仓合同。
+
 ## 1. 交付目标与边界
 
 WP-0040 后，INITIAL 虽然要求调用方提交 `current_position_quantity=0`，但最终预检没有读取交易所
@@ -97,7 +101,7 @@ position mode 认证仍未完成。
 
 仍未完成：
 
-- Campaign PnL Ledger、冻结初始保证金参考额、资金费/费用/净平仓成本归因；
+- Campaign PnL Ledger、资金费/费用/净平仓成本归因；WP-0042 已冻结 isolated 初始保证金参考额；
 - 真实 venue collector、OMS/Freqtrade/VenueAdapter 与发送前二次核验；
 - frozen return、`E_campaign`、真实 Strategy Evaluation evaluator；
 - Web/PWA、Telegram、Margin、Vault/CTO、财务报表与运维认证；

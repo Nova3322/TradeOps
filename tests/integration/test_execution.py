@@ -8,7 +8,7 @@ from typing import Any
 from uuid import UUID, uuid4
 
 import pytest
-from sqlalchemy import func, select, text, update
+from sqlalchemy import delete, func, select, text, update
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.orm import Session
 
@@ -71,6 +71,8 @@ from tests.venue_fact_fixtures import (
     protection_snapshot_request,
     venue_fact_envelope,
 )
+from trading_control_plane.campaign_economics import baseline_snapshot_from_record
+from trading_control_plane.campaign_economics_models import CampaignEconomicBaseline
 from trading_control_plane.capability_certificate_models import CapabilityCertificate
 from trading_control_plane.capability_certificates import CapabilityScope
 from trading_control_plane.command_executor import IdempotentCommandExecutor
@@ -1364,6 +1366,7 @@ def prepare_open_add_campaign(
                     "mark_price": Decimal("120"),
                     "notional": Decimal("60"),
                     "unrealized_pnl": unrealized_pnl,
+                    "initial_margin": Decimal("30"),
                 }
                 if fact.status == "POSITION_RECONCILED"
                 else None
@@ -1381,6 +1384,102 @@ def prepare_open_add_campaign(
         package_state = session.get(AddAuthorizationPackageState, package.add_package_id)
         assert package_state is not None and package_state.status == "ACTIVE"
     return proposal, campaign, package, unit
+
+
+def test_initial_position_reconciliation_freezes_immutable_campaign_economic_baseline(
+    database: Database,
+) -> None:
+    _, campaign, _, _ = prepare_open_add_campaign(database, unrealized_pnl=Decimal("9.75"))
+
+    with database.session_factory.begin() as session:
+        baseline = session.execute(select(CampaignEconomicBaseline)).scalar_one()
+        intent = session.get(OrderIntent, baseline.initial_order_intent_id)
+        fact = session.get(ExecutionFact, baseline.initial_execution_fact_id)
+        position = session.get(VenuePositionSnapshot, baseline.position_snapshot_id)
+        position_event = next(
+            item
+            for item in session.scalars(
+                select(OutboxMessage).where(OutboxMessage.event_type == "ExecutionFactReconciled")
+            )
+            if item.payload["target_status"] == "POSITION_RECONCILED"
+        )
+        snapshot = baseline_snapshot_from_record(baseline)
+
+        assert baseline.campaign_id == campaign.campaign_id
+        assert intent is not None and intent.intent_kind == "INITIAL"
+        assert fact is not None and fact.target_status == "POSITION_RECONCILED"
+        assert position is not None and position.position_state == "OPEN"
+        assert baseline.position_snapshot_hash == position.snapshot_hash
+        assert baseline.execution_fact_evidence_hash == fact.evidence_hash
+        assert baseline.frozen_initial_margin_reference == Decimal("30")
+        assert baseline.margin_reference_source == "VENUE_POSITION_INITIAL_MARGIN"
+        assert baseline.initial_quantity == Decimal("0.5")
+        assert baseline.initial_notional == Decimal("60")
+        assert baseline.margin_mode == "ISOLATED"
+        assert baseline.environment == "SHADOW"
+        assert baseline.real_funds_eligible is False
+        assert snapshot.baseline_hash == baseline.baseline_hash
+        assert position_event.payload["campaign_economic_baseline_id"] == str(
+            baseline.campaign_economic_baseline_id
+        )
+        assert position_event.payload["campaign_economic_baseline_hash"] == baseline.baseline_hash
+
+    with pytest.raises(DBAPIError, match="campaign_economic_baselines is immutable"):
+        with database.engine.begin() as connection:
+            connection.execute(
+                update(CampaignEconomicBaseline).values(
+                    frozen_initial_margin_reference=Decimal("31")
+                )
+            )
+    with pytest.raises(DBAPIError, match="campaign_economic_baselines is immutable"):
+        with database.engine.begin() as connection:
+            connection.execute(delete(CampaignEconomicBaseline))
+
+
+def test_initial_position_reconciliation_rejects_missing_positive_margin_baseline(
+    database: Database,
+) -> None:
+    now = datetime.now(UTC)
+    proposal, campaign, initial = prepare_authorization(database)
+    seed_execution_policy(database, now)
+    created = execute_create(
+        database,
+        create_intent_envelope(proposal, campaign, initial, now=now),
+    )
+    order_intent_id = UUID(str(created.data["order_intent_id"]))
+    filled = execute_fact(
+        database,
+        order_intent_id,
+        fact_request(
+            sequence=1,
+            status="FILLED",
+            filled=Decimal("0.5"),
+            remaining=Decimal("0"),
+            terminal=True,
+        ),
+    )
+    rejected = execute_fact(
+        database,
+        order_intent_id,
+        fact_request(
+            sequence=2,
+            status="POSITION_RECONCILED",
+            filled=Decimal("0.5"),
+            remaining=Decimal("0"),
+            terminal=True,
+            reconciled=True,
+        ),
+        position_snapshot_overrides={"initial_margin": Decimal("0")},
+    )
+
+    assert filled.status is CommandStatus.COMPLETED
+    assert rejected.status is CommandStatus.REJECTED
+    assert rejected.error_code == "CAMPAIGN_INITIAL_MARGIN_REFERENCE_UNAVAILABLE"
+    with database.session_factory.begin() as session:
+        state = session.get(OrderIntentState, order_intent_id)
+        assert state is not None and state.status == "FILLED"
+        assert count_rows(session, CampaignEconomicBaseline) == 0
+        assert count_rows(session, ExecutionFact) == 1
 
 
 def test_execution_intent_legacy_commands_and_wrong_v14_schema_are_rejected(
