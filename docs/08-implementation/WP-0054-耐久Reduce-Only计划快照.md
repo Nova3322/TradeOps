@@ -76,3 +76,6 @@ trading_campaign_reduction_plan_preparations_total{result}
 
 `LIVE_ORDER_SEND`、`CAPITAL_TRANSFER`、`AUTO_ADD` 继续为 `DISABLED`。按用户明确约束，Codex Security
 及其所有审计 Skill、插件和模块保持停用；本包只执行常规架构约束、代码检查、数据库约束与测试。
+
+后续 WP-0055 已在 plan resolve/preparation 前增加同 Campaign 活动与 Unknown OrderIntent occupancy 门；
+preparation 使用行锁复核，但真正 reduction OrderIntent 与发送前仍需再次检查。

@@ -9,6 +9,9 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from trading_control_plane.campaign_intent_occupancy import (
+    CampaignOrderIntentOccupancyService,
+)
 from trading_control_plane.campaign_position_binding import (
     CampaignCurrentPositionBindingService,
 )
@@ -81,6 +84,8 @@ class CampaignReductionExecutionPlanService:
         session: Session,
         campaign_id: UUID,
         context: ProjectionQueryContext,
+        *,
+        lock_intents: bool = False,
     ) -> CampaignReductionExecutionPlan:
         record = session.execute(
             select(CampaignTargetPositionFactRecord)
@@ -126,6 +131,17 @@ class CampaignReductionExecutionPlanService:
                 "CAMPAIGN_STATE_INVALID",
                 "CAMPAIGN_REDUCTION_STATE_INVALID",
                 "Campaign state does not match its actionable target",
+            )
+        occupancy = CampaignOrderIntentOccupancyService.resolve(
+            session,
+            campaign_id,
+            lock=lock_intents,
+        )
+        if occupancy.status != "CLEAR":
+            _reject(
+                "INTENT_OCCUPIED",
+                "CAMPAIGN_REDUCTION_INTENT_OCCUPIED",
+                "an unresolved OrderIntent can still change the Campaign position",
             )
 
         draft = CampaignReductionExecutionPlan.model_construct(

@@ -198,6 +198,7 @@ class CampaignReductionPlanPreparationService:
             session,
             request.campaign_id,
             ProjectionQueryContext(as_of=now, max_age_ms=request.max_age_ms),
+            lock_intents=True,
         )
         if plan.target_fact_id != target.campaign_target_position_fact_id:
             raise RuntimeError("Campaign reduction target changed inside one transaction")
