@@ -1,7 +1,7 @@
 # WP-0032：Scope Stress 策略派生
 
-> 后续状态：WP-0033 已将风险/意图命令升级为 v6，删除 caller `instrument_classified`，并由不可变
-> exact Instrument Catalog 记录验证分类。本文件保留 WP-0032 的 v5 历史合同。
+> 后续状态：WP-0034 已将风险/意图命令升级为 v7，删除 caller `protection_available`，并由不可变
+> exact 原生保护能力记录验证账户、凭证、worker 和保护模板。本文件保留 WP-0032 的 v5 历史合同。
 
 ## 1. 交付目标与权威边界
 

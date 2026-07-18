@@ -56,6 +56,11 @@ from trading_control_plane.projections import (
     ProjectionState,
 )
 from trading_control_plane.proposal_models import SystemRiskStateRecord
+from trading_control_plane.protection_capability import (
+    ProtectionCapabilityValidationRequest,
+    ProtectionCapabilityValidationResult,
+    ProtectionCapabilityValidator,
+)
 from trading_control_plane.risk_models import (
     RiskDecisionSnapshot,
     RiskPolicyRecord,
@@ -446,7 +451,6 @@ class RiskPrecheckRequest(BaseModel):
     requested: RequestedRiskIncrease
     scope_risks: tuple[ScopeRiskInput, ...]
     facts: tuple[FactObservation, ...]
-    protection_available: bool
 
     @model_validator(mode="after")
     def exact_fact_and_scope_coverage(self) -> Self:
@@ -492,6 +496,48 @@ def instrument_classification_validation_request(
         expected_risk_cluster_id=binding.risk_cluster_id,
         expected_settlement_asset=binding.settlement_asset,
         expected_contract_multiplier=binding.contract_multiplier,
+        validation_time=validation_time,
+    )
+
+
+def protection_capability_validation_request(
+    request: RiskPrecheckRequest,
+    instrument_classification: InstrumentClassificationValidationResult,
+    validation_time: datetime,
+) -> ProtectionCapabilityValidationRequest:
+    binding = request.binding
+    catalog_valid = instrument_classification.valid
+    return ProtectionCapabilityValidationRequest(
+        organization_id=request.organization_id,
+        expected_catalog_record_id=(
+            instrument_classification.catalog_record_id if catalog_valid else None
+        ),
+        expected_catalog_record_hash=(
+            instrument_classification.record_hash if catalog_valid else None
+        ),
+        catalog_version=binding.catalog_version,
+        classification_version=binding.instrument_scope_version,
+        venue=binding.venue,
+        execution_domain=binding.execution_domain,
+        canonical_instrument_id=binding.instrument_identity,
+        account_id=binding.account_id,
+        expected_account_abstraction=binding.account_abstraction,
+        position_mode=binding.position_mode,
+        margin_mode=binding.margin_mode,
+        expected_collateral_scope=binding.collateral_scope,
+        collateral_pool_id=binding.collateral_pool_id,
+        position_management_template_version=(binding.position_management_template_version),
+        expected_execution_capability_version=(binding.execution_capability_version),
+        expected_adapter_version=binding.adapter_version,
+        expected_worker_id=binding.worker_id,
+        expected_worker_config_hash=binding.worker_config_hash,
+        expected_credential_fingerprint=binding.credential_fingerprint,
+        expected_freqtrade_worker_version=binding.freqtrade_worker_version,
+        expected_account_capability_version=binding.account_capability_version,
+        expected_credential_permission_profile_version=(
+            binding.credential_permission_profile_version
+        ),
+        expected_venue_client_version=binding.venue_client_version,
         validation_time=validation_time,
     )
 
@@ -609,6 +655,7 @@ class RiskEvaluationInput(BaseModel):
     system_risk_state: SystemRiskState
     capability_validation: CapabilityValidationResult
     instrument_classification: InstrumentClassificationValidationResult
+    protection_capability: ProtectionCapabilityValidationResult
     decision_time: datetime
     protected_position_risk: VerifiedProtectedPositionRisk | None = None
 
@@ -711,6 +758,16 @@ class RiskEvaluationResult(BaseModel):
     catalog_record_hash: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
     catalog_evidence_hash: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
     catalog_validation_reason_codes: tuple[str, ...]
+    protection_capability_record_id: UUID | None
+    protection_capability_record_hash: str | None = Field(
+        default=None,
+        pattern=r"^[0-9a-f]{64}$",
+    )
+    protection_capability_evidence_hash: str | None = Field(
+        default=None,
+        pattern=r"^[0-9a-f]{64}$",
+    )
+    protection_capability_reason_codes: tuple[str, ...]
     requested_base_heat: Decimal
     requested_fee_stress: Decimal
     requested_stop_penetration_stress: Decimal
@@ -1091,7 +1148,7 @@ class RiskEvaluator:
         if not evaluation.capability_validation.valid:
             reasons.append("CAPABILITY_CERTIFICATE_INVALID")
             hard_failure = True
-        if not request.protection_available:
+        if not evaluation.protection_capability.valid:
             reasons.append("PROTECTION_UNAVAILABLE")
             hard_failure = True
         if (
@@ -1276,6 +1333,7 @@ class RiskEvaluator:
                 evaluation.policy_valid_until,
                 evaluation.capability_validation.valid_until,
                 evaluation.instrument_classification.valid_until,
+                evaluation.protection_capability.valid_until,
                 *fact_expiries,
                 *(
                     [evaluation.protected_position_risk.valid_until]
@@ -1313,6 +1371,12 @@ class RiskEvaluator:
             catalog_record_hash=evaluation.instrument_classification.record_hash,
             catalog_evidence_hash=evaluation.instrument_classification.evidence_hash,
             catalog_validation_reason_codes=(evaluation.instrument_classification.reason_codes),
+            protection_capability_record_id=(
+                evaluation.protection_capability.protection_capability_record_id
+            ),
+            protection_capability_record_hash=(evaluation.protection_capability.record_hash),
+            protection_capability_evidence_hash=(evaluation.protection_capability.evidence_hash),
+            protection_capability_reason_codes=(evaluation.protection_capability.reason_codes),
             requested_base_heat=request.requested_base_heat,
             requested_fee_stress=cost_stress.fee_stress,
             requested_stop_penetration_stress=cost_stress.stop_penetration_stress,
@@ -1333,14 +1397,15 @@ class RiskEvaluator:
 class RiskPrecheckService:
     """Persists one immutable shadow precheck and emits audit/outbox evidence."""
 
-    command_type = "risk.precheck.evaluate.v6"
-    payload_schema_version = 6
+    command_type = "risk.precheck.evaluate.v7"
+    payload_schema_version = 7
 
     def __init__(
         self,
         evaluator: RiskEvaluator | None = None,
         certificate_validator: CapabilityCertificateValidator | None = None,
         instrument_catalog_validator: InstrumentCatalogValidator | None = None,
+        protection_capability_validator: ProtectionCapabilityValidator | None = None,
         capital_projection_resolver: CapitalProjectionResolver | None = None,
         durable_exposure_resolver: ProposalDurableExposureResolver | None = None,
         clock: Callable[[], datetime] | None = None,
@@ -1349,6 +1414,9 @@ class RiskPrecheckService:
         self._certificate_validator = certificate_validator or CapabilityCertificateValidator()
         self._instrument_catalog_validator = (
             instrument_catalog_validator or InstrumentCatalogValidator()
+        )
+        self._protection_capability_validator = (
+            protection_capability_validator or ProtectionCapabilityValidator()
         )
         self._capital_projection_resolver = (
             capital_projection_resolver or CapitalProjectionResolver()
@@ -1436,6 +1504,14 @@ class RiskPrecheckService:
             session,
             instrument_classification_validation_request(verified_request, decided_at),
         )
+        protection_capability = self._protection_capability_validator.validate(
+            session,
+            protection_capability_validation_request(
+                verified_request,
+                instrument_classification,
+                decided_at,
+            ),
+        )
         state_record = session.execute(
             select(SystemRiskStateRecord)
             .where(SystemRiskStateRecord.organization_id == request.organization_id)
@@ -1455,6 +1531,7 @@ class RiskPrecheckService:
             system_risk_state=system_state,
             capability_validation=capability_validation,
             instrument_classification=instrument_classification,
+            protection_capability=protection_capability,
             decision_time=decided_at,
         )
         result = self._evaluator.evaluate(evaluation_input)
@@ -1521,6 +1598,15 @@ class RiskPrecheckService:
                     else None
                 ),
                 catalog_record_hash=instrument_classification.record_hash,
+                protection_capability_record_id=(
+                    protection_capability.protection_capability_record_id
+                ),
+                protection_capability_version=(
+                    verified_request.binding.position_management_template_version
+                    if protection_capability.protection_capability_record_id is not None
+                    else None
+                ),
+                protection_capability_record_hash=(protection_capability.record_hash),
                 requested_quantity=result.requested_quantity,
                 max_safe_quantity=result.max_safe_quantity,
                 final_quantity=result.final_quantity,
@@ -1578,6 +1664,13 @@ class RiskPrecheckService:
                 ),
                 "catalog_record_hash": instrument_classification.record_hash,
                 "catalog_validation_reason_codes": list(instrument_classification.reason_codes),
+                "protection_capability_record_id": (
+                    str(protection_capability.protection_capability_record_id)
+                    if protection_capability.protection_capability_record_id is not None
+                    else None
+                ),
+                "protection_capability_record_hash": (protection_capability.record_hash),
+                "protection_capability_reason_codes": list(protection_capability.reason_codes),
                 "valid_until": result.valid_until.isoformat(),
                 "execution_eligible": False,
                 "reservation_created": False,
@@ -1612,6 +1705,12 @@ class RiskPrecheckService:
                         "catalog_validation_reason_codes": list(
                             instrument_classification.reason_codes
                         ),
+                        "protection_capability_record_id": (
+                            str(protection_capability.protection_capability_record_id)
+                            if protection_capability.protection_capability_record_id is not None
+                            else None
+                        ),
+                        "protection_capability_record_hash": (protection_capability.record_hash),
                         "execution_eligible": False,
                         "reservation_created": False,
                     },

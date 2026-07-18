@@ -13,6 +13,7 @@ from trading_control_plane import (  # noqa: F401
     instrument_catalog_models,
     models,
     proposal_models,
+    protection_capability_models,
     reconciliation_models,
     risk_models,
     sender_fencing_models,

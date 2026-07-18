@@ -20,6 +20,9 @@ from trading_control_plane.capital_scope import (
 from trading_control_plane.commands import hash_json
 from trading_control_plane.instrument_catalog import InstrumentClassificationValidationResult
 from trading_control_plane.projections import CurrentAccountEquityScope
+from trading_control_plane.protection_capability import (
+    ProtectionCapabilityValidationResult,
+)
 from trading_control_plane.risk import (
     CANONICAL_COST_STRESS_MODEL_VERSION,
     CANONICAL_LOSS_MODEL_VERSION,
@@ -228,7 +231,6 @@ def make_request(
     fact_status: FactStatus = FactStatus.KNOWN,
     fact_age: timedelta = timedelta(milliseconds=100),
     scope_risks: tuple[ScopeRiskInput, ...] | None = None,
-    protection_available: bool = True,
 ) -> RiskPrecheckRequest:
     observed_at = now or datetime.now(UTC)
     event_time = observed_at - fact_age
@@ -334,7 +336,6 @@ def make_request(
             )
             for fact_type in FactType
         ),
-        protection_available=protection_available,
     )
 
 
@@ -346,6 +347,7 @@ def make_evaluation(
     system_risk_state: SystemRiskState = SystemRiskState.NORMAL,
     capability_valid: bool = True,
     classification_valid: bool = True,
+    protection_valid: bool = True,
 ) -> RiskEvaluationInput:
     decision_time = now or datetime.now(UTC)
     certificate_valid_until = (
@@ -389,6 +391,25 @@ def make_evaluation(
                     "00000000-0000-0000-0000-000000000033" if classification_valid else None
                 ),
                 "valid": classification_valid,
+            },
+        ),
+        protection_capability=ProtectionCapabilityValidationResult(
+            valid=protection_valid,
+            reason_codes=(() if protection_valid else ("PROTECTION_CAPABILITY_RECORD_NOT_FOUND",)),
+            protection_capability_record_id=(
+                UUID("00000000-0000-0000-0000-000000000044") if protection_valid else None
+            ),
+            position_management_template_version=(
+                "position-template-test-v1" if protection_valid else None
+            ),
+            record_hash="7" * 64 if protection_valid else None,
+            evidence_hash="8" * 64 if protection_valid else None,
+            valid_until=(decision_time + timedelta(days=1) if protection_valid else decision_time),
+            validation_snapshot={
+                "protection_capability_record_id": (
+                    "00000000-0000-0000-0000-000000000044" if protection_valid else None
+                ),
+                "valid": protection_valid,
             },
         ),
         decision_time=decision_time,

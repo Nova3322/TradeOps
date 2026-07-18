@@ -189,3 +189,15 @@ INSTRUMENT_CATALOG_VALIDATIONS = Counter(
     "Exact durable instrument classification validations by result and primary reason.",
     labelnames=("result", "primary_reason"),
 )
+
+PROTECTION_CAPABILITY_REGISTRATIONS = Counter(
+    "trading_protection_capability_registrations_total",
+    "Immutable SHADOW-only protection capability registrations by bounded result.",
+    labelnames=("result",),
+)
+
+PROTECTION_CAPABILITY_VALIDATIONS = Counter(
+    "trading_protection_capability_validations_total",
+    "Exact durable native protection capability validations by result and primary reason.",
+    labelnames=("result", "primary_reason"),
+)

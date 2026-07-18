@@ -17,6 +17,10 @@ from tests.instrument_catalog_fixtures import (
 )
 from tests.integration.test_capital_scope import _manifest_request, _register, _scope
 from tests.integration.test_projections import _prepare_collecting_run, _record_account_equity
+from tests.protection_capability_fixtures import (
+    protection_capability_request_for_risk,
+    register_protection_capability,
+)
 from tests.risk_fixtures import (
     TEST_CAPITAL_SCOPE_MANIFEST,
     make_capital,
@@ -37,6 +41,9 @@ from trading_control_plane.database import Database
 from trading_control_plane.instrument_catalog_models import InstrumentCatalogRecord
 from trading_control_plane.models import AuditEvent, OutboxMessage
 from trading_control_plane.proposal_models import SystemRiskStateRecord
+from trading_control_plane.protection_capability_models import (
+    InstrumentProtectionCapabilityRecord,
+)
 from trading_control_plane.reconciliation import ReconciliationSourceType
 from trading_control_plane.risk import (
     CapitalProjectionBinding,
@@ -94,11 +101,30 @@ def seed_default_capital_projection(database: Database, reset_database: None) ->
 
 
 @pytest.fixture(autouse=True)
-def seed_default_instrument_catalog(database: Database, reset_database: None) -> None:
+def seed_default_instrument_catalog(database: Database, reset_database: None):
     del reset_database
     now = datetime.now(UTC)
     request = instrument_catalog_request_for_risk(make_request(now=now), now=now)
     result = register_instrument_catalog(database, request, now=now)
+    assert result.status is CommandStatus.COMPLETED
+    return request
+
+
+@pytest.fixture(autouse=True)
+def seed_default_protection_capability(
+    database: Database,
+    reset_database: None,
+    seed_default_instrument_catalog,
+) -> None:
+    del reset_database
+    now = datetime.now(UTC)
+    risk_request = make_request(now=now)
+    request = protection_capability_request_for_risk(
+        risk_request,
+        seed_default_instrument_catalog,
+        now=now,
+    )
+    result = register_protection_capability(database, request, now=now)
     assert result.status is CommandStatus.COMPLETED
 
 
@@ -156,7 +182,7 @@ def risk_envelope(request: RiskPrecheckRequest) -> CommandEnvelope:
     now = datetime.now(UTC)
     return CommandEnvelope(
         idempotency_key=f"risk-precheck-{uuid4()}",
-        command_type="risk.precheck.evaluate.v6",
+        command_type="risk.precheck.evaluate.v7",
         object_type="ProposalCandidate",
         object_id=request.proposal_ref,
         expected_version=request.candidate_version,
@@ -167,7 +193,7 @@ def risk_envelope(request: RiskPrecheckRequest) -> CommandEnvelope:
         issued_at=now,
         expires_at=now + timedelta(minutes=2),
         auth_context_ref="test-only:risk-precheck-auth",
-        payload_schema_version=6,
+        payload_schema_version=7,
         reason="evaluate proposal candidate",
         payload=request.model_dump(mode="json"),
     )
@@ -245,6 +271,21 @@ def test_allow_precheck_persists_immutable_snapshot_audit_and_outbox(
         assert snapshot.catalog_record_hash == catalog_record.record_hash
         assert snapshot.input_snapshot["instrument_classification"]["valid"] is True
         assert snapshot.decision["catalog_record_hash"] == catalog_record.record_hash
+        assert snapshot.protection_capability_record_id is not None
+        protection_record = session.get(
+            InstrumentProtectionCapabilityRecord,
+            snapshot.protection_capability_record_id,
+        )
+        assert protection_record is not None
+        assert (
+            snapshot.protection_capability_version
+            == protection_record.position_management_template_version
+        )
+        assert snapshot.protection_capability_record_hash == protection_record.record_hash
+        assert snapshot.input_snapshot["protection_capability"]["valid"] is True
+        assert (
+            snapshot.decision["protection_capability_record_hash"] == protection_record.record_hash
+        )
         assert (
             hash_json(snapshot.input_snapshot["capital_projection"])
             == snapshot.capital_projection_hash
@@ -352,7 +393,7 @@ def test_precheck_denies_when_exact_catalog_version_is_missing(database: Databas
             )
         }
     )
-    certificate = issue_shadow_certificate_for_risk_request(database, request)
+    certificate = issue_shadow_certificate_for_risk_request(database, request, now=now)
     assert certificate.status is CommandStatus.COMPLETED
     seed_policy(database, now=now)
     seed_state(database)
@@ -370,6 +411,47 @@ def test_precheck_denies_when_exact_catalog_version_is_missing(database: Databas
         assert snapshot.valid_until == now
         assert snapshot.decision["catalog_validation_reason_codes"] == [
             "INSTRUMENT_CATALOG_RECORD_NOT_FOUND"
+        ]
+
+
+def test_precheck_denies_when_exact_protection_capability_is_missing(
+    database: Database,
+) -> None:
+    now = datetime.now(UTC)
+    base = make_request(now=now)
+    request = base.model_copy(
+        update={
+            "binding": base.binding.model_copy(
+                update={
+                    "position_management_template_version": ("position-template-missing-test-v2"),
+                    "capability_certificate_ref": (
+                        "test-only:missing-protection-capability-certificate"
+                    ),
+                }
+            )
+        }
+    )
+    certificate = issue_shadow_certificate_for_risk_request(database, request, now=now)
+    assert certificate.status is CommandStatus.COMPLETED
+    seed_policy(database, now=now)
+    seed_state(database)
+
+    result = execute_precheck(database, risk_envelope(request), now=now)
+
+    assert result.status is CommandStatus.COMPLETED
+    assert result.data["result"] == "DENY"
+    assert result.data["primary_reason_code"] == "PROTECTION_UNAVAILABLE"
+    assert result.data["protection_capability_record_id"] is None
+    assert result.data["protection_capability_reason_codes"] == [
+        "PROTECTION_CAPABILITY_RECORD_NOT_FOUND"
+    ]
+    with database.session_factory.begin() as session:
+        snapshot = session.execute(select(RiskDecisionSnapshot)).scalar_one()
+        assert snapshot.catalog_record_id is not None
+        assert snapshot.protection_capability_record_id is None
+        assert snapshot.valid_until == now
+        assert snapshot.decision["protection_capability_reason_codes"] == [
+            "PROTECTION_CAPABILITY_RECORD_NOT_FOUND"
         ]
 
 
@@ -713,7 +795,7 @@ def test_web_actor_cannot_call_internal_risk_precheck_handler_directly(
         assert count_rows(session, RiskDecisionSnapshot) == 0
 
 
-def test_risk_precheck_legacy_commands_and_wrong_v6_schema_are_rejected(
+def test_risk_precheck_legacy_commands_and_wrong_v7_schema_are_rejected(
     database: Database,
 ) -> None:
     v1 = risk_envelope(make_request()).model_copy(
@@ -731,6 +813,9 @@ def test_risk_precheck_legacy_commands_and_wrong_v6_schema_are_rejected(
     v5 = risk_envelope(make_request()).model_copy(
         update={"command_type": "risk.precheck.evaluate.v5"}
     )
+    v6 = risk_envelope(make_request()).model_copy(
+        update={"command_type": "risk.precheck.evaluate.v6"}
+    )
     old_field = risk_envelope(make_request())
     old_payload = dict(old_field.payload)
     old_scopes = [dict(scope) for scope in old_payload["scope_risks"]]
@@ -741,6 +826,12 @@ def test_risk_precheck_legacy_commands_and_wrong_v6_schema_are_rejected(
     caller_boolean_payload = dict(caller_boolean.payload)
     caller_boolean_payload["instrument_classified"] = True
     caller_boolean = caller_boolean.model_copy(update={"payload": caller_boolean_payload})
+    protection_boolean = risk_envelope(make_request())
+    protection_boolean_payload = dict(protection_boolean.payload)
+    protection_boolean_payload["protection_available"] = True
+    protection_boolean = protection_boolean.model_copy(
+        update={"payload": protection_boolean_payload}
+    )
     wrong_schema = risk_envelope(make_request()).model_copy(update={"payload_schema_version": 2})
 
     v1_result = execute_precheck(database, v1)
@@ -748,8 +839,10 @@ def test_risk_precheck_legacy_commands_and_wrong_v6_schema_are_rejected(
     v3_result = execute_precheck(database, v3)
     v4_result = execute_precheck(database, v4)
     v5_result = execute_precheck(database, v5)
+    v6_result = execute_precheck(database, v6)
     old_field_result = execute_precheck(database, old_field)
     caller_boolean_result = execute_precheck(database, caller_boolean)
+    protection_boolean_result = execute_precheck(database, protection_boolean)
     schema_result = execute_precheck(database, wrong_schema)
 
     assert v1_result.status is CommandStatus.REJECTED
@@ -762,10 +855,14 @@ def test_risk_precheck_legacy_commands_and_wrong_v6_schema_are_rejected(
     assert v4_result.error_code == "COMMAND_TYPE_MISMATCH"
     assert v5_result.status is CommandStatus.REJECTED
     assert v5_result.error_code == "COMMAND_TYPE_MISMATCH"
+    assert v6_result.status is CommandStatus.REJECTED
+    assert v6_result.error_code == "COMMAND_TYPE_MISMATCH"
     assert old_field_result.status is CommandStatus.REJECTED
     assert old_field_result.error_code == "RISK_INPUT_INVALID"
     assert caller_boolean_result.status is CommandStatus.REJECTED
     assert caller_boolean_result.error_code == "RISK_INPUT_INVALID"
+    assert protection_boolean_result.status is CommandStatus.REJECTED
+    assert protection_boolean_result.error_code == "RISK_INPUT_INVALID"
     assert schema_result.status is CommandStatus.REJECTED
     assert schema_result.error_code == "PAYLOAD_SCHEMA_VERSION_MISMATCH"
 

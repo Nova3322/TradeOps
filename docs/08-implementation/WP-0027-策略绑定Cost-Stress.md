@@ -84,7 +84,7 @@ risk.precheck.evaluate.v3      payload_schema_version=3
 execution.intent.create.v3     payload_schema_version=3
 ```
 
-以上为本包历史版本；当前版本见 WP-0033 的 v6 合同。
+以上为本包历史版本；当前版本见 WP-0034 的 v7 合同。
 
 v1/v2 命令返回 `COMMAND_TYPE_MISMATCH`；v3 携带非 3 schema 返回
 `PAYLOAD_SCHEMA_VERSION_MISMATCH`。v3 请求删除：

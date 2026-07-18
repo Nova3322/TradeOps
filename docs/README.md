@@ -114,6 +114,7 @@ docs/
     ├── WP-0031-Canonical保护风险接入最终预检.md
     ├── WP-0032-Scope-Stress策略派生.md
     ├── WP-0033-不可变Instrument-Catalog分类强绑定.md
+    ├── WP-0034-不可变原生保护能力强绑定.md
     └── evidence/
         ├── WP-0001-validation-20260718.md
         ├── WP-0002-validation-20260718.md
@@ -147,7 +148,8 @@ docs/
         ├── WP-0030-validation-20260718.md
         ├── WP-0031-validation-20260718.md
         ├── WP-0032-validation-20260718.md
-        └── WP-0033-validation-20260718.md
+        ├── WP-0033-validation-20260718.md
+        └── WP-0034-validation-20260718.md
 ```
 
 ### 专项索引
@@ -210,6 +212,7 @@ docs/
 | 实现 | [WP-0031：Canonical 保护风险接入最终预检](08-implementation/WP-0031-Canonical保护风险接入最终预检.md) | v4 移除 caller giveback、ADD current-risk 强绑定、七层 scope replacement delta 与有效期 |
 | 实现 | [WP-0032：Scope Stress 策略派生](08-implementation/WP-0032-Scope-Stress策略派生.md) | v5 移除 caller scope stress、per-scope 冻结场景派生与 Reservation allocation |
 | 实现 | [WP-0033：不可变 Instrument Catalog 分类强绑定](08-implementation/WP-0033-不可变Instrument-Catalog分类强绑定.md) | v6 移除 caller classification boolean、immutable exact Catalog 与 proposal/final precheck 绑定 |
+| 实现 | [WP-0034：不可变原生保护能力强绑定](08-implementation/WP-0034-不可变原生保护能力强绑定.md) | v7 移除 caller protection boolean、immutable exact account/credential/worker capability 与 proposal/final precheck 绑定 |
 
 ## 完整交付与能力激活
 

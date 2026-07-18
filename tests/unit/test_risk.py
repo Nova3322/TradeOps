@@ -454,6 +454,20 @@ def test_caller_instrument_boolean_is_rejected_and_catalog_invalidity_denies() -
     assert result.catalog_validation_reason_codes == ("INSTRUMENT_CATALOG_RECORD_NOT_FOUND",)
 
 
+def test_caller_protection_boolean_is_rejected_and_durable_invalidity_denies() -> None:
+    payload = make_request().model_dump(mode="python")
+    payload["protection_available"] = True
+
+    with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
+        RiskPrecheckRequest.model_validate(payload)
+
+    result = RiskEvaluator().evaluate(make_evaluation(protection_valid=False))
+    assert result.result is RiskDecisionResult.DENY
+    assert result.primary_reason_code == "PROTECTION_UNAVAILABLE"
+    assert result.protection_capability_record_id is None
+    assert result.protection_capability_reason_codes == ("PROTECTION_CAPABILITY_RECORD_NOT_FOUND",)
+
+
 def test_allow_validity_is_bounded_by_exact_catalog_record() -> None:
     now = datetime(2026, 7, 18, 12, tzinfo=UTC)
     evaluation = make_evaluation(now=now)
@@ -470,6 +484,24 @@ def test_allow_validity_is_bounded_by_exact_catalog_record() -> None:
 
     assert result.result is RiskDecisionResult.ALLOW
     assert result.valid_until == catalog_valid_until
+
+
+def test_allow_validity_is_bounded_by_exact_protection_capability() -> None:
+    now = datetime(2026, 7, 18, 12, tzinfo=UTC)
+    evaluation = make_evaluation(now=now)
+    protection_valid_until = now + timedelta(seconds=1)
+    bounded = evaluation.model_copy(
+        update={
+            "protection_capability": evaluation.protection_capability.model_copy(
+                update={"valid_until": protection_valid_until}
+            )
+        }
+    )
+
+    result = RiskEvaluator().evaluate(bounded)
+
+    assert result.result is RiskDecisionResult.ALLOW
+    assert result.valid_until == protection_valid_until
 
 
 @given(

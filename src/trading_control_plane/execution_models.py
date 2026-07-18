@@ -141,6 +141,15 @@ class ExecutionRiskDecision(Base):
             "AND length(catalog_record_hash) = 64)",
             name="ck_exec_risk_catalog_binding_integrity",
         ),
+        CheckConstraint(
+            "(protection_capability_record_id IS NULL "
+            "AND protection_capability_version IS NULL "
+            "AND protection_capability_record_hash IS NULL) OR "
+            "(protection_capability_record_id IS NOT NULL "
+            "AND protection_capability_version IS NOT NULL "
+            "AND length(protection_capability_record_hash) = 64)",
+            name="ck_exec_risk_protection_capability_binding",
+        ),
         CheckConstraint("execution_eligible = false", name="ck_exec_risk_shadow_only"),
         ForeignKeyConstraint(
             ["risk_policy_id", "organization_id", "risk_policy_version"],
@@ -166,6 +175,20 @@ class ExecutionRiskDecision(Base):
                 "instrument_catalog_records.classification_version",
             ],
             name="fk_exec_risk_instrument_catalog",
+            ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            [
+                "protection_capability_record_id",
+                "organization_id",
+                "protection_capability_version",
+            ],
+            [
+                "instrument_protection_capability_records.protection_capability_record_id",
+                "instrument_protection_capability_records.organization_id",
+                "instrument_protection_capability_records.position_management_template_version",
+            ],
+            name="fk_exec_risk_protection_capability",
             ondelete="RESTRICT",
         ),
         ForeignKeyConstraint(
@@ -207,6 +230,11 @@ class ExecutionRiskDecision(Base):
     catalog_version: Mapped[str | None] = mapped_column(String(120), nullable=True)
     catalog_classification_version: Mapped[str | None] = mapped_column(String(120), nullable=True)
     catalog_record_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    protection_capability_record_id: Mapped[UUID | None] = mapped_column(
+        Uuid(as_uuid=True), nullable=True
+    )
+    protection_capability_version: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    protection_capability_record_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
     system_risk_state: Mapped[str] = mapped_column(String(32), nullable=False)
     result: Mapped[str] = mapped_column(String(20), nullable=False)
     primary_reason_code: Mapped[str] = mapped_column(String(160), nullable=False)

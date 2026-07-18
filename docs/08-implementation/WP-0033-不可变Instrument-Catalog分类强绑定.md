@@ -1,5 +1,9 @@
 # WP-0033：不可变 Instrument Catalog 分类强绑定
 
+> 后续状态：WP-0034 已将风险/意图命令升级为 v7，删除 caller `protection_available`，并以不可变
+> exact 原生保护能力记录绑定账户、凭证、worker、Catalog 和保护模板。当前输入合同以
+> [WP-0034](WP-0034-不可变原生保护能力强绑定.md) 为准；本文件保留 WP-0033 历史证据。
+
 ## 1. 交付目标与边界
 
 WP-0032 之后，`RiskPrecheckRequest.instrument_classified` 仍是调用方布尔值。即使 Capability
