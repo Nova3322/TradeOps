@@ -55,6 +55,10 @@ from tests.sender_fencing_fixtures import (
     execute_claim,
     make_sender_scope,
 )
+from tests.strategy_evaluation_fixtures import (
+    register_strategy_evaluation,
+    strategy_evaluation_request_for_add,
+)
 from tests.venue_fact_fixtures import (
     execute_venue_fact,
     fill_request,
@@ -133,6 +137,7 @@ from trading_control_plane.sender_fencing_models import (
     ExecutionSenderScopeState,
     ShadowDispatchClaim,
 )
+from trading_control_plane.strategy_evaluations import StrategyRuleId, StrategyRuleStatus
 from trading_control_plane.trading_authorization_models import (
     AddAuthorizationPackage,
     AddAuthorizationPackageState,
@@ -440,7 +445,7 @@ def create_intent_envelope(
     request = risk_request or execution_risk_request(proposal, now=now)
     return CommandEnvelope(
         idempotency_key=idempotency_key or f"execution-intent-{uuid4()}",
-        command_type="execution.intent.create.v12",
+        command_type="execution.intent.create.v13",
         object_type="Campaign",
         object_id=str(campaign.campaign_id),
         expected_version=1,
@@ -451,7 +456,7 @@ def create_intent_envelope(
         issued_at=now,
         expires_at=now + timedelta(minutes=2),
         auth_context_ref="internal:oms-risk-reservation-service",
-        payload_schema_version=12,
+        payload_schema_version=13,
         reason="create non-dispatchable shadow intent",
         payload={
             "intent_kind": "INITIAL",
@@ -501,6 +506,8 @@ def create_add_envelope(
     *,
     now: datetime,
     candidate_ref: str,
+    register_strategy: bool = True,
+    strategy_rule_statuses: dict[StrategyRuleId, StrategyRuleStatus] | None = None,
 ) -> CommandEnvelope:
     with database.session_factory.begin() as session:
         position = (
@@ -544,9 +551,28 @@ def create_add_envelope(
         fact_set_version=f"risk-fact-set-{candidate_ref}",
     )
     assert register_risk_fact_set(database, fact_set, now=now).status is CommandStatus.COMPLETED
+    if register_strategy:
+        strategy_evaluation = strategy_evaluation_request_for_add(
+            request,
+            campaign,
+            fact_set,
+            position,
+            protection,
+            now=now,
+            evaluation_version=f"strategy-evaluation-{candidate_ref}",
+            rule_statuses=strategy_rule_statuses,
+        )
+        assert (
+            register_strategy_evaluation(
+                database,
+                strategy_evaluation,
+                now=now,
+            ).status
+            is CommandStatus.COMPLETED
+        )
     return CommandEnvelope(
         idempotency_key=f"execution-add-{uuid4()}",
-        command_type="execution.intent.create.v12",
+        command_type="execution.intent.create.v13",
         object_type="Campaign",
         object_id=str(campaign.campaign_id),
         expected_version=2,
@@ -557,7 +583,7 @@ def create_add_envelope(
         issued_at=now,
         expires_at=now + timedelta(minutes=2),
         auth_context_ref="internal:oms-risk-reservation-service",
-        payload_schema_version=12,
+        payload_schema_version=13,
         reason="create non-dispatchable shadow add intent",
         payload={
             "intent_kind": "ADD",
@@ -574,7 +600,6 @@ def create_add_envelope(
             "risk_request": request.model_dump(mode="json"),
             "add_eligibility": {
                 "frozen_return_pct": "30",
-                "trend_valid": True,
                 "target_effective_leverage": "1",
                 "current_position_equity": "72",
                 "position_snapshot_ref": (
@@ -1306,7 +1331,7 @@ def prepare_open_add_campaign(
     return proposal, campaign, package, unit
 
 
-def test_execution_intent_legacy_commands_and_wrong_v12_schema_are_rejected(
+def test_execution_intent_legacy_commands_and_wrong_v13_schema_are_rejected(
     database: Database,
 ) -> None:
     proposal, campaign, initial = prepare_authorization(database)
@@ -1342,6 +1367,9 @@ def test_execution_intent_legacy_commands_and_wrong_v12_schema_are_rejected(
     )
     v11 = create_intent_envelope(proposal, campaign, initial, now=datetime.now(UTC)).model_copy(
         update={"command_type": "execution.intent.create.v11"}
+    )
+    v12 = create_intent_envelope(proposal, campaign, initial, now=datetime.now(UTC)).model_copy(
+        update={"command_type": "execution.intent.create.v12"}
     )
     old_field = create_intent_envelope(proposal, campaign, initial, now=datetime.now(UTC))
     old_payload = dict(old_field.payload)
@@ -1399,6 +1427,7 @@ def test_execution_intent_legacy_commands_and_wrong_v12_schema_are_rejected(
     v9_result = execute_create(database, v9)
     v10_result = execute_create(database, v10)
     v11_result = execute_create(database, v11)
+    v12_result = execute_create(database, v12)
     old_field_result = execute_create(database, old_field)
     caller_boolean_result = execute_create(database, caller_boolean)
     protection_boolean_result = execute_create(database, protection_boolean)
@@ -1427,6 +1456,8 @@ def test_execution_intent_legacy_commands_and_wrong_v12_schema_are_rejected(
     assert v10_result.error_code == "COMMAND_TYPE_MISMATCH"
     assert v11_result.status is CommandStatus.REJECTED
     assert v11_result.error_code == "COMMAND_TYPE_MISMATCH"
+    assert v12_result.status is CommandStatus.REJECTED
+    assert v12_result.error_code == "COMMAND_TYPE_MISMATCH"
     assert old_field_result.status is CommandStatus.REJECTED
     assert old_field_result.error_code == "EXECUTION_INPUT_INVALID"
     assert caller_boolean_result.status is CommandStatus.REJECTED
@@ -2346,6 +2377,77 @@ def test_add_rejects_nonpositive_canonical_upnl_without_intent_or_reservation(
         assert unit_state is not None and unit_state.status == "AVAILABLE"
 
 
+@pytest.mark.parametrize(
+    ("mode", "rule_status", "expected_reason"),
+    (
+        ("missing", None, "STRATEGY_EVALUATION_RECORD_NOT_FOUND"),
+        ("failed", StrategyRuleStatus.FAIL, "STRATEGY_EVALUATION_OUTCOME_NOT_PASS"),
+        ("unknown", StrategyRuleStatus.UNKNOWN, "STRATEGY_EVALUATION_OUTCOME_NOT_PASS"),
+    ),
+)
+def test_add_denies_without_exact_passing_strategy_evaluation(
+    database: Database,
+    mode: str,
+    rule_status: StrategyRuleStatus | None,
+    expected_reason: str,
+) -> None:
+    proposal, campaign, package, unit = prepare_open_add_campaign(
+        database,
+        unrealized_pnl=Decimal("9.75"),
+    )
+    envelope = create_add_envelope(
+        database,
+        proposal,
+        campaign,
+        package,
+        unit,
+        now=datetime.now(UTC),
+        candidate_ref=f"add-strategy-evaluation-{mode}",
+        register_strategy=mode != "missing",
+        strategy_rule_statuses=(
+            {StrategyRuleId.TREND_CONTINUATION: rule_status} if rule_status is not None else None
+        ),
+    )
+
+    result = execute_create(database, envelope)
+
+    assert result.status is CommandStatus.COMPLETED
+    assert result.data["result"] == "DENY"
+    assert result.data["primary_reason_code"] == expected_reason
+    assert result.data["reservation_created"] is False
+    assert result.data["order_intent_created"] is False
+    with database.session_factory.begin() as session:
+        decision = session.execute(
+            select(ExecutionRiskDecision).where(ExecutionRiskDecision.intent_kind == "ADD")
+        ).scalar_one()
+        assert decision.primary_reason_code == expected_reason
+        if mode == "missing":
+            assert decision.strategy_evaluation_id is None
+            assert decision.input_snapshot["strategy_evaluation"]["valid"] is False
+            assert decision.input_snapshot["strategy_evaluation"]["strategy_evaluation_id"] is None
+        else:
+            assert decision.strategy_evaluation_id is not None
+            assert decision.input_snapshot["strategy_evaluation"]["valid"] is False
+        assert (
+            session.execute(
+                select(func.count())
+                .select_from(OrderIntent)
+                .where(OrderIntent.intent_kind == "ADD")
+            ).scalar_one()
+            == 0
+        )
+        assert (
+            session.execute(
+                select(func.count())
+                .select_from(RiskReservation)
+                .where(RiskReservation.add_package_id.is_not(None))
+            ).scalar_one()
+            == 0
+        )
+        unit_state = session.get(AddUnitState, unit.add_unit_id)
+        assert unit_state is not None and unit_state.status == "AVAILABLE"
+
+
 def test_add_zero_fill_releases_unit_then_positive_fill_consumes_it(
     database: Database,
 ) -> None:
@@ -2358,6 +2460,7 @@ def test_add_zero_fill_releases_unit_then_positive_fill_consumes_it(
         ("protection_valid", True),
         ("authorization_valid", True),
         ("current_effective_leverage", "0"),
+        ("trend_valid", True),
     ):
         legacy_input = create_add_envelope(
             database,
@@ -2449,6 +2552,7 @@ def test_add_zero_fill_releases_unit_then_positive_fill_consumes_it(
         ).scalar_one()
         protected = add_decision.input_snapshot["protected_position_risk"]
         leverage = add_decision.input_snapshot["add_leverage_calculation"]
+        strategy = add_decision.input_snapshot["strategy_evaluation"]
         assert Decimal(leverage["current_position_notional"]) == Decimal("60")
         assert Decimal(leverage["submitted_campaign_equity"]) == Decimal("72")
         assert Decimal(leverage["current_effective_leverage"]) == Decimal("0.833333333333333334")
@@ -2463,6 +2567,17 @@ def test_add_zero_fill_releases_unit_then_positive_fill_consumes_it(
             == first_add.data["add_leverage_calculation_hash"]
             == add_event.payload["add_leverage_calculation_hash"]
         )
+        assert strategy["valid"] is True
+        assert strategy["outcome"] == "PASS"
+        assert len(strategy["rule_results"]) == 3
+        assert add_decision.strategy_evaluation_id == UUID(str(strategy["strategy_evaluation_id"]))
+        assert (
+            add_decision.strategy_evaluation_record_hash
+            == strategy["record_hash"]
+            == first_add.data["strategy_evaluation_record_hash"]
+            == add_event.payload["strategy_evaluation_record_hash"]
+        )
+        assert add_decision.valid_until <= datetime.fromisoformat(strategy["valid_until"])
         assert Decimal(protected["current_to_protection_loss"]) == Decimal("5")
         assert Decimal(protected["unrealized_pnl"]) == Decimal("9.75")
         assert Decimal(protected["open_heat"]) == 0

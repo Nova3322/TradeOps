@@ -2,8 +2,9 @@
 
 > 后续状态：WP-0038 已把 ExecutionIntent 升级为 v11，删除 caller
 > `current_effective_leverage`，改由 canonical current notional 与 submitted `E_campaign` 服务端保守
-> 派生并哈希留证；WP-0039 再将 canonical venue UPNL 纳入 v2 hash 并强制为正。
-> 当前执行合同以 [WP-0039](WP-0039-ADD-Canonical正UPNL硬门.md) 为准。
+> 派生并哈希留证；WP-0039 再将 canonical venue UPNL 纳入 v2 hash 并强制为正；WP-0040
+> 删除 caller `trend_valid` 并绑定 immutable Strategy Evaluation。
+> 当前执行合同以 [WP-0040](WP-0040-ADD不可变策略评估强绑定.md) 为准。
 > 本文件保留 WP-0037 历史合同。
 
 ## 1. 交付目标与边界
@@ -22,6 +23,7 @@ Campaign、InitialAuthorization、AddPackage/AddUnit、SystemRiskState、Capabil
 
 WP-0037 删除这两个字段，并令旧字段显式失败。服务端耐久校验保持不变且成为唯一判定来源。本包不处理
 `trend_valid`、冻结收益率、当前 campaign equity 或有效杠杆的可信真源，它们保留为后续独立工作包。
+其中 `trend_valid` 已由 WP-0040 关闭；本段保留 WP-0037 当时的历史边界。
 
 ## 2. 命令合同
 

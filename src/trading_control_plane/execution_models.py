@@ -157,6 +157,13 @@ class ExecutionRiskDecision(Base):
             "AND length(risk_fact_set_record_hash) = 64)",
             name="ck_exec_risk_risk_fact_set_binding",
         ),
+        CheckConstraint(
+            "(strategy_evaluation_id IS NULL AND strategy_evaluation_version IS NULL "
+            "AND strategy_evaluation_record_hash IS NULL) OR "
+            "(strategy_evaluation_id IS NOT NULL AND strategy_evaluation_version IS NOT NULL "
+            "AND length(strategy_evaluation_record_hash) = 64)",
+            name="ck_exec_risk_strategy_evaluation_binding",
+        ),
         CheckConstraint("execution_eligible = false", name="ck_exec_risk_shadow_only"),
         ForeignKeyConstraint(
             ["risk_policy_id", "organization_id", "risk_policy_version"],
@@ -209,6 +216,16 @@ class ExecutionRiskDecision(Base):
             ondelete="RESTRICT",
         ),
         ForeignKeyConstraint(
+            ["strategy_evaluation_id", "campaign_id", "strategy_evaluation_version"],
+            [
+                "strategy_evaluation_records.strategy_evaluation_id",
+                "strategy_evaluation_records.campaign_id",
+                "strategy_evaluation_records.evaluation_version",
+            ],
+            name="fk_exec_risk_strategy_evaluation",
+            ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(
             [
                 "capital_scope_manifest_id",
                 "organization_id",
@@ -255,6 +272,9 @@ class ExecutionRiskDecision(Base):
     risk_fact_set_id: Mapped[UUID | None] = mapped_column(Uuid(as_uuid=True), nullable=True)
     risk_fact_set_version: Mapped[str | None] = mapped_column(String(120), nullable=True)
     risk_fact_set_record_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    strategy_evaluation_id: Mapped[UUID | None] = mapped_column(Uuid(as_uuid=True), nullable=True)
+    strategy_evaluation_version: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    strategy_evaluation_record_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
     system_risk_state: Mapped[str] = mapped_column(String(32), nullable=False)
     result: Mapped[str] = mapped_column(String(20), nullable=False)
     primary_reason_code: Mapped[str] = mapped_column(String(160), nullable=False)

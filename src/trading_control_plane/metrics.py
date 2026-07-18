@@ -213,3 +213,15 @@ RISK_FACT_SET_VALIDATIONS = Counter(
     "Exact-scope durable risk fact-set validations by result and primary reason.",
     labelnames=("result", "primary_reason"),
 )
+
+STRATEGY_EVALUATION_REGISTRATIONS = Counter(
+    "trading_strategy_evaluation_registrations_total",
+    "Immutable SHADOW-only strategy evaluation registrations by bounded result.",
+    labelnames=("result",),
+)
+
+STRATEGY_EVALUATION_VALIDATIONS = Counter(
+    "trading_strategy_evaluation_validations_total",
+    "Exact Campaign strategy evaluation validations by result and primary reason.",
+    labelnames=("result", "primary_reason"),
+)

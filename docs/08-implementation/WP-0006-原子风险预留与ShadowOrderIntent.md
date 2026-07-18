@@ -1,10 +1,10 @@
 # WP-0006：原子风险预留与 Shadow OrderIntent
 
-> 后续状态：WP-0039 已将创建命令升级为 `execution.intent.create.v12` / payload schema 12；WP-0031..0035
+> 后续状态：WP-0040 已将创建命令升级为 `execution.intent.create.v13` / payload schema 13；WP-0031..0035
 > 先后移除 caller giveback、scope stress、classification、protection boolean 和九类 facts，WP-0036 再绑定
 > KNOWN MARKET payload，WP-0037 删除 ADD caller protection/authorization 布尔值，WP-0038 再删除
-> caller current leverage 并服务端派生。当前输入合同以
-> [WP-0039](WP-0039-ADD-Canonical正UPNL硬门.md) 为准。
+> caller current leverage 并服务端派生，WP-0039/0040 再依次绑定正 UPNL 与 immutable Strategy Evaluation。
+> 当前输入合同以 [WP-0040](WP-0040-ADD不可变策略评估强绑定.md) 为准。
 > 本文件保留 WP-0006 历史证据。
 
 > 状态：Implemented

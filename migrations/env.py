@@ -18,6 +18,7 @@ from trading_control_plane import (  # noqa: F401
     risk_fact_set_models,
     risk_models,
     sender_fencing_models,
+    strategy_evaluation_models,
     trading_authorization_models,
     venue_fact_models,
 )

@@ -77,13 +77,18 @@ from trading_control_plane.risk import (
     protection_capability_validation_request,
     risk_fact_set_validation_request,
 )
-from trading_control_plane.risk_fact_sets import RiskFactSetValidator
+from trading_control_plane.risk_fact_sets import RiskFactSetValidationResult, RiskFactSetValidator
 from trading_control_plane.risk_facts import FactType
 from trading_control_plane.risk_models import RiskPolicyRecord
 from trading_control_plane.sender_fencing_models import (
     ExecutionSenderScope,
     ExecutionSenderScopeState,
     ShadowDispatchClaim,
+)
+from trading_control_plane.strategy_evaluations import (
+    StrategyEvaluationValidationRequest,
+    StrategyEvaluationValidationResult,
+    StrategyEvaluationValidator,
 )
 from trading_control_plane.trading_authorization import FrozenAuthorizationBinding
 from trading_control_plane.trading_authorization_models import (
@@ -200,7 +205,6 @@ class AddEligibilitySnapshot(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     frozen_return_pct: Decimal
-    trend_valid: bool
     target_effective_leverage: Decimal = Field(gt=0)
     current_position_equity: Decimal = Field(gt=0, max_digits=38, decimal_places=18)
     position_snapshot_ref: str = Field(min_length=1, max_length=255)
@@ -629,8 +633,8 @@ class DurableExposureResolver:
 
 
 class ExecutionIntentService:
-    command_type = "execution.intent.create.v12"
-    payload_schema_version = 12
+    command_type = "execution.intent.create.v13"
+    payload_schema_version = 13
 
     def __init__(
         self,
@@ -639,6 +643,7 @@ class ExecutionIntentService:
         instrument_catalog_validator: InstrumentCatalogValidator | None = None,
         protection_capability_validator: ProtectionCapabilityValidator | None = None,
         risk_fact_set_validator: RiskFactSetValidator | None = None,
+        strategy_evaluation_validator: StrategyEvaluationValidator | None = None,
         capital_projection_resolver: CapitalProjectionResolver | None = None,
         durable_exposure_resolver: DurableExposureResolver | None = None,
         protected_position_risk_resolver: CurrentProtectedPositionRiskResolver | None = None,
@@ -653,6 +658,9 @@ class ExecutionIntentService:
             protection_capability_validator or ProtectionCapabilityValidator()
         )
         self._risk_fact_set_validator = risk_fact_set_validator or RiskFactSetValidator()
+        self._strategy_evaluation_validator = (
+            strategy_evaluation_validator or StrategyEvaluationValidator()
+        )
         self._capital_projection_resolver = (
             capital_projection_resolver or CapitalProjectionResolver()
         )
@@ -816,6 +824,14 @@ class ExecutionIntentService:
             risk_fact_set_validation_request(request.risk_request, now),
             lock=True,
         )
+        strategy_evaluation = self._resolve_strategy_evaluation(
+            session,
+            request,
+            campaign,
+            risk_fact_set,
+            verified_exposure.protected_position_risk,
+            now,
+        )
         evaluation_input = RiskEvaluationInput(
             request=request.risk_request,
             risk_policy_id=policy_record.risk_policy_id,
@@ -843,6 +859,7 @@ class ExecutionIntentService:
                 verified_capital,
                 verified_exposure,
                 add_leverage_calculation,
+                strategy_evaluation,
                 now,
                 "ADD_REQUIRES_NORMAL_SYSTEM_STATE",
             )
@@ -858,8 +875,32 @@ class ExecutionIntentService:
                 verified_capital,
                 verified_exposure,
                 add_leverage_calculation,
+                strategy_evaluation,
                 now,
                 evaluation.primary_reason_code,
+            )
+        if request.intent_kind is IntentKind.ADD and (
+            strategy_evaluation is None or not strategy_evaluation.valid
+        ):
+            reason_code = (
+                strategy_evaluation.reason_codes[0]
+                if strategy_evaluation is not None and strategy_evaluation.reason_codes
+                else "STRATEGY_EVALUATION_UNAVAILABLE"
+            )
+            return self._record_denial(
+                session,
+                request,
+                campaign,
+                authorization,
+                policy_record,
+                evaluation_input,
+                evaluation,
+                verified_capital,
+                verified_exposure,
+                add_leverage_calculation,
+                strategy_evaluation,
+                now,
+                reason_code,
             )
 
         funding_after = (
@@ -879,6 +920,7 @@ class ExecutionIntentService:
                 verified_capital,
                 verified_exposure,
                 add_leverage_calculation,
+                strategy_evaluation,
                 now,
                 "FROZEN_FUNDING_ENVELOPE_EXCEEDED",
             )
@@ -899,6 +941,7 @@ class ExecutionIntentService:
                 verified_capital,
                 verified_exposure,
                 add_leverage_calculation,
+                strategy_evaluation,
                 now,
                 "FROZEN_AUTHORIZATION_CAPACITY_EXCEEDED",
             )
@@ -906,7 +949,15 @@ class ExecutionIntentService:
         decision_id = uuid4()
         order_intent_id = uuid4()
         risk_reservation_id = uuid4()
-        valid_until = min(evaluation.valid_until, authorization.valid_until)
+        valid_until = min(
+            evaluation.valid_until,
+            authorization.valid_until,
+            (
+                strategy_evaluation.valid_until
+                if strategy_evaluation is not None
+                else authorization.valid_until
+            ),
+        )
         if valid_until <= now:
             return self._record_denial(
                 session,
@@ -919,6 +970,7 @@ class ExecutionIntentService:
                 verified_capital,
                 verified_exposure,
                 add_leverage_calculation,
+                strategy_evaluation,
                 now,
                 "EXECUTION_VALIDITY_EXPIRED",
             )
@@ -931,12 +983,16 @@ class ExecutionIntentService:
             verified_capital,
             verified_exposure,
             add_leverage_calculation,
+            strategy_evaluation,
         )
         decision_payload = evaluation.model_dump(mode="json")
         decision_payload["add_leverage_calculation_hash"] = (
             add_leverage_calculation.calculation_hash
             if add_leverage_calculation is not None
             else None
+        )
+        decision_payload["strategy_evaluation_record_hash"] = (
+            strategy_evaluation.record_hash if strategy_evaluation is not None else None
         )
         decision_payload["approved_reserved_heat"] = str(reserved_heat)
         decision_payload["execution_eligible"] = False
@@ -990,6 +1046,19 @@ class ExecutionIntentService:
                     else None
                 ),
                 risk_fact_set_record_hash=risk_fact_set.record_hash,
+                strategy_evaluation_id=(
+                    strategy_evaluation.strategy_evaluation_id
+                    if strategy_evaluation is not None
+                    else None
+                ),
+                strategy_evaluation_version=(
+                    strategy_evaluation.evaluation_version
+                    if strategy_evaluation is not None
+                    else None
+                ),
+                strategy_evaluation_record_hash=(
+                    strategy_evaluation.record_hash if strategy_evaluation is not None else None
+                ),
                 system_risk_state=system_state.value,
                 result="ALLOW",
                 primary_reason_code="ORDER_PRECHECK_PASSED",
@@ -1256,6 +1325,15 @@ class ExecutionIntentService:
                     if add_leverage_calculation is not None
                     else None
                 ),
+                "strategy_evaluation_id": (
+                    str(strategy_evaluation.strategy_evaluation_id)
+                    if strategy_evaluation is not None
+                    and strategy_evaluation.strategy_evaluation_id is not None
+                    else None
+                ),
+                "strategy_evaluation_record_hash": (
+                    strategy_evaluation.record_hash if strategy_evaluation is not None else None
+                ),
                 "execution_mode": "SHADOW",
                 "dispatch_eligible": False,
                 "reservation_created": True,
@@ -1298,6 +1376,17 @@ class ExecutionIntentService:
                         "add_leverage_calculation_hash": (
                             add_leverage_calculation.calculation_hash
                             if add_leverage_calculation is not None
+                            else None
+                        ),
+                        "strategy_evaluation_id": (
+                            str(strategy_evaluation.strategy_evaluation_id)
+                            if strategy_evaluation is not None
+                            and strategy_evaluation.strategy_evaluation_id is not None
+                            else None
+                        ),
+                        "strategy_evaluation_record_hash": (
+                            strategy_evaluation.record_hash
+                            if strategy_evaluation is not None
                             else None
                         ),
                         "dispatch_eligible": False,
@@ -1509,8 +1598,6 @@ class ExecutionIntentService:
             raise CommandRejected("LATER_ADD_UNIT_LOCKED", "later AddUnit state is inconsistent")
         if eligibility.frozen_return_pct < Decimal(unit.unlock_milestone_pct):
             raise CommandRejected("ADD_MILESTONE_NOT_MET", "frozen-return milestone is not met")
-        if not eligibility.trend_valid:
-            raise CommandRejected("ADD_ELIGIBILITY_FAILED", "add hard gate failed")
         if not (
             package.target_leverage_min
             <= eligibility.target_effective_leverage
@@ -1527,6 +1614,81 @@ class ExecutionIntentService:
             }
         )
         return rows
+
+    @staticmethod
+    def _strategy_evaluation_request(
+        request: CreateExecutionIntentRequest,
+        campaign: Campaign,
+        risk_fact_set: RiskFactSetValidationResult,
+        protected_position_risk: VerifiedProtectedPositionRisk,
+        now: datetime,
+    ) -> StrategyEvaluationValidationRequest | None:
+        if (
+            not risk_fact_set.valid
+            or risk_fact_set.risk_fact_set_id is None
+            or risk_fact_set.fact_set_version is None
+            or risk_fact_set.record_hash is None
+        ):
+            return None
+        projection = protected_position_risk.projection
+        if (
+            projection.position_snapshot_id is None
+            or projection.position_snapshot_hash is None
+            or projection.protection_snapshot_id is None
+            or projection.protection_snapshot_hash is None
+        ):  # pragma: no cover - confirmed projection enforces
+            raise RuntimeError("confirmed protected-position risk lacks strategy source facts")
+        binding = request.risk_request.binding
+        return StrategyEvaluationValidationRequest(
+            campaign_id=campaign.campaign_id,
+            organization_id=campaign.organization_id,
+            strategy_id=campaign.strategy_id,
+            strategy_version=campaign.strategy_version,
+            strategy_parameter_version=binding.strategy_parameter_version,
+            venue=campaign.venue,
+            execution_domain=campaign.execution_domain,
+            account_id=campaign.account_id,
+            canonical_instrument_id=campaign.instrument_id,
+            position_mode=binding.position_mode,
+            margin_mode=binding.margin_mode,
+            collateral_pool_id=binding.collateral_pool_id,
+            risk_fact_set_id=risk_fact_set.risk_fact_set_id,
+            risk_fact_set_version=risk_fact_set.fact_set_version,
+            risk_fact_set_record_hash=risk_fact_set.record_hash,
+            position_snapshot_id=projection.position_snapshot_id,
+            position_snapshot_hash=projection.position_snapshot_hash,
+            protection_snapshot_id=projection.protection_snapshot_id,
+            protection_snapshot_hash=projection.protection_snapshot_hash,
+            validation_time=now,
+        )
+
+    def _resolve_strategy_evaluation(
+        self,
+        session: Session,
+        request: CreateExecutionIntentRequest,
+        campaign: Campaign,
+        risk_fact_set: RiskFactSetValidationResult,
+        protected_position_risk: VerifiedProtectedPositionRisk | None,
+        now: datetime,
+    ) -> StrategyEvaluationValidationResult | None:
+        if request.intent_kind is not IntentKind.ADD:
+            return None
+        if protected_position_risk is None:  # pragma: no cover - ADD resolver enforces
+            raise RuntimeError("ADD lacks protected-position risk")
+        validation_request = self._strategy_evaluation_request(
+            request,
+            campaign,
+            risk_fact_set,
+            protected_position_risk,
+            now,
+        )
+        if validation_request is None:
+            return None
+        return self._strategy_evaluation_validator.validate(
+            session,
+            validation_request,
+            lock=True,
+        )
 
     @staticmethod
     def _derive_and_validate_add_leverage(
@@ -1767,6 +1929,7 @@ class ExecutionIntentService:
         verified_capital: VerifiedCapitalProjection,
         verified_exposure: VerifiedDurableExposure,
         add_leverage_calculation: AddLeverageCalculation | None,
+        strategy_evaluation: StrategyEvaluationValidationResult | None,
     ) -> dict[str, Any]:
         snapshot: dict[str, Any] = {
             "request": request.model_dump(mode="json"),
@@ -1800,7 +1963,10 @@ class ExecutionIntentService:
         if request.intent_kind is IntentKind.ADD:
             if add_leverage_calculation is None:  # pragma: no cover - service enforces
                 raise RuntimeError("ADD input snapshot lacks leverage calculation")
+            if strategy_evaluation is None or not strategy_evaluation.valid:
+                raise RuntimeError("ADD input snapshot lacks a valid strategy evaluation")
             snapshot["add_leverage_calculation"] = add_leverage_calculation.model_dump(mode="json")
+            snapshot["strategy_evaluation"] = strategy_evaluation.model_dump(mode="json")
             snapshot["add_state_versions"] = {
                 "package": rows["add_package_state"].version,
                 "unit": rows["add_unit_state"].version,
@@ -1840,6 +2006,7 @@ class ExecutionIntentService:
         verified_capital: VerifiedCapitalProjection,
         verified_exposure: VerifiedDurableExposure,
         add_leverage_calculation: AddLeverageCalculation | None,
+        strategy_evaluation: StrategyEvaluationValidationResult | None,
         now: datetime,
         reason_code: str,
     ) -> CommandOutcome:
@@ -1859,11 +2026,16 @@ class ExecutionIntentService:
             input_snapshot["add_leverage_calculation"] = add_leverage_calculation.model_dump(
                 mode="json"
             )
+        if strategy_evaluation is not None:
+            input_snapshot["strategy_evaluation"] = strategy_evaluation.model_dump(mode="json")
         decision_payload = evaluation.model_dump(mode="json")
         decision_payload["add_leverage_calculation_hash"] = (
             add_leverage_calculation.calculation_hash
             if add_leverage_calculation is not None
             else None
+        )
+        decision_payload["strategy_evaluation_record_hash"] = (
+            strategy_evaluation.record_hash if strategy_evaluation is not None else None
         )
         decision_payload["result"] = "DENY"
         decision_payload["primary_reason_code"] = reason_code
@@ -1921,6 +2093,27 @@ class ExecutionIntentService:
                     else None
                 ),
                 risk_fact_set_record_hash=evaluation_input.risk_fact_set.record_hash,
+                strategy_evaluation_id=(
+                    strategy_evaluation.strategy_evaluation_id
+                    if strategy_evaluation is not None
+                    and strategy_evaluation.evaluation_version is not None
+                    and strategy_evaluation.record_hash is not None
+                    else None
+                ),
+                strategy_evaluation_version=(
+                    strategy_evaluation.evaluation_version
+                    if strategy_evaluation is not None
+                    and strategy_evaluation.strategy_evaluation_id is not None
+                    and strategy_evaluation.record_hash is not None
+                    else None
+                ),
+                strategy_evaluation_record_hash=(
+                    strategy_evaluation.record_hash
+                    if strategy_evaluation is not None
+                    and strategy_evaluation.strategy_evaluation_id is not None
+                    and strategy_evaluation.evaluation_version is not None
+                    else None
+                ),
                 system_risk_state=evaluation_input.system_risk_state.value,
                 result="DENY",
                 primary_reason_code=reason_code,
@@ -1992,6 +2185,20 @@ class ExecutionIntentService:
                     if add_leverage_calculation is not None
                     else None
                 ),
+                "strategy_evaluation_id": (
+                    str(strategy_evaluation.strategy_evaluation_id)
+                    if strategy_evaluation is not None
+                    and strategy_evaluation.strategy_evaluation_id is not None
+                    else None
+                ),
+                "strategy_evaluation_record_hash": (
+                    strategy_evaluation.record_hash if strategy_evaluation is not None else None
+                ),
+                "strategy_evaluation_reason_codes": (
+                    list(strategy_evaluation.reason_codes)
+                    if strategy_evaluation is not None
+                    else []
+                ),
                 "dispatch_eligible": False,
                 "reservation_created": False,
                 "order_intent_created": False,
@@ -2043,6 +2250,17 @@ class ExecutionIntentService:
                         "add_leverage_calculation_hash": (
                             add_leverage_calculation.calculation_hash
                             if add_leverage_calculation is not None
+                            else None
+                        ),
+                        "strategy_evaluation_id": (
+                            str(strategy_evaluation.strategy_evaluation_id)
+                            if strategy_evaluation is not None
+                            and strategy_evaluation.strategy_evaluation_id is not None
+                            else None
+                        ),
+                        "strategy_evaluation_record_hash": (
+                            strategy_evaluation.record_hash
+                            if strategy_evaluation is not None
                             else None
                         ),
                     },

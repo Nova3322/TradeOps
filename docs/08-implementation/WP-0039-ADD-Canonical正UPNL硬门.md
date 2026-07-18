@@ -1,5 +1,9 @@
 # WP-0039：ADD Canonical 正 UPNL 硬门
 
+> 后续状态：WP-0040 已把 ExecutionIntent 升级为 v13，删除 caller `trend_valid`，并要求同一
+> Risk Fact Set 与 exact position/protection 上的 latest immutable PASS Strategy Evaluation。
+> 当前执行合同以 [WP-0040](WP-0040-ADD不可变策略评估强绑定.md) 为准。本文件保留 WP-0039 历史合同。
+
 ## 1. 交付目标与边界
 
 系统的固定策略语义禁止亏损加仓，但 WP-0038 的 ADD 路径仍只校验 caller frozen return、

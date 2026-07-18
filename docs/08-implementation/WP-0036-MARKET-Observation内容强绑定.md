@@ -2,9 +2,10 @@
 
 > 后续状态：WP-0037 已把 ExecutionIntent 升级为 v10，并删除 ADD caller `protection_valid` /
 > `authorization_valid`。WP-0038 再将 ExecutionIntent 升级为 v11，并删除 caller current
-> leverage；WP-0039 又将 ExecutionIntent 升级为 v12，并强制 canonical venue UPNL 为正。
+> leverage；WP-0039 将 ExecutionIntent 升级为 v12 并强制 canonical venue UPNL 为正，WP-0040
+> 再升级为 v13 并删除 caller `trend_valid`。
 > RiskPrecheck 继续为 v9。当前执行合同以
-> [WP-0039](WP-0039-ADD-Canonical正UPNL硬门.md) 为准。本文件保留 WP-0036 历史合同。
+> [WP-0040](WP-0040-ADD不可变策略评估强绑定.md) 为准。本文件保留 WP-0036 历史合同。
 
 ## 1. 交付目标与边界
 
