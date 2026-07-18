@@ -234,6 +234,7 @@ docs/
 | 实现 | [WP-0053：服务端 Reduce-Only 执行计划](08-implementation/WP-0053-服务端Reduce-Only执行计划.md) | latest target 与 fresh current binding 派生 side/quantity/reason/idempotency；订单类型和场所参数保持 UNAVAILABLE，不创建 OrderIntent |
 | 实现 | [WP-0054：耐久 Reduce-Only 计划快照](08-implementation/WP-0054-耐久Reduce-Only计划快照.md) | INTERNAL service 将 exact plan 原子保存为单 target 唯一、不可变、不可派发快照；并发收敛且不创建 OrderIntent |
 | 实现 | [WP-0055：Campaign 意图占用门](08-implementation/WP-0055-Campaign意图占用门.md) | reduction plan/preparation 服务端扫描并锁定同 Campaign 未解决 OrderIntent；active/partial/Unknown 阻断旧数量计划 |
+| 实现 | [WP-0056：Reduce-Only 计划当前有效性](08-implementation/WP-0056-Reduce-Only计划当前有效性.md) | stored plan 对 latest target、validity、fresh position/state/occupancy 重新求值；CURRENT 仍因执行条款 UNAVAILABLE 不可派发 |
 
 ## 完整交付与能力激活
 

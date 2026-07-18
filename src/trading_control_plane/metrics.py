@@ -159,6 +159,12 @@ CAMPAIGN_ORDER_INTENT_OCCUPANCY_EVALUATIONS = Counter(
     labelnames=("result",),
 )
 
+CAMPAIGN_REDUCTION_PLAN_VALIDITY_EVALUATIONS = Counter(
+    "trading_campaign_reduction_plan_validity_evaluations_total",
+    "Current-use Campaign reduction-plan validity outcomes.",
+    labelnames=("result",),
+)
+
 CAPABILITY_CERTIFICATE_ISSUANCE = Counter(
     "trading_capability_certificate_issuance_total",
     "Shadow-only capability certificate issuance by type, environment, and result.",
