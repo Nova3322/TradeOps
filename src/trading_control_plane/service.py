@@ -50,6 +50,12 @@ from trading_control_plane.domain import (
     evaluate_risk,
     select_target_position,
 )
+from trading_control_plane.hyperliquid import HyperliquidReadOnlySnapshot
+from trading_control_plane.hyperliquid_execution import (
+    HyperliquidTestnetOrder,
+    HyperliquidTestnetOrderCommand,
+    HyperliquidTestnetProtectionCommand,
+)
 from trading_control_plane.metrics import (
     FENCING_REJECTIONS,
     INTENT_TRANSITIONS,
@@ -1130,6 +1136,19 @@ class TradingService:
             intent_id=_as_uuid(str(response["intent_id"])),
         )
 
+    @staticmethod
+    def _proposal_limit_price(proposal: Proposal) -> Decimal | None:
+        details = proposal.frozen_payload.get("details")
+        if not isinstance(details, dict) or details.get("limit_price") is None:
+            return None
+        try:
+            value = Decimal(str(details["limit_price"]))
+        except (ArithmeticError, TypeError, ValueError):
+            _reject("PROPOSAL_PRICE_INVALID", "frozen proposal limit price is invalid")
+        if not value.is_finite() or value <= 0:
+            _reject("PROPOSAL_PRICE_INVALID", "frozen proposal limit price is invalid")
+        return value
+
     def create_order_intent(
         self,
         authorization_id: UUID,
@@ -1336,6 +1355,7 @@ class TradingService:
                 kind=kind.value,
                 side=side,
                 quantity=quantity,
+                limit_price=self._proposal_limit_price(proposal),
                 reduce_only=False,
                 target_version=None,
                 position_id=position.position_id,
@@ -1639,6 +1659,14 @@ class TradingService:
     def _binance_protection_client_order_id(position_id: UUID) -> str:
         return f"tpp-{position_id.hex}"
 
+    @staticmethod
+    def _hyperliquid_client_order_id(intent_id: UUID) -> str:
+        return f"0x{intent_id.hex}"
+
+    @staticmethod
+    def _hyperliquid_protection_client_order_id(position_id: UUID) -> str:
+        return f"0x{position_id.hex}"
+
     def _binance_testnet_command(
         self,
         session: Session,
@@ -1649,6 +1677,9 @@ class TradingService:
         fencing_token: int,
         now: datetime,
         allowed_statuses: set[str],
+        *,
+        venue: str = "BINANCE",
+        require_limit_price: bool = False,
     ) -> BinanceTestnetOrderCommand:
         self._validate_sender(session, execution_scope, owner_id, fencing_token, now)
         intent = session.get(OrderIntent, intent_id)
@@ -1657,13 +1688,10 @@ class TradingService:
         campaign = session.get(Campaign, intent.campaign_id)
         if campaign is None:
             _reject("CAMPAIGN_NOT_FOUND", "intent campaign is missing")
-        if (
-            campaign.environment != ExecutionEnvironment.TESTNET.value
-            or campaign.venue != "BINANCE"
-        ):
+        if campaign.environment != ExecutionEnvironment.TESTNET.value or campaign.venue != venue:
             _reject(
-                "BINANCE_TESTNET_SCOPE_REQUIRED",
-                "Binance testnet execution only accepts TESTNET BINANCE campaigns",
+                f"{venue}_TESTNET_SCOPE_REQUIRED",
+                f"{venue} testnet execution only accepts its own TESTNET campaigns",
             )
         if execution_scope != _scope_key(campaign.environment, campaign.account_id, campaign.venue):
             _reject("EXECUTION_SCOPE_MISMATCH", "sender scope does not match campaign scope")
@@ -1671,10 +1699,18 @@ class TradingService:
         if intent.status not in allowed_statuses:
             _reject("ORDER_INTENT_STATE_INVALID", "intent state does not allow this venue action")
         instrument = session.get(Instrument, campaign.instrument_id)
-        if instrument is None or not instrument.active:
+        if instrument is None or not instrument.active or instrument.venue != venue:
             _reject("INSTRUMENT_UNAVAILABLE", "campaign instrument is unavailable")
         if intent.quantity % instrument.lot_size != 0:
             _reject("INSTRUMENT_QUANTITY_INVALID", "intent quantity is not aligned to lot size")
+        if require_limit_price:
+            if intent.limit_price is None or intent.limit_price <= 0:
+                _reject(
+                    "HYPERLIQUID_LIMIT_PRICE_REQUIRED",
+                    "Hyperliquid IOC execution requires an explicit frozen limit price",
+                )
+            if intent.limit_price % instrument.tick_size != 0:
+                _reject("INSTRUMENT_PRICE_INVALID", "intent price exceeds current price precision")
         if intent.status == OrderIntentStatus.READY.value and not intent.reduce_only:
             authorization = session.get(TradingAuthorization, intent.authorization_id)
             proposal = (
@@ -1751,7 +1787,9 @@ class TradingService:
                 is not None
             ):
                 _reject("RISK_RESERVATION_UNKNOWN", "unresolved risk blocks new testnet sends")
-            notional = intent.quantity * position.mark_price * instrument.contract_multiplier
+            reference_price = intent.limit_price if require_limit_price else position.mark_price
+            assert reference_price is not None
+            notional = intent.quantity * reference_price * instrument.contract_multiplier
             if notional < instrument.minimum_notional:
                 _reject("MINIMUM_NOTIONAL", "intent is below current instrument minimum notional")
         return BinanceTestnetOrderCommand(
@@ -1759,7 +1797,11 @@ class TradingService:
             side=intent.side,
             quantity=intent.quantity,
             reduce_only=intent.reduce_only,
-            client_order_id=self._binance_client_order_id(intent.intent_id),
+            client_order_id=(
+                self._hyperliquid_client_order_id(intent.intent_id)
+                if venue == "HYPERLIQUID"
+                else self._binance_client_order_id(intent.intent_id)
+            ),
         )
 
     def prepare_binance_testnet_send(
@@ -1835,23 +1877,141 @@ class TradingService:
                 {OrderIntentStatus.UNKNOWN.value},
             )
 
+    def _hyperliquid_testnet_command(
+        self,
+        session: Session,
+        intent_id: UUID,
+        actor_id: UUID,
+        execution_scope: str,
+        owner_id: str,
+        fencing_token: int,
+        now: datetime,
+        allowed_statuses: set[str],
+    ) -> HyperliquidTestnetOrderCommand:
+        base = self._binance_testnet_command(
+            session,
+            intent_id,
+            actor_id,
+            execution_scope,
+            owner_id,
+            fencing_token,
+            now,
+            allowed_statuses,
+            venue="HYPERLIQUID",
+            require_limit_price=True,
+        )
+        intent = session.get(OrderIntent, intent_id)
+        if intent is None or intent.limit_price is None:
+            _reject(
+                "HYPERLIQUID_LIMIT_PRICE_REQUIRED",
+                "Hyperliquid IOC execution requires an explicit frozen limit price",
+            )
+        campaign = session.get(Campaign, intent.campaign_id)
+        instrument = None if campaign is None else session.get(Instrument, campaign.instrument_id)
+        if instrument is None:
+            _reject("INSTRUMENT_UNAVAILABLE", "campaign instrument is unavailable")
+        notional = intent.quantity * intent.limit_price * instrument.contract_multiplier
+        if notional < instrument.minimum_notional:
+            _reject("MINIMUM_NOTIONAL", "intent is below current instrument minimum notional")
+        return HyperliquidTestnetOrderCommand(
+            symbol=base.symbol,
+            side=base.side,
+            quantity=base.quantity,
+            limit_price=intent.limit_price,
+            reduce_only=base.reduce_only,
+            client_order_id=base.client_order_id,
+        )
+
+    def prepare_hyperliquid_testnet_send(
+        self,
+        intent_id: UUID,
+        actor_id: UUID,
+        execution_scope: str,
+        owner_id: str,
+        fencing_token: int,
+        *,
+        now: datetime,
+    ) -> HyperliquidTestnetOrderCommand:
+        with self.database.session_factory() as session:
+            return self._hyperliquid_testnet_command(
+                session,
+                intent_id,
+                actor_id,
+                execution_scope,
+                owner_id,
+                fencing_token,
+                now,
+                {
+                    OrderIntentStatus.READY.value,
+                    OrderIntentStatus.SENT.value,
+                    OrderIntentStatus.PARTIALLY_FILLED.value,
+                },
+            )
+
+    def prepare_hyperliquid_testnet_cancel(
+        self,
+        intent_id: UUID,
+        actor_id: UUID,
+        execution_scope: str,
+        owner_id: str,
+        fencing_token: int,
+        *,
+        now: datetime,
+    ) -> HyperliquidTestnetOrderCommand:
+        with self.database.session_factory() as session:
+            return self._hyperliquid_testnet_command(
+                session,
+                intent_id,
+                actor_id,
+                execution_scope,
+                owner_id,
+                fencing_token,
+                now,
+                {OrderIntentStatus.SENT.value, OrderIntentStatus.PARTIALLY_FILLED.value},
+            )
+
+    def prepare_hyperliquid_testnet_recovery(
+        self,
+        intent_id: UUID,
+        actor_id: UUID,
+        execution_scope: str,
+        owner_id: str,
+        fencing_token: int,
+        *,
+        now: datetime,
+    ) -> HyperliquidTestnetOrderCommand:
+        with self.database.session_factory() as session:
+            return self._hyperliquid_testnet_command(
+                session,
+                intent_id,
+                actor_id,
+                execution_scope,
+                owner_id,
+                fencing_token,
+                now,
+                {OrderIntentStatus.UNKNOWN.value},
+            )
+
     @staticmethod
     def _validate_binance_order_result(
         intent: OrderIntent,
         command: BinanceTestnetOrderCommand,
         result: BinanceTestnetOrder,
+        *,
+        expected_order_type: str = "MARKET",
+        identity_code: str = "BINANCE_TESTNET_IDENTITY_CONFLICT",
     ) -> None:
         if (
             result.client_order_id != command.client_order_id
             or result.side != intent.side
-            or result.order_type != "MARKET"
+            or result.order_type != expected_order_type
             or result.ordered_quantity != intent.quantity
             or result.reduce_only != intent.reduce_only
             or result.close_position
             or result.filled_quantity > intent.quantity
         ):
             _reject(
-                "BINANCE_TESTNET_IDENTITY_CONFLICT",
+                identity_code,
                 "testnet order result does not match the frozen order intent",
             )
 
@@ -1899,6 +2059,9 @@ class TradingService:
         command: BinanceTestnetOrderCommand,
         result: BinanceTestnetOrder,
         *,
+        venue: str = "BINANCE",
+        expected_order_type: str = "MARKET",
+        expected_limit_price: Decimal | None = None,
         now: datetime,
     ) -> UUID:
         with self.database.session_factory.begin() as session:
@@ -1911,7 +2074,7 @@ class TradingService:
                 _reject("CAMPAIGN_NOT_FOUND", "intent campaign is missing")
             if (
                 campaign.environment != ExecutionEnvironment.TESTNET.value
-                or campaign.venue != "BINANCE"
+                or campaign.venue != venue
                 or execution_scope
                 != _scope_key(campaign.environment, campaign.account_id, campaign.venue)
             ):
@@ -1919,7 +2082,19 @@ class TradingService:
             self._require_role(
                 session, actor_id, "venue.record", campaign.account_id, campaign.venue
             )
-            self._validate_binance_order_result(intent, command, result)
+            if expected_limit_price is not None and intent.limit_price != expected_limit_price:
+                _reject(
+                    f"{venue}_TESTNET_IDENTITY_CONFLICT",
+                    "result does not match the intent's frozen price boundary",
+                )
+            identity_code = f"{venue}_TESTNET_IDENTITY_CONFLICT"
+            self._validate_binance_order_result(
+                intent,
+                command,
+                result,
+                expected_order_type=expected_order_type,
+                identity_code=identity_code,
+            )
             fact = session.scalar(
                 select(VenueOrder)
                 .where(VenueOrder.order_intent_id == intent.intent_id)
@@ -1951,7 +2126,7 @@ class TradingService:
                 or fact.reduce_only != result.reduce_only
             ):
                 _reject(
-                    "BINANCE_TESTNET_IDENTITY_CONFLICT",
+                    identity_code,
                     "persisted client order identity changed semantics",
                 )
             else:
@@ -2035,7 +2210,7 @@ class TradingService:
             self._audit(
                 session,
                 actor_id=str(actor_id),
-                event_type="BINANCE_TESTNET_ORDER_OBSERVED",
+                event_type=f"{venue}_TESTNET_ORDER_OBSERVED",
                 object_type="VenueOrder",
                 object_id=fact.venue_order_fact_id,
                 reason=f"{result.client_order_id}:{result.status}",
@@ -2047,6 +2222,55 @@ class TradingService:
                 INTENT_TRANSITIONS.labels(previous, intent.status).inc()
             return fact.venue_order_fact_id
 
+    def record_hyperliquid_testnet_order(
+        self,
+        intent_id: UUID,
+        actor_id: UUID,
+        execution_scope: str,
+        owner_id: str,
+        fencing_token: int,
+        command: HyperliquidTestnetOrderCommand,
+        result: HyperliquidTestnetOrder,
+        *,
+        now: datetime,
+    ) -> UUID:
+        if result.limit_price != command.limit_price or result.stop_price != 0:
+            _reject(
+                "HYPERLIQUID_TESTNET_IDENTITY_CONFLICT",
+                "Hyperliquid result changed the explicit IOC price boundary",
+            )
+        return self.record_binance_testnet_order(
+            intent_id,
+            actor_id,
+            execution_scope,
+            owner_id,
+            fencing_token,
+            BinanceTestnetOrderCommand(
+                symbol=command.symbol,
+                side=command.side,
+                quantity=command.quantity,
+                reduce_only=command.reduce_only,
+                client_order_id=command.client_order_id,
+            ),
+            BinanceTestnetOrder(
+                order_id=result.order_id,
+                client_order_id=result.client_order_id,
+                status=result.status,
+                side=result.side,
+                order_type=result.order_type,
+                ordered_quantity=result.ordered_quantity,
+                filled_quantity=result.filled_quantity,
+                stop_price=result.stop_price,
+                reduce_only=result.reduce_only,
+                close_position=result.close_position,
+                observed_at=result.observed_at,
+            ),
+            venue="HYPERLIQUID",
+            expected_order_type="IOC_LIMIT",
+            expected_limit_price=command.limit_price,
+            now=now,
+        )
+
     def record_binance_testnet_unknown(
         self,
         intent_id: UUID,
@@ -2057,6 +2281,8 @@ class TradingService:
         command: BinanceTestnetOrderCommand,
         reason: str,
         *,
+        venue: str = "BINANCE",
+        order_type: str = "MARKET",
         now: datetime,
     ) -> None:
         with self.database.session_factory.begin() as session:
@@ -2067,8 +2293,11 @@ class TradingService:
             campaign = session.get(Campaign, intent.campaign_id, with_for_update=True)
             if campaign is None:
                 _reject("CAMPAIGN_NOT_FOUND", "intent campaign is missing")
-            if execution_scope != _scope_key(
-                campaign.environment, campaign.account_id, campaign.venue
+            if (
+                campaign.environment != ExecutionEnvironment.TESTNET.value
+                or campaign.venue != venue
+                or execution_scope
+                != _scope_key(campaign.environment, campaign.account_id, campaign.venue)
             ):
                 _reject("EXECUTION_SCOPE_MISMATCH", "sender scope does not match campaign scope")
             self._require_role(
@@ -2089,7 +2318,7 @@ class TradingService:
                     venue_order_id=f"UNKNOWN:{command.client_order_id}",
                     client_order_id=command.client_order_id,
                     side=command.side,
-                    order_type="MARKET",
+                    order_type=order_type,
                     reduce_only=command.reduce_only,
                     status=VenueOrderStatus.UNKNOWN.value,
                     ordered_quantity=command.quantity,
@@ -2119,7 +2348,7 @@ class TradingService:
             self._audit(
                 session,
                 actor_id=str(actor_id),
-                event_type="BINANCE_TESTNET_OUTCOME_UNKNOWN",
+                event_type=f"{venue}_TESTNET_OUTCOME_UNKNOWN",
                 object_type="OrderIntent",
                 object_id=intent.intent_id,
                 reason=reason,
@@ -2130,6 +2359,37 @@ class TradingService:
             if previous != intent.status:
                 INTENT_TRANSITIONS.labels(previous, intent.status).inc()
 
+    def record_hyperliquid_testnet_unknown(
+        self,
+        intent_id: UUID,
+        actor_id: UUID,
+        execution_scope: str,
+        owner_id: str,
+        fencing_token: int,
+        command: HyperliquidTestnetOrderCommand,
+        reason: str,
+        *,
+        now: datetime,
+    ) -> None:
+        self.record_binance_testnet_unknown(
+            intent_id,
+            actor_id,
+            execution_scope,
+            owner_id,
+            fencing_token,
+            BinanceTestnetOrderCommand(
+                symbol=command.symbol,
+                side=command.side,
+                quantity=command.quantity,
+                reduce_only=command.reduce_only,
+                client_order_id=command.client_order_id,
+            ),
+            reason,
+            venue="HYPERLIQUID",
+            order_type="IOC_LIMIT",
+            now=now,
+        )
+
     def prepare_binance_testnet_protection(
         self,
         campaign_id: UUID,
@@ -2139,6 +2399,7 @@ class TradingService:
         fencing_token: int,
         trigger_price: Decimal,
         *,
+        venue: str = "BINANCE",
         now: datetime,
     ) -> BinanceTestnetProtectionCommand:
         with self.database.session_factory() as session:
@@ -2148,7 +2409,7 @@ class TradingService:
                 _reject("CAMPAIGN_NOT_FOUND", "campaign does not exist")
             if (
                 campaign.environment != ExecutionEnvironment.TESTNET.value
-                or campaign.venue != "BINANCE"
+                or campaign.venue != venue
                 or execution_scope
                 != _scope_key(campaign.environment, campaign.account_id, campaign.venue)
             ):
@@ -2180,14 +2441,24 @@ class TradingService:
             ):
                 _reject("POSITION_UNKNOWN", "native protection requires a fresh nonzero position")
             instrument = session.get(Instrument, campaign.instrument_id)
-            if instrument is None or not instrument.protection_supported:
+            if (
+                instrument is None
+                or instrument.venue != venue
+                or not instrument.protection_supported
+            ):
                 _reject("PROTECTION_UNSUPPORTED", "instrument does not support native protection")
+            if trigger_price % instrument.tick_size != 0:
+                _reject("INSTRUMENT_PRICE_INVALID", "protection price exceeds instrument precision")
             side = "SELL" if position.quantity > 0 else "BUY"
             return BinanceTestnetProtectionCommand(
                 symbol=instrument.symbol,
                 side=side,
                 trigger_price=trigger_price,
-                client_order_id=self._binance_protection_client_order_id(position.position_id),
+                client_order_id=(
+                    self._hyperliquid_protection_client_order_id(position.position_id)
+                    if venue == "HYPERLIQUID"
+                    else self._binance_protection_client_order_id(position.position_id)
+                ),
             )
 
     def record_binance_testnet_protection(
@@ -2200,6 +2471,10 @@ class TradingService:
         command: BinanceTestnetProtectionCommand,
         result: BinanceTestnetOrder,
         *,
+        venue: str = "BINANCE",
+        expected_order_type: str = "STOP_MARKET",
+        expected_close_position: bool = True,
+        require_reduce_only: bool = False,
         now: datetime,
     ) -> UUID:
         with self.database.session_factory.begin() as session:
@@ -2207,8 +2482,11 @@ class TradingService:
             campaign = session.get(Campaign, campaign_id)
             if campaign is None:
                 _reject("CAMPAIGN_NOT_FOUND", "campaign does not exist")
-            if execution_scope != _scope_key(
-                campaign.environment, campaign.account_id, campaign.venue
+            if (
+                campaign.environment != ExecutionEnvironment.TESTNET.value
+                or campaign.venue != venue
+                or execution_scope
+                != _scope_key(campaign.environment, campaign.account_id, campaign.venue)
             ):
                 _reject("EXECUTION_SCOPE_MISMATCH", "protection is outside campaign scope")
             self._require_role(
@@ -2229,12 +2507,13 @@ class TradingService:
             if (
                 result.client_order_id != command.client_order_id
                 or result.side != command.side
-                or result.order_type != "STOP_MARKET"
+                or result.order_type != expected_order_type
                 or result.stop_price != command.trigger_price
-                or not result.close_position
+                or result.close_position != expected_close_position
+                or (require_reduce_only and not result.reduce_only)
             ):
                 _reject(
-                    "BINANCE_TESTNET_IDENTITY_CONFLICT",
+                    f"{venue}_TESTNET_IDENTITY_CONFLICT",
                     "testnet protection result changed frozen semantics",
                 )
             order = session.scalar(
@@ -2260,7 +2539,7 @@ class TradingService:
                     order_type=result.order_type,
                     reduce_only=True,
                     status=result.status,
-                    ordered_quantity=Decimal(0),
+                    ordered_quantity=result.ordered_quantity,
                     filled_quantity=result.filled_quantity,
                     observed_at=result.observed_at,
                     updated_at=now,
@@ -2317,7 +2596,7 @@ class TradingService:
             self._audit(
                 session,
                 actor_id=str(actor_id),
-                event_type="BINANCE_TESTNET_PROTECTION_OBSERVED",
+                event_type=f"{venue}_TESTNET_PROTECTION_OBSERVED",
                 object_type="ProtectionOrder",
                 object_id=protection.protection_id,
                 reason=f"{result.client_order_id}:{result.status}",
@@ -2326,6 +2605,116 @@ class TradingService:
                 now=now,
             )
             return protection.protection_id
+
+    def prepare_hyperliquid_testnet_protection(
+        self,
+        campaign_id: UUID,
+        actor_id: UUID,
+        execution_scope: str,
+        owner_id: str,
+        fencing_token: int,
+        trigger_price: Decimal,
+        limit_price: Decimal,
+        *,
+        now: datetime,
+    ) -> HyperliquidTestnetProtectionCommand:
+        base = self.prepare_binance_testnet_protection(
+            campaign_id,
+            actor_id,
+            execution_scope,
+            owner_id,
+            fencing_token,
+            trigger_price,
+            venue="HYPERLIQUID",
+            now=now,
+        )
+        if limit_price <= 0:
+            _reject(
+                "PROTECTION_TRIGGER_INVALID",
+                "Hyperliquid protection requires a positive explicit limit price",
+            )
+        with self.database.session_factory() as session:
+            campaign = session.get(Campaign, campaign_id)
+            position = (
+                None
+                if campaign is None
+                else session.scalar(
+                    select(Position).where(
+                        Position.account_id == campaign.account_id,
+                        Position.venue == campaign.venue,
+                        Position.environment == campaign.environment,
+                        Position.instrument_id == campaign.instrument_id,
+                    )
+                )
+            )
+            instrument = (
+                None if campaign is None else session.get(Instrument, campaign.instrument_id)
+            )
+            if position is None or instrument is None:
+                _reject("POSITION_UNKNOWN", "native protection position is unavailable")
+            if limit_price % instrument.tick_size != 0:
+                _reject("INSTRUMENT_PRICE_INVALID", "protection price exceeds instrument precision")
+            return HyperliquidTestnetProtectionCommand(
+                symbol=base.symbol,
+                side=base.side,
+                quantity=abs(position.quantity),
+                trigger_price=base.trigger_price,
+                limit_price=limit_price,
+                client_order_id=base.client_order_id,
+            )
+
+    def record_hyperliquid_testnet_protection(
+        self,
+        campaign_id: UUID,
+        actor_id: UUID,
+        execution_scope: str,
+        owner_id: str,
+        fencing_token: int,
+        command: HyperliquidTestnetProtectionCommand,
+        result: HyperliquidTestnetOrder,
+        *,
+        now: datetime,
+    ) -> UUID:
+        if (
+            result.ordered_quantity != command.quantity
+            or result.limit_price != command.limit_price
+            or result.reduce_only is not True
+        ):
+            _reject(
+                "HYPERLIQUID_TESTNET_IDENTITY_CONFLICT",
+                "Hyperliquid protection changed frozen quantity or price semantics",
+            )
+        return self.record_binance_testnet_protection(
+            campaign_id,
+            actor_id,
+            execution_scope,
+            owner_id,
+            fencing_token,
+            BinanceTestnetProtectionCommand(
+                symbol=command.symbol,
+                side=command.side,
+                trigger_price=command.trigger_price,
+                client_order_id=command.client_order_id,
+            ),
+            BinanceTestnetOrder(
+                order_id=result.order_id,
+                client_order_id=result.client_order_id,
+                status=result.status,
+                side=result.side,
+                order_type=result.order_type,
+                ordered_quantity=result.ordered_quantity,
+                filled_quantity=result.filled_quantity,
+                stop_price=result.stop_price,
+                reduce_only=result.reduce_only,
+                close_position=result.close_position,
+                observed_at=result.observed_at,
+            ),
+            venue="HYPERLIQUID",
+            expected_order_type="TRIGGER_MARKET",
+            expected_close_position=False,
+            require_reduce_only=True,
+            now=now,
+        )
 
     def record_shadow_order(
         self,
@@ -2761,21 +3150,76 @@ class TradingService:
     ) -> dict[str, Any]:
         """Persist one Binance USER_DATA snapshot without any venue-side mutation."""
 
+        return self._ingest_read_only_snapshot(
+            account_id,
+            actor_id,
+            snapshot,
+            venue="BINANCE",
+            environment=environment,
+            now=now,
+        )
+
+    def ingest_hyperliquid_read_only_snapshot(
+        self,
+        account_id: str,
+        actor_id: UUID,
+        snapshot: HyperliquidReadOnlySnapshot,
+        *,
+        environment: ExecutionEnvironment,
+        now: datetime,
+    ) -> dict[str, Any]:
+        """Persist one Hyperliquid Core Info snapshot without Exchange actions."""
+
+        return self._ingest_read_only_snapshot(
+            account_id,
+            actor_id,
+            snapshot,
+            venue="HYPERLIQUID",
+            environment=environment,
+            now=now,
+        )
+
+    @staticmethod
+    def _intent_id_from_client_order(venue: str, client_order_id: str) -> UUID | None:
+        raw: str | None = None
+        if venue == "BINANCE" and client_order_id.startswith("tcp-"):
+            raw = client_order_id.removeprefix("tcp-")
+        elif venue == "HYPERLIQUID" and client_order_id.startswith("0x"):
+            raw = client_order_id.removeprefix("0x")
+        if raw is None:
+            return None
+        try:
+            return _as_uuid(raw)
+        except ValueError:
+            return None
+
+    def _ingest_read_only_snapshot(
+        self,
+        account_id: str,
+        actor_id: UUID,
+        snapshot: BinanceReadOnlySnapshot | HyperliquidReadOnlySnapshot,
+        *,
+        venue: str,
+        environment: ExecutionEnvironment,
+        now: datetime,
+    ) -> dict[str, Any]:
+        """Persist one normalized narrow-adapter snapshot into authoritative facts."""
+
         if snapshot.observed_at > now + timedelta(seconds=5):
-            _reject("FACT_TIME_INVALID", "Binance snapshot is unexpectedly in the future")
+            _reject("FACT_TIME_INVALID", f"{venue} snapshot is unexpectedly in the future")
         with self.database.session_factory.begin() as session:
-            self._require_role(session, actor_id, "venue.record", account_id, "BINANCE")
+            self._require_role(session, actor_id, "venue.record", account_id, venue)
             instrument = session.scalar(
                 select(Instrument)
                 .where(
-                    Instrument.venue == "BINANCE",
+                    Instrument.venue == venue,
                     Instrument.symbol == snapshot.symbol,
                 )
                 .with_for_update()
             )
             if instrument is None:
                 instrument = Instrument(
-                    venue="BINANCE",
+                    venue=venue,
                     symbol=snapshot.symbol,
                     tick_size=snapshot.instrument.tick_size,
                     lot_size=snapshot.instrument.lot_size,
@@ -2802,7 +3246,7 @@ class TradingService:
                 select(Position)
                 .where(
                     Position.account_id == account_id,
-                    Position.venue == "BINANCE",
+                    Position.venue == venue,
                     Position.environment == environment.value,
                     Position.instrument_id == instrument.instrument_id,
                 )
@@ -2811,7 +3255,7 @@ class TradingService:
             if position is None:
                 position = Position(
                     account_id=account_id,
-                    venue="BINANCE",
+                    venue=venue,
                     environment=environment.value,
                     instrument_id=instrument.instrument_id,
                     quantity=snapshot.position.quantity,
@@ -2835,7 +3279,7 @@ class TradingService:
                 select(AccountEquity)
                 .where(
                     AccountEquity.account_id == account_id,
-                    AccountEquity.venue == "BINANCE",
+                    AccountEquity.venue == venue,
                     AccountEquity.environment == environment.value,
                 )
                 .with_for_update()
@@ -2843,7 +3287,7 @@ class TradingService:
             if equity is None:
                 equity = AccountEquity(
                     account_id=account_id,
-                    venue="BINANCE",
+                    venue=venue,
                     environment=environment.value,
                     equity=snapshot.equity.equity,
                     available_balance=snapshot.equity.available_balance,
@@ -2864,24 +3308,20 @@ class TradingService:
             order_count = 0
             for external_order in snapshot.orders:
                 intent: OrderIntent | None = None
-                if external_order.client_order_id.startswith("tcp-"):
-                    try:
-                        candidate = _as_uuid(external_order.client_order_id.removeprefix("tcp-"))
-                    except ValueError:
-                        candidate = None
-                    if candidate is not None:
-                        intent = session.get(OrderIntent, candidate)
+                candidate = self._intent_id_from_client_order(venue, external_order.client_order_id)
+                if candidate is not None:
+                    intent = session.get(OrderIntent, candidate)
                 if intent is not None:
                     campaign = session.get(Campaign, intent.campaign_id)
                     if (
                         campaign is None
                         or campaign.account_id != account_id
-                        or campaign.venue != "BINANCE"
+                        or campaign.venue != venue
                         or campaign.environment != environment.value
                         or campaign.instrument_id != instrument.instrument_id
                     ):
                         _reject(
-                            "BINANCE_ORDER_BINDING_INVALID",
+                            f"{venue}_ORDER_BINDING_INVALID",
                             "client order identity does not match its internal scope",
                         )
                 current_order = session.scalar(
@@ -2889,7 +3329,7 @@ class TradingService:
                     .where(
                         VenueOrder.environment == environment.value,
                         VenueOrder.account_id == account_id,
-                        VenueOrder.venue == "BINANCE",
+                        VenueOrder.venue == venue,
                         VenueOrder.venue_order_id == external_order.order_id,
                     )
                     .with_for_update()
@@ -2900,7 +3340,7 @@ class TradingService:
                         .where(
                             VenueOrder.environment == environment.value,
                             VenueOrder.account_id == account_id,
-                            VenueOrder.venue == "BINANCE",
+                            VenueOrder.venue == venue,
                             VenueOrder.client_order_id == external_order.client_order_id,
                         )
                         .with_for_update()
@@ -2909,7 +3349,7 @@ class TradingService:
                     current_order = VenueOrder(
                         order_intent_id=None if intent is None else intent.intent_id,
                         account_id=account_id,
-                        venue="BINANCE",
+                        venue=venue,
                         environment=environment.value,
                         instrument_id=instrument.instrument_id,
                         venue_order_id=external_order.order_id,
@@ -2939,7 +3379,7 @@ class TradingService:
                             and current_order.order_intent_id != intent.intent_id
                         )
                     ):
-                        _reject("BINANCE_FACT_CONFLICT", "venue order identity changed scope")
+                        _reject(f"{venue}_FACT_CONFLICT", "venue order identity changed scope")
                     if current_order.order_intent_id is None and intent is not None:
                         current_order.order_intent_id = intent.intent_id
                     current_order.venue_order_id = external_order.order_id
@@ -2957,7 +3397,7 @@ class TradingService:
                     select(VenueFill).where(
                         VenueFill.environment == environment.value,
                         VenueFill.account_id == account_id,
-                        VenueFill.venue == "BINANCE",
+                        VenueFill.venue == venue,
                         VenueFill.venue_fill_id == external_fill.fill_id,
                     )
                 )
@@ -2965,7 +3405,7 @@ class TradingService:
                     select(VenueOrder).where(
                         VenueOrder.environment == environment.value,
                         VenueOrder.account_id == account_id,
-                        VenueOrder.venue == "BINANCE",
+                        VenueOrder.venue == venue,
                         VenueOrder.venue_order_id == external_fill.order_id,
                     )
                 )
@@ -2978,7 +3418,7 @@ class TradingService:
                 if current_fill is None:
                     session.add(
                         VenueFill(
-                            venue="BINANCE",
+                            venue=venue,
                             venue_fill_id=external_fill.fill_id,
                             order_intent_id=None if intent is None else intent.intent_id,
                             campaign_id=campaign_id,
@@ -3003,7 +3443,7 @@ class TradingService:
                     or current_fill.fee != external_fill.fee
                     or current_fill.fee_currency != external_fill.fee_currency
                 ):
-                    _reject("BINANCE_FACT_CONFLICT", "venue fill identity changed semantics")
+                    _reject(f"{venue}_FACT_CONFLICT", "venue fill identity changed semantics")
                 fill_count += 1
 
             session.flush()
@@ -3012,7 +3452,7 @@ class TradingService:
                 .where(
                     VenueOrder.environment == environment.value,
                     VenueOrder.account_id == account_id,
-                    VenueOrder.venue == "BINANCE",
+                    VenueOrder.venue == venue,
                     VenueOrder.instrument_id == instrument.instrument_id,
                     VenueOrder.order_intent_id.is_not(None),
                 )
@@ -3025,23 +3465,26 @@ class TradingService:
                     OrderIntent, bound_order.order_intent_id, with_for_update=True
                 )
                 if bound_intent is None:
-                    _reject("BINANCE_ORDER_BINDING_INVALID", "bound order intent is missing")
+                    _reject(f"{venue}_ORDER_BINDING_INVALID", "bound order intent is missing")
                 bound_campaign = session.get(
                     Campaign, bound_intent.campaign_id, with_for_update=True
                 )
                 if bound_campaign is None:
-                    _reject("BINANCE_ORDER_BINDING_INVALID", "bound order campaign is missing")
+                    _reject(f"{venue}_ORDER_BINDING_INVALID", "bound order campaign is missing")
                 intent_fills = session.scalars(
                     select(VenueFill).where(VenueFill.order_intent_id == bound_intent.intent_id)
                 ).all()
                 if any(fill.side != bound_intent.side for fill in intent_fills):
-                    _reject("FILL_SIDE_MISMATCH", "Binance fill side changed intent semantics")
+                    _reject("FILL_SIDE_MISMATCH", f"{venue} fill side changed intent semantics")
                 filled = sum((fill.quantity for fill in intent_fills), Decimal(0))
                 if (
                     filled > bound_intent.quantity
                     or bound_order.filled_quantity > bound_intent.quantity
                 ):
-                    _reject("ORDER_INTENT_OVERFILLED", "Binance cumulative fill exceeds intent")
+                    _reject(
+                        "ORDER_INTENT_OVERFILLED",
+                        f"{venue} cumulative fill exceeds intent",
+                    )
                 if filled > bound_order.filled_quantity:
                     bound_order.filled_quantity = filled
                 previous = bound_intent.status
@@ -3107,7 +3550,7 @@ class TradingService:
                 select(Campaign)
                 .where(
                     Campaign.account_id == account_id,
-                    Campaign.venue == "BINANCE",
+                    Campaign.venue == venue,
                     Campaign.environment == environment.value,
                     Campaign.instrument_id == instrument.instrument_id,
                     Campaign.status != CampaignStatus.CLOSED.value,
@@ -3119,7 +3562,7 @@ class TradingService:
                     select(FundingPayment).where(
                         FundingPayment.environment == environment.value,
                         FundingPayment.account_id == account_id,
-                        FundingPayment.venue == "BINANCE",
+                        FundingPayment.venue == venue,
                         FundingPayment.venue_payment_id == external_funding.payment_id,
                     )
                 )
@@ -3130,7 +3573,7 @@ class TradingService:
                                 None if funding_campaign is None else funding_campaign.campaign_id
                             ),
                             account_id=account_id,
-                            venue="BINANCE",
+                            venue=venue,
                             environment=environment.value,
                             instrument_id=instrument.instrument_id,
                             venue_payment_id=external_funding.payment_id,
@@ -3145,7 +3588,7 @@ class TradingService:
                     or current_funding.amount != external_funding.amount
                     or current_funding.currency != external_funding.currency
                 ):
-                    _reject("BINANCE_FACT_CONFLICT", "funding identity changed semantics")
+                    _reject(f"{venue}_FACT_CONFLICT", "funding identity changed semantics")
                 elif current_funding.campaign_id is None and funding_campaign is not None:
                     current_funding.campaign_id = funding_campaign.campaign_id
                 funding_count += 1
@@ -3166,7 +3609,7 @@ class TradingService:
                     protection = ProtectionOrder(
                         position_id=position.position_id,
                         venue_order_id=(
-                            f"BINANCE:UNKNOWN:{snapshot.symbol}"
+                            f"{venue}:UNKNOWN:{snapshot.symbol}"
                             if observed_protection is None
                             else observed_protection.order_id
                         ),
@@ -3198,7 +3641,7 @@ class TradingService:
                     session.add(protection)
                 else:
                     protection.venue_order_id = (
-                        f"BINANCE:UNKNOWN:{snapshot.symbol}"
+                        f"{venue}:UNKNOWN:{snapshot.symbol}"
                         if observed_protection is None
                         else observed_protection.order_id
                     )
@@ -3230,7 +3673,7 @@ class TradingService:
                     .where(
                         VenueOrder.environment == environment.value,
                         VenueOrder.account_id == account_id,
-                        VenueOrder.venue == "BINANCE",
+                        VenueOrder.venue == venue,
                         VenueOrder.venue_order_id == protection.venue_order_id,
                     )
                     .with_for_update()
@@ -3246,7 +3689,7 @@ class TradingService:
             self._audit(
                 session,
                 actor_id=str(actor_id),
-                event_type="BINANCE_READ_ONLY_SYNCED",
+                event_type=f"{venue}_READ_ONLY_SYNCED",
                 object_type="Instrument",
                 object_id=instrument.instrument_id,
                 reason=(
@@ -3330,6 +3773,7 @@ class TradingService:
         actor_id: UUID,
         idempotency_key: str,
         *,
+        limit_price: Decimal | None = None,
         now: datetime,
     ) -> UUID:
         operation = "order.reduce"
@@ -3363,7 +3807,10 @@ class TradingService:
                 "target_version": campaign.target_version,
                 "target_quantity": str(campaign.current_target_quantity),
                 "position_quantity": str(position.quantity),
+                "limit_price": None if limit_price is None else str(limit_price),
             }
+            if limit_price is not None and (not limit_price.is_finite() or limit_price <= 0):
+                _reject("ORDER_LIMIT_PRICE_INVALID", "explicit reduction limit must be positive")
             digest, response = self._idempotency(
                 session,
                 caller_id=str(actor_id),
@@ -3393,6 +3840,7 @@ class TradingService:
                 kind=kind.value,
                 side=side,
                 quantity=reduction_quantity,
+                limit_price=limit_price,
                 reduce_only=True,
                 target_version=campaign.target_version,
                 position_id=position.position_id,

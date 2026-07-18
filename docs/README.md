@@ -1,6 +1,6 @@
 # Trading 产品化文档中心
 
-> 状态日期：2026-07-18
+> 状态日期：2026-07-19
 > 实盘效力：无；文档不签发交易、资金或部署授权
 
 本目录同时承载当前实现基线和长期产品愿景。阅读时必须区分“代码已实现”“后续目标”“研究/发布验收材料”；未实现的长期描述不得被当作当前业务入口、数据真源或建表理由。
@@ -42,10 +42,10 @@
 | 领域 | [系统架构与部署拓扑](02-domain/系统架构与部署拓扑.md) | 长期组件与故障域；当前实现以基线为准 |
 | 领域 | [领域模型与状态机](02-domain/领域模型与状态机.md) | 核心状态语义；不得据此新增重复当前/历史/投影表 |
 | 领域 | [风险引擎规格](02-domain/风险引擎规格.md) | 风险口径和长期政策；纯计算优先 |
-| 合同 | [API、事件、数据与审计契约](03-contracts/API事件数据与审计契约.md) | 未来对外接口；当前只有健康和指标 API |
+| 合同 | [API、事件、数据与审计契约](03-contracts/API事件数据与审计契约.md) | 长期接口合同；当前业务 API 以实现基线和代码为准 |
 | 合同 | [Instrument Catalog 合同](03-contracts/市场数据与Instrument-Catalog合同.md) | 标的身份、精度、状态和新鲜度 |
 | 合同 | [财务对账与 PnL](03-contracts/财务对账与PnL口径.md) | 成交、费用、资金费和 PnL 口径 |
-| 执行 | [OMS/VenueAdapter 规范](04-execution/OMS-Freqtrade-VenueAdapter执行规范.md) | 未来真实执行合同；当前无适配器或发送 |
+| 执行 | [OMS/VenueAdapter 规范](04-execution/OMS-Freqtrade-VenueAdapter执行规范.md) | 唯一订单所有权的长期合同；当前已有两个默认关闭的窄 TESTNET 适配合同，不存在通用 Freqtrade 平台 |
 | 执行 | [Binance 验收清单](04-execution/Binance执行认证清单.md) | 未来发布验证清单，不是证书软件平台需求 |
 | 执行 | [Hyperliquid 验收清单](04-execution/Hyperliquid执行认证清单.md) | 未来发布验证清单，不是证书软件平台需求 |
 | 执行 | [Vault 与 CTO](04-execution/Vault与CTO资金规范.md) | 长期资金愿景；当前 Gate 关闭且没有实现 |
@@ -65,4 +65,4 @@
 5. 只有不可替代的权威状态、跨重启保存需求或不可逆外部副作用，才足以新增持久实体。
 6. WP、迁移、表、服务、测试、文档和代码行数都不是进度指标。
 7. 专业认证与发布证据在真实适配器和外部副作用出现后按实际范围验证，不提前工程化成平台。
-8. 文档必须区分已实现的 SHADOW Web/PWA 与 Mock Telegram，和尚未实现的托管身份、真实 Telegram Bot、真实 VenueAdapter 与实盘发送能力。
+8. 文档必须区分已实现的 SHADOW Web/PWA、Mock Telegram、Binance/Hyperliquid Core 窄合同，和尚未实现的托管身份、真实 Telegram Bot、真实账户验证、HIP-3 与实盘发送能力。

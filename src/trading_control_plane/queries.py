@@ -354,6 +354,9 @@ class TradingQueries:
                             "kind": item.kind,
                             "side": item.side,
                             "quantity": str(item.quantity),
+                            "limit_price": (
+                                None if item.limit_price is None else str(item.limit_price)
+                            ),
                             "reduce_only": item.reduce_only,
                             "status": item.status,
                             "version": item.version,

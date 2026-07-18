@@ -22,6 +22,10 @@ def test_postgresql_psycopg_url_is_accepted() -> None:
     )
 
     assert settings.environment == "local"
+    assert settings.hyperliquid_read_only_enabled is False
+    assert settings.hyperliquid_testnet_order_send_enabled is False
+    assert settings.hyperliquid_core_dex == ""
+    assert not hasattr(settings, "hyperliquid_private_key")
 
 
 def test_production_rejects_mock_identity_and_default_signing_secret() -> None:

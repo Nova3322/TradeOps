@@ -341,6 +341,10 @@ class OrderIntent(Base):
             name="ck_order_intents_status",
         ),
         CheckConstraint("quantity > 0", name="ck_order_intents_quantity_positive"),
+        CheckConstraint(
+            "limit_price IS NULL OR limit_price > 0",
+            name="ck_order_intents_limit_price_positive",
+        ),
         Index("ix_order_intents_campaign_status", "campaign_id", "status"),
         Index(
             "uq_order_intents_one_active_campaign",
@@ -363,6 +367,7 @@ class OrderIntent(Base):
     kind: Mapped[str] = mapped_column(String(16), nullable=False)
     side: Mapped[str] = mapped_column(String(8), nullable=False)
     quantity: Mapped[Decimal] = mapped_column(AMOUNT, nullable=False)
+    limit_price: Mapped[Decimal | None] = mapped_column(AMOUNT, nullable=True)
     reduce_only: Mapped[bool] = mapped_column(Boolean, nullable=False)
     target_version: Mapped[int | None] = mapped_column(Integer, nullable=True)
     position_id: Mapped[UUID | None] = mapped_column(

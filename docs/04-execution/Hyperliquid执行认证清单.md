@@ -2,8 +2,8 @@
 
 > 文档编号：EXEC-CERT-HL-001
 > 版本：Draft 0.1
-> 日期：2026-07-18
-> 状态：待验证清单；不代表 Hyperliquid Core、任何 HIP-3 DEX、Freqtrade 或保证金能力已经通过
+> 日期：2026-07-19
+> 状态：Core 合同级工程基线已实现、真实认证仍待验证；不代表 Hyperliquid Core、任何 HIP-3 DEX、Freqtrade 或保证金能力已经通过
 > 上位文档：`交易系统总体方案.md`、`策略合同与数值化验收门.md`、`docs/04-execution/OMS-Freqtrade-VenueAdapter执行规范.md`
 
 ---
@@ -11,6 +11,10 @@
 ## 1. 使用说明
 
 本清单用于逐个认证 Hyperliquid 执行域。不得把“Hyperliquid 已支持”当成单一结论：Core 与每个启用的 HIP-3 DEX，以及不同账户抽象、抵押池、margin mode 和 worker，都是不同认证单位。
+
+当前代码只实现最小 Core 边界：`POST /info` 只读事实、官方 TESTNET `POST /exchange` 动作构造、稳定 cloid、显式价格 IOC、cancel-by-cloid、trigger 保护、Unknown 查询恢复和 Trading sender fencing。自动化使用本地官方形状合同与一次性 PostgreSQL，不连接 Hyperliquid，也不包含真实签名。默认进程没有 signer，所有开关关闭；HIP-3、margin、资金动作、Freqtrade worker 和 LIVE 均未实现。
+
+这里的“认证”是具体账户/执行域的发布验收工作，不要求建设 CapabilityCertificate、证据包数据库或证书状态机。当前测试和 Git 提供工程证据；真实账户/API Wallet/网络副作用只有用户另行授权后才可验证。
 
 状态值；它们是检查项状态，不是 `capability_status`：
 
@@ -29,7 +33,7 @@
 
 | 项目 | 当前状态 | 固定内容 / 验证要求 |
 | --- | --- | --- |
-| 执行所有权 | 已定 | Trading 唯一生成订单意图；Freqtrade 仅作受控后端 |
+| 执行所有权 | 已定 | Trading 唯一生成订单意图；当前直接窄 Adapter 执行，Freqtrade 仅在未来有真实必要时作为受控后端 |
 | 初仓 | 已定 | SYSTEM / MANUAL 均人工批准，Risk Engine 可拒绝 |
 | 自动 Add | 已定 | 默认关闭；按目标杠杆差额和 1 / 2 / 3 次有限授权 |
 | 目标保证金拓扑 | 已定 | 专用 subaccount / worker 的 isolated；按标的认证 removable 或 strict |
@@ -39,7 +43,7 @@
 | 资金 / Vault | 已定 | RiskControl Vault、Hyperliquid subaccount / Vault 概念严格分离；CTO 独立 |
 | 跨所故障接管 | 不支持 | 不自动转 Binance；换所必须新提案 |
 
-账户与 subaccount 细节引用 `DEC-EXEC-002`；Hyperliquid 使用 Freqtrade 原生能力还是定制受控桥接引用 `DEC-EXEC-005`。
+账户与 subaccount 细节引用 `DEC-EXEC-002`。当前选择直接窄 Adapter，不维护 Freqtrade 竞争订单所有者；未来若引入 Freqtrade，必须重新证明它只是受控执行后端。
 
 ---
 
@@ -131,9 +135,9 @@
 
 ---
 
-## 7. Freqtrade / 定制桥接受控执行
+## 7. 直接窄 Adapter / 可选 Freqtrade 受控执行
 
-在 `DEC-EXEC-005` 冻结前，不预设 Freqtrade 原生路径或定制桥接已经满足全部能力。无论最终路径为何，都必须通过：
+当前实现采用直接窄 Adapter，不建设任意交易所或 Freqtrade 平台。若未来因真实运行需要引入 Freqtrade，它不得改变下列要求：
 
 | 检查项 | 状态 | 通过证据 |
 | --- | --- | --- |

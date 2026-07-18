@@ -51,6 +51,14 @@ class Settings(BaseSettings):
     binance_testnet_base_url: str = "https://testnet.binancefuture.com"
     binance_testnet_api_key: str | None = Field(default=None, repr=False)
     binance_testnet_api_secret: str | None = Field(default=None, repr=False)
+    hyperliquid_read_only_enabled: bool = False
+    hyperliquid_fact_environment: Literal["TESTNET", "LIVE"] = "TESTNET"
+    hyperliquid_base_url: str = "https://api.hyperliquid-testnet.xyz"
+    hyperliquid_account_address: str | None = None
+    hyperliquid_core_dex: Literal[""] = ""
+    hyperliquid_testnet_order_send_enabled: bool = False
+    hyperliquid_testnet_base_url: str = "https://api.hyperliquid-testnet.xyz"
+    hyperliquid_vault_address: str | None = None
 
     @field_validator("database_url")
     @classmethod

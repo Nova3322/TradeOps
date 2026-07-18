@@ -1,7 +1,7 @@
 # Trading 交易系统
 
 > 状态日期：2026-07-19
-> 当前状态：M4 Binance USDⓈ-M TESTNET 窄订单合同；默认关闭且无真实测试账户实证，LIVE 发送不可用
+> 当前状态：M5 Binance 与 Hyperliquid Core 窄适配合同；全部默认关闭且无真实账户实证，LIVE 发送不可用
 
 本项目面向一个资本所有者、一个内部组织和多个内部用户。用户可以提交和审核提案、查看仓位、处理异常；系统在风险可控的前提下辅助执行交易并判断是否赚钱。不开放外部注册，不管理第三方资金，不建设机构级多租户、通用合规或通用认证平台。
 
@@ -28,23 +28,25 @@
 - 场所真实订单、成交、仓位、保护、余额和资金费必须与内部预期分开并对账；SHADOW、TESTNET、LIVE 使用独立事实作用域。
 - 每个 execution scope 只有一个有效 sender；新 owner 接管后旧 fencing token 无效。
 - `LIVE_ORDER_SEND`、`CAPITAL_TRANSFER`、`AUTO_ADD` 默认 `DISABLED`。
-- Telegram 当前只有不联网的 Mock 适配器；Binance USER_DATA GET 和官方 TESTNET 窄订单合同都默认关闭。TESTNET 合同不等于真实测试账户实证，LIVE 没有发送入口。真实 Bot、真实账户验证、实盘发送、Margin、Vault/CTO 尚未实现，文档愿景不能冒充代码能力。
+- Telegram 当前只有不联网的 Mock 适配器；Binance 和 Hyperliquid Core 的只读/TESTNET 窄合同全部默认关闭。TESTNET 合同不等于真实测试账户实证，LIVE 没有发送入口。真实 Bot、真实账户验证、实盘发送、HIP-3、Margin、Vault/CTO 尚未实现，文档愿景不能冒充代码能力。
 
 ## 当前代码入口
 
 - 进程：`uv run trading-api`
-- Web/PWA：提案/审核页面，Campaign 运营页，以及 `/venues/binance` 的只读场所事实页
-- HTTP：健康检查、内部会话、Perptape 机会、Proposal/Review/Risk/Authorization、SHADOW/TESTNET Campaign，以及 Binance 只读和受控 TESTNET 订单 API
+- Web/PWA：提案/审核页面、Campaign 运营页，以及 `/venues/binance` 的只读场所事实页；Hyperliquid 当前只有 HTTP 入口，没有专属页面
+- HTTP：健康检查、内部会话、Perptape 机会、Proposal/Review/Risk/Authorization、SHADOW/TESTNET Campaign，以及 Binance、Hyperliquid Core 的只读和受控 TESTNET API
 - 内部业务：`trading_control_plane.service.TradingService`
 - 纯计算：`evaluate_risk`、`select_target_position`、`compute_pnl`
 - 数据库：PostgreSQL，Alembic head `20260718_0001`
-- 场所边界：`binance.py` 只实现 GET；`binance_execution.py` 只接受官方 Binance USDⓈ-M TESTNET，实现查询、市价订单、取消和原生保护。两者默认不联网，没有 LIVE、保证金或资金写入口，`LIVE_ORDER_SEND` 仍为 `DISABLED`
+- 场所边界：`binance.py`/`binance_execution.py` 只覆盖 USDⓈ-M 只读与官方 TESTNET；`hyperliquid.py`/`hyperliquid_execution.py` 只覆盖 Core Info 与官方 TESTNET Exchange 合同。Hyperliquid “市价”固定为带显式批准价格的 IOC，不使用隐含 5% 滑点；HIP-3、LIVE、保证金和资金写入口不存在，`LIVE_ORDER_SEND` 仍为 `DISABLED`
 
 正式身份源按冻结决策使用托管 IdP 与 Passkey，但外部 IdP 尚未接入。本地/测试环境可显式启用仅识别已存在内部用户的 Mock 会话和 Mock step-up；生产环境硬拒绝启用 Mock 身份。Perptape 使用其现有 `GET /api/v1/breakouts` 窄合同，需单独配置平台 API Key，未配置时机会入口明确返回不可用。
 
 Binance 私有事实读取必须同时显式配置 `TRADING_BINANCE_READ_ONLY_ENABLED=true`、只读 API Key/Secret 和 `TRADING_BINANCE_FACT_ENVIRONMENT=TESTNET|LIVE`。当前仓库没有真实凭据或账户验证结果；未配置时页面只显示 PostgreSQL 已保存事实，不尝试联网。
 
 Binance TESTNET 订单还必须单独配置 `TRADING_BINANCE_TESTNET_ORDER_SEND_ENABLED=true` 和独立 TESTNET Key/Secret。客户端严格拒绝 LIVE 主机，使用稳定 client order identity 先查询再发送；Unknown 只允许查询恢复，不盲重发。当前无真实测试账户或凭据，自动化仅验证官方合同形状和数据库语义，没有产生任何交易所订单。
+
+Hyperliquid Core 只读同步必须显式配置 `TRADING_HYPERLIQUID_READ_ONLY_ENABLED=true`、与 `TRADING_HYPERLIQUID_FACT_ENVIRONMENT` 一致的官方 API 主机，以及真实账户或 subaccount 地址。TESTNET 发送还要求 `TRADING_HYPERLIQUID_TESTNET_ORDER_SEND_ENABLED=true` 和部署时注入的官方兼容 signer；仓库配置中没有私钥字段，默认进程也不会自行构造 signer。稳定 128-bit cloid、query-before-send、cancel-by-cloid、显式 IOC 限价和原生 trigger 保护均有本地合同测试，但当前没有真实 API Wallet、账户或签名实证，没有发送任何 Hyperliquid 订单。
 
 ## 本地开发
 

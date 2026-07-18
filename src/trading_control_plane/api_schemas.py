@@ -178,6 +178,7 @@ class CampaignTargetRequest(BaseModel):
 
 class ReductionIntentRequest(BaseModel):
     idempotency_key: str = Field(min_length=1, max_length=160)
+    limit_price: Decimal | None = Field(default=None, gt=0)
 
 
 class ReconciliationRequest(BaseModel):
@@ -193,6 +194,11 @@ class BinanceReadOnlySyncRequest(BaseModel):
     symbol: str = Field(min_length=1, max_length=64, pattern=r"^[A-Z0-9_]+$")
 
 
+class HyperliquidReadOnlySyncRequest(BaseModel):
+    account_id: str = Field(min_length=1, max_length=120)
+    symbol: str = Field(min_length=1, max_length=64, pattern=r"^[A-Z0-9]+$")
+
+
 class BinanceTestnetActionRequest(BaseModel):
     execution_scope: str = Field(min_length=3, max_length=255)
     owner_id: str = Field(min_length=1, max_length=255)
@@ -201,3 +207,8 @@ class BinanceTestnetActionRequest(BaseModel):
 
 class BinanceTestnetProtectionRequest(BinanceTestnetActionRequest):
     trigger_price: Decimal = Field(gt=0)
+
+
+class HyperliquidTestnetProtectionRequest(BinanceTestnetActionRequest):
+    trigger_price: Decimal = Field(gt=0)
+    limit_price: Decimal = Field(gt=0)

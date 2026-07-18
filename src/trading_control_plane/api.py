@@ -25,6 +25,8 @@ from trading_control_plane.api_schemas import (
     BinanceTestnetProtectionRequest,
     CampaignTargetRequest,
     FundingFactRequest,
+    HyperliquidReadOnlySyncRequest,
+    HyperliquidTestnetProtectionRequest,
     IntentReleaseRequest,
     IntentUnknownRequest,
     ManualProposalRequest,
@@ -62,6 +64,13 @@ from trading_control_plane.domain import (
     ProposalStatus,
     ReviewDecision,
     TargetCandidate,
+)
+from trading_control_plane.hyperliquid import HyperliquidReadOnlyClient
+from trading_control_plane.hyperliquid_execution import (
+    HyperliquidTestnetClient,
+    HyperliquidTestnetOrder,
+    HyperliquidTestnetOrderCommand,
+    HyperliquidTestnetProtectionCommand,
 )
 from trading_control_plane.logging import configure_logging
 from trading_control_plane.metrics import DATABASE_READY
@@ -121,9 +130,21 @@ def _domain_status(code: str) -> int:
         "BINANCE_TESTNET_NOT_CONFIGURED",
         "BINANCE_TESTNET_UNAVAILABLE",
         "BINANCE_TESTNET_OUTCOME_UNKNOWN",
+        "HYPERLIQUID_READ_ONLY_DISABLED",
+        "HYPERLIQUID_READ_ONLY_NOT_CONFIGURED",
+        "HYPERLIQUID_READ_ONLY_UNAVAILABLE",
+        "HYPERLIQUID_TESTNET_DISABLED",
+        "HYPERLIQUID_TESTNET_NOT_CONFIGURED",
+        "HYPERLIQUID_TESTNET_UNAVAILABLE",
+        "HYPERLIQUID_TESTNET_OUTCOME_UNKNOWN",
     }:
         return status.HTTP_503_SERVICE_UNAVAILABLE
-    if code in {"BINANCE_RESPONSE_INVALID", "BINANCE_TESTNET_RESPONSE_INVALID"}:
+    if code in {
+        "BINANCE_RESPONSE_INVALID",
+        "BINANCE_TESTNET_RESPONSE_INVALID",
+        "HYPERLIQUID_RESPONSE_INVALID",
+        "HYPERLIQUID_TESTNET_RESPONSE_INVALID",
+    }:
         return status.HTTP_502_BAD_GATEWAY
     return status.HTTP_422_UNPROCESSABLE_CONTENT
 
@@ -136,6 +157,8 @@ def create_app(
     binance_client: BinanceReadOnlyClient | None = None,
     binance_testnet_client: BinanceTestnetClient | None = None,
     binance_testnet_reader: BinanceReadOnlyClient | None = None,
+    hyperliquid_client: HyperliquidReadOnlyClient | None = None,
+    hyperliquid_testnet_client: HyperliquidTestnetClient | None = None,
 ) -> FastAPI:
     resolved_settings = settings or get_settings()
     resolved_settings.validate_runtime_security()
@@ -167,6 +190,18 @@ def create_app(
         api_secret=resolved_settings.binance_testnet_api_secret,
         recv_window_ms=resolved_settings.binance_recv_window_ms,
     )
+    resolved_hyperliquid = hyperliquid_client or HyperliquidReadOnlyClient(
+        base_url=resolved_settings.hyperliquid_base_url,
+        account_address=resolved_settings.hyperliquid_account_address,
+        dex=resolved_settings.hyperliquid_core_dex,
+    )
+    resolved_hyperliquid_testnet = hyperliquid_testnet_client or HyperliquidTestnetClient(
+        base_url=resolved_settings.hyperliquid_testnet_base_url,
+        account_address=resolved_settings.hyperliquid_account_address,
+        signer=None,
+        vault_address=resolved_settings.hyperliquid_vault_address,
+        dex=resolved_settings.hyperliquid_core_dex,
+    )
 
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
@@ -188,6 +223,8 @@ def create_app(
     app.state.binance_client = resolved_binance
     app.state.binance_testnet_client = resolved_binance_testnet
     app.state.binance_testnet_reader = resolved_binance_testnet_reader
+    app.state.hyperliquid_client = resolved_hyperliquid
+    app.state.hyperliquid_testnet_client = resolved_hyperliquid_testnet
 
     @app.exception_handler(DomainRejected)
     async def domain_rejected(_: Request, exc: DomainRejected) -> JSONResponse:
@@ -198,7 +235,12 @@ def create_app(
                     "code": exc.code,
                     "message": exc.detail,
                     "retryable": exc.code
-                    in {"PERPTAPE_UNAVAILABLE", "BINANCE_READ_ONLY_UNAVAILABLE"},
+                    in {
+                        "PERPTAPE_UNAVAILABLE",
+                        "BINANCE_READ_ONLY_UNAVAILABLE",
+                        "HYPERLIQUID_READ_ONLY_UNAVAILABLE",
+                        "HYPERLIQUID_TESTNET_UNAVAILABLE",
+                    },
                 }
             },
         )
@@ -785,6 +827,130 @@ def create_app(
             ),
         }
 
+    @app.get("/api/venues/hyperliquid/status")
+    def hyperliquid_read_only_status(
+        identity: SessionIdentity = identity_dependency,
+    ) -> dict[str, Any]:
+        del identity
+        return {
+            "venue": "HYPERLIQUID",
+            "domain": "CORE",
+            "dex": "",
+            "mode": "INFO_READ_ONLY",
+            "enabled": resolved_settings.hyperliquid_read_only_enabled,
+            "configured": resolved_hyperliquid.configured,
+            "order_send_available": False,
+            "fact_environment": resolved_settings.hyperliquid_fact_environment,
+            "source_environment": resolved_hyperliquid.fact_environment,
+            "hip3_available": False,
+            "environment": resolved_settings.environment,
+        }
+
+    @app.get("/api/venues/hyperliquid/testnet/status")
+    def hyperliquid_testnet_status(
+        identity: SessionIdentity = identity_dependency,
+    ) -> dict[str, Any]:
+        del identity
+        return {
+            "venue": "HYPERLIQUID",
+            "domain": "CORE",
+            "environment": "TESTNET",
+            "enabled": resolved_settings.hyperliquid_testnet_order_send_enabled,
+            "configured": resolved_hyperliquid_testnet.configured,
+            "signer_source": "INJECTED_RUNTIME_ONLY",
+            "live_order_send": False,
+            "capital_transfer": False,
+            "hip3_available": False,
+        }
+
+    def require_hyperliquid_testnet() -> None:
+        if not resolved_settings.hyperliquid_testnet_order_send_enabled:
+            raise DomainRejected(
+                "HYPERLIQUID_TESTNET_DISABLED",
+                "Hyperliquid Core testnet order send is explicitly disabled",
+            )
+        if not resolved_hyperliquid_testnet.configured:
+            raise DomainRejected(
+                "HYPERLIQUID_TESTNET_NOT_CONFIGURED",
+                "Hyperliquid testnet account and injected signer are not configured",
+            )
+
+    @app.get("/api/venues/hyperliquid/facts")
+    def hyperliquid_read_only_facts(
+        account_id: str,
+        identity: SessionIdentity = identity_dependency,
+    ) -> dict[str, Any]:
+        return {
+            "mode": "INFO_READ_ONLY",
+            "domain": "CORE",
+            "data": queries().venue_facts(
+                identity.user_id,
+                account_id,
+                "HYPERLIQUID",
+                resolved_settings.hyperliquid_fact_environment,
+            ),
+            "as_of": _now().isoformat(),
+        }
+
+    @app.post("/api/venues/hyperliquid/sync")
+    def sync_hyperliquid_read_only_facts(
+        payload: HyperliquidReadOnlySyncRequest,
+        identity: SessionIdentity = identity_dependency,
+    ) -> dict[str, Any]:
+        if not resolved_settings.hyperliquid_read_only_enabled:
+            raise DomainRejected(
+                "HYPERLIQUID_READ_ONLY_DISABLED",
+                "Hyperliquid Core Info synchronization is disabled",
+            )
+        if not resolved_hyperliquid.configured:
+            raise DomainRejected(
+                "HYPERLIQUID_READ_ONLY_NOT_CONFIGURED",
+                "Hyperliquid account or subaccount address is not configured",
+            )
+        if resolved_hyperliquid.fact_environment != resolved_settings.hyperliquid_fact_environment:
+            raise DomainRejected(
+                "HYPERLIQUID_ENVIRONMENT_MISMATCH",
+                "Hyperliquid API host does not match the configured fact environment",
+            )
+        if not service().can_user(
+            identity.user_id, "venue.record", payload.account_id, "HYPERLIQUID"
+        ):
+            raise DomainRejected(
+                "RBAC_DENIED", "Hyperliquid facts are outside the current operator scope"
+            )
+        now = _now()
+        snapshot = resolved_hyperliquid.read_snapshot(payload.symbol, now=now)
+        environment = ExecutionEnvironment(resolved_settings.hyperliquid_fact_environment)
+        persisted = service().ingest_hyperliquid_read_only_snapshot(
+            payload.account_id,
+            identity.user_id,
+            snapshot,
+            environment=environment,
+            now=now,
+        )
+        execution_scope = f"{environment.value}:{payload.account_id}:HYPERLIQUID"
+        reconciliation_id = service().reconcile_scope(execution_scope, identity.user_id, now=now)
+        return {
+            "source": "HYPERLIQUID_CORE_INFO",
+            "mode": "READ_ONLY",
+            "domain": "CORE",
+            "environment": environment.value,
+            "symbol": payload.symbol,
+            "observed_at": snapshot.observed_at.isoformat(),
+            "persisted": persisted,
+            "reconciliation": {
+                "reconciliation_id": str(reconciliation_id),
+                "execution_scope": execution_scope,
+                "status": service().reconciliation_status(reconciliation_id).value,
+            },
+            "facts": queries().venue_facts(
+                identity.user_id,
+                payload.account_id,
+                "HYPERLIQUID",
+                environment.value,
+            ),
+        }
+
     @app.get("/api/campaigns")
     def campaigns(
         identity: SessionIdentity = identity_dependency,
@@ -1147,6 +1313,262 @@ def create_app(
             "detail": queries().campaign_detail(identity.user_id, campaign_id),
         }
 
+    def rejected_hyperliquid_order(
+        command: HyperliquidTestnetOrderCommand, now: datetime
+    ) -> HyperliquidTestnetOrder:
+        return HyperliquidTestnetOrder(
+            order_id=f"REJECTED:{command.client_order_id}",
+            client_order_id=command.client_order_id,
+            status="REJECTED",
+            side=command.side,
+            order_type="IOC_LIMIT",
+            ordered_quantity=command.quantity,
+            filled_quantity=Decimal(0),
+            limit_price=command.limit_price,
+            stop_price=Decimal(0),
+            reduce_only=command.reduce_only,
+            close_position=False,
+            observed_at=now,
+        )
+
+    @app.post("/api/intents/{intent_id}/hyperliquid-testnet/send")
+    def send_hyperliquid_testnet_order(
+        intent_id: UUID,
+        payload: BinanceTestnetActionRequest,
+        identity: SessionIdentity = identity_dependency,
+    ) -> dict[str, Any]:
+        require_hyperliquid_testnet()
+        now = _now()
+        command = service().prepare_hyperliquid_testnet_send(
+            intent_id,
+            identity.user_id,
+            payload.execution_scope,
+            payload.owner_id,
+            payload.fencing_token,
+            now=now,
+        )
+        try:
+            result = resolved_hyperliquid_testnet.ensure_order(command, now=now)
+        except DomainRejected as exc:
+            if exc.code == "HYPERLIQUID_TESTNET_REJECTED":
+                service().record_hyperliquid_testnet_order(
+                    intent_id,
+                    identity.user_id,
+                    payload.execution_scope,
+                    payload.owner_id,
+                    payload.fencing_token,
+                    command,
+                    rejected_hyperliquid_order(command, now),
+                    now=now,
+                )
+            elif exc.code not in {
+                "HYPERLIQUID_TESTNET_UNAVAILABLE",
+                "HYPERLIQUID_TESTNET_SIGNER_INVALID",
+                "HYPERLIQUID_ORDER_PRECISION_INVALID",
+            }:
+                service().record_hyperliquid_testnet_unknown(
+                    intent_id,
+                    identity.user_id,
+                    payload.execution_scope,
+                    payload.owner_id,
+                    payload.fencing_token,
+                    command,
+                    exc.code,
+                    now=now,
+                )
+            raise
+        fact_id = service().record_hyperliquid_testnet_order(
+            intent_id,
+            identity.user_id,
+            payload.execution_scope,
+            payload.owner_id,
+            payload.fencing_token,
+            command,
+            result,
+            now=now,
+        )
+        campaign_id = queries().campaign_id_for_intent(identity.user_id, intent_id)
+        return {
+            "venue_order_fact_id": str(fact_id),
+            "client_order_id": command.client_order_id,
+            "environment": "TESTNET",
+            "domain": "CORE",
+            "detail": queries().campaign_detail(identity.user_id, campaign_id),
+        }
+
+    @app.post("/api/intents/{intent_id}/hyperliquid-testnet/cancel")
+    def cancel_hyperliquid_testnet_order(
+        intent_id: UUID,
+        payload: BinanceTestnetActionRequest,
+        identity: SessionIdentity = identity_dependency,
+    ) -> dict[str, Any]:
+        require_hyperliquid_testnet()
+        now = _now()
+        command = service().prepare_hyperliquid_testnet_cancel(
+            intent_id,
+            identity.user_id,
+            payload.execution_scope,
+            payload.owner_id,
+            payload.fencing_token,
+            now=now,
+        )
+        try:
+            result = resolved_hyperliquid_testnet.cancel_order(command, now=now)
+        except DomainRejected as exc:
+            if exc.code not in {
+                "HYPERLIQUID_TESTNET_UNAVAILABLE",
+                "HYPERLIQUID_TESTNET_SIGNER_INVALID",
+            }:
+                service().record_hyperliquid_testnet_unknown(
+                    intent_id,
+                    identity.user_id,
+                    payload.execution_scope,
+                    payload.owner_id,
+                    payload.fencing_token,
+                    command,
+                    exc.code,
+                    now=now,
+                )
+            raise
+        if result is None:
+            service().record_hyperliquid_testnet_unknown(
+                intent_id,
+                identity.user_id,
+                payload.execution_scope,
+                payload.owner_id,
+                payload.fencing_token,
+                command,
+                "HYPERLIQUID_TESTNET_ORDER_NOT_FOUND",
+                now=now,
+            )
+        else:
+            service().record_hyperliquid_testnet_order(
+                intent_id,
+                identity.user_id,
+                payload.execution_scope,
+                payload.owner_id,
+                payload.fencing_token,
+                command,
+                result,
+                now=now,
+            )
+        campaign_id = queries().campaign_id_for_intent(identity.user_id, intent_id)
+        return {
+            "environment": "TESTNET",
+            "domain": "CORE",
+            "confirmed": result is not None,
+            "detail": queries().campaign_detail(identity.user_id, campaign_id),
+        }
+
+    @app.post("/api/intents/{intent_id}/hyperliquid-testnet/recover")
+    def recover_hyperliquid_testnet_order(
+        intent_id: UUID,
+        payload: BinanceTestnetActionRequest,
+        identity: SessionIdentity = identity_dependency,
+    ) -> dict[str, Any]:
+        require_hyperliquid_testnet()
+        now = _now()
+        command = service().prepare_hyperliquid_testnet_recovery(
+            intent_id,
+            identity.user_id,
+            payload.execution_scope,
+            payload.owner_id,
+            payload.fencing_token,
+            now=now,
+        )
+        result = resolved_hyperliquid_testnet.recover_order(command, now=now)
+        if result is not None:
+            service().record_hyperliquid_testnet_order(
+                intent_id,
+                identity.user_id,
+                payload.execution_scope,
+                payload.owner_id,
+                payload.fencing_token,
+                command,
+                result,
+                now=now,
+            )
+        campaign_id = queries().campaign_id_for_intent(identity.user_id, intent_id)
+        return {
+            "environment": "TESTNET",
+            "domain": "CORE",
+            "recovered": result is not None,
+            "detail": queries().campaign_detail(identity.user_id, campaign_id),
+        }
+
+    def unknown_hyperliquid_protection(
+        command: HyperliquidTestnetProtectionCommand, now: datetime
+    ) -> HyperliquidTestnetOrder:
+        return HyperliquidTestnetOrder(
+            order_id=f"UNKNOWN:{command.client_order_id}",
+            client_order_id=command.client_order_id,
+            status="UNKNOWN",
+            side=command.side,
+            order_type="TRIGGER_MARKET",
+            ordered_quantity=command.quantity,
+            filled_quantity=Decimal(0),
+            limit_price=command.limit_price,
+            stop_price=command.trigger_price,
+            reduce_only=True,
+            close_position=False,
+            observed_at=now,
+        )
+
+    @app.post("/api/campaigns/{campaign_id}/hyperliquid-testnet/protection")
+    def create_hyperliquid_testnet_protection(
+        campaign_id: UUID,
+        payload: HyperliquidTestnetProtectionRequest,
+        identity: SessionIdentity = identity_dependency,
+    ) -> dict[str, Any]:
+        require_hyperliquid_testnet()
+        now = _now()
+        command = service().prepare_hyperliquid_testnet_protection(
+            campaign_id,
+            identity.user_id,
+            payload.execution_scope,
+            payload.owner_id,
+            payload.fencing_token,
+            payload.trigger_price,
+            payload.limit_price,
+            now=now,
+        )
+        try:
+            result = resolved_hyperliquid_testnet.ensure_protection(command, now=now)
+        except DomainRejected as exc:
+            if exc.code not in {
+                "HYPERLIQUID_TESTNET_UNAVAILABLE",
+                "HYPERLIQUID_TESTNET_SIGNER_INVALID",
+                "HYPERLIQUID_ORDER_PRECISION_INVALID",
+            }:
+                service().record_hyperliquid_testnet_protection(
+                    campaign_id,
+                    identity.user_id,
+                    payload.execution_scope,
+                    payload.owner_id,
+                    payload.fencing_token,
+                    command,
+                    unknown_hyperliquid_protection(command, now),
+                    now=now,
+                )
+            raise
+        protection_id = service().record_hyperliquid_testnet_protection(
+            campaign_id,
+            identity.user_id,
+            payload.execution_scope,
+            payload.owner_id,
+            payload.fencing_token,
+            command,
+            result,
+            now=now,
+        )
+        return {
+            "protection_id": str(protection_id),
+            "client_order_id": command.client_order_id,
+            "environment": "TESTNET",
+            "domain": "CORE",
+            "detail": queries().campaign_detail(identity.user_id, campaign_id),
+        }
+
     @app.post("/api/intents/{intent_id}/fills")
     def record_fill(
         intent_id: UUID,
@@ -1297,7 +1719,11 @@ def create_app(
         identity: SessionIdentity = identity_dependency,
     ) -> dict[str, Any]:
         intent_id = service().create_reduction_intent(
-            campaign_id, identity.user_id, payload.idempotency_key, now=_now()
+            campaign_id,
+            identity.user_id,
+            payload.idempotency_key,
+            limit_price=payload.limit_price,
+            now=_now(),
         )
         return {
             "intent_id": str(intent_id),

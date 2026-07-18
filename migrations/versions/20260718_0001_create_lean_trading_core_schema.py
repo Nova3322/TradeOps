@@ -598,6 +598,7 @@ def upgrade() -> None:
         sa.Column("kind", sa.String(length=16), nullable=False),
         sa.Column("side", sa.String(length=8), nullable=False),
         sa.Column("quantity", sa.Numeric(precision=38, scale=18), nullable=False),
+        sa.Column("limit_price", sa.Numeric(precision=38, scale=18), nullable=True),
         sa.Column("reduce_only", sa.Boolean(), nullable=False),
         sa.Column("target_version", sa.Integer(), nullable=True),
         sa.Column("position_id", sa.Uuid(), nullable=True),
@@ -619,6 +620,10 @@ def upgrade() -> None:
             name="ck_order_intents_status",
         ),
         sa.CheckConstraint("quantity > 0", name="ck_order_intents_quantity_positive"),
+        sa.CheckConstraint(
+            "limit_price IS NULL OR limit_price > 0",
+            name="ck_order_intents_limit_price_positive",
+        ),
         sa.ForeignKeyConstraint(
             ["authorization_id"],
             ["trading_authorizations.authorization_id"],
