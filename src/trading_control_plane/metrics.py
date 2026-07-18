@@ -201,3 +201,15 @@ PROTECTION_CAPABILITY_VALIDATIONS = Counter(
     "Exact durable native protection capability validations by result and primary reason.",
     labelnames=("result", "primary_reason"),
 )
+
+RISK_FACT_SET_REGISTRATIONS = Counter(
+    "trading_risk_fact_set_registrations_total",
+    "Immutable SHADOW-only complete risk fact-set registrations by bounded result.",
+    labelnames=("result",),
+)
+
+RISK_FACT_SET_VALIDATIONS = Counter(
+    "trading_risk_fact_set_validations_total",
+    "Exact-scope durable risk fact-set validations by result and primary reason.",
+    labelnames=("result", "primary_reason"),
+)

@@ -31,9 +31,6 @@ from trading_control_plane.risk import (
     CapitalProjectionBinding,
     CertificationBinding,
     FactFreshnessLimit,
-    FactObservation,
-    FactStatus,
-    FactType,
     MarketRiskInput,
     PositionDirection,
     RequestedRiskIncrease,
@@ -47,6 +44,8 @@ from trading_control_plane.risk import (
     ScopeType,
     TradeLossComponents,
 )
+from trading_control_plane.risk_fact_sets import RiskFactSetValidationResult
+from trading_control_plane.risk_facts import FactObservation, FactStatus, FactType
 
 TEST_CAPITAL_SCOPE_MANIFEST_ID = UUID("00000000-0000-0000-0000-000000000020")
 TEST_CAPITAL_SCOPE = CurrentAccountEquityScope(
@@ -220,6 +219,33 @@ def make_requested(**updates: Any) -> RequestedRiskIncrease:
     return RequestedRiskIncrease.model_validate(values)
 
 
+def make_fact_observations(
+    *,
+    now: datetime | None = None,
+    fact_status: FactStatus = FactStatus.KNOWN,
+    fact_age: timedelta = timedelta(milliseconds=100),
+) -> tuple[FactObservation, ...]:
+    observed_at = now or datetime.now(UTC)
+    event_time = observed_at - fact_age
+    return tuple(
+        FactObservation(
+            fact_type=fact_type,
+            status=fact_status,
+            source_ref=f"test-only:{fact_type.value.lower()}",
+            source_version="test-source-v1",
+            payload_hash=hash_json(
+                {
+                    "fact_type": fact_type.value,
+                    "event_time": event_time.isoformat(),
+                }
+            ),
+            event_time=event_time,
+            received_at=event_time + timedelta(milliseconds=10),
+        )
+        for fact_type in sorted(FactType, key=lambda item: item.value)
+    )
+
+
 def make_request(
     *,
     now: datetime | None = None,
@@ -228,12 +254,8 @@ def make_request(
     current_trade_loss: TradeLossComponents | None = None,
     market: MarketRiskInput | None = None,
     risk_tier: RiskTier = RiskTier.LOW,
-    fact_status: FactStatus = FactStatus.KNOWN,
-    fact_age: timedelta = timedelta(milliseconds=100),
     scope_risks: tuple[ScopeRiskInput, ...] | None = None,
 ) -> RiskPrecheckRequest:
-    observed_at = now or datetime.now(UTC)
-    event_time = observed_at - fact_age
     effective_requested = requested or make_requested()
     effective_market = market or MarketRiskInput(
         direction=PositionDirection.LONG,
@@ -319,23 +341,6 @@ def make_request(
         ),
         requested=effective_requested,
         scope_risks=scope_risks,
-        facts=tuple(
-            FactObservation(
-                fact_type=fact_type,
-                status=fact_status,
-                source_ref=f"test-only:{fact_type.value.lower()}",
-                source_version="test-source-v1",
-                payload_hash=hash_json(
-                    {
-                        "fact_type": fact_type.value,
-                        "event_time": event_time.isoformat(),
-                    }
-                ),
-                event_time=event_time,
-                received_at=event_time + timedelta(milliseconds=10),
-            )
-            for fact_type in FactType
-        ),
     )
 
 
@@ -348,6 +353,9 @@ def make_evaluation(
     capability_valid: bool = True,
     classification_valid: bool = True,
     protection_valid: bool = True,
+    fact_set_valid: bool = True,
+    fact_status: FactStatus = FactStatus.KNOWN,
+    fact_age: timedelta = timedelta(milliseconds=100),
 ) -> RiskEvaluationInput:
     decision_time = now or datetime.now(UTC)
     certificate_valid_until = (
@@ -410,6 +418,32 @@ def make_evaluation(
                     "00000000-0000-0000-0000-000000000044" if protection_valid else None
                 ),
                 "valid": protection_valid,
+            },
+        ),
+        risk_fact_set=RiskFactSetValidationResult(
+            valid=fact_set_valid,
+            reason_codes=(() if fact_set_valid else ("RISK_FACT_SET_RECORD_NOT_FOUND",)),
+            risk_fact_set_id=(
+                UUID("00000000-0000-0000-0000-000000000055") if fact_set_valid else None
+            ),
+            fact_set_version="risk-fact-set-test-v1" if fact_set_valid else None,
+            record_hash="9" * 64 if fact_set_valid else None,
+            evidence_hash="a" * 64 if fact_set_valid else None,
+            observations=(
+                make_fact_observations(
+                    now=decision_time,
+                    fact_status=fact_status,
+                    fact_age=fact_age,
+                )
+                if fact_set_valid
+                else ()
+            ),
+            valid_until=(decision_time + timedelta(days=1) if fact_set_valid else decision_time),
+            validation_snapshot={
+                "risk_fact_set_id": (
+                    "00000000-0000-0000-0000-000000000055" if fact_set_valid else None
+                ),
+                "valid": fact_set_valid,
             },
         ),
         decision_time=decision_time,

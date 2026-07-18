@@ -62,7 +62,6 @@ from trading_control_plane.reconciliation_models import (
 from trading_control_plane.risk import (
     CapitalProjectionBinding,
     CapitalProjectionResolver,
-    FactType,
     RiskDecisionResult,
     RiskEvaluationInput,
     RiskEvaluationResult,
@@ -76,7 +75,10 @@ from trading_control_plane.risk import (
     capability_validation_request,
     instrument_classification_validation_request,
     protection_capability_validation_request,
+    risk_fact_set_validation_request,
 )
+from trading_control_plane.risk_fact_sets import RiskFactSetValidator
+from trading_control_plane.risk_facts import FactType
 from trading_control_plane.risk_models import RiskPolicyRecord
 from trading_control_plane.sender_fencing_models import (
     ExecutionSenderScope,
@@ -583,8 +585,8 @@ class DurableExposureResolver:
 
 
 class ExecutionIntentService:
-    command_type = "execution.intent.create.v7"
-    payload_schema_version = 7
+    command_type = "execution.intent.create.v8"
+    payload_schema_version = 8
 
     def __init__(
         self,
@@ -592,6 +594,7 @@ class ExecutionIntentService:
         certificate_validator: CapabilityCertificateValidator | None = None,
         instrument_catalog_validator: InstrumentCatalogValidator | None = None,
         protection_capability_validator: ProtectionCapabilityValidator | None = None,
+        risk_fact_set_validator: RiskFactSetValidator | None = None,
         capital_projection_resolver: CapitalProjectionResolver | None = None,
         durable_exposure_resolver: DurableExposureResolver | None = None,
         protected_position_risk_resolver: CurrentProtectedPositionRiskResolver | None = None,
@@ -605,6 +608,7 @@ class ExecutionIntentService:
         self._protection_capability_validator = (
             protection_capability_validator or ProtectionCapabilityValidator()
         )
+        self._risk_fact_set_validator = risk_fact_set_validator or RiskFactSetValidator()
         self._capital_projection_resolver = (
             capital_projection_resolver or CapitalProjectionResolver()
         )
@@ -754,6 +758,11 @@ class ExecutionIntentService:
             ),
             lock=True,
         )
+        risk_fact_set = self._risk_fact_set_validator.validate(
+            session,
+            risk_fact_set_validation_request(request.risk_request, now),
+            lock=True,
+        )
         evaluation_input = RiskEvaluationInput(
             request=request.risk_request,
             risk_policy_id=policy_record.risk_policy_id,
@@ -764,6 +773,7 @@ class ExecutionIntentService:
             capability_validation=capability_validation,
             instrument_classification=instrument_classification,
             protection_capability=protection_capability,
+            risk_fact_set=risk_fact_set,
             decision_time=now,
             protected_position_risk=verified_exposure.protected_position_risk,
         )
@@ -909,6 +919,13 @@ class ExecutionIntentService:
                     else None
                 ),
                 protection_capability_record_hash=(protection_capability.record_hash),
+                risk_fact_set_id=risk_fact_set.risk_fact_set_id,
+                risk_fact_set_version=(
+                    risk_fact_set.fact_set_version
+                    if risk_fact_set.risk_fact_set_id is not None
+                    else None
+                ),
+                risk_fact_set_record_hash=risk_fact_set.record_hash,
                 system_risk_state=system_state.value,
                 result="ALLOW",
                 primary_reason_code="ORDER_PRECHECK_PASSED",
@@ -1160,6 +1177,14 @@ class ExecutionIntentService:
                 ),
                 "protection_capability_record_hash": protection_capability.record_hash,
                 "protection_capability_reason_codes": list(protection_capability.reason_codes),
+                "risk_fact_set_id": (
+                    str(risk_fact_set.risk_fact_set_id)
+                    if risk_fact_set.risk_fact_set_id is not None
+                    else None
+                ),
+                "risk_fact_set_version": risk_fact_set.fact_set_version,
+                "risk_fact_set_record_hash": risk_fact_set.record_hash,
+                "risk_fact_set_reason_codes": list(risk_fact_set.reason_codes),
                 "execution_mode": "SHADOW",
                 "dispatch_eligible": False,
                 "reservation_created": True,
@@ -1188,6 +1213,13 @@ class ExecutionIntentService:
                             else None
                         ),
                         "protection_capability_record_hash": (protection_capability.record_hash),
+                        "risk_fact_set_id": (
+                            str(risk_fact_set.risk_fact_set_id)
+                            if risk_fact_set.risk_fact_set_id is not None
+                            else None
+                        ),
+                        "risk_fact_set_version": risk_fact_set.fact_set_version,
+                        "risk_fact_set_record_hash": risk_fact_set.record_hash,
                         "dispatch_eligible": False,
                     },
                 ),
@@ -1736,6 +1768,13 @@ class ExecutionIntentService:
                 protection_capability_record_hash=(
                     evaluation_input.protection_capability.record_hash
                 ),
+                risk_fact_set_id=evaluation_input.risk_fact_set.risk_fact_set_id,
+                risk_fact_set_version=(
+                    evaluation_input.risk_fact_set.fact_set_version
+                    if evaluation_input.risk_fact_set.risk_fact_set_id is not None
+                    else None
+                ),
+                risk_fact_set_record_hash=evaluation_input.risk_fact_set.record_hash,
                 system_risk_state=evaluation_input.system_risk_state.value,
                 result="DENY",
                 primary_reason_code=reason_code,
@@ -1792,6 +1831,14 @@ class ExecutionIntentService:
                 "protection_capability_reason_codes": list(
                     evaluation_input.protection_capability.reason_codes
                 ),
+                "risk_fact_set_id": (
+                    str(evaluation_input.risk_fact_set.risk_fact_set_id)
+                    if evaluation_input.risk_fact_set.risk_fact_set_id is not None
+                    else None
+                ),
+                "risk_fact_set_version": evaluation_input.risk_fact_set.fact_set_version,
+                "risk_fact_set_record_hash": evaluation_input.risk_fact_set.record_hash,
+                "risk_fact_set_reason_codes": list(evaluation_input.risk_fact_set.reason_codes),
                 "dispatch_eligible": False,
                 "reservation_created": False,
                 "order_intent_created": False,
@@ -1829,6 +1876,13 @@ class ExecutionIntentService:
                         "protection_capability_record_hash": (
                             evaluation_input.protection_capability.record_hash
                         ),
+                        "risk_fact_set_id": (
+                            str(evaluation_input.risk_fact_set.risk_fact_set_id)
+                            if evaluation_input.risk_fact_set.risk_fact_set_id is not None
+                            else None
+                        ),
+                        "risk_fact_set_version": (evaluation_input.risk_fact_set.fact_set_version),
+                        "risk_fact_set_record_hash": (evaluation_input.risk_fact_set.record_hash),
                     },
                 ),
             ),

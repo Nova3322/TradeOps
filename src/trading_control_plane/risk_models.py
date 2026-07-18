@@ -150,6 +150,13 @@ class RiskDecisionSnapshot(Base):
             name="ck_risk_decisions_protection_capability_binding",
         ),
         CheckConstraint(
+            "(risk_fact_set_id IS NULL AND risk_fact_set_version IS NULL "
+            "AND risk_fact_set_record_hash IS NULL) OR "
+            "(risk_fact_set_id IS NOT NULL AND risk_fact_set_version IS NOT NULL "
+            "AND length(risk_fact_set_record_hash) = 64)",
+            name="ck_risk_decisions_risk_fact_set_binding",
+        ),
+        CheckConstraint(
             "jsonb_typeof(input_snapshot) = 'object' AND jsonb_typeof(decision) = 'object'",
             name="ck_risk_decisions_json_objects",
         ),
@@ -196,6 +203,16 @@ class RiskDecisionSnapshot(Base):
                 "instrument_protection_capability_records.position_management_template_version",
             ],
             name="fk_risk_decisions_protection_capability",
+            ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            ["risk_fact_set_id", "organization_id", "risk_fact_set_version"],
+            [
+                "risk_fact_sets.risk_fact_set_id",
+                "risk_fact_sets.organization_id",
+                "risk_fact_sets.fact_set_version",
+            ],
+            name="fk_risk_decisions_risk_fact_set",
             ondelete="RESTRICT",
         ),
         ForeignKeyConstraint(
@@ -251,6 +268,9 @@ class RiskDecisionSnapshot(Base):
     )
     protection_capability_version: Mapped[str | None] = mapped_column(String(120), nullable=True)
     protection_capability_record_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    risk_fact_set_id: Mapped[UUID | None] = mapped_column(Uuid(as_uuid=True), nullable=True)
+    risk_fact_set_version: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    risk_fact_set_record_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
     requested_quantity: Mapped[Decimal] = mapped_column(Numeric(38, 18), nullable=False)
     max_safe_quantity: Mapped[Decimal] = mapped_column(Numeric(38, 18), nullable=False)
     final_quantity: Mapped[Decimal] = mapped_column(Numeric(38, 18), nullable=False)

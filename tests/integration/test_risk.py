@@ -21,6 +21,10 @@ from tests.protection_capability_fixtures import (
     protection_capability_request_for_risk,
     register_protection_capability,
 )
+from tests.risk_fact_set_fixtures import (
+    register_risk_fact_set,
+    risk_fact_set_request_for_risk,
+)
 from tests.risk_fixtures import (
     TEST_CAPITAL_SCOPE_MANIFEST,
     make_capital,
@@ -52,6 +56,7 @@ from trading_control_plane.risk import (
     SystemRiskStateCommandService,
     SystemRiskStateService,
 )
+from trading_control_plane.risk_fact_set_models import RiskFactSetRecord
 from trading_control_plane.risk_models import (
     RiskDecisionSnapshot,
     RiskPolicyRecord,
@@ -128,6 +133,15 @@ def seed_default_protection_capability(
     assert result.status is CommandStatus.COMPLETED
 
 
+@pytest.fixture(autouse=True)
+def seed_default_risk_fact_set(database: Database, reset_database: None) -> None:
+    del reset_database
+    now = datetime.now(UTC)
+    request = risk_fact_set_request_for_risk(make_request(now=now), now=now)
+    result = register_risk_fact_set(database, request, now=now)
+    assert result.status is CommandStatus.COMPLETED
+
+
 def count_rows(session: Session, model: type[object]) -> int:
     return session.execute(select(func.count()).select_from(model)).scalar_one()
 
@@ -182,7 +196,7 @@ def risk_envelope(request: RiskPrecheckRequest) -> CommandEnvelope:
     now = datetime.now(UTC)
     return CommandEnvelope(
         idempotency_key=f"risk-precheck-{uuid4()}",
-        command_type="risk.precheck.evaluate.v7",
+        command_type="risk.precheck.evaluate.v8",
         object_type="ProposalCandidate",
         object_id=request.proposal_ref,
         expected_version=request.candidate_version,
@@ -193,7 +207,7 @@ def risk_envelope(request: RiskPrecheckRequest) -> CommandEnvelope:
         issued_at=now,
         expires_at=now + timedelta(minutes=2),
         auth_context_ref="test-only:risk-precheck-auth",
-        payload_schema_version=7,
+        payload_schema_version=8,
         reason="evaluate proposal candidate",
         payload=request.model_dump(mode="json"),
     )
@@ -286,6 +300,13 @@ def test_allow_precheck_persists_immutable_snapshot_audit_and_outbox(
         assert (
             snapshot.decision["protection_capability_record_hash"] == protection_record.record_hash
         )
+        assert snapshot.risk_fact_set_id is not None
+        fact_set = session.get(RiskFactSetRecord, snapshot.risk_fact_set_id)
+        assert fact_set is not None
+        assert snapshot.risk_fact_set_version == fact_set.fact_set_version
+        assert snapshot.risk_fact_set_record_hash == fact_set.record_hash
+        assert snapshot.input_snapshot["risk_fact_set"]["valid"] is True
+        assert snapshot.decision["risk_fact_set_record_hash"] == fact_set.record_hash
         assert (
             hash_json(snapshot.input_snapshot["capital_projection"])
             == snapshot.capital_projection_hash
@@ -665,10 +686,18 @@ def test_stale_precheck_is_durable_deny_not_silent_failure(database: Database) -
     now = datetime.now(UTC)
     seed_policy(database, now=now)
     seed_state(database)
+    request = make_request(now=now)
+    fact_set = risk_fact_set_request_for_risk(
+        request,
+        now=now,
+        fact_set_version="risk-fact-set-stale-test-v2",
+        fact_age=timedelta(seconds=6),
+    )
+    assert register_risk_fact_set(database, fact_set, now=now).status is CommandStatus.COMPLETED
 
     result = execute_precheck(
         database,
-        risk_envelope(make_request(now=now, fact_age=timedelta(seconds=6))),
+        risk_envelope(request),
     )
 
     assert result.status is CommandStatus.COMPLETED
@@ -795,7 +824,7 @@ def test_web_actor_cannot_call_internal_risk_precheck_handler_directly(
         assert count_rows(session, RiskDecisionSnapshot) == 0
 
 
-def test_risk_precheck_legacy_commands_and_wrong_v7_schema_are_rejected(
+def test_risk_precheck_legacy_commands_and_wrong_v8_schema_are_rejected(
     database: Database,
 ) -> None:
     v1 = risk_envelope(make_request()).model_copy(
@@ -816,6 +845,9 @@ def test_risk_precheck_legacy_commands_and_wrong_v7_schema_are_rejected(
     v6 = risk_envelope(make_request()).model_copy(
         update={"command_type": "risk.precheck.evaluate.v6"}
     )
+    v7 = risk_envelope(make_request()).model_copy(
+        update={"command_type": "risk.precheck.evaluate.v7"}
+    )
     old_field = risk_envelope(make_request())
     old_payload = dict(old_field.payload)
     old_scopes = [dict(scope) for scope in old_payload["scope_risks"]]
@@ -832,6 +864,10 @@ def test_risk_precheck_legacy_commands_and_wrong_v7_schema_are_rejected(
     protection_boolean = protection_boolean.model_copy(
         update={"payload": protection_boolean_payload}
     )
+    caller_facts = risk_envelope(make_request())
+    caller_facts_payload = dict(caller_facts.payload)
+    caller_facts_payload["facts"] = []
+    caller_facts = caller_facts.model_copy(update={"payload": caller_facts_payload})
     wrong_schema = risk_envelope(make_request()).model_copy(update={"payload_schema_version": 2})
 
     v1_result = execute_precheck(database, v1)
@@ -840,9 +876,11 @@ def test_risk_precheck_legacy_commands_and_wrong_v7_schema_are_rejected(
     v4_result = execute_precheck(database, v4)
     v5_result = execute_precheck(database, v5)
     v6_result = execute_precheck(database, v6)
+    v7_result = execute_precheck(database, v7)
     old_field_result = execute_precheck(database, old_field)
     caller_boolean_result = execute_precheck(database, caller_boolean)
     protection_boolean_result = execute_precheck(database, protection_boolean)
+    caller_facts_result = execute_precheck(database, caller_facts)
     schema_result = execute_precheck(database, wrong_schema)
 
     assert v1_result.status is CommandStatus.REJECTED
@@ -857,12 +895,16 @@ def test_risk_precheck_legacy_commands_and_wrong_v7_schema_are_rejected(
     assert v5_result.error_code == "COMMAND_TYPE_MISMATCH"
     assert v6_result.status is CommandStatus.REJECTED
     assert v6_result.error_code == "COMMAND_TYPE_MISMATCH"
+    assert v7_result.status is CommandStatus.REJECTED
+    assert v7_result.error_code == "COMMAND_TYPE_MISMATCH"
     assert old_field_result.status is CommandStatus.REJECTED
     assert old_field_result.error_code == "RISK_INPUT_INVALID"
     assert caller_boolean_result.status is CommandStatus.REJECTED
     assert caller_boolean_result.error_code == "RISK_INPUT_INVALID"
     assert protection_boolean_result.status is CommandStatus.REJECTED
     assert protection_boolean_result.error_code == "RISK_INPUT_INVALID"
+    assert caller_facts_result.status is CommandStatus.REJECTED
+    assert caller_facts_result.error_code == "RISK_INPUT_INVALID"
     assert schema_result.status is CommandStatus.REJECTED
     assert schema_result.error_code == "PAYLOAD_SCHEMA_VERSION_MISMATCH"
 

@@ -61,6 +61,16 @@ from trading_control_plane.protection_capability import (
     ProtectionCapabilityValidationResult,
     ProtectionCapabilityValidator,
 )
+from trading_control_plane.risk_fact_sets import (
+    RiskFactSetValidationRequest,
+    RiskFactSetValidationResult,
+    RiskFactSetValidator,
+)
+from trading_control_plane.risk_facts import (
+    REQUIRED_FACT_TYPES,
+    FactStatus,
+    FactType,
+)
 from trading_control_plane.risk_models import (
     RiskDecisionSnapshot,
     RiskPolicyRecord,
@@ -79,23 +89,6 @@ class RiskDecisionResult(StrEnum):
     ALLOW = "ALLOW"
     DENY = "DENY"
     ALLOW_WITH_CAP = "ALLOW_WITH_CAP"
-
-
-class FactType(StrEnum):
-    MARKET = "MARKET"
-    ACCOUNT = "ACCOUNT"
-    VAULT = "VAULT"
-    POSITIONS = "POSITIONS"
-    ORDERS = "ORDERS"
-    LEDGER = "LEDGER"
-    CATALOG = "CATALOG"
-    VENUE_CAPABILITY = "VENUE_CAPABILITY"
-    PROTECTION = "PROTECTION"
-
-
-class FactStatus(StrEnum):
-    KNOWN = "KNOWN"
-    UNKNOWN = "UNKNOWN"
 
 
 class ScopeType(StrEnum):
@@ -118,7 +111,6 @@ class PositionDirection(StrEnum):
     SHORT = "SHORT"
 
 
-REQUIRED_FACT_TYPES = frozenset(FactType)
 REQUIRED_SCOPE_TYPES = frozenset(ScopeType)
 
 RISK_STATE_RANK = {
@@ -132,6 +124,7 @@ RISK_STATE_RANK = {
 
 REASON_PRIORITY = (
     "RISK_POLICY_OUTSIDE_VALID_WINDOW",
+    "RISK_FACT_SET_UNAVAILABLE",
     "FACTS_UNKNOWN",
     "FACT_TIMESTAMP_IN_FUTURE",
     "FACT_TIME_ORDER_INVALID",
@@ -414,24 +407,6 @@ class ScopeRiskInput(BaseModel):
         return (self.scope_type, self.scope_id)
 
 
-class FactObservation(BaseModel):
-    model_config = ConfigDict(frozen=True)
-
-    fact_type: FactType
-    status: FactStatus
-    source_ref: str = Field(min_length=1, max_length=255)
-    source_version: str = Field(min_length=1, max_length=120)
-    payload_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
-    event_time: datetime
-    received_at: datetime
-
-    @model_validator(mode="after")
-    def timestamps_are_aware(self) -> Self:
-        if self.event_time.tzinfo is None or self.received_at.tzinfo is None:
-            raise ValueError("fact timestamps must be timezone-aware")
-        return self
-
-
 class RiskPrecheckRequest(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
@@ -450,15 +425,9 @@ class RiskPrecheckRequest(BaseModel):
     current_trade_loss: TradeLossComponents
     requested: RequestedRiskIncrease
     scope_risks: tuple[ScopeRiskInput, ...]
-    facts: tuple[FactObservation, ...]
 
     @model_validator(mode="after")
-    def exact_fact_and_scope_coverage(self) -> Self:
-        fact_types = [item.fact_type for item in self.facts]
-        if len(fact_types) != len(set(fact_types)):
-            raise ValueError("fact observations must be unique")
-        if frozenset(fact_types) != REQUIRED_FACT_TYPES:
-            raise ValueError("fact observations must cover every required fact type")
+    def exact_scope_coverage(self) -> Self:
         scope_keys = [item.key for item in self.scope_risks]
         if len(scope_keys) != len(set(scope_keys)):
             raise ValueError("scope risk inputs must be unique")
@@ -538,6 +507,24 @@ def protection_capability_validation_request(
             binding.credential_permission_profile_version
         ),
         expected_venue_client_version=binding.venue_client_version,
+        validation_time=validation_time,
+    )
+
+
+def risk_fact_set_validation_request(
+    request: RiskPrecheckRequest,
+    validation_time: datetime,
+) -> RiskFactSetValidationRequest:
+    binding = request.binding
+    return RiskFactSetValidationRequest(
+        organization_id=request.organization_id,
+        venue=binding.venue,
+        execution_domain=binding.execution_domain,
+        account_id=binding.account_id,
+        canonical_instrument_id=binding.instrument_identity,
+        position_mode=binding.position_mode,
+        margin_mode=binding.margin_mode,
+        collateral_pool_id=binding.collateral_pool_id,
         validation_time=validation_time,
     )
 
@@ -656,6 +643,7 @@ class RiskEvaluationInput(BaseModel):
     capability_validation: CapabilityValidationResult
     instrument_classification: InstrumentClassificationValidationResult
     protection_capability: ProtectionCapabilityValidationResult
+    risk_fact_set: RiskFactSetValidationResult
     decision_time: datetime
     protected_position_risk: VerifiedProtectedPositionRisk | None = None
 
@@ -768,6 +756,17 @@ class RiskEvaluationResult(BaseModel):
         pattern=r"^[0-9a-f]{64}$",
     )
     protection_capability_reason_codes: tuple[str, ...]
+    risk_fact_set_id: UUID | None
+    risk_fact_set_version: str | None
+    risk_fact_set_record_hash: str | None = Field(
+        default=None,
+        pattern=r"^[0-9a-f]{64}$",
+    )
+    risk_fact_set_evidence_hash: str | None = Field(
+        default=None,
+        pattern=r"^[0-9a-f]{64}$",
+    )
+    risk_fact_set_reason_codes: tuple[str, ...]
     requested_base_heat: Decimal
     requested_fee_stress: Decimal
     requested_stop_penetration_stress: Decimal
@@ -1098,10 +1097,11 @@ class RiskEvaluator:
             reasons.append("RISK_POLICY_OUTSIDE_VALID_WINDOW")
             hard_failure = True
 
+        facts = evaluation.risk_fact_set.observations
         freshness = {item.fact_type: item.max_age_ms for item in policy.fact_freshness_limits}
         unknown_facts = tuple(
             sorted(
-                (item.fact_type for item in request.facts if item.status is FactStatus.UNKNOWN),
+                (item.fact_type for item in facts if item.status is FactStatus.UNKNOWN),
                 key=lambda item: item.value,
             )
         )
@@ -1109,7 +1109,10 @@ class RiskEvaluator:
         future_facts: list[FactType] = []
         invalid_order_facts: list[FactType] = []
         fact_expiries: list[datetime] = []
-        for fact in request.facts:
+        if not evaluation.risk_fact_set.valid:
+            reasons.append("RISK_FACT_SET_UNAVAILABLE")
+            hard_failure = True
+        for fact in facts:
             max_age = timedelta(milliseconds=freshness[fact.fact_type])
             max_skew = timedelta(milliseconds=policy.max_future_skew_ms)
             fact_expiries.append(fact.event_time + max_age)
@@ -1132,9 +1135,9 @@ class RiskEvaluator:
         if stale_facts:
             reasons.append("FACTS_STALE")
             hard_failure = True
-        event_times = [item.event_time for item in request.facts]
+        event_times = [item.event_time for item in facts]
         consistency_window = timedelta(milliseconds=policy.consistency_window_ms)
-        if max(event_times) - min(event_times) > consistency_window:
+        if event_times and max(event_times) - min(event_times) > consistency_window:
             reasons.append("FACTS_INCONSISTENT")
             hard_failure = True
 
@@ -1334,6 +1337,7 @@ class RiskEvaluator:
                 evaluation.capability_validation.valid_until,
                 evaluation.instrument_classification.valid_until,
                 evaluation.protection_capability.valid_until,
+                evaluation.risk_fact_set.valid_until,
                 *fact_expiries,
                 *(
                     [evaluation.protected_position_risk.valid_until]
@@ -1377,6 +1381,11 @@ class RiskEvaluator:
             protection_capability_record_hash=(evaluation.protection_capability.record_hash),
             protection_capability_evidence_hash=(evaluation.protection_capability.evidence_hash),
             protection_capability_reason_codes=(evaluation.protection_capability.reason_codes),
+            risk_fact_set_id=evaluation.risk_fact_set.risk_fact_set_id,
+            risk_fact_set_version=evaluation.risk_fact_set.fact_set_version,
+            risk_fact_set_record_hash=evaluation.risk_fact_set.record_hash,
+            risk_fact_set_evidence_hash=evaluation.risk_fact_set.evidence_hash,
+            risk_fact_set_reason_codes=evaluation.risk_fact_set.reason_codes,
             requested_base_heat=request.requested_base_heat,
             requested_fee_stress=cost_stress.fee_stress,
             requested_stop_penetration_stress=cost_stress.stop_penetration_stress,
@@ -1397,8 +1406,8 @@ class RiskEvaluator:
 class RiskPrecheckService:
     """Persists one immutable shadow precheck and emits audit/outbox evidence."""
 
-    command_type = "risk.precheck.evaluate.v7"
-    payload_schema_version = 7
+    command_type = "risk.precheck.evaluate.v8"
+    payload_schema_version = 8
 
     def __init__(
         self,
@@ -1406,6 +1415,7 @@ class RiskPrecheckService:
         certificate_validator: CapabilityCertificateValidator | None = None,
         instrument_catalog_validator: InstrumentCatalogValidator | None = None,
         protection_capability_validator: ProtectionCapabilityValidator | None = None,
+        risk_fact_set_validator: RiskFactSetValidator | None = None,
         capital_projection_resolver: CapitalProjectionResolver | None = None,
         durable_exposure_resolver: ProposalDurableExposureResolver | None = None,
         clock: Callable[[], datetime] | None = None,
@@ -1418,6 +1428,7 @@ class RiskPrecheckService:
         self._protection_capability_validator = (
             protection_capability_validator or ProtectionCapabilityValidator()
         )
+        self._risk_fact_set_validator = risk_fact_set_validator or RiskFactSetValidator()
         self._capital_projection_resolver = (
             capital_projection_resolver or CapitalProjectionResolver()
         )
@@ -1512,6 +1523,11 @@ class RiskPrecheckService:
                 decided_at,
             ),
         )
+        risk_fact_set = self._risk_fact_set_validator.validate(
+            session,
+            risk_fact_set_validation_request(verified_request, decided_at),
+            lock=True,
+        )
         state_record = session.execute(
             select(SystemRiskStateRecord)
             .where(SystemRiskStateRecord.organization_id == request.organization_id)
@@ -1532,6 +1548,7 @@ class RiskPrecheckService:
             capability_validation=capability_validation,
             instrument_classification=instrument_classification,
             protection_capability=protection_capability,
+            risk_fact_set=risk_fact_set,
             decision_time=decided_at,
         )
         result = self._evaluator.evaluate(evaluation_input)
@@ -1607,6 +1624,13 @@ class RiskPrecheckService:
                     else None
                 ),
                 protection_capability_record_hash=(protection_capability.record_hash),
+                risk_fact_set_id=risk_fact_set.risk_fact_set_id,
+                risk_fact_set_version=(
+                    risk_fact_set.fact_set_version
+                    if risk_fact_set.risk_fact_set_id is not None
+                    else None
+                ),
+                risk_fact_set_record_hash=risk_fact_set.record_hash,
                 requested_quantity=result.requested_quantity,
                 max_safe_quantity=result.max_safe_quantity,
                 final_quantity=result.final_quantity,
@@ -1671,6 +1695,14 @@ class RiskPrecheckService:
                 ),
                 "protection_capability_record_hash": (protection_capability.record_hash),
                 "protection_capability_reason_codes": list(protection_capability.reason_codes),
+                "risk_fact_set_id": (
+                    str(risk_fact_set.risk_fact_set_id)
+                    if risk_fact_set.risk_fact_set_id is not None
+                    else None
+                ),
+                "risk_fact_set_version": risk_fact_set.fact_set_version,
+                "risk_fact_set_record_hash": risk_fact_set.record_hash,
+                "risk_fact_set_reason_codes": list(risk_fact_set.reason_codes),
                 "valid_until": result.valid_until.isoformat(),
                 "execution_eligible": False,
                 "reservation_created": False,
@@ -1711,6 +1743,13 @@ class RiskPrecheckService:
                             else None
                         ),
                         "protection_capability_record_hash": (protection_capability.record_hash),
+                        "risk_fact_set_id": (
+                            str(risk_fact_set.risk_fact_set_id)
+                            if risk_fact_set.risk_fact_set_id is not None
+                            else None
+                        ),
+                        "risk_fact_set_version": risk_fact_set.fact_set_version,
+                        "risk_fact_set_record_hash": risk_fact_set.record_hash,
                         "execution_eligible": False,
                         "reservation_created": False,
                     },

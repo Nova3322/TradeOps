@@ -35,6 +35,10 @@ from tests.reconciliation_fixtures import (
     phase_envelope,
     start_envelope,
 )
+from tests.risk_fact_set_fixtures import (
+    register_risk_fact_set,
+    risk_fact_set_request_for_risk,
+)
 from tests.risk_fixtures import (
     TEST_EXECUTION_CAPITAL_PROJECTION_BINDING,
     TEST_EXECUTION_CAPITAL_SCOPE_MANIFEST,
@@ -120,6 +124,7 @@ from trading_control_plane.risk import (
     ScopeType,
     TradeLossComponents,
 )
+from trading_control_plane.risk_fact_set_models import RiskFactSetRecord
 from trading_control_plane.risk_models import RiskDecisionSnapshot, RiskPolicyRecord
 from trading_control_plane.sender_fencing import SenderScopeBinding, sender_scope_id
 from trading_control_plane.sender_fencing_models import (
@@ -254,6 +259,7 @@ def prepare_authorization(
     auto_add: bool = False,
     register_catalog: bool = True,
     register_protection: bool = True,
+    register_fact_set: bool = True,
 ) -> tuple[FrozenProposalVersion, Campaign, InitialOrderAuthorization]:
     proposal, decision = prepare_approved(
         database,
@@ -272,27 +278,38 @@ def prepare_authorization(
     )
     assert result.status is CommandStatus.COMPLETED
     seed_execution_capital_projection(database)
+    fact_now = datetime.now(UTC)
+    risk_request = execution_risk_request(proposal, now=fact_now)
     if register_catalog:
-        catalog_now = datetime.now(UTC)
-        risk_request = execution_risk_request(proposal, now=catalog_now)
         catalog_request = instrument_catalog_request_for_risk(
             risk_request,
-            now=catalog_now,
+            now=fact_now,
         )
-        catalog_result = register_instrument_catalog(database, catalog_request, now=catalog_now)
+        catalog_result = register_instrument_catalog(database, catalog_request, now=fact_now)
         assert catalog_result.status is CommandStatus.COMPLETED
         if register_protection:
             protection_request = protection_capability_request_for_risk(
                 risk_request,
                 catalog_request,
-                now=catalog_now,
+                now=fact_now,
             )
             protection_result = register_protection_capability(
                 database,
                 protection_request,
-                now=catalog_now,
+                now=fact_now,
             )
             assert protection_result.status is CommandStatus.COMPLETED
+    if register_fact_set:
+        fact_set_request = risk_fact_set_request_for_risk(
+            risk_request,
+            now=fact_now,
+        )
+        fact_set_result = register_risk_fact_set(
+            database,
+            fact_set_request,
+            now=fact_now,
+        )
+        assert fact_set_result.status is CommandStatus.COMPLETED
     with database.session_factory.begin() as session:
         campaign = session.execute(select(Campaign)).scalar_one()
         initial = session.execute(select(InitialOrderAuthorization)).scalar_one()
@@ -315,7 +332,6 @@ def execution_risk_request(
     scope_current_planned: Decimal = Decimal("0"),
     scope_current_stress: Decimal = Decimal("0"),
     market_price: Decimal = Decimal("100.5"),
-    fact_age: timedelta = timedelta(milliseconds=100),
 ) -> RiskPrecheckRequest:
     requested = make_requested(
         requested_quantity=quantity,
@@ -361,7 +377,6 @@ def execution_risk_request(
             loss_calculation_ref="test-only:wp-0006-loss",
         ),
         scope_risks=scopes,
-        fact_age=fact_age,
     )
     values = base.model_dump(mode="python")
     values.update(
@@ -424,7 +439,7 @@ def create_intent_envelope(
     request = risk_request or execution_risk_request(proposal, now=now)
     return CommandEnvelope(
         idempotency_key=idempotency_key or f"execution-intent-{uuid4()}",
-        command_type="execution.intent.create.v7",
+        command_type="execution.intent.create.v8",
         object_type="Campaign",
         object_id=str(campaign.campaign_id),
         expected_version=1,
@@ -435,7 +450,7 @@ def create_intent_envelope(
         issued_at=now,
         expires_at=now + timedelta(minutes=2),
         auth_context_ref="internal:oms-risk-reservation-service",
-        payload_schema_version=7,
+        payload_schema_version=8,
         reason="create non-dispatchable shadow intent",
         payload={
             "intent_kind": "INITIAL",
@@ -470,7 +485,7 @@ def proposal_precheck_envelope(request: RiskPrecheckRequest) -> CommandEnvelope:
         issued_at=now,
         expires_at=now + timedelta(minutes=2),
         auth_context_ref="test-only:proposal-precheck-auth",
-        payload_schema_version=7,
+        payload_schema_version=8,
         reason="evaluate proposal against existing durable exposure",
         payload=request.model_dump(mode="json"),
     )
@@ -524,7 +539,7 @@ def create_add_envelope(
     )
     return CommandEnvelope(
         idempotency_key=f"execution-add-{uuid4()}",
-        command_type="execution.intent.create.v7",
+        command_type="execution.intent.create.v8",
         object_type="Campaign",
         object_id=str(campaign.campaign_id),
         expected_version=2,
@@ -535,7 +550,7 @@ def create_add_envelope(
         issued_at=now,
         expires_at=now + timedelta(minutes=2),
         auth_context_ref="internal:oms-risk-reservation-service",
-        payload_schema_version=7,
+        payload_schema_version=8,
         reason="create non-dispatchable shadow add intent",
         payload={
             "intent_kind": "ADD",
@@ -1218,7 +1233,7 @@ def execute_fact(
     return result
 
 
-def test_execution_intent_legacy_commands_and_wrong_v7_schema_are_rejected(
+def test_execution_intent_legacy_commands_and_wrong_v8_schema_are_rejected(
     database: Database,
 ) -> None:
     proposal, campaign, initial = prepare_authorization(database)
@@ -1239,6 +1254,9 @@ def test_execution_intent_legacy_commands_and_wrong_v7_schema_are_rejected(
     )
     v6 = create_intent_envelope(proposal, campaign, initial, now=datetime.now(UTC)).model_copy(
         update={"command_type": "execution.intent.create.v6"}
+    )
+    v7 = create_intent_envelope(proposal, campaign, initial, now=datetime.now(UTC)).model_copy(
+        update={"command_type": "execution.intent.create.v7"}
     )
     old_field = create_intent_envelope(proposal, campaign, initial, now=datetime.now(UTC))
     old_payload = dict(old_field.payload)
@@ -1267,6 +1285,17 @@ def test_execution_intent_legacy_commands_and_wrong_v7_schema_are_rejected(
     protection_boolean = protection_boolean.model_copy(
         update={"payload": protection_boolean_payload}
     )
+    caller_facts = create_intent_envelope(
+        proposal,
+        campaign,
+        initial,
+        now=datetime.now(UTC),
+    )
+    caller_facts_payload = dict(caller_facts.payload)
+    caller_facts_risk = dict(caller_facts_payload["risk_request"])
+    caller_facts_risk["facts"] = []
+    caller_facts_payload["risk_request"] = caller_facts_risk
+    caller_facts = caller_facts.model_copy(update={"payload": caller_facts_payload})
     wrong_schema = create_intent_envelope(
         proposal,
         campaign,
@@ -1280,9 +1309,11 @@ def test_execution_intent_legacy_commands_and_wrong_v7_schema_are_rejected(
     v4_result = execute_create(database, v4)
     v5_result = execute_create(database, v5)
     v6_result = execute_create(database, v6)
+    v7_result = execute_create(database, v7)
     old_field_result = execute_create(database, old_field)
     caller_boolean_result = execute_create(database, caller_boolean)
     protection_boolean_result = execute_create(database, protection_boolean)
+    caller_facts_result = execute_create(database, caller_facts)
     schema_result = execute_create(database, wrong_schema)
 
     assert v1_result.status is CommandStatus.REJECTED
@@ -1297,12 +1328,16 @@ def test_execution_intent_legacy_commands_and_wrong_v7_schema_are_rejected(
     assert v5_result.error_code == "COMMAND_TYPE_MISMATCH"
     assert v6_result.status is CommandStatus.REJECTED
     assert v6_result.error_code == "COMMAND_TYPE_MISMATCH"
+    assert v7_result.status is CommandStatus.REJECTED
+    assert v7_result.error_code == "COMMAND_TYPE_MISMATCH"
     assert old_field_result.status is CommandStatus.REJECTED
     assert old_field_result.error_code == "EXECUTION_INPUT_INVALID"
     assert caller_boolean_result.status is CommandStatus.REJECTED
     assert caller_boolean_result.error_code == "EXECUTION_INPUT_INVALID"
     assert protection_boolean_result.status is CommandStatus.REJECTED
     assert protection_boolean_result.error_code == "EXECUTION_INPUT_INVALID"
+    assert caller_facts_result.status is CommandStatus.REJECTED
+    assert caller_facts_result.error_code == "EXECUTION_INPUT_INVALID"
     assert schema_result.status is CommandStatus.REJECTED
     assert schema_result.error_code == "PAYLOAD_SCHEMA_VERSION_MISMATCH"
 
@@ -1358,6 +1393,13 @@ def test_initial_intent_atomically_persists_decision_reservation_ledger_and_hist
         assert (
             decision.decision["protection_capability_record_hash"] == protection_record.record_hash
         )
+        assert decision.risk_fact_set_id is not None
+        fact_set = session.get(RiskFactSetRecord, decision.risk_fact_set_id)
+        assert fact_set is not None
+        assert decision.risk_fact_set_version == fact_set.fact_set_version
+        assert decision.risk_fact_set_record_hash == fact_set.record_hash
+        assert decision.input_snapshot["evaluation"]["risk_fact_set"]["valid"] is True
+        assert decision.decision["risk_fact_set_record_hash"] == fact_set.record_hash
         assert (
             hash_json(decision.input_snapshot["capital_projection"])
             == decision.capital_projection_hash
@@ -1487,6 +1529,37 @@ def test_final_precheck_denies_when_exact_protection_capability_is_missing(
         decision = session.execute(select(ExecutionRiskDecision)).scalar_one()
         assert decision.catalog_record_id is not None
         assert decision.protection_capability_record_id is None
+        assert decision.valid_until == now
+        assert count_rows(session, OrderIntent) == 0
+        assert count_rows(session, RiskReservation) == 0
+
+
+def test_final_precheck_denies_when_exact_risk_fact_set_is_missing(
+    database: Database,
+) -> None:
+    proposal, campaign, initial = prepare_authorization(
+        database,
+        register_fact_set=False,
+    )
+    now = datetime.now(UTC)
+    seed_execution_policy(database, now)
+
+    result = execute_create(
+        database,
+        create_intent_envelope(proposal, campaign, initial, now=now),
+        ExecutionIntentService(clock=lambda: now),
+    )
+
+    assert result.status is CommandStatus.COMPLETED
+    assert result.data["result"] == "DENY"
+    assert result.data["primary_reason_code"] == "RISK_FACT_SET_UNAVAILABLE"
+    assert result.data["risk_fact_set_id"] is None
+    assert result.data["risk_fact_set_reason_codes"] == ["RISK_FACT_SET_RECORD_NOT_FOUND"]
+    with database.session_factory.begin() as session:
+        decision = session.execute(select(ExecutionRiskDecision)).scalar_one()
+        assert decision.catalog_record_id is not None
+        assert decision.protection_capability_record_id is not None
+        assert decision.risk_fact_set_id is None
         assert decision.valid_until == now
         assert count_rows(session, OrderIntent) == 0
         assert count_rows(session, RiskReservation) == 0
@@ -1834,10 +1907,17 @@ def test_stale_canonical_capital_fails_before_final_risk_math(database: Database
 def test_stale_final_precheck_is_durable_deny_without_intent_or_reservation(
     database: Database,
 ) -> None:
-    now = datetime.now(UTC)
     proposal, campaign, initial = prepare_authorization(database)
+    now = datetime.now(UTC)
     seed_execution_policy(database, now)
-    risk_request = execution_risk_request(proposal, now=now, fact_age=timedelta(seconds=20))
+    risk_request = execution_risk_request(proposal, now=now)
+    fact_set = risk_fact_set_request_for_risk(
+        risk_request,
+        now=now,
+        fact_set_version="risk-fact-set-stale-execution-v2",
+        fact_age=timedelta(seconds=20),
+    )
+    assert register_risk_fact_set(database, fact_set, now=now).status is CommandStatus.COMPLETED
 
     result = execute_create(
         database,

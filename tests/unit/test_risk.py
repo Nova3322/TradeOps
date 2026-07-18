@@ -20,8 +20,6 @@ from tests.risk_fixtures import (
 from trading_control_plane.authorization import RiskTier, SystemRiskState
 from trading_control_plane.commands import hash_json
 from trading_control_plane.risk import (
-    FactStatus,
-    FactType,
     PositionDirection,
     RiskDecisionResult,
     RiskEvaluator,
@@ -32,6 +30,7 @@ from trading_control_plane.risk import (
     ScopeType,
     TradeLossComponents,
 )
+from trading_control_plane.risk_facts import FactStatus, FactType
 
 
 def test_identical_input_and_versions_produce_identical_decision() -> None:
@@ -117,13 +116,15 @@ def test_stale_or_unknown_fact_fails_closed_with_zero_safe_quantity() -> None:
     stale = RiskEvaluator().evaluate(
         make_evaluation(
             now=now,
-            request=make_request(now=now, fact_age=timedelta(seconds=6)),
+            request=make_request(now=now),
+            fact_age=timedelta(seconds=6),
         )
     )
     unknown = RiskEvaluator().evaluate(
         make_evaluation(
             now=now,
-            request=make_request(now=now, fact_status=FactStatus.UNKNOWN),
+            request=make_request(now=now),
+            fact_status=FactStatus.UNKNOWN,
         )
     )
 
@@ -411,11 +412,17 @@ def test_policy_cannot_change_fixed_one_r_or_tier_contract() -> None:
         RiskPolicyParameters.model_validate(payload)
 
 
-def test_precheck_requires_every_fact_and_scope_type() -> None:
+def test_precheck_rejects_caller_facts_and_requires_every_scope_type() -> None:
     payload = make_request().model_dump()
-    payload["facts"] = payload["facts"][:-1]
+    payload["facts"] = []
 
-    with pytest.raises(ValidationError, match="every required fact type"):
+    with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
+        RiskPrecheckRequest.model_validate(payload)
+
+    payload = make_request().model_dump()
+    payload["scope_risks"] = payload["scope_risks"][:-1]
+
+    with pytest.raises(ValidationError, match="every required scope type"):
         RiskPrecheckRequest.model_validate(payload)
 
 
@@ -468,6 +475,16 @@ def test_caller_protection_boolean_is_rejected_and_durable_invalidity_denies() -
     assert result.protection_capability_reason_codes == ("PROTECTION_CAPABILITY_RECORD_NOT_FOUND",)
 
 
+def test_missing_durable_risk_fact_set_denies_without_evaluating_caller_facts() -> None:
+    result = RiskEvaluator().evaluate(make_evaluation(fact_set_valid=False))
+
+    assert result.result is RiskDecisionResult.DENY
+    assert result.primary_reason_code == "RISK_FACT_SET_UNAVAILABLE"
+    assert result.risk_fact_set_id is None
+    assert result.risk_fact_set_reason_codes == ("RISK_FACT_SET_RECORD_NOT_FOUND",)
+    assert result.max_safe_quantity == 0
+
+
 def test_allow_validity_is_bounded_by_exact_catalog_record() -> None:
     now = datetime(2026, 7, 18, 12, tzinfo=UTC)
     evaluation = make_evaluation(now=now)
@@ -502,6 +519,24 @@ def test_allow_validity_is_bounded_by_exact_protection_capability() -> None:
 
     assert result.result is RiskDecisionResult.ALLOW
     assert result.valid_until == protection_valid_until
+
+
+def test_allow_validity_is_bounded_by_exact_risk_fact_set() -> None:
+    now = datetime(2026, 7, 18, 12, tzinfo=UTC)
+    evaluation = make_evaluation(now=now)
+    fact_set_valid_until = now + timedelta(seconds=1)
+    bounded = evaluation.model_copy(
+        update={
+            "risk_fact_set": evaluation.risk_fact_set.model_copy(
+                update={"valid_until": fact_set_valid_until}
+            )
+        }
+    )
+
+    result = RiskEvaluator().evaluate(bounded)
+
+    assert result.result is RiskDecisionResult.ALLOW
+    assert result.valid_until == fact_set_valid_until
 
 
 @given(

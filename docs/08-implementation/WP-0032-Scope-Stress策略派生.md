@@ -1,7 +1,7 @@
 # WP-0032：Scope Stress 策略派生
 
-> 后续状态：WP-0034 已将风险/意图命令升级为 v7，删除 caller `protection_available`，并由不可变
-> exact 原生保护能力记录验证账户、凭证、worker 和保护模板。本文件保留 WP-0032 的 v5 历史合同。
+> 后续状态：WP-0035 已将风险/意图命令升级为 v8；WP-0034 删除 caller `protection_available`，WP-0035
+> 再删除 caller `facts` 并绑定不可变完整 Risk Fact Set。本文件保留 WP-0032 的 v5 历史合同。
 
 ## 1. 交付目标与权威边界
 
