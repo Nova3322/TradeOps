@@ -129,6 +129,12 @@ CAMPAIGN_TARGET_POSITION_EVALUATIONS = Counter(
     labelnames=("result",),
 )
 
+CAMPAIGN_PROTECTION_EXIT_EVALUATIONS = Counter(
+    "trading_campaign_protection_exit_evaluations_total",
+    "Canonical Campaign protection-health exit evaluations by bounded result.",
+    labelnames=("result",),
+)
+
 CAPABILITY_CERTIFICATE_ISSUANCE = Counter(
     "trading_capability_certificate_issuance_total",
     "Shadow-only capability certificate issuance by type, environment, and result.",

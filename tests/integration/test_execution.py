@@ -1331,6 +1331,7 @@ def prepare_open_add_campaign(
     database: Database,
     *,
     unrealized_pnl: Decimal,
+    protection_confirmed: bool = True,
 ) -> tuple[FrozenProposalVersion, Campaign, AddAuthorizationPackage, AddUnit]:
     now = datetime.now(UTC)
     proposal, campaign, initial = prepare_authorization(database, auto_add=True)
@@ -1340,7 +1341,7 @@ def prepare_open_add_campaign(
         create_intent_envelope(proposal, campaign, initial, now=now),
     )
     initial_intent_id = UUID(str(initial_result.data["order_intent_id"]))
-    facts = (
+    facts = [
         fact_request(
             sequence=1,
             status="FILLED",
@@ -1356,16 +1357,19 @@ def prepare_open_add_campaign(
             terminal=True,
             reconciled=True,
         ),
-        fact_request(
-            sequence=3,
-            status="PROTECTION_CONFIRMED",
-            filled=Decimal("0.5"),
-            remaining=Decimal("0"),
-            terminal=True,
-            reconciled=True,
-            protected=True,
-        ),
-    )
+    ]
+    if protection_confirmed:
+        facts.append(
+            fact_request(
+                sequence=3,
+                status="PROTECTION_CONFIRMED",
+                filled=Decimal("0.5"),
+                remaining=Decimal("0"),
+                terminal=True,
+                reconciled=True,
+                protected=True,
+            )
+        )
     for fact in facts:
         result = execute_fact(
             database,
@@ -1393,7 +1397,9 @@ def prepare_open_add_campaign(
         package = session.execute(select(AddAuthorizationPackage)).scalar_one()
         unit = session.execute(select(AddUnit)).scalar_one()
         package_state = session.get(AddAuthorizationPackageState, package.add_package_id)
-        assert package_state is not None and package_state.status == "ACTIVE"
+        assert package_state is not None
+        if protection_confirmed:
+            assert package_state.status == "ACTIVE"
     return proposal, campaign, package, unit
 
 
