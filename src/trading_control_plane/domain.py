@@ -33,6 +33,11 @@ class Role(StrEnum):
     SYSTEM_ADMIN = "SYSTEM_ADMIN"
 
 
+class PrincipalType(StrEnum):
+    HUMAN = "HUMAN"
+    SERVICE = "SERVICE"
+
+
 class ProposalSource(StrEnum):
     SYSTEM = "SYSTEM"
     MANUAL = "MANUAL"
@@ -165,6 +170,7 @@ class RiskEvaluationInput:
     current_risk: Decimal
     fact_age: timedelta
     position_known: bool
+    equity_known: bool
     protection_known: bool
 
 
@@ -229,10 +235,21 @@ def _deny(reason: str) -> RiskOutcome:
 def evaluate_risk(policy: RiskPolicyInput, inputs: RiskEvaluationInput) -> RiskOutcome:
     """Deterministically apply the current policy to current facts without persistence."""
 
+    if (
+        policy.max_total_risk <= 0
+        or policy.max_fact_age <= timedelta(0)
+        or inputs.current_risk < 0
+        or inputs.fact_age < timedelta(0)
+        or inputs.requested_quantity <= 0
+        or inputs.requested_risk <= 0
+    ):
+        return _deny("INVALID_INPUT")
     if inputs.fact_age > policy.max_fact_age:
         return _deny("STALE_FACTS")
     if not inputs.position_known:
         return _deny("POSITION_UNKNOWN")
+    if not inputs.equity_known:
+        return _deny("EQUITY_UNKNOWN")
     if not inputs.protection_known:
         return _deny("PROTECTION_UNKNOWN")
     if policy.system_state is SystemRiskState.KILL_SWITCH:
@@ -244,9 +261,6 @@ def evaluate_risk(policy: RiskPolicyInput, inputs: RiskEvaluationInput) -> RiskO
         return _deny("REDUCE_ONLY")
     if policy.system_state is SystemRiskState.NO_PYRAMID and inputs.kind is IntentKind.ADD:
         return _deny("PYRAMID_DISABLED")
-    if inputs.requested_quantity <= 0 or inputs.requested_risk <= 0:
-        return _deny("INVALID_REQUEST")
-
     available = max(Decimal(0), policy.max_total_risk - inputs.current_risk)
     if available <= 0:
         return _deny("RISK_CAPACITY_EXHAUSTED")

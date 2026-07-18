@@ -23,6 +23,7 @@ from trading_control_plane.domain import (
     IntentKind,
     OrderIntentStatus,
     PnlBreakdown,
+    PrincipalType,
     ProposalSource,
     ProposalStatus,
     ProtectionStatus,
@@ -83,6 +84,20 @@ ACTIVE_INTENT_STATUSES = {
     OrderIntentStatus.UNKNOWN.value,
 }
 
+OCCUPIED_RESERVATION_STATUSES = {
+    ReservationStatus.RESERVED.value,
+    ReservationStatus.OPEN.value,
+    ReservationStatus.UNKNOWN.value,
+}
+
+RELEASABLE_INTENT_STATUSES = {
+    OrderIntentStatus.PENDING.value,
+    OrderIntentStatus.RESERVED.value,
+    OrderIntentStatus.READY.value,
+    OrderIntentStatus.SENT.value,
+    OrderIntentStatus.PARTIALLY_FILLED.value,
+}
+
 ROLE_ACTIONS: dict[Role, frozenset[str]] = {
     Role.OBSERVER: frozenset({"view"}),
     Role.PROPOSER: frozenset({"view", "proposal.create", "proposal.submit"}),
@@ -119,14 +134,19 @@ def _advisory_lock_key(caller_id: str, operation: str, key: str) -> int:
     return int.from_bytes(digest, byteorder="big", signed=True)
 
 
+RISK_CAPACITY_LOCK_KEY = _advisory_lock_key("trading", "risk-capacity", "global")
+
+
 def _as_uuid(value: str) -> UUID:
     return UUID(value)
 
 
-def _scope_parts(execution_scope: str) -> tuple[str | None, str | None]:
-    account_id, separator, venue = execution_scope.partition(":")
-    if not separator:
-        return None, None
+def _scope_parts(execution_scope: str) -> tuple[str, str]:
+    if execution_scope.count(":") != 1:
+        _reject("EXECUTION_SCOPE_INVALID", "execution scope must be account:venue")
+    account_id, venue = execution_scope.split(":", 1)
+    if not account_id or not venue or account_id.strip() != account_id or venue.strip() != venue:
+        _reject("EXECUTION_SCOPE_INVALID", "execution scope must contain non-empty exact parts")
     return account_id, venue
 
 
@@ -256,7 +276,12 @@ class TradingService:
         with self.database.session_factory.begin() as session:
             if session.scalar(select(func.count()).select_from(User)) != 0:
                 _reject("BOOTSTRAP_CLOSED", "an administrator already exists")
-            user = User(username=username, active=True, created_at=now)
+            user = User(
+                username=username,
+                principal_type=PrincipalType.HUMAN.value,
+                active=True,
+                created_at=now,
+            )
             session.add(user)
             session.flush()
             session.add(
@@ -284,7 +309,12 @@ class TradingService:
     def create_user(self, username: str, actor_id: UUID, *, now: datetime) -> UUID:
         with self.database.session_factory.begin() as session:
             self._require_role(session, actor_id, "user.manage")
-            user = User(username=username, active=True, created_at=now)
+            user = User(
+                username=username,
+                principal_type=PrincipalType.HUMAN.value,
+                active=True,
+                created_at=now,
+            )
             session.add(user)
             session.flush()
             self._audit(
@@ -299,6 +329,30 @@ class TradingService:
                 now=now,
             )
             return user.user_id
+
+    def create_service_principal(self, username: str, actor_id: UUID, *, now: datetime) -> UUID:
+        with self.database.session_factory.begin() as session:
+            self._require_role(session, actor_id, "user.manage")
+            principal = User(
+                username=username,
+                principal_type=PrincipalType.SERVICE.value,
+                active=True,
+                created_at=now,
+            )
+            session.add(principal)
+            session.flush()
+            self._audit(
+                session,
+                actor_id=str(actor_id),
+                event_type="SERVICE_PRINCIPAL_CREATED",
+                object_type="User",
+                object_id=principal.user_id,
+                reason="internal strategy or service principal created",
+                correlation_id=uuid4(),
+                object_version=1,
+                now=now,
+            )
+            return principal.user_id
 
     def assign_role(
         self,
@@ -393,6 +447,12 @@ class TradingService:
     ) -> UUID:
         with self.database.session_factory.begin() as session:
             self._require_role(session, actor_id, "risk_policy.manage")
+            if max_total_risk <= 0 or max_fact_age <= timedelta(0):
+                _reject("RISK_POLICY_INVALID", "risk capacity and fact age must be positive")
+            session.execute(
+                text("SELECT pg_advisory_xact_lock(:key)"),
+                {"key": RISK_CAPACITY_LOCK_KEY},
+            )
             for current in session.scalars(select(RiskPolicy).where(RiskPolicy.active)).all():
                 current.active = False
             policy = RiskPolicy(
@@ -433,6 +493,8 @@ class TradingService:
         max_risk: Decimal,
         expires_at: datetime,
         idempotency_key: str,
+        strategy_id: str | None = None,
+        strategy_version: str | None = None,
         now: datetime,
     ) -> UUID:
         payload = {
@@ -445,6 +507,8 @@ class TradingService:
             "quantity": str(quantity),
             "max_risk": str(max_risk),
             "expires_at": expires_at.isoformat(),
+            "strategy_id": strategy_id,
+            "strategy_version": strategy_version,
         }
         operation = "proposal.create"
         with self.database.session_factory.begin() as session:
@@ -458,6 +522,23 @@ class TradingService:
             )
             if response is not None:
                 return _as_uuid(str(response["proposal_id"]))
+            principal = session.get(User, actor_id)
+            if principal is None:
+                _reject("USER_NOT_AUTHORIZED", "proposal principal does not exist")
+            if source is ProposalSource.MANUAL:
+                if principal.principal_type != PrincipalType.HUMAN.value:
+                    _reject("PROPOSAL_SOURCE_INVALID", "MANUAL proposals require a human")
+                if strategy_id is not None or strategy_version is not None:
+                    _reject("PROPOSAL_STRATEGY_INVALID", "MANUAL proposals do not bind a strategy")
+            elif (
+                principal.principal_type != PrincipalType.SERVICE.value
+                or not strategy_id
+                or not strategy_version
+            ):
+                _reject(
+                    "PROPOSAL_SOURCE_INVALID",
+                    "SYSTEM proposals require a service principal and strategy version",
+                )
             instrument = session.get(Instrument, instrument_id)
             if instrument is None or not instrument.active or instrument.venue != venue:
                 _reject("INSTRUMENT_UNAVAILABLE", "instrument is inactive or outside venue scope")
@@ -467,6 +548,8 @@ class TradingService:
             proposal = Proposal(
                 source=source.value,
                 proposer_id=actor_id,
+                strategy_id=strategy_id,
+                strategy_version=strategy_version,
                 status=ProposalStatus.DRAFT.value,
                 version=1,
                 risk_tier=risk_tier.value,
@@ -649,45 +732,200 @@ class TradingService:
             raise RuntimeError("proposal review completed without a result")
         return result
 
+    @staticmethod
+    def _lock_risk_capacity(session: Session) -> None:
+        session.execute(
+            text("SELECT pg_advisory_xact_lock(:key)"),
+            {"key": RISK_CAPACITY_LOCK_KEY},
+        )
+
+    @staticmethod
+    def _occupied_risk(session: Session) -> Decimal:
+        reservations = session.scalars(
+            select(RiskReservation)
+            .where(RiskReservation.status.in_(OCCUPIED_RESERVATION_STATUSES))
+            .with_for_update()
+        ).all()
+        return sum((reservation.amount for reservation in reservations), Decimal(0))
+
+    @staticmethod
+    def _active_risk_policy(session: Session) -> RiskPolicy:
+        policy = session.scalar(select(RiskPolicy).where(RiskPolicy.active).with_for_update())
+        if policy is None:
+            _reject("RISK_POLICY_MISSING", "no active risk policy exists")
+        return policy
+
+    def _server_risk_context(
+        self,
+        session: Session,
+        *,
+        proposal: Proposal,
+        policy: RiskPolicy,
+        kind: IntentKind,
+        requested_quantity: Decimal,
+        requested_risk: Decimal,
+        current_risk: Decimal,
+        now: datetime,
+    ) -> tuple[RiskEvaluationInput, dict[str, Any], datetime]:
+        instrument = session.get(Instrument, proposal.instrument_id)
+        if instrument is None or not instrument.active:
+            _reject("INSTRUMENT_UNAVAILABLE", "proposal instrument is unavailable")
+        position = session.scalar(
+            select(Position)
+            .where(
+                Position.account_id == proposal.account_id,
+                Position.venue == proposal.venue,
+                Position.instrument_id == proposal.instrument_id,
+            )
+            .with_for_update()
+        )
+        equity = session.scalar(
+            select(AccountEquity)
+            .where(
+                AccountEquity.account_id == proposal.account_id,
+                AccountEquity.venue == proposal.venue,
+            )
+            .with_for_update()
+        )
+        protection = None
+        if position is not None:
+            protection = session.scalar(
+                select(ProtectionOrder)
+                .where(ProtectionOrder.position_id == position.position_id)
+                .with_for_update()
+            )
+
+        position_known = position is not None and position.fact_status == FactStatus.KNOWN.value
+        equity_known = (
+            equity is not None
+            and equity.fact_status == FactStatus.KNOWN.value
+            and equity.currency == instrument.collateral_currency
+        )
+        protection_required = kind is IntentKind.ADD or (
+            position_known and position is not None and position.quantity != 0
+        )
+        protection_known = not protection_required or (
+            protection is not None
+            and protection.status == ProtectionStatus.ACTIVE.value
+            and protection.fully_covered
+            and position is not None
+            and protection.quantity >= abs(position.quantity)
+        )
+        observed_times = [fact.observed_at for fact in (position, equity) if fact is not None]
+        if protection_required and protection is not None:
+            observed_times.append(protection.observed_at)
+        data_as_of = min(observed_times, default=now)
+        fact_age = now - data_as_of
+        inputs = RiskEvaluationInput(
+            kind=kind,
+            requested_quantity=requested_quantity,
+            requested_risk=requested_risk,
+            current_risk=current_risk,
+            fact_age=fact_age,
+            position_known=position_known,
+            equity_known=equity_known,
+            protection_known=protection_known,
+        )
+        facts = {
+            "proposal_id": str(proposal.proposal_id),
+            "proposal_version": proposal.version,
+            "kind": kind.value,
+            "requested_quantity": str(requested_quantity),
+            "requested_risk": str(requested_risk),
+            "current_risk": str(current_risk),
+            "policy": {
+                "policy_id": str(policy.policy_id),
+                "version": policy.version,
+                "system_state": policy.system_state,
+                "max_total_risk": str(policy.max_total_risk),
+                "max_fact_age_seconds": policy.max_fact_age_seconds,
+            },
+            "position": None
+            if position is None
+            else {
+                "position_id": str(position.position_id),
+                "quantity": str(position.quantity),
+                "fact_status": position.fact_status,
+                "observed_at": position.observed_at.isoformat(),
+                "written_at": position.updated_at.isoformat(),
+            },
+            "equity": None
+            if equity is None
+            else {
+                "account_equity_id": str(equity.account_equity_id),
+                "fact_status": equity.fact_status,
+                "currency": equity.currency,
+                "observed_at": equity.observed_at.isoformat(),
+                "written_at": equity.updated_at.isoformat(),
+            },
+            "protection_required": protection_required,
+            "protection": None
+            if protection is None
+            else {
+                "protection_id": str(protection.protection_id),
+                "status": protection.status,
+                "quantity": str(protection.quantity),
+                "fully_covered": protection.fully_covered,
+                "observed_at": protection.observed_at.isoformat(),
+                "written_at": protection.updated_at.isoformat(),
+            },
+            "data_as_of": data_as_of.isoformat(),
+            "fact_age_seconds": str(fact_age.total_seconds()),
+        }
+        return inputs, facts, data_as_of
+
     def decide_risk(
         self,
         *,
         proposal_id: UUID,
         actor_id: UUID,
-        inputs: RiskEvaluationInput,
+        kind: IntentKind,
         idempotency_key: str,
         now: datetime,
+        requested_quantity: Decimal | None = None,
     ) -> UUID:
-        payload = {
-            "proposal_id": str(proposal_id),
-            "kind": inputs.kind.value,
-            "requested_quantity": str(inputs.requested_quantity),
-            "requested_risk": str(inputs.requested_risk),
-            "current_risk": str(inputs.current_risk),
-            "fact_age_seconds": str(inputs.fact_age.total_seconds()),
-            "position_known": inputs.position_known,
-            "protection_known": inputs.protection_known,
-        }
         operation = "risk.decide"
         with self.database.session_factory.begin() as session:
-            proposal = session.get(Proposal, proposal_id)
+            proposal = session.get(Proposal, proposal_id, with_for_update=True)
             if proposal is None:
                 _reject("PROPOSAL_NOT_FOUND", "proposal does not exist")
             self._require_role(session, actor_id, operation, proposal.account_id, proposal.venue)
+            quantity = proposal.quantity if requested_quantity is None else requested_quantity
+            request_payload = {
+                "proposal_id": str(proposal_id),
+                "kind": kind.value,
+                "requested_quantity": str(quantity),
+            }
             digest, response = self._idempotency(
                 session,
                 caller_id=str(actor_id),
                 operation=operation,
                 idempotency_key=idempotency_key,
-                payload=payload,
+                payload=request_payload,
             )
             if response is not None:
                 return _as_uuid(str(response["decision_id"]))
-            if proposal.status != ProposalStatus.APPROVED.value:
-                _reject("PROPOSAL_NOT_APPROVED", "risk decision requires approved proposal")
-            policy = session.scalar(select(RiskPolicy).where(RiskPolicy.active))
-            if policy is None:
-                _reject("RISK_POLICY_MISSING", "no active risk policy exists")
+            if proposal.status != ProposalStatus.APPROVED.value or proposal.expires_at <= now:
+                _reject("PROPOSAL_NOT_APPROVED", "risk decision requires a live approved proposal")
+            if quantity <= 0 or quantity > proposal.quantity:
+                _reject("PROPOSAL_QUANTITY_EXCEEDED", "requested quantity exceeds proposal cap")
+
+            self._lock_risk_capacity(session)
+            policy = self._active_risk_policy(session)
+            current_risk = self._occupied_risk(session)
+            requested_risk = proposal.max_risk * quantity / proposal.quantity
+            if requested_risk > proposal.max_risk:
+                _reject("PROPOSAL_RISK_EXCEEDED", "requested risk exceeds proposal cap")
+            inputs, facts, data_as_of = self._server_risk_context(
+                session,
+                proposal=proposal,
+                policy=policy,
+                kind=kind,
+                requested_quantity=quantity,
+                requested_risk=requested_risk,
+                current_risk=current_risk,
+                now=now,
+            )
             outcome = evaluate_risk(
                 RiskPolicyInput(
                     version=policy.version,
@@ -700,12 +938,12 @@ class TradingService:
             decision = RiskDecision(
                 proposal_id=proposal_id,
                 policy_id=policy.policy_id,
-                input_data=payload,
+                input_data=facts,
                 result=outcome.result.value,
                 approved_quantity=outcome.allowed_quantity,
                 risk_amount=outcome.allowed_risk,
                 reasons=list(outcome.reasons),
-                data_as_of=now - inputs.fact_age,
+                data_as_of=data_as_of,
                 actor_id=str(actor_id),
                 correlation_id=proposal.correlation_id,
                 created_at=now,
@@ -779,6 +1017,8 @@ class TradingService:
                 _reject("RISK_DECISION_NOT_ALLOWING", "latest risk decision does not allow risk")
             if expires_at <= now or expires_at > proposal.expires_at:
                 _reject("AUTHORIZATION_EXPIRY_INVALID", "authorization must be short-lived")
+            if allowed_adds < 0:
+                _reject("AUTHORIZATION_ADD_LIMIT_INVALID", "allowed Add count cannot be negative")
             authorization = TradingAuthorization(
                 proposal_id=proposal_id,
                 risk_decision_id=decision.decision_id,
@@ -886,41 +1126,124 @@ class TradingService:
                 or authorization.used_quantity + quantity > authorization.quantity_limit
             ):
                 _reject("AUTHORIZATION_QUANTITY_EXCEEDED", "request exceeds quantity limit")
-            if kind is IntentKind.ADD:
-                gate = session.get(CapabilityGate, "AUTO_ADD")
-                if gate is None or gate.status != CapabilityStatus.ENABLED.value:
-                    _reject("AUTO_ADD_DISABLED", "automatic add capability is disabled")
-                if authorization.used_adds >= authorization.allowed_adds:
-                    _reject("ADD_LIMIT_EXHAUSTED", "authorization add count is exhausted")
+            proposal = session.get(Proposal, authorization.proposal_id, with_for_update=True)
+            if proposal is None or proposal.status != ProposalStatus.APPROVED.value:
+                _reject("PROPOSAL_NOT_APPROVED", "authorization proposal is not approved")
+            if proposal.expires_at <= now:
+                _reject("PROPOSAL_EXPIRED", "authorization proposal expired")
+            if (
+                authorization.quantity_limit > proposal.quantity
+                or authorization.risk_limit > proposal.max_risk
+            ):
+                _reject("AUTHORIZATION_SCOPE_MISMATCH", "authorization exceeds proposal caps")
+
+            self._lock_risk_capacity(session)
+            policy = self._active_risk_policy(session)
+            occupied_risk = self._occupied_risk(session)
+            risk_amount = authorization.risk_limit * quantity / authorization.quantity_limit
+            if risk_amount <= 0 or risk_amount > authorization.risk_limit:
+                _reject("AUTHORIZATION_RISK_EXCEEDED", "request exceeds risk authorization")
+            inputs, _, _ = self._server_risk_context(
+                session,
+                proposal=proposal,
+                policy=policy,
+                kind=kind,
+                requested_quantity=quantity,
+                requested_risk=risk_amount,
+                current_risk=occupied_risk,
+                now=now,
+            )
+            final_outcome = evaluate_risk(
+                RiskPolicyInput(
+                    version=policy.version,
+                    system_state=SystemRiskState(policy.system_state),
+                    max_total_risk=policy.max_total_risk,
+                    max_fact_age=timedelta(seconds=policy.max_fact_age_seconds),
+                ),
+                inputs,
+            )
+            if final_outcome.result is not RiskResult.ALLOW:
+                reason = final_outcome.reasons[0] if final_outcome.reasons else "RISK_REJECTED"
+                _reject("FINAL_RISK_CHECK_FAILED", reason)
+
+            position = session.scalar(
+                select(Position)
+                .where(
+                    Position.account_id == account_id,
+                    Position.venue == venue,
+                    Position.instrument_id == instrument_id,
+                )
+                .with_for_update()
+            )
+            if position is None or position.fact_status != FactStatus.KNOWN.value:
+                _reject("POSITION_UNKNOWN", "new risk requires a current known position fact")
 
             campaign = session.scalar(
-                select(Campaign).where(Campaign.authorization_id == authorization_id)
+                select(Campaign)
+                .where(Campaign.authorization_id == authorization_id)
+                .with_for_update()
             )
-            if campaign is None:
-                proposal = session.get(Proposal, authorization.proposal_id)
-                if proposal is None:
-                    _reject("PROPOSAL_NOT_FOUND", "authorization proposal is missing")
-                campaign = Campaign(
-                    proposal_id=authorization.proposal_id,
-                    authorization_id=authorization_id,
-                    account_id=authorization.account_id,
-                    venue=authorization.venue,
-                    instrument_id=authorization.instrument_id,
-                    direction=authorization.direction,
-                    status=CampaignStatus.OPENING.value,
-                    current_target_quantity=authorization.quantity_limit,
-                    target_version=0,
-                    target_reason=None,
-                    target_urgency=None,
-                    target_calculated_at=None,
-                    realized_pnl=Decimal(0),
-                    unrealized_pnl=Decimal(0),
-                    final_pnl=Decimal(0),
-                    created_at=now,
-                    updated_at=now,
+            if kind is IntentKind.INITIAL:
+                if position.quantity != 0:
+                    _reject("POSITION_NOT_FLAT", "INITIAL requires a confirmed flat position")
+                conflicting_campaign = session.scalar(
+                    select(Campaign)
+                    .where(
+                        Campaign.account_id == account_id,
+                        Campaign.venue == venue,
+                        Campaign.instrument_id == instrument_id,
+                        Campaign.status != CampaignStatus.CLOSED.value,
+                    )
+                    .with_for_update()
                 )
-                session.add(campaign)
-                session.flush()
+                if conflicting_campaign is not None and (
+                    campaign is None or conflicting_campaign.campaign_id != campaign.campaign_id
+                ):
+                    _reject("ACTIVE_CAMPAIGN_EXISTS", "scope already has an unclosed campaign")
+                if campaign is None:
+                    campaign = Campaign(
+                        proposal_id=authorization.proposal_id,
+                        authorization_id=authorization_id,
+                        account_id=authorization.account_id,
+                        venue=authorization.venue,
+                        instrument_id=authorization.instrument_id,
+                        direction=authorization.direction,
+                        status=CampaignStatus.OPENING.value,
+                        current_target_quantity=authorization.quantity_limit,
+                        target_version=0,
+                        target_reason=None,
+                        target_urgency=None,
+                        target_calculated_at=None,
+                        realized_pnl=Decimal(0),
+                        unrealized_pnl=Decimal(0),
+                        final_pnl=Decimal(0),
+                        created_at=now,
+                        updated_at=now,
+                    )
+                    session.add(campaign)
+                    session.flush()
+            else:
+                gate = session.get(CapabilityGate, "AUTO_ADD", with_for_update=True)
+                if gate is None or gate.status != CapabilityStatus.ENABLED.value:
+                    _reject("AUTO_ADD_DISABLED", "automatic add capability is disabled")
+                if policy.system_state != SystemRiskState.NORMAL.value:
+                    _reject("ADD_RISK_STATE_INVALID", "ADD requires NORMAL risk state")
+                if authorization.used_adds >= authorization.allowed_adds:
+                    _reject("ADD_LIMIT_EXHAUSTED", "authorization add count is exhausted")
+                if campaign is None or campaign.status in {
+                    CampaignStatus.CLOSED.value,
+                    CampaignStatus.UNKNOWN.value,
+                }:
+                    _reject("ADD_CAMPAIGN_REQUIRED", "ADD requires an existing known campaign")
+                expected_long = campaign.direction == Direction.LONG.value
+                if position.quantity == 0 or (position.quantity > 0) != expected_long:
+                    _reject("ADD_POSITION_INVALID", "ADD requires an existing aligned position")
+                unrealized_pnl = (
+                    position.mark_price - position.average_entry_price
+                ) * position.quantity
+                if unrealized_pnl <= 0:
+                    _reject("ADD_NOT_PROFITABLE", "ADD requires strictly positive unrealized PnL")
+
             active = session.scalar(
                 select(OrderIntent.intent_id).where(
                     OrderIntent.campaign_id == campaign.campaign_id,
@@ -929,7 +1252,8 @@ class TradingService:
             )
             if active is not None:
                 _reject("ACTIVE_ORDER_INTENT", "campaign already has unresolved intent")
-            risk_amount = authorization.risk_limit * quantity / authorization.quantity_limit
+            if occupied_risk + risk_amount > policy.max_total_risk:
+                _reject("RISK_CAPACITY_EXHAUSTED", "atomic risk capacity is exhausted")
             reservation = RiskReservation(
                 campaign_id=campaign.campaign_id,
                 authorization_id=authorization_id,
@@ -950,6 +1274,9 @@ class TradingService:
                 side=side,
                 quantity=quantity,
                 reduce_only=False,
+                target_version=None,
+                position_id=position.position_id,
+                position_observed_at=position.observed_at,
                 status=OrderIntentStatus.READY.value,
                 semantic_hash=digest,
                 actor_id=str(actor_id),
@@ -1009,12 +1336,10 @@ class TradingService:
             self._require_role(
                 session, actor_id, "order.prepare", campaign.account_id, campaign.venue
             )
-            campaign = session.get(Campaign, intent.campaign_id)
-            if campaign is None:
-                _reject("CAMPAIGN_NOT_FOUND", "intent campaign does not exist")
-            self._require_role(
-                session, actor_id, "order.prepare", campaign.account_id, campaign.venue
-            )
+            if intent.status == OrderIntentStatus.UNKNOWN.value:
+                return
+            if intent.status not in ACTIVE_INTENT_STATUSES:
+                _reject("ORDER_INTENT_NOT_ACTIVE", "only an active intent may become UNKNOWN")
             previous = intent.status
             intent.status = OrderIntentStatus.UNKNOWN.value
             intent.updated_at = now
@@ -1025,6 +1350,13 @@ class TradingService:
                     reservation.status = ReservationStatus.UNKNOWN.value
                     reservation.updated_at = now
                     reservation.version += 1
+            venue_order = session.scalar(
+                select(VenueOrder).where(VenueOrder.order_intent_id == intent_id)
+            )
+            if venue_order is not None:
+                venue_order.status = VenueOrderStatus.UNKNOWN.value
+                venue_order.observed_at = now
+                venue_order.updated_at = now
             campaign.status = CampaignStatus.UNKNOWN.value
             campaign.updated_at = now
             self._audit(
@@ -1055,6 +1387,29 @@ class TradingService:
             intent = session.get(OrderIntent, intent_id, with_for_update=True)
             if intent is None:
                 _reject("ORDER_INTENT_NOT_FOUND", "intent does not exist")
+            campaign = session.get(Campaign, intent.campaign_id)
+            if campaign is None:
+                _reject("CAMPAIGN_NOT_FOUND", "intent campaign does not exist")
+            self._require_role(
+                session, actor_id, "order.prepare", campaign.account_id, campaign.venue
+            )
+            reservation = (
+                session.get(RiskReservation, intent.reservation_id, with_for_update=True)
+                if intent.reservation_id is not None
+                else None
+            )
+            if intent.status == terminal_status.value:
+                if reservation is None or reservation.status == ReservationStatus.RELEASED.value:
+                    return
+                _reject("RISK_RELEASE_INCOMPLETE", "terminal intent still occupies risk")
+            if intent.status in {
+                OrderIntentStatus.CANCELLED.value,
+                OrderIntentStatus.REJECTED.value,
+                OrderIntentStatus.FILLED.value,
+            }:
+                _reject("ORDER_INTENT_TERMINAL", "terminal intent cannot change outcome")
+            if intent.status not in RELEASABLE_INTENT_STATUSES:
+                _reject("ORDER_INTENT_NOT_RELEASABLE", "unknown intent cannot release risk")
             filled = session.scalar(
                 select(func.coalesce(func.sum(VenueFill.quantity), 0)).where(
                     VenueFill.order_intent_id == intent_id
@@ -1066,12 +1421,36 @@ class TradingService:
             intent.status = terminal_status.value
             intent.updated_at = now
             intent.version += 1
-            if intent.reservation_id is not None:
-                reservation = session.get(RiskReservation, intent.reservation_id)
-                if reservation is not None:
+            if reservation is not None:
+                if reservation.status == ReservationStatus.UNKNOWN.value:
+                    _reject("RISK_RESERVATION_UNKNOWN", "unknown risk cannot be released")
+                if reservation.status != ReservationStatus.RELEASED.value:
                     reservation.status = ReservationStatus.RELEASED.value
                     reservation.updated_at = now
                     reservation.version += 1
+                    authorization = session.get(
+                        TradingAuthorization, intent.authorization_id, with_for_update=True
+                    )
+                    if authorization is None or authorization.used_quantity < intent.quantity:
+                        _reject(
+                            "AUTHORIZATION_USAGE_INVALID", "authorization usage is inconsistent"
+                        )
+                    authorization.used_quantity -= intent.quantity
+                    if intent.kind == IntentKind.ADD.value:
+                        if authorization.used_adds <= 0:
+                            _reject("AUTHORIZATION_USAGE_INVALID", "Add usage is inconsistent")
+                        authorization.used_adds -= 1
+            venue_order = session.scalar(
+                select(VenueOrder).where(VenueOrder.order_intent_id == intent_id)
+            )
+            if venue_order is not None:
+                venue_order.status = (
+                    VenueOrderStatus.CANCELLED.value
+                    if terminal_status is OrderIntentStatus.CANCELLED
+                    else VenueOrderStatus.REJECTED.value
+                )
+                venue_order.observed_at = now
+                venue_order.updated_at = now
             self._audit(
                 session,
                 actor_id=str(actor_id),
@@ -1095,6 +1474,8 @@ class TradingService:
     ) -> int:
         with self.database.session_factory.begin() as session:
             account_id, venue = _scope_parts(execution_scope)
+            if not owner_id or lease_duration <= timedelta(0):
+                _reject("SENDER_LEASE_INVALID", "owner and positive lease duration are required")
             self._require_role(session, actor_id, "sender.manage", account_id, venue)
             lease = session.get(SenderLease, execution_scope, with_for_update=True)
             if lease is None:
@@ -1113,19 +1494,32 @@ class TradingService:
                 lease.expires_at = now + lease_duration
                 lease.updated_at = now
             else:
+                if lease.expires_at > now:
+                    _reject("SENDER_LEASE_HELD", "another sender still owns the live lease")
                 latest = session.scalar(
                     select(ReconciliationRun)
                     .where(ReconciliationRun.execution_scope == execution_scope)
                     .order_by(ReconciliationRun.completed_at.desc())
                     .limit(1)
                 )
-                if latest is None or latest.status not in {
-                    ReconciliationStatus.MATCH.value,
-                    ReconciliationStatus.RESOLVED.value,
-                }:
+                policy = session.scalar(select(RiskPolicy).where(RiskPolicy.active))
+                max_age = (
+                    timedelta(seconds=policy.max_fact_age_seconds)
+                    if policy is not None
+                    else timedelta(0)
+                )
+                if (
+                    latest is None
+                    or policy is None
+                    or latest.status != ReconciliationStatus.MATCH.value
+                    or not latest.is_computed
+                    or latest.completed_at <= lease.expires_at
+                    or latest.completed_at > now
+                    or now - latest.completed_at > max_age
+                ):
                     _reject(
                         "RECONCILIATION_REQUIRED",
-                        "sender takeover requires current reconciliation",
+                        "sender takeover requires a fresh computed MATCH after lease expiry",
                     )
                 token = lease.fencing_token + 1
                 lease.owner_id = owner_id
@@ -1153,6 +1547,7 @@ class TradingService:
         fencing_token: int,
         now: datetime,
     ) -> None:
+        _scope_parts(execution_scope)
         lease = session.get(SenderLease, execution_scope)
         if (
             lease is None
@@ -1194,6 +1589,9 @@ class TradingService:
             campaign = session.get(Campaign, intent.campaign_id)
             if campaign is None:
                 _reject("CAMPAIGN_NOT_FOUND", "intent campaign is missing")
+            expected_scope = f"{campaign.account_id}:{campaign.venue}"
+            if execution_scope != expected_scope:
+                _reject("EXECUTION_SCOPE_MISMATCH", "sender scope does not match campaign scope")
             self._require_role(
                 session, actor_id, "venue.record", campaign.account_id, campaign.venue
             )
@@ -1204,6 +1602,7 @@ class TradingService:
                 status=VenueOrderStatus.SENT.value,
                 ordered_quantity=intent.quantity,
                 filled_quantity=Decimal(0),
+                observed_at=now,
                 updated_at=now,
             )
             session.add(fact)
@@ -1257,12 +1656,42 @@ class TradingService:
                 )
             )
             if existing is not None:
-                return existing.venue_fill_fact_id
+                if (
+                    existing.order_intent_id == intent_id
+                    and existing.campaign_id == campaign.campaign_id
+                    and existing.side == side
+                    and existing.quantity == quantity
+                    and existing.price == price
+                    and existing.fee == fee
+                    and existing.fee_currency == fee_currency
+                    and existing.slippage_cost == slippage_cost
+                ):
+                    return existing.venue_fill_fact_id
+                raise IdempotencyConflict
+            if intent.status not in {
+                OrderIntentStatus.SENT.value,
+                OrderIntentStatus.PARTIALLY_FILLED.value,
+            }:
+                _reject("ORDER_INTENT_NOT_FILLABLE", "fill requires a sent active intent")
+            if side != intent.side:
+                _reject("FILL_SIDE_MISMATCH", "fill side must match the order intent")
+            if quantity <= 0 or price <= 0 or fee < 0 or slippage_cost < 0:
+                _reject("FILL_INVALID", "fill amounts and price are invalid")
+            instrument = session.get(Instrument, campaign.instrument_id)
+            if instrument is None or fee_currency != instrument.collateral_currency:
+                _reject("PNL_CURRENCY_MISMATCH", "fill fee currency lacks an FX conversion")
             venue_order = session.scalar(
                 select(VenueOrder).where(VenueOrder.order_intent_id == intent_id)
             )
-            if venue_order is None:
+            if venue_order is None or venue_order.venue != campaign.venue:
                 _reject("VENUE_ORDER_MISSING", "fill must reference a known venue order")
+            current_filled = session.execute(
+                select(func.coalesce(func.sum(VenueFill.quantity), 0)).where(
+                    VenueFill.order_intent_id == intent_id
+                )
+            ).scalar_one()
+            if current_filled + quantity > intent.quantity:
+                _reject("ORDER_INTENT_OVERFILLED", "cumulative fill exceeds intent quantity")
             fact = VenueFill(
                 venue=campaign.venue,
                 venue_fill_id=venue_fill_id,
@@ -1278,19 +1707,16 @@ class TradingService:
             )
             session.add(fact)
             session.flush()
-            total_filled = session.execute(
-                select(func.coalesce(func.sum(VenueFill.quantity), 0)).where(
-                    VenueFill.order_intent_id == intent_id
-                )
-            ).scalar_one()
+            total_filled = current_filled + quantity
             previous = intent.status
-            if total_filled >= intent.quantity:
+            if total_filled == intent.quantity:
                 intent.status = OrderIntentStatus.FILLED.value
                 venue_order.status = VenueOrderStatus.FILLED.value
             else:
                 intent.status = OrderIntentStatus.PARTIALLY_FILLED.value
                 venue_order.status = VenueOrderStatus.PARTIALLY_FILLED.value
             venue_order.filled_quantity = total_filled
+            venue_order.observed_at = now
             venue_order.updated_at = now
             intent.updated_at = now
             intent.version += 1
@@ -1300,7 +1726,8 @@ class TradingService:
                     reservation.status = ReservationStatus.OPEN.value
                     reservation.updated_at = now
                     reservation.version += 1
-            campaign.status = CampaignStatus.OPEN.value
+            if intent.kind in {IntentKind.INITIAL.value, IntentKind.ADD.value}:
+                campaign.status = CampaignStatus.OPEN.value
             campaign.updated_at = now
             self._audit(
                 session,
@@ -1327,8 +1754,12 @@ class TradingService:
         known: bool,
         actor_id: UUID,
         *,
+        observed_at: datetime | None = None,
         now: datetime,
     ) -> UUID:
+        fact_time = now if observed_at is None else observed_at
+        if fact_time > now:
+            _reject("FACT_TIME_INVALID", "position observation cannot be in the future")
         with self.database.session_factory.begin() as session:
             self._require_role(session, actor_id, "venue.record", account_id, venue)
             position = session.scalar(
@@ -1347,6 +1778,7 @@ class TradingService:
                     average_entry_price=average_entry_price,
                     mark_price=mark_price,
                     fact_status=FactStatus.KNOWN.value if known else FactStatus.UNKNOWN.value,
+                    observed_at=fact_time,
                     updated_at=now,
                 )
                 session.add(position)
@@ -1356,6 +1788,7 @@ class TradingService:
                 position.average_entry_price = average_entry_price
                 position.mark_price = mark_price
                 position.fact_status = FactStatus.KNOWN.value if known else FactStatus.UNKNOWN.value
+                position.observed_at = fact_time
                 position.updated_at = now
             self._audit(
                 session,
@@ -1379,8 +1812,13 @@ class TradingService:
         fully_covered: bool,
         actor_id: UUID,
         *,
+        known: bool = True,
+        observed_at: datetime | None = None,
         now: datetime,
     ) -> UUID:
+        fact_time = now if observed_at is None else observed_at
+        if fact_time > now:
+            _reject("FACT_TIME_INVALID", "protection observation cannot be in the future")
         with self.database.session_factory.begin() as session:
             position = session.get(Position, position_id)
             if position is None:
@@ -1391,7 +1829,14 @@ class TradingService:
             protection = session.scalar(
                 select(ProtectionOrder).where(ProtectionOrder.position_id == position_id)
             )
-            status = ProtectionStatus.ACTIVE if fully_covered else ProtectionStatus.DEGRADED
+            effective_coverage = fully_covered and known
+            status = (
+                ProtectionStatus.UNKNOWN
+                if not known
+                else ProtectionStatus.ACTIVE
+                if effective_coverage
+                else ProtectionStatus.DEGRADED
+            )
             if protection is None:
                 protection = ProtectionOrder(
                     position_id=position_id,
@@ -1399,7 +1844,8 @@ class TradingService:
                     quantity=quantity,
                     trigger_price=trigger_price,
                     status=status.value,
-                    fully_covered=fully_covered,
+                    fully_covered=effective_coverage,
+                    observed_at=fact_time,
                     updated_at=now,
                 )
                 session.add(protection)
@@ -1409,9 +1855,10 @@ class TradingService:
                 protection.quantity = quantity
                 protection.trigger_price = trigger_price
                 protection.status = status.value
-                protection.fully_covered = fully_covered
+                protection.fully_covered = effective_coverage
+                protection.observed_at = fact_time
                 protection.updated_at = now
-            if not fully_covered:
+            if not effective_coverage:
                 PROTECTION_ISSUES.inc()
             self._audit(
                 session,
@@ -1436,8 +1883,12 @@ class TradingService:
         known: bool,
         actor_id: UUID,
         *,
+        observed_at: datetime | None = None,
         now: datetime,
     ) -> UUID:
+        fact_time = now if observed_at is None else observed_at
+        if fact_time > now:
+            _reject("FACT_TIME_INVALID", "equity observation cannot be in the future")
         with self.database.session_factory.begin() as session:
             self._require_role(session, actor_id, "venue.record", account_id, venue)
             fact = session.scalar(
@@ -1454,6 +1905,7 @@ class TradingService:
                     available_balance=available_balance,
                     currency=currency,
                     fact_status=FactStatus.KNOWN.value if known else FactStatus.UNKNOWN.value,
+                    observed_at=fact_time,
                     updated_at=now,
                 )
                 session.add(fact)
@@ -1463,6 +1915,7 @@ class TradingService:
                 fact.available_balance = available_balance
                 fact.currency = currency
                 fact.fact_status = FactStatus.KNOWN.value if known else FactStatus.UNKNOWN.value
+                fact.observed_at = fact_time
                 fact.updated_at = now
             return fact.account_equity_id
 
@@ -1484,6 +1937,11 @@ class TradingService:
             self._require_role(
                 session, actor_id, "venue.record", campaign.account_id, campaign.venue
             )
+            instrument = session.get(Instrument, campaign.instrument_id)
+            if venue != campaign.venue:
+                _reject("VENUE_SCOPE_MISMATCH", "funding venue does not match campaign")
+            if instrument is None or currency != instrument.collateral_currency:
+                _reject("PNL_CURRENCY_MISMATCH", "funding currency lacks an FX conversion")
             existing = session.scalar(
                 select(FundingPayment).where(
                     FundingPayment.venue == venue,
@@ -1491,7 +1949,13 @@ class TradingService:
                 )
             )
             if existing is not None:
-                return existing.funding_payment_id
+                if (
+                    existing.campaign_id == campaign_id
+                    and existing.amount == amount
+                    and existing.currency == currency
+                ):
+                    return existing.funding_payment_id
+                raise IdempotencyConflict
             payment = FundingPayment(
                 campaign_id=campaign_id,
                 venue=venue,
@@ -1520,16 +1984,35 @@ class TradingService:
             self._require_role(
                 session, actor_id, "order.prepare", campaign.account_id, campaign.venue
             )
+            policy = session.scalar(select(RiskPolicy).where(RiskPolicy.active))
+            if policy is None:
+                _reject("RISK_POLICY_MISSING", "target update requires an active policy")
+            position = session.scalar(
+                select(Position)
+                .where(
+                    Position.account_id == campaign.account_id,
+                    Position.venue == campaign.venue,
+                    Position.instrument_id == campaign.instrument_id,
+                )
+                .with_for_update()
+            )
+            if position is None or position.fact_status != FactStatus.KNOWN.value:
+                _reject("POSITION_UNKNOWN", "target update requires a known position")
+            if now - position.observed_at > timedelta(seconds=policy.max_fact_age_seconds):
+                _reject("STALE_FACTS", "target update requires a fresh position")
+            if decision.target_quantity > abs(position.quantity):
+                _reject("TARGET_EXCEEDS_POSITION", "target cannot exceed the current position")
             campaign.current_target_quantity = decision.target_quantity
             campaign.target_version += 1
             campaign.target_reason = ",".join(decision.reasons)
             campaign.target_urgency = decision.urgency.value
             campaign.target_calculated_at = now
-            campaign.status = (
-                CampaignStatus.CLOSING.value
-                if decision.target_quantity == 0
-                else CampaignStatus.REDUCING.value
-            )
+            if decision.target_quantity == 0:
+                campaign.status = CampaignStatus.CLOSING.value
+            elif decision.target_quantity < abs(position.quantity):
+                campaign.status = CampaignStatus.REDUCING.value
+            else:
+                campaign.status = CampaignStatus.OPEN.value
             campaign.updated_at = now
             self._audit(
                 session,
@@ -1569,6 +2052,14 @@ class TradingService:
             )
             if position is None or position.fact_status != FactStatus.KNOWN.value:
                 _reject("POSITION_UNKNOWN", "reduction requires current known position")
+            policy = session.scalar(select(RiskPolicy).where(RiskPolicy.active))
+            if policy is None:
+                _reject("RISK_POLICY_MISSING", "reduction requires an active policy")
+            if now - position.observed_at > timedelta(seconds=policy.max_fact_age_seconds):
+                _reject("STALE_FACTS", "reduction requires a fresh position")
+            expected_long = campaign.direction == Direction.LONG.value
+            if position.quantity == 0 or (position.quantity > 0) != expected_long:
+                _reject("POSITION_DIRECTION_MISMATCH", "position does not match campaign direction")
             payload = {
                 "campaign_id": str(campaign_id),
                 "target_version": campaign.target_version,
@@ -1605,6 +2096,9 @@ class TradingService:
                 side=side,
                 quantity=reduction_quantity,
                 reduce_only=True,
+                target_version=campaign.target_version,
+                position_id=position.position_id,
+                position_observed_at=position.observed_at,
                 status=OrderIntentStatus.READY.value,
                 semantic_hash=digest,
                 actor_id=str(actor_id),
@@ -1637,6 +2131,11 @@ class TradingService:
         now: datetime,
         campaign_id: UUID | None = None,
     ) -> UUID:
+        if status in {ReconciliationStatus.MATCH, ReconciliationStatus.RESOLVED}:
+            _reject(
+                "RECONCILIATION_STATUS_NOT_TRUSTED",
+                "MATCH must be computed and RESOLVED requires a manual transition",
+            )
         with self.database.session_factory.begin() as session:
             account_id, venue = _scope_parts(execution_scope)
             self._require_role(session, actor_id, "reconcile", account_id, venue)
@@ -1644,6 +2143,7 @@ class TradingService:
                 execution_scope=execution_scope,
                 campaign_id=campaign_id,
                 status=status.value,
+                is_computed=False,
                 differences=list(differences),
                 resolution_reason=None,
                 actor_id=str(actor_id),
@@ -1665,6 +2165,14 @@ class TradingService:
                 _reject("RECONCILIATION_NOT_FOUND", "run does not exist")
             account_id, venue = _scope_parts(run.execution_scope)
             self._require_role(session, actor_id, "reconcile", account_id, venue)
+            if run.status not in {
+                ReconciliationStatus.DIFFERENCE.value,
+                ReconciliationStatus.UNKNOWN.value,
+            }:
+                _reject(
+                    "RECONCILIATION_TRANSITION_INVALID",
+                    "only DIFFERENCE or UNKNOWN may require manual handling",
+                )
             run.status = ReconciliationStatus.MANUAL_REQUIRED.value
             run.resolution_reason = reason
             run.completed_at = now
@@ -1679,6 +2187,11 @@ class TradingService:
                 _reject("RECONCILIATION_NOT_FOUND", "run does not exist")
             account_id, venue = _scope_parts(run.execution_scope)
             self._require_role(session, actor_id, "reconcile", account_id, venue)
+            if run.status != ReconciliationStatus.MANUAL_REQUIRED.value:
+                _reject(
+                    "RECONCILIATION_TRANSITION_INVALID",
+                    "only MANUAL_REQUIRED may be resolved",
+                )
             run.status = ReconciliationStatus.RESOLVED.value
             run.resolution_reason = reason
             run.completed_at = now
@@ -1691,6 +2204,176 @@ class TradingService:
                 _reject("RECONCILIATION_NOT_FOUND", "run does not exist")
             return ReconciliationStatus(run.status)
 
+    @staticmethod
+    def _fact_is_stale(observed_at: datetime, now: datetime, max_age: timedelta) -> bool:
+        return observed_at > now or now - observed_at > max_age
+
+    def reconcile_scope(
+        self,
+        execution_scope: str,
+        actor_id: UUID,
+        *,
+        now: datetime,
+    ) -> UUID:
+        account_id, venue = _scope_parts(execution_scope)
+        with self.database.session_factory.begin() as session:
+            self._require_role(session, actor_id, "reconcile", account_id, venue)
+            policy = session.scalar(select(RiskPolicy).where(RiskPolicy.active))
+            max_age = (
+                timedelta(seconds=policy.max_fact_age_seconds)
+                if policy is not None
+                else timedelta(0)
+            )
+            campaigns = session.scalars(
+                select(Campaign)
+                .where(
+                    Campaign.account_id == account_id,
+                    Campaign.venue == venue,
+                    Campaign.status != CampaignStatus.CLOSED.value,
+                )
+                .order_by(Campaign.created_at, Campaign.campaign_id)
+                .with_for_update()
+            ).all()
+            equity = session.scalar(
+                select(AccountEquity)
+                .where(AccountEquity.account_id == account_id, AccountEquity.venue == venue)
+                .with_for_update()
+            )
+            differences: list[str] = []
+            unknown: list[str] = []
+            if policy is None:
+                unknown.append("RISK_POLICY_UNKNOWN")
+            if equity is None or equity.fact_status != FactStatus.KNOWN.value:
+                unknown.append("ACCOUNT_EQUITY_UNKNOWN")
+            elif self._fact_is_stale(equity.observed_at, now, max_age):
+                unknown.append("ACCOUNT_EQUITY_STALE")
+
+            for campaign in campaigns:
+                scope_suffix = str(campaign.campaign_id)
+                instrument = session.get(Instrument, campaign.instrument_id)
+                if instrument is None:
+                    unknown.append(f"INSTRUMENT_UNKNOWN:{scope_suffix}")
+                elif equity is not None and equity.currency != instrument.collateral_currency:
+                    differences.append(f"EQUITY_CURRENCY_MISMATCH:{scope_suffix}")
+                intents = session.scalars(
+                    select(OrderIntent)
+                    .where(OrderIntent.campaign_id == campaign.campaign_id)
+                    .order_by(OrderIntent.created_at, OrderIntent.intent_id)
+                    .with_for_update()
+                ).all()
+                fills = session.scalars(
+                    select(VenueFill).where(VenueFill.campaign_id == campaign.campaign_id)
+                ).all()
+                reservations = session.scalars(
+                    select(RiskReservation)
+                    .where(RiskReservation.campaign_id == campaign.campaign_id)
+                    .with_for_update()
+                ).all()
+                if not intents:
+                    differences.append(f"ORDER_INTENT_MISSING:{scope_suffix}")
+                for reservation in reservations:
+                    if reservation.status == ReservationStatus.UNKNOWN.value:
+                        unknown.append(f"RISK_RESERVATION_UNKNOWN:{reservation.reservation_id}")
+
+                for intent in intents:
+                    intent_fills = [
+                        fill for fill in fills if fill.order_intent_id == intent.intent_id
+                    ]
+                    intent_fill_quantity = sum((fill.quantity for fill in intent_fills), Decimal(0))
+                    order = session.scalar(
+                        select(VenueOrder)
+                        .where(VenueOrder.order_intent_id == intent.intent_id)
+                        .with_for_update()
+                    )
+                    order_required = intent.status in {
+                        OrderIntentStatus.SENT.value,
+                        OrderIntentStatus.PARTIALLY_FILLED.value,
+                        OrderIntentStatus.FILLED.value,
+                        OrderIntentStatus.UNKNOWN.value,
+                    }
+                    if order is None and order_required:
+                        differences.append(f"VENUE_ORDER_MISSING:{intent.intent_id}")
+                    elif order is not None:
+                        if order.venue != venue:
+                            differences.append(f"VENUE_ORDER_SCOPE_MISMATCH:{intent.intent_id}")
+                        if order.filled_quantity != intent_fill_quantity:
+                            differences.append(f"ORDER_FILL_MISMATCH:{intent.intent_id}")
+                        if order.status == VenueOrderStatus.UNKNOWN.value:
+                            unknown.append(f"VENUE_ORDER_UNKNOWN:{intent.intent_id}")
+                        elif self._fact_is_stale(order.observed_at, now, max_age):
+                            unknown.append(f"VENUE_ORDER_STALE:{intent.intent_id}")
+                    if intent_fill_quantity > intent.quantity:
+                        differences.append(f"ORDER_INTENT_OVERFILLED:{intent.intent_id}")
+                    if intent.status == OrderIntentStatus.UNKNOWN.value:
+                        unknown.append(f"ORDER_INTENT_UNKNOWN:{intent.intent_id}")
+                    if intent.status == OrderIntentStatus.FILLED.value and (
+                        intent_fill_quantity != intent.quantity
+                    ):
+                        differences.append(f"INTENT_FILL_STATE_MISMATCH:{intent.intent_id}")
+
+                position = session.scalar(
+                    select(Position)
+                    .where(
+                        Position.account_id == campaign.account_id,
+                        Position.venue == campaign.venue,
+                        Position.instrument_id == campaign.instrument_id,
+                    )
+                    .with_for_update()
+                )
+                if position is None or position.fact_status != FactStatus.KNOWN.value:
+                    unknown.append(f"POSITION_UNKNOWN:{scope_suffix}")
+                    continue
+                if self._fact_is_stale(position.observed_at, now, max_age):
+                    unknown.append(f"POSITION_STALE:{scope_suffix}")
+                signed_fills = sum(
+                    (fill.quantity if fill.side == "BUY" else -fill.quantity for fill in fills),
+                    Decimal(0),
+                )
+                if signed_fills != position.quantity:
+                    differences.append(f"POSITION_QUANTITY_MISMATCH:{scope_suffix}")
+                if position.quantity != 0:
+                    protection = session.scalar(
+                        select(ProtectionOrder)
+                        .where(ProtectionOrder.position_id == position.position_id)
+                        .with_for_update()
+                    )
+                    if protection is None or protection.status == ProtectionStatus.UNKNOWN.value:
+                        unknown.append(f"PROTECTION_UNKNOWN:{scope_suffix}")
+                    elif self._fact_is_stale(protection.observed_at, now, max_age):
+                        unknown.append(f"PROTECTION_STALE:{scope_suffix}")
+                    elif (
+                        protection.status != ProtectionStatus.ACTIVE.value
+                        or not protection.fully_covered
+                        or protection.quantity < abs(position.quantity)
+                    ):
+                        differences.append(f"PROTECTION_INSUFFICIENT:{scope_suffix}")
+
+            if unknown:
+                status = ReconciliationStatus.UNKNOWN
+                result_differences = sorted(set(unknown + differences))
+            elif differences:
+                status = ReconciliationStatus.DIFFERENCE
+                result_differences = sorted(set(differences))
+            else:
+                status = ReconciliationStatus.MATCH
+                result_differences = []
+            run = ReconciliationRun(
+                execution_scope=execution_scope,
+                campaign_id=None,
+                status=status.value,
+                is_computed=True,
+                differences=result_differences,
+                resolution_reason=None,
+                actor_id=str(actor_id),
+                correlation_id=uuid4(),
+                started_at=now,
+                completed_at=now,
+            )
+            session.add(run)
+            session.flush()
+            RECONCILIATION_RESULTS.labels(status.value).inc()
+            return run.reconciliation_id
+
     def reconcile_campaign(
         self,
         campaign_id: UUID,
@@ -1699,96 +2382,114 @@ class TradingService:
         *,
         now: datetime,
     ) -> UUID:
+        account_id, venue = _scope_parts(execution_scope)
         with self.database.session_factory() as session:
             campaign = session.get(Campaign, campaign_id)
             if campaign is None:
                 _reject("CAMPAIGN_NOT_FOUND", "campaign does not exist")
-            self._require_role(session, actor_id, "reconcile", campaign.account_id, campaign.venue)
-            intents = session.scalars(
-                select(OrderIntent).where(OrderIntent.campaign_id == campaign_id)
-            ).all()
-            fills = session.scalars(
-                select(VenueFill).where(VenueFill.campaign_id == campaign_id)
-            ).all()
+            if campaign.account_id != account_id or campaign.venue != venue:
+                _reject("EXECUTION_SCOPE_MISMATCH", "campaign is outside reconciliation scope")
+        return self.reconcile_scope(execution_scope, actor_id, now=now)
+
+    def close_campaign(self, campaign_id: UUID, actor_id: UUID, *, now: datetime) -> None:
+        with self.database.session_factory.begin() as session:
+            campaign = session.get(Campaign, campaign_id, with_for_update=True)
+            if campaign is None:
+                _reject("CAMPAIGN_NOT_FOUND", "campaign does not exist")
+            self._require_role(
+                session, actor_id, "order.prepare", campaign.account_id, campaign.venue
+            )
+            if campaign.status == CampaignStatus.CLOSED.value:
+                return
+            policy = session.scalar(select(RiskPolicy).where(RiskPolicy.active))
             position = session.scalar(
-                select(Position).where(
+                select(Position)
+                .where(
                     Position.account_id == campaign.account_id,
                     Position.venue == campaign.venue,
                     Position.instrument_id == campaign.instrument_id,
                 )
+                .with_for_update()
             )
-            equity = session.scalar(
-                select(AccountEquity).where(
-                    AccountEquity.account_id == campaign.account_id,
-                    AccountEquity.venue == campaign.venue,
+            if (
+                policy is None
+                or position is None
+                or position.fact_status != FactStatus.KNOWN.value
+                or position.quantity != 0
+                or self._fact_is_stale(
+                    position.observed_at,
+                    now,
+                    timedelta(seconds=policy.max_fact_age_seconds),
                 )
+            ):
+                _reject("CAMPAIGN_POSITION_NOT_CLOSED", "campaign requires a fresh flat position")
+            exit_intent = session.scalar(
+                select(OrderIntent)
+                .where(
+                    OrderIntent.campaign_id == campaign_id,
+                    OrderIntent.kind == IntentKind.EXIT.value,
+                )
+                .order_by(OrderIntent.created_at.desc())
+                .limit(1)
+                .with_for_update()
             )
-            differences: list[str] = []
-            unknown: list[str] = []
-            if not intents:
-                differences.append("ORDER_INTENT_MISSING")
-            for intent in intents:
-                order = session.scalar(
-                    select(VenueOrder).where(VenueOrder.order_intent_id == intent.intent_id)
-                )
-                if order is None:
-                    differences.append(f"VENUE_ORDER_MISSING:{intent.intent_id}")
-                else:
-                    intent_fill_quantity = sum(
-                        (
-                            fill.quantity
-                            for fill in fills
-                            if fill.order_intent_id == intent.intent_id
-                        ),
-                        Decimal(0),
-                    )
-                    if order.filled_quantity != intent_fill_quantity:
-                        differences.append(f"ORDER_FILL_MISMATCH:{intent.intent_id}")
-                    if order.status == VenueOrderStatus.UNKNOWN.value:
-                        unknown.append(f"VENUE_ORDER_UNKNOWN:{intent.intent_id}")
-                if intent.status == OrderIntentStatus.UNKNOWN.value:
-                    unknown.append(f"ORDER_UNKNOWN:{intent.intent_id}")
-            if position is None or position.fact_status == FactStatus.UNKNOWN.value:
-                unknown.append("POSITION_UNKNOWN")
-            if equity is None or equity.fact_status == FactStatus.UNKNOWN.value:
-                unknown.append("ACCOUNT_EQUITY_UNKNOWN")
-            if position is not None and position.fact_status == FactStatus.KNOWN.value:
-                signed_fills = sum(
-                    (fill.quantity if fill.side == "BUY" else -fill.quantity for fill in fills),
-                    Decimal(0),
-                )
-                if signed_fills != position.quantity:
-                    differences.append("POSITION_QUANTITY_MISMATCH")
-                if position.quantity != 0:
-                    protection = session.scalar(
-                        select(ProtectionOrder).where(
-                            ProtectionOrder.position_id == position.position_id
-                        )
-                    )
-                    if protection is None or protection.status == ProtectionStatus.UNKNOWN.value:
-                        unknown.append("PROTECTION_UNKNOWN")
-                    elif not protection.fully_covered or protection.quantity < abs(
-                        position.quantity
-                    ):
-                        differences.append("PROTECTION_INSUFFICIENT")
-
-        if unknown:
-            status = ReconciliationStatus.UNKNOWN
-            result_differences = tuple(sorted(set(unknown + differences)))
-        elif differences:
-            status = ReconciliationStatus.DIFFERENCE
-            result_differences = tuple(sorted(set(differences)))
-        else:
-            status = ReconciliationStatus.MATCH
-            result_differences = ()
-        return self.record_scope_reconciliation(
-            execution_scope,
-            actor_id,
-            status,
-            result_differences,
-            now=now,
-            campaign_id=campaign_id,
-        )
+            terminal_statuses = {
+                OrderIntentStatus.FILLED.value,
+                OrderIntentStatus.CANCELLED.value,
+                OrderIntentStatus.REJECTED.value,
+            }
+            if exit_intent is None or exit_intent.status not in terminal_statuses:
+                _reject("CAMPAIGN_EXIT_NOT_TERMINAL", "campaign exit is not terminal")
+            scope = f"{campaign.account_id}:{campaign.venue}"
+            latest = session.scalar(
+                select(ReconciliationRun)
+                .where(ReconciliationRun.execution_scope == scope)
+                .order_by(ReconciliationRun.completed_at.desc())
+                .limit(1)
+            )
+            if (
+                latest is None
+                or latest.status != ReconciliationStatus.MATCH.value
+                or not latest.is_computed
+                or latest.completed_at < position.observed_at
+                or latest.completed_at < exit_intent.updated_at
+            ):
+                _reject("RECONCILIATION_REQUIRED", "campaign closure requires a current MATCH")
+            reservations = session.scalars(
+                select(RiskReservation)
+                .where(RiskReservation.campaign_id == campaign_id)
+                .with_for_update()
+            ).all()
+            if any(
+                reservation.status
+                in {ReservationStatus.UNKNOWN.value, ReservationStatus.RESERVED.value}
+                for reservation in reservations
+            ):
+                _reject("RISK_RESERVATION_UNRESOLVED", "campaign risk is not confirmed closed")
+            for reservation in reservations:
+                if reservation.status == ReservationStatus.OPEN.value:
+                    reservation.status = ReservationStatus.RELEASED.value
+                    reservation.version += 1
+                    reservation.updated_at = now
+            authorization = session.get(
+                TradingAuthorization, campaign.authorization_id, with_for_update=True
+            )
+            if authorization is not None:
+                authorization.active = False
+            campaign.status = CampaignStatus.CLOSED.value
+            campaign.current_target_quantity = Decimal(0)
+            campaign.updated_at = now
+            self._audit(
+                session,
+                actor_id=str(actor_id),
+                event_type="CAMPAIGN_CLOSED",
+                object_type="Campaign",
+                object_id=campaign.campaign_id,
+                reason="flat position, terminal exit, and computed reconciliation MATCH",
+                correlation_id=uuid4(),
+                object_version=campaign.target_version,
+                now=now,
+            )
 
     def refresh_campaign_pnl(
         self, campaign_id: UUID, actor_id: UUID, *, now: datetime
@@ -1812,11 +2513,17 @@ class TradingService:
             )
             if position is None or position.fact_status != FactStatus.KNOWN.value:
                 _reject("POSITION_UNKNOWN", "PnL requires known current position")
-            funding = session.execute(
-                select(func.coalesce(func.sum(FundingPayment.amount), 0)).where(
-                    FundingPayment.campaign_id == campaign_id
-                )
-            ).scalar_one()
+            instrument = session.get(Instrument, campaign.instrument_id)
+            if instrument is None:
+                _reject("INSTRUMENT_UNAVAILABLE", "campaign instrument is missing")
+            payments = session.scalars(
+                select(FundingPayment).where(FundingPayment.campaign_id == campaign_id)
+            ).all()
+            if any(fill.fee_currency != instrument.collateral_currency for fill in fills) or any(
+                payment.currency != instrument.collateral_currency for payment in payments
+            ):
+                _reject("PNL_CURRENCY_MISMATCH", "PnL requires an explicit FX conversion")
+            funding = sum((payment.amount for payment in payments), Decimal(0))
             result = compute_pnl(
                 fills=tuple(
                     EconomicFill(

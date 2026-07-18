@@ -29,6 +29,7 @@ def upgrade() -> None:
         sa.Column("available_balance", sa.Numeric(precision=38, scale=18), nullable=False),
         sa.Column("currency", sa.String(length=32), nullable=False),
         sa.Column("fact_status", sa.String(length=16), nullable=False),
+        sa.Column("observed_at", sa.DateTime(timezone=True), nullable=False),
         sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
         sa.CheckConstraint("fact_status IN ('KNOWN','UNKNOWN')", name="ck_account_equities_status"),
         sa.CheckConstraint(
@@ -181,6 +182,7 @@ def upgrade() -> None:
         "users",
         sa.Column("user_id", sa.Uuid(), nullable=False),
         sa.Column("username", sa.String(length=120), nullable=False),
+        sa.Column("principal_type", sa.String(length=16), nullable=False),
         sa.Column("active", sa.Boolean(), nullable=False),
         sa.Column(
             "created_at",
@@ -188,6 +190,7 @@ def upgrade() -> None:
             server_default=sa.text("now()"),
             nullable=False,
         ),
+        sa.CheckConstraint("principal_type IN ('HUMAN','SERVICE')", name="ck_users_principal_type"),
         sa.PrimaryKeyConstraint("user_id"),
         sa.UniqueConstraint("username"),
     )
@@ -201,6 +204,7 @@ def upgrade() -> None:
         sa.Column("average_entry_price", sa.Numeric(precision=38, scale=18), nullable=False),
         sa.Column("mark_price", sa.Numeric(precision=38, scale=18), nullable=False),
         sa.Column("fact_status", sa.String(length=16), nullable=False),
+        sa.Column("observed_at", sa.DateTime(timezone=True), nullable=False),
         sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
         sa.CheckConstraint("fact_status IN ('KNOWN','UNKNOWN')", name="ck_positions_fact_status"),
         sa.ForeignKeyConstraint(
@@ -215,6 +219,8 @@ def upgrade() -> None:
         sa.Column("proposal_id", sa.Uuid(), nullable=False),
         sa.Column("source", sa.String(length=16), nullable=False),
         sa.Column("proposer_id", sa.Uuid(), nullable=False),
+        sa.Column("strategy_id", sa.String(length=120), nullable=True),
+        sa.Column("strategy_version", sa.String(length=120), nullable=True),
         sa.Column("status", sa.String(length=32), nullable=False),
         sa.Column("version", sa.Integer(), nullable=False),
         sa.Column("risk_tier", sa.String(length=16), nullable=False),
@@ -234,6 +240,10 @@ def upgrade() -> None:
         sa.CheckConstraint("direction IN ('LONG','SHORT')", name="ck_proposals_direction"),
         sa.CheckConstraint("risk_tier IN ('LOW','MEDIUM','HIGH')", name="ck_proposals_risk_tier"),
         sa.CheckConstraint("source IN ('SYSTEM','MANUAL')", name="ck_proposals_source"),
+        sa.CheckConstraint(
+            "source = 'MANUAL' OR (strategy_id IS NOT NULL AND strategy_version IS NOT NULL)",
+            name="ck_proposals_system_strategy",
+        ),
         sa.CheckConstraint(
             "status IN ('DRAFT','PENDING_REVIEW','APPROVED','REJECTED','EXPIRED')",
             name="ck_proposals_status",
@@ -295,6 +305,7 @@ def upgrade() -> None:
         sa.Column("trigger_price", sa.Numeric(precision=38, scale=18), nullable=False),
         sa.Column("status", sa.String(length=24), nullable=False),
         sa.Column("fully_covered", sa.Boolean(), nullable=False),
+        sa.Column("observed_at", sa.DateTime(timezone=True), nullable=False),
         sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
         sa.CheckConstraint(
             "status IN ('ACTIVE','DEGRADED','UNKNOWN')", name="ck_protection_status"
@@ -424,6 +435,13 @@ def upgrade() -> None:
         sa.PrimaryKeyConstraint("campaign_id"),
         sa.UniqueConstraint("authorization_id", name="uq_campaigns_authorization"),
     )
+    op.create_index(
+        "uq_campaigns_one_unclosed_scope",
+        "campaigns",
+        ["account_id", "venue", "instrument_id"],
+        unique=True,
+        postgresql_where=sa.text("status <> 'CLOSED'"),
+    )
     op.create_table(
         "funding_payments",
         sa.Column("funding_payment_id", sa.Uuid(), nullable=False),
@@ -452,6 +470,7 @@ def upgrade() -> None:
         sa.Column("execution_scope", sa.String(length=255), nullable=False),
         sa.Column("campaign_id", sa.Uuid(), nullable=True),
         sa.Column("status", sa.String(length=32), nullable=False),
+        sa.Column("is_computed", sa.Boolean(), nullable=False),
         sa.Column("differences", postgresql.JSONB(astext_type=sa.Text()), nullable=False),
         sa.Column("resolution_reason", sa.Text(), nullable=True),
         sa.Column("actor_id", sa.String(length=255), nullable=False),
@@ -514,6 +533,9 @@ def upgrade() -> None:
         sa.Column("side", sa.String(length=8), nullable=False),
         sa.Column("quantity", sa.Numeric(precision=38, scale=18), nullable=False),
         sa.Column("reduce_only", sa.Boolean(), nullable=False),
+        sa.Column("target_version", sa.Integer(), nullable=True),
+        sa.Column("position_id", sa.Uuid(), nullable=True),
+        sa.Column("position_observed_at", sa.DateTime(timezone=True), nullable=True),
         sa.Column("status", sa.String(length=32), nullable=False),
         sa.Column("semantic_hash", sa.String(length=64), nullable=False),
         sa.Column("actor_id", sa.String(length=255), nullable=False),
@@ -538,6 +560,10 @@ def upgrade() -> None:
         sa.ForeignKeyConstraint(
             ["campaign_id"],
             ["campaigns.campaign_id"],
+        ),
+        sa.ForeignKeyConstraint(
+            ["position_id"],
+            ["positions.position_id"],
         ),
         sa.ForeignKeyConstraint(
             ["reservation_id"],
@@ -600,6 +626,7 @@ def upgrade() -> None:
         sa.Column("status", sa.String(length=32), nullable=False),
         sa.Column("ordered_quantity", sa.Numeric(precision=38, scale=18), nullable=False),
         sa.Column("filled_quantity", sa.Numeric(precision=38, scale=18), nullable=False),
+        sa.Column("observed_at", sa.DateTime(timezone=True), nullable=False),
         sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
         sa.CheckConstraint(
             "status IN ('SENT','PARTIALLY_FILLED','FILLED','CANCELLED','REJECTED','UNKNOWN')",

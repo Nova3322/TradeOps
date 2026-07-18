@@ -41,17 +41,22 @@ def test_initial_schema_seeds_only_disabled_capability_gates(database: Database)
     }
 
 
-def test_database_readiness_checks_revision_and_disabled_gates(database: Database) -> None:
+def test_database_readiness_checks_revision_and_valid_gates(database: Database) -> None:
     assert database.is_ready() == (True, None)
 
     with database.engine.begin() as connection:
         connection.execute(
             text("UPDATE capability_gates SET status = 'ENABLED' WHERE capability_key = 'AUTO_ADD'")
         )
-    assert database.is_ready() == (False, "CONTROL_GATES_NOT_DISABLED")
+    assert database.is_ready() == (True, None)
 
     with database.engine.begin() as connection:
-        connection.execute(text("UPDATE capability_gates SET status = 'DISABLED'"))
+        connection.execute(
+            text("DELETE FROM capability_gates WHERE capability_key = 'CAPITAL_TRANSFER'")
+        )
+    assert database.is_ready() == (False, "CONTROL_GATES_INVALID")
+
+    with database.engine.begin() as connection:
         connection.execute(text("UPDATE alembic_version SET version_num = 'stale'"))
     assert database.is_ready() == (False, "SCHEMA_REVISION_MISMATCH")
 

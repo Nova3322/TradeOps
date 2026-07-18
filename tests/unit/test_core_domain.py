@@ -38,6 +38,7 @@ def risk_input(**overrides: object) -> RiskEvaluationInput:
         "current_risk": Decimal("20"),
         "fact_age": timedelta(seconds=1),
         "position_known": True,
+        "equity_known": True,
         "protection_known": True,
     }
     values.update(overrides)
@@ -62,6 +63,7 @@ def test_risk_engine_is_deterministic_and_scales_to_available_capacity() -> None
     [
         ({"fact_age": timedelta(minutes=2)}, "STALE_FACTS"),
         ({"position_known": False}, "POSITION_UNKNOWN"),
+        ({"equity_known": False}, "EQUITY_UNKNOWN"),
         ({"protection_known": False}, "PROTECTION_UNKNOWN"),
     ],
 )
@@ -136,8 +138,25 @@ def test_risk_engine_allows_valid_capacity_and_rejects_invalid_or_exhausted_requ
 
     assert allowed.result is RiskResult.ALLOW
     assert allowed.allowed_quantity == Decimal("10.000000000000000000")
-    assert invalid.reasons == ("INVALID_REQUEST",)
+    assert invalid.reasons == ("INVALID_INPUT",)
     assert exhausted.reasons == ("RISK_CAPACITY_EXHAUSTED",)
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"current_risk": Decimal("-1")},
+        {"fact_age": timedelta(seconds=-1)},
+        {"requested_risk": Decimal("0")},
+    ],
+)
+def test_risk_engine_rejects_negative_or_nonpositive_inputs(
+    overrides: dict[str, object],
+) -> None:
+    result = evaluate_risk(policy(), risk_input(**overrides))
+
+    assert result.result is RiskResult.DENY
+    assert result.reasons == ("INVALID_INPUT",)
 
 
 def test_target_and_fill_validation_reject_invalid_inputs() -> None:

@@ -28,24 +28,21 @@ class Database:
         try:
             with self.engine.connect() as connection:
                 connection.execute(text("SELECT 1"))
-                disabled_gates = set(
-                    connection.execute(
-                        text(
-                            """
-                        SELECT capability_key
-                        FROM capability_gates
-                        WHERE status = 'DISABLED'
-                        """
-                        )
-                    ).scalars()
-                )
+                gate_rows = {
+                    row[0]: row[1]
+                    for row in connection.execute(
+                        text("SELECT capability_key, status FROM capability_gates")
+                    )
+                }
                 revision = connection.execute(
                     text("SELECT version_num FROM alembic_version")
                 ).scalar_one_or_none()
             if revision != REQUIRED_SCHEMA_REVISION:
                 return False, "SCHEMA_REVISION_MISMATCH"
-            if disabled_gates != {"LIVE_ORDER_SEND", "CAPITAL_TRANSFER", "AUTO_ADD"}:
-                return False, "CONTROL_GATES_NOT_DISABLED"
+            if set(gate_rows) != {"LIVE_ORDER_SEND", "CAPITAL_TRANSFER", "AUTO_ADD"}:
+                return False, "CONTROL_GATES_INVALID"
+            if any(value not in {"DISABLED", "ENABLED"} for value in gate_rows.values()):
+                return False, "CONTROL_GATES_INVALID"
             return True, None
         except Exception:
             return False, "DATABASE_UNAVAILABLE"

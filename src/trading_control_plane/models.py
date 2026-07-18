@@ -30,9 +30,13 @@ AMOUNT = Numeric(38, 18)
 
 class User(Base):
     __tablename__ = "users"
+    __table_args__ = (
+        CheckConstraint("principal_type IN ('HUMAN','SERVICE')", name="ck_users_principal_type"),
+    )
 
     user_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid4)
     username: Mapped[str] = mapped_column(String(120), nullable=False, unique=True)
+    principal_type: Mapped[str] = mapped_column(String(16), nullable=False)
     active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
@@ -95,12 +99,18 @@ class Proposal(Base):
         ),
         CheckConstraint("quantity > 0", name="ck_proposals_quantity_positive"),
         CheckConstraint("max_risk > 0", name="ck_proposals_risk_positive"),
+        CheckConstraint(
+            "source = 'MANUAL' OR (strategy_id IS NOT NULL AND strategy_version IS NOT NULL)",
+            name="ck_proposals_system_strategy",
+        ),
         Index("ix_proposals_status_expires", "status", "expires_at"),
     )
 
     proposal_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid4)
     source: Mapped[str] = mapped_column(String(16), nullable=False)
     proposer_id: Mapped[UUID] = mapped_column(ForeignKey("users.user_id"), nullable=False)
+    strategy_id: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    strategy_version: Mapped[str | None] = mapped_column(String(120), nullable=True)
     status: Mapped[str] = mapped_column(String(32), nullable=False)
     version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
     risk_tier: Mapped[str] = mapped_column(String(16), nullable=False)
@@ -234,6 +244,14 @@ class Campaign(Base):
         ),
         CheckConstraint("current_target_quantity >= 0", name="ck_campaigns_target_nonnegative"),
         CheckConstraint("target_version >= 0", name="ck_campaigns_target_version_nonnegative"),
+        Index(
+            "uq_campaigns_one_unclosed_scope",
+            "account_id",
+            "venue",
+            "instrument_id",
+            unique=True,
+            postgresql_where=text("status <> 'CLOSED'"),
+        ),
     )
 
     campaign_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid4)
@@ -318,6 +336,13 @@ class OrderIntent(Base):
     side: Mapped[str] = mapped_column(String(8), nullable=False)
     quantity: Mapped[Decimal] = mapped_column(AMOUNT, nullable=False)
     reduce_only: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    target_version: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    position_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("positions.position_id"), nullable=True
+    )
+    position_observed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     status: Mapped[str] = mapped_column(String(32), nullable=False)
     semantic_hash: Mapped[str] = mapped_column(String(64), nullable=False)
     actor_id: Mapped[str] = mapped_column(String(255), nullable=False)
@@ -367,6 +392,7 @@ class VenueOrder(Base):
     status: Mapped[str] = mapped_column(String(32), nullable=False)
     ordered_quantity: Mapped[Decimal] = mapped_column(AMOUNT, nullable=False)
     filled_quantity: Mapped[Decimal] = mapped_column(AMOUNT, nullable=False)
+    observed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
 
@@ -413,6 +439,7 @@ class Position(Base):
     average_entry_price: Mapped[Decimal] = mapped_column(AMOUNT, nullable=False)
     mark_price: Mapped[Decimal] = mapped_column(AMOUNT, nullable=False)
     fact_status: Mapped[str] = mapped_column(String(16), nullable=False)
+    observed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
 
@@ -434,6 +461,7 @@ class ProtectionOrder(Base):
     trigger_price: Mapped[Decimal] = mapped_column(AMOUNT, nullable=False)
     status: Mapped[str] = mapped_column(String(24), nullable=False)
     fully_covered: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    observed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
 
@@ -455,6 +483,7 @@ class AccountEquity(Base):
     available_balance: Mapped[Decimal] = mapped_column(AMOUNT, nullable=False)
     currency: Mapped[str] = mapped_column(String(32), nullable=False)
     fact_status: Mapped[str] = mapped_column(String(16), nullable=False)
+    observed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
 
@@ -492,6 +521,7 @@ class ReconciliationRun(Base):
     execution_scope: Mapped[str] = mapped_column(String(255), nullable=False)
     campaign_id: Mapped[UUID | None] = mapped_column(ForeignKey("campaigns.campaign_id"))
     status: Mapped[str] = mapped_column(String(32), nullable=False)
+    is_computed: Mapped[bool] = mapped_column(Boolean, nullable=False)
     differences: Mapped[list[str]] = mapped_column(JSONB, nullable=False)
     resolution_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
     actor_id: Mapped[str] = mapped_column(String(255), nullable=False)

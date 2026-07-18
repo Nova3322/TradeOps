@@ -53,6 +53,11 @@ fail_under = 85
 target-version = "py312"
 line-length = 100
 src = ["src", "tests"]
+extend-exclude = [
+  "DynamicPositionSizing-",
+  "low_vol_breakout_bn",
+  "交易系统 notion 文档",
+]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "B", "UP", "RUF", "S"]
