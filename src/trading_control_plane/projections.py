@@ -1,0 +1,476 @@
+from __future__ import annotations
+
+from datetime import datetime, timedelta
+from decimal import Decimal
+from enum import StrEnum
+from typing import Any, Self
+from uuid import UUID
+
+from pydantic import BaseModel, ConfigDict, Field, model_validator
+from sqlalchemy import text
+from sqlalchemy.orm import Session
+
+from trading_control_plane.metrics import (
+    VENUE_CURRENT_PROJECTION_AGE,
+    VENUE_CURRENT_PROJECTION_QUERIES,
+)
+
+PROJECTION_VERSION = "venue-current-v1"
+
+
+class ProjectionState(StrEnum):
+    CONFIRMED = "CONFIRMED"
+    UNKNOWN = "UNKNOWN"
+
+
+class ProjectionFreshness(StrEnum):
+    FRESH = "FRESH"
+    STALE = "STALE"
+    MISSING = "MISSING"
+    UNKNOWN = "UNKNOWN"
+
+
+class ProjectionMaturity(StrEnum):
+    VENUE_CONFIRMED = "VENUE_CONFIRMED"
+    UNKNOWN = "UNKNOWN"
+
+
+class CurrentPositionState(StrEnum):
+    OPEN = "OPEN"
+    FLAT = "FLAT"
+    UNKNOWN = "UNKNOWN"
+
+
+class CurrentPositionDirection(StrEnum):
+    LONG = "LONG"
+    SHORT = "SHORT"
+    FLAT = "FLAT"
+    UNKNOWN = "UNKNOWN"
+
+
+class ProjectionQueryContext(BaseModel):
+    """Explicit query time and certified freshness limit; there is no runtime default."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    as_of: datetime
+    max_age_ms: int = Field(gt=0)
+
+    @model_validator(mode="after")
+    def as_of_is_timezone_aware(self) -> Self:
+        if self.as_of.tzinfo is None or self.as_of.utcoffset() is None:
+            raise ValueError("projection as_of must be timezone-aware")
+        return self
+
+
+class CurrentPositionScope(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    organization_id: str = Field(min_length=1, max_length=120)
+    venue: str = Field(min_length=1, max_length=80)
+    execution_domain: str = Field(min_length=1, max_length=120)
+    account_id: str = Field(min_length=1, max_length=160)
+    instrument_id: str = Field(min_length=1, max_length=255)
+    position_mode: str = Field(min_length=1, max_length=80)
+    position_side: str = Field(min_length=1, max_length=20)
+    margin_mode: str = Field(min_length=1, max_length=80)
+    collateral_pool_id: str = Field(min_length=1, max_length=160)
+    settlement_currency: str = Field(min_length=1, max_length=80)
+
+
+class CurrentAccountEquityScope(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    organization_id: str = Field(min_length=1, max_length=120)
+    venue: str = Field(min_length=1, max_length=80)
+    execution_domain: str = Field(min_length=1, max_length=120)
+    account_id: str = Field(min_length=1, max_length=160)
+    margin_mode: str = Field(min_length=1, max_length=80)
+    collateral_pool_id: str = Field(min_length=1, max_length=160)
+    settlement_currency: str = Field(min_length=1, max_length=80)
+
+
+class CurrentPositionProjection(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    scope: CurrentPositionScope
+    projection_state: ProjectionState
+    freshness: ProjectionFreshness
+    maturity: ProjectionMaturity
+    reason_code: str | None
+    source_snapshot_id: UUID | None
+    source_snapshot_hash: str | None
+    source_version: str | None
+    normalization_version: str | None
+    position_state: CurrentPositionState
+    direction: CurrentPositionDirection
+    quantity: Decimal | None
+    entry_price: Decimal | None
+    mark_price: Decimal | None
+    contract_multiplier: Decimal | None
+    notional: Decimal | None
+    unrealized_pnl: Decimal | None
+    liquidation_price: Decimal | None
+    leverage: Decimal | None
+    initial_margin: Decimal | None
+    maintenance_margin: Decimal | None
+    facts_as_of: datetime | None
+    venue_observed_at: datetime | None
+    received_at: datetime | None
+    age_ms: int | None = Field(ge=0)
+    max_event_candidate_count: int = Field(ge=0)
+    projection_version: str = Field(pattern=r"^venue-current-v[0-9]+$")
+
+    @model_validator(mode="after")
+    def unknown_never_exposes_position_economics(self) -> Self:
+        economics = (
+            self.quantity,
+            self.entry_price,
+            self.mark_price,
+            self.contract_multiplier,
+            self.notional,
+            self.unrealized_pnl,
+            self.liquidation_price,
+            self.leverage,
+            self.initial_margin,
+            self.maintenance_margin,
+        )
+        if self.projection_state is ProjectionState.UNKNOWN:
+            if (
+                self.position_state is not CurrentPositionState.UNKNOWN
+                or self.direction is not CurrentPositionDirection.UNKNOWN
+                or any(value is not None for value in economics)
+            ):
+                raise ValueError("unknown position projection cannot expose economics")
+        elif (
+            self.position_state is CurrentPositionState.UNKNOWN
+            or self.direction is CurrentPositionDirection.UNKNOWN
+            or self.source_snapshot_id is None
+            or self.source_snapshot_hash is None
+            or self.source_version is None
+            or self.normalization_version is None
+            or self.freshness is not ProjectionFreshness.FRESH
+            or self.maturity is not ProjectionMaturity.VENUE_CONFIRMED
+        ):
+            raise ValueError("confirmed position projection lacks usable source semantics")
+        return self
+
+
+class CurrentAccountEquityProjection(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    scope: CurrentAccountEquityScope
+    projection_state: ProjectionState
+    freshness: ProjectionFreshness
+    maturity: ProjectionMaturity
+    reason_code: str | None
+    source_snapshot_id: UUID | None
+    source_snapshot_hash: str | None
+    source_version: str | None
+    normalization_version: str | None
+    wallet_balance: Decimal | None
+    exchange_margin_equity: Decimal | None
+    available_margin: Decimal | None
+    total_unrealized_pnl: Decimal | None
+    total_initial_margin: Decimal | None
+    total_maintenance_margin: Decimal | None
+    total_liability: Decimal | None
+    unsettled_fee: Decimal | None
+    unsettled_funding: Decimal | None
+    includes_unrealized_pnl: bool
+    facts_as_of: datetime | None
+    venue_observed_at: datetime | None
+    received_at: datetime | None
+    age_ms: int | None = Field(ge=0)
+    max_event_candidate_count: int = Field(ge=0)
+    projection_version: str = Field(pattern=r"^venue-current-v[0-9]+$")
+
+    @model_validator(mode="after")
+    def unknown_never_exposes_account_economics(self) -> Self:
+        economics = (
+            self.wallet_balance,
+            self.exchange_margin_equity,
+            self.available_margin,
+            self.total_unrealized_pnl,
+            self.total_initial_margin,
+            self.total_maintenance_margin,
+            self.total_liability,
+            self.unsettled_fee,
+            self.unsettled_funding,
+        )
+        if self.projection_state is ProjectionState.UNKNOWN:
+            if any(value is not None for value in economics) or self.includes_unrealized_pnl:
+                raise ValueError("unknown account projection cannot expose economics")
+        elif (
+            any(value is None for value in economics)
+            or not self.includes_unrealized_pnl
+            or self.source_snapshot_id is None
+            or self.source_snapshot_hash is None
+            or self.source_version is None
+            or self.normalization_version is None
+            or self.freshness is not ProjectionFreshness.FRESH
+            or self.maturity is not ProjectionMaturity.VENUE_CONFIRMED
+        ):
+            raise ValueError("confirmed account projection lacks usable source semantics")
+        return self
+
+
+class VenueCurrentProjectionService:
+    """Reads deterministic SQL views; it has no business-command or write path."""
+
+    @staticmethod
+    def current_position(
+        session: Session,
+        scope: CurrentPositionScope,
+        context: ProjectionQueryContext,
+    ) -> CurrentPositionProjection:
+        row = (
+            session.execute(
+                text(
+                    """
+                SELECT *
+                FROM venue_position_current_projection
+                WHERE organization_id = :organization_id
+                  AND venue = :venue
+                  AND execution_domain = :execution_domain
+                  AND account_id = :account_id
+                  AND instrument_id = :instrument_id
+                  AND position_mode = :position_mode
+                  AND position_side = :position_side
+                  AND margin_mode = :margin_mode
+                  AND collateral_pool_id = :collateral_pool_id
+                  AND settlement_currency = :settlement_currency
+                """
+                ),
+                scope.model_dump(),
+            )
+            .mappings()
+            .one_or_none()
+        )
+        values = dict(row) if row is not None else None
+        status = _projection_status(values, context)
+        if values is None:
+            result = CurrentPositionProjection(
+                scope=scope,
+                projection_state=ProjectionState.UNKNOWN,
+                freshness=ProjectionFreshness.MISSING,
+                maturity=ProjectionMaturity.UNKNOWN,
+                reason_code="SOURCE_MISSING",
+                source_snapshot_id=None,
+                source_snapshot_hash=None,
+                source_version=None,
+                normalization_version=None,
+                position_state=CurrentPositionState.UNKNOWN,
+                direction=CurrentPositionDirection.UNKNOWN,
+                quantity=None,
+                entry_price=None,
+                mark_price=None,
+                contract_multiplier=None,
+                notional=None,
+                unrealized_pnl=None,
+                liquidation_price=None,
+                leverage=None,
+                initial_margin=None,
+                maintenance_margin=None,
+                facts_as_of=None,
+                venue_observed_at=None,
+                received_at=None,
+                age_ms=None,
+                max_event_candidate_count=0,
+                projection_version=PROJECTION_VERSION,
+            )
+        else:
+            usable = status.state is ProjectionState.CONFIRMED
+            result = CurrentPositionProjection(
+                scope=scope,
+                projection_state=status.state,
+                freshness=status.freshness,
+                maturity=ProjectionMaturity(values["maturity"]),
+                reason_code=status.reason_code,
+                source_snapshot_id=values["source_snapshot_id"],
+                source_snapshot_hash=values["source_snapshot_hash"],
+                source_version=values["source_version"],
+                normalization_version=values["normalization_version"],
+                position_state=CurrentPositionState(values["position_state"])
+                if usable
+                else CurrentPositionState.UNKNOWN,
+                direction=CurrentPositionDirection(values["direction"])
+                if usable
+                else CurrentPositionDirection.UNKNOWN,
+                quantity=values["quantity"] if usable else None,
+                entry_price=values["entry_price"] if usable else None,
+                mark_price=values["mark_price"] if usable else None,
+                contract_multiplier=values["contract_multiplier"] if usable else None,
+                notional=values["notional"] if usable else None,
+                unrealized_pnl=values["unrealized_pnl"] if usable else None,
+                liquidation_price=values["liquidation_price"] if usable else None,
+                leverage=values["leverage"] if usable else None,
+                initial_margin=values["initial_margin"] if usable else None,
+                maintenance_margin=values["maintenance_margin"] if usable else None,
+                facts_as_of=values["facts_as_of"],
+                venue_observed_at=values["venue_observed_at"],
+                received_at=values["received_at"],
+                age_ms=status.age_ms,
+                max_event_candidate_count=values["max_event_candidate_count"],
+                projection_version=values["projection_version"],
+            )
+        _observe("POSITION", result.projection_state, result.freshness, result.age_ms)
+        return result
+
+    @staticmethod
+    def current_account_equity(
+        session: Session,
+        scope: CurrentAccountEquityScope,
+        context: ProjectionQueryContext,
+    ) -> CurrentAccountEquityProjection:
+        row = (
+            session.execute(
+                text(
+                    """
+                SELECT *
+                FROM venue_account_equity_current_projection
+                WHERE organization_id = :organization_id
+                  AND venue = :venue
+                  AND execution_domain = :execution_domain
+                  AND account_id = :account_id
+                  AND margin_mode = :margin_mode
+                  AND collateral_pool_id = :collateral_pool_id
+                  AND settlement_currency = :settlement_currency
+                """
+                ),
+                scope.model_dump(),
+            )
+            .mappings()
+            .one_or_none()
+        )
+        values = dict(row) if row is not None else None
+        status = _projection_status(values, context)
+        if values is None:
+            result = CurrentAccountEquityProjection(
+                scope=scope,
+                projection_state=ProjectionState.UNKNOWN,
+                freshness=ProjectionFreshness.MISSING,
+                maturity=ProjectionMaturity.UNKNOWN,
+                reason_code="SOURCE_MISSING",
+                source_snapshot_id=None,
+                source_snapshot_hash=None,
+                source_version=None,
+                normalization_version=None,
+                wallet_balance=None,
+                exchange_margin_equity=None,
+                available_margin=None,
+                total_unrealized_pnl=None,
+                total_initial_margin=None,
+                total_maintenance_margin=None,
+                total_liability=None,
+                unsettled_fee=None,
+                unsettled_funding=None,
+                includes_unrealized_pnl=False,
+                facts_as_of=None,
+                venue_observed_at=None,
+                received_at=None,
+                age_ms=None,
+                max_event_candidate_count=0,
+                projection_version=PROJECTION_VERSION,
+            )
+        else:
+            usable = status.state is ProjectionState.CONFIRMED
+            result = CurrentAccountEquityProjection(
+                scope=scope,
+                projection_state=status.state,
+                freshness=status.freshness,
+                maturity=ProjectionMaturity(values["maturity"]),
+                reason_code=status.reason_code,
+                source_snapshot_id=values["source_snapshot_id"],
+                source_snapshot_hash=values["source_snapshot_hash"],
+                source_version=values["source_version"],
+                normalization_version=values["normalization_version"],
+                wallet_balance=values["wallet_balance"] if usable else None,
+                exchange_margin_equity=values["exchange_margin_equity"] if usable else None,
+                available_margin=values["available_margin"] if usable else None,
+                total_unrealized_pnl=values["total_unrealized_pnl"] if usable else None,
+                total_initial_margin=values["total_initial_margin"] if usable else None,
+                total_maintenance_margin=values["total_maintenance_margin"] if usable else None,
+                total_liability=values["total_liability"] if usable else None,
+                unsettled_fee=values["unsettled_fee"] if usable else None,
+                unsettled_funding=values["unsettled_funding"] if usable else None,
+                includes_unrealized_pnl=bool(values["includes_unrealized_pnl"])
+                if usable
+                else False,
+                facts_as_of=values["facts_as_of"],
+                venue_observed_at=values["venue_observed_at"],
+                received_at=values["received_at"],
+                age_ms=status.age_ms,
+                max_event_candidate_count=values["max_event_candidate_count"],
+                projection_version=values["projection_version"],
+            )
+        _observe("ACCOUNT_EQUITY", result.projection_state, result.freshness, result.age_ms)
+        return result
+
+
+class _ProjectionStatus(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    state: ProjectionState
+    freshness: ProjectionFreshness
+    reason_code: str | None
+    age_ms: int | None
+
+
+def _projection_status(
+    values: dict[str, Any] | None,
+    context: ProjectionQueryContext,
+) -> _ProjectionStatus:
+    if values is None:
+        return _ProjectionStatus(
+            state=ProjectionState.UNKNOWN,
+            freshness=ProjectionFreshness.MISSING,
+            reason_code="SOURCE_MISSING",
+            age_ms=None,
+        )
+    facts_as_of = values["facts_as_of"]
+    assert isinstance(facts_as_of, datetime)
+    age = context.as_of - facts_as_of
+    age_ms = max(0, int(age.total_seconds() * 1000))
+    if values["projection_state"] != ProjectionState.CONFIRMED.value:
+        return _ProjectionStatus(
+            state=ProjectionState.UNKNOWN,
+            freshness=ProjectionFreshness.UNKNOWN,
+            reason_code=str(values["reason_code"]),
+            age_ms=age_ms,
+        )
+    if age < timedelta(0):
+        return _ProjectionStatus(
+            state=ProjectionState.UNKNOWN,
+            freshness=ProjectionFreshness.UNKNOWN,
+            reason_code="SOURCE_FROM_FUTURE",
+            age_ms=0,
+        )
+    if age > timedelta(milliseconds=context.max_age_ms):
+        return _ProjectionStatus(
+            state=ProjectionState.UNKNOWN,
+            freshness=ProjectionFreshness.STALE,
+            reason_code="SOURCE_STALE",
+            age_ms=age_ms,
+        )
+    return _ProjectionStatus(
+        state=ProjectionState.CONFIRMED,
+        freshness=ProjectionFreshness.FRESH,
+        reason_code=None,
+        age_ms=age_ms,
+    )
+
+
+def _observe(
+    projection_type: str,
+    state: ProjectionState,
+    freshness: ProjectionFreshness,
+    age_ms: int | None,
+) -> None:
+    VENUE_CURRENT_PROJECTION_QUERIES.labels(
+        projection_type,
+        state.value,
+        freshness.value,
+    ).inc()
+    if age_ms is not None:
+        VENUE_CURRENT_PROJECTION_AGE.labels(projection_type).observe(age_ms / 1000)

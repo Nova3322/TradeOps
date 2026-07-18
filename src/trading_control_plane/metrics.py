@@ -152,3 +152,16 @@ VENUE_FACT_INPUT_LINKS = Counter(
     "Immutable reconciliation-input memberships by source and result.",
     labelnames=("source_type", "result"),
 )
+
+VENUE_CURRENT_PROJECTION_QUERIES = Counter(
+    "trading_venue_current_projection_queries_total",
+    "Read-only current venue projection queries by bounded projection, state, and freshness.",
+    labelnames=("projection_type", "projection_state", "freshness"),
+)
+
+VENUE_CURRENT_PROJECTION_AGE = Histogram(
+    "trading_venue_current_projection_age_seconds",
+    "Age of current venue projection facts when a source row exists.",
+    labelnames=("projection_type",),
+    buckets=(0.1, 0.5, 1, 2, 5, 10, 30, 60, 300, 900, 3600),
+)

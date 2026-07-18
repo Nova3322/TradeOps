@@ -99,6 +99,7 @@ docs/
     ├── WP-0016-Canonical-VenueProtectionSnapshot事实.md
     ├── WP-0017-Canonical-VenueProtection执行强绑定.md
     ├── WP-0018-Canonical-VenueAccountEquitySnapshot事实.md
+    ├── WP-0019-可重建当前Venue投影.md
     └── evidence/
         ├── WP-0001-validation-20260718.md
         ├── WP-0002-validation-20260718.md
@@ -117,7 +118,8 @@ docs/
         ├── WP-0015-validation-20260718.md
         ├── WP-0016-validation-20260718.md
         ├── WP-0017-validation-20260718.md
-        └── WP-0018-validation-20260718.md
+        ├── WP-0018-validation-20260718.md
+        └── WP-0019-validation-20260718.md
 ```
 
 ### 专项索引
@@ -165,6 +167,7 @@ docs/
 | 实现 | [WP-0016：Canonical VenueProtectionSnapshot 事实](08-implementation/WP-0016-Canonical-VenueProtectionSnapshot事实.md) | 原生保护 CONFIRMED/DEGRADED/UNKNOWN、仓位强引用、覆盖数量与 replacement 语义 |
 | 实现 | [WP-0017：Canonical VenueProtection 执行强绑定](08-implementation/WP-0017-Canonical-VenueProtection执行强绑定.md) | exact protection fact/link、全覆盖 reduce-only 保护、`PROTECTION_CONFIRMED` 原子推进 |
 | 实现 | [WP-0018：Canonical VenueAccountEquitySnapshot 事实](08-implementation/WP-0018-Canonical-VenueAccountEquitySnapshot事实.md) | 私有账户权益 CONFIRMED/UNKNOWN、margin/collateral/currency 精确作用域和 balance exact membership |
+| 实现 | [WP-0019：可重建当前 Venue 投影](08-implementation/WP-0019-可重建当前Venue投影.md) | 仓位/账户权益当前只读视图、事件时间排序、冲突/Unknown/陈旧遮蔽及可重复重建 |
 
 ## 完整交付与能力激活
 
