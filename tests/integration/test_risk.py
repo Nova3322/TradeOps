@@ -228,6 +228,22 @@ def test_allow_precheck_persists_immutable_snapshot_audit_and_outbox(
             == snapshot.capital_projection_hash
         )
         assert (
+            hash_json(snapshot.input_snapshot["durable_exposure_snapshot"])
+            == snapshot.durable_exposure_snapshot_hash
+        )
+        assert (
+            result.data["durable_exposure_snapshot_hash"] == snapshot.durable_exposure_snapshot_hash
+        )
+        assert snapshot.input_snapshot["durable_exposure_snapshot"]["campaign_id"] is None
+        assert snapshot.input_snapshot["durable_exposure_snapshot"]["components"] == []
+        assert snapshot.input_snapshot["request"]["current_trade_loss"] == {
+            "open_heat": "0",
+            "reserved_heat": "0",
+            "unknown_heat": "0",
+            "protected_profit_giveback": "0",
+            "cost_stress_add_on": "0",
+        }
+        assert (
             snapshot.input_snapshot["capital_projection"]["account_components"][0][
                 "source_snapshot_id"
             ]
@@ -277,6 +293,48 @@ def test_caller_cannot_forge_current_capital_values(database: Database) -> None:
 
     assert result.status is CommandStatus.REJECTED
     assert result.error_code == "CAPITAL_INPUT_MISMATCH"
+    with database.session_factory.begin() as session:
+        assert count_rows(session, RiskDecisionSnapshot) == 0
+
+
+@pytest.mark.parametrize("forged_field", ("funding", "initial_heat", "scope_usage"))
+def test_proposal_precheck_rejects_caller_reported_durable_exposure(
+    database: Database,
+    forged_field: str,
+) -> None:
+    now = datetime.now(UTC)
+    seed_policy(database, now=now)
+    seed_state(database)
+    request = make_request(now=now)
+    if forged_field == "funding":
+        request = request.model_copy(
+            update={
+                "capital": request.capital.model_copy(update={"funding_reserved": Decimal("1")})
+            }
+        )
+    elif forged_field == "initial_heat":
+        request = request.model_copy(
+            update={
+                "current_trade_loss": request.current_trade_loss.model_copy(
+                    update={"open_heat": Decimal("1")}
+                )
+            }
+        )
+    else:
+        first, *rest = request.scope_risks
+        request = request.model_copy(
+            update={
+                "scope_risks": (
+                    first.model_copy(update={"current_planned_loss": Decimal("1")}),
+                    *rest,
+                )
+            }
+        )
+
+    result = execute_precheck(database, risk_envelope(request), now=now)
+
+    assert result.status is CommandStatus.REJECTED
+    assert result.error_code == "DURABLE_EXPOSURE_INPUT_MISMATCH"
     with database.session_factory.begin() as session:
         assert count_rows(session, RiskDecisionSnapshot) == 0
 

@@ -35,6 +35,10 @@ from trading_control_plane.commands import (
     DomainEvent,
     hash_json,
 )
+from trading_control_plane.durable_exposure import (
+    DurableExposureSnapshot,
+    DurableExposureSnapshotService,
+)
 from trading_control_plane.metrics import (
     RISK_DECISION_DURATION,
     RISK_DECISIONS,
@@ -506,6 +510,14 @@ class VerifiedCapitalProjection(BaseModel):
     projection_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
 
 
+class VerifiedProposalDurableExposure(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    risk_request: RiskPrecheckRequest
+    snapshot: DurableExposureSnapshot
+    snapshot_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
 class CapitalProjectionResolver:
     """Recomputes current capital from exact canonical scope/facts inside the transaction."""
 
@@ -611,6 +623,101 @@ class CapitalProjectionResolver:
             capital=derived,
             projection=projection,
             projection_hash=hash_json(projection_snapshot),
+        )
+
+
+class ProposalDurableExposureResolver:
+    """Binds a new initial proposal to the organization risk ledger projection."""
+
+    @staticmethod
+    def resolve(
+        session: Session,
+        request: RiskPrecheckRequest,
+    ) -> VerifiedProposalDurableExposure:
+        snapshot = DurableExposureSnapshotService.query(
+            session,
+            organization_id=request.organization_id,
+            campaign_id=None,
+            scope_keys=tuple(
+                (item.scope_type.value, item.scope_id) for item in request.scope_risks
+            ),
+            raw_available_margin=request.capital.available_margin,
+        )
+        if snapshot.has_unknown_exposure:
+            raise CommandRejected(
+                "ORDER_RESULT_UNKNOWN",
+                "organization has unresolved durable order exposure",
+            )
+        if (
+            request.requested.requested_margin
+            > snapshot.available_margin_after_internal_reservations
+        ):
+            raise CommandRejected(
+                "DURABLE_MARGIN_CAPACITY_EXCEEDED",
+                "durable margin reservations leave insufficient available margin",
+            )
+
+        derived_trade_loss = TradeLossComponents(
+            open_heat=ZERO,
+            reserved_heat=ZERO,
+            unknown_heat=ZERO,
+            protected_profit_giveback=ZERO,
+            cost_stress_add_on=ZERO,
+        )
+        scope_by_key = {item.key: item for item in snapshot.scope_exposures}
+        derived_scope_risks = tuple(
+            item.model_copy(
+                update={
+                    "current_planned_loss": scope_by_key[
+                        item.scope_type.value, item.scope_id
+                    ].current_planned_loss,
+                    "current_stress_loss": scope_by_key[
+                        item.scope_type.value, item.scope_id
+                    ].current_stress_loss,
+                }
+            )
+            for item in request.scope_risks
+        )
+        derived_capital = request.capital.model_copy(
+            update={
+                "funding_used": snapshot.global_funding_used,
+                "funding_reserved": (
+                    snapshot.global_funding_reserved + snapshot.global_funding_unknown
+                ),
+                "available_margin": snapshot.available_margin_after_internal_reservations,
+            }
+        )
+        submitted_scope_usage = {
+            item.key: (item.current_planned_loss, item.current_stress_loss)
+            for item in request.scope_risks
+        }
+        derived_scope_usage = {
+            item.key: (item.current_planned_loss, item.current_stress_loss)
+            for item in derived_scope_risks
+        }
+        if (
+            request.capital.funding_used != snapshot.global_funding_used
+            or request.capital.funding_reserved
+            != snapshot.global_funding_reserved + snapshot.global_funding_unknown
+            or request.current_trade_loss != derived_trade_loss
+            or submitted_scope_usage != derived_scope_usage
+        ):
+            raise CommandRejected(
+                "DURABLE_EXPOSURE_INPUT_MISMATCH",
+                "caller funding, initial Heat, or scope usage differs from durable risk state",
+            )
+
+        snapshot_hash = hash_json(snapshot.model_dump(mode="json"))
+        return VerifiedProposalDurableExposure(
+            risk_request=request.model_copy(
+                update={
+                    "capital": derived_capital,
+                    "current_trade_loss": derived_trade_loss,
+                    "scope_risks": derived_scope_risks,
+                }
+            ),
+            snapshot=snapshot,
+            snapshot_hash=snapshot_hash,
         )
 
 
@@ -970,12 +1077,16 @@ class RiskPrecheckService:
         evaluator: RiskEvaluator | None = None,
         certificate_validator: CapabilityCertificateValidator | None = None,
         capital_projection_resolver: CapitalProjectionResolver | None = None,
+        durable_exposure_resolver: ProposalDurableExposureResolver | None = None,
         clock: Callable[[], datetime] | None = None,
     ) -> None:
         self._evaluator = evaluator or RiskEvaluator()
         self._certificate_validator = certificate_validator or CapabilityCertificateValidator()
         self._capital_projection_resolver = (
             capital_projection_resolver or CapitalProjectionResolver()
+        )
+        self._durable_exposure_resolver = (
+            durable_exposure_resolver or ProposalDurableExposureResolver()
         )
         self._clock = clock or (lambda: datetime.now(UTC))
 
@@ -1042,6 +1153,8 @@ class RiskPrecheckService:
             decided_at,
         )
         verified_request = request.model_copy(update={"capital": verified_capital.capital})
+        verified_exposure = self._durable_exposure_resolver.resolve(session, verified_request)
+        verified_request = verified_exposure.risk_request
         capability_validation = self._certificate_validator.validate(
             session,
             capability_validation_request(verified_request, decided_at),
@@ -1083,11 +1196,18 @@ class RiskPrecheckService:
         input_snapshot["submitted_capital"] = request.capital.model_dump(mode="json")
         input_snapshot["capital_projection"] = verified_capital.projection.model_dump(mode="json")
         input_snapshot["capital_projection_hash"] = verified_capital.projection_hash
+        input_snapshot["durable_exposure_snapshot"] = verified_exposure.snapshot.model_dump(
+            mode="json"
+        )
+        input_snapshot["durable_exposure_snapshot_hash"] = verified_exposure.snapshot_hash
         input_snapshot["derived_capital"] = {
             "exchange_margin_equity": str(verified_request.capital.exchange_margin_equity),
             "current_portfolio_mtm_equity": str(
                 verified_request.capital.current_portfolio_mtm_equity
             ),
+            "funding_used": str(verified_request.capital.funding_used),
+            "funding_reserved": str(verified_request.capital.funding_reserved),
+            "available_margin": str(verified_request.capital.available_margin),
         }
         input_hash = hash_json(input_snapshot)
         decision = result.model_dump(mode="json")
@@ -1110,6 +1230,7 @@ class RiskPrecheckService:
                 capital_scope_manifest_hash=verified_capital.projection.manifest_hash,
                 capital_projection_version=verified_capital.projection.projection_version,
                 capital_projection_hash=verified_capital.projection_hash,
+                durable_exposure_snapshot_hash=verified_exposure.snapshot_hash,
                 requested_quantity=result.requested_quantity,
                 max_safe_quantity=result.max_safe_quantity,
                 final_quantity=result.final_quantity,
@@ -1159,6 +1280,7 @@ class RiskPrecheckService:
                 "capital_scope_manifest_hash": verified_capital.projection.manifest_hash,
                 "capital_projection_version": verified_capital.projection.projection_version,
                 "capital_projection_hash": verified_capital.projection_hash,
+                "durable_exposure_snapshot_hash": verified_exposure.snapshot_hash,
                 "valid_until": result.valid_until.isoformat(),
                 "execution_eligible": False,
                 "reservation_created": False,
@@ -1183,6 +1305,7 @@ class RiskPrecheckService:
                             verified_capital.projection.projection_version
                         ),
                         "capital_projection_hash": verified_capital.projection_hash,
+                        "durable_exposure_snapshot_hash": verified_exposure.snapshot_hash,
                         "execution_eligible": False,
                         "reservation_created": False,
                     },

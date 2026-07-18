@@ -128,6 +128,7 @@ class RiskDecisionSnapshot(Base):
         CheckConstraint(
             "length(capital_scope_manifest_hash) = 64 "
             "AND length(capital_projection_hash) = 64 "
+            "AND length(durable_exposure_snapshot_hash) = 64 "
             "AND capital_projection_version ~ '^portfolio-mtm-v[0-9]+$'",
             name="ck_risk_decisions_capital_binding_integrity",
         ),
@@ -193,6 +194,7 @@ class RiskDecisionSnapshot(Base):
     capital_scope_manifest_hash: Mapped[str] = mapped_column(String(64), nullable=False)
     capital_projection_version: Mapped[str] = mapped_column(String(40), nullable=False)
     capital_projection_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    durable_exposure_snapshot_hash: Mapped[str] = mapped_column(String(64), nullable=False)
     requested_quantity: Mapped[Decimal] = mapped_column(Numeric(38, 18), nullable=False)
     max_safe_quantity: Mapped[Decimal] = mapped_column(Numeric(38, 18), nullable=False)
     final_quantity: Mapped[Decimal] = mapped_column(Numeric(38, 18), nullable=False)

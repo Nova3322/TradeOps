@@ -100,12 +100,13 @@ from trading_control_plane.risk import (
     MarketRiskInput,
     PositionDirection,
     RiskPrecheckRequest,
+    RiskPrecheckService,
     ScopeLimit,
     ScopeRiskInput,
     ScopeType,
     TradeLossComponents,
 )
-from trading_control_plane.risk_models import RiskPolicyRecord
+from trading_control_plane.risk_models import RiskDecisionSnapshot, RiskPolicyRecord
 from trading_control_plane.sender_fencing import SenderScopeBinding, sender_scope_id
 from trading_control_plane.sender_fencing_models import (
     ExecutionSenderScope,
@@ -414,6 +415,27 @@ def create_intent_envelope(
             "risk_request": request.model_dump(mode="json"),
             "add_eligibility": None,
         },
+    )
+
+
+def proposal_precheck_envelope(request: RiskPrecheckRequest) -> CommandEnvelope:
+    now = datetime.now(UTC)
+    return CommandEnvelope(
+        idempotency_key=f"proposal-risk-precheck-{uuid4()}",
+        command_type=RiskPrecheckService.command_type,
+        object_type="ProposalCandidate",
+        object_id=request.proposal_ref,
+        expected_version=request.candidate_version,
+        service_principal="trading:proposal-test",
+        channel=CommandChannel.INTERNAL,
+        scope={"organization_id": request.organization_id},
+        correlation_id=uuid4(),
+        issued_at=now,
+        expires_at=now + timedelta(minutes=2),
+        auth_context_ref="test-only:proposal-precheck-auth",
+        payload_schema_version=1,
+        reason="evaluate proposal against existing durable exposure",
+        payload=request.model_dump(mode="json"),
     )
 
 
@@ -1337,6 +1359,113 @@ def test_durable_exposure_snapshot_subtracts_internal_margin_reservations(
     assert hash_json(verified.snapshot.model_dump(mode="json")) == verified.snapshot_hash
 
 
+def test_proposal_precheck_derives_other_campaign_funding_margin_and_scope(
+    database: Database,
+) -> None:
+    proposal, campaign, initial = prepare_authorization(database)
+    now = datetime.now(UTC)
+    seed_execution_policy(database, now)
+    created = execute_create(
+        database,
+        create_intent_envelope(
+            proposal,
+            campaign,
+            initial,
+            now=now,
+            candidate_ref="proposal-durable-exposure-source",
+        ),
+    )
+    assert created.status is CommandStatus.COMPLETED
+
+    under_reported = execution_risk_request(proposal, now=datetime.now(UTC))
+    low = IdempotentCommandExecutor(database.session_factory).execute(
+        proposal_precheck_envelope(under_reported),
+        RiskPrecheckService().evaluate,
+    )
+    assert low.status is CommandStatus.REJECTED
+    assert low.error_code == "DURABLE_EXPOSURE_INPUT_MISMATCH"
+
+    exact = execution_risk_request(
+        proposal,
+        now=datetime.now(UTC),
+        funding_reserved=Decimal("500"),
+        scope_current_planned=Decimal("110"),
+        scope_current_stress=Decimal("150"),
+    )
+    allowed = IdempotentCommandExecutor(database.session_factory).execute(
+        proposal_precheck_envelope(exact),
+        RiskPrecheckService().evaluate,
+    )
+
+    assert allowed.status is CommandStatus.COMPLETED
+    assert allowed.data["result"] == "ALLOW"
+    with database.session_factory.begin() as session:
+        decision = session.execute(select(RiskDecisionSnapshot)).scalar_one()
+        durable = decision.input_snapshot["durable_exposure_snapshot"]
+        assert durable["campaign_id"] is None
+        assert len(durable["components"]) == 1
+        assert durable["global_funding_reserved"] == "500.000000000000000000"
+        assert durable["global_margin_reserved"] == "500.000000000000000000"
+        assert durable["available_margin_after_internal_reservations"] == (
+            "9500.000000000000000000"
+        )
+        assert decision.input_snapshot["request"]["current_trade_loss"] == {
+            "open_heat": "0",
+            "reserved_heat": "0",
+            "unknown_heat": "0",
+            "protected_profit_giveback": "0",
+            "cost_stress_add_on": "0",
+        }
+
+
+def test_durable_exposure_resolver_blocks_internal_margin_overcommit(database: Database) -> None:
+    proposal, campaign, initial = prepare_authorization(database)
+    now = datetime.now(UTC)
+    seed_execution_policy(database, now)
+    created = execute_create(
+        database,
+        create_intent_envelope(
+            proposal,
+            campaign,
+            initial,
+            now=now,
+            candidate_ref="durable-margin-capacity-source",
+        ),
+    )
+    assert created.status is CommandStatus.COMPLETED
+    risk_request = execution_risk_request(
+        proposal,
+        now=datetime.now(UTC),
+        current_reserved_heat=Decimal("110"),
+        funding_reserved=Decimal("500"),
+        scope_current_planned=Decimal("110"),
+        scope_current_stress=Decimal("150"),
+    )
+    risk_request = risk_request.model_copy(
+        update={
+            "requested": risk_request.requested.model_copy(
+                update={"requested_margin": Decimal("9600")}
+            )
+        }
+    )
+    request = CreateExecutionIntentRequest.model_validate(
+        create_intent_envelope(
+            proposal,
+            campaign,
+            initial,
+            now=datetime.now(UTC),
+            candidate_ref="durable-margin-capacity-check",
+            risk_request=risk_request,
+        ).payload
+    )
+
+    with database.session_factory.begin() as session:
+        with pytest.raises(CommandRejected) as exc_info:
+            DurableExposureResolver.resolve(session, request, campaign)
+
+    assert exc_info.value.error_code == "DURABLE_MARGIN_CAPACITY_EXCEEDED"
+
+
 def test_final_precheck_cannot_replace_frozen_capital_scope(database: Database) -> None:
     proposal, campaign, initial = prepare_authorization(database)
     now = datetime.now(UTC)
@@ -1460,6 +1589,20 @@ def test_partial_fill_consumes_initial_then_unknown_locks_remaining_risk(
         assert initial_state is not None and initial_state.status == "CONSUMED"
         assert campaign_state is not None and campaign_state.status == "OPEN"
         assert count_rows(session, RiskLedgerEntry) == 3
+
+    next_request = CreateExecutionIntentRequest.model_validate(
+        create_intent_envelope(
+            proposal,
+            campaign,
+            initial,
+            now=datetime.now(UTC),
+            candidate_ref="unknown-exposure-check",
+        ).payload
+    )
+    with database.session_factory.begin() as session:
+        with pytest.raises(CommandRejected) as exc_info:
+            DurableExposureResolver.resolve(session, next_request, campaign)
+    assert exc_info.value.error_code == "ORDER_RESULT_UNKNOWN"
 
 
 def test_partial_fill_then_canonical_cancel_releases_only_unfilled_quantity(

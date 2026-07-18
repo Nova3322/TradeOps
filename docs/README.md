@@ -104,6 +104,7 @@ docs/
     ├── WP-0021-RiskPrecheck可信资本强绑定.md
     ├── WP-0022-最终ORDER-PRECHECK可信资本强绑定.md
     ├── WP-0023-最终预检Durable-Exposure强绑定.md
+    ├── WP-0024-提案预检Durable-Exposure强绑定.md
     └── evidence/
         ├── WP-0001-validation-20260718.md
         ├── WP-0002-validation-20260718.md
@@ -127,7 +128,8 @@ docs/
         ├── WP-0020-validation-20260718.md
         ├── WP-0021-validation-20260718.md
         ├── WP-0022-validation-20260718.md
-        └── WP-0023-validation-20260718.md
+        ├── WP-0023-validation-20260718.md
+        └── WP-0024-validation-20260718.md
 ```
 
 ### 专项索引
@@ -180,6 +182,7 @@ docs/
 | 实现 | [WP-0021：RiskPrecheck 可信资本强绑定](08-implementation/WP-0021-RiskPrecheck可信资本强绑定.md) | 提案风险事务内资本重算、manifest/projection/source 强绑定和自报数值拒绝 |
 | 实现 | [WP-0022：最终 ORDER_PRECHECK 可信资本强绑定](08-implementation/WP-0022-最终ORDER-PRECHECK可信资本强绑定.md) | 授权冻结资金范围、执行前刷新 MTM/UPNL/available margin、保持 Snapshot_0/1R 不变并落库最终证据 |
 | 实现 | [WP-0023：最终预检 Durable Exposure 强绑定](08-implementation/WP-0023-最终预检Durable-Exposure强绑定.md) | Ledger 当前态派生 funding/Heat/internal margin/七层 scope、拒绝高低报并保存可复算快照 |
+| 实现 | [WP-0024：提案预检 Durable Exposure 强绑定](08-implementation/WP-0024-提案预检Durable-Exposure强绑定.md) | 公共聚合器、组织级并发锁、新初仓零 Heat、提案 funding/margin/scope 真源和不可变 hash |
 
 ## 完整交付与能力激活
 
