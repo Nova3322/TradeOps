@@ -57,7 +57,7 @@ def create_app(
         DATABASE_READY.set(1 if ready else 0)
         if not ready:
             logger.warning(
-                "durable control plane is not ready",
+                "durable trading core is not ready",
                 extra={
                     "event": "readiness_failed",
                     "error_code": error_code or "READINESS_FAILED",

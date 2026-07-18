@@ -1,4 +1,7 @@
-from fastapi.testclient import TestClient
+import asyncio
+
+from fastapi import FastAPI
+from httpx import ASGITransport, AsyncClient, Response
 
 from trading_control_plane.api import create_app
 from trading_control_plane.config import Settings
@@ -25,11 +28,20 @@ def settings() -> Settings:
     )
 
 
+async def async_get(app: FastAPI, path: str) -> Response:
+    async with app.router.lifespan_context(app):
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            return await client.get(path)
+
+
+def get(app: FastAPI, path: str) -> Response:
+    return asyncio.run(async_get(app, path))
+
+
 def test_liveness_does_not_claim_database_readiness() -> None:
     database = FakeDatabase(ready=False, error_code="DATABASE_UNAVAILABLE")
 
-    with TestClient(create_app(settings(), database)) as client:
-        response = client.get("/health/live")
+    response = get(create_app(settings(), database), "/health/live")
 
     assert response.status_code == 200
     assert response.json()["status"] == "live"
@@ -37,8 +49,7 @@ def test_liveness_does_not_claim_database_readiness() -> None:
 
 
 def test_readiness_requires_durable_store_and_control_gates() -> None:
-    with TestClient(create_app(settings(), FakeDatabase())) as client:
-        response = client.get("/health/ready")
+    response = get(create_app(settings(), FakeDatabase()), "/health/ready")
 
     assert response.status_code == 200
     assert response.json() == {"status": "ready", "durable_store": "postgresql"}
@@ -47,8 +58,7 @@ def test_readiness_requires_durable_store_and_control_gates() -> None:
 def test_readiness_fails_closed_with_stable_error_code() -> None:
     database = FakeDatabase(ready=False, error_code="CONTROL_GATES_MISSING")
 
-    with TestClient(create_app(settings(), database)) as client:
-        response = client.get("/health/ready")
+    response = get(create_app(settings(), database), "/health/ready")
 
     assert response.status_code == 503
     assert response.json()["detail"] == {
@@ -58,8 +68,7 @@ def test_readiness_fails_closed_with_stable_error_code() -> None:
 
 
 def test_metrics_endpoint_exposes_control_plane_metrics() -> None:
-    with TestClient(create_app(settings(), FakeDatabase())) as client:
-        response = client.get("/metrics")
+    response = get(create_app(settings(), FakeDatabase()), "/metrics")
 
     assert response.status_code == 200
     assert "trading_database_ready" in response.text

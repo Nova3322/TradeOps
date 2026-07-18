@@ -5,27 +5,7 @@ from logging.config import fileConfig
 from alembic import context
 from sqlalchemy import engine_from_config, pool
 
-from trading_control_plane import (  # noqa: F401
-    campaign_economics_models,
-    campaign_fill_economics_models,
-    campaign_reduction_models,
-    campaign_target_models,
-    capability_certificate_models,
-    capital_scope_models,
-    execution_models,
-    iam_models,
-    instrument_catalog_models,
-    models,
-    proposal_models,
-    protection_capability_models,
-    reconciliation_models,
-    risk_fact_set_models,
-    risk_models,
-    sender_fencing_models,
-    strategy_evaluation_models,
-    trading_authorization_models,
-    venue_fact_models,
-)
+from trading_control_plane import models  # noqa: F401
 from trading_control_plane.config import get_settings
 from trading_control_plane.database import Base
 

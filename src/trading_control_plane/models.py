@@ -1,14 +1,18 @@
 from __future__ import annotations
 
 from datetime import datetime
+from decimal import Decimal
 from typing import Any
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from sqlalchemy import (
+    Boolean,
     CheckConstraint,
     DateTime,
+    ForeignKey,
     Index,
     Integer,
+    Numeric,
     String,
     Text,
     UniqueConstraint,
@@ -21,112 +25,527 @@ from sqlalchemy.orm import Mapped, mapped_column
 
 from trading_control_plane.database import Base
 
+AMOUNT = Numeric(38, 18)
+
+
+class User(Base):
+    __tablename__ = "users"
+
+    user_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid4)
+    username: Mapped[str] = mapped_column(String(120), nullable=False, unique=True)
+    active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
+class RoleAssignment(Base):
+    __tablename__ = "role_assignments"
+    __table_args__ = (
+        CheckConstraint(
+            "role IN ('OBSERVER','PROPOSER','REVIEWER','OPERATOR','SYSTEM_ADMIN')",
+            name="ck_role_assignments_role",
+        ),
+        Index("ix_role_assignments_user", "user_id"),
+    )
+
+    assignment_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid4)
+    user_id: Mapped[UUID] = mapped_column(
+        ForeignKey("users.user_id", ondelete="CASCADE"), nullable=False
+    )
+    role: Mapped[str] = mapped_column(String(32), nullable=False)
+    account_scope: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    venue_scope: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class Instrument(Base):
+    __tablename__ = "instruments"
+    __table_args__ = (
+        UniqueConstraint("venue", "symbol", name="uq_instruments_venue_symbol"),
+        CheckConstraint("tick_size > 0", name="ck_instruments_tick_size_positive"),
+        CheckConstraint("lot_size > 0", name="ck_instruments_lot_size_positive"),
+        CheckConstraint("minimum_notional >= 0", name="ck_instruments_min_notional_nonnegative"),
+        CheckConstraint("contract_multiplier > 0", name="ck_instruments_multiplier_positive"),
+    )
+
+    instrument_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid4)
+    venue: Mapped[str] = mapped_column(String(64), nullable=False)
+    symbol: Mapped[str] = mapped_column(String(120), nullable=False)
+    tick_size: Mapped[Decimal] = mapped_column(AMOUNT, nullable=False)
+    lot_size: Mapped[Decimal] = mapped_column(AMOUNT, nullable=False)
+    minimum_notional: Mapped[Decimal] = mapped_column(AMOUNT, nullable=False)
+    contract_multiplier: Mapped[Decimal] = mapped_column(AMOUNT, nullable=False)
+    quote_currency: Mapped[str] = mapped_column(String(32), nullable=False)
+    collateral_currency: Mapped[str] = mapped_column(String(32), nullable=False)
+    active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    protection_supported: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class Proposal(Base):
+    __tablename__ = "proposals"
+    __table_args__ = (
+        CheckConstraint("source IN ('SYSTEM','MANUAL')", name="ck_proposals_source"),
+        CheckConstraint("risk_tier IN ('LOW','MEDIUM','HIGH')", name="ck_proposals_risk_tier"),
+        CheckConstraint("direction IN ('LONG','SHORT')", name="ck_proposals_direction"),
+        CheckConstraint(
+            "status IN ('DRAFT','PENDING_REVIEW','APPROVED','REJECTED','EXPIRED')",
+            name="ck_proposals_status",
+        ),
+        CheckConstraint("quantity > 0", name="ck_proposals_quantity_positive"),
+        CheckConstraint("max_risk > 0", name="ck_proposals_risk_positive"),
+        Index("ix_proposals_status_expires", "status", "expires_at"),
+    )
+
+    proposal_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid4)
+    source: Mapped[str] = mapped_column(String(16), nullable=False)
+    proposer_id: Mapped[UUID] = mapped_column(ForeignKey("users.user_id"), nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False)
+    version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    risk_tier: Mapped[str] = mapped_column(String(16), nullable=False)
+    account_id: Mapped[str] = mapped_column(String(120), nullable=False)
+    venue: Mapped[str] = mapped_column(String(64), nullable=False)
+    instrument_id: Mapped[UUID] = mapped_column(ForeignKey("instruments.instrument_id"))
+    direction: Mapped[str] = mapped_column(String(16), nullable=False)
+    quantity: Mapped[Decimal] = mapped_column(AMOUNT, nullable=False)
+    max_risk: Mapped[Decimal] = mapped_column(AMOUNT, nullable=False)
+    frozen_payload: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    semantic_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    frozen_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    correlation_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class Approval(Base):
+    __tablename__ = "approvals"
+    __table_args__ = (
+        UniqueConstraint("proposal_id", "reviewer_id", name="uq_approvals_proposal_reviewer"),
+        CheckConstraint("decision IN ('APPROVE','REJECT')", name="ck_approvals_decision"),
+    )
+
+    approval_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid4)
+    proposal_id: Mapped[UUID] = mapped_column(
+        ForeignKey("proposals.proposal_id", ondelete="CASCADE"), nullable=False
+    )
+    reviewer_id: Mapped[UUID] = mapped_column(ForeignKey("users.user_id"), nullable=False)
+    decision: Mapped[str] = mapped_column(String(16), nullable=False)
+    reason: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class RiskPolicy(Base):
+    __tablename__ = "risk_policies"
+    __table_args__ = (
+        CheckConstraint(
+            "system_state IN ('NORMAL','NO_PYRAMID','REDUCE_ONLY','KILL_SWITCH')",
+            name="ck_risk_policies_system_state",
+        ),
+        CheckConstraint("max_total_risk > 0", name="ck_risk_policies_max_risk_positive"),
+        CheckConstraint("max_fact_age_seconds > 0", name="ck_risk_policies_age_positive"),
+        Index(
+            "uq_risk_policies_one_active",
+            "active",
+            unique=True,
+            postgresql_where=text("active"),
+        ),
+    )
+
+    policy_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid4)
+    version: Mapped[str] = mapped_column(String(120), nullable=False, unique=True)
+    system_state: Mapped[str] = mapped_column(String(32), nullable=False)
+    max_total_risk: Mapped[Decimal] = mapped_column(AMOUNT, nullable=False)
+    max_fact_age_seconds: Mapped[int] = mapped_column(Integer, nullable=False)
+    active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    updated_by: Mapped[str] = mapped_column(String(255), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class RiskDecision(Base):
+    __tablename__ = "risk_decisions"
+    __table_args__ = (
+        CheckConstraint("result IN ('ALLOW','SCALE','DENY')", name="ck_risk_decisions_result"),
+        CheckConstraint("approved_quantity >= 0", name="ck_risk_decisions_quantity_nonnegative"),
+        CheckConstraint("risk_amount >= 0", name="ck_risk_decisions_risk_nonnegative"),
+        Index("ix_risk_decisions_proposal_created", "proposal_id", "created_at"),
+    )
+
+    decision_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid4)
+    proposal_id: Mapped[UUID] = mapped_column(ForeignKey("proposals.proposal_id"))
+    policy_id: Mapped[UUID] = mapped_column(ForeignKey("risk_policies.policy_id"))
+    input_data: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    result: Mapped[str] = mapped_column(String(16), nullable=False)
+    approved_quantity: Mapped[Decimal] = mapped_column(AMOUNT, nullable=False)
+    risk_amount: Mapped[Decimal] = mapped_column(AMOUNT, nullable=False)
+    reasons: Mapped[list[str]] = mapped_column(JSONB, nullable=False)
+    data_as_of: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    actor_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    correlation_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class TradingAuthorization(Base):
+    __tablename__ = "trading_authorizations"
+    __table_args__ = (
+        UniqueConstraint("proposal_id", name="uq_trading_authorizations_proposal"),
+        CheckConstraint("direction IN ('LONG','SHORT')", name="ck_authorizations_direction"),
+        CheckConstraint("quantity_limit > 0", name="ck_authorizations_quantity_positive"),
+        CheckConstraint("used_quantity >= 0", name="ck_authorizations_used_nonnegative"),
+        CheckConstraint(
+            "used_quantity <= quantity_limit", name="ck_authorizations_used_within_limit"
+        ),
+        CheckConstraint("risk_limit > 0", name="ck_authorizations_risk_positive"),
+        CheckConstraint("allowed_adds >= 0", name="ck_authorizations_adds_nonnegative"),
+        CheckConstraint(
+            "used_adds >= 0 AND used_adds <= allowed_adds", name="ck_authorizations_adds"
+        ),
+    )
+
+    authorization_id: Mapped[UUID] = mapped_column(
+        Uuid(as_uuid=True), primary_key=True, default=uuid4
+    )
+    proposal_id: Mapped[UUID] = mapped_column(ForeignKey("proposals.proposal_id"))
+    risk_decision_id: Mapped[UUID] = mapped_column(ForeignKey("risk_decisions.decision_id"))
+    account_id: Mapped[str] = mapped_column(String(120), nullable=False)
+    venue: Mapped[str] = mapped_column(String(64), nullable=False)
+    instrument_id: Mapped[UUID] = mapped_column(ForeignKey("instruments.instrument_id"))
+    direction: Mapped[str] = mapped_column(String(16), nullable=False)
+    quantity_limit: Mapped[Decimal] = mapped_column(AMOUNT, nullable=False)
+    used_quantity: Mapped[Decimal] = mapped_column(AMOUNT, nullable=False, default=Decimal(0))
+    risk_limit: Mapped[Decimal] = mapped_column(AMOUNT, nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    allowed_adds: Mapped[int] = mapped_column(Integer, nullable=False)
+    used_adds: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    actor_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class Campaign(Base):
+    __tablename__ = "campaigns"
+    __table_args__ = (
+        UniqueConstraint("authorization_id", name="uq_campaigns_authorization"),
+        CheckConstraint("direction IN ('LONG','SHORT')", name="ck_campaigns_direction"),
+        CheckConstraint(
+            "status IN ('OPENING','OPEN','REDUCING','CLOSING','CLOSED','UNKNOWN')",
+            name="ck_campaigns_status",
+        ),
+        CheckConstraint("current_target_quantity >= 0", name="ck_campaigns_target_nonnegative"),
+        CheckConstraint("target_version >= 0", name="ck_campaigns_target_version_nonnegative"),
+    )
+
+    campaign_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid4)
+    proposal_id: Mapped[UUID] = mapped_column(ForeignKey("proposals.proposal_id"))
+    authorization_id: Mapped[UUID] = mapped_column(
+        ForeignKey("trading_authorizations.authorization_id")
+    )
+    account_id: Mapped[str] = mapped_column(String(120), nullable=False)
+    venue: Mapped[str] = mapped_column(String(64), nullable=False)
+    instrument_id: Mapped[UUID] = mapped_column(ForeignKey("instruments.instrument_id"))
+    direction: Mapped[str] = mapped_column(String(16), nullable=False)
+    status: Mapped[str] = mapped_column(String(24), nullable=False)
+    current_target_quantity: Mapped[Decimal] = mapped_column(AMOUNT, nullable=False)
+    target_version: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    target_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    target_urgency: Mapped[str | None] = mapped_column(String(24), nullable=True)
+    target_calculated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    realized_pnl: Mapped[Decimal] = mapped_column(AMOUNT, nullable=False, default=Decimal(0))
+    unrealized_pnl: Mapped[Decimal] = mapped_column(AMOUNT, nullable=False, default=Decimal(0))
+    final_pnl: Mapped[Decimal] = mapped_column(AMOUNT, nullable=False, default=Decimal(0))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class RiskReservation(Base):
+    __tablename__ = "risk_reservations"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('RESERVED','OPEN','UNKNOWN','RELEASED')",
+            name="ck_risk_reservations_status",
+        ),
+        CheckConstraint("amount >= 0", name="ck_risk_reservations_amount_nonnegative"),
+        Index("ix_risk_reservations_campaign_status", "campaign_id", "status"),
+    )
+
+    reservation_id: Mapped[UUID] = mapped_column(
+        Uuid(as_uuid=True), primary_key=True, default=uuid4
+    )
+    campaign_id: Mapped[UUID] = mapped_column(ForeignKey("campaigns.campaign_id"))
+    authorization_id: Mapped[UUID] = mapped_column(
+        ForeignKey("trading_authorizations.authorization_id")
+    )
+    status: Mapped[str] = mapped_column(String(24), nullable=False)
+    amount: Mapped[Decimal] = mapped_column(AMOUNT, nullable=False)
+    version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class OrderIntent(Base):
+    __tablename__ = "order_intents"
+    __table_args__ = (
+        UniqueConstraint("reservation_id", name="uq_order_intents_reservation"),
+        CheckConstraint("kind IN ('INITIAL','ADD','REDUCE','EXIT')", name="ck_order_intents_kind"),
+        CheckConstraint("side IN ('BUY','SELL')", name="ck_order_intents_side"),
+        CheckConstraint(
+            "status IN ('PENDING','RESERVED','READY','SENT','PARTIALLY_FILLED','FILLED',"
+            "'CANCELLED','REJECTED','UNKNOWN')",
+            name="ck_order_intents_status",
+        ),
+        CheckConstraint("quantity > 0", name="ck_order_intents_quantity_positive"),
+        Index("ix_order_intents_campaign_status", "campaign_id", "status"),
+        Index(
+            "uq_order_intents_one_active_campaign",
+            "campaign_id",
+            unique=True,
+            postgresql_where=text(
+                "status IN ('PENDING','RESERVED','READY','SENT','PARTIALLY_FILLED','UNKNOWN')"
+            ),
+        ),
+    )
+
+    intent_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid4)
+    campaign_id: Mapped[UUID] = mapped_column(ForeignKey("campaigns.campaign_id"))
+    authorization_id: Mapped[UUID] = mapped_column(
+        ForeignKey("trading_authorizations.authorization_id")
+    )
+    reservation_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("risk_reservations.reservation_id"), nullable=True
+    )
+    kind: Mapped[str] = mapped_column(String(16), nullable=False)
+    side: Mapped[str] = mapped_column(String(8), nullable=False)
+    quantity: Mapped[Decimal] = mapped_column(AMOUNT, nullable=False)
+    reduce_only: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False)
+    semantic_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    actor_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    correlation_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), nullable=False)
+    version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
 
 class CommandReceipt(Base):
     __tablename__ = "command_receipts"
     __table_args__ = (
         UniqueConstraint(
-            "caller_id",
-            "command_type",
-            "idempotency_key",
-            name="uq_command_receipts_idempotency_scope",
+            "caller_id", "operation", "idempotency_key", name="uq_command_receipts_scope"
         ),
-        CheckConstraint(
-            "state IN ('COMPLETED', 'REJECTED')",
-            name="ck_command_receipts_state",
-        ),
-        CheckConstraint("length(request_hash) = 64", name="ck_command_receipts_hash_length"),
+        CheckConstraint("length(semantic_hash) = 64", name="ck_command_receipts_hash"),
     )
 
-    receipt_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True)
-    command_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), nullable=False, unique=True)
+    receipt_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid4)
     caller_id: Mapped[str] = mapped_column(String(255), nullable=False)
-    command_type: Mapped[str] = mapped_column(String(160), nullable=False)
+    operation: Mapped[str] = mapped_column(String(120), nullable=False)
     idempotency_key: Mapped[str] = mapped_column(String(160), nullable=False)
-    request_hash: Mapped[str] = mapped_column(String(64), nullable=False)
-    state: Mapped[str] = mapped_column(String(20), nullable=False)
+    semantic_hash: Mapped[str] = mapped_column(String(64), nullable=False)
     response: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, server_default=func.now()
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class VenueOrder(Base):
+    __tablename__ = "venue_orders"
+    __table_args__ = (
+        UniqueConstraint("venue", "venue_order_id", name="uq_venue_orders_external"),
+        UniqueConstraint("order_intent_id", name="uq_venue_orders_intent"),
+        CheckConstraint(
+            "status IN ('SENT','PARTIALLY_FILLED','FILLED','CANCELLED','REJECTED','UNKNOWN')",
+            name="ck_venue_orders_status",
+        ),
+        CheckConstraint("ordered_quantity > 0", name="ck_venue_orders_quantity_positive"),
+        CheckConstraint("filled_quantity >= 0", name="ck_venue_orders_filled_nonnegative"),
     )
+
+    venue_order_fact_id: Mapped[UUID] = mapped_column(
+        Uuid(as_uuid=True), primary_key=True, default=uuid4
+    )
+    order_intent_id: Mapped[UUID] = mapped_column(ForeignKey("order_intents.intent_id"))
+    venue: Mapped[str] = mapped_column(String(64), nullable=False)
+    venue_order_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False)
+    ordered_quantity: Mapped[Decimal] = mapped_column(AMOUNT, nullable=False)
+    filled_quantity: Mapped[Decimal] = mapped_column(AMOUNT, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class VenueFill(Base):
+    __tablename__ = "venue_fills"
+    __table_args__ = (
+        UniqueConstraint("venue", "venue_fill_id", name="uq_venue_fills_external"),
+        CheckConstraint("side IN ('BUY','SELL')", name="ck_venue_fills_side"),
+        CheckConstraint("quantity > 0", name="ck_venue_fills_quantity_positive"),
+        CheckConstraint("price > 0", name="ck_venue_fills_price_positive"),
+        CheckConstraint("fee >= 0", name="ck_venue_fills_fee_nonnegative"),
+        CheckConstraint("slippage_cost >= 0", name="ck_venue_fills_slippage_nonnegative"),
+        Index("ix_venue_fills_campaign_time", "campaign_id", "executed_at"),
+    )
+
+    venue_fill_fact_id: Mapped[UUID] = mapped_column(
+        Uuid(as_uuid=True), primary_key=True, default=uuid4
+    )
+    venue: Mapped[str] = mapped_column(String(64), nullable=False)
+    venue_fill_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    order_intent_id: Mapped[UUID] = mapped_column(ForeignKey("order_intents.intent_id"))
+    campaign_id: Mapped[UUID] = mapped_column(ForeignKey("campaigns.campaign_id"))
+    side: Mapped[str] = mapped_column(String(8), nullable=False)
+    quantity: Mapped[Decimal] = mapped_column(AMOUNT, nullable=False)
+    price: Mapped[Decimal] = mapped_column(AMOUNT, nullable=False)
+    fee: Mapped[Decimal] = mapped_column(AMOUNT, nullable=False)
+    fee_currency: Mapped[str] = mapped_column(String(32), nullable=False)
+    slippage_cost: Mapped[Decimal] = mapped_column(AMOUNT, nullable=False)
+    executed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class Position(Base):
+    __tablename__ = "positions"
+    __table_args__ = (
+        UniqueConstraint("account_id", "venue", "instrument_id", name="uq_positions_scope"),
+        CheckConstraint("fact_status IN ('KNOWN','UNKNOWN')", name="ck_positions_fact_status"),
+    )
+
+    position_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid4)
+    account_id: Mapped[str] = mapped_column(String(120), nullable=False)
+    venue: Mapped[str] = mapped_column(String(64), nullable=False)
+    instrument_id: Mapped[UUID] = mapped_column(ForeignKey("instruments.instrument_id"))
+    quantity: Mapped[Decimal] = mapped_column(AMOUNT, nullable=False)
+    average_entry_price: Mapped[Decimal] = mapped_column(AMOUNT, nullable=False)
+    mark_price: Mapped[Decimal] = mapped_column(AMOUNT, nullable=False)
+    fact_status: Mapped[str] = mapped_column(String(16), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class ProtectionOrder(Base):
+    __tablename__ = "protection_orders"
+    __table_args__ = (
+        UniqueConstraint("position_id", name="uq_protection_orders_position"),
+        CheckConstraint("status IN ('ACTIVE','DEGRADED','UNKNOWN')", name="ck_protection_status"),
+        CheckConstraint("quantity >= 0", name="ck_protection_quantity_nonnegative"),
+        CheckConstraint("trigger_price >= 0", name="ck_protection_trigger_nonnegative"),
+    )
+
+    protection_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid4)
+    position_id: Mapped[UUID] = mapped_column(
+        ForeignKey("positions.position_id", ondelete="CASCADE"), nullable=False
+    )
+    venue_order_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    quantity: Mapped[Decimal] = mapped_column(AMOUNT, nullable=False)
+    trigger_price: Mapped[Decimal] = mapped_column(AMOUNT, nullable=False)
+    status: Mapped[str] = mapped_column(String(24), nullable=False)
+    fully_covered: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class AccountEquity(Base):
+    __tablename__ = "account_equities"
+    __table_args__ = (
+        UniqueConstraint("account_id", "venue", name="uq_account_equities_scope"),
+        CheckConstraint("fact_status IN ('KNOWN','UNKNOWN')", name="ck_account_equities_status"),
+        CheckConstraint("equity >= 0", name="ck_account_equities_equity_nonnegative"),
+        CheckConstraint("available_balance >= 0", name="ck_account_equities_balance_nonnegative"),
+    )
+
+    account_equity_id: Mapped[UUID] = mapped_column(
+        Uuid(as_uuid=True), primary_key=True, default=uuid4
+    )
+    account_id: Mapped[str] = mapped_column(String(120), nullable=False)
+    venue: Mapped[str] = mapped_column(String(64), nullable=False)
+    equity: Mapped[Decimal] = mapped_column(AMOUNT, nullable=False)
+    available_balance: Mapped[Decimal] = mapped_column(AMOUNT, nullable=False)
+    currency: Mapped[str] = mapped_column(String(32), nullable=False)
+    fact_status: Mapped[str] = mapped_column(String(16), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class FundingPayment(Base):
+    __tablename__ = "funding_payments"
+    __table_args__ = (
+        UniqueConstraint("venue", "venue_payment_id", name="uq_funding_payments_external"),
+        Index("ix_funding_payments_campaign_time", "campaign_id", "paid_at"),
+    )
+
+    funding_payment_id: Mapped[UUID] = mapped_column(
+        Uuid(as_uuid=True), primary_key=True, default=uuid4
+    )
+    campaign_id: Mapped[UUID] = mapped_column(ForeignKey("campaigns.campaign_id"))
+    venue: Mapped[str] = mapped_column(String(64), nullable=False)
+    venue_payment_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    amount: Mapped[Decimal] = mapped_column(AMOUNT, nullable=False)
+    currency: Mapped[str] = mapped_column(String(32), nullable=False)
+    paid_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class ReconciliationRun(Base):
+    __tablename__ = "reconciliation_runs"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('MATCH','DIFFERENCE','UNKNOWN','MANUAL_REQUIRED','RESOLVED')",
+            name="ck_reconciliation_runs_status",
+        ),
+        Index("ix_reconciliation_scope_completed", "execution_scope", "completed_at"),
+    )
+
+    reconciliation_id: Mapped[UUID] = mapped_column(
+        Uuid(as_uuid=True), primary_key=True, default=uuid4
+    )
+    execution_scope: Mapped[str] = mapped_column(String(255), nullable=False)
+    campaign_id: Mapped[UUID | None] = mapped_column(ForeignKey("campaigns.campaign_id"))
+    status: Mapped[str] = mapped_column(String(32), nullable=False)
+    differences: Mapped[list[str]] = mapped_column(JSONB, nullable=False)
+    resolution_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    actor_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    correlation_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), nullable=False)
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     completed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
 
-class AuditEvent(Base):
-    __tablename__ = "audit_events"
+class SenderLease(Base):
+    __tablename__ = "sender_leases"
     __table_args__ = (
-        CheckConstraint("length(payload_hash) = 64", name="ck_audit_events_hash_length"),
-        Index("ix_audit_events_aggregate", "aggregate_type", "aggregate_id", "occurred_at"),
-        Index("ix_audit_events_correlation", "correlation_id", "occurred_at"),
+        CheckConstraint("fencing_token >= 1", name="ck_sender_leases_token_positive"),
     )
 
-    event_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True)
-    event_type: Mapped[str] = mapped_column(String(160), nullable=False)
-    aggregate_type: Mapped[str] = mapped_column(String(120), nullable=False)
-    aggregate_id: Mapped[str] = mapped_column(String(255), nullable=False)
-    command_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), nullable=False)
-    correlation_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), nullable=False)
-    causation_id: Mapped[UUID | None] = mapped_column(Uuid(as_uuid=True), nullable=True)
-    caller_id: Mapped[str] = mapped_column(String(255), nullable=False)
-    channel: Mapped[str] = mapped_column(String(32), nullable=False)
-    payload_schema_version: Mapped[int] = mapped_column(Integer, nullable=False)
-    payload: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
-    payload_hash: Mapped[str] = mapped_column(String(64), nullable=False)
-    occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
-
-
-class OutboxMessage(Base):
-    __tablename__ = "outbox_messages"
-    __table_args__ = (
-        CheckConstraint("publish_attempts >= 0", name="ck_outbox_publish_attempts_nonnegative"),
-        Index(
-            "ix_outbox_unpublished",
-            "occurred_at",
-            postgresql_where=text("published_at IS NULL"),
-        ),
-    )
-
-    message_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True)
-    topic: Mapped[str] = mapped_column(String(255), nullable=False)
-    message_key: Mapped[str] = mapped_column(String(255), nullable=False)
-    event_type: Mapped[str] = mapped_column(String(160), nullable=False)
-    payload_schema_version: Mapped[int] = mapped_column(Integer, nullable=False)
-    payload: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
-    headers: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
-    occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
-    published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    publish_attempts: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
-    last_error_code: Mapped[str | None] = mapped_column(String(160), nullable=True)
-
-
-class InboxReceipt(Base):
-    __tablename__ = "inbox_receipts"
-    __table_args__ = (
-        UniqueConstraint("consumer_name", "message_id", name="uq_inbox_consumer_message"),
-        CheckConstraint("length(payload_hash) = 64", name="ck_inbox_receipts_hash_length"),
-    )
-
-    receipt_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True)
-    consumer_name: Mapped[str] = mapped_column(String(160), nullable=False)
-    message_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), nullable=False)
-    payload_hash: Mapped[str] = mapped_column(String(64), nullable=False)
-    processed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    execution_scope: Mapped[str] = mapped_column(String(255), primary_key=True)
+    owner_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    fencing_token: Mapped[int] = mapped_column(Integer, nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
 
 class CapabilityGate(Base):
     __tablename__ = "capability_gates"
     __table_args__ = (
         CheckConstraint(
-            "status IN ('DISABLED', 'SHADOW', 'ENABLED')",
-            name="ck_capability_gates_status",
+            "capability_key IN ('LIVE_ORDER_SEND','CAPITAL_TRANSFER','AUTO_ADD')",
+            name="ck_capability_gates_key",
         ),
-        CheckConstraint("version >= 1", name="ck_capability_gates_version_positive"),
+        CheckConstraint("status IN ('DISABLED','ENABLED')", name="ck_capability_gates_status"),
     )
 
     capability_key: Mapped[str] = mapped_column(String(120), primary_key=True)
-    status: Mapped[str] = mapped_column(String(20), nullable=False)
-    version: Mapped[int] = mapped_column(Integer, nullable=False)
+    status: Mapped[str] = mapped_column(String(16), nullable=False)
     reason: Mapped[str] = mapped_column(Text, nullable=False)
-    policy_version: Mapped[str] = mapped_column(String(120), nullable=False)
-    certificate_ref: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    operator_id: Mapped[str] = mapped_column(String(255), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class AuditEvent(Base):
+    __tablename__ = "audit_events"
+    __table_args__ = (
+        Index("ix_audit_events_object", "object_type", "object_id", "created_at"),
+        Index("ix_audit_events_correlation", "correlation_id", "created_at"),
+    )
+
+    audit_event_id: Mapped[UUID] = mapped_column(
+        Uuid(as_uuid=True), primary_key=True, default=uuid4
+    )
+    actor_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    event_type: Mapped[str] = mapped_column(String(120), nullable=False)
+    object_type: Mapped[str] = mapped_column(String(120), nullable=False)
+    object_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    reason: Mapped[str] = mapped_column(Text, nullable=False)
+    correlation_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), nullable=False)
+    idempotency_key: Mapped[str | None] = mapped_column(String(160), nullable=True)
+    object_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
