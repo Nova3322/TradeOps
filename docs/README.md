@@ -230,6 +230,7 @@ docs/
 | 实现 | [WP-0049：服务端当前仓位目标仲裁绑定](08-implementation/WP-0049-服务端当前仓位目标仲裁绑定.md) | 服务端解析 fresh canonical binding/quantity 后仲裁，拒绝 caller current-position substitution，不生成 OrderIntent |
 | 实现 | [WP-0050：Canonical 保护失效退出候选](08-implementation/WP-0050-Canonical保护失效退出候选.md) | exact protection 返回 CLEAR；缺失、陈旧、UNKNOWN 或 binding conflict 生成服务端 zero-target IMMEDIATE 候选，不发送订单 |
 | 实现 | [WP-0051：Campaign 耐久目标仓位事实](08-implementation/WP-0051-Campaign耐久目标仓位事实.md) | Campaign 保存不可变、版本化、只收紧 target/reason fact；zero target 原子进入 CLOSING，仍不创建 OrderIntent |
+| 实现 | [WP-0052：耐久目标跨当前绑定延续](08-implementation/WP-0052-耐久目标跨当前绑定延续.md) | latest durable target 以稳定来源重新绑定 fresh current position；保护恢复不取消 zero target，语义一次归一后 NO_CHANGE |
 
 ## 完整交付与能力激活
 

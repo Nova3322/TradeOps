@@ -156,7 +156,7 @@ def test_missing_protection_records_zero_target_and_closes_campaign_for_executio
     assert state.reason_code == "TARGET_POSITION_ZERO_RECORDED"
 
 
-def test_campaign_target_command_replays_and_semantic_refresh_is_no_change(
+def test_campaign_target_command_replays_then_stabilizes_carried_semantics(
     database: Database,
 ) -> None:
     _, campaign, _, _ = prepare_open_add_campaign(
@@ -187,17 +187,42 @@ def test_campaign_target_command_replays_and_semantic_refresh_is_no_change(
 
     assert first.status is CommandStatus.COMPLETED
     assert replay.status is CommandStatus.ALREADY_PROCESSED and replay.replayed
+    stable_time = refresh_time + timedelta(milliseconds=1)
+    stable = _execute(
+        database,
+        _envelope(
+            campaign,
+            now=stable_time,
+            expected_version=2,
+            idempotency_key="campaign-target-stable-v2",
+        ),
+        now=stable_time,
+    )
+
     assert refresh.status is CommandStatus.COMPLETED
-    assert refresh.object_version == 1
-    assert refresh.data["result"] == "NO_CHANGE"
+    assert refresh.object_version == 2
+    assert refresh.data["result"] == "RECORDED"
+    assert stable.status is CommandStatus.COMPLETED
+    assert stable.object_version == 2
+    assert stable.data["result"] == "NO_CHANGE"
     with database.session_factory.begin() as session:
         count = session.execute(
             select(func.count()).select_from(CampaignTargetPositionFactRecord)
         ).scalar_one()
-    assert count == 1
+        latest = target_fact_from_record(
+            session.execute(
+                select(CampaignTargetPositionFactRecord).order_by(
+                    CampaignTargetPositionFactRecord.target_version.desc()
+                )
+            )
+            .scalars()
+            .first()
+        )
+    assert count == 2
+    assert "DURABLE_TARGET_ACTIVE" in latest.all_reason_codes
 
 
-def test_campaign_target_cannot_relax_zero_target_after_protection_recovers(
+def test_campaign_target_carries_zero_target_after_protection_recovers(
     database: Database,
 ) -> None:
     _, campaign, _, _ = prepare_open_add_campaign(
@@ -239,7 +264,7 @@ def test_campaign_target_cannot_relax_zero_target_after_protection_recovers(
     assert protection.status is CommandStatus.COMPLETED
 
     second_time = datetime.now(UTC)
-    relaxed = _execute(
+    carried = _execute(
         database,
         _envelope(
             campaign,
@@ -250,14 +275,26 @@ def test_campaign_target_cannot_relax_zero_target_after_protection_recovers(
         now=second_time,
     )
 
-    assert relaxed.status is CommandStatus.REJECTED
-    assert relaxed.error_code == "CAMPAIGN_TARGET_POSITION_RELAXATION_FORBIDDEN"
+    assert carried.status is CommandStatus.COMPLETED
+    assert carried.object_version == 2
+    assert Decimal(str(carried.data["target_quantity"])) == 0
     with database.session_factory.begin() as session:
         count = session.execute(
             select(func.count()).select_from(CampaignTargetPositionFactRecord)
         ).scalar_one()
+        latest = target_fact_from_record(
+            session.execute(
+                select(CampaignTargetPositionFactRecord).order_by(
+                    CampaignTargetPositionFactRecord.target_version.desc()
+                )
+            )
+            .scalars()
+            .first()
+        )
         state = session.get(CampaignState, campaign.campaign_id)
-    assert count == 1
+    assert count == 2
+    assert latest.target_quantity == 0
+    assert latest.all_reason_codes == ("DURABLE_TARGET_ACTIVE",)
     assert state is not None and state.status == "CLOSING"
 
 

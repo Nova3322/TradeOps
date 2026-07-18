@@ -12,6 +12,7 @@ from sqlalchemy.orm import Session
 
 from trading_control_plane.campaign_protection_exit import (
     CampaignProtectionExitCandidateService,
+    CampaignProtectionExitEvaluation,
 )
 from trading_control_plane.campaign_target_models import CampaignTargetPositionFactRecord
 from trading_control_plane.campaign_target_position import (
@@ -28,7 +29,12 @@ from trading_control_plane.commands import (
 )
 from trading_control_plane.metrics import CAMPAIGN_TARGET_FACT_RECORDINGS
 from trading_control_plane.projections import ProjectionQueryContext
-from trading_control_plane.target_position_arbiter import TargetPositionDecision
+from trading_control_plane.target_position_arbiter import (
+    ReductionSourceType,
+    ReductionUrgency,
+    TargetPositionCandidate,
+    TargetPositionDecision,
+)
 from trading_control_plane.trading_authorization_models import Campaign, CampaignState
 
 SERVICE_PRINCIPAL = "campaign-target-service"
@@ -170,6 +176,35 @@ def target_fact_from_record(
     return CampaignTargetPositionFactSnapshot.model_validate(record.contract())
 
 
+def _durable_target_candidate(
+    latest: CampaignTargetPositionFactSnapshot,
+    current: CampaignProtectionExitEvaluation,
+    evaluated_at: datetime,
+) -> TargetPositionCandidate | None:
+    if latest.target_quantity >= current.current_quantity:
+        return None
+    if latest.urgency == "NONE":  # pragma: no cover - validated decision contract forbids this
+        raise RuntimeError("reducing durable target lacks urgency")
+    draft = TargetPositionCandidate.model_construct(
+        source_type=ReductionSourceType.SYSTEM_RISK_REDUCTION,
+        source_ref=f"durable-target:{latest.campaign_id}",
+        policy_version="campaign-target-carry-forward-v1",
+        reason_code="DURABLE_TARGET_ACTIVE",
+        current_position_binding_hash=current.current_position_binding_hash,
+        target_quantity=latest.target_quantity,
+        urgency=ReductionUrgency(latest.urgency),
+        facts_as_of=evaluated_at,
+        valid_until=current.valid_until,
+        candidate_hash="0" * 64,
+    )
+    return TargetPositionCandidate.model_validate(
+        {
+            **draft.model_dump(mode="python"),
+            "candidate_hash": hash_json(draft.model_dump(mode="json", exclude={"candidate_hash"})),
+        }
+    )
+
+
 class CampaignTargetPositionFactService:
     """Evaluates canonical Campaign target sources and appends a monotonic target fact."""
 
@@ -243,7 +278,15 @@ class CampaignTargetPositionFactService:
             request.campaign_id,
             context,
         )
-        candidates = () if protection.candidate is None else (protection.candidate,)
+        source_candidates = () if protection.candidate is None else (protection.candidate,)
+        carry_forward = (
+            None
+            if latest_snapshot is None
+            else _durable_target_candidate(latest_snapshot, protection, now)
+        )
+        candidates = (
+            source_candidates if carry_forward is None else (*source_candidates, carry_forward)
+        )
         decision = CampaignTargetPositionEvaluationService.evaluate(
             session,
             request.campaign_id,

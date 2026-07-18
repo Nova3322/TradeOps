@@ -47,6 +47,9 @@ Campaign 必须保存裁决后的目标与原因事实。WP-0051 新增 Campaign
 zero target 首次写入时 Campaign 主状态从 `OPEN` 原子迁移到 `CLOSING`，并沿用已有
 `authorization_state_transitions` 留痕。事实写入失败时状态不会单独变化。
 
+后续 WP-0052 已把 latest durable target 作为稳定仲裁来源重绑 fresh current position；保护恢复时不再只
+依赖 relaxation rejection，而会保存仍为 zero 的当前-binding decision。
+
 ## 4. 数据库与监控
 
 Alembic revision 从 `20260718_0035` 升至 `20260718_0036`，新增：
