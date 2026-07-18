@@ -439,7 +439,7 @@ def create_intent_envelope(
     request = risk_request or execution_risk_request(proposal, now=now)
     return CommandEnvelope(
         idempotency_key=idempotency_key or f"execution-intent-{uuid4()}",
-        command_type="execution.intent.create.v9",
+        command_type="execution.intent.create.v10",
         object_type="Campaign",
         object_id=str(campaign.campaign_id),
         expected_version=1,
@@ -450,7 +450,7 @@ def create_intent_envelope(
         issued_at=now,
         expires_at=now + timedelta(minutes=2),
         auth_context_ref="internal:oms-risk-reservation-service",
-        payload_schema_version=9,
+        payload_schema_version=10,
         reason="create non-dispatchable shadow intent",
         payload={
             "intent_kind": "INITIAL",
@@ -545,7 +545,7 @@ def create_add_envelope(
     assert register_risk_fact_set(database, fact_set, now=now).status is CommandStatus.COMPLETED
     return CommandEnvelope(
         idempotency_key=f"execution-add-{uuid4()}",
-        command_type="execution.intent.create.v9",
+        command_type="execution.intent.create.v10",
         object_type="Campaign",
         object_id=str(campaign.campaign_id),
         expected_version=2,
@@ -556,7 +556,7 @@ def create_add_envelope(
         issued_at=now,
         expires_at=now + timedelta(minutes=2),
         auth_context_ref="internal:oms-risk-reservation-service",
-        payload_schema_version=9,
+        payload_schema_version=10,
         reason="create non-dispatchable shadow add intent",
         payload={
             "intent_kind": "ADD",
@@ -574,8 +574,6 @@ def create_add_envelope(
             "add_eligibility": {
                 "frozen_return_pct": "30",
                 "trend_valid": True,
-                "protection_valid": True,
-                "authorization_valid": True,
                 "current_effective_leverage": "0.5",
                 "target_effective_leverage": "1",
                 "current_position_equity": "72",
@@ -1239,7 +1237,7 @@ def execute_fact(
     return result
 
 
-def test_execution_intent_legacy_commands_and_wrong_v9_schema_are_rejected(
+def test_execution_intent_legacy_commands_and_wrong_v10_schema_are_rejected(
     database: Database,
 ) -> None:
     proposal, campaign, initial = prepare_authorization(database)
@@ -1266,6 +1264,9 @@ def test_execution_intent_legacy_commands_and_wrong_v9_schema_are_rejected(
     )
     v8 = create_intent_envelope(proposal, campaign, initial, now=datetime.now(UTC)).model_copy(
         update={"command_type": "execution.intent.create.v8"}
+    )
+    v9 = create_intent_envelope(proposal, campaign, initial, now=datetime.now(UTC)).model_copy(
+        update={"command_type": "execution.intent.create.v9"}
     )
     old_field = create_intent_envelope(proposal, campaign, initial, now=datetime.now(UTC))
     old_payload = dict(old_field.payload)
@@ -1320,6 +1321,7 @@ def test_execution_intent_legacy_commands_and_wrong_v9_schema_are_rejected(
     v6_result = execute_create(database, v6)
     v7_result = execute_create(database, v7)
     v8_result = execute_create(database, v8)
+    v9_result = execute_create(database, v9)
     old_field_result = execute_create(database, old_field)
     caller_boolean_result = execute_create(database, caller_boolean)
     protection_boolean_result = execute_create(database, protection_boolean)
@@ -1342,6 +1344,8 @@ def test_execution_intent_legacy_commands_and_wrong_v9_schema_are_rejected(
     assert v7_result.error_code == "COMMAND_TYPE_MISMATCH"
     assert v8_result.status is CommandStatus.REJECTED
     assert v8_result.error_code == "COMMAND_TYPE_MISMATCH"
+    assert v9_result.status is CommandStatus.REJECTED
+    assert v9_result.error_code == "COMMAND_TYPE_MISMATCH"
     assert old_field_result.status is CommandStatus.REJECTED
     assert old_field_result.error_code == "EXECUTION_INPUT_INVALID"
     assert caller_boolean_result.status is CommandStatus.REJECTED
@@ -2238,6 +2242,27 @@ def test_add_zero_fill_releases_unit_then_positive_fill_consumes_it(
         unit = session.execute(select(AddUnit)).scalar_one()
         package_state = session.get(AddAuthorizationPackageState, package.add_package_id)
         assert package_state is not None and package_state.status == "ACTIVE"
+
+    for legacy_field in ("protection_valid", "authorization_valid"):
+        legacy_boolean = create_add_envelope(
+            database,
+            proposal,
+            campaign,
+            package,
+            unit,
+            now=datetime.now(UTC),
+            candidate_ref=f"add-legacy-{legacy_field}",
+        )
+        legacy_payload = dict(legacy_boolean.payload)
+        legacy_eligibility = dict(legacy_payload["add_eligibility"])
+        legacy_eligibility[legacy_field] = True
+        legacy_payload["add_eligibility"] = legacy_eligibility
+        legacy_result = execute_create(
+            database,
+            legacy_boolean.model_copy(update={"payload": legacy_payload}),
+        )
+        assert legacy_result.status is CommandStatus.REJECTED
+        assert legacy_result.error_code == "EXECUTION_INPUT_INVALID"
 
     tampered = create_add_envelope(
         database,

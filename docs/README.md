@@ -215,6 +215,7 @@ docs/
 | 实现 | [WP-0034：不可变原生保护能力强绑定](08-implementation/WP-0034-不可变原生保护能力强绑定.md) | v7 移除 caller protection boolean、immutable exact account/credential/worker capability 与 proposal/final precheck 绑定 |
 | 实现 | [WP-0035：不可变 Risk Fact Set 强绑定](08-implementation/WP-0035-不可变Risk-Fact-Set强绑定.md) | v8 移除 caller facts、完整 immutable exact-scope observation set 与 proposal/final precheck 绑定 |
 | 实现 | [WP-0036：MARKET Observation 内容强绑定](08-implementation/WP-0036-MARKET-Observation内容强绑定.md) | v9 canonical MARKET payload hash、KNOWN observation 内容比较与 mismatch 无副作用 DENY |
+| 实现 | [WP-0037：ADD 冗余调用方布尔值移除](08-implementation/WP-0037-ADD冗余调用方布尔值移除.md) | Execution v10 删除 caller protection/authorization boolean，耐久授权图与 canonical protection 成为唯一真源 |
 
 ## 完整交付与能力激活
 

@@ -197,12 +197,10 @@ class IntentKind(StrEnum):
 
 
 class AddEligibilitySnapshot(BaseModel):
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
     frozen_return_pct: Decimal
     trend_valid: bool
-    protection_valid: bool
-    authorization_valid: bool
     current_effective_leverage: Decimal = Field(ge=0)
     target_effective_leverage: Decimal = Field(gt=0)
     current_position_equity: Decimal = Field(gt=0)
@@ -585,8 +583,8 @@ class DurableExposureResolver:
 
 
 class ExecutionIntentService:
-    command_type = "execution.intent.create.v9"
-    payload_schema_version = 9
+    command_type = "execution.intent.create.v10"
+    payload_schema_version = 10
 
     def __init__(
         self,
@@ -1435,11 +1433,7 @@ class ExecutionIntentService:
             raise CommandRejected("LATER_ADD_UNIT_LOCKED", "later AddUnit state is inconsistent")
         if eligibility.frozen_return_pct < Decimal(unit.unlock_milestone_pct):
             raise CommandRejected("ADD_MILESTONE_NOT_MET", "frozen-return milestone is not met")
-        if not (
-            eligibility.trend_valid
-            and eligibility.protection_valid
-            and eligibility.authorization_valid
-        ):
+        if not eligibility.trend_valid:
             raise CommandRejected("ADD_ELIGIBILITY_FAILED", "add hard gate failed")
         if eligibility.current_effective_leverage >= package.target_leverage_min:
             raise CommandRejected(

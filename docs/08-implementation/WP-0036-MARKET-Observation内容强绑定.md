@@ -1,5 +1,9 @@
 # WP-0036：MARKET Observation 内容强绑定
 
+> 后续状态：WP-0037 已把 ExecutionIntent 升级为 v10，并删除 ADD caller `protection_valid` /
+> `authorization_valid`。RiskPrecheck 继续为 v9；当前执行合同以
+> [WP-0037](WP-0037-ADD冗余调用方布尔值移除.md) 为准。本文件保留 WP-0036 历史合同。
+
 ## 1. 交付目标与边界
 
 WP-0035 已删除 caller `facts`，但 v8 风险请求中的 `MarketRiskInput` 仍未与服务端 Risk Fact Set 的
