@@ -122,7 +122,7 @@ class SnapshotStore:
         self,
         feed: PerptapeFeedSnapshot,
         now: datetime,
-        _expected_snapshot_identity: str | None,
+        _base_snapshot: PerptapeFeedSnapshot | None,
     ) -> None:
         assert now == feed.fetched_at
         self.current = feed
@@ -138,11 +138,26 @@ class CurrentSnapshotStore(SnapshotStore):
         self,
         feed: PerptapeFeedSnapshot,
         now: datetime,
-        _expected_snapshot_identity: str | None,
+        _base_snapshot: PerptapeFeedSnapshot | None,
     ) -> None:
         assert now == feed.fetched_at
         self.current = feed
         self.write_count += 1
+
+
+class PayloadRejectingStore(SnapshotStore):
+    def record(
+        self,
+        feed: PerptapeFeedSnapshot,
+        now: datetime,
+        _base_snapshot: PerptapeFeedSnapshot | None,
+    ) -> None:
+        if self.current is not None:
+            raise DomainRejected(
+                "PERPTAPE_PAYLOAD_TOO_LARGE",
+                "candidate payload exceeds test ceiling",
+            )
+        super().record(feed, now, _base_snapshot)
 
 
 class FakeSocket:
@@ -1353,8 +1368,8 @@ def test_ready_batch_clears_persisted_pending_and_restart_does_not_rebuild() -> 
     assert stream._pending_completion_targets == {}
     assert store.current is not None
     assert [candidate.symbol for candidate in store.current.candidates] == [
-        "SOLUSDT",
         "ETHUSDT",
+        "SOLUSDT",
     ]
     assert all(
         candidate.readiness == "READY" and candidate.data_health == "CURRENT"
@@ -1649,6 +1664,111 @@ def test_invalid_messages_stop_after_bounded_failures_and_never_log_secret(
     assert API_KEY not in caplog.text
     assert store.current is not None
     assert all(item.readiness != "READY" for item in store.current.candidates)
+
+
+@pytest.mark.parametrize(
+    ("event_id", "valid"),
+    [
+        ("a" * 199, True),
+        ("a" * 200, True),
+        ("a" * 201, False),
+        ("界" * 66, True),
+        ("界" * 67, False),
+    ],
+)
+def test_stream_event_id_limit_counts_utf8_bytes(event_id: str, valid: bool) -> None:
+    stream, _https_calls = worker(
+        responses=[],
+        connector=RecordingConnector([]),
+        store=SnapshotStore(),
+    )
+    raw = message(
+        "alert",
+        sequence=1,
+        event_time=NOW,
+        payload=complete_alert(event_id, "BTCUSDT", NOW),
+    )
+
+    if valid:
+        assert stream._parse_message(raw).event_id == event_id
+    else:
+        with pytest.raises(DomainRejected, match="PERPTAPE_FIELD_TOO_LARGE"):
+            stream._parse_message(raw)
+
+
+def test_oversized_event_id_stops_without_reconnect_backfill_or_degraded_write() -> None:
+    stop = RecordingStopEvent()
+    connector = RecordingConnector(
+        [
+            FakeSocket(
+                [
+                    message("hello", sequence=1, event_time=NOW),
+                    message(
+                        "alert",
+                        sequence=2,
+                        event_time=NOW + timedelta(seconds=1),
+                        payload=complete_alert("界" * 67, "BTCUSDT", NOW),
+                    ),
+                ]
+            )
+        ]
+    )
+    store = SnapshotStore()
+    stream, https_calls = worker(
+        responses=[response(candidate_payload())],
+        connector=connector,
+        store=store,
+    )
+
+    stream.run_forever(stop)
+
+    assert stream.fatal_error_code == "PERPTAPE_FIELD_TOO_LARGE"
+    assert stop.stopped is True
+    assert stop.waits == []
+    assert len(connector.calls) == 1
+    assert len(https_calls) == 1
+    assert len(store.writes) == 1
+    assert all(candidate.readiness == "READY" for candidate in store.writes[0].candidates)
+
+
+def test_payload_ceiling_failure_stops_without_retry_or_followup_side_effects() -> None:
+    stop = RecordingStopEvent()
+    connector = RecordingConnector(
+        [
+            FakeSocket(
+                [
+                    message("hello", sequence=1, event_time=NOW),
+                    message(
+                        "alert",
+                        sequence=2,
+                        event_time=NOW + timedelta(seconds=1),
+                        payload=complete_alert(
+                            "payload-limit",
+                            "ETHUSDT",
+                            NOW + timedelta(seconds=1),
+                        ),
+                    ),
+                ]
+            )
+        ]
+    )
+    store = PayloadRejectingStore()
+    stream, https_calls = worker(
+        responses=[response(candidate_payload())],
+        connector=connector,
+        store=store,
+    )
+
+    stream.run_forever(stop)
+
+    assert stream.fatal_error_code == "PERPTAPE_PAYLOAD_TOO_LARGE"
+    assert stop.stopped is True
+    assert stop.waits == []
+    assert len(connector.calls) == 1
+    assert len(https_calls) == 1
+    assert len(store.writes) == 1
+    assert stream.stats.alerts_applied == 0
+    assert store.current == store.writes[0]
 
 
 def test_pre_stopped_worker_does_not_fetch_or_connect() -> None:

@@ -24,12 +24,15 @@ from trading_control_plane.perptape import (
     bound_perptape_feed_snapshot,
     merge_incomplete_perptape_candidates,
     perptape_event_key,
-    perptape_snapshot_identity,
     validate_perptape_websocket_url,
 )
 
 logger = logging.getLogger(__name__)
 PERPTAPE_STREAM_WINDOW = PERPTAPE_CANDIDATE_WINDOW
+PERPTAPE_OVERSIZE_ERROR_CODES = {
+    "PERPTAPE_FIELD_TOO_LARGE",
+    "PERPTAPE_PAYLOAD_TOO_LARGE",
+}
 
 
 class PerptapeSocket(Protocol):
@@ -49,7 +52,7 @@ class StopEvent(Protocol):
 SocketConnector = Callable[[str, dict[str, str], float], AbstractContextManager[PerptapeSocket]]
 SnapshotLoader = Callable[[], PerptapeFeedSnapshot | None]
 SnapshotRecorder = Callable[
-    [PerptapeFeedSnapshot, datetime, str | None],
+    [PerptapeFeedSnapshot, datetime, PerptapeFeedSnapshot | None],
     object,
 ]
 MessageOrder = Literal["ACCEPT", "DUPLICATE", "OUT_OF_ORDER", "GAP"]
@@ -173,7 +176,7 @@ class PerptapeStreamWorker:
         self._record_snapshot(
             feed,
             feed.fetched_at,
-            None if current is None else perptape_snapshot_identity(current),
+            current,
         )
 
     def _sync_remote_request_state(self) -> int:
@@ -303,9 +306,9 @@ class PerptapeStreamWorker:
                 "PERPTAPE_RATE_LIMITED",
                 "Perptape exceeded the bounded rate-limit recovery sequence",
             )
-        current = self._load_snapshot()
-        if current is not None and now < current.next_allowed_at:
-            raise PerptapeRateLimited(current.next_allowed_at)
+        base = self._load_snapshot()
+        if base is not None and now < base.next_allowed_at:
+            raise PerptapeRateLimited(base.next_allowed_at)
         try:
             feed = self._client.refresh(now=now, force=backfill)
         except PerptapeRateLimited as exc:
@@ -321,7 +324,7 @@ class PerptapeStreamWorker:
             feed,
             self._preserved_pending_candidates(current),
         )
-        self._record(feed, current)
+        self._record(feed, base)
         self.stats.https_reconciliations += 1
         if backfill:
             self.stats.https_backfills += 1
@@ -395,6 +398,9 @@ class PerptapeStreamWorker:
         try:
             feed = self._reconcile(backfill=True)
         except DomainRejected as exc:
+            if exc.code in PERPTAPE_OVERSIZE_ERROR_CODES:
+                self.fatal_error_code = exc.code
+                raise
             current = self._load_snapshot()
             retry_at = now + timedelta(seconds=self._reconnect_initial_seconds)
             if current is not None:
@@ -425,7 +431,8 @@ class PerptapeStreamWorker:
     def _stop_for_fatal_error(self, stop_event: StopEvent) -> bool:
         if self.fatal_error_code is None:
             return False
-        self._mark_degraded()
+        if self.fatal_error_code not in PERPTAPE_OVERSIZE_ERROR_CODES:
+            self._mark_degraded()
         logger.error(
             "Perptape WebSocket stopped after bounded failures",
             extra={
@@ -503,10 +510,15 @@ class PerptapeStreamWorker:
             )
         event_id_value = payload_value.get("id") if event_type == "alert" else None
         event_id = None if event_id_value is None else str(event_id_value)
-        if event_type == "alert" and (not event_id or len(event_id) > 200):
+        if event_type == "alert" and not event_id:
             raise DomainRejected(
                 "PERPTAPE_STREAM_MESSAGE_INVALID",
                 "Perptape alert identity is invalid",
+            )
+        if event_type == "alert" and event_id is not None and len(event_id.encode("utf-8")) > 200:
+            raise DomainRejected(
+                "PERPTAPE_FIELD_TOO_LARGE",
+                "Perptape alert identity exceeds the supported byte ceiling",
             )
         return StreamEnvelope(
             event_type=event_type,
@@ -741,7 +753,10 @@ class PerptapeStreamWorker:
                 if current_time >= reconcile_at:
                     try:
                         self._reconcile(backfill=False)
-                    except DomainRejected:
+                    except DomainRejected as exc:
+                        if exc.code in PERPTAPE_OVERSIZE_ERROR_CODES:
+                            self.fatal_error_code = exc.code
+                            raise
                         self._mark_degraded()
                         if self.fatal_error_code == "PERPTAPE_RATE_LIMITED":
                             raise
@@ -849,6 +864,18 @@ class PerptapeStreamWorker:
             except Exception:
                 error_code = "PERPTAPE_STREAM_UNAVAILABLE"
             if stop_event.is_set():
+                return
+            if error_code in PERPTAPE_OVERSIZE_ERROR_CODES:
+                self.fatal_error_code = error_code
+                logger.error(
+                    "Perptape WebSocket stopped after an oversized external payload",
+                    extra={
+                        "event": "perptape_stream_stopped",
+                        "component": "perptape",
+                        "error_code": error_code,
+                    },
+                )
+                stop_event.set()
                 return
             if self._stop_for_fatal_error(stop_event):
                 return

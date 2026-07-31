@@ -6,9 +6,11 @@ import threading
 from collections import deque
 from collections.abc import Iterator
 from contextlib import contextmanager
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Any
+from uuid import UUID
 
 import pytest
 from httpx import ASGITransport, AsyncClient
@@ -22,7 +24,7 @@ from trading_control_plane.binance import (
 )
 from trading_control_plane.config import Settings
 from trading_control_plane.database import Database
-from trading_control_plane.domain import Role, SystemRiskState
+from trading_control_plane.domain import DomainRejected, Role, SystemRiskState
 from trading_control_plane.hyperliquid import (
     HyperliquidEquity,
     HyperliquidInstrument,
@@ -35,9 +37,13 @@ from trading_control_plane.notilt import (
     NoTiltVaultSnapshot,
 )
 from trading_control_plane.perptape import (
+    PERPTAPE_CANDIDATE_WINDOW,
+    PERPTAPE_PAYLOAD_MAX_BYTES,
+    PERPTAPE_STRING_FIELD_MAX_BYTES,
     PerptapeCandidate,
     PerptapeClient,
     PerptapeFeedSnapshot,
+    perptape_payload_size_bytes,
     perptape_snapshot_identity,
 )
 from trading_control_plane.perptape_stream import PerptapeSocket, PerptapeStreamWorker
@@ -215,6 +221,18 @@ def perptape_test_client() -> PerptapeClient:
     )
 
 
+def perptape_test_service(
+    database: Database,
+    label: str,
+) -> tuple[TradingService, TradingQueries, UUID, PerptapeClient]:
+    service = TradingService(database)
+    queries = TradingQueries(database)
+    admin = service.bootstrap_admin(f"{label}-admin", now=NOW)
+    actor = service.create_service_principal(f"{label}-perptape", admin, now=NOW)
+    service.assign_role(actor, Role.PROPOSER, admin, now=NOW)
+    return service, queries, actor, perptape_test_client()
+
+
 @pytest.mark.parametrize(
     ("first_source", "first_offset", "second_offset"),
     [
@@ -255,10 +273,10 @@ def test_concurrent_perptape_writers_merge_stale_snapshot_identities(
         actor,
         base,
         now=NOW,
-        expected_snapshot_identity=None,
+        base_snapshot=None,
     )
-    expected_identity = perptape_snapshot_identity(base)
     http = perptape_feed(
+        base.candidates[0],
         perptape_candidate(
             client,
             symbol="HTTPUSDT",
@@ -294,7 +312,7 @@ def test_concurrent_perptape_writers_merge_stale_snapshot_identities(
                 actor,
                 feed,
                 now=NOW + timedelta(seconds=10),
-                expected_snapshot_identity=expected_identity,
+                base_snapshot=base,
             )
         except BaseException as exc:  # pragma: no cover - asserted below
             errors.append(exc)
@@ -352,9 +370,8 @@ def test_concurrent_same_key_never_allows_older_fact_to_win(
         actor,
         base,
         now=NOW,
-        expected_snapshot_identity=None,
+        base_snapshot=None,
     )
-    expected_identity = perptape_snapshot_identity(base)
     stale = perptape_feed(
         perptape_candidate(
             client,
@@ -381,7 +398,7 @@ def test_concurrent_same_key_never_allows_older_fact_to_win(
             actor,
             feed,
             now=NOW + timedelta(seconds=10),
-            expected_snapshot_identity=expected_identity,
+            base_snapshot=base,
         )
 
     persisted = queries.perptape_feed()
@@ -389,6 +406,302 @@ def test_concurrent_same_key_never_allows_older_fact_to_win(
     assert len(persisted.candidates) == 1
     assert persisted.candidates[0].observed_at == fresh.candidates[0].observed_at
     assert persisted.candidates[0].reference_price == Decimal(120)
+
+
+@pytest.mark.parametrize("completion_first", [True, False])
+def test_three_way_merge_does_not_revive_completed_candidate(
+    database: Database,
+    completion_first: bool,
+) -> None:
+    service, queries, actor, client = perptape_test_service(
+        database,
+        f"three-way-complete-{completion_first}",
+    )
+    target = replace(
+        perptape_candidate(
+            client,
+            symbol="TARGETUSDT",
+            triggered_at=NOW,
+            observed_at=NOW,
+        ),
+        data_health="DEGRADED",
+        readiness="INCOMPLETE",
+    )
+    base = perptape_feed(target, fetched_at=NOW)
+    service.record_perptape_feed(actor, base, now=NOW, base_snapshot=None)
+    ready = replace(
+        target,
+        observed_at=NOW + timedelta(seconds=1),
+        data_health="CURRENT",
+        readiness="READY",
+    )
+    other = perptape_candidate(
+        client,
+        symbol="OTHERUSDT",
+        triggered_at=NOW + timedelta(seconds=2),
+        observed_at=NOW + timedelta(seconds=2),
+    )
+    completion = perptape_feed(ready, fetched_at=NOW + timedelta(seconds=3))
+    stale_writer = perptape_feed(
+        target,
+        other,
+        fetched_at=NOW + timedelta(seconds=3),
+    )
+    writes = (completion, stale_writer) if completion_first else (stale_writer, completion)
+    for desired in writes:
+        service.record_perptape_feed(
+            actor,
+            desired,
+            now=NOW + timedelta(seconds=10),
+            base_snapshot=base,
+        )
+
+    persisted = queries.perptape_feed()
+    assert persisted is not None
+    assert {candidate.symbol for candidate in persisted.candidates} == {
+        "TARGETUSDT",
+        "OTHERUSDT",
+    }
+    completed = next(
+        candidate for candidate in persisted.candidates if candidate.symbol == "TARGETUSDT"
+    )
+    assert completed.readiness == "READY"
+    assert completed.data_health == "CURRENT"
+
+
+@pytest.mark.parametrize("delete_first", [True, False])
+def test_three_way_delete_tombstone_wins_over_unchanged_stale_snapshot(
+    database: Database,
+    delete_first: bool,
+) -> None:
+    service, queries, actor, client = perptape_test_service(
+        database,
+        f"three-way-delete-{delete_first}",
+    )
+    removed = perptape_candidate(
+        client,
+        symbol="REMOVEUSDT",
+        triggered_at=NOW,
+        observed_at=NOW,
+    )
+    kept = perptape_candidate(
+        client,
+        symbol="KEEPUSDT",
+        triggered_at=NOW + timedelta(seconds=1),
+        observed_at=NOW + timedelta(seconds=1),
+    )
+    other = perptape_candidate(
+        client,
+        symbol="OTHERUSDT",
+        triggered_at=NOW + timedelta(seconds=2),
+        observed_at=NOW + timedelta(seconds=2),
+    )
+    base = perptape_feed(removed, kept, fetched_at=NOW)
+    service.record_perptape_feed(actor, base, now=NOW, base_snapshot=None)
+    deletion = perptape_feed(kept, fetched_at=NOW + timedelta(seconds=3))
+    stale_writer = perptape_feed(
+        removed,
+        kept,
+        other,
+        fetched_at=NOW + timedelta(seconds=3),
+    )
+    writes = (deletion, stale_writer) if delete_first else (stale_writer, deletion)
+    for desired in writes:
+        service.record_perptape_feed(
+            actor,
+            desired,
+            now=NOW + timedelta(seconds=10),
+            base_snapshot=base,
+        )
+
+    persisted = queries.perptape_feed()
+    assert persisted is not None
+    assert [candidate.symbol for candidate in persisted.candidates] == [
+        "KEEPUSDT",
+        "OTHERUSDT",
+    ]
+
+
+@pytest.mark.parametrize("cooldown_first", [True, False])
+def test_three_way_metadata_does_not_restore_stale_next_allowed_at(
+    database: Database,
+    cooldown_first: bool,
+) -> None:
+    service, queries, actor, client = perptape_test_service(
+        database,
+        f"three-way-cooldown-{cooldown_first}",
+    )
+    original = perptape_candidate(
+        client,
+        symbol="BASEUSDT",
+        triggered_at=NOW,
+        observed_at=NOW,
+    )
+    other = perptape_candidate(
+        client,
+        symbol="OTHERUSDT",
+        triggered_at=NOW + timedelta(seconds=1),
+        observed_at=NOW + timedelta(seconds=1),
+    )
+    base = perptape_feed(original, fetched_at=NOW)
+    service.record_perptape_feed(actor, base, now=NOW, base_snapshot=None)
+    new_deadline = NOW + timedelta(minutes=10)
+    cooldown = replace(
+        base,
+        fetched_at=NOW + timedelta(seconds=1),
+        next_allowed_at=new_deadline,
+    )
+    stale_writer = replace(
+        base,
+        fetched_at=NOW + timedelta(seconds=2),
+        candidates=(original, other),
+    )
+    writes = (cooldown, stale_writer) if cooldown_first else (stale_writer, cooldown)
+    for desired in writes:
+        service.record_perptape_feed(
+            actor,
+            desired,
+            now=NOW + timedelta(minutes=11),
+            base_snapshot=base,
+        )
+
+    persisted = queries.perptape_feed()
+    assert persisted is not None
+    assert persisted.next_allowed_at == new_deadline
+    assert {candidate.symbol for candidate in persisted.candidates} == {
+        "BASEUSDT",
+        "OTHERUSDT",
+    }
+
+
+def test_three_way_three_writers_and_retry_are_idempotent(
+    database: Database,
+) -> None:
+    service, queries, actor, client = perptape_test_service(database, "three-way-retry")
+    obsolete = perptape_candidate(
+        client,
+        symbol="OLDUSDT",
+        triggered_at=NOW,
+        observed_at=NOW,
+    )
+    first = perptape_candidate(
+        client,
+        symbol="FIRSTUSDT",
+        triggered_at=NOW + timedelta(seconds=1),
+        observed_at=NOW + timedelta(seconds=1),
+    )
+    second = perptape_candidate(
+        client,
+        symbol="SECONDUSDT",
+        triggered_at=NOW + timedelta(seconds=2),
+        observed_at=NOW + timedelta(seconds=2),
+    )
+    base = perptape_feed(obsolete, fetched_at=NOW)
+    service.record_perptape_feed(actor, base, now=NOW, base_snapshot=None)
+    first_writer = perptape_feed(
+        obsolete,
+        first,
+        fetched_at=NOW + timedelta(seconds=3),
+    )
+    second_writer = perptape_feed(
+        obsolete,
+        second,
+        fetched_at=NOW + timedelta(seconds=3),
+    )
+    cleanup = perptape_feed(fetched_at=NOW + timedelta(seconds=3))
+    for desired in (first_writer, second_writer, cleanup):
+        version = service.record_perptape_feed(
+            actor,
+            desired,
+            now=NOW + timedelta(seconds=10),
+            base_snapshot=base,
+        )
+    retry_version = service.record_perptape_feed(
+        actor,
+        first_writer,
+        now=NOW + timedelta(seconds=10),
+        base_snapshot=base,
+    )
+
+    assert retry_version == version
+    persisted = queries.perptape_feed()
+    assert persisted is not None
+    assert [candidate.symbol for candidate in persisted.candidates] == [
+        "FIRSTUSDT",
+        "SECONDUSDT",
+    ]
+
+
+@pytest.mark.parametrize("trim_first", [True, False])
+def test_three_way_window_trim_is_a_stable_tombstone(
+    database: Database,
+    trim_first: bool,
+) -> None:
+    service, queries, actor, client = perptape_test_service(
+        database,
+        f"three-way-trim-{trim_first}",
+    )
+    template = perptape_candidate(
+        client,
+        symbol="TEMPLATEUSDT",
+        triggered_at=NOW,
+        observed_at=NOW,
+    )
+    candidates = tuple(
+        replace(
+            template,
+            candidate_id=f"pt_trim_{index}",
+            symbol=f"T{index}USDT",
+            canonical_symbol=f"T{index}",
+            observed_at=NOW + timedelta(microseconds=index),
+            triggered_at=NOW + timedelta(microseconds=index),
+        )
+        for index in range(PERPTAPE_CANDIDATE_WINDOW)
+    )
+    base = perptape_feed(*candidates, fetched_at=NOW)
+    service.record_perptape_feed(actor, base, now=NOW, base_snapshot=None)
+    added_first = replace(
+        template,
+        candidate_id="pt_trim_first",
+        symbol="NEWFIRSTUSDT",
+        canonical_symbol="NEWFIRST",
+        observed_at=NOW + timedelta(seconds=1),
+        triggered_at=NOW + timedelta(seconds=1),
+    )
+    added_second = replace(
+        template,
+        candidate_id="pt_trim_second",
+        symbol="NEWSECONDUSDT",
+        canonical_symbol="NEWSECOND",
+        observed_at=NOW + timedelta(seconds=2),
+        triggered_at=NOW + timedelta(seconds=2),
+    )
+    trim_writer = perptape_feed(
+        *candidates,
+        added_first,
+        fetched_at=NOW + timedelta(seconds=3),
+    )
+    stale_writer = perptape_feed(
+        *candidates,
+        added_second,
+        fetched_at=NOW + timedelta(seconds=3),
+    )
+    writes = (trim_writer, stale_writer) if trim_first else (stale_writer, trim_writer)
+    for desired in writes:
+        service.record_perptape_feed(
+            actor,
+            desired,
+            now=NOW + timedelta(seconds=10),
+            base_snapshot=base,
+        )
+
+    persisted = queries.perptape_feed()
+    assert persisted is not None
+    symbols = {candidate.symbol for candidate in persisted.candidates}
+    assert len(persisted.candidates) == PERPTAPE_CANDIDATE_WINDOW
+    assert {"NEWFIRSTUSDT", "NEWSECONDUSDT"} <= symbols
+    assert "T0USDT" not in symbols
+    assert "T1USDT" not in symbols
 
 
 def test_postgres_perptape_payload_is_bounded_to_candidate_window(
@@ -418,7 +731,7 @@ def test_postgres_perptape_payload_is_bounded_to_candidate_window(
         actor,
         perptape_feed(*candidates, fetched_at=NOW + timedelta(seconds=3)),
         now=NOW + timedelta(seconds=3),
-        expected_snapshot_identity=None,
+        base_snapshot=None,
     )
 
     persisted = queries.perptape_feed()
@@ -426,6 +739,54 @@ def test_postgres_perptape_payload_is_bounded_to_candidate_window(
     assert len(persisted.candidates) == 2_048
     assert persisted.candidates[0].symbol == "B2USDT"
     assert persisted.candidates[-1].symbol == "B2049USDT"
+
+
+def test_postgres_rejects_oversized_payload_before_replacing_authoritative_feed(
+    database: Database,
+) -> None:
+    service, queries, actor, client = perptape_test_service(database, "payload-bytes")
+    original = perptape_feed(
+        perptape_candidate(
+            client,
+            symbol="ORIGINALUSDT",
+            triggered_at=NOW,
+            observed_at=NOW,
+        ),
+        fetched_at=NOW,
+    )
+    service.record_perptape_feed(actor, original, now=NOW, base_snapshot=None)
+    template = original.candidates[0]
+    candidates = tuple(
+        replace(
+            template,
+            candidate_id=f"pt_payload_{index}",
+            symbol=f"P{index}USDT",
+            canonical_symbol=f"P{index}",
+            observed_at=NOW + timedelta(microseconds=index),
+            triggered_at=NOW + timedelta(microseconds=index),
+            rationale="r" * PERPTAPE_STRING_FIELD_MAX_BYTES["rationale"],
+            detail_url="d" * PERPTAPE_STRING_FIELD_MAX_BYTES["detail_url"],
+            chart_url="c" * PERPTAPE_STRING_FIELD_MAX_BYTES["chart_url"],
+        )
+        for index in range(1_000)
+    )
+    oversized = perptape_feed(
+        *candidates,
+        fetched_at=NOW + timedelta(seconds=1),
+    )
+    assert perptape_payload_size_bytes(oversized) > PERPTAPE_PAYLOAD_MAX_BYTES
+
+    with pytest.raises(DomainRejected, match="PERPTAPE_PAYLOAD_TOO_LARGE"):
+        service.record_perptape_feed(
+            actor,
+            oversized,
+            now=NOW + timedelta(seconds=1),
+            base_snapshot=original,
+        )
+
+    persisted = queries.perptape_feed()
+    assert persisted is not None
+    assert perptape_snapshot_identity(persisted) == perptape_snapshot_identity(original)
 
 
 def test_runtime_worker_refreshes_perptape_two_venues_and_vault_without_sending(
@@ -491,7 +852,7 @@ def test_runtime_worker_refreshes_perptape_two_venues_and_vault_without_sending(
         perptape_actor,
         persisted_feed,
         now=NOW,
-        expected_snapshot_identity=perptape_snapshot_identity(persisted_feed),
+        base_snapshot=persisted_feed,
     )
     duplicate = worker.run_once()
 
@@ -656,11 +1017,11 @@ def test_websocket_alert_updates_the_existing_authoritative_perptape_feed(
         api_key="integration-stream-key",
         contract_version="breakouts-v1",
         load_snapshot=queries.perptape_feed,
-        record_snapshot=lambda feed, now, expected_snapshot_identity: service.record_perptape_feed(
+        record_snapshot=lambda feed, now, base_snapshot: service.record_perptape_feed(
             perptape_actor,
             feed,
             now=now,
-            expected_snapshot_identity=expected_snapshot_identity,
+            base_snapshot=base_snapshot,
         ),
         timeout_seconds=5,
         heartbeat_timeout_seconds=45,

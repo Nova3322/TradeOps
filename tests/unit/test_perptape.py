@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import json
 import threading
-from datetime import UTC, datetime, timedelta
+from dataclasses import replace
+from datetime import UTC, datetime, timedelta, timezone
+from decimal import Decimal
 from io import BytesIO
 from urllib.error import HTTPError
 
@@ -10,9 +12,31 @@ import pytest
 
 import trading_control_plane.perptape as perptape_module
 from trading_control_plane.domain import Direction, DomainRejected
-from trading_control_plane.perptape import PerptapeClient, PerptapeRateLimited
+from trading_control_plane.perptape import (
+    PERPTAPE_CANDIDATE_WINDOW,
+    PERPTAPE_PAYLOAD_MAX_BYTES,
+    PERPTAPE_STRING_FIELD_MAX_BYTES,
+    PerptapeCandidate,
+    PerptapeClient,
+    PerptapeFeedSnapshot,
+    PerptapeRateLimited,
+    bound_perptape_feed_snapshot,
+    perptape_payload_size_bytes,
+    perptape_snapshot_identity,
+    validate_perptape_feed_payload,
+)
 
 NOW = datetime(2026, 7, 19, 8, tzinfo=UTC)
+
+
+def parsed_feed() -> PerptapeFeedSnapshot:
+    return PerptapeClient(
+        base_url="https://perptape.com",
+        api_key="key",
+        contract_version="breakouts-v1",
+        cache_ttl=timedelta(0),
+        fetcher=lambda _url, _headers, _timeout: response(),
+    ).refresh(now=NOW)
 
 
 def response() -> dict[str, object]:
@@ -330,6 +354,231 @@ def test_invalid_candidate_fact_fails_closed() -> None:
 
     with pytest.raises(DomainRejected, match="PERPTAPE_RESPONSE_INVALID"):
         client.list_candidates(now=NOW)
+
+
+def test_snapshot_identity_is_canonical_for_order_timezone_decimal_and_defaults() -> None:
+    feed = replace(
+        parsed_feed(),
+        candidates=tuple(
+            replace(candidate, chart_url="") for candidate in parsed_feed().candidates
+        ),
+    )
+    offset = timezone(timedelta(hours=8))
+    equivalent = replace(
+        feed,
+        generated_at=feed.generated_at.astimezone(offset),
+        fetched_at=feed.fetched_at.astimezone(offset),
+        next_allowed_at=feed.next_allowed_at.astimezone(offset),
+        candidates=tuple(
+            replace(
+                candidate,
+                observed_at=candidate.observed_at.astimezone(offset),
+                triggered_at=(
+                    None
+                    if candidate.triggered_at is None
+                    else candidate.triggered_at.astimezone(offset)
+                ),
+                reference_price=Decimal(f"{candidate.reference_price}.00"),
+                threshold=(
+                    None if candidate.threshold is None else Decimal(f"{candidate.threshold}.000")
+                ),
+                chart_url=PerptapeCandidate.from_dict(
+                    {key: value for key, value in candidate.to_dict().items() if key != "chart_url"}
+                ).chart_url,
+            )
+            for candidate in reversed(feed.candidates)
+        ),
+    )
+
+    assert perptape_snapshot_identity(equivalent) == perptape_snapshot_identity(feed)
+    changed = replace(
+        equivalent,
+        candidates=(
+            replace(equivalent.candidates[0], rationale="materially changed"),
+            *equivalent.candidates[1:],
+        ),
+    )
+    assert perptape_snapshot_identity(changed) != perptape_snapshot_identity(feed)
+
+
+def test_candidate_window_selection_is_independent_of_input_order() -> None:
+    candidate = parsed_feed().candidates[0]
+    candidates = tuple(
+        replace(
+            candidate,
+            candidate_id=f"pt_window_{index}",
+            symbol=f"W{index}USDT",
+            canonical_symbol=f"W{index}",
+            observed_at=NOW + timedelta(microseconds=index),
+            triggered_at=NOW + timedelta(microseconds=index),
+        )
+        for index in range(PERPTAPE_CANDIDATE_WINDOW + 2)
+    )
+    forward = bound_perptape_feed_snapshot(replace(parsed_feed(), candidates=candidates)).candidates
+    reverse = bound_perptape_feed_snapshot(
+        replace(parsed_feed(), candidates=tuple(reversed(candidates)))
+    ).candidates
+
+    assert forward == reverse
+    assert len(forward) == PERPTAPE_CANDIDATE_WINDOW
+    assert forward[0].symbol == "W2USDT"
+    assert forward[-1].symbol == f"W{PERPTAPE_CANDIDATE_WINDOW + 1}USDT"
+
+
+@pytest.mark.parametrize("byte_delta", [-1, 0, 1])
+def test_http_symbol_length_uses_utf8_byte_boundaries(byte_delta: int) -> None:
+    payload = response()
+    data = payload["data"]
+    assert isinstance(data, list)
+    first = data[0]
+    assert isinstance(first, dict)
+    limit = PERPTAPE_STRING_FIELD_MAX_BYTES["symbol"]
+    first["symbol"] = "S" * (limit + byte_delta)
+    client = PerptapeClient(
+        base_url="https://perptape.com",
+        api_key="key",
+        contract_version="breakouts-v1",
+        cache_ttl=timedelta(0),
+        fetcher=lambda _url, _headers, _timeout: payload,
+    )
+
+    if byte_delta <= 0:
+        assert client.refresh(now=NOW).candidates[0].symbol == first["symbol"]
+    else:
+        with pytest.raises(DomainRejected, match="PERPTAPE_FIELD_TOO_LARGE"):
+            client.refresh(now=NOW)
+
+
+def test_http_symbol_rejects_multibyte_value_over_utf8_ceiling() -> None:
+    payload = response()
+    data = payload["data"]
+    assert isinstance(data, list)
+    first = data[0]
+    assert isinstance(first, dict)
+    first["symbol"] = "界" * 21
+    client = PerptapeClient(
+        base_url="https://perptape.com",
+        api_key="key",
+        contract_version="breakouts-v1",
+        cache_ttl=timedelta(0),
+        fetcher=lambda _url, _headers, _timeout: payload,
+    )
+    assert client.refresh(now=NOW).candidates[0].symbol == "界" * 21
+
+    first["symbol"] = "界" * 22
+    with pytest.raises(DomainRejected, match="PERPTAPE_FIELD_TOO_LARGE"):
+        client.refresh(now=NOW + timedelta(seconds=1), force=True)
+
+
+@pytest.mark.parametrize("field", ["candidate_id", "detail_url", "chart_url"])
+def test_persisted_id_and_url_fields_enforce_byte_ceiling(field: str) -> None:
+    candidate = parsed_feed().candidates[0]
+    limit = PERPTAPE_STRING_FIELD_MAX_BYTES[field]
+    for delta in (-1, 0):
+        value = candidate.to_dict()
+        value[field] = "x" * (limit + delta)
+        assert getattr(PerptapeCandidate.from_dict(value), field) == value[field]
+    value = candidate.to_dict()
+    value[field] = "x" * (limit + 1)
+    with pytest.raises(DomainRejected, match="PERPTAPE_FIELD_TOO_LARGE"):
+        PerptapeCandidate.from_dict(value)
+
+
+def _max_payload_candidate(
+    template: PerptapeCandidate,
+    index: int,
+) -> PerptapeCandidate:
+    candidate_prefix = f"id{index}:"
+    symbol_prefix = f"S{index}:"
+    return replace(
+        template,
+        candidate_id=candidate_prefix
+        + "i" * (PERPTAPE_STRING_FIELD_MAX_BYTES["candidate_id"] - len(candidate_prefix)),
+        symbol=symbol_prefix
+        + "s" * (PERPTAPE_STRING_FIELD_MAX_BYTES["symbol"] - len(symbol_prefix)),
+        canonical_symbol=symbol_prefix
+        + "c" * (PERPTAPE_STRING_FIELD_MAX_BYTES["canonical_symbol"] - len(symbol_prefix)),
+        observed_at=NOW + timedelta(microseconds=index),
+        triggered_at=NOW + timedelta(microseconds=index),
+        rationale="r" * PERPTAPE_STRING_FIELD_MAX_BYTES["rationale"],
+        detail_url="d" * PERPTAPE_STRING_FIELD_MAX_BYTES["detail_url"],
+        chart_url="c" * PERPTAPE_STRING_FIELD_MAX_BYTES["chart_url"],
+    )
+
+
+def _feed_at_payload_ceiling() -> PerptapeFeedSnapshot:
+    template = parsed_feed().candidates[0]
+    candidates = tuple(
+        _max_payload_candidate(template, index) for index in range(PERPTAPE_CANDIDATE_WINDOW)
+    )
+    low = 1
+    high = len(candidates)
+    while low < high:
+        middle = (low + high) // 2
+        size = perptape_payload_size_bytes(replace(parsed_feed(), candidates=candidates[:middle]))
+        if size >= PERPTAPE_PAYLOAD_MAX_BYTES:
+            high = middle
+        else:
+            low = middle + 1
+    selected = list(candidates[:low])
+    feed = replace(parsed_feed(), candidates=tuple(selected))
+    excess = perptape_payload_size_bytes(feed) - PERPTAPE_PAYLOAD_MAX_BYTES
+    assert excess >= 0
+    fields = (
+        ("chart_url", ""),
+        ("detail_url", "d"),
+        ("rationale", "r"),
+        ("canonical_symbol", "C"),
+        ("symbol", "S"),
+    )
+    for index in range(len(selected) - 1, -1, -1):
+        candidate = selected[index]
+        for field, minimum in fields:
+            value = getattr(candidate, field)
+            removable = len(value) - len(minimum)
+            removed = min(excess, removable)
+            if removed:
+                candidate = replace(candidate, **{field: value[: len(value) - removed]})
+                excess -= removed
+            if excess == 0:
+                break
+        selected[index] = candidate
+        if excess == 0:
+            break
+    assert excess == 0
+    feed = replace(feed, candidates=tuple(selected))
+    assert perptape_payload_size_bytes(feed) == PERPTAPE_PAYLOAD_MAX_BYTES
+    return feed
+
+
+def test_normalized_payload_byte_ceiling_accepts_boundary_and_rejects_plus_one() -> None:
+    exact = _feed_at_payload_ceiling()
+    adjustable_index = next(
+        index
+        for index, candidate in enumerate(exact.candidates)
+        if len(candidate.chart_url) < PERPTAPE_STRING_FIELD_MAX_BYTES["chart_url"]
+    )
+    adjustable = exact.candidates[adjustable_index]
+    below_candidates = list(exact.candidates)
+    below_candidates[0] = replace(
+        below_candidates[0],
+        chart_url=below_candidates[0].chart_url[:-1],
+    )
+    above_candidates = list(exact.candidates)
+    above_candidates[adjustable_index] = replace(
+        adjustable,
+        chart_url=adjustable.chart_url + "x",
+    )
+    below = replace(exact, candidates=tuple(below_candidates))
+    above = replace(exact, candidates=tuple(above_candidates))
+
+    assert perptape_payload_size_bytes(below) == PERPTAPE_PAYLOAD_MAX_BYTES - 1
+    assert perptape_payload_size_bytes(exact) == PERPTAPE_PAYLOAD_MAX_BYTES
+    assert perptape_payload_size_bytes(above) == PERPTAPE_PAYLOAD_MAX_BYTES + 1
+    validate_perptape_feed_payload(below)
+    validate_perptape_feed_payload(exact)
+    with pytest.raises(DomainRejected, match="PERPTAPE_PAYLOAD_TOO_LARGE"):
+        validate_perptape_feed_payload(above)
 
 
 class FakeHttpResponse:

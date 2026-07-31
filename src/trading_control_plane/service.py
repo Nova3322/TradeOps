@@ -115,9 +115,10 @@ from trading_control_plane.notilt import (
 from trading_control_plane.perptape import (
     PerptapeCandidate,
     PerptapeFeedSnapshot,
+    apply_perptape_feed_delta,
     bound_perptape_feed_snapshot,
-    merge_concurrent_perptape_feeds,
     perptape_snapshot_identity,
+    validate_perptape_feed_payload,
 )
 
 ACTIVE_INTENT_STATUSES = {
@@ -519,9 +520,12 @@ class TradingService:
         feed: PerptapeFeedSnapshot,
         *,
         now: datetime,
-        expected_snapshot_identity: str | None,
+        base_snapshot: PerptapeFeedSnapshot | None,
     ) -> int:
         feed = bound_perptape_feed_snapshot(feed)
+        if base_snapshot is not None:
+            base_snapshot = bound_perptape_feed_snapshot(base_snapshot)
+        validate_perptape_feed_payload(feed)
         if (
             feed.fetched_at > now + MAX_FACT_CLOCK_SKEW
             or feed.generated_at > feed.fetched_at + MAX_FACT_CLOCK_SKEW
@@ -548,31 +552,27 @@ class TradingService:
                     ),
                 )
             )
-            current_snapshot_identity = (
-                None if current_feed is None else perptape_snapshot_identity(current_feed)
+            if current is None and base_snapshot is not None:
+                _reject(
+                    "PERPTAPE_FEED_CONFLICT",
+                    "the base Perptape snapshot no longer exists",
+                )
+            feed = apply_perptape_feed_delta(
+                base=base_snapshot,
+                current=current_feed,
+                incoming=feed,
             )
-            if current_snapshot_identity != expected_snapshot_identity:
-                if current is None:
-                    _reject(
-                        "PERPTAPE_FEED_CONFLICT",
-                        "the expected Perptape snapshot no longer exists",
-                    )
-                assert current_feed is not None
-                feed = merge_concurrent_perptape_feeds(current_feed, feed)
-                merged_candidates = [candidate.to_dict() for candidate in feed.candidates]
-                if (
-                    current.contract_version == feed.contract_version
-                    and current.candidates == merged_candidates
-                    and current.generated_at == feed.generated_at
-                    and current.fetched_at == feed.fetched_at
-                    and current.next_allowed_at == feed.next_allowed_at
-                ):
-                    return current.version
-                if feed.fetched_at <= current.fetched_at:
-                    feed = replace(
-                        feed,
-                        fetched_at=current.fetched_at + timedelta(microseconds=1),
-                    )
+            validate_perptape_feed_payload(feed)
+            if current_feed is not None and perptape_snapshot_identity(
+                current_feed
+            ) == perptape_snapshot_identity(feed):
+                assert current is not None
+                return current.version
+            if current is not None and feed.fetched_at <= current.fetched_at:
+                feed = replace(
+                    feed,
+                    fetched_at=current.fetched_at + timedelta(microseconds=1),
+                )
             if (
                 feed.fetched_at > now + MAX_FACT_CLOCK_SKEW
                 or feed.generated_at > feed.fetched_at + MAX_FACT_CLOCK_SKEW
@@ -583,27 +583,6 @@ class TradingService:
                     "merged Perptape feed metadata is inconsistent",
                 )
             candidates = [candidate.to_dict() for candidate in feed.candidates]
-            if current is not None and current.fetched_at > feed.fetched_at:
-                return current.version
-            if current is not None and current.fetched_at == feed.fetched_at:
-                if (
-                    current.contract_version == feed.contract_version
-                    and current.candidates == candidates
-                    and current.generated_at == feed.generated_at
-                    and current.next_allowed_at == feed.next_allowed_at
-                ):
-                    return current.version
-                if current_snapshot_identity == expected_snapshot_identity:
-                    feed = replace(
-                        feed,
-                        fetched_at=current.fetched_at + timedelta(microseconds=1),
-                    )
-                    candidates = [candidate.to_dict() for candidate in feed.candidates]
-                else:
-                    _reject(
-                        "PERPTAPE_FEED_CONFLICT",
-                        "the same Perptape fetch time has different semantics",
-                    )
             if current is None:
                 current = PerptapeFeed(
                     feed_key="BREAKOUTS",

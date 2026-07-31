@@ -28,7 +28,6 @@ from trading_control_plane.notilt import NoTiltGateway, NoTiltUsdValuator
 from trading_control_plane.perptape import (
     PerptapeClient,
     merge_incomplete_perptape_candidates,
-    perptape_snapshot_identity,
 )
 from trading_control_plane.perptape_stream import PerptapeStreamWorker
 from trading_control_plane.queries import TradingQueries
@@ -155,16 +154,13 @@ class RuntimeSyncWorker:
         return len(persisted)
 
     def _record_perptape(self, actor_id: UUID, now: datetime) -> int:
-        current = self.queries.perptape_feed()
-        expected_snapshot_identity = (
-            None if current is None else perptape_snapshot_identity(current)
-        )
+        base = self.queries.perptape_feed()
         if (
-            current is not None
-            and current.contract_version == self.settings.perptape_contract_version
-            and now < current.next_allowed_at
+            base is not None
+            and base.contract_version == self.settings.perptape_contract_version
+            and now < base.next_allowed_at
         ):
-            return len(current.candidates)
+            return len(base.candidates)
         feed = self.perptape.refresh(now=now)
         current = self.queries.perptape_feed()
         if current is not None and current.contract_version == feed.contract_version:
@@ -180,7 +176,7 @@ class RuntimeSyncWorker:
             actor_id,
             feed,
             now=now,
-            expected_snapshot_identity=expected_snapshot_identity,
+            base_snapshot=base,
         )
         return len(feed.candidates)
 
@@ -333,13 +329,11 @@ class RuntimeSyncWorker:
                 api_key=self.settings.perptape_api_key,
                 contract_version=self.settings.perptape_contract_version,
                 load_snapshot=self.queries.perptape_feed,
-                record_snapshot=lambda feed, now, expected_snapshot_identity: (
-                    self.service.record_perptape_feed(
-                        perptape_actor.user_id,
-                        feed,
-                        now=now,
-                        expected_snapshot_identity=expected_snapshot_identity,
-                    )
+                record_snapshot=lambda feed, now, base_snapshot: self.service.record_perptape_feed(
+                    perptape_actor.user_id,
+                    feed,
+                    now=now,
+                    base_snapshot=base_snapshot,
                 ),
                 timeout_seconds=self.settings.perptape_timeout_seconds,
                 heartbeat_timeout_seconds=(

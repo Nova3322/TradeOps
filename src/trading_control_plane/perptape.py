@@ -10,12 +10,31 @@ from collections.abc import Callable, Iterable
 from dataclasses import asdict, dataclass, replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal, InvalidOperation
-from typing import Any
+from typing import Any, Literal
 
 from trading_control_plane.domain import Direction, DomainRejected
 
 PERPTAPE_OFFICIAL_HOST = "perptape.com"
 PERPTAPE_WEBSOCKET_PATH = "/ws/v1/alerts"
+# A normal full 2,048-candidate window is about 1.2-1.6 MiB; 4 MiB leaves
+# reconciliation headroom while making the authoritative JSONB payload finite.
+PERPTAPE_PAYLOAD_MAX_BYTES = 4 * 1024 * 1024
+PERPTAPE_STRING_FIELD_MAX_BYTES = {
+    "candidate_id": 200,
+    "source": 16,
+    "source_contract_version": 64,
+    "venue": 32,
+    "source_exchange": 16,
+    "symbol": 64,
+    "canonical_symbol": 64,
+    "source_direction": 8,
+    "timeframe": 16,
+    "rationale": 512,
+    "data_health": 32,
+    "readiness": 32,
+    "detail_url": 2_048,
+    "chart_url": 2_048,
+}
 
 
 def validate_perptape_http_url(value: str) -> str:
@@ -138,19 +157,7 @@ class PerptapeCandidate:
                 "PERPTAPE_CACHE_INVALID",
                 "persisted Perptape candidate is invalid",
             ) from exc
-        if (
-            candidate.source != "PERPTAPE"
-            or candidate.venue not in {"BINANCE", "HYPERLIQUID"}
-            or candidate.source_direction not in {"HH", "LL"}
-            or candidate.direction
-            is not (Direction.LONG if candidate.source_direction == "HH" else Direction.SHORT)
-            or candidate.reference_price <= 0
-            or candidate.observed_at.tzinfo is None
-        ):
-            raise DomainRejected(
-                "PERPTAPE_CACHE_INVALID",
-                "persisted Perptape candidate is outside the supported contract",
-            )
+        validate_perptape_candidate(candidate, error_code="PERPTAPE_CACHE_INVALID")
         return candidate
 
 
@@ -167,6 +174,66 @@ PerptapeEventKey = tuple[str, str, str, str, datetime | None]
 PERPTAPE_CANDIDATE_WINDOW = 2_048
 
 
+def _validate_string_field(
+    *,
+    field: str,
+    value: str,
+    error_code: str,
+    allow_empty: bool = False,
+) -> None:
+    if not value and not allow_empty:
+        raise DomainRejected(
+            error_code,
+            f"Perptape candidate {field} is outside the supported contract",
+        )
+    if len(value.encode("utf-8")) > PERPTAPE_STRING_FIELD_MAX_BYTES[field]:
+        raise DomainRejected(
+            "PERPTAPE_FIELD_TOO_LARGE",
+            f"Perptape candidate {field} exceeds the supported byte ceiling",
+        )
+
+
+def validate_perptape_candidate(
+    candidate: PerptapeCandidate,
+    *,
+    error_code: str = "PERPTAPE_RESPONSE_INVALID",
+) -> None:
+    for field in PERPTAPE_STRING_FIELD_MAX_BYTES:
+        _validate_string_field(
+            field=field,
+            value=getattr(candidate, field),
+            error_code=error_code,
+            allow_empty=field == "chart_url",
+        )
+    if (
+        candidate.source != "PERPTAPE"
+        or candidate.venue not in {"BINANCE", "HYPERLIQUID"}
+        or candidate.source_direction not in {"HH", "LL"}
+        or candidate.direction
+        is not (Direction.LONG if candidate.source_direction == "HH" else Direction.SHORT)
+        or not candidate.reference_price.is_finite()
+        or candidate.reference_price <= 0
+        or (
+            candidate.threshold is not None
+            and (not candidate.threshold.is_finite() or candidate.threshold <= 0)
+        )
+        or (
+            candidate.quote_volume is not None
+            and (not candidate.quote_volume.is_finite() or candidate.quote_volume < 0)
+        )
+        or (
+            candidate.open_interest is not None
+            and (not candidate.open_interest.is_finite() or candidate.open_interest < 0)
+        )
+        or candidate.observed_at.tzinfo is None
+        or (candidate.triggered_at is not None and candidate.triggered_at.tzinfo is None)
+    ):
+        raise DomainRejected(
+            error_code,
+            "Perptape candidate is outside the supported contract",
+        )
+
+
 def perptape_event_key(candidate: PerptapeCandidate) -> PerptapeEventKey:
     return (
         candidate.source_exchange,
@@ -177,38 +244,180 @@ def perptape_event_key(candidate: PerptapeCandidate) -> PerptapeEventKey:
     )
 
 
-def perptape_snapshot_identity(feed: PerptapeFeedSnapshot) -> str:
-    candidates = [
-        (
-            candidate.candidate_id,
-            candidate.source,
-            candidate.source_contract_version,
-            candidate.venue,
-            candidate.source_exchange,
-            candidate.symbol,
-            candidate.canonical_symbol,
-            candidate.direction.value,
-            candidate.source_direction,
-            candidate.timeframe,
-            candidate.observed_at.isoformat(),
-            (None if candidate.triggered_at is None else candidate.triggered_at.isoformat()),
-            str(candidate.reference_price),
-            None if candidate.threshold is None else str(candidate.threshold),
-            candidate.rationale,
-            candidate.data_health,
-            candidate.readiness,
-            candidate.detail_url,
-            (None if candidate.quote_volume is None else str(candidate.quote_volume)),
-            (None if candidate.open_interest is None else str(candidate.open_interest)),
-            candidate.chart_url,
+def _canonical_datetime(value: datetime | None) -> str | None:
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        raise DomainRejected(
+            "PERPTAPE_CACHE_INVALID",
+            "Perptape snapshot timestamps must be timezone-aware",
         )
-        for candidate in feed.candidates
+    return value.astimezone(UTC).isoformat(timespec="microseconds")
+
+
+def _canonical_decimal(value: Decimal | None) -> str | None:
+    if value is None:
+        return None
+    if not value.is_finite():
+        raise DomainRejected(
+            "PERPTAPE_CACHE_INVALID",
+            "Perptape snapshot decimals must be finite",
+        )
+    if value == 0:
+        return "0"
+    sign, digits_tuple, exponent = value.as_tuple()
+    assert isinstance(exponent, int)
+    digits = list(digits_tuple)
+    while digits and digits[-1] == 0:
+        digits.pop()
+        exponent += 1
+    coefficient = "".join(str(digit) for digit in digits)
+    if exponent >= 0:
+        rendered = coefficient + ("0" * exponent)
+    else:
+        point = len(coefficient) + exponent
+        rendered = (
+            coefficient[:point] + "." + coefficient[point:]
+            if point > 0
+            else "0." + ("0" * -point) + coefficient
+        )
+    return ("-" if sign else "") + rendered
+
+
+def _canonical_candidate(candidate: PerptapeCandidate) -> tuple[Any, ...]:
+    return (
+        candidate.candidate_id,
+        candidate.source,
+        candidate.source_contract_version,
+        candidate.venue,
+        candidate.source_exchange,
+        candidate.symbol,
+        candidate.canonical_symbol,
+        candidate.direction.value,
+        candidate.source_direction,
+        candidate.timeframe,
+        _canonical_datetime(candidate.observed_at),
+        _canonical_datetime(candidate.triggered_at),
+        _canonical_decimal(candidate.reference_price),
+        _canonical_decimal(candidate.threshold),
+        candidate.rationale,
+        candidate.data_health,
+        candidate.readiness,
+        candidate.detail_url,
+        _canonical_decimal(candidate.quote_volume),
+        _canonical_decimal(candidate.open_interest),
+        candidate.chart_url,
+    )
+
+
+def _normalized_candidate_dict(candidate: PerptapeCandidate) -> dict[str, Any]:
+    return {
+        "candidate_id": candidate.candidate_id,
+        "source": candidate.source,
+        "source_contract_version": candidate.source_contract_version,
+        "venue": candidate.venue,
+        "source_exchange": candidate.source_exchange,
+        "symbol": candidate.symbol,
+        "canonical_symbol": candidate.canonical_symbol,
+        "direction": candidate.direction.value,
+        "source_direction": candidate.source_direction,
+        "timeframe": candidate.timeframe,
+        "observed_at": _canonical_datetime(candidate.observed_at),
+        "triggered_at": _canonical_datetime(candidate.triggered_at),
+        "reference_price": _canonical_decimal(candidate.reference_price),
+        "threshold": _canonical_decimal(candidate.threshold),
+        "rationale": candidate.rationale,
+        "data_health": candidate.data_health,
+        "readiness": candidate.readiness,
+        "detail_url": candidate.detail_url,
+        "quote_volume": _canonical_decimal(candidate.quote_volume),
+        "open_interest": _canonical_decimal(candidate.open_interest),
+        "chart_url": candidate.chart_url,
+    }
+
+
+def perptape_payload_size_bytes(feed: PerptapeFeedSnapshot) -> int:
+    normalized = [
+        _normalized_candidate_dict(candidate)
+        for candidate in sorted(feed.candidates, key=_candidate_window_sort_key)
     ]
+    return len(
+        json.dumps(
+            normalized,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+    )
+
+
+def validate_perptape_feed_payload(feed: PerptapeFeedSnapshot) -> None:
+    _validate_string_field(
+        field="source_contract_version",
+        value=feed.contract_version,
+        error_code="PERPTAPE_RESPONSE_INVALID",
+    )
+    for candidate in feed.candidates:
+        validate_perptape_candidate(candidate)
+    if perptape_payload_size_bytes(feed) > PERPTAPE_PAYLOAD_MAX_BYTES:
+        raise DomainRejected(
+            "PERPTAPE_PAYLOAD_TOO_LARGE",
+            "Perptape candidate payload exceeds the supported byte ceiling",
+        )
+
+
+def _canonical_candidate_json(candidate: PerptapeCandidate) -> str:
+    return json.dumps(
+        _canonical_candidate(candidate),
+        ensure_ascii=True,
+        separators=(",", ":"),
+    )
+
+
+def _candidate_semantically_equal(
+    left: PerptapeCandidate,
+    right: PerptapeCandidate,
+) -> bool:
+    return _canonical_candidate(left) == _canonical_candidate(right)
+
+
+def _candidate_window_sort_key(candidate: PerptapeCandidate) -> tuple[Any, ...]:
+    return (
+        _canonical_datetime(candidate.observed_at),
+        _canonical_datetime(candidate.triggered_at) or "",
+        candidate.source_exchange,
+        candidate.symbol,
+        candidate.source_direction,
+        candidate.timeframe,
+        candidate.candidate_id,
+        _canonical_candidate_json(candidate),
+    )
+
+
+def _event_key_sort_key(key: PerptapeEventKey) -> tuple[str, ...]:
+    return (
+        key[0],
+        key[1],
+        key[2],
+        key[3],
+        _canonical_datetime(key[4]) or "",
+    )
+
+
+def perptape_snapshot_identity(feed: PerptapeFeedSnapshot) -> str:
+    candidates = sorted(
+        (_canonical_candidate(candidate) for candidate in feed.candidates),
+        key=lambda value: json.dumps(
+            value,
+            ensure_ascii=True,
+            separators=(",", ":"),
+        ),
+    )
     payload = {
         "contract_version": feed.contract_version,
-        "generated_at": feed.generated_at.isoformat(),
-        "fetched_at": feed.fetched_at.isoformat(),
-        "next_allowed_at": feed.next_allowed_at.isoformat(),
+        "generated_at": _canonical_datetime(feed.generated_at),
+        "fetched_at": _canonical_datetime(feed.fetched_at),
+        "next_allowed_at": _canonical_datetime(feed.next_allowed_at),
         "candidates": candidates,
     }
     canonical = json.dumps(
@@ -243,6 +452,7 @@ def _concurrent_candidate_choice(
             candidate.readiness == "READY",
             candidate.data_health == "CURRENT",
             candidate.candidate_id,
+            _canonical_candidate_json(candidate),
         ),
     )
 
@@ -255,11 +465,11 @@ def bound_perptape_feed_snapshot(
     unique: dict[PerptapeEventKey, PerptapeCandidate] = {}
     for candidate in feed.candidates:
         key = perptape_event_key(candidate)
-        existing = unique.pop(key, None)
+        existing = unique.get(key)
         unique[key] = (
             candidate if existing is None else _concurrent_candidate_choice(existing, candidate)
         )
-    candidates = tuple(unique.values())
+    candidates = tuple(sorted(unique.values(), key=_candidate_window_sort_key))
     incomplete_count = sum(candidate.readiness == "INCOMPLETE" for candidate in candidates)
     if incomplete_count > PERPTAPE_CANDIDATE_WINDOW:
         raise DomainRejected(
@@ -267,7 +477,7 @@ def bound_perptape_feed_snapshot(
             "Perptape unresolved alert window is full",
         )
     completed_slots = PERPTAPE_CANDIDATE_WINDOW - incomplete_count
-    completed = [candidate for candidate in candidates if candidate.readiness != "INCOMPLETE"]
+    completed = tuple(candidate for candidate in candidates if candidate.readiness != "INCOMPLETE")
     selected_completed = {
         perptape_event_key(candidate)
         for candidate in (completed[-completed_slots:] if completed_slots > 0 else ())
@@ -281,52 +491,112 @@ def bound_perptape_feed_snapshot(
     return replace(feed, candidates=bounded)
 
 
-def merge_concurrent_perptape_feeds(
+def _metadata_changed(
+    base: PerptapeFeedSnapshot | None,
+    incoming: PerptapeFeedSnapshot,
+    field: Literal["generated_at", "fetched_at", "next_allowed_at"],
+) -> bool:
+    if base is None:
+        return True
+    if field == "generated_at":
+        return _canonical_datetime(base.generated_at) != _canonical_datetime(incoming.generated_at)
+    if field == "fetched_at":
+        return _canonical_datetime(base.fetched_at) != _canonical_datetime(incoming.fetched_at)
+    return _canonical_datetime(base.next_allowed_at) != _canonical_datetime(
+        incoming.next_allowed_at
+    )
+
+
+def _merge_next_allowed_at(
+    base: PerptapeFeedSnapshot | None,
     current: PerptapeFeedSnapshot,
     incoming: PerptapeFeedSnapshot,
-) -> PerptapeFeedSnapshot:
-    """Merge writers that constructed snapshots from the same older database row."""
+) -> datetime:
+    if not _metadata_changed(base, incoming, "next_allowed_at"):
+        return current.next_allowed_at
+    if base is None:
+        if incoming.fetched_at > current.fetched_at:
+            return incoming.next_allowed_at
+        if incoming.fetched_at < current.fetched_at:
+            return current.next_allowed_at
+        return max(current.next_allowed_at, incoming.next_allowed_at)
+    if _canonical_datetime(current.next_allowed_at) == _canonical_datetime(base.next_allowed_at):
+        return incoming.next_allowed_at
+    if incoming.fetched_at > current.fetched_at:
+        return incoming.next_allowed_at
+    if incoming.fetched_at < current.fetched_at:
+        return current.next_allowed_at
+    return max(current.next_allowed_at, incoming.next_allowed_at)
 
-    if current.contract_version != incoming.contract_version:
+
+def apply_perptape_feed_delta(
+    *,
+    base: PerptapeFeedSnapshot | None,
+    current: PerptapeFeedSnapshot | None,
+    incoming: PerptapeFeedSnapshot,
+) -> PerptapeFeedSnapshot:
+    """Apply the caller's explicit base-to-desired changes to the locked row."""
+
+    incoming = bound_perptape_feed_snapshot(incoming)
+    if base is not None:
+        base = bound_perptape_feed_snapshot(base)
+    if current is not None:
+        current = bound_perptape_feed_snapshot(current)
+    contracts = {
+        snapshot.contract_version for snapshot in (base, current, incoming) if snapshot is not None
+    }
+    if len(contracts) != 1:
         raise DomainRejected(
             "PERPTAPE_FEED_CONFLICT",
-            "concurrent Perptape snapshots use different contracts",
+            "Perptape snapshot delta uses different contracts",
         )
-    merged: dict[PerptapeEventKey, PerptapeCandidate] = {
-        perptape_event_key(candidate): candidate for candidate in current.candidates
+    if current is None:
+        return incoming
+
+    base_candidates = {
+        perptape_event_key(candidate): candidate
+        for candidate in (() if base is None else base.candidates)
     }
-    for candidate in incoming.candidates:
-        key = perptape_event_key(candidate)
-        existing = merged.get(key)
-        merged[key] = (
-            candidate if existing is None else _concurrent_candidate_choice(existing, candidate)
-        )
-    candidates = tuple(
-        sorted(
-            merged.values(),
-            key=lambda candidate: (
-                candidate.observed_at,
-                candidate.triggered_at or datetime.min.replace(tzinfo=UTC),
-                candidate.source_exchange,
-                candidate.symbol,
-                candidate.source_direction,
-                candidate.timeframe,
-                candidate.candidate_id,
-            ),
-        )
-    )
-    generated_at = max(current.generated_at, incoming.generated_at)
+    incoming_candidates = {
+        perptape_event_key(candidate): candidate for candidate in incoming.candidates
+    }
+    merged = {perptape_event_key(candidate): candidate for candidate in current.candidates}
+
+    for key in sorted(base_candidates.keys() - incoming_candidates.keys(), key=_event_key_sort_key):
+        merged.pop(key, None)
+    for key in sorted(incoming_candidates, key=_event_key_sort_key):
+        desired = incoming_candidates[key]
+        base_candidate = base_candidates.get(key)
+        if base_candidate is not None and _candidate_semantically_equal(
+            base_candidate,
+            desired,
+        ):
+            continue
+        current_candidate = merged.get(key)
+        if base_candidate is not None and current_candidate is None:
+            continue
+        if current_candidate is None or (
+            base_candidate is not None
+            and _candidate_semantically_equal(current_candidate, base_candidate)
+        ):
+            merged[key] = desired
+        elif not _candidate_semantically_equal(current_candidate, desired):
+            merged[key] = _concurrent_candidate_choice(current_candidate, desired)
+
+    generated_at = current.generated_at
+    if _metadata_changed(base, incoming, "generated_at"):
+        generated_at = max(current.generated_at, incoming.generated_at)
+    fetched_at = current.fetched_at
+    if _metadata_changed(base, incoming, "fetched_at"):
+        fetched_at = max(current.fetched_at, incoming.fetched_at)
+    next_allowed_at = _merge_next_allowed_at(base, current, incoming)
     return bound_perptape_feed_snapshot(
         PerptapeFeedSnapshot(
             contract_version=current.contract_version,
             generated_at=generated_at,
-            fetched_at=max(current.fetched_at, incoming.fetched_at),
-            next_allowed_at=max(
-                generated_at,
-                current.next_allowed_at,
-                incoming.next_allowed_at,
-            ),
-            candidates=candidates,
+            fetched_at=fetched_at,
+            next_allowed_at=max(generated_at, next_allowed_at),
+            candidates=tuple(merged.values()),
         )
     )
 
@@ -715,7 +985,7 @@ class PerptapeClient:
             [exchange, canonical_symbol, timeframe, source_direction, str(triggered_at_ms or 0)]
         )
         candidate_id = "pt_" + hashlib.sha256(identity.encode()).hexdigest()[:24]
-        return PerptapeCandidate(
+        candidate = PerptapeCandidate(
             candidate_id=candidate_id,
             source="PERPTAPE",
             source_contract_version=self._contract_version,
@@ -754,6 +1024,8 @@ class PerptapeClient:
                 else "https://app.hyperliquid.xyz/trade/" + urllib.parse.quote(canonical_symbol)
             ),
         )
+        validate_perptape_candidate(candidate)
+        return candidate
 
     def parse_stream_alert(
         self,
