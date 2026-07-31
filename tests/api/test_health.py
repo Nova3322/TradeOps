@@ -481,9 +481,23 @@ def test_web_request_lifecycle_in_node() -> None:
         assert.equal(cancelledFrames.has(desktopStaleFrame.id), true);
         desktopStaleFrame.callback();
         assert.equal(activeElement, toggle);
+        assert.equal(sidebarClasses.has("open"), false);
+        assert.equal(toggleAttributes.get("aria-expanded"), "false");
         assert.equal(navigationContext.sidebar.inert, false);
         assert.equal(sidebarAttributes.get("aria-hidden"), "false");
+        assert.equal(navigationContext.navBackdrop.hidden, true);
+        assert.equal(bodyClasses.has("nav-open"), false);
         assert.equal(navigationContext.main.inert, false);
+
+        navigationContext.matchMedia = () => ({ matches: true });
+        navigationContext.syncNavigationMode();
+        assert.equal(sidebarClasses.has("open"), false);
+        assert.equal(toggleAttributes.get("aria-expanded"), "false");
+        assert.equal(navigationContext.sidebar.inert, true);
+        assert.equal(sidebarAttributes.get("aria-hidden"), "true");
+        navigationContext.openMobileNav();
+        frameCallbacks.shift().callback();
+        assert.equal(activeElement, firstNavigationLink);
 
         console.log(JSON.stringify({
           configuredDelay,

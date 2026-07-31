@@ -199,15 +199,7 @@ function closeMobileNav({restoreFocus = true} = {}) {
 }
 
 function syncNavigationMode() {
-  if (matchMedia('(max-width: 980px)').matches) closeMobileNav({restoreFocus:false});
-  else {
-    cancelMobileNavFocus();
-    sidebar.inert = sidebar.hidden;
-    sidebar.setAttribute('aria-hidden', String(sidebar.hidden));
-    navBackdrop.hidden = true;
-    main.inert = false;
-    document.body.classList.remove('nav-open');
-  }
+  closeMobileNav({restoreFocus:false});
 }
 
 function bindLinkedRows() {
