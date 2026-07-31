@@ -13,6 +13,8 @@ let instruments = [];
 let opportunities = [];
 let sessionNotice = '';
 let toastTimer = null;
+let authFailureActive = false;
+const REQUEST_TIMEOUT_MS = 15000;
 
 const escapeHtml = (value) => String(value ?? '').replace(/[&<>'"]/g, (char) => ({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[char]));
 const shortId = (value) => value ? `${value.slice(0, 8)}…` : '—';
@@ -26,16 +28,27 @@ const loginDestination = () => {
 };
 
 async function api(path, options = {}) {
-  const method = options.method || 'GET';
-  const controller = method === 'GET' ? new AbortController() : null;
-  const timeout = controller ? setTimeout(() => controller.abort(), 15000) : null;
+  const method = (options.method || 'GET').toUpperCase();
+  const mutation = !['GET', 'HEAD'].includes(method);
+  const controller = new AbortController();
+  let didTimeout = false;
+  const timeout = setTimeout(() => {
+    didTimeout = true;
+    controller.abort();
+  }, REQUEST_TIMEOUT_MS);
+  const externalSignal = options.signal;
+  const abortFromExternalSignal = () => controller.abort(externalSignal.reason);
+  if (externalSignal) {
+    if (externalSignal.aborted) abortFromExternalSignal();
+    else externalSignal.addEventListener('abort', abortFromExternalSignal, {once:true});
+  }
   let response;
   let data;
   try {
     response = await fetch(path, {
       credentials: 'same-origin',
       ...options,
-      signal: options.signal || controller?.signal,
+      signal: controller.signal,
       headers: {'content-type': 'application/json', ...(options.headers || {})}
     });
     if (response.status === 204) data = null;
@@ -48,22 +61,38 @@ async function api(path, options = {}) {
     }
   } catch (error) {
     if (error.name === 'AbortError') {
-      const timeoutError = new Error('读取超过 15 秒，请检查网络或服务状态后重试');
+      if (!didTimeout) {
+        const abortedError = new Error('请求已取消');
+        abortedError.code = 'REQUEST_ABORTED';
+        abortedError.status = 499;
+        throw abortedError;
+      }
+      const message = mutation
+        ? '操作在 15 秒内未收到确认。这是可恢复错误：按钮已恢复；请先刷新当前页面并核对权威状态，确认结果后再决定是否重试。'
+        : '读取超过 15 秒，请检查网络或服务状态后重试';
+      const timeoutError = new Error(message);
       timeoutError.code = 'REQUEST_TIMEOUT';
       timeoutError.status = 408;
+      timeoutError.outcomeUnknown = mutation;
       throw timeoutError;
     }
-    const networkError = new Error('无法连接控制台服务，请检查网络后重试');
+    const message = mutation
+      ? '连接中断，操作结果可能未知。这是可恢复错误：按钮已恢复；请先刷新当前页面并核对权威状态，确认结果后再决定是否重试。'
+      : '无法连接控制台服务，请检查网络后重试';
+    const networkError = new Error(message);
     networkError.code = 'NETWORK_ERROR';
     networkError.status = 0;
+    networkError.outcomeUnknown = mutation;
     throw networkError;
   } finally {
-    if (timeout) clearTimeout(timeout);
+    clearTimeout(timeout);
+    externalSignal?.removeEventListener('abort', abortFromExternalSignal);
   }
   if (!response.ok) {
     const error = new Error(data?.error?.message || data?.detail?.error?.code || `HTTP ${response.status}`);
     error.code = data?.error?.code || data?.detail?.error?.code || `HTTP_${response.status}`;
     error.status = response.status;
+    error.handled = response.status === 401 && handleUnauthorizedResponse();
     throw error;
   }
   return data;
@@ -77,6 +106,33 @@ function showToast(message, kind = 'success') {
   toast.setAttribute('aria-live', kind === 'error' ? 'assertive' : 'polite');
   toast.classList.add('show');
   toastTimer = setTimeout(() => toast.classList.remove('show'), kind === 'error' ? 5200 : 3200);
+}
+
+function handleUnauthorizedResponse() {
+  if (authFailureActive) return true;
+  if (!session) return false;
+  authFailureActive = true;
+  session = null;
+  sessionNotice = '会话已失效。请重新验证内部身份，完成后会返回当前页面。';
+  if (toastTimer) clearTimeout(toastTimer);
+  toastTimer = null;
+  toast.classList.remove('show', 'error');
+  toast.textContent = '';
+  toast.setAttribute('role', 'status');
+  toast.setAttribute('aria-live', 'polite');
+  if (dialog.open) dialog.close();
+  if (confirmDialog.open) confirmDialog.close();
+  setShell(false);
+  renderLogin();
+  enhanceRenderedPage();
+  return true;
+}
+
+function showApiError(error, target = null) {
+  if (error?.handled) return;
+  const message = `${error?.code || 'UNKNOWN'}: ${error?.message || '请求失败'}`;
+  if (target) target.textContent = message;
+  else showToast(message, 'error');
 }
 
 function setShell(loggedIn) {
@@ -191,12 +247,10 @@ async function withPending(button, pendingLabel, action) {
   try {
     return await action();
   } finally {
-    if (button.isConnected) {
-      button.disabled = false;
-      button.removeAttribute('aria-busy');
-      delete button.dataset.pending;
-      button.textContent = originalLabel;
-    }
+    button.disabled = false;
+    button.removeAttribute('aria-busy');
+    delete button.dataset.pending;
+    button.textContent = originalLabel;
   }
 }
 
@@ -252,11 +306,7 @@ async function route() {
     enhanceRenderedPage();
   } catch (error) {
     if (error.status === 401) {
-      session = null;
-      sessionNotice = '会话已失效。请重新验证内部身份，完成后会返回当前页面。';
-      setShell(false);
-      renderLogin();
-      enhanceRenderedPage();
+      if (!error.handled) handleUnauthorizedResponse();
       return;
     }
     main.innerHTML = errorView(error);
@@ -281,11 +331,12 @@ function renderLogin() {
       const result = await api('/api/auth/mock/login', {method:'POST', body: JSON.stringify({username: new FormData(form).get('username')})});
       session = result.session;
       sessionNotice = '';
+      authFailureActive = false;
       setShell(true);
       history.replaceState({}, '', loginDestination());
       await route();
     } catch (error) {
-      form.querySelector('.form-error').textContent = `${error.code}: ${error.message}`;
+      showApiError(error, form.querySelector('.form-error'));
     } finally { button.disabled = false; }
   });
 }
@@ -350,7 +401,7 @@ function bindOpportunityActions() {
       const result = await api(`/api/opportunities/${item.candidate_id}/proposals`, {method:'POST', body:JSON.stringify(defaultSystemPayload(item))});
       showToast(`${item.symbol} 提案已按默认配置创建`);
       navigate(`/proposals/${result.proposal_id}`);
-    } catch (error) { showToast(`${error.code}: ${error.message}`); button.disabled = false; button.textContent = '一键创建'; }
+    } catch (error) { showApiError(error); button.disabled = false; button.textContent = '一键创建'; }
   }));
   const filters = document.querySelector('#opportunity-filters');
   if (!filters) return;
@@ -418,7 +469,7 @@ async function submitManualProposal(event) {
     const result = await api('/api/proposals/manual', {method:'POST', body: JSON.stringify(data)});
     showToast('MANUAL 提案已冻结并进入审核');
     navigate(`/proposals/${result.proposal_id}`);
-  } catch (error) { form.querySelector('.form-error').textContent = `${error.code}: ${error.message}`; button.disabled = false; }
+  } catch (error) { showApiError(error, form.querySelector('.form-error')); button.disabled = false; }
 }
 
 async function renderProposalList(status, title) {
@@ -455,25 +506,25 @@ async function approveProposal(item) {
     const grant = await api('/api/auth/mock/step-up', {method:'POST', body:JSON.stringify({action:'proposal.approve', object_id:item.proposal_id, object_version:item.version})});
     await api(`/api/proposals/${item.proposal_id}/reviews`, {method:'POST', body:JSON.stringify({decision:'APPROVE', reason:document.querySelector('#review-reason').value, expected_version:item.version, action_grant:grant.action_grant})});
     showToast('Reviewer 投票已原子记录'); await route();
-  } catch (error) { errorBox.textContent = `${error.code}: ${error.message}`; }
+  } catch (error) { showApiError(error, errorBox); }
 }
 
 async function rejectProposal(item) {
   try {
     await api(`/api/proposals/${item.proposal_id}/reviews`, {method:'POST', body:JSON.stringify({decision:'REJECT', reason:document.querySelector('#review-reason').value, expected_version:item.version})});
     showToast('提案已拒绝'); await route();
-  } catch (error) { document.querySelector('#review-error').textContent = `${error.code}: ${error.message}`; }
+  } catch (error) { showApiError(error, document.querySelector('#review-error')); }
 }
 
 async function runRisk(item) {
   try { await api(`/api/proposals/${item.proposal_id}/risk-decisions`, {method:'POST', body:JSON.stringify({idempotency_key:crypto.randomUUID()})}); showToast('RiskDecision 已保存'); await route(); }
-  catch (error) { showToast(`${error.code}: ${error.message}`); }
+  catch (error) { showApiError(error); }
 }
 
 async function authorize(item) {
   const allowedAdds = item.frozen_payload?.details?.allow_auto_add ? Number(item.frozen_payload.details.requested_adds || 0) : 0;
   try { await api(`/api/proposals/${item.proposal_id}/authorizations`, {method:'POST', body:JSON.stringify({idempotency_key:crypto.randomUUID(), expires_in_minutes:30, allowed_adds:allowedAdds})}); showToast('短期授权已签发'); await route(); }
-  catch (error) { showToast(`${error.code}: ${error.message}`); }
+  catch (error) { showApiError(error); }
 }
 
 async function createInitialIntent(item) {
@@ -481,7 +532,7 @@ async function createInitialIntent(item) {
     const initialQuantity = item.frozen_payload?.details?.initial_quantity || item.authorization.quantity_limit;
     const result = await api(`/api/authorizations/${item.authorization.authorization_id}/intents`, {method:'POST', body:JSON.stringify({kind:'INITIAL', account_id:item.account_id, venue:item.venue, instrument_id:item.instrument_id, direction:item.direction, quantity:initialQuantity, idempotency_key:crypto.randomUUID()})});
     showToast('风险已原子预留，SHADOW 初仓意图已创建'); navigate(`/campaigns/${result.campaign_id}`);
-  } catch (error) { showToast(`${error.code}: ${error.message}`); }
+  } catch (error) { showApiError(error); }
 }
 
 async function loadCampaignDetails() {
@@ -538,8 +589,8 @@ async function recordStartingFacts(event) {
       await api('/api/facts/account-equity', {method:'POST', body:JSON.stringify({account_id:data.account_id, venue:data.venue, equity:data.equity, available_balance:data.available_balance, currency:data.currency, known:true})});
       showToast('当前 SHADOW 仓位与权益事实已记录'); await route();
     } catch (error) {
-      form.querySelector('.form-error').textContent = `${error.code}: ${error.message}`;
-      showToast('SHADOW 事实未完整记录，请先核对当前事实再决定是否继续', 'error');
+      showApiError(error, form.querySelector('.form-error'));
+      if (!error.handled) showToast('SHADOW 事实未完整记录，请先核对当前事实再决定是否继续', 'error');
     }
   });
 }
@@ -613,13 +664,13 @@ function drawCapitalChart(balances) {
 }
 
 function bindCapitalActions() {
-  document.querySelector('#capital-proposal-form')?.addEventListener('submit', async event => { event.preventDefault(); const data = Object.fromEntries(new FormData(event.currentTarget)); data.expires_in_minutes = Number(data.expires_in_minutes); data.idempotency_key = crypto.randomUUID(); try { await api('/api/capital/proposals', {method:'POST', body:JSON.stringify(data)}); showToast('资金 Proposal 草稿已创建'); await route(); } catch (error) { showToast(`${error.code}: ${error.message}`); } });
-  document.querySelector('#capital-fact-form')?.addEventListener('submit', async event => { event.preventDefault(); const data = Object.fromEntries(new FormData(event.currentTarget)); data.environment = 'TESTNET'; data.address_reference = 'masked-test-reference'; data.known = true; try { await api('/api/capital/balances/mock', {method:'POST', body:JSON.stringify(data)}); showToast('Mock 只读资金事实已记录'); await route(); } catch (error) { showToast(`${error.code}: ${error.message}`); } });
-  document.querySelector('#capital-policy-form')?.addEventListener('submit', async event => { event.preventDefault(); const data = Object.fromEntries(new FormData(event.currentTarget)); data.idempotency_key = crypto.randomUUID(); try { await api('/api/capital/automation/policies', {method:'POST', body:JSON.stringify(data)}); showToast('非生产资金阈值已保存；Gate 状态未改变'); await route(); } catch (error) { showToast(`${error.code}: ${error.message}`); } });
+  document.querySelector('#capital-proposal-form')?.addEventListener('submit', async event => { event.preventDefault(); const data = Object.fromEntries(new FormData(event.currentTarget)); data.expires_in_minutes = Number(data.expires_in_minutes); data.idempotency_key = crypto.randomUUID(); try { await api('/api/capital/proposals', {method:'POST', body:JSON.stringify(data)}); showToast('资金 Proposal 草稿已创建'); await route(); } catch (error) { showApiError(error); } });
+  document.querySelector('#capital-fact-form')?.addEventListener('submit', async event => { event.preventDefault(); const data = Object.fromEntries(new FormData(event.currentTarget)); data.environment = 'TESTNET'; data.address_reference = 'masked-test-reference'; data.known = true; try { await api('/api/capital/balances/mock', {method:'POST', body:JSON.stringify(data)}); showToast('Mock 只读资金事实已记录'); await route(); } catch (error) { showApiError(error); } });
+  document.querySelector('#capital-policy-form')?.addEventListener('submit', async event => { event.preventDefault(); const data = Object.fromEntries(new FormData(event.currentTarget)); data.idempotency_key = crypto.randomUUID(); try { await api('/api/capital/automation/policies', {method:'POST', body:JSON.stringify(data)}); showToast('非生产资金阈值已保存；Gate 状态未改变'); await route(); } catch (error) { showApiError(error); } });
   document.querySelectorAll('[data-cap-scope-reconcile]').forEach(button => button.addEventListener('click', () => capitalAction('/api/capital/reconciliations', {environment:button.dataset.environment, account_id:button.dataset.account, venue:button.dataset.venue})));
   document.querySelectorAll('[data-cap-auto]').forEach(button => button.addEventListener('click', () => capitalAction(`/api/capital/automation/policies/${button.dataset.capAuto}/evaluate`, {purpose:button.dataset.purpose, idempotency_key:crypto.randomUUID()})));
   document.querySelectorAll('[data-cap-submit]').forEach(button => button.addEventListener('click', () => capitalAction(`/api/capital/proposals/${button.dataset.capSubmit}/submit`, {})));
-  document.querySelectorAll('[data-cap-review]').forEach(button => button.addEventListener('click', async () => { try { const proposalId = button.dataset.capReview; const version = Number(button.dataset.version); const grant = await api('/api/auth/mock/step-up', {method:'POST', body:JSON.stringify({action:'capital.approve', object_id:proposalId, object_version:version})}); await api(`/api/capital/proposals/${proposalId}/reviews`, {method:'POST', body:JSON.stringify({decision:'APPROVE', reason:'independent Treasury review', expected_version:version, action_grant:grant.action_grant})}); showToast('资金审核已记录'); await route(); } catch (error) { showToast(`${error.code}: ${error.message}`); } }));
+  document.querySelectorAll('[data-cap-review]').forEach(button => button.addEventListener('click', async () => { try { const proposalId = button.dataset.capReview; const version = Number(button.dataset.version); const grant = await api('/api/auth/mock/step-up', {method:'POST', body:JSON.stringify({action:'capital.approve', object_id:proposalId, object_version:version})}); await api(`/api/capital/proposals/${proposalId}/reviews`, {method:'POST', body:JSON.stringify({decision:'APPROVE', reason:'independent Treasury review', expected_version:version, action_grant:grant.action_grant})}); showToast('资金审核已记录'); await route(); } catch (error) { showApiError(error); } }));
   document.querySelectorAll('[data-cap-authorize]').forEach(button => button.addEventListener('click', () => capitalAction(`/api/capital/proposals/${button.dataset.capAuthorize}/authorizations`, {idempotency_key:crypto.randomUUID(), expires_in_minutes:30})));
   document.querySelectorAll('[data-cap-execute]').forEach(button => button.addEventListener('click', () => capitalAction(`/api/capital/authorizations/${button.dataset.capExecute}/transfers/mock`, {idempotency_key:crypto.randomUUID()})));
   document.querySelectorAll('[data-cap-notilt]').forEach(button => button.addEventListener('click', () => capitalAction(`/api/capital/authorizations/${button.dataset.capNotilt}/transfers/notilt-plan`, {idempotency_key:crypto.randomUUID()})));
@@ -631,7 +682,7 @@ function bindCapitalActions() {
   document.querySelectorAll('[data-cap-reconcile]').forEach(button => button.addEventListener('click', () => capitalAction(`/api/capital/transfers/${button.dataset.capReconcile}/reconcile`, {})));
 }
 
-async function capitalAction(path, body) { try { await api(path, {method:'POST', body:JSON.stringify(body)}); showToast('资金权威状态已更新'); await route(); } catch (error) { showToast(`${error.code}: ${error.message}`); } }
+async function capitalAction(path, body) { try { await api(path, {method:'POST', body:JSON.stringify(body)}); showToast('资金权威状态已更新'); await route(); } catch (error) { showApiError(error); } }
 
 async function renderActualResults() {
   const environment = new URLSearchParams(location.search).get('environment') || 'SHADOW';
@@ -690,7 +741,7 @@ async function renderBinanceReadOnly() {
       showToast(`只读同步完成；对账 ${result.reconciliation.status}`);
       await route();
     } catch (error) {
-      form.querySelector('.form-error').textContent = `${error.code}: ${error.message}`;
+      showApiError(error, form.querySelector('.form-error'));
       button.disabled = false;
     }
   });
@@ -717,7 +768,10 @@ async function renderCampaignDetail(id) {
   let addCandidates = []; let addCandidateError = null;
   if (item.management?.allow_auto_add && Number(item.management.remaining_adds) > 0) {
     try { addCandidates = (await api(`/api/campaigns/${id}/add-candidates`)).data; }
-    catch (error) { addCandidateError = `${error.code}: ${error.message}`; }
+    catch (error) {
+      if (error.handled) return;
+      addCandidateError = `${error.code}: ${error.message}`;
+    }
   }
   const active = item.intents.find(intent => ['READY','SENT','PARTIALLY_FILLED','UNKNOWN'].includes(intent.status));
   main.innerHTML = `<section class="page"><header class="page-head"><div><p class="eyebrow">SHADOW · ${escapeHtml(item.venue)}</p><h1>${escapeHtml(item.instrument?.symbol || 'Campaign')} ${shortId(item.campaign_id)}</h1><p class="lede"><b class="status-${escapeHtml(item.status)}">${escapeHtml(item.status)}</b> · ${escapeHtml(item.direction)} · 目标 ${fmtNumber(item.current_target_quantity)}</p></div><div class="toolbar"><a class="secondary" href="/campaigns" data-link>返回运营台</a><button class="secondary" data-pnl>刷新 PnL</button><button class="secondary" data-reconcile>运行对账</button></div></header>
@@ -754,7 +808,7 @@ function bindCampaignActions(item, active) {
       const lease = await api('/api/sender-leases', {method:'POST', body:JSON.stringify({execution_scope:`${item.account_id}:${item.venue}`, owner_id:owner, lease_seconds:60})});
       await api(`/api/intents/${active.intent_id}/shadow-send`, {method:'POST', body:JSON.stringify({execution_scope:`${item.account_id}:${item.venue}`, owner_id:owner, fencing_token:lease.fencing_token, venue_order_id:document.querySelector('#venue-order-id').value})});
       showToast('已记录 SHADOW send；没有连接交易所'); await route();
-    } catch (error) { showToast(`${error.code}: ${error.message}`, 'error'); }
+    } catch (error) { showApiError(error); }
   }));
   document.querySelectorAll('[data-unknown]').forEach(button => button.addEventListener('click', () => campaignAction(`/api/intents/${active.intent_id}/unknown`, {reason:'operator marked uncertain SHADOW outcome'}, {
     button,
@@ -785,7 +839,7 @@ async function campaignAction(path, body, {button = null, pendingLabel = '处理
       await api(path, {method:'POST', body:JSON.stringify(body)});
       showToast(successMessage);
       await route();
-    } catch (error) { showToast(`${error.code}: ${error.message}`, 'error'); }
+    } catch (error) { showApiError(error); }
   };
   return button ? withPending(button, pendingLabel, run) : run();
 }
@@ -817,7 +871,7 @@ document.querySelectorAll('[data-close-dialog]').forEach(button => button.addEve
 document.querySelector('#system-proposal-form').addEventListener('submit', async (event) => {
   event.preventDefault(); const form = event.currentTarget; const data = Object.fromEntries(new FormData(form)); const candidateId = data.candidate_id; delete data.candidate_id; data.expires_in_minutes = Number(data.expires_in_minutes); data.initial_quantity = data.initial_quantity || null; data.add_trigger_price = data.add_trigger_price || null; data.allow_auto_add = data.allow_auto_add === 'true'; data.requested_adds = Number(data.requested_adds);
   try { const result = await api(`/api/opportunities/${candidateId}/proposals`, {method:'POST', body:JSON.stringify(data)}); dialog.close(); showToast('SYSTEM 提案已冻结并进入审核'); navigate(`/proposals/${result.proposal_id}`); }
-  catch (error) { document.querySelector('#system-form-error').textContent = `${error.code}: ${error.message}`; }
+  catch (error) { showApiError(error, form.querySelector('#system-form-error')); }
 });
 document.querySelector('#logout-button').addEventListener('click', async (event) => withPending(event.currentTarget, '退出中…', async () => {
   try {
@@ -826,7 +880,7 @@ document.querySelector('#logout-button').addEventListener('click', async (event)
     setShell(false);
     history.replaceState({}, '', '/');
     await route();
-  } catch (error) { showToast(`${error.code}: ${error.message}`, 'error'); }
+  } catch (error) { showApiError(error); }
 }));
 document.querySelector('#theme-toggle').addEventListener('click', () => { const next = document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark'; document.documentElement.dataset.theme = next; localStorage.setItem('trading-theme', next); });
 document.documentElement.dataset.theme = localStorage.getItem('trading-theme') || (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light');
