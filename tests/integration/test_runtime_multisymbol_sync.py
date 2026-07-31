@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import threading
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from types import SimpleNamespace
@@ -12,6 +13,8 @@ from sqlalchemy import func, select
 
 from trading_control_plane.binance import (
     BinanceEquity,
+    BinanceFill,
+    BinanceFunding,
     BinanceInstrument,
     BinancePosition,
     BinanceReadOnlySnapshot,
@@ -24,8 +27,15 @@ from trading_control_plane.domain import (
     Role,
     SystemRiskState,
 )
-from trading_control_plane.models import AccountEquity, Instrument, Position, ReconciliationRun
-from trading_control_plane.runtime import RuntimeSyncWorker, SourceSyncResult
+from trading_control_plane.models import (
+    AccountEquity,
+    FundingPayment,
+    Instrument,
+    Position,
+    ReconciliationRun,
+    VenueFill,
+)
+from trading_control_plane.runtime import RuntimeSyncReport, RuntimeSyncWorker, SourceSyncResult
 from trading_control_plane.service import TradingService
 
 NOW = datetime(2026, 7, 31, 12, tzinfo=UTC)
@@ -112,6 +122,36 @@ def ingest(
         snapshots,
         environment=environment,
         now=now,
+    )
+
+
+def with_history(
+    value: BinanceReadOnlySnapshot,
+    *,
+    suffix: str,
+) -> BinanceReadOnlySnapshot:
+    return replace(
+        value,
+        fills=(
+            BinanceFill(
+                fill_id=f"fill-{suffix}",
+                order_id=f"order-{suffix}",
+                side="BUY",
+                quantity=Decimal(1),
+                price=Decimal(100),
+                fee=Decimal(0),
+                fee_currency="USDT",
+                executed_at=value.observed_at,
+            ),
+        ),
+        funding=(
+            BinanceFunding(
+                payment_id=f"funding-{suffix}",
+                amount=Decimal(0),
+                currency="USDT",
+                paid_at=value.observed_at,
+            ),
+        ),
     )
 
 
@@ -253,6 +293,119 @@ def test_partial_failed_or_unknown_account_response_never_clears_stale_positions
     assert positions["BTCUSDT"].quantity == Decimal(1)
     assert positions["ETHUSDT"].quantity == Decimal(2)
     assert all(row.observed_at == NOW for row in positions.values())
+
+
+def test_incomplete_history_refreshes_current_domain_closes_absent_and_fails_readiness(
+    database: Database,
+) -> None:
+    service, actor = seed(database, "history-incomplete")
+    ingest(
+        service,
+        actor,
+        "account-a",
+        ExecutionEnvironment.LIVE,
+        NOW,
+        snapshot("BTCUSDT", Decimal(1), NOW),
+        snapshot("ETHUSDT", Decimal(2), NOW),
+        snapshot("SOLUSDT", Decimal(3), NOW),
+    )
+    refreshed_at = NOW + timedelta(seconds=1)
+    incomplete = tuple(
+        replace(
+            snapshot(symbol, quantity, refreshed_at),
+            history_error_code="BINANCE_READ_ONLY_UNAVAILABLE",
+        )
+        for symbol, quantity in reversed((("BTCUSDT", Decimal(5)), ("ETHUSDT", Decimal(6))))
+    )
+
+    class HistoryIncompleteReader:
+        def read_account_snapshots(
+            self, _symbols: tuple[str, ...], *, now: datetime
+        ) -> tuple[BinanceReadOnlySnapshot, ...]:
+            assert now == refreshed_at
+            return incomplete
+
+    worker: Any = object.__new__(RuntimeSyncWorker)
+    worker.settings = SimpleNamespace(
+        runtime_binance_account_id="account-a",
+        runtime_binance_symbol="BTCUSDT",
+        binance_fact_environment="LIVE",
+    )
+    worker.binance = HistoryIncompleteReader()
+    worker.service = service
+    results: dict[str, SourceSyncResult] = {}
+
+    RuntimeSyncWorker._attempt(
+        "BINANCE",
+        lambda: worker._record_binance(actor, refreshed_at),
+        results,
+    )
+    RuntimeSyncWorker._attempt(
+        "BINANCE",
+        lambda: worker._record_binance(actor, refreshed_at),
+        results,
+    )
+
+    assert results == {
+        "BINANCE": SourceSyncResult("FAILED", error_code="BINANCE_READ_ONLY_UNAVAILABLE")
+    }
+    positions = scoped_positions(database, account_id="account-a", environment="LIVE")
+    assert {symbol: (row.quantity, row.observed_at) for symbol, row in positions.items()} == {
+        "BTCUSDT": (Decimal(5), refreshed_at),
+        "ETHUSDT": (Decimal(6), refreshed_at),
+        "SOLUSDT": (Decimal(0), refreshed_at),
+    }
+    with database.session_factory() as session:
+        assert session.scalar(select(func.count()).select_from(VenueFill)) == 0
+        assert session.scalar(select(func.count()).select_from(FundingPayment)) == 0
+
+    report = RuntimeSyncReport(
+        started_at=refreshed_at.isoformat(),
+        completed_at=refreshed_at.isoformat(),
+        sources={
+            **results,
+            "HYPERLIQUID": SourceSyncResult("SUCCESS", items_observed=1),
+            "NOTILT:42161": SourceSyncResult("SUCCESS", items_observed=1),
+        },
+        net_worth={"complete": True},
+    )
+    assert report.capital_sources_successful is False
+    assert report.ready_for_new_risk is False
+
+
+def test_complete_history_is_written_atomically_and_remains_idempotent(
+    database: Database,
+) -> None:
+    service, actor = seed(database, "history-complete")
+    snapshots = (
+        with_history(snapshot("ETHUSDT", Decimal(2), NOW), suffix="eth"),
+        with_history(snapshot("BTCUSDT", Decimal(1), NOW), suffix="btc"),
+    )
+
+    first = ingest(
+        service,
+        actor,
+        "account-a",
+        ExecutionEnvironment.LIVE,
+        NOW,
+        *snapshots,
+    )
+    duplicate = ingest(
+        service,
+        actor,
+        "account-a",
+        ExecutionEnvironment.LIVE,
+        NOW,
+        *tuple(reversed(snapshots)),
+    )
+
+    assert first["history_error_code"] is None
+    assert duplicate["history_error_code"] is None
+    assert sum(item["fills"] for item in first["symbols"].values()) == 2
+    assert sum(item["funding"] for item in first["symbols"].values()) == 2
+    with database.session_factory() as session:
+        assert session.scalar(select(func.count()).select_from(VenueFill)) == 2
+        assert session.scalar(select(func.count()).select_from(FundingPayment)) == 2
 
 
 def test_newer_account_snapshot_revision_wins_concurrent_late_arrival(

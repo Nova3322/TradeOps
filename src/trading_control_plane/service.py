@@ -4318,6 +4318,17 @@ class TradingService:
             _reject(
                 f"{venue}_RESPONSE_INCOMPLETE", "account snapshot observations are inconsistent"
             )
+        history_error_codes = {snapshot.history_error_code for snapshot in snapshots}
+        if len(history_error_codes) != 1:
+            _reject(f"{venue}_RESPONSE_INCOMPLETE", "account history status is inconsistent")
+        history_error_code = next(iter(history_error_codes))
+        if history_error_code is not None and any(
+            snapshot.fills or snapshot.funding for snapshot in snapshots
+        ):
+            _reject(
+                f"{venue}_RESPONSE_INVALID",
+                "incomplete account history cannot contain partial facts",
+            )
 
         with self.database.session_factory.begin() as session:
             persisted: dict[str, Any] = {}
@@ -4353,6 +4364,7 @@ class TradingService:
             "symbols": persisted,
             "positions_covered": covered,
             "positions_authoritatively_closed": explicitly_closed + closed,
+            "history_error_code": history_error_code,
         }
 
     def _cover_absent_positions(

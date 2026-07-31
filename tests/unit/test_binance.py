@@ -222,15 +222,20 @@ def test_standard_account_snapshot_reads_position_risk_once_for_all_active_symbo
     assert calls.count("/fapi/v1/openOrders") == 1
 
 
-def test_account_snapshot_rejects_page_limit_before_returning_partial_coverage() -> None:
+def test_account_snapshot_marks_page_limited_history_incomplete_without_partial_facts() -> None:
     responses = payloads()
     trade = responses["/fapi/v1/userTrades"]
     assert isinstance(trade, list)
     responses["/fapi/v1/userTrades"] = trade * 1_000
     client, _calls = client_with_contract(responses)
 
-    with pytest.raises(DomainRejected, match="BINANCE_RESPONSE_INCOMPLETE"):
-        client.read_account_snapshots(("BTCUSDT",), now=NOW)
+    snapshots = client.read_account_snapshots(("BTCUSDT",), now=NOW)
+
+    assert len(snapshots) == 1
+    assert snapshots[0].position.quantity == Decimal("0.25")
+    assert snapshots[0].history_error_code == "BINANCE_RESPONSE_INCOMPLETE"
+    assert snapshots[0].fills == ()
+    assert snapshots[0].funding == ()
 
 
 def test_missing_credentials_fail_before_any_private_fact_is_read() -> None:
@@ -543,6 +548,113 @@ def test_portfolio_margin_account_snapshot_covers_all_positions_without_refetchi
     collateral_by_symbol["ETHUSDT"] = "USDC"
     with pytest.raises(DomainRejected, match="BINANCE_ACCOUNT_EQUITY_AMBIGUOUS"):
         client.read_account_snapshots(("BTCUSDT",), now=NOW)
+
+
+@pytest.mark.parametrize("failed_history_leg", [0, 2, 5])
+def test_portfolio_margin_history_failure_keeps_complete_current_domain(
+    failed_history_leg: int,
+) -> None:
+    observed_ms = int(NOW.timestamp() * 1_000)
+    history_calls: list[tuple[str, str]] = []
+    symbols = ("BTCUSDT", "ETHUSDT", "SOLUSDT")
+
+    def instrument(symbol: str) -> dict[str, Any]:
+        return {
+            "symbols": [
+                {
+                    "symbol": symbol,
+                    "contractType": "PERPETUAL",
+                    "status": "TRADING",
+                    "quoteAsset": "USDT",
+                    "marginAsset": "USDT",
+                    "filters": [
+                        {"filterType": "PRICE_FILTER", "tickSize": "0.10"},
+                        {"filterType": "LOT_SIZE", "stepSize": "0.001"},
+                        {"filterType": "MIN_NOTIONAL", "notional": "5"},
+                    ],
+                }
+            ]
+        }
+
+    def fetch(
+        url: str, _headers: dict[str, str], _timeout: float
+    ) -> dict[str, Any] | list[dict[str, Any]]:
+        parsed = urllib.parse.urlparse(url)
+        query = dict(urllib.parse.parse_qsl(parsed.query))
+        if parsed.path == "/papi/v1/um/account":
+            return {
+                "positions": [
+                    {
+                        "symbol": symbol,
+                        "positionSide": "BOTH",
+                        "positionAmt": str(index + 1),
+                        "entryPrice": "100",
+                    }
+                    for index, symbol in enumerate(symbols)
+                ]
+            }
+        if parsed.path == "/papi/v1/account":
+            return {
+                "accountEquity": "1025",
+                "totalAvailableBalance": "800",
+                "updateTime": observed_ms,
+            }
+        if parsed.path == "/fapi/v1/exchangeInfo":
+            return instrument(query["symbol"])
+        if parsed.path == "/fapi/v1/premiumIndex":
+            return {"symbol": query["symbol"], "markPrice": "110"}
+        if parsed.path in {"/papi/v1/um/openOrders", "/papi/v1/um/algo/openAlgoOrders"}:
+            return []
+        if parsed.path in {"/papi/v1/um/userTrades", "/papi/v1/um/income"}:
+            history_calls.append((parsed.path, query["symbol"]))
+            if len(history_calls) - 1 == failed_history_leg:
+                raise DomainRejected(
+                    "BINANCE_READ_ONLY_UNAVAILABLE", "history endpoint unavailable"
+                )
+            if parsed.path.endswith("userTrades"):
+                return [
+                    {
+                        "symbol": query["symbol"],
+                        "id": len(history_calls),
+                        "orderId": len(history_calls),
+                        "side": "BUY",
+                        "qty": "1",
+                        "price": "100",
+                        "commission": "0",
+                        "commissionAsset": "USDT",
+                        "time": observed_ms,
+                    }
+                ]
+            return [
+                {
+                    "symbol": query["symbol"],
+                    "incomeType": "FUNDING_FEE",
+                    "tranId": len(history_calls),
+                    "income": "0",
+                    "asset": "USDT",
+                    "time": observed_ms,
+                }
+            ]
+        raise AssertionError(parsed.path)
+
+    client = BinancePortfolioMarginReadOnlyClient(
+        base_url="https://papi.binance.com",
+        api_key="unified-key",
+        api_secret="unified-secret",  # noqa: S106
+        fetcher=fetch,
+        server_time_fetcher=lambda _timeout: observed_ms,
+    )
+
+    snapshots = client.read_account_snapshots(tuple(reversed(symbols)), now=NOW)
+
+    assert [(item.symbol, item.position.quantity) for item in snapshots] == [
+        ("BTCUSDT", Decimal(1)),
+        ("ETHUSDT", Decimal(2)),
+        ("SOLUSDT", Decimal(3)),
+    ]
+    assert len(history_calls) == failed_history_leg + 1
+    assert all(item.history_error_code == "BINANCE_READ_ONLY_UNAVAILABLE" for item in snapshots)
+    assert all(item.fills == () and item.funding == () for item in snapshots)
 
 
 def test_portfolio_margin_reader_rejects_nonofficial_hosts_before_network() -> None:

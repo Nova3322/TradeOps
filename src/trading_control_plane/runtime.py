@@ -163,8 +163,20 @@ class RuntimeSyncWorker:
     def _runtime_clock(self, *, continuous: bool) -> datetime:
         return self._normalize_runtime_time(self.clock(), continuous=continuous)
 
-    def _require_scope_match(self, scope: str, actor_id: UUID, now: datetime) -> None:
+    def _require_scope_match(
+        self,
+        scope: str,
+        actor_id: UUID,
+        now: datetime,
+        *,
+        source_error_code: str | None = None,
+    ) -> None:
         reconciliation_id = self.service.reconcile_scope(scope, actor_id, now=now)
+        if source_error_code is not None:
+            raise DomainRejected(
+                source_error_code,
+                "runtime current facts were refreshed but history supplementation is incomplete",
+            )
         if self.service.reconciliation_status(reconciliation_id) is not ReconciliationStatus.MATCH:
             raise DomainRejected(
                 "RUNTIME_RECONCILIATION_NOT_MATCH",
@@ -189,7 +201,12 @@ class RuntimeSyncWorker:
             now=now,
         )
         scope = f"{self.settings.binance_fact_environment}:{account_id}:BINANCE"
-        self._require_scope_match(scope, actor_id, now)
+        self._require_scope_match(
+            scope,
+            actor_id,
+            now,
+            source_error_code=persisted["history_error_code"],
+        )
         return int(persisted["positions_covered"])
 
     def _record_perptape(self, actor_id: UUID, now: datetime) -> int:
@@ -245,7 +262,12 @@ class RuntimeSyncWorker:
             now=now,
         )
         scope = f"{environment.value}:{account_id}:HYPERLIQUID"
-        self._require_scope_match(scope, actor_id, now)
+        self._require_scope_match(
+            scope,
+            actor_id,
+            now,
+            source_error_code=persisted["history_error_code"],
+        )
         return int(persisted["positions_covered"])
 
     def _record_notilt(self, actor_id: UUID, chain_id: int, now: datetime) -> int:

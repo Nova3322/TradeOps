@@ -174,7 +174,7 @@ def test_account_snapshot_projects_every_clearinghouse_position_from_single_resp
     assert call_types.count("userFunding") == 1
 
 
-def test_account_snapshot_rejects_duplicate_or_result_limited_responses() -> None:
+def test_account_snapshot_rejects_duplicate_current_response() -> None:
     duplicate = contract_payloads()
     clearinghouse = duplicate["clearinghouseState"]
     assert isinstance(clearinghouse, dict)
@@ -183,12 +183,19 @@ def test_account_snapshot_rejects_duplicate_or_result_limited_responses() -> Non
     with pytest.raises(DomainRejected, match="HYPERLIQUID_RESPONSE_INVALID"):
         client.read_account_snapshots(("BTC",), now=NOW)
 
+
+def test_account_snapshot_marks_result_limited_history_incomplete() -> None:
     for response_name in ("userFillsByTime", "userFunding"):
         limited = contract_payloads()
         limited[response_name] = [{} for _ in range(500)]
         client, _calls = client_with_contract(limited)
-        with pytest.raises(DomainRejected, match="HYPERLIQUID_RESPONSE_INCOMPLETE"):
-            client.read_account_snapshots(("BTC",), now=NOW)
+        snapshots = client.read_account_snapshots(("BTC",), now=NOW)
+
+        assert len(snapshots) == 1
+        assert snapshots[0].position.quantity == Decimal("0.25")
+        assert snapshots[0].history_error_code == "HYPERLIQUID_RESPONSE_INCOMPLETE"
+        assert snapshots[0].fills == ()
+        assert snapshots[0].funding == ()
 
 
 def test_unified_account_uses_spot_usdc_total_and_hold_for_equity() -> None:

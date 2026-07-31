@@ -7,7 +7,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from typing import Any
@@ -250,6 +250,7 @@ class HyperliquidReadOnlySnapshot:
     equity: HyperliquidEquity
     funding: tuple[HyperliquidFunding, ...]
     protection: HyperliquidProtection | None
+    history_error_code: str | None = None
 
 
 class HyperliquidReadOnlyClient:
@@ -388,47 +389,64 @@ class HyperliquidReadOnlyClient:
         orders = self._info(
             {"type": "frontendOpenOrders", "user": self._account_address, "dex": ""}
         )
-        start_time_ms = int((now - HISTORY_WINDOW).timestamp() * 1_000)
-        fills = self._info(
-            {
-                "type": "userFillsByTime",
-                "user": self._account_address,
-                "startTime": start_time_ms,
-                "aggregateByTime": True,
-            }
-        )
-        funding = self._info(
-            {"type": "userFunding", "user": self._account_address, "startTime": start_time_ms}
-        )
-        fill_rows = _require_dict_list(fills, "userFills")
-        funding_rows = _require_dict_list(funding, "userFunding")
-        if len(fill_rows) >= 500 or len(funding_rows) >= 500:
-            raise DomainRejected(
-                "HYPERLIQUID_RESPONSE_INCOMPLETE",
-                "Hyperliquid account history reached an endpoint result limit",
-            )
         target_symbols = (
             configured | self._active_position_symbols(clearinghouse) | self._order_symbols(orders)
         )
-        snapshots: list[HyperliquidReadOnlySnapshot] = []
+        current_snapshots: list[HyperliquidReadOnlySnapshot] = []
         for symbol in sorted(target_symbols):
             instrument, mark_price = self._parse_instrument(meta_contexts, symbol)
             position, equity = self._parse_account(clearinghouse, symbol, mark_price, now)
             if spot_state is not None:
                 equity = self._parse_unified_equity(spot_state, now)
             parsed_orders = self._parse_orders(orders, symbol, now)
-            snapshots.append(
+            current_snapshots.append(
                 HyperliquidReadOnlySnapshot(
                     symbol=symbol,
                     observed_at=now,
                     instrument=instrument,
                     orders=parsed_orders,
-                    fills=self._parse_fills(fill_rows, symbol, now),
+                    fills=(),
                     position=position,
                     equity=equity,
-                    funding=self._parse_funding(funding_rows, symbol, now),
+                    funding=(),
                     protection=self._select_protection(parsed_orders, position),
                 )
+            )
+        start_time_ms = int((now - HISTORY_WINDOW).timestamp() * 1_000)
+        try:
+            fills = self._info(
+                {
+                    "type": "userFillsByTime",
+                    "user": self._account_address,
+                    "startTime": start_time_ms,
+                    "aggregateByTime": True,
+                }
+            )
+            funding = self._info(
+                {
+                    "type": "userFunding",
+                    "user": self._account_address,
+                    "startTime": start_time_ms,
+                }
+            )
+            fill_rows = _require_dict_list(fills, "userFills")
+            funding_rows = _require_dict_list(funding, "userFunding")
+            if len(fill_rows) >= 500 or len(funding_rows) >= 500:
+                raise DomainRejected(
+                    "HYPERLIQUID_RESPONSE_INCOMPLETE",
+                    "Hyperliquid account history reached an endpoint result limit",
+                )
+            snapshots = [
+                replace(
+                    snapshot,
+                    fills=self._parse_fills(fill_rows, snapshot.symbol, now),
+                    funding=self._parse_funding(funding_rows, snapshot.symbol, now),
+                )
+                for snapshot in current_snapshots
+            ]
+        except DomainRejected as exc:
+            return tuple(
+                replace(snapshot, history_error_code=exc.code) for snapshot in current_snapshots
             )
         return tuple(snapshots)
 

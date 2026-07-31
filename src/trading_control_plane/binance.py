@@ -7,7 +7,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
 from typing import Any
@@ -137,6 +137,7 @@ class BinanceReadOnlySnapshot:
     equity: BinanceEquity
     funding: tuple[BinanceFunding, ...]
     protection: BinanceProtection | None
+    history_error_code: str | None = None
 
 
 def _decimal(raw: Any, field: str, *, minimum: Decimal | None = None) -> Decimal:
@@ -262,36 +263,54 @@ class BinanceReadOnlyClient:
         orders = self._signed_get("/fapi/v1/openOrders", {}, timestamp_ms=timestamp_ms)
         active_symbols = self._active_position_symbols(positions, container="positionRisk")
         target_symbols = configured | active_symbols | self._order_symbols(orders, "openOrders")
-        snapshots: list[BinanceReadOnlySnapshot] = []
+        current_snapshots: list[BinanceReadOnlySnapshot] = []
         for symbol in sorted(target_symbols):
             exchange = self._public_get("/fapi/v1/exchangeInfo", {"symbol": symbol})
             instrument = self._parse_instrument(exchange, symbol)
             parsed_orders = self._parse_orders(orders, symbol, now)
             position = self._parse_position_or_flat(positions, symbol, now)
-            fills = self._signed_get(
-                "/fapi/v1/userTrades",
-                {"symbol": symbol, "limit": "1000"},
-                timestamp_ms=timestamp_ms,
-            )
-            funding = self._signed_get(
-                "/fapi/v1/income",
-                {"symbol": symbol, "incomeType": "FUNDING_FEE", "limit": "1000"},
-                timestamp_ms=timestamp_ms,
-            )
-            self._require_untruncated(fills, "userTrades", limit=1000)
-            self._require_untruncated(funding, "income", limit=1000)
-            snapshots.append(
+            current_snapshots.append(
                 BinanceReadOnlySnapshot(
                     symbol=symbol,
                     observed_at=now,
                     instrument=instrument,
                     orders=parsed_orders,
-                    fills=self._parse_fills(fills, symbol, now),
+                    fills=(),
                     position=position,
                     equity=self._parse_equity(balance, instrument.collateral_currency, now),
-                    funding=self._parse_funding(funding, symbol, now),
+                    funding=(),
                     protection=self._select_protection(parsed_orders, position),
                 )
+            )
+        try:
+            snapshots: list[BinanceReadOnlySnapshot] = []
+            for snapshot in current_snapshots:
+                fills = self._signed_get(
+                    "/fapi/v1/userTrades",
+                    {"symbol": snapshot.symbol, "limit": "1000"},
+                    timestamp_ms=timestamp_ms,
+                )
+                funding = self._signed_get(
+                    "/fapi/v1/income",
+                    {
+                        "symbol": snapshot.symbol,
+                        "incomeType": "FUNDING_FEE",
+                        "limit": "1000",
+                    },
+                    timestamp_ms=timestamp_ms,
+                )
+                self._require_untruncated(fills, "userTrades", limit=1000)
+                self._require_untruncated(funding, "income", limit=1000)
+                snapshots.append(
+                    replace(
+                        snapshot,
+                        fills=self._parse_fills(fills, snapshot.symbol, now),
+                        funding=self._parse_funding(funding, snapshot.symbol, now),
+                    )
+                )
+        except DomainRejected as exc:
+            return tuple(
+                replace(snapshot, history_error_code=exc.code) for snapshot in current_snapshots
             )
         return tuple(snapshots)
 
@@ -711,37 +730,59 @@ class BinancePortfolioMarginReadOnlyClient:
             )
         equity_currency = next(iter(collateral_currencies))
 
-        snapshots: list[BinanceReadOnlySnapshot] = []
+        current_snapshots: list[BinanceReadOnlySnapshot] = []
         for symbol in sorted(target_symbols):
             instrument, mark = market[symbol]
-            fills = self._signed_get(
-                "/papi/v1/um/userTrades",
-                {"symbol": symbol, "limit": "1000"},
-                timestamp_ms=timestamp_ms,
-            )
-            funding = self._signed_get(
-                "/papi/v1/um/income",
-                {"symbol": symbol, "incomeType": "FUNDING_FEE", "limit": "1000"},
-                timestamp_ms=timestamp_ms,
-            )
-            BinanceReadOnlyClient._require_untruncated(fills, "userTrades", limit=1000)
-            BinanceReadOnlyClient._require_untruncated(funding, "income", limit=1000)
             position = self._parse_position(um_account, mark, symbol, observed_at)
             parsed_orders = BinanceReadOnlyClient._parse_orders(
                 orders, symbol, observed_at
             ) + self._parse_algo_orders(algo_orders, symbol, observed_at)
-            snapshots.append(
+            current_snapshots.append(
                 BinanceReadOnlySnapshot(
                     symbol=symbol,
                     observed_at=observed_at,
                     instrument=instrument,
                     orders=parsed_orders,
-                    fills=BinanceReadOnlyClient._parse_fills(fills, symbol, observed_at),
+                    fills=(),
                     position=position,
                     equity=self._parse_equity(account, equity_currency, observed_at),
-                    funding=BinanceReadOnlyClient._parse_funding(funding, symbol, observed_at),
+                    funding=(),
                     protection=BinanceReadOnlyClient._select_protection(parsed_orders, position),
                 )
+            )
+        try:
+            snapshots: list[BinanceReadOnlySnapshot] = []
+            for snapshot in current_snapshots:
+                fills = self._signed_get(
+                    "/papi/v1/um/userTrades",
+                    {"symbol": snapshot.symbol, "limit": "1000"},
+                    timestamp_ms=timestamp_ms,
+                )
+                funding = self._signed_get(
+                    "/papi/v1/um/income",
+                    {
+                        "symbol": snapshot.symbol,
+                        "incomeType": "FUNDING_FEE",
+                        "limit": "1000",
+                    },
+                    timestamp_ms=timestamp_ms,
+                )
+                BinanceReadOnlyClient._require_untruncated(fills, "userTrades", limit=1000)
+                BinanceReadOnlyClient._require_untruncated(funding, "income", limit=1000)
+                snapshots.append(
+                    replace(
+                        snapshot,
+                        fills=BinanceReadOnlyClient._parse_fills(
+                            fills, snapshot.symbol, observed_at
+                        ),
+                        funding=BinanceReadOnlyClient._parse_funding(
+                            funding, snapshot.symbol, observed_at
+                        ),
+                    )
+                )
+        except DomainRejected as exc:
+            return tuple(
+                replace(snapshot, history_error_code=exc.code) for snapshot in current_snapshots
             )
         return tuple(snapshots)
 
