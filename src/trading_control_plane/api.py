@@ -215,14 +215,14 @@ def create_app(
     )
     resolved_hyperliquid = hyperliquid_client or HyperliquidReadOnlyClient(
         base_url=resolved_settings.hyperliquid_base_url,
-        account_address=resolved_settings.hyperliquid_account_address,
+        account_address=resolved_settings.hyperliquid_effective_account_address,
         dex=resolved_settings.hyperliquid_core_dex,
     )
     resolved_hyperliquid_testnet = hyperliquid_testnet_client or HyperliquidTestnetClient(
         base_url=resolved_settings.hyperliquid_testnet_base_url,
         account_address=resolved_settings.hyperliquid_account_address,
         signer=None,
-        vault_address=resolved_settings.hyperliquid_vault_address,
+        subaccount_address=resolved_settings.hyperliquid_subaccount_address,
         dex=resolved_settings.hyperliquid_core_dex,
     )
     resolved_capital_transfer = capital_transfer_adapter or MockCapitalTransferAdapter()
@@ -1045,7 +1045,7 @@ def create_app(
         if not resolved_hyperliquid.configured:
             raise DomainRejected(
                 "HYPERLIQUID_READ_ONLY_NOT_CONFIGURED",
-                "Hyperliquid account or subaccount address is not configured",
+                "Hyperliquid main account address is not configured",
             )
         if resolved_hyperliquid.fact_environment != resolved_settings.hyperliquid_fact_environment:
             raise DomainRejected(
@@ -2213,12 +2213,14 @@ def create_app(
                     },
                     "hyperliquid_read_only": {
                         "enabled": resolved_settings.hyperliquid_read_only_enabled,
-                        "configured": bool(resolved_settings.hyperliquid_account_address),
+                        "configured": resolved_hyperliquid.configured,
+                        "account_scope": resolved_settings.hyperliquid_account_scope,
                         "fact_environment": resolved_settings.hyperliquid_fact_environment,
                     },
                     "hyperliquid_testnet_send": {
                         "enabled": resolved_settings.hyperliquid_testnet_order_send_enabled,
                         "signer_injected": resolved_hyperliquid_testnet.configured,
+                        "account_scope": resolved_settings.hyperliquid_account_scope,
                     },
                     "capital_transfer": {"mode": "MOCK_ONLY", "real_configured": False},
                     "telegram": {"mode": "MOCK_ONLY", "network_configured": False},

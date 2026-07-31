@@ -58,7 +58,15 @@ class Settings(BaseSettings):
     hyperliquid_core_dex: Literal[""] = ""
     hyperliquid_testnet_order_send_enabled: bool = False
     hyperliquid_testnet_base_url: str = "https://api.hyperliquid-testnet.xyz"
-    hyperliquid_vault_address: str | None = None
+    hyperliquid_subaccount_address: str | None = None
+
+    @property
+    def hyperliquid_effective_account_address(self) -> str | None:
+        return self.hyperliquid_subaccount_address or self.hyperliquid_account_address
+
+    @property
+    def hyperliquid_account_scope(self) -> Literal["MAIN_ACCOUNT", "SUBACCOUNT"]:
+        return "SUBACCOUNT" if self.hyperliquid_subaccount_address else "MAIN_ACCOUNT"
 
     @field_validator("database_url")
     @classmethod
@@ -85,6 +93,8 @@ class Settings(BaseSettings):
             self.binance_testnet_api_key and self.binance_testnet_api_secret
         ):
             raise ValueError("enabled Binance testnet send requires explicit testnet credentials")
+        if self.hyperliquid_subaccount_address and not self.hyperliquid_account_address:
+            raise ValueError("Hyperliquid subaccount requires the main account address")
 
 
 @lru_cache(maxsize=1)

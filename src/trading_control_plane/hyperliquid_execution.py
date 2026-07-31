@@ -132,7 +132,7 @@ class HyperliquidTestnetClient:
         base_url: str,
         account_address: str | None,
         signer: ActionSigner | None,
-        vault_address: str | None = None,
+        subaccount_address: str | None = None,
         dex: str = "",
         requester: JsonRequester = _default_requester,
     ) -> None:
@@ -141,12 +141,12 @@ class HyperliquidTestnetClient:
             raise ValueError("Hyperliquid execution base URL must be the official testnet API")
         if dex:
             raise ValueError("this execution adapter supports Hyperliquid Core only")
-        if vault_address is not None and not ADDRESS_PATTERN.fullmatch(vault_address):
-            raise ValueError("Hyperliquid vault or subaccount address is invalid")
+        if subaccount_address is not None and not ADDRESS_PATTERN.fullmatch(subaccount_address):
+            raise ValueError("Hyperliquid subaccount address is invalid")
         self._base_url = base_url.rstrip("/")
         self._account_address = account_address
         self._signer = signer
-        self._vault_address = vault_address
+        self._subaccount_address = subaccount_address
         self._requester = requester
 
     @property
@@ -161,10 +161,14 @@ class HyperliquidTestnetClient:
         if not self.configured:
             raise DomainRejected(
                 "HYPERLIQUID_TESTNET_NOT_CONFIGURED",
-                "Hyperliquid testnet requires an account address and injected signer",
+                "Hyperliquid testnet requires a main account address and injected signer",
             )
         assert self._account_address is not None
-        return self._account_address
+        return self._subaccount_address or self._account_address
+
+    @property
+    def account_scope(self) -> str:
+        return "SUBACCOUNT" if self._subaccount_address else "MAIN_ACCOUNT"
 
     def _info(self, payload: JsonObject) -> JsonValue:
         return self._requester(f"{self._base_url}/info", payload, 5.0)
@@ -180,8 +184,8 @@ class HyperliquidTestnetClient:
                 "injected signer did not return the official r/s/v signature shape",
             )
         body: JsonObject = {"action": action, "nonce": nonce, "signature": signature}
-        if self._vault_address is not None:
-            body["vaultAddress"] = self._vault_address
+        if self._subaccount_address is not None:
+            body["vaultAddress"] = self._subaccount_address
         raw = self._requester(f"{self._base_url}/exchange", body, 5.0)
         if not isinstance(raw, dict):
             raise DomainRejected(

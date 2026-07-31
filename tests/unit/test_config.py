@@ -25,7 +25,40 @@ def test_postgresql_psycopg_url_is_accepted() -> None:
     assert settings.hyperliquid_read_only_enabled is False
     assert settings.hyperliquid_testnet_order_send_enabled is False
     assert settings.hyperliquid_core_dex == ""
+    assert settings.hyperliquid_effective_account_address is None
+    assert settings.hyperliquid_account_scope == "MAIN_ACCOUNT"
     assert not hasattr(settings, "hyperliquid_private_key")
+    assert not hasattr(settings, "hyperliquid_vault_address")
+
+
+def test_hyperliquid_defaults_to_main_account_and_allows_explicit_subaccount() -> None:
+    main_account = "0x1111111111111111111111111111111111111111"
+    subaccount = "0x2222222222222222222222222222222222222222"
+    main = Settings(
+        database_url="postgresql+psycopg://user:pass@localhost/trading",
+        hyperliquid_account_address=main_account,
+        _env_file=None,
+    )
+    selected_subaccount = Settings(
+        database_url="postgresql+psycopg://user:pass@localhost/trading",
+        hyperliquid_account_address=main_account,
+        hyperliquid_subaccount_address=subaccount,
+        _env_file=None,
+    )
+
+    assert main.hyperliquid_effective_account_address == main_account
+    assert main.hyperliquid_account_scope == "MAIN_ACCOUNT"
+    assert selected_subaccount.hyperliquid_effective_account_address == subaccount
+    assert selected_subaccount.hyperliquid_account_scope == "SUBACCOUNT"
+    selected_subaccount.validate_runtime_security()
+
+    missing_main = Settings(
+        database_url="postgresql+psycopg://user:pass@localhost/trading",
+        hyperliquid_subaccount_address=subaccount,
+        _env_file=None,
+    )
+    with pytest.raises(ValueError, match="requires the main account"):
+        missing_main.validate_runtime_security()
 
 
 def test_production_rejects_mock_identity_and_default_signing_secret() -> None:

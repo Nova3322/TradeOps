@@ -224,7 +224,7 @@ class HyperliquidReadOnlyClient:
         if not self.configured:
             raise DomainRejected(
                 "HYPERLIQUID_READ_ONLY_NOT_CONFIGURED",
-                "a valid Hyperliquid account or subaccount address is required",
+                "a valid selected Hyperliquid account address is required",
             )
         if not symbol or symbol != symbol.upper() or not re.fullmatch(r"[A-Z0-9]+", symbol):
             raise DomainRejected(

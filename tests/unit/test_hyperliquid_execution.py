@@ -17,6 +17,7 @@ from trading_control_plane.hyperliquid_execution import (
 
 NOW = datetime(2026, 7, 19, 14, tzinfo=UTC)
 ACCOUNT = "0x1111111111111111111111111111111111111111"
+SUBACCOUNT = "0x2222222222222222222222222222222222222222"
 SIGNATURE = {"r": "0x01", "s": "0x02", "v": 27}
 
 
@@ -158,8 +159,37 @@ def test_query_first_ioc_uses_stable_cloid_and_restart_does_not_send_twice() -> 
     }
     exchange_body = venue.calls[2][1]
     assert exchange_body["signature"] == SIGNATURE
+    assert testnet.account_scope == "MAIN_ACCOUNT"
     assert "vaultAddress" not in exchange_body
     assert first.status == "FILLED"
+
+
+def test_explicit_subaccount_is_used_for_queries_and_exchange_actions() -> None:
+    venue = ContractVenue()
+    signatures, signer = signer_calls()
+    testnet = HyperliquidTestnetClient(
+        base_url="https://api.hyperliquid-testnet.xyz",
+        account_address=ACCOUNT,
+        subaccount_address=SUBACCOUNT,
+        signer=signer,
+        requester=venue,
+    )
+    command = HyperliquidTestnetOrderCommand(
+        symbol="BTC",
+        side="BUY",
+        quantity=Decimal("0.25"),
+        limit_price=Decimal("61000"),
+        reduce_only=False,
+        client_order_id="0x0123456789abcdef0123456789abcdef",
+    )
+
+    result = testnet.ensure_order(command, now=NOW)
+
+    assert result.status == "FILLED"
+    assert testnet.account_scope == "SUBACCOUNT"
+    assert venue.calls[0][1]["user"] == SUBACCOUNT
+    assert venue.calls[2][1]["vaultAddress"] == SUBACCOUNT
+    assert len(signatures) == 1
 
 
 def test_cancel_by_cloid_and_native_trigger_protection_use_official_actions() -> None:
@@ -377,7 +407,7 @@ def test_metadata_signer_precision_and_exchange_shapes_fail_closed() -> None:
             base_url="https://api.hyperliquid-testnet.xyz",
             account_address=ACCOUNT,
             signer=lambda _action, _nonce: SIGNATURE,
-            vault_address="invalid",
+            subaccount_address="invalid",
         )
 
     invalid_signer = fixed_client({}, signer=lambda _action, _nonce: {})
@@ -387,15 +417,15 @@ def test_metadata_signer_precision_and_exchange_shapes_fail_closed() -> None:
         fixed_client([])._exchange({"type": "cancelByCloid"}, now=NOW)
 
     recorded: list[dict[str, Any]] = []
-    vaulted = HyperliquidTestnetClient(
+    subaccount_client = HyperliquidTestnetClient(
         base_url="https://api.hyperliquid-testnet.xyz",
         account_address=ACCOUNT,
         signer=lambda _action, _nonce: SIGNATURE,
-        vault_address=ACCOUNT,
+        subaccount_address=SUBACCOUNT,
         requester=lambda _url, payload, _timeout: recorded.append(payload) or {},
     )
-    vaulted._exchange({"type": "cancelByCloid"}, now=NOW)
-    assert recorded[0]["vaultAddress"] == ACCOUNT
+    subaccount_client._exchange({"type": "cancelByCloid"}, now=NOW)
+    assert recorded[0]["vaultAddress"] == SUBACCOUNT
 
     for quantity, price, size_decimals in (
         (Decimal(0), Decimal(1), 5),

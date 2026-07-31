@@ -217,6 +217,14 @@ def test_results_audit_and_runtime_api_do_not_mix_environments_or_expose_secrets
                 "mode": "MOCK_ONLY",
                 "real_configured": False,
             }
+            assert (
+                payload["external_boundaries"]["hyperliquid_read_only"]["account_scope"]
+                == "MAIN_ACCOUNT"
+            )
+            assert (
+                payload["external_boundaries"]["hyperliquid_testnet_send"]["account_scope"]
+                == "MAIN_ACCOUNT"
+            )
             serialized = runtime.text.lower()
             assert "api_secret" not in serialized
             assert "private_key" not in serialized

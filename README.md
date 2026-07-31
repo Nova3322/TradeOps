@@ -50,7 +50,7 @@ Binance 私有事实读取必须同时显式配置 `TRADING_BINANCE_READ_ONLY_EN
 
 Binance TESTNET 订单还必须单独配置 `TRADING_BINANCE_TESTNET_ORDER_SEND_ENABLED=true` 和独立 TESTNET Key/Secret。客户端严格拒绝 LIVE 主机，使用稳定 client order identity 先查询再发送；Unknown 只允许查询恢复，不盲重发。当前无真实测试账户或凭据，自动化仅验证官方合同形状和数据库语义，没有产生任何交易所订单。
 
-Hyperliquid Core 只读同步必须显式配置 `TRADING_HYPERLIQUID_READ_ONLY_ENABLED=true`、与 `TRADING_HYPERLIQUID_FACT_ENVIRONMENT` 一致的官方 API 主机，以及真实账户或 subaccount 地址。TESTNET 发送还要求 `TRADING_HYPERLIQUID_TESTNET_ORDER_SEND_ENABLED=true` 和部署时注入的官方兼容 signer；仓库配置中没有私钥字段，默认进程也不会自行构造 signer。稳定 128-bit cloid、query-before-send、cancel-by-cloid、显式 IOC 限价和原生 trigger 保护均有本地合同测试，但当前没有真实 API Wallet、账户或签名实证，没有发送任何 Hyperliquid 订单。
+Hyperliquid Core 默认使用 `TRADING_HYPERLIQUID_ACCOUNT_ADDRESS` 指定的主账户；只有显式设置 `TRADING_HYPERLIQUID_SUBACCOUNT_ADDRESS` 时，私有事实读取、订单查询和 TESTNET 动作才统一切换到该子账户，Exchange 请求按官方合同携带 `vaultAddress`。只读同步还必须开启 `TRADING_HYPERLIQUID_READ_ONLY_ENABLED=true` 并使用与事实环境一致的官方 API 主机；TESTNET 发送另需 `TRADING_HYPERLIQUID_TESTNET_ORDER_SEND_ENABLED=true` 和部署注入的官方兼容 signer。仓库没有私钥字段，当前也没有真实 API Wallet、账户或签名实证，没有发送任何 Hyperliquid 订单。
 
 ## 本地开发
 
