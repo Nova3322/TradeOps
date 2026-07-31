@@ -1,7 +1,7 @@
 # Trading 交易系统
 
-> 状态日期：2026-07-19
-> 当前状态：M9 已提供分环境实际结果、作用域审计、运行状态和可恢复备份基线；LIVE 订单和真实资金发送不可用
+> 状态日期：2026-07-31
+> 当前状态：M9 基线以及 Binance Unified Account、Hyperliquid Core 的受控 LIVE 订单闭环已实现并完成最小主网实证；所有危险能力仍默认关闭
 
 本项目面向一个资本所有者、一个内部组织和多个内部用户。用户可以提交和审核提案、查看仓位、处理异常；系统在风险可控的前提下辅助执行交易并判断是否赚钱。不开放外部注册，不管理第三方资金，不建设机构级多租户、通用合规或通用认证平台。
 
@@ -31,26 +31,26 @@
 - AUTO_ADD 只有管理员显式开启 Gate 后才可能执行；每个 Add 仍需冻结 Proposal、分档 AddUnit、后续 Perptape 候选、盈利仓位、足额保护、新鲜事实、剩余授权和最终 Risk Engine 同时通过。只有首个正成交消费 AddUnit，零成交取消/拒绝不消费，Unknown 冻结后续新增风险。
 - 资金 Proposal、双人独立复核、Capital Transfer Authorization、源端预留、在途、目的端确认和对账与交易授权分离；活动仓位、未解决订单或 Unknown 禁止 Vault 救仓，Unknown 不释放或重发。
 - 自动利润归集和自动运营补充使用两个独立 Gate；当前只根据空仓、无订单、无 Unknown、机器 MATCH、已确认余额和已关闭 Campaign 净 PnL 生成待双人复核的非生产候选，不自动提交资金。浮盈不能归集，净亏损不能触发运营补充。
-- Telegram 已提供默认关闭的真实 Bot API 私聊长轮询、内部用户绑定、审核深链和受限收紧风险按钮；资金通知不包含批准或执行入口。正式 IdP/Passkey 仍未接入，因此本地用户名白名单绑定不能冒充生产强认证。Binance 和 Hyperliquid Core 的只读/TESTNET 窄合同全部默认关闭。TESTNET/Mock 合同不等于真实账户实证，LIVE 没有发送入口。真实账户验证、实盘发送、HIP-3、Margin、真实 Vault/CTO 适配器与真实资金划转尚未实现，文档愿景不能冒充代码能力。
+- Telegram 已提供默认关闭的真实 Bot API 私聊长轮询、内部用户绑定、审核深链和受限收紧风险按钮；资金通知不包含批准或执行入口。正式 IdP/Passkey 仍未接入，因此本地用户名白名单绑定不能冒充生产强认证。Binance Unified Account 与 Hyperliquid Core 已具有默认关闭的 LIVE 查询、发送、取消、Unknown 恢复、原生保护和保护取消入口，并于 2026-07-31 完成最小主网开仓到退出实证。该实证不启用 AUTO_ADD、资金划转、HIP-3 或 Margin，也不等于生产部署、持续运行或盈利保证。
 
 ## 当前代码入口
 
 - 进程：`uv run trading-api`
 - Web/PWA：提案/审核、Campaign、AUTO_ADD 候选、原子减仓/退出、全局只收紧风险动作、`/venues/binance` 只读场所事实页、`/capital` 资金中心和 `/results` 实际结果/审计/运行状态页；Hyperliquid 当前只有 HTTP 入口，没有专属页面
-- HTTP：健康检查、内部会话、Perptape 机会、Proposal/Review/Risk/Authorization、SHADOW/TESTNET Campaign、AUTO_ADD/减仓/退出、资金事实/提案/授权/Mock 划转、按环境结果/审计/运行状态，以及 Binance、Hyperliquid Core 的只读和受控 TESTNET API
+- HTTP：健康检查、内部会话、Perptape 机会、Proposal/Review/Risk/Authorization、SHADOW/TESTNET/LIVE Campaign、AUTO_ADD/减仓/退出、资金事实/提案/授权/Mock 划转、按环境结果/审计/运行状态，以及 Binance、Hyperliquid Core 的只读、TESTNET 与受控 LIVE API
 - 内部业务：`trading_control_plane.service.TradingService`
 - 纯计算：`evaluate_risk`、`select_target_position`、`compute_pnl`
 - 数据库：PostgreSQL，Alembic head `20260718_0001`
-- 场所边界：`binance.py`/`binance_execution.py` 只覆盖 USDⓈ-M 只读与官方 TESTNET；`hyperliquid.py`/`hyperliquid_execution.py` 只覆盖 Core Info 与官方 TESTNET Exchange 合同。Hyperliquid “市价”固定为带显式批准价格的 IOC，不使用隐含 5% 滑点；HIP-3、LIVE、保证金和资金写入口不存在，`LIVE_ORDER_SEND` 仍为 `DISABLED`
+- 场所边界：`binance.py`/`binance_execution.py` 覆盖标准 USDⓈ-M 只读/TESTNET，以及 Unified Account 官方 PAPI 的 LIVE 只读和执行；`hyperliquid.py`/`hyperliquid_execution.py` 覆盖 Core Info、TESTNET 与 LIVE Exchange。Hyperliquid “市价”固定为带冻结价格边界的 IOC，不使用隐含滑点；主账户默认、子账户显式配置。HIP-3、保证金控制和资金写入口不存在，数据库中的 `LIVE_ORDER_SEND` 初始仍为 `DISABLED`
 - 资金边界：`capital.py` 提供确定性的 SHADOW/TESTNET Mock 提交和自动候选计算，没有网络、签名器或凭据字段；真实 `CAPITAL_TRANSFER` 与两个自动资金 Gate 均保持 `DISABLED`
 
 正式身份源按冻结决策使用托管 IdP 与 Passkey，但外部 IdP 尚未接入。本地/测试环境可显式启用仅识别已存在内部用户的 Mock 会话和 Mock step-up；生产环境硬拒绝启用 Mock 身份。Perptape 使用其现有 `GET /api/v1/breakouts` 窄合同，需单独配置平台 API Key，未配置时机会入口明确返回不可用。
 
-Binance 私有事实读取必须同时显式配置 `TRADING_BINANCE_READ_ONLY_ENABLED=true`、只读 API Key/Secret 和 `TRADING_BINANCE_FACT_ENVIRONMENT=TESTNET|LIVE`。当前仓库没有真实凭据或账户验证结果；未配置时页面只显示 PostgreSQL 已保存事实，不尝试联网。
+Binance 私有事实读取必须同时显式配置 `TRADING_BINANCE_READ_ONLY_ENABLED=true`、API Key/Secret 和 `TRADING_BINANCE_FACT_ENVIRONMENT=TESTNET|LIVE`。Unified Account 使用 `TRADING_BINANCE_ACCOUNT_MODE=PORTFOLIO_MARGIN` 和官方 `https://papi.binance.com`。未配置时页面只显示 PostgreSQL 已保存事实，不尝试联网。
 
-Binance TESTNET 订单还必须单独配置 `TRADING_BINANCE_TESTNET_ORDER_SEND_ENABLED=true` 和独立 TESTNET Key/Secret。客户端严格拒绝 LIVE 主机，使用稳定 client order identity 先查询再发送；Unknown 只允许查询恢复，不盲重发。当前无真实测试账户或凭据，自动化仅验证官方合同形状和数据库语义，没有产生任何交易所订单。
+Binance TESTNET 订单还必须单独配置 `TRADING_BINANCE_TESTNET_ORDER_SEND_ENABLED=true` 和独立 TESTNET Key/Secret。LIVE 必须同时显式设置进程开关 `TRADING_BINANCE_LIVE_ORDER_SEND_ENABLED=true` 和数据库 Gate `LIVE_ORDER_SEND=ENABLED`；客户端只接受官方 PAPI 主机，使用不超过 32 字符的稳定 client order identity 先查询再发送。Unknown 只允许查询恢复，不盲重发。2026-07-31 的最小主网实证验证了默认 Gate 拒绝、真实开仓、幂等查询、fencing、reduce-only 保护、退出、保护取消、对账和最终空仓；实证结束后 Gate 已关闭。
 
-Hyperliquid Core 默认使用 `TRADING_HYPERLIQUID_ACCOUNT_ADDRESS` 指定的主账户；只有显式设置 `TRADING_HYPERLIQUID_SUBACCOUNT_ADDRESS` 时，私有事实读取、订单查询和 TESTNET 动作才统一切换到该子账户，Exchange 请求按官方合同携带 `vaultAddress`。只读同步还必须开启 `TRADING_HYPERLIQUID_READ_ONLY_ENABLED=true` 并使用与事实环境一致的官方 API 主机；TESTNET 发送另需 `TRADING_HYPERLIQUID_TESTNET_ORDER_SEND_ENABLED=true` 和部署注入的官方兼容 signer。仓库没有私钥字段，当前也没有真实 API Wallet、账户或签名实证，没有发送任何 Hyperliquid 订单。
+Hyperliquid Core 默认使用 `TRADING_HYPERLIQUID_ACCOUNT_ADDRESS` 指定的主账户；若只配置 API Wallet，系统通过官方 `userRole` 解析所属主账户。只有显式设置 `TRADING_HYPERLIQUID_SUBACCOUNT_ADDRESS` 时，事实与动作才切换到子账户并在 Exchange 请求携带 `vaultAddress`。只读同步必须开启 `TRADING_HYPERLIQUID_READ_ONLY_ENABLED=true`；LIVE 还必须同时设置 `TRADING_HYPERLIQUID_LIVE_ORDER_SEND_ENABLED=true`、本地 API Wallet 私钥和数据库 `LIVE_ORDER_SEND` Gate。私钥只从运行环境读取且不写入仓库或日志。2026-07-31 的最小主网实证验证了主账户解析、显式价格 IOC、稳定 cloid 幂等、fencing、trigger 保护、退出、保护取消、对账、PnL 和最终空仓；实证结束后 Gate 已关闭。
 
 ## 本地开发
 

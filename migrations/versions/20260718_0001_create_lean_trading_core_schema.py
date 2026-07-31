@@ -115,7 +115,7 @@ def upgrade() -> None:
             {
                 "capability_key": "LIVE_ORDER_SEND",
                 "status": "DISABLED",
-                "reason": "No real venue sender is implemented",
+                "reason": "LIVE venue sending requires explicit runtime and operator activation",
                 "operator_id": "migration",
                 "updated_at": seeded_at,
             },

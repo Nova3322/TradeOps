@@ -65,20 +65,28 @@ class Settings(BaseSettings):
     binance_read_only_enabled: bool = False
     binance_fact_environment: Literal["TESTNET", "LIVE"] = "LIVE"
     binance_futures_base_url: str = "https://fapi.binance.com"
+    binance_account_mode: Literal["STANDARD", "PORTFOLIO_MARGIN"] = "PORTFOLIO_MARGIN"
     binance_api_key: str | None = Field(default=None, repr=False)
     binance_api_secret: str | None = Field(default=None, repr=False)
-    binance_recv_window_ms: int = Field(default=5_000, ge=1_000, le=10_000)
+    binance_recv_window_ms: int = Field(default=10_000, ge=1_000, le=60_000)
+    binance_live_order_send_enabled: bool = False
+    binance_live_base_url: str = "https://papi.binance.com"
     binance_testnet_order_send_enabled: bool = False
     binance_testnet_base_url: str = "https://testnet.binancefuture.com"
     binance_testnet_api_key: str | None = Field(default=None, repr=False)
     binance_testnet_api_secret: str | None = Field(default=None, repr=False)
     hyperliquid_read_only_enabled: bool = False
-    hyperliquid_fact_environment: Literal["TESTNET", "LIVE"] = "TESTNET"
-    hyperliquid_base_url: str = "https://api.hyperliquid-testnet.xyz"
+    hyperliquid_fact_environment: Literal["TESTNET", "LIVE"] = "LIVE"
+    hyperliquid_base_url: str = "https://api.hyperliquid.xyz"
     hyperliquid_account_address: str | None = None
+    hyperliquid_api_wallet_address: str | None = None
+    hyperliquid_api_wallet_private_key: str | None = Field(default=None, repr=False)
     hyperliquid_core_dex: Literal[""] = ""
+    hyperliquid_live_order_send_enabled: bool = False
+    hyperliquid_live_base_url: str = "https://api.hyperliquid.xyz"
     hyperliquid_testnet_order_send_enabled: bool = False
     hyperliquid_testnet_base_url: str = "https://api.hyperliquid-testnet.xyz"
+    hyperliquid_testnet_api_wallet_private_key: str | None = Field(default=None, repr=False)
     hyperliquid_subaccount_address: str | None = None
 
     @property
@@ -114,8 +122,27 @@ class Settings(BaseSettings):
             self.binance_testnet_api_key and self.binance_testnet_api_secret
         ):
             raise ValueError("enabled Binance testnet send requires explicit testnet credentials")
+        if self.binance_live_order_send_enabled and not (
+            self.binance_api_key and self.binance_api_secret
+        ):
+            raise ValueError("enabled Binance LIVE send requires explicit LIVE credentials")
         if self.hyperliquid_subaccount_address and not self.hyperliquid_account_address:
             raise ValueError("Hyperliquid subaccount requires the main account address")
+        if self.hyperliquid_live_order_send_enabled and not (
+            (self.hyperliquid_account_address or self.hyperliquid_api_wallet_address)
+            and self.hyperliquid_api_wallet_private_key
+        ):
+            raise ValueError(
+                "enabled Hyperliquid LIVE send requires an account or API wallet address "
+                "and the API wallet private key"
+            )
+        if self.hyperliquid_testnet_order_send_enabled and not (
+            self.hyperliquid_account_address and self.hyperliquid_testnet_api_wallet_private_key
+        ):
+            raise ValueError(
+                "enabled Hyperliquid testnet send requires the main account address "
+                "and testnet API wallet private key"
+            )
         if self.telegram_enabled and not self.telegram_bot_token:
             raise ValueError("enabled Telegram requires a Bot API token")
         if self.telegram_enabled and not self.telegram_allowed_username:

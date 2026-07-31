@@ -29,10 +29,12 @@ from trading_control_plane.domain import (
     TargetUrgency,
 )
 from trading_control_plane.models import (
+    AccountEquity,
     Campaign,
     CapabilityGate,
     CommandReceipt,
     OrderIntent,
+    Position,
     Proposal,
     ReconciliationRun,
     RiskDecision,
@@ -1008,6 +1010,41 @@ def test_risk_decision_uses_server_facts_and_enforces_proposal_caps(
         assert Decimal(decision.input_data["current_risk"]) == 0
         assert decision.input_data["position"]["position_id"] == str(ids["position"])
         assert decision.input_data["data_as_of"] == NOW.isoformat()
+
+
+def test_risk_and_send_freshness_allow_bounded_venue_clock_skew(
+    database: Database, service: TradingService
+) -> None:
+    ids = seed(service)
+    proposal_id = create_approved_proposal(
+        service,
+        ids,
+        risk_tier=RiskTier.LOW,
+        key="bounded-clock-skew",
+    )
+    observed_at = NOW + timedelta(seconds=29)
+    with database.session_factory.begin() as session:
+        position = session.get(Position, ids["position"])
+        equity = session.scalar(select(AccountEquity))
+        assert position is not None and equity is not None
+        position.observed_at = observed_at
+        equity.observed_at = observed_at
+
+    decision_id = service.decide_risk(
+        proposal_id=proposal_id,
+        actor_id=ids["operator"],
+        kind=IntentKind.INITIAL,
+        idempotency_key="bounded-clock-skew-risk",
+        now=NOW,
+    )
+
+    with database.session_factory() as session:
+        decision = session.get(RiskDecision, decision_id)
+        assert decision is not None
+        assert decision.result == "ALLOW"
+        assert decision.input_data["fact_age_seconds"] == "0.0"
+    assert not service._fact_is_stale(observed_at, NOW, timedelta(seconds=30))
+    assert service._fact_is_stale(NOW + timedelta(seconds=31), NOW, timedelta(seconds=30))
 
 
 def test_risk_decision_rejects_persisted_stale_and_unknown_facts(

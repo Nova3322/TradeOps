@@ -184,6 +184,7 @@ async def run_m3_flow(database: Database) -> None:
             "enabled": True,
             "configured": True,
             "order_send_available": False,
+            "account_mode": "PORTFOLIO_MARGIN",
             "fact_environment": "LIVE",
             "environment": "test",
         }

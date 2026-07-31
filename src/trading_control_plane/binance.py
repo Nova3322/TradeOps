@@ -16,6 +16,26 @@ from trading_control_plane.domain import DomainRejected
 
 JsonValue = dict[str, Any] | list[dict[str, Any]]
 JsonFetcher = Callable[[str, dict[str, str], float], JsonValue]
+ServerTimeFetcher = Callable[[float], int]
+
+
+def _default_server_time_fetcher(timeout: float) -> int:
+    request = urllib.request.Request("https://fapi.binance.com/fapi/v1/time", method="GET")
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:  # noqa: S310
+            raw = json.loads(response.read())
+        return int(raw["serverTime"])
+    except (
+        json.JSONDecodeError,
+        KeyError,
+        TypeError,
+        ValueError,
+        urllib.error.URLError,
+        TimeoutError,
+    ) as exc:
+        raise DomainRejected(
+            "BINANCE_READ_ONLY_UNAVAILABLE", "Binance server time is unavailable"
+        ) from exc
 
 
 def _default_fetcher(url: str, headers: dict[str, str], timeout: float) -> JsonValue:
@@ -428,3 +448,200 @@ class BinanceReadOnlyClient:
         order = max(candidates, key=lambda item: item.observed_at)
         quantity = abs(position.quantity) if order.close_position else order.ordered_quantity
         return BinanceProtection(order.order_id, quantity, order.stop_price, order.observed_at)
+
+
+class BinancePortfolioMarginReadOnlyClient:
+    """Binance Unified Account UM reader using Portfolio Margin USER_DATA endpoints."""
+
+    def __init__(
+        self,
+        *,
+        base_url: str,
+        api_key: str | None,
+        api_secret: str | None,
+        recv_window_ms: int = 10_000,
+        fetcher: JsonFetcher = _default_fetcher,
+        server_time_fetcher: ServerTimeFetcher = _default_server_time_fetcher,
+    ) -> None:
+        parsed = urllib.parse.urlparse(base_url)
+        if parsed.scheme != "https" or parsed.hostname != "papi.binance.com":
+            raise ValueError(
+                "Binance Portfolio Margin base URL must be the official LIVE PAPI host"
+            )
+        self._base_url = base_url.rstrip("/")
+        self._api_key = api_key
+        self._api_secret = api_secret
+        self._recv_window_ms = recv_window_ms
+        self._fetcher = fetcher
+        self._server_time_fetcher = server_time_fetcher
+
+    @property
+    def configured(self) -> bool:
+        return bool(self._api_key and self._api_secret)
+
+    def _signed_get(self, path: str, params: dict[str, str], *, timestamp_ms: int) -> JsonValue:
+        if not self.configured:
+            raise DomainRejected(
+                "BINANCE_READ_ONLY_NOT_CONFIGURED",
+                "Binance Portfolio Margin credentials are not configured",
+            )
+        signed = {
+            **params,
+            "recvWindow": str(self._recv_window_ms),
+            "timestamp": str(timestamp_ms),
+        }
+        query = urllib.parse.urlencode(signed)
+        assert self._api_secret is not None
+        signature = hmac.new(self._api_secret.encode(), query.encode(), hashlib.sha256).hexdigest()
+        assert self._api_key is not None
+        return self._fetcher(
+            f"{self._base_url}{path}?{query}&signature={signature}",
+            {"X-MBX-APIKEY": self._api_key},
+            5.0,
+        )
+
+    def _market_get(self, path: str, params: dict[str, str]) -> JsonValue:
+        query = urllib.parse.urlencode(params)
+        return self._fetcher(f"https://fapi.binance.com{path}?{query}", {}, 5.0)
+
+    def read_snapshot(self, symbol: str, *, now: datetime) -> BinanceReadOnlySnapshot:
+        del now
+        if not symbol or symbol != symbol.upper():
+            raise DomainRejected("BINANCE_SYMBOL_INVALID", "Binance symbol must be uppercase")
+        timestamp_ms = self._server_time_fetcher(5.0)
+        observed_at = datetime.fromtimestamp(timestamp_ms / 1000, UTC)
+        exchange = self._market_get("/fapi/v1/exchangeInfo", {"symbol": symbol})
+        mark = self._market_get("/fapi/v1/premiumIndex", {"symbol": symbol})
+        um_account = self._signed_get("/papi/v1/um/account", {}, timestamp_ms=timestamp_ms)
+        account = self._signed_get("/papi/v1/account", {}, timestamp_ms=timestamp_ms)
+        orders = self._signed_get(
+            "/papi/v1/um/openOrders", {"symbol": symbol}, timestamp_ms=timestamp_ms
+        )
+        algo_orders = self._signed_get(
+            "/papi/v1/um/algo/openAlgoOrders",
+            {"symbol": symbol, "algoType": "CONDITIONAL"},
+            timestamp_ms=timestamp_ms,
+        )
+        fills = self._signed_get(
+            "/papi/v1/um/userTrades",
+            {"symbol": symbol, "limit": "1000"},
+            timestamp_ms=timestamp_ms,
+        )
+        funding = self._signed_get(
+            "/papi/v1/um/income",
+            {"symbol": symbol, "incomeType": "FUNDING_FEE", "limit": "1000"},
+            timestamp_ms=timestamp_ms,
+        )
+        instrument = BinanceReadOnlyClient._parse_instrument(exchange, symbol)
+        position = self._parse_position(um_account, mark, symbol, observed_at)
+        parsed_orders = BinanceReadOnlyClient._parse_orders(
+            orders, symbol, observed_at
+        ) + self._parse_algo_orders(algo_orders, symbol, observed_at)
+        return BinanceReadOnlySnapshot(
+            symbol=symbol,
+            observed_at=observed_at,
+            instrument=instrument,
+            orders=parsed_orders,
+            fills=BinanceReadOnlyClient._parse_fills(fills, symbol, observed_at),
+            position=position,
+            equity=self._parse_equity(account, instrument.collateral_currency, observed_at),
+            funding=BinanceReadOnlyClient._parse_funding(funding, symbol, observed_at),
+            protection=BinanceReadOnlyClient._select_protection(parsed_orders, position),
+        )
+
+    @staticmethod
+    def _parse_position(
+        raw: JsonValue, mark: JsonValue, symbol: str, now: datetime
+    ) -> BinancePosition:
+        if not isinstance(raw, dict) or not isinstance(raw.get("positions"), list):
+            raise DomainRejected(
+                "BINANCE_RESPONSE_INVALID", "Portfolio Margin UM account is invalid"
+            )
+        if not isinstance(mark, dict) or mark.get("symbol") != symbol:
+            raise DomainRejected("BINANCE_RESPONSE_INVALID", "Binance mark price is invalid")
+        rows = [
+            item
+            for item in raw["positions"]
+            if isinstance(item, dict) and item.get("symbol") == symbol
+        ]
+        both = next(
+            (item for item in rows if item.get("positionSide", "BOTH") == "BOTH"),
+            None,
+        )
+        if both is None and any(
+            _decimal(item.get("positionAmt", 0), "positionAmt") != 0 for item in rows
+        ):
+            raise DomainRejected(
+                "BINANCE_HEDGE_MODE_UNSUPPORTED",
+                "Portfolio Margin reader requires one-way UM position mode",
+            )
+        return BinancePosition(
+            quantity=(
+                Decimal(0) if both is None else _decimal(both.get("positionAmt", 0), "positionAmt")
+            ),
+            average_entry_price=(
+                Decimal(0)
+                if both is None
+                else _decimal(both.get("entryPrice", 0), "entryPrice", minimum=Decimal(0))
+            ),
+            mark_price=_positive_decimal(mark.get("markPrice"), "markPrice"),
+            observed_at=now,
+        )
+
+    @staticmethod
+    def _parse_equity(raw: JsonValue, currency: str, now: datetime) -> BinanceEquity:
+        if not isinstance(raw, dict):
+            raise DomainRejected("BINANCE_RESPONSE_INVALID", "Portfolio Margin account is invalid")
+        return BinanceEquity(
+            equity=_decimal(raw.get("accountEquity"), "accountEquity", minimum=Decimal(0)),
+            available_balance=_decimal(
+                raw.get("totalAvailableBalance"),
+                "totalAvailableBalance",
+                minimum=Decimal(0),
+            ),
+            currency=currency,
+            observed_at=_time(raw.get("updateTime", 0), now),
+        )
+
+    @staticmethod
+    def _parse_algo_orders(raw: JsonValue, symbol: str, now: datetime) -> tuple[BinanceOrder, ...]:
+        status_map = {
+            "NEW": "SENT",
+            "ACTIVE": "SENT",
+            "CANCELED": "CANCELLED",
+            "EXPIRED": "CANCELLED",
+            "REJECTED": "REJECTED",
+            "TRIGGERED": "UNKNOWN",
+            "FINISHED": "FILLED",
+        }
+        result: list[BinanceOrder] = []
+        for item in BinanceReadOnlyClient._require_list(raw, "openAlgoOrders"):
+            if item.get("symbol") != symbol:
+                continue
+            side = str(item.get("side"))
+            if side not in {"BUY", "SELL"}:
+                raise DomainRejected(
+                    "BINANCE_RESPONSE_INVALID", "Binance algo order side is invalid"
+                )
+            result.append(
+                BinanceOrder(
+                    order_id=str(item.get("algoId")),
+                    client_order_id=str(item.get("clientAlgoId")),
+                    status=status_map.get(str(item.get("algoStatus")), "UNKNOWN"),
+                    side=side,
+                    order_type=str(item.get("orderType")),
+                    ordered_quantity=_decimal(
+                        item.get("quantity", 0), "quantity", minimum=Decimal(0)
+                    ),
+                    filled_quantity=Decimal(0),
+                    stop_price=_decimal(
+                        item.get("triggerPrice", 0),
+                        "triggerPrice",
+                        minimum=Decimal(0),
+                    ),
+                    reduce_only=bool(item.get("reduceOnly", False)),
+                    close_position=False,
+                    observed_at=_time(item.get("updateTime", item.get("createTime", 0)), now),
+                )
+            )
+        return tuple(result)

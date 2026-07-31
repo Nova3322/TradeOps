@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import io
 from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
@@ -8,13 +9,16 @@ import pytest
 
 from trading_control_plane import hyperliquid
 from trading_control_plane.domain import DomainRejected
-from trading_control_plane.hyperliquid import HyperliquidReadOnlyClient
+from trading_control_plane.hyperliquid import (
+    HyperliquidReadOnlyClient,
+    resolve_hyperliquid_main_account,
+)
 
 NOW = datetime(2026, 7, 19, 13, tzinfo=UTC)
 ACCOUNT = "0x1111111111111111111111111111111111111111"
 
 
-def contract_payloads() -> dict[str, dict[str, Any] | list[Any]]:
+def contract_payloads() -> dict[str, dict[str, Any] | list[Any] | str]:
     observed_ms = int(NOW.timestamp() * 1_000)
     return {
         "metaAndAssetCtxs": [
@@ -38,6 +42,7 @@ def contract_payloads() -> dict[str, dict[str, Any] | list[Any]]:
                 }
             ],
         },
+        "userAbstraction": "disabled",
         "frontendOpenOrders": [
             {
                 "coin": "BTC",
@@ -54,7 +59,7 @@ def contract_payloads() -> dict[str, dict[str, Any] | list[Any]]:
                 "orderType": "Stop Market",
             }
         ],
-        "userFills": [
+        "userFillsByTime": [
             {
                 "coin": "BTC",
                 "oid": 70,
@@ -78,11 +83,13 @@ def contract_payloads() -> dict[str, dict[str, Any] | list[Any]]:
 
 
 def client_with_contract(
-    responses: dict[str, dict[str, Any] | list[Any]],
+    responses: dict[str, dict[str, Any] | list[Any] | str],
 ) -> tuple[HyperliquidReadOnlyClient, list[tuple[str, dict[str, Any], float]]]:
     calls: list[tuple[str, dict[str, Any], float]] = []
 
-    def fetch(url: str, payload: dict[str, Any], timeout: float) -> dict[str, Any] | list[Any]:
+    def fetch(
+        url: str, payload: dict[str, Any], timeout: float
+    ) -> dict[str, Any] | list[Any] | str:
         calls.append((url, payload, timeout))
         return responses[str(payload["type"])]
 
@@ -104,8 +111,9 @@ def test_core_info_contract_maps_required_facts_without_exchange_actions() -> No
     assert [call[1]["type"] for call in calls] == [
         "metaAndAssetCtxs",
         "clearinghouseState",
+        "userAbstraction",
         "frontendOpenOrders",
-        "userFills",
+        "userFillsByTime",
         "userFunding",
     ]
     assert calls[0][1]["dex"] == ""
@@ -114,6 +122,9 @@ def test_core_info_contract_maps_required_facts_without_exchange_actions() -> No
         "user": ACCOUNT,
         "dex": "",
     }
+    assert calls[4][1]["startTime"] == int((NOW - hyperliquid.HISTORY_WINDOW).timestamp() * 1_000)
+    assert "endTime" not in calls[4][1]
+    assert calls[5][1]["startTime"] == calls[4][1]["startTime"]
     assert all(call[0] == "https://api.hyperliquid-testnet.xyz/info" for call in calls)
     assert all(call[2] == 5.0 for call in calls)
     assert snapshot.instrument.lot_size == Decimal("0.00001")
@@ -129,6 +140,30 @@ def test_core_info_contract_maps_required_facts_without_exchange_actions() -> No
     assert snapshot.protection.quantity == Decimal("0.25")
     assert not hasattr(client, "send_order")
     assert not hasattr(client, "exchange")
+
+
+def test_unified_account_uses_spot_usdc_total_and_hold_for_equity() -> None:
+    responses = contract_payloads()
+    responses["userAbstraction"] = "unifiedAccount"
+    responses["spotClearinghouseState"] = {
+        "balances": [
+            {
+                "coin": "USDC",
+                "token": 0,
+                "total": "9.940002",
+                "hold": "1.25",
+            }
+        ]
+    }
+    client, calls = client_with_contract(responses)
+
+    first = client.read_snapshot("BTC", now=NOW)
+    client.read_snapshot("BTC", now=NOW)
+
+    assert first.equity.equity == Decimal("9.940002")
+    assert first.equity.available_balance == Decimal("8.690002")
+    assert [call[1]["type"] for call in calls].count("userAbstraction") == 1
+    assert [call[1]["type"] for call in calls].count("spotClearinghouseState") == 2
 
 
 def test_core_only_and_official_host_boundaries_fail_before_network() -> None:
@@ -275,3 +310,66 @@ def test_default_info_fetcher_parses_json_and_reports_transport_or_shape_errors(
     monkeypatch.setattr(hyperliquid.urllib.request, "urlopen", unavailable)
     with pytest.raises(DomainRejected, match="HYPERLIQUID_READ_ONLY_UNAVAILABLE"):
         hyperliquid._default_fetcher("https://example.invalid/info", {}, 1.0)
+
+
+def test_default_info_fetcher_retries_429_with_bounded_backoff(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    attempts = 0
+    delays: list[float] = []
+
+    def rate_limited_then_ready(*_args: object, **_kwargs: object) -> object:
+        nonlocal attempts
+        attempts += 1
+        if attempts < 3:
+            raise hyperliquid.urllib.error.HTTPError(
+                "https://api.hyperliquid.xyz/info",
+                429,
+                "rate limited",
+                {},
+                io.BytesIO(b""),
+            )
+
+        class Response:
+            def __enter__(self) -> Response:
+                return self
+
+            def __exit__(self, *_args: object) -> None:
+                return None
+
+            @staticmethod
+            def read() -> bytes:
+                return b'{"ok":true}'
+
+        return Response()
+
+    monkeypatch.setattr(hyperliquid.urllib.request, "urlopen", rate_limited_then_ready)
+    monkeypatch.setattr(hyperliquid.time, "sleep", delays.append)
+
+    assert hyperliquid._default_fetcher("https://api.hyperliquid.xyz/info", {}, 1.0) == {"ok": True}
+    assert attempts == 3
+    assert delays == [0.5, 1.0]
+
+
+def test_api_wallet_role_resolves_owning_main_account_without_using_agent_for_queries() -> None:
+    api_wallet = "0x2222222222222222222222222222222222222222"
+    calls: list[dict[str, Any]] = []
+
+    resolved = resolve_hyperliquid_main_account(
+        base_url="https://api.hyperliquid.xyz",
+        account_address=None,
+        api_wallet_address=api_wallet,
+        fetcher=lambda _url, payload, _timeout: (
+            calls.append(payload) or {"role": "agent", "data": {"user": ACCOUNT}}
+        ),
+    )
+
+    assert resolved == ACCOUNT
+    assert calls == [{"type": "userRole", "user": api_wallet}]
+    with pytest.raises(DomainRejected, match="HYPERLIQUID_ACCOUNT_UNRESOLVED"):
+        resolve_hyperliquid_main_account(
+            base_url="https://api.hyperliquid.xyz",
+            account_address=None,
+            api_wallet_address=api_wallet,
+            fetcher=lambda _url, _payload, _timeout: {"role": "user"},
+        )

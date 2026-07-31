@@ -1,9 +1,9 @@
 # Hyperliquid 执行认证清单
 
 > 文档编号：EXEC-CERT-HL-001
-> 版本：Draft 0.1
-> 日期：2026-07-19
-> 状态：Core 合同级工程基线已实现、真实认证仍待验证；不代表 Hyperliquid Core、任何 HIP-3 DEX、Freqtrade 或保证金能力已经通过
+> 版本：Draft 0.2
+> 日期：2026-07-31
+> 状态：Core 默认主账户的最小 LIVE 闭环已实证；生产部署、HIP-3、Margin 与逐执行域认证仍未完成
 > 上位文档：`交易系统总体方案.md`、`策略合同与数值化验收门.md`、`docs/04-execution/OMS-Freqtrade-VenueAdapter执行规范.md`
 
 ---
@@ -12,9 +12,9 @@
 
 本清单用于逐个认证 Hyperliquid 执行域。不得把“Hyperliquid 已支持”当成单一结论：Core 与每个启用的 HIP-3 DEX，以及不同账户抽象、抵押池、margin mode 和 worker，都是不同认证单位。
 
-当前代码只实现最小 Core 边界：`POST /info` 只读事实、官方 TESTNET `POST /exchange` 动作构造、稳定 cloid、显式价格 IOC、cancel-by-cloid、trigger 保护、Unknown 查询恢复和 Trading sender fencing。自动化使用本地官方形状合同与一次性 PostgreSQL，不连接 Hyperliquid，也不包含真实签名。默认进程没有 signer，所有开关关闭；HIP-3、margin、资金动作、Freqtrade worker 和 LIVE 均未实现。
+当前代码只实现最小 Core 边界：`POST /info` 只读事实、有界历史查询与 429 退避、官方 TESTNET/LIVE `POST /exchange`、官方 SDK signer、稳定 cloid、显式价格 IOC、cancel-by-cloid、trigger 保护、保护取消、Unknown 查询恢复和 Trading sender fencing。主账户默认，可选子账户显式配置；所有开关初始关闭。2026-07-31 已用 API Wallet 在默认主账户完成 0.00016 BTC 最小主网开仓到退出，并确认空仓、无活动订单和 Gate 关闭；HIP-3、margin、资金动作、Freqtrade worker 和生产常驻运行仍未实现。
 
-这里的“认证”是具体账户/执行域的发布验收工作，不要求建设 CapabilityCertificate、证据包数据库或证书状态机。当前测试和 Git 提供工程证据；真实账户/API Wallet/网络副作用只有用户另行授权后才可验证。
+这里的“认证”是具体账户/执行域的发布验收工作，不要求建设 CapabilityCertificate、证据包数据库或证书状态机。当前测试、Git 和最小主网记录提供工程证据，但一次小额实证不能替代凭据轮换、持续运行、故障恢复和逐账户/标的生产验收。
 
 状态值；它们是检查项状态，不是 `capability_status`：
 

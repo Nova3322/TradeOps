@@ -369,7 +369,8 @@ async def run_complete_testnet_flow(database: Database) -> None:
         sent = await http.post(f"/api/intents/{ids['opening']}/binance-testnet/send", json=action)
         assert sent.status_code == 200, sent.text
         opening_client_id = sent.json()["client_order_id"]
-        assert len(opening_client_id) == 36
+        assert opening_client_id.startswith("tcp-")
+        assert len(opening_client_id) <= 32
         duplicate = await http.post(
             f"/api/intents/{ids['opening']}/binance-testnet/send", json=action
         )

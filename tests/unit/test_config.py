@@ -23,10 +23,16 @@ def test_postgresql_psycopg_url_is_accepted() -> None:
 
     assert settings.environment == "local"
     assert settings.hyperliquid_read_only_enabled is False
+    assert settings.hyperliquid_fact_environment == "LIVE"
+    assert settings.hyperliquid_base_url == "https://api.hyperliquid.xyz"
+    assert settings.hyperliquid_live_order_send_enabled is False
     assert settings.hyperliquid_testnet_order_send_enabled is False
     assert settings.hyperliquid_core_dex == ""
     assert settings.hyperliquid_effective_account_address is None
     assert settings.hyperliquid_account_scope == "MAIN_ACCOUNT"
+    assert settings.binance_account_mode == "PORTFOLIO_MARGIN"
+    assert settings.binance_live_order_send_enabled is False
+    assert settings.binance_live_base_url == "https://papi.binance.com"
     assert not hasattr(settings, "hyperliquid_private_key")
     assert not hasattr(settings, "hyperliquid_vault_address")
 
@@ -108,3 +114,80 @@ def test_real_telegram_is_default_off_and_requires_binding_configuration() -> No
         _env_file=None,
     )
     configured.validate_runtime_security()
+
+
+def test_live_senders_remain_default_off_and_require_explicit_credentials() -> None:
+    database_url = "postgresql+psycopg://user:pass@localhost/trading"
+    missing_binance = Settings(
+        database_url=database_url,
+        binance_live_order_send_enabled=True,
+        _env_file=None,
+    )
+    with pytest.raises(ValueError, match="Binance LIVE send"):
+        missing_binance.validate_runtime_security()
+
+    missing_hyperliquid = Settings(
+        database_url=database_url,
+        hyperliquid_live_order_send_enabled=True,
+        _env_file=None,
+    )
+    with pytest.raises(ValueError, match="Hyperliquid LIVE send"):
+        missing_hyperliquid.validate_runtime_security()
+
+    explicit = Settings(
+        database_url=database_url,
+        binance_live_order_send_enabled=True,
+        binance_api_key="fixture-key",
+        binance_api_secret="fixture-secret",  # noqa: S106
+        hyperliquid_live_order_send_enabled=True,
+        hyperliquid_api_wallet_address="0x1111111111111111111111111111111111111111",
+        hyperliquid_api_wallet_private_key="fixture-private-key",
+        _env_file=None,
+    )
+    explicit.validate_runtime_security()
+
+
+@pytest.mark.parametrize(
+    ("overrides", "message"),
+    [
+        (
+            {"binance_read_only_enabled": True, "binance_api_key": "fixture-key"},
+            "read-only key and secret",
+        ),
+        ({"binance_testnet_api_key": "fixture-key"}, "testnet key and secret"),
+        (
+            {"binance_testnet_order_send_enabled": True},
+            "testnet send requires explicit",
+        ),
+        (
+            {"hyperliquid_testnet_order_send_enabled": True},
+            "testnet send requires the main account",
+        ),
+        (
+            {
+                "telegram_enabled": True,
+                "telegram_allowed_username": "allowed",
+                "telegram_internal_username": "internal",
+            },
+            "requires a Bot API token",
+        ),
+        (
+            {
+                "telegram_enabled": True,
+                "telegram_bot_token": "123456789:abcdefghijklmnopqrstuvwxyz",
+                "telegram_allowed_username": "allowed",
+            },
+            "existing internal username",
+        ),
+    ],
+)
+def test_runtime_configuration_rejects_partial_external_credentials(
+    overrides: dict[str, object], message: str
+) -> None:
+    settings = Settings(
+        database_url="postgresql+psycopg://user:pass@localhost/trading",
+        _env_file=None,
+        **overrides,
+    )
+    with pytest.raises(ValueError, match=message):
+        settings.validate_runtime_security()

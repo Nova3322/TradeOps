@@ -11,10 +11,28 @@ from typing import Any
 
 import pytest
 
-from trading_control_plane.binance import BinanceReadOnlyClient
+from trading_control_plane import binance
+from trading_control_plane.binance import (
+    BinancePortfolioMarginReadOnlyClient,
+    BinanceReadOnlyClient,
+)
 from trading_control_plane.domain import DomainRejected
 
 NOW = datetime(2026, 7, 19, 10, tzinfo=UTC)
+
+
+class UrlResponse:
+    def __init__(self, body: bytes) -> None:
+        self.body = body
+
+    def __enter__(self) -> UrlResponse:
+        return self
+
+    def __exit__(self, *_args: object) -> None:
+        return None
+
+    def read(self) -> bytes:
+        return self.body
 
 
 def payloads() -> dict[str, dict[str, Any] | list[dict[str, Any]]]:
@@ -238,3 +256,144 @@ def test_network_error_is_reported_as_read_only_unavailable(
 
     with pytest.raises(DomainRejected, match="BINANCE_READ_ONLY_UNAVAILABLE"):
         client.read_snapshot("BTCUSDT", now=NOW)
+
+
+def test_default_binance_read_transports_parse_and_fail_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        binance.urllib.request,
+        "urlopen",
+        lambda *_args, **_kwargs: UrlResponse(b'{"serverTime": 1234}'),
+    )
+    assert binance._default_server_time_fetcher(1.0) == 1234
+    assert binance._default_fetcher("https://example.invalid", {}, 1.0) == {"serverTime": 1234}
+
+    for body in (b"not-json", b'{"wrong": true}'):
+        monkeypatch.setattr(
+            binance.urllib.request,
+            "urlopen",
+            lambda *_args, body=body, **_kwargs: UrlResponse(body),
+        )
+        with pytest.raises(DomainRejected, match="BINANCE_READ_ONLY_UNAVAILABLE"):
+            binance._default_server_time_fetcher(1.0)
+
+    monkeypatch.setattr(
+        binance.urllib.request,
+        "urlopen",
+        lambda *_args, **_kwargs: UrlResponse(b"[]"),
+    )
+    assert binance._default_fetcher("https://example.invalid", {}, 1.0) == []
+    monkeypatch.setattr(
+        binance.urllib.request,
+        "urlopen",
+        lambda *_args, **_kwargs: UrlResponse(b"1"),
+    )
+    with pytest.raises(DomainRejected, match="BINANCE_RESPONSE_INVALID"):
+        binance._default_fetcher("https://example.invalid", {}, 1.0)
+    monkeypatch.setattr(
+        binance.urllib.request,
+        "urlopen",
+        lambda *_args, **_kwargs: UrlResponse(b"not-json"),
+    )
+    with pytest.raises(DomainRejected, match="BINANCE_RESPONSE_INVALID"):
+        binance._default_fetcher("https://example.invalid", {}, 1.0)
+
+
+def test_portfolio_margin_reader_uses_papi_and_maps_unified_account_facts() -> None:
+    observed_ms = int(NOW.timestamp() * 1_000)
+    responses: dict[str, dict[str, Any] | list[dict[str, Any]]] = {
+        "/fapi/v1/exchangeInfo": payloads()["/fapi/v1/exchangeInfo"],
+        "/fapi/v1/premiumIndex": {"symbol": "BTCUSDT", "markPrice": "61000"},
+        "/papi/v1/um/account": {
+            "positions": [
+                {
+                    "symbol": "BTCUSDT",
+                    "positionSide": "BOTH",
+                    "positionAmt": "0.25",
+                    "entryPrice": "60000",
+                }
+            ]
+        },
+        "/papi/v1/account": {
+            "accountEquity": "1025",
+            "totalAvailableBalance": "800",
+            "updateTime": observed_ms,
+        },
+        "/papi/v1/um/openOrders": [],
+        "/papi/v1/um/algo/openAlgoOrders": [
+            {
+                "symbol": "BTCUSDT",
+                "algoId": 77,
+                "clientAlgoId": "tpp-fixture",
+                "algoStatus": "NEW",
+                "side": "SELL",
+                "orderType": "STOP_MARKET",
+                "quantity": "0.25",
+                "triggerPrice": "59000",
+                "reduceOnly": True,
+                "updateTime": observed_ms,
+            }
+        ],
+        "/papi/v1/um/userTrades": payloads()["/fapi/v1/userTrades"],
+        "/papi/v1/um/income": payloads()["/fapi/v1/income"],
+    }
+    calls: list[tuple[str, dict[str, str], float]] = []
+
+    def fetch(
+        url: str, headers: dict[str, str], timeout: float
+    ) -> dict[str, Any] | list[dict[str, Any]]:
+        calls.append((url, headers, timeout))
+        return responses[urllib.parse.urlparse(url).path]
+
+    client = BinancePortfolioMarginReadOnlyClient(
+        base_url="https://papi.binance.com",
+        api_key="unified-key",
+        api_secret="unified-secret",  # noqa: S106
+        fetcher=fetch,
+        server_time_fetcher=lambda _timeout: observed_ms,
+    )
+
+    snapshot = client.read_snapshot("BTCUSDT", now=NOW.replace(year=2020))
+
+    assert snapshot.observed_at == NOW
+    assert snapshot.position.quantity == Decimal("0.25")
+    assert snapshot.position.mark_price == Decimal("61000")
+    assert snapshot.equity.equity == Decimal("1025")
+    assert snapshot.equity.available_balance == Decimal("800")
+    assert snapshot.protection is not None
+    assert snapshot.protection.order_id == "77"
+    assert snapshot.protection.quantity == Decimal("0.25")
+    assert [urllib.parse.urlparse(call[0]).path for call in calls] == [
+        "/fapi/v1/exchangeInfo",
+        "/fapi/v1/premiumIndex",
+        "/papi/v1/um/account",
+        "/papi/v1/account",
+        "/papi/v1/um/openOrders",
+        "/papi/v1/um/algo/openAlgoOrders",
+        "/papi/v1/um/userTrades",
+        "/papi/v1/um/income",
+    ]
+    assert all(
+        urllib.parse.urlparse(url).hostname == "fapi.binance.com"
+        for url, _headers, _timeout in calls[:2]
+    )
+    assert all(
+        urllib.parse.urlparse(url).hostname == "papi.binance.com"
+        and headers == {"X-MBX-APIKEY": "unified-key"}
+        for url, headers, _timeout in calls[2:]
+    )
+    for url, _headers, _timeout in calls[2:]:
+        assert dict(urllib.parse.parse_qsl(urllib.parse.urlparse(url).query))["timestamp"] == str(
+            observed_ms
+        )
+
+
+def test_portfolio_margin_reader_rejects_nonofficial_hosts_before_network() -> None:
+    for base_url in ("https://fapi.binance.com", "http://papi.binance.com"):
+        with pytest.raises(ValueError, match="official LIVE PAPI"):
+            BinancePortfolioMarginReadOnlyClient(
+                base_url=base_url,
+                api_key=None,
+                api_secret=None,
+            )

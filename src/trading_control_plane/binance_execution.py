@@ -7,16 +7,36 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
-from typing import Any
+from typing import Any, Literal
 
 from trading_control_plane.domain import DomainRejected
 
 JsonObject = dict[str, Any]
 JsonRequester = Callable[[str, str, dict[str, str], float], JsonObject]
+ServerTimeFetcher = Callable[[float], int]
 OFFICIAL_TESTNET_HOST = "testnet.binancefuture.com"
+OFFICIAL_LIVE_HOST = "fapi.binance.com"
+OFFICIAL_PORTFOLIO_MARGIN_HOST = "papi.binance.com"
+
+
+def _default_server_time_fetcher(timeout: float) -> int:
+    request = urllib.request.Request("https://fapi.binance.com/fapi/v1/time", method="GET")
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:  # noqa: S310
+            value = json.loads(response.read())
+    except (json.JSONDecodeError, urllib.error.URLError, TimeoutError) as exc:
+        raise DomainRejected(
+            "BINANCE_LIVE_UNAVAILABLE", "Binance server time is unavailable"
+        ) from exc
+    try:
+        return int(value["serverTime"])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise DomainRejected(
+            "BINANCE_LIVE_RESPONSE_INVALID", "Binance server time is invalid"
+        ) from exc
 
 
 def _default_requester(
@@ -99,6 +119,13 @@ class BinanceTestnetProtectionCommand:
     side: str
     trigger_price: Decimal
     client_order_id: str
+    quantity: Decimal | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ProtectionCancelCommand:
+    symbol: str
+    client_order_id: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -127,10 +154,18 @@ class BinanceTestnetClient:
         api_secret: str | None,
         recv_window_ms: int = 5_000,
         requester: JsonRequester = _default_requester,
+        environment: Literal["TESTNET", "LIVE"] = "TESTNET",
     ) -> None:
         parsed = urllib.parse.urlparse(base_url)
-        if parsed.scheme != "https" or parsed.hostname != OFFICIAL_TESTNET_HOST:
-            raise ValueError("Binance execution base URL must be the official USDⓈ-M testnet")
+        expected_hosts = (
+            {OFFICIAL_TESTNET_HOST}
+            if environment == "TESTNET"
+            else {OFFICIAL_LIVE_HOST, OFFICIAL_PORTFOLIO_MARGIN_HOST}
+        )
+        if parsed.scheme != "https" or parsed.hostname not in expected_hosts:
+            raise ValueError(
+                f"Binance execution base URL must be the official USDⓈ-M {environment.lower()} host"
+            )
         self._base_url = base_url.rstrip("/")
         self._api_key = api_key
         self._api_secret = api_secret
@@ -327,6 +362,36 @@ class BinanceTestnetClient:
         self._validate_protection(created, command)
         return created
 
+    def cancel_protection(
+        self, command: ProtectionCancelCommand, *, now: datetime
+    ) -> BinanceTestnetOrder | None:
+        existing = self.query_order(command.symbol, command.client_order_id, now=now)
+        if existing is None:
+            return None
+        if (
+            existing.order_type != "STOP_MARKET"
+            or not existing.close_position
+            or existing.client_order_id != command.client_order_id
+        ):
+            raise DomainRejected(
+                "BINANCE_TESTNET_IDENTITY_CONFLICT",
+                "stable protection identity refers to different order semantics",
+            )
+        if existing.status in {"CANCELLED", "REJECTED", "FILLED"}:
+            return existing
+        return self._parse_order(
+            self._signed(
+                "DELETE",
+                "/fapi/v1/order",
+                {
+                    "symbol": command.symbol,
+                    "origClientOrderId": command.client_order_id,
+                },
+                now=now,
+            ),
+            now=now,
+        )
+
     @staticmethod
     def _validate_command(order: BinanceTestnetOrder, command: BinanceTestnetOrderCommand) -> None:
         if (
@@ -357,3 +422,315 @@ class BinanceTestnetClient:
                 "BINANCE_TESTNET_IDENTITY_CONFLICT",
                 "stable protection identity refers to different order semantics",
             )
+
+
+class _BinancePortfolioMarginCore(BinanceTestnetClient):
+    """Portfolio Margin UM wire contract; callers wrap errors as LIVE errors."""
+
+    def query_order(
+        self, symbol: str, client_order_id: str, *, now: datetime
+    ) -> BinanceTestnetOrder | None:
+        raw = self._signed(
+            "GET",
+            "/papi/v1/um/order",
+            {"symbol": symbol, "origClientOrderId": client_order_id},
+            now=now,
+        )
+        if self._api_error(raw) == -2013:
+            return None
+        return self._parse_order(raw, now=now)
+
+    def ensure_order(
+        self, command: BinanceTestnetOrderCommand, *, now: datetime
+    ) -> BinanceTestnetOrder:
+        existing = self.query_order(command.symbol, command.client_order_id, now=now)
+        if existing is not None:
+            self._validate_command(existing, command)
+            return existing
+        params = {
+            "symbol": command.symbol,
+            "side": command.side,
+            "type": "MARKET",
+            "quantity": str(command.quantity),
+            "newClientOrderId": command.client_order_id,
+            "newOrderRespType": "RESULT",
+        }
+        if command.reduce_only:
+            params["reduceOnly"] = "true"
+        try:
+            created = self._parse_order(
+                self._signed("POST", "/papi/v1/um/order", params, now=now),
+                now=now,
+            )
+        except DomainRejected as exc:
+            if exc.code != "BINANCE_TESTNET_REJECTED":
+                raise
+            recovered = self.query_order(command.symbol, command.client_order_id, now=now)
+            if recovered is None:
+                raise
+            self._validate_command(recovered, command)
+            return recovered
+        self._validate_command(created, command)
+        return created
+
+    def cancel_order(
+        self, command: BinanceTestnetOrderCommand, *, now: datetime
+    ) -> BinanceTestnetOrder | None:
+        existing = self.query_order(command.symbol, command.client_order_id, now=now)
+        if existing is None:
+            return None
+        self._validate_command(existing, command)
+        if existing.status in {"CANCELLED", "REJECTED", "FILLED"}:
+            return existing
+        return self._parse_order(
+            self._signed(
+                "DELETE",
+                "/papi/v1/um/order",
+                {
+                    "symbol": command.symbol,
+                    "origClientOrderId": command.client_order_id,
+                },
+                now=now,
+            ),
+            now=now,
+        )
+
+    @classmethod
+    def _parse_algo_order(cls, raw: JsonObject, *, now: datetime) -> BinanceTestnetOrder:
+        error = cls._api_error(raw)
+        if error is not None:
+            raise DomainRejected(
+                "BINANCE_TESTNET_REJECTED",
+                f"Binance Portfolio Margin rejected protection request ({error})",
+            )
+        try:
+            order_id = str(raw["algoId"])
+            client_order_id = str(raw["clientAlgoId"])
+            side = str(raw["side"])
+            order_type = str(raw["orderType"])
+        except KeyError as exc:
+            raise DomainRejected(
+                "BINANCE_TESTNET_RESPONSE_INVALID",
+                "Binance Portfolio Margin protection identity is incomplete",
+            ) from exc
+        if side not in {"BUY", "SELL"} or order_type != "STOP_MARKET":
+            raise DomainRejected(
+                "BINANCE_TESTNET_RESPONSE_INVALID",
+                "Binance Portfolio Margin protection semantics are invalid",
+            )
+        status_map = {
+            "NEW": "SENT",
+            "ACTIVE": "SENT",
+            "CANCELED": "CANCELLED",
+            "EXPIRED": "CANCELLED",
+            "REJECTED": "REJECTED",
+            "TRIGGERED": "UNKNOWN",
+            "FINISHED": "FILLED",
+        }
+        return BinanceTestnetOrder(
+            order_id=order_id,
+            client_order_id=client_order_id,
+            status=status_map.get(str(raw.get("algoStatus")), "UNKNOWN"),
+            side=side,
+            order_type=order_type,
+            ordered_quantity=_decimal(raw.get("quantity", 0), "quantity"),
+            filled_quantity=Decimal(0),
+            stop_price=_decimal(raw.get("triggerPrice", 0), "triggerPrice"),
+            reduce_only=bool(raw.get("reduceOnly", False)),
+            close_position=False,
+            observed_at=_observed_time(raw.get("updateTime", raw.get("createTime", 0)), now),
+        )
+
+    def query_protection(
+        self,
+        command: BinanceTestnetProtectionCommand | ProtectionCancelCommand,
+        *,
+        now: datetime,
+    ) -> BinanceTestnetOrder | None:
+        raw = self._signed(
+            "GET",
+            "/papi/v1/um/algo/algoOrder",
+            {
+                "symbol": command.symbol,
+                "clientAlgoId": command.client_order_id,
+            },
+            now=now,
+        )
+        if self._api_error(raw) in {-2011, -2013}:
+            return None
+        return self._parse_algo_order(raw, now=now)
+
+    def ensure_protection(
+        self, command: BinanceTestnetProtectionCommand, *, now: datetime
+    ) -> BinanceTestnetOrder:
+        if command.quantity is None or command.quantity <= 0:
+            raise DomainRejected(
+                "BINANCE_TESTNET_IDENTITY_CONFLICT",
+                "Portfolio Margin protection requires an explicit position quantity",
+            )
+        existing = self.query_protection(command, now=now)
+        if existing is not None:
+            self._validate_portfolio_protection(existing, command)
+            return existing
+        created = self._parse_algo_order(
+            self._signed(
+                "POST",
+                "/papi/v1/um/algo/order",
+                {
+                    "algoType": "CONDITIONAL",
+                    "symbol": command.symbol,
+                    "side": command.side,
+                    "type": "STOP_MARKET",
+                    "quantity": str(command.quantity),
+                    "triggerPrice": str(command.trigger_price),
+                    "workingType": "MARK_PRICE",
+                    "reduceOnly": "true",
+                    "clientAlgoId": command.client_order_id,
+                    "newOrderRespType": "RESULT",
+                },
+                now=now,
+            ),
+            now=now,
+        )
+        self._validate_portfolio_protection(created, command)
+        return created
+
+    def cancel_protection(
+        self, command: ProtectionCancelCommand, *, now: datetime
+    ) -> BinanceTestnetOrder | None:
+        existing = self.query_protection(command, now=now)
+        if existing is None:
+            return None
+        if (
+            existing.client_order_id != command.client_order_id
+            or existing.order_type != "STOP_MARKET"
+            or not existing.reduce_only
+            or existing.close_position
+        ):
+            raise DomainRejected(
+                "BINANCE_TESTNET_IDENTITY_CONFLICT",
+                "stable Portfolio Margin protection identity changed semantics",
+            )
+        if existing.status in {"CANCELLED", "REJECTED", "FILLED"}:
+            return existing
+        raw = self._signed(
+            "DELETE",
+            "/papi/v1/um/algo/order",
+            {"clientAlgoId": command.client_order_id},
+            now=now,
+        )
+        error = self._api_error(raw)
+        if error is not None or raw.get("complete") is not True:
+            raise DomainRejected(
+                "BINANCE_TESTNET_REJECTED",
+                "Binance Portfolio Margin did not confirm protection cancellation",
+            )
+        return replace(existing, status="CANCELLED", observed_at=now)
+
+    @staticmethod
+    def _validate_portfolio_protection(
+        order: BinanceTestnetOrder, command: BinanceTestnetProtectionCommand
+    ) -> None:
+        if (
+            command.quantity is None
+            or order.client_order_id != command.client_order_id
+            or order.side != command.side
+            or order.order_type != "STOP_MARKET"
+            or order.ordered_quantity != command.quantity
+            or order.stop_price != command.trigger_price
+            or not order.reduce_only
+            or order.close_position
+        ):
+            raise DomainRejected(
+                "BINANCE_TESTNET_IDENTITY_CONFLICT",
+                "stable Portfolio Margin protection identity changed semantics",
+            )
+
+
+class BinancePortfolioMarginClient:
+    """Production Binance Unified Account UM adapter with venue-time signing."""
+
+    def __init__(
+        self,
+        *,
+        base_url: str,
+        api_key: str | None,
+        api_secret: str | None,
+        recv_window_ms: int = 10_000,
+        requester: JsonRequester = _default_requester,
+        server_time_fetcher: ServerTimeFetcher = _default_server_time_fetcher,
+    ) -> None:
+        parsed = urllib.parse.urlparse(base_url)
+        if parsed.scheme != "https" or parsed.hostname != OFFICIAL_PORTFOLIO_MARGIN_HOST:
+            raise ValueError(
+                "Binance Portfolio Margin execution requires the official LIVE PAPI host"
+            )
+        self._client = _BinancePortfolioMarginCore(
+            base_url=base_url,
+            api_key=api_key,
+            api_secret=api_secret,
+            recv_window_ms=recv_window_ms,
+            requester=requester,
+            environment="LIVE",
+        )
+        self._server_time_fetcher = server_time_fetcher
+
+    @property
+    def configured(self) -> bool:
+        return self._client.configured
+
+    def _now(self) -> datetime:
+        milliseconds = self._server_time_fetcher(5.0)
+        return datetime.fromtimestamp(milliseconds / 1000, UTC)
+
+    @staticmethod
+    def _live_error(exc: DomainRejected) -> DomainRejected:
+        return DomainRejected(
+            exc.code.replace("BINANCE_TESTNET", "BINANCE_LIVE"),
+            exc.detail.replace("Binance testnet", "Binance LIVE").replace("testnet", "LIVE"),
+        )
+
+    def ensure_order(
+        self, command: BinanceTestnetOrderCommand, *, now: datetime
+    ) -> BinanceTestnetOrder:
+        del now
+        try:
+            return self._client.ensure_order(command, now=self._now())
+        except DomainRejected as exc:
+            raise self._live_error(exc) from exc
+
+    def cancel_order(
+        self, command: BinanceTestnetOrderCommand, *, now: datetime
+    ) -> BinanceTestnetOrder | None:
+        del now
+        try:
+            return self._client.cancel_order(command, now=self._now())
+        except DomainRejected as exc:
+            raise self._live_error(exc) from exc
+
+    def recover_order(
+        self, command: BinanceTestnetOrderCommand, *, now: datetime
+    ) -> BinanceTestnetOrder | None:
+        del now
+        try:
+            return self._client.recover_order(command, now=self._now())
+        except DomainRejected as exc:
+            raise self._live_error(exc) from exc
+
+    def ensure_protection(
+        self, command: BinanceTestnetProtectionCommand, *, now: datetime
+    ) -> BinanceTestnetOrder:
+        del now
+        try:
+            return self._client.ensure_protection(command, now=self._now())
+        except DomainRejected as exc:
+            raise self._live_error(exc) from exc
+
+    def cancel_protection(
+        self, command: ProtectionCancelCommand, *, now: datetime
+    ) -> BinanceTestnetOrder | None:
+        del now
+        try:
+            return self._client.cancel_protection(command, now=self._now())
+        except DomainRejected as exc:
+            raise self._live_error(exc) from exc

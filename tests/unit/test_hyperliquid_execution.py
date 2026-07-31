@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import io
+import urllib.error
 from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
@@ -7,12 +9,15 @@ from typing import Any
 import pytest
 
 from trading_control_plane import hyperliquid_execution
+from trading_control_plane.binance_execution import ProtectionCancelCommand
 from trading_control_plane.domain import DomainRejected
 from trading_control_plane.hyperliquid_execution import (
+    HyperliquidLiveClient,
     HyperliquidTestnetClient,
     HyperliquidTestnetOrder,
     HyperliquidTestnetOrderCommand,
     HyperliquidTestnetProtectionCommand,
+    build_hyperliquid_signer,
 )
 
 NOW = datetime(2026, 7, 19, 14, tzinfo=UTC)
@@ -214,6 +219,13 @@ def test_cancel_by_cloid_and_native_trigger_protection_use_official_actions() ->
         "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
     )
     protection = testnet.ensure_protection(protection_command, now=NOW)
+    cancelled_protection = testnet.cancel_protection(
+        ProtectionCancelCommand(
+            symbol=protection_command.symbol,
+            client_order_id=protection_command.client_order_id,
+        ),
+        now=NOW,
+    )
 
     assert cancelled is not None and cancelled.status == "CANCELLED"
     cancel_action = next(
@@ -239,6 +251,8 @@ def test_cancel_by_cloid_and_native_trigger_protection_use_official_actions() ->
     }
     assert protection.order_type == "TRIGGER_MARKET"
     assert protection.stop_price == Decimal("59000")
+    assert cancelled_protection is not None
+    assert cancelled_protection.status == "CANCELLED"
 
 
 def test_default_off_signer_and_non_testnet_hosts_fail_closed() -> None:
@@ -444,6 +458,47 @@ def test_metadata_signer_precision_and_exchange_shapes_fail_closed() -> None:
         hyperliquid_execution._time("invalid", NOW)
 
 
+def test_exchange_nonce_is_monotonic_when_actions_share_one_clock_millisecond() -> None:
+    nonces: list[int] = []
+    client = HyperliquidTestnetClient(
+        base_url="https://api.hyperliquid-testnet.xyz",
+        account_address=ACCOUNT,
+        signer=lambda _action, nonce: nonces.append(nonce) or SIGNATURE,
+        requester=lambda _url, _payload, _timeout: {},
+    )
+
+    client._exchange({"type": "cancelByCloid"}, now=NOW)
+    client._exchange({"type": "cancelByCloid"}, now=NOW)
+
+    assert nonces == [int(NOW.timestamp() * 1_000), int(NOW.timestamp() * 1_000) + 1]
+
+
+def test_live_wrapper_requires_mainnet_host_and_maps_adapter_errors() -> None:
+    with pytest.raises(ValueError, match="official live"):
+        HyperliquidLiveClient(
+            base_url="https://api.hyperliquid-testnet.xyz",
+            account_address=ACCOUNT,
+            signer=lambda _action, _nonce: SIGNATURE,
+        )
+
+    live = HyperliquidLiveClient(
+        base_url="https://api.hyperliquid.xyz",
+        account_address=ACCOUNT,
+        signer=lambda _action, _nonce: SIGNATURE,
+        requester=lambda _url, _payload, _timeout: {"status": "unknownOid"},
+    )
+    command = HyperliquidTestnetOrderCommand(
+        "BTC",
+        "BUY",
+        Decimal("0.001"),
+        Decimal("61000"),
+        False,
+        "0x66666666666666666666666666666666",
+    )
+
+    assert live.recover_order(command, now=NOW) is None
+
+
 def test_order_acknowledgement_partial_rejection_and_invalid_shapes() -> None:
     command = HyperliquidTestnetOrderCommand(
         "BTC",
@@ -627,6 +682,22 @@ def test_default_requester_parses_json_and_rejects_invalid_payloads(
     monkeypatch.setattr(
         hyperliquid_execution.urllib.request,
         "urlopen",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            urllib.error.HTTPError(
+                "https://example.invalid/info",
+                429,
+                "rate limited",
+                {},
+                io.BytesIO(b'{"status":"error"}'),
+            )
+        ),
+    )
+    assert hyperliquid_execution._default_requester("https://example.invalid/info", {}, 1.0) == {
+        "status": "error"
+    }
+    monkeypatch.setattr(
+        hyperliquid_execution.urllib.request,
+        "urlopen",
         lambda *_args, **_kwargs: Response(b"not-json"),
     )
     with pytest.raises(DomainRejected, match="RESPONSE_INVALID"):
@@ -638,3 +709,92 @@ def test_default_requester_parses_json_and_rejects_invalid_payloads(
     )
     with pytest.raises(DomainRejected, match="RESPONSE_INVALID"):
         hyperliquid_execution._default_requester("https://example.invalid/info", {}, 1.0)
+
+
+def test_signer_validates_wallet_identity_and_uses_main_account(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Wallet:
+        address = ACCOUNT
+
+    monkeypatch.setattr(
+        hyperliquid_execution.Account,
+        "from_key",
+        lambda _key: (_ for _ in ()).throw(ValueError("invalid")),
+    )
+    with pytest.raises(ValueError, match="private key is invalid"):
+        build_hyperliquid_signer(
+            "invalid", api_wallet_address=None, active_pool=None, is_mainnet=True
+        )
+
+    monkeypatch.setattr(hyperliquid_execution.Account, "from_key", lambda _key: Wallet())
+    with pytest.raises(ValueError, match="address is invalid"):
+        build_hyperliquid_signer(
+            "configured", api_wallet_address="invalid", active_pool=None, is_mainnet=True
+        )
+    with pytest.raises(ValueError, match="does not match"):
+        build_hyperliquid_signer(
+            "configured", api_wallet_address=SUBACCOUNT, active_pool=None, is_mainnet=True
+        )
+
+    signed: list[tuple[object, ...]] = []
+    monkeypatch.setattr(
+        hyperliquid_execution,
+        "sign_l1_action",
+        lambda *args: signed.append(args) or SIGNATURE,
+    )
+    signer = build_hyperliquid_signer(
+        "configured", api_wallet_address=ACCOUNT, active_pool=None, is_mainnet=True
+    )
+    assert signer is not None
+    assert signer({"type": "cancel"}, 123) == SIGNATURE
+    assert signed[0][2] is None
+    assert signed[0][3:] == (123, None, True)
+
+
+def test_live_wrapper_translates_every_core_operation_error() -> None:
+    class RejectingCore:
+        @staticmethod
+        def reject(*_args: object, **_kwargs: object) -> None:
+            raise DomainRejected(
+                "HYPERLIQUID_TESTNET_REJECTED", "Hyperliquid testnet controlled rejection"
+            )
+
+        query_order = reject
+        ensure_order = reject
+        cancel_order = reject
+        recover_order = reject
+        ensure_protection = reject
+        cancel_protection = reject
+
+    live = HyperliquidLiveClient(
+        base_url="https://api.hyperliquid.xyz",
+        account_address=ACCOUNT,
+        signer=lambda _action, _nonce: SIGNATURE,
+    )
+    assert live.account_scope == "MAIN_ACCOUNT"
+    live._client = RejectingCore()  # type: ignore[assignment]
+    cloid = f"0x{'a' * 32}"
+    order = HyperliquidTestnetOrderCommand(
+        "BTC", "BUY", Decimal("0.001"), Decimal(61000), False, cloid
+    )
+    protection = HyperliquidTestnetProtectionCommand(
+        "BTC",
+        "SELL",
+        Decimal("0.001"),
+        Decimal(59000),
+        Decimal(58900),
+        cloid,
+    )
+
+    operations = (
+        lambda: live.query_order("BTC", cloid, expected_order_type="IOC_LIMIT", now=NOW),
+        lambda: live.ensure_order(order, now=NOW),
+        lambda: live.cancel_order(order, now=NOW),
+        lambda: live.recover_order(order, now=NOW),
+        lambda: live.ensure_protection(protection, now=NOW),
+        lambda: live.cancel_protection(ProtectionCancelCommand("BTC", cloid), now=NOW),
+    )
+    for operation in operations:
+        with pytest.raises(DomainRejected, match="HYPERLIQUID_LIVE_REJECTED"):
+            operation()

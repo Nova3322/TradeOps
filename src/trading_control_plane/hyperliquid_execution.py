@@ -9,8 +9,13 @@ from collections.abc import Callable
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
-from typing import Any
+from threading import Lock
+from typing import Any, Literal, cast
 
+from eth_account import Account
+from hyperliquid.utils.signing import sign_l1_action  # type: ignore[import-untyped]
+
+from trading_control_plane.binance_execution import ProtectionCancelCommand
 from trading_control_plane.domain import DomainRejected
 from trading_control_plane.hyperliquid import ADDRESS_PATTERN
 
@@ -19,7 +24,47 @@ JsonValue = JsonObject | list[Any]
 JsonRequester = Callable[[str, JsonObject, float], JsonValue]
 ActionSigner = Callable[[JsonObject, int], JsonObject]
 OFFICIAL_TESTNET_HOST = "api.hyperliquid-testnet.xyz"
+OFFICIAL_LIVE_HOST = "api.hyperliquid.xyz"
 CLOID_PATTERN = re.compile(r"^0x[0-9a-fA-F]{32}$")
+
+
+def build_hyperliquid_signer(
+    private_key: str | None,
+    *,
+    api_wallet_address: str | None,
+    active_pool: str | None,
+    is_mainnet: bool,
+) -> ActionSigner | None:
+    """Build the official SDK signer without exposing key material to application logs."""
+
+    if private_key is None:
+        return None
+    try:
+        wallet = Account.from_key(private_key)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("Hyperliquid API wallet private key is invalid") from exc
+    if api_wallet_address is not None:
+        if not ADDRESS_PATTERN.fullmatch(api_wallet_address):
+            raise ValueError("Hyperliquid API wallet address is invalid")
+        if wallet.address.lower() != api_wallet_address.lower():
+            raise ValueError(
+                "Hyperliquid API wallet private key does not match its configured address"
+            )
+
+    def signer(action: JsonObject, nonce: int) -> JsonObject:
+        return cast(
+            JsonObject,
+            sign_l1_action(
+                wallet,
+                action,
+                active_pool.lower() if active_pool else None,
+                nonce,
+                None,
+                is_mainnet,
+            ),
+        )
+
+    return signer
 
 
 def _default_requester(url: str, payload: JsonObject, timeout: float) -> JsonValue:
@@ -135,10 +180,14 @@ class HyperliquidTestnetClient:
         subaccount_address: str | None = None,
         dex: str = "",
         requester: JsonRequester = _default_requester,
+        environment: Literal["TESTNET", "LIVE"] = "TESTNET",
     ) -> None:
         parsed = urllib.parse.urlparse(base_url)
-        if parsed.scheme != "https" or parsed.hostname != OFFICIAL_TESTNET_HOST:
-            raise ValueError("Hyperliquid execution base URL must be the official testnet API")
+        expected_host = OFFICIAL_TESTNET_HOST if environment == "TESTNET" else OFFICIAL_LIVE_HOST
+        if parsed.scheme != "https" or parsed.hostname != expected_host:
+            raise ValueError(
+                f"Hyperliquid execution base URL must be the official {environment.lower()} API"
+            )
         if dex:
             raise ValueError("this execution adapter supports Hyperliquid Core only")
         if subaccount_address is not None and not ADDRESS_PATTERN.fullmatch(subaccount_address):
@@ -148,6 +197,8 @@ class HyperliquidTestnetClient:
         self._signer = signer
         self._subaccount_address = subaccount_address
         self._requester = requester
+        self._nonce_lock = Lock()
+        self._last_nonce = 0
 
     @property
     def configured(self) -> bool:
@@ -176,7 +227,9 @@ class HyperliquidTestnetClient:
     def _exchange(self, action: JsonObject, *, now: datetime) -> JsonObject:
         self._require_configured()
         assert self._signer is not None
-        nonce = int(now.timestamp() * 1_000)
+        with self._nonce_lock:
+            nonce = max(int(now.timestamp() * 1_000), self._last_nonce + 1)
+            self._last_nonce = nonce
         signature = self._signer(action, nonce)
         if not isinstance(signature, dict) or not {"r", "s", "v"}.issubset(signature):
             raise DomainRejected(
@@ -571,6 +624,42 @@ class HyperliquidTestnetClient:
         self._validate_protection(created, command)
         return created
 
+    def cancel_protection(
+        self, command: ProtectionCancelCommand, *, now: datetime
+    ) -> HyperliquidTestnetOrder | None:
+        existing = self.query_order(
+            command.symbol,
+            command.client_order_id,
+            expected_order_type="TRIGGER_MARKET",
+            now=now,
+        )
+        if existing is None:
+            return None
+        if not existing.reduce_only:
+            raise DomainRejected(
+                "HYPERLIQUID_TESTNET_IDENTITY_CONFLICT",
+                "stable cloid does not refer to reduce-only protection",
+            )
+        if existing.status in {"CANCELLED", "REJECTED", "FILLED"}:
+            return existing
+        asset, _ = self._asset_index(command.symbol)
+        raw = self._exchange(
+            {
+                "type": "cancelByCloid",
+                "cancels": [{"asset": asset, "cloid": command.client_order_id}],
+            },
+            now=now,
+        )
+        response = raw.get("response")
+        data = response.get("data") if isinstance(response, dict) else None
+        statuses = data.get("statuses") if isinstance(data, dict) else None
+        if raw.get("status") != "ok" or not isinstance(statuses, list) or statuses != ["success"]:
+            raise DomainRejected(
+                "HYPERLIQUID_TESTNET_REJECTED",
+                "Hyperliquid protection cancellation was not acknowledged",
+            )
+        return replace(existing, status="CANCELLED", observed_at=now)
+
     @staticmethod
     def _validate_order(
         order: HyperliquidTestnetOrder, command: HyperliquidTestnetOrderCommand
@@ -609,3 +698,102 @@ class HyperliquidTestnetClient:
                 "HYPERLIQUID_TESTNET_IDENTITY_CONFLICT",
                 "stable cloid refers to different protection semantics",
             )
+
+
+class HyperliquidLiveClient:
+    """Production Core client backed by the official SDK signing implementation."""
+
+    def __init__(
+        self,
+        *,
+        base_url: str,
+        account_address: str | None,
+        signer: ActionSigner | None,
+        subaccount_address: str | None = None,
+        dex: str = "",
+        requester: JsonRequester = _default_requester,
+    ) -> None:
+        self._client = HyperliquidTestnetClient(
+            base_url=base_url,
+            account_address=account_address,
+            signer=signer,
+            subaccount_address=subaccount_address,
+            dex=dex,
+            requester=requester,
+            environment="LIVE",
+        )
+
+    @property
+    def configured(self) -> bool:
+        return self._client.configured
+
+    @property
+    def account_scope(self) -> str:
+        return self._client.account_scope
+
+    @staticmethod
+    def _live_error(exc: DomainRejected) -> DomainRejected:
+        return DomainRejected(
+            exc.code.replace("HYPERLIQUID_TESTNET", "HYPERLIQUID_LIVE"),
+            exc.detail.replace("Hyperliquid testnet", "Hyperliquid LIVE").replace(
+                "testnet", "LIVE"
+            ),
+        )
+
+    def query_order(
+        self,
+        symbol: str,
+        client_order_id: str,
+        *,
+        expected_order_type: str,
+        now: datetime,
+    ) -> HyperliquidTestnetOrder | None:
+        try:
+            return self._client.query_order(
+                symbol,
+                client_order_id,
+                expected_order_type=expected_order_type,
+                now=now,
+            )
+        except DomainRejected as exc:
+            raise self._live_error(exc) from exc
+
+    def ensure_order(
+        self, command: HyperliquidTestnetOrderCommand, *, now: datetime
+    ) -> HyperliquidTestnetOrder:
+        try:
+            return self._client.ensure_order(command, now=now)
+        except DomainRejected as exc:
+            raise self._live_error(exc) from exc
+
+    def cancel_order(
+        self, command: HyperliquidTestnetOrderCommand, *, now: datetime
+    ) -> HyperliquidTestnetOrder | None:
+        try:
+            return self._client.cancel_order(command, now=now)
+        except DomainRejected as exc:
+            raise self._live_error(exc) from exc
+
+    def recover_order(
+        self, command: HyperliquidTestnetOrderCommand, *, now: datetime
+    ) -> HyperliquidTestnetOrder | None:
+        try:
+            return self._client.recover_order(command, now=now)
+        except DomainRejected as exc:
+            raise self._live_error(exc) from exc
+
+    def ensure_protection(
+        self, command: HyperliquidTestnetProtectionCommand, *, now: datetime
+    ) -> HyperliquidTestnetOrder:
+        try:
+            return self._client.ensure_protection(command, now=now)
+        except DomainRejected as exc:
+            raise self._live_error(exc) from exc
+
+    def cancel_protection(
+        self, command: ProtectionCancelCommand, *, now: datetime
+    ) -> HyperliquidTestnetOrder | None:
+        try:
+            return self._client.cancel_protection(command, now=now)
+        except DomainRejected as exc:
+            raise self._live_error(exc) from exc

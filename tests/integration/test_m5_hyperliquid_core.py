@@ -274,6 +274,8 @@ def app(
         hyperliquid_fact_environment="TESTNET",
         hyperliquid_account_address=ACCOUNT_ADDRESS,
         hyperliquid_testnet_order_send_enabled=enabled,
+        hyperliquid_testnet_api_wallet_private_key="0x"
+        "1111111111111111111111111111111111111111111111111111111111111111",
         _env_file=None,
     )
     execution = HyperliquidTestnetClient(
@@ -366,7 +368,7 @@ async def complete_flow(database: Database) -> None:
         duplicate = await http.post(
             f"/api/intents/{ids['opening']}/hyperliquid-testnet/send", json=action
         )
-        assert duplicate.status_code == 422  # FILLED intents cannot be resent by the coordinator.
+        assert duplicate.status_code == 200
         assert venue.order_exchange_count == 1
         opening_order_id = str(venue.orders[opening_cloid]["order"]["order"]["oid"])
 

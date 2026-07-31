@@ -2,24 +2,67 @@ from __future__ import annotations
 
 import json
 import re
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
 from trading_control_plane.domain import DomainRejected
 
-JsonValue = dict[str, Any] | list[Any]
+JsonValue = dict[str, Any] | list[Any] | str
 JsonFetcher = Callable[[str, dict[str, Any], float], JsonValue]
 OFFICIAL_INFO_HOSTS = {
     "api.hyperliquid.xyz",
     "api.hyperliquid-testnet.xyz",
 }
+HISTORY_WINDOW = timedelta(days=30)
 ADDRESS_PATTERN = re.compile(r"^0x[0-9a-fA-F]{40}$")
+
+
+def resolve_hyperliquid_main_account(
+    *,
+    base_url: str,
+    account_address: str | None,
+    api_wallet_address: str | None,
+    fetcher: JsonFetcher | None = None,
+) -> str | None:
+    """Resolve an API wallet's owning main account through the official userRole query."""
+
+    if account_address is not None:
+        if not ADDRESS_PATTERN.fullmatch(account_address):
+            raise ValueError("Hyperliquid main account address is invalid")
+        return account_address
+    if api_wallet_address is None:
+        return None
+    if not ADDRESS_PATTERN.fullmatch(api_wallet_address):
+        raise ValueError("Hyperliquid API wallet address is invalid")
+    parsed = urllib.parse.urlparse(base_url)
+    if parsed.scheme != "https" or parsed.hostname not in OFFICIAL_INFO_HOSTS:
+        raise ValueError("Hyperliquid account resolution requires an official API host")
+    resolved_fetcher = fetcher or _default_fetcher
+    raw = resolved_fetcher(
+        f"{base_url.rstrip('/')}/info",
+        {"type": "userRole", "user": api_wallet_address},
+        5.0,
+    )
+    if not isinstance(raw, dict) or raw.get("role") != "agent":
+        raise DomainRejected(
+            "HYPERLIQUID_ACCOUNT_UNRESOLVED",
+            "configured API wallet is not an authorized Hyperliquid agent",
+        )
+    data = raw.get("data")
+    user = data.get("user") if isinstance(data, dict) else None
+    if not isinstance(user, str) or not ADDRESS_PATTERN.fullmatch(user):
+        raise DomainRejected(
+            "HYPERLIQUID_ACCOUNT_UNRESOLVED",
+            "Hyperliquid agent role omitted its owning main account",
+        )
+    return user
 
 
 def _default_fetcher(url: str, payload: dict[str, Any], timeout: float) -> JsonValue:
@@ -29,14 +72,35 @@ def _default_fetcher(url: str, payload: dict[str, Any], timeout: float) -> JsonV
         headers={"Content-Type": "application/json"},
         method="POST",
     )
-    try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:  # noqa: S310
-            body = response.read()
-    except (urllib.error.URLError, TimeoutError) as exc:
+    body: bytes | None = None
+    last_error: BaseException | None = None
+    for attempt in range(6):
+        try:
+            with urllib.request.urlopen(request, timeout=timeout) as response:  # noqa: S310
+                body = response.read()
+            break
+        except urllib.error.HTTPError as exc:
+            last_error = exc
+            if exc.code != 429 or attempt == 5:
+                break
+            retry_after = exc.headers.get("Retry-After")
+            try:
+                delay = (
+                    min(10.0, max(0.5, float(retry_after)))
+                    if retry_after
+                    else min(10.0, 0.5 * 2**attempt)
+                )
+            except ValueError:
+                delay = min(10.0, 0.5 * 2**attempt)
+            time.sleep(delay)
+        except (urllib.error.URLError, TimeoutError) as exc:
+            last_error = exc
+            break
+    if body is None:
         raise DomainRejected(
             "HYPERLIQUID_READ_ONLY_UNAVAILABLE",
             "Hyperliquid Info API is unavailable",
-        ) from exc
+        ) from last_error
     try:
         value = json.loads(body)
     except json.JSONDecodeError as exc:
@@ -44,7 +108,7 @@ def _default_fetcher(url: str, payload: dict[str, Any], timeout: float) -> JsonV
             "HYPERLIQUID_RESPONSE_INVALID",
             "Hyperliquid Info API returned invalid JSON",
         ) from exc
-    if not isinstance(value, (dict, list)):
+    if not isinstance(value, (dict, list, str)):
         raise DomainRejected(
             "HYPERLIQUID_RESPONSE_INVALID",
             "Hyperliquid Info API response shape is invalid",
@@ -208,6 +272,7 @@ class HyperliquidReadOnlyClient:
         self._host = parsed.hostname
         self._account_address = account_address
         self._fetcher = fetcher
+        self._account_abstraction: str | None = None
 
     @property
     def configured(self) -> bool:
@@ -219,6 +284,25 @@ class HyperliquidReadOnlyClient:
 
     def _info(self, payload: dict[str, Any]) -> JsonValue:
         return self._fetcher(f"{self._base_url}/info", payload, 5.0)
+
+    def _abstraction(self) -> str:
+        if self._account_abstraction is not None:
+            return self._account_abstraction
+        assert self._account_address is not None
+        raw = self._info({"type": "userAbstraction", "user": self._account_address})
+        if not isinstance(raw, str) or raw not in {
+            "disabled",
+            "default",
+            "dexAbstraction",
+            "unifiedAccount",
+            "portfolioMargin",
+        }:
+            raise DomainRejected(
+                "HYPERLIQUID_RESPONSE_INVALID",
+                "Hyperliquid userAbstraction response is invalid",
+            )
+        self._account_abstraction = raw
+        return raw
 
     def read_snapshot(self, symbol: str, *, now: datetime) -> HyperliquidReadOnlySnapshot:
         if not self.configured:
@@ -236,16 +320,36 @@ class HyperliquidReadOnlyClient:
         clearinghouse = self._info(
             {"type": "clearinghouseState", "user": self._account_address, "dex": ""}
         )
+        abstraction = self._abstraction()
+        spot_state = (
+            self._info({"type": "spotClearinghouseState", "user": self._account_address})
+            if abstraction in {"unifiedAccount", "portfolioMargin"}
+            else None
+        )
 
         orders = self._info(
             {"type": "frontendOpenOrders", "user": self._account_address, "dex": ""}
         )
+        start_time_ms = int((now - HISTORY_WINDOW).timestamp() * 1_000)
         fills = self._info(
-            {"type": "userFills", "user": self._account_address, "aggregateByTime": True}
+            {
+                "type": "userFillsByTime",
+                "user": self._account_address,
+                "startTime": start_time_ms,
+                "aggregateByTime": True,
+            }
         )
-        funding = self._info({"type": "userFunding", "user": self._account_address, "startTime": 0})
+        funding = self._info(
+            {
+                "type": "userFunding",
+                "user": self._account_address,
+                "startTime": start_time_ms,
+            }
+        )
         instrument, mark_price = self._parse_instrument(meta_contexts, symbol)
         position, equity = self._parse_account(clearinghouse, symbol, mark_price, now)
+        if spot_state is not None:
+            equity = self._parse_unified_equity(spot_state, now)
         parsed_orders = self._parse_orders(orders, symbol, now)
         return HyperliquidReadOnlySnapshot(
             symbol=symbol,
@@ -338,6 +442,30 @@ class HyperliquidReadOnlyClient:
                 currency="USDC",
                 observed_at=observed_at,
             ),
+        )
+
+    @staticmethod
+    def _parse_unified_equity(raw: JsonValue, now: datetime) -> HyperliquidEquity:
+        state = _require_dict(raw, "spotClearinghouseState")
+        balances = _require_dict_list(state.get("balances", []), "spot balances")
+        usdc = next((item for item in balances if item.get("coin") == "USDC"), None)
+        if usdc is None:
+            raise DomainRejected(
+                "HYPERLIQUID_RESPONSE_INVALID",
+                "unified Hyperliquid account omitted its USDC balance",
+            )
+        total = _decimal(usdc.get("total"), "USDC total", minimum=Decimal(0))
+        hold = _decimal(usdc.get("hold", 0), "USDC hold", minimum=Decimal(0))
+        if hold > total:
+            raise DomainRejected(
+                "HYPERLIQUID_RESPONSE_INVALID",
+                "unified Hyperliquid USDC hold exceeds total balance",
+            )
+        return HyperliquidEquity(
+            equity=total,
+            available_balance=total - hold,
+            currency="USDC",
+            observed_at=now,
         )
 
     @staticmethod

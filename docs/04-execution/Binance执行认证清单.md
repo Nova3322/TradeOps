@@ -1,9 +1,9 @@
 # Binance USDⓈ-M Futures 执行认证清单
 
 > 文档编号：EXEC-CERT-BN-001
-> 版本：Draft 0.3
-> 日期：2026-07-19
-> 状态：M4 TESTNET 窄订单软件合同已实现；真实测试账户与任何实盘能力仍未验证
+> 版本：Draft 0.4
+> 日期：2026-07-31
+> 状态：Unified Account 主账户的最小 PAPI LIVE 闭环已实证；生产部署与逐账户/标的认证仍未完成
 > 上位文档：`交易系统总体方案.md`、`策略合同与数值化验收门.md`、`docs/04-execution/OMS-Freqtrade-VenueAdapter执行规范.md`
 
 ---
@@ -14,23 +14,23 @@
 
 当前基础版本不建设 CapabilityCertificate、证据包或证书状态机软件平台。本清单只是未来启用外部副作用前的人工验收材料；代码、自动化测试、Git 历史和普通运行记录已经足够表达当前只读实现。
 
-### 当前 M3 只读实现边界
+### 当前只读实现边界
 
-- 生产代码仅调用 GET：`/fapi/v1/exchangeInfo`、`/fapi/v3/positionRisk`、`/fapi/v3/balance`、`/fapi/v1/openOrders`、`/fapi/v1/userTrades`、`/fapi/v1/income`。
+- 标准账户读取使用 FAPI；Unified Account 读取使用 PAPI `um/account`、`account`、`um/openOrders`、`um/algo/openAlgoOrders`、`um/userTrades` 和 `um/income`，Instrument/mark 仍来自公开 FAPI。
 - 签名 USER_DATA 请求使用显式只读 Key/Secret；秘密不进入数据库、Web、日志或提交文件。
 - `Instrument`、订单、成交、仓位、保护、权益和资金费按外部身份去重，并以 `SHADOW|TESTNET|LIVE` 隔离。
 - 当前净仓模型只接受 one-way `BOTH` 仓位；非零 Hedge Mode 仓位 fail closed。
-- Adapter 没有下单、撤单、调整保证金或划转方法；`LIVE_ORDER_SEND` 仍为 `DISABLED`。
-- 本地合同和 PostgreSQL 集成测试已经覆盖映射、去重、RBAC、环境隔离、差异和禁用路径；没有真实凭据，因此真实账户连通性仍为“待验证”。
+- Adapter 没有调整保证金或资金划转方法；LIVE 发送只有进程开关与数据库 Gate 同时开启才可达。
+- 本地合同和 PostgreSQL 集成测试覆盖映射、去重、RBAC、环境隔离、差异和禁用路径；2026-07-31 已完成 Unified Account 主账户真实读取。
 
-### 当前 M4 TESTNET 订单合同边界
+### 当前 TESTNET/LIVE 订单合同边界
 
-- 写客户端只接受 `https://testnet.binancefuture.com`，不接受 LIVE、HTTP 或任意替代主机。
-- `TRADING_BINANCE_TESTNET_ORDER_SEND_ENABLED` 默认 `false`；TESTNET Key/Secret 独立配置，`LIVE_ORDER_SEND` 仍为 `DISABLED`。
-- 市价订单使用由 OrderIntent UUID 派生、长度不超过 36 的稳定 `clientOrderId`；先查询，确认不存在才 POST。
+- TESTNET 客户端只接受 `https://testnet.binancefuture.com`；Unified Account LIVE 客户端只接受 `https://papi.binance.com`。
+- 两个运行发送开关默认 `false`；LIVE 还要求数据库 `LIVE_ORDER_SEND` Gate 显式启用。
+- 市价订单使用由 OrderIntent UUID 派生的稳定标识；PAPI 标识不超过官方 32 字符上限。每次先查询，确认不存在才 POST。
 - 发送或撤销结果不确定时，Intent、Order、Reservation 与 Campaign 进入 `UNKNOWN`；重启恢复只按原 identity 查询，不自动重发。
-- 原生保护使用 `STOP_MARKET`、`closePosition=true` 和 `MARK_PRICE`，稳定身份由 Position UUID 派生。
-- 合同测试和 PostgreSQL 集成测试覆盖部分成交、零成交取消、明确拒绝、Unknown、fencing、恢复、保护、退出、对账和 PnL。它们没有访问 Binance 网络，不能填写真实账户证据项。
+- TESTNET 原生保护使用 `STOP_MARKET + closePosition`；PAPI LIVE 使用定量 reduce-only `STOP_MARKET` algo order，并支持在目标为零后显式取消。
+- 合同测试和 PostgreSQL 集成测试覆盖部分成交、零成交取消、明确拒绝、Unknown、fencing、恢复、保护、退出、对账和 PnL。2026-07-31 真实验证 5 XRP 最小开仓、幂等回放、保护、退出、取消保护、空仓和 Gate 关闭；这仍不是完整生产证书。
 
 状态值只有四种；它们是检查项状态，不是 `capability_status`：
 
