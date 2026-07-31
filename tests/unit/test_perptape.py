@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import threading
 from datetime import UTC, datetime, timedelta
 from io import BytesIO
 from urllib.error import HTTPError
@@ -155,9 +156,11 @@ def test_http_429_updates_cooldown_and_blocks_followup_requests(
         cache_ttl=timedelta(minutes=1),
     )
     client.refresh(now=NOW)
+    assert client.remote_request_state() == (1, 1, 0, 0)
 
     with pytest.raises(PerptapeRateLimited) as limited:
         client.refresh(now=NOW + timedelta(minutes=2), force=True)
+    state_after_remote_429 = client.remote_request_state()
     with pytest.raises(PerptapeRateLimited) as locally_limited:
         client.refresh(now=NOW + timedelta(minutes=3), force=True)
 
@@ -165,7 +168,73 @@ def test_http_429_updates_cooldown_and_blocks_followup_requests(
     assert limited.value.is_remote is True
     assert locally_limited.value.next_allowed_at == next_allowed_at
     assert locally_limited.value.is_remote is False
+    assert state_after_remote_429 == (2, 1, 1, 1)
+    assert client.remote_request_state() == state_after_remote_429
     assert calls == 2
+
+
+def test_invalid_or_rejected_response_does_not_forge_remote_success() -> None:
+    values: list[dict[str, object] | DomainRejected] = [
+        {"type": "wrong", "data": []},
+        DomainRejected("PERPTAPE_UNAVAILABLE", "unavailable"),
+    ]
+
+    def fetch(_url: str, _headers: dict[str, str], _timeout: float) -> dict[str, object]:
+        value = values.pop(0)
+        if isinstance(value, DomainRejected):
+            raise value
+        return value
+
+    client = PerptapeClient(
+        base_url="https://perptape.com",
+        api_key="key",
+        contract_version="breakouts-v1",
+        cache_ttl=timedelta(seconds=0),
+        fetcher=fetch,
+    )
+
+    with pytest.raises(DomainRejected, match="PERPTAPE_RESPONSE_INVALID"):
+        client.refresh(now=NOW, force=True)
+    assert client.remote_request_state() == (0, 0, 0, 0)
+
+    with pytest.raises(DomainRejected, match="PERPTAPE_UNAVAILABLE"):
+        client.refresh(now=NOW + timedelta(seconds=1), force=True)
+    assert client.remote_request_state() == (0, 0, 0, 0)
+
+
+def test_remote_request_state_is_shared_and_serialized_between_callers() -> None:
+    calls = 0
+
+    def fetch(_url: str, _headers: dict[str, str], _timeout: float) -> dict[str, object]:
+        nonlocal calls
+        calls += 1
+        return response()
+
+    client = PerptapeClient(
+        base_url="https://perptape.com",
+        api_key="key",
+        contract_version="breakouts-v1",
+        cache_ttl=timedelta(seconds=0),
+        fetcher=fetch,
+    )
+    errors: list[BaseException] = []
+
+    def refresh() -> None:
+        try:
+            client.refresh(now=NOW + timedelta(seconds=1), force=True)
+        except BaseException as exc:  # pragma: no cover - asserted below
+            errors.append(exc)
+
+    threads = [threading.Thread(target=refresh) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=1)
+
+    assert errors == []
+    assert all(not thread.is_alive() for thread in threads)
+    assert calls == 2
+    assert client.remote_request_state() == (2, 2, 0, 0)
 
 
 def test_client_fails_closed_without_api_key_or_with_invalid_contract() -> None:

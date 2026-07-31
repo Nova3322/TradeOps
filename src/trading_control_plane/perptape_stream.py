@@ -134,7 +134,17 @@ class PerptapeStreamWorker:
         self._connection_healthy = False
         self._backfill_not_before: datetime | None = None
         self._completion_pending = False
-        self._consecutive_remote_rate_limits = 0
+        (
+            _remote_generation,
+            _remote_success_generation,
+            self._observed_remote_rate_limit_count,
+            self._transport_consecutive_rate_limits,
+        ) = self._client.remote_request_state()
+        self._target_consecutive_rate_limits = 0
+        self._pending_completion_targets: dict[
+            str,
+            tuple[PerptapeCandidate, int],
+        ] = {}
         self.fatal_error_code: str | None = None
         self.stats = PerptapeStreamStats()
 
@@ -147,20 +157,105 @@ class PerptapeStreamWorker:
     def _record(self, feed: PerptapeFeedSnapshot) -> None:
         self._record_snapshot(feed, feed.fetched_at)
 
+    def _sync_remote_request_state(self) -> int:
+        (
+            _remote_generation,
+            success_generation,
+            rate_limit_count,
+            transport_consecutive_rate_limits,
+        ) = self._client.remote_request_state()
+        if self._pending_completion_targets:
+            new_rate_limits = max(
+                0,
+                rate_limit_count - self._observed_remote_rate_limit_count,
+            )
+            self._target_consecutive_rate_limits += new_rate_limits
+        self._observed_remote_rate_limit_count = rate_limit_count
+        self._transport_consecutive_rate_limits = transport_consecutive_rate_limits
+        if self._transport_consecutive_rate_limits >= self._max_reconnect_attempts or (
+            self._pending_completion_targets
+            and self._target_consecutive_rate_limits >= self._max_reconnect_attempts
+        ):
+            self.fatal_error_code = "PERPTAPE_RATE_LIMITED"
+        return success_generation
+
+    @staticmethod
+    def _candidate_completes_target(
+        candidate: PerptapeCandidate,
+        target: PerptapeCandidate,
+    ) -> bool:
+        return (
+            PerptapeStreamWorker._same_alert(candidate, target)
+            and candidate.readiness == "READY"
+            and candidate.data_health == "CURRENT"
+            and candidate.observed_at >= target.observed_at
+        )
+
+    def _resolve_pending_targets(
+        self,
+        feed: PerptapeFeedSnapshot,
+        *,
+        success_generation: int,
+    ) -> bool:
+        completed = [
+            event_id
+            for event_id, (
+                target,
+                registered_success_generation,
+            ) in self._pending_completion_targets.items()
+            if success_generation > registered_success_generation
+            and any(
+                self._candidate_completes_target(candidate, target) for candidate in feed.candidates
+            )
+        ]
+        for event_id in completed:
+            del self._pending_completion_targets[event_id]
+        if not self._pending_completion_targets:
+            self._target_consecutive_rate_limits = 0
+            self._completion_pending = False
+            return True
+        return False
+
+    def _register_completion_target(
+        self,
+        envelope: StreamEnvelope,
+        target: PerptapeCandidate,
+    ) -> None:
+        assert envelope.event_id is not None
+        if envelope.event_id in self._pending_completion_targets:
+            return
+        success_generation = self._sync_remote_request_state()
+        if self.fatal_error_code == "PERPTAPE_RATE_LIMITED":
+            raise DomainRejected(
+                "PERPTAPE_RATE_LIMITED",
+                "Perptape exceeded the bounded rate-limit recovery sequence",
+            )
+        if not self._pending_completion_targets:
+            self._target_consecutive_rate_limits = 0
+        self._pending_completion_targets[envelope.event_id] = (
+            target,
+            success_generation,
+        )
+        self._completion_pending = True
+
     def _reconcile(self, *, backfill: bool) -> PerptapeFeedSnapshot:
         now = self._clock()
+        self._sync_remote_request_state()
+        if self.fatal_error_code == "PERPTAPE_RATE_LIMITED":
+            raise DomainRejected(
+                "PERPTAPE_RATE_LIMITED",
+                "Perptape exceeded the bounded rate-limit recovery sequence",
+            )
         current = self._load_snapshot()
         if current is not None and now < current.next_allowed_at:
             raise PerptapeRateLimited(current.next_allowed_at)
         try:
             feed = self._client.refresh(now=now, force=backfill)
         except PerptapeRateLimited as exc:
-            if exc.is_remote:
-                self._consecutive_remote_rate_limits += 1
-                if self._consecutive_remote_rate_limits >= self._max_reconnect_attempts:
-                    self.fatal_error_code = exc.code
+            self._sync_remote_request_state()
             self._mark_degraded(next_allowed_at=exc.next_allowed_at)
             raise
+        success_generation = self._sync_remote_request_state()
         fetched_at = self._safe_record_time(feed.fetched_at, current)
         if fetched_at != feed.fetched_at:
             feed = replace(feed, fetched_at=fetched_at)
@@ -168,7 +263,10 @@ class PerptapeStreamWorker:
         self.stats.https_reconciliations += 1
         if backfill:
             self.stats.https_backfills += 1
-        self._consecutive_remote_rate_limits = 0
+        self._resolve_pending_targets(
+            feed,
+            success_generation=success_generation,
+        )
         return feed
 
     def _mark_degraded(self, *, next_allowed_at: datetime | None = None) -> None:
@@ -204,7 +302,21 @@ class PerptapeStreamWorker:
 
     def _try_backfill(self) -> bool:
         now = self._clock()
+        success_generation = self._sync_remote_request_state()
         current = self._load_snapshot()
+        had_pending_targets = bool(self._pending_completion_targets)
+        if current is not None and had_pending_targets:
+            self._resolve_pending_targets(
+                current,
+                success_generation=success_generation,
+            )
+            if not self._pending_completion_targets:
+                return True
+        if self.fatal_error_code == "PERPTAPE_RATE_LIMITED":
+            raise DomainRejected(
+                "PERPTAPE_RATE_LIMITED",
+                "Perptape exceeded the bounded rate-limit recovery sequence",
+            )
         not_before = self._backfill_not_before
         if current is not None:
             not_before = max(not_before or current.next_allowed_at, current.next_allowed_at)
@@ -229,6 +341,9 @@ class PerptapeStreamWorker:
                 raise
             return False
         self._backfill_not_before = max(now, feed.next_allowed_at)
+        if self._pending_completion_targets:
+            self._completion_pending = True
+            return False
         self._completion_pending = False
         return True
 
@@ -250,7 +365,10 @@ class PerptapeStreamWorker:
                 "event": "perptape_stream_stopped",
                 "component": "perptape",
                 "error_code": self.fatal_error_code,
-                "attempt": self._consecutive_remote_rate_limits,
+                "attempt": max(
+                    self._transport_consecutive_rate_limits,
+                    self._target_consecutive_rate_limits,
+                ),
             },
         )
         stop_event.set()
@@ -410,10 +528,11 @@ class PerptapeStreamWorker:
                 None,
             )
         needs_completion = self._needs_completion(envelope.payload)
+        if needs_completion and not completion_confirmed:
+            self._register_completion_target(envelope, preliminary)
         existing_is_complete = (
             existing is not None
-            and existing.readiness not in {"UNKNOWN", "DEGRADED", "INCOMPLETE"}
-            and existing.observed_at >= preliminary.observed_at
+            and self._candidate_completes_target(existing, preliminary)
             and (not needs_completion or completion_confirmed)
         )
         if needs_completion and not existing_is_complete and allow_completion:
@@ -424,11 +543,14 @@ class PerptapeStreamWorker:
                         (
                             candidate
                             for candidate in current.candidates
-                            if self._same_alert(candidate, preliminary)
+                            if self._candidate_completes_target(
+                                candidate,
+                                preliminary,
+                            )
                         ),
                         None,
                     )
-                    if completed is not None and completed.observed_at >= preliminary.observed_at:
+                    if completed is not None:
                         self._remember_event(envelope.event_id)
                         self.stats.alerts_applied += 1
                         return
@@ -518,6 +640,25 @@ class PerptapeStreamWorker:
             last_server_time: datetime | None = None
             hello_received = False
             while not stop_event.is_set():
+                success_generation = self._sync_remote_request_state()
+                if self._pending_completion_targets and any(
+                    success_generation > registered_success_generation
+                    for (
+                        _target,
+                        registered_success_generation,
+                    ) in self._pending_completion_targets.values()
+                ):
+                    shared = self._load_snapshot()
+                    if shared is not None:
+                        self._resolve_pending_targets(
+                            shared,
+                            success_generation=success_generation,
+                        )
+                if self.fatal_error_code == "PERPTAPE_RATE_LIMITED":
+                    raise DomainRejected(
+                        "PERPTAPE_RATE_LIMITED",
+                        "Perptape exceeded the bounded rate-limit recovery sequence",
+                    )
                 current_time = self._monotonic()
                 if self._completion_pending and (
                     self._backfill_not_before is None or self._clock() >= self._backfill_not_before
@@ -582,6 +723,12 @@ class PerptapeStreamWorker:
                 gap_backfill_succeeded = False
                 if gap_backfill_attempted:
                     self.stats.gaps_detected += 1
+                    if envelope.event_type == "alert" and self._needs_completion(envelope.payload):
+                        target = self._client.parse_stream_alert(
+                            envelope.payload,
+                            event_time=envelope.server_time,
+                        )
+                        self._register_completion_target(envelope, target)
                     gap_backfill_succeeded = self._try_backfill()
                     if stop_event.is_set():
                         return
@@ -632,7 +779,8 @@ class PerptapeStreamWorker:
                     delay = (retry_not_before - self._clock()).total_seconds()
                 else:
                     rate_limit_attempts = max(
-                        self._consecutive_remote_rate_limits,
+                        self._transport_consecutive_rate_limits,
+                        self._target_consecutive_rate_limits,
                         1,
                     )
                     delay = min(
@@ -645,7 +793,10 @@ class PerptapeStreamWorker:
                         "event": "perptape_stream_reconnect_scheduled",
                         "component": "perptape",
                         "error_code": error_code,
-                        "attempt": self._consecutive_remote_rate_limits,
+                        "attempt": max(
+                            self._transport_consecutive_rate_limits,
+                            self._target_consecutive_rate_limits,
+                        ),
                         "delay_seconds": delay,
                     },
                 )

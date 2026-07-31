@@ -264,6 +264,21 @@ class PerptapeClient:
         self._feed: PerptapeFeedSnapshot | None = None
         self._rate_limit_not_before: datetime | None = None
         self._server_not_before: datetime | None = None
+        self._remote_result_generation = 0
+        self._remote_success_generation = 0
+        self._remote_rate_limit_count = 0
+        self._consecutive_remote_rate_limits = 0
+
+    def remote_request_state(self) -> tuple[int, int, int, int]:
+        """Return shared real-request generations and the current 429 sequence."""
+
+        with self._lock:
+            return (
+                self._remote_result_generation,
+                self._remote_success_generation,
+                self._remote_rate_limit_count,
+                self._consecutive_remote_rate_limits,
+            )
 
     def list_candidates(self, *, now: datetime) -> list[PerptapeCandidate]:
         return list(self.refresh(now=now).candidates)
@@ -303,6 +318,10 @@ class PerptapeClient:
                     self._timeout_seconds,
                 )
             except PerptapeRateLimited as exc:
+                if exc.is_remote:
+                    self._remote_result_generation += 1
+                    self._remote_rate_limit_count += 1
+                    self._consecutive_remote_rate_limits += 1
                 if exc.next_allowed_at is not None:
                     self._rate_limit_not_before = max(
                         self._rate_limit_not_before or exc.next_allowed_at,
@@ -319,6 +338,9 @@ class PerptapeClient:
                 raise
             candidates = self._parse_response(value)
             generated_at, next_allowed_at = self._parse_feed_times(value, now=now)
+            self._remote_result_generation += 1
+            self._remote_success_generation = self._remote_result_generation
+            self._consecutive_remote_rate_limits = 0
             self._rate_limit_not_before = None
             self._server_not_before = next_allowed_at
             self._cached_at = now
