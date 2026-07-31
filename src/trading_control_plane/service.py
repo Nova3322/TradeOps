@@ -111,7 +111,15 @@ from trading_control_plane.notilt import (
     NoTiltVaultSnapshot,
     UsdValuation,
 )
-from trading_control_plane.perptape import PerptapeFeedSnapshot
+from trading_control_plane.perptape import (
+    PerptapeCandidate,
+    PerptapeFeedSnapshot,
+    apply_perptape_feed_delta,
+    bound_perptape_feed_snapshot,
+    normalize_perptape_datetime,
+    perptape_snapshot_identity,
+    validate_perptape_feed_payload,
+)
 
 ACTIVE_INTENT_STATUSES = {
     OrderIntentStatus.PENDING.value,
@@ -512,35 +520,71 @@ class TradingService:
         feed: PerptapeFeedSnapshot,
         *,
         now: datetime,
+        base_snapshot: PerptapeFeedSnapshot | None,
     ) -> int:
+        now_utc = normalize_perptape_datetime(now)
+        feed = bound_perptape_feed_snapshot(feed)
+        if base_snapshot is not None:
+            base_snapshot = bound_perptape_feed_snapshot(base_snapshot)
+        validate_perptape_feed_payload(feed)
+        generated_at_utc = normalize_perptape_datetime(feed.generated_at)
+        fetched_at_utc = normalize_perptape_datetime(feed.fetched_at)
+        next_allowed_at_utc = normalize_perptape_datetime(feed.next_allowed_at)
         if (
-            feed.fetched_at > now + MAX_FACT_CLOCK_SKEW
-            or feed.generated_at > feed.fetched_at + MAX_FACT_CLOCK_SKEW
-            or feed.next_allowed_at < feed.generated_at
+            fetched_at_utc - now_utc > MAX_FACT_CLOCK_SKEW
+            or generated_at_utc - fetched_at_utc > MAX_FACT_CLOCK_SKEW
+            or next_allowed_at_utc < generated_at_utc
             or any(
                 candidate.source_contract_version != feed.contract_version
                 for candidate in feed.candidates
             )
         ):
             _reject("PERPTAPE_RESPONSE_INVALID", "Perptape feed metadata is inconsistent")
-        candidates = [candidate.to_dict() for candidate in feed.candidates]
         with self.database.session_factory.begin() as session:
             self._require_role(session, actor_id, "proposal.create")
             current = session.get(PerptapeFeed, "BREAKOUTS", with_for_update=True)
-            if current is not None and current.fetched_at > feed.fetched_at:
-                return current.version
-            if current is not None and current.fetched_at == feed.fetched_at:
-                if (
-                    current.contract_version == feed.contract_version
-                    and current.candidates == candidates
-                    and current.generated_at == feed.generated_at
-                    and current.next_allowed_at == feed.next_allowed_at
-                ):
-                    return current.version
+            current_feed = (
+                None
+                if current is None
+                else PerptapeFeedSnapshot(
+                    contract_version=current.contract_version,
+                    generated_at=current.generated_at,
+                    fetched_at=current.fetched_at,
+                    next_allowed_at=current.next_allowed_at,
+                    candidates=tuple(
+                        PerptapeCandidate.from_dict(value) for value in current.candidates
+                    ),
+                )
+            )
+            if current is None and base_snapshot is not None:
                 _reject(
                     "PERPTAPE_FEED_CONFLICT",
-                    "the same Perptape fetch time has different semantics",
+                    "the base Perptape snapshot no longer exists",
                 )
+            feed = apply_perptape_feed_delta(
+                base=base_snapshot,
+                current=current_feed,
+                incoming=feed,
+            )
+            validate_perptape_feed_payload(feed)
+            if current_feed is not None and perptape_snapshot_identity(
+                current_feed
+            ) == perptape_snapshot_identity(feed):
+                assert current is not None
+                return current.version
+            generated_at_utc = normalize_perptape_datetime(feed.generated_at)
+            fetched_at_utc = normalize_perptape_datetime(feed.fetched_at)
+            next_allowed_at_utc = normalize_perptape_datetime(feed.next_allowed_at)
+            if (
+                fetched_at_utc - now_utc > MAX_FACT_CLOCK_SKEW
+                or generated_at_utc - fetched_at_utc > MAX_FACT_CLOCK_SKEW
+                or next_allowed_at_utc < generated_at_utc
+            ):
+                _reject(
+                    "PERPTAPE_RESPONSE_INVALID",
+                    "merged Perptape feed metadata is inconsistent",
+                )
+            candidates = [candidate.to_dict() for candidate in feed.candidates]
             if current is None:
                 current = PerptapeFeed(
                     feed_key="BREAKOUTS",

@@ -790,7 +790,7 @@ def build_app(database: Database, telegram: MockTelegramGateway) -> FastAPI:
         _env_file=None,
     )
     perptape = PerptapeClient(
-        base_url="https://perptape.invalid",
+        base_url="https://perptape.com",
         api_key=None,
         contract_version="breakouts-v1",
         cache_ttl=timedelta(minutes=1),
@@ -813,7 +813,7 @@ def build_notilt_app(database: Database, telegram: MockTelegramGateway) -> FastA
         _env_file=None,
     )
     perptape = PerptapeClient(
-        base_url="https://perptape.invalid",
+        base_url="https://perptape.com",
         api_key=None,
         contract_version="breakouts-v1",
         cache_ttl=timedelta(minutes=1),

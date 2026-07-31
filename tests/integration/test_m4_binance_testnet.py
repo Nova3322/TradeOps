@@ -254,7 +254,7 @@ def build_testnet_app(
         requester=venue,
     )
     perptape = PerptapeClient(
-        base_url="https://perptape.invalid",
+        base_url="https://perptape.com",
         api_key=None,
         contract_version="breakouts-v1",
         cache_ttl=timedelta(minutes=1),

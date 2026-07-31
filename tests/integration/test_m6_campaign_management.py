@@ -248,7 +248,7 @@ async def run_m6_flow(database: Database) -> None:
     ids = seed_campaign(database)
     candidate_time = datetime.now(UTC)
     perptape = PerptapeClient(
-        base_url="https://perptape.invalid",
+        base_url="https://perptape.com",
         api_key="contract-only-not-a-secret",
         contract_version="breakouts-v1",
         cache_ttl=timedelta(minutes=1),
@@ -507,7 +507,7 @@ async def run_perptape_failure_does_not_block_exit(database: Database) -> None:
         now=now,
     )
     unavailable = PerptapeClient(
-        base_url="https://perptape.invalid",
+        base_url="https://perptape.com",
         api_key=None,
         contract_version="breakouts-v1",
         cache_ttl=timedelta(minutes=1),
