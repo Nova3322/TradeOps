@@ -142,6 +142,62 @@ def test_core_info_contract_maps_required_facts_without_exchange_actions() -> No
     assert not hasattr(client, "exchange")
 
 
+def test_account_snapshot_projects_every_clearinghouse_position_from_single_response() -> None:
+    responses = contract_payloads()
+    meta = responses["metaAndAssetCtxs"]
+    assert isinstance(meta, list)
+    assert isinstance(meta[0], dict)
+    assert isinstance(meta[1], list)
+    meta[0]["universe"].append({"name": "ETH", "szDecimals": 4})
+    meta[1].append({"markPx": "3100", "funding": "0.0001"})
+    clearinghouse = responses["clearinghouseState"]
+    assert isinstance(clearinghouse, dict)
+    clearinghouse["assetPositions"].append(
+        {
+            "type": "oneWay",
+            "position": {"coin": "ETH", "szi": "2", "entryPx": "3000"},
+        }
+    )
+    client, calls = client_with_contract(responses)
+
+    snapshots = client.read_account_snapshots(("BTC",), now=NOW)
+
+    assert [(item.symbol, item.position.quantity) for item in snapshots] == [
+        ("BTC", Decimal("0.25")),
+        ("ETH", Decimal(2)),
+    ]
+    call_types = [call[1]["type"] for call in calls]
+    assert call_types.count("clearinghouseState") == 1
+    assert call_types.count("metaAndAssetCtxs") == 1
+    assert call_types.count("frontendOpenOrders") == 1
+    assert call_types.count("userFillsByTime") == 1
+    assert call_types.count("userFunding") == 1
+
+
+def test_account_snapshot_rejects_duplicate_current_response() -> None:
+    duplicate = contract_payloads()
+    clearinghouse = duplicate["clearinghouseState"]
+    assert isinstance(clearinghouse, dict)
+    clearinghouse["assetPositions"].append(clearinghouse["assetPositions"][0])
+    client, _calls = client_with_contract(duplicate)
+    with pytest.raises(DomainRejected, match="HYPERLIQUID_RESPONSE_INVALID"):
+        client.read_account_snapshots(("BTC",), now=NOW)
+
+
+def test_account_snapshot_marks_result_limited_history_incomplete() -> None:
+    for response_name in ("userFillsByTime", "userFunding"):
+        limited = contract_payloads()
+        limited[response_name] = [{} for _ in range(500)]
+        client, _calls = client_with_contract(limited)
+        snapshots = client.read_account_snapshots(("BTC",), now=NOW)
+
+        assert len(snapshots) == 1
+        assert snapshots[0].position.quantity == Decimal("0.25")
+        assert snapshots[0].history_error_code == "HYPERLIQUID_RESPONSE_INCOMPLETE"
+        assert snapshots[0].fills == ()
+        assert snapshots[0].funding == ()
+
+
 def test_unified_account_uses_spot_usdc_total_and_hold_for_equity() -> None:
     responses = contract_payloads()
     responses["userAbstraction"] = "unifiedAccount"

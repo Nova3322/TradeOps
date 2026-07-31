@@ -163,8 +163,20 @@ class RuntimeSyncWorker:
     def _runtime_clock(self, *, continuous: bool) -> datetime:
         return self._normalize_runtime_time(self.clock(), continuous=continuous)
 
-    def _require_scope_match(self, scope: str, actor_id: UUID, now: datetime) -> None:
+    def _require_scope_match(
+        self,
+        scope: str,
+        actor_id: UUID,
+        now: datetime,
+        *,
+        source_error_code: str | None = None,
+    ) -> None:
         reconciliation_id = self.service.reconcile_scope(scope, actor_id, now=now)
+        if source_error_code is not None:
+            raise DomainRejected(
+                source_error_code,
+                "runtime current facts were refreshed but history supplementation is incomplete",
+            )
         if self.service.reconciliation_status(reconciliation_id) is not ReconciliationStatus.MATCH:
             raise DomainRejected(
                 "RUNTIME_RECONCILIATION_NOT_MATCH",
@@ -178,17 +190,24 @@ class RuntimeSyncWorker:
                 "RUNTIME_BINANCE_TARGET_MISSING",
                 "runtime Binance sync requires an internal account ID",
             )
-        snapshot = self.binance.read_snapshot(self.settings.runtime_binance_symbol, now=now)
-        persisted = self.service.ingest_binance_read_only_snapshot(
+        snapshots = self.binance.read_account_snapshots(
+            (self.settings.runtime_binance_symbol,), now=now
+        )
+        persisted = self.service.ingest_binance_read_only_account_snapshot(
             account_id,
             actor_id,
-            snapshot,
+            snapshots,
             environment=ExecutionEnvironment(self.settings.binance_fact_environment),
             now=now,
         )
         scope = f"{self.settings.binance_fact_environment}:{account_id}:BINANCE"
-        self._require_scope_match(scope, actor_id, now)
-        return len(persisted)
+        self._require_scope_match(
+            scope,
+            actor_id,
+            now,
+            source_error_code=persisted["history_error_code"],
+        )
+        return int(persisted["positions_covered"])
 
     def _record_perptape(self, actor_id: UUID, now: datetime) -> int:
         now = self._normalize_runtime_time(now, continuous=False)
@@ -230,21 +249,26 @@ class RuntimeSyncWorker:
                 "HYPERLIQUID_ENVIRONMENT_MISMATCH",
                 "Hyperliquid API host does not match the configured fact environment",
             )
-        snapshot = self.hyperliquid.read_snapshot(
-            self.settings.runtime_hyperliquid_symbol,
+        snapshots = self.hyperliquid.read_account_snapshots(
+            (self.settings.runtime_hyperliquid_symbol,),
             now=now,
         )
         environment = ExecutionEnvironment(self.settings.hyperliquid_fact_environment)
-        persisted = self.service.ingest_hyperliquid_read_only_snapshot(
+        persisted = self.service.ingest_hyperliquid_read_only_account_snapshot(
             account_id,
             actor_id,
-            snapshot,
+            snapshots,
             environment=environment,
             now=now,
         )
         scope = f"{environment.value}:{account_id}:HYPERLIQUID"
-        self._require_scope_match(scope, actor_id, now)
-        return len(persisted)
+        self._require_scope_match(
+            scope,
+            actor_id,
+            now,
+            source_error_code=persisted["history_error_code"],
+        )
+        return int(persisted["positions_covered"])
 
     def _record_notilt(self, actor_id: UUID, chain_id: int, now: datetime) -> int:
         agent = self.settings.notilt_agent_address

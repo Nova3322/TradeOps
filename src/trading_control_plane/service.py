@@ -4,6 +4,7 @@ import base64
 import binascii
 import hashlib
 import json
+from contextlib import AbstractContextManager, nullcontext
 from datetime import datetime, timedelta
 from decimal import Decimal
 from typing import Any, NoReturn
@@ -4257,6 +4258,220 @@ class TradingService:
             now=now,
         )
 
+    def ingest_binance_read_only_account_snapshot(
+        self,
+        account_id: str,
+        actor_id: UUID,
+        snapshots: tuple[BinanceReadOnlySnapshot, ...],
+        *,
+        environment: ExecutionEnvironment,
+        now: datetime,
+    ) -> dict[str, Any]:
+        """Persist a fully parsed Binance account snapshot and cover absent positions."""
+
+        return self._ingest_read_only_account_snapshot(
+            account_id,
+            actor_id,
+            snapshots,
+            venue="BINANCE",
+            environment=environment,
+            now=now,
+        )
+
+    def ingest_hyperliquid_read_only_account_snapshot(
+        self,
+        account_id: str,
+        actor_id: UUID,
+        snapshots: tuple[HyperliquidReadOnlySnapshot, ...],
+        *,
+        environment: ExecutionEnvironment,
+        now: datetime,
+    ) -> dict[str, Any]:
+        """Persist a fully parsed Hyperliquid account snapshot and cover absent positions."""
+
+        return self._ingest_read_only_account_snapshot(
+            account_id,
+            actor_id,
+            snapshots,
+            venue="HYPERLIQUID",
+            environment=environment,
+            now=now,
+        )
+
+    def _ingest_read_only_account_snapshot(
+        self,
+        account_id: str,
+        actor_id: UUID,
+        snapshots: tuple[BinanceReadOnlySnapshot | HyperliquidReadOnlySnapshot, ...],
+        *,
+        venue: str,
+        environment: ExecutionEnvironment,
+        now: datetime,
+    ) -> dict[str, Any]:
+        if not snapshots:
+            _reject(f"{venue}_RESPONSE_INCOMPLETE", "account snapshot has no configured coverage")
+        symbols = [snapshot.symbol for snapshot in snapshots]
+        if len(set(symbols)) != len(symbols):
+            _reject(f"{venue}_RESPONSE_INVALID", "account snapshot contains duplicate symbols")
+        observed_at = snapshots[0].observed_at
+        if any(snapshot.observed_at != observed_at for snapshot in snapshots):
+            _reject(
+                f"{venue}_RESPONSE_INCOMPLETE", "account snapshot observations are inconsistent"
+            )
+        history_error_codes = {snapshot.history_error_code for snapshot in snapshots}
+        if len(history_error_codes) != 1:
+            _reject(f"{venue}_RESPONSE_INCOMPLETE", "account history status is inconsistent")
+        history_error_code = next(iter(history_error_codes))
+        if history_error_code is not None and any(
+            snapshot.fills or snapshot.funding for snapshot in snapshots
+        ):
+            _reject(
+                f"{venue}_RESPONSE_INVALID",
+                "incomplete account history cannot contain partial facts",
+            )
+
+        with self.database.session_factory.begin() as session:
+            persisted: dict[str, Any] = {}
+            for snapshot in sorted(snapshots, key=lambda item: item.symbol):
+                persisted[snapshot.symbol] = self._ingest_read_only_snapshot(
+                    account_id,
+                    actor_id,
+                    snapshot,
+                    venue=venue,
+                    environment=environment,
+                    now=now,
+                    session=session,
+                )
+            explicitly_closed = sum(
+                1 for item in persisted.values() if item["position_authoritatively_closed"] is True
+            )
+            active_symbols = {
+                snapshot.symbol for snapshot in snapshots if snapshot.position.quantity != 0
+            }
+            closed, covered = self._cover_absent_positions(
+                account_id,
+                actor_id,
+                venue=venue,
+                environment=environment,
+                active_symbols=active_symbols,
+                observed_order_ids={
+                    order.order_id for snapshot in snapshots for order in snapshot.orders
+                },
+                now=now,
+                session=session,
+            )
+        return {
+            "symbols": persisted,
+            "positions_covered": covered,
+            "positions_authoritatively_closed": explicitly_closed + closed,
+            "history_error_code": history_error_code,
+        }
+
+    def _cover_absent_positions(
+        self,
+        account_id: str,
+        actor_id: UUID,
+        *,
+        venue: str,
+        environment: ExecutionEnvironment,
+        active_symbols: set[str],
+        observed_order_ids: set[str],
+        now: datetime,
+        session: Session | None = None,
+    ) -> tuple[int, int]:
+        """Refresh every scoped position; absence in a complete account snapshot means flat."""
+
+        transaction: AbstractContextManager[Session] = (
+            self.database.session_factory.begin() if session is None else nullcontext(session)
+        )
+        with transaction as session:
+            self._require_role(session, actor_id, "venue.record", account_id, venue)
+            scoped = session.execute(
+                select(Position, Instrument)
+                .join(Instrument, Position.instrument_id == Instrument.instrument_id)
+                .where(
+                    Position.account_id == account_id,
+                    Position.venue == venue,
+                    Position.environment == environment.value,
+                    Instrument.venue == venue,
+                )
+                .order_by(Instrument.symbol, Position.position_id)
+                .with_for_update()
+            ).all()
+            if any(position.updated_at > now for position, _instrument in scoped):
+                _reject(
+                    f"{venue}_SNAPSHOT_SUPERSEDED",
+                    "an older account snapshot cannot overwrite newer position facts",
+                )
+            closed = 0
+            for position, instrument in scoped:
+                if instrument.symbol in active_symbols:
+                    continue
+                changed = (
+                    position.quantity != 0
+                    or position.average_entry_price != 0
+                    or position.fact_status != FactStatus.KNOWN.value
+                    or position.observed_at != now
+                )
+                if position.quantity != 0:
+                    closed += 1
+                position.quantity = Decimal(0)
+                position.average_entry_price = Decimal(0)
+                position.fact_status = FactStatus.KNOWN.value
+                position.observed_at = now
+                position.updated_at = now
+
+                protection = session.scalar(
+                    select(ProtectionOrder)
+                    .where(ProtectionOrder.position_id == position.position_id)
+                    .with_for_update()
+                )
+                if protection is not None:
+                    protection_order = session.scalar(
+                        select(VenueOrder)
+                        .where(
+                            VenueOrder.environment == environment.value,
+                            VenueOrder.account_id == account_id,
+                            VenueOrder.venue == venue,
+                            VenueOrder.venue_order_id == protection.venue_order_id,
+                        )
+                        .with_for_update()
+                    )
+                    if protection_order is not None and protection_order.status in {
+                        VenueOrderStatus.SENT.value,
+                        VenueOrderStatus.PARTIALLY_FILLED.value,
+                        VenueOrderStatus.UNKNOWN.value,
+                    }:
+                        still_open = protection_order.venue_order_id in observed_order_ids
+                        if not still_open:
+                            protection_order.status = VenueOrderStatus.UNKNOWN.value
+                        protection_order.observed_at = now
+                        protection_order.updated_at = now
+                        protection.quantity = Decimal(0)
+                        protection.status = (
+                            ProtectionStatus.DEGRADED.value
+                            if still_open
+                            else ProtectionStatus.UNKNOWN.value
+                        )
+                        protection.fully_covered = False
+                        protection.observed_at = now
+                        protection.updated_at = now
+                    else:
+                        session.delete(protection)
+                if changed:
+                    self._audit(
+                        session,
+                        actor_id=str(actor_id),
+                        event_type=f"{venue}_POSITION_COVERED",
+                        object_type="Position",
+                        object_id=position.position_id,
+                        reason="AUTHORITATIVE_FLAT",
+                        correlation_id=uuid4(),
+                        object_version=1,
+                        now=now,
+                    )
+            return closed, len(scoped)
+
     @staticmethod
     def _intent_id_from_client_order(venue: str, client_order_id: str) -> UUID | None:
         raw: str | None = None
@@ -4282,12 +4497,16 @@ class TradingService:
         venue: str,
         environment: ExecutionEnvironment,
         now: datetime,
+        session: Session | None = None,
     ) -> dict[str, Any]:
         """Persist one normalized narrow-adapter snapshot into authoritative facts."""
 
         if snapshot.observed_at > now + MAX_FACT_CLOCK_SKEW:
             _reject("FACT_TIME_INVALID", f"{venue} snapshot is unexpectedly in the future")
-        with self.database.session_factory.begin() as session:
+        transaction: AbstractContextManager[Session] = (
+            self.database.session_factory.begin() if session is None else nullcontext(session)
+        )
+        with transaction as session:
             self._require_role(session, actor_id, "venue.record", account_id, venue)
             instrument = session.scalar(
                 select(Instrument)
@@ -4332,6 +4551,9 @@ class TradingService:
                 )
                 .with_for_update()
             )
+            position_authoritatively_closed = bool(
+                position is not None and position.quantity != 0 and snapshot.position.quantity == 0
+            )
             if position is None:
                 position = Position(
                     account_id=account_id,
@@ -4351,6 +4573,11 @@ class TradingService:
                 session.add(position)
                 session.flush()
             else:
+                if position.updated_at > now:
+                    _reject(
+                        f"{venue}_SNAPSHOT_SUPERSEDED",
+                        "an older snapshot cannot overwrite newer position facts",
+                    )
                 position.quantity = snapshot.position.quantity
                 position.average_entry_price = snapshot.position.average_entry_price
                 position.mark_price = snapshot.position.mark_price
@@ -4387,6 +4614,11 @@ class TradingService:
                 )
                 session.add(equity)
             else:
+                if equity.updated_at > now:
+                    _reject(
+                        f"{venue}_SNAPSHOT_SUPERSEDED",
+                        "an older snapshot cannot overwrite newer equity facts",
+                    )
                 equity.equity = snapshot.equity.equity
                 equity.available_balance = snapshot.equity.available_balance
                 equity.currency = snapshot.equity.currency
@@ -4810,6 +5042,7 @@ class TradingService:
                 "orders": order_count,
                 "fills": fill_count,
                 "funding": funding_count,
+                "position_authoritatively_closed": position_authoritatively_closed,
             }
 
     def update_campaign_target(
@@ -5567,6 +5800,11 @@ class TradingService:
                 )
             ).all()
             for scope_position in scope_positions:
+                if scope_position.instrument_id not in active_instrument_ids:
+                    if scope_position.fact_status != FactStatus.KNOWN.value:
+                        unknown.append(f"POSITION_UNKNOWN:{scope_position.instrument_id}")
+                    elif self._fact_is_stale(scope_position.observed_at, now, max_age):
+                        unknown.append(f"POSITION_STALE:{scope_position.instrument_id}")
                 if (
                     scope_position.quantity != 0
                     and scope_position.instrument_id not in active_instrument_ids

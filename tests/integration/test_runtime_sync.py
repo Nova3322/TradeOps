@@ -84,6 +84,12 @@ class BinanceReader:
             protection=None,
         )
 
+    def read_account_snapshots(
+        self, symbols: tuple[str, ...], *, now: datetime
+    ) -> tuple[BinanceReadOnlySnapshot, ...]:
+        assert symbols == ("BTCUSDT",)
+        return (self.read_snapshot(symbols[0], now=now),)
+
 
 class HyperliquidReader:
     configured = True
@@ -110,6 +116,12 @@ class HyperliquidReader:
             funding=(),
             protection=None,
         )
+
+    def read_account_snapshots(
+        self, symbols: tuple[str, ...], *, now: datetime
+    ) -> tuple[HyperliquidReadOnlySnapshot, ...]:
+        assert symbols == ("BTC",)
+        return (self.read_snapshot(symbols[0], now=now),)
 
 
 class NoTiltReader:

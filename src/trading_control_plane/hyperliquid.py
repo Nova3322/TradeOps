@@ -7,7 +7,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from typing import Any
@@ -250,6 +250,7 @@ class HyperliquidReadOnlySnapshot:
     equity: HyperliquidEquity
     funding: tuple[HyperliquidFunding, ...]
     protection: HyperliquidProtection | None
+    history_error_code: str | None = None
 
 
 class HyperliquidReadOnlyClient:
@@ -362,6 +363,146 @@ class HyperliquidReadOnlyClient:
             funding=self._parse_funding(funding, symbol, now),
             protection=self._select_protection(parsed_orders, position),
         )
+
+    def read_account_snapshots(
+        self, symbols: tuple[str, ...], *, now: datetime
+    ) -> tuple[HyperliquidReadOnlySnapshot, ...]:
+        """Project every covered Core symbol from one complete clearinghouse response."""
+
+        configured = self._validated_symbols(symbols)
+        if not self.configured:
+            raise DomainRejected(
+                "HYPERLIQUID_READ_ONLY_NOT_CONFIGURED",
+                "a valid selected Hyperliquid account address is required",
+            )
+        assert self._account_address is not None
+        meta_contexts = self._info({"type": "metaAndAssetCtxs", "dex": ""})
+        clearinghouse = self._info(
+            {"type": "clearinghouseState", "user": self._account_address, "dex": ""}
+        )
+        abstraction = self._abstraction()
+        spot_state = (
+            self._info({"type": "spotClearinghouseState", "user": self._account_address})
+            if abstraction in {"unifiedAccount", "portfolioMargin"}
+            else None
+        )
+        orders = self._info(
+            {"type": "frontendOpenOrders", "user": self._account_address, "dex": ""}
+        )
+        target_symbols = (
+            configured | self._active_position_symbols(clearinghouse) | self._order_symbols(orders)
+        )
+        current_snapshots: list[HyperliquidReadOnlySnapshot] = []
+        for symbol in sorted(target_symbols):
+            instrument, mark_price = self._parse_instrument(meta_contexts, symbol)
+            position, equity = self._parse_account(clearinghouse, symbol, mark_price, now)
+            if spot_state is not None:
+                equity = self._parse_unified_equity(spot_state, now)
+            parsed_orders = self._parse_orders(orders, symbol, now)
+            current_snapshots.append(
+                HyperliquidReadOnlySnapshot(
+                    symbol=symbol,
+                    observed_at=now,
+                    instrument=instrument,
+                    orders=parsed_orders,
+                    fills=(),
+                    position=position,
+                    equity=equity,
+                    funding=(),
+                    protection=self._select_protection(parsed_orders, position),
+                )
+            )
+        start_time_ms = int((now - HISTORY_WINDOW).timestamp() * 1_000)
+        try:
+            fills = self._info(
+                {
+                    "type": "userFillsByTime",
+                    "user": self._account_address,
+                    "startTime": start_time_ms,
+                    "aggregateByTime": True,
+                }
+            )
+            funding = self._info(
+                {
+                    "type": "userFunding",
+                    "user": self._account_address,
+                    "startTime": start_time_ms,
+                }
+            )
+            fill_rows = _require_dict_list(fills, "userFills")
+            funding_rows = _require_dict_list(funding, "userFunding")
+            if len(fill_rows) >= 500 or len(funding_rows) >= 500:
+                raise DomainRejected(
+                    "HYPERLIQUID_RESPONSE_INCOMPLETE",
+                    "Hyperliquid account history reached an endpoint result limit",
+                )
+            snapshots = [
+                replace(
+                    snapshot,
+                    fills=self._parse_fills(fill_rows, snapshot.symbol, now),
+                    funding=self._parse_funding(funding_rows, snapshot.symbol, now),
+                )
+                for snapshot in current_snapshots
+            ]
+        except DomainRejected as exc:
+            return tuple(
+                replace(snapshot, history_error_code=exc.code) for snapshot in current_snapshots
+            )
+        return tuple(snapshots)
+
+    @staticmethod
+    def _validated_symbols(symbols: tuple[str, ...]) -> set[str]:
+        result = set(symbols)
+        if not result or any(
+            not symbol or symbol != symbol.upper() or not re.fullmatch(r"[A-Z0-9]+", symbol)
+            for symbol in result
+        ):
+            raise DomainRejected(
+                "HYPERLIQUID_SYMBOL_INVALID",
+                "Hyperliquid Core symbol must be uppercase alphanumeric",
+            )
+        return result
+
+    @staticmethod
+    def _active_position_symbols(raw: JsonValue) -> set[str]:
+        state = _require_dict(raw, "clearinghouseState")
+        wrappers = _require_dict_list(state.get("assetPositions", []), "assetPositions")
+        active: set[str] = set()
+        seen: set[str] = set()
+        for wrapper in wrappers:
+            if wrapper.get("type", "oneWay") != "oneWay":
+                raise DomainRejected("HYPERLIQUID_RESPONSE_INVALID", "position type is unsupported")
+            position = _require_dict(wrapper.get("position"), "position")
+            symbol = position.get("coin")
+            if (
+                not isinstance(symbol, str)
+                or not symbol
+                or symbol != symbol.upper()
+                or not re.fullmatch(r"[A-Z0-9]+", symbol)
+                or symbol in seen
+            ):
+                raise DomainRejected(
+                    "HYPERLIQUID_RESPONSE_INVALID", "position symbol is invalid or duplicated"
+                )
+            seen.add(symbol)
+            if _decimal(position.get("szi"), "szi") != 0:
+                active.add(symbol)
+        return active
+
+    @staticmethod
+    def _order_symbols(raw: JsonValue) -> set[str]:
+        result: set[str] = set()
+        for order in _require_dict_list(raw, "frontendOpenOrders"):
+            symbol = order.get("coin")
+            if (
+                not isinstance(symbol, str)
+                or not symbol
+                or symbol != symbol.upper()
+                or not re.fullmatch(r"[A-Z0-9]+", symbol)
+            ):
+                raise DomainRejected("HYPERLIQUID_RESPONSE_INVALID", "order symbol is invalid")
+            result.add(symbol)
+        return result
 
     @staticmethod
     def _parse_instrument(raw: JsonValue, symbol: str) -> tuple[HyperliquidInstrument, Decimal]:
