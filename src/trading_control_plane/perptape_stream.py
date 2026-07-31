@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import time
-from collections import deque
+from collections import OrderedDict, deque
 from collections.abc import Callable, Iterator
 from contextlib import AbstractContextManager, contextmanager
 from dataclasses import dataclass, replace
@@ -17,12 +17,16 @@ from trading_control_plane.domain import DomainRejected
 from trading_control_plane.perptape import (
     PerptapeCandidate,
     PerptapeClient,
+    PerptapeEventKey,
     PerptapeFeedSnapshot,
     PerptapeRateLimited,
+    merge_incomplete_perptape_candidates,
+    perptape_event_key,
     validate_perptape_websocket_url,
 )
 
 logger = logging.getLogger(__name__)
+PERPTAPE_STREAM_WINDOW = 2_048
 
 
 class PerptapeSocket(Protocol):
@@ -141,10 +145,10 @@ class PerptapeStreamWorker:
             self._transport_consecutive_rate_limits,
         ) = self._client.remote_request_state()
         self._target_consecutive_rate_limits = 0
-        self._pending_completion_targets: dict[
-            str,
+        self._pending_completion_targets: OrderedDict[
+            PerptapeEventKey,
             tuple[PerptapeCandidate, int],
-        ] = {}
+        ] = OrderedDict()
         self.fatal_error_code: str | None = None
         self.stats = PerptapeStreamStats()
 
@@ -198,8 +202,8 @@ class PerptapeStreamWorker:
         success_generation: int,
     ) -> bool:
         completed = [
-            event_id
-            for event_id, (
+            event_key
+            for event_key, (
                 target,
                 registered_success_generation,
             ) in self._pending_completion_targets.items()
@@ -208,8 +212,8 @@ class PerptapeStreamWorker:
                 self._candidate_completes_target(candidate, target) for candidate in feed.candidates
             )
         ]
-        for event_id in completed:
-            del self._pending_completion_targets[event_id]
+        for event_key in completed:
+            del self._pending_completion_targets[event_key]
         if not self._pending_completion_targets:
             self._target_consecutive_rate_limits = 0
             self._completion_pending = False
@@ -218,11 +222,19 @@ class PerptapeStreamWorker:
 
     def _register_completion_target(
         self,
-        envelope: StreamEnvelope,
         target: PerptapeCandidate,
     ) -> None:
-        assert envelope.event_id is not None
-        if envelope.event_id in self._pending_completion_targets:
+        event_key = perptape_event_key(target)
+        existing = self._pending_completion_targets.get(event_key)
+        if existing is not None:
+            existing_target, registered_success_generation = existing
+            if target.observed_at > existing_target.observed_at:
+                success_generation = self._sync_remote_request_state()
+                self._pending_completion_targets[event_key] = (
+                    target,
+                    max(registered_success_generation, success_generation),
+                )
+            self._completion_pending = True
             return
         success_generation = self._sync_remote_request_state()
         if self.fatal_error_code == "PERPTAPE_RATE_LIMITED":
@@ -230,13 +242,43 @@ class PerptapeStreamWorker:
                 "PERPTAPE_RATE_LIMITED",
                 "Perptape exceeded the bounded rate-limit recovery sequence",
             )
+        if len(self._pending_completion_targets) >= PERPTAPE_STREAM_WINDOW:
+            self.fatal_error_code = "PERPTAPE_STREAM_PENDING_LIMIT"
+            raise DomainRejected(
+                "PERPTAPE_STREAM_PENDING_LIMIT",
+                "Perptape unresolved alert window is full",
+            )
         if not self._pending_completion_targets:
             self._target_consecutive_rate_limits = 0
-        self._pending_completion_targets[envelope.event_id] = (
+        self._pending_completion_targets[event_key] = (
             target,
             success_generation,
         )
         self._completion_pending = True
+
+    def _rebuild_pending_targets(self, feed: PerptapeFeedSnapshot | None) -> None:
+        if feed is None or feed.contract_version != self._contract_version:
+            return
+        for candidate in feed.candidates:
+            if candidate.readiness == "INCOMPLETE":
+                self._register_completion_target(candidate)
+
+    def _preserved_pending_candidates(
+        self,
+        current: PerptapeFeedSnapshot | None,
+    ) -> tuple[PerptapeCandidate, ...]:
+        current_by_key = {
+            perptape_event_key(candidate): candidate
+            for candidate in (
+                ()
+                if current is None or current.contract_version != self._contract_version
+                else current.candidates
+            )
+        }
+        return tuple(
+            current_by_key.get(event_key, target)
+            for event_key, (target, _generation) in self._pending_completion_targets.items()
+        )
 
     def _reconcile(self, *, backfill: bool) -> PerptapeFeedSnapshot:
         now = self._clock()
@@ -256,9 +298,14 @@ class PerptapeStreamWorker:
             self._mark_degraded(next_allowed_at=exc.next_allowed_at)
             raise
         success_generation = self._sync_remote_request_state()
+        current = self._load_snapshot()
         fetched_at = self._safe_record_time(feed.fetched_at, current)
         if fetched_at != feed.fetched_at:
             feed = replace(feed, fetched_at=fetched_at)
+        feed = merge_incomplete_perptape_candidates(
+            feed,
+            self._preserved_pending_candidates(current),
+        )
         self._record(feed)
         self.stats.https_reconciliations += 1
         if backfill:
@@ -286,7 +333,11 @@ class PerptapeStreamWorker:
             return
         fetched_at = self._safe_record_time(self._clock(), current)
         degraded = tuple(
-            replace(candidate, data_health="DEGRADED", readiness="DEGRADED")
+            replace(
+                candidate,
+                data_health="DEGRADED",
+                readiness=("INCOMPLETE" if candidate.readiness == "INCOMPLETE" else "DEGRADED"),
+            )
             for candidate in current.candidates
         )
         self._record(
@@ -368,6 +419,11 @@ class PerptapeStreamWorker:
                 "attempt": max(
                     self._transport_consecutive_rate_limits,
                     self._target_consecutive_rate_limits,
+                    (
+                        len(self._pending_completion_targets)
+                        if self.fatal_error_code == "PERPTAPE_STREAM_PENDING_LIMIT"
+                        else 0
+                    ),
                 ),
             },
         )
@@ -486,18 +542,14 @@ class PerptapeStreamWorker:
         candidate: PerptapeCandidate,
         preliminary: PerptapeCandidate,
     ) -> bool:
-        return candidate.candidate_id == preliminary.candidate_id or (
-            candidate.source_exchange == preliminary.source_exchange
-            and candidate.symbol == preliminary.symbol
-            and candidate.source_direction == preliminary.source_direction
-            and candidate.timeframe == preliminary.timeframe
-            and candidate.triggered_at == preliminary.triggered_at
-        )
+        return candidate.candidate_id == preliminary.candidate_id or perptape_event_key(
+            candidate
+        ) == perptape_event_key(preliminary)
 
     def _remember_event(self, event_id: str) -> None:
         self._seen_event_ids.add(event_id)
         self._event_id_order.append(event_id)
-        if len(self._event_id_order) > 2_048:
+        if len(self._event_id_order) > PERPTAPE_STREAM_WINDOW:
             expired = self._event_id_order.popleft()
             self._seen_event_ids.discard(expired)
 
@@ -529,7 +581,7 @@ class PerptapeStreamWorker:
             )
         needs_completion = self._needs_completion(envelope.payload)
         if needs_completion and not completion_confirmed:
-            self._register_completion_target(envelope, preliminary)
+            self._register_completion_target(preliminary)
         existing_is_complete = (
             existing is not None
             and self._candidate_completes_target(existing, preliminary)
@@ -728,7 +780,7 @@ class PerptapeStreamWorker:
                             envelope.payload,
                             event_time=envelope.server_time,
                         )
-                        self._register_completion_target(envelope, target)
+                        self._register_completion_target(target)
                     gap_backfill_succeeded = self._try_backfill()
                     if stop_event.is_set():
                         return
@@ -754,6 +806,12 @@ class PerptapeStreamWorker:
             try:
                 if not startup_complete:
                     current = self._load_snapshot()
+                    self._rebuild_pending_targets(current)
+                    if self.fatal_error_code is not None:
+                        raise DomainRejected(
+                            self.fatal_error_code,
+                            "Perptape unresolved alert window could not be restored",
+                        )
                     if current is None or self._clock() >= current.next_allowed_at:
                         self._reconcile(backfill=False)
                     else:

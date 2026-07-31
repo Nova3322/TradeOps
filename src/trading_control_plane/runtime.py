@@ -25,7 +25,10 @@ from trading_control_plane.hyperliquid import (
 )
 from trading_control_plane.logging import configure_logging
 from trading_control_plane.notilt import NoTiltGateway, NoTiltUsdValuator
-from trading_control_plane.perptape import PerptapeClient
+from trading_control_plane.perptape import (
+    PerptapeClient,
+    merge_incomplete_perptape_candidates,
+)
 from trading_control_plane.perptape_stream import PerptapeStreamWorker
 from trading_control_plane.queries import TradingQueries
 from trading_control_plane.service import TradingService
@@ -159,6 +162,16 @@ class RuntimeSyncWorker:
         ):
             return len(current.candidates)
         feed = self.perptape.refresh(now=now)
+        current = self.queries.perptape_feed()
+        if current is not None and current.contract_version == feed.contract_version:
+            feed = merge_incomplete_perptape_candidates(
+                feed,
+                (
+                    candidate
+                    for candidate in current.candidates
+                    if candidate.readiness == "INCOMPLETE"
+                ),
+            )
         self.service.record_perptape_feed(actor_id, feed, now=now)
         return len(feed.candidates)
 

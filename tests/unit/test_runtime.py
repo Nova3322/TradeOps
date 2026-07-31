@@ -1,3 +1,5 @@
+from dataclasses import replace
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from typing import Any
 from uuid import UUID
@@ -7,6 +9,7 @@ import pytest
 import trading_control_plane.runtime as runtime_module
 from trading_control_plane.config import Settings
 from trading_control_plane.domain import DomainRejected, ReconciliationStatus
+from trading_control_plane.perptape import PerptapeClient, PerptapeFeedSnapshot
 from trading_control_plane.runtime import (
     RuntimeSyncReport,
     RuntimeSyncWorker,
@@ -88,6 +91,68 @@ def test_runtime_source_failure_isolated_as_a_safe_error_code() -> None:
             error_code="PERPTAPE_UNAVAILABLE",
         )
     }
+
+
+def test_runtime_https_snapshot_preserves_persisted_incomplete_stream_target() -> None:
+    now = datetime(2026, 7, 31, 8, tzinfo=UTC)
+    client = PerptapeClient(
+        base_url="https://perptape.com",
+        api_key="fixture-key",
+        contract_version="breakouts-v1",
+        cache_ttl=timedelta(0),
+        fetcher=lambda _url, _headers, _timeout: {},
+    )
+    target = replace(
+        client.parse_stream_alert(
+            {
+                "id": "persisted-target",
+                "ex": "BN",
+                "s": "ETHUSDT",
+                "dir": "HH",
+                "p": 4_000,
+                "tf": "1h",
+                "t": int(now.timestamp() * 1_000),
+                "u": int(now.timestamp() * 1_000),
+                "kr": {"status": "ready"},
+                "vq24": 20_000,
+                "oi": 10_000,
+            },
+            event_time=now,
+        ),
+        data_health="DEGRADED",
+        readiness="INCOMPLETE",
+    )
+    current = PerptapeFeedSnapshot(
+        contract_version="breakouts-v1",
+        generated_at=now,
+        fetched_at=now,
+        next_allowed_at=now,
+        candidates=(target,),
+    )
+    incoming = PerptapeFeedSnapshot(
+        contract_version="breakouts-v1",
+        generated_at=now + timedelta(seconds=1),
+        fetched_at=now + timedelta(seconds=1),
+        next_allowed_at=now + timedelta(seconds=1),
+        candidates=(),
+    )
+    recorded: list[PerptapeFeedSnapshot] = []
+    worker: Any = object.__new__(RuntimeSyncWorker)
+    worker.settings = SimpleNamespace(perptape_contract_version="breakouts-v1")
+    worker.queries = SimpleNamespace(perptape_feed=lambda: current)
+    worker.perptape = SimpleNamespace(refresh=lambda **_kwargs: incoming)
+    worker.service = SimpleNamespace(
+        record_perptape_feed=lambda _actor_id, feed, **_kwargs: recorded.append(feed)
+    )
+
+    observed = worker._record_perptape(
+        UUID("11111111-1111-1111-1111-111111111111"),
+        now + timedelta(seconds=1),
+    )
+
+    assert observed == 1
+    assert len(recorded) == 1
+    assert recorded[0].candidates == (target,)
 
 
 def test_runtime_venue_success_requires_this_cycle_reconciliation_match() -> None:

@@ -6,7 +6,7 @@ import threading
 import urllib.error
 import urllib.parse
 import urllib.request
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import asdict, dataclass, replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal, InvalidOperation
@@ -161,6 +161,80 @@ class PerptapeFeedSnapshot:
     fetched_at: datetime
     next_allowed_at: datetime
     candidates: tuple[PerptapeCandidate, ...]
+
+
+PerptapeEventKey = tuple[str, str, str, str, datetime | None]
+
+
+def perptape_event_key(candidate: PerptapeCandidate) -> PerptapeEventKey:
+    return (
+        candidate.source_exchange,
+        candidate.symbol,
+        candidate.source_direction,
+        candidate.timeframe,
+        candidate.triggered_at,
+    )
+
+
+def merge_incomplete_perptape_candidates(
+    feed: PerptapeFeedSnapshot,
+    preserved: Iterable[PerptapeCandidate],
+) -> PerptapeFeedSnapshot:
+    """Keep only unresolved persisted targets alongside a new full snapshot."""
+
+    pending: dict[PerptapeEventKey, PerptapeCandidate] = {}
+    for candidate in preserved:
+        pending.setdefault(perptape_event_key(candidate), candidate)
+    if not pending:
+        return feed
+    completed = {
+        perptape_event_key(candidate)
+        for candidate in feed.candidates
+        if perptape_event_key(candidate) in pending
+        and candidate.readiness == "READY"
+        and candidate.data_health == "CURRENT"
+        and candidate.observed_at >= pending[perptape_event_key(candidate)].observed_at
+    }
+    merged: list[PerptapeCandidate] = []
+    included: set[PerptapeEventKey] = set()
+    for candidate in feed.candidates:
+        key = perptape_event_key(candidate)
+        if key not in pending:
+            merged.append(candidate)
+        elif key in completed:
+            if (
+                key not in included
+                and candidate.readiness == "READY"
+                and candidate.data_health == "CURRENT"
+                and candidate.observed_at >= pending[key].observed_at
+            ):
+                merged.append(candidate)
+                included.add(key)
+        elif key not in included:
+            preserved_candidate = pending[key]
+            candidate = (
+                candidate
+                if candidate.observed_at >= preserved_candidate.observed_at
+                else preserved_candidate
+            )
+            merged.append(
+                replace(
+                    candidate,
+                    data_health="DEGRADED",
+                    readiness="INCOMPLETE",
+                )
+            )
+            included.add(key)
+    for key, candidate in pending.items():
+        if key not in completed and key not in included:
+            merged.append(
+                replace(
+                    candidate,
+                    data_health="DEGRADED",
+                    readiness="INCOMPLETE",
+                )
+            )
+    return replace(feed, candidates=tuple(merged))
 
 
 JsonFetcher = Callable[[str, dict[str, str], float], dict[str, Any]]

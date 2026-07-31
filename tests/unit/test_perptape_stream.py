@@ -6,6 +6,7 @@ import threading
 from collections import deque
 from collections.abc import Callable, Iterator
 from contextlib import AbstractContextManager, contextmanager
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -14,11 +15,16 @@ import pytest
 import trading_control_plane.perptape_stream as perptape_stream_module
 from trading_control_plane.domain import DomainRejected
 from trading_control_plane.perptape import (
+    PerptapeCandidate,
     PerptapeClient,
     PerptapeFeedSnapshot,
     PerptapeRateLimited,
 )
-from trading_control_plane.perptape_stream import PerptapeSocket, PerptapeStreamWorker
+from trading_control_plane.perptape_stream import (
+    PERPTAPE_STREAM_WINDOW,
+    PerptapeSocket,
+    PerptapeStreamWorker,
+)
 
 NOW = datetime(2026, 7, 31, 8, tzinfo=UTC)
 API_KEY = "test-perptape-platform-key"
@@ -105,6 +111,17 @@ class SnapshotStore:
         assert now == feed.fetched_at
         self.current = feed
         self.writes.append(feed)
+
+
+class CurrentSnapshotStore(SnapshotStore):
+    def __init__(self) -> None:
+        super().__init__()
+        self.write_count = 0
+
+    def record(self, feed: PerptapeFeedSnapshot, now: datetime) -> None:
+        assert now == feed.fetched_at
+        self.current = feed
+        self.write_count += 1
 
 
 class FakeSocket:
@@ -215,6 +232,23 @@ def worker(
             monotonic=monotonic,
         ),
         calls,
+    )
+
+
+def incomplete_candidate(
+    stream: PerptapeStreamWorker,
+    *,
+    alert_id: str,
+    symbol: str,
+    event_time: datetime,
+) -> PerptapeCandidate:
+    return replace(
+        stream._client.parse_stream_alert(
+            short_alert(alert_id, symbol, event_time),
+            event_time=event_time,
+        ),
+        data_health="DEGRADED",
+        readiness="INCOMPLETE",
     )
 
 
@@ -956,6 +990,319 @@ def test_target_missing_from_http_200_does_not_reset_target_rate_limit_series() 
     assert stream.fatal_error_code == "PERPTAPE_RATE_LIMITED"
     assert stop.is_set() is True
     assert len(connector.calls) == 1
+    assert store.current is not None
+    assert len(store.current.candidates) == 1
+    assert store.current.candidates[0].readiness == "INCOMPLETE"
+    assert store.current.candidates[0].data_health == "DEGRADED"
+
+
+def test_pending_window_fails_closed_at_2049_without_eviction_or_more_io() -> None:
+    stop = threading.Event()
+    event_time = NOW + timedelta(seconds=1)
+    alerts = [
+        message(
+            "alert",
+            sequence=index + 2,
+            event_time=event_time + timedelta(milliseconds=index),
+            payload=short_alert(
+                f"alert-{index}",
+                f"S{index}USDT",
+                event_time + timedelta(milliseconds=index),
+            ),
+        )
+        for index in range(PERPTAPE_STREAM_WINDOW + 1)
+    ]
+    socket = FakeSocket(
+        [
+            message("hello", sequence=1, event_time=NOW),
+            *alerts,
+        ]
+    )
+    connector = RecordingConnector([socket])
+    store = CurrentSnapshotStore()
+    store.current = PerptapeFeedSnapshot(
+        contract_version="breakouts-v1",
+        generated_at=NOW,
+        fetched_at=NOW,
+        next_allowed_at=NOW + timedelta(minutes=2),
+        candidates=(),
+    )
+    stream, https_calls = worker(
+        responses=[],
+        connector=connector,
+        store=store,
+        clock=lambda: NOW + timedelta(seconds=10),
+    )
+
+    stream.run_forever(stop)
+
+    assert stream.fatal_error_code == "PERPTAPE_STREAM_PENDING_LIMIT"
+    assert stop.is_set() is True
+    assert https_calls == []
+    assert len(connector.calls) == 1
+    assert len(stream._pending_completion_targets) == PERPTAPE_STREAM_WINDOW
+    assert stream.stats.alerts_applied == PERPTAPE_STREAM_WINDOW
+    assert store.write_count == PERPTAPE_STREAM_WINDOW
+    assert store.current is not None
+    assert len(store.current.candidates) == PERPTAPE_STREAM_WINDOW
+    assert store.current.candidates[0].symbol == "S0USDT"
+    assert store.current.candidates[-1].symbol == "S2047USDT"
+    assert all(
+        candidate.readiness == "INCOMPLETE" and candidate.data_health == "DEGRADED"
+        for candidate in store.current.candidates
+    )
+
+
+def test_repeated_semantic_target_does_not_grow_pending_or_snapshot() -> None:
+    stop = threading.Event()
+    target_time = NOW + timedelta(seconds=1)
+    first = short_alert("first-id", "ETHUSDT", target_time)
+    repeated = short_alert("second-id", "ETHUSDT", target_time)
+
+    def stop_receiving() -> str:
+        stop.set()
+        raise TimeoutError
+
+    socket = FakeSocket(
+        [
+            message("hello", sequence=1, event_time=NOW),
+            message(
+                "alert",
+                sequence=2,
+                event_time=target_time,
+                payload=first,
+            ),
+            message(
+                "alert",
+                sequence=3,
+                event_time=target_time + timedelta(seconds=1),
+                payload=repeated,
+            ),
+            stop_receiving,
+        ]
+    )
+    connector = RecordingConnector([socket])
+    store = SnapshotStore()
+    store.current = PerptapeFeedSnapshot(
+        contract_version="breakouts-v1",
+        generated_at=NOW,
+        fetched_at=NOW,
+        next_allowed_at=NOW + timedelta(minutes=2),
+        candidates=(),
+    )
+    stream, https_calls = worker(
+        responses=[],
+        connector=connector,
+        store=store,
+        clock=lambda: NOW + timedelta(seconds=10),
+    )
+
+    stream.run_forever(stop)
+
+    assert https_calls == []
+    assert len(stream._pending_completion_targets) == 1
+    assert store.current is not None
+    assert len(store.current.candidates) == 1
+    assert store.current.candidates[0].symbol == "ETHUSDT"
+    assert store.current.candidates[0].readiness == "INCOMPLETE"
+
+
+def test_restart_rebuilds_pending_before_empty_200_and_bounds_new_429_series() -> None:
+    clock_value = NOW + timedelta(seconds=1)
+
+    class AdvancingStopEvent(RecordingStopEvent):
+        def wait(self, timeout: float) -> bool:
+            nonlocal clock_value
+            self.waits.append(timeout)
+            clock_value += timedelta(seconds=timeout)
+            return False
+
+    stop = AdvancingStopEvent()
+    store = SnapshotStore()
+    seed_stream, _ = worker(
+        responses=[],
+        connector=RecordingConnector([]),
+        store=store,
+    )
+    target = incomplete_candidate(
+        seed_stream,
+        alert_id="persisted-target",
+        symbol="ETHUSDT",
+        event_time=NOW,
+    )
+    store.current = PerptapeFeedSnapshot(
+        contract_version="breakouts-v1",
+        generated_at=NOW,
+        fetched_at=NOW,
+        next_allowed_at=NOW,
+        candidates=(target,),
+    )
+    connector = RecordingConnector([FakeSocket([])])
+
+    def second_rate_limit() -> dict[str, Any]:
+        assert store.current is not None
+        assert store.current.candidates == (target,)
+        assert store.current.candidates[0].readiness == "INCOMPLETE"
+        raise PerptapeRateLimited(
+            NOW + timedelta(seconds=3),
+            is_remote=True,
+        )
+
+    stream, https_calls = worker(
+        responses=[
+            PerptapeRateLimited(
+                NOW + timedelta(seconds=2),
+                is_remote=True,
+            ),
+            response(generated_at=NOW + timedelta(seconds=2)),
+            second_rate_limit,
+        ],
+        connector=connector,
+        store=store,
+        clock=lambda: clock_value,
+        cache_ttl_seconds=0,
+        max_reconnect_attempts=2,
+    )
+
+    stream.run_forever(stop)
+
+    assert len(https_calls) == 3
+    assert stream._target_consecutive_rate_limits == 2
+    assert stream.fatal_error_code == "PERPTAPE_RATE_LIMITED"
+    assert stop.stopped is True
+    assert len(connector.calls) == 1
+    assert store.current is not None
+    assert len(store.current.candidates) == 1
+    assert store.current.candidates[0].readiness == "INCOMPLETE"
+    assert store.current.candidates[0].candidate_id == target.candidate_id
+
+
+def test_ready_batch_clears_persisted_pending_and_restart_does_not_rebuild() -> None:
+    stop = threading.Event()
+    store = SnapshotStore()
+    seed_stream, _ = worker(
+        responses=[],
+        connector=RecordingConnector([]),
+        store=store,
+    )
+    first_time = NOW
+    second_time = NOW + timedelta(seconds=1)
+    first = incomplete_candidate(
+        seed_stream,
+        alert_id="persisted-first",
+        symbol="ETHUSDT",
+        event_time=first_time,
+    )
+    second = incomplete_candidate(
+        seed_stream,
+        alert_id="persisted-second",
+        symbol="SOLUSDT",
+        event_time=second_time,
+    )
+    old_ready_payload = candidate_payload(
+        triggered_at=NOW - timedelta(minutes=1),
+        symbol="OLDUSDT",
+    )
+    old_seed_store = SnapshotStore()
+    old_seed_stream, _ = worker(
+        responses=[response(old_ready_payload)],
+        connector=RecordingConnector([]),
+        store=old_seed_store,
+    )
+    old_ready = old_seed_stream._client.refresh(now=NOW).candidates[0]
+    store.current = PerptapeFeedSnapshot(
+        contract_version="breakouts-v1",
+        generated_at=NOW,
+        fetched_at=NOW,
+        next_allowed_at=NOW,
+        candidates=(second, old_ready, first),
+    )
+    ready_second = candidate_payload(
+        triggered_at=second_time,
+        updated_at=second_time,
+        symbol="SOLUSDT",
+    )
+    ready_first = candidate_payload(
+        triggered_at=first_time,
+        updated_at=first_time,
+        symbol="ETHUSDT",
+    )
+    stale_first = candidate_payload(
+        triggered_at=first_time,
+        updated_at=first_time - timedelta(seconds=1),
+        symbol="ETHUSDT",
+    )
+
+    def stop_receiving() -> str:
+        stop.set()
+        raise TimeoutError
+
+    connector = RecordingConnector(
+        [
+            FakeSocket(
+                [
+                    message("hello", sequence=1, event_time=NOW),
+                    stop_receiving,
+                ]
+            )
+        ]
+    )
+    stream, https_calls = worker(
+        responses=[
+            response(
+                stale_first,
+                ready_second,
+                ready_first,
+                generated_at=NOW + timedelta(seconds=1),
+            )
+        ],
+        connector=connector,
+        store=store,
+        clock=lambda: NOW + timedelta(seconds=1),
+    )
+
+    stream.run_forever(stop)
+
+    assert len(https_calls) == 1
+    assert stream._pending_completion_targets == {}
+    assert store.current is not None
+    assert [candidate.symbol for candidate in store.current.candidates] == [
+        "SOLUSDT",
+        "ETHUSDT",
+    ]
+    assert all(
+        candidate.readiness == "READY" and candidate.data_health == "CURRENT"
+        for candidate in store.current.candidates
+    )
+
+    restart_stop = threading.Event()
+
+    def stop_restart() -> str:
+        restart_stop.set()
+        raise TimeoutError
+
+    restart_connector = RecordingConnector(
+        [
+            FakeSocket(
+                [
+                    message("hello", sequence=1, event_time=NOW),
+                    stop_restart,
+                ]
+            )
+        ]
+    )
+    restarted, restart_https_calls = worker(
+        responses=[],
+        connector=restart_connector,
+        store=store,
+        clock=lambda: NOW + timedelta(seconds=1),
+    )
+
+    restarted.run_forever(restart_stop)
+
+    assert restart_https_calls == []
+    assert restarted._pending_completion_targets == {}
+    assert restarted.fatal_error_code is None
 
 
 def test_shared_client_success_resets_transport_but_not_missing_target() -> None:
