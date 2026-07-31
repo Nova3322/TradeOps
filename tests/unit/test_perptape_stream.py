@@ -99,6 +99,17 @@ def short_alert(
     }
 
 
+def complete_alert(
+    alert_id: str,
+    symbol: str,
+    event_time: datetime,
+) -> dict[str, Any]:
+    payload = short_alert(alert_id, symbol, event_time)
+    payload["cs"] = symbol
+    payload["th"] = 3_900
+    return payload
+
+
 class SnapshotStore:
     def __init__(self) -> None:
         self.current: PerptapeFeedSnapshot | None = None
@@ -107,7 +118,12 @@ class SnapshotStore:
     def load(self) -> PerptapeFeedSnapshot | None:
         return self.current
 
-    def record(self, feed: PerptapeFeedSnapshot, now: datetime) -> None:
+    def record(
+        self,
+        feed: PerptapeFeedSnapshot,
+        now: datetime,
+        _expected_snapshot_identity: str | None,
+    ) -> None:
         assert now == feed.fetched_at
         self.current = feed
         self.writes.append(feed)
@@ -118,7 +134,12 @@ class CurrentSnapshotStore(SnapshotStore):
         super().__init__()
         self.write_count = 0
 
-    def record(self, feed: PerptapeFeedSnapshot, now: datetime) -> None:
+    def record(
+        self,
+        feed: PerptapeFeedSnapshot,
+        now: datetime,
+        _expected_snapshot_identity: str | None,
+    ) -> None:
         assert now == feed.fetched_at
         self.current = feed
         self.write_count += 1
@@ -1051,6 +1072,71 @@ def test_pending_window_fails_closed_at_2049_without_eviction_or_more_io() -> No
         candidate.readiness == "INCOMPLETE" and candidate.data_health == "DEGRADED"
         for candidate in store.current.candidates
     )
+
+
+def test_complete_alert_window_bounds_entire_authoritative_payload() -> None:
+    stop = threading.Event()
+    event_time = NOW + timedelta(seconds=1)
+    alert_count = 3_000
+    alerts = [
+        message(
+            "alert",
+            sequence=index + 2,
+            event_time=event_time + timedelta(milliseconds=index),
+            payload=complete_alert(
+                f"complete-{index}",
+                f"C{index}USDT",
+                event_time + timedelta(milliseconds=index),
+            ),
+        )
+        for index in range(alert_count)
+    ]
+
+    def stop_receiving() -> str:
+        stop.set()
+        raise TimeoutError
+
+    socket = FakeSocket(
+        [
+            message("hello", sequence=1, event_time=NOW),
+            *alerts,
+            stop_receiving,
+        ]
+    )
+    connector = RecordingConnector([socket])
+    store = CurrentSnapshotStore()
+    store.current = PerptapeFeedSnapshot(
+        contract_version="breakouts-v1",
+        generated_at=NOW,
+        fetched_at=NOW,
+        next_allowed_at=NOW + timedelta(minutes=2),
+        candidates=(),
+    )
+    stream, https_calls = worker(
+        responses=[],
+        connector=connector,
+        store=store,
+        clock=lambda: NOW + timedelta(seconds=10),
+    )
+
+    stream.run_forever(stop)
+
+    assert https_calls == []
+    assert stream._pending_completion_targets == {}
+    assert stream.fatal_error_code is None
+    assert stream.stats.alerts_applied == alert_count
+    assert store.write_count == alert_count
+    assert store.current is not None
+    assert len(store.current.candidates) == PERPTAPE_STREAM_WINDOW
+    assert store.current.candidates[0].symbol == "C952USDT"
+    assert store.current.candidates[-1].symbol == "C2999USDT"
+    payload_size = len(
+        json.dumps(
+            [candidate.to_dict() for candidate in store.current.candidates],
+            separators=(",", ":"),
+        ).encode()
+    )
+    assert payload_size < 2_000_000
 
 
 def test_repeated_semantic_target_does_not_grow_pending_or_snapshot() -> None:

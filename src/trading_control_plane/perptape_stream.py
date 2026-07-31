@@ -15,18 +15,21 @@ from websockets.sync.client import connect
 
 from trading_control_plane.domain import DomainRejected
 from trading_control_plane.perptape import (
+    PERPTAPE_CANDIDATE_WINDOW,
     PerptapeCandidate,
     PerptapeClient,
     PerptapeEventKey,
     PerptapeFeedSnapshot,
     PerptapeRateLimited,
+    bound_perptape_feed_snapshot,
     merge_incomplete_perptape_candidates,
     perptape_event_key,
+    perptape_snapshot_identity,
     validate_perptape_websocket_url,
 )
 
 logger = logging.getLogger(__name__)
-PERPTAPE_STREAM_WINDOW = 2_048
+PERPTAPE_STREAM_WINDOW = PERPTAPE_CANDIDATE_WINDOW
 
 
 class PerptapeSocket(Protocol):
@@ -45,7 +48,10 @@ class StopEvent(Protocol):
 
 SocketConnector = Callable[[str, dict[str, str], float], AbstractContextManager[PerptapeSocket]]
 SnapshotLoader = Callable[[], PerptapeFeedSnapshot | None]
-SnapshotRecorder = Callable[[PerptapeFeedSnapshot, datetime], object]
+SnapshotRecorder = Callable[
+    [PerptapeFeedSnapshot, datetime, str | None],
+    object,
+]
 MessageOrder = Literal["ACCEPT", "DUPLICATE", "OUT_OF_ORDER", "GAP"]
 
 
@@ -158,8 +164,17 @@ class PerptapeStreamWorker:
             return now
         return current.fetched_at + timedelta(microseconds=1)
 
-    def _record(self, feed: PerptapeFeedSnapshot) -> None:
-        self._record_snapshot(feed, feed.fetched_at)
+    def _record(
+        self,
+        feed: PerptapeFeedSnapshot,
+        current: PerptapeFeedSnapshot | None,
+    ) -> None:
+        feed = bound_perptape_feed_snapshot(feed)
+        self._record_snapshot(
+            feed,
+            feed.fetched_at,
+            None if current is None else perptape_snapshot_identity(current),
+        )
 
     def _sync_remote_request_state(self) -> int:
         (
@@ -306,7 +321,7 @@ class PerptapeStreamWorker:
             feed,
             self._preserved_pending_candidates(current),
         )
-        self._record(feed)
+        self._record(feed, current)
         self.stats.https_reconciliations += 1
         if backfill:
             self.stats.https_backfills += 1
@@ -347,7 +362,8 @@ class PerptapeStreamWorker:
                 fetched_at=fetched_at,
                 next_allowed_at=effective_next_allowed_at,
                 candidates=degraded,
-            )
+            ),
+            current,
         )
         self.stats.degraded_writes += 1
 
@@ -628,9 +644,12 @@ class PerptapeStreamWorker:
         now = self._clock()
         fetched_at = self._safe_record_time(now, current)
         candidates = {
-            item.candidate_id: item for item in (() if current is None else current.candidates)
+            perptape_event_key(item): item
+            for item in (() if current is None else current.candidates)
         }
-        candidates[candidate.candidate_id] = candidate
+        candidate_key = perptape_event_key(candidate)
+        candidates.pop(candidate_key, None)
+        candidates[candidate_key] = candidate
         generated_at = (
             envelope.server_time
             if current is None
@@ -648,7 +667,8 @@ class PerptapeStreamWorker:
                     generated_at if current is None else current.next_allowed_at,
                 ),
                 candidates=tuple(candidates.values()),
-            )
+            ),
+            current,
         )
         self._remember_event(envelope.event_id)
         self.stats.alerts_applied += 1

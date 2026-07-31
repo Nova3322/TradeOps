@@ -10,6 +10,7 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Any
 
+import pytest
 from httpx import ASGITransport, AsyncClient
 
 from trading_control_plane.api import create_app
@@ -33,7 +34,12 @@ from trading_control_plane.notilt import (
     NoTiltUsdValuator,
     NoTiltVaultSnapshot,
 )
-from trading_control_plane.perptape import PerptapeClient
+from trading_control_plane.perptape import (
+    PerptapeCandidate,
+    PerptapeClient,
+    PerptapeFeedSnapshot,
+    perptape_snapshot_identity,
+)
 from trading_control_plane.perptape_stream import PerptapeSocket, PerptapeStreamWorker
 from trading_control_plane.queries import TradingQueries
 from trading_control_plane.runtime import RuntimeSyncWorker
@@ -158,6 +164,270 @@ def perptape_payload() -> dict[str, Any]:
     }
 
 
+def perptape_candidate(
+    client: PerptapeClient,
+    *,
+    symbol: str,
+    triggered_at: datetime,
+    observed_at: datetime,
+    price: int = 100_000,
+) -> PerptapeCandidate:
+    return client.parse_stream_alert(
+        {
+            "id": f"{symbol}-{observed_at.timestamp()}",
+            "ex": "BN",
+            "s": symbol,
+            "cs": symbol,
+            "dir": "HH",
+            "p": price,
+            "th": price - 1,
+            "tf": "1h",
+            "t": int(triggered_at.timestamp() * 1_000),
+            "u": int(observed_at.timestamp() * 1_000),
+            "kr": {"status": "ready"},
+            "vq24": 20_000,
+            "oi": 10_000,
+        },
+        event_time=observed_at,
+    )
+
+
+def perptape_feed(
+    *candidates: PerptapeCandidate,
+    fetched_at: datetime,
+) -> PerptapeFeedSnapshot:
+    return PerptapeFeedSnapshot(
+        contract_version="breakouts-v1",
+        generated_at=fetched_at,
+        fetched_at=fetched_at,
+        next_allowed_at=fetched_at,
+        candidates=tuple(candidates),
+    )
+
+
+def perptape_test_client() -> PerptapeClient:
+    return PerptapeClient(
+        base_url="https://perptape.com",
+        api_key="integration-stream-key",
+        contract_version="breakouts-v1",
+        cache_ttl=timedelta(0),
+        fetcher=lambda _url, _headers, _timeout: perptape_payload(),
+    )
+
+
+@pytest.mark.parametrize(
+    ("first_source", "first_offset", "second_offset"),
+    [
+        ("HTTP", 0, 0),
+        ("WSS", 0, 0),
+        ("WSS", 2, 1),
+    ],
+)
+def test_concurrent_perptape_writers_merge_stale_snapshot_identities(
+    database: Database,
+    first_source: str,
+    first_offset: int,
+    second_offset: int,
+) -> None:
+    service = TradingService(database)
+    queries = TradingQueries(database)
+    admin = service.bootstrap_admin(
+        f"concurrent-{first_source}-{first_offset}-{second_offset}",
+        now=NOW,
+    )
+    actor = service.create_service_principal(
+        f"perptape-{first_source}-{first_offset}-{second_offset}",
+        admin,
+        now=NOW,
+    )
+    service.assign_role(actor, Role.PROPOSER, admin, now=NOW)
+    client = perptape_test_client()
+    base = perptape_feed(
+        perptape_candidate(
+            client,
+            symbol="BASEUSDT",
+            triggered_at=NOW,
+            observed_at=NOW,
+        ),
+        fetched_at=NOW,
+    )
+    service.record_perptape_feed(
+        actor,
+        base,
+        now=NOW,
+        expected_snapshot_identity=None,
+    )
+    expected_identity = perptape_snapshot_identity(base)
+    http = perptape_feed(
+        perptape_candidate(
+            client,
+            symbol="HTTPUSDT",
+            triggered_at=NOW + timedelta(seconds=1),
+            observed_at=NOW + timedelta(seconds=1),
+        ),
+        fetched_at=NOW
+        + timedelta(seconds=(first_offset if first_source == "HTTP" else second_offset)),
+    )
+    wss = perptape_feed(
+        base.candidates[0],
+        perptape_candidate(
+            client,
+            symbol="WSSUSDT",
+            triggered_at=NOW + timedelta(seconds=2),
+            observed_at=NOW + timedelta(seconds=2),
+        ),
+        fetched_at=NOW
+        + timedelta(seconds=(first_offset if first_source == "WSS" else second_offset)),
+    )
+    first = http if first_source == "HTTP" else wss
+    second = wss if first_source == "HTTP" else http
+    barrier = threading.Barrier(2)
+    first_done = threading.Event()
+    errors: list[BaseException] = []
+
+    def write(feed: PerptapeFeedSnapshot, *, wait_for_first: bool) -> None:
+        try:
+            barrier.wait(timeout=2)
+            if wait_for_first:
+                assert first_done.wait(timeout=2)
+            TradingService(database).record_perptape_feed(
+                actor,
+                feed,
+                now=NOW + timedelta(seconds=10),
+                expected_snapshot_identity=expected_identity,
+            )
+        except BaseException as exc:  # pragma: no cover - asserted below
+            errors.append(exc)
+        finally:
+            if not wait_for_first:
+                first_done.set()
+
+    threads = [
+        threading.Thread(target=write, args=(first,), kwargs={"wait_for_first": False}),
+        threading.Thread(target=write, args=(second,), kwargs={"wait_for_first": True}),
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=3)
+
+    assert errors == []
+    assert all(not thread.is_alive() for thread in threads)
+    persisted = queries.perptape_feed()
+    assert persisted is not None
+    assert [candidate.symbol for candidate in persisted.candidates] == [
+        "BASEUSDT",
+        "HTTPUSDT",
+        "WSSUSDT",
+    ]
+    assert persisted.fetched_at > max(http.fetched_at, wss.fetched_at)
+
+
+@pytest.mark.parametrize("fresh_first", [True, False])
+def test_concurrent_same_key_never_allows_older_fact_to_win(
+    database: Database,
+    fresh_first: bool,
+) -> None:
+    service = TradingService(database)
+    queries = TradingQueries(database)
+    admin = service.bootstrap_admin(f"same-key-{fresh_first}", now=NOW)
+    actor = service.create_service_principal(
+        f"perptape-same-key-{fresh_first}",
+        admin,
+        now=NOW,
+    )
+    service.assign_role(actor, Role.PROPOSER, admin, now=NOW)
+    client = perptape_test_client()
+    base = perptape_feed(
+        perptape_candidate(
+            client,
+            symbol="SAMEUSDT",
+            triggered_at=NOW,
+            observed_at=NOW,
+            price=100,
+        ),
+        fetched_at=NOW,
+    )
+    service.record_perptape_feed(
+        actor,
+        base,
+        now=NOW,
+        expected_snapshot_identity=None,
+    )
+    expected_identity = perptape_snapshot_identity(base)
+    stale = perptape_feed(
+        perptape_candidate(
+            client,
+            symbol="SAMEUSDT",
+            triggered_at=NOW,
+            observed_at=NOW + timedelta(seconds=1),
+            price=110,
+        ),
+        fetched_at=NOW,
+    )
+    fresh = perptape_feed(
+        perptape_candidate(
+            client,
+            symbol="SAMEUSDT",
+            triggered_at=NOW,
+            observed_at=NOW + timedelta(seconds=2),
+            price=120,
+        ),
+        fetched_at=NOW,
+    )
+    ordered = (fresh, stale) if fresh_first else (stale, fresh)
+    for feed in ordered:
+        service.record_perptape_feed(
+            actor,
+            feed,
+            now=NOW + timedelta(seconds=10),
+            expected_snapshot_identity=expected_identity,
+        )
+
+    persisted = queries.perptape_feed()
+    assert persisted is not None
+    assert len(persisted.candidates) == 1
+    assert persisted.candidates[0].observed_at == fresh.candidates[0].observed_at
+    assert persisted.candidates[0].reference_price == Decimal(120)
+
+
+def test_postgres_perptape_payload_is_bounded_to_candidate_window(
+    database: Database,
+) -> None:
+    service = TradingService(database)
+    queries = TradingQueries(database)
+    admin = service.bootstrap_admin("bounded-feed-admin", now=NOW)
+    actor = service.create_service_principal(
+        "bounded-feed-perptape",
+        admin,
+        now=NOW,
+    )
+    service.assign_role(actor, Role.PROPOSER, admin, now=NOW)
+    client = perptape_test_client()
+    candidates = tuple(
+        perptape_candidate(
+            client,
+            symbol=f"B{index}USDT",
+            triggered_at=NOW + timedelta(milliseconds=index),
+            observed_at=NOW + timedelta(milliseconds=index),
+        )
+        for index in range(2_050)
+    )
+
+    service.record_perptape_feed(
+        actor,
+        perptape_feed(*candidates, fetched_at=NOW + timedelta(seconds=3)),
+        now=NOW + timedelta(seconds=3),
+        expected_snapshot_identity=None,
+    )
+
+    persisted = queries.perptape_feed()
+    assert persisted is not None
+    assert len(persisted.candidates) == 2_048
+    assert persisted.candidates[0].symbol == "B2USDT"
+    assert persisted.candidates[-1].symbol == "B2049USDT"
+
+
 def test_runtime_worker_refreshes_perptape_two_venues_and_vault_without_sending(
     database: Database,
 ) -> None:
@@ -221,6 +491,7 @@ def test_runtime_worker_refreshes_perptape_two_venues_and_vault_without_sending(
         perptape_actor,
         persisted_feed,
         now=NOW,
+        expected_snapshot_identity=perptape_snapshot_identity(persisted_feed),
     )
     duplicate = worker.run_once()
 
@@ -385,10 +656,11 @@ def test_websocket_alert_updates_the_existing_authoritative_perptape_feed(
         api_key="integration-stream-key",
         contract_version="breakouts-v1",
         load_snapshot=queries.perptape_feed,
-        record_snapshot=lambda feed, now: service.record_perptape_feed(
+        record_snapshot=lambda feed, now, expected_snapshot_identity: service.record_perptape_feed(
             perptape_actor,
             feed,
             now=now,
+            expected_snapshot_identity=expected_snapshot_identity,
         ),
         timeout_seconds=5,
         heartbeat_timeout_seconds=45,

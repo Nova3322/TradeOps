@@ -164,6 +164,7 @@ class PerptapeFeedSnapshot:
 
 
 PerptapeEventKey = tuple[str, str, str, str, datetime | None]
+PERPTAPE_CANDIDATE_WINDOW = 2_048
 
 
 def perptape_event_key(candidate: PerptapeCandidate) -> PerptapeEventKey:
@@ -173,6 +174,160 @@ def perptape_event_key(candidate: PerptapeCandidate) -> PerptapeEventKey:
         candidate.source_direction,
         candidate.timeframe,
         candidate.triggered_at,
+    )
+
+
+def perptape_snapshot_identity(feed: PerptapeFeedSnapshot) -> str:
+    candidates = [
+        (
+            candidate.candidate_id,
+            candidate.source,
+            candidate.source_contract_version,
+            candidate.venue,
+            candidate.source_exchange,
+            candidate.symbol,
+            candidate.canonical_symbol,
+            candidate.direction.value,
+            candidate.source_direction,
+            candidate.timeframe,
+            candidate.observed_at.isoformat(),
+            (None if candidate.triggered_at is None else candidate.triggered_at.isoformat()),
+            str(candidate.reference_price),
+            None if candidate.threshold is None else str(candidate.threshold),
+            candidate.rationale,
+            candidate.data_health,
+            candidate.readiness,
+            candidate.detail_url,
+            (None if candidate.quote_volume is None else str(candidate.quote_volume)),
+            (None if candidate.open_interest is None else str(candidate.open_interest)),
+            candidate.chart_url,
+        )
+        for candidate in feed.candidates
+    ]
+    payload = {
+        "contract_version": feed.contract_version,
+        "generated_at": feed.generated_at.isoformat(),
+        "fetched_at": feed.fetched_at.isoformat(),
+        "next_allowed_at": feed.next_allowed_at.isoformat(),
+        "candidates": candidates,
+    }
+    canonical = json.dumps(
+        payload,
+        ensure_ascii=True,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+    return hashlib.sha256(canonical.encode()).hexdigest()
+
+
+def _concurrent_candidate_choice(
+    current: PerptapeCandidate,
+    incoming: PerptapeCandidate,
+) -> PerptapeCandidate:
+    current_incomplete = current.readiness == "INCOMPLETE"
+    incoming_incomplete = incoming.readiness == "INCOMPLETE"
+    if current_incomplete != incoming_incomplete:
+        incomplete = current if current_incomplete else incoming
+        completed = incoming if current_incomplete else current
+        if (
+            completed.readiness == "READY"
+            and completed.data_health == "CURRENT"
+            and completed.observed_at >= incomplete.observed_at
+        ):
+            return completed
+        return incomplete
+    return max(
+        (current, incoming),
+        key=lambda candidate: (
+            candidate.observed_at,
+            candidate.readiness == "READY",
+            candidate.data_health == "CURRENT",
+            candidate.candidate_id,
+        ),
+    )
+
+
+def bound_perptape_feed_snapshot(
+    feed: PerptapeFeedSnapshot,
+) -> PerptapeFeedSnapshot:
+    """Bound the authoritative candidate payload without evicting unresolved targets."""
+
+    unique: dict[PerptapeEventKey, PerptapeCandidate] = {}
+    for candidate in feed.candidates:
+        key = perptape_event_key(candidate)
+        existing = unique.pop(key, None)
+        unique[key] = (
+            candidate if existing is None else _concurrent_candidate_choice(existing, candidate)
+        )
+    candidates = tuple(unique.values())
+    incomplete_count = sum(candidate.readiness == "INCOMPLETE" for candidate in candidates)
+    if incomplete_count > PERPTAPE_CANDIDATE_WINDOW:
+        raise DomainRejected(
+            "PERPTAPE_STREAM_PENDING_LIMIT",
+            "Perptape unresolved alert window is full",
+        )
+    completed_slots = PERPTAPE_CANDIDATE_WINDOW - incomplete_count
+    completed = [candidate for candidate in candidates if candidate.readiness != "INCOMPLETE"]
+    selected_completed = {
+        perptape_event_key(candidate)
+        for candidate in (completed[-completed_slots:] if completed_slots > 0 else ())
+    }
+    bounded = tuple(
+        candidate
+        for candidate in candidates
+        if candidate.readiness == "INCOMPLETE"
+        or perptape_event_key(candidate) in selected_completed
+    )
+    return replace(feed, candidates=bounded)
+
+
+def merge_concurrent_perptape_feeds(
+    current: PerptapeFeedSnapshot,
+    incoming: PerptapeFeedSnapshot,
+) -> PerptapeFeedSnapshot:
+    """Merge writers that constructed snapshots from the same older database row."""
+
+    if current.contract_version != incoming.contract_version:
+        raise DomainRejected(
+            "PERPTAPE_FEED_CONFLICT",
+            "concurrent Perptape snapshots use different contracts",
+        )
+    merged: dict[PerptapeEventKey, PerptapeCandidate] = {
+        perptape_event_key(candidate): candidate for candidate in current.candidates
+    }
+    for candidate in incoming.candidates:
+        key = perptape_event_key(candidate)
+        existing = merged.get(key)
+        merged[key] = (
+            candidate if existing is None else _concurrent_candidate_choice(existing, candidate)
+        )
+    candidates = tuple(
+        sorted(
+            merged.values(),
+            key=lambda candidate: (
+                candidate.observed_at,
+                candidate.triggered_at or datetime.min.replace(tzinfo=UTC),
+                candidate.source_exchange,
+                candidate.symbol,
+                candidate.source_direction,
+                candidate.timeframe,
+                candidate.candidate_id,
+            ),
+        )
+    )
+    generated_at = max(current.generated_at, incoming.generated_at)
+    return bound_perptape_feed_snapshot(
+        PerptapeFeedSnapshot(
+            contract_version=current.contract_version,
+            generated_at=generated_at,
+            fetched_at=max(current.fetched_at, incoming.fetched_at),
+            next_allowed_at=max(
+                generated_at,
+                current.next_allowed_at,
+                incoming.next_allowed_at,
+            ),
+            candidates=candidates,
+        )
     )
 
 
@@ -186,7 +341,7 @@ def merge_incomplete_perptape_candidates(
     for candidate in preserved:
         pending.setdefault(perptape_event_key(candidate), candidate)
     if not pending:
-        return feed
+        return bound_perptape_feed_snapshot(feed)
     completed = {
         perptape_event_key(candidate)
         for candidate in feed.candidates
@@ -234,7 +389,7 @@ def merge_incomplete_perptape_candidates(
                     readiness="INCOMPLETE",
                 )
             )
-    return replace(feed, candidates=tuple(merged))
+    return bound_perptape_feed_snapshot(replace(feed, candidates=tuple(merged)))
 
 
 JsonFetcher = Callable[[str, dict[str, str], float], dict[str, Any]]
