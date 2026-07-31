@@ -21,6 +21,8 @@ from trading_control_plane.runtime import (
 @pytest.mark.parametrize(
     "invalid_time",
     [
+        datetime.max.replace(tzinfo=UTC),
+        datetime(2026, 7, 31, 8),
         datetime.min.replace(tzinfo=timezone(timedelta(hours=23, minutes=59))),
         datetime.max.replace(tzinfo=timezone(-timedelta(hours=23, minutes=59))),
     ],
@@ -35,12 +37,76 @@ def test_runtime_rejects_invalid_cycle_clock_before_database_queries(
         queries += 1
 
     worker: Any = object.__new__(RuntimeSyncWorker)
+    worker.settings = Settings(
+        database_url="postgresql+psycopg://unused:unused@127.0.0.1/unused",
+        _env_file=None,
+    )
     worker.clock = lambda: invalid_time
     worker.queries = SimpleNamespace(service_principal_by_username=principal)
 
     with pytest.raises(DomainRejected, match="PERPTAPE_DATETIME_INVALID"):
         worker.run_once()
     assert queries == 0
+
+
+@pytest.mark.parametrize(
+    "invalid_time",
+    [
+        datetime.max.replace(tzinfo=UTC),
+        datetime(2026, 7, 31, 8),
+        datetime.min.replace(tzinfo=timezone(timedelta(hours=23, minutes=59))),
+    ],
+)
+def test_runtime_rejects_invalid_completion_clock_before_database_queries(
+    invalid_time: datetime,
+) -> None:
+    queries = 0
+
+    def principal(_username: str) -> None:
+        nonlocal queries
+        queries += 1
+
+    values = iter([datetime(2026, 7, 31, tzinfo=UTC), invalid_time])
+    worker: Any = object.__new__(RuntimeSyncWorker)
+    worker.settings = Settings(
+        database_url="postgresql+psycopg://unused:unused@127.0.0.1/unused",
+        _env_file=None,
+    )
+    worker.clock = lambda: next(values)
+    worker.queries = SimpleNamespace(service_principal_by_username=principal)
+
+    with pytest.raises(DomainRejected, match="PERPTAPE_DATETIME_INVALID"):
+        worker.run_once()
+    assert queries == 0
+
+
+def test_runtime_operational_headroom_accepts_exact_boundary_only() -> None:
+    worker: Any = object.__new__(RuntimeSyncWorker)
+    worker.settings = Settings(
+        database_url="postgresql+psycopg://unused:unused@127.0.0.1/unused",
+        perptape_api_key="fixture-key",
+        perptape_cache_seconds=90,
+        runtime_sync_interval_seconds=120,
+        _env_file=None,
+    )
+    maximum = datetime.max.replace(tzinfo=UTC)
+    once_boundary = maximum - timedelta(seconds=90)
+    continuous_boundary = maximum - timedelta(seconds=120)
+
+    assert worker._normalize_runtime_time(once_boundary, continuous=False) == once_boundary
+    assert (
+        worker._normalize_runtime_time(continuous_boundary, continuous=True) == continuous_boundary
+    )
+    with pytest.raises(DomainRejected, match="PERPTAPE_DATETIME_INVALID"):
+        worker._normalize_runtime_time(
+            once_boundary + timedelta(microseconds=1),
+            continuous=False,
+        )
+    with pytest.raises(DomainRejected, match="PERPTAPE_DATETIME_INVALID"):
+        worker._normalize_runtime_time(
+            continuous_boundary + timedelta(microseconds=1),
+            continuous=True,
+        )
 
 
 def test_runtime_readiness_requires_both_source_success_and_complete_capital() -> None:
@@ -163,7 +229,11 @@ def test_runtime_https_snapshot_preserves_persisted_incomplete_stream_target() -
     )
     recorded: list[PerptapeFeedSnapshot] = []
     worker: Any = object.__new__(RuntimeSyncWorker)
-    worker.settings = SimpleNamespace(perptape_contract_version="breakouts-v1")
+    worker.settings = SimpleNamespace(
+        perptape_contract_version="breakouts-v1",
+        perptape_api_key="fixture-key",
+        perptape_cache_seconds=60,
+    )
     worker.queries = SimpleNamespace(perptape_feed=lambda: current)
     worker.perptape = SimpleNamespace(refresh=lambda **_kwargs: incoming)
     worker.service = SimpleNamespace(
@@ -298,8 +368,11 @@ def test_runtime_continuous_loop_waits_between_degraded_cycles(
     monkeypatch.setattr(
         worker,
         "run_once",
-        lambda: cycles.append("completed") or report,
+        lambda *, started_at, completed_at: (
+            cycles.append(f"{started_at.isoformat()}..{completed_at.isoformat()}") or report
+        ),
     )
+    worker.clock = lambda: datetime(2026, 7, 31, tzinfo=UTC)
 
     class StopAfterFirstWait:
         stopped = False
@@ -318,8 +391,142 @@ def test_runtime_continuous_loop_waits_between_degraded_cycles(
     stop_event = StopAfterFirstWait()
     worker.run_forever(stop_event)
 
-    assert cycles == ["completed"]
+    assert cycles == ["2026-07-31T00:00:00+00:00..2026-07-31T00:00:00+00:00"]
     assert stop_event.stopped is True
+
+
+@pytest.mark.parametrize(
+    "invalid_time",
+    [
+        datetime.max.replace(tzinfo=UTC),
+        datetime(2026, 7, 31, 8),
+        datetime.min.replace(tzinfo=timezone(timedelta(hours=23, minutes=59))),
+    ],
+)
+@pytest.mark.parametrize("failure_point", ["START", "COMPLETION"])
+def test_runtime_continuous_rejects_initial_clock_before_queries_or_stream(
+    monkeypatch: pytest.MonkeyPatch,
+    invalid_time: datetime,
+    failure_point: str,
+) -> None:
+    settings = Settings(
+        database_url="postgresql+psycopg://unused:unused@127.0.0.1/unused",
+        perptape_api_key="fixture-key",
+        perptape_websocket_enabled=True,
+        _env_file=None,
+    )
+    worker: Any = object.__new__(RuntimeSyncWorker)
+    worker.settings = settings
+    values = iter(
+        [invalid_time]
+        if failure_point == "START"
+        else [datetime(2026, 7, 31, tzinfo=UTC), invalid_time]
+    )
+    worker.clock = lambda: next(values)
+    worker._perptape_stream_thread = None
+    query_calls = 0
+    cycle_calls = 0
+    stream_calls = 0
+
+    def principal(_username: str) -> None:
+        nonlocal query_calls
+        query_calls += 1
+
+    def create_stream(**_kwargs: Any) -> None:
+        nonlocal stream_calls
+        stream_calls += 1
+
+    def run_once(*, started_at: datetime, completed_at: datetime) -> RuntimeSyncReport:
+        del started_at, completed_at
+        nonlocal cycle_calls
+        cycle_calls += 1
+        raise AssertionError("invalid initial clock must not start a cycle")
+
+    worker.queries = SimpleNamespace(service_principal_by_username=principal)
+    worker.run_once = run_once
+    monkeypatch.setattr(runtime_module, "PerptapeStreamWorker", create_stream)
+
+    class StopSpy:
+        stopped = False
+        waits = 0
+
+        def is_set(self) -> bool:
+            return self.stopped
+
+        def set(self) -> None:
+            self.stopped = True
+
+        def wait(self, _timeout: float) -> bool:
+            self.waits += 1
+            return False
+
+    stop = StopSpy()
+    with pytest.raises(DomainRejected, match="PERPTAPE_DATETIME_INVALID"):
+        worker.run_forever(stop)  # type: ignore[arg-type]
+
+    assert query_calls == 0
+    assert cycle_calls == 0
+    assert stream_calls == 0
+    assert stop.waits == 0
+    assert stop.stopped is True
+    assert worker.dependencies_in_use is False
+
+
+@pytest.mark.parametrize("failure_point", ["SCHEDULE", "NEXT_START", "NEXT_COMPLETION"])
+def test_runtime_continuous_validates_before_wait_and_each_later_cycle(
+    failure_point: str,
+) -> None:
+    settings = Settings(
+        database_url="postgresql+psycopg://unused:unused@127.0.0.1/unused",
+        runtime_sync_interval_seconds=30,
+        _env_file=None,
+    )
+    invalid = datetime.max.replace(tzinfo=UTC)
+    valid = datetime(2026, 7, 31, tzinfo=UTC)
+    clock_values = [valid, valid]
+    clock_values.append(invalid if failure_point == "SCHEDULE" else valid)
+    if failure_point != "SCHEDULE":
+        clock_values.append(invalid if failure_point == "NEXT_START" else valid)
+    if failure_point == "NEXT_COMPLETION":
+        clock_values.append(invalid)
+    values = iter(clock_values)
+    report = RuntimeSyncReport(
+        started_at="2026-07-31T00:00:00+00:00",
+        completed_at="2026-07-31T00:00:01+00:00",
+        sources={"PERPTAPE": SourceSyncResult("SUCCESS")},
+        net_worth={"complete": False},
+    )
+    worker: Any = object.__new__(RuntimeSyncWorker)
+    worker.settings = settings
+    worker.clock = lambda: next(values)
+    worker._perptape_stream_thread = None
+    cycles: list[tuple[datetime, datetime]] = []
+    worker.run_once = lambda *, started_at, completed_at: (
+        cycles.append((started_at, completed_at)) or report
+    )
+
+    class WaitSpy:
+        def __init__(self) -> None:
+            self.stopped = False
+            self.waits: list[float] = []
+
+        def is_set(self) -> bool:
+            return self.stopped
+
+        def set(self) -> None:
+            self.stopped = True
+
+        def wait(self, timeout: float) -> bool:
+            self.waits.append(timeout)
+            return False
+
+    stop = WaitSpy()
+    with pytest.raises(DomainRejected, match="PERPTAPE_DATETIME_INVALID"):
+        worker.run_forever(stop)  # type: ignore[arg-type]
+
+    assert cycles == [(valid, valid)]
+    assert stop.waits == ([] if failure_point == "SCHEDULE" else [30])
+    assert stop.stopped is True
 
 
 def test_runtime_enabled_websocket_is_started_and_joined_on_shutdown(
@@ -363,7 +570,7 @@ def test_runtime_enabled_websocket_is_started_and_joined_on_shutdown(
         sources={"PERPTAPE": SourceSyncResult("SUCCESS")},
         net_worth={"complete": False},
     )
-    worker.run_once = lambda: stop_event.set() or report
+    worker.run_once = lambda *, started_at, completed_at: stop_event.set() or report
 
     worker.run_forever(stop_event)
 

@@ -14,6 +14,7 @@ from uuid import UUID
 
 import pytest
 from httpx import ASGITransport, AsyncClient
+from sqlalchemy import event
 
 from trading_control_plane.api import create_app
 from trading_control_plane.binance import (
@@ -338,7 +339,7 @@ def test_concurrent_perptape_writers_merge_stale_snapshot_identities(
         "HTTPUSDT",
         "WSSUSDT",
     ]
-    assert persisted.fetched_at > max(http.fetched_at, wss.fetched_at)
+    assert persisted.fetched_at == max(http.fetched_at, wss.fetched_at)
 
 
 @pytest.mark.parametrize("fresh_first", [True, False])
@@ -1000,6 +1001,49 @@ def test_postgres_rejects_invalid_service_clock_without_mutating_feed(
         assert perptape_snapshot_identity(persisted) == perptape_snapshot_identity(valid)
 
 
+def test_postgres_exact_utc_max_feed_remains_updatable_at_same_fetched_at(
+    database: Database,
+) -> None:
+    service, queries, actor, client = perptape_test_service(database, "utc-max-update")
+    maximum = datetime.max.replace(tzinfo=UTC)
+    candidate = replace(
+        perptape_candidate(
+            client,
+            symbol="MAXTIMEUSDT",
+            triggered_at=NOW,
+            observed_at=NOW,
+        ),
+        triggered_at=maximum,
+        observed_at=maximum,
+    )
+    initial = perptape_feed(candidate, fetched_at=maximum)
+    updated = replace(
+        initial,
+        candidates=(replace(candidate, reference_price=Decimal("100001")),),
+    )
+
+    first_version = service.record_perptape_feed(
+        actor,
+        initial,
+        now=maximum,
+        base_snapshot=None,
+    )
+    second_version = service.record_perptape_feed(
+        actor,
+        updated,
+        now=maximum,
+        base_snapshot=initial,
+    )
+
+    persisted = queries.perptape_feed()
+    assert persisted is not None
+    assert first_version == 1
+    assert second_version == 2
+    assert persisted.fetched_at == maximum
+    assert persisted.candidates[0].reference_price == Decimal("100001")
+    assert perptape_snapshot_identity(persisted) == perptape_snapshot_identity(updated)
+
+
 def test_postgres_rejects_decimal_extremes_without_creating_feed(
     database: Database,
 ) -> None:
@@ -1029,6 +1073,55 @@ def test_postgres_rejects_decimal_extremes_without_creating_feed(
                 base_snapshot=None,
             )
         assert queries.perptape_feed() is None
+
+
+@pytest.mark.parametrize(
+    "invalid_time",
+    [
+        datetime.max.replace(tzinfo=UTC),
+        datetime(2026, 7, 31, 8),
+        datetime.min.replace(tzinfo=timezone(timedelta(hours=23, minutes=59))),
+    ],
+)
+@pytest.mark.parametrize("failure_point", ["START", "COMPLETION"])
+def test_runtime_invalid_clock_executes_zero_postgres_statements(
+    database: Database,
+    invalid_time: datetime,
+    failure_point: str,
+) -> None:
+    settings = Settings(
+        database_url="postgresql+psycopg://unused:unused@127.0.0.1/unused",
+        _env_file=None,
+    )
+    worker: Any = object.__new__(RuntimeSyncWorker)
+    worker.settings = settings
+    values = iter(
+        [invalid_time]
+        if failure_point == "START"
+        else [datetime(2026, 7, 31, tzinfo=UTC), invalid_time]
+    )
+    worker.clock = lambda: next(values)
+    worker.queries = TradingQueries(database)
+    statements: list[str] = []
+
+    def record_statement(
+        _connection: object,
+        _cursor: object,
+        statement: str,
+        _parameters: object,
+        _context: object,
+        _executemany: bool,
+    ) -> None:
+        statements.append(statement)
+
+    event.listen(database.engine, "before_cursor_execute", record_statement)
+    try:
+        with pytest.raises(DomainRejected, match="PERPTAPE_DATETIME_INVALID"):
+            worker.run_once()
+    finally:
+        event.remove(database.engine, "before_cursor_execute", record_statement)
+
+    assert statements == []
 
 
 def test_runtime_worker_refreshes_perptape_two_venues_and_vault_without_sending(

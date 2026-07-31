@@ -24,6 +24,7 @@ from trading_control_plane.perptape import (
     bound_perptape_feed_snapshot,
     merge_incomplete_perptape_candidates,
     normalize_perptape_datetime,
+    normalize_perptape_operational_datetime,
     perptape_event_key,
     validate_perptape_feed_contract,
     validate_perptape_websocket_url,
@@ -182,12 +183,18 @@ class PerptapeStreamWorker:
             ) from exc
 
     def _now(self) -> datetime:
-        return normalize_perptape_datetime(self._clock())
+        return normalize_perptape_operational_datetime(self._clock())
 
     @staticmethod
     def _add_time(value: datetime, delta: timedelta) -> datetime:
         try:
-            return normalize_perptape_datetime(value) + delta
+            return (
+                normalize_perptape_operational_datetime(
+                    value,
+                    required_headroom=delta,
+                )
+                + delta
+            )
         except (OverflowError, ValueError) as exc:
             raise DomainRejected(
                 "PERPTAPE_DATETIME_INVALID",

@@ -4,7 +4,6 @@ import base64
 import binascii
 import hashlib
 import json
-from dataclasses import replace
 from datetime import datetime, timedelta
 from decimal import Decimal
 from typing import Any, NoReturn
@@ -576,22 +575,6 @@ class TradingService:
             generated_at_utc = normalize_perptape_datetime(feed.generated_at)
             fetched_at_utc = normalize_perptape_datetime(feed.fetched_at)
             next_allowed_at_utc = normalize_perptape_datetime(feed.next_allowed_at)
-            if current is not None and fetched_at_utc <= normalize_perptape_datetime(
-                current.fetched_at
-            ):
-                try:
-                    fetched_at_utc = normalize_perptape_datetime(current.fetched_at) + timedelta(
-                        microseconds=1
-                    )
-                    feed = replace(
-                        feed,
-                        fetched_at=fetched_at_utc,
-                    )
-                except (OverflowError, ValueError) as exc:
-                    raise DomainRejected(
-                        "PERPTAPE_DATETIME_INVALID",
-                        "Perptape snapshot time cannot be advanced safely",
-                    ) from exc
             if (
                 fetched_at_utc - now_utc > MAX_FACT_CLOCK_SKEW
                 or generated_at_utc - fetched_at_utc > MAX_FACT_CLOCK_SKEW

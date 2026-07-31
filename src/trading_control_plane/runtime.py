@@ -26,9 +26,10 @@ from trading_control_plane.hyperliquid import (
 from trading_control_plane.logging import configure_logging
 from trading_control_plane.notilt import NoTiltGateway, NoTiltUsdValuator
 from trading_control_plane.perptape import (
+    PERPTAPE_OPERATIONAL_TIME_HEADROOM,
     PerptapeClient,
     merge_incomplete_perptape_candidates,
-    validate_perptape_datetime,
+    normalize_perptape_operational_datetime,
 )
 from trading_control_plane.perptape_stream import PerptapeStreamWorker
 from trading_control_plane.queries import TradingQueries
@@ -127,6 +128,41 @@ class RuntimeSyncWorker:
         close_timeout = min(transport_timeout, 5)
         return transport_timeout + close_timeout + 2
 
+    def _runtime_time_headroom(self, *, continuous: bool) -> timedelta:
+        headroom = PERPTAPE_OPERATIONAL_TIME_HEADROOM
+        if getattr(self.settings, "perptape_api_key", None) is not None:
+            headroom = max(
+                headroom,
+                timedelta(
+                    seconds=getattr(
+                        self.settings,
+                        "perptape_cache_seconds",
+                        int(PERPTAPE_OPERATIONAL_TIME_HEADROOM.total_seconds()),
+                    )
+                ),
+            )
+        if continuous:
+            headroom = max(
+                headroom,
+                timedelta(
+                    seconds=getattr(
+                        self.settings,
+                        "runtime_sync_interval_seconds",
+                        int(PERPTAPE_OPERATIONAL_TIME_HEADROOM.total_seconds()),
+                    )
+                ),
+            )
+        return headroom
+
+    def _normalize_runtime_time(self, value: datetime, *, continuous: bool) -> datetime:
+        return normalize_perptape_operational_datetime(
+            value,
+            required_headroom=self._runtime_time_headroom(continuous=continuous),
+        )
+
+    def _runtime_clock(self, *, continuous: bool) -> datetime:
+        return self._normalize_runtime_time(self.clock(), continuous=continuous)
+
     def _require_scope_match(self, scope: str, actor_id: UUID, now: datetime) -> None:
         reconciliation_id = self.service.reconcile_scope(scope, actor_id, now=now)
         if self.service.reconciliation_status(reconciliation_id) is not ReconciliationStatus.MATCH:
@@ -155,7 +191,7 @@ class RuntimeSyncWorker:
         return len(persisted)
 
     def _record_perptape(self, actor_id: UUID, now: datetime) -> int:
-        validate_perptape_datetime(now)
+        now = self._normalize_runtime_time(now, continuous=False)
         base = self.queries.perptape_feed()
         if (
             base is not None
@@ -257,9 +293,20 @@ class RuntimeSyncWorker:
         else:
             results[name] = SourceSyncResult("SUCCESS", items_observed=items_observed)
 
-    def run_once(self) -> RuntimeSyncReport:
-        started_at = self.clock()
-        validate_perptape_datetime(started_at)
+    def run_once(
+        self,
+        *,
+        started_at: datetime | None = None,
+        completed_at: datetime | None = None,
+    ) -> RuntimeSyncReport:
+        started_at = self._normalize_runtime_time(
+            self.clock() if started_at is None else started_at,
+            continuous=False,
+        )
+        completed_at = self._normalize_runtime_time(
+            self.clock() if completed_at is None else completed_at,
+            continuous=False,
+        )
         actor = self.queries.service_principal_by_username(
             self.settings.runtime_sync_service_username
         )
@@ -310,8 +357,6 @@ class RuntimeSyncWorker:
         if not self.settings.notilt_enabled or not self.settings.notilt_vaults:
             results["NOTILT"] = SourceSyncResult("SKIPPED")
 
-        completed_at = self.clock()
-        validate_perptape_datetime(completed_at)
         net_worth = self.queries.capital_center(actor.user_id)["net_worth"]
         return RuntimeSyncReport(
             started_at=started_at.isoformat(),
@@ -323,46 +368,57 @@ class RuntimeSyncWorker:
     def run_forever(self, stop_event: threading.Event) -> None:
         stream: PerptapeStreamWorker | None = None
         stream_thread: threading.Thread | None = None
-        if self.settings.perptape_websocket_enabled:
-            perptape_actor = self.queries.service_principal_by_username(
-                self.settings.perptape_service_username
-            )
-            stream = PerptapeStreamWorker(
-                client=self.perptape,
-                websocket_url=self.settings.perptape_websocket_url,
-                api_key=self.settings.perptape_api_key,
-                contract_version=self.settings.perptape_contract_version,
-                load_snapshot=self.queries.perptape_feed,
-                record_snapshot=lambda feed, now, base_snapshot: self.service.record_perptape_feed(
-                    perptape_actor.user_id,
-                    feed,
-                    now=now,
-                    base_snapshot=base_snapshot,
-                ),
-                timeout_seconds=self.settings.perptape_timeout_seconds,
-                heartbeat_timeout_seconds=(
-                    self.settings.perptape_websocket_heartbeat_timeout_seconds
-                ),
-                reconciliation_interval_seconds=(
-                    self.settings.perptape_websocket_reconciliation_seconds
-                ),
-                reconnect_initial_seconds=(
-                    self.settings.perptape_websocket_reconnect_initial_seconds
-                ),
-                reconnect_max_seconds=self.settings.perptape_websocket_reconnect_max_seconds,
-                max_reconnect_attempts=(self.settings.perptape_websocket_max_reconnect_attempts),
-                clock=self.clock,
-            )
-            stream_thread = threading.Thread(
-                target=stream.run_forever,
-                args=(stop_event,),
-                name="perptape-stream",
-            )
-            self._perptape_stream_thread = stream_thread
-            stream_thread.start()
         try:
+            if stop_event.is_set():
+                return
+            cycle_started_at = self._runtime_clock(continuous=True)
+            cycle_completed_at = self._runtime_clock(continuous=True)
+            if self.settings.perptape_websocket_enabled:
+                perptape_actor = self.queries.service_principal_by_username(
+                    self.settings.perptape_service_username
+                )
+                stream = PerptapeStreamWorker(
+                    client=self.perptape,
+                    websocket_url=self.settings.perptape_websocket_url,
+                    api_key=self.settings.perptape_api_key,
+                    contract_version=self.settings.perptape_contract_version,
+                    load_snapshot=self.queries.perptape_feed,
+                    record_snapshot=lambda feed, now, base_snapshot: (
+                        self.service.record_perptape_feed(
+                            perptape_actor.user_id,
+                            feed,
+                            now=now,
+                            base_snapshot=base_snapshot,
+                        )
+                    ),
+                    timeout_seconds=self.settings.perptape_timeout_seconds,
+                    heartbeat_timeout_seconds=(
+                        self.settings.perptape_websocket_heartbeat_timeout_seconds
+                    ),
+                    reconciliation_interval_seconds=(
+                        self.settings.perptape_websocket_reconciliation_seconds
+                    ),
+                    reconnect_initial_seconds=(
+                        self.settings.perptape_websocket_reconnect_initial_seconds
+                    ),
+                    reconnect_max_seconds=self.settings.perptape_websocket_reconnect_max_seconds,
+                    max_reconnect_attempts=(
+                        self.settings.perptape_websocket_max_reconnect_attempts
+                    ),
+                    clock=self.clock,
+                )
+                stream_thread = threading.Thread(
+                    target=stream.run_forever,
+                    args=(stop_event,),
+                    name="perptape-stream",
+                )
+                self._perptape_stream_thread = stream_thread
+                stream_thread.start()
             while not stop_event.is_set():
-                report = self.run_once()
+                report = self.run_once(
+                    started_at=cycle_started_at,
+                    completed_at=cycle_completed_at,
+                )
                 logger.info(
                     "Runtime read-only synchronization cycle completed",
                     extra={
@@ -371,7 +427,13 @@ class RuntimeSyncWorker:
                         "component": "runtime-sync",
                     },
                 )
-                stop_event.wait(self.settings.runtime_sync_interval_seconds)
+                if stop_event.is_set():
+                    break
+                self._runtime_clock(continuous=True)
+                if stop_event.wait(self.settings.runtime_sync_interval_seconds):
+                    break
+                cycle_started_at = self._runtime_clock(continuous=True)
+                cycle_completed_at = self._runtime_clock(continuous=True)
         finally:
             stop_event.set()
             if stream_thread is not None:

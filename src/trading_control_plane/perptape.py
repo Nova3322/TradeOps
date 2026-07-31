@@ -16,6 +16,7 @@ from trading_control_plane.domain import Direction, DomainRejected
 
 PERPTAPE_OFFICIAL_HOST = "perptape.com"
 PERPTAPE_WEBSOCKET_PATH = "/ws/v1/alerts"
+PERPTAPE_OPERATIONAL_TIME_HEADROOM = timedelta(seconds=30)
 # A normal full 2,048-candidate window is about 1.2-1.6 MiB; 4 MiB leaves
 # reconciliation headroom while making the authoritative JSONB payload finite.
 PERPTAPE_PAYLOAD_MAX_BYTES = 4 * 1024 * 1024
@@ -212,6 +213,23 @@ def normalize_perptape_datetime(value: datetime) -> datetime:
 
 def validate_perptape_datetime(value: datetime) -> None:
     normalize_perptape_datetime(value)
+
+
+def normalize_perptape_operational_datetime(
+    value: datetime,
+    *,
+    required_headroom: timedelta = PERPTAPE_OPERATIONAL_TIME_HEADROOM,
+) -> datetime:
+    normalized = normalize_perptape_datetime(value)
+    headroom = max(PERPTAPE_OPERATIONAL_TIME_HEADROOM, required_headroom)
+    try:
+        normalized + headroom
+    except (OverflowError, ValueError) as exc:
+        raise DomainRejected(
+            "PERPTAPE_DATETIME_INVALID",
+            "Perptape clock is outside the supported operational range",
+        ) from exc
+    return normalized
 
 
 def _validate_decimal_contract(value: Decimal) -> None:
@@ -949,15 +967,11 @@ class PerptapeClient:
     def refresh(self, *, now: datetime, force: bool = False) -> PerptapeFeedSnapshot:
         if self._api_key is None:
             raise DomainRejected("PERPTAPE_NOT_CONFIGURED", "Perptape API key is not configured")
-        now = normalize_perptape_datetime(now)
-        try:
-            _operational_deadline = now + max(self._cache_ttl, timedelta(seconds=30))
-            cache_deadline = now + self._cache_ttl
-        except (OverflowError, ValueError) as exc:
-            raise DomainRejected(
-                "PERPTAPE_DATETIME_INVALID",
-                "Perptape clock is outside the supported operational range",
-            ) from exc
+        now = normalize_perptape_operational_datetime(
+            now,
+            required_headroom=self._cache_ttl,
+        )
+        cache_deadline = now + self._cache_ttl
         with self._lock:
             if self._rate_limit_not_before is not None and now < self._rate_limit_not_before:
                 raise PerptapeRateLimited(self._rate_limit_not_before)
