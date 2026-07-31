@@ -7,6 +7,7 @@ from datetime import UTC, datetime, timedelta, timezone
 from decimal import Decimal
 from io import BytesIO
 from urllib.error import HTTPError
+from zoneinfo import ZoneInfo
 
 import pytest
 
@@ -26,6 +27,7 @@ from trading_control_plane.perptape import (
     PerptapeFeedSnapshot,
     PerptapeRateLimited,
     bound_perptape_feed_snapshot,
+    normalize_perptape_datetime,
     perptape_payload_size_bytes,
     perptape_snapshot_identity,
     validate_perptape_feed_payload,
@@ -406,18 +408,30 @@ def test_snapshot_identity_is_canonical_for_order_timezone_decimal_and_defaults(
     assert perptape_snapshot_identity(changed) != perptape_snapshot_identity(feed)
 
 
+EXTREME_POSITIVE_OFFSET = timezone(timedelta(hours=23, minutes=59))
+EXTREME_NEGATIVE_OFFSET = timezone(-timedelta(hours=23, minutes=59))
+INVALID_PERPTAPE_TIMES = [
+    pytest.param(NOW.replace(tzinfo=None), id="naive"),
+    pytest.param(datetime.min.replace(tzinfo=EXTREME_POSITIVE_OFFSET), id="min-underflow"),
+    pytest.param(datetime.max.replace(tzinfo=EXTREME_NEGATIVE_OFFSET), id="max-overflow"),
+]
+
+
+@pytest.mark.parametrize("invalid_time", INVALID_PERPTAPE_TIMES)
 @pytest.mark.parametrize(
     "field",
     ["generated_at", "fetched_at", "next_allowed_at", "observed_at", "triggered_at"],
 )
-def test_snapshot_rejects_naive_datetime_before_identity_or_sort(field: str) -> None:
+def test_snapshot_rejects_unusable_datetime_before_identity_or_sort(
+    field: str,
+    invalid_time: datetime,
+) -> None:
     feed = parsed_feed()
-    naive = NOW.replace(tzinfo=None)
     if field in {"observed_at", "triggered_at"}:
-        candidate = replace(feed.candidates[0], **{field: naive})
+        candidate = replace(feed.candidates[0], **{field: invalid_time})
         invalid = replace(feed, candidates=(candidate, *feed.candidates[1:]))
     else:
-        invalid = replace(feed, **{field: naive})
+        invalid = replace(feed, **{field: invalid_time})
 
     with pytest.raises(DomainRejected, match="PERPTAPE_DATETIME_INVALID"):
         perptape_snapshot_identity(invalid)
@@ -425,7 +439,16 @@ def test_snapshot_rejects_naive_datetime_before_identity_or_sort(field: str) -> 
         bound_perptape_feed_snapshot(invalid)
 
 
-def test_client_rejects_naive_clock_before_any_remote_request() -> None:
+@pytest.mark.parametrize(
+    "invalid_time",
+    [
+        *INVALID_PERPTAPE_TIMES,
+        pytest.param(datetime.max.replace(tzinfo=UTC), id="max-no-operational-headroom"),
+    ],
+)
+def test_client_rejects_invalid_clock_before_any_remote_request(
+    invalid_time: datetime,
+) -> None:
     calls = 0
 
     def fetch(_url: str, _headers: dict[str, str], _timeout: float) -> dict[str, object]:
@@ -442,8 +465,29 @@ def test_client_rejects_naive_clock_before_any_remote_request() -> None:
     )
 
     with pytest.raises(DomainRejected, match="PERPTAPE_DATETIME_INVALID"):
-        client.refresh(now=NOW.replace(tzinfo=None))
+        client.refresh(now=invalid_time)
     assert calls == 0
+
+
+def test_datetime_utc_normalization_accepts_exact_edges_and_dst_folds() -> None:
+    minimum_boundary = (datetime.min + timedelta(hours=23, minutes=59)).replace(
+        tzinfo=EXTREME_POSITIVE_OFFSET
+    )
+    maximum_boundary = (datetime.max - timedelta(hours=23, minutes=59)).replace(
+        tzinfo=EXTREME_NEGATIVE_OFFSET
+    )
+    assert normalize_perptape_datetime(minimum_boundary) == datetime.min.replace(tzinfo=UTC)
+    assert normalize_perptape_datetime(maximum_boundary) == datetime.max.replace(tzinfo=UTC)
+    with pytest.raises(DomainRejected, match="PERPTAPE_DATETIME_INVALID"):
+        normalize_perptape_datetime(minimum_boundary - timedelta(microseconds=1))
+    with pytest.raises(DomainRejected, match="PERPTAPE_DATETIME_INVALID"):
+        normalize_perptape_datetime(maximum_boundary + timedelta(microseconds=1))
+
+    new_york = ZoneInfo("America/New_York")
+    first_fold = datetime(2026, 11, 1, 1, 30, fold=0, tzinfo=new_york)
+    second_fold = datetime(2026, 11, 1, 1, 30, fold=1, tzinfo=new_york)
+    assert normalize_perptape_datetime(first_fold) == datetime(2026, 11, 1, 5, 30, tzinfo=UTC)
+    assert normalize_perptape_datetime(second_fold) == datetime(2026, 11, 1, 6, 30, tzinfo=UTC)
 
 
 def _feed_with_reference_price(value: Decimal) -> PerptapeFeedSnapshot:

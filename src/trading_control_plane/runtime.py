@@ -28,6 +28,7 @@ from trading_control_plane.notilt import NoTiltGateway, NoTiltUsdValuator
 from trading_control_plane.perptape import (
     PerptapeClient,
     merge_incomplete_perptape_candidates,
+    validate_perptape_datetime,
 )
 from trading_control_plane.perptape_stream import PerptapeStreamWorker
 from trading_control_plane.queries import TradingQueries
@@ -154,6 +155,7 @@ class RuntimeSyncWorker:
         return len(persisted)
 
     def _record_perptape(self, actor_id: UUID, now: datetime) -> int:
+        validate_perptape_datetime(now)
         base = self.queries.perptape_feed()
         if (
             base is not None
@@ -257,6 +259,7 @@ class RuntimeSyncWorker:
 
     def run_once(self) -> RuntimeSyncReport:
         started_at = self.clock()
+        validate_perptape_datetime(started_at)
         actor = self.queries.service_principal_by_username(
             self.settings.runtime_sync_service_username
         )
@@ -308,6 +311,7 @@ class RuntimeSyncWorker:
             results["NOTILT"] = SourceSyncResult("SKIPPED")
 
         completed_at = self.clock()
+        validate_perptape_datetime(completed_at)
         net_worth = self.queries.capital_center(actor.user_id)["net_worth"]
         return RuntimeSyncReport(
             started_at=started_at.isoformat(),

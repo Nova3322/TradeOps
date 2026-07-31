@@ -23,8 +23,9 @@ from trading_control_plane.perptape import (
     PerptapeRateLimited,
     bound_perptape_feed_snapshot,
     merge_incomplete_perptape_candidates,
+    normalize_perptape_datetime,
     perptape_event_key,
-    validate_perptape_datetime,
+    validate_perptape_feed_contract,
     validate_perptape_websocket_url,
 )
 
@@ -166,14 +167,38 @@ class PerptapeStreamWorker:
 
     @staticmethod
     def _safe_record_time(now: datetime, current: PerptapeFeedSnapshot | None) -> datetime:
-        if current is None or now > current.fetched_at:
+        now = normalize_perptape_datetime(now)
+        if current is None:
             return now
-        return current.fetched_at + timedelta(microseconds=1)
+        current_fetched_at = normalize_perptape_datetime(current.fetched_at)
+        if now > current_fetched_at:
+            return now
+        try:
+            return current_fetched_at + timedelta(microseconds=1)
+        except (OverflowError, ValueError) as exc:
+            raise DomainRejected(
+                "PERPTAPE_DATETIME_INVALID",
+                "Perptape snapshot time cannot be advanced safely",
+            ) from exc
 
     def _now(self) -> datetime:
-        now = self._clock()
-        validate_perptape_datetime(now)
-        return now
+        return normalize_perptape_datetime(self._clock())
+
+    @staticmethod
+    def _add_time(value: datetime, delta: timedelta) -> datetime:
+        try:
+            return normalize_perptape_datetime(value) + delta
+        except (OverflowError, ValueError) as exc:
+            raise DomainRejected(
+                "PERPTAPE_DATETIME_INVALID",
+                "Perptape timestamp arithmetic exceeds the supported range",
+            ) from exc
+
+    def _current_snapshot(self) -> PerptapeFeedSnapshot | None:
+        current = self._load_snapshot()
+        if current is not None:
+            validate_perptape_feed_contract(current)
+        return current
 
     def _record(
         self,
@@ -314,7 +339,7 @@ class PerptapeStreamWorker:
                 "PERPTAPE_RATE_LIMITED",
                 "Perptape exceeded the bounded rate-limit recovery sequence",
             )
-        base = self._load_snapshot()
+        base = self._current_snapshot()
         if base is not None and now < base.next_allowed_at:
             raise PerptapeRateLimited(base.next_allowed_at)
         try:
@@ -324,7 +349,7 @@ class PerptapeStreamWorker:
             self._mark_degraded(next_allowed_at=exc.next_allowed_at)
             raise
         success_generation = self._sync_remote_request_state()
-        current = self._load_snapshot()
+        current = self._current_snapshot()
         fetched_at = self._safe_record_time(feed.fetched_at, current)
         if fetched_at != feed.fetched_at:
             feed = replace(feed, fetched_at=fetched_at)
@@ -343,7 +368,7 @@ class PerptapeStreamWorker:
         return feed
 
     def _mark_degraded(self, *, next_allowed_at: datetime | None = None) -> None:
-        current = self._load_snapshot()
+        current = self._current_snapshot()
         if current is None:
             return
         candidates_already_degraded = all(
@@ -381,7 +406,7 @@ class PerptapeStreamWorker:
     def _try_backfill(self) -> bool:
         now = self._now()
         success_generation = self._sync_remote_request_state()
-        current = self._load_snapshot()
+        current = self._current_snapshot()
         had_pending_targets = bool(self._pending_completion_targets)
         if current is not None and had_pending_targets:
             self._resolve_pending_targets(
@@ -409,8 +434,11 @@ class PerptapeStreamWorker:
             if exc.code in PERPTAPE_FATAL_INPUT_ERROR_CODES:
                 self.fatal_error_code = exc.code
                 raise
-            current = self._load_snapshot()
-            retry_at = now + timedelta(seconds=self._reconnect_initial_seconds)
+            current = self._current_snapshot()
+            retry_at = self._add_time(
+                now,
+                timedelta(seconds=self._reconnect_initial_seconds),
+            )
             if current is not None:
                 retry_at = max(retry_at, current.next_allowed_at)
             if isinstance(exc, PerptapeRateLimited) and exc.next_allowed_at is not None:
@@ -430,7 +458,7 @@ class PerptapeStreamWorker:
 
     def _reconciliation_delay(self) -> float:
         delay = self._reconciliation_interval_seconds
-        current = self._load_snapshot()
+        current = self._current_snapshot()
         if current is not None:
             server_delay = (current.next_allowed_at - self._now()).total_seconds()
             delay = max(delay, server_delay)
@@ -503,8 +531,8 @@ class PerptapeStreamWorker:
                 "PERPTAPE_STREAM_MESSAGE_INVALID",
                 "Perptape WebSocket ordering metadata is invalid",
             ) from exc
-        if (sequence is not None and sequence < 0) or server_time > self._now() + timedelta(
-            seconds=30
+        if (sequence is not None and sequence < 0) or server_time > self._add_time(
+            self._now(), timedelta(seconds=30)
         ):
             raise DomainRejected(
                 "PERPTAPE_STREAM_MESSAGE_INVALID",
@@ -600,7 +628,7 @@ class PerptapeStreamWorker:
         if envelope.event_id in self._seen_event_ids:
             self.stats.duplicates_dropped += 1
             return
-        current = self._load_snapshot()
+        current = self._current_snapshot()
         preliminary = self._client.parse_stream_alert(
             envelope.payload,
             event_time=envelope.server_time,
@@ -625,7 +653,7 @@ class PerptapeStreamWorker:
         )
         if needs_completion and not existing_is_complete and allow_completion:
             if self._try_backfill():
-                current = self._load_snapshot()
+                current = self._current_snapshot()
                 if current is not None:
                     completed = next(
                         (
@@ -642,7 +670,7 @@ class PerptapeStreamWorker:
                         self._remember_event(envelope.event_id)
                         self.stats.alerts_applied += 1
                         return
-            current = self._load_snapshot()
+            current = self._current_snapshot()
             existing = None
             if current is not None:
                 existing = next(
@@ -660,7 +688,7 @@ class PerptapeStreamWorker:
         )
         if needs_completion and not existing_is_complete:
             candidate = replace(candidate, data_health="DEGRADED", readiness="INCOMPLETE")
-        current = self._load_snapshot()
+        current = self._current_snapshot()
         now = self._now()
         fetched_at = self._safe_record_time(now, current)
         candidates = {
@@ -740,7 +768,7 @@ class PerptapeStreamWorker:
                         registered_success_generation,
                     ) in self._pending_completion_targets.values()
                 ):
-                    shared = self._load_snapshot()
+                    shared = self._current_snapshot()
                     if shared is not None:
                         self._resolve_pending_targets(
                             shared,
@@ -848,7 +876,7 @@ class PerptapeStreamWorker:
             retry_not_before: datetime | None = None
             try:
                 if not startup_complete:
-                    current = self._load_snapshot()
+                    current = self._current_snapshot()
                     self._rebuild_pending_targets(current)
                     if self.fatal_error_code is not None:
                         raise DomainRejected(

@@ -1,5 +1,5 @@
 from dataclasses import replace
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime, timedelta, timezone
 from types import SimpleNamespace
 from typing import Any
 from uuid import UUID
@@ -16,6 +16,31 @@ from trading_control_plane.runtime import (
     SourceSyncResult,
     build_runtime_worker,
 )
+
+
+@pytest.mark.parametrize(
+    "invalid_time",
+    [
+        datetime.min.replace(tzinfo=timezone(timedelta(hours=23, minutes=59))),
+        datetime.max.replace(tzinfo=timezone(-timedelta(hours=23, minutes=59))),
+    ],
+)
+def test_runtime_rejects_invalid_cycle_clock_before_database_queries(
+    invalid_time: datetime,
+) -> None:
+    queries = 0
+
+    def principal(_username: str) -> None:
+        nonlocal queries
+        queries += 1
+
+    worker: Any = object.__new__(RuntimeSyncWorker)
+    worker.clock = lambda: invalid_time
+    worker.queries = SimpleNamespace(service_principal_by_username=principal)
+
+    with pytest.raises(DomainRejected, match="PERPTAPE_DATETIME_INVALID"):
+        worker.run_once()
+    assert queries == 0
 
 
 def test_runtime_readiness_requires_both_source_success_and_complete_capital() -> None:

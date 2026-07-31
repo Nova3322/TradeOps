@@ -7,7 +7,7 @@ from collections import deque
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import replace
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Any
 from uuid import UUID
@@ -890,6 +890,114 @@ def test_postgres_first_write_rejects_naive_metadata_without_creating_feed(
             base_snapshot=None,
         )
     assert queries.perptape_feed() is None
+
+
+@pytest.mark.parametrize("initial_write", [True, False])
+@pytest.mark.parametrize(
+    "invalid_time",
+    [
+        pytest.param(
+            datetime.min.replace(tzinfo=timezone(timedelta(hours=23, minutes=59))),
+            id="min-underflow",
+        ),
+        pytest.param(
+            datetime.max.replace(tzinfo=timezone(-timedelta(hours=23, minutes=59))),
+            id="max-overflow",
+        ),
+    ],
+)
+@pytest.mark.parametrize(
+    "field",
+    ["generated_at", "fetched_at", "next_allowed_at", "observed_at", "triggered_at"],
+)
+def test_postgres_rejects_utc_conversion_overflow_without_mutating_feed(
+    database: Database,
+    field: str,
+    invalid_time: datetime,
+    initial_write: bool,
+) -> None:
+    service, queries, actor, client = perptape_test_service(
+        database,
+        f"utc-overflow-{field}-{initial_write}",
+    )
+    valid = perptape_feed(
+        perptape_candidate(
+            client,
+            symbol="TIMEBOUNDARYUSDT",
+            triggered_at=NOW,
+            observed_at=NOW,
+        ),
+        fetched_at=NOW,
+    )
+    if not initial_write:
+        service.record_perptape_feed(actor, valid, now=NOW, base_snapshot=None)
+    if field in {"observed_at", "triggered_at"}:
+        invalid = replace(
+            valid,
+            candidates=(replace(valid.candidates[0], **{field: invalid_time}),),
+        )
+    else:
+        invalid = replace(valid, **{field: invalid_time})
+
+    with pytest.raises(DomainRejected, match="PERPTAPE_DATETIME_INVALID"):
+        service.record_perptape_feed(
+            actor,
+            invalid,
+            now=NOW,
+            base_snapshot=None if initial_write else valid,
+        )
+
+    persisted = queries.perptape_feed()
+    if initial_write:
+        assert persisted is None
+    else:
+        assert persisted is not None
+        assert perptape_snapshot_identity(persisted) == perptape_snapshot_identity(valid)
+
+
+@pytest.mark.parametrize("initial_write", [True, False])
+@pytest.mark.parametrize(
+    "invalid_now",
+    [
+        datetime.min.replace(tzinfo=timezone(timedelta(hours=23, minutes=59))),
+        datetime.max.replace(tzinfo=timezone(-timedelta(hours=23, minutes=59))),
+    ],
+)
+def test_postgres_rejects_invalid_service_clock_without_mutating_feed(
+    database: Database,
+    invalid_now: datetime,
+    initial_write: bool,
+) -> None:
+    service, queries, actor, client = perptape_test_service(
+        database,
+        f"invalid-service-clock-{initial_write}",
+    )
+    valid = perptape_feed(
+        perptape_candidate(
+            client,
+            symbol="SERVICECLOCKUSDT",
+            triggered_at=NOW,
+            observed_at=NOW,
+        ),
+        fetched_at=NOW,
+    )
+    if not initial_write:
+        service.record_perptape_feed(actor, valid, now=NOW, base_snapshot=None)
+
+    with pytest.raises(DomainRejected, match="PERPTAPE_DATETIME_INVALID"):
+        service.record_perptape_feed(
+            actor,
+            valid,
+            now=invalid_now,
+            base_snapshot=None if initial_write else valid,
+        )
+
+    persisted = queries.perptape_feed()
+    if initial_write:
+        assert persisted is None
+    else:
+        assert persisted is not None
+        assert perptape_snapshot_identity(persisted) == perptape_snapshot_identity(valid)
 
 
 def test_postgres_rejects_decimal_extremes_without_creating_feed(

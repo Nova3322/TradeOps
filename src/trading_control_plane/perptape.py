@@ -197,16 +197,21 @@ PerptapeEventKey = tuple[str, str, str, str, datetime | None]
 PERPTAPE_CANDIDATE_WINDOW = 2_048
 
 
-def validate_perptape_datetime(value: datetime) -> None:
+def normalize_perptape_datetime(value: datetime) -> datetime:
     try:
-        aware = isinstance(value, datetime) and value.utcoffset() is not None
+        if not isinstance(value, datetime) or value.utcoffset() is None:
+            raise ValueError("timezone-aware datetime required")
+        normalized = value.astimezone(UTC)
     except (OverflowError, TypeError, ValueError):
-        aware = False
-    if not aware:
         raise DomainRejected(
             "PERPTAPE_DATETIME_INVALID",
-            "Perptape timestamps must be timezone-aware",
-        )
+            "Perptape timestamps must be safely normalizable to UTC",
+        ) from None
+    return normalized
+
+
+def validate_perptape_datetime(value: datetime) -> None:
+    normalize_perptape_datetime(value)
 
 
 def _validate_decimal_contract(value: Decimal) -> None:
@@ -378,8 +383,7 @@ def perptape_event_key(candidate: PerptapeCandidate) -> PerptapeEventKey:
 def _canonical_datetime(value: datetime | None) -> str | None:
     if value is None:
         return None
-    validate_perptape_datetime(value)
-    return value.astimezone(UTC).isoformat(timespec="microseconds")
+    return normalize_perptape_datetime(value).isoformat(timespec="microseconds")
 
 
 def _canonical_decimal(value: Decimal | None) -> str | None:
@@ -945,7 +949,15 @@ class PerptapeClient:
     def refresh(self, *, now: datetime, force: bool = False) -> PerptapeFeedSnapshot:
         if self._api_key is None:
             raise DomainRejected("PERPTAPE_NOT_CONFIGURED", "Perptape API key is not configured")
-        validate_perptape_datetime(now)
+        now = normalize_perptape_datetime(now)
+        try:
+            _operational_deadline = now + max(self._cache_ttl, timedelta(seconds=30))
+            cache_deadline = now + self._cache_ttl
+        except (OverflowError, ValueError) as exc:
+            raise DomainRejected(
+                "PERPTAPE_DATETIME_INVALID",
+                "Perptape clock is outside the supported operational range",
+            ) from exc
         with self._lock:
             if self._rate_limit_not_before is not None and now < self._rate_limit_not_before:
                 raise PerptapeRateLimited(self._rate_limit_not_before)
@@ -1009,7 +1021,7 @@ class PerptapeClient:
                 contract_version=self._contract_version,
                 generated_at=generated_at,
                 fetched_at=now,
-                next_allowed_at=max(now + self._cache_ttl, next_allowed_at),
+                next_allowed_at=max(cache_deadline, next_allowed_at),
                 candidates=self._cached,
             )
             return self._feed
@@ -1022,7 +1034,7 @@ class PerptapeClient:
 
     @staticmethod
     def _parse_feed_times(value: dict[str, Any], *, now: datetime) -> tuple[datetime, datetime]:
-        validate_perptape_datetime(now)
+        now = normalize_perptape_datetime(now)
         try:
             generated_at = datetime.fromtimestamp(int(value["generatedAt"]) / 1000, UTC)
             rate_limit = value.get("rateLimit")
@@ -1036,7 +1048,7 @@ class PerptapeClient:
                 "PERPTAPE_RESPONSE_INVALID",
                 "Perptape feed timing metadata is invalid",
             ) from exc
-        if generated_at > now + timedelta(seconds=30) or next_allowed_at < generated_at:
+        if generated_at - now > timedelta(seconds=30) or next_allowed_at < generated_at:
             raise DomainRejected(
                 "PERPTAPE_RESPONSE_INVALID",
                 "Perptape feed timing metadata is inconsistent",
@@ -1221,7 +1233,7 @@ class PerptapeClient:
     ) -> PerptapeCandidate:
         """Map Perptape's documented short-field alert without inventing missing facts."""
 
-        validate_perptape_datetime(event_time)
+        event_time = normalize_perptape_datetime(event_time)
         if payload.get("t") is None:
             raise DomainRejected(
                 "PERPTAPE_STREAM_MESSAGE_INVALID",

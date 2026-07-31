@@ -7,7 +7,7 @@ from collections import deque
 from collections.abc import Callable, Iterator
 from contextlib import AbstractContextManager, contextmanager
 from dataclasses import replace
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime, timedelta, timezone
 from typing import Any
 
 import pytest
@@ -1834,7 +1834,24 @@ def test_extreme_decimal_alert_preserves_error_code_and_has_zero_followup_writes
     assert stream.stats.alerts_applied == 0
 
 
-def test_naive_worker_clock_stops_before_fetch_connect_or_snapshot_side_effects() -> None:
+@pytest.mark.parametrize(
+    "invalid_time",
+    [
+        pytest.param(NOW.replace(tzinfo=None), id="naive"),
+        pytest.param(
+            datetime.min.replace(tzinfo=timezone(timedelta(hours=23, minutes=59))),
+            id="min-underflow",
+        ),
+        pytest.param(
+            datetime.max.replace(tzinfo=timezone(-timedelta(hours=23, minutes=59))),
+            id="max-overflow",
+        ),
+        pytest.param(datetime.max.replace(tzinfo=UTC), id="max-no-operational-headroom"),
+    ],
+)
+def test_invalid_worker_clock_stops_before_fetch_connect_or_snapshot_side_effects(
+    invalid_time: datetime,
+) -> None:
     stop = RecordingStopEvent()
     connector = RecordingConnector([])
     store = SnapshotStore()
@@ -1842,7 +1859,41 @@ def test_naive_worker_clock_stops_before_fetch_connect_or_snapshot_side_effects(
         responses=[],
         connector=connector,
         store=store,
-        clock=lambda: NOW.replace(tzinfo=None),
+        clock=lambda: invalid_time,
+    )
+
+    stream.run_forever(stop)
+
+    assert stream.fatal_error_code == "PERPTAPE_DATETIME_INVALID"
+    assert stop.stopped is True
+    assert stop.waits == []
+    assert https_calls == []
+    assert connector.calls == []
+    assert store.writes == []
+    assert stream.stats.degraded_writes == 0
+    assert stream.stats.https_backfills == 0
+
+
+@pytest.mark.parametrize("field", ["generated_at", "fetched_at", "next_allowed_at"])
+def test_invalid_current_snapshot_time_stops_before_worker_side_effects(field: str) -> None:
+    stop = RecordingStopEvent()
+    connector = RecordingConnector([])
+    store = SnapshotStore()
+    invalid_time = datetime.min.replace(tzinfo=timezone(timedelta(hours=23, minutes=59)))
+    store.current = replace(
+        PerptapeFeedSnapshot(
+            contract_version="breakouts-v1",
+            generated_at=NOW,
+            fetched_at=NOW,
+            next_allowed_at=NOW,
+            candidates=(),
+        ),
+        **{field: invalid_time},
+    )
+    stream, https_calls = worker(
+        responses=[],
+        connector=connector,
+        store=store,
     )
 
     stream.run_forever(stop)

@@ -117,8 +117,8 @@ from trading_control_plane.perptape import (
     PerptapeFeedSnapshot,
     apply_perptape_feed_delta,
     bound_perptape_feed_snapshot,
+    normalize_perptape_datetime,
     perptape_snapshot_identity,
-    validate_perptape_datetime,
     validate_perptape_feed_payload,
 )
 
@@ -523,15 +523,18 @@ class TradingService:
         now: datetime,
         base_snapshot: PerptapeFeedSnapshot | None,
     ) -> int:
-        validate_perptape_datetime(now)
+        now_utc = normalize_perptape_datetime(now)
         feed = bound_perptape_feed_snapshot(feed)
         if base_snapshot is not None:
             base_snapshot = bound_perptape_feed_snapshot(base_snapshot)
         validate_perptape_feed_payload(feed)
+        generated_at_utc = normalize_perptape_datetime(feed.generated_at)
+        fetched_at_utc = normalize_perptape_datetime(feed.fetched_at)
+        next_allowed_at_utc = normalize_perptape_datetime(feed.next_allowed_at)
         if (
-            feed.fetched_at > now + MAX_FACT_CLOCK_SKEW
-            or feed.generated_at > feed.fetched_at + MAX_FACT_CLOCK_SKEW
-            or feed.next_allowed_at < feed.generated_at
+            fetched_at_utc - now_utc > MAX_FACT_CLOCK_SKEW
+            or generated_at_utc - fetched_at_utc > MAX_FACT_CLOCK_SKEW
+            or next_allowed_at_utc < generated_at_utc
             or any(
                 candidate.source_contract_version != feed.contract_version
                 for candidate in feed.candidates
@@ -570,15 +573,29 @@ class TradingService:
             ) == perptape_snapshot_identity(feed):
                 assert current is not None
                 return current.version
-            if current is not None and feed.fetched_at <= current.fetched_at:
-                feed = replace(
-                    feed,
-                    fetched_at=current.fetched_at + timedelta(microseconds=1),
-                )
+            generated_at_utc = normalize_perptape_datetime(feed.generated_at)
+            fetched_at_utc = normalize_perptape_datetime(feed.fetched_at)
+            next_allowed_at_utc = normalize_perptape_datetime(feed.next_allowed_at)
+            if current is not None and fetched_at_utc <= normalize_perptape_datetime(
+                current.fetched_at
+            ):
+                try:
+                    fetched_at_utc = normalize_perptape_datetime(current.fetched_at) + timedelta(
+                        microseconds=1
+                    )
+                    feed = replace(
+                        feed,
+                        fetched_at=fetched_at_utc,
+                    )
+                except (OverflowError, ValueError) as exc:
+                    raise DomainRejected(
+                        "PERPTAPE_DATETIME_INVALID",
+                        "Perptape snapshot time cannot be advanced safely",
+                    ) from exc
             if (
-                feed.fetched_at > now + MAX_FACT_CLOCK_SKEW
-                or feed.generated_at > feed.fetched_at + MAX_FACT_CLOCK_SKEW
-                or feed.next_allowed_at < feed.generated_at
+                fetched_at_utc - now_utc > MAX_FACT_CLOCK_SKEW
+                or generated_at_utc - fetched_at_utc > MAX_FACT_CLOCK_SKEW
+                or next_allowed_at_utc < generated_at_utc
             ):
                 _reject(
                     "PERPTAPE_RESPONSE_INVALID",
