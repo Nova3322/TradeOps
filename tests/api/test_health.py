@@ -104,6 +104,8 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
     assert stylesheet.status_code == 200
     assert ".sidebar[hidden] ~ .main-content" in stylesheet.text
     assert ".table-scroll-hint" in stylesheet.text
+    assert "visibility 0s linear .2s" in stylesheet.text
+    assert "visibility: visible; transition-delay: 0s" in stylesheet.text
 
     service_worker = get(app, "/sw.js")
     assert service_worker.status_code == 200
@@ -134,12 +136,16 @@ def test_web_request_lifecycle_in_node() -> None:
           "\nfunction formNumber",
         );
         const navigationSource = extract(
-          "function openMobileNav",
+          "function cancelMobileNavFocus",
           "\nfunction bindLinkedRows",
         );
         const navigationInteractionSource = extract(
-          "mobileNavToggle.addEventListener('keydown'",
+          "mobileNavToggle.addEventListener('mousedown'",
           "\nnavBackdrop.addEventListener",
+        );
+        const logoutSource = extract(
+          "document.querySelector('#logout-button')",
+          "\ndocument.querySelector('#theme-toggle')",
         );
         const unauthorizedSource = extract(
           "function handleUnauthorizedResponse",
@@ -316,11 +322,17 @@ def test_web_request_lifecycle_in_node() -> None:
         const bodyClasses = new Set();
         const sidebarAttributes = new Map();
         const toggleAttributes = new Map([["aria-expanded", "false"]]);
-        const timerCallbacks = [];
+        const frameCallbacks = [];
+        const cancelledFrames = new Set();
         const toggleListeners = new Map();
+        let nextFrameId = 1;
         let activeElement = null;
         const firstNavigationLink = {
+          isConnected: true,
           focus() { activeElement = firstNavigationLink; },
+        };
+        const logoutButton = {
+          focus() { activeElement = logoutButton; },
         };
         const toggle = {
           hidden: false,
@@ -337,14 +349,21 @@ def test_web_request_lifecycle_in_node() -> None:
               },
             },
           },
+          cancelAnimationFrame(id) { cancelledFrames.add(id); },
+          getComputedStyle() {
+            return { visibility: sidebarClasses.has("open") ? "visible" : "hidden" };
+          },
           main: { inert: false },
           matchMedia: () => ({ matches: true }),
+          mobileNavFocusFrame: null,
+          mobileNavFocusToken: 0,
           mobileNavToggle: toggle,
           navBackdrop: { hidden: true },
-          setTimeout(callback, delay) {
-            assert.equal(delay, 24);
-            timerCallbacks.push(callback);
-            return timerCallbacks.length;
+          requestAnimationFrame(callback) {
+            const id = nextFrameId;
+            nextFrameId += 1;
+            frameCallbacks.push({ id, callback });
+            return id;
           },
           session: { username: "operator" },
           sidebar: {
@@ -365,18 +384,25 @@ def test_web_request_lifecycle_in_node() -> None:
         vm.runInContext(navigationSource, navigationContext);
         vm.runInContext(navigationInteractionSource, navigationContext);
 
-        navigationContext.openMobileNav();
-        assert.equal(activeElement, null);
+        let prevented = false;
+        toggleListeners.get("mousedown")({
+          preventDefault() { prevented = true; },
+        });
+        assert.equal(prevented, true);
+        toggleListeners.get("click")();
+        toggle.focus();
+        assert.equal(activeElement, toggle);
         assert.equal(sidebarClasses.has("open"), true);
         assert.equal(navigationContext.sidebar.inert, false);
         assert.equal(sidebarAttributes.get("aria-hidden"), "false");
         assert.equal(toggleAttributes.get("aria-expanded"), "true");
         assert.equal(bodyClasses.has("nav-open"), true);
         assert.equal(navigationContext.main.inert, true);
-        toggle.focus();
-        assert.equal(activeElement, toggle);
-        timerCallbacks.shift()();
+        const coldStartFrame = frameCallbacks.shift();
+        coldStartFrame.callback();
         assert.equal(activeElement, firstNavigationLink);
+        assert.equal(navigationContext.mobileNavFocusFrame, null);
+        const navigationFocusStable = activeElement === firstNavigationLink;
 
         navigationContext.closeMobileNav();
         assert.equal(activeElement, toggle);
@@ -388,27 +414,32 @@ def test_web_request_lifecycle_in_node() -> None:
         assert.equal(navigationContext.main.inert, false);
 
         navigationContext.openMobileNav();
+        const closeStaleFrame = frameCallbacks.shift();
         navigationContext.closeMobileNav();
-        timerCallbacks.shift()();
+        assert.equal(cancelledFrames.has(closeStaleFrame.id), true);
+        closeStaleFrame.callback();
         assert.equal(activeElement, toggle);
 
         navigationContext.openMobileNav();
+        const rapidStaleFrame = frameCallbacks.shift();
         navigationContext.closeMobileNav();
         navigationContext.openMobileNav();
-        while (timerCallbacks.length) timerCallbacks.shift()();
+        const rapidCurrentFrame = frameCallbacks.shift();
+        rapidStaleFrame.callback();
+        assert.equal(activeElement, toggle);
+        rapidCurrentFrame.callback();
         assert.equal(activeElement, firstNavigationLink);
         assert.equal(sidebarClasses.has("open"), true);
 
         navigationContext.closeMobileNav();
-        let prevented = false;
+        prevented = false;
         toggleListeners.get("keydown")({
           key: "Enter",
           preventDefault() { prevented = true; },
         });
         assert.equal(prevented, true);
-        while (timerCallbacks.length) timerCallbacks.shift()();
+        frameCallbacks.shift().callback();
         assert.equal(activeElement, firstNavigationLink);
-        const navigationFocusStable = activeElement === firstNavigationLink;
         navigationContext.closeMobileNav();
 
         prevented = false;
@@ -417,7 +448,7 @@ def test_web_request_lifecycle_in_node() -> None:
           preventDefault() { prevented = true; },
         });
         assert.equal(prevented, true);
-        while (timerCallbacks.length) timerCallbacks.shift()();
+        frameCallbacks.shift().callback();
         assert.equal(activeElement, firstNavigationLink);
         navigationContext.closeMobileNav();
 
@@ -429,8 +460,27 @@ def test_web_request_lifecycle_in_node() -> None:
         assert.equal(prevented, false);
         assert.equal(sidebarClasses.has("open"), false);
 
+        navigationContext.openMobileNav();
+        const logoutStaleFrame = frameCallbacks.shift();
+        logoutButton.focus();
+        navigationContext.cancelMobileNavFocus();
+        assert.equal(cancelledFrames.has(logoutStaleFrame.id), true);
+        logoutStaleFrame.callback();
+        assert.equal(activeElement, logoutButton);
+        assert.ok(
+          logoutSource.indexOf("cancelMobileNavFocus();") <
+            logoutSource.indexOf("await api('/api/auth/logout'"),
+        );
+
+        navigationContext.closeMobileNav();
+        navigationContext.openMobileNav();
+        const desktopStaleFrame = frameCallbacks.shift();
+        toggle.focus();
         navigationContext.matchMedia = () => ({ matches: false });
         navigationContext.syncNavigationMode();
+        assert.equal(cancelledFrames.has(desktopStaleFrame.id), true);
+        desktopStaleFrame.callback();
+        assert.equal(activeElement, toggle);
         assert.equal(navigationContext.sidebar.inert, false);
         assert.equal(sidebarAttributes.get("aria-hidden"), "false");
         assert.equal(navigationContext.main.inert, false);

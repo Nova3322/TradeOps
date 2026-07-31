@@ -14,6 +14,8 @@ let opportunities = [];
 let sessionNotice = '';
 let toastTimer = null;
 let authFailureActive = false;
+let mobileNavFocusFrame = null;
+let mobileNavFocusToken = 0;
 const REQUEST_TIMEOUT_MS = 15000;
 
 const escapeHtml = (value) => String(value ?? '').replace(/[&<>'"]/g, (char) => ({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[char]));
@@ -151,8 +153,15 @@ function errorView(error, retry = true) {
   return `<section class="error-state"><div><p class="error-code">${escapeHtml(error.code || 'UNKNOWN')}</p><h2>当前事实无法读取</h2><p>${escapeHtml(error.message)}</p>${retry ? '<button class="secondary" data-retry>重新读取</button>' : ''}</div></section>`;
 }
 
+function cancelMobileNavFocus() {
+  mobileNavFocusToken += 1;
+  if (mobileNavFocusFrame !== null) cancelAnimationFrame(mobileNavFocusFrame);
+  mobileNavFocusFrame = null;
+}
+
 function openMobileNav() {
   if (!session || !matchMedia('(max-width: 980px)').matches) return;
+  cancelMobileNavFocus();
   sidebar.classList.add('open');
   sidebar.inert = false;
   sidebar.setAttribute('aria-hidden', 'false');
@@ -160,14 +169,24 @@ function openMobileNav() {
   mobileNavToggle.setAttribute('aria-expanded', 'true');
   document.body.classList.add('nav-open');
   main.inert = true;
-  setTimeout(() => {
-    if (sidebar.classList.contains('open') && !sidebar.inert) {
-      sidebar.querySelector('nav a')?.focus();
-    }
-  }, 24);
+  const focusToken = mobileNavFocusToken;
+  mobileNavFocusFrame = requestAnimationFrame(() => {
+    if (focusToken !== mobileNavFocusToken) return;
+    mobileNavFocusFrame = null;
+    const target = sidebar.querySelector('nav a');
+    if (
+      session &&
+      sidebar.classList.contains('open') &&
+      !sidebar.hidden &&
+      !sidebar.inert &&
+      getComputedStyle(sidebar).visibility === 'visible' &&
+      target?.isConnected
+    ) target.focus();
+  });
 }
 
 function closeMobileNav({restoreFocus = true} = {}) {
+  cancelMobileNavFocus();
   const mobile = matchMedia('(max-width: 980px)').matches;
   sidebar.classList.remove('open');
   navBackdrop.hidden = true;
@@ -182,6 +201,7 @@ function closeMobileNav({restoreFocus = true} = {}) {
 function syncNavigationMode() {
   if (matchMedia('(max-width: 980px)').matches) closeMobileNav({restoreFocus:false});
   else {
+    cancelMobileNavFocus();
     sidebar.inert = sidebar.hidden;
     sidebar.setAttribute('aria-hidden', String(sidebar.hidden));
     navBackdrop.hidden = true;
@@ -870,6 +890,7 @@ document.addEventListener('click', (event) => {
 });
 window.addEventListener('popstate', route);
 window.addEventListener('resize', syncNavigationMode);
+mobileNavToggle.addEventListener('mousedown', (event) => event.preventDefault());
 mobileNavToggle.addEventListener('click', () => sidebar.classList.contains('open') ? closeMobileNav() : openMobileNav());
 mobileNavToggle.addEventListener('keydown', (event) => {
   if (!['Enter', ' '].includes(event.key)) return;
@@ -888,6 +909,7 @@ document.querySelector('#system-proposal-form').addEventListener('submit', async
   catch (error) { showApiError(error, form.querySelector('#system-form-error')); }
 });
 document.querySelector('#logout-button').addEventListener('click', async (event) => withPending(event.currentTarget, '退出中…', async () => {
+  cancelMobileNavFocus();
   try {
     await api('/api/auth/logout', {method:'POST'});
     session = null;

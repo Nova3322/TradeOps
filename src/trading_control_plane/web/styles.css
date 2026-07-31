@@ -176,8 +176,8 @@ dialog::backdrop { background: rgba(4, 12, 10, .56); backdrop-filter: blur(3px);
   .brand small, .identity-chip { display: none; }
   .mobile-nav-toggle:not([hidden]) { min-height: 42px; display: inline-flex; align-items: center; justify-content: center; border: 1px solid var(--line); border-radius: 10px; padding: 0 13px; background: var(--panel); color: var(--ink); font-weight: 750; cursor: pointer; }
   .nav-backdrop:not([hidden]) { display: block; position: fixed; z-index: 19; inset: 68px 0 0; border: 0; padding: 0; background: rgba(4, 12, 10, .48); backdrop-filter: blur(2px); }
-  .sidebar { position: fixed; z-index: 20; top: 68px; bottom: 0; left: 0; width: min(360px, calc(100% - 54px)); height: auto; padding: 18px 16px max(18px, env(safe-area-inset-bottom)); border: 0; border-right: 1px solid var(--line); background: var(--panel); box-shadow: var(--shadow); transform: translateX(-105%); visibility: hidden; transition: transform .2s ease, visibility .2s ease; }
-  .sidebar.open { transform: translateX(0); visibility: visible; }
+  .sidebar { position: fixed; z-index: 20; top: 68px; bottom: 0; left: 0; width: min(360px, calc(100% - 54px)); height: auto; padding: 18px 16px max(18px, env(safe-area-inset-bottom)); border: 0; border-right: 1px solid var(--line); background: var(--panel); box-shadow: var(--shadow); transform: translateX(-105%); visibility: hidden; transition: transform .2s ease, visibility 0s linear .2s; }
+  .sidebar.open { transform: translateX(0); visibility: visible; transition-delay: 0s; }
   .sidebar nav { display: grid; gap: 6px; overflow-y: auto; }
   .sidebar nav a { min-height: 48px; display: flex; gap: 12px; padding: 11px 13px; font-size: 14px; }
   .sidebar-foot { display: grid; margin-top: 18px; }
@@ -198,8 +198,8 @@ dialog::backdrop { background: rgba(4, 12, 10, .56); backdrop-filter: blur(3px);
   .brand small, .identity-chip, .env-badge { display: none; }
   .mobile-nav-toggle:not([hidden]) { min-height: 42px; display: inline-flex; align-items: center; justify-content: center; border: 1px solid var(--line); border-radius: 10px; padding: 0 13px; background: var(--panel); color: var(--ink); font-weight: 750; cursor: pointer; }
   .nav-backdrop:not([hidden]) { display: block; position: fixed; z-index: 19; inset: 64px 0 0; border: 0; padding: 0; background: rgba(4, 12, 10, .48); backdrop-filter: blur(2px); }
-  .sidebar { position: fixed; z-index: 20; top: 64px; bottom: 0; left: 0; width: min(340px, calc(100% - 34px)); height: auto; padding: 18px 16px max(18px, env(safe-area-inset-bottom)); border: 0; border-right: 1px solid var(--line); background: var(--panel); box-shadow: var(--shadow); transform: translateX(-105%); visibility: hidden; transition: transform .2s ease, visibility .2s ease; }
-  .sidebar.open { transform: translateX(0); visibility: visible; }
+  .sidebar { position: fixed; z-index: 20; top: 64px; bottom: 0; left: 0; width: min(340px, calc(100% - 34px)); height: auto; padding: 18px 16px max(18px, env(safe-area-inset-bottom)); border: 0; border-right: 1px solid var(--line); background: var(--panel); box-shadow: var(--shadow); transform: translateX(-105%); visibility: hidden; transition: transform .2s ease, visibility 0s linear .2s; }
+  .sidebar.open { transform: translateX(0); visibility: visible; transition-delay: 0s; }
   .sidebar nav { display: grid; gap: 6px; overflow-y: auto; }
   .sidebar nav a { min-height: 48px; display: flex; gap: 12px; padding: 11px 13px; font-size: 14px; }
   .sidebar nav a span { font-size: 17px; }
