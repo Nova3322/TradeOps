@@ -267,6 +267,15 @@ class CapitalTransferCreateRequest(BaseModel):
     idempotency_key: str = Field(min_length=1, max_length=160)
 
 
+class NoTiltReceiptRequest(BaseModel):
+    transaction_hash: str = Field(pattern=r"^0x[0-9a-fA-F]{64}$")
+
+    @field_validator("transaction_hash")
+    @classmethod
+    def normalize_transaction_hash(cls, value: str) -> str:
+        return value.lower()
+
+
 class CapitalTransferObservationRequest(BaseModel):
     status: Literal[
         "IN_FLIGHT",

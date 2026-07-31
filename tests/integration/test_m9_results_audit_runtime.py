@@ -146,7 +146,7 @@ def test_results_are_environment_separated_and_derive_costs_curve_and_audit(
 
     runtime = queries.runtime_snapshot(ids["operator"])
     assert runtime["database_ready"] is True
-    assert runtime["schema_revision"] == "20260731_0002"
+    assert runtime["schema_revision"] == "20260731_0003"
     assert runtime["business_table_count"] == 26
     assert set(runtime["capability_gates"]) == {
         "LIVE_ORDER_SEND",

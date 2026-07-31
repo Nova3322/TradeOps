@@ -87,6 +87,24 @@ def executor(payload: dict[str, Any]) -> dict[str, Any]:
         return transaction("executeWhitelistRelease")
     if operation == "prepare-release-cancellation":
         return transaction("cancelWhitelistRelease")
+    if operation == "verify-receipt":
+        return {
+            "receiptKind": payload["receiptKind"],
+            "chainId": 42161,
+            "chain": "arbitrum",
+            "transactionHash": payload["transactionHash"],
+            "vault": VAULT,
+            "agent": AGENT,
+            "blockNumber": "123",
+            "blockTimestamp": "1785480000",
+            "confirmations": "20",
+            "asset": "USDC",
+            "requestId": REQUEST_ID,
+            "netAmount": "0.99",
+            "fee": "0.01",
+            "executeAfter": "1785480010",
+            "expiresAt": "1785483600",
+        }
     raise AssertionError(operation)
 
 
@@ -146,6 +164,65 @@ def test_gateway_maps_only_constrained_unsigned_transactions() -> None:
     assert all(item.value == 0 for item in (*deposit, request, execution, cancellation))
 
 
+def test_gateway_maps_verified_receipt_without_accepting_signing_material() -> None:
+    gateway = NoTiltGateway(executor=executor)
+    tx_hash = f"0x{'b' * 64}"
+
+    receipt = gateway.verify_receipt(
+        chain_id=42161,
+        vault=VAULT,
+        agent=AGENT,
+        receipt_kind="RELEASE_REQUEST",
+        transaction_hash=tx_hash,
+        min_confirmations=20,
+        asset="USDC",
+        amount="0.99",
+    )
+
+    assert receipt.transaction_hash == tx_hash
+    assert receipt.request_id == REQUEST_ID
+    assert receipt.net_amount == Decimal("0.99")
+    assert receipt.fee == Decimal("0.01")
+    assert receipt.confirmations == 20
+
+
+def test_gateway_maps_exact_deposit_receipt_amounts() -> None:
+    tx_hash = f"0x{'c' * 64}"
+
+    def deposit_executor(payload: dict[str, Any]) -> dict[str, Any]:
+        assert payload["receiptKind"] == "DEPOSIT"
+        return {
+            "receiptKind": "DEPOSIT",
+            "chainId": 42161,
+            "chain": "arbitrum",
+            "transactionHash": tx_hash.upper(),
+            "vault": VAULT,
+            "agent": AGENT,
+            "blockNumber": "124",
+            "blockTimestamp": "1785480001",
+            "confirmations": "21",
+            "asset": "USDC",
+            "requestedAmount": "1.00",
+            "creditedAmount": "1.00",
+        }
+
+    receipt = NoTiltGateway(executor=deposit_executor).verify_receipt(
+        chain_id=42161,
+        vault=VAULT,
+        agent=AGENT,
+        receipt_kind="DEPOSIT",
+        transaction_hash=tx_hash,
+        min_confirmations=20,
+        asset="USDC",
+        amount="1",
+    )
+
+    assert receipt.transaction_hash == tx_hash
+    assert receipt.requested_amount == Decimal("1.00")
+    assert receipt.credited_amount == Decimal("1.00")
+    assert receipt.request_id is None
+
+
 @pytest.mark.parametrize("chain_id", [0, 10, 421614])
 def test_gateway_rejects_non_production_chains_before_external_call(chain_id: int) -> None:
     gateway = NoTiltGateway(executor=lambda _payload: pytest.fail("executor must not run"))
@@ -175,6 +252,79 @@ def test_gateway_rejects_invalid_budget_and_transaction_shapes() -> None:
     )
     with pytest.raises(DomainRejected, match="NOTILT_RESPONSE_INVALID"):
         invalid_transaction.prepare_release_request(
+            chain_id=42161,
+            vault=VAULT,
+            agent=AGENT,
+            asset="USDC",
+            amount="1",
+        )
+
+
+def test_gateway_fails_closed_for_incomplete_protocol_responses() -> None:
+    incomplete_receipt = NoTiltGateway(executor=lambda _payload: {"receiptKind": "DEPOSIT"})
+    with pytest.raises(DomainRejected, match="NOTILT_RESPONSE_INVALID"):
+        incomplete_receipt.verify_receipt(
+            chain_id=42161,
+            vault=VAULT,
+            agent=AGENT,
+            receipt_kind="DEPOSIT",
+            transaction_hash=f"0x{'d' * 64}",
+            min_confirmations=20,
+        )
+
+    invalid_assignment = NoTiltGateway(
+        executor=lambda _payload: {"assignedVault": "0x0", "active": True}
+    )
+    with pytest.raises(DomainRejected, match="NOTILT_RESPONSE_INVALID"):
+        invalid_assignment.resolve_assignment(42161, AGENT)
+
+    empty_budgets = NoTiltGateway(
+        executor=lambda _payload: {
+            "chain": "arbitrum",
+            "vault": VAULT,
+            "agent": AGENT,
+            "budgets": [],
+        }
+    )
+    with pytest.raises(DomainRejected, match="NOTILT_RESPONSE_INVALID"):
+        empty_budgets.read_vault(42161, VAULT, AGENT)
+
+    malformed_budget = NoTiltGateway(
+        executor=lambda _payload: {
+            "chain": "arbitrum",
+            "vault": VAULT,
+            "agent": AGENT,
+            "budgets": ["not-a-budget"],
+        }
+    )
+    with pytest.raises(DomainRejected, match="NOTILT_RESPONSE_INVALID"):
+        malformed_budget.read_vault(42161, VAULT, AGENT)
+
+    missing_deposit = NoTiltGateway(executor=lambda _payload: {"transactions": []})
+    with pytest.raises(DomainRejected, match="NOTILT_RESPONSE_INVALID"):
+        missing_deposit.prepare_deposit(
+            chain_id=42161,
+            vault=VAULT,
+            agent=AGENT,
+            asset="USDC",
+            amount="1",
+        )
+
+    malformed_deposit = NoTiltGateway(
+        executor=lambda _payload: {"transactions": [transaction("deposit"), "invalid"]}
+    )
+    with pytest.raises(DomainRejected, match="NOTILT_RESPONSE_INVALID"):
+        malformed_deposit.prepare_deposit(
+            chain_id=42161,
+            vault=VAULT,
+            agent=AGENT,
+            asset="USDC",
+            amount="1",
+        )
+
+    missing_release = NoTiltGateway(executor=lambda _payload: {"transaction": None})
+    with pytest.raises(DomainRejected, match="NOTILT_RESPONSE_INVALID"):
+        missing_release.prepare_release_request(
             chain_id=42161,
             vault=VAULT,
             agent=AGENT,

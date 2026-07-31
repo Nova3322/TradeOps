@@ -419,6 +419,7 @@ def application(
     venue: str,
     binance: BinancePortfolioMarginClient | None = None,
     hyperliquid: HyperliquidLiveClient | None = None,
+    perptape_client: PerptapeClient | None = None,
 ) -> FastAPI:
     settings = Settings(
         environment="test",
@@ -435,7 +436,7 @@ def application(
         "1111111111111111111111111111111111111111111111111111111111111111",
         _env_file=None,
     )
-    perptape = PerptapeClient(
+    perptape = perptape_client or PerptapeClient(
         base_url="https://perptape.invalid",
         api_key=None,
         contract_version="breakouts-v1",
@@ -698,6 +699,372 @@ async def exercise_hyperliquid_live(database: Database) -> None:
             CapabilityStatus.DISABLED,
             "integration fixture complete",
             ids["admin"],
+            now=datetime.now(UTC),
+        )
+
+
+async def exercise_perptape_binance_live_lifecycle(database: Database) -> None:
+    service = TradingService(database)
+    account_id = "acct-perptape-live"
+    venue_name = "BINANCE"
+    admin = service.bootstrap_admin("perptape-live-admin", now=NOW)
+    proposer = service.create_user("perptape-live-proposer", admin, now=NOW)
+    reviewer_one = service.create_user("perptape-live-reviewer-1", admin, now=NOW)
+    reviewer_two = service.create_user("perptape-live-reviewer-2", admin, now=NOW)
+    operator = service.create_user("perptape-live-operator", admin, now=NOW)
+    perptape_actor = service.create_service_principal("perptape", admin, now=NOW)
+    for user_id, role in (
+        (proposer, Role.PROPOSER),
+        (reviewer_one, Role.REVIEWER),
+        (reviewer_two, Role.REVIEWER),
+        (operator, Role.OPERATOR),
+        (perptape_actor, Role.PROPOSER),
+    ):
+        service.assign_role(user_id, role, admin, account_id, venue_name, now=NOW)
+    instrument = service.register_instrument(
+        actor_id=admin,
+        venue=venue_name,
+        symbol="XRPUSDT",
+        tick_size=Decimal("0.0001"),
+        lot_size=Decimal("0.1"),
+        minimum_notional=Decimal(5),
+        contract_multiplier=Decimal(1),
+        quote_currency="USDT",
+        collateral_currency="USDT",
+        protection_supported=True,
+        now=NOW,
+    )
+    service.set_risk_policy(
+        actor_id=admin,
+        version="perptape-live-risk-v1",
+        system_state=SystemRiskState.NORMAL,
+        max_total_risk=Decimal(100),
+        max_fact_age=timedelta(minutes=10),
+        now=NOW,
+    )
+    service.record_position(
+        account_id,
+        venue_name,
+        instrument,
+        Decimal(0),
+        Decimal(0),
+        Decimal(10),
+        True,
+        operator,
+        environment=ExecutionEnvironment.LIVE,
+        now=NOW,
+    )
+    service.record_account_equity(
+        account_id,
+        venue_name,
+        Decimal(100),
+        Decimal(90),
+        "USDT",
+        True,
+        operator,
+        environment=ExecutionEnvironment.LIVE,
+        now=NOW,
+    )
+    candidate_time = int(datetime.now(UTC).timestamp() * 1000)
+    candidate_state = {
+        "triggered_at": candidate_time - 1_000,
+        "updated_at": candidate_time,
+        "price": 10,
+    }
+
+    def perptape_fetcher(_url: str, _headers: dict[str, str], _timeout: float) -> dict[str, Any]:
+        return {
+            "type": "breakouts",
+            "generatedAt": candidate_state["updated_at"],
+            "data": [
+                {
+                    "exchange": "BN",
+                    "symbol": "XRPUSDT",
+                    "canonicalSymbol": "XRP",
+                    "direction": "HH",
+                    "timeframe": "1h",
+                    "price": candidate_state["price"],
+                    "breakoutPrice": candidate_state["price"],
+                    "threshold": 9.9,
+                    "klineReadiness": {"status": "ready"},
+                    "triggeredAt": candidate_state["triggered_at"],
+                    "updatedAt": candidate_state["updated_at"],
+                }
+            ],
+        }
+
+    perptape = PerptapeClient(
+        base_url="https://perptape.invalid",
+        api_key="fixture-contract-key",
+        contract_version="breakouts-v1",
+        cache_ttl=timedelta(minutes=5),
+        fetcher=perptape_fetcher,
+    )
+    venue = PortfolioMarginVenue()
+    execution = BinancePortfolioMarginClient(
+        base_url="https://papi.binance.com",
+        api_key="fixture-key",
+        api_secret="fixture-secret",  # noqa: S106
+        requester=venue,
+        server_time_fetcher=lambda _timeout: int(datetime.now(UTC).timestamp() * 1000),
+    )
+    async with AsyncClient(
+        transport=ASGITransport(
+            app=application(
+                database,
+                venue="BINANCE",
+                binance=execution,
+                perptape_client=perptape,
+            )
+        ),
+        base_url="http://test",
+    ) as http:
+        await login(http, "perptape-live-proposer")
+        candidate_response = await http.get("/api/opportunities")
+        assert candidate_response.status_code == 200, candidate_response.text
+        candidate = candidate_response.json()["data"][0]
+        proposal_response = await http.post(
+            f"/api/opportunities/{candidate['candidate_id']}/proposals",
+            json={
+                "environment": "LIVE",
+                "account_id": account_id,
+                "risk_tier": "HIGH",
+                "quantity": "2",
+                "initial_quantity": "1",
+                "max_risk": "5",
+                "expires_in_minutes": 120,
+                "invalidation_price": "9",
+                "allow_auto_add": True,
+                "requested_adds": 1,
+                "add_trigger_price": "10.5",
+                "rationale": "Perptape production lifecycle contract",
+            },
+        )
+        assert proposal_response.status_code == 200, proposal_response.text
+        proposal_id = UUID(proposal_response.json()["proposal_id"])
+        assert proposal_response.json()["source_candidate_id"] == candidate["candidate_id"]
+        await http.post("/api/auth/logout")
+
+        service.review_proposal(
+            proposal_id,
+            reviewer_one,
+            ReviewDecision.APPROVE,
+            "first independent review",
+            now=NOW,
+        )
+        service.review_proposal(
+            proposal_id,
+            reviewer_two,
+            ReviewDecision.APPROVE,
+            "second independent review",
+            now=NOW,
+        )
+        service.decide_risk(
+            proposal_id=proposal_id,
+            actor_id=operator,
+            kind=IntentKind.INITIAL,
+            idempotency_key="perptape-live-risk",
+            now=NOW,
+        )
+        authorization = service.issue_authorization(
+            proposal_id=proposal_id,
+            actor_id=operator,
+            expires_at=NOW + timedelta(minutes=30),
+            allowed_adds=1,
+            idempotency_key="perptape-live-authorization",
+            now=NOW,
+        )
+        opening = service.create_order_intent(
+            authorization,
+            operator,
+            IntentKind.INITIAL,
+            account_id,
+            venue_name,
+            instrument,
+            Direction.LONG,
+            Decimal(1),
+            "perptape-live-opening",
+            now=NOW,
+        )
+        service.set_capability_gate(
+            "LIVE_ORDER_SEND",
+            CapabilityStatus.ENABLED,
+            "Perptape lifecycle integration fixture",
+            admin,
+            now=NOW,
+        )
+        service.set_capability_gate(
+            "AUTO_ADD",
+            CapabilityStatus.ENABLED,
+            "Perptape lifecycle integration fixture",
+            admin,
+            now=NOW,
+        )
+        await login(http, "perptape-live-operator")
+        lease_response = await http.post(
+            "/api/sender-leases",
+            json={
+                "execution_scope": f"LIVE:{account_id}:{venue_name}",
+                "owner_id": "perptape-live-worker",
+                "lease_seconds": 300,
+            },
+        )
+        lease = lease_response.json()
+        action = {
+            "execution_scope": lease["execution_scope"],
+            "owner_id": lease["owner_id"],
+            "fencing_token": lease["fencing_token"],
+        }
+        opening_send = await http.post(
+            f"/api/intents/{opening.intent_id}/binance/live/send",
+            json=action,
+        )
+        opening_duplicate = await http.post(
+            f"/api/intents/{opening.intent_id}/binance/live/send",
+            json=action,
+        )
+        assert opening_send.status_code == opening_duplicate.status_code == 200
+        assert venue.write_count == 1
+
+        fact_now = datetime.now(UTC)
+        position_id = service.record_position(
+            account_id,
+            venue_name,
+            instrument,
+            Decimal(1),
+            Decimal(10),
+            Decimal(11),
+            True,
+            operator,
+            environment=ExecutionEnvironment.LIVE,
+            now=fact_now,
+        )
+        service.record_protection(
+            position_id,
+            "perptape-live-stop-1",
+            Decimal(1),
+            Decimal(9),
+            True,
+            operator,
+            now=fact_now,
+        )
+        candidate_state["triggered_at"] += 1
+        candidate_state["updated_at"] = int(datetime.now(UTC).timestamp() * 1000)
+        candidate_state["price"] = 11
+        perptape._cached_at = None
+        campaign_path = f"/api/campaigns/{opening.campaign_id}"
+        add_candidates = await http.get(f"{campaign_path}/add-candidates")
+        assert add_candidates.status_code == 200, add_candidates.text
+        add_candidate = add_candidates.json()["data"][0]
+        add = await http.post(
+            f"{campaign_path}/auto-add",
+            json={
+                "candidate_id": add_candidate["candidate_id"],
+                "quantity": "0.5",
+                "idempotency_key": "perptape-live-add",
+            },
+        )
+        assert add.status_code == 200, add.text
+        add_send = await http.post(
+            f"/api/intents/{add.json()['intent_id']}/binance/live/send",
+            json=action,
+        )
+        assert add_send.status_code == 200, add_send.text
+        assert venue.write_count == 2
+
+        fact_now = datetime.now(UTC)
+        service.record_position(
+            account_id,
+            venue_name,
+            instrument,
+            Decimal("1.5"),
+            Decimal("10.333333333333333333"),
+            Decimal(11),
+            True,
+            operator,
+            environment=ExecutionEnvironment.LIVE,
+            now=fact_now,
+        )
+        service.record_protection(
+            position_id,
+            "perptape-live-stop-2",
+            Decimal("1.5"),
+            Decimal(9),
+            True,
+            operator,
+            now=fact_now,
+        )
+        reduction = await http.post(
+            f"{campaign_path}/managed-reductions",
+            json={
+                "target_quantity": "1",
+                "urgency": "URGENT",
+                "reason": "verified production reduction",
+                "idempotency_key": "perptape-live-reduction",
+            },
+        )
+        assert reduction.status_code == 200, reduction.text
+        assert reduction.json()["detail"]["intents"][-1]["reduce_only"] is True
+        reduction_send = await http.post(
+            f"/api/intents/{reduction.json()['intent_id']}/binance/live/send",
+            json=action,
+        )
+        assert reduction_send.status_code == 200, reduction_send.text
+        assert venue.write_count == 3
+
+        fact_now = datetime.now(UTC)
+        service.record_position(
+            account_id,
+            venue_name,
+            instrument,
+            Decimal(1),
+            Decimal("10.333333333333333333"),
+            Decimal("8.5"),
+            True,
+            operator,
+            environment=ExecutionEnvironment.LIVE,
+            now=fact_now,
+        )
+        exit_response = await http.post(
+            f"{campaign_path}/automatic-exit",
+            json={"idempotency_key": "perptape-live-exit"},
+        )
+        assert exit_response.status_code == 200, exit_response.text
+        assert exit_response.json()["triggered"] is True
+        exit_intent = exit_response.json()["detail"]["intents"][-1]
+        assert exit_intent["kind"] == "EXIT"
+        assert exit_intent["reduce_only"] is True
+        exit_send = await http.post(
+            f"/api/intents/{exit_intent['intent_id']}/binance/live/send",
+            json=action,
+        )
+        exit_duplicate = await http.post(
+            f"/api/intents/{exit_intent['intent_id']}/binance/live/send",
+            json=action,
+        )
+        assert exit_send.status_code == exit_duplicate.status_code == 200
+        assert venue.write_count == 4
+        detail = await http.get(campaign_path)
+        assert detail.status_code == 200
+        assert [item["kind"] for item in detail.json()["intents"]] == [
+            "INITIAL",
+            "ADD",
+            "REDUCE",
+            "EXIT",
+        ]
+
+        service.set_capability_gate(
+            "AUTO_ADD",
+            CapabilityStatus.DISABLED,
+            "Perptape lifecycle integration fixture complete",
+            admin,
+            now=datetime.now(UTC),
+        )
+        service.set_capability_gate(
+            "LIVE_ORDER_SEND",
+            CapabilityStatus.DISABLED,
+            "Perptape lifecycle integration fixture complete",
+            admin,
             now=datetime.now(UTC),
         )
 
@@ -1186,6 +1553,12 @@ def test_hyperliquid_live_flow_is_gated_idempotent_fenced_and_cleans_protection(
     database: Database,
 ) -> None:
     asyncio.run(exercise_hyperliquid_live(database))
+
+
+def test_perptape_live_candidate_runs_open_add_reduce_and_exit_through_binance_adapter(
+    database: Database,
+) -> None:
+    asyncio.run(exercise_perptape_binance_live_lifecycle(database))
 
 
 @pytest.mark.parametrize(

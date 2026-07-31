@@ -48,7 +48,7 @@
 | 执行 | [OMS/VenueAdapter 规范](04-execution/OMS-Freqtrade-VenueAdapter执行规范.md) | 唯一订单所有权的长期合同；当前已有两个默认关闭的窄 TESTNET 适配合同，不存在通用 Freqtrade 平台 |
 | 执行 | [Binance 验收清单](04-execution/Binance执行认证清单.md) | 未来发布验证清单，不是证书软件平台需求 |
 | 执行 | [Hyperliquid 验收清单](04-execution/Hyperliquid执行认证清单.md) | 未来发布验证清单，不是证书软件平台需求 |
-| 执行 | [Vault 与 CTO](04-execution/Vault与CTO资金规范.md) | NoTilt 三链只读、统一净值和未签名交易交接已实现；真实划转 Gate 关闭 |
+| 执行 | [Vault 与 CTO](04-execution/Vault与CTO资金规范.md) | NoTilt 三链只读、统一净值、持久化未签名计划和链上回执验证已实现；真实划转 Gate 关闭 |
 | 质量 | [安全与威胁模型](05-quality/安全与威胁模型.md) | 一般安全原则和风险边界 |
 | 质量 | [测试验证与发布计划](05-quality/测试验证与发布计划.md) | 按已实现端到端流程逐步扩展验证 |
 | 运维 | [SLO/Runbook](06-operations/SLO可观测性故障恢复与Runbook.md) | 故障降级、恢复和未来生产运维 |

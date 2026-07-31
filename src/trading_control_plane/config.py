@@ -96,6 +96,9 @@ class Settings(BaseSettings):
     notilt_bsc_vault_address: str | None = None
     notilt_arbitrum_vault_address: str | None = None
     notilt_gateway_timeout_seconds: int = Field(default=30, ge=5, le=120)
+    notilt_ethereum_min_confirmations: int = Field(default=12, ge=1, le=128)
+    notilt_bsc_min_confirmations: int = Field(default=15, ge=1, le=128)
+    notilt_arbitrum_min_confirmations: int = Field(default=20, ge=1, le=128)
 
     @property
     def hyperliquid_effective_account_address(self) -> str | None:
@@ -115,6 +118,14 @@ class Settings(BaseSettings):
                 (42161, self.notilt_arbitrum_vault_address),
             )
             if address is not None
+        }
+
+    @property
+    def notilt_min_confirmations(self) -> dict[int, int]:
+        return {
+            1: self.notilt_ethereum_min_confirmations,
+            56: self.notilt_bsc_min_confirmations,
+            42161: self.notilt_arbitrum_min_confirmations,
         }
 
     @field_validator("database_url")

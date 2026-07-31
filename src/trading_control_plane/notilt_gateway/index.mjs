@@ -1,14 +1,28 @@
 // Signing-free NoTilt SDK boundary used by the Python control plane.
 import {
   createNoTiltClient,
+  formatAssetAmount,
+  getContractAbi,
   getProductionDeployment,
   parseAssetAmount,
   serializeUnsignedTransaction,
 } from "@notilt/sdk";
-import { getAddress, isAddress, zeroAddress } from "viem";
+import {
+  decodeFunctionData,
+  getAddress,
+  isAddress,
+  parseEventLogs,
+  zeroAddress,
+} from "viem";
 import { pathToFileURL } from "node:url";
 
 const SUPPORTED_CHAIN_IDS = new Set([1, 56, 42161]);
+const RECEIPT_KINDS = new Set([
+  "DEPOSIT",
+  "RELEASE_REQUEST",
+  "RELEASE_EXECUTION",
+  "RELEASE_CANCELLATION",
+]);
 const SUPPORTED_OPERATIONS = new Set([
   "resolve-assignment",
   "verify-deployment",
@@ -17,7 +31,9 @@ const SUPPORTED_OPERATIONS = new Set([
   "prepare-release-request",
   "prepare-release-execution",
   "prepare-release-cancellation",
+  "verify-receipt",
 ]);
+const vaultAbi = getContractAbi("vault");
 
 function requireObject(value) {
   if (value === null || typeof value !== "object" || Array.isArray(value)) {
@@ -46,6 +62,28 @@ function requireRequestId(value) {
     throw new Error("requestId must be a bytes32 value.");
   }
   return value;
+}
+
+function requireTransactionHash(value) {
+  if (typeof value !== "string" || !/^0x[0-9a-fA-F]{64}$/.test(value)) {
+    throw new Error("transactionHash must be a 32-byte transaction hash.");
+  }
+  return value;
+}
+
+function requireReceiptKind(value) {
+  if (typeof value !== "string" || !RECEIPT_KINDS.has(value)) {
+    throw new Error("receiptKind is not supported.");
+  }
+  return value;
+}
+
+function requireConfirmations(value) {
+  const confirmations = Number(value);
+  if (!Number.isInteger(confirmations) || confirmations < 1 || confirmations > 128) {
+    throw new Error("minConfirmations must be an integer from 1 through 128.");
+  }
+  return confirmations;
 }
 
 function requireAsset(deployment, value) {
@@ -97,6 +135,160 @@ function serializeBudget(budget, asset) {
   };
 }
 
+function sameAddress(left, right) {
+  return getAddress(left).toLowerCase() === getAddress(right).toLowerCase();
+}
+
+function matchingEvent(receipt, vault, eventName) {
+  const parsed = parseEventLogs({
+    abi: vaultAbi,
+    logs: receipt.logs.filter((log) => sameAddress(log.address, vault)),
+    eventName,
+    strict: true,
+  });
+  if (parsed.length !== 1) {
+    throw new Error(`Receipt must contain exactly one ${eventName} event from the Vault.`);
+  }
+  return parsed[0];
+}
+
+async function verifyReceipt(client, deployment, input) {
+  const receiptKind = requireReceiptKind(input.receiptKind);
+  const transactionHash = requireTransactionHash(input.transactionHash);
+  const minConfirmations = requireConfirmations(input.minConfirmations);
+  const vault = requireAddress(input.vault, "vault");
+  const agent = requireAddress(input.agent, "agent");
+  const [transaction, receipt, latestBlock] = await Promise.all([
+    client.publicClient.getTransaction({ hash: transactionHash }),
+    client.publicClient.getTransactionReceipt({ hash: transactionHash }),
+    client.publicClient.getBlock(),
+  ]);
+  if (receipt.status !== "success") {
+    throw new Error("NoTilt transaction reverted.");
+  }
+  if (
+    !sameAddress(transaction.from, agent) ||
+    !transaction.to ||
+    !sameAddress(transaction.to, vault)
+  ) {
+    throw new Error("Receipt transaction sender or Vault target does not match.");
+  }
+  if (transaction.chainId !== undefined && Number(transaction.chainId) !== deployment.chainId) {
+    throw new Error("Receipt transaction belongs to a different chain.");
+  }
+  if (
+    receipt.transactionHash.toLowerCase() !== transactionHash.toLowerCase() ||
+    receipt.blockNumber > latestBlock.number
+  ) {
+    throw new Error("Receipt identity or block height is invalid.");
+  }
+  const confirmations = latestBlock.number - receipt.blockNumber + 1n;
+  if (confirmations < BigInt(minConfirmations)) {
+    throw new Error(
+      `Receipt has ${confirmations} confirmations; ${minConfirmations} are required.`,
+    );
+  }
+  const receiptBlock = await client.publicClient.getBlock({
+    blockNumber: receipt.blockNumber,
+  });
+  const decoded = decodeFunctionData({ abi: vaultAbi, data: transaction.input });
+  const base = {
+    receiptKind,
+    chainId: deployment.chainId,
+    chain: deployment.key,
+    transactionHash,
+    vault,
+    agent,
+    blockNumber: receipt.blockNumber.toString(),
+    blockTimestamp: receiptBlock.timestamp.toString(),
+    confirmations: confirmations.toString(),
+  };
+
+  if (receiptKind === "RELEASE_EXECUTION" || receiptKind === "RELEASE_CANCELLATION") {
+    const expectedFunction =
+      receiptKind === "RELEASE_EXECUTION"
+        ? "executeWhitelistRelease"
+        : "cancelWhitelistRelease";
+    const eventName =
+      receiptKind === "RELEASE_EXECUTION"
+        ? "WhitelistReleaseExecuted"
+        : "WhitelistReleaseCancelled";
+    const requestId = requireRequestId(input.requestId);
+    if (
+      decoded.functionName !== expectedFunction ||
+      decoded.args?.length !== 1 ||
+      String(decoded.args[0]).toLowerCase() !== requestId.toLowerCase()
+    ) {
+      throw new Error(`Receipt is not the expected ${expectedFunction} call.`);
+    }
+    const event = matchingEvent(receipt, vault, eventName);
+    if (String(event.args.requestId).toLowerCase() !== requestId.toLowerCase()) {
+      throw new Error(`${eventName} request identity does not match.`);
+    }
+    return { ...base, requestId };
+  }
+
+  const asset = requireAsset(deployment, input.asset);
+  const amount = requireAmount(input.amount, asset.decimals);
+  if (receiptKind === "DEPOSIT") {
+    if (
+      decoded.functionName !== "deposit" ||
+      decoded.args?.length !== 2 ||
+      !sameAddress(String(decoded.args[0]), asset.address) ||
+      BigInt(decoded.args[1]) !== amount
+    ) {
+      throw new Error("Receipt is not the expected NoTilt deposit call.");
+    }
+    const expectedValue = asset.native ? amount : 0n;
+    if (transaction.value !== expectedValue) {
+      throw new Error("Deposit transaction native value does not match.");
+    }
+    const event = matchingEvent(receipt, vault, "Deposit");
+    if (
+      !sameAddress(event.args.vault, vault) ||
+      !sameAddress(event.args.asset, asset.address) ||
+      !sameAddress(event.args.from, agent) ||
+      event.args.requestedAmount !== amount ||
+      event.args.creditedAmount !== amount
+    ) {
+      throw new Error("Deposit event does not match the authorized transfer.");
+    }
+    return {
+      ...base,
+      asset: asset.symbol,
+      requestedAmount: formatAssetAmount(amount, asset.decimals),
+      creditedAmount: formatAssetAmount(event.args.creditedAmount, asset.decimals),
+    };
+  }
+
+  if (
+    decoded.functionName !== "requestWhitelistRelease" ||
+    decoded.args?.length !== 2 ||
+    !sameAddress(String(decoded.args[0]), asset.address) ||
+    BigInt(decoded.args[1]) !== amount ||
+    transaction.value !== 0n
+  ) {
+    throw new Error("Receipt is not the expected NoTilt release request call.");
+  }
+  const event = matchingEvent(receipt, vault, "WhitelistReleaseRequested");
+  if (
+    !sameAddress(event.args.requester, agent) ||
+    !sameAddress(event.args.asset, asset.address) ||
+    event.args.netAmount !== amount
+  ) {
+    throw new Error("Whitelist release request event does not match.");
+  }
+  return {
+    ...base,
+    asset: asset.symbol,
+    requestId: event.args.requestId,
+    netAmount: formatAssetAmount(event.args.netAmount, asset.decimals),
+    fee: formatAssetAmount(event.args.fee, asset.decimals),
+    executeAfter: event.args.executeAfter.toString(),
+    expiresAt: event.args.expiresAt.toString(),
+  };
+}
+
 export async function executeOperation(rawInput, dependencies = {}) {
   const input = requireObject(rawInput);
   if (typeof input.operation !== "string" || !SUPPORTED_OPERATIONS.has(input.operation)) {
@@ -109,6 +301,10 @@ export async function executeOperation(rawInput, dependencies = {}) {
     createNoTiltClient({
       deployment,
     });
+
+  if (input.operation === "verify-receipt") {
+    return verifyReceipt(client, deployment, input);
+  }
 
   if (input.operation === "verify-deployment") {
     const result = await client.verifyDeployment();

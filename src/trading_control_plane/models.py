@@ -315,6 +315,22 @@ class CapitalTransfer(Base):
             "net_received IS NULL OR net_received > 0",
             name="ck_capital_transfers_net_positive",
         ),
+        CheckConstraint(
+            "transport IN ('MOCK','NOTILT')",
+            name="ck_capital_transfers_transport",
+        ),
+        CheckConstraint(
+            "chain_id IS NULL OR chain_id IN (1,56,42161)",
+            name="ck_capital_transfers_chain",
+        ),
+        CheckConstraint(
+            "transport_state IS NULL OR transport_state IN ("
+            "'DEPOSIT_PLAN_READY','DEPOSIT_CONFIRMED',"
+            "'RELEASE_REQUEST_PLAN_READY','RELEASE_REQUEST_CONFIRMED',"
+            "'RELEASE_EXECUTION_PLAN_READY','RELEASE_EXECUTION_CONFIRMED',"
+            "'RELEASE_CANCELLATION_PLAN_READY','RELEASE_CANCELLED')",
+            name="ck_capital_transfers_transport_state",
+        ),
         Index("ix_capital_transfers_status_updated", "status", "updated_at"),
     )
 
@@ -341,6 +357,22 @@ class CapitalTransfer(Base):
     net_received: Mapped[Decimal | None] = mapped_column(AMOUNT, nullable=True)
     external_transfer_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
     transaction_reference: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    transport: Mapped[str] = mapped_column(String(16), nullable=False, default="MOCK")
+    chain_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    transport_state: Mapped[str | None] = mapped_column(String(48), nullable=True)
+    planned_transactions: Mapped[list[dict[str, Any]]] = mapped_column(
+        JSONB, nullable=False, default=list
+    )
+    confirmed_transaction_hashes: Mapped[list[str]] = mapped_column(
+        JSONB, nullable=False, default=list
+    )
+    protocol_request_id: Mapped[str | None] = mapped_column(String(66), nullable=True)
+    protocol_execute_after: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    protocol_expires_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     reconciliation_status: Mapped[str] = mapped_column(String(32), nullable=False)
     reconciliation_details: Mapped[list[str]] = mapped_column(JSONB, nullable=False)
     actor_id: Mapped[str] = mapped_column(String(255), nullable=False)

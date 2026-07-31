@@ -3,9 +3,15 @@ import test from "node:test";
 
 import {
   createNoTiltClient,
+  getContractAbi,
   getProductionDeployment,
 } from "@notilt/sdk";
-import { zeroAddress } from "viem";
+import {
+  encodeAbiParameters,
+  encodeEventTopics,
+  encodeFunctionData,
+  zeroAddress,
+} from "viem";
 
 import { executeOperation } from "../src/trading_control_plane/notilt_gateway/index.mjs";
 
@@ -16,9 +22,36 @@ const owner = "0x3333333333333333333333333333333333333333";
 const otherVault = "0x4444444444444444444444444444444444444444";
 const otherAgent = "0x5555555555555555555555555555555555555555";
 const requestId = `0x${"a".repeat(64)}`;
+const transactionHash = `0x${"b".repeat(64)}`;
+const vaultAbi = getContractAbi("vault");
+
+function eventLog(eventName, indexedArgs, dataTypes = [], dataValues = []) {
+  return {
+    address: vault,
+    blockHash: `0x${"c".repeat(64)}`,
+    blockNumber: 123n,
+    data:
+      dataTypes.length === 0
+        ? "0x"
+        : encodeAbiParameters(
+            dataTypes.map((type) => ({ type })),
+            dataValues,
+          ),
+    logIndex: 0,
+    removed: false,
+    topics: encodeEventTopics({
+      abi: vaultAbi,
+      eventName,
+      args: indexedArgs,
+    }),
+    transactionHash,
+    transactionIndex: 0,
+  };
+}
 
 function publicClient(overrides = {}) {
   const state = {
+    chainId: deployment.chainId,
     official: true,
     active: true,
     assigned: vault,
@@ -43,15 +76,33 @@ function publicClient(overrides = {}) {
       1n,
       1n,
     ],
+    latestBlock: 123n,
+    receiptBlockTimestamp: 1_990n,
+    transaction: undefined,
+    receipt: undefined,
     ...overrides,
   };
   return {
-    chain: { id: deployment.chainId },
-    async getBlock() {
-      return { number: 123n, timestamp: state.blockTimestamp };
+    chain: { id: state.chainId },
+    async getBlock(input = {}) {
+      if (input.blockNumber !== undefined) {
+        return {
+          number: input.blockNumber,
+          timestamp: state.receiptBlockTimestamp,
+        };
+      }
+      return { number: state.latestBlock, timestamp: state.blockTimestamp };
     },
     async getBalance() {
       return state.balance;
+    },
+    async getTransaction() {
+      if (!state.transaction) throw new Error("transaction not configured");
+      return state.transaction;
+    },
+    async getTransactionReceipt() {
+      if (!state.receipt) throw new Error("receipt not configured");
+      return state.receipt;
     },
     async readContract(input) {
       switch (input.functionName) {
@@ -87,9 +138,33 @@ function publicClient(overrides = {}) {
   };
 }
 
+function receiptClient({ functionName, args, value = 0n, logs, ...overrides }) {
+  return client({
+    latestBlock: 130n,
+    transaction: {
+      chainId: 42161,
+      from: agent,
+      to: vault,
+      input: encodeFunctionData({ abi: vaultAbi, functionName, args }),
+      value,
+    },
+    receipt: {
+      blockNumber: 123n,
+      logs,
+      status: "success",
+      transactionHash,
+    },
+    ...overrides,
+  });
+}
+
 function client(overrides = {}) {
+  const selectedDeployment =
+    overrides.chainId === undefined
+      ? deployment
+      : getProductionDeployment(overrides.chainId);
   return createNoTiltClient({
-    deployment,
+    deployment: selectedDeployment,
     publicClient: publicClient(overrides),
   });
 }
@@ -105,6 +180,22 @@ test("read-vault returns catalog assets and single-block budget metadata", async
   assert.equal(result.budgets[1].isActiveWhitelist, true);
   assert.equal(result.budgets[1].maxReleaseNet, "100000000");
   assert.equal(result.budgets[1].blockNumber, "123");
+});
+
+test("the constrained read path covers Ethereum, BNB Smart Chain, and Arbitrum", async () => {
+  for (const [chainId, chain] of [
+    [1, "ethereum"],
+    [56, "bsc"],
+    [42161, "arbitrum"],
+  ]) {
+    const result = await executeOperation(
+      { operation: "read-vault", chainId, vault, agent },
+      { client: client({ chainId }) },
+    );
+    assert.equal(result.chainId, chainId);
+    assert.equal(result.chain, chain);
+    assert.equal(result.budgets.length, 3);
+  }
 });
 
 test("agent release request rejects every invalid budget condition", async () => {
@@ -328,4 +419,137 @@ test("assignment lookup only reads the official registry binding", async () => {
     { client: client({ assigned: zeroAddress }) },
   );
   assert.equal(unassigned.active, false);
+});
+
+test("deposit receipt verification requires exact call, event, sender, and confirmations", async () => {
+  const asset = deployment.assets[1];
+  const amount = 25_000_000n;
+  const logs = [
+    eventLog(
+      "Deposit",
+      { vault, asset: asset.address, from: agent },
+      ["uint256", "uint256"],
+      [amount, amount],
+    ),
+  ];
+  const input = {
+    operation: "verify-receipt",
+    receiptKind: "DEPOSIT",
+    chainId: 42161,
+    vault,
+    agent,
+    asset: "USDC",
+    amount: "25",
+    transactionHash,
+    minConfirmations: 8,
+  };
+  const verified = await executeOperation(input, {
+    client: receiptClient({
+      functionName: "deposit",
+      args: [asset.address, amount],
+      logs,
+    }),
+  });
+  assert.equal(verified.creditedAmount, "25");
+  assert.equal(verified.confirmations, "8");
+
+  await assert.rejects(
+    executeOperation(input, {
+      client: receiptClient({
+        functionName: "deposit",
+        args: [asset.address, amount],
+        logs,
+        latestBlock: 129n,
+      }),
+    }),
+    /confirmations/,
+  );
+  await assert.rejects(
+    executeOperation(input, {
+      client: receiptClient({
+        functionName: "deposit",
+        args: [asset.address, amount],
+        logs,
+        transaction: {
+          chainId: 42161,
+          from: otherAgent,
+          to: vault,
+          input: encodeFunctionData({
+            abi: vaultAbi,
+            functionName: "deposit",
+            args: [asset.address, amount],
+          }),
+          value: 0n,
+        },
+      }),
+    }),
+    /sender or Vault target/,
+  );
+});
+
+test("release request receipt returns the authoritative request window and fee", async () => {
+  const asset = deployment.assets[1];
+  const amount = 990_000n;
+  const fee = 10_000n;
+  const logs = [
+    eventLog(
+      "WhitelistReleaseRequested",
+      { requestId, requester: agent, asset: asset.address },
+      ["uint256", "uint256", "uint256", "uint256"],
+      [amount, fee, 2_050n, 2_500n],
+    ),
+  ];
+  const verified = await executeOperation(
+    {
+      operation: "verify-receipt",
+      receiptKind: "RELEASE_REQUEST",
+      chainId: 42161,
+      vault,
+      agent,
+      asset: "USDC",
+      amount: "0.99",
+      transactionHash,
+      minConfirmations: 8,
+    },
+    {
+      client: receiptClient({
+        functionName: "requestWhitelistRelease",
+        args: [asset.address, amount],
+        logs,
+      }),
+    },
+  );
+  assert.equal(verified.requestId, requestId);
+  assert.equal(verified.netAmount, "0.99");
+  assert.equal(verified.fee, "0.01");
+  assert.equal(verified.executeAfter, "2050");
+  assert.equal(verified.expiresAt, "2500");
+});
+
+test("release execution and cancellation receipts are fixed to the recorded request", async () => {
+  for (const [receiptKind, functionName, eventName] of [
+    ["RELEASE_EXECUTION", "executeWhitelistRelease", "WhitelistReleaseExecuted"],
+    ["RELEASE_CANCELLATION", "cancelWhitelistRelease", "WhitelistReleaseCancelled"],
+  ]) {
+    const verified = await executeOperation(
+      {
+        operation: "verify-receipt",
+        receiptKind,
+        chainId: 42161,
+        vault,
+        agent,
+        requestId,
+        transactionHash,
+        minConfirmations: 8,
+      },
+      {
+        client: receiptClient({
+          functionName,
+          args: [requestId],
+          logs: [eventLog(eventName, { requestId })],
+        }),
+      },
+    );
+    assert.equal(verified.requestId, requestId);
+  }
 });

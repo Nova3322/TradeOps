@@ -1,7 +1,7 @@
 # Trading 交易系统
 
 > 状态日期：2026-07-31
-> 当前状态：两场所受控 LIVE 订单闭环、Perptape 主站读取、统一 LIVE 净值和 NoTilt 三链只读/未签名交易边界已实现；所有危险能力仍默认关闭
+> 当前状态：两场所受控 LIVE 订单闭环、Perptape 主站读取、统一 LIVE 净值和 NoTilt 三链只读/持久化未签名计划/链上回执验证边界已实现；所有危险能力仍默认关闭
 
 本项目面向一个资本所有者、一个内部组织和多个内部用户。用户可以提交和审核提案、查看仓位、处理异常；系统在风险可控的前提下辅助执行交易并判断是否赚钱。不开放外部注册，不管理第三方资金，不建设机构级多租户、通用合规或通用认证平台。
 
@@ -37,12 +37,12 @@
 
 - 进程：`uv run trading-api`
 - Web/PWA：提案/审核、Campaign、AUTO_ADD 候选、原子减仓/退出、全局只收紧风险动作、`/venues/binance` 只读场所事实页、`/capital` 两场所/Vault/总净值资金中心和 `/results` 实际结果/审计/运行状态页；Hyperliquid 当前只有 HTTP 入口，没有专属页面
-- HTTP：健康检查、内部会话、Perptape 主站机会与可选 LIVE Proposal、Proposal/Review/Risk/Authorization、SHADOW/TESTNET/LIVE Campaign、AUTO_ADD/减仓/退出、资金事实/提案/授权、NoTilt 三链状态/同步/未签名交易计划、按环境结果/审计/运行状态，以及 Binance、Hyperliquid Core 的只读、TESTNET 与受控 LIVE API
+- HTTP：健康检查、内部会话、Perptape 主站机会与可选 LIVE Proposal、Proposal/Review/Risk/Authorization、SHADOW/TESTNET/LIVE Campaign、AUTO_ADD/减仓/退出、资金事实/提案/授权、NoTilt 三链状态/同步/持久化未签名计划/回执确认、按环境结果/审计/运行状态，以及 Binance、Hyperliquid Core 的只读、TESTNET 与受控 LIVE API
 - 内部业务：`trading_control_plane.service.TradingService`
 - 纯计算：`evaluate_risk`、`select_target_position`、`compute_pnl`
 - 数据库：PostgreSQL，Alembic head `20260731_0002`
 - 场所边界：`binance.py`/`binance_execution.py` 覆盖标准 USDⓈ-M 只读/TESTNET，以及 Unified Account 官方 PAPI 的 LIVE 只读和执行；`hyperliquid.py`/`hyperliquid_execution.py` 覆盖 Core Info、TESTNET 与 LIVE Exchange。Hyperliquid “市价”固定为带冻结价格边界的 IOC，不使用隐含滑点；主账户默认、子账户显式配置。HIP-3、保证金控制和资金写入口不存在，数据库中的 `LIVE_ORDER_SEND` 初始仍为 `DISABLED`
-- 资金边界：`capital.py` 提供 SHADOW/TESTNET Mock 提交和自动候选计算；`notilt.py` 通过官方 `@notilt/sdk` 固定支持 Ethereum、BNB Smart Chain、Arbitrum One，只读取官方部署/Registry/Vault 并生成 `{chainId,to,data,value}` 未签名交易。服务没有 NoTilt 私钥字段，不签名、不广播，也不暴露 owner、白名单管理、Panic 或 Full Exit 能力；真实 `CAPITAL_TRANSFER` 与两个自动资金 Gate 均保持 `DISABLED`
+- 资金边界：`capital.py` 提供 SHADOW/TESTNET Mock 提交和自动候选计算；`notilt.py` 通过官方 `@notilt/sdk` 固定支持 Ethereum、BNB Smart Chain、Arbitrum One，只读取官方部署/Registry/Vault、生成并持久化 `{chainId,to,data,value}` 未签名交易，并从可信生产 RPC 校验发送者、目标、函数、参数、事件、区块时间和逐链确认深度。服务没有 NoTilt 私钥字段，不签名、不广播，也不暴露 owner、白名单管理、Panic 或 Full Exit 能力；真实 `CAPITAL_TRANSFER` 与两个自动资金 Gate 均保持 `DISABLED`
 
 正式身份源按冻结决策使用托管 IdP 与 Passkey，但外部 IdP 尚未接入。本地/测试环境可显式启用仅识别已存在内部用户的 Mock 会话和 Mock step-up；生产环境硬拒绝启用 Mock 身份。Perptape 使用其现有 `GET /api/v1/breakouts` 窄合同，需单独配置平台 API Key，未配置时机会入口明确返回不可用。
 
@@ -52,7 +52,7 @@ Binance TESTNET 订单还必须单独配置 `TRADING_BINANCE_TESTNET_ORDER_SEND_
 
 Hyperliquid Core 默认使用 `TRADING_HYPERLIQUID_ACCOUNT_ADDRESS` 指定的主账户；若只配置 API Wallet，系统通过官方 `userRole` 解析所属主账户。只有显式设置 `TRADING_HYPERLIQUID_SUBACCOUNT_ADDRESS` 时，事实与动作才切换到子账户并在 Exchange 请求携带 `vaultAddress`。只读同步必须开启 `TRADING_HYPERLIQUID_READ_ONLY_ENABLED=true`；LIVE 还必须同时设置 `TRADING_HYPERLIQUID_LIVE_ORDER_SEND_ENABLED=true`、本地 API Wallet 私钥和数据库 `LIVE_ORDER_SEND` Gate。私钥只从运行环境读取且不写入仓库或日志。2026-07-31 的最小主网实证验证了主账户解析、显式价格 IOC、稳定 cloid 幂等、fencing、trigger 保护、退出、保护取消、对账、PnL 和最终空仓；实证结束后 Gate 已关闭。
 
-NoTilt 只保存公开 whitelist agent 与逐链 Vault 地址。配置 `TRADING_NOTILT_ENABLED=true` 后，可查询 Registry assignment；只有相应 `TRADING_NOTILT_*_VAULT_ADDRESS` 已配置、官方 Vault 身份匹配、事实和 USD 估值新鲜时才写入 LIVE 资金事实。Vault、Binance 和 Hyperliquid 的已确认 USD 净值合并展示并进入同环境管理资本上限；源端预留从管理资本扣除，未知或过期来源使新增风险 fail closed。当前 Arbitrum assignment 尚未激活且未提供 Vault 地址，因此资金中心把 Vault 标记为缺失，不能生成划转计划。即使条件齐备，LIVE 计划仍要求两名不同 Treasury Reviewer、短期授权、空仓/无订单/对账门和显式 `CAPITAL_TRANSFER` Gate；最终签名与广播必须在独立钱包完成。
+NoTilt 只保存公开 whitelist agent 与逐链 Vault 地址。配置 `TRADING_NOTILT_ENABLED=true` 后，可查询 Registry assignment；只有相应 `TRADING_NOTILT_*_VAULT_ADDRESS` 已配置、官方 Vault 身份匹配、事实和 USD 估值新鲜时才写入 LIVE 资金事实。Vault、Binance 和 Hyperliquid 的已确认 USD 净值合并展示并进入同环境管理资本上限；源端预留从管理资本扣除，未知或过期来源使新增风险 fail closed。当前 Arbitrum assignment 尚未激活且未提供 Vault 地址，因此资金中心把 Vault 标记为缺失，不能生成划转计划。即使条件齐备，LIVE 计划仍要求两名不同 Treasury Reviewer、短期授权、空仓/无订单/对账门和显式 `CAPITAL_TRANSFER` Gate；计划跨重启保持一致，重复回执幂等且 tx hash 不能跨划转复用。Vault 释放请求按授权最小净到账构造，gross 只作为净额加费用的源端上限；超出费用授权时只能进入人工处理并生成取消计划。最终签名与广播必须在独立钱包完成。
 
 ## 本地开发
 

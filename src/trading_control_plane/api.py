@@ -41,6 +41,7 @@ from trading_control_plane.api_schemas import (
     ManualProposalRequest,
     MockLoginRequest,
     MockStepUpRequest,
+    NoTiltReceiptRequest,
     OrderIntentRequest,
     PositionFactRequest,
     ProtectionFactRequest,
@@ -2852,6 +2853,30 @@ def create_app(
             )
         return chain_id
 
+    def sync_configured_notilt_vault(
+        chain_id: int,
+        actor_id: UUID,
+        *,
+        now: datetime,
+    ) -> tuple[int, dict[str, Any]]:
+        agent, vault = configured_notilt_scope(chain_id)
+        snapshot = resolved_notilt.read_vault(chain_id, vault, agent)
+        valuations = {
+            budget.asset: resolved_notilt_valuator.value(
+                budget.asset,
+                budget.balance,
+                now=now,
+            )
+            for budget in snapshot.budgets
+        }
+        fact_ids = service().record_notilt_vault_snapshot(
+            actor_id=actor_id,
+            snapshot=snapshot,
+            valuations=valuations,
+            now=now,
+        )
+        return len(fact_ids), queries().capital_center(actor_id)
+
     @app.get("/api/notilt/status")
     def notilt_status(
         identity: SessionIdentity = identity_dependency,
@@ -2902,28 +2927,17 @@ def create_app(
         chain_id: int,
         identity: SessionIdentity = identity_dependency,
     ) -> dict[str, Any]:
-        agent, vault = configured_notilt_scope(chain_id)
         now = _now()
-        snapshot = resolved_notilt.read_vault(chain_id, vault, agent)
-        valuations = {
-            budget.asset: resolved_notilt_valuator.value(
-                budget.asset,
-                budget.balance,
-                now=now,
-            )
-            for budget in snapshot.budgets
-        }
-        fact_ids = service().record_notilt_vault_snapshot(
-            actor_id=identity.user_id,
-            snapshot=snapshot,
-            valuations=valuations,
+        fact_count, capital = sync_configured_notilt_vault(
+            chain_id,
+            identity.user_id,
             now=now,
         )
         return {
             "transport": "NOTILT_OFFICIAL_SDK_READ_ONLY",
             "chain_id": chain_id,
-            "facts_recorded": len(fact_ids),
-            "data": queries().capital_center(identity.user_id),
+            "facts_recorded": fact_count,
+            "data": capital,
         }
 
     @app.get("/api/capital")
@@ -3027,6 +3041,8 @@ def create_app(
                         "enabled": resolved_settings.notilt_enabled,
                         "gateway_available": resolved_notilt.available,
                         "configured_chains": sorted(resolved_settings.notilt_vaults),
+                        "receipt_verification": True,
+                        "min_confirmations": resolved_settings.notilt_min_confirmations,
                         "credential_custody": "EXTERNAL_WALLET",
                         "broadcast_supported": False,
                     },
@@ -3327,6 +3343,30 @@ def create_app(
             now=now,
             allow_live_unsigned=True,
         )
+        existing = queries().capital_transfer_detail(identity.user_id, transfer_id)
+        if (
+            existing["transport_state"]
+            in {
+                "DEPOSIT_PLAN_READY",
+                "RELEASE_REQUEST_PLAN_READY",
+            }
+            and existing["planned_transactions"]
+        ):
+            return {
+                "transport": "NOTILT_UNSIGNED_TRANSACTION_HANDOFF",
+                "broadcast": False,
+                "signing": "EXTERNAL_WALLET_REQUIRED",
+                "capital_transfer_id": str(transfer_id),
+                "reserved_gross_amount": existing["gross_amount"],
+                "planned_net_amount": str(
+                    service().notilt_transfer_command(transfer_id, identity.user_id).min_received
+                ),
+                "transactions": existing["planned_transactions"],
+                "next_step": (
+                    "Confirm the exact persisted transaction plan in the independent wallet."
+                ),
+                "detail": existing,
+            }
         command = service().capital_transfer_command(
             transfer_id,
             identity.user_id,
@@ -3357,9 +3397,10 @@ def create_app(
                     vault=vault,
                     agent=agent,
                     asset=command.asset,
-                    amount=str(command.gross_amount),
+                    amount=str(command.min_received),
                 ),
             )
+            plan_state = "RELEASE_REQUEST_PLAN_READY"
             next_step = (
                 "Confirm the release request in the independent wallet, wait for the "
                 "protocol release window, then prepare and confirm release execution."
@@ -3370,20 +3411,236 @@ def create_app(
                 vault=vault,
                 agent=agent,
                 asset=command.asset,
-                amount=str(command.gross_amount),
+                amount=str(command.min_received),
             )
+            plan_state = "DEPOSIT_PLAN_READY"
             next_step = (
                 "Funds must already be present in the independent wallet after the "
                 "venue withdrawal; confirm each unsigned deposit transaction there."
             )
+        service().record_notilt_plan(
+            transfer_id,
+            identity.user_id,
+            chain_id=chain_id,
+            transport_state=plan_state,
+            transactions=transactions,
+            now=now,
+        )
+        detail = queries().capital_transfer_detail(identity.user_id, transfer_id)
         return {
             "transport": "NOTILT_UNSIGNED_TRANSACTION_HANDOFF",
             "broadcast": False,
             "signing": "EXTERNAL_WALLET_REQUIRED",
             "capital_transfer_id": str(transfer_id),
-            "transactions": [item.to_dict() for item in transactions],
+            "reserved_gross_amount": str(command.gross_amount),
+            "planned_net_amount": str(command.min_received),
+            "transactions": detail["planned_transactions"],
             "next_step": next_step,
-            "detail": queries().capital_transfer_detail(identity.user_id, transfer_id),
+            "detail": detail,
+        }
+
+    @app.post("/api/capital/transfers/{capital_transfer_id}/notilt-release-execution-plan")
+    def prepare_notilt_release_execution(
+        capital_transfer_id: UUID,
+        identity: SessionIdentity = identity_dependency,
+    ) -> dict[str, Any]:
+        now = _now()
+        detail = queries().capital_transfer_detail(identity.user_id, capital_transfer_id)
+        if detail["transport_state"] == "RELEASE_EXECUTION_PLAN_READY":
+            return {
+                "transport": "NOTILT_UNSIGNED_TRANSACTION_HANDOFF",
+                "broadcast": False,
+                "signing": "EXTERNAL_WALLET_REQUIRED",
+                "transactions": detail["planned_transactions"],
+                "detail": detail,
+            }
+        if (
+            detail["transport_state"] != "RELEASE_REQUEST_CONFIRMED"
+            or detail["status"] != CapitalTransferStatus.IN_FLIGHT.value
+            or detail["protocol_request_id"] is None
+        ):
+            raise DomainRejected(
+                "NOTILT_RELEASE_NOT_EXECUTABLE",
+                "verified release request is not ready for execution",
+            )
+        execute_after = datetime.fromisoformat(str(detail["protocol_execute_after"]))
+        expires_at = datetime.fromisoformat(str(detail["protocol_expires_at"]))
+        if now < execute_after:
+            raise DomainRejected(
+                "NOTILT_RELEASE_NOT_UNLOCKED",
+                f"NoTilt release unlocks at {execute_after.isoformat()}",
+            )
+        if now >= expires_at:
+            raise DomainRejected("NOTILT_RELEASE_EXPIRED", "NoTilt release request expired")
+        command = service().notilt_transfer_command(capital_transfer_id, identity.user_id)
+        chain_id = notilt_chain_id_for_network(command.network)
+        agent, vault = configured_notilt_scope(chain_id)
+        transaction = resolved_notilt.prepare_release_execution(
+            chain_id=chain_id,
+            vault=vault,
+            agent=agent,
+            request_id=str(detail["protocol_request_id"]),
+        )
+        service().record_notilt_plan(
+            capital_transfer_id,
+            identity.user_id,
+            chain_id=chain_id,
+            transport_state="RELEASE_EXECUTION_PLAN_READY",
+            transactions=(transaction,),
+            now=now,
+        )
+        updated = queries().capital_transfer_detail(identity.user_id, capital_transfer_id)
+        return {
+            "transport": "NOTILT_UNSIGNED_TRANSACTION_HANDOFF",
+            "broadcast": False,
+            "signing": "EXTERNAL_WALLET_REQUIRED",
+            "transactions": updated["planned_transactions"],
+            "detail": updated,
+        }
+
+    @app.post("/api/capital/transfers/{capital_transfer_id}/notilt-release-cancellation-plan")
+    def prepare_notilt_release_cancellation(
+        capital_transfer_id: UUID,
+        identity: SessionIdentity = identity_dependency,
+    ) -> dict[str, Any]:
+        now = _now()
+        detail = queries().capital_transfer_detail(identity.user_id, capital_transfer_id)
+        if detail["transport_state"] == "RELEASE_CANCELLATION_PLAN_READY":
+            return {
+                "transport": "NOTILT_UNSIGNED_TRANSACTION_HANDOFF",
+                "broadcast": False,
+                "signing": "EXTERNAL_WALLET_REQUIRED",
+                "transactions": detail["planned_transactions"],
+                "detail": detail,
+            }
+        if (
+            detail["transport_state"] != "RELEASE_REQUEST_CONFIRMED"
+            or detail["protocol_request_id"] is None
+            or detail["status"]
+            not in {
+                CapitalTransferStatus.IN_FLIGHT.value,
+                CapitalTransferStatus.MANUAL_REQUIRED.value,
+            }
+        ):
+            raise DomainRejected(
+                "NOTILT_RELEASE_NOT_CANCELLABLE",
+                "verified release request is not available for cancellation",
+            )
+        command = service().notilt_transfer_command(capital_transfer_id, identity.user_id)
+        chain_id = notilt_chain_id_for_network(command.network)
+        agent, vault = configured_notilt_scope(chain_id)
+        transaction = resolved_notilt.prepare_release_cancellation(
+            chain_id=chain_id,
+            vault=vault,
+            agent=agent,
+            request_id=str(detail["protocol_request_id"]),
+        )
+        service().record_notilt_plan(
+            capital_transfer_id,
+            identity.user_id,
+            chain_id=chain_id,
+            transport_state="RELEASE_CANCELLATION_PLAN_READY",
+            transactions=(transaction,),
+            now=now,
+        )
+        updated = queries().capital_transfer_detail(identity.user_id, capital_transfer_id)
+        return {
+            "transport": "NOTILT_UNSIGNED_TRANSACTION_HANDOFF",
+            "broadcast": False,
+            "signing": "EXTERNAL_WALLET_REQUIRED",
+            "transactions": updated["planned_transactions"],
+            "detail": updated,
+        }
+
+    @app.post("/api/capital/transfers/{capital_transfer_id}/notilt-receipt")
+    def verify_notilt_capital_receipt(
+        capital_transfer_id: UUID,
+        payload: NoTiltReceiptRequest,
+        identity: SessionIdentity = identity_dependency,
+    ) -> dict[str, Any]:
+        now = _now()
+        detail = queries().capital_transfer_detail(identity.user_id, capital_transfer_id)
+        receipt_kind = {
+            "DEPOSIT_PLAN_READY": "DEPOSIT",
+            "RELEASE_REQUEST_PLAN_READY": "RELEASE_REQUEST",
+            "RELEASE_EXECUTION_PLAN_READY": "RELEASE_EXECUTION",
+            "RELEASE_CANCELLATION_PLAN_READY": "RELEASE_CANCELLATION",
+        }.get(str(detail["transport_state"]))
+        if receipt_kind is None:
+            if payload.transaction_hash in detail["confirmed_transaction_hashes"]:
+                return {
+                    "transport": "NOTILT_VERIFIED_RECEIPT",
+                    "idempotent": True,
+                    "detail": detail,
+                }
+            raise DomainRejected(
+                "NOTILT_RECEIPT_STATE_INVALID",
+                "capital transfer is not waiting for a NoTilt receipt",
+            )
+        command = service().notilt_transfer_command(capital_transfer_id, identity.user_id)
+        chain_id = notilt_chain_id_for_network(command.network)
+        agent, vault = configured_notilt_scope(chain_id)
+        receipt = resolved_notilt.verify_receipt(
+            chain_id=chain_id,
+            vault=vault,
+            agent=agent,
+            receipt_kind=receipt_kind,
+            transaction_hash=payload.transaction_hash,
+            min_confirmations=resolved_settings.notilt_min_confirmations[chain_id],
+            asset=command.asset if receipt_kind in {"DEPOSIT", "RELEASE_REQUEST"} else None,
+            amount=(
+                str(command.min_received)
+                if receipt_kind in {"DEPOSIT", "RELEASE_REQUEST"}
+                else None
+            ),
+            request_id=(
+                str(detail["protocol_request_id"])
+                if receipt_kind in {"RELEASE_EXECUTION", "RELEASE_CANCELLATION"}
+                else None
+            ),
+        )
+        transport_state = service().record_notilt_receipt(
+            capital_transfer_id,
+            identity.user_id,
+            receipt,
+            now=now,
+        )
+        vault_sync: dict[str, Any] = {"attempted": False}
+        if receipt_kind in {"DEPOSIT", "RELEASE_EXECUTION"}:
+            vault_sync = {"attempted": True}
+            try:
+                fact_count, _ = sync_configured_notilt_vault(
+                    chain_id,
+                    identity.user_id,
+                    now=now,
+                )
+                vault_sync.update({"status": "SYNCED", "facts_recorded": fact_count})
+            except DomainRejected as exc:
+                vault_sync.update({"status": "FAILED", "error_code": exc.code})
+        updated = queries().capital_transfer_detail(identity.user_id, capital_transfer_id)
+        notify_capital(
+            object_id=capital_transfer_id,
+            object_type="CapitalTransfer",
+            event_type=f"NOTILT_{receipt_kind}_CONFIRMED",
+            environment=str(updated["environment"]),
+            account_id=str(updated["account_id"]),
+            venue=str(updated["venue"]),
+            object_version=int(updated["version"]),
+            summary=f"NoTilt receipt verified; protocol state is {transport_state}",
+        )
+        return {
+            "transport": "NOTILT_VERIFIED_RECEIPT",
+            "idempotent": False,
+            "receipt": {
+                "kind": receipt.receipt_kind,
+                "chain_id": receipt.chain_id,
+                "transaction_hash": receipt.transaction_hash,
+                "block_number": receipt.block_number,
+                "block_timestamp": receipt.block_timestamp.isoformat(),
+                "confirmations": receipt.confirmations,
+            },
+            "vault_sync": vault_sync,
+            "detail": updated,
         }
 
     @app.get("/api/capital/transfers/{capital_transfer_id}")

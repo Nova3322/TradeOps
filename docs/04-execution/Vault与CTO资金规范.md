@@ -3,7 +3,7 @@
 > 文档编号：FUND-SPEC-001
 > 版本：Draft 0.1
 > 日期：2026-07-31
-> 状态：产品与工程设计基线；NoTilt 三链只读、统一净值和外部钱包未签名交易交接已实现，真实划转仍因外部事实缺失而关闭
+> 状态：产品与工程设计基线；NoTilt 三链只读、统一净值、外部钱包未签名交易交接和链上回执验证已实现，真实划转仍因外部事实缺失而关闭
 > 上位文档：`交易系统总体方案.md`、`策略合同与数值化验收门.md`
 > 适用范围：RiskControl / NoTilt Vault、Capital Transfer Orchestrator、CapitalTransferAdapter、交易所运营资金与 Trading 风险账本
 
@@ -19,9 +19,9 @@
 - 浮亏、清算压力或活动仓位触发 Vault 救援。
 - 交易执行凭证获得提款或 Vault owner 权限。
 
-当前实现用三张独立资金生命周期表表达 `TransferProposal`、`TransferAuthorization` 与 `CapitalTransfer`，并用一张当前 `CapitalAutomationPolicy` 保存运营阈值；Vault/场所资本事实复用 `AccountEquity`。NoTilt 边界使用官方 `@notilt/sdk` 固定支持 chain id `1/56/42161`，只允许 Registry/官方部署/Vault budget 读取和 deposit/release 的未签名交易构造。运行时没有 NoTilt 私钥字段、签名或广播能力，也没有 owner、白名单管理、Panic、Full Exit 或任意合约调用入口。Vault、Binance、Hyperliquid 以新鲜 USD 估值形成 LIVE 净值；任一必需来源缺失或过期时整体标记为 `INCOMPLETE` 并阻断新增风险。`CAPITAL_TRANSFER`、`AUTO_PROFIT_SWEEP` 和 `AUTO_OPERATING_REFILL` 均默认关闭；自动候选仍需双人复核和独立授权。
+当前实现用三张独立资金生命周期表表达 `TransferProposal`、`TransferAuthorization` 与 `CapitalTransfer`，并用一张当前 `CapitalAutomationPolicy` 保存运营阈值；Vault/场所资本事实复用 `AccountEquity`。NoTilt 边界使用官方 `@notilt/sdk` 固定支持 chain id `1/56/42161`，只允许 Registry/官方部署/Vault budget 读取、deposit/release 的未签名交易构造，以及固定函数回执的只读验证。未签名计划、协议 request id、执行窗口和已确认 tx hash 保存在同一 `CapitalTransfer`；可信 RPC 回执必须匹配链、发送者、Vault、函数、参数、事件和逐链确认深度，tx hash 不可跨划转复用。运行时没有 NoTilt 私钥字段、签名或广播能力，也没有 owner、白名单管理、Panic、Full Exit 或任意合约调用入口。Vault、Binance、Hyperliquid 以新鲜 USD 估值形成 LIVE 净值；任一必需来源缺失或过期时整体标记为 `INCOMPLETE` 并阻断新增风险。`CAPITAL_TRANSFER`、`AUTO_PROFIT_SWEEP` 和 `AUTO_OPERATING_REFILL` 均默认关闭；自动候选仍需双人复核和独立授权。
 
-当前外部事实是：Arbitrum whitelist assignment 尚未激活，且三条链均未配置 Vault 地址。因此系统可以验证 Registry 状态，但不能把 Vault 余额纳入完整净值，也不能生成真实资金计划。条件齐备后，未签名计划仍必须由独立钱包逐笔确认；服务不会接收、保存或使用 Vault 私钥。
+当前外部事实是：Arbitrum whitelist assignment 尚未激活，且三条链均未配置 Vault 地址。因此系统可以验证 Registry 状态，但不能把 Vault 余额纳入完整净值，也不能生成真实资金计划。条件齐备后，未签名计划仍必须由独立钱包逐笔确认；服务只验证已广播交易的链上回执，不会接收、保存或使用 Vault 私钥。
 
 本文不冻结具体链、资产、签名托管、比例、金额、费用、确认数或自动化阈值。这些事项只通过 `DEC-FUND-*` 与 `DEC-RISK-*` 决策记录冻结。
 

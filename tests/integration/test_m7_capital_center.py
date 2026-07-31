@@ -29,6 +29,8 @@ from trading_control_plane.models import AccountEquity
 from trading_control_plane.notilt import (
     NoTiltAssetBudget,
     NoTiltGateway,
+    NoTiltReceipt,
+    NoTiltUnsignedTransaction,
     NoTiltUsdValuator,
     NoTiltVaultSnapshot,
     UsdValuation,
@@ -863,6 +865,54 @@ def build_notilt_app(database: Database, telegram: MockTelegramGateway) -> FastA
                     "summary": "Request reviewed NoTilt release",
                 }
             }
+        if payload["operation"] == "prepare-release-execution":
+            return {
+                "chainId": 42161,
+                "to": vault,
+                "data": "0x5678",
+                "value": "0",
+                "contract": "vault",
+                "functionName": "executeWhitelistRelease",
+                "summary": "Execute reviewed NoTilt release",
+            }
+        if payload["operation"] == "prepare-release-cancellation":
+            return {
+                "chainId": 42161,
+                "to": vault,
+                "data": "0x9abc",
+                "value": "0",
+                "contract": "vault",
+                "functionName": "cancelWhitelistRelease",
+                "summary": "Cancel reviewed NoTilt release",
+            }
+        if payload["operation"] == "verify-receipt":
+            now_timestamp = int(datetime.now(UTC).timestamp())
+            receipt_kind = str(payload["receiptKind"])
+            result: dict[str, object] = {
+                "receiptKind": receipt_kind,
+                "chainId": 42161,
+                "chain": "arbitrum",
+                "transactionHash": payload["transactionHash"],
+                "vault": vault,
+                "agent": agent,
+                "blockNumber": "123",
+                "blockTimestamp": str(now_timestamp - 1),
+                "confirmations": "20",
+            }
+            if receipt_kind == "RELEASE_REQUEST":
+                result.update(
+                    {
+                        "asset": "USDC",
+                        "requestId": f"0x{'a' * 64}",
+                        "netAmount": "0.99",
+                        "fee": "0.01",
+                        "executeAfter": str(now_timestamp - 2),
+                        "expiresAt": str(now_timestamp + 3600),
+                    }
+                )
+            else:
+                result["requestId"] = payload["requestId"]
+            return result
         raise AssertionError("unexpected NoTilt test operation")
 
     return create_app(
@@ -1221,5 +1271,477 @@ def test_notilt_live_plan_requires_full_capital_authority_and_never_broadcasts(
             )
             assert duplicate.status_code == 200
             assert duplicate.json()["capital_transfer_id"] == body["capital_transfer_id"]
+            assert duplicate.json()["transactions"] == body["transactions"]
+            assert body["reserved_gross_amount"] == "1.000000000000000000"
+            assert body["planned_net_amount"] == "0.990000000000000000"
+
+            transfer_id = body["capital_transfer_id"]
+            request_hash = f"0x{'b' * 64}"
+            request_receipt = await client.post(
+                f"/api/capital/transfers/{transfer_id}/notilt-receipt",
+                json={"transaction_hash": request_hash},
+            )
+            assert request_receipt.status_code == 200, request_receipt.text
+            request_detail = request_receipt.json()["detail"]
+            assert request_detail["transport_state"] == "RELEASE_REQUEST_CONFIRMED"
+            assert request_detail["status"] == "IN_FLIGHT"
+            assert request_detail["fee_amount"] == "0.010000000000000000"
+            assert request_receipt.json()["receipt"]["confirmations"] == 20
+
+            execution_plan = await client.post(
+                f"/api/capital/transfers/{transfer_id}/notilt-release-execution-plan"
+            )
+            assert execution_plan.status_code == 200, execution_plan.text
+            assert (
+                execution_plan.json()["transactions"][0]["function_name"]
+                == "executeWhitelistRelease"
+            )
+
+            execution_hash = f"0x{'c' * 64}"
+            execution_receipt = await client.post(
+                f"/api/capital/transfers/{transfer_id}/notilt-receipt",
+                json={"transaction_hash": execution_hash},
+            )
+            assert execution_receipt.status_code == 200, execution_receipt.text
+            assert (
+                execution_receipt.json()["detail"]["transport_state"]
+                == "RELEASE_EXECUTION_CONFIRMED"
+            )
+            assert execution_receipt.json()["detail"]["status"] == "IN_FLIGHT"
+            assert execution_receipt.json()["vault_sync"]["status"] == "SYNCED"
+
+            duplicate_receipt = await client.post(
+                f"/api/capital/transfers/{transfer_id}/notilt-receipt",
+                json={"transaction_hash": execution_hash},
+            )
+            assert duplicate_receipt.status_code == 200
+            assert duplicate_receipt.json()["idempotent"] is True
 
     asyncio.run(scenario())
+
+
+def test_notilt_fee_outside_authorization_requires_verified_cancellation(
+    database: Database, service: TradingService
+) -> None:
+    ids = seed(service)
+    now = datetime.now(UTC)
+    vault = "0x1111111111111111111111111111111111111111"
+    agent = "0x2222222222222222222222222222222222222222"
+    service.record_position(
+        "binance-main",
+        "BINANCE",
+        ids["instrument"],
+        Decimal(0),
+        Decimal(0),
+        Decimal("100000"),
+        True,
+        ids["admin"],
+        environment=ExecutionEnvironment.LIVE,
+        now=now,
+    )
+    service.record_account_equity(
+        "binance-main",
+        "BINANCE",
+        Decimal("10"),
+        Decimal("10"),
+        "USDC",
+        True,
+        ids["admin"],
+        environment=ExecutionEnvironment.LIVE,
+        now=now,
+    )
+    snapshot = NoTiltVaultSnapshot(
+        chain_id=42161,
+        chain="ARBITRUM",
+        vault=vault,
+        agent=agent,
+        budgets=(
+            notilt_budget(
+                asset="USDC",
+                balance=Decimal("10"),
+                vault=vault,
+                agent=agent,
+                now=now,
+            ),
+        ),
+    )
+    service.record_notilt_vault_snapshot(
+        actor_id=ids["proposer"],
+        snapshot=snapshot,
+        valuations={"USDC": UsdValuation(Decimal(1), Decimal("10"), now)},
+        now=now,
+    )
+    service.set_capability_gate(
+        "CAPITAL_TRANSFER",
+        CapabilityStatus.ENABLED,
+        "explicit cancellation test only",
+        ids["admin"],
+        now=now,
+    )
+    proposal = service.create_transfer_proposal(
+        actor_id=ids["proposer"],
+        environment=ExecutionEnvironment.LIVE,
+        direction=CapitalDirection.VAULT_TO_VENUE,
+        account_id="binance-main",
+        venue="BINANCE",
+        vault_id=vault,
+        asset="USDC",
+        network="ARBITRUM",
+        destination_reference="approved-binance-deposit-reference",
+        amount=Decimal("1"),
+        max_fee=Decimal("0.01"),
+        min_received=Decimal("0.99"),
+        reason="verified cancellation path",
+        expires_at=now + timedelta(hours=1),
+        idempotency_key="m7-notilt-fee-proposal",
+        now=now,
+        allow_live_unsigned=True,
+    )
+    service.submit_transfer_proposal(proposal, ids["proposer"], now=now)
+    service.review_transfer_proposal(
+        proposal,
+        ids["reviewer_one"],
+        ReviewDecision.APPROVE,
+        "first independent review",
+        2,
+        now=now,
+    )
+    service.review_transfer_proposal(
+        proposal,
+        ids["reviewer_two"],
+        ReviewDecision.APPROVE,
+        "second independent review",
+        3,
+        now=now,
+    )
+    authorization = service.issue_transfer_authorization(
+        proposal,
+        ids["reviewer_one"],
+        now + timedelta(minutes=30),
+        "m7-notilt-fee-auth",
+        now=now,
+    )
+    transfer = service.reserve_capital_transfer(
+        authorization,
+        ids["reviewer_two"],
+        "m7-notilt-fee-reserve",
+        now=now,
+        allow_live_unsigned=True,
+    )
+    request_transaction = NoTiltUnsignedTransaction(
+        chain_id=42161,
+        to=vault,
+        data="0x1234",
+        value=0,
+        contract="vault",
+        function_name="requestWhitelistRelease",
+        summary="request reviewed release",
+    )
+    service.record_notilt_plan(
+        transfer,
+        ids["reviewer_two"],
+        chain_id=42161,
+        transport_state="RELEASE_REQUEST_PLAN_READY",
+        transactions=(request_transaction,),
+        now=now,
+    )
+    request_id = f"0x{'d' * 64}"
+    state = service.record_notilt_receipt(
+        transfer,
+        ids["reviewer_two"],
+        NoTiltReceipt(
+            receipt_kind="RELEASE_REQUEST",
+            chain_id=42161,
+            chain="ARBITRUM",
+            transaction_hash=f"0x{'e' * 64}",
+            vault=vault,
+            agent=agent,
+            block_number=123,
+            block_timestamp=now,
+            confirmations=20,
+            asset="USDC",
+            request_id=request_id,
+            net_amount=Decimal("0.99"),
+            fee=Decimal("0.02"),
+            execute_after=now + timedelta(minutes=10),
+            expires_at=now + timedelta(hours=1),
+        ),
+        now=now,
+    )
+    assert state == "RELEASE_REQUEST_CONFIRMED"
+    assert (
+        TradingQueries(database).capital_transfer_detail(ids["reviewer_two"], transfer)["status"]
+        == CapitalTransferStatus.MANUAL_REQUIRED.value
+    )
+
+    cancellation_transaction = NoTiltUnsignedTransaction(
+        chain_id=42161,
+        to=vault,
+        data="0x5678",
+        value=0,
+        contract="vault",
+        function_name="cancelWhitelistRelease",
+        summary="cancel release outside fee authority",
+    )
+    service.record_notilt_plan(
+        transfer,
+        ids["reviewer_two"],
+        chain_id=42161,
+        transport_state="RELEASE_CANCELLATION_PLAN_READY",
+        transactions=(cancellation_transaction,),
+        now=now,
+    )
+    state = service.record_notilt_receipt(
+        transfer,
+        ids["reviewer_two"],
+        NoTiltReceipt(
+            receipt_kind="RELEASE_CANCELLATION",
+            chain_id=42161,
+            chain="ARBITRUM",
+            transaction_hash=f"0x{'f' * 64}",
+            vault=vault,
+            agent=agent,
+            block_number=124,
+            block_timestamp=now,
+            confirmations=20,
+            request_id=request_id,
+        ),
+        now=now,
+    )
+    detail = TradingQueries(database).capital_transfer_detail(ids["reviewer_two"], transfer)
+    assert state == "RELEASE_CANCELLED"
+    assert detail["status"] == CapitalTransferStatus.FAILED_SOURCE_RESTORED.value
+    assert detail["confirmed_transaction_hashes"] == [f"0x{'e' * 64}", f"0x{'f' * 64}"]
+
+
+def test_notilt_deposit_receipt_and_fresh_source_facts_settle_exactly_once(
+    database: Database, service: TradingService
+) -> None:
+    ids = seed(service)
+    now = datetime.now(UTC)
+    vault = "0x1111111111111111111111111111111111111111"
+    agent = "0x2222222222222222222222222222222222222222"
+    service.record_position(
+        "binance-main",
+        "BINANCE",
+        ids["instrument"],
+        Decimal(0),
+        Decimal(0),
+        Decimal("100000"),
+        True,
+        ids["admin"],
+        environment=ExecutionEnvironment.LIVE,
+        now=now,
+    )
+    service.record_account_equity(
+        "binance-main",
+        "BINANCE",
+        Decimal("10"),
+        Decimal("10"),
+        "USDC",
+        True,
+        ids["admin"],
+        environment=ExecutionEnvironment.LIVE,
+        now=now,
+    )
+    initial_snapshot = NoTiltVaultSnapshot(
+        chain_id=42161,
+        chain="ARBITRUM",
+        vault=vault,
+        agent=agent,
+        budgets=(
+            notilt_budget(
+                asset="USDC",
+                balance=Decimal("10"),
+                vault=vault,
+                agent=agent,
+                now=now,
+            ),
+        ),
+    )
+    service.record_notilt_vault_snapshot(
+        actor_id=ids["proposer"],
+        snapshot=initial_snapshot,
+        valuations={"USDC": UsdValuation(Decimal(1), Decimal("10"), now)},
+        now=now,
+    )
+    service.record_capital_scope_reconciliation(
+        actor_id=ids["reviewer_one"],
+        environment=ExecutionEnvironment.LIVE,
+        account_id="binance-main",
+        venue="BINANCE",
+        now=now,
+    )
+    service.set_capability_gate(
+        "CAPITAL_TRANSFER",
+        CapabilityStatus.ENABLED,
+        "explicit deposit receipt test only",
+        ids["admin"],
+        now=now,
+    )
+    proposal = service.create_transfer_proposal(
+        actor_id=ids["proposer"],
+        environment=ExecutionEnvironment.LIVE,
+        direction=CapitalDirection.VENUE_TO_VAULT,
+        account_id="binance-main",
+        venue="BINANCE",
+        vault_id=vault,
+        asset="USDC",
+        network="ARBITRUM",
+        destination_reference=vault,
+        amount=Decimal("1"),
+        max_fee=Decimal("0.01"),
+        min_received=Decimal("0.99"),
+        reason="settled profit sweep",
+        expires_at=now + timedelta(hours=1),
+        idempotency_key="m7-notilt-deposit-proposal",
+        now=now,
+        allow_live_unsigned=True,
+    )
+    service.submit_transfer_proposal(proposal, ids["proposer"], now=now)
+    service.review_transfer_proposal(
+        proposal,
+        ids["reviewer_one"],
+        ReviewDecision.APPROVE,
+        "first independent review",
+        2,
+        now=now,
+    )
+    service.review_transfer_proposal(
+        proposal,
+        ids["reviewer_two"],
+        ReviewDecision.APPROVE,
+        "second independent review",
+        3,
+        now=now,
+    )
+    authorization = service.issue_transfer_authorization(
+        proposal,
+        ids["reviewer_one"],
+        now + timedelta(minutes=30),
+        "m7-notilt-deposit-auth",
+        now=now,
+    )
+    transfer = service.reserve_capital_transfer(
+        authorization,
+        ids["reviewer_two"],
+        "m7-notilt-deposit-reserve",
+        now=now,
+        allow_live_unsigned=True,
+    )
+    service.record_notilt_plan(
+        transfer,
+        ids["reviewer_two"],
+        chain_id=42161,
+        transport_state="DEPOSIT_PLAN_READY",
+        transactions=(
+            NoTiltUnsignedTransaction(
+                chain_id=42161,
+                to="0x4444444444444444444444444444444444444444",
+                data="0x1234",
+                value=0,
+                contract="erc20",
+                function_name="approve",
+                summary="approve exact deposit",
+            ),
+            NoTiltUnsignedTransaction(
+                chain_id=42161,
+                to=vault,
+                data="0x5678",
+                value=0,
+                contract="vault",
+                function_name="deposit",
+                summary="deposit exact authorized net",
+            ),
+        ),
+        now=now,
+    )
+    transaction_hash = f"0x{'1' * 64}"
+    state = service.record_notilt_receipt(
+        transfer,
+        ids["reviewer_two"],
+        NoTiltReceipt(
+            receipt_kind="DEPOSIT",
+            chain_id=42161,
+            chain="ARBITRUM",
+            transaction_hash=transaction_hash,
+            vault=vault,
+            agent=agent,
+            block_number=123,
+            block_timestamp=now,
+            confirmations=20,
+            asset="USDC",
+            requested_amount=Decimal("0.99"),
+            credited_amount=Decimal("0.99"),
+        ),
+        now=now,
+    )
+    assert state == "DEPOSIT_CONFIRMED"
+    assert (
+        service.record_notilt_receipt(
+            transfer,
+            ids["reviewer_two"],
+            NoTiltReceipt(
+                receipt_kind="DEPOSIT",
+                chain_id=42161,
+                chain="ARBITRUM",
+                transaction_hash=transaction_hash,
+                vault=vault,
+                agent=agent,
+                block_number=123,
+                block_timestamp=now,
+                confirmations=20,
+                asset="USDC",
+                requested_amount=Decimal("0.99"),
+                credited_amount=Decimal("0.99"),
+            ),
+            now=now,
+        )
+        == "DEPOSIT_CONFIRMED"
+    )
+
+    observed = now + timedelta(seconds=1)
+    service.record_account_equity(
+        "binance-main",
+        "BINANCE",
+        Decimal("9"),
+        Decimal("9"),
+        "USDC",
+        True,
+        ids["admin"],
+        environment=ExecutionEnvironment.LIVE,
+        now=observed,
+    )
+    final_snapshot = NoTiltVaultSnapshot(
+        chain_id=42161,
+        chain="ARBITRUM",
+        vault=vault,
+        agent=agent,
+        budgets=(
+            notilt_budget(
+                asset="USDC",
+                balance=Decimal("10.99"),
+                vault=vault,
+                agent=agent,
+                now=observed,
+            ),
+        ),
+    )
+    service.record_notilt_vault_snapshot(
+        actor_id=ids["proposer"],
+        snapshot=final_snapshot,
+        valuations={"USDC": UsdValuation(Decimal(1), Decimal("10.99"), observed)},
+        now=observed,
+    )
+    assert (
+        service.reconcile_capital_transfer(
+            transfer,
+            ids["reviewer_two"],
+            now=observed,
+        )
+        == "MATCH"
+    )
+    detail = TradingQueries(database).capital_transfer_detail(ids["reviewer_two"], transfer)
+    assert detail["status"] == CapitalTransferStatus.SETTLED.value
+    assert detail["fee_amount"] == "0.010000000000000000"
+    assert detail["net_received"] == "0.990000000000000000"

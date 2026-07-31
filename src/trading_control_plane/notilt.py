@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import urllib.error
@@ -30,6 +31,8 @@ NATIVE_PRICE_SYMBOLS = {
     "ETH": "ETHUSDT",
     "BNB": "BNBUSDT",
 }
+EVM_ADDRESS_PATTERN = re.compile(r"^0x[0-9a-fA-F]{40}$")
+HASH_PATTERN = re.compile(r"^0x[0-9a-fA-F]{64}$")
 
 
 @dataclass(frozen=True, slots=True)
@@ -130,6 +133,123 @@ class NoTiltUnsignedTransaction:
             "function_name": self.function_name,
             "summary": self.summary,
         }
+
+
+@dataclass(frozen=True, slots=True)
+class NoTiltReceipt:
+    receipt_kind: str
+    chain_id: int
+    chain: str
+    transaction_hash: str
+    vault: str
+    agent: str
+    block_number: int
+    block_timestamp: datetime
+    confirmations: int
+    asset: str | None = None
+    requested_amount: Decimal | None = None
+    credited_amount: Decimal | None = None
+    request_id: str | None = None
+    net_amount: Decimal | None = None
+    fee: Decimal | None = None
+    execute_after: datetime | None = None
+    expires_at: datetime | None = None
+
+    @classmethod
+    def from_json(cls, value: JsonObject) -> NoTiltReceipt:
+        try:
+            receipt_kind = str(value["receiptKind"])
+            chain_id = int(value["chainId"])
+            chain = str(value["chain"]).upper()
+            transaction_hash = str(value["transactionHash"]).lower()
+            vault = str(value["vault"])
+            agent = str(value["agent"])
+            block_number = int(value["blockNumber"])
+            block_timestamp = datetime.fromtimestamp(int(value["blockTimestamp"]), UTC)
+            confirmations = int(value["confirmations"])
+            asset = str(value["asset"]).upper() if value.get("asset") is not None else None
+            requested_amount = (
+                Decimal(str(value["requestedAmount"]))
+                if value.get("requestedAmount") is not None
+                else None
+            )
+            credited_amount = (
+                Decimal(str(value["creditedAmount"]))
+                if value.get("creditedAmount") is not None
+                else None
+            )
+            request_id = (
+                str(value["requestId"]).lower() if value.get("requestId") is not None else None
+            )
+            net_amount = (
+                Decimal(str(value["netAmount"])) if value.get("netAmount") is not None else None
+            )
+            fee = Decimal(str(value["fee"])) if value.get("fee") is not None else None
+            execute_after = (
+                datetime.fromtimestamp(int(value["executeAfter"]), UTC)
+                if value.get("executeAfter") is not None
+                else None
+            )
+            expires_at = (
+                datetime.fromtimestamp(int(value["expiresAt"]), UTC)
+                if value.get("expiresAt") is not None
+                else None
+            )
+        except (
+            InvalidOperation,
+            KeyError,
+            OSError,
+            OverflowError,
+            TypeError,
+            ValueError,
+        ) as exc:
+            raise DomainRejected(
+                "NOTILT_RESPONSE_INVALID",
+                "NoTilt gateway returned an invalid transaction receipt",
+            ) from exc
+        if (
+            receipt_kind
+            not in {
+                "DEPOSIT",
+                "RELEASE_REQUEST",
+                "RELEASE_EXECUTION",
+                "RELEASE_CANCELLATION",
+            }
+            or chain_id not in SUPPORTED_NOTILT_CHAINS
+            or HASH_PATTERN.fullmatch(transaction_hash) is None
+            or EVM_ADDRESS_PATTERN.fullmatch(vault) is None
+            or EVM_ADDRESS_PATTERN.fullmatch(agent) is None
+            or block_number < 0
+            or confirmations < 1
+            or any(
+                item is not None and item < 0
+                for item in (requested_amount, credited_amount, net_amount, fee)
+            )
+            or (request_id is not None and HASH_PATTERN.fullmatch(request_id) is None)
+        ):
+            raise DomainRejected(
+                "NOTILT_RESPONSE_INVALID",
+                "NoTilt gateway returned unsupported transaction receipt evidence",
+            )
+        return cls(
+            receipt_kind=receipt_kind,
+            chain_id=chain_id,
+            chain=chain,
+            transaction_hash=transaction_hash,
+            vault=vault,
+            agent=agent,
+            block_number=block_number,
+            block_timestamp=block_timestamp,
+            confirmations=confirmations,
+            asset=asset,
+            requested_amount=requested_amount,
+            credited_amount=credited_amount,
+            request_id=request_id,
+            net_amount=net_amount,
+            fee=fee,
+            execute_after=execute_after,
+            expires_at=expires_at,
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -455,5 +575,39 @@ class NoTiltGateway:
                 vault=vault,
                 agent=agent,
                 requestId=request_id,
+            )
+        )
+
+    def verify_receipt(
+        self,
+        *,
+        chain_id: int,
+        vault: str,
+        agent: str,
+        receipt_kind: str,
+        transaction_hash: str,
+        min_confirmations: int,
+        asset: str | None = None,
+        amount: str | None = None,
+        request_id: str | None = None,
+    ) -> NoTiltReceipt:
+        values: JsonObject = {
+            "vault": vault,
+            "agent": agent,
+            "receiptKind": receipt_kind,
+            "transactionHash": transaction_hash,
+            "minConfirmations": min_confirmations,
+        }
+        if asset is not None:
+            values["asset"] = asset
+        if amount is not None:
+            values["amount"] = amount
+        if request_id is not None:
+            values["requestId"] = request_id
+        return NoTiltReceipt.from_json(
+            self._call(
+                "verify-receipt",
+                chain_id,
+                **values,
             )
         )
