@@ -18,7 +18,7 @@ from trading_control_plane.binance import (
 )
 from trading_control_plane.config import Settings, get_settings
 from trading_control_plane.database import Database
-from trading_control_plane.domain import DomainRejected, ExecutionEnvironment
+from trading_control_plane.domain import DomainRejected, ExecutionEnvironment, ReconciliationStatus
 from trading_control_plane.hyperliquid import (
     HyperliquidReadOnlyClient,
     resolve_hyperliquid_main_account,
@@ -26,6 +26,7 @@ from trading_control_plane.hyperliquid import (
 from trading_control_plane.logging import configure_logging
 from trading_control_plane.notilt import NoTiltGateway, NoTiltUsdValuator
 from trading_control_plane.perptape import PerptapeClient
+from trading_control_plane.perptape_stream import PerptapeStreamWorker
 from trading_control_plane.queries import TradingQueries
 from trading_control_plane.service import TradingService
 
@@ -51,17 +52,34 @@ class RuntimeSyncReport:
 
     @property
     def successful(self) -> bool:
-        return all(item.status != "FAILED" for item in self.sources.values())
+        return bool(self.sources) and all(
+            item.status == "SUCCESS" for item in self.sources.values()
+        )
+
+    @property
+    def capital_sources_successful(self) -> bool:
+        binance = self.sources.get("BINANCE")
+        hyperliquid = self.sources.get("HYPERLIQUID")
+        vaults = [result for source, result in self.sources.items() if source.startswith("NOTILT")]
+        return (
+            binance is not None
+            and binance.status == "SUCCESS"
+            and hyperliquid is not None
+            and hyperliquid.status == "SUCCESS"
+            and bool(vaults)
+            and all(item.status == "SUCCESS" for item in vaults)
+        )
 
     @property
     def ready_for_new_risk(self) -> bool:
-        return self.successful and self.net_worth.get("complete") is True
+        return self.capital_sources_successful and self.net_worth.get("complete") is True
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "started_at": self.started_at,
             "completed_at": self.completed_at,
             "source_sync_successful": self.successful,
+            "capital_sources_successful": self.capital_sources_successful,
             "ready_for_new_risk": self.ready_for_new_risk,
             "sources": {key: asdict(value) for key, value in self.sources.items()},
             "net_worth": self.net_worth,
@@ -94,6 +112,14 @@ class RuntimeSyncWorker:
         self.service = TradingService(database)
         self.queries = TradingQueries(database)
 
+    def _require_scope_match(self, scope: str, actor_id: UUID, now: datetime) -> None:
+        reconciliation_id = self.service.reconcile_scope(scope, actor_id, now=now)
+        if self.service.reconciliation_status(reconciliation_id) is not ReconciliationStatus.MATCH:
+            raise DomainRejected(
+                "RUNTIME_RECONCILIATION_NOT_MATCH",
+                "runtime venue synchronization requires a computed reconciliation MATCH",
+            )
+
     def _record_binance(self, actor_id: UUID, now: datetime) -> int:
         account_id = self.settings.runtime_binance_account_id
         if account_id is None:
@@ -110,7 +136,7 @@ class RuntimeSyncWorker:
             now=now,
         )
         scope = f"{self.settings.binance_fact_environment}:{account_id}:BINANCE"
-        self.service.reconcile_scope(scope, actor_id, now=now)
+        self._require_scope_match(scope, actor_id, now)
         return len(persisted)
 
     def _record_perptape(self, actor_id: UUID, now: datetime) -> int:
@@ -150,7 +176,7 @@ class RuntimeSyncWorker:
             now=now,
         )
         scope = f"{environment.value}:{account_id}:HYPERLIQUID"
-        self.service.reconcile_scope(scope, actor_id, now=now)
+        self._require_scope_match(scope, actor_id, now)
         return len(persisted)
 
     def _record_notilt(self, actor_id: UUID, chain_id: int, now: datetime) -> int:
@@ -262,17 +288,69 @@ class RuntimeSyncWorker:
         )
 
     def run_forever(self, stop_event: threading.Event) -> None:
-        while not stop_event.is_set():
-            report = self.run_once()
-            logger.info(
-                "Runtime read-only synchronization cycle completed",
-                extra={
-                    "event": "runtime_sync_cycle_completed",
-                    "result": "READY" if report.ready_for_new_risk else "DEGRADED",
-                    "component": "runtime-sync",
-                },
+        stream: PerptapeStreamWorker | None = None
+        stream_thread: threading.Thread | None = None
+        if self.settings.perptape_websocket_enabled:
+            perptape_actor = self.queries.service_principal_by_username(
+                self.settings.perptape_service_username
             )
-            stop_event.wait(self.settings.runtime_sync_interval_seconds)
+            stream = PerptapeStreamWorker(
+                client=self.perptape,
+                websocket_url=self.settings.perptape_websocket_url,
+                api_key=self.settings.perptape_api_key,
+                contract_version=self.settings.perptape_contract_version,
+                load_snapshot=self.queries.perptape_feed,
+                record_snapshot=lambda feed, now: self.service.record_perptape_feed(
+                    perptape_actor.user_id,
+                    feed,
+                    now=now,
+                ),
+                timeout_seconds=self.settings.perptape_timeout_seconds,
+                heartbeat_timeout_seconds=(
+                    self.settings.perptape_websocket_heartbeat_timeout_seconds
+                ),
+                reconciliation_interval_seconds=(
+                    self.settings.perptape_websocket_reconciliation_seconds
+                ),
+                reconnect_initial_seconds=(
+                    self.settings.perptape_websocket_reconnect_initial_seconds
+                ),
+                reconnect_max_seconds=self.settings.perptape_websocket_reconnect_max_seconds,
+                max_reconnect_attempts=(self.settings.perptape_websocket_max_reconnect_attempts),
+                clock=self.clock,
+            )
+            stream_thread = threading.Thread(
+                target=stream.run_forever,
+                args=(stop_event,),
+                name="perptape-stream",
+            )
+            stream_thread.start()
+        try:
+            while not stop_event.is_set():
+                report = self.run_once()
+                logger.info(
+                    "Runtime read-only synchronization cycle completed",
+                    extra={
+                        "event": "runtime_sync_cycle_completed",
+                        "result": "READY" if report.ready_for_new_risk else "DEGRADED",
+                        "component": "runtime-sync",
+                    },
+                )
+                stop_event.wait(self.settings.runtime_sync_interval_seconds)
+        finally:
+            stop_event.set()
+            if stream_thread is not None:
+                stream_thread.join(timeout=self.settings.perptape_timeout_seconds + 2)
+                if stream_thread.is_alive():
+                    raise DomainRejected(
+                        "PERPTAPE_STREAM_STOP_TIMEOUT",
+                        "Perptape WebSocket did not stop within its bounded timeout",
+                    )
+        if stream is not None and stream.fatal_error_code is not None:
+            raise DomainRejected(
+                stream.fatal_error_code,
+                "Perptape WebSocket stopped after bounded failures",
+            )
 
 
 def build_runtime_worker(settings: Settings, database: Database) -> RuntimeSyncWorker:
@@ -345,7 +423,18 @@ def main(argv: Sequence[str] | None = None) -> int:
         stop_event = threading.Event()
         for signal_number in (signal.SIGINT, signal.SIGTERM):
             signal.signal(signal_number, lambda _signal, _frame: stop_event.set())
-        worker.run_forever(stop_event)
+        try:
+            worker.run_forever(stop_event)
+        except DomainRejected as exc:
+            logger.error(
+                "Runtime read-only synchronization stopped",
+                extra={
+                    "event": "runtime_sync_stopped",
+                    "component": "runtime-sync",
+                    "error_code": exc.code,
+                },
+            )
+            return 1
         return 0
     finally:
         database.dispose()

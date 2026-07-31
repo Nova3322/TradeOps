@@ -437,7 +437,7 @@ def application(
         _env_file=None,
     )
     perptape = perptape_client or PerptapeClient(
-        base_url="https://perptape.invalid",
+        base_url="https://perptape.com",
         api_key=None,
         contract_version="breakouts-v1",
         cache_ttl=timedelta(minutes=1),
@@ -794,7 +794,7 @@ async def exercise_perptape_binance_live_lifecycle(database: Database) -> None:
         }
 
     perptape = PerptapeClient(
-        base_url="https://perptape.invalid",
+        base_url="https://perptape.com",
         api_key="fixture-contract-key",
         contract_version="breakouts-v1",
         cache_ttl=timedelta(minutes=5),

@@ -1,6 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import threading
+from collections import deque
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Any
@@ -16,7 +21,7 @@ from trading_control_plane.binance import (
 )
 from trading_control_plane.config import Settings
 from trading_control_plane.database import Database
-from trading_control_plane.domain import Role
+from trading_control_plane.domain import Role, SystemRiskState
 from trading_control_plane.hyperliquid import (
     HyperliquidEquity,
     HyperliquidInstrument,
@@ -29,6 +34,8 @@ from trading_control_plane.notilt import (
     NoTiltVaultSnapshot,
 )
 from trading_control_plane.perptape import PerptapeClient
+from trading_control_plane.perptape_stream import PerptapeSocket, PerptapeStreamWorker
+from trading_control_plane.queries import TradingQueries
 from trading_control_plane.runtime import RuntimeSyncWorker
 from trading_control_plane.service import TradingService
 from trading_control_plane.telegram import MockTelegramGateway
@@ -161,6 +168,14 @@ def test_runtime_worker_refreshes_perptape_two_venues_and_vault_without_sending(
     service.assign_role(actor, Role.OPERATOR, admin, now=NOW)
     service.assign_role(actor, Role.TREASURY_ADMIN, admin, now=NOW)
     service.assign_role(perptape_actor, Role.PROPOSER, admin, now=NOW)
+    service.set_risk_policy(
+        actor_id=admin,
+        version="runtime-test-v1",
+        system_state=SystemRiskState.NORMAL,
+        max_total_risk=Decimal(1_000),
+        max_fact_age=timedelta(minutes=5),
+        now=NOW,
+    )
     settings = Settings(
         database_url="postgresql+psycopg://unused:unused@127.0.0.1/unused",
         perptape_api_key="runtime-test-key",
@@ -183,7 +198,7 @@ def test_runtime_worker_refreshes_perptape_two_venues_and_vault_without_sending(
         return perptape_payload()
 
     perptape = PerptapeClient(
-        base_url="https://perptape.invalid",
+        base_url="https://perptape.com",
         api_key="runtime-test-key",
         contract_version="breakouts-v1",
         cache_ttl=timedelta(seconds=settings.runtime_sync_interval_seconds),
@@ -209,15 +224,21 @@ def test_runtime_worker_refreshes_perptape_two_venues_and_vault_without_sending(
     )
     duplicate = worker.run_once()
 
-    assert first.successful is duplicate.successful is True
-    assert replayed_version == 1
-    assert first.ready_for_new_risk is duplicate.ready_for_new_risk is True
     assert {source: result.status for source, result in first.sources.items()} == {
         "PERPTAPE": "SUCCESS",
         "BINANCE": "SUCCESS",
         "HYPERLIQUID": "SUCCESS",
         "NOTILT:42161": "SUCCESS",
     }
+    assert {source: result.status for source, result in duplicate.sources.items()} == {
+        "PERPTAPE": "SUCCESS",
+        "BINANCE": "SUCCESS",
+        "HYPERLIQUID": "SUCCESS",
+        "NOTILT:42161": "SUCCESS",
+    }
+    assert first.successful is duplicate.successful is True
+    assert replayed_version == 1
+    assert first.ready_for_new_risk is duplicate.ready_for_new_risk is True
     assert first.sources["PERPTAPE"].items_observed == 1
     assert len(perptape_calls) == 1
     assert first.net_worth["venues"] == {
@@ -234,7 +255,7 @@ def test_runtime_worker_refreshes_perptape_two_venues_and_vault_without_sending(
             raise AssertionError("runtime-enabled API must use the shared PostgreSQL feed")
 
         failing_client = PerptapeClient(
-            base_url="https://perptape.invalid",
+            base_url="https://perptape.com",
             api_key="runtime-test-key",
             contract_version="breakouts-v1",
             cache_ttl=timedelta(minutes=1),
@@ -270,3 +291,121 @@ def test_runtime_worker_refreshes_perptape_two_venues_and_vault_without_sending(
             assert len(opportunities.json()["data"]) == 1
 
     asyncio.run(cached_api_scenario())
+
+
+def test_websocket_alert_updates_the_existing_authoritative_perptape_feed(
+    database: Database,
+) -> None:
+    service = TradingService(database)
+    queries = TradingQueries(database)
+    admin = service.bootstrap_admin("stream-admin", now=NOW)
+    perptape_actor = service.create_service_principal("perptape", admin, now=NOW)
+    service.assign_role(perptape_actor, Role.PROPOSER, admin, now=NOW)
+    https_calls: list[str] = []
+
+    def fetch(url: str, _headers: dict[str, str], _timeout: float) -> dict[str, Any]:
+        https_calls.append(url)
+        return {
+            "type": "breakouts",
+            "generatedAt": int(NOW.timestamp() * 1_000),
+            "data": [],
+        }
+
+    client = PerptapeClient(
+        base_url="https://perptape.com",
+        api_key="integration-stream-key",
+        contract_version="breakouts-v1",
+        cache_ttl=timedelta(minutes=1),
+        fetcher=fetch,
+    )
+    event_time = NOW + timedelta(seconds=1)
+    alert = json.dumps(
+        {
+            "e": "alert",
+            "seq": 2,
+            "E": int(event_time.timestamp() * 1_000),
+            "d": {
+                "id": "integration-alert-1",
+                "ex": "BN",
+                "s": "ETHUSDT",
+                "cs": "ETHUSDT",
+                "dir": "HH",
+                "p": 4_000,
+                "th": 3_900,
+                "tf": "1h",
+                "t": int(event_time.timestamp() * 1_000),
+                "u": int(event_time.timestamp() * 1_000),
+                "kr": {"status": "ready"},
+                "vq24": 2_000_000,
+                "oi": 1_000_000,
+            },
+        }
+    )
+    stop = threading.Event()
+
+    class Socket:
+        def __init__(self) -> None:
+            self.messages = deque(
+                [
+                    json.dumps(
+                        {
+                            "e": "hello",
+                            "seq": 1,
+                            "E": int(NOW.timestamp() * 1_000),
+                        }
+                    ),
+                    alert,
+                ]
+            )
+
+        def send(self, _message: str) -> None:
+            return None
+
+        def recv(self, timeout: float | None = None) -> str | bytes:
+            assert timeout == 1.0
+            if self.messages:
+                return self.messages.popleft()
+            stop.set()
+            raise TimeoutError
+
+    @contextmanager
+    def connector(
+        url: str,
+        headers: dict[str, str],
+        timeout: float,
+    ) -> Iterator[PerptapeSocket]:
+        assert url == "wss://perptape.com/ws/v1/alerts"
+        assert headers["x-api-key"] == "integration-stream-key"
+        assert timeout == 5
+        yield Socket()
+
+    stream = PerptapeStreamWorker(
+        client=client,
+        websocket_url="wss://perptape.com/ws/v1/alerts",
+        api_key="integration-stream-key",
+        contract_version="breakouts-v1",
+        load_snapshot=queries.perptape_feed,
+        record_snapshot=lambda feed, now: service.record_perptape_feed(
+            perptape_actor,
+            feed,
+            now=now,
+        ),
+        timeout_seconds=5,
+        heartbeat_timeout_seconds=45,
+        reconciliation_interval_seconds=300,
+        reconnect_initial_seconds=1,
+        reconnect_max_seconds=8,
+        max_reconnect_attempts=3,
+        connector=connector,
+        clock=lambda: NOW + timedelta(seconds=2),
+    )
+
+    stream.run_forever(stop)
+
+    persisted = queries.perptape_feed()
+    assert persisted is not None
+    assert len(persisted.candidates) == 1
+    assert persisted.candidates[0].symbol == "ETHUSDT"
+    assert persisted.candidates[0].readiness == "READY"
+    assert stream.stats.alerts_applied == 1
+    assert len(https_calls) == 1

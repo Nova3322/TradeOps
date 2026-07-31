@@ -116,7 +116,7 @@ def perptape_client() -> PerptapeClient:
         }
 
     return PerptapeClient(
-        base_url="https://perptape.example",
+        base_url="https://perptape.com",
         api_key="test-key",
         contract_version="breakouts-v1",
         cache_ttl=timedelta(minutes=1),

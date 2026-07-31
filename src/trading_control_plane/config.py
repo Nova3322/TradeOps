@@ -7,6 +7,11 @@ from typing import Literal
 from pydantic import AliasChoices, Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from trading_control_plane.perptape import (
+    validate_perptape_http_url,
+    validate_perptape_websocket_url,
+)
+
 DEFAULT_SESSION_SECRET = "local-development-session-secret-change-me"  # noqa: S105
 EVM_ADDRESS_PATTERN = re.compile(r"^0x[0-9a-fA-F]{40}$")
 
@@ -65,6 +70,13 @@ class Settings(BaseSettings):
     perptape_contract_version: str = "breakouts-v1"
     perptape_cache_seconds: int = Field(default=60, ge=1, le=300)
     perptape_timeout_seconds: float = Field(default=15, ge=5, le=30)
+    perptape_websocket_enabled: bool = False
+    perptape_websocket_url: str = "wss://perptape.com/ws/v1/alerts"
+    perptape_websocket_heartbeat_timeout_seconds: int = Field(default=45, ge=20, le=120)
+    perptape_websocket_reconciliation_seconds: int = Field(default=300, ge=60, le=3_600)
+    perptape_websocket_reconnect_initial_seconds: float = Field(default=1, ge=0.1, le=30)
+    perptape_websocket_reconnect_max_seconds: float = Field(default=30, ge=1, le=300)
+    perptape_websocket_max_reconnect_attempts: int = Field(default=8, ge=1, le=20)
     runtime_sync_enabled: bool = False
     runtime_sync_interval_seconds: int = Field(default=60, ge=30, le=3_600)
     runtime_sync_service_username: str = "runtime-sync"
@@ -143,6 +155,16 @@ class Settings(BaseSettings):
             raise ValueError("database_url must use PostgreSQL with the psycopg driver")
         return value
 
+    @field_validator("perptape_base_url")
+    @classmethod
+    def require_official_perptape_http_url(cls, value: str) -> str:
+        return validate_perptape_http_url(value)
+
+    @field_validator("perptape_websocket_url")
+    @classmethod
+    def require_official_perptape_websocket_url(cls, value: str) -> str:
+        return validate_perptape_websocket_url(value)
+
     @field_validator(
         "notilt_agent_address",
         "notilt_ethereum_vault_address",
@@ -216,6 +238,15 @@ class Settings(BaseSettings):
             raise ValueError("enabled Telegram requires an allowed private-chat username")
         if self.telegram_enabled and not self.telegram_internal_username:
             raise ValueError("enabled Telegram requires an existing internal username")
+        if self.perptape_websocket_enabled and not self.runtime_sync_enabled:
+            raise ValueError("enabled Perptape WebSocket requires the runtime sync worker")
+        if self.perptape_websocket_enabled and not self.perptape_api_key:
+            raise ValueError("enabled Perptape WebSocket requires the platform API key")
+        if (
+            self.perptape_websocket_reconnect_initial_seconds
+            > self.perptape_websocket_reconnect_max_seconds
+        ):
+            raise ValueError("Perptape WebSocket reconnect initial delay exceeds its maximum")
 
 
 @lru_cache(maxsize=1)

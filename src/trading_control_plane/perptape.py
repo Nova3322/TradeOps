@@ -14,6 +14,51 @@ from typing import Any
 
 from trading_control_plane.domain import Direction, DomainRejected
 
+PERPTAPE_OFFICIAL_HOST = "perptape.com"
+PERPTAPE_WEBSOCKET_PATH = "/ws/v1/alerts"
+
+
+def validate_perptape_http_url(value: str) -> str:
+    parsed = urllib.parse.urlparse(value)
+    try:
+        port = parsed.port
+    except ValueError as exc:
+        raise ValueError("Perptape base URL must use the official HTTPS host") from exc
+    if (
+        parsed.scheme != "https"
+        or parsed.hostname != PERPTAPE_OFFICIAL_HOST
+        or port not in {None, 443}
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.path not in {"", "/"}
+        or parsed.params
+        or parsed.query
+        or parsed.fragment
+    ):
+        raise ValueError("Perptape base URL must use the official HTTPS host")
+    return value.rstrip("/")
+
+
+def validate_perptape_websocket_url(value: str) -> str:
+    parsed = urllib.parse.urlparse(value)
+    try:
+        port = parsed.port
+    except ValueError as exc:
+        raise ValueError("Perptape WebSocket URL must use the official WSS endpoint") from exc
+    if (
+        parsed.scheme != "wss"
+        or parsed.hostname != PERPTAPE_OFFICIAL_HOST
+        or port not in {None, 443}
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.path != PERPTAPE_WEBSOCKET_PATH
+        or parsed.params
+        or parsed.query
+        or parsed.fragment
+    ):
+        raise ValueError("Perptape WebSocket URL must use the official WSS endpoint")
+    return value
+
 
 @dataclass(frozen=True)
 class PerptapeCandidate:
@@ -162,7 +207,7 @@ class PerptapeClient:
         timeout_seconds: float = 15,
         fetcher: JsonFetcher = _default_fetcher,
     ) -> None:
-        self._base_url = base_url.rstrip("/")
+        self._base_url = validate_perptape_http_url(base_url)
         self._api_key = api_key
         self._contract_version = contract_version
         self._cache_ttl = cache_ttl
@@ -176,12 +221,13 @@ class PerptapeClient:
     def list_candidates(self, *, now: datetime) -> list[PerptapeCandidate]:
         return list(self.refresh(now=now).candidates)
 
-    def refresh(self, *, now: datetime) -> PerptapeFeedSnapshot:
+    def refresh(self, *, now: datetime, force: bool = False) -> PerptapeFeedSnapshot:
         if self._api_key is None:
             raise DomainRejected("PERPTAPE_NOT_CONFIGURED", "Perptape API key is not configured")
         with self._lock:
             if (
-                self._feed is not None
+                not force
+                and self._feed is not None
                 and self._cached_at is not None
                 and now < self._feed.next_allowed_at
             ):
@@ -259,11 +305,27 @@ class PerptapeClient:
 
     def _parse_candidate(self, raw: dict[str, Any]) -> PerptapeCandidate:
         try:
-            exchange = str(raw["exchange"])
-            symbol = str(raw["symbol"])
-            canonical_symbol = str(raw["canonicalSymbol"])
-            source_direction = str(raw["direction"])
-            timeframe = str(raw["timeframe"])
+            exchange_value = raw["exchange"]
+            symbol_value = raw["symbol"]
+            canonical_symbol_value = raw["canonicalSymbol"]
+            source_direction_value = raw["direction"]
+            timeframe_value = raw["timeframe"]
+            if not all(
+                isinstance(item, str) and item
+                for item in (
+                    exchange_value,
+                    symbol_value,
+                    canonical_symbol_value,
+                    source_direction_value,
+                    timeframe_value,
+                )
+            ):
+                raise ValueError("candidate identity fields must be non-empty strings")
+            exchange = exchange_value
+            symbol = symbol_value
+            canonical_symbol = canonical_symbol_value
+            source_direction = source_direction_value
+            timeframe = timeframe_value
             price_value = raw["price"] if raw.get("price") is not None else raw["breakoutPrice"]
             price = Decimal(str(price_value))
             updated_at_ms = int(raw["updatedAt"])
@@ -278,7 +340,12 @@ class PerptapeClient:
             raise DomainRejected(
                 "PERPTAPE_RESPONSE_INVALID", "Perptape candidate contains invalid fields"
             ) from exc
-        if source_direction not in {"HH", "LL"} or price <= 0:
+        if (
+            source_direction not in {"HH", "LL"}
+            or timeframe not in {"1h", "4h", "1d", "1w"}
+            or not price.is_finite()
+            or price <= 0
+        ):
             raise DomainRejected(
                 "PERPTAPE_RESPONSE_INVALID", "Perptape candidate direction or price is invalid"
             )
@@ -297,7 +364,7 @@ class PerptapeClient:
             volume_raw = next(
                 (
                     raw[key]
-                    for key in ("quoteVolume", "volume24h", "volume")
+                    for key in ("volume24hQuote", "quoteVolume", "volume24h", "volume")
                     if raw.get(key) is not None
                 ),
                 None,
@@ -305,7 +372,7 @@ class PerptapeClient:
             open_interest_raw = next(
                 (
                     raw[key]
-                    for key in ("openInterest", "openInterestUsd", "oi")
+                    for key in ("openInterestQuote", "openInterest", "openInterestUsd", "oi")
                     if raw.get(key) is not None
                 ),
                 None,
@@ -316,6 +383,14 @@ class PerptapeClient:
             raise DomainRejected(
                 "PERPTAPE_RESPONSE_INVALID", "Perptape candidate contains invalid facts"
             ) from exc
+        if (
+            (threshold is not None and (not threshold.is_finite() or threshold <= 0))
+            or (quote_volume is not None and (not quote_volume.is_finite() or quote_volume < 0))
+            or (open_interest is not None and (not open_interest.is_finite() or open_interest < 0))
+        ):
+            raise DomainRejected(
+                "PERPTAPE_RESPONSE_INVALID", "Perptape candidate contains invalid facts"
+            )
         identity = ":".join(
             [exchange, canonical_symbol, timeframe, source_direction, str(triggered_at_ms or 0)]
         )
@@ -359,3 +434,49 @@ class PerptapeClient:
                 else "https://app.hyperliquid.xyz/trade/" + urllib.parse.quote(canonical_symbol)
             ),
         )
+
+    def parse_stream_alert(
+        self,
+        payload: dict[str, Any],
+        *,
+        event_time: datetime,
+        existing: PerptapeCandidate | None = None,
+    ) -> PerptapeCandidate:
+        """Map Perptape's documented short-field alert without inventing missing facts."""
+
+        if payload.get("t") is None:
+            raise DomainRejected(
+                "PERPTAPE_STREAM_MESSAGE_INVALID",
+                "Perptape alert trigger time is missing",
+            )
+        readiness = "unknown" if existing is None else existing.readiness.lower()
+        kline_readiness = payload.get("kr")
+        if isinstance(kline_readiness, dict):
+            readiness = str(kline_readiness.get("status", "unknown"))
+        raw = {
+            "exchange": payload.get("ex"),
+            "symbol": payload.get("s"),
+            "canonicalSymbol": payload.get("cs", payload.get("s")),
+            "direction": payload.get("dir"),
+            "timeframe": payload.get("tf"),
+            "price": payload.get("p"),
+            "threshold": (
+                payload.get("th")
+                if payload.get("th") is not None
+                else (None if existing is None else existing.threshold)
+            ),
+            "triggeredAt": payload.get("t"),
+            "updatedAt": payload.get("u", int(event_time.timestamp() * 1_000)),
+            "klineReadiness": {"status": readiness},
+            "volume24hQuote": (
+                payload.get("vq24")
+                if payload.get("vq24") is not None
+                else (None if existing is None else existing.quote_volume)
+            ),
+            "openInterestQuote": (
+                payload.get("oi")
+                if payload.get("oi") is not None
+                else (None if existing is None else existing.open_interest)
+            ),
+        }
+        return self._parse_candidate(raw)

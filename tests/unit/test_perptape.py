@@ -26,6 +26,8 @@ def response() -> dict[str, object]:
                 "price": 120000,
                 "breakoutPrice": 120000,
                 "threshold": 119500,
+                "volume24hQuote": 1_000_000,
+                "openInterestQuote": 500_000,
                 "klineReadiness": {"status": "ready"},
                 "triggeredAt": 1_784_448_000_000,
                 "updatedAt": 1_784_448_030_000,
@@ -55,7 +57,7 @@ def test_real_breakout_contract_maps_to_narrow_trading_candidates_and_caches() -
         return response()
 
     client = PerptapeClient(
-        base_url="https://perptape.example",
+        base_url="https://perptape.com",
         api_key="test-api-key",
         contract_version="breakouts-v1",
         cache_ttl=timedelta(minutes=1),
@@ -80,6 +82,8 @@ def test_real_breakout_contract_maps_to_narrow_trading_candidates_and_caches() -
     assert first[1].direction is Direction.SHORT
     assert first[1].data_health == "DEGRADED"
     assert first[0].candidate_id.startswith("pt_")
+    assert first[0].quote_volume == 1_000_000
+    assert first[0].open_interest == 500_000
     assert client.get_candidate(first[0].candidate_id, now=NOW) == first[0]
 
 
@@ -98,7 +102,7 @@ def test_server_rate_limit_extends_cache_beyond_local_ttl() -> None:
         return payload
 
     client = PerptapeClient(
-        base_url="https://perptape.example",
+        base_url="https://perptape.com",
         api_key="test-api-key",
         contract_version="breakouts-v1",
         cache_ttl=timedelta(minutes=1),
@@ -115,7 +119,7 @@ def test_server_rate_limit_extends_cache_beyond_local_ttl() -> None:
 
 def test_client_fails_closed_without_api_key_or_with_invalid_contract() -> None:
     missing = PerptapeClient(
-        base_url="https://perptape.example",
+        base_url="https://perptape.com",
         api_key=None,
         contract_version="breakouts-v1",
         cache_ttl=timedelta(minutes=1),
@@ -124,7 +128,7 @@ def test_client_fails_closed_without_api_key_or_with_invalid_contract() -> None:
         missing.list_candidates(now=NOW)
 
     invalid = PerptapeClient(
-        base_url="https://perptape.example",
+        base_url="https://perptape.com",
         api_key="key",
         contract_version="breakouts-v1",
         cache_ttl=timedelta(minutes=1),
@@ -134,9 +138,51 @@ def test_client_fails_closed_without_api_key_or_with_invalid_contract() -> None:
         invalid.list_candidates(now=NOW)
 
 
+@pytest.mark.parametrize(
+    "base_url",
+    [
+        "http://perptape.com",
+        "https://perptape.example",
+        "https://perptape.com.evil.example",
+        "https://perptape.com/api/v1",
+        "https://user@perptape.com",
+    ],
+)
+def test_client_rejects_nonofficial_https_hosts_before_network(base_url: str) -> None:
+    with pytest.raises(ValueError, match="official HTTPS host"):
+        PerptapeClient(
+            base_url=base_url,
+            api_key="key",
+            contract_version="breakouts-v1",
+            cache_ttl=timedelta(minutes=1),
+        )
+
+
+def test_forced_refresh_bypasses_the_normal_snapshot_cache_for_gap_recovery() -> None:
+    calls = 0
+
+    def fetch(_url: str, _headers: dict[str, str], _timeout: float) -> dict[str, object]:
+        nonlocal calls
+        calls += 1
+        return response()
+
+    client = PerptapeClient(
+        base_url="https://perptape.com",
+        api_key="key",
+        contract_version="breakouts-v1",
+        cache_ttl=timedelta(minutes=5),
+        fetcher=fetch,
+    )
+
+    client.refresh(now=NOW)
+    client.refresh(now=NOW + timedelta(seconds=1), force=True)
+
+    assert calls == 2
+
+
 def test_candidate_lookup_does_not_invent_missing_source_fact() -> None:
     client = PerptapeClient(
-        base_url="https://perptape.example",
+        base_url="https://perptape.com",
         api_key="key",
         contract_version="breakouts-v1",
         cache_ttl=timedelta(minutes=1),
@@ -155,7 +201,7 @@ def test_invalid_candidate_fact_fails_closed() -> None:
     assert isinstance(first, dict)
     first["threshold"] = "not-a-number"
     client = PerptapeClient(
-        base_url="https://perptape.example",
+        base_url="https://perptape.com",
         api_key="key",
         contract_version="breakouts-v1",
         cache_ttl=timedelta(minutes=1),
@@ -191,7 +237,7 @@ def test_default_http_transport_maps_success_plan_denial_and_invalid_json(
         ),
     )
     client = PerptapeClient(
-        base_url="https://perptape.example",
+        base_url="https://perptape.com",
         api_key="key",
         contract_version="breakouts-v1",
         cache_ttl=timedelta(minutes=1),
@@ -199,7 +245,7 @@ def test_default_http_transport_maps_success_plan_denial_and_invalid_json(
     assert client.list_candidates(now=NOW) == []
 
     def denied(_request: object, timeout: float) -> FakeHttpResponse:
-        raise HTTPError("https://perptape.example", 403, "denied", None, None)
+        raise HTTPError("https://perptape.com", 403, "denied", None, None)
 
     monkeypatch.setattr(perptape_module.urllib.request, "urlopen", denied)
     with pytest.raises(DomainRejected, match="PERPTAPE_PLAN_DENIED"):

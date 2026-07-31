@@ -45,7 +45,7 @@
 - 场所边界：`binance.py`/`binance_execution.py` 覆盖标准 USDⓈ-M 只读/TESTNET，以及 Unified Account 官方 PAPI 的 LIVE 只读和执行；`hyperliquid.py`/`hyperliquid_execution.py` 覆盖 Core Info、TESTNET 与 LIVE Exchange。Hyperliquid “市价”固定为带冻结价格边界的 IOC，不使用隐含滑点；主账户默认、子账户显式配置。HIP-3、保证金控制和资金写入口不存在，数据库中的 `LIVE_ORDER_SEND` 初始仍为 `DISABLED`
 - 资金边界：`capital.py` 提供 SHADOW/TESTNET Mock 提交和自动候选计算；`notilt.py` 通过官方 `@notilt/sdk` 固定支持 Ethereum、BNB Smart Chain、Arbitrum One，只读取官方部署/Registry/Vault、生成并持久化 `{chainId,to,data,value}` 未签名交易，并从可信生产 RPC 校验发送者、目标、函数、参数、事件、区块时间和逐链确认深度。服务没有 NoTilt 私钥字段，不签名、不广播，也不暴露 owner、白名单管理、Panic 或 Full Exit 能力；真实 `CAPITAL_TRANSFER` 与两个自动资金 Gate 均保持 `DISABLED`
 
-正式身份源按冻结决策使用托管 IdP 与 Passkey，但外部 IdP 尚未接入。本地/测试环境可显式启用仅识别已存在内部用户的 Mock 会话和 Mock step-up；生产环境硬拒绝启用 Mock 身份。Perptape 使用其现有 `GET /api/v1/breakouts` 窄合同，需单独配置平台 API Key，未配置时机会入口明确返回不可用。
+正式身份源按冻结决策使用托管 IdP 与 Passkey，但外部 IdP 尚未接入。本地/测试环境可显式启用仅识别已存在内部用户的 Mock 会话和 Mock step-up；生产环境硬拒绝启用 Mock 身份。Perptape 需单独配置平台 API Key；连续模式还必须显式启用 `TRADING_PERPTAPE_WEBSOCKET_ENABLED`。启用后只连接官方 `wss://perptape.com/ws/v1/alerts`，WebSocket 是实时主通道，`GET /api/v1/breakouts` 仅用于启动快照、周期对账、断线/序列缺口回补和短字段补全；未配置时机会入口明确返回不可用。
 
 Binance 私有事实读取必须同时显式配置 `TRADING_BINANCE_READ_ONLY_ENABLED=true`、API Key/Secret 和 `TRADING_BINANCE_FACT_ENVIRONMENT=TESTNET|LIVE`。Unified Account 使用 `TRADING_BINANCE_ACCOUNT_MODE=PORTFOLIO_MARGIN` 和官方 `https://papi.binance.com`。未配置时页面只显示 PostgreSQL 已保存事实，不尝试联网。
 
@@ -55,7 +55,7 @@ Hyperliquid Core 默认使用 `TRADING_HYPERLIQUID_ACCOUNT_ADDRESS` 指定的主
 
 NoTilt 只保存公开 whitelist agent 与逐链 Vault 地址。配置 `TRADING_NOTILT_ENABLED=true` 后，可查询 Registry assignment；只有相应 `TRADING_NOTILT_*_VAULT_ADDRESS` 已配置、官方 Vault 身份匹配、事实和 USD 估值新鲜时才写入 LIVE 资金事实。Vault、Binance 和 Hyperliquid 的已确认 USD 净值合并展示并进入同环境管理资本上限；源端预留从管理资本扣除，未知或过期来源使新增风险 fail closed。当前 Arbitrum assignment 尚未激活且未提供 Vault 地址，因此资金中心把 Vault 标记为缺失，不能生成划转计划。即使条件齐备，LIVE 计划仍要求两名不同 Treasury Reviewer、短期授权、空仓/无订单/对账门和显式 `CAPITAL_TRANSFER` Gate；计划跨重启保持一致，重复回执幂等且 tx hash 不能跨划转复用。Vault 释放请求按授权最小净到账构造，gross 只作为净额加费用的源端上限；超出费用授权时只能进入人工处理并生成取消计划。最终签名与广播必须在独立钱包完成。
 
-只读同步进程默认关闭。启用时必须配置独立 `runtime-sync` SERVICE principal、两个内部账户 ID 和明确的读开关；每个周期独立刷新 Perptape、两个交易账户及已配置 Vault。某个来源失败不会伪造零值，旧事实会按风险政策自然转为陈旧。周期只有在所有请求成功且 Binance、Hyperliquid、Vault 三类 LIVE 净值同时新鲜时才报告 `ready_for_new_risk=true`。2026-07-31 的一次真实 `--once` 验收读取 200 个 Perptape 候选，并同步 Binance Unified Account 与 Hyperliquid 主账户；由于尚无 Vault 地址，报告明确为 `ready_for_new_risk=false`。
+只读同步进程默认关闭。启用时必须配置独立 `runtime-sync` SERVICE principal、两个内部账户 ID 和明确的读开关；每个周期独立刷新 Perptape、两个交易账户及已配置 Vault。某个来源失败不会伪造零值，旧事实会按风险政策自然转为陈旧；WebSocket 回补失败时，现有 `perptape_feeds` 共享快照会原地降级而不是继续声称 `READY`。周期只有在本周期 Binance、Hyperliquid、Vault 三类资本来源均明确成功且 LIVE 净值完整时才报告 `ready_for_new_risk=true`；`SKIPPED` 不能被旧快照掩盖。Perptape 仍是机会源，不单独决定资本 readiness。WebSocket 重连采用有上限的指数退避，`SIGINT`/`SIGTERM` 可中断等待；回滚或紧急停止只需关闭 `TRADING_PERPTAPE_WEBSOCKET_ENABLED` 并停止/重启 worker，HTTPS 周期同步和数据库 Schema 不变。2026-07-31 的一次真实 `--once` 验收读取 200 个 Perptape 候选，并同步 Binance Unified Account 与 Hyperliquid 主账户；由于尚无 Vault 地址，报告明确为 `ready_for_new_risk=false`。
 
 ## 本地开发
 

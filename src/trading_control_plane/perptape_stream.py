@@ -1,0 +1,562 @@
+from __future__ import annotations
+
+import json
+import logging
+import time
+from collections import deque
+from collections.abc import Callable, Iterator
+from contextlib import AbstractContextManager, contextmanager
+from dataclasses import dataclass, replace
+from datetime import UTC, datetime, timedelta
+from typing import Any, Literal, Protocol, cast
+
+from websockets.exceptions import WebSocketException
+from websockets.sync.client import connect
+
+from trading_control_plane.domain import DomainRejected
+from trading_control_plane.perptape import (
+    PerptapeClient,
+    PerptapeFeedSnapshot,
+    validate_perptape_websocket_url,
+)
+
+logger = logging.getLogger(__name__)
+
+
+class PerptapeSocket(Protocol):
+    def send(self, message: str) -> None: ...
+
+    def recv(self, timeout: float | None = None) -> str | bytes: ...
+
+
+class StopEvent(Protocol):
+    def is_set(self) -> bool: ...
+
+    def set(self) -> None: ...
+
+    def wait(self, timeout: float) -> bool: ...
+
+
+SocketConnector = Callable[[str, dict[str, str], float], AbstractContextManager[PerptapeSocket]]
+SnapshotLoader = Callable[[], PerptapeFeedSnapshot | None]
+SnapshotRecorder = Callable[[PerptapeFeedSnapshot, datetime], object]
+MessageOrder = Literal["ACCEPT", "DUPLICATE", "OUT_OF_ORDER", "GAP"]
+
+
+@contextmanager
+def _default_connector(
+    url: str,
+    headers: dict[str, str],
+    timeout_seconds: float,
+) -> Iterator[PerptapeSocket]:
+    try:
+        with connect(
+            url,
+            additional_headers=headers,
+            user_agent_header="trading-control-plane/1.0",
+            open_timeout=timeout_seconds,
+            close_timeout=min(timeout_seconds, 5),
+            ping_interval=15,
+            ping_timeout=timeout_seconds,
+            max_size=256 * 1024,
+            max_queue=32,
+        ) as connection:
+            yield cast(PerptapeSocket, connection)
+    except (OSError, TimeoutError, WebSocketException) as exc:
+        raise DomainRejected(
+            "PERPTAPE_STREAM_UNAVAILABLE",
+            "Perptape WebSocket could not be reached",
+        ) from exc
+
+
+@dataclass(frozen=True, slots=True)
+class StreamEnvelope:
+    event_type: Literal["hello", "heartbeat", "alert"]
+    sequence: int | None
+    server_time: datetime
+    payload: dict[str, Any]
+    event_id: str | None
+
+
+@dataclass(slots=True)
+class PerptapeStreamStats:
+    connections: int = 0
+    messages_received: int = 0
+    alerts_applied: int = 0
+    duplicates_dropped: int = 0
+    gaps_detected: int = 0
+    https_reconciliations: int = 0
+    https_backfills: int = 0
+    degraded_writes: int = 0
+
+
+class PerptapeStreamWorker:
+    """Consume Perptape alerts while keeping PostgreSQL's feed snapshot authoritative."""
+
+    def __init__(
+        self,
+        *,
+        client: PerptapeClient,
+        websocket_url: str,
+        api_key: str | None,
+        contract_version: str,
+        load_snapshot: SnapshotLoader,
+        record_snapshot: SnapshotRecorder,
+        timeout_seconds: float,
+        heartbeat_timeout_seconds: float,
+        reconciliation_interval_seconds: float,
+        reconnect_initial_seconds: float,
+        reconnect_max_seconds: float,
+        max_reconnect_attempts: int,
+        connector: SocketConnector = _default_connector,
+        clock: Callable[[], datetime] = lambda: datetime.now(UTC),
+        monotonic: Callable[[], float] = time.monotonic,
+    ) -> None:
+        self._client = client
+        self._websocket_url = validate_perptape_websocket_url(websocket_url)
+        self._api_key = api_key
+        self._contract_version = contract_version
+        self._load_snapshot = load_snapshot
+        self._record_snapshot = record_snapshot
+        self._timeout_seconds = timeout_seconds
+        self._heartbeat_timeout_seconds = heartbeat_timeout_seconds
+        self._reconciliation_interval_seconds = reconciliation_interval_seconds
+        self._reconnect_initial_seconds = reconnect_initial_seconds
+        self._reconnect_max_seconds = reconnect_max_seconds
+        self._max_reconnect_attempts = max_reconnect_attempts
+        self._connector = connector
+        self._clock = clock
+        self._monotonic = monotonic
+        self._seen_event_ids: set[str] = set()
+        self._event_id_order: deque[str] = deque()
+        self._connection_healthy = False
+        self._backfill_not_before: datetime | None = None
+        self.fatal_error_code: str | None = None
+        self.stats = PerptapeStreamStats()
+
+    @staticmethod
+    def _safe_record_time(now: datetime, current: PerptapeFeedSnapshot | None) -> datetime:
+        if current is None or now > current.fetched_at:
+            return now
+        return current.fetched_at + timedelta(microseconds=1)
+
+    def _record(self, feed: PerptapeFeedSnapshot) -> None:
+        self._record_snapshot(feed, feed.fetched_at)
+
+    def _reconcile(self, *, backfill: bool) -> PerptapeFeedSnapshot:
+        now = self._clock()
+        feed = self._client.refresh(now=now, force=backfill)
+        current = self._load_snapshot()
+        fetched_at = self._safe_record_time(feed.fetched_at, current)
+        if fetched_at != feed.fetched_at:
+            feed = replace(feed, fetched_at=fetched_at)
+        self._record(feed)
+        self.stats.https_reconciliations += 1
+        if backfill:
+            self.stats.https_backfills += 1
+        return feed
+
+    def _mark_degraded(self) -> None:
+        current = self._load_snapshot()
+        if current is None or not current.candidates:
+            return
+        if all(
+            candidate.data_health == "DEGRADED" and candidate.readiness != "READY"
+            for candidate in current.candidates
+        ):
+            return
+        fetched_at = self._safe_record_time(self._clock(), current)
+        degraded = tuple(
+            replace(candidate, data_health="DEGRADED", readiness="DEGRADED")
+            for candidate in current.candidates
+        )
+        self._record(
+            PerptapeFeedSnapshot(
+                contract_version=current.contract_version,
+                generated_at=current.generated_at,
+                fetched_at=fetched_at,
+                next_allowed_at=max(current.next_allowed_at, current.generated_at),
+                candidates=degraded,
+            )
+        )
+        self.stats.degraded_writes += 1
+
+    def _try_backfill(self) -> bool:
+        now = self._clock()
+        if self._backfill_not_before is not None and now < self._backfill_not_before:
+            self._mark_degraded()
+            return False
+        try:
+            feed = self._reconcile(backfill=True)
+        except DomainRejected:
+            current = self._load_snapshot()
+            retry_at = now + timedelta(seconds=self._reconnect_initial_seconds)
+            if current is not None:
+                retry_at = max(retry_at, current.next_allowed_at)
+            self._backfill_not_before = retry_at
+            self._mark_degraded()
+            return False
+        self._backfill_not_before = max(now, feed.next_allowed_at)
+        return True
+
+    def _reconciliation_delay(self) -> float:
+        delay = self._reconciliation_interval_seconds
+        current = self._load_snapshot()
+        if current is not None:
+            server_delay = (current.next_allowed_at - self._clock()).total_seconds()
+            delay = max(delay, server_delay)
+        return max(0, delay)
+
+    def _parse_message(self, raw_message: str | bytes) -> StreamEnvelope:
+        try:
+            if isinstance(raw_message, bytes):
+                raw_message = raw_message.decode("utf-8")
+            value = json.loads(raw_message)
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise DomainRejected(
+                "PERPTAPE_STREAM_MESSAGE_INVALID",
+                "Perptape WebSocket returned invalid JSON",
+            ) from exc
+        if not isinstance(value, dict):
+            raise DomainRejected(
+                "PERPTAPE_STREAM_MESSAGE_INVALID",
+                "Perptape WebSocket message must be an object",
+            )
+        event_type = value.get("e")
+        if event_type == "error":
+            remote_code = str(value.get("code", "")).upper()
+            code = (
+                "PERPTAPE_AUTH_FAILED"
+                if "AUTH" in remote_code or "KEY" in remote_code
+                else "PERPTAPE_STREAM_PROTOCOL_ERROR"
+            )
+            raise DomainRejected(code, "Perptape WebSocket rejected the connection")
+        if event_type not in {"hello", "heartbeat", "alert"}:
+            raise DomainRejected(
+                "PERPTAPE_STREAM_MESSAGE_INVALID",
+                "Perptape WebSocket event type is invalid",
+            )
+        sequence_value = value.get("seq")
+        try:
+            if sequence_value is not None and (
+                isinstance(sequence_value, bool) or not isinstance(sequence_value, int)
+            ):
+                raise ValueError("sequence must be an integer")
+            sequence = None if sequence_value is None else int(sequence_value)
+            server_time = datetime.fromtimestamp(int(value["E"]) / 1_000, UTC)
+        except (KeyError, OSError, OverflowError, TypeError, ValueError) as exc:
+            raise DomainRejected(
+                "PERPTAPE_STREAM_MESSAGE_INVALID",
+                "Perptape WebSocket ordering metadata is invalid",
+            ) from exc
+        if (sequence is not None and sequence < 0) or server_time > self._clock() + timedelta(
+            seconds=30
+        ):
+            raise DomainRejected(
+                "PERPTAPE_STREAM_MESSAGE_INVALID",
+                "Perptape WebSocket ordering metadata is invalid",
+            )
+        payload_value = value.get("d", {})
+        if not isinstance(payload_value, dict):
+            raise DomainRejected(
+                "PERPTAPE_STREAM_MESSAGE_INVALID",
+                "Perptape WebSocket payload is invalid",
+            )
+        event_id_value = payload_value.get("id") if event_type == "alert" else None
+        event_id = None if event_id_value is None else str(event_id_value)
+        if event_type == "alert" and (not event_id or len(event_id) > 200):
+            raise DomainRejected(
+                "PERPTAPE_STREAM_MESSAGE_INVALID",
+                "Perptape alert identity is invalid",
+            )
+        return StreamEnvelope(
+            event_type=event_type,
+            sequence=sequence,
+            server_time=server_time,
+            payload=payload_value,
+            event_id=event_id,
+        )
+
+    def _message_order(
+        self,
+        envelope: StreamEnvelope,
+        *,
+        last_sequence: int | None,
+        last_server_time: datetime | None,
+    ) -> MessageOrder:
+        if last_sequence is not None and envelope.sequence is not None:
+            if envelope.sequence == last_sequence:
+                return "DUPLICATE"
+            if envelope.sequence < last_sequence:
+                return "OUT_OF_ORDER"
+            if envelope.sequence > last_sequence + 1:
+                return "GAP"
+        if last_server_time is not None:
+            if envelope.server_time < last_server_time:
+                return "OUT_OF_ORDER"
+            if envelope.server_time - last_server_time > timedelta(
+                seconds=self._heartbeat_timeout_seconds
+            ):
+                return "GAP"
+        return "ACCEPT"
+
+    @staticmethod
+    def _needs_completion(payload: dict[str, Any]) -> bool:
+        readiness = payload.get("kr")
+        return (
+            not isinstance(readiness, dict)
+            or not readiness.get("status")
+            or payload.get("u") is None
+            or payload.get("vq24") is None
+            or payload.get("oi") is None
+        )
+
+    def _remember_event(self, event_id: str) -> None:
+        self._seen_event_ids.add(event_id)
+        self._event_id_order.append(event_id)
+        if len(self._event_id_order) > 2_048:
+            expired = self._event_id_order.popleft()
+            self._seen_event_ids.discard(expired)
+
+    def _apply_alert(self, envelope: StreamEnvelope, *, allow_completion: bool) -> None:
+        assert envelope.event_id is not None
+        if envelope.event_id in self._seen_event_ids:
+            self.stats.duplicates_dropped += 1
+            return
+        current = self._load_snapshot()
+        preliminary = self._client.parse_stream_alert(
+            envelope.payload,
+            event_time=envelope.server_time,
+        )
+        existing = None
+        if current is not None:
+            existing = next(
+                (
+                    candidate
+                    for candidate in current.candidates
+                    if candidate.candidate_id == preliminary.candidate_id
+                ),
+                None,
+            )
+        needs_completion = self._needs_completion(envelope.payload)
+        existing_is_complete = (
+            existing is not None
+            and existing.readiness not in {"UNKNOWN", "DEGRADED", "INCOMPLETE"}
+            and existing.observed_at >= preliminary.observed_at
+        )
+        if needs_completion and not existing_is_complete and allow_completion:
+            if self._try_backfill():
+                current = self._load_snapshot()
+                if current is not None:
+                    completed = next(
+                        (
+                            candidate
+                            for candidate in current.candidates
+                            if candidate.candidate_id == preliminary.candidate_id
+                        ),
+                        None,
+                    )
+                    if completed is not None and completed.observed_at >= preliminary.observed_at:
+                        self._remember_event(envelope.event_id)
+                        self.stats.alerts_applied += 1
+                        return
+            current = self._load_snapshot()
+            existing = None
+            if current is not None:
+                existing = next(
+                    (
+                        candidate
+                        for candidate in current.candidates
+                        if candidate.candidate_id == preliminary.candidate_id
+                    ),
+                    None,
+                )
+        candidate = self._client.parse_stream_alert(
+            envelope.payload,
+            event_time=envelope.server_time,
+            existing=existing,
+        )
+        if needs_completion and not existing_is_complete:
+            candidate = replace(candidate, data_health="DEGRADED", readiness="INCOMPLETE")
+        current = self._load_snapshot()
+        now = self._clock()
+        fetched_at = self._safe_record_time(now, current)
+        candidates = {
+            item.candidate_id: item for item in (() if current is None else current.candidates)
+        }
+        candidates[candidate.candidate_id] = candidate
+        generated_at = (
+            envelope.server_time
+            if current is None
+            else max(current.generated_at, envelope.server_time)
+        )
+        self._record(
+            PerptapeFeedSnapshot(
+                contract_version=(
+                    self._contract_version if current is None else current.contract_version
+                ),
+                generated_at=generated_at,
+                fetched_at=fetched_at,
+                next_allowed_at=max(
+                    generated_at,
+                    generated_at if current is None else current.next_allowed_at,
+                ),
+                candidates=tuple(candidates.values()),
+            )
+        )
+        self._remember_event(envelope.event_id)
+        self.stats.alerts_applied += 1
+
+    def _consume_connection(self, stop_event: StopEvent) -> None:
+        if self._api_key is None:
+            raise DomainRejected(
+                "PERPTAPE_NOT_CONFIGURED",
+                "Perptape API key is not configured",
+            )
+        headers = {
+            "authorization": f"Bearer {self._api_key}",
+            "x-api-key": self._api_key,
+        }
+        config = json.dumps(
+            {
+                "type": "client_config",
+                "payload": {
+                    "priceType": "last",
+                    "breakoutTimeframes": ["1h", "4h", "1d", "1w"],
+                    "breakoutLookbacks": {"1h": 20, "4h": 20, "1d": 20, "1w": 20},
+                },
+            },
+            separators=(",", ":"),
+        )
+        with self._connector(
+            self._websocket_url,
+            headers,
+            self._timeout_seconds,
+        ) as connection:
+            self.stats.connections += 1
+            connection.send(config)
+            opened_at = self._monotonic()
+            last_received_at = opened_at
+            reconcile_at = opened_at + self._reconciliation_delay()
+            last_sequence: int | None = None
+            last_server_time: datetime | None = None
+            hello_received = False
+            while not stop_event.is_set():
+                current_time = self._monotonic()
+                if current_time >= reconcile_at:
+                    try:
+                        self._reconcile(backfill=False)
+                    except DomainRejected:
+                        self._mark_degraded()
+                    reconcile_at = current_time + self._reconciliation_delay()
+                if current_time - last_received_at >= self._heartbeat_timeout_seconds:
+                    raise DomainRejected(
+                        "PERPTAPE_STREAM_STALE",
+                        "Perptape WebSocket heartbeat timed out",
+                    )
+                try:
+                    raw_message = connection.recv(timeout=1.0)
+                except TimeoutError:
+                    continue
+                last_received_at = self._monotonic()
+                envelope = self._parse_message(raw_message)
+                self.stats.messages_received += 1
+                if not hello_received:
+                    if envelope.event_type != "hello":
+                        raise DomainRejected(
+                            "PERPTAPE_STREAM_PROTOCOL_ERROR",
+                            "Perptape WebSocket did not begin with hello",
+                        )
+                    hello_received = True
+                    last_sequence = envelope.sequence
+                    last_server_time = envelope.server_time
+                    continue
+                if envelope.event_type == "hello":
+                    raise DomainRejected(
+                        "PERPTAPE_STREAM_PROTOCOL_ERROR",
+                        "Perptape WebSocket sent a duplicate hello",
+                    )
+                order = self._message_order(
+                    envelope,
+                    last_sequence=last_sequence,
+                    last_server_time=last_server_time,
+                )
+                if order == "DUPLICATE":
+                    self.stats.duplicates_dropped += 1
+                    continue
+                if order == "OUT_OF_ORDER":
+                    self.stats.gaps_detected += 1
+                    self._try_backfill()
+                    continue
+                gap_backfill_attempted = order == "GAP"
+                if gap_backfill_attempted:
+                    self.stats.gaps_detected += 1
+                    self._try_backfill()
+                if envelope.sequence is not None:
+                    last_sequence = envelope.sequence
+                last_server_time = envelope.server_time
+                if envelope.event_type in {"heartbeat", "alert"}:
+                    self._connection_healthy = True
+                if envelope.event_type == "alert":
+                    self._apply_alert(
+                        envelope,
+                        allow_completion=not gap_backfill_attempted,
+                    )
+
+    def run_forever(self, stop_event: StopEvent) -> None:
+        attempts = 0
+        startup_complete = False
+        while not stop_event.is_set():
+            self._connection_healthy = False
+            error_code = "PERPTAPE_STREAM_UNAVAILABLE"
+            try:
+                if not startup_complete:
+                    self._reconcile(backfill=False)
+                    startup_complete = True
+                self._consume_connection(stop_event)
+                return
+            except DomainRejected as exc:
+                error_code = exc.code
+            except Exception:
+                error_code = "PERPTAPE_STREAM_UNAVAILABLE"
+            if stop_event.is_set():
+                return
+            if startup_complete:
+                self._try_backfill()
+            else:
+                self._mark_degraded()
+            attempts = 1 if self._connection_healthy else attempts + 1
+            non_retryable = error_code in {
+                "PERPTAPE_AUTH_FAILED",
+                "PERPTAPE_NOT_CONFIGURED",
+            }
+            if non_retryable or attempts >= self._max_reconnect_attempts:
+                self._mark_degraded()
+                self.fatal_error_code = error_code
+                logger.error(
+                    "Perptape WebSocket stopped after bounded failures",
+                    extra={
+                        "event": "perptape_stream_stopped",
+                        "component": "perptape",
+                        "error_code": error_code,
+                        "attempt": attempts,
+                    },
+                )
+                stop_event.set()
+                return
+            delay = min(
+                self._reconnect_initial_seconds * (2 ** (attempts - 1)),
+                self._reconnect_max_seconds,
+            )
+            logger.warning(
+                "Perptape WebSocket reconnect scheduled",
+                extra={
+                    "event": "perptape_stream_reconnect_scheduled",
+                    "component": "perptape",
+                    "error_code": error_code,
+                    "attempt": attempts,
+                    "delay_seconds": delay,
+                },
+            )
+            if stop_event.wait(delay):
+                return

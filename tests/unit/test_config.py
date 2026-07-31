@@ -35,6 +35,8 @@ def test_postgresql_psycopg_url_is_accepted() -> None:
     assert settings.binance_live_base_url == "https://papi.binance.com"
     assert settings.perptape_base_url == "https://perptape.com"
     assert settings.perptape_timeout_seconds == 15
+    assert settings.perptape_websocket_enabled is False
+    assert settings.perptape_websocket_url == "wss://perptape.com/ws/v1/alerts"
     assert settings.runtime_sync_enabled is False
     assert settings.runtime_sync_interval_seconds == 60
     assert settings.notilt_enabled is False
@@ -249,3 +251,52 @@ def test_runtime_configuration_rejects_partial_external_credentials(
     )
     with pytest.raises(ValueError, match=message):
         settings.validate_runtime_security()
+
+
+def test_perptape_websocket_requires_explicit_worker_and_key() -> None:
+    database_url = "postgresql+psycopg://user:pass@localhost/trading"
+    missing_worker = Settings(
+        database_url=database_url,
+        perptape_websocket_enabled=True,
+        perptape_api_key="fixture-key",
+        _env_file=None,
+    )
+    with pytest.raises(ValueError, match="runtime sync worker"):
+        missing_worker.validate_runtime_security()
+
+    missing_key = Settings(
+        database_url=database_url,
+        runtime_sync_enabled=True,
+        perptape_websocket_enabled=True,
+        _env_file=None,
+    )
+    with pytest.raises(ValueError, match="platform API key"):
+        missing_key.validate_runtime_security()
+
+    enabled = Settings(
+        database_url=database_url,
+        runtime_sync_enabled=True,
+        perptape_websocket_enabled=True,
+        perptape_api_key="fixture-key",
+        _env_file=None,
+    )
+    enabled.validate_runtime_security()
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("perptape_base_url", "http://perptape.com"),
+        ("perptape_base_url", "https://perptape.example"),
+        ("perptape_websocket_url", "ws://perptape.com/ws/v1/alerts"),
+        ("perptape_websocket_url", "wss://perptape.com/ws/markets"),
+        ("perptape_websocket_url", "wss://perptape.com/ws/v1/alerts?apiKey=secret"),
+    ],
+)
+def test_perptape_urls_are_pinned_to_official_tls_endpoints(field: str, value: str) -> None:
+    with pytest.raises(ValidationError, match="official"):
+        Settings(
+            database_url="postgresql+psycopg://user:pass@localhost/trading",
+            _env_file=None,
+            **{field: value},
+        )
