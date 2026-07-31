@@ -80,12 +80,26 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
 
     assert response.status_code == 200
     assert "Trading Console" in response.text
-    assert "/assets/app.js?v=11" in response.text
+    assert "/assets/app.js?v=12" in response.text
+    assert 'id="mobile-nav-toggle"' in response.text
+    assert 'id="confirm-dialog"' in response.text
 
     app_javascript = get(app, "/assets/app.js")
     assert app_javascript.status_code == 200
     assert "history.replaceState({}, '', loginDestination());" in app_javascript.text
     assert "const destination = `${location.pathname}${location.search}`;" in app_javascript.text
+    assert "timeoutError.code = 'REQUEST_TIMEOUT'" in app_javascript.text
+    assert "networkError.code = 'NETWORK_ERROR'" in app_javascript.text
+    assert "function confirmAction" in app_javascript.text
+
+    stylesheet = get(app, "/assets/styles.css")
+    assert stylesheet.status_code == 200
+    assert ".sidebar[hidden] ~ .main-content" in stylesheet.text
+    assert ".table-scroll-hint" in stylesheet.text
+
+    service_worker = get(app, "/sw.js")
+    assert service_worker.status_code == 200
+    assert "await fetch(event.request)" in service_worker.text
 
 
 def test_mock_login_is_not_available_unless_explicitly_enabled() -> None:

@@ -1,12 +1,18 @@
 const main = document.querySelector('#main');
 const sidebar = document.querySelector('#sidebar');
 const identityChip = document.querySelector('#identity-chip');
+const mobileNavToggle = document.querySelector('#mobile-nav-toggle');
+const mobileSessionSummary = document.querySelector('#mobile-session-summary');
+const navBackdrop = document.querySelector('#nav-backdrop');
 const dialog = document.querySelector('#system-proposal-dialog');
+const confirmDialog = document.querySelector('#confirm-dialog');
 const toast = document.querySelector('#toast');
 let session = null;
 let authStatus = null;
 let instruments = [];
 let opportunities = [];
+let sessionNotice = '';
+let toastTimer = null;
 
 const escapeHtml = (value) => String(value ?? '').replace(/[&<>'"]/g, (char) => ({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[char]));
 const shortId = (value) => value ? `${value.slice(0, 8)}…` : '—';
@@ -20,12 +26,40 @@ const loginDestination = () => {
 };
 
 async function api(path, options = {}) {
-  const response = await fetch(path, {
-    credentials: 'same-origin',
-    ...options,
-    headers: {'content-type': 'application/json', ...(options.headers || {})}
-  });
-  const data = response.status === 204 ? null : await response.json().catch(() => ({}));
+  const method = options.method || 'GET';
+  const controller = method === 'GET' ? new AbortController() : null;
+  const timeout = controller ? setTimeout(() => controller.abort(), 15000) : null;
+  let response;
+  let data;
+  try {
+    response = await fetch(path, {
+      credentials: 'same-origin',
+      ...options,
+      signal: options.signal || controller?.signal,
+      headers: {'content-type': 'application/json', ...(options.headers || {})}
+    });
+    if (response.status === 204) data = null;
+    else {
+      try { data = await response.json(); }
+      catch (error) {
+        if (error.name === 'AbortError') throw error;
+        data = {};
+      }
+    }
+  } catch (error) {
+    if (error.name === 'AbortError') {
+      const timeoutError = new Error('读取超过 15 秒，请检查网络或服务状态后重试');
+      timeoutError.code = 'REQUEST_TIMEOUT';
+      timeoutError.status = 408;
+      throw timeoutError;
+    }
+    const networkError = new Error('无法连接控制台服务，请检查网络后重试');
+    networkError.code = 'NETWORK_ERROR';
+    networkError.status = 0;
+    throw networkError;
+  } finally {
+    if (timeout) clearTimeout(timeout);
+  }
   if (!response.ok) {
     const error = new Error(data?.error?.message || data?.detail?.error?.code || `HTTP ${response.status}`);
     error.code = data?.error?.code || data?.detail?.error?.code || `HTTP_${response.status}`;
@@ -35,20 +69,141 @@ async function api(path, options = {}) {
   return data;
 }
 
-function showToast(message) {
+function showToast(message, kind = 'success') {
+  if (toastTimer) clearTimeout(toastTimer);
   toast.textContent = message;
+  toast.classList.toggle('error', kind === 'error');
+  toast.setAttribute('role', kind === 'error' ? 'alert' : 'status');
+  toast.setAttribute('aria-live', kind === 'error' ? 'assertive' : 'polite');
   toast.classList.add('show');
-  setTimeout(() => toast.classList.remove('show'), 2600);
+  toastTimer = setTimeout(() => toast.classList.remove('show'), kind === 'error' ? 5200 : 3200);
 }
 
 function setShell(loggedIn) {
   sidebar.hidden = !loggedIn;
   identityChip.hidden = !loggedIn;
-  if (loggedIn) identityChip.textContent = `${session.username} · ${roleNames().join(' / ') || 'NO ROLE'}`;
+  mobileNavToggle.hidden = !loggedIn;
+  if (loggedIn) {
+    const identity = `${session.username} · ${roleNames().join(' / ') || 'NO ROLE'}`;
+    identityChip.textContent = identity;
+    mobileSessionSummary.textContent = identity;
+  }
+  closeMobileNav({restoreFocus:false});
 }
 
 function errorView(error, retry = true) {
   return `<section class="error-state"><div><p class="error-code">${escapeHtml(error.code || 'UNKNOWN')}</p><h2>当前事实无法读取</h2><p>${escapeHtml(error.message)}</p>${retry ? '<button class="secondary" data-retry>重新读取</button>' : ''}</div></section>`;
+}
+
+function openMobileNav() {
+  if (!session || !matchMedia('(max-width: 980px)').matches) return;
+  sidebar.classList.add('open');
+  sidebar.inert = false;
+  navBackdrop.hidden = false;
+  mobileNavToggle.setAttribute('aria-expanded', 'true');
+  document.body.classList.add('nav-open');
+  main.inert = true;
+  sidebar.querySelector('a.active, a')?.focus();
+}
+
+function closeMobileNav({restoreFocus = true} = {}) {
+  sidebar.classList.remove('open');
+  navBackdrop.hidden = true;
+  mobileNavToggle.setAttribute('aria-expanded', 'false');
+  document.body.classList.remove('nav-open');
+  main.inert = false;
+  sidebar.inert = matchMedia('(max-width: 980px)').matches;
+  if (restoreFocus && !mobileNavToggle.hidden) mobileNavToggle.focus();
+}
+
+function syncNavigationMode() {
+  if (matchMedia('(max-width: 980px)').matches) closeMobileNav({restoreFocus:false});
+  else {
+    sidebar.inert = false;
+    navBackdrop.hidden = true;
+    main.inert = false;
+    document.body.classList.remove('nav-open');
+  }
+}
+
+function bindLinkedRows() {
+  document.querySelectorAll('tr[data-href]').forEach((row) => {
+    if (row.dataset.rowBound === 'true') return;
+    row.dataset.rowBound = 'true';
+    const firstCell = row.querySelector('td');
+    if (firstCell && !firstCell.querySelector('.row-link')) {
+      const context = firstCell.textContent.trim().replace(/\s+/g, ' ');
+      const link = document.createElement('a');
+      link.className = 'row-link';
+      link.href = row.dataset.href;
+      link.dataset.link = '';
+      link.textContent = '查看详情';
+      link.setAttribute('aria-label', `查看 ${context}`);
+      firstCell.append(link);
+    }
+    row.addEventListener('click', (event) => {
+      if (event.target.closest('a, button, input, select, textarea')) return;
+      navigate(row.dataset.href);
+    });
+  });
+}
+
+function enhanceTables() {
+  document.querySelectorAll('.table-wrap').forEach((wrapper) => {
+    const heading = wrapper.closest('section')?.querySelector('h2, h1')?.textContent || '数据表格';
+    if (wrapper.scrollWidth <= wrapper.clientWidth + 1) return;
+    wrapper.tabIndex = 0;
+    wrapper.setAttribute('role', 'region');
+    wrapper.setAttribute('aria-label', `${heading}，可横向滚动`);
+    wrapper.classList.add('is-scrollable');
+    if (wrapper.previousElementSibling?.matches('[data-table-hint]')) return;
+    const hint = document.createElement('p');
+    hint.className = 'table-scroll-hint';
+    hint.dataset.tableHint = '';
+    hint.textContent = '横向滑动或使用方向键查看完整表格';
+    wrapper.before(hint);
+  });
+}
+
+function enhanceRenderedPage() {
+  bindLinkedRows();
+  enhanceTables();
+}
+
+function confirmAction({title, message, confirmLabel}) {
+  document.querySelector('#confirm-title').textContent = title;
+  document.querySelector('#confirm-message').textContent = message;
+  document.querySelector('#confirm-submit').textContent = confirmLabel || '确认并继续';
+  confirmDialog.returnValue = '';
+  confirmDialog.showModal();
+  return new Promise((resolve) => {
+    confirmDialog.addEventListener('close', () => resolve(confirmDialog.returnValue === 'confirm'), {once:true});
+  });
+}
+
+async function withPending(button, pendingLabel, action) {
+  if (!button || button.dataset.pending === 'true') return undefined;
+  const originalLabel = button.textContent;
+  button.dataset.pending = 'true';
+  button.disabled = true;
+  button.setAttribute('aria-busy', 'true');
+  button.textContent = pendingLabel;
+  try {
+    return await action();
+  } finally {
+    if (button.isConnected) {
+      button.disabled = false;
+      button.removeAttribute('aria-busy');
+      delete button.dataset.pending;
+      button.textContent = originalLabel;
+    }
+  }
+}
+
+function formNumber(value, fallback = '') {
+  if (value === null || value === undefined || value === '') return fallback;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? String(parsed) : String(value);
 }
 
 async function bootstrap() {
@@ -66,29 +221,46 @@ async function bootstrap() {
 async function route() {
   window.scrollTo(0, 0);
   updateActiveNav();
-  if (!session) return renderLogin();
+  closeMobileNav({restoreFocus:false});
+  if (!session) {
+    renderLogin();
+    enhanceRenderedPage();
+    return;
+  }
   main.innerHTML = '<section class="loading-state"><span class="spinner"></span><p>正在读取当前事实…</p></section>';
   const path = location.pathname;
   try {
-    if (path === '/opportunities' || path === '/') return await renderOpportunities();
-    if (path === '/proposals/new') return await renderManualProposal();
-    if (path === '/reviews') return await renderProposalList('PENDING_REVIEW', '审核队列');
-    if (path === '/proposals') return await renderProposalList(null, '全部提案');
-    if (path === '/campaigns') return await renderCampaignList();
-    if (path === '/positions') return await renderCampaignFacts('positions');
-    if (path === '/orders') return await renderCampaignFacts('orders');
-    if (path === '/risk') return await renderCampaignFacts('risk');
-    if (path === '/capital') return await renderCapitalCenter();
-    if (path === '/results') return await renderActualResults();
-    if (path === '/exceptions') return await renderExceptions();
-    if (path === '/venues/binance') return await renderBinanceReadOnly();
-    const campaignMatch = path.match(/^\/campaigns\/([0-9a-f-]+)$/i);
-    if (campaignMatch) return await renderCampaignDetail(campaignMatch[1]);
-    const match = path.match(/^\/proposals\/([0-9a-f-]+)$/i);
-    if (match) return await renderProposalDetail(match[1]);
-    main.innerHTML = '<section class="empty-state"><div><h2>页面不存在</h2><a class="primary" href="/opportunities" data-link>返回机会页</a></div></section>';
+    if (path === '/opportunities' || path === '/') await renderOpportunities();
+    else if (path === '/proposals/new') await renderManualProposal();
+    else if (path === '/reviews') await renderProposalList('PENDING_REVIEW', '审核队列');
+    else if (path === '/proposals') await renderProposalList(null, '全部提案');
+    else if (path === '/campaigns') await renderCampaignList();
+    else if (path === '/positions') await renderCampaignFacts('positions');
+    else if (path === '/orders') await renderCampaignFacts('orders');
+    else if (path === '/risk') await renderCampaignFacts('risk');
+    else if (path === '/capital') await renderCapitalCenter();
+    else if (path === '/results') await renderActualResults();
+    else if (path === '/exceptions') await renderExceptions();
+    else if (path === '/venues/binance') await renderBinanceReadOnly();
+    else {
+      const campaignMatch = path.match(/^\/campaigns\/([0-9a-f-]+)$/i);
+      const proposalMatch = path.match(/^\/proposals\/([0-9a-f-]+)$/i);
+      if (campaignMatch) await renderCampaignDetail(campaignMatch[1]);
+      else if (proposalMatch) await renderProposalDetail(proposalMatch[1]);
+      else main.innerHTML = '<section class="empty-state"><div><h2>页面不存在</h2><a class="primary" href="/opportunities" data-link>返回机会页</a></div></section>';
+    }
+    enhanceRenderedPage();
   } catch (error) {
+    if (error.status === 401) {
+      session = null;
+      sessionNotice = '会话已失效。请重新验证内部身份，完成后会返回当前页面。';
+      setShell(false);
+      renderLogin();
+      enhanceRenderedPage();
+      return;
+    }
     main.innerHTML = errorView(error);
+    enhanceRenderedPage();
   }
 }
 
@@ -97,6 +269,7 @@ function renderLogin() {
     <span class="mock-ribbon">${authStatus.mock_identity_available ? 'NON-PRODUCTION MOCK' : 'MANAGED IDP REQUIRED'}</span>
     <p class="eyebrow" style="margin-top:18px">INTERNAL ACCESS</p><h1>进入交易控制台</h1>
     <p class="lede">没有外部注册。正式环境使用托管身份源与 Passkey；本地 Mock 只验证已存在的内部用户。</p>
+    ${sessionNotice ? `<div class="callout" role="status">${escapeHtml(sessionNotice)}</div>` : ''}
     ${authStatus.mock_identity_available ? `<form id="login-form"><label>内部用户名<input name="username" autocomplete="username" required placeholder="reviewer-1"></label><button class="primary">使用非生产身份进入</button><div class="form-error" role="alert"></div></form>` : '<div class="callout">托管 IdP 尚未接入。系统不会降级为本地密码登录。</div>'}
   </div></section>`;
   document.querySelector('#login-form')?.addEventListener('submit', async (event) => {
@@ -107,6 +280,7 @@ function renderLogin() {
     try {
       const result = await api('/api/auth/mock/login', {method:'POST', body: JSON.stringify({username: new FormData(form).get('username')})});
       session = result.session;
+      sessionNotice = '';
       setShell(true);
       history.replaceState({}, '', loginDestination());
       await route();
@@ -252,7 +426,7 @@ async function renderProposalList(status, title) {
   const items = result.data;
   main.innerHTML = `<section class="page"><header class="page-head"><div><p class="eyebrow">AUTHORITATIVE PROPOSALS</p><h1>${escapeHtml(title)}</h1><p class="lede">每一行都是 PostgreSQL 中的当前权威状态，不把通知或界面缓存当作审批结果。</p></div></header>
     ${items.length ? `<div class="table-wrap"><table><thead><tr><th>来源 / 标的</th><th>方向</th><th>风险</th><th>状态</th><th>版本</th><th>到期</th></tr></thead><tbody>${items.map(item => `<tr data-href="/proposals/${item.proposal_id}"><td><b>${escapeHtml(item.source)}</b><br><span class="subtle">${escapeHtml(item.venue)} · ${shortId(item.instrument_id)}</span></td><td class="${item.direction === 'LONG' ? 'direction-long' : 'direction-short'}">${escapeHtml(item.direction)}</td><td>${escapeHtml(item.risk_tier)} · ${fmtNumber(item.max_risk)}</td><td><b class="status-${escapeHtml(item.status)}">${escapeHtml(item.status)}</b></td><td>v${item.version}</td><td>${fmtDate(item.expires_at)}</td></tr>`).join('')}</tbody></table></div>` : '<section class="empty-state"><div><h2>当前没有匹配提案</h2><p>队列为空不代表已批准或已执行任何交易。</p></div></section>'}</section>`;
-  document.querySelectorAll('tr[data-href]').forEach(row => row.addEventListener('click', () => navigate(row.dataset.href)));
+  bindLinkedRows();
 }
 
 async function renderProposalDetail(id) {
@@ -321,7 +495,7 @@ async function renderCampaignList() {
   main.innerHTML = `<section class="page"><header class="page-head"><div><p class="eyebrow">SHADOW OPERATIONS</p><h1>Campaign 运营台</h1><p class="lede">从短期授权、风险预留和订单意图，到成交、保护、减仓、对账和 PnL。所有发送动作均为本地 SHADOW 事实。</p></div><div class="toolbar"><a class="secondary" href="/proposals" data-link>全部提案</a></div></header>
     <div class="stats"><div class="stat"><small>Campaign</small><b>${items.length}</b></div><div class="stat"><small>Open / Opening</small><b>${items.filter(i => ['OPEN','OPENING'].includes(i.status)).length}</b></div><div class="stat"><small>Unknown</small><b>${items.filter(i => i.status === 'UNKNOWN').length}</b></div><div class="stat"><small>环境</small><b style="font-size:14px">SHADOW ONLY</b></div></div>
     ${items.length ? `<div class="table-wrap"><table><thead><tr><th>Campaign</th><th>范围</th><th>方向 / 目标</th><th>状态</th><th>PnL</th><th>更新时间</th></tr></thead><tbody>${items.map(item => `<tr data-href="/campaigns/${item.campaign_id}"><td><b>${shortId(item.campaign_id)}</b><br><span class="subtle">Proposal ${shortId(item.proposal_id)}</span></td><td>${escapeHtml(item.account_id)}<br><span class="subtle">${escapeHtml(item.venue)}</span></td><td class="${item.direction === 'LONG' ? 'direction-long' : 'direction-short'}">${escapeHtml(item.direction)} · ${fmtNumber(item.current_target_quantity)}</td><td><b class="status-${escapeHtml(item.status)}">${escapeHtml(item.status)}</b></td><td>${fmtNumber(item.final_pnl)}</td><td>${fmtDate(item.updated_at)}</td></tr>`).join('')}</tbody></table></div>` : '<section class="empty-state"><div><h2>尚无 Campaign</h2><p>批准提案并签发短期授权后，Operator 才能创建 SHADOW 初仓意图。</p></div></section>'}</section>`;
-  document.querySelectorAll('tr[data-href]').forEach(row => row.addEventListener('click', () => navigate(row.dataset.href)));
+  bindLinkedRows();
 }
 
 async function renderCampaignFacts(mode) {
@@ -336,10 +510,18 @@ async function renderCampaignFacts(mode) {
     ${mode === 'risk' && roleNames().includes('SYSTEM_ADMIN') ? '<div class="form-panel compact-form"><h2>全局只收紧动作</h2><p class="safety-note">这些入口只能关闭 AUTO_ADD 或把系统切到 REDUCE_ONLY；不能从这里恢复新增风险。</p><div class="toolbar"><button class="danger" data-disable-global-add>关闭全局 AUTO_ADD</button><button class="danger" data-pause-new-risk>暂停所有新增风险</button></div></div><div style="height:16px"></div>' : ''}
     ${mode === 'positions' ? shadowFactsForm() : ''}
     ${rows ? `<div class="table-wrap"><table><thead><tr>${headers}</tr></thead><tbody>${rows}</tbody></table></div>` : '<section class="empty-state"><div><h2>当前没有可展示事实</h2></div></section>'}</section>`;
-  document.querySelectorAll('tr[data-href]').forEach(row => row.addEventListener('click', () => navigate(row.dataset.href)));
+  bindLinkedRows();
   document.querySelector('#shadow-facts-form')?.addEventListener('submit', recordStartingFacts);
-  document.querySelector('[data-disable-global-add]')?.addEventListener('click', () => campaignAction('/api/operations/auto-add/disable', {reason:'administrator disabled AUTO_ADD from Web', idempotency_key:crypto.randomUUID()}));
-  document.querySelector('[data-pause-new-risk]')?.addEventListener('click', () => campaignAction('/api/operations/pause-new-risk', {reason:'administrator paused new risk from Web', idempotency_key:crypto.randomUUID()}));
+  document.querySelector('[data-disable-global-add]')?.addEventListener('click', (event) => campaignAction('/api/operations/auto-add/disable', {reason:'administrator disabled AUTO_ADD from Web', idempotency_key:crypto.randomUUID()}, {
+    button:event.currentTarget,
+    successMessage:'全局 AUTO_ADD 已关闭；现有仓位与退出能力不受影响',
+    confirm:{title:'关闭全局 AUTO_ADD？', message:'确认后，所有 Campaign 都不能继续新增 AddUnit。该入口只会收紧风险，无法在此页重新开启。', confirmLabel:'关闭 AUTO_ADD'},
+  }));
+  document.querySelector('[data-pause-new-risk]')?.addEventListener('click', (event) => campaignAction('/api/operations/pause-new-risk', {reason:'administrator paused new risk from Web', idempotency_key:crypto.randomUUID()}, {
+    button:event.currentTarget,
+    successMessage:'系统已切换到 REDUCE_ONLY；仅允许收紧和退出',
+    confirm:{title:'暂停所有新增风险？', message:'确认后，系统会进入 REDUCE_ONLY。已有仓位仍可减仓或退出，但新的初仓和加仓会被拒绝。', confirmLabel:'切换到 REDUCE_ONLY'},
+  }));
 }
 
 function shadowFactsForm() {
@@ -348,11 +530,18 @@ function shadowFactsForm() {
 
 async function recordStartingFacts(event) {
   event.preventDefault(); const form = event.currentTarget; const data = Object.fromEntries(new FormData(form));
-  try {
-    await api('/api/facts/positions', {method:'POST', body:JSON.stringify({account_id:data.account_id, venue:data.venue, instrument_id:data.instrument_id, quantity:data.quantity, average_entry_price:data.average_entry_price, mark_price:data.mark_price, known:true})});
-    await api('/api/facts/account-equity', {method:'POST', body:JSON.stringify({account_id:data.account_id, venue:data.venue, equity:data.equity, available_balance:data.available_balance, currency:data.currency, known:true})});
-    showToast('当前 SHADOW 仓位与权益事实已记录'); await route();
-  } catch (error) { form.querySelector('.form-error').textContent = `${error.code}: ${error.message}`; }
+  const button = event.submitter || form.querySelector('button');
+  await withPending(button, '记录中…', async () => {
+    form.querySelector('.form-error').textContent = '';
+    try {
+      await api('/api/facts/positions', {method:'POST', body:JSON.stringify({account_id:data.account_id, venue:data.venue, instrument_id:data.instrument_id, quantity:data.quantity, average_entry_price:data.average_entry_price, mark_price:data.mark_price, known:true})});
+      await api('/api/facts/account-equity', {method:'POST', body:JSON.stringify({account_id:data.account_id, venue:data.venue, equity:data.equity, available_balance:data.available_balance, currency:data.currency, known:true})});
+      showToast('当前 SHADOW 仓位与权益事实已记录'); await route();
+    } catch (error) {
+      form.querySelector('.form-error').textContent = `${error.code}: ${error.message}`;
+      showToast('SHADOW 事实未完整记录，请先核对当前事实再决定是否继续', 'error');
+    }
+  });
 }
 
 async function renderCapitalCenter() {
@@ -542,7 +731,7 @@ function intentCard(intent) { return `<div class="intent-row"><div><b>${escapeHt
 
 function operationForm(intent, item) { if (intent.status === 'UNKNOWN') return '<p class="safety-note">结果为 UNKNOWN：风险保持占用，不提供重发或释放按钮。必须人工对账。</p>'; if (intent.status === 'READY') return `<div class="action-panel"><h3>记录 SHADOW send</h3><label>合成 Venue Order ID<input id="venue-order-id" value="shadow-${intent.intent_id.slice(0,8)}"></label><button class="primary" data-shadow-send>获取 lease 并记录</button><button class="danger" data-unknown>标记 UNKNOWN</button></div>`; return `<form id="fill-form" class="action-panel"><h3>记录合成成交</h3><div class="field-grid"><label>Fill ID<input name="venue_fill_id" value="fill-${crypto.randomUUID().slice(0,8)}" required></label><label>方向<select name="side"><option ${intent.side === 'BUY' ? 'selected' : ''}>BUY</option><option ${intent.side === 'SELL' ? 'selected' : ''}>SELL</option></select></label><label>数量<input name="quantity" type="number" step="any" value="${escapeHtml(intent.quantity)}" required></label><label>成交价<input name="price" type="number" step="any" required></label><label>手续费<input name="fee" type="number" step="any" value="0"></label><label>币种<input name="fee_currency" value="${escapeHtml(item.instrument?.collateral_currency || 'USDT')}"></label><label>滑点成本<input name="slippage_cost" type="number" step="any" value="0"></label></div><div class="toolbar" style="margin-top:12px"><button class="primary">记录 SHADOW fill</button><button type="button" class="danger" data-unknown>标记 UNKNOWN</button></div></form>`; }
 
-function positionProtectionForms(item) { return `<form id="position-form" class="action-panel"><h3>更新合成仓位事实</h3><div class="field-grid"><label>数量<input name="quantity" type="number" step="any" value="${escapeHtml(item.position?.quantity || '0')}" required></label><label>平均入场价<input name="average_entry_price" type="number" step="any" value="${escapeHtml(item.position?.average_entry_price || '0')}" required></label><label>标记价<input name="mark_price" type="number" step="any" value="${escapeHtml(item.position?.mark_price || '')}" required></label></div><button class="secondary">更新仓位</button></form>${item.position && Math.abs(Number(item.position.quantity)) > 0 ? `<form id="protection-form" class="action-panel"><h3>更新保护事实</h3><div class="field-grid"><label>保护 Order ID<input name="venue_order_id" value="${escapeHtml(item.protection?.venue_order_id || 'shadow-stop')}" required></label><label>保护数量<input name="quantity" type="number" step="any" value="${escapeHtml(Math.abs(Number(item.position.quantity)))}" required></label><label>触发价<input name="trigger_price" type="number" step="any" value="${escapeHtml(item.protection?.trigger_price || '')}" required></label><label>状态<select name="coverage"><option value="full">已知且完整</option><option value="degraded">已知但不足</option><option value="unknown">未知</option></select></label></div><button class="secondary">更新保护</button></form>` : ''}`; }
+function positionProtectionForms(item) { return `<form id="position-form" class="action-panel"><h3>更新合成仓位事实</h3><div class="field-grid"><label>数量<input name="quantity" type="number" step="any" value="${escapeHtml(formNumber(item.position?.quantity, '0'))}" required></label><label>平均入场价<input name="average_entry_price" type="number" step="any" value="${escapeHtml(formNumber(item.position?.average_entry_price, '0'))}" required></label><label>标记价<input name="mark_price" type="number" step="any" value="${escapeHtml(formNumber(item.position?.mark_price))}" required></label></div><button class="secondary">更新仓位</button></form>${item.position && Math.abs(Number(item.position.quantity)) > 0 ? `<form id="protection-form" class="action-panel"><h3>更新保护事实</h3><div class="field-grid"><label>保护 Order ID<input name="venue_order_id" value="${escapeHtml(item.protection?.venue_order_id || 'shadow-stop')}" required></label><label>保护数量<input name="quantity" type="number" step="any" value="${escapeHtml(formNumber(Math.abs(Number(item.position.quantity))))}" required></label><label>触发价<input name="trigger_price" type="number" step="any" value="${escapeHtml(formNumber(item.protection?.trigger_price))}" required></label><label>状态<select name="coverage"><option value="full">已知且完整</option><option value="degraded">已知但不足</option><option value="unknown">未知</option></select></label></div><button class="secondary">更新保护</button></form>` : ''}`; }
 
 function targetForm(item) { return `<form id="target-form" class="action-panel"><h3>原子生成唯一减仓目标</h3><label>目标剩余数量<input name="target_quantity" type="number" step="any" min="0" max="${escapeHtml(Math.abs(Number(item.position.quantity)))}" required></label><label>紧迫度<select name="urgency"><option>NORMAL</option><option selected>URGENT</option><option>IMMEDIATE</option></select></label><label>原因<input name="reason" value="operator risk reduction" required></label><label>执行限价（Hyperliquid TESTNET 必填）<input name="limit_price" type="number" step="any" min="0"></label><button class="primary">生成 reduce-only 意图</button><button type="button" class="danger" data-auto-exit>评估冻结失效价并自动退出</button></form>`; }
 
@@ -552,28 +741,65 @@ function managementPanel(item, candidates, candidateError, canOperate) {
   const addForm = canOperate && management.allow_auto_add && Number(management.remaining_adds) > 0
     ? `<form id="auto-add-form" class="action-panel"><h3>Perptape Add 候选</h3>${candidateError ? `<p class="safety-note">${escapeHtml(candidateError)}</p>` : candidateOptions ? `<label>后续候选<select name="candidate_id">${candidateOptions}</select></label><label>Add 数量<input name="quantity" type="number" step="any" min="0" max="${escapeHtml(management.remaining_quantity)}" required></label><button class="primary" ${management.auto_add_gate !== 'ENABLED' ? 'disabled' : ''}>最终风控并创建 Add 意图</button>` : '<p class="safety-note">当前没有同场所、同标的、同方向的后续 Perptape 候选。</p>'}</form>`
     : '<p class="safety-note">该 Campaign 没有剩余的已冻结 AddUnit，或 Proposal 未允许 AUTO_ADD。</p>';
-  return `<article class="card"><h2>AUTO_ADD 管理</h2><dl class="definition-grid">${definition('全局 Gate', management.auto_add_gate)}${definition('AddUnit', `${item.authorization?.used_adds || 0} / ${item.authorization?.allowed_adds || 0}`)}${definition('剩余数量', fmtNumber(management.remaining_quantity))}${definition('冻结触发价', fmtNumber(management.add_trigger_price))}</dl>${addForm}${canOperate ? '<button class="danger" data-disable-campaign-add>关闭本 Campaign 后续 Add</button>' : ''}<p class="safety-note">只有首个真实正成交消费 AddUnit；零成交取消或拒绝不消费，UNKNOWN 冻结新增风险。</p></article>`;
+  const canDisableAdd = canOperate && management.allow_auto_add && Number(management.remaining_adds) > 0;
+  return `<article class="card"><h2>AUTO_ADD 管理</h2><dl class="definition-grid">${definition('全局 Gate', management.auto_add_gate)}${definition('AddUnit', `${item.authorization?.used_adds || 0} / ${item.authorization?.allowed_adds || 0}`)}${definition('剩余数量', fmtNumber(management.remaining_quantity))}${definition('冻结触发价', fmtNumber(management.add_trigger_price))}</dl>${addForm}${canDisableAdd ? '<button class="danger" data-disable-campaign-add>关闭本 Campaign 后续 Add</button>' : ''}<p class="safety-note">只有首个真实正成交消费 AddUnit；零成交取消或拒绝不消费，UNKNOWN 冻结新增风险。</p></article>`;
 }
 
 function bindCampaignActions(item, active) {
-  document.querySelector('[data-pnl]')?.addEventListener('click', () => campaignAction(`/api/campaigns/${item.campaign_id}/pnl`, {}));
-  document.querySelector('[data-reconcile]')?.addEventListener('click', () => campaignAction(`/api/campaigns/${item.campaign_id}/reconcile`, {execution_scope:`${item.account_id}:${item.venue}`}));
-  document.querySelector('[data-shadow-send]')?.addEventListener('click', async () => { const owner = `web-${session.user_id.slice(0,8)}`; try { const lease = await api('/api/sender-leases', {method:'POST', body:JSON.stringify({execution_scope:`${item.account_id}:${item.venue}`, owner_id:owner, lease_seconds:60})}); await api(`/api/intents/${active.intent_id}/shadow-send`, {method:'POST', body:JSON.stringify({execution_scope:`${item.account_id}:${item.venue}`, owner_id:owner, fencing_token:lease.fencing_token, venue_order_id:document.querySelector('#venue-order-id').value})}); showToast('已记录 SHADOW send；没有连接交易所'); await route(); } catch (error) { showToast(`${error.code}: ${error.message}`); } });
-  document.querySelectorAll('[data-unknown]').forEach(button => button.addEventListener('click', () => campaignAction(`/api/intents/${active.intent_id}/unknown`, {reason:'operator marked uncertain SHADOW outcome'})));
+  document.querySelector('[data-pnl]')?.addEventListener('click', (event) => campaignAction(`/api/campaigns/${item.campaign_id}/pnl`, {}, {button:event.currentTarget, pendingLabel:'刷新中…', successMessage:'PnL 已按当前 SHADOW 事实重新计算'}));
+  document.querySelector('[data-reconcile]')?.addEventListener('click', (event) => campaignAction(`/api/campaigns/${item.campaign_id}/reconcile`, {execution_scope:`${item.account_id}:${item.venue}`}, {button:event.currentTarget, pendingLabel:'对账中…', successMessage:'对账已完成；结果已写入审计事实'}));
+  document.querySelector('[data-shadow-send]')?.addEventListener('click', async (event) => withPending(event.currentTarget, '记录中…', async () => {
+    const owner = `web-${session.user_id.slice(0,8)}`;
+    try {
+      const lease = await api('/api/sender-leases', {method:'POST', body:JSON.stringify({execution_scope:`${item.account_id}:${item.venue}`, owner_id:owner, lease_seconds:60})});
+      await api(`/api/intents/${active.intent_id}/shadow-send`, {method:'POST', body:JSON.stringify({execution_scope:`${item.account_id}:${item.venue}`, owner_id:owner, fencing_token:lease.fencing_token, venue_order_id:document.querySelector('#venue-order-id').value})});
+      showToast('已记录 SHADOW send；没有连接交易所'); await route();
+    } catch (error) { showToast(`${error.code}: ${error.message}`, 'error'); }
+  }));
+  document.querySelectorAll('[data-unknown]').forEach(button => button.addEventListener('click', () => campaignAction(`/api/intents/${active.intent_id}/unknown`, {reason:'operator marked uncertain SHADOW outcome'}, {
+    button,
+    successMessage:'意图已标记 UNKNOWN；风险保持占用并等待人工对账',
+    confirm:{title:'标记为 UNKNOWN？', message:'这会冻结与该意图相关的新增风险，并隐藏重发和释放入口。请只在 SHADOW 结果确实无法确认时继续，随后必须人工对账。', confirmLabel:'标记 UNKNOWN'},
+  })));
   document.querySelector('#fill-form')?.addEventListener('submit', event => submitNamedForm(event, `/api/intents/${active.intent_id}/fills`));
-  document.querySelector('#position-form')?.addEventListener('submit', event => { event.preventDefault(); const data = Object.fromEntries(new FormData(event.currentTarget)); campaignAction('/api/facts/positions', {...data, account_id:item.account_id, venue:item.venue, instrument_id:item.instrument_id, known:true}); });
-  document.querySelector('#protection-form')?.addEventListener('submit', event => { event.preventDefault(); const data = Object.fromEntries(new FormData(event.currentTarget)); campaignAction(`/api/campaigns/${item.campaign_id}/protection`, {position_id:item.position.position_id, venue_order_id:data.venue_order_id, quantity:data.quantity, trigger_price:data.trigger_price, fully_covered:data.coverage === 'full', known:data.coverage !== 'unknown'}); });
-  document.querySelector('#target-form')?.addEventListener('submit', event => { event.preventDefault(); const data = Object.fromEntries(new FormData(event.currentTarget)); campaignAction(`/api/campaigns/${item.campaign_id}/managed-reductions`, {target_quantity:data.target_quantity, urgency:data.urgency, reason:data.reason, limit_price:data.limit_price || null, idempotency_key:crypto.randomUUID()}); });
-  document.querySelector('[data-auto-exit]')?.addEventListener('click', () => campaignAction(`/api/campaigns/${item.campaign_id}/automatic-exit`, {idempotency_key:crypto.randomUUID(), limit_price:document.querySelector('#target-form')?.elements.limit_price.value || null}));
-  document.querySelector('#auto-add-form')?.addEventListener('submit', event => { event.preventDefault(); const data = Object.fromEntries(new FormData(event.currentTarget)); campaignAction(`/api/campaigns/${item.campaign_id}/auto-add`, {candidate_id:data.candidate_id, quantity:data.quantity, idempotency_key:crypto.randomUUID()}); });
-  document.querySelector('[data-disable-campaign-add]')?.addEventListener('click', () => campaignAction(`/api/campaigns/${item.campaign_id}/auto-add/disable`, {reason:'operator disabled further Campaign AddUnits', idempotency_key:crypto.randomUUID()}));
+  document.querySelector('#position-form')?.addEventListener('submit', event => { event.preventDefault(); const data = Object.fromEntries(new FormData(event.currentTarget)); campaignAction('/api/facts/positions', {...data, account_id:item.account_id, venue:item.venue, instrument_id:item.instrument_id, known:true}, {button:event.submitter, successMessage:'SHADOW 仓位事实已更新'}); });
+  document.querySelector('#protection-form')?.addEventListener('submit', event => { event.preventDefault(); const data = Object.fromEntries(new FormData(event.currentTarget)); campaignAction(`/api/campaigns/${item.campaign_id}/protection`, {position_id:item.position.position_id, venue_order_id:data.venue_order_id, quantity:data.quantity, trigger_price:data.trigger_price, fully_covered:data.coverage === 'full', known:data.coverage !== 'unknown'}, {button:event.submitter, successMessage:'保护事实已更新；覆盖状态已重新计算'}); });
+  document.querySelector('#target-form')?.addEventListener('submit', event => { event.preventDefault(); const data = Object.fromEntries(new FormData(event.currentTarget)); campaignAction(`/api/campaigns/${item.campaign_id}/managed-reductions`, {target_quantity:data.target_quantity, urgency:data.urgency, reason:data.reason, limit_price:data.limit_price || null, idempotency_key:crypto.randomUUID()}, {button:event.submitter, successMessage:'唯一 reduce-only 目标已生成'}); });
+  document.querySelector('[data-auto-exit]')?.addEventListener('click', (event) => campaignAction(`/api/campaigns/${item.campaign_id}/automatic-exit`, {idempotency_key:crypto.randomUUID(), limit_price:document.querySelector('#target-form')?.elements.limit_price.value || null}, {
+    button:event.currentTarget,
+    successMessage:'自动退出评估已完成；SHADOW 退出意图已按冻结失效价生成',
+    confirm:{title:'评估并自动退出？', message:'确认后会按冻结失效价评估退出条件，并可能生成新的 reduce-only SHADOW 意图。不会连接交易所或发送真实订单。', confirmLabel:'评估并生成退出意图'},
+  }));
+  document.querySelector('#auto-add-form')?.addEventListener('submit', event => { event.preventDefault(); const data = Object.fromEntries(new FormData(event.currentTarget)); campaignAction(`/api/campaigns/${item.campaign_id}/auto-add`, {candidate_id:data.candidate_id, quantity:data.quantity, idempotency_key:crypto.randomUUID()}, {button:event.submitter, successMessage:'Add 候选已完成最终风控；结果已记录'}); });
+  document.querySelector('[data-disable-campaign-add]')?.addEventListener('click', (event) => campaignAction(`/api/campaigns/${item.campaign_id}/auto-add/disable`, {reason:'operator disabled further Campaign AddUnits', idempotency_key:crypto.randomUUID()}, {
+    button:event.currentTarget,
+    successMessage:'本 Campaign 的后续 Add 已关闭',
+    confirm:{title:'关闭本 Campaign 后续 Add？', message:'确认后，该 Campaign 剩余 AddUnit 将不能继续使用。已有仓位仍可减仓或退出。', confirmLabel:'关闭后续 Add'},
+  }));
 }
 
-async function campaignAction(path, body) { try { await api(path, {method:'POST', body:JSON.stringify(body)}); showToast('SHADOW 权威状态已更新'); await route(); } catch (error) { showToast(`${error.code}: ${error.message}`); } }
-async function submitNamedForm(event, path) { event.preventDefault(); await campaignAction(path, Object.fromEntries(new FormData(event.currentTarget))); }
+async function campaignAction(path, body, {button = null, pendingLabel = '处理中…', successMessage = 'SHADOW 权威状态已更新', confirm = null} = {}) {
+  if (confirm && !await confirmAction(confirm)) return;
+  const run = async () => {
+    try {
+      await api(path, {method:'POST', body:JSON.stringify(body)});
+      showToast(successMessage);
+      await route();
+    } catch (error) { showToast(`${error.code}: ${error.message}`, 'error'); }
+  };
+  return button ? withPending(button, pendingLabel, run) : run();
+}
+async function submitNamedForm(event, path) { event.preventDefault(); await campaignAction(path, Object.fromEntries(new FormData(event.currentTarget)), {button:event.submitter}); }
 
 function navigate(path) { history.pushState({}, '', path); route(); }
-function updateActiveNav() { document.querySelectorAll('nav a').forEach(link => link.classList.toggle('active', location.pathname === link.getAttribute('href'))); }
+function updateActiveNav() {
+  document.querySelectorAll('nav a').forEach((link) => {
+    const active = location.pathname === link.getAttribute('href');
+    link.classList.toggle('active', active);
+    if (active) link.setAttribute('aria-current', 'page');
+    else link.removeAttribute('aria-current');
+  });
+}
 
 document.addEventListener('click', (event) => {
   const link = event.target.closest('[data-link]');
@@ -581,14 +807,29 @@ document.addEventListener('click', (event) => {
   if (event.target.closest('[data-retry]')) route();
 });
 window.addEventListener('popstate', route);
+window.addEventListener('resize', syncNavigationMode);
+mobileNavToggle.addEventListener('click', () => sidebar.classList.contains('open') ? closeMobileNav() : openMobileNav());
+navBackdrop.addEventListener('click', () => closeMobileNav());
+document.addEventListener('keydown', (event) => {
+  if (event.key === 'Escape' && sidebar.classList.contains('open')) closeMobileNav();
+});
 document.querySelectorAll('[data-close-dialog]').forEach(button => button.addEventListener('click', () => dialog.close()));
 document.querySelector('#system-proposal-form').addEventListener('submit', async (event) => {
   event.preventDefault(); const form = event.currentTarget; const data = Object.fromEntries(new FormData(form)); const candidateId = data.candidate_id; delete data.candidate_id; data.expires_in_minutes = Number(data.expires_in_minutes); data.initial_quantity = data.initial_quantity || null; data.add_trigger_price = data.add_trigger_price || null; data.allow_auto_add = data.allow_auto_add === 'true'; data.requested_adds = Number(data.requested_adds);
   try { const result = await api(`/api/opportunities/${candidateId}/proposals`, {method:'POST', body:JSON.stringify(data)}); dialog.close(); showToast('SYSTEM 提案已冻结并进入审核'); navigate(`/proposals/${result.proposal_id}`); }
   catch (error) { document.querySelector('#system-form-error').textContent = `${error.code}: ${error.message}`; }
 });
-document.querySelector('#logout-button').addEventListener('click', async () => { await api('/api/auth/logout', {method:'POST'}); session = null; setShell(false); history.replaceState({}, '', '/'); route(); });
+document.querySelector('#logout-button').addEventListener('click', async (event) => withPending(event.currentTarget, '退出中…', async () => {
+  try {
+    await api('/api/auth/logout', {method:'POST'});
+    session = null;
+    setShell(false);
+    history.replaceState({}, '', '/');
+    await route();
+  } catch (error) { showToast(`${error.code}: ${error.message}`, 'error'); }
+}));
 document.querySelector('#theme-toggle').addEventListener('click', () => { const next = document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark'; document.documentElement.dataset.theme = next; localStorage.setItem('trading-theme', next); });
 document.documentElement.dataset.theme = localStorage.getItem('trading-theme') || (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light');
 if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js').catch(() => {});
+syncNavigationMode();
 bootstrap().catch((error) => { main.innerHTML = errorView(error, false); });

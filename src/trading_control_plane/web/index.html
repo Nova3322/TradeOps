@@ -7,7 +7,7 @@
     <meta name="description" content="内部 SHADOW 交易提案、审核与风险控制台">
     <link rel="manifest" href="/manifest.webmanifest">
     <link rel="icon" href="/assets/icon.svg" type="image/svg+xml">
-    <link rel="stylesheet" href="/assets/styles.css?v=8">
+    <link rel="stylesheet" href="/assets/styles.css?v=9">
     <title>Trading Console · SHADOW</title>
   </head>
   <body>
@@ -21,6 +21,7 @@
           <span class="env-badge">SHADOW</span>
           <button id="theme-toggle" class="icon-button" aria-label="切换主题">◐</button>
           <div id="identity-chip" class="identity-chip" hidden></div>
+          <button id="mobile-nav-toggle" class="mobile-nav-toggle" type="button" aria-controls="sidebar" aria-expanded="false" hidden>菜单</button>
         </div>
       </header>
 
@@ -39,11 +40,13 @@
           <a href="/venues/binance" data-link><span>◫</span>Binance只读</a>
         </nav>
         <div class="sidebar-foot">
+          <div id="mobile-session-summary" class="mobile-session-summary"></div>
           <div><span class="status-dot"></span> PostgreSQL 权威事实</div>
           <div>真实发送 · Disabled</div>
           <button id="logout-button" class="text-button">退出当前会话</button>
         </div>
       </aside>
+      <button id="nav-backdrop" class="nav-backdrop" type="button" aria-label="关闭主导航" hidden></button>
 
       <main id="main" class="main-content" aria-live="polite">
         <section class="loading-state"><span class="spinner"></span><p>正在读取当前事实…</p></section>
@@ -82,7 +85,20 @@
         <div class="dialog-actions"><button type="button" class="secondary" data-close-dialog>取消</button><button class="primary" type="submit">按此配置创建</button></div>
       </form>
     </dialog>
+    <dialog id="confirm-dialog" aria-labelledby="confirm-title" aria-describedby="confirm-message">
+      <form method="dialog" class="dialog-form confirm-form">
+        <div class="dialog-head">
+          <div><p class="eyebrow">请再次确认</p><h2 id="confirm-title">确认此操作？</h2></div>
+          <button type="submit" value="cancel" class="icon-button" aria-label="取消并关闭">×</button>
+        </div>
+        <p id="confirm-message" class="confirm-message"></p>
+        <div class="dialog-actions">
+          <button type="submit" value="cancel" class="secondary">取消</button>
+          <button id="confirm-submit" type="submit" value="confirm" class="danger">确认并继续</button>
+        </div>
+      </form>
+    </dialog>
     <div id="toast" class="toast" role="status" aria-live="polite"></div>
-    <script type="module" src="/assets/app.js?v=11"></script>
+    <script type="module" src="/assets/app.js?v=12"></script>
   </body>
 </html>
