@@ -101,6 +101,9 @@ from trading_control_plane.telegram import (
     CapitalNotification,
     MockTelegramGateway,
     ProposalNotification,
+    TelegramBotGateway,
+    TelegramCampaignAction,
+    TelegramGateway,
 )
 
 logger = logging.getLogger(__name__)
@@ -175,7 +178,7 @@ def create_app(
     settings: Settings | None = None,
     database: ReadinessDatabase | None = None,
     perptape_client: PerptapeClient | None = None,
-    telegram_gateway: MockTelegramGateway | None = None,
+    telegram_gateway: TelegramGateway | None = None,
     binance_client: BinanceReadOnlyClient | None = None,
     binance_testnet_client: BinanceTestnetClient | None = None,
     binance_testnet_reader: BinanceReadOnlyClient | None = None,
@@ -194,7 +197,33 @@ def create_app(
         contract_version=resolved_settings.perptape_contract_version,
         cache_ttl=timedelta(seconds=resolved_settings.perptape_cache_seconds),
     )
-    resolved_telegram = telegram_gateway or MockTelegramGateway()
+    if telegram_gateway is not None:
+        resolved_telegram = telegram_gateway
+    elif resolved_settings.telegram_enabled:
+        if not isinstance(resolved_database, Database):
+            raise ValueError("real Telegram requires the durable Trading database")
+        assert resolved_settings.telegram_bot_token is not None
+        assert resolved_settings.telegram_allowed_username is not None
+        assert resolved_settings.telegram_internal_username is not None
+        resolved_telegram = TelegramBotGateway(
+            token=resolved_settings.telegram_bot_token,
+            allowed_username=resolved_settings.telegram_allowed_username,
+            internal_username=resolved_settings.telegram_internal_username,
+            binder=lambda chat_id, telegram_username, internal_username: TradingService(
+                resolved_database
+            ).bind_telegram_private_chat(
+                internal_username=internal_username,
+                telegram_username=telegram_username,
+                telegram_chat_id=chat_id,
+                now=_now(),
+            ),
+            chat_resolver=lambda user_id: TradingQueries(resolved_database).telegram_chat_id(
+                user_id
+            ),
+            poll_timeout_seconds=resolved_settings.telegram_poll_timeout_seconds,
+        )
+    else:
+        resolved_telegram = MockTelegramGateway()
     resolved_binance = binance_client or BinanceReadOnlyClient(
         base_url=resolved_settings.binance_futures_base_url,
         api_key=resolved_settings.binance_api_key,
@@ -229,8 +258,14 @@ def create_app(
 
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
-        yield
-        resolved_database.dispose()
+        if isinstance(resolved_telegram, TelegramBotGateway):
+            resolved_telegram.start()
+        try:
+            yield
+        finally:
+            if isinstance(resolved_telegram, TelegramBotGateway):
+                resolved_telegram.stop()
+            resolved_database.dispose()
 
     app = FastAPI(
         title="Trading Control Plane",
@@ -2223,7 +2258,16 @@ def create_app(
                         "account_scope": resolved_settings.hyperliquid_account_scope,
                     },
                     "capital_transfer": {"mode": "MOCK_ONLY", "real_configured": False},
-                    "telegram": {"mode": "MOCK_ONLY", "network_configured": False},
+                    "telegram": {
+                        "mode": (
+                            "BOT_API_LONG_POLLING"
+                            if isinstance(resolved_telegram, TelegramBotGateway)
+                            else "MOCK_ONLY"
+                        ),
+                        "enabled": resolved_settings.telegram_enabled,
+                        "network_configured": bool(resolved_settings.telegram_bot_token),
+                        "private_chat_only": True,
+                    },
                 },
             }
         )
@@ -2591,6 +2635,88 @@ def create_app(
             "capital_data": capital_data,
         }
 
+    def execute_telegram_campaign_action(
+        *,
+        recipient_id: UUID,
+        campaign_id: UUID,
+        action: str,
+        action_reference: str,
+        campaign_version: int,
+        idempotency_key: str,
+        target_quantity: Decimal | None = None,
+        limit_price: Decimal | None = None,
+    ) -> UUID:
+        now = _now()
+        token_service.verify_action_reference(
+            action_reference,
+            user_id=recipient_id,
+            action=action,
+            object_id=campaign_id,
+            object_version=campaign_version,
+            now=now,
+        )
+        if action == "DISABLE_CAMPAIGN_AUTO_ADD":
+            service().disable_campaign_auto_add(
+                campaign_id,
+                recipient_id,
+                idempotency_key,
+                reason="Telegram operator disabled further Campaign AddUnits",
+                expected_target_version=campaign_version,
+                now=now,
+            )
+        elif action == "PAUSE_NEW_RISK":
+            service().pause_new_risk(
+                recipient_id,
+                idempotency_key,
+                reason="Telegram operator paused new risk",
+                now=now,
+            )
+        else:
+            target = Decimal(0) if action == "EXIT" else target_quantity
+            if target is None:
+                raise DomainRejected(
+                    "TELEGRAM_ACTION_INVALID",
+                    "emergency reduction requires a predefined target quantity",
+                )
+            service().create_reduction_intent(
+                campaign_id,
+                recipient_id,
+                idempotency_key,
+                candidates=(
+                    TargetCandidate(
+                        target,
+                        TargetUrgency.IMMEDIATE,
+                        f"TELEGRAM_{action}",
+                    ),
+                ),
+                expected_target_version=campaign_version,
+                limit_price=limit_price,
+                now=now,
+            )
+        return campaign_id
+
+    def handle_real_telegram_action(action: TelegramCampaignAction, update_id: int) -> str:
+        target: Decimal | None = None
+        if action.action == "EMERGENCY_REDUCE":
+            detail = queries().campaign_detail(action.recipient_id, action.campaign_id)
+            target = Decimal(str(detail["current_target_quantity"])) / Decimal(2)
+        try:
+            execute_telegram_campaign_action(
+                recipient_id=action.recipient_id,
+                campaign_id=action.campaign_id,
+                action=action.action,
+                action_reference=action.action_reference,
+                campaign_version=action.campaign_version,
+                idempotency_key=f"telegram:{update_id}:{action.callback_key}",
+                target_quantity=target,
+            )
+        except DomainRejected as exc:
+            return f"未执行: {exc.code}"
+        return "Trading 已受理; 请在 Web 控制台确认权威状态。"
+
+    if isinstance(resolved_telegram, TelegramBotGateway):
+        resolved_telegram.set_action_handler(handle_real_telegram_action)
+
     @app.post("/api/telegram/mock/campaign-actions")
     def mock_telegram_campaign_action(
         payload: TelegramCampaignActionRequest,
@@ -2612,53 +2738,16 @@ def create_app(
                 "ACTION_REFERENCE_SCOPE_INVALID",
                 "Telegram action reference is not bound to this internal user",
             )
-        now = _now()
-        token_service.verify_action_reference(
-            payload.action_reference,
-            user_id=identity.user_id,
+        execute_telegram_campaign_action(
+            recipient_id=identity.user_id,
+            campaign_id=campaign_id,
             action=payload.action,
-            object_id=campaign_id,
-            object_version=payload.campaign_version,
-            now=now,
+            action_reference=payload.action_reference,
+            campaign_version=payload.campaign_version,
+            idempotency_key=payload.idempotency_key,
+            target_quantity=payload.target_quantity,
+            limit_price=payload.limit_price,
         )
-        if payload.action == "DISABLE_CAMPAIGN_AUTO_ADD":
-            service().disable_campaign_auto_add(
-                campaign_id,
-                identity.user_id,
-                payload.idempotency_key,
-                reason="Telegram operator disabled further Campaign AddUnits",
-                expected_target_version=payload.campaign_version,
-                now=now,
-            )
-        elif payload.action == "PAUSE_NEW_RISK":
-            service().pause_new_risk(
-                identity.user_id,
-                payload.idempotency_key,
-                reason="Telegram operator paused new risk",
-                now=now,
-            )
-        else:
-            target = Decimal(0) if payload.action == "EXIT" else payload.target_quantity
-            if target is None:
-                raise DomainRejected(
-                    "TELEGRAM_ACTION_INVALID",
-                    "emergency reduction requires a predefined target quantity",
-                )
-            service().create_reduction_intent(
-                campaign_id,
-                identity.user_id,
-                payload.idempotency_key,
-                candidates=(
-                    TargetCandidate(
-                        target,
-                        TargetUrgency.IMMEDIATE,
-                        f"TELEGRAM_{payload.action}",
-                    ),
-                ),
-                expected_target_version=payload.campaign_version,
-                limit_price=payload.limit_price,
-                now=now,
-            )
         return {
             "channel": "TELEGRAM_MOCK_ONLY",
             "action": payload.action,

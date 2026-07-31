@@ -100,6 +100,13 @@ class TradingQueries:
                 ],
             }
 
+    def telegram_chat_id(self, user_id: UUID) -> str | None:
+        with self.database.session_factory() as session:
+            user = session.get(User, user_id)
+            if user is None or not user.active or user.principal_type != PrincipalType.HUMAN.value:
+                return None
+            return user.telegram_chat_id
+
     def list_instruments(self, user_id: UUID) -> list[dict[str, Any]]:
         with self.database.session_factory() as session:
             user = session.get(User, user_id)

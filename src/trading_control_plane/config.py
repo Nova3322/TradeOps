@@ -3,7 +3,7 @@ from __future__ import annotations
 from functools import lru_cache
 from typing import Literal
 
-from pydantic import Field, field_validator
+from pydantic import AliasChoices, Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 DEFAULT_SESSION_SECRET = "local-development-session-secret-change-me"  # noqa: S105
@@ -20,6 +20,7 @@ class Settings(BaseSettings):
         env_file=".env.local",
         env_file_encoding="utf-8",
         extra="ignore",
+        populate_by_name=True,
     )
 
     environment: Literal["local", "test", "staging", "production"] = "local"
@@ -36,6 +37,26 @@ class Settings(BaseSettings):
     allow_mock_identity: bool = False
     session_ttl_seconds: int = Field(default=28_800, ge=300, le=86_400)
     action_token_ttl_seconds: int = Field(default=300, ge=30, le=900)
+    telegram_enabled: bool = False
+    telegram_bot_token: str | None = Field(
+        default=None,
+        min_length=20,
+        repr=False,
+        validation_alias=AliasChoices(
+            "TRADING_TELEGRAM_BOT_TOKEN",
+            "TELEGRAM_BOT_TOKEN",
+        ),
+    )
+    telegram_bot_username: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices(
+            "TRADING_TELEGRAM_BOT_USERNAME",
+            "TELEGRAM_BOT_USERNAME",
+        ),
+    )
+    telegram_allowed_username: str | None = None
+    telegram_internal_username: str | None = None
+    telegram_poll_timeout_seconds: int = Field(default=20, ge=1, le=30)
     perptape_base_url: str = "http://127.0.0.1:8787"
     perptape_api_key: str | None = Field(default=None, repr=False)
     perptape_service_username: str = "perptape"
@@ -95,6 +116,12 @@ class Settings(BaseSettings):
             raise ValueError("enabled Binance testnet send requires explicit testnet credentials")
         if self.hyperliquid_subaccount_address and not self.hyperliquid_account_address:
             raise ValueError("Hyperliquid subaccount requires the main account address")
+        if self.telegram_enabled and not self.telegram_bot_token:
+            raise ValueError("enabled Telegram requires a Bot API token")
+        if self.telegram_enabled and not self.telegram_allowed_username:
+            raise ValueError("enabled Telegram requires an allowed private-chat username")
+        if self.telegram_enabled and not self.telegram_internal_username:
+            raise ValueError("enabled Telegram requires an existing internal username")
 
 
 @lru_cache(maxsize=1)

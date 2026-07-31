@@ -79,3 +79,32 @@ def test_production_rejects_mock_identity_and_default_signing_secret() -> None:
     )
     with pytest.raises(ValueError, match="signing secret"):
         default_secret.validate_runtime_security()
+
+
+def test_real_telegram_is_default_off_and_requires_binding_configuration() -> None:
+    token = "123456789:abcdefghijklmnopqrstuvwxyz"  # noqa: S105
+    default = Settings(
+        database_url="postgresql+psycopg://user:pass@localhost/trading",
+        _env_file=None,
+    )
+    assert default.telegram_enabled is False
+    assert default.telegram_bot_token is None
+
+    missing_binding = Settings(
+        database_url="postgresql+psycopg://user:pass@localhost/trading",
+        telegram_enabled=True,
+        telegram_bot_token=token,
+        _env_file=None,
+    )
+    with pytest.raises(ValueError, match="allowed private-chat username"):
+        missing_binding.validate_runtime_security()
+
+    configured = Settings(
+        database_url="postgresql+psycopg://user:pass@localhost/trading",
+        telegram_enabled=True,
+        telegram_bot_token=token,
+        telegram_allowed_username="kelly_oooo",
+        telegram_internal_username="kelly_oooo",
+        _env_file=None,
+    )
+    configured.validate_runtime_security()

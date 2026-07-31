@@ -409,6 +409,62 @@ class TradingService:
             )
             return user.user_id
 
+    def bind_telegram_private_chat(
+        self,
+        *,
+        internal_username: str,
+        telegram_username: str,
+        telegram_chat_id: str,
+        now: datetime,
+    ) -> str:
+        """Bind one allowlisted private chat to one existing human user.
+
+        The caller performs the Telegram username allowlist check. Once bound, all
+        authorization uses the immutable numeric private-chat ID and current Trading RBAC.
+        """
+
+        with self.database.session_factory.begin() as session:
+            user = session.scalar(
+                select(User).where(
+                    User.username == internal_username,
+                    User.principal_type == PrincipalType.HUMAN.value,
+                    User.active,
+                )
+            )
+            if user is None:
+                _reject(
+                    "TELEGRAM_INTERNAL_USER_NOT_FOUND",
+                    "the configured internal Telegram user is missing or inactive",
+                )
+            bound_to_chat = session.scalar(
+                select(User).where(User.telegram_chat_id == telegram_chat_id)
+            )
+            if bound_to_chat is not None and bound_to_chat.user_id != user.user_id:
+                _reject(
+                    "TELEGRAM_BINDING_CONFLICT",
+                    "the Telegram private chat is already bound to another internal user",
+                )
+            if user.telegram_chat_id is not None and user.telegram_chat_id != telegram_chat_id:
+                _reject(
+                    "TELEGRAM_BINDING_CONFLICT",
+                    "the internal user already has another Telegram private chat",
+                )
+            if user.telegram_chat_id == telegram_chat_id:
+                return user.username
+            user.telegram_chat_id = telegram_chat_id
+            self._audit(
+                session,
+                actor_id=str(user.user_id),
+                event_type="TELEGRAM_PRIVATE_CHAT_BOUND",
+                object_type="User",
+                object_id=user.user_id,
+                reason=f"allowlisted Telegram user @{telegram_username} completed private /start",
+                correlation_id=uuid4(),
+                object_version=1,
+                now=now,
+            )
+            return user.username
+
     def create_service_principal(self, username: str, actor_id: UUID, *, now: datetime) -> UUID:
         with self.database.session_factory.begin() as session:
             self._require_role(session, actor_id, "user.manage")

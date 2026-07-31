@@ -31,7 +31,7 @@
 - AUTO_ADD 只有管理员显式开启 Gate 后才可能执行；每个 Add 仍需冻结 Proposal、分档 AddUnit、后续 Perptape 候选、盈利仓位、足额保护、新鲜事实、剩余授权和最终 Risk Engine 同时通过。只有首个正成交消费 AddUnit，零成交取消/拒绝不消费，Unknown 冻结后续新增风险。
 - 资金 Proposal、双人独立复核、Capital Transfer Authorization、源端预留、在途、目的端确认和对账与交易授权分离；活动仓位、未解决订单或 Unknown 禁止 Vault 救仓，Unknown 不释放或重发。
 - 自动利润归集和自动运营补充使用两个独立 Gate；当前只根据空仓、无订单、无 Unknown、机器 MATCH、已确认余额和已关闭 Campaign 净 PnL 生成待双人复核的非生产候选，不自动提交资金。浮盈不能归集，净亏损不能触发运营补充。
-- Telegram 当前只有不联网的 Mock 通知与受限收紧风险动作合同；资金通知不包含批准或执行入口。Binance 和 Hyperliquid Core 的只读/TESTNET 窄合同全部默认关闭。TESTNET/Mock 合同不等于真实账户实证，LIVE 没有发送入口。真实账户验证、实盘发送、HIP-3、Margin、真实 Vault/CTO 适配器与真实资金划转尚未实现，文档愿景不能冒充代码能力。
+- Telegram 已提供默认关闭的真实 Bot API 私聊长轮询、内部用户绑定、审核深链和受限收紧风险按钮；资金通知不包含批准或执行入口。正式 IdP/Passkey 仍未接入，因此本地用户名白名单绑定不能冒充生产强认证。Binance 和 Hyperliquid Core 的只读/TESTNET 窄合同全部默认关闭。TESTNET/Mock 合同不等于真实账户实证，LIVE 没有发送入口。真实账户验证、实盘发送、HIP-3、Margin、真实 Vault/CTO 适配器与真实资金划转尚未实现，文档愿景不能冒充代码能力。
 
 ## 当前代码入口
 
@@ -69,6 +69,31 @@ TRADING_DATABASE_URL='postgresql+psycopg://.../trading_restore_test' ./scripts/r
 恢复脚本同样硬限制到预先创建、可丢弃的 `*_test` 数据库；当前不存在生产恢复自动化，不能把本地演练命令用于真实数据库。
 
 本机敏感值只放在 `.env.local`；可提交变量名模板为 `.env.example`。不得把密钥值写入代码、文档、日志或测试制品。
+
+### 本地真实 Telegram
+
+首次运行使用独立的本地 PostgreSQL：
+
+```bash
+./scripts/run_local.sh
+```
+
+该命令会启动 `127.0.0.1:5434` 的 PostgreSQL、升级 Schema、幂等创建
+`kelly_oooo` 内部管理员/Reviewer/Operator、一个本地 Proposer 和第二 Reviewer，然后启动
+API。Telegram 默认仍关闭；先在 BotFather 撤销任何曾出现在聊天或日志中的旧 Token，把新
+Token 仅写入 `.env.local`，再设置：
+
+```dotenv
+TRADING_TELEGRAM_ENABLED=true
+TRADING_TELEGRAM_ALLOWED_USERNAME=kelly_oooo
+TRADING_TELEGRAM_INTERNAL_USERNAME=kelly_oooo
+```
+
+启动后用 `@kelly_oooo` 在 Bot 私聊发送 `/start`。首次绑定校验白名单用户名，成功后只认
+Telegram 数字私聊 ID，并在每次按钮操作时重新加载 Trading RBAC、对象版本、有效期和幂等
+状态。群聊、转发或另一账号点击均拒绝。提案批准仍跳到 Web 完成 step-up；Telegram
+本身不等于强认证。`TRADING_PUBLIC_BASE_URL=http://127.0.0.1:8000` 只适合在同一台电脑
+打开审核链接；手机访问需要一个能到达本机的受控 HTTPS 地址。
 
 ## 文档与参考材料边界
 
