@@ -75,10 +75,17 @@ def test_metrics_endpoint_exposes_control_plane_metrics() -> None:
 
 
 def test_web_shell_is_served_without_claiming_business_readiness() -> None:
-    response = get(create_app(settings(), FakeDatabase(ready=False)), "/")
+    app = create_app(settings(), FakeDatabase(ready=False))
+    response = get(app, "/")
 
     assert response.status_code == 200
     assert "Trading Console" in response.text
+    assert "/assets/app.js?v=10" in response.text
+
+    app_javascript = get(app, "/assets/app.js")
+    assert app_javascript.status_code == 200
+    assert "history.replaceState({}, '', loginDestination());" in app_javascript.text
+    assert "const destination = `${location.pathname}${location.search}`;" in app_javascript.text
 
 
 def test_mock_login_is_not_available_unless_explicitly_enabled() -> None:

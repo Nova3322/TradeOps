@@ -12,6 +12,10 @@ const shortId = (value) => value ? `${value.slice(0, 8)}…` : '—';
 const fmtDate = (value) => value ? new Intl.DateTimeFormat('zh-CN', {month:'short', day:'numeric', hour:'2-digit', minute:'2-digit'}).format(new Date(value)) : '—';
 const fmtNumber = (value) => value === null || value === undefined ? '—' : new Intl.NumberFormat('en-US', {maximumFractionDigits: 6}).format(Number(value));
 const roleNames = () => (session?.roles || []).map((item) => item.role);
+const loginDestination = () => {
+  const destination = `${location.pathname}${location.search}`;
+  return destination === '/' ? '/opportunities' : destination;
+};
 
 async function api(path, options = {}) {
   const response = await fetch(path, {
@@ -102,7 +106,7 @@ function renderLogin() {
       const result = await api('/api/auth/mock/login', {method:'POST', body: JSON.stringify({username: new FormData(form).get('username')})});
       session = result.session;
       setShell(true);
-      history.replaceState({}, '', '/opportunities');
+      history.replaceState({}, '', loginDestination());
       await route();
     } catch (error) {
       form.querySelector('.form-error').textContent = `${error.code}: ${error.message}`;
