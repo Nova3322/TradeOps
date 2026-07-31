@@ -54,6 +54,18 @@ def _default_fetcher(url: str, headers: dict[str, str], timeout: float) -> dict[
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response:  # noqa: S310
             body = response.read()
+    except urllib.error.HTTPError as exc:
+        code = {
+            401: "PERPTAPE_AUTH_FAILED",
+            403: "PERPTAPE_PLAN_DENIED",
+            429: "PERPTAPE_RATE_LIMITED",
+        }.get(exc.code, "PERPTAPE_UNAVAILABLE")
+        detail = {
+            401: "Perptape rejected the configured API key",
+            403: "Perptape denied this API plan or account",
+            429: "Perptape breakout request is rate limited",
+        }.get(exc.code, "Perptape could not be reached")
+        raise DomainRejected(code, detail) from exc
     except (urllib.error.URLError, TimeoutError) as exc:
         raise DomainRejected("PERPTAPE_UNAVAILABLE", "Perptape could not be reached") from exc
     try:
@@ -103,7 +115,11 @@ class PerptapeClient:
             )
             value = self._fetcher(
                 f"{self._base_url}/api/v1/breakouts?{query}",
-                {"authorization": f"Bearer {self._api_key}"},
+                {
+                    "authorization": f"Bearer {self._api_key}",
+                    "x-api-key": self._api_key,
+                    "user-agent": "trading-control-plane/1.0",
+                },
                 5.0,
             )
             candidates = self._parse_response(value)

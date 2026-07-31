@@ -103,6 +103,11 @@ from trading_control_plane.models import (
     VenueFill,
     VenueOrder,
 )
+from trading_control_plane.notilt import (
+    USD_STABLE_ASSETS,
+    NoTiltVaultSnapshot,
+    UsdValuation,
+)
 
 ACTIVE_INTENT_STATUSES = {
     OrderIntentStatus.PENDING.value,
@@ -928,6 +933,104 @@ class TradingService:
             _reject("RISK_POLICY_MISSING", "no active risk policy exists")
         return policy
 
+    def _managed_capital_context(
+        self,
+        session: Session,
+        *,
+        environment: str,
+        now: datetime,
+        max_age: timedelta,
+    ) -> tuple[bool, Decimal, list[dict[str, Any]], datetime]:
+        rows = session.scalars(
+            select(AccountEquity)
+            .where(AccountEquity.environment == environment)
+            .order_by(
+                AccountEquity.location_type,
+                AccountEquity.venue,
+                AccountEquity.account_id,
+                AccountEquity.currency,
+            )
+            .with_for_update()
+        ).all()
+        if not rows:
+            return False, Decimal(0), [], now
+        known = True
+        total = Decimal(0)
+        data_as_of = now
+        facts: list[dict[str, Any]] = []
+        unit_prices: dict[tuple[str, str, str], Decimal] = {}
+        for row in rows:
+            valuation_time = row.observed_at
+            unit_price: Decimal | None
+            value: Decimal | None
+            if row.currency.upper() in USD_STABLE_ASSETS:
+                unit_price = Decimal(1)
+                value = row.equity
+            else:
+                unit_price = row.valuation_price
+                value = row.valuation_equity
+                if row.valuation_observed_at is not None:
+                    valuation_time = min(valuation_time, row.valuation_observed_at)
+            control_known = row.location_type != "VAULT" or row.control_status == "CONTROLLED"
+            row_known = (
+                row.fact_status == FactStatus.KNOWN.value
+                and control_known
+                and unit_price is not None
+                and unit_price > 0
+                and value is not None
+                and value >= 0
+                and not self._fact_is_stale(valuation_time, now, max_age)
+            )
+            known = known and row_known
+            if row_known:
+                assert unit_price is not None and value is not None
+                total += value
+                unit_prices[(row.account_id, row.venue, row.currency)] = unit_price
+            data_as_of = min(data_as_of, valuation_time)
+            facts.append(
+                {
+                    "account_equity_id": str(row.account_equity_id),
+                    "location_type": row.location_type,
+                    "location_id": row.account_id,
+                    "venue": row.venue,
+                    "asset": row.currency,
+                    "fact_status": row.fact_status,
+                    "control_status": row.control_status,
+                    "usd_value": None if not row_known else str(value),
+                    "observed_at": row.observed_at.isoformat(),
+                    "valuation_observed_at": (
+                        None
+                        if row.valuation_observed_at is None
+                        else row.valuation_observed_at.isoformat()
+                    ),
+                }
+            )
+
+        occupied = session.scalars(
+            select(CapitalTransfer).where(
+                CapitalTransfer.environment == environment,
+                CapitalTransfer.status.in_(OCCUPIED_CAPITAL_STATUSES),
+            )
+        ).all()
+        occupied_usd = Decimal(0)
+        for transfer in occupied:
+            source_venue = (
+                transfer.venue if transfer.direction == CapitalDirection.VENUE_TO_VAULT else "VAULT"
+            )
+            price = unit_prices.get((transfer.source_id, source_venue, transfer.asset))
+            if price is None:
+                known = False
+                continue
+            occupied_usd += transfer.reserved_amount * price
+        total = max(Decimal(0), total - occupied_usd)
+        facts.append(
+            {
+                "capital_transfer_reserved_usd": str(occupied_usd),
+                "managed_capital_usd": str(total),
+            }
+        )
+        return known and total > 0, total, facts, data_as_of
+
     def _server_risk_context(
         self,
         session: Session,
@@ -939,7 +1042,7 @@ class TradingService:
         requested_risk: Decimal,
         current_risk: Decimal,
         now: datetime,
-    ) -> tuple[RiskEvaluationInput, dict[str, Any], datetime]:
+    ) -> tuple[RiskEvaluationInput, dict[str, Any], datetime, Decimal]:
         instrument = session.get(Instrument, proposal.instrument_id)
         if instrument is None or not instrument.active:
             _reject("INSTRUMENT_UNAVAILABLE", "proposal instrument is unavailable")
@@ -959,6 +1062,7 @@ class TradingService:
                 AccountEquity.account_id == proposal.account_id,
                 AccountEquity.venue == proposal.venue,
                 AccountEquity.environment == proposal.environment,
+                AccountEquity.currency == instrument.collateral_currency,
             )
             .with_for_update()
         )
@@ -971,11 +1075,21 @@ class TradingService:
             )
 
         position_known = position is not None and position.fact_status == FactStatus.KNOWN.value
-        equity_known = (
+        venue_equity_known = (
             equity is not None
             and equity.fact_status == FactStatus.KNOWN.value
             and equity.currency == instrument.collateral_currency
         )
+        max_age = timedelta(seconds=policy.max_fact_age_seconds)
+        capital_known, managed_capital_usd, managed_facts, capital_as_of = (
+            self._managed_capital_context(
+                session,
+                environment=proposal.environment,
+                now=now,
+                max_age=max_age,
+            )
+        )
+        equity_known = venue_equity_known and capital_known
         protection_required = kind is IntentKind.ADD or (
             position_known and position is not None and position.quantity != 0
         )
@@ -989,6 +1103,7 @@ class TradingService:
         observed_times = [fact.observed_at for fact in (position, equity) if fact is not None]
         if protection_required and protection is not None:
             observed_times.append(protection.observed_at)
+        observed_times.append(capital_as_of)
         data_as_of = min(observed_times, default=now)
         raw_fact_age = now - data_as_of
         fact_age = (
@@ -1036,6 +1151,12 @@ class TradingService:
                 "observed_at": equity.observed_at.isoformat(),
                 "written_at": equity.updated_at.isoformat(),
             },
+            "managed_capital": {
+                "known": capital_known,
+                "total_usd": str(managed_capital_usd),
+                "effective_max_total_risk": str(min(policy.max_total_risk, managed_capital_usd)),
+                "facts": managed_facts,
+            },
             "protection_required": protection_required,
             "protection": None
             if protection is None
@@ -1050,7 +1171,12 @@ class TradingService:
             "data_as_of": data_as_of.isoformat(),
             "fact_age_seconds": str(fact_age.total_seconds()),
         }
-        return inputs, facts, data_as_of
+        return (
+            inputs,
+            facts,
+            data_as_of,
+            min(policy.max_total_risk, managed_capital_usd),
+        )
 
     def decide_risk(
         self,
@@ -1094,7 +1220,7 @@ class TradingService:
             requested_risk = proposal.max_risk * quantity / proposal.quantity
             if requested_risk > proposal.max_risk:
                 _reject("PROPOSAL_RISK_EXCEEDED", "requested risk exceeds proposal cap")
-            inputs, facts, data_as_of = self._server_risk_context(
+            inputs, facts, data_as_of, effective_max_total_risk = self._server_risk_context(
                 session,
                 proposal=proposal,
                 policy=policy,
@@ -1108,7 +1234,11 @@ class TradingService:
                 RiskPolicyInput(
                     version=policy.version,
                     system_state=SystemRiskState(policy.system_state),
-                    max_total_risk=policy.max_total_risk,
+                    max_total_risk=(
+                        effective_max_total_risk
+                        if effective_max_total_risk > 0
+                        else policy.max_total_risk
+                    ),
                     max_fact_age=timedelta(seconds=policy.max_fact_age_seconds),
                 ),
                 inputs,
@@ -1438,7 +1568,7 @@ class TradingService:
             risk_amount = authorization.risk_limit * quantity / authorization.quantity_limit
             if risk_amount <= 0 or risk_amount > authorization.risk_limit:
                 _reject("AUTHORIZATION_RISK_EXCEEDED", "request exceeds risk authorization")
-            inputs, _, _ = self._server_risk_context(
+            inputs, _, _, effective_max_total_risk = self._server_risk_context(
                 session,
                 proposal=proposal,
                 policy=policy,
@@ -1452,7 +1582,11 @@ class TradingService:
                 RiskPolicyInput(
                     version=policy.version,
                     system_state=SystemRiskState(policy.system_state),
-                    max_total_risk=policy.max_total_risk,
+                    max_total_risk=(
+                        effective_max_total_risk
+                        if effective_max_total_risk > 0
+                        else policy.max_total_risk
+                    ),
                     max_fact_age=timedelta(seconds=policy.max_fact_age_seconds),
                 ),
                 inputs,
@@ -2004,6 +2138,7 @@ class TradingService:
                     AccountEquity.account_id == campaign.account_id,
                     AccountEquity.venue == campaign.venue,
                     AccountEquity.environment == campaign.environment,
+                    AccountEquity.currency == instrument.collateral_currency,
                 )
             )
             max_age = timedelta(seconds=policy.max_fact_age_seconds)
@@ -2019,6 +2154,23 @@ class TradingService:
                 or self._fact_is_stale(equity.observed_at, now, max_age)
             ):
                 _reject("EQUITY_UNKNOWN", "new-risk venue send requires fresh equity")
+            capital_known, managed_capital_usd, _, _ = self._managed_capital_context(
+                session,
+                environment=campaign.environment,
+                now=now,
+                max_age=max_age,
+            )
+            if not capital_known:
+                _reject(
+                    "MANAGED_CAPITAL_UNKNOWN",
+                    "new-risk venue send requires fresh total managed capital",
+                )
+            occupied_risk = self._occupied_risk(session)
+            if occupied_risk > min(policy.max_total_risk, managed_capital_usd):
+                _reject(
+                    "RISK_CAPACITY_EXHAUSTED",
+                    "current reservations exceed total managed capital risk capacity",
+                )
             if intent.kind == IntentKind.INITIAL.value and position.quantity != 0:
                 _reject("POSITION_NOT_FLAT", "INITIAL venue send requires a flat position")
             if intent.kind == IntentKind.ADD.value:
@@ -3860,8 +4012,10 @@ class TradingService:
                     AccountEquity.account_id == account_id,
                     AccountEquity.venue == venue,
                     AccountEquity.environment == environment.value,
+                    AccountEquity.currency == currency,
                 )
             )
+            stable = currency.upper() in USD_STABLE_ASSETS
             if fact is None:
                 fact = AccountEquity(
                     account_id=account_id,
@@ -3870,6 +4024,10 @@ class TradingService:
                     equity=equity,
                     available_balance=available_balance,
                     currency=currency,
+                    valuation_currency="USD" if stable else None,
+                    valuation_price=Decimal(1) if stable else None,
+                    valuation_equity=equity if stable else None,
+                    valuation_observed_at=fact_time if stable else None,
                     fact_status=FactStatus.KNOWN.value if known else FactStatus.UNKNOWN.value,
                     observed_at=fact_time,
                     updated_at=now,
@@ -3880,6 +4038,10 @@ class TradingService:
                 fact.equity = equity
                 fact.available_balance = available_balance
                 fact.currency = currency
+                fact.valuation_currency = "USD" if stable else None
+                fact.valuation_price = Decimal(1) if stable else None
+                fact.valuation_equity = equity if stable else None
+                fact.valuation_observed_at = fact_time if stable else None
                 fact.fact_status = FactStatus.KNOWN.value if known else FactStatus.UNKNOWN.value
                 fact.observed_at = fact_time
                 fact.updated_at = now
@@ -4086,9 +4248,11 @@ class TradingService:
                     AccountEquity.account_id == account_id,
                     AccountEquity.venue == venue,
                     AccountEquity.environment == environment.value,
+                    AccountEquity.currency == snapshot.equity.currency,
                 )
                 .with_for_update()
             )
+            stable_equity = snapshot.equity.currency.upper() in USD_STABLE_ASSETS
             if equity is None:
                 equity = AccountEquity(
                     account_id=account_id,
@@ -4097,6 +4261,10 @@ class TradingService:
                     equity=snapshot.equity.equity,
                     available_balance=snapshot.equity.available_balance,
                     currency=snapshot.equity.currency,
+                    valuation_currency="USD" if stable_equity else None,
+                    valuation_price=Decimal(1) if stable_equity else None,
+                    valuation_equity=snapshot.equity.equity if stable_equity else None,
+                    valuation_observed_at=now if stable_equity else None,
                     fact_status=FactStatus.KNOWN.value,
                     observed_at=now,
                     updated_at=now,
@@ -4106,6 +4274,10 @@ class TradingService:
                 equity.equity = snapshot.equity.equity
                 equity.available_balance = snapshot.equity.available_balance
                 equity.currency = snapshot.equity.currency
+                equity.valuation_currency = "USD" if stable_equity else None
+                equity.valuation_price = Decimal(1) if stable_equity else None
+                equity.valuation_equity = snapshot.equity.equity if stable_equity else None
+                equity.valuation_observed_at = now if stable_equity else None
                 equity.fact_status = FactStatus.KNOWN.value
                 equity.observed_at = now
                 equity.updated_at = now
@@ -5607,6 +5779,10 @@ class TradingService:
         known: bool,
         observed_at: datetime,
         now: datetime,
+        valuation_currency: str | None = None,
+        valuation_price: Decimal | None = None,
+        valuation_equity: Decimal | None = None,
+        valuation_observed_at: datetime | None = None,
     ) -> UUID:
         if location_type not in {"VAULT", "VENUE"}:
             _reject("CAPITAL_LOCATION_INVALID", "capital location must be VAULT or VENUE")
@@ -5622,6 +5798,17 @@ class TradingService:
                 "CAPITAL_BALANCE_INVALID",
                 "withdrawable, available, and equity balances are inconsistent",
             )
+        if valuation_price is not None and valuation_price <= 0:
+            _reject("CAPITAL_VALUATION_INVALID", "capital valuation price must be positive")
+        if valuation_equity is not None and valuation_equity < 0:
+            _reject("CAPITAL_VALUATION_INVALID", "capital valuation cannot be negative")
+        if valuation_observed_at is not None and valuation_observed_at > now + MAX_FACT_CLOCK_SKEW:
+            _reject("FACT_TIME_INVALID", "capital valuation cannot be in the future")
+        if asset.upper() in USD_STABLE_ASSETS and valuation_equity is None:
+            valuation_currency = "USD"
+            valuation_price = Decimal(1)
+            valuation_equity = equity
+            valuation_observed_at = observed_at
         fact_venue = venue if location_type == "VENUE" else "VAULT"
         with self.database.session_factory.begin() as session:
             self._require_role(
@@ -5637,6 +5824,7 @@ class TradingService:
                     AccountEquity.environment == environment.value,
                     AccountEquity.account_id == location_id,
                     AccountEquity.venue == fact_venue,
+                    AccountEquity.currency == asset,
                 )
                 .with_for_update()
             )
@@ -5654,6 +5842,10 @@ class TradingService:
                     deposit_status=deposit_status,
                     network=network,
                     address_reference=address_reference,
+                    valuation_currency=valuation_currency,
+                    valuation_price=valuation_price,
+                    valuation_equity=valuation_equity,
+                    valuation_observed_at=valuation_observed_at,
                     fact_status=FactStatus.KNOWN.value if known else FactStatus.UNKNOWN.value,
                     observed_at=observed_at,
                     updated_at=now,
@@ -5670,6 +5862,10 @@ class TradingService:
                 fact.deposit_status = deposit_status
                 fact.network = network
                 fact.address_reference = address_reference
+                fact.valuation_currency = valuation_currency
+                fact.valuation_price = valuation_price
+                fact.valuation_equity = valuation_equity
+                fact.valuation_observed_at = valuation_observed_at
                 fact.fact_status = FactStatus.KNOWN.value if known else FactStatus.UNKNOWN.value
                 fact.observed_at = observed_at
                 fact.updated_at = now
@@ -5685,6 +5881,113 @@ class TradingService:
                 now=now,
             )
             return fact.account_equity_id
+
+    def record_notilt_vault_snapshot(
+        self,
+        *,
+        actor_id: UUID,
+        snapshot: NoTiltVaultSnapshot,
+        valuations: dict[str, UsdValuation],
+        now: datetime,
+    ) -> tuple[UUID, ...]:
+        if not snapshot.budgets:
+            _reject("NOTILT_FACT_INVALID", "NoTilt snapshot must contain catalog assets")
+        with self.database.session_factory.begin() as session:
+            self._require_role(session, actor_id, "capital.fact.record")
+            fact_ids: list[UUID] = []
+            for budget in snapshot.budgets:
+                if (
+                    not budget.is_official_vault
+                    or budget.chain_id != snapshot.chain_id
+                    or budget.vault.lower() != snapshot.vault.lower()
+                    or budget.agent.lower() != snapshot.agent.lower()
+                ):
+                    _reject(
+                        "NOTILT_VAULT_UNVERIFIED",
+                        "NoTilt facts must belong to one official configured Vault",
+                    )
+                if budget.block_timestamp > now + MAX_FACT_CLOCK_SKEW:
+                    _reject("FACT_TIME_INVALID", "NoTilt block time cannot be in the future")
+                valuation = valuations.get(budget.asset)
+                if valuation is None or valuation.observed_at > now + MAX_FACT_CLOCK_SKEW:
+                    _reject(
+                        "NOTILT_VALUATION_UNKNOWN",
+                        "every NoTilt asset requires a current USD valuation",
+                    )
+                assigned = (
+                    budget.is_active_whitelist
+                    and budget.assigned_whitelist_vault.lower() == snapshot.vault.lower()
+                )
+                controlled = assigned and not budget.panic_locked
+                withdrawable = (
+                    min(budget.balance, budget.max_release_net) if controlled else Decimal(0)
+                )
+                fact = session.scalar(
+                    select(AccountEquity)
+                    .where(
+                        AccountEquity.environment == ExecutionEnvironment.LIVE.value,
+                        AccountEquity.account_id == snapshot.vault,
+                        AccountEquity.venue == "VAULT",
+                        AccountEquity.currency == budget.asset,
+                    )
+                    .with_for_update()
+                )
+                if fact is None:
+                    fact = AccountEquity(
+                        account_id=snapshot.vault,
+                        venue="VAULT",
+                        environment=ExecutionEnvironment.LIVE.value,
+                        equity=budget.balance,
+                        available_balance=budget.balance,
+                        withdrawable_balance=withdrawable,
+                        currency=budget.asset,
+                        location_type="VAULT",
+                        control_status="CONTROLLED" if controlled else "READ_ONLY",
+                        deposit_status="READY",
+                        network=snapshot.chain,
+                        address_reference=snapshot.vault,
+                        valuation_currency="USD",
+                        valuation_price=valuation.price,
+                        valuation_equity=valuation.value,
+                        valuation_observed_at=valuation.observed_at,
+                        fact_status=FactStatus.KNOWN.value,
+                        observed_at=budget.block_timestamp,
+                        updated_at=now,
+                    )
+                    session.add(fact)
+                    session.flush()
+                else:
+                    fact.equity = budget.balance
+                    fact.available_balance = budget.balance
+                    fact.withdrawable_balance = withdrawable
+                    fact.location_type = "VAULT"
+                    fact.control_status = "CONTROLLED" if controlled else "READ_ONLY"
+                    fact.deposit_status = "READY"
+                    fact.network = snapshot.chain
+                    fact.address_reference = snapshot.vault
+                    fact.valuation_currency = "USD"
+                    fact.valuation_price = valuation.price
+                    fact.valuation_equity = valuation.value
+                    fact.valuation_observed_at = valuation.observed_at
+                    fact.fact_status = FactStatus.KNOWN.value
+                    fact.observed_at = budget.block_timestamp
+                    fact.updated_at = now
+                self._audit(
+                    session,
+                    actor_id=str(actor_id),
+                    event_type="NOTILT_VAULT_FACT_RECORDED",
+                    object_type="AccountEquity",
+                    object_id=fact.account_equity_id,
+                    reason=(
+                        f"{snapshot.chain}:{budget.asset}:"
+                        f"{'CONTROLLED' if controlled else 'READ_ONLY'}"
+                    ),
+                    correlation_id=uuid4(),
+                    object_version=1,
+                    now=now,
+                )
+                fact_ids.append(fact.account_equity_id)
+            return tuple(fact_ids)
 
     def set_capital_automation_policy(
         self,
@@ -6155,11 +6458,12 @@ class TradingService:
         expires_at: datetime,
         idempotency_key: str,
         now: datetime,
+        allow_live_unsigned: bool = False,
     ) -> UUID:
-        if environment is ExecutionEnvironment.LIVE:
+        if environment is ExecutionEnvironment.LIVE and not allow_live_unsigned:
             _reject(
                 "CAPITAL_TRANSFER_LIVE_DISABLED",
-                "LIVE capital proposals require real destination and signing parameters",
+                "LIVE capital proposals require the constrained unsigned transaction workflow",
             )
         if expires_at <= now:
             _reject("TRANSFER_PROPOSAL_EXPIRY_INVALID", "transfer proposal must expire later")
@@ -6648,6 +6952,7 @@ class TradingService:
         idempotency_key: str,
         *,
         now: datetime,
+        allow_live_unsigned: bool = False,
     ) -> UUID:
         operation = "capital.execute"
         payload = {"transfer_authorization_id": str(transfer_authorization_id)}
@@ -6679,11 +6984,26 @@ class TradingService:
                 return _as_uuid(str(response["capital_transfer_id"]))
             if not authorization.active or authorization.expires_at <= now:
                 _reject("TRANSFER_AUTHORIZATION_INACTIVE", "transfer authorization is inactive")
-            if authorization.environment == ExecutionEnvironment.LIVE.value:
+            if allow_live_unsigned and authorization.environment != ExecutionEnvironment.LIVE.value:
+                _reject(
+                    "NOTILT_TRANSFER_ENVIRONMENT_INVALID",
+                    "NoTilt transaction plans require a LIVE authorization",
+                )
+            if (
+                authorization.environment == ExecutionEnvironment.LIVE.value
+                and not allow_live_unsigned
+            ):
                 _reject(
                     "CAPITAL_TRANSFER_LIVE_DISABLED",
-                    "no real CapitalTransferAdapter is configured",
+                    "LIVE transfer requires the constrained unsigned transaction workflow",
                 )
+            if authorization.environment == ExecutionEnvironment.LIVE.value:
+                gate = session.get(CapabilityGate, "CAPITAL_TRANSFER")
+                if gate is None or gate.status != CapabilityStatus.ENABLED.value:
+                    _reject(
+                        "CAPABILITY_DISABLED",
+                        "CAPITAL_TRANSFER must be explicitly enabled before a LIVE reservation",
+                    )
             self._assert_capital_scope_flat(
                 session,
                 environment=authorization.environment,
@@ -6810,7 +7130,11 @@ class TradingService:
                 event_type="CAPITAL_SOURCE_RESERVED",
                 object_type="CapitalTransfer",
                 object_id=transfer.capital_transfer_id,
-                reason="source availability reduced before mock submission",
+                reason=(
+                    "source availability reserved before independent wallet confirmation"
+                    if authorization.environment == ExecutionEnvironment.LIVE.value
+                    else "source availability reduced before mock submission"
+                ),
                 correlation_id=transfer.correlation_id,
                 object_version=transfer.version,
                 idempotency_key=idempotency_key,

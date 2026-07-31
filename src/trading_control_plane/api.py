@@ -102,6 +102,12 @@ from trading_control_plane.hyperliquid_execution import (
 )
 from trading_control_plane.logging import configure_logging
 from trading_control_plane.metrics import DATABASE_READY
+from trading_control_plane.notilt import (
+    SUPPORTED_NOTILT_CHAINS,
+    NoTiltGateway,
+    NoTiltUnsignedTransaction,
+    NoTiltUsdValuator,
+)
 from trading_control_plane.perptape import PerptapeClient
 from trading_control_plane.queries import TradingQueries
 from trading_control_plane.service import TradingService
@@ -206,6 +212,8 @@ def create_app(
     hyperliquid_live_client: HyperliquidLiveClient | None = None,
     hyperliquid_testnet_client: HyperliquidTestnetClient | None = None,
     capital_transfer_adapter: MockCapitalTransferAdapter | None = None,
+    notilt_gateway: NoTiltGateway | None = None,
+    notilt_valuator: NoTiltUsdValuator | None = None,
 ) -> FastAPI:
     resolved_settings = settings or get_settings()
     resolved_settings.validate_runtime_security()
@@ -326,6 +334,10 @@ def create_app(
         dex=resolved_settings.hyperliquid_core_dex,
     )
     resolved_capital_transfer = capital_transfer_adapter or MockCapitalTransferAdapter()
+    resolved_notilt = notilt_gateway or NoTiltGateway(
+        timeout_seconds=resolved_settings.notilt_gateway_timeout_seconds
+    )
+    resolved_notilt_valuator = notilt_valuator or NoTiltUsdValuator()
 
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
@@ -358,6 +370,8 @@ def create_app(
     app.state.hyperliquid_live_client = resolved_hyperliquid_live
     app.state.hyperliquid_testnet_client = resolved_hyperliquid_testnet
     app.state.capital_transfer_adapter = resolved_capital_transfer
+    app.state.notilt_gateway = resolved_notilt
+    app.state.notilt_valuator = resolved_notilt_valuator
 
     @app.exception_handler(DomainRejected)
     async def domain_rejected(_: Request, exc: DomainRejected) -> JSONResponse:
@@ -655,7 +669,7 @@ def create_app(
             idempotency_key=f"perptape:{candidate.candidate_id}",
             strategy_id="perptape",
             strategy_version=candidate.source_contract_version,
-            environment=ExecutionEnvironment.SHADOW,
+            environment=ExecutionEnvironment(payload.environment),
             source_candidate_id=candidate.candidate_id,
             source_link=candidate.detail_url,
             source_observed_at=candidate.observed_at,
@@ -2797,6 +2811,121 @@ def create_app(
         )
         return queries().campaign_detail(identity.user_id, campaign_id)
 
+    def configured_notilt_scope(chain_id: int) -> tuple[str, str]:
+        if chain_id not in SUPPORTED_NOTILT_CHAINS:
+            raise DomainRejected(
+                "NOTILT_CHAIN_UNSUPPORTED",
+                "NoTilt only supports Ethereum, BNB Smart Chain, and Arbitrum One",
+            )
+        if not resolved_settings.notilt_enabled:
+            raise DomainRejected("NOTILT_DISABLED", "NoTilt read-only integration is disabled")
+        agent = resolved_settings.notilt_agent_address
+        vault = resolved_settings.notilt_vaults.get(chain_id)
+        if agent is None:
+            raise DomainRejected(
+                "NOTILT_NOT_CONFIGURED",
+                "NoTilt public whitelist agent address is not configured",
+            )
+        if vault is None:
+            raise DomainRejected(
+                "NOTILT_VAULT_NOT_CONFIGURED",
+                f"NoTilt {SUPPORTED_NOTILT_CHAINS[chain_id]} Vault is not configured",
+            )
+        return agent, vault
+
+    def notilt_chain_id_for_network(network: str) -> int:
+        normalized = network.upper().replace("-", "_").replace(" ", "_")
+        chain_id = {
+            "ETH": 1,
+            "ETHEREUM": 1,
+            "BNB": 56,
+            "BSC": 56,
+            "BNB_SMART_CHAIN": 56,
+            "ARB": 42161,
+            "ARBITRUM": 42161,
+            "ARBITRUM_ONE": 42161,
+        }.get(normalized)
+        if chain_id is None:
+            raise DomainRejected(
+                "NOTILT_CHAIN_UNSUPPORTED",
+                "NoTilt network must be Ethereum, BNB Smart Chain, or Arbitrum One",
+            )
+        return chain_id
+
+    @app.get("/api/notilt/status")
+    def notilt_status(
+        identity: SessionIdentity = identity_dependency,
+    ) -> dict[str, Any]:
+        queries().capital_center(identity.user_id)
+        return {
+            "enabled": resolved_settings.notilt_enabled,
+            "gateway_available": resolved_notilt.available,
+            "signing_mode": "EXTERNAL_WALLET_ONLY",
+            "credential_custody": "EXTERNAL_WALLET",
+            "chains": [
+                {
+                    "chain_id": chain_id,
+                    "chain": chain,
+                    "vault_configured": chain_id in resolved_settings.notilt_vaults,
+                }
+                for chain_id, chain in SUPPORTED_NOTILT_CHAINS.items()
+            ],
+        }
+
+    @app.get("/api/notilt/chains/{chain_id}/assignment")
+    def notilt_assignment(
+        chain_id: int,
+        identity: SessionIdentity = identity_dependency,
+    ) -> dict[str, Any]:
+        queries().capital_center(identity.user_id)
+        if not resolved_settings.notilt_enabled or resolved_settings.notilt_agent_address is None:
+            raise DomainRejected(
+                "NOTILT_NOT_CONFIGURED",
+                "NoTilt public whitelist agent address is not configured",
+            )
+        assigned_vault, active = resolved_notilt.resolve_assignment(
+            chain_id, resolved_settings.notilt_agent_address
+        )
+        configured_vault = resolved_settings.notilt_vaults.get(chain_id)
+        return {
+            "chain_id": chain_id,
+            "chain": SUPPORTED_NOTILT_CHAINS.get(chain_id),
+            "active": active,
+            "matches_configured_vault": (
+                configured_vault is not None and assigned_vault.lower() == configured_vault.lower()
+            ),
+            "configured_vault": configured_vault is not None,
+        }
+
+    @app.post("/api/notilt/chains/{chain_id}/sync")
+    def sync_notilt_vault(
+        chain_id: int,
+        identity: SessionIdentity = identity_dependency,
+    ) -> dict[str, Any]:
+        agent, vault = configured_notilt_scope(chain_id)
+        now = _now()
+        snapshot = resolved_notilt.read_vault(chain_id, vault, agent)
+        valuations = {
+            budget.asset: resolved_notilt_valuator.value(
+                budget.asset,
+                budget.balance,
+                now=now,
+            )
+            for budget in snapshot.budgets
+        }
+        fact_ids = service().record_notilt_vault_snapshot(
+            actor_id=identity.user_id,
+            snapshot=snapshot,
+            valuations=valuations,
+            now=now,
+        )
+        return {
+            "transport": "NOTILT_OFFICIAL_SDK_READ_ONLY",
+            "chain_id": chain_id,
+            "facts_recorded": len(fact_ids),
+            "data": queries().capital_center(identity.user_id),
+        }
+
     @app.get("/api/capital")
     def capital_center(
         identity: SessionIdentity = identity_dependency,
@@ -2893,7 +3022,21 @@ def create_app(
                         "signer_injected": resolved_hyperliquid_testnet.configured,
                         "account_scope": resolved_settings.hyperliquid_account_scope,
                     },
-                    "capital_transfer": {"mode": "MOCK_ONLY", "real_configured": False},
+                    "notilt": {
+                        "mode": "OFFICIAL_SDK_UNSIGNED_HANDOFF",
+                        "enabled": resolved_settings.notilt_enabled,
+                        "gateway_available": resolved_notilt.available,
+                        "configured_chains": sorted(resolved_settings.notilt_vaults),
+                        "credential_custody": "EXTERNAL_WALLET",
+                        "broadcast_supported": False,
+                    },
+                    "capital_transfer": {
+                        "mode": "MOCK_OR_NOTILT_UNSIGNED_HANDOFF",
+                        "real_configured": (
+                            resolved_settings.notilt_enabled
+                            and bool(resolved_settings.notilt_vaults)
+                        ),
+                    },
                     "telegram": {
                         "mode": (
                             "BOT_API_LONG_POLLING"
@@ -3021,9 +3164,20 @@ def create_app(
         identity: SessionIdentity = identity_dependency,
     ) -> dict[str, Any]:
         now = _now()
+        environment = ExecutionEnvironment(payload.environment)
+        allow_live_unsigned = False
+        if environment is ExecutionEnvironment.LIVE:
+            chain_id = notilt_chain_id_for_network(payload.network)
+            _, configured_vault = configured_notilt_scope(chain_id)
+            if payload.vault_id.lower() != configured_vault.lower():
+                raise DomainRejected(
+                    "NOTILT_VAULT_SCOPE_MISMATCH",
+                    "LIVE transfer proposal must use the configured Vault for its chain",
+                )
+            allow_live_unsigned = True
         proposal_id = service().create_transfer_proposal(
             actor_id=identity.user_id,
-            environment=ExecutionEnvironment(payload.environment),
+            environment=environment,
             direction=CapitalDirection(payload.direction),
             account_id=payload.account_id,
             venue=payload.venue,
@@ -3038,6 +3192,7 @@ def create_app(
             expires_at=now + timedelta(minutes=payload.expires_in_minutes),
             idempotency_key=payload.idempotency_key,
             now=now,
+            allow_live_unsigned=allow_live_unsigned,
         )
         return queries().transfer_proposal_detail(identity.user_id, proposal_id)
 
@@ -3157,6 +3312,79 @@ def create_app(
             summary="Mock capital transfer submitted; no real funds moved",
         )
         return {"transport": "MOCK_ONLY", "detail": detail}
+
+    @app.post("/api/capital/authorizations/{transfer_authorization_id}/transfers/notilt-plan")
+    def prepare_notilt_capital_transfer(
+        transfer_authorization_id: UUID,
+        payload: CapitalTransferCreateRequest,
+        identity: SessionIdentity = identity_dependency,
+    ) -> dict[str, Any]:
+        now = _now()
+        transfer_id = service().reserve_capital_transfer(
+            transfer_authorization_id,
+            identity.user_id,
+            payload.idempotency_key,
+            now=now,
+            allow_live_unsigned=True,
+        )
+        command = service().capital_transfer_command(
+            transfer_id,
+            identity.user_id,
+            now=now,
+        )
+        if command.environment is not ExecutionEnvironment.LIVE:
+            raise DomainRejected(
+                "NOTILT_TRANSFER_ENVIRONMENT_INVALID",
+                "NoTilt transaction plans are only available for LIVE authorizations",
+            )
+        chain_id = notilt_chain_id_for_network(command.network)
+        agent, vault = configured_notilt_scope(chain_id)
+        vault_endpoint = (
+            command.source_id
+            if command.direction is CapitalDirection.VAULT_TO_VENUE
+            else command.destination_id
+        )
+        if vault_endpoint.lower() != vault.lower():
+            raise DomainRejected(
+                "NOTILT_VAULT_SCOPE_MISMATCH",
+                "capital authorization does not reference the configured Vault",
+            )
+        transactions: tuple[NoTiltUnsignedTransaction, ...]
+        if command.direction is CapitalDirection.VAULT_TO_VENUE:
+            transactions = (
+                resolved_notilt.prepare_release_request(
+                    chain_id=chain_id,
+                    vault=vault,
+                    agent=agent,
+                    asset=command.asset,
+                    amount=str(command.gross_amount),
+                ),
+            )
+            next_step = (
+                "Confirm the release request in the independent wallet, wait for the "
+                "protocol release window, then prepare and confirm release execution."
+            )
+        else:
+            transactions = resolved_notilt.prepare_deposit(
+                chain_id=chain_id,
+                vault=vault,
+                agent=agent,
+                asset=command.asset,
+                amount=str(command.gross_amount),
+            )
+            next_step = (
+                "Funds must already be present in the independent wallet after the "
+                "venue withdrawal; confirm each unsigned deposit transaction there."
+            )
+        return {
+            "transport": "NOTILT_UNSIGNED_TRANSACTION_HANDOFF",
+            "broadcast": False,
+            "signing": "EXTERNAL_WALLET_REQUIRED",
+            "capital_transfer_id": str(transfer_id),
+            "transactions": [item.to_dict() for item in transactions],
+            "next_step": next_step,
+            "detail": queries().capital_transfer_detail(identity.user_id, transfer_id),
+        }
 
     @app.get("/api/capital/transfers/{capital_transfer_id}")
     def capital_transfer_detail(

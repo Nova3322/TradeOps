@@ -1,0 +1,16 @@
+{
+  "name": "trading-control-plane-notilt-gateway",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "test:notilt": "node --test tests/notilt_gateway.test.mjs"
+  },
+  "dependencies": {
+    "@notilt/sdk": "0.2.0",
+    "viem": "2.55.10"
+  }
+}

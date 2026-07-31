@@ -146,7 +146,7 @@ def test_results_are_environment_separated_and_derive_costs_curve_and_audit(
 
     runtime = queries.runtime_snapshot(ids["operator"])
     assert runtime["database_ready"] is True
-    assert runtime["schema_revision"] == "20260718_0001"
+    assert runtime["schema_revision"] == "20260731_0002"
     assert runtime["business_table_count"] == 26
     assert set(runtime["capability_gates"]) == {
         "LIVE_ORDER_SEND",
@@ -214,7 +214,7 @@ def test_results_audit_and_runtime_api_do_not_mix_environments_or_expose_secrets
             assert runtime.status_code == 200
             payload = runtime.json()["data"]
             assert payload["external_boundaries"]["capital_transfer"] == {
-                "mode": "MOCK_ONLY",
+                "mode": "MOCK_OR_NOTILT_UNSIGNED_HANDOFF",
                 "real_configured": False,
             }
             assert (

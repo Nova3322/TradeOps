@@ -823,7 +823,13 @@ class ProtectionOrder(Base):
 class AccountEquity(Base):
     __tablename__ = "account_equities"
     __table_args__ = (
-        UniqueConstraint("environment", "account_id", "venue", name="uq_account_equities_scope"),
+        UniqueConstraint(
+            "environment",
+            "account_id",
+            "venue",
+            "currency",
+            name="uq_account_equities_scope",
+        ),
         CheckConstraint(
             "environment IN ('SHADOW','TESTNET','LIVE')",
             name="ck_account_equities_environment",
@@ -845,6 +851,14 @@ class AccountEquity(Base):
         CheckConstraint(
             "deposit_status IN ('READY','PENDING','UNKNOWN')",
             name="ck_account_equities_deposit_status",
+        ),
+        CheckConstraint(
+            "valuation_price IS NULL OR valuation_price > 0",
+            name="ck_account_equities_valuation_price",
+        ),
+        CheckConstraint(
+            "valuation_equity IS NULL OR valuation_equity >= 0",
+            name="ck_account_equities_valuation_equity",
         ),
     )
 
@@ -869,6 +883,12 @@ class AccountEquity(Base):
     )
     network: Mapped[str | None] = mapped_column(String(64), nullable=True)
     address_reference: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    valuation_currency: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    valuation_price: Mapped[Decimal | None] = mapped_column(AMOUNT, nullable=True)
+    valuation_equity: Mapped[Decimal | None] = mapped_column(AMOUNT, nullable=True)
+    valuation_observed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     fact_status: Mapped[str] = mapped_column(String(16), nullable=False)
     observed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)

@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from urllib.error import HTTPError
 
 import pytest
 
+import trading_control_plane.perptape as perptape_module
 from trading_control_plane.domain import Direction, DomainRejected
 from trading_control_plane.perptape import PerptapeClient
 
@@ -65,7 +67,11 @@ def test_real_breakout_contract_maps_to_narrow_trading_candidates_and_caches() -
 
     assert first == second
     assert len(calls) == 1
-    assert calls[0][1] == {"authorization": "Bearer test-api-key"}
+    assert calls[0][1] == {
+        "authorization": "Bearer test-api-key",
+        "x-api-key": "test-api-key",
+        "user-agent": "trading-control-plane/1.0",
+    }
     assert first[0].venue == "BINANCE"
     assert first[0].direction is Direction.LONG
     assert first[0].readiness == "READY"
@@ -127,3 +133,51 @@ def test_invalid_candidate_fact_fails_closed() -> None:
 
     with pytest.raises(DomainRejected, match="PERPTAPE_RESPONSE_INVALID"):
         client.list_candidates(now=NOW)
+
+
+class FakeHttpResponse:
+    def __init__(self, body: bytes) -> None:
+        self.body = body
+
+    def __enter__(self) -> FakeHttpResponse:
+        return self
+
+    def __exit__(self, *_args: object) -> None:
+        return None
+
+    def read(self) -> bytes:
+        return self.body
+
+
+def test_default_http_transport_maps_success_plan_denial_and_invalid_json(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        perptape_module.urllib.request,
+        "urlopen",
+        lambda _request, timeout: FakeHttpResponse(
+            b'{"type":"breakouts","generatedAt":1784448000000,"data":[]}'
+        ),
+    )
+    client = PerptapeClient(
+        base_url="https://perptape.example",
+        api_key="key",
+        contract_version="breakouts-v1",
+        cache_ttl=timedelta(minutes=1),
+    )
+    assert client.list_candidates(now=NOW) == []
+
+    def denied(_request: object, timeout: float) -> FakeHttpResponse:
+        raise HTTPError("https://perptape.example", 403, "denied", None, None)
+
+    monkeypatch.setattr(perptape_module.urllib.request, "urlopen", denied)
+    with pytest.raises(DomainRejected, match="PERPTAPE_PLAN_DENIED"):
+        client.list_candidates(now=NOW + timedelta(minutes=2))
+
+    monkeypatch.setattr(
+        perptape_module.urllib.request,
+        "urlopen",
+        lambda _request, timeout: FakeHttpResponse(b"not-json"),
+    )
+    with pytest.raises(DomainRejected, match="PERPTAPE_RESPONSE_INVALID"):
+        client.list_candidates(now=NOW + timedelta(minutes=3))

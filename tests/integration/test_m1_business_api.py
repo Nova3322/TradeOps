@@ -288,6 +288,39 @@ def test_perptape_to_review_to_risk_and_authorization_api_flow(
         assert session.scalar(select(func.count()).select_from(OrderIntent)) == 0
 
 
+def test_perptape_candidate_can_start_as_explicit_live_proposal(
+    database: Database, service: TradingService
+) -> None:
+    seed(service)
+    telegram = MockTelegramGateway()
+
+    async def scenario() -> None:
+        async with AsyncClient(
+            transport=ASGITransport(app=app(database, telegram)), base_url="http://test"
+        ) as client:
+            await login(client, "proposer")
+            opportunities = await client.get("/api/opportunities")
+            candidate = opportunities.json()["data"][0]
+            created = await client.post(
+                f"/api/opportunities/{candidate['candidate_id']}/proposals",
+                json={
+                    "environment": "LIVE",
+                    "account_id": "acct-1",
+                    "risk_tier": "LOW",
+                    "quantity": "0.001",
+                    "max_risk": "1",
+                    "expires_in_minutes": 30,
+                    "invalidation_price": "118000",
+                    "rationale": "explicit live proposal still requires review and risk",
+                },
+            )
+            assert created.status_code == 200, created.text
+            assert created.json()["environment"] == "LIVE"
+            assert created.json()["status"] == "PENDING_REVIEW"
+
+    asyncio.run(scenario())
+
+
 def test_manual_api_is_idempotent_and_semantic_conflicts_are_explicit(
     database: Database, service: TradingService
 ) -> None:

@@ -8,12 +8,14 @@ from uuid import UUID
 import pytest
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
+from sqlalchemy import select
 
 from trading_control_plane.api import create_app
 from trading_control_plane.capital import MockCapitalTransferAdapter
 from trading_control_plane.config import Settings
 from trading_control_plane.database import Database
 from trading_control_plane.domain import (
+    CapabilityStatus,
     CapitalDirection,
     CapitalTransferStatus,
     DomainRejected,
@@ -22,6 +24,14 @@ from trading_control_plane.domain import (
     ReviewDecision,
     Role,
     SystemRiskState,
+)
+from trading_control_plane.models import AccountEquity
+from trading_control_plane.notilt import (
+    NoTiltAssetBudget,
+    NoTiltGateway,
+    NoTiltUsdValuator,
+    NoTiltVaultSnapshot,
+    UsdValuation,
 )
 from trading_control_plane.perptape import PerptapeClient
 from trading_control_plane.queries import TradingQueries
@@ -192,6 +202,200 @@ def approved_transfer(
         now=now,
     )
     return proposal, authorization
+
+
+def notilt_budget(
+    *,
+    asset: str,
+    balance: Decimal,
+    vault: str,
+    agent: str,
+    now: datetime,
+) -> NoTiltAssetBudget:
+    return NoTiltAssetBudget(
+        chain_id=42161,
+        chain="ARBITRUM",
+        block_number=123,
+        block_timestamp=now,
+        vault=vault,
+        agent=agent,
+        owner="0x3333333333333333333333333333333333333333",
+        asset_address="0x4444444444444444444444444444444444444444",
+        asset=asset,
+        decimals=6,
+        native=False,
+        is_official_vault=True,
+        is_active_whitelist=True,
+        assigned_whitelist_vault=vault,
+        balance=balance,
+        max_release_net=balance,
+        pending_net=Decimal(0),
+        panic_locked=False,
+        daily_release_rate=Decimal("0.1"),
+        daily_fee_rate=Decimal("0.001"),
+    )
+
+
+def test_live_net_worth_and_risk_capital_combine_two_venues_and_vault(
+    database: Database, service: TradingService
+) -> None:
+    ids = seed(service)
+    now = datetime.now(UTC)
+    service.record_account_equity(
+        "binance-main",
+        "BINANCE",
+        Decimal("10"),
+        Decimal("10"),
+        "USDT",
+        True,
+        ids["admin"],
+        environment=ExecutionEnvironment.LIVE,
+        now=now,
+    )
+    service.record_account_equity(
+        "hyperliquid-main",
+        "HYPERLIQUID",
+        Decimal("20"),
+        Decimal("20"),
+        "USDC",
+        True,
+        ids["admin"],
+        environment=ExecutionEnvironment.LIVE,
+        now=now,
+    )
+    vault = "0x1111111111111111111111111111111111111111"
+    agent = "0x2222222222222222222222222222222222222222"
+    snapshot = NoTiltVaultSnapshot(
+        chain_id=42161,
+        chain="ARBITRUM",
+        vault=vault,
+        agent=agent,
+        budgets=(
+            notilt_budget(
+                asset="USDC",
+                balance=Decimal("30"),
+                vault=vault,
+                agent=agent,
+                now=now,
+            ),
+            notilt_budget(
+                asset="ETH",
+                balance=Decimal("0.01"),
+                vault=vault,
+                agent=agent,
+                now=now,
+            ),
+        ),
+    )
+    service.record_notilt_vault_snapshot(
+        actor_id=ids["proposer"],
+        snapshot=snapshot,
+        valuations={
+            "USDC": UsdValuation(Decimal(1), Decimal("30"), now),
+            "ETH": UsdValuation(Decimal("3000"), Decimal("30"), now),
+        },
+        now=now,
+    )
+
+    center = TradingQueries(database).capital_center(ids["proposer"])
+    assert center["net_worth"] == {
+        "environment": "LIVE",
+        "currency": "USD",
+        "venues": {"BINANCE": "10.000000000000000000", "HYPERLIQUID": "20.000000000000000000"},
+        "vault": "60.000000000000000000",
+        "total": "90.000000000000000000",
+        "complete": True,
+        "issues": [],
+        "as_of": center["net_worth"]["as_of"],
+    }
+    with database.session_factory() as session:
+        known, total, facts, _ = service._managed_capital_context(
+            session,
+            environment=ExecutionEnvironment.LIVE.value,
+            now=now,
+            max_age=timedelta(minutes=5),
+        )
+    assert known is True
+    assert total == Decimal("90")
+    assert {item.get("location_type") for item in facts} >= {"VENUE", "VAULT"}
+
+    with database.session_factory.begin() as session:
+        vault_fact = session.scalar(
+            select(AccountEquity).where(
+                AccountEquity.environment == ExecutionEnvironment.LIVE.value,
+                AccountEquity.location_type == "VAULT",
+                AccountEquity.currency == "USDC",
+            )
+        )
+        assert vault_fact is not None
+        vault_fact.control_status = "READ_ONLY"
+    with database.session_factory() as session:
+        controlled, _, _, _ = service._managed_capital_context(
+            session,
+            environment=ExecutionEnvironment.LIVE.value,
+            now=now,
+            max_age=timedelta(minutes=5),
+        )
+    assert controlled is False
+
+
+def test_live_unsigned_transfer_still_requires_disabled_by_default_gate(
+    service: TradingService,
+) -> None:
+    ids = seed(service)
+    now = datetime.now(UTC)
+    proposal = service.create_transfer_proposal(
+        actor_id=ids["proposer"],
+        environment=ExecutionEnvironment.LIVE,
+        direction=CapitalDirection.VAULT_TO_VENUE,
+        account_id="binance-main",
+        venue="BINANCE",
+        vault_id="0x1111111111111111111111111111111111111111",
+        asset="USDC",
+        network="ARBITRUM",
+        destination_reference="approved-destination-reference",
+        amount=Decimal("1"),
+        max_fee=Decimal("0.01"),
+        min_received=Decimal("0.99"),
+        reason="reviewed operating capital allocation",
+        expires_at=now + timedelta(hours=1),
+        idempotency_key="m7-live-unsigned-proposal",
+        now=now,
+        allow_live_unsigned=True,
+    )
+    service.submit_transfer_proposal(proposal, ids["proposer"], now=now)
+    service.review_transfer_proposal(
+        proposal,
+        ids["reviewer_one"],
+        ReviewDecision.APPROVE,
+        "first independent review",
+        2,
+        now=now,
+    )
+    service.review_transfer_proposal(
+        proposal,
+        ids["reviewer_two"],
+        ReviewDecision.APPROVE,
+        "second independent review",
+        3,
+        now=now,
+    )
+    authorization = service.issue_transfer_authorization(
+        proposal,
+        ids["reviewer_one"],
+        now + timedelta(minutes=30),
+        "m7-live-unsigned-authorization",
+        now=now,
+    )
+
+    with pytest.raises(DomainRejected, match="CAPABILITY_DISABLED"):
+        service.reserve_capital_transfer(
+            authorization,
+            ids["reviewer_two"],
+            "m7-live-unsigned-reservation",
+            now=now,
+            allow_live_unsigned=True,
+        )
 
 
 def test_bidirectional_mock_capital_transfer_preserves_unique_ownership(
@@ -592,6 +796,85 @@ def build_app(database: Database, telegram: MockTelegramGateway) -> FastAPI:
     return create_app(settings, database, perptape, telegram)
 
 
+def build_notilt_app(database: Database, telegram: MockTelegramGateway) -> FastAPI:
+    agent = "0x2222222222222222222222222222222222222222"
+    vault = "0x1111111111111111111111111111111111111111"
+    settings = Settings(
+        environment="test",
+        database_url=str(database.engine.url),
+        allow_mock_identity=True,
+        session_signing_secret="m7-test-signing-secret-that-is-long-enough",  # noqa: S106
+        public_base_url="http://test",
+        notilt_enabled=True,
+        notilt_agent_address=agent,
+        notilt_arbitrum_vault_address=vault,
+        _env_file=None,
+    )
+    perptape = PerptapeClient(
+        base_url="https://perptape.invalid",
+        api_key=None,
+        contract_version="breakouts-v1",
+        cache_ttl=timedelta(minutes=1),
+    )
+
+    def execute(payload: dict[str, object]) -> dict[str, object]:
+        if payload["operation"] == "resolve-assignment":
+            return {"assignedVault": vault, "active": True}
+        if payload["operation"] == "read-vault":
+            timestamp = int(datetime.now(UTC).timestamp())
+            return {
+                "chain": "arbitrum",
+                "vault": vault,
+                "agent": agent,
+                "budgets": [
+                    {
+                        "blockNumber": "123",
+                        "blockTimestamp": str(timestamp),
+                        "vault": vault,
+                        "agent": agent,
+                        "owner": "0x3333333333333333333333333333333333333333",
+                        "asset": {
+                            "address": "0x4444444444444444444444444444444444444444",
+                            "symbol": "USDC",
+                            "decimals": 6,
+                            "native": False,
+                        },
+                        "isOfficialVault": True,
+                        "isActiveWhitelist": True,
+                        "assignedWhitelistVault": vault,
+                        "balance": "10000000",
+                        "maxReleaseNet": "9000000",
+                        "pendingNet": "0",
+                        "panicLocked": False,
+                        "dailyReleaseRate": "100000000000000000",
+                        "dailyFeeRate": "1000000000000000",
+                    }
+                ],
+            }
+        if payload["operation"] == "prepare-release-request":
+            return {
+                "transaction": {
+                    "chainId": 42161,
+                    "to": vault,
+                    "data": "0x1234",
+                    "value": "0",
+                    "contract": "vault",
+                    "functionName": "requestWhitelistRelease",
+                    "summary": "Request reviewed NoTilt release",
+                }
+            }
+        raise AssertionError("unexpected NoTilt test operation")
+
+    return create_app(
+        settings,
+        database,
+        perptape,
+        telegram,
+        notilt_gateway=NoTiltGateway(executor=execute),
+        notilt_valuator=NoTiltUsdValuator(),
+    )
+
+
 async def login(client: AsyncClient, username: str) -> None:
     response = await client.post("/api/auth/mock/login", json={"username": username})
     assert response.status_code == 200, response.text
@@ -771,5 +1054,172 @@ def test_capital_api_requires_treasury_step_up_and_telegram_is_notification_only
             page = await client.get("/capital")
             assert page.status_code == 200
             assert "Trading Console" in page.text
+
+    asyncio.run(scenario())
+
+
+def test_notilt_api_reports_assignment_and_syncs_official_vault_read_only(
+    database: Database, service: TradingService
+) -> None:
+    seed(service)
+    telegram = MockTelegramGateway()
+
+    async def scenario() -> None:
+        async with AsyncClient(
+            transport=ASGITransport(app=build_notilt_app(database, telegram)),
+            base_url="http://test",
+        ) as client:
+            await login(client, "treasury-proposer")
+            status_response = await client.get("/api/notilt/status")
+            assert status_response.status_code == 200
+            status_data = status_response.json()
+            assert status_data["signing_mode"] == "EXTERNAL_WALLET_ONLY"
+            assert status_data["credential_custody"] == "EXTERNAL_WALLET"
+            assert status_data["chains"][2] == {
+                "chain_id": 42161,
+                "chain": "ARBITRUM",
+                "vault_configured": True,
+            }
+
+            assignment = await client.get("/api/notilt/chains/42161/assignment")
+            assert assignment.status_code == 200
+            assert assignment.json()["active"] is True
+            assert assignment.json()["matches_configured_vault"] is True
+
+            synced = await client.post("/api/notilt/chains/42161/sync")
+            assert synced.status_code == 200, synced.text
+            assert synced.json()["transport"] == "NOTILT_OFFICIAL_SDK_READ_ONLY"
+            assert synced.json()["facts_recorded"] == 1
+            vault_balances = [
+                item
+                for item in synced.json()["data"]["balances"]
+                if item["location_type"] == "VAULT" and item["environment"] == "LIVE"
+            ]
+            assert len(vault_balances) == 1
+            assert vault_balances[0]["usd_equity"] == "10.000000000000000000"
+
+    asyncio.run(scenario())
+
+
+def test_notilt_live_plan_requires_full_capital_authority_and_never_broadcasts(
+    database: Database, service: TradingService
+) -> None:
+    ids = seed(service)
+    now = datetime.now(UTC)
+    service.record_position(
+        "binance-main",
+        "BINANCE",
+        ids["instrument"],
+        Decimal(0),
+        Decimal(0),
+        Decimal("100000"),
+        True,
+        ids["admin"],
+        environment=ExecutionEnvironment.LIVE,
+        now=now,
+    )
+    service.record_account_equity(
+        "binance-main",
+        "BINANCE",
+        Decimal("10"),
+        Decimal("10"),
+        "USDC",
+        True,
+        ids["admin"],
+        environment=ExecutionEnvironment.LIVE,
+        now=now,
+    )
+    service.set_capability_gate(
+        "CAPITAL_TRANSFER",
+        CapabilityStatus.ENABLED,
+        "explicit integration test only",
+        ids["admin"],
+        now=now,
+    )
+    telegram = MockTelegramGateway()
+
+    async def scenario() -> None:
+        async with AsyncClient(
+            transport=ASGITransport(app=build_notilt_app(database, telegram)),
+            base_url="http://test",
+        ) as client:
+            await login(client, "treasury-proposer")
+            assert (await client.post("/api/notilt/chains/42161/sync")).status_code == 200
+            created = await client.post(
+                "/api/capital/proposals",
+                json={
+                    "environment": "LIVE",
+                    "direction": "VAULT_TO_VENUE",
+                    "account_id": "binance-main",
+                    "venue": "BINANCE",
+                    "vault_id": "0x1111111111111111111111111111111111111111",
+                    "asset": "USDC",
+                    "network": "ARBITRUM",
+                    "destination_reference": "approved-binance-deposit-reference",
+                    "amount": "1",
+                    "max_fee": "0.01",
+                    "min_received": "0.99",
+                    "reason": "reviewed operating capital allocation",
+                    "idempotency_key": "m7-notilt-live-api",
+                },
+            )
+            assert created.status_code == 200, created.text
+            proposal_id = created.json()["transfer_proposal_id"]
+            submitted = await client.post(f"/api/capital/proposals/{proposal_id}/submit")
+            version = submitted.json()["version"]
+            await client.post("/api/auth/logout")
+
+            for username in ("treasury-reviewer-1", "treasury-reviewer-2"):
+                await login(client, username)
+                grant = await client.post(
+                    "/api/auth/mock/step-up",
+                    json={
+                        "action": "capital.approve",
+                        "object_id": proposal_id,
+                        "object_version": version,
+                    },
+                )
+                reviewed = await client.post(
+                    f"/api/capital/proposals/{proposal_id}/reviews",
+                    json={
+                        "decision": "APPROVE",
+                        "reason": "independent reviewed release",
+                        "expected_version": version,
+                        "action_grant": grant.json()["action_grant"],
+                    },
+                )
+                assert reviewed.status_code == 200, reviewed.text
+                version = reviewed.json()["version"]
+                await client.post("/api/auth/logout")
+
+            await login(client, "treasury-reviewer-1")
+            authorization = await client.post(
+                f"/api/capital/proposals/{proposal_id}/authorizations",
+                json={
+                    "idempotency_key": "m7-notilt-live-auth",
+                    "expires_in_minutes": 30,
+                },
+            )
+            assert authorization.status_code == 200, authorization.text
+            authorization_id = authorization.json()["transfer_authorization_id"]
+            await client.post("/api/auth/logout")
+
+            await login(client, "treasury-reviewer-2")
+            plan = await client.post(
+                f"/api/capital/authorizations/{authorization_id}/transfers/notilt-plan",
+                json={"idempotency_key": "m7-notilt-live-plan"},
+            )
+            assert plan.status_code == 200, plan.text
+            body = plan.json()
+            assert body["transport"] == "NOTILT_UNSIGNED_TRANSACTION_HANDOFF"
+            assert body["broadcast"] is False
+            assert body["signing"] == "EXTERNAL_WALLET_REQUIRED"
+            assert body["transactions"][0]["function_name"] == "requestWhitelistRelease"
+            duplicate = await client.post(
+                f"/api/capital/authorizations/{authorization_id}/transfers/notilt-plan",
+                json={"idempotency_key": "m7-notilt-live-plan"},
+            )
+            assert duplicate.status_code == 200
+            assert duplicate.json()["capital_transfer_id"] == body["capital_transfer_id"]
 
     asyncio.run(scenario())

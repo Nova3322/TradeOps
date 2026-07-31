@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Any
 from uuid import UUID
@@ -25,6 +25,7 @@ from trading_control_plane.models import (
     ProtectionOrder,
     ReconciliationRun,
     RiskDecision,
+    RiskPolicy,
     RiskReservation,
     RoleAssignment,
     SenderLease,
@@ -35,6 +36,7 @@ from trading_control_plane.models import (
     VenueFill,
     VenueOrder,
 )
+from trading_control_plane.notilt import USD_STABLE_ASSETS
 from trading_control_plane.service import TradingService
 
 
@@ -430,6 +432,7 @@ class TradingQueries:
 
     def capital_center(self, user_id: UUID) -> dict[str, Any]:
         with self.database.session_factory() as session:
+            now = datetime.now(UTC)
             capital_roles = {
                 Role.OBSERVER.value,
                 Role.PROPOSER.value,
@@ -464,6 +467,10 @@ class TradingQueries:
                     CapitalAutomationPolicy.account_id,
                 )
             ).all()
+            risk_policy = session.scalar(select(RiskPolicy).where(RiskPolicy.active))
+            max_fact_age = timedelta(
+                seconds=(risk_policy.max_fact_age_seconds if risk_policy is not None else 300)
+            )
             visible_transfers = [
                 item
                 for item in transfers
@@ -478,6 +485,12 @@ class TradingQueries:
                 "MANUAL_REQUIRED",
             }
             balance_data: list[dict[str, Any]] = []
+            valuation_issues: list[str] = []
+            venue_net_worth: dict[str, Decimal] = {}
+            vault_net_worth = Decimal(0)
+            total_net_worth = Decimal(0)
+            live_balance_count = 0
+            live_sources: set[str] = set()
             for item in balances:
                 can_view = (
                     self.service.can_user(user_id, "capital.view", item.account_id, item.venue)
@@ -502,6 +515,38 @@ class TradingQueries:
                     if item.withdrawable_balance is None
                     else item.withdrawable_balance
                 )
+                valuation_time = item.observed_at
+                usd_equity: Decimal | None
+                valuation_price: Decimal | None
+                if item.currency.upper() in USD_STABLE_ASSETS:
+                    usd_equity = item.equity
+                    valuation_price = Decimal(1)
+                else:
+                    usd_equity = item.valuation_equity
+                    valuation_price = item.valuation_price
+                    if item.valuation_observed_at is not None:
+                        valuation_time = min(valuation_time, item.valuation_observed_at)
+                valuation_current = (
+                    item.fact_status == "KNOWN"
+                    and usd_equity is not None
+                    and valuation_price is not None
+                    and valuation_price > 0
+                    and not self.service._fact_is_stale(valuation_time, now, max_fact_age)
+                )
+                if item.environment == "LIVE":
+                    live_balance_count += 1
+                    live_sources.add("VAULT" if item.location_type == "VAULT" else item.venue)
+                if valuation_current and item.environment == "LIVE":
+                    assert usd_equity is not None
+                    total_net_worth += usd_equity
+                    if item.location_type == "VAULT":
+                        vault_net_worth += usd_equity
+                    else:
+                        venue_net_worth[item.venue] = (
+                            venue_net_worth.get(item.venue, Decimal(0)) + usd_equity
+                        )
+                elif item.environment == "LIVE":
+                    valuation_issues.append(f"{item.location_type}:{item.venue}:{item.currency}")
                 balance_data.append(
                     {
                         "account_equity_id": str(item.account_equity_id),
@@ -518,10 +563,24 @@ class TradingQueries:
                         "deposit_status": item.deposit_status,
                         "network": item.network,
                         "address_reference": item.address_reference,
+                        "valuation_currency": (
+                            "USD"
+                            if item.currency.upper() in USD_STABLE_ASSETS
+                            else item.valuation_currency
+                        ),
+                        "valuation_price": (
+                            None if valuation_price is None else str(valuation_price)
+                        ),
+                        "usd_equity": (None if not valuation_current else str(usd_equity)),
+                        "valuation_observed_at": _iso(item.valuation_observed_at),
+                        "valuation_current": valuation_current,
                         "fact_status": item.fact_status,
                         "observed_at": _iso(item.observed_at),
                     }
                 )
+            for required_source in ("BINANCE", "HYPERLIQUID", "VAULT"):
+                if required_source not in live_sources:
+                    valuation_issues.append(f"MISSING_LIVE_SOURCE:{required_source}")
             gate = session.get(CapabilityGate, "CAPITAL_TRANSFER")
             automation_gates = {
                 key: (None if (value := session.get(CapabilityGate, key)) is None else value.status)
@@ -531,6 +590,18 @@ class TradingQueries:
                 "real_transfer_gate": None if gate is None else gate.status,
                 "real_transfer_reason": None if gate is None else gate.reason,
                 "balances": balance_data,
+                "net_worth": {
+                    "environment": "LIVE",
+                    "currency": "USD",
+                    "venues": {
+                        venue: str(value) for venue, value in sorted(venue_net_worth.items())
+                    },
+                    "vault": str(vault_net_worth),
+                    "total": str(total_net_worth),
+                    "complete": live_balance_count > 0 and not valuation_issues,
+                    "issues": sorted(valuation_issues),
+                    "as_of": now.isoformat(),
+                },
                 "in_transit": str(
                     sum(
                         (

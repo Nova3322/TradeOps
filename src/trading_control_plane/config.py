@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from functools import lru_cache
 from typing import Literal
 
@@ -7,6 +8,7 @@ from pydantic import AliasChoices, Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 DEFAULT_SESSION_SECRET = "local-development-session-secret-change-me"  # noqa: S105
+EVM_ADDRESS_PATTERN = re.compile(r"^0x[0-9a-fA-F]{40}$")
 
 
 class Settings(BaseSettings):
@@ -57,7 +59,7 @@ class Settings(BaseSettings):
     telegram_allowed_username: str | None = None
     telegram_internal_username: str | None = None
     telegram_poll_timeout_seconds: int = Field(default=20, ge=1, le=30)
-    perptape_base_url: str = "http://127.0.0.1:8787"
+    perptape_base_url: str = "https://perptape.com"
     perptape_api_key: str | None = Field(default=None, repr=False)
     perptape_service_username: str = "perptape"
     perptape_contract_version: str = "breakouts-v1"
@@ -88,6 +90,12 @@ class Settings(BaseSettings):
     hyperliquid_testnet_base_url: str = "https://api.hyperliquid-testnet.xyz"
     hyperliquid_testnet_api_wallet_private_key: str | None = Field(default=None, repr=False)
     hyperliquid_subaccount_address: str | None = None
+    notilt_enabled: bool = False
+    notilt_agent_address: str | None = None
+    notilt_ethereum_vault_address: str | None = None
+    notilt_bsc_vault_address: str | None = None
+    notilt_arbitrum_vault_address: str | None = None
+    notilt_gateway_timeout_seconds: int = Field(default=30, ge=5, le=120)
 
     @property
     def hyperliquid_effective_account_address(self) -> str | None:
@@ -97,11 +105,35 @@ class Settings(BaseSettings):
     def hyperliquid_account_scope(self) -> Literal["MAIN_ACCOUNT", "SUBACCOUNT"]:
         return "SUBACCOUNT" if self.hyperliquid_subaccount_address else "MAIN_ACCOUNT"
 
+    @property
+    def notilt_vaults(self) -> dict[int, str]:
+        return {
+            chain_id: address
+            for chain_id, address in (
+                (1, self.notilt_ethereum_vault_address),
+                (56, self.notilt_bsc_vault_address),
+                (42161, self.notilt_arbitrum_vault_address),
+            )
+            if address is not None
+        }
+
     @field_validator("database_url")
     @classmethod
     def require_postgresql(cls, value: str) -> str:
         if not value.startswith(("postgresql://", "postgresql+psycopg://")):
             raise ValueError("database_url must use PostgreSQL with the psycopg driver")
+        return value
+
+    @field_validator(
+        "notilt_agent_address",
+        "notilt_ethereum_vault_address",
+        "notilt_bsc_vault_address",
+        "notilt_arbitrum_vault_address",
+    )
+    @classmethod
+    def require_evm_address(cls, value: str | None) -> str | None:
+        if value is not None and not EVM_ADDRESS_PATTERN.fullmatch(value):
+            raise ValueError("NoTilt addresses must be 20-byte EVM addresses")
         return value
 
     def validate_runtime_security(self) -> None:
@@ -143,6 +175,10 @@ class Settings(BaseSettings):
                 "enabled Hyperliquid testnet send requires the main account address "
                 "and testnet API wallet private key"
             )
+        if self.notilt_enabled and not self.notilt_agent_address:
+            raise ValueError("enabled NoTilt requires the public whitelist agent address")
+        if self.notilt_vaults and not self.notilt_agent_address:
+            raise ValueError("configured NoTilt Vaults require the public whitelist agent address")
         if self.telegram_enabled and not self.telegram_bot_token:
             raise ValueError("enabled Telegram requires a Bot API token")
         if self.telegram_enabled and not self.telegram_allowed_username:

@@ -23,6 +23,7 @@ htmlcov/
 build/
 dist/
 *.egg-info/
+node_modules/
 
 # Local application output
 var/

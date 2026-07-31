@@ -33,8 +33,12 @@ def test_postgresql_psycopg_url_is_accepted() -> None:
     assert settings.binance_account_mode == "PORTFOLIO_MARGIN"
     assert settings.binance_live_order_send_enabled is False
     assert settings.binance_live_base_url == "https://papi.binance.com"
+    assert settings.perptape_base_url == "https://perptape.com"
+    assert settings.notilt_enabled is False
+    assert settings.notilt_vaults == {}
     assert not hasattr(settings, "hyperliquid_private_key")
     assert not hasattr(settings, "hyperliquid_vault_address")
+    assert not hasattr(settings, "notilt_private_key")
 
 
 def test_hyperliquid_defaults_to_main_account_and_allows_explicit_subaccount() -> None:
@@ -145,6 +149,41 @@ def test_live_senders_remain_default_off_and_require_explicit_credentials() -> N
         _env_file=None,
     )
     explicit.validate_runtime_security()
+
+
+def test_notilt_uses_public_agent_and_three_fixed_mainnet_vault_slots() -> None:
+    database_url = "postgresql+psycopg://user:pass@localhost/trading"
+    agent = "0x1111111111111111111111111111111111111111"
+    ethereum = "0x2222222222222222222222222222222222222222"
+    bsc = "0x3333333333333333333333333333333333333333"
+    arbitrum = "0x4444444444444444444444444444444444444444"
+    configured = Settings(
+        database_url=database_url,
+        notilt_enabled=True,
+        notilt_agent_address=agent,
+        notilt_ethereum_vault_address=ethereum,
+        notilt_bsc_vault_address=bsc,
+        notilt_arbitrum_vault_address=arbitrum,
+        _env_file=None,
+    )
+
+    configured.validate_runtime_security()
+    assert configured.notilt_vaults == {1: ethereum, 56: bsc, 42161: arbitrum}
+
+    missing_agent = Settings(
+        database_url=database_url,
+        notilt_enabled=True,
+        _env_file=None,
+    )
+    with pytest.raises(ValueError, match="public whitelist agent"):
+        missing_agent.validate_runtime_security()
+
+    with pytest.raises(ValidationError, match="20-byte EVM"):
+        Settings(
+            database_url=database_url,
+            notilt_agent_address="invalid",
+            _env_file=None,
+        )
 
 
 @pytest.mark.parametrize(

@@ -51,6 +51,7 @@ class ManualProposalRequest(BaseModel):
 
 
 class SystemProposalRequest(BaseModel):
+    environment: Literal["SHADOW", "TESTNET", "LIVE"] = "SHADOW"
     account_id: str = Field(min_length=1, max_length=120)
     risk_tier: RiskTier
     quantity: Decimal = Field(gt=0)
@@ -221,7 +222,7 @@ class CapitalBalanceFactRequest(BaseModel):
 
 
 class TransferProposalRequest(BaseModel):
-    environment: Literal["SHADOW", "TESTNET"] = "TESTNET"
+    environment: Literal["SHADOW", "TESTNET", "LIVE"] = "TESTNET"
     direction: CapitalDirection
     account_id: str = Field(min_length=1, max_length=120)
     venue: str = Field(min_length=1, max_length=64)
