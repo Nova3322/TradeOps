@@ -34,6 +34,9 @@ def test_postgresql_psycopg_url_is_accepted() -> None:
     assert settings.binance_live_order_send_enabled is False
     assert settings.binance_live_base_url == "https://papi.binance.com"
     assert settings.perptape_base_url == "https://perptape.com"
+    assert settings.perptape_timeout_seconds == 15
+    assert settings.runtime_sync_enabled is False
+    assert settings.runtime_sync_interval_seconds == 60
     assert settings.notilt_enabled is False
     assert settings.notilt_vaults == {}
     assert not hasattr(settings, "hyperliquid_private_key")
@@ -201,6 +204,22 @@ def test_notilt_uses_public_agent_and_three_fixed_mainnet_vault_slots() -> None:
         (
             {"hyperliquid_testnet_order_send_enabled": True},
             "testnet send requires the main account",
+        ),
+        (
+            {
+                "runtime_sync_enabled": True,
+                "binance_read_only_enabled": True,
+                "binance_api_key": "fixture-key",
+                "binance_api_secret": "fixture-secret",
+            },
+            "runtime Binance sync requires an internal account ID",
+        ),
+        (
+            {
+                "runtime_sync_enabled": True,
+                "hyperliquid_read_only_enabled": True,
+            },
+            "runtime Hyperliquid sync requires an internal account ID",
         ),
         (
             {

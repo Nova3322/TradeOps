@@ -109,7 +109,7 @@ from trading_control_plane.notilt import (
     NoTiltUnsignedTransaction,
     NoTiltUsdValuator,
 )
-from trading_control_plane.perptape import PerptapeClient
+from trading_control_plane.perptape import PerptapeCandidate, PerptapeClient
 from trading_control_plane.queries import TradingQueries
 from trading_control_plane.service import TradingService
 from trading_control_plane.telegram import (
@@ -152,6 +152,8 @@ def _domain_status(code: str) -> int:
         return status.HTTP_403_FORBIDDEN
     if code.endswith("_NOT_FOUND"):
         return status.HTTP_404_NOT_FOUND
+    if code == "PERPTAPE_RATE_LIMITED":
+        return status.HTTP_429_TOO_MANY_REQUESTS
     if code in {
         "IDEMPOTENCY_CONFLICT",
         "VERSION_CONFLICT",
@@ -164,6 +166,8 @@ def _domain_status(code: str) -> int:
     if code in {
         "PERPTAPE_UNAVAILABLE",
         "PERPTAPE_NOT_CONFIGURED",
+        "PERPTAPE_CACHE_UNAVAILABLE",
+        "PERPTAPE_CACHE_STALE",
         "BINANCE_READ_ONLY_DISABLED",
         "BINANCE_READ_ONLY_NOT_CONFIGURED",
         "BINANCE_READ_ONLY_UNAVAILABLE",
@@ -189,6 +193,8 @@ def _domain_status(code: str) -> int:
     }:
         return status.HTTP_503_SERVICE_UNAVAILABLE
     if code in {
+        "PERPTAPE_RESPONSE_INVALID",
+        "PERPTAPE_CACHE_INVALID",
         "BINANCE_RESPONSE_INVALID",
         "BINANCE_TESTNET_RESPONSE_INVALID",
         "BINANCE_LIVE_RESPONSE_INVALID",
@@ -226,6 +232,7 @@ def create_app(
         api_key=resolved_settings.perptape_api_key,
         contract_version=resolved_settings.perptape_contract_version,
         cache_ttl=timedelta(seconds=resolved_settings.perptape_cache_seconds),
+        timeout_seconds=resolved_settings.perptape_timeout_seconds,
     )
     if telegram_gateway is not None:
         resolved_telegram = telegram_gateway
@@ -385,6 +392,9 @@ def create_app(
                     "retryable": exc.code
                     in {
                         "PERPTAPE_UNAVAILABLE",
+                        "PERPTAPE_RATE_LIMITED",
+                        "PERPTAPE_CACHE_UNAVAILABLE",
+                        "PERPTAPE_CACHE_STALE",
                         "BINANCE_READ_ONLY_UNAVAILABLE",
                         "BINANCE_LIVE_UNAVAILABLE",
                         "BINANCE_LIVE_OUTCOME_UNKNOWN",
@@ -621,13 +631,45 @@ def create_app(
                 )
             )
 
+    def current_perptape_candidates(*, now: datetime) -> list[PerptapeCandidate]:
+        if resolved_settings.runtime_sync_enabled:
+            feed = queries().perptape_feed()
+            if feed is None:
+                raise DomainRejected(
+                    "PERPTAPE_CACHE_UNAVAILABLE",
+                    "runtime sync has not recorded a Perptape feed",
+                )
+            grace = timedelta(
+                seconds=(
+                    resolved_settings.runtime_sync_interval_seconds
+                    + int(resolved_settings.perptape_timeout_seconds)
+                    + 30
+                )
+            )
+            if (
+                feed.contract_version != resolved_settings.perptape_contract_version
+                or now > feed.next_allowed_at + grace
+            ):
+                raise DomainRejected(
+                    "PERPTAPE_CACHE_STALE",
+                    "runtime Perptape feed is stale or uses another contract version",
+                )
+            return list(feed.candidates)
+        return resolved_perptape.list_candidates(now=now)
+
+    def current_perptape_candidate(candidate_id: str, *, now: datetime) -> PerptapeCandidate:
+        for candidate in current_perptape_candidates(now=now):
+            if candidate.candidate_id == candidate_id:
+                return candidate
+        raise DomainRejected("PERPTAPE_CANDIDATE_NOT_FOUND", "candidate is no longer available")
+
     @app.get("/api/opportunities")
     def opportunities(
         identity: SessionIdentity = identity_dependency,
     ) -> dict[str, Any]:
         queries().user_context(identity.user_id)
         now = _now()
-        candidates = resolved_perptape.list_candidates(now=now)
+        candidates = current_perptape_candidates(now=now)
         return {
             "source": "PERPTAPE",
             "source_contract_version": resolved_settings.perptape_contract_version,
@@ -643,7 +685,7 @@ def create_app(
         identity: SessionIdentity = identity_dependency,
     ) -> dict[str, Any]:
         now = _now()
-        candidate = resolved_perptape.get_candidate(candidate_id, now=now)
+        candidate = current_perptape_candidate(candidate_id, now=now)
         if candidate.readiness != "READY":
             raise DomainRejected(
                 "PERPTAPE_CANDIDATE_NOT_READY", "candidate data is not ready for proposal review"
@@ -1315,7 +1357,7 @@ def create_app(
         now = _now()
         candidates = [
             item
-            for item in resolved_perptape.list_candidates(now=now)
+            for item in current_perptape_candidates(now=now)
             if item.venue == detail["venue"]
             and item.symbol == symbol
             and item.direction.value == detail["direction"]
@@ -1337,7 +1379,7 @@ def create_app(
     ) -> dict[str, Any]:
         now = _now()
         detail = queries().campaign_detail(identity.user_id, campaign_id)
-        candidate = resolved_perptape.get_candidate(payload.candidate_id, now=now)
+        candidate = current_perptape_candidate(payload.candidate_id, now=now)
         created = service().create_order_intent(
             UUID(str(detail["authorization_id"])),
             identity.user_id,
@@ -3004,8 +3046,24 @@ def create_app(
             {
                 "application_version": __version__,
                 "runtime_environment": resolved_settings.environment,
-                "process_model": "one FastAPI process plus PostgreSQL",
+                "process_model": (
+                    "FastAPI plus independent read-only sync worker and PostgreSQL"
+                    if resolved_settings.runtime_sync_enabled
+                    else "one FastAPI process plus PostgreSQL"
+                ),
                 "external_boundaries": {
+                    "runtime_sync": {
+                        "enabled": resolved_settings.runtime_sync_enabled,
+                        "interval_seconds": resolved_settings.runtime_sync_interval_seconds,
+                        "binance_target_configured": bool(
+                            resolved_settings.runtime_binance_account_id
+                        ),
+                        "hyperliquid_target_configured": bool(
+                            resolved_settings.runtime_hyperliquid_account_id
+                        ),
+                        "order_send_supported": False,
+                        "capital_broadcast_supported": False,
+                    },
                     "perptape": {
                         "configured": bool(resolved_settings.perptape_api_key),
                         "mode": "READ_ONLY",

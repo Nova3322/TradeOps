@@ -20,6 +20,7 @@ from trading_control_plane.models import (
     FundingPayment,
     Instrument,
     OrderIntent,
+    PerptapeFeed,
     Position,
     Proposal,
     ProtectionOrder,
@@ -37,6 +38,7 @@ from trading_control_plane.models import (
     VenueOrder,
 )
 from trading_control_plane.notilt import USD_STABLE_ASSETS
+from trading_control_plane.perptape import PerptapeCandidate, PerptapeFeedSnapshot
 from trading_control_plane.service import TradingService
 
 
@@ -73,8 +75,8 @@ class TradingQueries:
                 or user.principal_type != PrincipalType.SERVICE.value
             ):
                 raise DomainRejected(
-                    "PERPTAPE_PRINCIPAL_MISSING",
-                    "configured Perptape service principal is missing or inactive",
+                    "SERVICE_PRINCIPAL_MISSING",
+                    "configured service principal is missing or inactive",
                 )
             session.expunge(user)
             return user
@@ -158,6 +160,27 @@ class TradingQueries:
                     "candidate instrument is not active in the Trading catalog",
                 )
             return instrument.instrument_id
+
+    def perptape_feed(self) -> PerptapeFeedSnapshot | None:
+        with self.database.session_factory() as session:
+            feed = session.get(PerptapeFeed, "BREAKOUTS")
+            if feed is None:
+                return None
+            candidates: list[PerptapeCandidate] = []
+            for value in feed.candidates:
+                if not isinstance(value, dict):
+                    raise DomainRejected(
+                        "PERPTAPE_CACHE_INVALID",
+                        "persisted Perptape feed contains an invalid candidate",
+                    )
+                candidates.append(PerptapeCandidate.from_dict(value))
+            return PerptapeFeedSnapshot(
+                contract_version=feed.contract_version,
+                generated_at=feed.generated_at,
+                fetched_at=feed.fetched_at,
+                next_allowed_at=feed.next_allowed_at,
+                candidates=tuple(candidates),
+            )
 
     def list_proposals(self, user_id: UUID, *, status: str | None = None) -> list[dict[str, Any]]:
         with self.database.session_factory() as session:

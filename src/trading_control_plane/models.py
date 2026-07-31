@@ -89,6 +89,30 @@ class Instrument(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
 
+class PerptapeFeed(Base):
+    __tablename__ = "perptape_feeds"
+    __table_args__ = (
+        CheckConstraint(
+            "jsonb_typeof(candidates) = 'array'",
+            name="ck_perptape_feeds_candidates_array",
+        ),
+        CheckConstraint(
+            "next_allowed_at >= generated_at",
+            name="ck_perptape_feeds_refresh_window",
+        ),
+        CheckConstraint("version >= 1", name="ck_perptape_feeds_version"),
+    )
+
+    feed_key: Mapped[str] = mapped_column(String(32), primary_key=True)
+    contract_version: Mapped[str] = mapped_column(String(120), nullable=False)
+    candidates: Mapped[list[dict[str, Any]]] = mapped_column(JSONB, nullable=False)
+    generated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    next_allowed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
 class Proposal(Base):
     __tablename__ = "proposals"
     __table_args__ = (

@@ -64,6 +64,14 @@ class Settings(BaseSettings):
     perptape_service_username: str = "perptape"
     perptape_contract_version: str = "breakouts-v1"
     perptape_cache_seconds: int = Field(default=60, ge=1, le=300)
+    perptape_timeout_seconds: float = Field(default=15, ge=5, le=30)
+    runtime_sync_enabled: bool = False
+    runtime_sync_interval_seconds: int = Field(default=60, ge=30, le=3_600)
+    runtime_sync_service_username: str = "runtime-sync"
+    runtime_binance_account_id: str | None = None
+    runtime_binance_symbol: str = "BTCUSDT"
+    runtime_hyperliquid_account_id: str | None = None
+    runtime_hyperliquid_symbol: str = "BTC"
     binance_read_only_enabled: bool = False
     binance_fact_environment: Literal["TESTNET", "LIVE"] = "LIVE"
     binance_futures_base_url: str = "https://fapi.binance.com"
@@ -159,6 +167,12 @@ class Settings(BaseSettings):
             self.binance_api_secret
         ):
             raise ValueError("Binance read-only key and secret must be configured together")
+        if (
+            self.runtime_sync_enabled
+            and self.binance_read_only_enabled
+            and not self.runtime_binance_account_id
+        ):
+            raise ValueError("runtime Binance sync requires an internal account ID")
         if bool(self.binance_testnet_api_key) != bool(self.binance_testnet_api_secret):
             raise ValueError("Binance testnet key and secret must be configured together")
         if self.binance_testnet_order_send_enabled and not (
@@ -171,6 +185,12 @@ class Settings(BaseSettings):
             raise ValueError("enabled Binance LIVE send requires explicit LIVE credentials")
         if self.hyperliquid_subaccount_address and not self.hyperliquid_account_address:
             raise ValueError("Hyperliquid subaccount requires the main account address")
+        if (
+            self.runtime_sync_enabled
+            and self.hyperliquid_read_only_enabled
+            and not self.runtime_hyperliquid_account_id
+        ):
+            raise ValueError("runtime Hyperliquid sync requires an internal account ID")
         if self.hyperliquid_live_order_send_enabled and not (
             (self.hyperliquid_account_address or self.hyperliquid_api_wallet_address)
             and self.hyperliquid_api_wallet_private_key

@@ -34,6 +34,7 @@ def perptape_payload(observed_at: datetime) -> dict[str, Any]:
     timestamp = int(observed_at.timestamp() * 1_000)
     return {
         "type": "breakouts",
+        "generatedAt": timestamp,
         "data": [
             {
                 "exchange": "BN",

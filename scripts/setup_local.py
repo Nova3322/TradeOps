@@ -8,13 +8,15 @@ from sqlalchemy import select
 
 from trading_control_plane.config import get_settings
 from trading_control_plane.database import Database
-from trading_control_plane.domain import Role
+from trading_control_plane.domain import PrincipalType, Role
 from trading_control_plane.models import RoleAssignment, User
 from trading_control_plane.service import TradingService
 
 OWNER_USERNAME = "kelly_oooo"
 PROPOSER_USERNAME = "local-proposer"
 SECOND_REVIEWER_USERNAME = "local-reviewer-two"
+PERPTAPE_USERNAME = "perptape"
+RUNTIME_SYNC_USERNAME = "runtime-sync"
 
 
 def _user_id(database: Database, username: str):
@@ -33,6 +35,23 @@ def _ensure_user(
 ):
     user_id = _user_id(database, username)
     return service.create_user(username, owner_id, now=now) if user_id is None else user_id
+
+
+def _ensure_service_principal(
+    database: Database,
+    service: TradingService,
+    username: str,
+    owner_id,
+    *,
+    now: datetime,
+):
+    with database.session_factory() as session:
+        user = session.scalar(select(User).where(User.username == username))
+    if user is not None:
+        if user.principal_type != PrincipalType.SERVICE.value or not user.active:
+            raise RuntimeError(f"{username} must be an active service principal")
+        return user.user_id
+    return service.create_service_principal(username, owner_id, now=now)
 
 
 def _ensure_role(
@@ -81,6 +100,20 @@ def main() -> None:
             owner_id,
             now=now,
         )
+        perptape_id = _ensure_service_principal(
+            database,
+            service,
+            PERPTAPE_USERNAME,
+            owner_id,
+            now=now,
+        )
+        runtime_sync_id = _ensure_service_principal(
+            database,
+            service,
+            RUNTIME_SYNC_USERNAME,
+            owner_id,
+            now=now,
+        )
         for role in (Role.OBSERVER, Role.REVIEWER, Role.OPERATOR):
             _ensure_role(database, service, owner_id, role, owner_id, now=now)
         _ensure_role(database, service, proposer_id, Role.PROPOSER, owner_id, now=now)
@@ -92,9 +125,12 @@ def main() -> None:
             owner_id,
             now=now,
         )
+        _ensure_role(database, service, perptape_id, Role.PROPOSER, owner_id, now=now)
+        for role in (Role.OPERATOR, Role.TREASURY_ADMIN):
+            _ensure_role(database, service, runtime_sync_id, role, owner_id, now=now)
     finally:
         database.dispose()
-    print("Local database and internal Telegram user are ready.")
+    print("Local database and internal human/service principals are ready.")
 
 
 if __name__ == "__main__":

@@ -87,6 +87,7 @@ from trading_control_plane.models import (
     FundingPayment,
     Instrument,
     OrderIntent,
+    PerptapeFeed,
     Position,
     Proposal,
     ProtectionOrder,
@@ -110,6 +111,7 @@ from trading_control_plane.notilt import (
     NoTiltVaultSnapshot,
     UsdValuation,
 )
+from trading_control_plane.perptape import PerptapeFeedSnapshot
 
 ACTIVE_INTENT_STATUSES = {
     OrderIntentStatus.PENDING.value,
@@ -503,6 +505,74 @@ class TradingService:
                 now=now,
             )
             return principal.user_id
+
+    def record_perptape_feed(
+        self,
+        actor_id: UUID,
+        feed: PerptapeFeedSnapshot,
+        *,
+        now: datetime,
+    ) -> int:
+        if (
+            feed.fetched_at > now + MAX_FACT_CLOCK_SKEW
+            or feed.generated_at > feed.fetched_at + MAX_FACT_CLOCK_SKEW
+            or feed.next_allowed_at < feed.generated_at
+            or any(
+                candidate.source_contract_version != feed.contract_version
+                for candidate in feed.candidates
+            )
+        ):
+            _reject("PERPTAPE_RESPONSE_INVALID", "Perptape feed metadata is inconsistent")
+        candidates = [candidate.to_dict() for candidate in feed.candidates]
+        with self.database.session_factory.begin() as session:
+            self._require_role(session, actor_id, "proposal.create")
+            current = session.get(PerptapeFeed, "BREAKOUTS", with_for_update=True)
+            if current is not None and current.fetched_at > feed.fetched_at:
+                return current.version
+            if current is not None and current.fetched_at == feed.fetched_at:
+                if (
+                    current.contract_version == feed.contract_version
+                    and current.candidates == candidates
+                    and current.generated_at == feed.generated_at
+                    and current.next_allowed_at == feed.next_allowed_at
+                ):
+                    return current.version
+                _reject(
+                    "PERPTAPE_FEED_CONFLICT",
+                    "the same Perptape fetch time has different semantics",
+                )
+            if current is None:
+                current = PerptapeFeed(
+                    feed_key="BREAKOUTS",
+                    contract_version=feed.contract_version,
+                    candidates=candidates,
+                    generated_at=feed.generated_at,
+                    fetched_at=feed.fetched_at,
+                    next_allowed_at=feed.next_allowed_at,
+                    version=1,
+                    updated_at=now,
+                )
+                session.add(current)
+            else:
+                current.contract_version = feed.contract_version
+                current.candidates = candidates
+                current.generated_at = feed.generated_at
+                current.fetched_at = feed.fetched_at
+                current.next_allowed_at = feed.next_allowed_at
+                current.version += 1
+                current.updated_at = now
+            self._audit(
+                session,
+                actor_id=str(actor_id),
+                event_type="PERPTAPE_FEED_RECORDED",
+                object_type="PerptapeFeed",
+                object_id=current.feed_key,
+                reason=f"{len(candidates)} candidates",
+                correlation_id=uuid4(),
+                object_version=current.version,
+                now=now,
+            )
+            return current.version
 
     def assign_role(
         self,

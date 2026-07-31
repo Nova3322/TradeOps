@@ -72,6 +72,7 @@ def test_real_breakout_contract_maps_to_narrow_trading_candidates_and_caches() -
         "x-api-key": "test-api-key",
         "user-agent": "trading-control-plane/1.0",
     }
+    assert calls[0][2] == 15
     assert first[0].venue == "BINANCE"
     assert first[0].direction is Direction.LONG
     assert first[0].readiness == "READY"
@@ -80,6 +81,36 @@ def test_real_breakout_contract_maps_to_narrow_trading_candidates_and_caches() -
     assert first[1].data_health == "DEGRADED"
     assert first[0].candidate_id.startswith("pt_")
     assert client.get_candidate(first[0].candidate_id, now=NOW) == first[0]
+
+
+def test_server_rate_limit_extends_cache_beyond_local_ttl() -> None:
+    calls = 0
+    payload = response()
+    payload["rateLimit"] = {
+        "plan": "plus",
+        "intervalSeconds": 300,
+        "nextAllowedAt": int((NOW + timedelta(minutes=5)).timestamp() * 1_000),
+    }
+
+    def fetch(_url: str, _headers: dict[str, str], _timeout: float) -> dict[str, object]:
+        nonlocal calls
+        calls += 1
+        return payload
+
+    client = PerptapeClient(
+        base_url="https://perptape.example",
+        api_key="test-api-key",
+        contract_version="breakouts-v1",
+        cache_ttl=timedelta(minutes=1),
+        fetcher=fetch,
+    )
+
+    first = client.refresh(now=NOW)
+    second = client.refresh(now=NOW + timedelta(minutes=2))
+
+    assert first is second
+    assert first.next_allowed_at == NOW + timedelta(minutes=5)
+    assert calls == 1
 
 
 def test_client_fails_closed_without_api_key_or_with_invalid_contract() -> None:
