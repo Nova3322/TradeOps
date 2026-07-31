@@ -250,6 +250,122 @@ class BinanceReadOnlyClient:
             protection=self._select_protection(parsed_orders, parsed_position),
         )
 
+    def read_account_snapshots(
+        self, symbols: tuple[str, ...], *, now: datetime
+    ) -> tuple[BinanceReadOnlySnapshot, ...]:
+        """Read one complete account position/open-order snapshot and project its symbols."""
+
+        configured = self._validated_symbols(symbols)
+        timestamp_ms = int(now.timestamp() * 1000)
+        positions = self._signed_get("/fapi/v3/positionRisk", {}, timestamp_ms=timestamp_ms)
+        balance = self._signed_get("/fapi/v3/balance", {}, timestamp_ms=timestamp_ms)
+        orders = self._signed_get("/fapi/v1/openOrders", {}, timestamp_ms=timestamp_ms)
+        active_symbols = self._active_position_symbols(positions, container="positionRisk")
+        target_symbols = configured | active_symbols | self._order_symbols(orders, "openOrders")
+        snapshots: list[BinanceReadOnlySnapshot] = []
+        for symbol in sorted(target_symbols):
+            exchange = self._public_get("/fapi/v1/exchangeInfo", {"symbol": symbol})
+            instrument = self._parse_instrument(exchange, symbol)
+            parsed_orders = self._parse_orders(orders, symbol, now)
+            position = self._parse_position_or_flat(positions, symbol, now)
+            fills = self._signed_get(
+                "/fapi/v1/userTrades",
+                {"symbol": symbol, "limit": "1000"},
+                timestamp_ms=timestamp_ms,
+            )
+            funding = self._signed_get(
+                "/fapi/v1/income",
+                {"symbol": symbol, "incomeType": "FUNDING_FEE", "limit": "1000"},
+                timestamp_ms=timestamp_ms,
+            )
+            self._require_untruncated(fills, "userTrades", limit=1000)
+            self._require_untruncated(funding, "income", limit=1000)
+            snapshots.append(
+                BinanceReadOnlySnapshot(
+                    symbol=symbol,
+                    observed_at=now,
+                    instrument=instrument,
+                    orders=parsed_orders,
+                    fills=self._parse_fills(fills, symbol, now),
+                    position=position,
+                    equity=self._parse_equity(balance, instrument.collateral_currency, now),
+                    funding=self._parse_funding(funding, symbol, now),
+                    protection=self._select_protection(parsed_orders, position),
+                )
+            )
+        return tuple(snapshots)
+
+    @staticmethod
+    def _validated_symbols(symbols: tuple[str, ...]) -> set[str]:
+        result = set(symbols)
+        if not result or any(not symbol or symbol != symbol.upper() for symbol in result):
+            raise DomainRejected("BINANCE_SYMBOL_INVALID", "Binance symbol must be uppercase")
+        return result
+
+    @classmethod
+    def _active_position_symbols(cls, raw: JsonValue, *, container: str) -> set[str]:
+        rows = cls._require_list(raw, container)
+        grouped: dict[str, list[dict[str, Any]]] = {}
+        for item in rows:
+            symbol = item.get("symbol")
+            if not isinstance(symbol, str) or not symbol or symbol != symbol.upper():
+                raise DomainRejected(
+                    "BINANCE_RESPONSE_INVALID", "Binance position symbol is invalid"
+                )
+            grouped.setdefault(symbol, []).append(item)
+        active: set[str] = set()
+        for symbol, symbol_rows in grouped.items():
+            both = [item for item in symbol_rows if item.get("positionSide", "BOTH") == "BOTH"]
+            if len(both) > 1:
+                raise DomainRejected(
+                    "BINANCE_RESPONSE_INVALID", "Binance position response contains duplicates"
+                )
+            nonzero_hedged = any(
+                item.get("positionSide", "BOTH") != "BOTH"
+                and _decimal(item.get("positionAmt"), "positionAmt") != 0
+                for item in symbol_rows
+            )
+            if nonzero_hedged:
+                raise DomainRejected(
+                    "BINANCE_HEDGE_MODE_UNSUPPORTED",
+                    "read-only account sync requires one-way positions",
+                )
+            if both and _decimal(both[0].get("positionAmt"), "positionAmt") != 0:
+                active.add(symbol)
+        return active
+
+    @classmethod
+    def _order_symbols(cls, raw: JsonValue, name: str) -> set[str]:
+        result: set[str] = set()
+        for item in cls._require_list(raw, name):
+            symbol = item.get("symbol")
+            if not isinstance(symbol, str) or not symbol or symbol != symbol.upper():
+                raise DomainRejected("BINANCE_RESPONSE_INVALID", "Binance order symbol is invalid")
+            result.add(symbol)
+        return result
+
+    @classmethod
+    def _require_untruncated(cls, raw: JsonValue, name: str, *, limit: int) -> None:
+        if len(cls._require_list(raw, name)) >= limit:
+            raise DomainRejected(
+                "BINANCE_RESPONSE_INCOMPLETE",
+                f"Binance {name} reached its requested page limit",
+            )
+
+    def _parse_position_or_flat(
+        self, raw: JsonValue, symbol: str, now: datetime
+    ) -> BinancePosition:
+        rows = [
+            item for item in self._require_list(raw, "positionRisk") if item.get("symbol") == symbol
+        ]
+        if rows:
+            return self._parse_position(rows, symbol, now)
+        raw_mark = self._public_get("/fapi/v1/premiumIndex", {"symbol": symbol})
+        if not isinstance(raw_mark, dict) or raw_mark.get("symbol") != symbol:
+            raise DomainRejected("BINANCE_RESPONSE_INVALID", "Binance mark price is invalid")
+        mark = _positive_decimal(raw_mark.get("markPrice"), "markPrice")
+        return BinancePosition(Decimal(0), Decimal(0), mark, now)
+
     @staticmethod
     def _parse_instrument(raw: JsonValue, symbol: str) -> BinanceInstrument:
         if not isinstance(raw, dict) or not isinstance(raw.get("symbols"), list):
@@ -548,6 +664,86 @@ class BinancePortfolioMarginReadOnlyClient:
             funding=BinanceReadOnlyClient._parse_funding(funding, symbol, observed_at),
             protection=BinanceReadOnlyClient._select_protection(parsed_orders, position),
         )
+
+    def read_account_snapshots(
+        self, symbols: tuple[str, ...], *, now: datetime
+    ) -> tuple[BinanceReadOnlySnapshot, ...]:
+        """Read the authoritative UM account positions once, then enrich each covered symbol."""
+
+        del now
+        configured = BinanceReadOnlyClient._validated_symbols(symbols)
+        timestamp_ms = self._server_time_fetcher(5.0)
+        observed_at = datetime.fromtimestamp(timestamp_ms / 1000, UTC)
+        um_account = self._signed_get("/papi/v1/um/account", {}, timestamp_ms=timestamp_ms)
+        account = self._signed_get("/papi/v1/account", {}, timestamp_ms=timestamp_ms)
+        if not isinstance(um_account, dict) or not isinstance(um_account.get("positions"), list):
+            raise DomainRejected(
+                "BINANCE_RESPONSE_INVALID", "Portfolio Margin UM account is invalid"
+            )
+        position_rows: JsonValue = um_account["positions"]
+        active_symbols = BinanceReadOnlyClient._active_position_symbols(
+            position_rows, container="Portfolio Margin UM positions"
+        )
+        orders = self._signed_get("/papi/v1/um/openOrders", {}, timestamp_ms=timestamp_ms)
+        algo_orders = self._signed_get(
+            "/papi/v1/um/algo/openAlgoOrders",
+            {"algoType": "CONDITIONAL"},
+            timestamp_ms=timestamp_ms,
+        )
+        target_symbols = (
+            configured
+            | active_symbols
+            | BinanceReadOnlyClient._order_symbols(orders, "openOrders")
+            | BinanceReadOnlyClient._order_symbols(algo_orders, "openAlgoOrders")
+        )
+        market: dict[str, tuple[BinanceInstrument, JsonValue]] = {}
+        for symbol in sorted(target_symbols):
+            exchange = self._market_get("/fapi/v1/exchangeInfo", {"symbol": symbol})
+            mark = self._market_get("/fapi/v1/premiumIndex", {"symbol": symbol})
+            market[symbol] = (BinanceReadOnlyClient._parse_instrument(exchange, symbol), mark)
+        collateral_currencies = {
+            instrument.collateral_currency for instrument, _mark in market.values()
+        }
+        if len(collateral_currencies) != 1:
+            raise DomainRejected(
+                "BINANCE_ACCOUNT_EQUITY_AMBIGUOUS",
+                "Portfolio Margin aggregate equity cannot cover multiple collateral currencies",
+            )
+        equity_currency = next(iter(collateral_currencies))
+
+        snapshots: list[BinanceReadOnlySnapshot] = []
+        for symbol in sorted(target_symbols):
+            instrument, mark = market[symbol]
+            fills = self._signed_get(
+                "/papi/v1/um/userTrades",
+                {"symbol": symbol, "limit": "1000"},
+                timestamp_ms=timestamp_ms,
+            )
+            funding = self._signed_get(
+                "/papi/v1/um/income",
+                {"symbol": symbol, "incomeType": "FUNDING_FEE", "limit": "1000"},
+                timestamp_ms=timestamp_ms,
+            )
+            BinanceReadOnlyClient._require_untruncated(fills, "userTrades", limit=1000)
+            BinanceReadOnlyClient._require_untruncated(funding, "income", limit=1000)
+            position = self._parse_position(um_account, mark, symbol, observed_at)
+            parsed_orders = BinanceReadOnlyClient._parse_orders(
+                orders, symbol, observed_at
+            ) + self._parse_algo_orders(algo_orders, symbol, observed_at)
+            snapshots.append(
+                BinanceReadOnlySnapshot(
+                    symbol=symbol,
+                    observed_at=observed_at,
+                    instrument=instrument,
+                    orders=parsed_orders,
+                    fills=BinanceReadOnlyClient._parse_fills(fills, symbol, observed_at),
+                    position=position,
+                    equity=self._parse_equity(account, equity_currency, observed_at),
+                    funding=BinanceReadOnlyClient._parse_funding(funding, symbol, observed_at),
+                    protection=BinanceReadOnlyClient._select_protection(parsed_orders, position),
+                )
+            )
+        return tuple(snapshots)
 
     @staticmethod
     def _parse_position(

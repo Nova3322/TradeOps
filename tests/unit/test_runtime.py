@@ -274,6 +274,14 @@ def test_runtime_venue_success_requires_this_cycle_reconciliation_match() -> Non
             runtime_module.datetime.fromisoformat("2026-07-31T00:00:00+00:00"),
         )
 
+    worker.service.status = ReconciliationStatus.UNKNOWN
+    with pytest.raises(DomainRejected, match="RUNTIME_RECONCILIATION_NOT_MATCH"):
+        worker._require_scope_match(
+            "LIVE:account:BINANCE",
+            UUID("22222222-2222-2222-2222-222222222222"),
+            runtime_module.datetime.fromisoformat("2026-07-31T00:00:00+00:00"),
+        )
+
     worker.service.status = ReconciliationStatus.MATCH
     worker._require_scope_match(
         "LIVE:account:BINANCE",

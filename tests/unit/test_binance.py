@@ -175,6 +175,64 @@ def test_user_data_contract_is_get_only_signed_and_maps_all_required_facts() -> 
     assert not hasattr(client, "post")
 
 
+def test_standard_account_snapshot_reads_position_risk_once_for_all_active_symbols() -> None:
+    responses = payloads()
+    position_rows = responses["/fapi/v3/positionRisk"]
+    assert isinstance(position_rows, list)
+    position_rows.append(
+        {
+            "symbol": "ETHUSDT",
+            "positionSide": "BOTH",
+            "positionAmt": "2",
+            "entryPrice": "3000",
+            "markPrice": "3100",
+            "updateTime": int(NOW.timestamp() * 1_000),
+        }
+    )
+    exchange = responses["/fapi/v1/exchangeInfo"]
+    assert isinstance(exchange, dict)
+    template = exchange["symbols"][0]
+    calls: list[str] = []
+
+    def fetch(
+        url: str, _headers: dict[str, str], _timeout: float
+    ) -> dict[str, Any] | list[dict[str, Any]]:
+        parsed = urllib.parse.urlparse(url)
+        calls.append(parsed.path)
+        if parsed.path == "/fapi/v1/exchangeInfo":
+            symbol = dict(urllib.parse.parse_qsl(parsed.query))["symbol"]
+            return {"symbols": [{**template, "symbol": symbol}]}
+        return responses[parsed.path]
+
+    client = BinanceReadOnlyClient(
+        base_url="https://fapi.binance.example",
+        api_key="read-only-key",
+        api_secret="read-only-secret",  # noqa: S106
+        fetcher=fetch,
+    )
+
+    snapshots = client.read_account_snapshots(("BTCUSDT",), now=NOW)
+
+    assert [(item.symbol, item.position.quantity) for item in snapshots] == [
+        ("BTCUSDT", Decimal("0.25")),
+        ("ETHUSDT", Decimal(2)),
+    ]
+    assert calls.count("/fapi/v3/positionRisk") == 1
+    assert calls.count("/fapi/v3/balance") == 1
+    assert calls.count("/fapi/v1/openOrders") == 1
+
+
+def test_account_snapshot_rejects_page_limit_before_returning_partial_coverage() -> None:
+    responses = payloads()
+    trade = responses["/fapi/v1/userTrades"]
+    assert isinstance(trade, list)
+    responses["/fapi/v1/userTrades"] = trade * 1_000
+    client, _calls = client_with_contract(responses)
+
+    with pytest.raises(DomainRejected, match="BINANCE_RESPONSE_INCOMPLETE"):
+        client.read_account_snapshots(("BTCUSDT",), now=NOW)
+
+
 def test_missing_credentials_fail_before_any_private_fact_is_read() -> None:
     calls: list[str] = []
     client = BinanceReadOnlyClient(
@@ -387,6 +445,104 @@ def test_portfolio_margin_reader_uses_papi_and_maps_unified_account_facts() -> N
         assert dict(urllib.parse.parse_qsl(urllib.parse.urlparse(url).query))["timestamp"] == str(
             observed_ms
         )
+
+
+def test_portfolio_margin_account_snapshot_covers_all_positions_without_refetching_account() -> (
+    None
+):
+    observed_ms = int(NOW.timestamp() * 1_000)
+    calls: list[tuple[str, dict[str, str]]] = []
+    collateral_by_symbol: dict[str, str] = {}
+
+    def instrument(symbol: str) -> dict[str, Any]:
+        return {
+            "symbols": [
+                {
+                    "symbol": symbol,
+                    "contractType": "PERPETUAL",
+                    "status": "TRADING",
+                    "quoteAsset": "USDT",
+                    "marginAsset": collateral_by_symbol.get(symbol, "USDT"),
+                    "filters": [
+                        {"filterType": "PRICE_FILTER", "tickSize": "0.10"},
+                        {"filterType": "LOT_SIZE", "stepSize": "0.001"},
+                        {"filterType": "MIN_NOTIONAL", "notional": "5"},
+                    ],
+                }
+            ]
+        }
+
+    def fetch(
+        url: str, headers: dict[str, str], _timeout: float
+    ) -> dict[str, Any] | list[dict[str, Any]]:
+        parsed = urllib.parse.urlparse(url)
+        query = dict(urllib.parse.parse_qsl(parsed.query))
+        calls.append((parsed.path, query))
+        if parsed.path == "/papi/v1/um/account":
+            return {
+                "positions": [
+                    {
+                        "symbol": "BTCUSDT",
+                        "positionSide": "BOTH",
+                        "positionAmt": "0.25",
+                        "entryPrice": "60000",
+                    },
+                    {
+                        "symbol": "ETHUSDT",
+                        "positionSide": "BOTH",
+                        "positionAmt": "2",
+                        "entryPrice": "3000",
+                    },
+                ]
+            }
+        if parsed.path == "/papi/v1/account":
+            return {
+                "accountEquity": "1025",
+                "totalAvailableBalance": "800",
+                "updateTime": observed_ms,
+            }
+        if parsed.path == "/fapi/v1/exchangeInfo":
+            return instrument(query["symbol"])
+        if parsed.path == "/fapi/v1/premiumIndex":
+            return {
+                "symbol": query["symbol"],
+                "markPrice": "61000" if query["symbol"] == "BTCUSDT" else "3100",
+            }
+        if parsed.path in {
+            "/papi/v1/um/openOrders",
+            "/papi/v1/um/algo/openAlgoOrders",
+            "/papi/v1/um/userTrades",
+            "/papi/v1/um/income",
+        }:
+            assert headers == {"X-MBX-APIKEY": "unified-key"}
+            return []
+        raise AssertionError(parsed.path)
+
+    client = BinancePortfolioMarginReadOnlyClient(
+        base_url="https://papi.binance.com",
+        api_key="unified-key",
+        api_secret="unified-secret",  # noqa: S106
+        fetcher=fetch,
+        server_time_fetcher=lambda _timeout: observed_ms,
+    )
+
+    snapshots = client.read_account_snapshots(("BTCUSDT",), now=NOW)
+
+    assert [(item.symbol, item.position.quantity) for item in snapshots] == [
+        ("BTCUSDT", Decimal("0.25")),
+        ("ETHUSDT", Decimal(2)),
+    ]
+    assert all(item.equity.currency == "USDT" for item in snapshots)
+    paths = [path for path, _query in calls]
+    assert paths.count("/papi/v1/um/account") == 1
+    assert paths.count("/papi/v1/account") == 1
+    assert paths.count("/papi/v1/um/openOrders") == 1
+    assert paths.count("/papi/v1/um/algo/openAlgoOrders") == 1
+    assert dict(calls)["/papi/v1/um/openOrders"].get("symbol") is None
+
+    collateral_by_symbol["ETHUSDT"] = "USDC"
+    with pytest.raises(DomainRejected, match="BINANCE_ACCOUNT_EQUITY_AMBIGUOUS"):
+        client.read_account_snapshots(("BTCUSDT",), now=NOW)
 
 
 def test_portfolio_margin_reader_rejects_nonofficial_hosts_before_network() -> None:
