@@ -19,6 +19,13 @@ PERPTAPE_WEBSOCKET_PATH = "/ws/v1/alerts"
 # A normal full 2,048-candidate window is about 1.2-1.6 MiB; 4 MiB leaves
 # reconciliation headroom while making the authoritative JSONB payload finite.
 PERPTAPE_PAYLOAD_MAX_BYTES = 4 * 1024 * 1024
+PERPTAPE_DECIMAL_RAW_MAX_BYTES = 128
+PERPTAPE_DECIMAL_MAX_PRECISION = 38
+PERPTAPE_DECIMAL_MIN_ADJUSTED_EXPONENT = -18
+PERPTAPE_DECIMAL_MAX_ADJUSTED_EXPONENT = 24
+PERPTAPE_DECIMAL_MIN_TUPLE_EXPONENT = -38
+PERPTAPE_DECIMAL_MAX_TUPLE_EXPONENT = 24
+PERPTAPE_DECIMAL_MAX_CANONICAL_BYTES = 40
 PERPTAPE_STRING_FIELD_MAX_BYTES = {
     "candidate_id": 200,
     "source": 16,
@@ -134,8 +141,18 @@ class PerptapeCandidate:
                 triggered_at=(
                     None if triggered_at is None else datetime.fromisoformat(str(triggered_at))
                 ),
-                reference_price=Decimal(str(value["reference_price"])),
-                threshold=None if threshold is None else Decimal(str(threshold)),
+                reference_price=_parse_contract_decimal(
+                    value["reference_price"],
+                    parse_error_code="PERPTAPE_CACHE_INVALID",
+                ),
+                threshold=(
+                    None
+                    if threshold is None
+                    else _parse_contract_decimal(
+                        threshold,
+                        parse_error_code="PERPTAPE_CACHE_INVALID",
+                    )
+                ),
                 rationale=str(value["rationale"]),
                 data_health=str(value["data_health"]),
                 readiness=str(value["readiness"]),
@@ -143,12 +160,18 @@ class PerptapeCandidate:
                 quote_volume=(
                     None
                     if value.get("quote_volume") is None
-                    else Decimal(str(value["quote_volume"]))
+                    else _parse_contract_decimal(
+                        value["quote_volume"],
+                        parse_error_code="PERPTAPE_CACHE_INVALID",
+                    )
                 ),
                 open_interest=(
                     None
                     if value.get("open_interest") is None
-                    else Decimal(str(value["open_interest"]))
+                    else _parse_contract_decimal(
+                        value["open_interest"],
+                        parse_error_code="PERPTAPE_CACHE_INVALID",
+                    )
                 ),
                 chart_url=str(value.get("chart_url", "")),
             )
@@ -172,6 +195,103 @@ class PerptapeFeedSnapshot:
 
 PerptapeEventKey = tuple[str, str, str, str, datetime | None]
 PERPTAPE_CANDIDATE_WINDOW = 2_048
+
+
+def validate_perptape_datetime(value: datetime) -> None:
+    try:
+        aware = isinstance(value, datetime) and value.utcoffset() is not None
+    except (OverflowError, TypeError, ValueError):
+        aware = False
+    if not aware:
+        raise DomainRejected(
+            "PERPTAPE_DATETIME_INVALID",
+            "Perptape timestamps must be timezone-aware",
+        )
+
+
+def _validate_decimal_contract(value: Decimal) -> None:
+    if (
+        not isinstance(value, Decimal)
+        or not value.is_finite()
+        or (value.is_zero() and value.is_signed())
+    ):
+        raise DomainRejected(
+            "PERPTAPE_DECIMAL_INVALID",
+            "Perptape decimal fact is outside the supported contract",
+        )
+    sign, digits, exponent = value.as_tuple()
+    assert isinstance(exponent, int)
+    adjusted = value.adjusted()
+    if (
+        len(digits) > PERPTAPE_DECIMAL_MAX_PRECISION
+        or adjusted < PERPTAPE_DECIMAL_MIN_ADJUSTED_EXPONENT
+        or adjusted > PERPTAPE_DECIMAL_MAX_ADJUSTED_EXPONENT
+        or exponent < PERPTAPE_DECIMAL_MIN_TUPLE_EXPONENT
+        or exponent > PERPTAPE_DECIMAL_MAX_TUPLE_EXPONENT
+    ):
+        raise DomainRejected(
+            "PERPTAPE_DECIMAL_INVALID",
+            "Perptape decimal fact is outside the supported contract",
+        )
+    trailing_zeros = 0
+    for digit in reversed(digits):
+        if digit != 0:
+            break
+        trailing_zeros += 1
+    significant_digits = max(1, len(digits) - trailing_zeros)
+    normalized_exponent = exponent + trailing_zeros
+    if value.is_zero():
+        expanded_bytes = 1
+    elif normalized_exponent >= 0:
+        expanded_bytes = sign + significant_digits + normalized_exponent
+    else:
+        point = significant_digits + normalized_exponent
+        expanded_bytes = (
+            sign + significant_digits + 1 if point > 0 else sign + 2 + (-point) + significant_digits
+        )
+    if expanded_bytes > PERPTAPE_DECIMAL_MAX_CANONICAL_BYTES:
+        raise DomainRejected(
+            "PERPTAPE_DECIMAL_INVALID",
+            "Perptape decimal fact exceeds the supported canonical byte ceiling",
+        )
+
+
+def _parse_contract_decimal(
+    raw: object,
+    *,
+    parse_error_code: str,
+) -> Decimal:
+    if isinstance(raw, Decimal):
+        _validate_decimal_contract(raw)
+        return raw
+    if isinstance(raw, bool) or not isinstance(raw, (str, int, float)):
+        raise DomainRejected(
+            parse_error_code,
+            "Perptape decimal fact is invalid",
+        )
+    try:
+        text = str(raw)
+    except (TypeError, ValueError) as exc:
+        raise DomainRejected(
+            parse_error_code,
+            "Perptape decimal fact is invalid",
+        ) from exc
+    if len(text) > PERPTAPE_DECIMAL_RAW_MAX_BYTES or len(text.encode("utf-8")) > (
+        PERPTAPE_DECIMAL_RAW_MAX_BYTES
+    ):
+        raise DomainRejected(
+            "PERPTAPE_DECIMAL_INVALID",
+            "Perptape decimal fact exceeds the supported byte ceiling",
+        )
+    try:
+        value = Decimal(text)
+    except InvalidOperation as exc:
+        raise DomainRejected(
+            parse_error_code,
+            "Perptape decimal fact is invalid",
+        ) from exc
+    _validate_decimal_contract(value)
+    return value
 
 
 def _validate_string_field(
@@ -205,33 +325,44 @@ def validate_perptape_candidate(
             error_code=error_code,
             allow_empty=field == "chart_url",
         )
+    validate_perptape_datetime(candidate.observed_at)
+    if candidate.triggered_at is not None:
+        validate_perptape_datetime(candidate.triggered_at)
+    _validate_decimal_contract(candidate.reference_price)
+    if candidate.threshold is not None:
+        _validate_decimal_contract(candidate.threshold)
+    if candidate.quote_volume is not None:
+        _validate_decimal_contract(candidate.quote_volume)
+    if candidate.open_interest is not None:
+        _validate_decimal_contract(candidate.open_interest)
     if (
         candidate.source != "PERPTAPE"
         or candidate.venue not in {"BINANCE", "HYPERLIQUID"}
         or candidate.source_direction not in {"HH", "LL"}
         or candidate.direction
         is not (Direction.LONG if candidate.source_direction == "HH" else Direction.SHORT)
-        or not candidate.reference_price.is_finite()
         or candidate.reference_price <= 0
-        or (
-            candidate.threshold is not None
-            and (not candidate.threshold.is_finite() or candidate.threshold <= 0)
-        )
-        or (
-            candidate.quote_volume is not None
-            and (not candidate.quote_volume.is_finite() or candidate.quote_volume < 0)
-        )
-        or (
-            candidate.open_interest is not None
-            and (not candidate.open_interest.is_finite() or candidate.open_interest < 0)
-        )
-        or candidate.observed_at.tzinfo is None
-        or (candidate.triggered_at is not None and candidate.triggered_at.tzinfo is None)
+        or (candidate.threshold is not None and candidate.threshold <= 0)
+        or (candidate.quote_volume is not None and candidate.quote_volume < 0)
+        or (candidate.open_interest is not None and candidate.open_interest < 0)
     ):
         raise DomainRejected(
             error_code,
             "Perptape candidate is outside the supported contract",
         )
+
+
+def validate_perptape_feed_contract(feed: PerptapeFeedSnapshot) -> None:
+    _validate_string_field(
+        field="source_contract_version",
+        value=feed.contract_version,
+        error_code="PERPTAPE_RESPONSE_INVALID",
+    )
+    validate_perptape_datetime(feed.generated_at)
+    validate_perptape_datetime(feed.fetched_at)
+    validate_perptape_datetime(feed.next_allowed_at)
+    for candidate in feed.candidates:
+        validate_perptape_candidate(candidate)
 
 
 def perptape_event_key(candidate: PerptapeCandidate) -> PerptapeEventKey:
@@ -247,22 +378,14 @@ def perptape_event_key(candidate: PerptapeCandidate) -> PerptapeEventKey:
 def _canonical_datetime(value: datetime | None) -> str | None:
     if value is None:
         return None
-    if value.tzinfo is None:
-        raise DomainRejected(
-            "PERPTAPE_CACHE_INVALID",
-            "Perptape snapshot timestamps must be timezone-aware",
-        )
+    validate_perptape_datetime(value)
     return value.astimezone(UTC).isoformat(timespec="microseconds")
 
 
 def _canonical_decimal(value: Decimal | None) -> str | None:
     if value is None:
         return None
-    if not value.is_finite():
-        raise DomainRejected(
-            "PERPTAPE_CACHE_INVALID",
-            "Perptape snapshot decimals must be finite",
-        )
+    _validate_decimal_contract(value)
     if value == 0:
         return "0"
     sign, digits_tuple, exponent = value.as_tuple()
@@ -337,6 +460,7 @@ def _normalized_candidate_dict(candidate: PerptapeCandidate) -> dict[str, Any]:
 
 
 def perptape_payload_size_bytes(feed: PerptapeFeedSnapshot) -> int:
+    validate_perptape_feed_contract(feed)
     normalized = [
         _normalized_candidate_dict(candidate)
         for candidate in sorted(feed.candidates, key=_candidate_window_sort_key)
@@ -352,13 +476,7 @@ def perptape_payload_size_bytes(feed: PerptapeFeedSnapshot) -> int:
 
 
 def validate_perptape_feed_payload(feed: PerptapeFeedSnapshot) -> None:
-    _validate_string_field(
-        field="source_contract_version",
-        value=feed.contract_version,
-        error_code="PERPTAPE_RESPONSE_INVALID",
-    )
-    for candidate in feed.candidates:
-        validate_perptape_candidate(candidate)
+    validate_perptape_feed_contract(feed)
     if perptape_payload_size_bytes(feed) > PERPTAPE_PAYLOAD_MAX_BYTES:
         raise DomainRejected(
             "PERPTAPE_PAYLOAD_TOO_LARGE",
@@ -405,6 +523,7 @@ def _event_key_sort_key(key: PerptapeEventKey) -> tuple[str, ...]:
 
 
 def perptape_snapshot_identity(feed: PerptapeFeedSnapshot) -> str:
+    validate_perptape_feed_contract(feed)
     candidates = sorted(
         (_canonical_candidate(candidate) for candidate in feed.candidates),
         key=lambda value: json.dumps(
@@ -457,11 +576,35 @@ def _concurrent_candidate_choice(
     )
 
 
+def _candidate_health_rank(candidate: PerptapeCandidate) -> tuple[bool, bool, bool]:
+    return (
+        candidate.readiness == "READY" and candidate.data_health == "CURRENT",
+        candidate.data_health == "CURRENT",
+        candidate.readiness != "INCOMPLETE",
+    )
+
+
+def _candidate_supersedes_base(
+    candidate: PerptapeCandidate,
+    base: PerptapeCandidate,
+) -> bool:
+    """Return whether a changed fact is provably newer or healthier than its base."""
+
+    if _candidate_semantically_equal(candidate, base):
+        return False
+    if candidate.observed_at > base.observed_at:
+        return True
+    if candidate.observed_at < base.observed_at:
+        return False
+    return _candidate_health_rank(candidate) > _candidate_health_rank(base)
+
+
 def bound_perptape_feed_snapshot(
     feed: PerptapeFeedSnapshot,
 ) -> PerptapeFeedSnapshot:
     """Bound the authoritative candidate payload without evicting unresolved targets."""
 
+    validate_perptape_feed_contract(feed)
     unique: dict[PerptapeEventKey, PerptapeCandidate] = {}
     for candidate in feed.candidates:
         key = perptape_event_key(candidate)
@@ -563,7 +706,13 @@ def apply_perptape_feed_delta(
     merged = {perptape_event_key(candidate): candidate for candidate in current.candidates}
 
     for key in sorted(base_candidates.keys() - incoming_candidates.keys(), key=_event_key_sort_key):
-        merged.pop(key, None)
+        deletion_base = base_candidates[key]
+        current_candidate = merged.get(key)
+        if current_candidate is not None and not _candidate_supersedes_base(
+            current_candidate,
+            deletion_base,
+        ):
+            merged.pop(key, None)
     for key in sorted(incoming_candidates, key=_event_key_sort_key):
         desired = incoming_candidates[key]
         base_candidate = base_candidates.get(key)
@@ -573,6 +722,13 @@ def apply_perptape_feed_delta(
         ):
             continue
         current_candidate = merged.get(key)
+        if (
+            base_candidate is not None
+            and current_candidate is None
+            and _candidate_supersedes_base(desired, base_candidate)
+        ):
+            merged[key] = desired
+            continue
         if base_candidate is not None and current_candidate is None:
             continue
         if current_candidate is None or (
@@ -607,8 +763,12 @@ def merge_incomplete_perptape_candidates(
 ) -> PerptapeFeedSnapshot:
     """Keep only unresolved persisted targets alongside a new full snapshot."""
 
+    validate_perptape_feed_contract(feed)
+    preserved_candidates = tuple(preserved)
+    for candidate in preserved_candidates:
+        validate_perptape_candidate(candidate)
     pending: dict[PerptapeEventKey, PerptapeCandidate] = {}
-    for candidate in preserved:
+    for candidate in preserved_candidates:
         pending.setdefault(perptape_event_key(candidate), candidate)
     if not pending:
         return bound_perptape_feed_snapshot(feed)
@@ -731,7 +891,7 @@ def _default_fetcher(url: str, headers: dict[str, str], timeout: float) -> dict[
         raise DomainRejected("PERPTAPE_UNAVAILABLE", "Perptape could not be reached") from exc
     try:
         value = json.loads(body)
-    except json.JSONDecodeError as exc:
+    except ValueError as exc:
         raise DomainRejected("PERPTAPE_RESPONSE_INVALID", "Perptape returned invalid JSON") from exc
     if not isinstance(value, dict):
         raise DomainRejected("PERPTAPE_RESPONSE_INVALID", "Perptape response must be an object")
@@ -785,6 +945,7 @@ class PerptapeClient:
     def refresh(self, *, now: datetime, force: bool = False) -> PerptapeFeedSnapshot:
         if self._api_key is None:
             raise DomainRejected("PERPTAPE_NOT_CONFIGURED", "Perptape API key is not configured")
+        validate_perptape_datetime(now)
         with self._lock:
             if self._rate_limit_not_before is not None and now < self._rate_limit_not_before:
                 raise PerptapeRateLimited(self._rate_limit_not_before)
@@ -861,6 +1022,7 @@ class PerptapeClient:
 
     @staticmethod
     def _parse_feed_times(value: dict[str, Any], *, now: datetime) -> tuple[datetime, datetime]:
+        validate_perptape_datetime(now)
         try:
             generated_at = datetime.fromtimestamp(int(value["generatedAt"]) / 1000, UTC)
             rate_limit = value.get("rateLimit")
@@ -917,7 +1079,10 @@ class PerptapeClient:
             source_direction = source_direction_value
             timeframe = timeframe_value
             price_value = raw["price"] if raw.get("price") is not None else raw["breakoutPrice"]
-            price = Decimal(str(price_value))
+            price = _parse_contract_decimal(
+                price_value,
+                parse_error_code="PERPTAPE_RESPONSE_INVALID",
+            )
             updated_at_ms = int(raw["updatedAt"])
             triggered_at_ms = None if raw.get("triggeredAt") is None else int(raw["triggeredAt"])
             readiness_value = raw.get("klineReadiness")
@@ -933,7 +1098,6 @@ class PerptapeClient:
         if (
             source_direction not in {"HH", "LL"}
             or timeframe not in {"1h", "4h", "1d", "1w"}
-            or not price.is_finite()
             or price <= 0
         ):
             raise DomainRejected(
@@ -950,7 +1114,14 @@ class PerptapeClient:
                 else datetime.fromtimestamp(triggered_at_ms / 1000, tz=UTC)
             )
             threshold_raw = raw.get("threshold")
-            threshold = None if threshold_raw is None else Decimal(str(threshold_raw))
+            threshold = (
+                None
+                if threshold_raw is None
+                else _parse_contract_decimal(
+                    threshold_raw,
+                    parse_error_code="PERPTAPE_RESPONSE_INVALID",
+                )
+            )
             volume_raw = next(
                 (
                     raw[key]
@@ -967,16 +1138,30 @@ class PerptapeClient:
                 ),
                 None,
             )
-            quote_volume = None if volume_raw is None else Decimal(str(volume_raw))
-            open_interest = None if open_interest_raw is None else Decimal(str(open_interest_raw))
+            quote_volume = (
+                None
+                if volume_raw is None
+                else _parse_contract_decimal(
+                    volume_raw,
+                    parse_error_code="PERPTAPE_RESPONSE_INVALID",
+                )
+            )
+            open_interest = (
+                None
+                if open_interest_raw is None
+                else _parse_contract_decimal(
+                    open_interest_raw,
+                    parse_error_code="PERPTAPE_RESPONSE_INVALID",
+                )
+            )
         except (OSError, OverflowError, InvalidOperation, ValueError) as exc:
             raise DomainRejected(
                 "PERPTAPE_RESPONSE_INVALID", "Perptape candidate contains invalid facts"
             ) from exc
         if (
-            (threshold is not None and (not threshold.is_finite() or threshold <= 0))
-            or (quote_volume is not None and (not quote_volume.is_finite() or quote_volume < 0))
-            or (open_interest is not None and (not open_interest.is_finite() or open_interest < 0))
+            (threshold is not None and threshold <= 0)
+            or (quote_volume is not None and quote_volume < 0)
+            or (open_interest is not None and open_interest < 0)
         ):
             raise DomainRejected(
                 "PERPTAPE_RESPONSE_INVALID", "Perptape candidate contains invalid facts"
@@ -1036,6 +1221,7 @@ class PerptapeClient:
     ) -> PerptapeCandidate:
         """Map Perptape's documented short-field alert without inventing missing facts."""
 
+        validate_perptape_datetime(event_time)
         if payload.get("t") is None:
             raise DomainRejected(
                 "PERPTAPE_STREAM_MESSAGE_INVALID",

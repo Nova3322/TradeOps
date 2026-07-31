@@ -14,6 +14,11 @@ import trading_control_plane.perptape as perptape_module
 from trading_control_plane.domain import Direction, DomainRejected
 from trading_control_plane.perptape import (
     PERPTAPE_CANDIDATE_WINDOW,
+    PERPTAPE_DECIMAL_MAX_ADJUSTED_EXPONENT,
+    PERPTAPE_DECIMAL_MAX_CANONICAL_BYTES,
+    PERPTAPE_DECIMAL_MAX_PRECISION,
+    PERPTAPE_DECIMAL_MIN_ADJUSTED_EXPONENT,
+    PERPTAPE_DECIMAL_MIN_TUPLE_EXPONENT,
     PERPTAPE_PAYLOAD_MAX_BYTES,
     PERPTAPE_STRING_FIELD_MAX_BYTES,
     PerptapeCandidate,
@@ -399,6 +404,139 @@ def test_snapshot_identity_is_canonical_for_order_timezone_decimal_and_defaults(
         ),
     )
     assert perptape_snapshot_identity(changed) != perptape_snapshot_identity(feed)
+
+
+@pytest.mark.parametrize(
+    "field",
+    ["generated_at", "fetched_at", "next_allowed_at", "observed_at", "triggered_at"],
+)
+def test_snapshot_rejects_naive_datetime_before_identity_or_sort(field: str) -> None:
+    feed = parsed_feed()
+    naive = NOW.replace(tzinfo=None)
+    if field in {"observed_at", "triggered_at"}:
+        candidate = replace(feed.candidates[0], **{field: naive})
+        invalid = replace(feed, candidates=(candidate, *feed.candidates[1:]))
+    else:
+        invalid = replace(feed, **{field: naive})
+
+    with pytest.raises(DomainRejected, match="PERPTAPE_DATETIME_INVALID"):
+        perptape_snapshot_identity(invalid)
+    with pytest.raises(DomainRejected, match="PERPTAPE_DATETIME_INVALID"):
+        bound_perptape_feed_snapshot(invalid)
+
+
+def test_client_rejects_naive_clock_before_any_remote_request() -> None:
+    calls = 0
+
+    def fetch(_url: str, _headers: dict[str, str], _timeout: float) -> dict[str, object]:
+        nonlocal calls
+        calls += 1
+        return response()
+
+    client = PerptapeClient(
+        base_url="https://perptape.com",
+        api_key="key",
+        contract_version="breakouts-v1",
+        cache_ttl=timedelta(0),
+        fetcher=fetch,
+    )
+
+    with pytest.raises(DomainRejected, match="PERPTAPE_DATETIME_INVALID"):
+        client.refresh(now=NOW.replace(tzinfo=None))
+    assert calls == 0
+
+
+def _feed_with_reference_price(value: Decimal) -> PerptapeFeedSnapshot:
+    feed = parsed_feed()
+    return replace(
+        feed,
+        candidates=(replace(feed.candidates[0], reference_price=value),),
+    )
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        Decimal("1E999999999999999999"),
+        Decimal("1E-999999999999999999"),
+        Decimal("NaN"),
+        Decimal("sNaN"),
+        Decimal("Infinity"),
+        Decimal("-Infinity"),
+        Decimal("-0"),
+    ],
+)
+def test_decimal_extremes_fail_before_canonical_string_expansion(value: Decimal) -> None:
+    with pytest.raises(DomainRejected, match="PERPTAPE_DECIMAL_INVALID"):
+        perptape_snapshot_identity(_feed_with_reference_price(value))
+
+
+@pytest.mark.parametrize("precision_delta", [-1, 0, 1])
+def test_decimal_precision_boundary(precision_delta: int) -> None:
+    precision = PERPTAPE_DECIMAL_MAX_PRECISION + precision_delta
+    integer_digits = PERPTAPE_DECIMAL_MAX_ADJUSTED_EXPONENT + 1
+    fractional_digits = precision - integer_digits
+    value = Decimal((0, (1,) * precision, -fractional_digits))
+
+    if precision_delta <= 0:
+        perptape_snapshot_identity(_feed_with_reference_price(value))
+    else:
+        with pytest.raises(DomainRejected, match="PERPTAPE_DECIMAL_INVALID"):
+            perptape_snapshot_identity(_feed_with_reference_price(value))
+
+
+@pytest.mark.parametrize(
+    ("value", "valid"),
+    [
+        (Decimal(f"1E{PERPTAPE_DECIMAL_MAX_ADJUSTED_EXPONENT - 1}"), True),
+        (Decimal(f"1E{PERPTAPE_DECIMAL_MAX_ADJUSTED_EXPONENT}"), True),
+        (Decimal(f"1E{PERPTAPE_DECIMAL_MAX_ADJUSTED_EXPONENT + 1}"), False),
+        (Decimal(f"1E{PERPTAPE_DECIMAL_MIN_ADJUSTED_EXPONENT + 1}"), True),
+        (Decimal(f"1E{PERPTAPE_DECIMAL_MIN_ADJUSTED_EXPONENT}"), True),
+        (Decimal(f"1E{PERPTAPE_DECIMAL_MIN_ADJUSTED_EXPONENT - 1}"), False),
+    ],
+)
+def test_decimal_adjusted_exponent_boundaries(value: Decimal, valid: bool) -> None:
+    if valid:
+        perptape_snapshot_identity(_feed_with_reference_price(value))
+    else:
+        with pytest.raises(DomainRejected, match="PERPTAPE_DECIMAL_INVALID"):
+            perptape_snapshot_identity(_feed_with_reference_price(value))
+
+
+@pytest.mark.parametrize("canonical_delta", [-1, 0, 1])
+def test_decimal_fixed_expansion_boundary(canonical_delta: int) -> None:
+    precision = 21 + canonical_delta
+    exponent = PERPTAPE_DECIMAL_MIN_TUPLE_EXPONENT - canonical_delta
+    value = Decimal((0, (1,) * precision, exponent))
+    expected_bytes = 2 - exponent
+    assert expected_bytes == PERPTAPE_DECIMAL_MAX_CANONICAL_BYTES + canonical_delta
+
+    if canonical_delta <= 0:
+        perptape_snapshot_identity(_feed_with_reference_price(value))
+    else:
+        with pytest.raises(DomainRejected, match="PERPTAPE_DECIMAL_INVALID"):
+            perptape_snapshot_identity(_feed_with_reference_price(value))
+
+
+def test_http_decimal_raw_byte_ceiling_rejects_before_snapshot_state_changes() -> None:
+    payload = response()
+    data = payload["data"]
+    assert isinstance(data, list)
+    first = data[0]
+    assert isinstance(first, dict)
+    first["price"] = "1" * 129
+    client = PerptapeClient(
+        base_url="https://perptape.com",
+        api_key="key",
+        contract_version="breakouts-v1",
+        cache_ttl=timedelta(0),
+        fetcher=lambda _url, _headers, _timeout: payload,
+    )
+
+    with pytest.raises(DomainRejected, match="PERPTAPE_DECIMAL_INVALID"):
+        client.refresh(now=NOW)
+    assert client.remote_request_state() == (0, 0, 0, 0)
 
 
 def test_candidate_window_selection_is_independent_of_input_order() -> None:

@@ -118,6 +118,7 @@ from trading_control_plane.perptape import (
     apply_perptape_feed_delta,
     bound_perptape_feed_snapshot,
     perptape_snapshot_identity,
+    validate_perptape_datetime,
     validate_perptape_feed_payload,
 )
 
@@ -522,6 +523,7 @@ class TradingService:
         now: datetime,
         base_snapshot: PerptapeFeedSnapshot | None,
     ) -> int:
+        validate_perptape_datetime(now)
         feed = bound_perptape_feed_snapshot(feed)
         if base_snapshot is not None:
             base_snapshot = bound_perptape_feed_snapshot(base_snapshot)

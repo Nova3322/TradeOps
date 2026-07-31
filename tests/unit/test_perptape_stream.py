@@ -145,7 +145,11 @@ class CurrentSnapshotStore(SnapshotStore):
         self.write_count += 1
 
 
-class PayloadRejectingStore(SnapshotStore):
+class FatalInputRejectingStore(SnapshotStore):
+    def __init__(self, error_code: str) -> None:
+        super().__init__()
+        self.error_code = error_code
+
     def record(
         self,
         feed: PerptapeFeedSnapshot,
@@ -154,8 +158,8 @@ class PayloadRejectingStore(SnapshotStore):
     ) -> None:
         if self.current is not None:
             raise DomainRejected(
-                "PERPTAPE_PAYLOAD_TOO_LARGE",
-                "candidate payload exceeds test ceiling",
+                self.error_code,
+                "candidate input exceeds test contract",
             )
         super().record(feed, now, _base_snapshot)
 
@@ -1731,7 +1735,17 @@ def test_oversized_event_id_stops_without_reconnect_backfill_or_degraded_write()
     assert all(candidate.readiness == "READY" for candidate in store.writes[0].candidates)
 
 
-def test_payload_ceiling_failure_stops_without_retry_or_followup_side_effects() -> None:
+@pytest.mark.parametrize(
+    "error_code",
+    [
+        "PERPTAPE_PAYLOAD_TOO_LARGE",
+        "PERPTAPE_DATETIME_INVALID",
+        "PERPTAPE_DECIMAL_INVALID",
+    ],
+)
+def test_fatal_input_failure_stops_without_retry_or_followup_side_effects(
+    error_code: str,
+) -> None:
     stop = RecordingStopEvent()
     connector = RecordingConnector(
         [
@@ -1752,7 +1766,7 @@ def test_payload_ceiling_failure_stops_without_retry_or_followup_side_effects() 
             )
         ]
     )
-    store = PayloadRejectingStore()
+    store = FatalInputRejectingStore(error_code)
     stream, https_calls = worker(
         responses=[response(candidate_payload())],
         connector=connector,
@@ -1761,7 +1775,7 @@ def test_payload_ceiling_failure_stops_without_retry_or_followup_side_effects() 
 
     stream.run_forever(stop)
 
-    assert stream.fatal_error_code == "PERPTAPE_PAYLOAD_TOO_LARGE"
+    assert stream.fatal_error_code == error_code
     assert stop.stopped is True
     assert stop.waits == []
     assert len(connector.calls) == 1
@@ -1769,6 +1783,78 @@ def test_payload_ceiling_failure_stops_without_retry_or_followup_side_effects() 
     assert len(store.writes) == 1
     assert stream.stats.alerts_applied == 0
     assert store.current == store.writes[0]
+
+
+@pytest.mark.parametrize(
+    "price",
+    ["1E999999999999999999", "1E-999999999999999999"],
+)
+def test_extreme_decimal_alert_preserves_error_code_and_has_zero_followup_writes(
+    price: str,
+) -> None:
+    stop = RecordingStopEvent()
+    extreme_alert = complete_alert(
+        "extreme-decimal",
+        "ETHUSDT",
+        NOW + timedelta(seconds=1),
+    )
+    extreme_alert["p"] = price
+    connector = RecordingConnector(
+        [
+            FakeSocket(
+                [
+                    message("hello", sequence=1, event_time=NOW),
+                    message(
+                        "alert",
+                        sequence=2,
+                        event_time=NOW + timedelta(seconds=1),
+                        payload=extreme_alert,
+                    ),
+                ]
+            )
+        ]
+    )
+    store = SnapshotStore()
+    stream, https_calls = worker(
+        responses=[response(candidate_payload())],
+        connector=connector,
+        store=store,
+    )
+
+    stream.run_forever(stop)
+
+    assert stream.fatal_error_code == "PERPTAPE_DECIMAL_INVALID"
+    assert stop.stopped is True
+    assert stop.waits == []
+    assert len(https_calls) == 1
+    assert len(connector.calls) == 1
+    assert len(store.writes) == 1
+    assert stream.stats.degraded_writes == 0
+    assert stream.stats.https_backfills == 0
+    assert stream.stats.alerts_applied == 0
+
+
+def test_naive_worker_clock_stops_before_fetch_connect_or_snapshot_side_effects() -> None:
+    stop = RecordingStopEvent()
+    connector = RecordingConnector([])
+    store = SnapshotStore()
+    stream, https_calls = worker(
+        responses=[],
+        connector=connector,
+        store=store,
+        clock=lambda: NOW.replace(tzinfo=None),
+    )
+
+    stream.run_forever(stop)
+
+    assert stream.fatal_error_code == "PERPTAPE_DATETIME_INVALID"
+    assert stop.stopped is True
+    assert stop.waits == []
+    assert https_calls == []
+    assert connector.calls == []
+    assert store.writes == []
+    assert stream.stats.degraded_writes == 0
+    assert stream.stats.https_backfills == 0
 
 
 def test_pre_stopped_worker_does_not_fetch_or_connect() -> None:

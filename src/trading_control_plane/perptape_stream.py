@@ -24,12 +24,15 @@ from trading_control_plane.perptape import (
     bound_perptape_feed_snapshot,
     merge_incomplete_perptape_candidates,
     perptape_event_key,
+    validate_perptape_datetime,
     validate_perptape_websocket_url,
 )
 
 logger = logging.getLogger(__name__)
 PERPTAPE_STREAM_WINDOW = PERPTAPE_CANDIDATE_WINDOW
-PERPTAPE_OVERSIZE_ERROR_CODES = {
+PERPTAPE_FATAL_INPUT_ERROR_CODES = {
+    "PERPTAPE_DATETIME_INVALID",
+    "PERPTAPE_DECIMAL_INVALID",
     "PERPTAPE_FIELD_TOO_LARGE",
     "PERPTAPE_PAYLOAD_TOO_LARGE",
 }
@@ -167,6 +170,11 @@ class PerptapeStreamWorker:
             return now
         return current.fetched_at + timedelta(microseconds=1)
 
+    def _now(self) -> datetime:
+        now = self._clock()
+        validate_perptape_datetime(now)
+        return now
+
     def _record(
         self,
         feed: PerptapeFeedSnapshot,
@@ -299,7 +307,7 @@ class PerptapeStreamWorker:
         )
 
     def _reconcile(self, *, backfill: bool) -> PerptapeFeedSnapshot:
-        now = self._clock()
+        now = self._now()
         self._sync_remote_request_state()
         if self.fatal_error_code == "PERPTAPE_RATE_LIMITED":
             raise DomainRejected(
@@ -349,7 +357,7 @@ class PerptapeStreamWorker:
         )
         if candidates_already_degraded and effective_next_allowed_at == current.next_allowed_at:
             return
-        fetched_at = self._safe_record_time(self._clock(), current)
+        fetched_at = self._safe_record_time(self._now(), current)
         degraded = tuple(
             replace(
                 candidate,
@@ -371,7 +379,7 @@ class PerptapeStreamWorker:
         self.stats.degraded_writes += 1
 
     def _try_backfill(self) -> bool:
-        now = self._clock()
+        now = self._now()
         success_generation = self._sync_remote_request_state()
         current = self._load_snapshot()
         had_pending_targets = bool(self._pending_completion_targets)
@@ -398,7 +406,7 @@ class PerptapeStreamWorker:
         try:
             feed = self._reconcile(backfill=True)
         except DomainRejected as exc:
-            if exc.code in PERPTAPE_OVERSIZE_ERROR_CODES:
+            if exc.code in PERPTAPE_FATAL_INPUT_ERROR_CODES:
                 self.fatal_error_code = exc.code
                 raise
             current = self._load_snapshot()
@@ -424,14 +432,14 @@ class PerptapeStreamWorker:
         delay = self._reconciliation_interval_seconds
         current = self._load_snapshot()
         if current is not None:
-            server_delay = (current.next_allowed_at - self._clock()).total_seconds()
+            server_delay = (current.next_allowed_at - self._now()).total_seconds()
             delay = max(delay, server_delay)
         return max(0, delay)
 
     def _stop_for_fatal_error(self, stop_event: StopEvent) -> bool:
         if self.fatal_error_code is None:
             return False
-        if self.fatal_error_code not in PERPTAPE_OVERSIZE_ERROR_CODES:
+        if self.fatal_error_code not in PERPTAPE_FATAL_INPUT_ERROR_CODES:
             self._mark_degraded()
         logger.error(
             "Perptape WebSocket stopped after bounded failures",
@@ -495,7 +503,7 @@ class PerptapeStreamWorker:
                 "PERPTAPE_STREAM_MESSAGE_INVALID",
                 "Perptape WebSocket ordering metadata is invalid",
             ) from exc
-        if (sequence is not None and sequence < 0) or server_time > self._clock() + timedelta(
+        if (sequence is not None and sequence < 0) or server_time > self._now() + timedelta(
             seconds=30
         ):
             raise DomainRejected(
@@ -653,7 +661,7 @@ class PerptapeStreamWorker:
         if needs_completion and not existing_is_complete:
             candidate = replace(candidate, data_health="DEGRADED", readiness="INCOMPLETE")
         current = self._load_snapshot()
-        now = self._clock()
+        now = self._now()
         fetched_at = self._safe_record_time(now, current)
         candidates = {
             perptape_event_key(item): item
@@ -745,7 +753,7 @@ class PerptapeStreamWorker:
                     )
                 current_time = self._monotonic()
                 if self._completion_pending and (
-                    self._backfill_not_before is None or self._clock() >= self._backfill_not_before
+                    self._backfill_not_before is None or self._now() >= self._backfill_not_before
                 ):
                     self._try_backfill()
                     if stop_event.is_set():
@@ -754,7 +762,7 @@ class PerptapeStreamWorker:
                     try:
                         self._reconcile(backfill=False)
                     except DomainRejected as exc:
-                        if exc.code in PERPTAPE_OVERSIZE_ERROR_CODES:
+                        if exc.code in PERPTAPE_FATAL_INPUT_ERROR_CODES:
                             self.fatal_error_code = exc.code
                             raise
                         self._mark_degraded()
@@ -847,7 +855,7 @@ class PerptapeStreamWorker:
                             self.fatal_error_code,
                             "Perptape unresolved alert window could not be restored",
                         )
-                    if current is None or self._clock() >= current.next_allowed_at:
+                    if current is None or self._now() >= current.next_allowed_at:
                         self._reconcile(backfill=False)
                     else:
                         self._backfill_not_before = current.next_allowed_at
@@ -865,10 +873,10 @@ class PerptapeStreamWorker:
                 error_code = "PERPTAPE_STREAM_UNAVAILABLE"
             if stop_event.is_set():
                 return
-            if error_code in PERPTAPE_OVERSIZE_ERROR_CODES:
+            if error_code in PERPTAPE_FATAL_INPUT_ERROR_CODES:
                 self.fatal_error_code = error_code
                 logger.error(
-                    "Perptape WebSocket stopped after an oversized external payload",
+                    "Perptape WebSocket stopped after an invalid external payload",
                     extra={
                         "event": "perptape_stream_stopped",
                         "component": "perptape",
@@ -880,8 +888,8 @@ class PerptapeStreamWorker:
             if self._stop_for_fatal_error(stop_event):
                 return
             if error_code == "PERPTAPE_RATE_LIMITED":
-                if retry_not_before is not None and self._clock() < retry_not_before:
-                    delay = (retry_not_before - self._clock()).total_seconds()
+                if retry_not_before is not None and self._now() < retry_not_before:
+                    delay = (retry_not_before - self._now()).total_seconds()
                 else:
                     rate_limit_attempts = max(
                         self._transport_consecutive_rate_limits,
@@ -936,8 +944,8 @@ class PerptapeStreamWorker:
                 )
                 stop_event.set()
                 return
-            if retry_not_before is not None and self._clock() < retry_not_before:
-                delay = (retry_not_before - self._clock()).total_seconds()
+            if retry_not_before is not None and self._now() < retry_not_before:
+                delay = (retry_not_before - self._now()).total_seconds()
             else:
                 delay = min(
                     self._reconnect_initial_seconds * (2 ** (attempts - 1)),

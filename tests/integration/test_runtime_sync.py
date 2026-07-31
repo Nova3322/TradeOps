@@ -522,6 +522,79 @@ def test_three_way_delete_tombstone_wins_over_unchanged_stale_snapshot(
     ]
 
 
+@pytest.mark.parametrize("delete_first", [True, False])
+@pytest.mark.parametrize(
+    ("case", "expected_present"),
+    [
+        ("NEWER", True),
+        ("OLDER", False),
+        ("SAME", False),
+        ("READY_COMPLETION", True),
+    ],
+)
+def test_three_way_delete_conflict_preserves_only_provably_newer_or_healthier_fact(
+    database: Database,
+    delete_first: bool,
+    case: str,
+    expected_present: bool,
+) -> None:
+    service, queries, actor, client = perptape_test_service(
+        database,
+        f"delete-conflict-{case}-{delete_first}",
+    )
+    base_candidate = perptape_candidate(
+        client,
+        symbol="CONFLICTUSDT",
+        triggered_at=NOW,
+        observed_at=NOW,
+        price=100,
+    )
+    if case == "READY_COMPLETION":
+        base_candidate = replace(
+            base_candidate,
+            data_health="DEGRADED",
+            readiness="INCOMPLETE",
+        )
+        upsert_candidate = replace(
+            base_candidate,
+            data_health="CURRENT",
+            readiness="READY",
+        )
+    elif case == "NEWER":
+        upsert_candidate = replace(
+            base_candidate,
+            observed_at=NOW + timedelta(seconds=1),
+            reference_price=Decimal(110),
+        )
+    elif case == "OLDER":
+        upsert_candidate = replace(
+            base_candidate,
+            observed_at=NOW - timedelta(seconds=1),
+            reference_price=Decimal(90),
+        )
+    else:
+        assert case == "SAME"
+        upsert_candidate = base_candidate
+    base = perptape_feed(base_candidate, fetched_at=NOW)
+    deletion = perptape_feed(fetched_at=NOW + timedelta(seconds=2))
+    upsert = perptape_feed(upsert_candidate, fetched_at=NOW + timedelta(seconds=2))
+    service.record_perptape_feed(actor, base, now=NOW, base_snapshot=None)
+    writes = (deletion, upsert) if delete_first else (upsert, deletion)
+    for desired in writes:
+        service.record_perptape_feed(
+            actor,
+            desired,
+            now=NOW + timedelta(seconds=10),
+            base_snapshot=base,
+        )
+
+    persisted = queries.perptape_feed()
+    assert persisted is not None
+    assert bool(persisted.candidates) is expected_present
+    if expected_present:
+        assert persisted.candidates == (upsert_candidate,)
+
+
 @pytest.mark.parametrize("cooldown_first", [True, False])
 def test_three_way_metadata_does_not_restore_stale_next_allowed_at(
     database: Database,
@@ -787,6 +860,67 @@ def test_postgres_rejects_oversized_payload_before_replacing_authoritative_feed(
     persisted = queries.perptape_feed()
     assert persisted is not None
     assert perptape_snapshot_identity(persisted) == perptape_snapshot_identity(original)
+
+
+@pytest.mark.parametrize("field", ["generated_at", "fetched_at", "next_allowed_at"])
+def test_postgres_first_write_rejects_naive_metadata_without_creating_feed(
+    database: Database,
+    field: str,
+) -> None:
+    service, queries, actor, client = perptape_test_service(
+        database,
+        f"naive-metadata-{field}",
+    )
+    feed = perptape_feed(
+        perptape_candidate(
+            client,
+            symbol="NAIVEUSDT",
+            triggered_at=NOW,
+            observed_at=NOW,
+        ),
+        fetched_at=NOW,
+    )
+    invalid = replace(feed, **{field: getattr(feed, field).replace(tzinfo=None)})
+
+    with pytest.raises(DomainRejected, match="PERPTAPE_DATETIME_INVALID"):
+        service.record_perptape_feed(
+            actor,
+            invalid,
+            now=NOW,
+            base_snapshot=None,
+        )
+    assert queries.perptape_feed() is None
+
+
+def test_postgres_rejects_decimal_extremes_without_creating_feed(
+    database: Database,
+) -> None:
+    service, queries, actor, client = perptape_test_service(database, "decimal-extremes")
+    candidate = perptape_candidate(
+        client,
+        symbol="DECIMALUSDT",
+        triggered_at=NOW,
+        observed_at=NOW,
+    )
+    for value in (
+        Decimal("1E999999999999999999"),
+        Decimal("1E-999999999999999999"),
+        Decimal("NaN"),
+        Decimal("Infinity"),
+        Decimal("-0"),
+    ):
+        invalid = perptape_feed(
+            replace(candidate, reference_price=value),
+            fetched_at=NOW,
+        )
+        with pytest.raises(DomainRejected, match="PERPTAPE_DECIMAL_INVALID"):
+            service.record_perptape_feed(
+                actor,
+                invalid,
+                now=NOW,
+                base_snapshot=None,
+            )
+        assert queries.perptape_feed() is None
 
 
 def test_runtime_worker_refreshes_perptape_two_venues_and_vault_without_sending(
