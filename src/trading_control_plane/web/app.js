@@ -155,27 +155,35 @@ function openMobileNav() {
   if (!session || !matchMedia('(max-width: 980px)').matches) return;
   sidebar.classList.add('open');
   sidebar.inert = false;
+  sidebar.setAttribute('aria-hidden', 'false');
   navBackdrop.hidden = false;
   mobileNavToggle.setAttribute('aria-expanded', 'true');
   document.body.classList.add('nav-open');
   main.inert = true;
-  sidebar.querySelector('a.active, a')?.focus();
+  setTimeout(() => {
+    if (sidebar.classList.contains('open') && !sidebar.inert) {
+      sidebar.querySelector('nav a')?.focus();
+    }
+  }, 24);
 }
 
 function closeMobileNav({restoreFocus = true} = {}) {
+  const mobile = matchMedia('(max-width: 980px)').matches;
   sidebar.classList.remove('open');
   navBackdrop.hidden = true;
   mobileNavToggle.setAttribute('aria-expanded', 'false');
   document.body.classList.remove('nav-open');
   main.inert = false;
-  sidebar.inert = matchMedia('(max-width: 980px)').matches;
+  sidebar.inert = sidebar.hidden || mobile;
+  sidebar.setAttribute('aria-hidden', String(sidebar.hidden || mobile));
   if (restoreFocus && !mobileNavToggle.hidden) mobileNavToggle.focus();
 }
 
 function syncNavigationMode() {
   if (matchMedia('(max-width: 980px)').matches) closeMobileNav({restoreFocus:false});
   else {
-    sidebar.inert = false;
+    sidebar.inert = sidebar.hidden;
+    sidebar.setAttribute('aria-hidden', String(sidebar.hidden));
     navBackdrop.hidden = true;
     main.inert = false;
     document.body.classList.remove('nav-open');
@@ -863,6 +871,12 @@ document.addEventListener('click', (event) => {
 window.addEventListener('popstate', route);
 window.addEventListener('resize', syncNavigationMode);
 mobileNavToggle.addEventListener('click', () => sidebar.classList.contains('open') ? closeMobileNav() : openMobileNav());
+mobileNavToggle.addEventListener('keydown', (event) => {
+  if (!['Enter', ' '].includes(event.key)) return;
+  event.preventDefault();
+  if (sidebar.classList.contains('open')) closeMobileNav();
+  else openMobileNav();
+});
 navBackdrop.addEventListener('click', () => closeMobileNav());
 document.addEventListener('keydown', (event) => {
   if (event.key === 'Escape' && sidebar.classList.contains('open')) closeMobileNav();

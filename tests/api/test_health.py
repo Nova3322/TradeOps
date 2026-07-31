@@ -133,6 +133,14 @@ def test_web_request_lifecycle_in_node() -> None:
           "async function withPending",
           "\nfunction formNumber",
         );
+        const navigationSource = extract(
+          "function openMobileNav",
+          "\nfunction bindLinkedRows",
+        );
+        const navigationInteractionSource = extract(
+          "mobileNavToggle.addEventListener('keydown'",
+          "\nnavBackdrop.addEventListener",
+        );
         const unauthorizedSource = extract(
           "function handleUnauthorizedResponse",
           "\nfunction showApiError",
@@ -304,6 +312,129 @@ def test_web_request_lifecycle_in_node() -> None:
         assert.equal(attributes.has("aria-busy"), false);
         assert.equal(button.textContent, "刷新 PnL");
 
+        const sidebarClasses = new Set();
+        const bodyClasses = new Set();
+        const sidebarAttributes = new Map();
+        const toggleAttributes = new Map([["aria-expanded", "false"]]);
+        const timerCallbacks = [];
+        const toggleListeners = new Map();
+        let activeElement = null;
+        const firstNavigationLink = {
+          focus() { activeElement = firstNavigationLink; },
+        };
+        const toggle = {
+          hidden: false,
+          addEventListener(name, listener) { toggleListeners.set(name, listener); },
+          focus() { activeElement = toggle; },
+          setAttribute(name, value) { toggleAttributes.set(name, value); },
+        };
+        const navigationContext = vm.createContext({
+          document: {
+            body: {
+              classList: {
+                add(name) { bodyClasses.add(name); },
+                remove(name) { bodyClasses.delete(name); },
+              },
+            },
+          },
+          main: { inert: false },
+          matchMedia: () => ({ matches: true }),
+          mobileNavToggle: toggle,
+          navBackdrop: { hidden: true },
+          setTimeout(callback, delay) {
+            assert.equal(delay, 24);
+            timerCallbacks.push(callback);
+            return timerCallbacks.length;
+          },
+          session: { username: "operator" },
+          sidebar: {
+            hidden: false,
+            inert: true,
+            classList: {
+              add(name) { sidebarClasses.add(name); },
+              contains(name) { return sidebarClasses.has(name); },
+              remove(name) { sidebarClasses.delete(name); },
+            },
+            querySelector(selector) {
+              assert.equal(selector, "nav a");
+              return firstNavigationLink;
+            },
+            setAttribute(name, value) { sidebarAttributes.set(name, value); },
+          },
+        });
+        vm.runInContext(navigationSource, navigationContext);
+        vm.runInContext(navigationInteractionSource, navigationContext);
+
+        navigationContext.openMobileNav();
+        assert.equal(activeElement, null);
+        assert.equal(sidebarClasses.has("open"), true);
+        assert.equal(navigationContext.sidebar.inert, false);
+        assert.equal(sidebarAttributes.get("aria-hidden"), "false");
+        assert.equal(toggleAttributes.get("aria-expanded"), "true");
+        assert.equal(bodyClasses.has("nav-open"), true);
+        assert.equal(navigationContext.main.inert, true);
+        toggle.focus();
+        assert.equal(activeElement, toggle);
+        timerCallbacks.shift()();
+        assert.equal(activeElement, firstNavigationLink);
+
+        navigationContext.closeMobileNav();
+        assert.equal(activeElement, toggle);
+        assert.equal(sidebarClasses.has("open"), false);
+        assert.equal(navigationContext.sidebar.inert, true);
+        assert.equal(sidebarAttributes.get("aria-hidden"), "true");
+        assert.equal(toggleAttributes.get("aria-expanded"), "false");
+        assert.equal(bodyClasses.has("nav-open"), false);
+        assert.equal(navigationContext.main.inert, false);
+
+        navigationContext.openMobileNav();
+        navigationContext.closeMobileNav();
+        timerCallbacks.shift()();
+        assert.equal(activeElement, toggle);
+
+        navigationContext.openMobileNav();
+        navigationContext.closeMobileNav();
+        navigationContext.openMobileNav();
+        while (timerCallbacks.length) timerCallbacks.shift()();
+        assert.equal(activeElement, firstNavigationLink);
+        assert.equal(sidebarClasses.has("open"), true);
+
+        navigationContext.closeMobileNav();
+        let prevented = false;
+        toggleListeners.get("keydown")({
+          key: "Enter",
+          preventDefault() { prevented = true; },
+        });
+        assert.equal(prevented, true);
+        while (timerCallbacks.length) timerCallbacks.shift()();
+        assert.equal(activeElement, firstNavigationLink);
+        const navigationFocusStable = activeElement === firstNavigationLink;
+        navigationContext.closeMobileNav();
+
+        prevented = false;
+        toggleListeners.get("keydown")({
+          key: " ",
+          preventDefault() { prevented = true; },
+        });
+        assert.equal(prevented, true);
+        while (timerCallbacks.length) timerCallbacks.shift()();
+        assert.equal(activeElement, firstNavigationLink);
+        navigationContext.closeMobileNav();
+
+        prevented = false;
+        toggleListeners.get("keydown")({
+          key: "Tab",
+          preventDefault() { prevented = true; },
+        });
+        assert.equal(prevented, false);
+        assert.equal(sidebarClasses.has("open"), false);
+
+        navigationContext.matchMedia = () => ({ matches: false });
+        navigationContext.syncNavigationMode();
+        assert.equal(navigationContext.sidebar.inert, false);
+        assert.equal(sidebarAttributes.get("aria-hidden"), "false");
+        assert.equal(navigationContext.main.inert, false);
+
         console.log(JSON.stringify({
           configuredDelay,
           duplicateCalls: actionCalls,
@@ -312,6 +443,7 @@ def test_web_request_lifecycle_in_node() -> None:
             login: lifecycle.login,
             shell: lifecycle.shell,
           },
+          navigationFocusStable,
           pendingRestored: !button.disabled,
         }));
         """
@@ -327,6 +459,7 @@ def test_web_request_lifecycle_in_node() -> None:
         "configuredDelay": 15000,
         "duplicateCalls": 1,
         "lifecycle": {"enhance": 1, "login": 1, "shell": 1},
+        "navigationFocusStable": True,
         "pendingRestored": True,
     }
 
