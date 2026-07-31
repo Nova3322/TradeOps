@@ -162,7 +162,9 @@ def test_http_429_updates_cooldown_and_blocks_followup_requests(
         client.refresh(now=NOW + timedelta(minutes=3), force=True)
 
     assert limited.value.next_allowed_at == next_allowed_at
+    assert limited.value.is_remote is True
     assert locally_limited.value.next_allowed_at == next_allowed_at
+    assert locally_limited.value.is_remote is False
     assert calls == 2
 
 

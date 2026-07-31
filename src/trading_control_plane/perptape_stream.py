@@ -134,6 +134,7 @@ class PerptapeStreamWorker:
         self._connection_healthy = False
         self._backfill_not_before: datetime | None = None
         self._completion_pending = False
+        self._consecutive_remote_rate_limits = 0
         self.fatal_error_code: str | None = None
         self.stats = PerptapeStreamStats()
 
@@ -154,6 +155,10 @@ class PerptapeStreamWorker:
         try:
             feed = self._client.refresh(now=now, force=backfill)
         except PerptapeRateLimited as exc:
+            if exc.is_remote:
+                self._consecutive_remote_rate_limits += 1
+                if self._consecutive_remote_rate_limits >= self._max_reconnect_attempts:
+                    self.fatal_error_code = exc.code
             self._mark_degraded(next_allowed_at=exc.next_allowed_at)
             raise
         fetched_at = self._safe_record_time(feed.fetched_at, current)
@@ -163,6 +168,7 @@ class PerptapeStreamWorker:
         self.stats.https_reconciliations += 1
         if backfill:
             self.stats.https_backfills += 1
+        self._consecutive_remote_rate_limits = 0
         return feed
 
     def _mark_degraded(self, *, next_allowed_at: datetime | None = None) -> None:
@@ -219,6 +225,8 @@ class PerptapeStreamWorker:
             self._backfill_not_before = retry_at
             self._completion_pending = True
             self._mark_degraded()
+            if self.fatal_error_code == "PERPTAPE_RATE_LIMITED":
+                raise
             return False
         self._backfill_not_before = max(now, feed.next_allowed_at)
         self._completion_pending = False
@@ -231,6 +239,22 @@ class PerptapeStreamWorker:
             server_delay = (current.next_allowed_at - self._clock()).total_seconds()
             delay = max(delay, server_delay)
         return max(0, delay)
+
+    def _stop_for_fatal_error(self, stop_event: StopEvent) -> bool:
+        if self.fatal_error_code is None:
+            return False
+        self._mark_degraded()
+        logger.error(
+            "Perptape WebSocket stopped after bounded failures",
+            extra={
+                "event": "perptape_stream_stopped",
+                "component": "perptape",
+                "error_code": self.fatal_error_code,
+                "attempt": self._consecutive_remote_rate_limits,
+            },
+        )
+        stop_event.set()
+        return True
 
     def _parse_message(self, raw_message: str | bytes) -> StreamEnvelope:
         try:
@@ -506,6 +530,8 @@ class PerptapeStreamWorker:
                         self._reconcile(backfill=False)
                     except DomainRejected:
                         self._mark_degraded()
+                        if self.fatal_error_code == "PERPTAPE_RATE_LIMITED":
+                            raise
                     reconcile_at = current_time + self._reconciliation_delay()
                     if stop_event.is_set():
                         return
@@ -599,8 +625,40 @@ class PerptapeStreamWorker:
                 error_code = "PERPTAPE_STREAM_UNAVAILABLE"
             if stop_event.is_set():
                 return
+            if self._stop_for_fatal_error(stop_event):
+                return
+            if error_code == "PERPTAPE_RATE_LIMITED":
+                if retry_not_before is not None and self._clock() < retry_not_before:
+                    delay = (retry_not_before - self._clock()).total_seconds()
+                else:
+                    rate_limit_attempts = max(
+                        self._consecutive_remote_rate_limits,
+                        1,
+                    )
+                    delay = min(
+                        self._reconnect_initial_seconds * (2 ** (rate_limit_attempts - 1)),
+                        self._reconnect_max_seconds,
+                    )
+                logger.warning(
+                    "Perptape WebSocket reconnect scheduled",
+                    extra={
+                        "event": "perptape_stream_reconnect_scheduled",
+                        "component": "perptape",
+                        "error_code": error_code,
+                        "attempt": self._consecutive_remote_rate_limits,
+                        "delay_seconds": delay,
+                    },
+                )
+                if stop_event.wait(delay):
+                    return
+                continue
             if startup_complete:
-                self._try_backfill()
+                try:
+                    self._try_backfill()
+                except DomainRejected:
+                    if self._stop_for_fatal_error(stop_event):
+                        return
+                    raise
             else:
                 self._mark_degraded()
             attempts = 1 if self._connection_healthy else attempts + 1

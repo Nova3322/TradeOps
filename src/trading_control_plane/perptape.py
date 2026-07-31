@@ -167,8 +167,14 @@ JsonFetcher = Callable[[str, dict[str, str], float], dict[str, Any]]
 
 
 class PerptapeRateLimited(DomainRejected):
-    def __init__(self, next_allowed_at: datetime | None = None) -> None:
+    def __init__(
+        self,
+        next_allowed_at: datetime | None = None,
+        *,
+        is_remote: bool = False,
+    ) -> None:
         self.next_allowed_at = next_allowed_at
+        self.is_remote = is_remote
         super().__init__(
             "PERPTAPE_RATE_LIMITED",
             "Perptape breakout request is rate limited",
@@ -209,7 +215,10 @@ def _default_fetcher(url: str, headers: dict[str, str], timeout: float) -> dict[
                 rate_limit_body = exc.read()
             except (AttributeError, OSError):
                 rate_limit_body = b""
-            raise PerptapeRateLimited(_parse_rate_limit_deadline(rate_limit_body)) from exc
+            raise PerptapeRateLimited(
+                _parse_rate_limit_deadline(rate_limit_body),
+                is_remote=True,
+            ) from exc
         code = {
             401: "PERPTAPE_AUTH_FAILED",
             403: "PERPTAPE_PLAN_DENIED",

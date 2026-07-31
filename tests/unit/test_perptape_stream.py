@@ -73,6 +73,26 @@ def message(
     return json.dumps(value)
 
 
+def short_alert(
+    alert_id: str,
+    symbol: str,
+    event_time: datetime,
+) -> dict[str, Any]:
+    return {
+        "id": alert_id,
+        "ex": "BN",
+        "s": symbol,
+        "dir": "HH",
+        "p": 4_000,
+        "tf": "1h",
+        "t": int(event_time.timestamp() * 1_000),
+        "u": int(event_time.timestamp() * 1_000),
+        "kr": {"status": "ready"},
+        "vq24": 20_000,
+        "oi": 10_000,
+    }
+
+
 class SnapshotStore:
     def __init__(self) -> None:
         self.current: PerptapeFeedSnapshot | None = None
@@ -761,7 +781,12 @@ def test_startup_429_waits_for_server_window_and_stop_interrupts_wait() -> None:
     connector = RecordingConnector([])
     store = SnapshotStore()
     stream, https_calls = worker(
-        responses=[PerptapeRateLimited(NOW + timedelta(minutes=2))],
+        responses=[
+            PerptapeRateLimited(
+                NOW + timedelta(minutes=2),
+                is_remote=True,
+            )
+        ],
         connector=connector,
         store=store,
     )
@@ -772,6 +797,248 @@ def test_startup_429_waits_for_server_window_and_stop_interrupts_wait() -> None:
     assert stop.waits == [120]
     assert connector.calls == []
     assert stream.fatal_error_code is None
+
+
+def test_startup_real_429_stops_at_the_shared_attempt_limit() -> None:
+    clock_value = NOW
+
+    class AdvancingStopEvent(RecordingStopEvent):
+        def wait(self, timeout: float) -> bool:
+            nonlocal clock_value
+            self.waits.append(timeout)
+            clock_value += timedelta(seconds=timeout)
+            return False
+
+    stop = AdvancingStopEvent()
+    connector = RecordingConnector([])
+    store = SnapshotStore()
+    stream, https_calls = worker(
+        responses=[
+            PerptapeRateLimited(
+                NOW + timedelta(seconds=1),
+                is_remote=True,
+            ),
+            PerptapeRateLimited(
+                NOW + timedelta(seconds=2),
+                is_remote=True,
+            ),
+        ],
+        connector=connector,
+        store=store,
+        clock=lambda: clock_value,
+        max_reconnect_attempts=2,
+    )
+
+    stream.run_forever(stop)
+
+    assert len(https_calls) == 2
+    assert stop.waits == [1]
+    assert stop.stopped is True
+    assert connector.calls == []
+    assert stream.fatal_error_code == "PERPTAPE_RATE_LIMITED"
+
+
+def test_healthy_stream_real_429_stops_after_two_network_responses() -> None:
+    stop = threading.Event()
+    clock_value = NOW + timedelta(seconds=1)
+    event_time = clock_value
+    real_429_calls = 0
+
+    def remote_rate_limit(deadline: datetime) -> Callable[[], dict[str, Any]]:
+        def fail() -> dict[str, Any]:
+            nonlocal real_429_calls
+            real_429_calls += 1
+            raise PerptapeRateLimited(deadline, is_remote=True)
+
+        return fail
+
+    def advance_to_second_window() -> str:
+        nonlocal clock_value
+        clock_value = NOW + timedelta(seconds=11)
+        raise TimeoutError
+
+    socket = FakeSocket(
+        [
+            message("hello", sequence=1, event_time=NOW),
+            message(
+                "alert",
+                sequence=2,
+                event_time=event_time,
+                payload=short_alert("alert-rate-1", "ETHUSDT", event_time),
+            ),
+            message(
+                "heartbeat",
+                sequence=3,
+                event_time=NOW + timedelta(seconds=2),
+            ),
+            advance_to_second_window,
+        ]
+    )
+    connector = RecordingConnector([socket])
+    store = SnapshotStore()
+    stream, https_calls = worker(
+        responses=[
+            response(),
+            remote_rate_limit(NOW + timedelta(seconds=10)),
+            remote_rate_limit(NOW + timedelta(seconds=20)),
+        ],
+        connector=connector,
+        store=store,
+        clock=lambda: clock_value,
+        cache_ttl_seconds=0,
+        max_reconnect_attempts=2,
+    )
+
+    stream.run_forever(stop)
+
+    assert len(https_calls) == 3
+    assert real_429_calls == 2
+    assert stream.fatal_error_code == "PERPTAPE_RATE_LIMITED"
+    assert stop.is_set() is True
+    assert store.current is not None
+    assert all(candidate.readiness != "READY" for candidate in store.current.candidates)
+
+
+def test_local_cooldown_does_not_call_https_or_consume_attempts() -> None:
+    stop = threading.Event()
+    event_time = NOW + timedelta(seconds=1)
+
+    def stop_receiving() -> str:
+        stop.set()
+        raise TimeoutError
+
+    socket = FakeSocket(
+        [
+            message("hello", sequence=1, event_time=NOW),
+            message(
+                "alert",
+                sequence=2,
+                event_time=event_time,
+                payload=short_alert("alert-local-window", "ETHUSDT", event_time),
+            ),
+            message(
+                "heartbeat",
+                sequence=4,
+                event_time=event_time + timedelta(seconds=1),
+            ),
+            stop_receiving,
+        ]
+    )
+    connector = RecordingConnector([socket])
+    store = SnapshotStore()
+    store.current = PerptapeFeedSnapshot(
+        contract_version="breakouts-v1",
+        generated_at=NOW,
+        fetched_at=NOW,
+        next_allowed_at=NOW + timedelta(minutes=2),
+        candidates=(),
+    )
+    stream, https_calls = worker(
+        responses=[],
+        connector=connector,
+        store=store,
+        clock=lambda: event_time,
+        max_reconnect_attempts=2,
+    )
+
+    stream.run_forever(stop)
+
+    assert https_calls == []
+    assert stream._consecutive_remote_rate_limits == 0
+    assert stream.fatal_error_code is None
+    assert store.current is not None
+    assert all(candidate.readiness != "READY" for candidate in store.current.candidates)
+
+
+def test_successful_backfill_resets_rate_limit_series_before_new_failures() -> None:
+    stop = threading.Event()
+    clock_value = NOW + timedelta(seconds=1)
+    first_event_time = clock_value
+    second_event_time = NOW + timedelta(seconds=12)
+    real_429_calls = 0
+
+    def remote_rate_limit(deadline: datetime) -> Callable[[], dict[str, Any]]:
+        def fail() -> dict[str, Any]:
+            nonlocal real_429_calls
+            real_429_calls += 1
+            raise PerptapeRateLimited(deadline, is_remote=True)
+
+        return fail
+
+    completed = candidate_payload(
+        triggered_at=first_event_time,
+        updated_at=first_event_time,
+        symbol="ETHUSDT",
+    )
+    completed["canonicalSymbol"] = "ETH"
+
+    def advance_to_success_window() -> str:
+        nonlocal clock_value
+        clock_value = NOW + timedelta(seconds=11)
+        raise TimeoutError
+
+    def advance_to_final_window() -> str:
+        nonlocal clock_value
+        clock_value = NOW + timedelta(seconds=21)
+        raise TimeoutError
+
+    socket = FakeSocket(
+        [
+            message("hello", sequence=1, event_time=NOW),
+            message(
+                "alert",
+                sequence=2,
+                event_time=first_event_time,
+                payload=short_alert(
+                    "alert-reset-1",
+                    "ETHUSDT",
+                    first_event_time,
+                ),
+            ),
+            advance_to_success_window,
+            message(
+                "alert",
+                sequence=3,
+                event_time=second_event_time,
+                payload=short_alert(
+                    "alert-reset-2",
+                    "SOLUSDT",
+                    second_event_time,
+                ),
+            ),
+            message(
+                "heartbeat",
+                sequence=4,
+                event_time=second_event_time + timedelta(seconds=1),
+            ),
+            advance_to_final_window,
+        ]
+    )
+    connector = RecordingConnector([socket])
+    store = SnapshotStore()
+    stream, https_calls = worker(
+        responses=[
+            response(),
+            remote_rate_limit(NOW + timedelta(seconds=10)),
+            response(completed, generated_at=first_event_time),
+            remote_rate_limit(NOW + timedelta(seconds=20)),
+            remote_rate_limit(NOW + timedelta(seconds=30)),
+        ],
+        connector=connector,
+        store=store,
+        clock=lambda: clock_value,
+        cache_ttl_seconds=0,
+        max_reconnect_attempts=2,
+    )
+
+    stream.run_forever(stop)
+
+    assert len(https_calls) == 5
+    assert real_429_calls == 3
+    assert stream.stats.https_backfills == 1
+    assert stream._consecutive_remote_rate_limits == 2
+    assert stream.fatal_error_code == "PERPTAPE_RATE_LIMITED"
+    assert stop.is_set() is True
 
 
 def test_invalid_messages_stop_after_bounded_failures_and_never_log_secret(
