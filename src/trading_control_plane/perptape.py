@@ -35,6 +35,9 @@ class PerptapeCandidate:
     data_health: str
     readiness: str
     detail_url: str
+    quote_volume: Decimal | None = None
+    open_interest: Decimal | None = None
+    chart_url: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         value = asdict(self)
@@ -43,7 +46,76 @@ class PerptapeCandidate:
         value["triggered_at"] = None if self.triggered_at is None else self.triggered_at.isoformat()
         value["reference_price"] = str(self.reference_price)
         value["threshold"] = None if self.threshold is None else str(self.threshold)
+        value["quote_volume"] = None if self.quote_volume is None else str(self.quote_volume)
+        value["open_interest"] = None if self.open_interest is None else str(self.open_interest)
         return value
+
+    @classmethod
+    def from_dict(cls, value: dict[str, Any]) -> PerptapeCandidate:
+        try:
+            triggered_at = value.get("triggered_at")
+            threshold = value.get("threshold")
+            candidate = cls(
+                candidate_id=str(value["candidate_id"]),
+                source=str(value["source"]),
+                source_contract_version=str(value["source_contract_version"]),
+                venue=str(value["venue"]),
+                source_exchange=str(value["source_exchange"]),
+                symbol=str(value["symbol"]),
+                canonical_symbol=str(value["canonical_symbol"]),
+                direction=Direction(str(value["direction"])),
+                source_direction=str(value["source_direction"]),
+                timeframe=str(value["timeframe"]),
+                observed_at=datetime.fromisoformat(str(value["observed_at"])),
+                triggered_at=(
+                    None if triggered_at is None else datetime.fromisoformat(str(triggered_at))
+                ),
+                reference_price=Decimal(str(value["reference_price"])),
+                threshold=None if threshold is None else Decimal(str(threshold)),
+                rationale=str(value["rationale"]),
+                data_health=str(value["data_health"]),
+                readiness=str(value["readiness"]),
+                detail_url=str(value["detail_url"]),
+                quote_volume=(
+                    None
+                    if value.get("quote_volume") is None
+                    else Decimal(str(value["quote_volume"]))
+                ),
+                open_interest=(
+                    None
+                    if value.get("open_interest") is None
+                    else Decimal(str(value["open_interest"]))
+                ),
+                chart_url=str(value.get("chart_url", "")),
+            )
+        except (InvalidOperation, KeyError, TypeError, ValueError) as exc:
+            raise DomainRejected(
+                "PERPTAPE_CACHE_INVALID",
+                "persisted Perptape candidate is invalid",
+            ) from exc
+        if (
+            candidate.source != "PERPTAPE"
+            or candidate.venue not in {"BINANCE", "HYPERLIQUID"}
+            or candidate.source_direction not in {"HH", "LL"}
+            or candidate.direction
+            is not (Direction.LONG if candidate.source_direction == "HH" else Direction.SHORT)
+            or candidate.reference_price <= 0
+            or candidate.observed_at.tzinfo is None
+        ):
+            raise DomainRejected(
+                "PERPTAPE_CACHE_INVALID",
+                "persisted Perptape candidate is outside the supported contract",
+            )
+        return candidate
+
+
+@dataclass(frozen=True)
+class PerptapeFeedSnapshot:
+    contract_version: str
+    generated_at: datetime
+    fetched_at: datetime
+    next_allowed_at: datetime
+    candidates: tuple[PerptapeCandidate, ...]
 
 
 JsonFetcher = Callable[[str, dict[str, str], float], dict[str, Any]]
@@ -87,23 +159,33 @@ class PerptapeClient:
         api_key: str | None,
         contract_version: str,
         cache_ttl: timedelta,
+        timeout_seconds: float = 15,
         fetcher: JsonFetcher = _default_fetcher,
     ) -> None:
         self._base_url = base_url.rstrip("/")
         self._api_key = api_key
         self._contract_version = contract_version
         self._cache_ttl = cache_ttl
+        self._timeout_seconds = timeout_seconds
         self._fetcher = fetcher
         self._lock = threading.Lock()
         self._cached_at: datetime | None = None
         self._cached: tuple[PerptapeCandidate, ...] = ()
+        self._feed: PerptapeFeedSnapshot | None = None
 
     def list_candidates(self, *, now: datetime) -> list[PerptapeCandidate]:
+        return list(self.refresh(now=now).candidates)
+
+    def refresh(self, *, now: datetime) -> PerptapeFeedSnapshot:
         if self._api_key is None:
             raise DomainRejected("PERPTAPE_NOT_CONFIGURED", "Perptape API key is not configured")
         with self._lock:
-            if self._cached_at is not None and now - self._cached_at < self._cache_ttl:
-                return list(self._cached)
+            if (
+                self._feed is not None
+                and self._cached_at is not None
+                and now < self._feed.next_allowed_at
+            ):
+                return self._feed
             query = urllib.parse.urlencode(
                 {
                     "tf": "1h,4h,1d,1w",
@@ -120,18 +202,48 @@ class PerptapeClient:
                     "x-api-key": self._api_key,
                     "user-agent": "trading-control-plane/1.0",
                 },
-                5.0,
+                self._timeout_seconds,
             )
             candidates = self._parse_response(value)
+            generated_at, next_allowed_at = self._parse_feed_times(value, now=now)
             self._cached_at = now
             self._cached = tuple(candidates)
-            return candidates
+            self._feed = PerptapeFeedSnapshot(
+                contract_version=self._contract_version,
+                generated_at=generated_at,
+                fetched_at=now,
+                next_allowed_at=max(now + self._cache_ttl, next_allowed_at),
+                candidates=self._cached,
+            )
+            return self._feed
 
     def get_candidate(self, candidate_id: str, *, now: datetime) -> PerptapeCandidate:
         for candidate in self.list_candidates(now=now):
             if candidate.candidate_id == candidate_id:
                 return candidate
         raise DomainRejected("PERPTAPE_CANDIDATE_NOT_FOUND", "candidate is no longer available")
+
+    @staticmethod
+    def _parse_feed_times(value: dict[str, Any], *, now: datetime) -> tuple[datetime, datetime]:
+        try:
+            generated_at = datetime.fromtimestamp(int(value["generatedAt"]) / 1000, UTC)
+            rate_limit = value.get("rateLimit")
+            next_allowed_at = (
+                datetime.fromtimestamp(int(rate_limit["nextAllowedAt"]) / 1000, UTC)
+                if isinstance(rate_limit, dict) and rate_limit.get("nextAllowedAt") is not None
+                else now
+            )
+        except (KeyError, OSError, OverflowError, TypeError, ValueError) as exc:
+            raise DomainRejected(
+                "PERPTAPE_RESPONSE_INVALID",
+                "Perptape feed timing metadata is invalid",
+            ) from exc
+        if generated_at > now + timedelta(seconds=30) or next_allowed_at < generated_at:
+            raise DomainRejected(
+                "PERPTAPE_RESPONSE_INVALID",
+                "Perptape feed timing metadata is inconsistent",
+            )
+        return generated_at, next_allowed_at
 
     def _parse_response(self, value: dict[str, Any]) -> list[PerptapeCandidate]:
         if value.get("type") != "breakouts" or not isinstance(value.get("data"), list):
@@ -182,6 +294,24 @@ class PerptapeClient:
             )
             threshold_raw = raw.get("threshold")
             threshold = None if threshold_raw is None else Decimal(str(threshold_raw))
+            volume_raw = next(
+                (
+                    raw[key]
+                    for key in ("quoteVolume", "volume24h", "volume")
+                    if raw.get(key) is not None
+                ),
+                None,
+            )
+            open_interest_raw = next(
+                (
+                    raw[key]
+                    for key in ("openInterest", "openInterestUsd", "oi")
+                    if raw.get(key) is not None
+                ),
+                None,
+            )
+            quote_volume = None if volume_raw is None else Decimal(str(volume_raw))
+            open_interest = None if open_interest_raw is None else Decimal(str(open_interest_raw))
         except (OSError, OverflowError, InvalidOperation, ValueError) as exc:
             raise DomainRejected(
                 "PERPTAPE_RESPONSE_INVALID", "Perptape candidate contains invalid facts"
@@ -208,5 +338,24 @@ class PerptapeClient:
             rationale=f"Perptape {source_direction} breakout on {timeframe}",
             data_health="CURRENT" if readiness == "ready" else "DEGRADED",
             readiness=readiness.upper(),
-            detail_url=f"{self._base_url}/breakouts?ex={urllib.parse.quote(exchange)}",
+            detail_url=(
+                f"{self._base_url}/breakouts?"
+                + urllib.parse.urlencode(
+                    {
+                        "ex": exchange,
+                        "q": f"{exchange}:{canonical_symbol}:{symbol}",
+                        "utm_source": "trading_console",
+                        "utm_medium": "opportunity",
+                        "utm_campaign": "breakout_symbol",
+                        "lang": "zh-CN",
+                    }
+                )
+            ),
+            quote_volume=quote_volume,
+            open_interest=open_interest,
+            chart_url=(
+                f"https://www.binance.com/zh-CN/futures/{urllib.parse.quote(symbol)}"
+                if venue == "BINANCE"
+                else "https://app.hyperliquid.xyz/trade/" + urllib.parse.quote(canonical_symbol)
+            ),
         )

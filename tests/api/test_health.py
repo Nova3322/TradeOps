@@ -80,7 +80,7 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
 
     assert response.status_code == 200
     assert "Trading Console" in response.text
-    assert "/assets/app.js?v=10" in response.text
+    assert "/assets/app.js?v=11" in response.text
 
     app_javascript = get(app, "/assets/app.js")
     assert app_javascript.status_code == 200

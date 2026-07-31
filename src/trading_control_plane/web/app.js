@@ -6,11 +6,13 @@ const toast = document.querySelector('#toast');
 let session = null;
 let authStatus = null;
 let instruments = [];
+let opportunities = [];
 
 const escapeHtml = (value) => String(value ?? '').replace(/[&<>'"]/g, (char) => ({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[char]));
 const shortId = (value) => value ? `${value.slice(0, 8)}…` : '—';
 const fmtDate = (value) => value ? new Intl.DateTimeFormat('zh-CN', {month:'short', day:'numeric', hour:'2-digit', minute:'2-digit'}).format(new Date(value)) : '—';
 const fmtNumber = (value) => value === null || value === undefined ? '—' : new Intl.NumberFormat('en-US', {maximumFractionDigits: 6}).format(Number(value));
+const fmtCompact = (value) => value === null || value === undefined ? '暂无数据' : new Intl.NumberFormat('zh-CN', {notation:'compact', maximumFractionDigits:1}).format(Number(value));
 const roleNames = () => (session?.roles || []).map((item) => item.role);
 const loginDestination = () => {
   const destination = `${location.pathname}${location.search}`;
@@ -116,31 +118,86 @@ function renderLogin() {
 
 async function renderOpportunities() {
   const result = await api('/api/opportunities');
-  const items = result.data;
+  opportunities = result.data;
+  const items = opportunities;
+  const options = (key) => [...new Set(items.map(item => item[key]).filter(Boolean))].sort().map(value => `<option value="${escapeHtml(value)}">${escapeHtml(value)}</option>`).join('');
   main.innerHTML = `<section class="page"><header class="page-head"><div><p class="eyebrow">PERPTAPE · ${escapeHtml(result.source_contract_version)}</p><h1>当前机会</h1><p class="lede">这里只展示 Perptape 实际返回的突破候选。数据健康、方向和时间保留来源语义；交易数量与风险由 Trading 独立决定。</p></div><div class="toolbar"><button class="secondary" data-refresh>刷新事实</button></div></header>
     <div class="stats"><div class="stat"><small>当前候选</small><b>${items.length}</b></div><div class="stat"><small>可冻结</small><b>${items.filter(i => i.readiness === 'READY').length}</b></div><div class="stat"><small>数据截止</small><b style="font-size:14px">${fmtDate(result.as_of)}</b></div><div class="stat"><small>执行环境</small><b style="font-size:14px">SHADOW</b></div></div>
-    ${items.length ? `<div class="card-grid">${items.map(opportunityCard).join('')}</div>` : '<section class="empty-state"><div><h2>Perptape 当前没有返回候选</h2><p>这不是零风险或无行情，只表示当前接口数据为空。</p></div></section>'}
+    ${items.length ? `<form id="opportunity-filters" class="filter-panel"><label>交易所<select name="venue"><option value="">全部</option>${options('venue')}</select></label><label>币对<input name="symbol" type="search" placeholder="例如 BTC、XYZ100"></label><label>共振周期<select name="timeframe"><option value="">全部周期</option>${options('timeframe')}</select></label><label>方向<select name="direction"><option value="">全部</option><option>LONG</option><option>SHORT</option></select></label><label>最低成交量<input name="volume" type="number" min="0" placeholder="不限"></label><label>最低持仓量<input name="open_interest" type="number" min="0" placeholder="不限"></label><button type="reset" class="text-button">清除筛选</button></form><div class="result-summary"><span>显示 <b data-filter-count>${items.length}</b> / ${items.length} 个机会</span><span>成交量与持仓量缺失时不会通过数值筛选</span></div><div id="opportunity-grid" class="card-grid">${items.map(opportunityCard).join('')}</div><section id="opportunity-empty" class="empty-state compact-empty" hidden><div><h2>没有符合条件的机会</h2><p>尝试降低成交量/持仓量门槛，或清除部分筛选。</p></div></section>` : '<section class="empty-state"><div><h2>Perptape 当前没有返回候选</h2><p>这不是零风险或无行情，只表示当前接口数据为空。</p></div></section>'}
   </section>`;
   document.querySelector('[data-refresh]')?.addEventListener('click', route);
-  document.querySelectorAll('[data-create-system]').forEach((button) => button.addEventListener('click', () => openSystemDialog(button.dataset.createSystem)));
+  bindOpportunityActions();
 }
 
 function opportunityCard(item) {
   const directionClass = item.direction === 'LONG' ? 'direction-long' : 'direction-short';
-  return `<article class="card"><div class="card-top"><div><span class="subtle">${escapeHtml(item.venue)} · ${escapeHtml(item.timeframe)}</span><div class="symbol">${escapeHtml(item.symbol)}</div></div><span class="tag ${directionClass}">${escapeHtml(item.direction)}</span></div>
+  return `<article class="card" data-opportunity-card="${escapeHtml(item.candidate_id)}"><div class="card-top"><div><span class="subtle">${escapeHtml(item.venue)} · ${escapeHtml(item.timeframe)}</span><div class="symbol">${escapeHtml(item.symbol)}</div></div><span class="tag ${directionClass}">${escapeHtml(item.direction)}</span></div>
     <div class="metric-row"><div><small>参考价格</small><b>${fmtNumber(item.reference_price)}</b></div><div><small>触发时间</small><b>${fmtDate(item.triggered_at)}</b></div><div><small>数据状态</small><b>${escapeHtml(item.readiness)}</b></div></div>
-    <p class="subtle">${escapeHtml(item.rationale)}</p><div class="card-actions"><a class="text-button" href="${escapeHtml(item.detail_url)}" target="_blank" rel="noreferrer">Perptape 详情 ↗</a><button class="primary" data-create-system="${escapeHtml(item.candidate_id)}" ${item.readiness !== 'READY' ? 'disabled' : ''}>创建提案</button></div></article>`;
+    <div class="market-facts"><span>成交量 <b>${fmtCompact(item.quote_volume)}</b></span><span>持仓量 <b>${fmtCompact(item.open_interest)}</b></span></div>
+    <p class="subtle">${escapeHtml(item.rationale)}</p><div class="link-row"><a class="text-button" href="${escapeHtml(item.detail_url)}" target="_blank" rel="noreferrer">Perptape 榜单 ↗</a><a class="text-button" href="${escapeHtml(item.chart_url)}" target="_blank" rel="noreferrer">交易所图表 ↗</a></div><div class="card-actions proposal-actions"><button class="secondary" data-advanced-system="${escapeHtml(item.candidate_id)}" ${item.readiness !== 'READY' ? 'disabled' : ''}>高级配置</button><button class="primary" data-create-system="${escapeHtml(item.candidate_id)}" ${item.readiness !== 'READY' ? 'disabled' : ''}>一键创建</button></div></article>`;
 }
 
 function openSystemDialog(candidateId) {
   const form = document.querySelector('#system-proposal-form');
+  const item = opportunities.find(candidate => candidate.candidate_id === candidateId);
   form.reset();
   form.elements.candidate_id.value = candidateId;
   form.elements.account_id.value = 'acct-1';
+  const price = Number(item?.reference_price || 1);
+  form.elements.quantity.value = Math.max(0.000001, 100 / price).toPrecision(6);
+  form.elements.max_risk.value = '1';
+  form.elements.invalidation_price.value = (price * (item?.direction === 'SHORT' ? 1.02 : 0.98)).toPrecision(8);
   form.elements.expires_in_minutes.value = '120';
-  form.elements.rationale.value = 'Perptape 候选进入人工审核，尚未形成任何订单。';
+  form.elements.rationale.value = '使用默认风险配置创建 Perptape 候选提案，尚未形成任何订单。';
   document.querySelector('#system-form-error').textContent = '';
   dialog.showModal();
+}
+
+function defaultSystemPayload(item) {
+  const price = Number(item.reference_price);
+  return {
+    account_id:'acct-1', risk_tier:'MEDIUM',
+    quantity:Math.max(0.000001, 100 / price).toPrecision(6),
+    initial_quantity:null, max_risk:'1',
+    invalidation_price:(price * (item.direction === 'SHORT' ? 1.02 : 0.98)).toPrecision(8),
+    allow_auto_add:false, requested_adds:0, add_trigger_price:null,
+    expires_in_minutes:120,
+    rationale:'使用默认风险配置创建 Perptape 候选提案，尚未形成任何订单。'
+  };
+}
+
+function bindOpportunityActions() {
+  document.querySelectorAll('[data-advanced-system]').forEach(button => button.addEventListener('click', () => openSystemDialog(button.dataset.advancedSystem)));
+  document.querySelectorAll('[data-create-system]').forEach(button => button.addEventListener('click', async () => {
+    const item = opportunities.find(candidate => candidate.candidate_id === button.dataset.createSystem);
+    if (!item) return;
+    button.disabled = true; button.textContent = '创建中…';
+    try {
+      const result = await api(`/api/opportunities/${item.candidate_id}/proposals`, {method:'POST', body:JSON.stringify(defaultSystemPayload(item))});
+      showToast(`${item.symbol} 提案已按默认配置创建`);
+      navigate(`/proposals/${result.proposal_id}`);
+    } catch (error) { showToast(`${error.code}: ${error.message}`); button.disabled = false; button.textContent = '一键创建'; }
+  }));
+  const filters = document.querySelector('#opportunity-filters');
+  if (!filters) return;
+  const applyFilters = () => {
+    const values = Object.fromEntries(new FormData(filters));
+    let visible = 0;
+    opportunities.forEach(item => {
+      const match = (!values.venue || item.venue === values.venue)
+        && (!values.symbol || `${item.symbol} ${item.canonical_symbol}`.toLowerCase().includes(values.symbol.toLowerCase().trim()))
+        && (!values.timeframe || item.timeframe === values.timeframe)
+        && (!values.direction || item.direction === values.direction)
+        && (!values.volume || (item.quote_volume !== null && Number(item.quote_volume) >= Number(values.volume)))
+        && (!values.open_interest || (item.open_interest !== null && Number(item.open_interest) >= Number(values.open_interest)));
+      document.querySelector(`[data-opportunity-card="${CSS.escape(item.candidate_id)}"]`).hidden = !match;
+      if (match) visible += 1;
+    });
+    document.querySelector('[data-filter-count]').textContent = visible;
+    document.querySelector('#opportunity-empty').hidden = visible !== 0;
+  };
+  filters.addEventListener('input', applyFilters);
+  filters.addEventListener('reset', () => requestAnimationFrame(applyFilters));
 }
 
 async function renderManualProposal() {
@@ -305,6 +362,8 @@ async function renderCapitalCenter() {
   const automation = item.automation || {gates:{}, policies:[]};
   const netWorth = item.net_worth || {currency:'USD', venues:{}, vault:'0', total:'0', complete:false, issues:[]};
   const venueNetWorth = Object.entries(netWorth.venues).map(([venue, value]) => `<div class="stat"><small>${escapeHtml(venue)} 净值</small><b>${fmtNumber(value)} ${escapeHtml(netWorth.currency)}</b></div>`).join('');
+  const chartBalances = item.balances.filter(balance => balance.usd_equity !== null).sort((a, b) => new Date(a.observed_at) - new Date(b.observed_at));
+  const chartLegend = chartBalances.map((balance, index) => `<span><i style="--legend-index:${index}"></i>${escapeHtml(balance.location_type === 'VAULT' ? 'VAULT' : balance.venue)} <b>${fmtCompact(balance.usd_equity)} USD</b></span>`).join('');
   const balanceRows = item.balances.map(balance => `<tr><td>${escapeHtml(balance.location_type)}<br><span class="subtle">${escapeHtml(balance.location_id)}</span></td><td>${escapeHtml(balance.environment)} · ${escapeHtml(balance.venue)}</td><td>${fmtNumber(balance.confirmed_available)} ${escapeHtml(balance.asset)}</td><td>${balance.usd_equity === null ? 'UNKNOWN' : `${fmtNumber(balance.usd_equity)} USD`}</td><td>${fmtNumber(balance.source_reserved)}</td><td><b>${fmtNumber(balance.effective_available)}</b></td><td>${escapeHtml(balance.control_status)} / ${escapeHtml(balance.deposit_status)}</td><td>${fmtDate(balance.observed_at)}</td></tr>`).join('');
   const proposalRows = item.proposals.map(proposal => {
     const actions = [];
@@ -329,8 +388,39 @@ async function renderCapitalCenter() {
   const treasuryForms = canTreasury ? `<div class="detail-layout"><form id="capital-proposal-form" class="form-panel compact-form"><h2>人工资金 Proposal</h2><p class="safety-note">独立于交易 Proposal；LIVE 只生成持久化 NoTilt 未签名计划，仍需独立钱包逐笔确认。</p><div class="field-grid"><label>环境<select name="environment"><option>TESTNET</option><option>SHADOW</option><option>LIVE</option></select></label><label>方向<select name="direction"><option>VAULT_TO_VENUE</option><option>VENUE_TO_VAULT</option></select></label><label>交易账户<input name="account_id" value="acct-1" required></label><label>场所<input name="venue" value="BINANCE" required></label><label>Vault ID<input name="vault_id" value="vault-1" required></label><label>资产<input name="asset" value="USDT" required></label><label>网络<input name="network" value="TESTNET" required></label><label>目的端引用<input name="destination_reference" value="approved-test-destination" required></label><label>Gross 金额<input name="amount" type="number" step="any" min="0" required></label><label>最大费用<input name="max_fee" type="number" step="any" min="0" value="1" required></label><label>最小到账<input name="min_received" type="number" step="any" min="0" required></label><label>有效分钟<input name="expires_in_minutes" type="number" min="5" value="120" required></label></div><label>理由<textarea name="reason" rows="2" required>manual capital allocation</textarea></label><button class="primary">创建草稿</button></form><form id="capital-fact-form" class="form-panel compact-form"><h2>Mock 只读资金事实</h2><p class="safety-note">只写入 TESTNET/SHADOW 观测，不连接 Vault、链或交易所，不移动资金。</p><div class="field-grid"><label>位置<select name="location_type"><option>VAULT</option><option>VENUE</option></select></label><label>位置 ID<input name="location_id" value="vault-1" required></label><label>场所<input name="venue" value="BINANCE" required></label><label>资产<input name="asset" value="USDT" required></label><label>权益<input name="equity" type="number" step="any" required></label><label>已确认可用<input name="available_balance" type="number" step="any" required></label><label>可划出<input name="withdrawable_balance" type="number" step="any" required></label><label>网络<input name="network" value="TESTNET"></label><label>控制状态<select name="control_status"><option>CONTROLLED</option><option>READ_ONLY</option><option>UNKNOWN</option></select></label><label>充值状态<select name="deposit_status"><option>READY</option><option>PENDING</option><option>UNKNOWN</option></select></label></div><button class="secondary">记录 Mock 事实</button></form></div>` : '';
   const policyRows = automation.policies.map(policy => `<tr><td>${escapeHtml(policy.environment)} · ${escapeHtml(policy.account_id)} / ${escapeHtml(policy.venue)}<br><span class="subtle">${escapeHtml(policy.asset)} · v${policy.version}</span></td><td>${fmtNumber(policy.operating_low)} / <b>${fmtNumber(policy.operating_target)}</b> / ${fmtNumber(policy.operating_high)}</td><td>${fmtNumber(policy.vault_minimum_reserve)} / ${fmtNumber(policy.minimum_transfer)}–${fmtNumber(policy.maximum_transfer)}</td><td><div class="toolbar"><button class="secondary" data-cap-scope-reconcile="${policy.policy_id}" data-environment="${policy.environment}" data-account="${escapeHtml(policy.account_id)}" data-venue="${escapeHtml(policy.venue)}">空仓对账</button><button class="secondary" data-cap-auto="${policy.policy_id}" data-purpose="AUTO_PROFIT_SWEEP" ${automation.gates.AUTO_PROFIT_SWEEP !== 'ENABLED' ? 'disabled' : ''}>评估利润归集</button><button class="secondary" data-cap-auto="${policy.policy_id}" data-purpose="AUTO_OPERATING_REFILL" ${automation.gates.AUTO_OPERATING_REFILL !== 'ENABLED' ? 'disabled' : ''}>评估运营补充</button></div></td></tr>`).join('');
   const automationPanel = `<section><h2>自动资金候选</h2><p class="safety-note">利润归集与运营补充使用独立 Gate，当前只生成需双人复核和独立授权的候选 Proposal，不自动提交资金。浮盈、活动仓位、订单、Unknown 或非 MATCH 均阻断。</p><div class="stats"><div class="stat"><small>AUTO_PROFIT_SWEEP</small><b style="font-size:14px">${escapeHtml(automation.gates.AUTO_PROFIT_SWEEP || 'MISSING')}</b></div><div class="stat"><small>AUTO_OPERATING_REFILL</small><b style="font-size:14px">${escapeHtml(automation.gates.AUTO_OPERATING_REFILL || 'MISSING')}</b></div></div>${canTreasury ? `<form id="capital-policy-form" class="form-panel compact-form"><h3>SHADOW / TESTNET 运营阈值</h3><div class="field-grid"><label>环境<select name="environment"><option>TESTNET</option><option>SHADOW</option></select></label><label>交易账户<input name="account_id" value="acct-1" required></label><label>场所<input name="venue" value="BINANCE" required></label><label>Vault ID<input name="vault_id" value="vault-1" required></label><label>资产<input name="asset" value="USDT" required></label><label>网络<input name="network" value="TESTNET" required></label><label>Vault 目的端引用<input name="vault_destination_reference" value="approved-test-vault" required></label><label>场所目的端引用<input name="venue_destination_reference" value="approved-test-venue" required></label><label>运营下沿<input name="operating_low" type="number" step="any" value="400" required></label><label>运营目标<input name="operating_target" type="number" step="any" value="500" required></label><label>运营上沿<input name="operating_high" type="number" step="any" value="600" required></label><label>Vault 最低储备<input name="vault_minimum_reserve" type="number" step="any" value="500" required></label><label>最小划转<input name="minimum_transfer" type="number" step="any" value="10" required></label><label>最大划转<input name="maximum_transfer" type="number" step="any" value="200" required></label><label>最大费用<input name="max_fee" type="number" step="any" value="1" required></label></div><button class="secondary">保存非生产策略</button></form>` : ''}${policyRows ? `<div class="table-wrap"><table><thead><tr><th>作用域</th><th>下沿 / 目标 / 上沿</th><th>Vault 储备 / 划转限额</th><th>动作</th></tr></thead><tbody>${policyRows}</tbody></table></div>` : '<div class="callout">尚无资金自动化策略；两个 Gate 默认关闭。</div>'}</section>`;
-  main.innerHTML = `<section class="page"><header class="page-head"><div><p class="eyebrow">CAPITAL AUTHORITY · FAIL CLOSED</p><h1>资金中心</h1><p class="lede">Binance、Hyperliquid 与 NoTilt Vault 使用已确认事实合并计算 USD 净值；任何未知或过期估值都会将净值标记为不完整。Telegram 只通知，不能批准或执行资金动作。</p></div></header><div class="stats"><div class="stat"><small>总净值</small><b>${fmtNumber(netWorth.total)} ${escapeHtml(netWorth.currency)}</b></div><div class="stat"><small>Vault 净值</small><b>${fmtNumber(netWorth.vault)} ${escapeHtml(netWorth.currency)}</b></div>${venueNetWorth}<div class="stat"><small>净值状态</small><b style="font-size:14px">${netWorth.complete ? 'CURRENT' : 'INCOMPLETE'}</b></div><div class="stat"><small>真实划转 Gate</small><b style="font-size:14px">${escapeHtml(item.real_transfer_gate || 'DISABLED')}</b></div><div class="stat"><small>在途 / 占用</small><b>${fmtNumber(item.in_transit)}</b></div></div>${netWorth.complete ? '' : `<div class="callout"><b>净值不完整：</b>${escapeHtml((netWorth.issues || []).join(', ') || '尚无资金事实')}</div>`}${treasuryForms}${automationPanel}<section><h2>确认资本、USD 估值与源端预留</h2>${balanceRows ? `<div class="table-wrap"><table><thead><tr><th>位置</th><th>环境 / 场所</th><th>已确认可用</th><th>USD 净值</th><th>源端预留</th><th>有效可用</th><th>控制 / 充值</th><th>观测</th></tr></thead><tbody>${balanceRows}</tbody></table></div>` : '<div class="callout">尚无 Vault 或交易所资金事实。</div>'}</section><section><h2>资金 Proposal</h2>${proposalRows ? `<div class="table-wrap"><table><thead><tr><th>Proposal</th><th>方向 / 用途</th><th>路径</th><th>金额</th><th>状态</th><th>动作</th></tr></thead><tbody>${proposalRows}</tbody></table></div>` : '<div class="callout">尚无资金 Proposal。</div>'}</section><section><h2>Capital Transfer</h2>${transferRows ? `<div class="table-wrap"><table><thead><tr><th>Transfer</th><th>方向</th><th>Gross</th><th>状态 / 对账</th><th>外部引用</th><th>动作</th></tr></thead><tbody>${transferRows}</tbody></table></div>` : '<div class="callout">尚无划转状态。</div>'}</section></section>`;
+  main.innerHTML = `<section class="page"><header class="page-head"><div><p class="eyebrow">CAPITAL AUTHORITY · FAIL CLOSED</p><h1>资金中心</h1><p class="lede">Binance、Hyperliquid 与 NoTilt Vault 使用已确认事实合并计算 USD 净值；任何未知或过期估值都会将净值标记为不完整。Telegram 只通知，不能批准或执行资金动作。</p></div></header><div class="stats"><div class="stat"><small>总净值</small><b>${fmtNumber(netWorth.total)} ${escapeHtml(netWorth.currency)}</b></div><div class="stat"><small>Vault 净值</small><b>${fmtNumber(netWorth.vault)} ${escapeHtml(netWorth.currency)}</b></div>${venueNetWorth}<div class="stat"><small>净值状态</small><b style="font-size:14px">${netWorth.complete ? 'CURRENT' : 'INCOMPLETE'}</b></div><div class="stat"><small>真实划转 Gate</small><b style="font-size:14px">${escapeHtml(item.real_transfer_gate || 'DISABLED')}</b></div><div class="stat"><small>在途 / 占用</small><b>${fmtNumber(item.in_transit)}</b></div></div><section class="capital-chart-panel"><div class="chart-head"><div><p class="eyebrow">CAPITAL SNAPSHOT</p><h2>资金构成曲线</h2><p class="subtle">按各资金位置最新有效 USD 估值累计，帮助快速识别资金集中度；这是当前快照，不冒充历史净值。</p></div><b>${fmtNumber(netWorth.total)} <small>${escapeHtml(netWorth.currency)}</small></b></div>${chartBalances.length ? `<canvas id="capital-chart" height="210" aria-label="当前资金构成累计曲线"></canvas><div class="chart-legend">${chartLegend}</div>` : '<div class="chart-empty">有效资金估值就绪后将在这里显示曲线</div>'}</section>${netWorth.complete ? '' : `<div class="callout"><b>净值不完整：</b>${escapeHtml((netWorth.issues || []).join(', ') || '尚无资金事实')}</div>`}${treasuryForms}${automationPanel}<section><h2>确认资本、USD 估值与源端预留</h2>${balanceRows ? `<div class="table-wrap"><table><thead><tr><th>位置</th><th>环境 / 场所</th><th>已确认可用</th><th>USD 净值</th><th>源端预留</th><th>有效可用</th><th>控制 / 充值</th><th>观测</th></tr></thead><tbody>${balanceRows}</tbody></table></div>` : '<div class="callout">尚无 Vault 或交易所资金事实。</div>'}</section><section><h2>资金 Proposal</h2>${proposalRows ? `<div class="table-wrap"><table><thead><tr><th>Proposal</th><th>方向 / 用途</th><th>路径</th><th>金额</th><th>状态</th><th>动作</th></tr></thead><tbody>${proposalRows}</tbody></table></div>` : '<div class="callout">尚无资金 Proposal。</div>'}</section><section><h2>Capital Transfer</h2>${transferRows ? `<div class="table-wrap"><table><thead><tr><th>Transfer</th><th>方向</th><th>Gross</th><th>状态 / 对账</th><th>外部引用</th><th>动作</th></tr></thead><tbody>${transferRows}</tbody></table></div>` : '<div class="callout">尚无划转状态。</div>'}</section></section>`;
+  drawCapitalChart(chartBalances);
   bindCapitalActions();
+}
+
+function drawCapitalChart(balances) {
+  const canvas = document.querySelector('#capital-chart');
+  if (!canvas || !balances.length) return;
+  const ratio = window.devicePixelRatio || 1;
+  const width = canvas.clientWidth;
+  const height = 210;
+  canvas.width = width * ratio; canvas.height = height * ratio;
+  const context = canvas.getContext('2d'); context.scale(ratio, ratio);
+  const styles = getComputedStyle(document.documentElement);
+  const accent = styles.getPropertyValue('--accent').trim();
+  const line = styles.getPropertyValue('--line').trim();
+  const panel = styles.getPropertyValue('--panel').trim();
+  const values = []; let cumulative = 0;
+  balances.forEach(balance => { cumulative += Number(balance.usd_equity); values.push(cumulative); });
+  if (values.length === 1) values.unshift(0);
+  const max = Math.max(...values, 1);
+  const left = 8, right = width - 8, top = 16, bottom = height - 24;
+  context.strokeStyle = line; context.lineWidth = 1;
+  for (let index = 0; index < 4; index += 1) {
+    const y = top + ((bottom - top) * index / 3);
+    context.beginPath(); context.moveTo(left, y); context.lineTo(right, y); context.stroke();
+  }
+  const points = values.map((value, index) => ({x:left + ((right - left) * index / Math.max(1, values.length - 1)), y:bottom - ((bottom - top) * value / max)}));
+  context.beginPath(); context.moveTo(points[0].x, bottom); points.forEach(point => context.lineTo(point.x, point.y)); context.lineTo(points.at(-1).x, bottom); context.closePath();
+  context.fillStyle = `${accent}1f`; context.fill();
+  context.beginPath(); points.forEach((point, index) => index ? context.lineTo(point.x, point.y) : context.moveTo(point.x, point.y));
+  context.strokeStyle = accent; context.lineWidth = 3; context.lineJoin = 'round'; context.lineCap = 'round'; context.stroke();
+  points.slice(1).forEach(point => { context.beginPath(); context.arc(point.x, point.y, 4, 0, Math.PI * 2); context.fillStyle = panel; context.fill(); context.strokeStyle = accent; context.lineWidth = 2; context.stroke(); });
 }
 
 function bindCapitalActions() {
