@@ -111,6 +111,17 @@ class RuntimeSyncWorker:
         self.clock = clock
         self.service = TradingService(database)
         self.queries = TradingQueries(database)
+        self._perptape_stream_thread: threading.Thread | None = None
+
+    @property
+    def dependencies_in_use(self) -> bool:
+        thread = getattr(self, "_perptape_stream_thread", None)
+        return thread is not None and thread.is_alive()
+
+    def _perptape_stop_timeout_seconds(self) -> float:
+        transport_timeout = self.settings.perptape_timeout_seconds
+        close_timeout = min(transport_timeout, 5)
+        return transport_timeout + close_timeout + 2
 
     def _require_scope_match(self, scope: str, actor_id: UUID, now: datetime) -> None:
         reconciliation_id = self.service.reconcile_scope(scope, actor_id, now=now)
@@ -324,6 +335,7 @@ class RuntimeSyncWorker:
                 args=(stop_event,),
                 name="perptape-stream",
             )
+            self._perptape_stream_thread = stream_thread
             stream_thread.start()
         try:
             while not stop_event.is_set():
@@ -340,12 +352,13 @@ class RuntimeSyncWorker:
         finally:
             stop_event.set()
             if stream_thread is not None:
-                stream_thread.join(timeout=self.settings.perptape_timeout_seconds + 2)
+                stream_thread.join(timeout=self._perptape_stop_timeout_seconds())
                 if stream_thread.is_alive():
                     raise DomainRejected(
                         "PERPTAPE_STREAM_STOP_TIMEOUT",
                         "Perptape WebSocket did not stop within its bounded timeout",
                     )
+                self._perptape_stream_thread = None
         if stream is not None and stream.fatal_error_code is not None:
             raise DomainRejected(
                 stream.fatal_error_code,
@@ -411,6 +424,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     if not args.once and not settings.runtime_sync_enabled:
         raise SystemExit("TRADING_RUNTIME_SYNC_ENABLED must be true for continuous mode")
     database = Database(settings.database_url)
+    worker: RuntimeSyncWorker | None = None
     try:
         ready, reason = database.is_ready()
         if not ready:
@@ -437,7 +451,17 @@ def main(argv: Sequence[str] | None = None) -> int:
             return 1
         return 0
     finally:
-        database.dispose()
+        if worker is None or not bool(getattr(worker, "dependencies_in_use", False)):
+            database.dispose()
+        else:
+            logger.critical(
+                "Database disposal skipped while a background worker is still active",
+                extra={
+                    "event": "runtime_dependency_release_deferred",
+                    "component": "runtime-sync",
+                    "error_code": "PERPTAPE_STREAM_STOP_TIMEOUT",
+                },
+            )
 
 
 if __name__ == "__main__":

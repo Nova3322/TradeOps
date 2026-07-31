@@ -280,6 +280,19 @@ def test_runtime_enabled_websocket_is_started_and_joined_on_shutdown(
     assert len(created) == 1
     assert created[0].kwargs["websocket_url"] == "wss://perptape.com/ws/v1/alerts"
     assert stop_event.is_set() is True
+    assert worker.dependencies_in_use is False
+
+
+def test_runtime_stream_stop_bound_covers_http_open_or_close() -> None:
+    settings = Settings(
+        database_url="postgresql+psycopg://unused:unused@127.0.0.1/unused",
+        perptape_timeout_seconds=30,
+        _env_file=None,
+    )
+    worker: Any = object.__new__(RuntimeSyncWorker)
+    worker.settings = settings
+
+    assert worker._perptape_stop_timeout_seconds() == 37
 
 
 def test_runtime_continuous_cli_installs_stop_handlers_and_disposes(
@@ -328,3 +341,45 @@ def test_runtime_continuous_cli_installs_stop_handlers_and_disposes(
     assert installed_signals == [runtime_module.signal.SIGINT, runtime_module.signal.SIGTERM]
     assert worker.cycles == 1
     assert database.disposed is True
+
+
+def test_runtime_does_not_dispose_database_while_stream_thread_is_alive(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = Settings(
+        database_url="postgresql+psycopg://unused:unused@127.0.0.1/unused",
+        runtime_sync_enabled=True,
+        _env_file=None,
+    )
+
+    class FakeDatabase:
+        disposed = False
+
+        def is_ready(self) -> tuple[bool, str | None]:
+            return True, None
+
+        def dispose(self) -> None:
+            self.disposed = True
+
+    class FakeWorker:
+        dependencies_in_use = True
+
+        def run_forever(self, _stop_event: Any) -> None:
+            raise DomainRejected(
+                "PERPTAPE_STREAM_STOP_TIMEOUT",
+                "background stream is still active",
+            )
+
+    database = FakeDatabase()
+    monkeypatch.setattr(runtime_module, "get_settings", lambda: settings)
+    monkeypatch.setattr(runtime_module, "Database", lambda _url: database)
+    monkeypatch.setattr(
+        runtime_module,
+        "build_runtime_worker",
+        lambda _settings, _database: FakeWorker(),
+    )
+    monkeypatch.setattr(runtime_module, "configure_logging", lambda _level: None)
+    monkeypatch.setattr(runtime_module.signal, "signal", lambda *_args: None)
+
+    assert runtime_module.main([]) == 1
+    assert database.disposed is False

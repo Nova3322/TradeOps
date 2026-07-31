@@ -15,8 +15,10 @@ from websockets.sync.client import connect
 
 from trading_control_plane.domain import DomainRejected
 from trading_control_plane.perptape import (
+    PerptapeCandidate,
     PerptapeClient,
     PerptapeFeedSnapshot,
+    PerptapeRateLimited,
     validate_perptape_websocket_url,
 )
 
@@ -131,6 +133,7 @@ class PerptapeStreamWorker:
         self._event_id_order: deque[str] = deque()
         self._connection_healthy = False
         self._backfill_not_before: datetime | None = None
+        self._completion_pending = False
         self.fatal_error_code: str | None = None
         self.stats = PerptapeStreamStats()
 
@@ -145,8 +148,14 @@ class PerptapeStreamWorker:
 
     def _reconcile(self, *, backfill: bool) -> PerptapeFeedSnapshot:
         now = self._clock()
-        feed = self._client.refresh(now=now, force=backfill)
         current = self._load_snapshot()
+        if current is not None and now < current.next_allowed_at:
+            raise PerptapeRateLimited(current.next_allowed_at)
+        try:
+            feed = self._client.refresh(now=now, force=backfill)
+        except PerptapeRateLimited as exc:
+            self._mark_degraded(next_allowed_at=exc.next_allowed_at)
+            raise
         fetched_at = self._safe_record_time(feed.fetched_at, current)
         if fetched_at != feed.fetched_at:
             feed = replace(feed, fetched_at=fetched_at)
@@ -156,14 +165,20 @@ class PerptapeStreamWorker:
             self.stats.https_backfills += 1
         return feed
 
-    def _mark_degraded(self) -> None:
+    def _mark_degraded(self, *, next_allowed_at: datetime | None = None) -> None:
         current = self._load_snapshot()
-        if current is None or not current.candidates:
+        if current is None:
             return
-        if all(
+        candidates_already_degraded = all(
             candidate.data_health == "DEGRADED" and candidate.readiness != "READY"
             for candidate in current.candidates
-        ):
+        )
+        effective_next_allowed_at = max(
+            current.next_allowed_at,
+            current.generated_at,
+            next_allowed_at or current.generated_at,
+        )
+        if candidates_already_degraded and effective_next_allowed_at == current.next_allowed_at:
             return
         fetched_at = self._safe_record_time(self._clock(), current)
         degraded = tuple(
@@ -175,7 +190,7 @@ class PerptapeStreamWorker:
                 contract_version=current.contract_version,
                 generated_at=current.generated_at,
                 fetched_at=fetched_at,
-                next_allowed_at=max(current.next_allowed_at, current.generated_at),
+                next_allowed_at=effective_next_allowed_at,
                 candidates=degraded,
             )
         )
@@ -183,20 +198,30 @@ class PerptapeStreamWorker:
 
     def _try_backfill(self) -> bool:
         now = self._clock()
-        if self._backfill_not_before is not None and now < self._backfill_not_before:
+        current = self._load_snapshot()
+        not_before = self._backfill_not_before
+        if current is not None:
+            not_before = max(not_before or current.next_allowed_at, current.next_allowed_at)
+        if not_before is not None and now < not_before:
+            self._backfill_not_before = not_before
+            self._completion_pending = True
             self._mark_degraded()
             return False
         try:
             feed = self._reconcile(backfill=True)
-        except DomainRejected:
+        except DomainRejected as exc:
             current = self._load_snapshot()
             retry_at = now + timedelta(seconds=self._reconnect_initial_seconds)
             if current is not None:
                 retry_at = max(retry_at, current.next_allowed_at)
+            if isinstance(exc, PerptapeRateLimited) and exc.next_allowed_at is not None:
+                retry_at = max(retry_at, exc.next_allowed_at)
             self._backfill_not_before = retry_at
+            self._completion_pending = True
             self._mark_degraded()
             return False
         self._backfill_not_before = max(now, feed.next_allowed_at)
+        self._completion_pending = False
         return True
 
     def _reconciliation_delay(self) -> float:
@@ -306,9 +331,25 @@ class PerptapeStreamWorker:
         return (
             not isinstance(readiness, dict)
             or not readiness.get("status")
+            or not isinstance(payload.get("cs"), str)
+            or not payload.get("cs")
+            or "th" not in payload
             or payload.get("u") is None
             or payload.get("vq24") is None
             or payload.get("oi") is None
+        )
+
+    @staticmethod
+    def _same_alert(
+        candidate: PerptapeCandidate,
+        preliminary: PerptapeCandidate,
+    ) -> bool:
+        return candidate.candidate_id == preliminary.candidate_id or (
+            candidate.source_exchange == preliminary.source_exchange
+            and candidate.symbol == preliminary.symbol
+            and candidate.source_direction == preliminary.source_direction
+            and candidate.timeframe == preliminary.timeframe
+            and candidate.triggered_at == preliminary.triggered_at
         )
 
     def _remember_event(self, event_id: str) -> None:
@@ -318,7 +359,13 @@ class PerptapeStreamWorker:
             expired = self._event_id_order.popleft()
             self._seen_event_ids.discard(expired)
 
-    def _apply_alert(self, envelope: StreamEnvelope, *, allow_completion: bool) -> None:
+    def _apply_alert(
+        self,
+        envelope: StreamEnvelope,
+        *,
+        allow_completion: bool,
+        completion_confirmed: bool = False,
+    ) -> None:
         assert envelope.event_id is not None
         if envelope.event_id in self._seen_event_ids:
             self.stats.duplicates_dropped += 1
@@ -334,7 +381,7 @@ class PerptapeStreamWorker:
                 (
                     candidate
                     for candidate in current.candidates
-                    if candidate.candidate_id == preliminary.candidate_id
+                    if self._same_alert(candidate, preliminary)
                 ),
                 None,
             )
@@ -343,6 +390,7 @@ class PerptapeStreamWorker:
             existing is not None
             and existing.readiness not in {"UNKNOWN", "DEGRADED", "INCOMPLETE"}
             and existing.observed_at >= preliminary.observed_at
+            and (not needs_completion or completion_confirmed)
         )
         if needs_completion and not existing_is_complete and allow_completion:
             if self._try_backfill():
@@ -352,7 +400,7 @@ class PerptapeStreamWorker:
                         (
                             candidate
                             for candidate in current.candidates
-                            if candidate.candidate_id == preliminary.candidate_id
+                            if self._same_alert(candidate, preliminary)
                         ),
                         None,
                     )
@@ -367,7 +415,7 @@ class PerptapeStreamWorker:
                     (
                         candidate
                         for candidate in current.candidates
-                        if candidate.candidate_id == preliminary.candidate_id
+                        if self._same_alert(candidate, preliminary)
                     ),
                     None,
                 )
@@ -408,6 +456,8 @@ class PerptapeStreamWorker:
         self.stats.alerts_applied += 1
 
     def _consume_connection(self, stop_event: StopEvent) -> None:
+        if stop_event.is_set():
+            return
         if self._api_key is None:
             raise DomainRejected(
                 "PERPTAPE_NOT_CONFIGURED",
@@ -433,6 +483,8 @@ class PerptapeStreamWorker:
             headers,
             self._timeout_seconds,
         ) as connection:
+            if stop_event.is_set():
+                return
             self.stats.connections += 1
             connection.send(config)
             opened_at = self._monotonic()
@@ -443,12 +495,20 @@ class PerptapeStreamWorker:
             hello_received = False
             while not stop_event.is_set():
                 current_time = self._monotonic()
+                if self._completion_pending and (
+                    self._backfill_not_before is None or self._clock() >= self._backfill_not_before
+                ):
+                    self._try_backfill()
+                    if stop_event.is_set():
+                        return
                 if current_time >= reconcile_at:
                     try:
                         self._reconcile(backfill=False)
                     except DomainRejected:
                         self._mark_degraded()
                     reconcile_at = current_time + self._reconciliation_delay()
+                    if stop_event.is_set():
+                        return
                 if current_time - last_received_at >= self._heartbeat_timeout_seconds:
                     raise DomainRejected(
                         "PERPTAPE_STREAM_STALE",
@@ -458,6 +518,8 @@ class PerptapeStreamWorker:
                     raw_message = connection.recv(timeout=1.0)
                 except TimeoutError:
                     continue
+                if stop_event.is_set():
+                    return
                 last_received_at = self._monotonic()
                 envelope = self._parse_message(raw_message)
                 self.stats.messages_received += 1
@@ -487,11 +549,16 @@ class PerptapeStreamWorker:
                 if order == "OUT_OF_ORDER":
                     self.stats.gaps_detected += 1
                     self._try_backfill()
+                    if stop_event.is_set():
+                        return
                     continue
                 gap_backfill_attempted = order == "GAP"
+                gap_backfill_succeeded = False
                 if gap_backfill_attempted:
                     self.stats.gaps_detected += 1
-                    self._try_backfill()
+                    gap_backfill_succeeded = self._try_backfill()
+                    if stop_event.is_set():
+                        return
                 if envelope.sequence is not None:
                     last_sequence = envelope.sequence
                 last_server_time = envelope.server_time
@@ -501,6 +568,7 @@ class PerptapeStreamWorker:
                     self._apply_alert(
                         envelope,
                         allow_completion=not gap_backfill_attempted,
+                        completion_confirmed=gap_backfill_succeeded,
                     )
 
     def run_forever(self, stop_event: StopEvent) -> None:
@@ -509,14 +577,24 @@ class PerptapeStreamWorker:
         while not stop_event.is_set():
             self._connection_healthy = False
             error_code = "PERPTAPE_STREAM_UNAVAILABLE"
+            retry_not_before: datetime | None = None
             try:
                 if not startup_complete:
-                    self._reconcile(backfill=False)
+                    current = self._load_snapshot()
+                    if current is None or self._clock() >= current.next_allowed_at:
+                        self._reconcile(backfill=False)
+                    else:
+                        self._backfill_not_before = current.next_allowed_at
+                        self._completion_pending = True
                     startup_complete = True
+                    if stop_event.is_set():
+                        return
                 self._consume_connection(stop_event)
                 return
             except DomainRejected as exc:
                 error_code = exc.code
+                if isinstance(exc, PerptapeRateLimited):
+                    retry_not_before = exc.next_allowed_at
             except Exception:
                 error_code = "PERPTAPE_STREAM_UNAVAILABLE"
             if stop_event.is_set():
@@ -544,10 +622,13 @@ class PerptapeStreamWorker:
                 )
                 stop_event.set()
                 return
-            delay = min(
-                self._reconnect_initial_seconds * (2 ** (attempts - 1)),
-                self._reconnect_max_seconds,
-            )
+            if retry_not_before is not None and self._clock() < retry_not_before:
+                delay = (retry_not_before - self._clock()).total_seconds()
+            else:
+                delay = min(
+                    self._reconnect_initial_seconds * (2 ** (attempts - 1)),
+                    self._reconnect_max_seconds,
+                )
             logger.warning(
                 "Perptape WebSocket reconnect scheduled",
                 extra={

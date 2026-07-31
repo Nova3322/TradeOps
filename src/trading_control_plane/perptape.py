@@ -7,7 +7,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from collections.abc import Callable
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from typing import Any
@@ -166,21 +166,57 @@ class PerptapeFeedSnapshot:
 JsonFetcher = Callable[[str, dict[str, str], float], dict[str, Any]]
 
 
+class PerptapeRateLimited(DomainRejected):
+    def __init__(self, next_allowed_at: datetime | None = None) -> None:
+        self.next_allowed_at = next_allowed_at
+        super().__init__(
+            "PERPTAPE_RATE_LIMITED",
+            "Perptape breakout request is rate limited",
+        )
+
+
+def _parse_rate_limit_deadline(body: bytes) -> datetime | None:
+    try:
+        value = json.loads(body)
+        rate_limit = value.get("rateLimit")
+        raw_deadline = (
+            rate_limit.get("nextAllowedAt")
+            if isinstance(rate_limit, dict)
+            else value.get("nextAllowedAt")
+        )
+        if raw_deadline is None:
+            return None
+        return datetime.fromtimestamp(int(raw_deadline) / 1_000, UTC)
+    except (
+        AttributeError,
+        json.JSONDecodeError,
+        OSError,
+        OverflowError,
+        TypeError,
+        ValueError,
+    ):
+        return None
+
+
 def _default_fetcher(url: str, headers: dict[str, str], timeout: float) -> dict[str, Any]:
     request = urllib.request.Request(url, headers=headers, method="GET")  # noqa: S310
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response:  # noqa: S310
             body = response.read()
     except urllib.error.HTTPError as exc:
+        if exc.code == 429:
+            try:
+                rate_limit_body = exc.read()
+            except (AttributeError, OSError):
+                rate_limit_body = b""
+            raise PerptapeRateLimited(_parse_rate_limit_deadline(rate_limit_body)) from exc
         code = {
             401: "PERPTAPE_AUTH_FAILED",
             403: "PERPTAPE_PLAN_DENIED",
-            429: "PERPTAPE_RATE_LIMITED",
         }.get(exc.code, "PERPTAPE_UNAVAILABLE")
         detail = {
             401: "Perptape rejected the configured API key",
             403: "Perptape denied this API plan or account",
-            429: "Perptape breakout request is rate limited",
         }.get(exc.code, "Perptape could not be reached")
         raise DomainRejected(code, detail) from exc
     except (urllib.error.URLError, TimeoutError) as exc:
@@ -217,6 +253,8 @@ class PerptapeClient:
         self._cached_at: datetime | None = None
         self._cached: tuple[PerptapeCandidate, ...] = ()
         self._feed: PerptapeFeedSnapshot | None = None
+        self._rate_limit_not_before: datetime | None = None
+        self._server_not_before: datetime | None = None
 
     def list_candidates(self, *, now: datetime) -> list[PerptapeCandidate]:
         return list(self.refresh(now=now).candidates)
@@ -225,6 +263,8 @@ class PerptapeClient:
         if self._api_key is None:
             raise DomainRejected("PERPTAPE_NOT_CONFIGURED", "Perptape API key is not configured")
         with self._lock:
+            if self._rate_limit_not_before is not None and now < self._rate_limit_not_before:
+                raise PerptapeRateLimited(self._rate_limit_not_before)
             if (
                 not force
                 and self._feed is not None
@@ -232,6 +272,8 @@ class PerptapeClient:
                 and now < self._feed.next_allowed_at
             ):
                 return self._feed
+            if self._server_not_before is not None and now < self._server_not_before:
+                raise PerptapeRateLimited(self._server_not_before)
             query = urllib.parse.urlencode(
                 {
                     "tf": "1h,4h,1d,1w",
@@ -241,17 +283,35 @@ class PerptapeClient:
                     "sort": "triggeredAt",
                 }
             )
-            value = self._fetcher(
-                f"{self._base_url}/api/v1/breakouts?{query}",
-                {
-                    "authorization": f"Bearer {self._api_key}",
-                    "x-api-key": self._api_key,
-                    "user-agent": "trading-control-plane/1.0",
-                },
-                self._timeout_seconds,
-            )
+            try:
+                value = self._fetcher(
+                    f"{self._base_url}/api/v1/breakouts?{query}",
+                    {
+                        "authorization": f"Bearer {self._api_key}",
+                        "x-api-key": self._api_key,
+                        "user-agent": "trading-control-plane/1.0",
+                    },
+                    self._timeout_seconds,
+                )
+            except PerptapeRateLimited as exc:
+                if exc.next_allowed_at is not None:
+                    self._rate_limit_not_before = max(
+                        self._rate_limit_not_before or exc.next_allowed_at,
+                        exc.next_allowed_at,
+                    )
+                    if self._feed is not None:
+                        self._feed = replace(
+                            self._feed,
+                            next_allowed_at=max(
+                                self._feed.next_allowed_at,
+                                exc.next_allowed_at,
+                            ),
+                        )
+                raise
             candidates = self._parse_response(value)
             generated_at, next_allowed_at = self._parse_feed_times(value, now=now)
+            self._rate_limit_not_before = None
+            self._server_not_before = next_allowed_at
             self._cached_at = now
             self._cached = tuple(candidates)
             self._feed = PerptapeFeedSnapshot(
@@ -456,7 +516,11 @@ class PerptapeClient:
         raw = {
             "exchange": payload.get("ex"),
             "symbol": payload.get("s"),
-            "canonicalSymbol": payload.get("cs", payload.get("s")),
+            "canonicalSymbol": (
+                payload.get("cs")
+                if payload.get("cs") is not None
+                else (payload.get("s") if existing is None else existing.canonical_symbol)
+            ),
             "direction": payload.get("dir"),
             "timeframe": payload.get("tf"),
             "price": payload.get("p"),

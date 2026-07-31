@@ -4,7 +4,7 @@ import json
 import logging
 import threading
 from collections import deque
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import AbstractContextManager, contextmanager
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -13,7 +13,11 @@ import pytest
 
 import trading_control_plane.perptape_stream as perptape_stream_module
 from trading_control_plane.domain import DomainRejected
-from trading_control_plane.perptape import PerptapeClient, PerptapeFeedSnapshot
+from trading_control_plane.perptape import (
+    PerptapeClient,
+    PerptapeFeedSnapshot,
+    PerptapeRateLimited,
+)
 from trading_control_plane.perptape_stream import PerptapeSocket, PerptapeStreamWorker
 
 NOW = datetime(2026, 7, 31, 8, tzinfo=UTC)
@@ -143,7 +147,7 @@ class RecordingStopEvent:
 
 def worker(
     *,
-    responses: list[dict[str, Any] | DomainRejected],
+    responses: list[dict[str, Any] | DomainRejected | Callable[[], dict[str, Any]]],
     connector: RecordingConnector,
     store: SnapshotStore,
     clock: Any = lambda: NOW,
@@ -161,6 +165,8 @@ def worker(
         value = values.popleft()
         if isinstance(value, DomainRejected):
             raise value
+        if callable(value):
+            return value()
         return value
 
     client = PerptapeClient(
@@ -274,6 +280,7 @@ def test_stream_deduplicates_alert_and_uses_https_to_complete_missing_fields() -
         connector=connector,
         store=store,
         clock=lambda: complete_time,
+        cache_ttl_seconds=0,
     )
 
     stream.run_forever(stop)
@@ -332,10 +339,8 @@ def test_failed_https_completion_degrades_snapshot_and_keeps_alert_incomplete() 
         "id": "alert-incomplete",
         "ex": "BN",
         "s": "ETHUSDT",
-        "cs": "ETHUSDT",
         "dir": "HH",
         "p": 4_000,
-        "th": 3_900,
         "tf": "1h",
         "t": int(event_time.timestamp() * 1_000),
     }
@@ -366,6 +371,7 @@ def test_failed_https_completion_degrades_snapshot_and_keeps_alert_incomplete() 
         connector=connector,
         store=store,
         clock=lambda: event_time,
+        cache_ttl_seconds=0,
     )
 
     stream.run_forever(stop)
@@ -376,6 +382,257 @@ def test_failed_https_completion_degrades_snapshot_and_keeps_alert_incomplete() 
     assert all(item.readiness != "READY" for item in store.current.candidates)
     eth = next(item for item in store.current.candidates if item.symbol == "ETHUSDT")
     assert eth.readiness == "INCOMPLETE"
+
+
+def test_missing_canonical_symbol_and_threshold_are_completed_by_https() -> None:
+    stop = threading.Event()
+    event_time = NOW + timedelta(seconds=1)
+    short_alert = {
+        "id": "alert-short",
+        "ex": "BN",
+        "s": "ETHUSDT",
+        "dir": "HH",
+        "p": 4_000,
+        "tf": "1h",
+        "t": int(event_time.timestamp() * 1_000),
+        "u": int(event_time.timestamp() * 1_000),
+        "kr": {"status": "ready"},
+        "vq24": 20_000,
+        "oi": 10_000,
+    }
+    completed = candidate_payload(
+        triggered_at=event_time,
+        updated_at=event_time,
+        symbol="ETHUSDT",
+    )
+    completed["canonicalSymbol"] = "ETH"
+
+    def stop_receiving() -> str:
+        stop.set()
+        raise TimeoutError
+
+    connector = RecordingConnector(
+        [
+            FakeSocket(
+                [
+                    message("hello", sequence=1, event_time=NOW),
+                    message(
+                        "alert",
+                        sequence=2,
+                        event_time=event_time,
+                        payload=short_alert,
+                    ),
+                    stop_receiving,
+                ]
+            )
+        ]
+    )
+    store = SnapshotStore()
+    stream, https_calls = worker(
+        responses=[
+            response(),
+            response(completed, generated_at=event_time),
+        ],
+        connector=connector,
+        store=store,
+        clock=lambda: event_time,
+        cache_ttl_seconds=0,
+    )
+
+    stream.run_forever(stop)
+
+    assert len(https_calls) == 2
+    assert stream.stats.https_backfills == 1
+    assert store.current is not None
+    candidate = next(item for item in store.current.candidates if item.symbol == "ETHUSDT")
+    assert candidate.canonical_symbol == "ETH"
+    assert candidate.threshold == 99_000
+    assert candidate.readiness == "READY"
+
+
+def test_future_next_allowed_blocks_gap_and_short_field_completion_until_stop() -> None:
+    stop = threading.Event()
+    event_time = NOW + timedelta(seconds=1)
+    initial = response(candidate_payload())
+    initial["rateLimit"] = {"nextAllowedAt": int((NOW + timedelta(minutes=2)).timestamp() * 1_000)}
+    short_alert = {
+        "id": "alert-future-window",
+        "ex": "BN",
+        "s": "ETHUSDT",
+        "dir": "HH",
+        "p": 4_000,
+        "tf": "1h",
+        "t": int(event_time.timestamp() * 1_000),
+        "u": int(event_time.timestamp() * 1_000),
+        "kr": {"status": "ready"},
+        "vq24": 20_000,
+        "oi": 10_000,
+    }
+
+    def stop_receiving() -> str:
+        stop.set()
+        raise TimeoutError
+
+    connector = RecordingConnector(
+        [
+            FakeSocket(
+                [
+                    message("hello", sequence=1, event_time=NOW),
+                    message(
+                        "alert",
+                        sequence=2,
+                        event_time=event_time,
+                        payload=short_alert,
+                    ),
+                    message(
+                        "heartbeat",
+                        sequence=4,
+                        event_time=event_time + timedelta(seconds=1),
+                    ),
+                    stop_receiving,
+                ]
+            )
+        ]
+    )
+    store = SnapshotStore()
+    stream, https_calls = worker(
+        responses=[initial],
+        connector=connector,
+        store=store,
+        clock=lambda: event_time,
+    )
+
+    stream.run_forever(stop)
+
+    assert len(https_calls) == 1
+    assert stream.stats.gaps_detected == 1
+    assert stream.stats.https_backfills == 0
+    assert store.current is not None
+    assert all(item.readiness != "READY" for item in store.current.candidates)
+    eth = next(item for item in store.current.candidates if item.symbol == "ETHUSDT")
+    assert eth.readiness == "INCOMPLETE"
+
+
+def test_deferred_short_field_completion_runs_when_server_window_opens() -> None:
+    stop = threading.Event()
+    clock_value = NOW + timedelta(seconds=1)
+    event_time = clock_value
+    initial = response()
+    initial["rateLimit"] = {"nextAllowedAt": int((NOW + timedelta(minutes=2)).timestamp() * 1_000)}
+    short_alert = {
+        "id": "alert-deferred",
+        "ex": "BN",
+        "s": "ETHUSDT",
+        "dir": "HH",
+        "p": 4_000,
+        "tf": "1h",
+        "t": int(event_time.timestamp() * 1_000),
+        "u": int(event_time.timestamp() * 1_000),
+        "kr": {"status": "ready"},
+        "vq24": 20_000,
+        "oi": 10_000,
+    }
+    completed = candidate_payload(
+        triggered_at=event_time,
+        updated_at=event_time,
+        symbol="ETHUSDT",
+    )
+    completed["canonicalSymbol"] = "ETH"
+
+    def advance_past_window() -> str:
+        nonlocal clock_value
+        clock_value = NOW + timedelta(minutes=2, seconds=1)
+        raise TimeoutError
+
+    def stop_receiving() -> str:
+        stop.set()
+        raise TimeoutError
+
+    connector = RecordingConnector(
+        [
+            FakeSocket(
+                [
+                    message("hello", sequence=1, event_time=NOW),
+                    message(
+                        "alert",
+                        sequence=2,
+                        event_time=event_time,
+                        payload=short_alert,
+                    ),
+                    advance_past_window,
+                    stop_receiving,
+                ]
+            )
+        ]
+    )
+    store = SnapshotStore()
+    stream, https_calls = worker(
+        responses=[
+            initial,
+            response(completed, generated_at=event_time),
+        ],
+        connector=connector,
+        store=store,
+        clock=lambda: clock_value,
+        cache_ttl_seconds=0,
+    )
+
+    stream.run_forever(stop)
+
+    assert len(https_calls) == 2
+    assert stream.stats.https_backfills == 1
+    assert store.current is not None
+    candidate = next(item for item in store.current.candidates if item.symbol == "ETHUSDT")
+    assert candidate.canonical_symbol == "ETH"
+    assert candidate.readiness == "READY"
+
+
+def test_periodic_reconciliation_does_not_call_https_inside_server_window() -> None:
+    stop = threading.Event()
+    monotonic_value = 0.0
+    initial = response(candidate_payload())
+    initial["rateLimit"] = {"nextAllowedAt": int((NOW + timedelta(minutes=2)).timestamp() * 1_000)}
+
+    def monotonic() -> float:
+        return monotonic_value
+
+    def advance_inside_window() -> str:
+        nonlocal monotonic_value
+        monotonic_value = 121.0
+        raise TimeoutError
+
+    def stop_receiving() -> str:
+        stop.set()
+        raise TimeoutError
+
+    connector = RecordingConnector(
+        [
+            FakeSocket(
+                [
+                    message("hello", sequence=1, event_time=NOW),
+                    advance_inside_window,
+                    stop_receiving,
+                ]
+            )
+        ]
+    )
+    store = SnapshotStore()
+    stream, https_calls = worker(
+        responses=[initial],
+        connector=connector,
+        store=store,
+        clock=lambda: NOW + timedelta(seconds=monotonic_value / 2),
+        monotonic=monotonic,
+        reconciliation_interval_seconds=60,
+        heartbeat_timeout_seconds=300,
+    )
+
+    stream.run_forever(stop)
+
+    assert len(https_calls) == 1
+    assert stream.stats.https_reconciliations == 1
+    assert store.current is not None
+    assert all(item.readiness != "READY" for item in store.current.candidates)
 
 
 def test_periodic_full_reconciliation_runs_while_connection_is_quiet() -> None:
@@ -493,6 +750,30 @@ def test_failed_startup_snapshot_retries_once_per_backoff_cycle() -> None:
     assert len(connector.calls) == 1
 
 
+def test_startup_429_waits_for_server_window_and_stop_interrupts_wait() -> None:
+    class StopOnFirstWait(RecordingStopEvent):
+        def wait(self, timeout: float) -> bool:
+            self.waits.append(timeout)
+            self.set()
+            return True
+
+    stop = StopOnFirstWait()
+    connector = RecordingConnector([])
+    store = SnapshotStore()
+    stream, https_calls = worker(
+        responses=[PerptapeRateLimited(NOW + timedelta(minutes=2))],
+        connector=connector,
+        store=store,
+    )
+
+    stream.run_forever(stop)
+
+    assert len(https_calls) == 1
+    assert stop.waits == [120]
+    assert connector.calls == []
+    assert stream.fatal_error_code is None
+
+
 def test_invalid_messages_stop_after_bounded_failures_and_never_log_secret(
     caplog: Any,
 ) -> None:
@@ -548,6 +829,36 @@ def test_pre_stopped_worker_does_not_fetch_or_connect() -> None:
     stream.run_forever(stop)
 
     assert https_calls == []
+    assert connector.calls == []
+
+
+def test_stop_during_startup_snapshot_returns_without_opening_websocket() -> None:
+    stop = threading.Event()
+    fetch_started = threading.Event()
+    release_fetch = threading.Event()
+
+    def delayed_startup_snapshot() -> dict[str, Any]:
+        fetch_started.set()
+        assert release_fetch.wait(timeout=1)
+        return response(candidate_payload())
+
+    connector = RecordingConnector([])
+    store = SnapshotStore()
+    stream, https_calls = worker(
+        responses=[delayed_startup_snapshot],
+        connector=connector,
+        store=store,
+    )
+    stream_thread = threading.Thread(target=stream.run_forever, args=(stop,))
+    stream_thread.start()
+    assert fetch_started.wait(timeout=1)
+
+    stop.set()
+    release_fetch.set()
+    stream_thread.join(timeout=1)
+
+    assert not stream_thread.is_alive()
+    assert len(https_calls) == 1
     assert connector.calls == []
 
 

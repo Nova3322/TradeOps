@@ -1,13 +1,15 @@
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime, timedelta
+from io import BytesIO
 from urllib.error import HTTPError
 
 import pytest
 
 import trading_control_plane.perptape as perptape_module
 from trading_control_plane.domain import Direction, DomainRejected
-from trading_control_plane.perptape import PerptapeClient
+from trading_control_plane.perptape import PerptapeClient, PerptapeRateLimited
 
 NOW = datetime(2026, 7, 19, 8, tzinfo=UTC)
 
@@ -111,10 +113,57 @@ def test_server_rate_limit_extends_cache_beyond_local_ttl() -> None:
 
     first = client.refresh(now=NOW)
     second = client.refresh(now=NOW + timedelta(minutes=2))
+    with pytest.raises(PerptapeRateLimited):
+        client.refresh(now=NOW + timedelta(minutes=2), force=True)
 
     assert first is second
     assert first.next_allowed_at == NOW + timedelta(minutes=5)
     assert calls == 1
+
+
+def test_http_429_updates_cooldown_and_blocks_followup_requests(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = 0
+    next_allowed_at = NOW + timedelta(minutes=10)
+
+    def urlopen(_request: object, timeout: float) -> FakeHttpResponse:
+        nonlocal calls
+        calls += 1
+        assert timeout == 15
+        if calls == 1:
+            return FakeHttpResponse(json.dumps(response()).encode())
+        body = json.dumps(
+            {
+                "error": "rate limited",
+                "rateLimit": {"nextAllowedAt": int(next_allowed_at.timestamp() * 1_000)},
+            }
+        ).encode()
+        raise HTTPError(
+            "https://perptape.com/api/v1/breakouts",
+            429,
+            "rate limited",
+            None,
+            BytesIO(body),
+        )
+
+    monkeypatch.setattr(perptape_module.urllib.request, "urlopen", urlopen)
+    client = PerptapeClient(
+        base_url="https://perptape.com",
+        api_key="key",
+        contract_version="breakouts-v1",
+        cache_ttl=timedelta(minutes=1),
+    )
+    client.refresh(now=NOW)
+
+    with pytest.raises(PerptapeRateLimited) as limited:
+        client.refresh(now=NOW + timedelta(minutes=2), force=True)
+    with pytest.raises(PerptapeRateLimited) as locally_limited:
+        client.refresh(now=NOW + timedelta(minutes=3), force=True)
+
+    assert limited.value.next_allowed_at == next_allowed_at
+    assert locally_limited.value.next_allowed_at == next_allowed_at
+    assert calls == 2
 
 
 def test_client_fails_closed_without_api_key_or_with_invalid_contract() -> None:
