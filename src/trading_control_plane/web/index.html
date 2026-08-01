@@ -7,13 +7,13 @@
     <meta name="description" content="内部 SHADOW 交易提案、审核与风险控制台">
     <link rel="manifest" href="/manifest.webmanifest">
     <link rel="icon" href="/assets/icon.svg" type="image/svg+xml">
-    <link rel="stylesheet" href="/assets/styles.css?v=14">
+    <link rel="stylesheet" href="/assets/styles.css?v=15">
     <title>Trading Console · SHADOW</title>
   </head>
   <body>
     <div class="app-shell">
       <header class="topbar">
-        <a class="brand" href="/opportunities" data-link>
+        <a class="brand" href="/" data-link>
           <span class="brand-mark" aria-hidden="true">T</span>
           <span><b>Trading Console</b><small>Internal control plane</small></span>
         </a>
@@ -27,6 +27,7 @@
 
       <aside id="sidebar" class="sidebar" hidden>
         <nav aria-label="主导航">
+          <a href="/" data-link><span>⌂</span>今日</a>
           <a href="/opportunities" data-link><span>⌁</span>机会</a>
           <a href="/proposals/new" data-link><span>＋</span>人工提案</a>
           <a href="/reviews" data-link><span>✓</span>审核队列</a>
@@ -99,6 +100,6 @@
       </form>
     </dialog>
     <div id="toast" class="toast" role="status" aria-live="polite"></div>
-    <script type="module" src="/assets/app.js?v=23"></script>
+    <script type="module" src="/assets/app.js?v=24"></script>
   </body>
 </html>

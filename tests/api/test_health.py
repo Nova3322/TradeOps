@@ -85,8 +85,9 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
 
     assert response.status_code == 200
     assert "Trading Console" in response.text
-    assert "/assets/app.js?v=23" in response.text
-    assert "/assets/styles.css?v=14" in response.text
+    assert "/assets/app.js?v=24" in response.text
+    assert "/assets/styles.css?v=15" in response.text
+    assert '<a href="/" data-link><span>⌂</span>今日</a>' in response.text
     assert 'id="mobile-nav-toggle"' in response.text
     assert 'id="confirm-dialog"' in response.text
 
@@ -129,6 +130,12 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
     assert "当前唯一推荐动作" in app_javascript.text
     assert "data-close-campaign" in app_javascript.text
     assert "/api/campaigns/${item.campaign_id}/close" in app_javascript.text
+    assert "现在按这个顺序处理" in app_javascript.text
+    assert "没有必须立即处理的事项" in app_javascript.text
+    assert "当前作用域无异常" in app_javascript.text
+    assert "api('/api/campaign-exceptions')" in app_javascript.text
+    assert "if (error.status === 403) return null" in app_javascript.text
+    assert "全局风险恢复仍由管理员控制" in app_javascript.text
 
     stylesheet = get(app, "/assets/styles.css")
     assert stylesheet.status_code == 200
@@ -144,7 +151,7 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
 
     service_worker = get(app, "/sw.js")
     assert service_worker.status_code == 200
-    assert "trading-shell-v23" in service_worker.text
+    assert "trading-shell-v24" in service_worker.text
     assert "await fetch(event.request)" in service_worker.text
 
 

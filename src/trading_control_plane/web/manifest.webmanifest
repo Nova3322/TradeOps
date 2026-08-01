@@ -1,8 +1,8 @@
 {
   "name": "Trading Console SHADOW",
   "short_name": "Trading",
-  "description": "Internal proposal, review and risk console",
-  "start_url": "/opportunities",
+  "description": "Internal trading command and risk console",
+  "start_url": "/",
   "display": "standalone",
   "background_color": "#f1f4f0",
   "theme_color": "#101616",
