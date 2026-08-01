@@ -131,6 +131,39 @@ def perptape_client() -> PerptapeClient:
     )
 
 
+def perptape_client_for_contract(symbol: str, canonical_symbol: str) -> PerptapeClient:
+    now_ms = int(datetime.now(UTC).timestamp() * 1000)
+
+    def fetch(_url: str, _headers: dict[str, str], _timeout: float) -> dict[str, Any]:
+        return {
+            "type": "breakouts",
+            "generatedAt": now_ms,
+            "data": [
+                {
+                    "exchange": "BN",
+                    "symbol": symbol,
+                    "canonicalSymbol": canonical_symbol,
+                    "direction": "HH",
+                    "timeframe": "1h",
+                    "price": 120000,
+                    "breakoutPrice": 120000,
+                    "threshold": 119500,
+                    "klineReadiness": {"status": "ready"},
+                    "triggeredAt": now_ms - 1_000,
+                    "updatedAt": now_ms,
+                }
+            ],
+        }
+
+    return PerptapeClient(
+        base_url="https://perptape.com",
+        api_key="test-key",
+        contract_version="breakouts-v1",
+        cache_ttl=timedelta(minutes=1),
+        fetcher=fetch,
+    )
+
+
 def app(
     database: Database,
     telegram: MockTelegramGateway,
@@ -157,6 +190,47 @@ async def login(client: AsyncClient, username: str) -> None:
 async def logout(client: AsyncClient) -> None:
     response = await client.post("/api/auth/logout")
     assert response.status_code == 200
+
+
+def test_opportunity_marks_ready_but_uncatalogued_raw_contract_ineligible(
+    database: Database, service: TradingService
+) -> None:
+    seed(service)
+    candidate_client = perptape_client_for_contract("BTCUSDC", "BTC")
+
+    async def scenario() -> None:
+        async with AsyncClient(
+            transport=ASGITransport(app=app(database, MockTelegramGateway(), candidate_client)),
+            base_url="http://test",
+        ) as http:
+            await login(http, "proposer")
+            opportunities = await http.get("/api/opportunities")
+            assert opportunities.status_code == 200, opportunities.text
+            candidate = opportunities.json()["data"][0]
+            assert candidate["symbol"] == "BTCUSDC"
+            assert candidate["canonical_symbol"] == "BTC"
+            assert candidate["readiness"] == "READY"
+            assert candidate["proposal_eligible"] is False
+            assert candidate["proposal_blocker"] == "INSTRUMENT_UNAVAILABLE"
+
+            rejected = await http.post(
+                f"/api/opportunities/{candidate['candidate_id']}/proposals",
+                json={
+                    "account_id": "acct-1",
+                    "risk_tier": "LOW",
+                    "quantity": "1",
+                    "max_risk": "40",
+                    "expires_in_minutes": 120,
+                    "invalidation_price": "118000",
+                    "rationale": "must not guess a quote contract",
+                },
+            )
+            assert rejected.status_code == 422, rejected.text
+            assert rejected.json()["error"]["code"] == "INSTRUMENT_UNAVAILABLE"
+
+    asyncio.run(scenario())
+    with database.session_factory() as session:
+        assert session.scalar(select(func.count()).select_from(Proposal)) == 0
 
 
 def test_api_reuses_exact_legacy_proposal_without_deduplicating_another_contract(
@@ -278,6 +352,8 @@ def test_perptape_to_review_to_risk_and_authorization_api_flow(
             assert opportunities.status_code == 200, opportunities.text
             candidate = opportunities.json()["data"][0]
             assert candidate["direction"] == "LONG"
+            assert candidate["proposal_eligible"] is True
+            assert candidate["proposal_blocker"] is None
             payload = {
                 "account_id": "acct-1",
                 "risk_tier": "LOW",

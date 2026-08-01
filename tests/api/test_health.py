@@ -85,7 +85,7 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
 
     assert response.status_code == 200
     assert "Trading Console" in response.text
-    assert "/assets/app.js?v=16" in response.text
+    assert "/assets/app.js?v=17" in response.text
     assert "/assets/styles.css?v=10" in response.text
     assert 'id="mobile-nav-toggle"' in response.text
     assert 'id="confirm-dialog"' in response.text
@@ -116,6 +116,8 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
     assert "旧提案、旧授权和旧 AddUnit 永远不会复活" in app_javascript.text
     assert "本地条件满足" in app_javascript.text
     assert "LIVE_SCOPE_CONFIGURATION_REQUIRED" in app_javascript.text
+    assert "i.readiness === 'READY' && i.proposal_eligible" in app_javascript.text
+    assert "Catalog 未认证此交易合约" in app_javascript.text
 
     stylesheet = get(app, "/assets/styles.css")
     assert stylesheet.status_code == 200
@@ -128,8 +130,61 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
 
     service_worker = get(app, "/sw.js")
     assert service_worker.status_code == 200
-    assert "trading-shell-v15" in service_worker.text
+    assert "trading-shell-v16" in service_worker.text
     assert "await fetch(event.request)" in service_worker.text
+
+
+def test_opportunity_card_disables_creation_when_catalog_rejects_raw_contract() -> None:
+    node = shutil.which("node")
+    assert node is not None
+    app_path = Path(__file__).parents[2] / "src" / "trading_control_plane" / "web" / "app.js"
+    script = textwrap.dedent(
+        r"""
+        import assert from "node:assert/strict";
+        import fs from "node:fs";
+        import vm from "node:vm";
+
+        const source = fs.readFileSync(process.argv[1], "utf8");
+        const from = source.indexOf("function opportunityCard");
+        const to = source.indexOf("\nfunction openSystemDialog", from);
+        assert.notEqual(from, -1);
+        assert.notEqual(to, -1);
+        const context = {
+          escapeHtml: String,
+          fmtNumber: String,
+          fmtDate: String,
+          fmtCompact: String,
+        };
+        vm.createContext(context);
+        vm.runInContext(`${source.slice(from, to)}; this.render = opportunityCard;`, context);
+        const unavailable = context.render({
+          candidate_id:"pt_unavailable", venue:"BINANCE", timeframe:"1h",
+          symbol:"BTCUSDC", direction:"LONG", reference_price:"1", triggered_at:null,
+          readiness:"READY", proposal_eligible:false,
+          proposal_blocker:"INSTRUMENT_UNAVAILABLE", quote_volume:null, open_interest:null,
+          rationale:"candidate", detail_url:"https://example.test", chart_url:"https://example.test",
+        });
+        assert.match(unavailable, /Catalog 未认证此交易合约/);
+        assert.equal((unavailable.match(/ disabled/g) || []).length, 2);
+
+        const eligible = context.render({
+          candidate_id:"pt_eligible", venue:"BINANCE", timeframe:"1h",
+          symbol:"BTCUSDT", direction:"LONG", reference_price:"1", triggered_at:null,
+          readiness:"READY", proposal_eligible:true, proposal_blocker:null,
+          quote_volume:null, open_interest:null, rationale:"candidate",
+          detail_url:"https://example.test", chart_url:"https://example.test",
+        });
+        assert.doesNotMatch(eligible, /Catalog 未认证此交易合约/);
+        assert.doesNotMatch(eligible, / disabled/);
+        """
+    )
+    completed = subprocess.run(  # noqa: S603
+        [node, "--input-type=module", "-e", script, str(app_path)],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stderr
 
 
 def test_capital_web_projection_separates_live_and_simulation_records() -> None:

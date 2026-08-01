@@ -5,7 +5,7 @@ from decimal import Decimal
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import select, text
+from sqlalchemy import select, text, tuple_
 
 from trading_control_plane.database import Database
 from trading_control_plane.domain import DomainRejected, PrincipalType, Role
@@ -160,6 +160,21 @@ class TradingQueries:
                     "candidate instrument is not active in the Trading catalog",
                 )
             return instrument.instrument_id
+
+    def active_instrument_keys(self, venue_symbols: set[tuple[str, str]]) -> set[tuple[str, str]]:
+        """Return exact active Catalog matches without normalizing or guessing symbols."""
+
+        if not venue_symbols:
+            return set()
+        with self.database.session_factory() as session:
+            return set(
+                session.execute(
+                    select(Instrument.venue, Instrument.symbol).where(
+                        Instrument.active,
+                        tuple_(Instrument.venue, Instrument.symbol).in_(venue_symbols),
+                    )
+                ).tuples()
+            )
 
     def compatible_legacy_system_candidate_id(
         self,
