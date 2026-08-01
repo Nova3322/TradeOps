@@ -1,6 +1,10 @@
+# Telegram's user-facing Chinese copy intentionally uses full-width punctuation.
+# ruff: noqa: RUF001
+
 from __future__ import annotations
 
 import hashlib
+import html
 import json
 import logging
 import threading
@@ -8,7 +12,7 @@ import urllib.error
 import urllib.request
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any, ClassVar, Protocol
 from uuid import UUID
 
@@ -26,6 +30,8 @@ class ProposalNotification:
     review_code: str
     review_url: str
     created_at: datetime
+    status: str = "PENDING_REVIEW"
+    expires_at: str | None = None
 
 
 @dataclass(frozen=True)
@@ -39,6 +45,9 @@ class CampaignNotification:
     campaign_version: int
     action_references: tuple[tuple[str, str], ...]
     created_at: datetime
+    status: str | None = None
+    auto_add_available: bool | None = None
+    position_reduction_available: bool | None = None
 
 
 @dataclass(frozen=True)
@@ -62,6 +71,220 @@ class TelegramCampaignAction:
     action: str
     action_reference: str
     campaign_version: int
+    environment: str = "SHADOW"
+    event_type: str = "UNKNOWN"
+
+
+@dataclass(frozen=True)
+class _ActionPrompt:
+    action: TelegramCampaignAction
+    source_callback_key: str
+    original_text: str
+    original_reply_markup: dict[str, Any]
+
+
+MAX_TELEGRAM_TEXT = 3_500
+
+_EVENT_LABELS: dict[str, str] = {
+    "ADD_INTENT_READY": "加仓意图已就绪",
+    "RISK_REDUCTION_READY": "减仓意图已就绪",
+    "AUTOMATIC_EXIT_READY": "自动退出意图已就绪",
+    "CAMPAIGN_AUTO_ADD_DISABLED": "后续加仓已关闭",
+    "SHADOW_FILL_RECORDED": "SHADOW 成交事实已记录",
+    "ORDER_INTENT_UNKNOWN": "订单结果未知",
+    "PROTECTION_ACTIVE": "保护事实有效",
+    "PROTECTION_EXCEPTION": "保护事实异常",
+    "RECONCILIATION_EXCEPTION": "对账异常",
+    "CAMPAIGN_CLOSED": "Campaign 已关闭",
+    "POSITION_UPDATED": "仓位状态已更新",
+    "PENDING_REVIEW": "等待审核",
+    "REVIEW_APPROVE": "审核通过",
+    "REVIEW_REJECT": "审核拒绝",
+    "SOURCE_RESERVED": "源端资金已预留",
+    "IN_TRANSIT": "资金在途",
+    "DESTINATION_CONFIRMED": "目的端已确认",
+    "RECONCILED": "资金对账完成",
+    "UNKNOWN": "状态未知",
+}
+
+_STATUS_LABELS: dict[str, str] = {
+    "ACTIVE": "进行中",
+    "CLOSED": "已关闭",
+    "CANCELLED": "已取消",
+    "DRAFT": "草稿",
+    "PENDING_REVIEW": "等待审核",
+    "APPROVED": "已批准",
+    "REJECTED": "已拒绝",
+    "UNKNOWN": "未知",
+}
+
+_NO_ACTION_EVENTS = {
+    "ADD_INTENT_READY",
+    "RISK_REDUCTION_READY",
+    "AUTOMATIC_EXIT_READY",
+    "CAMPAIGN_AUTO_ADD_DISABLED",
+    "PROTECTION_ACTIVE",
+    "CAMPAIGN_CLOSED",
+}
+
+_ERROR_LABELS: dict[str, str] = {
+    "VERSION_CONFLICT": "对象版本已变化，请重新打开最新通知",
+    "ACTION_REFERENCE_EXPIRED": "操作凭证已过期，请使用最新通知",
+    "ACTION_REFERENCE_SCOPE_INVALID": "操作凭证不属于当前用户或对象",
+    "CAMPAIGN_NOT_FOUND": "Campaign 不存在或已不可见",
+    "CAMPAIGN_NOT_ACTIVE": "Campaign 当前状态不允许该操作",
+    "ORDER_INTENT_UNKNOWN": "订单结果未知，系统已阻止重复动作",
+    "RBAC_DENIED": "当前身份没有执行该操作的权限",
+}
+
+
+def _escaped(value: object, *, max_length: int = 480) -> str:
+    raw = str(value).strip()
+    escaped = html.escape(raw, quote=True)
+    if len(escaped) <= max_length:
+        return escaped
+    low = 0
+    high = len(raw)
+    while low < high:
+        midpoint = (low + high + 1) // 2
+        if len(html.escape(raw[:midpoint], quote=True)) <= max_length - 1:
+            low = midpoint
+        else:
+            high = midpoint - 1
+    return html.escape(raw[:low], quote=True) + "…"
+
+
+def _optional(value: object | None, *, fallback: str = "未提供") -> str:
+    return _escaped(fallback if value is None or str(value).strip() == "" else value)
+
+
+def _short_id(value: UUID) -> str:
+    return str(value).split("-", maxsplit=1)[0]
+
+
+def _format_time(value: datetime) -> str:
+    return value.astimezone(UTC).strftime("%Y-%m-%d %H:%M UTC")
+
+
+def _labeled_code(value: str | None, labels: dict[str, str]) -> str:
+    if value is None or value.strip() == "":
+        return "未提供"
+    label = labels.get(value, value)
+    if label == value:
+        return f"<code>{_escaped(value)}</code>"
+    return f"{_escaped(label)} · <code>{_escaped(value)}</code>"
+
+
+def _ensure_message_limit(text: str) -> str:
+    if len(text) <= MAX_TELEGRAM_TEXT:
+        return text
+    return "<b>通知内容过长</b>\n为避免截断权威字段，请打开 Web 控制台查看完整信息。"
+
+
+def campaign_action_references(
+    notification: CampaignNotification,
+) -> tuple[tuple[str, str], ...]:
+    """Return only actions that are meaningful for the current notification."""
+
+    if notification.status in {"CLOSED", "CANCELLED"}:
+        return ()
+    if notification.event_type in _NO_ACTION_EVENTS:
+        return ()
+    allowed = {action for action, _reference in notification.action_references}
+    if notification.auto_add_available is False:
+        allowed.discard("DISABLE_CAMPAIGN_AUTO_ADD")
+    if notification.position_reduction_available is False:
+        allowed -= {"EMERGENCY_REDUCE", "EXIT"}
+    if notification.event_type == "ORDER_INTENT_UNKNOWN":
+        allowed -= {"EMERGENCY_REDUCE", "EXIT"}
+    return tuple(
+        (action, reference)
+        for action, reference in notification.action_references
+        if action in allowed
+    )
+
+
+def render_proposal_notification(notification: ProposalNotification) -> str:
+    facts = [
+        f"<b>环境</b>　<code>{_escaped(notification.environment)}</code>",
+        f"<b>对象</b>　提案 <code>{_short_id(notification.proposal_id)}</code>",
+        f"<b>状态</b>　{_labeled_code(notification.status, _STATUS_LABELS)} "
+        f"· v{notification.proposal_version}",
+        f"<b>截止</b>　{_optional(notification.expires_at)}",
+    ]
+    summary = _escaped(notification.summary, max_length=1_800)
+    return _ensure_message_limit(
+        "🟠 <b>待审核提案</b>\n"
+        + "\n".join(facts)
+        + f"\n\n<b>说明</b>\n{summary}"
+        + f"\n\n<b>通知时间</b>　{_format_time(notification.created_at)}"
+        + "\n\n⚠️ Telegram 只负责通知并打开 Web；不会在聊天中批准提案。"
+    )
+
+
+def render_campaign_notification(notification: CampaignNotification) -> str:
+    attention = notification.event_type in {
+        "ORDER_INTENT_UNKNOWN",
+        "PROTECTION_EXCEPTION",
+        "RECONCILIATION_EXCEPTION",
+    }
+    heading = "🔴 <b>风险事件</b>" if attention else "🔵 <b>Campaign 状态更新</b>"
+    return _ensure_message_limit(
+        f"{heading}\n"
+        f"<b>事件</b>　{_labeled_code(notification.event_type, _EVENT_LABELS)}\n"
+        f"<b>环境</b>　<code>{_escaped(notification.environment)}</code>\n"
+        f"<b>对象</b>　Campaign <code>{_short_id(notification.campaign_id)}</code>\n"
+        f"<b>状态</b>　{_labeled_code(notification.status, _STATUS_LABELS)} "
+        f"· v{notification.campaign_version}\n"
+        "<b>详情</b>　请在 Web 控制台查看完整交易事实\n\n"
+        f"<b>说明</b>\n{_escaped(notification.summary, max_length=1_800)}\n\n"
+        f"<b>通知时间</b>　{_format_time(notification.created_at)}\n\n"
+        "⚠️ 所有按钮仅提交只收紧风险的请求；权威结果以 Web 控制台为准。"
+    )
+
+
+def render_capital_notification(notification: CapitalNotification) -> str:
+    return _ensure_message_limit(
+        "🟣 <b>资金状态通知</b>\n"
+        f"<b>环境</b>　<code>{_escaped(notification.environment)}</code>\n"
+        f"<b>对象</b>　{_escaped(notification.object_type)} "
+        f"<code>{_short_id(notification.object_id)}</code>\n"
+        f"<b>事件</b>　{_labeled_code(notification.event_type, _EVENT_LABELS)}\n"
+        f"<b>状态版本</b>　v{notification.object_version}\n"
+        "<b>详情</b>　请在 Web 控制台查看完整资金事实\n\n"
+        f"<b>说明</b>\n{_escaped(notification.summary, max_length=1_800)}\n\n"
+        f"<b>通知时间</b>　{_format_time(notification.created_at)}\n\n"
+        "🔒 Telegram 不提供资金批准、签名、广播或执行入口。"
+    )
+
+
+def render_help() -> str:
+    return (
+        "<b>Trading Bot 帮助</b>\n\n"
+        "/start　绑定或确认内部用户\n"
+        "/status　查看 Bot 能力和安全边界\n"
+        "/help　查看本帮助\n\n"
+        "<b>可以做什么</b>\n"
+        "• 接收提案、Campaign 和资金状态通知\n"
+        "• 打开 Web 安全审核页\n"
+        "• 提交经二次确认的只收紧风险动作\n\n"
+        "<b>不会做什么</b>\n"
+        "• 不在 Telegram 中批准增险提案\n"
+        "• 不批准、签名或执行资金操作\n"
+        "• 不绕过 Trading 的权限、版本和风险校验"
+    )
+
+
+def render_status() -> str:
+    return (
+        "🟢 <b>Trading Bot 正常运行</b>\n\n"
+        "<b>会话</b>　仅限已允许的私聊账号\n"
+        "<b>审批</b>　只打开 Web，不在聊天中批准\n"
+        "<b>风险动作</b>　仅收紧风险，必须二次确认\n"
+        "<b>资金动作</b>　不支持批准、签名或执行\n"
+        "<b>权威状态</b>　以 Trading Web 与 PostgreSQL 为准\n\n"
+        "此状态不会显示账户余额、密钥、Token 或私钥。"
+    )
 
 
 class TelegramGateway(Protocol):
@@ -192,6 +415,17 @@ class TelegramBotGateway(MockTelegramGateway):
         "EMERGENCY_REDUCE": "紧急减仓 50%",
         "EXIT": "完全退出",
     }
+    _ACTION_IMPACTS: ClassVar[dict[str, str]] = {
+        "DISABLE_CAMPAIGN_AUTO_ADD": "关闭此 Campaign 后续 AddUnit，不影响已有减仓与退出能力。",
+        "PAUSE_NEW_RISK": "将全局系统切换为只减仓，阻止全部新增风险。",
+        "EMERGENCY_REDUCE": "提交 reduce-only 意图，将当前目标仓位减少 50%。",
+        "EXIT": "提交 reduce-only 退出意图，将目标仓位降至 0。",
+    }
+    _COMMANDS: ClassVar[list[dict[str, str]]] = [
+        {"command": "start", "description": "绑定或确认内部用户"},
+        {"command": "status", "description": "查看 Bot 能力和安全边界"},
+        {"command": "help", "description": "查看使用帮助"},
+    ]
 
     def __init__(
         self,
@@ -213,6 +447,9 @@ class TelegramBotGateway(MockTelegramGateway):
         self._poll_timeout_seconds = poll_timeout_seconds
         self._action_handler: TelegramActionHandler | None = None
         self._actions: dict[str, TelegramCampaignAction] = {}
+        self._source_prompts: dict[str, _ActionPrompt] = {}
+        self._confirmations: dict[str, _ActionPrompt] = {}
+        self._cancellations: dict[str, _ActionPrompt] = {}
         self._stop_event = threading.Event()
         self._poll_thread: threading.Thread | None = None
 
@@ -245,95 +482,103 @@ class TelegramBotGateway(MockTelegramGateway):
         self._poll_thread = None
 
     def send(self, notification: ProposalNotification) -> None:
-        before = len(self.notifications())
-        super().send(notification)
-        if len(self.notifications()) == before:
+        if any(
+            item.notification_id == notification.notification_id for item in self.notifications()
+        ):
             return
         keyboard = {
             "inline_keyboard": [
-                [{"text": "打开审核页面", "url": notification.review_url}],
+                [{"text": "打开 Web 安全审核", "url": notification.review_url}],
             ]
         }
-        self._send_to_user(
+        delivered = self._send_to_user(
             notification.reviewer_id,
-            (
-                f"待审核提案 · {notification.environment}\n"
-                f"{notification.summary}\n"
-                f"版本: {notification.proposal_version}"
-            ),
+            render_proposal_notification(notification),
             keyboard,
         )
+        if delivered:
+            super().send(notification)
 
     def send_campaign(self, notification: CampaignNotification) -> None:
-        before = len(self.campaign_notifications())
-        super().send_campaign(notification)
-        if len(self.campaign_notifications()) == before:
+        if any(
+            item.notification_id == notification.notification_id
+            for item in self.campaign_notifications()
+        ):
             return
         rows: list[list[dict[str, str]]] = []
-        with self._lock:
-            for action, reference in notification.action_references:
-                callback_key = (
-                    "ca_"
-                    + hashlib.sha256(
-                        f"{notification.notification_id}:{action}:{reference}".encode()
-                    ).hexdigest()[:24]
-                )
-                self._actions[callback_key] = TelegramCampaignAction(
-                    callback_key=callback_key,
-                    recipient_id=notification.recipient_id,
-                    campaign_id=notification.campaign_id,
-                    action=action,
-                    action_reference=reference,
-                    campaign_version=notification.campaign_version,
-                )
-                rows.append(
-                    [
-                        {
-                            "text": self._ACTION_LABELS[action],
-                            "callback_data": callback_key,
-                        }
-                    ]
-                )
-        self._send_to_user(
+        pending_actions: dict[str, TelegramCampaignAction] = {}
+        for action, reference in campaign_action_references(notification):
+            callback_key = (
+                "ca_"
+                + hashlib.sha256(
+                    f"{notification.notification_id}:{action}:{reference}".encode()
+                ).hexdigest()[:24]
+            )
+            pending_actions[callback_key] = TelegramCampaignAction(
+                callback_key=callback_key,
+                recipient_id=notification.recipient_id,
+                campaign_id=notification.campaign_id,
+                action=action,
+                action_reference=reference,
+                campaign_version=notification.campaign_version,
+                environment=notification.environment,
+                event_type=notification.event_type,
+            )
+            rows.append(
+                [
+                    {
+                        "text": f"需确认 · {self._ACTION_LABELS[action]}",
+                        "callback_data": callback_key,
+                    }
+                ]
+            )
+        text = render_campaign_notification(notification)
+        keyboard = {"inline_keyboard": rows}
+        delivered = self._send_to_user(
             notification.recipient_id,
-            (
-                f"Campaign 事件 · {notification.environment}\n"
-                f"{notification.summary}\n"
-                f"版本: {notification.campaign_version}"
-            ),
-            {"inline_keyboard": rows},
+            text,
+            keyboard if rows else None,
         )
+        if not delivered:
+            return
+        super().send_campaign(notification)
+        with self._lock:
+            self._actions.update(pending_actions)
+            for callback_key, pending_action in pending_actions.items():
+                self._source_prompts[callback_key] = _ActionPrompt(
+                    action=pending_action,
+                    source_callback_key=callback_key,
+                    original_text=text,
+                    original_reply_markup=keyboard,
+                )
 
     def send_capital(self, notification: CapitalNotification) -> None:
-        before = len(self.capital_notifications())
-        super().send_capital(notification)
-        if len(self.capital_notifications()) == before:
+        if any(
+            item.notification_id == notification.notification_id
+            for item in self.capital_notifications()
+        ):
             return
-        self._send_to_user(
+        delivered = self._send_to_user(
             notification.recipient_id,
-            (
-                f"资金通知 · {notification.environment}\n"
-                f"{notification.summary}\n"
-                "Telegram 不能批准或执行资金动作。"
-            ),
+            render_capital_notification(notification),
         )
+        if delivered:
+            super().send_capital(notification)
 
     def _send_to_user(
         self,
         user_id: UUID,
         text: str,
         reply_markup: dict[str, Any] | None = None,
-    ) -> None:
+    ) -> bool:
         chat_id = self._chat_resolver(user_id)
         if chat_id is None:
             logger.info(
                 "Telegram notification held because the internal user is not bound",
                 extra={"event": "telegram_user_unbound", "recipient_id": str(user_id)},
             )
-            return
-        payload: dict[str, Any] = {"chat_id": chat_id, "text": text}
-        if reply_markup is not None:
-            payload["reply_markup"] = reply_markup
+            return False
+        payload = self._message_payload(chat_id, text, reply_markup)
         try:
             self._client.call("sendMessage", payload)
         except TelegramUnavailable:
@@ -341,6 +586,24 @@ class TelegramBotGateway(MockTelegramGateway):
                 "Telegram notification delivery failed",
                 extra={"event": "telegram_delivery_failed", "recipient_id": str(user_id)},
             )
+            return False
+        return True
+
+    @staticmethod
+    def _message_payload(
+        chat_id: str | int,
+        text: str,
+        reply_markup: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "chat_id": chat_id,
+            "text": _ensure_message_limit(text),
+            "parse_mode": "HTML",
+            "link_preview_options": {"is_disabled": True},
+        }
+        if reply_markup is not None:
+            payload["reply_markup"] = reply_markup
+        return payload
 
     def _poll(self) -> None:
         offset = 0
@@ -352,6 +615,7 @@ class TelegramBotGateway(MockTelegramGateway):
                 extra={"event": "telegram_poll_start_failed"},
             )
             return
+        self._safe_call("setMyCommands", {"commands": self._COMMANDS})
         while not self._stop_event.is_set():
             try:
                 response = self._client.call(
@@ -402,15 +666,20 @@ class TelegramBotGateway(MockTelegramGateway):
         chat = message.get("chat")
         sender = message.get("from")
         text = message.get("text")
-        if (
-            not isinstance(chat, dict)
-            or chat.get("type") != "private"
-            or not isinstance(sender, dict)
-            or not isinstance(text, str)
-            or not text.split(maxsplit=1)[0].startswith("/start")
-        ):
+        if not isinstance(chat, dict) or not isinstance(sender, dict) or not isinstance(text, str):
             return
         chat_id = chat.get("id")
+        command_token = text.split(maxsplit=1)[0]
+        if not command_token.startswith("/"):
+            return
+        command = command_token.split("@", maxsplit=1)[0].casefold()
+        if chat.get("type") != "private":
+            if isinstance(chat_id, int):
+                self._safe_call(
+                    "sendMessage",
+                    self._message_payload(chat_id, "此 Bot 仅支持一对一私聊。"),
+                )
+            return
         telegram_user_id = sender.get("id")
         username = sender.get("username")
         if (
@@ -423,8 +692,26 @@ class TelegramBotGateway(MockTelegramGateway):
             if isinstance(chat_id, int):
                 self._safe_call(
                     "sendMessage",
-                    {"chat_id": chat_id, "text": "此 Telegram 账号不在内部用户白名单中。"},
+                    self._message_payload(
+                        chat_id,
+                        "此 Telegram 账号不在内部用户白名单中。",
+                    ),
                 )
+            return
+        if command == "/help":
+            self._safe_call("sendMessage", self._message_payload(chat_id, render_help()))
+            return
+        if command == "/status":
+            self._safe_call("sendMessage", self._message_payload(chat_id, render_status()))
+            return
+        if command != "/start":
+            self._safe_call(
+                "sendMessage",
+                self._message_payload(
+                    chat_id,
+                    "<b>不支持该命令</b>\n\n" + render_help(),
+                ),
+            )
             return
         try:
             bound_username = self._binder(
@@ -439,18 +726,23 @@ class TelegramBotGateway(MockTelegramGateway):
             )
             self._safe_call(
                 "sendMessage",
-                {"chat_id": chat_id, "text": "绑定失败, 请在 Web 控制台检查内部用户。"},
+                self._message_payload(
+                    chat_id,
+                    "<b>绑定失败</b>\n请在 Web 控制台检查内部用户状态后重试。",
+                ),
             )
             return
         self._safe_call(
             "sendMessage",
-            {
-                "chat_id": chat_id,
-                "text": (
-                    f"已绑定内部用户 {bound_username}。\n"
-                    "本 Bot 只提供通知、审核页面跳转和只收紧风险操作。"
+            self._message_payload(
+                chat_id,
+                (
+                    "🟢 <b>绑定成功</b>\n"
+                    f"内部用户　<code>{_escaped(bound_username)}</code>\n\n"
+                    "本 Bot 只提供通知、Web 审核跳转和经二次确认的只收紧风险操作。\n"
+                    "输入 /help 查看完整能力边界。"
                 ),
-            },
+            ),
         )
 
     def _handle_callback(self, callback: dict[str, Any], update_id: int) -> None:
@@ -476,28 +768,191 @@ class TelegramBotGateway(MockTelegramGateway):
             return
         with self._lock:
             action = self._actions.get(callback_key)
-        if action is None or self._chat_resolver(action.recipient_id) != str(chat_id):
+            source_prompt = self._source_prompts.get(callback_key)
+            confirmation = self._confirmations.get(callback_key)
+            cancellation = self._cancellations.get(callback_key)
+        prompt = source_prompt or confirmation or cancellation
+        resolved_action = action if prompt is None else prompt.action
+        if (
+            resolved_action is None
+            or prompt is None
+            or self._chat_resolver(resolved_action.recipient_id) != str(chat_id)
+        ):
             self._answer_callback(callback_id, "按钮已过期或不属于当前用户。", show_alert=True)
             return
+        if cancellation is not None:
+            self._cancel_confirmation(
+                callback_id,
+                chat_id,
+                message.get("message_id"),
+                cancellation,
+            )
+            return
+        if confirmation is not None:
+            self._execute_confirmation(
+                callback_id,
+                chat_id,
+                message.get("message_id"),
+                confirmation,
+                update_id,
+            )
+            return
+        if self._action_handler is None or source_prompt is None:
+            self._answer_callback(callback_id, "Trading 暂未准备好。", show_alert=True)
+            return
+        self._show_confirmation(
+            callback_id,
+            chat_id,
+            message.get("message_id"),
+            source_prompt,
+        )
+
+    def _show_confirmation(
+        self,
+        callback_id: str,
+        chat_id: int,
+        message_id: object,
+        prompt: _ActionPrompt,
+    ) -> None:
+        suffix = prompt.source_callback_key.removeprefix("ca_")
+        confirm_key = "cc_" + suffix
+        cancel_key = "cx_" + suffix
+        with self._lock:
+            self._confirmations[confirm_key] = prompt
+            self._cancellations[cancel_key] = prompt
+        action_label = self._ACTION_LABELS[prompt.action.action]
+        keyboard = {
+            "inline_keyboard": [
+                [{"text": f"确认 · {action_label}", "callback_data": confirm_key}],
+                [{"text": "取消并返回", "callback_data": cancel_key}],
+            ]
+        }
+        self._answer_callback(callback_id, "请核对对象、影响范围和版本。", show_alert=False)
+        self._edit_message(
+            chat_id,
+            message_id,
+            self._render_confirmation(prompt.action),
+            keyboard,
+        )
+
+    def _cancel_confirmation(
+        self,
+        callback_id: str,
+        chat_id: int,
+        message_id: object,
+        prompt: _ActionPrompt,
+    ) -> None:
+        self._discard_confirmation(prompt)
+        self._answer_callback(callback_id, "已取消，未提交任何操作。", show_alert=False)
+        self._edit_message(
+            chat_id,
+            message_id,
+            prompt.original_text,
+            prompt.original_reply_markup,
+        )
+
+    def _execute_confirmation(
+        self,
+        callback_id: str,
+        chat_id: int,
+        message_id: object,
+        prompt: _ActionPrompt,
+        update_id: int,
+    ) -> None:
         if self._action_handler is None:
             self._answer_callback(callback_id, "Trading 暂未准备好。", show_alert=True)
             return
         try:
-            result = self._action_handler(action, update_id)
+            result = self._action_handler(prompt.action, update_id)
         except Exception:
             logger.exception(
                 "Telegram campaign action failed",
-                extra={"event": "telegram_action_failed", "action": action.action},
+                extra={"event": "telegram_action_failed", "action": prompt.action.action},
             )
-            self._answer_callback(callback_id, "操作失败, 请打开 Web 控制台确认。", show_alert=True)
-            return
-        self._answer_callback(callback_id, result, show_alert=False)
+            result = "未执行: TELEGRAM_ACTION_FAILED"
+            self._answer_callback(
+                callback_id,
+                "操作未执行，请在 Web 控制台确认。",
+                show_alert=True,
+            )
+        else:
+            self._answer_callback(callback_id, "请求已处理，请核对权威结果。", show_alert=False)
+        self._discard_action_buttons(prompt)
+        self._edit_message(
+            chat_id,
+            message_id,
+            self._render_action_result(prompt.action, result),
+            {"inline_keyboard": []},
+        )
+
+    def _discard_confirmation(self, prompt: _ActionPrompt) -> None:
+        suffix = prompt.source_callback_key.removeprefix("ca_")
+        with self._lock:
+            self._confirmations.pop("cc_" + suffix, None)
+            self._cancellations.pop("cx_" + suffix, None)
+
+    def _discard_action_buttons(self, prompt: _ActionPrompt) -> None:
+        with self._lock:
+            for row in prompt.original_reply_markup.get("inline_keyboard", []):
+                for button in row:
+                    callback_key = button.get("callback_data")
+                    if isinstance(callback_key, str):
+                        self._actions.pop(callback_key, None)
+                        self._source_prompts.pop(callback_key, None)
+                        suffix = callback_key.removeprefix("ca_")
+                        self._confirmations.pop("cc_" + suffix, None)
+                        self._cancellations.pop("cx_" + suffix, None)
+
+    def _render_confirmation(self, action: TelegramCampaignAction) -> str:
+        return _ensure_message_limit(
+            "🟠 <b>确认只收紧风险操作</b>\n"
+            f"<b>操作</b>　{_escaped(self._ACTION_LABELS[action.action])}\n"
+            f"<b>环境</b>　<code>{_escaped(action.environment)}</code>\n"
+            f"<b>对象</b>　Campaign <code>{_short_id(action.campaign_id)}</code>\n"
+            f"<b>权威版本</b>　v{action.campaign_version}\n\n"
+            f"<b>影响范围</b>\n{_escaped(self._ACTION_IMPACTS[action.action])}\n\n"
+            "确认时 Trading 会重新校验身份、权限、对象版本和业务不变量；"
+            "Telegram 不会绕过权威状态。"
+        )
+
+    def _render_action_result(self, action: TelegramCampaignAction, result: str) -> str:
+        code: str | None = None
+        if result.startswith("未执行:"):
+            code = result.partition(":")[2].strip()
+        if code:
+            result_text = (
+                f"{_ERROR_LABELS.get(code, '权威状态拒绝了该操作。')}\n"
+                f"错误码　<code>{_escaped(code)}</code>"
+            )
+            heading = "🔴 <b>操作未执行</b>"
+        else:
+            result_text = _escaped(result, max_length=1_200)
+            heading = "🟢 <b>请求已处理</b>"
+        return _ensure_message_limit(
+            f"{heading}\n"
+            f"<b>操作</b>　{_escaped(self._ACTION_LABELS[action.action])}\n"
+            f"<b>对象</b>　Campaign <code>{_short_id(action.campaign_id)}</code>\n"
+            f"<b>提交版本</b>　v{action.campaign_version}\n\n"
+            f"{result_text}\n\n"
+            "按钮已失效。请在 Web 控制台核对最新权威状态。"
+        )
+
+    def _edit_message(
+        self,
+        chat_id: int,
+        message_id: object,
+        text: str,
+        reply_markup: dict[str, Any],
+    ) -> None:
         self._safe_call(
-            "editMessageReplyMarkup",
+            "editMessageText",
             {
                 "chat_id": chat_id,
-                "message_id": message.get("message_id"),
-                "reply_markup": {"inline_keyboard": []},
+                "message_id": message_id,
+                "text": _ensure_message_limit(text),
+                "parse_mode": "HTML",
+                "link_preview_options": {"is_disabled": True},
+                "reply_markup": reply_markup,
             },
         )
 
