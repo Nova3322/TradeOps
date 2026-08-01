@@ -1692,6 +1692,13 @@ class TradingService:
             )
             if response is not None:
                 return self._intent_creation(response)
+            self._lock_risk_capacity(session)
+            policy = self._active_risk_policy(session)
+            auto_add_gate: CapabilityGate | None = None
+            if kind is IntentKind.ADD:
+                auto_add_gate = session.get(CapabilityGate, "AUTO_ADD", with_for_update=True)
+                if auto_add_gate is None or auto_add_gate.status != CapabilityStatus.ENABLED.value:
+                    _reject("AUTO_ADD_DISABLED", "automatic add capability is disabled")
             authorization = session.get(
                 TradingAuthorization, authorization_id, with_for_update=True
             )
@@ -1723,8 +1730,6 @@ class TradingService:
             ):
                 _reject("AUTHORIZATION_SCOPE_MISMATCH", "authorization exceeds proposal caps")
 
-            self._lock_risk_capacity(session)
-            policy = self._active_risk_policy(session)
             occupied_risk = self._occupied_risk(session)
             risk_amount = authorization.risk_limit * quantity / authorization.quantity_limit
             if risk_amount <= 0 or risk_amount > authorization.risk_limit:
@@ -1816,9 +1821,7 @@ class TradingService:
                     session.add(campaign)
                     session.flush()
             else:
-                gate = session.get(CapabilityGate, "AUTO_ADD", with_for_update=True)
-                if gate is None or gate.status != CapabilityStatus.ENABLED.value:
-                    _reject("AUTO_ADD_DISABLED", "automatic add capability is disabled")
+                assert auto_add_gate is not None
                 if authorization.add_revoked_at is not None:
                     _reject(
                         "AUTHORIZATION_ADD_REVOKED",
@@ -5521,7 +5524,7 @@ class TradingService:
             "expected_target_version": expected_target_version,
         }
         with self.database.session_factory.begin() as session:
-            campaign = session.get(Campaign, campaign_id, with_for_update=True)
+            campaign = session.get(Campaign, campaign_id)
             if campaign is None:
                 _reject("CAMPAIGN_NOT_FOUND", "campaign does not exist")
             self._require_role(
@@ -5536,15 +5539,19 @@ class TradingService:
             )
             if response is not None:
                 return int(response["allowed_adds"])
+            self._lock_risk_capacity(session)
+            authorization = session.get(
+                TradingAuthorization, campaign.authorization_id, with_for_update=True
+            )
+            campaign = session.get(Campaign, campaign_id, with_for_update=True)
+            if campaign is None:
+                _reject("CAMPAIGN_NOT_FOUND", "campaign does not exist")
             if (
                 expected_target_version is not None
                 and campaign.target_version != expected_target_version
             ):
                 _reject("VERSION_CONFLICT", "Campaign target changed before the action")
-            authorization = session.get(
-                TradingAuthorization, campaign.authorization_id, with_for_update=True
-            )
-            if authorization is None:
+            if authorization is None or authorization.authorization_id != campaign.authorization_id:
                 _reject("AUTHORIZATION_INACTIVE", "campaign authorization is missing")
             unresolved_add = session.scalar(
                 select(OrderIntent.intent_id).where(
@@ -5603,6 +5610,7 @@ class TradingService:
             )
             if response is not None:
                 return
+            self._lock_risk_capacity(session)
             gate = session.get(CapabilityGate, "AUTO_ADD", with_for_update=True)
             if gate is None:
                 _reject("CAPABILITY_GATE_NOT_FOUND", "AUTO_ADD gate is missing")
@@ -5612,7 +5620,10 @@ class TradingService:
             gate.version += 1
             gate.updated_at = now
             authorizations = session.scalars(
-                select(TradingAuthorization).where(TradingAuthorization.add_revoked_at.is_(None))
+                select(TradingAuthorization)
+                .where(TradingAuthorization.add_revoked_at.is_(None))
+                .order_by(TradingAuthorization.authorization_id)
+                .with_for_update()
             ).all()
             for authorization in authorizations:
                 authorization.add_revoked_at = now
@@ -5668,10 +5679,13 @@ class TradingService:
                 policy.updated_by = str(actor_id)
                 policy.updated_at = now
             authorizations = session.scalars(
-                select(TradingAuthorization).where(
+                select(TradingAuthorization)
+                .where(
                     TradingAuthorization.active,
                     TradingAuthorization.expires_at > now,
                 )
+                .order_by(TradingAuthorization.authorization_id)
+                .with_for_update()
             ).all()
             for authorization in authorizations:
                 authorization.active = False

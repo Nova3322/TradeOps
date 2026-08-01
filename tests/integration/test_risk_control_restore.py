@@ -3,6 +3,7 @@ from __future__ import annotations
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from threading import Barrier
 from uuid import UUID
 
 import pytest
@@ -10,11 +11,13 @@ from sqlalchemy import select
 
 from trading_control_plane.database import Database
 from trading_control_plane.domain import (
+    AddCandidateFacts,
     CapabilityStatus,
     Direction,
     DomainRejected,
     ExecutionEnvironment,
     IntentKind,
+    OrderIntentStatus,
     ProposalSource,
     ReviewDecision,
     RiskPolicyChangeStatus,
@@ -24,6 +27,7 @@ from trading_control_plane.domain import (
 )
 from trading_control_plane.models import (
     CapabilityGate,
+    OrderIntent,
     RiskControlChangeRequest,
     RiskPolicy,
     TradingAuthorization,
@@ -203,6 +207,196 @@ def test_pause_and_authorization_issue_serialize_fail_closed(
         policy = session.scalar(select(RiskPolicy).where(RiskPolicy.active))
         assert policy is not None
         assert policy.system_state == SystemRiskState.REDUCE_ONLY.value
+
+
+def test_pause_and_initial_intent_creation_share_risk_first_lock_order(
+    database: Database, service: TradingService
+) -> None:
+    ids = seed(service)
+    proposal_id = prepare_add_proposal(service, ids, key="pause-create-race")
+    authorization_id = service.issue_authorization(
+        proposal_id=proposal_id,
+        actor_id=ids["operator"],
+        expires_at=NOW + timedelta(minutes=30),
+        allowed_adds=0,
+        idempotency_key="pause-create-race-authorization",
+        now=NOW,
+    )
+    race = Barrier(2)
+
+    def create_initial() -> str:
+        race.wait(timeout=5)
+        try:
+            service.create_order_intent(
+                authorization_id,
+                ids["operator"],
+                IntentKind.INITIAL,
+                "acct-1",
+                "BINANCE",
+                ids["instrument"],
+                Direction.LONG,
+                Decimal("0.5"),
+                "pause-create-race-intent",
+                now=NOW + timedelta(seconds=1),
+            )
+        except DomainRejected as exc:
+            return exc.code
+        return "CREATED"
+
+    def pause() -> str:
+        race.wait(timeout=5)
+        return service.pause_new_risk(
+            ids["admin"],
+            "pause-create-race-pause",
+            reason="serialize pause against initial intent creation",
+            now=NOW + timedelta(seconds=1),
+        ).value
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        create_future = executor.submit(create_initial)
+        pause_future = executor.submit(pause)
+        results = {create_future.result(timeout=10), pause_future.result(timeout=10)}
+
+    assert SystemRiskState.REDUCE_ONLY.value in results
+    assert results <= {
+        SystemRiskState.REDUCE_ONLY.value,
+        "CREATED",
+        "AUTHORIZATION_INACTIVE",
+        "FINAL_RISK_CHECK_FAILED",
+    }
+    with database.session_factory() as session:
+        authorization = session.get(TradingAuthorization, authorization_id)
+        assert authorization is not None and authorization.active is False
+        policy = session.scalar(select(RiskPolicy).where(RiskPolicy.active))
+        assert policy is not None
+        assert policy.system_state == SystemRiskState.REDUCE_ONLY.value
+
+
+def test_disable_auto_add_and_add_creation_share_risk_gate_auth_lock_order(
+    database: Database, service: TradingService
+) -> None:
+    ids = seed(service)
+    enable_auto_add_for_test(database, ids["admin"], now=NOW)
+    authorization_id = issue_add_authorization(service, ids)
+    opening = service.create_order_intent(
+        authorization_id,
+        ids["operator"],
+        IntentKind.INITIAL,
+        "acct-1",
+        "BINANCE",
+        ids["instrument"],
+        Direction.LONG,
+        Decimal("0.5"),
+        "disable-add-race-opening",
+        now=NOW,
+    )
+    token = service.acquire_sender("acct-1:BINANCE", "disable-add-worker", ids["operator"], NOW)
+    service.record_shadow_order(
+        opening.intent_id,
+        ids["operator"],
+        "acct-1:BINANCE",
+        "disable-add-worker",
+        token,
+        "disable-add-race-order",
+        now=NOW,
+    )
+    service.record_fill(
+        opening.intent_id,
+        ids["operator"],
+        "disable-add-race-fill",
+        "BUY",
+        Decimal("0.5"),
+        Decimal("100"),
+        Decimal("0"),
+        "USDT",
+        Decimal("0"),
+        now=NOW,
+    )
+    position_id = service.record_position(
+        "acct-1",
+        "BINANCE",
+        ids["instrument"],
+        Decimal("0.5"),
+        Decimal("100"),
+        Decimal("110"),
+        True,
+        ids["operator"],
+        now=NOW,
+    )
+    service.record_protection(
+        position_id,
+        "disable-add-race-stop",
+        Decimal("0.5"),
+        Decimal("90"),
+        True,
+        ids["operator"],
+        now=NOW,
+    )
+    candidate = AddCandidateFacts(
+        candidate_id="disable_add_race_candidate",
+        contract_version="breakouts-v1",
+        venue="BINANCE",
+        symbol="BTCUSDT",
+        direction=Direction.LONG,
+        observed_at=NOW + timedelta(seconds=1),
+        reference_price=Decimal("110"),
+        readiness="READY",
+    )
+    race = Barrier(2)
+
+    def create_add() -> str:
+        race.wait(timeout=5)
+        try:
+            service.create_order_intent(
+                authorization_id,
+                ids["operator"],
+                IntentKind.ADD,
+                "acct-1",
+                "BINANCE",
+                ids["instrument"],
+                Direction.LONG,
+                Decimal("0.5"),
+                "disable-add-race-intent",
+                add_candidate=candidate,
+                now=NOW + timedelta(seconds=1),
+            )
+        except DomainRejected as exc:
+            return exc.code
+        return "CREATED"
+
+    def disable() -> str:
+        race.wait(timeout=5)
+        service.disable_global_auto_add(
+            ids["admin"],
+            "disable-add-race-disable",
+            reason="serialize global disable against Add creation",
+            now=NOW + timedelta(seconds=1),
+        )
+        return "DISABLED"
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        add_future = executor.submit(create_add)
+        disable_future = executor.submit(disable)
+        results = {add_future.result(timeout=10), disable_future.result(timeout=10)}
+
+    assert "DISABLED" in results
+    assert results <= {
+        "DISABLED",
+        "CREATED",
+        "AUTO_ADD_DISABLED",
+        "AUTHORIZATION_ADD_REVOKED",
+    }
+    with database.session_factory() as session:
+        gate = session.get(CapabilityGate, "AUTO_ADD")
+        authorization = session.get(TradingAuthorization, authorization_id)
+        add_intents = session.scalars(
+            select(OrderIntent).where(OrderIntent.kind == IntentKind.ADD.value)
+        ).all()
+        assert gate is not None and gate.status == CapabilityStatus.DISABLED.value
+        assert authorization is not None and authorization.add_revoked_at is not None
+        assert len(add_intents) <= 1
+        if add_intents:
+            assert add_intents[0].status == OrderIntentStatus.READY.value
 
 
 def approve_restore(
