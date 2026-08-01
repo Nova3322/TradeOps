@@ -1,7 +1,7 @@
 # 市场数据与 Instrument Catalog 合同
 
 > 版本：当前规范基线
-> 日期：2026-07-18
+> 日期：2026-08-01
 > Owner / 批准人：待 `DEC-GOV-004` 确认
 > 文档状态：工程合同基线
 > 上位文档：《交易系统总体方案》《策略合同与数值化验收门》
@@ -187,7 +187,7 @@ Trading 应保存每次提案和 Add 使用的 Kline/指标版本或证据引用
 Perptape 候选至少提供：
 
 - `candidate_id`、策略/信号版本和 source service version。
-- 规范或可映射的 venue、execution domain、native Instrument identity。
+- 规范或可映射的 venue、execution domain、源场所 raw symbol、canonical symbol 和 native Instrument identity。
 - 方向、决策周期、触发/突破时间、候选有效期。
 - 价格、Kline、成交量、持仓量和其他依据的时间与来源。
 - 数据健康、readiness、缺口和不确定性。
@@ -199,6 +199,10 @@ Trading 处理：
 - 从目标场所重新读取规则、盘口、交易时段和账户事实。
 - 去重迟到/重复候选，不因重连重复创建 Proposal。
 - Perptape 不可用或陈旧时冻结 SYSTEM 新候选；已有仓位继续由 Trading 管理。
+
+当前候选 ID 的确定性输入包含 `source_exchange + raw symbol + canonical symbol + timeframe + source_direction + triggered_at`。raw symbol 是源合同身份的一部分，不是纯显示字段：例如同一 canonical symbol 下的 `BTCUSDT` 与 `BTCUSDC` 必须形成不同 candidate ID、深链和 Proposal 关联，不能因 canonical 化被去重。
+
+2026-08-01 之前持久化的 legacy candidate ID 未包含 raw symbol。仅“旧 ID 唯一匹配一个当前候选”还不足以复用既有 Proposal；还必须同时满足 Proposal 的 `instrument_id`、venue、direction，以及冻结候选快照中的 venue、source_exchange、symbol、canonical_symbol、direction、source_direction、timeframe、triggered_at 全部与当前候选一致。任一字段缺失或不一致都不得复用。如果两个或更多当前报价合约命中同一 legacy ID，必须返回歧义拒绝，不能任选其一，也不能让另一合约复用旧 Proposal。新建 Proposal 优先冻结当前精确 candidate ID。
 
 候选不是 Proposal、Approval、Authorization 或 OrderIntent。
 
@@ -313,6 +317,7 @@ Catalog/Market 事件至少表达：
 | 失败 | 行为 |
 | --- | --- |
 | Instrument 无法唯一映射 | 拒绝候选/提案，不猜测 symbol |
+| legacy Perptape ID 匹配多个 raw symbol 合约 | 返回歧义拒绝，不复用旧 Proposal、不猜测报价合约 |
 | 规则陈旧或变化 | 停止该 Instrument 新仓/Add，重新认证 |
 | 公开行情陈旧/Gapped | 停止依赖该数据的新动作；已有保护继续 |
 | Mark/指数/盘口分歧 | 使用场景化保守政策或进入 UNKNOWN，不扩大风险 |

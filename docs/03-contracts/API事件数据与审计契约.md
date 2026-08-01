@@ -1,7 +1,7 @@
 # API、事件、数据与审计契约
 
 > 版本：当前规范基线
-> 日期：2026-07-18
+> 日期：2026-08-01
 > Owner / 批准人：待 `DEC-GOV-004` 确认
 > 文档状态：工程合同基线
 > 上位文档：《交易系统总体方案》《策略合同与数值化验收门》《领域模型与状态机》
@@ -42,7 +42,7 @@
 | 调用方 | 被调用方 | 允许内容 | 禁止内容 |
 | --- | --- | --- | --- |
 | Web/PWA | Trading API | 草稿、审核、查询、收紧、风险/资金提案 | 直连 Freqtrade/交易所/Vault |
-| Telegram Bot | Trading API | 冻结提案决定意图、关闭 Add、暂停、预定义减仓 | 任意数量/杠杆开仓、恢复增险、直连 Freqtrade |
+| Telegram Bot | Trading API | 通知、Web 审核深链、经二次确认的关闭 Add/预定义减仓或退出 | 任意数量/杠杆开仓、资金批准/执行、风险恢复、直连 Freqtrade |
 | Perptape | Trading Ingestion | 候选、指标、数据健康和版本 | 私有仓位、审批、订单 |
 | Trading Core | Risk Engine | 不可变 Decision Snapshot | 通过管理员参数覆盖拒绝 |
 | OMS | VenueAdapter/Freqtrade | 已授权、已预留、一次性 `OrderIntent` | 策略自由信号、无限重试 |
@@ -167,6 +167,17 @@ MANUAL 草稿、预检与冻结命令至少携带：方向、触发价、委托�
 
 资金命令使用 Treasury 权限与独立 `capital_transfer_id`，不得复用交易 Approval。
 
+### 7.6 Risk Control Restore
+
+当前 HTTP 合同为：
+
+- `GET /api/risk-controls`：返回当前 RiskPolicy revision、AUTO_ADD Gate version、运行时受控 scope、恢复 blocker、冷却和请求/复核事实。
+- `POST /api/risk-controls/restores`：创建冻结 `RiskControlChangeRequest`；载荷只接受 reason、是否恢复 AUTO_ADD 和 idempotency key，scope 与生产 LIVE 要求由服务端配置提供。
+- `POST /api/risk-controls/restores/{request_id}/reviews`：按 `expected_version` 记录 APPROVE/REJECT。APPROVE 必须携带绑定 user、`risk.restore.review`、request ID 和当前 version 的 action grant。
+- `POST /api/risk-controls/restores/{request_id}/execute`：携带绑定 `risk.restore.execute`、request ID 和当前 version 的 action grant；服务端在事务中重验来源政策/Gate、scope、冷却、TTL、两名不同 HUMAN 且有 `risk.restore.review` 权限的用户、申请人不得自审和全部恢复事实。
+
+请求状态为 `PENDING_REVIEW / APPROVED / REJECTED / EXPIRED / EXECUTED`，创建后 24 小时到期，最近一次相关收紧后至少冷却 15 分钟。生产没有运行时 LIVE scope 时以 `LIVE_SCOPE_CONFIGURATION_REQUIRED` fail closed；`KILL_SWITCH` 返回人工事故恢复要求，不允许通过该 API 放宽。风险恢复 API 不在 Telegram 暴露。
+
 ---
 
 ## 八、统一事件信封
@@ -201,7 +212,7 @@ MANUAL 草稿、预检与冻结命令至少携带：方向、触发价、委托�
 - ProposalCreated/Prechecked/Frozen/Superseded/Expired。
 - ApprovalRequested/Approved/Rejected/Returned/Expired。
 - AuthorizationIssued/Activated/Revoked/Expired/Consumed。
-- RiskEvaluated/Reserved/Released/Unknown/StateTightened/RecoveryApproved。
+- RiskEvaluated/Reserved/Released/Unknown/StateTightened，以及当前审计事实 `RISK_RESTORE_REQUESTED`、`RISK_RESTORE_REVIEWED`、`RISK_RESTORE_EXECUTED`。恢复请求的数据库状态是权威事实，当前未为无消费者场景新增 outbox 事件。
 - AddUnitClaimed/ReleasedZeroFill/Consumed/Invalidated/Expired；候选评估作为决策证据，不作为 AddUnit 生命周期事件。
 - OrderIntentCreated/Dispatched/Acknowledged/PartiallyFilled/Filled/Cancelled/Rejected/Unknown。
 - VenueFillObserved/PositionObserved/BalanceObserved/ReconciliationDifferenceFound/Reconciled。
@@ -242,7 +253,7 @@ MANUAL 草稿、预检与冻结命令至少携带：方向、触发价、委托�
 | Strategy | strategy、parameter version、signal/candidate evidence |
 | Proposal/Review | versioned proposal、ReviewerVote、ApprovalDecision、TradingAuthorization |
 | Campaign | 唯一经济仓位生命周期、AddUnit、target、protection requirement、exit reason |
-| Risk | decision snapshot、capacity、Reserved/Open/Unknown/Stress Heat、system state |
+| Risk | decision snapshot、capacity、Reserved/Open/Unknown/Stress Heat、system state、RiskControlChangeRequest、policy/gate monotonic version |
 | Execution | `OrderIntent`、venue order、fill、可重建 venue position/balance projection、reconciliation |
 | Margin | MarginNormalizationWorkflow、fencing、released/reserved margin、settlement |
 | Capital | vault/account balance、funding envelope、capital transfer、fee、confirmation |
@@ -253,7 +264,7 @@ MANUAL 草稿、预检与冻结命令至少携带：方向、触发价、委托�
 
 ### 11.1 简单 Capability Gate 与发布验证
 
-当前只持久化简单 Capability Gate：`capability_key`、`status`、`reason`、`operator_id` 和 `updated_at`。Gate 仅表达显式启用/禁用，不能替代 RBAC、Approval、RiskDecision、TradingAuthorization、reconciliation 或 sender fencing。
+当前只持久化简单 Capability Gate：`capability_key`、`status`、`reason`、`operator_id`、单调 `version` 和 `updated_at`。Gate 仅表达显式启用/禁用，不能替代 RBAC、Approval、RiskDecision、TradingAuthorization、reconciliation 或 sender fencing。风险恢复冻结并比较 AUTO_ADD Gate version，控制漂移时拒绝执行。
 
 场所、账户、adapter、worker、margin mode 和风险档位的未来发布验证保存在测试/发布材料和版本化配置中；没有真实消费者前，不建设 CapabilityCertificate、证据包、证书状态机或平行认证实体。若未来真实外部副作用证明需要额外持久状态，应以当时的具体恢复合同另行设计。
 
@@ -290,6 +301,7 @@ MANUAL 草稿、预检与冻结命令至少携带：方向、触发价、委托�
 - `FUNDING_NOT_SETTLED` / `MARGIN_INSUFFICIENT` / `PROTECTION_UNAVAILABLE`。
 - `VENUE_UNAVAILABLE` / `RATE_LIMITED` / `EXECUTION_UNKNOWN`。
 - `AUDIT_UNAVAILABLE` / `SYSTEM_REDUCE_ONLY`。
+- 风险恢复使用稳定原因码，包括 `RISK_RESTORE_NOT_APPROVED`、`RISK_RESTORE_COOLDOWN`、`RISK_RESTORE_EXPIRED`、`RISK_RESTORE_CONTROL_DRIFT`、`RISK_RESTORE_SCOPE_DRIFT`、`RISK_RESTORE_BLOCKED`、`LIVE_SCOPE_CONFIGURATION_REQUIRED` 和 `KILL_SWITCH_MANUAL_RECOVERY_REQUIRED`。
 
 错误响应保存 correlation ID、稳定原因码、用户可读解释、是否可重试及安全下一步。不得把所有场所错误映射为“下单失败”。
 
@@ -301,7 +313,7 @@ MANUAL 草稿、预检与冻结命令至少携带：方向、触发价、委托�
 
 - 每个命令的原始业务字段 hash、actor、channel、session、device、MFA 和权限结果。
 - 每次允许/拒绝的规则、政策版本和解释。
-- Proposal、Approval、Authorization、Risk、Order、Fill、Protection、Margin、Capital 的全部迁移。
+- Proposal、Approval、Authorization、Risk、RiskControlChangeRequest、Order、Fill、Protection、Margin、Capital 的全部迁移。
 - 标签、作用域、自审、密钥、配置、Capability Gate 和发布变更。
 - 任何 break-glass、外部人工交易、修正、重放和数据导出。
 
