@@ -23,6 +23,16 @@ const shortId = (value) => value ? `${value.slice(0, 8)}…` : '—';
 const fmtDate = (value) => value ? new Intl.DateTimeFormat('zh-CN', {month:'short', day:'numeric', hour:'2-digit', minute:'2-digit'}).format(new Date(value)) : '—';
 const fmtNumber = (value) => value === null || value === undefined ? '—' : new Intl.NumberFormat('en-US', {maximumFractionDigits: 6}).format(Number(value));
 const fmtCompact = (value) => value === null || value === undefined ? '暂无数据' : new Intl.NumberFormat('zh-CN', {notation:'compact', maximumFractionDigits:1}).format(Number(value));
+const fmtAmount = (value, currency) => value === null || value === undefined ? '—' : `${fmtNumber(value)}${currency ? ` ${currency}` : ''}`;
+const statusLabels = {DRAFT:'草稿',PENDING_REVIEW:'待审核',APPROVED:'已批准',REJECTED:'已拒绝',EXPIRED:'已过期',ALLOW:'通过',DENY:'拒绝'};
+const riskLabels = {LOW:'低风险',MEDIUM:'中风险',HIGH:'高风险'};
+const fmtStatus = (value) => statusLabels[value] || value || '未知';
+const fmtRisk = (value) => riskLabels[value] || value || '未知';
+const percentageDistance = (from, to) => {
+  const base = Number(from); const target = Number(to);
+  if (!base || !target) return '—';
+  return `${Math.abs((target - base) / base * 100).toFixed(2)}%`;
+};
 const roleNames = () => (session?.roles || []).map((item) => item.role);
 const loginDestination = () => {
   const destination = `${location.pathname}${location.search}`;
@@ -452,25 +462,55 @@ function bindOpportunityActions() {
 async function renderManualProposal() {
   const result = await api('/api/instruments');
   instruments = result.data;
-  main.innerHTML = `<section class="page"><header class="page-head"><div><p class="eyebrow">MANUAL · SHADOW</p><h1>创建人工提案</h1><p class="lede">输入方向、数量、风险上限和失效条件。提交后字段被冻结，任何变更都应创建新版本。</p></div></header>
-    <form id="manual-form" class="form-panel"><div class="field-grid">
-      <label>账户<input name="account_id" value="acct-1" required></label>
-      <label>交易标的<select name="instrument_id" required>${instruments.map(i => `<option value="${i.instrument_id}" data-venue="${escapeHtml(i.venue)}">${escapeHtml(i.venue)} · ${escapeHtml(i.symbol)}</option>`).join('')}</select></label>
-      <label>方向<select name="direction"><option>LONG</option><option>SHORT</option></select></label>
-      <label>风险档位<select name="risk_tier"><option>LOW</option><option selected>MEDIUM</option><option>HIGH</option></select></label>
-      <label>总数量上限<input name="quantity" type="number" step="any" min="0" required></label>
-      <label>初仓数量<input name="initial_quantity" type="number" step="any" min="0"></label>
-      <label>最大风险<input name="max_risk" type="number" step="any" min="0" required></label>
-      <label>触发价格<input name="trigger_price" type="number" step="any" min="0" required></label>
-      <label>限价（可选）<input name="limit_price" type="number" step="any" min="0"></label>
-      <label>失效价格<input name="invalidation_price" type="number" step="any" min="0" required></label>
-      <label>允许 AUTO_ADD<select name="allow_auto_add"><option value="false" selected>否</option><option value="true">是</option></select></label>
-      <label>预授权 AddUnit<select name="requested_adds"><option value="0" selected>0</option><option value="1">1</option><option value="2">2</option><option value="3">3</option></select></label>
-      <label>Add 触发价格<input name="add_trigger_price" type="number" step="any" min="0"></label>
-      <label>有效分钟<input name="expires_in_minutes" type="number" min="5" max="1440" value="120" required></label>
-    </div><label style="margin-top:16px">提案理由<textarea name="rationale" rows="4" required></textarea></label>
-    <div class="safety-note">该表单不会下单；它只创建冻结提案并进入 Reviewer 队列。真实发送能力仍为 DISABLED。</div><div class="form-error" role="alert"></div><div class="form-actions"><button class="primary">提交审核</button></div></form></section>`;
-  document.querySelector('#manual-form').addEventListener('submit', submitManualProposal);
+  main.innerHTML = `<section class="page"><header class="page-head"><div><p class="eyebrow">MANUAL PROPOSAL · SHADOW</p><h1>创建人工提案</h1><p class="lede">先说清要做什么、最多亏多少；分批入场和 AUTO_ADD 等执行细节按需展开。</p></div><a class="secondary" href="/proposals" data-link>查看全部提案</a></header>
+    <div class="compose-layout"><form id="manual-form" class="form-panel proposal-compose">
+      <section class="form-section"><div class="section-title"><span>1</span><div><h2>交易意图</h2><p>选标的、定方向，说清从哪个价格开始执行。</p></div></div><div class="field-grid">
+        <label>账户<span class="field-help">资金和权限归属</span><input name="account_id" value="acct-1" required></label>
+        <label>交易标的<span class="field-help">仅展示 Catalog 中已启用的合约</span><select name="instrument_id" required>${instruments.map(i => `<option value="${i.instrument_id}" data-venue="${escapeHtml(i.venue)}">${escapeHtml(i.venue)} · ${escapeHtml(i.symbol)}</option>`).join('')}</select></label>
+        <label>方向<span class="field-help">做多或做空</span><select name="direction"><option>LONG</option><option>SHORT</option></select></label>
+        <label>触发价格<span class="field-help">计划开始执行的位置</span><input name="trigger_price" type="number" step="any" min="0" required></label>
+      </div></section>
+      <section class="form-section"><div class="section-title"><span>2</span><div><h2>风险边界</h2><p>用数量、最大损失和失效点限制这笔交易。</p></div></div><div class="field-grid">
+        <label>风险档位<span class="field-help">影响审批门槛与加仓上限</span><select name="risk_tier"><option>LOW</option><option selected>MEDIUM</option><option>HIGH</option></select></label>
+        <label>总数量上限<span class="field-help">这份提案不能突破的数量</span><input name="quantity" type="number" step="any" min="0" required></label>
+        <label>最大风险<span class="field-help">以账户结算币计价</span><input name="max_risk" type="number" step="any" min="0" required></label>
+        <label>失效价格<span class="field-help">到达后交易逻辑不再成立</span><input name="invalidation_price" type="number" step="any" min="0" required></label>
+      </div></section>
+      <details class="advanced-form"><summary><span>高级执行参数</span><small>分批入场、限价、AUTO_ADD 与有效期</small></summary><div class="field-grid">
+        <label>初仓数量<input name="initial_quantity" type="number" step="any" min="0" placeholder="默认等于总数量"></label>
+        <label>限价（可选）<input name="limit_price" type="number" step="any" min="0"></label>
+        <label>允许 AUTO_ADD<select name="allow_auto_add"><option value="false" selected>否</option><option value="true">是</option></select></label>
+        <label>预授权 AddUnit<select name="requested_adds"><option value="0" selected>0</option><option value="1">1</option><option value="2">2</option><option value="3">3</option></select></label>
+        <label>Add 触发价格<input name="add_trigger_price" type="number" step="any" min="0"></label>
+        <label>有效分钟<input name="expires_in_minutes" type="number" min="5" max="1440" value="120" required></label>
+      </div></details>
+      <label class="rationale-field">提案理由<span class="field-help">至少说明触发逻辑和主要风险</span><textarea name="rationale" rows="4" required placeholder="例如：4h 突破确认，成交量扩张；若跌破失效价则退出。"></textarea></label>
+      <div class="form-error" role="alert"></div><div class="form-actions"><span class="submit-disclosure">提交后冻结当前参数并进入 Reviewer 队列，不会直接下单。</span><button class="primary">创建并提交审核</button></div>
+    </form>
+    <aside class="proposal-preview" aria-live="polite"><p class="eyebrow">LIVE SUMMARY</p><h2>提交前摘要</h2><div class="preview-symbol" data-preview-symbol>选择交易标的</div><div class="preview-direction" data-preview-direction>LONG</div><dl class="preview-metrics"><div><dt>计划名义价值</dt><dd data-preview-notional>—</dd></div><div><dt>最大风险</dt><dd data-preview-risk>—</dd></div><div><dt>失效距离</dt><dd data-preview-distance>—</dd></div><div><dt>有效期</dt><dd data-preview-expiry>120 分钟</dd></div></dl><div class="preview-checks"><p data-check-intent>○ 补全交易意图</p><p data-check-risk>○ 补全风险边界</p><p>✓ 只创建提案，不直接下单</p></div></aside></div></section>`;
+  const form = document.querySelector('#manual-form');
+  form.addEventListener('submit', submitManualProposal);
+  form.addEventListener('input', updateManualProposalPreview);
+  updateManualProposalPreview({currentTarget:form});
+}
+
+function updateManualProposalPreview(event) {
+  const form = event.currentTarget;
+  const data = Object.fromEntries(new FormData(form));
+  const selected = instruments.find(item => item.instrument_id === data.instrument_id);
+  const trigger = Number(data.trigger_price); const quantity = Number(data.quantity);
+  const intentReady = Boolean(selected && trigger > 0 && data.direction);
+  const riskReady = Number(data.max_risk) > 0 && Number(data.invalidation_price) > 0 && quantity > 0;
+  document.querySelector('[data-preview-symbol]').textContent = selected ? `${selected.symbol} · ${selected.venue}` : '选择交易标的';
+  const direction = document.querySelector('[data-preview-direction]');
+  direction.textContent = data.direction || '—';
+  direction.className = `preview-direction ${data.direction === 'SHORT' ? 'direction-short' : 'direction-long'}`;
+  document.querySelector('[data-preview-notional]').textContent = trigger > 0 && quantity > 0 ? fmtAmount(trigger * quantity, selected?.quote_currency) : '—';
+  document.querySelector('[data-preview-risk]').textContent = data.max_risk ? `${fmtAmount(data.max_risk, selected?.collateral_currency)} · ${fmtRisk(data.risk_tier)}` : '—';
+  document.querySelector('[data-preview-distance]').textContent = percentageDistance(data.trigger_price, data.invalidation_price);
+  document.querySelector('[data-preview-expiry]').textContent = `${data.expires_in_minutes || 120} 分钟`;
+  document.querySelector('[data-check-intent]').textContent = `${intentReady ? '✓' : '○'} ${intentReady ? '交易意图完整' : '补全交易意图'}`;
+  document.querySelector('[data-check-risk]').textContent = `${riskReady ? '✓' : '○'} ${riskReady ? '风险边界完整' : '补全风险边界'}`;
 }
 
 async function submitManualProposal(event) {
@@ -499,22 +539,73 @@ async function submitManualProposal(event) {
 async function renderProposalList(status, title) {
   const result = await api(`/api/proposals${status ? `?proposal_status=${status}` : ''}`);
   const items = result.data;
-  main.innerHTML = `<section class="page"><header class="page-head"><div><p class="eyebrow">AUTHORITATIVE PROPOSALS</p><h1>${escapeHtml(title)}</h1><p class="lede">每一行都是 PostgreSQL 中的当前权威状态，不把通知或界面缓存当作审批结果。</p></div></header>
-    ${items.length ? `<div class="table-wrap"><table><thead><tr><th>来源 / 标的</th><th>方向</th><th>风险</th><th>状态</th><th>版本</th><th>到期</th></tr></thead><tbody>${items.map(item => `<tr data-href="/proposals/${item.proposal_id}"><td><b>${escapeHtml(item.source)}</b><br><span class="subtle">${escapeHtml(item.venue)} · ${shortId(item.instrument_id)}</span></td><td class="${item.direction === 'LONG' ? 'direction-long' : 'direction-short'}">${escapeHtml(item.direction)}</td><td>${escapeHtml(item.risk_tier)} · ${fmtNumber(item.max_risk)}</td><td><b class="status-${escapeHtml(item.status)}">${escapeHtml(item.status)}</b></td><td>v${item.version}</td><td>${fmtDate(item.expires_at)}</td></tr>`).join('')}</tbody></table></div>` : '<section class="empty-state"><div><h2>当前没有匹配提案</h2><p>队列为空不代表已批准或已执行任何交易。</p></div></section>'}</section>`;
+  const pending = items.filter(item => item.status === 'PENDING_REVIEW').length;
+  const expiring = items.filter(item => { const remaining = new Date(item.expires_at) - Date.now(); return remaining > 0 && remaining < 30 * 60 * 1000; }).length;
+  main.innerHTML = `<section class="page"><header class="page-head"><div><p class="eyebrow">PROPOSAL CONTROL</p><h1>${escapeHtml(title)}</h1><p class="lede">${status ? '先看交易逻辑和风险边界，再做独立判断；审批不等于下单。' : '集中查看提案从创建、审核到授权的权威状态。'}</p></div><div class="toolbar"><a class="secondary" href="/opportunities" data-link>从机会创建</a><a class="primary" href="/proposals/new" data-link>新建人工提案</a></div></header>
+    <div class="stats proposal-stats"><div class="stat"><small>当前列表</small><b>${items.length}</b></div><div class="stat"><small>等待审核</small><b>${pending}</b></div><div class="stat"><small>高风险</small><b>${items.filter(item => item.risk_tier === 'HIGH').length}</b></div><div class="stat"><small>30 分钟内到期</small><b>${expiring}</b></div></div>
+    <div class="section-tabs"><a class="${status ? 'active' : ''}" href="/reviews" data-link>待我审核${pending ? `<span>${pending}</span>` : ''}</a><a class="${status ? '' : 'active'}" href="/proposals" data-link>全部提案</a></div>
+    ${items.length ? `<div class="proposal-list-tools"><label>搜索标的或账户<input id="proposal-search" type="search" placeholder="BTCUSDT / acct-1"></label><label>方向<select id="proposal-direction"><option value="">全部方向</option><option>LONG</option><option>SHORT</option></select></label><label>风险<select id="proposal-risk"><option value="">全部档位</option><option>LOW</option><option>MEDIUM</option><option>HIGH</option></select></label><span><b data-proposal-count>${items.length}</b> 个结果</span></div><div class="table-wrap proposal-table"><table><thead><tr><th>提案</th><th>方向 / 数量</th><th>风险边界</th><th>状态</th><th>提交时间</th><th>到期</th></tr></thead><tbody>${items.map(item => `<tr data-href="/proposals/${item.proposal_id}" data-proposal-row data-search="${escapeHtml(`${item.symbol || ''} ${item.account_id} ${item.venue}`.toLowerCase())}" data-direction="${escapeHtml(item.direction)}" data-risk="${escapeHtml(item.risk_tier)}"><td><b>${escapeHtml(item.symbol || shortId(item.instrument_id))}</b><br><span class="subtle">${escapeHtml(item.venue)} · ${escapeHtml(item.source === 'SYSTEM' ? 'Perptape' : '人工')}</span></td><td><span class="direction-pill ${item.direction === 'LONG' ? 'direction-long' : 'direction-short'}">${escapeHtml(item.direction)}</span><br><span class="subtle">数量 ${fmtNumber(item.quantity)}</span></td><td><b>${fmtRisk(item.risk_tier)}</b><br><span class="subtle">最多 ${escapeHtml(fmtAmount(item.max_risk, item.collateral_currency))}</span></td><td><span class="status-pill status-${escapeHtml(item.status)}">${escapeHtml(fmtStatus(item.status))}</span></td><td>${fmtDate(item.created_at)}<br><span class="subtle">v${item.version}</span></td><td>${fmtDate(item.expires_at)}</td></tr>`).join('')}</tbody></table></div><section id="proposal-filter-empty" class="empty-state compact-empty" hidden><div><h2>没有符合条件的提案</h2><p>请清除搜索或调整筛选。</p></div></section>` : '<section class="empty-state"><div><h2>当前没有匹配提案</h2><p>可以从机会页一键创建，或提交一份人工提案。</p><div class="toolbar empty-actions"><a class="secondary" href="/opportunities" data-link>查看机会</a><a class="primary" href="/proposals/new" data-link>新建提案</a></div></div></section>'}</section>`;
   bindLinkedRows();
+  const filter = () => {
+    const query = document.querySelector('#proposal-search')?.value.toLowerCase().trim() || '';
+    const direction = document.querySelector('#proposal-direction')?.value || '';
+    const risk = document.querySelector('#proposal-risk')?.value || '';
+    let visible = 0;
+    document.querySelectorAll('[data-proposal-row]').forEach(row => {
+      const matches = (!query || row.dataset.search.includes(query)) && (!direction || row.dataset.direction === direction) && (!risk || row.dataset.risk === risk);
+      row.hidden = !matches;
+      if (matches) visible += 1;
+    });
+    if (document.querySelector('[data-proposal-count]')) document.querySelector('[data-proposal-count]').textContent = visible;
+    if (document.querySelector('#proposal-filter-empty')) document.querySelector('#proposal-filter-empty').hidden = visible !== 0;
+  };
+  ['#proposal-search','#proposal-direction','#proposal-risk'].forEach(selector => document.querySelector(selector)?.addEventListener('input', filter));
 }
 
 async function renderProposalDetail(id) {
   const item = await api(`/api/proposals/${id}`);
-  const canReview = roleNames().includes('REVIEWER') || roleNames().includes('SYSTEM_ADMIN');
+  const canReview = (roleNames().includes('REVIEWER') || roleNames().includes('SYSTEM_ADMIN')) && item.proposer_id !== session.user_id;
   const canOperate = roleNames().includes('OPERATOR') || roleNames().includes('SYSTEM_ADMIN');
-  main.innerHTML = `<section class="page"><header class="page-head"><div><p class="eyebrow">${escapeHtml(item.environment)} · ${escapeHtml(item.source)}</p><h1>提案 ${shortId(item.proposal_id)}</h1><p class="lede">状态 <b class="status-${escapeHtml(item.status)}">${escapeHtml(item.status)}</b> · 权威版本 v${item.version}</p></div><div class="toolbar"><a class="secondary" href="/reviews" data-link>返回队列</a></div></header>
-    <div class="detail-layout"><div class="stack"><article class="card"><h2>冻结交易语义</h2><dl class="definition-grid">${definition('账户', item.account_id)}${definition('场所', item.venue)}${definition('方向', item.direction)}${definition('风险档位', item.risk_tier)}${definition('总数量上限', fmtNumber(item.quantity))}${definition('初仓数量', fmtNumber(item.frozen_payload?.details?.initial_quantity || item.quantity))}${definition('风险上限', fmtNumber(item.max_risk))}${definition('AUTO_ADD', item.frozen_payload?.details?.allow_auto_add ? `允许 · ${item.frozen_payload.details.requested_adds} Unit` : '不允许')}${definition('Add 触发价', fmtNumber(item.frozen_payload?.details?.add_trigger_price))}${definition('来源候选', item.source_candidate_id || 'MANUAL')}${definition('来源时间', fmtDate(item.source_observed_at))}</dl></article>
-      <article class="card"><h2>理由与来源事实</h2><pre>${escapeHtml(JSON.stringify(item.frozen_payload, null, 2))}</pre></article>
-      <article class="card"><h2>审核记录</h2>${item.approvals.length ? item.approvals.map(a => `<div class="callout"><b>${escapeHtml(a.decision)}</b> · ${escapeHtml(a.reason)}<br><span class="subtle">${shortId(a.reviewer_id)} · ${fmtDate(a.created_at)}</span></div>`).join('') : '<p class="subtle">尚无 Reviewer 投票。</p>'}</article></div>
-      <aside class="stack"><article class="card"><h2>安全动作</h2><p class="subtle">批准要求对象版本绑定的短时 step-up。拒绝只会收紧，不生成授权。</p>${item.status === 'PENDING_REVIEW' && canReview ? `<label>审核理由<textarea id="review-reason" rows="3">已核对冻结字段与风险范围</textarea></label><div class="toolbar" style="margin-top:12px"><button class="primary" data-approve>Step-up 并批准</button><button class="danger" data-reject>拒绝</button></div><div class="form-error" id="review-error"></div>` : '<p class="safety-note">当前状态或角色没有可用审核动作。</p>'}</article>
-      <article class="card"><h2>风险决定</h2>${item.risk_decision ? `<p><b class="status-${item.risk_decision.result}">${escapeHtml(item.risk_decision.result)}</b></p>${definition('批准数量', item.risk_decision.approved_quantity)}${definition('风险金额', item.risk_decision.risk_amount)}<p class="subtle">${escapeHtml(item.risk_decision.reasons.join(' · '))}</p>` : '<p class="subtle">尚未运行服务端确定性 Risk Engine。</p>'}${item.status === 'APPROVED' && canOperate && !item.risk_decision ? '<button class="primary" data-risk>运行 RiskDecision</button>' : ''}</article>
-      <article class="card"><h2>短期交易授权</h2>${item.authorization ? `<p><b>${shortId(item.authorization.authorization_id)}</b></p>${definition('数量上限', item.authorization.quantity_limit)}${definition('风险上限', item.authorization.risk_limit)}${definition('AddUnit', `${item.authorization.used_adds} / ${item.authorization.allowed_adds}`)}${definition('到期', fmtDate(item.authorization.expires_at))}` : '<p class="subtle">尚无 TradingAuthorization。</p>'}${item.risk_decision && item.risk_decision.result !== 'DENY' && canOperate && !item.authorization ? '<button class="primary" data-authorize>签发短期授权</button>' : ''}${item.authorization?.active && canOperate ? '<button class="primary" data-initial style="margin-top:10px">创建 SHADOW 初仓意图</button>' : ''}<p class="safety-note">创建意图会原子预留风险，但不会连接交易所。必须先在仓位页记录当前 SHADOW 仓位与权益事实。</p></article></aside></div></section>`;
+  const details = item.frozen_payload?.details || {};
+  const candidate = details.candidate || {};
+  const triggerPrice = details.trigger_price || candidate.reference_price || candidate.threshold_price;
+  const invalidationPrice = details.invalidation_price;
+  const notional = triggerPrice ? Number(triggerPrice) * Number(item.quantity) : null;
+  const reviewDone = !['DRAFT','PENDING_REVIEW'].includes(item.status);
+  const riskDone = Boolean(item.risk_decision);
+  const authorizationDone = Boolean(item.authorization);
+  const terminal = ['REJECTED','EXPIRED'].includes(item.status) || item.risk_decision?.result === 'DENY';
+  const rationale = details.rationale || candidate.rationale || '未提供补充理由';
+  const sourceLink = item.source_link || candidate.detail_url;
+  const chartLink = candidate.chart_url;
+  const sourceFacts = item.source === 'SYSTEM'
+    ? `<div class="source-facts"><div><small>来源状态</small><b class="${item.source_readiness === 'READY' ? 'direction-long' : 'direction-short'}">${escapeHtml(item.source_readiness || '未知')}</b></div><div><small>共振周期</small><b>${escapeHtml(candidate.timeframe || '—')}</b></div><div><small>成交量</small><b>${fmtCompact(candidate.quote_volume)}</b></div><div><small>持仓量</small><b>${fmtCompact(candidate.open_interest)}</b></div><div><small>观测时间</small><b>${fmtDate(item.source_observed_at)}</b></div></div>`
+    : '<div class="source-facts manual-source"><div><small>来源</small><b>人工输入</b></div><div><small>审核依据</small><b>冻结参数与提案理由</b></div></div>';
+  const highRiskReviewCopy = item.risk_tier === 'HIGH' ? `高风险提案需要两名不同 Reviewer；当前已记录 ${item.approvals.length} 票。` : '批准后仍需运行服务端风险检查。';
+  const nextAction = terminal
+    ? {title:'流程已终止', copy:'该提案不能继续扩大风险。条件改变后需创建新提案。', tone:'danger'}
+    : item.status === 'PENDING_REVIEW'
+      ? canReview
+        ? {title:'需要你的独立判断', copy:`核对方向、触发价、失效位置和最大风险。${highRiskReviewCopy}`, tone:'attention'}
+        : {title:'等待独立审核', copy:item.proposer_id === session.user_id ? '你是提案创建者，不能审核自己的提案。' : '当前角色没有审核权限。', tone:'neutral'}
+      : item.status === 'APPROVED' && !riskDone
+        ? {title:'下一步：运行风险检查', copy:'审核已完成，Operator 需要基于最新账户事实运行确定性风控。', tone:'attention'}
+        : riskDone && item.risk_decision.result !== 'DENY' && !authorizationDone
+          ? {title:'下一步：签发短期授权', copy:'风险检查已通过，可签发限时、限数量、限风险的交易授权。', tone:'attention'}
+          : authorizationDone && item.authorization.active
+            ? {title:'已准备创建初仓意图', copy:'授权仍在有效期内；创建后只记录 SHADOW 风险预留与意图。', tone:'success'}
+            : {title:'当前没有待办动作', copy:'请核对授权有效期和当前状态。', tone:'neutral'};
+  main.innerHTML = `<section class="page proposal-detail"><header class="page-head"><div><p class="eyebrow">${escapeHtml(item.environment)} · ${escapeHtml(item.source === 'SYSTEM' ? 'PERPTAPE SYSTEM' : 'MANUAL')}</p><div class="proposal-title-row"><h1>${escapeHtml(item.symbol || candidate.symbol || '交易提案')}</h1><span class="direction-pill ${item.direction === 'LONG' ? 'direction-long' : 'direction-short'}">${escapeHtml(item.direction)}</span><span class="status-pill status-${escapeHtml(item.status)}">${escapeHtml(fmtStatus(item.status))}</span></div><p class="lede">${escapeHtml(item.venue)} · ${escapeHtml(item.account_id)} · 提案 ${shortId(item.proposal_id)} · v${item.version}</p></div><div class="toolbar"><a class="secondary" href="/reviews" data-link>返回审核队列</a>${sourceLink ? `<a class="secondary" href="${escapeHtml(sourceLink)}" target="_blank" rel="noreferrer">Perptape 榜单 ↗</a>` : ''}${chartLink ? `<a class="secondary" href="${escapeHtml(chartLink)}" target="_blank" rel="noreferrer">交易所图表 ↗</a>` : ''}</div></header>
+    <ol class="workflow-stepper" aria-label="提案流程"><li class="done"><span>1</span><div><b>提案已冻结</b><small>${fmtDate(item.frozen_at)}</small></div></li><li class="${reviewDone ? 'done' : 'current'}"><span>2</span><div><b>独立审核</b><small>${reviewDone ? fmtStatus(item.status) : '等待判断'}</small></div></li><li class="${riskDone ? 'done' : reviewDone && !terminal ? 'current' : ''}"><span>3</span><div><b>风险检查</b><small>${riskDone ? fmtStatus(item.risk_decision.result) : '尚未运行'}</small></div></li><li class="${authorizationDone ? 'done' : riskDone && !terminal ? 'current' : ''}"><span>4</span><div><b>短期授权</b><small>${authorizationDone ? (item.authorization.active ? '有效' : '已失效') : '尚未签发'}</small></div></li></ol>
+    <div class="proposal-detail-layout"><div class="stack">
+      <article class="card decision-brief"><div class="card-heading"><div><p class="eyebrow">DECISION BRIEF</p><h2>这笔交易要做什么</h2></div><span class="risk-badge risk-${escapeHtml(item.risk_tier)}">${escapeHtml(fmtRisk(item.risk_tier))}</span></div><p class="proposal-rationale">${escapeHtml(rationale)}</p><div class="decision-metrics"><div><small>计划数量</small><b>${fmtNumber(item.quantity)}</b><span>初仓 ${fmtNumber(details.initial_quantity || item.quantity)}</span></div><div><small>估算名义价值</small><b>${notional === null ? '—' : escapeHtml(fmtAmount(notional, item.quote_currency))}</b><span>触发价 ${fmtNumber(triggerPrice)}</span></div><div><small>最大风险</small><b>${escapeHtml(fmtAmount(item.max_risk, item.collateral_currency))}</b><span>${fmtRisk(item.risk_tier)}</span></div><div><small>失效位置</small><b>${fmtNumber(invalidationPrice)}</b><span>距触发 ${percentageDistance(triggerPrice, invalidationPrice)}</span></div></div>${sourceFacts}</article>
+      <article class="card frozen-scope"><div class="card-heading"><div><p class="eyebrow">FROZEN SCOPE</p><h2>冻结范围</h2></div><span class="status-pill">不可编辑</span></div><dl class="definition-grid spacious">${definition('账户', item.account_id)}${definition('交易场所', item.venue)}${definition('方向', item.direction)}${definition('风险档位', fmtRisk(item.risk_tier))}${definition('限价', fmtNumber(details.limit_price))}${definition('有效至', fmtDate(item.expires_at))}${definition('AUTO_ADD', details.allow_auto_add ? `允许 · ${details.requested_adds} Unit` : '关闭')}${definition('Add 触发价', fmtNumber(details.add_trigger_price))}${definition('来源候选', item.source_candidate_id || '人工创建')}${definition('来源观测', fmtDate(item.source_observed_at))}</dl><details class="technical-details"><summary>查看技术载荷与语义哈希</summary><pre>${escapeHtml(JSON.stringify(item.frozen_payload, null, 2))}</pre><p class="subtle">Semantic hash · ${escapeHtml(item.semantic_hash)}</p></details></article>
+      <article class="card review-trail"><div class="card-heading"><div><p class="eyebrow">REVIEW TRAIL</p><h2>审核记录</h2></div><span class="subtle">${item.approvals.length} 条记录</span></div>${item.approvals.length ? `<div class="review-timeline">${item.approvals.map(a => `<div class="review-event"><span class="${a.decision === 'APPROVE' ? 'approve-dot' : 'reject-dot'}"></span><div><b>${a.decision === 'APPROVE' ? '批准提案' : '拒绝提案'}</b><p>${escapeHtml(a.reason)}</p><small>${shortId(a.reviewer_id)} · ${fmtDate(a.created_at)}</small></div></div>`).join('')}</div>` : '<div class="empty-inline"><b>尚无审核记录</b><span>Reviewer 的独立判断会按时间出现在这里。</span></div>'}</article>
+    </div><aside class="stack proposal-actions-column">
+      <article class="card next-action tone-${nextAction.tone}"><p class="eyebrow">NEXT ACTION</p><h2>${escapeHtml(nextAction.title)}</h2><p>${escapeHtml(nextAction.copy)}</p>${item.status === 'PENDING_REVIEW' && canReview ? `<label>审核意见<span class="field-help">说明你核对了什么，以及判断依据</span><textarea id="review-reason" rows="4">已核对交易逻辑、冻结参数与最大风险边界</textarea></label><div class="review-actions"><button class="primary" data-approve>批准提案</button><button class="danger" data-reject>拒绝提案</button></div><p class="microcopy">批准会触发对象版本绑定的短时 step-up；不会直接下单。</p><div class="form-error" id="review-error"></div>` : ''}${item.status === 'APPROVED' && canOperate && !item.risk_decision ? '<button class="primary wide-action" data-risk>运行风险检查</button>' : ''}${item.risk_decision && item.risk_decision.result !== 'DENY' && canOperate && !item.authorization ? '<button class="primary wide-action" data-authorize>签发 30 分钟授权</button>' : ''}${item.authorization?.active && canOperate ? '<button class="primary wide-action" data-initial>创建 SHADOW 初仓意图</button>' : ''}</article>
+      <article class="card risk-engine-card"><div class="card-heading"><div><p class="eyebrow">RISK ENGINE</p><h2>风险检查</h2></div>${item.risk_decision ? `<span class="status-pill status-${escapeHtml(item.risk_decision.result)}">${escapeHtml(fmtStatus(item.risk_decision.result))}</span>` : '<span class="status-pill">未运行</span>'}</div>${item.risk_decision ? `<dl class="definition-grid">${definition('批准数量', item.risk_decision.approved_quantity)}${definition('风险金额', item.risk_decision.risk_amount)}${definition('数据截止', fmtDate(item.risk_decision.data_as_of))}</dl><div class="reason-list">${item.risk_decision.reasons.map(reason => `<span>${escapeHtml(reason)}</span>`).join('')}</div>` : '<div class="empty-inline"><b>等待审核通过</b><span>风险检查使用服务端最新账户事实和全局策略。</span></div>'}</article>
+      <article class="card authorization-card"><div class="card-heading"><div><p class="eyebrow">AUTHORIZATION</p><h2>短期授权</h2></div>${item.authorization ? `<span class="status-pill ${item.authorization.active ? 'status-APPROVED' : ''}">${item.authorization.active ? '有效' : '无效'}</span>` : '<span class="status-pill">未签发</span>'}</div>${item.authorization ? `<dl class="definition-grid">${definition('数量上限', item.authorization.quantity_limit)}${definition('风险上限', item.authorization.risk_limit)}${definition('AddUnit', `${item.authorization.used_adds} / ${item.authorization.allowed_adds}`)}${definition('到期', fmtDate(item.authorization.expires_at))}</dl>` : '<div class="empty-inline"><b>风险通过后可签发</b><span>授权绑定数量、风险上限、AddUnit 与到期时间。</span></div>'}<p class="microcopy">创建意图只会原子预留风险并记录 SHADOW 事实，不连接交易所。</p></article>
+    </aside></div></section>`;
   document.querySelector('[data-approve]')?.addEventListener('click', () => approveProposal(item));
   document.querySelector('[data-reject]')?.addEventListener('click', () => rejectProposal(item));
   document.querySelector('[data-risk]')?.addEventListener('click', () => runRisk(item));

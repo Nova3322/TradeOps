@@ -85,8 +85,8 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
 
     assert response.status_code == 200
     assert "Trading Console" in response.text
-    assert "/assets/app.js?v=17" in response.text
-    assert "/assets/styles.css?v=10" in response.text
+    assert "/assets/app.js?v=18" in response.text
+    assert "/assets/styles.css?v=12" in response.text
     assert 'id="mobile-nav-toggle"' in response.text
     assert 'id="confirm-dialog"' in response.text
 
@@ -118,6 +118,11 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
     assert "LIVE_SCOPE_CONFIGURATION_REQUIRED" in app_javascript.text
     assert "i.readiness === 'READY' && i.proposal_eligible" in app_javascript.text
     assert "Catalog 未认证此交易合约" in app_javascript.text
+    assert "function updateManualProposalPreview" in app_javascript.text
+    assert "只创建提案，不直接下单" in app_javascript.text  # noqa: RUF001
+    assert "这笔交易要做什么" in app_javascript.text
+    assert "查看技术载荷与语义哈希" in app_javascript.text
+    assert "item.proposer_id !== session.user_id" in app_javascript.text
 
     stylesheet = get(app, "/assets/styles.css")
     assert stylesheet.status_code == 200
@@ -127,10 +132,13 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
     assert "visibility: visible; transition-delay: 0s" in stylesheet.text
     assert ".simulation-panel" in stylesheet.text
     assert ".capital-status-missing" in stylesheet.text
+    assert ".proposal-detail-layout" in stylesheet.text
+    assert ".proposal-preview" in stylesheet.text
+    assert ".source-facts" in stylesheet.text
 
     service_worker = get(app, "/sw.js")
     assert service_worker.status_code == 200
-    assert "trading-shell-v16" in service_worker.text
+    assert "trading-shell-v18" in service_worker.text
     assert "await fetch(event.request)" in service_worker.text
 
 

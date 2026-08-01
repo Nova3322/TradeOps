@@ -416,8 +416,16 @@ def test_perptape_to_review_to_risk_and_authorization_api_flow(
             assert proposal["environment"] == "SHADOW"
             assert proposal["status"] == "PENDING_REVIEW"
             assert proposal["source_candidate_id"] == candidate["candidate_id"]
+            assert proposal["symbol"] == "BTCUSDT"
+            assert proposal["quote_currency"] == "USDT"
+            assert proposal["collateral_currency"] == "USDT"
             proposal_id = proposal["proposal_id"]
             version = proposal["version"]
+
+            listed = await client.get("/api/proposals?proposal_status=PENDING_REVIEW")
+            assert listed.status_code == 200, listed.text
+            assert listed.json()["data"][0]["symbol"] == "BTCUSDT"
+            assert listed.json()["data"][0]["collateral_currency"] == "USDT"
 
             duplicate = await client.post(
                 f"/api/opportunities/{candidate['candidate_id']}/proposals", json=payload

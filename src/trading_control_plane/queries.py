@@ -240,14 +240,18 @@ class TradingQueries:
 
     def list_proposals(self, user_id: UUID, *, status: str | None = None) -> list[dict[str, Any]]:
         with self.database.session_factory() as session:
-            statement = select(Proposal).order_by(Proposal.created_at.desc())
+            statement = (
+                select(Proposal, Instrument)
+                .join(Instrument, Instrument.instrument_id == Proposal.instrument_id)
+                .order_by(Proposal.created_at.desc())
+            )
             if status is not None:
                 statement = statement.where(Proposal.status == status)
-            values = session.scalars(statement).all()
+            values = session.execute(statement).all()
             return [
-                self._proposal_summary(item)
-                for item in values
-                if self.service.can_user(user_id, "view", item.account_id, item.venue)
+                self._proposal_summary(proposal, instrument)
+                for proposal, instrument in values
+                if self.service.can_user(user_id, "view", proposal.account_id, proposal.venue)
             ]
 
     def proposal_detail(self, user_id: UUID, proposal_id: UUID) -> dict[str, Any]:
@@ -271,7 +275,9 @@ class TradingQueries:
             authorization = session.scalar(
                 select(TradingAuthorization).where(TradingAuthorization.proposal_id == proposal_id)
             )
-            result = self._proposal_summary(proposal)
+            result = self._proposal_summary(
+                proposal, session.get(Instrument, proposal.instrument_id)
+            )
             result.update(
                 {
                     "frozen_payload": proposal.frozen_payload,
@@ -1663,7 +1669,9 @@ class TradingQueries:
         }
 
     @staticmethod
-    def _proposal_summary(proposal: Proposal) -> dict[str, Any]:
+    def _proposal_summary(
+        proposal: Proposal, instrument: Instrument | None = None
+    ) -> dict[str, Any]:
         return {
             "proposal_id": str(proposal.proposal_id),
             "source": proposal.source,
@@ -1681,6 +1689,9 @@ class TradingQueries:
             "account_id": proposal.account_id,
             "venue": proposal.venue,
             "instrument_id": str(proposal.instrument_id),
+            "symbol": None if instrument is None else instrument.symbol,
+            "quote_currency": None if instrument is None else instrument.quote_currency,
+            "collateral_currency": (None if instrument is None else instrument.collateral_currency),
             "direction": proposal.direction,
             "quantity": str(proposal.quantity),
             "max_risk": str(proposal.max_risk),
