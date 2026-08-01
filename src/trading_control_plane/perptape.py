@@ -398,6 +398,30 @@ def perptape_event_key(candidate: PerptapeCandidate) -> PerptapeEventKey:
     )
 
 
+def perptape_legacy_candidate_id(candidate: PerptapeCandidate) -> str:
+    """Return the pre-symbol identity used by persisted proposals before v2 IDs."""
+
+    if candidate.triggered_at is None:
+        triggered_at_ms = 0
+    else:
+        epoch_delta = candidate.triggered_at - datetime(1970, 1, 1, tzinfo=UTC)
+        triggered_at_ms = (
+            epoch_delta.days * 86_400_000
+            + epoch_delta.seconds * 1_000
+            + epoch_delta.microseconds // 1_000
+        )
+    identity = ":".join(
+        [
+            candidate.source_exchange,
+            candidate.canonical_symbol,
+            candidate.timeframe,
+            candidate.source_direction,
+            str(triggered_at_ms),
+        ]
+    )
+    return "pt_" + hashlib.sha256(identity.encode()).hexdigest()[:24]
+
+
 def _canonical_datetime(value: datetime | None) -> str | None:
     if value is None:
         return None
@@ -1193,7 +1217,14 @@ class PerptapeClient:
                 "PERPTAPE_RESPONSE_INVALID", "Perptape candidate contains invalid facts"
             )
         identity = ":".join(
-            [exchange, canonical_symbol, timeframe, source_direction, str(triggered_at_ms or 0)]
+            [
+                exchange,
+                symbol,
+                canonical_symbol,
+                timeframe,
+                source_direction,
+                str(triggered_at_ms or 0),
+            ]
         )
         candidate_id = "pt_" + hashlib.sha256(identity.encode()).hexdigest()[:24]
         candidate = PerptapeCandidate(

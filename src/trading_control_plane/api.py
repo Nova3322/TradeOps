@@ -109,7 +109,11 @@ from trading_control_plane.notilt import (
     NoTiltUnsignedTransaction,
     NoTiltUsdValuator,
 )
-from trading_control_plane.perptape import PerptapeCandidate, PerptapeClient
+from trading_control_plane.perptape import (
+    PerptapeCandidate,
+    PerptapeClient,
+    perptape_legacy_candidate_id,
+)
 from trading_control_plane.queries import TradingQueries
 from trading_control_plane.service import TradingService
 from trading_control_plane.telegram import (
@@ -658,9 +662,22 @@ def create_app(
         return resolved_perptape.list_candidates(now=now)
 
     def current_perptape_candidate(candidate_id: str, *, now: datetime) -> PerptapeCandidate:
-        for candidate in current_perptape_candidates(now=now):
+        candidates = current_perptape_candidates(now=now)
+        for candidate in candidates:
             if candidate.candidate_id == candidate_id:
                 return candidate
+        legacy_matches = [
+            candidate
+            for candidate in candidates
+            if perptape_legacy_candidate_id(candidate) == candidate_id
+        ]
+        if len(legacy_matches) == 1:
+            return legacy_matches[0]
+        if legacy_matches:
+            raise DomainRejected(
+                "PERPTAPE_CANDIDATE_AMBIGUOUS",
+                "legacy candidate identity matches more than one current contract",
+            )
         raise DomainRejected("PERPTAPE_CANDIDATE_NOT_FOUND", "candidate is no longer available")
 
     @app.get("/api/opportunities")
@@ -698,6 +715,15 @@ def create_app(
             resolved_settings.perptape_service_username
         )
         instrument_id = queries().instrument_id_by_venue_symbol(candidate.venue, candidate.symbol)
+        legacy_candidate_id = perptape_legacy_candidate_id(candidate)
+        source_candidate_id = (
+            queries().compatible_legacy_system_candidate_id(
+                legacy_candidate_id,
+                candidate,
+                instrument_id,
+            )
+            or candidate.candidate_id
+        )
         proposal_id = service().create_proposal(
             actor_id=principal.user_id,
             source=ProposalSource.SYSTEM,
@@ -709,11 +735,11 @@ def create_app(
             quantity=payload.quantity,
             max_risk=payload.max_risk,
             expires_at=now + timedelta(minutes=payload.expires_in_minutes),
-            idempotency_key=f"perptape:{candidate.candidate_id}",
+            idempotency_key=f"perptape:{source_candidate_id}",
             strategy_id="perptape",
             strategy_version=candidate.source_contract_version,
             environment=ExecutionEnvironment(payload.environment),
-            source_candidate_id=candidate.candidate_id,
+            source_candidate_id=source_candidate_id,
             source_link=candidate.detail_url,
             source_observed_at=candidate.observed_at,
             source_readiness=candidate.readiness,
@@ -733,7 +759,7 @@ def create_app(
                 "rationale": payload.rationale,
             },
             idempotency_payload={
-                "candidate_id": candidate.candidate_id,
+                "candidate_id": source_candidate_id,
                 "account_id": payload.account_id,
                 "risk_tier": payload.risk_tier.value,
                 "quantity": str(payload.quantity),
@@ -1362,7 +1388,7 @@ def create_app(
             and item.symbol == symbol
             and item.direction.value == detail["direction"]
             and item.readiness == "READY"
-            and item.candidate_id != source_candidate_id
+            and source_candidate_id not in {item.candidate_id, perptape_legacy_candidate_id(item)}
         ]
         return {
             "source": "PERPTAPE",
@@ -1399,6 +1425,7 @@ def create_app(
                 observed_at=candidate.observed_at,
                 reference_price=candidate.reference_price,
                 readiness=candidate.readiness,
+                legacy_candidate_id=perptape_legacy_candidate_id(candidate),
             ),
             now=now,
         )
