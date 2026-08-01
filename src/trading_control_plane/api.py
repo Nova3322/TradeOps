@@ -124,6 +124,7 @@ from trading_control_plane.telegram import (
     TelegramBotGateway,
     TelegramCampaignAction,
     TelegramGateway,
+    campaign_position_reduction_available,
 )
 
 logger = logging.getLogger(__name__)
@@ -578,6 +579,7 @@ def create_app(
         proposal_id: UUID, proposal_version: int, environment: str = "SHADOW"
     ) -> None:
         for reviewer in queries().reviewers_for_proposal(proposal_id):
+            detail = queries().proposal_detail(reviewer.user_id, proposal_id)
             code = token_service.issue_review_reference(
                 user_id=reviewer.user_id,
                 object_id=proposal_id,
@@ -598,10 +600,12 @@ def create_app(
                     proposal_id=proposal_id,
                     proposal_version=proposal_version,
                     environment=environment,
-                    summary=f"{environment} proposal {proposal_id} is pending review",
+                    summary="提案正在等待人工审核；完整冻结语义仅在 Web 中展示。",  # noqa: RUF001
                     review_code=code,
                     review_url=review_url,
                     created_at=_now(),
+                    status=str(detail["status"]),
+                    expires_at=str(detail["expires_at"]),
                 )
             )
 
@@ -997,6 +1001,7 @@ def create_app(
                 )
             )
         notification_key = f"{campaign_id}:{event_type}:{event_key}:{recipient_id}"
+        management = detail["management"]
         resolved_telegram.send_campaign(
             CampaignNotification(
                 notification_id="tg_" + hashlib.sha256(notification_key.encode()).hexdigest()[:20],
@@ -1008,6 +1013,17 @@ def create_app(
                 campaign_version=campaign_version,
                 action_references=tuple(action_references),
                 created_at=_now(),
+                status=str(detail["status"]),
+                auto_add_available=bool(
+                    isinstance(management, dict)
+                    and management["auto_add_gate"] == "ENABLED"
+                    and management["allow_auto_add"] is True
+                    and int(management["remaining_adds"]) > 0
+                ),
+                position_reduction_available=campaign_position_reduction_available(
+                    str(detail["status"]),
+                    Decimal(str(detail["current_target_quantity"])),
+                ),
             )
         )
 
@@ -1434,7 +1450,7 @@ def create_app(
             created.campaign_id,
             "ADD_INTENT_READY",
             str(created.intent_id),
-            "Perptape Add candidate passed the frozen gate and final risk check",
+            "Perptape 加仓候选已通过冻结条件和最终风险校验。",
             str(detail["environment"]),
         )
         return {
@@ -1464,7 +1480,7 @@ def create_app(
             campaign_id,
             "RISK_REDUCTION_READY",
             str(intent_id),
-            f"Reduce-only target {detail['current_target_quantity']} is ready",
+            "只减仓目标已就绪；完整目标数量仅在 Web 中展示。",  # noqa: RUF001
             str(detail["environment"]),
         )
         return {"intent_id": str(intent_id), "detail": detail}
@@ -1489,7 +1505,7 @@ def create_app(
                 campaign_id,
                 "AUTOMATIC_EXIT_READY",
                 str(intent_id),
-                f"Automatic reduce-only exit is ready: {reason}",
+                "自动只减仓退出意图已就绪；请在 Web 中核对触发原因。",  # noqa: RUF001
                 str(detail["environment"]),
             )
         return {
@@ -1518,7 +1534,7 @@ def create_app(
             campaign_id,
             "CAMPAIGN_AUTO_ADD_DISABLED",
             payload.idempotency_key,
-            "Further AddUnits are disabled for this Campaign",
+            "此 Campaign 的后续 AddUnit 已关闭。",
             str(detail["environment"]),
         )
         return {"allowed_adds": allowed_adds, "detail": detail}
@@ -2666,7 +2682,7 @@ def create_app(
             campaign_id,
             "SHADOW_FILL_RECORDED",
             payload.venue_fill_id,
-            f"SHADOW fill {payload.venue_fill_id} recorded; no venue order was sent",
+            "SHADOW 成交事实已记录；没有向交易场所发送订单。",  # noqa: RUF001
         )
         return {
             "venue_fill_fact_id": str(fact_id),
@@ -2687,7 +2703,7 @@ def create_app(
             campaign_id,
             "ORDER_INTENT_UNKNOWN",
             str(intent_id),
-            "Order outcome is UNKNOWN; risk remains occupied and automatic retry is blocked",
+            "订单结果为 UNKNOWN；风险占用保持，自动重试已阻止。",  # noqa: RUF001
         )
         return queries().campaign_detail(identity.user_id, campaign_id)
 
@@ -2734,7 +2750,7 @@ def create_app(
             campaign_id,
             event_type,
             f"{payload.position_id}:{payload.venue_order_id}",
-            "Protection fact recorded for SHADOW position",
+            "SHADOW 仓位保护事实已记录。",
         )
         return {
             "protection_id": str(protection_id),
@@ -2820,7 +2836,7 @@ def create_app(
                 campaign_id,
                 "RECONCILIATION_EXCEPTION",
                 str(reconciliation_id),
-                f"Reconciliation requires attention: {reconciliation['status']}",
+                f"对账需要人工关注；当前状态为 {reconciliation['status']}。",  # noqa: RUF001
             )
         return {"reconciliation_id": str(reconciliation_id), "detail": detail}
 
@@ -2877,7 +2893,7 @@ def create_app(
             campaign_id,
             "CAMPAIGN_CLOSED",
             str(campaign_id),
-            "SHADOW Campaign closed after flat position and reconciliation MATCH",
+            "仓位归零且对账 MATCH，SHADOW Campaign 已关闭。",  # noqa: RUF001
         )
         return queries().campaign_detail(identity.user_id, campaign_id)
 
@@ -3251,7 +3267,7 @@ def create_app(
                 account_id=str(detail["account_id"]),
                 venue=str(detail["venue"]),
                 object_version=int(detail["version"]),
-                summary=(f"{payload.purpose} candidate requires two independent Treasury reviews"),
+                summary="资金候选需要两名独立 Treasury Reviewer 审核。",
             )
         return {
             "transfer_proposal_id": None if proposal_id is None else str(proposal_id),
@@ -3312,7 +3328,7 @@ def create_app(
             account_id=str(detail["account_id"]),
             venue=str(detail["venue"]),
             object_version=int(detail["version"]),
-            summary="Capital transfer proposal requires two independent Treasury reviews",
+            summary="资金划转提案需要两名独立 Treasury Reviewer 审核。",
         )
         return detail
 
@@ -3353,7 +3369,7 @@ def create_app(
             account_id=str(detail["account_id"]),
             venue=str(detail["venue"]),
             object_version=int(detail["version"]),
-            summary=f"Capital transfer review recorded: {payload.decision}",
+            summary=f"资金划转审核结果已记录：{payload.decision}。",  # noqa: RUF001
         )
         return detail
 
@@ -3410,7 +3426,7 @@ def create_app(
             account_id=str(detail["account_id"]),
             venue=str(detail["venue"]),
             object_version=int(detail["version"]),
-            summary="Mock capital transfer submitted; no real funds moved",
+            summary="Mock 资金划转已提交；没有移动真实资金。",  # noqa: RUF001
         )
         return {"transport": "MOCK_ONLY", "detail": detail}
 
@@ -3711,7 +3727,7 @@ def create_app(
             account_id=str(updated["account_id"]),
             venue=str(updated["venue"]),
             object_version=int(updated["version"]),
-            summary=f"NoTilt receipt verified; protocol state is {transport_state}",
+            summary=f"NoTilt 回执已验证；协议状态为 {transport_state}。",  # noqa: RUF001
         )
         return {
             "transport": "NOTILT_VERIFIED_RECEIPT",
@@ -3761,7 +3777,7 @@ def create_app(
             account_id=str(detail["account_id"]),
             venue=str(detail["venue"]),
             object_version=int(detail["version"]),
-            summary=f"Capital transfer state changed to {detail['status']}",
+            summary=f"资金划转状态已变更为 {detail['status']}。",
         )
         return {"transport": "MOCK_ONLY", "detail": detail}
 
@@ -3782,7 +3798,7 @@ def create_app(
             account_id=str(detail["account_id"]),
             venue=str(detail["venue"]),
             object_version=int(detail["version"]),
-            summary=f"Capital reconciliation result: {result}",
+            summary=f"资金对账结果为 {result}。",
         )
         return {"reconciliation_status": result, "detail": detail}
 
@@ -3918,7 +3934,7 @@ def create_app(
             )
         except DomainRejected as exc:
             return f"未执行: {exc.code}"
-        return "Trading 已受理; 请在 Web 控制台确认权威状态。"
+        return "Trading 已受理；请在 Web 控制台确认最新权威状态。"  # noqa: RUF001
 
     if isinstance(resolved_telegram, TelegramBotGateway):
         resolved_telegram.set_action_handler(handle_real_telegram_action)

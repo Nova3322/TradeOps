@@ -14,6 +14,7 @@ from trading_control_plane.api import create_app
 from trading_control_plane.config import Settings
 from trading_control_plane.database import Database
 from trading_control_plane.domain import (
+    CampaignStatus,
     CapabilityStatus,
     Direction,
     DomainRejected,
@@ -393,6 +394,14 @@ async def run_m6_flow(database: Database) -> None:
             for item in reversed(notifications.json()["campaign_data"])
             if item["campaign_version"] == 1 and "EMERGENCY_REDUCE" in item["action_references"]
         )
+        delivered_notification = next(
+            item
+            for item in reversed(telegram.campaign_notifications())
+            if item.campaign_version == 1
+            and any(action == "EMERGENCY_REDUCE" for action, _ in item.action_references)
+        )
+        assert delivered_notification.status == CampaignStatus.REDUCING.value
+        assert delivered_notification.position_reduction_available is True
         telegram_payload = {
             "action": "EMERGENCY_REDUCE",
             "action_reference": campaign_notification["action_references"]["EMERGENCY_REDUCE"],
