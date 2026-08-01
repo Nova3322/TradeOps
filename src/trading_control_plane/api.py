@@ -716,12 +716,22 @@ def create_app(
         queries().user_context(identity.user_id)
         now = _now()
         candidates = current_perptape_candidates(now=now)
+        active_instruments = queries().active_instrument_keys(
+            {(candidate.venue, candidate.symbol) for candidate in candidates}
+        )
+        data: list[dict[str, Any]] = []
+        for candidate in candidates:
+            value = candidate.to_dict()
+            proposal_eligible = (candidate.venue, candidate.symbol) in active_instruments
+            value["proposal_eligible"] = proposal_eligible
+            value["proposal_blocker"] = None if proposal_eligible else "INSTRUMENT_UNAVAILABLE"
+            data.append(value)
         return {
             "source": "PERPTAPE",
             "source_contract_version": resolved_settings.perptape_contract_version,
             "environment": "SHADOW",
             "as_of": now.isoformat(),
-            "data": [candidate.to_dict() for candidate in candidates],
+            "data": data,
         }
 
     @app.post("/api/opportunities/{candidate_id}/proposals")
