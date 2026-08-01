@@ -1,10 +1,12 @@
 from datetime import UTC, datetime
+from decimal import Decimal
 from typing import Any
 from urllib.error import URLError
 from uuid import UUID, uuid4
 
 import pytest
 
+from trading_control_plane.domain import CampaignStatus
 from trading_control_plane.telegram import (
     MAX_TELEGRAM_TEXT,
     CampaignNotification,
@@ -15,6 +17,7 @@ from trading_control_plane.telegram import (
     TelegramCampaignAction,
     TelegramUnavailable,
     _default_poster,
+    campaign_position_reduction_available,
 )
 
 
@@ -595,7 +598,7 @@ def test_campaign_actions_are_filtered_for_terminal_success_and_unknown_events()
         CampaignNotification(
             notification_id="unknown-event",
             event_type="ORDER_INTENT_UNKNOWN",
-            status="ACTIVE",
+            status=CampaignStatus.OPEN.value,
             **shared,
         )
     )
@@ -606,7 +609,7 @@ def test_campaign_actions_are_filtered_for_terminal_success_and_unknown_events()
         CampaignNotification(
             notification_id="state-filtered-event",
             event_type="POSITION_UPDATED",
-            status="ACTIVE",
+            status=CampaignStatus.OPEN.value,
             auto_add_available=False,
             position_reduction_available=False,
             **{
@@ -639,7 +642,7 @@ def test_campaign_action_can_be_cancelled_without_calling_handler() -> None:
             campaign_version=3,
             action_references=(("EXIT", "exit-reference"),),
             created_at=datetime.now(UTC),
-            status="ACTIVE",
+            status=CampaignStatus.OPEN.value,
         )
     )
     original_payload = fake.calls[-1][1]
@@ -666,6 +669,25 @@ def test_campaign_action_can_be_cancelled_without_calling_handler() -> None:
     assert fake.calls[-1][0] == "editMessageText"
     assert fake.calls[-1][1]["text"] == original_payload["text"]
     assert fake.calls[-1][1]["reply_markup"] == original_payload["reply_markup"]
+
+
+@pytest.mark.parametrize(
+    ("status", "available"),
+    [
+        (CampaignStatus.OPENING, True),
+        (CampaignStatus.OPEN, True),
+        (CampaignStatus.REDUCING, True),
+        (CampaignStatus.CLOSING, True),
+        (CampaignStatus.CLOSED, False),
+        (CampaignStatus.UNKNOWN, False),
+    ],
+)
+def test_campaign_position_reduction_uses_real_campaign_statuses(
+    status: CampaignStatus,
+    available: bool,
+) -> None:
+    assert campaign_position_reduction_available(status.value, Decimal("1")) is available
+    assert campaign_position_reduction_available(status.value, Decimal("0")) is False
 
 
 def test_failed_delivery_does_not_permanently_deduplicate_notification() -> None:

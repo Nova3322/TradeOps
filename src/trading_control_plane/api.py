@@ -124,6 +124,7 @@ from trading_control_plane.telegram import (
     TelegramBotGateway,
     TelegramCampaignAction,
     TelegramGateway,
+    campaign_position_reduction_available,
 )
 
 logger = logging.getLogger(__name__)
@@ -1019,9 +1020,9 @@ def create_app(
                     and management["allow_auto_add"] is True
                     and int(management["remaining_adds"]) > 0
                 ),
-                position_reduction_available=(
-                    detail["status"] == "ACTIVE"
-                    and Decimal(str(detail["current_target_quantity"])) > 0
+                position_reduction_available=campaign_position_reduction_available(
+                    str(detail["status"]),
+                    Decimal(str(detail["current_target_quantity"])),
                 ),
             )
         )

@@ -13,8 +13,11 @@ import urllib.request
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from decimal import Decimal
 from typing import Any, ClassVar, Protocol
 from uuid import UUID
+
+from trading_control_plane.domain import CampaignStatus
 
 logger = logging.getLogger(__name__)
 
@@ -127,6 +130,13 @@ _NO_ACTION_EVENTS = {
     "CAMPAIGN_CLOSED",
 }
 
+_POSITION_REDUCTION_STATUSES = {
+    CampaignStatus.OPENING.value,
+    CampaignStatus.OPEN.value,
+    CampaignStatus.REDUCING.value,
+    CampaignStatus.CLOSING.value,
+}
+
 _ERROR_LABELS: dict[str, str] = {
     "VERSION_CONFLICT": "对象版本已变化，请重新打开最新通知",
     "ACTION_REFERENCE_EXPIRED": "操作凭证已过期，请使用最新通知",
@@ -202,6 +212,15 @@ def campaign_action_references(
         for action, reference in notification.action_references
         if action in allowed
     )
+
+
+def campaign_position_reduction_available(
+    status: str,
+    current_target_quantity: Decimal,
+) -> bool:
+    """Return whether Telegram may offer Campaign reduction actions."""
+
+    return status in _POSITION_REDUCTION_STATUSES and current_target_quantity > 0
 
 
 def render_proposal_notification(notification: ProposalNotification) -> str:
