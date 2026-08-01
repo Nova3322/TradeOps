@@ -238,7 +238,14 @@ class TradingQueries:
                 candidates=tuple(candidates),
             )
 
-    def list_proposals(self, user_id: UUID, *, status: str | None = None) -> list[dict[str, Any]]:
+    def list_proposals(
+        self,
+        user_id: UUID,
+        *,
+        status: str | None = None,
+        now: datetime | None = None,
+    ) -> list[dict[str, Any]]:
+        current_time = now or datetime.now(UTC)
         with self.database.session_factory() as session:
             statement = (
                 select(Proposal, Instrument)
@@ -248,13 +255,37 @@ class TradingQueries:
             if status is not None:
                 statement = statement.where(Proposal.status == status)
             values = session.execute(statement).all()
-            return [
-                self._proposal_summary(proposal, instrument)
-                for proposal, instrument in values
-                if self.service.can_user(user_id, "view", proposal.account_id, proposal.venue)
-            ]
+            reviewed_proposal_ids = set(
+                session.scalars(select(Approval.proposal_id).where(Approval.reviewer_id == user_id))
+            )
+            result: list[dict[str, Any]] = []
+            for proposal, instrument in values:
+                if not self.service.can_user(user_id, "view", proposal.account_id, proposal.venue):
+                    continue
+                summary = self._proposal_summary(proposal, instrument)
+                summary["actionable_for_current_user"] = bool(
+                    proposal.status == "PENDING_REVIEW"
+                    and proposal.expires_at > current_time
+                    and proposal.proposer_id != user_id
+                    and proposal.proposal_id not in reviewed_proposal_ids
+                    and self.service.can_user(
+                        user_id,
+                        "proposal.review",
+                        proposal.account_id,
+                        proposal.venue,
+                    )
+                )
+                result.append(summary)
+            return result
 
-    def proposal_detail(self, user_id: UUID, proposal_id: UUID) -> dict[str, Any]:
+    def proposal_detail(
+        self,
+        user_id: UUID,
+        proposal_id: UUID,
+        *,
+        now: datetime | None = None,
+    ) -> dict[str, Any]:
+        current_time = now or datetime.now(UTC)
         with self.database.session_factory() as session:
             proposal = session.get(Proposal, proposal_id)
             if proposal is None:
@@ -322,6 +353,18 @@ class TradingQueries:
                         }
                         for item in approvals
                     ],
+                    "actionable_for_current_user": bool(
+                        proposal.status == "PENDING_REVIEW"
+                        and proposal.expires_at > current_time
+                        and proposal.proposer_id != user_id
+                        and all(item.reviewer_id != user_id for item in approvals)
+                        and self.service.can_user(
+                            user_id,
+                            "proposal.review",
+                            proposal.account_id,
+                            proposal.venue,
+                        )
+                    ),
                     "risk_decision": None
                     if risk is None
                     else {

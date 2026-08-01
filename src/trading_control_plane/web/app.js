@@ -445,7 +445,7 @@ async function renderHome() {
   const canOperate = roles.includes('OPERATOR') || roles.includes('SYSTEM_ADMIN');
   const canPropose = roles.includes('PROPOSER') || roles.includes('SYSTEM_ADMIN');
   const pending = proposalResponse.data.filter(item => new Date(item.expires_at).getTime() > now);
-  const actionableReviews = canReview ? pending.filter(item => item.proposer_id !== session.user_id) : [];
+  const actionableReviews = canReview ? pending.filter(item => item.actionable_for_current_user) : [];
   const expiringReviews = actionableReviews.filter(item => new Date(item.expires_at).getTime() - now < 30 * 60 * 1000);
   const nextReview = [...actionableReviews].sort((left, right) => new Date(left.expires_at) - new Date(right.expires_at))[0];
   const activeCampaigns = campaignResponse.data.filter(item => item.status !== 'CLOSED');
@@ -678,13 +678,19 @@ async function submitManualProposal(event) {
 
 async function renderProposalList(status, title) {
   const result = await api(`/api/proposals${status ? `?proposal_status=${status}` : ''}`);
-  const items = result.data;
-  const pending = items.filter(item => item.status === 'PENDING_REVIEW').length;
+  const allItems = result.data;
+  const items = status ? allItems.filter(item => item.actionable_for_current_user) : allItems;
+  const pending = status ? items.length : items.filter(item => item.status === 'PENDING_REVIEW' && item.actionable_for_current_user).length;
   const expiring = items.filter(item => { const remaining = new Date(item.expires_at) - Date.now(); return remaining > 0 && remaining < 30 * 60 * 1000; }).length;
-  main.innerHTML = `<section class="page"><header class="page-head"><div><p class="eyebrow">PROPOSAL CONTROL</p><h1>${escapeHtml(title)}</h1><p class="lede">${status ? '先看交易逻辑和风险边界，再做独立判断；审批不等于下单。' : '集中查看提案从创建、审核到授权的权威状态。'}</p></div><div class="toolbar"><a class="secondary" href="/opportunities" data-link>从机会创建</a><a class="primary" href="/proposals/new" data-link>新建人工提案</a></div></header>
+  const canPropose = roleNames().includes('PROPOSER') || roleNames().includes('SYSTEM_ADMIN');
+  const createActions = canPropose ? '<div class="toolbar"><a class="secondary" href="/opportunities" data-link>从机会创建</a><a class="primary" href="/proposals/new" data-link>新建人工提案</a></div>' : '';
+  const emptyState = status
+    ? '<section class="empty-state"><div><h2>当前没有待你审核的提案</h2><p>自己的提案、已经投过票、已到期或已结束的提案不会留在这里。</p><div class="toolbar empty-actions"><a class="secondary" href="/" data-link>返回今日</a><a class="primary" href="/proposals" data-link>查看全部提案</a></div></div></section>'
+    : `<section class="empty-state"><div><h2>当前没有匹配提案</h2><p>${canPropose ? '可以从机会页一键创建，或提交一份人工提案。' : '当前作用域内还没有提案。'}</p>${createActions}</div></section>`;
+  main.innerHTML = `<section class="page"><header class="page-head"><div><p class="eyebrow">PROPOSAL CONTROL</p><h1>${escapeHtml(title)}</h1><p class="lede">${status ? '这里只保留真正需要你独立判断的提案；审批不等于下单。' : '集中查看提案从创建、审核到授权的权威状态。'}</p></div>${createActions}</header>
     <div class="stats proposal-stats"><div class="stat"><small>当前列表</small><b>${items.length}</b></div><div class="stat"><small>等待审核</small><b>${pending}</b></div><div class="stat"><small>高风险</small><b>${items.filter(item => item.risk_tier === 'HIGH').length}</b></div><div class="stat"><small>30 分钟内到期</small><b>${expiring}</b></div></div>
     <div class="section-tabs"><a class="${status ? 'active' : ''}" href="/reviews" data-link>待我审核${pending ? `<span>${pending}</span>` : ''}</a><a class="${status ? '' : 'active'}" href="/proposals" data-link>全部提案</a></div>
-    ${items.length ? `<div class="proposal-list-tools"><label>搜索标的或账户<input id="proposal-search" type="search" placeholder="BTCUSDT / acct-1"></label><label>方向<select id="proposal-direction"><option value="">全部方向</option><option>LONG</option><option>SHORT</option></select></label><label>风险<select id="proposal-risk"><option value="">全部档位</option><option>LOW</option><option>MEDIUM</option><option>HIGH</option></select></label><span><b data-proposal-count>${items.length}</b> 个结果</span></div><div class="table-wrap proposal-table"><table><thead><tr><th>提案</th><th>方向 / 数量</th><th>风险边界</th><th>状态</th><th>提交时间</th><th>到期</th></tr></thead><tbody>${items.map(item => `<tr data-href="/proposals/${item.proposal_id}" data-proposal-row data-search="${escapeHtml(`${item.symbol || ''} ${item.account_id} ${item.venue}`.toLowerCase())}" data-direction="${escapeHtml(item.direction)}" data-risk="${escapeHtml(item.risk_tier)}"><td><b>${escapeHtml(item.symbol || shortId(item.instrument_id))}</b><br><span class="subtle">${escapeHtml(item.venue)} · ${escapeHtml(item.source === 'SYSTEM' ? 'Perptape' : '人工')}</span></td><td><span class="direction-pill ${item.direction === 'LONG' ? 'direction-long' : 'direction-short'}">${escapeHtml(item.direction)}</span><br><span class="subtle">数量 ${fmtNumber(item.quantity)}</span></td><td><b>${fmtRisk(item.risk_tier)}</b><br><span class="subtle">最多 ${escapeHtml(fmtAmount(item.max_risk, item.collateral_currency))}</span></td><td><span class="status-pill status-${escapeHtml(item.status)}">${escapeHtml(fmtStatus(item.status))}</span></td><td>${fmtDate(item.created_at)}<br><span class="subtle">v${item.version}</span></td><td>${fmtDate(item.expires_at)}</td></tr>`).join('')}</tbody></table></div><section id="proposal-filter-empty" class="empty-state compact-empty" hidden><div><h2>没有符合条件的提案</h2><p>请清除搜索或调整筛选。</p></div></section>` : '<section class="empty-state"><div><h2>当前没有匹配提案</h2><p>可以从机会页一键创建，或提交一份人工提案。</p><div class="toolbar empty-actions"><a class="secondary" href="/opportunities" data-link>查看机会</a><a class="primary" href="/proposals/new" data-link>新建提案</a></div></div></section>'}</section>`;
+    ${items.length ? `<div class="proposal-list-tools"><label>搜索标的或账户<input id="proposal-search" type="search" placeholder="BTCUSDT / acct-1"></label><label>方向<select id="proposal-direction"><option value="">全部方向</option><option>LONG</option><option>SHORT</option></select></label><label>风险<select id="proposal-risk"><option value="">全部档位</option><option>LOW</option><option>MEDIUM</option><option>HIGH</option></select></label><span><b data-proposal-count>${items.length}</b> 个结果</span></div><div class="table-wrap proposal-table"><table><thead><tr><th>提案</th><th>方向 / 数量</th><th>风险边界</th><th>状态</th><th>提交时间</th><th>到期</th></tr></thead><tbody>${items.map(item => `<tr data-href="/proposals/${item.proposal_id}" data-proposal-row data-search="${escapeHtml(`${item.symbol || ''} ${item.account_id} ${item.venue}`.toLowerCase())}" data-direction="${escapeHtml(item.direction)}" data-risk="${escapeHtml(item.risk_tier)}"><td><b>${escapeHtml(item.symbol || shortId(item.instrument_id))}</b><br><span class="subtle">${escapeHtml(item.venue)} · ${escapeHtml(item.source === 'SYSTEM' ? 'Perptape' : '人工')}</span></td><td><span class="direction-pill ${item.direction === 'LONG' ? 'direction-long' : 'direction-short'}">${escapeHtml(item.direction)}</span><br><span class="subtle">数量 ${fmtNumber(item.quantity)}</span></td><td><b>${fmtRisk(item.risk_tier)}</b><br><span class="subtle">最多 ${escapeHtml(fmtAmount(item.max_risk, item.collateral_currency))}</span></td><td><span class="status-pill status-${escapeHtml(item.status)}">${escapeHtml(fmtStatus(item.status))}</span></td><td>${fmtDate(item.created_at)}<br><span class="subtle">v${item.version}</span></td><td>${fmtDate(item.expires_at)}</td></tr>`).join('')}</tbody></table></div><section id="proposal-filter-empty" class="empty-state compact-empty" hidden><div><h2>没有符合条件的提案</h2><p>请清除搜索或调整筛选。</p></div></section>` : emptyState}</section>`;
   bindLinkedRows();
   const filter = () => {
     const query = document.querySelector('#proposal-search')?.value.toLowerCase().trim() || '';
@@ -704,14 +710,16 @@ async function renderProposalList(status, title) {
 
 async function renderProposalDetail(id) {
   const item = await api(`/api/proposals/${id}`);
-  const canReview = (roleNames().includes('REVIEWER') || roleNames().includes('SYSTEM_ADMIN')) && item.proposer_id !== session.user_id;
+  const reviewedByMe = item.approvals.some(approval => approval.reviewer_id === session.user_id);
+  const isExpired = item.status === 'PENDING_REVIEW' && new Date(item.expires_at).getTime() <= Date.now();
+  const canReview = Boolean(item.actionable_for_current_user);
   const canOperate = roleNames().includes('OPERATOR') || roleNames().includes('SYSTEM_ADMIN');
   const details = item.frozen_payload?.details || {};
   const candidate = details.candidate || {};
   const triggerPrice = details.trigger_price || candidate.reference_price || candidate.threshold_price;
   const invalidationPrice = details.invalidation_price;
   const notional = triggerPrice ? Number(triggerPrice) * Number(item.quantity) : null;
-  const reviewDone = !['DRAFT','PENDING_REVIEW'].includes(item.status);
+  const reviewDone = isExpired || !['DRAFT','PENDING_REVIEW'].includes(item.status);
   const riskDone = Boolean(item.risk_decision);
   const riskDenied = item.risk_decision?.result === 'DENY';
   const riskReason = item.risk_decision?.reasons?.[0];
@@ -723,7 +731,7 @@ async function renderProposalDetail(id) {
   const initialEntry = item.initial_entry;
   const needsFreshRisk = Boolean(authorizationDone && !authorizationUsable && !initialEntry && !riskAfterAuthorization);
   const needsAuthorization = Boolean(riskDone && !riskDenied && !initialEntry && (!authorizationDone || (!authorizationUsable && riskAfterAuthorization)));
-  const terminal = ['REJECTED','EXPIRED'].includes(item.status);
+  const terminal = isExpired || ['REJECTED','EXPIRED'].includes(item.status);
   const rationale = details.rationale || candidate.rationale || '未提供补充理由';
   const sourceLink = item.source_link || candidate.detail_url;
   const chartLink = candidate.chart_url;
@@ -732,11 +740,13 @@ async function renderProposalDetail(id) {
     : '<div class="source-facts manual-source"><div><small>来源</small><b>人工输入</b></div><div><small>审核依据</small><b>冻结参数与提案理由</b></div></div>';
   const highRiskReviewCopy = item.risk_tier === 'HIGH' ? `高风险提案需要两名不同 Reviewer；当前已记录 ${item.approvals.length} 票。` : '批准后仍需运行服务端风险检查。';
   const nextAction = terminal
-    ? {title:'流程已终止', copy:'该提案不能继续扩大风险。条件改变后需创建新提案。', tone:'danger'}
+    ? {title:isExpired ? '提案已到期' : '流程已终止', copy:'该提案不能继续扩大风险。条件改变后需创建新提案。', tone:'danger'}
     : item.status === 'PENDING_REVIEW'
       ? canReview
         ? {title:'需要你的独立判断', copy:`核对方向、触发价、失效位置和最大风险。${highRiskReviewCopy}`, tone:'attention'}
-        : {title:'等待独立审核', copy:item.proposer_id === session.user_id ? '你是提案创建者，不能审核自己的提案。' : '当前角色没有审核权限。', tone:'neutral'}
+        : reviewedByMe
+          ? {title:'你的审核已记录', copy:'这笔提案仍在等待另一名独立 Reviewer；你无需再次操作。', tone:'success'}
+          : {title:'等待独立审核', copy:item.proposer_id === session.user_id ? '你是提案创建者，不能审核自己的提案。' : '当前角色没有审核权限。', tone:'neutral'}
       : initialEntry
         ? {title:'初仓意图已经创建', copy:'该冻结提案不能再创建第二个初仓意图；后续执行、保护和异常处理统一进入 Campaign。', tone:'success'}
         : item.status === 'APPROVED' && (!riskDone || riskDenied)
@@ -783,7 +793,7 @@ async function renderProposalDetail(id) {
     ? `<dl class="definition-grid authorization-grid">${definition('批准数量', fmtNumber(item.authorization.quantity_limit))}${definition('已使用', fmtNumber(item.authorization.used_quantity))}${definition('剩余数量', fmtNumber(item.authorization.remaining_quantity))}${definition('风险上限', fmtAmount(item.authorization.risk_limit, item.collateral_currency))}${definition('AddUnit', `${item.authorization.used_adds} / ${item.authorization.allowed_adds}`)}${definition('到期', fmtDate(item.authorization.expires_at))}</dl>${initialEntry ? `<div class="entry-boundary"><b>一次性初仓已消费</b><span>意图 ${shortId(initialEntry.intent_id)} · ${escapeHtml(fmtStatus(initialEntry.intent_status))}</span><a href="/campaigns/${initialEntry.campaign_id}" data-link>查看 Campaign →</a></div>` : '<p class="microcopy">授权仍不是订单；创建初仓意图时还会再次读取事实并原子预留风险。</p>'}`
     : '<div class="empty-inline"><b>风险通过后可签发</b><span>授权同时限制有效期、数量、风险金额、作用域和 AddUnit。</span></div>';
   main.innerHTML = `<section class="page proposal-detail"><header class="page-head"><div><p class="eyebrow">${escapeHtml(item.environment)} · ${escapeHtml(item.source === 'SYSTEM' ? 'PERPTAPE SYSTEM' : 'MANUAL')}</p><div class="proposal-title-row"><h1>${escapeHtml(item.symbol || candidate.symbol || '交易提案')}</h1><span class="direction-pill ${item.direction === 'LONG' ? 'direction-long' : 'direction-short'}">${escapeHtml(item.direction)}</span><span class="status-pill status-${escapeHtml(item.status)}">${escapeHtml(fmtStatus(item.status))}</span></div><p class="lede">${escapeHtml(item.venue)} · ${escapeHtml(item.account_id)} · 提案 ${shortId(item.proposal_id)} · v${item.version}</p></div><div class="toolbar"><a class="secondary" href="/reviews" data-link>返回审核队列</a>${sourceLink ? `<a class="secondary" href="${escapeHtml(sourceLink)}" target="_blank" rel="noreferrer">Perptape 榜单 ↗</a>` : ''}${chartLink ? `<a class="secondary" href="${escapeHtml(chartLink)}" target="_blank" rel="noreferrer">交易所图表 ↗</a>` : ''}</div></header>
-    <ol class="workflow-stepper" aria-label="提案流程"><li class="done"><span>1</span><div><b>提案已冻结</b><small>${fmtDate(item.frozen_at)}</small></div></li><li class="${reviewDone ? 'done' : 'current'}"><span>2</span><div><b>独立审核</b><small>${reviewDone ? fmtStatus(item.status) : '等待判断'}</small></div></li><li class="${riskDenied ? 'blocked' : riskDone ? 'done' : reviewDone && !terminal ? 'current' : ''}"><span>3</span><div><b>风险检查</b><small>${riskDone ? fmtStatus(item.risk_decision.result) : '尚未运行'}</small></div></li><li class="${initialEntry || authorizationUsable ? 'done' : needsAuthorization ? 'current' : ''}"><span>4</span><div><b>短期授权</b><small>${initialEntry ? '已生成初仓意图' : authorizationDone ? (authorizationUsable ? '有效' : '已失效') : '尚未签发'}</small></div></li></ol>
+    <ol class="workflow-stepper" aria-label="提案流程"><li class="done"><span>1</span><div><b>提案已冻结</b><small>${fmtDate(item.frozen_at)}</small></div></li><li class="${reviewDone ? 'done' : 'current'}"><span>2</span><div><b>独立审核</b><small>${isExpired ? '已到期' : reviewDone ? fmtStatus(item.status) : reviewedByMe ? '你的票已记录' : '等待判断'}</small></div></li><li class="${riskDenied ? 'blocked' : riskDone ? 'done' : reviewDone && !terminal ? 'current' : ''}"><span>3</span><div><b>风险检查</b><small>${riskDone ? fmtStatus(item.risk_decision.result) : '尚未运行'}</small></div></li><li class="${initialEntry || authorizationUsable ? 'done' : needsAuthorization ? 'current' : ''}"><span>4</span><div><b>短期授权</b><small>${initialEntry ? '已生成初仓意图' : authorizationDone ? (authorizationUsable ? '有效' : '已失效') : '尚未签发'}</small></div></li></ol>
     <div class="proposal-detail-layout"><div class="stack">
       <article class="card decision-brief"><div class="card-heading"><div><p class="eyebrow">DECISION BRIEF</p><h2>这笔交易要做什么</h2></div><span class="risk-badge risk-${escapeHtml(item.risk_tier)}">${escapeHtml(fmtRisk(item.risk_tier))}</span></div><p class="proposal-rationale">${escapeHtml(rationale)}</p><div class="decision-metrics"><div><small>计划数量</small><b>${fmtNumber(item.quantity)}</b><span>初仓 ${fmtNumber(details.initial_quantity || item.quantity)}</span></div><div><small>估算名义价值</small><b>${notional === null ? '—' : escapeHtml(fmtAmount(notional, item.quote_currency))}</b><span>触发价 ${fmtNumber(triggerPrice)}</span></div><div><small>最大风险</small><b>${escapeHtml(fmtAmount(item.max_risk, item.collateral_currency))}</b><span>${fmtRisk(item.risk_tier)}</span></div><div><small>失效位置</small><b>${fmtNumber(invalidationPrice)}</b><span>距触发 ${percentageDistance(triggerPrice, invalidationPrice)}</span></div></div>${sourceFacts}</article>
       <article class="card frozen-scope"><div class="card-heading"><div><p class="eyebrow">FROZEN SCOPE</p><h2>冻结范围</h2></div><span class="status-pill">不可编辑</span></div><dl class="definition-grid spacious">${definition('账户', item.account_id)}${definition('交易场所', item.venue)}${definition('方向', item.direction)}${definition('风险档位', fmtRisk(item.risk_tier))}${definition('限价', fmtNumber(details.limit_price))}${definition('有效至', fmtDate(item.expires_at))}${definition('AUTO_ADD', details.allow_auto_add ? `允许 · ${details.requested_adds} Unit` : '关闭')}${definition('Add 触发价', fmtNumber(details.add_trigger_price))}${definition('来源候选', item.source_candidate_id || '人工创建')}${definition('来源观测', fmtDate(item.source_observed_at))}</dl><details class="technical-details"><summary>查看技术载荷与语义哈希</summary><pre>${escapeHtml(JSON.stringify(item.frozen_payload, null, 2))}</pre><p class="subtle">Semantic hash · ${escapeHtml(item.semantic_hash)}</p></details></article>

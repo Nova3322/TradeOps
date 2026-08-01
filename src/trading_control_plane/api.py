@@ -898,9 +898,14 @@ def create_app(
         identity: SessionIdentity = identity_dependency,
         proposal_status: str | None = None,
     ) -> dict[str, Any]:
+        now = _now()
         return {
-            "data": queries().list_proposals(identity.user_id, status=proposal_status),
-            "as_of": _now().isoformat(),
+            "data": queries().list_proposals(
+                identity.user_id,
+                status=proposal_status,
+                now=now,
+            ),
+            "as_of": now.isoformat(),
         }
 
     @app.get("/api/proposals/{proposal_id}")
@@ -908,7 +913,7 @@ def create_app(
         proposal_id: UUID,
         identity: SessionIdentity = identity_dependency,
     ) -> dict[str, Any]:
-        return queries().proposal_detail(identity.user_id, proposal_id)
+        return queries().proposal_detail(identity.user_id, proposal_id, now=_now())
 
     @app.post("/api/proposals/{proposal_id}/reviews")
     def review_proposal(

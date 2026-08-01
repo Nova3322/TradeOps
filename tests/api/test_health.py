@@ -85,7 +85,7 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
 
     assert response.status_code == 200
     assert "Trading Console" in response.text
-    assert "/assets/app.js?v=26" in response.text
+    assert "/assets/app.js?v=27" in response.text
     assert "/assets/styles.css?v=16" in response.text
     assert '<a href="/" data-link><span>⌂</span>今日</a>' in response.text
     assert 'id="mobile-nav-toggle"' in response.text
@@ -100,6 +100,8 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
     assert "const REQUEST_TIMEOUT_MS = 15000" in app_javascript.text
     assert "全局风险恢复由管理员控制" in app_javascript.text
     assert "if (error.status !== 403) throw error" in app_javascript.text
+    assert "actionable_for_current_user" in app_javascript.text
+    assert "你的审核已记录" in app_javascript.text
     assert "error.handled = response.status === 401" in app_javascript.text
     assert "function handleUnauthorizedResponse" in app_javascript.text
     assert "function confirmAction" in app_javascript.text
@@ -125,7 +127,7 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
     assert "只创建提案，不直接下单" in app_javascript.text  # noqa: RUF001
     assert "这笔交易要做什么" in app_javascript.text
     assert "查看技术载荷与语义哈希" in app_javascript.text
-    assert "item.proposer_id !== session.user_id" in app_javascript.text
+    assert "const canReview = Boolean(item.actionable_for_current_user);" in app_javascript.text
     assert "INITIAL_INTENT_ALREADY_EXISTS" in app_javascript.text
     assert "账户事实已经过期" in app_javascript.text
     assert "系统允许开多少" in app_javascript.text
@@ -156,7 +158,7 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
 
     service_worker = get(app, "/sw.js")
     assert service_worker.status_code == 200
-    assert "trading-shell-v26" in service_worker.text
+    assert "trading-shell-v27" in service_worker.text
     assert "await fetch(event.request)" in service_worker.text
 
 

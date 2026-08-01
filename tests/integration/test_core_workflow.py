@@ -45,6 +45,7 @@ from trading_control_plane.models import (
     VenueFill,
     VenueOrder,
 )
+from trading_control_plane.queries import TradingQueries
 from trading_control_plane.service import TradingService
 
 NOW = datetime(2026, 7, 18, 12, tzinfo=UTC)
@@ -376,6 +377,39 @@ def test_self_review_is_forbidden_and_high_risk_needs_two_reviewers(
         ReviewDecision.APPROVE,
         "first",
         now=NOW,
+    )
+    queries = TradingQueries(database)
+    assert (
+        queries.list_proposals(ids["reviewer_one"], now=NOW)[0]["actionable_for_current_user"]
+        is False
+    )
+    assert (
+        queries.list_proposals(ids["reviewer_two"], now=NOW)[0]["actionable_for_current_user"]
+        is True
+    )
+    assert (
+        queries.proposal_detail(ids["reviewer_one"], proposal_id, now=NOW)[
+            "actionable_for_current_user"
+        ]
+        is False
+    )
+    assert (
+        queries.proposal_detail(ids["reviewer_two"], proposal_id, now=NOW)[
+            "actionable_for_current_user"
+        ]
+        is True
+    )
+    assert (
+        queries.list_proposals(ids["proposer"], now=NOW)[0]["actionable_for_current_user"] is False
+    )
+    assert (
+        queries.list_proposals(ids["observer"], now=NOW)[0]["actionable_for_current_user"] is False
+    )
+    assert (
+        queries.list_proposals(ids["reviewer_two"], now=NOW + timedelta(hours=2))[0][
+            "actionable_for_current_user"
+        ]
+        is False
     )
     second = service.review_proposal(
         proposal_id,
