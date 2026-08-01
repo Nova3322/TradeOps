@@ -2296,6 +2296,7 @@ def test_campaign_closes_and_releases_open_risk_only_after_exit_and_match(
         Decimal("0"),
         now=NOW,
     )
+    closure_time = NOW + timedelta(minutes=10)
     service.record_position(
         "acct-1",
         "BINANCE",
@@ -2305,13 +2306,26 @@ def test_campaign_closes_and_releases_open_risk_only_after_exit_and_match(
         Decimal("105"),
         True,
         ids["operator"],
-        now=NOW,
+        now=closure_time,
     )
-    service.reconcile_scope("acct-1:BINANCE", ids["operator"], now=NOW)
-    service.close_campaign(opening.campaign_id, ids["operator"], now=NOW)
+    service.record_account_equity(
+        "acct-1",
+        "BINANCE",
+        Decimal("10000"),
+        Decimal("9000"),
+        "USDT",
+        True,
+        ids["operator"],
+        now=closure_time,
+    )
+    service.reconcile_scope("acct-1:BINANCE", ids["operator"], now=closure_time)
+    service.close_campaign(opening.campaign_id, ids["operator"], now=closure_time)
 
     with database.session_factory() as session:
         campaign = session.get(Campaign, opening.campaign_id)
         reservation = session.get(RiskReservation, opening.reservation_id)
         assert campaign is not None and campaign.status == "CLOSED"
+        assert campaign.realized_pnl == Decimal("5")
+        assert campaign.unrealized_pnl == 0
+        assert campaign.final_pnl == Decimal("5")
         assert reservation is not None and reservation.status == "RELEASED"

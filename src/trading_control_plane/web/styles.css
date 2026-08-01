@@ -275,6 +275,29 @@ textarea { resize: vertical; }
 .intent-row { display: flex; align-items: start; justify-content: space-between; gap: 12px; padding: 13px 0; border-top: 1px solid var(--line); }
 .intent-row:first-of-type { border-top: 0; }
 .detail-layout { display: grid; grid-template-columns: minmax(0, 1.4fr) minmax(280px, .6fr); gap: 16px; }
+.campaign-command { display: grid; grid-template-columns: minmax(0, .85fr) minmax(360px, 1.15fr); gap: 28px; align-items: start; margin-bottom: 14px; padding: clamp(20px, 3vw, 30px); border: 1px solid var(--line); border-left: 4px solid var(--warning); border-radius: 16px; background: var(--panel); box-shadow: var(--shadow); }
+.campaign-command.tone-success { border-left-color: var(--accent); }
+.campaign-command.tone-danger { border-left-color: var(--danger); }
+.campaign-command h2 { margin-bottom: 9px; }
+.campaign-command p:not(.eyebrow,.microcopy) { color: var(--muted); line-height: 1.6; }
+.campaign-command-action > .primary, .campaign-command-action > .secondary, .campaign-command-action > .danger { width: 100%; justify-content: center; }
+.campaign-command-action .action-panel { margin-top: 0; background: var(--panel-strong); }
+.campaign-command-action .form-error { margin-bottom: -10px; }
+.campaign-truth-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 1px; margin-bottom: 18px; overflow: hidden; border: 1px solid var(--line); border-radius: 14px; background: var(--line); }
+.campaign-truth-grid > div { min-width: 0; padding: 15px; background: var(--panel); }
+.campaign-truth-grid small, .campaign-truth-grid b, .campaign-truth-grid span { display: block; }
+.campaign-truth-grid small { color: var(--muted); font-size: 10px; }
+.campaign-truth-grid b { margin: 7px 0 4px; overflow-wrap: anywhere; font-size: 13px; }
+.campaign-truth-grid span { color: var(--muted); font-size: 10px; line-height: 1.45; }
+.campaign-truth-grid .truth-danger { background: color-mix(in srgb, var(--danger) 7%, var(--panel)); }
+.campaign-truth-grid .truth-danger b { color: var(--danger); }
+.campaign-command-layout { display: grid; grid-template-columns: minmax(0, 1.35fr) minmax(300px, .65fr); gap: 16px; align-items: start; }
+.operation-toolbox { padding: 0; overflow: hidden; }
+.operation-toolbox > summary { display: flex; align-items: center; justify-content: space-between; padding: 18px 20px; cursor: pointer; list-style-position: inside; }
+.operation-toolbox > summary span { display: inline-grid; gap: 4px; }
+.operation-toolbox > summary small { color: var(--muted); font-size: 10px; font-weight: 500; }
+.toolbox-content { padding: 0 20px 20px; }
+.risk-reduction-card { border-top: 3px solid var(--accent); }
 .stack { display: grid; gap: 14px; }
 .definition-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 17px; margin: 0; }
 .definition-grid dd { margin: 0; word-break: break-word; font-size: 13px; }
@@ -310,6 +333,7 @@ dialog::backdrop { background: rgba(4, 12, 10, .56); backdrop-filter: blur(3px);
   .review-trail { order: 4; }
   .risk-engine-card { order: 5; }
   .authorization-card { order: 6; }
+  .campaign-command-layout { grid-template-columns: 1fr; }
 }
 
 @media (min-width: 781px) and (max-width: 980px) {
@@ -327,7 +351,8 @@ dialog::backdrop { background: rgba(4, 12, 10, .56); backdrop-filter: blur(3px);
   .main-content { padding: 32px 24px 60px; }
   .page-head { display: block; }
   .page-head .toolbar { margin-top: 18px; }
-  .detail-layout, .compose-layout, .proposal-detail-layout { grid-template-columns: 1fr; }
+  .detail-layout, .compose-layout, .proposal-detail-layout, .campaign-command { grid-template-columns: 1fr; }
+  .campaign-truth-grid { grid-template-columns: 1fr 1fr; }
   .proposal-preview, .proposal-actions-column { position: static; }
   .proposal-list-tools { grid-template-columns: minmax(220px, 1fr) 140px 140px; }
   .proposal-list-tools > span { grid-column: 1 / -1; }
@@ -360,7 +385,8 @@ dialog::backdrop { background: rgba(4, 12, 10, .56); backdrop-filter: blur(3px);
   .page-head .toolbar { margin-top: 18px; }
   .primary, .secondary, .danger, .text-button { min-height: 44px; }
   .stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-  .field-grid, .detail-layout, .definition-grid, .compose-layout, .proposal-detail-layout { grid-template-columns: 1fr; }
+  .field-grid, .detail-layout, .definition-grid, .compose-layout, .proposal-detail-layout, .campaign-command { grid-template-columns: 1fr; }
+  .campaign-truth-grid { grid-template-columns: 1fr 1fr; }
   .proposal-preview, .proposal-actions-column { position: static; }
   .proposal-list-tools { grid-template-columns: 1fr 1fr; }
   .proposal-list-tools label:first-child { grid-column: 1 / -1; }
@@ -400,6 +426,10 @@ dialog::backdrop { background: rgba(4, 12, 10, .56); backdrop-filter: blur(3px);
   .risk-fact-strip { grid-template-columns: 1fr 1fr; }
   .risk-guidance-list > div { padding-right: 12px; }
   .risk-guidance-list code { position: static; }
+  .campaign-truth-grid { grid-template-columns: 1fr; }
+  .campaign-command { padding: 19px; }
+  .campaign-command-action .toolbar { display: grid; }
+  .campaign-command-action .toolbar button { width: 100%; }
 }
 
 @media (prefers-reduced-motion: reduce) {

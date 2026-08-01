@@ -4,6 +4,7 @@ import base64
 import binascii
 import hashlib
 import json
+from collections.abc import Sequence
 from contextlib import AbstractContextManager, nullcontext
 from datetime import datetime, timedelta
 from decimal import Decimal
@@ -6618,7 +6619,11 @@ class TradingService:
                             differences.append(f"ORDER_FILL_MISMATCH:{intent.intent_id}")
                         if intent_order.status == VenueOrderStatus.UNKNOWN.value:
                             unknown.append(f"VENUE_ORDER_UNKNOWN:{intent.intent_id}")
-                        elif self._fact_is_stale(intent_order.observed_at, now, max_age):
+                        elif intent_order.status not in {
+                            VenueOrderStatus.FILLED.value,
+                            VenueOrderStatus.CANCELLED.value,
+                            VenueOrderStatus.REJECTED.value,
+                        } and self._fact_is_stale(intent_order.observed_at, now, max_age):
                             unknown.append(f"VENUE_ORDER_STALE:{intent.intent_id}")
                     if intent_fill_quantity > intent.quantity:
                         differences.append(f"ORDER_INTENT_OVERFILLED:{intent.intent_id}")
@@ -6790,6 +6795,7 @@ class TradingService:
                 for reservation in reservations
             ):
                 _reject("RISK_RESERVATION_UNRESOLVED", "campaign risk is not confirmed closed")
+            self._update_campaign_pnl(session, campaign, position, now=now)
             for reservation in reservations:
                 if reservation.status == ReservationStatus.OPEN.value:
                     reservation.status = ReservationStatus.RELEASED.value
@@ -6838,36 +6844,58 @@ class TradingService:
             )
             if position is None or position.fact_status != FactStatus.KNOWN.value:
                 _reject("POSITION_UNKNOWN", "PnL requires known current position")
-            instrument = session.get(Instrument, campaign.instrument_id)
-            if instrument is None:
-                _reject("INSTRUMENT_UNAVAILABLE", "campaign instrument is missing")
-            payments = session.scalars(
-                select(FundingPayment).where(FundingPayment.campaign_id == campaign_id)
-            ).all()
-            if any(fill.fee_currency != instrument.collateral_currency for fill in fills) or any(
-                payment.currency != instrument.collateral_currency for payment in payments
-            ):
-                _reject("PNL_CURRENCY_MISMATCH", "PnL requires an explicit FX conversion")
-            funding = sum((payment.amount for payment in payments), Decimal(0))
-            result = compute_pnl(
-                fills=tuple(
-                    EconomicFill(
-                        fill.side,
-                        fill.quantity,
-                        fill.price,
-                        fill.fee,
-                        fill.slippage_cost,
-                    )
-                    for fill in fills
-                ),
-                mark_price=position.mark_price,
-                funding=funding,
+            return self._update_campaign_pnl(session, campaign, position, fills=fills, now=now)
+
+    def _update_campaign_pnl(
+        self,
+        session: Session,
+        campaign: Campaign,
+        position: Position,
+        *,
+        now: datetime,
+        fills: Sequence[VenueFill] | None = None,
+    ) -> PnlBreakdown:
+        campaign_fills = (
+            fills
+            if fills is not None
+            else list(
+                session.scalars(
+                    select(VenueFill)
+                    .where(VenueFill.campaign_id == campaign.campaign_id)
+                    .order_by(VenueFill.executed_at, VenueFill.venue_fill_fact_id)
+                ).all()
             )
-            campaign.realized_pnl = result.realized_pnl
-            campaign.unrealized_pnl = result.unrealized_pnl
-            campaign.final_pnl = result.total_pnl
-            campaign.updated_at = now
-            return result
+        )
+        instrument = session.get(Instrument, campaign.instrument_id)
+        if instrument is None:
+            _reject("INSTRUMENT_UNAVAILABLE", "campaign instrument is missing")
+        payments = session.scalars(
+            select(FundingPayment).where(FundingPayment.campaign_id == campaign.campaign_id)
+        ).all()
+        if any(
+            fill.fee_currency != instrument.collateral_currency for fill in campaign_fills
+        ) or any(payment.currency != instrument.collateral_currency for payment in payments):
+            _reject("PNL_CURRENCY_MISMATCH", "PnL requires an explicit FX conversion")
+        funding = sum((payment.amount for payment in payments), Decimal(0))
+        result = compute_pnl(
+            fills=tuple(
+                EconomicFill(
+                    fill.side,
+                    fill.quantity,
+                    fill.price,
+                    fill.fee,
+                    fill.slippage_cost,
+                )
+                for fill in campaign_fills
+            ),
+            mark_price=position.mark_price,
+            funding=funding,
+        )
+        campaign.realized_pnl = result.realized_pnl
+        campaign.unrealized_pnl = result.unrealized_pnl
+        campaign.final_pnl = result.total_pnl
+        campaign.updated_at = now
+        return result
 
     def record_capital_balance(
         self,

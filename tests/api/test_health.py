@@ -85,8 +85,8 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
 
     assert response.status_code == 200
     assert "Trading Console" in response.text
-    assert "/assets/app.js?v=21" in response.text
-    assert "/assets/styles.css?v=13" in response.text
+    assert "/assets/app.js?v=23" in response.text
+    assert "/assets/styles.css?v=14" in response.text
     assert 'id="mobile-nav-toggle"' in response.text
     assert 'id="confirm-dialog"' in response.text
 
@@ -126,6 +126,9 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
     assert "INITIAL_INTENT_ALREADY_EXISTS" in app_javascript.text
     assert "账户事实已经过期" in app_javascript.text
     assert "系统允许开多少" in app_javascript.text
+    assert "当前唯一推荐动作" in app_javascript.text
+    assert "data-close-campaign" in app_javascript.text
+    assert "/api/campaigns/${item.campaign_id}/close" in app_javascript.text
 
     stylesheet = get(app, "/assets/styles.css")
     assert stylesheet.status_code == 200
@@ -141,7 +144,7 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
 
     service_worker = get(app, "/sw.js")
     assert service_worker.status_code == 200
-    assert "trading-shell-v21" in service_worker.text
+    assert "trading-shell-v23" in service_worker.text
     assert "await fetch(event.request)" in service_worker.text
 
 
