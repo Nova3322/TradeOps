@@ -855,6 +855,7 @@ const riskControlStatusLabel = (value) => ({
 }[value] || value);
 
 function renderRiskControlPanel(control) {
+  if (!control) return `<article class="card"><div class="card-heading"><div><p class="eyebrow">GLOBAL CONTROL</p><h2>全局风险恢复由管理员控制</h2></div><span class="status-pill">作用域视图</span></div><p class="subtle">当前身份只能查看被分配账户与交易所的 Campaign 风险，不能读取或执行全局 Policy、AUTO_ADD Gate 与恢复申请。</p><p class="safety-note">这不代表全局风险状态正常。新增风险仍会由服务端 Risk Engine 强制检查；你仍可使用下表查看风险预留、唯一减仓目标和最近对账。</p><div class="toolbar"><a class="secondary" href="/" data-link>返回今日</a><a class="primary" href="/exceptions" data-link>查看当前异常</a></div></article>`;
   const policy = control.policy;
   const gate = control.auto_add_gate;
   const conditions = control.restore_conditions;
@@ -909,7 +910,14 @@ async function renderCampaignList() {
 
 async function renderCampaignFacts(mode) {
   const details = await loadCampaignDetails();
-  const riskControls = mode === 'risk' ? await api('/api/risk-controls') : null;
+  let riskControls = null;
+  if (mode === 'risk') {
+    try {
+      riskControls = await api('/api/risk-controls');
+    } catch (error) {
+      if (error.status !== 403) throw error;
+    }
+  }
   const titles = {positions:'仓位与保护', orders:'订单与成交', risk:'风险与目标'};
   let rows = '';
   if (mode === 'positions') rows = details.map(item => `<tr data-href="/campaigns/${item.campaign_id}"><td>${shortId(item.campaign_id)}</td><td>${escapeHtml(item.instrument?.symbol || shortId(item.instrument_id))}</td><td>${item.position ? `${fmtNumber(item.position.quantity)} @ ${fmtNumber(item.position.average_entry_price)}` : '无事实'}</td><td>${item.position ? escapeHtml(fmtStatus(item.position.fact_status)) : '结果未知'}</td><td>${item.protection ? `${escapeHtml(fmtStatus(item.protection.status))} · ${item.protection.fully_covered ? '完整覆盖' : '覆盖不足'}` : '无保护事实'}</td><td>${fmtDate(item.position?.observed_at)}</td></tr>`).join('');
