@@ -33,11 +33,13 @@ from trading_control_plane.models import (
     Campaign,
     CapabilityGate,
     CommandReceipt,
+    Instrument,
     OrderIntent,
     Position,
     Proposal,
     ReconciliationRun,
     RiskDecision,
+    RiskPolicy,
     RiskReservation,
     TradingAuthorization,
     VenueFill,
@@ -193,6 +195,39 @@ def current_add_candidate() -> AddCandidateFacts:
         reference_price=Decimal("110"),
         readiness="READY",
     )
+
+
+def test_auto_add_rejects_initial_candidate_through_legacy_identity() -> None:
+    proposal = Proposal(
+        source=ProposalSource.SYSTEM.value,
+        strategy_version="breakouts-v1",
+        source_candidate_id="pt_legacy_initial",
+        venue="BINANCE",
+        direction=Direction.LONG.value,
+        frozen_payload={"details": {"allow_auto_add": True}},
+    )
+    instrument = Instrument(symbol="BTCUSDT")
+    policy = RiskPolicy(max_fact_age_seconds=30)
+    candidate = AddCandidateFacts(
+        candidate_id="pt_exact_initial",
+        legacy_candidate_id="pt_legacy_initial",
+        contract_version="breakouts-v1",
+        venue="BINANCE",
+        symbol="BTCUSDT",
+        direction=Direction.LONG,
+        observed_at=NOW,
+        reference_price=Decimal("110"),
+        readiness="READY",
+    )
+
+    with pytest.raises(DomainRejected, match="AUTO_ADD_CANDIDATE_VERSION_INVALID"):
+        TradingService._validate_add_candidate(
+            proposal=proposal,
+            instrument=instrument,
+            candidate=candidate,
+            policy=policy,
+            now=NOW,
+        )
 
 
 def issue_authorization(

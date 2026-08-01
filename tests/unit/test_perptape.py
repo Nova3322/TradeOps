@@ -28,6 +28,7 @@ from trading_control_plane.perptape import (
     PerptapeRateLimited,
     bound_perptape_feed_snapshot,
     normalize_perptape_datetime,
+    perptape_legacy_candidate_id,
     perptape_payload_size_bytes,
     perptape_snapshot_identity,
     validate_perptape_feed_payload,
@@ -119,6 +120,33 @@ def test_real_breakout_contract_maps_to_narrow_trading_candidates_and_caches() -
     assert first[0].quote_volume == 1_000_000
     assert first[0].open_interest == 500_000
     assert client.get_candidate(first[0].candidate_id, now=NOW) == first[0]
+
+
+def test_candidate_identity_distinguishes_contracts_with_same_canonical_symbol() -> None:
+    payload = response()
+    binance = payload["data"][0]
+    assert isinstance(binance, dict)
+    alternate_contract = dict(binance)
+    alternate_contract["symbol"] = "BTCUSDC"
+    payload["data"] = [binance, alternate_contract]
+
+    client = PerptapeClient(
+        base_url="https://perptape.com",
+        api_key="test-api-key",
+        contract_version="breakouts-v1",
+        cache_ttl=timedelta(minutes=1),
+        fetcher=lambda _url, _headers, _timeout: payload,
+    )
+
+    candidates = client.list_candidates(now=NOW)
+
+    assert [candidate.symbol for candidate in candidates] == ["BTCUSDT", "BTCUSDC"]
+    assert len({candidate.candidate_id for candidate in candidates}) == 2
+    assert len({perptape_legacy_candidate_id(candidate) for candidate in candidates}) == 1
+    assert all(
+        client.get_candidate(candidate.candidate_id, now=NOW) == candidate
+        for candidate in candidates
+    )
 
 
 def test_server_rate_limit_extends_cache_beyond_local_ttl() -> None:

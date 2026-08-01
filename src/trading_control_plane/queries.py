@@ -161,6 +161,47 @@ class TradingQueries:
                 )
             return instrument.instrument_id
 
+    def compatible_legacy_system_candidate_id(
+        self,
+        legacy_candidate_id: str,
+        candidate: PerptapeCandidate,
+        instrument_id: UUID,
+    ) -> str | None:
+        """Reuse an exact legacy proposal identity without conflating quote contracts."""
+
+        with self.database.session_factory() as session:
+            proposal = session.scalar(
+                select(Proposal).where(
+                    Proposal.source == "SYSTEM",
+                    Proposal.source_candidate_id == legacy_candidate_id,
+                )
+            )
+            if (
+                proposal is None
+                or proposal.instrument_id != instrument_id
+                or proposal.venue != candidate.venue
+                or proposal.direction != candidate.direction.value
+            ):
+                return None
+            details = proposal.frozen_payload.get("details")
+            snapshot = details.get("candidate") if isinstance(details, dict) else None
+            if not isinstance(snapshot, dict):
+                return None
+            current = candidate.to_dict()
+            identity_fields = (
+                "venue",
+                "source_exchange",
+                "symbol",
+                "canonical_symbol",
+                "direction",
+                "source_direction",
+                "timeframe",
+                "triggered_at",
+            )
+            if any(snapshot.get(field) != current[field] for field in identity_fields):
+                return None
+            return legacy_candidate_id
+
     def perptape_feed(self) -> PerptapeFeedSnapshot | None:
         with self.database.session_factory() as session:
             feed = session.get(PerptapeFeed, "BREAKOUTS")

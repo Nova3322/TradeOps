@@ -259,6 +259,7 @@ class AddCandidateFacts:
     observed_at: datetime
     reference_price: Decimal
     readiness: str
+    legacy_candidate_id: str | None = None
 
 
 def _amount(value: Decimal) -> Decimal:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Any
@@ -13,14 +14,20 @@ from sqlalchemy import func, select
 from trading_control_plane.api import create_app
 from trading_control_plane.config import Settings
 from trading_control_plane.database import Database
-from trading_control_plane.domain import Role, SystemRiskState
+from trading_control_plane.domain import (
+    ProposalSource,
+    RiskTier,
+    Role,
+    SystemRiskState,
+)
 from trading_control_plane.models import (
     OrderIntent,
     Proposal,
     RiskDecision,
     TradingAuthorization,
 )
-from trading_control_plane.perptape import PerptapeClient
+from trading_control_plane.perptape import PerptapeClient, perptape_legacy_candidate_id
+from trading_control_plane.queries import TradingQueries
 from trading_control_plane.service import TradingService
 from trading_control_plane.telegram import MockTelegramGateway
 
@@ -124,7 +131,11 @@ def perptape_client() -> PerptapeClient:
     )
 
 
-def app(database: Database, telegram: MockTelegramGateway) -> FastAPI:
+def app(
+    database: Database,
+    telegram: MockTelegramGateway,
+    client: PerptapeClient | None = None,
+) -> FastAPI:
     settings = Settings(
         environment="test",
         database_url=str(database.engine.url),
@@ -135,7 +146,7 @@ def app(database: Database, telegram: MockTelegramGateway) -> FastAPI:
         public_base_url="http://test",
         _env_file=None,
     )
-    return create_app(settings, database, perptape_client(), telegram)
+    return create_app(settings, database, client or perptape_client(), telegram)
 
 
 async def login(client: AsyncClient, username: str) -> None:
@@ -146,6 +157,110 @@ async def login(client: AsyncClient, username: str) -> None:
 async def logout(client: AsyncClient) -> None:
     response = await client.post("/api/auth/logout")
     assert response.status_code == 200
+
+
+def test_api_reuses_exact_legacy_proposal_without_deduplicating_another_contract(
+    database: Database, service: TradingService
+) -> None:
+    ids = seed(service)
+    now = datetime.now(UTC)
+    client = perptape_client()
+    candidate = client.list_candidates(now=now)[0]
+    legacy_candidate_id = perptape_legacy_candidate_id(candidate)
+    request_payload = {
+        "account_id": "acct-1",
+        "risk_tier": "LOW",
+        "quantity": "1",
+        "max_risk": "40",
+        "expires_in_minutes": 120,
+        "invalidation_price": "118000",
+        "rationale": "review Perptape breakout",
+    }
+    legacy_proposal_id = service.create_proposal(
+        actor_id=ids["perptape"],
+        source=ProposalSource.SYSTEM,
+        risk_tier=RiskTier.LOW,
+        account_id="acct-1",
+        venue=candidate.venue,
+        instrument_id=ids["instrument"],
+        direction=candidate.direction,
+        quantity=Decimal("1"),
+        max_risk=Decimal("40"),
+        expires_at=now + timedelta(minutes=120),
+        idempotency_key=f"perptape:{legacy_candidate_id}",
+        strategy_id="perptape",
+        strategy_version=candidate.source_contract_version,
+        source_candidate_id=legacy_candidate_id,
+        source_link=candidate.detail_url,
+        source_observed_at=candidate.observed_at,
+        source_readiness=candidate.readiness,
+        details={
+            "candidate": candidate.to_dict(),
+            "invalidation_price": "118000",
+            "initial_quantity": "1",
+            "allow_auto_add": False,
+            "requested_adds": 0,
+            "add_trigger_price": None,
+            "rationale": "review Perptape breakout",
+        },
+        idempotency_payload={
+            "candidate_id": legacy_candidate_id,
+            "account_id": "acct-1",
+            "risk_tier": "LOW",
+            "quantity": "1",
+            "initial_quantity": None,
+            "max_risk": "40",
+            "expires_in_minutes": 120,
+            "invalidation_price": "118000",
+            "allow_auto_add": False,
+            "requested_adds": 0,
+            "add_trigger_price": None,
+            "rationale": "review Perptape breakout",
+        },
+        now=now,
+    )
+
+    async def scenario() -> None:
+        async with AsyncClient(
+            transport=ASGITransport(app=app(database, MockTelegramGateway(), client)),
+            base_url="http://test",
+        ) as http:
+            await login(http, "proposer")
+            created = await http.post(
+                f"/api/opportunities/{candidate.candidate_id}/proposals",
+                json=request_payload,
+            )
+            assert created.status_code == 200, created.text
+            assert created.json()["proposal_id"] == str(legacy_proposal_id)
+            assert created.json()["source_candidate_id"] == legacy_candidate_id
+            legacy_created = await http.post(
+                f"/api/opportunities/{legacy_candidate_id}/proposals",
+                json=request_payload,
+            )
+            assert legacy_created.status_code == 200, legacy_created.text
+            assert legacy_created.json()["proposal_id"] == str(legacy_proposal_id)
+
+    asyncio.run(scenario())
+    with database.session_factory() as session:
+        assert session.scalar(select(func.count()).select_from(Proposal)) == 1
+    queries = TradingQueries(database)
+
+    assert (
+        queries.compatible_legacy_system_candidate_id(
+            legacy_candidate_id,
+            candidate,
+            ids["instrument"],
+        )
+        == legacy_candidate_id
+    )
+    assert (
+        queries.compatible_legacy_system_candidate_id(
+            legacy_candidate_id,
+            replace(candidate, symbol="BTCUSDC", candidate_id="pt_exact_usdc"),
+            ids["instrument"],
+        )
+        is None
+    )
 
 
 def test_perptape_to_review_to_risk_and_authorization_api_flow(

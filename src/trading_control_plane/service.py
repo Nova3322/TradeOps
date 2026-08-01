@@ -1573,7 +1573,8 @@ class TradingService:
             )
         if proposal.source == ProposalSource.SYSTEM.value and (
             candidate.contract_version != proposal.strategy_version
-            or candidate.candidate_id == proposal.source_candidate_id
+            or proposal.source_candidate_id
+            in {candidate.candidate_id, candidate.legacy_candidate_id}
         ):
             _reject(
                 "AUTO_ADD_CANDIDATE_VERSION_INVALID",
