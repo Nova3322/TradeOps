@@ -49,6 +49,9 @@ from trading_control_plane.api_schemas import (
     ReconciliationRequest,
     ReductionIntentRequest,
     ReviewRequest,
+    RiskControlChangeCreateRequest,
+    RiskControlChangeExecuteRequest,
+    RiskControlChangeReviewRequest,
     RiskDecisionRequest,
     RiskTightenRequest,
     SenderLeaseRequest,
@@ -426,6 +429,22 @@ def create_app(
     def service() -> TradingService:
         return TradingService(business_database())
 
+    def configured_risk_scopes() -> tuple[tuple[str, str, str], ...]:
+        scopes: set[tuple[str, str, str]] = set()
+        if (
+            resolved_settings.binance_read_only_enabled
+            and resolved_settings.binance_fact_environment == "LIVE"
+            and resolved_settings.runtime_binance_account_id
+        ):
+            scopes.add(("LIVE", resolved_settings.runtime_binance_account_id, "BINANCE"))
+        if (
+            resolved_settings.hyperliquid_read_only_enabled
+            and resolved_settings.hyperliquid_fact_environment == "LIVE"
+            and resolved_settings.runtime_hyperliquid_account_id
+        ):
+            scopes.add(("LIVE", resolved_settings.runtime_hyperliquid_account_id, "HYPERLIQUID"))
+        return tuple(sorted(scopes))
+
     def current_identity(
         trading_session: str | None = Cookie(default=None, alias=SESSION_COOKIE),
     ) -> SessionIdentity:
@@ -541,10 +560,16 @@ def create_app(
             current_version = queries().proposal_version(payload.object_id)
             detail = queries().proposal_detail(identity.user_id, payload.object_id)
             review_action = "proposal.review"
-        else:
+        elif payload.action == "capital.approve":
             current_version = queries().transfer_proposal_version(payload.object_id)
             detail = queries().transfer_proposal_detail(identity.user_id, payload.object_id)
             review_action = "capital.review"
+        elif payload.action in {"risk.restore.review", "risk.restore.execute"}:
+            current_version = service().risk_control_change_version(payload.object_id)
+            detail = {"account_id": None, "venue": None}
+            review_action = payload.action
+        else:
+            raise DomainRejected("STEP_UP_ACTION_INVALID", "step-up action is not supported")
         if current_version != payload.object_version:
             raise DomainRejected("VERSION_CONFLICT", "proposal changed before step-up")
         if not service().can_user(
@@ -1564,6 +1589,96 @@ def create_app(
             now=_now(),
         )
         return {"system_state": state.value}
+
+    @app.get("/api/risk-controls")
+    def risk_controls(
+        identity: SessionIdentity = identity_dependency,
+    ) -> dict[str, Any]:
+        return service().risk_control_status(
+            identity.user_id,
+            configured_risk_scopes(),
+            require_live_scope=resolved_settings.environment == "production",
+            now=_now(),
+        )
+
+    @app.post("/api/risk-controls/restores")
+    def create_risk_control_restore(
+        payload: RiskControlChangeCreateRequest,
+        identity: SessionIdentity = identity_dependency,
+    ) -> dict[str, Any]:
+        request_id = service().create_risk_control_change_request(
+            identity.user_id,
+            payload.idempotency_key,
+            reason=payload.reason,
+            restore_auto_add=payload.restore_auto_add,
+            configured_scopes=configured_risk_scopes(),
+            require_live_scope=resolved_settings.environment == "production",
+            now=_now(),
+        )
+        return service().risk_control_status(
+            identity.user_id,
+            configured_risk_scopes(),
+            require_live_scope=resolved_settings.environment == "production",
+            now=_now(),
+        ) | {"request_id": str(request_id)}
+
+    @app.post("/api/risk-controls/restores/{request_id}/reviews")
+    def review_risk_control_restore(
+        request_id: UUID,
+        payload: RiskControlChangeReviewRequest,
+        identity: SessionIdentity = identity_dependency,
+    ) -> dict[str, Any]:
+        now = _now()
+        if payload.decision == "APPROVE":
+            if payload.action_grant is None:
+                raise DomainRejected(
+                    "ACTION_GRANT_REQUIRED",
+                    "risk restoration approval requires action-level step-up",
+                )
+            token_service.verify_action_grant(
+                payload.action_grant,
+                user_id=identity.user_id,
+                action="risk.restore.review",
+                object_id=request_id,
+                object_version=payload.expected_version,
+                now=now,
+            )
+        result = service().review_risk_control_change_request(
+            request_id,
+            identity.user_id,
+            ReviewDecision(payload.decision),
+            payload.reason,
+            payload.expected_version,
+            payload.idempotency_key,
+            now=now,
+        )
+        return {"request_id": str(request_id), "status": result.value}
+
+    @app.post("/api/risk-controls/restores/{request_id}/execute")
+    def execute_risk_control_restore(
+        request_id: UUID,
+        payload: RiskControlChangeExecuteRequest,
+        identity: SessionIdentity = identity_dependency,
+    ) -> dict[str, Any]:
+        now = _now()
+        token_service.verify_action_grant(
+            payload.action_grant,
+            user_id=identity.user_id,
+            action="risk.restore.execute",
+            object_id=request_id,
+            object_version=payload.expected_version,
+            now=now,
+        )
+        policy_id = service().execute_risk_control_change_request(
+            request_id,
+            identity.user_id,
+            payload.expected_version,
+            payload.idempotency_key,
+            configured_risk_scopes(),
+            require_live_scope=resolved_settings.environment == "production",
+            now=now,
+        )
+        return {"request_id": str(request_id), "policy_id": str(policy_id)}
 
     @app.post("/api/authorizations/{authorization_id}/intents")
     def create_order_intent(

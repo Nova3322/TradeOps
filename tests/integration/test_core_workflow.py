@@ -119,6 +119,18 @@ def seed(service: TradingService) -> dict[str, UUID]:
     }
 
 
+def enable_auto_add_fixture(database: Database, admin: UUID, *, now: datetime = NOW) -> None:
+    """Open AUTO_ADD only while arranging a pre-existing test scenario."""
+    with database.session_factory.begin() as session:
+        gate = session.get(CapabilityGate, "AUTO_ADD", with_for_update=True)
+        assert gate is not None
+        gate.status = CapabilityStatus.ENABLED.value
+        gate.reason = "integration fixture precondition"
+        gate.operator_id = str(admin)
+        gate.version += 1
+        gate.updated_at = now
+
+
 def create_approved_proposal(
     service: TradingService,
     ids: dict[str, UUID],
@@ -690,18 +702,18 @@ def test_basic_rbac_bootstrap_and_capability_gate_are_fail_closed(
     with pytest.raises(DomainRejected, match="BOOTSTRAP_CLOSED"):
         service.bootstrap_admin("second-admin", now=NOW)
 
-    service.set_capability_gate(
-        "AUTO_ADD",
-        CapabilityStatus.ENABLED,
-        "explicit test operator decision",
-        ids["admin"],
-        now=NOW,
-    )
+    with pytest.raises(DomainRejected, match="REVIEWED_RESTORE_REQUIRED"):
+        service.set_capability_gate(
+            "AUTO_ADD",
+            CapabilityStatus.ENABLED,
+            "direct operator decision must remain closed",
+            ids["admin"],
+            now=NOW,
+        )
     with database.session_factory() as session:
         gate = session.get(CapabilityGate, "AUTO_ADD")
         assert gate is not None
-        assert gate.status == CapabilityStatus.ENABLED.value
-        assert gate.operator_id == str(ids["admin"])
+        assert gate.status == CapabilityStatus.DISABLED.value
 
 
 def test_sender_fencing_rejects_old_owner_after_reconciled_takeover(
@@ -1202,37 +1214,6 @@ def test_final_risk_check_rejects_policy_and_fact_changes_after_authorization(
     ids = seed(service)
     proposal_id = create_approved_proposal(service, ids, risk_tier=RiskTier.LOW, key="final-check")
     authorization_id = issue_authorization(service, ids, proposal_id)
-    service.set_risk_policy(
-        actor_id=ids["admin"],
-        version="risk-kill",
-        system_state=SystemRiskState.KILL_SWITCH,
-        max_total_risk=Decimal("100"),
-        max_fact_age=timedelta(seconds=30),
-        now=NOW + timedelta(seconds=1),
-    )
-
-    with pytest.raises(DomainRejected, match="FINAL_RISK_CHECK_FAILED: KILL_SWITCH"):
-        service.create_order_intent(
-            authorization_id,
-            ids["operator"],
-            IntentKind.INITIAL,
-            "acct-1",
-            "BINANCE",
-            ids["instrument"],
-            Direction.LONG,
-            Decimal("1"),
-            "kill-after-auth",
-            now=NOW + timedelta(seconds=1),
-        )
-
-    service.set_risk_policy(
-        actor_id=ids["admin"],
-        version="risk-normal-2",
-        system_state=SystemRiskState.NORMAL,
-        max_total_risk=Decimal("100"),
-        max_fact_age=timedelta(seconds=30),
-        now=NOW + timedelta(seconds=2),
-    )
     with pytest.raises(DomainRejected, match="FINAL_RISK_CHECK_FAILED: STALE_FACTS"):
         service.create_order_intent(
             authorization_id,
@@ -1245,6 +1226,49 @@ def test_final_risk_check_rejects_policy_and_fact_changes_after_authorization(
             Decimal("1"),
             "stale-after-auth",
             now=NOW + timedelta(seconds=31),
+        )
+
+    service.set_risk_policy(
+        actor_id=ids["admin"],
+        version="risk-kill",
+        system_state=SystemRiskState.KILL_SWITCH,
+        max_total_risk=Decimal("100"),
+        max_fact_age=timedelta(seconds=30),
+        now=NOW + timedelta(seconds=32),
+    )
+    service.record_position(
+        "acct-1",
+        "BINANCE",
+        ids["instrument"],
+        Decimal("0"),
+        Decimal("0"),
+        Decimal("100"),
+        True,
+        ids["operator"],
+        now=NOW + timedelta(seconds=32),
+    )
+    service.record_account_equity(
+        "acct-1",
+        "BINANCE",
+        Decimal("10000"),
+        Decimal("9000"),
+        "USDT",
+        True,
+        ids["operator"],
+        now=NOW + timedelta(seconds=32),
+    )
+    with pytest.raises(DomainRejected, match="FINAL_RISK_CHECK_FAILED: KILL_SWITCH"):
+        service.create_order_intent(
+            authorization_id,
+            ids["operator"],
+            IntentKind.INITIAL,
+            "acct-1",
+            "BINANCE",
+            ids["instrument"],
+            Direction.LONG,
+            Decimal("1"),
+            "kill-after-auth",
+            now=NOW + timedelta(seconds=32),
         )
 
 
@@ -1298,9 +1322,11 @@ def test_unknown_reservation_still_occupies_capacity(
 
 
 def test_add_requires_profit_position_protection_and_normal_risk_state(
+    database: Database,
     service: TradingService,
 ) -> None:
     ids = seed(service)
+    enable_auto_add_fixture(database, ids["admin"])
     proposal_id = create_approved_proposal(
         service,
         ids,
@@ -1363,10 +1389,6 @@ def test_add_requires_profit_position_protection_and_normal_risk_state(
         ids["operator"],
         now=NOW,
     )
-    service.set_capability_gate(
-        "AUTO_ADD", CapabilityStatus.ENABLED, "test Add", ids["admin"], now=NOW
-    )
-
     with pytest.raises(DomainRejected, match="ADD_NOT_PROFITABLE"):
         service.create_order_intent(
             authorization_id,
@@ -1489,6 +1511,7 @@ def test_zero_fill_cancelled_add_does_not_consume_unit_and_requires_operator(
     database: Database, service: TradingService
 ) -> None:
     ids = seed(service)
+    enable_auto_add_fixture(database, ids["admin"])
     proposal_id = create_approved_proposal(
         service,
         ids,
@@ -1550,9 +1573,6 @@ def test_zero_fill_cancelled_add_does_not_consume_unit_and_requires_operator(
         True,
         ids["operator"],
         now=NOW,
-    )
-    service.set_capability_gate(
-        "AUTO_ADD", CapabilityStatus.ENABLED, "test Add", ids["admin"], now=NOW
     )
     addition = service.create_order_intent(
         authorization_id,
@@ -2113,6 +2133,7 @@ def test_enabled_add_gate_keeps_database_ready_but_does_not_bypass_hard_checks(
     database: Database, service: TradingService
 ) -> None:
     ids = seed(service)
+    enable_auto_add_fixture(database, ids["admin"])
     proposal_id = create_approved_proposal(
         service,
         ids,
@@ -2121,10 +2142,6 @@ def test_enabled_add_gate_keeps_database_ready_but_does_not_bypass_hard_checks(
         allow_auto_add=True,
     )
     authorization_id = issue_authorization(service, ids, proposal_id, allowed_adds=1)
-    service.set_capability_gate(
-        "AUTO_ADD", CapabilityStatus.ENABLED, "explicit test", ids["admin"], now=NOW
-    )
-
     assert database.is_ready() == (True, None)
     with pytest.raises(DomainRejected, match="FINAL_RISK_CHECK_FAILED"):
         service.create_order_intent(

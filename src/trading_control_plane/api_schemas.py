@@ -100,7 +100,12 @@ class ReviewRequest(BaseModel):
 
 
 class MockStepUpRequest(BaseModel):
-    action: Literal["proposal.approve", "capital.approve"]
+    action: Literal[
+        "proposal.approve",
+        "capital.approve",
+        "risk.restore.review",
+        "risk.restore.execute",
+    ]
     object_id: UUID
     object_version: int = Field(ge=1)
 
@@ -405,6 +410,26 @@ class AutomaticExitRequest(BaseModel):
 class RiskTightenRequest(BaseModel):
     reason: str = Field(min_length=2, max_length=500)
     idempotency_key: str = Field(min_length=1, max_length=160)
+
+
+class RiskControlChangeCreateRequest(BaseModel):
+    reason: str = Field(min_length=10, max_length=2_000)
+    restore_auto_add: bool = False
+    idempotency_key: str = Field(min_length=1, max_length=160)
+
+
+class RiskControlChangeReviewRequest(BaseModel):
+    decision: Literal["APPROVE", "REJECT"]
+    reason: str = Field(min_length=10, max_length=2_000)
+    expected_version: int = Field(ge=1)
+    idempotency_key: str = Field(min_length=1, max_length=160)
+    action_grant: str | None = None
+
+
+class RiskControlChangeExecuteRequest(BaseModel):
+    expected_version: int = Field(ge=1)
+    idempotency_key: str = Field(min_length=1, max_length=160)
+    action_grant: str
 
 
 class TelegramCampaignActionRequest(BaseModel):

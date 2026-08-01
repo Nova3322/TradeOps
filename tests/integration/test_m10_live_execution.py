@@ -37,7 +37,12 @@ from trading_control_plane.hyperliquid_execution import (
     HyperliquidLiveClient,
     HyperliquidTestnetOrder,
 )
-from trading_control_plane.models import OrderIntent, ProtectionOrder, RiskReservation
+from trading_control_plane.models import (
+    CapabilityGate,
+    OrderIntent,
+    ProtectionOrder,
+    RiskReservation,
+)
 from trading_control_plane.perptape import PerptapeClient
 from trading_control_plane.service import TradingService
 
@@ -866,6 +871,14 @@ async def exercise_perptape_binance_live_lifecycle(database: Database) -> None:
             idempotency_key="perptape-live-risk",
             now=NOW,
         )
+        with database.session_factory.begin() as session:
+            gate = session.get(CapabilityGate, "AUTO_ADD", with_for_update=True)
+            assert gate is not None
+            gate.status = CapabilityStatus.ENABLED.value
+            gate.reason = "Perptape lifecycle integration fixture precondition"
+            gate.operator_id = str(admin)
+            gate.version += 1
+            gate.updated_at = NOW
         authorization = service.issue_authorization(
             proposal_id=proposal_id,
             actor_id=operator,
@@ -888,13 +901,6 @@ async def exercise_perptape_binance_live_lifecycle(database: Database) -> None:
         )
         service.set_capability_gate(
             "LIVE_ORDER_SEND",
-            CapabilityStatus.ENABLED,
-            "Perptape lifecycle integration fixture",
-            admin,
-            now=NOW,
-        )
-        service.set_capability_gate(
-            "AUTO_ADD",
             CapabilityStatus.ENABLED,
             "Perptape lifecycle integration fixture",
             admin,

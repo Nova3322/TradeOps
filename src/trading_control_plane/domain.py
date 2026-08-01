@@ -63,6 +63,14 @@ class ReviewDecision(StrEnum):
     REJECT = "REJECT"
 
 
+class RiskPolicyChangeStatus(StrEnum):
+    PENDING_REVIEW = "PENDING_REVIEW"
+    APPROVED = "APPROVED"
+    REJECTED = "REJECTED"
+    EXPIRED = "EXPIRED"
+    EXECUTED = "EXECUTED"
+
+
 class CapitalDirection(StrEnum):
     VAULT_TO_VENUE = "VAULT_TO_VENUE"
     VENUE_TO_VAULT = "VENUE_TO_VAULT"

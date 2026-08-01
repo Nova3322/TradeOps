@@ -292,6 +292,7 @@ class TradingQueries:
                         "risk_limit": str(authorization.risk_limit),
                         "allowed_adds": authorization.allowed_adds,
                         "used_adds": authorization.used_adds,
+                        "add_revoked_at": _iso(authorization.add_revoked_at),
                         "active": authorization.active,
                         "expires_at": _iso(authorization.expires_at),
                     },
@@ -1217,6 +1218,7 @@ class TradingQueries:
                         "used_quantity": str(authorization.used_quantity),
                         "allowed_adds": authorization.allowed_adds,
                         "used_adds": authorization.used_adds,
+                        "add_revoked_at": _iso(authorization.add_revoked_at),
                         "expires_at": _iso(authorization.expires_at),
                     },
                     "reservations": [
@@ -1346,7 +1348,9 @@ class TradingQueries:
                         ),
                         "remaining_adds": (
                             0
-                            if authorization is None or not authorization.active
+                            if authorization is None
+                            or not authorization.active
+                            or authorization.add_revoked_at is not None
                             else authorization.allowed_adds - authorization.used_adds
                         ),
                     },

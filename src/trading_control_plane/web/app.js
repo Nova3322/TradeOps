@@ -560,6 +560,56 @@ async function loadCampaignDetails() {
   return Promise.all(result.data.map((item) => api(`/api/campaigns/${item.campaign_id}`)));
 }
 
+const riskControlStatusLabel = (value) => ({
+  NORMAL:'正常开放', NO_PYRAMID:'禁止加仓', REDUCE_ONLY:'仅允许减仓', KILL_SWITCH:'紧急停止',
+  ENABLED:'已启用', DISABLED:'已关闭', PENDING_REVIEW:'等待双人审核', APPROVED:'审核完成待执行',
+  REJECTED:'已拒绝', EXPIRED:'已过期', EXECUTED:'已执行',
+}[value] || value);
+
+function renderRiskControlPanel(control) {
+  const policy = control.policy;
+  const gate = control.auto_add_gate;
+  const conditions = control.restore_conditions;
+  const hasLiveScope = conditions.required_scopes.some(scope => scope.environment === 'LIVE');
+  const restoreGateLabel = conditions.ready
+    ? (conditions.live_scope_required ? '生产条件满足' : (hasLiveScope ? '条件满足' : '本地条件满足'))
+    : `${conditions.blockers.length} 项阻塞`;
+  const isAdmin = roleNames().includes('SYSTEM_ADMIN');
+  const canReview = roleNames().includes('REVIEWER') || isAdmin;
+  const activeRequest = control.requests.find(item => ['PENDING_REVIEW','APPROVED'].includes(item.status));
+  const requestForm = isAdmin && !activeRequest && (policy.system_state !== 'NORMAL' || gate.status !== 'ENABLED')
+    ? `<form id="risk-restore-form" class="form-panel compact-form"><h2>申请受审核恢复</h2><p class="danger-note"><b>这不是反向开关。</b>申请只冻结当前 Policy、Gate 和受控 scope；两名独立 Reviewer 分别完成强身份验证后，还要在执行时重新检查事实、计算型对账、未决订单、冷却期和版本漂移。旧提案、旧授权和旧 AddUnit 永远不会复活。</p><label>恢复理由<textarea name="reason" rows="4" minlength="10" required>已完成异常处置，并准备由两名独立审核人复核全部恢复条件</textarea></label><label class="checkbox-row"><input name="restore_auto_add" type="checkbox">同时申请恢复全局 AUTO_ADD Gate（旧 AddUnit 仍保持撤销）</label><div class="form-error" role="alert"></div><div class="form-actions"><button class="primary">创建冻结申请</button></div></form>`
+    : '';
+  const requestCards = control.requests.length ? control.requests.map(item => {
+    const isRequester = item.requester_id === session.user_id;
+    const reviewedByMe = item.reviews.some(review => review.reviewer_id === session.user_id);
+    const reviewUi = item.status === 'PENDING_REVIEW' && canReview && !isRequester && !reviewedByMe
+      ? `<label>独立审核理由<textarea id="risk-review-${item.request_id}" rows="3">已核对冻结版本、恢复影响和当前阻塞条件</textarea></label><div class="toolbar"><button class="primary" data-risk-review="${item.request_id}" data-decision="APPROVE" data-version="${item.version}">强验证并批准</button><button class="danger" data-risk-review="${item.request_id}" data-decision="REJECT" data-version="${item.version}">拒绝申请</button></div>`
+      : '<p class="subtle">当前身份或申请状态没有可用审核动作。</p>';
+    const executeUi = item.status === 'APPROVED' && isAdmin
+      ? `<button class="danger" data-risk-execute="${item.request_id}" data-version="${item.version}">强验证并执行恢复</button><p class="safety-note">执行会再次 fail closed；任何事实、scope、Policy 或 Gate 漂移都会拒绝。</p>`
+      : '';
+    return `<article class="card"><div class="card-head"><div><p class="eyebrow">RESTORE REQUEST · v${item.version}</p><h2>${riskControlStatusLabel(item.status)}</h2></div><span class="tag">${shortId(item.request_id)}</span></div><dl class="definition-grid">${definition('申请人', shortId(item.requester_id))}${definition('恢复 AUTO_ADD', item.restore_auto_add ? '是' : '否')}${definition('最早执行', fmtDate(item.execute_after))}${definition('到期', fmtDate(item.expires_at))}${definition('冻结 Policy', `${escapeHtml(item.source_policy_version)} · r${item.source_policy_revision}`)}${definition('冻结 Gate', `${escapeHtml(item.source_auto_add_status)} · v${item.source_auto_add_version}`)}</dl><p>${escapeHtml(item.reason)}</p><h3>审核记录</h3>${item.reviews.length ? item.reviews.map(review => `<div class="callout"><b>${escapeHtml(review.decision)}</b> · ${escapeHtml(review.reason)}<br><span class="subtle">${shortId(review.reviewer_id)} · ${fmtDate(review.created_at)}</span></div>`).join('') : '<p class="subtle">尚无审核票。</p>'}<div class="review-action-panel">${reviewUi}${executeUi}</div></article>`;
+  }).join('') : '<section class="empty-state"><div><h2>尚无恢复申请</h2><p>收紧控制不会自动恢复；需要创建冻结申请并完成双人独立审核。</p></div></section>';
+  return `<section class="risk-control-overview"><div class="stats"><div class="stat"><small>RiskPolicy</small><b>${riskControlStatusLabel(policy.system_state)}</b></div><div class="stat"><small>Policy 版本</small><b>${escapeHtml(policy.version)} · r${policy.revision}</b></div><div class="stat"><small>AUTO_ADD</small><b>${riskControlStatusLabel(gate.status)} · v${gate.version}</b></div><div class="stat"><small>恢复门</small><b>${restoreGateLabel}</b></div></div><div class="detail-layout"><article class="card"><h2>当前权威控制</h2><dl class="definition-grid">${definition('Policy 原因', policy.reason)}${definition('Policy 更新人', shortId(policy.updated_by))}${definition('Policy 更新时间', fmtDate(policy.updated_at))}${definition('Gate 原因', gate.reason)}${definition('Gate 操作人', shortId(gate.operator_id))}${definition('Gate 更新时间', fmtDate(gate.updated_at))}</dl><p class="safety-note">REDUCE_ONLY 仍允许减仓与退出；暂停会永久失效当时所有未过期的新风险授权。</p></article><article class="card"><h2>实时恢复条件</h2>${conditions.blockers.length ? `<ul class="exception-list">${conditions.blockers.map(item => `<li><code>${escapeHtml(item)}</code></li>`).join('')}</ul>` : `<p class="success-note">${conditions.live_scope_required ? '生产 LIVE 恢复条件当前无阻塞' : '当前本地读取未发现阻塞'}；执行事务仍会重新验证。</p>`}<h3>冻结范围来源</h3>${conditions.required_scopes.length ? conditions.required_scopes.map(scope => `<div class="callout"><b>${escapeHtml(scope.environment)}</b> · ${escapeHtml(scope.account_id)} · ${escapeHtml(scope.venue)}</div>`).join('') : `<p class="danger-note">${conditions.live_scope_required ? 'LIVE_SCOPE_CONFIGURATION_REQUIRED：未配置生产 LIVE 受控 scope，恢复执行保持关闭。' : '当前为本地模式且未配置受控 scope；生产环境会返回 LIVE_SCOPE_CONFIGURATION_REQUIRED 并禁止执行。'}</p>`}</article></div>${requestForm}<div class="section-head"><div><p class="eyebrow">FOUR-EYES WORKFLOW</p><h2>恢复申请与独立审核</h2></div></div><div class="stack">${requestCards}</div></section>`;
+}
+
+async function bindRiskControlActions() {
+  document.querySelector('#risk-restore-form')?.addEventListener('submit', async event => {
+    event.preventDefault(); const form = event.currentTarget; const data = new FormData(form); const button = event.submitter || form.querySelector('button');
+    await withPending(button, '冻结中…', async () => { try { await api('/api/risk-controls/restores', {method:'POST', body:JSON.stringify({reason:data.get('reason'), restore_auto_add:data.get('restore_auto_add') === 'on', idempotency_key:crypto.randomUUID()})}); showToast('恢复申请已冻结，等待两名独立审核人'); await route(); } catch (error) { showApiError(error, form.querySelector('.form-error')); } });
+  });
+  document.querySelectorAll('[data-risk-review]').forEach(button => button.addEventListener('click', async () => {
+    const requestId = button.dataset.riskReview; const version = Number(button.dataset.version); const decision = button.dataset.decision; const reason = document.querySelector(`#risk-review-${requestId}`)?.value || '独立审核拒绝';
+    await withPending(button, '提交中…', async () => { try { let action_grant = null; if (decision === 'APPROVE') { const grant = await api('/api/auth/mock/step-up', {method:'POST', body:JSON.stringify({action:'risk.restore.review', object_id:requestId, object_version:version})}); action_grant = grant.action_grant; } await api(`/api/risk-controls/restores/${requestId}/reviews`, {method:'POST', body:JSON.stringify({decision, reason, expected_version:version, idempotency_key:crypto.randomUUID(), action_grant})}); showToast(decision === 'APPROVE' ? '独立审核票已记录' : '恢复申请已拒绝'); await route(); } catch (error) { showApiError(error); } });
+  }));
+  document.querySelectorAll('[data-risk-execute]').forEach(button => button.addEventListener('click', async () => {
+    const requestId = button.dataset.riskExecute; const version = Number(button.dataset.version);
+    const confirmed = await confirmAction({title:'执行受审核恢复？', message:'系统将重新验证所有冻结 scope、事实、计算型 MATCH、未决订单、冷却期和控制版本。只会创建新的 NORMAL Policy；旧授权与旧 AddUnit 永不复活。', confirmLabel:'重新验证并执行'}); if (!confirmed) return;
+    await withPending(button, '验证中…', async () => { try { const grant = await api('/api/auth/mock/step-up', {method:'POST', body:JSON.stringify({action:'risk.restore.execute', object_id:requestId, object_version:version})}); await api(`/api/risk-controls/restores/${requestId}/execute`, {method:'POST', body:JSON.stringify({expected_version:version, idempotency_key:crypto.randomUUID(), action_grant:grant.action_grant})}); showToast('新 NORMAL Policy 已创建；旧授权保持失效'); await route(); } catch (error) { showApiError(error); } });
+  }));
+}
+
 async function renderCampaignList() {
   const result = await api('/api/campaigns');
   const items = result.data;
@@ -571,6 +621,7 @@ async function renderCampaignList() {
 
 async function renderCampaignFacts(mode) {
   const details = await loadCampaignDetails();
+  const riskControls = mode === 'risk' ? await api('/api/risk-controls') : null;
   const titles = {positions:'仓位与保护', orders:'订单与成交', risk:'风险与目标'};
   let rows = '';
   if (mode === 'positions') rows = details.map(item => `<tr data-href="/campaigns/${item.campaign_id}"><td>${shortId(item.campaign_id)}</td><td>${escapeHtml(item.instrument?.symbol || shortId(item.instrument_id))}</td><td>${item.position ? `${fmtNumber(item.position.quantity)} @ ${fmtNumber(item.position.average_entry_price)}` : '无事实'}</td><td>${item.position ? escapeHtml(item.position.fact_status) : 'UNKNOWN'}</td><td>${item.protection ? `${escapeHtml(item.protection.status)} · ${item.protection.fully_covered ? '完整覆盖' : '覆盖不足'}` : '无保护事实'}</td><td>${fmtDate(item.position?.observed_at)}</td></tr>`).join('');
@@ -578,11 +629,13 @@ async function renderCampaignFacts(mode) {
   if (mode === 'risk') rows = details.map(item => `<tr data-href="/campaigns/${item.campaign_id}"><td>${shortId(item.campaign_id)}</td><td>${escapeHtml(item.status)}</td><td>${item.reservations.map(r => `${escapeHtml(r.status)} ${fmtNumber(r.amount)}`).join(' · ') || '无预留'}</td><td>${fmtNumber(item.current_target_quantity)} · v${item.target_version}</td><td>${escapeHtml(item.target_urgency || '—')}</td><td>${escapeHtml(item.reconciliation?.status || '未对账')}</td></tr>`).join('');
   const headers = mode === 'positions' ? '<th>Campaign</th><th>标的</th><th>仓位</th><th>事实</th><th>保护</th><th>观测时间</th>' : mode === 'orders' ? '<th>Campaign</th><th>意图</th><th>方向 / 数量</th><th>状态</th><th>SHADOW Order</th><th>更新时间</th>' : '<th>Campaign</th><th>状态</th><th>风险预留</th><th>目标</th><th>紧迫度</th><th>对账</th>';
   main.innerHTML = `<section class="page"><header class="page-head"><div><p class="eyebrow">POSTGRESQL AUTHORITY</p><h1>${titles[mode]}</h1><p class="lede">这些页面直接读取当前权威状态；可重新计算的投影不另行持久化。</p></div></header>
+    ${mode === 'risk' ? renderRiskControlPanel(riskControls) : ''}
     ${mode === 'risk' && roleNames().includes('SYSTEM_ADMIN') ? '<div class="form-panel compact-form"><h2>全局只收紧动作</h2><p class="safety-note">这些入口只能关闭 AUTO_ADD 或把系统切到 REDUCE_ONLY；不能从这里恢复新增风险。</p><div class="toolbar"><button class="danger" data-disable-global-add>关闭全局 AUTO_ADD</button><button class="danger" data-pause-new-risk>暂停所有新增风险</button></div></div><div style="height:16px"></div>' : ''}
     ${mode === 'positions' ? shadowFactsForm() : ''}
     ${rows ? `<div class="table-wrap"><table><thead><tr>${headers}</tr></thead><tbody>${rows}</tbody></table></div>` : '<section class="empty-state"><div><h2>当前没有可展示事实</h2></div></section>'}</section>`;
   bindLinkedRows();
   document.querySelector('#shadow-facts-form')?.addEventListener('submit', recordStartingFacts);
+  if (mode === 'risk') await bindRiskControlActions();
   document.querySelector('[data-disable-global-add]')?.addEventListener('click', (event) => campaignAction('/api/operations/auto-add/disable', {reason:'administrator disabled AUTO_ADD from Web', idempotency_key:crypto.randomUUID()}, {
     button:event.currentTarget,
     successMessage:'全局 AUTO_ADD 已关闭；现有仓位与退出能力不受影响',

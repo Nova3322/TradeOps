@@ -85,7 +85,7 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
 
     assert response.status_code == 200
     assert "Trading Console" in response.text
-    assert "/assets/app.js?v=14" in response.text
+    assert "/assets/app.js?v=16" in response.text
     assert "/assets/styles.css?v=10" in response.text
     assert 'id="mobile-nav-toggle"' in response.text
     assert 'id="confirm-dialog"' in response.text
@@ -110,6 +110,12 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
     assert "${capitalProposalForm}${mockFactForm}${automationPanel}" in app_javascript.text
     assert "fmtNumber(item.in_transit)" not in app_javascript.text
     assert "fmtNumber(liveInTransit)" in app_javascript.text
+    assert "申请受审核恢复" in app_javascript.text
+    assert "risk.restore.review" in app_javascript.text
+    assert "risk.restore.execute" in app_javascript.text
+    assert "旧提案、旧授权和旧 AddUnit 永远不会复活" in app_javascript.text
+    assert "本地条件满足" in app_javascript.text
+    assert "LIVE_SCOPE_CONFIGURATION_REQUIRED" in app_javascript.text
 
     stylesheet = get(app, "/assets/styles.css")
     assert stylesheet.status_code == 200
@@ -122,6 +128,7 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
 
     service_worker = get(app, "/sw.js")
     assert service_worker.status_code == 200
+    assert "trading-shell-v15" in service_worker.text
     assert "await fetch(event.request)" in service_worker.text
 
 
