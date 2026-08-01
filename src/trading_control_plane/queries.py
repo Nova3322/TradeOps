@@ -1475,9 +1475,16 @@ class TradingQueries:
                 raise DomainRejected("RBAC_DENIED", "intent is outside the current scope")
             return campaign.campaign_id
 
-    def list_exceptions(self, user_id: UUID) -> list[dict[str, Any]]:
+    def list_exceptions(self, user_id: UUID, *, now: datetime) -> list[dict[str, Any]]:
         exceptions: list[dict[str, Any]] = []
+        with self.database.session_factory() as session:
+            risk_policy = session.scalar(select(RiskPolicy).where(RiskPolicy.active))
+            max_fact_age = timedelta(
+                seconds=(risk_policy.max_fact_age_seconds if risk_policy is not None else 300)
+            )
         for campaign in self.list_campaigns(user_id):
+            if campaign["status"] == "CLOSED":
+                continue
             detail = self.campaign_detail(user_id, UUID(str(campaign["campaign_id"])))
             campaign_id = str(campaign["campaign_id"])
             if campaign["status"] == "UNKNOWN":
@@ -1500,16 +1507,50 @@ class TradingQueries:
             position = detail["position"]
             if position is None or position["fact_status"] == "UNKNOWN":
                 exceptions.append(self._exception(campaign_id, "POSITION_UNKNOWN", "BLOCKING"))
-            elif Decimal(str(position["quantity"])) != 0:
+            else:
+                position_observed_at = datetime.fromisoformat(str(position["observed_at"]))
+                if self.service._fact_is_stale(position_observed_at, now, max_fact_age):
+                    exceptions.append(
+                        self._exception(
+                            campaign_id,
+                            "POSITION_STALE",
+                            "BLOCKING",
+                            object_id=str(position["position_id"]),
+                            details=[
+                                f"observed_at={position['observed_at']}",
+                                f"max_age_seconds={int(max_fact_age.total_seconds())}",
+                            ],
+                        )
+                    )
+            if (
+                position is not None
+                and position["fact_status"] != "UNKNOWN"
+                and Decimal(str(position["quantity"])) != 0
+            ):
                 protection = detail["protection"]
                 if protection is None or protection["status"] == "UNKNOWN":
                     exceptions.append(
                         self._exception(campaign_id, "PROTECTION_UNKNOWN", "BLOCKING")
                     )
-                elif not protection["fully_covered"]:
-                    exceptions.append(
-                        self._exception(campaign_id, "PROTECTION_INSUFFICIENT", "BLOCKING")
-                    )
+                else:
+                    protection_observed_at = datetime.fromisoformat(str(protection["observed_at"]))
+                    if self.service._fact_is_stale(protection_observed_at, now, max_fact_age):
+                        exceptions.append(
+                            self._exception(
+                                campaign_id,
+                                "PROTECTION_STALE",
+                                "BLOCKING",
+                                object_id=str(protection["protection_id"]),
+                                details=[
+                                    f"observed_at={protection['observed_at']}",
+                                    f"max_age_seconds={int(max_fact_age.total_seconds())}",
+                                ],
+                            )
+                        )
+                    if not protection["fully_covered"]:
+                        exceptions.append(
+                            self._exception(campaign_id, "PROTECTION_INSUFFICIENT", "BLOCKING")
+                        )
             reconciliation = detail["reconciliation"]
             if reconciliation is not None and reconciliation["status"] != "MATCH":
                 exceptions.append(
@@ -1520,6 +1561,30 @@ class TradingQueries:
                         details=list(reconciliation["differences"]),
                     )
                 )
+            elif reconciliation is not None:
+                completed_at = datetime.fromisoformat(str(reconciliation["completed_at"]))
+                newer_facts: list[str] = []
+                if (
+                    position is not None
+                    and datetime.fromisoformat(str(position["observed_at"])) > completed_at
+                ):
+                    newer_facts.append("POSITION_FACT_NEWER")
+                if (
+                    detail["intents"]
+                    and datetime.fromisoformat(str(detail["intents"][-1]["updated_at"]))
+                    > completed_at
+                ):
+                    newer_facts.append("ORDER_INTENT_NEWER")
+                if newer_facts:
+                    exceptions.append(
+                        self._exception(
+                            campaign_id,
+                            "RECONCILIATION_STALE",
+                            "BLOCKING",
+                            object_id=str(reconciliation["reconciliation_id"]),
+                            details=newer_facts,
+                        )
+                    )
         return exceptions
 
     def venue_facts(

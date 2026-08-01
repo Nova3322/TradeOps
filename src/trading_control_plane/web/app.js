@@ -28,6 +28,22 @@ const statusLabels = {DRAFT:'草稿',PENDING_REVIEW:'待审核',APPROVED:'已批
 const riskLabels = {LOW:'低风险',MEDIUM:'中风险',HIGH:'高风险'};
 const intentKindLabels = {INITIAL:'初仓',ADD:'加仓',REDUCE:'减仓',EXIT:'退出'};
 const fmtIntentKind = (value) => intentKindLabels[value] || value || '未知意图';
+const exceptionGuidance = {
+  CAMPAIGN_UNKNOWN:{priority:1,title:'Campaign 状态不确定',copy:'系统无法确认这笔交易当前处于哪个阶段，因此不会继续增加风险。',next:'先核对订单、成交和仓位，再运行对账。'},
+  ORDER_INTENT_UNKNOWN:{priority:1,title:'订单结果不确定',copy:'发送结果可能成功也可能失败，不能把超时当作失败后重发。',next:'到交易所核对原订单与成交，然后运行对账。'},
+  RISK_RESERVATION_UNKNOWN:{priority:1,title:'风险占用不确定',copy:'这部分风险继续占用总容量，不能提前释放给另一笔交易。',next:'先查清原订单结果；对账一致后再处理风险预留。'},
+  POSITION_UNKNOWN:{priority:2,title:'当前仓位未知',copy:'缺少可信仓位事实，系统不能把“没读到”当成“已经平仓”。',next:'从交易所同步当前仓位；不确定时不要把数量填成 0。'},
+  POSITION_STALE:{priority:2,title:'仓位事实已过期',copy:'上次仓位观测超过风险政策允许的有效期，不能据此继续管理风险。',next:'重新同步交易所仓位，再判断保护和下一步。'},
+  PROTECTION_UNKNOWN:{priority:3,title:'保护状态未知',copy:'系统不能确认止损或原生保护是否真实存在并仍然有效。',next:'核对交易所保护单；无法确认时优先减仓或退出。'},
+  PROTECTION_STALE:{priority:3,title:'保护事实已过期',copy:'曾经有效的保护不能证明现在仍有效，必须重新确认。',next:'同步最新保护单及覆盖数量。'},
+  PROTECTION_INSUFFICIENT:{priority:3,title:'保护数量不足',copy:'当前保护不能完整覆盖已知仓位，继续持有会暴露超出计划的风险。',next:'先补齐保护；做不到时立即减仓或退出。'},
+  RECONCILIATION_UNKNOWN:{priority:4,title:'对账结果未知',copy:'系统与交易所事实尚不能形成可信结论。',next:'补齐缺失事实后重新运行计算型对账。'},
+  RECONCILIATION_DIFFERENCE:{priority:4,title:'对账存在差异',copy:'订单、成交、仓位或保护至少有一项与系统预期不一致。',next:'逐项核对差异；不要在差异未解决时新增风险。'},
+  RECONCILIATION_MANUAL_REQUIRED:{priority:4,title:'对账需要人工处理',copy:'自动对账无法安全决定如何恢复，当前风险继续受限。',next:'按差异清单核实交易所事实并记录人工结论。'},
+  RECONCILIATION_RESOLVED:{priority:4,title:'仍需新的计算型对账',copy:'人工标记已处理不等于交易所与系统已经重新一致。',next:'更新事实后再运行一次计算型对账。'},
+  RECONCILIATION_STALE:{priority:4,title:'对账早于最新事实',copy:'最近对账发生后仓位或订单意图又有变化，旧结论已经失效。',next:'以最新仓位和订单事实重新运行对账。'},
+};
+const explainException = (code) => exceptionGuidance[code] || {priority:9,title:'需要人工核实',copy:'系统发现一项无法自动解释的阻断事实。',next:'进入 Campaign 查看技术详情并完成对账。'};
 const riskReasonGuidance = {
   INVALID_INPUT:{label:'风险输入无效',action:'检查计划数量、最大风险和风险政策后重新运行。'},
   STALE_FACTS:{label:'账户事实已经过期',action:'刷新交易所仓位、权益和受管资金事实后重新检查。'},
@@ -1143,8 +1159,25 @@ async function renderActualResults() {
 
 async function renderExceptions() {
   const result = await api('/api/campaign-exceptions'); const items = result.data;
-  main.innerHTML = `<section class="page"><header class="page-head"><div><p class="eyebrow">FAIL CLOSED</p><h1>异常处理</h1><p class="lede">Unknown、保护不足与对账差异均阻止新增风险或自动重发。这里只显示可由权威状态派生的当前异常。</p></div><button class="secondary" data-refresh>重新计算视图</button></header>
-    ${items.length ? `<div class="card-grid">${items.map(item => `<article class="card"><span class="tag">${escapeHtml(item.severity)}</span><h2 style="margin-top:16px">${escapeHtml(item.code)}</h2><p class="subtle">Campaign ${shortId(item.campaign_id)}</p>${item.details.length ? `<pre>${escapeHtml(item.details.join('\n'))}</pre>` : ''}<a class="primary" href="/campaigns/${item.campaign_id}" data-link>处理 Campaign</a></article>`).join('')}</div>` : '<section class="empty-state"><div><h2>当前没有派生异常</h2><p>这只表示当前数据库事实未触发异常条件。</p></div></section>'}</section>`;
+  const groups = [...items.reduce((result, item) => {
+    if (!result.has(item.campaign_id)) result.set(item.campaign_id, []);
+    result.get(item.campaign_id).push(item);
+    return result;
+  }, new Map()).entries()].map(([campaignId, groupItems]) => ({campaignId, items:groupItems}));
+  groups.sort((left, right) => Math.min(...left.items.map(item => explainException(item.code).priority)) - Math.min(...right.items.map(item => explainException(item.code).priority)));
+  const unknownCount = items.filter(item => item.code.includes('UNKNOWN')).length;
+  const staleCount = items.filter(item => item.code.endsWith('_STALE')).length;
+  const cards = groups.map(group => {
+    const issues = [...group.items.reduce((result, item) => {
+      if (!result.has(item.code)) result.set(item.code, []);
+      result.get(item.code).push(item);
+      return result;
+    }, new Map()).entries()].map(([code, matching]) => ({code, matching, guidance:explainException(code)})).sort((left, right) => left.guidance.priority - right.guidance.priority || left.code.localeCompare(right.code));
+    return `<article class="card exception-card"><div class="exception-card-head"><div><p class="eyebrow">RECOVERY QUEUE</p><h2>Campaign ${shortId(group.campaignId)}</h2></div><span class="status-pill status-DENY">${group.items.length} 项阻断</span></div><ol class="exception-steps">${issues.map((issue, index) => `<li><span class="exception-order">${index + 1}</span><div><h3>${escapeHtml(issue.guidance.title)}${issue.matching.length > 1 ? ` × ${issue.matching.length}` : ''}</h3><p>${escapeHtml(issue.guidance.copy)}</p><strong>下一步：${escapeHtml(issue.guidance.next)}</strong><details class="exception-technical"><summary>查看技术依据</summary><code>${escapeHtml(issue.code)}</code>${issue.matching.some(item => item.details.length) ? `<pre>${escapeHtml(issue.matching.flatMap(item => item.details).join('\n'))}</pre>` : ''}</details></div></li>`).join('')}</ol><a class="primary" href="/campaigns/${group.campaignId}" data-link>打开 Campaign 按顺序处理</a></article>`;
+  }).join('');
+  main.innerHTML = `<section class="page exceptions-page"><header class="page-head"><div><p class="eyebrow">FAIL CLOSED</p><h1>异常与恢复</h1><p class="lede">只看当前活动 Campaign 的阻断问题。系统按安全顺序说明发生了什么、为什么不能继续，以及下一步该做什么。</p></div><button class="secondary" data-refresh>重新读取当前事实</button></header>
+    <div class="stats exception-stats"><div class="stat"><small>受影响 Campaign</small><b class="${groups.length ? 'danger-text' : ''}">${groups.length}</b></div><div class="stat"><small>阻断问题</small><b>${items.length}</b></div><div class="stat"><small>结果未知</small><b class="${unknownCount ? 'danger-text' : ''}">${unknownCount}</b></div><div class="stat"><small>事实过期</small><b class="${staleCount ? 'warning-text' : ''}">${staleCount}</b><span>截止 ${fmtDate(result.as_of)}</span></div></div>
+    ${items.length ? `<div class="exception-grid">${cards}</div>` : '<section class="empty-state"><div><h2>当前活动 Campaign 没有阻断异常</h2><p>没有发现 Unknown、过期事实、保护不足或对账差异。已关闭历史不会因为事实变旧而重新报警。</p><div class="toolbar empty-actions"><a class="secondary" href="/" data-link>返回今日</a><a class="primary" href="/campaigns" data-link>查看 Campaign</a></div></div></section>'}</section>`;
   document.querySelector('[data-refresh]')?.addEventListener('click', route);
 }
 

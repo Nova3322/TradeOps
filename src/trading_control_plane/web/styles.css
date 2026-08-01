@@ -108,6 +108,22 @@ button:disabled { opacity: .52; cursor: not-allowed; }
 .stacked-actions { display: grid; gap: 9px; margin-top: 18px; }
 .stacked-actions a { text-align: center; }
 .home-quick-start h2, .home-boundary h2 { margin-bottom: 10px; }
+.exception-grid { display: grid; gap: 14px; }
+.exception-card { border-top: 3px solid var(--danger); }
+.exception-card-head { display: flex; align-items: start; justify-content: space-between; gap: 14px; }
+.exception-card-head h2 { margin-bottom: 0; }
+.exception-steps { margin: 20px 0; padding: 0; list-style: none; }
+.exception-steps li { display: grid; grid-template-columns: 34px minmax(0, 1fr); gap: 13px; padding: 17px 0; border-top: 1px solid var(--line); }
+.exception-steps li:first-child { border-top: 0; padding-top: 0; }
+.exception-order { width: 30px; height: 30px; display: grid; place-items: center; border-radius: 50%; background: color-mix(in srgb, var(--danger) 11%, var(--panel)); color: var(--danger); font-size: 11px; font-weight: 850; }
+.exception-steps h3 { margin: 2px 0 6px; }
+.exception-steps p { margin-bottom: 7px; color: var(--muted); font-size: 12px; line-height: 1.55; }
+.exception-steps strong { display: block; color: var(--ink); font-size: 12px; line-height: 1.5; }
+.exception-technical { margin-top: 10px; color: var(--muted); font-size: 10px; }
+.exception-technical summary { cursor: pointer; }
+.exception-technical code { display: inline-block; margin-top: 8px; color: var(--danger); }
+.exception-technical pre { margin-bottom: 0; }
+.exception-card > .primary { display: block; width: 100%; text-align: center; }
 .card-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 14px; }
 .card { min-width: 0; background: var(--panel); border: 1px solid var(--line); border-radius: 15px; padding: 20px; box-shadow: 0 1px 0 rgba(255,255,255,.3); }
 .card:hover { border-color: color-mix(in srgb, var(--accent) 35%, var(--line)); }

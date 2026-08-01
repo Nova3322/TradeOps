@@ -4,7 +4,7 @@ import asyncio
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Any
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
@@ -22,8 +22,9 @@ from trading_control_plane.domain import (
     Role,
     SystemRiskState,
 )
-from trading_control_plane.models import Campaign, OrderIntent, RiskReservation
+from trading_control_plane.models import Campaign, OrderIntent, ReconciliationRun, RiskReservation
 from trading_control_plane.perptape import PerptapeClient
+from trading_control_plane.queries import TradingQueries
 from trading_control_plane.service import TradingService
 from trading_control_plane.telegram import MockTelegramGateway
 
@@ -423,3 +424,72 @@ async def run_unknown_flow(database: Database) -> None:
 
 def test_unknown_api_keeps_risk_and_blocks_release_or_retry(database: Database) -> None:
     asyncio.run(run_unknown_flow(database))
+
+
+def test_exception_view_marks_active_facts_stale_but_ignores_closed_history(
+    database: Database,
+) -> None:
+    service = TradingService(database)
+    ids = seed_authorized_campaign(service)
+    now = datetime.now(UTC)
+    opening = service.create_order_intent(
+        ids["authorization"],
+        ids["operator"],
+        IntentKind.INITIAL,
+        "acct-1",
+        "BINANCE",
+        ids["instrument"],
+        Direction.LONG,
+        Decimal(1),
+        "m2-stale-exception",
+        now=now,
+    )
+    stale_at = now - timedelta(minutes=10)
+    position_id = service.record_position(
+        "acct-1",
+        "BINANCE",
+        ids["instrument"],
+        Decimal(1),
+        Decimal(100),
+        Decimal(105),
+        True,
+        ids["operator"],
+        observed_at=stale_at,
+        now=now,
+    )
+    service.record_protection(
+        position_id,
+        "stale-protection",
+        Decimal(1),
+        Decimal(90),
+        True,
+        ids["operator"],
+        observed_at=stale_at,
+        now=now,
+    )
+    with database.session_factory.begin() as session:
+        session.add(
+            ReconciliationRun(
+                execution_scope="acct-1:BINANCE",
+                campaign_id=opening.campaign_id,
+                status="MATCH",
+                is_computed=True,
+                differences=[],
+                resolution_reason=None,
+                actor_id=str(ids["operator"]),
+                correlation_id=uuid4(),
+                started_at=stale_at - timedelta(seconds=1),
+                completed_at=stale_at - timedelta(seconds=1),
+            )
+        )
+
+    queries = TradingQueries(database)
+    codes = {item["code"] for item in queries.list_exceptions(ids["operator"], now=now)}
+    assert {"POSITION_STALE", "PROTECTION_STALE", "RECONCILIATION_STALE"} <= codes
+
+    with database.session_factory.begin() as session:
+        campaign = session.get(Campaign, opening.campaign_id)
+        assert campaign is not None
+        campaign.status = "CLOSED"
+
+    assert queries.list_exceptions(ids["operator"], now=now + timedelta(hours=1)) == []

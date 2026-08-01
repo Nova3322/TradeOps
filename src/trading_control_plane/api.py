@@ -1410,9 +1410,10 @@ def create_app(
     def campaign_exceptions(
         identity: SessionIdentity = identity_dependency,
     ) -> dict[str, Any]:
+        now = _now()
         return {
-            "data": queries().list_exceptions(identity.user_id),
-            "as_of": _now().isoformat(),
+            "data": queries().list_exceptions(identity.user_id, now=now),
+            "as_of": now.isoformat(),
         }
 
     @app.get("/api/campaigns/{campaign_id}")
