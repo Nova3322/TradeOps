@@ -90,6 +90,21 @@ const percentageDistance = (from, to) => {
   return `${Math.abs((target - base) / base * 100).toFixed(2)}%`;
 };
 const roleNames = () => (session?.roles || []).map((item) => item.role);
+const capabilityRoles = {
+  view:['OBSERVER','PROPOSER','REVIEWER','OPERATOR'],
+  'capital.view':['OBSERVER','PROPOSER','REVIEWER','OPERATOR','TREASURY_ADMIN'],
+  'proposal.create':['PROPOSER'],
+  'proposal.review':['REVIEWER'],
+};
+const hasCapability = (capability) => roleNames().includes('SYSTEM_ADMIN') || (capabilityRoles[capability] || []).some(role => roleNames().includes(role));
+const routeCapability = (path) => {
+  if (path === '/') return null;
+  if (path === '/capital') return 'capital.view';
+  if (path === '/proposals/new') return 'proposal.create';
+  if (path === '/reviews') return 'proposal.review';
+  return 'view';
+};
+const capabilityLabel = (capability) => ({view:'交易只读作用域','capital.view':'资金查看','proposal.create':'创建提案','proposal.review':'独立审核'}[capability] || capability);
 const loginDestination = () => {
   const destination = `${location.pathname}${location.search}`;
   return destination;
@@ -211,6 +226,9 @@ function setShell(loggedIn) {
     const identity = `${session.username} · ${roleNames().join(' / ') || 'NO ROLE'}`;
     identityChip.textContent = identity;
     mobileSessionSummary.textContent = identity;
+    document.querySelectorAll('[data-nav-capability]').forEach(link => {
+      link.hidden = !hasCapability(link.dataset.navCapability);
+    });
   }
   closeMobileNav({restoreFocus:false});
 }
@@ -367,8 +385,14 @@ async function route() {
     enhanceRenderedPage();
     return;
   }
-  main.innerHTML = '<section class="loading-state"><span class="spinner"></span><p>正在读取当前事实…</p></section>';
   const path = location.pathname;
+  const requiredCapability = routeCapability(path);
+  if (requiredCapability && !hasCapability(requiredCapability)) {
+    main.innerHTML = `<section class="empty-state"><div><p class="eyebrow">ROLE BOUNDARY</p><h2>当前职责不包含这个页面</h2><p>此页面需要“${escapeHtml(capabilityLabel(requiredCapability))}”能力。侧栏只展示当前角色可用入口；直接链接也不会绕过服务端权限。</p><div class="toolbar empty-actions"><a class="secondary" href="/" data-link>返回今日</a>${hasCapability('capital.view') ? '<a class="primary" href="/capital" data-link>进入资金中心</a>' : ''}</div></div></section>`;
+    enhanceRenderedPage();
+    return;
+  }
+  main.innerHTML = '<section class="loading-state"><span class="spinner"></span><p>正在读取当前事实…</p></section>';
   try {
     if (path === '/') await renderHome();
     else if (path === '/opportunities') await renderOpportunities();
@@ -429,6 +453,11 @@ function renderLogin() {
 }
 
 async function renderHome() {
+  if (!hasCapability('view')) {
+    const hasCapital = hasCapability('capital.view');
+    main.innerHTML = `<section class="page home-page"><article class="home-status tone-${hasCapital ? 'success' : 'neutral'}"><div><p class="eyebrow">ROLE-CORRECT HOME</p><h1>${hasCapital ? '今日只显示你的资金职责' : '当前身份尚未分配业务职责'}</h1><p>${hasCapital ? '你可以查看资金事实、净值完整性、在途占用和资金对账；交易提案、Campaign 与风险操作不在当前角色范围内。' : '请由管理员分配明确角色和作用域；系统不会把缺少权限当作空数据。'}</p></div>${hasCapital ? '<a class="primary" href="/capital" data-link>进入资金中心</a>' : ''}</article></section>`;
+    return;
+  }
   const riskControlRequest = api('/api/risk-controls').catch(error => {
     if (error.status === 403) return null;
     throw error;
@@ -502,11 +531,11 @@ async function renderHome() {
   if (riskLimited) priorityCards.push(`<a class="home-priority attention" href="/risk" data-link><span class="priority-number">${priorityCards.length + 1}</span><div><small>新增风险受限</small><b>${escapeHtml(riskControlStatusLabel(riskControl.policy.system_state))}</b><p>${riskControl.restore_conditions.blockers.length ? `${riskControl.restore_conditions.blockers.length} 项恢复条件尚未满足。` : '恢复条件已满足，仍需完成受控审核与执行。'} 减仓和退出不受阻断。</p></div><strong>查看恢复条件 →</strong></a>`);
   if (actionableReviews.length) priorityCards.push(`<a class="home-priority attention" href="/reviews" data-link><span class="priority-number">${priorityCards.length + 1}</span><div><small>独立审核队列</small><b>${actionableReviews.length} 笔非本人提案等待审核</b><p>${expiringReviews.length ? `${expiringReviews.length} 笔将在 30 分钟内到期。` : `最早一笔到期于 ${fmtDate(nextReview.expires_at)}。`} 已投票的高风险提案可能仍在等待另一名 Reviewer。</p></div><strong>打开审核队列 →</strong></a>`);
   if (activeCampaigns.length) priorityCards.push(`<a class="home-priority" href="/campaigns" data-link><span class="priority-number">${priorityCards.length + 1}</span><div><small>持续观察</small><b>${activeCampaigns.length} 个运行中 Campaign</b><p>${escapeHtml(activeCampaigns.slice(0, 3).map(item => `${item.venue} · ${item.direction} · ${fmtStatus(item.status)}`).join('；'))}</p></div><strong>查看当前仓位 →</strong></a>`);
-  if (!priorityCards.length) priorityCards.push(`<a class="home-priority clear" href="/opportunities" data-link><span class="priority-number">✓</span><div><small>当前无待办</small><b>继续观察，不必为了操作而操作</b><p>机会只是候选；只有形成清楚交易假设时才创建提案。</p></div><strong>查看机会 →</strong></a>`);
+  if (!priorityCards.length) priorityCards.push(`<a class="home-priority clear" href="/opportunities" data-link><span class="priority-number">✓</span><div><small>当前无待办</small><b>继续观察，不必为了操作而操作</b><p>${canPropose ? '机会只是候选；只有形成清楚交易假设时才创建提案。' : '当前角色可以观察机会，但不能创建提案；如有判断请交由 Proposer 冻结参数。'}</p></div><strong>查看机会 →</strong></a>`);
   main.innerHTML = `<section class="page home-page"><article class="home-status tone-${safety.tone}"><div><p class="eyebrow">${safety.eyebrow}</p><h1>${escapeHtml(safety.title)}</h1><p>${escapeHtml(safety.copy)}</p></div><a class="primary" href="${safety.href}" data-link>${escapeHtml(safety.action)}</a></article>
     <div class="stats home-stats"><div class="stat"><small>受影响 Campaign</small><b class="${exceptions.length ? 'danger-text' : ''}">${exceptionCampaigns.size}</b><span>${exceptions.length ? `${exceptions.length} 项问题` : '没有派生异常'}</span></div><div class="stat"><small>非本人待审核</small><b class="${expiringReviews.length ? 'warning-text' : ''}">${actionableReviews.length}</b><span>${expiringReviews.length ? `${expiringReviews.length} 笔即将到期` : canReview ? '创建者不可审核自己的提案' : '当前身份不是 Reviewer'}</span></div><div class="stat"><small>运行中 Campaign</small><b>${activeCampaigns.length}</b><span>${activeCampaigns.length ? '保护与对账需持续有效' : '当前没有活动仓位流程'}</span></div><div class="stat"><small>新增风险状态</small><b class="${riskLimited ? 'warning-text status-copy' : 'status-copy'}">${escapeHtml(riskControl ? riskControlStatusLabel(riskControl.policy.system_state) : '由管理员控制')}</b><span>${riskControl ? `AUTO_ADD ${escapeHtml(riskControlStatusLabel(riskControl.auto_add_gate.status))}` : '当前角色无全局恢复权限'}</span></div></div>
     <div class="home-layout"><section><div class="section-heading"><div><p class="eyebrow">PRIORITY ORDER</p><h2>现在按这个顺序处理</h2></div><button class="secondary" data-refresh>刷新当前事实</button></div><div class="home-priority-list">${priorityCards.join('')}</div></section>
-      <aside class="stack"><article class="card home-quick-start"><p class="eyebrow">NEW DECISION</p><h2>开始新的判断</h2><p class="subtle">先看机会或写交易假设；这两条路径都只会创建提案，并进入独立审核。</p><div class="stacked-actions"><a class="primary" href="/opportunities" data-link>查看 PerpTape 机会</a>${canPropose ? '<a class="secondary" href="/proposals/new" data-link>创建人工提案</a>' : ''}</div></article>
+      <aside class="stack"><article class="card home-quick-start"><p class="eyebrow">${canPropose ? 'NEW DECISION' : 'MARKET OBSERVATION'}</p><h2>${canPropose ? '开始新的判断' : '继续观察市场机会'}</h2><p class="subtle">${canPropose ? '先看机会或写交易假设；这两条路径都只会创建提案，并进入独立审核。' : '当前角色只查看候选，不冻结交易参数，也不会从这里新增风险。'}</p><div class="stacked-actions"><a class="primary" href="/opportunities" data-link>查看 PerpTape 机会</a>${canPropose ? '<a class="secondary" href="/proposals/new" data-link>创建人工提案</a>' : ''}</div></article>
         <article class="card home-boundary"><p class="eyebrow">SYSTEM BOUNDARY</p><h2>当前运行边界</h2><dl class="definition-grid">${definition('环境', 'SHADOW')}${definition('真实订单', '关闭')}${definition('风险政策', riskControl ? riskControlStatusLabel(riskControl.policy.system_state) : '由管理员控制')}${definition('自动加仓', riskControl ? riskControlStatusLabel(riskControl.auto_add_gate.status) : '由管理员控制')}</dl><p class="safety-note">首页只汇总你当前可见的权威事实。没有异常不代表交易盈利，也不代表 LIVE 已准备好。</p></article></aside></div></section>`;
   document.querySelector('[data-refresh]')?.addEventListener('click', route);
 }
@@ -515,9 +544,10 @@ async function renderOpportunities() {
   const result = await api('/api/opportunities');
   opportunities = result.data;
   const items = opportunities;
+  const canPropose = hasCapability('proposal.create');
   const options = (key) => [...new Set(items.map(item => item[key]).filter(Boolean))].sort().map(value => `<option value="${escapeHtml(value)}">${escapeHtml(value)}</option>`).join('');
   main.innerHTML = `<section class="page"><header class="page-head"><div><p class="eyebrow">PERPTAPE · ${escapeHtml(result.source_contract_version)}</p><h1>当前机会</h1><p class="lede">这里只展示 Perptape 实际返回的突破候选。数据健康、方向和时间保留来源语义；交易数量与风险由 Trading 独立决定。</p></div><div class="toolbar"><button class="secondary" data-refresh>刷新事实</button></div></header>
-    <div class="stats"><div class="stat"><small>当前候选</small><b>${items.length}</b></div><div class="stat"><small>可冻结</small><b>${items.filter(i => i.readiness === 'READY' && i.proposal_eligible).length}</b></div><div class="stat"><small>数据截止</small><b style="font-size:14px">${fmtDate(result.as_of)}</b></div><div class="stat"><small>执行环境</small><b style="font-size:14px">SHADOW</b></div></div>
+    <div class="stats"><div class="stat"><small>当前候选</small><b>${items.length}</b></div><div class="stat"><small>${canPropose ? '可冻结' : 'Catalog 可用'}</small><b>${items.filter(i => i.readiness === 'READY' && i.proposal_eligible).length}</b></div><div class="stat"><small>数据截止</small><b style="font-size:14px">${fmtDate(result.as_of)}</b></div><div class="stat"><small>执行环境</small><b style="font-size:14px">SHADOW</b></div></div>
     ${items.length ? `<form id="opportunity-filters" class="filter-panel"><label>交易所<select name="venue"><option value="">全部</option>${options('venue')}</select></label><label>币对<input name="symbol" type="search" placeholder="例如 BTC、XYZ100"></label><label>共振周期<select name="timeframe"><option value="">全部周期</option>${options('timeframe')}</select></label><label>方向<select name="direction"><option value="">全部</option><option>LONG</option><option>SHORT</option></select></label><label>最低成交量<input name="volume" type="number" min="0" placeholder="不限"></label><label>最低持仓量<input name="open_interest" type="number" min="0" placeholder="不限"></label><button type="reset" class="text-button">清除筛选</button></form><div class="result-summary"><span>显示 <b data-filter-count>${items.length}</b> / ${items.length} 个机会</span><span>成交量与持仓量缺失时不会通过数值筛选</span></div><div id="opportunity-grid" class="card-grid">${items.map(opportunityCard).join('')}</div><section id="opportunity-empty" class="empty-state compact-empty" hidden><div><h2>没有符合条件的机会</h2><p>尝试降低成交量/持仓量门槛，或清除部分筛选。</p></div></section>` : '<section class="empty-state"><div><h2>Perptape 当前没有返回候选</h2><p>这不是零风险或无行情，只表示当前接口数据为空。</p></div></section>'}
   </section>`;
   document.querySelector('[data-refresh]')?.addEventListener('click', route);
@@ -526,14 +556,15 @@ async function renderOpportunities() {
 
 function opportunityCard(item) {
   const directionClass = item.direction === 'LONG' ? 'direction-long' : 'direction-short';
-  const canCreateProposal = item.readiness === 'READY' && item.proposal_eligible;
+  const canPropose = hasCapability('proposal.create');
+  const canCreateProposal = canPropose && item.readiness === 'READY' && item.proposal_eligible;
   const catalogStatus = item.proposal_blocker === 'INSTRUMENT_UNAVAILABLE'
     ? '<p class="callout">Catalog 未认证此交易合约，暂不能创建提案。</p>'
     : '';
   return `<article class="card" data-opportunity-card="${escapeHtml(item.candidate_id)}"><div class="card-top"><div><span class="subtle">${escapeHtml(item.venue)} · ${escapeHtml(item.timeframe)}</span><div class="symbol">${escapeHtml(item.symbol)}</div></div><span class="tag ${directionClass}">${escapeHtml(item.direction)}</span></div>
     <div class="metric-row"><div><small>参考价格</small><b>${fmtNumber(item.reference_price)}</b></div><div><small>触发时间</small><b>${fmtDate(item.triggered_at)}</b></div><div><small>数据状态</small><b>${escapeHtml(item.readiness)}</b></div></div>
     <div class="market-facts"><span>成交量 <b>${fmtCompact(item.quote_volume)}</b></span><span>持仓量 <b>${fmtCompact(item.open_interest)}</b></span></div>
-    <p class="subtle">${escapeHtml(item.rationale)}</p>${catalogStatus}<div class="link-row"><a class="text-button" href="${escapeHtml(item.detail_url)}" target="_blank" rel="noreferrer">Perptape 榜单 ↗</a><a class="text-button" href="${escapeHtml(item.chart_url)}" target="_blank" rel="noreferrer">交易所图表 ↗</a></div><div class="card-actions proposal-actions"><button class="secondary" data-advanced-system="${escapeHtml(item.candidate_id)}" ${canCreateProposal ? '' : 'disabled'}>高级配置</button><button class="primary" data-create-system="${escapeHtml(item.candidate_id)}" ${canCreateProposal ? '' : 'disabled'}>一键创建</button></div></article>`;
+    <p class="subtle">${escapeHtml(item.rationale)}</p>${catalogStatus}${canPropose ? '' : '<p class="safety-note">当前角色可观察候选，但不能创建提案。</p>'}<div class="link-row"><a class="text-button" href="${escapeHtml(item.detail_url)}" target="_blank" rel="noreferrer">Perptape 榜单 ↗</a><a class="text-button" href="${escapeHtml(item.chart_url)}" target="_blank" rel="noreferrer">交易所图表 ↗</a></div>${canPropose ? `<div class="card-actions proposal-actions"><button class="secondary" data-advanced-system="${escapeHtml(item.candidate_id)}" ${canCreateProposal ? '' : 'disabled'}>高级配置</button><button class="primary" data-create-system="${escapeHtml(item.candidate_id)}" ${canCreateProposal ? '' : 'disabled'}>一键创建</button></div>` : ''}</article>`;
 }
 
 function openSystemDialog(candidateId) {

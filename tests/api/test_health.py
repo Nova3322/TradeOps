@@ -85,7 +85,7 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
 
     assert response.status_code == 200
     assert "Trading Console" in response.text
-    assert "/assets/app.js?v=27" in response.text
+    assert "/assets/app.js?v=28" in response.text
     assert "/assets/styles.css?v=16" in response.text
     assert '<a href="/" data-link><span>⌂</span>今日</a>' in response.text
     assert 'id="mobile-nav-toggle"' in response.text
@@ -102,6 +102,11 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
     assert "if (error.status !== 403) throw error" in app_javascript.text
     assert "actionable_for_current_user" in app_javascript.text
     assert "你的审核已记录" in app_javascript.text
+    assert 'data-nav-capability="proposal.create"' in response.text
+    assert "const routeCapability = (path)" in app_javascript.text
+    assert "今日只显示你的资金职责" in app_javascript.text
+    assert "当前职责不包含这个页面" in app_javascript.text
+    assert "当前角色可观察候选，但不能创建提案" in app_javascript.text  # noqa: RUF001
     assert "error.handled = response.status === 401" in app_javascript.text
     assert "function handleUnauthorizedResponse" in app_javascript.text
     assert "function confirmAction" in app_javascript.text
@@ -158,7 +163,7 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
 
     service_worker = get(app, "/sw.js")
     assert service_worker.status_code == 200
-    assert "trading-shell-v27" in service_worker.text
+    assert "trading-shell-v28" in service_worker.text
     assert "await fetch(event.request)" in service_worker.text
 
 
@@ -182,6 +187,7 @@ def test_opportunity_card_disables_creation_when_catalog_rejects_raw_contract() 
           fmtNumber: String,
           fmtDate: String,
           fmtCompact: String,
+          hasCapability: () => true,
         };
         vm.createContext(context);
         vm.runInContext(`${source.slice(from, to)}; this.render = opportunityCard;`, context);
@@ -204,6 +210,18 @@ def test_opportunity_card_disables_creation_when_catalog_rejects_raw_contract() 
         });
         assert.doesNotMatch(eligible, /Catalog 未认证此交易合约/);
         assert.doesNotMatch(eligible, / disabled/);
+
+        context.hasCapability = () => false;
+        const readOnly = context.render({
+          candidate_id:"pt_read_only", venue:"BINANCE", timeframe:"1h",
+          symbol:"BTCUSDT", direction:"LONG", reference_price:"1", triggered_at:null,
+          readiness:"READY", proposal_eligible:true, proposal_blocker:null,
+          quote_volume:null, open_interest:null, rationale:"candidate",
+          detail_url:"https://example.test", chart_url:"https://example.test",
+        });
+        assert.match(readOnly, /当前角色可观察候选/);
+        assert.match(readOnly, /不能创建提案/);
+        assert.doesNotMatch(readOnly, /一键创建|高级配置/);
         """
     )
     completed = subprocess.run(  # noqa: S603

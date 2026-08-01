@@ -28,17 +28,17 @@
       <aside id="sidebar" class="sidebar" hidden>
         <nav aria-label="主导航">
           <a href="/" data-link><span>⌂</span>今日</a>
-          <a href="/opportunities" data-link><span>⌁</span>机会</a>
-          <a href="/proposals/new" data-link><span>＋</span>人工提案</a>
-          <a href="/reviews" data-link><span>✓</span>审核队列</a>
-          <a href="/campaigns" data-link><span>◎</span>Campaign</a>
-          <a href="/positions" data-link><span>↕</span>仓位</a>
-          <a href="/orders" data-link><span>≡</span>订单</a>
-          <a href="/risk" data-link><span>◇</span>风险</a>
-          <a href="/capital" data-link><span>¤</span>资金</a>
-          <a href="/results" data-link><span>▤</span>审计与结果</a>
-          <a href="/exceptions" data-link><span>!</span>异常</a>
-          <a href="/venues/binance" data-link><span>◫</span>Binance只读</a>
+          <a href="/opportunities" data-link data-nav-capability="view"><span>⌁</span>机会</a>
+          <a href="/proposals/new" data-link data-nav-capability="proposal.create"><span>＋</span>人工提案</a>
+          <a href="/reviews" data-link data-nav-capability="proposal.review"><span>✓</span>审核队列</a>
+          <a href="/campaigns" data-link data-nav-capability="view"><span>◎</span>Campaign</a>
+          <a href="/positions" data-link data-nav-capability="view"><span>↕</span>仓位</a>
+          <a href="/orders" data-link data-nav-capability="view"><span>≡</span>订单</a>
+          <a href="/risk" data-link data-nav-capability="view"><span>◇</span>风险</a>
+          <a href="/capital" data-link data-nav-capability="capital.view"><span>¤</span>资金</a>
+          <a href="/results" data-link data-nav-capability="view"><span>▤</span>审计与结果</a>
+          <a href="/exceptions" data-link data-nav-capability="view"><span>!</span>异常</a>
+          <a href="/venues/binance" data-link data-nav-capability="view"><span>◫</span>Binance只读</a>
         </nav>
         <div class="sidebar-foot">
           <div id="mobile-session-summary" class="mobile-session-summary"></div>
@@ -100,6 +100,6 @@
       </form>
     </dialog>
     <div id="toast" class="toast" role="status" aria-live="polite"></div>
-    <script type="module" src="/assets/app.js?v=27"></script>
+    <script type="module" src="/assets/app.js?v=28"></script>
   </body>
 </html>
