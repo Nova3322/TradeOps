@@ -1187,22 +1187,97 @@ function bindCapitalActions() {
 
 async function capitalAction(path, body) { try { await api(path, {method:'POST', body:JSON.stringify(body)}); showToast('资金权威状态已更新'); await route(); } catch (error) { showApiError(error); } }
 
+function signedResult(value) {
+  const number = Number(value || 0);
+  return `${number > 0 ? '+' : ''}${fmtNumber(value || 0)}`;
+}
+
+function resultValueClass(value) {
+  const number = Number(value || 0);
+  return number > 0 ? 'result-positive' : number < 0 ? 'result-negative' : '';
+}
+
+function actualResultsVerdict(campaigns, exceptions) {
+  const activeCount = campaigns.filter(item => item.status !== 'CLOSED').length;
+  const closedCount = campaigns.length - activeCount;
+  const affectedCount = new Set(exceptions.map(item => item.campaign_id)).size;
+  if (affectedCount) return {
+    tone:'danger',
+    title:`${affectedCount} 个 Campaign 有事实或对账问题`,
+    copy:'这些数字不能直接当作最终结果。先处理 Unknown、过期事实、保护不足或对账差异。',
+    href:'/exceptions',
+    action:'先处理异常',
+  };
+  if (activeCount) return {
+    tone:'attention',
+    title:`${activeCount} 个 Campaign 仍在运行`,
+    copy:'当前盈亏会随仓位和成交事实继续变化；只有仓位归零、退出终结且对账一致后，结果才会固定。',
+    href:'/campaigns',
+    action:'查看进行中 Campaign',
+  };
+  if (closedCount) return {
+    tone:'success',
+    title:`已结算 ${closedCount} 个 Campaign，当前没有待处理异常`,
+    copy:'已关闭 Campaign 已满足退出终结、仓位归零与对账一致；下方保留盈亏、成本和完整审计链。',
+    href:'/campaigns',
+    action:'查看 Campaign 记录',
+  };
+  return {
+    tone:'clear',
+    title:'该环境尚未形成可结算结果',
+    copy:'没有持久化的 Campaign 事实，因此这里不会推测盈亏。先从机会和提案流程形成可审计的交易记录。',
+    href:'/opportunities',
+    action:'查看市场机会',
+  };
+}
+
+function resultsEnvironmentNotice(environment) {
+  return {
+    SHADOW:'SHADOW 仅展示合成记录，不代表交易所执行或真实收益。',
+    TESTNET:'TESTNET 仅展示非生产环境记录，不代表真实收益。',
+    LIVE:'LIVE 只展示系统实际收到并持久化的事实，不承诺盈利。',
+  }[environment];
+}
+
 async function renderActualResults() {
   const environment = new URLSearchParams(location.search).get('environment') || 'SHADOW';
-  const [resultResponse, auditResponse, runtimeResponse] = await Promise.all([
+  const [resultResponse, auditResponse, runtimeResponse, exceptionResponse] = await Promise.all([
     api(`/api/results?environment=${encodeURIComponent(environment)}`),
     api(`/api/audit?environment=${encodeURIComponent(environment)}&limit=200`),
     api('/api/runtime/status'),
+    api('/api/campaign-exceptions'),
   ]);
   const results = resultResponse.data;
   const runtime = runtimeResponse.data;
+  const resultCampaignIds = new Set(results.campaigns.map(item => item.campaign_id));
+  const exceptions = exceptionResponse.data.filter(item => resultCampaignIds.has(item.campaign_id));
+  const verdict = actualResultsVerdict(results.campaigns, exceptions);
+  const closedCount = results.campaigns.filter(item => item.status === 'CLOSED').length;
+  const affectedCount = new Set(exceptions.map(item => item.campaign_id)).size;
+  const outcomeCards = Object.entries(results.totals_by_currency).map(([currency, item]) => {
+    const curve = results.curves_by_currency[currency];
+    return `<article class="result-outcome-card"><small>${escapeHtml(currency)} · 最终 / 当前</small><strong class="${resultValueClass(item.final_pnl)}">${signedResult(item.final_pnl)}</strong><div><span>已实现 <b>${signedResult(item.realized_pnl)}</b></span><span>未实现 <b>${signedResult(item.unrealized_pnl)}</b></span></div><p>手续费 ${fmtNumber(item.fees)} · 资金费 ${fmtNumber(item.funding)} · 滑点 ${fmtNumber(item.slippage)}</p><p>最大绝对回撤 ${fmtNumber(curve?.maximum_drawdown || 0)} ${escapeHtml(currency)}</p></article>`;
+  }).join('');
   const totals = Object.entries(results.totals_by_currency).map(([currency, item]) => `<tr><td><b>${escapeHtml(currency)}</b></td><td>${fmtNumber(item.realized_pnl)}</td><td>${fmtNumber(item.unrealized_pnl)}</td><td>${fmtNumber(item.final_pnl)}</td><td>${fmtNumber(item.fees)}</td><td>${fmtNumber(item.funding)}</td><td>${fmtNumber(item.slippage)}</td></tr>`).join('');
-  const campaigns = results.campaigns.map(item => `<tr><td>${shortId(item.campaign_id)}<br><span class="subtle">${escapeHtml(item.actuality)}</span></td><td>${escapeHtml(item.source || 'UNKNOWN')} · ${escapeHtml(item.source_type || 'UNKNOWN')}<br><span class="subtle">${escapeHtml(item.source_candidate_id || 'MANUAL')} · ${escapeHtml(item.source_version || 'no version')}</span></td><td>${escapeHtml(item.venue)} · ${escapeHtml(item.symbol || item.instrument_id)}<br><span class="subtle">${escapeHtml(item.account_id)} · ${escapeHtml(item.direction)} · ${escapeHtml(item.risk_tier || 'UNKNOWN')}</span></td><td><b>${escapeHtml(item.status)}</b><br><span class="subtle">${item.fill_count} fills</span></td><td>${fmtNumber(item.final_pnl)} ${escapeHtml(item.currency)}</td><td>${fmtNumber(item.fees)} / ${fmtNumber(item.funding)} / ${fmtNumber(item.slippage)}</td><td>${fmtDate(item.updated_at)}</td></tr>`).join('');
-  const curves = Object.entries(results.curves_by_currency).flatMap(([currency, curve]) => curve.points.map(point => `<tr><td>${escapeHtml(currency)}</td><td>${shortId(point.campaign_id)}</td><td>${fmtNumber(point.cumulative_pnl)}</td><td>${fmtNumber(point.running_peak)}</td><td>${fmtNumber(point.drawdown)}</td><td>${fmtDate(point.at)}</td></tr>`)).join('');
-  const audits = auditResponse.data.map(item => `<tr><td>${fmtDate(item.created_at)}</td><td>${escapeHtml(item.actor)}</td><td><b>${escapeHtml(item.event_type)}</b><br><span class="subtle">${escapeHtml(item.object_type)} · ${shortId(item.object_id)}</span></td><td>${escapeHtml(item.reason)}</td><td>${shortId(item.correlation_id)}<br><span class="subtle">v${item.object_version}</span></td></tr>`).join('');
+  const campaigns = results.campaigns.map(item => `<tr><td><a class="table-primary-link" href="/campaigns/${item.campaign_id}" data-link><b>${escapeHtml(item.symbol || 'Campaign')}</b><span>${shortId(item.campaign_id)} · 打开明细 →</span></a><span class="subtle">${escapeHtml(item.actuality)}</span></td><td>${escapeHtml(item.source || 'UNKNOWN')} · ${escapeHtml(item.source_type || 'UNKNOWN')}<br><span class="subtle">${escapeHtml(item.source_candidate_id || 'MANUAL')} · ${escapeHtml(item.source_version || 'no version')}</span></td><td>${escapeHtml(item.venue)} · ${escapeHtml(item.symbol || item.instrument_id)}<br><span class="subtle">${escapeHtml(item.account_id)} · ${escapeHtml(item.direction)} · ${escapeHtml(item.risk_tier || 'UNKNOWN')}</span></td><td><b>${escapeHtml(item.status)}</b><br><span class="subtle">${item.fill_count} fills</span></td><td><b class="${resultValueClass(item.final_pnl)}">${signedResult(item.final_pnl)}</b> ${escapeHtml(item.currency)}</td><td>${fmtNumber(item.fees)} / ${fmtNumber(item.funding)} / ${fmtNumber(item.slippage)}</td><td>${fmtDate(item.updated_at)}</td></tr>`).join('');
+  const curves = Object.entries(results.curves_by_currency).flatMap(([currency, curve]) => curve.points.map(point => `<tr><td>${escapeHtml(currency)}</td><td><a class="table-primary-link compact" href="/campaigns/${point.campaign_id}" data-link>${shortId(point.campaign_id)} →</a></td><td>${signedResult(point.cumulative_pnl)}</td><td>${signedResult(point.running_peak)}</td><td>${fmtNumber(point.drawdown)}</td><td>${fmtDate(point.at)}</td></tr>`)).join('');
+  const audits = auditResponse.data.map(item => {
+    const href = item.object_type === 'Campaign' ? `/campaigns/${item.object_id}` : item.object_type === 'Proposal' ? `/proposals/${item.object_id}` : null;
+    const object = `<b>${escapeHtml(item.event_type)}</b><br><span class="subtle">${escapeHtml(item.object_type)} · ${shortId(item.object_id)}${href ? ' · 打开 →' : ''}</span>`;
+    return `<tr><td>${fmtDate(item.created_at)}</td><td>${escapeHtml(item.actor)}</td><td>${href ? `<a class="table-primary-link compact" href="${href}" data-link>${object}</a>` : object}</td><td>${escapeHtml(item.reason)}</td><td>${shortId(item.correlation_id)}<br><span class="subtle">v${item.object_version}</span></td></tr>`;
+  }).join('');
   const gates = Object.entries(runtime.capability_gates).map(([key, gate]) => `<tr><td>${escapeHtml(key)}</td><td><b>${escapeHtml(gate.status)}</b></td><td>${escapeHtml(gate.reason)}</td><td>${fmtDate(gate.updated_at)}</td></tr>`).join('');
-  const firstCurve = Object.values(results.curves_by_currency)[0];
-  main.innerHTML = `<section class="page"><header class="page-head"><div><p class="eyebrow">RECORDED FACTS · ${escapeHtml(environment)}</p><h1>审计与实际结果</h1><p class="lede">只统计系统实际收到并持久化的事实。SHADOW、TESTNET、LIVE 强制分开；这里没有回测、策略模拟或盈利保证。</p></div><label>环境<select id="results-environment"><option ${environment === 'SHADOW' ? 'selected' : ''}>SHADOW</option><option ${environment === 'TESTNET' ? 'selected' : ''}>TESTNET</option><option ${environment === 'LIVE' ? 'selected' : ''}>LIVE</option></select></label></header><div class="callout"><b>${escapeHtml(results.environment_notice)}</b></div><div class="stats"><div class="stat"><small>Campaign</small><b>${results.campaigns.length}</b></div><div class="stat"><small>审计事件</small><b>${auditResponse.data.length}</b></div><div class="stat"><small>最大绝对回撤</small><b>${fmtNumber(firstCurve?.maximum_drawdown || 0)}</b></div><div class="stat"><small>Schema / 表</small><b style="font-size:14px">${escapeHtml(runtime.schema_revision)} · ${runtime.business_table_count}</b></div></div><section><h2>按结算币种汇总</h2>${totals ? `<div class="table-wrap"><table><thead><tr><th>币种</th><th>已实现</th><th>未实现</th><th>最终 / 当前</th><th>手续费</th><th>资金费</th><th>滑点</th></tr></thead><tbody>${totals}</tbody></table></div>` : '<div class="callout">该环境尚无可归因 Campaign。</div>'}</section><section><h2>Campaign 实际事实</h2>${campaigns ? `<div class="table-wrap"><table><thead><tr><th>Campaign / 事实类型</th><th>来源</th><th>作用域</th><th>状态</th><th>PnL</th><th>费用 / 资金费 / 滑点</th><th>更新时间</th></tr></thead><tbody>${campaigns}</tbody></table></div>` : '<div class="callout">当前环境没有 Campaign。</div>'}</section><section><h2>已关闭 Campaign 累计 PnL 与绝对回撤</h2><p class="safety-note">没有可靠期初资本时只展示结算币种绝对值，不伪造百分比收益率或回撤。</p>${curves ? `<div class="table-wrap"><table><thead><tr><th>币种</th><th>Campaign</th><th>累计 PnL</th><th>历史峰值</th><th>回撤</th><th>时间</th></tr></thead><tbody>${curves}</tbody></table></div>` : '<div class="callout">没有已关闭 Campaign 曲线点。</div>'}</section><section><h2>作用域审计时间线</h2>${audits ? `<div class="table-wrap"><table><thead><tr><th>时间</th><th>操作者</th><th>事件 / 对象</th><th>原因</th><th>Correlation / 版本</th></tr></thead><tbody>${audits}</tbody></table></div>` : '<div class="callout">当前身份和环境下没有可见审计事件。</div>'}</section><section><h2>运行状态</h2><div class="stats"><div class="stat"><small>数据库</small><b style="font-size:14px">${runtime.database_ready ? 'READY' : 'NOT READY'}</b></div><div class="stat"><small>运行环境</small><b style="font-size:14px">${escapeHtml(runtime.runtime_environment)}</b></div><div class="stat"><small>进程模型</small><b style="font-size:14px">API + PostgreSQL</b></div><div class="stat"><small>外部资金</small><b style="font-size:14px">MOCK ONLY</b></div></div><div class="table-wrap"><table><thead><tr><th>Capability</th><th>状态</th><th>原因</th><th>更新时间</th></tr></thead><tbody>${gates}</tbody></table></div><pre>${escapeHtml(JSON.stringify(runtime.external_boundaries, null, 2))}</pre></section></section>`;
+  main.innerHTML = `<section class="page results-page"><header class="page-head"><div><p class="eyebrow">RECORDED FACTS · ${escapeHtml(environment)}</p><h1>实际结果</h1><p class="lede">先看实际盈亏和当前结论，再下钻到每个 Campaign 的成交、成本、对账与审计记录。不同环境强制分开。</p></div><label>环境<select id="results-environment"><option ${environment === 'SHADOW' ? 'selected' : ''}>SHADOW</option><option ${environment === 'TESTNET' ? 'selected' : ''}>TESTNET</option><option ${environment === 'LIVE' ? 'selected' : ''}>LIVE</option></select></label></header>
+    <div class="callout"><b>${escapeHtml(resultsEnvironmentNotice(environment))}</b></div>
+    <article class="results-verdict tone-${verdict.tone}"><div><p class="eyebrow">当前结论</p><h2>${escapeHtml(verdict.title)}</h2><p>${escapeHtml(verdict.copy)}</p></div><a class="${verdict.tone === 'danger' ? 'danger' : 'secondary'}" href="${verdict.href}" data-link>${escapeHtml(verdict.action)}</a></article>
+    <section aria-labelledby="results-outcome-heading"><div class="section-heading"><div><p class="eyebrow">OUTCOME</p><h2 id="results-outcome-heading">按结算币种看结果</h2></div><p class="subtle">进行中为当前值，已关闭才是最终值</p></div>${outcomeCards ? `<div class="result-outcome-grid">${outcomeCards}</div>` : '<div class="empty-state compact-empty"><div><h2>暂无结果</h2><p>系统没有收到可归因的 Campaign 事实，因此不会展示推测数字。</p></div></div>'}</section>
+    <div class="stats results-stats"><div class="stat"><small>Campaign</small><b>${results.campaigns.length}</b></div><div class="stat"><small>已关闭</small><b>${closedCount}</b></div><div class="stat"><small>待处理 Campaign</small><b class="${affectedCount ? 'danger-text' : ''}">${affectedCount}</b></div><div class="stat"><small>审计事件</small><b>${auditResponse.data.length}</b></div></div>
+    <section><h2>盈亏与成本明细</h2>${totals ? `<div class="table-wrap"><table><thead><tr><th>币种</th><th>已实现</th><th>未实现</th><th>最终 / 当前</th><th>手续费</th><th>资金费</th><th>滑点</th></tr></thead><tbody>${totals}</tbody></table></div>` : '<div class="callout">该环境尚无可归因 Campaign。</div>'}</section>
+    <section><h2>Campaign 实际事实</h2>${campaigns ? `<div class="table-wrap"><table><thead><tr><th>Campaign / 事实类型</th><th>来源</th><th>作用域</th><th>状态</th><th>PnL</th><th>费用 / 资金费 / 滑点</th><th>更新时间</th></tr></thead><tbody>${campaigns}</tbody></table></div>` : '<div class="callout">当前环境没有 Campaign。</div>'}</section>
+    <section><h2>已关闭 Campaign 累计 PnL 与绝对回撤</h2><p class="safety-note">没有可靠期初资本时只展示结算币种绝对值，不伪造百分比收益率或回撤。</p>${curves ? `<div class="table-wrap"><table><thead><tr><th>币种</th><th>Campaign</th><th>累计 PnL</th><th>历史峰值</th><th>回撤</th><th>时间</th></tr></thead><tbody>${curves}</tbody></table></div>` : '<div class="callout">没有已关闭 Campaign 曲线点。</div>'}</section>
+    <section><h2>作用域审计时间线</h2><p class="subtle">可打开 Proposal 或 Campaign 继续追查；Correlation 与版本用于定位同一条审计链。</p>${audits ? `<div class="table-wrap"><table><thead><tr><th>时间</th><th>操作者</th><th>事件 / 对象</th><th>原因</th><th>Correlation / 版本</th></tr></thead><tbody>${audits}</tbody></table></div>` : '<div class="callout">当前身份和环境下没有可见审计事件。</div>'}</section>
+    <details class="results-technical"><summary><span><b>系统运行边界与技术状态</b><small>仅在排查连接、功能开关或数据版本时查看</small></span><strong>展开技术详情</strong></summary><div class="results-technical-content"><div class="stats"><div class="stat"><small>数据库</small><b style="font-size:14px">${runtime.database_ready ? 'READY' : 'NOT READY'}</b></div><div class="stat"><small>运行环境</small><b style="font-size:14px">${escapeHtml(runtime.runtime_environment)}</b></div><div class="stat"><small>Schema / 表</small><b style="font-size:14px">${escapeHtml(runtime.schema_revision)} · ${runtime.business_table_count}</b></div><div class="stat"><small>外部资金</small><b style="font-size:14px">MOCK ONLY</b></div></div><div class="table-wrap"><table><thead><tr><th>Capability</th><th>状态</th><th>原因</th><th>更新时间</th></tr></thead><tbody>${gates}</tbody></table></div><details class="technical-details"><summary>查看外部边界原始记录</summary><pre>${escapeHtml(JSON.stringify(runtime.external_boundaries, null, 2))}</pre></details></div></details>
+  </section>`;
   document.querySelector('#results-environment')?.addEventListener('change', event => navigate(`/results?environment=${encodeURIComponent(event.target.value)}`));
 }
 

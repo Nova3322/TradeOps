@@ -85,8 +85,8 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
 
     assert response.status_code == 200
     assert "Trading Console" in response.text
-    assert "/assets/app.js?v=28" in response.text
-    assert "/assets/styles.css?v=16" in response.text
+    assert "/assets/app.js?v=29" in response.text
+    assert "/assets/styles.css?v=17" in response.text
     assert '<a href="/" data-link><span>⌂</span>今日</a>' in response.text
     assert 'id="mobile-nav-toggle"' in response.text
     assert 'id="confirm-dialog"' in response.text
@@ -148,6 +148,10 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
     assert "异常与恢复" in app_javascript.text
     assert "POSITION_STALE" in app_javascript.text
     assert "打开 Campaign 按顺序处理" in app_javascript.text
+    assert "function actualResultsVerdict" in app_javascript.text
+    assert "先看实际盈亏和当前结论" in app_javascript.text
+    assert "待处理 Campaign" in app_javascript.text
+    assert "系统运行边界与技术状态" in app_javascript.text
 
     stylesheet = get(app, "/assets/styles.css")
     assert stylesheet.status_code == 200
@@ -163,7 +167,7 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
 
     service_worker = get(app, "/sw.js")
     assert service_worker.status_code == 200
-    assert "trading-shell-v28" in service_worker.text
+    assert "trading-shell-v29" in service_worker.text
     assert "await fetch(event.request)" in service_worker.text
 
 
@@ -222,6 +226,72 @@ def test_opportunity_card_disables_creation_when_catalog_rejects_raw_contract() 
         assert.match(readOnly, /当前角色可观察候选/);
         assert.match(readOnly, /不能创建提案/);
         assert.doesNotMatch(readOnly, /一键创建|高级配置/);
+        """
+    )
+    completed = subprocess.run(  # noqa: S603
+        [node, "--input-type=module", "-e", script, str(app_path)],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stderr
+
+
+def test_actual_results_verdict_prioritizes_exceptions_and_settlement_state() -> None:
+    node = shutil.which("node")
+    assert node is not None
+    app_path = Path(__file__).parents[2] / "src" / "trading_control_plane" / "web" / "app.js"
+    script = textwrap.dedent(
+        r"""
+        import assert from "node:assert/strict";
+        import fs from "node:fs";
+        import vm from "node:vm";
+
+        const source = fs.readFileSync(process.argv[1], "utf8");
+        const from = source.indexOf("function signedResult");
+        const to = source.indexOf("\nasync function renderActualResults", from);
+        assert.notEqual(from, -1);
+        assert.notEqual(to, -1);
+        const context = {fmtNumber: value => String(Number(value))};
+        vm.createContext(context);
+        vm.runInContext(
+          `${source.slice(from, to)}; this.verdict = actualResultsVerdict; ` +
+          `this.signed = signedResult; this.valueClass = resultValueClass;`,
+          context,
+        );
+
+        const exception = context.verdict(
+          [{campaign_id:"campaign-1", status:"RUNNING"}],
+          [
+            {campaign_id:"campaign-1", code:"POSITION_UNKNOWN"},
+            {campaign_id:"campaign-1", code:"RECONCILIATION_DIFF"},
+          ],
+        );
+        assert.equal(exception.tone, "danger");
+        assert.match(exception.title, /^1 个 Campaign/);
+        assert.equal(exception.href, "/exceptions");
+
+        const active = context.verdict(
+          [{campaign_id:"campaign-1", status:"RUNNING"}],
+          [],
+        );
+        assert.equal(active.tone, "attention");
+        assert.match(active.copy, /结果才会固定/);
+
+        const settled = context.verdict(
+          [{campaign_id:"campaign-1", status:"CLOSED"}],
+          [],
+        );
+        assert.equal(settled.tone, "success");
+        assert.match(settled.title, /当前没有待处理异常/);
+
+        const empty = context.verdict([], []);
+        assert.equal(empty.tone, "clear");
+        assert.equal(empty.href, "/opportunities");
+        assert.equal(context.signed("10"), "+10");
+        assert.equal(context.signed("-2"), "-2");
+        assert.equal(context.valueClass("10"), "result-positive");
+        assert.equal(context.valueClass("-2"), "result-negative");
         """
     )
     completed = subprocess.run(  # noqa: S603
