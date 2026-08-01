@@ -17,7 +17,7 @@ from decimal import Decimal
 from typing import Any, ClassVar, Protocol
 from uuid import UUID
 
-from trading_control_plane.domain import CampaignStatus
+from trading_control_plane.domain import CampaignStatus, ProposalStatus
 
 logger = logging.getLogger(__name__)
 
@@ -111,14 +111,18 @@ _EVENT_LABELS: dict[str, str] = {
 }
 
 _STATUS_LABELS: dict[str, str] = {
-    "ACTIVE": "进行中",
-    "CLOSED": "已关闭",
+    CampaignStatus.OPENING.value: "建仓中",
+    CampaignStatus.OPEN.value: "持仓中",
+    CampaignStatus.REDUCING.value: "减仓中",
+    CampaignStatus.CLOSING.value: "平仓中",
+    CampaignStatus.CLOSED.value: "已关闭",
+    CampaignStatus.UNKNOWN.value: "未知",
     "CANCELLED": "已取消",
-    "DRAFT": "草稿",
-    "PENDING_REVIEW": "等待审核",
-    "APPROVED": "已批准",
-    "REJECTED": "已拒绝",
-    "UNKNOWN": "未知",
+    ProposalStatus.DRAFT.value: "草稿",
+    ProposalStatus.PENDING_REVIEW.value: "等待审核",
+    ProposalStatus.APPROVED.value: "已批准",
+    ProposalStatus.REJECTED.value: "已拒绝",
+    ProposalStatus.EXPIRED.value: "已过期",
 }
 
 _NO_ACTION_EVENTS = {

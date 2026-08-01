@@ -6,7 +6,7 @@ from uuid import UUID, uuid4
 
 import pytest
 
-from trading_control_plane.domain import CampaignStatus
+from trading_control_plane.domain import CampaignStatus, ProposalStatus
 from trading_control_plane.telegram import (
     MAX_TELEGRAM_TEXT,
     CampaignNotification,
@@ -18,6 +18,8 @@ from trading_control_plane.telegram import (
     TelegramUnavailable,
     _default_poster,
     campaign_position_reduction_available,
+    render_campaign_notification,
+    render_proposal_notification,
 )
 
 
@@ -688,6 +690,71 @@ def test_campaign_position_reduction_uses_real_campaign_statuses(
 ) -> None:
     assert campaign_position_reduction_available(status.value, Decimal("1")) is available
     assert campaign_position_reduction_available(status.value, Decimal("0")) is False
+
+
+@pytest.mark.parametrize(
+    ("status", "label"),
+    [
+        (CampaignStatus.OPENING, "建仓中"),
+        (CampaignStatus.OPEN, "持仓中"),
+        (CampaignStatus.REDUCING, "减仓中"),
+        (CampaignStatus.CLOSING, "平仓中"),
+        (CampaignStatus.CLOSED, "已关闭"),
+        (CampaignStatus.UNKNOWN, "未知"),
+    ],
+)
+def test_campaign_render_uses_chinese_labels_for_real_statuses(
+    status: CampaignStatus,
+    label: str,
+) -> None:
+    rendered = render_campaign_notification(
+        CampaignNotification(
+            notification_id="status-label",
+            recipient_id=uuid4(),
+            campaign_id=uuid4(),
+            event_type="POSITION_UPDATED",
+            environment="SHADOW",
+            summary="状态已更新",
+            campaign_version=1,
+            action_references=(),
+            created_at=datetime.now(UTC),
+            status=status.value,
+        )
+    )
+
+    assert f"{label} · <code>{status.value}</code>" in rendered
+
+
+@pytest.mark.parametrize(
+    ("status", "label"),
+    [
+        (ProposalStatus.DRAFT, "草稿"),
+        (ProposalStatus.PENDING_REVIEW, "等待审核"),
+        (ProposalStatus.APPROVED, "已批准"),
+        (ProposalStatus.REJECTED, "已拒绝"),
+        (ProposalStatus.EXPIRED, "已过期"),
+    ],
+)
+def test_proposal_render_uses_chinese_labels_for_real_statuses(
+    status: ProposalStatus,
+    label: str,
+) -> None:
+    rendered = render_proposal_notification(
+        ProposalNotification(
+            notification_id="status-label",
+            reviewer_id=uuid4(),
+            proposal_id=uuid4(),
+            proposal_version=1,
+            environment="SHADOW",
+            summary="审核状态已更新",
+            review_code="review-reference",
+            review_url="http://test/proposals/1",
+            created_at=datetime.now(UTC),
+            status=status.value,
+        )
+    )
+
+    assert f"{label} · <code>{status.value}</code>" in rendered
 
 
 def test_failed_delivery_does_not_permanently_deduplicate_notification() -> None:
