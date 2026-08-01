@@ -237,7 +237,9 @@ class Approval(Base):
     __tablename__ = "approvals"
     __table_args__ = (
         CheckConstraint(
-            "(proposal_id IS NOT NULL) <> (transfer_proposal_id IS NOT NULL)",
+            "((proposal_id IS NOT NULL)::integer + "
+            "(transfer_proposal_id IS NOT NULL)::integer + "
+            "(risk_control_change_request_id IS NOT NULL)::integer) = 1",
             name="ck_approvals_one_parent",
         ),
         CheckConstraint("decision IN ('APPROVE','REJECT')", name="ck_approvals_decision"),
@@ -255,6 +257,13 @@ class Approval(Base):
             unique=True,
             postgresql_where=text("transfer_proposal_id IS NOT NULL"),
         ),
+        Index(
+            "uq_approvals_risk_control_reviewer",
+            "risk_control_change_request_id",
+            "reviewer_id",
+            unique=True,
+            postgresql_where=text("risk_control_change_request_id IS NOT NULL"),
+        ),
     )
 
     approval_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid4)
@@ -263,6 +272,9 @@ class Approval(Base):
     )
     transfer_proposal_id: Mapped[UUID | None] = mapped_column(
         ForeignKey("transfer_proposals.transfer_proposal_id", ondelete="CASCADE"), nullable=True
+    )
+    risk_control_change_request_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("risk_control_change_requests.request_id", ondelete="CASCADE"), nullable=True
     )
     reviewer_id: Mapped[UUID] = mapped_column(ForeignKey("users.user_id"), nullable=False)
     decision: Mapped[str] = mapped_column(String(16), nullable=False)
@@ -474,6 +486,7 @@ class RiskPolicy(Base):
         ),
         CheckConstraint("max_total_risk > 0", name="ck_risk_policies_max_risk_positive"),
         CheckConstraint("max_fact_age_seconds > 0", name="ck_risk_policies_age_positive"),
+        CheckConstraint("revision >= 1", name="ck_risk_policies_revision"),
         Index(
             "uq_risk_policies_one_active",
             "active",
@@ -484,11 +497,68 @@ class RiskPolicy(Base):
 
     policy_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid4)
     version: Mapped[str] = mapped_column(String(120), nullable=False, unique=True)
+    revision: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
     system_state: Mapped[str] = mapped_column(String(32), nullable=False)
     max_total_risk: Mapped[Decimal] = mapped_column(AMOUNT, nullable=False)
     max_fact_age_seconds: Mapped[int] = mapped_column(Integer, nullable=False)
+    reason: Mapped[str] = mapped_column(Text, nullable=False)
     active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     updated_by: Mapped[str] = mapped_column(String(255), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class RiskControlChangeRequest(Base):
+    __tablename__ = "risk_control_change_requests"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('PENDING_REVIEW','APPROVED','REJECTED','EXPIRED','EXECUTED')",
+            name="ck_risk_control_change_requests_status",
+        ),
+        CheckConstraint("version >= 1", name="ck_risk_control_change_requests_version"),
+        CheckConstraint(
+            "source_policy_revision >= 1 AND source_auto_add_version >= 1",
+            name="ck_risk_control_change_requests_source_versions",
+        ),
+        CheckConstraint(
+            "source_auto_add_status IN ('DISABLED','ENABLED')",
+            name="ck_risk_control_change_requests_auto_add_status",
+        ),
+        CheckConstraint(
+            "execute_after >= created_at AND expires_at > execute_after",
+            name="ck_risk_control_change_requests_window",
+        ),
+        Index(
+            "uq_risk_control_change_requests_pending",
+            text("(true)"),
+            unique=True,
+            postgresql_where=text("status IN ('PENDING_REVIEW','APPROVED')"),
+        ),
+        Index("ix_risk_control_change_requests_created", "created_at"),
+    )
+
+    request_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid4)
+    requester_id: Mapped[UUID] = mapped_column(ForeignKey("users.user_id"), nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False)
+    version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    reason: Mapped[str] = mapped_column(Text, nullable=False)
+    restore_auto_add: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    require_live_scope: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    source_policy_id: Mapped[UUID] = mapped_column(
+        ForeignKey("risk_policies.policy_id"), nullable=False
+    )
+    source_policy_version: Mapped[str] = mapped_column(String(120), nullable=False)
+    source_policy_revision: Mapped[int] = mapped_column(Integer, nullable=False)
+    source_auto_add_status: Mapped[str] = mapped_column(String(16), nullable=False)
+    source_auto_add_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    required_scopes: Mapped[list[dict[str, str]]] = mapped_column(JSONB, nullable=False)
+    resulting_policy_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("risk_policies.policy_id"), nullable=True
+    )
+    correlation_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), nullable=False)
+    execute_after: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    executed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
 
@@ -552,6 +622,7 @@ class TradingAuthorization(Base):
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     allowed_adds: Mapped[int] = mapped_column(Integer, nullable=False)
     used_adds: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    add_revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     actor_id: Mapped[str] = mapped_column(String(255), nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
@@ -1037,12 +1108,14 @@ class CapabilityGate(Base):
             name="ck_capability_gates_key",
         ),
         CheckConstraint("status IN ('DISABLED','ENABLED')", name="ck_capability_gates_status"),
+        CheckConstraint("version >= 1", name="ck_capability_gates_version"),
     )
 
     capability_key: Mapped[str] = mapped_column(String(120), primary_key=True)
     status: Mapped[str] = mapped_column(String(16), nullable=False)
     reason: Mapped[str] = mapped_column(Text, nullable=False)
     operator_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
 

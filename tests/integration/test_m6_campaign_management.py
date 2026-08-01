@@ -25,7 +25,7 @@ from trading_control_plane.domain import (
     Role,
     SystemRiskState,
 )
-from trading_control_plane.models import OrderIntent, TradingAuthorization
+from trading_control_plane.models import CapabilityGate, OrderIntent, TradingAuthorization
 from trading_control_plane.perptape import PerptapeClient
 from trading_control_plane.service import TradingService
 from trading_control_plane.telegram import MockTelegramGateway
@@ -139,6 +139,14 @@ def seed_campaign(database: Database) -> dict[str, UUID]:
         idempotency_key="m6-risk",
         now=now,
     )
+    with database.session_factory.begin() as session:
+        gate = session.get(CapabilityGate, "AUTO_ADD", with_for_update=True)
+        assert gate is not None
+        gate.status = CapabilityStatus.ENABLED.value
+        gate.reason = "M6 integration fixture precondition"
+        gate.operator_id = str(admin)
+        gate.version += 1
+        gate.updated_at = now
     with pytest.raises(DomainRejected, match="AUTHORIZATION_ADD_LIMIT_INVALID"):
         service.issue_authorization(
             proposal_id=proposal,
@@ -209,9 +217,6 @@ def seed_campaign(database: Database) -> dict[str, UUID]:
         True,
         operator,
         now=now,
-    )
-    service.set_capability_gate(
-        "AUTO_ADD", CapabilityStatus.ENABLED, "M6 local test", admin, now=now
     )
     return {
         "admin": admin,

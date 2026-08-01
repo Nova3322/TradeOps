@@ -50,6 +50,7 @@ from trading_control_plane.domain import (
     ReservationStatus,
     ReviewDecision,
     RiskEvaluationInput,
+    RiskPolicyChangeStatus,
     RiskPolicyInput,
     RiskResult,
     RiskTier,
@@ -93,6 +94,7 @@ from trading_control_plane.models import (
     Proposal,
     ProtectionOrder,
     ReconciliationRun,
+    RiskControlChangeRequest,
     RiskDecision,
     RiskPolicy,
     RiskReservation,
@@ -131,6 +133,9 @@ ACTIVE_INTENT_STATUSES = {
     OrderIntentStatus.UNKNOWN.value,
 }
 
+RISK_RESTORE_COOLDOWN = timedelta(minutes=15)
+RISK_RESTORE_TTL = timedelta(hours=24)
+
 OCCUPIED_RESERVATION_STATUSES = {
     ReservationStatus.RESERVED.value,
     ReservationStatus.OPEN.value,
@@ -153,7 +158,7 @@ RELEASABLE_INTENT_STATUSES = {
 ROLE_ACTIONS: dict[Role, frozenset[str]] = {
     Role.OBSERVER: frozenset({"view", "capital.view"}),
     Role.PROPOSER: frozenset({"view", "capital.view", "proposal.create", "proposal.submit"}),
-    Role.REVIEWER: frozenset({"view", "capital.view", "proposal.review"}),
+    Role.REVIEWER: frozenset({"view", "capital.view", "proposal.review", "risk.restore.review"}),
     Role.OPERATOR: frozenset(
         {
             "view",
@@ -719,12 +724,24 @@ class TradingService:
                 {"key": RISK_CAPACITY_LOCK_KEY},
             )
             for current in session.scalars(select(RiskPolicy).where(RiskPolicy.active)).all():
+                if (
+                    system_state is SystemRiskState.NORMAL
+                    and current.system_state != SystemRiskState.NORMAL.value
+                ):
+                    _reject(
+                        "REVIEWED_RESTORE_REQUIRED",
+                        "a tightened risk policy may only return to NORMAL through "
+                        "reviewed restore",
+                    )
                 current.active = False
+            previous_revision = session.scalar(select(func.max(RiskPolicy.revision))) or 0
             policy = RiskPolicy(
                 version=version,
+                revision=int(previous_revision) + 1,
                 system_state=system_state.value,
                 max_total_risk=max_total_risk,
                 max_fact_age_seconds=int(max_fact_age.total_seconds()),
+                reason=system_state.value,
                 active=True,
                 updated_by=str(actor_id),
                 updated_at=now,
@@ -1246,6 +1263,7 @@ class TradingService:
             "policy": {
                 "policy_id": str(policy.policy_id),
                 "version": policy.version,
+                "revision": policy.revision,
                 "system_state": policy.system_state,
                 "max_total_risk": str(policy.max_total_risk),
                 "max_fact_age_seconds": policy.max_fact_age_seconds,
@@ -1430,6 +1448,13 @@ class TradingService:
             )
             if response is not None:
                 return _as_uuid(str(response["authorization_id"]))
+            self._lock_risk_capacity(session)
+            policy = self._active_risk_policy(session)
+            if policy.system_state != SystemRiskState.NORMAL.value:
+                _reject(
+                    "AUTHORIZATION_RISK_STATE_INVALID",
+                    "new authorization requires the current NORMAL risk policy",
+                )
             if proposal.status != ProposalStatus.APPROVED.value:
                 _reject("PROPOSAL_NOT_APPROVED", "authorization requires approved proposal")
             decision = session.scalar(
@@ -1440,6 +1465,16 @@ class TradingService:
             )
             if decision is None or decision.result == RiskResult.DENY.value:
                 _reject("RISK_DECISION_NOT_ALLOWING", "latest risk decision does not allow risk")
+            frozen_policy = decision.input_data.get("policy")
+            if not isinstance(frozen_policy, dict) or (
+                frozen_policy.get("policy_id") != str(policy.policy_id)
+                or frozen_policy.get("version") != policy.version
+                or frozen_policy.get("revision") != policy.revision
+            ):
+                _reject(
+                    "RISK_DECISION_CONTROL_CHANGED",
+                    "risk controls changed after the latest decision; a new decision is required",
+                )
             if expires_at <= now or expires_at > proposal.expires_at:
                 _reject("AUTHORIZATION_EXPIRY_INVALID", "authorization must be short-lived")
             details = proposal.frozen_payload.get("details")
@@ -1463,6 +1498,13 @@ class TradingService:
                     "AUTHORIZATION_ADD_LIMIT_INVALID",
                     "allowed Add count exceeds the frozen proposal and risk tier",
                 )
+            if allowed_adds > 0:
+                auto_add_gate = session.get(CapabilityGate, "AUTO_ADD", with_for_update=True)
+                if auto_add_gate is None or auto_add_gate.status != CapabilityStatus.ENABLED.value:
+                    _reject(
+                        "AUTO_ADD_DISABLED",
+                        "new AddUnit authorization requires the current AUTO_ADD gate",
+                    )
             authorization = TradingAuthorization(
                 proposal_id=proposal_id,
                 risk_decision_id=decision.decision_id,
@@ -1477,6 +1519,7 @@ class TradingService:
                 expires_at=expires_at,
                 allowed_adds=allowed_adds,
                 used_adds=0,
+                add_revoked_at=None,
                 active=True,
                 actor_id=str(actor_id),
                 created_at=now,
@@ -1776,6 +1819,11 @@ class TradingService:
                 gate = session.get(CapabilityGate, "AUTO_ADD", with_for_update=True)
                 if gate is None or gate.status != CapabilityStatus.ENABLED.value:
                     _reject("AUTO_ADD_DISABLED", "automatic add capability is disabled")
+                if authorization.add_revoked_at is not None:
+                    _reject(
+                        "AUTHORIZATION_ADD_REVOKED",
+                        "authorization AddUnits were permanently revoked by a tighten action",
+                    )
                 instrument = session.get(Instrument, proposal.instrument_id)
                 if instrument is None:
                     _reject("INSTRUMENT_UNAVAILABLE", "proposal instrument is unavailable")
@@ -2234,6 +2282,15 @@ class TradingService:
                 or proposal.expires_at <= now
             ):
                 _reject("AUTHORIZATION_EXPIRED", "new-risk intent authorization is no longer valid")
+            if (
+                intent.kind == IntentKind.ADD.value
+                and intent.status == OrderIntentStatus.READY.value
+                and authorization.add_revoked_at is not None
+            ):
+                _reject(
+                    "AUTHORIZATION_ADD_REVOKED",
+                    "a tighten action permanently revoked this unsent Add intent",
+                )
             if policy is None:
                 _reject("RISK_POLICY_UNKNOWN", "active risk policy is unavailable")
             state = SystemRiskState(policy.system_state)
@@ -5497,11 +5554,11 @@ class TradingService:
                     OrderIntent.status.in_(ACTIVE_INTENT_STATUSES),
                 )
             )
-            authorization.allowed_adds = authorization.used_adds + (
-                1 if unresolved_add is not None else 0
-            )
+            authorization.add_revoked_at = now
             authorization.active = False
-            result = {"allowed_adds": authorization.allowed_adds}
+            result = {
+                "allowed_adds": authorization.used_adds + (1 if unresolved_add is not None else 0)
+            }
             self._save_receipt(
                 session,
                 caller_id=str(actor_id),
@@ -5523,7 +5580,7 @@ class TradingService:
                 idempotency_key=idempotency_key,
                 now=now,
             )
-            return authorization.allowed_adds
+            return int(result["allowed_adds"])
 
     def disable_global_auto_add(
         self,
@@ -5552,7 +5609,13 @@ class TradingService:
             gate.status = CapabilityStatus.DISABLED.value
             gate.reason = reason
             gate.operator_id = str(actor_id)
+            gate.version += 1
             gate.updated_at = now
+            authorizations = session.scalars(
+                select(TradingAuthorization).where(TradingAuthorization.add_revoked_at.is_(None))
+            ).all()
+            for authorization in authorizations:
+                authorization.add_revoked_at = now
             self._save_receipt(
                 session,
                 caller_id=str(actor_id),
@@ -5570,7 +5633,7 @@ class TradingService:
                 object_id="AUTO_ADD",
                 reason=reason,
                 correlation_id=uuid4(),
-                object_version=1,
+                object_version=gate.version,
                 idempotency_key=idempotency_key,
                 now=now,
             )
@@ -5600,8 +5663,20 @@ class TradingService:
             policy = self._active_risk_policy(session)
             if policy.system_state != SystemRiskState.KILL_SWITCH.value:
                 policy.system_state = SystemRiskState.REDUCE_ONLY.value
+                policy.revision += 1
+                policy.reason = reason
                 policy.updated_by = str(actor_id)
                 policy.updated_at = now
+            authorizations = session.scalars(
+                select(TradingAuthorization).where(
+                    TradingAuthorization.active,
+                    TradingAuthorization.expires_at > now,
+                )
+            ).all()
+            for authorization in authorizations:
+                authorization.active = False
+                if authorization.add_revoked_at is None:
+                    authorization.add_revoked_at = now
             result = {"system_state": policy.system_state}
             self._save_receipt(
                 session,
@@ -5620,11 +5695,661 @@ class TradingService:
                 object_id=policy.policy_id,
                 reason=reason,
                 correlation_id=uuid4(),
-                object_version=1,
+                object_version=policy.revision,
                 idempotency_key=idempotency_key,
                 now=now,
             )
             return SystemRiskState(policy.system_state)
+
+    @staticmethod
+    def _canonical_restore_scopes(
+        configured_scopes: tuple[tuple[str, str, str], ...],
+        campaigns: list[Campaign],
+    ) -> list[dict[str, str]]:
+        scopes = set(configured_scopes)
+        scopes.update(
+            (campaign.environment, campaign.account_id, campaign.venue)
+            for campaign in campaigns
+            if campaign.status != CampaignStatus.CLOSED.value
+        )
+        return [
+            {"environment": environment, "account_id": account_id, "venue": venue}
+            for environment, account_id, venue in sorted(scopes)
+        ]
+
+    def _risk_restore_blockers(
+        self,
+        session: Session,
+        policy: RiskPolicy,
+        required_scopes: list[dict[str, str]],
+        *,
+        require_live_scope: bool = False,
+        now: datetime,
+    ) -> list[str]:
+        blockers: set[str] = set()
+        if require_live_scope and not any(
+            scope.get("environment") == ExecutionEnvironment.LIVE.value for scope in required_scopes
+        ):
+            blockers.add("LIVE_SCOPE_CONFIGURATION_REQUIRED")
+        if policy.system_state == SystemRiskState.KILL_SWITCH.value:
+            blockers.add("KILL_SWITCH_MANUAL_RECOVERY_REQUIRED")
+
+        if (
+            session.scalar(
+                select(OrderIntent.intent_id).where(
+                    OrderIntent.kind.in_({IntentKind.INITIAL.value, IntentKind.ADD.value}),
+                    OrderIntent.status.in_(ACTIVE_INTENT_STATUSES),
+                )
+            )
+            is not None
+        ):
+            blockers.add("ACTIVE_NEW_RISK_INTENT")
+        if (
+            session.scalar(
+                select(OrderIntent.intent_id).where(
+                    OrderIntent.status == OrderIntentStatus.UNKNOWN.value
+                )
+            )
+            is not None
+        ):
+            blockers.add("ORDER_INTENT_UNKNOWN")
+        if (
+            session.scalar(
+                select(VenueOrder.venue_order_fact_id).where(
+                    VenueOrder.status == VenueOrderStatus.UNKNOWN.value
+                )
+            )
+            is not None
+        ):
+            blockers.add("VENUE_ORDER_UNKNOWN")
+        if (
+            session.scalar(
+                select(RiskReservation.reservation_id).where(
+                    RiskReservation.status == ReservationStatus.UNKNOWN.value
+                )
+            )
+            is not None
+        ):
+            blockers.add("RISK_RESERVATION_UNKNOWN")
+        if (
+            session.scalar(
+                select(Campaign.campaign_id).where(Campaign.status == CampaignStatus.UNKNOWN.value)
+            )
+            is not None
+        ):
+            blockers.add("CAMPAIGN_UNKNOWN")
+        if (
+            session.scalar(
+                select(VenueOrder.venue_order_fact_id).where(
+                    VenueOrder.order_intent_id.is_(None),
+                    VenueOrder.status.in_(
+                        {
+                            VenueOrderStatus.SENT.value,
+                            VenueOrderStatus.PARTIALLY_FILLED.value,
+                            VenueOrderStatus.UNKNOWN.value,
+                        }
+                    ),
+                )
+            )
+            is not None
+        ):
+            blockers.add("UNBOUND_OPEN_ORDER")
+
+        max_age = timedelta(seconds=policy.max_fact_age_seconds)
+        for scope in required_scopes:
+            try:
+                environment = ExecutionEnvironment(str(scope["environment"]))
+                account_id = str(scope["account_id"])
+                venue = str(scope["venue"])
+            except (KeyError, ValueError):
+                blockers.add("CONTROL_SCOPE_INVALID")
+                continue
+            prefix = f"{environment.value}:{account_id}:{venue}"
+            equity = session.scalar(
+                select(AccountEquity).where(
+                    AccountEquity.environment == environment.value,
+                    AccountEquity.account_id == account_id,
+                    AccountEquity.venue == venue,
+                )
+            )
+            if equity is None:
+                blockers.add(f"ACCOUNT_EQUITY_MISSING:{prefix}")
+            elif equity.fact_status != FactStatus.KNOWN.value:
+                blockers.add(f"ACCOUNT_EQUITY_UNKNOWN:{prefix}")
+            elif self._fact_is_stale(equity.observed_at, now, max_age):
+                blockers.add(f"ACCOUNT_EQUITY_STALE:{prefix}")
+
+            positions = session.scalars(
+                select(Position).where(
+                    Position.environment == environment.value,
+                    Position.account_id == account_id,
+                    Position.venue == venue,
+                )
+            ).all()
+            if not positions:
+                blockers.add(f"POSITION_FACTS_MISSING:{prefix}")
+            for position in positions:
+                if position.fact_status != FactStatus.KNOWN.value:
+                    blockers.add(f"POSITION_UNKNOWN:{prefix}")
+                    continue
+                if self._fact_is_stale(position.observed_at, now, max_age):
+                    blockers.add(f"POSITION_STALE:{prefix}")
+                if position.quantity == 0:
+                    continue
+                protection = session.scalar(
+                    select(ProtectionOrder).where(
+                        ProtectionOrder.position_id == position.position_id
+                    )
+                )
+                if (
+                    protection is None
+                    or protection.status != ProtectionStatus.ACTIVE.value
+                    or not protection.fully_covered
+                    or protection.quantity < abs(position.quantity)
+                ):
+                    blockers.add(f"PROTECTION_INCOMPLETE:{prefix}")
+                elif self._fact_is_stale(protection.observed_at, now, max_age):
+                    blockers.add(f"PROTECTION_STALE:{prefix}")
+
+            execution_scope = _scope_key(environment.value, account_id, venue)
+            reconciliation = session.scalar(
+                select(ReconciliationRun)
+                .where(ReconciliationRun.execution_scope == execution_scope)
+                .order_by(ReconciliationRun.completed_at.desc())
+                .limit(1)
+            )
+            latest_source_at = max(
+                [
+                    policy.updated_at,
+                    *([equity.observed_at] if equity is not None else []),
+                    *(position.observed_at for position in positions),
+                ]
+            )
+            if (
+                reconciliation is None
+                or reconciliation.status != ReconciliationStatus.MATCH.value
+                or not reconciliation.is_computed
+            ):
+                blockers.add(f"COMPUTED_RECONCILIATION_MATCH_REQUIRED:{prefix}")
+            elif (
+                self._fact_is_stale(reconciliation.completed_at, now, max_age)
+                or reconciliation.completed_at < latest_source_at
+            ):
+                blockers.add(f"RECONCILIATION_STALE:{prefix}")
+        return sorted(blockers)
+
+    def risk_control_status(
+        self,
+        actor_id: UUID,
+        configured_scopes: tuple[tuple[str, str, str], ...],
+        *,
+        require_live_scope: bool = False,
+        now: datetime,
+    ) -> dict[str, Any]:
+        with self.database.session_factory() as session:
+            self._require_role(session, actor_id, "view")
+            policy = self._active_risk_policy(session)
+            gate = session.get(CapabilityGate, "AUTO_ADD")
+            if gate is None:
+                _reject("CAPABILITY_GATE_NOT_FOUND", "AUTO_ADD gate is missing")
+            campaigns = session.scalars(select(Campaign)).all()
+            scopes = self._canonical_restore_scopes(configured_scopes, list(campaigns))
+            blockers = self._risk_restore_blockers(
+                session,
+                policy,
+                scopes,
+                require_live_scope=require_live_scope,
+                now=now,
+            )
+            requests = session.scalars(
+                select(RiskControlChangeRequest)
+                .order_by(RiskControlChangeRequest.created_at.desc())
+                .limit(20)
+            ).all()
+            request_ids = [item.request_id for item in requests]
+            reviews = (
+                []
+                if not request_ids
+                else session.scalars(
+                    select(Approval)
+                    .where(Approval.risk_control_change_request_id.in_(request_ids))
+                    .order_by(Approval.created_at, Approval.approval_id)
+                ).all()
+            )
+            reviews_by_request: dict[UUID, list[dict[str, Any]]] = {}
+            for review in reviews:
+                if review.risk_control_change_request_id is None:
+                    continue
+                reviews_by_request.setdefault(review.risk_control_change_request_id, []).append(
+                    {
+                        "reviewer_id": str(review.reviewer_id),
+                        "decision": review.decision,
+                        "reason": review.reason,
+                        "created_at": review.created_at.isoformat(),
+                    }
+                )
+            return {
+                "policy": {
+                    "policy_id": str(policy.policy_id),
+                    "version": policy.version,
+                    "revision": policy.revision,
+                    "system_state": policy.system_state,
+                    "reason": policy.reason,
+                    "max_total_risk": str(policy.max_total_risk),
+                    "max_fact_age_seconds": policy.max_fact_age_seconds,
+                    "updated_by": policy.updated_by,
+                    "updated_at": policy.updated_at.isoformat(),
+                },
+                "auto_add_gate": {
+                    "status": gate.status,
+                    "version": gate.version,
+                    "reason": gate.reason,
+                    "operator_id": gate.operator_id,
+                    "updated_at": gate.updated_at.isoformat(),
+                },
+                "restore_conditions": {
+                    "ready": not blockers,
+                    "live_scope_required": require_live_scope,
+                    "blockers": blockers,
+                    "required_scopes": scopes,
+                    "cooldown_seconds": int(RISK_RESTORE_COOLDOWN.total_seconds()),
+                },
+                "requests": [
+                    {
+                        "request_id": str(item.request_id),
+                        "requester_id": str(item.requester_id),
+                        "status": item.status,
+                        "version": item.version,
+                        "reason": item.reason,
+                        "restore_auto_add": item.restore_auto_add,
+                        "require_live_scope": item.require_live_scope,
+                        "source_policy_id": str(item.source_policy_id),
+                        "source_policy_version": item.source_policy_version,
+                        "source_policy_revision": item.source_policy_revision,
+                        "source_auto_add_status": item.source_auto_add_status,
+                        "source_auto_add_version": item.source_auto_add_version,
+                        "required_scopes": item.required_scopes,
+                        "execute_after": item.execute_after.isoformat(),
+                        "expires_at": item.expires_at.isoformat(),
+                        "executed_at": (
+                            None if item.executed_at is None else item.executed_at.isoformat()
+                        ),
+                        "resulting_policy_id": (
+                            None
+                            if item.resulting_policy_id is None
+                            else str(item.resulting_policy_id)
+                        ),
+                        "reviews": reviews_by_request.get(item.request_id, []),
+                        "created_at": item.created_at.isoformat(),
+                        "updated_at": item.updated_at.isoformat(),
+                    }
+                    for item in requests
+                ],
+                "as_of": now.isoformat(),
+            }
+
+    def risk_control_change_version(self, request_id: UUID) -> int:
+        with self.database.session_factory() as session:
+            request = session.get(RiskControlChangeRequest, request_id)
+            if request is None:
+                _reject("RISK_RESTORE_NOT_FOUND", "restore request does not exist")
+            return request.version
+
+    def create_risk_control_change_request(
+        self,
+        actor_id: UUID,
+        idempotency_key: str,
+        *,
+        reason: str,
+        restore_auto_add: bool,
+        configured_scopes: tuple[tuple[str, str, str], ...],
+        require_live_scope: bool = False,
+        now: datetime,
+    ) -> UUID:
+        operation = "risk.restore.request"
+        payload = {
+            "reason": reason,
+            "restore_auto_add": restore_auto_add,
+            "configured_scopes": configured_scopes,
+            "require_live_scope": require_live_scope,
+        }
+        with self.database.session_factory.begin() as session:
+            self._require_role(session, actor_id, operation)
+            requester = session.get(User, actor_id)
+            if requester is None or requester.principal_type != PrincipalType.HUMAN.value:
+                _reject("SERVICE_REQUEST_FORBIDDEN", "risk restoration requires a human requester")
+            digest, response = self._idempotency(
+                session,
+                caller_id=str(actor_id),
+                operation=operation,
+                idempotency_key=idempotency_key,
+                payload=payload,
+            )
+            if response is not None:
+                return _as_uuid(str(response["request_id"]))
+            self._lock_risk_capacity(session)
+            policy = self._active_risk_policy(session)
+            gate = session.get(CapabilityGate, "AUTO_ADD", with_for_update=True)
+            if gate is None:
+                _reject("CAPABILITY_GATE_NOT_FOUND", "AUTO_ADD gate is missing")
+            if policy.system_state == SystemRiskState.KILL_SWITCH.value:
+                _reject(
+                    "KILL_SWITCH_MANUAL_RECOVERY_REQUIRED",
+                    "KILL_SWITCH cannot be resumed through the reviewed restore workflow",
+                )
+            if policy.system_state == SystemRiskState.NORMAL.value and (
+                not restore_auto_add or gate.status == CapabilityStatus.ENABLED.value
+            ):
+                _reject("RISK_CONTROL_ALREADY_NORMAL", "the requested controls are already open")
+            pending = session.scalar(
+                select(RiskControlChangeRequest.request_id).where(
+                    RiskControlChangeRequest.status.in_(
+                        {
+                            RiskPolicyChangeStatus.PENDING_REVIEW.value,
+                            RiskPolicyChangeStatus.APPROVED.value,
+                        }
+                    )
+                )
+            )
+            if pending is not None:
+                _reject("RISK_RESTORE_ALREADY_PENDING", "a reviewed restore is already active")
+            campaigns = list(session.scalars(select(Campaign)).all())
+            scopes = self._canonical_restore_scopes(configured_scopes, campaigns)
+            last_tighten_at = max(
+                policy.updated_at,
+                gate.updated_at if restore_auto_add else policy.updated_at,
+            )
+            request = RiskControlChangeRequest(
+                requester_id=actor_id,
+                status=RiskPolicyChangeStatus.PENDING_REVIEW.value,
+                version=1,
+                reason=reason,
+                restore_auto_add=restore_auto_add,
+                require_live_scope=require_live_scope,
+                source_policy_id=policy.policy_id,
+                source_policy_version=policy.version,
+                source_policy_revision=policy.revision,
+                source_auto_add_status=gate.status,
+                source_auto_add_version=gate.version,
+                required_scopes=scopes,
+                resulting_policy_id=None,
+                correlation_id=uuid4(),
+                execute_after=max(now, last_tighten_at + RISK_RESTORE_COOLDOWN),
+                expires_at=now + RISK_RESTORE_TTL,
+                executed_at=None,
+                created_at=now,
+                updated_at=now,
+            )
+            session.add(request)
+            session.flush()
+            result = {"request_id": str(request.request_id)}
+            self._save_receipt(
+                session,
+                caller_id=str(actor_id),
+                operation=operation,
+                idempotency_key=idempotency_key,
+                semantic_hash=digest,
+                response=result,
+                now=now,
+            )
+            self._audit(
+                session,
+                actor_id=str(actor_id),
+                event_type="RISK_RESTORE_REQUESTED",
+                object_type="RiskControlChangeRequest",
+                object_id=request.request_id,
+                reason=reason,
+                correlation_id=request.correlation_id,
+                object_version=request.version,
+                idempotency_key=idempotency_key,
+                now=now,
+            )
+            return request.request_id
+
+    def review_risk_control_change_request(
+        self,
+        request_id: UUID,
+        reviewer_id: UUID,
+        decision: ReviewDecision,
+        reason: str,
+        expected_version: int,
+        idempotency_key: str,
+        *,
+        now: datetime,
+    ) -> RiskPolicyChangeStatus:
+        operation = "risk.restore.review"
+        payload = {
+            "request_id": str(request_id),
+            "decision": decision.value,
+            "reason": reason,
+            "expected_version": expected_version,
+        }
+        expired = False
+        result_status: RiskPolicyChangeStatus | None = None
+        with self.database.session_factory.begin() as session:
+            request = session.get(RiskControlChangeRequest, request_id, with_for_update=True)
+            if request is None:
+                _reject("RISK_RESTORE_NOT_FOUND", "restore request does not exist")
+            self._require_role(session, reviewer_id, operation)
+            reviewer = session.get(User, reviewer_id)
+            if reviewer is None or reviewer.principal_type != PrincipalType.HUMAN.value:
+                _reject("SERVICE_REVIEW_FORBIDDEN", "risk restoration requires human reviewers")
+            digest, response = self._idempotency(
+                session,
+                caller_id=str(reviewer_id),
+                operation=operation,
+                idempotency_key=idempotency_key,
+                payload=payload,
+            )
+            if response is not None:
+                return RiskPolicyChangeStatus(str(response["status"]))
+            if request.version != expected_version:
+                _reject("VERSION_CONFLICT", "restore request changed before review")
+            if request.requester_id == reviewer_id:
+                _reject("SELF_REVIEW_FORBIDDEN", "requester cannot review their restore")
+            if request.expires_at <= now:
+                request.status = RiskPolicyChangeStatus.EXPIRED.value
+                request.version += 1
+                request.updated_at = now
+                expired = True
+            else:
+                if request.status != RiskPolicyChangeStatus.PENDING_REVIEW.value:
+                    _reject("RISK_RESTORE_NOT_REVIEWABLE", "restore request is not pending")
+                duplicate = session.scalar(
+                    select(Approval).where(
+                        Approval.risk_control_change_request_id == request_id,
+                        Approval.reviewer_id == reviewer_id,
+                    )
+                )
+                if duplicate is not None:
+                    _reject("REVIEW_ALREADY_RECORDED", "reviewer already voted")
+                session.add(
+                    Approval(
+                        proposal_id=None,
+                        transfer_proposal_id=None,
+                        risk_control_change_request_id=request_id,
+                        reviewer_id=reviewer_id,
+                        decision=decision.value,
+                        reason=reason,
+                        created_at=now,
+                    )
+                )
+                session.flush()
+                if decision is ReviewDecision.REJECT:
+                    request.status = RiskPolicyChangeStatus.REJECTED.value
+                else:
+                    approvals = session.scalar(
+                        select(func.count())
+                        .select_from(Approval)
+                        .where(
+                            Approval.risk_control_change_request_id == request_id,
+                            Approval.decision == ReviewDecision.APPROVE.value,
+                        )
+                    )
+                    if int(approvals or 0) >= 2:
+                        request.status = RiskPolicyChangeStatus.APPROVED.value
+                request.version += 1
+                request.updated_at = now
+                result_status = RiskPolicyChangeStatus(request.status)
+                response_value = {"status": request.status, "version": request.version}
+                self._save_receipt(
+                    session,
+                    caller_id=str(reviewer_id),
+                    operation=operation,
+                    idempotency_key=idempotency_key,
+                    semantic_hash=digest,
+                    response=response_value,
+                    now=now,
+                )
+                self._audit(
+                    session,
+                    actor_id=str(reviewer_id),
+                    event_type="RISK_RESTORE_REVIEWED",
+                    object_type="RiskControlChangeRequest",
+                    object_id=request.request_id,
+                    reason=f"{decision.value}: {reason}",
+                    correlation_id=request.correlation_id,
+                    object_version=request.version,
+                    idempotency_key=idempotency_key,
+                    now=now,
+                )
+        if expired:
+            _reject("RISK_RESTORE_EXPIRED", "restore request expired before review")
+        if result_status is None:
+            raise RuntimeError("risk restore review completed without a status")
+        return result_status
+
+    def execute_risk_control_change_request(
+        self,
+        request_id: UUID,
+        actor_id: UUID,
+        expected_version: int,
+        idempotency_key: str,
+        configured_scopes: tuple[tuple[str, str, str], ...],
+        *,
+        require_live_scope: bool = False,
+        now: datetime,
+    ) -> UUID:
+        operation = "risk.restore.execute"
+        payload = {
+            "request_id": str(request_id),
+            "expected_version": expected_version,
+            "configured_scopes": configured_scopes,
+            "require_live_scope": require_live_scope,
+        }
+        with self.database.session_factory.begin() as session:
+            request = session.get(RiskControlChangeRequest, request_id, with_for_update=True)
+            if request is None:
+                _reject("RISK_RESTORE_NOT_FOUND", "restore request does not exist")
+            self._require_role(session, actor_id, operation)
+            executor = session.get(User, actor_id)
+            if executor is None or executor.principal_type != PrincipalType.HUMAN.value:
+                _reject("SERVICE_EXECUTION_FORBIDDEN", "risk restoration requires a human executor")
+            digest, response = self._idempotency(
+                session,
+                caller_id=str(actor_id),
+                operation=operation,
+                idempotency_key=idempotency_key,
+                payload=payload,
+            )
+            if response is not None:
+                return _as_uuid(str(response["policy_id"]))
+            if request.version != expected_version:
+                _reject("VERSION_CONFLICT", "restore request changed before execution")
+            if request.status != RiskPolicyChangeStatus.APPROVED.value:
+                _reject("RISK_RESTORE_NOT_APPROVED", "two independent approvals are required")
+            if request.expires_at <= now:
+                _reject("RISK_RESTORE_EXPIRED", "restore request expired before execution")
+            if request.execute_after > now:
+                _reject("RISK_RESTORE_COOLDOWN", "restore cooldown has not completed")
+            approvals = session.scalars(
+                select(Approval).where(
+                    Approval.risk_control_change_request_id == request_id,
+                    Approval.decision == ReviewDecision.APPROVE.value,
+                )
+            ).all()
+            if len({approval.reviewer_id for approval in approvals}) < 2:
+                _reject("RISK_RESTORE_NOT_APPROVED", "two independent approvals are required")
+            self._lock_risk_capacity(session)
+            policy = self._active_risk_policy(session)
+            gate = session.get(CapabilityGate, "AUTO_ADD", with_for_update=True)
+            if gate is None:
+                _reject("CAPABILITY_GATE_NOT_FOUND", "AUTO_ADD gate is missing")
+            if (
+                policy.policy_id != request.source_policy_id
+                or policy.version != request.source_policy_version
+                or policy.revision != request.source_policy_revision
+                or gate.status != request.source_auto_add_status
+                or gate.version != request.source_auto_add_version
+            ):
+                _reject("RISK_RESTORE_CONTROL_DRIFT", "risk controls changed after the request")
+            campaigns = list(session.scalars(select(Campaign)).all())
+            current_scopes = self._canonical_restore_scopes(configured_scopes, campaigns)
+            if current_scopes != request.required_scopes:
+                _reject("RISK_RESTORE_SCOPE_DRIFT", "controlled scopes changed after the request")
+            if request.require_live_scope != require_live_scope:
+                _reject(
+                    "RISK_RESTORE_SCOPE_DRIFT",
+                    "LIVE scope requirement changed after the request",
+                )
+            blockers = self._risk_restore_blockers(
+                session,
+                policy,
+                request.required_scopes,
+                require_live_scope=request.require_live_scope,
+                now=now,
+            )
+            if blockers:
+                _reject("RISK_RESTORE_BLOCKED", ",".join(blockers))
+            policy.active = False
+            next_revision = policy.revision + 1
+            restored = RiskPolicy(
+                version=f"restore-{next_revision}-{request.request_id.hex[:12]}",
+                revision=next_revision,
+                system_state=SystemRiskState.NORMAL.value,
+                max_total_risk=policy.max_total_risk,
+                max_fact_age_seconds=policy.max_fact_age_seconds,
+                reason=request.reason,
+                active=True,
+                updated_by=str(actor_id),
+                updated_at=now,
+            )
+            session.add(restored)
+            session.flush()
+            if request.restore_auto_add:
+                gate.status = CapabilityStatus.ENABLED.value
+                gate.reason = request.reason
+                gate.operator_id = str(actor_id)
+                gate.version += 1
+                gate.updated_at = now
+            request.status = RiskPolicyChangeStatus.EXECUTED.value
+            request.resulting_policy_id = restored.policy_id
+            request.executed_at = now
+            request.updated_at = now
+            request.version += 1
+            result = {"policy_id": str(restored.policy_id), "request_id": str(request_id)}
+            self._save_receipt(
+                session,
+                caller_id=str(actor_id),
+                operation=operation,
+                idempotency_key=idempotency_key,
+                semantic_hash=digest,
+                response=result,
+                now=now,
+            )
+            self._audit(
+                session,
+                actor_id=str(actor_id),
+                event_type="RISK_RESTORE_EXECUTED",
+                object_type="RiskControlChangeRequest",
+                object_id=request.request_id,
+                reason=request.reason,
+                correlation_id=request.correlation_id,
+                object_version=request.version,
+                idempotency_key=idempotency_key,
+                now=now,
+            )
+            return restored.policy_id
 
     def record_scope_reconciliation(
         self,
@@ -8103,7 +8828,17 @@ class TradingService:
             gate = session.get(CapabilityGate, capability_key, with_for_update=True)
             if gate is None:
                 _reject("CAPABILITY_GATE_NOT_FOUND", "unknown capability")
+            if (
+                capability_key == "AUTO_ADD"
+                and status is CapabilityStatus.ENABLED
+                and gate.status != CapabilityStatus.ENABLED.value
+            ):
+                _reject(
+                    "REVIEWED_RESTORE_REQUIRED",
+                    "AUTO_ADD may only be enabled through reviewed restore",
+                )
             gate.status = status.value
             gate.reason = reason
             gate.operator_id = str(actor_id)
+            gate.version += 1
             gate.updated_at = now
