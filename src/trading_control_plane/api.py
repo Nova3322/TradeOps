@@ -169,6 +169,7 @@ def _domain_status(code: str) -> int:
         "PROPOSAL_NOT_DRAFT",
         "PROPOSAL_NOT_REVIEWABLE",
         "PROPOSAL_NOT_APPROVED",
+        "INITIAL_INTENT_ALREADY_EXISTS",
     }:
         return status.HTTP_409_CONFLICT
     if code in {

@@ -182,6 +182,8 @@ button:disabled { opacity: .52; cursor: not-allowed; }
 .workflow-stepper li.done > span { border-color: var(--accent); background: var(--accent); color: var(--panel); }
 .workflow-stepper li.current { background: color-mix(in srgb, var(--accent-2) 45%, transparent); }
 .workflow-stepper li.current > span { border-color: var(--accent); color: var(--accent); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 11%, transparent); }
+.workflow-stepper li.blocked { background: color-mix(in srgb, var(--danger) 7%, transparent); }
+.workflow-stepper li.blocked > span { border-color: color-mix(in srgb, var(--danger) 45%, var(--line)); color: var(--danger); }
 .proposal-detail-layout { display: grid; grid-template-columns: minmax(0, 1.55fr) minmax(300px, .75fr); gap: 16px; align-items: start; }
 .proposal-actions-column { position: sticky; top: 90px; }
 .card-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 14px; margin-bottom: 18px; }
@@ -224,13 +226,29 @@ button:disabled { opacity: .52; cursor: not-allowed; }
 .next-action > p:not(.eyebrow,.microcopy) { color: var(--muted); font-size: 12px; line-height: 1.6; }
 .review-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 13px; }
 .review-actions button, .wide-action { width: 100%; text-align: center; }
+.next-action .wide-action { display: block; margin-top: 14px; }
 .microcopy { margin: 12px 0 0; color: var(--muted); font-size: 10px; line-height: 1.5; }
 .reason-list { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 14px; }
 .reason-list span { padding: 5px 8px; border-radius: 7px; background: var(--bg); color: var(--muted); font-size: 10px; }
+.risk-outcome-copy { margin-bottom: 18px; color: var(--ink); line-height: 1.6; }
+.risk-decision-grid, .authorization-grid { padding: 15px; border-radius: 11px; background: var(--bg); }
+.risk-fact-strip { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 7px; margin-top: 13px; }
+.risk-fact-strip span { min-width: 0; padding: 8px; border: 1px solid var(--line); border-radius: 8px; color: var(--muted); font-size: 10px; }
+.risk-fact-strip b { display: block; margin-top: 3px; overflow-wrap: anywhere; color: var(--ink); font-size: 11px; }
+.risk-guidance-list { display: grid; gap: 8px; margin-top: 13px; }
+.risk-guidance-list > div { position: relative; display: grid; gap: 4px; padding: 11px 76px 11px 12px; border-radius: 9px; background: color-mix(in srgb, var(--danger) 7%, var(--panel)); }
+.risk-guidance-list b { font-size: 12px; }
+.risk-guidance-list span { color: var(--muted); font-size: 10px; line-height: 1.45; }
+.risk-guidance-list code { position: absolute; top: 11px; right: 10px; color: var(--danger); font-size: 9px; }
+.entry-boundary { display: grid; gap: 6px; margin-top: 13px; padding: 13px; border-radius: 10px; background: var(--accent-2); }
+.entry-boundary b { color: var(--accent); font-size: 12px; }
+.entry-boundary span { color: var(--muted); font-size: 10px; }
+.entry-boundary a { color: var(--accent); font-size: 11px; font-weight: 800; }
 .direction-long { color: #087d65; }
 .direction-short { color: var(--danger); }
 .status-PENDING_REVIEW { color: var(--warning); }
 .status-APPROVED, .status-ALLOW { color: #16805e; }
+.status-SCALE { color: var(--warning); }
 .status-REJECTED, .status-DENY { color: var(--danger); }
 .table-wrap { overflow: auto; background: var(--panel); border: 1px solid var(--line); border-radius: 15px; scrollbar-gutter: stable; }
 table { width: 100%; border-collapse: collapse; min-width: 760px; }
@@ -379,6 +397,9 @@ dialog::backdrop { background: rgba(4, 12, 10, .56); backdrop-filter: blur(3px);
   .proposal-list-tools label:first-child, .proposal-list-tools > span { grid-column: auto; }
   .source-facts.manual-source { grid-template-columns: 1fr; }
   .review-actions { grid-template-columns: 1fr; }
+  .risk-fact-strip { grid-template-columns: 1fr 1fr; }
+  .risk-guidance-list > div { padding-right: 12px; }
+  .risk-guidance-list code { position: static; }
 }
 
 @media (prefers-reduced-motion: reduce) {

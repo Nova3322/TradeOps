@@ -273,8 +273,36 @@ class TradingQueries:
                 .limit(1)
             )
             authorization = session.scalar(
-                select(TradingAuthorization).where(TradingAuthorization.proposal_id == proposal_id)
+                select(TradingAuthorization)
+                .where(TradingAuthorization.proposal_id == proposal_id)
+                .order_by(TradingAuthorization.created_at.desc())
+                .limit(1)
             )
+            campaign = session.scalar(
+                select(Campaign)
+                .where(Campaign.proposal_id == proposal_id)
+                .order_by(Campaign.created_at.desc())
+                .limit(1)
+            )
+            initial_intent = (
+                None
+                if campaign is None
+                else session.scalar(
+                    select(OrderIntent)
+                    .where(
+                        OrderIntent.campaign_id == campaign.campaign_id,
+                        OrderIntent.kind == "INITIAL",
+                    )
+                    .order_by(OrderIntent.created_at.desc())
+                    .limit(1)
+                )
+            )
+            risk_inputs = risk.input_data if risk is not None else {}
+            risk_policy = risk_inputs.get("policy", {})
+            risk_position = risk_inputs.get("position")
+            risk_equity = risk_inputs.get("equity")
+            risk_capital = risk_inputs.get("managed_capital", {})
+            risk_protection = risk_inputs.get("protection")
             result = self._proposal_summary(
                 proposal, session.get(Instrument, proposal.instrument_id)
             )
@@ -303,19 +331,75 @@ class TradingQueries:
                         "risk_amount": str(risk.risk_amount),
                         "reasons": risk.reasons,
                         "data_as_of": _iso(risk.data_as_of),
+                        "created_at": _iso(risk.created_at),
+                        "context": {
+                            "requested_quantity": risk_inputs.get("requested_quantity"),
+                            "requested_risk": risk_inputs.get("requested_risk"),
+                            "current_risk": risk_inputs.get("current_risk"),
+                            "system_state": risk_policy.get("system_state"),
+                            "max_total_risk": risk_policy.get("max_total_risk"),
+                            "effective_max_total_risk": risk_capital.get(
+                                "effective_max_total_risk"
+                            ),
+                            "fact_age_seconds": risk_inputs.get("fact_age_seconds"),
+                            "max_fact_age_seconds": risk_policy.get("max_fact_age_seconds"),
+                            "position_status": (
+                                "MISSING"
+                                if not isinstance(risk_position, dict)
+                                else risk_position.get("fact_status")
+                            ),
+                            "equity_status": (
+                                "MISSING"
+                                if not isinstance(risk_equity, dict)
+                                else risk_equity.get("fact_status")
+                            ),
+                            "managed_capital_known": risk_capital.get("known"),
+                            "protection_required": risk_inputs.get("protection_required"),
+                            "protection_status": (
+                                "NOT_REQUIRED"
+                                if not risk_inputs.get("protection_required")
+                                else (
+                                    "MISSING"
+                                    if not isinstance(risk_protection, dict)
+                                    else risk_protection.get("status")
+                                )
+                            ),
+                            "protection_fully_covered": (
+                                None
+                                if not isinstance(risk_protection, dict)
+                                else risk_protection.get("fully_covered")
+                            ),
+                        },
                     },
                     "authorization": None
                     if authorization is None
                     else {
                         "authorization_id": str(authorization.authorization_id),
                         "environment": authorization.environment,
+                        "created_at": _iso(authorization.created_at),
                         "quantity_limit": str(authorization.quantity_limit),
+                        "used_quantity": str(authorization.used_quantity),
+                        "remaining_quantity": str(
+                            max(
+                                Decimal(0),
+                                authorization.quantity_limit - authorization.used_quantity,
+                            )
+                        ),
                         "risk_limit": str(authorization.risk_limit),
                         "allowed_adds": authorization.allowed_adds,
                         "used_adds": authorization.used_adds,
                         "add_revoked_at": _iso(authorization.add_revoked_at),
                         "active": authorization.active,
                         "expires_at": _iso(authorization.expires_at),
+                    },
+                    "initial_entry": None
+                    if campaign is None or initial_intent is None
+                    else {
+                        "campaign_id": str(campaign.campaign_id),
+                        "campaign_status": campaign.status,
+                        "intent_id": str(initial_intent.intent_id),
+                        "intent_status": initial_intent.status,
+                        "created_at": _iso(initial_intent.created_at),
                     },
                 }
             )

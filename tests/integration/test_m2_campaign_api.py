@@ -179,6 +179,15 @@ async def run_shadow_campaign_flow(database: Database, telegram: MockTelegramGat
         assert duplicate.json()["intent_id"] == created.json()["intent_id"]
         campaign_id = created.json()["campaign_id"]
         opening_intent = created.json()["intent_id"]
+        proposal_detail = await client.get(f"/api/proposals/{ids['proposal']}")
+        assert proposal_detail.status_code == 200, proposal_detail.text
+        entry = proposal_detail.json()["initial_entry"]
+        assert entry["campaign_id"] == campaign_id
+        assert entry["campaign_status"] == "OPENING"
+        assert entry["intent_id"] == opening_intent
+        assert entry["intent_status"] == "READY"
+        assert entry["created_at"] is not None
+        assert Decimal(proposal_detail.json()["authorization"]["remaining_quantity"]) == 0
 
         lease = await client.post(
             "/api/sender-leases",

@@ -572,6 +572,51 @@ def test_order_reservation_intent_and_receipt_are_atomic_and_idempotent(
         assert session.scalar(select(func.count()).select_from(OrderIntent)) == 1
 
 
+def test_cancelled_initial_intent_cannot_be_recreated_with_a_new_key(
+    database: Database, service: TradingService
+) -> None:
+    ids = seed(service)
+    proposal_id = create_approved_proposal(service, ids)
+    authorization_id = issue_authorization(service, ids, proposal_id)
+    created = service.create_order_intent(
+        authorization_id,
+        ids["operator"],
+        IntentKind.INITIAL,
+        "acct-1",
+        "BINANCE",
+        ids["instrument"],
+        Direction.LONG,
+        Decimal("0.5"),
+        "one-time-initial",
+        now=NOW,
+    )
+    service.release_unfilled_intent(
+        created.intent_id,
+        ids["operator"],
+        OrderIntentStatus.CANCELLED,
+        "venue confirmed no fill",
+        now=NOW,
+    )
+
+    with pytest.raises(DomainRejected, match="INITIAL_INTENT_ALREADY_EXISTS"):
+        service.create_order_intent(
+            authorization_id,
+            ids["operator"],
+            IntentKind.INITIAL,
+            "acct-1",
+            "BINANCE",
+            ids["instrument"],
+            Direction.LONG,
+            Decimal("0.5"),
+            "second-initial-must-fail",
+            now=NOW,
+        )
+
+    with database.session_factory() as session:
+        assert session.scalar(select(func.count()).select_from(Campaign)) == 1
+        assert session.scalar(select(func.count()).select_from(OrderIntent)) == 1
+
+
 def test_unknown_intent_keeps_risk_and_cannot_be_recreated(
     database: Database, service: TradingService
 ) -> None:

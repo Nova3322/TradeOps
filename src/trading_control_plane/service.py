@@ -1729,6 +1729,21 @@ class TradingService:
                 or authorization.risk_limit > proposal.max_risk
             ):
                 _reject("AUTHORIZATION_SCOPE_MISMATCH", "authorization exceeds proposal caps")
+            if kind is IntentKind.INITIAL:
+                existing_initial = session.scalar(
+                    select(OrderIntent.intent_id)
+                    .join(Campaign, Campaign.campaign_id == OrderIntent.campaign_id)
+                    .where(
+                        Campaign.proposal_id == proposal.proposal_id,
+                        OrderIntent.kind == IntentKind.INITIAL.value,
+                    )
+                    .limit(1)
+                )
+                if existing_initial is not None:
+                    _reject(
+                        "INITIAL_INTENT_ALREADY_EXISTS",
+                        "this frozen proposal already produced its one initial intent",
+                    )
 
             occupied_risk = self._occupied_risk(session)
             risk_amount = authorization.risk_limit * quantity / authorization.quantity_limit

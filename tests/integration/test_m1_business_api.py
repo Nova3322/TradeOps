@@ -504,7 +504,14 @@ def test_perptape_to_review_to_risk_and_authorization_api_flow(
                 json={"idempotency_key": "api-risk-1"},
             )
             assert risk.status_code == 200, risk.text
-            assert risk.json()["detail"]["risk_decision"]["result"] == "ALLOW"
+            risk_detail = risk.json()["detail"]["risk_decision"]
+            assert risk_detail["result"] == "ALLOW"
+            assert risk_detail["created_at"] is not None
+            assert Decimal(risk_detail["context"]["requested_quantity"]) == 1
+            assert risk_detail["context"]["position_status"] == "KNOWN"
+            assert risk_detail["context"]["equity_status"] == "KNOWN"
+            assert risk_detail["context"]["managed_capital_known"] is True
+            assert risk_detail["context"]["protection_status"] == "NOT_REQUIRED"
             authorization = await client.post(
                 f"/api/proposals/{proposal_id}/authorizations",
                 json={
@@ -516,6 +523,10 @@ def test_perptape_to_review_to_risk_and_authorization_api_flow(
             assert authorization.status_code == 200, authorization.text
             detail = authorization.json()["detail"]
             assert detail["authorization"]["allowed_adds"] == 0
+            assert Decimal(detail["authorization"]["used_quantity"]) == 0
+            assert Decimal(detail["authorization"]["remaining_quantity"]) == 1
+            assert detail["authorization"]["created_at"] is not None
+            assert detail["initial_entry"] is None
             return proposal_id
 
     proposal_id = asyncio.run(scenario())

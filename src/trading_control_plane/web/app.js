@@ -24,10 +24,44 @@ const fmtDate = (value) => value ? new Intl.DateTimeFormat('zh-CN', {month:'shor
 const fmtNumber = (value) => value === null || value === undefined ? '—' : new Intl.NumberFormat('en-US', {maximumFractionDigits: 6}).format(Number(value));
 const fmtCompact = (value) => value === null || value === undefined ? '暂无数据' : new Intl.NumberFormat('zh-CN', {notation:'compact', maximumFractionDigits:1}).format(Number(value));
 const fmtAmount = (value, currency) => value === null || value === undefined ? '—' : `${fmtNumber(value)}${currency ? ` ${currency}` : ''}`;
-const statusLabels = {DRAFT:'草稿',PENDING_REVIEW:'待审核',APPROVED:'已批准',REJECTED:'已拒绝',EXPIRED:'已过期',ALLOW:'通过',DENY:'拒绝'};
+const statusLabels = {DRAFT:'草稿',PENDING_REVIEW:'待审核',APPROVED:'已批准',REJECTED:'已拒绝',EXPIRED:'已过期',ALLOW:'通过',SCALE:'缩小仓位',DENY:'拒绝',READY:'待发送',SENT:'已发送',PARTIALLY_FILLED:'部分成交',FILLED:'已成交',CANCELLED:'已取消',UNKNOWN:'结果未知',OPENING:'建仓中'};
 const riskLabels = {LOW:'低风险',MEDIUM:'中风险',HIGH:'高风险'};
+const riskReasonGuidance = {
+  INVALID_INPUT:{label:'风险输入无效',action:'检查计划数量、最大风险和风险政策后重新运行。'},
+  STALE_FACTS:{label:'账户事实已经过期',action:'刷新交易所仓位、权益和受管资金事实后重新检查。'},
+  POSITION_UNKNOWN:{label:'仓位状态未知',action:'完成该账户与标的的仓位同步和对账后重新检查。'},
+  EQUITY_UNKNOWN:{label:'资金权益未知',action:'刷新交易所权益和受管资金事实后重新检查。'},
+  PROTECTION_UNKNOWN:{label:'现有仓位保护不足',action:'确认保护单有效且足额覆盖后重新检查。'},
+  KILL_SWITCH:{label:'系统处于紧急停止',action:'当前只能对账、减仓或退出；排障后通过受控流程恢复。'},
+  REDUCE_ONLY:{label:'系统仅允许降低风险',action:'当前只能对账、减仓或退出；恢复新增风险需要受控审核。'},
+  PYRAMID_DISABLED:{label:'自动加仓已关闭',action:'初仓不受影响；加仓需要新的受控授权。'},
+  RISK_CAPACITY_EXHAUSTED:{label:'总风险容量已经用完',action:'等待其他风险释放，或由受控流程调整风险政策。'},
+  RISK_CAPACITY_SCALED:{label:'系统缩小了可用仓位',action:'授权只会采用系统批准后的较小数量和风险金额。'},
+};
+const actionErrorGuidance = {
+  INITIAL_INTENT_ALREADY_EXISTS:'这个冻结提案已经创建过初仓意图。请进入原 Campaign 继续处理，不能重复开仓。',
+  ACTIVE_ORDER_INTENT:'当前 Campaign 还有未完成意图。请先确认原意图结果，不要重复提交。',
+  AUTHORIZATION_EXPIRED:'短期授权已经过期。请重新运行风险检查，再签发新授权。',
+  AUTHORIZATION_INACTIVE:'短期授权已失效，不能继续新增风险。',
+  AUTHORIZATION_RISK_STATE_INVALID:'系统当前不允许新增风险；只能对账、减仓或退出。',
+  RISK_DECISION_CONTROL_CHANGED:'风险政策已变化。请重新运行风险检查。',
+  PROPOSAL_EXPIRED:'提案已经过期，需要按当前事实创建新提案。',
+};
 const fmtStatus = (value) => statusLabels[value] || value || '未知';
 const fmtRisk = (value) => riskLabels[value] || value || '未知';
+const riskGuidance = (reason) => riskReasonGuidance[reason] || {label:'风险检查未通过',action:'查看当前风险事实，处理阻塞后重新检查。'};
+const friendlyApiError = (error) => {
+  const risk = riskReasonGuidance[error?.code] || riskReasonGuidance[error?.message];
+  if (risk) return `${risk.label}：${risk.action}`;
+  return actionErrorGuidance[error?.code] || error?.message || '请求失败';
+};
+const fmtSeconds = (value) => {
+  const seconds = Number(value);
+  if (!Number.isFinite(seconds) || seconds < 0) return '—';
+  if (seconds < 60) return `${Math.round(seconds)} 秒`;
+  return `${Math.round(seconds / 60)} 分钟`;
+};
+const factStatusLabel = (value) => ({KNOWN:'已确认',ACTIVE:'有效',NOT_REQUIRED:'不需要',MISSING:'缺失',UNKNOWN:'未知'}[value] || value || '未知');
 const percentageDistance = (from, to) => {
   const base = Number(from); const target = Number(to);
   if (!base || !target) return '—';
@@ -142,7 +176,7 @@ function handleUnauthorizedResponse() {
 
 function showApiError(error, target = null) {
   if (error?.handled) return;
-  const message = `${error?.code || 'UNKNOWN'}: ${error?.message || '请求失败'}`;
+  const message = `${friendlyApiError(error)}（${error?.code || 'UNKNOWN'}）`;
   if (target) target.textContent = message;
   else showToast(message, 'error');
 }
@@ -573,8 +607,17 @@ async function renderProposalDetail(id) {
   const notional = triggerPrice ? Number(triggerPrice) * Number(item.quantity) : null;
   const reviewDone = !['DRAFT','PENDING_REVIEW'].includes(item.status);
   const riskDone = Boolean(item.risk_decision);
+  const riskDenied = item.risk_decision?.result === 'DENY';
+  const riskReason = item.risk_decision?.reasons?.[0];
+  const riskHelp = riskGuidance(riskReason);
+  const riskContext = item.risk_decision?.context || {};
   const authorizationDone = Boolean(item.authorization);
-  const terminal = ['REJECTED','EXPIRED'].includes(item.status) || item.risk_decision?.result === 'DENY';
+  const authorizationUsable = Boolean(item.authorization?.active && new Date(item.authorization.expires_at).getTime() > Date.now());
+  const riskAfterAuthorization = Boolean(item.risk_decision?.created_at && item.authorization?.created_at && new Date(item.risk_decision.created_at) > new Date(item.authorization.created_at));
+  const initialEntry = item.initial_entry;
+  const needsFreshRisk = Boolean(authorizationDone && !authorizationUsable && !initialEntry && !riskAfterAuthorization);
+  const needsAuthorization = Boolean(riskDone && !riskDenied && !initialEntry && (!authorizationDone || (!authorizationUsable && riskAfterAuthorization)));
+  const terminal = ['REJECTED','EXPIRED'].includes(item.status);
   const rationale = details.rationale || candidate.rationale || '未提供补充理由';
   const sourceLink = item.source_link || candidate.detail_url;
   const chartLink = candidate.chart_url;
@@ -588,29 +631,67 @@ async function renderProposalDetail(id) {
       ? canReview
         ? {title:'需要你的独立判断', copy:`核对方向、触发价、失效位置和最大风险。${highRiskReviewCopy}`, tone:'attention'}
         : {title:'等待独立审核', copy:item.proposer_id === session.user_id ? '你是提案创建者，不能审核自己的提案。' : '当前角色没有审核权限。', tone:'neutral'}
-      : item.status === 'APPROVED' && !riskDone
-        ? {title:'下一步：运行风险检查', copy:'审核已完成，Operator 需要基于最新账户事实运行确定性风控。', tone:'attention'}
-        : riskDone && item.risk_decision.result !== 'DENY' && !authorizationDone
+      : initialEntry
+        ? {title:'初仓意图已经创建', copy:'该冻结提案不能再创建第二个初仓意图；后续执行、保护和异常处理统一进入 Campaign。', tone:'success'}
+        : item.status === 'APPROVED' && (!riskDone || riskDenied)
+          ? riskDenied
+            ? {title:riskHelp.label, copy:riskHelp.action, tone:'danger'}
+            : {title:'下一步：运行风险检查', copy:'审核已完成，Operator 需要基于最新账户事实运行确定性风控。', tone:'attention'}
+        : needsFreshRisk
+          ? {title:'短期授权已经失效', copy:'重新读取当前账户事实并运行风险检查；通过后才能签发新的短期授权。', tone:'danger'}
+        : needsAuthorization
           ? {title:'下一步：签发短期授权', copy:'风险检查已通过，可签发限时、限数量、限风险的交易授权。', tone:'attention'}
-          : authorizationDone && item.authorization.active
+          : authorizationUsable
             ? {title:'已准备创建初仓意图', copy:'授权仍在有效期内；创建后只记录 SHADOW 风险预留与意图。', tone:'success'}
             : {title:'当前没有待办动作', copy:'请核对授权有效期和当前状态。', tone:'neutral'};
+  const canRunRisk = item.status === 'APPROVED' && canOperate && (!riskDone || riskDenied || needsFreshRisk);
+  const executionAction = initialEntry
+    ? `<a class="primary wide-action" href="/campaigns/${initialEntry.campaign_id}" data-link>进入 Campaign</a><p class="microcopy">初仓意图 ${shortId(initialEntry.intent_id)} · ${escapeHtml(fmtStatus(initialEntry.intent_status))}</p>`
+    : canRunRisk
+      ? `<button class="primary wide-action" data-risk>${riskDenied ? '处理后重新检查' : needsFreshRisk ? '重新检查当前风险' : '运行风险检查'}</button>`
+      : needsAuthorization && canOperate
+        ? '<button class="primary wide-action" data-authorize>签发 30 分钟授权</button>'
+        : authorizationUsable && canOperate
+          ? '<button class="primary wide-action" data-initial>创建一次性 SHADOW 初仓意图</button>'
+          : '';
+  const riskOutcomeCopy = !riskDone
+    ? ''
+    : item.risk_decision.result === 'ALLOW'
+      ? `当前事实允许计划数量 ${fmtNumber(item.risk_decision.approved_quantity)}，最多占用 ${fmtAmount(item.risk_decision.risk_amount, item.collateral_currency)} 风险。`
+      : item.risk_decision.result === 'SCALE'
+        ? `系统把请求数量 ${fmtNumber(riskContext.requested_quantity)} 缩小为 ${fmtNumber(item.risk_decision.approved_quantity)}；授权不能超过缩小后的边界。`
+        : `${riskHelp.label}。${riskHelp.action}`;
+  const riskCapacityCopy = riskContext.managed_capital_known
+    ? `${fmtAmount(riskContext.current_risk, item.collateral_currency)} / ${fmtAmount(riskContext.effective_max_total_risk || riskContext.max_total_risk, item.collateral_currency)}`
+    : `${fmtAmount(riskContext.current_risk, item.collateral_currency)} / 受管资金未确认`;
+  const riskReasons = !riskDone
+    ? ''
+    : item.risk_decision.reasons.length
+      ? `<div class="risk-guidance-list">${item.risk_decision.reasons.map(reason => { const guidance = riskGuidance(reason); return `<div><b>${escapeHtml(guidance.label)}</b><span>${escapeHtml(guidance.action)}</span><code>${escapeHtml(reason)}</code></div>`; }).join('')}</div>`
+      : '<p class="success-note">仓位、权益、受管资金、系统状态和总风险容量均通过。</p>';
+  const riskDecisionPanel = riskDone
+    ? `<p class="risk-outcome-copy">${escapeHtml(riskOutcomeCopy)}</p><dl class="definition-grid risk-decision-grid">${definition('请求数量', fmtNumber(riskContext.requested_quantity))}${definition('系统批准数量', fmtNumber(item.risk_decision.approved_quantity))}${definition('本次风险占用', fmtAmount(item.risk_decision.risk_amount, item.collateral_currency))}${definition('组合风险容量', riskCapacityCopy)}${definition('事实年龄', `${fmtSeconds(riskContext.fact_age_seconds)} / 上限 ${fmtSeconds(riskContext.max_fact_age_seconds)}`)}${definition('数据截止', fmtDate(item.risk_decision.data_as_of))}</dl><div class="risk-fact-strip"><span>仓位 <b>${escapeHtml(factStatusLabel(riskContext.position_status))}</b></span><span>权益 <b>${escapeHtml(factStatusLabel(riskContext.equity_status))}</b></span><span>受管资金 <b>${riskContext.managed_capital_known ? '已确认' : '缺失'}</b></span><span>保护 <b>${escapeHtml(factStatusLabel(riskContext.protection_status))}</b></span></div>${riskReasons}`
+    : '<div class="empty-inline"><b>等待审核通过</b><span>风险检查会读取服务端最新仓位、权益、受管资金、保护和总风险容量。</span></div>';
+  const authorizationState = !authorizationDone ? '未签发' : authorizationUsable ? '有效' : item.authorization.active ? '已过期' : '已撤销';
+  const authorizationPanel = authorizationDone
+    ? `<dl class="definition-grid authorization-grid">${definition('批准数量', fmtNumber(item.authorization.quantity_limit))}${definition('已使用', fmtNumber(item.authorization.used_quantity))}${definition('剩余数量', fmtNumber(item.authorization.remaining_quantity))}${definition('风险上限', fmtAmount(item.authorization.risk_limit, item.collateral_currency))}${definition('AddUnit', `${item.authorization.used_adds} / ${item.authorization.allowed_adds}`)}${definition('到期', fmtDate(item.authorization.expires_at))}</dl>${initialEntry ? `<div class="entry-boundary"><b>一次性初仓已消费</b><span>意图 ${shortId(initialEntry.intent_id)} · ${escapeHtml(fmtStatus(initialEntry.intent_status))}</span><a href="/campaigns/${initialEntry.campaign_id}" data-link>查看 Campaign →</a></div>` : '<p class="microcopy">授权仍不是订单；创建初仓意图时还会再次读取事实并原子预留风险。</p>'}`
+    : '<div class="empty-inline"><b>风险通过后可签发</b><span>授权同时限制有效期、数量、风险金额、作用域和 AddUnit。</span></div>';
   main.innerHTML = `<section class="page proposal-detail"><header class="page-head"><div><p class="eyebrow">${escapeHtml(item.environment)} · ${escapeHtml(item.source === 'SYSTEM' ? 'PERPTAPE SYSTEM' : 'MANUAL')}</p><div class="proposal-title-row"><h1>${escapeHtml(item.symbol || candidate.symbol || '交易提案')}</h1><span class="direction-pill ${item.direction === 'LONG' ? 'direction-long' : 'direction-short'}">${escapeHtml(item.direction)}</span><span class="status-pill status-${escapeHtml(item.status)}">${escapeHtml(fmtStatus(item.status))}</span></div><p class="lede">${escapeHtml(item.venue)} · ${escapeHtml(item.account_id)} · 提案 ${shortId(item.proposal_id)} · v${item.version}</p></div><div class="toolbar"><a class="secondary" href="/reviews" data-link>返回审核队列</a>${sourceLink ? `<a class="secondary" href="${escapeHtml(sourceLink)}" target="_blank" rel="noreferrer">Perptape 榜单 ↗</a>` : ''}${chartLink ? `<a class="secondary" href="${escapeHtml(chartLink)}" target="_blank" rel="noreferrer">交易所图表 ↗</a>` : ''}</div></header>
-    <ol class="workflow-stepper" aria-label="提案流程"><li class="done"><span>1</span><div><b>提案已冻结</b><small>${fmtDate(item.frozen_at)}</small></div></li><li class="${reviewDone ? 'done' : 'current'}"><span>2</span><div><b>独立审核</b><small>${reviewDone ? fmtStatus(item.status) : '等待判断'}</small></div></li><li class="${riskDone ? 'done' : reviewDone && !terminal ? 'current' : ''}"><span>3</span><div><b>风险检查</b><small>${riskDone ? fmtStatus(item.risk_decision.result) : '尚未运行'}</small></div></li><li class="${authorizationDone ? 'done' : riskDone && !terminal ? 'current' : ''}"><span>4</span><div><b>短期授权</b><small>${authorizationDone ? (item.authorization.active ? '有效' : '已失效') : '尚未签发'}</small></div></li></ol>
+    <ol class="workflow-stepper" aria-label="提案流程"><li class="done"><span>1</span><div><b>提案已冻结</b><small>${fmtDate(item.frozen_at)}</small></div></li><li class="${reviewDone ? 'done' : 'current'}"><span>2</span><div><b>独立审核</b><small>${reviewDone ? fmtStatus(item.status) : '等待判断'}</small></div></li><li class="${riskDenied ? 'blocked' : riskDone ? 'done' : reviewDone && !terminal ? 'current' : ''}"><span>3</span><div><b>风险检查</b><small>${riskDone ? fmtStatus(item.risk_decision.result) : '尚未运行'}</small></div></li><li class="${initialEntry || authorizationUsable ? 'done' : needsAuthorization ? 'current' : ''}"><span>4</span><div><b>短期授权</b><small>${initialEntry ? '已生成初仓意图' : authorizationDone ? (authorizationUsable ? '有效' : '已失效') : '尚未签发'}</small></div></li></ol>
     <div class="proposal-detail-layout"><div class="stack">
       <article class="card decision-brief"><div class="card-heading"><div><p class="eyebrow">DECISION BRIEF</p><h2>这笔交易要做什么</h2></div><span class="risk-badge risk-${escapeHtml(item.risk_tier)}">${escapeHtml(fmtRisk(item.risk_tier))}</span></div><p class="proposal-rationale">${escapeHtml(rationale)}</p><div class="decision-metrics"><div><small>计划数量</small><b>${fmtNumber(item.quantity)}</b><span>初仓 ${fmtNumber(details.initial_quantity || item.quantity)}</span></div><div><small>估算名义价值</small><b>${notional === null ? '—' : escapeHtml(fmtAmount(notional, item.quote_currency))}</b><span>触发价 ${fmtNumber(triggerPrice)}</span></div><div><small>最大风险</small><b>${escapeHtml(fmtAmount(item.max_risk, item.collateral_currency))}</b><span>${fmtRisk(item.risk_tier)}</span></div><div><small>失效位置</small><b>${fmtNumber(invalidationPrice)}</b><span>距触发 ${percentageDistance(triggerPrice, invalidationPrice)}</span></div></div>${sourceFacts}</article>
       <article class="card frozen-scope"><div class="card-heading"><div><p class="eyebrow">FROZEN SCOPE</p><h2>冻结范围</h2></div><span class="status-pill">不可编辑</span></div><dl class="definition-grid spacious">${definition('账户', item.account_id)}${definition('交易场所', item.venue)}${definition('方向', item.direction)}${definition('风险档位', fmtRisk(item.risk_tier))}${definition('限价', fmtNumber(details.limit_price))}${definition('有效至', fmtDate(item.expires_at))}${definition('AUTO_ADD', details.allow_auto_add ? `允许 · ${details.requested_adds} Unit` : '关闭')}${definition('Add 触发价', fmtNumber(details.add_trigger_price))}${definition('来源候选', item.source_candidate_id || '人工创建')}${definition('来源观测', fmtDate(item.source_observed_at))}</dl><details class="technical-details"><summary>查看技术载荷与语义哈希</summary><pre>${escapeHtml(JSON.stringify(item.frozen_payload, null, 2))}</pre><p class="subtle">Semantic hash · ${escapeHtml(item.semantic_hash)}</p></details></article>
       <article class="card review-trail"><div class="card-heading"><div><p class="eyebrow">REVIEW TRAIL</p><h2>审核记录</h2></div><span class="subtle">${item.approvals.length} 条记录</span></div>${item.approvals.length ? `<div class="review-timeline">${item.approvals.map(a => `<div class="review-event"><span class="${a.decision === 'APPROVE' ? 'approve-dot' : 'reject-dot'}"></span><div><b>${a.decision === 'APPROVE' ? '批准提案' : '拒绝提案'}</b><p>${escapeHtml(a.reason)}</p><small>${shortId(a.reviewer_id)} · ${fmtDate(a.created_at)}</small></div></div>`).join('')}</div>` : '<div class="empty-inline"><b>尚无审核记录</b><span>Reviewer 的独立判断会按时间出现在这里。</span></div>'}</article>
     </div><aside class="stack proposal-actions-column">
-      <article class="card next-action tone-${nextAction.tone}"><p class="eyebrow">NEXT ACTION</p><h2>${escapeHtml(nextAction.title)}</h2><p>${escapeHtml(nextAction.copy)}</p>${item.status === 'PENDING_REVIEW' && canReview ? `<label>审核意见<span class="field-help">说明你核对了什么，以及判断依据</span><textarea id="review-reason" rows="4">已核对交易逻辑、冻结参数与最大风险边界</textarea></label><div class="review-actions"><button class="primary" data-approve>批准提案</button><button class="danger" data-reject>拒绝提案</button></div><p class="microcopy">批准会触发对象版本绑定的短时 step-up；不会直接下单。</p><div class="form-error" id="review-error"></div>` : ''}${item.status === 'APPROVED' && canOperate && !item.risk_decision ? '<button class="primary wide-action" data-risk>运行风险检查</button>' : ''}${item.risk_decision && item.risk_decision.result !== 'DENY' && canOperate && !item.authorization ? '<button class="primary wide-action" data-authorize>签发 30 分钟授权</button>' : ''}${item.authorization?.active && canOperate ? '<button class="primary wide-action" data-initial>创建 SHADOW 初仓意图</button>' : ''}</article>
-      <article class="card risk-engine-card"><div class="card-heading"><div><p class="eyebrow">RISK ENGINE</p><h2>风险检查</h2></div>${item.risk_decision ? `<span class="status-pill status-${escapeHtml(item.risk_decision.result)}">${escapeHtml(fmtStatus(item.risk_decision.result))}</span>` : '<span class="status-pill">未运行</span>'}</div>${item.risk_decision ? `<dl class="definition-grid">${definition('批准数量', item.risk_decision.approved_quantity)}${definition('风险金额', item.risk_decision.risk_amount)}${definition('数据截止', fmtDate(item.risk_decision.data_as_of))}</dl><div class="reason-list">${item.risk_decision.reasons.map(reason => `<span>${escapeHtml(reason)}</span>`).join('')}</div>` : '<div class="empty-inline"><b>等待审核通过</b><span>风险检查使用服务端最新账户事实和全局策略。</span></div>'}</article>
-      <article class="card authorization-card"><div class="card-heading"><div><p class="eyebrow">AUTHORIZATION</p><h2>短期授权</h2></div>${item.authorization ? `<span class="status-pill ${item.authorization.active ? 'status-APPROVED' : ''}">${item.authorization.active ? '有效' : '无效'}</span>` : '<span class="status-pill">未签发</span>'}</div>${item.authorization ? `<dl class="definition-grid">${definition('数量上限', item.authorization.quantity_limit)}${definition('风险上限', item.authorization.risk_limit)}${definition('AddUnit', `${item.authorization.used_adds} / ${item.authorization.allowed_adds}`)}${definition('到期', fmtDate(item.authorization.expires_at))}</dl>` : '<div class="empty-inline"><b>风险通过后可签发</b><span>授权绑定数量、风险上限、AddUnit 与到期时间。</span></div>'}<p class="microcopy">创建意图只会原子预留风险并记录 SHADOW 事实，不连接交易所。</p></article>
+      <article class="card next-action tone-${nextAction.tone}"><p class="eyebrow">NEXT ACTION</p><h2>${escapeHtml(nextAction.title)}</h2><p>${escapeHtml(nextAction.copy)}</p>${item.status === 'PENDING_REVIEW' && canReview ? `<label>审核意见<span class="field-help">说明你核对了什么，以及判断依据</span><textarea id="review-reason" rows="4">已核对交易逻辑、冻结参数与最大风险边界</textarea></label><div class="review-actions"><button class="primary" data-approve>批准提案</button><button class="danger" data-reject>拒绝提案</button></div><p class="microcopy">批准会触发对象版本绑定的短时 step-up；不会直接下单。</p><div class="form-error" id="review-error"></div>` : ''}${executionAction}<div class="form-error" id="execution-error"></div></article>
+      <article class="card risk-engine-card"><div class="card-heading"><div><p class="eyebrow">RISK ENGINE</p><h2>系统允许开多少</h2></div>${item.risk_decision ? `<span class="status-pill status-${escapeHtml(item.risk_decision.result)}">${escapeHtml(fmtStatus(item.risk_decision.result))}</span>` : '<span class="status-pill">未运行</span>'}</div>${riskDecisionPanel}</article>
+      <article class="card authorization-card"><div class="card-heading"><div><p class="eyebrow">LIMITED AUTHORIZATION</p><h2>这份许可还能做什么</h2></div><span class="status-pill ${authorizationUsable ? 'status-APPROVED' : authorizationDone ? 'status-EXPIRED' : ''}">${authorizationState}</span></div>${authorizationPanel}</article>
     </aside></div></section>`;
   document.querySelector('[data-approve]')?.addEventListener('click', () => approveProposal(item));
   document.querySelector('[data-reject]')?.addEventListener('click', () => rejectProposal(item));
-  document.querySelector('[data-risk]')?.addEventListener('click', () => runRisk(item));
-  document.querySelector('[data-authorize]')?.addEventListener('click', () => authorize(item));
-  document.querySelector('[data-initial]')?.addEventListener('click', () => createInitialIntent(item));
+  document.querySelector('[data-risk]')?.addEventListener('click', (event) => runRisk(item, event.currentTarget));
+  document.querySelector('[data-authorize]')?.addEventListener('click', (event) => authorize(item, event.currentTarget));
+  document.querySelector('[data-initial]')?.addEventListener('click', (event) => createInitialIntent(item, event.currentTarget));
 }
 
 const definition = (label, value) => `<div><dt>${escapeHtml(label)}</dt><dd>${escapeHtml(value ?? '—')}</dd></div>`;
@@ -631,23 +712,29 @@ async function rejectProposal(item) {
   } catch (error) { showApiError(error, document.querySelector('#review-error')); }
 }
 
-async function runRisk(item) {
-  try { await api(`/api/proposals/${item.proposal_id}/risk-decisions`, {method:'POST', body:JSON.stringify({idempotency_key:crypto.randomUUID()})}); showToast('RiskDecision 已保存'); await route(); }
-  catch (error) { showApiError(error); }
+async function runRisk(item, button) {
+  await withPending(button, '检查中…', async () => {
+    try { await api(`/api/proposals/${item.proposal_id}/risk-decisions`, {method:'POST', body:JSON.stringify({idempotency_key:crypto.randomUUID()})}); showToast('风险检查已完成'); await route(); }
+    catch (error) { showApiError(error, document.querySelector('#execution-error')); }
+  });
 }
 
-async function authorize(item) {
+async function authorize(item, button) {
   const allowedAdds = item.frozen_payload?.details?.allow_auto_add ? Number(item.frozen_payload.details.requested_adds || 0) : 0;
-  try { await api(`/api/proposals/${item.proposal_id}/authorizations`, {method:'POST', body:JSON.stringify({idempotency_key:crypto.randomUUID(), expires_in_minutes:30, allowed_adds:allowedAdds})}); showToast('短期授权已签发'); await route(); }
-  catch (error) { showApiError(error); }
+  await withPending(button, '签发中…', async () => {
+    try { await api(`/api/proposals/${item.proposal_id}/authorizations`, {method:'POST', body:JSON.stringify({idempotency_key:crypto.randomUUID(), expires_in_minutes:30, allowed_adds:allowedAdds})}); showToast('短期授权已签发'); await route(); }
+    catch (error) { showApiError(error, document.querySelector('#execution-error')); }
+  });
 }
 
-async function createInitialIntent(item) {
-  try {
-    const initialQuantity = item.frozen_payload?.details?.initial_quantity || item.authorization.quantity_limit;
-    const result = await api(`/api/authorizations/${item.authorization.authorization_id}/intents`, {method:'POST', body:JSON.stringify({kind:'INITIAL', account_id:item.account_id, venue:item.venue, instrument_id:item.instrument_id, direction:item.direction, quantity:initialQuantity, idempotency_key:crypto.randomUUID()})});
-    showToast('风险已原子预留，SHADOW 初仓意图已创建'); navigate(`/campaigns/${result.campaign_id}`);
-  } catch (error) { showApiError(error); }
+async function createInitialIntent(item, button) {
+  await withPending(button, '创建中…', async () => {
+    try {
+      const initialQuantity = item.frozen_payload?.details?.initial_quantity || item.authorization.quantity_limit;
+      const result = await api(`/api/authorizations/${item.authorization.authorization_id}/intents`, {method:'POST', body:JSON.stringify({kind:'INITIAL', account_id:item.account_id, venue:item.venue, instrument_id:item.instrument_id, direction:item.direction, quantity:initialQuantity, idempotency_key:crypto.randomUUID()})});
+      showToast('风险已原子预留，SHADOW 初仓意图已创建'); navigate(`/campaigns/${result.campaign_id}`);
+    } catch (error) { showApiError(error, document.querySelector('#execution-error')); }
+  });
 }
 
 async function loadCampaignDetails() {
