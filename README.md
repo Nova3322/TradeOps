@@ -1,7 +1,7 @@
 # Trading 交易系统
 
-> 状态日期：2026-07-31
-> 当前状态：两场所受控 LIVE 订单闭环、Perptape 主站读取、统一 LIVE 净值和 NoTilt 三链只读/持久化未签名计划/链上回执验证边界已实现；所有危险能力仍默认关闭
+> 状态日期：2026-08-01
+> 当前状态：两场所受控 LIVE 订单闭环、Perptape 精确合约身份、LIVE/模拟资金隔离、受复核风险恢复和专业化 Telegram 私聊已实现；所有危险能力仍默认关闭
 
 本项目面向一个资本所有者、一个内部组织和多个内部用户。用户可以提交和审核提案、查看仓位、处理异常；系统在风险可控的前提下辅助执行交易并判断是否赚钱。不开放外部注册，不管理第三方资金，不建设机构级多租户、通用合规或通用认证平台。
 
@@ -23,6 +23,7 @@
 - 创建者不能自审；高风险提案需要两个不同 Reviewer。
 - Approval 只产生短期、有限范围的 TradingAuthorization，不产生永久权限。
 - 数据陈旧、仓位未知、保护未知或订单结果 Unknown 时禁止新增风险。
+- Perptape 候选身份包含源场所 raw symbol；同一 canonical symbol 的不同报价合约不得合并。旧候选 ID 只有唯一匹配当前合约时才兼容，歧义时拒绝。
 - Reservation、OrderIntent 和幂等回执必须原子提交；Unknown 不能提前释放或自动重发。
 - 多个退出候选合并为唯一更小目标仓位；有活动 OrderIntent 时不重复生成减仓意图。
 - 场所真实订单、成交、仓位、保护、余额和资金费必须与内部预期分开并对账；SHADOW、TESTNET、LIVE 使用独立事实作用域。
@@ -31,17 +32,18 @@
 - AUTO_ADD 只有管理员显式开启 Gate 后才可能执行；每个 Add 仍需冻结 Proposal、分档 AddUnit、后续 Perptape 候选、盈利仓位、足额保护、新鲜事实、剩余授权和最终 Risk Engine 同时通过。只有首个正成交消费 AddUnit，零成交取消/拒绝不消费，Unknown 冻结后续新增风险。
 - 资金 Proposal、双人独立复核、Capital Transfer Authorization、源端预留、在途、目的端确认和对账与交易授权分离；活动仓位、未解决订单或 Unknown 禁止 Vault 救仓，Unknown 不释放或重发。
 - 自动利润归集和自动运营补充使用两个独立 Gate；当前只根据空仓、无订单、无 Unknown、机器 MATCH、已确认余额和已关闭 Campaign 净 PnL 生成待双人复核的非生产候选，不自动提交资金。浮盈不能归集，净亏损不能触发运营补充。
-- Telegram 已提供默认关闭的真实 Bot API 私聊长轮询、内部用户绑定、审核深链和受限收紧风险按钮；资金通知不包含批准或执行入口。正式 IdP/Passkey 仍未接入，因此本地用户名白名单绑定不能冒充生产强认证。Binance Unified Account 与 Hyperliquid Core 已具有默认关闭的 LIVE 查询、发送、取消、Unknown 恢复、原生保护和保护取消入口，并于 2026-07-31 完成最小主网开仓到退出实证。该实证不启用 AUTO_ADD、资金划转、HIP-3 或 Margin，也不等于生产部署、持续运行或盈利保证。
+- 风险恢复使用 `RiskControlChangeRequest`：请求冻结政策/Gate 版本和 scope，经两名不同 HUMAN Reviewer 的动作级 step-up 复核，等待 15 分钟冷却并在 24 小时内执行；执行时重验事实、版本和 scope。生产未配置 LIVE scope 时 fail closed，`KILL_SWITCH` 不进入该流程，旧授权和旧 AddUnit 永不复活。
+- Telegram 已提供默认关闭的真实 Bot API 私聊长轮询、中文 HTML 摘要、`/start`/`/help`/`/status` 命令、内部用户绑定、Web 审核深链和按 Campaign 状态显示的只收紧按钮；减仓/退出必须二次确认，资金通知和风险恢复均无 Telegram 批准或执行入口。正式 IdP/Passkey 仍未接入：生产代码只验证外部签发且绑定 action/object/version 的 grant，真实发行集成仍是限制，本地白名单和 Mock step-up 不能冒充生产强认证。Binance Unified Account 与 Hyperliquid Core 已具有默认关闭的 LIVE 查询、发送、取消、Unknown 恢复、原生保护和保护取消入口，并于 2026-07-31 完成最小主网开仓到退出实证。该实证不启用 AUTO_ADD、资金划转、HIP-3 或 Margin，也不等于生产部署、持续运行或盈利保证。
 
 ## 当前代码入口
 
 - API 进程：`uv run trading-api`
 - 只读同步进程：`uv run trading-sync-worker`；`--once` 用于一次性生产边界验收。它只读取 Perptape、Binance、Hyperliquid 和已配置 NoTilt Vault，持久化事实并运行对账，不拥有订单发送、资金签名或广播方法
-- Web/PWA：提案/审核、Campaign、AUTO_ADD 候选、原子减仓/退出、全局只收紧风险动作、`/venues/binance` 只读场所事实页、`/capital` 两场所/Vault/总净值资金中心和 `/results` 实际结果/审计/运行状态页；Hyperliquid 当前只有 HTTP 入口，没有专属页面
+- Web/PWA：提案/审核、Campaign、AUTO_ADD 候选、原子减仓/退出、全局风险收紧及受复核恢复、`/venues/binance` 只读场所事实页、`/capital` 资金中心和 `/results` 实际结果/审计/运行状态页。资金中心默认只展示 LIVE；SHADOW/TESTNET 置于独立折叠的“模拟数据”区且不计入真实净值；Vault 缺少事实时仍显示 `0 USD · MISSING`，不能据此视为已确认余额。Hyperliquid 当前只有 HTTP 入口，没有专属页面
 - HTTP：健康检查、内部会话、Perptape 主站机会与可选 LIVE Proposal、Proposal/Review/Risk/Authorization、SHADOW/TESTNET/LIVE Campaign、AUTO_ADD/减仓/退出、资金事实/提案/授权、NoTilt 三链状态/同步/持久化未签名计划/回执确认、按环境结果/审计/运行状态，以及 Binance、Hyperliquid Core 的只读、TESTNET 与受控 LIVE API
 - 内部业务：`trading_control_plane.service.TradingService`
 - 纯计算：`evaluate_risk`、`select_target_position`、`compute_pnl`
-- 数据库：PostgreSQL，Alembic head `20260731_0004`
+- 数据库：PostgreSQL，Alembic head `20260801_0005`，28 张业务/运行表（另有 Alembic 版本表）
 - 场所边界：`binance.py`/`binance_execution.py` 覆盖标准 USDⓈ-M 只读/TESTNET，以及 Unified Account 官方 PAPI 的 LIVE 只读和执行；`hyperliquid.py`/`hyperliquid_execution.py` 覆盖 Core Info、TESTNET 与 LIVE Exchange。Hyperliquid “市价”固定为带冻结价格边界的 IOC，不使用隐含滑点；主账户默认、子账户显式配置。HIP-3、保证金控制和资金写入口不存在，数据库中的 `LIVE_ORDER_SEND` 初始仍为 `DISABLED`
 - 资金边界：`capital.py` 提供 SHADOW/TESTNET Mock 提交和自动候选计算；`notilt.py` 通过官方 `@notilt/sdk` 固定支持 Ethereum、BNB Smart Chain、Arbitrum One，只读取官方部署/Registry/Vault、生成并持久化 `{chainId,to,data,value}` 未签名交易，并从可信生产 RPC 校验发送者、目标、函数、参数、事件、区块时间和逐链确认深度。服务没有 NoTilt 私钥字段，不签名、不广播，也不暴露 owner、白名单管理、Panic 或 Full Exit 能力；真实 `CAPITAL_TRANSFER` 与两个自动资金 Gate 均保持 `DISABLED`
 

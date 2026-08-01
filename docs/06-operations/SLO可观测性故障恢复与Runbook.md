@@ -2,7 +2,7 @@
 
 > 文档状态：Draft，待运营、风险、安全和执行负责人批准
 > 版本：0.1
-> 日期：2026-07-18
+> 日期：2026-08-01
 > 适用范围：Trading 生产运行、Binance / Hyperliquid 执行、Web / PWA、Telegram、Freqtrade、CTO 与 Vault 集成
 > 决策真源：`docs/00-governance/待确认决策清单.md`；DEC 状态以该文件为准
 
@@ -116,7 +116,7 @@ Binance、Hyperliquid Core、每个 HIP-3 DEX、账户 / 子账户、margin mode
 
 本地开发所需的敏感值统一保存在 `/Users/vireo/Documents/trading/.env.local`；项目内相对路径为 `.env.local`。该文件必须保持 Git 忽略和仅当前操作系统用户可读写，不得进入提交、补丁、日志、截图、浏览器客户端、Telegram 消息、审计事件或文档正文。可提交的变量名模板是 `/Users/vireo/Documents/trading/.env.example`。
 
-当前登记的本地变量只有 `TELEGRAM_BOT_TOKEN`。它只供 Trading Telegram Bot 的服务端进程读取；Web / PWA、前端构建、Freqtrade 策略、通知正文和任何客户端均不得读取。后续本地 API key 可继续写入同一文件并同步补充 `.env.example` 的空变量名；生产环境必须迁移至经 `DEC-SEC-002` 认证的 Secrets / KMS，不得把 `.env.local` 当作生产秘密库。
+`.env.example` 只登记变量名和安全默认值；Telegram Token、Perptape API Key、Binance Key/Secret、Hyperliquid API Wallet 私钥及其他真实值只能写入未跟踪的 `.env.local`。它们只供对应服务端边界读取；Web/PWA、前端构建、通知正文和任何客户端均不得读取。生产环境必须迁移至经 `DEC-SEC-002` 认证的 Secrets/KMS，不得把 `.env.local` 当作生产秘密库。
 
 任何曾出现在聊天、工单、日志或截图中的 Token 都按已暴露处理。当前 Telegram Token 在首次联调或上线前必须通过 BotFather 重新生成，并原位替换 `.env.local` 中的值；轮换后只验证变量存在、权限和密钥指纹，不在任何可提交材料中复制明文。发生泄漏时立即撤销旧 Token、暂停 Bot 增险入口、检查审计和绑定记录，再使用新 Token 恢复。
 
@@ -205,6 +205,17 @@ Binance、Hyperliquid Core、每个 HIP-3 DEX、账户 / 子账户、margin mode
 - 停止受影响适配器增险，冻结事件顺序和当前制品版本。
 - 修复时间源或规则后重跑契约、历史回放和影子验证；受影响执行证书重新签发。
 
+### RB-010 受复核风险恢复
+
+1. `NO_PYRAMID` / `REDUCE_ONLY` 可进入 `/risk` 的 `RiskControlChangeRequest` 流程；政策已是 `NORMAL` 但 AUTO_ADD 仍关闭时，也可仅申请恢复该 Gate。`KILL_SWITCH` 保持关闭并按 RB-007/人工事故恢复处置。
+2. 由 HUMAN SYSTEM_ADMIN 提交原因并冻结当前 RiskPolicy ID/version/revision、AUTO_ADD 状态/version 和运行时 scope。生产必须发现至少一个 LIVE scope；否则 `LIVE_SCOPE_CONFIGURATION_REQUIRED`，不得创建可执行恢复假象。
+3. 请求者之外的两名不同 HUMAN REVIEWER 分别在 Web 完成绑定 `risk.restore.review`、request ID 和当前 version 的动作级 step-up；Telegram、离线 PWA 和 break-glass 短链不能替代两票。
+4. 最近一次相关收紧后等待至少 15 分钟，并在请求创建后 24 小时内由 HUMAN SYSTEM_ADMIN 以绑定 `risk.restore.execute` 和当前 version 的 grant 执行。
+5. 执行事务重新锁定风险容量，比较 Policy/Gate version 和完整 scope，重验权益、仓位、保护、订单、Unknown 与机器 MATCH；任何 blocker 或漂移均停止，修复后新建请求，不能修改冻结请求绕过。
+6. 成功只创建新的 NORMAL RiskPolicy，并按冻结选择更新 AUTO_ADD Gate version。暂停/关闭产生的旧 TradingAuthorization、旧 AddUnit 和旧订单永不复活；已发送/Unknown Add 的迟到正成交仍进入责任槽和对账。
+
+生产代码当前只验证外部身份系统签发的 action grant；真实 IdP/WebAuthn grant 发行集成尚未实现。在该集成和运行时 LIVE scope 配置完成前，生产恢复必须保持 fail closed。
+
 ## 9. 人工交易所接管
 
 只有 Trading 整体不可用且真实仓位需要处置时才启用，具体凭据和双人复核由 `DEC-SEC-003` 冻结：
@@ -235,6 +246,10 @@ TRADING_DATABASE_URL="$DISPOSABLE_RESTORE_DATABASE_URL" \
 ```
 
 目标恢复数据库必须预先创建，名称必须以 `_test` 结尾；脚本会清理并覆盖该目标，硬拒绝其他名称。容器内 PostgreSQL 可额外设置 `TRADING_PG_CONTAINER`。当前脚本不是生产灾备自动化，不能指向共享库或真实交易库。
+
+当前本地开发的权威入口是 `./scripts/run_local.sh`：它使用 `compose.yaml` 启动 `127.0.0.1:5434` 上的 PostgreSQL 16，数据库名 `trading_local`、数据库用户 `trading`，随后升级至 Alembic `20260801_0005` 并幂等初始化内部用户。准确的本地管理员用户名是小写 `kelly_oooo`（四个 `o`），另有 `local-proposer`、`local-reviewer-two` 及 SERVICE principals；不要使用 `Kelly_ooo` 等显示名猜测登录。数据库连接、Token、API Key 和私钥只从 `.env.local`/服务端环境读取，不复制到命令历史、文档或提交。
+
+当前 Schema 为 28 张业务/运行表（另有 Alembic 版本表）。本地启动不使用 SQLite，也不应连接真实交易数据库；测试和恢复演练继续使用名称以 `_test` 结尾的独立 PostgreSQL。
 
 2026-07-19 已完成一次本地演练：custom-format 归档可由 `pg_restore --list` 解析；独立 `trading_m9_restore_test` 恢复后有 26 张业务表、Alembic revision `20260718_0001`、五个默认关闭 Gate，数据库 readiness 与 `alembic check` 均通过；演练库和归档随后删除。
 
