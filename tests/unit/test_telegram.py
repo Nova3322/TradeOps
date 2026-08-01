@@ -186,6 +186,8 @@ def test_campaign_button_is_compact_bound_and_submitted_to_trading() -> None:
         "answerCallbackQuery",
         "editMessageText",
     ]
+    assert "请求已受理" in fake.calls[-1][1]["text"]
+    assert "不证明订单已发送、成交或对账完成" in fake.calls[-1][1]["text"]
     assert fake.calls[-1][1]["reply_markup"] == {"inline_keyboard": []}
 
 
@@ -534,7 +536,9 @@ def test_help_status_and_unknown_commands_are_safe_and_use_html() -> None:
 
     assert [method for method, _payload in fake.calls] == ["sendMessage"] * 3
     assert "Trading Bot 帮助" in fake.calls[0][1]["text"]
+    assert "接收 Trading 的受理或拒绝回执" in fake.calls[0][1]["text"]
     assert "不会显示账户余额、密钥、Token 或私钥" in fake.calls[1][1]["text"]
+    assert "已受理不等于订单已发送、成交或完成" in fake.calls[1][1]["text"]
     assert "不支持该命令" in fake.calls[2][1]["text"]
     assert all(payload["parse_mode"] == "HTML" for _method, payload in fake.calls)
 

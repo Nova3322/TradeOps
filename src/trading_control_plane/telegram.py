@@ -290,7 +290,8 @@ def render_help() -> str:
         "<b>可以做什么</b>\n"
         "• 接收提案、Campaign 和资金状态通知\n"
         "• 打开 Web 安全审核页\n"
-        "• 提交经二次确认的只收紧风险动作\n\n"
+        "• 提交经二次确认的只收紧风险动作\n"
+        "• 接收 Trading 的受理或拒绝回执\n\n"
         "<b>不会做什么</b>\n"
         "• 不在 Telegram 中批准增险提案\n"
         "• 不批准、签名或执行资金操作\n"
@@ -304,6 +305,7 @@ def render_status() -> str:
         "<b>会话</b>　仅限已允许的私聊账号\n"
         "<b>审批</b>　只打开 Web，不在聊天中批准\n"
         "<b>风险动作</b>　仅收紧风险，必须二次确认\n"
+        "<b>动作回执</b>　已受理不等于订单已发送、成交或完成\n"
         "<b>资金动作</b>　不支持批准、签名或执行\n"
         "<b>权威状态</b>　以 Trading Web 与 PostgreSQL 为准\n\n"
         "此状态不会显示账户余额、密钥、Token 或私钥。"
@@ -899,7 +901,11 @@ class TelegramBotGateway(MockTelegramGateway):
                 show_alert=True,
             )
         else:
-            self._answer_callback(callback_id, "请求已处理，请核对权威结果。", show_alert=False)
+            self._answer_callback(
+                callback_id,
+                "请求已受理；成交与完成状态仍需在 Web 核对。",
+                show_alert=False,
+            )
         self._discard_action_buttons(prompt)
         self._edit_message(
             chat_id,
@@ -950,14 +956,15 @@ class TelegramBotGateway(MockTelegramGateway):
             heading = "🔴 <b>操作未执行</b>"
         else:
             result_text = _escaped(result, max_length=1_200)
-            heading = "🟢 <b>请求已处理</b>"
+            heading = "🟠 <b>请求已受理</b>"
         return _ensure_message_limit(
             f"{heading}\n"
             f"<b>操作</b>　{_escaped(self._ACTION_LABELS[action.action])}\n"
             f"<b>对象</b>　Campaign <code>{_short_id(action.campaign_id)}</code>\n"
             f"<b>提交版本</b>　v{action.campaign_version}\n\n"
             f"{result_text}\n\n"
-            "按钮已失效。请在 Web 控制台核对最新权威状态。"
+            "按钮已失效。本回执只证明 Trading 已受理，不证明订单已发送、成交或对账完成；"
+            "请在 Web 控制台核对最新权威状态。"
         )
 
     def _edit_message(
