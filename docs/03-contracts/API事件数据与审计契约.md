@@ -174,7 +174,7 @@ MANUAL 草稿、预检与冻结命令至少携带：方向、触发价、委托�
 - `GET /api/risk-controls`：返回当前 RiskPolicy revision、AUTO_ADD Gate version、运行时受控 scope、恢复 blocker、冷却和请求/复核事实。
 - `POST /api/risk-controls/restores`：创建冻结 `RiskControlChangeRequest`；载荷只接受 reason、是否恢复 AUTO_ADD 和 idempotency key，scope 与生产 LIVE 要求由服务端配置提供。
 - `POST /api/risk-controls/restores/{request_id}/reviews`：按 `expected_version` 记录 APPROVE/REJECT。APPROVE 必须携带绑定 user、`risk.restore.review`、request ID 和当前 version 的 action grant。
-- `POST /api/risk-controls/restores/{request_id}/execute`：携带绑定 `risk.restore.execute`、request ID 和当前 version 的 action grant；服务端在事务中重验来源政策/Gate、scope、冷却、TTL、两名不同 HUMAN Reviewer 和全部恢复事实。
+- `POST /api/risk-controls/restores/{request_id}/execute`：携带绑定 `risk.restore.execute`、request ID 和当前 version 的 action grant；服务端在事务中重验来源政策/Gate、scope、冷却、TTL、两名不同 HUMAN 且有 `risk.restore.review` 权限的用户、申请人不得自审和全部恢复事实。
 
 请求状态为 `PENDING_REVIEW / APPROVED / REJECTED / EXPIRED / EXECUTED`，创建后 24 小时到期，最近一次相关收紧后至少冷却 15 分钟。生产没有运行时 LIVE scope 时以 `LIVE_SCOPE_CONFIGURATION_REQUIRED` fail closed；`KILL_SWITCH` 返回人工事故恢复要求，不允许通过该 API 放宽。风险恢复 API 不在 Telegram 暴露。
 

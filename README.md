@@ -23,17 +23,17 @@
 - 创建者不能自审；高风险提案需要两个不同 Reviewer。
 - Approval 只产生短期、有限范围的 TradingAuthorization，不产生永久权限。
 - 数据陈旧、仓位未知、保护未知或订单结果 Unknown 时禁止新增风险。
-- Perptape 候选身份包含源场所 raw symbol；同一 canonical symbol 的不同报价合约不得合并。旧候选 ID 只有唯一匹配当前合约时才兼容，歧义时拒绝。
+- Perptape 候选身份包含源场所 raw symbol；同一 canonical symbol 的不同报价合约不得合并。旧候选 ID 只有唯一匹配当前候选，且既有 Proposal 的 instrument/venue/direction 与冻结候选身份快照全部精确一致时才兼容；歧义或不一致时拒绝。
 - Reservation、OrderIntent 和幂等回执必须原子提交；Unknown 不能提前释放或自动重发。
 - 多个退出候选合并为唯一更小目标仓位；有活动 OrderIntent 时不重复生成减仓意图。
 - 场所真实订单、成交、仓位、保护、余额和资金费必须与内部预期分开并对账；SHADOW、TESTNET、LIVE 使用独立事实作用域。
 - 每个 execution scope 只有一个有效 sender；新 owner 接管后旧 fencing token 无效。
 - `LIVE_ORDER_SEND`、`CAPITAL_TRANSFER`、`AUTO_ADD`、`AUTO_PROFIT_SWEEP` 与 `AUTO_OPERATING_REFILL` 默认 `DISABLED`。
-- AUTO_ADD 只有管理员显式开启 Gate 后才可能执行；每个 Add 仍需冻结 Proposal、分档 AddUnit、后续 Perptape 候选、盈利仓位、足额保护、新鲜事实、剩余授权和最终 Risk Engine 同时通过。只有首个正成交消费 AddUnit，零成交取消/拒绝不消费，Unknown 冻结后续新增风险。
+- AUTO_ADD 从 `DISABLED` 变为 `ENABLED` 只能通过 `RiskControlChangeRequest` 受复核恢复流程；不能由管理员直接翻转 Gate。每个 Add 仍需冻结 Proposal、分档 AddUnit、后续 Perptape 候选、盈利仓位、足额保护、新鲜事实、剩余授权和最终 Risk Engine 同时通过。只有首个正成交消费 AddUnit，零成交取消/拒绝不消费，Unknown 冻结后续新增风险。
 - 资金 Proposal、双人独立复核、Capital Transfer Authorization、源端预留、在途、目的端确认和对账与交易授权分离；活动仓位、未解决订单或 Unknown 禁止 Vault 救仓，Unknown 不释放或重发。
 - 自动利润归集和自动运营补充使用两个独立 Gate；当前只根据空仓、无订单、无 Unknown、机器 MATCH、已确认余额和已关闭 Campaign 净 PnL 生成待双人复核的非生产候选，不自动提交资金。浮盈不能归集，净亏损不能触发运营补充。
-- 风险恢复使用 `RiskControlChangeRequest`：请求冻结政策/Gate 版本和 scope，经两名不同 HUMAN Reviewer 的动作级 step-up 复核，等待 15 分钟冷却并在 24 小时内执行；执行时重验事实、版本和 scope。生产未配置 LIVE scope 时 fail closed，`KILL_SWITCH` 不进入该流程，旧授权和旧 AddUnit 永不复活。
-- Telegram 已提供默认关闭的真实 Bot API 私聊长轮询、中文 HTML 摘要、`/start`/`/help`/`/status` 命令、内部用户绑定、Web 审核深链和按 Campaign 状态显示的只收紧按钮；减仓/退出必须二次确认，资金通知和风险恢复均无 Telegram 批准或执行入口。正式 IdP/Passkey 仍未接入：生产代码只验证外部签发且绑定 action/object/version 的 grant，真实发行集成仍是限制，本地白名单和 Mock step-up 不能冒充生产强认证。Binance Unified Account 与 Hyperliquid Core 已具有默认关闭的 LIVE 查询、发送、取消、Unknown 恢复、原生保护和保护取消入口，并于 2026-07-31 完成最小主网开仓到退出实证。该实证不启用 AUTO_ADD、资金划转、HIP-3 或 Margin，也不等于生产部署、持续运行或盈利保证。
+- 风险恢复使用 `RiskControlChangeRequest`：请求冻结政策/Gate 版本和 scope，经两名不同 HUMAN 且有 `risk.restore.review` 权限的用户复核，申请人不得自审；等待 15 分钟冷却并在 24 小时内执行，执行时重验事实、版本和 scope。生产未配置 LIVE scope 时 fail closed，`KILL_SWITCH` 不进入该流程，旧授权和旧 AddUnit 永不复活。
+- Telegram 已提供默认关闭的真实 Bot API 私聊长轮询、中文 HTML 摘要、`/start`/`/help`/`/status` 命令、内部用户绑定、Web 审核深链和按 Campaign 状态显示的只收紧按钮；减仓/退出必须二次确认，资金通知和风险恢复均无 Telegram 批准或执行入口。正式 IdP/Passkey 仍未接入：本服务的 `SignedTokenService` 仅以本地 HMAC 验证 action grant 的 user/action/object/version/TTL；只有 local/test 提供 Mock grant 发行，生产 issuer、IdP/WebAuthn 和外部签名验证均未实现，因此生产风险恢复保持不可用/fail closed。Binance Unified Account 与 Hyperliquid Core 已具有默认关闭的 LIVE 查询、发送、取消、Unknown 恢复、原生保护和保护取消入口，并于 2026-07-31 完成最小主网开仓到退出实证。该实证不启用 AUTO_ADD、资金划转、HIP-3 或 Margin，也不等于生产部署、持续运行或盈利保证。
 
 ## 当前代码入口
 

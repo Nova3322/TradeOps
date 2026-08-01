@@ -209,12 +209,12 @@ Binance、Hyperliquid Core、每个 HIP-3 DEX、账户 / 子账户、margin mode
 
 1. `NO_PYRAMID` / `REDUCE_ONLY` 可进入 `/risk` 的 `RiskControlChangeRequest` 流程；政策已是 `NORMAL` 但 AUTO_ADD 仍关闭时，也可仅申请恢复该 Gate。`KILL_SWITCH` 保持关闭并按 RB-007/人工事故恢复处置。
 2. 由 HUMAN SYSTEM_ADMIN 提交原因并冻结当前 RiskPolicy ID/version/revision、AUTO_ADD 状态/version 和运行时 scope。生产必须发现至少一个 LIVE scope；否则 `LIVE_SCOPE_CONFIGURATION_REQUIRED`，不得创建可执行恢复假象。
-3. 请求者之外的两名不同 HUMAN REVIEWER 分别在 Web 完成绑定 `risk.restore.review`、request ID 和当前 version 的动作级 step-up；Telegram、离线 PWA 和 break-glass 短链不能替代两票。
+3. 申请人之外的两名不同 HUMAN 且有 `risk.restore.review` 权限的用户（REVIEWER 或 SYSTEM_ADMIN）分别在 Web 完成绑定 `risk.restore.review`、request ID 和当前 version 的动作级 step-up；Telegram、离线 PWA 和 break-glass 短链不能替代两票。
 4. 最近一次相关收紧后等待至少 15 分钟，并在请求创建后 24 小时内由 HUMAN SYSTEM_ADMIN 以绑定 `risk.restore.execute` 和当前 version 的 grant 执行。
 5. 执行事务重新锁定风险容量，比较 Policy/Gate version 和完整 scope，重验权益、仓位、保护、订单、Unknown 与机器 MATCH；任何 blocker 或漂移均停止，修复后新建请求，不能修改冻结请求绕过。
 6. 成功只创建新的 NORMAL RiskPolicy，并按冻结选择更新 AUTO_ADD Gate version。暂停/关闭产生的旧 TradingAuthorization、旧 AddUnit 和旧订单永不复活；已发送/Unknown Add 的迟到正成交仍进入责任槽和对账。
 
-生产代码当前只验证外部身份系统签发的 action grant；真实 IdP/WebAuthn grant 发行集成尚未实现。在该集成和运行时 LIVE scope 配置完成前，生产恢复必须保持 fail closed。
+本服务的 `SignedTokenService` 仅以本地 HMAC 验证 action grant 的 user/action/object/version/TTL；只有 local/test 提供 Mock grant 发行。生产 issuer、IdP/WebAuthn 和外部签名验证尚未实现；在这些能力和运行时 LIVE scope 配置完成前，生产恢复必须保持不可用/fail closed。
 
 ## 9. 人工交易所接管
 

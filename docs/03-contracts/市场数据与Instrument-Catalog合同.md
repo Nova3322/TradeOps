@@ -202,7 +202,7 @@ Trading 处理：
 
 当前候选 ID 的确定性输入包含 `source_exchange + raw symbol + canonical symbol + timeframe + source_direction + triggered_at`。raw symbol 是源合同身份的一部分，不是纯显示字段：例如同一 canonical symbol 下的 `BTCUSDT` 与 `BTCUSDC` 必须形成不同 candidate ID、深链和 Proposal 关联，不能因 canonical 化被去重。
 
-2026-08-01 之前持久化的 legacy candidate ID 未包含 raw symbol。兼容查询只有在该旧 ID 对当前候选得到唯一匹配时才可沿用既有 Proposal；如果两个或更多当前报价合约命中同一 legacy ID，必须返回歧义拒绝，不能任选其一，也不能让另一合约复用旧 Proposal。新建 Proposal 优先冻结当前精确 candidate ID。
+2026-08-01 之前持久化的 legacy candidate ID 未包含 raw symbol。仅“旧 ID 唯一匹配一个当前候选”还不足以复用既有 Proposal；还必须同时满足 Proposal 的 `instrument_id`、venue、direction，以及冻结候选快照中的 venue、source_exchange、symbol、canonical_symbol、direction、source_direction、timeframe、triggered_at 全部与当前候选一致。任一字段缺失或不一致都不得复用。如果两个或更多当前报价合约命中同一 legacy ID，必须返回歧义拒绝，不能任选其一，也不能让另一合约复用旧 Proposal。新建 Proposal 优先冻结当前精确 candidate ID。
 
 候选不是 Proposal、Approval、Authorization 或 OrderIntent。
 
