@@ -85,7 +85,7 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
 
     assert response.status_code == 200
     assert "Trading Console" in response.text
-    assert "/assets/app.js?v=13" in response.text
+    assert "/assets/app.js?v=14" in response.text
     assert "/assets/styles.css?v=10" in response.text
     assert 'id="mobile-nav-toggle"' in response.text
     assert 'id="confirm-dialog"' in response.text
@@ -102,9 +102,14 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
     assert "function confirmAction" in app_javascript.text
     assert "function partitionCapitalRecords" in app_javascript.text
     assert "function capitalSourceSlots" in app_javascript.text
+    assert "function liveCapitalInTransit" in app_javascript.text
     assert "模拟数据" in app_javascript.text
     assert "独立隔离" in app_javascript.text
     assert "未配置或未同步" in app_javascript.text
+    assert app_javascript.text.count("${capitalProposalForm}") == 1
+    assert "${capitalProposalForm}${mockFactForm}${automationPanel}" in app_javascript.text
+    assert "fmtNumber(item.in_transit)" not in app_javascript.text
+    assert "fmtNumber(liveInTransit)" in app_javascript.text
 
     stylesheet = get(app, "/assets/styles.css")
     assert stylesheet.status_code == 200
@@ -135,6 +140,12 @@ def test_capital_web_projection_separates_live_and_simulation_records() -> None:
         const to = source.indexOf("\nfunction capitalBalanceRows", from);
         assert.notEqual(from, -1);
         assert.notEqual(to, -1);
+        const capitalFormFrom = source.indexOf("const capitalProposalForm");
+        const capitalFormTo = source.indexOf("const mockFactForm", capitalFormFrom);
+        const capitalFormSource = source.slice(capitalFormFrom, capitalFormTo);
+        assert.match(capitalFormSource, /<option>TESTNET<\/option>/);
+        assert.match(capitalFormSource, /<option>SHADOW<\/option>/);
+        assert.doesNotMatch(capitalFormSource, /<option>LIVE<\/option>/);
 
         const records = [
           {environment:"LIVE", location_type:"VENUE", venue:"BINANCE", marker:"live-binance"},
@@ -168,6 +179,18 @@ def test_capital_web_projection_separates_live_and_simulation_records() -> None:
         assert.equal(slots[2].fact_status, "MISSING");
         assert.equal(slots[2].missing_detail, "未配置或未同步");
         assert.equal(slots.some(item => item.marker === "shadow-10000"), false);
+
+        const liveInTransit = vm.runInContext(
+          `liveCapitalInTransit([
+            {environment:"LIVE", status:"IN_FLIGHT", reserved_amount:"1.200000000000000000"},
+            {environment:"LIVE", status:"UNKNOWN", reserved_amount:"0.050000000000000000"},
+            {environment:"LIVE", status:"SETTLED", reserved_amount:"500"},
+            {environment:"SHADOW", status:"IN_FLIGHT", reserved_amount:"10000"},
+            {environment:"TESTNET", status:"MANUAL_REQUIRED", reserved_amount:"20000"},
+          ])`,
+          context,
+        );
+        assert.equal(liveInTransit, "1.250000000000000000");
         """
     )
     completed = subprocess.run(  # noqa: S603
