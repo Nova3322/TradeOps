@@ -110,6 +110,18 @@ button:disabled { opacity: .52; cursor: not-allowed; }
 .chart-legend i { display: inline-block; width: 7px; height: 7px; margin-right: 6px; border-radius: 50%; background: var(--accent); opacity: calc(1 - var(--legend-index) * .12); }
 .chart-legend b { color: var(--ink); margin-left: 3px; }
 .chart-empty { min-height: 180px; display: grid; place-items: center; color: var(--muted); border: 1px dashed var(--line); border-radius: 12px; }
+.capital-missing-row { background: color-mix(in srgb, var(--warning) 5%, var(--panel)); }
+.capital-status-missing { color: var(--warning); letter-spacing: .05em; }
+.simulation-panel { margin-top: 32px; border: 1px solid var(--line); border-radius: 16px; background: var(--panel); overflow: clip; }
+.simulation-panel > summary { min-height: 72px; display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 18px 20px; cursor: pointer; }
+.simulation-panel > summary::marker { color: var(--accent); }
+.simulation-panel > summary span:first-child { min-width: 0; }
+.simulation-panel > summary b, .simulation-panel > summary small { display: block; }
+.simulation-panel > summary small { margin-top: 5px; color: var(--muted); line-height: 1.4; }
+.simulation-panel[open] > summary { border-bottom: 1px solid var(--line); }
+.simulation-content { display: grid; gap: 24px; padding: 0 20px 24px; background: color-mix(in srgb, var(--bg) 42%, var(--panel)); }
+.simulation-content > section { min-width: 0; }
+.simulation-content h2, .simulation-content h3 { margin-bottom: 12px; }
 .proposal-default { display: flex; justify-content: space-between; gap: 16px; align-items: center; padding: 14px; margin-bottom: 14px; border-radius: 12px; background: var(--accent-2); }
 .proposal-default small, .proposal-default b { display: block; }
 .proposal-default small { color: var(--muted); margin-bottom: 4px; }
@@ -220,6 +232,9 @@ dialog::backdrop { background: rgba(4, 12, 10, .56); backdrop-filter: blur(3px);
   .result-summary span { display: block; margin-top: 5px; }
   .chart-head { display: block; }
   .chart-head > b { display: block; margin-top: 14px; }
+  .simulation-panel > summary { align-items: flex-start; padding: 16px; }
+  .simulation-panel > summary .tag { flex: 0 0 auto; }
+  .simulation-content { padding: 0 14px 18px; }
   dialog { max-height: calc(100dvh - 24px); overflow: auto; }
   .toast { left: 15px; right: 15px; bottom: max(15px, env(safe-area-inset-bottom)); max-width: none; }
 }

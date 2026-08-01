@@ -85,7 +85,8 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
 
     assert response.status_code == 200
     assert "Trading Console" in response.text
-    assert "/assets/app.js?v=12" in response.text
+    assert "/assets/app.js?v=14" in response.text
+    assert "/assets/styles.css?v=10" in response.text
     assert 'id="mobile-nav-toggle"' in response.text
     assert 'id="confirm-dialog"' in response.text
 
@@ -99,6 +100,16 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
     assert "error.handled = response.status === 401" in app_javascript.text
     assert "function handleUnauthorizedResponse" in app_javascript.text
     assert "function confirmAction" in app_javascript.text
+    assert "function partitionCapitalRecords" in app_javascript.text
+    assert "function capitalSourceSlots" in app_javascript.text
+    assert "function liveCapitalInTransit" in app_javascript.text
+    assert "模拟数据" in app_javascript.text
+    assert "独立隔离" in app_javascript.text
+    assert "未配置或未同步" in app_javascript.text
+    assert app_javascript.text.count("${capitalProposalForm}") == 1
+    assert "${capitalProposalForm}${mockFactForm}${automationPanel}" in app_javascript.text
+    assert "fmtNumber(item.in_transit)" not in app_javascript.text
+    assert "fmtNumber(liveInTransit)" in app_javascript.text
 
     stylesheet = get(app, "/assets/styles.css")
     assert stylesheet.status_code == 200
@@ -106,10 +117,89 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
     assert ".table-scroll-hint" in stylesheet.text
     assert "visibility 0s linear .2s" in stylesheet.text
     assert "visibility: visible; transition-delay: 0s" in stylesheet.text
+    assert ".simulation-panel" in stylesheet.text
+    assert ".capital-status-missing" in stylesheet.text
 
     service_worker = get(app, "/sw.js")
     assert service_worker.status_code == 200
     assert "await fetch(event.request)" in service_worker.text
+
+
+def test_capital_web_projection_separates_live_and_simulation_records() -> None:
+    node = shutil.which("node")
+    assert node is not None
+    app_path = Path(__file__).parents[2] / "src" / "trading_control_plane" / "web" / "app.js"
+    script = textwrap.dedent(
+        r"""
+        import assert from "node:assert/strict";
+        import fs from "node:fs";
+        import vm from "node:vm";
+
+        const source = fs.readFileSync(process.argv[1], "utf8");
+        const from = source.indexOf("const LIVE_CAPITAL_SOURCES");
+        const to = source.indexOf("\nfunction capitalBalanceRows", from);
+        assert.notEqual(from, -1);
+        assert.notEqual(to, -1);
+        const capitalFormFrom = source.indexOf("const capitalProposalForm");
+        const capitalFormTo = source.indexOf("const mockFactForm", capitalFormFrom);
+        const capitalFormSource = source.slice(capitalFormFrom, capitalFormTo);
+        assert.match(capitalFormSource, /<option>TESTNET<\/option>/);
+        assert.match(capitalFormSource, /<option>SHADOW<\/option>/);
+        assert.doesNotMatch(capitalFormSource, /<option>LIVE<\/option>/);
+
+        const records = [
+          {environment:"LIVE", location_type:"VENUE", venue:"BINANCE", marker:"live-binance"},
+          {environment:"SHADOW", location_type:"VENUE", venue:"HYPERLIQUID", marker:"shadow-10000"},
+          {environment:"TESTNET", location_type:"VAULT", venue:"VAULT", marker:"test-vault"},
+        ];
+        const context = vm.createContext({records});
+        vm.runInContext(source.slice(from, to), context);
+        const split = JSON.parse(vm.runInContext(
+          "JSON.stringify(partitionCapitalRecords(records))",
+          context,
+        ));
+        assert.deepEqual(split.live.map(item => item.marker), ["live-binance"]);
+        assert.deepEqual(
+          split.simulated.map(item => item.marker),
+          ["shadow-10000", "test-vault"],
+        );
+
+        const slots = JSON.parse(vm.runInContext(
+          `JSON.stringify(capitalSourceSlots(records, {
+            chains:[{chain_id:42161, vault_configured:false}],
+          }))`,
+          context,
+        ));
+        assert.equal(slots.length, 3);
+        assert.equal(slots[0].marker, "live-binance");
+        assert.equal(slots[1].venue, "HYPERLIQUID");
+        assert.equal(slots[1].fact_status, "MISSING");
+        assert.equal(slots[2].venue, "VAULT");
+        assert.equal(slots[2].usd_equity, "0");
+        assert.equal(slots[2].fact_status, "MISSING");
+        assert.equal(slots[2].missing_detail, "未配置或未同步");
+        assert.equal(slots.some(item => item.marker === "shadow-10000"), false);
+
+        const liveInTransit = vm.runInContext(
+          `liveCapitalInTransit([
+            {environment:"LIVE", status:"IN_FLIGHT", reserved_amount:"1.200000000000000000"},
+            {environment:"LIVE", status:"UNKNOWN", reserved_amount:"0.050000000000000000"},
+            {environment:"LIVE", status:"SETTLED", reserved_amount:"500"},
+            {environment:"SHADOW", status:"IN_FLIGHT", reserved_amount:"10000"},
+            {environment:"TESTNET", status:"MANUAL_REQUIRED", reserved_amount:"20000"},
+          ])`,
+          context,
+        );
+        assert.equal(liveInTransit, "1.250000000000000000");
+        """
+    )
+    completed = subprocess.run(  # noqa: S603
+        [node, "--input-type=module", "-e", script, str(app_path)],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stderr
 
 
 def test_web_request_lifecycle_in_node() -> None:
