@@ -21,6 +21,7 @@ from trading_control_plane.domain import (
     SystemRiskState,
 )
 from trading_control_plane.models import (
+    Instrument,
     OrderIntent,
     Proposal,
     RiskDecision,
@@ -223,6 +224,49 @@ def test_opportunity_marks_ready_but_uncatalogued_raw_contract_ineligible(
                     "expires_in_minutes": 120,
                     "invalidation_price": "118000",
                     "rationale": "must not guess a quote contract",
+                },
+            )
+            assert rejected.status_code == 422, rejected.text
+            assert rejected.json()["error"]["code"] == "INSTRUMENT_UNAVAILABLE"
+
+    asyncio.run(scenario())
+    with database.session_factory() as session:
+        assert session.scalar(select(func.count()).select_from(Proposal)) == 0
+
+
+def test_opportunity_rejects_exact_but_inactive_catalog_instrument(
+    database: Database, service: TradingService
+) -> None:
+    ids = seed(service)
+    with database.session_factory() as session:
+        instrument = session.get(Instrument, ids["instrument"])
+        assert instrument is not None
+        instrument.active = False
+        session.commit()
+
+    async def scenario() -> None:
+        async with AsyncClient(
+            transport=ASGITransport(app=app(database, MockTelegramGateway(), perptape_client())),
+            base_url="http://test",
+        ) as http:
+            await login(http, "proposer")
+            opportunities = await http.get("/api/opportunities")
+            assert opportunities.status_code == 200, opportunities.text
+            candidate = opportunities.json()["data"][0]
+            assert candidate["symbol"] == "BTCUSDT"
+            assert candidate["proposal_eligible"] is False
+            assert candidate["proposal_blocker"] == "INSTRUMENT_UNAVAILABLE"
+
+            rejected = await http.post(
+                f"/api/opportunities/{candidate['candidate_id']}/proposals",
+                json={
+                    "account_id": "acct-1",
+                    "risk_tier": "LOW",
+                    "quantity": "1",
+                    "max_risk": "40",
+                    "expires_in_minutes": 120,
+                    "invalidation_price": "118000",
+                    "rationale": "inactive Catalog instruments remain unavailable",
                 },
             )
             assert rejected.status_code == 422, rejected.text
