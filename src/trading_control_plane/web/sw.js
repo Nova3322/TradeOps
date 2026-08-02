@@ -1,4 +1,4 @@
-const CACHE = 'trading-shell-v53';
+const CACHE = 'trading-shell-v54';
 const SHELL = ['/assets/styles.css', '/assets/app.js', '/assets/icon.svg', '/manifest.webmanifest'];
 self.addEventListener('install', (event) => event.waitUntil(
   caches.open(CACHE).then((cache) => cache.addAll(SHELL)).then(() => self.skipWaiting()),

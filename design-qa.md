@@ -1,49 +1,34 @@
-**Source and state**
+# Opportunity filter single-row visual QA
 
-- Source visual truth: `/var/folders/c1/6j8smjg96430htljxp_sx8sr0000gn/T/codex-clipboard-0dca9201-6c29-4c36-bbf8-7b9261b5fdd7.png`
-- Source pixels: 3024 × 1722.
-- Intended implementation viewport: desktop, 1512 × 861 CSS pixels at device scale factor 2.
-- Intended state: authenticated SHADOW opportunities page; capital page is an extension of the same design system.
-- Implementation screenshot: unavailable.
-- Density normalization: source is treated as a 2× capture of the intended CSS viewport.
+## Source and state
 
-**Findings**
+- Source visual truth: `/var/folders/c1/6j8smjg96430htljxp_sx8sr0000gn/T/codex-clipboard-0a326ebc-3d32-459b-8f16-d1a0f4f21c9e.png`
+- Source pixels: 2048 × 345; focused desktop crop of the opportunity filter panel.
+- Implementation screenshot: `/Users/vireo/.codex/visualizations/2026/07/31/019fb774-db1b-78e3-a3c9-bf8f73f9d0fe/trading-console-language-audit/opportunity-filters-single-row-v24.png`
+- Implementation viewport: 1424 × 800 CSS pixels.
+- State: Chinese production opportunities page, live Perptape connection, default filter values.
+- Requested change: keep all eight filters on one desktop row; the source's two-row arrangement is the intentional delta.
 
-- [P2] Browser-rendered comparison is unavailable.
-  Location: opportunities, proposal dialog, and capital center.
-  Evidence: the in-app browser could not attach because the active Codex desktop window was displaying another task; no implementation screenshot could be captured from this task.
-  Impact: typography, spacing, responsive wrapping, and chart rendering could not be judged against the supplied screenshot.
-  Fix: focus this task in the Codex desktop window, open the local application, capture the three relevant states at 1512 × 861 CSS pixels, and run a side-by-side comparison.
+## Comparison result
 
-**Required fidelity surfaces**
+- Full-view comparison: passed. The existing page hierarchy, cards, typography, colors, borders, and spacing tokens remain unchanged.
+- Focused filter comparison: passed. Venue, symbol, resonance, breakout periods, direction, volume, open interest, and reset are all visible on one row.
+- Geometry check: passed. All eight direct children share the same row; the panel is 1078 px wide and no control is clipped or overlapping.
+- Alignment check: passed. Labels use a common top edge, inputs share a common baseline, and the reset action aligns with the input row.
+- Interaction check: passed. Changing resonance to three periods and disabling 1h changed the result summary; reset restored resonance to one, re-enabled 1h, and restored all 278 results.
+- Responsive behavior: preserved. At 1180 px and below the layout returns to a four-column adaptive grid; at 780 px and below it uses the existing two-column layout.
+- Console/runtime check: no new browser-visible error was observed during navigation, filtering, or reset.
 
-- Fonts and typography: code uses the existing Inter/system UI stack and Georgia display hierarchy; browser comparison is blocked.
-- Spacing and layout rhythm: additions reuse the existing panel, grid, radius, and spacing tokens; browser comparison is blocked.
-- Colors and visual tokens: additions only use existing theme variables; browser comparison is blocked.
-- Image quality and asset fidelity: no new raster or decorative assets were introduced; the data chart is rendered from live values.
-- Copy and content: filters, default proposal explanation, dual links, and capital snapshot disclosure are present in the implementation.
+## Findings and fixes
 
-**Full-view and focused evidence**
+- [P2] The original five-column grid forced direction, volume, open interest, and reset onto a second row.
+  Fix: replaced it with an eight-column desktop grid sized by control type, removed the desktop timeframe span, tightened the gap and panel padding, and kept explicit responsive fallbacks.
+- No open P0, P1, or P2 visual findings remain.
 
-- Full-view comparison: blocked because there is no browser-rendered implementation screenshot.
-- Focused comparison: blocked for the same reason.
-- Primary interactions covered by automated/code verification: filter event wiring, default proposal payload construction, advanced-dialog submission, external URL construction, and capital chart rendering path.
-- Console errors checked: JavaScript syntax check passed; browser console inspection unavailable.
+## Verification
 
-**Comparison history**
+- `tests/api/test_health.py`: 11 passed.
+- `node --check src/trading_control_plane/web/app.js`: passed.
+- `git diff --check`: passed.
 
-- Initial pass: blocked by unavailable implementation capture.
-- No visual fixes were made from a comparison because a valid same-state comparison could not be produced.
-
-**Implementation checklist**
-
-- Capture opportunities default state and an active filter state.
-- Capture the advanced proposal dialog.
-- Capture capital center with at least two valid balance locations.
-- Verify desktop and mobile wrapping, keyboard focus, and browser console.
-
-**Follow-up polish**
-
-- Consider adding true historical net-worth snapshots later; the current chart is deliberately labeled as a current capital-composition snapshot.
-
-final result: blocked
+final result: passed

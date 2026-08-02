@@ -136,10 +136,10 @@ button:disabled { opacity: .52; cursor: not-allowed; }
 .metric-row small, .definition-grid dt { display: block; color: var(--muted); font-size: 10px; text-transform: uppercase; letter-spacing: .07em; margin-bottom: 5px; }
 .metric-row b { font-size: 13px; }
 .card-actions { display: flex; justify-content: space-between; align-items: center; gap: 10px; }
-.filter-panel { display: grid; grid-template-columns: repeat(5, minmax(120px, 1fr)); gap: 12px; align-items: end; padding: 17px; margin: 18px 0 8px; border: 1px solid var(--line); border-radius: 15px; background: var(--panel); }
+.filter-panel { display: grid; grid-template-columns: minmax(88px, .75fr) minmax(128px, 1.05fr) minmax(120px, .95fr) minmax(212px, 1.7fr) minmax(88px, .75fr) minmax(104px, .9fr) minmax(104px, .9fr) auto; gap: 8px; align-items: end; padding: 14px; margin: 18px 0 8px; border: 1px solid var(--line); border-radius: 15px; background: var(--panel); }
 .filter-panel label { min-width: 0; }
-.filter-panel .text-button { align-self: center; justify-self: start; }
-.timeframe-filter { grid-column: span 2; display: flex; align-items: center; gap: 8px; min-width: 0; min-height: 42px; margin: 0; padding: 7px 9px; border: 1px solid var(--line); border-radius: 9px; }
+.filter-panel .text-button { align-self: end; justify-self: start; min-height: 42px; padding-inline: 6px; white-space: nowrap; }
+.timeframe-filter { grid-column: auto; display: flex; align-items: center; justify-content: space-between; gap: 6px; min-width: 0; min-height: 42px; margin: 0; padding: 7px 9px; border: 1px solid var(--line); border-radius: 9px; }
 .timeframe-filter legend { padding: 0 5px; color: var(--muted); font-size: 10px; font-weight: 750; }
 .timeframe-filter label { display: inline-flex; align-items: center; gap: 4px; color: var(--ink); font-size: 11px; font-weight: 800; }
 .timeframe-filter input { width: 15px; height: 15px; accent-color: var(--accent); }
@@ -462,6 +462,8 @@ dialog::backdrop { background: rgba(4, 12, 10, .56); backdrop-filter: blur(3px);
   .campaign-command-layout { grid-template-columns: 1fr; }
   .home-layout { grid-template-columns: 1fr; }
   .system-health-grid, .permission-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .filter-panel { grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; padding: 17px; }
+  .timeframe-filter { grid-column: span 2; justify-content: flex-start; gap: 8px; }
 }
 
 @media (min-width: 781px) and (max-width: 980px) {
