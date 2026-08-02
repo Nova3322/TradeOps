@@ -1282,6 +1282,7 @@ class TradingQueries:
                     "WHERE table_schema = 'public' AND table_name <> 'alembic_version'"
                 )
             ).scalar_one()
+            perptape_feed = session.get(PerptapeFeed, "BREAKOUTS")
             return {
                 "database_ready": self.database.is_ready()[0],
                 "schema_revision": revision,
@@ -1294,6 +1295,25 @@ class TradingQueries:
                     }
                     for item in gates
                 },
+                "perptape_feed": (
+                    {
+                        "available": True,
+                        "contract_version": perptape_feed.contract_version,
+                        "candidate_count": len(perptape_feed.candidates),
+                        "generated_at": _iso(perptape_feed.generated_at),
+                        "fetched_at": _iso(perptape_feed.fetched_at),
+                        "updated_at": _iso(perptape_feed.updated_at),
+                    }
+                    if perptape_feed is not None
+                    else {
+                        "available": False,
+                        "contract_version": None,
+                        "candidate_count": 0,
+                        "generated_at": None,
+                        "fetched_at": None,
+                        "updated_at": None,
+                    }
+                ),
             }
 
     def list_campaigns(self, user_id: UUID) -> list[dict[str, Any]]:

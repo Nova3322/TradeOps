@@ -160,6 +160,7 @@ button:disabled { opacity: .52; cursor: not-allowed; }
 .system-health-card { min-width: 0; padding: 18px; border: 1px solid var(--line); border-top: 3px solid var(--accent); border-radius: 14px; background: var(--panel); }
 .system-health-card.tone-attention { border-top-color: var(--warning); }
 .system-health-card.tone-danger { border-top-color: var(--danger); background: color-mix(in srgb, var(--danger) 4%, var(--panel)); }
+.system-health-card.tone-neutral { border-top-color: var(--muted); background: color-mix(in srgb, var(--muted) 4%, var(--panel)); }
 .system-health-head { display: flex; gap: 11px; align-items: center; }
 .system-health-head small { color: var(--muted); font-size: 10px; font-weight: 750; letter-spacing: .05em; }
 .system-health-head h2 { margin: 4px 0 0; font: 800 16px/1.25 Inter, ui-sans-serif, sans-serif; letter-spacing: -.015em; }

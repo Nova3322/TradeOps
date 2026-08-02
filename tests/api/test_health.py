@@ -3,12 +3,13 @@ import json
 import shutil
 import subprocess
 import textwrap
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient, Response
 
-from trading_control_plane.api import create_app
+from trading_control_plane.api import _perptape_runtime_status, create_app
 from trading_control_plane.config import Settings
 
 
@@ -79,14 +80,40 @@ def test_metrics_endpoint_exposes_control_plane_metrics() -> None:
     assert "trading_database_ready" in response.text
 
 
+def test_perptape_runtime_status_distinguishes_configuration_and_freshness() -> None:
+    now = datetime.now(UTC)
+    empty_feed = {
+        "available": False,
+        "contract_version": None,
+        "fetched_at": None,
+    }
+    assert _perptape_runtime_status(settings(), empty_feed, now=now) == "NOT_CONFIGURED"
+
+    on_demand = settings().model_copy(update={"perptape_api_key": "configured"})
+    assert _perptape_runtime_status(on_demand, empty_feed, now=now) == "ON_DEMAND"
+    continuous = on_demand.model_copy(update={"runtime_sync_enabled": True})
+    assert _perptape_runtime_status(continuous, empty_feed, now=now) == "WAITING"
+
+    fresh_feed = {
+        "available": True,
+        "contract_version": "breakouts-v1",
+        "fetched_at": (now - timedelta(seconds=10)).isoformat(),
+    }
+    assert _perptape_runtime_status(continuous, fresh_feed, now=now) == "SUCCESS"
+    stale_feed = {**fresh_feed, "fetched_at": (now - timedelta(minutes=3)).isoformat()}
+    assert _perptape_runtime_status(continuous, stale_feed, now=now) == "STALE"
+    mismatched_feed = {**fresh_feed, "contract_version": "breakouts-v0"}
+    assert _perptape_runtime_status(continuous, mismatched_feed, now=now) == "STALE"
+
+
 def test_web_shell_is_served_without_claiming_business_readiness() -> None:
     app = create_app(settings(), FakeDatabase(ready=False))
     response = get(app, "/")
 
     assert response.status_code == 200
     assert "Trading Console" in response.text
-    assert "/assets/app.js?v=31" in response.text
-    assert "/assets/styles.css?v=18" in response.text
+    assert "/assets/app.js?v=34" in response.text
+    assert "/assets/styles.css?v=19" in response.text
     assert '<a href="/" data-link><span>⌂</span>今日</a>' in response.text
     assert 'id="mobile-nav-toggle"' in response.text
     assert 'id="confirm-dialog"' in response.text
@@ -131,11 +158,11 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
     assert "申请受审核恢复" in app_javascript.text
     assert "risk.restore.review" in app_javascript.text
     assert "risk.restore.execute" in app_javascript.text
-    assert "旧提案、旧授权和旧 AddUnit 永远不会复活" in app_javascript.text
+    assert "旧提案、旧授权和旧的可用加仓次数永远不会恢复" in app_javascript.text
     assert "本地条件满足" in app_javascript.text
     assert "LIVE_SCOPE_CONFIGURATION_REQUIRED" in app_javascript.text
     assert "i.readiness === 'READY' && i.proposal_eligible" in app_javascript.text
-    assert "Catalog 未认证此交易合约" in app_javascript.text
+    assert "该合约尚未进入可交易合约目录" in app_javascript.text
     assert "function updateManualProposalPreview" in app_javascript.text
     assert "只创建提案，不直接下单" in app_javascript.text  # noqa: RUF001
     assert "这笔交易要做什么" in app_javascript.text
@@ -155,11 +182,16 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
     assert "全局风险恢复仍由管理员控制" in app_javascript.text
     assert "异常与恢复" in app_javascript.text
     assert "POSITION_STALE" in app_javascript.text
-    assert "打开 Campaign 按顺序处理" in app_javascript.text
+    assert "打开交易任务并按顺序处理" in app_javascript.text
     assert "function actualResultsVerdict" in app_javascript.text
-    assert "先看实际盈亏和当前结论" in app_javascript.text
-    assert "待处理 Campaign" in app_javascript.text
+    assert "先看盈亏和当前结论" in app_javascript.text
+    assert "待处理交易任务" in app_javascript.text
     assert "系统运行边界与技术状态" in app_javascript.text
+    assert "风险检查已完成" in app_javascript.text
+    assert "资金划转已对账" in app_javascript.text
+    assert "api('/api/runtime/status')" in app_javascript.text
+    assert "Perptape 机会源" in app_javascript.text
+    assert "当前无监控对象" in app_javascript.text
 
     stylesheet = get(app, "/assets/styles.css")
     assert stylesheet.status_code == 200
@@ -175,7 +207,7 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
 
     service_worker = get(app, "/sw.js")
     assert service_worker.status_code == 200
-    assert "trading-shell-v31" in service_worker.text
+    assert "trading-shell-v34" in service_worker.text
     assert "await fetch(event.request)" in service_worker.text
 
 
@@ -199,6 +231,8 @@ def test_opportunity_card_disables_creation_when_catalog_rejects_raw_contract() 
           fmtNumber: String,
           fmtDate: String,
           fmtCompact: String,
+          fmtDirection: value => ({LONG:"做多", SHORT:"做空"}[value] || value),
+          fmtReadiness: value => value === "READY" ? "可用" : value,
           hasCapability: () => true,
         };
         vm.createContext(context);
@@ -210,7 +244,7 @@ def test_opportunity_card_disables_creation_when_catalog_rejects_raw_contract() 
           proposal_blocker:"INSTRUMENT_UNAVAILABLE", quote_volume:null, open_interest:null,
           rationale:"candidate", detail_url:"https://example.test", chart_url:"https://example.test",
         });
-        assert.match(unavailable, /Catalog 未认证此交易合约/);
+        assert.match(unavailable, /该合约尚未进入可交易合约目录/);
         assert.equal((unavailable.match(/ disabled/g) || []).length, 2);
 
         const eligible = context.render({
@@ -220,7 +254,7 @@ def test_opportunity_card_disables_creation_when_catalog_rejects_raw_contract() 
           quote_volume:null, open_interest:null, rationale:"candidate",
           detail_url:"https://example.test", chart_url:"https://example.test",
         });
-        assert.doesNotMatch(eligible, /Catalog 未认证此交易合约/);
+        assert.doesNotMatch(eligible, /该合约尚未进入可交易合约目录/);
         assert.doesNotMatch(eligible, / disabled/);
 
         context.hasCapability = () => false;
@@ -276,7 +310,7 @@ def test_actual_results_verdict_prioritizes_exceptions_and_settlement_state() ->
           ],
         );
         assert.equal(exception.tone, "danger");
-        assert.match(exception.title, /^1 个 Campaign/);
+        assert.match(exception.title, /^1 个交易任务/);
         assert.equal(exception.href, "/exceptions");
 
         const active = context.verdict(
@@ -329,9 +363,9 @@ def test_capital_web_projection_separates_live_and_simulation_records() -> None:
         const capitalFormFrom = source.indexOf("const capitalProposalForm");
         const capitalFormTo = source.indexOf("const mockFactForm", capitalFormFrom);
         const capitalFormSource = source.slice(capitalFormFrom, capitalFormTo);
-        assert.match(capitalFormSource, /<option>TESTNET<\/option>/);
-        assert.match(capitalFormSource, /<option>SHADOW<\/option>/);
-        assert.doesNotMatch(capitalFormSource, /<option>LIVE<\/option>/);
+        assert.match(capitalFormSource, /<option value="TESTNET">测试网<\/option>/);
+        assert.match(capitalFormSource, /<option value="SHADOW">模拟<\/option>/);
+        assert.doesNotMatch(capitalFormSource, /value="LIVE"/);
 
         const records = [
           {environment:"LIVE", location_type:"VENUE", venue:"BINANCE", marker:"live-binance"},

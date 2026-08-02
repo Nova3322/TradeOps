@@ -148,6 +148,28 @@ def _now() -> datetime:
     return datetime.now(UTC)
 
 
+def _perptape_runtime_status(
+    settings: Settings,
+    feed: dict[str, Any],
+    *,
+    now: datetime,
+) -> str:
+    if not settings.perptape_api_key:
+        return "NOT_CONFIGURED"
+    if not feed["available"]:
+        return "WAITING" if settings.runtime_sync_enabled else "ON_DEMAND"
+    if feed["contract_version"] != settings.perptape_contract_version:
+        return "STALE"
+    try:
+        fetched_at = datetime.fromisoformat(feed["fetched_at"])
+    except (TypeError, ValueError):
+        return "STALE"
+    stale_after = timedelta(
+        seconds=settings.runtime_sync_interval_seconds + int(settings.perptape_timeout_seconds)
+    )
+    return "STALE" if now - fetched_at > stale_after else "SUCCESS"
+
+
 def _domain_status(code: str) -> int:
     if code in {"LOGIN_DENIED", "AUTH_TOKEN_INVALID", "SESSION_EXPIRED", "SESSION_REVOKED"}:
         return status.HTTP_401_UNAUTHORIZED
@@ -3297,6 +3319,13 @@ def create_app(
     ) -> dict[str, Any]:
         require_capability(identity, "system.view")
         snapshot = queries().runtime_snapshot(identity.user_id)
+        perptape_feed = snapshot["perptape_feed"]
+        perptape_configured = bool(resolved_settings.perptape_api_key)
+        perptape_status = _perptape_runtime_status(
+            resolved_settings,
+            perptape_feed,
+            now=_now(),
+        )
         snapshot.update(
             {
                 "application_version": __version__,
@@ -3320,8 +3349,14 @@ def create_app(
                         "capital_broadcast_supported": False,
                     },
                     "perptape": {
-                        "configured": bool(resolved_settings.perptape_api_key),
+                        "configured": perptape_configured,
                         "mode": "READ_ONLY",
+                        "status": perptape_status,
+                        "contract_version": resolved_settings.perptape_contract_version,
+                        "feed_available": perptape_feed["available"],
+                        "candidate_count": perptape_feed["candidate_count"],
+                        "last_fetched_at": perptape_feed["fetched_at"],
+                        "last_generated_at": perptape_feed["generated_at"],
                     },
                     "binance_read_only": {
                         "enabled": resolved_settings.binance_read_only_enabled,

@@ -156,6 +156,14 @@ def test_results_are_environment_separated_and_derive_costs_curve_and_audit(
         "AUTO_OPERATING_REFILL",
     }
     assert all(item["status"] == "DISABLED" for item in runtime["capability_gates"].values())
+    assert runtime["perptape_feed"] == {
+        "available": False,
+        "contract_version": None,
+        "candidate_count": 0,
+        "generated_at": None,
+        "fetched_at": None,
+        "updated_at": None,
+    }
 
 
 def test_results_audit_and_runtime_api_do_not_mix_environments_or_expose_secrets(
@@ -213,6 +221,24 @@ def test_results_audit_and_runtime_api_do_not_mix_environments_or_expose_secrets
             runtime = await client.get("/api/runtime/status")
             assert runtime.status_code == 200
             payload = runtime.json()["data"]
+            assert payload["perptape_feed"] == {
+                "available": False,
+                "contract_version": None,
+                "candidate_count": 0,
+                "generated_at": None,
+                "fetched_at": None,
+                "updated_at": None,
+            }
+            assert payload["external_boundaries"]["perptape"] == {
+                "configured": False,
+                "mode": "READ_ONLY",
+                "status": "NOT_CONFIGURED",
+                "contract_version": "breakouts-v1",
+                "feed_available": False,
+                "candidate_count": 0,
+                "last_fetched_at": None,
+                "last_generated_at": None,
+            }
             assert payload["external_boundaries"]["capital_transfer"] == {
                 "mode": "MOCK_OR_NOTILT_UNSIGNED_HANDOFF",
                 "real_configured": False,

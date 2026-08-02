@@ -7,18 +7,18 @@
     <meta name="description" content="内部交易提案、审核、执行事实与风险控制台">
     <link rel="manifest" href="/manifest.webmanifest">
     <link rel="icon" href="/assets/icon.svg" type="image/svg+xml">
-    <link rel="stylesheet" href="/assets/styles.css?v=18">
-    <title>Trading Console · Control Plane</title>
+    <link rel="stylesheet" href="/assets/styles.css?v=19">
+    <title>Trading Console · 内部交易控制台</title>
   </head>
   <body>
     <div class="app-shell">
       <header class="topbar">
         <a class="brand" href="/" data-link>
           <span class="brand-mark" aria-hidden="true">T</span>
-          <span><b>Trading Console</b><small>Internal control plane</small></span>
+          <span><b>Trading Console</b><small>内部交易控制台</small></span>
         </a>
         <div class="topbar-actions">
-          <span id="environment-badge" class="env-badge">CONTROL PLANE</span>
+          <span id="environment-badge" class="env-badge">控制台</span>
           <button id="theme-toggle" class="icon-button" aria-label="切换主题">◐</button>
           <div id="identity-chip" class="identity-chip" hidden></div>
           <button id="mobile-nav-toggle" class="mobile-nav-toggle" type="button" aria-controls="sidebar" aria-expanded="false" hidden>菜单</button>
@@ -30,7 +30,7 @@
           <a href="/" data-link><span>⌂</span>今日</a>
           <a href="/opportunities" data-link data-nav-capability="opportunity.view"><span>⌁</span>机会</a>
           <a href="/reviews" data-link data-nav-capability="proposal.review"><span>✓</span>审核队列</a>
-          <a href="/campaigns" data-link data-nav-capability="operations.view"><span>◎</span>Campaign</a>
+          <a href="/campaigns" data-link data-nav-capability="operations.view"><span>◎</span>交易任务</a>
           <a href="/positions" data-link data-nav-capability="system.view"><span>↕</span>系统状态</a>
           <a href="/capital" data-link data-nav-capability="capital.view"><span>¤</span>资金</a>
           <a href="/exceptions" data-link data-nav-capability="operations.view"><span>!</span>异常</a>
@@ -40,8 +40,8 @@
         </nav>
         <div class="sidebar-foot">
           <div id="mobile-session-summary" class="mobile-session-summary"></div>
-          <div><span class="status-dot"></span> PostgreSQL 权威事实</div>
-          <div>缺失事实 · 自动阻断</div>
+          <div><span class="status-dot"></span> 数据来源：PostgreSQL</div>
+          <div>数据缺失时自动阻止交易</div>
           <button id="logout-button" class="text-button">退出当前会话</button>
         </div>
       </aside>
@@ -55,7 +55,7 @@
     <dialog id="system-proposal-dialog">
       <form id="system-proposal-form" method="dialog" class="dialog-form">
         <div class="dialog-head">
-          <div><p class="eyebrow">PERPTAPE → SYSTEM PROPOSAL</p><h2>冻结候选并提交审核</h2></div>
+          <div><p class="eyebrow">PERPTAPE 机会</p><h2>保存候选并提交审核</h2></div>
           <button type="button" class="icon-button" data-close-dialog aria-label="关闭">×</button>
         </div>
         <input name="candidate_id" type="hidden">
@@ -67,19 +67,19 @@
           <summary>高级参数</summary>
         <div class="field-grid">
           <label>账户<input name="account_id" value="acct-1" required></label>
-          <label>风险档位<select name="risk_tier"><option>LOW</option><option selected>MEDIUM</option><option>HIGH</option></select></label>
+          <label>风险档位<select name="risk_tier"><option value="LOW">低</option><option value="MEDIUM" selected>中</option><option value="HIGH">高</option></select></label>
           <label>请求数量<input name="quantity" type="number" step="any" min="0" required></label>
           <label>初仓数量<input name="initial_quantity" type="number" step="any" min="0"></label>
           <label>最大风险<input name="max_risk" type="number" step="any" min="0" required></label>
           <label>失效价格<input name="invalidation_price" type="number" step="any" min="0" required></label>
-          <label>允许 AUTO_ADD<select name="allow_auto_add"><option value="false" selected>否</option><option value="true">是</option></select></label>
-          <label>预授权 AddUnit<select name="requested_adds"><option value="0" selected>0</option><option value="1">1</option><option value="2">2</option><option value="3">3</option></select></label>
-          <label>Add 触发价格<input name="add_trigger_price" type="number" step="any" min="0"></label>
-          <label>有效分钟<input name="expires_in_minutes" type="number" min="5" max="1440" value="120" required></label>
+          <label>允许自动加仓<select name="allow_auto_add"><option value="false" selected>否</option><option value="true">是</option></select></label>
+          <label>可用加仓次数<select name="requested_adds"><option value="0" selected>0</option><option value="1">1</option><option value="2">2</option><option value="3">3</option></select></label>
+          <label>加仓触发价格<input name="add_trigger_price" type="number" step="any" min="0"></label>
+          <label>有效时间（分钟）<input name="expires_in_minutes" type="number" min="5" max="1440" value="120" required></label>
         </div>
         <label>人工补充理由<textarea name="rationale" rows="3" required>使用默认风险配置创建 Perptape 候选提案，尚未形成任何订单。</textarea></label>
         </details>
-        <p class="safety-note">提交只创建 SHADOW 提案。Perptape 信号不会直接产生订单。</p>
+        <p class="safety-note">提交只创建模拟环境提案。Perptape 信号不会直接产生订单。</p>
         <div id="system-form-error" class="form-error" role="alert"></div>
         <div class="dialog-actions"><button type="button" class="secondary" data-close-dialog>取消</button><button class="primary" type="submit">按此配置创建</button></div>
       </form>
@@ -98,6 +98,6 @@
       </form>
     </dialog>
     <div id="toast" class="toast" role="status" aria-live="polite"></div>
-    <script type="module" src="/assets/app.js?v=31"></script>
+    <script type="module" src="/assets/app.js?v=34"></script>
   </body>
 </html>
