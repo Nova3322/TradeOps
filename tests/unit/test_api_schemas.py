@@ -73,6 +73,9 @@ def test_disabled_auto_add_cannot_hide_reserved_quantity_or_units() -> None:
 
 
 def test_live_environment_is_explicit_for_perptape_and_capital_proposals() -> None:
+    manual = ManualProposalRequest.model_validate(
+        {**proposal_payload(), "environment": "LIVE"}
+    )
     system = SystemProposalRequest.model_validate(
         {
             "environment": "LIVE",
@@ -102,5 +105,6 @@ def test_live_environment_is_explicit_for_perptape_and_capital_proposals() -> No
         }
     )
 
+    assert manual.environment == "LIVE"
     assert system.environment == "LIVE"
     assert transfer.environment == "LIVE"

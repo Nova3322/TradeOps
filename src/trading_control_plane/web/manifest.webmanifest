@@ -1,7 +1,7 @@
 {
-  "name": "Trading Console SHADOW",
-  "short_name": "Trading",
-  "description": "Internal trading command and risk console",
+  "name": "交易控制台",
+  "short_name": "交易控制台",
+  "description": "生产交易与风险管理控制台",
   "start_url": "/",
   "display": "standalone",
   "background_color": "#f1f4f0",

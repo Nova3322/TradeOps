@@ -57,7 +57,7 @@ class ManagedUserAccessRequest(BaseModel):
 
 
 class ManualProposalRequest(BaseModel):
-    environment: Literal["SHADOW", "TESTNET"] = "SHADOW"
+    environment: Literal["SHADOW", "TESTNET", "LIVE"] = "SHADOW"
     account_id: str = Field(min_length=1, max_length=120)
     venue: str = Field(min_length=1, max_length=64)
     instrument_id: UUID

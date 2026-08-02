@@ -4,21 +4,22 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
     <meta name="theme-color" content="#101616">
-    <meta name="description" content="内部交易提案、审核、执行事实与风险控制台">
+    <meta name="description" content="生产交易提案、审核、执行、资金与风险控制台">
     <link rel="manifest" href="/manifest.webmanifest">
     <link rel="icon" href="/assets/icon.svg" type="image/svg+xml">
-    <link rel="stylesheet" href="/assets/styles.css?v=19">
-    <title>Trading Console · 内部交易控制台</title>
+    <link rel="stylesheet" href="/assets/styles.css?v=20">
+    <title>交易控制台</title>
   </head>
   <body>
     <div class="app-shell">
       <header class="topbar">
         <a class="brand" href="/" data-link>
           <span class="brand-mark" aria-hidden="true">T</span>
-          <span><b>Trading Console</b><small>内部交易控制台</small></span>
+          <span><b>交易控制台</b><small>生产交易管理</small></span>
         </a>
         <div class="topbar-actions">
           <span id="environment-badge" class="env-badge">控制台</span>
+          <button id="language-toggle" class="icon-button language-button" type="button" aria-label="切换语言">语言</button>
           <button id="theme-toggle" class="icon-button" aria-label="切换主题">◐</button>
           <div id="identity-chip" class="identity-chip" hidden></div>
           <button id="mobile-nav-toggle" class="mobile-nav-toggle" type="button" aria-controls="sidebar" aria-expanded="false" hidden>菜单</button>
@@ -35,12 +36,12 @@
           <a href="/capital" data-link data-nav-capability="capital.view"><span>¤</span>资金</a>
           <a href="/exceptions" data-link data-nav-capability="operations.view"><span>!</span>异常</a>
           <a href="/results" data-link data-nav-capability="results.view"><span>▤</span>结果与审计</a>
-          <a href="/venues" data-link data-nav-capability="venue.view"><span>◫</span>交易所事实</a>
+          <a href="/venues" data-link data-nav-capability="venue.view"><span>◫</span>交易账户</a>
           <a href="/admin/users" data-link data-nav-capability="access.manage"><span>◇</span>成员权限</a>
         </nav>
         <div class="sidebar-foot">
           <div id="mobile-session-summary" class="mobile-session-summary"></div>
-          <div><span class="status-dot"></span> 数据来源：PostgreSQL</div>
+          <div><span class="status-dot"></span> 业务数据库已连接</div>
           <div>数据缺失时自动阻止交易</div>
           <button id="logout-button" class="text-button">退出当前会话</button>
         </div>
@@ -79,7 +80,7 @@
         </div>
         <label>人工补充理由<textarea name="rationale" rows="3" required>使用默认风险配置创建 Perptape 候选提案，尚未形成任何订单。</textarea></label>
         </details>
-        <p class="safety-note">提交只创建模拟环境提案。Perptape 信号不会直接产生订单。</p>
+        <p class="safety-note">提交只创建生产交易提案。突破信号不会绕过审核、风控和授权直接产生订单。</p>
         <div id="system-form-error" class="form-error" role="alert"></div>
         <div class="dialog-actions"><button type="button" class="secondary" data-close-dialog>取消</button><button class="primary" type="submit">按此配置创建</button></div>
       </form>
@@ -98,6 +99,6 @@
       </form>
     </dialog>
     <div id="toast" class="toast" role="status" aria-live="polite"></div>
-    <script type="module" src="/assets/app.js?v=34"></script>
+    <script type="module" src="/assets/app.js?v=38"></script>
   </body>
 </html>

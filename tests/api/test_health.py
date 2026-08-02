@@ -111,9 +111,9 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
     response = get(app, "/")
 
     assert response.status_code == 200
-    assert "Trading Console" in response.text
-    assert "/assets/app.js?v=34" in response.text
-    assert "/assets/styles.css?v=19" in response.text
+    assert "交易控制台" in response.text
+    assert "/assets/app.js?v=38" in response.text
+    assert "/assets/styles.css?v=20" in response.text
     assert '<a href="/" data-link><span>⌂</span>今日</a>' in response.text
     assert 'id="mobile-nav-toggle"' in response.text
     assert 'id="confirm-dialog"' in response.text
@@ -121,7 +121,7 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
     for route in ("/venues", "/venues/hyperliquid", "/admin/users"):
         routed_shell = get(app, route)
         assert routed_shell.status_code == 200
-        assert "Trading Console" in routed_shell.text
+        assert "交易控制台" in routed_shell.text
 
     app_javascript = get(app, "/assets/app.js")
     assert app_javascript.status_code == 200
@@ -148,25 +148,25 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
     assert "function partitionCapitalRecords" in app_javascript.text
     assert "function capitalSourceSlots" in app_javascript.text
     assert "function liveCapitalInTransit" in app_javascript.text
-    assert "模拟数据" in app_javascript.text
-    assert "独立隔离" in app_javascript.text
+    assert "审核后自动准备，钱包只做最终确认" in app_javascript.text  # noqa: RUF001
+    assert "startAutomaticCapitalTransfer" in app_javascript.text
     assert "未配置或未同步" in app_javascript.text
     assert app_javascript.text.count("${capitalProposalForm}") == 1
-    assert "${capitalProposalForm}${mockFactForm}${automationPanel}" in app_javascript.text
+    assert "${automaticTransferPanel}${capitalProposalForm}" in app_javascript.text
     assert "fmtNumber(item.in_transit)" not in app_javascript.text
     assert "fmtNumber(liveInTransit)" in app_javascript.text
     assert "申请受审核恢复" in app_javascript.text
     assert "risk.restore.review" in app_javascript.text
     assert "risk.restore.execute" in app_javascript.text
     assert "旧提案、旧授权和旧的可用加仓次数永远不会恢复" in app_javascript.text
-    assert "本地条件满足" in app_javascript.text
+    assert "恢复条件" in app_javascript.text
     assert "LIVE_SCOPE_CONFIGURATION_REQUIRED" in app_javascript.text
     assert "i.readiness === 'READY' && i.proposal_eligible" in app_javascript.text
     assert "该合约尚未进入可交易合约目录" in app_javascript.text
     assert "function updateManualProposalPreview" in app_javascript.text
     assert "只创建提案，不直接下单" in app_javascript.text  # noqa: RUF001
     assert "这笔交易要做什么" in app_javascript.text
-    assert "查看技术载荷与语义哈希" in app_javascript.text
+    assert "查看技术载荷与语义哈希" not in app_javascript.text
     assert "const canReview = Boolean(item.actionable_for_current_user);" in app_javascript.text
     assert "INITIAL_INTENT_ALREADY_EXISTS" in app_javascript.text
     assert "账户事实已经过期" in app_javascript.text
@@ -186,7 +186,7 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
     assert "function actualResultsVerdict" in app_javascript.text
     assert "先看盈亏和当前结论" in app_javascript.text
     assert "待处理交易任务" in app_javascript.text
-    assert "系统运行边界与技术状态" in app_javascript.text
+    assert "系统运行边界与技术状态" not in app_javascript.text
     assert "风险检查已完成" in app_javascript.text
     assert "资金划转已对账" in app_javascript.text
     assert "api('/api/runtime/status')" in app_javascript.text
@@ -207,7 +207,7 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
 
     service_worker = get(app, "/sw.js")
     assert service_worker.status_code == 200
-    assert "trading-shell-v34" in service_worker.text
+    assert "trading-shell-v38" in service_worker.text
     assert "await fetch(event.request)" in service_worker.text
 
 
@@ -345,7 +345,7 @@ def test_actual_results_verdict_prioritizes_exceptions_and_settlement_state() ->
     assert completed.returncode == 0, completed.stderr
 
 
-def test_capital_web_projection_separates_live_and_simulation_records() -> None:
+def test_capital_web_projection_only_renders_live_records() -> None:
     node = shutil.which("node")
     assert node is not None
     app_path = Path(__file__).parents[2] / "src" / "trading_control_plane" / "web" / "app.js"
@@ -361,11 +361,11 @@ def test_capital_web_projection_separates_live_and_simulation_records() -> None:
         assert.notEqual(from, -1);
         assert.notEqual(to, -1);
         const capitalFormFrom = source.indexOf("const capitalProposalForm");
-        const capitalFormTo = source.indexOf("const mockFactForm", capitalFormFrom);
+        const capitalFormTo = source.indexOf("const automaticTransferPanel", capitalFormFrom);
         const capitalFormSource = source.slice(capitalFormFrom, capitalFormTo);
-        assert.match(capitalFormSource, /<option value="TESTNET">测试网<\/option>/);
-        assert.match(capitalFormSource, /<option value="SHADOW">模拟<\/option>/);
-        assert.doesNotMatch(capitalFormSource, /value="LIVE"/);
+        assert.match(capitalFormSource, /type="hidden" value="LIVE"/);
+        assert.doesNotMatch(capitalFormSource, /value="TESTNET"/);
+        assert.doesNotMatch(capitalFormSource, /value="SHADOW"/);
 
         const records = [
           {environment:"LIVE", location_type:"VENUE", venue:"BINANCE", marker:"live-binance"},
@@ -590,7 +590,7 @@ def test_web_request_lifecycle_in_node() -> None:
           removedToastClasses: ["show", "error"],
         });
 
-        const pendingContext = vm.createContext({});
+        const pendingContext = vm.createContext({localizedText: value => value});
         vm.runInContext(pendingSource, pendingContext);
         const attributes = new Map();
         const button = {

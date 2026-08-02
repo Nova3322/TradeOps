@@ -821,7 +821,7 @@ def create_app(
         return {
             "source": "PERPTAPE",
             "source_contract_version": resolved_settings.perptape_contract_version,
-            "environment": "SHADOW",
+            "environment": "LIVE",
             "as_of": now.isoformat(),
             "data": data,
         }
@@ -913,7 +913,7 @@ def create_app(
         if current["status"] == ProposalStatus.DRAFT.value:
             service().submit_proposal(proposal_id, principal.user_id, now=now)
             current = queries().proposal_detail(identity.user_id, proposal_id)
-            notify_reviewers(proposal_id, int(current["version"]), "SHADOW")
+            notify_reviewers(proposal_id, int(current["version"]), current["environment"])
         return current
 
     @app.post("/api/proposals/manual")
