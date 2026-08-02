@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
+import json
 import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -11,7 +13,18 @@ from typing import Any, Protocol
 from urllib.parse import quote
 from uuid import UUID
 
-from fastapi import Cookie, Depends, FastAPI, HTTPException, Query, Request, Response, status
+from fastapi import (
+    Cookie,
+    Depends,
+    FastAPI,
+    HTTPException,
+    Query,
+    Request,
+    Response,
+    WebSocket,
+    WebSocketDisconnect,
+    status,
+)
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
@@ -801,22 +814,16 @@ def create_app(
             )
         raise DomainRejected("PERPTAPE_CANDIDATE_NOT_FOUND", "candidate is no longer available")
 
-    @app.get("/api/opportunities")
-    def opportunities(
-        identity: SessionIdentity = identity_dependency,
-    ) -> dict[str, Any]:
-        require_capability(identity, "opportunity.view")
-        now = _now()
+    def opportunity_snapshot(*, now: datetime) -> dict[str, Any]:
         candidates = current_perptape_candidates(now=now)
-        active_instruments = queries().active_instrument_keys(
-            {(candidate.venue, candidate.symbol) for candidate in candidates}
-        )
         data: list[dict[str, Any]] = []
         for candidate in candidates:
             value = candidate.to_dict()
-            proposal_eligible = (candidate.venue, candidate.symbol) in active_instruments
+            proposal_eligible = candidate.venue in {"BINANCE", "HYPERLIQUID"}
             value["proposal_eligible"] = proposal_eligible
-            value["proposal_blocker"] = None if proposal_eligible else "INSTRUMENT_UNAVAILABLE"
+            value["proposal_blocker"] = (
+                None if proposal_eligible else "VENUE_UNSUPPORTED"
+            )
             data.append(value)
         return {
             "source": "PERPTAPE",
@@ -825,6 +832,64 @@ def create_app(
             "as_of": now.isoformat(),
             "data": data,
         }
+
+    @app.get("/api/opportunities")
+    def opportunities(
+        identity: SessionIdentity = identity_dependency,
+    ) -> dict[str, Any]:
+        require_capability(identity, "opportunity.view")
+        return opportunity_snapshot(now=_now())
+
+    @app.websocket("/ws/opportunities")
+    async def opportunity_stream(websocket: WebSocket) -> None:
+        session_token = websocket.cookies.get(SESSION_COOKIE)
+        if session_token is None:
+            await websocket.close(code=4401)
+            return
+        try:
+            identity = token_service.verify_session(session_token, now=_now())
+            queries().user_context(identity.user_id)
+            require_capability(identity, "opportunity.view")
+        except DomainRejected as exc:
+            await websocket.close(code=4403 if exc.code == "RBAC_DENIED" else 4401)
+            return
+
+        await websocket.accept()
+        last_digest: str | None = None
+        last_error: str | None = None
+        last_heartbeat = 0.0
+        loop = asyncio.get_running_loop()
+        try:
+            while True:
+                try:
+                    snapshot = opportunity_snapshot(now=_now())
+                except DomainRejected as exc:
+                    if last_error != exc.code:
+                        await websocket.send_json(
+                            {
+                                "type": "error",
+                                "error": {"code": exc.code, "message": exc.detail},
+                            }
+                        )
+                        last_error = exc.code
+                else:
+                    digest = hashlib.sha256(
+                        json.dumps(snapshot["data"], sort_keys=True, separators=(",", ":")).encode()
+                    ).hexdigest()
+                    monotonic_now = loop.time()
+                    if digest != last_digest:
+                        await websocket.send_json({"type": "snapshot", **snapshot})
+                        last_digest = digest
+                        last_error = None
+                        last_heartbeat = monotonic_now
+                    elif monotonic_now - last_heartbeat >= 15:
+                        await websocket.send_json(
+                            {"type": "heartbeat", "as_of": snapshot["as_of"]}
+                        )
+                        last_heartbeat = monotonic_now
+                await asyncio.sleep(2)
+        except WebSocketDisconnect:
+            return
 
     @app.post("/api/opportunities/{candidate_id}/proposals")
     def create_system_proposal(
@@ -845,7 +910,44 @@ def create_app(
         principal = queries().service_principal_by_username(
             resolved_settings.perptape_service_username
         )
-        instrument_id = queries().instrument_id_by_venue_symbol(candidate.venue, candidate.symbol)
+        try:
+            instrument_id = queries().instrument_id_by_venue_symbol(
+                candidate.venue, candidate.symbol
+            )
+        except DomainRejected as exc:
+            if exc.code != "INSTRUMENT_UNAVAILABLE":
+                raise
+            catalog_actor = queries().service_principal_by_username(
+                resolved_settings.runtime_sync_service_username
+            )
+            instrument: Any
+            if candidate.venue == "BINANCE":
+                instrument = resolved_binance.read_instrument(candidate.symbol)
+            elif candidate.venue == "HYPERLIQUID":
+                instrument = resolved_hyperliquid.read_instrument(candidate.symbol)
+            else:
+                raise DomainRejected(
+                    "INSTRUMENT_UNAVAILABLE",
+                    "candidate venue is not supported for automatic contract discovery",
+                ) from exc
+            if not instrument.active:
+                raise DomainRejected(
+                    "INSTRUMENT_UNAVAILABLE",
+                    "official venue metadata marks the candidate contract inactive",
+                ) from exc
+            instrument_id = service().upsert_venue_instrument(
+                actor_id=catalog_actor.user_id,
+                account_id=payload.account_id,
+                venue=candidate.venue,
+                symbol=instrument.symbol,
+                tick_size=instrument.tick_size,
+                lot_size=instrument.lot_size,
+                minimum_notional=instrument.minimum_notional,
+                quote_currency=instrument.quote_currency,
+                collateral_currency=instrument.collateral_currency,
+                active=instrument.active,
+                now=now,
+            )
         legacy_candidate_id = perptape_legacy_candidate_id(candidate)
         source_candidate_id = (
             queries().compatible_legacy_system_candidate_id(
@@ -1177,6 +1279,11 @@ def create_app(
             ),
             "account_mode": resolved_settings.binance_account_mode,
             "fact_environment": resolved_settings.binance_fact_environment,
+            "automatic_sync_enabled": (
+                resolved_settings.runtime_sync_enabled
+                and resolved_settings.runtime_binance_account_id is not None
+            ),
+            "automatic_sync_interval_seconds": resolved_settings.runtime_sync_interval_seconds,
             "environment": resolved_settings.environment,
         }
 
@@ -1362,6 +1469,11 @@ def create_app(
             "fact_environment": resolved_settings.hyperliquid_fact_environment,
             "source_environment": resolved_hyperliquid.fact_environment,
             "hip3_available": False,
+            "automatic_sync_enabled": (
+                resolved_settings.runtime_sync_enabled
+                and resolved_settings.runtime_hyperliquid_account_id is not None
+            ),
+            "automatic_sync_interval_seconds": resolved_settings.runtime_sync_interval_seconds,
             "environment": resolved_settings.environment,
         }
 

@@ -11,6 +11,7 @@ from trading_control_plane.database import Database
 from trading_control_plane.domain import DomainRejected, PrincipalType, Role
 from trading_control_plane.models import (
     AccountEquity,
+    AccountEquityObservation,
     Approval,
     AuditEvent,
     Campaign,
@@ -695,6 +696,25 @@ class TradingQueries:
             ).all()
             if not any(item.role == Role.TREASURY_ADMIN.value for item in assignments):
                 raise DomainRejected("RBAC_DENIED", "capital center access is not assigned")
+            treasury_assignments = [
+                item for item in assignments if item.role == Role.TREASURY_ADMIN.value
+            ]
+
+            def can_view_history(item: AccountEquityObservation) -> bool:
+                if item.location_type == "VAULT":
+                    return any(
+                        assignment.account_scope is None and assignment.venue_scope is None
+                        for assignment in treasury_assignments
+                    )
+                return any(
+                    (
+                        assignment.account_scope is None
+                        or assignment.account_scope == item.account_id
+                    )
+                    and (assignment.venue_scope is None or assignment.venue_scope == item.venue)
+                    for assignment in treasury_assignments
+                )
+
             balances = session.scalars(
                 select(AccountEquity).order_by(
                     AccountEquity.location_type,
@@ -717,6 +737,16 @@ class TradingQueries:
                     CapitalAutomationPolicy.account_id,
                 )
             ).all()
+            observations = list(
+                reversed(
+                    session.scalars(
+                        select(AccountEquityObservation)
+                        .where(AccountEquityObservation.environment == "LIVE")
+                        .order_by(AccountEquityObservation.observed_at.desc())
+                        .limit(5_000)
+                    ).all()
+                )
+            )
             risk_policy = session.scalar(select(RiskPolicy).where(RiskPolicy.active))
             max_fact_age = timedelta(
                 seconds=(risk_policy.max_fact_age_seconds if risk_policy is not None else 300)
@@ -840,6 +870,25 @@ class TradingQueries:
                 "real_transfer_gate": None if gate is None else gate.status,
                 "real_transfer_reason": None if gate is None else gate.reason,
                 "balances": balance_data,
+                "history": [
+                    {
+                        "source": (
+                            "VAULT" if item.location_type == "VAULT" else item.venue
+                        ),
+                        "location_type": item.location_type,
+                        "location_id": item.account_id,
+                        "venue": item.venue,
+                        "asset": item.currency,
+                        "equity": str(item.equity),
+                        "available_balance": str(item.available_balance),
+                        "usd_equity": (
+                            None if item.usd_equity is None else str(item.usd_equity)
+                        ),
+                        "observed_at": _iso(item.observed_at),
+                    }
+                    for item in observations
+                    if can_view_history(item)
+                ],
                 "net_worth": {
                     "environment": "LIVE",
                     "currency": "USD",

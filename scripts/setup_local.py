@@ -114,7 +114,7 @@ def main() -> None:
             owner_id,
             now=now,
         )
-        for role in (Role.OBSERVER, Role.REVIEWER, Role.OPERATOR):
+        for role in (Role.OBSERVER, Role.REVIEWER, Role.OPERATOR, Role.TREASURY_ADMIN):
             _ensure_role(database, service, owner_id, role, owner_id, now=now)
         _ensure_role(database, service, proposer_id, Role.PROPOSER, owner_id, now=now)
         _ensure_role(

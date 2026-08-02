@@ -191,6 +191,12 @@ class BinanceReadOnlyClient:
     def configured(self) -> bool:
         return bool(self._api_key and self._api_secret)
 
+    def read_instrument(self, symbol: str) -> BinanceInstrument:
+        if not symbol or symbol != symbol.upper():
+            raise DomainRejected("BINANCE_SYMBOL_INVALID", "Binance symbol must be uppercase")
+        exchange = self._public_get("/fapi/v1/exchangeInfo", {"symbol": symbol})
+        return self._parse_instrument(exchange, symbol)
+
     def _public_get(self, path: str, params: dict[str, str]) -> JsonValue:
         query = urllib.parse.urlencode(params)
         return self._fetcher(f"{self._base_url}{path}?{query}", {}, 5.0)
@@ -613,6 +619,12 @@ class BinancePortfolioMarginReadOnlyClient:
     @property
     def configured(self) -> bool:
         return bool(self._api_key and self._api_secret)
+
+    def read_instrument(self, symbol: str) -> BinanceInstrument:
+        if not symbol or symbol != symbol.upper():
+            raise DomainRejected("BINANCE_SYMBOL_INVALID", "Binance symbol must be uppercase")
+        exchange = self._market_get("/fapi/v1/exchangeInfo", {"symbol": symbol})
+        return BinanceReadOnlyClient._parse_instrument(exchange, symbol)
 
     def _signed_get(self, path: str, params: dict[str, str], *, timestamp_ms: int) -> JsonValue:
         if not self.configured:

@@ -146,8 +146,8 @@ def test_results_are_environment_separated_and_derive_costs_curve_and_audit(
 
     runtime = queries.runtime_snapshot(ids["operator"])
     assert runtime["database_ready"] is True
-    assert runtime["schema_revision"] == "20260801_0005"
-    assert runtime["business_table_count"] == 28
+    assert runtime["schema_revision"] == "20260802_0006"
+    assert runtime["business_table_count"] == 29
     assert set(runtime["capability_gates"]) == {
         "LIVE_ORDER_SEND",
         "CAPITAL_TRANSFER",
@@ -256,6 +256,6 @@ def test_results_audit_and_runtime_api_do_not_mix_environments_or_expose_secrets
             assert "private_key" not in serialized
             web = await client.get("/results")
             assert web.status_code == 200
-            assert "Trading Console" in web.text
+            assert "<title>交易控制台</title>" in web.text
 
     asyncio.run(scenario())

@@ -1246,14 +1246,14 @@ class PerptapeClient:
             data_health="CURRENT" if readiness == "ready" else "DEGRADED",
             readiness=readiness.upper(),
             detail_url=(
-                f"{self._base_url}/breakouts?"
+                f"{self._base_url}/markets?"
                 + urllib.parse.urlencode(
                     {
                         "ex": exchange,
                         "q": f"{exchange}:{canonical_symbol}:{symbol}",
                         "utm_source": "trading_console",
                         "utm_medium": "opportunity",
-                        "utm_campaign": "breakout_symbol",
+                        "utm_campaign": "market_scan_symbol",
                         "lang": "zh-CN",
                     }
                 )

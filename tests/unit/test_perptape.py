@@ -119,6 +119,9 @@ def test_real_breakout_contract_maps_to_narrow_trading_candidates_and_caches() -
     assert first[0].candidate_id.startswith("pt_")
     assert first[0].quote_volume == 1_000_000
     assert first[0].open_interest == 500_000
+    assert first[0].detail_url.startswith("https://perptape.com/markets?")
+    assert "utm_campaign=market_scan_symbol" in first[0].detail_url
+    assert "/breakouts?" not in first[0].detail_url
     assert client.get_candidate(first[0].candidate_id, now=NOW) == first[0]
 
 

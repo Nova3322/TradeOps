@@ -80,6 +80,7 @@ from trading_control_plane.metrics import (
 )
 from trading_control_plane.models import (
     AccountEquity,
+    AccountEquityObservation,
     Approval,
     AuditEvent,
     Campaign,
@@ -838,6 +839,69 @@ class TradingService:
                 object_type="Instrument",
                 object_id=instrument.instrument_id,
                 reason=f"{venue}:{symbol}",
+                correlation_id=uuid4(),
+                object_version=1,
+                now=now,
+            )
+            return instrument.instrument_id
+
+    def upsert_venue_instrument(
+        self,
+        *,
+        actor_id: UUID,
+        account_id: str,
+        venue: str,
+        symbol: str,
+        tick_size: Decimal,
+        lot_size: Decimal,
+        minimum_notional: Decimal,
+        quote_currency: str,
+        collateral_currency: str,
+        active: bool,
+        now: datetime,
+    ) -> UUID:
+        """Refresh a read-only venue contract catalog entry from official venue metadata."""
+
+        with self.database.session_factory.begin() as session:
+            self._require_role(session, actor_id, "venue.record", account_id, venue)
+            instrument = session.scalar(
+                select(Instrument)
+                .where(Instrument.venue == venue, Instrument.symbol == symbol)
+                .with_for_update()
+            )
+            event_type = "INSTRUMENT_REGISTERED"
+            if instrument is None:
+                instrument = Instrument(
+                    venue=venue,
+                    symbol=symbol,
+                    tick_size=tick_size,
+                    lot_size=lot_size,
+                    minimum_notional=minimum_notional,
+                    contract_multiplier=Decimal(1),
+                    quote_currency=quote_currency,
+                    collateral_currency=collateral_currency,
+                    active=active,
+                    protection_supported=True,
+                    updated_at=now,
+                )
+                session.add(instrument)
+                session.flush()
+            else:
+                event_type = "INSTRUMENT_REFRESHED"
+                instrument.tick_size = tick_size
+                instrument.lot_size = lot_size
+                instrument.minimum_notional = minimum_notional
+                instrument.quote_currency = quote_currency
+                instrument.collateral_currency = collateral_currency
+                instrument.active = active
+                instrument.updated_at = now
+            self._audit(
+                session,
+                actor_id=str(actor_id),
+                event_type=event_type,
+                object_type="Instrument",
+                object_id=instrument.instrument_id,
+                reason=f"OFFICIAL_VENUE_METADATA:{venue}:{symbol}",
                 correlation_id=uuid4(),
                 object_version=1,
                 now=now,
@@ -4320,6 +4384,44 @@ class TradingService:
             )
             return protection.protection_id
 
+    @staticmethod
+    def _record_account_equity_observation(
+        session: Session,
+        fact: AccountEquity,
+        *,
+        recorded_at: datetime,
+    ) -> None:
+        session.flush()
+        if session.scalar(
+            select(AccountEquityObservation.observation_id).where(
+                AccountEquityObservation.account_equity_id == fact.account_equity_id,
+                AccountEquityObservation.observed_at == fact.observed_at,
+            )
+        ) is not None:
+            return
+        usd_equity = None
+        if fact.fact_status == FactStatus.KNOWN.value:
+            usd_equity = (
+                fact.equity
+                if fact.currency.upper() in USD_STABLE_ASSETS
+                else fact.valuation_equity
+            )
+        session.add(
+            AccountEquityObservation(
+                account_equity_id=fact.account_equity_id,
+                environment=fact.environment,
+                location_type=fact.location_type,
+                account_id=fact.account_id,
+                venue=fact.venue,
+                currency=fact.currency,
+                equity=fact.equity,
+                available_balance=fact.available_balance,
+                usd_equity=usd_equity,
+                observed_at=fact.observed_at,
+                recorded_at=recorded_at,
+            )
+        )
+
     def record_account_equity(
         self,
         account_id: str,
@@ -4377,6 +4479,7 @@ class TradingService:
                 fact.fact_status = FactStatus.KNOWN.value if known else FactStatus.UNKNOWN.value
                 fact.observed_at = fact_time
                 fact.updated_at = now
+            self._record_account_equity_observation(session, fact, recorded_at=now)
             return fact.account_equity_id
 
     def record_funding(
@@ -4844,6 +4947,7 @@ class TradingService:
                 equity.fact_status = FactStatus.KNOWN.value
                 equity.observed_at = now
                 equity.updated_at = now
+            self._record_account_equity_observation(session, equity, recorded_at=now)
 
             order_count = 0
             for external_order in snapshot.orders:
@@ -7144,6 +7248,7 @@ class TradingService:
                 fact.fact_status = FactStatus.KNOWN.value if known else FactStatus.UNKNOWN.value
                 fact.observed_at = observed_at
                 fact.updated_at = now
+            self._record_account_equity_observation(session, fact, recorded_at=now)
             self._audit(
                 session,
                 actor_id=str(actor_id),
@@ -7247,6 +7352,7 @@ class TradingService:
                     fact.fact_status = FactStatus.KNOWN.value
                     fact.observed_at = budget.block_timestamp
                     fact.updated_at = now
+                self._record_account_equity_observation(session, fact, recorded_at=now)
                 self._audit(
                     session,
                     actor_id=str(actor_id),

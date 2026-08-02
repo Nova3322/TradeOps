@@ -283,6 +283,16 @@ class HyperliquidReadOnlyClient:
     def fact_environment(self) -> str:
         return "TESTNET" if self._host == "api.hyperliquid-testnet.xyz" else "LIVE"
 
+    def read_instrument(self, symbol: str) -> HyperliquidInstrument:
+        if not symbol or symbol != symbol.upper() or not re.fullmatch(r"[A-Z0-9]+", symbol):
+            raise DomainRejected(
+                "HYPERLIQUID_SYMBOL_INVALID",
+                "Hyperliquid Core symbol must be uppercase alphanumeric",
+            )
+        meta_contexts = self._info({"type": "metaAndAssetCtxs", "dex": ""})
+        instrument, _mark_price = self._parse_instrument(meta_contexts, symbol)
+        return instrument
+
     def _info(self, payload: dict[str, Any]) -> JsonValue:
         return self._fetcher(f"{self._base_url}/info", payload, 5.0)
 

@@ -12,6 +12,7 @@ from httpx import ASGITransport, AsyncClient
 from sqlalchemy import func, select
 
 from trading_control_plane.api import create_app
+from trading_control_plane.binance import BinanceInstrument
 from trading_control_plane.config import Settings
 from trading_control_plane.database import Database
 from trading_control_plane.domain import (
@@ -41,11 +42,13 @@ def seed(service: TradingService) -> dict[str, UUID]:
     reviewer_two = service.create_user("reviewer-2", admin, now=now)
     operator = service.create_user("operator", admin, now=now)
     perptape = service.create_service_principal("perptape", admin, now=now)
+    runtime_sync = service.create_service_principal("runtime-sync", admin, now=now)
     service.assign_role(proposer, Role.PROPOSER, admin, "acct-1", "BINANCE", now=now)
     service.assign_role(reviewer_one, Role.REVIEWER, admin, "acct-1", "BINANCE", now=now)
     service.assign_role(reviewer_two, Role.REVIEWER, admin, "acct-1", "BINANCE", now=now)
     service.assign_role(operator, Role.OPERATOR, admin, "acct-1", "BINANCE", now=now)
     service.assign_role(perptape, Role.PROPOSER, admin, "acct-1", "BINANCE", now=now)
+    service.assign_role(runtime_sync, Role.OPERATOR, admin, "acct-1", "BINANCE", now=now)
     instrument = service.register_instrument(
         actor_id=admin,
         venue="BINANCE",
@@ -95,6 +98,7 @@ def seed(service: TradingService) -> dict[str, UUID]:
         "reviewer_two": reviewer_two,
         "operator": operator,
         "perptape": perptape,
+        "runtime_sync": runtime_sync,
         "instrument": instrument,
     }
 
@@ -169,6 +173,8 @@ def app(
     database: Database,
     telegram: MockTelegramGateway,
     client: PerptapeClient | None = None,
+    *,
+    catalog_active: bool = True,
 ) -> FastAPI:
     settings = Settings(
         environment="test",
@@ -180,7 +186,27 @@ def app(
         public_base_url="http://test",
         _env_file=None,
     )
-    return create_app(settings, database, client or perptape_client(), telegram)
+    class StaticBinanceCatalog:
+        configured = True
+
+        def read_instrument(self, symbol: str) -> BinanceInstrument:
+            return BinanceInstrument(
+                symbol=symbol,
+                tick_size=Decimal("0.1"),
+                lot_size=Decimal("0.001"),
+                minimum_notional=Decimal("5"),
+                quote_currency="USDC" if symbol.endswith("USDC") else "USDT",
+                collateral_currency="USDC" if symbol.endswith("USDC") else "USDT",
+                active=catalog_active,
+            )
+
+    return create_app(
+        settings,
+        database,
+        client or perptape_client(),
+        telegram,
+        binance_client=StaticBinanceCatalog(),  # type: ignore[arg-type]
+    )
 
 
 async def login(client: AsyncClient, username: str) -> None:
@@ -193,7 +219,7 @@ async def logout(client: AsyncClient) -> None:
     assert response.status_code == 200
 
 
-def test_opportunity_marks_ready_but_uncatalogued_raw_contract_ineligible(
+def test_opportunity_lazily_registers_an_active_official_venue_contract(
     database: Database, service: TradingService
 ) -> None:
     seed(service)
@@ -211,10 +237,10 @@ def test_opportunity_marks_ready_but_uncatalogued_raw_contract_ineligible(
             assert candidate["symbol"] == "BTCUSDC"
             assert candidate["canonical_symbol"] == "BTC"
             assert candidate["readiness"] == "READY"
-            assert candidate["proposal_eligible"] is False
-            assert candidate["proposal_blocker"] == "INSTRUMENT_UNAVAILABLE"
+            assert candidate["proposal_eligible"] is True
+            assert candidate["proposal_blocker"] is None
 
-            rejected = await http.post(
+            created = await http.post(
                 f"/api/opportunities/{candidate['candidate_id']}/proposals",
                 json={
                     "account_id": "acct-1",
@@ -223,15 +249,22 @@ def test_opportunity_marks_ready_but_uncatalogued_raw_contract_ineligible(
                     "max_risk": "40",
                     "expires_in_minutes": 120,
                     "invalidation_price": "118000",
-                    "rationale": "must not guess a quote contract",
+                    "rationale": "register exact official quote contract",
                 },
             )
-            assert rejected.status_code == 422, rejected.text
-            assert rejected.json()["error"]["code"] == "INSTRUMENT_UNAVAILABLE"
+            assert created.status_code == 200, created.text
+            assert created.json()["symbol"] == "BTCUSDC"
+            assert created.json()["quote_currency"] == "USDC"
 
     asyncio.run(scenario())
     with database.session_factory() as session:
-        assert session.scalar(select(func.count()).select_from(Proposal)) == 0
+        assert session.scalar(select(func.count()).select_from(Proposal)) == 1
+        discovered = session.scalar(
+            select(Instrument).where(
+                Instrument.venue == "BINANCE", Instrument.symbol == "BTCUSDC"
+            )
+        )
+        assert discovered is not None and discovered.active
 
 
 def test_opportunity_rejects_exact_but_inactive_catalog_instrument(
@@ -246,7 +279,14 @@ def test_opportunity_rejects_exact_but_inactive_catalog_instrument(
 
     async def scenario() -> None:
         async with AsyncClient(
-            transport=ASGITransport(app=app(database, MockTelegramGateway(), perptape_client())),
+            transport=ASGITransport(
+                app=app(
+                    database,
+                    MockTelegramGateway(),
+                    perptape_client(),
+                    catalog_active=False,
+                )
+            ),
             base_url="http://test",
         ) as http:
             await login(http, "proposer")
@@ -254,8 +294,8 @@ def test_opportunity_rejects_exact_but_inactive_catalog_instrument(
             assert opportunities.status_code == 200, opportunities.text
             candidate = opportunities.json()["data"][0]
             assert candidate["symbol"] == "BTCUSDT"
-            assert candidate["proposal_eligible"] is False
-            assert candidate["proposal_blocker"] == "INSTRUMENT_UNAVAILABLE"
+            assert candidate["proposal_eligible"] is True
+            assert candidate["proposal_blocker"] is None
 
             rejected = await http.post(
                 f"/api/opportunities/{candidate['candidate_id']}/proposals",

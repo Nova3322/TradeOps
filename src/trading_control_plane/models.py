@@ -1021,6 +1021,59 @@ class AccountEquity(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
 
+class AccountEquityObservation(Base):
+    __tablename__ = "account_equity_observations"
+    __table_args__ = (
+        UniqueConstraint(
+            "account_equity_id",
+            "observed_at",
+            name="uq_account_equity_observations_fact_time",
+        ),
+        CheckConstraint(
+            "environment IN ('SHADOW','TESTNET','LIVE')",
+            name="ck_account_equity_observations_environment",
+        ),
+        CheckConstraint(
+            "location_type IN ('VENUE','VAULT')",
+            name="ck_account_equity_observations_location_type",
+        ),
+        CheckConstraint("equity >= 0", name="ck_account_equity_observations_equity"),
+        CheckConstraint(
+            "available_balance >= 0",
+            name="ck_account_equity_observations_available_balance",
+        ),
+        CheckConstraint(
+            "usd_equity IS NULL OR usd_equity >= 0",
+            name="ck_account_equity_observations_usd_equity",
+        ),
+        Index(
+            "ix_account_equity_observations_scope_time",
+            "environment",
+            "location_type",
+            "venue",
+            "account_id",
+            "observed_at",
+        ),
+    )
+
+    observation_id: Mapped[UUID] = mapped_column(
+        Uuid(as_uuid=True), primary_key=True, default=uuid4
+    )
+    account_equity_id: Mapped[UUID] = mapped_column(
+        ForeignKey("account_equities.account_equity_id", ondelete="CASCADE"), nullable=False
+    )
+    environment: Mapped[str] = mapped_column(String(16), nullable=False)
+    location_type: Mapped[str] = mapped_column(String(16), nullable=False)
+    account_id: Mapped[str] = mapped_column(String(120), nullable=False)
+    venue: Mapped[str] = mapped_column(String(64), nullable=False)
+    currency: Mapped[str] = mapped_column(String(32), nullable=False)
+    equity: Mapped[Decimal] = mapped_column(AMOUNT, nullable=False)
+    available_balance: Mapped[Decimal] = mapped_column(AMOUNT, nullable=False)
+    usd_equity: Mapped[Decimal | None] = mapped_column(AMOUNT, nullable=True)
+    observed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    recorded_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
 class FundingPayment(Base):
     __tablename__ = "funding_payments"
     __table_args__ = (

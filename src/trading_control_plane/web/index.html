@@ -7,7 +7,7 @@
     <meta name="description" content="生产交易提案、审核、执行、资金与风险控制台">
     <link rel="manifest" href="/manifest.webmanifest">
     <link rel="icon" href="/assets/icon.svg" type="image/svg+xml">
-    <link rel="stylesheet" href="/assets/styles.css?v=20">
+    <link rel="stylesheet" href="/assets/styles.css?v=23">
     <title>交易控制台</title>
   </head>
   <body>
@@ -19,7 +19,7 @@
         </a>
         <div class="topbar-actions">
           <span id="environment-badge" class="env-badge">控制台</span>
-          <button id="language-toggle" class="icon-button language-button" type="button" aria-label="切换语言">语言</button>
+          <button id="language-toggle" class="icon-button language-button" type="button" aria-label="切换中英文">中英切换</button>
           <button id="theme-toggle" class="icon-button" aria-label="切换主题">◐</button>
           <div id="identity-chip" class="identity-chip" hidden></div>
           <button id="mobile-nav-toggle" class="mobile-nav-toggle" type="button" aria-controls="sidebar" aria-expanded="false" hidden>菜单</button>
@@ -35,7 +35,6 @@
           <a href="/positions" data-link data-nav-capability="system.view"><span>↕</span>系统状态</a>
           <a href="/capital" data-link data-nav-capability="capital.view"><span>¤</span>资金</a>
           <a href="/exceptions" data-link data-nav-capability="operations.view"><span>!</span>异常</a>
-          <a href="/results" data-link data-nav-capability="results.view"><span>▤</span>结果与审计</a>
           <a href="/venues" data-link data-nav-capability="venue.view"><span>◫</span>交易账户</a>
           <a href="/admin/users" data-link data-nav-capability="access.manage"><span>◇</span>成员权限</a>
         </nav>
@@ -99,6 +98,6 @@
       </form>
     </dialog>
     <div id="toast" class="toast" role="status" aria-live="polite"></div>
-    <script type="module" src="/assets/app.js?v=38"></script>
+    <script type="module" src="/assets/app.js?v=53"></script>
   </body>
 </html>

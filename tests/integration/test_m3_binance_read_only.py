@@ -186,6 +186,8 @@ async def run_m3_flow(database: Database) -> None:
             "order_send_available": False,
             "account_mode": "PORTFOLIO_MARGIN",
             "fact_environment": "LIVE",
+            "automatic_sync_enabled": False,
+            "automatic_sync_interval_seconds": 60,
             "environment": "test",
         }
 
@@ -243,7 +245,7 @@ async def run_m3_flow(database: Database) -> None:
 
         web = await http.get("/venues/binance")
         assert web.status_code == 200, web.text
-        assert "Trading Console" in web.text
+        assert "<title>交易控制台</title>" in web.text
 
         await logout(http)
         await login(http, "observer")

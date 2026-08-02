@@ -112,8 +112,8 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
 
     assert response.status_code == 200
     assert "交易控制台" in response.text
-    assert "/assets/app.js?v=38" in response.text
-    assert "/assets/styles.css?v=20" in response.text
+    assert "/assets/app.js?v=53" in response.text
+    assert "/assets/styles.css?v=23" in response.text
     assert '<a href="/" data-link><span>⌂</span>今日</a>' in response.text
     assert 'id="mobile-nav-toggle"' in response.text
     assert 'id="confirm-dialog"' in response.text
@@ -136,6 +136,12 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
     assert "你的审核已记录" in app_javascript.text
     assert 'data-nav-capability="opportunity.view"' in response.text
     assert 'href="/admin/users"' in response.text
+    assert 'href="/results"' not in response.text
+    assert "renderActualResults" not in app_javascript.text
+    assert "/api/results" not in app_javascript.text
+    assert "/api/audit" not in app_javascript.text
+    assert "'access.manage':['SYSTEM_ADMIN']" in app_javascript.text
+    assert "默认查看成员权限并管理所有成员" in app_javascript.text
     assert 'href="/proposals/new"' not in response.text
     assert "Binance只读" not in response.text
     assert "const routeCapability = (path)" in app_javascript.text
@@ -147,6 +153,8 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
     assert "function confirmAction" in app_javascript.text
     assert "function partitionCapitalRecords" in app_javascript.text
     assert "function capitalSourceSlots" in app_javascript.text
+    assert "function capitalHistorySeries" in app_javascript.text
+    assert "三方资金趋势" in app_javascript.text
     assert "function liveCapitalInTransit" in app_javascript.text
     assert "审核后自动准备，钱包只做最终确认" in app_javascript.text  # noqa: RUF001
     assert "startAutomaticCapitalTransfer" in app_javascript.text
@@ -161,8 +169,11 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
     assert "旧提案、旧授权和旧的可用加仓次数永远不会恢复" in app_javascript.text
     assert "恢复条件" in app_javascript.text
     assert "LIVE_SCOPE_CONFIGURATION_REQUIRED" in app_javascript.text
-    assert "i.readiness === 'READY' && i.proposal_eligible" in app_javascript.text
-    assert "该合约尚未进入可交易合约目录" in app_javascript.text
+    assert "item.readiness === 'READY' && item.proposal_eligible" in app_javascript.text
+    assert "DEGRADED:'数据不完整'" in app_javascript.text
+    assert "该合约尚未进入可交易合约目录" not in app_javascript.text
+    assert "共振周期" in app_javascript.text
+    assert 'name="timeframes" type="checkbox"' in app_javascript.text
     assert "function updateManualProposalPreview" in app_javascript.text
     assert "只创建提案，不直接下单" in app_javascript.text  # noqa: RUF001
     assert "这笔交易要做什么" in app_javascript.text
@@ -183,15 +194,20 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
     assert "异常与恢复" in app_javascript.text
     assert "POSITION_STALE" in app_javascript.text
     assert "打开交易任务并按顺序处理" in app_javascript.text
-    assert "function actualResultsVerdict" in app_javascript.text
-    assert "先看盈亏和当前结论" in app_javascript.text
-    assert "待处理交易任务" in app_javascript.text
+    assert "new WebSocket(`${scheme}://${location.host}/ws/opportunities`)" in app_javascript.text
+    assert "function groupOpportunities" in app_javascript.text
+    assert "Perptape 市场扫描" not in app_javascript.text
+    assert "市场扫描 ↗" in app_javascript.text
     assert "系统运行边界与技术状态" not in app_javascript.text
     assert "风险检查已完成" in app_javascript.text
-    assert "资金划转已对账" in app_javascript.text
     assert "api('/api/runtime/status')" in app_javascript.text
+    assert "const opportunityHealthRequest" in app_javascript.text
     assert "Perptape 机会源" in app_javascript.text
+    assert "生产数据与资金连接" in app_javascript.text
+    assert "等待资金库绑定" in app_javascript.text
     assert "当前无监控对象" in app_javascript.text
+    assert "venue-sync-form" not in app_javascript.text
+    assert "账户数据自动更新中" in app_javascript.text
 
     stylesheet = get(app, "/assets/styles.css")
     assert stylesheet.status_code == 200
@@ -207,11 +223,13 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
 
     service_worker = get(app, "/sw.js")
     assert service_worker.status_code == 200
-    assert "trading-shell-v38" in service_worker.text
+    assert "trading-shell-v53" in service_worker.text
+    assert "self.skipWaiting()" in service_worker.text
+    assert "self.clients.claim()" in service_worker.text
     assert "await fetch(event.request)" in service_worker.text
 
 
-def test_opportunity_card_disables_creation_when_catalog_rejects_raw_contract() -> None:
+def test_opportunity_card_has_no_stale_local_catalog_blocker_copy() -> None:
     node = shutil.which("node")
     assert node is not None
     app_path = Path(__file__).parents[2] / "src" / "trading_control_plane" / "web" / "app.js"
@@ -244,7 +262,7 @@ def test_opportunity_card_disables_creation_when_catalog_rejects_raw_contract() 
           proposal_blocker:"INSTRUMENT_UNAVAILABLE", quote_volume:null, open_interest:null,
           rationale:"candidate", detail_url:"https://example.test", chart_url:"https://example.test",
         });
-        assert.match(unavailable, /该合约尚未进入可交易合约目录/);
+        assert.doesNotMatch(unavailable, /可交易合约目录/);
         assert.equal((unavailable.match(/ disabled/g) || []).length, 2);
 
         const eligible = context.render({
@@ -256,6 +274,8 @@ def test_opportunity_card_disables_creation_when_catalog_rejects_raw_contract() 
         });
         assert.doesNotMatch(eligible, /该合约尚未进入可交易合约目录/);
         assert.doesNotMatch(eligible, / disabled/);
+        assert.match(eligible, /1h · 向上突破/);
+        assert.doesNotMatch(eligible, />candidate</);
 
         context.hasCapability = () => false;
         const readOnly = context.render({
@@ -279,7 +299,7 @@ def test_opportunity_card_disables_creation_when_catalog_rejects_raw_contract() 
     assert completed.returncode == 0, completed.stderr
 
 
-def test_actual_results_verdict_prioritizes_exceptions_and_settlement_state() -> None:
+def test_opportunity_groups_keep_multiple_timeframes_and_direction_separate() -> None:
     node = shutil.which("node")
     assert node is not None
     app_path = Path(__file__).parents[2] / "src" / "trading_control_plane" / "web" / "app.js"
@@ -290,50 +310,35 @@ def test_actual_results_verdict_prioritizes_exceptions_and_settlement_state() ->
         import vm from "node:vm";
 
         const source = fs.readFileSync(process.argv[1], "utf8");
-        const from = source.indexOf("function signedResult");
-        const to = source.indexOf("\nasync function renderActualResults", from);
+        const from = source.indexOf("const OPPORTUNITY_TIMEFRAME_ORDER");
+        const to = source.indexOf("\nfunction currentOpportunityFilters", from);
         assert.notEqual(from, -1);
         assert.notEqual(to, -1);
-        const context = {fmtNumber: value => String(Number(value))};
+        const context = {};
         vm.createContext(context);
-        vm.runInContext(
-          `${source.slice(from, to)}; this.verdict = actualResultsVerdict; ` +
-          `this.signed = signedResult; this.valueClass = resultValueClass;`,
-          context,
-        );
-
-        const exception = context.verdict(
-          [{campaign_id:"campaign-1", status:"RUNNING"}],
-          [
-            {campaign_id:"campaign-1", code:"POSITION_UNKNOWN"},
-            {campaign_id:"campaign-1", code:"RECONCILIATION_DIFF"},
-          ],
-        );
-        assert.equal(exception.tone, "danger");
-        assert.match(exception.title, /^1 个交易任务/);
-        assert.equal(exception.href, "/exceptions");
-
-        const active = context.verdict(
-          [{campaign_id:"campaign-1", status:"RUNNING"}],
-          [],
-        );
-        assert.equal(active.tone, "attention");
-        assert.match(active.copy, /结果才会固定/);
-
-        const settled = context.verdict(
-          [{campaign_id:"campaign-1", status:"CLOSED"}],
-          [],
-        );
-        assert.equal(settled.tone, "success");
-        assert.match(settled.title, /当前没有待处理异常/);
-
-        const empty = context.verdict([], []);
-        assert.equal(empty.tone, "clear");
-        assert.equal(empty.href, "/opportunities");
-        assert.equal(context.signed("10"), "+10");
-        assert.equal(context.signed("-2"), "-2");
-        assert.equal(context.valueClass("10"), "result-positive");
-        assert.equal(context.valueClass("-2"), "result-negative");
+        vm.runInContext(`${source.slice(from, to)}; this.group = groupOpportunities;`, context);
+        const base = {
+          venue:"BINANCE", source_exchange:"BN", symbol:"BTCUSDT", canonical_symbol:"BTC",
+          observed_at:"2026-08-02T10:00:00+00:00", triggered_at:"2026-08-02T10:00:00+00:00",
+          readiness:"READY", proposal_eligible:true, proposal_blocker:null,
+          quote_volume:"100", open_interest:"50",
+        };
+        const groups = JSON.parse(JSON.stringify(context.group([
+          {...base, candidate_id:"pt_1h_long", direction:"LONG", timeframe:"1h"},
+          {
+            ...base, candidate_id:"pt_4h_long", direction:"LONG", timeframe:"4h",
+            quote_volume:"120",
+          },
+          {...base, candidate_id:"pt_1d_short", direction:"SHORT", timeframe:"1d"},
+        ])));
+        assert.equal(groups.length, 2);
+        const long = groups.find(item => item.direction === "LONG");
+        const short = groups.find(item => item.direction === "SHORT");
+        assert.deepEqual(long.timeframes, ["1h", "4h"]);
+        assert.equal(long.candidates.length, 2);
+        assert.equal(long.quote_volume, 120);
+        assert.equal(long.action_candidate_id, "pt_1h_long");
+        assert.deepEqual(short.timeframes, ["1d"]);
         """
     )
     completed = subprocess.run(  # noqa: S603
@@ -374,6 +379,9 @@ def test_capital_web_projection_only_renders_live_records() -> None:
         ];
         const context = vm.createContext({records});
         vm.runInContext(source.slice(from, to), context);
+        const historyFrom = source.indexOf("function capitalHistorySeries");
+        const historyTo = source.indexOf("\nasync function renderCapitalCenter", historyFrom);
+        vm.runInContext(source.slice(historyFrom, historyTo), context);
         const split = JSON.parse(vm.runInContext(
           "JSON.stringify(partitionCapitalRecords(records))",
           context,
@@ -411,6 +419,30 @@ def test_capital_web_projection_only_renders_live_records() -> None:
           context,
         );
         assert.equal(liveInTransit, "1.250000000000000000");
+
+        const history = JSON.parse(vm.runInContext(
+          `JSON.stringify(capitalHistorySeries([
+            {
+              environment:"LIVE", location_type:"VENUE", venue:"BINANCE",
+              usd_equity:"10", observed_at:"2026-08-02T10:00:00Z"
+            },
+            {
+              environment:"LIVE", location_type:"VENUE", venue:"HYPERLIQUID",
+              usd_equity:"20", observed_at:"2026-08-02T10:00:00Z"
+            },
+            {
+              environment:"LIVE", location_type:"VAULT", venue:"VAULT",
+              usd_equity:"30", observed_at:"2026-08-02T10:00:00Z"
+            },
+            {
+              environment:"LIVE", location_type:"VAULT", venue:"VAULT",
+              usd_equity:"5", observed_at:"2026-08-02T10:00:00Z"
+            },
+          ]))`,
+          context,
+        ));
+        assert.deepEqual(history.map(item => item.source), ["BINANCE", "HYPERLIQUID", "VAULT"]);
+        assert.equal(history[2].points[0].value, 35);
         """
     )
     completed = subprocess.run(  # noqa: S603

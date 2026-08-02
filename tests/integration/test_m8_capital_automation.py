@@ -369,7 +369,7 @@ def test_capital_automation_api_exposes_disabled_gates_and_policy(
             assert denied.json()["error"]["code"] == "CAPITAL_AUTOMATION_DISABLED"
             web = await client.get("/capital")
             assert web.status_code == 200
-            assert "Trading Console" in web.text
+            assert "<title>交易控制台</title>" in web.text
 
     asyncio.run(scenario())
 

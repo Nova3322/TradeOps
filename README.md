@@ -43,7 +43,7 @@
 - HTTP：健康检查、内部会话、Perptape 主站机会与可选 LIVE Proposal、Proposal/Review/Risk/Authorization、SHADOW/TESTNET/LIVE Campaign、AUTO_ADD/减仓/退出、资金事实/提案/授权、NoTilt 三链状态/同步/持久化未签名计划/回执确认、按环境结果/审计/运行状态，以及 Binance、Hyperliquid Core 的只读、TESTNET 与受控 LIVE API
 - 内部业务：`trading_control_plane.service.TradingService`
 - 纯计算：`evaluate_risk`、`select_target_position`、`compute_pnl`
-- 数据库：PostgreSQL，Alembic head `20260801_0005`，28 张业务/运行表（另有 Alembic 版本表）
+- 数据库：PostgreSQL，Alembic head `20260802_0006`，29 张业务/运行表（另有 Alembic 版本表）
 - 场所边界：`binance.py`/`binance_execution.py` 覆盖标准 USDⓈ-M 只读/TESTNET，以及 Unified Account 官方 PAPI 的 LIVE 只读和执行；`hyperliquid.py`/`hyperliquid_execution.py` 覆盖 Core Info、TESTNET 与 LIVE Exchange。Hyperliquid “市价”固定为带冻结价格边界的 IOC，不使用隐含滑点；主账户默认、子账户显式配置。HIP-3、保证金控制和资金写入口不存在，数据库中的 `LIVE_ORDER_SEND` 初始仍为 `DISABLED`
 - 资金边界：`capital.py` 提供 SHADOW/TESTNET Mock 提交和自动候选计算；`notilt.py` 通过官方 `@notilt/sdk` 固定支持 Ethereum、BNB Smart Chain、Arbitrum One，只读取官方部署/Registry/Vault、生成并持久化 `{chainId,to,data,value}` 未签名交易，并从可信生产 RPC 校验发送者、目标、函数、参数、事件、区块时间和逐链确认深度。服务没有 NoTilt 私钥字段，不签名、不广播，也不暴露 owner、白名单管理、Panic 或 Full Exit 能力；真实 `CAPITAL_TRANSFER` 与两个自动资金 Gate 均保持 `DISABLED`
 
@@ -88,7 +88,7 @@ TRADING_DATABASE_URL='postgresql+psycopg://.../trading_restore_test' ./scripts/r
 ```
 
 该命令会启动 `127.0.0.1:5434` 的 PostgreSQL、升级 Schema、幂等创建
-`kelly_oooo` 内部管理员/Reviewer/Operator、一个本地 Proposer 和第二 Reviewer，然后启动
+`kelly_oooo` 内部超级管理员/Reviewer/Operator/Treasury、一个本地 Proposer 和第二 Reviewer，然后启动
 API。Telegram 默认仍关闭；先在 BotFather 撤销任何曾出现在聊天或日志中的旧 Token，把新
 Token 仅写入 `.env.local`，再设置：
 

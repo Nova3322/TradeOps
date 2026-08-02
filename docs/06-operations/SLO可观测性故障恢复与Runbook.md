@@ -247,7 +247,7 @@ TRADING_DATABASE_URL="$DISPOSABLE_RESTORE_DATABASE_URL" \
 
 目标恢复数据库必须预先创建，名称必须以 `_test` 结尾；脚本会清理并覆盖该目标，硬拒绝其他名称。容器内 PostgreSQL 可额外设置 `TRADING_PG_CONTAINER`。当前脚本不是生产灾备自动化，不能指向共享库或真实交易库。
 
-当前本地开发的权威入口是 `./scripts/run_local.sh`：它使用 `compose.yaml` 启动 `127.0.0.1:5434` 上的 PostgreSQL 16，数据库名 `trading_local`、数据库用户 `trading`，随后升级至 Alembic `20260801_0005` 并幂等初始化内部用户。准确的本地管理员用户名是小写 `kelly_oooo`（四个 `o`），另有 `local-proposer`、`local-reviewer-two` 及 SERVICE principals；不要使用 `Kelly_ooo` 等显示名猜测登录。数据库连接、Token、API Key 和私钥只从 `.env.local`/服务端环境读取，不复制到命令历史、文档或提交。
+当前本地开发的权威入口是 `./scripts/run_local.sh`：它使用 `compose.yaml` 启动 `127.0.0.1:5434` 上的 PostgreSQL 16，数据库名 `trading_local`、数据库用户 `trading`，随后升级至 Alembic `20260802_0006` 并幂等初始化内部用户。准确的本地管理员用户名是小写 `kelly_oooo`（四个 `o`），另有 `local-proposer`、`local-reviewer-two` 及 SERVICE principals；不要使用 `Kelly_ooo` 等显示名猜测登录。数据库连接、Token、API Key 和私钥只从 `.env.local`/服务端环境读取，不复制到命令历史、文档或提交。
 
 当前 Schema 为 28 张业务/运行表（另有 Alembic 版本表）。本地启动不使用 SQLite，也不应连接真实交易数据库；测试和恢复演练继续使用名称以 `_test` 结尾的独立 PostgreSQL。
 

@@ -310,6 +310,13 @@ def test_live_net_worth_and_risk_capital_combine_two_venues_and_vault(
         "issues": [],
         "as_of": center["net_worth"]["as_of"],
     }
+    assert sorted(item["source"] for item in center["history"]) == [
+        "BINANCE",
+        "HYPERLIQUID",
+        "VAULT",
+        "VAULT",
+    ]
+    assert all(item["usd_equity"] is not None for item in center["history"])
     with database.session_factory() as session:
         known, total, facts, _ = service._managed_capital_context(
             session,
@@ -1103,7 +1110,7 @@ def test_capital_api_requires_treasury_step_up_and_telegram_is_notification_only
 
             page = await client.get("/capital")
             assert page.status_code == 200
-            assert "Trading Console" in page.text
+            assert "<title>交易控制台</title>" in page.text
 
     asyncio.run(scenario())
 

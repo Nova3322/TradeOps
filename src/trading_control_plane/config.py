@@ -24,7 +24,7 @@ class Settings(BaseSettings):
 
     model_config = SettingsConfigDict(
         env_prefix="TRADING_",
-        env_file=".env.local",
+        env_file=(".env.local", ".env.production.local"),
         env_file_encoding="utf-8",
         extra="ignore",
         populate_by_name=True,
