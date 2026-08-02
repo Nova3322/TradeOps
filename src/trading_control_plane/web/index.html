@@ -4,11 +4,11 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
     <meta name="theme-color" content="#101616">
-    <meta name="description" content="内部 SHADOW 交易提案、审核与风险控制台">
+    <meta name="description" content="内部交易提案、审核、执行事实与风险控制台">
     <link rel="manifest" href="/manifest.webmanifest">
     <link rel="icon" href="/assets/icon.svg" type="image/svg+xml">
-    <link rel="stylesheet" href="/assets/styles.css?v=17">
-    <title>Trading Console · SHADOW</title>
+    <link rel="stylesheet" href="/assets/styles.css?v=18">
+    <title>Trading Console · Control Plane</title>
   </head>
   <body>
     <div class="app-shell">
@@ -18,7 +18,7 @@
           <span><b>Trading Console</b><small>Internal control plane</small></span>
         </a>
         <div class="topbar-actions">
-          <span class="env-badge">SHADOW</span>
+          <span id="environment-badge" class="env-badge">CONTROL PLANE</span>
           <button id="theme-toggle" class="icon-button" aria-label="切换主题">◐</button>
           <div id="identity-chip" class="identity-chip" hidden></div>
           <button id="mobile-nav-toggle" class="mobile-nav-toggle" type="button" aria-controls="sidebar" aria-expanded="false" hidden>菜单</button>
@@ -28,22 +28,20 @@
       <aside id="sidebar" class="sidebar" hidden>
         <nav aria-label="主导航">
           <a href="/" data-link><span>⌂</span>今日</a>
-          <a href="/opportunities" data-link data-nav-capability="view"><span>⌁</span>机会</a>
-          <a href="/proposals/new" data-link data-nav-capability="proposal.create"><span>＋</span>人工提案</a>
+          <a href="/opportunities" data-link data-nav-capability="opportunity.view"><span>⌁</span>机会</a>
           <a href="/reviews" data-link data-nav-capability="proposal.review"><span>✓</span>审核队列</a>
-          <a href="/campaigns" data-link data-nav-capability="view"><span>◎</span>Campaign</a>
-          <a href="/positions" data-link data-nav-capability="view"><span>↕</span>仓位</a>
-          <a href="/orders" data-link data-nav-capability="view"><span>≡</span>订单</a>
-          <a href="/risk" data-link data-nav-capability="view"><span>◇</span>风险</a>
+          <a href="/campaigns" data-link data-nav-capability="operations.view"><span>◎</span>Campaign</a>
+          <a href="/positions" data-link data-nav-capability="system.view"><span>↕</span>系统状态</a>
           <a href="/capital" data-link data-nav-capability="capital.view"><span>¤</span>资金</a>
-          <a href="/results" data-link data-nav-capability="view"><span>▤</span>审计与结果</a>
-          <a href="/exceptions" data-link data-nav-capability="view"><span>!</span>异常</a>
-          <a href="/venues/binance" data-link data-nav-capability="view"><span>◫</span>Binance只读</a>
+          <a href="/exceptions" data-link data-nav-capability="operations.view"><span>!</span>异常</a>
+          <a href="/results" data-link data-nav-capability="results.view"><span>▤</span>结果与审计</a>
+          <a href="/venues" data-link data-nav-capability="venue.view"><span>◫</span>交易所事实</a>
+          <a href="/admin/users" data-link data-nav-capability="access.manage"><span>◇</span>成员权限</a>
         </nav>
         <div class="sidebar-foot">
           <div id="mobile-session-summary" class="mobile-session-summary"></div>
           <div><span class="status-dot"></span> PostgreSQL 权威事实</div>
-          <div>真实发送 · Disabled</div>
+          <div>缺失事实 · 自动阻断</div>
           <button id="logout-button" class="text-button">退出当前会话</button>
         </div>
       </aside>
@@ -100,6 +98,6 @@
       </form>
     </dialog>
     <div id="toast" class="toast" role="status" aria-live="polite"></div>
-    <script type="module" src="/assets/app.js?v=29"></script>
+    <script type="module" src="/assets/app.js?v=31"></script>
   </body>
 </html>

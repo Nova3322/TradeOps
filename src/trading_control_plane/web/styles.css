@@ -145,6 +145,60 @@ button:disabled { opacity: .52; cursor: not-allowed; }
 .link-row { display: flex; gap: 16px; margin-bottom: 14px; }
 .proposal-actions { justify-content: flex-end; padding-top: 13px; border-top: 1px solid var(--line); }
 .compact-empty { min-height: 240px; }
+.source-status { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 22px; align-items: center; margin-bottom: 18px; padding: 20px; border: 1px solid var(--line); border-left: 4px solid var(--warning); border-radius: 15px; background: var(--panel); }
+.source-status h2 { margin-bottom: 7px; font-size: 22px; }
+.source-status p:not(.eyebrow) { margin-bottom: 0; color: var(--muted); line-height: 1.55; }
+.venue-switch { display: inline-flex; gap: 4px; margin-bottom: 18px; padding: 4px; border: 1px solid var(--line); border-radius: 12px; background: var(--panel); }
+.venue-switch a { min-width: 130px; padding: 9px 14px; border-radius: 8px; text-align: center; color: var(--muted); font-size: 12px; font-weight: 800; }
+.venue-switch a.active { background: var(--accent); color: var(--panel); }
+.venue-status-stats .stat span, .system-health-meta { display: block; margin-top: 7px; color: var(--muted); font-size: 10px; line-height: 1.45; }
+.venue-scope-card { display: grid; grid-template-columns: minmax(230px, .75fr) minmax(350px, 1.25fr); gap: 18px; margin-bottom: 24px; }
+.venue-scope-card h2 { margin-bottom: 7px; }
+.venue-scope-card .inline-form { margin: 0; }
+.venue-facts-page > section { margin-top: 28px; }
+.system-health-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; margin: 18px 0 32px; }
+.system-health-card { min-width: 0; padding: 18px; border: 1px solid var(--line); border-top: 3px solid var(--accent); border-radius: 14px; background: var(--panel); }
+.system-health-card.tone-attention { border-top-color: var(--warning); }
+.system-health-card.tone-danger { border-top-color: var(--danger); background: color-mix(in srgb, var(--danger) 4%, var(--panel)); }
+.system-health-head { display: flex; gap: 11px; align-items: center; }
+.system-health-head small { color: var(--muted); font-size: 10px; font-weight: 750; letter-spacing: .05em; }
+.system-health-head h2 { margin: 4px 0 0; font: 800 16px/1.25 Inter, ui-sans-serif, sans-serif; letter-spacing: -.015em; }
+.health-indicator { flex: 0 0 10px; width: 10px; height: 10px; border-radius: 50%; background: var(--accent); box-shadow: 0 0 0 5px color-mix(in srgb, var(--accent) 12%, transparent); }
+.tone-attention .health-indicator { background: var(--warning); box-shadow: 0 0 0 5px color-mix(in srgb, var(--warning) 12%, transparent); }
+.tone-danger .health-indicator { background: var(--danger); box-shadow: 0 0 0 5px color-mix(in srgb, var(--danger) 12%, transparent); }
+.system-health-card > p { min-height: 54px; margin: 15px 0 0; color: var(--muted); font-size: 11px; line-height: 1.55; }
+.exception-code-list { display: flex; flex-wrap: wrap; gap: 8px; }
+.exception-code-list span { padding: 8px 10px; border: 1px solid color-mix(in srgb, var(--danger) 26%, var(--line)); border-radius: 9px; background: color-mix(in srgb, var(--danger) 5%, var(--panel)); color: var(--danger); font-size: 11px; font-weight: 700; }
+.access-principles { margin-bottom: 18px; }
+.access-principles h2 { margin-bottom: 14px; }
+.access-principle-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
+.access-principle-grid p { margin: 0; padding: 14px; border-radius: 11px; background: var(--bg); }
+.access-principle-grid b, .access-principle-grid span { display: block; }
+.access-principle-grid b { margin-bottom: 6px; font-size: 12px; }
+.access-principle-grid span { color: var(--muted); font-size: 10px; line-height: 1.5; }
+.create-member-panel { margin-bottom: 26px; padding: 0; overflow: hidden; }
+.create-member-panel > summary { display: flex; justify-content: space-between; gap: 16px; padding: 18px 20px; cursor: pointer; }
+.create-member-panel > summary b, .create-member-panel > summary small { display: block; }
+.create-member-panel > summary small { margin-top: 5px; color: var(--muted); font-size: 10px; font-weight: 500; }
+.create-member-panel[open] > summary { border-bottom: 1px solid var(--line); }
+.create-member-panel .toolbox-content { padding-top: 20px; }
+.preset-row { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; margin: 18px 0 12px; color: var(--muted); font-size: 11px; }
+.member-access-list { display: grid; gap: 14px; }
+.member-access-card { padding: 20px; border: 1px solid var(--line); border-radius: 15px; background: var(--panel); }
+.member-access-card.is-inactive { opacity: .7; }
+.member-access-head { display: flex; align-items: start; justify-content: space-between; gap: 16px; margin-bottom: 16px; }
+.member-access-head h2 { margin-bottom: 4px; font-size: 21px; }
+.member-access-head p { margin: 0; color: var(--muted); font-size: 10px; }
+.permission-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 9px; }
+.permission-option { display: grid; grid-template-columns: 18px minmax(0, 1fr); gap: 9px; align-items: start; padding: 12px; border: 1px solid var(--line); border-radius: 11px; background: var(--panel-strong); cursor: pointer; }
+.permission-option:has(input:checked) { border-color: color-mix(in srgb, var(--accent) 42%, var(--line)); background: color-mix(in srgb, var(--accent-2) 58%, var(--panel)); }
+.permission-option input { width: 16px; height: 16px; margin: 1px 0 0; accent-color: var(--accent); }
+.permission-option b, .permission-option small { display: block; }
+.permission-option b { color: var(--ink); font-size: 11px; }
+.permission-option small { margin-top: 5px; color: var(--muted); font-size: 9px; font-weight: 500; line-height: 1.45; }
+.scope-grid { display: grid; grid-template-columns: 1fr 1fr 1.2fr; gap: 12px; align-items: end; margin-top: 14px; }
+.active-toggle { grid-template-columns: 18px minmax(0, 1fr); align-items: center; min-height: 42px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 9px; background: var(--panel-strong); color: var(--ink); }
+.active-toggle input { width: 16px; height: 16px; margin: 0; accent-color: var(--accent); }
 .capital-chart-panel { margin: 18px 0 24px; padding: 22px; border: 1px solid var(--line); border-radius: 16px; background: var(--panel); }
 .chart-head { display: flex; align-items: start; justify-content: space-between; gap: 20px; }
 .chart-head h2 { margin-bottom: 6px; }
@@ -411,6 +465,7 @@ dialog::backdrop { background: rgba(4, 12, 10, .56); backdrop-filter: blur(3px);
   .authorization-card { order: 6; }
   .campaign-command-layout { grid-template-columns: 1fr; }
   .home-layout { grid-template-columns: 1fr; }
+  .system-health-grid, .permission-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
 
 @media (min-width: 781px) and (max-width: 980px) {
@@ -429,6 +484,8 @@ dialog::backdrop { background: rgba(4, 12, 10, .56); backdrop-filter: blur(3px);
   .page-head { display: block; }
   .page-head .toolbar { margin-top: 18px; }
   .detail-layout, .compose-layout, .proposal-detail-layout, .campaign-command, .home-status { grid-template-columns: 1fr; }
+  .venue-scope-card { grid-template-columns: 1fr; }
+  .access-principle-grid, .scope-grid { grid-template-columns: 1fr; }
   .home-status .primary { width: fit-content; }
   .campaign-truth-grid { grid-template-columns: 1fr 1fr; }
   .proposal-preview, .proposal-actions-column { position: static; }
@@ -464,6 +521,10 @@ dialog::backdrop { background: rgba(4, 12, 10, .56); backdrop-filter: blur(3px);
   .primary, .secondary, .danger, .text-button { min-height: 44px; }
   .stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .field-grid, .detail-layout, .definition-grid, .compose-layout, .proposal-detail-layout, .campaign-command, .home-status { grid-template-columns: 1fr; }
+  .source-status, .venue-scope-card { grid-template-columns: 1fr; }
+  .system-health-grid, .permission-grid, .access-principle-grid, .scope-grid { grid-template-columns: 1fr; }
+  .venue-switch { display: grid; grid-template-columns: 1fr 1fr; width: 100%; }
+  .venue-switch a { min-width: 0; }
   .home-status .primary { width: 100%; }
   .home-priority { grid-template-columns: 38px minmax(0, 1fr); align-items: start; }
   .home-priority strong { grid-column: 2; }

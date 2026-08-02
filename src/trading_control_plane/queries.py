@@ -104,6 +104,42 @@ class TradingQueries:
                 ],
             }
 
+    def managed_users(self, actor_id: UUID) -> list[dict[str, Any]]:
+        if not self.service.can_user(actor_id, "user.manage"):
+            raise DomainRejected("RBAC_DENIED", "user access management requires SYSTEM_ADMIN")
+        with self.database.session_factory() as session:
+            users = session.scalars(
+                select(User)
+                .where(User.principal_type == PrincipalType.HUMAN.value)
+                .order_by(User.username)
+            ).all()
+            assignments = session.scalars(
+                select(RoleAssignment)
+                .where(RoleAssignment.user_id.in_([item.user_id for item in users]))
+                .order_by(RoleAssignment.role)
+            ).all()
+            by_user: dict[UUID, list[dict[str, Any]]] = {item.user_id: [] for item in users}
+            for assignment in assignments:
+                by_user[assignment.user_id].append(
+                    {
+                        "role": assignment.role,
+                        "account_scope": assignment.account_scope,
+                        "venue_scope": assignment.venue_scope,
+                    }
+                )
+            return [
+                {
+                    "user_id": str(user.user_id),
+                    "username": user.username,
+                    "identity_bound": user.identity_subject is not None,
+                    "active": user.active,
+                    "roles": by_user[user.user_id],
+                    "created_at": _iso(user.created_at),
+                    "is_current_user": user.user_id == actor_id,
+                }
+                for user in users
+            ]
+
     def telegram_chat_id(self, user_id: UUID) -> str | None:
         with self.database.session_factory() as session:
             user = session.get(User, user_id)
@@ -654,17 +690,10 @@ class TradingQueries:
     def capital_center(self, user_id: UUID) -> dict[str, Any]:
         with self.database.session_factory() as session:
             now = datetime.now(UTC)
-            capital_roles = {
-                Role.OBSERVER.value,
-                Role.PROPOSER.value,
-                Role.REVIEWER.value,
-                Role.OPERATOR.value,
-                Role.TREASURY_ADMIN.value,
-            }
             assignments = session.scalars(
                 select(RoleAssignment).where(RoleAssignment.user_id == user_id)
             ).all()
-            if not any(item.role in capital_roles for item in assignments):
+            if not any(item.role == Role.TREASURY_ADMIN.value for item in assignments):
                 raise DomainRejected("RBAC_DENIED", "capital center access is not assigned")
             balances = session.scalars(
                 select(AccountEquity).order_by(
@@ -1695,6 +1724,12 @@ class TradingQueries:
                     AccountEquity.environment == environment,
                 )
             )
+            execution_scope = f"{environment}:{account_id}:{venue}"
+            reconciliation = session.scalar(
+                select(ReconciliationRun)
+                .where(ReconciliationRun.execution_scope == execution_scope)
+                .order_by(ReconciliationRun.completed_at.desc())
+            )
             return {
                 "account_id": account_id,
                 "venue": venue,
@@ -1799,6 +1834,15 @@ class TradingQueries:
                     "currency": equity.currency,
                     "fact_status": equity.fact_status,
                     "observed_at": _iso(equity.observed_at),
+                },
+                "reconciliation": None
+                if reconciliation is None
+                else {
+                    "reconciliation_id": str(reconciliation.reconciliation_id),
+                    "status": reconciliation.status,
+                    "is_computed": reconciliation.is_computed,
+                    "differences": reconciliation.differences,
+                    "completed_at": _iso(reconciliation.completed_at),
                 },
             }
 

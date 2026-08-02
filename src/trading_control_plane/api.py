@@ -38,6 +38,8 @@ from trading_control_plane.api_schemas import (
     IntentReleaseRequest,
     IntentUnknownRequest,
     ManagedReductionRequest,
+    ManagedUserAccessRequest,
+    ManagedUserCreateRequest,
     ManualProposalRequest,
     MockLoginRequest,
     MockStepUpRequest,
@@ -89,6 +91,7 @@ from trading_control_plane.domain import (
     ProposalSource,
     ProposalStatus,
     ReviewDecision,
+    Role,
     TargetCandidate,
     TargetUrgency,
 )
@@ -156,6 +159,7 @@ def _domain_status(code: str) -> int:
         "ACTION_GRANT_EXPIRED",
         "ACTION_REFERENCE_SCOPE_INVALID",
         "ACTION_REFERENCE_EXPIRED",
+        "SELF_ACCESS_CHANGE_DENIED",
     }:
         return status.HTTP_403_FORBIDDEN
     if code.endswith("_NOT_FOUND"):
@@ -170,6 +174,8 @@ def _domain_status(code: str) -> int:
         "PROPOSAL_NOT_REVIEWABLE",
         "PROPOSAL_NOT_APPROVED",
         "INITIAL_INTENT_ALREADY_EXISTS",
+        "USERNAME_CONFLICT",
+        "LAST_SYSTEM_ADMIN_REQUIRED",
     }:
         return status.HTTP_409_CONFLICT
     if code in {
@@ -430,6 +436,28 @@ def create_app(
     def service() -> TradingService:
         return TradingService(business_database())
 
+    def require_capability(
+        identity: SessionIdentity,
+        action: str,
+        account_id: str | None = None,
+        venue: str | None = None,
+    ) -> None:
+        assignments = queries().user_context(identity.user_id)["roles"]
+        allowed = any(
+            service().can_user(
+                identity.user_id,
+                action,
+                account_id if account_id is not None else assignment["account_scope"],
+                venue if venue is not None else assignment["venue_scope"],
+            )
+            for assignment in assignments
+            if venue is None
+            or assignment["venue_scope"] is None
+            or assignment["venue_scope"] == venue
+        )
+        if not allowed:
+            raise DomainRejected("RBAC_DENIED", f"{action} is not assigned to this user")
+
     def configured_risk_scopes() -> tuple[tuple[str, str, str], ...]:
         scopes: set[tuple[str, str, str]] = set()
         if (
@@ -546,6 +574,47 @@ def create_app(
             "authentication_method": identity.authentication_method,
             "expires_at": identity.expires_at.isoformat(),
         }
+
+    @app.get("/api/admin/users")
+    def managed_users(
+        identity: SessionIdentity = identity_dependency,
+    ) -> dict[str, Any]:
+        return {"data": queries().managed_users(identity.user_id), "as_of": _now().isoformat()}
+
+    @app.post("/api/admin/users")
+    def create_managed_user(
+        payload: ManagedUserCreateRequest,
+        identity: SessionIdentity = identity_dependency,
+    ) -> dict[str, Any]:
+        user_id = service().create_managed_user(
+            payload.username,
+            [Role(value) for value in payload.roles],
+            identity.user_id,
+            payload.account_scope,
+            payload.venue_scope,
+            now=_now(),
+        )
+        return {
+            "user_id": str(user_id),
+            "data": queries().managed_users(identity.user_id),
+        }
+
+    @app.put("/api/admin/users/{user_id}/access")
+    def update_managed_user_access(
+        user_id: UUID,
+        payload: ManagedUserAccessRequest,
+        identity: SessionIdentity = identity_dependency,
+    ) -> dict[str, Any]:
+        service().update_managed_user_access(
+            user_id,
+            [Role(value) for value in payload.roles],
+            payload.active,
+            identity.user_id,
+            payload.account_scope,
+            payload.venue_scope,
+            now=_now(),
+        )
+        return {"user_id": str(user_id), "data": queries().managed_users(identity.user_id)}
 
     @app.post("/api/auth/mock/step-up")
     def mock_step_up(
@@ -714,7 +783,7 @@ def create_app(
     def opportunities(
         identity: SessionIdentity = identity_dependency,
     ) -> dict[str, Any]:
-        queries().user_context(identity.user_id)
+        require_capability(identity, "opportunity.view")
         now = _now()
         candidates = current_perptape_candidates(now=now)
         active_instruments = queries().active_instrument_keys(
@@ -898,6 +967,7 @@ def create_app(
         identity: SessionIdentity = identity_dependency,
         proposal_status: str | None = None,
     ) -> dict[str, Any]:
+        require_capability(identity, "proposal.view")
         now = _now()
         return {
             "data": queries().list_proposals(
@@ -913,6 +983,7 @@ def create_app(
         proposal_id: UUID,
         identity: SessionIdentity = identity_dependency,
     ) -> dict[str, Any]:
+        require_capability(identity, "proposal.view")
         return queries().proposal_detail(identity.user_id, proposal_id, now=_now())
 
     @app.post("/api/proposals/{proposal_id}/reviews")
@@ -1072,7 +1143,7 @@ def create_app(
     def binance_read_only_status(
         identity: SessionIdentity = identity_dependency,
     ) -> dict[str, Any]:
-        del identity
+        require_capability(identity, "venue.view", venue="BINANCE")
         return {
             "venue": "BINANCE",
             "mode": "USER_DATA_READ_ONLY",
@@ -1142,6 +1213,7 @@ def create_app(
         account_id: str,
         identity: SessionIdentity = identity_dependency,
     ) -> dict[str, Any]:
+        require_capability(identity, "venue.view", account_id, "BINANCE")
         return {
             "mode": "USER_DATA_READ_ONLY",
             "data": queries().venue_facts(
@@ -1253,7 +1325,7 @@ def create_app(
     def hyperliquid_read_only_status(
         identity: SessionIdentity = identity_dependency,
     ) -> dict[str, Any]:
-        del identity
+        require_capability(identity, "venue.view", venue="HYPERLIQUID")
         return {
             "venue": "HYPERLIQUID",
             "domain": "CORE",
@@ -1334,6 +1406,7 @@ def create_app(
         account_id: str,
         identity: SessionIdentity = identity_dependency,
     ) -> dict[str, Any]:
+        require_capability(identity, "venue.view", account_id, "HYPERLIQUID")
         return {
             "mode": "INFO_READ_ONLY",
             "domain": "CORE",
@@ -1409,12 +1482,14 @@ def create_app(
     def campaigns(
         identity: SessionIdentity = identity_dependency,
     ) -> dict[str, Any]:
+        require_capability(identity, "operations.view")
         return {"data": queries().list_campaigns(identity.user_id), "as_of": _now().isoformat()}
 
     @app.get("/api/campaign-exceptions")
     def campaign_exceptions(
         identity: SessionIdentity = identity_dependency,
     ) -> dict[str, Any]:
+        require_capability(identity, "operations.view")
         now = _now()
         return {
             "data": queries().list_exceptions(identity.user_id, now=now),
@@ -1426,6 +1501,7 @@ def create_app(
         campaign_id: UUID,
         identity: SessionIdentity = identity_dependency,
     ) -> dict[str, Any]:
+        require_capability(identity, "operations.view")
         return queries().campaign_detail(identity.user_id, campaign_id)
 
     @app.get("/api/campaigns/{campaign_id}/add-candidates")
@@ -1611,6 +1687,7 @@ def create_app(
     def risk_controls(
         identity: SessionIdentity = identity_dependency,
     ) -> dict[str, Any]:
+        require_capability(identity, "system.view")
         return service().risk_control_status(
             identity.user_id,
             configured_risk_scopes(),
@@ -3180,6 +3257,7 @@ def create_app(
         to_time: datetime | None = None,
         identity: SessionIdentity = identity_dependency,
     ) -> dict[str, Any]:
+        require_capability(identity, "results.view")
         return {
             "data": queries().actual_results(
                 identity.user_id,
@@ -3206,6 +3284,7 @@ def create_app(
         limit: int = Query(default=200, ge=1, le=500),
         identity: SessionIdentity = identity_dependency,
     ) -> dict[str, Any]:
+        require_capability(identity, "results.view")
         return {
             "environment": environment,
             "data": queries().audit_timeline(identity.user_id, environment, limit=limit),
@@ -3216,6 +3295,7 @@ def create_app(
     def runtime_status(
         identity: SessionIdentity = identity_dependency,
     ) -> dict[str, Any]:
+        require_capability(identity, "system.view")
         snapshot = queries().runtime_snapshot(identity.user_id)
         snapshot.update(
             {
@@ -4131,7 +4211,10 @@ def create_app(
         @app.get("/exceptions", include_in_schema=False)
         @app.get("/capital", include_in_schema=False)
         @app.get("/results", include_in_schema=False)
+        @app.get("/venues", include_in_schema=False)
         @app.get("/venues/binance", include_in_schema=False)
+        @app.get("/venues/hyperliquid", include_in_schema=False)
+        @app.get("/admin/users", include_in_schema=False)
         @app.get("/proposals/{proposal_id}", include_in_schema=False)
         @app.get("/campaigns/{campaign_id}", include_in_schema=False)
         def web_app(proposal_id: str | None = None, campaign_id: str | None = None) -> FileResponse:

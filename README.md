@@ -39,7 +39,7 @@
 
 - API 进程：`uv run trading-api`
 - 只读同步进程：`uv run trading-sync-worker`；`--once` 用于一次性生产边界验收。它只读取 Perptape、Binance、Hyperliquid 和已配置 NoTilt Vault，持久化事实并运行对账，不拥有订单发送、资金签名或广播方法
-- Web/PWA：提案/审核、Campaign、AUTO_ADD 候选、原子减仓/退出、全局风险收紧及受复核恢复、`/venues/binance` 只读场所事实页、`/capital` 资金中心和 `/results` 实际结果/审计/运行状态页。资金中心默认只展示 LIVE；SHADOW/TESTNET 置于独立折叠的“模拟数据”区且不计入真实净值；Vault 缺少事实时仍显示 `0 USD · MISSING`，不能据此视为已确认余额。Hyperliquid 当前只有 HTTP 入口，没有专属页面
+- Web/PWA：机会页内的人工提案入口、审核、Campaign、AUTO_ADD 候选、原子减仓/退出、全局风险收紧及受复核恢复、`/positions` 系统状态、`/venues` 统一交易所事实、`/admin/users` 成员权限、`/capital` 资金中心和 `/results` 实际结果/审计页。交易所事实把 Binance 与 Hyperliquid 作为同一能力的两个数据源；成员权限按角色、账户和场所作用域分配。资金中心默认只展示 LIVE；SHADOW/TESTNET 置于独立折叠的“模拟数据”区且不计入真实净值；Vault 缺少事实时仍显示 `0 USD · MISSING`，不能据此视为已确认余额
 - HTTP：健康检查、内部会话、Perptape 主站机会与可选 LIVE Proposal、Proposal/Review/Risk/Authorization、SHADOW/TESTNET/LIVE Campaign、AUTO_ADD/减仓/退出、资金事实/提案/授权、NoTilt 三链状态/同步/持久化未签名计划/回执确认、按环境结果/审计/运行状态，以及 Binance、Hyperliquid Core 的只读、TESTNET 与受控 LIVE API
 - 内部业务：`trading_control_plane.service.TradingService`
 - 纯计算：`evaluate_risk`、`select_target_position`、`compute_pnl`

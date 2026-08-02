@@ -11,7 +11,7 @@ from decimal import Decimal
 from typing import Any, NoReturn
 from uuid import UUID, uuid4
 
-from sqlalchemy import func, select, text
+from sqlalchemy import delete, func, select, text
 from sqlalchemy.orm import Session
 
 from trading_control_plane.binance import BinanceReadOnlySnapshot
@@ -157,13 +157,29 @@ RELEASABLE_INTENT_STATUSES = {
 }
 
 ROLE_ACTIONS: dict[Role, frozenset[str]] = {
-    Role.OBSERVER: frozenset({"view", "capital.view"}),
-    Role.PROPOSER: frozenset({"view", "capital.view", "proposal.create", "proposal.submit"}),
-    Role.REVIEWER: frozenset({"view", "capital.view", "proposal.review", "risk.restore.review"}),
+    Role.OBSERVER: frozenset(
+        {
+            "view",
+            "opportunity.view",
+            "proposal.view",
+            "operations.view",
+            "system.view",
+            "venue.view",
+            "results.view",
+        }
+    ),
+    Role.PROPOSER: frozenset(
+        {"view", "opportunity.view", "proposal.view", "proposal.create", "proposal.submit"}
+    ),
+    Role.REVIEWER: frozenset({"view", "proposal.view", "proposal.review", "risk.restore.review"}),
     Role.OPERATOR: frozenset(
         {
             "view",
-            "capital.view",
+            "proposal.view",
+            "operations.view",
+            "system.view",
+            "venue.view",
+            "results.view",
             "risk.decide",
             "authorization.issue",
             "order.prepare",
@@ -440,6 +456,128 @@ class TradingService:
                 now=now,
             )
             return user.user_id
+
+    def create_managed_user(
+        self,
+        username: str,
+        roles: Sequence[Role],
+        actor_id: UUID,
+        account_scope: str | None = None,
+        venue_scope: str | None = None,
+        *,
+        now: datetime,
+    ) -> UUID:
+        normalized_username = username.strip()
+        normalized_roles = tuple(dict.fromkeys(roles))
+        if not normalized_username or not normalized_roles:
+            _reject("USER_ACCESS_INVALID", "an active user requires a username and role")
+        with self.database.session_factory.begin() as session:
+            self._require_role(session, actor_id, "user.manage")
+            if session.scalar(select(User).where(User.username == normalized_username)) is not None:
+                _reject("USERNAME_CONFLICT", "the internal username already exists")
+            user = User(
+                username=normalized_username,
+                principal_type=PrincipalType.HUMAN.value,
+                active=True,
+                created_at=now,
+            )
+            session.add(user)
+            session.flush()
+            for role in normalized_roles:
+                session.add(
+                    RoleAssignment(
+                        user_id=user.user_id,
+                        role=role.value,
+                        account_scope=None if role is Role.SYSTEM_ADMIN else account_scope,
+                        venue_scope=None if role is Role.SYSTEM_ADMIN else venue_scope,
+                        created_at=now,
+                    )
+                )
+            self._audit(
+                session,
+                actor_id=str(actor_id),
+                event_type="USER_ACCESS_CREATED",
+                object_type="User",
+                object_id=user.user_id,
+                reason=f"roles={','.join(sorted(role.value for role in normalized_roles))}",
+                correlation_id=uuid4(),
+                object_version=1,
+                now=now,
+            )
+            return user.user_id
+
+    def update_managed_user_access(
+        self,
+        user_id: UUID,
+        roles: Sequence[Role],
+        active: bool,
+        actor_id: UUID,
+        account_scope: str | None = None,
+        venue_scope: str | None = None,
+        *,
+        now: datetime,
+    ) -> None:
+        normalized_roles = tuple(dict.fromkeys(roles))
+        if active and not normalized_roles:
+            _reject("USER_ACCESS_INVALID", "an active user requires at least one role")
+        if user_id == actor_id:
+            _reject(
+                "SELF_ACCESS_CHANGE_DENIED",
+                "manage your own access through another system administrator",
+            )
+        with self.database.session_factory.begin() as session:
+            self._require_role(session, actor_id, "user.manage")
+            user = session.get(User, user_id, with_for_update=True)
+            if user is None or user.principal_type != PrincipalType.HUMAN.value:
+                _reject("USER_NOT_FOUND", "the managed human user does not exist")
+            current_assignments = session.scalars(
+                select(RoleAssignment).where(RoleAssignment.user_id == user_id)
+            ).all()
+            current_roles = {Role(item.role) for item in current_assignments}
+            removing_admin = Role.SYSTEM_ADMIN in current_roles and (
+                Role.SYSTEM_ADMIN not in normalized_roles or not active
+            )
+            if removing_admin:
+                active_admins = session.scalar(
+                    select(func.count(func.distinct(User.user_id)))
+                    .select_from(User)
+                    .join(RoleAssignment, RoleAssignment.user_id == User.user_id)
+                    .where(
+                        User.active,
+                        RoleAssignment.role == Role.SYSTEM_ADMIN.value,
+                    )
+                )
+                if int(active_admins or 0) <= 1:
+                    _reject(
+                        "LAST_SYSTEM_ADMIN_REQUIRED",
+                        "the last active system administrator cannot be removed or disabled",
+                    )
+            session.execute(delete(RoleAssignment).where(RoleAssignment.user_id == user_id))
+            for role in normalized_roles:
+                session.add(
+                    RoleAssignment(
+                        user_id=user_id,
+                        role=role.value,
+                        account_scope=None if role is Role.SYSTEM_ADMIN else account_scope,
+                        venue_scope=None if role is Role.SYSTEM_ADMIN else venue_scope,
+                        created_at=now,
+                    )
+                )
+            user.active = active
+            self._audit(
+                session,
+                actor_id=str(actor_id),
+                event_type="USER_ACCESS_UPDATED",
+                object_type="User",
+                object_id=user_id,
+                reason=(
+                    f"active={str(active).lower()};"
+                    f"roles={','.join(sorted(role.value for role in normalized_roles))}"
+                ),
+                correlation_id=uuid4(),
+                object_version=1,
+                now=now,
+            )
 
     def bind_telegram_private_chat(
         self,

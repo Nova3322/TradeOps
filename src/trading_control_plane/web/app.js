@@ -1,6 +1,7 @@
 const main = document.querySelector('#main');
 const sidebar = document.querySelector('#sidebar');
 const identityChip = document.querySelector('#identity-chip');
+const environmentBadge = document.querySelector('#environment-badge');
 const mobileNavToggle = document.querySelector('#mobile-nav-toggle');
 const mobileSessionSummary = document.querySelector('#mobile-session-summary');
 const navBackdrop = document.querySelector('#nav-backdrop');
@@ -91,20 +92,45 @@ const percentageDistance = (from, to) => {
 };
 const roleNames = () => (session?.roles || []).map((item) => item.role);
 const capabilityRoles = {
-  view:['OBSERVER','PROPOSER','REVIEWER','OPERATOR'],
-  'capital.view':['OBSERVER','PROPOSER','REVIEWER','OPERATOR','TREASURY_ADMIN'],
+  'opportunity.view':['OBSERVER','PROPOSER'],
+  'proposal.view':['OBSERVER','PROPOSER','REVIEWER','OPERATOR'],
+  'operations.view':['OBSERVER','OPERATOR'],
+  'system.view':['OBSERVER','OPERATOR'],
+  'venue.view':['OBSERVER','OPERATOR'],
+  'venue.sync':['OPERATOR'],
+  'results.view':['OBSERVER','OPERATOR'],
+  'capital.view':['TREASURY_ADMIN'],
   'proposal.create':['PROPOSER'],
   'proposal.review':['REVIEWER'],
+  'access.manage':[],
 };
-const hasCapability = (capability) => roleNames().includes('SYSTEM_ADMIN') || (capabilityRoles[capability] || []).some(role => roleNames().includes(role));
+const hasCapability = (capability) => (
+  (roleNames().includes('SYSTEM_ADMIN') && capability !== 'capital.view')
+  || (capabilityRoles[capability] || []).some(role => roleNames().includes(role))
+);
 const routeCapability = (path) => {
   if (path === '/') return null;
   if (path === '/capital') return 'capital.view';
+  if (path === '/opportunities') return 'opportunity.view';
   if (path === '/proposals/new') return 'proposal.create';
   if (path === '/reviews') return 'proposal.review';
-  return 'view';
+  if (path === '/proposals' || path.startsWith('/proposals/')) return 'proposal.view';
+  if (path === '/campaigns' || path.startsWith('/campaigns/') || path === '/orders' || path === '/exceptions') return 'operations.view';
+  if (path === '/positions' || path === '/risk') return 'system.view';
+  if (path === '/results') return 'results.view';
+  if (path === '/venues' || path.startsWith('/venues/')) return 'venue.view';
+  if (path === '/admin/users') return 'access.manage';
+  return 'operations.view';
 };
-const capabilityLabel = (capability) => ({view:'交易只读作用域','capital.view':'资金查看','proposal.create':'创建提案','proposal.review':'独立审核'}[capability] || capability);
+const capabilityLabel = (capability) => ({'opportunity.view':'查看机会','proposal.view':'查看提案','operations.view':'交易运维','system.view':'查看系统状态','venue.view':'查看交易所事实','results.view':'查看结果与审计','capital.view':'资金管理','proposal.create':'发起提案','proposal.review':'独立审核','access.manage':'成员权限管理'}[capability] || capability);
+const accessRoleCatalog = [
+  {role:'OBSERVER', label:'只读观察', copy:'查看机会、提案、Campaign、系统状态、交易所事实和结果；不能执行动作。'},
+  {role:'PROPOSER', label:'发起提案', copy:'查看机会并创建提案；不能审核自己的提案，也不能操作 Campaign。'},
+  {role:'REVIEWER', label:'独立审核', copy:'只处理冻结提案的审核；不能发起、执行或查看资金。'},
+  {role:'OPERATOR', label:'交易运维', copy:'运行风险、授权、订单、减仓、对账和交易所同步；不自动获得资金权限。'},
+  {role:'TREASURY_ADMIN', label:'资金管理', copy:'查看与管理资金事实、划转和资金对账；与交易运维职责分离。'},
+  {role:'SYSTEM_ADMIN', label:'系统管理', copy:'管理成员与系统控制；不会自动获得资金管理权限。'},
+];
 const loginDestination = () => {
   const destination = `${location.pathname}${location.search}`;
   return destination;
@@ -366,6 +392,7 @@ function formNumber(value, fallback = '') {
 
 async function bootstrap() {
   authStatus = await api('/api/auth/status');
+  environmentBadge.textContent = String(authStatus.environment || 'CONTROL PLANE').toUpperCase();
   try {
     const result = await api('/api/auth/session');
     session = result.session;
@@ -400,13 +427,14 @@ async function route() {
     else if (path === '/reviews') await renderProposalList('PENDING_REVIEW', '审核队列');
     else if (path === '/proposals') await renderProposalList(null, '全部提案');
     else if (path === '/campaigns') await renderCampaignList();
-    else if (path === '/positions') await renderCampaignFacts('positions');
+    else if (path === '/positions') await renderSystemStatus();
     else if (path === '/orders') await renderCampaignFacts('orders');
     else if (path === '/risk') await renderCampaignFacts('risk');
     else if (path === '/capital') await renderCapitalCenter();
     else if (path === '/results') await renderActualResults();
     else if (path === '/exceptions') await renderExceptions();
-    else if (path === '/venues/binance') await renderBinanceReadOnly();
+    else if (path === '/venues' || path === '/venues/binance' || path === '/venues/hyperliquid') await renderVenueFacts();
+    else if (path === '/admin/users') await renderAccessManagement();
     else {
       const campaignMatch = path.match(/^\/campaigns\/([0-9a-f-]+)$/i);
       const proposalMatch = path.match(/^\/proposals\/([0-9a-f-]+)$/i);
@@ -453,9 +481,23 @@ function renderLogin() {
 }
 
 async function renderHome() {
-  if (!hasCapability('view')) {
-    const hasCapital = hasCapability('capital.view');
-    main.innerHTML = `<section class="page home-page"><article class="home-status tone-${hasCapital ? 'success' : 'neutral'}"><div><p class="eyebrow">ROLE-CORRECT HOME</p><h1>${hasCapital ? '今日只显示你的资金职责' : '当前身份尚未分配业务职责'}</h1><p>${hasCapital ? '你可以查看资金事实、净值完整性、在途占用和资金对账；交易提案、Campaign 与风险操作不在当前角色范围内。' : '请由管理员分配明确角色和作用域；系统不会把缺少权限当作空数据。'}</p></div>${hasCapital ? '<a class="primary" href="/capital" data-link>进入资金中心</a>' : ''}</article></section>`;
+  if (!hasCapability('operations.view')) {
+    if (hasCapability('proposal.review')) {
+      const result = await api('/api/proposals?proposal_status=PENDING_REVIEW');
+      const actionable = result.data.filter(item => item.actionable_for_current_user);
+      main.innerHTML = `<section class="page home-page"><article class="home-status tone-${actionable.length ? 'attention' : 'success'}"><div><p class="eyebrow">REVIEWER WORKSPACE</p><h1>${actionable.length ? `${actionable.length} 笔提案等待你的独立审核` : '当前没有需要你审核的提案'}</h1><p>审核身份只看冻结提案与审核依据，不能发起提案、查看资金或操作 Campaign。</p></div><a class="primary" href="/reviews" data-link>进入审核队列</a></article></section>`;
+      return;
+    }
+    if (hasCapability('proposal.create')) {
+      const result = await api('/api/proposals');
+      main.innerHTML = `<section class="page home-page"><article class="home-status tone-success"><div><p class="eyebrow">PROPOSER WORKSPACE</p><h1>从机会开始形成交易假设</h1><p>你可以查看机会、发起提案并跟踪自己可见的提案；不能审核、查看资金或操作 Campaign。</p></div><a class="primary" href="/opportunities" data-link>查看机会</a></article><div class="stats"><div class="stat"><small>当前可见提案</small><b>${result.data.length}</b></div><div class="stat"><small>待审核</small><b>${result.data.filter(item => item.status === 'PENDING_REVIEW').length}</b></div></div></section>`;
+      return;
+    }
+    if (hasCapability('capital.view')) {
+      main.innerHTML = `<section class="page home-page"><article class="home-status tone-success"><div><p class="eyebrow">TREASURY WORKSPACE</p><h1>今日只显示你的资金职责</h1><p>你可以查看资金事实、净值完整性、在途占用和资金对账；交易提案、Campaign 与交易所排障不在当前角色范围内。</p></div><a class="primary" href="/capital" data-link>进入资金中心</a></article></section>`;
+      return;
+    }
+    main.innerHTML = `<section class="page home-page"><article class="home-status tone-neutral"><div><p class="eyebrow">NO ASSIGNMENT</p><h1>当前身份尚未分配业务职责</h1><p>请由系统管理员分配明确岗位与作用域；系统不会把缺少权限显示成空数据。</p></div></article></section>`;
     return;
   }
   const riskControlRequest = api('/api/risk-controls').catch(error => {
@@ -536,19 +578,27 @@ async function renderHome() {
     <div class="stats home-stats"><div class="stat"><small>受影响 Campaign</small><b class="${exceptions.length ? 'danger-text' : ''}">${exceptionCampaigns.size}</b><span>${exceptions.length ? `${exceptions.length} 项问题` : '没有派生异常'}</span></div><div class="stat"><small>非本人待审核</small><b class="${expiringReviews.length ? 'warning-text' : ''}">${actionableReviews.length}</b><span>${expiringReviews.length ? `${expiringReviews.length} 笔即将到期` : canReview ? '创建者不可审核自己的提案' : '当前身份不是 Reviewer'}</span></div><div class="stat"><small>运行中 Campaign</small><b>${activeCampaigns.length}</b><span>${activeCampaigns.length ? '保护与对账需持续有效' : '当前没有活动仓位流程'}</span></div><div class="stat"><small>新增风险状态</small><b class="${riskLimited ? 'warning-text status-copy' : 'status-copy'}">${escapeHtml(riskControl ? riskControlStatusLabel(riskControl.policy.system_state) : '由管理员控制')}</b><span>${riskControl ? `AUTO_ADD ${escapeHtml(riskControlStatusLabel(riskControl.auto_add_gate.status))}` : '当前角色无全局恢复权限'}</span></div></div>
     <div class="home-layout"><section><div class="section-heading"><div><p class="eyebrow">PRIORITY ORDER</p><h2>现在按这个顺序处理</h2></div><button class="secondary" data-refresh>刷新当前事实</button></div><div class="home-priority-list">${priorityCards.join('')}</div></section>
       <aside class="stack"><article class="card home-quick-start"><p class="eyebrow">${canPropose ? 'NEW DECISION' : 'MARKET OBSERVATION'}</p><h2>${canPropose ? '开始新的判断' : '继续观察市场机会'}</h2><p class="subtle">${canPropose ? '先看机会或写交易假设；这两条路径都只会创建提案，并进入独立审核。' : '当前角色只查看候选，不冻结交易参数，也不会从这里新增风险。'}</p><div class="stacked-actions"><a class="primary" href="/opportunities" data-link>查看 PerpTape 机会</a>${canPropose ? '<a class="secondary" href="/proposals/new" data-link>创建人工提案</a>' : ''}</div></article>
-        <article class="card home-boundary"><p class="eyebrow">SYSTEM BOUNDARY</p><h2>当前运行边界</h2><dl class="definition-grid">${definition('环境', 'SHADOW')}${definition('真实订单', '关闭')}${definition('风险政策', riskControl ? riskControlStatusLabel(riskControl.policy.system_state) : '由管理员控制')}${definition('自动加仓', riskControl ? riskControlStatusLabel(riskControl.auto_add_gate.status) : '由管理员控制')}</dl><p class="safety-note">首页只汇总你当前可见的权威事实。没有异常不代表交易盈利，也不代表 LIVE 已准备好。</p></article></aside></div></section>`;
+        <article class="card home-boundary"><p class="eyebrow">SYSTEM BOUNDARY</p><h2>当前控制状态</h2><dl class="definition-grid">${definition('站点环境', String(authStatus?.environment || 'unknown').toUpperCase())}${definition('风险政策', riskControl ? riskControlStatusLabel(riskControl.policy.system_state) : '由管理员控制')}${definition('自动加仓', riskControl ? riskControlStatusLabel(riskControl.auto_add_gate.status) : '由管理员控制')}${definition('事实原则', '缺失即阻断')}</dl><p class="safety-note">是否允许真实发送由具体 Campaign、短期授权、交易所配置和服务端 Gate 共同决定，首页不把它简化成一个容易误解的开关。</p></article></aside></div></section>`;
   document.querySelector('[data-refresh]')?.addEventListener('click', route);
 }
 
 async function renderOpportunities() {
-  const result = await api('/api/opportunities');
-  opportunities = result.data;
+  let result = null;
+  let sourceError = null;
+  try {
+    result = await api('/api/opportunities');
+  } catch (error) {
+    if (error.status === 401 || error.status === 403) throw error;
+    sourceError = error;
+  }
+  opportunities = result?.data || [];
   const items = opportunities;
   const canPropose = hasCapability('proposal.create');
   const options = (key) => [...new Set(items.map(item => item[key]).filter(Boolean))].sort().map(value => `<option value="${escapeHtml(value)}">${escapeHtml(value)}</option>`).join('');
-  main.innerHTML = `<section class="page"><header class="page-head"><div><p class="eyebrow">PERPTAPE · ${escapeHtml(result.source_contract_version)}</p><h1>当前机会</h1><p class="lede">这里只展示 Perptape 实际返回的突破候选。数据健康、方向和时间保留来源语义；交易数量与风险由 Trading 独立决定。</p></div><div class="toolbar"><button class="secondary" data-refresh>刷新事实</button></div></header>
-    <div class="stats"><div class="stat"><small>当前候选</small><b>${items.length}</b></div><div class="stat"><small>${canPropose ? '可冻结' : 'Catalog 可用'}</small><b>${items.filter(i => i.readiness === 'READY' && i.proposal_eligible).length}</b></div><div class="stat"><small>数据截止</small><b style="font-size:14px">${fmtDate(result.as_of)}</b></div><div class="stat"><small>执行环境</small><b style="font-size:14px">SHADOW</b></div></div>
-    ${items.length ? `<form id="opportunity-filters" class="filter-panel"><label>交易所<select name="venue"><option value="">全部</option>${options('venue')}</select></label><label>币对<input name="symbol" type="search" placeholder="例如 BTC、XYZ100"></label><label>共振周期<select name="timeframe"><option value="">全部周期</option>${options('timeframe')}</select></label><label>方向<select name="direction"><option value="">全部</option><option>LONG</option><option>SHORT</option></select></label><label>最低成交量<input name="volume" type="number" min="0" placeholder="不限"></label><label>最低持仓量<input name="open_interest" type="number" min="0" placeholder="不限"></label><button type="reset" class="text-button">清除筛选</button></form><div class="result-summary"><span>显示 <b data-filter-count>${items.length}</b> / ${items.length} 个机会</span><span>成交量与持仓量缺失时不会通过数值筛选</span></div><div id="opportunity-grid" class="card-grid">${items.map(opportunityCard).join('')}</div><section id="opportunity-empty" class="empty-state compact-empty" hidden><div><h2>没有符合条件的机会</h2><p>尝试降低成交量/持仓量门槛，或清除部分筛选。</p></div></section>` : '<section class="empty-state"><div><h2>Perptape 当前没有返回候选</h2><p>这不是零风险或无行情，只表示当前接口数据为空。</p></div></section>'}
+  main.innerHTML = `<section class="page"><header class="page-head"><div><p class="eyebrow">PERPTAPE · ${escapeHtml(result?.source_contract_version || 'SOURCE UNAVAILABLE')}</p><h1>机会</h1><p class="lede">先看外部候选；没有合适信号时，也可以从同一页面发起人工提案。两条路径都只冻结判断并进入独立审核。</p></div><div class="toolbar">${canPropose ? '<a class="primary" href="/proposals/new" data-link>＋ 人工提案</a>' : ''}<button class="secondary" data-refresh>刷新机会</button></div></header>
+    ${sourceError ? `<article class="source-status tone-attention"><div><p class="eyebrow">PERPTAPE SOURCE</p><h2>外部机会源当前不可用</h2><p>${escapeHtml(friendlyApiError(sourceError))}。这不会阻止有权限的用户发起人工提案，也不会用缓存或模拟候选冒充实时机会。</p></div>${canPropose ? '<a class="secondary" href="/proposals/new" data-link>创建人工提案</a>' : ''}</article>` : ''}
+    <div class="stats"><div class="stat"><small>当前候选</small><b>${items.length}</b></div><div class="stat"><small>${canPropose ? '可冻结' : 'Catalog 可用'}</small><b>${items.filter(i => i.readiness === 'READY' && i.proposal_eligible).length}</b></div><div class="stat"><small>数据截止</small><b style="font-size:14px">${fmtDate(result?.as_of)}</b></div><div class="stat"><small>来源状态</small><b style="font-size:14px">${sourceError ? '不可用' : '实时返回'}</b></div></div>
+    ${items.length ? `<form id="opportunity-filters" class="filter-panel"><label>交易所<select name="venue"><option value="">全部</option>${options('venue')}</select></label><label>币对<input name="symbol" type="search" placeholder="例如 BTC、XYZ100"></label><label>共振周期<select name="timeframe"><option value="">全部周期</option>${options('timeframe')}</select></label><label>方向<select name="direction"><option value="">全部</option><option>LONG</option><option>SHORT</option></select></label><label>最低成交量<input name="volume" type="number" min="0" placeholder="不限"></label><label>最低持仓量<input name="open_interest" type="number" min="0" placeholder="不限"></label><button type="reset" class="text-button">清除筛选</button></form><div class="result-summary"><span>显示 <b data-filter-count>${items.length}</b> / ${items.length} 个机会</span><span>成交量与持仓量缺失时不会通过数值筛选</span></div><div id="opportunity-grid" class="card-grid">${items.map(opportunityCard).join('')}</div><section id="opportunity-empty" class="empty-state compact-empty" hidden><div><h2>没有符合条件的机会</h2><p>尝试降低成交量/持仓量门槛，或清除部分筛选。</p></div></section>` : `<section class="empty-state compact-empty"><div><h2>${sourceError ? '等待机会源恢复' : '当前没有突破候选'}</h2><p>${sourceError ? '人工提案入口仍然可用；外部源恢复后再刷新。' : '这不代表零风险或无行情，只表示当前接口数据为空。'}</p></div></section>`}
   </section>`;
   document.querySelector('[data-refresh]')?.addEventListener('click', route);
   bindOpportunityActions();
@@ -633,7 +683,7 @@ function bindOpportunityActions() {
 async function renderManualProposal() {
   const result = await api('/api/instruments');
   instruments = result.data;
-  main.innerHTML = `<section class="page"><header class="page-head"><div><p class="eyebrow">MANUAL PROPOSAL · SHADOW</p><h1>创建人工提案</h1><p class="lede">先说清要做什么、最多亏多少；分批入场和 AUTO_ADD 等执行细节按需展开。</p></div><a class="secondary" href="/proposals" data-link>查看全部提案</a></header>
+  main.innerHTML = `<section class="page"><header class="page-head"><div><p class="eyebrow">CONTROLLED MANUAL PROPOSAL</p><h1>创建人工提案</h1><p class="lede">先说清要做什么、最多亏多少；分批入场和 AUTO_ADD 等执行细节按需展开。提交只冻结判断，仍需独立审核和服务端风险门控。</p></div><a class="secondary" href="/opportunities" data-link>返回机会</a></header>
     <div class="compose-layout"><form id="manual-form" class="form-panel proposal-compose">
       <section class="form-section"><div class="section-title"><span>1</span><div><h2>交易意图</h2><p>选标的、定方向，说清从哪个价格开始执行。</p></div></div><div class="field-grid">
         <label>账户<span class="field-help">资金和权限归属</span><input name="account_id" value="acct-1" required></label>
@@ -789,7 +839,7 @@ async function renderProposalDetail(id) {
         : needsAuthorization
           ? {title:'下一步：签发短期授权', copy:'风险检查已通过，可签发限时、限数量、限风险的交易授权。', tone:'attention'}
           : authorizationUsable
-            ? {title:'已准备创建初仓意图', copy:'授权仍在有效期内；创建后只记录 SHADOW 风险预留与意图。', tone:'success'}
+            ? {title:'已准备创建初仓意图', copy:'授权仍在有效期内；创建后只记录风险预留与订单意图，后续执行仍受服务端 Gate 和发送租约控制。', tone:'success'}
             : {title:'当前没有待办动作', copy:'请核对授权有效期和当前状态。', tone:'neutral'};
   const canRunRisk = item.status === 'APPROVED' && canOperate && (!riskDone || riskDenied || needsFreshRisk);
   const executionAction = initialEntry
@@ -799,7 +849,7 @@ async function renderProposalDetail(id) {
       : needsAuthorization && canOperate
         ? '<button class="primary wide-action" data-authorize>签发 30 分钟授权</button>'
         : authorizationUsable && canOperate
-          ? '<button class="primary wide-action" data-initial>创建一次性 SHADOW 初仓意图</button>'
+          ? '<button class="primary wide-action" data-initial>创建一次性初仓意图</button>'
           : '';
   const riskOutcomeCopy = !riskDone
     ? ''
@@ -879,14 +929,17 @@ async function createInitialIntent(item, button) {
     try {
       const initialQuantity = item.frozen_payload?.details?.initial_quantity || item.authorization.quantity_limit;
       const result = await api(`/api/authorizations/${item.authorization.authorization_id}/intents`, {method:'POST', body:JSON.stringify({kind:'INITIAL', account_id:item.account_id, venue:item.venue, instrument_id:item.instrument_id, direction:item.direction, quantity:initialQuantity, idempotency_key:crypto.randomUUID()})});
-      showToast('风险已原子预留，SHADOW 初仓意图已创建'); navigate(`/campaigns/${result.campaign_id}`);
+      showToast('风险已原子预留，初仓意图已创建'); navigate(`/campaigns/${result.campaign_id}`);
     } catch (error) { showApiError(error, document.querySelector('#execution-error')); }
   });
 }
 
 async function loadCampaignDetails() {
   const result = await api('/api/campaigns');
-  return Promise.all(result.data.map((item) => api(`/api/campaigns/${item.campaign_id}`)));
+  const visible = authStatus?.environment === 'production'
+    ? result.data.filter(item => item.environment === 'LIVE')
+    : result.data;
+  return Promise.all(visible.map((item) => api(`/api/campaigns/${item.campaign_id}`)));
 }
 
 const riskControlStatusLabel = (value) => ({
@@ -942,11 +995,61 @@ async function bindRiskControlActions() {
 
 async function renderCampaignList() {
   const result = await api('/api/campaigns');
-  const items = result.data;
-  main.innerHTML = `<section class="page"><header class="page-head"><div><p class="eyebrow">SHADOW OPERATIONS</p><h1>Campaign 运营台</h1><p class="lede">从短期授权、风险预留和订单意图，到成交、保护、减仓、对账和 PnL。所有发送动作均为本地 SHADOW 事实。</p></div><div class="toolbar"><a class="secondary" href="/proposals" data-link>全部提案</a></div></header>
-    <div class="stats"><div class="stat"><small>Campaign</small><b>${items.length}</b></div><div class="stat"><small>Open / Opening</small><b>${items.filter(i => ['OPEN','OPENING'].includes(i.status)).length}</b></div><div class="stat"><small>Unknown</small><b>${items.filter(i => i.status === 'UNKNOWN').length}</b></div><div class="stat"><small>环境</small><b style="font-size:14px">SHADOW ONLY</b></div></div>
-    ${items.length ? `<div class="table-wrap"><table><thead><tr><th>Campaign</th><th>范围</th><th>方向 / 目标</th><th>状态</th><th>PnL</th><th>更新时间</th></tr></thead><tbody>${items.map(item => `<tr data-href="/campaigns/${item.campaign_id}"><td><b>${shortId(item.campaign_id)}</b><br><span class="subtle">Proposal ${shortId(item.proposal_id)}</span></td><td>${escapeHtml(item.account_id)}<br><span class="subtle">${escapeHtml(item.venue)}</span></td><td class="${item.direction === 'LONG' ? 'direction-long' : 'direction-short'}">${escapeHtml(item.direction)} · ${fmtNumber(item.current_target_quantity)}</td><td><b class="status-${escapeHtml(item.status)}">${escapeHtml(fmtStatus(item.status))}</b></td><td>${fmtNumber(item.final_pnl)}</td><td>${fmtDate(item.updated_at)}</td></tr>`).join('')}</tbody></table></div>` : '<section class="empty-state"><div><h2>尚无 Campaign</h2><p>批准提案并签发短期授权后，Operator 才能创建 SHADOW 初仓意图。</p></div></section>'}</section>`;
+  const productionOnly = authStatus?.environment === 'production';
+  const items = productionOnly ? result.data.filter(item => item.environment === 'LIVE') : result.data;
+  const environments = [...new Set(items.map(item => item.environment))];
+  main.innerHTML = `<section class="page"><header class="page-head"><div><p class="eyebrow">AUTHORITATIVE OPERATIONS</p><h1>Campaign</h1><p class="lede">一笔交易从短期授权、风险预留和订单意图，到成交、保护、减仓、对账与最终结果的唯一运行单元。</p></div><div class="toolbar"><a class="secondary" href="/proposals" data-link>查看提案</a></div></header>
+    <div class="stats"><div class="stat"><small>Campaign</small><b>${items.length}</b></div><div class="stat"><small>Open / Opening</small><b>${items.filter(i => ['OPEN','OPENING'].includes(i.status)).length}</b></div><div class="stat"><small>Unknown</small><b>${items.filter(i => i.status === 'UNKNOWN').length}</b></div><div class="stat"><small>事实环境</small><b style="font-size:14px">${escapeHtml(environments.join(' / ') || '尚无事实')}</b></div></div>
+    ${items.length ? `<div class="table-wrap"><table><thead><tr><th>Campaign</th><th>范围</th><th>方向 / 目标</th><th>状态</th><th>PnL</th><th>更新时间</th></tr></thead><tbody>${items.map(item => `<tr data-href="/campaigns/${item.campaign_id}"><td><b>${shortId(item.campaign_id)}</b><br><span class="subtle">Proposal ${shortId(item.proposal_id)}</span></td><td>${escapeHtml(item.account_id)}<br><span class="subtle">${escapeHtml(item.environment)} · ${escapeHtml(item.venue)}</span></td><td class="${item.direction === 'LONG' ? 'direction-long' : 'direction-short'}">${escapeHtml(item.direction)} · ${fmtNumber(item.current_target_quantity)}</td><td><b class="status-${escapeHtml(item.status)}">${escapeHtml(fmtStatus(item.status))}</b></td><td>${fmtNumber(item.final_pnl)}</td><td>${fmtDate(item.updated_at)}</td></tr>`).join('')}</tbody></table></div>` : `<section class="empty-state"><div><h2>尚无 ${productionOnly ? 'LIVE ' : ''}Campaign</h2><p>${productionOnly ? '当前生产站只展示 LIVE 运行单元，不用 SHADOW 或 TESTNET 数据补位。' : '批准提案并签发短期授权后，Operator 才能创建初仓意图。'}</p></div></section>`}</section>`;
   bindLinkedRows();
+}
+
+function systemHealthCard({title, status, copy, tone = 'success', meta = ''}) {
+  return `<article class="system-health-card tone-${tone}"><div class="system-health-head"><span class="health-indicator" aria-hidden="true"></span><div><small>${escapeHtml(title)}</small><h2>${escapeHtml(status)}</h2></div></div><p>${escapeHtml(copy)}</p>${meta ? `<span class="system-health-meta">${escapeHtml(meta)}</span>` : ''}</article>`;
+}
+
+async function renderSystemStatus() {
+  const healthRequest = api('/health/ready').then(() => ({ready:true})).catch(error => ({ready:false, error}));
+  const [health, control, campaignsResponse, exceptionsResponse, binance, hyperliquid] = await Promise.all([
+    healthRequest,
+    api('/api/risk-controls').catch(error => ({error})),
+    api('/api/campaigns'),
+    api('/api/campaign-exceptions'),
+    api('/api/venues/binance/status'),
+    api('/api/venues/hyperliquid/status'),
+  ]);
+  const campaigns = campaignsResponse.data.filter(item => item.status !== 'CLOSED' && (authStatus?.environment !== 'production' || item.environment === 'LIVE'));
+  const details = await Promise.all(campaigns.map(item => api(`/api/campaigns/${item.campaign_id}`)));
+  const exceptions = exceptionsResponse.data;
+  const codes = new Set(exceptions.map(item => item.code));
+  const unknownIntents = details.flatMap(item => item.intents).filter(item => item.status === 'UNKNOWN').length;
+  const protectionIssues = exceptions.filter(item => item.code.startsWith('PROTECTION_'));
+  const exposureIssues = exceptions.filter(item => ['POSITION_UNKNOWN','POSITION_STALE','RISK_RESERVATION_UNKNOWN'].includes(item.code));
+  const reconciliationIssues = exceptions.filter(item => item.code.startsWith('RECONCILIATION_'));
+  const controlAvailable = !control.error;
+  const policy = control.policy || {system_state:'UNKNOWN', version:'—'};
+  const gate = control.auto_add_gate || {status:'UNKNOWN', version:'—'};
+  const entryOpen = controlAvailable && policy.system_state === 'NORMAL';
+  const addOpen = entryOpen && gate.status === 'ENABLED';
+  const venueConnections = [binance, hyperliquid];
+  const connectedVenues = venueConnections.filter(item => item.enabled && item.configured);
+  const overallTone = health.ready && controlAvailable && !exceptions.length ? 'success' : health.ready ? 'attention' : 'danger';
+  const cards = [
+    systemHealthCard({title:'交易核心', status:health.ready ? '正常运行' : '不可用', tone:health.ready ? 'success' : 'danger', copy:health.ready ? '数据库与权威事务核心已通过就绪检查。' : '就绪检查失败；不能把缺失响应当成正常。', meta:'PostgreSQL · fail closed'}),
+    systemHealthCard({title:'开仓与加仓', status:controlAvailable ? (addOpen ? '允许新增风险' : entryOpen ? '加仓已关闭' : riskControlStatusLabel(policy.system_state)) : '风险政策未配置', tone:addOpen ? 'success' : controlAvailable ? 'attention' : 'danger', copy:controlAvailable ? `RiskPolicy ${riskControlStatusLabel(policy.system_state)}；AUTO_ADD ${riskControlStatusLabel(gate.status)}。` : '缺少当前 RiskPolicy 或 AUTO_ADD Gate，系统按禁止新增风险处理。', meta:`Policy ${policy.version} · Gate v${gate.version}`}),
+    systemHealthCard({title:'减仓与退出', status:unknownIntents ? '部分 Campaign 先对账' : '正常可用', tone:unknownIntents ? 'attention' : 'success', copy:unknownIntents ? `${unknownIntents} 个订单结果未知，相关 Campaign 禁止重复动作；其他已知仓位仍可减仓或退出。` : '即使新增风险受限，受控减仓与退出路径仍保持可用。', meta:`${campaigns.length} 个运行中 Campaign`}),
+    systemHealthCard({title:'止损与保护监控', status:protectionIssues.length ? `${protectionIssues.length} 项需要处理` : '监控正常', tone:protectionIssues.length ? 'danger' : 'success', copy:protectionIssues.length ? '检测到保护缺失、过期、未知或覆盖不足。' : '当前活动 Campaign 没有派生保护异常。', meta:`截止 ${fmtDate(exceptionsResponse.as_of)}`}),
+    systemHealthCard({title:'风险敞口监控', status:exposureIssues.length ? `${exposureIssues.length} 项敞口不确定` : '监控正常', tone:exposureIssues.length ? 'danger' : 'success', copy:exposureIssues.length ? '仓位或风险占用存在未知/过期事实，系统会阻断新增风险。' : '当前没有仓位未知、仓位过期或风险占用未知。', meta:`${exceptions.length} 项总阻断`}),
+    systemHealthCard({title:'对账监控', status:reconciliationIssues.length ? `${reconciliationIssues.length} 项未一致` : '当前一致', tone:reconciliationIssues.length ? 'attention' : 'success', copy:reconciliationIssues.length ? '至少一个作用域存在差异、未知、过期或需要人工处理。' : '当前活动 Campaign 没有派生对账异常。', meta:'计算型 MATCH 才算恢复证据'}),
+  ].join('');
+  const venueRows = venueConnections.map(item => `<tr><td><b>${escapeHtml(item.venue)}</b></td><td>${item.enabled && item.configured ? '<span class="status-pill status-APPROVED">已连接</span>' : `<span class="status-pill">${item.enabled ? '未配置' : '已关闭'}</span>`}</td><td>${escapeHtml(item.fact_environment || item.source_environment || 'UNKNOWN')}</td><td>${item.order_send_available ? '已配置（仍受 Gate）' : '未配置'}</td><td><a class="text-button" href="/venues?venue=${encodeURIComponent(item.venue)}" data-link>查看事实 →</a></td></tr>`).join('');
+  main.innerHTML = `<section class="page system-status-page"><header class="page-head"><div><p class="eyebrow">AUTHORITATIVE SYSTEM HEALTH</p><h1>系统状态</h1><p class="lede">这里只回答一件事：交易系统现在能不能安全工作。绿色表示当前证据正常；黄色表示能力受限；红色表示必须先处理。</p></div><div class="toolbar"><button class="secondary" data-refresh>刷新状态</button><a class="secondary" href="/risk" data-link>风险控制详情</a></div></header>
+    <article class="home-status tone-${overallTone}"><div><p class="eyebrow">CURRENT VERDICT</p><h2>${!health.ready ? '交易核心未通过就绪检查' : !controlAvailable ? '核心在线，但风险控制未配置' : exceptions.length ? '核心在线，但存在风险阻断' : '交易系统当前正常'}</h2><p>${!health.ready ? '停止依赖当前页面的旧事实，先恢复数据库与服务就绪状态。' : !controlAvailable ? `${friendlyApiError(control.error)}。新增风险保持关闭，先完成风险政策配置。` : exceptions.length ? `发现 ${exceptions.length} 项安全异常；受影响的新增风险会保持关闭。` : '没有检测到活动 Campaign 的保护、敞口或对账阻断。'}</p></div>${exceptions.length ? '<a class="primary" href="/exceptions" data-link>处理异常</a>' : !controlAvailable ? '<a class="secondary" href="/risk" data-link>查看风险控制</a>' : '<span class="status-pill status-APPROVED">无需立即动作</span>'}</article>
+    <div class="system-health-grid">${cards}</div>
+    <section><div class="section-heading"><div><p class="eyebrow">VENUE SOURCES</p><h2>交易所连接</h2></div><span class="status-pill">${connectedVenues.length} / ${venueConnections.length} 已连接</span></div><div class="table-wrap"><table><thead><tr><th>数据源</th><th>读取连接</th><th>事实环境</th><th>订单发送配置</th><th></th></tr></thead><tbody>${venueRows}</tbody></table></div></section>
+    ${codes.size ? `<section><div class="section-heading"><div><p class="eyebrow">ACTIVE BLOCKERS</p><h2>当前阻断类别</h2></div><a class="secondary" href="/exceptions" data-link>查看恢复步骤</a></div><div class="exception-code-list">${[...codes].sort().map(code => `<span>${escapeHtml(explainException(code).title)}</span>`).join('')}</div></section>` : ''}
+  </section>`;
+  document.querySelector('[data-refresh]')?.addEventListener('click', route);
 }
 
 async function renderCampaignFacts(mode) {
@@ -962,9 +1065,9 @@ async function renderCampaignFacts(mode) {
   const titles = {positions:'仓位与保护', orders:'订单与成交', risk:'风险与目标'};
   let rows = '';
   if (mode === 'positions') rows = details.map(item => `<tr data-href="/campaigns/${item.campaign_id}"><td>${shortId(item.campaign_id)}</td><td>${escapeHtml(item.instrument?.symbol || shortId(item.instrument_id))}</td><td>${item.position ? `${fmtNumber(item.position.quantity)} @ ${fmtNumber(item.position.average_entry_price)}` : '无事实'}</td><td>${item.position ? escapeHtml(fmtStatus(item.position.fact_status)) : '结果未知'}</td><td>${item.protection ? `${escapeHtml(fmtStatus(item.protection.status))} · ${item.protection.fully_covered ? '完整覆盖' : '覆盖不足'}` : '无保护事实'}</td><td>${fmtDate(item.position?.observed_at)}</td></tr>`).join('');
-  if (mode === 'orders') rows = details.flatMap(item => item.intents.map(intent => `<tr data-href="/campaigns/${item.campaign_id}"><td>${shortId(item.campaign_id)}</td><td>${escapeHtml(fmtIntentKind(intent.kind))}${intent.reduce_only ? ' · 只减仓' : ''}</td><td>${escapeHtml(intent.side)} ${fmtNumber(intent.quantity)}</td><td>${escapeHtml(fmtStatus(intent.status))}</td><td>${intent.order ? `${escapeHtml(intent.order.venue_order_id)} · ${escapeHtml(fmtStatus(intent.order.status))}` : '尚未记录 SHADOW 发送'}</td><td>${fmtDate(intent.updated_at)}</td></tr>`)).join('');
+  if (mode === 'orders') rows = details.flatMap(item => item.intents.map(intent => `<tr data-href="/campaigns/${item.campaign_id}"><td>${shortId(item.campaign_id)}</td><td>${escapeHtml(fmtIntentKind(intent.kind))}${intent.reduce_only ? ' · 只减仓' : ''}</td><td>${escapeHtml(intent.side)} ${fmtNumber(intent.quantity)}</td><td>${escapeHtml(fmtStatus(intent.status))}</td><td>${intent.order ? `${escapeHtml(intent.order.venue_order_id)} · ${escapeHtml(fmtStatus(intent.order.status))}` : '尚未记录场所回执'}</td><td>${fmtDate(intent.updated_at)}</td></tr>`)).join('');
   if (mode === 'risk') rows = details.map(item => `<tr data-href="/campaigns/${item.campaign_id}"><td>${shortId(item.campaign_id)}</td><td>${escapeHtml(fmtStatus(item.status))}</td><td>${item.reservations.map(r => `${escapeHtml(fmtStatus(r.status))} ${fmtNumber(r.amount)}`).join(' · ') || '无预留'}</td><td>${fmtNumber(item.current_target_quantity)} · v${item.target_version}</td><td>${escapeHtml(fmtStatus(item.target_urgency || '—'))}</td><td>${escapeHtml(item.reconciliation ? fmtStatus(item.reconciliation.status) : '未对账')}</td></tr>`).join('');
-  const headers = mode === 'positions' ? '<th>Campaign</th><th>标的</th><th>仓位</th><th>事实</th><th>保护</th><th>观测时间</th>' : mode === 'orders' ? '<th>Campaign</th><th>意图</th><th>方向 / 数量</th><th>状态</th><th>SHADOW Order</th><th>更新时间</th>' : '<th>Campaign</th><th>状态</th><th>风险预留</th><th>目标</th><th>紧迫度</th><th>对账</th>';
+  const headers = mode === 'positions' ? '<th>Campaign</th><th>标的</th><th>仓位</th><th>事实</th><th>保护</th><th>观测时间</th>' : mode === 'orders' ? '<th>Campaign</th><th>意图</th><th>方向 / 数量</th><th>状态</th><th>场所 Order</th><th>更新时间</th>' : '<th>Campaign</th><th>状态</th><th>风险预留</th><th>目标</th><th>紧迫度</th><th>对账</th>';
   main.innerHTML = `<section class="page"><header class="page-head"><div><p class="eyebrow">POSTGRESQL AUTHORITY</p><h1>${titles[mode]}</h1><p class="lede">这些页面直接读取当前权威状态；可重新计算的投影不另行持久化。</p></div></header>
     ${mode === 'risk' ? renderRiskControlPanel(riskControls) : ''}
     ${mode === 'risk' && roleNames().includes('SYSTEM_ADMIN') ? '<div class="form-panel compact-form"><h2>全局只收紧动作</h2><p class="safety-note">这些入口只能关闭 AUTO_ADD 或把系统切到 REDUCE_ONLY；不能从这里恢复新增风险。</p><div class="toolbar"><button class="danger" data-disable-global-add>关闭全局 AUTO_ADD</button><button class="danger" data-pause-new-risk>暂停所有新增风险</button></div></div><div style="height:16px"></div>' : ''}
@@ -1130,7 +1233,7 @@ async function renderCapitalCenter() {
   const proposalTable = (rows, emptyMessage) => rows ? `<div class="table-scroll-hint">左右滑动查看完整 Proposal</div><div class="table-wrap is-scrollable"><table><thead><tr><th>Proposal</th><th>方向 / 用途</th><th>路径</th><th>金额</th><th>状态</th><th>动作</th></tr></thead><tbody>${rows}</tbody></table></div>` : `<div class="callout">${escapeHtml(emptyMessage)}</div>`;
   const transferTable = (rows, emptyMessage) => rows ? `<div class="table-scroll-hint">左右滑动查看完整 Transfer</div><div class="table-wrap is-scrollable"><table><thead><tr><th>Transfer</th><th>方向</th><th>Gross</th><th>状态 / 对账</th><th>外部引用</th><th>动作</th></tr></thead><tbody>${rows}</tbody></table></div>` : `<div class="callout">${escapeHtml(emptyMessage)}</div>`;
   const simulatedCount = balances.simulated.length + proposals.simulated.length + transfers.simulated.length;
-  const simulationPanel = `<details class="simulation-panel"><summary><span><b>模拟数据（SHADOW / TESTNET）</b><small>独立隔离，不计入真实净值</small></span><span class="tag">${simulatedCount} 条记录</span></summary><div class="simulation-content"><div class="safety-note"><b>非生产区域：</b>以下表单、余额、Proposal 与 Transfer 不属于 LIVE，不参与顶部总净值、Vault 净值、LIVE 在途占用或资金构成曲线。</div>${capitalProposalForm}${mockFactForm}${automationPanel}<section><h3>模拟资金事实</h3>${capitalBalanceTable(simulatedBalanceRows, '尚无 SHADOW 或 TESTNET 资金事实。')}</section><section><h3>模拟资金 Proposal</h3>${proposalTable(simulatedProposalRows, '尚无 SHADOW 或 TESTNET 资金 Proposal。')}</section><section><h3>模拟 Capital Transfer</h3>${transferTable(simulatedTransferRows, '尚无 SHADOW 或 TESTNET 划转状态。')}</section></div></details>`;
+  const simulationPanel = authStatus?.environment === 'production' ? '' : `<details class="simulation-panel"><summary><span><b>模拟数据（SHADOW / TESTNET）</b><small>独立隔离，不计入真实净值</small></span><span class="tag">${simulatedCount} 条记录</span></summary><div class="simulation-content"><div class="safety-note"><b>非生产区域：</b>以下表单、余额、Proposal 与 Transfer 不属于 LIVE，不参与顶部总净值、Vault 净值、LIVE 在途占用或资金构成曲线。</div>${capitalProposalForm}${mockFactForm}${automationPanel}<section><h3>模拟资金事实</h3>${capitalBalanceTable(simulatedBalanceRows, '尚无 SHADOW 或 TESTNET 资金事实。')}</section><section><h3>模拟资金 Proposal</h3>${proposalTable(simulatedProposalRows, '尚无 SHADOW 或 TESTNET 资金 Proposal。')}</section><section><h3>模拟 Capital Transfer</h3>${transferTable(simulatedTransferRows, '尚无 SHADOW 或 TESTNET 划转状态。')}</section></div></details>`;
   main.innerHTML = `<section class="page"><header class="page-head"><div><p class="eyebrow">LIVE CAPITAL AUTHORITY · FAIL CLOSED</p><h1>资金中心</h1><p class="lede">默认区域只展示 LIVE：Binance、Hyperliquid 与 NoTilt Vault 使用已确认事实合并计算 USD 净值；任何未知或过期估值都会将净值标记为不完整。Telegram 只通知，不能批准或执行资金动作。</p></div></header><div class="stats"><div class="stat"><small>LIVE 总净值</small><b>${fmtNumber(netWorth.total)} ${escapeHtml(netWorth.currency)}</b></div><div class="stat"><small>链上 Vault 净值</small><b>${fmtNumber(netWorth.vault)} ${escapeHtml(netWorth.currency)}</b></div>${venueNetWorth}<div class="stat"><small>净值状态</small><b style="font-size:14px">${netWorth.complete ? 'CURRENT' : 'INCOMPLETE'}</b></div><div class="stat"><small>真实划转 Gate</small><b style="font-size:14px">${escapeHtml(item.real_transfer_gate || 'DISABLED')}</b></div><div class="stat"><small>LIVE 在途 / 占用</small><b>${fmtNumber(liveInTransit)}</b></div></div><section class="capital-chart-panel"><div class="chart-head"><div><p class="eyebrow">LIVE CAPITAL SNAPSHOT</p><h2>资金构成曲线</h2><p class="subtle">只按 LIVE 各资金位置最新有效 USD 估值累计；这是当前快照，不冒充历史净值。</p></div><b>${fmtNumber(netWorth.total)} <small>${escapeHtml(netWorth.currency)}</small></b></div>${chartBalances.length ? `<canvas id="capital-chart" height="210" aria-label="LIVE 当前资金构成累计曲线"></canvas><div class="chart-legend">${chartLegend}</div>` : '<div class="chart-empty">LIVE 有效资金估值就绪后将在这里显示曲线</div>'}</section>${netWorth.complete ? '' : `<div class="callout"><b>LIVE 净值不完整：</b>${escapeHtml((netWorth.issues || []).join(', ') || '尚无资金事实')}</div>`}<section><h2>LIVE 确认资本、USD 估值与源端预留</h2><p class="subtle">固定展示 Binance、Hyperliquid 与链上 Vault；0 与 MISSING 同时出现表示当前没有可确认事实，不代表来源已完成同步。</p>${capitalBalanceTable(liveBalanceRows, '尚无 LIVE 资金事实。')}</section><section><h2>LIVE 资金 Proposal</h2>${proposalTable(liveProposalRows, '尚无 LIVE 资金 Proposal。')}</section><section><h2>LIVE Capital Transfer</h2>${transferTable(liveTransferRows, '尚无 LIVE 划转状态。')}</section>${simulationPanel}</section>`;
   drawCapitalChart(chartBalances);
   bindCapitalActions();
@@ -1240,7 +1343,7 @@ function resultsEnvironmentNotice(environment) {
 }
 
 async function renderActualResults() {
-  const environment = new URLSearchParams(location.search).get('environment') || 'SHADOW';
+  const environment = new URLSearchParams(location.search).get('environment') || (authStatus?.environment === 'production' ? 'LIVE' : 'SHADOW');
   const [resultResponse, auditResponse, runtimeResponse, exceptionResponse] = await Promise.all([
     api(`/api/results?environment=${encodeURIComponent(environment)}`),
     api(`/api/audit?environment=${encodeURIComponent(environment)}&limit=200`),
@@ -1305,40 +1408,61 @@ async function renderExceptions() {
   document.querySelector('[data-refresh]')?.addEventListener('click', route);
 }
 
-async function renderBinanceReadOnly() {
-  const binanceRole = session.roles.find((item) => item.venue_scope === 'BINANCE' && item.account_scope);
-  const accountId = new URLSearchParams(location.search).get('account_id') || binanceRole?.account_scope || 'acct-1';
+function latestVenueObservation(facts) {
+  const values = [facts.equity?.observed_at, facts.reconciliation?.completed_at]
+    .concat(facts.positions.map(item => item.observed_at))
+    .concat(facts.orders.map(item => item.observed_at))
+    .concat(facts.fills.map(item => item.executed_at))
+    .concat(facts.funding.map(item => item.paid_at))
+    .filter(Boolean)
+    .map(value => new Date(value).getTime())
+    .filter(Number.isFinite);
+  return values.length ? new Date(Math.max(...values)).toISOString() : null;
+}
+
+async function renderVenueFacts() {
+  const params = new URLSearchParams(location.search);
+  const selectedVenue = (params.get('venue') || (location.pathname.includes('hyperliquid') ? 'HYPERLIQUID' : 'BINANCE')).toUpperCase();
+  const venue = selectedVenue === 'HYPERLIQUID' ? 'HYPERLIQUID' : 'BINANCE';
+  const role = session.roles.find(item => item.venue_scope === venue && item.account_scope);
+  const accountId = params.get('account_id') || role?.account_scope || 'acct-1';
+  const endpoint = venue.toLowerCase();
   const [status, response] = await Promise.all([
-    api('/api/venues/binance/status'),
-    api(`/api/venues/binance/facts?account_id=${encodeURIComponent(accountId)}`),
+    api(`/api/venues/${endpoint}/status`),
+    api(`/api/venues/${endpoint}/facts?account_id=${encodeURIComponent(accountId)}`),
   ]);
   const facts = response.data;
-  const canSync = status.enabled && status.configured;
-  main.innerHTML = `<section class="page"><header class="page-head"><div><p class="eyebrow">${escapeHtml(status.fact_environment)} · BINANCE USDⓈ-M · USER_DATA</p><h1>Binance 私有事实</h1><p class="lede">只读同步 Instrument、订单、成交、仓位、保护、权益和资金费。此适配器没有下单方法，LIVE_ORDER_SEND 仍为 DISABLED。</p></div><div class="toolbar"><button class="secondary" data-refresh>刷新本地事实</button></div></header>
-    <div class="stats"><div class="stat"><small>读取开关</small><b style="font-size:14px">${status.enabled ? 'ENABLED' : 'DISABLED'}</b></div><div class="stat"><small>凭据配置</small><b style="font-size:14px">${status.configured ? 'CONFIGURED' : 'NOT CONFIGURED'}</b></div><div class="stat"><small>订单发送</small><b style="font-size:14px">UNAVAILABLE</b></div><div class="stat"><small>本地事实截止</small><b style="font-size:14px">${fmtDate(response.as_of)}</b></div></div>
-    <article class="card"><h2>读取作用域</h2><form id="binance-account-form" class="inline-form"><label>内部账户<input name="account_id" value="${escapeHtml(accountId)}" required></label><button class="secondary">查看本地事实</button></form>${canSync ? `<form id="binance-sync-form" class="inline-form"><input name="account_id" type="hidden" value="${escapeHtml(accountId)}"><label>Binance Symbol<input name="symbol" value="BTCUSDT" pattern="[A-Z0-9_]+" required></label><button class="primary">从 Binance 只读同步</button><span class="form-error" role="alert"></span></form>` : '<p class="safety-note">真实 USER_DATA 读取保持关闭或未配置。页面只展示已持久化事实；不会尝试网络连接。</p>'}</article>
+  const connected = status.enabled && status.configured;
+  const canSync = connected && hasCapability('venue.sync');
+  const lastSync = latestVenueObservation(facts);
+  const venueDetail = venue === 'BINANCE'
+    ? `Portfolio Margin · ${status.account_mode || '账户模式未知'}`
+    : `Core ${status.domain || ''}${status.dex ? ` · ${status.dex}` : ''}`;
+  const symbolDefault = venue === 'BINANCE' ? 'BTCUSDT' : 'BTC';
+  const symbolPattern = venue === 'BINANCE' ? '[A-Z0-9_]+' : '[A-Z0-9]+';
+  main.innerHTML = `<section class="page venue-facts-page"><header class="page-head"><div><p class="eyebrow">OPERATOR FACTS · READ ONLY</p><h1>交易所事实</h1><p class="lede">Binance 与 Hyperliquid 是同一套账户事实能力下的两个数据源。这里用于同步、核对和排障；日常交易仍从 Campaign、系统状态和异常进入。</p></div><button class="secondary" data-refresh>刷新本地事实</button></header>
+    <nav class="venue-switch" aria-label="选择交易所"><a class="${venue === 'BINANCE' ? 'active' : ''}" href="/venues?venue=BINANCE&account_id=${encodeURIComponent(accountId)}" data-link>Binance</a><a class="${venue === 'HYPERLIQUID' ? 'active' : ''}" href="/venues?venue=HYPERLIQUID&account_id=${encodeURIComponent(accountId)}" data-link>Hyperliquid</a></nav>
+    <div class="stats venue-status-stats"><div class="stat"><small>连接状态</small><b class="${connected ? 'direction-long' : 'warning-text'}">${connected ? '已连接' : status.enabled ? '未配置' : '已关闭'}</b><span>${escapeHtml(status.mode)}</span></div><div class="stat"><small>事实环境</small><b>${escapeHtml(status.fact_environment || status.source_environment || 'UNKNOWN')}</b><span>${escapeHtml(venueDetail)}</span></div><div class="stat"><small>内部账户</small><b>${escapeHtml(accountId)}</b><span>${escapeHtml(venue)}</span></div><div class="stat"><small>最后同步</small><b>${fmtDate(lastSync)}</b><span>${lastSync ? '已持久化权威事实' : '尚无事实'}</span></div></div>
+    <article class="card venue-scope-card"><div><h2>账户与同步</h2><p class="subtle">切换内部账户只读取已授权作用域。同步动作会读取交易所、持久化事实并立即运行对账。</p></div><form id="venue-account-form" class="inline-form"><input name="venue" type="hidden" value="${venue}"><label>内部账户<input name="account_id" value="${escapeHtml(accountId)}" required></label><button class="secondary">查看账户</button></form>${canSync ? `<form id="venue-sync-form" class="inline-form"><input name="account_id" type="hidden" value="${escapeHtml(accountId)}"><label>${escapeHtml(venue)} 标的<input name="symbol" value="${symbolDefault}" pattern="${symbolPattern}" required></label><button class="primary">同步并对账</button><span class="form-error" role="alert"></span></form>` : `<p class="safety-note">${connected ? '当前身份只有读取权限，不能触发交易所同步。' : '生产读取连接尚未配置或已关闭。页面只展示已持久化事实，不会用模拟数据补位。'}</p>`}</article>
     ${venueFactSections(facts)}
   </section>`;
   document.querySelector('[data-refresh]')?.addEventListener('click', route);
-  document.querySelector('#binance-account-form')?.addEventListener('submit', (event) => {
+  document.querySelector('#venue-account-form')?.addEventListener('submit', (event) => {
     event.preventDefault();
-    const next = new FormData(event.currentTarget).get('account_id');
-    navigate(`/venues/binance?account_id=${encodeURIComponent(next)}`);
+    const data = new FormData(event.currentTarget);
+    navigate(`/venues?venue=${encodeURIComponent(data.get('venue'))}&account_id=${encodeURIComponent(data.get('account_id'))}`);
   });
-  document.querySelector('#binance-sync-form')?.addEventListener('submit', async (event) => {
+  document.querySelector('#venue-sync-form')?.addEventListener('submit', async (event) => {
     event.preventDefault();
     const form = event.currentTarget;
-    const payload = Object.fromEntries(new FormData(form));
     const button = form.querySelector('button');
-    button.disabled = true;
-    try {
-      const result = await api('/api/venues/binance/sync', {method:'POST', body:JSON.stringify(payload)});
-      showToast(`只读同步完成；对账 ${result.reconciliation.status}`);
-      await route();
-    } catch (error) {
-      showApiError(error, form.querySelector('.form-error'));
-      button.disabled = false;
-    }
+    await withPending(button, '同步中…', async () => {
+      try {
+        const result = await api(`/api/venues/${endpoint}/sync`, {method:'POST', body:JSON.stringify(Object.fromEntries(new FormData(form)))});
+        showToast(`${venue} 同步完成；对账 ${fmtStatus(result.reconciliation.status)}`);
+        await route();
+      } catch (error) { showApiError(error, form.querySelector('.form-error')); }
+    });
   });
 }
 
@@ -1347,7 +1471,9 @@ function venueFactSections(facts) {
   const orders = facts.orders.map(item => `<tr><td>${escapeHtml(item.venue_order_id)}</td><td>${escapeHtml(item.symbol)}</td><td>${escapeHtml(item.status)}</td><td>${fmtNumber(item.filled_quantity)} / ${fmtNumber(item.ordered_quantity)}</td><td>${item.intent_id ? shortId(item.intent_id) : '外部未绑定'}</td><td>${fmtDate(item.observed_at)}</td></tr>`).join('');
   const fills = facts.fills.map(item => `<tr><td>${escapeHtml(item.venue_fill_id)}</td><td>${escapeHtml(item.symbol)}</td><td>${escapeHtml(item.side)} ${fmtNumber(item.quantity)}</td><td>${fmtNumber(item.price)}</td><td>${fmtNumber(item.fee)} ${escapeHtml(item.fee_currency)}</td><td>${fmtDate(item.executed_at)}</td></tr>`).join('');
   const funding = facts.funding.map(item => `<tr><td>${escapeHtml(item.venue_payment_id)}</td><td>${escapeHtml(item.symbol)}</td><td>${fmtNumber(item.amount)} ${escapeHtml(item.currency)}</td><td>${fmtDate(item.paid_at)}</td></tr>`).join('');
-  return `<div class="stats"><div class="stat"><small>权益</small><b>${fmtNumber(facts.equity?.equity)}</b></div><div class="stat"><small>可用余额</small><b>${fmtNumber(facts.equity?.available_balance)}</b></div><div class="stat"><small>权益状态</small><b style="font-size:14px">${escapeHtml(facts.equity?.fact_status || 'UNKNOWN')}</b></div><div class="stat"><small>观测时间</small><b style="font-size:14px">${fmtDate(facts.equity?.observed_at)}</b></div></div>
+  const reconciliation = facts.reconciliation;
+  return `<div class="stats"><div class="stat"><small>权益</small><b>${fmtNumber(facts.equity?.equity)} ${escapeHtml(facts.equity?.currency || '')}</b></div><div class="stat"><small>可用余额</small><b>${fmtNumber(facts.equity?.available_balance)}</b></div><div class="stat"><small>权益状态</small><b style="font-size:14px">${escapeHtml(factStatusLabel(facts.equity?.fact_status))}</b></div><div class="stat"><small>最近对账</small><b style="font-size:14px" class="${reconciliation?.status === 'MATCH' ? 'direction-long' : reconciliation ? 'warning-text' : ''}">${escapeHtml(reconciliation ? fmtStatus(reconciliation.status) : '未运行')}</b><span>${fmtDate(reconciliation?.completed_at)}</span></div></div>
+    ${reconciliation?.differences?.length ? `<article class="danger-note"><b>对账差异</b><ul>${reconciliation.differences.map(item => `<li>${escapeHtml(item)}</li>`).join('')}</ul></article>` : ''}
     ${factTable('仓位与保护', '<th>标的</th><th>数量 / 入场</th><th>标记价</th><th>事实</th><th>保护</th><th>观测时间</th>', positions)}
     ${factTable('当前场所订单', '<th>Venue Order</th><th>标的</th><th>状态</th><th>成交 / 委托</th><th>内部意图</th><th>观测时间</th>', orders)}
     ${factTable('最近成交', '<th>Venue Fill</th><th>标的</th><th>方向 / 数量</th><th>价格</th><th>手续费</th><th>成交时间</th>', fills)}
@@ -1358,8 +1484,68 @@ function factTable(title, headers, rows) {
   return `<section><h2>${escapeHtml(title)}</h2>${rows ? `<div class="table-wrap"><table><thead><tr>${headers}</tr></thead><tbody>${rows}</tbody></table></div>` : '<div class="callout">当前没有已持久化事实。</div>'}</section>`;
 }
 
+function accessRoleOptions(selectedRoles, prefix, disabled = false) {
+  const selected = new Set(selectedRoles);
+  return accessRoleCatalog.map(item => `<label class="permission-option" for="${prefix}-${item.role}"><input id="${prefix}-${item.role}" name="roles" type="checkbox" value="${item.role}" ${selected.has(item.role) ? 'checked' : ''} ${disabled ? 'disabled' : ''}><span><b>${escapeHtml(item.label)}</b><small>${escapeHtml(item.copy)}</small></span></label>`).join('');
+}
+
+function memberScope(member) {
+  const accountScopes = [...new Set(member.roles.map(item => item.account_scope).filter(Boolean))];
+  const venueScopes = [...new Set(member.roles.map(item => item.venue_scope).filter(Boolean))];
+  return {
+    account: accountScopes.length === 1 ? accountScopes[0] : '',
+    venue: venueScopes.length === 1 ? venueScopes[0] : '',
+    mixed: accountScopes.length > 1 || venueScopes.length > 1,
+  };
+}
+
+async function renderAccessManagement() {
+  const result = await api('/api/admin/users');
+  const members = result.data;
+  const cards = members.map(member => {
+    const roles = member.roles.map(item => item.role);
+    const scope = memberScope(member);
+    return `<form class="member-access-card ${member.active ? '' : 'is-inactive'}" data-user-access="${member.user_id}"><div class="member-access-head"><div><h2>${escapeHtml(member.username)}</h2><p>${member.identity_bound ? '已绑定生产身份源' : '等待生产身份源绑定'} · 创建于 ${fmtDate(member.created_at)}</p></div><span class="status-pill ${member.active ? 'status-APPROVED' : ''}">${member.active ? '已启用' : '已停用'}</span></div>
+      ${member.is_current_user ? '<p class="safety-note">这是当前账号。为避免误锁死，必须由另一名系统管理员修改。</p>' : ''}
+      <div class="permission-grid">${accessRoleOptions(roles, `member-${member.user_id}`, member.is_current_user)}</div>
+      <div class="scope-grid"><label>账户作用域<input name="account_scope" value="${escapeHtml(scope.account)}" placeholder="留空 = 全部账户" ${member.is_current_user ? 'disabled' : ''}></label><label>交易所作用域<input name="venue_scope" value="${escapeHtml(scope.venue)}" placeholder="BINANCE / HYPERLIQUID / 留空" ${member.is_current_user ? 'disabled' : ''}></label><label class="active-toggle"><input name="active" type="checkbox" ${member.active ? 'checked' : ''} ${member.is_current_user ? 'disabled' : ''}>允许登录和使用已分配权限</label></div>
+      ${scope.mixed ? '<p class="danger-note">该成员当前有多个不同作用域。保存会把所选岗位统一到上面的账户/交易所作用域，请先确认。</p>' : ''}
+      <div class="form-error" role="alert"></div>${member.is_current_user ? '' : '<div class="form-actions"><button class="secondary">保存权限</button></div>'}</form>`;
+  }).join('');
+  main.innerHTML = `<section class="page access-page"><header class="page-head"><div><p class="eyebrow">SYSTEM ADMIN · AUTHORIZATION</p><h1>成员权限</h1><p class="lede">按岗位勾选，不按页面逐项拼权限。一个人可以组合多个岗位；账户和交易所作用域继续限制他能接触的事实范围。</p></div><span class="status-pill">${members.filter(item => item.active).length} 名启用成员</span></header>
+    <article class="card access-principles"><h2>三条边界</h2><div class="access-principle-grid"><p><b>审核与发起分开</b><span>Reviewer 不能审核自己的提案；Proposer 不获得执行权限。</span></p><p><b>交易与资金分开</b><span>Operator 看不到资金中心；SYSTEM_ADMIN 也不会自动获得资金权限。</span></p><p><b>身份与权限分开</b><span>生产环境仍由托管 IdP / Passkey 认证；这里仅管理内部授权，不创建密码。</span></p></div></article>
+    <details class="card create-member-panel"><summary><span><b>新增内部成员</b><small>先创建授权记录，再由生产身份源完成身份绑定</small></span><strong>展开</strong></summary><form id="create-member-form" class="toolbox-content"><div class="field-grid"><label>内部用户名<input name="username" pattern="[A-Za-z0-9._-]+" placeholder="reviewer-li" required></label><label>账户作用域<input name="account_scope" placeholder="例如 acct-live；留空为全部"></label><label>交易所作用域<input name="venue_scope" placeholder="BINANCE / HYPERLIQUID / 留空"></label></div><div class="preset-row"><span>常用模板</span><button type="button" class="text-button" data-role-preset="REVIEWER">只审核</button><button type="button" class="text-button" data-role-preset="PROPOSER">只发起提案</button><button type="button" class="text-button" data-role-preset="OPERATOR">交易运维</button></div><div class="permission-grid">${accessRoleOptions([], 'create')}</div><div class="form-error" role="alert"></div><div class="form-actions"><button class="primary">创建成员</button></div></form></details>
+    <div class="section-heading"><div><p class="eyebrow">CURRENT MEMBERS</p><h2>现有成员</h2></div><span class="subtle">截止 ${fmtDate(result.as_of)}</span></div><div class="member-access-list">${cards}</div>
+  </section>`;
+  document.querySelectorAll('[data-role-preset]').forEach(button => button.addEventListener('click', () => {
+    document.querySelectorAll('#create-member-form input[name="roles"]').forEach(input => { input.checked = input.value === button.dataset.rolePreset; });
+  }));
+  document.querySelector('#create-member-form')?.addEventListener('submit', async event => {
+    event.preventDefault();
+    const form = event.currentTarget;
+    const data = new FormData(form);
+    const payload = {username:data.get('username'), roles:data.getAll('roles'), account_scope:data.get('account_scope') || null, venue_scope:(data.get('venue_scope') || '').toUpperCase() || null};
+    if (!payload.roles.length) { form.querySelector('.form-error').textContent = '至少选择一个岗位。'; return; }
+    await withPending(event.submitter, '创建中…', async () => {
+      try { await api('/api/admin/users', {method:'POST', body:JSON.stringify(payload)}); showToast(`${payload.username} 已创建，等待身份源绑定`); await route(); }
+      catch (error) { showApiError(error, form.querySelector('.form-error')); }
+    });
+  });
+  document.querySelectorAll('[data-user-access]').forEach(form => form.addEventListener('submit', async event => {
+    event.preventDefault();
+    const data = new FormData(form);
+    const payload = {roles:data.getAll('roles'), active:data.get('active') === 'on', account_scope:data.get('account_scope') || null, venue_scope:(data.get('venue_scope') || '').toUpperCase() || null};
+    if (!payload.roles.length) { form.querySelector('.form-error').textContent = '启用或停用成员时都要保留至少一个岗位记录。'; return; }
+    await withPending(event.submitter, '保存中…', async () => {
+      try { await api(`/api/admin/users/${form.dataset.userAccess}/access`, {method:'PUT', body:JSON.stringify(payload)}); showToast('成员权限已保存并写入审计'); await route(); }
+      catch (error) { showApiError(error, form.querySelector('.form-error')); }
+    });
+  }));
+}
+
 async function renderCampaignDetail(id) {
   const item = await api(`/api/campaigns/${id}`); const canOperate = roleNames().includes('OPERATOR') || roleNames().includes('SYSTEM_ADMIN');
+  const canRecordSyntheticFacts = canOperate && authStatus?.environment !== 'production' && item.environment !== 'LIVE';
   const active = item.intents.find(intent => ['READY','SENT','PARTIALLY_FILLED','UNKNOWN'].includes(intent.status));
   const positionKnown = item.position?.fact_status === 'KNOWN';
   const latestFilledIntent = item.intents.filter(intent => intent.status === 'FILLED').at(-1);
@@ -1383,20 +1569,20 @@ async function renderCampaignDetail(id) {
       addCandidateError = `${error.code}: ${error.message}`;
     }
   }
-  const nextStep = campaignNextStep(item, active, canOperate, {positionCurrent, hasPosition, flatKnown, protectionReady, reconciliationMatched, exitTerminal, riskClosable});
+  const nextStep = campaignNextStep(item, active, canRecordSyntheticFacts, {positionCurrent, hasPosition, flatKnown, protectionReady, reconciliationMatched, exitTerminal, riskClosable});
   const positionTruth = !item.position ? '未同步' : !positionCurrent ? '需要重新同步' : `${fmtStatus(item.position.fact_status)} · ${fmtNumber(item.position.quantity)}`;
   const protectionTruth = !positionCurrent ? '等待仓位同步' : !hasPosition ? '当前无仓位' : protectionReady ? `完整覆盖 · ${fmtNumber(item.protection.quantity)}` : item.protection ? fmtStatus(item.protection.status) : '尚无保护';
   const activeTruth = active ? `${fmtIntentKind(active.kind)} · ${fmtStatus(active.status)}` : '无进行中意图';
   const reconciliationTruth = item.reconciliation ? `${fmtStatus(item.reconciliation.status)} · ${fmtDate(item.reconciliation.completed_at)}` : '尚未运行';
-  const shadowTools = canOperate
+  const shadowTools = canRecordSyntheticFacts
     ? `<details class="card operation-toolbox"><summary><span><b>SHADOW 事实与维护工具</b><small>仅用于合成事实、PnL 与对账</small></span></summary><div class="toolbox-content">${nextStep.key === 'position' ? '' : positionFactForm(item)}${hasPosition && nextStep.key !== 'protection' ? protectionFactForm(item) : ''}<div class="toolbar"><button class="secondary" data-pnl>按当前事实刷新 PnL</button><button class="secondary" data-reconcile>重新运行对账</button></div><p class="safety-note">这些动作只写入本地 SHADOW 事实；不会连接交易所或发送真实订单。</p></div></details>`
     : '';
-  main.innerHTML = `<section class="page campaign-detail"><header class="page-head"><div><p class="eyebrow">SHADOW · ${escapeHtml(item.venue)}</p><h1>${escapeHtml(item.instrument?.symbol || 'Campaign')} ${shortId(item.campaign_id)}</h1><p class="lede"><b class="status-${escapeHtml(item.status)}">${escapeHtml(fmtStatus(item.status))}</b> · ${escapeHtml(item.direction)} · 当前目标 ${fmtNumber(item.current_target_quantity)}</p></div><a class="secondary" href="/campaigns" data-link>返回 Campaign</a></header>
+  main.innerHTML = `<section class="page campaign-detail"><header class="page-head"><div><p class="eyebrow">${escapeHtml(item.environment)} · ${escapeHtml(item.venue)}</p><h1>${escapeHtml(item.instrument?.symbol || 'Campaign')} ${shortId(item.campaign_id)}</h1><p class="lede"><b class="status-${escapeHtml(item.status)}">${escapeHtml(fmtStatus(item.status))}</b> · ${escapeHtml(item.direction)} · 当前目标 ${fmtNumber(item.current_target_quantity)}</p></div><a class="secondary" href="/campaigns" data-link>返回 Campaign</a></header>
     <article class="campaign-command tone-${nextStep.tone}"><div><p class="eyebrow">当前唯一推荐动作</p><h2>${escapeHtml(nextStep.title)}</h2><p>${escapeHtml(nextStep.copy)}</p></div><div class="campaign-command-action">${nextStep.action}<div class="form-error" id="campaign-action-error"></div></div></article>
     <div class="campaign-truth-grid"><div class="${item.position && !positionCurrent ? 'truth-danger' : ''}"><small>当前仓位</small><b>${escapeHtml(positionTruth)}</b><span>${item.position ? `上次 ${fmtNumber(item.position.quantity)} · ${fmtDate(item.position.observed_at)}` : '等待权威仓位事实'}</span></div><div class="${positionCurrent && hasPosition && !protectionReady ? 'truth-danger' : ''}"><small>原生保护</small><b>${escapeHtml(protectionTruth)}</b><span>${item.protection ? `触发价 ${fmtNumber(item.protection.trigger_price)} · ${fmtDate(item.protection.observed_at)}` : '有仓位时必须确认足额覆盖'}</span></div><div><small>进行中意图</small><b>${escapeHtml(activeTruth)}</b><span>${active ? `${active.side} ${fmtNumber(active.quantity)} · ${shortId(active.intent_id)}` : '不会与新动作冲突'}</span></div><div class="${item.reconciliation && !reconciliationMatched ? 'truth-danger' : ''}"><small>最近对账</small><b>${escapeHtml(reconciliationTruth)}</b><span>${item.reconciliation?.differences?.length ? `${item.reconciliation.differences.length} 项差异待处理` : reconciliationMatched ? '晚于当前仓位与意图' : '需要在最新事实后重跑'}</span></div></div>
     <div class="stats"><div class="stat"><small>已实现 PnL</small><b>${fmtNumber(item.realized_pnl)}</b></div><div class="stat"><small>未实现 PnL</small><b>${fmtNumber(item.unrealized_pnl)}</b></div><div class="stat"><small>最终 / 当前 PnL</small><b>${fmtNumber(item.final_pnl)}</b></div><div class="stat"><small>风险目标</small><b style="font-size:14px">${fmtNumber(item.current_target_quantity)} · ${escapeHtml(item.target_urgency ? fmtStatus(item.target_urgency) : '尚未设置')}</b></div></div>
-    <div class="campaign-command-layout"><div class="stack"><article class="card"><div class="card-heading"><div><p class="eyebrow">EXECUTION LEDGER</p><h2>意图与成交记录</h2></div><span class="status-pill">${item.intents.length} 个意图 · ${item.fills.length} 笔成交</span></div>${item.intents.length ? item.intents.map(intentCard).join('') : '<p class="subtle">尚无订单意图。</p>'}</article><article class="card"><div class="card-heading"><div><p class="eyebrow">POSITION TRUTH</p><h2>仓位与保护事实</h2></div><span class="status-pill ${protectionReady ? 'status-APPROVED' : positionCurrent && hasPosition ? 'status-DENY' : ''}">${!positionCurrent ? '仓位待同步' : hasPosition ? (protectionReady ? '保护完整' : '需要保护') : '当前无仓位'}</span></div><dl class="definition-grid spacious">${definition('仓位数量', item.position ? fmtNumber(item.position.quantity) : '未知')}${definition('平均入场', item.position ? fmtNumber(item.position.average_entry_price) : '—')}${definition('标记价', item.position ? fmtNumber(item.position.mark_price) : '—')}${definition('仓位观测', fmtDate(item.position?.observed_at))}${definition('保护状态', item.protection ? fmtStatus(item.protection.status) : '尚无事实')}${definition('保护数量', item.protection ? fmtNumber(item.protection.quantity) : '—')}${definition('保护触发价', item.protection ? fmtNumber(item.protection.trigger_price) : '—')}${definition('保护观测', fmtDate(item.protection?.observed_at))}</dl></article>${canCreatePositionAction ? `<article class="card risk-reduction-card"><div class="card-heading"><div><p class="eyebrow">RISK REDUCTION</p><h2>减仓与退出随时可用</h2></div><span class="status-pill">只减险</span></div><p class="subtle">无论新增风险是否被暂停，都可以把目标降到更小数量或 0；系统只生成 reduce-only 意图。</p>${targetForm(item)}</article>` : ''}${shadowTools}</div>
-      <aside class="stack"><article class="card"><div class="card-heading"><div><p class="eyebrow">RISK TARGET</p><h2>风险预留与唯一目标</h2></div><span class="status-pill">v${item.target_version}</span></div>${item.reservations.map(r => `<div class="callout"><b>${escapeHtml(fmtStatus(r.status))}</b> · ${fmtNumber(r.amount)} ${escapeHtml(item.instrument?.collateral_currency || '')}</div>`).join('') || '<p class="subtle">无风险预留。</p>'}<dl class="definition-grid">${definition('目标数量', fmtNumber(item.current_target_quantity))}${definition('紧迫度', item.target_urgency ? fmtStatus(item.target_urgency) : '尚未设置')}${definition('目标原因', item.target_reason || '—')}</dl></article>${managementPanel(item, addCandidates, addCandidateError, canOperate, canAddNow, active, protectionReady, reconciliationMatched)}<article class="card"><div class="card-heading"><div><p class="eyebrow">RECONCILIATION</p><h2>对账结论</h2></div><span class="status-pill ${reconciliationMatched ? 'status-APPROVED' : item.reconciliation ? 'status-DENY' : ''}">${escapeHtml(item.reconciliation ? fmtStatus(item.reconciliation.status) : '未运行')}</span></div>${item.reconciliation ? `<p class="subtle">完成于 ${fmtDate(item.reconciliation.completed_at)}</p>${item.reconciliation.differences.length ? `<ul class="exception-list">${item.reconciliation.differences.map(value => `<li><code>${escapeHtml(value)}</code></li>`).join('')}</ul>` : '<p class="success-note">内部意图、场所事实、仓位和保护当前一致。</p>'}` : '<p class="subtle">尚未运行对账；任何不确定结果都必须先对账。</p>'}</article><details class="card technical-details"><summary>发送租约与技术边界</summary><div class="toolbox-content"><dl class="definition-grid">${definition('Owner', item.sender_lease?.owner_id)}${definition('Fencing token', item.sender_lease?.fencing_token)}${definition('到期', fmtDate(item.sender_lease?.expires_at))}</dl><p class="safety-note">Web 动作只记录合成 SHADOW Order；LIVE_ORDER_SEND 仍为关闭。</p></div></details></aside></div></section>`;
+    <div class="campaign-command-layout"><div class="stack"><article class="card"><div class="card-heading"><div><p class="eyebrow">EXECUTION LEDGER</p><h2>意图与成交记录</h2></div><span class="status-pill">${item.intents.length} 个意图 · ${item.fills.length} 笔成交</span></div>${item.intents.length ? item.intents.map(intent => intentCard(intent, item.environment)).join('') : '<p class="subtle">尚无订单意图。</p>'}</article><article class="card"><div class="card-heading"><div><p class="eyebrow">POSITION TRUTH</p><h2>仓位与保护事实</h2></div><span class="status-pill ${protectionReady ? 'status-APPROVED' : positionCurrent && hasPosition ? 'status-DENY' : ''}">${!positionCurrent ? '仓位待同步' : hasPosition ? (protectionReady ? '保护完整' : '需要保护') : '当前无仓位'}</span></div><dl class="definition-grid spacious">${definition('仓位数量', item.position ? fmtNumber(item.position.quantity) : '未知')}${definition('平均入场', item.position ? fmtNumber(item.position.average_entry_price) : '—')}${definition('标记价', item.position ? fmtNumber(item.position.mark_price) : '—')}${definition('仓位观测', fmtDate(item.position?.observed_at))}${definition('保护状态', item.protection ? fmtStatus(item.protection.status) : '尚无事实')}${definition('保护数量', item.protection ? fmtNumber(item.protection.quantity) : '—')}${definition('保护触发价', item.protection ? fmtNumber(item.protection.trigger_price) : '—')}${definition('保护观测', fmtDate(item.protection?.observed_at))}</dl></article>${canCreatePositionAction ? `<article class="card risk-reduction-card"><div class="card-heading"><div><p class="eyebrow">RISK REDUCTION</p><h2>减仓与退出随时可用</h2></div><span class="status-pill">只减险</span></div><p class="subtle">无论新增风险是否被暂停，都可以把目标降到更小数量或 0；系统只生成 reduce-only 意图。</p>${targetForm(item)}</article>` : ''}${shadowTools}</div>
+      <aside class="stack"><article class="card"><div class="card-heading"><div><p class="eyebrow">RISK TARGET</p><h2>风险预留与唯一目标</h2></div><span class="status-pill">v${item.target_version}</span></div>${item.reservations.map(r => `<div class="callout"><b>${escapeHtml(fmtStatus(r.status))}</b> · ${fmtNumber(r.amount)} ${escapeHtml(item.instrument?.collateral_currency || '')}</div>`).join('') || '<p class="subtle">无风险预留。</p>'}<dl class="definition-grid">${definition('目标数量', fmtNumber(item.current_target_quantity))}${definition('紧迫度', item.target_urgency ? fmtStatus(item.target_urgency) : '尚未设置')}${definition('目标原因', item.target_reason || '—')}</dl></article>${managementPanel(item, addCandidates, addCandidateError, canOperate, canAddNow, active, protectionReady, reconciliationMatched)}<article class="card"><div class="card-heading"><div><p class="eyebrow">RECONCILIATION</p><h2>对账结论</h2></div><span class="status-pill ${reconciliationMatched ? 'status-APPROVED' : item.reconciliation ? 'status-DENY' : ''}">${escapeHtml(item.reconciliation ? fmtStatus(item.reconciliation.status) : '未运行')}</span></div>${item.reconciliation ? `<p class="subtle">完成于 ${fmtDate(item.reconciliation.completed_at)}</p>${item.reconciliation.differences.length ? `<ul class="exception-list">${item.reconciliation.differences.map(value => `<li><code>${escapeHtml(value)}</code></li>`).join('')}</ul>` : '<p class="success-note">内部意图、场所事实、仓位和保护当前一致。</p>'}` : '<p class="subtle">尚未运行对账；任何不确定结果都必须先对账。</p>'}</article><details class="card technical-details"><summary>发送租约与技术边界</summary><div class="toolbox-content"><dl class="definition-grid">${definition('Owner', item.sender_lease?.owner_id)}${definition('Fencing token', item.sender_lease?.fencing_token)}${definition('到期', fmtDate(item.sender_lease?.expires_at))}</dl><p class="safety-note">${item.environment === 'LIVE' ? 'LIVE 执行由服务端 Gate、短期授权、发送租约和交易所适配器共同约束；本页不会用合成回执冒充实盘结果。' : '当前非生产 Campaign 只记录合成回执，不连接真实交易所。'}</p></div></details></aside></div></section>`;
   bindCampaignActions(item, active);
 }
 
@@ -1404,7 +1590,9 @@ function campaignNextStep(item, active, canOperate, truth) {
   const filledIntent = item.intents.some(intent => intent.status === 'FILLED');
   if (item.status === 'CLOSED') return {key:'done', tone:'success', title:'Campaign 已完成并关闭', copy:'风险预留已释放，结果保留在审计与实际结果中。', action:'<a class="secondary" href="/results" data-link>查看实际结果</a>'};
   if (active?.status === 'UNKNOWN') return {key:'reconcile', tone:'danger', title:'结果不确定，先对账', copy:'风险继续占用，禁止重发、加仓或释放；先核对场所订单、成交、仓位和保护。', action:canOperate ? '<button class="danger" data-reconcile>立即运行对账</button>' : '<p class="microcopy">等待 Operator 运行对账。</p>'};
-  if (active?.status === 'READY') return {key:'intent', tone:'attention', title:`记录${fmtIntentKind(active.kind)}发送结果`, copy:'当前只有这个意图可以推进；获取发送租约后记录 SHADOW Order，不会连接交易所。', action:canOperate ? operationForm(active, item) : '<p class="microcopy">等待 Operator 处理待发送意图。</p>'};
+  if (active?.status === 'READY') return item.environment === 'LIVE'
+    ? {key:'intent', tone:'attention', title:`等待${fmtIntentKind(active.kind)}发送`, copy:'LIVE 意图只能由受控发送进程在 Gate、短期授权和有效租约内推进；页面不会合成场所回执。', action:'<p class="microcopy">等待受控发送进程或前往异常页排查阻断。</p>'}
+    : {key:'intent', tone:'attention', title:`记录${fmtIntentKind(active.kind)}发送结果`, copy:'当前只有这个意图可以推进；获取发送租约后记录 SHADOW Order，不会连接交易所。', action:canOperate ? operationForm(active, item) : '<p class="microcopy">等待 Operator 处理待发送意图。</p>'};
   if (active && ['SENT','PARTIALLY_FILLED'].includes(active.status)) return {key:'intent', tone:'attention', title:`确认${fmtIntentKind(active.kind)}成交结果`, copy:'先记录已确认成交，或在确实无法判断时标记 UNKNOWN；不要创建第二个意图。', action:canOperate ? operationForm(active, item) : '<p class="microcopy">等待 Operator 记录成交结果。</p>'};
   if (!truth.positionCurrent && filledIntent) return {key:'position', tone:'attention', title:'同步成交后的当前仓位', copy:'成交已经记录，但仓位事实早于最新成交或尚未确认；在此之前不能判断保护和下一步。', action:canOperate ? positionFactForm(item) : '<p class="microcopy">等待 Operator 同步仓位事实。</p>'};
   if (truth.hasPosition && !truth.protectionReady) return {key:'protection', tone:'danger', title:'先补齐足额原生保护', copy:'当前有仓位但保护缺失、未知或不足。优先确认保护；若无法保护，使用下方减仓或退出。', action:canOperate ? protectionFactForm(item) : '<p class="microcopy">等待 Operator 确认保护或减仓退出。</p>'};
@@ -1415,7 +1603,7 @@ function campaignNextStep(item, active, canOperate, truth) {
   return {key:'reconcile', tone:'attention', title:'确认当前作用域事实', copy:'当前没有可确认仓位；先运行对账，避免把缺失事实误认为已经平仓。', action:canOperate ? '<button class="primary" data-reconcile>运行当前作用域对账</button>' : '<p class="microcopy">等待 Operator 运行对账。</p>'};
 }
 
-function intentCard(intent) { return `<div class="intent-row"><div><b>${escapeHtml(fmtIntentKind(intent.kind))} · ${escapeHtml(intent.side)} ${fmtNumber(intent.quantity)}</b><br><span class="subtle">${shortId(intent.intent_id)} · ${intent.reduce_only ? '只减仓' : '会增加风险'} · ${fmtDate(intent.updated_at)}</span></div><b class="status-${escapeHtml(intent.status)}">${escapeHtml(fmtStatus(intent.status))}</b></div>${intent.order ? `<p class="subtle">SHADOW Order ${escapeHtml(intent.order.venue_order_id)} · 已成交 ${fmtNumber(intent.order.filled_quantity)} / ${fmtNumber(intent.order.ordered_quantity)}</p>` : ''}`; }
+function intentCard(intent, environment = 'SHADOW') { return `<div class="intent-row"><div><b>${escapeHtml(fmtIntentKind(intent.kind))} · ${escapeHtml(intent.side)} ${fmtNumber(intent.quantity)}</b><br><span class="subtle">${shortId(intent.intent_id)} · ${intent.reduce_only ? '只减仓' : '会增加风险'} · ${fmtDate(intent.updated_at)}</span></div><b class="status-${escapeHtml(intent.status)}">${escapeHtml(fmtStatus(intent.status))}</b></div>${intent.order ? `<p class="subtle">${escapeHtml(environment)} Order ${escapeHtml(intent.order.venue_order_id)} · 已成交 ${fmtNumber(intent.order.filled_quantity)} / ${fmtNumber(intent.order.ordered_quantity)}</p>` : ''}`; }
 
 function operationForm(intent, item) { if (intent.status === 'UNKNOWN') return '<p class="safety-note">结果不确定：风险保持占用，不提供重发或释放按钮。必须先人工对账。</p>'; if (intent.status === 'READY') return `<div class="action-panel"><h3>记录已发送的 SHADOW 订单</h3><label>交易所订单编号（合成）<input id="venue-order-id" value="shadow-${intent.intent_id.slice(0,8)}"></label><button class="primary" data-shadow-send>确认已发送</button><button class="danger" data-unknown>结果无法确认</button></div>`; return `<form id="fill-form" class="action-panel"><h3>记录已确认的 SHADOW 成交</h3><div class="field-grid"><label>成交编号<input name="venue_fill_id" value="fill-${crypto.randomUUID().slice(0,8)}" required></label><label>成交方向<select name="side"><option ${intent.side === 'BUY' ? 'selected' : ''}>BUY</option><option ${intent.side === 'SELL' ? 'selected' : ''}>SELL</option></select></label><label>成交数量<input name="quantity" type="number" step="any" value="${escapeHtml(intent.quantity)}" required></label><label>成交价格<input name="price" type="number" step="any" required></label><label>手续费<input name="fee" type="number" step="any" value="0"></label><label>币种<input name="fee_currency" value="${escapeHtml(item.instrument?.collateral_currency || 'USDT')}"></label><label>滑点成本<input name="slippage_cost" type="number" step="any" value="0"></label></div><div class="toolbar" style="margin-top:12px"><button class="primary">确认并记录成交</button><button type="button" class="danger" data-unknown>结果无法确认</button></div></form>`; }
 
@@ -1499,7 +1687,8 @@ async function submitNamedForm(event, path) { event.preventDefault(); await camp
 function navigate(path) { history.pushState({}, '', path); route(); }
 function updateActiveNav() {
   document.querySelectorAll('nav a').forEach((link) => {
-    const active = location.pathname === link.getAttribute('href');
+    const href = link.getAttribute('href');
+    const active = location.pathname === href || (href === '/venues' && location.pathname.startsWith('/venues/'));
     link.classList.toggle('active', active);
     if (active) link.setAttribute('aria-current', 'page');
     else link.removeAttribute('aria-current');

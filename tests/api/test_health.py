@@ -85,11 +85,16 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
 
     assert response.status_code == 200
     assert "Trading Console" in response.text
-    assert "/assets/app.js?v=29" in response.text
-    assert "/assets/styles.css?v=17" in response.text
+    assert "/assets/app.js?v=31" in response.text
+    assert "/assets/styles.css?v=18" in response.text
     assert '<a href="/" data-link><span>⌂</span>今日</a>' in response.text
     assert 'id="mobile-nav-toggle"' in response.text
     assert 'id="confirm-dialog"' in response.text
+
+    for route in ("/venues", "/venues/hyperliquid", "/admin/users"):
+        routed_shell = get(app, route)
+        assert routed_shell.status_code == 200
+        assert "Trading Console" in routed_shell.text
 
     app_javascript = get(app, "/assets/app.js")
     assert app_javascript.status_code == 200
@@ -102,7 +107,10 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
     assert "if (error.status !== 403) throw error" in app_javascript.text
     assert "actionable_for_current_user" in app_javascript.text
     assert "你的审核已记录" in app_javascript.text
-    assert 'data-nav-capability="proposal.create"' in response.text
+    assert 'data-nav-capability="opportunity.view"' in response.text
+    assert 'href="/admin/users"' in response.text
+    assert 'href="/proposals/new"' not in response.text
+    assert "Binance只读" not in response.text
     assert "const routeCapability = (path)" in app_javascript.text
     assert "今日只显示你的资金职责" in app_javascript.text
     assert "当前职责不包含这个页面" in app_javascript.text
@@ -167,7 +175,7 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
 
     service_worker = get(app, "/sw.js")
     assert service_worker.status_code == 200
-    assert "trading-shell-v29" in service_worker.text
+    assert "trading-shell-v31" in service_worker.text
     assert "await fetch(event.request)" in service_worker.text
 
 

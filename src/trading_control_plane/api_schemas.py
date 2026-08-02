@@ -14,9 +14,46 @@ from trading_control_plane.domain import (
     TargetUrgency,
 )
 
+AccessRole = Literal[
+    "OBSERVER",
+    "PROPOSER",
+    "REVIEWER",
+    "OPERATOR",
+    "TREASURY_ADMIN",
+    "SYSTEM_ADMIN",
+]
+
 
 class MockLoginRequest(BaseModel):
     username: str = Field(min_length=1, max_length=120)
+
+
+class ManagedUserCreateRequest(BaseModel):
+    username: str = Field(min_length=1, max_length=120, pattern=r"^[A-Za-z0-9._-]+$")
+    roles: list[AccessRole] = Field(min_length=1, max_length=6)
+    account_scope: str | None = Field(default=None, min_length=1, max_length=120)
+    venue_scope: str | None = Field(default=None, min_length=1, max_length=64)
+
+    @field_validator("roles")
+    @classmethod
+    def unique_roles(cls, value: list[AccessRole]) -> list[AccessRole]:
+        if len(value) != len(set(value)):
+            raise ValueError("roles must not contain duplicates")
+        return value
+
+
+class ManagedUserAccessRequest(BaseModel):
+    roles: list[AccessRole] = Field(min_length=1, max_length=6)
+    active: bool = True
+    account_scope: str | None = Field(default=None, min_length=1, max_length=120)
+    venue_scope: str | None = Field(default=None, min_length=1, max_length=64)
+
+    @field_validator("roles")
+    @classmethod
+    def unique_roles(cls, value: list[AccessRole]) -> list[AccessRole]:
+        if len(value) != len(set(value)):
+            raise ValueError("roles must not contain duplicates")
+        return value
 
 
 class ManualProposalRequest(BaseModel):
