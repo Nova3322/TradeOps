@@ -225,6 +225,10 @@ class RuntimeSourceHealth(Base):
             "items_observed >= 0",
             name="ck_runtime_source_health_items_nonnegative",
         ),
+        CheckConstraint(
+            "consecutive_failures >= 0",
+            name="ck_runtime_source_health_failures_nonnegative",
+        ),
     )
 
     source_name: Mapped[str] = mapped_column(String(64), primary_key=True)
@@ -232,6 +236,11 @@ class RuntimeSourceHealth(Base):
     items_observed: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     error_code: Mapped[str | None] = mapped_column(String(120), nullable=True)
     checked_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    last_success_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    retry_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    consecutive_failures: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     updated_by: Mapped[UUID] = mapped_column(ForeignKey("users.user_id"), nullable=False)
 
 

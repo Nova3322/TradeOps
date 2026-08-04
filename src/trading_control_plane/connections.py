@@ -78,6 +78,9 @@ def _projection(
     write_process_enabled: bool,
 ) -> dict[str, Any]:
     checked_at = None if health is None else health.get("checked_at")
+    last_success_at = None if health is None else health.get("last_success_at")
+    retry_at = None if health is None else health.get("retry_at")
+    consecutive_failures = 0 if health is None else int(health.get("consecutive_failures") or 0)
     error_code = None if health is None else health.get("error_code")
     if credential_state == "MISSING":
         category = "CREDENTIALS_NOT_LOADED"
@@ -109,7 +112,7 @@ def _projection(
         reason = "最近一次无副作用只读探针成功。"
         next_action = "无需操作; 写入、下单、签名与资金动作仍由独立 Gate 阻断。"
         available = True
-    elif health.get("status") == "SKIPPED":
+    elif health.get("status") == "SKIPPED" and "RATE_LIMITED" not in str(error_code or ""):
         category = "PROBE_SKIPPED"
         reason = "最近一轮只读探针被跳过, 不能把旧结果当作当前可用。"
         next_action = "核对读取开关和目标映射后重新运行只读同步。"
@@ -131,6 +134,9 @@ def _projection(
         "owner_role": owner_role,
         "next_action": next_action,
         "checked_at": checked_at,
+        "last_success_at": last_success_at,
+        "retry_at": retry_at,
+        "consecutive_failures": consecutive_failures,
         "error_code": error_code,
         "mode": "READ_ONLY",
         "write_process_enabled": write_process_enabled,

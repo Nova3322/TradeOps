@@ -133,6 +133,41 @@ def test_runtime_readiness_requires_both_source_success_and_complete_capital() -
     assert failed.ready_for_new_risk is False
 
 
+def test_runtime_rate_limit_cooldown_skips_only_until_retry_deadline() -> None:
+    now = datetime(2026, 8, 5, 1, 0, tzinfo=UTC)
+    worker: Any = object.__new__(RuntimeSyncWorker)
+    worker.queries = SimpleNamespace(
+        runtime_source_health=lambda _source: {
+            "error_code": "HYPERLIQUID_RATE_LIMITED",
+            "retry_at": (now + timedelta(minutes=2)).isoformat(),
+        }
+    )
+
+    cooldown = worker._rate_limit_cooldown("HYPERLIQUID", now=now)
+
+    assert cooldown == SourceSyncResult(
+        "SKIPPED",
+        error_code="HYPERLIQUID_RATE_LIMITED_COOLDOWN",
+    )
+    assert worker._rate_limit_cooldown(
+        "HYPERLIQUID", now=now + timedelta(minutes=2)
+    ) is None
+
+
+def test_runtime_rate_limit_cooldown_fails_open_to_a_real_probe_on_bad_metadata() -> None:
+    worker: Any = object.__new__(RuntimeSyncWorker)
+    worker.queries = SimpleNamespace(
+        runtime_source_health=lambda _source: {
+            "error_code": "HYPERLIQUID_RATE_LIMITED",
+            "retry_at": "not-a-time",
+        }
+    )
+
+    assert worker._rate_limit_cooldown(
+        "HYPERLIQUID", now=datetime(2026, 8, 5, tzinfo=UTC)
+    ) is None
+
+
 def test_skipped_capital_sources_cannot_be_hidden_by_a_fresh_complete_snapshot() -> None:
     skipped = RuntimeSyncReport(
         started_at="2026-07-31T00:00:00+00:00",

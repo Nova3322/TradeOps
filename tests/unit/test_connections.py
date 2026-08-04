@@ -109,12 +109,31 @@ def test_connection_projection_distinguishes_configuration_and_probe_failures() 
             "HYPERLIQUID": {
                 "status": "FAILED",
                 "error_code": "HYPERLIQUID_RATE_LIMITED",
+                "checked_at": "2026-08-02T12:01:00+00:00",
+                "last_success_at": "2026-08-02T11:59:00+00:00",
+                "retry_at": "2026-08-02T12:02:00+00:00",
+                "consecutive_failures": 1,
             }
         },
     )
     assert rate_limited["HYPERLIQUID"]["available"] is False
     assert rate_limited["HYPERLIQUID"]["category"] == "UPSTREAM_RATE_LIMITED"
     assert "限流" in rate_limited["HYPERLIQUID"]["reason"]
+    assert rate_limited["HYPERLIQUID"]["last_success_at"].endswith("11:59:00+00:00")
+    assert rate_limited["HYPERLIQUID"]["retry_at"].endswith("12:02:00+00:00")
+    assert rate_limited["HYPERLIQUID"]["consecutive_failures"] == 1
+
+    cooldown = project_runtime_connections(
+        failed,
+        {
+            "HYPERLIQUID": {
+                "status": "SKIPPED",
+                "error_code": "HYPERLIQUID_RATE_LIMITED_COOLDOWN",
+            }
+        },
+    )
+    assert cooldown["HYPERLIQUID"]["category"] == "UPSTREAM_RATE_LIMITED"
+    assert cooldown["HYPERLIQUID"]["available"] is False
 
     degraded = project_runtime_connections(
         failed,

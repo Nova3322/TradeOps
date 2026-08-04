@@ -623,6 +623,29 @@ class RuntimeSyncWorker:
         else:
             results[name] = SourceSyncResult("SUCCESS", items_observed=items_observed)
 
+    def _rate_limit_cooldown(
+        self,
+        source_name: str,
+        *,
+        now: datetime,
+    ) -> SourceSyncResult | None:
+        health = self.queries.runtime_source_health(source_name)
+        if health is None or "RATE_LIMITED" not in str(health.get("error_code") or ""):
+            return None
+        retry_value = health.get("retry_at")
+        if not isinstance(retry_value, str):
+            return None
+        try:
+            retry_at = datetime.fromisoformat(retry_value)
+        except ValueError:
+            return None
+        if retry_at <= now:
+            return None
+        return SourceSyncResult(
+            "SKIPPED",
+            error_code=f"{source_name}_RATE_LIMITED_COOLDOWN",
+        )
+
     def run_once(
         self,
         *,
@@ -652,11 +675,15 @@ class RuntimeSyncWorker:
             results["BINANCE"] = SourceSyncResult("SKIPPED")
 
         if self.settings.hyperliquid_read_only_enabled:
-            self._attempt(
-                "HYPERLIQUID",
-                lambda: self._record_hyperliquid(actor.user_id, started_at),
-                results,
-            )
+            cooldown = self._rate_limit_cooldown("HYPERLIQUID", now=started_at)
+            if cooldown is None:
+                self._attempt(
+                    "HYPERLIQUID",
+                    lambda: self._record_hyperliquid(actor.user_id, started_at),
+                    results,
+                )
+            else:
+                results["HYPERLIQUID"] = cooldown
         else:
             results["HYPERLIQUID"] = SourceSyncResult("SKIPPED")
 

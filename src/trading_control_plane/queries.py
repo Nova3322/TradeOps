@@ -1539,9 +1539,27 @@ class TradingQueries:
                         "items_observed": item.items_observed,
                         "error_code": item.error_code,
                         "checked_at": _iso(item.checked_at),
+                        "last_success_at": _iso(item.last_success_at),
+                        "retry_at": _iso(item.retry_at),
+                        "consecutive_failures": item.consecutive_failures,
                     }
                     for item in source_health
                 },
+            }
+
+    def runtime_source_health(self, source_name: str) -> dict[str, Any] | None:
+        with self.database.session_factory() as session:
+            item = session.get(RuntimeSourceHealth, source_name)
+            if item is None:
+                return None
+            return {
+                "status": item.status,
+                "items_observed": item.items_observed,
+                "error_code": item.error_code,
+                "checked_at": _iso(item.checked_at),
+                "last_success_at": _iso(item.last_success_at),
+                "retry_at": _iso(item.retry_at),
+                "consecutive_failures": item.consecutive_failures,
             }
 
     def list_campaigns(self, user_id: UUID) -> list[dict[str, Any]]:

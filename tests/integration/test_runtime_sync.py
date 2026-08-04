@@ -1182,6 +1182,80 @@ def test_runtime_invalid_clock_executes_zero_postgres_statements(
     assert statements == []
 
 
+def test_runtime_health_preserves_last_success_and_rate_limit_backoff(
+    database: Database,
+) -> None:
+    service = TradingService(database)
+    admin = service.bootstrap_admin("runtime-health-admin", now=NOW)
+    actor = service.create_service_principal("runtime-health-sync", admin, now=NOW)
+    queries = TradingQueries(database)
+
+    service.record_runtime_source_health(
+        actor,
+        {"HYPERLIQUID": {"status": "SUCCESS", "items_observed": 3}},
+        now=NOW,
+    )
+    first_failure = NOW + timedelta(minutes=1)
+    service.record_runtime_source_health(
+        actor,
+        {
+            "HYPERLIQUID": {
+                "status": "FAILED",
+                "error_code": "HYPERLIQUID_RATE_LIMITED",
+            }
+        },
+        now=first_failure,
+    )
+    failed = queries.runtime_source_health("HYPERLIQUID")
+    assert failed is not None
+    assert failed["status"] == "FAILED"
+    assert failed["checked_at"] == first_failure.isoformat()
+    assert failed["last_success_at"] == NOW.isoformat()
+    assert failed["retry_at"] == (first_failure + timedelta(seconds=60)).isoformat()
+    assert failed["consecutive_failures"] == 1
+
+    service.record_runtime_source_health(
+        actor,
+        {
+            "HYPERLIQUID": {
+                "status": "SKIPPED",
+                "error_code": "HYPERLIQUID_RATE_LIMITED_COOLDOWN",
+            }
+        },
+        now=first_failure + timedelta(seconds=30),
+    )
+    assert queries.runtime_source_health("HYPERLIQUID") == failed
+
+    second_failure = first_failure + timedelta(seconds=60)
+    service.record_runtime_source_health(
+        actor,
+        {
+            "HYPERLIQUID": {
+                "status": "FAILED",
+                "error_code": "HYPERLIQUID_RATE_LIMITED",
+            }
+        },
+        now=second_failure,
+    )
+    repeated = queries.runtime_source_health("HYPERLIQUID")
+    assert repeated is not None
+    assert repeated["retry_at"] == (second_failure + timedelta(seconds=120)).isoformat()
+    assert repeated["consecutive_failures"] == 2
+    assert repeated["last_success_at"] == NOW.isoformat()
+
+    recovered_at = second_failure + timedelta(minutes=3)
+    service.record_runtime_source_health(
+        actor,
+        {"HYPERLIQUID": {"status": "SUCCESS", "items_observed": 4}},
+        now=recovered_at,
+    )
+    recovered = queries.runtime_source_health("HYPERLIQUID")
+    assert recovered is not None
+    assert recovered["last_success_at"] == recovered_at.isoformat()
+    assert recovered["retry_at"] is None
+    assert recovered["consecutive_failures"] == 0
+
+
 def test_runtime_worker_refreshes_perptape_two_venues_and_vault_without_sending(
     database: Database,
 ) -> None:

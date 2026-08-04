@@ -809,6 +809,29 @@ class TradingService:
                         "runtime source item count cannot be negative",
                     )
                 current = session.get(RuntimeSourceHealth, source_name)
+                if (
+                    current is not None
+                    and status == "SKIPPED"
+                    and error_code is not None
+                    and error_code.endswith("_RATE_LIMITED_COOLDOWN")
+                ):
+                    continue
+                consecutive_failures = (
+                    (current.consecutive_failures if current is not None else 0) + 1
+                    if status == "FAILED"
+                    else 0
+                )
+                retry_at = None
+                if status == "FAILED" and error_code is not None and "RATE_LIMITED" in error_code:
+                    retry_seconds = min(300, 60 * (2 ** min(consecutive_failures - 1, 3)))
+                    retry_at = now + timedelta(seconds=retry_seconds)
+                last_success_at = (
+                    now
+                    if status == "SUCCESS"
+                    else current.last_success_at
+                    if current is not None
+                    else None
+                )
                 if current is None:
                     session.add(
                         RuntimeSourceHealth(
@@ -817,6 +840,9 @@ class TradingService:
                             items_observed=items_observed,
                             error_code=error_code,
                             checked_at=now,
+                            last_success_at=last_success_at,
+                            retry_at=retry_at,
+                            consecutive_failures=consecutive_failures,
                             updated_by=actor_id,
                         )
                     )
@@ -825,6 +851,9 @@ class TradingService:
                     current.items_observed = items_observed
                     current.error_code = error_code
                     current.checked_at = now
+                    current.last_success_at = last_success_at
+                    current.retry_at = retry_at
+                    current.consecutive_failures = consecutive_failures
                     current.updated_by = actor_id
 
     def record_perptape_feed(

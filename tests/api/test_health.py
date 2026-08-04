@@ -112,7 +112,7 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
 
     assert response.status_code == 200
     assert "交易控制台" in response.text
-    assert "/assets/app.js?v=83" in response.text
+    assert "/assets/app.js?v=84" in response.text
     assert "/assets/styles.css?v=37" in response.text
     assert 'aria-label="交易控制台首页"' in response.text
     assert '<a href="/" data-link><span>⌂</span>今日</a>' in response.text
@@ -143,6 +143,12 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
     assert "actionable_for_current_user" in app_javascript.text
     assert "item.proposer_id === session.user_id" in app_javascript.text
     assert "只统计草稿和等待审核" in app_javascript.text
+    assert "const canViewOperations = hasCapability('operations.view')" in app_javascript.text
+    assert "canViewOperations ? api('/api/campaigns')" in app_javascript.text
+    assert "api('/api/venues/binance/status')" not in app_javascript.text
+    assert "api('/api/venues/hyperliquid/status')" not in app_javascript.text
+    assert "当前身份不读取任务详情" in app_javascript.text
+    assert "由交易运维人员查看" in app_javascript.text
     assert 'href="/proposals" data-link>查看提案记录</a>' in app_javascript.text
     assert "new URLSearchParams(location.search).get('history') === '1'" in app_javascript.text
     assert "item.status === 'APPROVED' && !item.campaign_id" in app_javascript.text
@@ -295,7 +301,7 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
 
     service_worker = get(app, "/sw.js")
     assert service_worker.status_code == 200
-    assert "trading-shell-v77" in service_worker.text
+    assert "trading-shell-v78" in service_worker.text
     assert "self.skipWaiting()" in service_worker.text
     assert "self.clients.claim()" in service_worker.text
     assert "await fetch(event.request)" in service_worker.text

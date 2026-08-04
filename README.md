@@ -45,7 +45,7 @@
 - HTTP：健康检查、内部会话、Perptape 主站机会与可选 LIVE Proposal、Proposal/Review/Risk/Authorization、SHADOW/TESTNET/LIVE Campaign、AUTO_ADD/减仓/退出、资金事实/提案/授权、NoTilt 三链状态/同步/持久化未签名计划/回执确认、按环境结果/审计/运行状态，以及 Binance、Hyperliquid Core 的只读、TESTNET 与受控 LIVE API
 - 内部业务：`trading_control_plane.service.TradingService`
 - 纯计算：`evaluate_risk`、`select_target_position`、`compute_pnl`
-- 数据库：PostgreSQL，Alembic head `20260802_0011`，33 张业务/运行表（另有 Alembic 版本表）
+- 数据库：PostgreSQL，Alembic head `20260805_0012`，33 张业务/运行表（另有 Alembic 版本表）
 - 场所边界：Binance 与 Hyperliquid 的交易发送默认只允许进入各自隔离的 Freqtrade worker；Hyperliquid worker 通过显式 `hip3_dexes` allowlist 加载 HIP-3。仓库原有 `binance_execution.py` / `hyperliquid_execution.py` 只保留隔离兼容测试，默认后端不会加载其签名密钥，也会拒绝直接发送。交易所官方只读接口继续提供账户、仓位和目录事实；数据库中的 `LIVE_ORDER_SEND` 初始仍为 `DISABLED`
 - 资金边界：`capital.py` 提供 SHADOW/TESTNET Mock 提交和自动候选计算；`notilt.py` 通过官方 `@notilt/sdk` 固定支持 Ethereum、BNB Smart Chain、Arbitrum One，只读取官方部署/Registry/Vault、生成并持久化 `{chainId,to,data,value}` 未签名交易，并从可信生产 RPC 校验发送者、目标、函数、参数、事件、区块时间和逐链确认深度。服务没有 NoTilt 私钥字段，不签名、不广播，也不暴露 owner、白名单管理、Panic 或 Full Exit 能力；真实 `CAPITAL_TRANSFER` 与两个自动资金 Gate 均保持 `DISABLED`
 
