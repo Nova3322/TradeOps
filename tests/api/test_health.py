@@ -112,7 +112,7 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
 
     assert response.status_code == 200
     assert "交易控制台" in response.text
-    assert "/assets/app.js?v=60" in response.text
+    assert "/assets/app.js?v=62" in response.text
     assert "/assets/styles.css?v=29" in response.text
     assert '<a href="/" data-link><span>⌂</span>今日</a>' in response.text
     assert 'id="mobile-nav-toggle"' in response.text
@@ -179,6 +179,8 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
     assert "proposalResonanceTimeframes(details, candidate)" in app_javascript.text
     assert "formatRiskActionReason" in app_javascript.text
     assert "当前无需恢复" in app_javascript.text
+    assert "已失效" in app_javascript.text
+    assert "控制状态已变化" in app_javascript.text
     assert 'name="timeframes" type="checkbox"' in app_javascript.text
     assert "function updateManualProposalPreview" in app_javascript.text
     assert "只创建提案，不直接下单" in app_javascript.text  # noqa: RUF001
@@ -250,7 +252,7 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
 
     service_worker = get(app, "/sw.js")
     assert service_worker.status_code == 200
-    assert "trading-shell-v61" in service_worker.text
+    assert "trading-shell-v63" in service_worker.text
     assert "self.skipWaiting()" in service_worker.text
     assert "self.clients.claim()" in service_worker.text
     assert "await fetch(event.request)" in service_worker.text

@@ -1,4 +1,31 @@
-# Opportunity page visual QA
+# Trading console product QA
+
+## 2026-08-04: proposal truth and risk-recovery lifecycle
+
+### P0 / P1 / P2 status
+
+- P0: none open in this batch.
+- P1 closed: SYSTEM proposal detail now reads all resonance periods from the frozen snapshot and shows the stored automatic rationale in plain Chinese.
+- P1 closed: a restore request whose frozen policy or AUTO_ADD control has changed is no longer presented as reviewable. Direct administrator restoration durably expires active requests, records `RISK_RESTORE_SUPERSEDED`, and never reopens AUTO_ADD or old authorizations.
+- P1 external: Hyperliquid read-only health remains intermittently rate-limited; NoTilt production scope remains configuration-incomplete. Both stay unavailable and fail closed.
+- P1 external: Telegram code and API coverage exist, but a real Telegram Web login/binding session is still required for browser acceptance.
+- P2 open: desktop risk/proposal pages were accepted in the in-app browser. The current browser surface has a fixed desktop viewport, so a real mobile-width visual pass remains unverified; responsive CSS coverage is not being treated as browser proof.
+
+### Five-dimensional evidence
+
+- Code: proposal frozen-fact projection, risk request drift projection, durable supersede handling, cache revision, and focused tests.
+- API: `/api/risk-controls` reports stale active rows as `EXPIRED` with `superseded_by_control_state=true`; review and execute actions are both denied.
+- Actual pages: proposal detail shows `1h / 4h / 1d`; risk page shows `已失效（控制状态已变化）` and no review action for obsolete requests.
+- End-to-end runtime: `live` and `ready` both return HTTP 200 on local port 8014; all persistent dangerous gates remain disabled.
+- Tests: `tests/api/test_health.py` 12 passed; `tests/integration/test_runtime_sync.py` targeted automatic-proposal test passed; `tests/integration/test_risk_control_restore.py` 10 passed; Ruff, Node syntax, and diff checks passed.
+
+### Accepted screenshots
+
+- Proposal detail: `/Users/vireo/.codex/visualizations/2026/08/02/019fc2e6-1567-7381-a0b6-73935a4ca083/trading-product-audit-20260804/13-proposal-detail-fixed.png`.
+- Risk summary: `/Users/vireo/.codex/visualizations/2026/08/02/019fc2e6-1567-7381-a0b6-73935a4ca083/trading-product-audit-20260804/15-risk-superseded.png`.
+- Superseded request: `/Users/vireo/.codex/visualizations/2026/08/02/019fc2e6-1567-7381-a0b6-73935a4ca083/trading-product-audit-20260804/16-risk-request-superseded.png`.
+
+final result: desktop batch passed; mobile and external Telegram/connection evidence remain open
 
 ## Latest: compact opportunity signal chips
 

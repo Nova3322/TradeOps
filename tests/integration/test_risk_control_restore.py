@@ -694,6 +694,16 @@ def test_restore_fails_closed_on_live_scope_configuration_and_control_drift(
         reason="a later tighten invalidates the frozen control version",
         now=NOW + timedelta(minutes=4),
     )
+    drifted_status = service.risk_control_status(
+        ids["admin"], (), now=NOW + timedelta(minutes=4, seconds=1)
+    )
+    drifted_request = next(
+        item for item in drifted_status["requests"] if item["request_id"] == str(request_id)
+    )
+    assert drifted_request["status"] == RiskPolicyChangeStatus.EXPIRED.value
+    assert drifted_request["superseded_by_control_state"] is True
+    assert drifted_status["actions"]["review_restore"]["allowed"] is False
+    assert drifted_status["actions"]["execute_restore"]["allowed"] is False
     with pytest.raises(DomainRejected, match="RISK_RESTORE_CONTROL_DRIFT"):
         service.execute_risk_control_change_request(
             request_id,
@@ -733,6 +743,15 @@ def test_system_admin_direct_restore_requires_live_conditions_and_keeps_auto_add
             configured_scopes=live_scope,
             now=NOW + timedelta(minutes=2),
         )
+    pending_request_id = service.create_risk_control_change_request(
+        ids["operator"],
+        "pending-before-admin-restore",
+        reason="a direct administrator restore should supersede this request",
+        restore_auto_add=False,
+        configured_scopes=live_scope,
+        require_live_scope=True,
+        now=NOW + timedelta(minutes=2, seconds=1),
+    )
 
     ready_at = NOW + timedelta(minutes=17)
     service.record_position(
@@ -776,10 +795,28 @@ def test_system_admin_direct_restore_requires_live_conditions_and_keeps_auto_add
         restored = session.get(RiskPolicy, restored_policy_id)
         gate = session.get(CapabilityGate, "AUTO_ADD")
         old_authorization = session.get(TradingAuthorization, old_authorization_id)
+        pending_request = session.get(RiskControlChangeRequest, pending_request_id)
         assert restored is not None
         assert restored.system_state == SystemRiskState.NORMAL.value
         assert gate is not None and gate.status == CapabilityStatus.DISABLED.value
         assert old_authorization is not None and old_authorization.active is False
+        assert pending_request is not None
+        assert pending_request.status == RiskPolicyChangeStatus.EXPIRED.value
+        assert pending_request.version == 2
+        assert pending_request.resulting_policy_id == restored_policy_id
+
+    status = service.risk_control_status(
+        ids["admin"], live_scope, require_live_scope=True, now=ready_at + timedelta(seconds=3)
+    )
+    superseded_request = next(
+        item
+        for item in status["requests"]
+        if item["request_id"] == str(pending_request_id)
+    )
+    assert superseded_request["status"] == RiskPolicyChangeStatus.EXPIRED.value
+    assert superseded_request["superseded_by_control_state"] is True
+    assert status["actions"]["review_restore"]["allowed"] is False
+    assert status["actions"]["execute_restore"]["allowed"] is False
 
 
 def test_restore_rejection_expiry_and_terminal_status_are_durable(

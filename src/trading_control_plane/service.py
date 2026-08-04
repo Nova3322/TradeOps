@@ -7691,6 +7691,20 @@ class TradingService:
             )
         return details
 
+    @staticmethod
+    def _risk_restore_request_drifted(
+        request: RiskControlChangeRequest,
+        policy: RiskPolicy,
+        gate: CapabilityGate,
+    ) -> bool:
+        return bool(
+            request.source_policy_id != policy.policy_id
+            or request.source_policy_version != policy.version
+            or request.source_policy_revision != policy.revision
+            or request.source_auto_add_status != gate.status
+            or request.source_auto_add_version != gate.version
+        )
+
     def risk_control_status(
         self,
         actor_id: UUID,
@@ -7751,6 +7765,12 @@ class TradingService:
                 select(RoleAssignment).where(RoleAssignment.user_id == actor_id)
             ).all()
             role_names = {item.role for item in assignments}
+            restricted = policy.system_state != SystemRiskState.NORMAL.value
+
+            def request_superseded(item: RiskControlChangeRequest) -> bool:
+                return not restricted or self._risk_restore_request_drifted(
+                    item, policy, gate
+                )
 
             def effective_request_status(item: RiskControlChangeRequest) -> str:
                 if (
@@ -7759,7 +7779,7 @@ class TradingService:
                         RiskPolicyChangeStatus.PENDING_REVIEW.value,
                         RiskPolicyChangeStatus.APPROVED.value,
                     }
-                    and item.expires_at <= now
+                    and (item.expires_at <= now or request_superseded(item))
                 ):
                     return RiskPolicyChangeStatus.EXPIRED.value
                 return item.status
@@ -7776,7 +7796,6 @@ class TradingService:
                 ),
                 None,
             )
-            restricted = policy.system_state != SystemRiskState.NORMAL.value
             is_admin = Role.SYSTEM_ADMIN.value in role_names
             is_operator = Role.OPERATOR.value in role_names
             is_reviewer = Role.REVIEWER.value in role_names
@@ -7874,6 +7893,7 @@ class TradingService:
                         "request_id": str(item.request_id),
                         "requester_id": str(item.requester_id),
                         "status": effective_request_status(item),
+                        "superseded_by_control_state": request_superseded(item),
                         "version": item.version,
                         "reason": item.reason,
                         "restore_auto_add": item.restore_auto_add,
@@ -7999,17 +8019,28 @@ class TradingService:
             )
             pending = None
             for existing_request in existing_requests:
-                if existing_request.expires_at <= now:
+                superseded = self._risk_restore_request_drifted(
+                    existing_request, policy, gate
+                )
+                if existing_request.expires_at <= now or superseded:
                     existing_request.status = RiskPolicyChangeStatus.EXPIRED.value
                     existing_request.version += 1
                     existing_request.updated_at = now
                     self._audit(
                         session,
                         actor_id=str(actor_id),
-                        event_type="RISK_RESTORE_EXPIRED",
+                        event_type=(
+                            "RISK_RESTORE_SUPERSEDED"
+                            if superseded
+                            else "RISK_RESTORE_EXPIRED"
+                        ),
                         object_type="RiskControlChangeRequest",
                         object_id=existing_request.request_id,
-                        reason="restore request expired before a replacement was created",
+                        reason=(
+                            "restore request control snapshot was superseded"
+                            if superseded
+                            else "restore request expired before a replacement was created"
+                        ),
                         correlation_id=existing_request.correlation_id,
                         object_version=existing_request.version,
                         idempotency_key=idempotency_key,
@@ -8117,6 +8148,18 @@ class TradingService:
                 return RiskPolicyChangeStatus(str(response["status"]))
             if request.version != expected_version:
                 _reject("VERSION_CONFLICT", "restore request changed before review")
+            policy = self._active_risk_policy(session)
+            gate = session.get(CapabilityGate, "AUTO_ADD")
+            if gate is None:
+                _reject("CAPABILITY_GATE_NOT_FOUND", "AUTO_ADD gate is missing")
+            if (
+                policy.system_state == SystemRiskState.NORMAL.value
+                or self._risk_restore_request_drifted(request, policy, gate)
+            ):
+                _reject(
+                    "RISK_RESTORE_CONTROL_DRIFT",
+                    "restore request no longer matches current controls",
+                )
             if request.requester_id == reviewer_id:
                 _reject("SELF_REVIEW_FORBIDDEN", "requester cannot review their restore")
             if request.expires_at <= now:
@@ -8249,13 +8292,7 @@ class TradingService:
             gate = session.get(CapabilityGate, "AUTO_ADD", with_for_update=True)
             if gate is None:
                 _reject("CAPABILITY_GATE_NOT_FOUND", "AUTO_ADD gate is missing")
-            if (
-                policy.policy_id != request.source_policy_id
-                or policy.version != request.source_policy_version
-                or policy.revision != request.source_policy_revision
-                or gate.status != request.source_auto_add_status
-                or gate.version != request.source_auto_add_version
-            ):
+            if self._risk_restore_request_drifted(request, policy, gate):
                 _reject("RISK_RESTORE_CONTROL_DRIFT", "risk controls changed after the request")
             campaigns = list(session.scalars(select(Campaign)).all())
             current_scopes = self._canonical_restore_scopes(
@@ -8412,6 +8449,35 @@ class TradingService:
             )
             session.add(restored)
             session.flush()
+            pending_requests = session.scalars(
+                select(RiskControlChangeRequest)
+                .where(
+                    RiskControlChangeRequest.status.in_(
+                        {
+                            RiskPolicyChangeStatus.PENDING_REVIEW.value,
+                            RiskPolicyChangeStatus.APPROVED.value,
+                        }
+                    )
+                )
+                .with_for_update()
+            ).all()
+            for pending_request in pending_requests:
+                pending_request.status = RiskPolicyChangeStatus.EXPIRED.value
+                pending_request.version += 1
+                pending_request.resulting_policy_id = restored.policy_id
+                pending_request.updated_at = now
+                self._audit(
+                    session,
+                    actor_id=str(actor_id),
+                    event_type="RISK_RESTORE_SUPERSEDED",
+                    object_type="RiskControlChangeRequest",
+                    object_id=pending_request.request_id,
+                    reason="direct administrator restoration superseded the request",
+                    correlation_id=pending_request.correlation_id,
+                    object_version=pending_request.version,
+                    idempotency_key=idempotency_key,
+                    now=now,
+                )
             authorizations = session.scalars(
                 select(TradingAuthorization)
                 .where(TradingAuthorization.active)
