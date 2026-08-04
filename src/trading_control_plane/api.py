@@ -477,9 +477,7 @@ def create_app(
                 password=resolved_settings.freqtrade_api_password,
             ),
             timeout_seconds=resolved_settings.freqtrade_timeout_seconds,
-            confirmation_timeout_seconds=(
-                resolved_settings.freqtrade_confirmation_timeout_seconds
-            ),
+            confirmation_timeout_seconds=(resolved_settings.freqtrade_confirmation_timeout_seconds),
         ),
         FreqtradeWorkerClient(
             FreqtradeWorkerSpec(
@@ -491,9 +489,7 @@ def create_app(
                 hip3_dexes=resolved_settings.hyperliquid_hip3_dexes,
             ),
             timeout_seconds=resolved_settings.freqtrade_timeout_seconds,
-            confirmation_timeout_seconds=(
-                resolved_settings.freqtrade_confirmation_timeout_seconds
-            ),
+            confirmation_timeout_seconds=(resolved_settings.freqtrade_confirmation_timeout_seconds),
         ),
     )
     resolved_capital_transfer = capital_transfer_adapter or MockCapitalTransferAdapter()
@@ -1966,7 +1962,8 @@ def create_app(
         require_capability(identity, "venue.view", account_id, "HYPERLIQUID")
         return {
             "mode": "INFO_READ_ONLY",
-            "domain": "CORE",
+            "domain": "CORE_AND_CONFIGURED_HIP3",
+            "hip3_dexes": list(resolved_settings.hyperliquid_hip3_dexes),
             "data": queries().venue_facts(
                 identity.user_id,
                 account_id,
@@ -2015,10 +2012,11 @@ def create_app(
         )
         execution_scope = f"{environment.value}:{payload.account_id}:HYPERLIQUID"
         reconciliation_id = service().reconcile_scope(execution_scope, identity.user_id, now=now)
+        symbol_dex = payload.symbol.split(":", 1)[0] if ":" in payload.symbol else ""
         return {
-            "source": "HYPERLIQUID_CORE_INFO",
+            "source": "HYPERLIQUID_INFO",
             "mode": "READ_ONLY",
-            "domain": "CORE",
+            "domain": "CORE" if not symbol_dex else f"HIP3:{symbol_dex}",
             "environment": environment.value,
             "symbol": payload.symbol,
             "observed_at": snapshot.observed_at.isoformat(),
@@ -5143,9 +5141,7 @@ def create_app(
     ) -> str:
         del update_id
         decision = (
-            ReviewDecision.APPROVE
-            if action.action == "APPROVE_PROPOSAL"
-            else ReviewDecision.REJECT
+            ReviewDecision.APPROVE if action.action == "APPROVE_PROPOSAL" else ReviewDecision.REJECT
         )
         try:
             result = service().review_proposal(

@@ -414,6 +414,74 @@ def test_account_snapshot_projects_every_clearinghouse_position_from_single_resp
     assert call_types.count("userFunding") == 1
 
 
+def test_account_snapshot_covers_core_and_every_configured_hip3_dex() -> None:
+    observed_ms = int(NOW.timestamp() * 1_000)
+    calls: list[dict[str, Any]] = []
+
+    def fetcher(
+        url: str, payload: dict[str, Any], timeout: float
+    ) -> dict[str, Any] | list[Any] | str:
+        assert url == "https://api.hyperliquid.xyz/info"
+        assert timeout == 5
+        calls.append(payload)
+        response_type = payload["type"]
+        dex = payload.get("dex", "")
+        if response_type == "userAbstraction":
+            return "disabled"
+        if response_type == "metaAndAssetCtxs":
+            symbol = "BTC" if not dex else "TSLA"
+            return [
+                {
+                    "collateralToken": 0,
+                    "universe": [{"name": symbol, "szDecimals": 3}],
+                },
+                [{"markPx": "100", "funding": "0.0001"}],
+            ]
+        if response_type == "clearinghouseState":
+            return {
+                "marginSummary": {"accountValue": "100"},
+                "withdrawable": "90",
+                "time": observed_ms,
+                "assetPositions": (
+                    [
+                        {
+                            "type": "oneWay",
+                            "position": {"coin": "BTC", "szi": "0.1", "entryPx": "90"},
+                        }
+                    ]
+                    if not dex
+                    else []
+                ),
+            }
+        if response_type == "frontendOpenOrders":
+            return []
+        if response_type in {"userFillsByTime", "userFunding"}:
+            return []
+        raise AssertionError(f"unexpected Hyperliquid request: {payload}")
+
+    client = HyperliquidReadOnlyClient(
+        base_url="https://api.hyperliquid.xyz",
+        account_address=ACCOUNT,
+        hip3_dexes=("xyz",),
+        fetcher=fetcher,
+    )
+
+    snapshots = client.read_account_snapshots(("BTC",), now=NOW)
+
+    assert [(item.symbol, item.position.quantity) for item in snapshots] == [
+        ("BTC", Decimal("0.1")),
+        ("xyz:TSLA", Decimal(0)),
+    ]
+    assert [call.get("dex") for call in calls if call["type"] == "clearinghouseState"] == [
+        "",
+        "xyz",
+    ]
+    assert [call.get("dex") for call in calls if call["type"] == "frontendOpenOrders"] == [
+        "",
+        "xyz",
+    ]
+
+
 def test_account_snapshot_rejects_duplicate_current_response() -> None:
     duplicate = contract_payloads()
     clearinghouse = duplicate["clearinghouseState"]

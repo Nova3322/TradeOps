@@ -297,9 +297,7 @@ def _proposal_manual_execution_key(proposal: Proposal) -> tuple[Any, ...]:
         risk_tier=proposal.risk_tier,
         quantity=proposal.quantity,
         max_risk=proposal.max_risk,
-        expires_in_minutes=round(
-            (proposal.expires_at - proposal.created_at).total_seconds() / 60
-        ),
+        expires_in_minutes=round((proposal.expires_at - proposal.created_at).total_seconds() / 60),
         details=dict(proposal.frozen_payload.get("details") or {}),
     )
 
@@ -4600,15 +4598,15 @@ class TradingService:
             )
             if order is None:
                 order = session.scalar(
-                select(VenueOrder)
-                .where(
-                    VenueOrder.environment == campaign.environment,
-                    VenueOrder.account_id == campaign.account_id,
-                    VenueOrder.venue == campaign.venue,
-                    VenueOrder.client_order_id == command.client_order_id,
+                    select(VenueOrder)
+                    .where(
+                        VenueOrder.environment == campaign.environment,
+                        VenueOrder.account_id == campaign.account_id,
+                        VenueOrder.venue == campaign.venue,
+                        VenueOrder.client_order_id == command.client_order_id,
+                    )
+                    .with_for_update()
                 )
-                .with_for_update()
-            )
             if order is None:
                 order = VenueOrder(
                     order_intent_id=None,
@@ -5937,6 +5935,32 @@ class TradingService:
                 f"{venue}_RESPONSE_INVALID",
                 "incomplete account history cannot contain partial facts",
             )
+        covered_hyperliquid_dexes = (
+            {
+                snapshot.symbol.split(":", 1)[0] if ":" in snapshot.symbol else ""
+                for snapshot in snapshots
+            }
+            if venue == "HYPERLIQUID"
+            else None
+        )
+        if (
+            venue == "HYPERLIQUID"
+            and len(
+                {
+                    (
+                        snapshot.equity.currency,
+                        snapshot.equity.equity,
+                        snapshot.equity.available_balance,
+                    )
+                    for snapshot in snapshots
+                }
+            )
+            != 1
+        ):
+            _reject(
+                "HYPERLIQUID_EQUITY_SCOPE_INCONSISTENT",
+                "Hyperliquid Core and configured HIP-3 equity facts are not a unified total",
+            )
 
         with self.database.session_factory.begin() as session:
             persisted: dict[str, Any] = {}
@@ -5965,6 +5989,7 @@ class TradingService:
                 observed_order_ids={
                     order.order_id for snapshot in snapshots for order in snapshot.orders
                 },
+                covered_hyperliquid_dexes=covered_hyperliquid_dexes,
                 now=now,
                 session=session,
             )
@@ -5984,6 +6009,7 @@ class TradingService:
         environment: ExecutionEnvironment,
         active_symbols: set[str],
         observed_order_ids: set[str],
+        covered_hyperliquid_dexes: set[str] | None = None,
         now: datetime,
         session: Session | None = None,
     ) -> tuple[int, int]:
@@ -6012,7 +6038,15 @@ class TradingService:
                     "an older account snapshot cannot overwrite newer position facts",
                 )
             closed = 0
+            covered = 0
             for position, instrument in scoped:
+                if covered_hyperliquid_dexes is not None:
+                    instrument_dex = (
+                        instrument.symbol.split(":", 1)[0] if ":" in instrument.symbol else ""
+                    )
+                    if instrument_dex not in covered_hyperliquid_dexes:
+                        continue
+                covered += 1
                 if instrument.symbol in active_symbols:
                     continue
                 changed = (
@@ -6077,7 +6111,7 @@ class TradingService:
                         object_version=1,
                         now=now,
                     )
-            return closed, len(scoped)
+            return closed, covered
 
     @staticmethod
     def _intent_id_from_client_order(venue: str, client_order_id: str) -> UUID | None:
@@ -6363,8 +6397,7 @@ class TradingService:
                     synthetic_candidates = [
                         item
                         for item in synthetic_candidates
-                        if abs(item.observed_at - external_fill.executed_at)
-                        <= timedelta(minutes=2)
+                        if abs(item.observed_at - external_fill.executed_at) <= timedelta(minutes=2)
                     ]
                     if len(synthetic_candidates) == 1:
                         venue_order = synthetic_candidates[0]
@@ -6399,8 +6432,7 @@ class TradingService:
                     unknown_candidates = [
                         item
                         for item in unknown_candidates
-                        if abs(item.observed_at - external_fill.executed_at)
-                        <= timedelta(minutes=5)
+                        if abs(item.observed_at - external_fill.executed_at) <= timedelta(minutes=5)
                     ]
                     if len(unknown_candidates) == 1:
                         venue_order = unknown_candidates[0]
@@ -6497,20 +6529,15 @@ class TradingService:
                         f"{venue} cumulative fill exceeds intent",
                     )
                 if bound_campaign.status == CampaignStatus.CLOSED.value:
-                    if (
-                        bound_intent.status
-                        not in {
-                            OrderIntentStatus.FILLED.value,
-                            OrderIntentStatus.CANCELLED.value,
-                            OrderIntentStatus.REJECTED.value,
-                        }
-                        or bound_order.status
-                        not in {
-                            VenueOrderStatus.FILLED.value,
-                            VenueOrderStatus.CANCELLED.value,
-                            VenueOrderStatus.REJECTED.value,
-                        }
-                    ):
+                    if bound_intent.status not in {
+                        OrderIntentStatus.FILLED.value,
+                        OrderIntentStatus.CANCELLED.value,
+                        OrderIntentStatus.REJECTED.value,
+                    } or bound_order.status not in {
+                        VenueOrderStatus.FILLED.value,
+                        VenueOrderStatus.CANCELLED.value,
+                        VenueOrderStatus.REJECTED.value,
+                    }:
                         _reject(
                             "CLOSED_CAMPAIGN_ORDER_NONTERMINAL",
                             f"{venue} closed campaign contains a non-terminal order fact",
@@ -7020,9 +7047,7 @@ class TradingService:
             campaign = session.get(Campaign, campaign_id, with_for_update=True)
             if campaign is None:
                 _reject("CAMPAIGN_NOT_FOUND", "campaign does not exist")
-            self._require_role(
-                session, actor_id, "reconcile", campaign.account_id, campaign.venue
-            )
+            self._require_role(session, actor_id, "reconcile", campaign.account_id, campaign.venue)
             existing_exit = session.scalar(
                 select(OrderIntent)
                 .where(
@@ -8129,19 +8154,13 @@ class TradingService:
             restricted = policy.system_state != SystemRiskState.NORMAL.value
 
             def request_superseded(item: RiskControlChangeRequest) -> bool:
-                return not restricted or self._risk_restore_request_drifted(
-                    item, policy, gate
-                )
+                return not restricted or self._risk_restore_request_drifted(item, policy, gate)
 
             def effective_request_status(item: RiskControlChangeRequest) -> str:
-                if (
-                    item.status
-                    in {
-                        RiskPolicyChangeStatus.PENDING_REVIEW.value,
-                        RiskPolicyChangeStatus.APPROVED.value,
-                    }
-                    and (item.expires_at <= now or request_superseded(item))
-                ):
+                if item.status in {
+                    RiskPolicyChangeStatus.PENDING_REVIEW.value,
+                    RiskPolicyChangeStatus.APPROVED.value,
+                } and (item.expires_at <= now or request_superseded(item)):
                     return RiskPolicyChangeStatus.EXPIRED.value
                 return item.status
 
@@ -8383,9 +8402,7 @@ class TradingService:
             )
             pending = None
             for existing_request in existing_requests:
-                superseded = self._risk_restore_request_drifted(
-                    existing_request, policy, gate
-                )
+                superseded = self._risk_restore_request_drifted(existing_request, policy, gate)
                 if existing_request.expires_at <= now or superseded:
                     existing_request.status = RiskPolicyChangeStatus.EXPIRED.value
                     existing_request.version += 1
@@ -8394,9 +8411,7 @@ class TradingService:
                         session,
                         actor_id=str(actor_id),
                         event_type=(
-                            "RISK_RESTORE_SUPERSEDED"
-                            if superseded
-                            else "RISK_RESTORE_EXPIRED"
+                            "RISK_RESTORE_SUPERSEDED" if superseded else "RISK_RESTORE_EXPIRED"
                         ),
                         object_type="RiskControlChangeRequest",
                         object_id=existing_request.request_id,

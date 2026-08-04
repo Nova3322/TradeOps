@@ -27,6 +27,12 @@ from trading_control_plane.domain import (
     Role,
     SystemRiskState,
 )
+from trading_control_plane.hyperliquid import (
+    HyperliquidEquity,
+    HyperliquidInstrument,
+    HyperliquidPosition,
+    HyperliquidReadOnlySnapshot,
+)
 from trading_control_plane.models import (
     AccountEquity,
     FundingPayment,
@@ -94,6 +100,7 @@ def scoped_positions(
     *,
     account_id: str,
     environment: str,
+    venue: str = "BINANCE",
 ) -> dict[str, Position]:
     with database.session_factory() as session:
         rows = session.execute(
@@ -101,7 +108,7 @@ def scoped_positions(
             .join(Instrument, Position.instrument_id == Instrument.instrument_id)
             .where(
                 Position.account_id == account_id,
-                Position.venue == "BINANCE",
+                Position.venue == venue,
                 Position.environment == environment,
             )
         ).all()
@@ -152,6 +159,116 @@ def with_history(
                 paid_at=value.observed_at,
             ),
         ),
+    )
+
+
+def hyperliquid_snapshot(
+    symbol: str,
+    quantity: Decimal,
+    now: datetime,
+    *,
+    equity: Decimal = Decimal(1_000),
+) -> HyperliquidReadOnlySnapshot:
+    return HyperliquidReadOnlySnapshot(
+        symbol=symbol,
+        observed_at=now,
+        instrument=HyperliquidInstrument(
+            symbol=symbol,
+            tick_size=Decimal("0.1"),
+            lot_size=Decimal("0.001"),
+            minimum_notional=Decimal(10),
+            quote_currency="USDC",
+            collateral_currency="USDC",
+            active=True,
+        ),
+        orders=(),
+        fills=(),
+        position=HyperliquidPosition(
+            quantity=quantity,
+            average_entry_price=Decimal(0) if quantity == 0 else Decimal(100),
+            mark_price=Decimal(110),
+            observed_at=now,
+        ),
+        equity=HyperliquidEquity(
+            equity=equity,
+            available_balance=equity,
+            currency="USDC",
+            observed_at=now,
+        ),
+        funding=(),
+        protection=None,
+    )
+
+
+def ingest_hyperliquid(
+    service: TradingService,
+    actor: UUID,
+    now: datetime,
+    *snapshots: HyperliquidReadOnlySnapshot,
+) -> dict[str, Any]:
+    return service.ingest_hyperliquid_read_only_account_snapshot(
+        "account-a",
+        actor,
+        snapshots,
+        environment=ExecutionEnvironment.LIVE,
+        now=now,
+    )
+
+
+def test_hyperliquid_partial_dex_coverage_never_clears_unqueried_hip3_position(
+    database: Database,
+) -> None:
+    service, actor = seed(database, "hyperliquid-dex-coverage")
+    ingest_hyperliquid(
+        service,
+        actor,
+        NOW,
+        hyperliquid_snapshot("BTC", Decimal(1), NOW),
+        hyperliquid_snapshot("xyz:TSLA", Decimal(2), NOW),
+    )
+
+    core_only_at = NOW + timedelta(seconds=1)
+    result = ingest_hyperliquid(
+        service,
+        actor,
+        core_only_at,
+        hyperliquid_snapshot("BTC", Decimal(1), core_only_at),
+    )
+
+    positions = scoped_positions(
+        database,
+        account_id="account-a",
+        environment="LIVE",
+        venue="HYPERLIQUID",
+    )
+    assert result["positions_covered"] == 1
+    assert positions["BTC"].observed_at == core_only_at
+    assert positions["xyz:TSLA"].quantity == Decimal(2)
+    assert positions["xyz:TSLA"].observed_at == NOW
+
+
+def test_hyperliquid_rejects_non_unified_core_and_hip3_equity(
+    database: Database,
+) -> None:
+    service, actor = seed(database, "hyperliquid-equity-scope")
+
+    with pytest.raises(DomainRejected, match="HYPERLIQUID_EQUITY_SCOPE_INCONSISTENT"):
+        ingest_hyperliquid(
+            service,
+            actor,
+            NOW,
+            hyperliquid_snapshot("BTC", Decimal(0), NOW, equity=Decimal(100)),
+            hyperliquid_snapshot("xyz:TSLA", Decimal(0), NOW, equity=Decimal(90)),
+        )
+
+    assert (
+        scoped_positions(
+            database,
+            account_id="account-a",
+            environment="LIVE",
+            venue="HYPERLIQUID",
+        )
+        == {}
     )
 
 

@@ -112,7 +112,7 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
 
     assert response.status_code == 200
     assert "交易控制台" in response.text
-    assert "/assets/app.js?v=101" in response.text
+    assert "/assets/app.js?v=102" in response.text
     assert "/assets/styles.css?v=43" in response.text
     assert 'aria-label="交易控制台首页"' in response.text
     assert '<a href="/" data-link><span>⌂</span>今日</a>' in response.text
@@ -303,6 +303,7 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
     assert "Freqtrade worker 已接管" not in app_javascript.text
     assert "venue-sync-form" not in app_javascript.text
     assert "账户数据自动更新中" in app_javascript.text
+    assert "刷新当前状态" in app_javascript.text
 
     stylesheet = get(app, "/assets/styles.css")
     assert stylesheet.status_code == 200
@@ -327,7 +328,7 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
 
     service_worker = get(app, "/sw.js")
     assert service_worker.status_code == 200
-    assert "trading-shell-v82" in service_worker.text
+    assert "trading-shell-v83" in service_worker.text
     assert "self.skipWaiting()" in service_worker.text
     assert "self.clients.claim()" in service_worker.text
     assert "await fetch(event.request)" in service_worker.text

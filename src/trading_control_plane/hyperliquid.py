@@ -24,9 +24,7 @@ OFFICIAL_INFO_HOSTS = {
 HISTORY_WINDOW = timedelta(days=30)
 ADDRESS_PATTERN = re.compile(r"^0x[0-9a-fA-F]{40}$")
 CORE_SYMBOL_PATTERN = re.compile(r"^[A-Za-z0-9]{1,32}$")
-HIP3_SYMBOL_PATTERN = re.compile(
-    r"^(?P<dex>[a-z0-9][a-z0-9_-]{0,31}):(?P<coin>[A-Za-z0-9]{1,32})$"
-)
+HIP3_SYMBOL_PATTERN = re.compile(r"^(?P<dex>[a-z0-9][a-z0-9_-]{0,31}):(?P<coin>[A-Za-z0-9]{1,32})$")
 
 
 def _is_core_symbol(value: object) -> TypeGuard[str]:
@@ -325,10 +323,7 @@ class HyperliquidReadOnlyClient:
     def configured(self) -> bool:
         return bool(
             (self._account_address and ADDRESS_PATTERN.fullmatch(self._account_address))
-            or (
-                self._api_wallet_address
-                and ADDRESS_PATTERN.fullmatch(self._api_wallet_address)
-            )
+            or (self._api_wallet_address and ADDRESS_PATTERN.fullmatch(self._api_wallet_address))
         )
 
     @property
@@ -456,9 +451,7 @@ class HyperliquidReadOnlyClient:
             else None
         )
 
-        orders = self._info(
-            {"type": "frontendOpenOrders", "user": account_address, "dex": dex}
-        )
+        orders = self._info({"type": "frontendOpenOrders", "user": account_address, "dex": dex})
         start_time_ms = int((now - HISTORY_WINDOW).timestamp() * 1_000)
         fills = self._info(
             {
@@ -506,7 +499,7 @@ class HyperliquidReadOnlyClient:
             else None
         )
         current_snapshots: list[HyperliquidReadOnlySnapshot] = []
-        configured_by_dex: dict[str, set[str]] = {}
+        configured_by_dex: dict[str, set[str]] = {dex: set() for dex in ("", *self._hip3_dexes)}
         for symbol in configured:
             configured_by_dex.setdefault(self._symbol_dex(symbol), set()).add(symbol)
         for dex, scoped_symbols in sorted(configured_by_dex.items()):
@@ -514,18 +507,28 @@ class HyperliquidReadOnlyClient:
             clearinghouse = self._info(
                 {"type": "clearinghouseState", "user": account_address, "dex": dex}
             )
-            orders = self._info(
-                {"type": "frontendOpenOrders", "user": account_address, "dex": dex}
-            )
+            orders = self._info({"type": "frontendOpenOrders", "user": account_address, "dex": dex})
             target_symbols = (
                 scoped_symbols
                 | self._active_position_symbols(clearinghouse, dex=dex)
                 | self._order_symbols(orders, dex=dex)
             )
-            for symbol in sorted(target_symbols):
-                instrument, mark_price = self._parse_instrument(
-                    meta_contexts, symbol, dex=dex
+            if not target_symbols:
+                meta = _require_dict(meta_contexts[0], "meta")
+                universe = _require_dict_list(meta.get("universe"), "meta universe")
+                seed = next(
+                    (item for item in universe if not bool(item.get("isDelisted", False))),
+                    None,
                 )
+                raw_symbol = None if seed is None else seed.get("name")
+                if not isinstance(raw_symbol, str):
+                    raise DomainRejected(
+                        "HYPERLIQUID_RESPONSE_INVALID",
+                        "configured perpetual catalog has no active coverage symbol",
+                    )
+                target_symbols.add(_normalize_market_symbol(raw_symbol, dex=dex))
+            for symbol in sorted(target_symbols):
+                instrument, mark_price = self._parse_instrument(meta_contexts, symbol, dex=dex)
                 position, equity = self._parse_account(
                     clearinghouse, symbol, mark_price, now, dex=dex
                 )
@@ -854,9 +857,7 @@ class HyperliquidReadOnlyClient:
         for item in _require_dict_list(raw, "userFunding"):
             delta = item.get("delta")
             if not isinstance(delta, dict):
-                raise DomainRejected(
-                    "HYPERLIQUID_RESPONSE_INVALID", "funding delta is invalid"
-                )
+                raise DomainRejected("HYPERLIQUID_RESPONSE_INVALID", "funding delta is invalid")
             if delta.get("coin") != symbol:
                 continue
             paid_at = _time(item.get("time", 0), now)
