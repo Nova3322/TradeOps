@@ -337,6 +337,12 @@ def seed_live(
         max_fact_age=timedelta(minutes=10),
         now=NOW,
     )
+    runtime = service.create_service_principal(f"{key}-runtime", admin, now=NOW)
+    service.record_runtime_source_health(
+        runtime,
+        {venue: {"status": "SUCCESS", "items_observed": 1}},
+        now=NOW,
+    )
     service.record_position(
         account_id,
         venue,
@@ -412,6 +418,7 @@ def seed_live(
     return {
         "admin": admin,
         "operator": operator,
+        "runtime": runtime,
         "instrument": instrument,
         "campaign": opening.campaign_id,
         "opening": opening.intent_id,
@@ -515,6 +522,22 @@ async def exercise_binance_live(database: Database) -> None:
             CapabilityStatus.ENABLED,
             "integration fixture",
             ids["admin"],
+            now=NOW,
+        )
+        service.record_runtime_source_health(
+            ids["runtime"],
+            {"BINANCE": {"status": "FAILED", "error_code": "BINANCE_NETWORK_UNAVAILABLE"}},
+            now=NOW,
+        )
+        source_blocked = await http.post(
+            f"/api/intents/{ids['opening']}/binance/live/send", json=action
+        )
+        assert source_blocked.status_code == 422
+        assert source_blocked.json()["error"]["code"] == "READ_ONLY_SOURCE_UNAVAILABLE"
+        assert venue.write_count == 0
+        service.record_runtime_source_health(
+            ids["runtime"],
+            {"BINANCE": {"status": "SUCCESS", "items_observed": 1}},
             now=NOW,
         )
         sent = await http.post(f"/api/intents/{ids['opening']}/binance/live/send", json=action)
@@ -643,6 +666,28 @@ async def exercise_hyperliquid_live(database: Database) -> None:
             ids["admin"],
             now=NOW,
         )
+        service.record_runtime_source_health(
+            ids["runtime"],
+            {
+                "HYPERLIQUID": {
+                    "status": "FAILED",
+                    "error_code": "HYPERLIQUID_NETWORK_UNAVAILABLE",
+                }
+            },
+            now=NOW,
+        )
+        source_blocked = await http.post(
+            f"/api/intents/{ids['opening']}/hyperliquid/live/send",
+            json=action,
+        )
+        assert source_blocked.status_code == 422
+        assert source_blocked.json()["error"]["code"] == "READ_ONLY_SOURCE_UNAVAILABLE"
+        assert venue.write_count == 0
+        service.record_runtime_source_health(
+            ids["runtime"],
+            {"HYPERLIQUID": {"status": "SUCCESS", "items_observed": 1}},
+            now=NOW,
+        )
         sent = await http.post(
             f"/api/intents/{ids['opening']}/hyperliquid/live/send",
             json=action,
@@ -769,6 +814,12 @@ async def exercise_perptape_binance_live_lifecycle(database: Database) -> None:
         True,
         operator,
         environment=ExecutionEnvironment.LIVE,
+        now=NOW,
+    )
+    runtime = service.create_service_principal("perptape-live-runtime", admin, now=NOW)
+    service.record_runtime_source_health(
+        runtime,
+        {venue_name: {"status": "SUCCESS", "items_observed": 1}},
         now=NOW,
     )
     candidate_time = int(datetime.now(UTC).timestamp() * 1000)

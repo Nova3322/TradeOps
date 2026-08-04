@@ -112,7 +112,7 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
 
     assert response.status_code == 200
     assert "交易控制台" in response.text
-    assert "/assets/app.js?v=99" in response.text
+    assert "/assets/app.js?v=100" in response.text
     assert "/assets/styles.css?v=43" in response.text
     assert 'aria-label="交易控制台首页"' in response.text
     assert '<a href="/" data-link><span>⌂</span>今日</a>' in response.text
@@ -323,7 +323,7 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
 
     service_worker = get(app, "/sw.js")
     assert service_worker.status_code == 200
-    assert "trading-shell-v80" in service_worker.text
+    assert "trading-shell-v81" in service_worker.text
     assert "self.skipWaiting()" in service_worker.text
     assert "self.clients.claim()" in service_worker.text
     assert "await fetch(event.request)" in service_worker.text
@@ -647,7 +647,7 @@ def test_proposal_review_projection_uses_frozen_resonance_and_plain_risk_reasons
           context,
         );
         const normal = context.actionReason("SYSTEM_ALREADY_NORMAL", {blockers:[]});
-        assert.equal(normal, "无需操作\uFF1A风险政策已经正常开放");
+        assert.equal(normal, "无需恢复\uFF1A风险政策当前为正常状态");
         assert.doesNotMatch(normal, /SYSTEM_ALREADY_NORMAL/);
         assert.equal(
           context.actionReason("REALTIME_CONDITIONS_BLOCKED", {blockers:["a", "b"]}),

@@ -30,6 +30,7 @@ from trading_control_plane.models import (
     CapabilityGate,
     OrderIntent,
     RiskControlChangeRequest,
+    RiskDecision,
     RiskPolicy,
     TradingAuthorization,
 )
@@ -825,6 +826,43 @@ def test_system_admin_direct_restore_requires_live_conditions_and_keeps_auto_add
         "READ_ONLY_SOURCE_FAILED:LIVE:acct-1:BINANCE:BINANCE_RATE_LIMITED"
         in failed_probe["restore_conditions"]["blockers"]
     )
+    live_proposal = service.create_proposal(
+        actor_id=ids["proposer"],
+        source=ProposalSource.MANUAL,
+        risk_tier=RiskTier.LOW,
+        account_id="acct-1",
+        venue="BINANCE",
+        instrument_id=ids["instrument"],
+        direction=Direction.LONG,
+        quantity=Decimal("1"),
+        max_risk=Decimal("5"),
+        expires_at=ready_at + timedelta(hours=1),
+        idempotency_key="failed-source-live-proposal",
+        environment=ExecutionEnvironment.LIVE,
+        details={"invalidation_price": "90"},
+        now=ready_at,
+    )
+    service.submit_proposal(live_proposal, ids["proposer"], now=ready_at)
+    service.review_proposal(
+        live_proposal,
+        ids["reviewer_one"],
+        ReviewDecision.APPROVE,
+        "independent live proposal review",
+        now=ready_at,
+    )
+    failed_source_decision = service.decide_risk(
+        proposal_id=live_proposal,
+        actor_id=ids["operator"],
+        kind=IntentKind.INITIAL,
+        idempotency_key="failed-source-live-decision",
+        now=ready_at + timedelta(seconds=1, milliseconds=350),
+    )
+    with database.session_factory() as session:
+        decision = session.get(RiskDecision, failed_source_decision)
+        assert decision is not None
+        assert decision.result == "DENY"
+        assert decision.reasons == ["READ_ONLY_SOURCE_UNAVAILABLE"]
+        assert decision.input_data["read_only_source"]["error_code"] == "BINANCE_RATE_LIMITED"
 
     service.record_runtime_source_health(
         runtime_actor,

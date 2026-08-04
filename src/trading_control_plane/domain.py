@@ -210,6 +210,7 @@ class RiskEvaluationInput:
     position_known: bool
     equity_known: bool
     protection_known: bool
+    source_current: bool = True
 
 
 @dataclass(frozen=True, slots=True)
@@ -297,6 +298,8 @@ def evaluate_risk(policy: RiskPolicyInput, inputs: RiskEvaluationInput) -> RiskO
         or inputs.requested_risk <= 0
     ):
         return _deny("INVALID_INPUT")
+    if not inputs.source_current:
+        return _deny("READ_ONLY_SOURCE_UNAVAILABLE")
     if inputs.fact_age > policy.max_fact_age:
         return _deny("STALE_FACTS")
     if not inputs.position_known:

@@ -2327,13 +2327,24 @@ class TradingService:
                 .with_for_update()
             )
 
+        max_age = timedelta(seconds=policy.max_fact_age_seconds)
+        source_health = (
+            session.get(RuntimeSourceHealth, proposal.venue)
+            if proposal.environment == ExecutionEnvironment.LIVE.value
+            else None
+        )
+        source_current = proposal.environment != ExecutionEnvironment.LIVE.value or (
+            source_health is not None
+            and source_health.status == "SUCCESS"
+            and not self._fact_is_stale(source_health.checked_at, now, max_age)
+        )
+
         position_known = position is not None and position.fact_status == FactStatus.KNOWN.value
         venue_equity_known = (
             equity is not None
             and equity.fact_status == FactStatus.KNOWN.value
             and equity.currency == instrument.collateral_currency
         )
-        max_age = timedelta(seconds=policy.max_fact_age_seconds)
         capital_known, managed_capital_usd, managed_facts, capital_as_of = (
             self._managed_capital_context(
                 session,
@@ -2371,6 +2382,7 @@ class TradingService:
             position_known=position_known,
             equity_known=equity_known,
             protection_known=protection_known,
+            source_current=source_current,
         )
         facts = {
             "proposal_id": str(proposal.proposal_id),
@@ -2410,6 +2422,13 @@ class TradingService:
                 "total_usd": str(managed_capital_usd),
                 "effective_max_total_risk": str(min(policy.max_total_risk, managed_capital_usd)),
                 "facts": managed_facts,
+            },
+            "read_only_source": None
+            if source_health is None
+            else {
+                "status": source_health.status,
+                "error_code": source_health.error_code,
+                "checked_at": source_health.checked_at.isoformat(),
             },
             "protection_required": protection_required,
             "protection": None
@@ -3522,6 +3541,17 @@ class TradingService:
                 or self._fact_is_stale(equity.observed_at, now, max_age)
             ):
                 _reject("EQUITY_UNKNOWN", "new-risk venue send requires fresh equity")
+            if environment is ExecutionEnvironment.LIVE:
+                source_health = session.get(RuntimeSourceHealth, campaign.venue)
+                if (
+                    source_health is None
+                    or source_health.status != "SUCCESS"
+                    or self._fact_is_stale(source_health.checked_at, now, max_age)
+                ):
+                    _reject(
+                        "READ_ONLY_SOURCE_UNAVAILABLE",
+                        "new-risk venue send requires a current successful read-only probe",
+                    )
             capital_known, managed_capital_usd, _, _ = self._managed_capital_context(
                 session,
                 environment=campaign.environment,

@@ -62,6 +62,7 @@ def test_risk_engine_is_deterministic_and_scales_to_available_capacity() -> None
     ("overrides", "reason"),
     [
         ({"fact_age": timedelta(minutes=2)}, "STALE_FACTS"),
+        ({"source_current": False}, "READ_ONLY_SOURCE_UNAVAILABLE"),
         ({"position_known": False}, "POSITION_UNKNOWN"),
         ({"equity_known": False}, "EQUITY_UNKNOWN"),
         ({"protection_known": False}, "PROTECTION_UNKNOWN"),
