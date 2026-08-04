@@ -288,6 +288,9 @@ button:disabled { opacity: .52; cursor: not-allowed; }
 .capital-route-card li { counter-increment: capital-step; padding: 6px 8px; border-radius: 8px; background: var(--bg); color: var(--muted); font-size: 10px; }
 .capital-route-card li::before { content: counter(capital-step) '. '; color: var(--accent); font-weight: 850; }
 .capital-route-action { width: 100%; text-align: center; }
+.capital-blockers { margin-bottom: 8px; }
+.capital-blockers summary { color: var(--warning); cursor: pointer; font-weight: 800; }
+.capital-blockers p { max-width: 42rem; margin: 8px 0 0; color: var(--muted); line-height: 1.55; }
 .direct-capital-confirm { display: flex; align-items: center; gap: 8px; min-height: 40px; padding: 9px 11px; border: 1px solid var(--line); border-radius: 9px; color: var(--ink); }
 .direct-capital-confirm input { width: 16px; height: 16px; margin: 0; accent-color: var(--accent); }
 .chart-empty { min-height: 180px; display: grid; place-items: center; color: var(--muted); border: 1px dashed var(--line); border-radius: 12px; }

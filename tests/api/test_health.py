@@ -112,8 +112,8 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
 
     assert response.status_code == 200
     assert "交易控制台" in response.text
-    assert "/assets/app.js?v=70" in response.text
-    assert "/assets/styles.css?v=33" in response.text
+    assert "/assets/app.js?v=71" in response.text
+    assert "/assets/styles.css?v=34" in response.text
     assert '<a href="/" data-link><span>⌂</span>今日</a>' in response.text
     assert 'id="mobile-nav-toggle"' in response.text
     assert 'id="confirm-dialog"' in response.text
@@ -169,6 +169,17 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
     assert "const DIRECT_CAPITAL_PATHS" in app_javascript.text
     assert "/api/capital/direct-operations" in app_javascript.text
     assert "最终确认并检查" in app_javascript.text
+    assert "检查转入币安条件" in app_javascript.text
+    assert "检查 Hyperliquid 回流条件" in app_javascript.text
+    assert "3 项阻断，查看详情" not in app_javascript.text  # noqa: RUF001
+    assert "项阻断，查看详情" in app_javascript.text  # noqa: RUF001
+    assert "生成无签名预检" in app_javascript.text
+    assert "BLOCKED:'已安全阻断'" in app_javascript.text
+    assert "NOT_SUBMITTED:'未提交'" in app_javascript.text
+    assert "账户范围" in app_javascript.text
+    assert "默认账户" in app_javascript.text
+    assert "{BINANCE:'币安', HYPERLIQUID:'Hyperliquid'}" in app_javascript.text
+    assert "series.points.length && capitalTrendVisibility" in app_javascript.text
     assert "未配置或未同步" in app_javascript.text
     assert "旧流程只保留为只读审计记录" in app_javascript.text
     assert "fmtNumber(item.in_transit)" not in app_javascript.text
@@ -255,6 +266,7 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
     assert ".capital-status-missing" in stylesheet.text
     assert ".capital-route-grid" in stylesheet.text
     assert ".capital-trend-toggle" in stylesheet.text
+    assert ".capital-blockers" in stylesheet.text
     assert ".opportunity-signals { display: flex; flex-wrap: nowrap" in stylesheet.text
     assert "@container (min-width: 520px)" in stylesheet.text
     assert ".opportunity-stats" in stylesheet.text
