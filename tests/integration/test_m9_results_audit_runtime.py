@@ -243,6 +243,14 @@ def test_results_audit_and_runtime_api_do_not_mix_environments_or_expose_secrets
                 "mode": "MOCK_OR_NOTILT_UNSIGNED_HANDOFF",
                 "real_configured": False,
             }
+            assert payload["external_boundaries"]["telegram"]["polling"] == {
+                "state": "DISABLED",
+                "running": False,
+                "last_success_at": None,
+                "last_error_at": None,
+                "last_error_code": None,
+                "consecutive_failures": 0,
+            }
             assert (
                 payload["external_boundaries"]["hyperliquid_read_only"]["account_scope"]
                 == "MAIN_ACCOUNT"

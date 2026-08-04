@@ -1,6 +1,8 @@
 from datetime import UTC, datetime
+from io import BytesIO
+from threading import Event
 from typing import Any
-from urllib.error import URLError
+from urllib.error import HTTPError, URLError
 from uuid import UUID, uuid4
 
 import pytest
@@ -58,6 +60,8 @@ def proposal(recipient_id: UUID, *, status: str = "PENDING_REVIEW") -> ProposalN
 
 def gateway(
     fake: FakeBotApi,
+    *,
+    todo_items: list[ProposalNotification] | None = None,
 ) -> tuple[TelegramBotGateway, dict[str, str], list[object], UUID]:
     token = "123456789:abcdefghijklmnopqrstuvwxyz"  # noqa: S105
     bindings: dict[str, str] = {}
@@ -76,7 +80,12 @@ def gateway(
         internal_username="kelly_oooo",
         binder=bind,
         chat_resolver=lambda user_id: bindings.get(str(user_id)),
-        todo_resolver=lambda chat_id: [proposal(recipient_id)] if chat_id == "789" else [],
+        todo_resolver=lambda chat_id: (
+            todo_items if todo_items is not None else [proposal(recipient_id)]
+        )
+        if chat_id == "789"
+        else [],
+        review_queue_url="http://127.0.0.1:8014/reviews",
         client=TelegramBotClient(
             token,
             base_url="https://telegram.invalid",
@@ -192,6 +201,45 @@ def test_private_start_binds_allowlisted_username_and_todo_is_available() -> Non
         }
     )
     assert "待我审核 · 1 项" in fake.calls[-1][1]["text"]
+    assert fake.calls[-1][1]["reply_markup"] == {
+        "inline_keyboard": [
+            [{"text": "打开 Web 审核队列", "url": "http://127.0.0.1:8014/reviews"}]
+        ]
+    }
+
+
+def test_todo_limits_message_to_earliest_ten_and_reports_omitted_count() -> None:
+    fake = FakeBotApi()
+    recipient_id = uuid4()
+    todo_items = [
+        ProposalNotification(
+            **{
+                **proposal(recipient_id).__dict__,
+                "notification_id": f"todo-{index}",
+                "symbol": f"PAIR{index}",
+            }
+        )
+        for index in range(12)
+    ]
+    bot, _bindings, _handled, _gateway_recipient_id = gateway(fake, todo_items=todo_items)
+    bind(bot)
+
+    bot.handle_update(
+        {
+            "update_id": 2,
+            "message": {
+                "text": "/todo",
+                "from": {"id": 789, "username": "kelly_oooo"},
+                "chat": {"id": 789, "type": "private"},
+            },
+        }
+    )
+
+    payload = fake.calls[-1][1]
+    assert "待我审核 · 12 项" in payload["text"]
+    assert "另有 2 项" in payload["text"]
+    assert "PAIR9" in payload["text"]
+    assert "PAIR10" not in payload["text"]
 
 
 def test_start_rejects_different_username_and_group_chat() -> None:
@@ -308,6 +356,64 @@ def test_default_poster_sanitizes_network_failure(monkeypatch: Any) -> None:
     with pytest.raises(TelegramUnavailable, match="could not be reached") as error:
         _default_poster("https://example.invalid/bot-secret/send", {}, 1)
     assert "secret" not in str(error.value)
+
+
+def test_default_poster_classifies_polling_conflict_without_exposing_bot_url(
+    monkeypatch: Any,
+) -> None:
+    response = BytesIO(
+        b'{"ok":false,"error_code":409,'
+        b'"description":"Conflict: terminated by other getUpdates request"}'
+    )
+    rejection = HTTPError(
+        "https://example.invalid/bot-secret/getUpdates",
+        409,
+        "Conflict",
+        None,
+        response,
+    )
+    monkeypatch.setattr(
+        "urllib.request.urlopen",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(rejection),
+    )
+
+    with pytest.raises(TelegramUnavailable) as error:
+        _default_poster("https://example.invalid/bot-secret/getUpdates", {}, 1)
+
+    assert error.value.code == "TELEGRAM_POLLING_CONFLICT"
+    assert "secret" not in str(error.value)
+
+
+def test_polling_health_reports_successful_long_poll_without_enabling_actions() -> None:
+    fake = FakeBotApi()
+    polled = Event()
+    original_poster = fake.poster
+
+    def poster(url: str, payload: dict[str, Any], timeout: float) -> dict[str, Any]:
+        result = original_poster(url, payload, timeout)
+        if url.endswith("/getUpdates"):
+            polled.set()
+        return result
+
+    token = "123456789:abcdefghijklmnopqrstuvwxyz"  # noqa: S105
+    bot = TelegramBotGateway(
+        token=token,
+        allowed_username="kelly_oooo",
+        internal_username="kelly_oooo",
+        binder=lambda *_args: "kelly_oooo",
+        chat_resolver=lambda _user_id: None,
+        client=TelegramBotClient(token, base_url="https://telegram.invalid", poster=poster),
+    )
+
+    bot.start()
+    assert polled.wait(1)
+    bot.stop()
+
+    health = bot.polling_health()
+    assert health["state"] == "HEALTHY"
+    assert health["running"] is False
+    assert health["last_success_at"] is not None
+    assert health["consecutive_failures"] == 0
 
 
 def test_default_poster_rejects_invalid_json_without_exposing_url(monkeypatch: Any) -> None:

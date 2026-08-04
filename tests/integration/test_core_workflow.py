@@ -380,12 +380,15 @@ def test_self_review_is_forbidden_and_high_risk_needs_two_reviewers(
         now=NOW,
     )
     queries = TradingQueries(database)
+    reviewer_two_summary = queries.list_proposals(ids["reviewer_two"], now=NOW)[0]
+    assert reviewer_two_summary["approval_count"] == 1
+    assert reviewer_two_summary["required_approvals"] == 2
     assert (
         queries.list_proposals(ids["reviewer_one"], now=NOW)[0]["actionable_for_current_user"]
         is False
     )
     assert (
-        queries.list_proposals(ids["reviewer_two"], now=NOW)[0]["actionable_for_current_user"]
+        reviewer_two_summary["actionable_for_current_user"]
         is True
     )
     assert (

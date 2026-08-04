@@ -1889,12 +1889,12 @@ async function renderSystemStatus() {
     TELEGRAM_BOT_API_REJECTED:'Bot API 拒绝轮询请求；由系统管理员检查机器人运行实例。',
   })[telegramPolling.last_error_code] || '机器人尚未完成一次成功轮询；Web 审核队列仍是权威入口。';
   const telegramStatus = telegramHealthy
-    ? 'Telegram 审核通知可用'
+    ? '通知可用'
     : telegramPolling.state === 'DEGRADED'
-      ? 'Telegram 审核通知受阻'
+      ? '通知受阻'
       : telegram.enabled
-        ? 'Telegram 等待首次轮询'
-        : 'Telegram 尚未启用';
+        ? '等待首次轮询'
+        : '尚未启用';
   const connections = runtime?.data?.connections || {};
   const perptapeAvailable = Boolean(connections.PERPTAPE?.available);
   const notiltConfigured = Boolean(connections.NOTILT?.available);
@@ -1970,7 +1970,7 @@ async function renderSystemStatus() {
   const verdictTitle = !health.ready ? '核心服务未通过就绪检查' : !controlAvailable ? '核心服务可用，但风险政策未配置' : exceptions.length ? '核心服务可用，但存在风险阻断' : !workersReady || !tradingConnectionsReady ? '只读控制台可用，但交易执行尚未就绪' : !telegramHealthy ? '交易管理可用，但 Telegram 审核通知受限' : !perptapeAvailable ? '交易管理可用，但 Perptape 机会源受限' : activeMonitoring ? '交易系统正在正常监控' : '核心服务可用，当前无运行中交易任务';
   const verdictCopy = !health.ready ? '请先恢复数据库与服务状态，不要继续依赖旧数据。' : !controlAvailable ? `${friendlyApiError(control.error)} 新增风险保持关闭。` : exceptions.length ? `发现 ${exceptions.length} 项安全异常；受影响的新增风险会保持关闭。` : !workersReady || !tradingConnectionsReady ? `${workersDisabled ? 'Freqtrade worker 尚未启动' : 'Freqtrade worker 尚未通过检查'}；${!tradingConnectionsReady ? '至少一个交易所只读连接当前受限' : '交易所只读连接正常'}。系统不会把只读页面可访问误报为可执行交易。` : !telegramHealthy ? `${telegramFailureCopy} 不影响 Web 审核，也不会放宽任何审核或交易边界。` : !perptapeAvailable ? `${perptapeStatus}。现有交易任务仍可管理，但新的 Perptape 机会暂不可用。` : activeMonitoring ? '运行中的交易任务没有检测到保护、敞口或对账阻断。' : '当前没有需要监控的交易任务；系统不会把“无监控对象”误报为“监控正常”。';
   main.innerHTML = `<section class="page system-status-page"><header class="page-head"><div><p class="eyebrow">交易系统状态</p><h1>系统状态</h1><p class="lede">这里直接说明系统能否工作、哪些能力受限，以及是否需要处理。绿色表示当前证据正常；黄色表示能力受限；红色表示必须先处理；灰色表示当前没有监控对象。</p></div><div class="toolbar"><button class="secondary" data-refresh>刷新状态</button><a class="secondary" href="/risk" data-link>查看风险控制</a></div></header>
-    <article class="home-status tone-${overallTone}"><div><p class="eyebrow">当前结论</p><h2>${escapeHtml(verdictTitle)}</h2><p>${escapeHtml(verdictCopy)}</p></div>${exceptions.length ? '<a class="primary" href="/campaigns/alerts" data-link>查看运行告警</a>' : !controlAvailable ? '<a class="secondary" href="/risk" data-link>查看风险控制</a>' : !workersReady || !tradingConnectionsReady ? '<a class="secondary" href="/venues" data-link>查看交易账户</a>' : !perptapeAvailable ? '<a class="secondary" href="/opportunities" data-link>查看 Perptape</a>' : '<span class="status-pill status-APPROVED">无需立即动作</span>'}</article>
+    <article class="home-status tone-${overallTone}"><div><p class="eyebrow">当前结论</p><h2>${escapeHtml(verdictTitle)}</h2><p>${escapeHtml(verdictCopy)}</p></div>${exceptions.length ? '<a class="primary" href="/campaigns/alerts" data-link>查看运行告警</a>' : !controlAvailable ? '<a class="secondary" href="/risk" data-link>查看风险控制</a>' : !workersReady || !tradingConnectionsReady ? '<a class="secondary" href="/venues" data-link>查看交易账户</a>' : !telegramHealthy ? '<a class="secondary" href="/reviews" data-link>使用 Web 审核</a>' : !perptapeAvailable ? '<a class="secondary" href="/opportunities" data-link>查看 Perptape</a>' : '<span class="status-pill status-APPROVED">无需立即动作</span>'}</article>
     <div class="system-health-grid">${cards}</div>
     <section><div class="section-heading"><div><p class="eyebrow">外部数据连接</p><h2>生产数据与资金连接</h2></div><span class="status-pill">${availableSources} / 4 可用</span></div><div class="table-wrap"><table><thead><tr><th>数据源</th><th>读取状态与处理建议</th><th>运行范围</th><th>可用能力</th><th></th></tr></thead><tbody>${connectionRows}</tbody></table></div></section>
     ${codes.size ? `<section><div class="section-heading"><div><p class="eyebrow">交易任务运行告警</p><h2>需要处理的问题类型</h2></div><a class="secondary" href="/campaigns/alerts" data-link>查看运行告警</a></div><div class="exception-code-list">${[...codes].sort().map(code => `<span>${escapeHtml(explainException(code).title)}</span>`).join('')}</div></section>` : ''}

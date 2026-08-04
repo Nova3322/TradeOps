@@ -357,6 +357,7 @@ button:disabled { opacity: .52; cursor: not-allowed; }
 .section-tabs a { display: flex; align-items: center; gap: 7px; padding: 8px 13px; border-radius: 8px; color: var(--muted); font-size: 12px; font-weight: 750; }
 .section-tabs a.active { background: var(--ink); color: var(--panel); }
 .section-tabs a span { min-width: 19px; padding: 2px 6px; border-radius: 999px; background: var(--accent-2); color: var(--accent); text-align: center; font-size: 10px; }
+.review-queue-summary { margin: -3px 0 12px; color: var(--muted); font-size: 11px; line-height: 1.55; }
 .proposal-list-tools { display: grid; grid-template-columns: minmax(220px, 1fr) repeat(3, 150px) auto; gap: 10px; align-items: end; padding: 14px; border: 1px solid var(--line); border-bottom: 0; border-radius: 15px 15px 0 0; background: var(--panel); }
 .proposal-list-tools > span { align-self: center; color: var(--muted); font-size: 11px; white-space: nowrap; }
 .proposal-table { border-radius: 0 0 15px 15px; }

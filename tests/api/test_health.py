@@ -112,8 +112,8 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
 
     assert response.status_code == 200
     assert "交易控制台" in response.text
-    assert "/assets/app.js?v=68" in response.text
-    assert "/assets/styles.css?v=32" in response.text
+    assert "/assets/app.js?v=70" in response.text
+    assert "/assets/styles.css?v=33" in response.text
     assert '<a href="/" data-link><span>⌂</span>今日</a>' in response.text
     assert 'id="mobile-nav-toggle"' in response.text
     assert 'id="confirm-dialog"' in response.text
@@ -234,6 +234,11 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
     assert "api('/api/runtime/status')" in app_javascript.text
     assert "const opportunityHealthRequest" in app_javascript.text
     assert "Perptape 机会源" in app_javascript.text
+    assert "Telegram 审核通知受限" in app_javascript.text
+    assert "? '通知可用'" in app_javascript.text
+    assert "? '通知受阻'" in app_javascript.text
+    assert "使用 Web 审核" in app_javascript.text
+    assert "系统机会 ${systemCount} 笔 · 人工判断 ${manualCount} 笔" in app_javascript.text
     assert "生产数据与资金连接" in app_javascript.text
     assert "等待资金库绑定" in app_javascript.text
     assert "当前无监控对象" in app_javascript.text
@@ -255,11 +260,12 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
     assert ".opportunity-stats" in stylesheet.text
     assert ".proposal-detail-layout" in stylesheet.text
     assert ".proposal-preview" in stylesheet.text
+    assert ".review-queue-summary" in stylesheet.text
     assert ".source-facts" in stylesheet.text
 
     service_worker = get(app, "/sw.js")
     assert service_worker.status_code == 200
-    assert "trading-shell-v64" in service_worker.text
+    assert "trading-shell-v65" in service_worker.text
     assert "self.skipWaiting()" in service_worker.text
     assert "self.clients.claim()" in service_worker.text
     assert "await fetch(event.request)" in service_worker.text

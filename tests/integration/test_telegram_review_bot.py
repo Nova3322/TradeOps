@@ -279,3 +279,8 @@ def test_telegram_todo_excludes_expired_frozen_proposals(database: Database) -> 
     assert "待我审核 · 1 项" in todo_text
     assert "BTCUSDT" in todo_text
     assert "ETHUSDT" not in todo_text
+    assert fake.calls[-1][1]["reply_markup"] == {
+        "inline_keyboard": [
+            [{"text": "打开 Web 审核队列", "url": "http://test/reviews"}]
+        ]
+    }
