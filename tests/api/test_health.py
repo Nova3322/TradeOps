@@ -112,7 +112,7 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
 
     assert response.status_code == 200
     assert "交易控制台" in response.text
-    assert "/assets/app.js?v=75" in response.text
+    assert "/assets/app.js?v=77" in response.text
     assert "/assets/styles.css?v=36" in response.text
     assert '<a href="/" data-link><span>⌂</span>今日</a>' in response.text
     assert 'id="mobile-nav-toggle"' in response.text
@@ -143,7 +143,7 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
     assert "/api/results" not in app_javascript.text
     assert "/api/audit" not in app_javascript.text
     assert "'access.manage':['SYSTEM_ADMIN']" in app_javascript.text
-    assert "'system.view':['OBSERVER','OPERATOR']" in app_javascript.text
+    assert "'system.view':['OBSERVER','REVIEWER','OPERATOR']" in app_javascript.text
     assert "[translate=\"no\"]" in app_javascript.text
     assert "管理所有成员并可访问资金中心" in app_javascript.text
     assert 'href="/proposals/new"' not in response.text
@@ -278,7 +278,7 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
 
     service_worker = get(app, "/sw.js")
     assert service_worker.status_code == 200
-    assert "trading-shell-v68" in service_worker.text
+    assert "trading-shell-v70" in service_worker.text
     assert "self.skipWaiting()" in service_worker.text
     assert "self.clients.claim()" in service_worker.text
     assert "await fetch(event.request)" in service_worker.text
@@ -731,6 +731,7 @@ def test_risk_workspace_prioritizes_current_actions_and_hides_closed_tasks() -> 
     assert "mode === 'risk' && !hasCapability('operations.view')" in source
     assert "details.filter(item => item.status !== 'CLOSED')" in source
     assert "当前没有运行中的风险任务" in source
+    assert "hasCapability('operations.view') ? '<section class=\"empty-state" in source
     assert "自动加仓已经关闭" in source
     assert "roleNames().join('、')" not in source
 

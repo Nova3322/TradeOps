@@ -236,7 +236,7 @@ const ENGLISH_EXACT = new Map(Object.entries({
   '这是当前账号。为避免误锁死，必须由另一名系统管理员修改。':'This is the current account. Another system administrator must make changes to prevent accidental lockout.',
   '只读观察':'Read-only observer', '查看机会、提案、交易任务、系统状态和交易账户；不能执行动作。':'View opportunities, proposals, trades, system status, and exchange accounts without taking actions.',
   '发起提案':'Proposal creator', '查看机会并创建提案；不能审核自己的提案，也不能操作交易任务。':'View opportunities and create proposals. Cannot review own proposals or operate trades.',
-  '独立审核':'Independent reviewer', '只处理冻结提案的审核；不能发起、执行或查看资金。':'Review frozen proposals only. Cannot propose, execute, or view capital.',
+  '独立审核':'Independent reviewer', '独立审核冻结提案与风险恢复申请；不能发起提案、操作交易或查看资金。':'Independently review frozen proposals and risk restoration requests. Cannot create proposals, operate trades, or view capital.',
   '运行风险、授权、订单、减仓、对账和交易所同步；不自动获得资金权限。':'Run risk checks, authorizations, orders, reductions, reconciliation, and exchange sync without treasury access.',
   '资金管理':'Treasury management', '查看与管理资金数据、划转和资金对账；与交易运维职责分离。':'View and manage capital data, transfers, and capital reconciliation separately from trading operations.',
   '系统管理':'System administration', '管理成员与系统控制；资金动作仍受独立实时安全检查。':'Manage users and system controls; capital actions remain subject to independent live safety checks.',
@@ -536,7 +536,7 @@ const capabilityRoles = {
   'opportunity.view':['OBSERVER','PROPOSER'],
   'proposal.view':['OBSERVER','PROPOSER','REVIEWER','OPERATOR'],
   'operations.view':['OBSERVER','OPERATOR'],
-  'system.view':['OBSERVER','OPERATOR'],
+  'system.view':['OBSERVER','REVIEWER','OPERATOR'],
   'venue.view':['OBSERVER','OPERATOR'],
   'venue.sync':['OPERATOR'],
   'capital.view':['TREASURY_ADMIN','SYSTEM_ADMIN'],
@@ -566,7 +566,7 @@ const capabilityLabel = (capability) => ({'opportunity.view':'查看机会','pro
 const accessRoleCatalog = [
   {role:'OBSERVER', label:'只读观察', copy:'查看机会、提案、交易任务、系统状态和交易账户；不能执行动作。'},
   {role:'PROPOSER', label:'发起提案', copy:'查看机会并创建提案；不能审核自己的提案，也不能操作交易任务。'},
-  {role:'REVIEWER', label:'独立审核', copy:'只处理冻结提案的审核；不能发起、执行或查看资金。'},
+  {role:'REVIEWER', label:'独立审核', copy:'独立审核冻结提案与风险恢复申请；不能发起提案、操作交易或查看资金。'},
   {role:'OPERATOR', label:'交易运维', copy:'运行风险、授权、订单、减仓、对账和交易所同步；不自动获得资金权限。'},
   {role:'TREASURY_ADMIN', label:'资金管理', copy:'查看与管理资金数据、划转和资金对账；与交易运维职责分离。'},
   {role:'SYSTEM_ADMIN', label:'超级管理员', copy:'管理所有成员并可访问资金中心；所有资金动作仍受实时校验、最终确认和 Gate 约束。'},
@@ -2015,7 +2015,7 @@ async function renderCampaignFacts(mode) {
   main.innerHTML = `<section class="page"><header class="page-head"><div><p class="eyebrow">生产交易数据</p><h1>${titles[mode]}</h1><p class="lede">这里显示当前确认的数据；能够重新计算的汇总会按最新数据生成。</p></div></header>
     ${mode === 'risk' ? renderRiskControlPanel(riskControls) : ''}
     ${mode === 'risk' && roleNames().includes('SYSTEM_ADMIN') ? `<div class="form-panel compact-form"><h2>只允许收紧风险</h2><p class="safety-note">这些入口只能关闭自动加仓，或把系统切换为“仅允许减仓”；不能从这里恢复新增风险。</p><div class="toolbar"><button class="danger" data-disable-global-add ${riskControls?.auto_add_gate?.status === 'DISABLED' ? 'disabled title="自动加仓已经关闭"' : ''}>${riskControls?.auto_add_gate?.status === 'DISABLED' ? '自动加仓已关闭' : '关闭全局自动加仓'}</button><button class="danger" data-pause-new-risk ${riskControls?.policy?.system_state !== 'NORMAL' ? 'disabled title="新增风险已经暂停"' : ''}>${riskControls?.policy?.system_state !== 'NORMAL' ? '新增风险已暂停' : '暂停所有新增风险'}</button></div></div><div style="height:16px"></div>` : ''}
-    ${rows ? `<div class="table-wrap"><table><thead><tr>${headers}</tr></thead><tbody>${rows}</tbody></table></div>` : mode === 'risk' ? '<section class="empty-state compact-empty-state"><div><h2>当前没有运行中的风险任务</h2><p>已结束任务不会占用当前风险工作区；可前往交易任务查看完整历史。</p><a class="secondary" href="/campaigns" data-link>查看交易任务</a></div></section>' : '<section class="empty-state"><div><h2>当前没有可展示的数据</h2></div></section>'}</section>`;
+    ${rows ? `<div class="table-wrap"><table><thead><tr>${headers}</tr></thead><tbody>${rows}</tbody></table></div>` : mode === 'risk' ? (hasCapability('operations.view') ? '<section class="empty-state compact-empty-state"><div><h2>当前没有运行中的风险任务</h2><p>已结束任务不会占用当前风险工作区；可前往交易任务查看完整历史。</p><a class="secondary" href="/campaigns" data-link>查看交易任务</a></div></section>' : '') : '<section class="empty-state"><div><h2>当前没有可展示的数据</h2></div></section>'}</section>`;
   bindLinkedRows();
   if (mode === 'risk') await bindRiskControlActions();
   document.querySelector('[data-disable-global-add]')?.addEventListener('click', (event) => campaignAction('/api/operations/auto-add/disable', {reason:'administrator disabled AUTO_ADD from Web', idempotency_key:crypto.randomUUID()}, {
