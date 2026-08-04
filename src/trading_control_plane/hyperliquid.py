@@ -303,6 +303,7 @@ class HyperliquidReadOnlyClient:
         *,
         base_url: str,
         account_address: str | None,
+        api_wallet_address: str | None = None,
         dex: str = "",
         hip3_dexes: tuple[str, ...] = (),
         fetcher: JsonFetcher = _default_fetcher,
@@ -315,13 +316,20 @@ class HyperliquidReadOnlyClient:
         self._base_url = base_url.rstrip("/")
         self._host = parsed.hostname
         self._account_address = account_address
+        self._api_wallet_address = api_wallet_address
         self._hip3_dexes = parse_hip3_dexes(",".join(hip3_dexes))
         self._fetcher = fetcher
         self._account_abstraction: str | None = None
 
     @property
     def configured(self) -> bool:
-        return bool(self._account_address and ADDRESS_PATTERN.fullmatch(self._account_address))
+        return bool(
+            (self._account_address and ADDRESS_PATTERN.fullmatch(self._account_address))
+            or (
+                self._api_wallet_address
+                and ADDRESS_PATTERN.fullmatch(self._api_wallet_address)
+            )
+        )
 
     @property
     def fact_environment(self) -> str:
@@ -394,11 +402,32 @@ class HyperliquidReadOnlyClient:
     def _info(self, payload: dict[str, Any]) -> JsonValue:
         return self._fetcher(f"{self._base_url}/info", payload, 5.0)
 
-    def _abstraction(self) -> str:
+    def _resolved_account(self) -> str:
+        if self._account_address and ADDRESS_PATTERN.fullmatch(self._account_address):
+            return self._account_address
+        if not self.configured:
+            raise DomainRejected(
+                "HYPERLIQUID_READ_ONLY_NOT_CONFIGURED",
+                "a valid selected Hyperliquid account or API wallet address is required",
+            )
+        resolved = resolve_hyperliquid_main_account(
+            base_url=self._base_url,
+            account_address=None,
+            api_wallet_address=self._api_wallet_address,
+            fetcher=self._fetcher,
+        )
+        if resolved is None:
+            raise DomainRejected(
+                "HYPERLIQUID_ACCOUNT_UNRESOLVED",
+                "Hyperliquid API wallet did not resolve to its owning main account",
+            )
+        self._account_address = resolved
+        return resolved
+
+    def _abstraction(self, account_address: str) -> str:
         if self._account_abstraction is not None:
             return self._account_abstraction
-        assert self._account_address is not None
-        raw = self._info({"type": "userAbstraction", "user": self._account_address})
+        raw = self._info({"type": "userAbstraction", "user": account_address})
         if not isinstance(raw, str) or raw not in {
             "disabled",
             "default",
@@ -414,32 +443,27 @@ class HyperliquidReadOnlyClient:
         return raw
 
     def read_snapshot(self, symbol: str, *, now: datetime) -> HyperliquidReadOnlySnapshot:
-        if not self.configured:
-            raise DomainRejected(
-                "HYPERLIQUID_READ_ONLY_NOT_CONFIGURED",
-                "a valid selected Hyperliquid account address is required",
-            )
+        account_address = self._resolved_account()
         dex = self._symbol_dex(symbol)
-        assert self._account_address is not None
         meta_contexts = self._info({"type": "metaAndAssetCtxs", "dex": dex})
         clearinghouse = self._info(
-            {"type": "clearinghouseState", "user": self._account_address, "dex": dex}
+            {"type": "clearinghouseState", "user": account_address, "dex": dex}
         )
-        abstraction = self._abstraction()
+        abstraction = self._abstraction(account_address)
         spot_state = (
-            self._info({"type": "spotClearinghouseState", "user": self._account_address})
+            self._info({"type": "spotClearinghouseState", "user": account_address})
             if abstraction in {"unifiedAccount", "portfolioMargin"}
             else None
         )
 
         orders = self._info(
-            {"type": "frontendOpenOrders", "user": self._account_address, "dex": dex}
+            {"type": "frontendOpenOrders", "user": account_address, "dex": dex}
         )
         start_time_ms = int((now - HISTORY_WINDOW).timestamp() * 1_000)
         fills = self._info(
             {
                 "type": "userFillsByTime",
-                "user": self._account_address,
+                "user": account_address,
                 "startTime": start_time_ms,
                 "aggregateByTime": True,
             }
@@ -447,7 +471,7 @@ class HyperliquidReadOnlyClient:
         funding = self._info(
             {
                 "type": "userFunding",
-                "user": self._account_address,
+                "user": account_address,
                 "startTime": start_time_ms,
             }
         )
@@ -474,15 +498,10 @@ class HyperliquidReadOnlyClient:
         """Project configured Core and HIP-3 symbols from their venue-scoped responses."""
 
         configured = self._validated_symbols(symbols)
-        if not self.configured:
-            raise DomainRejected(
-                "HYPERLIQUID_READ_ONLY_NOT_CONFIGURED",
-                "a valid selected Hyperliquid account address is required",
-            )
-        assert self._account_address is not None
-        abstraction = self._abstraction()
+        account_address = self._resolved_account()
+        abstraction = self._abstraction(account_address)
         spot_state = (
-            self._info({"type": "spotClearinghouseState", "user": self._account_address})
+            self._info({"type": "spotClearinghouseState", "user": account_address})
             if abstraction in {"unifiedAccount", "portfolioMargin"}
             else None
         )
@@ -493,10 +512,10 @@ class HyperliquidReadOnlyClient:
         for dex, scoped_symbols in sorted(configured_by_dex.items()):
             meta_contexts = self._info({"type": "metaAndAssetCtxs", "dex": dex})
             clearinghouse = self._info(
-                {"type": "clearinghouseState", "user": self._account_address, "dex": dex}
+                {"type": "clearinghouseState", "user": account_address, "dex": dex}
             )
             orders = self._info(
-                {"type": "frontendOpenOrders", "user": self._account_address, "dex": dex}
+                {"type": "frontendOpenOrders", "user": account_address, "dex": dex}
             )
             target_symbols = (
                 scoped_symbols
@@ -531,7 +550,7 @@ class HyperliquidReadOnlyClient:
             fills = self._info(
                 {
                     "type": "userFillsByTime",
-                    "user": self._account_address,
+                    "user": account_address,
                     "startTime": start_time_ms,
                     "aggregateByTime": True,
                 }
@@ -539,7 +558,7 @@ class HyperliquidReadOnlyClient:
             funding = self._info(
                 {
                     "type": "userFunding",
-                    "user": self._account_address,
+                    "user": account_address,
                     "startTime": start_time_ms,
                 }
             )

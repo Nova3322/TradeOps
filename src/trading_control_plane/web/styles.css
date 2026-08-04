@@ -89,6 +89,8 @@ button:disabled { opacity: .52; cursor: not-allowed; }
 .home-stats .status-copy { font-size: 17px; line-height: 1.35; }
 .danger-text { color: var(--danger); }
 .warning-text { color: var(--warning); }
+.danger-note { padding: 14px 16px; border-left: 4px solid var(--danger); border-radius: 10px; background: color-mix(in srgb, var(--danger) 7%, var(--panel)); color: var(--ink); line-height: 1.55; }
+.danger-note p { margin: 5px 0 0; color: var(--muted); }
 .home-layout { display: grid; grid-template-columns: minmax(0, 1.35fr) minmax(300px, .65fr); gap: 16px; align-items: start; }
 .section-heading { display: flex; align-items: end; justify-content: space-between; gap: 16px; margin-bottom: 14px; }
 .section-heading h2 { margin-bottom: 0; }
@@ -184,6 +186,9 @@ button:disabled { opacity: .52; cursor: not-allowed; }
 .account-sync-note.is-active .status-dot { background: var(--accent); }
 .account-sync-note b { display: block; font-size: 12px; }
 .account-sync-note p { margin: 4px 0 0; color: var(--muted); font-size: 11px; line-height: 1.5; }
+.venue-snapshot-warning { margin: 0 0 24px; }
+.venue-order-history { margin-top: 28px; border: 1px solid var(--line); border-radius: 14px; background: var(--panel); }
+.venue-order-history .toolbox-content { padding-top: 18px; }
 .venue-scope-card { display: grid; grid-template-columns: minmax(230px, .75fr) minmax(350px, 1.25fr); gap: 18px; margin-bottom: 24px; }
 .venue-scope-card h2 { margin-bottom: 7px; }
 .venue-scope-card .inline-form { margin: 0; }

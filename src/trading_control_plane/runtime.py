@@ -29,10 +29,7 @@ from trading_control_plane.domain import (
     ReconciliationStatus,
     RiskTier,
 )
-from trading_control_plane.hyperliquid import (
-    HyperliquidReadOnlyClient,
-    resolve_hyperliquid_main_account,
-)
+from trading_control_plane.hyperliquid import HyperliquidReadOnlyClient
 from trading_control_plane.logging import configure_logging
 from trading_control_plane.notilt import NoTiltGateway, NoTiltUsdValuator
 from trading_control_plane.perptape import (
@@ -821,29 +818,16 @@ def build_runtime_worker(settings: Settings, database: Database) -> RuntimeSyncW
             api_secret=settings.binance_api_secret,
             recv_window_ms=settings.binance_recv_window_ms,
         )
-    try:
-        hyperliquid_account = resolve_hyperliquid_main_account(
-            base_url=settings.hyperliquid_base_url,
-            account_address=settings.hyperliquid_account_address,
-            api_wallet_address=(
-                settings.hyperliquid_api_wallet_address
-                if settings.hyperliquid_read_only_enabled
-                else None
-            ),
-        )
-    except DomainRejected as exc:
-        hyperliquid_account = None
-        logger.warning(
-            "Hyperliquid read-only account resolution failed closed during worker startup",
-            extra={
-                "event": "hyperliquid_account_resolution_failed",
-                "component": "HYPERLIQUID",
-                "error_code": exc.code,
-            },
-        )
     hyperliquid = HyperliquidReadOnlyClient(
         base_url=settings.hyperliquid_base_url,
-        account_address=settings.hyperliquid_subaccount_address or hyperliquid_account,
+        account_address=(
+            settings.hyperliquid_subaccount_address or settings.hyperliquid_account_address
+        ),
+        api_wallet_address=(
+            settings.hyperliquid_api_wallet_address
+            if settings.hyperliquid_read_only_enabled
+            else None
+        ),
         dex=settings.hyperliquid_core_dex,
         hip3_dexes=settings.hyperliquid_hip3_dexes,
     )

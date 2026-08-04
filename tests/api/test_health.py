@@ -112,8 +112,8 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
 
     assert response.status_code == 200
     assert "交易控制台" in response.text
-    assert "/assets/app.js?v=65" in response.text
-    assert "/assets/styles.css?v=31" in response.text
+    assert "/assets/app.js?v=68" in response.text
+    assert "/assets/styles.css?v=32" in response.text
     assert '<a href="/" data-link><span>⌂</span>今日</a>' in response.text
     assert 'id="mobile-nav-toggle"' in response.text
     assert 'id="confirm-dialog"' in response.text
@@ -143,6 +143,8 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
     assert "/api/results" not in app_javascript.text
     assert "/api/audit" not in app_javascript.text
     assert "'access.manage':['SYSTEM_ADMIN']" in app_javascript.text
+    assert "'system.view':['OBSERVER','OPERATOR']" in app_javascript.text
+    assert "[translate=\"no\"]" in app_javascript.text
     assert "管理所有成员并可访问资金中心" in app_javascript.text
     assert 'href="/proposals/new"' not in response.text
     assert "Binance只读" not in response.text
@@ -712,6 +714,21 @@ def test_risk_workspace_prioritizes_current_actions_and_hides_closed_tasks() -> 
     assert "当前没有运行中的风险任务" in source
     assert "自动加仓已经关闭" in source
     assert "roleNames().join('、')" not in source
+
+
+def test_system_and_venue_pages_distinguish_read_only_snapshots_from_live_execution() -> None:
+    app_path = Path(__file__).parents[2] / "src" / "trading_control_plane" / "web" / "app.js"
+    source = app_path.read_text()
+
+    assert "只读控制台可用，但交易执行尚未就绪" in source  # noqa: RUF001
+    assert "Freqtrade worker 未启动" in source
+    assert "LIVE_ORDER_SEND 保持关闭" in source
+    assert "fmtConnectionCategory(state.category)" in source
+    assert "当前连接不可用，以下仅为最后一次保存快照" in source  # noqa: RUF001
+    assert "自动同步等待连接恢复" in source
+    assert "Number(item.quantity) !== 0" in source
+    assert "不计入当前委托" in source
+    assert "当前账户没有未完成委托" in source
 
 
 def test_web_request_lifecycle_in_node() -> None:

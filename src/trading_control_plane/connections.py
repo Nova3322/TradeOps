@@ -26,7 +26,13 @@ def _failure_category(error_code: str | None) -> tuple[str, str, str]:
             "生产环境与只读 API 主机不一致。",
             "由系统管理员核对生产环境和官方只读主机配置。",
         )
-    if any(token in code for token in ("UNAVAILABLE", "TIMEOUT", "RATE_LIMITED", "GATEWAY")):
+    if "RATE_LIMITED" in code:
+        return (
+            "UPSTREAM_RATE_LIMITED",
+            "上游只读接口正在限流，本轮未采信新的账户事实。",  # noqa: RUF001
+            "等待系统按退避策略自动重试；持续失败时由系统管理员检查上游配额。",  # noqa: RUF001
+        )
+    if any(token in code for token in ("UNAVAILABLE", "TIMEOUT", "GATEWAY")):
         return (
             "NETWORK_OR_UPSTREAM_FAILED",
             "官方只读接口或本地只读网关当前不可达。",

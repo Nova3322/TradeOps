@@ -103,6 +103,19 @@ def test_connection_projection_distinguishes_configuration_and_probe_failures() 
     assert projected["BINANCE"]["category"] == "AUTH_OR_PERMISSION_FAILED"
     assert projected["HYPERLIQUID"]["category"] == "NETWORK_OR_UPSTREAM_FAILED"
 
+    rate_limited = project_runtime_connections(
+        failed,
+        {
+            "HYPERLIQUID": {
+                "status": "FAILED",
+                "error_code": "HYPERLIQUID_RATE_LIMITED",
+            }
+        },
+    )
+    assert rate_limited["HYPERLIQUID"]["available"] is False
+    assert rate_limited["HYPERLIQUID"]["category"] == "UPSTREAM_RATE_LIMITED"
+    assert "限流" in rate_limited["HYPERLIQUID"]["reason"]
+
     degraded = project_runtime_connections(
         failed,
         {

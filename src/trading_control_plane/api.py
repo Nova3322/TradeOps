@@ -406,36 +406,16 @@ def create_app(
         api_secret=resolved_settings.binance_testnet_api_secret,
         recv_window_ms=resolved_settings.binance_recv_window_ms,
     )
-    resolved_hyperliquid_account = resolved_settings.hyperliquid_account_address
-    if (
-        resolved_hyperliquid_account is None
-        and resolved_settings.hyperliquid_api_wallet_address is not None
-        and (
-            resolved_settings.hyperliquid_read_only_enabled
-            or resolved_settings.hyperliquid_live_order_send_enabled
-        )
-    ):
-        try:
-            resolved_hyperliquid_account = resolve_hyperliquid_main_account(
-                base_url=resolved_settings.hyperliquid_base_url,
-                account_address=None,
-                api_wallet_address=resolved_settings.hyperliquid_api_wallet_address,
-            )
-        except DomainRejected as exc:
-            if resolved_settings.hyperliquid_live_order_send_enabled:
-                raise
-            logger.warning(
-                "Hyperliquid read-only account resolution failed closed during startup",
-                extra={
-                    "event": "hyperliquid_account_resolution_failed",
-                    "component": "HYPERLIQUID",
-                    "error_code": exc.code,
-                },
-            )
     resolved_hyperliquid = hyperliquid_client or HyperliquidReadOnlyClient(
         base_url=resolved_settings.hyperliquid_base_url,
         account_address=(
-            resolved_settings.hyperliquid_subaccount_address or resolved_hyperliquid_account
+            resolved_settings.hyperliquid_subaccount_address
+            or resolved_settings.hyperliquid_account_address
+        ),
+        api_wallet_address=(
+            resolved_settings.hyperliquid_api_wallet_address
+            if resolved_settings.hyperliquid_read_only_enabled
+            else None
         ),
         dex=resolved_settings.hyperliquid_core_dex,
         hip3_dexes=resolved_settings.hyperliquid_hip3_dexes,
@@ -452,7 +432,7 @@ def create_app(
     )
     resolved_hyperliquid_testnet = hyperliquid_testnet_client or HyperliquidTestnetClient(
         base_url=resolved_settings.hyperliquid_testnet_base_url,
-        account_address=resolved_hyperliquid_account,
+        account_address=resolved_settings.hyperliquid_account_address,
         signer=testnet_signer,
         subaccount_address=resolved_settings.hyperliquid_subaccount_address,
         dex=resolved_settings.hyperliquid_core_dex,
@@ -467,9 +447,20 @@ def create_app(
         if direct_execution_enabled
         else None
     )
+    resolved_hyperliquid_live_account = resolved_settings.hyperliquid_account_address
+    if (
+        direct_execution_enabled
+        and resolved_hyperliquid_live_account is None
+        and resolved_settings.hyperliquid_api_wallet_address is not None
+    ):
+        resolved_hyperliquid_live_account = resolve_hyperliquid_main_account(
+            base_url=resolved_settings.hyperliquid_base_url,
+            account_address=None,
+            api_wallet_address=resolved_settings.hyperliquid_api_wallet_address,
+        )
     resolved_hyperliquid_live = hyperliquid_live_client or HyperliquidLiveClient(
         base_url=resolved_settings.hyperliquid_live_base_url,
-        account_address=resolved_hyperliquid_account,
+        account_address=resolved_hyperliquid_live_account,
         signer=live_signer,
         subaccount_address=resolved_settings.hyperliquid_subaccount_address,
         dex=resolved_settings.hyperliquid_core_dex,

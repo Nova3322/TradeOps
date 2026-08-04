@@ -200,12 +200,17 @@ const ENGLISH_EXACT = new Map(Object.entries({
   '在这里查看币安和链上永续账户的连接、余额、仓位、委托、成交、资金费与对账。日常交易仍从交易任务、系统状态和异常页面进入。':'Use this page to inspect Binance and Hyperliquid connections, balances, positions, orders, fills, funding, and reconciliation. Daily operations still start from Trades, System status, and Exceptions.',
   '刷新账户数据':'Refresh account data', '刷新页面':'Refresh page', '选择交易所':'Select exchange', '账户数据只读':'Account data read only',
   '统一账户':'Unified account', '账户数据已保存':'Account data saved',
-  '最后更新':'Last updated', '账户数据自动更新中':'Account data updates automatically', '账户自动更新尚未启用':'Automatic account updates are not enabled',
+  '最后更新':'Last updated', '账户数据自动更新中':'Account data updates automatically', '账户数据自动同步':'Account data sync is current', '自动同步等待连接恢复':'Automatic sync is waiting for the connection', '账户自动更新尚未启用':'Automatic account updates are not enabled',
   '统一查看币安和链上永续的余额、当前仓位、当前委托、最近成交与资金费。系统按账户自动覆盖全部活跃标的，不需要逐个输入币对。':'View balances, positions, open orders, recent fills, and funding for Binance and Hyperliquid in one place. Account-wide synchronization automatically covers every active instrument; no symbol input is needed.',
   '当前只展示已经保存的生产数据；配置连续读取服务后会自动更新。':'Only saved production data is shown. Configure the continuous reader to update it automatically.',
   '切换账户时只读取当前身份获准查看的范围。点击同步后，系统会从交易所获取数据、保存并立即运行对账。':'Changing accounts only reads scopes assigned to the current identity. Sync fetches exchange data, saves it, and immediately runs reconciliation.',
   '生产读取连接尚未配置或已关闭。页面只展示已经保存的数据，不会用其他数据填充。':'The production read connection is not configured or is disabled. This page shows saved data only and never fills gaps with substitute data.',
-  '权益状态':'Equity status', '仓位与风险保护':'Positions and risk protection',
+  '权益状态':'Equity status', '仓位与风险保护':'Positions and risk protection', '当前仓位与风险保护':'Current positions and protection',
+  '最后快照':'Last snapshot', '历史快照':'Historical snapshot', '历史结果':'Historical result',
+  '当前连接不可用，以下仅为最后一次保存快照':'The current connection is unavailable; the data below is the last saved snapshot',
+  '这些余额、仓位、订单与成交不能作为实时交易依据。恢复只读连接并完成新一轮同步后，页面才会重新标记为当前事实。':'These balances, positions, orders, and fills are not live trading facts. The page returns to current status only after the read-only connection and a fresh sync recover.',
+  '当前账户没有持仓；零仓位行情不会冒充当前仓位。':'There are no open positions. Zero-position market observations are not shown as positions.',
+  '当前账户没有未完成委托。':'There are no open orders.', '最近订单记录':'Recent order history', '查看记录':'View history',
   '已确认':'Confirmed', '数量 / 入场':'Quantity / entry', '保护':'Protection',
   '足额':'Fully covered', '不足':'Insufficient', '无保护数据':'No protection data',
   '成交 / 委托':'Filled / ordered', '方向 / 数量':'Side / quantity',
@@ -372,7 +377,7 @@ function applyLanguageToDocument(root = document.body) {
   const nodes = [];
   while (walker.nextNode()) nodes.push(walker.currentNode);
   nodes.forEach((node) => {
-    if (node.parentElement?.closest('script, style')) return;
+    if (node.parentElement?.closest('script, style, [translate="no"]')) return;
     const next = localizedText(node.nodeValue);
     if (next !== node.nodeValue) node.nodeValue = next;
   });
@@ -403,6 +408,20 @@ const capitalTransportLabels = {MOCK:'模拟执行',NOTILT_UNSIGNED_HANDOFF:'NoT
 const environmentLabels = {LIVE:'生产环境',SHADOW:'生产环境',TESTNET:'生产环境',production:'生产环境',test:'生产环境',development:'生产环境',local:'生产环境'};
 const roleLabels = {OBSERVER:'只读用户',PROPOSER:'提案发起人',REVIEWER:'审核人',OPERATOR:'交易运维人员',TREASURY_ADMIN:'资金管理员',SYSTEM_ADMIN:'系统管理员'};
 const readinessLabels = {READY:'可用',DEGRADED:'数据不完整',INCOMPLETE:'数据不完整',STALE:'数据已过期'};
+const connectionCategoryLabels = {
+  READ_ONLY_CONNECTED:'只读已连接',
+  READ_ONLY_CONNECTED_HISTORY_INCOMPLETE:'只读已连接，历史补全受限',
+  CREDENTIALS_NOT_LOADED:'启动配置未加载',
+  CONFIG_INCOMPLETE:'生产范围配置不完整',
+  EXPLICITLY_DISABLED:'只读连接已关闭',
+  NOT_YET_VERIFIED:'等待首次只读检查',
+  PROBE_SKIPPED:'本轮检查已跳过',
+  AUTH_OR_PERMISSION_FAILED:'只读鉴权或权限失败',
+  UPSTREAM_RATE_LIMITED:'上游只读接口限流',
+  NETWORK_OR_UPSTREAM_FAILED:'网络或上游不可达',
+  UPSTREAM_RESPONSE_INVALID:'上游响应无效',
+  READ_ONLY_PROBE_FAILED:'只读检查失败',
+};
 const venueModeLabels = {USER_DATA_READ_ONLY:'账户数据只读',INFO_READ_ONLY:'账户数据只读',READ_ONLY:'只读'};
 const accountModeLabels = {PORTFOLIO_MARGIN:'统一账户',MAIN_ACCOUNT:'主账户',SUBACCOUNT:'子账户'};
 const fmtIntentKind = (value) => intentKindLabels[value] || value || '未知意图';
@@ -415,6 +434,8 @@ const fmtEnvironment = (value, withCode = false) => {
 };
 const fmtRole = (value) => roleLabels[value] || value || '未分配角色';
 const fmtReadiness = (value) => readinessLabels[value] || fmtStatus(value);
+const fmtConnectionCategory = (value) => connectionCategoryLabels[value] || value || '尚未验证';
+const fmtOperationalCopy = (value) => String(value ?? '—').replaceAll(';', '；').replaceAll(',', '，');
 const fmtCapitalDirection = (value) => capitalDirectionLabels[value] || value || '未知方向';
 const fmtCapitalPurpose = (value) => capitalPurposeLabels[value] || value || '未说明用途';
 const fmtCapitalTransport = (value) => capitalTransportLabels[value] || value || '未记录执行方式';
@@ -505,7 +526,7 @@ const capabilityRoles = {
   'opportunity.view':['OBSERVER','PROPOSER'],
   'proposal.view':['OBSERVER','PROPOSER','REVIEWER','OPERATOR'],
   'operations.view':['OBSERVER','OPERATOR'],
-  'system.view':['OBSERVER','REVIEWER','OPERATOR'],
+  'system.view':['OBSERVER','OPERATOR'],
   'venue.view':['OBSERVER','OPERATOR'],
   'venue.sync':['OPERATOR'],
   'capital.view':['TREASURY_ADMIN','SYSTEM_ADMIN'],
@@ -1868,14 +1889,19 @@ async function renderSystemStatus() {
   const workersReady = freqtrade?.backend === 'FREQTRADE'
     && executionWorkers.length === 2
     && executionWorkers.every(worker => worker.status === 'READY' && worker.dry_run === true);
+  const workersDisabled = freqtrade?.workers_enabled === false;
   const hyperliquidWorker = executionWorkers.find(worker => worker.venue === 'HYPERLIQUID');
+  const configuredHip3Dexes = Array.isArray(hyperliquidWorker?.hip3_dexes) ? hyperliquidWorker.hip3_dexes : [];
   const executionCopy = workersReady
     ? `Binance ${Number(executionWorkers.find(worker => worker.venue === 'BINANCE')?.active_pair_count || 0)} 个合约；Hyperliquid ${Number(hyperliquidWorker?.active_pair_count || 0)} 个合约，其中 HIP-3 ${Number(hyperliquidWorker?.hip3_pair_count || 0)} 个。`
+    : workersDisabled
+      ? '当前只读控制台未启动 Binance 与 Hyperliquid 的 Freqtrade worker；不会把“未启动”误报为 worker 故障。'
     : freqtrade?.error
       ? friendlyApiError(freqtrade.error)
       : 'Freqtrade worker 尚未全部通过身份、期货模式、合约目录和 dry-run 检查。';
+  const tradingConnectionsReady = Boolean(connections.BINANCE?.available && connections.HYPERLIQUID?.available);
   const activeMonitoring = campaigns.length > 0;
-  const overallTone = !health.ready || !controlAvailable ? 'danger' : exceptions.length || !perptapeAvailable ? 'attention' : activeMonitoring ? 'success' : 'neutral';
+  const overallTone = !health.ready || !controlAvailable ? 'danger' : exceptions.length || !perptapeAvailable || !workersReady || !tradingConnectionsReady ? 'attention' : activeMonitoring ? 'success' : 'neutral';
   const cards = [
     systemHealthCard({title:'核心服务', status:health.ready ? '服务可用' : '服务不可用', tone:health.ready ? 'success' : 'danger', copy:health.ready ? '业务数据库和交易服务运行正常。' : '核心服务检查失败；不能把缺失响应当成正常。', meta:'数据缺失时自动阻止交易'}),
     systemHealthCard({title:'开仓与加仓', status:controlAvailable ? (addOpen ? '允许新增风险' : entryOpen ? '自动加仓已关闭' : riskControlStatusLabel(policy.system_state)) : '风险政策未配置', tone:addOpen ? 'success' : controlAvailable ? 'attention' : 'danger', copy:controlAvailable ? `风险政策：${riskControlStatusLabel(policy.system_state)}；自动加仓：${riskControlStatusLabel(gate.status)}。` : '缺少当前风险政策或自动加仓控制，系统会阻止新增风险。', meta:'政策变化会立即重新检查所有新增风险'}),
@@ -1883,7 +1909,7 @@ async function renderSystemStatus() {
     systemHealthCard({title:'止损与保护监控', status:!activeMonitoring ? '当前无监控对象' : protectionIssues.length ? `${protectionIssues.length} 项需要处理` : '监控正常', tone:!activeMonitoring ? 'neutral' : protectionIssues.length ? 'danger' : 'success', copy:!activeMonitoring ? '有交易任务进入持仓后，系统会持续检查止损和保护覆盖。' : protectionIssues.length ? '检测到保护缺失、过期、未知或覆盖不足。' : '运行中的交易任务没有保护异常。', meta:`数据截止 ${fmtDate(exceptionsResponse.as_of)}`}),
     systemHealthCard({title:'风险敞口监控', status:!activeMonitoring ? '当前无监控对象' : exposureIssues.length ? `${exposureIssues.length} 项敞口不确定` : '监控正常', tone:!activeMonitoring ? 'neutral' : exposureIssues.length ? 'danger' : 'success', copy:!activeMonitoring ? '有交易任务进入运行后，系统会检查仓位和风险占用。' : exposureIssues.length ? '仓位或风险占用存在未知或过期数据，系统会阻止新增风险。' : '当前没有仓位未知、仓位过期或风险占用未知。', meta:`${exceptions.length} 项总阻断`}),
     systemHealthCard({title:'对账监控', status:!activeMonitoring ? '暂无对账对象' : reconciliationIssues.length ? `${reconciliationIssues.length} 项未一致` : '对账一致', tone:!activeMonitoring ? 'neutral' : reconciliationIssues.length ? 'attention' : 'success', copy:!activeMonitoring ? '当前没有运行中的交易任务需要对账。' : reconciliationIssues.length ? '至少一个权限范围存在差异、未知、过期或需要人工处理。' : '运行中的交易任务没有派生对账异常。', meta:'只有计算结果为“对账一致”才可作为恢复依据'}),
-    systemHealthCard({title:'交易执行底座', status:workersReady ? 'Freqtrade worker 已接管' : '执行 worker 受阻', tone:workersReady ? 'attention' : 'danger', copy:executionCopy, meta:workersReady ? '本地 dry-run 运行；强制开仓、真实下单与旧直连均关闭' : '缺失或不一致即禁止发送'}),
+    systemHealthCard({title:'交易执行底座', status:workersReady ? 'Freqtrade worker 已接管' : workersDisabled ? 'Freqtrade worker 未启动' : 'Freqtrade worker 检查未通过', tone:workersReady || workersDisabled ? 'attention' : 'danger', copy:executionCopy, meta:workersReady ? '本地 dry-run 运行；强制开仓、真实下单与旧直连均关闭' : workersDisabled ? `需配置 worker 控制凭据后以 dry-run 启动；LIVE_ORDER_SEND 保持关闭${configuredHip3Dexes.length ? `；HIP-3 范围 ${configuredHip3Dexes.join('、')}` : ''}` : '身份、模式或合约目录不一致时禁止发送'}),
     systemHealthCard({title:'Perptape 机会源', status:perptapeStatus, tone:perptapeTone, copy:perptapeAvailable ? `已读取 ${Number(opportunityHealth?.data?.length ?? perptape.candidate_count ?? 0)} 个候选，可用于机会筛选和提案。` : perptape.configured ? 'Perptape 已配置，但最近数据尚未形成可用连接结论。现有交易任务不受影响，新的外部机会不可用。' : 'Perptape 尚未配置；人工提案仍可使用。', meta:`只读 · 最近数据 ${fmtDate(perptape.last_fetched_at)}`}),
   ].join('');
   const connectionLabels = {
@@ -1910,13 +1936,15 @@ async function renderSystemStatus() {
       : key === 'NOTILT'
         ? '只读事实；资金签名与广播关闭'
         : '只读连接；下单与写入关闭';
-    return `<tr><td><b>${label[0]}</b><br><span class="subtle">${escapeHtml(state.category)}</span></td><td><span class="status-pill ${state.available ? 'status-APPROVED' : ''}">${state.available ? '只读已连接' : '不可用'}</span><br><span class="subtle">${escapeHtml(state.reason)}</span><br><span class="subtle">负责：${escapeHtml(state.owner_role)} · 下一步：${escapeHtml(state.next_action)} · 最近检查：${fmtDate(state.checked_at)}</span></td><td>${label[1]}</td><td>${escapeHtml(capability)}</td><td>${action}</td></tr>`;
+    const categoryLabel = fmtConnectionCategory(state.category);
+    const errorEvidence = state.error_code ? ` · <code translate="no">${escapeHtml(state.error_code)}</code>` : '';
+    return `<tr><td><b>${label[0]}</b><br><span class="subtle">${escapeHtml(categoryLabel)}${errorEvidence}</span></td><td><span class="status-pill ${state.available ? 'status-APPROVED' : ''}">${state.available ? '只读已连接' : escapeHtml(categoryLabel)}</span><br><span class="subtle">${escapeHtml(fmtOperationalCopy(state.reason))}</span><br><span class="subtle">负责：${escapeHtml(state.owner_role)} · 下一步：${escapeHtml(fmtOperationalCopy(state.next_action))} · 最近检查：${fmtDate(state.checked_at)}</span></td><td>${label[1]}</td><td>${escapeHtml(capability)}</td><td>${action}</td></tr>`;
   }).join('');
   const availableSources = Object.values(connections).filter(item => item.available).length;
-  const verdictTitle = !health.ready ? '核心服务未通过就绪检查' : !controlAvailable ? '核心服务可用，但风险政策未配置' : exceptions.length ? '核心服务可用，但存在风险阻断' : !perptapeAvailable ? '交易管理可用，但 Perptape 机会源受限' : activeMonitoring ? '交易系统正在正常监控' : '核心服务可用，当前无运行中交易任务';
-  const verdictCopy = !health.ready ? '请先恢复数据库与服务状态，不要继续依赖旧数据。' : !controlAvailable ? `${friendlyApiError(control.error)} 新增风险保持关闭。` : exceptions.length ? `发现 ${exceptions.length} 项安全异常；受影响的新增风险会保持关闭。` : !perptapeAvailable ? `${perptapeStatus}。现有交易任务仍可管理，但新的 Perptape 机会暂不可用。` : activeMonitoring ? '运行中的交易任务没有检测到保护、敞口或对账阻断。' : '当前没有需要监控的交易任务；系统不会把“无监控对象”误报为“监控正常”。';
+  const verdictTitle = !health.ready ? '核心服务未通过就绪检查' : !controlAvailable ? '核心服务可用，但风险政策未配置' : exceptions.length ? '核心服务可用，但存在风险阻断' : !workersReady || !tradingConnectionsReady ? '只读控制台可用，但交易执行尚未就绪' : !perptapeAvailable ? '交易管理可用，但 Perptape 机会源受限' : activeMonitoring ? '交易系统正在正常监控' : '核心服务可用，当前无运行中交易任务';
+  const verdictCopy = !health.ready ? '请先恢复数据库与服务状态，不要继续依赖旧数据。' : !controlAvailable ? `${friendlyApiError(control.error)} 新增风险保持关闭。` : exceptions.length ? `发现 ${exceptions.length} 项安全异常；受影响的新增风险会保持关闭。` : !workersReady || !tradingConnectionsReady ? `${workersDisabled ? 'Freqtrade worker 尚未启动' : 'Freqtrade worker 尚未通过检查'}；${!tradingConnectionsReady ? '至少一个交易所只读连接当前受限' : '交易所只读连接正常'}。系统不会把只读页面可访问误报为可执行交易。` : !perptapeAvailable ? `${perptapeStatus}。现有交易任务仍可管理，但新的 Perptape 机会暂不可用。` : activeMonitoring ? '运行中的交易任务没有检测到保护、敞口或对账阻断。' : '当前没有需要监控的交易任务；系统不会把“无监控对象”误报为“监控正常”。';
   main.innerHTML = `<section class="page system-status-page"><header class="page-head"><div><p class="eyebrow">交易系统状态</p><h1>系统状态</h1><p class="lede">这里直接说明系统能否工作、哪些能力受限，以及是否需要处理。绿色表示当前证据正常；黄色表示能力受限；红色表示必须先处理；灰色表示当前没有监控对象。</p></div><div class="toolbar"><button class="secondary" data-refresh>刷新状态</button><a class="secondary" href="/risk" data-link>查看风险控制</a></div></header>
-    <article class="home-status tone-${overallTone}"><div><p class="eyebrow">当前结论</p><h2>${escapeHtml(verdictTitle)}</h2><p>${escapeHtml(verdictCopy)}</p></div>${exceptions.length ? '<a class="primary" href="/campaigns/alerts" data-link>查看运行告警</a>' : !controlAvailable ? '<a class="secondary" href="/risk" data-link>查看风险控制</a>' : !perptapeAvailable ? '<a class="secondary" href="/opportunities" data-link>查看 Perptape</a>' : '<span class="status-pill status-APPROVED">无需立即动作</span>'}</article>
+    <article class="home-status tone-${overallTone}"><div><p class="eyebrow">当前结论</p><h2>${escapeHtml(verdictTitle)}</h2><p>${escapeHtml(verdictCopy)}</p></div>${exceptions.length ? '<a class="primary" href="/campaigns/alerts" data-link>查看运行告警</a>' : !controlAvailable ? '<a class="secondary" href="/risk" data-link>查看风险控制</a>' : !workersReady || !tradingConnectionsReady ? '<a class="secondary" href="/venues" data-link>查看交易账户</a>' : !perptapeAvailable ? '<a class="secondary" href="/opportunities" data-link>查看 Perptape</a>' : '<span class="status-pill status-APPROVED">无需立即动作</span>'}</article>
     <div class="system-health-grid">${cards}</div>
     <section><div class="section-heading"><div><p class="eyebrow">外部数据连接</p><h2>生产数据与资金连接</h2></div><span class="status-pill">${availableSources} / 4 可用</span></div><div class="table-wrap"><table><thead><tr><th>数据源</th><th>读取状态与处理建议</th><th>运行范围</th><th>可用能力</th><th></th></tr></thead><tbody>${connectionRows}</tbody></table></div></section>
     ${codes.size ? `<section><div class="section-heading"><div><p class="eyebrow">交易任务运行告警</p><h2>需要处理的问题类型</h2></div><a class="secondary" href="/campaigns/alerts" data-link>查看运行告警</a></div><div class="exception-code-list">${[...codes].sort().map(code => `<span>${escapeHtml(explainException(code).title)}</span>`).join('')}</div></section>` : ''}
@@ -2354,55 +2382,62 @@ async function renderVenueFacts() {
   const facts = response.data;
   const connection = runtime?.data?.connections?.[venue] || null;
   const connected = Boolean(connection?.available);
-  const connectionLabel = connected
-    ? connection.category === 'READ_ONLY_CONNECTED_HISTORY_INCOMPLETE' ? '只读已连接，历史补全受限' : '只读已连接'
-    : connection?.category === 'EXPLICITLY_DISABLED' ? '只读连接已关闭'
-      : connection?.category === 'CREDENTIALS_NOT_LOADED' ? '凭据未加载'
-        : connection?.category === 'CONFIG_INCOMPLETE' ? '配置不完整'
-          : connection?.category === 'NOT_YET_VERIFIED' ? '等待只读探针'
-            : '只读连接不可用';
+  const connectionLabel = fmtConnectionCategory(connection?.category);
+  const connectionEvidence = connection?.error_code ? `错误类别：<code translate="no">${escapeHtml(connection.error_code)}</code>。` : '';
   const connectionReason = connection
-    ? `${connection.reason} 负责：${connection.owner_role}；下一步：${connection.next_action}`
+    ? `${fmtOperationalCopy(connection.reason)} 负责：${connection.owner_role}；下一步：${fmtOperationalCopy(connection.next_action)}`
     : '当前身份无法读取统一连接探针；页面仅展示已保存账户事实，不能据此声称实时已连接。';
   const lastSync = latestVenueObservation(facts);
+  const snapshotMode = !connected && Boolean(lastSync);
   const venueDetail = venue === 'BINANCE'
     ? (accountModeLabels[status.account_mode] || '账户模式未知')
     : `核心市场${status.dex ? ` · ${status.dex}` : ''}`;
   const syncInterval = Number(status.automatic_sync_interval_seconds || 0);
-  const automaticSyncCopyLocalized = status.automatic_sync_enabled
+  const automaticSyncCopyLocalized = status.automatic_sync_enabled && connected
     ? localizedText(`系统约每 ${syncInterval} 秒读取一次完整账户；新出现的持仓和委托会自动纳入，最近成交与资金费同步保存。`)
+    : status.automatic_sync_enabled
+      ? localizedText(`自动读取服务仍会约每 ${syncInterval} 秒重试；连接恢复前不会把旧快照标记为实时。`)
     : localizedText('当前只展示已经保存的生产数据；配置连续读取服务后会自动更新。');
   const automaticSyncCopy = currentLanguage === 'en'
-    ? status.automatic_sync_enabled
+    ? status.automatic_sync_enabled && connected
       ? `The system reads the complete account about every ${syncInterval} seconds. New positions and orders are included automatically, with recent fills and funding saved together.`
+      : status.automatic_sync_enabled
+        ? `The reader retries about every ${syncInterval} seconds. Saved snapshots will not be presented as live until the connection recovers.`
       : 'Only saved production data is shown. Configure the continuous reader to update it automatically.'
     : automaticSyncCopyLocalized;
   main.innerHTML = `<section class="page venue-facts-page"><header class="page-head"><div><p class="eyebrow">生产账户 · 自动读取</p><h1>交易账户</h1><p class="lede">统一查看币安和链上永续的余额、当前仓位、当前委托、最近成交与资金费。系统按账户自动覆盖全部活跃标的，不需要逐个输入币对。</p></div><button class="secondary" data-refresh>刷新页面</button></header>
     <nav class="venue-switch" aria-label="选择交易所"><a class="${venue === 'BINANCE' ? 'active' : ''}" href="/venues?venue=BINANCE" data-link>Binance</a><a class="${venue === 'HYPERLIQUID' ? 'active' : ''}" href="/venues?venue=HYPERLIQUID" data-link>Hyperliquid</a></nav>
-    <div class="stats venue-status-stats"><div class="stat"><small>连接状态</small><b class="${connected ? 'direction-long' : 'warning-text'}">${escapeHtml(connectionLabel)}</b><span>${escapeHtml(connection?.category || 'UNVERIFIED')}</span></div><div class="stat"><small>运行模式</small><b>生产账户 · 只读</b><span>${escapeHtml(venueDetail)}</span></div><div class="stat"><small>交易账户</small><b>${escapeHtml(accountId)}</b><span>当前唯一默认账户 · ${escapeHtml(venue)}</span></div><div class="stat"><small>事实新鲜度</small><b>${fmtDate(lastSync)}</b><span>${lastSync ? '最近保存时间；不等同于当前连接' : '尚无已保存事实'}</span></div></div>
-    <article class="account-sync-note ${connected ? 'is-active' : ''}"><span class="status-dot"></span><div><b>${escapeHtml(connectionLabel)}</b><p>${escapeHtml(connectionReason)} 最近探针：${fmtDate(connection?.checked_at)}</p></div></article>
-    <article class="account-sync-note ${status.automatic_sync_enabled ? 'is-active' : ''}"><span class="status-dot"></span><div><b>${status.automatic_sync_enabled ? '账户数据自动更新中' : '账户自动更新尚未启用'}</b><p>${escapeHtml(automaticSyncCopy)}</p></div></article>
-    ${venueFactSections(facts)}
+    <div class="stats venue-status-stats"><div class="stat"><small>连接状态</small><b class="${connected ? 'direction-long' : 'warning-text'}">${escapeHtml(connectionLabel)}</b><span translate="no">${escapeHtml(connection?.error_code || (connected ? '最近只读检查成功' : '尚无错误分类'))}</span></div><div class="stat"><small>运行模式</small><b>生产账户 · 只读</b><span>${escapeHtml(venueDetail)}</span></div><div class="stat"><small>交易账户</small><b>${escapeHtml(accountId)}</b><span>当前唯一默认账户 · ${escapeHtml(venue)}</span></div><div class="stat"><small>${snapshotMode ? '最后快照' : '事实新鲜度'}</small><b>${fmtDate(lastSync)}</b><span>${lastSync ? snapshotMode ? '连接受限；以下数据不是实时事实' : '最近保存时间；连接探针另行校验' : '尚无已保存事实'}</span></div></div>
+    <article class="account-sync-note ${connected ? 'is-active' : ''}"><span class="status-dot"></span><div><b>${escapeHtml(connectionLabel)}</b><p>${escapeHtml(connectionReason)} ${connectionEvidence}最近探针：${fmtDate(connection?.checked_at)}</p></div></article>
+    <article class="account-sync-note ${status.automatic_sync_enabled && connected ? 'is-active' : ''}"><span class="status-dot"></span><div><b>${status.automatic_sync_enabled && connected ? '账户数据自动同步' : status.automatic_sync_enabled ? '自动同步等待连接恢复' : '账户自动更新尚未启用'}</b><p>${escapeHtml(automaticSyncCopy)}</p></div></article>
+    ${snapshotMode ? `<article class="danger-note venue-snapshot-warning"><b>当前连接不可用，以下仅为最后一次保存快照</b><p>这些余额、仓位、订单与成交不能作为实时交易依据。恢复只读连接并完成新一轮同步后，页面才会重新标记为当前事实。</p></article>` : ''}
+    ${venueFactSections(facts, {snapshotMode})}
   </section>`;
   document.querySelector('[data-refresh]')?.addEventListener('click', route);
 }
 
-function venueFactSections(facts) {
-  const positions = facts.positions.map(item => `<tr><td>${escapeHtml(item.symbol)}</td><td>${fmtNumber(item.quantity)} @ ${fmtNumber(item.average_entry_price)}</td><td>${fmtNumber(item.mark_price)}</td><td>${escapeHtml(factStatusLabel(item.fact_status))}</td><td>${item.protection ? `${escapeHtml(fmtStatus(item.protection.status))} · ${item.protection.fully_covered ? '足额' : '不足'}` : '无保护数据'}</td><td>${fmtDate(item.observed_at)}</td></tr>`).join('');
-  const orders = facts.orders.map(item => `<tr><td>${escapeHtml(item.venue_order_id)}</td><td>${escapeHtml(item.symbol)}</td><td>${escapeHtml(fmtStatus(item.status))}</td><td>${fmtNumber(item.filled_quantity)} / ${fmtNumber(item.ordered_quantity)}</td><td>${item.intent_id ? shortId(item.intent_id) : '外部未关联'}</td><td>${fmtDate(item.observed_at)}</td></tr>`).join('');
+function venueFactSections(facts, {snapshotMode = false} = {}) {
+  const positionRows = facts.positions.filter(item => Number(item.quantity) !== 0);
+  const activeOrderRows = facts.orders.filter(item => !['FILLED','CANCELLED','REJECTED','EXPIRED'].includes(item.status));
+  const historicalOrderRows = facts.orders.filter(item => ['FILLED','CANCELLED','REJECTED','EXPIRED'].includes(item.status));
+  const positions = positionRows.map(item => `<tr><td>${escapeHtml(item.symbol)}</td><td>${fmtNumber(item.quantity)} @ ${fmtNumber(item.average_entry_price)}</td><td>${fmtNumber(item.mark_price)}</td><td>${escapeHtml(snapshotMode ? '历史快照' : factStatusLabel(item.fact_status))}</td><td>${item.protection ? `${escapeHtml(fmtStatus(item.protection.status))} · ${item.protection.fully_covered ? '足额' : '不足'}` : '无保护数据'}</td><td>${fmtDate(item.observed_at)}</td></tr>`).join('');
+  const renderOrderRows = items => items.map(item => `<tr><td>${escapeHtml(item.venue_order_id)}</td><td>${escapeHtml(item.symbol)}</td><td>${escapeHtml(fmtStatus(item.status))}</td><td>${fmtNumber(item.filled_quantity)} / ${fmtNumber(item.ordered_quantity)}</td><td>${item.intent_id ? shortId(item.intent_id) : '外部未关联'}</td><td>${fmtDate(item.observed_at)}</td></tr>`).join('');
+  const orders = renderOrderRows(activeOrderRows);
+  const orderHistory = renderOrderRows(historicalOrderRows);
   const fills = facts.fills.map(item => `<tr><td>${escapeHtml(item.venue_fill_id)}</td><td>${escapeHtml(item.symbol)}</td><td>${escapeHtml(fmtSide(item.side))} ${fmtNumber(item.quantity)}</td><td>${fmtNumber(item.price)}</td><td>${fmtNumber(item.fee)} ${escapeHtml(item.fee_currency)}</td><td>${fmtDate(item.executed_at)}</td></tr>`).join('');
   const funding = facts.funding.map(item => `<tr><td>${escapeHtml(item.venue_payment_id)}</td><td>${escapeHtml(item.symbol)}</td><td>${fmtNumber(item.amount)} ${escapeHtml(item.currency)}</td><td>${fmtDate(item.paid_at)}</td></tr>`).join('');
   const reconciliation = facts.reconciliation;
-  return `<div class="stats"><div class="stat"><small>权益</small><b>${fmtNumber(facts.equity?.equity)} ${escapeHtml(facts.equity?.currency || '')}</b></div><div class="stat"><small>可用余额</small><b>${fmtNumber(facts.equity?.available_balance)}</b></div><div class="stat"><small>权益状态</small><b style="font-size:14px">${escapeHtml(factStatusLabel(facts.equity?.fact_status))}</b></div><div class="stat"><small>最近对账</small><b style="font-size:14px" class="${reconciliation?.status === 'MATCH' ? 'direction-long' : reconciliation ? 'warning-text' : ''}">${escapeHtml(reconciliation ? fmtStatus(reconciliation.status) : '未运行')}</b><span>${fmtDate(reconciliation?.completed_at)}</span></div></div>
+  return `<div class="stats"><div class="stat"><small>权益</small><b>${fmtNumber(facts.equity?.equity)} ${escapeHtml(facts.equity?.currency || '')}</b></div><div class="stat"><small>可用余额</small><b>${fmtNumber(facts.equity?.available_balance)}</b></div><div class="stat"><small>权益状态</small><b style="font-size:14px">${escapeHtml(snapshotMode ? '历史快照' : factStatusLabel(facts.equity?.fact_status))}</b></div><div class="stat"><small>最近对账</small><b style="font-size:14px" class="${reconciliation?.status === 'MATCH' && !snapshotMode ? 'direction-long' : reconciliation ? 'warning-text' : ''}">${escapeHtml(reconciliation ? snapshotMode ? '历史结果' : fmtStatus(reconciliation.status) : '未运行')}</b><span>${fmtDate(reconciliation?.completed_at)}</span></div></div>
     ${reconciliation?.differences?.length ? `<article class="danger-note"><b>对账差异</b><ul>${reconciliation.differences.map(item => `<li>${escapeHtml(item)}</li>`).join('')}</ul></article>` : ''}
-    ${factTable('仓位与风险保护', '<th>标的</th><th>数量 / 入场</th><th>标记价</th><th>数据状态</th><th>保护</th><th>更新时间</th>', positions)}
-    ${factTable('当前委托', '<th>交易所订单</th><th>标的</th><th>状态</th><th>成交 / 委托</th><th>关联操作</th><th>更新时间</th>', orders)}
-    ${factTable('最近成交', '<th>成交编号</th><th>标的</th><th>方向 / 数量</th><th>价格</th><th>手续费</th><th>成交时间</th>', fills)}
-    ${factTable('资金费', '<th>支付编号</th><th>标的</th><th>金额</th><th>支付时间</th>', funding)}`;
+    ${factTable('当前仓位与风险保护', '<th>标的</th><th>数量 / 入场</th><th>标记价</th><th>数据状态</th><th>保护</th><th>更新时间</th>', positions, '当前账户没有持仓；零仓位行情不会冒充当前仓位。')}
+    ${factTable('当前委托', '<th>交易所订单</th><th>标的</th><th>状态</th><th>成交 / 委托</th><th>关联操作</th><th>更新时间</th>', orders, '当前账户没有未完成委托。')}
+    ${orderHistory ? `<details class="operation-toolbox venue-order-history"><summary><span><b>最近订单记录</b><small>${historicalOrderRows.length} 条已成交、取消、拒绝或过期记录，不计入当前委托</small></span><strong>查看记录</strong></summary><div class="toolbox-content"><div class="table-wrap"><table><thead><tr><th>交易所订单</th><th>标的</th><th>状态</th><th>成交 / 委托</th><th>关联操作</th><th>更新时间</th></tr></thead><tbody>${orderHistory}</tbody></table></div></div></details>` : ''}
+    ${factTable('最近成交', '<th>成交编号</th><th>标的</th><th>方向 / 数量</th><th>价格</th><th>手续费</th><th>成交时间</th>', fills, '当前没有已保存的成交记录。')}
+    ${factTable('资金费', '<th>支付编号</th><th>标的</th><th>金额</th><th>支付时间</th>', funding, '当前没有已保存的资金费记录。')}`;
 }
 
-function factTable(title, headers, rows) {
-  return `<section><h2>${escapeHtml(title)}</h2>${rows ? `<div class="table-wrap"><table><thead><tr>${headers}</tr></thead><tbody>${rows}</tbody></table></div>` : '<div class="callout">当前没有已保存的数据。</div>'}</section>`;
+function factTable(title, headers, rows, emptyCopy = '当前没有已保存的数据。') {
+  return `<section><h2>${escapeHtml(title)}</h2>${rows ? `<div class="table-wrap"><table><thead><tr>${headers}</tr></thead><tbody>${rows}</tbody></table></div>` : `<div class="callout">${escapeHtml(emptyCopy)}</div>`}</section>`;
 }
 
 function accessRoleOptions(selectedRoles, prefix, disabled = false) {

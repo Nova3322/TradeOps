@@ -17,6 +17,7 @@ from trading_control_plane.hyperliquid import (
 
 NOW = datetime(2026, 7, 19, 13, tzinfo=UTC)
 ACCOUNT = "0x1111111111111111111111111111111111111111"
+API_WALLET = "0x2222222222222222222222222222222222222222"
 
 
 def contract_payloads() -> dict[str, dict[str, Any] | list[Any] | str]:
@@ -481,6 +482,43 @@ def test_core_only_and_official_host_boundaries_fail_before_network() -> None:
             account_address=ACCOUNT,
             dex="hip3-dex",
         )
+
+
+def test_api_wallet_account_resolution_retries_after_transient_rate_limit() -> None:
+    responses = contract_payloads()
+    calls: list[dict[str, Any]] = []
+    resolution_attempts = 0
+
+    def fetch(
+        _url: str, payload: dict[str, Any], _timeout: float
+    ) -> dict[str, Any] | list[Any] | str:
+        nonlocal resolution_attempts
+        calls.append(payload)
+        if payload["type"] == "userRole":
+            resolution_attempts += 1
+            if resolution_attempts == 1:
+                raise DomainRejected(
+                    "HYPERLIQUID_RATE_LIMITED",
+                    "bounded upstream read-only probe was rate limited",
+                )
+            return {"role": "agent", "data": {"user": ACCOUNT}}
+        return responses[str(payload["type"])]
+
+    client = HyperliquidReadOnlyClient(
+        base_url="https://api.hyperliquid-testnet.xyz",
+        account_address=None,
+        api_wallet_address=API_WALLET,
+        fetcher=fetch,
+    )
+
+    assert client.configured is True
+    with pytest.raises(DomainRejected, match="HYPERLIQUID_RATE_LIMITED"):
+        client.read_snapshot("BTC", now=NOW)
+
+    assert client.read_snapshot("BTC", now=NOW).symbol == "BTC"
+    assert client.read_snapshot("BTC", now=NOW).symbol == "BTC"
+    assert resolution_attempts == 2
+    assert [call["type"] for call in calls].count("userRole") == 2
 
 
 def test_invalid_account_and_response_precision_fail_closed() -> None:
