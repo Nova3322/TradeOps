@@ -271,7 +271,35 @@ TelegramActionHandler = Callable[[TelegramProposalReviewAction, int], str]
 
 
 class TelegramUnavailable(RuntimeError):
-    pass
+    def __init__(self, message: str, *, code: str = "TELEGRAM_UNAVAILABLE") -> None:
+        super().__init__(message)
+        self.code = code
+
+
+def _telegram_rejection(error_code: object, description: object) -> TelegramUnavailable:
+    status_code = error_code if isinstance(error_code, int) else None
+    safe_description = description.casefold() if isinstance(description, str) else ""
+    if status_code == 409:
+        code = (
+            "TELEGRAM_POLLING_CONFLICT"
+            if "getupdates" in safe_description or "webhook" in safe_description
+            else "TELEGRAM_BOT_API_CONFLICT"
+        )
+        return TelegramUnavailable("Telegram Bot API polling conflict", code=code)
+    if status_code in {401, 403}:
+        return TelegramUnavailable(
+            "Telegram Bot API authentication was rejected",
+            code="TELEGRAM_AUTH_FAILED",
+        )
+    if status_code == 429:
+        return TelegramUnavailable(
+            "Telegram Bot API rate limit was reached",
+            code="TELEGRAM_RATE_LIMITED",
+        )
+    return TelegramUnavailable(
+        "Telegram Bot API rejected the request",
+        code="TELEGRAM_BOT_API_REJECTED",
+    )
 
 
 def _default_poster(url: str, payload: dict[str, Any], timeout: float) -> dict[str, Any]:
@@ -284,15 +312,35 @@ def _default_poster(url: str, payload: dict[str, Any], timeout: float) -> dict[s
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response:  # noqa: S310
             raw = response.read()
+    except urllib.error.HTTPError as exc:
+        try:
+            rejection = json.loads(exc.read())
+        except (json.JSONDecodeError, OSError):
+            rejection = {}
+        raise _telegram_rejection(
+            rejection.get("error_code", exc.code) if isinstance(rejection, dict) else exc.code,
+            rejection.get("description") if isinstance(rejection, dict) else None,
+        ) from None
     except (TimeoutError, urllib.error.URLError):
         # urllib exceptions may include the request URL, which contains the Bot token.
-        raise TelegramUnavailable("Telegram Bot API could not be reached") from None
+        raise TelegramUnavailable(
+            "Telegram Bot API could not be reached",
+            code="TELEGRAM_NETWORK_UNAVAILABLE",
+        ) from None
     try:
         result = json.loads(raw)
     except json.JSONDecodeError as exc:
-        raise TelegramUnavailable("Telegram Bot API returned invalid JSON") from exc
+        raise TelegramUnavailable(
+            "Telegram Bot API returned invalid JSON",
+            code="TELEGRAM_RESPONSE_INVALID",
+        ) from exc
     if not isinstance(result, dict) or result.get("ok") is not True:
-        raise TelegramUnavailable("Telegram Bot API rejected the request")
+        if isinstance(result, dict):
+            raise _telegram_rejection(result.get("error_code"), result.get("description"))
+        raise TelegramUnavailable(
+            "Telegram Bot API returned an invalid response",
+            code="TELEGRAM_RESPONSE_INVALID",
+        )
     return result
 
 
@@ -351,6 +399,7 @@ class TelegramBotGateway(MockTelegramGateway):
         binder: TelegramBinder,
         chat_resolver: TelegramChatResolver,
         todo_resolver: TelegramTodoResolver | None = None,
+        review_queue_url: str | None = None,
         poll_timeout_seconds: int = 20,
         client: TelegramBotClient | None = None,
     ) -> None:
@@ -361,6 +410,7 @@ class TelegramBotGateway(MockTelegramGateway):
         self._binder = binder
         self._chat_resolver = chat_resolver
         self._todo_resolver = todo_resolver
+        self._review_queue_url = review_queue_url
         self._poll_timeout_seconds = poll_timeout_seconds
         self._action_handler: TelegramActionHandler | None = None
         self._actions: dict[str, TelegramProposalReviewAction] = {}
@@ -369,6 +419,10 @@ class TelegramBotGateway(MockTelegramGateway):
         self._cancellations: dict[str, _ActionPrompt] = {}
         self._stop_event = threading.Event()
         self._poll_thread: threading.Thread | None = None
+        self._last_poll_success_at: datetime | None = None
+        self._last_poll_error_at: datetime | None = None
+        self._last_poll_error_code: str | None = None
+        self._consecutive_poll_failures = 0
 
     @staticmethod
     def _normalize_username(value: str) -> str:
@@ -377,6 +431,31 @@ class TelegramBotGateway(MockTelegramGateway):
     @property
     def running(self) -> bool:
         return self._poll_thread is not None and self._poll_thread.is_alive()
+
+    def polling_health(self) -> dict[str, object]:
+        with self._lock:
+            if self._last_poll_error_code is not None:
+                state = "DEGRADED"
+            elif self._last_poll_success_at is not None:
+                state = "HEALTHY"
+            else:
+                state = "STARTING" if self.running else "STOPPED"
+            return {
+                "state": state,
+                "running": self.running,
+                "last_success_at": (
+                    None
+                    if self._last_poll_success_at is None
+                    else self._last_poll_success_at.isoformat()
+                ),
+                "last_error_at": (
+                    None
+                    if self._last_poll_error_at is None
+                    else self._last_poll_error_at.isoformat()
+                ),
+                "last_error_code": self._last_poll_error_code,
+                "consecutive_failures": self._consecutive_poll_failures,
+            }
 
     def set_action_handler(self, handler: TelegramActionHandler) -> None:
         self._action_handler = handler
@@ -516,10 +595,11 @@ class TelegramBotGateway(MockTelegramGateway):
         offset = 0
         try:
             self._client.call("deleteWebhook", {"drop_pending_updates": False})
-        except TelegramUnavailable:
+        except TelegramUnavailable as exc:
+            self._record_poll_failure(exc)
             logger.exception(
                 "Telegram long polling could not clear the webhook",
-                extra={"event": "telegram_poll_start_failed"},
+                extra={"event": "telegram_poll_start_failed", "error_code": exc.code},
             )
             return
         self._safe_call("setMyCommands", {"commands": self._COMMANDS})
@@ -536,7 +616,11 @@ class TelegramBotGateway(MockTelegramGateway):
                 )
                 result = response.get("result")
                 if not isinstance(result, list):
-                    raise TelegramUnavailable("Telegram update response is invalid")
+                    raise TelegramUnavailable(
+                        "Telegram update response is invalid",
+                        code="TELEGRAM_RESPONSE_INVALID",
+                    )
+                self._record_poll_success()
                 for update in result:
                     if not isinstance(update, dict):
                         continue
@@ -544,18 +628,33 @@ class TelegramBotGateway(MockTelegramGateway):
                     if isinstance(update_id, int):
                         offset = max(offset, update_id + 1)
                     self.handle_update(update)
-            except TelegramUnavailable:
+            except TelegramUnavailable as exc:
+                failures = self._record_poll_failure(exc)
                 logger.exception(
                     "Telegram long polling failed",
-                    extra={"event": "telegram_poll_failed"},
+                    extra={"event": "telegram_poll_failed", "error_code": exc.code},
                 )
-                self._stop_event.wait(2)
+                self._stop_event.wait(min(30, 2 ** min(failures, 5)))
             except Exception:
                 logger.exception(
                     "Unexpected Telegram update failure",
                     extra={"event": "telegram_update_failed"},
                 )
                 self._stop_event.wait(1)
+
+    def _record_poll_success(self) -> None:
+        with self._lock:
+            self._last_poll_success_at = datetime.now(UTC)
+            self._last_poll_error_at = None
+            self._last_poll_error_code = None
+            self._consecutive_poll_failures = 0
+
+    def _record_poll_failure(self, error: TelegramUnavailable) -> int:
+        with self._lock:
+            self._last_poll_error_at = datetime.now(UTC)
+            self._last_poll_error_code = error.code
+            self._consecutive_poll_failures += 1
+            return self._consecutive_poll_failures
 
     def handle_update(self, update: dict[str, Any]) -> None:
         update_id = update.get("update_id")
@@ -618,6 +717,7 @@ class TelegramBotGateway(MockTelegramGateway):
             )
             return
         if command == "/todo":
+            todo_markup: dict[str, Any] | None = None
             if self._todo_resolver is None:
                 body = "<b>待审核列表暂不可用</b>\n请在 Web 审核队列查看。"
             else:
@@ -632,21 +732,37 @@ class TelegramBotGateway(MockTelegramGateway):
                     body = "<b>待审核列表读取失败</b>\n未执行任何操作，请稍后重试。"
                 else:
                     if todos:
+                        visible_limit = 10
                         rows = [
                             f"• <b>{_optional(item.symbol)}</b> "
                             f"{_labeled_code(item.direction, _DIRECTION_LABELS)}"
                             f" · {_labeled_code(item.risk_tier, _RISK_LABELS)}风险"
                             f" · 截止 {_optional(item.expires_at)}"
-                            for item in todos[:20]
+                            for item in todos[:visible_limit]
                         ]
+                        omitted = max(0, len(todos) - visible_limit)
                         body = (
                             f"<b>待我审核 · {len(todos)} 项</b>\n\n"
                             + "\n".join(rows)
-                            + "\n\n请使用对应通知卡片的批准 / 拒绝按钮；点击后仍需再次确认。"
+                            + (
+                                f"\n\n仅显示最早到期的 {visible_limit} 项，另有 {omitted} 项。"
+                                if omitted
+                                else ""
+                            )
+                            + "\n\n请打开审核队列选择提案；批准 / 拒绝仍需再次确认。"
                         )
+                        if self._review_queue_url is not None:
+                            todo_markup = {
+                                "inline_keyboard": [
+                                    [{"text": "打开 Web 审核队列", "url": self._review_queue_url}]
+                                ]
+                            }
                     else:
                         body = "🟢 <b>当前没有可由你独立审核的冻结提案</b>"
-            self._safe_call("sendMessage", self._message_payload(chat_id, body))
+            self._safe_call(
+                "sendMessage",
+                self._message_payload(chat_id, body, todo_markup),
+            )
             return
         if command != "/start":
             self._safe_call(

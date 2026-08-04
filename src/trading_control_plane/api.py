@@ -366,6 +366,7 @@ def create_app(
                 user_id
             ),
             todo_resolver=telegram_review_todos,
+            review_queue_url=f"{resolved_settings.public_base_url.rstrip('/')}/reviews",
             poll_timeout_seconds=resolved_settings.telegram_poll_timeout_seconds,
         )
     else:
@@ -4153,6 +4154,18 @@ def create_app(
             perptape_feed,
             now=_now(),
         )
+        telegram_polling = (
+            resolved_telegram.polling_health()
+            if isinstance(resolved_telegram, TelegramBotGateway)
+            else {
+                "state": "DISABLED",
+                "running": False,
+                "last_success_at": None,
+                "last_error_at": None,
+                "last_error_code": None,
+                "consecutive_failures": 0,
+            }
+        )
         snapshot.update(
             {
                 "application_version": __version__,
@@ -4247,6 +4260,7 @@ def create_app(
                         "enabled": resolved_settings.telegram_enabled,
                         "network_configured": bool(resolved_settings.telegram_bot_token),
                         "private_chat_only": True,
+                        "polling": telegram_polling,
                     },
                 },
             }

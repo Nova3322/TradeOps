@@ -961,6 +961,8 @@ async function renderHome() {
   const canPropose = roles.includes('PROPOSER') || roles.includes('SYSTEM_ADMIN');
   const pending = proposalResponse.data.filter(item => item.environment === 'LIVE' && new Date(item.expires_at).getTime() > now);
   const actionableReviews = canReview ? pending.filter(item => item.actionable_for_current_user) : [];
+  const systemReviewCount = actionableReviews.filter(item => item.source === 'SYSTEM').length;
+  const manualReviewCount = actionableReviews.length - systemReviewCount;
   const expiringReviews = actionableReviews.filter(item => new Date(item.expires_at).getTime() - now < 30 * 60 * 1000);
   const nextReview = [...actionableReviews].sort((left, right) => new Date(left.expires_at) - new Date(right.expires_at))[0];
   const activeCampaigns = campaignResponse.data.filter(item => item.environment === 'LIVE' && item.status !== 'CLOSED');
@@ -1016,7 +1018,7 @@ async function renderHome() {
   const priorityCards = [];
   if (exceptions.length) priorityCards.push(`<a class="home-priority danger" href="/campaigns/alerts" data-link><span class="priority-number">1</span><div><small>严重运行告警</small><b>${exceptions.length} 项运行问题</b><p>影响 ${exceptionCampaigns.size} 个交易任务；结果未知、保护不足和对账差异不会被自动忽略。</p></div><strong>查看运行告警 →</strong></a>`);
   if (riskLimited) priorityCards.push(`<a class="home-priority attention" href="/risk" data-link><span class="priority-number">${priorityCards.length + 1}</span><div><small>新增风险受限</small><b>${escapeHtml(riskControlStatusLabel(riskControl.policy.system_state))}</b><p>${riskControl.restore_conditions.blockers.length ? `${riskControl.restore_conditions.blockers.length} 项恢复条件尚未满足。` : '恢复条件已满足，仍需完成受控审核与执行。'} 减仓和退出不受阻断。</p></div><strong>查看恢复条件 →</strong></a>`);
-  if (actionableReviews.length) priorityCards.push(`<a class="home-priority attention" href="/reviews" data-link><span class="priority-number">${priorityCards.length + 1}</span><div><small>独立审核队列</small><b>${actionableReviews.length} 笔非本人提案等待审核</b><p>${expiringReviews.length ? `${expiringReviews.length} 笔将在 30 分钟内到期。` : `最早一笔到期于 ${fmtDate(nextReview.expires_at)}。`} 已投票的高风险提案可能仍在等待另一名审核人。</p></div><strong>打开审核队列 →</strong></a>`);
+  if (actionableReviews.length) priorityCards.push(`<a class="home-priority attention" href="/reviews" data-link><span class="priority-number">${priorityCards.length + 1}</span><div><small>独立审核队列</small><b>${actionableReviews.length} 笔非本人提案等待审核</b><p>${expiringReviews.length ? `${expiringReviews.length} 笔将在 30 分钟内到期。` : `最早一笔到期于 ${fmtDate(nextReview.expires_at)}。`} 系统机会 ${systemReviewCount} 笔，人工判断 ${manualReviewCount} 笔。</p></div><strong>打开审核队列 →</strong></a>`);
   if (activeCampaigns.length) priorityCards.push(`<a class="home-priority" href="/campaigns" data-link><span class="priority-number">${priorityCards.length + 1}</span><div><small>持续观察</small><b>${activeCampaigns.length} 个运行中交易任务</b><p>${escapeHtml(activeCampaigns.slice(0, 3).map(item => `${item.venue} · ${fmtDirection(item.direction)} · ${fmtStatus(item.status)}`).join('；'))}</p></div><strong>查看当前仓位 →</strong></a>`);
   if (!priorityCards.length) priorityCards.push(`<a class="home-priority clear" href="/opportunities" data-link><span class="priority-number">✓</span><div><small>当前无待办</small><b>继续观察，不必为了操作而操作</b><p>${canPropose ? '机会只是候选；只有形成清楚交易判断时才创建提案。' : '当前身份可以观察机会，但不能创建提案；如有判断请交由提案发起人保存参数。'}</p></div><strong>查看机会 →</strong></a>`);
   main.innerHTML = `<section class="page home-page"><article class="home-status tone-${safety.tone}"><div><p class="eyebrow">${safety.eyebrow}</p><h1>${escapeHtml(safety.title)}</h1><p>${escapeHtml(safety.copy)}</p></div><a class="primary" href="${safety.href}" data-link>${escapeHtml(safety.action)}</a></article>
@@ -1474,6 +1476,8 @@ async function renderProposalList(status, title) {
   const pending = items.filter(item => item.status === 'PENDING_REVIEW' && item.actionable_for_current_user).length;
   const expiring = items.filter(item => { const remaining = new Date(item.expires_at) - Date.now(); return remaining > 0 && remaining < 30 * 60 * 1000; }).length;
   const doubleReview = items.filter(item => item.status === 'PENDING_REVIEW' && item.risk_tier === 'HIGH').length;
+  const systemCount = items.filter(item => item.source === 'SYSTEM').length;
+  const manualCount = items.length - systemCount;
   const completed = items.filter(item => ['REJECTED','EXPIRED'].includes(item.status)).length;
   const earliestExpiry = items[0]?.expires_at;
   const canPropose = roleNames().includes('PROPOSER') || roleNames().includes('SYSTEM_ADMIN');
@@ -1486,23 +1490,25 @@ async function renderProposalList(status, title) {
       ? `<div class="stat"><small>待我审核</small><b>${items.length}</b></div><div class="stat"><small>需两人审核</small><b>${doubleReview}</b></div><div class="stat"><small>30 分钟内到期</small><b>${expiring}</b></div><div class="stat"><small>最早到期</small><b class="stat-date">${earliestExpiry ? fmtDate(earliestExpiry) : '—'}</b></div>`
       : `<div class="stat"><small>当前列表</small><b>${items.length}</b></div><div class="stat"><small>流程中</small><b>${items.filter(item => ['DRAFT','PENDING_REVIEW','APPROVED'].includes(item.status)).length}</b></div><div class="stat"><small>待我审核</small><b>${pending}</b></div><div class="stat"><small>已结束</small><b>${completed}</b></div>`}</div>
     <div class="section-tabs"><a class="${status ? 'active' : ''}" href="/reviews" data-link>待我审核${pending ? `<span>${pending}</span>` : ''}</a><a class="${status ? '' : 'active'}" href="/proposals" data-link>全部提案</a></div>
-    ${items.length ? `<div class="proposal-list-tools"><label>搜索标的或账户<input id="proposal-search" type="search" placeholder="BTCUSDT / acct-1"></label><label>方向<select id="proposal-direction"><option value="">全部方向</option><option value="LONG">做多</option><option value="SHORT">做空</option></select></label><label>风险<select id="proposal-risk"><option value="">全部档位</option><option value="LOW">低</option><option value="MEDIUM">中</option><option value="HIGH">高</option></select></label>${status ? '' : '<label>状态<select id="proposal-status"><option value="">全部状态</option><option value="PENDING_REVIEW">待审核</option><option value="APPROVED">已批准</option><option value="REJECTED">已拒绝</option><option value="EXPIRED">已过期</option></select></label>'}<span><b data-proposal-count>${items.length}</b> 个结果</span></div><div class="table-wrap proposal-table"><table><thead><tr><th>提案</th><th>方向 / 数量</th><th>风险边界</th><th>状态</th><th>提交时间</th><th>到期</th></tr></thead><tbody>${items.map(item => `<tr data-href="/proposals/${item.proposal_id}" data-proposal-row data-search="${escapeHtml(`${item.symbol || ''} ${item.account_id} ${item.venue}`.toLowerCase())}" data-direction="${escapeHtml(item.direction)}" data-risk="${escapeHtml(item.risk_tier)}" data-status="${escapeHtml(item.status)}"><td><b>${escapeHtml(item.symbol || shortId(item.instrument_id))}</b><br><span class="subtle">${escapeHtml(item.venue)} · ${escapeHtml(item.source === 'SYSTEM' ? 'Perptape' : '人工')}</span></td><td><span class="direction-pill ${item.direction === 'LONG' ? 'direction-long' : 'direction-short'}">${escapeHtml(fmtDirection(item.direction))}</span><br><span class="subtle">数量 ${fmtNumber(item.quantity)}</span></td><td><b>${fmtRisk(item.risk_tier)}</b><br><span class="subtle">最多 ${escapeHtml(fmtAmount(item.max_risk, item.collateral_currency))}</span></td><td><span class="status-pill status-${escapeHtml(item.status)}">${escapeHtml(fmtStatus(item.status))}</span></td><td>${fmtDate(item.created_at)}<br><span class="subtle">版本 ${item.version}</span></td><td>${fmtDate(item.expires_at)}</td></tr>`).join('')}</tbody></table></div><section id="proposal-filter-empty" class="empty-state compact-empty" hidden><div><h2>没有符合条件的提案</h2><p>请清除搜索或调整筛选。</p></div></section>` : emptyState}</section>`;
+    ${status && items.length ? `<p class="review-queue-summary">系统机会 ${systemCount} 笔 · 人工判断 ${manualCount} 笔。这里只统计你尚未投票、仍在有效期内的提案。</p>` : ''}
+    ${items.length ? `<div class="proposal-list-tools"><label>搜索标的或账户<input id="proposal-search" type="search" placeholder="BTCUSDT / acct-1"></label><label>方向<select id="proposal-direction"><option value="">全部方向</option><option value="LONG">做多</option><option value="SHORT">做空</option></select></label><label>风险<select id="proposal-risk"><option value="">全部档位</option><option value="LOW">低</option><option value="MEDIUM">中</option><option value="HIGH">高</option></select></label>${status ? '<label>来源<select id="proposal-source"><option value="">全部来源</option><option value="SYSTEM">系统机会</option><option value="MANUAL">人工判断</option></select></label>' : '<label>状态<select id="proposal-status"><option value="">全部状态</option><option value="PENDING_REVIEW">待审核</option><option value="APPROVED">已批准</option><option value="REJECTED">已拒绝</option><option value="EXPIRED">已过期</option></select></label>'}<span><b data-proposal-count>${items.length}</b> 个结果</span></div><div class="table-wrap proposal-table"><table><thead><tr><th>提案</th><th>方向 / 数量</th><th>风险边界</th><th>${status ? '审核进度' : '状态'}</th><th>提交时间</th><th>到期</th></tr></thead><tbody>${items.map(item => `<tr data-href="/proposals/${item.proposal_id}" data-proposal-row data-search="${escapeHtml(`${item.symbol || ''} ${item.account_id} ${item.venue}`.toLowerCase())}" data-direction="${escapeHtml(item.direction)}" data-risk="${escapeHtml(item.risk_tier)}" data-source="${escapeHtml(item.source)}" data-status="${escapeHtml(item.status)}"><td><b>${escapeHtml(item.symbol || shortId(item.instrument_id))}</b><br><span class="subtle">${escapeHtml(item.venue)} · ${escapeHtml(item.source === 'SYSTEM' ? '系统机会' : '人工判断')}</span></td><td><span class="direction-pill ${item.direction === 'LONG' ? 'direction-long' : 'direction-short'}">${escapeHtml(fmtDirection(item.direction))}</span><br><span class="subtle">数量 ${fmtNumber(item.quantity)}</span></td><td><b>${fmtRisk(item.risk_tier)}</b><br><span class="subtle">最多 ${escapeHtml(fmtAmount(item.max_risk, item.collateral_currency))}</span></td><td>${status ? `<b>已 ${Number(item.approval_count || 0)} / ${Number(item.required_approvals || (item.risk_tier === 'HIGH' ? 2 : 1))}</b><br><span class="subtle">仍需你的独立判断</span>` : `<span class="status-pill status-${escapeHtml(item.status)}">${escapeHtml(fmtStatus(item.status))}</span>`}</td><td>${fmtDate(item.created_at)}<br><span class="subtle">版本 ${item.version}</span></td><td>${fmtDate(item.expires_at)}</td></tr>`).join('')}</tbody></table></div><section id="proposal-filter-empty" class="empty-state compact-empty" hidden><div><h2>没有符合条件的提案</h2><p>请清除搜索或调整筛选。</p></div></section>` : emptyState}</section>`;
   bindLinkedRows();
   const filter = () => {
     const query = document.querySelector('#proposal-search')?.value.toLowerCase().trim() || '';
     const direction = document.querySelector('#proposal-direction')?.value || '';
     const risk = document.querySelector('#proposal-risk')?.value || '';
     const proposalStatus = document.querySelector('#proposal-status')?.value || '';
+    const source = document.querySelector('#proposal-source')?.value || '';
     let visible = 0;
     document.querySelectorAll('[data-proposal-row]').forEach(row => {
-      const matches = (!query || row.dataset.search.includes(query)) && (!direction || row.dataset.direction === direction) && (!risk || row.dataset.risk === risk) && (!proposalStatus || row.dataset.status === proposalStatus);
+      const matches = (!query || row.dataset.search.includes(query)) && (!direction || row.dataset.direction === direction) && (!risk || row.dataset.risk === risk) && (!source || row.dataset.source === source) && (!proposalStatus || row.dataset.status === proposalStatus);
       row.hidden = !matches;
       if (matches) visible += 1;
     });
     if (document.querySelector('[data-proposal-count]')) document.querySelector('[data-proposal-count]').textContent = visible;
     if (document.querySelector('#proposal-filter-empty')) document.querySelector('#proposal-filter-empty').hidden = visible !== 0;
   };
-  ['#proposal-search','#proposal-direction','#proposal-risk','#proposal-status'].forEach(selector => document.querySelector(selector)?.addEventListener('input', filter));
+  ['#proposal-search','#proposal-direction','#proposal-risk','#proposal-source','#proposal-status'].forEach(selector => document.querySelector(selector)?.addEventListener('input', filter));
 }
 
 function proposalResonanceTimeframes(details, candidate) {
@@ -1870,6 +1876,25 @@ async function renderSystemStatus() {
   const venueConnections = [binance, hyperliquid];
   const perptape = runtime?.data?.external_boundaries?.perptape || {configured:false,status:'NOT_CONFIGURED',candidate_count:0,last_fetched_at:null,contract_version:'—'};
   const notilt = runtime?.data?.external_boundaries?.notilt || {enabled:false,gateway_available:false,configured_chains:[]};
+  const telegram = runtime?.data?.external_boundaries?.telegram || {enabled:false,network_configured:false,polling:{state:'DISABLED'}};
+  const telegramPolling = telegram.polling || {state:'DISABLED',last_error_code:null,last_success_at:null};
+  const telegramHealthy = telegram.enabled && telegram.network_configured && telegramPolling.state === 'HEALTHY';
+  const telegramFailureCopy = ({
+    TELEGRAM_POLLING_CONFLICT:'另一个 Bot 实例正在使用同一长轮询；只保留一个生产轮询进程后重试。',
+    TELEGRAM_BOT_API_CONFLICT:'Bot API 报告会话冲突；检查是否存在另一轮询或 webhook 实例。',
+    TELEGRAM_AUTH_FAILED:'Bot API 拒绝当前凭据；由系统管理员核对 Bot 配置。',
+    TELEGRAM_RATE_LIMITED:'Bot API 正在限流；系统会按有界退避自动重试。',
+    TELEGRAM_NETWORK_UNAVAILABLE:'当前无法连接 Bot API；Web 审核队列仍可使用。',
+    TELEGRAM_RESPONSE_INVALID:'Bot API 返回了无法采信的响应；机器人动作保持关闭。',
+    TELEGRAM_BOT_API_REJECTED:'Bot API 拒绝轮询请求；由系统管理员检查机器人运行实例。',
+  })[telegramPolling.last_error_code] || '机器人尚未完成一次成功轮询；Web 审核队列仍是权威入口。';
+  const telegramStatus = telegramHealthy
+    ? 'Telegram 审核通知可用'
+    : telegramPolling.state === 'DEGRADED'
+      ? 'Telegram 审核通知受阻'
+      : telegram.enabled
+        ? 'Telegram 等待首次轮询'
+        : 'Telegram 尚未启用';
   const connections = runtime?.data?.connections || {};
   const perptapeAvailable = Boolean(connections.PERPTAPE?.available);
   const notiltConfigured = Boolean(connections.NOTILT?.available);
@@ -1901,7 +1926,7 @@ async function renderSystemStatus() {
       : 'Freqtrade worker 尚未全部通过身份、期货模式、合约目录和 dry-run 检查。';
   const tradingConnectionsReady = Boolean(connections.BINANCE?.available && connections.HYPERLIQUID?.available);
   const activeMonitoring = campaigns.length > 0;
-  const overallTone = !health.ready || !controlAvailable ? 'danger' : exceptions.length || !perptapeAvailable || !workersReady || !tradingConnectionsReady ? 'attention' : activeMonitoring ? 'success' : 'neutral';
+  const overallTone = !health.ready || !controlAvailable ? 'danger' : exceptions.length || !perptapeAvailable || !workersReady || !tradingConnectionsReady || !telegramHealthy ? 'attention' : activeMonitoring ? 'success' : 'neutral';
   const cards = [
     systemHealthCard({title:'核心服务', status:health.ready ? '服务可用' : '服务不可用', tone:health.ready ? 'success' : 'danger', copy:health.ready ? '业务数据库和交易服务运行正常。' : '核心服务检查失败；不能把缺失响应当成正常。', meta:'数据缺失时自动阻止交易'}),
     systemHealthCard({title:'开仓与加仓', status:controlAvailable ? (addOpen ? '允许新增风险' : entryOpen ? '自动加仓已关闭' : riskControlStatusLabel(policy.system_state)) : '风险政策未配置', tone:addOpen ? 'success' : controlAvailable ? 'attention' : 'danger', copy:controlAvailable ? `风险政策：${riskControlStatusLabel(policy.system_state)}；自动加仓：${riskControlStatusLabel(gate.status)}。` : '缺少当前风险政策或自动加仓控制，系统会阻止新增风险。', meta:'政策变化会立即重新检查所有新增风险'}),
@@ -1910,6 +1935,7 @@ async function renderSystemStatus() {
     systemHealthCard({title:'风险敞口监控', status:!activeMonitoring ? '当前无监控对象' : exposureIssues.length ? `${exposureIssues.length} 项敞口不确定` : '监控正常', tone:!activeMonitoring ? 'neutral' : exposureIssues.length ? 'danger' : 'success', copy:!activeMonitoring ? '有交易任务进入运行后，系统会检查仓位和风险占用。' : exposureIssues.length ? '仓位或风险占用存在未知或过期数据，系统会阻止新增风险。' : '当前没有仓位未知、仓位过期或风险占用未知。', meta:`${exceptions.length} 项总阻断`}),
     systemHealthCard({title:'对账监控', status:!activeMonitoring ? '暂无对账对象' : reconciliationIssues.length ? `${reconciliationIssues.length} 项未一致` : '对账一致', tone:!activeMonitoring ? 'neutral' : reconciliationIssues.length ? 'attention' : 'success', copy:!activeMonitoring ? '当前没有运行中的交易任务需要对账。' : reconciliationIssues.length ? '至少一个权限范围存在差异、未知、过期或需要人工处理。' : '运行中的交易任务没有派生对账异常。', meta:'只有计算结果为“对账一致”才可作为恢复依据'}),
     systemHealthCard({title:'交易执行底座', status:workersReady ? 'Freqtrade worker 已接管' : workersDisabled ? 'Freqtrade worker 未启动' : 'Freqtrade worker 检查未通过', tone:workersReady || workersDisabled ? 'attention' : 'danger', copy:executionCopy, meta:workersReady ? '本地 dry-run 运行；强制开仓、真实下单与旧直连均关闭' : workersDisabled ? `需配置 worker 控制凭据后以 dry-run 启动；LIVE_ORDER_SEND 保持关闭${configuredHip3Dexes.length ? `；HIP-3 范围 ${configuredHip3Dexes.join('、')}` : ''}` : '身份、模式或合约目录不一致时禁止发送'}),
+    systemHealthCard({title:'审核通知', status:telegramStatus, tone:telegramHealthy ? 'success' : 'attention', copy:telegramHealthy ? '私聊 Bot 最近一次长轮询成功；批准和拒绝仍需二次确认并写入统一审计。' : telegramFailureCopy, meta:telegramHealthy ? `最近成功 ${fmtDate(telegramPolling.last_success_at)}` : 'Web 审核队列保持可用；资金、订单、风险开关与权限操作不对 Bot 开放'}),
     systemHealthCard({title:'Perptape 机会源', status:perptapeStatus, tone:perptapeTone, copy:perptapeAvailable ? `已读取 ${Number(opportunityHealth?.data?.length ?? perptape.candidate_count ?? 0)} 个候选，可用于机会筛选和提案。` : perptape.configured ? 'Perptape 已配置，但最近数据尚未形成可用连接结论。现有交易任务不受影响，新的外部机会不可用。' : 'Perptape 尚未配置；人工提案仍可使用。', meta:`只读 · 最近数据 ${fmtDate(perptape.last_fetched_at)}`}),
   ].join('');
   const connectionLabels = {
@@ -1941,8 +1967,8 @@ async function renderSystemStatus() {
     return `<tr><td><b>${label[0]}</b><br><span class="subtle">${escapeHtml(categoryLabel)}${errorEvidence}</span></td><td><span class="status-pill ${state.available ? 'status-APPROVED' : ''}">${state.available ? '只读已连接' : escapeHtml(categoryLabel)}</span><br><span class="subtle">${escapeHtml(fmtOperationalCopy(state.reason))}</span><br><span class="subtle">负责：${escapeHtml(state.owner_role)} · 下一步：${escapeHtml(fmtOperationalCopy(state.next_action))} · 最近检查：${fmtDate(state.checked_at)}</span></td><td>${label[1]}</td><td>${escapeHtml(capability)}</td><td>${action}</td></tr>`;
   }).join('');
   const availableSources = Object.values(connections).filter(item => item.available).length;
-  const verdictTitle = !health.ready ? '核心服务未通过就绪检查' : !controlAvailable ? '核心服务可用，但风险政策未配置' : exceptions.length ? '核心服务可用，但存在风险阻断' : !workersReady || !tradingConnectionsReady ? '只读控制台可用，但交易执行尚未就绪' : !perptapeAvailable ? '交易管理可用，但 Perptape 机会源受限' : activeMonitoring ? '交易系统正在正常监控' : '核心服务可用，当前无运行中交易任务';
-  const verdictCopy = !health.ready ? '请先恢复数据库与服务状态，不要继续依赖旧数据。' : !controlAvailable ? `${friendlyApiError(control.error)} 新增风险保持关闭。` : exceptions.length ? `发现 ${exceptions.length} 项安全异常；受影响的新增风险会保持关闭。` : !workersReady || !tradingConnectionsReady ? `${workersDisabled ? 'Freqtrade worker 尚未启动' : 'Freqtrade worker 尚未通过检查'}；${!tradingConnectionsReady ? '至少一个交易所只读连接当前受限' : '交易所只读连接正常'}。系统不会把只读页面可访问误报为可执行交易。` : !perptapeAvailable ? `${perptapeStatus}。现有交易任务仍可管理，但新的 Perptape 机会暂不可用。` : activeMonitoring ? '运行中的交易任务没有检测到保护、敞口或对账阻断。' : '当前没有需要监控的交易任务；系统不会把“无监控对象”误报为“监控正常”。';
+  const verdictTitle = !health.ready ? '核心服务未通过就绪检查' : !controlAvailable ? '核心服务可用，但风险政策未配置' : exceptions.length ? '核心服务可用，但存在风险阻断' : !workersReady || !tradingConnectionsReady ? '只读控制台可用，但交易执行尚未就绪' : !telegramHealthy ? '交易管理可用，但 Telegram 审核通知受限' : !perptapeAvailable ? '交易管理可用，但 Perptape 机会源受限' : activeMonitoring ? '交易系统正在正常监控' : '核心服务可用，当前无运行中交易任务';
+  const verdictCopy = !health.ready ? '请先恢复数据库与服务状态，不要继续依赖旧数据。' : !controlAvailable ? `${friendlyApiError(control.error)} 新增风险保持关闭。` : exceptions.length ? `发现 ${exceptions.length} 项安全异常；受影响的新增风险会保持关闭。` : !workersReady || !tradingConnectionsReady ? `${workersDisabled ? 'Freqtrade worker 尚未启动' : 'Freqtrade worker 尚未通过检查'}；${!tradingConnectionsReady ? '至少一个交易所只读连接当前受限' : '交易所只读连接正常'}。系统不会把只读页面可访问误报为可执行交易。` : !telegramHealthy ? `${telegramFailureCopy} 不影响 Web 审核，也不会放宽任何审核或交易边界。` : !perptapeAvailable ? `${perptapeStatus}。现有交易任务仍可管理，但新的 Perptape 机会暂不可用。` : activeMonitoring ? '运行中的交易任务没有检测到保护、敞口或对账阻断。' : '当前没有需要监控的交易任务；系统不会把“无监控对象”误报为“监控正常”。';
   main.innerHTML = `<section class="page system-status-page"><header class="page-head"><div><p class="eyebrow">交易系统状态</p><h1>系统状态</h1><p class="lede">这里直接说明系统能否工作、哪些能力受限，以及是否需要处理。绿色表示当前证据正常；黄色表示能力受限；红色表示必须先处理；灰色表示当前没有监控对象。</p></div><div class="toolbar"><button class="secondary" data-refresh>刷新状态</button><a class="secondary" href="/risk" data-link>查看风险控制</a></div></header>
     <article class="home-status tone-${overallTone}"><div><p class="eyebrow">当前结论</p><h2>${escapeHtml(verdictTitle)}</h2><p>${escapeHtml(verdictCopy)}</p></div>${exceptions.length ? '<a class="primary" href="/campaigns/alerts" data-link>查看运行告警</a>' : !controlAvailable ? '<a class="secondary" href="/risk" data-link>查看风险控制</a>' : !workersReady || !tradingConnectionsReady ? '<a class="secondary" href="/venues" data-link>查看交易账户</a>' : !perptapeAvailable ? '<a class="secondary" href="/opportunities" data-link>查看 Perptape</a>' : '<span class="status-pill status-APPROVED">无需立即动作</span>'}</article>
     <div class="system-health-grid">${cards}</div>

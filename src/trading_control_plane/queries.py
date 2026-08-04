@@ -5,7 +5,7 @@ from decimal import Decimal
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import and_, or_, select, text, tuple_
+from sqlalchemy import and_, func, or_, select, text, tuple_
 
 from trading_control_plane.database import Database
 from trading_control_plane.domain import DomainRejected, PrincipalType, Role
@@ -329,6 +329,13 @@ class TradingQueries:
             reviewed_proposal_ids = set(
                 session.scalars(select(Approval.proposal_id).where(Approval.reviewer_id == user_id))
             )
+            approval_counts = dict(
+                session.execute(
+                    select(Approval.proposal_id, func.count(Approval.approval_id)).group_by(
+                        Approval.proposal_id
+                    )
+                ).all()
+            )
             result: list[dict[str, Any]] = []
             for proposal, instrument in values:
                 if not self.service.can_user(user_id, "view", proposal.account_id, proposal.venue):
@@ -336,6 +343,12 @@ class TradingQueries:
                 effective_status = _effective_proposal_status(proposal, current_time)
                 summary = self._proposal_summary(proposal, instrument)
                 summary["status"] = effective_status
+                summary["approval_count"] = int(
+                    approval_counts.get(proposal.proposal_id, 0)
+                )
+                summary["required_approvals"] = (
+                    2 if proposal.risk_tier == "HIGH" else 1
+                )
                 summary["actionable_for_current_user"] = bool(
                     effective_status == "PENDING_REVIEW"
                     and proposal.proposer_id != user_id
