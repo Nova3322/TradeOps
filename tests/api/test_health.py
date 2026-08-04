@@ -112,7 +112,7 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
 
     assert response.status_code == 200
     assert "交易控制台" in response.text
-    assert "/assets/app.js?v=96" in response.text
+    assert "/assets/app.js?v=97" in response.text
     assert "/assets/styles.css?v=43" in response.text
     assert 'aria-label="交易控制台首页"' in response.text
     assert '<a href="/" data-link><span>⌂</span>今日</a>' in response.text
@@ -242,8 +242,18 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
     assert "data-close-campaign" in app_javascript.text
     assert "/api/campaigns/${item.campaign_id}/close" in app_javascript.text
     assert "现在按这个顺序处理" in app_javascript.text
+    assert "api('/api/proposals?proposal_status=PENDING_REVIEW')" in app_javascript.text
+    assert "api('/api/proposals?proposal_status=APPROVED')" in app_javascript.text
+    assert "const canOperate = roles.includes('OPERATOR')" in app_javascript.text
+    assert "approvedAwaitingLaunch = canOperate" in app_javascript.text
+    assert (
+        "当前身份只能查看，处理与风险动作由交易运维人员负责"  # noqa: RUF001
+        in app_javascript.text
+    )
+    assert "真实下单${escapeHtml(liveOrderSendLabel)}" in app_javascript.text
+    assert "definition('真实下单', liveOrderSendLabel)" in app_javascript.text
     assert "没有必须立即处理的事项" in app_javascript.text
-    assert "当前作用域无异常" in app_javascript.text
+    assert "当前作用域无运行告警" in app_javascript.text
     assert "api('/api/campaign-exceptions')" in app_javascript.text
     assert "if (error.status === 403) return null" in app_javascript.text
     assert "全局风险恢复仍由管理员控制" in app_javascript.text

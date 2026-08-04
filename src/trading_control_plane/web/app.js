@@ -67,7 +67,8 @@ const ENGLISH_EXACT = new Map(Object.entries({
   '交易待启动':'Trade setup pending', '查看当前提案':'View current proposals',
   '批准不会自动下单。交易运维需要按当前账户事实重新风控、签发短期授权，再创建交易任务。':'Approval never places an order automatically. Trading operations must rerun risk checks against current account facts, issue short-lived authorization, and then create a trade.',
   '查看市场机会':'View market opportunities', '受影响交易任务':'Affected trades', '非本人待审核':'Independent reviews pending',
-  '运行中交易任务':'Active trades', '新增风险状态':'New-risk status', '处理顺序':'Priority order',
+  '运行中交易任务':'Active trades', '新增风险状态':'New-risk status', '风险政策':'Risk policy', '真实下单':'Live order sending',
+  '只读观察':'Read-only monitoring', '处理顺序':'Priority order',
   '现在按这个顺序处理':'Handle items in this order', '刷新当前数据':'Refresh data', '新的交易判断':'New trading thesis',
   '市场观察':'Market watch', '开始新的判断':'Start a new thesis', '继续观察市场机会':'Continue watching opportunities',
   '查看突破榜单机会':'View breakout opportunities', '创建人工提案':'Create manual proposal', '系统边界':'System controls',
@@ -1081,19 +1082,23 @@ async function renderHome() {
     if (error.status === 403) return null;
     throw error;
   });
-  const [proposalResponse, campaignResponse, exceptionResponse, riskControl] = await Promise.all([
-    api('/api/proposals'),
+  const [pendingResponse, approvedResponse, campaignResponse, exceptionResponse, riskControl, runtime] = await Promise.all([
+    api('/api/proposals?proposal_status=PENDING_REVIEW'),
+    api('/api/proposals?proposal_status=APPROVED'),
     api('/api/campaigns'),
     api('/api/campaign-exceptions'),
     riskControlRequest,
+    api('/api/runtime/status'),
   ]);
   const now = Date.now();
   const roles = roleNames();
   const canReview = roles.includes('REVIEWER') || roles.includes('SYSTEM_ADMIN');
   const canPropose = roles.includes('PROPOSER') || roles.includes('SYSTEM_ADMIN');
-  const liveProposals = proposalResponse.data.filter(item => item.environment === 'LIVE');
-  const pending = liveProposals.filter(item => item.status === 'PENDING_REVIEW' && new Date(item.expires_at).getTime() > now);
-  const approvedAwaitingLaunch = liveProposals.filter(item => item.status === 'APPROVED' && !item.campaign_id);
+  const canOperate = roles.includes('OPERATOR') || roles.includes('SYSTEM_ADMIN');
+  const pending = pendingResponse.data.filter(item => item.environment === 'LIVE');
+  const approvedAwaitingLaunch = canOperate
+    ? approvedResponse.data.filter(item => item.environment === 'LIVE' && !item.campaign_id)
+    : [];
   const actionableReviews = canReview ? pending.filter(item => item.actionable_for_current_user) : [];
   const systemReviewCount = actionableReviews.filter(item => item.source === 'SYSTEM').length;
   const manualReviewCount = actionableReviews.length - systemReviewCount;
@@ -1104,13 +1109,21 @@ async function renderHome() {
   const exceptions = exceptionResponse.data.filter(item => activeCampaignIds.has(item.campaign_id));
   const exceptionCampaigns = new Set(exceptions.map(item => item.campaign_id));
   const riskLimited = Boolean(riskControl && riskControl.policy.system_state !== 'NORMAL');
-  const clearScopeLabel = riskControl ? '当前安全' : '当前作用域无异常';
+  const riskPolicySummary = riskControl?.policy?.system_state === 'NORMAL'
+    ? '正常'
+    : riskControl ? riskControlStatusLabel(riskControl.policy.system_state) : '由管理员控制';
+  const liveOrderSendEnabled = runtime.capability_gates?.LIVE_ORDER_SEND?.status === 'ENABLED'
+    && runtime.external_boundaries?.execution?.live_order_send === true;
+  const liveOrderSendLabel = liveOrderSendEnabled ? '已开启' : '已关闭';
+  const clearScopeLabel = riskControl ? '当前未发现运行阻断' : '当前作用域无运行告警';
   const safety = exceptions.length
     ? {
         tone:'danger',
-        eyebrow:'风险提醒',
-        title:`${exceptionCampaigns.size} 个交易任务需要先处理`,
-        copy:`当前有 ${exceptions.length} 项阻断问题。相关新增风险保持关闭；先确认结果未知、仓位、保护和对账数据。`,
+        eyebrow:canOperate ? '风险提醒' : '只读观察',
+        title:canOperate ? `${exceptionCampaigns.size} 个交易任务需要先处理` : `${exceptionCampaigns.size} 个交易任务出现运行告警`,
+        copy:canOperate
+          ? `当前有 ${exceptions.length} 项阻断问题。相关新增风险保持关闭；先确认结果未知、仓位、保护和对账数据。`
+          : `当前有 ${exceptions.length} 项阻断问题。你可以查看事实，处理与风险动作由交易运维人员负责。`,
         href:'/campaigns/alerts',
         action:'查看运行告警',
       }
@@ -1146,30 +1159,34 @@ async function renderHome() {
               tone:'success',
               eyebrow:'交易运行中',
               title:`${clearScopeLabel}；${activeCampaigns.length} 个交易任务正在运行`,
-              copy:'没有派生异常。继续观察仓位、保护、意图和最近对账；需要降险时可随时减仓或退出。',
+              copy:canOperate
+                ? '没有派生异常。继续观察仓位、保护、意图和最近对账；需要降险时可随时减仓或退出。'
+                : '当前没有派生异常。你可以查看任务事实；减仓、退出和其他操作仍由交易运维人员负责。',
               href:'/campaigns',
               action:'查看运行中交易任务',
             }
           : {
               tone:'success',
-              eyebrow:'当前无待办',
-              title:`${clearScopeLabel}，没有必须立即处理的事项`,
-              copy:`系统没有发现阻断异常、待你审核的提案或运行中交易任务。${riskControl ? '' : '全局风险恢复仍由管理员控制。'} 可以继续观察机会。`,
+              eyebrow:canOperate ? '当前无待办' : '只读观察',
+              title:canOperate ? `${clearScopeLabel}，没有必须立即处理的事项` : '当前没有运行告警或运行中交易任务',
+              copy:canOperate
+                ? `系统没有发现阻断异常、待你审核的提案或运行中交易任务。${riskControl ? '' : '全局风险恢复仍由管理员控制。'} 可以继续观察机会。`
+                : '当前身份只查看市场与运行事实，不能启动交易、审核提案或改变风险状态。可以继续观察机会。',
               href:'/opportunities',
               action:'查看市场机会',
             };
   const priorityCards = [];
-  if (exceptions.length) priorityCards.push(`<a class="home-priority danger" href="/campaigns/alerts" data-link><span class="priority-number">1</span><div><small>严重运行告警</small><b>${exceptions.length} 项运行问题</b><p>影响 ${exceptionCampaigns.size} 个交易任务；结果未知、保护不足和对账差异不会被自动忽略。</p></div><strong>查看运行告警 →</strong></a>`);
+  if (exceptions.length) priorityCards.push(`<a class="home-priority danger" href="/campaigns/alerts" data-link><span class="priority-number">1</span><div><small>严重运行告警</small><b>${exceptions.length} 项运行问题</b><p>影响 ${exceptionCampaigns.size} 个交易任务；${canOperate ? '结果未知、保护不足和对账差异不会被自动忽略。' : '当前身份只能查看，处理与风险动作由交易运维人员负责。'}</p></div><strong>查看运行告警 →</strong></a>`);
   if (riskLimited) priorityCards.push(`<a class="home-priority attention" href="/risk" data-link><span class="priority-number">${priorityCards.length + 1}</span><div><small>新增风险受限</small><b>${escapeHtml(riskControlStatusLabel(riskControl.policy.system_state))}</b><p>${riskControl.restore_conditions.blockers.length ? `${riskControl.restore_conditions.blockers.length} 项恢复条件尚未满足。` : '恢复条件已满足，仍需完成受控审核与执行。'} 减仓和退出不受阻断。</p></div><strong>查看恢复条件 →</strong></a>`);
   if (actionableReviews.length) priorityCards.push(`<a class="home-priority attention" href="/reviews" data-link><span class="priority-number">${priorityCards.length + 1}</span><div><small>独立审核队列</small><b>${actionableReviews.length} 笔非本人提案等待审核</b><p>${expiringReviews.length ? `${expiringReviews.length} 笔将在 30 分钟内到期。` : `最早一笔到期于 ${fmtDate(nextReview.expires_at)}。`} 系统机会 ${systemReviewCount} 笔，人工判断 ${manualReviewCount} 笔。</p></div><strong>打开审核队列 →</strong></a>`);
   if (approvedAwaitingLaunch.length) priorityCards.push(`<a class="home-priority attention" href="/proposals" data-link><span class="priority-number">${priorityCards.length + 1}</span><div><small>交易待启动</small><b>${approvedAwaitingLaunch.length} 笔已批准提案尚未形成交易任务</b><p>先重新运行实时风险检查，再签发短期授权；缺少事实或 Gate 未满足时仍会阻断。</p></div><strong>查看当前提案 →</strong></a>`);
-  if (activeCampaigns.length) priorityCards.push(`<a class="home-priority" href="/campaigns" data-link><span class="priority-number">${priorityCards.length + 1}</span><div><small>持续观察</small><b>${activeCampaigns.length} 个运行中交易任务</b><p>${escapeHtml(activeCampaigns.slice(0, 3).map(item => `${item.venue} · ${fmtDirection(item.direction)} · ${fmtStatus(item.status)}`).join('；'))}</p></div><strong>查看当前仓位 →</strong></a>`);
+  if (activeCampaigns.length) priorityCards.push(`<a class="home-priority" href="/campaigns" data-link><span class="priority-number">${priorityCards.length + 1}</span><div><small>持续观察</small><b>${activeCampaigns.length} 个运行中交易任务</b><p>${escapeHtml(activeCampaigns.slice(0, 3).map(item => `${item.venue} · ${fmtDirection(item.direction)} · ${fmtStatus(item.status)}`).join('；'))}</p></div><strong>查看运行中任务 →</strong></a>`);
   if (!priorityCards.length) priorityCards.push(`<a class="home-priority clear" href="/opportunities" data-link><span class="priority-number">✓</span><div><small>当前无待办</small><b>继续观察，不必为了操作而操作</b><p>${canPropose ? '机会只是候选；只有形成清楚交易判断时才创建提案。' : '当前身份可以观察机会，但不能创建提案；如有判断请交由提案发起人保存参数。'}</p></div><strong>查看机会 →</strong></a>`);
   main.innerHTML = `<section class="page home-page"><article class="home-status tone-${safety.tone}"><div><p class="eyebrow">${safety.eyebrow}</p><h1>${escapeHtml(safety.title)}</h1><p>${escapeHtml(safety.copy)}</p></div><a class="primary" href="${safety.href}" data-link>${escapeHtml(safety.action)}</a></article>
-    <div class="stats home-stats"><div class="stat"><small>运行告警</small><b class="${exceptions.length ? 'danger-text' : ''}">${exceptionCampaigns.size}</b><span>${exceptions.length ? `${exceptions.length} 项问题` : '无运行告警 / 无需处理'}</span></div><div class="stat"><small>非本人待审核</small><b class="${expiringReviews.length ? 'warning-text' : ''}">${actionableReviews.length}</b><span>${expiringReviews.length ? `${expiringReviews.length} 笔即将到期` : canReview ? '创建者不可审核自己的提案' : '当前身份不是审核人'}</span></div><div class="stat"><small>运行中交易任务</small><b>${activeCampaigns.length}</b><span>${activeCampaigns.length ? '保护与对账需持续有效' : '当前没有活动仓位流程'}</span></div><div class="stat"><small>新增风险状态</small><b class="${riskLimited ? 'warning-text status-copy' : 'status-copy'}">${escapeHtml(riskControl ? riskControlStatusLabel(riskControl.policy.system_state) : '由管理员控制')}</b><span>${riskControl ? `自动加仓${escapeHtml(riskControlStatusLabel(riskControl.auto_add_gate.status))}` : '当前身份无全局恢复权限'}</span></div></div>
+    <div class="stats home-stats"><div class="stat"><small>运行告警</small><b class="${exceptions.length ? 'danger-text' : ''}">${exceptionCampaigns.size}</b><span>${exceptions.length ? `${exceptions.length} 项问题` : '无运行告警 / 无需处理'}</span></div><div class="stat"><small>非本人待审核</small><b class="${expiringReviews.length ? 'warning-text' : ''}">${actionableReviews.length}</b><span>${expiringReviews.length ? `${expiringReviews.length} 笔即将到期` : canReview ? '创建者不可审核自己的提案' : '当前身份不是审核人'}</span></div><div class="stat"><small>运行中交易任务</small><b>${activeCampaigns.length}</b><span>${activeCampaigns.length ? '保护与对账需持续有效' : '当前没有活动仓位流程'}</span></div><div class="stat"><small>风险政策</small><b class="${riskLimited ? 'warning-text status-copy' : 'status-copy'}">${escapeHtml(riskPolicySummary)}</b><span>真实下单${escapeHtml(liveOrderSendLabel)} · 自动加仓${escapeHtml(riskControl ? riskControlStatusLabel(riskControl.auto_add_gate.status) : '由管理员控制')}</span></div></div>
     <div class="home-layout"><section><div class="section-heading"><div><p class="eyebrow">处理顺序</p><h2>现在按这个顺序处理</h2></div><button class="secondary" data-refresh>刷新当前数据</button></div><div class="home-priority-list">${priorityCards.join('')}</div></section>
       <aside class="stack"><article class="card home-quick-start"><p class="eyebrow">${canPropose ? '新的交易判断' : '市场观察'}</p><h2>${canPropose ? '开始新的判断' : '继续观察市场机会'}</h2><p class="subtle">${canPropose ? '先看机会或写交易判断；这两条路径都只会创建提案，并进入独立审核。' : '当前身份只查看候选，不保存交易参数，也不会从这里新增风险。'}</p><div class="stacked-actions"><a class="primary" href="/opportunities" data-link>查看 Perptape 机会</a>${canPropose ? '<a class="secondary" href="/proposals/new" data-link>创建人工提案</a>' : ''}</div></article>
-        <article class="card home-boundary"><p class="eyebrow">系统边界</p><h2>当前控制状态</h2><dl class="definition-grid">${definition('站点环境', fmtEnvironment(authStatus?.environment, true))}${definition('风险政策', riskControl ? riskControlStatusLabel(riskControl.policy.system_state) : '由管理员控制')}${definition('自动加仓', riskControl ? riskControlStatusLabel(riskControl.auto_add_gate.status) : '由管理员控制')}${definition('安全原则', '数据缺失即阻断')}</dl><p class="safety-note">是否允许真实发送，由具体交易任务、短期授权、交易所配置和服务端控制开关共同决定。</p></article></aside></div></section>`;
+        <article class="card home-boundary"><p class="eyebrow">系统边界</p><h2>当前控制状态</h2><dl class="definition-grid">${definition('站点环境', fmtEnvironment(authStatus?.environment, true))}${definition('风险政策', riskPolicySummary)}${definition('真实下单', liveOrderSendLabel)}${definition('自动加仓', riskControl ? riskControlStatusLabel(riskControl.auto_add_gate.status) : '由管理员控制')}${definition('安全原则', '数据缺失即阻断')}</dl><p class="safety-note">页面只展示当前事实；任何真实发送仍需通过交易任务、短期授权、交易所配置和服务端 Gate 的逐项检查。</p></article></aside></div></section>`;
   document.querySelector('[data-refresh]')?.addEventListener('click', route);
 }
 
