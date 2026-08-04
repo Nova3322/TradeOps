@@ -1756,7 +1756,7 @@ def create_app(
     def binance_live_status(
         identity: SessionIdentity = identity_dependency,
     ) -> dict[str, Any]:
-        del identity
+        require_capability(identity, "venue.view", venue="BINANCE")
         return {
             "venue": "BINANCE",
             "environment": "LIVE",
@@ -1787,7 +1787,7 @@ def create_app(
     def binance_testnet_status(
         identity: SessionIdentity = identity_dependency,
     ) -> dict[str, Any]:
-        del identity
+        require_capability(identity, "venue.view", venue="BINANCE")
         return {
             "venue": "BINANCE",
             "environment": "TESTNET",
@@ -1962,7 +1962,7 @@ def create_app(
     def hyperliquid_live_status(
         identity: SessionIdentity = identity_dependency,
     ) -> dict[str, Any]:
-        del identity
+        require_capability(identity, "venue.view", venue="HYPERLIQUID")
         return {
             "venue": "HYPERLIQUID",
             "domain": "CORE",
@@ -1980,7 +1980,7 @@ def create_app(
     def hyperliquid_testnet_status(
         identity: SessionIdentity = identity_dependency,
     ) -> dict[str, Any]:
-        del identity
+        require_capability(identity, "venue.view", venue="HYPERLIQUID")
         return {
             "venue": "HYPERLIQUID",
             "domain": "CORE",
@@ -5359,8 +5359,16 @@ def create_app(
         def service_worker() -> FileResponse:
             return FileResponse(WEB_ROOT / "sw.js", media_type="application/javascript")
 
+        @app.get("/admin/users", include_in_schema=False)
+        def managed_users_web(
+            identity: SessionIdentity = identity_dependency,
+        ) -> FileResponse:
+            require_capability(identity, "access.manage")
+            return FileResponse(WEB_ROOT / "index.html")
+
         @app.get("/", include_in_schema=False)
         @app.get("/opportunities", include_in_schema=False)
+        @app.get("/opportunities/defaults", include_in_schema=False)
         @app.get("/proposals/new", include_in_schema=False)
         @app.get("/reviews", include_in_schema=False)
         @app.get("/campaigns", include_in_schema=False)
@@ -5374,7 +5382,6 @@ def create_app(
         @app.get("/venues", include_in_schema=False)
         @app.get("/venues/binance", include_in_schema=False)
         @app.get("/venues/hyperliquid", include_in_schema=False)
-        @app.get("/admin/users", include_in_schema=False)
         @app.get("/proposals/{proposal_id}", include_in_schema=False)
         @app.get("/campaigns/{campaign_id}", include_in_schema=False)
         def web_app(proposal_id: str | None = None, campaign_id: str | None = None) -> FileResponse:

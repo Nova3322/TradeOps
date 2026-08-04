@@ -44,6 +44,7 @@ async def exercise_access_management(database: Database) -> None:
     ) as client:
         await login(client, "admin")
         assert (await client.get("/api/capital")).status_code == 200
+        assert (await client.get("/admin/users")).status_code == 200
 
         created = await client.post(
             "/api/admin/users",
@@ -94,6 +95,7 @@ async def exercise_access_management(database: Database) -> None:
         assert (await client.get("/api/campaigns")).status_code == 403
         assert (await client.get("/api/capital")).status_code == 403
         assert (await client.get("/api/admin/users")).status_code == 403
+        assert (await client.get("/admin/users")).status_code == 403
 
         await login(client, "mixed-non-admin")
         assert (await client.get("/api/capital")).status_code == 200
@@ -132,3 +134,109 @@ def test_only_system_admin_manages_members_while_admin_keeps_highest_permissions
     database: Database,
 ) -> None:
     asyncio.run(exercise_access_management(database))
+
+
+async def exercise_six_identity_permission_matrix(database: Database) -> None:
+    service = TradingService(database)
+    admin_id = service.bootstrap_admin("matrix-admin", now=datetime.now(UTC))
+    app = access_app(database)
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://test"
+    ) as admin_http:
+        await login(admin_http, "matrix-admin")
+        member_ids: dict[str, str] = {}
+        for username, roles in {
+            "matrix-proposer": ["PROPOSER"],
+            "matrix-reviewer": ["REVIEWER"],
+            "matrix-treasury": ["TREASURY_ADMIN"],
+            "matrix-observer": ["OBSERVER"],
+            "matrix-disabled": ["OBSERVER"],
+        }.items():
+            response = await admin_http.post(
+                "/api/admin/users",
+                json={"username": username, "roles": roles},
+            )
+            assert response.status_code == 200, response.text
+            member_ids[username] = response.json()["user_id"]
+
+        endpoints = (
+            "/api/opportunities",
+            "/api/proposal-defaults",
+            "/api/proposals",
+            "/api/campaigns",
+            "/api/runtime/status",
+            "/api/venues/binance/status",
+            "/api/venues/binance/live/status",
+            "/api/venues/binance/testnet/status",
+            "/api/venues/hyperliquid/status",
+            "/api/venues/hyperliquid/live/status",
+            "/api/venues/hyperliquid/testnet/status",
+            "/api/capital",
+            "/api/admin/users",
+            "/admin/users",
+        )
+        allowed = {
+            "matrix-admin": set(endpoints),
+            "matrix-proposer": {
+                "/api/opportunities",
+                "/api/proposal-defaults",
+                "/api/proposals",
+            },
+            "matrix-reviewer": {"/api/proposals", "/api/runtime/status"},
+            "matrix-treasury": {"/api/capital"},
+            "matrix-observer": {
+                "/api/opportunities",
+                "/api/proposals",
+                "/api/campaigns",
+                "/api/runtime/status",
+                "/api/venues/binance/status",
+                "/api/venues/binance/live/status",
+                "/api/venues/binance/testnet/status",
+                "/api/venues/hyperliquid/status",
+                "/api/venues/hyperliquid/live/status",
+                "/api/venues/hyperliquid/testnet/status",
+            },
+        }
+        for username, permitted in allowed.items():
+            async with AsyncClient(
+                transport=ASGITransport(app=app), base_url="http://test"
+            ) as member_http:
+                await login(member_http, username)
+                for endpoint in endpoints:
+                    response = await member_http.get(endpoint)
+                    expected_status = (
+                        503 if endpoint == "/api/opportunities" else 200
+                    ) if endpoint in permitted else 403
+                    assert response.status_code == expected_status, (
+                        username,
+                        endpoint,
+                        response.text,
+                    )
+                if username != "matrix-admin":
+                    denied = await member_http.get("/api/admin/users")
+                    assert "matrix-admin" not in denied.text
+                    assert "matrix-proposer" not in denied.text
+
+        async with AsyncClient(
+            transport=ASGITransport(app=app), base_url="http://test"
+        ) as disabled_http:
+            await login(disabled_http, "matrix-disabled")
+            disabled = await admin_http.put(
+                f"/api/admin/users/{member_ids['matrix-disabled']}/access",
+                json={"roles": ["OBSERVER"], "active": False},
+            )
+            assert disabled.status_code == 200, disabled.text
+            assert (await disabled_http.get("/api/auth/session")).status_code == 401
+            assert (await disabled_http.get("/admin/users")).status_code == 401
+            denied_login = await disabled_http.post(
+                "/api/auth/mock/login", json={"username": "matrix-disabled"}
+            )
+            assert denied_login.status_code == 401
+
+    assert service.can_user(admin_id, "user.manage") is True
+
+
+def test_six_identity_permission_matrix_is_enforced_by_api_and_member_route(
+    database: Database,
+) -> None:
+    asyncio.run(exercise_six_identity_permission_matrix(database))

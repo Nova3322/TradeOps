@@ -1,5 +1,37 @@
 # Trading console product QA
 
+## 2026-08-04: six-identity access boundary and login recovery
+
+### P0 / P1 / P2 status
+
+- P0: none open in this batch.
+- P1 closed: Binance and Hyperliquid LIVE/TESTNET status endpoints now require `venue.view`; hiding the trading-account navigation is no longer the only control.
+- P1 closed: `/admin/users` now enforces `SYSTEM_ADMIN` on the server. Non-admin direct requests return 403 without rendering the member shell or leaking member data.
+- P1 closed: the previously missing `/opportunities/defaults` deep link now serves the application shell and remains capability-gated by the existing client and API checks.
+- P2 closed: a disabled or unavailable account now receives a specific, non-enumerating access message instead of a generic system-failure message; the message clears when the username is edited.
+- P1 external: Hyperliquid read-only health is currently rate-limited and NoTilt production scope remains configuration-incomplete. Both are shown unavailable and remain fail closed.
+- P2 open: this in-app browser surface remains fixed at desktop width. Responsive behavior is covered by existing CSS, but a real mobile-width visual pass is still unverified and is not counted as browser proof.
+
+### Five-dimensional evidence
+
+- Code: four venue status routes enforce `venue.view`; the member web route enforces `access.manage`; the default-settings deep link is registered; login copy and recovery behavior are user-facing and localized.
+- API: the local six-identity matrix returned the expected status codes: administrator has member/venue/capital access; proposer and reviewer receive 403 for member/venue/capital; treasury receives only capital; observer receives read-only venue access; disabled login returns 401.
+- Actual pages: administrator, proposer, reviewer, treasury, observer, and disabled-member states were opened in the in-app browser. Each active identity sees only its assigned navigation and a role-specific Today page.
+- End-to-end runtime: local port 8014 is live and ready on the current code. Perptape and Binance are read-only connected; Hyperliquid reports `HYPERLIQUID_RATE_LIMITED`; NoTilt reports `CONFIG_INCOMPLETE`.
+- Tests: 26 focused API, access, Binance, and Hyperliquid tests passed. Ruff, JavaScript syntax, and diff checks passed.
+
+### Accepted screenshots
+
+- Administrator Today: `/Users/vireo/.codex/visualizations/2026/08/02/019fc2e6-1567-7381-a0b6-73935a4ca083/trading-permission-audit-20260804/01-admin-today.png`.
+- Proposer Today: `/Users/vireo/.codex/visualizations/2026/08/02/019fc2e6-1567-7381-a0b6-73935a4ca083/trading-permission-audit-20260804/02-proposer-today.png`.
+- Reviewer Today: `/Users/vireo/.codex/visualizations/2026/08/02/019fc2e6-1567-7381-a0b6-73935a4ca083/trading-permission-audit-20260804/03-reviewer-today.png`.
+- Treasury Today: `/Users/vireo/.codex/visualizations/2026/08/02/019fc2e6-1567-7381-a0b6-73935a4ca083/trading-permission-audit-20260804/04-treasury-today.png`.
+- Observer Today: `/Users/vireo/.codex/visualizations/2026/08/02/019fc2e6-1567-7381-a0b6-73935a4ca083/trading-permission-audit-20260804/05-observer-today.png`.
+- Disabled login before/after: `/Users/vireo/.codex/visualizations/2026/08/02/019fc2e6-1567-7381-a0b6-73935a4ca083/trading-permission-audit-20260804/06-disabled-login-before.png` and `/Users/vireo/.codex/visualizations/2026/08/02/019fc2e6-1567-7381-a0b6-73935a4ca083/trading-permission-audit-20260804/07-disabled-login-fixed.png`.
+- Administrator member page: `/Users/vireo/.codex/visualizations/2026/08/02/019fc2e6-1567-7381-a0b6-73935a4ca083/trading-permission-audit-20260804/08-admin-members.png`.
+
+final result: desktop permission batch passed; real mobile-width and external Telegram acceptance remain open
+
 ## 2026-08-04: proposal truth and risk-recovery lifecycle
 
 ### P0 / P1 / P2 status

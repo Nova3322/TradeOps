@@ -112,16 +112,18 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
 
     assert response.status_code == 200
     assert "交易控制台" in response.text
-    assert "/assets/app.js?v=62" in response.text
+    assert "/assets/app.js?v=63" in response.text
     assert "/assets/styles.css?v=29" in response.text
     assert '<a href="/" data-link><span>⌂</span>今日</a>' in response.text
     assert 'id="mobile-nav-toggle"' in response.text
     assert 'id="confirm-dialog"' in response.text
 
-    for route in ("/venues", "/venues/hyperliquid", "/admin/users"):
+    for route in ("/venues", "/venues/hyperliquid", "/opportunities/defaults"):
         routed_shell = get(app, route)
         assert routed_shell.status_code == 200
         assert "交易控制台" in routed_shell.text
+
+    assert get(app, "/admin/users").status_code == 401
 
     app_javascript = get(app, "/assets/app.js")
     assert app_javascript.status_code == 200
@@ -151,6 +153,9 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
     assert "error.handled = response.status === 401" in app_javascript.text
     assert "function handleUnauthorizedResponse" in app_javascript.text
     assert "function confirmAction" in app_javascript.text
+    assert "无法登录：账号不存在、尚未分配岗位或已停用" in app_javascript.text  # noqa: RUF001
+    assert 'placeholder="请输入分配给你的内部用户名"' in app_javascript.text
+    assert "loginForm.querySelector('.form-error').textContent = ''" in app_javascript.text
     assert "function partitionCapitalRecords" in app_javascript.text
     assert "function capitalSourceSlots" in app_javascript.text
     assert "function capitalHistorySeries" in app_javascript.text
@@ -252,7 +257,7 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
 
     service_worker = get(app, "/sw.js")
     assert service_worker.status_code == 200
-    assert "trading-shell-v63" in service_worker.text
+    assert "trading-shell-v64" in service_worker.text
     assert "self.skipWaiting()" in service_worker.text
     assert "self.clients.claim()" in service_worker.text
     assert "await fetch(event.request)" in service_worker.text

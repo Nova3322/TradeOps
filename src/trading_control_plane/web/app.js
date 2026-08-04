@@ -51,6 +51,8 @@ const ENGLISH_EXACT = new Map(Object.entries({
   '页面不存在':'Page not found', '返回机会页':'Back to Opportunities', '内部访问':'Internal access',
   '进入交易控制台':'Open Trading Console', '需要统一身份登录':'Identity verification required',
   '内部用户名':'Internal username', '进入控制台':'Open console', '统一身份服务尚未接入。':'The identity service is not connected.',
+  '请输入分配给你的内部用户名':'Enter the internal username assigned to you',
+  '无法登录：账号不存在、尚未分配岗位或已停用。请联系系统管理员确认成员状态。':'Unable to sign in: this account is unavailable, has no assigned role, or is disabled. Ask a system administrator to confirm your access.',
   '审核工作台':'Review workspace', '当前没有需要你审核的提案':'There are no proposals waiting for your review',
   '进入审核队列':'Open review queue', '提案工作台':'Proposal workspace', '从机会开始形成交易判断':'Start a trading thesis from an opportunity',
   '查看机会':'View opportunities', '当前可见提案':'Visible proposals', '待审核':'Pending review', '资金工作台':'Capital workspace',
@@ -457,6 +459,7 @@ const actionErrorGuidance = {
   RISK_RESERVATION_UNRESOLVED:'风险预留仍处于不确定或待确认状态，必须先完成对账。',
 };
 const apiErrorGuidance = {
+  LOGIN_DENIED:'无法登录：账号不存在、尚未分配岗位或已停用。请联系系统管理员确认成员状态。',
   RISK_POLICY_MISSING:'风险政策尚未配置，因此系统已暂停创建和执行新增风险。请联系系统管理员完成配置。',
   PERPTAPE_NOT_CONFIGURED:'Perptape 尚未配置。人工提案仍可使用，外部机会将在完成配置后恢复。',
   PERPTAPE_UNAVAILABLE:'暂时无法连接 Perptape。人工提案仍可使用，请稍后重新检查外部机会。',
@@ -869,9 +872,13 @@ function renderLogin() {
     <p class="eyebrow" style="margin-top:18px">内部访问</p><h1>进入交易控制台</h1>
     <p class="lede">系统不开放外部注册。只有已经分配岗位和数据范围的内部成员可以进入。</p>
     ${sessionNotice ? `<div class="callout" role="status">${escapeHtml(sessionNotice)}</div>` : ''}
-    ${authStatus.mock_identity_available ? `<form id="login-form"><label>内部用户名<input name="username" autocomplete="username" required placeholder="reviewer-1"></label><button class="primary">进入控制台</button><div class="form-error" role="alert"></div></form>` : '<div class="callout">统一身份服务尚未接入。</div>'}
+    ${authStatus.mock_identity_available ? `<form id="login-form"><label>内部用户名<input name="username" autocomplete="username" required placeholder="请输入分配给你的内部用户名"></label><button class="primary">进入控制台</button><div class="form-error" role="alert"></div></form>` : '<div class="callout">统一身份服务尚未接入。</div>'}
   </div></section>`;
-  document.querySelector('#login-form')?.addEventListener('submit', async (event) => {
+  const loginForm = document.querySelector('#login-form');
+  loginForm?.querySelector('input[name="username"]')?.addEventListener('input', () => {
+    loginForm.querySelector('.form-error').textContent = '';
+  });
+  loginForm?.addEventListener('submit', async (event) => {
     event.preventDefault();
     const form = event.currentTarget;
     const button = form.querySelector('button');
