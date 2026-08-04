@@ -112,7 +112,7 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
 
     assert response.status_code == 200
     assert "交易控制台" in response.text
-    assert "/assets/app.js?v=98" in response.text
+    assert "/assets/app.js?v=99" in response.text
     assert "/assets/styles.css?v=43" in response.text
     assert 'aria-label="交易控制台首页"' in response.text
     assert '<a href="/" data-link><span>⌂</span>今日</a>' in response.text
@@ -178,6 +178,10 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
     assert "error.handled = response.status === 401" in app_javascript.text
     assert "function handleUnauthorizedResponse" in app_javascript.text
     assert "function confirmAction" in app_javascript.text
+    assert "批准这份冻结提案？" in app_javascript.text
+    assert "最高管理员直接批准本人提案" in app_javascript.text
+    assert "批准前需要再次确认；不会直接下单" in app_javascript.text
+    assert "二次强验证" not in app_javascript.text
     assert "无法登录：账号不存在、尚未分配岗位或已停用" in app_javascript.text  # noqa: RUF001
     assert 'placeholder="请输入分配给你的内部用户名"' in app_javascript.text
     assert "loginForm.querySelector('.form-error').textContent = ''" in app_javascript.text
@@ -319,7 +323,7 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
 
     service_worker = get(app, "/sw.js")
     assert service_worker.status_code == 200
-    assert "trading-shell-v79" in service_worker.text
+    assert "trading-shell-v80" in service_worker.text
     assert "self.skipWaiting()" in service_worker.text
     assert "self.clients.claim()" in service_worker.text
     assert "await fetch(event.request)" in service_worker.text
