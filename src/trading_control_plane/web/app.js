@@ -211,6 +211,16 @@ const ENGLISH_EXACT = new Map(Object.entries({
   '这些余额、仓位、订单与成交不能作为实时交易依据。恢复只读连接并完成新一轮同步后，页面才会重新标记为当前事实。':'These balances, positions, orders, and fills are not live trading facts. The page returns to current status only after the read-only connection and a fresh sync recover.',
   '当前账户没有持仓；零仓位行情不会冒充当前仓位。':'There are no open positions. Zero-position market observations are not shown as positions.',
   '当前账户没有未完成委托。':'There are no open orders.', '最近订单记录':'Recent order history', '查看记录':'View history',
+  '最后快照中的仓位与风险保护':'Positions and protection in the last snapshot',
+  '最后一次保存快照中没有持仓；这不能确认当前账户仍为空仓。':'The last saved snapshot has no position; this does not confirm that the account is currently flat.',
+  '最后快照中的委托':'Orders in the last snapshot',
+  '最后一次保存快照中没有未完成委托；这不能确认当前仍无挂单。':'The last saved snapshot has no open orders; this does not confirm that there are currently no open orders.',
+  '最后快照中的订单记录':'Order history in the last snapshot',
+  '最后快照中的成交记录':'Fills in the last snapshot',
+  '最后一次保存快照中没有成交记录；这不代表连接中断后没有成交。':'The last saved snapshot has no fills; this does not mean no fills occurred after the connection was lost.',
+  '最后快照中的资金费':'Funding in the last snapshot',
+  '最后一次保存快照中没有资金费记录；这不代表连接中断后没有资金费。':'The last saved snapshot has no funding records; this does not mean no funding occurred after the connection was lost.',
+  '最后快照的对账差异':'Reconciliation differences in the last snapshot',
   '已确认':'Confirmed', '数量 / 入场':'Quantity / entry', '保护':'Protection',
   '足额':'Fully covered', '不足':'Insufficient', '无保护数据':'No protection data',
   '成交 / 委托':'Filled / ordered', '方向 / 数量':'Side / quantity',
@@ -2480,14 +2490,25 @@ function venueFactSections(facts, {snapshotMode = false, historyIncomplete = fal
   const fills = facts.fills.map(item => `<tr><td>${escapeHtml(item.venue_fill_id)}</td><td>${escapeHtml(item.symbol)}</td><td>${escapeHtml(fmtSide(item.side))} ${fmtNumber(item.quantity)}</td><td>${fmtNumber(item.price)}</td><td>${fmtNumber(item.fee)} ${escapeHtml(item.fee_currency)}</td><td>${fmtDate(item.executed_at)}</td></tr>`).join('');
   const funding = facts.funding.map(item => `<tr><td>${escapeHtml(item.venue_payment_id)}</td><td>${escapeHtml(item.symbol)}</td><td>${fmtNumber(item.amount)} ${escapeHtml(item.currency)}</td><td>${fmtDate(item.paid_at)}</td></tr>`).join('');
   const reconciliation = facts.reconciliation;
+  const positionTitle = snapshotMode ? '最后快照中的仓位与风险保护' : '当前仓位与风险保护';
+  const positionEmpty = snapshotMode ? '最后一次保存快照中没有持仓；这不能确认当前账户仍为空仓。' : '当前账户没有持仓；零仓位行情不会冒充当前仓位。';
+  const orderTitle = snapshotMode ? '最后快照中的委托' : '当前委托';
+  const orderEmpty = snapshotMode ? '最后一次保存快照中没有未完成委托；这不能确认当前仍无挂单。' : '当前账户没有未完成委托。';
+  const orderHistoryDescription = currentLanguage === 'en'
+    ? `${historicalOrderRows.length} filled, cancelled, rejected, or expired records${snapshotMode ? ' from the last snapshot; they do not confirm current open orders' : '; they are not current open orders'}`
+    : `${historicalOrderRows.length} 条已成交、取消、拒绝或过期记录；${snapshotMode ? '仅表示最后快照，不代表当前挂单' : '不计入当前委托'}`;
+  const fillTitle = snapshotMode ? '最后快照中的成交记录' : historyIncomplete ? '已保存成交' : '最近成交';
+  const fillEmpty = snapshotMode ? '最后一次保存快照中没有成交记录；这不代表连接中断后没有成交。' : historyIncomplete ? '当前没有已保存的成交；这不代表交易所没有历史成交。' : '当前没有已保存的成交记录。';
+  const fundingTitle = snapshotMode ? '最后快照中的资金费' : historyIncomplete ? '已保存资金费' : '资金费';
+  const fundingEmpty = snapshotMode ? '最后一次保存快照中没有资金费记录；这不代表连接中断后没有资金费。' : historyIncomplete ? '当前没有已保存的资金费；这不代表交易所没有历史资金费。' : '当前没有已保存的资金费记录。';
   return `<div class="stats"><div class="stat"><small>权益</small><b>${fmtNumber(facts.equity?.equity)} ${escapeHtml(facts.equity?.currency || '')}</b></div><div class="stat"><small>可用余额</small><b>${fmtNumber(facts.equity?.available_balance)}</b></div><div class="stat"><small>权益状态</small><b style="font-size:14px">${escapeHtml(snapshotMode ? '历史快照' : factStatusLabel(facts.equity?.fact_status))}</b></div><div class="stat"><small>最近对账</small><b style="font-size:14px" class="${reconciliation?.status === 'MATCH' && !snapshotMode ? 'direction-long' : reconciliation ? 'warning-text' : ''}">${escapeHtml(reconciliation ? snapshotMode ? '历史结果' : fmtStatus(reconciliation.status) : '未运行')}</b><span>${fmtDate(reconciliation?.completed_at)}</span></div></div>
-    ${reconciliation?.differences?.length ? `<article class="danger-note"><b>对账差异</b><ul>${reconciliation.differences.map(item => `<li>${escapeHtml(item)}</li>`).join('')}</ul></article>` : ''}
-    ${factTable('当前仓位与风险保护', '<th>标的</th><th>数量 / 入场</th><th>标记价</th><th>数据状态</th><th>保护</th><th>更新时间</th>', positions, '当前账户没有持仓；零仓位行情不会冒充当前仓位。')}
-    ${factTable('当前委托', '<th>交易所订单</th><th>标的</th><th>状态</th><th>成交 / 委托</th><th>关联操作</th><th>更新时间</th>', orders, '当前账户没有未完成委托。')}
-    ${orderHistory ? `<details class="operation-toolbox venue-order-history"><summary><span><b>最近订单记录</b><small>${historicalOrderRows.length} 条已成交、取消、拒绝或过期记录，不计入当前委托</small></span><strong>查看记录</strong></summary><div class="toolbox-content"><div class="table-scroll-hint">左右滑动查看完整订单记录</div><div class="table-wrap is-scrollable"><table><thead><tr><th>交易所订单</th><th>标的</th><th>状态</th><th>成交 / 委托</th><th>关联操作</th><th>更新时间</th></tr></thead><tbody>${orderHistory}</tbody></table></div></div></details>` : ''}
+    ${reconciliation?.differences?.length ? `<article class="danger-note"><b>${snapshotMode ? '最后快照的对账差异' : '对账差异'}</b><ul>${reconciliation.differences.map(item => `<li>${escapeHtml(item)}</li>`).join('')}</ul></article>` : ''}
+    ${factTable(positionTitle, '<th>标的</th><th>数量 / 入场</th><th>标记价</th><th>数据状态</th><th>保护</th><th>更新时间</th>', positions, positionEmpty)}
+    ${factTable(orderTitle, '<th>交易所订单</th><th>标的</th><th>状态</th><th>成交 / 委托</th><th>关联操作</th><th>更新时间</th>', orders, orderEmpty)}
+    ${orderHistory ? `<details class="operation-toolbox venue-order-history"><summary><span><b>${snapshotMode ? '最后快照中的订单记录' : '最近订单记录'}</b><small>${escapeHtml(orderHistoryDescription)}</small></span><strong>查看记录</strong></summary><div class="toolbox-content"><div class="table-scroll-hint">左右滑动查看完整订单记录</div><div class="table-wrap is-scrollable"><table><thead><tr><th>交易所订单</th><th>标的</th><th>状态</th><th>成交 / 委托</th><th>关联操作</th><th>更新时间</th></tr></thead><tbody>${orderHistory}</tbody></table></div></div></details>` : ''}
     ${historyIncomplete ? '<article class="callout venue-history-warning"><b>历史记录尚未补全</b><p>以下成交与资金费只代表已经保存的记录，不能据此判断完整历史；余额、仓位和当前委托不受影响。</p></article>' : ''}
-    ${factTable(historyIncomplete ? '已保存成交' : '最近成交', '<th>成交编号</th><th>标的</th><th>方向 / 数量</th><th>价格</th><th>手续费</th><th>成交时间</th>', fills, historyIncomplete ? '当前没有已保存的成交；这不代表交易所没有历史成交。' : '当前没有已保存的成交记录。')}
-    ${factTable(historyIncomplete ? '已保存资金费' : '资金费', '<th>支付编号</th><th>标的</th><th>金额</th><th>支付时间</th>', funding, historyIncomplete ? '当前没有已保存的资金费；这不代表交易所没有历史资金费。' : '当前没有已保存的资金费记录。')}`;
+    ${factTable(fillTitle, '<th>成交编号</th><th>标的</th><th>方向 / 数量</th><th>价格</th><th>手续费</th><th>成交时间</th>', fills, fillEmpty)}
+    ${factTable(fundingTitle, '<th>支付编号</th><th>标的</th><th>金额</th><th>支付时间</th>', funding, fundingEmpty)}`;
 }
 
 function factTable(title, headers, rows, emptyCopy = '当前没有已保存的数据。') {

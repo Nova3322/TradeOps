@@ -112,8 +112,8 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
 
     assert response.status_code == 200
     assert "交易控制台" in response.text
-    assert "/assets/app.js?v=74" in response.text
-    assert "/assets/styles.css?v=35" in response.text
+    assert "/assets/app.js?v=75" in response.text
+    assert "/assets/styles.css?v=36" in response.text
     assert '<a href="/" data-link><span>⌂</span>今日</a>' in response.text
     assert 'id="mobile-nav-toggle"' in response.text
     assert 'id="confirm-dialog"' in response.text
@@ -762,6 +762,73 @@ def test_system_and_venue_pages_distinguish_read_only_snapshots_from_live_execut
     assert "venue-technical-detail" in source
     assert "左右滑动查看完整${escapeHtml(title)}" in source
     assert "左右滑动查看完整订单记录" in source
+    assert "最后一次保存快照中没有持仓；这不能确认当前账户仍为空仓。" in source  # noqa: RUF001
+    assert "最后一次保存快照中没有未完成委托；这不能确认当前仍无挂单。" in source  # noqa: RUF001
+    styles = app_path.with_name("styles.css").read_text()
+    assert ".venue-status-stats { grid-template-columns: 1fr; }" in styles
+
+
+def test_venue_snapshot_empty_states_do_not_claim_current_account_state() -> None:
+    node = shutil.which("node")
+    assert node is not None
+    app_path = Path(__file__).parents[2] / "src" / "trading_control_plane" / "web" / "app.js"
+    script = textwrap.dedent(
+        r"""
+        import assert from "node:assert/strict";
+        import fs from "node:fs";
+        import vm from "node:vm";
+
+        const source = fs.readFileSync(process.argv[1], "utf8");
+        const from = source.indexOf("function venueFactSections");
+        const to = source.indexOf("\nfunction accessRoleOptions", from);
+        assert.notEqual(from, -1);
+        assert.notEqual(to, -1);
+        const context = vm.createContext({
+          currentLanguage: "zh-CN",
+          escapeHtml: value => String(value ?? ""),
+          fmtNumber: value => String(value ?? "—"),
+          fmtStatus: value => String(value ?? ""),
+          factStatusLabel: value => String(value ?? ""),
+          fmtDate: value => String(value ?? "—"),
+          fmtSide: value => String(value ?? ""),
+          shortId: value => String(value ?? ""),
+        });
+        vm.runInContext(
+          source.slice(from, to) + "; this.renderVenueSections = venueFactSections;",
+          context,
+        );
+        const emptyFacts = {
+          equity:null, reconciliation:null, positions:[], orders:[], fills:[], funding:[],
+        };
+        const snapshot = context.renderVenueSections(emptyFacts, {snapshotMode:true});
+        assert.match(snapshot, /最后快照中的仓位与风险保护/);
+        assert.match(snapshot, /不能确认当前账户仍为空仓/);
+        assert.match(snapshot, /不能确认当前仍无挂单/);
+        assert.match(snapshot, /这不代表连接中断后没有成交/);
+        assert.match(snapshot, /这不代表连接中断后没有资金费/);
+        assert.doesNotMatch(snapshot, /当前账户没有持仓/);
+        assert.doesNotMatch(snapshot, /当前账户没有未完成委托/);
+
+        const current = context.renderVenueSections(emptyFacts, {snapshotMode:false});
+        assert.match(current, /当前账户没有持仓/);
+        assert.match(current, /当前账户没有未完成委托/);
+
+        context.currentLanguage = "en";
+        const snapshotWithHistory = context.renderVenueSections(
+          {...emptyFacts, orders:[{status:"FILLED", venue_order_id:"1"}]},
+          {snapshotMode:true},
+        );
+        assert.match(snapshotWithHistory, /from the last snapshot/);
+        assert.match(snapshotWithHistory, /do not confirm current open orders/);
+        """
+    )
+    completed = subprocess.run(  # noqa: S603
+        [node, "--input-type=module", "-e", script, str(app_path)],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stderr
 
 
 def test_web_request_lifecycle_in_node() -> None:

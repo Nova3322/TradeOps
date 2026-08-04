@@ -644,6 +644,7 @@ dialog::backdrop { background: rgba(4, 12, 10, .56); backdrop-filter: blur(3px);
 }
 
 @media (max-width: 480px) {
+  .venue-status-stats { grid-template-columns: 1fr; }
   .form-section, .advanced-form { padding: 21px 18px; }
   .rationale-field { margin-inline: 18px; }
   .proposal-compose .form-error { margin-inline: 18px; }
