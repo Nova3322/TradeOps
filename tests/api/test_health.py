@@ -112,8 +112,8 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
 
     assert response.status_code == 200
     assert "交易控制台" in response.text
-    assert "/assets/app.js?v=71" in response.text
-    assert "/assets/styles.css?v=34" in response.text
+    assert "/assets/app.js?v=72" in response.text
+    assert "/assets/styles.css?v=35" in response.text
     assert '<a href="/" data-link><span>⌂</span>今日</a>' in response.text
     assert 'id="mobile-nav-toggle"' in response.text
     assert 'id="confirm-dialog"' in response.text
@@ -277,7 +277,7 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
 
     service_worker = get(app, "/sw.js")
     assert service_worker.status_code == 200
-    assert "trading-shell-v65" in service_worker.text
+    assert "trading-shell-v66" in service_worker.text
     assert "self.skipWaiting()" in service_worker.text
     assert "self.clients.claim()" in service_worker.text
     assert "await fetch(event.request)" in service_worker.text
@@ -747,6 +747,18 @@ def test_system_and_venue_pages_distinguish_read_only_snapshots_from_live_execut
     assert "Number(item.quantity) !== 0" in source
     assert "不计入当前委托" in source
     assert "当前账户没有未完成委托" in source
+    assert "执行由 Freqtrade worker 负责；本页不能下单" in source  # noqa: RUF001
+    assert "执行底座为 Freqtrade；控制面尚未接入 worker" in source  # noqa: RUF001
+    assert "status.execution_backend === 'FREQTRADE'" in source
+    assert "status.worker_configured" in source
+    assert "核心市场${status.hip3_available ? ` + HIP-3" in source
+    assert "当前账户事实可用；历史记录待补全" in source  # noqa: RUF001
+    assert "以下成交与资金费只代表已经保存的记录" in source
+    assert "<b>默认账户</b>" in source
+    assert "<b>${escapeHtml(accountId)}</b>" not in source
+    assert "venue-technical-detail" in source
+    assert "左右滑动查看完整${escapeHtml(title)}" in source
+    assert "左右滑动查看完整订单记录" in source
 
 
 def test_web_request_lifecycle_in_node() -> None:

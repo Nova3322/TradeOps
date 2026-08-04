@@ -186,7 +186,12 @@ button:disabled { opacity: .52; cursor: not-allowed; }
 .account-sync-note.is-active .status-dot { background: var(--accent); }
 .account-sync-note b { display: block; font-size: 12px; }
 .account-sync-note p { margin: 4px 0 0; color: var(--muted); font-size: 11px; line-height: 1.5; }
+.venue-technical-detail { margin-top: 8px; color: var(--muted); font-size: 10px; }
+.venue-technical-detail summary { width: fit-content; color: var(--accent); cursor: pointer; font-weight: 800; }
+.venue-technical-detail code { display: block; margin-top: 6px; overflow-wrap: anywhere; }
 .venue-snapshot-warning { margin: 0 0 24px; }
+.venue-history-warning { margin-top: 28px; }
+.venue-history-warning p { margin: 5px 0 0; }
 .venue-order-history { margin-top: 28px; border: 1px solid var(--line); border-radius: 14px; background: var(--panel); }
 .venue-order-history .toolbox-content { padding-top: 18px; }
 .venue-scope-card { display: grid; grid-template-columns: minmax(230px, .75fr) minmax(350px, 1.25fr); gap: 18px; margin-bottom: 24px; }

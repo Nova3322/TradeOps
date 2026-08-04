@@ -2417,40 +2417,53 @@ async function renderVenueFacts() {
   const connection = runtime?.data?.connections?.[venue] || null;
   const connected = Boolean(connection?.available);
   const connectionLabel = fmtConnectionCategory(connection?.category);
-  const connectionEvidence = connection?.error_code ? `错误类别：<code translate="no">${escapeHtml(connection.error_code)}</code>。` : '';
+  const historyIncomplete = connection?.category === 'READ_ONLY_CONNECTED_HISTORY_INCOMPLETE';
+  const connectionEvidence = connection?.error_code
+    ? `<details class="venue-technical-detail"><summary>查看技术分类</summary><code translate="no">${escapeHtml(connection.error_code)}</code></details>`
+    : '';
   const connectionReason = connection
     ? `${fmtOperationalCopy(connection.reason)} 负责：${connection.owner_role}；下一步：${fmtOperationalCopy(connection.next_action)}`
     : '当前身份无法读取统一连接探针；页面仅展示已保存账户事实，不能据此声称实时已连接。';
   const lastSync = latestVenueObservation(facts);
   const snapshotMode = !connected && Boolean(lastSync);
+  const hip3Dexes = Array.isArray(status.hip3_dexes) ? status.hip3_dexes : [];
   const venueDetail = venue === 'BINANCE'
     ? (accountModeLabels[status.account_mode] || '账户模式未知')
-    : `核心市场${status.dex ? ` · ${status.dex}` : ''}`;
+    : `核心市场${status.hip3_available ? ` + HIP-3${hip3Dexes.length ? `（${hip3Dexes.join('、')}）` : ''}` : ''}`;
+  const executionDetail = status.execution_backend === 'FREQTRADE'
+    ? status.worker_configured
+      ? '执行由 Freqtrade worker 负责；本页不能下单'
+      : '执行底座为 Freqtrade；控制面尚未接入 worker，本页不能下单'
+    : '旧直连执行已隔离于当前只读页面';
   const syncInterval = Number(status.automatic_sync_interval_seconds || 0);
   const automaticSyncCopyLocalized = status.automatic_sync_enabled && connected
-    ? localizedText(`系统约每 ${syncInterval} 秒读取一次完整账户；新出现的持仓和委托会自动纳入，最近成交与资金费同步保存。`)
+    ? historyIncomplete
+      ? localizedText(`系统约每 ${syncInterval} 秒更新余额、仓位与当前委托；历史成交和资金费仍在等待上游补全。`)
+      : localizedText(`系统约每 ${syncInterval} 秒读取一次完整账户；新出现的持仓和委托会自动纳入，最近成交与资金费同步保存。`)
     : status.automatic_sync_enabled
       ? localizedText(`自动读取服务仍会约每 ${syncInterval} 秒重试；连接恢复前不会把旧快照标记为实时。`)
     : localizedText('当前只展示已经保存的生产数据；配置连续读取服务后会自动更新。');
   const automaticSyncCopy = currentLanguage === 'en'
     ? status.automatic_sync_enabled && connected
-      ? `The system reads the complete account about every ${syncInterval} seconds. New positions and orders are included automatically, with recent fills and funding saved together.`
+      ? historyIncomplete
+        ? `Balances, positions, and open orders update about every ${syncInterval} seconds. Historical fills and funding are still waiting for upstream backfill.`
+        : `The system reads the complete account about every ${syncInterval} seconds. New positions and orders are included automatically, with recent fills and funding saved together.`
       : status.automatic_sync_enabled
         ? `The reader retries about every ${syncInterval} seconds. Saved snapshots will not be presented as live until the connection recovers.`
       : 'Only saved production data is shown. Configure the continuous reader to update it automatically.'
     : automaticSyncCopyLocalized;
   main.innerHTML = `<section class="page venue-facts-page"><header class="page-head"><div><p class="eyebrow">生产账户 · 自动读取</p><h1>交易账户</h1><p class="lede">统一查看币安和链上永续的余额、当前仓位、当前委托、最近成交与资金费。系统按账户自动覆盖全部活跃标的，不需要逐个输入币对。</p></div><button class="secondary" data-refresh>刷新页面</button></header>
     <nav class="venue-switch" aria-label="选择交易所"><a class="${venue === 'BINANCE' ? 'active' : ''}" href="/venues?venue=BINANCE" data-link>Binance</a><a class="${venue === 'HYPERLIQUID' ? 'active' : ''}" href="/venues?venue=HYPERLIQUID" data-link>Hyperliquid</a></nav>
-    <div class="stats venue-status-stats"><div class="stat"><small>连接状态</small><b class="${connected ? 'direction-long' : 'warning-text'}">${escapeHtml(connectionLabel)}</b><span translate="no">${escapeHtml(connection?.error_code || (connected ? '最近只读检查成功' : '尚无错误分类'))}</span></div><div class="stat"><small>运行模式</small><b>生产账户 · 只读</b><span>${escapeHtml(venueDetail)}</span></div><div class="stat"><small>交易账户</small><b>${escapeHtml(accountId)}</b><span>当前唯一默认账户 · ${escapeHtml(venue)}</span></div><div class="stat"><small>${snapshotMode ? '最后快照' : '事实新鲜度'}</small><b>${fmtDate(lastSync)}</b><span>${lastSync ? snapshotMode ? '连接受限；以下数据不是实时事实' : '最近保存时间；连接探针另行校验' : '尚无已保存事实'}</span></div></div>
-    <article class="account-sync-note ${connected ? 'is-active' : ''}"><span class="status-dot"></span><div><b>${escapeHtml(connectionLabel)}</b><p>${escapeHtml(connectionReason)} ${connectionEvidence}最近探针：${fmtDate(connection?.checked_at)}</p></div></article>
+    <div class="stats venue-status-stats"><div class="stat"><small>连接状态</small><b class="${connected ? 'direction-long' : 'warning-text'}">${escapeHtml(connectionLabel)}</b><span>${historyIncomplete ? '当前账户事实可用；历史记录待补全' : connected ? '最近只读检查成功' : '尚无可用连接结论'}</span></div><div class="stat"><small>运行模式</small><b>生产账户 · 只读</b><span>${escapeHtml(venueDetail)} · ${escapeHtml(executionDetail)}</span></div><div class="stat"><small>交易账户</small><b>默认账户</b><span>${escapeHtml(venue === 'BINANCE' ? '币安' : 'Hyperliquid')} · 单账户模式</span></div><div class="stat"><small>${snapshotMode ? '最后快照' : '事实新鲜度'}</small><b>${fmtDate(lastSync)}</b><span>${lastSync ? snapshotMode ? '连接受限；以下数据不是实时事实' : '最近保存时间；连接探针另行校验' : '尚无已保存事实'}</span></div></div>
+    <article class="account-sync-note ${connected ? 'is-active' : ''}"><span class="status-dot"></span><div><b>${escapeHtml(connectionLabel)}</b><p>${escapeHtml(connectionReason)} 最近探针：${fmtDate(connection?.checked_at)}</p>${connectionEvidence}</div></article>
     <article class="account-sync-note ${status.automatic_sync_enabled && connected ? 'is-active' : ''}"><span class="status-dot"></span><div><b>${status.automatic_sync_enabled && connected ? '账户数据自动同步' : status.automatic_sync_enabled ? '自动同步等待连接恢复' : '账户自动更新尚未启用'}</b><p>${escapeHtml(automaticSyncCopy)}</p></div></article>
     ${snapshotMode ? `<article class="danger-note venue-snapshot-warning"><b>当前连接不可用，以下仅为最后一次保存快照</b><p>这些余额、仓位、订单与成交不能作为实时交易依据。恢复只读连接并完成新一轮同步后，页面才会重新标记为当前事实。</p></article>` : ''}
-    ${venueFactSections(facts, {snapshotMode})}
+    ${venueFactSections(facts, {snapshotMode, historyIncomplete})}
   </section>`;
   document.querySelector('[data-refresh]')?.addEventListener('click', route);
 }
 
-function venueFactSections(facts, {snapshotMode = false} = {}) {
+function venueFactSections(facts, {snapshotMode = false, historyIncomplete = false} = {}) {
   const positionRows = facts.positions.filter(item => Number(item.quantity) !== 0);
   const activeOrderRows = facts.orders.filter(item => !['FILLED','CANCELLED','REJECTED','EXPIRED'].includes(item.status));
   const historicalOrderRows = facts.orders.filter(item => ['FILLED','CANCELLED','REJECTED','EXPIRED'].includes(item.status));
@@ -2465,13 +2478,14 @@ function venueFactSections(facts, {snapshotMode = false} = {}) {
     ${reconciliation?.differences?.length ? `<article class="danger-note"><b>对账差异</b><ul>${reconciliation.differences.map(item => `<li>${escapeHtml(item)}</li>`).join('')}</ul></article>` : ''}
     ${factTable('当前仓位与风险保护', '<th>标的</th><th>数量 / 入场</th><th>标记价</th><th>数据状态</th><th>保护</th><th>更新时间</th>', positions, '当前账户没有持仓；零仓位行情不会冒充当前仓位。')}
     ${factTable('当前委托', '<th>交易所订单</th><th>标的</th><th>状态</th><th>成交 / 委托</th><th>关联操作</th><th>更新时间</th>', orders, '当前账户没有未完成委托。')}
-    ${orderHistory ? `<details class="operation-toolbox venue-order-history"><summary><span><b>最近订单记录</b><small>${historicalOrderRows.length} 条已成交、取消、拒绝或过期记录，不计入当前委托</small></span><strong>查看记录</strong></summary><div class="toolbox-content"><div class="table-wrap"><table><thead><tr><th>交易所订单</th><th>标的</th><th>状态</th><th>成交 / 委托</th><th>关联操作</th><th>更新时间</th></tr></thead><tbody>${orderHistory}</tbody></table></div></div></details>` : ''}
-    ${factTable('最近成交', '<th>成交编号</th><th>标的</th><th>方向 / 数量</th><th>价格</th><th>手续费</th><th>成交时间</th>', fills, '当前没有已保存的成交记录。')}
-    ${factTable('资金费', '<th>支付编号</th><th>标的</th><th>金额</th><th>支付时间</th>', funding, '当前没有已保存的资金费记录。')}`;
+    ${orderHistory ? `<details class="operation-toolbox venue-order-history"><summary><span><b>最近订单记录</b><small>${historicalOrderRows.length} 条已成交、取消、拒绝或过期记录，不计入当前委托</small></span><strong>查看记录</strong></summary><div class="toolbox-content"><div class="table-scroll-hint">左右滑动查看完整订单记录</div><div class="table-wrap is-scrollable"><table><thead><tr><th>交易所订单</th><th>标的</th><th>状态</th><th>成交 / 委托</th><th>关联操作</th><th>更新时间</th></tr></thead><tbody>${orderHistory}</tbody></table></div></div></details>` : ''}
+    ${historyIncomplete ? '<article class="callout venue-history-warning"><b>历史记录尚未补全</b><p>以下成交与资金费只代表已经保存的记录，不能据此判断完整历史；余额、仓位和当前委托不受影响。</p></article>' : ''}
+    ${factTable(historyIncomplete ? '已保存成交' : '最近成交', '<th>成交编号</th><th>标的</th><th>方向 / 数量</th><th>价格</th><th>手续费</th><th>成交时间</th>', fills, historyIncomplete ? '当前没有已保存的成交；这不代表交易所没有历史成交。' : '当前没有已保存的成交记录。')}
+    ${factTable(historyIncomplete ? '已保存资金费' : '资金费', '<th>支付编号</th><th>标的</th><th>金额</th><th>支付时间</th>', funding, historyIncomplete ? '当前没有已保存的资金费；这不代表交易所没有历史资金费。' : '当前没有已保存的资金费记录。')}`;
 }
 
 function factTable(title, headers, rows, emptyCopy = '当前没有已保存的数据。') {
-  return `<section><h2>${escapeHtml(title)}</h2>${rows ? `<div class="table-wrap"><table><thead><tr>${headers}</tr></thead><tbody>${rows}</tbody></table></div>` : `<div class="callout">${escapeHtml(emptyCopy)}</div>`}</section>`;
+  return `<section><h2>${escapeHtml(title)}</h2>${rows ? `<div class="table-scroll-hint">左右滑动查看完整${escapeHtml(title)}</div><div class="table-wrap is-scrollable"><table><thead><tr>${headers}</tr></thead><tbody>${rows}</tbody></table></div>` : `<div class="callout">${escapeHtml(emptyCopy)}</div>`}</section>`;
 }
 
 function accessRoleOptions(selectedRoles, prefix, disabled = false) {
