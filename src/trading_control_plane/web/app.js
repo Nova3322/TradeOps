@@ -129,9 +129,57 @@ const ENGLISH_EXACT = new Map(Object.entries({
   '支付时间':'Paid at', '当前没有已保存的数据。':'No saved data.', '暂无数据':'No data', '资金中心':'Capital', '总净值':'Total net worth',
   '链上资金库净值':'On-chain vault net worth', '净值状态':'Net-worth status', '资金划转控制':'Transfer control',
   '在途 / 占用':'In transit / reserved', '资金快照':'Capital snapshot', '资金构成':'Capital composition',
+  '生产资金 · 缺失即阻断 · 不代签不广播':'Production capital · missing data blocks · no delegated signing or broadcast',
+  '只保留四条明确资金路径。每次操作都先最终确认，再校验地址、网络、金额、额度和实时安全开关；当前缺少生产参数时只记录阻断与阶段，不会生成订单、签名或发送资金。':'Four fixed capital routes only. Every operation requires final confirmation and live validation of the destination, network, amount, limits, and safety gate. Missing production settings record a blocked stage only; no order, signature, or transfer is created.',
+  '三方总净值':'Combined net worth', '资金库':'Vault', '币安 净值':'Binance net worth',
+  'Hyperliquid 净值':'Hyperliquid net worth', '链上永续 净值':'Hyperliquid net worth', '资金操作':'Capital operations', '资金统计':'Capital history',
+  '资金净值趋势':'Net-worth trend', '三方汇总':'Combined total', '选择显示的资金曲线':'Select visible capital series',
+  '币安、Hyperliquid、资金库和三方汇总四条资金趋势':'Four capital series: Binance, Hyperliquid, Vault, and Combined total',
+  '固定四条线：币安、Hyperliquid、资金库和三方汇总。缺失来源显示“等待数据”，不会补成 0；历史曲线不会冒充当前净值。':'Exactly four series: Binance, Hyperliquid, Vault, and Combined total. Missing sources show “Waiting for data” instead of zero; historical trends are never presented as current net worth.',
+  '完成生产资金同步后才显示曲线；缺失数据不会补零。':'The chart appears after production capital is synchronized; missing data is never replaced with zero.',
+  '链上资金库尚未同步':'The on-chain vault has not synchronized', '链上永续数据已过期':'Hyperliquid data is stale',
+  '净值不完整：':'Net worth incomplete: ', '净值不完整：链上资金库尚未同步':'Net worth incomplete: the on-chain vault has not synchronized',
+  '净值不完整：链上资金库尚未同步；链上永续数据已过期':'Net worth incomplete: the on-chain vault has not synchronized; Hyperliquid data is stale',
   '资金位置':'Capital locations', '资金提案':'Capital proposals', '资金划转':'Capital transfers', '位置':'Location',
+  '固定展示三处资金；缺失金额显示为“—”，历史快照不会计入当前净值。':'Three capital locations are shown. Missing amounts appear as “—”, and historical snapshots are excluded from current net worth.',
+  '默认账户':'Default account', '等待配置':'Waiting for configuration', '数据缺失':'Data missing',
+  '未配置或未同步':'Not configured or not synchronized', '当前美元估值不可采信':'The current USD value is not trustworthy',
+  '只读 / 待发送':'Read only / not submitted', '已安装':'Installed', '不完整':'Incomplete',
+  '生产配置预检':'Production configuration preflight', '只显示是否配置，不回显地址或凭据':'Shows configuration status only; addresses and credentials are never revealed',
+  '单账户模式':'Single-account mode', '网络 / 资产':'Network / asset', 'NoTilt 官方 SDK':'Official NoTilt SDK',
+  'NoTilt 范围':'NoTilt scope', '缺少官方金库或 Agent 范围':'Missing the trusted vault or agent scope',
+  '自有钱包':'Owned wallet', '币安受限路径':'Restricted Binance route', 'Hyperliquid 路径':'Hyperliquid route',
+  '金额 / 费用上限':'Amount / fee limits', '签名 / 广播':'Signing / broadcast',
+  '始终由独立人控钱包处理；Agent 不支持':'Always handled by a separate human-controlled wallet; agents cannot perform it',
+  '四条直达路径':'Four direct routes', '选择资金从哪里到哪里':'Choose the capital source and destination',
+  '配置固定资金路径':'Configure fixed capital routes', '尚无数据库配置；当前读取安全环境配置':'No saved database configuration; using fail-closed environment settings',
+  '管理员配置':'Administrator settings',
+  '先选路径，再在一个确认窗口里填写金额；安全说明不再重复四遍。':'Choose a route, then enter the amount in one confirmation dialog. The shared safety boundary is stated once.',
+  '统一安全边界：':'Shared safety boundary: ',
+  '每条路径都重新校验地址、网络、资产、额度、实时状态与安全开关。NoTilt 只构建官方 SDK 无签名请求；签名和广播只能由独立人控钱包逐笔完成。':'Every route revalidates the address, network, asset, limits, live state, and safety gate. NoTilt only builds unsigned requests from the official SDK; a separate human-controlled wallet must confirm every signature and broadcast.',
   '已确认可用':'Confirmed available', '美元净值':'USD value', '源端预留':'Source reserved', '有效可用':'Effective available',
   '控制 / 充值':'Control / deposit', '提案':'Proposal', '路径':'Route', '动作':'Actions', '划转记录':'Transfer record',
+  '当前估值':'Current value', '历史快照':'Historical snapshot', '不计入当前净值':'Excluded from current net worth',
+  '历史趋势':'Historical trend', '当前数据':'Current data', '操作':'Operation', '路径 / 金额':'Route / amount',
+  '阶段':'Stage', '状态 / 回执':'Status / receipt', '精确阻断':'Exact blockers',
+  '固定路径':'Fixed route', '10 分钟等待':'10-minute delay', '两段路径':'Two-stage route', '受限提现':'Restricted withdrawal',
+  '申请释放':'Request release', '等待 10 分钟':'Wait 10 minutes', '到期重检':'Revalidate after the delay', '进入币安':'Deposit to Binance',
+  '到达自有地址':'Arrive at owned address', '合约入金':'Deposit to contract', '提现预检':'Withdrawal preflight',
+  'SDK 无签名入金':'Unsigned SDK deposit', '合约提现':'Contract withdrawal',
+  '检查转入币安条件':'Check Binance deposit requirements', '检查转入 Hyperliquid 条件':'Check Hyperliquid deposit requirements',
+  '检查币安回流条件':'Check Binance return requirements', '检查 Hyperliquid 回流条件':'Check Hyperliquid return requirements',
+  '释放到期后重新校验，再转入已授权币安地址。':'Revalidate after the release delay, then deposit to the authorized Binance address.',
+  '先释放至已授权 Arbitrum 自有地址，再存入 Hyperliquid 合约。':'Release to the authorized owned Arbitrum address, then deposit into the Hyperliquid contract.',
+  '先提现到已授权自有地址，再构建 NoTilt SDK 无签名入金。':'Withdraw to the authorized owned address, then build an unsigned NoTilt SDK deposit.',
+  '先从合约提回已授权自有地址，再构建 NoTilt SDK 无签名入金。':'Withdraw from the contract to the authorized owned address, then build an unsigned NoTilt SDK deposit.',
+  '资金路径安全预检':'Capital-route safety preflight', '金额（USDC）':'Amount (USDC)', '输入划转金额':'Enter transfer amount',
+  '我已核对资金方向与金额':'I verified the direction and amount', '最终确认并检查':'Confirm and run preflight',
+  '提交只会重新校验地址、网络、资产、额度和实时安全开关。任何条件缺失都会阻断；系统不会签名、广播或发送资金。':'Submitting only revalidates the address, network, asset, limits, and live safety gate. Any missing condition blocks the operation; the system never signs, broadcasts, or transfers funds.',
+  '操作日志、阶段与回执':'Operation log, stages, and receipts', '生成无签名预检':'Build unsigned preflight',
+  '申请资金库释放 → 等待 10 分钟 → 到期重新校验 → 转入已授权币安地址':'Request vault release → wait 10 minutes → revalidate → deposit to the authorized Binance address',
+  '已安全阻断':'Safely blocked', '回执：未提交':'Receipt: not submitted',
+  '历史资金划转':'Historical capital transfers', '尚无历史资金划转。':'No historical capital transfers.',
+  '旧流程只保留为只读审计记录，不再是四条直达操作的必经界面。':'The legacy workflow remains as read-only audit history and is no longer required for the four direct routes.',
   '划转总额':'Gross amount', '状态 / 对账':'Status / reconciliation', '外部引用':'External reference',
   '运行告警':'Runtime alerts', '刷新当前数据':'Refresh data', '阻断问题':'Blocking issues', '结果未知':'Unknown outcome',
   '数据过期':'Stale data', '恢复队列':'Recovery queue', '下一步：':'Next: ', '打开交易任务并按顺序处理':'Open trade and follow the steps',
@@ -303,6 +351,7 @@ const ENGLISH_EXACT = new Map(Object.entries({
 
 const ENGLISH_PATTERNS = [
   [/^(\d+) 个交易任务$/, '$1 trades'], [/^(\d+) 项阻断$/, '$1 blockers'], [/^(\d+) 项需要处理$/, '$1 issues require action'],
+  [/^(\d+) 项阻断，查看详情$/, '$1 blockers; view details'],
   [/^(\d+) 项敞口不确定$/, '$1 exposure issues'], [/^(\d+) 项未一致$/, '$1 reconciliation issues'],
   [/^(\d+) 名启用成员$/, '$1 active users'], [/^(\d+) 个结果$/, '$1 results'], [/^(\d+) 条记录$/, '$1 records'],
   [/^显示 (\d+) \/ (\d+) 个机会$/, 'Showing $1 of $2 opportunities'], [/^(\d+) 分钟$/, '$1 minutes'],
@@ -2179,6 +2228,11 @@ function formatCapitalIssue(value) {
   }[code] || '资金数据尚未完整');
 }
 
+function capitalSourceIssue(issues, source) {
+  const match = (issues || []).find(value => String(value).endsWith(`:${source}`));
+  return match ? formatCapitalIssue(match) : null;
+}
+
 function renderUnsignedPlanSummary(transfer) {
   const plans = transfer.planned_transactions || [];
   if (!plans.length) return '';
@@ -2212,25 +2266,30 @@ function capitalSourceSlots(balances, notiltStatus) {
   });
 }
 
-function capitalBalanceRows(balances) {
+function capitalBalanceRows(balances, issues = []) {
   return balances.map(balance => {
     const missing = balance.fact_status === 'MISSING';
+    const source = balance.location_type === 'VAULT' ? 'VAULT' : balance.venue;
+    const valuationIssue = capitalSourceIssue(issues, source);
+    const historical = !missing && balance.valuation_current === false;
     const sourceLabel = balance.source_label || (balance.location_type === 'VAULT'
       ? '资金库'
       : ({BINANCE:'币安', HYPERLIQUID:'Hyperliquid'}[balance.venue] || balance.venue || '交易所'));
     const state = missing
       ? `<b class="capital-status-missing">数据缺失</b><br><span class="subtle">${escapeHtml(balance.missing_detail)}</span>`
-      : `${escapeHtml(fmtStatus(balance.control_status))} / ${escapeHtml(fmtStatus(balance.deposit_status))}`;
+      : historical
+        ? `<b class="capital-status-missing">历史快照</b><br><span class="subtle">${escapeHtml(valuationIssue || '当前美元估值不可采信')}；不计入当前净值</span><br><span class="subtle">${escapeHtml(fmtStatus(balance.control_status))} / ${escapeHtml(fmtStatus(balance.deposit_status))}</span>`
+        : `<b>当前估值</b><br><span class="subtle">${escapeHtml(fmtStatus(balance.control_status))} / ${escapeHtml(fmtStatus(balance.deposit_status))}</span>`;
     const accountScope = balance.location_type === 'VAULT'
       ? (missing ? '等待配置' : '已配置范围')
       : '默认账户';
-    return `<tr${missing ? ' class="capital-missing-row"' : ''}><td><b>${escapeHtml(sourceLabel)}</b></td><td>${escapeHtml(accountScope)}</td><td>${fmtNumber(balance.confirmed_available)} ${escapeHtml(balance.asset)}</td><td>${balance.usd_equity === null ? '未知' : `${fmtNumber(balance.usd_equity)} USD`}</td><td>${fmtNumber(balance.source_reserved)}</td><td><b>${fmtNumber(balance.effective_available)}</b></td><td>${state}</td><td>${missing ? '—' : fmtDate(balance.observed_at)}</td></tr>`;
+    return `<tr${missing || historical ? ' class="capital-missing-row"' : ''}><td data-label="资金位置"><b>${escapeHtml(sourceLabel)}</b></td><td data-label="账户范围">${escapeHtml(accountScope)}</td><td data-label="已确认可用">${fmtNumber(balance.confirmed_available)} ${escapeHtml(balance.asset)}</td><td data-label="美元净值">${balance.usd_equity === null ? '未知' : `${fmtNumber(balance.usd_equity)} USD`}</td><td data-label="源端预留">${fmtNumber(balance.source_reserved)}</td><td data-label="有效可用"><b>${fmtNumber(balance.effective_available)}</b></td><td data-label="数据状态">${state}</td><td data-label="更新时间">${missing ? '—' : fmtDate(balance.observed_at)}</td></tr>`;
   }).join('');
 }
 
 function capitalBalanceTable(rows, emptyMessage) {
   return rows
-    ? `<div class="table-scroll-hint">左右滑动查看完整资金数据</div><div class="table-wrap is-scrollable"><table><thead><tr><th>资金位置</th><th>账户范围</th><th>已确认可用</th><th>美元净值</th><th>源端预留</th><th>有效可用</th><th>控制 / 充值</th><th>更新时间</th></tr></thead><tbody>${rows}</tbody></table></div>`
+    ? `<div class="table-scroll-hint capital-balance-scroll-hint">左右滑动查看完整资金数据</div><div class="table-wrap is-scrollable capital-balance-table"><table><thead><tr><th>资金位置</th><th>账户范围</th><th>已确认可用</th><th>美元净值</th><th>源端预留</th><th>有效可用</th><th>数据状态</th><th>更新时间</th></tr></thead><tbody>${rows}</tbody></table></div>`
     : `<div class="callout">${escapeHtml(emptyMessage)}</div>`;
 }
 
@@ -2328,8 +2387,26 @@ async function renderCapitalCenter() {
   const historySeries = capitalHistorySeries(item.history || []);
   const visibleHistorySeries = historySeries.filter(series => capitalTrendVisibility[series.source]);
   const hasHistory = historySeries.some(series => series.points.length);
-  const chartLegend = historySeries.map(series => `<label class="capital-trend-toggle trend-${escapeHtml(series.source)} ${series.points.length ? '' : 'is-missing'}"><input type="checkbox" data-capital-trend="${escapeHtml(series.source)}" ${series.points.length && capitalTrendVisibility[series.source] ? 'checked' : ''} ${series.points.length ? '' : 'disabled'}><i aria-hidden="true"></i><span><b>${escapeHtml(series.label)}</b><small>${series.points.length ? `最近 ${fmtCompact(series.points.at(-1).value)} USD` : '等待数据'}</small></span></label>`).join('');
-  const liveBalanceRows = capitalBalanceRows(capitalSourceSlots(balances.live, notiltStatus));
+  const currentSourceValues = {
+    BINANCE:netWorth.venues?.BINANCE,
+    HYPERLIQUID:netWorth.venues?.HYPERLIQUID,
+    VAULT:netWorth.vault,
+    TOTAL:netWorth.total,
+  };
+  const chartLegend = historySeries.map(series => {
+    const latestPoint = series.points.at(-1);
+    const current = latestPoint && currentSourceValues[series.source] !== null
+      && currentSourceValues[series.source] !== undefined
+      && (series.source === 'TOTAL' ? netWorth.complete : !capitalSourceIssue(netWorth.issues, series.source));
+    const summary = !latestPoint
+      ? '等待数据'
+      : `${current ? '当前数据' : '历史趋势'} ${fmtCompact(latestPoint.value)} USD · ${fmtDate(latestPoint.time)}`;
+    return `<label class="capital-trend-toggle trend-${escapeHtml(series.source)} ${latestPoint ? '' : 'is-missing'}"><input type="checkbox" data-capital-trend="${escapeHtml(series.source)}" ${latestPoint && capitalTrendVisibility[series.source] ? 'checked' : ''} ${latestPoint ? '' : 'disabled'}><i aria-hidden="true"></i><span><b>${escapeHtml(series.label)}</b><small>${escapeHtml(summary)}</small></span></label>`;
+  }).join('');
+  const liveBalanceRows = capitalBalanceRows(
+    capitalSourceSlots(balances.live, notiltStatus),
+    netWorth.issues,
+  );
   const configuredPlaceholder = value => value ? '已配置；留空保持当前值' : '尚未配置';
   const directConfigurationEditor = directConfiguration.can_manage ? `<details class="card direct-capital-config-editor"><summary><span><b>配置固定资金路径</b><small>${directConfiguration.version ? `版本 ${directConfiguration.version} · ${escapeHtml(directConfiguration.updated_by_username || '系统管理员')} · ${fmtDate(directConfiguration.effective_at)}` : '尚无数据库配置；当前读取安全环境配置'}</small></span><strong>管理员配置</strong></summary><form id="direct-capital-config-form" class="toolbox-content compact-form"><p class="safety-note">只允许 Arbitrum / USDC、默认单账户和固定路径。这里只接收账户标识、公开地址与额度；不得输入 API secret、私钥、种子、钱包密码或签名令牌。</p><div class="field-grid"><label>NoTilt 金库编号<input name="vault_id" autocomplete="off" placeholder="${configuredPlaceholder(directConfiguration.vault_id_configured)}"></label><label>NoTilt 金库地址<input name="vault_address" autocomplete="off" placeholder="${configuredPlaceholder(directConfiguration.vault_address_configured)}"></label><label>授权自有 Arbitrum 地址<input name="owned_arbitrum_address" autocomplete="off" placeholder="${configuredPlaceholder(directConfiguration.owned_arbitrum_address_configured)}"></label><label>币安默认账户<input name="binance_account_id" autocomplete="off" placeholder="${configuredPlaceholder(directConfiguration.binance_account_configured)}"></label><label>币安白名单入金地址<input name="binance_deposit_address" autocomplete="off" placeholder="${configuredPlaceholder(directConfiguration.binance_whitelist_destination_configured)}"></label><label>币安受限提现地址<input name="binance_withdrawal_address" autocomplete="off" placeholder="${configuredPlaceholder(directConfiguration.binance_withdrawal_destination_configured)}"></label><label>Hyperliquid 默认账户<input name="hyperliquid_account_id" autocomplete="off" placeholder="${configuredPlaceholder(directConfiguration.hyperliquid_account_configured)}"></label><label>Hyperliquid Bridge 地址<input name="hyperliquid_bridge_address" autocomplete="off" placeholder="${configuredPlaceholder(directConfiguration.hyperliquid_contract_configured)}"></label><label>单次金额上限<input name="max_amount" type="number" step="any" min="0.000001" placeholder="留空保持当前值"></label><label>最大费用上限<input name="max_fee" type="number" step="any" min="0" placeholder="留空保持当前值"></label></div><div class="form-error" role="alert"></div><div class="form-actions"><button class="primary">保存并审计新版本</button></div></form></details>` : '';
   const directPathCards = DIRECT_CAPITAL_PATHS.map(path => `<article class="capital-route-card"><div class="capital-route-meta"><span>固定路径</span><strong>${escapeHtml(path.badge)}</strong></div><div class="capital-route-flow"><b>${escapeHtml(path.from)}</b><span aria-hidden="true">→</span><b>${escapeHtml(path.to)}</b></div><p>${escapeHtml(path.copy)}</p><ol>${path.steps.map(step => `<li>${escapeHtml(step)}</li>`).join('')}</ol><button class="secondary capital-route-action" type="button" data-open-capital-path="${escapeHtml(path.path)}">${escapeHtml(path.action)}</button></article>`).join('');
@@ -2342,10 +2419,10 @@ async function renderCapitalCenter() {
     const blockerDetails = blockers.length
       ? `<details class="capital-blockers"><summary>${blockers.length} 项阻断，查看详情</summary><p>${escapeHtml(blockers.join('；'))}</p></details>`
       : '<span>无阻断</span>';
-    return `<tr><td>${shortId(operation.operation_id)}<br><span class="subtle">${fmtDate(operation.final_confirmed_at)}</span></td><td><b>${escapeHtml(label)}</b><br><span class="subtle">${fmtNumber(operation.amount)} ${escapeHtml(operation.asset)}</span></td><td>${escapeHtml(stages || '尚无阶段')}</td><td><b>${escapeHtml(fmtStatus(operation.status))}</b><br><span class="subtle">回执：${escapeHtml(fmtStatus(operation.receipt_status))}</span></td><td>${blockerDetails}<button class="text-button" data-notilt-preview="${escapeHtml(operation.operation_id)}" data-operation-version="${Number(operation.version || 1)}">生成无签名预检</button></td></tr>`;
+    return `<tr><td data-label="操作">${shortId(operation.operation_id)}<br><span class="subtle">${fmtDate(operation.final_confirmed_at)}</span></td><td data-label="路径 / 金额"><b>${escapeHtml(label)}</b><br><span class="subtle">${fmtNumber(operation.amount)} ${escapeHtml(operation.asset)}</span></td><td data-label="阶段">${escapeHtml(stages || '尚无阶段')}</td><td data-label="状态 / 回执"><b>${escapeHtml(fmtStatus(operation.status))}</b><br><span class="subtle">回执：${escapeHtml(fmtStatus(operation.receipt_status))}</span></td><td data-label="精确阻断">${blockerDetails}<button class="text-button" data-notilt-preview="${escapeHtml(operation.operation_id)}" data-operation-version="${Number(operation.version || 1)}">生成无签名预检</button></td></tr>`;
   }).join('');
-  const legacyRows = transfers.live.map(transfer => `<tr><td>${shortId(transfer.capital_transfer_id)}</td><td>${escapeHtml(fmtCapitalDirection(transfer.direction))}</td><td>${fmtNumber(transfer.gross_amount)} ${escapeHtml(transfer.asset)}</td><td>${escapeHtml(fmtStatus(transfer.status))}</td><td>${escapeHtml(transfer.external_transfer_id || '未提交')}</td></tr>`).join('');
-  main.innerHTML = `<section class="page"><header class="page-head"><div><p class="eyebrow">生产资金 · 缺失即阻断 · 不代签不广播</p><h1>资金中心</h1><p class="lede">只保留四条明确资金路径。每次操作都先最终确认，再校验地址、网络、金额、额度和实时安全开关；当前缺少生产参数时只记录阻断与阶段，不会生成订单、签名或发送资金。</p></div></header><div class="stats"><div class="stat"><small>三方总净值</small><b>${fmtNumber(netWorth.total)} ${escapeHtml(netWorth.currency)}</b></div><div class="stat"><small>资金库</small><b>${fmtNumber(netWorth.vault)} ${escapeHtml(netWorth.currency)}</b></div>${venueNetWorth}<div class="stat"><small>净值状态</small><b style="font-size:14px">${escapeHtml(fmtStatus(netWorth.complete ? 'CURRENT' : 'INCOMPLETE'))}</b></div><div class="stat"><small>资金操作</small><b style="font-size:14px">${escapeHtml(fmtStatus(item.real_transfer_gate || 'DISABLED'))}</b></div><div class="stat"><small>在途 / 占用</small><b>${fmtNumber(liveInTransit)}</b></div></div><section class="capital-chart-panel"><div class="chart-head"><div><p class="eyebrow">资金统计</p><h2>资金净值趋势</h2><p class="subtle">固定四条线：币安、Hyperliquid、资金库和三方汇总。缺失来源显示“等待数据”，不会补成 0。</p></div><b>${fmtNumber(netWorth.total)} <small>${escapeHtml(netWorth.currency)}</small></b></div>${hasHistory ? `<canvas id="capital-chart" height="260" aria-label="币安、Hyperliquid、资金库和三方汇总四条资金趋势"></canvas>` : '<div class="chart-empty">完成生产资金同步后才显示曲线；缺失数据不会补零。</div>'}<div class="chart-legend" role="group" aria-label="选择显示的资金曲线">${chartLegend}</div></section>${netWorth.complete ? '' : `<div class="callout"><b>净值不完整：</b>${escapeHtml([...new Set((netWorth.issues || []).map(formatCapitalIssue))].join('；') || '尚无资金数据')}</div>`}<section><h2>资金位置</h2><p class="subtle">固定展示三处资金；缺失金额显示为“—”。</p>${capitalBalanceTable(liveBalanceRows, '尚无生产资金数据。')}</section><article class="card"><div class="card-heading"><div><p class="eyebrow">生产配置预检</p><h2>只显示是否配置，不回显地址或凭据</h2></div><span class="status-pill">单账户模式</span></div><dl class="definition-grid">${definition('网络 / 资产', `${directConfiguration.network || '—'} / ${directConfiguration.asset || '—'}`)}${definition('NoTilt 官方 SDK', directConfiguration.notilt_sdk_available ? '已安装' : '不可用')}${definition('NoTilt 范围', directConfiguration.notilt_scope_configured ? '已配置' : '缺少官方金库或 Agent 范围')}${definition('自有钱包', directConfiguration.owned_arbitrum_address_configured ? '已配置' : '未配置')}${definition('币安受限路径', directConfiguration.binance_account_configured && directConfiguration.binance_whitelist_destination_configured && directConfiguration.binance_withdrawal_destination_configured ? '已配置' : '不完整')}${definition('Hyperliquid 路径', directConfiguration.hyperliquid_account_configured && directConfiguration.hyperliquid_contract_configured ? '已配置' : '不完整')}${definition('金额 / 费用上限', directConfiguration.limits_configured ? '已配置' : '未配置')}${definition('签名 / 广播', '始终由独立人控钱包处理；Agent 不支持')}</dl></article><section class="capital-routes-section"><div class="card-heading"><div><p class="eyebrow">四条直达路径</p><h2>选择资金从哪里到哪里</h2><p class="subtle">先选路径，再在一个确认窗口里填写金额；安全说明不再重复四遍。</p></div><span class="status-pill ${item.real_transfer_gate === 'ENABLED' ? 'status-APPROVED' : 'status-DISABLED'}">${escapeHtml(fmtStatus(item.real_transfer_gate || 'DISABLED'))}</span></div>${directConfigurationEditor}<div class="callout direct-capital-boundary"><b>统一安全边界：</b>每条路径都重新校验地址、网络、资产、额度、实时状态与安全开关。NoTilt 只构建官方 SDK 无签名请求；签名和广播只能由独立人控钱包逐笔完成。</div><div class="capital-route-grid">${directPathCards}</div></section>${directCapitalDialog}<section><h2>操作日志、阶段与回执</h2>${directRows ? `<div class="table-wrap is-scrollable"><table><thead><tr><th>操作</th><th>路径 / 金额</th><th>阶段</th><th>状态 / 回执</th><th>精确阻断</th></tr></thead><tbody>${directRows}</tbody></table></div>` : '<div class="callout">尚无直达资金操作。提交一次最终确认后，会在这里记录校验结果。</div>'}</section><section><h2>历史资金划转</h2><p class="subtle">旧流程只保留为只读审计记录，不再是四条直达操作的必经界面。</p>${legacyRows ? `<div class="table-wrap is-scrollable"><table><thead><tr><th>记录</th><th>方向</th><th>金额</th><th>状态</th><th>外部回执</th></tr></thead><tbody>${legacyRows}</tbody></table></div>` : '<div class="callout">尚无历史资金划转。</div>'}</section></section>`;
+  const legacyRows = transfers.live.map(transfer => `<tr><td data-label="记录">${shortId(transfer.capital_transfer_id)}</td><td data-label="方向">${escapeHtml(fmtCapitalDirection(transfer.direction))}</td><td data-label="金额">${fmtNumber(transfer.gross_amount)} ${escapeHtml(transfer.asset)}</td><td data-label="状态">${escapeHtml(fmtStatus(transfer.status))}</td><td data-label="外部回执">${escapeHtml(transfer.external_transfer_id || '未提交')}</td></tr>`).join('');
+  main.innerHTML = `<section class="page"><header class="page-head"><div><p class="eyebrow">生产资金 · 缺失即阻断 · 不代签不广播</p><h1>资金中心</h1><p class="lede">只保留四条明确资金路径。每次操作都先最终确认，再校验地址、网络、金额、额度和实时安全开关；当前缺少生产参数时只记录阻断与阶段，不会生成订单、签名或发送资金。</p></div></header><div class="stats"><div class="stat"><small>三方总净值</small><b>${fmtNumber(netWorth.total)} ${escapeHtml(netWorth.currency)}</b></div><div class="stat"><small>资金库</small><b>${fmtNumber(netWorth.vault)} ${escapeHtml(netWorth.currency)}</b></div>${venueNetWorth}<div class="stat"><small>净值状态</small><b style="font-size:14px">${escapeHtml(fmtStatus(netWorth.complete ? 'CURRENT' : 'INCOMPLETE'))}</b></div><div class="stat"><small>资金操作</small><b style="font-size:14px">${escapeHtml(fmtStatus(item.real_transfer_gate || 'DISABLED'))}</b></div><div class="stat"><small>在途 / 占用</small><b>${fmtNumber(liveInTransit)}</b></div></div><section class="capital-chart-panel"><div class="chart-head"><div><p class="eyebrow">资金统计</p><h2>资金净值趋势</h2><p class="subtle">固定四条线：币安、Hyperliquid、资金库和三方汇总。缺失来源显示“等待数据”，不会补成 0；历史曲线不会冒充当前净值。</p></div><b>${fmtNumber(netWorth.total)} <small>${escapeHtml(netWorth.currency)}</small></b></div>${hasHistory ? `<canvas id="capital-chart" height="260" aria-label="币安、Hyperliquid、资金库和三方汇总四条资金趋势"></canvas>` : '<div class="chart-empty">完成生产资金同步后才显示曲线；缺失数据不会补零。</div>'}<div class="chart-legend" role="group" aria-label="选择显示的资金曲线">${chartLegend}</div></section>${netWorth.complete ? '' : `<div class="callout"><b>净值不完整：</b>${escapeHtml([...new Set((netWorth.issues || []).map(formatCapitalIssue))].join('；') || '尚无资金数据')}</div>`}<section><h2>资金位置</h2><p class="subtle">固定展示三处资金；缺失金额显示为“—”，历史快照不会计入当前净值。</p>${capitalBalanceTable(liveBalanceRows, '尚无生产资金数据。')}</section><article class="card"><div class="card-heading"><div><p class="eyebrow">生产配置预检</p><h2>只显示是否配置，不回显地址或凭据</h2></div><span class="status-pill">单账户模式</span></div><dl class="definition-grid">${definition('网络 / 资产', `${directConfiguration.network || '—'} / ${directConfiguration.asset || '—'}`)}${definition('NoTilt 官方 SDK', directConfiguration.notilt_sdk_available ? '已安装' : '不可用')}${definition('NoTilt 范围', directConfiguration.notilt_scope_configured ? '已配置' : '缺少官方金库或 Agent 范围')}${definition('自有钱包', directConfiguration.owned_arbitrum_address_configured ? '已配置' : '未配置')}${definition('币安受限路径', directConfiguration.binance_account_configured && directConfiguration.binance_whitelist_destination_configured && directConfiguration.binance_withdrawal_destination_configured ? '已配置' : '不完整')}${definition('Hyperliquid 路径', directConfiguration.hyperliquid_account_configured && directConfiguration.hyperliquid_contract_configured ? '已配置' : '不完整')}${definition('金额 / 费用上限', directConfiguration.limits_configured ? '已配置' : '未配置')}${definition('签名 / 广播', '始终由独立人控钱包处理；Agent 不支持')}</dl></article><section class="capital-routes-section"><div class="card-heading"><div><p class="eyebrow">四条直达路径</p><h2>选择资金从哪里到哪里</h2><p class="subtle">先选路径，再在一个确认窗口里填写金额；安全说明不再重复四遍。</p></div><span class="status-pill ${item.real_transfer_gate === 'ENABLED' ? 'status-APPROVED' : 'status-DISABLED'}">${escapeHtml(fmtStatus(item.real_transfer_gate || 'DISABLED'))}</span></div>${directConfigurationEditor}<div class="callout direct-capital-boundary"><b>统一安全边界：</b>每条路径都重新校验地址、网络、资产、额度、实时状态与安全开关。NoTilt 只构建官方 SDK 无签名请求；签名和广播只能由独立人控钱包逐笔完成。</div><div class="capital-route-grid">${directPathCards}</div></section>${directCapitalDialog}<section><h2>操作日志、阶段与回执</h2>${directRows ? `<div class="table-wrap is-scrollable capital-operation-table"><table><thead><tr><th>操作</th><th>路径 / 金额</th><th>阶段</th><th>状态 / 回执</th><th>精确阻断</th></tr></thead><tbody>${directRows}</tbody></table></div>` : '<div class="callout">尚无直达资金操作。提交一次最终确认后，会在这里记录校验结果。</div>'}</section><section><h2>历史资金划转</h2><p class="subtle">旧流程只保留为只读审计记录，不再是四条直达操作的必经界面。</p>${legacyRows ? `<div class="table-wrap is-scrollable capital-history-table"><table><thead><tr><th>记录</th><th>方向</th><th>金额</th><th>状态</th><th>外部回执</th></tr></thead><tbody>${legacyRows}</tbody></table></div>` : '<div class="callout">尚无历史资金划转。</div>'}</section></section>`;
   drawCapitalChart(visibleHistorySeries);
   bindCapitalActions();
 }

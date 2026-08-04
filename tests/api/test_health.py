@@ -112,8 +112,8 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
 
     assert response.status_code == 200
     assert "交易控制台" in response.text
-    assert "/assets/app.js?v=86" in response.text
-    assert "/assets/styles.css?v=39" in response.text
+    assert "/assets/app.js?v=87" in response.text
+    assert "/assets/styles.css?v=40" in response.text
     assert 'aria-label="交易控制台首页"' in response.text
     assert '<a href="/" data-link><span>⌂</span>今日</a>' in response.text
     assert 'id="mobile-nav-toggle"' in response.text
@@ -167,7 +167,7 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
     assert "/api/audit" not in app_javascript.text
     assert "'access.manage':['SYSTEM_ADMIN']" in app_javascript.text
     assert "'system.view':['OBSERVER','REVIEWER','OPERATOR']" in app_javascript.text
-    assert "[translate=\"no\"]" in app_javascript.text
+    assert '[translate="no"]' in app_javascript.text
     assert "管理所有成员并可访问资金中心" in app_javascript.text
     assert 'href="/proposals/new"' not in response.text
     assert "Binance只读" not in response.text
@@ -202,7 +202,7 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
     assert "账户范围" in app_javascript.text
     assert "默认账户" in app_javascript.text
     assert "{BINANCE:'币安', HYPERLIQUID:'Hyperliquid'}" in app_javascript.text
-    assert "series.points.length && capitalTrendVisibility" in app_javascript.text
+    assert "latestPoint && capitalTrendVisibility" in app_javascript.text
     assert "未配置或未同步" in app_javascript.text
     assert "旧流程只保留为只读审计记录" in app_javascript.text
     assert "fmtNumber(item.in_transit)" not in app_javascript.text
@@ -259,8 +259,7 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
     assert 'name="view_state"' in app_javascript.text
     assert "function opportunityViewState" in app_javascript.text
     assert (
-        "信号快照 ${fmtDate(result?.snapshot_generated_at || result?.as_of)}"
-        in app_javascript.text
+        "信号快照 ${fmtDate(result?.snapshot_generated_at || result?.as_of)}" in app_javascript.text
     )
     assert "Perptape 市场扫描" not in app_javascript.text
     assert "突破详情 ↗" in app_javascript.text
@@ -731,6 +730,14 @@ def test_capital_web_projection_only_renders_live_records() -> None:
         const staggeredTotal = staggered.find(item => item.source === "TOTAL");
         assert.equal(staggeredTotal.points.length, 2);
         assert.deepEqual(staggeredTotal.points.map(point => point.value), [60, 61]);
+
+        assert.equal(
+          vm.runInContext(
+            `capitalSourceIssue(["STALE_LIVE_SOURCE:HYPERLIQUID"], "HYPERLIQUID")`,
+            context,
+          ),
+          "链上永续数据已过期",
+        );
         """
     )
     completed = subprocess.run(  # noqa: S603
@@ -740,6 +747,16 @@ def test_capital_web_projection_only_renders_live_records() -> None:
         check=False,
     )
     assert completed.returncode == 0, completed.stderr
+
+    stylesheet = (
+        Path(__file__).parents[2] / "src" / "trading_control_plane" / "web" / "styles.css"
+    ).read_text()
+    app_source = app_path.read_text()
+    assert "历史曲线不会冒充当前净值" in app_source
+    assert 'data-label="数据状态"' in app_source
+    assert 'class="table-wrap is-scrollable capital-operation-table"' in app_source
+    assert ".capital-balance-table td::before" in stylesheet
+    assert ".capital-operation-table td::before" in stylesheet
 
 
 def test_risk_workspace_prioritizes_current_actions_and_hides_closed_tasks() -> None:

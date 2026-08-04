@@ -645,6 +645,14 @@ dialog::backdrop { background: rgba(4, 12, 10, .56); backdrop-filter: blur(3px);
   .connection-status-table td { width: 100%; display: grid; grid-template-columns: 92px minmax(0, 1fr); gap: 10px; padding: 7px 0; border: 0; font-size: 12px; overflow-wrap: anywhere; }
   .connection-status-table td::before { content: attr(data-label); color: var(--muted); font-size: 10px; font-weight: 750; letter-spacing: .04em; }
   .connection-scroll-hint { display: none; }
+  .capital-balance-table, .capital-operation-table, .capital-history-table { overflow: visible; border: 0; background: transparent; scrollbar-gutter: auto; }
+  .capital-balance-table table, .capital-operation-table table, .capital-history-table table { min-width: 0; }
+  .capital-balance-table thead, .capital-operation-table thead, .capital-history-table thead { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
+  .capital-balance-table tbody, .capital-operation-table tbody, .capital-history-table tbody { display: grid; gap: 10px; }
+  .capital-balance-table tr, .capital-operation-table tr, .capital-history-table tr { display: block; padding: 14px; border: 1px solid var(--line); border-radius: 12px; background: var(--panel-strong); }
+  .capital-balance-table td, .capital-operation-table td, .capital-history-table td { width: 100%; display: grid; grid-template-columns: 100px minmax(0, 1fr); gap: 10px; padding: 7px 0; border: 0; font-size: 12px; overflow-wrap: anywhere; }
+  .capital-balance-table td::before, .capital-operation-table td::before, .capital-history-table td::before { content: attr(data-label); color: var(--muted); font-size: 10px; font-weight: 750; letter-spacing: .04em; }
+  .capital-balance-scroll-hint { display: none; }
   .result-summary { display: block; }
   .result-summary span { display: block; margin-top: 5px; }
   .chart-head { display: block; }
