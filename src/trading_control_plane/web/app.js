@@ -431,7 +431,7 @@ const capitalDirectionLabels = {VAULT_TO_VENUE:'资金库转入交易所',VENUE_
 const capitalPurposeLabels = {AUTO_PROFIT_SWEEP:'自动归集利润',AUTO_OPERATING_REFILL:'自动补充运营资金',MANUAL:'人工调配资金'};
 const capitalTransportLabels = {MOCK:'模拟执行',NOTILT_UNSIGNED_HANDOFF:'NoTilt 未签名交接'};
 const environmentLabels = {LIVE:'生产环境',SHADOW:'生产环境',TESTNET:'生产环境',production:'生产环境',test:'生产环境',development:'生产环境',local:'生产环境'};
-const roleLabels = {OBSERVER:'只读用户',PROPOSER:'提案发起人',REVIEWER:'审核人',OPERATOR:'交易运维人员',TREASURY_ADMIN:'资金管理员',SYSTEM_ADMIN:'系统管理员'};
+const roleLabels = {OBSERVER:'只读用户',PROPOSER:'提案发起人',REVIEWER:'审核人',OPERATOR:'交易运维人员',TREASURY_ADMIN:'资金管理员',SYSTEM_ADMIN:'系统管理员',SYSTEM:'系统'};
 const readinessLabels = {READY:'可用',DEGRADED:'数据不完整',INCOMPLETE:'数据不完整',STALE:'数据已过期'};
 const connectionCategoryLabels = {
   READ_ONLY_CONNECTED:'只读已连接',
@@ -798,6 +798,7 @@ function bindLinkedRows() {
 
 function enhanceTables() {
   document.querySelectorAll('.table-wrap').forEach((wrapper) => {
+    if (wrapper.closest('.risk-condition-details') && matchMedia('(max-width: 780px)').matches) return;
     const heading = wrapper.closest('section')?.querySelector('h2, h1')?.textContent || '数据表格';
     if (wrapper.scrollWidth <= wrapper.clientWidth + 1) return;
     wrapper.tabIndex = 0;
@@ -1777,6 +1778,12 @@ function formatControlBlocker(value) {
   const [code, environment, accountId, venue, detail] = String(value || '').split(':');
   const venueLabel = ({BINANCE:'币安', HYPERLIQUID:'链上永续'})[venue] || venue;
   const scope = accountId ? `（${venueLabel} · 生产账户 ${accountId}）` : '';
+  const probeFailure = ({
+    BINANCE_RATE_LIMITED:'币安只读接口限流，系统会按计划重试',
+    HYPERLIQUID_RATE_LIMITED:'链上永续只读接口限流，系统会按计划重试',
+    BINANCE_AUTH_FAILED:'币安只读鉴权或权限检查失败',
+    HYPERLIQUID_AUTH_FAILED:'链上永续只读鉴权或权限检查失败',
+  }[detail] || (detail ? `只读检查未成功（错误代码：${detail}）` : '只读检查未成功'));
   return ({
     LIVE_SCOPE_CONFIGURATION_REQUIRED:'生产账户范围未配置：至少配置一个明确的 LIVE 账户与交易所',
     KILL_SWITCH_MANUAL_RECOVERY_REQUIRED:'系统处于紧急停止：必须先完成人工处置，不能从本页恢复',
@@ -1785,7 +1792,7 @@ function formatControlBlocker(value) {
     RISK_RESERVATION_UNKNOWN:'风险预留结果未知', CAMPAIGN_UNKNOWN:'交易任务结果未知',
     UNBOUND_OPEN_ORDER:'发现未绑定到受控意图的开放订单',
     READ_ONLY_SOURCE_MISSING:`尚无成功的交易所只读探针${scope}`,
-    READ_ONLY_SOURCE_FAILED:`交易所只读探针失败${scope}${detail ? `：${detail}` : ''}`,
+    READ_ONLY_SOURCE_FAILED:`交易所只读探针失败${scope}：${probeFailure}`,
     READ_ONLY_SOURCE_STALE:`交易所只读探针已过期${scope}`,
     ACCOUNT_EQUITY_MISSING:`账户权益事实缺失${scope}`,
     ACCOUNT_EQUITY_UNKNOWN:`账户权益事实未知${scope}`,
@@ -1838,7 +1845,7 @@ function renderRiskControlPanel(control) {
     const venueLabel = ({BINANCE:'币安', HYPERLIQUID:'链上永续'})[check.scope?.venue] || check.scope?.venue;
     const scope = check.scope ? `${venueLabel} · 生产账户 ${check.scope.account_id}` : '全局';
     const reasons = (check.reason || []).map(reason => reason === 'CURRENT' ? '当前检查通过' : formatControlBlocker(reason)).join('；');
-    return `<tr><td><b>${escapeHtml(check.label)}</b><br><span class="subtle">${escapeHtml(scope)}</span></td><td><span class="status-pill status-${check.status === 'PASS' ? 'APPROVED' : 'DENY'}">${check.status === 'PASS' ? '通过' : '阻塞'}</span></td><td>${escapeHtml(reasons)}</td><td>${escapeHtml(check.role)}</td><td>${escapeHtml(check.next_action)}</td></tr>`;
+    return `<tr><td data-label="条件 / 范围"><b>${escapeHtml(check.label)}</b><br><span class="subtle">${escapeHtml(scope)}</span></td><td data-label="状态"><span class="status-pill status-${check.status === 'PASS' ? 'APPROVED' : 'DENY'}">${check.status === 'PASS' ? '通过' : '阻塞'}</span></td><td data-label="精确原因">${escapeHtml(reasons)}</td><td data-label="处理角色">${escapeHtml(fmtRole(check.role))}</td><td data-label="下一步">${escapeHtml(check.next_action)}</td></tr>`;
   }).join('');
   const directForm = isAdmin && !systemAlreadyNormal ? (control.actions.direct_restore.allowed
     ? `<form id="risk-direct-restore-form" class="form-panel compact-form"><h2>最高管理员直接恢复</h2><p class="safety-note">所有实时条件已通过。执行会再次校验并创建新的 NORMAL 风险政策；不会开启 AUTO_ADD，旧 TradingAuthorization 继续失效。</p><label>恢复理由<textarea name="reason" rows="3" minlength="10" required>已逐项确认全部实时安全条件，恢复新增风险但保持自动加仓关闭</textarea></label><div class="form-error" role="alert"></div><button class="primary">强验证并直接恢复</button></form>`
@@ -1870,7 +1877,7 @@ function renderRiskControlPanel(control) {
     ? `<details class="operation-toolbox risk-request-history"><summary><span><b>历史恢复申请</b><small>${historicalRequests.length} 条已结束或已失效记录，不计入当前待办</small></span><strong>查看历史</strong></summary><div class="stack">${historicalRequests.map(renderRequestCard).join('')}</div></details>`
     : '';
   const actionSummary = `<article class="card"><h2>为什么当前能 / 不能操作</h2><dl class="definition-grid">${definition('当前身份', currentRoleSummary())}${definition('管理员直接恢复', formatRiskActionReason(control.actions.direct_restore.reason, conditions))}${definition('操作员发起申请', formatRiskActionReason(control.actions.request_restore.reason, conditions))}${definition('独立审核', formatRiskActionReason(control.actions.review_restore.reason, conditions))}${definition('审核后执行', formatRiskActionReason(control.actions.execute_restore.reason, conditions))}</dl></article>`;
-  const conditionDetails = `<details class="operation-toolbox risk-condition-details" ${systemAlreadyNormal && conditions.ready ? '' : 'open'}><summary><span><b>实时恢复条件</b><small>${conditions.ready ? '全部条件通过；执行恢复时仍会重新校验' : `${conditions.blockers.length} 项阻塞，需要先处理`}</small></span><strong>${systemAlreadyNormal && conditions.ready ? '查看明细' : '当前必须处理'}</strong></summary><div class="risk-condition-content"><p class="subtle">逐项展示当前事实、精确原因、负责角色和下一步；执行时会在同一事务内重新校验。</p><div class="table-wrap is-scrollable"><table><thead><tr><th>条件 / 范围</th><th>状态</th><th>精确原因</th><th>处理角色</th><th>下一步</th></tr></thead><tbody>${conditionRows}</tbody></table></div></div></details>`;
+  const conditionDetails = `<details class="operation-toolbox risk-condition-details" ${systemAlreadyNormal && conditions.ready ? '' : 'open'}><summary><span><b>实时恢复条件</b><small>${conditions.ready ? '全部条件通过；执行恢复时仍会重新校验' : `${conditions.blockers.length} 项阻塞，需要先处理`}</small></span><strong>${systemAlreadyNormal && conditions.ready ? '查看明细' : '当前必须处理'}</strong></summary><div class="risk-condition-content"><p class="subtle">逐项展示当前事实、精确原因、负责角色和下一步；执行时会在同一事务内重新校验。</p><div class="table-scroll-hint risk-condition-scroll-hint" data-table-hint>左右滑动查看完整恢复条件</div><div class="table-wrap"><table><thead><tr><th>条件 / 范围</th><th>状态</th><th>精确原因</th><th>处理角色</th><th>下一步</th></tr></thead><tbody>${conditionRows}</tbody></table></div></div></details>`;
   return `<section class="risk-control-overview"><div class="stats"><div class="stat"><small>风险政策</small><b>${riskControlStatusLabel(policy.system_state)}</b></div><div class="stat"><small>政策更新时间</small><b>${fmtDate(policy.updated_at)}</b></div><div class="stat"><small>自动加仓</small><b>${riskControlStatusLabel(gate.status)}</b></div><div class="stat"><small>恢复条件</small><b>${restoreGateLabel}</b></div></div><div class="detail-layout"><article class="card"><h2>当前控制状态</h2><dl class="definition-grid">${definition('政策原因', formatControlReason(policy.reason))}${definition('政策更新人', policy.updated_by_username || shortId(policy.updated_by))}${definition('政策更新时间', fmtDate(policy.updated_at))}${definition('控制原因', formatControlReason(gate.reason))}${definition('控制操作人', gate.operator_username || shortId(gate.operator_id))}${definition('控制更新时间', fmtDate(gate.updated_at))}</dl><p class="safety-note">“仅允许减仓”仍允许减仓与退出；暂停新增风险后，旧 TradingAuthorization 永久失效。恢复不会开启 AUTO_ADD。</p></article>${actionSummary}</div>${normalRestoreState}${conditionDetails}${directForm}${requestForm}<div class="section-head"><div><p class="eyebrow">分权恢复</p><h2>当前恢复待办</h2></div></div><div class="stack">${requestCards}</div>${requestHistory}</section>`;
 }
 

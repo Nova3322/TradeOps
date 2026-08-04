@@ -112,8 +112,8 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
 
     assert response.status_code == 200
     assert "交易控制台" in response.text
-    assert "/assets/app.js?v=84" in response.text
-    assert "/assets/styles.css?v=37" in response.text
+    assert "/assets/app.js?v=85" in response.text
+    assert "/assets/styles.css?v=38" in response.text
     assert 'aria-label="交易控制台首页"' in response.text
     assert '<a href="/" data-link><span>⌂</span>今日</a>' in response.text
     assert 'id="mobile-nav-toggle"' in response.text
@@ -756,7 +756,17 @@ def test_risk_workspace_prioritizes_current_actions_and_hides_closed_tasks() -> 
     assert "当前没有运行中的风险任务" in source
     assert "hasCapability('operations.view') ? '<section class=\"empty-state" in source
     assert "自动加仓已经关闭" in source
+    assert (
+        "HYPERLIQUID_RATE_LIMITED:'链上永续只读接口限流，系统会按计划重试'"  # noqa: RUF001
+        in source
+    )
+    assert "escapeHtml(fmtRole(check.role))" in source
+    assert 'data-label="精确原因"' in source
+    assert "wrapper.closest('.risk-condition-details')" in source
     assert "roleNames().join('、')" not in source
+    styles = app_path.with_name("styles.css").read_text()
+    assert ".risk-condition-details tr { display: block;" in styles
+    assert ".risk-condition-scroll-hint { display: none; }" in styles
 
 
 def test_system_and_venue_pages_distinguish_read_only_snapshots_from_live_execution() -> None:

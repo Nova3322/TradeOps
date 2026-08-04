@@ -629,6 +629,14 @@ dialog::backdrop { background: rgba(4, 12, 10, .56); backdrop-filter: blur(3px);
   .table-scroll-hint { display: block; margin: 0 2px 8px; color: var(--muted); font-size: 11px; }
   .table-wrap.is-scrollable { scroll-snap-type: x proximity; }
   .table-wrap.is-scrollable th, .table-wrap.is-scrollable td { scroll-snap-align: start; }
+  .risk-condition-details .table-wrap { overflow: visible; border: 0; background: transparent; scrollbar-gutter: auto; }
+  .risk-condition-details table { min-width: 0; }
+  .risk-condition-details thead { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
+  .risk-condition-details tbody { display: grid; gap: 10px; }
+  .risk-condition-details tr { display: block; padding: 12px; border: 1px solid var(--line); border-radius: 12px; background: var(--panel-strong); }
+  .risk-condition-details td { width: 100%; display: grid; grid-template-columns: 82px minmax(0, 1fr); gap: 10px; padding: 7px 0; border: 0; font-size: 12px; overflow-wrap: anywhere; }
+  .risk-condition-details td::before { content: attr(data-label); color: var(--muted); font-size: 10px; font-weight: 750; letter-spacing: .04em; }
+  .risk-condition-scroll-hint { display: none; }
   .result-summary { display: block; }
   .result-summary span { display: block; margin-top: 5px; }
   .chart-head { display: block; }
