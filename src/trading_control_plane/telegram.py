@@ -137,6 +137,19 @@ def _format_time(value: datetime) -> str:
     return value.astimezone(UTC).strftime("%Y-%m-%d %H:%M UTC")
 
 
+def _format_deadline(value: datetime | str | None) -> str:
+    if value is None or str(value).strip() == "":
+        return "未提供"
+    try:
+        parsed = value if isinstance(value, datetime) else datetime.fromisoformat(str(value))
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=UTC)
+    except ValueError:
+        return _escaped(value)
+    deadline = parsed.astimezone(UTC)
+    return f"{deadline.year}年{deadline.month}月{deadline.day}日 {deadline:%H:%M} UTC"
+
+
 def _labeled_code(value: str | None, labels: dict[str, str]) -> str:
     if value is None or value.strip() == "":
         return "未提供"
@@ -158,7 +171,7 @@ def render_proposal_notification(notification: ProposalNotification) -> str:
         f"<b>对象</b>　提案 <code>{_short_id(notification.proposal_id)}</code>",
         f"<b>状态</b>　{_labeled_code(notification.status, _STATUS_LABELS)} "
         f"· v{notification.proposal_version}",
-        f"<b>截止</b>　{_optional(notification.expires_at)}",
+        f"<b>截止</b>　{_format_deadline(notification.expires_at)}",
         f"<b>币对 / 方向</b>　{_optional(notification.symbol)} / "
         f"{_labeled_code(notification.direction, _DIRECTION_LABELS)}",
         f"<b>风险</b>　{_labeled_code(notification.risk_tier, _RISK_LABELS)}"
@@ -737,7 +750,7 @@ class TelegramBotGateway(MockTelegramGateway):
                             f"• <b>{_optional(item.symbol)}</b> "
                             f"{_labeled_code(item.direction, _DIRECTION_LABELS)}"
                             f" · {_labeled_code(item.risk_tier, _RISK_LABELS)}风险"
-                            f" · 截止 {_optional(item.expires_at)}"
+                            f" · 截止 {_format_deadline(item.expires_at)}"
                             for item in todos[:visible_limit]
                         ]
                         omitted = max(0, len(todos) - visible_limit)

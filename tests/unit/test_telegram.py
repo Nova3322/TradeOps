@@ -134,6 +134,8 @@ def test_bot_requires_two_clicks_and_exposes_only_proposal_review() -> None:
         "查看完整冻结快照",
     ]
     assert "BTCUSDT" in fake.calls[-1][1]["text"]
+    assert "2026年8月4日 20:00 UTC" in fake.calls[-1][1]["text"]
+    assert "2026-08-04T20:00:00+00:00" not in fake.calls[-1][1]["text"]
     assert "资金" not in " ".join(row[0]["text"] for row in keyboard)
 
     bot.send_campaign(
@@ -240,6 +242,7 @@ def test_todo_limits_message_to_earliest_ten_and_reports_omitted_count() -> None
     assert "另有 2 项" in payload["text"]
     assert "PAIR9" in payload["text"]
     assert "PAIR10" not in payload["text"]
+    assert "截止 2026年8月4日 20:00 UTC" in payload["text"]
 
 
 def test_start_rejects_different_username_and_group_chat() -> None:

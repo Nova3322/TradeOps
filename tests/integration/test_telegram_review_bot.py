@@ -177,8 +177,15 @@ def test_telegram_todo_excludes_expired_frozen_proposals(database: Database) -> 
         admin,
         now=now - timedelta(hours=3),
     )
+    reuser = service.create_user(
+        "telegram-todo-reuser",
+        admin,
+        now=now - timedelta(hours=3),
+    )
     service.assign_role(proposer, Role.PROPOSER, admin, now=now - timedelta(hours=3))
     service.assign_role(reviewer, Role.REVIEWER, admin, now=now - timedelta(hours=3))
+    service.assign_role(reuser, Role.PROPOSER, admin, now=now - timedelta(hours=3))
+    service.assign_role(reuser, Role.REVIEWER, admin, now=now - timedelta(hours=3))
     instrument_ids = {
         symbol: service.register_instrument(
             actor_id=admin,
@@ -219,11 +226,29 @@ def test_telegram_todo_excludes_expired_frozen_proposals(database: Database) -> 
         created_at=now - timedelta(hours=2),
         expires_at=now - timedelta(hours=1),
     )
-    frozen_proposal(
+    btc_created_at = now - timedelta(minutes=1)
+    btc_expires_at = now + timedelta(hours=1)
+    btc_proposal_id = frozen_proposal(
         "BTCUSDT",
-        created_at=now - timedelta(minutes=1),
-        expires_at=now + timedelta(hours=1),
+        created_at=btc_created_at,
+        expires_at=btc_expires_at,
     )
+    reused_id = service.create_proposal(
+        actor_id=reuser,
+        source=ProposalSource.MANUAL,
+        risk_tier=RiskTier.MEDIUM,
+        account_id="acct-1",
+        venue="BINANCE",
+        instrument_id=instrument_ids["BTCUSDT"],
+        direction=Direction.LONG,
+        quantity=Decimal("0.001"),
+        max_risk=Decimal("1"),
+        expires_at=btc_expires_at,
+        idempotency_key="telegram-todo-reuser",
+        deduplicate_active_manual_semantics=True,
+        now=btc_created_at,
+    )
+    assert reused_id == btc_proposal_id
 
     fake = RecordingBotApi()
     app = create_app(
@@ -284,3 +309,46 @@ def test_telegram_todo_excludes_expired_frozen_proposals(database: Database) -> 
             [{"text": "打开 Web 审核队列", "url": "http://test/reviews"}]
         ]
     }
+
+    reuser_fake = RecordingBotApi()
+    reuser_app = create_app(
+        Settings(
+            environment="test",
+            database_url=str(database.engine.url),
+            allow_mock_identity=True,
+            session_signing_secret="telegram-todo-reuser-signing-secret",  # noqa: S106
+            public_base_url="http://test",
+            telegram_enabled=True,
+            telegram_bot_token="123456789:abcdefghijklmnopqrstuvwxyz",  # noqa: S106
+            telegram_allowed_username="telegram-todo-reuser",
+            telegram_internal_username="telegram-todo-reuser",
+            _env_file=None,
+        ),
+        database,
+        PerptapeClient(
+            base_url="https://perptape.com",
+            api_key=None,
+            contract_version="breakouts-v1",
+            cache_ttl=timedelta(minutes=1),
+        ),
+    )
+    reuser_gateway = reuser_app.state.telegram_gateway
+    assert isinstance(reuser_gateway, TelegramBotGateway)
+    reuser_gateway._client = TelegramBotClient(
+        "123456789:abcdefghijklmnopqrstuvwxyz",
+        base_url="https://telegram.invalid",
+        poster=reuser_fake.poster,
+    )
+    for update_id, command in ((300, "/start"), (301, "/todo")):
+        reuser_gateway.handle_update(
+            {
+                "update_id": update_id,
+                "message": {
+                    "text": command,
+                    "from": {"id": 790, "username": "telegram-todo-reuser"},
+                    "chat": {"id": 790, "type": "private"},
+                },
+            }
+        )
+    assert "当前没有可由你独立审核" in reuser_fake.calls[-1][1]["text"]
+    assert "BTCUSDT" not in reuser_fake.calls[-1][1]["text"]
