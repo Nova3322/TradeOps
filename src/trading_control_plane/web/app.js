@@ -1774,8 +1774,9 @@ const riskControlStatusLabel = (value) => ({
 }[value] || value);
 
 function formatControlBlocker(value) {
-  const [code, environment, accountId, venue] = String(value || '').split(':');
-  const scope = accountId ? `（${environment} · ${accountId} · ${venue}）` : '';
+  const [code, environment, accountId, venue, detail] = String(value || '').split(':');
+  const venueLabel = ({BINANCE:'币安', HYPERLIQUID:'链上永续'})[venue] || venue;
+  const scope = accountId ? `（${venueLabel} · 生产账户 ${accountId}）` : '';
   return ({
     LIVE_SCOPE_CONFIGURATION_REQUIRED:'生产账户范围未配置：至少配置一个明确的 LIVE 账户与交易所',
     KILL_SWITCH_MANUAL_RECOVERY_REQUIRED:'系统处于紧急停止：必须先完成人工处置，不能从本页恢复',
@@ -1783,6 +1784,9 @@ function formatControlBlocker(value) {
     ORDER_INTENT_UNKNOWN:'订单意图结果未知', VENUE_ORDER_UNKNOWN:'交易所订单结果未知',
     RISK_RESERVATION_UNKNOWN:'风险预留结果未知', CAMPAIGN_UNKNOWN:'交易任务结果未知',
     UNBOUND_OPEN_ORDER:'发现未绑定到受控意图的开放订单',
+    READ_ONLY_SOURCE_MISSING:`尚无成功的交易所只读探针${scope}`,
+    READ_ONLY_SOURCE_FAILED:`交易所只读探针失败${scope}${detail ? `：${detail}` : ''}`,
+    READ_ONLY_SOURCE_STALE:`交易所只读探针已过期${scope}`,
     ACCOUNT_EQUITY_MISSING:`账户权益事实缺失${scope}`,
     ACCOUNT_EQUITY_UNKNOWN:`账户权益事实未知${scope}`,
     ACCOUNT_EQUITY_STALE:`账户权益事实已过期${scope}`,
@@ -1831,7 +1835,8 @@ function renderRiskControlPanel(control) {
   const activeRequests = control.requests.filter(item => !item.superseded_by_control_state && ['PENDING_REVIEW','APPROVED'].includes(item.status));
   const historicalRequests = control.requests.filter(item => item.superseded_by_control_state || !['PENDING_REVIEW','APPROVED'].includes(item.status));
   const conditionRows = (conditions.checks || []).map(check => {
-    const scope = check.scope ? `${check.scope.environment} · ${check.scope.account_id} · ${check.scope.venue}` : '全局';
+    const venueLabel = ({BINANCE:'币安', HYPERLIQUID:'链上永续'})[check.scope?.venue] || check.scope?.venue;
+    const scope = check.scope ? `${venueLabel} · 生产账户 ${check.scope.account_id}` : '全局';
     const reasons = (check.reason || []).map(reason => reason === 'CURRENT' ? '当前检查通过' : formatControlBlocker(reason)).join('；');
     return `<tr><td><b>${escapeHtml(check.label)}</b><br><span class="subtle">${escapeHtml(scope)}</span></td><td><span class="status-pill status-${check.status === 'PASS' ? 'APPROVED' : 'DENY'}">${check.status === 'PASS' ? '通过' : '阻塞'}</span></td><td>${escapeHtml(reasons)}</td><td>${escapeHtml(check.role)}</td><td>${escapeHtml(check.next_action)}</td></tr>`;
   }).join('');

@@ -7752,6 +7752,15 @@ class TradingService:
                 blockers.add("CONTROL_SCOPE_INVALID")
                 continue
             prefix = f"{environment.value}:{account_id}:{venue}"
+            if require_live_scope:
+                source_health = session.get(RuntimeSourceHealth, venue)
+                if source_health is None:
+                    blockers.add(f"READ_ONLY_SOURCE_MISSING:{prefix}")
+                elif source_health.status != "SUCCESS":
+                    failure_code = source_health.error_code or "READ_ONLY_PROBE_FAILED"
+                    blockers.add(f"READ_ONLY_SOURCE_FAILED:{prefix}:{failure_code}")
+                elif self._fact_is_stale(source_health.checked_at, now, max_age):
+                    blockers.add(f"READ_ONLY_SOURCE_STALE:{prefix}")
             equity = session.scalar(
                 select(AccountEquity).where(
                     AccountEquity.environment == environment.value,
@@ -7892,6 +7901,24 @@ class TradingService:
             )
             details.extend(
                 [
+                    condition(
+                        "READ_ONLY_SOURCE_CURRENT",
+                        "交易所只读探针已连接且新鲜",
+                        [
+                            item
+                            for item in blockers
+                            if item.startswith(
+                                (
+                                    f"READ_ONLY_SOURCE_MISSING:{prefix}",
+                                    f"READ_ONLY_SOURCE_FAILED:{prefix}",
+                                    f"READ_ONLY_SOURCE_STALE:{prefix}",
+                                )
+                            )
+                        ],
+                        "SYSTEM_ADMIN",
+                        "恢复该交易所只读同步并等待一次成功探针",
+                        scope,
+                    ),
                     condition(
                         "ACCOUNT_EQUITY_CURRENT",
                         "账户权益事实完整且新鲜",

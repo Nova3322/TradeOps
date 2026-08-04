@@ -720,6 +720,11 @@ def test_system_admin_direct_restore_requires_live_conditions_and_keeps_auto_add
     service: TradingService,
 ) -> None:
     ids = seed(service)
+    runtime_actor = service.create_service_principal(
+        "risk-runtime-sync",
+        ids["admin"],
+        now=NOW,
+    )
     enable_auto_add_for_test(database, ids["admin"], now=NOW)
     old_authorization_id = issue_add_authorization(service, ids)
     service.disable_global_auto_add(
@@ -783,6 +788,49 @@ def test_system_admin_direct_restore_requires_live_conditions_and_keeps_auto_add
         now=ready_at + timedelta(seconds=1),
     )
     assert service.reconciliation_status(reconciliation_id).value == "MATCH"
+    missing_probe = service.risk_control_status(
+        ids["admin"],
+        live_scope,
+        require_live_scope=True,
+        now=ready_at + timedelta(seconds=1, milliseconds=100),
+    )
+    assert "READ_ONLY_SOURCE_MISSING:LIVE:acct-1:BINANCE" in missing_probe[
+        "restore_conditions"
+    ]["blockers"]
+    source_check = next(
+        item
+        for item in missing_probe["restore_conditions"]["checks"]
+        if item["code"] == "READ_ONLY_SOURCE_CURRENT"
+    )
+    assert source_check["status"] == "BLOCKED"
+    assert source_check["role"] == "SYSTEM_ADMIN"
+
+    service.record_runtime_source_health(
+        runtime_actor,
+        {
+            "BINANCE": {
+                "status": "FAILED",
+                "error_code": "BINANCE_RATE_LIMITED",
+            }
+        },
+        now=ready_at + timedelta(seconds=1, milliseconds=200),
+    )
+    failed_probe = service.risk_control_status(
+        ids["admin"],
+        live_scope,
+        require_live_scope=True,
+        now=ready_at + timedelta(seconds=1, milliseconds=300),
+    )
+    assert (
+        "READ_ONLY_SOURCE_FAILED:LIVE:acct-1:BINANCE:BINANCE_RATE_LIMITED"
+        in failed_probe["restore_conditions"]["blockers"]
+    )
+
+    service.record_runtime_source_health(
+        runtime_actor,
+        {"BINANCE": {"status": "SUCCESS", "items_observed": 1}},
+        now=ready_at + timedelta(seconds=1, milliseconds=400),
+    )
     restored_policy_id = service.direct_restore_risk_controls(
         ids["admin"],
         "admin-restore-success",
