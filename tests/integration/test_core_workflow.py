@@ -406,11 +406,29 @@ def test_self_review_is_forbidden_and_high_risk_needs_two_reviewers(
     assert (
         queries.list_proposals(ids["observer"], now=NOW)[0]["actionable_for_current_user"] is False
     )
+    expired_projection = queries.list_proposals(ids["reviewer_two"], now=NOW + timedelta(hours=2))[
+        0
+    ]
+    assert expired_projection["status"] == "EXPIRED"
+    assert expired_projection["actionable_for_current_user"] is False
     assert (
-        queries.list_proposals(ids["reviewer_two"], now=NOW + timedelta(hours=2))[0][
-            "actionable_for_current_user"
+        queries.list_proposals(
+            ids["reviewer_two"],
+            status="PENDING_REVIEW",
+            now=NOW + timedelta(hours=2),
+        )
+        == []
+    )
+    assert queries.list_proposals(
+        ids["reviewer_two"],
+        status="EXPIRED",
+        now=NOW + timedelta(hours=2),
+    )[0]["proposal_id"] == str(proposal_id)
+    assert (
+        queries.proposal_detail(ids["reviewer_two"], proposal_id, now=NOW + timedelta(hours=2))[
+            "status"
         ]
-        is False
+        == "EXPIRED"
     )
     second = service.review_proposal(
         proposal_id,

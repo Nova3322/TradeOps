@@ -5,7 +5,7 @@ from decimal import Decimal
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import select, text, tuple_
+from sqlalchemy import and_, or_, select, text, tuple_
 
 from trading_control_plane.database import Database
 from trading_control_plane.domain import DomainRejected, PrincipalType, Role
@@ -54,6 +54,12 @@ def _uuid_or_none(value: str) -> UUID | None:
         return UUID(value)
     except ValueError:
         return None
+
+
+def _effective_proposal_status(proposal: Proposal, now: datetime) -> str:
+    if proposal.status in {"DRAFT", "PENDING_REVIEW"} and proposal.expires_at <= now:
+        return "EXPIRED"
+    return proposal.status
 
 
 class TradingQueries:
@@ -302,7 +308,22 @@ class TradingQueries:
                 .join(Instrument, Instrument.instrument_id == Proposal.instrument_id)
                 .order_by(Proposal.created_at.desc())
             )
-            if status is not None:
+            if status in {"DRAFT", "PENDING_REVIEW"}:
+                statement = statement.where(
+                    Proposal.status == status,
+                    Proposal.expires_at > current_time,
+                )
+            elif status == "EXPIRED":
+                statement = statement.where(
+                    or_(
+                        Proposal.status == "EXPIRED",
+                        and_(
+                            Proposal.status.in_(["DRAFT", "PENDING_REVIEW"]),
+                            Proposal.expires_at <= current_time,
+                        ),
+                    )
+                )
+            elif status is not None:
                 statement = statement.where(Proposal.status == status)
             values = session.execute(statement).all()
             reviewed_proposal_ids = set(
@@ -312,10 +333,11 @@ class TradingQueries:
             for proposal, instrument in values:
                 if not self.service.can_user(user_id, "view", proposal.account_id, proposal.venue):
                     continue
+                effective_status = _effective_proposal_status(proposal, current_time)
                 summary = self._proposal_summary(proposal, instrument)
+                summary["status"] = effective_status
                 summary["actionable_for_current_user"] = bool(
-                    proposal.status == "PENDING_REVIEW"
-                    and proposal.expires_at > current_time
+                    effective_status == "PENDING_REVIEW"
                     and proposal.proposer_id != user_id
                     and proposal.proposal_id not in reviewed_proposal_ids
                     and self.service.can_user(
@@ -387,6 +409,8 @@ class TradingQueries:
             result = self._proposal_summary(
                 proposal, session.get(Instrument, proposal.instrument_id)
             )
+            effective_status = _effective_proposal_status(proposal, current_time)
+            result["status"] = effective_status
             result.update(
                 {
                     "frozen_payload": proposal.frozen_payload,
@@ -404,8 +428,7 @@ class TradingQueries:
                         for item in approvals
                     ],
                     "actionable_for_current_user": bool(
-                        proposal.status == "PENDING_REVIEW"
-                        and proposal.expires_at > current_time
+                        effective_status == "PENDING_REVIEW"
                         and proposal.proposer_id != user_id
                         and all(item.reviewer_id != user_id for item in approvals)
                         and self.service.can_user(
