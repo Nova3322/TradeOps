@@ -26,6 +26,7 @@ from trading_control_plane.domain import (
     SystemRiskState,
 )
 from trading_control_plane.models import (
+    Campaign,
     CapabilityGate,
     OrderIntent,
     RiskControlChangeRequest,
@@ -36,6 +37,45 @@ from trading_control_plane.service import TradingService
 
 NOW = datetime(2026, 8, 1, 8, tzinfo=UTC)
 SCOPE = (("SHADOW", "acct-1", "BINANCE"),)
+
+
+def test_live_restore_scope_projection_excludes_shadow_scopes_and_campaigns() -> None:
+    campaigns = [
+        Campaign(
+            environment="SHADOW",
+            account_id="shadow-account",
+            venue="HYPERLIQUID",
+            status="OPEN",
+        ),
+        Campaign(
+            environment="LIVE",
+            account_id="live-campaign-account",
+            venue="BINANCE",
+            status="OPEN",
+        ),
+    ]
+
+    scopes = TradingService._canonical_restore_scopes(
+        (
+            ("SHADOW", "configured-shadow", "BINANCE"),
+            ("LIVE", "configured-live", "HYPERLIQUID"),
+        ),
+        campaigns,
+        required_environment=ExecutionEnvironment.LIVE.value,
+    )
+
+    assert scopes == [
+        {
+            "environment": "LIVE",
+            "account_id": "configured-live",
+            "venue": "HYPERLIQUID",
+        },
+        {
+            "environment": "LIVE",
+            "account_id": "live-campaign-account",
+            "venue": "BINANCE",
+        },
+    ]
 
 
 def seed(service: TradingService) -> dict[str, UUID]:
@@ -280,7 +320,7 @@ def test_disable_auto_add_and_add_creation_share_risk_gate_auth_lock_order(
     authorization_id = issue_add_authorization(service, ids)
     opening = service.create_order_intent(
         authorization_id,
-        ids["operator"],
+        ids["admin"],
         IntentKind.INITIAL,
         "acct-1",
         "BINANCE",
@@ -416,18 +456,6 @@ def approve_restore(
             "restore-review-one",
             now=now,
         )
-        is RiskPolicyChangeStatus.PENDING_REVIEW
-    )
-    assert (
-        service.review_risk_control_change_request(
-            request_id,
-            ids["reviewer_two"],
-            ReviewDecision.APPROVE,
-            "second independent restore review",
-            2,
-            "restore-review-two",
-            now=now,
-        )
         is RiskPolicyChangeStatus.APPROVED
     )
 
@@ -487,7 +515,7 @@ def test_tighten_actions_permanently_revoke_old_authorization(
         )
 
 
-def test_reviewed_restore_requires_two_distinct_reviewers_and_fresh_match(
+def test_reviewed_restore_requires_operator_and_one_independent_reviewer(
     database: Database, service: TradingService
 ) -> None:
     ids = seed(service)
@@ -506,28 +534,34 @@ def test_reviewed_restore_requires_two_distinct_reviewers_and_fresh_match(
         now=NOW + timedelta(minutes=1),
     )
     request_id = service.create_risk_control_change_request(
-        ids["admin"],
+        ids["operator"],
         "create-reviewed-restore",
         reason="root cause remediated and independent review requested",
-        restore_auto_add=True,
+        restore_auto_add=False,
         configured_scopes=SCOPE,
         now=NOW + timedelta(minutes=2),
     )
     assert (
         service.create_risk_control_change_request(
-            ids["admin"],
+            ids["operator"],
             "create-reviewed-restore",
             reason="root cause remediated and independent review requested",
-            restore_auto_add=True,
+            restore_auto_add=False,
             configured_scopes=SCOPE,
             now=NOW + timedelta(minutes=2),
         )
         == request_id
     )
+    service.assign_role(
+        ids["operator"],
+        Role.REVIEWER,
+        ids["admin"],
+        now=NOW + timedelta(minutes=2, seconds=1),
+    )
     with pytest.raises(DomainRejected, match="SELF_REVIEW_FORBIDDEN"):
         service.review_risk_control_change_request(
             request_id,
-            ids["admin"],
+            ids["operator"],
             ReviewDecision.APPROVE,
             "requester cannot approve their own change",
             1,
@@ -544,9 +578,9 @@ def test_reviewed_restore_requires_two_distinct_reviewers_and_fresh_match(
             "restore-review-one",
             now=NOW + timedelta(minutes=3),
         )
-        is RiskPolicyChangeStatus.PENDING_REVIEW
+        is RiskPolicyChangeStatus.APPROVED
     )
-    with pytest.raises(DomainRejected, match="REVIEW_ALREADY_RECORDED"):
+    with pytest.raises(DomainRejected, match="RISK_RESTORE_NOT_REVIEWABLE"):
         service.review_risk_control_change_request(
             request_id,
             ids["reviewer_one"],
@@ -556,33 +590,21 @@ def test_reviewed_restore_requires_two_distinct_reviewers_and_fresh_match(
             "duplicate-review",
             now=NOW + timedelta(minutes=4),
         )
-    with pytest.raises(DomainRejected, match="VERSION_CONFLICT"):
+    with pytest.raises(DomainRejected, match="RISK_RESTORE_NOT_REVIEWABLE"):
         service.review_risk_control_change_request(
             request_id,
             ids["reviewer_two"],
             ReviewDecision.APPROVE,
             "stale second restore review",
-            1,
+            2,
             "stale-review",
             now=NOW + timedelta(minutes=4),
         )
-    assert (
-        service.review_risk_control_change_request(
-            request_id,
-            ids["reviewer_two"],
-            ReviewDecision.APPROVE,
-            "second independent restore review",
-            2,
-            "restore-review-two",
-            now=NOW + timedelta(minutes=4),
-        )
-        is RiskPolicyChangeStatus.APPROVED
-    )
     with pytest.raises(DomainRejected, match="RISK_RESTORE_COOLDOWN"):
         service.execute_risk_control_change_request(
             request_id,
-            ids["admin"],
-            3,
+            ids["reviewer_one"],
+            2,
             "execute-too-soon",
             SCOPE,
             now=NOW + timedelta(minutes=5),
@@ -616,8 +638,8 @@ def test_reviewed_restore_requires_two_distinct_reviewers_and_fresh_match(
     assert service.reconciliation_status(reconciliation_id).value == "MATCH"
     restored_policy_id = service.execute_risk_control_change_request(
         request_id,
-        ids["admin"],
-        3,
+        ids["reviewer_one"],
+        2,
         "execute-reviewed-restore",
         SCOPE,
         now=ready_at + timedelta(seconds=2),
@@ -634,7 +656,7 @@ def test_reviewed_restore_requires_two_distinct_reviewers_and_fresh_match(
         assert active_policy.policy_id == restored_policy_id
         assert active_policy.system_state == SystemRiskState.NORMAL.value
         assert active_policy.revision == 3
-        assert gate is not None and gate.status == CapabilityStatus.ENABLED.value
+        assert gate is not None and gate.status == CapabilityStatus.DISABLED.value
         assert old_authorization is not None
         assert old_authorization.active is False
         assert old_authorization.add_revoked_at == NOW + timedelta(seconds=30)
@@ -658,7 +680,7 @@ def test_restore_fails_closed_on_live_scope_configuration_and_control_drift(
     assert "LIVE_SCOPE_CONFIGURATION_REQUIRED" in status["restore_conditions"]["blockers"]
 
     request_id = service.create_risk_control_change_request(
-        ids["admin"],
+        ids["operator"],
         "create-drift-request",
         reason="request that will be invalidated by control drift",
         restore_auto_add=False,
@@ -675,12 +697,89 @@ def test_restore_fails_closed_on_live_scope_configuration_and_control_drift(
     with pytest.raises(DomainRejected, match="RISK_RESTORE_CONTROL_DRIFT"):
         service.execute_risk_control_change_request(
             request_id,
-            ids["admin"],
-            3,
+            ids["reviewer_one"],
+            2,
             "execute-drifted-request",
             (),
             now=NOW + timedelta(minutes=17),
         )
+
+
+def test_system_admin_direct_restore_requires_live_conditions_and_keeps_auto_add_off(
+    database: Database,
+    service: TradingService,
+) -> None:
+    ids = seed(service)
+    enable_auto_add_for_test(database, ids["admin"], now=NOW)
+    old_authorization_id = issue_add_authorization(service, ids)
+    service.disable_global_auto_add(
+        ids["admin"],
+        "disable-before-admin-restore",
+        reason="direct restore must never reopen AUTO_ADD",
+        now=NOW + timedelta(seconds=30),
+    )
+    service.pause_new_risk(
+        ids["admin"],
+        "pause-before-admin-restore",
+        reason="exercise direct administrator restoration",
+        now=NOW + timedelta(minutes=1),
+    )
+    live_scope = (("LIVE", "acct-1", "BINANCE"),)
+    with pytest.raises(DomainRejected, match="RISK_RESTORE_BLOCKED"):
+        service.direct_restore_risk_controls(
+            ids["admin"],
+            "admin-restore-blocked",
+            reason="must not restore without live facts",
+            configured_scopes=live_scope,
+            now=NOW + timedelta(minutes=2),
+        )
+
+    ready_at = NOW + timedelta(minutes=17)
+    service.record_position(
+        "acct-1",
+        "BINANCE",
+        ids["instrument"],
+        Decimal("0"),
+        Decimal("0"),
+        Decimal("100"),
+        True,
+        ids["operator"],
+        environment=ExecutionEnvironment.LIVE,
+        now=ready_at,
+    )
+    service.record_account_equity(
+        "acct-1",
+        "BINANCE",
+        Decimal("10000"),
+        Decimal("9000"),
+        "USDT",
+        True,
+        ids["operator"],
+        environment=ExecutionEnvironment.LIVE,
+        now=ready_at,
+    )
+    reconciliation_id = service.reconcile_scope(
+        "LIVE:acct-1:BINANCE",
+        ids["operator"],
+        now=ready_at + timedelta(seconds=1),
+    )
+    assert service.reconciliation_status(reconciliation_id).value == "MATCH"
+    restored_policy_id = service.direct_restore_risk_controls(
+        ids["admin"],
+        "admin-restore-success",
+        reason="all live safety conditions passed",
+        configured_scopes=live_scope,
+        now=ready_at + timedelta(seconds=2),
+    )
+
+    with database.session_factory() as session:
+        restored = session.get(RiskPolicy, restored_policy_id)
+        gate = session.get(CapabilityGate, "AUTO_ADD")
+        old_authorization = session.get(TradingAuthorization, old_authorization_id)
+        assert restored is not None
+        assert restored.system_state == SystemRiskState.NORMAL.value
+        assert gate is not None and gate.status == CapabilityStatus.DISABLED.value
+        assert old_authorization is not None and old_authorization.active is False
 
 
 def test_restore_rejection_expiry_and_terminal_status_are_durable(
@@ -689,7 +788,7 @@ def test_restore_rejection_expiry_and_terminal_status_are_durable(
     ids = seed(service)
     with pytest.raises(DomainRejected, match="RISK_CONTROL_ALREADY_NORMAL"):
         service.create_risk_control_change_request(
-            ids["admin"],
+            ids["operator"],
             "normal-control-request",
             reason="normal controls cannot create a no-op restoration",
             restore_auto_add=False,
@@ -704,7 +803,7 @@ def test_restore_rejection_expiry_and_terminal_status_are_durable(
         now=NOW + timedelta(minutes=1),
     )
     rejected_id = service.create_risk_control_change_request(
-        ids["admin"],
+        ids["operator"],
         "create-rejected-restore",
         reason="independent reviewer will reject this restoration",
         restore_auto_add=False,
@@ -730,13 +829,20 @@ def test_restore_rejection_expiry_and_terminal_status_are_durable(
     assert rejected["reviews"][0]["decision"] == ReviewDecision.REJECT.value
 
     expiring_id = service.create_risk_control_change_request(
-        ids["admin"],
+        ids["operator"],
         "create-expiring-restore",
         reason="unreviewed request must expire durably",
         restore_auto_add=False,
         configured_scopes=SCOPE,
         now=NOW + timedelta(minutes=4),
     )
+    expired_projection = service.risk_control_status(
+        ids["admin"], SCOPE, now=NOW + timedelta(days=1, minutes=5)
+    )
+    projected_request = next(
+        item for item in expired_projection["requests"] if item["request_id"] == str(expiring_id)
+    )
+    assert projected_request["status"] == RiskPolicyChangeStatus.EXPIRED.value
     with pytest.raises(DomainRejected, match="RISK_RESTORE_EXPIRED"):
         service.review_risk_control_change_request(
             expiring_id,
@@ -751,3 +857,42 @@ def test_restore_rejection_expiry_and_terminal_status_are_durable(
 
     with pytest.raises(DomainRejected, match="RISK_RESTORE_NOT_FOUND"):
         service.risk_control_change_version(UUID(int=0))
+
+
+def test_expired_restore_does_not_block_a_replacement_request(
+    database: Database,
+    service: TradingService,
+) -> None:
+    ids = seed(service)
+    service.pause_new_risk(
+        ids["admin"],
+        "pause-for-replacement",
+        reason="exercise replacement after expiry",
+        now=NOW + timedelta(minutes=1),
+    )
+    expired_id = service.create_risk_control_change_request(
+        ids["operator"],
+        "create-request-that-expires",
+        reason="this request will not be reviewed in time",
+        restore_auto_add=False,
+        configured_scopes=SCOPE,
+        now=NOW + timedelta(minutes=2),
+    )
+
+    replacement_id = service.create_risk_control_change_request(
+        ids["operator"],
+        "create-replacement-request",
+        reason="replace the expired request with current evidence",
+        restore_auto_add=False,
+        configured_scopes=SCOPE,
+        now=NOW + timedelta(days=1, minutes=3),
+    )
+
+    with database.session_factory() as session:
+        expired = session.get(RiskControlChangeRequest, expired_id)
+        replacement = session.get(RiskControlChangeRequest, replacement_id)
+        assert expired is not None
+        assert expired.status == RiskPolicyChangeStatus.EXPIRED.value
+        assert expired.version == 2
+        assert replacement is not None
+        assert replacement.status == RiskPolicyChangeStatus.PENDING_REVIEW.value

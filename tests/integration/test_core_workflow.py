@@ -11,6 +11,7 @@ from sqlalchemy import func, select
 from trading_control_plane.database import Database
 from trading_control_plane.domain import (
     AddCandidateFacts,
+    CampaignStatus,
     CapabilityStatus,
     Direction,
     DomainRejected,
@@ -624,6 +625,7 @@ def test_cancelled_initial_intent_cannot_be_recreated_with_a_new_key(
         "one-time-initial",
         now=NOW,
     )
+    service.reconcile_scope("acct-1:BINANCE", ids["operator"], now=NOW)
     service.release_unfilled_intent(
         created.intent_id,
         ids["operator"],
@@ -632,7 +634,7 @@ def test_cancelled_initial_intent_cannot_be_recreated_with_a_new_key(
         now=NOW,
     )
 
-    with pytest.raises(DomainRejected, match="INITIAL_INTENT_ALREADY_EXISTS"):
+    with pytest.raises(DomainRejected, match="AUTHORIZATION_INACTIVE"):
         service.create_order_intent(
             authorization_id,
             ids["operator"],
@@ -648,6 +650,12 @@ def test_cancelled_initial_intent_cannot_be_recreated_with_a_new_key(
 
     with database.session_factory() as session:
         assert session.scalar(select(func.count()).select_from(Campaign)) == 1
+        campaign = session.get(Campaign, created.campaign_id)
+        authorization = session.get(TradingAuthorization, authorization_id)
+        assert campaign is not None
+        assert campaign.status == CampaignStatus.CLOSED.value
+        assert authorization is not None
+        assert authorization.active is False
         assert session.scalar(select(func.count()).select_from(OrderIntent)) == 1
 
 

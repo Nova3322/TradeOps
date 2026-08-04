@@ -2,11 +2,18 @@ from __future__ import annotations
 
 import hashlib
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from decimal import Decimal
+from typing import Any
 from uuid import UUID
 
-from trading_control_plane.domain import CapitalDirection, DomainRejected, ExecutionEnvironment
+from trading_control_plane.config import Settings
+from trading_control_plane.domain import (
+    CapitalDirection,
+    DirectCapitalPath,
+    DomainRejected,
+    ExecutionEnvironment,
+)
 
 
 @dataclass(frozen=True)
@@ -36,6 +43,181 @@ class CapitalAutomationDecision:
     purpose: str
     amount: Decimal | None
     reason: str
+
+
+@dataclass(frozen=True)
+class DirectCapitalPlan:
+    path: DirectCapitalPath
+    venue: str
+    account_id: str | None
+    vault_id: str | None
+    asset: str
+    network: str
+    amount: Decimal
+    max_fee: Decimal | None
+    min_received: Decimal | None
+    status: str
+    receipt_status: str
+    source_reference: str | None
+    destination_reference: str | None
+    stages: tuple[dict[str, Any], ...]
+    blockers: tuple[str, ...]
+    execute_after: datetime | None
+    expires_at: datetime
+
+
+def build_direct_capital_plan(
+    *,
+    path: DirectCapitalPath,
+    amount: Decimal,
+    settings: Settings,
+    capital_transfer_gate: str | None,
+    now: datetime,
+) -> DirectCapitalPlan:
+    """Build a fully explicit, non-broadcasting capital path plan."""
+
+    if amount <= 0:
+        raise DomainRejected("CAPITAL_AMOUNT_INVALID", "capital amount must be positive")
+    venue = "BINANCE" if "BINANCE" in path.value else "HYPERLIQUID"
+    account_id = (
+        settings.capital_direct_binance_account_id
+        if venue == "BINANCE"
+        else settings.capital_direct_hyperliquid_account_id
+    )
+    vault_id = settings.capital_direct_vault_id
+    owned_address = settings.capital_direct_owned_arbitrum_address
+    vault_address = settings.capital_direct_vault_address
+    venue_reference = (
+        settings.capital_direct_binance_deposit_address
+        if venue == "BINANCE"
+        else settings.capital_direct_hyperliquid_bridge_address
+    )
+    blockers: list[str] = []
+    required = {
+        "CAPITAL_VAULT_ID_MISSING": vault_id,
+        "CAPITAL_VAULT_ADDRESS_MISSING": vault_address,
+        "CAPITAL_VENUE_ACCOUNT_MISSING": account_id,
+    }
+    if path in {
+        DirectCapitalPath.VAULT_TO_HYPERLIQUID,
+        DirectCapitalPath.HYPERLIQUID_TO_VAULT,
+        DirectCapitalPath.BINANCE_TO_VAULT,
+    }:
+        required["CAPITAL_OWNED_ARBITRUM_ADDRESS_MISSING"] = owned_address
+    if path in {
+        DirectCapitalPath.VAULT_TO_HYPERLIQUID,
+        DirectCapitalPath.HYPERLIQUID_TO_VAULT,
+    }:
+        required["CAPITAL_HYPERLIQUID_CONTRACT_MISSING"] = venue_reference
+    elif path is DirectCapitalPath.VAULT_TO_BINANCE:
+        required["CAPITAL_BINANCE_WHITELIST_ADDRESS_MISSING"] = venue_reference
+    elif path is DirectCapitalPath.BINANCE_TO_VAULT:
+        withdrawal_address = settings.capital_direct_binance_withdrawal_address
+        required["CAPITAL_BINANCE_WITHDRAWAL_ADDRESS_MISSING"] = withdrawal_address
+        if (
+            withdrawal_address
+            and owned_address
+            and withdrawal_address.lower() != owned_address.lower()
+        ):
+            blockers.append("CAPITAL_BINANCE_WITHDRAWAL_ADDRESS_NOT_OWNED")
+    for code, value in required.items():
+        if not value:
+            blockers.append(code)
+    if settings.capital_direct_max_amount is None:
+        blockers.append("CAPITAL_AMOUNT_LIMIT_MISSING")
+    elif amount > settings.capital_direct_max_amount:
+        blockers.append("CAPITAL_AMOUNT_LIMIT_EXCEEDED")
+    if settings.capital_direct_max_fee is None:
+        blockers.append("CAPITAL_FEE_LIMIT_MISSING")
+    if capital_transfer_gate != "ENABLED":
+        blockers.append("CAPITAL_TRANSFER_GATE_DISABLED")
+
+    max_fee = settings.capital_direct_max_fee
+    min_received = None if max_fee is None or amount <= max_fee else amount - max_fee
+    if max_fee is not None and amount <= max_fee:
+        blockers.append("CAPITAL_MIN_RECEIVED_INVALID")
+
+    execute_after: datetime | None = None
+    stages: tuple[dict[str, str], ...]
+    if path is DirectCapitalPath.VAULT_TO_BINANCE:
+        execute_after = now + timedelta(minutes=10)
+        stages = (
+            {"code": "VAULT_RELEASE_REQUEST", "status": "BLOCKED"},
+            {
+                "code": "WAIT_10_MINUTES",
+                "status": "BLOCKED",
+                "execute_after": execute_after.isoformat(),
+            },
+            {"code": "REVALIDATE_RELEASE", "status": "BLOCKED"},
+            {"code": "TRANSFER_TO_AUTHORIZED_BINANCE_ADDRESS", "status": "BLOCKED"},
+        )
+        blockers.append("NOTILT_RELEASE_ADAPTER_UNAVAILABLE")
+    elif path is DirectCapitalPath.VAULT_TO_HYPERLIQUID:
+        execute_after = now + timedelta(minutes=10)
+        stages = (
+            {"code": "VAULT_RELEASE_TO_AUTHORIZED_OWNED_ADDRESS", "status": "BLOCKED"},
+            {
+                "code": "WAIT_10_MINUTES",
+                "status": "BLOCKED",
+                "execute_after": execute_after.isoformat(),
+            },
+            {"code": "REVALIDATE_RELEASE", "status": "BLOCKED"},
+            {"code": "DEPOSIT_TO_HYPERLIQUID_CONTRACT", "status": "BLOCKED"},
+        )
+        blockers.append("HYPERLIQUID_DEPOSIT_ADAPTER_UNAVAILABLE")
+    elif path is DirectCapitalPath.HYPERLIQUID_TO_VAULT:
+        stages = (
+            {"code": "WITHDRAW_FROM_HYPERLIQUID_CONTRACT", "status": "BLOCKED"},
+            {"code": "RECEIVE_AT_AUTHORIZED_OWNED_ADDRESS", "status": "BLOCKED"},
+            {"code": "PREPARE_NOTILT_SDK_DEPOSIT", "status": "BLOCKED"},
+            {"code": "HUMAN_WALLET_CONFIRMATION", "status": "BLOCKED"},
+            {"code": "VERIFY_NOTILT_DEPOSIT_RECEIPT", "status": "BLOCKED"},
+        )
+        blockers.append("HYPERLIQUID_WITHDRAWAL_ADAPTER_UNAVAILABLE")
+    else:
+        stages = (
+            {
+                "code": "RESTRICTED_BINANCE_WITHDRAWAL_TO_AUTHORIZED_OWNED_ADDRESS",
+                "status": "BLOCKED",
+            },
+            {"code": "RECEIVE_AT_AUTHORIZED_OWNED_ADDRESS", "status": "BLOCKED"},
+            {"code": "PREPARE_NOTILT_SDK_DEPOSIT", "status": "BLOCKED"},
+            {"code": "HUMAN_WALLET_CONFIRMATION", "status": "BLOCKED"},
+            {"code": "VERIFY_NOTILT_DEPOSIT_RECEIPT", "status": "BLOCKED"},
+        )
+        blockers.append("BINANCE_RESTRICTED_WITHDRAWAL_ADAPTER_UNAVAILABLE")
+
+    source_reference = (
+        vault_address
+        if path in {DirectCapitalPath.VAULT_TO_BINANCE, DirectCapitalPath.VAULT_TO_HYPERLIQUID}
+        else owned_address
+    )
+    destination_reference = (
+        venue_reference
+        if path is DirectCapitalPath.VAULT_TO_BINANCE
+        else owned_address
+        if path is DirectCapitalPath.VAULT_TO_HYPERLIQUID
+        else vault_address
+    )
+    return DirectCapitalPlan(
+        path=path,
+        venue=venue,
+        account_id=account_id,
+        vault_id=vault_id,
+        asset=settings.capital_direct_asset,
+        network=settings.capital_direct_network,
+        amount=amount,
+        max_fee=max_fee,
+        min_received=min_received,
+        status="BLOCKED",
+        receipt_status="NOT_SUBMITTED",
+        source_reference=source_reference,
+        destination_reference=destination_reference,
+        stages=stages,
+        blockers=tuple(dict.fromkeys(blockers)),
+        execute_after=execute_after,
+        expires_at=now + timedelta(hours=24),
+    )
 
 
 def evaluate_capital_automation(

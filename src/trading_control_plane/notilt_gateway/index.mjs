@@ -135,6 +135,30 @@ function serializeBudget(budget, asset) {
   };
 }
 
+function requireAgentReleaseBudget(budget, vault, agent, amount) {
+  if (!budget.isOfficialVault) {
+    throw new Error("Agent release requires an official NoTilt Vault.");
+  }
+  if (!budget.isActiveWhitelist) {
+    throw new Error("Agent is not the active Vault whitelist.");
+  }
+  if (!sameAddress(budget.vault, vault) || !sameAddress(budget.agent, agent)) {
+    throw new Error("Agent budget scope does not match the requested Vault and agent.");
+  }
+  if (!sameAddress(budget.assignedWhitelistVault, vault)) {
+    throw new Error("Registry assigns the agent to a different Vault.");
+  }
+  if (sameAddress(budget.owner, agent)) {
+    throw new Error("Vault owner cannot use the Agent release path.");
+  }
+  if (budget.panicLocked) {
+    throw new Error("Vault is panic locked.");
+  }
+  if (amount <= 0n || amount > budget.maxReleaseNet) {
+    throw new Error("Requested amount exceeds the current maxReleaseNet budget.");
+  }
+}
+
 function sameAddress(left, right) {
   return getAddress(left).toLowerCase() === getAddress(right).toLowerCase();
 }
@@ -393,6 +417,8 @@ export async function executeOperation(rawInput, dependencies = {}) {
     };
   }
 
+  const budget = await client.getAgentBudget(vault, agent, asset.address);
+  requireAgentReleaseBudget(budget, vault, agent, amount);
   const transaction = await client.buildAgentReleaseRequest({
     vault,
     agent,

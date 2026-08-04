@@ -15,6 +15,7 @@ from trading_control_plane.telegram import (
     TelegramBotClient,
     TelegramBotGateway,
     TelegramCampaignAction,
+    TelegramProposalReviewAction,
     TelegramUnavailable,
     _default_poster,
     campaign_position_reduction_available,
@@ -53,6 +54,7 @@ def gateway(
         internal_username="kelly_oooo",
         binder=bind,
         chat_resolver=lambda user_id: bindings.get(str(user_id)),
+        review_only=False,
         client=TelegramBotClient(
             token,
             base_url="https://telegram.invalid",
@@ -63,6 +65,107 @@ def gateway(
         lambda action, update_id: handled.extend([action, update_id]) or "accepted"
     )
     return instance, bindings, handled, recipient_id
+
+
+def test_review_only_bot_requires_two_clicks_and_exposes_no_risk_or_capital_action() -> None:
+    fake = FakeBotApi()
+    token = "123456789:abcdefghijklmnopqrstuvwxyz"  # noqa: S105
+    recipient_id = uuid4()
+    bindings = {str(recipient_id): "789"}
+    handled: list[object] = []
+    notification = ProposalNotification(
+        notification_id="review-only-proposal",
+        reviewer_id=recipient_id,
+        proposal_id=uuid4(),
+        proposal_version=2,
+        environment="LIVE",
+        summary="frozen proposal awaiting independent review",
+        review_code="review-reference",
+        review_url="http://127.0.0.1:8014/proposals/1",
+        created_at=datetime.now(UTC),
+        symbol="BTCUSDT",
+        direction="LONG",
+        risk_tier="MEDIUM",
+        quantity="0.001",
+        max_risk="1",
+    )
+    bot = TelegramBotGateway(
+        token=token,
+        allowed_username="kelly_oooo",
+        internal_username="kelly_oooo",
+        binder=lambda chat_id, _telegram_username, _internal_username: chat_id,
+        chat_resolver=lambda user_id: bindings.get(str(user_id)),
+        todo_resolver=lambda chat_id: [notification] if chat_id == "789" else [],
+        review_only=True,
+        client=TelegramBotClient(
+            token,
+            base_url="https://telegram.invalid",
+            poster=fake.poster,
+        ),
+    )
+    bot.set_action_handler(
+        lambda action, update_id: handled.extend([action, update_id]) or "review recorded"
+    )
+    bot.send(notification)
+    keyboard = fake.calls[-1][1]["reply_markup"]["inline_keyboard"]
+    assert [row[0]["text"] for row in keyboard] == [
+        "需确认 · 批准",
+        "需确认 · 拒绝",
+        "查看完整冻结快照",
+    ]
+    assert "BTCUSDT" in fake.calls[-1][1]["text"]
+    assert "资金" not in " ".join(row[0]["text"] for row in keyboard)
+
+    bot.send_campaign(
+        CampaignNotification(
+            notification_id="review-only-campaign",
+            recipient_id=recipient_id,
+            campaign_id=uuid4(),
+            event_type="POSITION_UPDATED",
+            environment="LIVE",
+            summary="campaign notification must stay outside the minimal review bot",
+            campaign_version=1,
+            action_references=(("EXIT", "must-not-be-exposed"),),
+            created_at=datetime.now(UTC),
+        )
+    )
+    assert len(fake.calls) == 1
+    assert bot.campaign_notifications() == []
+
+    approve_key = keyboard[0][0]["callback_data"]
+    callback = {
+        "from": {"id": 789},
+        "message": {"message_id": 11, "chat": {"id": 789, "type": "private"}},
+    }
+    bot.handle_update(
+        {"update_id": 10, "callback_query": {"id": "approve", "data": approve_key, **callback}}
+    )
+    assert handled == []
+    confirmation = next(
+        payload for method, payload in reversed(fake.calls) if method == "editMessageText"
+    )
+    confirm_key = confirmation["reply_markup"]["inline_keyboard"][0][0]["callback_data"]
+    bot.handle_update(
+        {
+            "update_id": 11,
+            "callback_query": {"id": "confirm", "data": confirm_key, **callback},
+        }
+    )
+    assert isinstance(handled[0], TelegramProposalReviewAction)
+    assert handled[0].action == "APPROVE_PROPOSAL"
+    assert handled[1] == 11
+
+    bot.handle_update(
+        {
+            "update_id": 12,
+            "message": {
+                "text": "/todo",
+                "from": {"id": 789, "username": "kelly_oooo"},
+                "chat": {"id": 789, "type": "private"},
+            },
+        }
+    )
+    assert "待我审核 · 1 项" in fake.calls[-1][1]["text"]
 
 
 def test_private_start_binds_allowlisted_username_to_numeric_chat_id() -> None:
@@ -569,7 +672,7 @@ def test_offline_payload_preview_is_escaped_bounded_and_hierarchical() -> None:
     assert "LIVE&lt;&amp;" in payload["text"]
     assert "&lt;review &amp; verify&gt;" in payload["text"]
     assert "<review" not in payload["text"]
-    assert "Telegram 只负责通知并打开 Web" in payload["text"]
+    assert "批准或拒绝都需再次确认" in payload["text"]
     assert payload["reply_markup"]["inline_keyboard"][0][0]["text"] == ("打开 Web 安全审核")
 
 
@@ -782,6 +885,7 @@ def test_failed_delivery_does_not_permanently_deduplicate_notification() -> None
         internal_username="kelly_oooo",
         binder=lambda _chat_id, _telegram_username, internal_username: internal_username,
         chat_resolver=lambda _user_id: "789",
+        review_only=False,
         client=TelegramBotClient(
             token,
             base_url="https://telegram.invalid",

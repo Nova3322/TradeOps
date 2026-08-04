@@ -1,0 +1,59 @@
+{
+  "$schema": "https://schema.freqtrade.io/schema.json",
+  "bot_name": "trading-hyperliquid-worker",
+  "dry_run": true,
+  "dry_run_wallet": 10000,
+  "trading_mode": "futures",
+  "margin_mode": "isolated",
+  "stake_currency": "USDC",
+  "stake_amount": 10,
+  "max_open_trades": 20,
+  "timeframe": "5m",
+  "initial_state": "running",
+  "process_only_new_candles": true,
+  "position_adjustment_enable": false,
+  "force_entry_enable": false,
+  "cancel_open_orders_on_exit": true,
+  "exchange": {
+    "name": "hyperliquid",
+    "walletAddress": "",
+    "privateKey": "",
+    "hip3_dexes": ["xyz"],
+    "pair_whitelist": [".*/USDC:USDC"],
+    "pair_blacklist": []
+  },
+  "pairlists": [{"method": "StaticPairList"}],
+  "entry_pricing": {
+    "price_side": "same",
+    "use_order_book": true,
+    "order_book_top": 1,
+    "price_last_balance": 0,
+    "check_depth_of_market": {"enabled": false, "bids_to_ask_delta": 1}
+  },
+  "exit_pricing": {
+    "price_side": "same",
+    "use_order_book": true,
+    "order_book_top": 1
+  },
+  "order_types": {
+    "entry": "limit",
+    "exit": "limit",
+    "emergency_exit": "limit",
+    "force_entry": "limit",
+    "force_exit": "limit",
+    "stoploss": "limit",
+    "stoploss_on_exchange": false
+  },
+  "unfilledtimeout": {"entry": 10, "exit": 10, "unit": "minutes"},
+  "api_server": {
+    "enabled": true,
+    "listen_ip_address": "0.0.0.0",
+    "listen_port": 8080,
+    "verbosity": "error",
+    "enable_openapi": false,
+    "jwt_secret_key": "local-dry-run-jwt-secret-change-me",
+    "CORS_origins": [],
+    "username": "overridden-by-environment",
+    "password": "overridden-by-environment"
+  }
+}

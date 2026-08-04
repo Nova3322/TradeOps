@@ -33,6 +33,7 @@ from trading_control_plane.domain import (
     IntentKind,
     OrderIntentStatus,
     ProposalSource,
+    ReconciliationStatus,
     ReservationStatus,
     ReviewDecision,
     RiskTier,
@@ -40,8 +41,15 @@ from trading_control_plane.domain import (
     SystemRiskState,
     TargetCandidate,
     TargetUrgency,
+    VenueOrderStatus,
 )
-from trading_control_plane.models import Campaign, OrderIntent, RiskReservation, VenueOrder
+from trading_control_plane.models import (
+    Campaign,
+    OrderIntent,
+    RiskReservation,
+    VenueFill,
+    VenueOrder,
+)
 from trading_control_plane.perptape import PerptapeClient
 from trading_control_plane.service import TradingService
 
@@ -242,6 +250,7 @@ def build_testnet_app(
         allow_mock_identity=True,
         session_signing_secret="m4-test-signing-secret-that-is-long-enough",  # noqa: S106
         public_base_url="http://test",
+        execution_backend="DIRECT_LEGACY",
         binance_testnet_order_send_enabled=enabled,
         binance_testnet_api_key="fixture-testnet-key",
         binance_testnet_api_secret="fixture-testnet-secret",  # noqa: S106
@@ -524,6 +533,7 @@ async def run_complete_testnet_flow(database: Database) -> None:
         )
         assert exit_sync.status_code == 200, exit_sync.text
         assert exit_sync.json()["reconciliation"]["status"] == "MATCH"
+        assert exit_sync.json()["facts"]["positions"][0]["protection"] is None
 
     pnl = service.refresh_campaign_pnl(ids["campaign"], ids["operator"], now=datetime.now(UTC))
     assert pnl.total_pnl == Decimal("7.5")
@@ -797,3 +807,329 @@ def test_testnet_send_is_default_off_and_disabled_guard_precedes_external_call(
     database: Database,
 ) -> None:
     asyncio.run(run_disabled_guard(database))
+
+
+def test_read_only_sync_binds_legacy_freqtrade_fill_and_accepts_bounded_lot(
+    database: Database,
+) -> None:
+    service = TradingService(database)
+    ids = seed_testnet(service, key="m4-freqtrade-fill")
+    now = datetime.now(UTC)
+    with database.session_factory.begin() as session:
+        intent = session.get(OrderIntent, ids["opening"], with_for_update=True)
+        campaign = session.get(Campaign, ids["campaign"], with_for_update=True)
+        assert intent is not None and campaign is not None
+        intent.status = OrderIntentStatus.FILLED.value
+        intent.updated_at = now
+        campaign.status = CampaignStatus.OPEN.value
+        campaign.updated_at = now
+        session.add(
+            VenueOrder(
+                order_intent_id=intent.intent_id,
+                account_id="acct-testnet",
+                venue="BINANCE",
+                environment=ExecutionEnvironment.TESTNET.value,
+                instrument_id=ids["instrument"],
+                venue_order_id="freqtrade:41:entry",
+                client_order_id="tcp-freqtrade-fixture",
+                side="BUY",
+                order_type="MARKET",
+                reduce_only=False,
+                status=VenueOrderStatus.FILLED.value,
+                ordered_quantity=Decimal("0.8"),
+                filled_quantity=Decimal("0.8"),
+                observed_at=now - timedelta(seconds=5),
+                updated_at=now,
+            )
+        )
+
+    service.ingest_binance_read_only_snapshot(
+        "acct-testnet",
+        ids["operator"],
+        snapshot(
+            now,
+            orders=(
+                order_fact(
+                    "native-stop-41",
+                    "external-stop-41",
+                    VenueOrderStatus.SENT.value,
+                    "SELL",
+                    Decimal("0.8"),
+                    Decimal(0),
+                    now,
+                    order_type="STOP_MARKET",
+                    stop_price=Decimal("95"),
+                    reduce_only=True,
+                ),
+            ),
+            fills=(
+                BinanceFill(
+                    "native-fill-41",
+                    "native-entry-41",
+                    "BUY",
+                    Decimal("0.8"),
+                    Decimal("100"),
+                    Decimal("0.04"),
+                    "USDT",
+                    now,
+                ),
+            ),
+            quantity=Decimal("0.8"),
+            entry=Decimal("100"),
+            mark=Decimal("101"),
+            protection=BinanceProtection(
+                "native-stop-41", Decimal("0.8"), Decimal("95"), now
+            ),
+        ),
+        environment=ExecutionEnvironment.TESTNET,
+        now=now,
+    )
+    reconciliation_id = service.reconcile_scope(
+        "TESTNET:acct-testnet:BINANCE", ids["operator"], now=now
+    )
+
+    assert service.reconciliation_status(reconciliation_id) is ReconciliationStatus.MATCH
+    with database.session_factory() as session:
+        intent = session.get(OrderIntent, ids["opening"])
+        order = session.scalar(
+            select(VenueOrder).where(VenueOrder.order_intent_id == ids["opening"])
+        )
+        fill = session.scalar(
+            select(VenueFill).where(VenueFill.venue_fill_id == "native-fill-41")
+        )
+        assert intent is not None and intent.status == OrderIntentStatus.FILLED.value
+        assert order is not None and order.venue_order_id == "native-entry-41"
+        assert fill is not None and fill.order_intent_id == ids["opening"]
+
+
+def test_read_only_sync_recovers_unique_late_fill_for_unknown_freqtrade_intent(
+    database: Database,
+) -> None:
+    service = TradingService(database)
+    ids = seed_testnet(service, key="m4-freqtrade-late-fill")
+    now = datetime.now(UTC)
+    with database.session_factory.begin() as session:
+        intent = session.get(OrderIntent, ids["opening"], with_for_update=True)
+        campaign = session.get(Campaign, ids["campaign"], with_for_update=True)
+        reservation = session.get(RiskReservation, ids["reservation"], with_for_update=True)
+        assert intent is not None and campaign is not None and reservation is not None
+        intent.status = OrderIntentStatus.UNKNOWN.value
+        intent.updated_at = now
+        campaign.status = CampaignStatus.UNKNOWN.value
+        campaign.updated_at = now
+        reservation.status = ReservationStatus.UNKNOWN.value
+        reservation.updated_at = now
+        session.add(
+            VenueOrder(
+                order_intent_id=intent.intent_id,
+                account_id="acct-testnet",
+                venue="BINANCE",
+                environment=ExecutionEnvironment.TESTNET.value,
+                instrument_id=ids["instrument"],
+                venue_order_id="UNKNOWN:tcp-late-fill",
+                client_order_id="tcp-late-fill",
+                side="BUY",
+                order_type="MARKET",
+                reduce_only=False,
+                status=VenueOrderStatus.UNKNOWN.value,
+                ordered_quantity=Decimal("0.8"),
+                filled_quantity=Decimal(0),
+                observed_at=now - timedelta(seconds=20),
+                updated_at=now,
+            )
+        )
+
+    service.ingest_binance_read_only_snapshot(
+        "acct-testnet",
+        ids["operator"],
+        snapshot(
+            now,
+            orders=(),
+            fills=(
+                BinanceFill(
+                    "native-late-fill-41",
+                    "native-late-entry-41",
+                    "BUY",
+                    Decimal("0.75"),
+                    Decimal("100"),
+                    Decimal("0.04"),
+                    "USDT",
+                    now - timedelta(seconds=30),
+                ),
+                BinanceFill(
+                    "native-cleanup-fill-41",
+                    "native-cleanup-exit-41",
+                    "SELL",
+                    Decimal("0.75"),
+                    Decimal("101"),
+                    Decimal("0.04"),
+                    "USDT",
+                    now,
+                ),
+            ),
+            quantity=Decimal(0),
+            entry=Decimal(0),
+            mark=Decimal("101"),
+            protection=None,
+        ),
+        environment=ExecutionEnvironment.TESTNET,
+        now=now,
+    )
+
+    with database.session_factory() as session:
+        intent = session.get(OrderIntent, ids["opening"])
+        reservation = session.get(RiskReservation, ids["reservation"])
+        order = session.scalar(
+            select(VenueOrder).where(VenueOrder.order_intent_id == ids["opening"])
+        )
+        fill = session.scalar(
+            select(VenueFill).where(VenueFill.venue_fill_id == "native-late-fill-41")
+        )
+        assert intent is not None and intent.status == OrderIntentStatus.FILLED.value
+        assert reservation is not None and reservation.status == ReservationStatus.OPEN.value
+        assert order is not None and order.venue_order_id == "native-late-entry-41"
+        assert order.ordered_quantity == Decimal("0.75")
+        assert order.filled_quantity == Decimal("0.75")
+        assert fill is not None and fill.order_intent_id == ids["opening"]
+
+    recovered_exit = service.recover_freqtrade_emergency_exit(
+        ids["campaign"],
+        ids["admin"],
+        "confirmed unique emergency cleanup fill",
+        now=now,
+    )
+    reconciliation_id = service.reconcile_scope(
+        "TESTNET:acct-testnet:BINANCE", ids["operator"], now=now
+    )
+    assert service.reconciliation_status(reconciliation_id) is ReconciliationStatus.MATCH
+    service.close_campaign(ids["campaign"], ids["operator"], now=now)
+
+    with database.session_factory() as session:
+        campaign = session.get(Campaign, ids["campaign"])
+        exit_intent = session.get(OrderIntent, recovered_exit)
+        reservation = session.get(RiskReservation, ids["reservation"])
+        cleanup_fill = session.scalar(
+            select(VenueFill).where(VenueFill.venue_fill_id == "native-cleanup-fill-41")
+        )
+        assert campaign is not None and campaign.status == CampaignStatus.CLOSED.value
+        assert exit_intent is not None and exit_intent.status == OrderIntentStatus.FILLED.value
+        assert exit_intent.trigger_source == "FREQTRADE_EMERGENCY_RECOVERY"
+        assert reservation is not None and reservation.status == ReservationStatus.RELEASED.value
+        assert cleanup_fill is not None and cleanup_fill.order_intent_id == recovered_exit
+
+    service.ingest_binance_read_only_snapshot(
+        "acct-testnet",
+        ids["operator"],
+        snapshot(
+            now,
+            orders=(),
+            fills=(
+                BinanceFill(
+                    "native-late-fill-41",
+                    "native-late-entry-41",
+                    "BUY",
+                    Decimal("0.75"),
+                    Decimal("100"),
+                    Decimal("0.04"),
+                    "USDT",
+                    now - timedelta(seconds=30),
+                ),
+                BinanceFill(
+                    "native-cleanup-fill-41",
+                    "native-cleanup-exit-41",
+                    "SELL",
+                    Decimal("0.75"),
+                    Decimal("101"),
+                    Decimal("0.04"),
+                    "USDT",
+                    now,
+                ),
+            ),
+            quantity=Decimal(0),
+            entry=Decimal(0),
+            mark=Decimal("101"),
+            protection=None,
+        ),
+        environment=ExecutionEnvironment.TESTNET,
+        now=now + timedelta(seconds=1),
+    )
+    with database.session_factory() as session:
+        campaign = session.get(Campaign, ids["campaign"])
+        reservation = session.get(RiskReservation, ids["reservation"])
+        assert campaign is not None and campaign.status == CampaignStatus.CLOSED.value
+        assert reservation is not None and reservation.status == ReservationStatus.RELEASED.value
+
+
+def test_emergency_recovery_binds_interrupted_ready_entry_and_cleanup(
+    database: Database,
+) -> None:
+    service = TradingService(database)
+    ids = seed_testnet(service, key="m4-freqtrade-interrupted-entry")
+    now = datetime.now(UTC)
+    observed_at = now + timedelta(seconds=1)
+    service.ingest_binance_read_only_snapshot(
+        "acct-testnet",
+        ids["operator"],
+        snapshot(
+            now,
+            orders=(),
+            fills=(
+                BinanceFill(
+                    "interrupted-entry-fill",
+                    "interrupted-entry-order",
+                    "BUY",
+                    Decimal("0.75"),
+                    Decimal("100"),
+                    Decimal("0.04"),
+                    "USDT",
+                    now,
+                ),
+                BinanceFill(
+                    "interrupted-cleanup-fill",
+                    "interrupted-cleanup-order",
+                    "SELL",
+                    Decimal("0.75"),
+                    Decimal("101"),
+                    Decimal("0.04"),
+                    "USDT",
+                    observed_at,
+                ),
+            ),
+            quantity=Decimal(0),
+            entry=Decimal(0),
+            mark=Decimal("101"),
+            protection=None,
+        ),
+        environment=ExecutionEnvironment.TESTNET,
+        now=observed_at,
+    )
+
+    recovered_exit = service.recover_freqtrade_emergency_exit(
+        ids["campaign"],
+        ids["admin"],
+        "worker process interrupted after the official entry fill",
+        now=observed_at,
+    )
+    reconciliation_id = service.reconcile_scope(
+        "TESTNET:acct-testnet:BINANCE", ids["operator"], now=observed_at
+    )
+    assert service.reconciliation_status(reconciliation_id) is ReconciliationStatus.MATCH
+    service.close_campaign(ids["campaign"], ids["operator"], now=observed_at)
+
+    with database.session_factory() as session:
+        campaign = session.get(Campaign, ids["campaign"])
+        entry = session.get(OrderIntent, ids["opening"])
+        exit_intent = session.get(OrderIntent, recovered_exit)
+        reservation = session.get(RiskReservation, ids["reservation"])
+        entry_fill = session.scalar(
+            select(VenueFill).where(VenueFill.venue_fill_id == "interrupted-entry-fill")
+        )
+        cleanup_fill = session.scalar(
+            select(VenueFill).where(VenueFill.venue_fill_id == "interrupted-cleanup-fill")
+        )
+        assert campaign is not None and campaign.status == CampaignStatus.CLOSED.value
+        assert entry is not None and entry.status == OrderIntentStatus.FILLED.value
+        assert exit_intent is not None and exit_intent.status == OrderIntentStatus.FILLED.value
+        assert reservation is not None and reservation.status == ReservationStatus.RELEASED.value
+        assert entry_fill is not None and entry_fill.order_intent_id == ids["opening"]
+        assert cleanup_fill is not None and cleanup_fill.order_intent_id == recovered_exit

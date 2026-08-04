@@ -22,6 +22,7 @@ from trading_control_plane.domain import (
     SystemRiskState,
 )
 from trading_control_plane.models import (
+    AuditEvent,
     Instrument,
     OrderIntent,
     Proposal,
@@ -169,6 +170,39 @@ def perptape_client_for_contract(symbol: str, canonical_symbol: str) -> Perptape
     )
 
 
+def perptape_hip3_client() -> PerptapeClient:
+    now_ms = int(datetime.now(UTC).timestamp() * 1000)
+
+    def fetch(_url: str, _headers: dict[str, str], _timeout: float) -> dict[str, Any]:
+        return {
+            "type": "breakouts",
+            "generatedAt": now_ms,
+            "data": [
+                {
+                    "exchange": "HL",
+                    "symbol": "xyz:TSLA",
+                    "canonicalSymbol": "TSLA",
+                    "direction": "HH",
+                    "timeframe": "4h",
+                    "price": 325.19,
+                    "breakoutPrice": 325.19,
+                    "threshold": 320,
+                    "klineReadiness": {"status": "ready"},
+                    "triggeredAt": now_ms - 1_000,
+                    "updatedAt": now_ms,
+                }
+            ],
+        }
+
+    return PerptapeClient(
+        base_url="https://perptape.com",
+        api_key="test-key",
+        contract_version="breakouts-v1",
+        cache_ttl=timedelta(minutes=1),
+        fetcher=fetch,
+    )
+
+
 def app(
     database: Database,
     telegram: MockTelegramGateway,
@@ -186,6 +220,7 @@ def app(
         public_base_url="http://test",
         _env_file=None,
     )
+
     class StaticBinanceCatalog:
         configured = True
 
@@ -219,7 +254,72 @@ async def logout(client: AsyncClient) -> None:
     assert response.status_code == 200
 
 
-def test_opportunity_lazily_registers_an_active_official_venue_contract(
+def test_freqtrade_backend_status_is_explicit_and_order_send_remains_closed(
+    database: Database, service: TradingService
+) -> None:
+    seed(service)
+
+    async def scenario() -> None:
+        async with AsyncClient(
+            transport=ASGITransport(app=app(database, MockTelegramGateway())),
+            base_url="http://test",
+        ) as http:
+            await login(http, "admin")
+            response = await http.get("/api/execution/freqtrade/status")
+            assert response.status_code == 200, response.text
+            payload = response.json()
+            assert payload["backend"] == "FREQTRADE"
+            assert payload["workers_enabled"] is False
+            assert payload["direct_venue_send"] is False
+            assert payload["live_order_send"] is False
+            assert [(item["venue"], item["status"]) for item in payload["workers"]] == [
+                ("BINANCE", "DISABLED"),
+                ("HYPERLIQUID", "DISABLED"),
+            ]
+            assert payload["workers"][1]["hip3_dexes"] == ["xyz"]
+
+    asyncio.run(scenario())
+
+
+def test_configured_hip3_catalog_contract_is_proposal_eligible(
+    database: Database, service: TradingService
+) -> None:
+    ids = seed(service)
+    now = datetime.now(UTC)
+    service.register_instrument(
+        actor_id=ids["admin"],
+        venue="HYPERLIQUID",
+        symbol="xyz:TSLA",
+        tick_size=Decimal("0.001"),
+        lot_size=Decimal("0.001"),
+        minimum_notional=Decimal("10"),
+        contract_multiplier=Decimal(1),
+        quote_currency="USDC",
+        collateral_currency="USDC",
+        protection_supported=True,
+        now=now,
+    )
+
+    async def scenario() -> None:
+        async with AsyncClient(
+            transport=ASGITransport(
+                app=app(database, MockTelegramGateway(), perptape_hip3_client())
+            ),
+            base_url="http://test",
+        ) as http:
+            await login(http, "admin")
+            response = await http.get("/api/opportunities")
+            assert response.status_code == 200, response.text
+            candidate = response.json()["data"][0]
+            assert candidate["venue"] == "HYPERLIQUID"
+            assert candidate["symbol"] == "xyz:TSLA"
+            assert candidate["proposal_eligible"] is True
+            assert candidate["proposal_blocker"] is None
+
+    asyncio.run(scenario())
+
+
+def test_opportunity_requires_an_exact_active_instrument_catalog_contract(
     database: Database, service: TradingService
 ) -> None:
     seed(service)
@@ -237,34 +337,104 @@ def test_opportunity_lazily_registers_an_active_official_venue_contract(
             assert candidate["symbol"] == "BTCUSDC"
             assert candidate["canonical_symbol"] == "BTC"
             assert candidate["readiness"] == "READY"
-            assert candidate["proposal_eligible"] is True
-            assert candidate["proposal_blocker"] is None
+            assert candidate["proposal_eligible"] is False
+            assert candidate["proposal_blocker"] == "INSTRUMENT_UNAVAILABLE"
+            assert "active Instrument Catalog match" in candidate["missing_fields"]
 
-            created = await http.post(
+            rejected = await http.post(
                 f"/api/opportunities/{candidate['candidate_id']}/proposals",
                 json={
                     "account_id": "acct-1",
                     "risk_tier": "LOW",
                     "quantity": "1",
                     "max_risk": "40",
-                    "expires_in_minutes": 120,
+                    "expires_in_minutes": 480,
                     "invalidation_price": "118000",
-                    "rationale": "register exact official quote contract",
+                    "rationale": "exact Catalog contract is required before proposal creation",
                 },
             )
-            assert created.status_code == 200, created.text
-            assert created.json()["symbol"] == "BTCUSDC"
-            assert created.json()["quote_currency"] == "USDC"
+            assert rejected.status_code == 422, rejected.text
+            assert rejected.json()["error"]["code"] == "INSTRUMENT_UNAVAILABLE"
 
     asyncio.run(scenario())
     with database.session_factory() as session:
-        assert session.scalar(select(func.count()).select_from(Proposal)) == 1
+        assert session.scalar(select(func.count()).select_from(Proposal)) == 0
         discovered = session.scalar(
-            select(Instrument).where(
-                Instrument.venue == "BINANCE", Instrument.symbol == "BTCUSDC"
-            )
+            select(Instrument).where(Instrument.venue == "BINANCE", Instrument.symbol == "BTCUSDC")
         )
-        assert discovered is not None and discovered.active
+        assert discovered is None
+
+
+def test_official_catalog_sync_activates_current_contracts_and_deactivates_absent_ones(
+    database: Database,
+    service: TradingService,
+) -> None:
+    ids = seed(service)
+    now = datetime.now(UTC)
+    result = service.synchronize_active_venue_instruments(
+        actor_id=ids["runtime_sync"],
+        account_id="acct-1",
+        venue="BINANCE",
+        instruments=(
+            BinanceInstrument(
+                symbol="BTCUSDT",
+                tick_size=Decimal("0.1"),
+                lot_size=Decimal("0.001"),
+                minimum_notional=Decimal("5"),
+                quote_currency="USDT",
+                collateral_currency="USDT",
+                active=True,
+            ),
+            BinanceInstrument(
+                symbol="TUTUSDT",
+                tick_size=Decimal("0.00001"),
+                lot_size=Decimal("1"),
+                minimum_notional=Decimal("5"),
+                quote_currency="USDT",
+                collateral_currency="USDT",
+                active=True,
+            ),
+        ),
+        now=now,
+    )
+    assert result == {
+        "active": 2,
+        "created": 1,
+        "refreshed": 0,
+        "deactivated": 0,
+        "unchanged": 1,
+    }
+
+    result = service.synchronize_active_venue_instruments(
+        actor_id=ids["runtime_sync"],
+        account_id="acct-1",
+        venue="BINANCE",
+        instruments=(
+            BinanceInstrument(
+                symbol="TUTUSDT",
+                tick_size=Decimal("0.00001"),
+                lot_size=Decimal("1"),
+                minimum_notional=Decimal("5"),
+                quote_currency="USDT",
+                collateral_currency="USDT",
+                active=True,
+            ),
+        ),
+        now=now + timedelta(minutes=1),
+    )
+    assert result["deactivated"] == 1
+    with database.session_factory() as session:
+        instruments = {
+            row.symbol: row.active
+            for row in session.scalars(select(Instrument).where(Instrument.venue == "BINANCE"))
+        }
+        catalog_audits = session.scalar(
+            select(func.count())
+            .select_from(AuditEvent)
+            .where(AuditEvent.event_type == "INSTRUMENT_CATALOG_SYNCED")
+        )
+    assert instruments == {"BTCUSDT": False, "TUTUSDT": True}
+    assert catalog_audits == 2
 
 
 def test_opportunity_rejects_exact_but_inactive_catalog_instrument(
@@ -294,8 +464,8 @@ def test_opportunity_rejects_exact_but_inactive_catalog_instrument(
             assert opportunities.status_code == 200, opportunities.text
             candidate = opportunities.json()["data"][0]
             assert candidate["symbol"] == "BTCUSDT"
-            assert candidate["proposal_eligible"] is True
-            assert candidate["proposal_blocker"] is None
+            assert candidate["proposal_eligible"] is False
+            assert candidate["proposal_blocker"] == "INSTRUMENT_UNAVAILABLE"
 
             rejected = await http.post(
                 f"/api/opportunities/{candidate['candidate_id']}/proposals",
@@ -304,7 +474,7 @@ def test_opportunity_rejects_exact_but_inactive_catalog_instrument(
                     "risk_tier": "LOW",
                     "quantity": "1",
                     "max_risk": "40",
-                    "expires_in_minutes": 120,
+                    "expires_in_minutes": 480,
                     "invalidation_price": "118000",
                     "rationale": "inactive Catalog instruments remain unavailable",
                 },
@@ -315,6 +485,133 @@ def test_opportunity_rejects_exact_but_inactive_catalog_instrument(
     asyncio.run(scenario())
     with database.session_factory() as session:
         assert session.scalar(select(func.count()).select_from(Proposal)) == 0
+
+
+def test_incomplete_opportunity_explains_missing_fields_and_post_revalidates(
+    database: Database,
+    service: TradingService,
+) -> None:
+    seed(service)
+    now_ms = int(datetime.now(UTC).timestamp() * 1000)
+    incomplete_client = PerptapeClient(
+        base_url="https://perptape.com",
+        api_key="test-key",
+        contract_version="breakouts-v1",
+        cache_ttl=timedelta(minutes=1),
+        fetcher=lambda _url, _headers, _timeout: {
+            "type": "breakouts",
+            "generatedAt": now_ms,
+            "data": [
+                {
+                    "exchange": "BN",
+                    "symbol": "BTCUSDT",
+                    "canonicalSymbol": "BTC",
+                    "direction": "HH",
+                    "timeframe": "1h",
+                    "price": 120000,
+                    "klineReadiness": {"status": "incomplete"},
+                    "triggeredAt": now_ms - 1_000,
+                    "updatedAt": now_ms,
+                }
+            ],
+        },
+    )
+
+    async def scenario() -> None:
+        async with AsyncClient(
+            transport=ASGITransport(app=app(database, MockTelegramGateway(), incomplete_client)),
+            base_url="http://test",
+        ) as http:
+            await login(http, "proposer")
+            opportunities = await http.get("/api/opportunities")
+            assert opportunities.status_code == 200, opportunities.text
+            candidate = opportunities.json()["data"][0]
+            assert candidate["proposal_eligible"] is False
+            assert candidate["proposal_blocker"] == "PERPTAPE_REQUIRED_FIELDS_MISSING"
+            assert candidate["missing_fields"] == [
+                "threshold",
+                "klineReadiness.status=ready",
+                "data_health=CURRENT",
+            ]
+            assert candidate["missing_field_labels"] == [
+                "突破阈值",
+                "K 线就绪状态",
+                "实时完整数据",
+            ]
+            assert candidate["last_complete_at"] is None
+            assert opportunities.json()["snapshot_id"]
+            rejected = await http.post(
+                f"/api/opportunities/{candidate['candidate_id']}/proposals",
+                json={
+                    "account_id": "acct-1",
+                    "risk_tier": "LOW",
+                    "quantity": "1",
+                    "max_risk": "40",
+                    "expires_in_minutes": 480,
+                    "invalidation_price": "118000",
+                    "rationale": "server must reject incomplete facts",
+                },
+            )
+            assert rejected.status_code == 422, rejected.text
+            assert rejected.json()["error"]["code"] == "PERPTAPE_CANDIDATE_NOT_READY"
+
+    asyncio.run(scenario())
+    with database.session_factory() as session:
+        assert session.scalar(select(func.count()).select_from(Proposal)) == 0
+
+
+def test_opportunity_snapshot_hides_malformed_binance_identity(
+    database: Database,
+    service: TradingService,
+) -> None:
+    seed(service)
+    now_ms = int(datetime.now(UTC).timestamp() * 1000)
+    rows = []
+    for symbol, canonical_symbol in (
+        ("BTCUSDT", "BTC"),
+        ("我踏马来了USDT", "我踏马来了"),
+    ):
+        rows.append(
+            {
+                "exchange": "BN",
+                "symbol": symbol,
+                "canonicalSymbol": canonical_symbol,
+                "direction": "HH",
+                "timeframe": "1h",
+                "price": 120000,
+                "threshold": 119500,
+                "volume24hQuote": 1_000_000,
+                "openInterestQuote": 500_000,
+                "klineReadiness": {"status": "ready"},
+                "triggeredAt": now_ms - 1_000,
+                "updatedAt": now_ms,
+            }
+        )
+    candidate_client = PerptapeClient(
+        base_url="https://perptape.com",
+        api_key="test-key",
+        contract_version="breakouts-v1",
+        cache_ttl=timedelta(minutes=1),
+        fetcher=lambda _url, _headers, _timeout: {
+            "type": "breakouts",
+            "generatedAt": now_ms,
+            "data": rows,
+        },
+    )
+
+    async def scenario() -> None:
+        async with AsyncClient(
+            transport=ASGITransport(app=app(database, MockTelegramGateway(), candidate_client)),
+            base_url="http://test",
+        ) as http:
+            await login(http, "proposer")
+            response = await http.get("/api/opportunities")
+
+            assert response.status_code == 200, response.text
+            assert [item["symbol"] for item in response.json()["data"]] == ["BTCUSDT"]
+            assert response.json()["discarded_candidate_count"] == 1
+
+    asyncio.run(scenario())
 
 
 def test_api_reuses_exact_legacy_proposal_without_deduplicating_another_contract(
@@ -330,7 +627,7 @@ def test_api_reuses_exact_legacy_proposal_without_deduplicating_another_contract
         "risk_tier": "LOW",
         "quantity": "1",
         "max_risk": "40",
-        "expires_in_minutes": 120,
+        "expires_in_minutes": 480,
         "invalidation_price": "118000",
         "rationale": "review Perptape breakout",
     }
@@ -368,7 +665,7 @@ def test_api_reuses_exact_legacy_proposal_without_deduplicating_another_contract
             "quantity": "1",
             "initial_quantity": None,
             "max_risk": "40",
-            "expires_in_minutes": 120,
+            "expires_in_minutes": 480,
             "invalidation_price": "118000",
             "allow_auto_add": False,
             "requested_adds": 0,
@@ -443,7 +740,7 @@ def test_perptape_to_review_to_risk_and_authorization_api_flow(
                 "risk_tier": "LOW",
                 "quantity": "1",
                 "max_risk": "40",
-                "expires_in_minutes": 120,
+                "expires_in_minutes": 480,
                 "invalidation_price": "118000",
                 "rationale": "review Perptape breakout",
             }

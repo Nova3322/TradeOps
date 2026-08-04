@@ -1,12 +1,16 @@
 from __future__ import annotations
 
+import os
 import re
+from decimal import Decimal
 from functools import lru_cache
+from pathlib import Path
 from typing import Literal
 
 from pydantic import AliasChoices, Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from trading_control_plane.freqtrade import parse_hip3_dexes, validate_worker_url
 from trading_control_plane.perptape import (
     validate_perptape_http_url,
     validate_perptape_websocket_url,
@@ -77,6 +81,15 @@ class Settings(BaseSettings):
     perptape_websocket_reconnect_initial_seconds: float = Field(default=1, ge=0.1, le=30)
     perptape_websocket_reconnect_max_seconds: float = Field(default=30, ge=1, le=300)
     perptape_websocket_max_reconnect_attempts: int = Field(default=8, ge=1, le=20)
+    perptape_auto_proposal_enabled: bool = False
+    perptape_auto_proposal_account_id: str | None = None
+    perptape_auto_proposal_environment: Literal["SHADOW", "TESTNET", "LIVE"] = "LIVE"
+    perptape_auto_proposal_risk_tier: Literal["LOW", "MEDIUM", "HIGH"] = "MEDIUM"
+    perptape_auto_proposal_min_timeframes: int = Field(default=3, ge=3, le=4)
+    perptape_auto_proposal_notional: Decimal = Field(default=Decimal(100), gt=0)
+    perptape_auto_proposal_max_risk: Decimal = Field(default=Decimal(1), gt=0)
+    perptape_auto_proposal_invalidation_bps: int = Field(default=200, ge=1, le=5_000)
+    perptape_auto_proposal_expires_minutes: int = Field(default=480, ge=480, le=1_440)
     runtime_sync_enabled: bool = False
     runtime_sync_interval_seconds: int = Field(default=60, ge=30, le=3_600)
     runtime_sync_service_username: str = "runtime-sync"
@@ -84,6 +97,17 @@ class Settings(BaseSettings):
     runtime_binance_symbol: str = "BTCUSDT"
     runtime_hyperliquid_account_id: str | None = None
     runtime_hyperliquid_symbol: str = "BTC"
+    execution_backend: Literal["FREQTRADE", "DIRECT_LEGACY"] = "FREQTRADE"
+    freqtrade_workers_enabled: bool = False
+    freqtrade_binance_worker_url: str = "http://127.0.0.1:8081"
+    freqtrade_hyperliquid_worker_url: str = "http://127.0.0.1:8082"
+    freqtrade_api_username: str | None = None
+    freqtrade_api_password: str | None = Field(default=None, repr=False)
+    freqtrade_timeout_seconds: float = Field(default=5, ge=1, le=15)
+    freqtrade_confirmation_timeout_seconds: float = Field(default=90, ge=10, le=120)
+    freqtrade_hyperliquid_hip3_dexes: str = "xyz"
+    freqtrade_live_order_send_enabled: bool = False
+    freqtrade_live_leverage: Decimal = Field(default=Decimal(1), ge=1, le=20)
     binance_read_only_enabled: bool = False
     binance_fact_environment: Literal["TESTNET", "LIVE"] = "LIVE"
     binance_futures_base_url: str = "https://fapi.binance.com"
@@ -119,6 +143,18 @@ class Settings(BaseSettings):
     notilt_ethereum_min_confirmations: int = Field(default=12, ge=1, le=128)
     notilt_bsc_min_confirmations: int = Field(default=15, ge=1, le=128)
     notilt_arbitrum_min_confirmations: int = Field(default=20, ge=1, le=128)
+    capital_direct_vault_id: str | None = None
+    capital_direct_vault_address: str | None = None
+    capital_direct_owned_arbitrum_address: str | None = None
+    capital_direct_binance_account_id: str | None = None
+    capital_direct_binance_deposit_address: str | None = None
+    capital_direct_binance_withdrawal_address: str | None = None
+    capital_direct_hyperliquid_account_id: str | None = None
+    capital_direct_hyperliquid_bridge_address: str | None = None
+    capital_direct_asset: str = "USDC"
+    capital_direct_network: Literal["ARBITRUM"] = "ARBITRUM"
+    capital_direct_max_amount: Decimal | None = Field(default=None, gt=0)
+    capital_direct_max_fee: Decimal | None = Field(default=None, ge=0)
 
     @property
     def hyperliquid_effective_account_address(self) -> str | None:
@@ -127,6 +163,10 @@ class Settings(BaseSettings):
     @property
     def hyperliquid_account_scope(self) -> Literal["MAIN_ACCOUNT", "SUBACCOUNT"]:
         return "SUBACCOUNT" if self.hyperliquid_subaccount_address else "MAIN_ACCOUNT"
+
+    @property
+    def hyperliquid_hip3_dexes(self) -> tuple[str, ...]:
+        return parse_hip3_dexes(self.freqtrade_hyperliquid_hip3_dexes)
 
     @property
     def notilt_vaults(self) -> dict[int, str]:
@@ -165,16 +205,32 @@ class Settings(BaseSettings):
     def require_official_perptape_websocket_url(cls, value: str) -> str:
         return validate_perptape_websocket_url(value)
 
+    @field_validator("freqtrade_binance_worker_url", "freqtrade_hyperliquid_worker_url")
+    @classmethod
+    def require_safe_freqtrade_worker_url(cls, value: str) -> str:
+        return validate_worker_url(value)
+
+    @field_validator("freqtrade_hyperliquid_hip3_dexes")
+    @classmethod
+    def require_valid_hip3_dexes(cls, value: str) -> str:
+        parse_hip3_dexes(value)
+        return value
+
     @field_validator(
         "notilt_agent_address",
         "notilt_ethereum_vault_address",
         "notilt_bsc_vault_address",
         "notilt_arbitrum_vault_address",
+        "capital_direct_vault_address",
+        "capital_direct_owned_arbitrum_address",
+        "capital_direct_binance_deposit_address",
+        "capital_direct_binance_withdrawal_address",
+        "capital_direct_hyperliquid_bridge_address",
     )
     @classmethod
     def require_evm_address(cls, value: str | None) -> str | None:
         if value is not None and not EVM_ADDRESS_PATTERN.fullmatch(value):
-            raise ValueError("NoTilt addresses must be 20-byte EVM addresses")
+            raise ValueError("configured EVM addresses must be 20-byte EVM addresses")
         return value
 
     def validate_runtime_security(self) -> None:
@@ -189,6 +245,35 @@ class Settings(BaseSettings):
             self.binance_api_secret
         ):
             raise ValueError("Binance read-only key and secret must be configured together")
+        direct_send_enabled = any(
+            (
+                self.binance_live_order_send_enabled,
+                self.binance_testnet_order_send_enabled,
+                self.hyperliquid_live_order_send_enabled,
+                self.hyperliquid_testnet_order_send_enabled,
+            )
+        )
+        if direct_send_enabled and self.execution_backend != "DIRECT_LEGACY":
+            raise ValueError(
+                "direct venue sending is retired; enabled order sending requires "
+                "DIRECT_LEGACY only for isolated compatibility tests"
+            )
+        if bool(self.freqtrade_api_username) != bool(self.freqtrade_api_password):
+            raise ValueError("Freqtrade worker username and password must be configured together")
+        if self.freqtrade_workers_enabled and not (
+            self.freqtrade_api_username and self.freqtrade_api_password
+        ):
+            raise ValueError("enabled Freqtrade workers require explicit control credentials")
+        if self.freqtrade_live_order_send_enabled and (
+            self.execution_backend != "FREQTRADE"
+            or not self.freqtrade_workers_enabled
+            or not self.freqtrade_api_username
+            or not self.freqtrade_api_password
+        ):
+            raise ValueError(
+                "Freqtrade LIVE send requires the FREQTRADE backend, enabled workers and "
+                "explicit control credentials"
+            )
         if (
             self.runtime_sync_enabled
             and self.binance_read_only_enabled
@@ -242,6 +327,12 @@ class Settings(BaseSettings):
             raise ValueError("enabled Perptape WebSocket requires the runtime sync worker")
         if self.perptape_websocket_enabled and not self.perptape_api_key:
             raise ValueError("enabled Perptape WebSocket requires the platform API key")
+        if self.perptape_auto_proposal_enabled and not self.runtime_sync_enabled:
+            raise ValueError("automatic Perptape proposals require the runtime sync worker")
+        if self.perptape_auto_proposal_enabled and not self.perptape_api_key:
+            raise ValueError("automatic Perptape proposals require the platform API key")
+        if self.perptape_auto_proposal_enabled and not self.perptape_auto_proposal_account_id:
+            raise ValueError("automatic Perptape proposals require an internal account ID")
         if (
             self.perptape_websocket_reconnect_initial_seconds
             > self.perptape_websocket_reconnect_max_seconds
@@ -251,4 +342,15 @@ class Settings(BaseSettings):
 
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:
-    return Settings()  # type: ignore[call-arg]
+    config_dir = os.environ.get("TRADING_CONFIG_DIR")
+    if config_dir is None:
+        return Settings()  # type: ignore[call-arg]
+    root = Path(config_dir)
+    if not root.is_absolute() or not root.is_dir():
+        raise ValueError("TRADING_CONFIG_DIR must be an existing absolute directory")
+    env_files = tuple(
+        path for path in (root / ".env.local", root / ".env.production.local") if path.is_file()
+    )
+    if not env_files:
+        raise ValueError("TRADING_CONFIG_DIR contains no supported environment files")
+    return Settings(_env_file=env_files)  # type: ignore[call-arg]

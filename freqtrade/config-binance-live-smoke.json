@@ -1,0 +1,68 @@
+{
+  "$schema": "https://schema.freqtrade.io/schema.json",
+  "bot_name": "trading-binance-live-smoke",
+  "dry_run": true,
+  "dry_run_wallet": 100,
+  "trading_mode": "futures",
+  "margin_mode": "cross",
+  "stake_currency": "USDT",
+  "stake_amount": 6,
+  "max_open_trades": 1,
+  "timeframe": "5m",
+  "initial_state": "stopped",
+  "process_only_new_candles": true,
+  "position_adjustment_enable": false,
+  "force_entry_enable": false,
+  "cancel_open_orders_on_exit": true,
+  "stoploss": -0.01,
+  "exchange": {
+    "name": "binance",
+    "key": "",
+    "secret": "",
+    "ccxt_config": {
+      "options": {"defaultType": "swap", "papi": true},
+      "has": {"setMarginMode": false}
+    },
+    "ccxt_async_config": {
+      "options": {"defaultType": "swap", "papi": true},
+      "has": {"setMarginMode": false}
+    },
+    "pair_whitelist": ["SOL/USDT:USDT"],
+    "pair_blacklist": []
+  },
+  "pairlists": [{"method": "StaticPairList"}],
+  "entry_pricing": {
+    "price_side": "same",
+    "use_order_book": true,
+    "order_book_top": 1,
+    "price_last_balance": 0,
+    "check_depth_of_market": {"enabled": false, "bids_to_ask_delta": 1}
+  },
+  "exit_pricing": {
+    "price_side": "same",
+    "use_order_book": true,
+    "order_book_top": 1
+  },
+  "order_types": {
+    "entry": "limit",
+    "exit": "limit",
+    "emergency_exit": "market",
+    "force_entry": "market",
+    "force_exit": "market",
+    "stoploss": "market",
+    "stoploss_on_exchange": true,
+    "stoploss_on_exchange_interval": 60
+  },
+  "unfilledtimeout": {"entry": 1, "exit": 1, "unit": "minutes"},
+  "api_server": {
+    "enabled": true,
+    "listen_ip_address": "0.0.0.0",
+    "listen_port": 8080,
+    "verbosity": "error",
+    "enable_openapi": false,
+    "jwt_secret_key": "local-live-smoke-jwt-override-required",
+    "CORS_origins": [],
+    "username": "overridden-by-environment",
+    "password": "overridden-by-environment"
+  }
+}

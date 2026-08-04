@@ -266,6 +266,10 @@ def test_partial_failed_or_unknown_account_response_never_clears_stale_positions
     )
 
     class PartialReader:
+        @staticmethod
+        def read_active_instruments() -> tuple[BinanceInstrument, ...]:
+            return (snapshot("BTCUSDT", Decimal(0), NOW).instrument,)
+
         def read_account_snapshots(
             self, _symbols: tuple[str, ...], *, now: datetime
         ) -> tuple[BinanceReadOnlySnapshot, ...]:
@@ -319,6 +323,10 @@ def test_incomplete_history_refreshes_current_domain_closes_absent_and_fails_rea
     )
 
     class HistoryIncompleteReader:
+        @staticmethod
+        def read_active_instruments() -> tuple[BinanceInstrument, ...]:
+            return tuple(item.instrument for item in incomplete)
+
         def read_account_snapshots(
             self, _symbols: tuple[str, ...], *, now: datetime
         ) -> tuple[BinanceReadOnlySnapshot, ...]:
@@ -347,7 +355,10 @@ def test_incomplete_history_refreshes_current_domain_closes_absent_and_fails_rea
     )
 
     assert results == {
-        "BINANCE": SourceSyncResult("FAILED", error_code="BINANCE_READ_ONLY_UNAVAILABLE")
+        "BINANCE": SourceSyncResult(
+            "FAILED",
+            error_code="BINANCE_HISTORY_INCOMPLETE:BINANCE_READ_ONLY_UNAVAILABLE",
+        )
     }
     positions = scoped_positions(database, account_id="account-a", environment="LIVE")
     assert {symbol: (row.quantity, row.observed_at) for symbol, row in positions.items()} == {

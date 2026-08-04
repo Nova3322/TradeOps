@@ -328,6 +328,66 @@ def test_live_net_worth_and_risk_capital_combine_two_venues_and_vault(
     assert total == Decimal("90")
     assert {item.get("location_type") for item in facts} >= {"VENUE", "VAULT"}
 
+    service.record_account_equity(
+        "retired-binance-account",
+        "BINANCE",
+        Decimal("999"),
+        Decimal("999"),
+        "USDT",
+        True,
+        ids["admin"],
+        environment=ExecutionEnvironment.LIVE,
+        now=now,
+    )
+    service.record_account_equity(
+        "retired-hyperliquid-account",
+        "HYPERLIQUID",
+        Decimal("999"),
+        Decimal("999"),
+        "USDC",
+        True,
+        ids["admin"],
+        environment=ExecutionEnvironment.LIVE,
+        now=now,
+    )
+    single_account_center = TradingQueries(database).capital_center(
+        ids["proposer"],
+        authoritative_live_accounts={
+            "BINANCE": "binance-main",
+            "HYPERLIQUID": "hyperliquid-main",
+        },
+    )
+    live_venue_balances = [
+        item
+        for item in single_account_center["balances"]
+        if item["environment"] == "LIVE" and item["location_type"] == "VENUE"
+    ]
+    assert {item["location_id"] for item in live_venue_balances} == {
+        "binance-main",
+        "hyperliquid-main",
+    }
+    assert single_account_center["net_worth"]["total"] == "90.000000000000000000"
+    assert not any(
+        item["location_id"].startswith("retired-") for item in single_account_center["history"]
+    )
+    authoritative_service = TradingService(
+        database,
+        authoritative_live_accounts={
+            "BINANCE": "binance-main",
+            "HYPERLIQUID": "hyperliquid-main",
+        },
+    )
+    with database.session_factory() as session:
+        known, total, facts, _ = authoritative_service._managed_capital_context(
+            session,
+            environment=ExecutionEnvironment.LIVE.value,
+            now=now,
+            max_age=timedelta(minutes=5),
+        )
+    assert known is True
+    assert total == Decimal("90")
+    assert not any(item.get("location_id", "").startswith("retired-") for item in facts)
+
     with database.session_factory.begin() as session:
         vault_fact = session.scalar(
             select(AccountEquity).where(
@@ -346,6 +406,28 @@ def test_live_net_worth_and_risk_capital_combine_two_venues_and_vault(
             max_age=timedelta(minutes=5),
         )
     assert controlled is False
+
+    with database.session_factory.begin() as session:
+        stale_binance = session.scalar(
+            select(AccountEquity).where(
+                AccountEquity.environment == ExecutionEnvironment.LIVE.value,
+                AccountEquity.location_type == "VENUE",
+                AccountEquity.account_id == "binance-main",
+            )
+        )
+        assert stale_binance is not None
+        stale_binance.observed_at = now - timedelta(days=1)
+    stale_center = TradingQueries(database).capital_center(
+        ids["proposer"],
+        authoritative_live_accounts={
+            "BINANCE": "binance-main",
+            "HYPERLIQUID": "hyperliquid-main",
+        },
+    )
+    assert stale_center["net_worth"]["venues"]["BINANCE"] is None
+    assert stale_center["net_worth"]["total"] is None
+    assert stale_center["net_worth"]["issues"].count("STALE_LIVE_SOURCE:BINANCE") == 1
+    assert not any(issue.startswith("VENUE:") for issue in stale_center["net_worth"]["issues"])
 
 
 def test_live_unsigned_transfer_still_requires_disabled_by_default_gate(
@@ -949,8 +1031,8 @@ def test_capital_api_requires_treasury_step_up_and_telegram_is_notification_only
             base_url="http://test",
         ) as client:
             await login(client, "admin")
-            denied = await client.get("/api/capital")
-            assert denied.status_code == 403
+            admin_center = await client.get("/api/capital")
+            assert admin_center.status_code == 200
             await client.post("/api/auth/logout")
 
             await login(client, "treasury-proposer")

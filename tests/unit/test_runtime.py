@@ -15,6 +15,8 @@ from trading_control_plane.runtime import (
     RuntimeSyncWorker,
     SourceSyncResult,
     build_runtime_worker,
+    perptape_resonance_groups,
+    perptape_resonance_signal_identity,
 )
 
 
@@ -184,6 +186,84 @@ def test_runtime_source_failure_isolated_as_a_safe_error_code() -> None:
     }
 
 
+def test_perptape_resonance_requires_three_fresh_distinct_consistent_timeframes() -> None:
+    now = datetime(2026, 8, 2, 12, tzinfo=UTC)
+    client = PerptapeClient(
+        base_url="https://perptape.com",
+        api_key="fixture-key",
+        contract_version="breakouts-v1",
+        cache_ttl=timedelta(0),
+        fetcher=lambda _url, _headers, _timeout: {},
+    )
+
+    def candidate(identifier: str, timeframe: str, observed_at: datetime = now):
+        return client.parse_stream_alert(
+            {
+                "id": identifier,
+                "ex": "BN",
+                "s": "BTCUSDT",
+                "cs": "BTCUSDT",
+                "dir": "HH",
+                "p": 100_000,
+                "th": 99_000,
+                "tf": timeframe,
+                "t": int(observed_at.timestamp() * 1_000),
+                "u": int(observed_at.timestamp() * 1_000),
+                "kr": {"status": "ready"},
+            },
+            event_time=observed_at,
+        )
+
+    fresh = tuple(
+        candidate(f"candidate-{timeframe}", timeframe) for timeframe in ("1h", "4h", "1d")
+    )
+    groups = perptape_resonance_groups(
+        fresh,
+        now=now,
+        max_age=timedelta(minutes=2),
+    )
+    assert [[item.timeframe for item in group] for group in groups] == [["1h", "4h", "1d"]]
+    refreshed = tuple(
+        replace(
+            item,
+            candidate_id=f"{item.candidate_id}-refresh",
+            observed_at=now + timedelta(minutes=1),
+            triggered_at=now + timedelta(minutes=1),
+        )
+        for item in fresh
+    )
+    assert perptape_resonance_signal_identity(refreshed) == (
+        perptape_resonance_signal_identity(fresh)
+    )
+    assert (
+        perptape_resonance_signal_identity((replace(fresh[0], threshold=None), *fresh[1:])) is None
+    )
+    assert (
+        perptape_resonance_groups(
+            fresh[:2],
+            now=now,
+            max_age=timedelta(minutes=2),
+        )
+        == ()
+    )
+    assert (
+        perptape_resonance_groups(
+            (*fresh[:2], candidate("stale-1d", "1d", now - timedelta(minutes=3))),
+            now=now,
+            max_age=timedelta(minutes=2),
+        )
+        == ()
+    )
+    assert (
+        perptape_resonance_groups(
+            (*fresh, candidate("conflicting-1h", "1h", now + timedelta(seconds=1))),
+            now=now,
+            max_age=timedelta(minutes=2),
+        )
+        == ()
+    )
+
+
 def test_runtime_https_snapshot_preserves_persisted_incomplete_stream_target() -> None:
     now = datetime(2026, 7, 31, 8, tzinfo=UTC)
     client = PerptapeClient(
@@ -233,11 +313,13 @@ def test_runtime_https_snapshot_preserves_persisted_incomplete_stream_target() -
         perptape_contract_version="breakouts-v1",
         perptape_api_key="fixture-key",
         perptape_cache_seconds=60,
+        perptape_websocket_reconciliation_seconds=300,
     )
     worker.queries = SimpleNamespace(perptape_feed=lambda: current)
     worker.perptape = SimpleNamespace(refresh=lambda **_kwargs: incoming)
     worker.service = SimpleNamespace(
-        record_perptape_feed=lambda _actor_id, feed, **_kwargs: recorded.append(feed)
+        record_perptape_feed=lambda _actor_id, feed, **_kwargs: recorded.append(feed),
+        proposal_automation_config=lambda _actor_id: None,
     )
 
     observed = worker._record_perptape(

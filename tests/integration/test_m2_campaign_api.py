@@ -484,8 +484,11 @@ def test_exception_view_marks_active_facts_stale_but_ignores_closed_history(
         )
 
     queries = TradingQueries(database)
-    codes = {item["code"] for item in queries.list_exceptions(ids["operator"], now=now)}
+    current_exceptions = queries.list_exceptions(ids["operator"], now=now)
+    codes = {item["code"] for item in current_exceptions}
     assert {"POSITION_STALE", "PROTECTION_STALE", "RECONCILIATION_STALE"} <= codes
+    assert all(item["occurred_at"] for item in current_exceptions)
+    assert all(item["last_checked_at"] == now.isoformat() for item in current_exceptions)
 
     with database.session_factory.begin() as session:
         campaign = session.get(Campaign, opening.campaign_id)

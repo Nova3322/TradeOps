@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -21,32 +22,55 @@ ServerTimeFetcher = Callable[[float], int]
 
 def _default_server_time_fetcher(timeout: float) -> int:
     request = urllib.request.Request("https://fapi.binance.com/fapi/v1/time", method="GET")
-    try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:  # noqa: S310
-            raw = json.loads(response.read())
-        return int(raw["serverTime"])
-    except (
-        json.JSONDecodeError,
-        KeyError,
-        TypeError,
-        ValueError,
-        urllib.error.URLError,
-        TimeoutError,
-    ) as exc:
-        raise DomainRejected(
-            "BINANCE_READ_ONLY_UNAVAILABLE", "Binance server time is unavailable"
-        ) from exc
+    last_error: BaseException | None = None
+    for attempt in range(3):
+        try:
+            with urllib.request.urlopen(request, timeout=timeout) as response:  # noqa: S310
+                raw = json.loads(response.read())
+            return int(raw["serverTime"])
+        except (urllib.error.URLError, TimeoutError) as exc:
+            last_error = exc
+            if attempt < 2:
+                time.sleep(0.25 * 2**attempt)
+                continue
+        except (json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
+            last_error = exc
+        break
+    raise DomainRejected(
+        "BINANCE_READ_ONLY_UNAVAILABLE", "Binance server time is unavailable"
+    ) from last_error
 
 
 def _default_fetcher(url: str, headers: dict[str, str], timeout: float) -> JsonValue:
     request = urllib.request.Request(url, headers=headers, method="GET")  # noqa: S310
-    try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:  # noqa: S310
-            body = response.read()
-    except (urllib.error.URLError, TimeoutError) as exc:
+    body: bytes | None = None
+    last_error: BaseException | None = None
+    for attempt in range(3):
+        try:
+            with urllib.request.urlopen(request, timeout=timeout) as response:  # noqa: S310
+                body = response.read()
+            break
+        except urllib.error.HTTPError as exc:
+            if exc.code in {401, 403}:
+                code = "BINANCE_AUTHENTICATION_FAILED"
+            elif exc.code == 429:
+                code = "BINANCE_RATE_LIMITED"
+            else:
+                code = "BINANCE_READ_ONLY_UNAVAILABLE"
+            if exc.code >= 500 and attempt < 2:
+                last_error = exc
+                time.sleep(0.25 * 2**attempt)
+                continue
+            raise DomainRejected(code, "Binance read-only API rejected the request") from exc
+        except (urllib.error.URLError, TimeoutError) as exc:
+            last_error = exc
+            if attempt < 2:
+                time.sleep(0.25 * 2**attempt)
+                continue
+    if body is None:
         raise DomainRejected(
             "BINANCE_READ_ONLY_UNAVAILABLE", "Binance read-only API could not be reached"
-        ) from exc
+        ) from last_error
     try:
         value = json.loads(body)
     except json.JSONDecodeError as exc:
@@ -196,6 +220,12 @@ class BinanceReadOnlyClient:
             raise DomainRejected("BINANCE_SYMBOL_INVALID", "Binance symbol must be uppercase")
         exchange = self._public_get("/fapi/v1/exchangeInfo", {"symbol": symbol})
         return self._parse_instrument(exchange, symbol)
+
+    def read_active_instruments(self) -> tuple[BinanceInstrument, ...]:
+        """Read the complete official USDⓈ-M perpetual catalog without credentials."""
+
+        exchange = self._public_get("/fapi/v1/exchangeInfo", {})
+        return self._parse_active_instruments(exchange)
 
     def _public_get(self, path: str, params: dict[str, str]) -> JsonValue:
         query = urllib.parse.urlencode(params)
@@ -425,6 +455,24 @@ class BinanceReadOnlyClient:
             active=item.get("status") == "TRADING",
         )
 
+    @classmethod
+    def _parse_active_instruments(cls, raw: JsonValue) -> tuple[BinanceInstrument, ...]:
+        if not isinstance(raw, dict) or not isinstance(raw.get("symbols"), list):
+            raise DomainRejected("BINANCE_RESPONSE_INVALID", "exchangeInfo is invalid")
+        symbols: list[str] = []
+        for item in raw["symbols"]:
+            if not isinstance(item, dict):
+                raise DomainRejected("BINANCE_RESPONSE_INVALID", "exchangeInfo symbol is invalid")
+            if item.get("contractType") != "PERPETUAL" or item.get("status") != "TRADING":
+                continue
+            symbol = item.get("symbol")
+            if not isinstance(symbol, str) or not symbol or symbol != symbol.upper():
+                raise DomainRejected("BINANCE_RESPONSE_INVALID", "exchangeInfo symbol is invalid")
+            symbols.append(symbol)
+        if not symbols or len(symbols) != len(set(symbols)):
+            raise DomainRejected("BINANCE_RESPONSE_INVALID", "active perpetual catalog is invalid")
+        return tuple(cls._parse_instrument(raw, symbol) for symbol in sorted(symbols))
+
     @staticmethod
     def _require_list(raw: JsonValue, name: str) -> list[dict[str, Any]]:
         if not isinstance(raw, list) or any(not isinstance(item, dict) for item in raw):
@@ -625,6 +673,10 @@ class BinancePortfolioMarginReadOnlyClient:
             raise DomainRejected("BINANCE_SYMBOL_INVALID", "Binance symbol must be uppercase")
         exchange = self._market_get("/fapi/v1/exchangeInfo", {"symbol": symbol})
         return BinanceReadOnlyClient._parse_instrument(exchange, symbol)
+
+    def read_active_instruments(self) -> tuple[BinanceInstrument, ...]:
+        exchange = self._market_get("/fapi/v1/exchangeInfo", {})
+        return BinanceReadOnlyClient._parse_active_instruments(exchange)
 
     def _signed_get(self, path: str, params: dict[str, str], *, timestamp_ms: int) -> JsonValue:
         if not self.configured:

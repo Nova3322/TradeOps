@@ -25,7 +25,16 @@ from trading_control_plane.binance import (
 )
 from trading_control_plane.config import Settings
 from trading_control_plane.database import Database
-from trading_control_plane.domain import DomainRejected, Role, SystemRiskState
+from trading_control_plane.domain import (
+    Direction,
+    DomainRejected,
+    ExecutionEnvironment,
+    ProposalSource,
+    ReviewDecision,
+    RiskTier,
+    Role,
+    SystemRiskState,
+)
 from trading_control_plane.hyperliquid import (
     HyperliquidEquity,
     HyperliquidInstrument,
@@ -62,6 +71,29 @@ OWNER = "0x3333333333333333333333333333333333333333"
 class BinanceReader:
     configured = True
 
+    @staticmethod
+    def read_active_instruments() -> tuple[BinanceInstrument, ...]:
+        return (
+            BinanceInstrument(
+                symbol="BTCUSDT",
+                tick_size=Decimal("0.1"),
+                lot_size=Decimal("0.001"),
+                minimum_notional=Decimal("5"),
+                quote_currency="USDT",
+                collateral_currency="USDT",
+                active=True,
+            ),
+            BinanceInstrument(
+                symbol="BTCUSDC",
+                tick_size=Decimal("0.1"),
+                lot_size=Decimal("0.001"),
+                minimum_notional=Decimal("5"),
+                quote_currency="USDC",
+                collateral_currency="USDC",
+                active=True,
+            ),
+        )
+
     def read_snapshot(self, symbol: str, *, now: datetime) -> BinanceReadOnlySnapshot:
         assert symbol == "BTCUSDT"
         return BinanceReadOnlySnapshot(
@@ -94,6 +126,20 @@ class BinanceReader:
 class HyperliquidReader:
     configured = True
     fact_environment = "LIVE"
+
+    @staticmethod
+    def read_active_instruments() -> tuple[HyperliquidInstrument, ...]:
+        return (
+            HyperliquidInstrument(
+                symbol="BTC",
+                tick_size=Decimal("1"),
+                lot_size=Decimal("0.00001"),
+                minimum_notional=Decimal("10"),
+                quote_currency="USD",
+                collateral_currency="USDC",
+                active=True,
+            ),
+        )
 
     def read_snapshot(self, symbol: str, *, now: datetime) -> HyperliquidReadOnlySnapshot:
         assert symbol == "BTC"
@@ -1270,6 +1316,271 @@ def test_runtime_worker_refreshes_perptape_two_venues_and_vault_without_sending(
             assert len(opportunities.json()["data"]) == 1
 
     asyncio.run(cached_api_scenario())
+
+
+def test_three_timeframe_resonance_creates_one_pending_system_proposal(
+    database: Database,
+) -> None:
+    service = TradingService(database)
+    admin = service.bootstrap_admin("resonance-admin", now=NOW)
+    perptape_actor = service.create_service_principal("perptape", admin, now=NOW)
+    service.assign_role(
+        perptape_actor,
+        Role.PROPOSER,
+        admin,
+        "acct-1",
+        "BINANCE",
+        now=NOW,
+    )
+    instrument_id = service.register_instrument(
+        actor_id=admin,
+        venue="BINANCE",
+        symbol="BTCUSDT",
+        tick_size=Decimal("0.1"),
+        lot_size=Decimal("0.001"),
+        minimum_notional=Decimal("5"),
+        contract_multiplier=Decimal("1"),
+        quote_currency="USDT",
+        collateral_currency="USDT",
+        protection_supported=True,
+        now=NOW,
+    )
+    service.set_proposal_default_config(
+        admin,
+        "resonance-policy-v1",
+        account_id="acct-1",
+        risk_tier=RiskTier.MEDIUM,
+        notional=Decimal("100"),
+        max_risk=Decimal("1"),
+        invalidation_bps=200,
+        expires_in_minutes=480,
+        rationale="automatic resonance proposal awaiting independent review",
+        auto_proposal_enabled=True,
+        auto_proposal_min_timeframes=3,
+        now=NOW,
+    )
+    settings = Settings(
+        database_url="postgresql+psycopg://unused:unused@127.0.0.1/unused",
+        perptape_api_key="fixture-key",
+        runtime_sync_enabled=True,
+        _env_file=None,
+    )
+    client = PerptapeClient(
+        base_url="https://perptape.com",
+        api_key="fixture-key",
+        contract_version="breakouts-v1",
+        cache_ttl=timedelta(0),
+        fetcher=lambda _url, _headers, _timeout: {},
+    )
+    candidates = tuple(
+        client.parse_stream_alert(
+            {
+                "ex": "BN",
+                "s": "BTCUSDT",
+                "cs": "BTCUSDT",
+                "dir": "HH",
+                "p": 100_000,
+                "th": 99_000,
+                "tf": timeframe,
+                "t": int(NOW.timestamp() * 1_000),
+                "u": int(NOW.timestamp() * 1_000),
+                "kr": {"status": "ready"},
+            },
+            event_time=NOW,
+        )
+        for timeframe in ("1h", "4h", "1d")
+    )
+    feed = PerptapeFeedSnapshot(
+        contract_version="breakouts-v1",
+        generated_at=NOW,
+        fetched_at=NOW,
+        next_allowed_at=NOW,
+        candidates=candidates,
+    )
+    worker = RuntimeSyncWorker(
+        settings=settings,
+        database=database,
+        perptape=client,
+        binance=BinanceReader(),  # type: ignore[arg-type]
+        hyperliquid=HyperliquidReader(),  # type: ignore[arg-type]
+        notilt=NoTiltReader(),  # type: ignore[arg-type]
+        notilt_valuator=NoTiltUsdValuator(),
+        clock=lambda: NOW,
+    )
+
+    assert worker._create_resonance_proposals(perptape_actor, feed, now=NOW) == 1
+    assert worker._create_resonance_proposals(perptape_actor, feed, now=NOW) == 0
+    proposals = TradingQueries(database).list_proposals(admin, now=NOW)
+    assert len(proposals) == 1
+    assert proposals[0]["source"] == "SYSTEM"
+    assert proposals[0]["status"] == "PENDING_REVIEW"
+    detail = TradingQueries(database).proposal_detail(
+        admin,
+        UUID(proposals[0]["proposal_id"]),
+        now=NOW,
+    )
+    assert detail["frozen_payload"]["details"]["resonance_timeframes"] == [
+        "1h",
+        "4h",
+        "1d",
+    ]
+    assert detail["frozen_payload"]["details"]["allow_auto_add"] is False
+    assert detail["frozen_payload"]["details"]["default_config_version"] == 1
+
+    legacy_duplicate_id = service.create_proposal(
+        actor_id=perptape_actor,
+        source=ProposalSource.SYSTEM,
+        risk_tier=RiskTier.MEDIUM,
+        account_id="acct-1",
+        venue="BINANCE",
+        instrument_id=instrument_id,
+        direction=Direction.LONG,
+        quantity=Decimal("0.001"),
+        max_risk=Decimal("1"),
+        expires_at=NOW + timedelta(hours=8),
+        idempotency_key="legacy-refresh-duplicate",
+        strategy_id="perptape-resonance",
+        strategy_version="legacy-refresh-identity",
+        environment=ExecutionEnvironment.LIVE,
+        source_candidate_id="ptr_legacy_refresh_duplicate",
+        source_observed_at=NOW + timedelta(seconds=10),
+        source_readiness="READY",
+        details={"resonance_timeframes": ["1h", "4h", "1d"]},
+        now=NOW + timedelta(seconds=10),
+    )
+    service.submit_proposal(
+        legacy_duplicate_id,
+        perptape_actor,
+        now=NOW + timedelta(seconds=10),
+    )
+    refreshed_at = NOW + timedelta(seconds=30)
+    refreshed_candidates = tuple(
+        client.parse_stream_alert(
+            {
+                "ex": "BN",
+                "s": "BTCUSDT",
+                "cs": "BTCUSDT",
+                "dir": "HH",
+                "p": 100_100,
+                "th": 99_000,
+                "tf": timeframe,
+                "t": int(refreshed_at.timestamp() * 1_000),
+                "u": int(refreshed_at.timestamp() * 1_000),
+                "kr": {"status": "ready"},
+            },
+            event_time=refreshed_at,
+        )
+        for timeframe in ("1h", "4h", "1d")
+    )
+    refreshed_feed = replace(
+        feed,
+        generated_at=refreshed_at,
+        fetched_at=refreshed_at,
+        candidates=refreshed_candidates,
+    )
+    assert (
+        worker._create_resonance_proposals(
+            perptape_actor,
+            refreshed_feed,
+            now=refreshed_at,
+        )
+        == 0
+    )
+    proposals_after_cleanup = TradingQueries(database).list_proposals(admin, now=refreshed_at)
+    assert sum(item["status"] == "PENDING_REVIEW" for item in proposals_after_cleanup) == 1
+    assert sum(item["status"] == "EXPIRED" for item in proposals_after_cleanup) == 1
+    assert (
+        TradingQueries(database).proposal_detail(
+            admin,
+            legacy_duplicate_id,
+            now=refreshed_at,
+        )["status"]
+        == "EXPIRED"
+    )
+
+    stale = replace(
+        feed,
+        candidates=tuple(
+            replace(item, observed_at=NOW - timedelta(minutes=5)) for item in candidates
+        ),
+    )
+    assert worker._create_resonance_proposals(perptape_actor, stale, now=NOW) == 0
+
+    later = NOW + timedelta(minutes=1)
+    service.set_proposal_default_config(
+        admin,
+        "resonance-policy-v2",
+        account_id="acct-1",
+        risk_tier=RiskTier.LOW,
+        notional=Decimal("80"),
+        max_risk=Decimal("0.8"),
+        invalidation_bps=150,
+        expires_in_minutes=480,
+        rationale="four timeframe policy for new signals only",
+        auto_proposal_enabled=True,
+        auto_proposal_min_timeframes=4,
+        now=later,
+    )
+    four_candidates = tuple(
+        client.parse_stream_alert(
+            {
+                "ex": "BN",
+                "s": "BTCUSDT",
+                "cs": "BTCUSDT",
+                "dir": "HH",
+                "p": 101_000,
+                "th": 100_000,
+                "tf": timeframe,
+                "t": int(later.timestamp() * 1_000),
+                "u": int(later.timestamp() * 1_000),
+                "kr": {"status": "ready"},
+            },
+            event_time=later,
+        )
+        for timeframe in ("1h", "4h", "1d", "1w")
+    )
+    three_only = replace(feed, generated_at=later, fetched_at=later, candidates=four_candidates[:3])
+    four_feed = replace(feed, generated_at=later, fetched_at=later, candidates=four_candidates)
+    assert worker._create_resonance_proposals(perptape_actor, three_only, now=later) == 0
+    assert worker._create_resonance_proposals(perptape_actor, four_feed, now=later) == 0
+    service.review_proposal(
+        UUID(detail["proposal_id"]),
+        admin,
+        ReviewDecision.REJECT,
+        "superseded by a newly qualified signal",
+        expected_version=detail["version"],
+        now=later,
+    )
+    after_review = later + timedelta(seconds=1)
+    assert (
+        worker._create_resonance_proposals(
+            perptape_actor,
+            four_feed,
+            now=after_review,
+        )
+        == 1
+    )
+    assert (
+        worker._create_resonance_proposals(
+            perptape_actor,
+            four_feed,
+            now=after_review,
+        )
+        == 0
+    )
+    proposals = TradingQueries(database).list_proposals(admin, now=after_review)
+    new_proposal_id = next(
+        item["proposal_id"]
+        for item in proposals
+        if item["proposal_id"] != detail["proposal_id"] and item["status"] == "PENDING_REVIEW"
+    )
+    new_detail = TradingQueries(database).proposal_detail(
+        admin,
+        UUID(new_proposal_id),
+        now=later,
+    )
+    assert new_detail["frozen_payload"]["details"]["resonance_threshold"] == 4
+    assert new_detail["frozen_payload"]["details"]["default_config_version"] == 2
 
 
 def test_websocket_alert_updates_the_existing_authoritative_perptape_feed(

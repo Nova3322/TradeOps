@@ -175,6 +175,52 @@ def test_user_data_contract_is_get_only_signed_and_maps_all_required_facts() -> 
     assert not hasattr(client, "post")
 
 
+def test_active_catalog_uses_complete_official_exchange_info_and_omits_inactive() -> None:
+    responses = payloads()
+    exchange = responses["/fapi/v1/exchangeInfo"]
+    assert isinstance(exchange, dict)
+    exchange["symbols"].extend(
+        [
+            {
+                "symbol": "TUTUSDT",
+                "contractType": "PERPETUAL",
+                "status": "TRADING",
+                "quoteAsset": "USDT",
+                "marginAsset": "USDT",
+                "filters": [
+                    {"filterType": "PRICE_FILTER", "tickSize": "0.00001"},
+                    {"filterType": "LOT_SIZE", "stepSize": "1"},
+                    {"filterType": "MIN_NOTIONAL", "notional": "5"},
+                ],
+            },
+            {
+                "symbol": "OLDUSDT",
+                "contractType": "PERPETUAL",
+                "status": "SETTLING",
+                "quoteAsset": "USDT",
+                "marginAsset": "USDT",
+                "filters": [],
+            },
+            {
+                "symbol": "BTCUSDT_260925",
+                "contractType": "CURRENT_QUARTER",
+                "status": "TRADING",
+                "quoteAsset": "USDT",
+                "marginAsset": "USDT",
+                "filters": [],
+            },
+        ]
+    )
+    client, calls = client_with_contract(responses)
+
+    instruments = client.read_active_instruments()
+
+    assert [instrument.symbol for instrument in instruments] == ["BTCUSDT", "TUTUSDT"]
+    assert all(instrument.active for instrument in instruments)
+    assert urllib.parse.parse_qs(urllib.parse.urlparse(calls[0][0]).query) == {}
+    assert calls[0][1] == {}
+
+
 def test_standard_account_snapshot_reads_position_risk_once_for_all_active_symbols() -> None:
     responses = payloads()
     position_rows = responses["/fapi/v3/positionRisk"]
@@ -319,6 +365,27 @@ def test_network_error_is_reported_as_read_only_unavailable(
 
     with pytest.raises(DomainRejected, match="BINANCE_READ_ONLY_UNAVAILABLE"):
         client.read_snapshot("BTCUSDT", now=NOW)
+
+
+def test_read_only_transport_retries_transient_network_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    attempts = 0
+    delays: list[float] = []
+
+    def transient(*_args: object, **_kwargs: object) -> UrlResponse:
+        nonlocal attempts
+        attempts += 1
+        if attempts < 3:
+            raise urllib.error.URLError("temporary")
+        return UrlResponse(b'{"ok":true}')
+
+    monkeypatch.setattr(urllib.request, "urlopen", transient)
+    monkeypatch.setattr(binance.time, "sleep", delays.append)
+
+    assert binance._default_fetcher("https://example.invalid", {}, 1.0) == {"ok": True}
+    assert attempts == 3
+    assert delays == [0.25, 0.5]
 
 
 def test_default_binance_read_transports_parse_and_fail_closed(

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import logging
 import signal
@@ -8,6 +9,7 @@ import threading
 from collections.abc import Callable, Sequence
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime, timedelta
+from decimal import ROUND_DOWN, Decimal
 from functools import partial
 from typing import Any, Literal
 from uuid import UUID
@@ -18,7 +20,15 @@ from trading_control_plane.binance import (
 )
 from trading_control_plane.config import Settings, get_settings
 from trading_control_plane.database import Database
-from trading_control_plane.domain import DomainRejected, ExecutionEnvironment, ReconciliationStatus
+from trading_control_plane.domain import (
+    Direction,
+    DomainRejected,
+    ExecutionEnvironment,
+    ProposalSource,
+    ProposalStatus,
+    ReconciliationStatus,
+    RiskTier,
+)
 from trading_control_plane.hyperliquid import (
     HyperliquidReadOnlyClient,
     resolve_hyperliquid_main_account,
@@ -27,7 +37,9 @@ from trading_control_plane.logging import configure_logging
 from trading_control_plane.notilt import NoTiltGateway, NoTiltUsdValuator
 from trading_control_plane.perptape import (
     PERPTAPE_OPERATIONAL_TIME_HEADROOM,
+    PerptapeCandidate,
     PerptapeClient,
+    PerptapeFeedSnapshot,
     merge_incomplete_perptape_candidates,
     normalize_perptape_operational_datetime,
 )
@@ -39,6 +51,91 @@ logger = logging.getLogger(__name__)
 
 SourceStatus = Literal["SUCCESS", "FAILED", "SKIPPED"]
 BinanceReader = BinanceReadOnlyClient | BinancePortfolioMarginReadOnlyClient
+TIMEFRAME_ORDER = {"1h": 0, "4h": 1, "1d": 2, "1w": 3}
+AMOUNT_QUANTUM = Decimal("0.000000000000000001")
+
+
+def _resonance_decimal_identity(value: Decimal) -> str:
+    normalized = value.normalize()
+    if normalized == 0:
+        return "0"
+    return format(normalized, "f")
+
+
+def perptape_resonance_signal_identity(
+    candidates: Sequence[PerptapeCandidate],
+) -> str | None:
+    """Identify one continuing breakout without using refresh timestamps or candidate IDs."""
+
+    if not candidates or any(item.threshold is None for item in candidates):
+        return None
+    primary = candidates[0]
+    return "|".join(
+        [
+            primary.source_contract_version,
+            primary.venue,
+            primary.source_exchange,
+            primary.symbol,
+            primary.canonical_symbol,
+            primary.direction.value,
+            *(
+                f"{item.timeframe}:{_resonance_decimal_identity(item.threshold)}"
+                for item in candidates
+                if item.threshold is not None
+            ),
+        ]
+    )
+
+
+def perptape_resonance_groups(
+    candidates: Sequence[PerptapeCandidate],
+    *,
+    now: datetime,
+    max_age: timedelta,
+    minimum_timeframes: int = 3,
+) -> tuple[tuple[PerptapeCandidate, ...], ...]:
+    """Return exact-instrument, same-direction fresh groups without guessing conflicts."""
+
+    if minimum_timeframes < 3 or minimum_timeframes > len(TIMEFRAME_ORDER):
+        raise ValueError("minimum_timeframes must be between 3 and 4")
+    grouped: dict[tuple[str, str, Direction], dict[str, PerptapeCandidate]] = {}
+    conflicted: set[tuple[str, str, Direction]] = set()
+    cutoff = now - max_age
+    future_limit = now + timedelta(seconds=30)
+    for candidate in candidates:
+        if (
+            candidate.readiness != "READY"
+            or candidate.data_health != "CURRENT"
+            or candidate.observed_at < cutoff
+            or candidate.observed_at > future_limit
+        ):
+            continue
+        key = (candidate.venue, candidate.symbol, candidate.direction)
+        existing = grouped.setdefault(key, {}).get(candidate.timeframe)
+        if existing is not None and existing.candidate_id != candidate.candidate_id:
+            conflicted.add(key)
+            continue
+        grouped[key][candidate.timeframe] = candidate
+    results: list[tuple[PerptapeCandidate, ...]] = []
+    for key, by_timeframe in grouped.items():
+        values = tuple(
+            sorted(by_timeframe.values(), key=lambda item: TIMEFRAME_ORDER[item.timeframe])
+        )
+        if key in conflicted or len(values) < minimum_timeframes:
+            continue
+        if (
+            len({item.canonical_symbol for item in values}) != 1
+            or len({item.source_exchange for item in values}) != 1
+            or len({item.source_contract_version for item in values}) != 1
+        ):
+            continue
+        results.append(values)
+    return tuple(
+        sorted(
+            results,
+            key=lambda items: (items[0].venue, items[0].symbol, items[0].direction.value),
+        )
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -190,6 +287,36 @@ class RuntimeSyncWorker:
                 "RUNTIME_BINANCE_TARGET_MISSING",
                 "runtime Binance sync requires an internal account ID",
             )
+        venue_instruments = self.binance.read_active_instruments()
+        worker_instruments = tuple(
+            instrument
+            for instrument in venue_instruments
+            if instrument.quote_currency == "USDT" and instrument.collateral_currency == "USDT"
+        )
+        if not worker_instruments:
+            raise DomainRejected(
+                "FREQTRADE_BINANCE_SCOPE_EMPTY",
+                "Binance returned no active USDT-margined perpetual supported by the bound "
+                "Freqtrade worker",
+            )
+        excluded = len(venue_instruments) - len(worker_instruments)
+        if excluded:
+            logger.info(
+                "Binance instruments outside the bound Freqtrade collateral scope were skipped",
+                extra={
+                    "event": "freqtrade_catalog_scope_filtered",
+                    "component": "BINANCE",
+                    "excluded_count": excluded,
+                    "included_count": len(worker_instruments),
+                },
+            )
+        self.service.synchronize_active_venue_instruments(
+            actor_id=actor_id,
+            account_id=account_id,
+            venue="BINANCE",
+            instruments=worker_instruments,
+            now=now,
+        )
         snapshots = self.binance.read_account_snapshots(
             (self.settings.runtime_binance_symbol,), now=now
         )
@@ -205,7 +332,11 @@ class RuntimeSyncWorker:
             scope,
             actor_id,
             now,
-            source_error_code=persisted["history_error_code"],
+            source_error_code=(
+                None
+                if persisted["history_error_code"] is None
+                else f"BINANCE_HISTORY_INCOMPLETE:{persisted['history_error_code']}"
+            ),
         )
         return int(persisted["positions_covered"])
 
@@ -217,6 +348,7 @@ class RuntimeSyncWorker:
             and base.contract_version == self.settings.perptape_contract_version
             and now < base.next_allowed_at
         ):
+            self._create_resonance_proposals(actor_id, base, now=now)
             return len(base.candidates)
         feed = self.perptape.refresh(now=now)
         current = self.queries.perptape_feed()
@@ -228,14 +360,179 @@ class RuntimeSyncWorker:
                     for candidate in current.candidates
                     if candidate.readiness == "INCOMPLETE"
                 ),
+                pending_max_age=timedelta(
+                    seconds=self.settings.perptape_websocket_reconciliation_seconds
+                ),
             )
-        self.service.record_perptape_feed(
+        self._record_perptape_snapshot(
             actor_id,
             feed,
             now=now,
             base_snapshot=base,
         )
         return len(feed.candidates)
+
+    def _record_perptape_snapshot(
+        self,
+        actor_id: UUID,
+        feed: PerptapeFeedSnapshot,
+        *,
+        now: datetime,
+        base_snapshot: PerptapeFeedSnapshot | None,
+    ) -> None:
+        self.service.record_perptape_feed(
+            actor_id,
+            feed,
+            now=now,
+            base_snapshot=base_snapshot,
+        )
+        self._create_resonance_proposals(actor_id, feed, now=now)
+
+    def _create_resonance_proposals(
+        self,
+        actor_id: UUID,
+        feed: PerptapeFeedSnapshot,
+        *,
+        now: datetime,
+    ) -> int:
+        config = self.service.proposal_automation_config(actor_id)
+        if config is None or not config["auto_proposal_enabled"]:
+            return 0
+        expired_duplicates = self.service.expire_duplicate_active_system_proposals(
+            actor_id=actor_id,
+            strategy_id="perptape-resonance",
+            now=now,
+        )
+        if expired_duplicates:
+            logger.warning(
+                "expired duplicate active Perptape resonance proposals",
+                extra={
+                    "event": "perptape_resonance_duplicates_expired",
+                    "component": "perptape",
+                    "expired_count": expired_duplicates,
+                },
+            )
+        account_id = str(config["account_id"])
+        minimum_timeframes = int(config["auto_proposal_min_timeframes"])
+        notional = Decimal(str(config["notional"]))
+        max_risk = Decimal(str(config["max_risk"]))
+        invalidation_bps = int(config["invalidation_bps"])
+        expires_in_minutes = int(config["expires_in_minutes"])
+        max_age = timedelta(
+            seconds=(
+                self.settings.runtime_sync_interval_seconds
+                + int(self.settings.perptape_timeout_seconds)
+                + 30
+            )
+        )
+        groups = perptape_resonance_groups(
+            feed.candidates,
+            now=now,
+            max_age=max_age,
+            minimum_timeframes=minimum_timeframes,
+        )
+        created = 0
+        for candidates in groups:
+            primary = max(
+                candidates,
+                key=lambda item: (item.observed_at, item.triggered_at or item.observed_at),
+            )
+            try:
+                instrument_id = self.queries.instrument_id_by_venue_symbol(
+                    primary.venue, primary.symbol
+                )
+            except DomainRejected as exc:
+                if exc.code != "INSTRUMENT_UNAVAILABLE":
+                    raise
+                logger.info(
+                    "Perptape resonance skipped outside the exact Instrument Catalog",
+                    extra={
+                        "event": "perptape_resonance_proposal_skipped",
+                        "component": "perptape",
+                        "error_code": exc.code,
+                    },
+                )
+                continue
+            signal_identity = perptape_resonance_signal_identity(candidates)
+            if signal_identity is None:
+                logger.info(
+                    "Perptape resonance skipped without stable breakout thresholds",
+                    extra={
+                        "event": "perptape_resonance_proposal_skipped",
+                        "component": "perptape",
+                        "error_code": "PERPTAPE_SIGNAL_IDENTITY_INCOMPLETE",
+                    },
+                )
+                continue
+            source_candidate_id = "ptr_" + hashlib.sha256(signal_identity.encode()).hexdigest()[:33]
+            quantity = (notional / primary.reference_price).quantize(
+                AMOUNT_QUANTUM, rounding=ROUND_DOWN
+            )
+            if quantity <= 0:
+                continue
+            invalidation_factor = Decimal(invalidation_bps) / Decimal(10_000)
+            invalidation_price = (
+                primary.reference_price
+                * (
+                    Decimal(1) - invalidation_factor
+                    if primary.direction is Direction.LONG
+                    else Decimal(1) + invalidation_factor
+                )
+            ).quantize(AMOUNT_QUANTUM, rounding=ROUND_DOWN)
+            timeframes = [item.timeframe for item in candidates]
+            proposal_id = self.service.create_proposal(
+                actor_id=actor_id,
+                source=ProposalSource.SYSTEM,
+                risk_tier=RiskTier(str(config["risk_tier"])),
+                account_id=account_id,
+                venue=primary.venue,
+                instrument_id=instrument_id,
+                direction=primary.direction,
+                quantity=quantity,
+                max_risk=max_risk,
+                expires_at=now + timedelta(minutes=expires_in_minutes),
+                idempotency_key=f"perptape-resonance:{source_candidate_id}",
+                strategy_id="perptape-resonance",
+                strategy_version=(
+                    f"{feed.contract_version}:policy-v{config['version']}:min-{minimum_timeframes}"
+                ),
+                environment=ExecutionEnvironment.LIVE,
+                source_candidate_id=source_candidate_id,
+                source_link=primary.detail_url,
+                source_observed_at=max(item.observed_at for item in candidates),
+                source_readiness="READY",
+                details={
+                    "candidate": primary.to_dict(),
+                    "resonance_candidates": [item.to_dict() for item in candidates],
+                    "resonance_timeframes": timeframes,
+                    "resonance_threshold": minimum_timeframes,
+                    "default_config_id": config["config_id"],
+                    "default_config_version": config["version"],
+                    "configuration_mode": "AUTO_POLICY",
+                    "trigger_price": str(primary.reference_price),
+                    "invalidation_price": str(invalidation_price),
+                    "initial_quantity": str(quantity),
+                    "allow_auto_add": False,
+                    "requested_adds": 0,
+                    "add_trigger_price": None,
+                    "rationale": (
+                        "Perptape current exact-instrument resonance across "
+                        f"{', '.join(timeframes)}; {config['rationale']} "
+                        "Proposal only, pending human review."
+                    ),
+                },
+                idempotency_payload={
+                    "source_candidate_id": source_candidate_id,
+                    "signal_identity": signal_identity,
+                },
+                deduplicate_active_system_scope=True,
+                now=now,
+            )
+            detail = self.queries.proposal_detail(actor_id, proposal_id, now=now)
+            if detail["status"] == ProposalStatus.DRAFT.value:
+                self.service.submit_proposal(proposal_id, actor_id, now=now)
+                created += 1
+        return created
 
     def _record_hyperliquid(self, actor_id: UUID, now: datetime) -> int:
         account_id = self.settings.runtime_hyperliquid_account_id
@@ -249,6 +546,14 @@ class RuntimeSyncWorker:
                 "HYPERLIQUID_ENVIRONMENT_MISMATCH",
                 "Hyperliquid API host does not match the configured fact environment",
             )
+        self.service.synchronize_active_venue_instruments(
+            actor_id=actor_id,
+            account_id=account_id,
+            venue="HYPERLIQUID",
+            instruments=self.hyperliquid.read_active_instruments(),
+            hip3_dexes=self.settings.hyperliquid_hip3_dexes,
+            now=now,
+        )
         snapshots = self.hyperliquid.read_account_snapshots(
             (self.settings.runtime_hyperliquid_symbol,),
             now=now,
@@ -266,7 +571,11 @@ class RuntimeSyncWorker:
             scope,
             actor_id,
             now,
-            source_error_code=persisted["history_error_code"],
+            source_error_code=(
+                None
+                if persisted["history_error_code"] is None
+                else f"HYPERLIQUID_HISTORY_INCOMPLETE:{persisted['history_error_code']}"
+            ),
         )
         return int(persisted["positions_covered"])
 
@@ -336,18 +645,6 @@ class RuntimeSyncWorker:
         )
         results: dict[str, SourceSyncResult] = {}
 
-        if self.settings.perptape_api_key:
-            perptape_actor = self.queries.service_principal_by_username(
-                self.settings.perptape_service_username
-            )
-            self._attempt(
-                "PERPTAPE",
-                lambda: self._record_perptape(perptape_actor.user_id, started_at),
-                results,
-            )
-        else:
-            results["PERPTAPE"] = SourceSyncResult("SKIPPED")
-
         if self.settings.binance_read_only_enabled:
             self._attempt(
                 "BINANCE",
@@ -366,6 +663,18 @@ class RuntimeSyncWorker:
         else:
             results["HYPERLIQUID"] = SourceSyncResult("SKIPPED")
 
+        if self.settings.perptape_api_key:
+            perptape_actor = self.queries.service_principal_by_username(
+                self.settings.perptape_service_username
+            )
+            self._attempt(
+                "PERPTAPE",
+                lambda: self._record_perptape(perptape_actor.user_id, started_at),
+                results,
+            )
+        else:
+            results["PERPTAPE"] = SourceSyncResult("SKIPPED")
+
         if self.settings.notilt_enabled:
             for chain_id in sorted(self.settings.notilt_vaults):
                 self._attempt(
@@ -381,7 +690,23 @@ class RuntimeSyncWorker:
         if not self.settings.notilt_enabled or not self.settings.notilt_vaults:
             results["NOTILT"] = SourceSyncResult("SKIPPED")
 
-        net_worth = self.queries.capital_center(actor.user_id)["net_worth"]
+        authoritative_live_accounts = {
+            venue: account_id
+            for venue, account_id in (
+                ("BINANCE", self.settings.runtime_binance_account_id),
+                ("HYPERLIQUID", self.settings.runtime_hyperliquid_account_id),
+            )
+            if account_id
+        }
+        net_worth = self.queries.capital_center(
+            actor.user_id,
+            authoritative_live_accounts=authoritative_live_accounts,
+        )["net_worth"]
+        self.service.record_runtime_source_health(
+            actor.user_id,
+            {source: asdict(result) for source, result in results.items()},
+            now=completed_at,
+        )
         return RuntimeSyncReport(
             started_at=started_at.isoformat(),
             completed_at=completed_at.isoformat(),
@@ -407,13 +732,11 @@ class RuntimeSyncWorker:
                     api_key=self.settings.perptape_api_key,
                     contract_version=self.settings.perptape_contract_version,
                     load_snapshot=self.queries.perptape_feed,
-                    record_snapshot=lambda feed, now, base_snapshot: (
-                        self.service.record_perptape_feed(
-                            perptape_actor.user_id,
-                            feed,
-                            now=now,
-                            base_snapshot=base_snapshot,
-                        )
+                    record_snapshot=lambda feed, now, base_snapshot: self._record_perptape_snapshot(
+                        perptape_actor.user_id,
+                        feed,
+                        now=now,
+                        base_snapshot=base_snapshot,
                     ),
                     timeout_seconds=self.settings.perptape_timeout_seconds,
                     heartbeat_timeout_seconds=(
@@ -498,19 +821,31 @@ def build_runtime_worker(settings: Settings, database: Database) -> RuntimeSyncW
             api_secret=settings.binance_api_secret,
             recv_window_ms=settings.binance_recv_window_ms,
         )
-    hyperliquid_account = resolve_hyperliquid_main_account(
-        base_url=settings.hyperliquid_base_url,
-        account_address=settings.hyperliquid_account_address,
-        api_wallet_address=(
-            settings.hyperliquid_api_wallet_address
-            if settings.hyperliquid_read_only_enabled
-            else None
-        ),
-    )
+    try:
+        hyperliquid_account = resolve_hyperliquid_main_account(
+            base_url=settings.hyperliquid_base_url,
+            account_address=settings.hyperliquid_account_address,
+            api_wallet_address=(
+                settings.hyperliquid_api_wallet_address
+                if settings.hyperliquid_read_only_enabled
+                else None
+            ),
+        )
+    except DomainRejected as exc:
+        hyperliquid_account = None
+        logger.warning(
+            "Hyperliquid read-only account resolution failed closed during worker startup",
+            extra={
+                "event": "hyperliquid_account_resolution_failed",
+                "component": "HYPERLIQUID",
+                "error_code": exc.code,
+            },
+        )
     hyperliquid = HyperliquidReadOnlyClient(
         base_url=settings.hyperliquid_base_url,
         account_address=settings.hyperliquid_subaccount_address or hyperliquid_account,
         dex=settings.hyperliquid_core_dex,
+        hip3_dexes=settings.hyperliquid_hip3_dexes,
     )
     return RuntimeSyncWorker(
         settings=settings,

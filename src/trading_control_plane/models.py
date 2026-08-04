@@ -171,6 +171,70 @@ class Proposal(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
 
+class ProposalDefaultConfig(Base):
+    __tablename__ = "proposal_default_configs"
+    __table_args__ = (
+        CheckConstraint("environment = 'LIVE'", name="ck_proposal_defaults_live"),
+        CheckConstraint(
+            "risk_tier IN ('LOW','MEDIUM','HIGH')", name="ck_proposal_defaults_risk_tier"
+        ),
+        CheckConstraint("notional > 0", name="ck_proposal_defaults_notional_positive"),
+        CheckConstraint("max_risk > 0", name="ck_proposal_defaults_risk_positive"),
+        CheckConstraint("invalidation_bps BETWEEN 1 AND 5000", name="ck_proposal_defaults_bps"),
+        CheckConstraint(
+            "expires_in_minutes BETWEEN 5 AND 1440", name="ck_proposal_defaults_expiry"
+        ),
+        CheckConstraint(
+            "auto_proposal_min_timeframes IN (3, 4)",
+            name="ck_proposal_defaults_auto_timeframes",
+        ),
+        UniqueConstraint("version", name="uq_proposal_default_configs_version"),
+        Index(
+            "uq_proposal_default_configs_active",
+            "active",
+            unique=True,
+            postgresql_where=text("active"),
+        ),
+    )
+
+    config_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid4)
+    version: Mapped[int] = mapped_column(Integer, nullable=False)
+    environment: Mapped[str] = mapped_column(String(16), nullable=False)
+    account_id: Mapped[str] = mapped_column(String(120), nullable=False)
+    risk_tier: Mapped[str] = mapped_column(String(16), nullable=False)
+    notional: Mapped[Decimal] = mapped_column(AMOUNT, nullable=False)
+    max_risk: Mapped[Decimal] = mapped_column(AMOUNT, nullable=False)
+    invalidation_bps: Mapped[int] = mapped_column(Integer, nullable=False)
+    expires_in_minutes: Mapped[int] = mapped_column(Integer, nullable=False)
+    rationale: Mapped[str] = mapped_column(Text, nullable=False)
+    auto_proposal_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    auto_proposal_min_timeframes: Mapped[int] = mapped_column(Integer, nullable=False, default=3)
+    active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    updated_by: Mapped[UUID] = mapped_column(ForeignKey("users.user_id"), nullable=False)
+    effective_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class RuntimeSourceHealth(Base):
+    __tablename__ = "runtime_source_health"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('SUCCESS','FAILED','SKIPPED')",
+            name="ck_runtime_source_health_status",
+        ),
+        CheckConstraint(
+            "items_observed >= 0",
+            name="ck_runtime_source_health_items_nonnegative",
+        ),
+    )
+
+    source_name: Mapped[str] = mapped_column(String(64), primary_key=True)
+    status: Mapped[str] = mapped_column(String(16), nullable=False)
+    items_observed: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    error_code: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    checked_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    updated_by: Mapped[UUID] = mapped_column(ForeignKey("users.user_id"), nullable=False)
+
+
 class TransferProposal(Base):
     __tablename__ = "transfer_proposals"
     __table_args__ = (
@@ -417,6 +481,107 @@ class CapitalTransfer(Base):
     version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
     observed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     reconciled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class DirectCapitalConfiguration(Base):
+    __tablename__ = "direct_capital_configurations"
+    __table_args__ = (
+        UniqueConstraint("version", name="uq_direct_capital_configurations_version"),
+        CheckConstraint("version >= 1", name="ck_direct_capital_configuration_version"),
+        CheckConstraint("network = 'ARBITRUM'", name="ck_direct_capital_configuration_network"),
+        CheckConstraint("asset = 'USDC'", name="ck_direct_capital_configuration_asset"),
+        CheckConstraint(
+            "max_amount IS NULL OR max_amount > 0",
+            name="ck_direct_capital_configuration_max_amount",
+        ),
+        CheckConstraint(
+            "max_fee IS NULL OR max_fee >= 0",
+            name="ck_direct_capital_configuration_max_fee",
+        ),
+        Index(
+            "uq_direct_capital_configuration_active",
+            "active",
+            unique=True,
+            postgresql_where=text("active"),
+        ),
+    )
+
+    config_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid4)
+    version: Mapped[int] = mapped_column(Integer, nullable=False)
+    active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    network: Mapped[str] = mapped_column(String(64), nullable=False, default="ARBITRUM")
+    asset: Mapped[str] = mapped_column(String(32), nullable=False, default="USDC")
+    vault_id: Mapped[str | None] = mapped_column(String(160), nullable=True)
+    vault_address: Mapped[str | None] = mapped_column(String(42), nullable=True)
+    owned_arbitrum_address: Mapped[str | None] = mapped_column(String(42), nullable=True)
+    binance_account_id: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    binance_deposit_address: Mapped[str | None] = mapped_column(String(42), nullable=True)
+    binance_withdrawal_address: Mapped[str | None] = mapped_column(String(42), nullable=True)
+    hyperliquid_account_id: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    hyperliquid_bridge_address: Mapped[str | None] = mapped_column(String(42), nullable=True)
+    max_amount: Mapped[Decimal | None] = mapped_column(AMOUNT, nullable=True)
+    max_fee: Mapped[Decimal | None] = mapped_column(AMOUNT, nullable=True)
+    updated_by: Mapped[UUID] = mapped_column(ForeignKey("users.user_id"), nullable=False)
+    effective_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class DirectCapitalOperation(Base):
+    __tablename__ = "direct_capital_operations"
+    __table_args__ = (
+        CheckConstraint(
+            "path IN ('VAULT_TO_BINANCE','VAULT_TO_HYPERLIQUID',"
+            "'BINANCE_TO_VAULT','HYPERLIQUID_TO_VAULT')",
+            name="ck_direct_capital_operations_path",
+        ),
+        CheckConstraint("venue IN ('BINANCE','HYPERLIQUID')", name="ck_direct_capital_venue"),
+        CheckConstraint(
+            "status IN ('BLOCKED','UNSIGNED_PLAN_READY','AWAITING_RECEIPT','SETTLED','UNKNOWN')",
+            name="ck_direct_capital_status",
+        ),
+        CheckConstraint(
+            "receipt_status IN ('NOT_SUBMITTED','PENDING','CONFIRMED','UNKNOWN')",
+            name="ck_direct_capital_receipt_status",
+        ),
+        CheckConstraint("amount > 0", name="ck_direct_capital_amount_positive"),
+        CheckConstraint(
+            "max_fee IS NULL OR max_fee >= 0", name="ck_direct_capital_fee_nonnegative"
+        ),
+        CheckConstraint(
+            "min_received IS NULL OR (min_received > 0 AND min_received <= amount)",
+            name="ck_direct_capital_min_received",
+        ),
+        CheckConstraint("jsonb_typeof(stages) = 'array'", name="ck_direct_capital_stages_array"),
+        CheckConstraint(
+            "jsonb_typeof(blockers) = 'array'", name="ck_direct_capital_blockers_array"
+        ),
+        Index("ix_direct_capital_operations_updated", "updated_at"),
+    )
+
+    operation_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid4)
+    path: Mapped[str] = mapped_column(String(32), nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False)
+    receipt_status: Mapped[str] = mapped_column(String(32), nullable=False)
+    account_id: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    venue: Mapped[str] = mapped_column(String(64), nullable=False)
+    vault_id: Mapped[str | None] = mapped_column(String(160), nullable=True)
+    asset: Mapped[str] = mapped_column(String(32), nullable=False)
+    network: Mapped[str] = mapped_column(String(64), nullable=False)
+    amount: Mapped[Decimal] = mapped_column(AMOUNT, nullable=False)
+    max_fee: Mapped[Decimal | None] = mapped_column(AMOUNT, nullable=True)
+    min_received: Mapped[Decimal | None] = mapped_column(AMOUNT, nullable=True)
+    source_reference: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    destination_reference: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    stages: Mapped[list[dict[str, Any]]] = mapped_column(JSONB, nullable=False)
+    blockers: Mapped[list[str]] = mapped_column(JSONB, nullable=False)
+    execute_after: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    final_confirmed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    actor_id: Mapped[UUID] = mapped_column(ForeignKey("users.user_id"), nullable=False)
+    correlation_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), nullable=False)
+    idempotency_key: Mapped[str] = mapped_column(String(160), nullable=False)
+    version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 

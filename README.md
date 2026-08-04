@@ -1,11 +1,13 @@
 # Trading 交易系统
 
-> 状态日期：2026-08-01
-> 当前状态：两场所受控 LIVE 订单闭环、Perptape 精确合约身份、LIVE/模拟资金隔离、受复核风险恢复和专业化 Telegram 私聊已实现；所有危险能力仍默认关闭
+> 状态日期：2026-08-03
+> 当前状态：两场所只读连接、Perptape 精确合约身份与多周期待审核提案、LIVE/模拟资金隔离、分权风险恢复、受控资金路径和最小 Telegram 审核已实现；所有危险能力仍默认关闭
 
 本项目面向一个资本所有者、一个内部组织和多个内部用户。用户可以提交和审核提案、查看仓位、处理异常；系统在风险可控的前提下辅助执行交易并判断是否赚钱。不开放外部注册，不管理第三方资金，不建设机构级多租户、通用合规或通用认证平台。
 
 完整产品愿景包含 Binance、Hyperliquid、Web/PWA、Telegram、VenueAdapter、Freqtrade/OMS、Margin、Vault/CTO 和报表。这些目标不删除，但按可运行的端到端用户流程逐步开发。未实现能力保持关闭，不为未来可能性预建通用实体。
+
+交易执行的默认底座现统一为场所隔离的 Freqtrade worker：Binance futures 与 Hyperliquid futures 各自独立，Hyperliquid 通过显式 `hip3_dexes` allowlist 加载 HIP-3。控制面仍拥有提案、审核、风险、OrderIntent、fencing 和审计；交易所官方 API 只读客户端继续作为账户事实源。仓库内旧直接发送客户端仅供隔离兼容测试，默认运行配置会拒绝这条路径。`docker compose --profile execution-workers` 提供的是本地 dry-run worker，不构成实盘认证。
 
 ## 从这里开始
 
@@ -30,21 +32,21 @@
 - 每个 execution scope 只有一个有效 sender；新 owner 接管后旧 fencing token 无效。
 - `LIVE_ORDER_SEND`、`CAPITAL_TRANSFER`、`AUTO_ADD`、`AUTO_PROFIT_SWEEP` 与 `AUTO_OPERATING_REFILL` 默认 `DISABLED`。
 - AUTO_ADD 从 `DISABLED` 变为 `ENABLED` 只能通过 `RiskControlChangeRequest` 受复核恢复流程；不能由管理员直接翻转 Gate。每个 Add 仍需冻结 Proposal、分档 AddUnit、后续 Perptape 候选、盈利仓位、足额保护、新鲜事实、剩余授权和最终 Risk Engine 同时通过。只有首个正成交消费 AddUnit，零成交取消/拒绝不消费，Unknown 冻结后续新增风险。
-- 资金 Proposal、双人独立复核、Capital Transfer Authorization、源端预留、在途、目的端确认和对账与交易授权分离；活动仓位、未解决订单或 Unknown 禁止 Vault 救仓，Unknown 不释放或重发。
+- 既有资金 Proposal/双人复核/Transfer Authorization 生命周期继续与交易授权分离。面向资金管理员的四条直接路径不再强制经过该旧界面，但仍要求显式最终确认、可信配置、地址/网络/资产/金额/限额/新鲜状态重验、完整审计和阶段回执；生产参数或 Adapter 缺失时 fail closed。活动仓位、未解决订单或 Unknown 禁止 Vault 救仓，Unknown 不释放或重发。
 - 自动利润归集和自动运营补充使用两个独立 Gate；当前只根据空仓、无订单、无 Unknown、机器 MATCH、已确认余额和已关闭 Campaign 净 PnL 生成待双人复核的非生产候选，不自动提交资金。浮盈不能归集，净亏损不能触发运营补充。
-- 风险恢复使用 `RiskControlChangeRequest`：请求冻结政策/Gate 版本和 scope，经两名不同 HUMAN 且有 `risk.restore.review` 权限的用户复核，申请人不得自审；等待 15 分钟冷却并在 24 小时内执行，执行时重验事实、版本和 scope。生产未配置 LIVE scope 时 fail closed，`KILL_SWITCH` 不进入该流程，旧授权和旧 AddUnit 永不复活。
-- Telegram 已提供默认关闭的真实 Bot API 私聊长轮询、中文 HTML 摘要、`/start`/`/help`/`/status` 命令、内部用户绑定、Web 审核深链和按 Campaign 状态显示的只收紧按钮；减仓/退出必须二次确认，资金通知和风险恢复均无 Telegram 批准或执行入口。正式 IdP/Passkey 仍未接入：本服务的 `SignedTokenService` 仅以本地 HMAC 验证 action grant 的 user/action/object/version/TTL；只有 local/test 提供 Mock grant 发行，生产 issuer、IdP/WebAuthn 和外部签名验证均未实现，因此生产风险恢复保持不可用/fail closed。Binance Unified Account 与 Hyperliquid Core 已具有默认关闭的 LIVE 查询、发送、取消、Unknown 恢复、原生保护和保护取消入口，并于 2026-07-31 完成最小主网开仓到退出实证。该实证不启用 AUTO_ADD、资金划转、HIP-3 或 Margin，也不等于生产部署、持续运行或盈利保证。
+- 风险恢复分两条受控路径：最高管理员可在全部实时条件满足时直接恢复；操作人员只能创建冻结申请，并由具备独立审核职责的他人审核后执行。两条路径都重验事实、版本和 scope、写入审计、保持 AUTO_ADD 关闭，并使旧 TradingAuthorization 与旧 AddUnit 永久失效。生产未配置 LIVE scope 时 fail closed，`KILL_SWITCH` 不进入常规恢复流程。
+- Telegram 已提供默认关闭的真实 Bot API 私聊长轮询、中文 HTML 审核卡、`/start`/`/help`/`/status`/`/todo`、内部用户绑定，以及冻结提案的两步批准/拒绝。它只承担提醒、待办和独立审核；Campaign、资金、风险 Gate、成员权限、签名与广播入口在 review-only 模式全部抑制。创建者自审、对象版本、有效期、身份绑定和幂等仍由服务端重验。正式 IdP/Passkey 仍未接入：本服务的 `SignedTokenService` 仅以本地 HMAC 验证 action grant；只有 local/test 提供 Mock grant 发行，生产 issuer、IdP/WebAuthn 和外部签名验证仍未实现。Binance Unified Account 与 Hyperliquid Core 的危险写能力保持独立关闭。
 
 ## 当前代码入口
 
 - API 进程：`uv run trading-api`
 - 只读同步进程：`uv run trading-sync-worker`；`--once` 用于一次性生产边界验收。它只读取 Perptape、Binance、Hyperliquid 和已配置 NoTilt Vault，持久化事实并运行对账，不拥有订单发送、资金签名或广播方法
-- Web/PWA：机会页内的人工提案入口、审核、Campaign、AUTO_ADD 候选、原子减仓/退出、全局风险收紧及受复核恢复、`/positions` 系统状态、`/venues` 统一交易所事实、`/admin/users` 成员权限、`/capital` 资金中心和 `/results` 实际结果/审计页。交易所事实把 Binance 与 Hyperliquid 作为同一能力的两个数据源；成员权限按角色、账户和场所作用域分配。资金中心默认只展示 LIVE；SHADOW/TESTNET 置于独立折叠的“模拟数据”区且不计入真实净值；Vault 缺少事实时仍显示 `0 USD · MISSING`，不能据此视为已确认余额
+- Web/PWA：`/` 是唯一行动总览；核心主线为机会 → 审核队列 → 交易任务，运行告警详情位于 `/campaigns/alerts`，旧 `/exceptions` 只做兼容跳转。另有 `/risk` 风险、`/positions` 系统状态、`/venues` 交易账户、`/capital` 资金中心、`/admin/users` 管理员专属成员权限和 `/results` 结果/审计。资金中心默认只展示 LIVE；SHADOW/TESTNET 不计入真实净值。Vault 缺少事实时显示 `— · MISSING`，总净值也保持不完整，绝不把缺失投影为零
 - HTTP：健康检查、内部会话、Perptape 主站机会与可选 LIVE Proposal、Proposal/Review/Risk/Authorization、SHADOW/TESTNET/LIVE Campaign、AUTO_ADD/减仓/退出、资金事实/提案/授权、NoTilt 三链状态/同步/持久化未签名计划/回执确认、按环境结果/审计/运行状态，以及 Binance、Hyperliquid Core 的只读、TESTNET 与受控 LIVE API
 - 内部业务：`trading_control_plane.service.TradingService`
 - 纯计算：`evaluate_risk`、`select_target_position`、`compute_pnl`
-- 数据库：PostgreSQL，Alembic head `20260802_0006`，29 张业务/运行表（另有 Alembic 版本表）
-- 场所边界：`binance.py`/`binance_execution.py` 覆盖标准 USDⓈ-M 只读/TESTNET，以及 Unified Account 官方 PAPI 的 LIVE 只读和执行；`hyperliquid.py`/`hyperliquid_execution.py` 覆盖 Core Info、TESTNET 与 LIVE Exchange。Hyperliquid “市价”固定为带冻结价格边界的 IOC，不使用隐含滑点；主账户默认、子账户显式配置。HIP-3、保证金控制和资金写入口不存在，数据库中的 `LIVE_ORDER_SEND` 初始仍为 `DISABLED`
+- 数据库：PostgreSQL，Alembic head `20260802_0011`，33 张业务/运行表（另有 Alembic 版本表）
+- 场所边界：Binance 与 Hyperliquid 的交易发送默认只允许进入各自隔离的 Freqtrade worker；Hyperliquid worker 通过显式 `hip3_dexes` allowlist 加载 HIP-3。仓库原有 `binance_execution.py` / `hyperliquid_execution.py` 只保留隔离兼容测试，默认后端不会加载其签名密钥，也会拒绝直接发送。交易所官方只读接口继续提供账户、仓位和目录事实；数据库中的 `LIVE_ORDER_SEND` 初始仍为 `DISABLED`
 - 资金边界：`capital.py` 提供 SHADOW/TESTNET Mock 提交和自动候选计算；`notilt.py` 通过官方 `@notilt/sdk` 固定支持 Ethereum、BNB Smart Chain、Arbitrum One，只读取官方部署/Registry/Vault、生成并持久化 `{chainId,to,data,value}` 未签名交易，并从可信生产 RPC 校验发送者、目标、函数、参数、事件、区块时间和逐链确认深度。服务没有 NoTilt 私钥字段，不签名、不广播，也不暴露 owner、白名单管理、Panic 或 Full Exit 能力；真实 `CAPITAL_TRANSFER` 与两个自动资金 Gate 均保持 `DISABLED`
 
 正式身份源按冻结决策使用托管 IdP 与 Passkey，但外部 IdP 尚未接入。本地/测试环境可显式启用仅识别已存在内部用户的 Mock 会话和 Mock step-up；生产环境硬拒绝启用 Mock 身份。Perptape 需单独配置平台 API Key；连续模式还必须显式启用 `TRADING_PERPTAPE_WEBSOCKET_ENABLED`。启用后只连接官方 `wss://perptape.com/ws/v1/alerts`，WebSocket 是实时主通道，`GET /api/v1/breakouts` 仅用于启动快照、周期对账、断线/序列缺口回补和短字段补全；未配置时机会入口明确返回不可用。
@@ -55,7 +57,7 @@ Binance TESTNET 订单还必须单独配置 `TRADING_BINANCE_TESTNET_ORDER_SEND_
 
 Hyperliquid Core 默认使用 `TRADING_HYPERLIQUID_ACCOUNT_ADDRESS` 指定的主账户；若只配置 API Wallet，系统通过官方 `userRole` 解析所属主账户。只有显式设置 `TRADING_HYPERLIQUID_SUBACCOUNT_ADDRESS` 时，事实与动作才切换到子账户并在 Exchange 请求携带 `vaultAddress`。只读同步必须开启 `TRADING_HYPERLIQUID_READ_ONLY_ENABLED=true`；LIVE 还必须同时设置 `TRADING_HYPERLIQUID_LIVE_ORDER_SEND_ENABLED=true`、本地 API Wallet 私钥和数据库 `LIVE_ORDER_SEND` Gate。私钥只从运行环境读取且不写入仓库或日志。2026-07-31 的最小主网实证验证了主账户解析、显式价格 IOC、稳定 cloid 幂等、fencing、trigger 保护、退出、保护取消、对账、PnL 和最终空仓；实证结束后 Gate 已关闭。
 
-NoTilt 只保存公开 whitelist agent 与逐链 Vault 地址。配置 `TRADING_NOTILT_ENABLED=true` 后，可查询 Registry assignment；只有相应 `TRADING_NOTILT_*_VAULT_ADDRESS` 已配置、官方 Vault 身份匹配、事实和 USD 估值新鲜时才写入 LIVE 资金事实。Vault、Binance 和 Hyperliquid 的已确认 USD 净值合并展示并进入同环境管理资本上限；源端预留从管理资本扣除，未知或过期来源使新增风险 fail closed。当前 Arbitrum assignment 尚未激活且未提供 Vault 地址，因此资金中心把 Vault 标记为缺失，不能生成划转计划。即使条件齐备，LIVE 计划仍要求两名不同 Treasury Reviewer、短期授权、空仓/无订单/对账门和显式 `CAPITAL_TRANSFER` Gate；计划跨重启保持一致，重复回执幂等且 tx hash 不能跨划转复用。Vault 释放请求按授权最小净到账构造，gross 只作为净额加费用的源端上限；超出费用授权时只能进入人工处理并生成取消计划。最终签名与广播必须在独立钱包完成。
+NoTilt 只保存公开 whitelist agent 与逐链 Vault 地址。配置 `TRADING_NOTILT_ENABLED=true` 后，可查询 Registry assignment；只有相应 `TRADING_NOTILT_*_VAULT_ADDRESS` 已配置、官方 Vault 身份匹配、事实和 USD 估值新鲜时才写入 LIVE 资金事实。Vault、Binance 和 Hyperliquid 的已确认 USD 净值合并展示；任一必需来源未知或过期时总净值和新增风险均 fail closed。当前受信 Registry assignment 尚未激活，且缺少可验证的生产 Vault scope，因此资金中心把 Vault 标记为缺失，不能生成可执行计划。四条直接路径只会在可信 Arbitrum/USDC 目录、授权自有地址、白名单、限额、延迟和实时预算全部通过后构建受限未签名请求；Binance→Vault 还需要受限提现 Adapter，Hyperliquid→Vault 保持“合约→授权自有地址→NoTilt deposit”两段路径。服务不读取钱包秘密、不签名、不广播，最终动作只能在独立人控钱包逐笔确认；`CAPITAL_TRANSFER` Gate 仍保持关闭。
 
 只读同步进程默认关闭。启用时必须配置独立 `runtime-sync` SERVICE principal、两个内部账户 ID 和明确的读开关；每个周期独立刷新 Perptape、两个交易账户及已配置 Vault。某个来源失败不会伪造零值，旧事实会按风险政策自然转为陈旧；WebSocket 回补失败时，现有 `perptape_feeds` 共享快照会原地降级而不是继续声称 `READY`。周期只有在本周期 Binance、Hyperliquid、Vault 三类资本来源均明确成功且 LIVE 净值完整时才报告 `ready_for_new_risk=true`；`SKIPPED` 不能被旧快照掩盖。Perptape 仍是机会源，不单独决定资本 readiness。WebSocket 重连采用有上限的指数退避，`SIGINT`/`SIGTERM` 可中断等待；回滚或紧急停止只需关闭 `TRADING_PERPTAPE_WEBSOCKET_ENABLED` 并停止/重启 worker，HTTPS 周期同步和数据库 Schema 不变。2026-07-31 的一次真实 `--once` 验收读取 200 个 Perptape 候选，并同步 Binance Unified Account 与 Hyperliquid 主账户；由于尚无 Vault 地址，报告明确为 `ready_for_new_risk=false`。
 
@@ -100,8 +102,9 @@ TRADING_TELEGRAM_INTERNAL_USERNAME=kelly_oooo
 
 启动后用 `@kelly_oooo` 在 Bot 私聊发送 `/start`。首次绑定校验白名单用户名，成功后只认
 Telegram 数字私聊 ID，并在每次按钮操作时重新加载 Trading RBAC、对象版本、有效期和幂等
-状态。群聊、转发或另一账号点击均拒绝。提案批准仍跳到 Web 完成 step-up；Telegram
-本身不等于强认证。`TRADING_PUBLIC_BASE_URL=http://127.0.0.1:8000` 只适合在同一台电脑
+状态。群聊、转发或另一账号点击均拒绝。review-only 模式可在私聊中对冻结提案执行两步
+批准/拒绝，并写回统一审计；创建者自审与独立审核限制不变。管理员的“创建并直接批准”仍只在
+Web 中提供二次确认和审计。Telegram 本身不等于强认证。`TRADING_PUBLIC_BASE_URL=http://127.0.0.1:8014` 只适合在同一台电脑
 打开审核链接；手机访问需要一个能到达本机的受控 HTTPS 地址。
 
 ## 文档与参考材料边界

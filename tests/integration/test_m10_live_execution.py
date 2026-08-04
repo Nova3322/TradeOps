@@ -432,6 +432,7 @@ def application(
         allow_mock_identity=True,
         session_signing_secret="live-integration-signing-secret-is-long-enough",  # noqa: S106
         public_base_url="http://test",
+        execution_backend="DIRECT_LEGACY",
         binance_live_order_send_enabled=venue == "BINANCE",
         binance_api_key="fixture-key",
         binance_api_secret="fixture-secret",  # noqa: S106
@@ -837,7 +838,7 @@ async def exercise_perptape_binance_live_lifecycle(database: Database) -> None:
                 "quantity": "2",
                 "initial_quantity": "1",
                 "max_risk": "5",
-                "expires_in_minutes": 120,
+                "expires_in_minutes": 480,
                 "invalidation_price": "9",
                 "allow_auto_add": True,
                 "requested_adds": 1,

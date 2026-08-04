@@ -10,9 +10,10 @@ from collections.abc import Callable
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal, InvalidOperation
-from typing import Any
+from typing import Any, TypeGuard
 
 from trading_control_plane.domain import DomainRejected
+from trading_control_plane.freqtrade import parse_hip3_dexes
 
 JsonValue = dict[str, Any] | list[Any] | str
 JsonFetcher = Callable[[str, dict[str, Any], float], JsonValue]
@@ -22,6 +23,37 @@ OFFICIAL_INFO_HOSTS = {
 }
 HISTORY_WINDOW = timedelta(days=30)
 ADDRESS_PATTERN = re.compile(r"^0x[0-9a-fA-F]{40}$")
+CORE_SYMBOL_PATTERN = re.compile(r"^[A-Za-z0-9]{1,32}$")
+HIP3_SYMBOL_PATTERN = re.compile(
+    r"^(?P<dex>[a-z0-9][a-z0-9_-]{0,31}):(?P<coin>[A-Za-z0-9]{1,32})$"
+)
+
+
+def _is_core_symbol(value: object) -> TypeGuard[str]:
+    return isinstance(value, str) and CORE_SYMBOL_PATTERN.fullmatch(value) is not None
+
+
+def _normalize_market_symbol(raw: object, *, dex: str) -> str:
+    if not isinstance(raw, str):
+        raise DomainRejected(
+            "HYPERLIQUID_RESPONSE_INVALID",
+            "Hyperliquid market symbol is not a string",
+        )
+    if not dex:
+        if not _is_core_symbol(raw):
+            raise DomainRejected(
+                "HYPERLIQUID_RESPONSE_INVALID",
+                "Hyperliquid Core market symbol is invalid",
+            )
+        return raw
+    prefix = f"{dex}:"
+    coin = raw[len(prefix) :] if raw.startswith(prefix) else raw
+    if not _is_core_symbol(coin):
+        raise DomainRejected(
+            "HYPERLIQUID_RESPONSE_INVALID",
+            "Hyperliquid HIP-3 market symbol is invalid",
+        )
+    return f"{dex}:{coin}"
 
 
 def resolve_hyperliquid_main_account(
@@ -74,14 +106,16 @@ def _default_fetcher(url: str, payload: dict[str, Any], timeout: float) -> JsonV
     )
     body: bytes | None = None
     last_error: BaseException | None = None
-    for attempt in range(6):
+    # Four bounded attempts keep a full probe below roughly 25 seconds while
+    # still tolerating Hyperliquid's short 429 bursts.
+    for attempt in range(4):
         try:
             with urllib.request.urlopen(request, timeout=timeout) as response:  # noqa: S310
                 body = response.read()
             break
         except urllib.error.HTTPError as exc:
             last_error = exc
-            if exc.code != 429 or attempt == 5:
+            if exc.code != 429 or attempt == 3:
                 break
             retry_after = exc.headers.get("Retry-After")
             try:
@@ -95,8 +129,16 @@ def _default_fetcher(url: str, payload: dict[str, Any], timeout: float) -> JsonV
             time.sleep(delay)
         except (urllib.error.URLError, TimeoutError) as exc:
             last_error = exc
+            if attempt < 2:
+                time.sleep(0.25 * 2**attempt)
+                continue
             break
     if body is None:
+        if isinstance(last_error, urllib.error.HTTPError) and last_error.code == 429:
+            raise DomainRejected(
+                "HYPERLIQUID_RATE_LIMITED",
+                "Hyperliquid Info API remained rate limited after bounded retries",
+            ) from last_error
         raise DomainRejected(
             "HYPERLIQUID_READ_ONLY_UNAVAILABLE",
             "Hyperliquid Info API is unavailable",
@@ -254,7 +296,7 @@ class HyperliquidReadOnlySnapshot:
 
 
 class HyperliquidReadOnlyClient:
-    """Narrow Hyperliquid Core reader; HIP-3 and Exchange actions are absent."""
+    """Official Info API reader for Core facts and configured HIP-3 market catalogs."""
 
     def __init__(
         self,
@@ -262,16 +304,18 @@ class HyperliquidReadOnlyClient:
         base_url: str,
         account_address: str | None,
         dex: str = "",
+        hip3_dexes: tuple[str, ...] = (),
         fetcher: JsonFetcher = _default_fetcher,
     ) -> None:
         parsed = urllib.parse.urlparse(base_url)
         if parsed.scheme != "https" or parsed.hostname not in OFFICIAL_INFO_HOSTS:
             raise ValueError("Hyperliquid read-only base URL must use an official API host")
         if dex:
-            raise ValueError("this adapter supports Hyperliquid Core only; dex must be empty")
+            raise ValueError("the Core reader requires dex to remain empty")
         self._base_url = base_url.rstrip("/")
         self._host = parsed.hostname
         self._account_address = account_address
+        self._hip3_dexes = parse_hip3_dexes(",".join(hip3_dexes))
         self._fetcher = fetcher
         self._account_abstraction: str | None = None
 
@@ -284,14 +328,68 @@ class HyperliquidReadOnlyClient:
         return "TESTNET" if self._host == "api.hyperliquid-testnet.xyz" else "LIVE"
 
     def read_instrument(self, symbol: str) -> HyperliquidInstrument:
-        if not symbol or symbol != symbol.upper() or not re.fullmatch(r"[A-Z0-9]+", symbol):
+        dex = self._symbol_dex(symbol)
+        meta_contexts = self._info({"type": "metaAndAssetCtxs", "dex": dex})
+        instrument, _mark_price = self._parse_instrument(meta_contexts, symbol, dex=dex)
+        return instrument
+
+    def _symbol_dex(self, symbol: str) -> str:
+        if _is_core_symbol(symbol):
+            return ""
+        match = HIP3_SYMBOL_PATTERN.fullmatch(symbol)
+        if match is None or match.group("dex") not in self._hip3_dexes:
             raise DomainRejected(
                 "HYPERLIQUID_SYMBOL_INVALID",
-                "Hyperliquid Core symbol must be uppercase alphanumeric",
+                "Hyperliquid symbol must be Core or belong to an explicitly configured HIP-3 DEX",
             )
-        meta_contexts = self._info({"type": "metaAndAssetCtxs", "dex": ""})
-        instrument, _mark_price = self._parse_instrument(meta_contexts, symbol)
-        return instrument
+        return match.group("dex")
+
+    def read_active_instruments(self) -> tuple[HyperliquidInstrument, ...]:
+        """Read Core plus explicitly allowed HIP-3 catalogs from the official Info API."""
+
+        instruments: list[HyperliquidInstrument] = []
+        for dex in ("", *self._hip3_dexes):
+            instruments.extend(self._read_active_instruments_for_dex(dex))
+        symbols = [instrument.symbol for instrument in instruments]
+        if len(symbols) != len(set(symbols)):
+            raise DomainRejected(
+                "HYPERLIQUID_RESPONSE_INVALID",
+                "Core and HIP-3 active catalogs contain duplicate instrument identities",
+            )
+        return tuple(sorted(instruments, key=lambda item: item.symbol))
+
+    def _read_active_instruments_for_dex(self, dex: str) -> list[HyperliquidInstrument]:
+        meta_contexts = self._info({"type": "metaAndAssetCtxs", "dex": dex})
+        if not isinstance(meta_contexts, list) or len(meta_contexts) != 2:
+            raise DomainRejected(
+                "HYPERLIQUID_RESPONSE_INVALID", "metaAndAssetCtxs response is invalid"
+            )
+        meta = _require_dict(meta_contexts[0], "meta")
+        collateral_token = meta.get("collateralToken")
+        if dex and collateral_token not in {None, 0}:
+            raise DomainRejected(
+                "HYPERLIQUID_HIP3_COLLATERAL_UNSUPPORTED",
+                "configured HIP-3 DEX does not use the worker's USDC collateral scope",
+            )
+        universe = _require_dict_list(meta.get("universe"), "meta universe")
+        contexts = _require_dict_list(meta_contexts[1], "asset contexts")
+        if not universe or len(universe) != len(contexts):
+            raise DomainRejected(
+                "HYPERLIQUID_RESPONSE_INVALID", "active perpetual catalog is invalid"
+            )
+        result: list[HyperliquidInstrument] = []
+        for index, item in enumerate(universe):
+            if bool(item.get("isDelisted", False)):
+                continue
+            raw_symbol = item.get("name")
+            if not isinstance(raw_symbol, str):
+                raise DomainRejected(
+                    "HYPERLIQUID_RESPONSE_INVALID",
+                    "active perpetual catalog symbols are invalid",
+                )
+            symbol = _normalize_market_symbol(raw_symbol, dex=dex)
+            result.append(self._parse_instrument_at(meta_contexts, index, symbol)[0])
+        return result
 
     def _info(self, payload: dict[str, Any]) -> JsonValue:
         return self._fetcher(f"{self._base_url}/info", payload, 5.0)
@@ -321,15 +419,11 @@ class HyperliquidReadOnlyClient:
                 "HYPERLIQUID_READ_ONLY_NOT_CONFIGURED",
                 "a valid selected Hyperliquid account address is required",
             )
-        if not symbol or symbol != symbol.upper() or not re.fullmatch(r"[A-Z0-9]+", symbol):
-            raise DomainRejected(
-                "HYPERLIQUID_SYMBOL_INVALID",
-                "Hyperliquid Core symbol must be uppercase alphanumeric",
-            )
+        dex = self._symbol_dex(symbol)
         assert self._account_address is not None
-        meta_contexts = self._info({"type": "metaAndAssetCtxs", "dex": ""})
+        meta_contexts = self._info({"type": "metaAndAssetCtxs", "dex": dex})
         clearinghouse = self._info(
-            {"type": "clearinghouseState", "user": self._account_address, "dex": ""}
+            {"type": "clearinghouseState", "user": self._account_address, "dex": dex}
         )
         abstraction = self._abstraction()
         spot_state = (
@@ -339,7 +433,7 @@ class HyperliquidReadOnlyClient:
         )
 
         orders = self._info(
-            {"type": "frontendOpenOrders", "user": self._account_address, "dex": ""}
+            {"type": "frontendOpenOrders", "user": self._account_address, "dex": dex}
         )
         start_time_ms = int((now - HISTORY_WINDOW).timestamp() * 1_000)
         fills = self._info(
@@ -357,27 +451,27 @@ class HyperliquidReadOnlyClient:
                 "startTime": start_time_ms,
             }
         )
-        instrument, mark_price = self._parse_instrument(meta_contexts, symbol)
-        position, equity = self._parse_account(clearinghouse, symbol, mark_price, now)
+        instrument, mark_price = self._parse_instrument(meta_contexts, symbol, dex=dex)
+        position, equity = self._parse_account(clearinghouse, symbol, mark_price, now, dex=dex)
         if spot_state is not None:
             equity = self._parse_unified_equity(spot_state, now)
-        parsed_orders = self._parse_orders(orders, symbol, now)
+        parsed_orders = self._parse_orders(orders, symbol, now, dex=dex)
         return HyperliquidReadOnlySnapshot(
             symbol=symbol,
             observed_at=now,
             instrument=instrument,
             orders=parsed_orders,
-            fills=self._parse_fills(fills, symbol, now),
+            fills=self._parse_fills(fills, symbol, now, dex=dex),
             position=position,
             equity=equity,
-            funding=self._parse_funding(funding, symbol, now),
+            funding=self._parse_funding(funding, symbol, now, dex=dex),
             protection=self._select_protection(parsed_orders, position),
         )
 
     def read_account_snapshots(
         self, symbols: tuple[str, ...], *, now: datetime
     ) -> tuple[HyperliquidReadOnlySnapshot, ...]:
-        """Project every covered Core symbol from one complete clearinghouse response."""
+        """Project configured Core and HIP-3 symbols from their venue-scoped responses."""
 
         configured = self._validated_symbols(symbols)
         if not self.configured:
@@ -386,42 +480,52 @@ class HyperliquidReadOnlyClient:
                 "a valid selected Hyperliquid account address is required",
             )
         assert self._account_address is not None
-        meta_contexts = self._info({"type": "metaAndAssetCtxs", "dex": ""})
-        clearinghouse = self._info(
-            {"type": "clearinghouseState", "user": self._account_address, "dex": ""}
-        )
         abstraction = self._abstraction()
         spot_state = (
             self._info({"type": "spotClearinghouseState", "user": self._account_address})
             if abstraction in {"unifiedAccount", "portfolioMargin"}
             else None
         )
-        orders = self._info(
-            {"type": "frontendOpenOrders", "user": self._account_address, "dex": ""}
-        )
-        target_symbols = (
-            configured | self._active_position_symbols(clearinghouse) | self._order_symbols(orders)
-        )
         current_snapshots: list[HyperliquidReadOnlySnapshot] = []
-        for symbol in sorted(target_symbols):
-            instrument, mark_price = self._parse_instrument(meta_contexts, symbol)
-            position, equity = self._parse_account(clearinghouse, symbol, mark_price, now)
-            if spot_state is not None:
-                equity = self._parse_unified_equity(spot_state, now)
-            parsed_orders = self._parse_orders(orders, symbol, now)
-            current_snapshots.append(
-                HyperliquidReadOnlySnapshot(
-                    symbol=symbol,
-                    observed_at=now,
-                    instrument=instrument,
-                    orders=parsed_orders,
-                    fills=(),
-                    position=position,
-                    equity=equity,
-                    funding=(),
-                    protection=self._select_protection(parsed_orders, position),
-                )
+        configured_by_dex: dict[str, set[str]] = {}
+        for symbol in configured:
+            configured_by_dex.setdefault(self._symbol_dex(symbol), set()).add(symbol)
+        for dex, scoped_symbols in sorted(configured_by_dex.items()):
+            meta_contexts = self._info({"type": "metaAndAssetCtxs", "dex": dex})
+            clearinghouse = self._info(
+                {"type": "clearinghouseState", "user": self._account_address, "dex": dex}
             )
+            orders = self._info(
+                {"type": "frontendOpenOrders", "user": self._account_address, "dex": dex}
+            )
+            target_symbols = (
+                scoped_symbols
+                | self._active_position_symbols(clearinghouse, dex=dex)
+                | self._order_symbols(orders, dex=dex)
+            )
+            for symbol in sorted(target_symbols):
+                instrument, mark_price = self._parse_instrument(
+                    meta_contexts, symbol, dex=dex
+                )
+                position, equity = self._parse_account(
+                    clearinghouse, symbol, mark_price, now, dex=dex
+                )
+                if spot_state is not None:
+                    equity = self._parse_unified_equity(spot_state, now)
+                parsed_orders = self._parse_orders(orders, symbol, now, dex=dex)
+                current_snapshots.append(
+                    HyperliquidReadOnlySnapshot(
+                        symbol=symbol,
+                        observed_at=now,
+                        instrument=instrument,
+                        orders=parsed_orders,
+                        fills=(),
+                        position=position,
+                        equity=equity,
+                        funding=(),
+                        protection=self._select_protection(parsed_orders, position),
+                    )
+                )
         start_time_ms = int((now - HISTORY_WINDOW).timestamp() * 1_000)
         try:
             fills = self._info(
@@ -449,8 +553,18 @@ class HyperliquidReadOnlyClient:
             snapshots = [
                 replace(
                     snapshot,
-                    fills=self._parse_fills(fill_rows, snapshot.symbol, now),
-                    funding=self._parse_funding(funding_rows, snapshot.symbol, now),
+                    fills=self._parse_fills(
+                        fill_rows,
+                        snapshot.symbol,
+                        now,
+                        dex=self._symbol_dex(snapshot.symbol),
+                    ),
+                    funding=self._parse_funding(
+                        funding_rows,
+                        snapshot.symbol,
+                        now,
+                        dex=self._symbol_dex(snapshot.symbol),
+                    ),
                 )
                 for snapshot in current_snapshots
             ]
@@ -460,21 +574,19 @@ class HyperliquidReadOnlyClient:
             )
         return tuple(snapshots)
 
-    @staticmethod
-    def _validated_symbols(symbols: tuple[str, ...]) -> set[str]:
+    def _validated_symbols(self, symbols: tuple[str, ...]) -> set[str]:
         result = set(symbols)
-        if not result or any(
-            not symbol or symbol != symbol.upper() or not re.fullmatch(r"[A-Z0-9]+", symbol)
-            for symbol in result
-        ):
+        if not result:
             raise DomainRejected(
                 "HYPERLIQUID_SYMBOL_INVALID",
-                "Hyperliquid Core symbol must be uppercase alphanumeric",
+                "at least one configured Hyperliquid symbol is required",
             )
+        for symbol in result:
+            self._symbol_dex(symbol)
         return result
 
     @staticmethod
-    def _active_position_symbols(raw: JsonValue) -> set[str]:
+    def _active_position_symbols(raw: JsonValue, *, dex: str = "") -> set[str]:
         state = _require_dict(raw, "clearinghouseState")
         wrappers = _require_dict_list(state.get("assetPositions", []), "assetPositions")
         active: set[str] = set()
@@ -483,14 +595,8 @@ class HyperliquidReadOnlyClient:
             if wrapper.get("type", "oneWay") != "oneWay":
                 raise DomainRejected("HYPERLIQUID_RESPONSE_INVALID", "position type is unsupported")
             position = _require_dict(wrapper.get("position"), "position")
-            symbol = position.get("coin")
-            if (
-                not isinstance(symbol, str)
-                or not symbol
-                or symbol != symbol.upper()
-                or not re.fullmatch(r"[A-Z0-9]+", symbol)
-                or symbol in seen
-            ):
+            symbol = _normalize_market_symbol(position.get("coin"), dex=dex)
+            if symbol in seen:
                 raise DomainRejected(
                     "HYPERLIQUID_RESPONSE_INVALID", "position symbol is invalid or duplicated"
                 )
@@ -500,22 +606,17 @@ class HyperliquidReadOnlyClient:
         return active
 
     @staticmethod
-    def _order_symbols(raw: JsonValue) -> set[str]:
+    def _order_symbols(raw: JsonValue, *, dex: str = "") -> set[str]:
         result: set[str] = set()
         for order in _require_dict_list(raw, "frontendOpenOrders"):
-            symbol = order.get("coin")
-            if (
-                not isinstance(symbol, str)
-                or not symbol
-                or symbol != symbol.upper()
-                or not re.fullmatch(r"[A-Z0-9]+", symbol)
-            ):
-                raise DomainRejected("HYPERLIQUID_RESPONSE_INVALID", "order symbol is invalid")
+            symbol = _normalize_market_symbol(order.get("coin"), dex=dex)
             result.add(symbol)
         return result
 
     @staticmethod
-    def _parse_instrument(raw: JsonValue, symbol: str) -> tuple[HyperliquidInstrument, Decimal]:
+    def _parse_instrument(
+        raw: JsonValue, symbol: str, *, dex: str = ""
+    ) -> tuple[HyperliquidInstrument, Decimal]:
         if not isinstance(raw, list) or len(raw) != 2:
             raise DomainRejected(
                 "HYPERLIQUID_RESPONSE_INVALID", "metaAndAssetCtxs response is invalid"
@@ -523,11 +624,35 @@ class HyperliquidReadOnlyClient:
         meta = _require_dict(raw[0], "meta")
         universe = _require_dict_list(meta.get("universe"), "meta universe")
         contexts = _require_dict_list(raw[1], "asset contexts")
-        index = next((i for i, item in enumerate(universe) if item.get("name") == symbol), None)
+        index = next(
+            (
+                i
+                for i, item in enumerate(universe)
+                if _normalize_market_symbol(item.get("name"), dex=dex) == symbol
+            ),
+            None,
+        )
         if index is None or index >= len(contexts):
             raise DomainRejected(
                 "HYPERLIQUID_INSTRUMENT_UNAVAILABLE",
-                "Hyperliquid Core perpetual instrument is unavailable",
+                "Hyperliquid perpetual instrument is unavailable in the selected market scope",
+            )
+        return HyperliquidReadOnlyClient._parse_instrument_at(raw, index, symbol)
+
+    @staticmethod
+    def _parse_instrument_at(
+        raw: JsonValue, index: int, symbol: str
+    ) -> tuple[HyperliquidInstrument, Decimal]:
+        if not isinstance(raw, list) or len(raw) != 2:
+            raise DomainRejected(
+                "HYPERLIQUID_RESPONSE_INVALID", "metaAndAssetCtxs response is invalid"
+            )
+        meta = _require_dict(raw[0], "meta")
+        universe = _require_dict_list(meta.get("universe"), "meta universe")
+        contexts = _require_dict_list(raw[1], "asset contexts")
+        if index < 0 or index >= len(universe) or index >= len(contexts):
+            raise DomainRejected(
+                "HYPERLIQUID_RESPONSE_INVALID", "instrument metadata index is invalid"
             )
         item = universe[index]
         try:
@@ -556,7 +681,7 @@ class HyperliquidReadOnlyClient:
 
     @staticmethod
     def _parse_account(
-        raw: JsonValue, symbol: str, mark_price: Decimal, now: datetime
+        raw: JsonValue, symbol: str, mark_price: Decimal, now: datetime, *, dex: str = ""
     ) -> tuple[HyperliquidPosition, HyperliquidEquity]:
         state = _require_dict(raw, "clearinghouseState")
         summary = _require_dict(state.get("marginSummary"), "marginSummary")
@@ -565,7 +690,10 @@ class HyperliquidReadOnlyClient:
         position_data: dict[str, Any] | None = None
         for wrapper in positions:
             candidate = wrapper.get("position")
-            if isinstance(candidate, dict) and candidate.get("coin") == symbol:
+            if (
+                isinstance(candidate, dict)
+                and _normalize_market_symbol(candidate.get("coin"), dex=dex) == symbol
+            ):
                 position_data = candidate
                 break
         if position_data is None:
@@ -620,10 +748,12 @@ class HyperliquidReadOnlyClient:
         )
 
     @staticmethod
-    def _parse_orders(raw: JsonValue, symbol: str, now: datetime) -> tuple[HyperliquidOrder, ...]:
+    def _parse_orders(
+        raw: JsonValue, symbol: str, now: datetime, *, dex: str = ""
+    ) -> tuple[HyperliquidOrder, ...]:
         result: list[HyperliquidOrder] = []
         for item in _require_dict_list(raw, "frontendOpenOrders"):
-            if item.get("coin") != symbol:
+            if _normalize_market_symbol(item.get("coin"), dex=dex) != symbol:
                 continue
             try:
                 order_id = str(item["oid"])
@@ -663,7 +793,10 @@ class HyperliquidReadOnlyClient:
         return tuple(result)
 
     @staticmethod
-    def _parse_fills(raw: JsonValue, symbol: str, now: datetime) -> tuple[HyperliquidFill, ...]:
+    def _parse_fills(
+        raw: JsonValue, symbol: str, now: datetime, *, dex: str = ""
+    ) -> tuple[HyperliquidFill, ...]:
+        del dex  # History is global; HIP-3 identities must remain fully qualified.
         result: list[HyperliquidFill] = []
         for item in _require_dict_list(raw, "userFills"):
             if item.get("coin") != symbol:
@@ -695,12 +828,17 @@ class HyperliquidReadOnlyClient:
 
     @staticmethod
     def _parse_funding(
-        raw: JsonValue, symbol: str, now: datetime
+        raw: JsonValue, symbol: str, now: datetime, *, dex: str = ""
     ) -> tuple[HyperliquidFunding, ...]:
+        del dex  # History is global; HIP-3 identities must remain fully qualified.
         result: list[HyperliquidFunding] = []
         for item in _require_dict_list(raw, "userFunding"):
             delta = item.get("delta")
-            if not isinstance(delta, dict) or delta.get("coin") != symbol:
+            if not isinstance(delta, dict):
+                raise DomainRejected(
+                    "HYPERLIQUID_RESPONSE_INVALID", "funding delta is invalid"
+                )
+            if delta.get("coin") != symbol:
                 continue
             paid_at = _time(item.get("time", 0), now)
             payment_id = str(

@@ -14,7 +14,7 @@ from uuid import UUID, uuid4
 from sqlalchemy import delete, func, select, text
 from sqlalchemy.orm import Session
 
-from trading_control_plane.binance import BinanceReadOnlySnapshot
+from trading_control_plane.binance import BinanceInstrument, BinanceReadOnlySnapshot
 from trading_control_plane.binance_execution import (
     BinanceTestnetOrder,
     BinanceTestnetOrderCommand,
@@ -24,6 +24,7 @@ from trading_control_plane.binance_execution import (
 from trading_control_plane.capital import (
     CapitalTransferCommand,
     CapitalTransferSubmission,
+    DirectCapitalPlan,
     evaluate_capital_automation,
 )
 from trading_control_plane.database import Database
@@ -33,6 +34,7 @@ from trading_control_plane.domain import (
     CapabilityStatus,
     CapitalDirection,
     CapitalTransferStatus,
+    DirectCapitalPath,
     Direction,
     DomainRejected,
     EconomicFill,
@@ -65,7 +67,13 @@ from trading_control_plane.domain import (
     evaluate_risk,
     select_target_position,
 )
-from trading_control_plane.hyperliquid import HyperliquidReadOnlySnapshot
+from trading_control_plane.freqtrade import (
+    FreqtradeEntryCommand,
+    FreqtradeExitCommand,
+    FreqtradeTrade,
+    freqtrade_pair,
+)
+from trading_control_plane.hyperliquid import HyperliquidInstrument, HyperliquidReadOnlySnapshot
 from trading_control_plane.hyperliquid_execution import (
     HyperliquidTestnetOrder,
     HyperliquidTestnetOrderCommand,
@@ -88,12 +96,15 @@ from trading_control_plane.models import (
     CapitalAutomationPolicy,
     CapitalTransfer,
     CommandReceipt,
+    DirectCapitalConfiguration,
+    DirectCapitalOperation,
     FundingPayment,
     Instrument,
     OrderIntent,
     PerptapeFeed,
     Position,
     Proposal,
+    ProposalDefaultConfig,
     ProtectionOrder,
     ReconciliationRun,
     RiskControlChangeRequest,
@@ -101,6 +112,7 @@ from trading_control_plane.models import (
     RiskPolicy,
     RiskReservation,
     RoleAssignment,
+    RuntimeSourceHealth,
     SenderLease,
     TradingAuthorization,
     TransferAuthorization,
@@ -172,7 +184,16 @@ ROLE_ACTIONS: dict[Role, frozenset[str]] = {
     Role.PROPOSER: frozenset(
         {"view", "opportunity.view", "proposal.view", "proposal.create", "proposal.submit"}
     ),
-    Role.REVIEWER: frozenset({"view", "proposal.view", "proposal.review", "risk.restore.review"}),
+    Role.REVIEWER: frozenset(
+        {
+            "view",
+            "proposal.view",
+            "proposal.review",
+            "system.view",
+            "risk.restore.review",
+            "risk.restore.execute",
+        }
+    ),
     Role.OPERATOR: frozenset(
         {
             "view",
@@ -188,6 +209,7 @@ ROLE_ACTIONS: dict[Role, frozenset[str]] = {
             "reconcile",
             "sender.manage",
             "risk.tighten",
+            "risk.restore.request",
         }
     ),
     Role.TREASURY_ADMIN: frozenset(
@@ -279,8 +301,17 @@ def _scope_parts(execution_scope: str) -> tuple[ExecutionEnvironment, str, str]:
 class TradingService:
     """Single transactional entry point for the pre-production SHADOW trading core."""
 
-    def __init__(self, database: Database) -> None:
+    def __init__(
+        self,
+        database: Database,
+        *,
+        authoritative_live_accounts: dict[str, str] | None = None,
+    ) -> None:
         self.database = database
+        self.authoritative_live_accounts = {
+            venue.upper(): account_id
+            for venue, account_id in (authoritative_live_accounts or {}).items()
+        }
 
     def _audit(
         self,
@@ -375,8 +406,6 @@ class TradingService:
         ).all()
         for assignment in assignments:
             role = Role(assignment.role)
-            if action.startswith("capital.") and role is Role.SYSTEM_ADMIN:
-                continue
             if action not in ROLE_ACTIONS[role] and "*" not in ROLE_ACTIONS[role]:
                 continue
             if assignment.account_scope is not None and assignment.account_scope != account_id:
@@ -660,6 +689,66 @@ class TradingService:
             )
             return principal.user_id
 
+    def record_runtime_source_health(
+        self,
+        actor_id: UUID,
+        sources: dict[str, dict[str, Any]],
+        *,
+        now: datetime,
+    ) -> None:
+        with self.database.session_factory() as session, session.begin():
+            principal = session.get(User, actor_id)
+            if (
+                principal is None
+                or not principal.active
+                or principal.principal_type != PrincipalType.SERVICE.value
+            ):
+                _reject(
+                    "SERVICE_PRINCIPAL_REQUIRED",
+                    "runtime source health requires an active service principal",
+                )
+            for source_name, result in sources.items():
+                status = str(result.get("status", ""))
+                error_code = result.get("error_code")
+                items_observed = int(result.get("items_observed", 0))
+                if status not in {"SUCCESS", "FAILED", "SKIPPED"}:
+                    _reject(
+                        "RUNTIME_HEALTH_STATUS_INVALID",
+                        "runtime source health status is invalid",
+                    )
+                if error_code is not None and (
+                    not isinstance(error_code, str)
+                    or len(error_code) > 120
+                    or not error_code.replace("_", "").replace(":", "").isalnum()
+                ):
+                    _reject(
+                        "RUNTIME_HEALTH_ERROR_INVALID",
+                        "runtime source health error code is invalid",
+                    )
+                if items_observed < 0:
+                    _reject(
+                        "RUNTIME_HEALTH_ITEMS_INVALID",
+                        "runtime source item count cannot be negative",
+                    )
+                current = session.get(RuntimeSourceHealth, source_name)
+                if current is None:
+                    session.add(
+                        RuntimeSourceHealth(
+                            source_name=source_name,
+                            status=status,
+                            items_observed=items_observed,
+                            error_code=error_code,
+                            checked_at=now,
+                            updated_by=actor_id,
+                        )
+                    )
+                else:
+                    current.status = status
+                    current.items_observed = items_observed
+                    current.error_code = error_code
+                    current.checked_at = now
+                    current.updated_by = actor_id
+
     def record_perptape_feed(
         self,
         actor_id: UUID,
@@ -908,6 +997,132 @@ class TradingService:
             )
             return instrument.instrument_id
 
+    def synchronize_active_venue_instruments(
+        self,
+        *,
+        actor_id: UUID,
+        account_id: str,
+        venue: str,
+        instruments: Sequence[BinanceInstrument | HyperliquidInstrument],
+        hip3_dexes: tuple[str, ...] = (),
+        now: datetime,
+    ) -> dict[str, int]:
+        """Replace one venue's active Catalog set from a complete official read-only snapshot."""
+
+        if venue not in {"BINANCE", "HYPERLIQUID"} or not instruments:
+            _reject("INSTRUMENT_CATALOG_INVALID", "official active instrument catalog is invalid")
+        symbols = [instrument.symbol for instrument in instruments]
+        for symbol in symbols:
+            freqtrade_pair(venue, symbol, hip3_dexes=hip3_dexes)
+        if len(symbols) != len(set(symbols)) or any(
+            not instrument.active
+            or not instrument.symbol
+            or instrument.tick_size <= 0
+            or instrument.lot_size <= 0
+            or instrument.minimum_notional < 0
+            or not instrument.quote_currency
+            or not instrument.collateral_currency
+            for instrument in instruments
+        ):
+            _reject("INSTRUMENT_CATALOG_INVALID", "official active instrument catalog is invalid")
+
+        with self.database.session_factory.begin() as session:
+            self._require_role(session, actor_id, "venue.record", account_id, venue)
+            existing = {
+                instrument.symbol: instrument
+                for instrument in session.scalars(
+                    select(Instrument).where(Instrument.venue == venue).with_for_update()
+                )
+            }
+            created = 0
+            refreshed = 0
+            unchanged = 0
+            for snapshot in instruments:
+                instrument = existing.get(snapshot.symbol)
+                desired = (
+                    snapshot.tick_size,
+                    snapshot.lot_size,
+                    snapshot.minimum_notional,
+                    Decimal(1),
+                    snapshot.quote_currency,
+                    snapshot.collateral_currency,
+                    True,
+                    True,
+                )
+                if instrument is None:
+                    instrument = Instrument(
+                        venue=venue,
+                        symbol=snapshot.symbol,
+                        tick_size=desired[0],
+                        lot_size=desired[1],
+                        minimum_notional=desired[2],
+                        contract_multiplier=desired[3],
+                        quote_currency=desired[4],
+                        collateral_currency=desired[5],
+                        active=desired[6],
+                        protection_supported=desired[7],
+                        updated_at=now,
+                    )
+                    session.add(instrument)
+                    created += 1
+                    continue
+                current = (
+                    instrument.tick_size,
+                    instrument.lot_size,
+                    instrument.minimum_notional,
+                    instrument.contract_multiplier,
+                    instrument.quote_currency,
+                    instrument.collateral_currency,
+                    instrument.active,
+                    instrument.protection_supported,
+                )
+                if current == desired:
+                    unchanged += 1
+                    continue
+                (
+                    instrument.tick_size,
+                    instrument.lot_size,
+                    instrument.minimum_notional,
+                    instrument.contract_multiplier,
+                    instrument.quote_currency,
+                    instrument.collateral_currency,
+                    instrument.active,
+                    instrument.protection_supported,
+                ) = desired
+                instrument.updated_at = now
+                refreshed += 1
+
+            active_symbols = set(symbols)
+            deactivated = 0
+            for symbol, instrument in existing.items():
+                if symbol not in active_symbols and instrument.active:
+                    instrument.active = False
+                    instrument.updated_at = now
+                    deactivated += 1
+
+            if created or refreshed or deactivated:
+                self._audit(
+                    session,
+                    actor_id=str(actor_id),
+                    event_type="INSTRUMENT_CATALOG_SYNCED",
+                    object_type="InstrumentCatalog",
+                    object_id=f"{venue}:active",
+                    reason=(
+                        f"official read-only catalog active={len(instruments)} created={created} "
+                        f"refreshed={refreshed} deactivated={deactivated} unchanged={unchanged}"
+                    ),
+                    correlation_id=uuid4(),
+                    object_version=1,
+                    now=now,
+                )
+            return {
+                "active": len(instruments),
+                "created": created,
+                "refreshed": refreshed,
+                "deactivated": deactivated,
+                "unchanged": unchanged,
+            }
+
     def set_risk_policy(
         self,
         *,
@@ -964,6 +1179,179 @@ class TradingService:
             )
             return policy.policy_id
 
+    def proposal_default_config(self, actor_id: UUID) -> dict[str, Any] | None:
+        with self.database.session_factory() as session:
+            self._require_role(session, actor_id, "proposal.create")
+            config = session.scalar(
+                select(ProposalDefaultConfig).where(ProposalDefaultConfig.active)
+            )
+            if config is None:
+                return None
+            updater = session.get(User, config.updated_by)
+            return self._proposal_default_payload(config, updater)
+
+    @staticmethod
+    def _proposal_default_payload(
+        config: ProposalDefaultConfig,
+        updater: User | None,
+    ) -> dict[str, Any]:
+        return {
+            "config_id": str(config.config_id),
+            "version": config.version,
+            "environment": config.environment,
+            "account_id": config.account_id,
+            "risk_tier": config.risk_tier,
+            "notional": str(config.notional),
+            "max_risk": str(config.max_risk),
+            "invalidation_bps": config.invalidation_bps,
+            "expires_in_minutes": config.expires_in_minutes,
+            "rationale": config.rationale,
+            "auto_proposal_enabled": config.auto_proposal_enabled,
+            "auto_proposal_min_timeframes": config.auto_proposal_min_timeframes,
+            "updated_by": str(config.updated_by),
+            "updated_by_username": None if updater is None else updater.username,
+            "effective_at": config.effective_at.isoformat(),
+        }
+
+    def proposal_automation_config(self, actor_id: UUID) -> dict[str, Any] | None:
+        """Return the active admin policy to the internal feed worker only."""
+        with self.database.session_factory() as session:
+            actor = session.get(User, actor_id)
+            if (
+                actor is None
+                or not actor.active
+                or actor.principal_type != PrincipalType.SERVICE.value
+            ):
+                _reject(
+                    "PROPOSAL_AUTOMATION_SERVICE_REQUIRED",
+                    "automatic proposal policy is restricted to an active service principal",
+                )
+            assignments = session.scalars(
+                select(RoleAssignment).where(RoleAssignment.user_id == actor_id)
+            ).all()
+            if not any(
+                "proposal.create" in ROLE_ACTIONS[Role(item.role)]
+                or "*" in ROLE_ACTIONS[Role(item.role)]
+                for item in assignments
+            ):
+                _reject(
+                    "RBAC_DENIED",
+                    "proposal automation service has no proposal creation capability",
+                )
+            config = session.scalar(
+                select(ProposalDefaultConfig).where(ProposalDefaultConfig.active)
+            )
+            if config is None:
+                return None
+            return self._proposal_default_payload(config, session.get(User, config.updated_by))
+
+    def set_proposal_default_config(
+        self,
+        actor_id: UUID,
+        idempotency_key: str,
+        *,
+        account_id: str,
+        risk_tier: RiskTier,
+        notional: Decimal,
+        max_risk: Decimal,
+        invalidation_bps: int,
+        expires_in_minutes: int,
+        rationale: str,
+        auto_proposal_enabled: bool,
+        auto_proposal_min_timeframes: int,
+        now: datetime,
+    ) -> UUID:
+        operation = "proposal.defaults.manage"
+        payload = {
+            "environment": ExecutionEnvironment.LIVE.value,
+            "account_id": account_id,
+            "risk_tier": risk_tier.value,
+            "notional": str(notional),
+            "max_risk": str(max_risk),
+            "invalidation_bps": invalidation_bps,
+            "expires_in_minutes": expires_in_minutes,
+            "rationale": rationale,
+            "auto_proposal_enabled": auto_proposal_enabled,
+            "auto_proposal_min_timeframes": auto_proposal_min_timeframes,
+        }
+        if not account_id.strip() or account_id != account_id.strip():
+            _reject("PROPOSAL_DEFAULT_INVALID", "default account ID must be non-empty and exact")
+        if notional <= 0 or max_risk <= 0:
+            _reject("PROPOSAL_DEFAULT_INVALID", "default amounts must be positive")
+        if not 1 <= invalidation_bps <= 5_000 or not 480 <= expires_in_minutes <= 1_440:
+            _reject("PROPOSAL_DEFAULT_INVALID", "default price distance or expiry is invalid")
+        if auto_proposal_min_timeframes not in {3, 4}:
+            _reject(
+                "PROPOSAL_DEFAULT_INVALID",
+                "automatic proposal threshold must be three or four timeframes",
+            )
+        with self.database.session_factory.begin() as session:
+            self._require_role(session, actor_id, operation)
+            assignments = session.scalars(
+                select(RoleAssignment).where(RoleAssignment.user_id == actor_id)
+            ).all()
+            if not any(item.role == Role.SYSTEM_ADMIN.value for item in assignments):
+                _reject(
+                    "PROPOSAL_DEFAULT_ADMIN_REQUIRED",
+                    "only SYSTEM_ADMIN can change global proposal defaults",
+                )
+            digest, response = self._idempotency(
+                session,
+                caller_id=str(actor_id),
+                operation=operation,
+                idempotency_key=idempotency_key,
+                payload=payload,
+            )
+            if response is not None:
+                return _as_uuid(str(response["config_id"]))
+            current = session.scalar(
+                select(ProposalDefaultConfig).where(ProposalDefaultConfig.active).with_for_update()
+            )
+            next_version = 1 if current is None else current.version + 1
+            if current is not None:
+                current.active = False
+            config = ProposalDefaultConfig(
+                version=next_version,
+                environment=ExecutionEnvironment.LIVE.value,
+                account_id=account_id,
+                risk_tier=risk_tier.value,
+                notional=notional,
+                max_risk=max_risk,
+                invalidation_bps=invalidation_bps,
+                expires_in_minutes=expires_in_minutes,
+                rationale=rationale,
+                auto_proposal_enabled=auto_proposal_enabled,
+                auto_proposal_min_timeframes=auto_proposal_min_timeframes,
+                active=True,
+                updated_by=actor_id,
+                effective_at=now,
+            )
+            session.add(config)
+            session.flush()
+            result = {"config_id": str(config.config_id), "version": config.version}
+            self._save_receipt(
+                session,
+                caller_id=str(actor_id),
+                operation=operation,
+                idempotency_key=idempotency_key,
+                semantic_hash=digest,
+                response=result,
+                now=now,
+            )
+            self._audit(
+                session,
+                actor_id=str(actor_id),
+                event_type="PROPOSAL_DEFAULTS_UPDATED",
+                object_type="ProposalDefaultConfig",
+                object_id=config.config_id,
+                reason=f"version={config.version}",
+                correlation_id=uuid4(),
+                object_version=config.version,
+                idempotency_key=idempotency_key,
+                now=now,
+            )
+            return config.config_id
+
     def create_proposal(
         self,
         *,
@@ -987,6 +1375,7 @@ class TradingService:
         source_readiness: str | None = None,
         details: dict[str, Any] | None = None,
         idempotency_payload: dict[str, Any] | None = None,
+        deduplicate_active_system_scope: bool = False,
         now: datetime,
     ) -> UUID:
         payload = {
@@ -1009,6 +1398,7 @@ class TradingService:
             ),
             "source_readiness": source_readiness,
             "details": details or {},
+            "deduplicate_active_system_scope": deduplicate_active_system_scope,
         }
         operation = "proposal.create"
         with self.database.session_factory.begin() as session:
@@ -1051,6 +1441,56 @@ class TradingService:
                 _reject("INSTRUMENT_UNAVAILABLE", "instrument is inactive or outside venue scope")
             if expires_at <= now:
                 _reject("PROPOSAL_EXPIRY_INVALID", "proposal expiry must be in the future")
+            if deduplicate_active_system_scope:
+                if source is not ProposalSource.SYSTEM or not strategy_id:
+                    _reject(
+                        "PROPOSAL_DEDUPLICATION_SCOPE_INVALID",
+                        "active-scope deduplication is restricted to identified SYSTEM strategies",
+                    )
+                active_scope = ":".join(
+                    [
+                        environment.value,
+                        account_id,
+                        venue,
+                        str(instrument_id),
+                        direction.value,
+                        strategy_id,
+                    ]
+                )
+                session.execute(
+                    text("SELECT pg_advisory_xact_lock(:key)"),
+                    {
+                        "key": _advisory_lock_key(
+                            "proposal.active-system-scope",
+                            strategy_id,
+                            active_scope,
+                        )
+                    },
+                )
+                existing = session.scalar(
+                    select(Proposal)
+                    .where(
+                        Proposal.source == ProposalSource.SYSTEM.value,
+                        Proposal.proposer_id == actor_id,
+                        Proposal.strategy_id == strategy_id,
+                        Proposal.environment == environment.value,
+                        Proposal.account_id == account_id,
+                        Proposal.venue == venue,
+                        Proposal.instrument_id == instrument_id,
+                        Proposal.direction == direction.value,
+                        Proposal.status.in_(
+                            [
+                                ProposalStatus.DRAFT.value,
+                                ProposalStatus.PENDING_REVIEW.value,
+                            ]
+                        ),
+                        Proposal.expires_at > now,
+                    )
+                    .order_by(Proposal.created_at, Proposal.proposal_id)
+                    .limit(1)
+                )
+                if existing is not None:
+                    return existing.proposal_id
             correlation_id = uuid4()
             proposal = Proposal(
                 source=source.value,
@@ -1104,6 +1544,104 @@ class TradingService:
                 now=now,
             )
             return proposal.proposal_id
+
+    def expire_duplicate_active_system_proposals(
+        self,
+        *,
+        actor_id: UUID,
+        strategy_id: str,
+        now: datetime,
+    ) -> int:
+        """Keep one frozen active proposal per exact strategy scope and audit the surplus."""
+
+        if not strategy_id:
+            _reject("PROPOSAL_STRATEGY_INVALID", "duplicate cleanup requires a strategy ID")
+        with self.database.session_factory.begin() as session:
+            actor = session.get(User, actor_id)
+            if (
+                actor is None
+                or not actor.active
+                or actor.principal_type != PrincipalType.SERVICE.value
+            ):
+                _reject(
+                    "PROPOSAL_AUTOMATION_SERVICE_REQUIRED",
+                    "duplicate cleanup is restricted to an active service principal",
+                )
+            session.execute(
+                text("SELECT pg_advisory_xact_lock(:key)"),
+                {
+                    "key": _advisory_lock_key(
+                        str(actor_id),
+                        "proposal.active-system-deduplication",
+                        strategy_id,
+                    )
+                },
+            )
+            proposals = session.scalars(
+                select(Proposal)
+                .where(
+                    Proposal.source == ProposalSource.SYSTEM.value,
+                    Proposal.proposer_id == actor_id,
+                    Proposal.strategy_id == strategy_id,
+                    Proposal.status.in_(
+                        [
+                            ProposalStatus.DRAFT.value,
+                            ProposalStatus.PENDING_REVIEW.value,
+                        ]
+                    ),
+                    Proposal.expires_at > now,
+                )
+                .order_by(Proposal.created_at, Proposal.proposal_id)
+                .with_for_update()
+            ).all()
+            approved_proposal_ids = set(
+                session.scalars(
+                    select(Approval.proposal_id).where(
+                        Approval.proposal_id.in_([item.proposal_id for item in proposals])
+                    )
+                ).all()
+            )
+            grouped: dict[tuple[str, str, str, UUID, str], list[Proposal]] = {}
+            for proposal in proposals:
+                scope = (
+                    proposal.environment,
+                    proposal.account_id,
+                    proposal.venue,
+                    proposal.instrument_id,
+                    proposal.direction,
+                )
+                grouped.setdefault(scope, []).append(proposal)
+            expired = 0
+            for scoped in grouped.values():
+                if len(scoped) < 2:
+                    continue
+                scoped.sort(
+                    key=lambda item: (
+                        item.proposal_id not in approved_proposal_ids,
+                        item.created_at,
+                        str(item.proposal_id),
+                    )
+                )
+                canonical = scoped[0]
+                for duplicate in scoped[1:]:
+                    duplicate.status = ProposalStatus.EXPIRED.value
+                    duplicate.updated_at = now
+                    duplicate.version += 1
+                    self._audit(
+                        session,
+                        actor_id=str(actor_id),
+                        event_type="PROPOSAL_DUPLICATE_EXPIRED",
+                        object_type="Proposal",
+                        object_id=duplicate.proposal_id,
+                        reason=(
+                            f"duplicate active resonance scope; canonical={canonical.proposal_id}"
+                        ),
+                        correlation_id=duplicate.correlation_id,
+                        object_version=duplicate.version,
+                        now=now,
+                    )
+                    expired += 1
+            return expired
 
     def submit_proposal(self, proposal_id: UUID, actor_id: UUID, *, now: datetime) -> None:
         expired = False
@@ -1247,6 +1785,95 @@ class TradingService:
             raise RuntimeError("proposal review completed without a result")
         return result
 
+    def admin_direct_approve_proposal(
+        self,
+        proposal_id: UUID,
+        admin_id: UUID,
+        reason: str,
+        expected_version: int,
+        *,
+        now: datetime,
+    ) -> ProposalStatus:
+        """Approve a frozen proposal through the explicit SYSTEM_ADMIN override path.
+
+        This path records the administrator's decision only. It never runs risk,
+        issues a TradingAuthorization, creates an intent, or sends an order.
+        """
+        expired = False
+        with self.database.session_factory.begin() as session:
+            assignments = session.scalars(
+                select(RoleAssignment).where(RoleAssignment.user_id == admin_id)
+            ).all()
+            if not any(item.role == Role.SYSTEM_ADMIN.value for item in assignments):
+                _reject(
+                    "PROPOSAL_ADMIN_APPROVAL_REQUIRED",
+                    "direct proposal approval requires SYSTEM_ADMIN",
+                )
+            self._require_role(session, admin_id, "proposal.admin_approve")
+            proposal = session.get(Proposal, proposal_id, with_for_update=True)
+            if proposal is None:
+                _reject("PROPOSAL_NOT_FOUND", "proposal does not exist")
+            if proposal.version != expected_version:
+                _reject("VERSION_CONFLICT", "proposal version changed; refresh before approving")
+            if proposal.expires_at <= now:
+                proposal.status = ProposalStatus.EXPIRED.value
+                proposal.updated_at = now
+                proposal.version += 1
+                self._audit(
+                    session,
+                    actor_id=str(admin_id),
+                    event_type="PROPOSAL_EXPIRED",
+                    object_type="Proposal",
+                    object_id=proposal.proposal_id,
+                    reason="expired before administrator direct approval",
+                    correlation_id=proposal.correlation_id,
+                    object_version=proposal.version,
+                    now=now,
+                )
+                expired = True
+            elif proposal.status != ProposalStatus.PENDING_REVIEW.value:
+                _reject("PROPOSAL_NOT_REVIEWABLE", "proposal is not pending review")
+            elif proposal.source != ProposalSource.MANUAL.value or proposal.proposer_id != admin_id:
+                _reject(
+                    "PROPOSAL_ADMIN_DIRECT_APPROVAL_SCOPE_INVALID",
+                    "administrator direct approval is limited to their own manual proposal",
+                )
+            else:
+                duplicate = session.scalar(
+                    select(Approval).where(
+                        Approval.proposal_id == proposal_id,
+                        Approval.reviewer_id == admin_id,
+                    )
+                )
+                if duplicate is not None:
+                    _reject("REVIEW_ALREADY_RECORDED", "administrator already reviewed proposal")
+                session.add(
+                    Approval(
+                        proposal_id=proposal_id,
+                        reviewer_id=admin_id,
+                        decision=ReviewDecision.APPROVE.value,
+                        reason=f"SYSTEM_ADMIN direct approval: {reason}",
+                        created_at=now,
+                    )
+                )
+                proposal.status = ProposalStatus.APPROVED.value
+                proposal.updated_at = now
+                proposal.version += 1
+                self._audit(
+                    session,
+                    actor_id=str(admin_id),
+                    event_type="PROPOSAL_ADMIN_DIRECT_APPROVED",
+                    object_type="Proposal",
+                    object_id=proposal_id,
+                    reason=reason,
+                    correlation_id=proposal.correlation_id,
+                    object_version=proposal.version,
+                    now=now,
+                )
+        if expired:
+            _reject("PROPOSAL_EXPIRED", "proposal expired before administrator approval")
+        return ProposalStatus.APPROVED
+
     @staticmethod
     def _lock_risk_capacity(session: Session) -> None:
         session.execute(
@@ -1289,6 +1916,13 @@ class TradingService:
             )
             .with_for_update()
         ).all()
+        if self.authoritative_live_accounts and environment == ExecutionEnvironment.LIVE.value:
+            rows = [
+                row
+                for row in rows
+                if row.location_type != "VENUE"
+                or self.authoritative_live_accounts.get(row.venue) == row.account_id
+            ]
         if not rows:
             return False, Decimal(0), [], now
         known = True
@@ -2284,6 +2918,50 @@ class TradingService:
                             "AUTHORIZATION_USAGE_INVALID", "authorization usage is inconsistent"
                         )
                     authorization.used_quantity -= intent.quantity
+            close_unfilled_campaign = False
+            if intent.kind == IntentKind.INITIAL.value:
+                policy = session.scalar(select(RiskPolicy).where(RiskPolicy.active))
+                position = session.scalar(
+                    select(Position).where(
+                        Position.account_id == campaign.account_id,
+                        Position.venue == campaign.venue,
+                        Position.environment == campaign.environment,
+                        Position.instrument_id == campaign.instrument_id,
+                    )
+                )
+                scope = _scope_key(campaign.environment, campaign.account_id, campaign.venue)
+                latest_reconciliation = session.scalar(
+                    select(ReconciliationRun)
+                    .where(ReconciliationRun.execution_scope == scope)
+                    .order_by(ReconciliationRun.completed_at.desc())
+                    .limit(1)
+                )
+                close_unfilled_campaign = bool(
+                    policy is not None
+                    and position is not None
+                    and position.fact_status == FactStatus.KNOWN.value
+                    and position.quantity == 0
+                    and not self._fact_is_stale(
+                        position.observed_at,
+                        now,
+                        timedelta(seconds=policy.max_fact_age_seconds),
+                    )
+                    and latest_reconciliation is not None
+                    and latest_reconciliation.status == ReconciliationStatus.MATCH.value
+                    and latest_reconciliation.is_computed
+                    and latest_reconciliation.completed_at >= position.observed_at
+                )
+                if close_unfilled_campaign:
+                    campaign.status = CampaignStatus.CLOSED.value
+                    campaign.current_target_quantity = Decimal(0)
+                    campaign.target_reason = reason
+                    campaign.updated_at = now
+                    authorization = session.get(
+                        TradingAuthorization, campaign.authorization_id, with_for_update=True
+                    )
+                    if authorization is not None:
+                        authorization.active = False
+                    self._update_campaign_pnl(session, campaign, position, now=now)
             venue_order = session.scalar(
                 select(VenueOrder).where(VenueOrder.order_intent_id == intent_id)
             )
@@ -2306,6 +2984,18 @@ class TradingService:
                 object_version=intent.version,
                 now=now,
             )
+            if close_unfilled_campaign:
+                self._audit(
+                    session,
+                    actor_id=str(actor_id),
+                    event_type="CAMPAIGN_CLOSED_UNFILLED",
+                    object_type="Campaign",
+                    object_id=campaign.campaign_id,
+                    reason="initial intent terminated with fresh flat position and computed MATCH",
+                    correlation_id=intent.correlation_id,
+                    object_version=campaign.target_version,
+                    now=now,
+                )
             INTENT_TRANSITIONS.labels(previous, intent.status).inc()
 
     def acquire_sender(
@@ -2711,6 +3401,84 @@ class TradingService:
                 environment=ExecutionEnvironment.LIVE,
             )
 
+    def prepare_freqtrade_live_order(
+        self,
+        intent_id: UUID,
+        actor_id: UUID,
+        execution_scope: str,
+        owner_id: str,
+        fencing_token: int,
+        *,
+        hip3_dexes: tuple[str, ...] = (),
+        leverage: Decimal = Decimal(1),
+        now: datetime,
+    ) -> FreqtradeEntryCommand | FreqtradeExitCommand:
+        if leverage <= 0:
+            _reject("FREQTRADE_LEVERAGE_INVALID", "Freqtrade leverage must be positive")
+        environment, _account_id, venue = _scope_parts(execution_scope)
+        if environment is not ExecutionEnvironment.LIVE:
+            _reject("FREQTRADE_LIVE_SCOPE_REQUIRED", "Freqtrade LIVE requires a LIVE scope")
+        with self.database.session_factory() as session:
+            base = self._binance_testnet_command(
+                session,
+                intent_id,
+                actor_id,
+                execution_scope,
+                owner_id,
+                fencing_token,
+                now,
+                {
+                    OrderIntentStatus.READY.value,
+                    OrderIntentStatus.SENT.value,
+                    OrderIntentStatus.PARTIALLY_FILLED.value,
+                    OrderIntentStatus.FILLED.value,
+                },
+                venue=venue,
+                environment=ExecutionEnvironment.LIVE,
+            )
+            intent = session.get(OrderIntent, intent_id)
+            campaign = None if intent is None else session.get(Campaign, intent.campaign_id)
+            instrument = (
+                None if campaign is None else session.get(Instrument, campaign.instrument_id)
+            )
+            if intent is None or campaign is None or instrument is None:
+                _reject("ORDER_INTENT_NOT_FOUND", "Freqtrade intent scope is incomplete")
+            pair = freqtrade_pair(venue, instrument.symbol, hip3_dexes=hip3_dexes)
+            if intent.reduce_only:
+                return FreqtradeExitCommand(
+                    pair=pair,
+                    max_quantity=base.quantity,
+                    client_order_id=base.client_order_id,
+                )
+            position = session.scalar(
+                select(Position).where(
+                    Position.account_id == campaign.account_id,
+                    Position.venue == campaign.venue,
+                    Position.environment == campaign.environment,
+                    Position.instrument_id == campaign.instrument_id,
+                )
+            )
+            if position is None or position.mark_price <= 0:
+                _reject(
+                    "POSITION_UNKNOWN",
+                    "Freqtrade entry requires a positive current mark price",
+                )
+            requested_notional = (
+                intent.quantity * position.mark_price * instrument.contract_multiplier
+            )
+            stake_amount = requested_notional * Decimal("0.98") / leverage
+            if stake_amount <= 0:
+                _reject("FREQTRADE_ORDER_INVALID", "Freqtrade stake amount is invalid")
+            return FreqtradeEntryCommand(
+                pair=pair,
+                side="long" if base.side == "BUY" else "short",
+                stake_amount=stake_amount,
+                max_quantity=base.quantity,
+                leverage=leverage,
+                enter_tag=f"tcp-{intent.intent_id.hex[:24]}",
+                client_order_id=base.client_order_id,
+            )
+
     def prepare_binance_live_cancel(
         self,
         intent_id: UUID,
@@ -2964,12 +3732,18 @@ class TradingService:
         *,
         expected_order_type: str = "MARKET",
         identity_code: str = "BINANCE_TESTNET_IDENTITY_CONFLICT",
+        allow_bounded_quantity: bool = False,
     ) -> None:
+        quantity_invalid = (
+            result.ordered_quantity <= 0 or result.ordered_quantity > intent.quantity
+            if allow_bounded_quantity
+            else result.ordered_quantity != intent.quantity
+        )
         if (
             result.client_order_id != command.client_order_id
             or result.side != intent.side
             or result.order_type != expected_order_type
-            or result.ordered_quantity != intent.quantity
+            or quantity_invalid
             or result.reduce_only != intent.reduce_only
             or result.close_position
             or result.filled_quantity > intent.quantity
@@ -3022,6 +3796,7 @@ class TradingService:
         venue: str = "BINANCE",
         expected_order_type: str = "MARKET",
         expected_limit_price: Decimal | None = None,
+        allow_bounded_quantity: bool = False,
         environment: ExecutionEnvironment = ExecutionEnvironment.TESTNET,
         now: datetime,
     ) -> UUID:
@@ -3058,6 +3833,7 @@ class TradingService:
                 result,
                 expected_order_type=expected_order_type,
                 identity_code=identity_code,
+                allow_bounded_quantity=allow_bounded_quantity,
             )
             fact = session.scalar(
                 select(VenueOrder)
@@ -3506,6 +4282,17 @@ class TradingService:
                     VenueOrder.environment == campaign.environment,
                     VenueOrder.account_id == campaign.account_id,
                     VenueOrder.venue == campaign.venue,
+                    VenueOrder.venue_order_id == result.order_id,
+                )
+                .with_for_update()
+            )
+            if order is None:
+                order = session.scalar(
+                select(VenueOrder)
+                .where(
+                    VenueOrder.environment == campaign.environment,
+                    VenueOrder.account_id == campaign.account_id,
+                    VenueOrder.venue == campaign.venue,
                     VenueOrder.client_order_id == command.client_order_id,
                 )
                 .with_for_update()
@@ -3530,7 +4317,18 @@ class TradingService:
                 )
                 session.add(order)
             else:
-                order.venue_order_id = result.order_id
+                if (
+                    order.instrument_id != campaign.instrument_id
+                    or order.venue_order_id != result.order_id
+                    or order.side != result.side
+                    or order.order_type != result.order_type
+                    or not order.reduce_only
+                    or order.ordered_quantity != result.ordered_quantity
+                ):
+                    _reject(
+                        f"{venue}_{environment.value}_IDENTITY_CONFLICT",
+                        "existing venue protection changed protected order identity",
+                    )
                 order.status = result.status
                 order.filled_quantity = result.filled_quantity
                 order.observed_at = result.observed_at
@@ -3725,6 +4523,185 @@ class TradingService:
             fencing_token,
             command,
             result,
+            environment=ExecutionEnvironment.LIVE,
+            now=now,
+        )
+
+    def record_freqtrade_live_order(
+        self,
+        intent_id: UUID,
+        actor_id: UUID,
+        execution_scope: str,
+        owner_id: str,
+        fencing_token: int,
+        command: FreqtradeEntryCommand | FreqtradeExitCommand,
+        trade: FreqtradeTrade,
+        *,
+        now: datetime,
+    ) -> UUID:
+        with self.database.session_factory() as session:
+            intent = session.get(OrderIntent, intent_id)
+            campaign = None if intent is None else session.get(Campaign, intent.campaign_id)
+            if intent is None or campaign is None:
+                _reject("ORDER_INTENT_NOT_FOUND", "Freqtrade intent campaign is unavailable")
+            if trade.pair != command.pair or trade.amount > command.max_quantity:
+                _reject(
+                    "FREQTRADE_ORDER_IDENTITY_CONFLICT",
+                    "Freqtrade trade exceeds the frozen pair or quantity boundary",
+                )
+            if isinstance(command, FreqtradeEntryCommand):
+                if (
+                    intent.reduce_only
+                    or trade.enter_tag != command.enter_tag
+                    or trade.side != command.side
+                    or not trade.is_open
+                ):
+                    _reject(
+                        "FREQTRADE_ORDER_IDENTITY_CONFLICT",
+                        "Freqtrade entry changed the frozen direction or identity",
+                    )
+                phase = "entry"
+                venue_order_id = trade.entry_order_id
+            else:
+                if not intent.reduce_only or trade.is_open:
+                    _reject(
+                        "FREQTRADE_ORDER_IDENTITY_CONFLICT",
+                        "Freqtrade exit did not confirm a closed reduce-only trade",
+                    )
+                phase = "exit"
+                venue_order_id = trade.exit_order_id
+            if venue_order_id is None:
+                _reject(
+                    "FREQTRADE_EXECUTION_ORDER_ID_MISSING",
+                    f"Freqtrade did not expose the native {phase} order identity",
+                )
+            venue = campaign.venue
+            side = intent.side
+            reduce_only = intent.reduce_only
+        return self.record_binance_testnet_order(
+            intent_id,
+            actor_id,
+            execution_scope,
+            owner_id,
+            fencing_token,
+            BinanceTestnetOrderCommand(
+                symbol=trade.pair,
+                side=side,
+                quantity=command.max_quantity,
+                reduce_only=reduce_only,
+                client_order_id=command.client_order_id,
+            ),
+            BinanceTestnetOrder(
+                order_id=venue_order_id,
+                client_order_id=command.client_order_id,
+                status=VenueOrderStatus.FILLED.value,
+                side=side,
+                order_type="MARKET",
+                ordered_quantity=trade.amount,
+                filled_quantity=trade.amount,
+                stop_price=Decimal(0),
+                reduce_only=reduce_only,
+                close_position=False,
+                observed_at=trade.observed_at,
+            ),
+            venue=venue,
+            allow_bounded_quantity=True,
+            environment=ExecutionEnvironment.LIVE,
+            now=now,
+        )
+
+    def record_freqtrade_live_unknown(
+        self,
+        intent_id: UUID,
+        actor_id: UUID,
+        execution_scope: str,
+        owner_id: str,
+        fencing_token: int,
+        command: FreqtradeEntryCommand | FreqtradeExitCommand,
+        reason: str,
+        *,
+        now: datetime,
+    ) -> None:
+        with self.database.session_factory() as session:
+            intent = session.get(OrderIntent, intent_id)
+            campaign = None if intent is None else session.get(Campaign, intent.campaign_id)
+            if intent is None or campaign is None:
+                _reject("ORDER_INTENT_NOT_FOUND", "Freqtrade intent campaign is unavailable")
+            side = intent.side
+            reduce_only = intent.reduce_only
+            venue = campaign.venue
+        self.record_binance_testnet_unknown(
+            intent_id,
+            actor_id,
+            execution_scope,
+            owner_id,
+            fencing_token,
+            BinanceTestnetOrderCommand(
+                symbol=command.pair,
+                side=side,
+                quantity=command.max_quantity,
+                reduce_only=reduce_only,
+                client_order_id=command.client_order_id,
+            ),
+            reason,
+            venue=venue,
+            environment=ExecutionEnvironment.LIVE,
+            now=now,
+        )
+
+    def record_freqtrade_live_protection(
+        self,
+        campaign_id: UUID,
+        actor_id: UUID,
+        execution_scope: str,
+        owner_id: str,
+        fencing_token: int,
+        trade: FreqtradeTrade,
+        *,
+        now: datetime,
+    ) -> UUID:
+        if not trade.is_open or trade.stop_loss_abs is None or not trade.stoploss_order_id:
+            _reject(
+                "FREQTRADE_PROTECTION_UNCONFIRMED",
+                "Freqtrade did not expose an active exchange stop-loss order",
+            )
+        environment, _account_id, venue = _scope_parts(execution_scope)
+        if environment is not ExecutionEnvironment.LIVE:
+            _reject("FREQTRADE_LIVE_SCOPE_REQUIRED", "Freqtrade protection requires LIVE")
+        command = self.prepare_binance_testnet_protection(
+            campaign_id,
+            actor_id,
+            execution_scope,
+            owner_id,
+            fencing_token,
+            trade.stop_loss_abs,
+            venue=venue,
+            environment=ExecutionEnvironment.LIVE,
+            now=now,
+        )
+        return self.record_binance_testnet_protection(
+            campaign_id,
+            actor_id,
+            execution_scope,
+            owner_id,
+            fencing_token,
+            command,
+            BinanceTestnetOrder(
+                order_id=trade.stoploss_order_id,
+                client_order_id=command.client_order_id,
+                status=VenueOrderStatus.SENT.value,
+                side=command.side,
+                order_type="STOP_MARKET",
+                ordered_quantity=trade.amount,
+                filled_quantity=Decimal(0),
+                stop_price=trade.stop_loss_abs,
+                reduce_only=True,
+                close_position=False,
+                observed_at=trade.observed_at,
+            ),
+            venue=venue,
+            expected_close_position=False,
+            require_reduce_only=True,
             environment=ExecutionEnvironment.LIVE,
             now=now,
         )
@@ -4392,19 +5369,20 @@ class TradingService:
         recorded_at: datetime,
     ) -> None:
         session.flush()
-        if session.scalar(
-            select(AccountEquityObservation.observation_id).where(
-                AccountEquityObservation.account_equity_id == fact.account_equity_id,
-                AccountEquityObservation.observed_at == fact.observed_at,
+        if (
+            session.scalar(
+                select(AccountEquityObservation.observation_id).where(
+                    AccountEquityObservation.account_equity_id == fact.account_equity_id,
+                    AccountEquityObservation.observed_at == fact.observed_at,
+                )
             )
-        ) is not None:
+            is not None
+        ):
             return
         usd_equity = None
         if fact.fact_status == FactStatus.KNOWN.value:
             usd_equity = (
-                fact.equity
-                if fact.currency.upper() in USD_STABLE_ASSETS
-                else fact.valuation_equity
+                fact.equity if fact.currency.upper() in USD_STABLE_ASSETS else fact.valuation_equity
             )
         session.add(
             AccountEquityObservation(
@@ -4762,18 +5740,17 @@ class TradingService:
                     }:
                         still_open = protection_order.venue_order_id in observed_order_ids
                         if not still_open:
-                            protection_order.status = VenueOrderStatus.UNKNOWN.value
+                            protection_order.status = VenueOrderStatus.CANCELLED.value
                         protection_order.observed_at = now
                         protection_order.updated_at = now
-                        protection.quantity = Decimal(0)
-                        protection.status = (
-                            ProtectionStatus.DEGRADED.value
-                            if still_open
-                            else ProtectionStatus.UNKNOWN.value
-                        )
-                        protection.fully_covered = False
-                        protection.observed_at = now
-                        protection.updated_at = now
+                        if still_open:
+                            protection.quantity = Decimal(0)
+                            protection.status = ProtectionStatus.DEGRADED.value
+                            protection.fully_covered = False
+                            protection.observed_at = now
+                            protection.updated_at = now
+                        else:
+                            session.delete(protection)
                     else:
                         session.delete(protection)
                 if changed:
@@ -5053,6 +6030,74 @@ class TradingService:
                         VenueOrder.venue_order_id == external_fill.order_id,
                     )
                 )
+                if venue_order is None:
+                    # Older Freqtrade observations used a synthetic trade identity instead of
+                    # the exchange order id. Bind only an exact, unique, recent fully-filled
+                    # order; ambiguity remains unbound and therefore fail-closed in reconcile.
+                    synthetic_candidates = session.scalars(
+                        select(VenueOrder).where(
+                            VenueOrder.environment == environment.value,
+                            VenueOrder.account_id == account_id,
+                            VenueOrder.venue == venue,
+                            VenueOrder.instrument_id == instrument.instrument_id,
+                            VenueOrder.order_intent_id.is_not(None),
+                            VenueOrder.venue_order_id.like("freqtrade:%"),
+                            VenueOrder.status == VenueOrderStatus.FILLED.value,
+                            VenueOrder.side == external_fill.side,
+                            VenueOrder.ordered_quantity == external_fill.quantity,
+                            VenueOrder.filled_quantity == external_fill.quantity,
+                        )
+                    ).all()
+                    synthetic_candidates = [
+                        item
+                        for item in synthetic_candidates
+                        if abs(item.observed_at - external_fill.executed_at)
+                        <= timedelta(minutes=2)
+                    ]
+                    if len(synthetic_candidates) == 1:
+                        venue_order = synthetic_candidates[0]
+                        venue_order.venue_order_id = external_fill.order_id
+                        venue_order.observed_at = external_fill.executed_at
+                        venue_order.updated_at = now
+                if venue_order is None:
+                    # A slow Freqtrade fill can arrive after the bounded API confirmation
+                    # window. Recover only one exact scoped UNKNOWN intent whose frozen
+                    # maximum contains this fill. Ambiguity stays unbound and fail-closed.
+                    unknown_candidates = session.scalars(
+                        select(VenueOrder)
+                        .join(
+                            OrderIntent,
+                            VenueOrder.order_intent_id == OrderIntent.intent_id,
+                        )
+                        .where(
+                            VenueOrder.environment == environment.value,
+                            VenueOrder.account_id == account_id,
+                            VenueOrder.venue == venue,
+                            VenueOrder.instrument_id == instrument.instrument_id,
+                            VenueOrder.order_intent_id.is_not(None),
+                            VenueOrder.venue_order_id.like("UNKNOWN:%"),
+                            VenueOrder.status == VenueOrderStatus.UNKNOWN.value,
+                            VenueOrder.side == external_fill.side,
+                            VenueOrder.filled_quantity == 0,
+                            VenueOrder.ordered_quantity >= external_fill.quantity,
+                            OrderIntent.status == OrderIntentStatus.UNKNOWN.value,
+                        )
+                        .with_for_update()
+                    ).all()
+                    unknown_candidates = [
+                        item
+                        for item in unknown_candidates
+                        if abs(item.observed_at - external_fill.executed_at)
+                        <= timedelta(minutes=5)
+                    ]
+                    if len(unknown_candidates) == 1:
+                        venue_order = unknown_candidates[0]
+                        venue_order.venue_order_id = external_fill.order_id
+                        venue_order.status = VenueOrderStatus.FILLED.value
+                        venue_order.ordered_quantity = external_fill.quantity
+                        venue_order.filled_quantity = external_fill.quantity
+                        venue_order.observed_at = external_fill.executed_at
+                        venue_order.updated_at = now
                 intent = (
                     session.get(OrderIntent, venue_order.order_intent_id)
                     if venue_order is not None and venue_order.order_intent_id is not None
@@ -5088,6 +6133,15 @@ class TradingService:
                     or current_fill.fee_currency != external_fill.fee_currency
                 ):
                     _reject(f"{venue}_FACT_CONFLICT", "venue fill identity changed semantics")
+                elif current_fill.order_intent_id is None and intent is not None:
+                    current_fill.order_intent_id = intent.intent_id
+                    current_fill.campaign_id = intent.campaign_id
+                elif (
+                    current_fill.order_intent_id is not None
+                    and intent is not None
+                    and current_fill.order_intent_id != intent.intent_id
+                ):
+                    _reject(f"{venue}_FACT_CONFLICT", "venue fill identity changed binding")
                 fill_count += 1
 
             session.flush()
@@ -5124,11 +6178,35 @@ class TradingService:
                 if (
                     filled > bound_intent.quantity
                     or bound_order.filled_quantity > bound_intent.quantity
+                    or filled > bound_order.ordered_quantity
                 ):
                     _reject(
                         "ORDER_INTENT_OVERFILLED",
                         f"{venue} cumulative fill exceeds intent",
                     )
+                if bound_campaign.status == CampaignStatus.CLOSED.value:
+                    if (
+                        bound_intent.status
+                        not in {
+                            OrderIntentStatus.FILLED.value,
+                            OrderIntentStatus.CANCELLED.value,
+                            OrderIntentStatus.REJECTED.value,
+                        }
+                        or bound_order.status
+                        not in {
+                            VenueOrderStatus.FILLED.value,
+                            VenueOrderStatus.CANCELLED.value,
+                            VenueOrderStatus.REJECTED.value,
+                        }
+                    ):
+                        _reject(
+                            "CLOSED_CAMPAIGN_ORDER_NONTERMINAL",
+                            f"{venue} closed campaign contains a non-terminal order fact",
+                        )
+                    # Repeated historical fills are expected. CLOSED is absorbing:
+                    # terminal facts cannot reopen the campaign or its released risk.
+                    bound_order.updated_at = now
+                    continue
                 if filled > bound_order.filled_quantity:
                     bound_order.filled_quantity = filled
                 if filled > 0:
@@ -5160,7 +6238,13 @@ class TradingService:
                     )
                     release_updated_intent = True
                 else:
-                    if filled == bound_intent.quantity:
+                    if filled > 0 and (
+                        filled == bound_intent.quantity
+                        or (
+                            bound_order.status == VenueOrderStatus.FILLED.value
+                            and filled == bound_order.ordered_quantity
+                        )
+                    ):
                         bound_intent.status = OrderIntentStatus.FILLED.value
                         bound_order.status = VenueOrderStatus.FILLED.value
                     elif filled > 0 and bound_order.status not in terminal:
@@ -5328,18 +6412,17 @@ class TradingService:
                 }:
                     still_open = protection_order.venue_order_id in observed_order_ids
                     if not still_open:
-                        protection_order.status = VenueOrderStatus.UNKNOWN.value
+                        protection_order.status = VenueOrderStatus.CANCELLED.value
                     protection_order.observed_at = snapshot.observed_at
                     protection_order.updated_at = now
-                    protection.quantity = Decimal(0)
-                    protection.status = (
-                        ProtectionStatus.DEGRADED.value
-                        if still_open
-                        else ProtectionStatus.UNKNOWN.value
-                    )
-                    protection.fully_covered = False
-                    protection.observed_at = snapshot.observed_at
-                    protection.updated_at = now
+                    if still_open:
+                        protection.quantity = Decimal(0)
+                        protection.status = ProtectionStatus.DEGRADED.value
+                        protection.fully_covered = False
+                        protection.observed_at = snapshot.observed_at
+                        protection.updated_at = now
+                    else:
+                        session.delete(protection)
                 else:
                     session.delete(protection)
             self._audit(
@@ -5591,6 +6674,309 @@ class TradingService:
                 now=now,
             )
             return intent.intent_id
+
+    def recover_freqtrade_emergency_exit(
+        self,
+        campaign_id: UUID,
+        actor_id: UUID,
+        reason: str,
+        *,
+        now: datetime,
+    ) -> UUID:
+        """Bind one unique official cleanup fill after a Freqtrade outcome timeout.
+
+        This is a fact-recovery path only. It never invokes a worker or venue and is
+        restricted to a fresh, officially observed flat position.
+        """
+
+        if len(reason.strip()) < 8:
+            _reject("EMERGENCY_EXIT_RECOVERY_REASON_REQUIRED", "a specific reason is required")
+        with self.database.session_factory.begin() as session:
+            assignments = session.scalars(
+                select(RoleAssignment).where(RoleAssignment.user_id == actor_id)
+            ).all()
+            if not any(
+                item.role == Role.SYSTEM_ADMIN.value
+                and item.account_scope is None
+                and item.venue_scope is None
+                for item in assignments
+            ):
+                _reject(
+                    "EMERGENCY_EXIT_RECOVERY_ADMIN_REQUIRED",
+                    "Freqtrade emergency exit recovery requires SYSTEM_ADMIN",
+                )
+            campaign = session.get(Campaign, campaign_id, with_for_update=True)
+            if campaign is None:
+                _reject("CAMPAIGN_NOT_FOUND", "campaign does not exist")
+            self._require_role(
+                session, actor_id, "reconcile", campaign.account_id, campaign.venue
+            )
+            existing_exit = session.scalar(
+                select(OrderIntent)
+                .where(
+                    OrderIntent.campaign_id == campaign_id,
+                    OrderIntent.kind == IntentKind.EXIT.value,
+                    OrderIntent.trigger_source == "FREQTRADE_EMERGENCY_RECOVERY",
+                )
+                .with_for_update()
+            )
+            if existing_exit is not None:
+                return existing_exit.intent_id
+            if campaign.status == CampaignStatus.CLOSED.value:
+                _reject("CAMPAIGN_ALREADY_CLOSED", "closed campaigns require no recovery")
+            policy = session.scalar(select(RiskPolicy).where(RiskPolicy.active))
+            position = session.scalar(
+                select(Position)
+                .where(
+                    Position.account_id == campaign.account_id,
+                    Position.venue == campaign.venue,
+                    Position.environment == campaign.environment,
+                    Position.instrument_id == campaign.instrument_id,
+                )
+                .with_for_update()
+            )
+            if (
+                policy is None
+                or position is None
+                or position.fact_status != FactStatus.KNOWN.value
+                or position.quantity != 0
+                or self._fact_is_stale(
+                    position.observed_at,
+                    now,
+                    timedelta(seconds=policy.max_fact_age_seconds),
+                )
+            ):
+                _reject(
+                    "EMERGENCY_EXIT_RECOVERY_FLAT_FACT_REQUIRED",
+                    "recovery requires a fresh official flat position",
+                )
+            active_orders = session.scalar(
+                select(VenueOrder.venue_order_fact_id).where(
+                    VenueOrder.account_id == campaign.account_id,
+                    VenueOrder.venue == campaign.venue,
+                    VenueOrder.environment == campaign.environment,
+                    VenueOrder.instrument_id == campaign.instrument_id,
+                    VenueOrder.status.in_(
+                        {
+                            VenueOrderStatus.SENT.value,
+                            VenueOrderStatus.PARTIALLY_FILLED.value,
+                            VenueOrderStatus.UNKNOWN.value,
+                        }
+                    ),
+                )
+            )
+            if active_orders is not None:
+                _reject(
+                    "EMERGENCY_EXIT_RECOVERY_OPEN_ORDER",
+                    "recovery requires every scoped order outcome to be terminal",
+                )
+            entries = session.scalars(
+                select(OrderIntent)
+                .where(
+                    OrderIntent.campaign_id == campaign_id,
+                    OrderIntent.kind.in_({IntentKind.INITIAL.value, IntentKind.ADD.value}),
+                )
+                .with_for_update()
+            ).all()
+            if len(entries) != 1:
+                _reject(
+                    "EMERGENCY_EXIT_RECOVERY_ENTRY_AMBIGUOUS",
+                    "recovery requires exactly one entry and no adds",
+                )
+            entry = entries[0]
+            instrument = session.get(Instrument, campaign.instrument_id)
+            if instrument is None:
+                _reject("INSTRUMENT_UNAVAILABLE", "campaign instrument is unavailable")
+            if entry.status == OrderIntentStatus.READY.value:
+                existing_entry_order = session.scalar(
+                    select(VenueOrder.venue_order_fact_id).where(
+                        VenueOrder.order_intent_id == entry.intent_id
+                    )
+                )
+                if existing_entry_order is not None:
+                    _reject(
+                        "EMERGENCY_EXIT_RECOVERY_ENTRY_AMBIGUOUS",
+                        "a READY recovery entry must not already have an order fact",
+                    )
+                entry_candidates = session.scalars(
+                    select(VenueFill)
+                    .where(
+                        VenueFill.environment == campaign.environment,
+                        VenueFill.account_id == campaign.account_id,
+                        VenueFill.venue == campaign.venue,
+                        VenueFill.instrument_id == campaign.instrument_id,
+                        VenueFill.order_intent_id.is_(None),
+                        VenueFill.campaign_id.is_(None),
+                        VenueFill.side == entry.side,
+                        VenueFill.quantity <= entry.quantity,
+                        VenueFill.executed_at >= entry.created_at,
+                        VenueFill.executed_at <= entry.created_at + timedelta(minutes=10),
+                    )
+                    .with_for_update()
+                ).all()
+                if len(entry_candidates) != 1:
+                    _reject(
+                        "EMERGENCY_EXIT_RECOVERY_ENTRY_AMBIGUOUS",
+                        "interrupted entry recovery requires one unique same-side fill",
+                    )
+                recovered_entry_fill = entry_candidates[0]
+                if recovered_entry_fill.fee_currency != instrument.collateral_currency:
+                    _reject("PNL_CURRENCY_MISMATCH", "entry fill currency lacks an FX conversion")
+                session.add(
+                    VenueOrder(
+                        order_intent_id=entry.intent_id,
+                        account_id=campaign.account_id,
+                        venue=campaign.venue,
+                        environment=campaign.environment,
+                        instrument_id=campaign.instrument_id,
+                        venue_order_id=f"recovered-fill:{recovered_entry_fill.venue_fill_id}",
+                        client_order_id=f"recovery-entry-{entry.intent_id.hex[:24]}",
+                        side=entry.side,
+                        order_type="MARKET",
+                        reduce_only=False,
+                        status=VenueOrderStatus.FILLED.value,
+                        ordered_quantity=recovered_entry_fill.quantity,
+                        filled_quantity=recovered_entry_fill.quantity,
+                        observed_at=recovered_entry_fill.executed_at,
+                        updated_at=now,
+                    )
+                )
+                recovered_entry_fill.order_intent_id = entry.intent_id
+                recovered_entry_fill.campaign_id = campaign_id
+                entry.status = OrderIntentStatus.FILLED.value
+                entry.updated_at = now
+                entry.version += 1
+                if entry.reservation_id is not None:
+                    reservation = session.get(
+                        RiskReservation, entry.reservation_id, with_for_update=True
+                    )
+                    if reservation is not None:
+                        reservation.status = ReservationStatus.OPEN.value
+                        reservation.updated_at = now
+                        reservation.version += 1
+                campaign.status = CampaignStatus.OPEN.value
+                campaign.updated_at = now
+                self._audit(
+                    session,
+                    actor_id=str(actor_id),
+                    event_type="FREQTRADE_INTERRUPTED_ENTRY_RECOVERED",
+                    object_type="OrderIntent",
+                    object_id=entry.intent_id,
+                    reason=reason.strip(),
+                    correlation_id=entry.correlation_id,
+                    object_version=entry.version,
+                    now=now,
+                )
+            elif entry.status != OrderIntentStatus.FILLED.value:
+                _reject(
+                    "EMERGENCY_EXIT_RECOVERY_ENTRY_AMBIGUOUS",
+                    "recovery requires a READY interrupted entry or confirmed filled entry",
+                )
+            entry_fills = session.scalars(
+                select(VenueFill)
+                .where(VenueFill.order_intent_id == entry.intent_id)
+                .order_by(VenueFill.executed_at, VenueFill.venue_fill_fact_id)
+            ).all()
+            if not entry_fills or any(fill.side != entry.side for fill in entry_fills):
+                _reject(
+                    "EMERGENCY_EXIT_RECOVERY_ENTRY_FACTS_INVALID",
+                    "recovery requires complete entry fills",
+                )
+            entry_quantity = sum((fill.quantity for fill in entry_fills), Decimal(0))
+            entry_time = max(fill.executed_at for fill in entry_fills)
+            exit_side = "SELL" if entry.side == "BUY" else "BUY"
+            candidates = session.scalars(
+                select(VenueFill)
+                .where(
+                    VenueFill.environment == campaign.environment,
+                    VenueFill.account_id == campaign.account_id,
+                    VenueFill.venue == campaign.venue,
+                    VenueFill.instrument_id == campaign.instrument_id,
+                    VenueFill.order_intent_id.is_(None),
+                    VenueFill.campaign_id.is_(None),
+                    VenueFill.side == exit_side,
+                    VenueFill.quantity == entry_quantity,
+                    VenueFill.executed_at >= entry_time,
+                    VenueFill.executed_at <= entry_time + timedelta(minutes=10),
+                )
+                .with_for_update()
+            ).all()
+            if len(candidates) != 1:
+                _reject(
+                    "EMERGENCY_EXIT_RECOVERY_FILL_AMBIGUOUS",
+                    "recovery requires one unique opposite cleanup fill",
+                )
+            cleanup_fill = candidates[0]
+            if cleanup_fill.fee_currency != instrument.collateral_currency:
+                _reject("PNL_CURRENCY_MISMATCH", "cleanup fill currency lacks an FX conversion")
+            campaign.target_version += 1
+            campaign.current_target_quantity = Decimal(0)
+            campaign.target_reason = f"FREQTRADE_EMERGENCY_RECOVERY:{reason.strip()}"
+            campaign.target_urgency = TargetUrgency.IMMEDIATE.value
+            campaign.target_calculated_at = now
+            campaign.status = CampaignStatus.CLOSING.value
+            campaign.updated_at = now
+            semantic_hash = hashlib.sha256(
+                f"{campaign_id}:{cleanup_fill.venue_fill_id}:{entry_quantity}".encode()
+            ).hexdigest()
+            exit_intent = OrderIntent(
+                campaign_id=campaign_id,
+                authorization_id=campaign.authorization_id,
+                reservation_id=None,
+                kind=IntentKind.EXIT.value,
+                side=exit_side,
+                quantity=entry_quantity,
+                limit_price=None,
+                reduce_only=True,
+                trigger_source="FREQTRADE_EMERGENCY_RECOVERY",
+                trigger_observed_at=position.observed_at,
+                add_unit_consumed=False,
+                target_version=campaign.target_version,
+                position_id=position.position_id,
+                position_observed_at=position.observed_at,
+                status=OrderIntentStatus.FILLED.value,
+                semantic_hash=semantic_hash,
+                actor_id=str(actor_id),
+                correlation_id=uuid4(),
+                version=1,
+                created_at=now,
+                updated_at=now,
+            )
+            session.add(exit_intent)
+            session.flush()
+            session.add(
+                VenueOrder(
+                    order_intent_id=exit_intent.intent_id,
+                    account_id=campaign.account_id,
+                    venue=campaign.venue,
+                    environment=campaign.environment,
+                    instrument_id=campaign.instrument_id,
+                    venue_order_id=f"recovered-fill:{cleanup_fill.venue_fill_id}",
+                    client_order_id=f"recovery-{exit_intent.intent_id.hex[:24]}",
+                    side=exit_side,
+                    order_type="MARKET",
+                    reduce_only=True,
+                    status=VenueOrderStatus.FILLED.value,
+                    ordered_quantity=entry_quantity,
+                    filled_quantity=entry_quantity,
+                    observed_at=cleanup_fill.executed_at,
+                    updated_at=now,
+                )
+            )
+            cleanup_fill.order_intent_id = exit_intent.intent_id
+            cleanup_fill.campaign_id = campaign_id
+            self._audit(
+                session,
+                actor_id=str(actor_id),
+                event_type="FREQTRADE_EMERGENCY_EXIT_RECOVERED",
+                object_type="OrderIntent",
+                object_id=exit_intent.intent_id,
+                reason=reason.strip(),
+                correlation_id=exit_intent.correlation_id,
+                object_version=1,
+                now=now,
+            )
+            return exit_intent.intent_id
 
     def create_automatic_exit_intent(
         self,
@@ -5977,12 +7363,19 @@ class TradingService:
     def _canonical_restore_scopes(
         configured_scopes: tuple[tuple[str, str, str], ...],
         campaigns: list[Campaign],
+        *,
+        required_environment: str | None = None,
     ) -> list[dict[str, str]]:
-        scopes = set(configured_scopes)
+        scopes = {
+            (environment, account_id, venue)
+            for environment, account_id, venue in configured_scopes
+            if required_environment is None or environment == required_environment
+        }
         scopes.update(
             (campaign.environment, campaign.account_id, campaign.venue)
             for campaign in campaigns
             if campaign.status != CampaignStatus.CLOSED.value
+            and (required_environment is None or campaign.environment == required_environment)
         )
         return [
             {"environment": environment, "account_id": account_id, "venue": venue}
@@ -6150,6 +7543,154 @@ class TradingService:
                 blockers.add(f"RECONCILIATION_STALE:{prefix}")
         return sorted(blockers)
 
+    @staticmethod
+    def _risk_restore_condition_details(
+        blockers: list[str],
+        required_scopes: list[dict[str, str]],
+    ) -> list[dict[str, Any]]:
+        blocker_set = set(blockers)
+
+        def condition(
+            code: str,
+            label: str,
+            matching: list[str],
+            role: str,
+            next_action: str,
+            scope: dict[str, str] | None = None,
+        ) -> dict[str, Any]:
+            return {
+                "code": code,
+                "label": label,
+                "status": "BLOCKED" if matching else "PASS",
+                "reason": matching if matching else ["CURRENT"],
+                "role": role,
+                "next_action": next_action if matching else "无需处理",
+                "scope": scope,
+            }
+
+        details = [
+            condition(
+                "LIVE_SCOPE_CONFIGURED",
+                "生产账户范围已配置",
+                [item for item in blockers if item == "LIVE_SCOPE_CONFIGURATION_REQUIRED"],
+                "SYSTEM_ADMIN",
+                "配置明确的 LIVE 账户与交易所范围后重新检查",
+            ),
+            condition(
+                "SYSTEM_RECOVERABLE",
+                "系统不处于需人工处置的紧急停止",
+                [item for item in blockers if item == "KILL_SWITCH_MANUAL_RECOVERY_REQUIRED"],
+                "SYSTEM_ADMIN",
+                "先完成 KILL_SWITCH 人工处置; 不能从本页绕过",
+            ),
+            condition(
+                "NO_ACTIVE_OR_UNKNOWN_OPERATIONS",
+                "不存在新增风险在途或结果未知操作",
+                [
+                    item
+                    for item in blockers
+                    if item
+                    in {
+                        "ACTIVE_NEW_RISK_INTENT",
+                        "ORDER_INTENT_UNKNOWN",
+                        "VENUE_ORDER_UNKNOWN",
+                        "RISK_RESERVATION_UNKNOWN",
+                        "CAMPAIGN_UNKNOWN",
+                        "UNBOUND_OPEN_ORDER",
+                    }
+                ],
+                "OPERATOR",
+                "完成订单、仓位、预留与任务对账; 消除未知结果",
+            ),
+        ]
+        for scope in required_scopes:
+            prefix = (
+                f"{scope.get('environment', '')}:"
+                f"{scope.get('account_id', '')}:{scope.get('venue', '')}"
+            )
+            details.extend(
+                [
+                    condition(
+                        "ACCOUNT_EQUITY_CURRENT",
+                        "账户权益事实完整且新鲜",
+                        [
+                            item
+                            for item in blockers
+                            if item.startswith(
+                                (
+                                    f"ACCOUNT_EQUITY_MISSING:{prefix}",
+                                    f"ACCOUNT_EQUITY_UNKNOWN:{prefix}",
+                                    f"ACCOUNT_EQUITY_STALE:{prefix}",
+                                )
+                            )
+                        ],
+                        "OPERATOR",
+                        "同步该账户最新权益事实",
+                        scope,
+                    ),
+                    condition(
+                        "POSITION_AND_PROTECTION_CURRENT",
+                        "仓位与保护事实完整且新鲜",
+                        [
+                            item
+                            for item in blockers
+                            if item.startswith(
+                                (
+                                    f"POSITION_FACTS_MISSING:{prefix}",
+                                    f"POSITION_UNKNOWN:{prefix}",
+                                    f"POSITION_STALE:{prefix}",
+                                    f"PROTECTION_INCOMPLETE:{prefix}",
+                                    f"PROTECTION_STALE:{prefix}",
+                                )
+                            )
+                        ],
+                        "OPERATOR",
+                        "同步仓位并补齐有效保护事实",
+                        scope,
+                    ),
+                    condition(
+                        "COMPUTED_RECONCILIATION_CURRENT",
+                        "最新计算型对账一致",
+                        [
+                            item
+                            for item in blockers
+                            if item.startswith(
+                                (
+                                    f"COMPUTED_RECONCILIATION_MATCH_REQUIRED:{prefix}",
+                                    f"RECONCILIATION_STALE:{prefix}",
+                                )
+                            )
+                        ],
+                        "OPERATOR",
+                        "用最新事实重新运行计算型对账",
+                        scope,
+                    ),
+                ]
+            )
+        details.append(
+            condition(
+                "AUTO_ADD_REMAINS_DISABLED",
+                "恢复不会开启自动加仓",
+                [],
+                "SYSTEM",
+                "无需处理",
+            )
+        )
+        represented = {
+            reason for item in details for reason in item["reason"] if reason != "CURRENT"
+        }
+        for blocker in sorted(blocker_set - represented):
+            details.append(
+                condition(
+                    blocker.split(":", 1)[0],
+                    "其他实时安全条件",
+                    [blocker],
+                    "OPERATOR",
+                    "按精确阻断码处理后重新检查",
+                )
+            )
+        return details
+
     def risk_control_status(
         self,
         actor_id: UUID,
@@ -6165,7 +7706,13 @@ class TradingService:
             if gate is None:
                 _reject("CAPABILITY_GATE_NOT_FOUND", "AUTO_ADD gate is missing")
             campaigns = session.scalars(select(Campaign)).all()
-            scopes = self._canonical_restore_scopes(configured_scopes, list(campaigns))
+            scopes = self._canonical_restore_scopes(
+                configured_scopes,
+                list(campaigns),
+                required_environment=(
+                    ExecutionEnvironment.LIVE.value if require_live_scope else None
+                ),
+            )
             blockers = self._risk_restore_blockers(
                 session,
                 policy,
@@ -6200,6 +7747,59 @@ class TradingService:
                         "created_at": review.created_at.isoformat(),
                     }
                 )
+            assignments = session.scalars(
+                select(RoleAssignment).where(RoleAssignment.user_id == actor_id)
+            ).all()
+            role_names = {item.role for item in assignments}
+
+            def effective_request_status(item: RiskControlChangeRequest) -> str:
+                if (
+                    item.status
+                    in {
+                        RiskPolicyChangeStatus.PENDING_REVIEW.value,
+                        RiskPolicyChangeStatus.APPROVED.value,
+                    }
+                    and item.expires_at <= now
+                ):
+                    return RiskPolicyChangeStatus.EXPIRED.value
+                return item.status
+
+            active_request = next(
+                (
+                    item
+                    for item in requests
+                    if effective_request_status(item)
+                    in {
+                        RiskPolicyChangeStatus.PENDING_REVIEW.value,
+                        RiskPolicyChangeStatus.APPROVED.value,
+                    }
+                ),
+                None,
+            )
+            restricted = policy.system_state != SystemRiskState.NORMAL.value
+            is_admin = Role.SYSTEM_ADMIN.value in role_names
+            is_operator = Role.OPERATOR.value in role_names
+            is_reviewer = Role.REVIEWER.value in role_names
+            direct_allowed = is_admin and restricted and not blockers
+            request_allowed = is_operator and restricted and active_request is None
+            review_allowed = bool(
+                is_reviewer
+                and active_request is not None
+                and active_request.status == RiskPolicyChangeStatus.PENDING_REVIEW.value
+                and active_request.requester_id != actor_id
+                and not any(
+                    review["reviewer_id"] == str(actor_id)
+                    for review in reviews_by_request.get(active_request.request_id, [])
+                )
+            )
+            execute_allowed = bool(
+                (is_reviewer or is_admin)
+                and active_request is not None
+                and active_request.status == RiskPolicyChangeStatus.APPROVED.value
+                and active_request.requester_id != actor_id
+                and not blockers
+                and active_request.execute_after <= now
+            )
             return {
                 "policy": {
                     "policy_id": str(policy.policy_id),
@@ -6223,14 +7823,57 @@ class TradingService:
                     "ready": not blockers,
                     "live_scope_required": require_live_scope,
                     "blockers": blockers,
+                    "checks": self._risk_restore_condition_details(blockers, scopes),
                     "required_scopes": scopes,
                     "cooldown_seconds": int(RISK_RESTORE_COOLDOWN.total_seconds()),
+                },
+                "actions": {
+                    "direct_restore": {
+                        "allowed": direct_allowed,
+                        "reason": (
+                            "READY"
+                            if direct_allowed
+                            else "SYSTEM_ADMIN_REQUIRED"
+                            if not is_admin
+                            else "SYSTEM_ALREADY_NORMAL"
+                            if not restricted
+                            else "REALTIME_CONDITIONS_BLOCKED"
+                        ),
+                    },
+                    "request_restore": {
+                        "allowed": request_allowed,
+                        "reason": (
+                            "READY"
+                            if request_allowed
+                            else "OPERATOR_REQUIRED"
+                            if not is_operator
+                            else "SYSTEM_ALREADY_NORMAL"
+                            if not restricted
+                            else "RESTORE_REQUEST_ALREADY_ACTIVE"
+                        ),
+                    },
+                    "review_restore": {
+                        "allowed": review_allowed,
+                        "reason": (
+                            "READY"
+                            if review_allowed
+                            else "INDEPENDENT_REVIEWER_REQUIRED"
+                            if not is_reviewer
+                            else "NO_REVIEWABLE_REQUEST"
+                        ),
+                    },
+                    "execute_restore": {
+                        "allowed": execute_allowed,
+                        "reason": (
+                            "READY" if execute_allowed else "EXECUTION_REQUIREMENTS_NOT_MET"
+                        ),
+                    },
                 },
                 "requests": [
                     {
                         "request_id": str(item.request_id),
                         "requester_id": str(item.requester_id),
-                        "status": item.status,
+                        "status": effective_request_status(item),
                         "version": item.version,
                         "reason": item.reason,
                         "restore_auto_add": item.restore_auto_add,
@@ -6286,10 +7929,37 @@ class TradingService:
             "require_live_scope": require_live_scope,
         }
         with self.database.session_factory.begin() as session:
-            self._require_role(session, actor_id, operation)
             requester = session.get(User, actor_id)
             if requester is None or requester.principal_type != PrincipalType.HUMAN.value:
                 _reject("SERVICE_REQUEST_FORBIDDEN", "risk restoration requires a human requester")
+            operator_assignments = session.scalars(
+                select(RoleAssignment).where(
+                    RoleAssignment.user_id == actor_id,
+                    RoleAssignment.role == Role.OPERATOR.value,
+                )
+            ).all()
+            if not operator_assignments:
+                _reject(
+                    "RISK_RESTORE_OPERATOR_REQUIRED",
+                    "reviewed risk restoration must be requested by an operator",
+                )
+            if any(
+                not any(
+                    (assignment.account_scope is None or assignment.account_scope == account_id)
+                    and (assignment.venue_scope is None or assignment.venue_scope == venue)
+                    for assignment in operator_assignments
+                )
+                for _environment, account_id, venue in configured_scopes
+            ):
+                _reject(
+                    "RBAC_DENIED",
+                    "risk restoration scope is outside the operator assignment",
+                )
+            if restore_auto_add:
+                _reject(
+                    "AUTO_ADD_RESTORE_FORBIDDEN",
+                    "risk restoration never enables the AUTO_ADD gate",
+                )
             digest, response = self._idempotency(
                 session,
                 caller_id=str(actor_id),
@@ -6313,20 +7983,50 @@ class TradingService:
                 not restore_auto_add or gate.status == CapabilityStatus.ENABLED.value
             ):
                 _reject("RISK_CONTROL_ALREADY_NORMAL", "the requested controls are already open")
-            pending = session.scalar(
-                select(RiskControlChangeRequest.request_id).where(
-                    RiskControlChangeRequest.status.in_(
-                        {
-                            RiskPolicyChangeStatus.PENDING_REVIEW.value,
-                            RiskPolicyChangeStatus.APPROVED.value,
-                        }
+            existing_requests = list(
+                session.scalars(
+                    select(RiskControlChangeRequest)
+                    .where(
+                        RiskControlChangeRequest.status.in_(
+                            {
+                                RiskPolicyChangeStatus.PENDING_REVIEW.value,
+                                RiskPolicyChangeStatus.APPROVED.value,
+                            }
+                        )
                     )
+                    .with_for_update()
                 )
             )
+            pending = None
+            for existing_request in existing_requests:
+                if existing_request.expires_at <= now:
+                    existing_request.status = RiskPolicyChangeStatus.EXPIRED.value
+                    existing_request.version += 1
+                    existing_request.updated_at = now
+                    self._audit(
+                        session,
+                        actor_id=str(actor_id),
+                        event_type="RISK_RESTORE_EXPIRED",
+                        object_type="RiskControlChangeRequest",
+                        object_id=existing_request.request_id,
+                        reason="restore request expired before a replacement was created",
+                        correlation_id=existing_request.correlation_id,
+                        object_version=existing_request.version,
+                        idempotency_key=idempotency_key,
+                        now=now,
+                    )
+                else:
+                    pending = existing_request.request_id
             if pending is not None:
                 _reject("RISK_RESTORE_ALREADY_PENDING", "a reviewed restore is already active")
             campaigns = list(session.scalars(select(Campaign)).all())
-            scopes = self._canonical_restore_scopes(configured_scopes, campaigns)
+            scopes = self._canonical_restore_scopes(
+                configured_scopes,
+                campaigns,
+                required_environment=(
+                    ExecutionEnvironment.LIVE.value if require_live_scope else None
+                ),
+            )
             last_tighten_at = max(
                 policy.updated_at,
                 gate.updated_at if restore_auto_add else policy.updated_at,
@@ -6458,7 +8158,7 @@ class TradingService:
                             Approval.decision == ReviewDecision.APPROVE.value,
                         )
                     )
-                    if int(approvals or 0) >= 2:
+                    if int(approvals or 0) >= 1:
                         request.status = RiskPolicyChangeStatus.APPROVED.value
                 request.version += 1
                 request.updated_at = now
@@ -6529,7 +8229,7 @@ class TradingService:
             if request.version != expected_version:
                 _reject("VERSION_CONFLICT", "restore request changed before execution")
             if request.status != RiskPolicyChangeStatus.APPROVED.value:
-                _reject("RISK_RESTORE_NOT_APPROVED", "two independent approvals are required")
+                _reject("RISK_RESTORE_NOT_APPROVED", "an independent approval is required")
             if request.expires_at <= now:
                 _reject("RISK_RESTORE_EXPIRED", "restore request expired before execution")
             if request.execute_after > now:
@@ -6540,8 +8240,10 @@ class TradingService:
                     Approval.decision == ReviewDecision.APPROVE.value,
                 )
             ).all()
-            if len({approval.reviewer_id for approval in approvals}) < 2:
-                _reject("RISK_RESTORE_NOT_APPROVED", "two independent approvals are required")
+            if len({approval.reviewer_id for approval in approvals}) < 1:
+                _reject("RISK_RESTORE_NOT_APPROVED", "an independent approval is required")
+            if request.requester_id == actor_id:
+                _reject("SELF_EXECUTION_FORBIDDEN", "requester cannot execute their restore")
             self._lock_risk_capacity(session)
             policy = self._active_risk_policy(session)
             gate = session.get(CapabilityGate, "AUTO_ADD", with_for_update=True)
@@ -6556,7 +8258,13 @@ class TradingService:
             ):
                 _reject("RISK_RESTORE_CONTROL_DRIFT", "risk controls changed after the request")
             campaigns = list(session.scalars(select(Campaign)).all())
-            current_scopes = self._canonical_restore_scopes(configured_scopes, campaigns)
+            current_scopes = self._canonical_restore_scopes(
+                configured_scopes,
+                campaigns,
+                required_environment=(
+                    ExecutionEnvironment.LIVE.value if request.require_live_scope else None
+                ),
+            )
             if current_scopes != request.required_scopes:
                 _reject("RISK_RESTORE_SCOPE_DRIFT", "controlled scopes changed after the request")
             if request.require_live_scope != require_live_scope:
@@ -6588,12 +8296,16 @@ class TradingService:
             )
             session.add(restored)
             session.flush()
-            if request.restore_auto_add:
-                gate.status = CapabilityStatus.ENABLED.value
-                gate.reason = request.reason
-                gate.operator_id = str(actor_id)
-                gate.version += 1
-                gate.updated_at = now
+            authorizations = session.scalars(
+                select(TradingAuthorization)
+                .where(TradingAuthorization.active)
+                .order_by(TradingAuthorization.authorization_id)
+                .with_for_update()
+            ).all()
+            for authorization in authorizations:
+                authorization.active = False
+                if authorization.add_revoked_at is None:
+                    authorization.add_revoked_at = now
             request.status = RiskPolicyChangeStatus.EXECUTED.value
             request.resulting_policy_id = restored.policy_id
             request.executed_at = now
@@ -6618,6 +8330,117 @@ class TradingService:
                 reason=request.reason,
                 correlation_id=request.correlation_id,
                 object_version=request.version,
+                idempotency_key=idempotency_key,
+                now=now,
+            )
+            return restored.policy_id
+
+    def direct_restore_risk_controls(
+        self,
+        actor_id: UUID,
+        idempotency_key: str,
+        *,
+        reason: str,
+        configured_scopes: tuple[tuple[str, str, str], ...],
+        require_live_scope: bool = True,
+        now: datetime,
+    ) -> UUID:
+        operation = "risk.restore.direct"
+        payload = {
+            "reason": reason,
+            "configured_scopes": configured_scopes,
+            "require_live_scope": require_live_scope,
+        }
+        with self.database.session_factory.begin() as session:
+            self._require_role(session, actor_id, operation)
+            assignments = session.scalars(
+                select(RoleAssignment).where(RoleAssignment.user_id == actor_id)
+            ).all()
+            if not any(item.role == Role.SYSTEM_ADMIN.value for item in assignments):
+                _reject(
+                    "RISK_RESTORE_ADMIN_REQUIRED",
+                    "direct risk restoration requires SYSTEM_ADMIN",
+                )
+            actor = session.get(User, actor_id)
+            if actor is None or actor.principal_type != PrincipalType.HUMAN.value:
+                _reject("SERVICE_EXECUTION_FORBIDDEN", "direct restoration requires a human")
+            digest, response = self._idempotency(
+                session,
+                caller_id=str(actor_id),
+                operation=operation,
+                idempotency_key=idempotency_key,
+                payload=payload,
+            )
+            if response is not None:
+                return _as_uuid(str(response["policy_id"]))
+            self._lock_risk_capacity(session)
+            policy = self._active_risk_policy(session)
+            if policy.system_state == SystemRiskState.NORMAL.value:
+                _reject("RISK_CONTROL_ALREADY_NORMAL", "risk policy is already normal")
+            gate = session.get(CapabilityGate, "AUTO_ADD", with_for_update=True)
+            if gate is None:
+                _reject("CAPABILITY_GATE_NOT_FOUND", "AUTO_ADD gate is missing")
+            campaigns = list(session.scalars(select(Campaign)).all())
+            scopes = self._canonical_restore_scopes(
+                configured_scopes,
+                campaigns,
+                required_environment=(
+                    ExecutionEnvironment.LIVE.value if require_live_scope else None
+                ),
+            )
+            blockers = self._risk_restore_blockers(
+                session,
+                policy,
+                scopes,
+                require_live_scope=require_live_scope,
+                now=now,
+            )
+            if blockers:
+                _reject("RISK_RESTORE_BLOCKED", ",".join(blockers))
+            policy.active = False
+            next_revision = policy.revision + 1
+            restored = RiskPolicy(
+                version=f"direct-restore-{next_revision}-{uuid4().hex[:12]}",
+                revision=next_revision,
+                system_state=SystemRiskState.NORMAL.value,
+                max_total_risk=policy.max_total_risk,
+                max_fact_age_seconds=policy.max_fact_age_seconds,
+                reason=reason,
+                active=True,
+                updated_by=str(actor_id),
+                updated_at=now,
+            )
+            session.add(restored)
+            session.flush()
+            authorizations = session.scalars(
+                select(TradingAuthorization)
+                .where(TradingAuthorization.active)
+                .order_by(TradingAuthorization.authorization_id)
+                .with_for_update()
+            ).all()
+            for authorization in authorizations:
+                authorization.active = False
+                if authorization.add_revoked_at is None:
+                    authorization.add_revoked_at = now
+            result = {"policy_id": str(restored.policy_id)}
+            self._save_receipt(
+                session,
+                caller_id=str(actor_id),
+                operation=operation,
+                idempotency_key=idempotency_key,
+                semantic_hash=digest,
+                response=result,
+                now=now,
+            )
+            self._audit(
+                session,
+                actor_id=str(actor_id),
+                event_type="RISK_RESTORE_DIRECT_EXECUTED",
+                object_type="RiskPolicy",
+                object_id=restored.policy_id,
+                reason=reason,
+                correlation_id=uuid4(),
+                object_version=restored.revision,
                 idempotency_key=idempotency_key,
                 now=now,
             )
@@ -6871,8 +8694,10 @@ class TradingService:
                         differences.append(f"ORDER_INTENT_OVERFILLED:{intent.intent_id}")
                     if intent.status == OrderIntentStatus.UNKNOWN.value:
                         unknown.append(f"ORDER_INTENT_UNKNOWN:{intent.intent_id}")
-                    if intent.status == OrderIntentStatus.FILLED.value and (
-                        intent_fill_quantity != intent.quantity
+                    if (
+                        intent.status == OrderIntentStatus.FILLED.value
+                        and intent_order is not None
+                        and intent_fill_quantity != intent_order.filled_quantity
                     ):
                         differences.append(f"INTENT_FILL_STATE_MISMATCH:{intent.intent_id}")
 
@@ -7138,6 +8963,418 @@ class TradingService:
         campaign.final_pnl = result.total_pnl
         campaign.updated_at = now
         return result
+
+    @staticmethod
+    def _direct_capital_configuration_payload(
+        config: DirectCapitalConfiguration,
+        updater: User | None,
+    ) -> dict[str, Any]:
+        return {
+            "config_id": str(config.config_id),
+            "version": config.version,
+            "network": config.network,
+            "asset": config.asset,
+            "vault_id": config.vault_id,
+            "vault_address": config.vault_address,
+            "owned_arbitrum_address": config.owned_arbitrum_address,
+            "binance_account_id": config.binance_account_id,
+            "binance_deposit_address": config.binance_deposit_address,
+            "binance_withdrawal_address": config.binance_withdrawal_address,
+            "hyperliquid_account_id": config.hyperliquid_account_id,
+            "hyperliquid_bridge_address": config.hyperliquid_bridge_address,
+            "max_amount": None if config.max_amount is None else str(config.max_amount),
+            "max_fee": None if config.max_fee is None else str(config.max_fee),
+            "updated_by": str(config.updated_by),
+            "updated_by_username": None if updater is None else updater.username,
+            "effective_at": config.effective_at.isoformat(),
+        }
+
+    def direct_capital_configuration(self, actor_id: UUID) -> dict[str, Any] | None:
+        with self.database.session_factory() as session:
+            self._require_role(session, actor_id, "capital.view")
+            config = session.scalar(
+                select(DirectCapitalConfiguration).where(DirectCapitalConfiguration.active)
+            )
+            if config is None:
+                return None
+            return self._direct_capital_configuration_payload(
+                config,
+                session.get(User, config.updated_by),
+            )
+
+    def set_direct_capital_configuration(
+        self,
+        actor_id: UUID,
+        idempotency_key: str,
+        *,
+        network: str,
+        asset: str,
+        vault_id: str | None,
+        vault_address: str | None,
+        owned_arbitrum_address: str | None,
+        binance_account_id: str | None,
+        binance_deposit_address: str | None,
+        binance_withdrawal_address: str | None,
+        hyperliquid_account_id: str | None,
+        hyperliquid_bridge_address: str | None,
+        max_amount: Decimal | None,
+        max_fee: Decimal | None,
+        now: datetime,
+    ) -> UUID:
+        operation = "capital.configuration.manage"
+        payload = {
+            "network": network,
+            "asset": asset,
+            "vault_id": vault_id,
+            "vault_address": vault_address,
+            "owned_arbitrum_address": owned_arbitrum_address,
+            "binance_account_id": binance_account_id,
+            "binance_deposit_address": binance_deposit_address,
+            "binance_withdrawal_address": binance_withdrawal_address,
+            "hyperliquid_account_id": hyperliquid_account_id,
+            "hyperliquid_bridge_address": hyperliquid_bridge_address,
+            "max_amount": None if max_amount is None else str(max_amount),
+            "max_fee": None if max_fee is None else str(max_fee),
+        }
+        if network != "ARBITRUM" or asset != "USDC":
+            _reject(
+                "CAPITAL_CONFIGURATION_UNTRUSTED",
+                "direct capital paths only support the trusted Arbitrum USDC catalog",
+            )
+        if max_amount is not None and max_amount <= 0:
+            _reject("CAPITAL_CONFIGURATION_INVALID", "maximum amount must be positive")
+        if max_fee is not None and max_fee < 0:
+            _reject("CAPITAL_CONFIGURATION_INVALID", "maximum fee cannot be negative")
+        if max_amount is not None and max_fee is not None and max_fee >= max_amount:
+            _reject(
+                "CAPITAL_CONFIGURATION_INVALID",
+                "maximum fee must be lower than maximum amount",
+            )
+        if (
+            owned_arbitrum_address is not None
+            and binance_withdrawal_address is not None
+            and owned_arbitrum_address.lower() != binance_withdrawal_address.lower()
+        ):
+            _reject(
+                "CAPITAL_BINANCE_WITHDRAWAL_ADDRESS_NOT_OWNED",
+                "Binance withdrawal must target the authorized owned wallet",
+            )
+        with self.database.session_factory.begin() as session:
+            self._require_role(session, actor_id, operation)
+            assignments = session.scalars(
+                select(RoleAssignment).where(RoleAssignment.user_id == actor_id)
+            ).all()
+            if not any(item.role == Role.SYSTEM_ADMIN.value for item in assignments):
+                _reject(
+                    "CAPITAL_CONFIGURATION_ADMIN_REQUIRED",
+                    "direct capital configuration requires SYSTEM_ADMIN",
+                )
+            digest, response = self._idempotency(
+                session,
+                caller_id=str(actor_id),
+                operation=operation,
+                idempotency_key=idempotency_key,
+                payload=payload,
+            )
+            if response is not None:
+                return _as_uuid(str(response["config_id"]))
+            current = session.scalar(
+                select(DirectCapitalConfiguration)
+                .where(DirectCapitalConfiguration.active)
+                .with_for_update()
+            )
+            next_version = 1 if current is None else current.version + 1
+            if current is not None:
+                current.active = False
+            config = DirectCapitalConfiguration(
+                version=next_version,
+                active=True,
+                network=network,
+                asset=asset,
+                vault_id=vault_id,
+                vault_address=vault_address,
+                owned_arbitrum_address=owned_arbitrum_address,
+                binance_account_id=binance_account_id,
+                binance_deposit_address=binance_deposit_address,
+                binance_withdrawal_address=binance_withdrawal_address,
+                hyperliquid_account_id=hyperliquid_account_id,
+                hyperliquid_bridge_address=hyperliquid_bridge_address,
+                max_amount=max_amount,
+                max_fee=max_fee,
+                updated_by=actor_id,
+                effective_at=now,
+            )
+            session.add(config)
+            session.flush()
+            result = {"config_id": str(config.config_id), "version": config.version}
+            self._save_receipt(
+                session,
+                caller_id=str(actor_id),
+                operation=operation,
+                idempotency_key=idempotency_key,
+                semantic_hash=digest,
+                response=result,
+                now=now,
+            )
+            self._audit(
+                session,
+                actor_id=str(actor_id),
+                event_type="CAPITAL_DIRECT_CONFIGURATION_UPDATED",
+                object_type="DirectCapitalConfiguration",
+                object_id=config.config_id,
+                reason=f"version={config.version}; network=ARBITRUM; asset=USDC",
+                correlation_id=uuid4(),
+                object_version=config.version,
+                idempotency_key=idempotency_key,
+                now=now,
+            )
+            return config.config_id
+
+    def create_direct_capital_operation(
+        self,
+        *,
+        actor_id: UUID,
+        plan: DirectCapitalPlan,
+        final_confirmed: bool,
+        idempotency_key: str,
+        now: datetime,
+    ) -> UUID:
+        if not final_confirmed:
+            _reject(
+                "CAPITAL_FINAL_CONFIRMATION_REQUIRED",
+                "direct capital operations require explicit final confirmation",
+            )
+        payload = {
+            "path": plan.path.value,
+            "venue": plan.venue,
+            "account_id": plan.account_id,
+            "vault_id": plan.vault_id,
+            "asset": plan.asset,
+            "network": plan.network,
+            "amount": str(plan.amount),
+            "max_fee": None if plan.max_fee is None else str(plan.max_fee),
+            "min_received": None if plan.min_received is None else str(plan.min_received),
+            "source_reference": plan.source_reference,
+            "destination_reference": plan.destination_reference,
+            "stages": list(plan.stages),
+            "blockers": list(plan.blockers),
+            "execute_after": (
+                None if plan.execute_after is None else plan.execute_after.isoformat()
+            ),
+            "expires_at": plan.expires_at.isoformat(),
+            "final_confirmed": True,
+        }
+        operation = "capital.direct.create"
+        with self.database.session_factory.begin() as session:
+            self._require_role(
+                session,
+                actor_id,
+                "capital.execute",
+                plan.account_id,
+                plan.venue,
+            )
+            digest, response = self._idempotency(
+                session,
+                caller_id=str(actor_id),
+                operation=operation,
+                idempotency_key=idempotency_key,
+                payload=payload,
+            )
+            if response is not None:
+                return _as_uuid(str(response["operation_id"]))
+            correlation_id = uuid4()
+            direct_operation = DirectCapitalOperation(
+                path=plan.path.value,
+                status=plan.status,
+                receipt_status=plan.receipt_status,
+                account_id=plan.account_id,
+                venue=plan.venue,
+                vault_id=plan.vault_id,
+                asset=plan.asset,
+                network=plan.network,
+                amount=plan.amount,
+                max_fee=plan.max_fee,
+                min_received=plan.min_received,
+                source_reference=plan.source_reference,
+                destination_reference=plan.destination_reference,
+                stages=list(plan.stages),
+                blockers=list(plan.blockers),
+                execute_after=plan.execute_after,
+                expires_at=plan.expires_at,
+                final_confirmed_at=now,
+                actor_id=actor_id,
+                correlation_id=correlation_id,
+                idempotency_key=idempotency_key,
+                version=1,
+                created_at=now,
+                updated_at=now,
+            )
+            session.add(direct_operation)
+            session.flush()
+            result = {"operation_id": str(direct_operation.operation_id)}
+            self._save_receipt(
+                session,
+                caller_id=str(actor_id),
+                operation=operation,
+                idempotency_key=idempotency_key,
+                semantic_hash=digest,
+                response=result,
+                now=now,
+            )
+            self._audit(
+                session,
+                actor_id=str(actor_id),
+                event_type="CAPITAL_DIRECT_OPERATION_BLOCKED",
+                object_type="DirectCapitalOperation",
+                object_id=direct_operation.operation_id,
+                reason=",".join(plan.blockers),
+                correlation_id=correlation_id,
+                object_version=1,
+                idempotency_key=idempotency_key,
+                now=now,
+            )
+            return direct_operation.operation_id
+
+    def direct_capital_operation_context(
+        self,
+        operation_id: UUID,
+        actor_id: UUID,
+        *,
+        now: datetime,
+    ) -> dict[str, Any]:
+        with self.database.session_factory() as session:
+            item = session.get(DirectCapitalOperation, operation_id)
+            if item is None:
+                _reject("CAPITAL_DIRECT_OPERATION_NOT_FOUND", "direct capital operation is missing")
+            self._require_role(session, actor_id, "capital.execute", item.account_id, item.venue)
+            if item.expires_at <= now:
+                _reject("CAPITAL_DIRECT_OPERATION_EXPIRED", "direct capital operation expired")
+            return {
+                "operation_id": str(item.operation_id),
+                "path": item.path,
+                "version": item.version,
+                "status": item.status,
+                "blockers": list(item.blockers),
+                "account_id": item.account_id,
+                "venue": item.venue,
+                "vault_id": item.vault_id,
+                "asset": item.asset,
+                "network": item.network,
+                "amount": str(item.amount),
+                "min_received": (
+                    str(item.amount) if item.min_received is None else str(item.min_received)
+                ),
+                "source_reference": item.source_reference,
+                "destination_reference": item.destination_reference,
+            }
+
+    def record_direct_capital_unsigned_preview(
+        self,
+        operation_id: UUID,
+        actor_id: UUID,
+        *,
+        expected_version: int,
+        final_confirmed: bool,
+        transactions: tuple[NoTiltUnsignedTransaction, ...],
+        idempotency_key: str,
+        now: datetime,
+    ) -> int:
+        if not final_confirmed:
+            _reject(
+                "CAPITAL_FINAL_CONFIRMATION_REQUIRED",
+                "unsigned SDK preview requires explicit final confirmation",
+            )
+        if not transactions:
+            _reject("NOTILT_PLAN_EMPTY", "NoTilt SDK returned no unsigned transactions")
+        serialized = [item.to_dict() for item in transactions]
+        operation = "capital.direct.notilt_unsigned_preview"
+        with self.database.session_factory.begin() as session:
+            item = session.get(DirectCapitalOperation, operation_id, with_for_update=True)
+            if item is None:
+                _reject("CAPITAL_DIRECT_OPERATION_NOT_FOUND", "direct capital operation is missing")
+            self._require_role(session, actor_id, "capital.execute", item.account_id, item.venue)
+            payload = {
+                "operation_id": str(operation_id),
+                "expected_version": expected_version,
+                "transactions": serialized,
+                "final_confirmed": True,
+            }
+            digest, response = self._idempotency(
+                session,
+                caller_id=str(actor_id),
+                operation=operation,
+                idempotency_key=idempotency_key,
+                payload=payload,
+            )
+            if response is not None:
+                return int(response["version"])
+            if item.version != expected_version:
+                _reject("VERSION_CONFLICT", "direct capital operation changed; refresh first")
+            if item.expires_at <= now:
+                _reject("CAPITAL_DIRECT_OPERATION_EXPIRED", "direct capital operation expired")
+            if item.path not in {
+                DirectCapitalPath.VAULT_TO_BINANCE.value,
+                DirectCapitalPath.VAULT_TO_HYPERLIQUID.value,
+                DirectCapitalPath.BINANCE_TO_VAULT.value,
+                DirectCapitalPath.HYPERLIQUID_TO_VAULT.value,
+            }:
+                _reject("CAPITAL_DIRECT_PATH_INVALID", "direct capital path is unsupported")
+            allowed_functions = (
+                {"requestWhitelistRelease"}
+                if item.path
+                in {
+                    DirectCapitalPath.VAULT_TO_BINANCE.value,
+                    DirectCapitalPath.VAULT_TO_HYPERLIQUID.value,
+                }
+                else {"approve", "deposit"}
+            )
+            if any(
+                transaction.function_name not in allowed_functions for transaction in transactions
+            ):
+                _reject(
+                    "NOTILT_PLAN_INVALID",
+                    "NoTilt SDK preview contains a function outside the fixed path",
+                )
+            stage_code = (
+                "NOTILT_UNSIGNED_RELEASE_REQUEST_PREVIEW"
+                if "requestWhitelistRelease" in allowed_functions
+                else "NOTILT_UNSIGNED_DEPOSIT_PREVIEW"
+            )
+            item.stages = [
+                *item.stages,
+                {
+                    "code": stage_code,
+                    "status": "READY_FOR_HUMAN_REVIEW",
+                    "transactions": serialized,
+                    "prepared_at": now.isoformat(),
+                    "broadcast": False,
+                },
+            ]
+            item.version += 1
+            item.updated_at = now
+            result = {"operation_id": str(operation_id), "version": item.version}
+            self._save_receipt(
+                session,
+                caller_id=str(actor_id),
+                operation=operation,
+                idempotency_key=idempotency_key,
+                semantic_hash=digest,
+                response=result,
+                now=now,
+            )
+            self._audit(
+                session,
+                actor_id=str(actor_id),
+                event_type="CAPITAL_DIRECT_UNSIGNED_PREVIEW_PREPARED",
+                object_type="DirectCapitalOperation",
+                object_id=operation_id,
+                reason=f"{stage_code}; signing=false; broadcast=false",
+                correlation_id=item.correlation_id,
+                object_version=item.version,
+                idempotency_key=idempotency_key,
+                now=now,
+            )
+            return item.version
 
     def record_capital_balance(
         self,
@@ -9143,3 +11380,14 @@ class TradingService:
             gate.operator_id = str(actor_id)
             gate.version += 1
             gate.updated_at = now
+            self._audit(
+                session,
+                actor_id=str(actor_id),
+                event_type="CAPABILITY_GATE_UPDATED",
+                object_type="CapabilityGate",
+                object_id=capability_key,
+                reason=f"{status.value}:{reason}",
+                correlation_id=uuid4(),
+                object_version=gate.version,
+                now=now,
+            )

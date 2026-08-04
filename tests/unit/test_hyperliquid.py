@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import urllib.error
 from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
@@ -142,6 +143,244 @@ def test_core_info_contract_maps_required_facts_without_exchange_actions() -> No
     assert not hasattr(client, "exchange")
 
 
+def test_bounded_info_fetch_classifies_persistent_rate_limit(monkeypatch: Any) -> None:
+    attempts = 0
+
+    def rate_limited(*args: Any, **kwargs: Any) -> Any:
+        nonlocal attempts
+        del args, kwargs
+        attempts += 1
+        raise urllib.error.HTTPError(
+            "https://api.hyperliquid.xyz/info", 429, "rate limited", {}, None
+        )
+
+    monkeypatch.setattr(hyperliquid.urllib.request, "urlopen", rate_limited)
+    monkeypatch.setattr(hyperliquid.time, "sleep", lambda _seconds: None)
+
+    with pytest.raises(DomainRejected, match="HYPERLIQUID_RATE_LIMITED"):
+        hyperliquid._default_fetcher(
+            "https://api.hyperliquid.xyz/info",
+            {"type": "metaAndAssetCtxs", "dex": ""},
+            5,
+        )
+    assert attempts == 4
+
+
+def test_active_catalog_uses_complete_core_meta_and_omits_delisted() -> None:
+    responses = contract_payloads()
+    meta_contexts = responses["metaAndAssetCtxs"]
+    assert isinstance(meta_contexts, list)
+    assert isinstance(meta_contexts[0], dict)
+    assert isinstance(meta_contexts[1], list)
+    meta_contexts[0]["universe"].extend(
+        [
+            {"name": "HYPE", "szDecimals": 2},
+            {"name": "kPEPE", "szDecimals": 0},
+            {"name": "OLD", "szDecimals": 3, "isDelisted": True},
+        ]
+    )
+    meta_contexts[1].extend(
+        [
+            {"markPx": "45", "funding": "0.0001"},
+            {"markPx": "0.01", "funding": "0.0001"},
+            {"markPx": "1", "funding": "0"},
+        ]
+    )
+    client, calls = client_with_contract(responses)
+
+    instruments = client.read_active_instruments()
+
+    assert [instrument.symbol for instrument in instruments] == ["BTC", "HYPE", "kPEPE"]
+    assert all(instrument.active for instrument in instruments)
+    assert calls == [
+        (
+            "https://api.hyperliquid-testnet.xyz/info",
+            {"type": "metaAndAssetCtxs", "dex": ""},
+            5.0,
+        )
+    ]
+
+
+def test_active_catalog_includes_explicit_freqtrade_hip3_dexes() -> None:
+    calls: list[dict[str, Any]] = []
+
+    def fetcher(
+        url: str, payload: dict[str, Any], timeout: float
+    ) -> dict[str, Any] | list[Any] | str:
+        assert url == "https://api.hyperliquid.xyz/info"
+        assert timeout == 5
+        calls.append(payload)
+        if payload["dex"] == "":
+            return [
+                {"universe": [{"name": "BTC", "szDecimals": 5}]},
+                [{"markPx": "61000", "funding": "0.0001"}],
+            ]
+        assert payload["dex"] == "xyz"
+        return [
+            {
+                "collateralToken": 0,
+                "universe": [
+                    {"name": "xyz:TSLA", "szDecimals": 3},
+                    {"name": "SP500", "szDecimals": 2},
+                ],
+            },
+            [
+                {"markPx": "325.19", "funding": "0.0001"},
+                {"markPx": "7612.15", "funding": "0.0001"},
+            ],
+        ]
+
+    client = HyperliquidReadOnlyClient(
+        base_url="https://api.hyperliquid.xyz",
+        account_address=ACCOUNT,
+        hip3_dexes=("xyz",),
+        fetcher=fetcher,
+    )
+
+    instruments = client.read_active_instruments()
+
+    assert [item.symbol for item in instruments] == ["BTC", "xyz:SP500", "xyz:TSLA"]
+    assert instruments[1].lot_size == Decimal("0.01")
+    assert instruments[2].tick_size == Decimal("0.001")
+    assert calls == [
+        {"type": "metaAndAssetCtxs", "dex": ""},
+        {"type": "metaAndAssetCtxs", "dex": "xyz"},
+    ]
+
+
+def test_hip3_snapshot_uses_dex_scoped_current_facts_and_global_history() -> None:
+    observed_ms = int(NOW.timestamp() * 1_000)
+    calls: list[dict[str, Any]] = []
+
+    def fetcher(
+        url: str, payload: dict[str, Any], timeout: float
+    ) -> dict[str, Any] | list[Any] | str:
+        assert url == "https://api.hyperliquid.xyz/info"
+        assert timeout == 5
+        calls.append(payload)
+        response_type = payload["type"]
+        if response_type == "metaAndAssetCtxs":
+            assert payload["dex"] == "xyz"
+            return [
+                {
+                    "collateralToken": 0,
+                    "universe": [{"name": "TSLA", "szDecimals": 3}],
+                },
+                [{"markPx": "325.19", "funding": "0.0001"}],
+            ]
+        if response_type == "clearinghouseState":
+            assert payload["dex"] == "xyz"
+            return {
+                "marginSummary": {"accountValue": "31.5"},
+                "withdrawable": "20",
+                "time": observed_ms,
+                "assetPositions": [
+                    {
+                        "type": "oneWay",
+                        "position": {
+                            "coin": "xyz:TSLA",
+                            "szi": "0.04",
+                            "entryPx": "325",
+                        },
+                    }
+                ],
+            }
+        if response_type == "userAbstraction":
+            return "disabled"
+        if response_type == "frontendOpenOrders":
+            assert payload["dex"] == "xyz"
+            return [
+                {
+                    "coin": "xyz:TSLA",
+                    "oid": 701,
+                    "side": "A",
+                    "sz": "0.04",
+                    "origSz": "0.04",
+                    "timestamp": observed_ms,
+                    "triggerPx": "320",
+                    "isTrigger": True,
+                    "reduceOnly": True,
+                }
+            ]
+        if response_type == "userFillsByTime":
+            assert "dex" not in payload
+            return [
+                {
+                    "coin": "xyz:TSLA",
+                    "oid": 700,
+                    "tid": 702,
+                    "side": "B",
+                    "px": "325",
+                    "sz": "0.04",
+                    "fee": "0.01",
+                    "time": observed_ms,
+                }
+            ]
+        if response_type == "userFunding":
+            assert "dex" not in payload
+            return [
+                {
+                    "time": observed_ms,
+                    "delta": {"coin": "xyz:TSLA", "usdc": "-0.001"},
+                }
+            ]
+        raise AssertionError(f"unexpected Hyperliquid request: {payload}")
+
+    client = HyperliquidReadOnlyClient(
+        base_url="https://api.hyperliquid.xyz",
+        account_address=ACCOUNT,
+        hip3_dexes=("xyz",),
+        fetcher=fetcher,
+    )
+
+    snapshot = client.read_snapshot("xyz:TSLA", now=NOW)
+
+    assert snapshot.symbol == "xyz:TSLA"
+    assert snapshot.instrument.symbol == "xyz:TSLA"
+    assert snapshot.position.quantity == Decimal("0.04")
+    assert snapshot.equity.equity == Decimal("31.5")
+    assert snapshot.fills[0].fill_id == "702"
+    assert snapshot.funding[0].amount == Decimal("-0.001")
+    assert snapshot.protection is not None
+    assert snapshot.protection.order_id == "701"
+    assert [call.get("dex") for call in calls[:4]] == ["xyz", "xyz", None, "xyz"]
+
+
+def test_hip3_symbol_requires_an_explicit_worker_dex_scope() -> None:
+    client = HyperliquidReadOnlyClient(
+        base_url="https://api.hyperliquid.xyz",
+        account_address=ACCOUNT,
+    )
+    with pytest.raises(DomainRejected, match="HYPERLIQUID_SYMBOL_INVALID"):
+        client.read_snapshot("xyz:TSLA", now=NOW)
+
+
+def test_configured_hip3_catalog_rejects_a_non_usdc_collateral_scope() -> None:
+    def fetcher(
+        url: str, payload: dict[str, Any], timeout: float
+    ) -> dict[str, Any] | list[Any] | str:
+        del url, timeout
+        if payload["dex"] == "":
+            return [
+                {"universe": [{"name": "BTC", "szDecimals": 5}]},
+                [{"markPx": "61000"}],
+            ]
+        return [
+            {"collateralToken": 7, "universe": [{"name": "ALT", "szDecimals": 2}]},
+            [{"markPx": "1"}],
+        ]
+
+    client = HyperliquidReadOnlyClient(
+        base_url="https://api.hyperliquid.xyz",
+        account_address=ACCOUNT,
+        hip3_dexes=("alt",),
+        fetcher=fetcher,
+    )
+
+    with pytest.raises(DomainRejected, match="HYPERLIQUID_HIP3_COLLATERAL_UNSUPPORTED"):
+        client.read_active_instruments()
+
+
 def test_account_snapshot_projects_every_clearinghouse_position_from_single_response() -> None:
     responses = contract_payloads()
     meta = responses["metaAndAssetCtxs"]
@@ -236,7 +475,7 @@ def test_core_only_and_official_host_boundaries_fail_before_network() -> None:
         with pytest.raises(ValueError, match="official API host"):
             HyperliquidReadOnlyClient(base_url=base_url, account_address=ACCOUNT)
 
-    with pytest.raises(ValueError, match="Core only"):
+    with pytest.raises(ValueError, match="Core reader"):
         HyperliquidReadOnlyClient(
             base_url="https://api.hyperliquid.xyz",
             account_address=ACCOUNT,
@@ -293,7 +532,7 @@ def test_flat_account_and_invalid_symbols_are_explicit() -> None:
     assert flat.protection is None
     before = len(calls)
     with pytest.raises(DomainRejected, match="HYPERLIQUID_SYMBOL_INVALID"):
-        client.read_snapshot("btc", now=NOW)
+        client.read_snapshot("BTC-PERP", now=NOW)
     assert len(calls) == before
 
 
@@ -405,6 +644,39 @@ def test_default_info_fetcher_retries_429_with_bounded_backoff(
     assert hyperliquid._default_fetcher("https://api.hyperliquid.xyz/info", {}, 1.0) == {"ok": True}
     assert attempts == 3
     assert delays == [0.5, 1.0]
+
+
+def test_default_info_fetcher_retries_transient_network_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    attempts = 0
+    delays: list[float] = []
+
+    def transient(*_args: object, **_kwargs: object) -> object:
+        nonlocal attempts
+        attempts += 1
+        if attempts < 3:
+            raise hyperliquid.urllib.error.URLError("temporary")
+
+        class Response:
+            def __enter__(self) -> Response:
+                return self
+
+            def __exit__(self, *_args: object) -> None:
+                return None
+
+            @staticmethod
+            def read() -> bytes:
+                return b'{"ok":true}'
+
+        return Response()
+
+    monkeypatch.setattr(hyperliquid.urllib.request, "urlopen", transient)
+    monkeypatch.setattr(hyperliquid.time, "sleep", delays.append)
+
+    assert hyperliquid._default_fetcher("https://api.hyperliquid.xyz/info", {}, 1.0) == {"ok": True}
+    assert attempts == 3
+    assert delays == [0.25, 0.5]
 
 
 def test_api_wallet_role_resolves_owning_main_account_without_using_agent_for_queries() -> None:

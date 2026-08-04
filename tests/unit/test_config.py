@@ -1,7 +1,7 @@
 import pytest
 from pydantic import ValidationError
 
-from trading_control_plane.config import Settings
+from trading_control_plane.config import Settings, get_settings
 
 
 def test_database_is_mandatory(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -39,11 +39,37 @@ def test_postgresql_psycopg_url_is_accepted() -> None:
     assert settings.perptape_websocket_url == "wss://perptape.com/ws/v1/alerts"
     assert settings.runtime_sync_enabled is False
     assert settings.runtime_sync_interval_seconds == 60
+    assert settings.execution_backend == "FREQTRADE"
+    assert settings.freqtrade_workers_enabled is False
+    assert settings.hyperliquid_hip3_dexes == ("xyz",)
     assert settings.notilt_enabled is False
     assert settings.notilt_vaults == {}
     assert not hasattr(settings, "hyperliquid_private_key")
     assert not hasattr(settings, "hyperliquid_vault_address")
     assert not hasattr(settings, "notilt_private_key")
+
+
+def test_explicit_config_directory_loads_both_secret_and_production_layers(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (tmp_path / ".env.local").write_text(
+        "TRADING_DATABASE_URL=postgresql+psycopg://user:pass@localhost/trading\n"
+        "TRADING_BINANCE_API_KEY=fixture-key\n"
+        "TRADING_BINANCE_API_SECRET=fixture-secret\n"
+    )
+    (tmp_path / ".env.production.local").write_text(
+        "TRADING_BINANCE_READ_ONLY_ENABLED=true\nTRADING_RUNTIME_BINANCE_ACCOUNT_ID=binance-main\n"
+    )
+    monkeypatch.setenv("TRADING_CONFIG_DIR", str(tmp_path))
+    get_settings.cache_clear()
+    try:
+        settings = get_settings()
+        assert settings.binance_read_only_enabled is True
+        assert settings.runtime_binance_account_id == "binance-main"
+        assert settings.binance_api_key == "fixture-key"
+        assert "fixture-secret" not in repr(settings)
+    finally:
+        get_settings.cache_clear()
 
 
 def test_hyperliquid_defaults_to_main_account_and_allows_explicit_subaccount() -> None:
@@ -129,6 +155,7 @@ def test_live_senders_remain_default_off_and_require_explicit_credentials() -> N
     database_url = "postgresql+psycopg://user:pass@localhost/trading"
     missing_binance = Settings(
         database_url=database_url,
+        execution_backend="DIRECT_LEGACY",
         binance_live_order_send_enabled=True,
         _env_file=None,
     )
@@ -137,6 +164,7 @@ def test_live_senders_remain_default_off_and_require_explicit_credentials() -> N
 
     missing_hyperliquid = Settings(
         database_url=database_url,
+        execution_backend="DIRECT_LEGACY",
         hyperliquid_live_order_send_enabled=True,
         _env_file=None,
     )
@@ -145,6 +173,7 @@ def test_live_senders_remain_default_off_and_require_explicit_credentials() -> N
 
     explicit = Settings(
         database_url=database_url,
+        execution_backend="DIRECT_LEGACY",
         binance_live_order_send_enabled=True,
         binance_api_key="fixture-key",
         binance_api_secret="fixture-secret",  # noqa: S106
@@ -200,11 +229,17 @@ def test_notilt_uses_public_agent_and_three_fixed_mainnet_vault_slots() -> None:
         ),
         ({"binance_testnet_api_key": "fixture-key"}, "testnet key and secret"),
         (
-            {"binance_testnet_order_send_enabled": True},
+            {
+                "execution_backend": "DIRECT_LEGACY",
+                "binance_testnet_order_send_enabled": True,
+            },
             "testnet send requires explicit",
         ),
         (
-            {"hyperliquid_testnet_order_send_enabled": True},
+            {
+                "execution_backend": "DIRECT_LEGACY",
+                "hyperliquid_testnet_order_send_enabled": True,
+            },
             "testnet send requires the main account",
         ),
         (

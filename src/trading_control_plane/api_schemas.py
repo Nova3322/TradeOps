@@ -9,6 +9,7 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 from trading_control_plane.domain import (
     CapitalDirection,
     CapitalTransferStatus,
+    DirectCapitalPath,
     Direction,
     RiskTier,
     TargetUrgency,
@@ -66,7 +67,7 @@ class ManualProposalRequest(BaseModel):
     quantity: Decimal = Field(gt=0)
     initial_quantity: Decimal | None = Field(default=None, gt=0)
     max_risk: Decimal = Field(gt=0)
-    expires_in_minutes: int = Field(default=120, ge=5, le=1_440)
+    expires_in_minutes: int = Field(default=480, ge=480, le=1_440)
     trigger_price: Decimal = Field(gt=0)
     limit_price: Decimal | None = Field(default=None, gt=0)
     invalidation_price: Decimal = Field(gt=0)
@@ -94,17 +95,39 @@ class SystemProposalRequest(BaseModel):
     quantity: Decimal = Field(gt=0)
     initial_quantity: Decimal | None = Field(default=None, gt=0)
     max_risk: Decimal = Field(gt=0)
-    expires_in_minutes: int = Field(default=120, ge=5, le=1_440)
+    expires_in_minutes: int = Field(default=480, ge=480, le=1_440)
     invalidation_price: Decimal = Field(gt=0)
     allow_auto_add: bool = False
     requested_adds: int = Field(default=0, ge=0, le=3)
     add_trigger_price: Decimal | None = Field(default=None, gt=0)
     rationale: str = Field(min_length=3, max_length=2_000)
+    configuration_mode: Literal["DEFAULT", "ADVANCED_OVERRIDE"] = "ADVANCED_OVERRIDE"
+    default_config_version: int | None = Field(default=None, ge=1)
 
     @model_validator(mode="after")
     def validate_auto_add_contract(self) -> SystemProposalRequest:
         _validate_auto_add_fields(self)
+        if self.configuration_mode == "DEFAULT" and self.default_config_version is None:
+            raise ValueError("DEFAULT mode requires default_config_version")
+        if (
+            self.configuration_mode == "ADVANCED_OVERRIDE"
+            and self.default_config_version is not None
+        ):
+            raise ValueError("advanced override cannot claim a default config version")
         return self
+
+
+class ProposalDefaultConfigRequest(BaseModel):
+    account_id: str = Field(min_length=1, max_length=120)
+    risk_tier: RiskTier
+    notional: Decimal = Field(gt=0)
+    max_risk: Decimal = Field(gt=0)
+    invalidation_bps: int = Field(ge=1, le=5_000)
+    expires_in_minutes: int = Field(ge=480, le=1_440)
+    rationale: str = Field(min_length=3, max_length=2_000)
+    auto_proposal_enabled: bool = False
+    auto_proposal_min_timeframes: Literal[3, 4] = 3
+    idempotency_key: str = Field(min_length=1, max_length=160)
 
 
 def _validate_auto_add_fields(value: ManualProposalRequest | SystemProposalRequest) -> None:
@@ -136,12 +159,20 @@ class ReviewRequest(BaseModel):
     action_grant: str | None = None
 
 
+class AdminDirectApproveRequest(BaseModel):
+    reason: str = Field(min_length=5, max_length=1_000)
+    expected_version: int = Field(ge=1)
+    action_grant: str
+
+
 class MockStepUpRequest(BaseModel):
     action: Literal[
         "proposal.approve",
+        "proposal.admin_approve",
         "capital.approve",
         "risk.restore.review",
         "risk.restore.execute",
+        "risk.restore.direct",
     ]
     object_id: UUID
     object_version: int = Field(ge=1)
@@ -309,6 +340,52 @@ class CapitalTransferCreateRequest(BaseModel):
     idempotency_key: str = Field(min_length=1, max_length=160)
 
 
+class DirectCapitalOperationRequest(BaseModel):
+    path: DirectCapitalPath
+    amount: Decimal = Field(gt=0)
+    final_confirmed: Literal[True]
+    idempotency_key: str = Field(min_length=1, max_length=160)
+
+
+class DirectCapitalUnsignedPlanRequest(BaseModel):
+    expected_version: int = Field(ge=1)
+    final_confirmed: Literal[True]
+    idempotency_key: str = Field(min_length=1, max_length=160)
+
+
+class DirectCapitalConfigurationRequest(BaseModel):
+    network: Literal["ARBITRUM"] = "ARBITRUM"
+    asset: Literal["USDC"] = "USDC"
+    vault_id: str | None = Field(default=None, min_length=1, max_length=160)
+    vault_address: str | None = None
+    owned_arbitrum_address: str | None = None
+    binance_account_id: str | None = Field(default=None, min_length=1, max_length=120)
+    binance_deposit_address: str | None = None
+    binance_withdrawal_address: str | None = None
+    hyperliquid_account_id: str | None = Field(default=None, min_length=1, max_length=120)
+    hyperliquid_bridge_address: str | None = None
+    max_amount: Decimal | None = Field(default=None, gt=0)
+    max_fee: Decimal | None = Field(default=None, ge=0)
+    idempotency_key: str = Field(min_length=1, max_length=160)
+
+    @field_validator(
+        "vault_address",
+        "owned_arbitrum_address",
+        "binance_deposit_address",
+        "binance_withdrawal_address",
+        "hyperliquid_bridge_address",
+    )
+    @classmethod
+    def validate_evm_address(cls, value: str | None) -> str | None:
+        if value is not None and (
+            len(value) != 42
+            or not value.startswith("0x")
+            or any(character not in "0123456789abcdefABCDEF" for character in value[2:])
+        ):
+            raise ValueError("capital addresses must be 20-byte EVM addresses")
+        return None if value is None else value.lower()
+
+
 class NoTiltReceiptRequest(BaseModel):
     transaction_hash: str = Field(pattern=r"^0x[0-9a-fA-F]{64}$")
 
@@ -465,6 +542,12 @@ class RiskControlChangeReviewRequest(BaseModel):
 
 class RiskControlChangeExecuteRequest(BaseModel):
     expected_version: int = Field(ge=1)
+    idempotency_key: str = Field(min_length=1, max_length=160)
+    action_grant: str
+
+
+class RiskControlDirectRestoreRequest(BaseModel):
+    reason: str = Field(min_length=10, max_length=2_000)
     idempotency_key: str = Field(min_length=1, max_length=160)
     action_grant: str
 

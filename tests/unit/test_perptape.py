@@ -7,6 +7,7 @@ from datetime import UTC, datetime, timedelta, timezone
 from decimal import Decimal
 from io import BytesIO
 from urllib.error import HTTPError
+from urllib.parse import parse_qs, urlparse
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -27,7 +28,9 @@ from trading_control_plane.perptape import (
     PerptapeFeedSnapshot,
     PerptapeRateLimited,
     bound_perptape_feed_snapshot,
+    merge_incomplete_perptape_candidates,
     normalize_perptape_datetime,
+    perptape_candidate_identity_is_displayable,
     perptape_legacy_candidate_id,
     perptape_payload_size_bytes,
     perptape_snapshot_identity,
@@ -119,10 +122,32 @@ def test_real_breakout_contract_maps_to_narrow_trading_candidates_and_caches() -
     assert first[0].candidate_id.startswith("pt_")
     assert first[0].quote_volume == 1_000_000
     assert first[0].open_interest == 500_000
-    assert first[0].detail_url.startswith("https://perptape.com/markets?")
-    assert "utm_campaign=market_scan_symbol" in first[0].detail_url
-    assert "/breakouts?" not in first[0].detail_url
+    assert first[0].detail_url.startswith("https://perptape.com/breakouts?")
+    assert "utm_campaign=breakout_signal_symbol" in first[0].detail_url
+    assert "/markets?" not in first[0].detail_url
+    detail_query = parse_qs(urlparse(first[0].detail_url).query)
+    assert detail_query["ex"] == ["BN"]
+    assert detail_query["q"] == ["BN:BTCUSDT"]
     assert client.get_candidate(first[0].candidate_id, now=NOW) == first[0]
+
+
+def test_persisted_legacy_market_scan_link_is_repaired_without_mutating_identity() -> None:
+    candidate = parsed_feed().candidates[0]
+    value = candidate.to_dict()
+    value["detail_url"] = (
+        "https://perptape.com/markets?"
+        "ex=BN&q=BN%3ABTC%3ABTCUSDT&utm_source=trading_console&"
+        "utm_medium=opportunity&utm_campaign=market_scan_symbol&lang=zh-CN"
+    )
+
+    restored = PerptapeCandidate.from_dict(value)
+    detail_query = parse_qs(urlparse(restored.detail_url).query)
+
+    assert restored.candidate_id == candidate.candidate_id
+    assert detail_query["ex"] == ["BN"]
+    assert urlparse(restored.detail_url).path == "/breakouts"
+    assert detail_query["q"] == ["BN:BTCUSDT"]
+    assert detail_query["utm_campaign"] == ["breakout_signal_symbol"]
 
 
 def test_candidate_identity_distinguishes_contracts_with_same_canonical_symbol() -> None:
@@ -150,6 +175,61 @@ def test_candidate_identity_distinguishes_contracts_with_same_canonical_symbol()
         client.get_candidate(candidate.candidate_id, now=NOW) == candidate
         for candidate in candidates
     )
+
+
+def test_opportunity_identity_rejects_malformed_binance_symbol_without_guessing() -> None:
+    candidate = parsed_feed().candidates[0]
+
+    assert perptape_candidate_identity_is_displayable(candidate) is True
+    assert (
+        perptape_candidate_identity_is_displayable(
+            replace(candidate, symbol="我踏马来了USDT", canonical_symbol="我踏马来了")
+        )
+        is False
+    )
+    assert (
+        perptape_candidate_identity_is_displayable(
+            replace(candidate, venue="HYPERLIQUID", symbol="kPEPE", canonical_symbol="kPEPE")
+        )
+        is True
+    )
+
+
+def test_authoritative_snapshot_expires_only_old_unresolved_stream_alerts() -> None:
+    candidate = parsed_feed().candidates[0]
+    old = replace(
+        candidate,
+        candidate_id="pt_old",
+        symbol="OLDUSDT",
+        canonical_symbol="OLD",
+        triggered_at=NOW - timedelta(minutes=6),
+        observed_at=NOW - timedelta(minutes=6),
+        readiness="INCOMPLETE",
+        data_health="DEGRADED",
+    )
+    recent = replace(
+        old,
+        candidate_id="pt_recent",
+        symbol="NEWUSDT",
+        canonical_symbol="NEW",
+        triggered_at=NOW - timedelta(minutes=4),
+        observed_at=NOW - timedelta(minutes=4),
+    )
+    authoritative = replace(
+        parsed_feed(),
+        generated_at=NOW,
+        fetched_at=NOW,
+        next_allowed_at=NOW + timedelta(minutes=1),
+        candidates=(),
+    )
+
+    merged = merge_incomplete_perptape_candidates(
+        authoritative,
+        (old, recent),
+        pending_max_age=timedelta(minutes=5),
+    )
+
+    assert [item.symbol for item in merged.candidates] == ["NEWUSDT"]
 
 
 def test_server_rate_limit_extends_cache_beyond_local_ttl() -> None:

@@ -188,6 +188,7 @@ async def run_m3_flow(database: Database) -> None:
             "fact_environment": "LIVE",
             "automatic_sync_enabled": False,
             "automatic_sync_interval_seconds": 60,
+            "default_account_id": None,
             "environment": "test",
         }
 

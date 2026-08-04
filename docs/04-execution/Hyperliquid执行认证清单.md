@@ -12,7 +12,7 @@
 
 本清单用于逐个认证 Hyperliquid 执行域。不得把“Hyperliquid 已支持”当成单一结论：Core 与每个启用的 HIP-3 DEX，以及不同账户抽象、抵押池、margin mode 和 worker，都是不同认证单位。
 
-当前代码只实现最小 Core 边界：`POST /info` 只读事实、有界历史查询与 429 退避、官方 TESTNET/LIVE `POST /exchange`、官方 SDK signer、稳定 cloid、显式价格 IOC、cancel-by-cloid、trigger 保护、保护取消、Unknown 查询恢复和 Trading sender fencing。主账户默认，可选子账户显式配置；所有开关初始关闭。2026-07-31 已用 API Wallet 在默认主账户完成 0.00016 BTC 最小主网开仓到退出，并确认空仓、无活动订单和 Gate 关闭；HIP-3、margin、资金动作、Freqtrade worker 和生产常驻运行仍未实现。
+当前默认执行后端已收敛为 Freqtrade worker，直接 `POST /exchange` 客户端只保留为隔离兼容测试路径且默认拒绝。官方 `POST /info` 继续负责 Core 账户事实，并从显式 allowlist 读取 HIP-3 市场目录；本地 Docker worker 使用 dry-run、无自主信号策略并隔离 Binance/Hyperliquid。2026-07-31 的 Core 小额主网闭环仅是旧直接路径历史证据，不授予当前 Freqtrade、HIP-3 或生产常驻执行证书；所有发送开关仍初始关闭。
 
 这里的“认证”是具体账户/执行域的发布验收工作，不要求建设 CapabilityCertificate、证据包数据库或证书状态机。当前测试、Git 和最小主网记录提供工程证据，但一次小额实证不能替代凭据轮换、持续运行、故障恢复和逐账户/标的生产验收。
 
@@ -33,7 +33,7 @@
 
 | 项目 | 当前状态 | 固定内容 / 验证要求 |
 | --- | --- | --- |
-| 执行所有权 | 已定 | Trading 唯一生成订单意图；当前直接窄 Adapter 执行，Freqtrade 仅在未来有真实必要时作为受控后端 |
+| 执行所有权 | 已定 | Trading 唯一生成订单意图；Freqtrade 是 Binance/Hyperliquid 的唯一默认受控执行后端，旧直接发送仅限隔离兼容测试 |
 | 初仓 | 已定 | SYSTEM / MANUAL 均人工批准，Risk Engine 可拒绝 |
 | 自动 Add | 已定 | 默认关闭；按目标杠杆差额和 1 / 2 / 3 次有限授权 |
 | 目标保证金拓扑 | 已定 | 专用 subaccount / worker 的 isolated；按标的认证 removable 或 strict |
@@ -43,7 +43,7 @@
 | 资金 / Vault | 已定 | RiskControl Vault、Hyperliquid subaccount / Vault 概念严格分离；CTO 独立 |
 | 跨所故障接管 | 不支持 | 不自动转 Binance；换所必须新提案 |
 
-账户与 subaccount 细节引用 `DEC-EXEC-002`。当前选择直接窄 Adapter，不维护 Freqtrade 竞争订单所有者；未来若引入 Freqtrade，必须重新证明它只是受控执行后端。
+账户与 subaccount 细节引用 `DEC-EXEC-002`。每个 Binance、Hyperliquid Core 与获准 HIP-3 DEX 都必须绑定独立 worker scope；Freqtrade 不拥有提案、审核、风险放宽或跨 scope 接管权。
 
 ---
 
@@ -135,9 +135,9 @@
 
 ---
 
-## 7. 直接窄 Adapter / 可选 Freqtrade 受控执行
+## 7. Freqtrade 受控执行 / 旧直接路径隔离
 
-当前实现采用直接窄 Adapter，不建设任意交易所或 Freqtrade 平台。若未来因真实运行需要引入 Freqtrade，它不得改变下列要求：
+当前默认实现采用场所隔离的 Freqtrade worker。旧直接客户端不得被生产配置启用，也不能改变下列要求：
 
 | 检查项 | 状态 | 通过证据 |
 | --- | --- | --- |

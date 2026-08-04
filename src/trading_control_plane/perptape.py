@@ -87,6 +87,63 @@ def validate_perptape_websocket_url(value: str) -> str:
     return value
 
 
+def build_perptape_breakout_url(
+    *,
+    base_url: str,
+    source_exchange: str,
+    symbol: str,
+) -> str:
+    """Build a Perptape breakout URL from its public exact-symbol contract.
+
+    Perptape's market page only performs substring search, so ``AINUSDT`` can
+    incorrectly select ``GRIFFAINUSDT`` when the exact contract is absent from
+    that table.  Its breakout board officially indexes ``exchange:symbol`` and
+    therefore provides an exact, source-aligned destination for a breakout
+    candidate.
+    """
+
+    return f"{base_url.rstrip('/')}/breakouts?" + urllib.parse.urlencode(
+        {
+            "ex": source_exchange,
+            "q": f"{source_exchange}:{symbol}",
+            "utm_source": "trading_console",
+            "utm_medium": "opportunity",
+            "utm_campaign": "breakout_signal_symbol",
+            "lang": "zh-CN",
+        }
+    )
+
+
+def _repair_perptape_source_url(
+    value: str,
+    *,
+    source_exchange: str,
+    symbol: str,
+) -> str:
+    """Repair persisted console links that used the ambiguous market search."""
+
+    parsed = urllib.parse.urlparse(value)
+    query = urllib.parse.parse_qs(parsed.query)
+    if (
+        parsed.scheme == "https"
+        and parsed.hostname == PERPTAPE_OFFICIAL_HOST
+        and parsed.path in {"/markets", "/breakouts"}
+        and query.get("utm_source") == ["trading_console"]
+        and query.get("utm_campaign")
+        in (["market_scan_symbol"], ["breakout_signal_symbol"])
+        and (
+            parsed.path != "/breakouts"
+            or query.get("q") != [f"{source_exchange}:{symbol}"]
+        )
+    ):
+        return build_perptape_breakout_url(
+            base_url=f"https://{PERPTAPE_OFFICIAL_HOST}",
+            source_exchange=source_exchange,
+            symbol=symbol,
+        )
+    return value
+
+
 @dataclass(frozen=True)
 class PerptapeCandidate:
     candidate_id: str
@@ -127,14 +184,17 @@ class PerptapeCandidate:
         try:
             triggered_at = value.get("triggered_at")
             threshold = value.get("threshold")
+            source_exchange = str(value["source_exchange"])
+            symbol = str(value["symbol"])
+            canonical_symbol = str(value["canonical_symbol"])
             candidate = cls(
                 candidate_id=str(value["candidate_id"]),
                 source=str(value["source"]),
                 source_contract_version=str(value["source_contract_version"]),
                 venue=str(value["venue"]),
-                source_exchange=str(value["source_exchange"]),
-                symbol=str(value["symbol"]),
-                canonical_symbol=str(value["canonical_symbol"]),
+                source_exchange=source_exchange,
+                symbol=symbol,
+                canonical_symbol=canonical_symbol,
                 direction=Direction(str(value["direction"])),
                 source_direction=str(value["source_direction"]),
                 timeframe=str(value["timeframe"]),
@@ -157,7 +217,11 @@ class PerptapeCandidate:
                 rationale=str(value["rationale"]),
                 data_health=str(value["data_health"]),
                 readiness=str(value["readiness"]),
-                detail_url=str(value["detail_url"]),
+                detail_url=_repair_perptape_source_url(
+                    str(value["detail_url"]),
+                    source_exchange=source_exchange,
+                    symbol=symbol,
+                ),
                 quote_volume=(
                     None
                     if value.get("quote_volume") is None
@@ -396,6 +460,38 @@ def perptape_event_key(candidate: PerptapeCandidate) -> PerptapeEventKey:
         candidate.timeframe,
         candidate.triggered_at,
     )
+
+
+def perptape_candidate_identity_is_displayable(candidate: PerptapeCandidate) -> bool:
+    """Reject malformed Binance identities without guessing an alternative symbol."""
+
+    if candidate.venue != "BINANCE":
+        return True
+    return all(
+        value.isascii() and value.isalnum() and value == value.upper()
+        for value in (candidate.symbol, candidate.canonical_symbol)
+    )
+
+
+def perptape_pending_candidate_is_current(
+    candidate: PerptapeCandidate,
+    *,
+    generated_at: datetime,
+    max_age: timedelta,
+) -> bool:
+    """Bound unresolved stream alerts to one configured reconciliation window."""
+
+    if max_age <= timedelta(0):
+        raise ValueError("Perptape pending candidate max_age must be positive")
+    try:
+        cutoff = normalize_perptape_datetime(generated_at) - max_age
+    except (OverflowError, ValueError) as exc:
+        raise DomainRejected(
+            "PERPTAPE_DATETIME_INVALID",
+            "Perptape pending candidate window exceeds the supported time range",
+        ) from exc
+    signal_time = candidate.triggered_at or candidate.observed_at
+    return normalize_perptape_datetime(signal_time) >= cutoff
 
 
 def perptape_legacy_candidate_id(candidate: PerptapeCandidate) -> str:
@@ -806,11 +902,22 @@ def apply_perptape_feed_delta(
 def merge_incomplete_perptape_candidates(
     feed: PerptapeFeedSnapshot,
     preserved: Iterable[PerptapeCandidate],
+    *,
+    pending_max_age: timedelta | None = None,
 ) -> PerptapeFeedSnapshot:
     """Keep only unresolved persisted targets alongside a new full snapshot."""
 
     validate_perptape_feed_contract(feed)
-    preserved_candidates = tuple(preserved)
+    preserved_candidates = tuple(
+        candidate
+        for candidate in preserved
+        if pending_max_age is None
+        or perptape_pending_candidate_is_current(
+            candidate,
+            generated_at=feed.generated_at,
+            max_age=pending_max_age,
+        )
+    )
     for candidate in preserved_candidates:
         validate_perptape_candidate(candidate)
     pending: dict[PerptapeEventKey, PerptapeCandidate] = {}
@@ -1245,18 +1352,10 @@ class PerptapeClient:
             rationale=f"Perptape {source_direction} breakout on {timeframe}",
             data_health="CURRENT" if readiness == "ready" else "DEGRADED",
             readiness=readiness.upper(),
-            detail_url=(
-                f"{self._base_url}/markets?"
-                + urllib.parse.urlencode(
-                    {
-                        "ex": exchange,
-                        "q": f"{exchange}:{canonical_symbol}:{symbol}",
-                        "utm_source": "trading_console",
-                        "utm_medium": "opportunity",
-                        "utm_campaign": "market_scan_symbol",
-                        "lang": "zh-CN",
-                    }
-                )
+            detail_url=build_perptape_breakout_url(
+                base_url=self._base_url,
+                source_exchange=exchange,
+                symbol=symbol,
             ),
             quote_volume=quote_volume,
             open_interest=open_interest,

@@ -112,8 +112,8 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
 
     assert response.status_code == 200
     assert "交易控制台" in response.text
-    assert "/assets/app.js?v=53" in response.text
-    assert "/assets/styles.css?v=24" in response.text
+    assert "/assets/app.js?v=59" in response.text
+    assert "/assets/styles.css?v=29" in response.text
     assert '<a href="/" data-link><span>⌂</span>今日</a>' in response.text
     assert 'id="mobile-nav-toggle"' in response.text
     assert 'id="confirm-dialog"' in response.text
@@ -141,7 +141,7 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
     assert "/api/results" not in app_javascript.text
     assert "/api/audit" not in app_javascript.text
     assert "'access.manage':['SYSTEM_ADMIN']" in app_javascript.text
-    assert "默认查看成员权限并管理所有成员" in app_javascript.text
+    assert "管理所有成员并可访问资金中心" in app_javascript.text
     assert 'href="/proposals/new"' not in response.text
     assert "Binance只读" not in response.text
     assert "const routeCapability = (path)" in app_javascript.text
@@ -154,19 +154,22 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
     assert "function partitionCapitalRecords" in app_javascript.text
     assert "function capitalSourceSlots" in app_javascript.text
     assert "function capitalHistorySeries" in app_javascript.text
-    assert "三方资金趋势" in app_javascript.text
+    assert "固定四条线：币安、Hyperliquid、资金库和三方汇总" in app_javascript.text  # noqa: RUF001
+    assert 'class="capital-route-grid"' in app_javascript.text
+    assert 'data-open-capital-path="${escapeHtml(path.path)}"' in app_javascript.text
+    assert 'id="direct-capital-dialog"' in app_javascript.text
     assert "function liveCapitalInTransit" in app_javascript.text
-    assert "审核后自动准备，钱包只做最终确认" in app_javascript.text  # noqa: RUF001
-    assert "startAutomaticCapitalTransfer" in app_javascript.text
+    assert "const DIRECT_CAPITAL_PATHS" in app_javascript.text
+    assert "/api/capital/direct-operations" in app_javascript.text
+    assert "最终确认并检查" in app_javascript.text
     assert "未配置或未同步" in app_javascript.text
-    assert app_javascript.text.count("${capitalProposalForm}") == 1
-    assert "${automaticTransferPanel}${capitalProposalForm}" in app_javascript.text
+    assert "旧流程只保留为只读审计记录" in app_javascript.text
     assert "fmtNumber(item.in_transit)" not in app_javascript.text
     assert "fmtNumber(liveInTransit)" in app_javascript.text
-    assert "申请受审核恢复" in app_javascript.text
+    assert "最高管理员直接恢复" in app_javascript.text
     assert "risk.restore.review" in app_javascript.text
     assert "risk.restore.execute" in app_javascript.text
-    assert "旧提案、旧授权和旧的可用加仓次数永远不会恢复" in app_javascript.text
+    assert "旧授权和旧的可用加仓次数不会恢复" in app_javascript.text
     assert "恢复条件" in app_javascript.text
     assert "LIVE_SCOPE_CONFIGURATION_REQUIRED" in app_javascript.text
     assert "item.readiness === 'READY' && item.proposal_eligible" in app_javascript.text
@@ -191,13 +194,29 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
     assert "api('/api/campaign-exceptions')" in app_javascript.text
     assert "if (error.status === 403) return null" in app_javascript.text
     assert "全局风险恢复仍由管理员控制" in app_javascript.text
-    assert "异常与恢复" in app_javascript.text
+    assert "交易任务 · 运行告警详情" in app_javascript.text
     assert "POSITION_STALE" in app_javascript.text
     assert "打开交易任务并按顺序处理" in app_javascript.text
     assert "new WebSocket(`${scheme}://${location.host}/ws/opportunities`)" in app_javascript.text
     assert "function groupOpportunities" in app_javascript.text
+    assert "function opportunitySnapshotCounts" in app_javascript.text
+    assert 'class="signal-chip-full"' in app_javascript.text
+    assert 'class="signal-chip-short"' in app_javascript.text
+    assert 'aria-label="${escapeHtml(`${timeframe} · ${signalLabel}`)}"' in app_javascript.text
+    assert 'href="/opportunities/defaults"' in app_javascript.text
+    assert "function renderOpportunityDefaults" in app_javascript.text
+    assert "覆盖币对" in app_javascript.text
+    assert "方向机会" in app_javascript.text
+    assert "周期信号" in app_javascript.text
+    assert "各周期分别计数，不是币对数量" in app_javascript.text  # noqa: RUF001
+    assert 'name="view_state"' in app_javascript.text
+    assert "function opportunityViewState" in app_javascript.text
+    assert (
+        "信号快照 ${fmtDate(result?.snapshot_generated_at || result?.as_of)}"
+        in app_javascript.text
+    )
     assert "Perptape 市场扫描" not in app_javascript.text
-    assert "市场扫描 ↗" in app_javascript.text
+    assert "突破详情 ↗" in app_javascript.text
     assert "系统运行边界与技术状态" not in app_javascript.text
     assert "风险检查已完成" in app_javascript.text
     assert "api('/api/runtime/status')" in app_javascript.text
@@ -217,19 +236,24 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
     assert "visibility: visible; transition-delay: 0s" in stylesheet.text
     assert ".simulation-panel" in stylesheet.text
     assert ".capital-status-missing" in stylesheet.text
+    assert ".capital-route-grid" in stylesheet.text
+    assert ".capital-trend-toggle" in stylesheet.text
+    assert ".opportunity-signals { display: flex; flex-wrap: nowrap" in stylesheet.text
+    assert "@container (min-width: 520px)" in stylesheet.text
+    assert ".opportunity-stats" in stylesheet.text
     assert ".proposal-detail-layout" in stylesheet.text
     assert ".proposal-preview" in stylesheet.text
     assert ".source-facts" in stylesheet.text
 
     service_worker = get(app, "/sw.js")
     assert service_worker.status_code == 200
-    assert "trading-shell-v54" in service_worker.text
+    assert "trading-shell-v60" in service_worker.text
     assert "self.skipWaiting()" in service_worker.text
     assert "self.clients.claim()" in service_worker.text
     assert "await fetch(event.request)" in service_worker.text
 
 
-def test_opportunity_card_has_no_stale_local_catalog_blocker_copy() -> None:
+def test_opportunity_card_explains_exact_catalog_blocker() -> None:
     node = shutil.which("node")
     assert node is not None
     app_path = Path(__file__).parents[2] / "src" / "trading_control_plane" / "web" / "app.js"
@@ -252,8 +276,20 @@ def test_opportunity_card_has_no_stale_local_catalog_blocker_copy() -> None:
           fmtDirection: value => ({LONG:"做多", SHORT:"做空"}[value] || value),
           fmtReadiness: value => value === "READY" ? "可用" : value,
           hasCapability: () => true,
+          proposalDefaults: {configured:true, can_manage:false, data:{version:1}},
+          currentLanguage: "zh",
         };
         vm.createContext(context);
+        context.opportunityViewState = item => (
+          item.action_candidate_id
+          || (!Array.isArray(item.candidates) && item.candidate_id)
+        ) && item.proposal_eligible
+          ? "ACTIONABLE"
+          : [
+              "PERPTAPE_REQUIRED_FIELDS_MISSING",
+              "PERPTAPE_CANDIDATE_NOT_CURRENT",
+            ].includes(item.proposal_blocker)
+            ? "WAITING" : "WATCH_ONLY";
         vm.runInContext(`${source.slice(from, to)}; this.render = opportunityCard;`, context);
         const unavailable = context.render({
           candidate_id:"pt_unavailable", venue:"BINANCE", timeframe:"1h",
@@ -262,8 +298,41 @@ def test_opportunity_card_has_no_stale_local_catalog_blocker_copy() -> None:
           proposal_blocker:"INSTRUMENT_UNAVAILABLE", quote_volume:null, open_interest:null,
           rationale:"candidate", detail_url:"https://example.test", chart_url:"https://example.test",
         });
-        assert.doesNotMatch(unavailable, /可交易合约目录/);
-        assert.equal((unavailable.match(/ disabled/g) || []).length, 2);
+        assert.match(unavailable, /可交易合约目录/);
+        assert.match(unavailable, /仅查看/);
+        assert.match(unavailable, /行情可用/);
+        assert.doesNotMatch(unavailable, /数据暂不可用/);
+        assert.doesNotMatch(unavailable, /一键创建|高级配置/);
+        assert.doesNotMatch(unavailable, /后重试/);
+
+        const hip3Unavailable = context.render({
+          candidate_id:"pt_hip3", venue:"HYPERLIQUID", timeframe:"1h",
+          symbol:"xyz:AAPL", direction:"LONG", reference_price:"1", triggered_at:null,
+          readiness:"READY", proposal_eligible:false, retry_at:"2026-08-02T10:10:00+00:00",
+          proposal_blocker:"INSTRUMENT_UNAVAILABLE", quote_volume:null, open_interest:null,
+          rationale:"candidate", detail_url:"https://example.test", chart_url:"https://example.test",
+        });
+        assert.match(hip3Unavailable, /该 HIP-3 市场尚未进入当前 Freqtrade worker 的精确合约目录/);
+        assert.match(hip3Unavailable, /仅查看/);
+        assert.match(hip3Unavailable, /行情可用/);
+        assert.doesNotMatch(hip3Unavailable, /数据暂不可用/);
+        assert.doesNotMatch(hip3Unavailable, /后重试/);
+
+        const incomplete = context.render({
+          candidate_id:"pt_incomplete", venue:"BINANCE", timeframe:"1h",
+          symbol:"QUSDT", direction:"LONG", reference_price:"1", triggered_at:null,
+          readiness:"INCOMPLETE", data_health:"DEGRADED", proposal_eligible:false,
+          proposal_blocker:"PERPTAPE_REQUIRED_FIELDS_MISSING",
+          unavailable_timeframes:["1h"], missing_field_labels:["K 线就绪状态", "实时完整数据"],
+          retry_at:"2026-08-02T10:10:00+00:00", quote_volume:null, open_interest:null,
+          rationale:"candidate", detail_url:"https://example.test", chart_url:"https://example.test",
+        });
+        assert.match(incomplete, /等待行情补齐/);
+        assert.match(incomplete, /等待补齐/);
+        assert.match(incomplete, /K 线就绪状态、实时完整数据/);
+        assert.match(incomplete, /后重试/);
+        assert.doesNotMatch(incomplete, /数据暂不可用/);
+        assert.doesNotMatch(incomplete, /一键创建|高级配置/);
 
         const eligible = context.render({
           candidate_id:"pt_eligible", venue:"BINANCE", timeframe:"1h",
@@ -316,11 +385,16 @@ def test_opportunity_groups_keep_multiple_timeframes_and_direction_separate() ->
         assert.notEqual(to, -1);
         const context = {};
         vm.createContext(context);
-        vm.runInContext(`${source.slice(from, to)}; this.group = groupOpportunities;`, context);
+        vm.runInContext(
+          `${source.slice(from, to)}; this.group = groupOpportunities; `
+          + `this.counts = opportunitySnapshotCounts; this.breakdown = opportunityVenueBreakdown; `
+          + `this.viewState = opportunityViewState;`,
+          context,
+        );
         const base = {
           venue:"BINANCE", source_exchange:"BN", symbol:"BTCUSDT", canonical_symbol:"BTC",
           observed_at:"2026-08-02T10:00:00+00:00", triggered_at:"2026-08-02T10:00:00+00:00",
-          readiness:"READY", proposal_eligible:true, proposal_blocker:null,
+          readiness:"READY", data_health:"CURRENT", proposal_eligible:true, proposal_blocker:null,
           quote_volume:"100", open_interest:"50",
         };
         const groups = JSON.parse(JSON.stringify(context.group([
@@ -339,6 +413,85 @@ def test_opportunity_groups_keep_multiple_timeframes_and_direction_separate() ->
         assert.equal(long.quote_volume, 120);
         assert.equal(long.action_candidate_id, "pt_1h_long");
         assert.deepEqual(short.timeframes, ["1d"]);
+        const counts = context.counts([
+          {...base, candidate_id:"pt_1h_long", direction:"LONG", timeframe:"1h"},
+          {...base, candidate_id:"pt_4h_long", direction:"LONG", timeframe:"4h"},
+          {...base, candidate_id:"pt_1d_short", direction:"SHORT", timeframe:"1d"},
+        ], groups);
+        assert.equal(counts.unique_symbols, 1);
+        assert.equal(counts.symbols_by_venue.BINANCE, 1);
+        assert.equal(context.breakdown(counts.symbols_by_venue), "币安 1");
+        assert.equal(counts.directional_opportunities, 2);
+        assert.equal(counts.timeframe_hits, 3);
+        assert.equal(counts.eligible_opportunities, 2);
+        assert.equal(counts.waiting_opportunities, 0);
+        assert.equal(counts.watch_only_opportunities, 0);
+
+        const catalogBlocked = JSON.parse(JSON.stringify(context.group([{
+          ...base,
+          candidate_id:"pt_eth_catalog_blocked",
+          symbol:"ETHUSDT",
+          canonical_symbol:"ETH",
+          direction:"LONG",
+          timeframe:"4h",
+          proposal_eligible:false,
+          proposal_blocker:"INSTRUMENT_UNAVAILABLE",
+          missing_fields:["active Instrument Catalog match"],
+          last_complete_at:"2026-08-02T10:00:00+00:00",
+        }])))[0];
+        assert.equal(catalogBlocked.proposal_blocker, "INSTRUMENT_UNAVAILABLE");
+        assert.equal(catalogBlocked.incomplete_candidates.length, 0);
+        assert.deepEqual(catalogBlocked.missing_fields, ["active Instrument Catalog match"]);
+        assert.equal(context.viewState(catalogBlocked), "WATCH_ONLY");
+
+        const stableWithOldIncomplete = JSON.parse(JSON.stringify(context.group([
+          {
+            ...base, candidate_id:"pt_ready", direction:"LONG", timeframe:"1h",
+            observed_at:"2026-08-02T10:05:00+00:00",
+            last_complete_at:"2026-08-02T10:05:00+00:00",
+          },
+          {
+            ...base, candidate_id:"pt_old_incomplete", direction:"LONG", timeframe:"1h",
+            observed_at:"2026-08-02T10:00:00+00:00", readiness:"INCOMPLETE",
+            data_health:"DEGRADED", proposal_eligible:false,
+            proposal_blocker:"PERPTAPE_REQUIRED_FIELDS_MISSING",
+            missing_field_labels:["实时完整数据"], last_complete_at:null,
+          },
+        ])))[0];
+        assert.deepEqual(stableWithOldIncomplete.pending_refresh_timeframes, []);
+        assert.deepEqual(stableWithOldIncomplete.unavailable_timeframes, []);
+        assert.equal(stableWithOldIncomplete.incomplete_candidates.length, 0);
+        assert.equal(stableWithOldIncomplete.last_complete_at, "2026-08-02T10:05:00+00:00");
+
+        const pendingRefresh = JSON.parse(JSON.stringify(context.group([
+          {
+            ...base, candidate_id:"pt_ready", direction:"LONG", timeframe:"1h",
+            observed_at:"2026-08-02T10:05:00+00:00",
+            last_complete_at:"2026-08-02T10:05:00+00:00",
+          },
+          {
+            ...base, candidate_id:"pt_new_incomplete", direction:"LONG", timeframe:"1h",
+            observed_at:"2026-08-02T10:06:00+00:00", readiness:"INCOMPLETE",
+            data_health:"DEGRADED", proposal_eligible:false,
+            proposal_blocker:"PERPTAPE_REQUIRED_FIELDS_MISSING",
+            missing_field_labels:["实时完整数据"], last_complete_at:null,
+          },
+        ])))[0];
+        assert.deepEqual(pendingRefresh.pending_refresh_timeframes, ["1h"]);
+        assert.deepEqual(pendingRefresh.unavailable_timeframes, []);
+        assert.equal(pendingRefresh.incomplete_candidates.length, 1);
+        assert.equal(pendingRefresh.action_candidate_id, "pt_ready");
+
+        const genuinelyIncomplete = JSON.parse(JSON.stringify(context.group([{
+          ...base, candidate_id:"pt_incomplete", direction:"LONG", timeframe:"4h",
+          readiness:"INCOMPLETE", data_health:"DEGRADED", proposal_eligible:false,
+          proposal_blocker:"PERPTAPE_REQUIRED_FIELDS_MISSING",
+          missing_field_labels:["K 线就绪状态", "实时完整数据"], last_complete_at:null,
+        }])))[0];
+        assert.deepEqual(genuinelyIncomplete.unavailable_timeframes, ["4h"]);
+        assert.deepEqual(genuinelyIncomplete.pending_refresh_timeframes, []);
+        assert.equal(genuinelyIncomplete.last_complete_at, null);
+        assert.equal(context.viewState(genuinelyIncomplete), "WAITING");
         """
     )
     completed = subprocess.run(  # noqa: S603
@@ -365,13 +518,6 @@ def test_capital_web_projection_only_renders_live_records() -> None:
         const to = source.indexOf("\nfunction capitalBalanceRows", from);
         assert.notEqual(from, -1);
         assert.notEqual(to, -1);
-        const capitalFormFrom = source.indexOf("const capitalProposalForm");
-        const capitalFormTo = source.indexOf("const automaticTransferPanel", capitalFormFrom);
-        const capitalFormSource = source.slice(capitalFormFrom, capitalFormTo);
-        assert.match(capitalFormSource, /type="hidden" value="LIVE"/);
-        assert.doesNotMatch(capitalFormSource, /value="TESTNET"/);
-        assert.doesNotMatch(capitalFormSource, /value="SHADOW"/);
-
         const records = [
           {environment:"LIVE", location_type:"VENUE", venue:"BINANCE", marker:"live-binance"},
           {environment:"SHADOW", location_type:"VENUE", venue:"HYPERLIQUID", marker:"shadow-10000"},
@@ -403,7 +549,7 @@ def test_capital_web_projection_only_renders_live_records() -> None:
         assert.equal(slots[1].venue, "HYPERLIQUID");
         assert.equal(slots[1].fact_status, "MISSING");
         assert.equal(slots[2].venue, "VAULT");
-        assert.equal(slots[2].usd_equity, "0");
+        assert.equal(slots[2].usd_equity, null);
         assert.equal(slots[2].fact_status, "MISSING");
         assert.equal(slots[2].missing_detail, "未配置或未同步");
         assert.equal(slots.some(item => item.marker === "shadow-10000"), false);
@@ -441,8 +587,25 @@ def test_capital_web_projection_only_renders_live_records() -> None:
           ]))`,
           context,
         ));
-        assert.deepEqual(history.map(item => item.source), ["BINANCE", "HYPERLIQUID", "VAULT"]);
+        assert.deepEqual(
+          history.map(item => item.source),
+          ["BINANCE", "HYPERLIQUID", "VAULT", "TOTAL"],
+        );
         assert.equal(history[2].points[0].value, 35);
+        assert.equal(history[3].points[0].value, 65);
+
+        const staggered = JSON.parse(vm.runInContext(
+          `JSON.stringify(capitalHistorySeries([
+            {environment:"LIVE",location_type:"VENUE",venue:"BINANCE",usd_equity:"10",observed_at:"2026-08-02T10:00:00Z"},
+            {environment:"LIVE",location_type:"VENUE",venue:"HYPERLIQUID",usd_equity:"20",observed_at:"2026-08-02T10:01:00Z"},
+            {environment:"LIVE",location_type:"VAULT",venue:"VAULT",usd_equity:"30",observed_at:"2026-08-02T10:02:00Z"},
+            {environment:"LIVE",location_type:"VENUE",venue:"BINANCE",usd_equity:"11",observed_at:"2026-08-02T10:03:00Z"}
+          ]))`,
+          context,
+        ));
+        const staggeredTotal = staggered.find(item => item.source === "TOTAL");
+        assert.equal(staggeredTotal.points.length, 2);
+        assert.deepEqual(staggeredTotal.points.map(point => point.value), [60, 61]);
         """
     )
     completed = subprocess.run(  # noqa: S603

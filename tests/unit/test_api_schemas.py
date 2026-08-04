@@ -5,6 +5,7 @@ from pydantic import ValidationError
 
 from trading_control_plane.api_schemas import (
     ManualProposalRequest,
+    ProposalDefaultConfigRequest,
     SystemProposalRequest,
     TransferProposalRequest,
 )
@@ -73,9 +74,7 @@ def test_disabled_auto_add_cannot_hide_reserved_quantity_or_units() -> None:
 
 
 def test_live_environment_is_explicit_for_perptape_and_capital_proposals() -> None:
-    manual = ManualProposalRequest.model_validate(
-        {**proposal_payload(), "environment": "LIVE"}
-    )
+    manual = ManualProposalRequest.model_validate({**proposal_payload(), "environment": "LIVE"})
     system = SystemProposalRequest.model_validate(
         {
             "environment": "LIVE",
@@ -108,3 +107,22 @@ def test_live_environment_is_explicit_for_perptape_and_capital_proposals() -> No
     assert manual.environment == "LIVE"
     assert system.environment == "LIVE"
     assert transfer.environment == "LIVE"
+
+
+def test_trade_proposals_and_defaults_require_at_least_eight_hours() -> None:
+    assert ManualProposalRequest.model_validate(proposal_payload()).expires_in_minutes == 480
+    with pytest.raises(ValidationError):
+        ManualProposalRequest.model_validate({**proposal_payload(), "expires_in_minutes": 479})
+    with pytest.raises(ValidationError):
+        ProposalDefaultConfigRequest.model_validate(
+            {
+                "account_id": "acct-1",
+                "risk_tier": "LOW",
+                "notional": "100",
+                "max_risk": "1",
+                "invalidation_bps": 200,
+                "expires_in_minutes": 120,
+                "rationale": "too short for human review",
+                "idempotency_key": "short-default",
+            }
+        )

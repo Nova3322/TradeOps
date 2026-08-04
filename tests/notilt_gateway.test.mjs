@@ -208,12 +208,12 @@ test("agent release request rejects every invalid budget condition", async () =>
     amount: "25",
   };
   for (const [overrides, message] of [
-    [{ official: false }, /not registered/],
-    [{ active: false }, /not an active/],
-    [{ assigned: otherVault }, /does not assign/],
-    [{ owner: agent }, /owner operations/],
+    [{ official: false }, /official NoTilt Vault/],
+    [{ active: false }, /not the active Vault whitelist/],
+    [{ assigned: otherVault }, /different Vault/],
+    [{ owner: agent }, /owner cannot use/],
     [{ panic: true }, /panic locked/],
-    [{ maxReleaseNet: 1n }, /exceeds current/],
+    [{ maxReleaseNet: 1n }, /exceeds the current maxReleaseNet/],
   ]) {
     await assert.rejects(
       executeOperation(base, { client: client(overrides) }),

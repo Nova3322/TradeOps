@@ -7,7 +7,7 @@
     <meta name="description" content="生产交易提案、审核、执行、资金与风险控制台">
     <link rel="manifest" href="/manifest.webmanifest">
     <link rel="icon" href="/assets/icon.svg" type="image/svg+xml">
-    <link rel="stylesheet" href="/assets/styles.css?v=24">
+    <link rel="stylesheet" href="/assets/styles.css?v=29">
     <title>交易控制台</title>
   </head>
   <body>
@@ -34,7 +34,6 @@
           <a href="/campaigns" data-link data-nav-capability="operations.view"><span>◎</span>交易任务</a>
           <a href="/positions" data-link data-nav-capability="system.view"><span>↕</span>系统状态</a>
           <a href="/capital" data-link data-nav-capability="capital.view"><span>¤</span>资金</a>
-          <a href="/exceptions" data-link data-nav-capability="operations.view"><span>!</span>异常</a>
           <a href="/venues" data-link data-nav-capability="venue.view"><span>◫</span>交易账户</a>
           <a href="/admin/users" data-link data-nav-capability="access.manage"><span>◇</span>成员权限</a>
         </nav>
@@ -60,14 +59,14 @@
         </div>
         <input name="candidate_id" type="hidden">
         <div class="proposal-default">
-          <div><small>默认配置</small><b>约 100 USDT 名义仓位 · 1 USDT 最大风险 · 2% 失效距离</b></div>
+          <div><small>当前卡片配置</small><b>正在读取服务端默认配置</b></div>
           <span class="tag">可修改</span>
         </div>
         <details class="advanced-settings">
           <summary>高级参数</summary>
         <div class="field-grid">
-          <label>账户<input name="account_id" value="acct-1" required></label>
-          <label>风险档位<select name="risk_tier"><option value="LOW">低</option><option value="MEDIUM" selected>中</option><option value="HIGH">高</option></select></label>
+          <label>账户<input name="account_id" required></label>
+          <label>风险档位<select name="risk_tier" required><option value="" selected disabled>请选择</option><option value="LOW">低</option><option value="MEDIUM">中</option><option value="HIGH">高</option></select></label>
           <label>请求数量<input name="quantity" type="number" step="any" min="0" required></label>
           <label>初仓数量<input name="initial_quantity" type="number" step="any" min="0"></label>
           <label>最大风险<input name="max_risk" type="number" step="any" min="0" required></label>
@@ -75,9 +74,9 @@
           <label>允许自动加仓<select name="allow_auto_add"><option value="false" selected>否</option><option value="true">是</option></select></label>
           <label>可用加仓次数<select name="requested_adds"><option value="0" selected>0</option><option value="1">1</option><option value="2">2</option><option value="3">3</option></select></label>
           <label>加仓触发价格<input name="add_trigger_price" type="number" step="any" min="0"></label>
-          <label>有效时间（分钟）<input name="expires_in_minutes" type="number" min="5" max="1440" value="120" required></label>
+          <label>有效时间（小时，至少 8 小时）<input name="expires_in_hours" type="number" min="8" max="24" value="8" required></label>
         </div>
-        <label>人工补充理由<textarea name="rationale" rows="3" required>使用默认风险配置创建 Perptape 候选提案，尚未形成任何订单。</textarea></label>
+        <label>人工补充理由<textarea name="rationale" rows="3" required></textarea></label>
         </details>
         <p class="safety-note">提交只创建生产交易提案。突破信号不会绕过审核、风控和授权直接产生订单。</p>
         <div id="system-form-error" class="form-error" role="alert"></div>
@@ -98,6 +97,6 @@
       </form>
     </dialog>
     <div id="toast" class="toast" role="status" aria-live="polite"></div>
-    <script type="module" src="/assets/app.js?v=53"></script>
+    <script type="module" src="/assets/app.js?v=59"></script>
   </body>
 </html>

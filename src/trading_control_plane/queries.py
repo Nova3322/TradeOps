@@ -18,6 +18,7 @@ from trading_control_plane.models import (
     CapabilityGate,
     CapitalAutomationPolicy,
     CapitalTransfer,
+    DirectCapitalOperation,
     FundingPayment,
     Instrument,
     OrderIntent,
@@ -30,6 +31,7 @@ from trading_control_plane.models import (
     RiskPolicy,
     RiskReservation,
     RoleAssignment,
+    RuntimeSourceHealth,
     SenderLease,
     TradingAuthorization,
     TransferAuthorization,
@@ -147,6 +149,17 @@ class TradingQueries:
             if user is None or not user.active or user.principal_type != PrincipalType.HUMAN.value:
                 return None
             return user.telegram_chat_id
+
+    def telegram_user_id(self, chat_id: str) -> UUID | None:
+        with self.database.session_factory() as session:
+            user = session.scalar(
+                select(User).where(
+                    User.telegram_chat_id == chat_id,
+                    User.active,
+                    User.principal_type == PrincipalType.HUMAN.value,
+                )
+            )
+            return None if user is None else user.user_id
 
     def list_instruments(self, user_id: UUID) -> list[dict[str, Any]]:
         with self.database.session_factory() as session:
@@ -688,19 +701,50 @@ class TradingQueries:
                 raise DomainRejected("RBAC_DENIED", "capital transfer is outside scope")
             return self._capital_transfer_summary(transfer)
 
-    def capital_center(self, user_id: UUID) -> dict[str, Any]:
+    def capital_center(
+        self,
+        user_id: UUID,
+        *,
+        authoritative_live_accounts: dict[str, str] | None = None,
+    ) -> dict[str, Any]:
         with self.database.session_factory() as session:
             now = datetime.now(UTC)
+            authoritative_accounts = {
+                venue.upper(): account_id
+                for venue, account_id in (authoritative_live_accounts or {}).items()
+                if account_id
+            }
+
+            def is_authoritative_live_venue(
+                environment: str,
+                location_type: str,
+                venue: str,
+                account_id: str,
+            ) -> bool:
+                if environment != "LIVE" or location_type != "VENUE":
+                    return True
+                expected = authoritative_accounts.get(venue.upper())
+                return expected is None or expected == account_id
+
             assignments = session.scalars(
                 select(RoleAssignment).where(RoleAssignment.user_id == user_id)
             ).all()
-            if not any(item.role == Role.TREASURY_ADMIN.value for item in assignments):
+            if not self.service.can_user(user_id, "capital.view"):
                 raise DomainRejected("RBAC_DENIED", "capital center access is not assigned")
             treasury_assignments = [
-                item for item in assignments if item.role == Role.TREASURY_ADMIN.value
+                item
+                for item in assignments
+                if item.role in {Role.TREASURY_ADMIN.value, Role.SYSTEM_ADMIN.value}
             ]
 
             def can_view_history(item: AccountEquityObservation) -> bool:
+                if not is_authoritative_live_venue(
+                    item.environment,
+                    item.location_type,
+                    item.venue,
+                    item.account_id,
+                ):
+                    return False
                 if item.location_type == "VAULT":
                     return any(
                         assignment.account_scope is None and assignment.venue_scope is None
@@ -729,6 +773,9 @@ class TradingQueries:
             authorization_by_proposal = {item.transfer_proposal_id: item for item in authorizations}
             transfers = session.scalars(
                 select(CapitalTransfer).order_by(CapitalTransfer.updated_at.desc())
+            ).all()
+            direct_operations = session.scalars(
+                select(DirectCapitalOperation).order_by(DirectCapitalOperation.updated_at.desc())
             ).all()
             policies = session.scalars(
                 select(CapitalAutomationPolicy).order_by(
@@ -765,13 +812,21 @@ class TradingQueries:
                 "MANUAL_REQUIRED",
             }
             balance_data: list[dict[str, Any]] = []
-            valuation_issues: list[str] = []
+            valuation_issues: set[str] = set()
             venue_net_worth: dict[str, Decimal] = {}
             vault_net_worth = Decimal(0)
             total_net_worth = Decimal(0)
             live_balance_count = 0
             live_sources: set[str] = set()
+            current_live_sources: set[str] = set()
             for item in balances:
+                if not is_authoritative_live_venue(
+                    item.environment,
+                    item.location_type,
+                    item.venue,
+                    item.account_id,
+                ):
+                    continue
                 can_view = (
                     self.service.can_user(user_id, "capital.view", item.account_id, item.venue)
                     if item.location_type == "VENUE"
@@ -818,6 +873,9 @@ class TradingQueries:
                     live_sources.add("VAULT" if item.location_type == "VAULT" else item.venue)
                 if valuation_current and item.environment == "LIVE":
                     assert usd_equity is not None
+                    current_live_sources.add(
+                        "VAULT" if item.location_type == "VAULT" else item.venue
+                    )
                     total_net_worth += usd_equity
                     if item.location_type == "VAULT":
                         vault_net_worth += usd_equity
@@ -826,7 +884,15 @@ class TradingQueries:
                             venue_net_worth.get(item.venue, Decimal(0)) + usd_equity
                         )
                 elif item.environment == "LIVE":
-                    valuation_issues.append(f"{item.location_type}:{item.venue}:{item.currency}")
+                    source = "VAULT" if item.location_type == "VAULT" else item.venue
+                    if item.fact_status != "KNOWN":
+                        valuation_issues.add(f"CURRENT_VALUE_MISSING:{source}")
+                    elif usd_equity is None or valuation_price is None or valuation_price <= 0:
+                        valuation_issues.add(f"UNKNOWN_USD_VALUE:{source}")
+                    elif self.service._fact_is_stale(valuation_time, now, max_fact_age):
+                        valuation_issues.add(f"STALE_LIVE_SOURCE:{source}")
+                    else:
+                        valuation_issues.add(f"CURRENT_VALUE_MISSING:{source}")
                 balance_data.append(
                     {
                         "account_equity_id": str(item.account_equity_id),
@@ -860,7 +926,11 @@ class TradingQueries:
                 )
             for required_source in ("BINANCE", "HYPERLIQUID", "VAULT"):
                 if required_source not in live_sources:
-                    valuation_issues.append(f"MISSING_LIVE_SOURCE:{required_source}")
+                    valuation_issues.add(f"MISSING_LIVE_SOURCE:{required_source}")
+                elif required_source not in current_live_sources and not any(
+                    issue.endswith(f":{required_source}") for issue in valuation_issues
+                ):
+                    valuation_issues.add(f"CURRENT_VALUE_MISSING:{required_source}")
             gate = session.get(CapabilityGate, "CAPITAL_TRANSFER")
             automation_gates = {
                 key: (None if (value := session.get(CapabilityGate, key)) is None else value.status)
@@ -872,18 +942,14 @@ class TradingQueries:
                 "balances": balance_data,
                 "history": [
                     {
-                        "source": (
-                            "VAULT" if item.location_type == "VAULT" else item.venue
-                        ),
+                        "source": ("VAULT" if item.location_type == "VAULT" else item.venue),
                         "location_type": item.location_type,
                         "location_id": item.account_id,
                         "venue": item.venue,
                         "asset": item.currency,
                         "equity": str(item.equity),
                         "available_balance": str(item.available_balance),
-                        "usd_equity": (
-                            None if item.usd_equity is None else str(item.usd_equity)
-                        ),
+                        "usd_equity": (None if item.usd_equity is None else str(item.usd_equity)),
                         "observed_at": _iso(item.observed_at),
                     }
                     for item in observations
@@ -893,10 +959,18 @@ class TradingQueries:
                     "environment": "LIVE",
                     "currency": "USD",
                     "venues": {
-                        venue: str(value) for venue, value in sorted(venue_net_worth.items())
+                        venue: (
+                            str(venue_net_worth[venue]) if venue in current_live_sources else None
+                        )
+                        for venue in ("BINANCE", "HYPERLIQUID")
                     },
-                    "vault": str(vault_net_worth),
-                    "total": str(total_net_worth),
+                    "vault": str(vault_net_worth) if "VAULT" in current_live_sources else None,
+                    "total": (
+                        str(total_net_worth)
+                        if {"BINANCE", "HYPERLIQUID", "VAULT"}.issubset(current_live_sources)
+                        and not valuation_issues
+                        else None
+                    ),
                     "complete": live_balance_count > 0 and not valuation_issues,
                     "issues": sorted(valuation_issues),
                     "as_of": now.isoformat(),
@@ -935,6 +1009,37 @@ class TradingQueries:
                     if self.service.can_user(user_id, "capital.view", item.account_id, item.venue)
                 ],
                 "transfers": [self._capital_transfer_summary(item) for item in visible_transfers],
+                "direct_operations": [
+                    {
+                        "operation_id": str(item.operation_id),
+                        "path": item.path,
+                        "status": item.status,
+                        "receipt_status": item.receipt_status,
+                        "account_id": item.account_id,
+                        "venue": item.venue,
+                        "vault_id": item.vault_id,
+                        "asset": item.asset,
+                        "network": item.network,
+                        "amount": str(item.amount),
+                        "max_fee": None if item.max_fee is None else str(item.max_fee),
+                        "min_received": (
+                            None if item.min_received is None else str(item.min_received)
+                        ),
+                        "source_reference_configured": item.source_reference is not None,
+                        "destination_reference_configured": (
+                            item.destination_reference is not None
+                        ),
+                        "stages": item.stages,
+                        "blockers": item.blockers,
+                        "execute_after": _iso(item.execute_after),
+                        "expires_at": _iso(item.expires_at),
+                        "final_confirmed_at": _iso(item.final_confirmed_at),
+                        "version": item.version,
+                        "updated_at": _iso(item.updated_at),
+                    }
+                    for item in direct_operations
+                    if self.service.can_user(user_id, "capital.view", item.account_id, item.venue)
+                ],
                 "automation": {
                     "gates": automation_gates,
                     "policies": [
@@ -1332,6 +1437,9 @@ class TradingQueries:
                 )
             ).scalar_one()
             perptape_feed = session.get(PerptapeFeed, "BREAKOUTS")
+            source_health = session.scalars(
+                select(RuntimeSourceHealth).order_by(RuntimeSourceHealth.source_name)
+            ).all()
             return {
                 "database_ready": self.database.is_ready()[0],
                 "schema_revision": revision,
@@ -1363,6 +1471,15 @@ class TradingQueries:
                         "updated_at": None,
                     }
                 ),
+                "source_health": {
+                    item.source_name: {
+                        "status": item.status,
+                        "items_observed": item.items_observed,
+                        "error_code": item.error_code,
+                        "checked_at": _iso(item.checked_at),
+                    }
+                    for item in source_health
+                },
             }
 
     def list_campaigns(self, user_id: UUID) -> list[dict[str, Any]]:
@@ -1473,6 +1590,8 @@ class TradingQueries:
                             "status": item.status,
                             "amount": str(item.amount),
                             "version": item.version,
+                            "created_at": _iso(item.created_at),
+                            "updated_at": _iso(item.updated_at),
                         }
                         for item in reservations
                     ],
@@ -1628,12 +1747,26 @@ class TradingQueries:
                 continue
             detail = self.campaign_detail(user_id, UUID(str(campaign["campaign_id"])))
             campaign_id = str(campaign["campaign_id"])
+            campaign_occurred_at = str(campaign["updated_at"] or campaign["created_at"])
             if campaign["status"] == "UNKNOWN":
-                exceptions.append(self._exception(campaign_id, "CAMPAIGN_UNKNOWN", "BLOCKING"))
+                exceptions.append(
+                    self._exception(
+                        campaign_id,
+                        "CAMPAIGN_UNKNOWN",
+                        "BLOCKING",
+                        occurred_at=campaign_occurred_at,
+                    )
+                )
             for reservation in detail["reservations"]:
                 if reservation["status"] == "UNKNOWN":
                     exceptions.append(
-                        self._exception(campaign_id, "RISK_RESERVATION_UNKNOWN", "BLOCKING")
+                        self._exception(
+                            campaign_id,
+                            "RISK_RESERVATION_UNKNOWN",
+                            "BLOCKING",
+                            object_id=str(reservation["reservation_id"]),
+                            occurred_at=str(reservation["updated_at"]),
+                        )
                     )
             for intent in detail["intents"]:
                 if intent["status"] == "UNKNOWN":
@@ -1643,11 +1776,19 @@ class TradingQueries:
                             "ORDER_INTENT_UNKNOWN",
                             "BLOCKING",
                             object_id=str(intent["intent_id"]),
+                            occurred_at=str(intent["updated_at"]),
                         )
                     )
             position = detail["position"]
             if position is None or position["fact_status"] == "UNKNOWN":
-                exceptions.append(self._exception(campaign_id, "POSITION_UNKNOWN", "BLOCKING"))
+                exceptions.append(
+                    self._exception(
+                        campaign_id,
+                        "POSITION_UNKNOWN",
+                        "BLOCKING",
+                        occurred_at=campaign_occurred_at,
+                    )
+                )
             else:
                 position_observed_at = datetime.fromisoformat(str(position["observed_at"]))
                 if self.service._fact_is_stale(position_observed_at, now, max_fact_age):
@@ -1657,6 +1798,7 @@ class TradingQueries:
                             "POSITION_STALE",
                             "BLOCKING",
                             object_id=str(position["position_id"]),
+                            occurred_at=str(position["observed_at"]),
                             details=[
                                 f"observed_at={position['observed_at']}",
                                 f"max_age_seconds={int(max_fact_age.total_seconds())}",
@@ -1671,7 +1813,12 @@ class TradingQueries:
                 protection = detail["protection"]
                 if protection is None or protection["status"] == "UNKNOWN":
                     exceptions.append(
-                        self._exception(campaign_id, "PROTECTION_UNKNOWN", "BLOCKING")
+                        self._exception(
+                            campaign_id,
+                            "PROTECTION_UNKNOWN",
+                            "BLOCKING",
+                            occurred_at=str(position["observed_at"]),
+                        )
                     )
                 else:
                     protection_observed_at = datetime.fromisoformat(str(protection["observed_at"]))
@@ -1682,6 +1829,7 @@ class TradingQueries:
                                 "PROTECTION_STALE",
                                 "BLOCKING",
                                 object_id=str(protection["protection_id"]),
+                                occurred_at=str(protection["observed_at"]),
                                 details=[
                                     f"observed_at={protection['observed_at']}",
                                     f"max_age_seconds={int(max_fact_age.total_seconds())}",
@@ -1690,7 +1838,13 @@ class TradingQueries:
                         )
                     if not protection["fully_covered"]:
                         exceptions.append(
-                            self._exception(campaign_id, "PROTECTION_INSUFFICIENT", "BLOCKING")
+                            self._exception(
+                                campaign_id,
+                                "PROTECTION_INSUFFICIENT",
+                                "BLOCKING",
+                                object_id=str(protection["protection_id"]),
+                                occurred_at=str(protection["observed_at"]),
+                            )
                         )
             reconciliation = detail["reconciliation"]
             if reconciliation is not None and reconciliation["status"] != "MATCH":
@@ -1699,6 +1853,7 @@ class TradingQueries:
                         campaign_id,
                         f"RECONCILIATION_{reconciliation['status']}",
                         "BLOCKING",
+                        occurred_at=str(reconciliation["completed_at"]),
                         details=list(reconciliation["differences"]),
                     )
                 )
@@ -1723,9 +1878,83 @@ class TradingQueries:
                             "RECONCILIATION_STALE",
                             "BLOCKING",
                             object_id=str(reconciliation["reconciliation_id"]),
+                            occurred_at=str(reconciliation["completed_at"]),
                             details=newer_facts,
                         )
                     )
+        guidance = {
+            "CAMPAIGN_UNKNOWN": (
+                "CRITICAL",
+                "交易运维",
+                "任务结果未知会阻断新增风险",
+                "核对交易所事实并完成计算型对账",
+            ),
+            "RISK_RESERVATION_UNKNOWN": (
+                "CRITICAL",
+                "交易运维",
+                "风险占用无法安全释放",
+                "核对订单结果并重新计算风险预留",
+            ),
+            "ORDER_INTENT_UNKNOWN": (
+                "CRITICAL",
+                "交易运维",
+                "可能存在未确认订单结果",
+                "先同步订单与成交, 再处理未知意图",
+            ),
+            "POSITION_UNKNOWN": (
+                "CRITICAL",
+                "交易运维",
+                "无法确认真实仓位",
+                "同步该账户与标的的仓位事实",
+            ),
+            "POSITION_STALE": (
+                "HIGH",
+                "交易运维",
+                "仓位事实可能不再代表当前状态",
+                "刷新仓位后重新对账",
+            ),
+            "PROTECTION_UNKNOWN": (
+                "CRITICAL",
+                "交易运维",
+                "无法确认持仓保护是否有效",
+                "同步或补齐保护单事实",
+            ),
+            "PROTECTION_STALE": (
+                "HIGH",
+                "交易运维",
+                "保护事实可能已经变化",
+                "刷新保护单并确认足额覆盖",
+            ),
+            "PROTECTION_INSUFFICIENT": (
+                "CRITICAL",
+                "交易运维",
+                "现有持仓未被足额保护",
+                "按交易任务允许的降险路径补齐保护或退出",
+            ),
+            "RECONCILIATION_STALE": (
+                "HIGH",
+                "交易运维",
+                "旧对账早于最新仓位或订单事实",
+                "用最新事实重新运行计算型对账",
+            ),
+        }
+        for item in exceptions:
+            code = str(item["code"])
+            default = ("HIGH", "交易运维", "运行事实存在不一致", "检查差异并重新运行计算型对账")
+            severity, owner_role, impact, next_action = guidance.get(code, default)
+            item.update(
+                {
+                    "severity": severity,
+                    "last_checked_at": now.isoformat(),
+                    "impact": impact,
+                    "owner_role": owner_role,
+                    "next_action": next_action,
+                    "action_available": False,
+                    "action_unavailable_reason": (
+                        "告警详情只提供事实与路径; 必须回到受影响交易任务按后端安全条件处理"
+                    ),
+                }
+            )
         return exceptions
 
     def venue_facts(
@@ -1923,6 +2152,7 @@ class TradingQueries:
         *,
         object_id: str | None = None,
         details: list[str] | None = None,
+        occurred_at: str | None = None,
     ) -> dict[str, Any]:
         return {
             "campaign_id": campaign_id,
@@ -1930,6 +2160,7 @@ class TradingQueries:
             "code": code,
             "severity": severity,
             "details": details or [],
+            "occurred_at": occurred_at,
         }
 
     @staticmethod

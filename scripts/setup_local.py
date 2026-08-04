@@ -8,8 +8,8 @@ from sqlalchemy import select
 
 from trading_control_plane.config import get_settings
 from trading_control_plane.database import Database
-from trading_control_plane.domain import PrincipalType, Role
-from trading_control_plane.models import RoleAssignment, User
+from trading_control_plane.domain import CapabilityStatus, PrincipalType, Role
+from trading_control_plane.models import CapabilityGate, RoleAssignment, User
 from trading_control_plane.service import TradingService
 
 OWNER_USERNAME = "kelly_oooo"
@@ -128,6 +128,20 @@ def main() -> None:
         _ensure_role(database, service, perptape_id, Role.PROPOSER, owner_id, now=now)
         for role in (Role.OPERATOR, Role.TREASURY_ADMIN):
             _ensure_role(database, service, runtime_sync_id, role, owner_id, now=now)
+        with database.session_factory() as session:
+            enabled_gates = session.scalars(
+                select(CapabilityGate).where(
+                    CapabilityGate.status != CapabilityStatus.DISABLED.value
+                )
+            ).all()
+        for gate in enabled_gates:
+            service.set_capability_gate(
+                gate.capability_key,
+                CapabilityStatus.DISABLED,
+                "local console startup forces every dangerous gate closed",
+                owner_id,
+                now=now,
+            )
     finally:
         database.dispose()
     print("Local database and internal human/service principals are ready.")

@@ -270,6 +270,7 @@ def app(
         allow_mock_identity=True,
         session_signing_secret="m5-test-signing-secret-that-is-long-enough",  # noqa: S106
         public_base_url="http://test",
+        execution_backend="DIRECT_LEGACY",
         hyperliquid_read_only_enabled=True,
         hyperliquid_fact_environment="TESTNET",
         hyperliquid_account_address=ACCOUNT_ADDRESS,

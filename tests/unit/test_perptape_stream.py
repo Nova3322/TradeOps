@@ -471,9 +471,13 @@ def test_failed_https_completion_degrades_snapshot_and_keeps_alert_incomplete() 
     stream.run_forever(stop)
 
     assert len(https_calls) == 2
-    assert stream.stats.degraded_writes == 1
+    assert stream.stats.degraded_writes == 0
     assert store.current is not None
-    assert all(item.readiness != "READY" for item in store.current.candidates)
+    assert any(
+        item.readiness == "READY" and item.data_health == "CURRENT"
+        for item in store.current.candidates
+    )
+    assert any(item.readiness == "INCOMPLETE" for item in store.current.candidates)
     eth = next(item for item in store.current.candidates if item.symbol == "ETHUSDT")
     assert eth.readiness == "INCOMPLETE"
 
@@ -602,7 +606,11 @@ def test_future_next_allowed_blocks_gap_and_short_field_completion_until_stop() 
     assert stream.stats.gaps_detected == 1
     assert stream.stats.https_backfills == 0
     assert store.current is not None
-    assert all(item.readiness != "READY" for item in store.current.candidates)
+    assert any(
+        item.readiness == "READY" and item.data_health == "CURRENT"
+        for item in store.current.candidates
+    )
+    assert any(item.readiness == "INCOMPLETE" for item in store.current.candidates)
     eth = next(item for item in store.current.candidates if item.symbol == "ETHUSDT")
     assert eth.readiness == "INCOMPLETE"
 
@@ -726,7 +734,10 @@ def test_periodic_reconciliation_does_not_call_https_inside_server_window() -> N
     assert len(https_calls) == 1
     assert stream.stats.https_reconciliations == 1
     assert store.current is not None
-    assert all(item.readiness != "READY" for item in store.current.candidates)
+    assert all(
+        item.readiness == "READY" and item.data_health == "CURRENT"
+        for item in store.current.candidates
+    )
 
 
 def test_periodic_full_reconciliation_runs_while_connection_is_quiet() -> None:

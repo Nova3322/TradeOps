@@ -26,6 +26,7 @@ from trading_control_plane.perptape import (
     normalize_perptape_datetime,
     normalize_perptape_operational_datetime,
     perptape_event_key,
+    perptape_pending_candidate_is_current,
     validate_perptape_feed_contract,
     validate_perptape_websocket_url,
 )
@@ -266,8 +267,16 @@ class PerptapeStreamWorker:
                 registered_success_generation,
             ) in self._pending_completion_targets.items()
             if success_generation > registered_success_generation
-            and any(
-                self._candidate_completes_target(candidate, target) for candidate in feed.candidates
+            and (
+                any(
+                    self._candidate_completes_target(candidate, target)
+                    for candidate in feed.candidates
+                )
+                or not perptape_pending_candidate_is_current(
+                    target,
+                    generated_at=feed.generated_at,
+                    max_age=timedelta(seconds=self._reconciliation_interval_seconds),
+                )
             )
         ]
         for event_key in completed:
@@ -363,6 +372,7 @@ class PerptapeStreamWorker:
         feed = merge_incomplete_perptape_candidates(
             feed,
             self._preserved_pending_candidates(current),
+            pending_max_age=timedelta(seconds=self._reconciliation_interval_seconds),
         )
         self._record(feed, base)
         self.stats.https_reconciliations += 1
@@ -374,12 +384,22 @@ class PerptapeStreamWorker:
         )
         return feed
 
-    def _mark_degraded(self, *, next_allowed_at: datetime | None = None) -> None:
+    def _mark_degraded(
+        self,
+        *,
+        next_allowed_at: datetime | None = None,
+        preserve_complete: bool = True,
+    ) -> None:
         current = self._current_snapshot()
         if current is None:
             return
         candidates_already_degraded = all(
-            candidate.data_health == "DEGRADED" and candidate.readiness != "READY"
+            (
+                preserve_complete
+                and candidate.readiness == "READY"
+                and candidate.data_health == "CURRENT"
+            )
+            or (candidate.data_health == "DEGRADED" and candidate.readiness != "READY")
             for candidate in current.candidates
         )
         effective_next_allowed_at = max(
@@ -391,7 +411,13 @@ class PerptapeStreamWorker:
             return
         fetched_at = self._safe_record_time(self._now(), current)
         degraded = tuple(
-            replace(
+            candidate
+            if (
+                preserve_complete
+                and candidate.readiness == "READY"
+                and candidate.data_health == "CURRENT"
+            )
+            else replace(
                 candidate,
                 data_health="DEGRADED",
                 readiness=("INCOMPLETE" if candidate.readiness == "INCOMPLETE" else "DEGRADED"),
@@ -475,7 +501,7 @@ class PerptapeStreamWorker:
         if self.fatal_error_code is None:
             return False
         if self.fatal_error_code not in PERPTAPE_FATAL_INPUT_ERROR_CODES:
-            self._mark_degraded()
+            self._mark_degraded(preserve_complete=False)
         logger.error(
             "Perptape WebSocket stopped after bounded failures",
             extra={
@@ -966,7 +992,7 @@ class PerptapeStreamWorker:
                 "PERPTAPE_NOT_CONFIGURED",
             }
             if non_retryable or attempts >= self._max_reconnect_attempts:
-                self._mark_degraded()
+                self._mark_degraded(preserve_complete=False)
                 self.fatal_error_code = error_code
                 logger.error(
                     "Perptape WebSocket stopped after bounded failures",

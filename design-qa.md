@@ -1,4 +1,31 @@
-# Opportunity filter single-row visual QA
+# Opportunity page visual QA
+
+## Latest: compact opportunity signal chips
+
+### Source and state
+
+- Source visual truth: `/var/folders/c1/6j8smjg96430htljxp_sx8sr0000gn/T/codex-clipboard-5d4d3863-58af-4d69-84b4-7e9095a1e63f.png`.
+- Implementation screenshot: `/Users/vireo/.codex/visualizations/2026/08/02/019fc2e6-1567-7381-a0b6-73935a4ca083/trading-opportunity-tut-compact-20260804.png`.
+- State: Chinese production opportunities page, live Perptape feed, symbol filter `TUT`, exact active Binance contract catalog synchronized.
+- Requested change: keep all timeframe signals on one row and use compact labels when the card cannot fit the full breakout phrase.
+
+### Comparison result
+
+- Visual result: passed. The existing card, pill, typography, color, border, and spacing system remains unchanged.
+- Wide and narrow card behavior: passed. Four periods render on one row; the 390 px card and narrower 285 px card both use `1h 上 / 4h 上 / 1d 上 / 1w 上` without clipping.
+- Accessibility: passed. Each compact chip retains the complete accessible name such as `1h · 向上突破`.
+- Action state: passed. The live TUT card shows enabled `高级配置` and `一键创建` buttons after exact official catalog synchronization.
+- No open P0, P1, or P2 visual findings remain.
+
+### Verification
+
+- Browser geometry: all four TUT chips share one y-coordinate.
+- `tests/api/test_health.py`: 11 passed.
+- `node --check src/trading_control_plane/web/app.js`: passed.
+
+final result: passed
+
+## Previous: opportunity filter single-row visual QA
 
 ## Source and state
 

@@ -43,6 +43,7 @@ async def exercise_access_management(database: Database) -> None:
         transport=ASGITransport(app=access_app(database)), base_url="http://test"
     ) as client:
         await login(client, "admin")
+        assert (await client.get("/api/capital")).status_code == 200
 
         created = await client.post(
             "/api/admin/users",
@@ -71,6 +72,15 @@ async def exercise_access_management(database: Database) -> None:
         assert duplicate.status_code == 409, duplicate.text
         assert duplicate.json()["error"]["code"] == "USERNAME_CONFLICT"
 
+        mixed = await client.post(
+            "/api/admin/users",
+            json={
+                "username": "mixed-non-admin",
+                "roles": ["PROPOSER", "REVIEWER", "OPERATOR", "TREASURY_ADMIN"],
+            },
+        )
+        assert mixed.status_code == 200, mixed.text
+
         self_change = await client.put(
             f"/api/admin/users/{admin_id}/access",
             json={"roles": ["SYSTEM_ADMIN"], "active": True},
@@ -84,6 +94,13 @@ async def exercise_access_management(database: Database) -> None:
         assert (await client.get("/api/campaigns")).status_code == 403
         assert (await client.get("/api/capital")).status_code == 403
         assert (await client.get("/api/admin/users")).status_code == 403
+
+        await login(client, "mixed-non-admin")
+        assert (await client.get("/api/capital")).status_code == 200
+        denied_members = await client.get("/api/admin/users")
+        assert denied_members.status_code == 403
+        assert "reviewer-only" not in denied_members.text
+        assert "mixed-non-admin" not in denied_members.text
 
         await login(client, "admin")
         disabled = await client.put(
@@ -111,7 +128,7 @@ async def exercise_access_management(database: Database) -> None:
         assert {"USER_ACCESS_CREATED", "USER_ACCESS_UPDATED"} <= event_types
 
 
-def test_system_admin_manages_role_templates_without_inheriting_capital(
+def test_only_system_admin_manages_members_while_admin_keeps_highest_permissions(
     database: Database,
 ) -> None:
     asyncio.run(exercise_access_management(database))
