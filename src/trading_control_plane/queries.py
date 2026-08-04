@@ -345,6 +345,9 @@ class TradingQueries:
                     )
                 ).all()
             )
+            campaign_by_proposal = dict(
+                session.execute(select(Campaign.proposal_id, Campaign.campaign_id)).all()
+            )
             result: list[dict[str, Any]] = []
             for proposal, instrument in values:
                 if not self.service.can_user(user_id, "view", proposal.account_id, proposal.venue):
@@ -358,6 +361,8 @@ class TradingQueries:
                 summary["required_approvals"] = (
                     2 if proposal.risk_tier == "HIGH" else 1
                 )
+                campaign_id = campaign_by_proposal.get(proposal.proposal_id)
+                summary["campaign_id"] = None if campaign_id is None else str(campaign_id)
                 summary["actionable_for_current_user"] = bool(
                     effective_status == "PENDING_REVIEW"
                     and proposal.proposer_id != user_id

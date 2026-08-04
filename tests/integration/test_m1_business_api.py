@@ -763,6 +763,7 @@ def test_perptape_to_review_to_risk_and_authorization_api_flow(
             assert listed.status_code == 200, listed.text
             assert listed.json()["data"][0]["symbol"] == "BTCUSDT"
             assert listed.json()["data"][0]["collateral_currency"] == "USDT"
+            assert listed.json()["data"][0]["campaign_id"] is None
 
             duplicate = await client.post(
                 f"/api/opportunities/{candidate['candidate_id']}/proposals", json=payload

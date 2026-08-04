@@ -5179,6 +5179,7 @@ def create_app(
         @app.get("/opportunities", include_in_schema=False)
         @app.get("/opportunities/defaults", include_in_schema=False)
         @app.get("/proposals/new", include_in_schema=False)
+        @app.get("/proposals", include_in_schema=False)
         @app.get("/reviews", include_in_schema=False)
         @app.get("/campaigns", include_in_schema=False)
         @app.get("/campaigns/alerts", include_in_schema=False)

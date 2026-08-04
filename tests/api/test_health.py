@@ -112,13 +112,19 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
 
     assert response.status_code == 200
     assert "交易控制台" in response.text
-    assert "/assets/app.js?v=77" in response.text
-    assert "/assets/styles.css?v=36" in response.text
+    assert "/assets/app.js?v=83" in response.text
+    assert "/assets/styles.css?v=37" in response.text
+    assert 'aria-label="交易控制台首页"' in response.text
     assert '<a href="/" data-link><span>⌂</span>今日</a>' in response.text
     assert 'id="mobile-nav-toggle"' in response.text
     assert 'id="confirm-dialog"' in response.text
 
-    for route in ("/venues", "/venues/hyperliquid", "/opportunities/defaults"):
+    for route in (
+        "/venues",
+        "/venues/hyperliquid",
+        "/opportunities/defaults",
+        "/proposals",
+    ):
         routed_shell = get(app, route)
         assert routed_shell.status_code == 200
         assert "交易控制台" in routed_shell.text
@@ -135,6 +141,17 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
     assert "全局风险恢复由管理员控制" in app_javascript.text
     assert "if (error.status !== 403) throw error" in app_javascript.text
     assert "actionable_for_current_user" in app_javascript.text
+    assert "item.proposer_id === session.user_id" in app_javascript.text
+    assert "只统计草稿和等待审核" in app_javascript.text
+    assert 'href="/proposals" data-link>查看提案记录</a>' in app_javascript.text
+    assert "new URLSearchParams(location.search).get('history') === '1'" in app_javascript.text
+    assert "item.status === 'APPROVED' && !item.campaign_id" in app_javascript.text
+    assert "historyMode ? !isCurrentProposal(item)" in app_javascript.text
+    assert "const proposerOnly = hasCapability('proposal.create')" in app_javascript.text
+    assert "item.proposer_id === session.user_id) : allItems" in app_javascript.text
+    assert 'href="/proposals?history=1" data-link>历史记录</a>' in app_javascript.text
+    assert "approvedAwaitingLaunch" in app_javascript.text
+    assert "批准不会自动下单" in app_javascript.text
     assert "你的审核已记录" in app_javascript.text
     assert 'data-nav-capability="opportunity.view"' in response.text
     assert 'href="/admin/users"' in response.text
@@ -278,7 +295,7 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
 
     service_worker = get(app, "/sw.js")
     assert service_worker.status_code == 200
-    assert "trading-shell-v70" in service_worker.text
+    assert "trading-shell-v77" in service_worker.text
     assert "self.skipWaiting()" in service_worker.text
     assert "self.clients.claim()" in service_worker.text
     assert "await fetch(event.request)" in service_worker.text

@@ -644,6 +644,9 @@ dialog::backdrop { background: rgba(4, 12, 10, .56); backdrop-filter: blur(3px);
 }
 
 @media (max-width: 480px) {
+  .topbar { padding-inline: 10px; }
+  .topbar-actions { gap: 6px; }
+  .brand > span:last-child { display: none; }
   .venue-status-stats { grid-template-columns: 1fr; }
   .form-section, .advanced-form { padding: 21px 18px; }
   .rationale-field { margin-inline: 18px; }
