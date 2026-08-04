@@ -112,7 +112,7 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
 
     assert response.status_code == 200
     assert "交易控制台" in response.text
-    assert "/assets/app.js?v=72" in response.text
+    assert "/assets/app.js?v=73" in response.text
     assert "/assets/styles.css?v=35" in response.text
     assert '<a href="/" data-link><span>⌂</span>今日</a>' in response.text
     assert 'id="mobile-nav-toggle"' in response.text
@@ -277,7 +277,7 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
 
     service_worker = get(app, "/sw.js")
     assert service_worker.status_code == 200
-    assert "trading-shell-v66" in service_worker.text
+    assert "trading-shell-v67" in service_worker.text
     assert "self.skipWaiting()" in service_worker.text
     assert "self.clients.claim()" in service_worker.text
     assert "await fetch(event.request)" in service_worker.text
@@ -738,7 +738,9 @@ def test_system_and_venue_pages_distinguish_read_only_snapshots_from_live_execut
     app_path = Path(__file__).parents[2] / "src" / "trading_control_plane" / "web" / "app.js"
     source = app_path.read_text()
 
-    assert "只读控制台可用，但交易执行尚未就绪" in source  # noqa: RUF001
+    assert "只读控制台可用，但 Freqtrade 执行底座尚未就绪" in source  # noqa: RUF001
+    assert "Freqtrade 执行底座已就绪，但交易所只读连接受限" in source  # noqa: RUF001
+    assert "两个 Freqtrade worker 已通过 dry-run 检查" in source
     assert "Freqtrade worker 未启动" in source
     assert "LIVE_ORDER_SEND 保持关闭" in source
     assert "fmtConnectionCategory(state.category)" in source
