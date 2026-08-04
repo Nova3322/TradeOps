@@ -112,7 +112,7 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
 
     assert response.status_code == 200
     assert "交易控制台" in response.text
-    assert "/assets/app.js?v=100" in response.text
+    assert "/assets/app.js?v=101" in response.text
     assert "/assets/styles.css?v=43" in response.text
     assert 'aria-label="交易控制台首页"' in response.text
     assert '<a href="/" data-link><span>⌂</span>今日</a>' in response.text
@@ -297,6 +297,10 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
     assert "生产数据与资金连接" in app_javascript.text
     assert "等待资金库绑定" in app_javascript.text
     assert "当前无监控对象" in app_javascript.text
+    assert "逐笔开仓可检查" in app_javascript.text
+    assert "实时安全条件未通过" in app_javascript.text
+    assert "dry-run worker 已连接" in app_javascript.text
+    assert "Freqtrade worker 已接管" not in app_javascript.text
     assert "venue-sync-form" not in app_javascript.text
     assert "账户数据自动更新中" in app_javascript.text
 
@@ -323,7 +327,7 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
 
     service_worker = get(app, "/sw.js")
     assert service_worker.status_code == 200
-    assert "trading-shell-v81" in service_worker.text
+    assert "trading-shell-v82" in service_worker.text
     assert "self.skipWaiting()" in service_worker.text
     assert "self.clients.claim()" in service_worker.text
     assert "await fetch(event.request)" in service_worker.text

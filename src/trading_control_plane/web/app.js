@@ -2092,8 +2092,32 @@ async function renderSystemStatus() {
   const controlAvailable = !control.error;
   const policy = control.policy || {system_state:'UNKNOWN', version:'—'};
   const gate = control.auto_add_gate || {status:'UNKNOWN', version:'—'};
-  const entryOpen = controlAvailable && policy.system_state === 'NORMAL';
+  const restoreConditions = control.restore_conditions || {ready:false, blockers:[], checks:[]};
+  const blockedRiskChecks = (restoreConditions.checks || []).filter(check => check.status === 'BLOCKED');
+  const blockedRiskScopes = [...new Map(blockedRiskChecks
+    .filter(check => check.scope?.venue)
+    .map(check => [`${check.scope.environment}:${check.scope.account_id}:${check.scope.venue}`, check.scope])).values()];
+  const blockedRiskScopeLabels = blockedRiskScopes.map(scope => ({BINANCE:'币安', HYPERLIQUID:'链上永续'})[scope.venue] || scope.venue);
+  const entryOpen = controlAvailable && policy.system_state === 'NORMAL' && restoreConditions.ready;
   const addOpen = entryOpen && gate.status === 'ENABLED';
+  const entryStatus = !controlAvailable
+    ? '风险政策未配置'
+    : policy.system_state !== 'NORMAL'
+      ? riskControlStatusLabel(policy.system_state)
+      : !restoreConditions.ready
+        ? blockedRiskScopeLabels.length
+          ? `${blockedRiskScopeLabels.length} 个生产范围受阻`
+          : '实时安全条件未通过'
+        : addOpen
+          ? '开仓与加仓逐笔检查'
+          : '逐笔开仓可检查';
+  const entryCopy = !controlAvailable
+    ? '缺少当前风险政策或自动加仓控制，系统会阻止新增风险。'
+    : policy.system_state !== 'NORMAL'
+      ? `风险政策：${riskControlStatusLabel(policy.system_state)}；自动加仓：${riskControlStatusLabel(gate.status)}。`
+      : !restoreConditions.ready
+        ? `风险政策正常，但${blockedRiskScopeLabels.length ? `${blockedRiskScopeLabels.join('、')}的` : ''}实时安全条件未通过；通过检查的范围仍需逐笔复核。自动加仓${riskControlStatusLabel(gate.status)}。`
+        : `实时安全条件全部通过；每笔开仓仍由服务端重新检查。自动加仓${riskControlStatusLabel(gate.status)}。`;
   const perptape = runtime?.data?.external_boundaries?.perptape || {configured:false,status:'NOT_CONFIGURED',candidate_count:0,last_fetched_at:null,contract_version:'—'};
   const notilt = runtime?.data?.external_boundaries?.notilt || {enabled:false,gateway_available:false,configured_chains:[]};
   const telegram = runtime?.data?.external_boundaries?.telegram || {enabled:false,network_configured:false,polling:{state:'DISABLED'}};
@@ -2146,7 +2170,7 @@ async function renderSystemStatus() {
       : 'Freqtrade worker 尚未全部通过身份、期货模式、合约目录和 dry-run 检查。';
   const tradingConnectionsReady = Boolean(connections.BINANCE?.available && connections.HYPERLIQUID?.available);
   const activeMonitoring = campaigns.length > 0;
-  const overallTone = !health.ready || !controlAvailable ? 'danger' : exceptions.length || !perptapeAvailable || !workersReady || !tradingConnectionsReady || !telegramHealthy ? 'attention' : activeMonitoring ? 'success' : 'neutral';
+  const overallTone = !health.ready || !controlAvailable ? 'danger' : exceptions.length || !entryOpen || !perptapeAvailable || !workersReady || !tradingConnectionsReady || !telegramHealthy ? 'attention' : activeMonitoring ? 'success' : 'neutral';
   const monitoringCards = canViewOperations ? [
     systemHealthCard({title:'减仓与退出', status:!activeMonitoring ? '当前无运行中任务' : unknownIntents ? '部分交易任务需要先对账' : '路径可用', tone:!activeMonitoring ? 'neutral' : unknownIntents ? 'attention' : 'success', copy:!activeMonitoring ? '当前没有需要减仓或退出的交易任务。' : unknownIntents ? `${unknownIntents} 个订单结果未知，相关交易任务禁止重复动作；其他已知仓位仍可减仓或退出。` : '即使新增风险受限，受控减仓与退出仍然可用。', meta:`${campaigns.length} 个运行中交易任务`}),
     systemHealthCard({title:'止损与保护监控', status:!activeMonitoring ? '当前无监控对象' : protectionIssues.length ? `${protectionIssues.length} 项需要处理` : '监控正常', tone:!activeMonitoring ? 'neutral' : protectionIssues.length ? 'danger' : 'success', copy:!activeMonitoring ? '有交易任务进入持仓后，系统会持续检查止损和保护覆盖。' : protectionIssues.length ? '检测到保护缺失、过期、未知或覆盖不足。' : '运行中的交易任务没有保护异常。', meta:`数据截止 ${fmtDate(exceptionsResponse.as_of)}`}),
@@ -2157,9 +2181,9 @@ async function renderSystemStatus() {
   ];
   const cards = [
     systemHealthCard({title:'核心服务', status:health.ready ? '服务可用' : '服务不可用', tone:health.ready ? 'success' : 'danger', copy:health.ready ? '业务数据库和交易服务运行正常。' : '核心服务检查失败；不能把缺失响应当成正常。', meta:'数据缺失时自动阻止交易'}),
-    systemHealthCard({title:'开仓与加仓', status:controlAvailable ? (addOpen ? '允许新增风险' : entryOpen ? '自动加仓已关闭' : riskControlStatusLabel(policy.system_state)) : '风险政策未配置', tone:addOpen ? 'success' : controlAvailable ? 'attention' : 'danger', copy:controlAvailable ? `风险政策：${riskControlStatusLabel(policy.system_state)}；自动加仓：${riskControlStatusLabel(gate.status)}。` : '缺少当前风险政策或自动加仓控制，系统会阻止新增风险。', meta:'政策变化会立即重新检查所有新增风险'}),
+    systemHealthCard({title:'开仓与加仓', status:entryStatus, tone:entryOpen ? (addOpen ? 'success' : 'attention') : 'danger', copy:entryCopy, meta:restoreConditions.ready ? '每笔新增风险仍会重新检查账户、交易所与授权' : `${restoreConditions.blockers?.length || blockedRiskChecks.length} 项实时条件待处理；查看风险控制了解精确原因`}),
     ...monitoringCards,
-    systemHealthCard({title:'交易执行底座', status:workersReady ? 'Freqtrade worker 已接管' : workersDisabled ? 'Freqtrade worker 未启动' : 'Freqtrade worker 检查未通过', tone:workersReady || workersDisabled ? 'attention' : 'danger', copy:executionCopy, meta:workersReady ? '本地 dry-run 运行；强制开仓、真实下单与旧直连均关闭' : workersDisabled ? `需配置 worker 控制凭据后以 dry-run 启动；LIVE_ORDER_SEND 保持关闭${configuredHip3Dexes.length ? `；HIP-3 范围 ${configuredHip3Dexes.join('、')}` : ''}` : '身份、模式或合约目录不一致时禁止发送'}),
+    systemHealthCard({title:'交易执行底座', status:workersReady ? 'dry-run worker 已连接' : workersDisabled ? 'Freqtrade worker 未启动' : 'Freqtrade worker 检查未通过', tone:workersReady || workersDisabled ? 'attention' : 'danger', copy:executionCopy, meta:workersReady ? '仅验证执行适配与合约目录；不会发送真实订单' : workersDisabled ? `需配置 worker 控制凭据后以 dry-run 启动；LIVE_ORDER_SEND 保持关闭${configuredHip3Dexes.length ? `；HIP-3 范围 ${configuredHip3Dexes.join('、')}` : ''}` : '身份、模式或合约目录不一致时禁止发送'}),
     systemHealthCard({title:'审核通知', status:telegramStatus, tone:telegramHealthy ? 'success' : 'attention', copy:telegramHealthy ? '私聊 Bot 最近一次长轮询成功；批准和拒绝仍需二次确认并写入统一审计。' : telegramFailureCopy, meta:telegramHealthy ? `最近成功 ${fmtDate(telegramPolling.last_success_at)}` : 'Web 审核队列保持可用；资金、订单、风险开关与权限操作不对 Bot 开放'}),
     systemHealthCard({title:'Perptape 机会源', status:perptapeStatus, tone:perptapeTone, copy:perptapeAvailable ? `已读取 ${Number(opportunityHealth?.data?.length ?? perptape.candidate_count ?? 0)} 个候选，可用于机会筛选和提案。` : perptape.configured ? 'Perptape 已配置，但最近数据尚未形成可用连接结论。现有交易任务不受影响，新的外部机会不可用。' : 'Perptape 尚未配置；人工提案仍可使用。', meta:`只读 · 最近数据 ${fmtDate(perptape.last_fetched_at)}`}),
   ].join('');
@@ -2209,18 +2233,26 @@ async function renderSystemStatus() {
       : `负责：${state.owner_role} · 下一步：${fmtConnectionNextAction(state)}`;
     return `<tr><td data-label="数据源"><b>${label[0]}</b><br><span class="subtle">${escapeHtml(categoryLabel)}</span>${errorEvidence}</td><td data-label="读取状态与处理建议"><span class="status-pill ${state.available ? 'status-APPROVED' : ''}">${state.available ? (currentLanguage === 'en' ? 'Read-only connected' : '只读已连接') : escapeHtml(categoryLabel)}</span><br><span class="subtle">${escapeHtml(fmtConnectionReason(state))}</span><br><span class="subtle">${escapeHtml(probeEvidence)}</span><br><span class="subtle">${escapeHtml(ownership)}</span></td><td data-label="运行范围">${label[1]}</td><td data-label="可用能力">${escapeHtml(capability)}</td><td data-label="下一步">${action}</td></tr>`;
   }).join('');
-  const availableSources = Object.values(connections).filter(item => item.available).length;
+  const availableSources = Object.keys(connectionLabels).filter(key => connections[key]?.available).length;
   const executionVerdictTitle = !workersReady
     ? '只读控制台可用，但 Freqtrade 执行底座尚未就绪'
     : 'Freqtrade 执行底座已就绪，但交易所只读连接受限';
   const executionVerdictCopy = !workersReady
     ? `${workersDisabled ? 'Freqtrade worker 尚未启动' : 'Freqtrade worker 尚未通过检查'}；${!tradingConnectionsReady ? '至少一个交易所只读连接也受限' : '交易所只读连接正常'}。系统不会把页面可访问误报为可执行交易。`
     : '两个 Freqtrade worker 已通过 dry-run 检查；至少一个交易所只读账户连接当前受限。真实下单继续关闭，系统不会把执行底座可用误报为生产交易就绪。';
-  const verdictTitle = !health.ready ? '核心服务未通过就绪检查' : !controlAvailable ? '核心服务可用，但风险政策未配置' : exceptions.length ? '核心服务可用，但存在风险阻断' : !workersReady || !tradingConnectionsReady ? executionVerdictTitle : !telegramHealthy ? '交易管理可用，但 Telegram 审核通知受限' : !perptapeAvailable ? '交易管理可用，但 Perptape 机会源受限' : !canViewOperations ? '核心服务与可见连接状态正常' : activeMonitoring ? '交易系统正在正常监控' : '核心服务可用，当前无运行中交易任务';
-  const verdictCopy = !health.ready ? '请先恢复数据库与服务状态，不要继续依赖旧数据。' : !controlAvailable ? `${friendlyApiError(control.error)} 新增风险保持关闭。` : exceptions.length ? `发现 ${exceptions.length} 项安全异常；受影响的新增风险会保持关闭。` : !workersReady || !tradingConnectionsReady ? executionVerdictCopy : !telegramHealthy ? `${telegramFailureCopy} 不影响 Web 审核，也不会放宽任何审核或交易边界。` : !perptapeAvailable ? `${perptapeStatus}。现有交易任务仍可管理，但新的 Perptape 机会暂不可用。` : !canViewOperations ? '当前身份未读取交易任务、保护和对账详情；页面仅对已授权的系统事实给出结论。' : activeMonitoring ? '运行中的交易任务没有检测到保护、敞口或对账阻断。' : '当前没有需要监控的交易任务；系统不会把“无监控对象”误报为“监控正常”。';
+  const riskVerdictTitle = policy.system_state === 'NORMAL'
+    ? blockedRiskScopeLabels.length
+      ? `核心服务可用，但${blockedRiskScopeLabels.join('、')}的实时开仓条件受阻`
+      : '核心服务可用，但实时开仓条件未全部通过'
+    : `核心服务可用，但风险政策为${riskControlStatusLabel(policy.system_state)}`;
+  const riskVerdictCopy = blockedRiskChecks.length
+    ? `${blockedRiskChecks.map(check => (check.reason || []).filter(reason => reason !== 'CURRENT').map(formatControlBlocker).join('；')).filter(Boolean).join('；')}。通过检查的范围仍需逐笔复核；自动加仓保持关闭。`
+    : '风险政策或实时生产事实尚未满足新增风险条件；每笔请求都会继续由服务端拒绝或重新校验。';
+  const verdictTitle = !health.ready ? '核心服务未通过就绪检查' : !controlAvailable ? '核心服务可用，但风险政策未配置' : exceptions.length ? '核心服务可用，但存在风险阻断' : !entryOpen ? riskVerdictTitle : !workersReady || !tradingConnectionsReady ? executionVerdictTitle : !telegramHealthy ? '交易管理可用，但 Telegram 审核通知受限' : !perptapeAvailable ? '交易管理可用，但 Perptape 机会源受限' : !canViewOperations ? '核心服务与可见连接状态正常' : activeMonitoring ? '交易系统正在正常监控' : '核心服务可用，当前无运行中交易任务';
+  const verdictCopy = !health.ready ? '请先恢复数据库与服务状态，不要继续依赖旧数据。' : !controlAvailable ? `${friendlyApiError(control.error)} 新增风险保持关闭。` : exceptions.length ? `发现 ${exceptions.length} 项安全异常；受影响的新增风险会保持关闭。` : !entryOpen ? riskVerdictCopy : !workersReady || !tradingConnectionsReady ? executionVerdictCopy : !telegramHealthy ? `${telegramFailureCopy} 不影响 Web 审核，也不会放宽任何审核或交易边界。` : !perptapeAvailable ? `${perptapeStatus}。现有交易任务仍可管理，但新的 Perptape 机会暂不可用。` : !canViewOperations ? '当前身份未读取交易任务、保护和对账详情；页面仅对已授权的系统事实给出结论。' : activeMonitoring ? '运行中的交易任务没有检测到保护、敞口或对账阻断。' : '当前没有需要监控的交易任务；系统不会把“无监控对象”误报为“监控正常”。';
   const verdictAction = exceptions.length && canViewOperations
     ? '<a class="primary" href="/campaigns/alerts" data-link>查看运行告警</a>'
-    : !controlAvailable
+    : !controlAvailable || !entryOpen
       ? '<a class="secondary" href="/risk" data-link>查看风险控制</a>'
       : (!workersReady || !tradingConnectionsReady) && canViewVenues
         ? '<a class="secondary" href="/venues" data-link>查看交易账户</a>'
