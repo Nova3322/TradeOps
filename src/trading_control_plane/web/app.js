@@ -1204,19 +1204,22 @@ function groupOpportunities(items) {
     const actionable = newest.filter(item => item.readiness === 'READY' && item.proposal_eligible);
     const currentCandidates = newest.filter(item => item.readiness === 'READY' && item.data_health === 'CURRENT');
     const primary = actionable[0] || currentCandidates[0] || newest[0];
-    const timeframes = [...new Set(candidates.map(item => item.timeframe))].sort((left, right) => OPPORTUNITY_TIMEFRAME_ORDER.indexOf(left) - OPPORTUNITY_TIMEFRAME_ORDER.indexOf(right));
-    const timeframeStates = timeframes.map(timeframe => {
+    const observedTimeframes = [...new Set(candidates.map(item => item.timeframe))].sort((left, right) => OPPORTUNITY_TIMEFRAME_ORDER.indexOf(left) - OPPORTUNITY_TIMEFRAME_ORDER.indexOf(right));
+    const timeframeStates = observedTimeframes.map(timeframe => {
       const timeframeCandidates = newest.filter(item => item.timeframe === timeframe);
       const complete = timeframeCandidates.find(item => item.readiness === 'READY' && item.data_health === 'CURRENT') || null;
       const latest = timeframeCandidates[0] || null;
       const latestIncomplete = latest && (latest.readiness !== 'READY' || latest.data_health !== 'CURRENT') ? latest : null;
       return {timeframe, complete, latest, latestIncomplete};
     });
+    const completeTimeframes = timeframeStates.filter(item => item.complete).map(item => item.timeframe);
+    const timeframes = completeTimeframes.length ? completeTimeframes : observedTimeframes;
     const unavailableTimeframes = timeframeStates.filter(item => !item.complete).map(item => item.timeframe);
     const pendingRefreshTimeframes = timeframeStates.filter(item => item.complete && item.latestIncomplete).map(item => item.timeframe);
     const relevantIncompleteCandidates = timeframeStates.map(item => item.latestIncomplete).filter(Boolean);
+    const factCandidates = timeframeStates.map(item => item.complete || item.latest).filter(Boolean);
     const numericMaximum = key => {
-      const values = candidates.map(item => item[key]).filter(value => value !== null && value !== undefined).map(Number).filter(Number.isFinite);
+      const values = factCandidates.map(item => item[key]).filter(value => value !== null && value !== undefined).map(Number).filter(Number.isFinite);
       return values.length ? Math.max(...values) : null;
     };
     return {
@@ -1224,6 +1227,8 @@ function groupOpportunities(items) {
       group_id:groupId,
       candidates,
       timeframes,
+      observed_timeframes:observedTimeframes,
+      complete_timeframes:completeTimeframes,
       action_candidate_id:actionable[0]?.candidate_id || null,
       proposal_eligible:Boolean(actionable.length),
       proposal_blocker:actionable.length ? null : primary?.proposal_blocker || null,
@@ -1255,7 +1260,7 @@ function opportunitySnapshotCounts(items, groups) {
     unique_symbols:new Set(symbolKeys).size,
     symbols_by_venue:Object.fromEntries(Object.entries(venueSymbols).map(([venue, symbols]) => [venue, symbols.size])),
     directional_opportunities:groups.length,
-    timeframe_hits:items.length,
+    timeframe_hits:groups.reduce((total, item) => total + (item.complete_timeframes || []).length, 0),
     eligible_opportunities:groups.filter(item => item.action_candidate_id).length,
     waiting_opportunities:groups.filter(item => opportunityViewState(item) === 'WAITING').length,
     watch_only_opportunities:groups.filter(item => opportunityViewState(item) === 'WATCH_ONLY').length,
@@ -1296,9 +1301,10 @@ function renderOpportunitySnapshot(result, sourceError = null, preservedFilters 
   const defaultViewState = counts.eligible_opportunities ? 'ACTIONABLE' : 'ALL';
   main.innerHTML = `<section class="page" data-opportunity-snapshot="${escapeHtml(result?.snapshot_id || '')}"><header class="page-head"><div><p class="eyebrow">Perptape · 实时机会流</p><h1>机会</h1><p class="lede">实时汇总同一币对、同一方向的多个突破周期。同一轮卡片、状态和按钮都来自同一个事实快照；创建时服务端仍会重新校验。</p></div><div class="toolbar"><span class="status-pill" data-live-status>${sourceError ? '连接已中断，正在重连' : '正在连接'}</span>${canPropose ? '<a class="primary" href="/proposals/new" data-link>＋ 人工提案</a>' : ''}<button class="secondary" data-refresh>刷新机会</button></div></header>
     ${sourceError ? `<article class="source-status tone-attention"><div><p class="eyebrow">Perptape 数据源</p><h2>外部机会当前不可用</h2><p>${escapeHtml(friendlyApiError(sourceError))} 系统不会把过期候选当成当前机会。</p></div>${canPropose ? '<a class="secondary" href="/proposals/new" data-link>创建人工提案</a>' : ''}</article>` : ''}
+    ${!canPropose ? '<div class="callout"><b>只读模式：</b>当前身份可以查看、筛选候选并打开外部图表，但不能创建或修改提案。</div>' : ''}
     <div class="opportunity-tools"><span>信号快照 ${fmtDate(result?.snapshot_generated_at || result?.as_of)}</span>${canPropose ? `<a class="secondary" href="/opportunities/defaults" data-link>默认配置${proposalDefaults.configured ? '' : ' · 未完成'}</a>` : ''}</div>
-    <div class="stats opportunity-stats"><div class="stat"><small>覆盖币对</small><b>${counts.unique_symbols}</b><span>${escapeHtml(venueBreakdown || '按交易所和合约去重')}</span></div><div class="stat"><small>方向机会</small><b>${counts.directional_opportunities}</b><span>同一币对做多、做空分开</span></div><div class="stat"><small>周期信号</small><b>${counts.timeframe_hits}</b><span>各周期分别计数，不是币对数量</span></div><div class="stat"><small>${canPropose ? '可创建提案' : '可交易合约'}</small><b>${counts.eligible_opportunities}</b><span>当前快照通过服务端资格检查</span></div></div>
-    ${items.length ? `<form id="opportunity-filters" class="filter-panel"><fieldset class="opportunity-state-filter"><legend>查看状态</legend><label><input name="view_state" type="radio" value="ACTIONABLE" ${defaultViewState === 'ACTIONABLE' ? 'checked' : ''}><span>可创建 <b>${counts.eligible_opportunities}</b></span></label><label><input name="view_state" type="radio" value="WAITING"><span>待补齐 <b>${counts.waiting_opportunities}</b></span></label><label><input name="view_state" type="radio" value="WATCH_ONLY"><span>仅查看 <b>${counts.watch_only_opportunities}</b></span></label><label><input name="view_state" type="radio" value="ALL" ${defaultViewState === 'ALL' ? 'checked' : ''}><span>全部 <b>${items.length}</b></span></label></fieldset><label>交易所<select name="venue"><option value="">全部</option>${optionTags(venues)}</select></label><label>币对<input name="symbol" type="search" placeholder="例如 BTC、XYZ100"></label><label>共振周期<select name="resonance"><option value="1">至少 1 个周期</option><option value="2">至少 2 个周期</option><option value="3">至少 3 个周期</option><option value="4">4 个周期</option></select></label><fieldset class="timeframe-filter"><legend>突破周期</legend>${OPPORTUNITY_TIMEFRAME_ORDER.map(timeframe => `<label><input name="timeframes" type="checkbox" value="${timeframe}" checked><span>${timeframe}</span></label>`).join('')}</fieldset><label>方向<select name="direction"><option value="">全部</option><option value="LONG">做多</option><option value="SHORT">做空</option></select></label><label>最低成交量<input name="volume" type="number" min="0" placeholder="不限"></label><label>最低持仓量<input name="open_interest" type="number" min="0" placeholder="不限"></label><button type="reset" class="text-button">清除筛选</button></form><div class="result-summary"><span data-filter-summary>显示 ${items.length} / ${items.length} 个机会</span><span>默认先显示可创建机会；待补齐和仅查看仍可切换。</span></div><div id="opportunity-grid" class="card-grid">${items.map(opportunityCard).join('')}</div><section id="opportunity-empty" class="empty-state compact-empty" hidden><div><h2>没有符合条件的机会</h2><p>尝试切换机会状态、降低筛选门槛，或者清除部分筛选。</p></div></section>` : `<section class="empty-state compact-empty"><div><h2>${sourceError ? '等待机会数据恢复' : '当前没有突破候选'}</h2><p>${sourceError ? '人工提案仍然可用；Perptape 恢复后会自动重连。' : '这不代表市场没有风险或行情，只表示当前没有返回候选。'}</p></div></section>`}
+    <div class="stats opportunity-stats"><div class="stat"><small>覆盖币对</small><b>${counts.unique_symbols}</b><span>${escapeHtml(venueBreakdown || '按交易所和合约去重')}</span></div><div class="stat"><small>方向机会</small><b>${counts.directional_opportunities}</b><span>同一币对做多、做空分开</span></div><div class="stat"><small>完整周期信号</small><b>${counts.timeframe_hits}</b><span>同一合约、方向、周期只计一次</span></div><div class="stat"><small>${canPropose ? '可创建提案' : '可交易合约'}</small><b>${counts.eligible_opportunities}</b><span>当前快照通过服务端资格检查</span></div></div>
+    ${items.length ? `<form id="opportunity-filters" class="filter-panel"><fieldset class="opportunity-state-filter"><legend>查看状态</legend><label><input name="view_state" type="radio" value="ACTIONABLE" ${defaultViewState === 'ACTIONABLE' ? 'checked' : ''}><span>${canPropose ? '可创建' : '可交易'} <b>${counts.eligible_opportunities}</b></span></label><label><input name="view_state" type="radio" value="WAITING"><span>待补齐 <b>${counts.waiting_opportunities}</b></span></label><label><input name="view_state" type="radio" value="WATCH_ONLY"><span>仅查看 <b>${counts.watch_only_opportunities}</b></span></label><label><input name="view_state" type="radio" value="ALL" ${defaultViewState === 'ALL' ? 'checked' : ''}><span>全部 <b>${items.length}</b></span></label></fieldset><label>交易所<select name="venue"><option value="">全部</option>${optionTags(venues)}</select></label><label>币对<input name="symbol" type="search" placeholder="例如 BTC、XYZ100"></label><label>共振周期<select name="resonance"><option value="1">至少 1 个周期</option><option value="2">至少 2 个周期</option><option value="3">至少 3 个周期</option><option value="4">4 个周期</option></select></label><fieldset class="timeframe-filter"><legend>突破周期</legend>${OPPORTUNITY_TIMEFRAME_ORDER.map(timeframe => `<label><input name="timeframes" type="checkbox" value="${timeframe}" checked><span>${timeframe}</span></label>`).join('')}</fieldset><label>方向<select name="direction"><option value="">全部</option><option value="LONG">做多</option><option value="SHORT">做空</option></select></label><label>最低成交量<input name="volume" type="number" min="0" placeholder="不限"></label><label>最低持仓量<input name="open_interest" type="number" min="0" placeholder="不限"></label><button type="reset" class="text-button">清除筛选</button></form><div class="result-summary"><span data-filter-summary>显示 ${items.length} / ${items.length} 个机会</span><span>默认先显示${canPropose ? '可创建' : '可交易'}机会；待补齐和仅查看仍可切换。</span></div><div id="opportunity-grid" class="card-grid">${items.map(opportunityCard).join('')}</div><section id="opportunity-empty" class="empty-state compact-empty" hidden><div><h2>没有符合条件的机会</h2><p>尝试切换机会状态、降低筛选门槛，或者清除部分筛选。</p></div></section>` : `<section class="empty-state compact-empty"><div><h2>${sourceError ? '等待机会数据恢复' : '当前没有突破候选'}</h2><p>${sourceError ? '人工提案仍然可用；Perptape 恢复后会自动重连。' : '这不代表市场没有风险或行情，只表示当前没有返回候选。'}</p></div></section>`}
   </section>`;
   const filterForm = document.querySelector('#opportunity-filters');
   if (filterForm) Object.entries(preservedFilters).forEach(([key, value]) => {
@@ -1459,9 +1465,12 @@ function opportunityCard(item) {
       ? '该 HIP-3 市场尚未进入当前 Freqtrade worker 的精确合约目录，只能查看信号'
       : '该交易合约尚未进入可交易合约目录',
   }[item.proposal_blocker] || (actionCandidateId ? '' : '当前没有可用于创建的完整周期'));
+  const incompleteCopy = unavailableTimeframes.length && actionCandidateId
+    ? `${unavailableTimeframes.join('、')} 数据尚未完整，未计入当前共振；创建时会再次校验。`
+    : '';
   const partialCopy = pendingRefreshTimeframes.length && item.last_complete_at
     ? `新一轮信号正在补齐：${pendingRefreshTimeframes.join('、')}。当前仍使用 ${fmtDate(item.last_complete_at)} 的完整快照；创建时会再次校验。`
-    : '';
+    : incompleteCopy;
   const retryCopy = !actionCandidateId
     && ['PERPTAPE_REQUIRED_FIELDS_MISSING', 'PERPTAPE_CANDIDATE_NOT_CURRENT'].includes(item.proposal_blocker)
     && item.retry_at
@@ -1484,7 +1493,7 @@ function opportunityCard(item) {
     <div class="opportunity-signals" aria-label="突破周期">${signals}</div>
     <div class="metric-row"><div><small>参考价格</small><b>${fmtNumber(item.reference_price)}</b></div><div><small>触发时间</small><b>${fmtDate(item.triggered_at)}</b></div><div><small>行情状态</small><b class="${marketDataCurrent ? 'direction-long' : 'warning-text'}">${escapeHtml(marketStatus)}</b></div></div>
     <div class="market-facts"><span>成交量 <b>${fmtCompact(item.quote_volume)}</b></span><span>持仓量 <b>${fmtCompact(item.open_interest)}</b></span></div>
-    <p class="subtle">${escapeHtml(breakoutSummary)}</p>${partialCopy ? `<p class="safety-note opportunity-status-note">${escapeHtml(partialCopy)}</p>` : ''}${blockedStatusCopy}${canPropose ? (canUseCandidate ? (!proposalDefaults.configured ? `<p class="danger-note opportunity-status-note"><b>一键创建关闭：</b>${escapeHtml(oneClickBlocker)}；仍可使用当前卡片的高级配置。</p>` : '') : '') : (candidateEligible ? '<p class="safety-note opportunity-status-note">当前角色可观察候选，但不能创建提案。</p>' : '')}<div class="link-row"><a class="text-button" href="${escapeHtml(item.detail_url)}" target="_blank" rel="noreferrer">突破详情 ↗</a><a class="text-button" href="${escapeHtml(item.chart_url)}" target="_blank" rel="noreferrer">交易所图表 ↗</a></div>${canPropose && canUseCandidate ? `<div class="card-actions proposal-actions"><button class="secondary" data-advanced-system="${escapeHtml(actionCandidateId)}">高级配置</button><button class="primary" data-create-system="${escapeHtml(actionCandidateId)}" ${canCreateProposal ? '' : 'disabled'} title="${escapeHtml(oneClickBlocker)}">一键创建</button></div>` : ''}</article>`;
+    <p class="subtle">${escapeHtml(breakoutSummary)}</p>${partialCopy ? `<p class="safety-note opportunity-status-note">${escapeHtml(partialCopy)}</p>` : ''}${blockedStatusCopy}${canPropose && canUseCandidate && !proposalDefaults.configured ? `<p class="danger-note opportunity-status-note"><b>一键创建关闭：</b>${escapeHtml(oneClickBlocker)}；仍可使用当前卡片的高级配置。</p>` : ''}<div class="link-row"><a class="text-button" href="${escapeHtml(item.detail_url)}" target="_blank" rel="noreferrer">突破详情 ↗</a><a class="text-button" href="${escapeHtml(item.chart_url)}" target="_blank" rel="noreferrer">交易所图表 ↗</a></div>${canPropose && canUseCandidate ? `<div class="card-actions proposal-actions"><button class="secondary" data-advanced-system="${escapeHtml(actionCandidateId)}">高级配置</button><button class="primary" data-create-system="${escapeHtml(actionCandidateId)}" ${canCreateProposal ? '' : 'disabled'} title="${escapeHtml(oneClickBlocker)}">一键创建</button></div>` : ''}</article>`;
 }
 
 function openSystemDialog(candidateId) {

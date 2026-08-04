@@ -112,7 +112,7 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
 
     assert response.status_code == 200
     assert "交易控制台" in response.text
-    assert "/assets/app.js?v=97" in response.text
+    assert "/assets/app.js?v=98" in response.text
     assert "/assets/styles.css?v=43" in response.text
     assert 'aria-label="交易控制台首页"' in response.text
     assert '<a href="/" data-link><span>⌂</span>今日</a>' in response.text
@@ -174,7 +174,7 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
     assert "const routeCapability = (path)" in app_javascript.text
     assert "今日只显示你的资金职责" in app_javascript.text
     assert "当前职责不包含这个页面" in app_javascript.text
-    assert "当前角色可观察候选，但不能创建提案" in app_javascript.text  # noqa: RUF001
+    assert "只读模式" in app_javascript.text
     assert "error.handled = response.status === 401" in app_javascript.text
     assert "function handleUnauthorizedResponse" in app_javascript.text
     assert "function confirmAction" in app_javascript.text
@@ -270,10 +270,11 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
     assert "function renderOpportunityDefaults" in app_javascript.text
     assert "覆盖币对" in app_javascript.text
     assert "方向机会" in app_javascript.text
-    assert "周期信号" in app_javascript.text
-    assert "各周期分别计数，不是币对数量" in app_javascript.text  # noqa: RUF001
+    assert "完整周期信号" in app_javascript.text
+    assert "同一合约、方向、周期只计一次" in app_javascript.text  # noqa: RUF001
     assert 'name="view_state"' in app_javascript.text
     assert "function opportunityViewState" in app_javascript.text
+    assert "当前身份可以查看、筛选候选并打开外部图表" in app_javascript.text
     assert (
         "信号快照 ${fmtDate(result?.snapshot_generated_at || result?.as_of)}" in app_javascript.text
     )
@@ -318,7 +319,7 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
 
     service_worker = get(app, "/sw.js")
     assert service_worker.status_code == 200
-    assert "trading-shell-v78" in service_worker.text
+    assert "trading-shell-v79" in service_worker.text
     assert "self.skipWaiting()" in service_worker.text
     assert "self.clients.claim()" in service_worker.text
     assert "await fetch(event.request)" in service_worker.text
@@ -425,8 +426,7 @@ def test_opportunity_card_explains_exact_catalog_blocker() -> None:
           quote_volume:null, open_interest:null, rationale:"candidate",
           detail_url:"https://example.test", chart_url:"https://example.test",
         });
-        assert.match(readOnly, /当前角色可观察候选/);
-        assert.match(readOnly, /不能创建提案/);
+        assert.doesNotMatch(readOnly, /当前角色可观察候选|不能创建提案/);
         assert.doesNotMatch(readOnly, /一键创建|高级配置/);
         """
     )
@@ -497,6 +497,25 @@ def test_opportunity_groups_keep_multiple_timeframes_and_direction_separate() ->
         assert.equal(counts.eligible_opportunities, 2);
         assert.equal(counts.waiting_opportunities, 0);
         assert.equal(counts.watch_only_opportunities, 0);
+
+        const duplicatePeriodGroups = JSON.parse(JSON.stringify(context.group([
+          {
+            ...base, candidate_id:"pt_ready_new", direction:"LONG", timeframe:"1h",
+            observed_at:"2026-08-02T10:06:00+00:00", quote_volume:"110",
+          },
+          {
+            ...base, candidate_id:"pt_ready_old", direction:"LONG", timeframe:"1h",
+            observed_at:"2026-08-02T10:05:00+00:00", quote_volume:"999",
+          },
+          {
+            ...base, candidate_id:"pt_4h", direction:"LONG", timeframe:"4h",
+            observed_at:"2026-08-02T10:04:00+00:00", quote_volume:"120",
+          },
+        ])));
+        const duplicatePeriodCounts = context.counts([], duplicatePeriodGroups);
+        assert.equal(duplicatePeriodCounts.timeframe_hits, 2);
+        assert.deepEqual(duplicatePeriodGroups[0].complete_timeframes, ["1h", "4h"]);
+        assert.equal(duplicatePeriodGroups[0].quote_volume, 120);
 
         const catalogBlocked = JSON.parse(JSON.stringify(context.group([{
           ...base,
