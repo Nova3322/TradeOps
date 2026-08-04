@@ -552,20 +552,6 @@ class RiskControlDirectRestoreRequest(BaseModel):
     action_grant: str
 
 
-class TelegramCampaignActionRequest(BaseModel):
-    action: Literal[
-        "DISABLE_CAMPAIGN_AUTO_ADD",
-        "PAUSE_NEW_RISK",
-        "EMERGENCY_REDUCE",
-        "EXIT",
-    ]
-    action_reference: str = Field(min_length=1)
-    campaign_version: int = Field(ge=0)
-    idempotency_key: str = Field(min_length=1, max_length=160)
-    target_quantity: Decimal | None = Field(default=None, ge=0)
-    limit_price: Decimal | None = Field(default=None, gt=0)
-
-
 class ReconciliationRequest(BaseModel):
     execution_scope: str = Field(min_length=3, max_length=255)
 

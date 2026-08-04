@@ -60,7 +60,6 @@ def test_telegram_review_confirmation_writes_audit_without_authorization_or_orde
         internal_username="telegram-reviewer",
         binder=lambda chat_id, _telegram_username, _internal_username: chat_id,
         chat_resolver=lambda user_id: "789" if user_id == reviewer else None,
-        review_only=True,
         client=TelegramBotClient(
             "123456789:abcdefghijklmnopqrstuvwxyz",
             base_url="https://telegram.invalid",

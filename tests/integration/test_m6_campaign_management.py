@@ -394,46 +394,26 @@ async def run_m6_flow(database: Database) -> None:
 
         notifications = await client.get("/api/telegram/mock/notifications")
         assert notifications.status_code == 200, notifications.text
-        campaign_notification = next(
-            item
-            for item in reversed(notifications.json()["campaign_data"])
-            if item["campaign_version"] == 1 and "EMERGENCY_REDUCE" in item["action_references"]
-        )
+        assert notifications.json()["scope"] == "PROPOSAL_REVIEW_ONLY"
+        assert "campaign_data" not in notifications.json()
         delivered_notification = next(
             item
             for item in reversed(telegram.campaign_notifications())
             if item.campaign_version == 1
-            and any(action == "EMERGENCY_REDUCE" for action, _ in item.action_references)
         )
         assert delivered_notification.status == CampaignStatus.REDUCING.value
-        assert delivered_notification.position_reduction_available is True
-        telegram_payload = {
-            "action": "EMERGENCY_REDUCE",
-            "action_reference": campaign_notification["action_references"]["EMERGENCY_REDUCE"],
-            "campaign_version": 1,
-            "idempotency_key": "m6-telegram-reduce",
-            "target_quantity": "0.50",
-        }
-        telegram_reduce = await client.post(
-            "/api/telegram/mock/campaign-actions", json=telegram_payload
-        )
-        telegram_duplicate = await client.post(
-            "/api/telegram/mock/campaign-actions", json=telegram_payload
-        )
-        stale_button = await client.post(
+        assert delivered_notification.action_references == ()
+        telegram_action = await client.post(
             "/api/telegram/mock/campaign-actions",
-            json={**telegram_payload, "idempotency_key": "m6-stale-telegram-button"},
+            json={
+                "action": "EMERGENCY_REDUCE",
+                "action_reference": "not-issued",
+                "campaign_version": 1,
+                "idempotency_key": "m6-telegram-reduce",
+                "target_quantity": "0.50",
+            },
         )
-        assert telegram_reduce.status_code == telegram_duplicate.status_code == 200
-        assert stale_button.status_code == 409
-        telegram_intent = telegram_reduce.json()["detail"]["intents"][-1]
-        assert telegram_intent["kind"] == "REDUCE"
-        assert telegram_intent["reduce_only"] is True
-        release = await client.post(
-            f"/api/intents/{telegram_intent['intent_id']}/release",
-            json={"terminal_status": "CANCELLED", "reason": "confirmed zero fill"},
-        )
-        assert release.status_code == 200, release.text
+        assert telegram_action.status_code == 404
 
         before_trigger = await client.post(
             f"{campaign_path}/automatic-exit",

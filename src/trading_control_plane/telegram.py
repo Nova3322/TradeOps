@@ -13,11 +13,10 @@ import urllib.request
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from decimal import Decimal
 from typing import Any, ClassVar, Protocol
 from uuid import UUID
 
-from trading_control_plane.domain import CampaignStatus, ProposalStatus
+from trading_control_plane.domain import ProposalStatus
 
 logger = logging.getLogger(__name__)
 
@@ -72,18 +71,6 @@ class CapitalNotification:
 
 
 @dataclass(frozen=True)
-class TelegramCampaignAction:
-    callback_key: str
-    recipient_id: UUID
-    campaign_id: UUID
-    action: str
-    action_reference: str
-    campaign_version: int
-    environment: str = "SHADOW"
-    event_type: str = "UNKNOWN"
-
-
-@dataclass(frozen=True)
 class TelegramProposalReviewAction:
     callback_key: str
     recipient_id: UUID
@@ -95,7 +82,7 @@ class TelegramProposalReviewAction:
 
 @dataclass(frozen=True)
 class _ActionPrompt:
-    action: TelegramCampaignAction | TelegramProposalReviewAction
+    action: TelegramProposalReviewAction
     source_callback_key: str
     original_text: str
     original_reply_markup: dict[str, Any]
@@ -103,36 +90,7 @@ class _ActionPrompt:
 
 MAX_TELEGRAM_TEXT = 3_500
 
-_EVENT_LABELS: dict[str, str] = {
-    "ADD_INTENT_READY": "加仓意图已就绪",
-    "RISK_REDUCTION_READY": "减仓意图已就绪",
-    "AUTOMATIC_EXIT_READY": "自动退出意图已就绪",
-    "CAMPAIGN_AUTO_ADD_DISABLED": "后续加仓已关闭",
-    "SHADOW_FILL_RECORDED": "SHADOW 成交事实已记录",
-    "ORDER_INTENT_UNKNOWN": "订单结果未知",
-    "PROTECTION_ACTIVE": "保护事实有效",
-    "PROTECTION_EXCEPTION": "保护事实异常",
-    "RECONCILIATION_EXCEPTION": "对账异常",
-    "CAMPAIGN_CLOSED": "Campaign 已关闭",
-    "POSITION_UPDATED": "仓位状态已更新",
-    "PENDING_REVIEW": "等待审核",
-    "REVIEW_APPROVE": "审核通过",
-    "REVIEW_REJECT": "审核拒绝",
-    "SOURCE_RESERVED": "源端资金已预留",
-    "IN_TRANSIT": "资金在途",
-    "DESTINATION_CONFIRMED": "目的端已确认",
-    "RECONCILED": "资金对账完成",
-    "UNKNOWN": "状态未知",
-}
-
 _STATUS_LABELS: dict[str, str] = {
-    CampaignStatus.OPENING.value: "建仓中",
-    CampaignStatus.OPEN.value: "持仓中",
-    CampaignStatus.REDUCING.value: "减仓中",
-    CampaignStatus.CLOSING.value: "平仓中",
-    CampaignStatus.CLOSED.value: "已关闭",
-    CampaignStatus.UNKNOWN.value: "未知",
-    "CANCELLED": "已取消",
     ProposalStatus.DRAFT.value: "草稿",
     ProposalStatus.PENDING_REVIEW.value: "等待审核",
     ProposalStatus.APPROVED.value: "已批准",
@@ -143,29 +101,10 @@ _STATUS_LABELS: dict[str, str] = {
 _DIRECTION_LABELS = {"LONG": "做多", "SHORT": "做空"}
 _RISK_LABELS = {"LOW": "低", "MEDIUM": "中", "HIGH": "高"}
 
-_NO_ACTION_EVENTS = {
-    "ADD_INTENT_READY",
-    "RISK_REDUCTION_READY",
-    "AUTOMATIC_EXIT_READY",
-    "CAMPAIGN_AUTO_ADD_DISABLED",
-    "PROTECTION_ACTIVE",
-    "CAMPAIGN_CLOSED",
-}
-
-_POSITION_REDUCTION_STATUSES = {
-    CampaignStatus.OPENING.value,
-    CampaignStatus.OPEN.value,
-    CampaignStatus.REDUCING.value,
-    CampaignStatus.CLOSING.value,
-}
-
 _ERROR_LABELS: dict[str, str] = {
     "VERSION_CONFLICT": "对象版本已变化，请重新打开最新通知",
     "ACTION_REFERENCE_EXPIRED": "操作凭证已过期，请使用最新通知",
     "ACTION_REFERENCE_SCOPE_INVALID": "操作凭证不属于当前用户或对象",
-    "CAMPAIGN_NOT_FOUND": "Campaign 不存在或已不可见",
-    "CAMPAIGN_NOT_ACTIVE": "Campaign 当前状态不允许该操作",
-    "ORDER_INTENT_UNKNOWN": "订单结果未知，系统已阻止重复动作",
     "RBAC_DENIED": "当前身份没有执行该操作的权限",
 }
 
@@ -213,38 +152,6 @@ def _ensure_message_limit(text: str) -> str:
     return "<b>通知内容过长</b>\n为避免截断权威字段，请打开 Web 控制台查看完整信息。"
 
 
-def campaign_action_references(
-    notification: CampaignNotification,
-) -> tuple[tuple[str, str], ...]:
-    """Return only actions that are meaningful for the current notification."""
-
-    if notification.status in {"CLOSED", "CANCELLED"}:
-        return ()
-    if notification.event_type in _NO_ACTION_EVENTS:
-        return ()
-    allowed = {action for action, _reference in notification.action_references}
-    if notification.auto_add_available is False:
-        allowed.discard("DISABLE_CAMPAIGN_AUTO_ADD")
-    if notification.position_reduction_available is False:
-        allowed -= {"EMERGENCY_REDUCE", "EXIT"}
-    if notification.event_type == "ORDER_INTENT_UNKNOWN":
-        allowed -= {"EMERGENCY_REDUCE", "EXIT"}
-    return tuple(
-        (action, reference)
-        for action, reference in notification.action_references
-        if action in allowed
-    )
-
-
-def campaign_position_reduction_available(
-    status: str,
-    current_target_quantity: Decimal,
-) -> bool:
-    """Return whether Telegram may offer Campaign reduction actions."""
-
-    return status in _POSITION_REDUCTION_STATUSES and current_target_quantity > 0
-
-
 def render_proposal_notification(notification: ProposalNotification) -> str:
     facts = [
         f"<b>环境</b>　<code>{_escaped(notification.environment)}</code>",
@@ -268,95 +175,32 @@ def render_proposal_notification(notification: ProposalNotification) -> str:
     )
 
 
-def render_campaign_notification(notification: CampaignNotification) -> str:
-    attention = notification.event_type in {
-        "ORDER_INTENT_UNKNOWN",
-        "PROTECTION_EXCEPTION",
-        "RECONCILIATION_EXCEPTION",
-    }
-    heading = "🔴 <b>风险事件</b>" if attention else "🔵 <b>Campaign 状态更新</b>"
-    return _ensure_message_limit(
-        f"{heading}\n"
-        f"<b>事件</b>　{_labeled_code(notification.event_type, _EVENT_LABELS)}\n"
-        f"<b>环境</b>　<code>{_escaped(notification.environment)}</code>\n"
-        f"<b>对象</b>　Campaign <code>{_short_id(notification.campaign_id)}</code>\n"
-        f"<b>状态</b>　{_labeled_code(notification.status, _STATUS_LABELS)} "
-        f"· v{notification.campaign_version}\n"
-        "<b>详情</b>　请在 Web 控制台查看完整交易事实\n\n"
-        f"<b>说明</b>\n{_escaped(notification.summary, max_length=1_800)}\n\n"
-        f"<b>通知时间</b>　{_format_time(notification.created_at)}\n\n"
-        "⚠️ 所有按钮仅提交只收紧风险的请求；权威结果以 Web 控制台为准。"
-    )
-
-
-def render_capital_notification(notification: CapitalNotification) -> str:
-    return _ensure_message_limit(
-        "🟣 <b>资金状态通知</b>\n"
-        f"<b>环境</b>　<code>{_escaped(notification.environment)}</code>\n"
-        f"<b>对象</b>　{_escaped(notification.object_type)} "
-        f"<code>{_short_id(notification.object_id)}</code>\n"
-        f"<b>事件</b>　{_labeled_code(notification.event_type, _EVENT_LABELS)}\n"
-        f"<b>状态版本</b>　v{notification.object_version}\n"
-        "<b>详情</b>　请在 Web 控制台查看完整资金事实\n\n"
-        f"<b>说明</b>\n{_escaped(notification.summary, max_length=1_800)}\n\n"
-        f"<b>通知时间</b>　{_format_time(notification.created_at)}\n\n"
-        "🔒 Telegram 不提供资金批准、签名、广播或执行入口。"
-    )
-
-
-def render_help(*, review_only: bool = False) -> str:
-    if review_only:
-        return (
-            "<b>Trading 审核 Bot</b>\n\n"
-            "/start　绑定或确认内部成员\n"
-            "/todo　查看当前可由你独立审核的冻结提案\n"
-            "/status　查看 Bot 安全边界\n"
-            "/help　查看本帮助\n\n"
-            "<b>唯一可执行动作</b>\n"
-            "• 对当前冻结提案批准或拒绝\n"
-            "• 每次操作都需要第二次明确确认并写入统一审计\n\n"
-            "<b>明确不支持</b>\n"
-            "• 不看资金、不下单、不划转资金\n"
-            "• 不切换风险 Gate、不改成员权限\n"
-            "• 不绕过创建者不可自审、对象版本、到期和服务端权限校验"
-        )
+def render_help() -> str:
     return (
-        "<b>Trading Bot 帮助</b>\n\n"
-        "/start　绑定或确认内部用户\n"
+        "<b>Trading 审核 Bot</b>\n\n"
+        "/start　绑定或确认内部成员\n"
+        "/todo　查看当前可由你独立审核的冻结提案\n"
         "/status　查看 Bot 能力和安全边界\n"
         "/help　查看本帮助\n\n"
-        "<b>可以做什么</b>\n"
-        "• 接收提案、Campaign 和资金状态通知\n"
-        "• 打开 Web 安全审核页\n"
-        "• 提交经二次确认的只收紧风险动作\n"
-        "• 接收 Trading 的受理或拒绝回执\n\n"
-        "<b>不会做什么</b>\n"
-        "• 不在 Telegram 中批准增险提案\n"
-        "• 不批准、签名或执行资金操作\n"
-        "• 不绕过 Trading 的权限、版本和风险校验"
+        "<b>唯一可执行动作</b>\n"
+        "• 对当前冻结提案批准或拒绝\n"
+        "• 每次操作都需要第二次明确确认并写入统一审计\n\n"
+        "<b>明确不支持</b>\n"
+        "• 不看资金、不下单、不划转资金\n"
+        "• 不切换风险 Gate、不改成员权限\n"
+        "• 不绕过创建者不可自审、对象版本、到期和服务端权限校验"
     )
 
 
-def render_status(*, review_only: bool = False) -> str:
-    if review_only:
-        return (
-            "🟢 <b>Trading 审核 Bot 正常运行</b>\n\n"
-            "<b>会话</b>　仅限已绑定的内部成员私聊\n"
-            "<b>动作</b>　冻结提案批准 / 拒绝，必须二次确认\n"
-            "<b>复核</b>　服务端重新检查身份、独立审核、版本与到期\n"
-            "<b>禁止</b>　资金、订单、风险开关、权限变更\n"
-            "<b>权威状态</b>　Trading Web 与 PostgreSQL\n\n"
-            "此状态不会显示余额、密钥、Token、私钥或地址。"
-        )
+def render_status() -> str:
     return (
-        "🟢 <b>Trading Bot 正常运行</b>\n\n"
-        "<b>会话</b>　仅限已允许的私聊账号\n"
-        "<b>审批</b>　只打开 Web，不在聊天中批准\n"
-        "<b>风险动作</b>　仅收紧风险，必须二次确认\n"
-        "<b>动作回执</b>　已受理不等于订单已发送、成交或完成\n"
-        "<b>资金动作</b>　不支持批准、签名或执行\n"
+        "🟢 <b>Trading 审核 Bot 正常运行</b>\n\n"
+        "<b>会话</b>　仅限已绑定的内部成员私聊\n"
+        "<b>动作</b>　冻结提案批准 / 拒绝，必须二次确认\n"
+        "<b>复核</b>　服务端重新检查身份、独立审核、版本与到期\n"
+        "<b>禁止</b>　资金、订单、风险开关、权限变更\n"
         "<b>权威状态</b>　以 Trading Web 与 PostgreSQL 为准\n\n"
-        "此状态不会显示账户余额、密钥、Token 或私钥。"
+        "此状态不会显示余额、密钥、Token、私钥或地址。"
     )
 
 
@@ -423,7 +267,7 @@ TelegramPoster = Callable[[str, dict[str, Any], float], dict[str, Any]]
 TelegramBinder = Callable[[str, str, str], str]
 TelegramChatResolver = Callable[[UUID], str | None]
 TelegramTodoResolver = Callable[[str], list[ProposalNotification]]
-TelegramActionHandler = Callable[[TelegramCampaignAction | TelegramProposalReviewAction, int], str]
+TelegramActionHandler = Callable[[TelegramProposalReviewAction, int], str]
 
 
 class TelegramUnavailable(RuntimeError):
@@ -486,18 +330,10 @@ class TelegramBotGateway(MockTelegramGateway):
     _ACTION_LABELS: ClassVar[dict[str, str]] = {
         "APPROVE_PROPOSAL": "批准冻结提案",
         "REJECT_PROPOSAL": "拒绝冻结提案",
-        "DISABLE_CAMPAIGN_AUTO_ADD": "关闭该仓继续加仓",
-        "PAUSE_NEW_RISK": "暂停全部新增风险",
-        "EMERGENCY_REDUCE": "紧急减仓 50%",
-        "EXIT": "完全退出",
     }
     _ACTION_IMPACTS: ClassVar[dict[str, str]] = {
         "APPROVE_PROPOSAL": "记录一次独立批准。仍需风险检查、短期授权和交易 Gate；不会下单。",
         "REJECT_PROPOSAL": "拒绝并终止当前冻结提案；不会创建订单或资金动作。",
-        "DISABLE_CAMPAIGN_AUTO_ADD": "关闭此 Campaign 后续 AddUnit，不影响已有减仓与退出能力。",
-        "PAUSE_NEW_RISK": "将全局系统切换为只减仓，阻止全部新增风险。",
-        "EMERGENCY_REDUCE": "提交 reduce-only 意图，将当前目标仓位减少 50%。",
-        "EXIT": "提交 reduce-only 退出意图，将目标仓位降至 0。",
     }
     _COMMANDS: ClassVar[list[dict[str, str]]] = [
         {"command": "start", "description": "绑定或确认内部用户"},
@@ -515,7 +351,6 @@ class TelegramBotGateway(MockTelegramGateway):
         binder: TelegramBinder,
         chat_resolver: TelegramChatResolver,
         todo_resolver: TelegramTodoResolver | None = None,
-        review_only: bool = True,
         poll_timeout_seconds: int = 20,
         client: TelegramBotClient | None = None,
     ) -> None:
@@ -526,10 +361,9 @@ class TelegramBotGateway(MockTelegramGateway):
         self._binder = binder
         self._chat_resolver = chat_resolver
         self._todo_resolver = todo_resolver
-        self._review_only = review_only
         self._poll_timeout_seconds = poll_timeout_seconds
         self._action_handler: TelegramActionHandler | None = None
-        self._actions: dict[str, TelegramCampaignAction | TelegramProposalReviewAction] = {}
+        self._actions: dict[str, TelegramProposalReviewAction] = {}
         self._source_prompts: dict[str, _ActionPrompt] = {}
         self._confirmations: dict[str, _ActionPrompt] = {}
         self._cancellations: dict[str, _ActionPrompt] = {}
@@ -565,13 +399,19 @@ class TelegramBotGateway(MockTelegramGateway):
         self._poll_thread = None
 
     def send(self, notification: ProposalNotification) -> None:
+        if notification.environment != "LIVE":
+            logger.info(
+                "Telegram proposal notification suppressed outside LIVE review scope",
+                extra={"event": "telegram_non_live_proposal_suppressed"},
+            )
+            return
         if any(
             item.notification_id == notification.notification_id for item in self.notifications()
         ):
             return
         keyboard: dict[str, Any]
         pending_actions: dict[str, TelegramProposalReviewAction] = {}
-        if self._review_only and notification.status == ProposalStatus.PENDING_REVIEW.value:
+        if notification.status == ProposalStatus.PENDING_REVIEW.value:
             rows: list[list[dict[str, str]]] = []
             for action, label in (
                 ("APPROVE_PROPOSAL", "需确认 · 批准"),
@@ -619,82 +459,18 @@ class TelegramBotGateway(MockTelegramGateway):
                     )
 
     def send_campaign(self, notification: CampaignNotification) -> None:
-        if self._review_only:
-            logger.info(
-                "Telegram campaign notification suppressed by review-only boundary",
-                extra={"event": "telegram_campaign_suppressed"},
-            )
-            return
-        if any(
-            item.notification_id == notification.notification_id
-            for item in self.campaign_notifications()
-        ):
-            return
-        rows: list[list[dict[str, str]]] = []
-        pending_actions: dict[str, TelegramCampaignAction] = {}
-        for action, reference in campaign_action_references(notification):
-            callback_key = (
-                "ca_"
-                + hashlib.sha256(
-                    f"{notification.notification_id}:{action}:{reference}".encode()
-                ).hexdigest()[:24]
-            )
-            pending_actions[callback_key] = TelegramCampaignAction(
-                callback_key=callback_key,
-                recipient_id=notification.recipient_id,
-                campaign_id=notification.campaign_id,
-                action=action,
-                action_reference=reference,
-                campaign_version=notification.campaign_version,
-                environment=notification.environment,
-                event_type=notification.event_type,
-            )
-            rows.append(
-                [
-                    {
-                        "text": f"需确认 · {self._ACTION_LABELS[action]}",
-                        "callback_data": callback_key,
-                    }
-                ]
-            )
-        text = render_campaign_notification(notification)
-        keyboard = {"inline_keyboard": rows}
-        delivered = self._send_to_user(
-            notification.recipient_id,
-            text,
-            keyboard if rows else None,
+        del notification
+        logger.info(
+            "Telegram campaign notification suppressed by product boundary",
+            extra={"event": "telegram_campaign_suppressed"},
         )
-        if not delivered:
-            return
-        super().send_campaign(notification)
-        with self._lock:
-            self._actions.update(pending_actions)
-            for callback_key, pending_action in pending_actions.items():
-                self._source_prompts[callback_key] = _ActionPrompt(
-                    action=pending_action,
-                    source_callback_key=callback_key,
-                    original_text=text,
-                    original_reply_markup=keyboard,
-                )
 
     def send_capital(self, notification: CapitalNotification) -> None:
-        if self._review_only:
-            logger.info(
-                "Telegram capital notification suppressed by review-only boundary",
-                extra={"event": "telegram_capital_suppressed"},
-            )
-            return
-        if any(
-            item.notification_id == notification.notification_id
-            for item in self.capital_notifications()
-        ):
-            return
-        delivered = self._send_to_user(
-            notification.recipient_id,
-            render_capital_notification(notification),
+        del notification
+        logger.info(
+            "Telegram capital notification suppressed by product boundary",
+            extra={"event": "telegram_capital_suppressed"},
         )
-        if delivered:
-            super().send_capital(notification)
 
     def _send_to_user(
         self,
@@ -832,16 +608,16 @@ class TelegramBotGateway(MockTelegramGateway):
         if command == "/help":
             self._safe_call(
                 "sendMessage",
-                self._message_payload(chat_id, render_help(review_only=self._review_only)),
+                self._message_payload(chat_id, render_help()),
             )
             return
         if command == "/status":
             self._safe_call(
                 "sendMessage",
-                self._message_payload(chat_id, render_status(review_only=self._review_only)),
+                self._message_payload(chat_id, render_status()),
             )
             return
-        if command == "/todo" and self._review_only:
+        if command == "/todo":
             if self._todo_resolver is None:
                 body = "<b>待审核列表暂不可用</b>\n请在 Web 审核队列查看。"
             else:
@@ -877,7 +653,7 @@ class TelegramBotGateway(MockTelegramGateway):
                 "sendMessage",
                 self._message_payload(
                     chat_id,
-                    "<b>不支持该命令</b>\n\n" + render_help(review_only=self._review_only),
+                    "<b>不支持该命令</b>\n\n" + render_help(),
                 ),
             )
             return
@@ -982,7 +758,7 @@ class TelegramBotGateway(MockTelegramGateway):
         message_id: object,
         prompt: _ActionPrompt,
     ) -> None:
-        suffix = prompt.source_callback_key.removeprefix("ca_")
+        suffix = prompt.source_callback_key.removeprefix("pr_")
         confirm_key = "cc_" + suffix
         cancel_key = "cx_" + suffix
         with self._lock:
@@ -1046,11 +822,7 @@ class TelegramBotGateway(MockTelegramGateway):
         else:
             self._answer_callback(
                 callback_id,
-                (
-                    "审核结果已写入 Trading；请核对最新状态。"
-                    if isinstance(prompt.action, TelegramProposalReviewAction)
-                    else "请求已受理；成交与完成状态仍需在 Web 核对。"
-                ),
+                "审核结果已写入 Trading；请核对最新状态。",
                 show_alert=False,
             )
         self._discard_action_buttons(prompt)
@@ -1062,7 +834,7 @@ class TelegramBotGateway(MockTelegramGateway):
         )
 
     def _discard_confirmation(self, prompt: _ActionPrompt) -> None:
-        suffix = prompt.source_callback_key.removeprefix("ca_")
+        suffix = prompt.source_callback_key.removeprefix("pr_")
         with self._lock:
             self._confirmations.pop("cc_" + suffix, None)
             self._cancellations.pop("cx_" + suffix, None)
@@ -1075,40 +847,29 @@ class TelegramBotGateway(MockTelegramGateway):
                     if isinstance(callback_key, str):
                         self._actions.pop(callback_key, None)
                         self._source_prompts.pop(callback_key, None)
-                        suffix = callback_key.removeprefix("ca_")
+                        suffix = callback_key.removeprefix("pr_")
                         self._confirmations.pop("cc_" + suffix, None)
                         self._cancellations.pop("cx_" + suffix, None)
 
     def _render_confirmation(
         self,
-        action: TelegramCampaignAction | TelegramProposalReviewAction,
+        action: TelegramProposalReviewAction,
     ) -> str:
-        if isinstance(action, TelegramProposalReviewAction):
-            decision_copy = self._ACTION_IMPACTS[action.action]
-            return _ensure_message_limit(
-                "🟠 <b>确认提案审核结论</b>\n"
-                f"<b>结论</b>　{_escaped(self._ACTION_LABELS[action.action])}\n"
-                f"<b>环境</b>　<code>{_escaped(action.environment)}</code>\n"
-                f"<b>对象</b>　提案 <code>{_short_id(action.proposal_id)}</code>\n"
-                f"<b>权威版本</b>　v{action.proposal_version}\n\n"
-                f"<b>影响</b>\n{_escaped(decision_copy)}\n\n"
-                "确认时 Trading 会重新校验绑定身份、独立审核权限、创建者限制、"
-                "对象版本与到期时间。"
-            )
+        decision_copy = self._ACTION_IMPACTS[action.action]
         return _ensure_message_limit(
-            "🟠 <b>确认只收紧风险操作</b>\n"
-            f"<b>操作</b>　{_escaped(self._ACTION_LABELS[action.action])}\n"
+            "🟠 <b>确认提案审核结论</b>\n"
+            f"<b>结论</b>　{_escaped(self._ACTION_LABELS[action.action])}\n"
             f"<b>环境</b>　<code>{_escaped(action.environment)}</code>\n"
-            f"<b>对象</b>　Campaign <code>{_short_id(action.campaign_id)}</code>\n"
-            f"<b>权威版本</b>　v{action.campaign_version}\n\n"
-            f"<b>影响范围</b>\n{_escaped(self._ACTION_IMPACTS[action.action])}\n\n"
-            "确认时 Trading 会重新校验身份、权限、对象版本和业务不变量；"
-            "Telegram 不会绕过权威状态。"
+            f"<b>对象</b>　提案 <code>{_short_id(action.proposal_id)}</code>\n"
+            f"<b>权威版本</b>　v{action.proposal_version}\n\n"
+            f"<b>影响</b>\n{_escaped(decision_copy)}\n\n"
+            "确认时 Trading 会重新校验绑定身份、独立审核权限、创建者限制、"
+            "对象版本与到期时间。"
         )
 
     def _render_action_result(
         self,
-        action: TelegramCampaignAction | TelegramProposalReviewAction,
+        action: TelegramProposalReviewAction,
         result: str,
     ) -> str:
         code: str | None = None
@@ -1123,23 +884,13 @@ class TelegramBotGateway(MockTelegramGateway):
         else:
             result_text = _escaped(result, max_length=1_200)
             heading = "🟠 <b>请求已受理</b>"
-        if isinstance(action, TelegramProposalReviewAction):
-            return _ensure_message_limit(
-                f"{heading}\n"
-                f"<b>审核结论</b>　{_escaped(self._ACTION_LABELS[action.action])}\n"
-                f"<b>对象</b>　提案 <code>{_short_id(action.proposal_id)}</code>\n"
-                f"<b>提交版本</b>　v{action.proposal_version}\n\n"
-                f"{result_text}\n\n"
-                "按钮已失效。批准提案不代表风险检查通过、授权已签发或订单已创建。"
-            )
         return _ensure_message_limit(
             f"{heading}\n"
-            f"<b>操作</b>　{_escaped(self._ACTION_LABELS[action.action])}\n"
-            f"<b>对象</b>　Campaign <code>{_short_id(action.campaign_id)}</code>\n"
-            f"<b>提交版本</b>　v{action.campaign_version}\n\n"
+            f"<b>审核结论</b>　{_escaped(self._ACTION_LABELS[action.action])}\n"
+            f"<b>对象</b>　提案 <code>{_short_id(action.proposal_id)}</code>\n"
+            f"<b>提交版本</b>　v{action.proposal_version}\n\n"
             f"{result_text}\n\n"
-            "按钮已失效。本回执只证明 Trading 已受理，不证明订单已发送、成交或对账完成；"
-            "请在 Web 控制台核对最新权威状态。"
+            "按钮已失效。批准提案不代表风险检查通过、授权已签发或订单已创建。"
         )
 
     def _edit_message(

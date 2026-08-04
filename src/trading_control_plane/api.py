@@ -79,7 +79,6 @@ from trading_control_plane.api_schemas import (
     ShadowFillRequest,
     ShadowSendRequest,
     SystemProposalRequest,
-    TelegramCampaignActionRequest,
     TransferAuthorizationRequest,
     TransferProposalRequest,
     TransferReviewRequest,
@@ -114,7 +113,6 @@ from trading_control_plane.domain import (
     ReviewDecision,
     Role,
     TargetCandidate,
-    TargetUrgency,
 )
 from trading_control_plane.freqtrade import (
     FreqtradeEntryCommand,
@@ -157,10 +155,8 @@ from trading_control_plane.telegram import (
     MockTelegramGateway,
     ProposalNotification,
     TelegramBotGateway,
-    TelegramCampaignAction,
     TelegramGateway,
     TelegramProposalReviewAction,
-    campaign_position_reduction_available,
 )
 
 logger = logging.getLogger(__name__)
@@ -370,7 +366,6 @@ def create_app(
                 user_id
             ),
             todo_resolver=telegram_review_todos,
-            review_only=True,
             poll_timeout_seconds=resolved_settings.telegram_poll_timeout_seconds,
         )
     else:
@@ -1646,47 +1641,7 @@ def create_app(
     ) -> None:
         detail = queries().campaign_detail(recipient_id, campaign_id)
         campaign_version = int(detail["target_version"])
-        action_references: list[tuple[str, str]] = []
-        if service().can_user(
-            recipient_id,
-            "risk.tighten",
-            str(detail["account_id"]),
-            str(detail["venue"]),
-        ):
-            for action in (
-                "DISABLE_CAMPAIGN_AUTO_ADD",
-                "EMERGENCY_REDUCE",
-                "EXIT",
-            ):
-                action_references.append(
-                    (
-                        action,
-                        token_service.issue_action_reference(
-                            user_id=recipient_id,
-                            action=action,
-                            object_id=campaign_id,
-                            object_version=campaign_version,
-                            now=_now(),
-                            ttl=timedelta(seconds=resolved_settings.action_token_ttl_seconds),
-                        ),
-                    )
-                )
-        if service().can_user(recipient_id, "risk.tighten"):
-            action_references.append(
-                (
-                    "PAUSE_NEW_RISK",
-                    token_service.issue_action_reference(
-                        user_id=recipient_id,
-                        action="PAUSE_NEW_RISK",
-                        object_id=campaign_id,
-                        object_version=campaign_version,
-                        now=_now(),
-                        ttl=timedelta(seconds=resolved_settings.action_token_ttl_seconds),
-                    ),
-                )
-            )
         notification_key = f"{campaign_id}:{event_type}:{event_key}:{recipient_id}"
-        management = detail["management"]
         resolved_telegram.send_campaign(
             CampaignNotification(
                 notification_id="tg_" + hashlib.sha256(notification_key.encode()).hexdigest()[:20],
@@ -1696,19 +1651,11 @@ def create_app(
                 environment=environment,
                 summary=summary,
                 campaign_version=campaign_version,
-                action_references=tuple(action_references),
+                action_references=(),
                 created_at=_now(),
                 status=str(detail["status"]),
-                auto_add_available=bool(
-                    isinstance(management, dict)
-                    and management["auto_add_gate"] == "ENABLED"
-                    and management["allow_auto_add"] is True
-                    and int(management["remaining_adds"]) > 0
-                ),
-                position_reduction_available=campaign_position_reduction_available(
-                    str(detail["status"]),
-                    Decimal(str(detail["current_target_quantity"])),
-                ),
+                auto_add_available=False,
+                position_reduction_available=False,
             )
         )
 
@@ -5172,181 +5119,37 @@ def create_app(
             for item in resolved_telegram.notifications()
             if item.reviewer_id == identity.user_id
         ]
-        campaign_data = [
-            {
-                "notification_id": item.notification_id,
-                "campaign_id": str(item.campaign_id),
-                "event_type": item.event_type,
-                "environment": item.environment,
-                "summary": item.summary,
-                "campaign_version": item.campaign_version,
-                "action_references": dict(item.action_references),
-                "created_at": item.created_at.isoformat(),
-            }
-            for item in resolved_telegram.campaign_notifications()
-            if item.recipient_id == identity.user_id
-        ]
-        capital_data = [
-            {
-                "notification_id": item.notification_id,
-                "object_id": str(item.object_id),
-                "object_type": item.object_type,
-                "event_type": item.event_type,
-                "environment": item.environment,
-                "summary": item.summary,
-                "object_version": item.object_version,
-                "created_at": item.created_at.isoformat(),
-            }
-            for item in resolved_telegram.capital_notifications()
-            if item.recipient_id == identity.user_id
-        ]
         return {
             "transport": "MOCK_ONLY",
+            "scope": "PROPOSAL_REVIEW_ONLY",
             "data": data,
-            "campaign_data": campaign_data,
-            "capital_data": capital_data,
         }
 
-    def execute_telegram_campaign_action(
-        *,
-        recipient_id: UUID,
-        campaign_id: UUID,
-        action: str,
-        action_reference: str,
-        campaign_version: int,
-        idempotency_key: str,
-        target_quantity: Decimal | None = None,
-        limit_price: Decimal | None = None,
-    ) -> UUID:
-        now = _now()
-        token_service.verify_action_reference(
-            action_reference,
-            user_id=recipient_id,
-            action=action,
-            object_id=campaign_id,
-            object_version=campaign_version,
-            now=now,
-        )
-        if action == "DISABLE_CAMPAIGN_AUTO_ADD":
-            service().disable_campaign_auto_add(
-                campaign_id,
-                recipient_id,
-                idempotency_key,
-                reason="Telegram operator disabled further Campaign AddUnits",
-                expected_target_version=campaign_version,
-                now=now,
-            )
-        elif action == "PAUSE_NEW_RISK":
-            service().pause_new_risk(
-                recipient_id,
-                idempotency_key,
-                reason="Telegram operator paused new risk",
-                now=now,
-            )
-        else:
-            target = Decimal(0) if action == "EXIT" else target_quantity
-            if target is None:
-                raise DomainRejected(
-                    "TELEGRAM_ACTION_INVALID",
-                    "emergency reduction requires a predefined target quantity",
-                )
-            service().create_reduction_intent(
-                campaign_id,
-                recipient_id,
-                idempotency_key,
-                candidates=(
-                    TargetCandidate(
-                        target,
-                        TargetUrgency.IMMEDIATE,
-                        f"TELEGRAM_{action}",
-                    ),
-                ),
-                expected_target_version=campaign_version,
-                limit_price=limit_price,
-                now=now,
-            )
-        return campaign_id
-
     def handle_real_telegram_action(
-        action: TelegramCampaignAction | TelegramProposalReviewAction,
+        action: TelegramProposalReviewAction,
         update_id: int,
     ) -> str:
-        if isinstance(action, TelegramProposalReviewAction):
-            decision = (
-                ReviewDecision.APPROVE
-                if action.action == "APPROVE_PROPOSAL"
-                else ReviewDecision.REJECT
-            )
-            try:
-                result = service().review_proposal(
-                    action.proposal_id,
-                    action.recipient_id,
-                    decision,
-                    "Telegram private-chat review after explicit two-step confirmation",
-                    expected_version=action.proposal_version,
-                    now=_now(),
-                )
-            except DomainRejected as exc:
-                return f"未执行: {exc.code}"
-            return f"审核已记录: {result.value}。未创建授权、订单或资金动作。"
-        target: Decimal | None = None
-        if action.action == "EMERGENCY_REDUCE":
-            detail = queries().campaign_detail(action.recipient_id, action.campaign_id)
-            target = Decimal(str(detail["current_target_quantity"])) / Decimal(2)
+        del update_id
+        decision = (
+            ReviewDecision.APPROVE
+            if action.action == "APPROVE_PROPOSAL"
+            else ReviewDecision.REJECT
+        )
         try:
-            execute_telegram_campaign_action(
-                recipient_id=action.recipient_id,
-                campaign_id=action.campaign_id,
-                action=action.action,
-                action_reference=action.action_reference,
-                campaign_version=action.campaign_version,
-                idempotency_key=f"telegram:{update_id}:{action.callback_key}",
-                target_quantity=target,
+            result = service().review_proposal(
+                action.proposal_id,
+                action.recipient_id,
+                decision,
+                "Telegram private-chat review after explicit two-step confirmation",
+                expected_version=action.proposal_version,
+                now=_now(),
             )
         except DomainRejected as exc:
             return f"未执行: {exc.code}"
-        return "Trading 已受理；请在 Web 控制台确认最新权威状态。"  # noqa: RUF001
+        return f"审核已记录: {result.value}。未创建授权、订单或资金动作。"
 
     if isinstance(resolved_telegram, TelegramBotGateway):
         resolved_telegram.set_action_handler(handle_real_telegram_action)
-
-    @app.post("/api/telegram/mock/campaign-actions")
-    def mock_telegram_campaign_action(
-        payload: TelegramCampaignActionRequest,
-        identity: SessionIdentity = identity_dependency,
-    ) -> dict[str, Any]:
-        if resolved_settings.environment not in {"local", "test"}:
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND)
-        campaign_id: UUID | None = None
-        for notification in resolved_telegram.campaign_notifications():
-            references = dict(notification.action_references)
-            if (
-                notification.recipient_id == identity.user_id
-                and references.get(payload.action) == payload.action_reference
-            ):
-                campaign_id = notification.campaign_id
-                break
-        if campaign_id is None:
-            raise DomainRejected(
-                "ACTION_REFERENCE_SCOPE_INVALID",
-                "Telegram action reference is not bound to this internal user",
-            )
-        execute_telegram_campaign_action(
-            recipient_id=identity.user_id,
-            campaign_id=campaign_id,
-            action=payload.action,
-            action_reference=payload.action_reference,
-            campaign_version=payload.campaign_version,
-            idempotency_key=payload.idempotency_key,
-            target_quantity=payload.target_quantity,
-            limit_price=payload.limit_price,
-        )
-        return {
-            "channel": "TELEGRAM_MOCK_ONLY",
-            "action": payload.action,
-            "campaign_id": str(campaign_id),
-            "detail": queries().campaign_detail(identity.user_id, campaign_id),
-        }
 
     if WEB_ROOT.exists():
         app.mount("/assets", StaticFiles(directory=WEB_ROOT), name="web-assets")

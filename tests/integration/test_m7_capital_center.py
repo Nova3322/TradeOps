@@ -1094,9 +1094,9 @@ def test_capital_api_requires_treasury_step_up_and_telegram_is_notification_only
                 version = reviewed.json()["version"]
                 notifications = await client.get("/api/telegram/mock/notifications")
                 assert notifications.status_code == 200
-                capital_data = notifications.json()["capital_data"]
-                assert capital_data
-                assert all("action_references" not in item for item in capital_data)
+                assert notifications.json()["scope"] == "PROPOSAL_REVIEW_ONLY"
+                assert "capital_data" not in notifications.json()
+                assert telegram.capital_notifications()
                 await client.post("/api/auth/logout")
 
             await login(client, "treasury-reviewer-1")

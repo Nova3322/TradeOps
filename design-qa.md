@@ -1,5 +1,34 @@
 # Trading console product QA
 
+## 2026-08-04: Telegram proposal-review boundary
+
+### P0 / P1 / P2 status
+
+- P0: none open in this batch.
+- P1 closed: Telegram can no longer be switched back to the legacy Campaign-risk mode. Its only callback type is frozen-proposal approve/reject, and both actions still require a second explicit confirmation.
+- P1 closed: the local mock Campaign-action API and request schema were removed. OpenAPI no longer exposes the route and direct requests return 404.
+- P1 closed: Campaign and capital events no longer create action references or appear in Telegram's local notification projection. The projection now declares `PROPOSAL_REVIEW_ONLY`.
+- P1 closed: SHADOW proposals were found to produce a Telegram card whose production Web link could not open the proposal. Real Telegram delivery is now restricted to LIVE frozen proposals; SHADOW remains available only in internal test sinks.
+- P1 external: Telegram Bot API delivery to one already-bound active member succeeded, but Telegram Web remained at `Waiting for network...`; its visible card and button interaction could not be accepted in-browser without external network recovery.
+- P2 open: the in-app browser has a fixed desktop viewport, so a real Telegram mobile-client visual pass remains unverified.
+
+### Five-dimensional evidence
+
+- Code: removed the legacy Campaign callback model, runtime switch, render/action branches, token issuing, local execution helper, action route and schema. Help, status and command handling now describe only the review Bot.
+- API: `/api/telegram/mock/notifications` returns only `{transport, scope, data}` with `scope=PROPOSAL_REVIEW_ONLY`; `/api/telegram/mock/campaign-actions` returns 404 and is absent from OpenAPI.
+- Actual pages: the administrator member page, review queue and a delivered LIVE BTCUSDT frozen-proposal detail were opened in the in-app browser. The proposal is still `PENDING_REVIEW`, valid for eight hours, and explicitly states that approval is not an order.
+- End-to-end runtime: a LIVE frozen proposal created by `local-proposer` was delivered through the configured Bot API transport to the bound administrator/reviewer. No review, authorization, order, signing, broadcast or capital action was executed.
+- Tests: 53 distinct focused API, Telegram, proposal, Campaign and capital tests passed; Ruff, Python compilation and diff checks passed.
+
+### Accepted screenshots
+
+- Administrator member page: `/Users/vireo/.codex/worktrees/640e/trading/artifacts/product-audit/telegram-boundary-2026-08-04/01-console-members.png`.
+- Telegram Web external-network blocker: `/Users/vireo/.codex/worktrees/640e/trading/artifacts/product-audit/telegram-boundary-2026-08-04/02-telegram-web-network-wait.png`.
+- Review queue: `/Users/vireo/.codex/worktrees/640e/trading/artifacts/product-audit/telegram-boundary-2026-08-04/03-review-queue.png`.
+- Delivered LIVE proposal detail: `/Users/vireo/.codex/worktrees/640e/trading/artifacts/product-audit/telegram-boundary-2026-08-04/04-live-proposal-detail.png`.
+
+final result: local Bot API delivery and product boundary passed; Telegram Web/mobile visual interaction remains externally blocked
+
 ## 2026-08-04: six-identity access boundary and login recovery
 
 ### P0 / P1 / P2 status

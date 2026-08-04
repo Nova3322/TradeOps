@@ -335,7 +335,12 @@ async def run_shadow_campaign_flow(database: Database, telegram: MockTelegramGat
         assert exceptions.status_code == 200, exceptions.text
         assert exceptions.json()["data"] == []
         notifications = await client.get("/api/telegram/mock/notifications")
-        events = [item["event_type"] for item in notifications.json()["campaign_data"]]
+        assert notifications.json() == {
+            "transport": "MOCK_ONLY",
+            "scope": "PROPOSAL_REVIEW_ONLY",
+            "data": [],
+        }
+        events = [item.event_type for item in telegram.campaign_notifications()]
         assert events == [
             "SHADOW_FILL_RECORDED",
             "PROTECTION_ACTIVE",
@@ -415,7 +420,9 @@ async def run_unknown_flow(database: Database) -> None:
         codes = {item["code"] for item in exceptions.json()["data"]}
         assert {"CAMPAIGN_UNKNOWN", "ORDER_INTENT_UNKNOWN", "RISK_RESERVATION_UNKNOWN"} <= codes
         notifications = await client.get("/api/telegram/mock/notifications")
-        assert [item["event_type"] for item in notifications.json()["campaign_data"]] == [
+        assert notifications.json()["scope"] == "PROPOSAL_REVIEW_ONLY"
+        assert "campaign_data" not in notifications.json()
+        assert [item.event_type for item in gateway.campaign_notifications()] == [
             "ORDER_INTENT_UNKNOWN"
         ]
         detail = await client.get(f"/api/campaigns/{campaign_id}")
