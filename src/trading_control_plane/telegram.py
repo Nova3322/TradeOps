@@ -78,6 +78,11 @@ class TelegramProposalReviewAction:
     action: str
     proposal_version: int
     environment: str = "LIVE"
+    symbol: str | None = None
+    direction: str | None = None
+    risk_tier: str | None = None
+    max_risk: str | None = None
+    expires_at: str | None = None
 
 
 @dataclass(frozen=True)
@@ -522,6 +527,11 @@ class TelegramBotGateway(MockTelegramGateway):
                     action=action,
                     proposal_version=notification.proposal_version,
                     environment=notification.environment,
+                    symbol=notification.symbol,
+                    direction=notification.direction,
+                    risk_tier=notification.risk_tier,
+                    max_risk=notification.max_risk,
+                    expires_at=notification.expires_at,
                 )
                 rows.append([{"text": label, "callback_data": callback_key}])
             rows.append([{"text": "查看完整冻结快照", "url": notification.review_url}])
@@ -949,10 +959,15 @@ class TelegramBotGateway(MockTelegramGateway):
                 show_alert=True,
             )
         else:
+            rejected = result.startswith("未执行:")
             self._answer_callback(
                 callback_id,
-                "审核结果已写入 Trading；请核对最新状态。",
-                show_alert=False,
+                (
+                    "操作未执行；请查看明确原因并刷新待办。"
+                    if rejected
+                    else "审核结论已写入 Trading；请核对最新状态。"
+                ),
+                show_alert=rejected,
             )
         self._discard_action_buttons(prompt)
         self._edit_message(
@@ -988,9 +1003,14 @@ class TelegramBotGateway(MockTelegramGateway):
         return _ensure_message_limit(
             "🟠 <b>确认提案审核结论</b>\n"
             f"<b>结论</b>　{_escaped(self._ACTION_LABELS[action.action])}\n"
-            f"<b>环境</b>　<code>{_escaped(action.environment)}</code>\n"
+            f"<b>币对 / 方向</b>　{_optional(action.symbol)} / "
+            f"{_labeled_code(action.direction, _DIRECTION_LABELS)}\n"
+            f"<b>风险</b>　{_labeled_code(action.risk_tier, _RISK_LABELS)}"
+            f" · 最大风险 {_optional(action.max_risk)}\n"
+            f"<b>截止</b>　{_format_deadline(action.expires_at)}\n"
             f"<b>对象</b>　提案 <code>{_short_id(action.proposal_id)}</code>\n"
-            f"<b>权威版本</b>　v{action.proposal_version}\n\n"
+            f"<b>环境 / 版本</b>　<code>{_escaped(action.environment)}</code> "
+            f"· v{action.proposal_version}\n\n"
             f"<b>影响</b>\n{_escaped(decision_copy)}\n\n"
             "确认时 Trading 会重新校验绑定身份、独立审核权限、创建者限制、"
             "对象版本与到期时间。"
@@ -1012,10 +1032,12 @@ class TelegramBotGateway(MockTelegramGateway):
             heading = "🔴 <b>操作未执行</b>"
         else:
             result_text = _escaped(result, max_length=1_200)
-            heading = "🟠 <b>请求已受理</b>"
+            heading = "🟢 <b>审核已记录</b>"
         return _ensure_message_limit(
             f"{heading}\n"
             f"<b>审核结论</b>　{_escaped(self._ACTION_LABELS[action.action])}\n"
+            f"<b>币对 / 方向</b>　{_optional(action.symbol)} / "
+            f"{_labeled_code(action.direction, _DIRECTION_LABELS)}\n"
             f"<b>对象</b>　提案 <code>{_short_id(action.proposal_id)}</code>\n"
             f"<b>提交版本</b>　v{action.proposal_version}\n\n"
             f"{result_text}\n\n"

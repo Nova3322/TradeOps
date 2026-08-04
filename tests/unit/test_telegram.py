@@ -81,10 +81,10 @@ def gateway(
         binder=bind,
         chat_resolver=lambda user_id: bindings.get(str(user_id)),
         todo_resolver=lambda chat_id: (
-            todo_items if todo_items is not None else [proposal(recipient_id)]
-        )
-        if chat_id == "789"
-        else [],
+            (todo_items if todo_items is not None else [proposal(recipient_id)])
+            if chat_id == "789"
+            else []
+        ),
         review_queue_url="http://127.0.0.1:8014/reviews",
         client=TelegramBotClient(
             token,
@@ -169,20 +169,53 @@ def test_bot_requires_two_clicks_and_exposes_only_proposal_review() -> None:
     assert bot.capital_notifications() == []
 
     approve_key = keyboard[0][0]["callback_data"]
-    bot.handle_update(
-        {"update_id": 10, "callback_query": callback("approve", approve_key)}
-    )
+    bot.handle_update({"update_id": 10, "callback_query": callback("approve", approve_key)})
     assert handled == []
     confirmation = next(
         payload for method, payload in reversed(fake.calls) if method == "editMessageText"
     )
+    assert "BTCUSDT" in confirmation["text"]
+    assert "做多" in confirmation["text"]
+    assert "中 · <code>MEDIUM</code>" in confirmation["text"]
+    assert "最大风险 1" in confirmation["text"]
+    assert "2026年8月4日 20:00 UTC" in confirmation["text"]
     confirm_key = confirmation["reply_markup"]["inline_keyboard"][0][0]["callback_data"]
-    bot.handle_update(
-        {"update_id": 11, "callback_query": callback("confirm", confirm_key)}
-    )
+    bot.handle_update({"update_id": 11, "callback_query": callback("confirm", confirm_key)})
     assert isinstance(handled[0], TelegramProposalReviewAction)
     assert handled[0].action == "APPROVE_PROPOSAL"
     assert handled[1] == 11
+    receipt = next(
+        payload for method, payload in reversed(fake.calls) if method == "editMessageText"
+    )
+    assert "审核已记录" in receipt["text"]
+    assert "BTCUSDT" in receipt["text"]
+
+
+def test_authoritative_rejection_is_an_alert_and_never_claims_a_write() -> None:
+    fake = FakeBotApi()
+    bot, _bindings, _handled, recipient_id = gateway(fake)
+    bind(bot)
+    bot.set_action_handler(lambda _action, _update_id: "未执行: VERSION_CONFLICT")
+    bot.send(proposal(recipient_id))
+    source_key = fake.calls[-1][1]["reply_markup"]["inline_keyboard"][0][0]["callback_data"]
+    bot.handle_update({"update_id": 20, "callback_query": callback("approve", source_key)})
+    confirmation = next(
+        payload for method, payload in reversed(fake.calls) if method == "editMessageText"
+    )
+    confirm_key = confirmation["reply_markup"]["inline_keyboard"][0][0]["callback_data"]
+    bot.handle_update({"update_id": 21, "callback_query": callback("confirm", confirm_key)})
+
+    alert = next(
+        payload for method, payload in reversed(fake.calls) if method == "answerCallbackQuery"
+    )
+    assert alert["show_alert"] is True
+    assert "操作未执行" in alert["text"]
+    assert "写入" not in alert["text"]
+    receipt = next(
+        payload for method, payload in reversed(fake.calls) if method == "editMessageText"
+    )
+    assert "操作未执行" in receipt["text"]
+    assert "对象版本已变化" in receipt["text"]
 
 
 def test_private_start_binds_allowlisted_username_and_todo_is_available() -> None:
@@ -204,9 +237,7 @@ def test_private_start_binds_allowlisted_username_and_todo_is_available() -> Non
     )
     assert "待我审核 · 1 项" in fake.calls[-1][1]["text"]
     assert fake.calls[-1][1]["reply_markup"] == {
-        "inline_keyboard": [
-            [{"text": "打开 Web 审核队列", "url": "http://127.0.0.1:8014/reviews"}]
-        ]
+        "inline_keyboard": [[{"text": "打开 Web 审核队列", "url": "http://127.0.0.1:8014/reviews"}]]
     }
 
 
@@ -279,9 +310,7 @@ def test_forwarded_or_cross_account_button_fails_closed() -> None:
     )
     assert handled == []
     alert = next(
-        payload
-        for method, payload in reversed(fake.calls)
-        if method == "answerCallbackQuery"
+        payload for method, payload in reversed(fake.calls) if method == "answerCallbackQuery"
     )
     assert alert["show_alert"] is True
     assert "身份不匹配" in alert["text"]
@@ -343,9 +372,7 @@ def test_binding_failure_and_missing_handler_fail_closed() -> None:
     key = fake.calls[-1][1]["reply_markup"]["inline_keyboard"][0][0]["callback_data"]
     bot.handle_update({"update_id": 3, "callback_query": callback("no-handler", key)})
     alert = next(
-        payload
-        for method, payload in reversed(fake.calls)
-        if method == "answerCallbackQuery"
+        payload for method, payload in reversed(fake.calls) if method == "answerCallbackQuery"
     )
     assert alert["show_alert"] is True
     assert "暂未准备好" in alert["text"]
@@ -474,9 +501,7 @@ def test_help_status_and_unknown_commands_explain_narrow_boundary() -> None:
     texts = [payload["text"] for method, payload in fake.calls if method == "sendMessage"]
     assert any("不支持该命令" in text for text in texts)
     assert all(
-        payload["parse_mode"] == "HTML"
-        for method, payload in fake.calls
-        if method == "sendMessage"
+        payload["parse_mode"] == "HTML" for method, payload in fake.calls if method == "sendMessage"
     )
 
 
@@ -510,9 +535,7 @@ def test_confirmation_can_be_cancelled_without_calling_handler() -> None:
     bot.handle_update({"update_id": 4, "callback_query": callback("cancel", cancel_key)})
     assert handled == []
     restored = next(
-        payload
-        for method, payload in reversed(fake.calls)
-        if method == "editMessageText"
+        payload for method, payload in reversed(fake.calls) if method == "editMessageText"
     )
     assert restored["text"] == original["text"]
     assert restored["reply_markup"] == original["reply_markup"]
