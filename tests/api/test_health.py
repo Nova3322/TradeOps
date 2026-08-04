@@ -112,8 +112,8 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
 
     assert response.status_code == 200
     assert "交易控制台" in response.text
-    assert "/assets/app.js?v=85" in response.text
-    assert "/assets/styles.css?v=38" in response.text
+    assert "/assets/app.js?v=86" in response.text
+    assert "/assets/styles.css?v=39" in response.text
     assert 'aria-label="交易控制台首页"' in response.text
     assert '<a href="/" data-link><span>⌂</span>今日</a>' in response.text
     assert 'id="mobile-nav-toggle"' in response.text
@@ -788,6 +788,10 @@ def test_system_and_venue_pages_distinguish_read_only_snapshots_from_live_execut
     assert "执行底座为 Freqtrade；控制面尚未接入 worker" in source  # noqa: RUF001
     assert "status.execution_backend === 'FREQTRADE'" in source
     assert "status.worker_configured" in source
+    assert "connectionProbeEvidence" in source
+    assert "上游失败时按有界退避计划重试" in source
+    assert 'data-label="读取状态与处理建议"' in source
+    assert "wrapper.matches('.connection-status-table')" in source
     assert "核心市场${status.hip3_available ? ` + HIP-3" in source
     assert "当前账户事实可用；历史记录待补全" in source  # noqa: RUF001
     assert "以下成交与资金费只代表已经保存的记录" in source
@@ -800,6 +804,8 @@ def test_system_and_venue_pages_distinguish_read_only_snapshots_from_live_execut
     assert "最后一次保存快照中没有未完成委托；这不能确认当前仍无挂单。" in source  # noqa: RUF001
     styles = app_path.with_name("styles.css").read_text()
     assert ".venue-status-stats { grid-template-columns: 1fr; }" in styles
+    assert ".connection-status-table tr { display: block;" in styles
+    assert ".connection-scroll-hint { display: none; }" in styles
 
 
 def test_venue_snapshot_empty_states_do_not_claim_current_account_state() -> None:

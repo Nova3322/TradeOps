@@ -798,7 +798,7 @@ function bindLinkedRows() {
 
 function enhanceTables() {
   document.querySelectorAll('.table-wrap').forEach((wrapper) => {
-    if (wrapper.closest('.risk-condition-details') && matchMedia('(max-width: 780px)').matches) return;
+    if ((wrapper.closest('.risk-condition-details') || wrapper.matches('.connection-status-table')) && matchMedia('(max-width: 780px)').matches) return;
     const heading = wrapper.closest('section')?.querySelector('h2, h1')?.textContent || '数据表格';
     if (wrapper.scrollWidth <= wrapper.clientWidth + 1) return;
     wrapper.tabIndex = 0;
@@ -2049,13 +2049,13 @@ async function renderSystemStatus() {
         ? '只读事实；资金签名与广播关闭'
         : '只读连接；下单与写入关闭';
     const categoryLabel = fmtConnectionCategory(state.category);
-    const errorEvidence = state.error_code ? ` · <code translate="no">${escapeHtml(state.error_code)}</code>` : '';
+    const errorEvidence = state.error_code ? `<details class="venue-technical-detail"><summary>技术分类</summary><code translate="no">${escapeHtml(state.error_code)}</code></details>` : '';
     const probeEvidence = [
       `最近探针：${fmtDate(state.checked_at)}`,
       state.last_success_at ? `最近成功：${fmtDate(state.last_success_at)}` : '尚无成功记录',
       state.retry_at ? `下次自动重试：${fmtDate(state.retry_at)}` : null,
     ].filter(Boolean).join(' · ');
-    return `<tr><td><b>${label[0]}</b><br><span class="subtle">${escapeHtml(categoryLabel)}${errorEvidence}</span></td><td><span class="status-pill ${state.available ? 'status-APPROVED' : ''}">${state.available ? '只读已连接' : escapeHtml(categoryLabel)}</span><br><span class="subtle">${escapeHtml(fmtOperationalCopy(state.reason))}</span><br><span class="subtle">${escapeHtml(probeEvidence)}</span><br><span class="subtle">负责：${escapeHtml(state.owner_role)} · 下一步：${escapeHtml(fmtOperationalCopy(state.next_action))}</span></td><td>${label[1]}</td><td>${escapeHtml(capability)}</td><td>${action}</td></tr>`;
+    return `<tr><td data-label="数据源"><b>${label[0]}</b><br><span class="subtle">${escapeHtml(categoryLabel)}</span>${errorEvidence}</td><td data-label="读取状态与处理建议"><span class="status-pill ${state.available ? 'status-APPROVED' : ''}">${state.available ? '只读已连接' : escapeHtml(categoryLabel)}</span><br><span class="subtle">${escapeHtml(fmtOperationalCopy(state.reason))}</span><br><span class="subtle">${escapeHtml(probeEvidence)}</span><br><span class="subtle">负责：${escapeHtml(state.owner_role)} · 下一步：${escapeHtml(fmtOperationalCopy(state.next_action))}</span></td><td data-label="运行范围">${label[1]}</td><td data-label="可用能力">${escapeHtml(capability)}</td><td data-label="下一步">${action}</td></tr>`;
   }).join('');
   const availableSources = Object.values(connections).filter(item => item.available).length;
   const executionVerdictTitle = !workersReady
@@ -2082,7 +2082,7 @@ async function renderSystemStatus() {
   main.innerHTML = `<section class="page system-status-page"><header class="page-head"><div><p class="eyebrow">交易系统状态</p><h1>系统状态</h1><p class="lede">这里直接说明系统能否工作、哪些能力受限，以及是否需要处理。绿色表示当前证据正常；黄色表示能力受限；红色表示必须先处理；灰色表示当前没有监控对象。</p></div><div class="toolbar"><button class="secondary" data-refresh>刷新状态</button><a class="secondary" href="/risk" data-link>查看风险控制</a></div></header>
     <article class="home-status tone-${overallTone}"><div><p class="eyebrow">当前结论</p><h2>${escapeHtml(verdictTitle)}</h2><p>${escapeHtml(verdictCopy)}</p></div>${verdictAction}</article>
     <div class="system-health-grid">${cards}</div>
-    <section><div class="section-heading"><div><p class="eyebrow">外部数据连接</p><h2>生产数据与资金连接</h2></div><span class="status-pill">${availableSources} / 4 可用</span></div><div class="table-wrap"><table><thead><tr><th>数据源</th><th>读取状态与处理建议</th><th>运行范围</th><th>可用能力</th><th></th></tr></thead><tbody>${connectionRows}</tbody></table></div></section>
+    <section><div class="section-heading"><div><p class="eyebrow">外部数据连接</p><h2>生产数据与资金连接</h2></div><span class="status-pill">${availableSources} / 4 可用</span></div><div class="table-scroll-hint connection-scroll-hint" data-table-hint>左右滑动查看完整连接状态</div><div class="table-wrap connection-status-table"><table><thead><tr><th>数据源</th><th>读取状态与处理建议</th><th>运行范围</th><th>可用能力</th><th></th></tr></thead><tbody>${connectionRows}</tbody></table></div></section>
     ${codes.size ? `<section><div class="section-heading"><div><p class="eyebrow">交易任务运行告警</p><h2>需要处理的问题类型</h2></div><a class="secondary" href="/campaigns/alerts" data-link>查看运行告警</a></div><div class="exception-code-list">${[...codes].sort().map(code => `<span>${escapeHtml(explainException(code).title)}</span>`).join('')}</div></section>` : ''}
   </section>`;
   document.querySelector('[data-refresh]')?.addEventListener('click', route);
@@ -2534,6 +2534,14 @@ async function renderVenueFacts() {
   const connectionReason = connection
     ? `${fmtOperationalCopy(connection.reason)} 负责：${connection.owner_role}；下一步：${fmtOperationalCopy(connection.next_action)}`
     : '当前身份无法读取统一连接探针；页面仅展示已保存账户事实，不能据此声称实时已连接。';
+  const connectionProbeEvidence = connection
+    ? [
+        `最近探针：${fmtDate(connection.checked_at)}`,
+        connection.last_success_at ? `最近成功：${fmtDate(connection.last_success_at)}` : '尚无成功记录',
+        connection.retry_at ? `下次自动重试：${fmtDate(connection.retry_at)}` : null,
+        Number(connection.consecutive_failures || 0) > 0 ? `连续失败：${Number(connection.consecutive_failures)} 次` : null,
+      ].filter(Boolean).join(' · ')
+    : '当前身份无法读取探针时间';
   const lastSync = latestVenueObservation(facts);
   const snapshotMode = !connected && Boolean(lastSync);
   const hip3Dexes = Array.isArray(status.hip3_dexes) ? status.hip3_dexes : [];
@@ -2551,7 +2559,7 @@ async function renderVenueFacts() {
       ? localizedText(`系统约每 ${syncInterval} 秒更新余额、仓位与当前委托；历史成交和资金费仍在等待上游补全。`)
       : localizedText(`系统约每 ${syncInterval} 秒读取一次完整账户；新出现的持仓和委托会自动纳入，最近成交与资金费同步保存。`)
     : status.automatic_sync_enabled
-      ? localizedText(`自动读取服务仍会约每 ${syncInterval} 秒重试；连接恢复前不会把旧快照标记为实时。`)
+      ? localizedText(`同步服务约每 ${syncInterval} 秒检查一次；上游失败时按有界退避计划重试。连接恢复前不会把旧快照标记为实时。`)
     : localizedText('当前只展示已经保存的生产数据；配置连续读取服务后会自动更新。');
   const automaticSyncCopy = currentLanguage === 'en'
     ? status.automatic_sync_enabled && connected
@@ -2559,13 +2567,13 @@ async function renderVenueFacts() {
         ? `Balances, positions, and open orders update about every ${syncInterval} seconds. Historical fills and funding are still waiting for upstream backfill.`
         : `The system reads the complete account about every ${syncInterval} seconds. New positions and orders are included automatically, with recent fills and funding saved together.`
       : status.automatic_sync_enabled
-        ? `The reader retries about every ${syncInterval} seconds. Saved snapshots will not be presented as live until the connection recovers.`
+        ? `The reader checks about every ${syncInterval} seconds and follows a bounded backoff after upstream failures. Saved snapshots will not be presented as live until the connection recovers.`
       : 'Only saved production data is shown. Configure the continuous reader to update it automatically.'
     : automaticSyncCopyLocalized;
   main.innerHTML = `<section class="page venue-facts-page"><header class="page-head"><div><p class="eyebrow">生产账户 · 自动读取</p><h1>交易账户</h1><p class="lede">统一查看币安和链上永续的余额、当前仓位、当前委托、最近成交与资金费。系统按账户自动覆盖全部活跃标的，不需要逐个输入币对。</p></div><button class="secondary" data-refresh>刷新页面</button></header>
     <nav class="venue-switch" aria-label="选择交易所"><a class="${venue === 'BINANCE' ? 'active' : ''}" href="/venues?venue=BINANCE" data-link>Binance</a><a class="${venue === 'HYPERLIQUID' ? 'active' : ''}" href="/venues?venue=HYPERLIQUID" data-link>Hyperliquid</a></nav>
     <div class="stats venue-status-stats"><div class="stat"><small>连接状态</small><b class="${connected ? 'direction-long' : 'warning-text'}">${escapeHtml(connectionLabel)}</b><span>${historyIncomplete ? '当前账户事实可用；历史记录待补全' : connected ? '最近只读检查成功' : '尚无可用连接结论'}</span></div><div class="stat"><small>运行模式</small><b>生产账户 · 只读</b><span>${escapeHtml(venueDetail)} · ${escapeHtml(executionDetail)}</span></div><div class="stat"><small>交易账户</small><b>默认账户</b><span>${escapeHtml(venue === 'BINANCE' ? '币安' : 'Hyperliquid')} · 单账户模式</span></div><div class="stat"><small>${snapshotMode ? '最后快照' : '事实新鲜度'}</small><b>${fmtDate(lastSync)}</b><span>${lastSync ? snapshotMode ? '连接受限；以下数据不是实时事实' : '最近保存时间；连接探针另行校验' : '尚无已保存事实'}</span></div></div>
-    <article class="account-sync-note ${connected ? 'is-active' : ''}"><span class="status-dot"></span><div><b>${escapeHtml(connectionLabel)}</b><p>${escapeHtml(connectionReason)} 最近探针：${fmtDate(connection?.checked_at)}</p>${connectionEvidence}</div></article>
+    <article class="account-sync-note ${connected ? 'is-active' : ''}"><span class="status-dot"></span><div><b>${escapeHtml(connectionLabel)}</b><p>${escapeHtml(connectionReason)}</p><span class="system-health-meta">${escapeHtml(connectionProbeEvidence)}</span>${connectionEvidence}</div></article>
     <article class="account-sync-note ${status.automatic_sync_enabled && connected ? 'is-active' : ''}"><span class="status-dot"></span><div><b>${status.automatic_sync_enabled && connected ? '账户数据自动同步' : status.automatic_sync_enabled ? '自动同步等待连接恢复' : '账户自动更新尚未启用'}</b><p>${escapeHtml(automaticSyncCopy)}</p></div></article>
     ${snapshotMode ? `<article class="danger-note venue-snapshot-warning"><b>当前连接不可用，以下仅为最后一次保存快照</b><p>这些余额、仓位、订单与成交不能作为实时交易依据。恢复只读连接并完成新一轮同步后，页面才会重新标记为当前事实。</p></article>` : ''}
     ${venueFactSections(facts, {snapshotMode, historyIncomplete})}
