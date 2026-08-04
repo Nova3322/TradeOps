@@ -128,6 +128,7 @@ def main() -> None:
         _ensure_role(database, service, perptape_id, Role.PROPOSER, owner_id, now=now)
         for role in (Role.OPERATOR, Role.TREASURY_ADMIN):
             _ensure_role(database, service, runtime_sync_id, role, owner_id, now=now)
+        service.expire_duplicate_active_manual_proposals(actor_id=owner_id, now=now)
         with database.session_factory() as session:
             enabled_gates = session.scalars(
                 select(CapabilityGate).where(

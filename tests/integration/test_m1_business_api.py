@@ -916,6 +916,23 @@ def test_manual_api_is_idempotent_and_semantic_conflicts_are_explicit(
     database: Database, service: TradingService
 ) -> None:
     ids = seed(service)
+    second_proposer = service.create_user("proposer-2", ids["admin"], now=datetime.now(UTC))
+    service.assign_role(
+        second_proposer,
+        Role.PROPOSER,
+        ids["admin"],
+        "acct-1",
+        "BINANCE",
+        now=datetime.now(UTC),
+    )
+    service.assign_role(
+        second_proposer,
+        Role.REVIEWER,
+        ids["admin"],
+        "acct-1",
+        "BINANCE",
+        now=datetime.now(UTC),
+    )
     telegram = MockTelegramGateway()
 
     async def scenario() -> None:
@@ -943,7 +960,7 @@ def test_manual_api_is_idempotent_and_semantic_conflicts_are_explicit(
             assert first.status_code == 200, first.text
             assert second.status_code == 200
             assert first.json()["proposal_id"] == second.json()["proposal_id"]
-            assert len(telegram.notifications()) == 2
+            assert len(telegram.notifications()) == 3
 
             same_trade = {
                 **payload,
@@ -953,7 +970,28 @@ def test_manual_api_is_idempotent_and_semantic_conflicts_are_explicit(
             reused = await client.post("/api/proposals/manual", json=same_trade)
             assert reused.status_code == 200
             assert reused.json()["proposal_id"] == first.json()["proposal_id"]
-            assert len(telegram.notifications()) == 2
+            assert len(telegram.notifications()) == 3
+
+            await login(client, "proposer-2")
+            cross_proposer = await client.post(
+                "/api/proposals/manual",
+                json={**payload, "idempotency_key": "manual-api-cross-proposer"},
+            )
+            assert cross_proposer.status_code == 200
+            assert cross_proposer.json()["proposal_id"] == first.json()["proposal_id"]
+            assert cross_proposer.json()["actionable_for_current_user"] is False
+            assert len(telegram.notifications()) == 3
+            self_review = await client.post(
+                f"/api/proposals/{first.json()['proposal_id']}/reviews",
+                json={
+                    "decision": "REJECT",
+                    "reason": "must not review a proposal I tried to create",
+                    "expected_version": first.json()["version"],
+                },
+            )
+            assert self_review.status_code == 403
+            assert self_review.json()["error"]["code"] == "SELF_REVIEW_FORBIDDEN"
+            await login(client, "proposer")
 
             live_scope = await client.post(
                 "/api/proposals/manual",
@@ -961,7 +999,7 @@ def test_manual_api_is_idempotent_and_semantic_conflicts_are_explicit(
             )
             assert live_scope.status_code == 200
             assert live_scope.json()["proposal_id"] != first.json()["proposal_id"]
-            assert len(telegram.notifications()) == 4
+            assert len(telegram.notifications()) == 6
 
             conflict = await client.post(
                 "/api/proposals/manual", json={**payload, "quantity": "0.2"}
@@ -975,7 +1013,7 @@ def test_manual_api_is_idempotent_and_semantic_conflicts_are_explicit(
             )
             assert distinct.status_code == 200
             assert distinct.json()["proposal_id"] != first.json()["proposal_id"]
-            assert len(telegram.notifications()) == 6
+            assert len(telegram.notifications()) == 9
 
     asyncio.run(scenario())
     with database.session_factory() as session:
@@ -986,5 +1024,5 @@ def test_manual_api_is_idempotent_and_semantic_conflicts_are_explicit(
                 .select_from(AuditEvent)
                 .where(AuditEvent.event_type == "PROPOSAL_DUPLICATE_REUSED")
             )
-            == 1
+            == 2
         )

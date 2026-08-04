@@ -287,6 +287,45 @@ def _manual_execution_key(
     )
 
 
+def _proposal_manual_execution_key(proposal: Proposal) -> tuple[Any, ...]:
+    return _manual_execution_key(
+        environment=proposal.environment,
+        account_id=proposal.account_id,
+        venue=proposal.venue,
+        instrument_id=proposal.instrument_id,
+        direction=proposal.direction,
+        risk_tier=proposal.risk_tier,
+        quantity=proposal.quantity,
+        max_risk=proposal.max_risk,
+        expires_in_minutes=round(
+            (proposal.expires_at - proposal.created_at).total_seconds() / 60
+        ),
+        details=dict(proposal.frozen_payload.get("details") or {}),
+    )
+
+
+def _is_manual_proposal_originator(
+    session: Session,
+    proposal: Proposal,
+    user_id: UUID,
+) -> bool:
+    if proposal.proposer_id == user_id:
+        return True
+    return (
+        session.scalar(
+            select(AuditEvent.audit_event_id)
+            .where(
+                AuditEvent.event_type == "PROPOSAL_DUPLICATE_REUSED",
+                AuditEvent.object_type == "Proposal",
+                AuditEvent.object_id == str(proposal.proposal_id),
+                AuditEvent.actor_id == str(user_id),
+            )
+            .limit(1)
+        )
+        is not None
+    )
+
+
 def _advisory_lock_key(caller_id: str, operation: str, key: str) -> int:
     digest = hashlib.sha256(f"{caller_id}:{operation}:{key}".encode()).digest()[:8]
     return int.from_bytes(digest, byteorder="big", signed=True)
@@ -1491,7 +1530,6 @@ class TradingService:
                 active_scope = ":".join(
                     [
                         environment.value,
-                        str(actor_id),
                         account_id,
                         venue,
                         str(instrument_id),
@@ -1503,7 +1541,7 @@ class TradingService:
                     {
                         "key": _advisory_lock_key(
                             "proposal.active-manual-semantics",
-                            str(actor_id),
+                            "shared",
                             active_scope,
                         )
                     },
@@ -1524,7 +1562,6 @@ class TradingService:
                     select(Proposal)
                     .where(
                         Proposal.source == ProposalSource.MANUAL.value,
-                        Proposal.proposer_id == actor_id,
                         Proposal.environment == environment.value,
                         Proposal.account_id == account_id,
                         Proposal.venue == venue,
@@ -1542,21 +1579,7 @@ class TradingService:
                     (
                         proposal
                         for proposal in active_manual
-                        if _manual_execution_key(
-                            environment=proposal.environment,
-                            account_id=proposal.account_id,
-                            venue=proposal.venue,
-                            instrument_id=proposal.instrument_id,
-                            direction=proposal.direction,
-                            risk_tier=proposal.risk_tier,
-                            quantity=proposal.quantity,
-                            max_risk=proposal.max_risk,
-                            expires_in_minutes=round(
-                                (proposal.expires_at - proposal.created_at).total_seconds() / 60
-                            ),
-                            details=dict(proposal.frozen_payload.get("details") or {}),
-                        )
-                        == requested_key
+                        if _proposal_manual_execution_key(proposal) == requested_key
                     ),
                     None,
                 )
@@ -1687,6 +1710,93 @@ class TradingService:
                 now=now,
             )
             return proposal.proposal_id
+
+    def expire_duplicate_active_manual_proposals(
+        self,
+        *,
+        actor_id: UUID,
+        now: datetime,
+    ) -> int:
+        """Keep one active proposal per exact frozen manual trade and audit the surplus."""
+
+        with self.database.session_factory.begin() as session:
+            self._require_role(session, actor_id, "user.manage")
+            session.execute(
+                text("SELECT pg_advisory_xact_lock(:key)"),
+                {
+                    "key": _advisory_lock_key(
+                        "proposal.active-manual-semantics",
+                        "shared",
+                        "all",
+                    )
+                },
+            )
+            proposals = session.scalars(
+                select(Proposal)
+                .where(
+                    Proposal.source == ProposalSource.MANUAL.value,
+                    Proposal.status.in_(
+                        [ProposalStatus.DRAFT.value, ProposalStatus.PENDING_REVIEW.value]
+                    ),
+                    Proposal.expires_at > now,
+                )
+                .order_by(Proposal.created_at, Proposal.proposal_id)
+                .with_for_update()
+            ).all()
+            approved_ids = set(
+                session.scalars(
+                    select(Approval.proposal_id).where(
+                        Approval.proposal_id.in_([item.proposal_id for item in proposals])
+                    )
+                ).all()
+            )
+            grouped: dict[tuple[Any, ...], list[Proposal]] = {}
+            for proposal in proposals:
+                grouped.setdefault(_proposal_manual_execution_key(proposal), []).append(proposal)
+
+            expired = 0
+            for matching in grouped.values():
+                if len(matching) < 2:
+                    continue
+                matching.sort(
+                    key=lambda item: (
+                        item.proposal_id not in approved_ids,
+                        item.created_at,
+                        str(item.proposal_id),
+                    )
+                )
+                canonical = matching[0]
+                for duplicate in matching[1:]:
+                    self._audit(
+                        session,
+                        actor_id=str(duplicate.proposer_id),
+                        event_type="PROPOSAL_DUPLICATE_REUSED",
+                        object_type="Proposal",
+                        object_id=canonical.proposal_id,
+                        reason="existing duplicate manual proposal consolidated at startup",
+                        correlation_id=canonical.correlation_id,
+                        object_version=canonical.version,
+                        now=now,
+                    )
+                    duplicate.status = ProposalStatus.EXPIRED.value
+                    duplicate.updated_at = now
+                    duplicate.version += 1
+                    self._audit(
+                        session,
+                        actor_id=str(actor_id),
+                        event_type="PROPOSAL_DUPLICATE_EXPIRED",
+                        object_type="Proposal",
+                        object_id=duplicate.proposal_id,
+                        reason=(
+                            "duplicate active manual execution semantics; "
+                            f"canonical={canonical.proposal_id}"
+                        ),
+                        correlation_id=duplicate.correlation_id,
+                        object_version=duplicate.version,
+                        now=now,
+                    )
+                    expired += 1
+            return expired
 
     def expire_duplicate_active_system_proposals(
         self,
@@ -1852,7 +1962,7 @@ class TradingService:
                 _reject("PROPOSAL_NOT_FOUND", "proposal does not exist")
             if expected_version is not None and proposal.version != expected_version:
                 _reject("VERSION_CONFLICT", "proposal version changed; refresh before reviewing")
-            if proposal.proposer_id == reviewer_id:
+            if _is_manual_proposal_originator(session, proposal, reviewer_id):
                 _reject("SELF_REVIEW_FORBIDDEN", "a proposer cannot review the same proposal")
             self._require_role(
                 session, reviewer_id, "proposal.review", proposal.account_id, proposal.venue

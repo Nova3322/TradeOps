@@ -31,6 +31,7 @@ from trading_control_plane.domain import (
 )
 from trading_control_plane.models import (
     AccountEquity,
+    AuditEvent,
     Campaign,
     CapabilityGate,
     CommandReceipt,
@@ -348,10 +349,27 @@ def test_concurrent_manual_semantic_duplicates_reuse_one_active_proposal(
     database: Database, service: TradingService
 ) -> None:
     ids = seed(service)
+    second_proposer = service.create_user("proposer-2", ids["admin"], now=NOW)
+    service.assign_role(
+        second_proposer,
+        Role.PROPOSER,
+        ids["admin"],
+        "acct-1",
+        "BINANCE",
+        now=NOW,
+    )
+    service.assign_role(
+        second_proposer,
+        Role.REVIEWER,
+        ids["admin"],
+        "acct-1",
+        "BINANCE",
+        now=NOW,
+    )
 
-    def create(index: int) -> UUID:
+    def create(actor_id: UUID) -> UUID:
         return service.create_proposal(
-            actor_id=ids["proposer"],
+            actor_id=actor_id,
             source=ProposalSource.MANUAL,
             risk_tier=RiskTier.LOW,
             account_id="acct-1",
@@ -361,24 +379,95 @@ def test_concurrent_manual_semantic_duplicates_reuse_one_active_proposal(
             quantity=Decimal("1"),
             max_risk=Decimal("10"),
             expires_at=NOW + timedelta(hours=8),
-            idempotency_key=f"concurrent-manual-{index}",
+            idempotency_key=f"concurrent-manual-{actor_id}",
             details={
                 "trigger_price": "100",
                 "invalidation_price": "95",
                 "initial_quantity": "1",
-                "rationale": f"human note {index}",
+                "rationale": f"human note {actor_id}",
             },
             deduplicate_active_manual_semantics=True,
             now=NOW,
         )
 
     with ThreadPoolExecutor(max_workers=2) as pool:
-        proposal_ids = list(pool.map(create, (1, 2)))
+        proposal_ids = list(pool.map(create, (ids["proposer"], second_proposer)))
 
     assert proposal_ids[0] == proposal_ids[1]
     with database.session_factory() as session:
         assert session.scalar(select(func.count()).select_from(Proposal)) == 1
         assert session.scalar(select(func.count()).select_from(CommandReceipt)) == 2
+
+
+def test_admin_cleanup_expires_cross_proposer_manual_duplicates_with_audit(
+    database: Database, service: TradingService
+) -> None:
+    ids = seed(service)
+    second_proposer = service.create_user("proposer-2", ids["admin"], now=NOW)
+    service.assign_role(
+        second_proposer,
+        Role.PROPOSER,
+        ids["admin"],
+        "acct-1",
+        "BINANCE",
+        now=NOW,
+    )
+
+    proposal_ids = [
+        service.create_proposal(
+            actor_id=actor_id,
+            source=ProposalSource.MANUAL,
+            risk_tier=RiskTier.LOW,
+            account_id="acct-1",
+            venue="BINANCE",
+            instrument_id=ids["instrument"],
+            direction=Direction.LONG,
+            quantity=Decimal("1"),
+            max_risk=Decimal("10"),
+            expires_at=NOW + timedelta(minutes=index, hours=8),
+            idempotency_key=f"legacy-manual-{index}",
+            details={"trigger_price": "100", "invalidation_price": "95"},
+            now=NOW + timedelta(minutes=index),
+        )
+        for index, actor_id in enumerate((ids["proposer"], second_proposer))
+    ]
+
+    assert service.expire_duplicate_active_manual_proposals(
+        actor_id=ids["admin"], now=NOW + timedelta(minutes=2)
+    ) == 1
+    with pytest.raises(DomainRejected, match="SELF_REVIEW_FORBIDDEN"):
+        service.review_proposal(
+            proposal_ids[0],
+            second_proposer,
+            ReviewDecision.REJECT,
+            "must not review a proposal consolidated from my duplicate",
+            now=NOW + timedelta(minutes=3),
+        )
+    with database.session_factory() as session:
+        proposals = {
+            item.proposal_id: item.status
+            for item in session.scalars(
+                select(Proposal).where(Proposal.proposal_id.in_(proposal_ids))
+            ).all()
+        }
+        assert proposals[proposal_ids[0]] == ProposalStatus.DRAFT.value
+        assert proposals[proposal_ids[1]] == ProposalStatus.EXPIRED.value
+        assert (
+            session.scalar(
+                select(func.count())
+                .select_from(AuditEvent)
+                .where(AuditEvent.event_type == "PROPOSAL_DUPLICATE_EXPIRED")
+            )
+            == 1
+        )
+        assert (
+            session.scalar(
+                select(func.count())
+                .select_from(AuditEvent)
+                .where(AuditEvent.event_type == "PROPOSAL_DUPLICATE_REUSED")
+            )
+            == 1
+        )
 
 
 def test_self_review_is_forbidden_and_high_risk_needs_two_reviewers(

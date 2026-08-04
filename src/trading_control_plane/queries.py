@@ -329,6 +329,15 @@ class TradingQueries:
             reviewed_proposal_ids = set(
                 session.scalars(select(Approval.proposal_id).where(Approval.reviewer_id == user_id))
             )
+            reused_proposal_ids = set(
+                session.scalars(
+                    select(AuditEvent.object_id).where(
+                        AuditEvent.event_type == "PROPOSAL_DUPLICATE_REUSED",
+                        AuditEvent.object_type == "Proposal",
+                        AuditEvent.actor_id == str(user_id),
+                    )
+                )
+            )
             approval_counts = dict(
                 session.execute(
                     select(Approval.proposal_id, func.count(Approval.approval_id)).group_by(
@@ -352,6 +361,7 @@ class TradingQueries:
                 summary["actionable_for_current_user"] = bool(
                     effective_status == "PENDING_REVIEW"
                     and proposal.proposer_id != user_id
+                    and str(proposal.proposal_id) not in reused_proposal_ids
                     and proposal.proposal_id not in reviewed_proposal_ids
                     and self.service.can_user(
                         user_id,
@@ -423,6 +433,16 @@ class TradingQueries:
                 proposal, session.get(Instrument, proposal.instrument_id)
             )
             effective_status = _effective_proposal_status(proposal, current_time)
+            reused_by_current_user = session.scalar(
+                select(AuditEvent.audit_event_id)
+                .where(
+                    AuditEvent.event_type == "PROPOSAL_DUPLICATE_REUSED",
+                    AuditEvent.object_type == "Proposal",
+                    AuditEvent.object_id == str(proposal.proposal_id),
+                    AuditEvent.actor_id == str(user_id),
+                )
+                .limit(1)
+            )
             result["status"] = effective_status
             result.update(
                 {
@@ -443,6 +463,7 @@ class TradingQueries:
                     "actionable_for_current_user": bool(
                         effective_status == "PENDING_REVIEW"
                         and proposal.proposer_id != user_id
+                        and reused_by_current_user is None
                         and all(item.reviewer_id != user_id for item in approvals)
                         and self.service.can_user(
                             user_id,
