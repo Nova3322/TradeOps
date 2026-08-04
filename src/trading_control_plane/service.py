@@ -248,6 +248,45 @@ def _semantic_hash(value: dict[str, Any]) -> str:
     return hashlib.sha256(_canonical(value).encode()).hexdigest()
 
 
+def _manual_execution_key(
+    *,
+    environment: str,
+    account_id: str,
+    venue: str,
+    instrument_id: UUID,
+    direction: str,
+    risk_tier: str,
+    quantity: Decimal,
+    max_risk: Decimal,
+    expires_in_minutes: int,
+    details: dict[str, Any],
+) -> tuple[Any, ...]:
+    """Compare frozen trade instructions while leaving human commentary out of the key."""
+
+    def decimal_detail(name: str, fallback: Decimal | None = None) -> Decimal | None:
+        value = details.get(name)
+        return fallback if value is None else Decimal(str(value))
+
+    return (
+        environment,
+        account_id,
+        venue,
+        instrument_id,
+        direction,
+        risk_tier,
+        quantity,
+        max_risk,
+        expires_in_minutes,
+        decimal_detail("trigger_price"),
+        decimal_detail("limit_price"),
+        decimal_detail("invalidation_price"),
+        decimal_detail("initial_quantity", quantity),
+        bool(details.get("allow_auto_add", False)),
+        int(details.get("requested_adds", 0)),
+        decimal_detail("add_trigger_price"),
+    )
+
+
 def _advisory_lock_key(caller_id: str, operation: str, key: str) -> int:
     digest = hashlib.sha256(f"{caller_id}:{operation}:{key}".encode()).digest()[:8]
     return int.from_bytes(digest, byteorder="big", signed=True)
@@ -1375,6 +1414,7 @@ class TradingService:
         source_readiness: str | None = None,
         details: dict[str, Any] | None = None,
         idempotency_payload: dict[str, Any] | None = None,
+        deduplicate_active_manual_semantics: bool = False,
         deduplicate_active_system_scope: bool = False,
         now: datetime,
     ) -> UUID:
@@ -1398,6 +1438,7 @@ class TradingService:
             ),
             "source_readiness": source_readiness,
             "details": details or {},
+            "deduplicate_active_manual_semantics": deduplicate_active_manual_semantics,
             "deduplicate_active_system_scope": deduplicate_active_system_scope,
         }
         operation = "proposal.create"
@@ -1441,6 +1482,108 @@ class TradingService:
                 _reject("INSTRUMENT_UNAVAILABLE", "instrument is inactive or outside venue scope")
             if expires_at <= now:
                 _reject("PROPOSAL_EXPIRY_INVALID", "proposal expiry must be in the future")
+            if deduplicate_active_manual_semantics:
+                if source is not ProposalSource.MANUAL:
+                    _reject(
+                        "PROPOSAL_DEDUPLICATION_SCOPE_INVALID",
+                        "manual semantic deduplication is restricted to MANUAL proposals",
+                    )
+                active_scope = ":".join(
+                    [
+                        environment.value,
+                        str(actor_id),
+                        account_id,
+                        venue,
+                        str(instrument_id),
+                        direction.value,
+                    ]
+                )
+                session.execute(
+                    text("SELECT pg_advisory_xact_lock(:key)"),
+                    {
+                        "key": _advisory_lock_key(
+                            "proposal.active-manual-semantics",
+                            str(actor_id),
+                            active_scope,
+                        )
+                    },
+                )
+                requested_key = _manual_execution_key(
+                    environment=environment.value,
+                    account_id=account_id,
+                    venue=venue,
+                    instrument_id=instrument_id,
+                    direction=direction.value,
+                    risk_tier=risk_tier.value,
+                    quantity=quantity,
+                    max_risk=max_risk,
+                    expires_in_minutes=round((expires_at - now).total_seconds() / 60),
+                    details=details or {},
+                )
+                active_manual = session.scalars(
+                    select(Proposal)
+                    .where(
+                        Proposal.source == ProposalSource.MANUAL.value,
+                        Proposal.proposer_id == actor_id,
+                        Proposal.environment == environment.value,
+                        Proposal.account_id == account_id,
+                        Proposal.venue == venue,
+                        Proposal.instrument_id == instrument_id,
+                        Proposal.direction == direction.value,
+                        Proposal.status.in_(
+                            [ProposalStatus.DRAFT.value, ProposalStatus.PENDING_REVIEW.value]
+                        ),
+                        Proposal.expires_at > now,
+                    )
+                    .order_by(Proposal.created_at, Proposal.proposal_id)
+                    .with_for_update()
+                ).all()
+                existing = next(
+                    (
+                        proposal
+                        for proposal in active_manual
+                        if _manual_execution_key(
+                            environment=proposal.environment,
+                            account_id=proposal.account_id,
+                            venue=proposal.venue,
+                            instrument_id=proposal.instrument_id,
+                            direction=proposal.direction,
+                            risk_tier=proposal.risk_tier,
+                            quantity=proposal.quantity,
+                            max_risk=proposal.max_risk,
+                            expires_in_minutes=round(
+                                (proposal.expires_at - proposal.created_at).total_seconds() / 60
+                            ),
+                            details=dict(proposal.frozen_payload.get("details") or {}),
+                        )
+                        == requested_key
+                    ),
+                    None,
+                )
+                if existing is not None:
+                    result = {"proposal_id": str(existing.proposal_id)}
+                    self._save_receipt(
+                        session,
+                        caller_id=str(actor_id),
+                        operation=operation,
+                        idempotency_key=idempotency_key,
+                        semantic_hash=digest,
+                        response=result,
+                        now=now,
+                    )
+                    self._audit(
+                        session,
+                        actor_id=str(actor_id),
+                        event_type="PROPOSAL_DUPLICATE_REUSED",
+                        object_type="Proposal",
+                        object_id=existing.proposal_id,
+                        reason="matching active manual execution semantics",
+                        correlation_id=existing.correlation_id,
+                        object_version=existing.version,
+                        idempotency_key=idempotency_key,
+                        now=now,
+                    )
+                    return existing.proposal_id
             if deduplicate_active_system_scope:
                 if source is not ProposalSource.SYSTEM or not strategy_id:
                     _reject(

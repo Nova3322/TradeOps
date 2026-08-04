@@ -1461,7 +1461,7 @@ async function submitManualProposal(event) {
   delete data.expires_in_hours;
   try {
     const result = await api('/api/proposals/manual', {method:'POST', body: JSON.stringify(data)});
-    showToast('人工提案已保存并进入审核');
+    showToast('提案已进入审核；相同交易参数不会重复创建');
     navigate(`/proposals/${result.proposal_id}`);
   } catch (error) { showApiError(error, form.querySelector('.form-error')); button.disabled = false; }
 }

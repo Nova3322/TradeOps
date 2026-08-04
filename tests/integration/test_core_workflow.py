@@ -344,6 +344,43 @@ def test_proposal_idempotency_and_semantic_conflict(
         assert session.scalar(select(func.count()).select_from(CommandReceipt)) == 1
 
 
+def test_concurrent_manual_semantic_duplicates_reuse_one_active_proposal(
+    database: Database, service: TradingService
+) -> None:
+    ids = seed(service)
+
+    def create(index: int) -> UUID:
+        return service.create_proposal(
+            actor_id=ids["proposer"],
+            source=ProposalSource.MANUAL,
+            risk_tier=RiskTier.LOW,
+            account_id="acct-1",
+            venue="BINANCE",
+            instrument_id=ids["instrument"],
+            direction=Direction.LONG,
+            quantity=Decimal("1"),
+            max_risk=Decimal("10"),
+            expires_at=NOW + timedelta(hours=8),
+            idempotency_key=f"concurrent-manual-{index}",
+            details={
+                "trigger_price": "100",
+                "invalidation_price": "95",
+                "initial_quantity": "1",
+                "rationale": f"human note {index}",
+            },
+            deduplicate_active_manual_semantics=True,
+            now=NOW,
+        )
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        proposal_ids = list(pool.map(create, (1, 2)))
+
+    assert proposal_ids[0] == proposal_ids[1]
+    with database.session_factory() as session:
+        assert session.scalar(select(func.count()).select_from(Proposal)) == 1
+        assert session.scalar(select(func.count()).select_from(CommandReceipt)) == 2
+
+
 def test_self_review_is_forbidden_and_high_risk_needs_two_reviewers(
     database: Database, service: TradingService
 ) -> None:

@@ -112,7 +112,7 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
 
     assert response.status_code == 200
     assert "交易控制台" in response.text
-    assert "/assets/app.js?v=73" in response.text
+    assert "/assets/app.js?v=74" in response.text
     assert "/assets/styles.css?v=35" in response.text
     assert '<a href="/" data-link><span>⌂</span>今日</a>' in response.text
     assert 'id="mobile-nav-toggle"' in response.text
@@ -202,6 +202,7 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
     assert 'name="timeframes" type="checkbox"' in app_javascript.text
     assert "function updateManualProposalPreview" in app_javascript.text
     assert "只创建提案，不直接下单" in app_javascript.text  # noqa: RUF001
+    assert "相同交易参数不会重复创建" in app_javascript.text
     assert "这笔交易要做什么" in app_javascript.text
     assert "查看技术载荷与语义哈希" not in app_javascript.text
     assert "const canReview = Boolean(item.actionable_for_current_user);" in app_javascript.text
@@ -277,7 +278,7 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
 
     service_worker = get(app, "/sw.js")
     assert service_worker.status_code == 200
-    assert "trading-shell-v67" in service_worker.text
+    assert "trading-shell-v68" in service_worker.text
     assert "self.skipWaiting()" in service_worker.text
     assert "self.clients.claim()" in service_worker.text
     assert "await fetch(event.request)" in service_worker.text

@@ -1485,6 +1485,7 @@ def create_app(
                 ),
                 "rationale": payload.rationale,
             },
+            deduplicate_active_manual_semantics=True,
             now=now,
         )
         current = queries().proposal_detail(identity.user_id, proposal_id)

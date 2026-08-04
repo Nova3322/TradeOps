@@ -945,11 +945,46 @@ def test_manual_api_is_idempotent_and_semantic_conflicts_are_explicit(
             assert first.json()["proposal_id"] == second.json()["proposal_id"]
             assert len(telegram.notifications()) == 2
 
-            payload["quantity"] = "0.2"
-            conflict = await client.post("/api/proposals/manual", json=payload)
+            same_trade = {
+                **payload,
+                "idempotency_key": "manual-api-2",
+                "rationale": "same frozen trade with different human commentary",
+            }
+            reused = await client.post("/api/proposals/manual", json=same_trade)
+            assert reused.status_code == 200
+            assert reused.json()["proposal_id"] == first.json()["proposal_id"]
+            assert len(telegram.notifications()) == 2
+
+            live_scope = await client.post(
+                "/api/proposals/manual",
+                json={**payload, "idempotency_key": "manual-api-live", "environment": "LIVE"},
+            )
+            assert live_scope.status_code == 200
+            assert live_scope.json()["proposal_id"] != first.json()["proposal_id"]
+            assert len(telegram.notifications()) == 4
+
+            conflict = await client.post(
+                "/api/proposals/manual", json={**payload, "quantity": "0.2"}
+            )
             assert conflict.status_code == 409
             assert conflict.json()["error"]["code"] == "IDEMPOTENCY_CONFLICT"
 
+            distinct = await client.post(
+                "/api/proposals/manual",
+                json={**payload, "idempotency_key": "manual-api-3", "quantity": "0.2"},
+            )
+            assert distinct.status_code == 200
+            assert distinct.json()["proposal_id"] != first.json()["proposal_id"]
+            assert len(telegram.notifications()) == 6
+
     asyncio.run(scenario())
     with database.session_factory() as session:
-        assert session.scalar(select(func.count()).select_from(Proposal)) == 1
+        assert session.scalar(select(func.count()).select_from(Proposal)) == 3
+        assert (
+            session.scalar(
+                select(func.count())
+                .select_from(AuditEvent)
+                .where(AuditEvent.event_type == "PROPOSAL_DUPLICATE_REUSED")
+            )
+            == 1
+        )
