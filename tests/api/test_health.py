@@ -112,8 +112,8 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
 
     assert response.status_code == 200
     assert "交易控制台" in response.text
-    assert "/assets/app.js?v=95" in response.text
-    assert "/assets/styles.css?v=42" in response.text
+    assert "/assets/app.js?v=96" in response.text
+    assert "/assets/styles.css?v=43" in response.text
     assert 'aria-label="交易控制台首页"' in response.text
     assert '<a href="/" data-link><span>⌂</span>今日</a>' in response.text
     assert 'id="mobile-nav-toggle"' in response.text
@@ -229,6 +229,12 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
     assert "这笔交易要做什么" in app_javascript.text
     assert "查看技术载荷与语义哈希" not in app_javascript.text
     assert "const canReview = Boolean(item.actionable_for_current_user);" in app_javascript.text
+    assert 'placeholder="BTCUSDT / acct-1"' not in app_javascript.text
+    assert 'placeholder="BTCUSDT / xyz:TSLA"' in app_javascript.text
+    assert "definition('账户', item.account_id)" not in app_javascript.text
+    assert "definition('账户', '默认生产账户')" in app_javascript.text
+    assert "a.reviewer_username || shortId(a.reviewer_id)" in app_javascript.text
+    assert 'data-label="提交时间"' in app_javascript.text
     assert "INITIAL_INTENT_ALREADY_EXISTS" in app_javascript.text
     assert "账户事实已经过期" in app_javascript.text
     assert "系统允许开多少" in app_javascript.text
@@ -287,6 +293,8 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
     assert "visibility: visible; transition-delay: 0s" in stylesheet.text
     assert ".simulation-panel" in stylesheet.text
     assert ".capital-status-missing" in stylesheet.text
+    assert ".proposal-table tr { display: block;" in stylesheet.text
+    assert '.proposal-table td::before { content: attr(data-label);' in stylesheet.text
     assert ".capital-route-grid" in stylesheet.text
     assert ".capital-trend-toggle" in stylesheet.text
     assert ".capital-blockers" in stylesheet.text
@@ -597,7 +605,7 @@ def test_proposal_review_projection_uses_frozen_resonance_and_plain_risk_reasons
           + "使用管理员默认配置。 Proposal only, pending human review.",
         );
         assert.match(rationale, /1h、4h、1d 同时突破/);
-        assert.match(rationale, /不会自动审核、授权或下单/);
+        assert.match(rationale, /仍需人工审核；不会自动授权或下单/);
         assert.doesNotMatch(rationale, /pending human review/);
 
         vm.runInContext(

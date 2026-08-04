@@ -326,6 +326,14 @@ class TradingQueries:
             elif status is not None:
                 statement = statement.where(Proposal.status == status)
             values = session.execute(statement).all()
+            proposer_names = {
+                item.user_id: item.username
+                for item in session.scalars(
+                    select(User).where(
+                        User.user_id.in_({proposal.proposer_id for proposal, _ in values})
+                    )
+                ).all()
+            }
             reviewed_proposal_ids = set(
                 session.scalars(select(Approval.proposal_id).where(Approval.reviewer_id == user_id))
             )
@@ -354,6 +362,7 @@ class TradingQueries:
                     continue
                 effective_status = _effective_proposal_status(proposal, current_time)
                 summary = self._proposal_summary(proposal, instrument)
+                summary["proposer_username"] = proposer_names.get(proposal.proposer_id)
                 summary["status"] = effective_status
                 summary["approval_count"] = int(approval_counts.get(proposal.proposal_id, 0))
                 summary["required_approvals"] = 2 if proposal.risk_tier == "HIGH" else 1
@@ -393,6 +402,16 @@ class TradingQueries:
                 .where(Approval.proposal_id == proposal_id)
                 .order_by(Approval.created_at)
             ).all()
+            proposal_users = {
+                item.user_id: item.username
+                for item in session.scalars(
+                    select(User).where(
+                        User.user_id.in_(
+                            {proposal.proposer_id, *(item.reviewer_id for item in approvals)}
+                        )
+                    )
+                ).all()
+            }
             risk = session.scalar(
                 select(RiskDecision)
                 .where(RiskDecision.proposal_id == proposal_id)
@@ -445,6 +464,7 @@ class TradingQueries:
                 .limit(1)
             )
             result["status"] = effective_status
+            result["proposer_username"] = proposal_users.get(proposal.proposer_id)
             result.update(
                 {
                     "frozen_payload": proposal.frozen_payload,
@@ -455,6 +475,7 @@ class TradingQueries:
                         {
                             "approval_id": str(item.approval_id),
                             "reviewer_id": str(item.reviewer_id),
+                            "reviewer_username": proposal_users.get(item.reviewer_id),
                             "decision": item.decision,
                             "reason": item.reason,
                             "created_at": _iso(item.created_at),
