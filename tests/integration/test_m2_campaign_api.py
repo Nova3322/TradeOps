@@ -180,6 +180,12 @@ async def run_shadow_campaign_flow(database: Database, telegram: MockTelegramGat
         assert duplicate.json()["intent_id"] == created.json()["intent_id"]
         campaign_id = created.json()["campaign_id"]
         opening_intent = created.json()["intent_id"]
+        campaign_list = await client.get("/api/campaigns")
+        listed_campaign = next(
+            item for item in campaign_list.json()["data"] if item["campaign_id"] == campaign_id
+        )
+        assert listed_campaign["symbol"] == "BTCUSDT"
+        assert listed_campaign["collateral_currency"] == "USDT"
         proposal_detail = await client.get(f"/api/proposals/{ids['proposal']}")
         assert proposal_detail.status_code == 200, proposal_detail.text
         entry = proposal_detail.json()["initial_entry"]
@@ -496,6 +502,12 @@ def test_exception_view_marks_active_facts_stale_but_ignores_closed_history(
     assert {"POSITION_STALE", "PROTECTION_STALE", "RECONCILIATION_STALE"} <= codes
     assert all(item["occurred_at"] for item in current_exceptions)
     assert all(item["last_checked_at"] == now.isoformat() for item in current_exceptions)
+    by_code = {item["code"]: item for item in current_exceptions}
+    assert by_code["POSITION_STALE"]["occurred_at"] == (stale_at + timedelta(minutes=5)).isoformat()
+    assert (
+        by_code["PROTECTION_STALE"]["occurred_at"] == (stale_at + timedelta(minutes=5)).isoformat()
+    )
+    assert by_code["RECONCILIATION_STALE"]["occurred_at"] == stale_at.isoformat()
 
     with database.session_factory.begin() as session:
         campaign = session.get(Campaign, opening.campaign_id)

@@ -208,7 +208,8 @@ const ENGLISH_EXACT = new Map(Object.entries({
   '这里只保留真正需要你独立判断的提案；批准不等于下单。':'Only proposals that require your independent judgment appear here. Approval does not place an order.',
   '查看全部提案':'View all proposals', '自己的提案、已经投过票、已到期或已结束的提案不会留在这里。':'Your own proposals, proposals you already reviewed, expired proposals, and completed proposals are excluded.',
   '每个交易任务覆盖一笔交易从授权、风险占用和下单意图，到成交、保护、减仓、对账与最终结果的完整生命周期。':'Each trade tracks the full lifecycle from authorization, risk reservation, and order intent through fills, protection, reductions, reconciliation, and final results.',
-  '建仓中 / 持仓中':'Opening / open', '运行范围':'Operating scope', '生产交易':'Production trading',
+  '交易任务记录':'Trade records', '建仓中 / 持仓中':'Opening / open', '运行范围':'Operating scope', '生产交易':'Production trading',
+  '标的 / 方向':'Instrument / direction', '账户 / 场所':'Account / venue', '当前目标':'Current target', '最终盈亏':'Final PnL',
   '提案通过审核和风险检查后，交易运维人员才能发起开仓。':'Trading operations can open a position only after proposal approval and risk checks pass.',
   '这里直接说明系统能否工作、哪些能力受限，以及是否需要处理。绿色表示当前证据正常；黄色表示能力受限；红色表示必须先处理；灰色表示当前没有监控对象。':'This page shows whether the trading system is operational, which capabilities are limited, and what needs attention. Green is healthy, yellow is limited, red requires action, and gray means there is nothing to monitor.',
   '交易管理可用，但突破榜单机会源受限':'Trading operations are available, but the breakout feed is limited',
@@ -350,6 +351,7 @@ const ENGLISH_EXACT = new Map(Object.entries({
 }));
 
 const ENGLISH_PATTERNS = [
+  [/^([0-9a-f]+…) · 查看详情$/i, '$1 · view details'],
   [/^(\d+) 个交易任务$/, '$1 trades'], [/^(\d+) 项阻断$/, '$1 blockers'], [/^(\d+) 项需要处理$/, '$1 issues require action'],
   [/^(\d+) 项阻断，查看详情$/, '$1 blockers; view details'],
   [/^(\d+) 项敞口不确定$/, '$1 exposure issues'], [/^(\d+) 项未一致$/, '$1 reconciliation issues'],
@@ -1955,8 +1957,8 @@ async function renderCampaignList() {
   const result = await api('/api/campaigns');
   const items = result.data.filter(item => item.environment === 'LIVE');
   main.innerHTML = `<section class="page"><header class="page-head"><div><p class="eyebrow">交易任务</p><h1>交易任务</h1><p class="lede">每个交易任务覆盖一笔交易从授权、风险占用和下单意图，到成交、保护、减仓、对账与最终结果的完整生命周期。</p></div><div class="toolbar"><a class="secondary" href="/campaigns/alerts" data-link>运行告警</a><a class="secondary" href="/proposals" data-link>查看提案</a></div></header>
-    <div class="stats"><div class="stat"><small>全部交易任务</small><b>${items.length}</b></div><div class="stat"><small>建仓中 / 持仓中</small><b>${items.filter(i => ['OPEN','OPENING'].includes(i.status)).length}</b></div><div class="stat"><small>结果未知</small><b>${items.filter(i => i.status === 'UNKNOWN').length}</b></div><div class="stat"><small>运行范围</small><b style="font-size:14px">生产交易</b></div></div>
-    ${items.length ? `<div class="table-wrap"><table><thead><tr><th>交易任务</th><th>账户范围</th><th>方向 / 目标</th><th>状态</th><th>盈亏</th><th>更新时间</th></tr></thead><tbody>${items.map(item => `<tr data-href="/campaigns/${item.campaign_id}"><td><b>${shortId(item.campaign_id)}</b><br><span class="subtle">提案 ${shortId(item.proposal_id)}</span></td><td>${escapeHtml(item.account_id)}<br><span class="subtle">${escapeHtml(item.venue)}</span></td><td class="${item.direction === 'LONG' ? 'direction-long' : 'direction-short'}">${escapeHtml(fmtDirection(item.direction))} · ${fmtNumber(item.current_target_quantity)}</td><td><b class="status-${escapeHtml(item.status)}">${escapeHtml(fmtStatus(item.status))}</b></td><td>${fmtNumber(item.final_pnl)}</td><td>${fmtDate(item.updated_at)}</td></tr>`).join('')}</tbody></table></div>` : `<section class="empty-state"><div><h2>当前没有交易任务</h2><p>提案通过审核和风险检查后，交易运维人员才能发起开仓。</p></div></section>`}</section>`;
+    <div class="stats"><div class="stat"><small>交易任务记录</small><b>${items.length}</b></div><div class="stat"><small>建仓中 / 持仓中</small><b>${items.filter(i => ['OPEN','OPENING'].includes(i.status)).length}</b></div><div class="stat"><small>结果未知</small><b>${items.filter(i => i.status === 'UNKNOWN').length}</b></div><div class="stat"><small>运行范围</small><b style="font-size:14px">生产交易</b></div></div>
+    ${items.length ? `<div class="table-wrap campaign-list-table"><table><thead><tr><th>标的 / 方向</th><th>账户 / 场所</th><th>当前目标</th><th>状态</th><th>最终盈亏</th><th>更新时间</th></tr></thead><tbody>${items.map(item => `<tr data-href="/campaigns/${item.campaign_id}"><td data-label="标的 / 方向"><b>${escapeHtml(item.symbol || '标的未配置')}</b><br><span class="${item.direction === 'LONG' ? 'direction-long' : 'direction-short'}">${escapeHtml(fmtDirection(item.direction))}</span><br><a class="row-link" href="/campaigns/${item.campaign_id}" data-link>${shortId(item.campaign_id)} · 查看详情</a></td><td data-label="账户 / 场所">${escapeHtml(item.account_id)}<br><span class="subtle">${escapeHtml(item.venue)}</span></td><td data-label="当前目标">${fmtNumber(item.current_target_quantity)}</td><td data-label="状态"><b class="status-${escapeHtml(item.status)}">${escapeHtml(fmtStatus(item.status))}</b></td><td data-label="最终盈亏">${fmtNumber(item.final_pnl)}${item.collateral_currency ? ` ${escapeHtml(item.collateral_currency)}` : ''}</td><td data-label="更新时间">${fmtDate(item.updated_at)}</td></tr>`).join('')}</tbody></table></div>` : `<section class="empty-state"><div><h2>当前没有交易任务</h2><p>提案通过审核和风险检查后，交易运维人员才能发起开仓。</p></div></section>`}</section>`;
   bindLinkedRows();
 }
 

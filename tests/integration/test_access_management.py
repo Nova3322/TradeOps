@@ -140,9 +140,7 @@ async def exercise_six_identity_permission_matrix(database: Database) -> None:
     service = TradingService(database)
     admin_id = service.bootstrap_admin("matrix-admin", now=datetime.now(UTC))
     app = access_app(database)
-    async with AsyncClient(
-        transport=ASGITransport(app=app), base_url="http://test"
-    ) as admin_http:
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as admin_http:
         await login(admin_http, "matrix-admin")
         member_ids: dict[str, str] = {}
         for username, roles in {
@@ -164,6 +162,7 @@ async def exercise_six_identity_permission_matrix(database: Database) -> None:
             "/api/proposal-defaults",
             "/api/proposals",
             "/api/campaigns",
+            "/api/campaign-exceptions",
             "/api/runtime/status",
             "/api/risk-controls",
             "/api/venues/binance/status",
@@ -193,6 +192,7 @@ async def exercise_six_identity_permission_matrix(database: Database) -> None:
                 "/api/opportunities",
                 "/api/proposals",
                 "/api/campaigns",
+                "/api/campaign-exceptions",
                 "/api/runtime/status",
                 "/api/risk-controls",
                 "/api/venues/binance/status",

@@ -355,12 +355,8 @@ class TradingQueries:
                 effective_status = _effective_proposal_status(proposal, current_time)
                 summary = self._proposal_summary(proposal, instrument)
                 summary["status"] = effective_status
-                summary["approval_count"] = int(
-                    approval_counts.get(proposal.proposal_id, 0)
-                )
-                summary["required_approvals"] = (
-                    2 if proposal.risk_tier == "HIGH" else 1
-                )
+                summary["approval_count"] = int(approval_counts.get(proposal.proposal_id, 0))
+                summary["required_approvals"] = 2 if proposal.risk_tier == "HIGH" else 1
                 campaign_id = campaign_by_proposal.get(proposal.proposal_id)
                 summary["campaign_id"] = None if campaign_id is None else str(campaign_id)
                 summary["actionable_for_current_user"] = bool(
@@ -1564,13 +1560,15 @@ class TradingQueries:
 
     def list_campaigns(self, user_id: UUID) -> list[dict[str, Any]]:
         with self.database.session_factory() as session:
-            values = session.scalars(
-                select(Campaign).order_by(Campaign.updated_at.desc(), Campaign.campaign_id)
+            values = session.execute(
+                select(Campaign, Instrument)
+                .outerjoin(Instrument, Instrument.instrument_id == Campaign.instrument_id)
+                .order_by(Campaign.updated_at.desc(), Campaign.campaign_id)
             ).all()
             return [
-                self._campaign_summary(item)
-                for item in values
-                if self.service.can_user(user_id, "view", item.account_id, item.venue)
+                self._campaign_summary(campaign, instrument)
+                for campaign, instrument in values
+                if self.service.can_user(user_id, "view", campaign.account_id, campaign.venue)
             ]
 
     def campaign_detail(self, user_id: UUID, campaign_id: UUID) -> dict[str, Any]:
@@ -1642,7 +1640,7 @@ class TradingQueries:
             )
             lease = session.get(SenderLease, scope)
             orders_by_intent = {item.order_intent_id: item for item in orders}
-            result = self._campaign_summary(campaign)
+            result = self._campaign_summary(campaign, instrument)
             result.update(
                 {
                     "instrument": None
@@ -1878,7 +1876,7 @@ class TradingQueries:
                             "POSITION_STALE",
                             "BLOCKING",
                             object_id=str(position["position_id"]),
-                            occurred_at=str(position["observed_at"]),
+                            occurred_at=(position_observed_at + max_fact_age).isoformat(),
                             details=[
                                 f"observed_at={position['observed_at']}",
                                 f"max_age_seconds={int(max_fact_age.total_seconds())}",
@@ -1909,7 +1907,7 @@ class TradingQueries:
                                 "PROTECTION_STALE",
                                 "BLOCKING",
                                 object_id=str(protection["protection_id"]),
-                                occurred_at=str(protection["observed_at"]),
+                                occurred_at=(protection_observed_at + max_fact_age).isoformat(),
                                 details=[
                                     f"observed_at={protection['observed_at']}",
                                     f"max_age_seconds={int(max_fact_age.total_seconds())}",
@@ -1939,18 +1937,28 @@ class TradingQueries:
                 )
             elif reconciliation is not None:
                 completed_at = datetime.fromisoformat(str(reconciliation["completed_at"]))
-                newer_facts: list[str] = []
+                newer_facts: list[tuple[str, datetime]] = []
                 if (
                     position is not None
                     and datetime.fromisoformat(str(position["observed_at"])) > completed_at
                 ):
-                    newer_facts.append("POSITION_FACT_NEWER")
+                    newer_facts.append(
+                        (
+                            "POSITION_FACT_NEWER",
+                            datetime.fromisoformat(str(position["observed_at"])),
+                        )
+                    )
                 if (
                     detail["intents"]
                     and datetime.fromisoformat(str(detail["intents"][-1]["updated_at"]))
                     > completed_at
                 ):
-                    newer_facts.append("ORDER_INTENT_NEWER")
+                    newer_facts.append(
+                        (
+                            "ORDER_INTENT_NEWER",
+                            datetime.fromisoformat(str(detail["intents"][-1]["updated_at"])),
+                        )
+                    )
                 if newer_facts:
                     exceptions.append(
                         self._exception(
@@ -1958,8 +1966,8 @@ class TradingQueries:
                             "RECONCILIATION_STALE",
                             "BLOCKING",
                             object_id=str(reconciliation["reconciliation_id"]),
-                            occurred_at=str(reconciliation["completed_at"]),
-                            details=newer_facts,
+                            occurred_at=min(value for _name, value in newer_facts).isoformat(),
+                            details=[name for name, _value in newer_facts],
                         )
                     )
         guidance = {
@@ -2261,7 +2269,9 @@ class TradingQueries:
         }
 
     @staticmethod
-    def _campaign_summary(campaign: Campaign) -> dict[str, Any]:
+    def _campaign_summary(
+        campaign: Campaign, instrument: Instrument | None = None
+    ) -> dict[str, Any]:
         return {
             "campaign_id": str(campaign.campaign_id),
             "proposal_id": str(campaign.proposal_id),
@@ -2270,6 +2280,8 @@ class TradingQueries:
             "venue": campaign.venue,
             "environment": campaign.environment,
             "instrument_id": str(campaign.instrument_id),
+            "symbol": None if instrument is None else instrument.symbol,
+            "collateral_currency": (None if instrument is None else instrument.collateral_currency),
             "direction": campaign.direction,
             "status": campaign.status,
             "current_target_quantity": str(campaign.current_target_quantity),
