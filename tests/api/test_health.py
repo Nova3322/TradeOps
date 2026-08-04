@@ -112,7 +112,7 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
 
     assert response.status_code == 200
     assert "交易控制台" in response.text
-    assert "/assets/app.js?v=59" in response.text
+    assert "/assets/app.js?v=60" in response.text
     assert "/assets/styles.css?v=29" in response.text
     assert '<a href="/" data-link><span>⌂</span>今日</a>' in response.text
     assert 'id="mobile-nav-toggle"' in response.text
@@ -176,6 +176,9 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
     assert "DEGRADED:'数据不完整'" in app_javascript.text
     assert "该合约尚未进入可交易合约目录" not in app_javascript.text
     assert "共振周期" in app_javascript.text
+    assert "proposalResonanceTimeframes(details, candidate)" in app_javascript.text
+    assert "formatRiskActionReason" in app_javascript.text
+    assert "当前无需恢复" in app_javascript.text
     assert 'name="timeframes" type="checkbox"' in app_javascript.text
     assert "function updateManualProposalPreview" in app_javascript.text
     assert "只创建提案，不直接下单" in app_javascript.text  # noqa: RUF001
@@ -247,7 +250,7 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
 
     service_worker = get(app, "/sw.js")
     assert service_worker.status_code == 200
-    assert "trading-shell-v60" in service_worker.text
+    assert "trading-shell-v61" in service_worker.text
     assert "self.skipWaiting()" in service_worker.text
     assert "self.clients.claim()" in service_worker.text
     assert "await fetch(event.request)" in service_worker.text
@@ -492,6 +495,77 @@ def test_opportunity_groups_keep_multiple_timeframes_and_direction_separate() ->
         assert.deepEqual(genuinelyIncomplete.pending_refresh_timeframes, []);
         assert.equal(genuinelyIncomplete.last_complete_at, null);
         assert.equal(context.viewState(genuinelyIncomplete), "WAITING");
+        """
+    )
+    completed = subprocess.run(  # noqa: S603
+        [node, "--input-type=module", "-e", script, str(app_path)],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stderr
+
+
+def test_proposal_review_projection_uses_frozen_resonance_and_plain_risk_reasons() -> None:
+    node = shutil.which("node")
+    assert node is not None
+    app_path = Path(__file__).parents[2] / "src" / "trading_control_plane" / "web" / "app.js"
+    script = textwrap.dedent(
+        r"""
+        import assert from "node:assert/strict";
+        import fs from "node:fs";
+        import vm from "node:vm";
+
+        const source = fs.readFileSync(process.argv[1], "utf8");
+        const extract = (start, end) => {
+          const from = source.indexOf(start);
+          const to = source.indexOf(end, from);
+          assert.notEqual(from, -1);
+          assert.notEqual(to, -1);
+          return source.slice(from, to);
+        };
+        const context = vm.createContext({});
+        vm.runInContext(
+          extract("function proposalResonanceTimeframes", "\nasync function renderProposalDetail")
+          + "; this.timeframes = proposalResonanceTimeframes;"
+          + " this.rationale = formatProposalRationale;",
+          context,
+        );
+        assert.deepEqual(
+          JSON.parse(JSON.stringify(context.timeframes(
+            {resonance_timeframes:["1h", "4h", "1d"]},
+            {timeframe:"1h"},
+          ))),
+          ["1h", "4h", "1d"],
+        );
+        assert.deepEqual(
+          JSON.parse(JSON.stringify(context.timeframes({}, {timeframe:"4h"}))),
+          ["4h"],
+        );
+        const rationale = context.rationale(
+          "Perptape current exact-instrument resonance across 1h, 4h, 1d; "
+          + "使用管理员默认配置。 Proposal only, pending human review.",
+        );
+        assert.match(rationale, /1h、4h、1d 同时突破/);
+        assert.match(rationale, /不会自动审核、授权或下单/);
+        assert.doesNotMatch(rationale, /pending human review/);
+
+        vm.runInContext(
+          extract("function formatRiskActionReason", "\nfunction renderRiskControlPanel")
+          + "; this.actionReason = formatRiskActionReason;",
+          context,
+        );
+        const normal = context.actionReason("SYSTEM_ALREADY_NORMAL", {blockers:[]});
+        assert.equal(normal, "无需操作\uFF1A风险政策已经正常开放");
+        assert.doesNotMatch(normal, /SYSTEM_ALREADY_NORMAL/);
+        assert.equal(
+          context.actionReason("REALTIME_CONDITIONS_BLOCKED", {blockers:["a", "b"]}),
+          "实时安全条件未全部通过\uFF082 项\uFF09",
+        );
+        assert.equal(
+          context.actionReason("NO_REVIEWABLE_REQUEST", {blockers:[]}),
+          "当前没有可由你独立审核的恢复申请",
+        );
         """
     )
     completed = subprocess.run(  # noqa: S603
