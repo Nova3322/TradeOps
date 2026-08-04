@@ -253,6 +253,7 @@ def _domain_status(code: str) -> int:
         "HYPERLIQUID_LIVE_NOT_CONFIGURED",
         "HYPERLIQUID_LIVE_UNAVAILABLE",
         "HYPERLIQUID_LIVE_OUTCOME_UNKNOWN",
+        "DEFAULT_ACCOUNT_NOT_CONFIGURED",
     }:
         return status.HTTP_503_SERVICE_UNAVAILABLE
     if code in {
@@ -737,7 +738,12 @@ def create_app(
             if venue == "BINANCE"
             else resolved_settings.runtime_hyperliquid_account_id
         )
-        if expected is not None and account_id != expected:
+        if expected is None:
+            raise DomainRejected(
+                "DEFAULT_ACCOUNT_NOT_CONFIGURED",
+                f"{venue} production facts require a configured default account",
+            )
+        if account_id != expected:
             raise DomainRejected(
                 "DEFAULT_ACCOUNT_REQUIRED",
                 f"{venue} production facts are restricted to the configured default account",

@@ -115,6 +115,14 @@ const ENGLISH_EXACT = new Map(Object.entries({
   '服务不可用':'Unavailable', '当前无运行中任务':'No active trades', '当前无监控对象':'Nothing to monitor',
   '暂无对账对象':'Nothing to reconcile', '监控正常':'Monitoring normally', '对账一致':'Reconciled',
   '外部数据连接':'External connections', '生产数据与资金连接':'Production data and capital connections', '数据源':'Source', '数据可用':'Data available',
+  '默认账户未配置':'Default account not configured', '账户范围缺失，未读取账户数据':'Account scope is missing; no account data was read', '事实新鲜度':'Fact freshness',
+  '已配置默认账户':'Default account configured', '未配置默认账户':'Default account not configured',
+  '不会回退到示例账户或猜测范围':'No fallback to a sample or guessed account', '未读取账户数据':'No account data was read',
+  '请由系统管理员配置唯一默认生产账户。配置完成前，余额、仓位、委托、成交和资金费全部保持不可用，不会使用旧的 acct-1 或其他示例账户代替。':'Ask a system administrator to configure the one default production account. Until then, balances, positions, orders, fills, and funding remain unavailable; the console will not substitute acct-1 or another sample account.',
+  '当前没有已保存的资金费记录。':'No saved funding records are available.',
+  '当前没有已保存的成交记录。':'No saved fills are available.',
+  '当前没有已保存的成交；这不代表交易所没有历史成交。':'No fills are saved yet; this does not mean the exchange has no fill history.',
+  '当前没有已保存的资金费；这不代表交易所没有历史资金费。':'No funding is saved yet; this does not mean the exchange has no funding history.',
   '读取状态':'Read status', '运行范围':'Operating scope', '写入能力':'Write capability', '实时只读数据':'Real-time read-only data', '查看账户数据 →':'View account data →',
   '查看机会 →':'View opportunities →', '当前阻断':'Current blockers', '需要处理的问题类型':'Issues requiring action',
   '等待资金库绑定':'Waiting for vault binding', '生产资金':'Production capital', '只读网关已连接':'Read-only gateway connected',
@@ -478,6 +486,7 @@ const riskLabels = {LOW:'低风险',MEDIUM:'中风险',HIGH:'高风险'};
 const intentKindLabels = {INITIAL:'初仓',ADD:'加仓',REDUCE:'减仓',EXIT:'退出'};
 const directionLabels = {LONG:'做多',SHORT:'做空'};
 const sideLabels = {BUY:'买入',SELL:'卖出'};
+const sideEnglishLabels = {BUY:'Buy',SELL:'Sell'};
 const capitalDirectionLabels = {VAULT_TO_VENUE:'资金库转入交易所',VENUE_TO_VAULT:'交易所转回资金库'};
 const capitalPurposeLabels = {AUTO_PROFIT_SWEEP:'自动归集利润',AUTO_OPERATING_REFILL:'自动补充运营资金',MANUAL:'人工调配资金'};
 const capitalTransportLabels = {MOCK:'模拟执行',NOTILT_UNSIGNED_HANDOFF:'NoTilt 未签名交接'};
@@ -498,11 +507,41 @@ const connectionCategoryLabels = {
   UPSTREAM_RESPONSE_INVALID:'上游响应无效',
   READ_ONLY_PROBE_FAILED:'只读检查失败',
 };
+const connectionCategoryEnglishLabels = {
+  READ_ONLY_CONNECTED:'Read-only connected',
+  READ_ONLY_CONNECTED_HISTORY_INCOMPLETE:'Read-only connected; history incomplete',
+  CREDENTIALS_NOT_LOADED:'Startup configuration not loaded',
+  CONFIG_INCOMPLETE:'Production scope incomplete',
+  EXPLICITLY_DISABLED:'Read-only connection disabled',
+  NOT_YET_VERIFIED:'Waiting for the first read-only probe',
+  PROBE_SKIPPED:'Latest probe skipped',
+  AUTH_OR_PERMISSION_FAILED:'Read-only authentication or permission failed',
+  UPSTREAM_RATE_LIMITED:'Upstream read-only API rate-limited',
+  NETWORK_OR_UPSTREAM_FAILED:'Network or upstream unavailable',
+  UPSTREAM_RESPONSE_INVALID:'Invalid upstream response',
+  READ_ONLY_PROBE_FAILED:'Read-only probe failed',
+};
+const connectionEnglishCopy = {
+  READ_ONLY_CONNECTED:['The latest side-effect-free read-only probe succeeded.','No action is required. Independent gates still block writes, orders, signing, and capital actions.'],
+  READ_ONLY_CONNECTED_HISTORY_INCOMPLETE:['Current balances, positions, and orders are connected; historical fills or funding are incomplete.','Wait for the upstream history source to recover. New risk remains blocked.'],
+  CREDENTIALS_NOT_LOADED:['This process did not load the required local credentials or public account identity.','Check the protected startup configuration source. Never paste credentials into the page or logs.'],
+  CONFIG_INCOMPLETE:['Credentials or public identity are loaded, but the production account mapping or network scope is incomplete.','Complete the non-sensitive account mapping and authorized production scope, then retry.'],
+  EXPLICITLY_DISABLED:['The process configuration explicitly disables this read-only connection.','Enable only the corresponding read-only setting and restart the reader.'],
+  NOT_YET_VERIFIED:['Configuration is loaded, but this process has not completed a verifiable read-only probe.','Start read-only synchronization and wait for one bounded probe.'],
+  PROBE_SKIPPED:['The latest read-only probe was skipped; an older result is not treated as current.','Check the reader setting and target mapping, then run read-only synchronization again.'],
+  AUTH_OR_PERMISSION_FAILED:['Read-only authentication or account permission validation failed.','Confirm the credential belongs to the target production account and has only the required read permissions.'],
+  UPSTREAM_RATE_LIMITED:['The upstream read-only API is rate-limiting requests; no new account facts were accepted.','Wait for the bounded automatic retry. If failures persist, check the upstream quota.'],
+  NETWORK_OR_UPSTREAM_FAILED:['The official read-only API or local read-only gateway is currently unreachable.','Check the network and upstream status, then run one read-only retry.'],
+  UPSTREAM_RESPONSE_INVALID:['The upstream response failed strict validation and was not accepted.','Check the upstream API version and account type, then retry.'],
+  READ_ONLY_PROBE_FAILED:['The latest read-only probe failed; the data is not marked available.','Inspect the non-sensitive error category and rerun the read-only probe.'],
+};
 const venueModeLabels = {USER_DATA_READ_ONLY:'账户数据只读',INFO_READ_ONLY:'账户数据只读',READ_ONLY:'只读'};
 const accountModeLabels = {PORTFOLIO_MARGIN:'统一账户',MAIN_ACCOUNT:'主账户',SUBACCOUNT:'子账户'};
 const fmtIntentKind = (value) => intentKindLabels[value] || value || '未知意图';
 const fmtDirection = (value) => directionLabels[value] || value || '未知方向';
-const fmtSide = (value) => sideLabels[value] || value || '未知方向';
+const fmtSide = (value) => currentLanguage === 'en'
+  ? sideEnglishLabels[value] || value || 'Unknown side'
+  : sideLabels[value] || value || '未知方向';
 const fmtEnvironment = (value, withCode = false) => {
   void value;
   void withCode;
@@ -510,7 +549,15 @@ const fmtEnvironment = (value, withCode = false) => {
 };
 const fmtRole = (value) => roleLabels[value] || value || '未分配角色';
 const fmtReadiness = (value) => readinessLabels[value] || fmtStatus(value);
-const fmtConnectionCategory = (value) => connectionCategoryLabels[value] || value || '尚未验证';
+const fmtConnectionCategory = (value) => currentLanguage === 'en'
+  ? connectionCategoryEnglishLabels[value] || value || 'Not verified'
+  : connectionCategoryLabels[value] || value || '尚未验证';
+const fmtConnectionReason = (state) => currentLanguage === 'en'
+  ? connectionEnglishCopy[state?.category]?.[0] || 'No verified connection reason is available.'
+  : fmtOperationalCopy(state?.reason);
+const fmtConnectionNextAction = (state) => currentLanguage === 'en'
+  ? connectionEnglishCopy[state?.category]?.[1] || 'Ask a system administrator to inspect the read-only connection.'
+  : fmtOperationalCopy(state?.next_action);
 const fmtOperationalCopy = (value) => String(value ?? '—').replaceAll(';', '；').replaceAll(',', '，');
 const fmtCapitalDirection = (value) => capitalDirectionLabels[value] || value || '未知方向';
 const fmtCapitalPurpose = (value) => capitalPurposeLabels[value] || value || '未说明用途';
@@ -2102,11 +2149,14 @@ async function renderSystemStatus() {
     const categoryLabel = fmtConnectionCategory(state.category);
     const errorEvidence = state.error_code ? `<details class="venue-technical-detail"><summary>技术分类</summary><code translate="no">${escapeHtml(state.error_code)}</code></details>` : '';
     const probeEvidence = [
-      `最近探针：${fmtDate(state.checked_at)}`,
-      state.last_success_at ? `最近成功：${fmtDate(state.last_success_at)}` : '尚无成功记录',
-      state.retry_at ? `下次自动重试：${fmtDate(state.retry_at)}` : null,
+      `${currentLanguage === 'en' ? 'Latest probe: ' : '最近探针：'}${fmtDate(state.checked_at)}`,
+      state.last_success_at ? `${currentLanguage === 'en' ? 'Latest success: ' : '最近成功：'}${fmtDate(state.last_success_at)}` : (currentLanguage === 'en' ? 'No successful probe yet' : '尚无成功记录'),
+      state.retry_at ? `${currentLanguage === 'en' ? 'Next automatic retry: ' : '下次自动重试：'}${fmtDate(state.retry_at)}` : null,
     ].filter(Boolean).join(' · ');
-    return `<tr><td data-label="数据源"><b>${label[0]}</b><br><span class="subtle">${escapeHtml(categoryLabel)}</span>${errorEvidence}</td><td data-label="读取状态与处理建议"><span class="status-pill ${state.available ? 'status-APPROVED' : ''}">${state.available ? '只读已连接' : escapeHtml(categoryLabel)}</span><br><span class="subtle">${escapeHtml(fmtOperationalCopy(state.reason))}</span><br><span class="subtle">${escapeHtml(probeEvidence)}</span><br><span class="subtle">负责：${escapeHtml(state.owner_role)} · 下一步：${escapeHtml(fmtOperationalCopy(state.next_action))}</span></td><td data-label="运行范围">${label[1]}</td><td data-label="可用能力">${escapeHtml(capability)}</td><td data-label="下一步">${action}</td></tr>`;
+    const ownership = currentLanguage === 'en'
+      ? `Owner: ${translateEnglishText(state.owner_role)} · Next: ${fmtConnectionNextAction(state)}`
+      : `负责：${state.owner_role} · 下一步：${fmtConnectionNextAction(state)}`;
+    return `<tr><td data-label="数据源"><b>${label[0]}</b><br><span class="subtle">${escapeHtml(categoryLabel)}</span>${errorEvidence}</td><td data-label="读取状态与处理建议"><span class="status-pill ${state.available ? 'status-APPROVED' : ''}">${state.available ? (currentLanguage === 'en' ? 'Read-only connected' : '只读已连接') : escapeHtml(categoryLabel)}</span><br><span class="subtle">${escapeHtml(fmtConnectionReason(state))}</span><br><span class="subtle">${escapeHtml(probeEvidence)}</span><br><span class="subtle">${escapeHtml(ownership)}</span></td><td data-label="运行范围">${label[1]}</td><td data-label="可用能力">${escapeHtml(capability)}</td><td data-label="下一步">${action}</td></tr>`;
   }).join('');
   const availableSources = Object.values(connections).filter(item => item.available).length;
   const executionVerdictTitle = !workersReady
@@ -2600,38 +2650,45 @@ async function renderVenueFacts() {
     api(`/api/venues/${endpoint}/status`),
     api('/api/runtime/status').catch(error => error.status === 403 ? null : Promise.reject(error)),
   ]);
-  const accountId = status.default_account_id || 'acct-1';
-  const response = await api(`/api/venues/${endpoint}/facts?account_id=${encodeURIComponent(accountId)}`);
-  const facts = response.data;
+  const accountId = status.default_account_id;
+  const facts = accountId
+    ? (await api(`/api/venues/${endpoint}/facts?account_id=${encodeURIComponent(accountId)}`)).data
+    : null;
   const connection = runtime?.data?.connections?.[venue] || null;
-  const connected = Boolean(connection?.available);
-  const connectionLabel = fmtConnectionCategory(connection?.category);
+  const connected = Boolean(accountId && connection?.available);
+  const connectionLabel = accountId ? fmtConnectionCategory(connection?.category) : '默认账户未配置';
   const historyIncomplete = connection?.category === 'READ_ONLY_CONNECTED_HISTORY_INCOMPLETE';
   const connectionEvidence = connection?.error_code
     ? `<details class="venue-technical-detail"><summary>查看技术分类</summary><code translate="no">${escapeHtml(connection.error_code)}</code></details>`
     : '';
-  const connectionReason = connection
-    ? `${fmtOperationalCopy(connection.reason)} 负责：${connection.owner_role}；下一步：${fmtOperationalCopy(connection.next_action)}`
-    : '当前身份无法读取统一连接探针；页面仅展示已保存账户事实，不能据此声称实时已连接。';
+  const connectionReason = !accountId
+    ? (currentLanguage === 'en' ? 'No unique production account is configured, so no account facts were read. Owner: system administrator. Next: configure the default production account and retry.' : '没有配置唯一生产账户，系统没有读取任何账户事实。负责：系统管理员；下一步：配置该交易所的默认生产账户后重试。')
+    : connection
+    ? (currentLanguage === 'en' ? `${fmtConnectionReason(connection)} Owner: ${translateEnglishText(connection.owner_role)}. Next: ${fmtConnectionNextAction(connection)}` : `${fmtConnectionReason(connection)} 负责：${connection.owner_role}；下一步：${fmtConnectionNextAction(connection)}`)
+    : (currentLanguage === 'en' ? 'This identity cannot read the unified connection probe. The page shows saved facts only and does not claim a live connection.' : '当前身份无法读取统一连接探针；页面仅展示已保存账户事实，不能据此声称实时已连接。');
   const connectionProbeEvidence = connection
     ? [
-        `最近探针：${fmtDate(connection.checked_at)}`,
-        connection.last_success_at ? `最近成功：${fmtDate(connection.last_success_at)}` : '尚无成功记录',
-        connection.retry_at ? `下次自动重试：${fmtDate(connection.retry_at)}` : null,
-        Number(connection.consecutive_failures || 0) > 0 ? `连续失败：${Number(connection.consecutive_failures)} 次` : null,
+        `${currentLanguage === 'en' ? 'Latest probe: ' : '最近探针：'}${fmtDate(connection.checked_at)}`,
+        connection.last_success_at ? `${currentLanguage === 'en' ? 'Latest success: ' : '最近成功：'}${fmtDate(connection.last_success_at)}` : (currentLanguage === 'en' ? 'No successful probe yet' : '尚无成功记录'),
+        connection.retry_at ? `${currentLanguage === 'en' ? 'Next automatic retry: ' : '下次自动重试：'}${fmtDate(connection.retry_at)}` : null,
+        Number(connection.consecutive_failures || 0) > 0 ? `${currentLanguage === 'en' ? 'Consecutive failures: ' : '连续失败：'}${Number(connection.consecutive_failures)}${currentLanguage === 'en' ? '' : ' 次'}` : null,
       ].filter(Boolean).join(' · ')
-    : '当前身份无法读取探针时间';
-  const lastSync = latestVenueObservation(facts);
+    : (currentLanguage === 'en' ? 'Probe time is unavailable for this identity' : '当前身份无法读取探针时间');
+  const lastSync = facts ? latestVenueObservation(facts) : null;
   const snapshotMode = !connected && Boolean(lastSync);
   const hip3Dexes = Array.isArray(status.hip3_dexes) ? status.hip3_dexes : [];
-  const venueDetail = venue === 'BINANCE'
-    ? (accountModeLabels[status.account_mode] || '账户模式未知')
-    : `核心市场${status.hip3_available ? ` + HIP-3${hip3Dexes.length ? `（${hip3Dexes.join('、')}）` : ''}` : ''}`;
+  const venueDetail = currentLanguage === 'en'
+    ? venue === 'BINANCE'
+      ? ({PORTFOLIO_MARGIN:'Unified account',MAIN_ACCOUNT:'Main account',SUBACCOUNT:'Subaccount'}[status.account_mode] || 'Unknown account mode')
+      : `Core markets${status.hip3_available ? ` + HIP-3${hip3Dexes.length ? ` (${hip3Dexes.join(', ')})` : ''}` : ''}`
+    : venue === 'BINANCE'
+      ? (accountModeLabels[status.account_mode] || '账户模式未知')
+      : `核心市场${status.hip3_available ? ` + HIP-3${hip3Dexes.length ? `（${hip3Dexes.join('、')}）` : ''}` : ''}`;
   const executionDetail = status.execution_backend === 'FREQTRADE'
     ? status.worker_configured
-      ? '执行由 Freqtrade worker 负责；本页不能下单'
-      : '执行底座为 Freqtrade；控制面尚未接入 worker，本页不能下单'
-    : '旧直连执行已隔离于当前只读页面';
+      ? (currentLanguage === 'en' ? 'Execution is handled by Freqtrade workers; this page cannot place orders' : '执行由 Freqtrade worker 负责；本页不能下单')
+      : (currentLanguage === 'en' ? 'Freqtrade is the execution backend, but no worker is connected; this page cannot place orders' : '执行底座为 Freqtrade；控制面尚未接入 worker，本页不能下单')
+    : (currentLanguage === 'en' ? 'Legacy direct execution is isolated from this read-only page' : '旧直连执行已隔离于当前只读页面');
   const syncInterval = Number(status.automatic_sync_interval_seconds || 0);
   const automaticSyncCopyLocalized = status.automatic_sync_enabled && connected
     ? historyIncomplete
@@ -2651,11 +2708,11 @@ async function renderVenueFacts() {
     : automaticSyncCopyLocalized;
   main.innerHTML = `<section class="page venue-facts-page"><header class="page-head"><div><p class="eyebrow">生产账户 · 自动读取</p><h1>交易账户</h1><p class="lede">统一查看币安和链上永续的余额、当前仓位、当前委托、最近成交与资金费。系统按账户自动覆盖全部活跃标的，不需要逐个输入币对。</p></div><button class="secondary" data-refresh>刷新页面</button></header>
     <nav class="venue-switch" aria-label="选择交易所"><a class="${venue === 'BINANCE' ? 'active' : ''}" href="/venues?venue=BINANCE" data-link>Binance</a><a class="${venue === 'HYPERLIQUID' ? 'active' : ''}" href="/venues?venue=HYPERLIQUID" data-link>Hyperliquid</a></nav>
-    <div class="stats venue-status-stats"><div class="stat"><small>连接状态</small><b class="${connected ? 'direction-long' : 'warning-text'}">${escapeHtml(connectionLabel)}</b><span>${historyIncomplete ? '当前账户事实可用；历史记录待补全' : connected ? '最近只读检查成功' : '尚无可用连接结论'}</span></div><div class="stat"><small>运行模式</small><b>生产账户 · 只读</b><span>${escapeHtml(venueDetail)} · ${escapeHtml(executionDetail)}</span></div><div class="stat"><small>交易账户</small><b>默认账户</b><span>${escapeHtml(venue === 'BINANCE' ? '币安' : 'Hyperliquid')} · 单账户模式</span></div><div class="stat"><small>${snapshotMode ? '最后快照' : '事实新鲜度'}</small><b>${fmtDate(lastSync)}</b><span>${lastSync ? snapshotMode ? '连接受限；以下数据不是实时事实' : '最近保存时间；连接探针另行校验' : '尚无已保存事实'}</span></div></div>
+    <div class="stats venue-status-stats"><div class="stat"><small>连接状态</small><b class="${connected ? 'direction-long' : 'warning-text'}">${escapeHtml(connectionLabel)}</b><span>${currentLanguage === 'en' ? (!accountId ? 'Account scope is missing; no account data was read' : historyIncomplete ? 'Current account facts are available; history is incomplete' : connected ? 'The latest read-only probe succeeded' : 'No verified connection conclusion') : (!accountId ? '账户范围缺失，未读取账户数据' : historyIncomplete ? '当前账户事实可用；历史记录待补全' : connected ? '最近只读检查成功' : '尚无可用连接结论')}</span></div><div class="stat"><small>运行模式</small><b>${currentLanguage === 'en' ? 'Production account · read-only' : '生产账户 · 只读'}</b><span>${escapeHtml(venueDetail)} · ${escapeHtml(executionDetail)}</span></div><div class="stat"><small>交易账户</small><b>${accountId ? '已配置默认账户' : '未配置默认账户'}</b><span>${accountId ? `${escapeHtml(venue === 'BINANCE' ? (currentLanguage === 'en' ? 'Binance' : '币安') : 'Hyperliquid')} · ${currentLanguage === 'en' ? 'Bound production account · Single-account mode' : '生产账户已绑定 · 单账户模式'}` : '不会回退到示例账户或猜测范围'}</span></div><div class="stat"><small>${snapshotMode ? '最后快照' : '事实新鲜度'}</small><b>${fmtDate(lastSync)}</b><span>${currentLanguage === 'en' ? (lastSync ? snapshotMode ? 'Connection restricted; the data below is not live' : 'Latest saved facts; connection probes are verified separately' : 'No saved account facts') : (lastSync ? snapshotMode ? '连接受限；以下数据不是实时事实' : '最近保存时间；连接探针另行校验' : '尚无已保存事实')}</span></div></div>
     <article class="account-sync-note ${connected ? 'is-active' : ''}"><span class="status-dot"></span><div><b>${escapeHtml(connectionLabel)}</b><p>${escapeHtml(connectionReason)}</p><span class="system-health-meta">${escapeHtml(connectionProbeEvidence)}</span>${connectionEvidence}</div></article>
     <article class="account-sync-note ${status.automatic_sync_enabled && connected ? 'is-active' : ''}"><span class="status-dot"></span><div><b>${status.automatic_sync_enabled && connected ? '账户数据自动同步' : status.automatic_sync_enabled ? '自动同步等待连接恢复' : '账户自动更新尚未启用'}</b><p>${escapeHtml(automaticSyncCopy)}</p></div></article>
     ${snapshotMode ? `<article class="danger-note venue-snapshot-warning"><b>当前连接不可用，以下仅为最后一次保存快照</b><p>这些余额、仓位、订单与成交不能作为实时交易依据。恢复只读连接并完成新一轮同步后，页面才会重新标记为当前事实。</p></article>` : ''}
-    ${venueFactSections(facts, {snapshotMode, historyIncomplete})}
+    ${accountId ? venueFactSections(facts, {snapshotMode, historyIncomplete}) : '<article class="danger-note venue-account-blocker"><b>未读取账户数据</b><p>请由系统管理员配置唯一默认生产账户。配置完成前，余额、仓位、委托、成交和资金费全部保持不可用，不会使用旧的 acct-1 或其他示例账户代替。</p></article>'}
   </section>`;
   document.querySelector('[data-refresh]')?.addEventListener('click', route);
 }
@@ -2664,12 +2721,12 @@ function venueFactSections(facts, {snapshotMode = false, historyIncomplete = fal
   const positionRows = facts.positions.filter(item => Number(item.quantity) !== 0);
   const activeOrderRows = facts.orders.filter(item => !['FILLED','CANCELLED','REJECTED','EXPIRED'].includes(item.status));
   const historicalOrderRows = facts.orders.filter(item => ['FILLED','CANCELLED','REJECTED','EXPIRED'].includes(item.status));
-  const positions = positionRows.map(item => `<tr><td>${escapeHtml(item.symbol)}</td><td>${fmtNumber(item.quantity)} @ ${fmtNumber(item.average_entry_price)}</td><td>${fmtNumber(item.mark_price)}</td><td>${escapeHtml(snapshotMode ? '历史快照' : factStatusLabel(item.fact_status))}</td><td>${item.protection ? `${escapeHtml(fmtStatus(item.protection.status))} · ${item.protection.fully_covered ? '足额' : '不足'}` : '无保护数据'}</td><td>${fmtDate(item.observed_at)}</td></tr>`).join('');
-  const renderOrderRows = items => items.map(item => `<tr><td>${escapeHtml(item.venue_order_id)}</td><td>${escapeHtml(item.symbol)}</td><td>${escapeHtml(fmtStatus(item.status))}</td><td>${fmtNumber(item.filled_quantity)} / ${fmtNumber(item.ordered_quantity)}</td><td>${item.intent_id ? shortId(item.intent_id) : '外部未关联'}</td><td>${fmtDate(item.observed_at)}</td></tr>`).join('');
+  const positions = positionRows.map(item => `<tr><td data-label="标的">${escapeHtml(item.symbol)}</td><td data-label="数量 / 入场">${fmtNumber(item.quantity)} @ ${fmtNumber(item.average_entry_price)}</td><td data-label="标记价">${fmtNumber(item.mark_price)}</td><td data-label="数据状态">${escapeHtml(snapshotMode ? '历史快照' : factStatusLabel(item.fact_status))}</td><td data-label="保护">${item.protection ? `${escapeHtml(fmtStatus(item.protection.status))} · ${item.protection.fully_covered ? '足额' : '不足'}` : '无保护数据'}</td><td data-label="更新时间">${fmtDate(item.observed_at)}</td></tr>`).join('');
+  const renderOrderRows = items => items.map(item => `<tr><td data-label="交易所订单">${escapeHtml(item.venue_order_id)}</td><td data-label="标的">${escapeHtml(item.symbol)}</td><td data-label="状态">${escapeHtml(fmtStatus(item.status))}</td><td data-label="成交 / 委托">${fmtNumber(item.filled_quantity)} / ${fmtNumber(item.ordered_quantity)}</td><td data-label="关联操作">${item.intent_id ? shortId(item.intent_id) : '外部未关联'}</td><td data-label="更新时间">${fmtDate(item.observed_at)}</td></tr>`).join('');
   const orders = renderOrderRows(activeOrderRows);
   const orderHistory = renderOrderRows(historicalOrderRows);
-  const fills = facts.fills.map(item => `<tr><td>${escapeHtml(item.venue_fill_id)}</td><td>${escapeHtml(item.symbol)}</td><td>${escapeHtml(fmtSide(item.side))} ${fmtNumber(item.quantity)}</td><td>${fmtNumber(item.price)}</td><td>${fmtNumber(item.fee)} ${escapeHtml(item.fee_currency)}</td><td>${fmtDate(item.executed_at)}</td></tr>`).join('');
-  const funding = facts.funding.map(item => `<tr><td>${escapeHtml(item.venue_payment_id)}</td><td>${escapeHtml(item.symbol)}</td><td>${fmtNumber(item.amount)} ${escapeHtml(item.currency)}</td><td>${fmtDate(item.paid_at)}</td></tr>`).join('');
+  const fills = facts.fills.map(item => `<tr><td data-label="成交编号">${escapeHtml(item.venue_fill_id)}</td><td data-label="标的">${escapeHtml(item.symbol)}</td><td data-label="方向 / 数量">${escapeHtml(fmtSide(item.side))} ${fmtNumber(item.quantity)}</td><td data-label="价格">${fmtNumber(item.price)}</td><td data-label="手续费">${fmtNumber(item.fee)} ${escapeHtml(item.fee_currency)}</td><td data-label="成交时间">${fmtDate(item.executed_at)}</td></tr>`).join('');
+  const funding = facts.funding.map(item => `<tr><td data-label="支付编号">${escapeHtml(item.venue_payment_id)}</td><td data-label="标的">${escapeHtml(item.symbol)}</td><td data-label="金额">${fmtNumber(item.amount)} ${escapeHtml(item.currency)}</td><td data-label="支付时间">${fmtDate(item.paid_at)}</td></tr>`).join('');
   const reconciliation = facts.reconciliation;
   const positionTitle = snapshotMode ? '最后快照中的仓位与风险保护' : '当前仓位与风险保护';
   const positionEmpty = snapshotMode ? '最后一次保存快照中没有持仓；这不能确认当前账户仍为空仓。' : '当前账户没有持仓；零仓位行情不会冒充当前仓位。';
@@ -2686,14 +2743,14 @@ function venueFactSections(facts, {snapshotMode = false, historyIncomplete = fal
     ${reconciliation?.differences?.length ? `<article class="danger-note"><b>${snapshotMode ? '最后快照的对账差异' : '对账差异'}</b><ul>${reconciliation.differences.map(item => `<li>${escapeHtml(item)}</li>`).join('')}</ul></article>` : ''}
     ${factTable(positionTitle, '<th>标的</th><th>数量 / 入场</th><th>标记价</th><th>数据状态</th><th>保护</th><th>更新时间</th>', positions, positionEmpty)}
     ${factTable(orderTitle, '<th>交易所订单</th><th>标的</th><th>状态</th><th>成交 / 委托</th><th>关联操作</th><th>更新时间</th>', orders, orderEmpty)}
-    ${orderHistory ? `<details class="operation-toolbox venue-order-history"><summary><span><b>${snapshotMode ? '最后快照中的订单记录' : '最近订单记录'}</b><small>${escapeHtml(orderHistoryDescription)}</small></span><strong>查看记录</strong></summary><div class="toolbox-content"><div class="table-scroll-hint">左右滑动查看完整订单记录</div><div class="table-wrap is-scrollable"><table><thead><tr><th>交易所订单</th><th>标的</th><th>状态</th><th>成交 / 委托</th><th>关联操作</th><th>更新时间</th></tr></thead><tbody>${orderHistory}</tbody></table></div></div></details>` : ''}
+    ${orderHistory ? `<details class="operation-toolbox venue-order-history"><summary><span><b>${snapshotMode ? '最后快照中的订单记录' : '最近订单记录'}</b><small>${escapeHtml(orderHistoryDescription)}</small></span><strong>查看记录</strong></summary><div class="toolbox-content"><div class="table-scroll-hint venue-fact-scroll-hint">左右滑动查看完整订单记录</div><div class="table-wrap is-scrollable venue-fact-table"><table><thead><tr><th>交易所订单</th><th>标的</th><th>状态</th><th>成交 / 委托</th><th>关联操作</th><th>更新时间</th></tr></thead><tbody>${orderHistory}</tbody></table></div></div></details>` : ''}
     ${historyIncomplete ? '<article class="callout venue-history-warning"><b>历史记录尚未补全</b><p>以下成交与资金费只代表已经保存的记录，不能据此判断完整历史；余额、仓位和当前委托不受影响。</p></article>' : ''}
     ${factTable(fillTitle, '<th>成交编号</th><th>标的</th><th>方向 / 数量</th><th>价格</th><th>手续费</th><th>成交时间</th>', fills, fillEmpty)}
     ${factTable(fundingTitle, '<th>支付编号</th><th>标的</th><th>金额</th><th>支付时间</th>', funding, fundingEmpty)}`;
 }
 
 function factTable(title, headers, rows, emptyCopy = '当前没有已保存的数据。') {
-  return `<section><h2>${escapeHtml(title)}</h2>${rows ? `<div class="table-scroll-hint">左右滑动查看完整${escapeHtml(title)}</div><div class="table-wrap is-scrollable"><table><thead><tr>${headers}</tr></thead><tbody>${rows}</tbody></table></div>` : `<div class="callout">${escapeHtml(emptyCopy)}</div>`}</section>`;
+  return `<section><h2>${escapeHtml(title)}</h2>${rows ? `<div class="table-scroll-hint venue-fact-scroll-hint">左右滑动查看完整${escapeHtml(title)}</div><div class="table-wrap is-scrollable venue-fact-table"><table><thead><tr>${headers}</tr></thead><tbody>${rows}</tbody></table></div>` : `<div class="callout">${escapeHtml(emptyCopy)}</div>`}</section>`;
 }
 
 function accessRoleOptions(selectedRoles, prefix, disabled = false) {

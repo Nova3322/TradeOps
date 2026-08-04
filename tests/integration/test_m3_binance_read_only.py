@@ -135,6 +135,7 @@ def m3_app(
     client: StaticBinanceReadOnlyClient,
     *,
     enabled: bool,
+    account_id: str | None = "acct-live",
 ) -> FastAPI:
     settings = Settings(
         environment="test",
@@ -144,6 +145,7 @@ def m3_app(
         public_base_url="http://test",
         binance_read_only_enabled=enabled,
         binance_fact_environment="LIVE",
+        runtime_binance_account_id=account_id,
         binance_api_key="fixture-read-only-key",
         binance_api_secret="fixture-read-only-secret",  # noqa: S106
         _env_file=None,
@@ -190,7 +192,7 @@ async def run_m3_flow(database: Database) -> None:
             "fact_environment": "LIVE",
             "automatic_sync_enabled": False,
             "automatic_sync_interval_seconds": 60,
-            "default_account_id": None,
+            "default_account_id": "acct-live",
             "environment": "test",
         }
 
@@ -291,6 +293,21 @@ async def run_m3_flow(database: Database) -> None:
         assert unconfigured.status_code == 503, unconfigured.text
         assert unconfigured.json()["error"]["code"] == ("BINANCE_READ_ONLY_NOT_CONFIGURED")
         assert unconfigured_client.calls == []
+
+    missing_account_client = StaticBinanceReadOnlyClient()
+    async with AsyncClient(
+        transport=ASGITransport(
+            app=m3_app(database, missing_account_client, enabled=True, account_id=None)
+        ),
+        base_url="http://test",
+    ) as missing_account_http:
+        await login(missing_account_http, "operator")
+        missing_account = await missing_account_http.get(
+            "/api/venues/binance/facts", params={"account_id": "acct-live"}
+        )
+        assert missing_account.status_code == 503, missing_account.text
+        assert missing_account.json()["error"]["code"] == "DEFAULT_ACCOUNT_NOT_CONFIGURED"
+        assert missing_account_client.calls == []
 
     with database.session_factory() as session:
         assert session.scalar(select(func.count()).select_from(Instrument)) == 1

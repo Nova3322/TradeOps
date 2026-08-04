@@ -112,8 +112,8 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
 
     assert response.status_code == 200
     assert "交易控制台" in response.text
-    assert "/assets/app.js?v=90" in response.text
-    assert "/assets/styles.css?v=41" in response.text
+    assert "/assets/app.js?v=95" in response.text
+    assert "/assets/styles.css?v=42" in response.text
     assert 'aria-label="交易控制台首页"' in response.text
     assert '<a href="/" data-link><span>⌂</span>今日</a>' in response.text
     assert 'id="mobile-nav-toggle"' in response.text
@@ -812,7 +812,14 @@ def test_system_and_venue_pages_distinguish_read_only_snapshots_from_live_execut
     assert "核心市场${status.hip3_available ? ` + HIP-3" in source
     assert "当前账户事实可用；历史记录待补全" in source  # noqa: RUF001
     assert "以下成交与资金费只代表已经保存的记录" in source
-    assert "<b>默认账户</b>" in source
+    assert "已配置默认账户" in source
+    assert "status.default_account_id || 'acct-1'" not in source
+    assert "不会使用旧的 acct-1 或其他示例账户代替" in source
+    assert "shortId(accountId)" not in source
+    assert 'class="table-wrap is-scrollable venue-fact-table"' in source
+    assert "connectionCategoryEnglishLabels" in source
+    assert "The upstream read-only API is rate-limiting requests" in source
+    assert "Production account · read-only" in source
     assert "<b>${escapeHtml(accountId)}</b>" not in source
     assert "venue-technical-detail" in source
     assert "左右滑动查看完整${escapeHtml(title)}" in source

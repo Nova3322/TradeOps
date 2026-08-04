@@ -21,6 +21,8 @@ def access_app(database: Database):
         allow_mock_identity=True,
         session_signing_secret="access-test-signing-secret-that-is-long-enough",  # noqa: S106
         public_base_url="http://test",
+        runtime_binance_account_id="acct-live",
+        runtime_hyperliquid_account_id="acct-hl",
         _env_file=None,
     )
     perptape = PerptapeClient(
@@ -171,6 +173,8 @@ async def exercise_six_identity_permission_matrix(database: Database) -> None:
             "/api/venues/hyperliquid/status",
             "/api/venues/hyperliquid/live/status",
             "/api/venues/hyperliquid/testnet/status",
+            "/api/venues/binance/facts?account_id=acct-live",
+            "/api/venues/hyperliquid/facts?account_id=acct-hl",
             "/api/capital",
             "/api/admin/users",
             "/admin/users",
@@ -201,6 +205,8 @@ async def exercise_six_identity_permission_matrix(database: Database) -> None:
                 "/api/venues/hyperliquid/status",
                 "/api/venues/hyperliquid/live/status",
                 "/api/venues/hyperliquid/testnet/status",
+                "/api/venues/binance/facts?account_id=acct-live",
+                "/api/venues/hyperliquid/facts?account_id=acct-hl",
             },
         }
         for username, permitted in allowed.items():

@@ -263,6 +263,7 @@ def app(
     reader: MutableHyperliquidReader,
     *,
     enabled: bool = True,
+    account_id: str | None = ACCOUNT_ID,
 ) -> FastAPI:
     settings = Settings(
         environment="test",
@@ -273,6 +274,7 @@ def app(
         execution_backend="DIRECT_LEGACY",
         hyperliquid_read_only_enabled=True,
         hyperliquid_fact_environment="TESTNET",
+        runtime_hyperliquid_account_id=account_id,
         hyperliquid_account_address=ACCOUNT_ADDRESS,
         hyperliquid_testnet_order_send_enabled=enabled,
         hyperliquid_testnet_api_wallet_private_key="0x"
@@ -502,6 +504,28 @@ def test_core_program_owns_proposal_to_ioc_protection_reconcile_exit_and_pnl(
     database: Database,
 ) -> None:
     asyncio.run(complete_flow(database))
+
+
+async def missing_default_account_fails_closed(database: Database) -> None:
+    service = TradingService(database)
+    seed(service, key="m5-missing-account")
+    venue = SimulatedHyperliquidCore()
+    reader = MutableHyperliquidReader()
+    async with AsyncClient(
+        transport=ASGITransport(app=app(database, venue, reader, account_id=None)),
+        base_url="http://test",
+    ) as http:
+        await login(http, "m5-missing-account-operator")
+        response = await http.get(
+            "/api/venues/hyperliquid/facts", params={"account_id": ACCOUNT_ID}
+        )
+        assert response.status_code == 503, response.text
+        assert response.json()["error"]["code"] == "DEFAULT_ACCOUNT_NOT_CONFIGURED"
+        assert reader.snapshot is None
+
+
+def test_hyperliquid_facts_require_the_configured_default_account(database: Database) -> None:
+    asyncio.run(missing_default_account_fails_closed(database))
 
 
 async def unknown_and_fencing(database: Database) -> None:
