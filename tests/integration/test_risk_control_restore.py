@@ -808,6 +808,7 @@ def test_system_admin_direct_restore_requires_live_conditions_and_keeps_auto_add
     status = service.risk_control_status(
         ids["admin"], live_scope, require_live_scope=True, now=ready_at + timedelta(seconds=3)
     )
+    assert status["auto_add_gate"]["operator_username"] == "risk-admin"
     superseded_request = next(
         item
         for item in status["requests"]
@@ -862,8 +863,12 @@ def test_restore_rejection_expiry_and_terminal_status_are_durable(
     )
     status = service.risk_control_status(ids["admin"], SCOPE, now=NOW + timedelta(minutes=3))
     rejected = next(item for item in status["requests"] if item["request_id"] == str(rejected_id))
+    assert status["policy"]["updated_by_username"] == "risk-admin"
+    assert status["auto_add_gate"]["operator_username"] is None
+    assert rejected["requester_username"] == "risk-operator"
     assert rejected["status"] == RiskPolicyChangeStatus.REJECTED.value
     assert rejected["reviews"][0]["decision"] == ReviewDecision.REJECT.value
+    assert rejected["reviews"][0]["reviewer_username"] == "risk-reviewer-1"
 
     expiring_id = service.create_risk_control_change_request(
         ids["operator"],

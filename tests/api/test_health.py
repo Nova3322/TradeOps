@@ -112,8 +112,8 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
 
     assert response.status_code == 200
     assert "交易控制台" in response.text
-    assert "/assets/app.js?v=63" in response.text
-    assert "/assets/styles.css?v=29" in response.text
+    assert "/assets/app.js?v=65" in response.text
+    assert "/assets/styles.css?v=31" in response.text
     assert '<a href="/" data-link><span>⌂</span>今日</a>' in response.text
     assert 'id="mobile-nav-toggle"' in response.text
     assert 'id="confirm-dialog"' in response.text
@@ -696,6 +696,22 @@ def test_capital_web_projection_only_renders_live_records() -> None:
         check=False,
     )
     assert completed.returncode == 0, completed.stderr
+
+
+def test_risk_workspace_prioritizes_current_actions_and_hides_closed_tasks() -> None:
+    app_path = Path(__file__).parents[2] / "src" / "trading_control_plane" / "web" / "app.js"
+    source = app_path.read_text()
+
+    assert "系统管理员（最高权限）" in source  # noqa: RUF001
+    assert "activeRequests = control.requests.filter" in source
+    assert "历史恢复申请" in source
+    assert "不计入当前待办" in source
+    assert "risk-condition-details" in source
+    assert "mode === 'risk' && !hasCapability('operations.view')" in source
+    assert "details.filter(item => item.status !== 'CLOSED')" in source
+    assert "当前没有运行中的风险任务" in source
+    assert "自动加仓已经关闭" in source
+    assert "roleNames().join('、')" not in source
 
 
 def test_web_request_lifecycle_in_node() -> None:

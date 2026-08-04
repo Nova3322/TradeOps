@@ -7749,6 +7749,27 @@ class TradingService:
                     .order_by(Approval.created_at, Approval.approval_id)
                 ).all()
             )
+            identity_ids = {item.requester_id for item in requests}
+            identity_ids.update(item.reviewer_id for item in reviews)
+            for value in (policy.updated_by, gate.operator_id):
+                try:
+                    identity_ids.add(UUID(str(value)))
+                except (TypeError, ValueError):
+                    pass
+            usernames = {
+                item.user_id: item.username
+                for item in session.scalars(
+                    select(User).where(User.user_id.in_(identity_ids))
+                ).all()
+            }
+
+            def projected_username(value: object) -> str | None:
+                try:
+                    user_id = UUID(str(value))
+                except (TypeError, ValueError):
+                    return None
+                return usernames.get(user_id)
+
             reviews_by_request: dict[UUID, list[dict[str, Any]]] = {}
             for review in reviews:
                 if review.risk_control_change_request_id is None:
@@ -7756,6 +7777,7 @@ class TradingService:
                 reviews_by_request.setdefault(review.risk_control_change_request_id, []).append(
                     {
                         "reviewer_id": str(review.reviewer_id),
+                        "reviewer_username": usernames.get(review.reviewer_id),
                         "decision": review.decision,
                         "reason": review.reason,
                         "created_at": review.created_at.isoformat(),
@@ -7829,6 +7851,7 @@ class TradingService:
                     "max_total_risk": str(policy.max_total_risk),
                     "max_fact_age_seconds": policy.max_fact_age_seconds,
                     "updated_by": policy.updated_by,
+                    "updated_by_username": projected_username(policy.updated_by),
                     "updated_at": policy.updated_at.isoformat(),
                 },
                 "auto_add_gate": {
@@ -7836,6 +7859,7 @@ class TradingService:
                     "version": gate.version,
                     "reason": gate.reason,
                     "operator_id": gate.operator_id,
+                    "operator_username": projected_username(gate.operator_id),
                     "updated_at": gate.updated_at.isoformat(),
                 },
                 "restore_conditions": {
@@ -7892,6 +7916,7 @@ class TradingService:
                     {
                         "request_id": str(item.request_id),
                         "requester_id": str(item.requester_id),
+                        "requester_username": usernames.get(item.requester_id),
                         "status": effective_request_status(item),
                         "superseded_by_control_state": request_superseded(item),
                         "version": item.version,

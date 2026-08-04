@@ -496,6 +496,11 @@ const percentageDistance = (from, to) => {
   return `${Math.abs((target - base) / base * 100).toFixed(2)}%`;
 };
 const roleNames = () => (session?.roles || []).map((item) => item.role);
+const currentRoleSummary = () => {
+  const roles = roleNames();
+  if (roles.includes('SYSTEM_ADMIN')) return '系统管理员（最高权限）';
+  return roles.map(fmtRole).join('、') || '未分配岗位';
+};
 const capabilityRoles = {
   'opportunity.view':['OBSERVER','PROPOSER'],
   'proposal.view':['OBSERVER','PROPOSER','REVIEWER','OPERATOR'],
@@ -1736,7 +1741,8 @@ function renderRiskControlPanel(control) {
   const isOperator = roleNames().includes('OPERATOR');
   const isReviewer = roleNames().includes('REVIEWER');
   const systemAlreadyNormal = policy.system_state === 'NORMAL';
-  const activeRequest = control.requests.find(item => ['PENDING_REVIEW','APPROVED'].includes(item.status));
+  const activeRequests = control.requests.filter(item => !item.superseded_by_control_state && ['PENDING_REVIEW','APPROVED'].includes(item.status));
+  const historicalRequests = control.requests.filter(item => item.superseded_by_control_state || !['PENDING_REVIEW','APPROVED'].includes(item.status));
   const conditionRows = (conditions.checks || []).map(check => {
     const scope = check.scope ? `${check.scope.environment} · ${check.scope.account_id} · ${check.scope.venue}` : '全局';
     const reasons = (check.reason || []).map(reason => reason === 'CURRENT' ? '当前检查通过' : formatControlBlocker(reason)).join('；');
@@ -1751,7 +1757,7 @@ function renderRiskControlPanel(control) {
   const normalRestoreState = systemAlreadyNormal
     ? '<div class="success-note"><b>当前无需恢复：</b>风险政策已经正常开放；自动加仓仍保持关闭，旧交易授权不会复活。</div>'
     : '';
-  const requestCards = control.requests.length ? control.requests.map(item => {
+  const renderRequestCard = item => {
     const superseded = Boolean(item.superseded_by_control_state);
     const isRequester = item.requester_id === session.user_id;
     const reviewedByMe = item.reviews.some(review => review.reviewer_id === session.user_id);
@@ -1763,10 +1769,17 @@ function renderRiskControlPanel(control) {
       : '';
     const statusLabel = superseded ? '已失效（控制状态已变化）' : riskControlStatusLabel(item.status);
     const supersededNote = superseded ? '<div class="callout"><b>无需继续审核：</b>系统已经恢复，或申请冻结的控制版本已被后续操作替代。</div>' : '';
-    return `<article class="card"><div class="card-head"><div><p class="eyebrow">恢复申请</p><h2>${statusLabel}</h2></div><span class="tag">${shortId(item.request_id)}</span></div>${supersededNote}<dl class="definition-grid">${definition('申请人', shortId(item.requester_id))}${definition('自动加仓', '保持关闭')}${definition('最早执行', fmtDate(item.execute_after))}${definition('到期', fmtDate(item.expires_at))}${definition('原控制状态', fmtStatus(item.source_auto_add_status))}</dl><p>${escapeHtml(item.reason)}</p><h3>独立审核记录</h3>${item.reviews.length ? item.reviews.map(review => `<div class="callout"><b>${escapeHtml(review.decision === 'APPROVE' ? '批准' : '拒绝')}</b> · ${escapeHtml(review.reason)}<br><span class="subtle">${shortId(review.reviewer_id)} · ${fmtDate(review.created_at)}</span></div>`).join('') : `<p class="subtle">${superseded ? '申请已经失效，不再等待审核。' : '等待一名非申请人的独立审核人员。'}</p>`}<div class="review-action-panel">${reviewUi}${executeUi}</div></article>`;
-  }).join('') : '<section class="empty-state"><div><h2>当前没有恢复申请</h2><p>操作人员可发起申请；最高管理员只在全部实时条件通过时直接恢复，无需申请或自审。</p></div></section>';
-  const actionSummary = `<article class="card"><h2>为什么当前能 / 不能操作</h2><dl class="definition-grid">${definition('当前角色', roleNames().join('、') || '无')}${definition('管理员直接恢复', formatRiskActionReason(control.actions.direct_restore.reason, conditions))}${definition('操作员发起申请', formatRiskActionReason(control.actions.request_restore.reason, conditions))}${definition('独立审核', formatRiskActionReason(control.actions.review_restore.reason, conditions))}${definition('审核后执行', formatRiskActionReason(control.actions.execute_restore.reason, conditions))}</dl></article>`;
-  return `<section class="risk-control-overview"><div class="stats"><div class="stat"><small>风险政策</small><b>${riskControlStatusLabel(policy.system_state)}</b></div><div class="stat"><small>政策更新时间</small><b>${fmtDate(policy.updated_at)}</b></div><div class="stat"><small>自动加仓</small><b>${riskControlStatusLabel(gate.status)}</b></div><div class="stat"><small>恢复条件</small><b>${restoreGateLabel}</b></div></div><div class="detail-layout"><article class="card"><h2>当前控制状态</h2><dl class="definition-grid">${definition('政策原因', formatControlReason(policy.reason))}${definition('政策更新人', shortId(policy.updated_by))}${definition('政策更新时间', fmtDate(policy.updated_at))}${definition('控制原因', formatControlReason(gate.reason))}${definition('控制操作人', shortId(gate.operator_id))}${definition('控制更新时间', fmtDate(gate.updated_at))}</dl><p class="safety-note">“仅允许减仓”仍允许减仓与退出；暂停新增风险后，旧 TradingAuthorization 永久失效。恢复不会开启 AUTO_ADD。</p></article>${actionSummary}</div>${normalRestoreState}<section><h2>实时恢复条件</h2><p class="subtle">逐项展示当前事实、精确原因、负责角色和下一步；执行时还会在同一事务内重新校验。</p><div class="table-wrap is-scrollable"><table><thead><tr><th>条件 / 范围</th><th>状态</th><th>精确原因</th><th>处理角色</th><th>下一步</th></tr></thead><tbody>${conditionRows}</tbody></table></div></section>${directForm}${requestForm}<div class="section-head"><div><p class="eyebrow">分权恢复</p><h2>操作人员申请 → 独立审核人员复核</h2></div></div><div class="stack">${requestCards}</div></section>`;
+    return `<article class="card"><div class="card-head"><div><p class="eyebrow">恢复申请</p><h2>${statusLabel}</h2></div><span class="tag">${shortId(item.request_id)}</span></div>${supersededNote}<dl class="definition-grid">${definition('申请人', item.requester_username || shortId(item.requester_id))}${definition('自动加仓', '保持关闭')}${definition('最早执行', fmtDate(item.execute_after))}${definition('到期', fmtDate(item.expires_at))}${definition('原控制状态', fmtStatus(item.source_auto_add_status))}</dl><p>${escapeHtml(item.reason)}</p><h3>独立审核记录</h3>${item.reviews.length ? item.reviews.map(review => `<div class="callout"><b>${escapeHtml(review.decision === 'APPROVE' ? '批准' : '拒绝')}</b> · ${escapeHtml(review.reason)}<br><span class="subtle">${escapeHtml(review.reviewer_username || shortId(review.reviewer_id))} · ${fmtDate(review.created_at)}</span></div>`).join('') : `<p class="subtle">${superseded ? '申请已经失效，不再等待审核。' : '等待一名非申请人的独立审核人员。'}</p>`}<div class="review-action-panel">${reviewUi}${executeUi}</div></article>`;
+  };
+  const requestCards = activeRequests.length
+    ? activeRequests.map(renderRequestCard).join('')
+    : '<section class="empty-state compact-empty-state"><div><h2>当前没有待处理的恢复申请</h2><p>操作人员可在风险受限时发起申请；最高管理员仅在全部实时条件通过后直接恢复。</p></div></section>';
+  const requestHistory = historicalRequests.length
+    ? `<details class="operation-toolbox risk-request-history"><summary><span><b>历史恢复申请</b><small>${historicalRequests.length} 条已结束或已失效记录，不计入当前待办</small></span><strong>查看历史</strong></summary><div class="stack">${historicalRequests.map(renderRequestCard).join('')}</div></details>`
+    : '';
+  const actionSummary = `<article class="card"><h2>为什么当前能 / 不能操作</h2><dl class="definition-grid">${definition('当前身份', currentRoleSummary())}${definition('管理员直接恢复', formatRiskActionReason(control.actions.direct_restore.reason, conditions))}${definition('操作员发起申请', formatRiskActionReason(control.actions.request_restore.reason, conditions))}${definition('独立审核', formatRiskActionReason(control.actions.review_restore.reason, conditions))}${definition('审核后执行', formatRiskActionReason(control.actions.execute_restore.reason, conditions))}</dl></article>`;
+  const conditionDetails = `<details class="operation-toolbox risk-condition-details" ${systemAlreadyNormal && conditions.ready ? '' : 'open'}><summary><span><b>实时恢复条件</b><small>${conditions.ready ? '全部条件通过；执行恢复时仍会重新校验' : `${conditions.blockers.length} 项阻塞，需要先处理`}</small></span><strong>${systemAlreadyNormal && conditions.ready ? '查看明细' : '当前必须处理'}</strong></summary><div class="risk-condition-content"><p class="subtle">逐项展示当前事实、精确原因、负责角色和下一步；执行时会在同一事务内重新校验。</p><div class="table-wrap is-scrollable"><table><thead><tr><th>条件 / 范围</th><th>状态</th><th>精确原因</th><th>处理角色</th><th>下一步</th></tr></thead><tbody>${conditionRows}</tbody></table></div></div></details>`;
+  return `<section class="risk-control-overview"><div class="stats"><div class="stat"><small>风险政策</small><b>${riskControlStatusLabel(policy.system_state)}</b></div><div class="stat"><small>政策更新时间</small><b>${fmtDate(policy.updated_at)}</b></div><div class="stat"><small>自动加仓</small><b>${riskControlStatusLabel(gate.status)}</b></div><div class="stat"><small>恢复条件</small><b>${restoreGateLabel}</b></div></div><div class="detail-layout"><article class="card"><h2>当前控制状态</h2><dl class="definition-grid">${definition('政策原因', formatControlReason(policy.reason))}${definition('政策更新人', policy.updated_by_username || shortId(policy.updated_by))}${definition('政策更新时间', fmtDate(policy.updated_at))}${definition('控制原因', formatControlReason(gate.reason))}${definition('控制操作人', gate.operator_username || shortId(gate.operator_id))}${definition('控制更新时间', fmtDate(gate.updated_at))}</dl><p class="safety-note">“仅允许减仓”仍允许减仓与退出；暂停新增风险后，旧 TradingAuthorization 永久失效。恢复不会开启 AUTO_ADD。</p></article>${actionSummary}</div>${normalRestoreState}${conditionDetails}${directForm}${requestForm}<div class="section-head"><div><p class="eyebrow">分权恢复</p><h2>当前恢复待办</h2></div></div><div class="stack">${requestCards}</div>${requestHistory}</section>`;
 }
 
 async function bindRiskControlActions() {
@@ -1912,7 +1925,9 @@ async function renderSystemStatus() {
 }
 
 async function renderCampaignFacts(mode) {
-  const details = await loadCampaignDetails();
+  const details = mode === 'risk' && !hasCapability('operations.view')
+    ? []
+    : await loadCampaignDetails();
   let riskControls = null;
   if (mode === 'risk') {
     try {
@@ -1922,14 +1937,15 @@ async function renderCampaignFacts(mode) {
     }
   }
   const titles = {orders:'订单与成交', risk:'风险与目标'};
+  const visibleDetails = mode === 'risk' ? details.filter(item => item.status !== 'CLOSED') : details;
   let rows = '';
-  if (mode === 'orders') rows = details.flatMap(item => item.intents.map(intent => `<tr data-href="/campaigns/${item.campaign_id}"><td>${shortId(item.campaign_id)}</td><td>${escapeHtml(fmtIntentKind(intent.kind))}${intent.reduce_only ? ' · 只减仓' : ''}</td><td>${escapeHtml(fmtSide(intent.side))} ${fmtNumber(intent.quantity)}</td><td>${escapeHtml(fmtStatus(intent.status))}</td><td>${intent.order ? `${escapeHtml(intent.order.venue_order_id)} · ${escapeHtml(fmtStatus(intent.order.status))}` : '尚未记录交易所回执'}</td><td>${fmtDate(intent.updated_at)}</td></tr>`)).join('');
-  if (mode === 'risk') rows = details.map(item => `<tr data-href="/campaigns/${item.campaign_id}"><td>${shortId(item.campaign_id)}</td><td>${escapeHtml(fmtStatus(item.status))}</td><td>${item.reservations.map(r => `${escapeHtml(fmtStatus(r.status))} ${fmtNumber(r.amount)}`).join(' · ') || '无预留'}</td><td>${fmtNumber(item.current_target_quantity)} · v${item.target_version}</td><td>${escapeHtml(fmtStatus(item.target_urgency || '—'))}</td><td>${escapeHtml(item.reconciliation ? fmtStatus(item.reconciliation.status) : '未对账')}</td></tr>`).join('');
+  if (mode === 'orders') rows = visibleDetails.flatMap(item => item.intents.map(intent => `<tr data-href="/campaigns/${item.campaign_id}"><td>${shortId(item.campaign_id)}</td><td>${escapeHtml(fmtIntentKind(intent.kind))}${intent.reduce_only ? ' · 只减仓' : ''}</td><td>${escapeHtml(fmtSide(intent.side))} ${fmtNumber(intent.quantity)}</td><td>${escapeHtml(fmtStatus(intent.status))}</td><td>${intent.order ? `${escapeHtml(intent.order.venue_order_id)} · ${escapeHtml(fmtStatus(intent.order.status))}` : '尚未记录交易所回执'}</td><td>${fmtDate(intent.updated_at)}</td></tr>`)).join('');
+  if (mode === 'risk') rows = visibleDetails.map(item => `<tr data-href="/campaigns/${item.campaign_id}"><td>${shortId(item.campaign_id)}</td><td>${escapeHtml(fmtStatus(item.status))}</td><td>${item.reservations.map(r => `${escapeHtml(fmtStatus(r.status))} ${fmtNumber(r.amount)}`).join(' · ') || '无预留'}</td><td>${fmtNumber(item.current_target_quantity)} · v${item.target_version}</td><td>${escapeHtml(fmtStatus(item.target_urgency || '—'))}</td><td>${escapeHtml(item.reconciliation ? fmtStatus(item.reconciliation.status) : '未对账')}</td></tr>`).join('');
   const headers = mode === 'orders' ? '<th>交易任务</th><th>意图</th><th>方向 / 数量</th><th>状态</th><th>交易所订单</th><th>更新时间</th>' : '<th>交易任务</th><th>状态</th><th>风险预留</th><th>目标</th><th>紧迫度</th><th>对账</th>';
   main.innerHTML = `<section class="page"><header class="page-head"><div><p class="eyebrow">生产交易数据</p><h1>${titles[mode]}</h1><p class="lede">这里显示当前确认的数据；能够重新计算的汇总会按最新数据生成。</p></div></header>
     ${mode === 'risk' ? renderRiskControlPanel(riskControls) : ''}
-    ${mode === 'risk' && roleNames().includes('SYSTEM_ADMIN') ? '<div class="form-panel compact-form"><h2>只允许收紧风险</h2><p class="safety-note">这些入口只能关闭自动加仓，或把系统切换为“仅允许减仓”；不能从这里恢复新增风险。</p><div class="toolbar"><button class="danger" data-disable-global-add>关闭全局自动加仓</button><button class="danger" data-pause-new-risk>暂停所有新增风险</button></div></div><div style="height:16px"></div>' : ''}
-    ${rows ? `<div class="table-wrap"><table><thead><tr>${headers}</tr></thead><tbody>${rows}</tbody></table></div>` : '<section class="empty-state"><div><h2>当前没有可展示的数据</h2></div></section>'}</section>`;
+    ${mode === 'risk' && roleNames().includes('SYSTEM_ADMIN') ? `<div class="form-panel compact-form"><h2>只允许收紧风险</h2><p class="safety-note">这些入口只能关闭自动加仓，或把系统切换为“仅允许减仓”；不能从这里恢复新增风险。</p><div class="toolbar"><button class="danger" data-disable-global-add ${riskControls?.auto_add_gate?.status === 'DISABLED' ? 'disabled title="自动加仓已经关闭"' : ''}>${riskControls?.auto_add_gate?.status === 'DISABLED' ? '自动加仓已关闭' : '关闭全局自动加仓'}</button><button class="danger" data-pause-new-risk ${riskControls?.policy?.system_state !== 'NORMAL' ? 'disabled title="新增风险已经暂停"' : ''}>${riskControls?.policy?.system_state !== 'NORMAL' ? '新增风险已暂停' : '暂停所有新增风险'}</button></div></div><div style="height:16px"></div>` : ''}
+    ${rows ? `<div class="table-wrap"><table><thead><tr>${headers}</tr></thead><tbody>${rows}</tbody></table></div>` : mode === 'risk' ? '<section class="empty-state compact-empty-state"><div><h2>当前没有运行中的风险任务</h2><p>已结束任务不会占用当前风险工作区；可前往交易任务查看完整历史。</p><a class="secondary" href="/campaigns" data-link>查看交易任务</a></div></section>' : '<section class="empty-state"><div><h2>当前没有可展示的数据</h2></div></section>'}</section>`;
   bindLinkedRows();
   if (mode === 'risk') await bindRiskControlActions();
   document.querySelector('[data-disable-global-add]')?.addEventListener('click', (event) => campaignAction('/api/operations/auto-add/disable', {reason:'administrator disabled AUTO_ADD from Web', idempotency_key:crypto.randomUUID()}, {

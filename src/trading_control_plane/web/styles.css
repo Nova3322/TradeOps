@@ -490,6 +490,11 @@ textarea { resize: vertical; }
 .operation-toolbox > summary span { display: inline-grid; gap: 4px; }
 .operation-toolbox > summary small { color: var(--muted); font-size: 10px; font-weight: 500; }
 .toolbox-content { padding: 0 20px 20px; }
+.risk-condition-details, .risk-request-history { margin: 18px 0; border: 1px solid var(--line); border-radius: 14px; background: var(--panel); }
+.risk-condition-details[open] > summary, .risk-request-history[open] > summary { border-bottom: 1px solid var(--line); }
+.risk-condition-content, .risk-request-history > .stack { padding: 18px 20px 20px; }
+.empty-state.compact-empty-state { min-height: 190px; padding: 28px 20px; border: 1px dashed var(--line); border-radius: 14px; }
+.compact-empty-state .secondary { margin-top: 10px; }
 .risk-reduction-card { border-top: 3px solid var(--accent); }
 .stack { display: grid; gap: 14px; }
 .definition-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 17px; margin: 0; }
