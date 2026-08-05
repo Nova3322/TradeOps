@@ -1037,6 +1037,7 @@ class TradingQueries:
                 "net_worth": {
                     "environment": "LIVE",
                     "currency": "USD",
+                    "max_fact_age_seconds": int(max_fact_age.total_seconds()),
                     "venues": {
                         venue: (
                             str(venue_net_worth[venue]) if venue in current_live_sources else None

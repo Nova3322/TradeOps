@@ -303,6 +303,7 @@ def test_live_net_worth_and_risk_capital_combine_two_venues_and_vault(
     assert center["net_worth"] == {
         "environment": "LIVE",
         "currency": "USD",
+        "max_fact_age_seconds": 300,
         "venues": {"BINANCE": "10.000000000000000000", "HYPERLIQUID": "20.000000000000000000"},
         "vault": "60.000000000000000000",
         "total": "90.000000000000000000",

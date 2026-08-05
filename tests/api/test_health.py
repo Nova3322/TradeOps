@@ -314,7 +314,7 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
     assert ".simulation-panel" in stylesheet.text
     assert ".capital-status-missing" in stylesheet.text
     assert ".proposal-table tr { display: block;" in stylesheet.text
-    assert '.proposal-table td::before { content: attr(data-label);' in stylesheet.text
+    assert ".proposal-table td::before { content: attr(data-label);" in stylesheet.text
     assert ".capital-route-grid" in stylesheet.text
     assert ".capital-trend-toggle" in stylesheet.text
     assert ".capital-blockers" in stylesheet.text
@@ -776,6 +776,19 @@ def test_capital_web_projection_only_renders_live_records() -> None:
         const staggeredTotal = staggered.find(item => item.source === "TOTAL");
         assert.equal(staggeredTotal.points.length, 2);
         assert.deepEqual(staggeredTotal.points.map(point => point.value), [60, 61]);
+
+        const staleCarryForward = JSON.parse(vm.runInContext(
+          `JSON.stringify(capitalHistorySeries([
+            {environment:"LIVE",location_type:"VENUE",venue:"BINANCE",usd_equity:"10",observed_at:"2026-08-02T10:00:00Z"},
+            {environment:"LIVE",location_type:"VENUE",venue:"HYPERLIQUID",usd_equity:"20",observed_at:"2026-08-02T10:00:00Z"},
+            {environment:"LIVE",location_type:"VAULT",venue:"VAULT",usd_equity:"30",observed_at:"2026-08-02T10:00:00Z"},
+            {environment:"LIVE",location_type:"VENUE",venue:"BINANCE",usd_equity:"11",observed_at:"2026-08-02T10:06:00Z"}
+          ], 300))`,
+          context,
+        ));
+        const staleTotal = staleCarryForward.find(item => item.source === "TOTAL");
+        assert.equal(staleTotal.points.length, 1);
+        assert.equal(staleTotal.points[0].value, 60);
 
         assert.equal(
           vm.runInContext(

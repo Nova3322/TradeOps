@@ -4,6 +4,7 @@ import asyncio
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
+import pytest
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy import select
 
@@ -648,3 +649,133 @@ def test_direct_notilt_return_rejects_non_deposit_sdk_function(database: Databas
         assert operation.version == 1
         assert session.query(TradingAuthorization).count() == 0
         assert session.query(OrderIntent).count() == 0
+
+
+@pytest.mark.parametrize(
+    ("override", "expected_code"),
+    (
+        ({}, None),
+        ({"isOfficialVault": False}, "NOTILT_VAULT_UNTRUSTED"),
+        ({"isActiveWhitelist": False}, "NOTILT_WHITELIST_INACTIVE"),
+        (
+            {"assignedWhitelistVault": "0x0000000000000000000000000000000000000000"},
+            "NOTILT_WHITELIST_INACTIVE",
+        ),
+        (
+            {"owner": "0x5555555555555555555555555555555555555555"},
+            "NOTILT_AGENT_OWNER_FORBIDDEN",
+        ),
+        ({"panicLocked": True}, "NOTILT_PANIC_LOCKED"),
+        ({"maxReleaseNet": "98000000"}, "NOTILT_RELEASE_LIMIT_EXCEEDED"),
+        ({"blockTimestampOffset": -301}, "NOTILT_FACT_STALE"),
+    ),
+)
+def test_direct_notilt_release_rereads_live_agent_budget_before_unsigned_preview(
+    database: Database,
+    override: dict[str, object],
+    expected_code: str | None,
+) -> None:
+    service = TradingService(database)
+    now = datetime.now(UTC)
+    case_name = expected_code or "SAFE"
+    admin = service.bootstrap_admin(f"release-admin-{case_name}", now=now)
+    treasury = service.create_user(f"release-treasury-{case_name}", admin, now=now)
+    service.assign_role(treasury, Role.TREASURY_ADMIN, admin, now=now)
+    calls: list[str] = []
+
+    def executor(payload: dict[str, object]) -> dict[str, object]:
+        operation = str(payload["operation"])
+        calls.append(operation)
+        if operation == "read-vault":
+            block_offset = int(override.get("blockTimestampOffset", 0))
+            budget = {
+                "blockNumber": "123",
+                "blockTimestamp": str(int((now + timedelta(seconds=block_offset)).timestamp())),
+                "vault": "0x1111111111111111111111111111111111111111",
+                "agent": "0x5555555555555555555555555555555555555555",
+                "owner": "0x7777777777777777777777777777777777777777",
+                "asset": {
+                    "address": "0x6666666666666666666666666666666666666666",
+                    "symbol": "USDC",
+                    "decimals": 6,
+                    "native": False,
+                },
+                "isOfficialVault": True,
+                "isActiveWhitelist": True,
+                "assignedWhitelistVault": "0x1111111111111111111111111111111111111111",
+                "balance": "100000000",
+                "maxReleaseNet": "100000000",
+                "pendingNet": "0",
+                "panicLocked": False,
+                "dailyReleaseRate": "0",
+                "dailyFeeRate": "0",
+            }
+            budget.update(
+                {key: value for key, value in override.items() if key != "blockTimestampOffset"}
+            )
+            return {
+                "chain": "arbitrum",
+                "vault": "0x1111111111111111111111111111111111111111",
+                "agent": "0x5555555555555555555555555555555555555555",
+                "budgets": [budget],
+            }
+        if operation == "prepare-release-request" and expected_code is None:
+            return {
+                "transaction": {
+                    "chainId": 42161,
+                    "to": "0x1111111111111111111111111111111111111111",
+                    "data": "0x1234",
+                    "value": "0",
+                    "contract": "vault",
+                    "functionName": "requestWhitelistRelease",
+                    "summary": "Request the reviewed NoTilt whitelist release",
+                }
+            }
+        raise AssertionError("unsafe release preview reached transaction construction")
+
+    async def scenario() -> None:
+        async with AsyncClient(
+            transport=ASGITransport(
+                app=_app(database, notilt_gateway=NoTiltGateway(executor=executor))
+            ),
+            base_url="http://test",
+        ) as client:
+            await _login(client, f"release-treasury-{case_name}")
+            created = await client.post(
+                "/api/capital/direct-operations",
+                json={
+                    "path": "VAULT_TO_BINANCE",
+                    "amount": "100",
+                    "final_confirmed": True,
+                    "idempotency_key": f"release-{case_name}",
+                },
+            )
+            assert created.status_code == 200, created.text
+            preview = await client.post(
+                f"/api/capital/direct-operations/{created.json()['operation_id']}/notilt-unsigned-preview",
+                json={
+                    "expected_version": 1,
+                    "final_confirmed": True,
+                    "idempotency_key": f"release-preview-{case_name}",
+                },
+            )
+            if expected_code is None:
+                assert preview.status_code == 200, preview.text
+                assert preview.json()["signing"] is False
+                assert preview.json()["broadcast"] is False
+                assert preview.json()["execution_blocked"] is True
+            else:
+                assert preview.status_code == 422, preview.text
+                assert preview.json()["error"]["code"] == expected_code
+
+    asyncio.run(scenario())
+    assert calls == (
+        ["read-vault", "prepare-release-request"] if expected_code is None else ["read-vault"]
+    )
+    with database.session_factory() as session:
+        operation = session.scalar(select(DirectCapitalOperation))
+        assert operation is not None
+        assert operation.version == (2 if expected_code is None else 1)
+        assert (operation.stages[-1]["code"] == "NOTILT_UNSIGNED_RELEASE_REQUEST_PREVIEW") is (
+            expected_code is None
+        )

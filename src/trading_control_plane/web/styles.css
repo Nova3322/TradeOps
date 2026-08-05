@@ -263,6 +263,7 @@ button:disabled { opacity: .52; cursor: not-allowed; }
 .chart-legend { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; padding-top: 16px; border-top: 1px solid var(--line); }
 .capital-trend-toggle { position: relative; display: grid; grid-template-columns: 10px minmax(0, 1fr); gap: 10px; align-items: center; min-width: 0; padding: 12px; border: 1px solid var(--line); border-radius: 11px; background: var(--panel-strong); cursor: pointer; }
 .capital-trend-toggle:has(input:checked) { border-color: color-mix(in srgb, var(--trend-color) 38%, var(--line)); background: color-mix(in srgb, var(--trend-color) 5%, var(--panel-strong)); }
+.capital-trend-toggle:has(input:focus-visible) { outline: 3px solid color-mix(in srgb, var(--trend-color) 45%, transparent); outline-offset: 2px; }
 .capital-trend-toggle input { position: absolute; width: 1px; height: 1px; opacity: 0; pointer-events: none; }
 .capital-trend-toggle i { width: 9px; height: 32px; border-radius: 999px; background: var(--trend-color); }
 .capital-trend-toggle span, .capital-trend-toggle b, .capital-trend-toggle small { display: block; min-width: 0; }
@@ -717,6 +718,7 @@ dialog::backdrop { background: rgba(4, 12, 10, .56); backdrop-filter: blur(3px);
   .section-heading { display: grid; align-items: start; }
   .section-heading .secondary { width: 100%; }
   .chart-legend { grid-template-columns: 1fr; }
+  .capital-page > .stats { grid-template-columns: 1fr; }
   .capital-route-flow b { font-size: 16px; }
 }
 

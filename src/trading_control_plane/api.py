@@ -3753,6 +3753,68 @@ def create_app(
             )
         return chain_id
 
+    def verify_live_notilt_release_budget(
+        *,
+        chain_id: int,
+        vault: str,
+        agent: str,
+        asset: str,
+        amount: Decimal,
+        max_fact_age_seconds: int,
+        now: datetime,
+    ) -> None:
+        snapshot = resolved_notilt.read_vault(chain_id, vault, agent)
+        budget = next(
+            (item for item in snapshot.budgets if item.asset == asset.upper()),
+            None,
+        )
+        if budget is None:
+            raise DomainRejected(
+                "NOTILT_RELEASE_BUDGET_MISSING",
+                "NoTilt release requires a live budget for the configured asset",
+            )
+        if (
+            snapshot.vault.lower() != vault.lower()
+            or snapshot.agent.lower() != agent.lower()
+            or budget.vault.lower() != vault.lower()
+            or budget.agent.lower() != agent.lower()
+        ):
+            raise DomainRejected(
+                "NOTILT_RELEASE_SCOPE_MISMATCH",
+                "NoTilt live budget does not match the configured Vault and Agent scope",
+            )
+        if not budget.is_official_vault:
+            raise DomainRejected(
+                "NOTILT_VAULT_UNTRUSTED",
+                "NoTilt release requires an official Vault from the trusted deployment catalog",
+            )
+        if (
+            not budget.is_active_whitelist
+            or budget.assigned_whitelist_vault.lower() != vault.lower()
+        ):
+            raise DomainRejected(
+                "NOTILT_WHITELIST_INACTIVE",
+                "NoTilt release requires an active whitelist assigned to the configured Vault",
+            )
+        if budget.owner.lower() == agent.lower():
+            raise DomainRejected(
+                "NOTILT_AGENT_OWNER_FORBIDDEN",
+                "NoTilt Agent budget cannot use the Vault owner identity",
+            )
+        if budget.panic_locked:
+            raise DomainRejected("NOTILT_PANIC_LOCKED", "NoTilt Vault is panic locked")
+        fact_age = now - budget.block_timestamp
+        if fact_age < timedelta(0) or fact_age > timedelta(seconds=max_fact_age_seconds):
+            raise DomainRejected(
+                "NOTILT_FACT_STALE",
+                "NoTilt live budget is outside the active production freshness window",
+            )
+        if amount > budget.max_release_net:
+            raise DomainRejected(
+                "NOTILT_RELEASE_LIMIT_EXCEEDED",
+                "NoTilt release amount exceeds the current live maxReleaseNet allowance",
+            )
+
     def sync_configured_notilt_vault(
         chain_id: int,
         actor_id: UUID,
@@ -4020,6 +4082,18 @@ def create_app(
             DirectCapitalPath.VAULT_TO_BINANCE,
             DirectCapitalPath.VAULT_TO_HYPERLIQUID,
         }:
+            max_fact_age_seconds = int(
+                capital_snapshot(identity.user_id)["net_worth"]["max_fact_age_seconds"]
+            )
+            verify_live_notilt_release_budget(
+                chain_id=chain_id,
+                vault=vault,
+                agent=agent,
+                asset=str(context["asset"]),
+                amount=Decimal(amount),
+                max_fact_age_seconds=max_fact_age_seconds,
+                now=now,
+            )
             transactions = (
                 resolved_notilt.prepare_release_request(
                     chain_id=chain_id,
