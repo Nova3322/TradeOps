@@ -1,5 +1,32 @@
 # Trading console product QA
 
+## 2026-08-05: active proposal truth on the opportunity page
+
+### P0 / P1 / P2 status
+
+- P0: none open in this batch. No proposal, review, authorization or order action was submitted during acceptance.
+- P1 closed: a fresh Perptape opportunity whose LIVE venue, exact contract and direction already has an active SYSTEM proposal no longer appears as newly creatable. The page exposes a separate `审核中` state and links to the existing frozen proposal.
+- P1 closed: HTTP and WebSocket opportunity snapshots now project the same user-scoped active-proposal fact. The `可新建提案` count excludes occupied scopes; backend dedup remains the final enforcement boundary.
+- P1 closed: the live TUTUSDT long card showed the existing proposal, remaining validity and no `高级配置` or `一键创建` action. A normal actionable card still showed both creation actions.
+- P2 closed: the state filters, warning, links and card actions reflow at 390 px and 430 px without horizontal overflow.
+
+### Five-dimensional evidence
+
+- Code: user-scoped active Perptape proposal query, shared HTTP/WebSocket projection, `ACTIVE_PROPOSAL` view state, truthful counts and card action suppression.
+- API: the current snapshot returned 206 candidate rows, 196 eligible rows and 13 candidate rows across six occupied venue/contract/direction scopes. All six point to the matching `PENDING_REVIEW` proposal.
+- Actual pages: the opportunity page reported separate `可新建` and `审核中` counts. Filtering `审核中` plus `TUT` rendered one TUTUSDT card with only `查看待审核提案`.
+- End-to-end runtime: that link opened proposal `50ec25fc…`, whose frozen Binance/TUTUSDT/long scope and pending status matched the opportunity card. `live` and `ready` returned HTTP 200.
+- Tests: 3 focused web/API tests and 13 opportunity/default/capital integration tests passed; source Ruff, JavaScript/Python syntax and diff checks passed. The integration coverage includes an observer projection without granting creation or review capability.
+
+### Accepted screenshots
+
+- Desktop opportunity: `artifacts/product-audit/opportunity-active-proposal-2026-08-05/01-opportunity-tut-desktop.jpg`.
+- Desktop frozen proposal detail: `artifacts/product-audit/opportunity-active-proposal-2026-08-05/02-proposal-detail-desktop.jpg`.
+- 390 px opportunity card: `artifacts/product-audit/opportunity-active-proposal-2026-08-05/03-opportunity-tut-390.jpg`.
+- 430 px opportunity card: `artifacts/product-audit/opportunity-active-proposal-2026-08-05/04-opportunity-tut-430.jpg`.
+
+final result: passed; active scopes are no longer presented as new proposals, mobile has no horizontal overflow, and all dangerous gates remain disabled
+
 ## 2026-08-05: Perptape proposal-family deduplication
 
 ### P0 / P1 / P2 status
