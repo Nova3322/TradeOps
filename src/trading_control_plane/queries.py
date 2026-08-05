@@ -950,13 +950,30 @@ class TradingQueries:
                     CapitalAutomationPolicy.account_id,
                 )
             ).all()
+            observation_query = select(AccountEquityObservation).where(
+                AccountEquityObservation.environment == "LIVE"
+            )
+            if authoritative_accounts:
+                authoritative_history_scopes = [
+                    AccountEquityObservation.location_type == "VAULT",
+                    *[
+                        and_(
+                            AccountEquityObservation.location_type == "VENUE",
+                            func.upper(AccountEquityObservation.venue) == venue,
+                            AccountEquityObservation.account_id == account_id,
+                        )
+                        for venue, account_id in authoritative_accounts.items()
+                    ],
+                ]
+                observation_query = observation_query.where(
+                    or_(*authoritative_history_scopes)
+                )
             observations = list(
                 reversed(
                     session.scalars(
-                        select(AccountEquityObservation)
-                        .where(AccountEquityObservation.environment == "LIVE")
-                        .order_by(AccountEquityObservation.observed_at.desc())
-                        .limit(5_000)
+                        observation_query.order_by(
+                            AccountEquityObservation.observed_at.desc()
+                        ).limit(5_000)
                     ).all()
                 )
             )

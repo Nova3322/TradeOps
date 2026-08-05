@@ -377,6 +377,33 @@ def test_live_net_worth_and_risk_capital_combine_two_venues_and_vault(
     assert not any(
         item["location_id"].startswith("retired-") for item in single_account_center["history"]
     )
+
+    async def api_scope_scenario() -> None:
+        async with AsyncClient(
+            transport=ASGITransport(
+                app=build_app(
+                    database,
+                    MockTelegramGateway(),
+                    runtime_binance_account_id="binance-main",
+                    runtime_hyperliquid_account_id="hyperliquid-main",
+                )
+            ),
+            base_url="http://test",
+        ) as client:
+            await login(client, "treasury-proposer")
+            response = await client.get("/api/capital")
+            assert response.status_code == 200
+            payload = response.json()["data"]
+            assert {
+                item["location_id"]
+                for item in payload["balances"]
+                if item["environment"] == "LIVE" and item["location_type"] == "VENUE"
+            } == {"binance-main", "hyperliquid-main"}
+            assert not any(
+                item["location_id"].startswith("retired-") for item in payload["history"]
+            )
+
+    asyncio.run(api_scope_scenario())
     authoritative_service = TradingService(
         database,
         authoritative_live_accounts={
@@ -919,13 +946,21 @@ def test_capital_contract_rejects_unsafe_facts_reviews_and_transitions(
     assert service.reconcile_capital_transfer(transfer, ids["reviewer_one"], now=now) == "UNKNOWN"
 
 
-def build_app(database: Database, telegram: MockTelegramGateway) -> FastAPI:
+def build_app(
+    database: Database,
+    telegram: MockTelegramGateway,
+    *,
+    runtime_binance_account_id: str | None = None,
+    runtime_hyperliquid_account_id: str | None = None,
+) -> FastAPI:
     settings = Settings(
         environment="test",
         database_url=str(database.engine.url),
         allow_mock_identity=True,
         session_signing_secret="m7-test-signing-secret-that-is-long-enough",  # noqa: S106
         public_base_url="http://test",
+        runtime_binance_account_id=runtime_binance_account_id,
+        runtime_hyperliquid_account_id=runtime_hyperliquid_account_id,
         _env_file=None,
     )
     perptape = PerptapeClient(

@@ -425,3 +425,30 @@ final result: passed for the current runtime state; reviewer Today no longer omi
 - 430 px: `artifacts/product-audit/venue-facts-2026-08-05/03-hyperliquid-430.png`.
 
 final result: passed for the current rate-limited runtime state; execution-worker readiness is no longer visually conflated with live account truth
+
+## 2026-08-05: capital dashboard account-scope and responsive revalidation
+
+### P0 / P1 / P2 status
+
+- P0: none open. No capital operation, order, signature, broadcast or Gate mutation was executed.
+- P1 closed: capital history is filtered to the configured default Binance and Hyperliquid accounts before the 5,000-row history limit; retired account rows cannot displace or mix into the visible curve.
+- P1 verified: complete, missing, stale and 90-second time-misaligned facts produce distinct truthful states; only complete facts within the 60-second alignment window calculate the current total.
+- P2 closed: the chart minimum visual range is 0.05%, keeping small USD changes readable without manufacturing a dramatic fall.
+- P2 verified: desktop, 390 px and 430 px show the net-worth cards, four compact series controls, USD axes and detail content without horizontal overflow.
+
+### Five-dimensional evidence
+
+- Code: account-scoped history query, four-series chart domain, gap handling and current/last-valid copy.
+- API: current local facts report Binance and Hyperliquid separately, Vault missing, and `total=null`; the isolated complete fixture reports `$60.6912`.
+- Actual page: current missing-Vault, isolated complete and isolated time-misaligned screens were rendered from real API responses.
+- End-to-end runtime: 8014 restarted safely and remained live/ready; a disposable 8015 test instance exercised complete/stale/misaligned pages and was removed afterward.
+- Tests: focused Web projection and PostgreSQL capital-center tests passed; syntax, lint and diff checks passed.
+
+### Accepted screenshots
+
+- Current desktop: `artifacts/product-audit/capital-net-worth-2026-08-05/06-desktop-current.png`.
+- Current 390 px: `07-390-current.png`, `08-390-chart-current.png`.
+- Current 430 px: `09-430-current.png`, `10-430-chart-current.png`.
+- Complete and misaligned fixtures: `11-complete-desktop.png`, `12-misaligned-desktop.png`.
+
+final result: passed; the dashboard preserves usable single-source history while refusing to manufacture a current three-source total

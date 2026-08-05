@@ -573,19 +573,17 @@ def create_app(
     def authoritative_live_accounts() -> dict[str, str]:
         return {
             venue: account_id
-            for venue, enabled, account_id in (
+            for venue, account_id in (
                 (
                     "BINANCE",
-                    resolved_settings.binance_read_only_enabled,
                     resolved_settings.runtime_binance_account_id,
                 ),
                 (
                     "HYPERLIQUID",
-                    resolved_settings.hyperliquid_read_only_enabled,
                     resolved_settings.runtime_hyperliquid_account_id,
                 ),
             )
-            if enabled and account_id
+            if account_id
         }
 
     def service() -> TradingService:

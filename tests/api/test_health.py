@@ -1258,7 +1258,7 @@ def test_capital_web_projection_only_renders_live_records() -> None:
           `JSON.stringify(capitalAxisDomain([9.967, 9.971]))`,
           context,
         ));
-        assert.ok(domain.range >= 9.971 * 0.005);
+        assert.ok(domain.range >= 9.971 * 0.0005);
         """
     )
     completed = subprocess.run(  # noqa: S603
@@ -1274,7 +1274,7 @@ def test_capital_web_projection_only_renders_live_records() -> None:
     ).read_text()
     app_source = app_path.read_text()
     assert "历史曲线不会冒充当前净值" in app_source
-    assert "纵轴至少保留 0.5% 观察范围" in app_source
+    assert "纵轴至少保留 0.05% 观察范围" in app_source
     assert "跨断档数据不会比较" in app_source
     assert "capitalChartResizeObserver = new ResizeObserver" in app_source
     assert "function compactCapitalChartPoints" in app_source
