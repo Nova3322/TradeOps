@@ -156,6 +156,8 @@ button:disabled { opacity: .52; cursor: not-allowed; }
 .timeframe-filter label { display: inline-flex; align-items: center; gap: 4px; color: var(--ink); font-size: 11px; font-weight: 800; }
 .timeframe-filter input { width: 15px; height: 15px; accent-color: var(--accent); }
 .result-summary { display: flex; justify-content: space-between; gap: 12px; margin: 0 2px 14px; color: var(--muted); font-size: 11px; }
+.opportunity-pagination { display: flex; justify-content: center; margin-top: 18px; }
+.opportunity-pagination button { min-width: 220px; }
 .market-facts { display: flex; gap: 8px; margin: -8px 0 16px; }
 .market-facts span { flex: 1; padding: 8px 10px; border-radius: 9px; background: var(--bg); color: var(--muted); font-size: 10px; }
 .market-facts b { display: block; margin-top: 3px; color: var(--ink); font-size: 12px; }
@@ -681,6 +683,7 @@ dialog::backdrop { background: rgba(4, 12, 10, .56); backdrop-filter: blur(3px);
   .campaign-list-table td > .row-link { grid-column: 2; }
   .result-summary { display: block; }
   .result-summary span { display: block; margin-top: 5px; }
+  .opportunity-pagination button { width: 100%; }
   .chart-head { display: block; }
   .chart-head > b { display: block; margin-top: 14px; }
   .chart-legend { grid-template-columns: 1fr 1fr; }

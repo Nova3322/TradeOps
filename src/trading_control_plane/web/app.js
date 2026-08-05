@@ -18,6 +18,8 @@ let proposalDefaults = {configured:false, can_manage:false, data:null};
 let opportunitySocket = null;
 let opportunityReconnectTimer = null;
 let opportunityReconnectAttempt = 0;
+const OPPORTUNITY_PAGE_SIZE = 24;
+let opportunityVisibleLimit = OPPORTUNITY_PAGE_SIZE;
 let sessionNotice = '';
 let toastTimer = null;
 let authFailureActive = false;
@@ -1259,7 +1261,7 @@ async function renderHome() {
     <div class="stats home-stats"><div class="stat"><small>运行告警</small><b class="${exceptions.length ? 'danger-text' : ''}">${exceptionCampaigns.size}</b><span>${exceptions.length ? `${exceptions.length} 项问题` : '无运行告警 / 无需处理'}</span></div><div class="stat"><small>非本人待审核</small><b class="${expiringReviews.length ? 'warning-text' : ''}">${actionableReviews.length}</b><span>${expiringReviews.length ? `${expiringReviews.length} 笔即将到期` : canReview ? '创建者不可审核自己的提案' : '当前身份不是审核人'}</span></div><div class="stat"><small>运行中交易任务</small><b>${activeCampaigns.length}</b><span>${activeCampaigns.length ? '保护与对账需持续有效' : '当前没有活动仓位流程'}</span></div><div class="stat"><small>风险政策</small><b class="${riskLimited ? 'warning-text status-copy' : 'status-copy'}">${escapeHtml(riskPolicySummary)}</b><span>真实下单${escapeHtml(liveOrderSendLabel)} · 自动加仓${escapeHtml(riskControl ? riskControlStatusLabel(riskControl.auto_add_gate.status) : '由管理员控制')}</span></div></div>
     <div class="home-layout"><section><div class="section-heading"><div><p class="eyebrow">处理顺序</p><h2>现在按这个顺序处理</h2></div><button class="secondary" data-refresh>刷新当前数据</button></div><div class="home-priority-list">${priorityCards.join('')}</div></section>
       <aside class="stack"><article class="card home-quick-start"><p class="eyebrow">${canPropose ? '新的交易判断' : '市场观察'}</p><h2>${canPropose ? '开始新的判断' : '继续观察市场机会'}</h2><p class="subtle">${canPropose ? '先看机会或写交易判断；这两条路径都只会创建提案，并进入独立审核。' : '当前身份只查看候选，不保存交易参数，也不会从这里新增风险。'}</p><div class="stacked-actions"><a class="primary" href="/opportunities" data-link>查看 Perptape 机会</a>${canPropose ? '<a class="secondary" href="/proposals/new" data-link>创建人工提案</a>' : ''}</div></article>
-        <article class="card home-boundary"><p class="eyebrow">系统边界</p><h2>当前控制状态</h2><dl class="definition-grid">${definition('站点环境', fmtEnvironment(authStatus?.environment, true))}${definition('风险政策', riskPolicySummary)}${definition('真实下单', liveOrderSendLabel)}${definition('自动加仓', riskControl ? riskControlStatusLabel(riskControl.auto_add_gate.status) : '由管理员控制')}${definition('安全原则', '数据缺失即阻断')}</dl><p class="safety-note">页面只展示当前事实；任何真实发送仍需通过交易任务、短期授权、交易所配置和服务端 Gate 的逐项检查。</p></article></aside></div></section>`;
+        <article class="card home-boundary"><p class="eyebrow">系统边界</p><h2>当前控制状态</h2><dl class="definition-grid">${definition('站点环境', fmtEnvironment(authStatus?.environment, true))}${definition('风险政策', riskPolicySummary)}${definition('真实下单', liveOrderSendLabel)}${definition('自动加仓', riskControl ? riskControlStatusLabel(riskControl.auto_add_gate.status) : '由管理员控制')}${definition('安全原则', '数据缺失即阻断')}</dl><p class="safety-note">页面只展示当前事实；任何真实发送仍需通过交易任务、短期授权、交易所配置和服务端安全开关的逐项检查。</p></article></aside></div></section>`;
   document.querySelector('[data-refresh]')?.addEventListener('click', route);
 }
 
@@ -1368,7 +1370,7 @@ function renderOpportunitySnapshot(result, sourceError = null, preservedFilters 
   const items = opportunityGroups;
   const canPropose = hasCapability('proposal.create');
   const venues = [...new Set(items.map(item => item.venue).filter(Boolean))].sort();
-  const optionTags = values => values.map(value => `<option value="${escapeHtml(value)}">${escapeHtml(value)}</option>`).join('');
+  const optionTags = values => values.map(value => `<option value="${escapeHtml(value)}">${escapeHtml(fmtVenueLabel(value))}</option>`).join('');
   const counts = opportunitySnapshotCounts(opportunities, items);
   const venueBreakdown = opportunityVenueBreakdown(counts.symbols_by_venue);
   const defaultViewState = counts.eligible_opportunities ? 'ACTIONABLE' : 'ALL';
@@ -1377,7 +1379,7 @@ function renderOpportunitySnapshot(result, sourceError = null, preservedFilters 
     ${!canPropose ? '<div class="callout"><b>只读模式：</b>当前身份可以查看、筛选候选并打开外部图表，但不能创建或修改提案。</div>' : ''}
     <div class="opportunity-tools"><span>信号快照 ${fmtDate(result?.snapshot_generated_at || result?.as_of)}</span>${canPropose ? `<a class="secondary" href="/opportunities/defaults" data-link>默认配置${proposalDefaults.configured ? '' : ' · 未完成'}</a>` : ''}</div>
     <div class="stats opportunity-stats"><div class="stat"><small>覆盖币对</small><b>${counts.unique_symbols}</b><span>${escapeHtml(venueBreakdown || '按交易所和合约去重')}</span></div><div class="stat"><small>方向机会</small><b>${counts.directional_opportunities}</b><span>同一币对做多、做空分开</span></div><div class="stat"><small>完整周期信号</small><b>${counts.timeframe_hits}</b><span>同一合约、方向、周期只计一次</span></div><div class="stat"><small>${canPropose ? '可创建提案' : '可交易合约'}</small><b>${counts.eligible_opportunities}</b><span>当前快照通过服务端资格检查</span></div></div>
-    ${items.length ? `<form id="opportunity-filters" class="filter-panel"><fieldset class="opportunity-state-filter"><legend>查看状态</legend><label><input name="view_state" type="radio" value="ACTIONABLE" ${defaultViewState === 'ACTIONABLE' ? 'checked' : ''}><span>${canPropose ? '可创建' : '可交易'} <b>${counts.eligible_opportunities}</b></span></label><label><input name="view_state" type="radio" value="WAITING"><span>待补齐 <b>${counts.waiting_opportunities}</b></span></label><label><input name="view_state" type="radio" value="WATCH_ONLY"><span>仅查看 <b>${counts.watch_only_opportunities}</b></span></label><label><input name="view_state" type="radio" value="ALL" ${defaultViewState === 'ALL' ? 'checked' : ''}><span>全部 <b>${items.length}</b></span></label></fieldset><label>交易所<select name="venue"><option value="">全部</option>${optionTags(venues)}</select></label><label>币对<input name="symbol" type="search" placeholder="例如 BTC、XYZ100"></label><label>共振周期<select name="resonance"><option value="1">至少 1 个周期</option><option value="2">至少 2 个周期</option><option value="3">至少 3 个周期</option><option value="4">4 个周期</option></select></label><fieldset class="timeframe-filter"><legend>突破周期</legend>${OPPORTUNITY_TIMEFRAME_ORDER.map(timeframe => `<label><input name="timeframes" type="checkbox" value="${timeframe}" checked><span>${timeframe}</span></label>`).join('')}</fieldset><label>方向<select name="direction"><option value="">全部</option><option value="LONG">做多</option><option value="SHORT">做空</option></select></label><label>最低成交量<input name="volume" type="number" min="0" placeholder="不限"></label><label>最低持仓量<input name="open_interest" type="number" min="0" placeholder="不限"></label><button type="reset" class="text-button">清除筛选</button></form><div class="result-summary"><span data-filter-summary>显示 ${items.length} / ${items.length} 个机会</span><span>默认先显示${canPropose ? '可创建' : '可交易'}机会；待补齐和仅查看仍可切换。</span></div><div id="opportunity-grid" class="card-grid">${items.map(opportunityCard).join('')}</div><section id="opportunity-empty" class="empty-state compact-empty" hidden><div><h2>没有符合条件的机会</h2><p>尝试切换机会状态、降低筛选门槛，或者清除部分筛选。</p></div></section>` : `<section class="empty-state compact-empty"><div><h2>${sourceError ? '等待机会数据恢复' : '当前没有突破候选'}</h2><p>${sourceError ? '人工提案仍然可用；Perptape 恢复后会自动重连。' : '这不代表市场没有风险或行情，只表示当前没有返回候选。'}</p></div></section>`}
+    ${items.length ? `<form id="opportunity-filters" class="filter-panel"><fieldset class="opportunity-state-filter"><legend>查看状态</legend><label><input name="view_state" type="radio" value="ACTIONABLE" ${defaultViewState === 'ACTIONABLE' ? 'checked' : ''}><span>${canPropose ? '可创建' : '可交易'} <b>${counts.eligible_opportunities}</b></span></label><label><input name="view_state" type="radio" value="WAITING"><span>待补齐 <b>${counts.waiting_opportunities}</b></span></label><label><input name="view_state" type="radio" value="WATCH_ONLY"><span>仅查看 <b>${counts.watch_only_opportunities}</b></span></label><label><input name="view_state" type="radio" value="ALL" ${defaultViewState === 'ALL' ? 'checked' : ''}><span>全部 <b>${items.length}</b></span></label></fieldset><label>交易所<select name="venue"><option value="">全部</option>${optionTags(venues)}</select></label><label>币对<input name="symbol" type="search" placeholder="例如 BTC、XYZ100"></label><label>共振周期<select name="resonance"><option value="1">至少 1 个周期</option><option value="2">至少 2 个周期</option><option value="3">至少 3 个周期</option><option value="4">4 个周期</option></select></label><fieldset class="timeframe-filter"><legend>突破周期</legend>${OPPORTUNITY_TIMEFRAME_ORDER.map(timeframe => `<label><input name="timeframes" type="checkbox" value="${timeframe}" checked><span>${timeframe}</span></label>`).join('')}</fieldset><label>方向<select name="direction"><option value="">全部</option><option value="LONG">做多</option><option value="SHORT">做空</option></select></label><label>最低成交量<input name="volume" type="number" min="0" placeholder="不限"></label><label>最低持仓量<input name="open_interest" type="number" min="0" placeholder="不限"></label><button type="reset" class="text-button">清除筛选</button></form><div class="result-summary"><span data-filter-summary>正在整理机会…</span><span>默认先显示${canPropose ? '可创建' : '可交易'}机会；待补齐和仅查看仍可切换。</span></div><div id="opportunity-grid" class="card-grid"></div><div class="opportunity-pagination"><button class="secondary" type="button" data-load-more-opportunities hidden>显示更多</button></div><section id="opportunity-empty" class="empty-state compact-empty" hidden><div><h2>没有符合条件的机会</h2><p>尝试切换机会状态、降低筛选门槛，或者清除部分筛选。</p></div></section>` : `<section class="empty-state compact-empty"><div><h2>${sourceError ? '等待机会数据恢复' : '当前没有突破候选'}</h2><p>${sourceError ? '人工提案仍然可用；Perptape 恢复后会自动重连。' : '这不代表市场没有风险或行情，只表示当前没有返回候选。'}</p></div></section>`}
   </section>`;
   const filterForm = document.querySelector('#opportunity-filters');
   if (filterForm) Object.entries(preservedFilters).forEach(([key, value]) => {
@@ -1387,7 +1389,6 @@ function renderOpportunitySnapshot(result, sourceError = null, preservedFilters 
   });
   document.querySelector('[data-refresh]')?.addEventListener('click', route);
   bindOpportunityActions();
-  document.querySelector('#opportunity-filters')?.dispatchEvent(new Event('input'));
   enhanceRenderedPage();
 }
 
@@ -1442,6 +1443,7 @@ function openOpportunityStream() {
 }
 
 async function renderOpportunities() {
+  opportunityVisibleLimit = OPPORTUNITY_PAGE_SIZE;
   let result = null;
   let sourceError = null;
   const [opportunityResponse, defaultResponse] = await Promise.allSettled([
@@ -1562,7 +1564,7 @@ function opportunityCard(item) {
   const oneClickBlocker = canUseCandidate && !proposalDefaults.configured
     ? '最高管理员尚未保存一键创建默认配置'
     : blockerCopy;
-  return `<article class="card" data-opportunity-card="${escapeHtml(cardId)}" data-opportunity-state="${viewState}"><div class="card-top"><div><span class="subtle">${escapeHtml(item.venue)} · ${escapeHtml(timeframes.join(' / '))}</span><div class="symbol">${escapeHtml(item.symbol)}</div></div><span class="tag ${directionClass}">${escapeHtml(fmtDirection(item.direction))}</span></div>
+  return `<article class="card" data-opportunity-card="${escapeHtml(cardId)}" data-opportunity-state="${viewState}"><div class="card-top"><div><span class="subtle">${escapeHtml(fmtVenueLabel(item.venue))} · ${escapeHtml(timeframes.join(' / '))}</span><div class="symbol">${escapeHtml(item.symbol)}</div></div><span class="tag ${directionClass}">${escapeHtml(fmtDirection(item.direction))}</span></div>
     <div class="opportunity-signals" aria-label="突破周期">${signals}</div>
     <div class="metric-row"><div><small>参考价格</small><b>${fmtNumber(item.reference_price)}</b></div><div><small>触发时间</small><b>${fmtDate(item.triggered_at)}</b></div><div><small>行情状态</small><b class="${marketDataCurrent ? 'direction-long' : 'warning-text'}">${escapeHtml(marketStatus)}</b></div></div>
     <div class="market-facts"><span>成交量 <b>${fmtCompact(item.quote_volume)}</b></span><span>持仓量 <b>${fmtCompact(item.open_interest)}</b></span></div>
@@ -1591,7 +1593,7 @@ function openSystemDialog(candidateId) {
   dialog.showModal();
 }
 
-function bindOpportunityActions() {
+function bindOpportunityCardActions() {
   document.querySelectorAll('[data-advanced-system]').forEach(button => button.addEventListener('click', () => openSystemDialog(button.dataset.advancedSystem)));
   document.querySelectorAll('[data-create-system]').forEach(button => button.addEventListener('click', async () => {
     const item = opportunities.find(candidate => candidate.candidate_id === button.dataset.createSystem);
@@ -1603,30 +1605,47 @@ function bindOpportunityActions() {
       navigate(`/proposals/${result.proposal_id}`);
     } catch (error) { showApiError(error); button.disabled = false; button.textContent = '一键创建'; }
   }));
+}
+
+function opportunityMatchesFilters(item, values, selectedTimeframes) {
+  const minimumResonance = Number(values.resonance || 1);
+  return (!values.view_state || values.view_state === 'ALL' || opportunityViewState(item) === values.view_state)
+    && (!values.venue || item.venue === values.venue)
+    && (!values.symbol || `${item.symbol} ${item.canonical_symbol}`.toLowerCase().includes(values.symbol.toLowerCase().trim()))
+    && item.timeframes.length >= minimumResonance
+    && selectedTimeframes.some(timeframe => item.timeframes.includes(timeframe))
+    && (!values.direction || item.direction === values.direction)
+    && (!values.volume || (item.quote_volume !== null && Number(item.quote_volume) >= Number(values.volume)))
+    && (!values.open_interest || (item.open_interest !== null && Number(item.open_interest) >= Number(values.open_interest)));
+}
+
+function opportunityVisiblePage(groups, values, selectedTimeframes, visibleLimit) {
+  const matches = groups.filter(item => opportunityMatchesFilters(item, values, selectedTimeframes));
+  return {matches, rendered:matches.slice(0, visibleLimit)};
+}
+
+function bindOpportunityActions() {
   const filters = document.querySelector('#opportunity-filters');
   if (!filters) return;
+  const grid = document.querySelector('#opportunity-grid');
+  const loadMore = document.querySelector('[data-load-more-opportunities]');
   const applyFilters = () => {
     const values = Object.fromEntries(new FormData(filters));
     const selectedTimeframes = new FormData(filters).getAll('timeframes');
-    const minimumResonance = Number(values.resonance || 1);
-    let visible = 0;
-    opportunityGroups.forEach(item => {
-      const match = (!values.view_state || values.view_state === 'ALL' || opportunityViewState(item) === values.view_state)
-        && (!values.venue || item.venue === values.venue)
-        && (!values.symbol || `${item.symbol} ${item.canonical_symbol}`.toLowerCase().includes(values.symbol.toLowerCase().trim()))
-        && item.timeframes.length >= minimumResonance
-        && selectedTimeframes.some(timeframe => item.timeframes.includes(timeframe))
-        && (!values.direction || item.direction === values.direction)
-        && (!values.volume || (item.quote_volume !== null && Number(item.quote_volume) >= Number(values.volume)))
-        && (!values.open_interest || (item.open_interest !== null && Number(item.open_interest) >= Number(values.open_interest)));
-      document.querySelector(`[data-opportunity-card="${CSS.escape(item.group_id)}"]`).hidden = !match;
-      if (match) visible += 1;
-    });
-    document.querySelector('[data-filter-summary]').textContent = localizedText(`显示 ${visible} / ${opportunityGroups.length} 个机会`);
-    document.querySelector('#opportunity-empty').hidden = visible !== 0;
+    const {matches, rendered} = opportunityVisiblePage(opportunityGroups, values, selectedTimeframes, opportunityVisibleLimit);
+    grid.innerHTML = rendered.map(opportunityCard).join('');
+    bindOpportunityCardActions();
+    applyLanguageToDocument(grid);
+    document.querySelector('[data-filter-summary]').textContent = localizedText(`显示 ${rendered.length} / ${matches.length} 个匹配机会（全部 ${opportunityGroups.length}）`);
+    document.querySelector('#opportunity-empty').hidden = matches.length !== 0;
+    const remaining = Math.max(0, matches.length - rendered.length);
+    loadMore.hidden = remaining === 0;
+    loadMore.textContent = remaining ? `显示更多（剩余 ${remaining}）` : '已显示全部';
   };
-  filters.addEventListener('input', applyFilters);
-  filters.addEventListener('reset', () => requestAnimationFrame(applyFilters));
+  filters.addEventListener('input', () => { opportunityVisibleLimit = OPPORTUNITY_PAGE_SIZE; applyFilters(); });
+  filters.addEventListener('reset', () => requestAnimationFrame(() => { opportunityVisibleLimit = OPPORTUNITY_PAGE_SIZE; applyFilters(); }));
+  loadMore.addEventListener('click', () => { opportunityVisibleLimit += OPPORTUNITY_PAGE_SIZE; applyFilters(); });
+  applyFilters();
 }
 
 async function renderManualProposal() {
@@ -1752,7 +1771,7 @@ async function renderProposalList(status, title, historyMode = false) {
         : `<div class="stat"><small>当前提案</small><b>${items.length}</b></div><div class="stat"><small>等待审核</small><b>${items.filter(item => item.status === 'PENDING_REVIEW').length}</b></div>`}</div>
     <div class="section-tabs"><a class="${status ? 'active' : ''}" href="/reviews" data-link>待我审核${pending ? `<span>${pending}</span>` : ''}</a><a class="${!status && !historyMode ? 'active' : ''}" href="/proposals" data-link>当前提案</a><a class="${historyMode ? 'active' : ''}" href="/proposals?history=1" data-link>历史记录</a></div>
     ${status && items.length ? `<p class="review-queue-summary">系统机会 ${systemCount} 笔 · 人工判断 ${manualCount} 笔。这里只统计你尚未投票、仍在有效期内的提案。</p>` : ''}
-    ${items.length ? `<div class="proposal-list-tools"><label>搜索标的<input id="proposal-search" type="search" placeholder="BTCUSDT / xyz:TSLA"></label><label>方向<select id="proposal-direction"><option value="">全部方向</option><option value="LONG">做多</option><option value="SHORT">做空</option></select></label><label>风险<select id="proposal-risk"><option value="">全部档位</option><option value="LOW">低</option><option value="MEDIUM">中</option><option value="HIGH">高</option></select></label>${status ? '<label>来源<select id="proposal-source"><option value="">全部来源</option><option value="SYSTEM">系统机会</option><option value="MANUAL">人工判断</option></select></label>' : '<label>状态<select id="proposal-status"><option value="">全部状态</option><option value="DRAFT">草稿</option><option value="PENDING_REVIEW">待审核</option><option value="APPROVED">已批准</option><option value="REJECTED">已拒绝</option><option value="EXPIRED">已过期</option></select></label>'}<span><b data-proposal-count>${items.length}</b> 个结果</span></div><div class="table-wrap proposal-table"><table><thead><tr><th>提案</th><th>方向 / 数量</th><th>风险边界</th><th>${status ? '审核进度' : '状态'}</th><th>提交时间</th><th>到期</th></tr></thead><tbody>${items.map(item => `<tr data-href="/proposals/${item.proposal_id}" data-proposal-row data-search="${escapeHtml(`${item.symbol || ''} ${item.venue} ${item.proposer_username || ''}`.toLowerCase())}" data-direction="${escapeHtml(item.direction)}" data-risk="${escapeHtml(item.risk_tier)}" data-source="${escapeHtml(item.source)}" data-status="${escapeHtml(item.status)}"><td data-label="提案"><b>${escapeHtml(item.symbol || shortId(item.instrument_id))}</b><br><span class="subtle">${escapeHtml(item.venue)} · ${escapeHtml(item.source === 'SYSTEM' ? '系统机会' : '人工判断')}</span></td><td data-label="方向 / 数量"><span class="direction-pill ${item.direction === 'LONG' ? 'direction-long' : 'direction-short'}">${escapeHtml(fmtDirection(item.direction))}</span><br><span class="subtle">数量 ${fmtNumber(item.quantity)}</span></td><td data-label="风险边界"><b>${fmtRisk(item.risk_tier)}</b><br><span class="subtle">最多 ${escapeHtml(fmtAmount(item.max_risk, item.collateral_currency))}</span></td><td data-label="${status ? '审核进度' : '状态'}">${status ? `<b>已 ${Number(item.approval_count || 0)} / ${Number(item.required_approvals || (item.risk_tier === 'HIGH' ? 2 : 1))}</b><br><span class="subtle">仍需你的独立判断</span>` : `<span class="status-pill status-${escapeHtml(item.status)}">${escapeHtml(fmtStatus(item.status))}</span>`}</td><td data-label="提交时间">${fmtDate(item.created_at)}<br><span class="subtle">版本 ${item.version}</span></td><td data-label="到期">${fmtDate(item.expires_at)}</td></tr>`).join('')}</tbody></table></div><section id="proposal-filter-empty" class="empty-state compact-empty" hidden><div><h2>没有符合条件的提案</h2><p>请清除搜索或调整筛选。</p></div></section>` : emptyState}</section>`;
+    ${items.length ? `<div class="proposal-list-tools"><label>搜索标的<input id="proposal-search" type="search" placeholder="BTCUSDT / xyz:TSLA"></label><label>方向<select id="proposal-direction"><option value="">全部方向</option><option value="LONG">做多</option><option value="SHORT">做空</option></select></label><label>风险<select id="proposal-risk"><option value="">全部档位</option><option value="LOW">低</option><option value="MEDIUM">中</option><option value="HIGH">高</option></select></label>${status ? '<label>来源<select id="proposal-source"><option value="">全部来源</option><option value="SYSTEM">系统机会</option><option value="MANUAL">人工判断</option></select></label>' : '<label>状态<select id="proposal-status"><option value="">全部状态</option><option value="DRAFT">草稿</option><option value="PENDING_REVIEW">待审核</option><option value="APPROVED">已批准</option><option value="REJECTED">已拒绝</option><option value="EXPIRED">已过期</option></select></label>'}<span><b data-proposal-count>${items.length}</b> 个结果</span></div><div class="table-wrap proposal-table"><table><thead><tr><th>提案</th><th>方向 / 数量</th><th>风险边界</th><th>${status ? '审核进度' : '状态'}</th><th>提交时间</th><th>到期</th></tr></thead><tbody>${items.map(item => `<tr data-href="/proposals/${item.proposal_id}" data-proposal-row data-search="${escapeHtml(`${item.symbol || ''} ${item.venue} ${item.proposer_username || ''}`.toLowerCase())}" data-direction="${escapeHtml(item.direction)}" data-risk="${escapeHtml(item.risk_tier)}" data-source="${escapeHtml(item.source)}" data-status="${escapeHtml(item.status)}"><td data-label="提案"><b>${escapeHtml(item.symbol || shortId(item.instrument_id))}</b><br><span class="subtle">${escapeHtml(fmtVenueLabel(item.venue))} · ${escapeHtml(item.source === 'SYSTEM' ? '系统机会' : '人工判断')}</span></td><td data-label="方向 / 数量"><span class="direction-pill ${item.direction === 'LONG' ? 'direction-long' : 'direction-short'}">${escapeHtml(fmtDirection(item.direction))}</span><br><span class="subtle">计划数量 ${fmtNumber(item.quantity)}</span></td><td data-label="风险边界"><b>${fmtRisk(item.risk_tier)}</b><br><span class="subtle">最多损失 ${escapeHtml(fmtAmount(item.max_risk, item.collateral_currency))}</span></td><td data-label="${status ? '审核进度' : '状态'}">${status ? `<b>已 ${Number(item.approval_count || 0)} / ${Number(item.required_approvals || (item.risk_tier === 'HIGH' ? 2 : 1))}</b><br><span class="subtle">仍需你的独立判断</span>` : `<span class="status-pill status-${escapeHtml(item.status)}">${escapeHtml(fmtStatus(item.status))}</span>`}</td><td data-label="提交时间">${fmtDate(item.created_at)}<br><span class="subtle">版本 ${item.version}</span></td><td data-label="到期">${fmtDate(item.expires_at)}</td></tr>`).join('')}</tbody></table></div><section id="proposal-filter-empty" class="empty-state compact-empty" hidden><div><h2>没有符合条件的提案</h2><p>请清除搜索或调整筛选。</p></div></section>` : emptyState}</section>`;
   bindLinkedRows();
   const filter = () => {
     const query = document.querySelector('#proposal-search')?.value.toLowerCase().trim() || '';

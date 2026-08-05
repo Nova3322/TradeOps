@@ -370,6 +370,7 @@ def test_opportunity_card_explains_exact_catalog_blocker() -> None:
           fmtDate: String,
           fmtCompact: String,
           fmtDirection: value => ({LONG:"做多", SHORT:"做空"}[value] || value),
+          fmtVenueLabel: value => ({BINANCE:"币安", HYPERLIQUID:"Hyperliquid"}[value] || value),
           fmtReadiness: value => value === "READY" ? "可用" : value,
           hasCapability: () => true,
           proposalDefaults: {configured:true, can_manage:false, data:{version:1}},
@@ -615,6 +616,77 @@ def test_opportunity_groups_keep_multiple_timeframes_and_direction_separate() ->
         check=False,
     )
     assert completed.returncode == 0, completed.stderr
+
+
+def test_opportunity_filters_render_a_bounded_page_and_keep_all_matches() -> None:
+    node = shutil.which("node")
+    assert node is not None
+    app_path = Path(__file__).parents[2] / "src" / "trading_control_plane" / "web" / "app.js"
+    script = textwrap.dedent(
+        r"""
+        import assert from "node:assert/strict";
+        import fs from "node:fs";
+        import vm from "node:vm";
+
+        const source = fs.readFileSync(process.argv[1], "utf8");
+        const from = source.indexOf("function opportunityMatchesFilters");
+        const to = source.indexOf("\nfunction bindOpportunityActions", from);
+        assert.notEqual(from, -1);
+        assert.notEqual(to, -1);
+        const context = vm.createContext({
+          opportunityViewState: item => item.view_state,
+        });
+        vm.runInContext(
+          `${source.slice(from, to)}; this.page = opportunityVisiblePage;`,
+          context,
+        );
+        const groups = Array.from({length: 30}, (_, index) => ({
+          symbol:`COIN${index}USDT`, canonical_symbol:`COIN${index}`,
+          venue:index < 25 ? "BINANCE" : "HYPERLIQUID",
+          direction:index % 2 ? "SHORT" : "LONG",
+          timeframes:index % 3 ? ["1h"] : ["1h", "4h", "1d"],
+          quote_volume:1000 + index, open_interest:500 + index,
+          view_state:"ACTIONABLE",
+        }));
+        const first = context.page(
+          groups,
+          {view_state:"ACTIONABLE", resonance:"1"},
+          ["1h", "4h", "1d", "1w"],
+          24,
+        );
+        assert.equal(first.matches.length, 30);
+        assert.equal(first.rendered.length, 24);
+
+        const expanded = context.page(
+          groups,
+          {view_state:"ACTIONABLE", resonance:"1"},
+          ["1h", "4h", "1d", "1w"],
+          48,
+        );
+        assert.equal(expanded.matches.length, 30);
+        assert.equal(expanded.rendered.length, 30);
+
+        const filtered = context.page(
+          groups,
+          {view_state:"ACTIONABLE", venue:"HYPERLIQUID", resonance:"3"},
+          ["1h", "4h", "1d"],
+          24,
+        );
+        assert.equal(filtered.matches.length, 1);
+        assert.equal(filtered.rendered[0].venue, "HYPERLIQUID");
+        """
+    )
+    completed = subprocess.run(  # noqa: S603
+        [node, "--input-type=module", "-e", script, str(app_path)],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stderr
+    source = app_path.read_text()
+    assert "const OPPORTUNITY_PAGE_SIZE = 24" in source
+    assert 'data-load-more-opportunities' in source
+    assert "显示更多（剩余 ${remaining}）" in source
 
 
 def test_proposal_review_projection_uses_frozen_resonance_and_plain_risk_reasons() -> None:
