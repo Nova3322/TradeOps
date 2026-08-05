@@ -245,6 +245,18 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
     assert "当前唯一推荐动作" in app_javascript.text
     assert "data-close-campaign" in app_javascript.text
     assert "/api/campaigns/${item.campaign_id}/close" in app_javascript.text
+    assert "fmtDefaultAccountLabel(item.account_id)" in app_javascript.text
+    assert "fmtVenueLabel(item.venue)" in app_javascript.text
+    assert "fmtTargetReason(item.target_reason)" in app_javascript.text
+    assert "FREQTRADE_EMERGENCY_RECOVERY:" in app_javascript.text
+    assert "受控执行恢复：交易所成交与仓位已经核对" in app_javascript.text
+    assert (
+        "campaignNextStep(item, active, {canOperate, canRecordSyntheticFacts" in app_javascript.text
+    )
+    assert "canRecordSyntheticFacts ? positionFactForm(item)" in app_javascript.text
+    assert "canRecordSyntheticFacts ? protectionFactForm(item)" in app_javascript.text
+    assert "生产仓位只能来自交易所只读事实，不能在页面手工补写" in app_javascript.text
+    assert "前往异常页" not in app_javascript.text
     assert "现在按这个顺序处理" in app_javascript.text
     assert "api('/api/proposals?proposal_status=PENDING_REVIEW')" in app_javascript.text
     assert "api('/api/proposals?proposal_status=APPROVED')" in app_javascript.text
