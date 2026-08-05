@@ -230,3 +230,27 @@ final result: passed for current missing-Vault production state; complete, stale
 - Independent reviewer queue: `artifacts/product-audit/review-flow-2026-08-05/05-reviewer-queue-desktop.png`.
 
 final result: passed for the current pending SYSTEM proposal state; no live review or trading mutation was performed
+
+## 2026-08-05: real Telegram Web review acceptance retry
+
+### P0 / P1 / P2 status
+
+- P0: none found. No Telegram approval/rejection callback, authorization, order, risk switch, permission change or capital action was executed.
+- P1 runtime passed: the real Bot long poll is `HEALTHY`, running, has a recent successful poll and zero consecutive failures; the bound internal user remains active and has review permission.
+- P1 external blocker: the already authenticated Telegram Web client still shows `waiting for network`. A newly entered `/todo` command did not reach Telegram within a bounded 10-second wait, so the old Monday result cannot be treated as current evidence.
+- P1 local contract passed: `/todo` resolves only current, unexpired, independently actionable frozen proposals; notification buttons require a second confirmation and the server rechecks identity, self-review, version and expiry.
+- P2 external blocker: at a narrow browser viewport Telegram Web retained its own two-column desktop layout and clipped the chat pane. The actual Telegram mobile client was not available, so mobile visual acceptance remains unproven rather than inferred from the bot HTML.
+
+### Five-dimensional evidence
+
+- Code: real gateway suppresses Campaign and capital notifications; help/status expose only proposal review, and confirmations explicitly exclude orders, capital, risk switches and permission changes.
+- API/runtime: `/api/runtime/status` reported Telegram enabled, network configured and polling `HEALTHY`; the database returned `BOUND` without exposing the chat id.
+- Actual client: Telegram Web was already authenticated and the ChainToTheMoon bot chat opened successfully. Its current header still showed `waiting for network`.
+- End-to-end: `/todo` was entered and send was attempted, then observed for 10 seconds. No new outbound message or bot response appeared, so no stale response was accepted as current.
+- Tests: 19 Telegram unit tests and 2 isolated PostgreSQL integration tests passed, including two-step confirmation, audit write, expiry/self-review/version checks, and proof that no authorization or order is created.
+
+### Accepted screenshot
+
+- Cropped bot chat without unrelated chat-list content: `artifacts/product-audit/telegram-live-2026-08-05/01-telegram-web-network-blocked.jpg`.
+
+final result: Bot runtime and local safety contract passed; real Telegram Web command/card and mobile visual acceptance remain externally blocked
