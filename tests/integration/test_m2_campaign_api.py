@@ -508,6 +508,7 @@ def test_exception_view_marks_active_facts_stale_but_ignores_closed_history(
         by_code["PROTECTION_STALE"]["occurred_at"] == (stale_at + timedelta(minutes=5)).isoformat()
     )
     assert by_code["RECONCILIATION_STALE"]["occurred_at"] == stale_at.isoformat()
+    assert all(";" not in item["action_unavailable_reason"] for item in current_exceptions)
 
     with database.session_factory.begin() as session:
         campaign = session.get(Campaign, opening.campaign_id)

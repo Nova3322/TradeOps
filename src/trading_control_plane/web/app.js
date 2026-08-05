@@ -673,6 +673,24 @@ const exceptionGuidance = {
   RECONCILIATION_STALE:{priority:4,title:'对账早于最新事实',copy:'最近对账发生后仓位或订单意图又有变化，旧结论已经失效。',next:'以最新仓位和订单事实重新运行对账。'},
 };
 const explainException = (code) => exceptionGuidance[code] || {priority:9,title:'需要人工核实',copy:'系统发现一项无法自动解释的阻断事实。',next:'进入交易任务查看技术详情并完成对账。'};
+const exceptionCategory = (code) => {
+  if (['CAMPAIGN_UNKNOWN','ORDER_INTENT_UNKNOWN','RISK_RESERVATION_UNKNOWN'].includes(code)) return '结果未知';
+  if (['POSITION_UNKNOWN','PROTECTION_UNKNOWN'].includes(code)) return '事实缺失';
+  if (String(code).endsWith('_STALE')) return '数据过期';
+  if (code === 'PROTECTION_INSUFFICIENT') return '保护不足';
+  if (String(code).startsWith('RECONCILIATION_')) return '对账差异';
+  return '运行阻断';
+};
+function formatExceptionDetail(value) {
+  const detail = String(value || '');
+  if (detail.startsWith('observed_at=')) return `最近有效事实：${fmtDate(detail.slice(12))}`;
+  if (detail.startsWith('max_age_seconds=')) return `最长有效期：${fmtSeconds(detail.slice(16))}`;
+  const labels = {
+    POSITION_FACT_NEWER:'仓位事实晚于最近对账',
+    ORDER_INTENT_NEWER:'订单意图晚于最近对账',
+  };
+  return labels[detail] || fmtOperationalCopy(detail);
+}
 const riskReasonGuidance = {
   INVALID_INPUT:{label:'风险输入无效',action:'检查计划数量、最大风险和风险政策后重新运行。'},
   READ_ONLY_SOURCE_UNAVAILABLE:{label:'交易所只读连接当前不可用',action:'等待所属交易所只读探针恢复并完成一次成功检查后重试。'},
@@ -3185,11 +3203,11 @@ async function renderRuntimeAlerts() {
   const cards = [...items].sort((left, right) => explainException(left.code).priority - explainException(right.code).priority).map(item => {
     const guidance = explainException(item.code);
     const severity = item.severity === 'CRITICAL' ? '严重' : '高';
-    return `<article class="card exception-card"><div class="exception-card-head"><div><p class="eyebrow">${escapeHtml(severity)}运行告警</p><h2>${escapeHtml(guidance.title)}</h2></div><span class="status-pill status-DENY">${escapeHtml(item.code)}</span></div><dl class="definition-grid">${definition('受影响交易任务', shortId(item.campaign_id))}${definition('发生 / 首次可判定', fmtDate(item.occurred_at))}${definition('最近检查', fmtDate(item.last_checked_at || result.as_of))}${definition('具体阻断原因', guidance.copy)}${definition('影响', item.impact)}${definition('负责角色', item.owner_role)}${definition('下一步', item.next_action)}</dl>${item.details?.length ? `<p class="subtle">事实详情：${escapeHtml(item.details.join('；'))}</p>` : ''}<p class="safety-note">${escapeHtml(item.action_unavailable_reason || '详情页不提供解除风控动作。')}</p><a class="primary" href="/campaigns/${item.campaign_id}" data-link>打开受影响交易任务</a></article>`;
+    return `<article class="card exception-card"><div class="exception-card-head"><div><p class="eyebrow">${escapeHtml(severity)}运行告警</p><h2>${escapeHtml(guidance.title)}</h2></div><span class="status-pill status-DENY">${escapeHtml(exceptionCategory(item.code))}</span></div><dl class="definition-grid">${definition('受影响交易任务', shortId(item.campaign_id))}${definition('发生 / 首次可判定', fmtDate(item.occurred_at))}${definition('最近检查', fmtDate(item.last_checked_at || result.as_of))}${definition('具体阻断原因', guidance.copy)}${definition('影响', item.impact)}${definition('负责角色', item.owner_role)}${definition('下一步', item.next_action)}${definition('诊断编号', item.code)}</dl>${item.details?.length ? `<p class="subtle">事实详情：${escapeHtml(item.details.map(formatExceptionDetail).join('；'))}</p>` : ''}<p class="safety-note">${escapeHtml(item.action_unavailable_reason || '详情页不提供解除风控动作。')}</p><a class="primary" href="/campaigns/${item.campaign_id}" data-link>打开受影响交易任务</a></article>`;
   }).join('');
   main.innerHTML = `<section class="page exceptions-page"><header class="page-head"><div><p class="eyebrow">交易任务 · 运行告警详情</p><h1>运行告警</h1><p class="lede">只展示运行中生产交易任务需要人工处理的问题；风险恢复、资金异常和系统健康分别保留在各自页面。</p></div><div class="toolbar"><a class="secondary" href="/campaigns" data-link>返回交易任务</a><button class="secondary" data-refresh>刷新</button></div></header>
     <div class="stats exception-stats"><div class="stat"><small>受影响交易任务</small><b class="${affectedCampaigns.size ? 'danger-text' : ''}">${affectedCampaigns.size}</b></div><div class="stat"><small>运行问题</small><b>${items.length}</b></div><div class="stat"><small>结果未知</small><b class="${unknownCount ? 'danger-text' : ''}">${unknownCount}</b></div><div class="stat"><small>数据过期</small><b class="${staleCount ? 'warning-text' : ''}">${staleCount}</b><span>最近检查 ${fmtDate(result.as_of)}</span></div></div>
-    ${items.length ? `<div class="exception-grid">${cards}</div>` : `<section class="empty-state"><div><h2>无运行告警 / 当前无需处理</h2><p>检查范围：运行中的 LIVE 交易任务；未发现结果未知、数据过期、保护不足或对账差异。已关闭记录不会重新计入当前待办。</p><p class="subtle">最近检查：${fmtDate(result.as_of)}</p><div class="toolbar empty-actions"><a class="secondary" href="/" data-link>返回今日</a><a class="primary" href="/campaigns" data-link>查看交易任务</a></div></div></section>`}</section>`;
+    ${items.length ? `<div class="exception-grid">${cards}</div>` : `<section class="empty-state"><div><h2>无运行告警 / 当前无需处理</h2><p>检查范围：运行中的生产交易任务；未发现结果未知、数据过期、保护不足或对账差异。已关闭记录不会重新计入当前待办。</p><p class="subtle">最近检查：${fmtDate(result.as_of)}</p><div class="toolbar empty-actions"><a class="secondary" href="/" data-link>返回今日</a><a class="primary" href="/campaigns" data-link>查看交易任务</a></div></div></section>`}</section>`;
   document.querySelector('[data-refresh]')?.addEventListener('click', route);
 }
 

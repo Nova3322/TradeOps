@@ -112,7 +112,7 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
 
     assert response.status_code == 200
     assert "交易控制台" in response.text
-    assert "/assets/app.js?v=115" in response.text
+    assert "/assets/app.js?v=116" in response.text
     assert "/assets/styles.css?v=47" in response.text
     assert 'aria-label="交易控制台首页"' in response.text
     assert '<a href="/" data-link><span>⌂</span>今日</a>' in response.text
@@ -301,6 +301,10 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
     assert "全局风险恢复仍由管理员控制" in app_javascript.text
     assert "交易任务 · 运行告警详情" in app_javascript.text
     assert "POSITION_STALE" in app_javascript.text
+    assert "function formatExceptionDetail" in app_javascript.text
+    assert "exceptionCategory(item.code)" in app_javascript.text
+    assert "运行中的生产交易任务" in app_javascript.text
+    assert "运行中的 LIVE 交易任务" not in app_javascript.text
     assert "打开交易任务并按顺序处理" in app_javascript.text
     assert "new WebSocket(`${scheme}://${location.host}/ws/opportunities`)" in app_javascript.text
     assert "function groupOpportunities" in app_javascript.text
@@ -369,7 +373,7 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
 
     service_worker = get(app, "/sw.js")
     assert service_worker.status_code == 200
-    assert "trading-shell-v95" in service_worker.text
+    assert "trading-shell-v96" in service_worker.text
     assert "self.skipWaiting()" in service_worker.text
     assert "self.clients.claim()" in service_worker.text
     assert "await fetch(event.request)" in service_worker.text
@@ -549,6 +553,53 @@ def test_reviewer_today_combines_proposal_and_risk_restore_work_without_false_ze
         assert.equal(unavailable.hasReviewWork, false);
         assert.equal(unavailable.needsAttention, true);
         assert.equal(unavailable.headline, "提案无待办；风险恢复状态暂不可用");
+        """
+    )
+    completed = subprocess.run(  # noqa: S603
+        [node, "--input-type=module", "-e", script, str(app_path)],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stderr
+
+
+def test_runtime_alert_copy_keeps_internal_codes_out_of_primary_labels() -> None:
+    node = shutil.which("node")
+    assert node is not None
+    app_path = Path(__file__).parents[2] / "src" / "trading_control_plane" / "web" / "app.js"
+    script = textwrap.dedent(
+        r"""
+        import assert from "node:assert/strict";
+        import fs from "node:fs";
+        import vm from "node:vm";
+
+        const source = fs.readFileSync(process.argv[1], "utf8");
+        const from = source.indexOf("const exceptionGuidance");
+        const to = source.indexOf("\nconst riskReasonGuidance", from);
+        assert.notEqual(from, -1);
+        assert.notEqual(to, -1);
+        const context = vm.createContext({
+          fmtDate: () => "8月5日 14:00",
+          fmtSeconds: () => "5 分钟",
+          fmtOperationalCopy: () => "技术详情已记录",
+        });
+        vm.runInContext(
+          source.slice(from, to)
+          + "; this.category = exceptionCategory; this.detail = formatExceptionDetail;",
+          context,
+        );
+
+        assert.equal(context.category("ORDER_INTENT_UNKNOWN"), "结果未知");
+        assert.equal(context.category("POSITION_UNKNOWN"), "事实缺失");
+        assert.equal(context.category("POSITION_STALE"), "数据过期");
+        assert.equal(context.category("PROTECTION_INSUFFICIENT"), "保护不足");
+        assert.equal(context.category("RECONCILIATION_DIFFERENCE"), "对账差异");
+        assert.equal(context.detail("observed_at=2026-08-05T06:00:00Z"), "最近有效事实：8月5日 14:00");
+        assert.equal(context.detail("max_age_seconds=300"), "最长有效期：5 分钟");
+        assert.equal(context.detail("POSITION_FACT_NEWER"), "仓位事实晚于最近对账");
+        assert.equal(context.detail("ORDER_INTENT_NEWER"), "订单意图晚于最近对账");
+        assert.equal(context.detail("UNMAPPED_INTERNAL_CODE"), "技术详情已记录");
         """
     )
     completed = subprocess.run(  # noqa: S603

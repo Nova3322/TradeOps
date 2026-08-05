@@ -452,3 +452,28 @@ final result: passed for the current rate-limited runtime state; execution-worke
 - Complete and misaligned fixtures: `11-complete-desktop.png`, `12-misaligned-desktop.png`.
 
 final result: passed; the dashboard preserves usable single-source history while refusing to manufacture a current three-source total
+
+## 2026-08-05: Today and runtime-alert operator copy
+
+### P0 / P1 / P2 status
+
+- P0: none open. Runtime-alert detail exposes facts and links only; it does not add any risk release, authorization, order or capital action.
+- P1 closed: raw exception codes are no longer the primary status label. Human categories and action-oriented Chinese copy lead each card; the code remains visible as a secondary diagnostic ID.
+- P1 verified: a disposable LIVE campaign produced four fail-closed alerts, and Today showed the same one affected campaign / four issues without a second fact source.
+- P2 verified: the zero-alert empty state names the production scope; desktop and requested 390/430 responsive viewports showed no document-level horizontal overflow.
+
+### Five-dimensional evidence
+
+- Code: one shared exception API, human category/detail projection, legacy route compatibility and cache version bump.
+- API: the isolated campaign returned `CAMPAIGN_UNKNOWN`, `RISK_RESERVATION_UNKNOWN`, `ORDER_INTENT_UNKNOWN` and `POSITION_UNKNOWN` with precise owner/impact/next-step fields.
+- Actual page: all four cards rendered with friendly primary labels; raw codes appeared only under `诊断编号`.
+- End-to-end runtime: Today showed one affected task and four issues, matching the detail page exactly.
+- Tests: focused Web shell and M2 campaign API suites passed; syntax and diff checks passed.
+
+### Accepted screenshots
+
+- Desktop: `artifacts/product-audit/today-runtime-alerts-2026-08-05/02-alerts-desktop.png`.
+- Requested 390 px: `03-alerts-390.png`.
+- Requested 430 px: `04-alerts-430.png`.
+
+final result: passed; runtime alerts are readable, scoped to production campaigns and remain fail-closed

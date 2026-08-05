@@ -2133,7 +2133,7 @@ class TradingQueries:
                 "CRITICAL",
                 "交易运维",
                 "可能存在未确认订单结果",
-                "先同步订单与成交, 再处理未知意图",
+                "先同步订单与成交，再处理未知意图",  # noqa: RUF001
             ),
             "POSITION_UNKNOWN": (
                 "CRITICAL",
@@ -2185,7 +2185,7 @@ class TradingQueries:
                     "next_action": next_action,
                     "action_available": False,
                     "action_unavailable_reason": (
-                        "告警详情只提供事实与路径; 必须回到受影响交易任务按后端安全条件处理"
+                        "告警详情只提供事实与路径；必须回到受影响交易任务按后端安全条件处理"  # noqa: RUF001
                     ),
                 }
             )
