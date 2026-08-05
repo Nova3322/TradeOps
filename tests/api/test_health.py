@@ -112,8 +112,8 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
 
     assert response.status_code == 200
     assert "交易控制台" in response.text
-    assert "/assets/app.js?v=102" in response.text
-    assert "/assets/styles.css?v=43" in response.text
+    assert "/assets/app.js?v=103" in response.text
+    assert "/assets/styles.css?v=44" in response.text
     assert 'aria-label="交易控制台首页"' in response.text
     assert '<a href="/" data-link><span>⌂</span>今日</a>' in response.text
     assert 'id="mobile-nav-toggle"' in response.text
@@ -205,7 +205,13 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
     assert "NOT_SUBMITTED:'未提交'" in app_javascript.text
     assert "账户范围" in app_javascript.text
     assert "默认账户" in app_javascript.text
-    assert "{BINANCE:'币安', HYPERLIQUID:'Hyperliquid'}" in app_javascript.text
+    assert "{BINANCE:'Binance', HYPERLIQUID:'Hyperliquid'}" in app_javascript.text
+    assert "当前三方总净值" in app_javascript.text
+    assert "当前不可汇总" in app_javascript.text
+    assert "alignment_tolerance_seconds" in app_javascript.text
+    assert "断档不连线" in app_javascript.text
+    assert "function capitalSeriesLargestChange" in app_javascript.text
+    assert "capital-chart-tooltip" in app_javascript.text
     assert "latestPoint && capitalTrendVisibility" in app_javascript.text
     assert "未配置或未同步" in app_javascript.text
     assert "旧流程只保留为只读审计记录" in app_javascript.text
@@ -861,8 +867,21 @@ def test_capital_web_projection_only_renders_live_records() -> None:
           context,
         ));
         const staggeredTotal = staggered.find(item => item.source === "TOTAL");
-        assert.equal(staggeredTotal.points.length, 2);
-        assert.deepEqual(staggeredTotal.points.map(point => point.value), [60, 61]);
+        assert.equal(staggeredTotal.points.length, 0);
+        assert.equal(staggeredTotal.timeMisaligned, true);
+
+        const aligned = JSON.parse(vm.runInContext(
+          `JSON.stringify(capitalHistorySeries([
+            {environment:"LIVE",location_type:"VENUE",venue:"BINANCE",usd_equity:"10",observed_at:"2026-08-02T10:00:10Z"},
+            {environment:"LIVE",location_type:"VENUE",venue:"HYPERLIQUID",usd_equity:"20",observed_at:"2026-08-02T10:00:35Z"},
+            {environment:"LIVE",location_type:"VAULT",venue:"VAULT",usd_equity:"30",observed_at:"2026-08-02T10:00:55Z"}
+          ], 60))`,
+          context,
+        ));
+        const alignedTotal = aligned.find(item => item.source === "TOTAL");
+        assert.equal(alignedTotal.points.length, 1);
+        assert.equal(alignedTotal.points[0].value, 60);
+        assert.equal(alignedTotal.latestCompleteAt, Date.parse("2026-08-02T10:00:55Z"));
 
         const staleCarryForward = JSON.parse(vm.runInContext(
           `JSON.stringify(capitalHistorySeries([
@@ -876,13 +895,25 @@ def test_capital_web_projection_only_renders_live_records() -> None:
         const staleTotal = staleCarryForward.find(item => item.source === "TOTAL");
         assert.equal(staleTotal.points.length, 1);
         assert.equal(staleTotal.points[0].value, 60);
+        const staleBinance = staleCarryForward.find(item => item.source === "BINANCE");
+        assert.equal(staleBinance.points.at(-1).breakBefore, true);
+        assert.equal(
+          vm.runInContext(
+            `capitalSeriesLargestChange(${JSON.stringify(staleBinance)})`,
+            context,
+          ),
+          null,
+        );
+
+        assert.equal(vm.runInContext(`formatCapitalUsd("9.96773487")`, context), "$9.9677");
+        assert.equal(vm.runInContext(`formatCapitalUsd("1967.73487")`, context), "$1,967.73");
 
         assert.equal(
           vm.runInContext(
             `capitalSourceIssue(["STALE_LIVE_SOURCE:HYPERLIQUID"], "HYPERLIQUID")`,
             context,
           ),
-          "链上永续数据已过期",
+          "Hyperliquid：数据已过期",
         );
         """
     )

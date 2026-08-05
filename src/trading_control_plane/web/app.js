@@ -2401,9 +2401,9 @@ async function renderCampaignFacts(mode) {
 }
 
 const LIVE_CAPITAL_SOURCES = [
-  {key:'BINANCE', location_type:'VENUE', label:'币安'},
-  {key:'HYPERLIQUID', location_type:'VENUE', label:'链上永续'},
-  {key:'VAULT', location_type:'VAULT', label:'资金库'},
+  {key:'BINANCE', location_type:'VENUE', label:'Binance'},
+  {key:'HYPERLIQUID', location_type:'VENUE', label:'Hyperliquid'},
+  {key:'VAULT', location_type:'VAULT', label:'Vault'},
 ];
 const DIRECT_CAPITAL_PATHS = [
   {path:'VAULT_TO_BINANCE', from:'资金库', to:'币安', badge:'10 分钟等待', action:'检查转入币安条件', copy:'释放到期后重新校验，再转入已授权币安地址。', steps:['申请释放','等待 10 分钟','到期重检','进入币安']},
@@ -2446,13 +2446,23 @@ function liveCapitalInTransit(transfers) {
 
 function formatCapitalIssue(value) {
   const [code, source = ''] = String(value || '').split(':');
-  const sourceLabel = ({BINANCE:'币安',HYPERLIQUID:'链上永续',VAULT:'链上资金库'}[source] || source);
+  const sourceLabel = ({BINANCE:'Binance',HYPERLIQUID:'Hyperliquid',VAULT:'Vault'}[source] || source);
   return ({
-    MISSING_LIVE_SOURCE:`${sourceLabel || '资金来源'}尚未同步`,
-    STALE_LIVE_SOURCE:`${sourceLabel || '资金来源'}数据已过期`,
-    UNKNOWN_USD_VALUE:`${sourceLabel || '资金来源'}缺少美元估值`,
-    CURRENT_VALUE_MISSING:`${sourceLabel || '资金来源'}没有可采信的当前美元净值`,
+    MISSING_LIVE_SOURCE:`${sourceLabel || '资金来源'}：尚未同步`,
+    STALE_LIVE_SOURCE:`${sourceLabel || '资金来源'}：数据已过期`,
+    UNKNOWN_USD_VALUE:`${sourceLabel || '资金来源'}：缺少美元估值`,
+    CURRENT_VALUE_MISSING:`${sourceLabel || '资金来源'}：没有可采信的当前美元净值`,
+    TIME_MISALIGNED_SOURCE:`${sourceLabel || '资金来源'}：与其他来源时间错位`,
   }[code] || '资金数据尚未完整');
+}
+
+function formatCapitalUsd(value) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) return '—';
+  const fractionDigits = Math.abs(number) < 100 ? 4 : 2;
+  return new Intl.NumberFormat('en-US', {
+    style:'currency', currency:'USD', minimumFractionDigits:fractionDigits, maximumFractionDigits:fractionDigits,
+  }).format(number);
 }
 
 function capitalSourceIssue(issues, source) {
@@ -2500,8 +2510,8 @@ function capitalBalanceRows(balances, issues = []) {
     const valuationIssue = capitalSourceIssue(issues, source);
     const historical = !missing && balance.valuation_current === false;
     const sourceLabel = balance.source_label || (balance.location_type === 'VAULT'
-      ? '资金库'
-      : ({BINANCE:'币安', HYPERLIQUID:'Hyperliquid'}[balance.venue] || balance.venue || '交易所'));
+      ? 'Vault'
+      : ({BINANCE:'Binance', HYPERLIQUID:'Hyperliquid'}[balance.venue] || balance.venue || '交易所'));
     const state = missing
       ? `<b class="capital-status-missing">数据缺失</b><br><span class="subtle">${escapeHtml(balance.missing_detail)}</span>`
       : historical
@@ -2510,7 +2520,7 @@ function capitalBalanceRows(balances, issues = []) {
     const accountScope = balance.location_type === 'VAULT'
       ? (missing ? '等待配置' : '已配置范围')
       : '默认账户';
-    return `<tr${missing || historical ? ' class="capital-missing-row"' : ''}><td data-label="资金位置"><b>${escapeHtml(sourceLabel)}</b></td><td data-label="账户范围">${escapeHtml(accountScope)}</td><td data-label="已确认可用">${fmtNumber(balance.confirmed_available)} ${escapeHtml(balance.asset)}</td><td data-label="美元净值">${balance.usd_equity === null ? '未知' : `${fmtNumber(balance.usd_equity)} USD`}</td><td data-label="源端预留">${fmtNumber(balance.source_reserved)}</td><td data-label="有效可用"><b>${fmtNumber(balance.effective_available)}</b></td><td data-label="数据状态">${state}</td><td data-label="更新时间">${missing ? '—' : fmtDate(balance.observed_at)}</td></tr>`;
+    return `<tr${missing || historical ? ' class="capital-missing-row"' : ''}><td data-label="资金位置"><b translate="no">${escapeHtml(sourceLabel)}</b></td><td data-label="账户范围">${escapeHtml(accountScope)}</td><td data-label="已确认可用">${fmtNumber(balance.confirmed_available)} ${escapeHtml(balance.asset)}</td><td data-label="美元净值">${balance.usd_equity === null ? '未知' : `${formatCapitalUsd(balance.usd_equity)}`}</td><td data-label="源端预留">${fmtNumber(balance.source_reserved)}</td><td data-label="有效可用"><b>${fmtNumber(balance.effective_available)}</b></td><td data-label="数据状态">${state}</td><td data-label="更新时间">${missing ? '—' : fmtDate(balance.observed_at)}</td></tr>`;
   }).join('');
 }
 
@@ -2520,7 +2530,7 @@ function capitalBalanceTable(rows, emptyMessage) {
     : `<div class="callout">${escapeHtml(emptyMessage)}</div>`;
 }
 
-function capitalHistorySeries(history, maxFactAgeSeconds = 300) {
+function capitalHistorySeries(history, alignmentToleranceSeconds = 60, gapToleranceSeconds = 300) {
   const grouped = new Map(LIVE_CAPITAL_SOURCES.map(source => [source.key, new Map()]));
   history.filter(item => item.usd_equity !== null && item.usd_equity !== undefined).forEach(item => {
     const source = item.location_type === 'VAULT' ? 'VAULT' : item.venue;
@@ -2530,39 +2540,84 @@ function capitalHistorySeries(history, maxFactAgeSeconds = 300) {
     if (!buckets || !Number.isFinite(timestamp) || !Number.isFinite(value)) return;
     buckets.set(timestamp, (buckets.get(timestamp) || 0) + value);
   });
-  const sourceSeries = LIVE_CAPITAL_SOURCES.map(source => ({
-    source:source.key,
-    label:source.label,
-    points:[...(grouped.get(source.key) || new Map()).entries()]
+  const gapToleranceMs = Math.max(1, Number(gapToleranceSeconds) || 300) * 1000;
+  const sourceSeries = LIVE_CAPITAL_SOURCES.map(source => {
+    const points = [...(grouped.get(source.key) || new Map()).entries()]
       .sort((left, right) => left[0] - right[0])
-      .map(([time, value]) => ({time, value})),
-  }));
-  const sourceMaps = sourceSeries.map(series => new Map(series.points.map(point => [point.time, point.value])));
+      .map(([time, value], index, entries) => ({
+        time, value,
+        breakBefore:index > 0 && time - entries[index - 1][0] > gapToleranceMs,
+      }));
+    return {source:source.key, label:source.label, points};
+  });
   const totalTimes = [...new Set(sourceSeries.flatMap(series => series.points.map(point => point.time)))]
     .sort((left, right) => left - right);
-  const maxFactAgeMs = Math.max(0, Number(maxFactAgeSeconds) || 0) * 1000;
-  const latestValues = new Map();
+  const alignmentToleranceMs = Math.max(1, Number(alignmentToleranceSeconds) || 60) * 1000;
+  const closestPoint = (points, time) => {
+    let closest = null;
+    for (const point of points) {
+      if (point.time < time - alignmentToleranceMs) continue;
+      if (point.time > time + alignmentToleranceMs) break;
+      if (!closest || Math.abs(point.time - time) < Math.abs(closest.time - time)) closest = point;
+    }
+    return closest;
+  };
   const totalPoints = [];
+  let lastSignature = '';
   totalTimes.forEach(time => {
-    sourceSeries.forEach((series, index) => {
-      if (sourceMaps[index].has(time)) {
-        latestValues.set(series.source, {time, value:sourceMaps[index].get(time)});
-      }
-    });
-    if (sourceSeries.every(series => {
-      const latest = latestValues.get(series.source);
-      return latest && time - latest.time <= maxFactAgeMs;
-    })) {
+    const matches = sourceSeries.map(series => closestPoint(series.points, time));
+    if (matches.every(Boolean)) {
+      const sourceTimes = matches.map(point => point.time);
+      if (Math.max(...sourceTimes) - Math.min(...sourceTimes) > alignmentToleranceMs) return;
+      const signature = sourceTimes.join(':');
+      if (signature === lastSignature) return;
+      lastSignature = signature;
+      const totalTime = Math.max(...sourceTimes);
+      const previous = totalPoints.at(-1);
       totalPoints.push({
-        time,
-        value:sourceSeries.reduce((sum, series) => sum + latestValues.get(series.source).value, 0),
+        time:totalTime,
+        value:matches.reduce((sum, point) => sum + point.value, 0),
+        sourceTimes,
+        breakBefore:Boolean(previous && totalTime - previous.time > gapToleranceMs),
       });
     }
   });
   return [...sourceSeries, {
     source:'TOTAL', label:'三方汇总',
     points:totalPoints,
+    alignmentToleranceSeconds:Number(alignmentToleranceSeconds) || 60,
+    latestCompleteAt:totalPoints.at(-1)?.time || null,
+    timeMisaligned:sourceSeries.every(series => series.points.length) && !totalPoints.length,
   }];
+}
+
+function capitalSeriesChange(series) {
+  const points = series?.points || [];
+  if (points.length < 2) return null;
+  const previous = points.at(-2);
+  const latest = points.at(-1);
+  const delta = latest.value - previous.value;
+  const percentage = previous.value === 0 ? null : delta / previous.value * 100;
+  return {
+    delta, percentage, time:latest.time,
+    anomalous:(percentage !== null && Math.abs(percentage) >= 1),
+  };
+}
+
+function capitalSeriesLargestChange(series) {
+  const points = series?.points || [];
+  let largest = null;
+  for (let index = 1; index < points.length; index += 1) {
+    if (points[index].breakBefore) continue;
+    const previous = points[index - 1];
+    const latest = points[index];
+    const delta = latest.value - previous.value;
+    const percentage = previous.value === 0 ? null : delta / previous.value * 100;
+    if (!largest || Math.abs(delta) > Math.abs(largest.delta)) {
+      largest = {delta, percentage, time:latest.time};
+    }
+  }
+  return largest;
 }
 
 function formatDirectCapitalBlocker(code) {
@@ -2619,7 +2674,8 @@ async function renderCapitalCenter() {
   const venueNetWorth = Object.entries(netWorth.venues || {}).map(([venue, value]) => `<div class="stat"><small>${escapeHtml(venue)} 净值</small><b>${fmtNumber(value)} ${escapeHtml(netWorth.currency)}</b></div>`).join('');
   const historySeries = capitalHistorySeries(
     item.history || [],
-    netWorth.max_fact_age_seconds,
+    netWorth.alignment_tolerance_seconds || 60,
+    Math.max(300, Number(netWorth.max_fact_age_seconds) || 300),
   );
   const visibleHistorySeries = historySeries.filter(series => capitalTrendVisibility[series.source]);
   const hasHistory = historySeries.some(series => series.points.length);
@@ -2636,9 +2692,54 @@ async function renderCapitalCenter() {
       && (series.source === 'TOTAL' ? netWorth.complete : !capitalSourceIssue(netWorth.issues, series.source));
     const summary = !latestPoint
       ? '等待数据'
-      : `${current ? '当前数据' : '历史趋势'} ${fmtCompact(latestPoint.value)} USD · ${fmtDate(latestPoint.time)}`;
-    return `<label class="capital-trend-toggle trend-${escapeHtml(series.source)} ${latestPoint ? '' : 'is-missing'}"><input type="checkbox" data-capital-trend="${escapeHtml(series.source)}" ${latestPoint && capitalTrendVisibility[series.source] ? 'checked' : ''} ${latestPoint ? '' : 'disabled'}><i aria-hidden="true"></i><span><b>${escapeHtml(series.label)}</b><small>${escapeHtml(summary)}</small></span></label>`;
+      : `${formatCapitalUsd(latestPoint.value)} · ${current ? '当前' : '历史'} · ${fmtDate(latestPoint.time)}`;
+    return `<label class="capital-trend-toggle trend-${escapeHtml(series.source)} ${latestPoint ? '' : 'is-missing'}"><input type="checkbox" data-capital-trend="${escapeHtml(series.source)}" ${latestPoint && capitalTrendVisibility[series.source] ? 'checked' : ''} ${latestPoint ? '' : 'disabled'}><i aria-hidden="true"></i><span><b translate="no">${escapeHtml(series.label)}</b><small>${escapeHtml(summary)}</small></span></label>`;
   }).join('');
+  const totalSeries = historySeries.find(series => series.source === 'TOTAL');
+  const latestCompleteTotal = totalSeries?.points.at(-1) || null;
+  const totalHeadline = netWorth.total !== null && netWorth.total !== undefined
+    ? formatCapitalUsd(netWorth.total)
+    : '当前不可汇总';
+  const totalSupporting = netWorth.complete
+    ? `三方同一时间口径 · ${fmtDate(netWorth.as_of)}`
+    : latestCompleteTotal
+      ? `最近完整汇总 ${formatCapitalUsd(latestCompleteTotal.value)} · ${fmtDate(latestCompleteTotal.time)}`
+      : '尚无三方同一时间口径的完整记录';
+  const sourceCards = [
+    {source:'BINANCE', label:'Binance', value:netWorth.venues?.BINANCE},
+    {source:'HYPERLIQUID', label:'Hyperliquid', value:netWorth.venues?.HYPERLIQUID},
+    {source:'VAULT', label:'Vault', value:netWorth.vault},
+  ].map(source => {
+    const sourceSeries = historySeries.find(series => series.source === source.source);
+    const latestPoint = sourceSeries?.points.at(-1);
+    const issue = capitalSourceIssue(netWorth.issues, source.source);
+    const current = source.value !== null && source.value !== undefined && !issue;
+    const value = current ? source.value : latestPoint?.value;
+    const state = current ? '当前可信' : issue || '等待数据';
+    const time = current ? netWorth.source_as_of?.[source.source] : latestPoint?.time;
+    return `<article class="capital-worth-card ${current ? 'is-current' : 'is-limited'}"><div><small translate="no">${escapeHtml(source.label)}</small><b>${formatCapitalUsd(value)}</b></div><span>${escapeHtml(state)}</span><p>${time ? `最后有效 ${fmtDate(time)}` : '尚无有效时间'} · 来源：<span translate="no">${escapeHtml(source.label)}</span> 只读账户</p></article>`;
+  }).join('');
+  const changes = historySeries.map(series => ({series, change:capitalSeriesChange(series)}))
+    .filter(item => item.change)
+    .sort((left, right) => right.change.time - left.change.time);
+  const abnormalChanges = changes.filter(item => item.change.anomalous);
+  const latestChange = changes[0];
+  const largestChartChange = historySeries.map(series => ({
+    series, change:capitalSeriesLargestChange(series),
+  })).filter(item => item.change).sort((left, right) => Math.abs(right.change.delta) - Math.abs(left.change.delta))[0];
+  const changeCopy = abnormalChanges.length
+    ? abnormalChanges.slice(0, 2).map(({series, change}) => `${series.label} ${change.delta >= 0 ? '上升' : '下降'} ${formatCapitalUsd(Math.abs(change.delta))}（${Math.abs(change.percentage).toFixed(2)}%）`).join('；')
+    : latestChange && largestChartChange
+      ? `${latestChange.series.label} 最新 ${latestChange.change.delta >= 0 ? '+' : '-'}${formatCapitalUsd(Math.abs(latestChange.change.delta))}（${Math.abs(latestChange.change.percentage || 0).toFixed(2)}%）；图中最大单次变化为 ${largestChartChange.series.label} ${largestChartChange.change.delta >= 0 ? '+' : '-'}${formatCapitalUsd(Math.abs(largestChartChange.change.delta))}（${Math.abs(largestChartChange.change.percentage || 0).toFixed(2)}%），未达到 1% 异常阈值`
+      : '至少需要两个有效记录后才计算变化';
+  const issueDetails = [...new Set((netWorth.issues || []).map(issue => {
+    const source = String(issue).split(':')[1];
+    const lastTime = source && netWorth.source_as_of?.[source];
+    return `${formatCapitalIssue(issue)}${lastTime ? `（最后有效 ${fmtDate(lastTime)}）` : ''}`;
+  }))];
+  const trustCopy = netWorth.complete
+    ? '三方数据完整、新鲜且时间对齐，可以计算当前汇总。'
+    : `${issueDetails.join('；') || '资金数据尚未完整'}。影响：当前三方总净值不计算，但其他有效单线继续保留。`;
   const liveBalanceRows = capitalBalanceRows(
     capitalSourceSlots(balances.live, notiltStatus),
     netWorth.issues,
@@ -2659,51 +2760,97 @@ async function renderCapitalCenter() {
   }).join('');
   const legacyRows = transfers.live.map(transfer => `<tr><td data-label="记录">${shortId(transfer.capital_transfer_id)}</td><td data-label="方向">${escapeHtml(fmtCapitalDirection(transfer.direction))}</td><td data-label="金额">${fmtNumber(transfer.gross_amount)} ${escapeHtml(transfer.asset)}</td><td data-label="状态">${escapeHtml(fmtStatus(transfer.status))}</td><td data-label="外部回执">${escapeHtml(transfer.external_transfer_id || '未提交')}</td></tr>`).join('');
   main.innerHTML = `<section class="page capital-page"><header class="page-head"><div><p class="eyebrow">生产资金 · 缺失即阻断 · 不代签不广播</p><h1>资金中心</h1><p class="lede">只保留四条明确资金路径。每次操作都先最终确认，再校验地址、网络、金额、额度和实时安全开关；当前缺少生产参数时只记录阻断与阶段，不会生成订单、签名或发送资金。</p></div></header><div class="stats"><div class="stat"><small>三方总净值</small><b>${fmtNumber(netWorth.total)} ${escapeHtml(netWorth.currency)}</b></div><div class="stat"><small>资金库</small><b>${fmtNumber(netWorth.vault)} ${escapeHtml(netWorth.currency)}</b></div>${venueNetWorth}<div class="stat"><small>净值状态</small><b style="font-size:14px">${escapeHtml(fmtStatus(netWorth.complete ? 'CURRENT' : 'INCOMPLETE'))}</b></div><div class="stat"><small>资金操作</small><b style="font-size:14px">${escapeHtml(fmtStatus(item.real_transfer_gate || 'DISABLED'))}</b></div><div class="stat"><small>在途 / 占用</small><b>${fmtNumber(liveInTransit)}</b></div></div><section class="capital-chart-panel"><div class="chart-head"><div><p class="eyebrow">资金统计</p><h2>资金净值趋势</h2><p class="subtle">固定四条线：币安、Hyperliquid、资金库和三方汇总。缺失来源显示“等待数据”，不会补成 0；历史曲线不会冒充当前净值。</p></div><b>${fmtNumber(netWorth.total)} <small>${escapeHtml(netWorth.currency)}</small></b></div>${hasHistory ? `<canvas id="capital-chart" height="260" aria-label="币安、Hyperliquid、资金库和三方汇总四条资金趋势"></canvas>` : '<div class="chart-empty">完成生产资金同步后才显示曲线；缺失数据不会补零。</div>'}<div class="chart-legend" role="group" aria-label="选择显示的资金曲线">${chartLegend}</div></section>${netWorth.complete ? '' : `<div class="callout"><b>净值不完整：</b>${escapeHtml([...new Set((netWorth.issues || []).map(formatCapitalIssue))].join('；') || '尚无资金数据')}</div>`}<section><h2>资金位置</h2><p class="subtle">固定展示三处资金；缺失金额显示为“—”，历史快照不会计入当前净值。</p>${capitalBalanceTable(liveBalanceRows, '尚无生产资金数据。')}</section><article class="card"><div class="card-heading"><div><p class="eyebrow">生产配置预检</p><h2>只显示是否配置，不回显地址或凭据</h2></div><span class="status-pill">单账户模式</span></div><dl class="definition-grid">${definition('网络 / 资产', `${directConfiguration.network || '—'} / ${directConfiguration.asset || '—'}`)}${definition('NoTilt 官方 SDK', directConfiguration.notilt_sdk_available ? '已安装' : '不可用')}${definition('NoTilt 范围', directConfiguration.notilt_scope_configured ? '已配置' : '缺少官方金库或 Agent 范围')}${definition('自有钱包', directConfiguration.owned_arbitrum_address_configured ? '已配置' : '未配置')}${definition('币安受限路径', directConfiguration.binance_account_configured && directConfiguration.binance_whitelist_destination_configured && directConfiguration.binance_withdrawal_destination_configured ? '已配置' : '不完整')}${definition('Hyperliquid 路径', directConfiguration.hyperliquid_account_configured && directConfiguration.hyperliquid_contract_configured ? '已配置' : '不完整')}${definition('金额 / 费用上限', directConfiguration.limits_configured ? '已配置' : '未配置')}${definition('签名 / 广播', '始终由独立人控钱包处理；Agent 不支持')}</dl></article><section class="capital-routes-section"><div class="card-heading"><div><p class="eyebrow">四条直达路径</p><h2>选择资金从哪里到哪里</h2><p class="subtle">先选路径，再在一个确认窗口里填写金额；安全说明不再重复四遍。</p></div><span class="status-pill ${item.real_transfer_gate === 'ENABLED' ? 'status-APPROVED' : 'status-DISABLED'}">${escapeHtml(fmtStatus(item.real_transfer_gate || 'DISABLED'))}</span></div>${directConfigurationEditor}<div class="callout direct-capital-boundary"><b>统一安全边界：</b>每条路径都重新校验地址、网络、资产、额度、实时状态与安全开关。NoTilt 只构建官方 SDK 无签名请求；签名和广播只能由独立人控钱包逐笔完成。</div><div class="capital-route-grid">${directPathCards}</div></section>${directCapitalDialog}<section><h2>操作日志、阶段与回执</h2>${directRows ? `<div class="table-wrap is-scrollable capital-operation-table"><table><thead><tr><th>操作</th><th>路径 / 金额</th><th>阶段</th><th>状态 / 回执</th><th>精确阻断</th></tr></thead><tbody>${directRows}</tbody></table></div>` : '<div class="callout">尚无直达资金操作。提交一次最终确认后，会在这里记录校验结果。</div>'}</section><section><h2>历史资金划转</h2><p class="subtle">旧流程只保留为只读审计记录，不再是四条直达操作的必经界面。</p>${legacyRows ? `<div class="table-wrap is-scrollable capital-history-table"><table><thead><tr><th>记录</th><th>方向</th><th>金额</th><th>状态</th><th>外部回执</th></tr></thead><tbody>${legacyRows}</tbody></table></div>` : '<div class="callout">尚无历史资金划转。</div>'}</section></section>`;
+  const pageHead = main.querySelector('.capital-page > .page-head');
+  pageHead.classList.add('capital-page-head');
+  pageHead.innerHTML = `<div><p class="eyebrow">生产资金 · 只读事实</p><h1>资金中心</h1><p class="lede">先看总额、资金位置和数据可信度，再处理资金路径。缺失、过期或时间错位的数据不会补零，也不会参与汇总。</p></div><div class="capital-gate-summary"><small>资金操作</small><b>${escapeHtml(fmtStatus(item.real_transfer_gate || 'DISABLED'))}</b><span>在途 / 占用 ${fmtNumber(liveInTransit)} USDC</span></div>`;
+  const legacyStats = main.querySelector('.capital-page > .stats');
+  legacyStats.outerHTML = `<section class="capital-overview" aria-label="当前资金净值"><article class="capital-total-card ${netWorth.complete ? 'is-current' : 'is-limited'}"><small>当前三方总净值</small><b>${escapeHtml(totalHeadline)}</b><p>${escapeHtml(totalSupporting)}</p></article><div class="capital-source-cards">${sourceCards}</div></section><section class="capital-trust-panel ${netWorth.complete ? 'is-current' : 'is-limited'}"><div><b>${netWorth.complete ? '数据可信，可用于当前汇总' : '当前汇总已阻断'}</b><p>${escapeHtml(trustCopy)}</p></div><span>${netWorth.complete ? '完整' : '需关注'}</span></section>`;
+  const chartPanel = main.querySelector('.capital-chart-panel');
+  chartPanel.innerHTML = `<div class="chart-head"><div><p class="eyebrow">资金净值趋势</p><h2>四条固定资金曲线</h2><p class="subtle">Binance、Hyperliquid、Vault 与三方汇总。汇总只使用 ${Number(netWorth.alignment_tolerance_seconds || 60)} 秒内对齐的三方事实；断档不连线。</p></div><div class="chart-head-value"><b>${escapeHtml(totalHeadline)}</b><small>${escapeHtml(totalSupporting)}</small></div></div><div class="chart-legend" role="group" aria-label="选择显示的资金曲线">${chartLegend}</div>${hasHistory ? `<div class="capital-chart-wrap"><canvas id="capital-chart" height="300" aria-label="Binance、Hyperliquid、Vault 和三方汇总四条 USD 资金趋势"></canvas><div class="capital-chart-tooltip" role="status" hidden></div></div>` : '<div class="chart-empty">尚无可绘制的资金历史；缺失数据不会补零。</div>'}<div class="capital-change-note ${abnormalChanges.length ? 'is-anomaly' : ''}"><b>${abnormalChanges.length ? '异常变化提示' : '最近变化'}</b><span>${escapeHtml(changeCopy)}</span></div>`;
+  const legacyIncomplete = chartPanel.nextElementSibling?.classList.contains('callout') ? chartPanel.nextElementSibling : null;
+  legacyIncomplete?.remove();
+  const capitalPositionsHeading = [...main.querySelectorAll('section > h2')].find(heading => heading.textContent === '资金位置');
+  if (capitalPositionsHeading) {
+    capitalPositionsHeading.textContent = '资金位置明细';
+    const detail = capitalPositionsHeading.nextElementSibling;
+    if (detail?.classList.contains('subtle')) detail.textContent = 'USD 金额统一精度：小额四位、大额两位；原资产余额保留在明细中。历史快照不会计入当前净值。';
+  }
   drawCapitalChart(visibleHistorySeries);
-  bindCapitalActions();
+  bindCapitalActions(historySeries);
 }
 
 function drawCapitalChart(series) {
   const canvas = document.querySelector('#capital-chart');
+  if (!canvas) return;
   const allPoints = series.flatMap(item => item.points);
-  if (!canvas || !allPoints.length) return;
   const ratio = window.devicePixelRatio || 1;
   const width = canvas.clientWidth;
-  const height = 260;
+  const height = width < 520 ? 270 : 300;
   canvas.width = width * ratio; canvas.height = height * ratio;
   const context = canvas.getContext('2d'); context.scale(ratio, ratio);
   const styles = getComputedStyle(document.documentElement);
   const line = styles.getPropertyValue('--line').trim();
   const panel = styles.getPropertyValue('--panel').trim();
+  const muted = styles.getPropertyValue('--muted').trim();
+  if (!allPoints.length) {
+    context.fillStyle = muted;
+    context.font = '11px system-ui';
+    context.textAlign = 'center';
+    context.fillText('请至少选择一条有数据的曲线', width / 2, height / 2);
+    return;
+  }
   const colors = ['--accent','--warning','--danger','--ink'].map(name => styles.getPropertyValue(name).trim());
-  const values = allPoints.map(point => point.value);
   const times = allPoints.map(point => point.time);
-  const minimumValue = Math.min(...values);
-  const maximumValue = Math.max(...values);
-  const valuePadding = Math.max((maximumValue - minimumValue) * 0.12, Math.abs(maximumValue) * 0.005, 0.01);
   const minimumTime = Math.min(...times);
   const maximumTime = Math.max(...times);
-  const left = 12, right = width - 12, top = 18, bottom = height - 22;
+  const left = width < 520 ? 64 : 68, right = width - 12, top = 12, bottom = height - 30;
   const x = time => maximumTime === minimumTime ? (left + right) / 2 : left + ((right - left) * (time - minimumTime) / (maximumTime - minimumTime));
-  const y = value => bottom - ((bottom - top) * (value - (minimumValue - valuePadding)) / ((maximumValue - minimumValue) + valuePadding * 2));
-  context.strokeStyle = line; context.lineWidth = 1;
-  for (let index = 0; index < 4; index += 1) {
-    const y = top + ((bottom - top) * index / 3);
-    context.beginPath(); context.moveTo(left, y); context.lineTo(right, y); context.stroke();
-  }
+  const total = series.find(item => item.source === 'TOTAL' && item.points.length);
+  const sources = series.filter(item => item.source !== 'TOTAL' && item.points.length);
+  const bands = total && sources.length
+    ? [{items:[total], top, bottom:top + (bottom - top) * .39}, {items:sources, top:top + (bottom - top) * .53, bottom}]
+    : [{items:series.filter(item => item.points.length), top, bottom}];
+  const hitPoints = [];
+  context.font = width < 520 ? '9px system-ui' : '10px system-ui';
+  context.textBaseline = 'middle';
+  bands.forEach(band => {
+    const values = band.items.flatMap(item => item.points.map(point => point.value));
+    const minimumValue = Math.min(...values);
+    const maximumValue = Math.max(...values);
+    const rawRange = maximumValue - minimumValue;
+    const valuePadding = Math.max(rawRange * .18, Math.abs(maximumValue) * .0005, .001);
+    const range = Math.max(rawRange + valuePadding * 2, .002);
+    band.minimum = minimumValue - valuePadding;
+    band.maximum = band.minimum + range;
+    band.y = value => band.bottom - ((band.bottom - band.top) * (value - band.minimum) / range);
+    for (let index = 0; index < 3; index += 1) {
+      const gridY = band.top + ((band.bottom - band.top) * index / 2);
+      const tickValue = band.maximum - ((band.maximum - band.minimum) * index / 2);
+      context.strokeStyle = line; context.lineWidth = 1;
+      context.beginPath(); context.moveTo(left, gridY); context.lineTo(right, gridY); context.stroke();
+      context.fillStyle = muted; context.textAlign = 'right';
+      context.fillText(formatCapitalUsd(tickValue), left - 7, gridY);
+    }
+  });
   series.forEach((item, seriesIndex) => {
     if (!item.points.length) return;
+    const band = bands.find(candidate => candidate.items.includes(item));
+    if (!band) return;
     const colorIndex = ({BINANCE:0, HYPERLIQUID:1, VAULT:2, TOTAL:3})[item.source];
     const color = colors[colorIndex ?? seriesIndex] || colors[0];
-    const projected = item.points.map(point => ({x:x(point.time), y:y(point.value)}));
+    const projected = item.points.map(point => ({...point, x:x(point.time), y:band.y(point.value)}));
     const points = projected.reduce((result, point, index) => {
       const previous = result.at(-1);
-      if (!previous || point.x - previous.x >= 2 || index === projected.length - 1) result.push(point);
+      if (!previous || point.breakBefore || point.x - previous.x >= 2 || index === projected.length - 1) result.push(point);
       else result[result.length - 1] = point;
       return result;
     }, []);
     context.beginPath();
-    points.forEach((point, index) => index ? context.lineTo(point.x, point.y) : context.moveTo(point.x, point.y));
+    points.forEach((point, index) => {
+      if (!index || point.breakBefore) context.moveTo(point.x, point.y);
+      else context.lineTo(point.x, point.y);
+      hitPoints.push({...point, source:item.source, label:item.label, color});
+    });
     context.strokeStyle = color;
     context.lineWidth = item.source === 'TOTAL' ? 3 : 2.25;
     context.lineJoin = 'round';
@@ -2720,12 +2867,35 @@ function drawCapitalChart(series) {
     context.lineWidth = 2;
     context.stroke();
   });
+  context.fillStyle = muted; context.textBaseline = 'bottom';
+  const timeFormatter = new Intl.DateTimeFormat('zh-CN', {month:'numeric', day:'numeric', hour:'2-digit', minute:'2-digit'});
+  context.textAlign = 'left'; context.fillText(timeFormatter.format(new Date(minimumTime)), left, height - 4);
+  context.textAlign = 'right'; context.fillText(timeFormatter.format(new Date(maximumTime)), right, height - 4);
+  const tooltip = document.querySelector('.capital-chart-tooltip');
+  canvas.onpointermove = event => {
+    const rect = canvas.getBoundingClientRect();
+    const pointerX = event.clientX - rect.left;
+    const pointerY = event.clientY - rect.top;
+    const nearest = hitPoints.reduce((best, point) => {
+      const distance = Math.hypot(point.x - pointerX, point.y - pointerY);
+      return !best || distance < best.distance ? {point, distance} : best;
+    }, null);
+    if (!tooltip || !nearest || nearest.distance > 30) {
+      if (tooltip) tooltip.hidden = true;
+      return;
+    }
+    tooltip.hidden = false;
+    tooltip.innerHTML = `<b translate="no">${escapeHtml(nearest.point.label)}</b><span>${escapeHtml(formatCapitalUsd(nearest.point.value))}</span><small>${escapeHtml(fmtDate(nearest.point.time))}</small>`;
+    tooltip.style.left = `${Math.min(width - 145, Math.max(6, nearest.point.x + 10))}px`;
+    tooltip.style.top = `${Math.max(6, nearest.point.y - 64)}px`;
+  };
+  canvas.onpointerleave = () => { if (tooltip) tooltip.hidden = true; };
 }
 
-function bindCapitalActions() {
+function bindCapitalActions(historySeries = []) {
   document.querySelectorAll('[data-capital-trend]').forEach(input => input.addEventListener('change', event => {
     capitalTrendVisibility[event.currentTarget.dataset.capitalTrend] = event.currentTarget.checked;
-    route();
+    drawCapitalChart(historySeries.filter(series => capitalTrendVisibility[series.source]));
   }));
   document.querySelectorAll('[data-notilt-preview]').forEach(button => button.addEventListener('click', async event => {
     const target = event.currentTarget;

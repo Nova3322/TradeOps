@@ -304,6 +304,12 @@ def test_live_net_worth_and_risk_capital_combine_two_venues_and_vault(
         "environment": "LIVE",
         "currency": "USD",
         "max_fact_age_seconds": 300,
+        "alignment_tolerance_seconds": 60,
+        "source_as_of": {
+            "BINANCE": now.isoformat(),
+            "HYPERLIQUID": now.isoformat(),
+            "VAULT": now.isoformat(),
+        },
         "venues": {"BINANCE": "10.000000000000000000", "HYPERLIQUID": "20.000000000000000000"},
         "vault": "60.000000000000000000",
         "total": "90.000000000000000000",
@@ -429,6 +435,49 @@ def test_live_net_worth_and_risk_capital_combine_two_venues_and_vault(
     assert stale_center["net_worth"]["total"] is None
     assert stale_center["net_worth"]["issues"].count("STALE_LIVE_SOURCE:BINANCE") == 1
     assert not any(issue.startswith("VENUE:") for issue in stale_center["net_worth"]["issues"])
+
+
+def test_live_net_worth_rejects_time_misaligned_sources(
+    database: Database, service: TradingService
+) -> None:
+    ids = seed(service)
+    now = datetime.now(UTC)
+    service.record_account_equity(
+        "binance-main", "BINANCE", Decimal("10"), Decimal("10"), "USDT", True,
+        ids["admin"], environment=ExecutionEnvironment.LIVE, now=now,
+    )
+    service.record_account_equity(
+        "hyperliquid-main", "HYPERLIQUID", Decimal("20"), Decimal("20"), "USDC", True,
+        ids["admin"], environment=ExecutionEnvironment.LIVE, now=now - timedelta(seconds=90),
+    )
+    vault = "0x1111111111111111111111111111111111111111"
+    agent = "0x2222222222222222222222222222222222222222"
+    service.record_notilt_vault_snapshot(
+        actor_id=ids["proposer"],
+        snapshot=NoTiltVaultSnapshot(
+            chain_id=42161,
+            chain="ARBITRUM",
+            vault=vault,
+            agent=agent,
+            budgets=(
+                notilt_budget(
+                    asset="USDC",
+                    balance=Decimal("30"),
+                    vault=vault,
+                    agent=agent,
+                    now=now,
+                ),
+            ),
+        ),
+        valuations={"USDC": UsdValuation(Decimal(1), Decimal("30"), now)},
+        now=now,
+    )
+
+    center = TradingQueries(database).capital_center(ids["proposer"])
+    assert center["net_worth"]["total"] is None
+    assert center["net_worth"]["complete"] is False
+    assert center["net_worth"]["issues"] == ["TIME_MISALIGNED_SOURCE:HYPERLIQUID"]
+    assert center["net_worth"]["venues"]["HYPERLIQUID"] == "20.000000000000000000"
 
 
 def test_live_unsigned_transfer_still_requires_disabled_by_default_gate(

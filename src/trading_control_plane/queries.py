@@ -914,6 +914,8 @@ class TradingQueries:
             live_balance_count = 0
             live_sources: set[str] = set()
             current_live_sources: set[str] = set()
+            latest_live_source_times: dict[str, datetime] = {}
+            current_live_source_times: dict[str, datetime] = {}
             for item in balances:
                 if not is_authoritative_live_venue(
                     item.environment,
@@ -963,14 +965,20 @@ class TradingQueries:
                     and valuation_price > 0
                     and not self.service._fact_is_stale(valuation_time, now, max_fact_age)
                 )
+                source = "VAULT" if item.location_type == "VAULT" else item.venue
+                if item.environment == "LIVE":
+                    previous_time = latest_live_source_times.get(source)
+                    if previous_time is None or valuation_time > previous_time:
+                        latest_live_source_times[source] = valuation_time
                 if item.environment == "LIVE":
                     live_balance_count += 1
                     live_sources.add("VAULT" if item.location_type == "VAULT" else item.venue)
                 if valuation_current and item.environment == "LIVE":
                     assert usd_equity is not None
-                    current_live_sources.add(
-                        "VAULT" if item.location_type == "VAULT" else item.venue
-                    )
+                    current_live_sources.add(source)
+                    previous_current_time = current_live_source_times.get(source)
+                    if previous_current_time is None or valuation_time < previous_current_time:
+                        current_live_source_times[source] = valuation_time
                     total_net_worth += usd_equity
                     if item.location_type == "VAULT":
                         vault_net_worth += usd_equity
@@ -1026,6 +1034,13 @@ class TradingQueries:
                     issue.endswith(f":{required_source}") for issue in valuation_issues
                 ):
                     valuation_issues.add(f"CURRENT_VALUE_MISSING:{required_source}")
+            alignment_tolerance = timedelta(seconds=60)
+            required_sources = {"BINANCE", "HYPERLIQUID", "VAULT"}
+            if required_sources.issubset(current_live_source_times):
+                newest_source_time = max(current_live_source_times.values())
+                for source, source_time in current_live_source_times.items():
+                    if newest_source_time - source_time > alignment_tolerance:
+                        valuation_issues.add(f"TIME_MISALIGNED_SOURCE:{source}")
             gate = session.get(CapabilityGate, "CAPITAL_TRANSFER")
             automation_gates = {
                 key: (None if (value := session.get(CapabilityGate, key)) is None else value.status)
@@ -1054,6 +1069,11 @@ class TradingQueries:
                     "environment": "LIVE",
                     "currency": "USD",
                     "max_fact_age_seconds": int(max_fact_age.total_seconds()),
+                    "alignment_tolerance_seconds": int(alignment_tolerance.total_seconds()),
+                    "source_as_of": {
+                        source: _iso(latest_live_source_times.get(source))
+                        for source in ("BINANCE", "HYPERLIQUID", "VAULT")
+                    },
                     "venues": {
                         venue: (
                             str(venue_net_worth[venue]) if venue in current_live_sources else None
