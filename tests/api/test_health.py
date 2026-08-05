@@ -743,6 +743,14 @@ def test_proposal_review_projection_uses_frozen_resonance_and_plain_risk_reasons
         assert.match(rationale, /1h、4h、1d 同时突破/);
         assert.match(rationale, /仍需人工审核；不会自动授权或下单/);
         assert.doesNotMatch(rationale, /pending human review/);
+        const legacyChineseRationale = context.rationale(
+          "Perptape 当前同一精确合约、同一方向在 1h、4h、1d、1w 同时突破。"
+          + "使用管理员保存的一键创建默认配置，仅创建待审核提案。 "
+          + "系统仅创建冻结待审核提案，不会自动审核、授权或下单。",
+        );
+        assert.match(legacyChineseRationale, /^创建提案时，突破榜单中/);
+        assert.match(legacyChineseRationale, /来源与参数已冻结/);
+        assert.doesNotMatch(legacyChineseRationale, /突破榜单当前|Perptape 当前/);
 
         vm.runInContext(
           extract("function formatRiskActionReason", "\nfunction renderRiskControlPanel")

@@ -1814,9 +1814,14 @@ function formatProposalRationale(value) {
   const automatic = rationale.match(
     /^Perptape current exact-instrument resonance across ([^;]+);\s*(.*?)\s*Proposal only, pending human review\.$/,
   );
-  if (!automatic) return rationale;
-  const timeframes = automatic[1].split(',').map(item => item.trim()).filter(Boolean).join('、');
-  const configuredRationale = automatic[2].trim();
+  const legacyChinese = rationale.match(
+    /^Perptape 当前同一精确合约、同一方向在 (.+?) 同时突破。\s*(.*?)\s*系统仅创建冻结待审核提案，不会自动审核、授权或下单。$/,
+  );
+  if (!automatic && !legacyChinese) return rationale;
+  const timeframes = automatic
+    ? automatic[1].split(',').map(item => item.trim()).filter(Boolean).join('、')
+    : legacyChinese[1].trim();
+  const configuredRationale = (automatic ? automatic[2] : legacyChinese[2]).trim();
   const defaultConfigCopy = '使用管理员保存的一键创建默认配置，仅创建待审核提案。';
   const riskCopy = configuredRationale === defaultConfigCopy
     ? '风险参数来自管理员保存的默认配置。'

@@ -200,3 +200,33 @@ final result: passed
 - Desktop overview: `/Users/vireo/.codex/worktrees/640e/trading/artifacts/product-audit/capital-2026-08-05/06-capital-overview-desktop-after.png`.
 
 final result: passed for current missing-Vault production state; complete, stale and time-misaligned truth projections passed in isolated integration scenarios
+
+## 2026-08-05: proposal review decision clarity and frozen-source truth
+
+### P0 / P1 / P2 status
+
+- P0: none open in this batch. No approval, rejection, authorization or order was submitted during browser acceptance.
+- P1 closed: the review queue now leads with estimated notional value and maximum loss instead of presenting raw contract quantity as the primary decision fact.
+- P1 closed: existing Chinese SYSTEM rationales no longer describe an hours-old frozen signal as "current". The page consistently says "创建提案时", labels the source as a creation-time snapshot, and preserves the stored record unchanged.
+- P1 closed: newly generated automatic proposals freeze the same creation-time wording at the source.
+- P1 closed: absolute expiry and time remaining appear in the queue, frozen scope and next-action copy. Approval still requires the existing second confirmation and action grant.
+- P2 closed: the detail page and approval confirmation reflow without horizontal overflow at 390 px and 430 px.
+- P2 observed: the mobile card intentionally wraps the long raw contract quantity; notional and maximum loss remain the two primary values and are fully visible.
+
+### Five-dimensional evidence
+
+- Code: proposal summary notional projection, creation-time rationale normalization for legacy records, creation-time text for new SYSTEM proposals, and explicit remaining-time formatting.
+- API: the live queue returned 14 pending proposals with `estimated_notional`; the six-identity read-only matrix returned administrator 14 actionable, reviewer 14 actionable, proposer 0 actionable, observer 0 actionable, treasury `RBAC_DENIED`, disabled `LOGIN_DENIED`.
+- Actual pages: administrator proposal detail, reviewer queue, proposer workspace, treasury workspace, observer workspace and disabled-login denial were opened in the in-app browser. The reviewer navigation exposes only Today, Review Queue and System Status.
+- End-to-end runtime: the confirmation dialog was opened and cancelled. It explicitly states that approval does not run risk checks, issue authorization, create an order or send an order.
+- Tests: 16 API/web tests passed; automatic-proposal integration, six-identity permission matrix, high-risk two-reviewer/self-review rejection, and Perptape proposal-to-authorization API flow each passed against the isolated `trading_test` database.
+
+### Accepted screenshots
+
+- Desktop proposal detail: `artifacts/product-audit/review-flow-2026-08-05/01-proposal-detail-desktop.png`.
+- 390 px proposal detail: `artifacts/product-audit/review-flow-2026-08-05/02-proposal-detail-390.png`.
+- 430 px proposal detail: `artifacts/product-audit/review-flow-2026-08-05/03-proposal-detail-430.png`.
+- 430 px approval confirmation: `artifacts/product-audit/review-flow-2026-08-05/04-approval-confirm-430.png`.
+- Independent reviewer queue: `artifacts/product-audit/review-flow-2026-08-05/05-reviewer-queue-desktop.png`.
+
+final result: passed for the current pending SYSTEM proposal state; no live review or trading mutation was performed

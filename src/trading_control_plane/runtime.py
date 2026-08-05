@@ -513,9 +513,9 @@ class RuntimeSyncWorker:
                     "requested_adds": 0,
                     "add_trigger_price": None,
                     "rationale": (
-                        "Perptape 当前同一精确合约、同一方向在 "
+                        "创建提案时，Perptape 中同一精确合约、同一方向在 "  # noqa: RUF001
                         f"{'、'.join(timeframes)} 同时突破。{config['rationale']} "
-                        "系统仅创建冻结待审核提案，不会自动审核、授权或下单。"  # noqa: RUF001
+                        "来源与参数已冻结，仅创建待审核提案；不会自动授权或下单。"  # noqa: RUF001
                     ),
                 },
                 idempotency_payload={

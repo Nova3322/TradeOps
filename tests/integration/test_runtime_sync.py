@@ -1501,9 +1501,9 @@ def test_three_timeframe_resonance_creates_one_pending_system_proposal(
     assert detail["frozen_payload"]["details"]["allow_auto_add"] is False
     assert detail["frozen_payload"]["details"]["default_config_version"] == 1
     assert detail["frozen_payload"]["details"]["rationale"] == (
-        "Perptape 当前同一精确合约、同一方向在 1h、4h、1d 同时突破。"
+        "创建提案时，Perptape 中同一精确合约、同一方向在 1h、4h、1d 同时突破。"  # noqa: RUF001
         "automatic resonance proposal awaiting independent review "
-        "系统仅创建冻结待审核提案，不会自动审核、授权或下单。"  # noqa: RUF001
+        "来源与参数已冻结，仅创建待审核提案；不会自动授权或下单。"  # noqa: RUF001
     )
 
     legacy_duplicate_id = service.create_proposal(
