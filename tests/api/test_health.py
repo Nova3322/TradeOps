@@ -848,7 +848,7 @@ def test_risk_workspace_prioritizes_current_actions_and_hides_closed_tasks() -> 
     assert "hasCapability('operations.view') ? '<section class=\"empty-state" in source
     assert "自动加仓已经关闭" in source
     assert (
-        "HYPERLIQUID_RATE_LIMITED:'链上永续只读接口限流，系统会按计划重试'"  # noqa: RUF001
+        "HYPERLIQUID_RATE_LIMITED:'Hyperliquid 只读接口限流，系统会按计划重试'"  # noqa: RUF001
         in source
     )
     assert "escapeHtml(fmtRole(check.role))" in source
@@ -889,6 +889,15 @@ def test_system_and_venue_pages_distinguish_read_only_snapshots_from_live_execut
     assert "已配置默认账户" in source
     assert "status.default_account_id || 'acct-1'" not in source
     assert "不会使用旧的 acct-1 或其他示例账户代替" in source
+    assert "function fmtConnectionCapability(key, state)" in source
+    assert "仅可查看历史快照；实时账户事实不可用；下单与写入关闭" in source
+    assert "实时只读账户事实；下单与写入关闭" in source
+    assert "const scope = accountId ? `（${venueLabel} · ${fmtDefaultAccountLabel(accountId)}）` : '';" in source
+    assert "`${venueLabel} · ${fmtDefaultAccountLabel(check.scope.account_id)}`" in source
+    assert "生产账户 ${accountId}" not in source
+    assert "生产账户 ${check.scope.account_id}" not in source
+    assert "独立安全开关" in source
+    assert "币安和 Hyperliquid（含 HIP-3）" in source
     assert "shortId(accountId)" not in source
     assert 'class="table-wrap is-scrollable venue-fact-table"' in source
     assert "connectionCategoryEnglishLabels" in source

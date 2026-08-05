@@ -434,7 +434,6 @@ function translateChineseText(value) {
     .replaceAll('Trading Console', '交易控制台')
     .replaceAll('PostgreSQL', '业务数据库')
     .replaceAll('HYPERLIQUID', '链上永续')
-    .replaceAll('Hyperliquid', '链上永续')
     .replaceAll('BINANCE', '币安')
     .replaceAll('Binance', '币安')
     .replaceAll('PERPTAPE', '突破榜单')
@@ -568,7 +567,47 @@ const fmtConnectionReason = (state) => currentLanguage === 'en'
 const fmtConnectionNextAction = (state) => currentLanguage === 'en'
   ? connectionEnglishCopy[state?.category]?.[1] || 'Ask a system administrator to inspect the read-only connection.'
   : fmtOperationalCopy(state?.next_action);
-const fmtOperationalCopy = (value) => String(value ?? '—').replaceAll(';', '；').replaceAll(',', '，');
+const fmtOperationalCopy = (value) => String(value ?? '—')
+  .replaceAll(';', '；')
+  .replaceAll(',', '，')
+  .replaceAll('独立 Gate', '独立安全开关')
+  .replaceAll('Gate', '安全开关')
+  .replaceAll('安全开关 阻断', '安全开关阻断');
+
+function fmtConnectionCapability(key, state) {
+  if (state.write_process_enabled) {
+    return currentLanguage === 'en'
+      ? 'Safety fault: the write-process switch must remain disabled'
+      : '安全异常：写入进程开关不应开启';
+  }
+  if (state.available) {
+    if (key === 'NOTILT') {
+      return currentLanguage === 'en'
+        ? 'Live read-only capital facts; signing and broadcasting disabled'
+        : '实时只读资金事实；签名与广播关闭';
+    }
+    if (key === 'PERPTAPE') {
+      return currentLanguage === 'en'
+        ? 'Live read-only opportunity data; no trading capability'
+        : '实时只读机会数据；不提供交易能力';
+    }
+    return currentLanguage === 'en'
+      ? 'Live read-only account facts; orders and writes disabled'
+      : '实时只读账户事实；下单与写入关闭';
+  }
+  if (state.last_success_at) {
+    return key === 'NOTILT'
+      ? (currentLanguage === 'en' ? 'Saved snapshot only; live capital facts unavailable; signing and broadcasting disabled' : '仅可查看历史快照；实时资金事实不可用；签名与广播关闭')
+      : key === 'PERPTAPE'
+        ? (currentLanguage === 'en' ? 'Saved snapshot only; live opportunities unavailable' : '仅可查看历史快照；实时机会不可用')
+        : (currentLanguage === 'en' ? 'Saved snapshot only; live account facts unavailable; orders and writes disabled' : '仅可查看历史快照；实时账户事实不可用；下单与写入关闭');
+  }
+  return key === 'NOTILT'
+    ? (currentLanguage === 'en' ? 'No verified capital facts; signing and broadcasting disabled' : '暂无可核验资金事实；签名与广播关闭')
+    : key === 'PERPTAPE'
+      ? (currentLanguage === 'en' ? 'No verified live opportunity data' : '暂无可核验实时机会数据')
+      : (currentLanguage === 'en' ? 'No verified account facts; orders and writes disabled' : '暂无可核验账户事实；下单与写入关闭');
+}
 function fmtTargetReason(value) {
   const normalized = String(value || '').trim();
   if (!normalized) return '—';
@@ -1950,13 +1989,13 @@ const riskControlStatusLabel = (value) => ({
 
 function formatControlBlocker(value) {
   const [code, environment, accountId, venue, detail] = String(value || '').split(':');
-  const venueLabel = ({BINANCE:'币安', HYPERLIQUID:'链上永续'})[venue] || venue;
-  const scope = accountId ? `（${venueLabel} · 生产账户 ${accountId}）` : '';
+  const venueLabel = fmtVenueLabel(venue);
+  const scope = accountId ? `（${venueLabel} · ${fmtDefaultAccountLabel(accountId)}）` : '';
   const probeFailure = ({
     BINANCE_RATE_LIMITED:'币安只读接口限流，系统会按计划重试',
-    HYPERLIQUID_RATE_LIMITED:'链上永续只读接口限流，系统会按计划重试',
+    HYPERLIQUID_RATE_LIMITED:'Hyperliquid 只读接口限流，系统会按计划重试',
     BINANCE_AUTH_FAILED:'币安只读鉴权或权限检查失败',
-    HYPERLIQUID_AUTH_FAILED:'链上永续只读鉴权或权限检查失败',
+    HYPERLIQUID_AUTH_FAILED:'Hyperliquid 只读鉴权或权限检查失败',
   }[detail] || (detail ? `只读检查未成功（错误代码：${detail}）` : '只读检查未成功'));
   return ({
     LIVE_SCOPE_CONFIGURATION_REQUIRED:'生产账户范围未配置：至少配置一个明确的 LIVE 账户与交易所',
@@ -2024,8 +2063,8 @@ function renderRiskControlPanel(control) {
   const activeRequests = control.requests.filter(item => !item.superseded_by_control_state && ['PENDING_REVIEW','APPROVED'].includes(item.status));
   const historicalRequests = control.requests.filter(item => item.superseded_by_control_state || !['PENDING_REVIEW','APPROVED'].includes(item.status));
   const conditionRows = (conditions.checks || []).map(check => {
-    const venueLabel = ({BINANCE:'币安', HYPERLIQUID:'链上永续'})[check.scope?.venue] || check.scope?.venue;
-    const scope = check.scope ? `${venueLabel} · 生产账户 ${check.scope.account_id}` : '全局';
+    const venueLabel = fmtVenueLabel(check.scope?.venue);
+    const scope = check.scope ? `${venueLabel} · ${fmtDefaultAccountLabel(check.scope.account_id)}` : '全局';
     const reasons = (check.reason || []).map(reason => reason === 'CURRENT' ? '当前检查通过' : formatControlBlocker(reason)).join('；');
     return `<tr><td data-label="条件 / 范围"><b>${escapeHtml(check.label)}</b><br><span class="subtle">${escapeHtml(scope)}</span></td><td data-label="状态"><span class="status-pill status-${check.status === 'PASS' ? 'APPROVED' : 'DENY'}">${check.status === 'PASS' ? '通过' : '阻塞'}</span></td><td data-label="精确原因">${escapeHtml(reasons)}</td><td data-label="处理角色">${escapeHtml(fmtRole(check.role))}</td><td data-label="下一步">${escapeHtml(check.next_action)}</td></tr>`;
   }).join('');
@@ -2134,7 +2173,7 @@ async function renderSystemStatus() {
   const blockedRiskScopes = [...new Map(blockedRiskChecks
     .filter(check => check.scope?.venue)
     .map(check => [`${check.scope.environment}:${check.scope.account_id}:${check.scope.venue}`, check.scope])).values()];
-  const blockedRiskScopeLabels = blockedRiskScopes.map(scope => ({BINANCE:'币安', HYPERLIQUID:'链上永续'})[scope.venue] || scope.venue);
+  const blockedRiskScopeLabels = blockedRiskScopes.map(scope => fmtVenueLabel(scope.venue));
   const entryOpen = controlAvailable && policy.system_state === 'NORMAL' && restoreConditions.ready;
   const addOpen = entryOpen && gate.status === 'ENABLED';
   const entryStatus = !controlAvailable
@@ -2226,7 +2265,7 @@ async function renderSystemStatus() {
   ].join('');
   const connectionLabels = {
     BINANCE:['币安','生产账户','/venues?venue=BINANCE','查看账户数据 →'],
-    HYPERLIQUID:['链上永续','生产账户','/venues?venue=HYPERLIQUID','查看账户数据 →'],
+    HYPERLIQUID:['Hyperliquid','生产账户','/venues?venue=HYPERLIQUID','查看账户数据 →'],
     PERPTAPE:['突破榜单','市场机会','/opportunities','查看机会 →'],
     NOTILT:['链上资金库','生产资金','/capital','查看资金 →'],
   };
@@ -2253,11 +2292,7 @@ async function renderSystemStatus() {
     const action = hasCapability(destinationCapability)
       ? `<a class="text-button" href="${label[2]}" data-link>${label[3]}</a>`
       : `<span class="subtle">${restrictedOwner}</span>`;
-    const capability = state.write_process_enabled
-      ? '只读状态异常：写入进程开关不应开启'
-      : key === 'NOTILT'
-        ? '只读事实；资金签名与广播关闭'
-        : '只读连接；下单与写入关闭';
+    const capability = fmtConnectionCapability(key, state);
     const categoryLabel = fmtConnectionCategory(state.category);
     const errorEvidence = state.error_code ? `<details class="venue-technical-detail"><summary>技术分类</summary><code translate="no">${escapeHtml(state.error_code)}</code></details>` : '';
     const probeEvidence = [
@@ -2282,8 +2317,9 @@ async function renderSystemStatus() {
       ? `核心服务可用，但${blockedRiskScopeLabels.join('、')}的实时开仓条件受阻`
       : '核心服务可用，但实时开仓条件未全部通过'
     : `核心服务可用，但风险政策为${riskControlStatusLabel(policy.system_state)}`;
+  const blockedRiskReasonCount = blockedRiskChecks.reduce((count, check) => count + new Set((check.reason || []).filter(reason => reason !== 'CURRENT')).size, 0);
   const riskVerdictCopy = blockedRiskChecks.length
-    ? `${blockedRiskChecks.map(check => (check.reason || []).filter(reason => reason !== 'CURRENT').map(formatControlBlocker).join('；')).filter(Boolean).join('；')}。通过检查的范围仍需逐笔复核；自动加仓保持关闭。`
+    ? `${blockedRiskChecks.length} 个默认账户范围共有 ${blockedRiskReasonCount} 项实时条件未通过；请进入风险控制逐项查看原因、负责人和下一步。通过检查的范围仍需逐笔复核；自动加仓保持关闭。`
     : '风险政策或实时生产事实尚未满足新增风险条件；每笔请求都会继续由服务端拒绝或重新校验。';
   const verdictTitle = !health.ready ? '核心服务未通过就绪检查' : !controlAvailable ? '核心服务可用，但风险政策未配置' : exceptions.length ? '核心服务可用，但存在风险阻断' : !entryOpen ? riskVerdictTitle : !workersReady || !tradingConnectionsReady ? executionVerdictTitle : !telegramHealthy ? '交易管理可用，但 Telegram 审核通知受限' : !perptapeAvailable ? '交易管理可用，但 Perptape 机会源受限' : !canViewOperations ? '核心服务与可见连接状态正常' : activeMonitoring ? '交易系统正在正常监控' : '核心服务可用，当前无运行中交易任务';
   const verdictCopy = !health.ready ? '请先恢复数据库与服务状态，不要继续依赖旧数据。' : !controlAvailable ? `${friendlyApiError(control.error)} 新增风险保持关闭。` : exceptions.length ? `发现 ${exceptions.length} 项安全异常；受影响的新增风险会保持关闭。` : !entryOpen ? riskVerdictCopy : !workersReady || !tradingConnectionsReady ? executionVerdictCopy : !telegramHealthy ? `${telegramFailureCopy} 不影响 Web 审核，也不会放宽任何审核或交易边界。` : !perptapeAvailable ? `${perptapeStatus}。现有交易任务仍可管理，但新的 Perptape 机会暂不可用。` : !canViewOperations ? '当前身份未读取交易任务、保护和对账详情；页面仅对已授权的系统事实给出结论。' : activeMonitoring ? '运行中的交易任务没有检测到保护、敞口或对账阻断。' : '当前没有需要监控的交易任务；系统不会把“无监控对象”误报为“监控正常”。';
@@ -2835,7 +2871,7 @@ async function renderVenueFacts() {
         ? `The reader checks about every ${syncInterval} seconds and follows a bounded backoff after upstream failures. Saved snapshots will not be presented as live until the connection recovers.`
       : 'Only saved production data is shown. Configure the continuous reader to update it automatically.'
     : automaticSyncCopyLocalized;
-  main.innerHTML = `<section class="page venue-facts-page"><header class="page-head"><div><p class="eyebrow">生产账户 · 自动读取</p><h1>交易账户</h1><p class="lede">统一查看币安和链上永续的余额、当前仓位、当前委托、最近成交与资金费。系统按账户自动覆盖全部活跃标的，不需要逐个输入币对。</p></div><button class="secondary" data-refresh>刷新当前状态</button></header>
+  main.innerHTML = `<section class="page venue-facts-page"><header class="page-head"><div><p class="eyebrow">生产账户 · 自动读取</p><h1>交易账户</h1><p class="lede">统一查看币安和 Hyperliquid（含 HIP-3）的余额、当前仓位、当前委托、最近成交与资金费。系统按账户自动覆盖全部活跃标的，不需要逐个输入币对。</p></div><button class="secondary" data-refresh>刷新当前状态</button></header>
     <nav class="venue-switch" aria-label="选择交易所"><a class="${venue === 'BINANCE' ? 'active' : ''}" href="/venues?venue=BINANCE" data-link>Binance</a><a class="${venue === 'HYPERLIQUID' ? 'active' : ''}" href="/venues?venue=HYPERLIQUID" data-link>Hyperliquid</a></nav>
     <div class="stats venue-status-stats"><div class="stat"><small>连接状态</small><b class="${connected ? 'direction-long' : 'warning-text'}">${escapeHtml(connectionLabel)}</b><span>${currentLanguage === 'en' ? (!accountId ? 'Account scope is missing; no account data was read' : historyIncomplete ? 'Current account facts are available; history is incomplete' : connected ? 'The latest read-only probe succeeded' : 'No verified connection conclusion') : (!accountId ? '账户范围缺失，未读取账户数据' : historyIncomplete ? '当前账户事实可用；历史记录待补全' : connected ? '最近只读检查成功' : '尚无可用连接结论')}</span></div><div class="stat"><small>运行模式</small><b>${currentLanguage === 'en' ? 'Production account · read-only' : '生产账户 · 只读'}</b><span>${escapeHtml(venueDetail)} · ${escapeHtml(executionDetail)}</span></div><div class="stat"><small>交易账户</small><b>${accountId ? '已配置默认账户' : '未配置默认账户'}</b><span>${accountId ? `${escapeHtml(venue === 'BINANCE' ? (currentLanguage === 'en' ? 'Binance' : '币安') : 'Hyperliquid')} · ${currentLanguage === 'en' ? 'Bound production account · Single-account mode' : '生产账户已绑定 · 单账户模式'}` : '不会回退到示例账户或猜测范围'}</span></div><div class="stat"><small>${snapshotMode ? '最后快照' : '事实新鲜度'}</small><b>${fmtDate(lastSync)}</b><span>${currentLanguage === 'en' ? (lastSync ? snapshotMode ? 'Connection restricted; the data below is not live' : 'Latest saved facts; connection probes are verified separately' : 'No saved account facts') : (lastSync ? snapshotMode ? '连接受限；以下数据不是实时事实' : '最近保存时间；连接探针另行校验' : '尚无已保存事实')}</span></div></div>
     <article class="account-sync-note ${connected ? 'is-active' : ''}"><span class="status-dot"></span><div><b>${escapeHtml(connectionLabel)}</b><p>${escapeHtml(connectionReason)}</p><span class="system-health-meta">${escapeHtml(connectionProbeEvidence)}</span>${connectionEvidence}</div></article>
