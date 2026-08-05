@@ -98,6 +98,7 @@ const ENGLISH_EXACT = new Map(Object.entries({
   '当前没有突破候选':'No breakout candidates right now', '人工创建交易提案':'Manual trading proposal',
   '创建人工提案':'Create manual proposal', '返回机会':'Back to Opportunities', '交易意图':'Trading intent',
   '风险边界':'Risk limits', '交易标的':'Instrument', '触发价格':'Trigger price', '最大持仓数量':'Maximum position size', '最大持仓金额':'Maximum position value',
+  '先选交易所，再输入币对':'Choose an exchange, then enter a symbol', '输入完整币对':'Enter the full exchange symbol',
   '高级执行参数':'Advanced execution settings', '限价（可选）':'Limit price (optional)', '提案理由':'Rationale',
   '创建并提交审核':'Create and submit for review', '提案预览':'Proposal preview', '提交前摘要':'Summary before submission',
   '选择交易标的':'Select an instrument', '计划名义价值':'Planned notional', '失效距离':'Distance to invalidation',
@@ -1735,6 +1736,53 @@ function bindOpportunityActions() {
   applyFilters();
 }
 
+function manualInstrumentOptions(allInstruments, venue) {
+  return allInstruments.filter(item => item.venue === venue);
+}
+
+function manualInstrumentMatch(allInstruments, venue, symbol) {
+  const normalized = String(symbol || '').trim().toLocaleUpperCase('en-US');
+  if (!normalized) return null;
+  return manualInstrumentOptions(allInstruments, venue).find(
+    item => String(item.symbol).toLocaleUpperCase('en-US') === normalized,
+  ) || null;
+}
+
+function syncManualInstrumentPicker(form, {clearSymbol = false} = {}) {
+  const venue = form.elements.venue.value;
+  const symbolInput = form.elements.instrument_symbol;
+  const instrumentId = form.elements.instrument_id;
+  const datalist = form.querySelector('#manual-instrument-options');
+  const status = form.querySelector('[data-instrument-match]');
+  const available = manualInstrumentOptions(instruments, venue);
+  if (clearSymbol) symbolInput.value = '';
+  datalist.innerHTML = available.map(item => `<option value="${escapeHtml(item.symbol)}"></option>`).join('');
+  const selected = manualInstrumentMatch(instruments, venue, symbolInput.value);
+  instrumentId.value = selected?.instrument_id || '';
+  symbolInput.setCustomValidity(
+    symbolInput.value && !selected
+      ? (currentLanguage === 'en' ? 'Enter an exact active symbol for the selected exchange.' : '请输入所选交易所中完整、当前在线的币对。')
+      : '',
+  );
+  if (selected) {
+    status.textContent = currentLanguage === 'en'
+      ? `Matched: ${venue === 'BINANCE' ? 'Binance' : 'Hyperliquid / HIP-3'} · ${selected.symbol}`
+      : `已匹配：${venue === 'BINANCE' ? '币安' : 'Hyperliquid（含 HIP-3）'} · ${selected.symbol}`;
+    status.dataset.state = 'matched';
+  } else if (symbolInput.value) {
+    status.textContent = currentLanguage === 'en'
+      ? `No exact match among ${available.length} active contracts on this exchange.`
+      : `尚未精确匹配该交易所的 ${available.length} 个在线合约，请继续输入或从建议中选择。`;
+    status.dataset.state = 'unmatched';
+  } else {
+    status.textContent = currentLanguage === 'en'
+      ? `${available.length} active contracts. Type a full symbol or choose a suggestion.`
+      : `当前交易所共 ${available.length} 个在线合约；请输入完整币对或从建议中选择。`;
+    status.dataset.state = 'idle';
+  }
+  return selected;
+}
+
 async function renderManualProposal() {
   const result = await api('/api/instruments');
   instruments = result.data;
@@ -1742,7 +1790,7 @@ async function renderManualProposal() {
     <div class="compose-layout"><form id="manual-form" class="form-panel proposal-compose">
       <section class="form-section"><div class="section-title"><span>1</span><div><h2>交易意图</h2><p>选标的、定方向，说清从哪个价格开始执行。</p></div></div><div class="field-grid">
         <label>账户<span class="field-help">资金和权限归属</span><input name="account_id" value="acct-1" required></label>
-        <label>交易标的<span class="field-help">交易所当前在线的 U 本位永续合约，共 ${instruments.length} 个；不受策略启用列表限制</span><select name="instrument_id" required>${instruments.map(i => `<option value="${i.instrument_id}" data-venue="${escapeHtml(i.venue)}">${escapeHtml(i.venue)} · ${escapeHtml(i.symbol)}</option>`).join('')}</select></label>
+        <div class="instrument-field"><span class="field-label">交易标的</span><span class="field-help">先选交易所，再输入完整币对；支持键盘输入和建议匹配，共 ${instruments.length} 个在线 U 本位合约</span><div class="instrument-picker"><label><span>交易所</span><select name="venue" aria-label="交易所" required><option value="BINANCE">币安</option><option value="HYPERLIQUID">Hyperliquid</option></select></label><label><span>币对</span><input name="instrument_symbol" aria-label="币对" list="manual-instrument-options" autocomplete="off" spellcheck="false" placeholder="例如 BTCUSDT" required></label></div><input name="instrument_id" type="hidden"><datalist id="manual-instrument-options"></datalist><span class="instrument-match" data-instrument-match data-state="idle" role="status" aria-live="polite"></span></div>
         <label>方向<span class="field-help">做多或做空</span><select name="direction"><option value="LONG">做多</option><option value="SHORT">做空</option></select></label>
         <label>触发价格<span class="field-help">计划开始执行的位置</span><input name="trigger_price" type="number" step="any" min="0" required></label>
       </div></section>
@@ -1767,6 +1815,17 @@ async function renderManualProposal() {
   const form = document.querySelector('#manual-form');
   form.addEventListener('submit', submitManualProposal);
   form.addEventListener('input', updateManualProposalPreview);
+  form.elements.venue.addEventListener('change', () => {
+    syncManualInstrumentPicker(form, {clearSymbol:true});
+    updateManualProposalPreview({currentTarget:form});
+    form.elements.instrument_symbol.focus();
+  });
+  form.elements.instrument_symbol.addEventListener('input', () => syncManualInstrumentPicker(form));
+  form.elements.instrument_symbol.addEventListener('change', () => {
+    const selected = syncManualInstrumentPicker(form);
+    if (selected) form.elements.instrument_symbol.value = selected.symbol;
+  });
+  syncManualInstrumentPicker(form);
   updateManualProposalPreview({currentTarget:form});
 }
 
@@ -1778,7 +1837,7 @@ function updateManualProposalPreview(event) {
   const intentReady = Boolean(selected && trigger > 0 && data.direction);
   const riskReady = Number(data.max_risk) > 0 && Number(data.invalidation_price) > 0 && positionNotional > 0;
   document.querySelectorAll('[data-position-currency]').forEach(node => { node.textContent = selected?.collateral_currency || 'U'; });
-  document.querySelector('[data-preview-symbol]').textContent = selected ? `${selected.symbol} · ${selected.venue}` : '选择交易标的';
+  document.querySelector('[data-preview-symbol]').textContent = selected ? `${selected.symbol} · ${selected.venue === 'HYPERLIQUID' ? 'Hyperliquid' : selected.venue}` : '选择交易标的';
   const direction = document.querySelector('[data-preview-direction]');
   direction.textContent = fmtDirection(data.direction);
   direction.className = `preview-direction ${data.direction === 'SHORT' ? 'direction-short' : 'direction-long'}`;
@@ -1796,6 +1855,13 @@ async function submitManualProposal(event) {
   const form = event.currentTarget;
   const data = Object.fromEntries(new FormData(form));
   const selected = instruments.find(i => i.instrument_id === data.instrument_id);
+  if (!selected) {
+    form.elements.instrument_symbol.setCustomValidity(currentLanguage === 'en'
+      ? 'Choose an exact active contract from the selected exchange.'
+      : '请先输入并匹配所选交易所中当前在线的完整币对。');
+    form.elements.instrument_symbol.reportValidity();
+    return;
+  }
   const button = form.querySelector('button');
   button.disabled = true;
   data.environment = 'LIVE';
@@ -1809,6 +1875,7 @@ async function submitManualProposal(event) {
   for (const field of ['max_position_notional','initial_position_notional','max_risk','trigger_price','limit_price','invalidation_price','add_trigger_price']) if (data[field] !== null) data[field] = String(data[field]);
   data.expires_in_minutes = Number(data.expires_in_hours) * 60;
   delete data.expires_in_hours;
+  delete data.instrument_symbol;
   try {
     const result = await api('/api/proposals/manual', {method:'POST', body: JSON.stringify(data)});
     showToast('提案已进入审核；相同交易参数不会重复创建');

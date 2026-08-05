@@ -375,6 +375,13 @@ button:disabled { opacity: .52; cursor: not-allowed; }
 .section-title h2 { margin: 1px 0 4px; font-size: 20px; }
 .section-title p { color: var(--muted); font-size: 12px; margin: 0; }
 .field-help { display: block; min-height: 14px; color: color-mix(in srgb, var(--muted) 82%, transparent); font-size: 10px; font-weight: 500; }
+.field-label { color: var(--muted); font-size: 12px; font-weight: 700; }
+.instrument-field { display: grid; align-content: start; gap: 7px; }
+.instrument-picker { display: grid; grid-template-columns: minmax(145px, .45fr) minmax(0, 1fr); gap: 8px; }
+.instrument-picker label { gap: 5px; font-size: 10px; font-weight: 650; }
+.instrument-match { min-height: 16px; color: var(--muted); font-size: 10px; line-height: 1.45; }
+.instrument-match[data-state="matched"] { color: var(--accent); font-weight: 700; }
+.instrument-match[data-state="unmatched"] { color: var(--warning); }
 .advanced-form { padding: 20px 28px; border-bottom: 1px solid var(--line); }
 .advanced-form summary { display: flex; justify-content: space-between; gap: 12px; color: var(--ink); cursor: pointer; font-weight: 800; }
 .advanced-form summary small { color: var(--muted); font-weight: 500; }
@@ -738,6 +745,7 @@ dialog::backdrop { background: rgba(4, 12, 10, .56); backdrop-filter: blur(3px);
 }
 
 @media (max-width: 480px) {
+  .instrument-picker { grid-template-columns: 1fr; }
   .topbar { padding-inline: 10px; }
   .topbar-actions { gap: 6px; }
   .brand > span:last-child { display: none; }

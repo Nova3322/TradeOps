@@ -528,3 +528,29 @@ final result: passed; repeated adjacent facts were removed without weakening tru
 - Requested responsive runs: `mobile-390.png` and `mobile-430.png`; the in-app browser reported effective widths of 619 px and 682 px with no document overflow.
 
 final result: passed; the manual form uses truthful U-margin catalog scope and settlement-currency amounts while preserving exact server-side quantity controls
+
+## 2026-08-05: manual proposal exchange-scoped symbol search
+
+### P0 / P1 / P2 status
+
+- P0: none open. No proposal, order, capital action, signature, broadcast or Gate mutation was executed during browser acceptance.
+- P1 closed: the 795-item native select was replaced by a selected-exchange scope plus directly editable symbol input with native suggestions.
+- P1 verified: lowercase input matches the exact raw symbol, but no quote suffix, HIP-3 prefix or cross-exchange fallback is guessed.
+- P1 verified: unmatched input leaves `instrument_id` empty and blocks submission; changing exchanges clears the prior selection.
+- P2 closed: the compact venue label uses the formal `Hyperliquid` name without truncation, while the match status still states HIP-3 explicitly.
+
+### Five-dimensional evidence
+
+- Code: pure venue filter/exact-match helpers, native datalist suggestions, live match status, hidden exact catalog ID and submit-time UI guard.
+- API: unchanged exact `/api/instruments` catalog and `/api/proposals/manual` server revalidation remain authoritative.
+- Actual page: Binance `btcusdt` matched `BTCUSDT`; Hyperliquid `xyz:aapl` matched HIP-3 `xyz:AAPL`; the amount unit changed from USDT to USDC.
+- End-to-end runtime: the final 8014 page used the live 530/265 venue catalogs and rejected a Hyperliquid `BTCUSDT` mismatch before POST.
+- Tests: 21 Web/API tests, JavaScript syntax and diff checks passed.
+
+### Accepted screenshots
+
+- Before: `artifacts/product-audit/manual-instrument-search-2026-08-05/01-before.png`.
+- Binance exact match: `02-binance-match.png`.
+- Final Hyperliquid/HIP-3 exact match: `05-final-hyperliquid-match.png`.
+
+final result: passed; users can type a symbol directly without weakening exact exchange/catalog validation

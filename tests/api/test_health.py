@@ -112,8 +112,8 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
 
     assert response.status_code == 200
     assert "交易控制台" in response.text
-    assert "/assets/app.js?v=118" in response.text
-    assert "/assets/styles.css?v=48" in response.text
+    assert "/assets/app.js?v=119" in response.text
+    assert "/assets/styles.css?v=49" in response.text
     assert 'aria-label="交易控制台首页"' in response.text
     assert '<a href="/" data-link><span>⌂</span>今日</a>' in response.text
     assert 'id="mobile-nav-toggle"' in response.text
@@ -244,8 +244,10 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
     assert "控制状态已变化" in app_javascript.text
     assert 'name="timeframes" type="checkbox"' in app_javascript.text
     assert "function updateManualProposalPreview" in app_javascript.text
-    assert "交易所当前在线的 U 本位永续合约" in app_javascript.text
-    assert "不受策略启用列表限制" in app_javascript.text
+    assert "先选交易所，再输入完整币对" in app_javascript.text
+    assert "支持键盘输入和建议匹配" in app_javascript.text
+    assert 'name="venue" aria-label="交易所"' in app_javascript.text
+    assert 'name="instrument_symbol" aria-label="币对"' in app_javascript.text
     assert 'name="max_position_notional"' in app_javascript.text
     assert "服务端按触发价、合约乘数和数量步长换算" in app_javascript.text
     assert 'name="initial_position_notional"' in app_javascript.text
@@ -385,10 +387,65 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
 
     service_worker = get(app, "/sw.js")
     assert service_worker.status_code == 200
-    assert "trading-shell-v98" in service_worker.text
+    assert "trading-shell-v99" in service_worker.text
     assert "self.skipWaiting()" in service_worker.text
     assert "self.clients.claim()" in service_worker.text
     assert "await fetch(event.request)" in service_worker.text
+
+
+def test_manual_proposal_instrument_picker_filters_and_requires_exact_symbol() -> None:
+    node = shutil.which("node")
+    assert node is not None
+    app_path = Path(__file__).parents[2] / "src" / "trading_control_plane" / "web" / "app.js"
+    source = app_path.read_text()
+    assert 'select name="venue" aria-label="交易所"' in source
+    assert 'input name="instrument_symbol" aria-label="币对"' in source
+    assert 'list="manual-instrument-options"' in source
+    assert '<option value="HYPERLIQUID">Hyperliquid</option>' in source
+    assert "Hyperliquid（含 HIP-3）" in source
+    assert "form.elements.instrument_symbol.reportValidity()" in source
+    assert "delete data.instrument_symbol" in source
+
+    script = textwrap.dedent(
+        r"""
+        import assert from "node:assert/strict";
+        import fs from "node:fs";
+        import vm from "node:vm";
+
+        const source = fs.readFileSync(process.argv[1], "utf8");
+        const from = source.indexOf("function manualInstrumentOptions");
+        const to = source.indexOf("\nfunction syncManualInstrumentPicker", from);
+        assert.notEqual(from, -1);
+        assert.notEqual(to, -1);
+        const context = vm.createContext({});
+        vm.runInContext(
+          source.slice(from, to)
+            + "; this.options = manualInstrumentOptions; this.match = manualInstrumentMatch;",
+          context,
+        );
+        const instruments = [
+          {instrument_id:"b-btc",venue:"BINANCE",symbol:"BTCUSDT"},
+          {instrument_id:"b-eth",venue:"BINANCE",symbol:"ETHUSDT"},
+          {instrument_id:"h-btc",venue:"HYPERLIQUID",symbol:"BTC"},
+          {instrument_id:"h-aapl",venue:"HYPERLIQUID",symbol:"xyz:AAPL"},
+        ];
+        assert.deepEqual(
+          Array.from(context.options(instruments, "BINANCE"), item => item.instrument_id),
+          ["b-btc", "b-eth"],
+        );
+        assert.equal(context.match(instruments, "BINANCE", " btcusdt ").instrument_id, "b-btc");
+        assert.equal(context.match(instruments, "HYPERLIQUID", "XYZ:aapl").instrument_id, "h-aapl");
+        assert.equal(context.match(instruments, "BINANCE", "BTC"), null);
+        assert.equal(context.match(instruments, "HYPERLIQUID", "BTCUSDT"), null);
+        """
+    )
+    completed = subprocess.run(  # noqa: S603
+        [node, "--input-type=module", "-e", script, str(app_path)],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stderr
 
 
 def test_closed_campaign_labels_are_flat_currency_aware_and_action_free() -> None:
