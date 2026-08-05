@@ -342,3 +342,33 @@ final result: passed for current closed, flat production task records; no live t
 - 430 px: `artifacts/product-audit/action-flow-2026-08-05/08-approved-expired-detail-430.png`.
 
 final result: passed for the current local dataset; expired approvals no longer masquerade as current work
+
+## 2026-08-05: reviewer Today, risk mobile, and Freqtrade runtime truth
+
+### P0 / P1 / P2 status
+
+- P0: none open. No restore request, review, policy, authorization, order, capital operation, signing, broadcast or Gate mutation was executed.
+- P1 closed: a pure reviewer’s Today page now includes risk-restoration review/execution duties instead of reading only proposal reviews.
+- P1 closed: risk-control read failure is shown as unavailable, not as a false zero or a green all-clear state.
+- P1 runtime verified: both Binance and Hyperliquid Freqtrade workers pass dry-run identity, futures-mode and exact-catalog probes; Hyperliquid includes the configured HIP-3 scope.
+- P1 external: Hyperliquid account read-only probes remain rate-limited, and NoTilt production scope remains configuration-incomplete. Both stay unavailable and fail closed.
+- P2 closed: the administrator risk page and pure-reviewer Today page reflow without horizontal overflow at 390 px and 430 px.
+
+### Five-dimensional evidence
+
+- Code: a shared reviewer-workload projection combines independent proposal reviews with risk-restoration responsibilities.
+- API: pure-reviewer risk actions, live worker probes, source classifications and disabled Gates were read from the running service.
+- Actual page: pure reviewer, administrator risk, Binance account and system-status screens were inspected from the current local runtime.
+- End-to-end runtime: browser identity switched from administrator to pure reviewer and back; the reviewer saw 14 proposal reviews and an explicit 0 risk-restoration tasks from current facts.
+- Tests: 19 API/web tests and 4 isolated PostgreSQL integration tests passed, including administrator, proposer, reviewer, treasury, observer and disabled identities plus reviewed/direct restoration.
+
+### Accepted screenshots
+
+- Binance account: `artifacts/product-audit/venues-runtime-2026-08-05/01-binance-account-desktop.png`.
+- Risk at 390 px: `artifacts/product-audit/venues-runtime-2026-08-05/02-risk-390.png`.
+- Pure-reviewer Today desktop: `artifacts/product-audit/venues-runtime-2026-08-05/03-reviewer-today-desktop.png`.
+- Pure-reviewer Today 390 px: `artifacts/product-audit/venues-runtime-2026-08-05/04-reviewer-today-390.png`.
+- Pure-reviewer Today 430 px: `artifacts/product-audit/venues-runtime-2026-08-05/05-reviewer-today-430.png`.
+- System status: `artifacts/product-audit/venues-runtime-2026-08-05/06-system-status-desktop.png`.
+
+final result: passed for the current runtime state; reviewer Today no longer omits risk-restoration duties

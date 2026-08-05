@@ -112,7 +112,7 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
 
     assert response.status_code == 200
     assert "交易控制台" in response.text
-    assert "/assets/app.js?v=112" in response.text
+    assert "/assets/app.js?v=113" in response.text
     assert "/assets/styles.css?v=46" in response.text
     assert 'aria-label="交易控制台首页"' in response.text
     assert '<a href="/" data-link><span>⌂</span>今日</a>' in response.text
@@ -173,6 +173,11 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
     assert "Binance只读" not in response.text
     assert "const routeCapability = (path)" in app_javascript.text
     assert "今日只显示你的资金职责" in app_javascript.text
+    assert "api('/api/risk-controls').catch(error => ({error}))" in app_javascript.text
+    assert "riskControl.actions?.review_restore?.allowed === true" in app_javascript.text
+    assert "riskControl.actions?.execute_restore?.allowed === true" in app_javascript.text
+    assert "当前没有风险恢复审核待办" in app_javascript.text  # noqa: RUF001
+    assert "风险恢复状态读取失败" in app_javascript.text  # noqa: RUF001
     assert "当前职责不包含这个页面" in app_javascript.text
     assert "只读模式" in app_javascript.text
     assert "error.handled = response.status === 401" in app_javascript.text
@@ -364,7 +369,7 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
 
     service_worker = get(app, "/sw.js")
     assert service_worker.status_code == 200
-    assert "trading-shell-v92" in service_worker.text
+    assert "trading-shell-v93" in service_worker.text
     assert "self.skipWaiting()" in service_worker.text
     assert "self.clients.claim()" in service_worker.text
     assert "await fetch(event.request)" in service_worker.text
@@ -486,6 +491,64 @@ def test_proposal_launch_window_projection_excludes_expired_approvals() -> None:
           ),
           "已结束",
         );
+        """
+    )
+    completed = subprocess.run(  # noqa: S603
+        [node, "--input-type=module", "-e", script, str(app_path)],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stderr
+
+
+def test_reviewer_today_combines_proposal_and_risk_restore_work_without_false_zero() -> None:
+    node = shutil.which("node")
+    assert node is not None
+    app_path = Path(__file__).parents[2] / "src" / "trading_control_plane" / "web" / "app.js"
+    script = textwrap.dedent(
+        r"""
+        import assert from "node:assert/strict";
+        import fs from "node:fs";
+        import vm from "node:vm";
+
+        const source = fs.readFileSync(process.argv[1], "utf8");
+        const from = source.indexOf("function reviewerHomeWorkload");
+        const to = source.indexOf("\nasync function renderHome", from);
+        assert.notEqual(from, -1);
+        assert.notEqual(to, -1);
+        const context = vm.createContext({});
+        vm.runInContext(source.slice(from, to), context);
+
+        const proposalsOnly = vm.runInContext(
+          `reviewerHomeWorkload(14,{actions:{review_restore:{allowed:false},execute_restore:{allowed:false}}})`,
+          context,
+        );
+        assert.equal(proposalsOnly.restoreTaskCount, 0);
+        assert.equal(proposalsOnly.restoreCopy, "当前没有风险恢复审核待办");
+        assert.equal(proposalsOnly.headline, "14 笔提案等待你的独立审核");
+
+        const independentRestore = vm.runInContext(
+          `reviewerHomeWorkload(2,{actions:{review_restore:{allowed:true},execute_restore:{allowed:false}}})`,
+          context,
+        );
+        assert.equal(independentRestore.restoreTaskCount, 1);
+        assert.equal(independentRestore.restoreCopy, "等待你的独立审核");
+        assert.equal(independentRestore.headline, "2 笔提案和 1 项风险恢复待办");
+
+        const executableRestore = vm.runInContext(
+          `reviewerHomeWorkload(0,{actions:{review_restore:{allowed:false},execute_restore:{allowed:true}}})`,
+          context,
+        );
+        assert.equal(executableRestore.restoreTaskCount, 1);
+        assert.equal(executableRestore.restoreCopy, "已审核，等待满足条件后执行");
+
+        const unavailable = vm.runInContext(`reviewerHomeWorkload(0,{error:{code:"NETWORK"}})`, context);
+        assert.equal(unavailable.restoreStatus, "—");
+        assert.equal(unavailable.restoreCopy, "风险恢复状态读取失败");
+        assert.equal(unavailable.hasReviewWork, false);
+        assert.equal(unavailable.needsAttention, true);
+        assert.equal(unavailable.headline, "提案无待办；风险恢复状态暂不可用");
         """
     )
     completed = subprocess.run(  # noqa: S603

@@ -56,6 +56,10 @@ const ENGLISH_EXACT = new Map(Object.entries({
   '请输入分配给你的内部用户名':'Enter the internal username assigned to you',
   '无法登录：账号不存在、尚未分配岗位或已停用。请联系系统管理员确认成员状态。':'Unable to sign in: this account is unavailable, has no assigned role, or is disabled. Ask a system administrator to confirm your access.',
   '审核工作台':'Review workspace', '当前没有需要你审核的提案':'There are no proposals waiting for your review',
+  '当前没有需要你处理的审核待办':'There are no review tasks requiring your action', '风险恢复':'Risk restoration',
+  '当前没有风险恢复审核待办':'No risk-restoration review is pending', '风险恢复状态读取失败':'Risk-restoration status could not be loaded',
+  '提案无待办；风险恢复状态暂不可用':'No proposal review is pending; risk-restoration status is temporarily unavailable',
+  '审核人只处理非本人提案与风险恢复申请；不能发起提案、查看资金或操作交易任务。':'Reviewers handle only independent proposal reviews and risk-restoration requests. They cannot create proposals, view capital, or operate trades.',
   '进入审核队列':'Open review queue', '提案工作台':'Proposal workspace', '从机会开始形成交易判断':'Start a trading thesis from an opportunity',
   '查看机会':'View opportunities', '查看提案记录':'View proposal records', '我的当前提案':'My current proposals',
   '等待独立审核':'Waiting for independent review', '只统计草稿和等待审核':'Counts drafts and pending reviews only',
@@ -1160,12 +1164,45 @@ function renderLogin() {
   });
 }
 
+function reviewerHomeWorkload(actionableCount, riskControl) {
+  const riskStatusAvailable = !riskControl?.error;
+  const reviewRestore = riskStatusAvailable && riskControl.actions?.review_restore?.allowed === true;
+  const executeRestore = riskStatusAvailable && riskControl.actions?.execute_restore?.allowed === true;
+  const restoreTaskCount = reviewRestore || executeRestore ? 1 : 0;
+  const hasReviewWork = actionableCount > 0 || restoreTaskCount > 0;
+  const headline = actionableCount && restoreTaskCount
+    ? `${actionableCount} 笔提案和 1 项风险恢复待办`
+    : actionableCount
+      ? `${actionableCount} 笔提案等待你的独立审核`
+      : restoreTaskCount
+        ? '1 项风险恢复待办等待你的独立处理'
+        : !riskStatusAvailable
+          ? '提案无待办；风险恢复状态暂不可用'
+        : '当前没有需要你处理的审核待办';
+  const restoreStatus = riskStatusAvailable ? String(restoreTaskCount) : '—';
+  const restoreCopy = !riskStatusAvailable
+    ? '风险恢复状态读取失败'
+    : restoreTaskCount
+      ? reviewRestore ? '等待你的独立审核' : '已审核，等待满足条件后执行'
+      : '当前没有风险恢复审核待办';
+  const needsAttention = hasReviewWork || !riskStatusAvailable;
+  return {riskStatusAvailable, reviewRestore, executeRestore, restoreTaskCount, hasReviewWork, needsAttention, headline, restoreStatus, restoreCopy};
+}
+
 async function renderHome() {
   if (!hasCapability('operations.view')) {
     if (hasCapability('proposal.review')) {
-      const result = await api('/api/proposals?proposal_status=PENDING_REVIEW');
+      const [result, riskControl] = await Promise.all([
+        api('/api/proposals?proposal_status=PENDING_REVIEW'),
+        api('/api/risk-controls').catch(error => ({error})),
+      ]);
       const actionable = result.data.filter(item => item.environment === 'LIVE' && item.actionable_for_current_user);
-      main.innerHTML = `<section class="page home-page"><article class="home-status tone-${actionable.length ? 'attention' : 'success'}"><div><p class="eyebrow">审核工作台</p><h1>${actionable.length ? `${actionable.length} 笔提案等待你的独立审核` : '当前没有需要你审核的提案'}</h1><p>审核人只查看已经提交的提案和审核依据，不能发起提案、查看资金或操作交易任务。</p></div><a class="primary" href="/reviews" data-link>进入审核队列</a></article></section>`;
+      const workload = reviewerHomeWorkload(actionable.length, riskControl);
+      const actions = [
+        actionable.length ? '<a class="primary" href="/reviews" data-link>进入审核队列</a>' : '',
+        workload.restoreTaskCount ? '<a class="secondary" href="/risk" data-link>查看风险恢复</a>' : '',
+      ].filter(Boolean).join('');
+      main.innerHTML = `<section class="page home-page"><article class="home-status tone-${workload.needsAttention ? 'attention' : 'success'}"><div><p class="eyebrow">审核工作台</p><h1>${escapeHtml(workload.headline)}</h1><p>审核人只处理非本人提案与风险恢复申请；不能发起提案、查看资金或操作交易任务。</p></div>${actions ? `<div class="toolbar">${actions}</div>` : ''}</article><div class="stats home-stats"><div class="stat"><small>提案审核</small><b>${actionable.length}</b><span>${actionable.length ? '只统计非本人、未投票且未到期的提案' : '当前没有需要你审核的提案'}</span></div><div class="stat"><small>风险恢复</small><b>${escapeHtml(workload.restoreStatus)}</b><span>${escapeHtml(workload.restoreCopy)}</span></div></div></section>`;
       return;
     }
     if (hasCapability('proposal.create')) {
