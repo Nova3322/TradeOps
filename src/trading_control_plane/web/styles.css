@@ -543,6 +543,12 @@ textarea { resize: vertical; }
 .risk-condition-details, .risk-request-history { margin: 18px 0; border: 1px solid var(--line); border-radius: 14px; background: var(--panel); }
 .risk-condition-details[open] > summary, .risk-request-history[open] > summary { border-bottom: 1px solid var(--line); }
 .risk-condition-content, .risk-request-history > .stack { padding: 18px 20px 20px; }
+.risk-condition-section-head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; margin: 12px 0 10px; }
+.risk-condition-section-head span { color: var(--muted); font-size: 12px; }
+.risk-passed-conditions { margin-top: 14px; border: 1px solid var(--line); border-radius: 12px; background: var(--panel-strong); }
+.risk-passed-conditions > summary { padding: 12px 14px; }
+.risk-passed-conditions[open] > summary { border-bottom: 1px solid var(--line); }
+.risk-passed-conditions > .table-wrap, .risk-passed-conditions > .risk-condition-scroll-hint { margin: 12px 14px 14px; }
 .empty-state.compact-empty-state { min-height: 190px; padding: 28px 20px; border: 1px dashed var(--line); border-radius: 14px; }
 .compact-empty-state .secondary { margin-top: 10px; }
 .risk-reduction-card { border-top: 3px solid var(--accent); }
@@ -681,6 +687,10 @@ dialog::backdrop { background: rgba(4, 12, 10, .56); backdrop-filter: blur(3px);
   .risk-condition-details td { width: 100%; display: grid; grid-template-columns: 82px minmax(0, 1fr); gap: 10px; padding: 7px 0; border: 0; font-size: 12px; overflow-wrap: anywhere; }
   .risk-condition-details td::before { content: attr(data-label); color: var(--muted); font-size: 10px; font-weight: 750; letter-spacing: .04em; }
   .risk-condition-scroll-hint { display: none; }
+  .risk-condition-content { padding: 14px; }
+  .risk-passed-conditions > summary { align-items: flex-start; }
+  .risk-passed-conditions > summary strong { white-space: nowrap; }
+  .risk-passed-conditions > .table-wrap { margin: 10px; }
   .connection-status-table { overflow: visible; border: 0; background: transparent; scrollbar-gutter: auto; }
   .connection-status-table table { min-width: 0; }
   .connection-status-table thead { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }

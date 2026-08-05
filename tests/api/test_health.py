@@ -945,6 +945,13 @@ def test_risk_workspace_prioritizes_current_actions_and_hides_closed_tasks() -> 
     assert "历史恢复申请" in source
     assert "不计入当前待办" in source
     assert "risk-condition-details" in source
+    assert "blockingChecks = (conditions.checks || []).filter" in source
+    assert "passingChecks = (conditions.checks || []).filter" in source
+    assert "项阻塞优先展示；已通过条件收起" in source
+    assert "项已通过" in source
+    assert "通过项不占用当前待办" in source
+    assert "政策正常不代表所有账户都能新增风险" in source
+    assert "当前没有实时阻塞" in source
     assert "mode === 'risk' && !hasCapability('operations.view')" in source
     assert "details.filter(item => item.status !== 'CLOSED')" in source
     assert "当前没有运行中的风险任务" in source
@@ -961,6 +968,7 @@ def test_risk_workspace_prioritizes_current_actions_and_hides_closed_tasks() -> 
     styles = app_path.with_name("styles.css").read_text()
     assert ".risk-condition-details tr { display: block;" in styles
     assert ".risk-condition-scroll-hint { display: none; }" in styles
+    assert ".risk-passed-conditions" in styles
 
 
 def test_system_and_venue_pages_distinguish_read_only_snapshots_from_live_execution() -> None:
