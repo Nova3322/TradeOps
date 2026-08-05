@@ -12,7 +12,7 @@ from sqlalchemy import select
 from trading_control_plane.api import create_app
 from trading_control_plane.config import Settings
 from trading_control_plane.database import Database
-from trading_control_plane.domain import Role
+from trading_control_plane.domain import DirectCapitalPath, Role
 from trading_control_plane.models import (
     AuditEvent,
     DirectCapitalOperation,
@@ -21,6 +21,7 @@ from trading_control_plane.models import (
 )
 from trading_control_plane.notilt import NoTiltGateway
 from trading_control_plane.perptape import PerptapeClient, PerptapeFeedSnapshot
+from trading_control_plane.safe_spending import SafeSpendingGateway
 from trading_control_plane.service import TradingService
 
 
@@ -29,7 +30,12 @@ async def _login(client: AsyncClient, username: str) -> None:
     assert response.status_code == 200, response.text
 
 
-def _app(database: Database, *, notilt_gateway: NoTiltGateway | None = None):
+def _app(
+    database: Database,
+    *,
+    notilt_gateway: NoTiltGateway | None = None,
+    safe_spending_gateway: SafeSpendingGateway | None = None,
+):
     settings = Settings(
         environment="test",
         database_url=str(database.engine.url),
@@ -49,6 +55,10 @@ def _app(database: Database, *, notilt_gateway: NoTiltGateway | None = None):
         notilt_enabled=True,
         notilt_agent_address="0x5555555555555555555555555555555555555555",
         notilt_arbitrum_vault_address="0x1111111111111111111111111111111111111111",
+        safe_spending_enabled=True,
+        safe_spending_arbitrum_rpc_url="https://example.invalid",
+        capital_direct_safe_address="0x7777777777777777777777777777777777777777",
+        capital_direct_safe_delegate_address="0x8888888888888888888888888888888888888888",
         _env_file=None,
     )
     perptape = PerptapeClient(
@@ -57,7 +67,129 @@ def _app(database: Database, *, notilt_gateway: NoTiltGateway | None = None):
         contract_version="breakouts-v1",
         cache_ttl=timedelta(minutes=1),
     )
-    return create_app(settings, database, perptape, notilt_gateway=notilt_gateway)
+    return create_app(
+        settings,
+        database,
+        perptape,
+        notilt_gateway=notilt_gateway,
+        safe_spending_gateway=safe_spending_gateway,
+    )
+
+
+def test_safe_spending_limit_provider_is_selected_audited_and_never_signed(
+    database: Database,
+) -> None:
+    service = TradingService(database)
+    now = datetime.now(UTC)
+    admin = service.bootstrap_admin("safe-provider-admin", now=now)
+    treasury = service.create_user("safe-provider-treasury", admin, now=now)
+    service.assign_role(treasury, Role.TREASURY_ADMIN, admin, now=now)
+
+    def executor(payload: dict[str, object]) -> dict[str, object]:
+        assert payload["asset"] == "USDC"
+        if payload["operation"] == "prepare-deposit":
+            return {
+                "kind": "SAFE_ERC20_DEPOSIT_UNSIGNED_TRANSACTION",
+                "chainId": 42161,
+                "safe": payload["safe"],
+                "sender": payload["sender"],
+                "token": "0xaf88d065e77c8cc2239327c5edb3a432268e5831",
+                "amount": "99000000",
+                "to": "0xaf88d065e77c8cc2239327c5edb3a432268e5831",
+                "value": "0",
+                "data": "0xa9059cbb" + "00" * 64,
+                "signing": False,
+                "broadcast": False,
+            }
+        assert payload["operation"] == "prepare-spend"
+        return {
+            "kind": "SAFE_ALLOWANCE_SIGNATURE_REQUEST",
+            "chainId": 42161,
+            "module": "0x9999999999999999999999999999999999999999",
+            "safe": payload["safe"],
+            "delegate": payload["delegate"],
+            "token": "0xaf88d065e77c8cc2239327c5edb3a432268e5831",
+            "recipient": payload["recipient"],
+            "amount": "99000000",
+            "nonce": "7",
+            "transferHash": "0x" + "ab" * 32,
+            "signing": False,
+            "broadcast": False,
+            "calldataReady": False,
+        }
+
+    async def scenario() -> None:
+        async with AsyncClient(
+            transport=ASGITransport(
+                app=_app(database, safe_spending_gateway=SafeSpendingGateway(executor=executor))
+            ),
+            base_url="http://test",
+        ) as client:
+            await _login(client, "safe-provider-treasury")
+            created = await client.post(
+                "/api/capital/direct-operations",
+                json={
+                    "path": "VAULT_TO_BINANCE",
+                    "treasury_provider": "SAFE_SPENDING_LIMIT",
+                    "amount": "100",
+                    "final_confirmed": True,
+                    "idempotency_key": "safe-provider-create",
+                },
+            )
+            assert created.status_code == 200, created.text
+            assert created.json()["treasury_provider"] == "SAFE_SPENDING_LIMIT"
+            operation_id = created.json()["operation_id"]
+            preview = await client.post(
+                f"/api/capital/direct-operations/{operation_id}/safe-spending-preview",
+                json={
+                    "expected_version": 1,
+                    "final_confirmed": True,
+                    "idempotency_key": "safe-provider-preview",
+                },
+            )
+            assert preview.status_code == 200, preview.text
+            body = preview.json()
+            assert body["signing"] is False and body["broadcast"] is False
+            assert body["signature_request"]["calldataReady"] is False
+            assert body["data"]["real_transfer_gate"] == "DISABLED"
+
+            inbound = await client.post(
+                "/api/capital/direct-operations",
+                json={
+                    "path": "BINANCE_TO_VAULT",
+                    "treasury_provider": "SAFE_SPENDING_LIMIT",
+                    "amount": "100",
+                    "final_confirmed": True,
+                    "idempotency_key": "safe-provider-inbound-create",
+                },
+            )
+            assert inbound.status_code == 200, inbound.text
+            inbound_preview = await client.post(
+                f"/api/capital/direct-operations/{inbound.json()['operation_id']}/safe-spending-preview",
+                json={
+                    "expected_version": 1,
+                    "final_confirmed": True,
+                    "idempotency_key": "safe-provider-inbound-preview",
+                },
+            )
+            assert inbound_preview.status_code == 200, inbound_preview.text
+            inbound_body = inbound_preview.json()
+            assert inbound_body["preview_kind"] == "SAFE_ERC20_DEPOSIT_UNSIGNED_TRANSACTION"
+            assert inbound_body["signing"] is False and inbound_body["broadcast"] is False
+
+    asyncio.run(scenario())
+    with database.session_factory() as session:
+        operation = session.scalar(
+            select(DirectCapitalOperation).where(
+                DirectCapitalOperation.path == DirectCapitalPath.VAULT_TO_BINANCE.value
+            )
+        )
+        assert operation is not None
+        assert operation.treasury_provider == "SAFE_SPENDING_LIMIT"
+        assert operation.version == 2
+        assert session.query(OrderIntent).count() == 0
+        events = set(session.scalars(select(AuditEvent.event_type)).all())
+    assert "CAPITAL_SAFE_SPENDING_PREVIEW_PREPARED" in events
 
 
 def test_proposal_defaults_and_direct_capital_are_permissioned_audited_and_blocked(
@@ -259,9 +391,10 @@ def test_proposal_defaults_and_direct_capital_are_permissioned_audited_and_block
             await _login(client, "product-observer")
             observer_opportunities = await client.get("/api/opportunities")
             assert observer_opportunities.status_code == 200
-            assert observer_opportunities.json()["data"][0]["active_proposal"][
-                "proposal_id"
-            ] == proposal_id
+            assert (
+                observer_opportunities.json()["data"][0]["active_proposal"]["proposal_id"]
+                == proposal_id
+            )
             assert (await client.get("/api/proposal-defaults")).status_code == 403
             denied_capital = await client.post(
                 "/api/capital/direct-operations",

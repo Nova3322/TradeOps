@@ -155,6 +155,11 @@ class Settings(BaseSettings):
     capital_direct_network: Literal["ARBITRUM"] = "ARBITRUM"
     capital_direct_max_amount: Decimal | None = Field(default=None, gt=0)
     capital_direct_max_fee: Decimal | None = Field(default=None, ge=0)
+    safe_spending_enabled: bool = False
+    safe_spending_arbitrum_rpc_url: str | None = None
+    capital_direct_safe_address: str | None = None
+    capital_direct_safe_delegate_address: str | None = None
+    safe_spending_gateway_timeout_seconds: int = Field(default=20, ge=5, le=60)
 
     @property
     def hyperliquid_effective_account_address(self) -> str | None:
@@ -226,6 +231,8 @@ class Settings(BaseSettings):
         "capital_direct_binance_deposit_address",
         "capital_direct_binance_withdrawal_address",
         "capital_direct_hyperliquid_bridge_address",
+        "capital_direct_safe_address",
+        "capital_direct_safe_delegate_address",
     )
     @classmethod
     def require_evm_address(cls, value: str | None) -> str | None:

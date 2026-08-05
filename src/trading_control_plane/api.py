@@ -148,6 +148,7 @@ from trading_control_plane.perptape import (
     perptape_legacy_candidate_id,
 )
 from trading_control_plane.queries import TradingQueries
+from trading_control_plane.safe_spending import SafeSpendingGateway
 from trading_control_plane.service import TradingService
 from trading_control_plane.telegram import (
     CampaignNotification,
@@ -286,6 +287,7 @@ def create_app(
     capital_transfer_adapter: MockCapitalTransferAdapter | None = None,
     notilt_gateway: NoTiltGateway | None = None,
     notilt_valuator: NoTiltUsdValuator | None = None,
+    safe_spending_gateway: SafeSpendingGateway | None = None,
 ) -> FastAPI:
     resolved_settings = settings or get_settings()
     resolved_settings.validate_runtime_security()
@@ -497,6 +499,9 @@ def create_app(
         timeout_seconds=resolved_settings.notilt_gateway_timeout_seconds
     )
     resolved_notilt_valuator = notilt_valuator or NoTiltUsdValuator()
+    resolved_safe_spending = safe_spending_gateway or SafeSpendingGateway(
+        timeout_seconds=resolved_settings.safe_spending_gateway_timeout_seconds
+    )
 
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
@@ -532,6 +537,7 @@ def create_app(
     app.state.capital_transfer_adapter = resolved_capital_transfer
     app.state.notilt_gateway = resolved_notilt
     app.state.notilt_valuator = resolved_notilt_valuator
+    app.state.safe_spending_gateway = resolved_safe_spending
 
     @app.exception_handler(DomainRejected)
     async def domain_rejected(_: Request, exc: DomainRejected) -> JSONResponse:
@@ -613,6 +619,8 @@ def create_app(
                     "capital_direct_hyperliquid_bridge_address": config[
                         "hyperliquid_bridge_address"
                     ],
+                    "capital_direct_safe_address": config["safe_address"],
+                    "capital_direct_safe_delegate_address": config["safe_delegate_address"],
                     "capital_direct_max_amount": (
                         None if config["max_amount"] is None else Decimal(str(config["max_amount"]))
                     ),
@@ -688,6 +696,18 @@ def create_app(
                 resolved_settings.notilt_enabled
                 and configured_vault is not None
                 and resolved_settings.notilt_agent_address is not None
+            ),
+            "safe_spending_enabled": direct_settings.safe_spending_enabled,
+            "safe_gateway_available": resolved_safe_spending.available,
+            "safe_spending_scope_configured": (
+                direct_settings.safe_spending_enabled
+                and direct_settings.safe_spending_arbitrum_rpc_url is not None
+                and direct_settings.capital_direct_safe_address is not None
+                and direct_settings.capital_direct_safe_delegate_address is not None
+            ),
+            "safe_address_configured": direct_settings.capital_direct_safe_address is not None,
+            "safe_delegate_configured": (
+                direct_settings.capital_direct_safe_delegate_address is not None
             ),
             "signing": False,
             "broadcast": False,
@@ -1574,9 +1594,7 @@ def create_app(
                     if payload.max_position_notional is None
                     else str(payload.max_position_notional)
                 ),
-                "initial_quantity": (
-                    None if initial_quantity is None else str(initial_quantity)
-                ),
+                "initial_quantity": (None if initial_quantity is None else str(initial_quantity)),
                 "initial_position_notional": (
                     None
                     if payload.initial_position_notional is None
@@ -4040,6 +4058,8 @@ def create_app(
             "binance_withdrawal_address": "capital_direct_binance_withdrawal_address",
             "hyperliquid_account_id": "capital_direct_hyperliquid_account_id",
             "hyperliquid_bridge_address": "capital_direct_hyperliquid_bridge_address",
+            "safe_address": "capital_direct_safe_address",
+            "safe_delegate_address": "capital_direct_safe_delegate_address",
             "max_amount": "capital_direct_max_amount",
             "max_fee": "capital_direct_max_fee",
         }
@@ -4116,6 +4136,12 @@ def create_app(
                 if merged["hyperliquid_bridge_address"] is None
                 else str(merged["hyperliquid_bridge_address"])
             ),
+            safe_address=(None if merged["safe_address"] is None else str(merged["safe_address"])),
+            safe_delegate_address=(
+                None
+                if merged["safe_delegate_address"] is None
+                else str(merged["safe_delegate_address"])
+            ),
             max_amount=(
                 None if merged["max_amount"] is None else Decimal(str(merged["max_amount"]))
             ),
@@ -4137,6 +4163,7 @@ def create_app(
         direct_settings, _ = effective_direct_capital_settings(identity.user_id)
         plan = build_direct_capital_plan(
             path=DirectCapitalPath(payload.path),
+            treasury_provider=payload.treasury_provider,
             amount=payload.amount,
             settings=direct_settings,
             capital_transfer_gate=center["real_transfer_gate"],
@@ -4152,6 +4179,7 @@ def create_app(
         return {
             "operation_id": str(operation_id),
             "status": plan.status,
+            "treasury_provider": plan.treasury_provider.value,
             "blockers": list(plan.blockers),
             "data": capital_snapshot(identity.user_id),
         }
@@ -4174,6 +4202,11 @@ def create_app(
                 "direct capital operation changed; refresh before SDK preflight",
             )
         path = DirectCapitalPath(str(context["path"]))
+        if context["treasury_provider"] != "NOTILT_VAULT":
+            raise DomainRejected(
+                "NOTILT_PLAN_SCOPE_MISMATCH",
+                "operation selected Safe Spending Limits instead of NoTilt Vault",
+            )
         chain_id = notilt_chain_id_for_network(str(context["network"]))
         agent, vault = configured_notilt_scope(chain_id)
         direct_vault = (
@@ -4275,6 +4308,86 @@ def create_app(
             "next_step": (
                 "Resolve every blocker and re-read live source receipts before a human wallet "
                 "may confirm any transaction."
+            ),
+            "data": capital_snapshot(identity.user_id),
+        }
+
+    @app.post("/api/capital/direct-operations/{operation_id}/safe-spending-preview")
+    def prepare_direct_safe_spending_preview(
+        operation_id: UUID,
+        payload: DirectCapitalUnsignedPlanRequest,
+        identity: SessionIdentity = identity_dependency,
+    ) -> dict[str, Any]:
+        now = _now()
+        context = service().direct_capital_operation_context(
+            operation_id, identity.user_id, now=now
+        )
+        if int(context["version"]) != payload.expected_version:
+            raise DomainRejected("VERSION_CONFLICT", "direct capital operation changed; refresh")
+        if context["treasury_provider"] != "SAFE_SPENDING_LIMIT":
+            raise DomainRejected(
+                "SAFE_PLAN_SCOPE_MISMATCH", "operation did not select Safe Spending Limits"
+            )
+        path = DirectCapitalPath(str(context["path"]))
+        outbound = path in {
+            DirectCapitalPath.VAULT_TO_BINANCE,
+            DirectCapitalPath.VAULT_TO_HYPERLIQUID,
+        }
+        direct_settings, _ = effective_direct_capital_settings(identity.user_id)
+        rpc_url = direct_settings.safe_spending_arbitrum_rpc_url
+        safe = direct_settings.capital_direct_safe_address
+        delegate = direct_settings.capital_direct_safe_delegate_address
+        counterparty = context["destination_reference"] if outbound else context["source_reference"]
+        required_scope = (
+            (rpc_url, safe, delegate, counterparty) if outbound else (rpc_url, safe, counterparty)
+        )
+        if not direct_settings.safe_spending_enabled or not all(required_scope):
+            raise DomainRejected(
+                "SAFE_SPENDING_LIMIT_NOT_CONFIGURED",
+                "Safe RPC, account, delegate and destination scope are required",
+            )
+        if outbound:
+            artifact = resolved_safe_spending.prepare_spend(
+                rpc_url=str(rpc_url),
+                safe=str(safe),
+                delegate=str(delegate),
+                recipient=str(counterparty),
+                amount=str(context["min_received"]),
+            )
+        else:
+            artifact = resolved_safe_spending.prepare_deposit(
+                rpc_url=str(rpc_url),
+                safe=str(safe),
+                sender=str(counterparty),
+                amount=str(context["min_received"]),
+            )
+        version = service().record_direct_capital_safe_preview(
+            operation_id,
+            identity.user_id,
+            expected_version=payload.expected_version,
+            final_confirmed=payload.final_confirmed,
+            signature_request=artifact,
+            idempotency_key=payload.idempotency_key,
+            now=now,
+        )
+        blockers = list(context["blockers"])
+        return {
+            "operation_id": str(operation_id),
+            "version": version,
+            "preview_kind": artifact["kind"],
+            "transport": (
+                "SAFE_OFFICIAL_ALLOWANCE_MODULE_HUMAN_HANDOFF"
+                if outbound
+                else "SAFE_EXACT_USDC_TRANSFER_HUMAN_HANDOFF"
+            ),
+            "signing": False,
+            "broadcast": False,
+            "execution_blocked": bool(blockers),
+            "blockers": blockers,
+            "signature_request": artifact,
+            "next_step": (
+                "A human-controlled delegate wallet must review and sign the exact hash; "
+                "this service cannot sign or broadcast."
             ),
             "data": capital_snapshot(identity.user_id),
         }

@@ -9449,6 +9449,8 @@ class TradingService:
             "binance_withdrawal_address": config.binance_withdrawal_address,
             "hyperliquid_account_id": config.hyperliquid_account_id,
             "hyperliquid_bridge_address": config.hyperliquid_bridge_address,
+            "safe_address": config.safe_address,
+            "safe_delegate_address": config.safe_delegate_address,
             "max_amount": None if config.max_amount is None else str(config.max_amount),
             "max_fee": None if config.max_fee is None else str(config.max_fee),
             "updated_by": str(config.updated_by),
@@ -9484,6 +9486,8 @@ class TradingService:
         binance_withdrawal_address: str | None,
         hyperliquid_account_id: str | None,
         hyperliquid_bridge_address: str | None,
+        safe_address: str | None = None,
+        safe_delegate_address: str | None = None,
         max_amount: Decimal | None,
         max_fee: Decimal | None,
         now: datetime,
@@ -9500,6 +9504,8 @@ class TradingService:
             "binance_withdrawal_address": binance_withdrawal_address,
             "hyperliquid_account_id": hyperliquid_account_id,
             "hyperliquid_bridge_address": hyperliquid_bridge_address,
+            "safe_address": safe_address,
+            "safe_delegate_address": safe_delegate_address,
             "max_amount": None if max_amount is None else str(max_amount),
             "max_fee": None if max_fee is None else str(max_fee),
         }
@@ -9566,6 +9572,8 @@ class TradingService:
                 binance_withdrawal_address=binance_withdrawal_address,
                 hyperliquid_account_id=hyperliquid_account_id,
                 hyperliquid_bridge_address=hyperliquid_bridge_address,
+                safe_address=safe_address,
+                safe_delegate_address=safe_delegate_address,
                 max_amount=max_amount,
                 max_fee=max_fee,
                 updated_by=actor_id,
@@ -9613,6 +9621,7 @@ class TradingService:
             )
         payload = {
             "path": plan.path.value,
+            "treasury_provider": plan.treasury_provider.value,
             "venue": plan.venue,
             "account_id": plan.account_id,
             "vault_id": plan.vault_id,
@@ -9652,6 +9661,7 @@ class TradingService:
             correlation_id = uuid4()
             direct_operation = DirectCapitalOperation(
                 path=plan.path.value,
+                treasury_provider=plan.treasury_provider.value,
                 status=plan.status,
                 receipt_status=plan.receipt_status,
                 account_id=plan.account_id,
@@ -9719,6 +9729,7 @@ class TradingService:
             return {
                 "operation_id": str(item.operation_id),
                 "path": item.path,
+                "treasury_provider": item.treasury_provider,
                 "version": item.version,
                 "status": item.status,
                 "blockers": list(item.blockers),
@@ -9836,6 +9847,113 @@ class TradingService:
                 object_type="DirectCapitalOperation",
                 object_id=operation_id,
                 reason=f"{stage_code}; signing=false; broadcast=false",
+                correlation_id=item.correlation_id,
+                object_version=item.version,
+                idempotency_key=idempotency_key,
+                now=now,
+            )
+            return item.version
+
+    def record_direct_capital_safe_preview(
+        self,
+        operation_id: UUID,
+        actor_id: UUID,
+        *,
+        expected_version: int,
+        final_confirmed: bool,
+        signature_request: dict[str, Any],
+        idempotency_key: str,
+        now: datetime,
+    ) -> int:
+        if not final_confirmed:
+            _reject("CAPITAL_FINAL_CONFIRMATION_REQUIRED", "Safe preflight requires confirmation")
+        artifact_kind = signature_request.get("kind")
+        if artifact_kind not in {
+            "SAFE_ALLOWANCE_SIGNATURE_REQUEST",
+            "SAFE_ERC20_DEPOSIT_UNSIGNED_TRANSACTION",
+        }:
+            _reject("SAFE_PLAN_INVALID", "Safe preflight artifact is not a supported fixed request")
+        if (
+            signature_request.get("signing") is not False
+            or signature_request.get("broadcast") is not False
+        ):
+            _reject(
+                "SAFE_PLAN_INVALID", "Safe preflight must remain signing-free and non-broadcasting"
+            )
+        operation = "capital.direct.safe_spending_preview"
+        with self.database.session_factory.begin() as session:
+            item = session.get(DirectCapitalOperation, operation_id, with_for_update=True)
+            if item is None:
+                _reject("CAPITAL_DIRECT_OPERATION_NOT_FOUND", "direct capital operation is missing")
+            self._require_role(session, actor_id, "capital.execute", item.account_id, item.venue)
+            if item.treasury_provider != "SAFE_SPENDING_LIMIT":
+                _reject("SAFE_PLAN_SCOPE_MISMATCH", "operation did not select Safe Spending Limits")
+            outbound = item.path in {
+                DirectCapitalPath.VAULT_TO_BINANCE.value,
+                DirectCapitalPath.VAULT_TO_HYPERLIQUID.value,
+            }
+            expected_kind = (
+                "SAFE_ALLOWANCE_SIGNATURE_REQUEST"
+                if outbound
+                else "SAFE_ERC20_DEPOSIT_UNSIGNED_TRANSACTION"
+            )
+            if artifact_kind != expected_kind:
+                _reject(
+                    "SAFE_PLAN_DIRECTION_INVALID", "Safe artifact does not match path direction"
+                )
+            payload = {
+                "operation_id": str(operation_id),
+                "expected_version": expected_version,
+                "signature_request": signature_request,
+                "final_confirmed": True,
+            }
+            digest, response = self._idempotency(
+                session,
+                caller_id=str(actor_id),
+                operation=operation,
+                idempotency_key=idempotency_key,
+                payload=payload,
+            )
+            if response is not None:
+                return int(response["version"])
+            if item.version != expected_version:
+                _reject("VERSION_CONFLICT", "direct capital operation changed; refresh first")
+            if item.expires_at <= now:
+                _reject("CAPITAL_DIRECT_OPERATION_EXPIRED", "direct capital operation expired")
+            item.stages = [
+                *item.stages,
+                {
+                    "code": (
+                        "SAFE_ALLOWANCE_SIGNATURE_REQUEST_READY"
+                        if outbound
+                        else "SAFE_DEPOSIT_UNSIGNED_TRANSACTION_READY"
+                    ),
+                    "status": "READY_FOR_HUMAN_REVIEW",
+                    "signature_request": signature_request,
+                    "prepared_at": now.isoformat(),
+                    "signing": False,
+                    "broadcast": False,
+                },
+            ]
+            item.version += 1
+            item.updated_at = now
+            result = {"operation_id": str(operation_id), "version": item.version}
+            self._save_receipt(
+                session,
+                caller_id=str(actor_id),
+                operation=operation,
+                idempotency_key=idempotency_key,
+                semantic_hash=digest,
+                response=result,
+                now=now,
+            )
+            self._audit(
+                session,
+                actor_id=str(actor_id),
+                event_type="CAPITAL_SAFE_SPENDING_PREVIEW_PREPARED",
+                object_type="DirectCapitalOperation",
+                object_id=operation_id,
+                reason=f"{artifact_kind}; signing=false; broadcast=false",
                 correlation_id=item.correlation_id,
                 object_version=item.version,
                 idempotency_key=idempotency_key,

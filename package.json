@@ -7,10 +7,12 @@
     "node": ">=20"
   },
   "scripts": {
-    "test:notilt": "node --test tests/notilt_gateway.test.mjs"
+    "test:notilt": "node --test tests/notilt_gateway.test.mjs",
+    "test:safe-spending": "node --test tests/safe_spending_gateway.test.mjs"
   },
   "dependencies": {
     "@notilt/sdk": "0.2.0",
+    "@safe-global/safe-modules-deployments": "^3.0.9",
     "viem": "2.55.10"
   }
 }

@@ -9,6 +9,7 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 from trading_control_plane.domain import (
     CapitalDirection,
     CapitalTransferStatus,
+    CapitalTreasuryProvider,
     DirectCapitalPath,
     Direction,
     RiskTier,
@@ -363,6 +364,7 @@ class CapitalTransferCreateRequest(BaseModel):
 
 class DirectCapitalOperationRequest(BaseModel):
     path: DirectCapitalPath
+    treasury_provider: CapitalTreasuryProvider = CapitalTreasuryProvider.NOTILT_VAULT
     amount: Decimal = Field(gt=0)
     final_confirmed: Literal[True]
     idempotency_key: str = Field(min_length=1, max_length=160)
@@ -385,6 +387,8 @@ class DirectCapitalConfigurationRequest(BaseModel):
     binance_withdrawal_address: str | None = None
     hyperliquid_account_id: str | None = Field(default=None, min_length=1, max_length=120)
     hyperliquid_bridge_address: str | None = None
+    safe_address: str | None = None
+    safe_delegate_address: str | None = None
     max_amount: Decimal | None = Field(default=None, gt=0)
     max_fee: Decimal | None = Field(default=None, ge=0)
     idempotency_key: str = Field(min_length=1, max_length=160)
@@ -395,6 +399,8 @@ class DirectCapitalConfigurationRequest(BaseModel):
         "binance_deposit_address",
         "binance_withdrawal_address",
         "hyperliquid_bridge_address",
+        "safe_address",
+        "safe_delegate_address",
     )
     @classmethod
     def validate_evm_address(cls, value: str | None) -> str | None:

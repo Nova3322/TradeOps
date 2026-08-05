@@ -1221,6 +1221,7 @@ class TradingQueries:
                     {
                         "operation_id": str(item.operation_id),
                         "path": item.path,
+                        "treasury_provider": item.treasury_provider,
                         "status": item.status,
                         "receipt_status": item.receipt_status,
                         "account_id": item.account_id,

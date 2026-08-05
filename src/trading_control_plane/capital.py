@@ -10,6 +10,7 @@ from uuid import UUID
 from trading_control_plane.config import Settings
 from trading_control_plane.domain import (
     CapitalDirection,
+    CapitalTreasuryProvider,
     DirectCapitalPath,
     DomainRejected,
     ExecutionEnvironment,
@@ -48,6 +49,7 @@ class CapitalAutomationDecision:
 @dataclass(frozen=True)
 class DirectCapitalPlan:
     path: DirectCapitalPath
+    treasury_provider: CapitalTreasuryProvider
     venue: str
     account_id: str | None
     vault_id: str | None
@@ -69,6 +71,7 @@ class DirectCapitalPlan:
 def build_direct_capital_plan(
     *,
     path: DirectCapitalPath,
+    treasury_provider: CapitalTreasuryProvider = CapitalTreasuryProvider.NOTILT_VAULT,
     amount: Decimal,
     settings: Settings,
     capital_transfer_gate: str | None,
@@ -84,9 +87,12 @@ def build_direct_capital_plan(
         if venue == "BINANCE"
         else settings.capital_direct_hyperliquid_account_id
     )
-    vault_id = settings.capital_direct_vault_id
+    is_safe = treasury_provider is CapitalTreasuryProvider.SAFE_SPENDING_LIMIT
+    vault_id = "SAFE_SPENDING_LIMIT" if is_safe else settings.capital_direct_vault_id
     owned_address = settings.capital_direct_owned_arbitrum_address
-    vault_address = settings.capital_direct_vault_address
+    vault_address = (
+        settings.capital_direct_safe_address if is_safe else settings.capital_direct_vault_address
+    )
     venue_reference = (
         settings.capital_direct_binance_deposit_address
         if venue == "BINANCE"
@@ -94,10 +100,16 @@ def build_direct_capital_plan(
     )
     blockers: list[str] = []
     required = {
-        "CAPITAL_VAULT_ID_MISSING": vault_id,
-        "CAPITAL_VAULT_ADDRESS_MISSING": vault_address,
+        ("SAFE_ADDRESS_MISSING" if is_safe else "CAPITAL_VAULT_ID_MISSING"): (
+            vault_address if is_safe else vault_id
+        ),
+        ("SAFE_ADDRESS_MISSING" if is_safe else "CAPITAL_VAULT_ADDRESS_MISSING"): vault_address,
         "CAPITAL_VENUE_ACCOUNT_MISSING": account_id,
     }
+    if is_safe:
+        required["SAFE_DELEGATE_ADDRESS_MISSING"] = settings.capital_direct_safe_delegate_address
+        if not settings.safe_spending_enabled or not settings.safe_spending_arbitrum_rpc_url:
+            blockers.append("SAFE_SPENDING_LIMIT_NOT_CONFIGURED")
     if path in {
         DirectCapitalPath.VAULT_TO_HYPERLIQUID,
         DirectCapitalPath.HYPERLIQUID_TO_VAULT,
@@ -139,7 +151,48 @@ def build_direct_capital_plan(
 
     execute_after: datetime | None = None
     stages: tuple[dict[str, str], ...]
-    if path is DirectCapitalPath.VAULT_TO_BINANCE:
+    if is_safe and path is DirectCapitalPath.VAULT_TO_BINANCE:
+        stages = (
+            {"code": "READ_SAFE_SPENDING_LIMIT", "status": "BLOCKED"},
+            {"code": "VERIFY_SAFE_MODULE_DELEGATE_TOKEN_NONCE", "status": "BLOCKED"},
+            {"code": "BUILD_SAFE_ALLOWANCE_SIGNATURE_REQUEST", "status": "BLOCKED"},
+            {"code": "HUMAN_DELEGATE_SIGNATURE_AND_SUBMISSION", "status": "BLOCKED"},
+            {"code": "VERIFY_SAFE_TRANSFER_RECEIPT", "status": "BLOCKED"},
+        )
+        blockers.append("SAFE_ALLOWANCE_PREFLIGHT_REQUIRED")
+    elif is_safe and path is DirectCapitalPath.VAULT_TO_HYPERLIQUID:
+        stages = (
+            {"code": "READ_SAFE_SPENDING_LIMIT", "status": "BLOCKED"},
+            {"code": "SAFE_TRANSFER_TO_AUTHORIZED_OWNED_ADDRESS", "status": "BLOCKED"},
+            {"code": "DEPOSIT_TO_HYPERLIQUID_CONTRACT", "status": "BLOCKED"},
+            {"code": "HUMAN_WALLET_CONFIRMATION", "status": "BLOCKED"},
+            {"code": "VERIFY_DESTINATION_RECEIPTS", "status": "BLOCKED"},
+        )
+        blockers.extend(
+            ("SAFE_ALLOWANCE_PREFLIGHT_REQUIRED", "HYPERLIQUID_DEPOSIT_ADAPTER_UNAVAILABLE")
+        )
+    elif is_safe and path is DirectCapitalPath.HYPERLIQUID_TO_VAULT:
+        stages = (
+            {"code": "WITHDRAW_FROM_HYPERLIQUID_CONTRACT", "status": "BLOCKED"},
+            {"code": "RECEIVE_AT_AUTHORIZED_OWNED_ADDRESS", "status": "BLOCKED"},
+            {"code": "BUILD_EXACT_USDC_TRANSFER_TO_SAFE", "status": "BLOCKED"},
+            {"code": "HUMAN_WALLET_CONFIRMATION", "status": "BLOCKED"},
+            {"code": "VERIFY_SAFE_BALANCE_RECEIPT", "status": "BLOCKED"},
+        )
+        blockers.append("HYPERLIQUID_WITHDRAWAL_ADAPTER_UNAVAILABLE")
+    elif is_safe:
+        stages = (
+            {
+                "code": "RESTRICTED_BINANCE_WITHDRAWAL_TO_AUTHORIZED_OWNED_ADDRESS",
+                "status": "BLOCKED",
+            },
+            {"code": "RECEIVE_AT_AUTHORIZED_OWNED_ADDRESS", "status": "BLOCKED"},
+            {"code": "BUILD_EXACT_USDC_TRANSFER_TO_SAFE", "status": "BLOCKED"},
+            {"code": "HUMAN_WALLET_CONFIRMATION", "status": "BLOCKED"},
+            {"code": "VERIFY_SAFE_BALANCE_RECEIPT", "status": "BLOCKED"},
+        )
+        blockers.append("BINANCE_RESTRICTED_WITHDRAWAL_ADAPTER_UNAVAILABLE")
+    elif path is DirectCapitalPath.VAULT_TO_BINANCE:
         execute_after = now + timedelta(minutes=10)
         stages = (
             {"code": "VAULT_RELEASE_REQUEST", "status": "BLOCKED"},
@@ -190,6 +243,8 @@ def build_direct_capital_plan(
     source_reference = (
         vault_address
         if path in {DirectCapitalPath.VAULT_TO_BINANCE, DirectCapitalPath.VAULT_TO_HYPERLIQUID}
+        else vault_address
+        if is_safe and path is DirectCapitalPath.BINANCE_TO_VAULT
         else owned_address
     )
     destination_reference = (
@@ -201,6 +256,7 @@ def build_direct_capital_plan(
     )
     return DirectCapitalPlan(
         path=path,
+        treasury_provider=treasury_provider,
         venue=venue,
         account_id=account_id,
         vault_id=vault_id,

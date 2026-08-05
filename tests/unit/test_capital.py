@@ -12,6 +12,7 @@ from trading_control_plane.capital import (
 from trading_control_plane.config import Settings
 from trading_control_plane.domain import (
     CapitalDirection,
+    CapitalTreasuryProvider,
     DirectCapitalPath,
     DomainRejected,
     ExecutionEnvironment,
@@ -129,3 +130,32 @@ def test_direct_capital_paths_are_explicit_and_never_broadcast(
         DirectCapitalPath.VAULT_TO_HYPERLIQUID,
     }:
         assert plan.execute_after == now + timedelta(minutes=10)
+
+
+def test_safe_spending_limits_are_a_parallel_fail_closed_provider() -> None:
+    settings = Settings(
+        database_url="postgresql+psycopg://user:pass@localhost/trading",
+        safe_spending_enabled=True,
+        safe_spending_arbitrum_rpc_url="https://example.invalid",
+        capital_direct_safe_address="0x1111111111111111111111111111111111111111",
+        capital_direct_safe_delegate_address="0x2222222222222222222222222222222222222222",
+        capital_direct_binance_account_id="binance-main",
+        capital_direct_binance_deposit_address="0x3333333333333333333333333333333333333333",
+        capital_direct_max_amount=Decimal(1000),
+        capital_direct_max_fee=Decimal(1),
+        _env_file=None,
+    )
+    plan = build_direct_capital_plan(
+        path=DirectCapitalPath.VAULT_TO_BINANCE,
+        treasury_provider=CapitalTreasuryProvider.SAFE_SPENDING_LIMIT,
+        amount=Decimal(100),
+        settings=settings,
+        capital_transfer_gate="DISABLED",
+        now=datetime(2026, 8, 5, tzinfo=UTC),
+    )
+    assert plan.treasury_provider is CapitalTreasuryProvider.SAFE_SPENDING_LIMIT
+    assert plan.vault_id == "SAFE_SPENDING_LIMIT"
+    assert "SAFE_ALLOWANCE_PREFLIGHT_REQUIRED" in plan.blockers
+    assert "CAPITAL_TRANSFER_GATE_DISABLED" in plan.blockers
+    assert plan.execute_after is None
+    assert plan.stages[0]["code"] == "READ_SAFE_SPENDING_LIMIT"

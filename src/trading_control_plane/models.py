@@ -530,6 +530,8 @@ class DirectCapitalConfiguration(Base):
     binance_withdrawal_address: Mapped[str | None] = mapped_column(String(42), nullable=True)
     hyperliquid_account_id: Mapped[str | None] = mapped_column(String(120), nullable=True)
     hyperliquid_bridge_address: Mapped[str | None] = mapped_column(String(42), nullable=True)
+    safe_address: Mapped[str | None] = mapped_column(String(42), nullable=True)
+    safe_delegate_address: Mapped[str | None] = mapped_column(String(42), nullable=True)
     max_amount: Mapped[Decimal | None] = mapped_column(AMOUNT, nullable=True)
     max_fee: Mapped[Decimal | None] = mapped_column(AMOUNT, nullable=True)
     updated_by: Mapped[UUID] = mapped_column(ForeignKey("users.user_id"), nullable=False)
@@ -545,6 +547,10 @@ class DirectCapitalOperation(Base):
             name="ck_direct_capital_operations_path",
         ),
         CheckConstraint("venue IN ('BINANCE','HYPERLIQUID')", name="ck_direct_capital_venue"),
+        CheckConstraint(
+            "treasury_provider IN ('NOTILT_VAULT','SAFE_SPENDING_LIMIT')",
+            name="ck_direct_capital_treasury_provider",
+        ),
         CheckConstraint(
             "status IN ('BLOCKED','UNSIGNED_PLAN_READY','AWAITING_RECEIPT','SETTLED','UNKNOWN')",
             name="ck_direct_capital_status",
@@ -569,6 +575,9 @@ class DirectCapitalOperation(Base):
     )
 
     operation_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid4)
+    treasury_provider: Mapped[str] = mapped_column(
+        String(32), nullable=False, default="NOTILT_VAULT"
+    )
     path: Mapped[str] = mapped_column(String(32), nullable=False)
     status: Mapped[str] = mapped_column(String(32), nullable=False)
     receipt_status: Mapped[str] = mapped_column(String(32), nullable=False)

@@ -83,6 +83,11 @@ class DirectCapitalPath(StrEnum):
     HYPERLIQUID_TO_VAULT = "HYPERLIQUID_TO_VAULT"
 
 
+class CapitalTreasuryProvider(StrEnum):
+    NOTILT_VAULT = "NOTILT_VAULT"
+    SAFE_SPENDING_LIMIT = "SAFE_SPENDING_LIMIT"
+
+
 class CapitalTransferStatus(StrEnum):
     SOURCE_RESERVED = "SOURCE_RESERVED"
     SUBMITTED = "SUBMITTED"
