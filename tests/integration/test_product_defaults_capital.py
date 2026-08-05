@@ -183,6 +183,22 @@ def test_proposal_defaults_and_direct_capital_are_permissioned_audited_and_block
             assert one_click.status_code == 200, one_click.text
             assert one_click.json()["status"] == "PENDING_REVIEW"
             proposal_id = one_click.json()["proposal_id"]
+            occupied = await client.get("/api/opportunities")
+            occupied_candidate = next(
+                item
+                for item in occupied.json()["data"]
+                if item["candidate_id"] == candidate.candidate_id
+            )
+            assert occupied_candidate["active_proposal"] == {
+                "proposal_id": proposal_id,
+                "status": "PENDING_REVIEW",
+                "venue": "BINANCE",
+                "symbol": "BTCUSDT",
+                "direction": "LONG",
+                "expires_at": one_click.json()["expires_at"],
+                "source_observed_at": one_click.json()["source_observed_at"],
+                "active_count": 1,
+            }
             refreshed_at = datetime.now(UTC)
             refreshed_candidate = replace(
                 candidate,
@@ -208,6 +224,14 @@ def test_proposal_defaults_and_direct_capital_are_permissioned_audited_and_block
             )
             assert repeated_one_click.status_code == 200, repeated_one_click.text
             assert repeated_one_click.json()["proposal_id"] == proposal_id
+            refreshed_opportunities = await client.get("/api/opportunities")
+            refreshed_projection = next(
+                item
+                for item in refreshed_opportunities.json()["data"]
+                if item["candidate_id"] == refreshed_candidate.candidate_id
+            )
+            assert refreshed_projection["active_proposal"]["proposal_id"] == proposal_id
+            assert refreshed_projection["active_proposal"]["active_count"] == 1
 
             await _login(client, "product-admin")
             update_v2 = await client.put(
@@ -233,6 +257,11 @@ def test_proposal_defaults_and_direct_capital_are_permissioned_audited_and_block
             assert frozen.json()["frozen_payload"]["details"]["configuration_mode"] == "DEFAULT"
 
             await _login(client, "product-observer")
+            observer_opportunities = await client.get("/api/opportunities")
+            assert observer_opportunities.status_code == 200
+            assert observer_opportunities.json()["data"][0]["active_proposal"][
+                "proposal_id"
+            ] == proposal_id
             assert (await client.get("/api/proposal-defaults")).status_code == 403
             denied_capital = await client.post(
                 "/api/capital/direct-operations",

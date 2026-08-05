@@ -1077,7 +1077,7 @@ def create_app(
             )
         raise DomainRejected("PERPTAPE_CANDIDATE_NOT_FOUND", "candidate is no longer available")
 
-    def opportunity_snapshot(*, now: datetime) -> dict[str, Any]:
+    def opportunity_snapshot(*, user_id: UUID, now: datetime) -> dict[str, Any]:
         source_candidates = current_perptape_candidates(now=now)
         candidates = [
             candidate
@@ -1092,9 +1092,16 @@ def create_app(
                 if candidate.venue in {"BINANCE", "HYPERLIQUID"}
             }
         )
+        active_proposals = {
+            (item["venue"], item["symbol"], item["direction"]): item
+            for item in queries().active_perptape_system_proposals(user_id, now=now)
+        }
         data: list[dict[str, Any]] = []
         for candidate in candidates:
             value = candidate.to_dict()
+            value["active_proposal"] = active_proposals.get(
+                (candidate.venue, candidate.symbol, candidate.direction.value)
+            )
             instrument_available = (candidate.venue, candidate.symbol) in active_instrument_keys
             proposal_eligible = (
                 candidate.venue in {"BINANCE", "HYPERLIQUID"}
@@ -1159,7 +1166,7 @@ def create_app(
         identity: SessionIdentity = identity_dependency,
     ) -> dict[str, Any]:
         require_capability(identity, "opportunity.view")
-        return opportunity_snapshot(now=_now())
+        return opportunity_snapshot(user_id=identity.user_id, now=_now())
 
     @app.get("/api/proposal-defaults")
     def proposal_defaults(
@@ -1223,7 +1230,7 @@ def create_app(
         try:
             while True:
                 try:
-                    snapshot = opportunity_snapshot(now=_now())
+                    snapshot = opportunity_snapshot(user_id=identity.user_id, now=_now())
                 except DomainRejected as exc:
                     if last_error != exc.code:
                         await websocket.send_json(

@@ -402,6 +402,53 @@ class TradingQueries:
                 result.append(summary)
             return result
 
+    def active_perptape_system_proposals(
+        self,
+        user_id: UUID,
+        *,
+        now: datetime,
+    ) -> list[dict[str, Any]]:
+        """Return the current visible Perptape proposal occupying each trading scope."""
+
+        with self.database.session_factory() as session:
+            values = session.execute(
+                select(Proposal, Instrument)
+                .join(Instrument, Instrument.instrument_id == Proposal.instrument_id)
+                .where(
+                    Proposal.source == "SYSTEM",
+                    Proposal.strategy_id.in_(("perptape", "perptape-resonance")),
+                    Proposal.environment == "LIVE",
+                    Proposal.status.in_(("DRAFT", "PENDING_REVIEW")),
+                    Proposal.expires_at > now,
+                )
+                .order_by(Proposal.created_at, Proposal.proposal_id)
+            ).all()
+            grouped: dict[tuple[str, str, str], dict[str, Any]] = {}
+            for proposal, instrument in values:
+                if not self.service.can_user(
+                    user_id,
+                    "view",
+                    proposal.account_id,
+                    proposal.venue,
+                ):
+                    continue
+                key = (proposal.venue, instrument.symbol, proposal.direction)
+                current = grouped.get(key)
+                if current is None:
+                    grouped[key] = {
+                        "proposal_id": str(proposal.proposal_id),
+                        "status": _effective_proposal_status(proposal, now),
+                        "venue": proposal.venue,
+                        "symbol": instrument.symbol,
+                        "direction": proposal.direction,
+                        "expires_at": _iso(proposal.expires_at),
+                        "source_observed_at": _iso(proposal.source_observed_at),
+                        "active_count": 1,
+                    }
+                else:
+                    current["active_count"] += 1
+            return list(grouped.values())
+
     def proposal_detail(
         self,
         user_id: UUID,

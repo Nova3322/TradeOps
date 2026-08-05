@@ -112,7 +112,7 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
 
     assert response.status_code == 200
     assert "交易控制台" in response.text
-    assert "/assets/app.js?v=114" in response.text
+    assert "/assets/app.js?v=115" in response.text
     assert "/assets/styles.css?v=47" in response.text
     assert 'aria-label="交易控制台首页"' in response.text
     assert '<a href="/" data-link><span>⌂</span>今日</a>' in response.text
@@ -369,7 +369,7 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
 
     service_worker = get(app, "/sw.js")
     assert service_worker.status_code == 200
-    assert "trading-shell-v94" in service_worker.text
+    assert "trading-shell-v95" in service_worker.text
     assert "self.skipWaiting()" in service_worker.text
     assert "self.clients.claim()" in service_worker.text
     assert "await fetch(event.request)" in service_worker.text
@@ -586,9 +586,12 @@ def test_opportunity_card_explains_exact_catalog_blocker() -> None:
           hasCapability: () => true,
           proposalDefaults: {configured:true, can_manage:false, data:{version:1}},
           currentLanguage: "zh",
+          fmtTimeRemaining: () => "剩余 7 小时",
         };
         vm.createContext(context);
-        context.opportunityViewState = item => (
+        context.opportunityViewState = item => item.active_proposal?.proposal_id
+          ? "ACTIVE_PROPOSAL"
+          : (
           item.action_candidate_id
           || (!Array.isArray(item.candidates) && item.candidate_id)
         ) && item.proposal_eligible
@@ -653,6 +656,22 @@ def test_opportunity_card_explains_exact_catalog_blocker() -> None:
         assert.doesNotMatch(eligible, / disabled/);
         assert.match(eligible, /1h · 向上突破/);
         assert.doesNotMatch(eligible, />candidate</);
+
+        const active = context.render({
+          candidate_id:"pt_active", venue:"BINANCE", timeframe:"1h",
+          symbol:"TUTUSDT", direction:"LONG", reference_price:"1", triggered_at:null,
+          readiness:"READY", proposal_eligible:true, proposal_blocker:null,
+          quote_volume:null, open_interest:null, rationale:"candidate",
+          detail_url:"https://example.test", chart_url:"https://example.test",
+          active_proposal:{
+            proposal_id:"00000000-0000-0000-0000-000000000001",
+            expires_at:"2026-08-02T18:00:00+00:00", active_count:1,
+          },
+        });
+        assert.match(active, /已有待审核提案/);
+        assert.match(active, /不会重复创建/);
+        assert.match(active, /查看待审核提案/);
+        assert.doesNotMatch(active, /一键创建|高级配置/);
 
         context.hasCapability = () => false;
         const readOnly = context.render({
@@ -731,8 +750,23 @@ def test_opportunity_groups_keep_multiple_timeframes_and_direction_separate() ->
         assert.equal(counts.directional_opportunities, 2);
         assert.equal(counts.timeframe_hits, 3);
         assert.equal(counts.eligible_opportunities, 2);
+        assert.equal(counts.active_proposal_opportunities, 0);
         assert.equal(counts.waiting_opportunities, 0);
         assert.equal(counts.watch_only_opportunities, 0);
+
+        const occupiedGroups = JSON.parse(JSON.stringify(context.group([
+          {
+            ...base, candidate_id:"pt_active_scope", direction:"LONG", timeframe:"1h",
+            active_proposal:{
+              proposal_id:"00000000-0000-0000-0000-000000000001",
+              status:"PENDING_REVIEW", active_count:1,
+            },
+          },
+        ])));
+        const occupiedCounts = context.counts([], occupiedGroups);
+        assert.equal(context.viewState(occupiedGroups[0]), "ACTIVE_PROPOSAL");
+        assert.equal(occupiedCounts.eligible_opportunities, 0);
+        assert.equal(occupiedCounts.active_proposal_opportunities, 1);
 
         const duplicatePeriodGroups = JSON.parse(JSON.stringify(context.group([
           {
