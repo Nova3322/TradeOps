@@ -112,7 +112,7 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
 
     assert response.status_code == 200
     assert "交易控制台" in response.text
-    assert "/assets/app.js?v=107" in response.text
+    assert "/assets/app.js?v=108" in response.text
     assert "/assets/styles.css?v=46" in response.text
     assert 'aria-label="交易控制台首页"' in response.text
     assert '<a href="/" data-link><span>⌂</span>今日</a>' in response.text
@@ -256,6 +256,11 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
     assert "当前唯一推荐动作" in app_javascript.text
     assert "data-close-campaign" in app_javascript.text
     assert "/api/campaigns/${item.campaign_id}/close" in app_javascript.text
+    assert "const isClosedFlatCampaign" in app_javascript.text
+    assert "const campaignPnlLabel" in app_javascript.text
+    assert "const management = closedFlat ? '' : managementPanel" in app_javascript.text
+    assert "保护不适用（当前无仓位）" in app_javascript.text  # noqa: RUF001
+    assert 'data-label="仓位目标"' in app_javascript.text
     assert "fmtDefaultAccountLabel(item.account_id)" in app_javascript.text
     assert "fmtVenueLabel(item.venue)" in app_javascript.text
     assert "fmtTargetReason(item.target_reason)" in app_javascript.text
@@ -354,10 +359,71 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
 
     service_worker = get(app, "/sw.js")
     assert service_worker.status_code == 200
-    assert "trading-shell-v87" in service_worker.text
+    assert "trading-shell-v88" in service_worker.text
     assert "self.skipWaiting()" in service_worker.text
     assert "self.clients.claim()" in service_worker.text
     assert "await fetch(event.request)" in service_worker.text
+
+
+def test_closed_campaign_labels_are_flat_currency_aware_and_action_free() -> None:
+    node = shutil.which("node")
+    assert node is not None
+    app_path = Path(__file__).parents[2] / "src" / "trading_control_plane" / "web" / "app.js"
+    script = textwrap.dedent(
+        r"""
+        import assert from "node:assert/strict";
+        import fs from "node:fs";
+        import vm from "node:vm";
+
+        const source = fs.readFileSync(process.argv[1], "utf8");
+        const from = source.indexOf("const fmtNumber");
+        const to = source.indexOf("\nconst statusLabels", from);
+        assert.notEqual(from, -1);
+        assert.notEqual(to, -1);
+        const context = vm.createContext({
+          currentLanguage:"zh-CN",
+          localizedText:value => value,
+          Intl,
+        });
+        vm.runInContext(
+          source.slice(from, to)
+            + "; this.targetLabel = campaignTargetLabel;"
+            + " this.pnlLabel = campaignPnlLabel;"
+            + " this.closedFlat = isClosedFlatCampaign;",
+          context,
+        );
+        const closed = {
+          status:"CLOSED", current_target_quantity:"0",
+          instrument:{collateral_currency:"USDC"},
+        };
+        assert.equal(context.closedFlat(closed), true);
+        assert.equal(context.targetLabel(closed), "已平仓");
+        assert.equal(context.pnlLabel(closed, "-0.00274"), "-0.00274 USDC");
+
+        const open = {
+          status:"OPEN", current_target_quantity:"0.25", collateral_currency:"USDT",
+        };
+        assert.equal(context.closedFlat(open), false);
+        assert.equal(context.targetLabel(open), "0.25");
+        assert.equal(context.pnlLabel(open, "1.5"), "1.5 USDT");
+
+        const detailFrom = source.indexOf("async function renderCampaignDetail");
+        const detailTo = source.indexOf("\nfunction campaignNextStep", detailFrom);
+        const detailSource = source.slice(detailFrom, detailTo);
+        assert.match(detailSource, /const management = closedFlat \? '' : managementPanel/);
+        assert.match(
+          detailSource,
+          /\u4fdd\u62a4\u4e0d\u9002\u7528\uff08\u5f53\u524d\u65e0\u4ed3\u4f4d\uff09/,
+        );
+        """
+    )
+    completed = subprocess.run(  # noqa: S603
+        [node, "--input-type=module", "-e", script, str(app_path)],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stderr
 
 
 def test_opportunity_card_explains_exact_catalog_blocker() -> None:
@@ -696,7 +762,7 @@ def test_opportunity_filters_render_a_bounded_page_and_keep_all_matches() -> Non
     assert completed.returncode == 0, completed.stderr
     source = app_path.read_text()
     assert "const OPPORTUNITY_PAGE_SIZE = 24" in source
-    assert 'data-load-more-opportunities' in source
+    assert "data-load-more-opportunities" in source
     assert "显示更多（剩余 ${remaining}）" in source
 
 
@@ -1119,7 +1185,10 @@ def test_system_and_venue_pages_distinguish_read_only_snapshots_from_live_execut
     assert "function fmtConnectionCapability(key, state)" in source
     assert "仅可查看历史快照；实时账户事实不可用；下单与写入关闭" in source
     assert "实时只读账户事实；下单与写入关闭" in source
-    assert "const scope = accountId ? `（${venueLabel} · ${fmtDefaultAccountLabel(accountId)}）` : '';" in source
+    assert (
+        "const scope = accountId ? `（${venueLabel} · ${fmtDefaultAccountLabel(accountId)}）` : '';"
+        in source
+    )
     assert "`${venueLabel} · ${fmtDefaultAccountLabel(check.scope.account_id)}`" in source
     assert "生产账户 ${accountId}" not in source
     assert "生产账户 ${check.scope.account_id}" not in source

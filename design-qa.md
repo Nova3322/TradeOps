@@ -282,3 +282,32 @@ final result: Bot runtime and local safety contract passed; real Telegram Web co
 - 430 px overview/chart: `artifacts/product-audit/capital-net-worth-2026-08-05/04-430-overview.png`, `05-430-chart.png`.
 
 final result: passed for the current missing-Vault production state; current single-source truth remains visible without manufacturing a three-source total
+
+## 2026-08-05: closed trade truth and lifecycle clarity
+
+### P0 / P1 / P2 status
+
+- P0: none open. No proposal review, authorization, order, capital operation, signing, broadcast or Gate mutation was executed.
+- P1 closed: a closed, flat trade no longer presents `0` as an active position target. The list and detail page explicitly say `已平仓`.
+- P1 closed: realized, unrealized and final PnL now include the authoritative instrument collateral currency.
+- P1 closed: a flat task no longer describes entry and protection as missing operational data; it states that there is no current position and protection is therefore not applicable.
+- P1 closed: the auto-add management panel is absent after the task has closed, while the immutable execution, risk reservation, reconciliation and PnL record remains visible.
+- P2 closed: the detail page and list remain readable without horizontal overflow at desktop, 390 px and 430 px widths.
+
+### Five-dimensional evidence
+
+- Code: shared closed-flat projection, currency-aware PnL labels, lifecycle-aware position/protection copy and action removal.
+- API: the live campaign fact source reports `CLOSED`, zero current target/position, released reservation, reconciled result and the instrument collateral currency.
+- Actual page: the live closed task detail and four-record list were rendered from the current local API at desktop, 390 px and 430 px.
+- End-to-end runtime: a real closed Hyperliquid task was inspected through list and detail routes without mutating any state.
+- Tests: 17 API/web tests and 3 campaign integration tests passed; JavaScript syntax and diff checks passed.
+
+### Accepted screenshots
+
+- Before: `artifacts/product-audit/next-batch-2026-08-05/02-campaign-detail-before.jpg`.
+- Desktop after: `artifacts/product-audit/next-batch-2026-08-05/03-campaign-detail-after-desktop.jpg`.
+- 390 px: `artifacts/product-audit/next-batch-2026-08-05/04-campaign-detail-390.jpg`.
+- 430 px: `artifacts/product-audit/next-batch-2026-08-05/05-campaign-detail-430.jpg`.
+- Desktop list: `artifacts/product-audit/next-batch-2026-08-05/06-campaign-list-desktop.jpg`.
+
+final result: passed for current closed, flat production task records; no live trading mutation was performed
