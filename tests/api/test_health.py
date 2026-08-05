@@ -112,8 +112,8 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
 
     assert response.status_code == 200
     assert "交易控制台" in response.text
-    assert "/assets/app.js?v=103" in response.text
-    assert "/assets/styles.css?v=44" in response.text
+    assert "/assets/app.js?v=104" in response.text
+    assert "/assets/styles.css?v=45" in response.text
     assert 'aria-label="交易控制台首页"' in response.text
     assert '<a href="/" data-link><span>⌂</span>今日</a>' in response.text
     assert 'id="mobile-nav-toggle"' in response.text
@@ -209,7 +209,7 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
     assert "当前三方总净值" in app_javascript.text
     assert "当前不可汇总" in app_javascript.text
     assert "alignment_tolerance_seconds" in app_javascript.text
-    assert "断档不连线" in app_javascript.text
+    assert "断档都不会补零或强行连线" in app_javascript.text
     assert "function capitalSeriesLargestChange" in app_javascript.text
     assert "capital-chart-tooltip" in app_javascript.text
     assert "latestPoint && capitalTrendVisibility" in app_javascript.text
@@ -349,7 +349,7 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
 
     service_worker = get(app, "/sw.js")
     assert service_worker.status_code == 200
-    assert "trading-shell-v83" in service_worker.text
+    assert "trading-shell-v84" in service_worker.text
     assert "self.skipWaiting()" in service_worker.text
     assert "self.clients.claim()" in service_worker.text
     assert "await fetch(event.request)" in service_worker.text
@@ -899,6 +899,13 @@ def test_capital_web_projection_only_renders_live_records() -> None:
         assert.equal(staleBinance.points.at(-1).breakBefore, true);
         assert.equal(
           vm.runInContext(
+            `capitalSeriesChange(${JSON.stringify(staleBinance)})`,
+            context,
+          ),
+          null,
+        );
+        assert.equal(
+          vm.runInContext(
             `capitalSeriesLargestChange(${JSON.stringify(staleBinance)})`,
             context,
           ),
@@ -930,6 +937,9 @@ def test_capital_web_projection_only_renders_live_records() -> None:
     ).read_text()
     app_source = app_path.read_text()
     assert "历史曲线不会冒充当前净值" in app_source
+    assert "纵轴按当前可见数据自动缩放" in app_source
+    assert "跨断档数据不会比较" in app_source
+    assert "capitalChartResizeObserver = new ResizeObserver" in app_source
     assert 'data-label="数据状态"' in app_source
     assert 'class="table-wrap is-scrollable capital-operation-table"' in app_source
     assert ".capital-balance-table td::before" in stylesheet

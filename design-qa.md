@@ -173,3 +173,30 @@ final result: passed
 - `git diff --check`: passed.
 
 final result: passed
+## 2026-08-05: capital net-worth dashboard truth and responsive chart
+
+### P0 / P1 / P2 status
+
+- P0: none open in this batch.
+- P1 closed: the chart no longer compares the last two points across a fact gap; missing intervals remain disconnected and are counted in the visible coverage summary.
+- P1 closed: canvas dimensions now follow responsive viewport changes. USD ticks and the time axis remain readable at 390 px, 430 px and desktop widths.
+- P1 closed: the page explicitly distinguishes an unavailable current three-source total from still-valid Binance and Hyperliquid history. No missing Vault value is zero-filled.
+- P2 closed: the auto-zoom disclosure and percentage context now sit beside the chart, so the real Binance `$0.0045` / `0.04%` decrease is not presented as an unexplained capital cliff.
+- P1 external: the production Vault fact is still missing, so a current three-source total and TOTAL line remain correctly unavailable.
+
+### Five-dimensional evidence
+
+- Code: fixed four-series projection, aligned total-only history, gap-safe change comparison, responsive canvas redraw, adaptive axis margins, five/three time ticks, compact two-column mobile filters and cache revision.
+- API: `/api/capital` reports current Binance and Hyperliquid values, `MISSING_LIVE_SOURCE:VAULT`, `total=null`, and preserves 2,860 visible history facts without substituting zero.
+- Actual page: desktop, 390 px and 430 px views show no horizontal overflow; enabled Binance/Hyperliquid filters work, missing Vault/TOTAL filters remain disabled, and USD tick labels are not clipped.
+- End-to-end runtime: the live local page uses current read-only capital facts. No transfer, signing, broadcast, order or gate mutation was executed.
+- Tests: 23 capital integration tests and the focused capital web test passed; JavaScript syntax and diff checks passed.
+
+### Accepted screenshots
+
+- 390 px trend: `/Users/vireo/.codex/worktrees/640e/trading/artifacts/product-audit/capital-2026-08-05/03-capital-trend-390-after.png`.
+- 430 px trend: `/Users/vireo/.codex/worktrees/640e/trading/artifacts/product-audit/capital-2026-08-05/04-capital-trend-430-after.png`.
+- Desktop trend: `/Users/vireo/.codex/worktrees/640e/trading/artifacts/product-audit/capital-2026-08-05/05-capital-trend-desktop-after.png`.
+- Desktop overview: `/Users/vireo/.codex/worktrees/640e/trading/artifacts/product-audit/capital-2026-08-05/06-capital-overview-desktop-after.png`.
+
+final result: passed for current missing-Vault production state; complete, stale and time-misaligned truth projections passed in isolated integration scenarios

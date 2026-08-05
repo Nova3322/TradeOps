@@ -283,6 +283,7 @@ button:disabled { opacity: .52; cursor: not-allowed; }
 .chart-head-value { display: grid; gap: 5px; text-align: right; }
 .chart-head-value b { font-size: 20px; white-space: nowrap; }
 .chart-head-value small { max-width: 280px; color: var(--muted); font-size: 9px; }
+.capital-chart-meta { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 6px 18px; margin-top: 10px; color: var(--muted); font-size: 9px; line-height: 1.45; }
 .capital-chart-wrap { position: relative; min-width: 0; }
 #capital-chart { display: block; width: 100%; height: 300px; margin: 8px 0 0; touch-action: pan-y; }
 .capital-chart-tooltip { position: absolute; z-index: 2; display: grid; gap: 3px; min-width: 130px; padding: 9px 11px; border: 1px solid var(--line); border-radius: 9px; background: var(--panel-strong); box-shadow: 0 8px 24px color-mix(in srgb, var(--ink) 12%, transparent); pointer-events: none; }
@@ -298,7 +299,7 @@ button:disabled { opacity: .52; cursor: not-allowed; }
 .capital-trend-toggle i { width: 8px; height: 24px; border-radius: 999px; background: var(--trend-color); }
 .capital-trend-toggle span, .capital-trend-toggle b, .capital-trend-toggle small { display: block; min-width: 0; }
 .capital-trend-toggle b { overflow: hidden; color: var(--ink); font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
-.capital-trend-toggle small { margin-top: 2px; overflow: hidden; color: var(--muted); font-size: 8px; text-overflow: ellipsis; white-space: nowrap; }
+.capital-trend-toggle small { margin-top: 2px; overflow: hidden; color: var(--muted); font-size: 9px; text-overflow: ellipsis; white-space: nowrap; }
 .capital-trend-toggle.is-missing { opacity: .62; cursor: not-allowed; }
 .capital-change-note { display: flex; gap: 8px; align-items: baseline; padding: 9px 11px; border-radius: 9px; background: var(--panel-strong); font-size: 9px; }
 .capital-change-note b { flex: 0 0 auto; }
@@ -770,6 +771,10 @@ dialog::backdrop { background: rgba(4, 12, 10, .56); backdrop-filter: blur(3px);
   .capital-worth-card { grid-template-columns: minmax(0, 1fr) auto; align-items: center; }
   .capital-worth-card p { grid-column: 1 / -1; }
   .capital-chart-panel { padding: 14px 10px; }
+  .chart-head { display: grid; gap: 10px; }
+  .chart-head-value { text-align: left; }
+  .chart-head-value small { max-width: none; }
+  .capital-chart-meta { display: grid; }
   #capital-chart { height: 270px; }
   .chart-legend { grid-template-columns: 1fr 1fr; }
   .capital-trend-toggle { padding: 8px; }

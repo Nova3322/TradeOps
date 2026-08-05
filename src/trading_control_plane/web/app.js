@@ -2426,6 +2426,7 @@ const DIRECT_CAPITAL_PATHS = [
   {path:'HYPERLIQUID_TO_VAULT', from:'Hyperliquid', to:'资金库', badge:'两段路径', action:'检查 Hyperliquid 回流条件', copy:'先从合约提回已授权自有地址，再构建 NoTilt SDK 无签名入金。', steps:['合约提现','到达自有地址','SDK 无签名入金']},
 ];
 let capitalTrendVisibility = {BINANCE:true, HYPERLIQUID:true, VAULT:true, TOTAL:true};
+let capitalChartResizeObserver = null;
 const OCCUPIED_CAPITAL_TRANSFER_STATUSES = new Set([
   'SOURCE_RESERVED', 'SUBMITTED', 'IN_FLIGHT', 'DESTINATION_CONFIRMED',
   'UNKNOWN', 'MANUAL_REQUIRED',
@@ -2610,6 +2611,7 @@ function capitalSeriesChange(series) {
   if (points.length < 2) return null;
   const previous = points.at(-2);
   const latest = points.at(-1);
+  if (latest.breakBefore) return null;
   const delta = latest.value - previous.value;
   const percentage = previous.value === 0 ? null : delta / previous.value * 100;
   return {
@@ -2745,7 +2747,17 @@ async function renderCapitalCenter() {
     ? abnormalChanges.slice(0, 2).map(({series, change}) => `${series.label} ${change.delta >= 0 ? '上升' : '下降'} ${formatCapitalUsd(Math.abs(change.delta))}（${Math.abs(change.percentage).toFixed(2)}%）`).join('；')
     : latestChange && largestChartChange
       ? `${latestChange.series.label} 最新 ${latestChange.change.delta >= 0 ? '+' : '-'}${formatCapitalUsd(Math.abs(latestChange.change.delta))}（${Math.abs(latestChange.change.percentage || 0).toFixed(2)}%）；图中最大单次变化为 ${largestChartChange.series.label} ${largestChartChange.change.delta >= 0 ? '+' : '-'}${formatCapitalUsd(Math.abs(largestChartChange.change.delta))}（${Math.abs(largestChartChange.change.percentage || 0).toFixed(2)}%），未达到 1% 异常阈值`
-      : '至少需要两个有效记录后才计算变化';
+      : '至少需要两个连续有效记录后才计算变化；跨断档数据不会比较。';
+  const chartTimes = historySeries.flatMap(series => series.points.map(point => point.time));
+  const chartStart = chartTimes.length ? Math.min(...chartTimes) : null;
+  const chartEnd = chartTimes.length ? Math.max(...chartTimes) : null;
+  const chartGapCount = historySeries.reduce(
+    (count, series) => count + series.points.filter(point => point.breakBefore).length,
+    0,
+  );
+  const chartCoverage = chartStart && chartEnd
+    ? `${fmtDate(chartStart)} 至 ${fmtDate(chartEnd)} · ${chartGapCount ? `${chartGapCount} 处断档未连线` : '没有检测到断档'}`
+    : '尚无有效时间范围';
   const issueDetails = [...new Set((netWorth.issues || []).map(issue => {
     const source = String(issue).split(':')[1];
     const lastTime = source && netWorth.source_as_of?.[source];
@@ -2780,7 +2792,7 @@ async function renderCapitalCenter() {
   const legacyStats = main.querySelector('.capital-page > .stats');
   legacyStats.outerHTML = `<section class="capital-overview" aria-label="当前资金净值"><article class="capital-total-card ${netWorth.complete ? 'is-current' : 'is-limited'}"><small>当前三方总净值</small><b>${escapeHtml(totalHeadline)}</b><p>${escapeHtml(totalSupporting)}</p></article><div class="capital-source-cards">${sourceCards}</div></section><section class="capital-trust-panel ${netWorth.complete ? 'is-current' : 'is-limited'}"><div><b>${netWorth.complete ? '数据可信，可用于当前汇总' : '当前汇总已阻断'}</b><p>${escapeHtml(trustCopy)}</p></div><span>${netWorth.complete ? '完整' : '需关注'}</span></section>`;
   const chartPanel = main.querySelector('.capital-chart-panel');
-  chartPanel.innerHTML = `<div class="chart-head"><div><p class="eyebrow">资金净值趋势</p><h2>四条固定资金曲线</h2><p class="subtle">Binance、Hyperliquid、Vault 与三方汇总。汇总只使用 ${Number(netWorth.alignment_tolerance_seconds || 60)} 秒内对齐的三方事实；断档不连线。</p></div><div class="chart-head-value"><b>${escapeHtml(totalHeadline)}</b><small>${escapeHtml(totalSupporting)}</small></div></div><div class="chart-legend" role="group" aria-label="选择显示的资金曲线">${chartLegend}</div>${hasHistory ? `<div class="capital-chart-wrap"><canvas id="capital-chart" height="300" aria-label="Binance、Hyperliquid、Vault 和三方汇总四条 USD 资金趋势"></canvas><div class="capital-chart-tooltip" role="status" hidden></div></div>` : '<div class="chart-empty">尚无可绘制的资金历史；缺失数据不会补零。</div>'}<div class="capital-change-note ${abnormalChanges.length ? 'is-anomaly' : ''}"><b>${abnormalChanges.length ? '异常变化提示' : '最近变化'}</b><span>${escapeHtml(changeCopy)}</span></div>`;
+  chartPanel.innerHTML = `<div class="chart-head"><div><p class="eyebrow">资金净值趋势</p><h2>四条固定资金曲线</h2><p class="subtle">Binance、Hyperliquid、Vault 与三方汇总。汇总只使用 ${Number(netWorth.alignment_tolerance_seconds || 60)} 秒内对齐的三方事实；缺失、过期、错位和断档都不会补零或强行连线。</p></div><div class="chart-head-value"><b>${escapeHtml(totalHeadline)}</b><small>${escapeHtml(totalSupporting)}</small></div></div><div class="capital-chart-meta"><span>${escapeHtml(chartCoverage)}</span><span>纵轴按当前可见数据自动缩放；请结合金额和百分比判断变化</span></div><div class="chart-legend" role="group" aria-label="选择显示的资金曲线">${chartLegend}</div>${hasHistory ? `<div class="capital-chart-wrap"><canvas id="capital-chart" height="300" aria-label="Binance、Hyperliquid、Vault 和三方汇总四条 USD 资金趋势"></canvas><div class="capital-chart-tooltip" role="status" hidden></div></div>` : '<div class="chart-empty">尚无可绘制的资金历史；缺失数据不会补零。</div>'}<div class="capital-change-note ${abnormalChanges.length ? 'is-anomaly' : ''}"><b>${abnormalChanges.length ? '异常变化提示' : '最近变化'}</b><span>${escapeHtml(changeCopy)}</span></div>`;
   const legacyIncomplete = chartPanel.nextElementSibling?.classList.contains('callout') ? chartPanel.nextElementSibling : null;
   legacyIncomplete?.remove();
   const capitalPositionsHeading = [...main.querySelectorAll('section > h2')].find(heading => heading.textContent === '资金位置');
@@ -2817,7 +2829,11 @@ function drawCapitalChart(series) {
   const times = allPoints.map(point => point.time);
   const minimumTime = Math.min(...times);
   const maximumTime = Math.max(...times);
-  const left = width < 520 ? 64 : 68, right = width - 12, top = 12, bottom = height - 30;
+  const axisSamples = allPoints.map(point => formatCapitalUsd(point.value));
+  context.font = width < 520 ? '9px system-ui' : '10px system-ui';
+  const widestAxisLabel = Math.max(44, ...axisSamples.map(label => context.measureText(label).width));
+  const left = Math.ceil(widestAxisLabel + (width < 520 ? 14 : 18));
+  const right = width - 10, top = 18, bottom = height - 34;
   const x = time => maximumTime === minimumTime ? (left + right) / 2 : left + ((right - left) * (time - minimumTime) / (maximumTime - minimumTime));
   const total = series.find(item => item.source === 'TOTAL' && item.points.length);
   const sources = series.filter(item => item.source !== 'TOTAL' && item.points.length);
@@ -2825,7 +2841,6 @@ function drawCapitalChart(series) {
     ? [{items:[total], top, bottom:top + (bottom - top) * .39}, {items:sources, top:top + (bottom - top) * .53, bottom}]
     : [{items:series.filter(item => item.points.length), top, bottom}];
   const hitPoints = [];
-  context.font = width < 520 ? '9px system-ui' : '10px system-ui';
   context.textBaseline = 'middle';
   bands.forEach(band => {
     const values = band.items.flatMap(item => item.points.map(point => point.value));
@@ -2837,6 +2852,11 @@ function drawCapitalChart(series) {
     band.minimum = minimumValue - valuePadding;
     band.maximum = band.minimum + range;
     band.y = value => band.bottom - ((band.bottom - band.top) * (value - band.minimum) / range);
+    context.fillStyle = muted;
+    context.textAlign = 'left';
+    context.textBaseline = 'bottom';
+    context.fillText(band.items.some(item => item.source === 'TOTAL') ? '三方汇总 · USD' : '单项资金 · USD', left, band.top - 4);
+    context.textBaseline = 'middle';
     for (let index = 0; index < 3; index += 1) {
       const gridY = band.top + ((band.bottom - band.top) * index / 2);
       const tickValue = band.maximum - ((band.maximum - band.minimum) * index / 2);
@@ -2883,8 +2903,14 @@ function drawCapitalChart(series) {
   });
   context.fillStyle = muted; context.textBaseline = 'bottom';
   const timeFormatter = new Intl.DateTimeFormat('zh-CN', {month:'numeric', day:'numeric', hour:'2-digit', minute:'2-digit'});
-  context.textAlign = 'left'; context.fillText(timeFormatter.format(new Date(minimumTime)), left, height - 4);
-  context.textAlign = 'right'; context.fillText(timeFormatter.format(new Date(maximumTime)), right, height - 4);
+  const tickCount = width < 520 ? 3 : 5;
+  for (let index = 0; index < tickCount; index += 1) {
+    const ratio = tickCount === 1 ? 0 : index / (tickCount - 1);
+    const tickTime = minimumTime + (maximumTime - minimumTime) * ratio;
+    const tickX = left + (right - left) * ratio;
+    context.textAlign = index === 0 ? 'left' : index === tickCount - 1 ? 'right' : 'center';
+    context.fillText(timeFormatter.format(new Date(tickTime)), tickX, height - 4);
+  }
   const tooltip = document.querySelector('.capital-chart-tooltip');
   canvas.onpointermove = event => {
     const rect = canvas.getBoundingClientRect();
@@ -2911,6 +2937,18 @@ function bindCapitalActions(historySeries = []) {
     capitalTrendVisibility[event.currentTarget.dataset.capitalTrend] = event.currentTarget.checked;
     drawCapitalChart(historySeries.filter(series => capitalTrendVisibility[series.source]));
   }));
+  capitalChartResizeObserver?.disconnect();
+  const chartCanvas = document.querySelector('#capital-chart');
+  if (chartCanvas && typeof ResizeObserver !== 'undefined') {
+    let previousWidth = Math.round(chartCanvas.clientWidth);
+    capitalChartResizeObserver = new ResizeObserver(entries => {
+      const nextWidth = Math.round(entries[0]?.contentRect?.width || chartCanvas.clientWidth);
+      if (!nextWidth || nextWidth === previousWidth) return;
+      previousWidth = nextWidth;
+      drawCapitalChart(historySeries.filter(series => capitalTrendVisibility[series.source]));
+    });
+    capitalChartResizeObserver.observe(chartCanvas);
+  }
   document.querySelectorAll('[data-notilt-preview]').forEach(button => button.addEventListener('click', async event => {
     const target = event.currentTarget;
     const confirmed = await confirmAction({title:'生成 NoTilt SDK 无签名预检？', message:'只会调用官方可信部署和资产目录构建固定用途的无签名交易。不会签名或广播；当前仍有任何阻断时，不得交给钱包执行。', confirmLabel:'确认并生成预检'});
