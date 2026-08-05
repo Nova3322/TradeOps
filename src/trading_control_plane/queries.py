@@ -2358,6 +2358,23 @@ class TradingQueries:
     def _proposal_summary(
         proposal: Proposal, instrument: Instrument | None = None
     ) -> dict[str, Any]:
+        details = proposal.frozen_payload.get("details", {})
+        candidate = details.get("candidate", {}) if isinstance(details, dict) else {}
+        reference_price = (
+            details.get("trigger_price")
+            or candidate.get("reference_price")
+            or candidate.get("threshold_price")
+            if isinstance(details, dict) and isinstance(candidate, dict)
+            else None
+        )
+        try:
+            estimated_notional = (
+                None
+                if reference_price is None
+                else proposal.quantity * Decimal(str(reference_price))
+            )
+        except (ArithmeticError, TypeError, ValueError):
+            estimated_notional = None
         return {
             "proposal_id": str(proposal.proposal_id),
             "source": proposal.source,
@@ -2380,6 +2397,9 @@ class TradingQueries:
             "collateral_currency": (None if instrument is None else instrument.collateral_currency),
             "direction": proposal.direction,
             "quantity": str(proposal.quantity),
+            "estimated_notional": (
+                None if estimated_notional is None else str(estimated_notional)
+            ),
             "max_risk": str(proposal.max_risk),
             "expires_at": _iso(proposal.expires_at),
             "created_at": _iso(proposal.created_at),

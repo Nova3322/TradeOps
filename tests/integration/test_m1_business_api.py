@@ -765,6 +765,7 @@ def test_perptape_to_review_to_risk_and_authorization_api_flow(
             assert listed.json()["data"][0]["symbol"] == "BTCUSDT"
             assert listed.json()["data"][0]["proposer_username"] == "perptape"
             assert listed.json()["data"][0]["collateral_currency"] == "USDT"
+            assert listed.json()["data"][0]["estimated_notional"] == "120000.000000000000000000"
             assert listed.json()["data"][0]["campaign_id"] is None
 
             duplicate = await client.post(

@@ -212,6 +212,11 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
     assert "断档都不会补零或强行连线" in app_javascript.text
     assert "function capitalSeriesLargestChange" in app_javascript.text
     assert "capital-chart-tooltip" in app_javascript.text
+    assert "方向 / 交易规模" in app_javascript.text
+    assert "名义价值 ${escapeHtml(fmtAmount(item.estimated_notional" in app_javascript.text
+    assert "创建时来源快照" in app_javascript.text
+    assert "创建提案时，突破榜单中同一精确合约" in app_javascript.text
+    assert "fmtTimeRemaining(item.expires_at)" in app_javascript.text
     assert "latestPoint && capitalTrendVisibility" in app_javascript.text
     assert "未配置或未同步" in app_javascript.text
     assert "旧流程只保留为只读审计记录" in app_javascript.text
