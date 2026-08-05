@@ -62,6 +62,20 @@ def _effective_proposal_status(proposal: Proposal, now: datetime) -> str:
     return proposal.status
 
 
+def _proposal_execution_status(
+    proposal: Proposal,
+    now: datetime,
+    campaign_id: UUID | None,
+) -> str | None:
+    if proposal.status != "APPROVED":
+        return None
+    if campaign_id is not None:
+        return "TRADE_CREATED"
+    if proposal.expires_at <= now:
+        return "WINDOW_EXPIRED"
+    return "AWAITING_LAUNCH"
+
+
 class TradingQueries:
     def __init__(self, database: Database) -> None:
         self.database = database
@@ -368,6 +382,11 @@ class TradingQueries:
                 summary["required_approvals"] = 2 if proposal.risk_tier == "HIGH" else 1
                 campaign_id = campaign_by_proposal.get(proposal.proposal_id)
                 summary["campaign_id"] = None if campaign_id is None else str(campaign_id)
+                summary["execution_status"] = _proposal_execution_status(
+                    proposal,
+                    current_time,
+                    campaign_id,
+                )
                 summary["actionable_for_current_user"] = bool(
                     effective_status == "PENDING_REVIEW"
                     and proposal.proposer_id != user_id
@@ -464,6 +483,11 @@ class TradingQueries:
                 .limit(1)
             )
             result["status"] = effective_status
+            result["execution_status"] = _proposal_execution_status(
+                proposal,
+                current_time,
+                None if campaign is None else campaign.campaign_id,
+            )
             result["proposer_username"] = proposal_users.get(proposal.proposer_id)
             result.update(
                 {

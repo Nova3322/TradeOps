@@ -629,6 +629,21 @@ def test_self_review_is_forbidden_and_high_risk_needs_two_reviewers(
 
     assert first is ProposalStatus.PENDING_REVIEW
     assert second is ProposalStatus.APPROVED
+    approved_summary = queries.list_proposals(ids["reviewer_two"], now=NOW + timedelta(minutes=10))[
+        0
+    ]
+    assert approved_summary["execution_status"] == "AWAITING_LAUNCH"
+    expired_approval_summary = queries.list_proposals(
+        ids["reviewer_two"], now=NOW + timedelta(hours=2)
+    )[0]
+    assert expired_approval_summary["status"] == "APPROVED"
+    assert expired_approval_summary["execution_status"] == "WINDOW_EXPIRED"
+    assert (
+        queries.proposal_detail(ids["reviewer_two"], proposal_id, now=NOW + timedelta(hours=2))[
+            "execution_status"
+        ]
+        == "WINDOW_EXPIRED"
+    )
     with database.session_factory() as session:
         assert session.get(Proposal, proposal_id).status == ProposalStatus.APPROVED.value
 

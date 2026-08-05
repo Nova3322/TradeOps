@@ -112,7 +112,7 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
 
     assert response.status_code == 200
     assert "交易控制台" in response.text
-    assert "/assets/app.js?v=108" in response.text
+    assert "/assets/app.js?v=112" in response.text
     assert "/assets/styles.css?v=46" in response.text
     assert 'aria-label="交易控制台首页"' in response.text
     assert '<a href="/" data-link><span>⌂</span>今日</a>' in response.text
@@ -151,7 +151,7 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
     assert "由交易运维人员查看" in app_javascript.text
     assert 'href="/proposals" data-link>查看提案记录</a>' in app_javascript.text
     assert "new URLSearchParams(location.search).get('history') === '1'" in app_javascript.text
-    assert "item.status === 'APPROVED' && !item.campaign_id" in app_javascript.text
+    assert "proposalAwaitingLaunch(item)" in app_javascript.text
     assert "historyMode ? !isCurrentProposal(item)" in app_javascript.text
     assert "const proposerOnly = hasCapability('proposal.create')" in app_javascript.text
     assert "item.proposer_id === session.user_id) : allItems" in app_javascript.text
@@ -278,6 +278,11 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
     assert "api('/api/proposals?proposal_status=APPROVED')" in app_javascript.text
     assert "const canOperate = roles.includes('OPERATOR')" in app_javascript.text
     assert "approvedAwaitingLaunch = canOperate" in app_javascript.text
+    assert "proposalLaunchWindowExpired(item)" in app_javascript.text
+    assert "item.status === 'APPROVED' && !proposalLaunchWindowExpired(item)" in app_javascript.text
+    assert "operationsView ? '已进入交易' : '已批准'" in app_javascript.text  # noqa: RUF001
+    assert "审核已批准，但启动窗口已过期" in app_javascript.text  # noqa: RUF001
+    assert "当前提案不可再签发" in app_javascript.text  # noqa: RUF001
     assert (
         "当前身份只能查看，处理与风险动作由交易运维人员负责"  # noqa: RUF001
         in app_javascript.text
@@ -359,7 +364,7 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
 
     service_worker = get(app, "/sw.js")
     assert service_worker.status_code == 200
-    assert "trading-shell-v88" in service_worker.text
+    assert "trading-shell-v92" in service_worker.text
     assert "self.skipWaiting()" in service_worker.text
     assert "self.clients.claim()" in service_worker.text
     assert "await fetch(event.request)" in service_worker.text
@@ -414,6 +419,72 @@ def test_closed_campaign_labels_are_flat_currency_aware_and_action_free() -> Non
         assert.match(
           detailSource,
           /\u4fdd\u62a4\u4e0d\u9002\u7528\uff08\u5f53\u524d\u65e0\u4ed3\u4f4d\uff09/,
+        );
+        """
+    )
+    completed = subprocess.run(  # noqa: S603
+        [node, "--input-type=module", "-e", script, str(app_path)],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stderr
+
+
+def test_proposal_launch_window_projection_excludes_expired_approvals() -> None:
+    node = shutil.which("node")
+    assert node is not None
+    app_path = Path(__file__).parents[2] / "src" / "trading_control_plane" / "web" / "app.js"
+    script = textwrap.dedent(
+        r"""
+        import assert from "node:assert/strict";
+        import fs from "node:fs";
+        import vm from "node:vm";
+
+        const source = fs.readFileSync(process.argv[1], "utf8");
+        const from = source.indexOf("const proposalAwaitingLaunch");
+        const to = source.indexOf("\nconst statusLabels", from);
+        assert.notEqual(from, -1);
+        assert.notEqual(to, -1);
+        const context = vm.createContext({localizedText:value => value});
+        vm.runInContext(source.slice(from, to), context);
+
+        assert.equal(vm.runInContext(`isCurrentProposalItem({status:"DRAFT"}, false)`, context), true);
+        assert.equal(vm.runInContext(`isCurrentProposalItem({status:"PENDING_REVIEW"}, false)`, context), true);
+        assert.equal(
+          vm.runInContext(
+            `isCurrentProposalItem({status:"APPROVED",execution_status:"AWAITING_LAUNCH"}, true)`,
+            context,
+          ),
+          true,
+        );
+        assert.equal(
+          vm.runInContext(
+            `isCurrentProposalItem({status:"APPROVED",execution_status:"AWAITING_LAUNCH"}, false)`,
+            context,
+          ),
+          false,
+        );
+        assert.equal(
+          vm.runInContext(
+            `isCurrentProposalItem({status:"APPROVED",execution_status:"WINDOW_EXPIRED"}, true)`,
+            context,
+          ),
+          false,
+        );
+        assert.equal(
+          vm.runInContext(
+            `proposalStatusSupplement({execution_status:"WINDOW_EXPIRED"})`,
+            context,
+          ),
+          "启动窗口已过期",
+        );
+        assert.equal(
+          vm.runInContext(
+            `proposalExpiryPresentation({status:"EXPIRED",expires_at:"2026-08-05T16:00:00Z",updated_at:"2026-08-05T12:00:00Z"}).state`,
+            context,
+          ),
+          "已结束",
         );
         """
     )

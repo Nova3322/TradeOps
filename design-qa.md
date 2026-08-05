@@ -311,3 +311,34 @@ final result: passed for the current missing-Vault production state; current sin
 - Desktop list: `artifacts/product-audit/next-batch-2026-08-05/06-campaign-list-desktop.jpg`.
 
 final result: passed for current closed, flat production task records; no live trading mutation was performed
+
+## 2026-08-05: Today, review queue and proposal launch-window truth
+
+### P0 / P1 / P2 status
+
+- P0: none open. No proposal review, authorization, order, capital operation or Gate mutation was executed.
+- P1 closed: Today no longer counts an approved proposal after its launch window has expired.
+- P1 closed: expired approved proposals no longer appear in Current proposals and cannot expose risk-check, authorization or trade-creation actions.
+- P1 closed: the immutable approval decision remains visible in History, with a separate `启动窗口已过期` execution outcome.
+- P1 closed: History summary categories are mutually exclusive; entered-trading, expired and rejected counts no longer double-count the same record.
+- P2 closed: a proposal that ended early shows its real terminal time and `已结束`, not a misleading future expiry countdown.
+- P2 closed: the terminal detail remains readable without horizontal overflow at desktop, 390 px and 430 px.
+
+### Five-dimensional evidence
+
+- Code: one execution-state projection drives Today, proposal lists and detail actions while preserving decision history.
+- API: approved proposals return `AWAITING_LAUNCH`, `WINDOW_EXPIRED` or `TRADE_CREATED`; list and detail agree.
+- Actual page: Today, review queue, Current proposals, History and the expired-approved detail were rendered from the running service.
+- End-to-end runtime: two false launch tasks disappeared from Today and Current proposals; the selected record remained auditable in History and became read-only in detail.
+- Tests: API/web tests and isolated PostgreSQL workflow coverage verify pre-expiry and post-expiry behavior, independent review and self-review rejection.
+
+### Accepted screenshots
+
+- Today after: `artifacts/product-audit/action-flow-2026-08-05/03-today-admin-after.png`.
+- Current proposals: `artifacts/product-audit/action-flow-2026-08-05/04-current-proposals-after.png`.
+- History outcome: `artifacts/product-audit/action-flow-2026-08-05/05-history-approved-expired.png`.
+- Desktop detail: `artifacts/product-audit/action-flow-2026-08-05/06-approved-expired-detail-desktop.png`.
+- 390 px: `artifacts/product-audit/action-flow-2026-08-05/07-approved-expired-detail-390.png`.
+- 430 px: `artifacts/product-audit/action-flow-2026-08-05/08-approved-expired-detail-430.png`.
+
+final result: passed for the current local dataset; expired approvals no longer masquerade as current work
