@@ -477,3 +477,29 @@ final result: passed; the dashboard preserves usable single-source history while
 - Requested 430 px: `04-alerts-430.png`.
 
 final result: passed; runtime alerts are readable, scoped to production campaigns and remain fail-closed
+
+## 2026-08-05: console content deduplication
+
+### P0 / P1 / P2 status
+
+- P0: none open. This batch changes presentation only; no order, capital, authorization, signature, broadcast or Gate action was added or executed.
+- P1 closed: opportunity cards no longer state the same breakout periods twice. Compact chips are now the single signal summary and preserve accessible direction labels.
+- P2 closed: adjacent repeated facts were removed from the review tab, campaign title, system connection source cell, capital chart header, venue connection detail and risk-condition summaries.
+- P2 retained intentionally: Today still shows overview counts and a separate single-action item because they serve different information and navigation levels while using the same backend facts.
+
+### Five-dimensional evidence
+
+- Code: removed redundant render branches and their unused styles/translations; bumped the static cache revisions.
+- API: the live pages continued to load the same read-only facts; no response contract changed.
+- Actual page: desktop opportunity cards show one signal summary; system, capital, venue, review, campaign and risk pages show the reduced copy in their real authenticated states.
+- End-to-end runtime: the restarted 8014 console remained authenticated and live while the current Perptape snapshot continued updating.
+- Tests: Web shell/cache/render assertions, syntax and diff checks passed. Requested 390/430 responsive runs had no document-level horizontal overflow.
+
+### Accepted screenshots
+
+- Before: `artifacts/product-audit/content-dedup-2026-08-05/01-opportunity-before.png`.
+- Desktop after: `02-opportunity-after-desktop.jpg`.
+- Requested 390 px: `03-opportunity-after-390.jpg` (effective browser layout width 433 px).
+- Requested 430 px: `04-opportunity-after-430.jpg` (effective browser layout width 478 px).
+
+final result: passed; repeated adjacent facts were removed without weakening truth, permissions or fail-closed behavior

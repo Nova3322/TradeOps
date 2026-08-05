@@ -112,8 +112,8 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
 
     assert response.status_code == 200
     assert "交易控制台" in response.text
-    assert "/assets/app.js?v=116" in response.text
-    assert "/assets/styles.css?v=47" in response.text
+    assert "/assets/app.js?v=117" in response.text
+    assert "/assets/styles.css?v=48" in response.text
     assert 'aria-label="交易控制台首页"' in response.text
     assert '<a href="/" data-link><span>⌂</span>今日</a>' in response.text
     assert 'id="mobile-nav-toggle"' in response.text
@@ -312,6 +312,12 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
     assert 'class="signal-chip-full"' in app_javascript.text
     assert 'class="signal-chip-short"' in app_javascript.text
     assert 'aria-label="${escapeHtml(`${timeframe} · ${signalLabel}`)}"' in app_javascript.text
+    assert "const breakoutSummary" not in app_javascript.text
+    assert 'class="chart-head-value"' not in app_javascript.text
+    assert 'class="eyebrow">交易任务</p><h1>交易任务' not in app_javascript.text
+    assert "待我审核${pending" not in app_javascript.text
+    assert 'data-label="数据源"><b>${label[0]}</b><br>' not in app_javascript.text
+    assert "currentLanguage === 'en' ? 'Connection check' : '连接检查'" in app_javascript.text
     assert 'href="/opportunities/defaults"' in app_javascript.text
     assert "function renderOpportunityDefaults" in app_javascript.text
     assert "覆盖币对" in app_javascript.text
@@ -373,7 +379,7 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
 
     service_worker = get(app, "/sw.js")
     assert service_worker.status_code == 200
-    assert "trading-shell-v96" in service_worker.text
+    assert "trading-shell-v97" in service_worker.text
     assert "self.skipWaiting()" in service_worker.text
     assert "self.clients.claim()" in service_worker.text
     assert "await fetch(event.request)" in service_worker.text
@@ -706,6 +712,7 @@ def test_opportunity_card_explains_exact_catalog_blocker() -> None:
         assert.doesNotMatch(eligible, /该合约尚未进入可交易合约目录/);
         assert.doesNotMatch(eligible, / disabled/);
         assert.match(eligible, /1h · 向上突破/);
+        assert.doesNotMatch(eligible, /<p class="subtle">1h · 向上突破<\/p>/);
         assert.doesNotMatch(eligible, />candidate</);
 
         const active = context.render({
@@ -1348,7 +1355,8 @@ def test_risk_workspace_prioritizes_current_actions_and_hides_closed_tasks() -> 
     assert "risk-condition-details" in source
     assert "blockingChecks = (conditions.checks || []).filter" in source
     assert "passingChecks = (conditions.checks || []).filter" in source
-    assert "项阻塞优先展示；已通过条件收起" in source
+    assert "阻塞优先展示；已通过条件收起" in source
+    assert "项阻塞优先展示；已通过条件收起" not in source
     assert "项已通过" in source
     assert "通过项不占用当前待办" in source
     assert "政策正常不代表所有账户都能新增风险" in source
