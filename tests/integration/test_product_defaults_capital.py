@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
@@ -182,6 +183,31 @@ def test_proposal_defaults_and_direct_capital_are_permissioned_audited_and_block
             assert one_click.status_code == 200, one_click.text
             assert one_click.json()["status"] == "PENDING_REVIEW"
             proposal_id = one_click.json()["proposal_id"]
+            refreshed_at = datetime.now(UTC)
+            refreshed_candidate = replace(
+                candidate,
+                candidate_id="pt_refreshed_same_scope",
+                reference_price=Decimal("100001"),
+                triggered_at=refreshed_at,
+                observed_at=refreshed_at,
+            )
+            service.record_perptape_feed(
+                perptape_actor,
+                PerptapeFeedSnapshot(
+                    contract_version="breakouts-v1",
+                    generated_at=refreshed_at,
+                    fetched_at=refreshed_at,
+                    next_allowed_at=refreshed_at,
+                    candidates=(refreshed_candidate,),
+                ),
+                now=refreshed_at,
+                base_snapshot=None,
+            )
+            repeated_one_click = await client.post(
+                f"/api/opportunities/{refreshed_candidate.candidate_id}/proposals/default"
+            )
+            assert repeated_one_click.status_code == 200, repeated_one_click.text
+            assert repeated_one_click.json()["proposal_id"] == proposal_id
 
             await _login(client, "product-admin")
             update_v2 = await client.put(

@@ -1377,6 +1377,7 @@ def create_app(
                 "default_config_version": payload.default_config_version,
             },
             idempotency_payload=idempotency_payload,
+            deduplicate_active_system_scope=True,
             now=now,
         )
         current = queries().proposal_detail(principal.user_id, proposal_id)

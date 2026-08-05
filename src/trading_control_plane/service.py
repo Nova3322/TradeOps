@@ -302,6 +302,14 @@ def _proposal_manual_execution_key(proposal: Proposal) -> tuple[Any, ...]:
     )
 
 
+def _system_proposal_strategy_family(strategy_id: str) -> tuple[str, tuple[str, ...]]:
+    """Treat one-click and automatic Perptape proposal entry points as one signal family."""
+
+    if strategy_id in {"perptape", "perptape-resonance"}:
+        return "perptape", ("perptape", "perptape-resonance")
+    return strategy_id, (strategy_id,)
+
+
 def _is_manual_proposal_originator(
     session: Session,
     proposal: Proposal,
@@ -1640,6 +1648,7 @@ class TradingService:
                         "PROPOSAL_DEDUPLICATION_SCOPE_INVALID",
                         "active-scope deduplication is restricted to identified SYSTEM strategies",
                     )
+                strategy_family, strategy_ids = _system_proposal_strategy_family(strategy_id)
                 active_scope = ":".join(
                     [
                         environment.value,
@@ -1647,7 +1656,7 @@ class TradingService:
                         venue,
                         str(instrument_id),
                         direction.value,
-                        strategy_id,
+                        strategy_family,
                     ]
                 )
                 session.execute(
@@ -1655,7 +1664,7 @@ class TradingService:
                     {
                         "key": _advisory_lock_key(
                             "proposal.active-system-scope",
-                            strategy_id,
+                            strategy_family,
                             active_scope,
                         )
                     },
@@ -1665,7 +1674,7 @@ class TradingService:
                     .where(
                         Proposal.source == ProposalSource.SYSTEM.value,
                         Proposal.proposer_id == actor_id,
-                        Proposal.strategy_id == strategy_id,
+                        Proposal.strategy_id.in_(strategy_ids),
                         Proposal.environment == environment.value,
                         Proposal.account_id == account_id,
                         Proposal.venue == venue,
@@ -1683,6 +1692,18 @@ class TradingService:
                     .limit(1)
                 )
                 if existing is not None:
+                    self._audit(
+                        session,
+                        actor_id=str(actor_id),
+                        event_type="PROPOSAL_DUPLICATE_REUSED",
+                        object_type="Proposal",
+                        object_id=existing.proposal_id,
+                        reason=f"matching active SYSTEM proposal family {strategy_family}",
+                        correlation_id=existing.correlation_id,
+                        object_version=existing.version,
+                        idempotency_key=idempotency_key,
+                        now=now,
+                    )
                     return existing.proposal_id
             correlation_id = uuid4()
             proposal = Proposal(
@@ -1832,7 +1853,7 @@ class TradingService:
         strategy_id: str,
         now: datetime,
     ) -> int:
-        """Keep one frozen active proposal per exact strategy scope and audit the surplus."""
+        """Keep one frozen active proposal per strategy-family scope and audit the surplus."""
 
         if not strategy_id:
             _reject("PROPOSAL_STRATEGY_INVALID", "duplicate cleanup requires a strategy ID")
@@ -1847,13 +1868,14 @@ class TradingService:
                     "PROPOSAL_AUTOMATION_SERVICE_REQUIRED",
                     "duplicate cleanup is restricted to an active service principal",
                 )
+            strategy_family, strategy_ids = _system_proposal_strategy_family(strategy_id)
             session.execute(
                 text("SELECT pg_advisory_xact_lock(:key)"),
                 {
                     "key": _advisory_lock_key(
                         str(actor_id),
                         "proposal.active-system-deduplication",
-                        strategy_id,
+                        strategy_family,
                     )
                 },
             )
@@ -1862,7 +1884,7 @@ class TradingService:
                 .where(
                     Proposal.source == ProposalSource.SYSTEM.value,
                     Proposal.proposer_id == actor_id,
-                    Proposal.strategy_id == strategy_id,
+                    Proposal.strategy_id.in_(strategy_ids),
                     Proposal.status.in_(
                         [
                             ProposalStatus.DRAFT.value,

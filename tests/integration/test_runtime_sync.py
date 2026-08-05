@@ -1518,7 +1518,7 @@ def test_three_timeframe_resonance_creates_one_pending_system_proposal(
         max_risk=Decimal("1"),
         expires_at=NOW + timedelta(hours=8),
         idempotency_key="legacy-refresh-duplicate",
-        strategy_id="perptape-resonance",
+        strategy_id="perptape",
         strategy_version="legacy-refresh-identity",
         environment=ExecutionEnvironment.LIVE,
         source_candidate_id="ptr_legacy_refresh_duplicate",

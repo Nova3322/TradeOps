@@ -1,5 +1,31 @@
 # Trading console product QA
 
+## 2026-08-05: Perptape proposal-family deduplication
+
+### P0 / P1 / P2 status
+
+- P0: none open in this batch.
+- P1 closed: opportunity one-click proposals (`perptape`) and automatic resonance proposals (`perptape-resonance`) previously used separate active-scope keys, so one LIVE venue, contract and direction could appear twice in the review queue. Both entry points now share one Perptape strategy family, advisory lock and active scope.
+- P1 closed: one-click creation now enables the same active SYSTEM scope check as runtime automation. Repeated fresh candidates reuse the current frozen proposal and write a `PROPOSAL_DUPLICATE_REUSED` audit event; a rejected or expired proposal does not block a genuinely later signal forever.
+- P1 closed: the read-only runtime worker consolidated the existing Binance FLOCKUSDT short duplicate at startup. Pending review count changed from 16 to 15, and the API reports zero active Perptape-family duplicates.
+- P2 closed: the administrator review queue was accepted at 390 px, 430 px and desktop widths with no horizontal overflow. The queue count, filters and one remaining FLOCKUSDT row stay readable.
+- P1 external: Telegram Web visual interaction remains blocked by its external network/login state; this batch did not claim Telegram client acceptance.
+
+### Five-dimensional evidence
+
+- Code: shared Perptape strategy-family mapping, cross-entry advisory lock/query, one-click active-scope opt-in, cleanup and audit coverage.
+- API: `/api/proposals?proposal_status=PENDING_REVIEW` returns 15 active rows, zero duplicate family scopes and one Binance FLOCKUSDT short row.
+- Actual pages: review queue shows 15 pending proposals and only one FLOCKUSDT row on mobile and desktop.
+- End-to-end runtime: safe restart completed; the read-only worker logged one duplicate consolidation. `live` and `ready` return HTTP 200; no review, authorization or order action was executed.
+- Tests: 112 affected integration tests passed. The six-identity API matrix passed: administrator has proposal/member/capital access; proposer, reviewer and observer can read proposals but not members/capital; treasury can access only capital; disabled member receives 401.
+
+### Accepted screenshots
+
+- Administrator review queue, 390 px: `/private/tmp/trading-product-audit-continuation/06-reviews-admin-390-deduped.jpg`.
+- Administrator review queue, desktop: `/private/tmp/trading-product-audit-continuation/07-reviews-admin-desktop-deduped.jpg`.
+
+final result: active Perptape proposal-family duplicates removed and prevented; runtime and responsive review-queue acceptance passed
+
 ## 2026-08-04: Telegram proposal-review boundary
 
 ### P0 / P1 / P2 status

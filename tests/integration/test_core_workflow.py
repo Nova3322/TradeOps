@@ -399,6 +399,66 @@ def test_concurrent_manual_semantic_duplicates_reuse_one_active_proposal(
         assert session.scalar(select(func.count()).select_from(CommandReceipt)) == 2
 
 
+def test_perptape_manual_and_automatic_entry_points_share_one_active_scope(
+    database: Database, service: TradingService
+) -> None:
+    ids = seed(service)
+    automatic_id = service.create_proposal(
+        actor_id=ids["strategy"],
+        source=ProposalSource.SYSTEM,
+        risk_tier=RiskTier.LOW,
+        account_id="acct-1",
+        venue="BINANCE",
+        instrument_id=ids["instrument"],
+        direction=Direction.LONG,
+        quantity=Decimal("1"),
+        max_risk=Decimal("1"),
+        expires_at=NOW + timedelta(hours=8),
+        idempotency_key="perptape-auto-scope",
+        strategy_id="perptape-resonance",
+        strategy_version="breakouts-v1:auto",
+        source_candidate_id="ptr_auto_scope",
+        source_observed_at=NOW,
+        source_readiness="READY",
+        now=NOW,
+    )
+    service.submit_proposal(automatic_id, ids["strategy"], now=NOW)
+
+    one_click_id = service.create_proposal(
+        actor_id=ids["strategy"],
+        source=ProposalSource.SYSTEM,
+        risk_tier=RiskTier.MEDIUM,
+        account_id="acct-1",
+        venue="BINANCE",
+        instrument_id=ids["instrument"],
+        direction=Direction.LONG,
+        quantity=Decimal("2"),
+        max_risk=Decimal("2"),
+        expires_at=NOW + timedelta(hours=8),
+        idempotency_key="perptape-one-click-scope",
+        strategy_id="perptape",
+        strategy_version="breakouts-v1:default",
+        source_candidate_id="pt_one_click_scope",
+        source_observed_at=NOW + timedelta(seconds=1),
+        source_readiness="READY",
+        deduplicate_active_system_scope=True,
+        now=NOW + timedelta(seconds=1),
+    )
+
+    assert one_click_id == automatic_id
+    with database.session_factory() as session:
+        assert session.scalar(select(func.count()).select_from(Proposal)) == 1
+        assert session.scalar(select(func.count()).select_from(CommandReceipt)) == 1
+        assert (
+            session.scalar(
+                select(func.count())
+                .select_from(AuditEvent)
+                .where(AuditEvent.event_type == "PROPOSAL_DUPLICATE_REUSED")
+            )
+            == 1
+        )
+
+
 def test_admin_cleanup_expires_cross_proposer_manual_duplicates_with_audit(
     database: Database, service: TradingService
 ) -> None:
