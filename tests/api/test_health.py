@@ -112,10 +112,12 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
 
     assert response.status_code == 200
     assert "交易控制台" in response.text
-    assert "/assets/app.js?v=121" in response.text
-    assert "/assets/styles.css?v=49" in response.text
+    assert "/assets/app.js?v=123" in response.text
+    assert "/assets/styles.css?v=50" in response.text
     assert 'aria-label="交易控制台首页"' in response.text
-    assert '<a href="/" data-link><span>⌂</span>今日</a>' in response.text
+    assert '<a href="/" data-link><span>⌂</span>当前任务</a>' in response.text
+    assert '<span>⌁</span>实时机会</a>' in response.text
+    assert '<span>¤</span>资金中心</a>' in response.text
     assert 'id="mobile-nav-toggle"' in response.text
     assert 'id="confirm-dialog"' in response.text
 
@@ -172,7 +174,7 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
     assert 'href="/proposals/new"' not in response.text
     assert "Binance只读" not in response.text
     assert "const routeCapability = (path)" in app_javascript.text
-    assert "今日只显示你的资金职责" in app_javascript.text
+    assert "当前任务只显示你的资金职责" in app_javascript.text
     assert "api('/api/risk-controls').catch(error => ({error}))" in app_javascript.text
     assert "riskControl.actions?.review_restore?.allowed === true" in app_javascript.text
     assert "riskControl.actions?.execute_restore?.allowed === true" in app_javascript.text
@@ -203,6 +205,11 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
     assert "最终确认并检查" in app_javascript.text
     assert "检查转入币安条件" in app_javascript.text
     assert "检查 Hyperliquid 回流条件" in app_javascript.text
+    assert 'name="treasury_provider" value="NOTILT_VAULT"' in app_javascript.text
+    assert 'name="treasury_provider" value="SAFE_SPENDING_LIMIT"' in app_javascript.text
+    assert "syncTreasuryProviderFields" in app_javascript.text
+    assert "系统只使用该方案创建之后的资金操作" in app_javascript.text
+    assert "data-treasury-provider" in app_javascript.text
     assert "3 项阻断，查看详情" not in app_javascript.text  # noqa: RUF001
     assert "项阻断，查看详情" in app_javascript.text  # noqa: RUF001
     assert "生成无签名预检" in app_javascript.text
@@ -377,6 +384,8 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
     assert ".capital-route-grid" in stylesheet.text
     assert ".capital-trend-toggle" in stylesheet.text
     assert ".capital-blockers" in stylesheet.text
+    assert ".treasury-provider-choice" in stylesheet.text
+    assert ".selected-provider-summary" in stylesheet.text
     assert ".opportunity-signals { display: flex; flex-wrap: nowrap" in stylesheet.text
     assert "@container (min-width: 520px)" in stylesheet.text
     assert ".opportunity-stats" in stylesheet.text
@@ -387,7 +396,7 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
 
     service_worker = get(app, "/sw.js")
     assert service_worker.status_code == 200
-    assert "trading-shell-v101" in service_worker.text
+    assert "trading-shell-v103" in service_worker.text
     assert "self.skipWaiting()" in service_worker.text
     assert "self.clients.claim()" in service_worker.text
     assert "await fetch(event.request)" in service_worker.text

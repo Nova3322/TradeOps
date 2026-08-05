@@ -314,6 +314,21 @@ button:disabled { opacity: .52; cursor: not-allowed; }
 .direct-capital-config-editor > summary small { margin-top: 5px; color: var(--muted); font-size: 10px; }
 .direct-capital-config-editor > summary strong { color: var(--accent); font-size: 10px; }
 .direct-capital-config-editor[open] > summary { border-bottom: 1px solid var(--line); }
+.treasury-provider-choice { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; margin: 0; padding: 0; border: 0; }
+.treasury-provider-choice legend { grid-column: 1 / -1; margin-bottom: 6px; color: var(--ink); font-size: 13px; font-weight: 850; }
+.treasury-provider-choice label { min-height: 72px; display: flex; align-items: flex-start; gap: 10px; padding: 14px; border: 1px solid var(--line); border-radius: 12px; background: var(--panel); cursor: pointer; }
+.treasury-provider-choice label:has(input:checked) { border-color: var(--accent); background: var(--accent-2); box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 14%, transparent); }
+.treasury-provider-choice input { width: 17px; height: 17px; margin: 2px 0 0; accent-color: var(--accent); }
+.treasury-provider-choice b, .treasury-provider-choice small { display: block; }
+.treasury-provider-choice small { margin-top: 4px; color: var(--muted); font-size: 10px; line-height: 1.45; }
+.provider-guidance { margin: 10px 0 0; padding: 10px 12px; border-left: 3px solid var(--accent); background: var(--accent-2); color: var(--muted); font-size: 10px; line-height: 1.55; }
+.capital-config-section { margin-top: 18px; padding-top: 16px; border-top: 1px solid var(--line); }
+.capital-config-section[hidden] { display: none; }
+.capital-config-section h3 { margin: 0; font-size: 13px; }
+.capital-config-section > p { margin: 5px 0 12px; color: var(--muted); font-size: 10px; }
+.selected-provider-summary { display: grid; gap: 3px; padding: 12px 14px; border: 1px solid var(--line); border-radius: 10px; background: var(--accent-2); }
+.selected-provider-summary small, .selected-provider-summary span { color: var(--muted); font-size: 10px; }
+.selected-provider-summary b { font-size: 14px; }
 .capital-routes-section { margin-top: 30px; }
 .capital-route-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
 .capital-route-card { display: grid; grid-template-rows: auto auto minmax(42px, auto) auto auto; gap: 14px; min-width: 0; padding: 20px; border: 1px solid var(--line); border-radius: 14px; background: var(--panel); }
@@ -634,6 +649,7 @@ dialog::backdrop { background: rgba(4, 12, 10, .56); backdrop-filter: blur(3px);
 }
 
 @media (max-width: 780px) {
+  .treasury-provider-choice { grid-template-columns: 1fr; }
   .app-shell { display: block; }
   .topbar { height: 64px; padding: 0 15px; }
   .brand small, .identity-chip, .env-badge { display: none; }

@@ -236,9 +236,7 @@ class RuntimeSourceHealth(Base):
     items_observed: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     error_code: Mapped[str | None] = mapped_column(String(120), nullable=True)
     checked_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
-    last_success_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True
-    )
+    last_success_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     retry_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     consecutive_failures: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     updated_by: Mapped[UUID] = mapped_column(ForeignKey("users.user_id"), nullable=False)
@@ -502,6 +500,10 @@ class DirectCapitalConfiguration(Base):
         CheckConstraint("network = 'ARBITRUM'", name="ck_direct_capital_configuration_network"),
         CheckConstraint("asset = 'USDC'", name="ck_direct_capital_configuration_asset"),
         CheckConstraint(
+            "treasury_provider IN ('NOTILT_VAULT','SAFE_SPENDING_LIMIT')",
+            name="ck_direct_capital_configuration_treasury_provider",
+        ),
+        CheckConstraint(
             "max_amount IS NULL OR max_amount > 0",
             name="ck_direct_capital_configuration_max_amount",
         ),
@@ -522,6 +524,9 @@ class DirectCapitalConfiguration(Base):
     active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     network: Mapped[str] = mapped_column(String(64), nullable=False, default="ARBITRUM")
     asset: Mapped[str] = mapped_column(String(32), nullable=False, default="USDC")
+    treasury_provider: Mapped[str] = mapped_column(
+        String(32), nullable=False, default="NOTILT_VAULT"
+    )
     vault_id: Mapped[str | None] = mapped_column(String(160), nullable=True)
     vault_address: Mapped[str | None] = mapped_column(String(42), nullable=True)
     owned_arbitrum_address: Mapped[str | None] = mapped_column(String(42), nullable=True)

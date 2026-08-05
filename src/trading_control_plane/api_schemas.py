@@ -364,7 +364,7 @@ class CapitalTransferCreateRequest(BaseModel):
 
 class DirectCapitalOperationRequest(BaseModel):
     path: DirectCapitalPath
-    treasury_provider: CapitalTreasuryProvider = CapitalTreasuryProvider.NOTILT_VAULT
+    treasury_provider: CapitalTreasuryProvider | None = None
     amount: Decimal = Field(gt=0)
     final_confirmed: Literal[True]
     idempotency_key: str = Field(min_length=1, max_length=160)
@@ -379,6 +379,7 @@ class DirectCapitalUnsignedPlanRequest(BaseModel):
 class DirectCapitalConfigurationRequest(BaseModel):
     network: Literal["ARBITRUM"] = "ARBITRUM"
     asset: Literal["USDC"] = "USDC"
+    treasury_provider: CapitalTreasuryProvider | None = None
     vault_id: str | None = Field(default=None, min_length=1, max_length=160)
     vault_address: str | None = None
     owned_arbitrum_address: str | None = None

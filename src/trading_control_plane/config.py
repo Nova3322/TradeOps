@@ -151,6 +151,9 @@ class Settings(BaseSettings):
     capital_direct_binance_withdrawal_address: str | None = None
     capital_direct_hyperliquid_account_id: str | None = None
     capital_direct_hyperliquid_bridge_address: str | None = None
+    capital_direct_treasury_provider: Literal["NOTILT_VAULT", "SAFE_SPENDING_LIMIT"] = (
+        "NOTILT_VAULT"
+    )
     capital_direct_asset: str = "USDC"
     capital_direct_network: Literal["ARBITRUM"] = "ARBITRUM"
     capital_direct_max_amount: Decimal | None = Field(default=None, gt=0)

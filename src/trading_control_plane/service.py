@@ -9441,6 +9441,7 @@ class TradingService:
             "version": config.version,
             "network": config.network,
             "asset": config.asset,
+            "treasury_provider": config.treasury_provider,
             "vault_id": config.vault_id,
             "vault_address": config.vault_address,
             "owned_arbitrum_address": config.owned_arbitrum_address,
@@ -9478,6 +9479,7 @@ class TradingService:
         *,
         network: str,
         asset: str,
+        treasury_provider: str,
         vault_id: str | None,
         vault_address: str | None,
         owned_arbitrum_address: str | None,
@@ -9496,6 +9498,7 @@ class TradingService:
         payload = {
             "network": network,
             "asset": asset,
+            "treasury_provider": treasury_provider,
             "vault_id": vault_id,
             "vault_address": vault_address,
             "owned_arbitrum_address": owned_arbitrum_address,
@@ -9514,6 +9517,22 @@ class TradingService:
                 "CAPITAL_CONFIGURATION_UNTRUSTED",
                 "direct capital paths only support the trusted Arbitrum USDC catalog",
             )
+        if treasury_provider not in {"NOTILT_VAULT", "SAFE_SPENDING_LIMIT"}:
+            _reject("CAPITAL_CONFIGURATION_INVALID", "funding provider is unsupported")
+        if treasury_provider == "NOTILT_VAULT":
+            safe_address = None
+            safe_delegate_address = None
+        else:
+            vault_id = None
+            vault_address = None
+        payload.update(
+            {
+                "vault_id": vault_id,
+                "vault_address": vault_address,
+                "safe_address": safe_address,
+                "safe_delegate_address": safe_delegate_address,
+            }
+        )
         if max_amount is not None and max_amount <= 0:
             _reject("CAPITAL_CONFIGURATION_INVALID", "maximum amount must be positive")
         if max_fee is not None and max_fee < 0:
@@ -9564,6 +9583,7 @@ class TradingService:
                 active=True,
                 network=network,
                 asset=asset,
+                treasury_provider=treasury_provider,
                 vault_id=vault_id,
                 vault_address=vault_address,
                 owned_arbitrum_address=owned_arbitrum_address,
@@ -9597,7 +9617,10 @@ class TradingService:
                 event_type="CAPITAL_DIRECT_CONFIGURATION_UPDATED",
                 object_type="DirectCapitalConfiguration",
                 object_id=config.config_id,
-                reason=f"version={config.version}; network=ARBITRUM; asset=USDC",
+                reason=(
+                    f"version={config.version}; network=ARBITRUM; asset=USDC; "
+                    f"treasury_provider={treasury_provider}"
+                ),
                 correlation_id=uuid4(),
                 object_version=config.version,
                 idempotency_key=idempotency_key,

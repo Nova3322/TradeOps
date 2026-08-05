@@ -7,7 +7,7 @@
     <meta name="description" content="生产交易提案、审核、执行、资金与风险控制台">
     <link rel="manifest" href="/manifest.webmanifest">
     <link rel="icon" href="/assets/icon.svg" type="image/svg+xml">
-    <link rel="stylesheet" href="/assets/styles.css?v=49">
+    <link rel="stylesheet" href="/assets/styles.css?v=50">
     <title>交易控制台</title>
   </head>
   <body>
@@ -28,12 +28,12 @@
 
       <aside id="sidebar" class="sidebar" hidden>
         <nav aria-label="主导航">
-          <a href="/" data-link><span>⌂</span>今日</a>
-          <a href="/opportunities" data-link data-nav-capability="opportunity.view"><span>⌁</span>机会</a>
+          <a href="/" data-link><span>⌂</span>当前任务</a>
+          <a href="/opportunities" data-link data-nav-capability="opportunity.view"><span>⌁</span>实时机会</a>
           <a href="/reviews" data-link data-nav-capability="proposal.review"><span>✓</span>审核队列</a>
           <a href="/campaigns" data-link data-nav-capability="operations.view"><span>◎</span>交易任务</a>
           <a href="/positions" data-link data-nav-capability="system.view"><span>↕</span>系统状态</a>
-          <a href="/capital" data-link data-nav-capability="capital.view"><span>¤</span>资金</a>
+          <a href="/capital" data-link data-nav-capability="capital.view"><span>¤</span>资金中心</a>
           <a href="/venues" data-link data-nav-capability="venue.view"><span>◫</span>交易账户</a>
           <a href="/admin/users" data-link data-nav-capability="access.manage"><span>◇</span>成员权限</a>
         </nav>
@@ -97,6 +97,6 @@
       </form>
     </dialog>
     <div id="toast" class="toast" role="status" aria-live="polite"></div>
-    <script type="module" src="/assets/app.js?v=121"></script>
+    <script type="module" src="/assets/app.js?v=123"></script>
   </body>
 </html>

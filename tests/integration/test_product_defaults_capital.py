@@ -125,12 +125,26 @@ def test_safe_spending_limit_provider_is_selected_audited_and_never_signed(
             ),
             base_url="http://test",
         ) as client:
+            await _login(client, "safe-provider-admin")
+            configured = await client.put(
+                "/api/capital/direct-configuration",
+                json={
+                    "treasury_provider": "SAFE_SPENDING_LIMIT",
+                    "safe_address": "0x7777777777777777777777777777777777777777",
+                    "safe_delegate_address": "0x8888888888888888888888888888888888888888",
+                    "idempotency_key": "safe-provider-configure",
+                },
+            )
+            assert configured.status_code == 200, configured.text
+            direct_config = configured.json()["data"]["direct_configuration"]
+            assert direct_config["treasury_provider"] == "SAFE_SPENDING_LIMIT"
+            assert "0x7777777777777777777777777777777777777777" not in configured.text
+
             await _login(client, "safe-provider-treasury")
             created = await client.post(
                 "/api/capital/direct-operations",
                 json={
                     "path": "VAULT_TO_BINANCE",
-                    "treasury_provider": "SAFE_SPENDING_LIMIT",
                     "amount": "100",
                     "final_confirmed": True,
                     "idempotency_key": "safe-provider-create",
@@ -157,7 +171,6 @@ def test_safe_spending_limit_provider_is_selected_audited_and_never_signed(
                 "/api/capital/direct-operations",
                 json={
                     "path": "BINANCE_TO_VAULT",
-                    "treasury_provider": "SAFE_SPENDING_LIMIT",
                     "amount": "100",
                     "final_confirmed": True,
                     "idempotency_key": "safe-provider-inbound-create",

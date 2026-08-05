@@ -554,3 +554,36 @@ final result: passed; the manual form uses truthful U-margin catalog scope and s
 - Final Hyperliquid/HIP-3 exact match: `05-final-hyperliquid-match.png`.
 
 final result: passed; users can type a symbol directly without weakening exact exchange/catalog validation
+
+---
+
+# Capital provider selection design QA
+
+## Scope
+
+- Reference: `/var/folders/c1/6j8smjg96430htljxp_sx8sr0000gn/T/codex-clipboard-bcff3666-1454-44fb-b39b-6c6e457e8ace.png`
+- Navigation reference: `/var/folders/c1/6j8smjg96430htljxp_sx8sr0000gn/T/codex-clipboard-9b83a971-56ae-4830-8553-32e39df40013.png`
+- Implemented page: `http://127.0.0.1:8014/capital`
+- Combined comparison: `artifacts/product-audit/capital-provider-selection-2026-08-05/reference-and-implementation.png`
+
+## Visual and interaction checks
+
+- Replaced the mixed NoTilt and Safe field list with one explicit two-option provider choice.
+- Confirmed that selecting NoTilt shows only the NoTilt vault fields and disables the Safe fields.
+- Confirmed that selecting Safe Spending Limits shows only the Safe Smart Account and delegate fields and disables the NoTilt fields.
+- Kept exchange accounts, owned Arbitrum address, withdrawal destinations, amount limit, and fee limit in a clearly separated shared section.
+- Confirmed the live safety-boundary copy immediately follows the unsaved provider selection.
+- Confirmed the operation dialog reads the saved provider and does not offer a per-operation provider override.
+- Confirmed the renamed navigation labels are `当前任务`, `实时机会`, and `资金中心`.
+- Desktop screenshot: `artifacts/product-audit/capital-provider-selection-2026-08-05/implementation-capital-config-default.png`.
+- Mobile screenshot: `artifacts/product-audit/capital-provider-selection-2026-08-05/implementation-capital-config-390.png`; provider cards stack, inputs remain within the viewport, and the document width equals the viewport width.
+- Browser console: no warnings or errors during the tested flow.
+
+## Safety checks
+
+- The UI accepts only public account/address scope and does not expose secret, signing, or broadcast inputs.
+- Saving creates a versioned, audited configuration for subsequent operations only.
+- The server, not the operation request, selects the active provider and rejects mismatched client overrides.
+- No form was submitted during visual QA and no transfer, signature, or broadcast occurred.
+
+final result: passed

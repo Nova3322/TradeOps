@@ -103,6 +103,7 @@ from trading_control_plane.domain import (
     AddCandidateFacts,
     CapitalDirection,
     CapitalTransferStatus,
+    CapitalTreasuryProvider,
     DirectCapitalPath,
     DomainRejected,
     ExecutionEnvironment,
@@ -607,6 +608,7 @@ def create_app(
                 update={
                     "capital_direct_network": config["network"],
                     "capital_direct_asset": config["asset"],
+                    "capital_direct_treasury_provider": config["treasury_provider"],
                     "capital_direct_vault_id": config["vault_id"],
                     "capital_direct_vault_address": config["vault_address"],
                     "capital_direct_owned_arbitrum_address": config["owned_arbitrum_address"],
@@ -667,6 +669,7 @@ def create_app(
             "can_manage": service().can_user(user_id, "access.manage"),
             "asset": direct_settings.capital_direct_asset,
             "network": direct_settings.capital_direct_network,
+            "treasury_provider": direct_settings.capital_direct_treasury_provider,
             "vault_id_configured": direct_settings.capital_direct_vault_id is not None,
             "vault_address_configured": (direct_settings.capital_direct_vault_address is not None),
             "owned_arbitrum_address_configured": (
@@ -4050,6 +4053,7 @@ def create_app(
         field_map = {
             "network": "capital_direct_network",
             "asset": "capital_direct_asset",
+            "treasury_provider": "capital_direct_treasury_provider",
             "vault_id": "capital_direct_vault_id",
             "vault_address": "capital_direct_vault_address",
             "owned_arbitrum_address": "capital_direct_owned_arbitrum_address",
@@ -4067,10 +4071,12 @@ def create_app(
             field: supplied.get(field, getattr(direct_settings, setting_name))
             for field, setting_name in field_map.items()
         }
+        selected_provider = CapitalTreasuryProvider(str(merged["treasury_provider"]))
         trusted_vault = resolved_settings.notilt_vaults.get(42161)
         direct_vault = merged["vault_address"]
         if (
-            trusted_vault is not None
+            selected_provider is CapitalTreasuryProvider.NOTILT_VAULT
+            and trusted_vault is not None
             and direct_vault is not None
             and str(direct_vault).lower() != trusted_vault.lower()
         ):
@@ -4104,6 +4110,7 @@ def create_app(
             payload.idempotency_key,
             network=str(merged["network"]),
             asset=str(merged["asset"]),
+            treasury_provider=selected_provider.value,
             vault_id=None if merged["vault_id"] is None else str(merged["vault_id"]),
             vault_address=(
                 None if merged["vault_address"] is None else str(merged["vault_address"])
@@ -4161,9 +4168,20 @@ def create_app(
         now = _now()
         center = capital_snapshot(identity.user_id)
         direct_settings, _ = effective_direct_capital_settings(identity.user_id)
+        selected_provider = CapitalTreasuryProvider(
+            direct_settings.capital_direct_treasury_provider
+        )
+        if (
+            payload.treasury_provider is not None
+            and payload.treasury_provider is not selected_provider
+        ):
+            raise DomainRejected(
+                "CAPITAL_TREASURY_PROVIDER_MISMATCH",
+                "capital operation must use the administrator-selected funding provider",
+            )
         plan = build_direct_capital_plan(
             path=DirectCapitalPath(payload.path),
-            treasury_provider=payload.treasury_provider,
+            treasury_provider=selected_provider,
             amount=payload.amount,
             settings=direct_settings,
             capital_transfer_gate=center["real_transfer_gate"],
