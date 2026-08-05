@@ -129,18 +129,38 @@ def _repair_perptape_source_url(
         and parsed.hostname == PERPTAPE_OFFICIAL_HOST
         and parsed.path in {"/markets", "/breakouts"}
         and query.get("utm_source") == ["trading_console"]
-        and query.get("utm_campaign")
-        in (["market_scan_symbol"], ["breakout_signal_symbol"])
-        and (
-            parsed.path != "/breakouts"
-            or query.get("q") != [f"{source_exchange}:{symbol}"]
-        )
+        and query.get("utm_campaign") in (["market_scan_symbol"], ["breakout_signal_symbol"])
+        and (parsed.path != "/breakouts" or query.get("q") != [f"{source_exchange}:{symbol}"])
     ):
         return build_perptape_breakout_url(
             base_url=f"https://{PERPTAPE_OFFICIAL_HOST}",
             source_exchange=source_exchange,
             symbol=symbol,
         )
+    return value
+
+
+def build_hyperliquid_chart_url(symbol: str) -> str:
+    """Build the official chart URL without dropping a HIP-3 namespace."""
+
+    return "https://app.hyperliquid.xyz/trade/" + urllib.parse.quote(symbol, safe=":")
+
+
+def _repair_hyperliquid_chart_url(value: str, *, venue: str, symbol: str) -> str:
+    """Repair console-generated Hyperliquid links persisted before HIP-3 support."""
+
+    if not value or venue != "HYPERLIQUID":
+        return value
+    parsed = urllib.parse.urlparse(value)
+    if (
+        parsed.scheme == "https"
+        and parsed.hostname == "app.hyperliquid.xyz"
+        and parsed.path.startswith("/trade/")
+        and not parsed.params
+        and not parsed.query
+        and not parsed.fragment
+    ):
+        return build_hyperliquid_chart_url(symbol)
     return value
 
 
@@ -238,7 +258,11 @@ class PerptapeCandidate:
                         parse_error_code="PERPTAPE_CACHE_INVALID",
                     )
                 ),
-                chart_url=str(value.get("chart_url", "")),
+                chart_url=_repair_hyperliquid_chart_url(
+                    str(value.get("chart_url", "")),
+                    venue=str(value["venue"]),
+                    symbol=symbol,
+                ),
             )
         except (InvalidOperation, KeyError, TypeError, ValueError) as exc:
             raise DomainRejected(
@@ -1362,7 +1386,7 @@ class PerptapeClient:
             chart_url=(
                 f"https://www.binance.com/zh-CN/futures/{urllib.parse.quote(symbol)}"
                 if venue == "BINANCE"
-                else "https://app.hyperliquid.xyz/trade/" + urllib.parse.quote(canonical_symbol)
+                else build_hyperliquid_chart_url(symbol)
             ),
         )
         validate_perptape_candidate(candidate)

@@ -150,6 +150,43 @@ def test_persisted_legacy_market_scan_link_is_repaired_without_mutating_identity
     assert detail_query["utm_campaign"] == ["breakout_signal_symbol"]
 
 
+def test_hyperliquid_hip3_chart_link_preserves_namespace() -> None:
+    payload = response()
+    hyperliquid = payload["data"][1]
+    assert isinstance(hyperliquid, dict)
+    hyperliquid["symbol"] = "xyz:IBM"
+    hyperliquid["canonicalSymbol"] = "IBM"
+    client = PerptapeClient(
+        base_url="https://perptape.com",
+        api_key="key",
+        contract_version="breakouts-v1",
+        cache_ttl=timedelta(0),
+        fetcher=lambda _url, _headers, _timeout: payload,
+    )
+
+    candidate = client.refresh(now=NOW).candidates[1]
+
+    assert candidate.symbol == "xyz:IBM"
+    assert candidate.canonical_symbol == "IBM"
+    assert candidate.chart_url == "https://app.hyperliquid.xyz/trade/xyz:IBM"
+
+
+def test_persisted_hyperliquid_hip3_chart_link_is_repaired() -> None:
+    candidate = parsed_feed().candidates[1]
+    value = candidate.to_dict()
+    value.update(
+        {
+            "symbol": "xyz:IBM",
+            "canonical_symbol": "IBM",
+            "chart_url": "https://app.hyperliquid.xyz/trade/IBM",
+        }
+    )
+
+    restored = PerptapeCandidate.from_dict(value)
+
+    assert restored.chart_url == "https://app.hyperliquid.xyz/trade/xyz:IBM"
+
+
 def test_candidate_identity_distinguishes_contracts_with_same_canonical_symbol() -> None:
     payload = response()
     binance = payload["data"][0]
