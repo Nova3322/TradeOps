@@ -112,8 +112,8 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
 
     assert response.status_code == 200
     assert "交易控制台" in response.text
-    assert "/assets/app.js?v=113" in response.text
-    assert "/assets/styles.css?v=46" in response.text
+    assert "/assets/app.js?v=114" in response.text
+    assert "/assets/styles.css?v=47" in response.text
     assert 'aria-label="交易控制台首页"' in response.text
     assert '<a href="/" data-link><span>⌂</span>今日</a>' in response.text
     assert 'id="mobile-nav-toggle"' in response.text
@@ -369,7 +369,7 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
 
     service_worker = get(app, "/sw.js")
     assert service_worker.status_code == 200
-    assert "trading-shell-v93" in service_worker.text
+    assert "trading-shell-v94" in service_worker.text
     assert "self.skipWaiting()" in service_worker.text
     assert "self.clients.claim()" in service_worker.text
     assert "await fetch(event.request)" in service_worker.text
@@ -1339,10 +1339,14 @@ def test_system_and_venue_pages_distinguish_read_only_snapshots_from_live_execut
     assert "左右滑动查看完整订单记录" in source
     assert "最后一次保存快照中没有持仓；这不能确认当前账户仍为空仓。" in source  # noqa: RUF001
     assert "最后一次保存快照中没有未完成委托；这不能确认当前仍无挂单。" in source  # noqa: RUF001
+    assert "实时账户事实不可用；仅展示最后快照" in source
+    assert "尚无可用连接结论" not in source
+    assert "fmtNumber(facts.equity?.available_balance)} ${escapeHtml(facts.equity?.currency" in source
     styles = app_path.with_name("styles.css").read_text()
     assert ".venue-status-stats { grid-template-columns: 1fr; }" in styles
     assert ".connection-status-table tr { display: block;" in styles
     assert ".connection-scroll-hint { display: none; }" in styles
+    assert ".callout.tone-attention" in styles
 
 
 def test_venue_snapshot_empty_states_do_not_claim_current_account_state() -> None:
@@ -1383,12 +1387,14 @@ def test_venue_snapshot_empty_states_do_not_claim_current_account_state() -> Non
         assert.match(snapshot, /不能确认当前仍无挂单/);
         assert.match(snapshot, /这不代表连接中断后没有成交/);
         assert.match(snapshot, /这不代表连接中断后没有资金费/);
+        assert.equal((snapshot.match(/callout tone-attention/g) || []).length, 4);
         assert.doesNotMatch(snapshot, /当前账户没有持仓/);
         assert.doesNotMatch(snapshot, /当前账户没有未完成委托/);
 
         const current = context.renderVenueSections(emptyFacts, {snapshotMode:false});
         assert.match(current, /当前账户没有持仓/);
         assert.match(current, /当前账户没有未完成委托/);
+        assert.doesNotMatch(current, /callout tone-attention/);
 
         context.currentLanguage = "en";
         const snapshotWithHistory = context.renderVenueSections(

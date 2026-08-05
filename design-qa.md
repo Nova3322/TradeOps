@@ -372,3 +372,29 @@ final result: passed for the current local dataset; expired approvals no longer 
 - System status: `artifacts/product-audit/venues-runtime-2026-08-05/06-system-status-desktop.png`.
 
 final result: passed for the current runtime state; reviewer Today no longer omits risk-restoration duties
+
+## 2026-08-05: venue live connection versus last-snapshot truth
+
+### P0 / P1 / P2 status
+
+- P0: none open. No order, authorization, capital operation, signing, broadcast or Gate mutation was executed.
+- P1 closed: an unavailable Hyperliquid read-only connection no longer paints “no position”, “no open order” or “no funding” from an old snapshot as green current-account success states.
+- P1 closed: the connection summary now says that live facts are unavailable and only the last snapshot is shown; it no longer conflicts with the already classified upstream rate limit.
+- P2 closed: available balance includes the same USDT/USDC unit as equity, so the two primary account amounts cannot be compared without a currency.
+- P1 external: Hyperliquid account read-only probes remain rate-limited. The last saved snapshot stays visible but is not accepted as current truth.
+
+### Five-dimensional evidence
+
+- Code: snapshot-aware empty-state tone, one user-facing connection summary projection, consistent balance currency, and web cache revision.
+- API: runtime reports `UPSTREAM_RATE_LIMITED`, `available=false`, `HYPERLIQUID_RATE_LIMITED`; the venue status separately reports Freqtrade worker configured and HIP-3 `xyz` available.
+- Actual page: desktop, 390 px and 430 px Hyperliquid account views show the rate-limit blocker, last-snapshot boundary, yellow historical empty states and explicit USDC balance.
+- End-to-end runtime: the page loaded current API facts, switched to Hyperliquid, retained the historical data without claiming current positions/orders, and produced no console warnings or errors.
+- Tests: 76 API/Web/unit tests plus 69 isolated PostgreSQL integration tests passed. The integration matrix includes system administrator, proposer, reviewer, treasury, observer and disabled identities.
+
+### Accepted screenshots
+
+- Desktop: `artifacts/product-audit/venue-facts-2026-08-05/01-hyperliquid-desktop.png`.
+- 390 px: `artifacts/product-audit/venue-facts-2026-08-05/02-hyperliquid-390.png`.
+- 430 px: `artifacts/product-audit/venue-facts-2026-08-05/03-hyperliquid-430.png`.
+
+final result: passed for the current rate-limited runtime state; execution-worker readiness is no longer visually conflated with live account truth

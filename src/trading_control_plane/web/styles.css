@@ -513,6 +513,7 @@ textarea { resize: vertical; }
 .form-actions { margin-top: 22px; display: flex; justify-content: flex-end; }
 .form-error { color: var(--danger); font-size: 12px; min-height: 20px; margin-top: 10px; }
 .safety-note, .callout { padding: 12px 14px; border-left: 3px solid var(--accent); background: var(--accent-2); color: var(--muted); font-size: 12px; line-height: 1.55; margin: 18px 0; }
+.callout.tone-attention { border-left-color: var(--warning); background: color-mix(in srgb, var(--warning) 9%, var(--panel)); }
 .compact-form { max-width: none; }
 .action-panel { display: grid; gap: 11px; margin-top: 16px; padding: 15px; border: 1px solid var(--line); border-radius: 12px; background: var(--panel-strong); }
 .action-panel h3 { margin-bottom: 0; }
