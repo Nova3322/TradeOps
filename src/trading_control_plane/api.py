@@ -632,6 +632,12 @@ def create_app(
             user_id,
             authoritative_live_accounts=authoritative_live_accounts(),
         )
+        expected_interval = resolved_settings.runtime_sync_interval_seconds
+        snapshot["net_worth"]["history_expected_interval_seconds"] = expected_interval
+        snapshot["net_worth"]["history_gap_tolerance_seconds"] = max(
+            180,
+            expected_interval * 3,
+        )
         configured_chain_id: int | None
         try:
             configured_chain_id = notilt_chain_id_for_network(

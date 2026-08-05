@@ -254,3 +254,31 @@ final result: passed for the current pending SYSTEM proposal state; no live revi
 - Cropped bot chat without unrelated chat-list content: `artifacts/product-audit/telegram-live-2026-08-05/01-telegram-web-network-blocked.jpg`.
 
 final result: Bot runtime and local safety contract passed; real Telegram Web command/card and mobile visual acceptance remain externally blocked
+
+## 2026-08-05: capital net-worth dashboard residual-gap and mobile audit
+
+### P0 / P1 / P2 status
+
+- P0: none open. No capital operation, signing, broadcast, order or Gate change was executed.
+- P1 closed: dense-point canvas compaction no longer collapses a continuous mobile series to its final marker or loses a segment boundary.
+- P1 closed: chart discontinuity is no longer derived from the 30-minute risk-fact TTL. It uses each source's observed cadence with a configured-sync lower bound, while current trust continues to use the risk policy.
+- P1 closed: the default chart focuses on the latest six hours. Old service outages no longer dominate the current-change view, while real gaps remain disconnected and counted.
+- P1 closed: a current but aging source now shows its age, policy window and “接近过期” state. Time-misaligned data remains individually visible but cannot enter the total.
+- P2 closed: the Y range keeps at least 0.5% context and the copy shows absolute and percentage change, so a real `$0.0045` / `0.04%` Binance valuation move is not presented as an unexplained cliff.
+- P1 external: Vault production scope is still not configured/synchronized. The current three-source total and TOTAL curve therefore remain correctly unavailable.
+
+### Five-dimensional evidence
+
+- Code: cadence-aware gap detection, six-hour window, gap-preserving pixel compaction, bounded Y domain, uniform source presentation and aging-state projection.
+- API: the live response supplies expected sync cadence and chart-gap lower bound while retaining `total=null` for the missing Vault source.
+- Actual page: desktop, 390 px and 430 px all show four controls, complete time/USD axes and no horizontal overflow. The 390/430 charts retain continuous Binance history and disconnected Hyperliquid gaps.
+- End-to-end runtime: hover returned `Binance / $9.9672 / 8月5日 10:54`; the Hyperliquid control was switched off and back on, and all four controls remained present.
+- Tests: 16 API/web tests plus 10 isolated capital-center integration tests passed. Full, missing, stale and time-misaligned states remain fail-closed.
+
+### Accepted screenshots
+
+- Desktop chart: `artifacts/product-audit/capital-net-worth-2026-08-05/01-desktop-chart.png`.
+- 390 px overview/chart: `artifacts/product-audit/capital-net-worth-2026-08-05/02-390-overview.png`, `03-390-chart.png`.
+- 430 px overview/chart: `artifacts/product-audit/capital-net-worth-2026-08-05/04-430-overview.png`, `05-430-chart.png`.
+
+final result: passed for the current missing-Vault production state; current single-source truth remains visible without manufacturing a three-source total

@@ -112,8 +112,8 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
 
     assert response.status_code == 200
     assert "交易控制台" in response.text
-    assert "/assets/app.js?v=104" in response.text
-    assert "/assets/styles.css?v=45" in response.text
+    assert "/assets/app.js?v=107" in response.text
+    assert "/assets/styles.css?v=46" in response.text
     assert 'aria-label="交易控制台首页"' in response.text
     assert '<a href="/" data-link><span>⌂</span>今日</a>' in response.text
     assert 'id="mobile-nav-toggle"' in response.text
@@ -354,7 +354,7 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
 
     service_worker = get(app, "/sw.js")
     assert service_worker.status_code == 200
-    assert "trading-shell-v84" in service_worker.text
+    assert "trading-shell-v87" in service_worker.text
     assert "self.skipWaiting()" in service_worker.text
     assert "self.clients.claim()" in service_worker.text
     assert "await fetch(event.request)" in service_worker.text
@@ -917,6 +917,28 @@ def test_capital_web_projection_only_renders_live_records() -> None:
           ),
           null,
         );
+
+        const adaptiveGap = JSON.parse(vm.runInContext(
+          `JSON.stringify(capitalHistorySeries([
+            {location_type:"VENUE",venue:"BINANCE",usd_equity:"10",observed_at:"2026-08-02T10:00:00Z"},
+            {location_type:"VENUE",venue:"BINANCE",usd_equity:"10",observed_at:"2026-08-02T10:02:00Z"},
+            {location_type:"VENUE",venue:"BINANCE",usd_equity:"10",observed_at:"2026-08-02T10:04:00Z"},
+            {location_type:"VENUE",venue:"BINANCE",usd_equity:"10",observed_at:"2026-08-02T10:10:50Z"}
+          ], 60, 180).find(item => item.source === "BINANCE"))`,
+          context,
+        ));
+        assert.equal(adaptiveGap.gapToleranceSeconds, 360);
+        assert.equal(adaptiveGap.points.at(-1).breakBefore, true);
+        assert.equal(
+          vm.runInContext(
+            `capitalHistoryWindow([
+              {observed_at:"2026-08-01T09:00:00Z"},
+              {observed_at:"2026-08-02T10:00:00Z"}
+            ], 24).length`,
+            context,
+          ),
+          1,
+        );
         assert.equal(
           vm.runInContext(
             `capitalSeriesLargestChange(${JSON.stringify(staleBinance)})`,
@@ -935,6 +957,74 @@ def test_capital_web_projection_only_renders_live_records() -> None:
           ),
           "Hyperliquid：数据已过期",
         );
+
+        const completePresentation = JSON.parse(vm.runInContext(
+          `JSON.stringify(capitalSourcePresentation({
+            venues:{BINANCE:"10"}, vault:"30", issues:[],
+            source_as_of:{BINANCE:"2026-08-02T10:00:00Z"},
+            as_of:"2026-08-02T10:02:00Z", max_fact_age_seconds:300,
+          }, "BINANCE", {time:Date.parse("2026-08-02T10:00:00Z"), value:10}))`,
+          context,
+        ));
+        assert.equal(completePresentation.individuallyCurrent, true);
+        assert.equal(completePresentation.aligned, true);
+        assert.equal(completePresentation.nearExpiry, false);
+        assert.equal(completePresentation.state, "当前可信");
+        assert.match(completePresentation.freshness, /2 分钟前更新/);
+
+        const stalePresentation = JSON.parse(vm.runInContext(
+          `JSON.stringify(capitalSourcePresentation({
+            venues:{BINANCE:null}, vault:null, issues:["STALE_LIVE_SOURCE:BINANCE"],
+            source_as_of:{BINANCE:"2026-08-02T09:00:00Z"},
+            as_of:"2026-08-02T10:00:00Z", max_fact_age_seconds:300,
+          }, "BINANCE", {time:Date.parse("2026-08-02T09:00:00Z"), value:9.5}))`,
+          context,
+        ));
+        assert.equal(stalePresentation.individuallyCurrent, false);
+        assert.equal(stalePresentation.value, 9.5);
+        assert.equal(stalePresentation.state, "Binance\uFF1A数据已过期");
+
+        const misalignedPresentation = JSON.parse(vm.runInContext(
+          `JSON.stringify(capitalSourcePresentation({
+            venues:{HYPERLIQUID:"20"}, vault:"30",
+            issues:["TIME_MISALIGNED_SOURCE:HYPERLIQUID"],
+            source_as_of:{HYPERLIQUID:"2026-08-02T09:59:00Z"},
+            as_of:"2026-08-02T10:00:00Z", max_fact_age_seconds:300,
+          }, "HYPERLIQUID", {time:Date.parse("2026-08-02T09:59:00Z"), value:20}))`,
+          context,
+        ));
+        assert.equal(misalignedPresentation.individuallyCurrent, true);
+        assert.equal(misalignedPresentation.aligned, false);
+        assert.equal(misalignedPresentation.state, "当前\uFF0C但未对齐");
+
+        const agingPresentation = JSON.parse(vm.runInContext(
+          `JSON.stringify(capitalSourcePresentation({
+            venues:{HYPERLIQUID:"20"}, vault:null, issues:[],
+            source_as_of:{HYPERLIQUID:"2026-08-02T09:56:00Z"},
+            as_of:"2026-08-02T10:00:00Z", max_fact_age_seconds:300,
+          }, "HYPERLIQUID", {time:Date.parse("2026-08-02T09:56:00Z"), value:20}))`,
+          context,
+        ));
+        assert.equal(agingPresentation.nearExpiry, true);
+        assert.equal(agingPresentation.state, "当前\uFF0C接近过期");
+
+        const compacted = JSON.parse(vm.runInContext(
+          `JSON.stringify(compactCapitalChartPoints([
+            {x:0,y:1,breakBefore:false},
+            {x:1,y:2,breakBefore:true},
+            {x:1.5,y:3,breakBefore:false},
+            {x:5,y:4,breakBefore:false}
+          ]))`,
+          context,
+        ));
+        assert.equal(compacted[1].breakBefore, true);
+        assert.equal(compacted[1].y, 2);
+        assert.equal(compacted.at(-1).x, 5);
+        const domain = JSON.parse(vm.runInContext(
+          `JSON.stringify(capitalAxisDomain([9.967, 9.971]))`,
+          context,
+        ));
+        assert.ok(domain.range >= 9.971 * 0.005);
         """
     )
     completed = subprocess.run(  # noqa: S603
@@ -950,9 +1040,12 @@ def test_capital_web_projection_only_renders_live_records() -> None:
     ).read_text()
     app_source = app_path.read_text()
     assert "历史曲线不会冒充当前净值" in app_source
-    assert "纵轴按当前可见数据自动缩放" in app_source
+    assert "纵轴至少保留 0.5% 观察范围" in app_source
     assert "跨断档数据不会比较" in app_source
     assert "capitalChartResizeObserver = new ResizeObserver" in app_source
+    assert "function compactCapitalChartPoints" in app_source
+    assert "history_gap_tolerance_seconds" in app_source
+    assert "function capitalHistoryWindow" in app_source
     assert 'data-label="数据状态"' in app_source
     assert 'class="table-wrap is-scrollable capital-operation-table"' in app_source
     assert ".capital-balance-table td::before" in stylesheet

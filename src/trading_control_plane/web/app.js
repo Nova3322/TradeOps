@@ -2433,6 +2433,7 @@ const LIVE_CAPITAL_SOURCES = [
   {key:'HYPERLIQUID', location_type:'VENUE', label:'Hyperliquid'},
   {key:'VAULT', location_type:'VAULT', label:'Vault'},
 ];
+const CAPITAL_CHART_WINDOW_HOURS = 6;
 const DIRECT_CAPITAL_PATHS = [
   {path:'VAULT_TO_BINANCE', from:'资金库', to:'币安', badge:'10 分钟等待', action:'检查转入币安条件', copy:'释放到期后重新校验，再转入已授权币安地址。', steps:['申请释放','等待 10 分钟','到期重检','进入币安']},
   {path:'VAULT_TO_HYPERLIQUID', from:'资金库', to:'Hyperliquid', badge:'两段路径', action:'检查转入 Hyperliquid 条件', copy:'先释放至已授权 Arbitrum 自有地址，再存入 Hyperliquid 合约。', steps:['申请释放','到达自有地址','合约入金']},
@@ -2497,6 +2498,49 @@ function formatCapitalUsd(value) {
 function capitalSourceIssue(issues, source) {
   const match = (issues || []).find(value => String(value).endsWith(`:${source}`));
   return match ? formatCapitalIssue(match) : null;
+}
+
+function capitalSourceIssueCode(issues, source) {
+  const match = (issues || []).find(value => String(value).endsWith(`:${source}`));
+  return match ? String(match).split(':')[0] : null;
+}
+
+function capitalFreshnessCopy(observedAt, asOf, maxAgeSeconds) {
+  const observed = new Date(observedAt).getTime();
+  const reference = new Date(asOf).getTime();
+  if (!Number.isFinite(observed) || !Number.isFinite(reference)) return '尚无有效更新时间';
+  const ageSeconds = Math.max(0, Math.round((reference - observed) / 1000));
+  const age = ageSeconds < 60 ? '刚刚更新' : ageSeconds < 3600
+    ? `${Math.floor(ageSeconds / 60)} 分钟前更新`
+    : `${Math.floor(ageSeconds / 3600)} 小时前更新`;
+  const windowMinutes = Math.max(1, Math.round(Number(maxAgeSeconds || 300) / 60));
+  return `${age} · 当前有效窗口 ${windowMinutes} 分钟`;
+}
+
+function capitalSourcePresentation(netWorth, source, latestPoint) {
+  const issueCode = capitalSourceIssueCode(netWorth.issues, source);
+  const currentValue = source === 'VAULT' ? netWorth.vault : netWorth.venues?.[source];
+  const individuallyCurrent = currentValue !== null && currentValue !== undefined
+    && !['MISSING_LIVE_SOURCE','STALE_LIVE_SOURCE','UNKNOWN_USD_VALUE','CURRENT_VALUE_MISSING'].includes(issueCode);
+  const aligned = individuallyCurrent && issueCode !== 'TIME_MISALIGNED_SOURCE';
+  const observedAt = individuallyCurrent ? netWorth.source_as_of?.[source] : latestPoint?.time;
+  const value = individuallyCurrent ? currentValue : latestPoint?.value;
+  const ageSeconds = observedAt && netWorth.as_of
+    ? Math.max(0, (new Date(netWorth.as_of).getTime() - new Date(observedAt).getTime()) / 1000)
+    : null;
+  const nearExpiry = individuallyCurrent && Number.isFinite(ageSeconds)
+    && ageSeconds >= Number(netWorth.max_fact_age_seconds || 300) * 2 / 3;
+  const state = issueCode === 'TIME_MISALIGNED_SOURCE'
+    ? '当前，但未对齐'
+    : nearExpiry
+      ? '当前，接近过期'
+    : individuallyCurrent
+      ? '当前可信'
+      : capitalSourceIssue(netWorth.issues, source) || '等待数据';
+  return {
+    aligned, individuallyCurrent, nearExpiry, observedAt, state, value,
+    freshness:capitalFreshnessCopy(observedAt, netWorth.as_of, netWorth.max_fact_age_seconds),
+  };
 }
 
 function renderUnsignedPlanSummary(transfer) {
@@ -2571,13 +2615,24 @@ function capitalHistorySeries(history, alignmentToleranceSeconds = 60, gapTolera
   });
   const gapToleranceMs = Math.max(1, Number(gapToleranceSeconds) || 300) * 1000;
   const sourceSeries = LIVE_CAPITAL_SOURCES.map(source => {
-    const points = [...(grouped.get(source.key) || new Map()).entries()]
-      .sort((left, right) => left[0] - right[0])
+    const entries = [...(grouped.get(source.key) || new Map()).entries()]
+      .sort((left, right) => left[0] - right[0]);
+    const intervals = entries.slice(1).map((entry, index) => entry[0] - entries[index][0])
+      .filter(interval => interval > 0).sort((left, right) => left - right);
+    const medianInterval = intervals.length >= 3 ? intervals[Math.floor(intervals.length / 2)] : 0;
+    const sourceGapTolerance = Math.min(
+      Math.max(gapToleranceMs, medianInterval * 3),
+      Math.max(gapToleranceMs, 15 * 60 * 1000),
+    );
+    const points = entries
       .map(([time, value], index, entries) => ({
         time, value,
-        breakBefore:index > 0 && time - entries[index - 1][0] > gapToleranceMs,
+        breakBefore:index > 0 && time - entries[index - 1][0] > sourceGapTolerance,
       }));
-    return {source:source.key, label:source.label, points};
+    return {
+      source:source.key, label:source.label, points,
+      gapToleranceSeconds:Math.round(sourceGapTolerance / 1000),
+    };
   });
   const totalTimes = [...new Set(sourceSeries.flatMap(series => series.points.map(point => point.time)))]
     .sort((left, right) => left - right);
@@ -2618,6 +2673,35 @@ function capitalHistorySeries(history, alignmentToleranceSeconds = 60, gapTolera
     latestCompleteAt:totalPoints.at(-1)?.time || null,
     timeMisaligned:sourceSeries.every(series => series.points.length) && !totalPoints.length,
   }];
+}
+
+function capitalHistoryWindow(history, hours = CAPITAL_CHART_WINDOW_HOURS) {
+  const timestamps = history.map(item => new Date(item.observed_at).getTime()).filter(Number.isFinite);
+  if (!timestamps.length) return [];
+  const end = Math.max(...timestamps);
+  const start = end - Math.max(1, Number(hours) || 24) * 60 * 60 * 1000;
+  return history.filter(item => new Date(item.observed_at).getTime() >= start);
+}
+
+function compactCapitalChartPoints(points, minimumDistance = 2) {
+  return points.reduce((result, point, index) => {
+    const previous = result.at(-1);
+    if (!previous || point.breakBefore || point.x - previous.x >= minimumDistance || index === points.length - 1) {
+      result.push(point);
+    }
+    return result;
+  }, []);
+}
+
+function capitalAxisDomain(values) {
+  const minimumValue = Math.min(...values);
+  const maximumValue = Math.max(...values);
+  const rawRange = maximumValue - minimumValue;
+  const magnitude = Math.max(Math.abs(minimumValue), Math.abs(maximumValue), 1);
+  const minimumRange = Math.max(magnitude * .005, magnitude < 100 ? .001 : .01);
+  const range = Math.max(rawRange * 1.36, minimumRange);
+  const midpoint = (minimumValue + maximumValue) / 2;
+  return {minimum:midpoint - range / 2, maximum:midpoint + range / 2, range};
 }
 
 function capitalSeriesChange(series) {
@@ -2702,30 +2786,29 @@ async function renderCapitalCenter() {
   const transfers = partitionCapitalRecords(item.transfers);
   const liveInTransit = liveCapitalInTransit(transfers.live);
   const venueNetWorth = Object.entries(netWorth.venues || {}).map(([venue, value]) => `<div class="stat"><small>${escapeHtml(venue)} 净值</small><b>${fmtNumber(value)} ${escapeHtml(netWorth.currency)}</b></div>`).join('');
-  const historySeries = capitalHistorySeries(
+  const allHistorySeries = capitalHistorySeries(
     item.history || [],
     netWorth.alignment_tolerance_seconds || 60,
-    Math.max(300, Number(netWorth.max_fact_age_seconds) || 300),
+    netWorth.history_gap_tolerance_seconds || 300,
+  );
+  const historySeries = capitalHistorySeries(
+    capitalHistoryWindow(item.history || []),
+    netWorth.alignment_tolerance_seconds || 60,
+    netWorth.history_gap_tolerance_seconds || 300,
   );
   const visibleHistorySeries = historySeries.filter(series => capitalTrendVisibility[series.source]);
   const hasHistory = historySeries.some(series => series.points.length);
-  const currentSourceValues = {
-    BINANCE:netWorth.venues?.BINANCE,
-    HYPERLIQUID:netWorth.venues?.HYPERLIQUID,
-    VAULT:netWorth.vault,
-    TOTAL:netWorth.total,
-  };
   const chartLegend = historySeries.map(series => {
     const latestPoint = series.points.at(-1);
-    const current = latestPoint && currentSourceValues[series.source] !== null
-      && currentSourceValues[series.source] !== undefined
-      && (series.source === 'TOTAL' ? netWorth.complete : !capitalSourceIssue(netWorth.issues, series.source));
+    const fallbackPoint = allHistorySeries.find(item => item.source === series.source)?.points.at(-1);
+    const presentation = series.source === 'TOTAL' ? null : capitalSourcePresentation(netWorth, series.source, latestPoint || fallbackPoint);
+    const current = latestPoint && (series.source === 'TOTAL' ? netWorth.complete : presentation.individuallyCurrent);
     const summary = !latestPoint
-      ? '等待数据'
-      : `${formatCapitalUsd(latestPoint.value)} · ${current ? '当前' : '历史'} · ${fmtDate(latestPoint.time)}`;
+      ? (fallbackPoint ? `${CAPITAL_CHART_WINDOW_HOURS} 小时无数据 · 最后记录 ${fmtDate(fallbackPoint.time)}` : '等待数据')
+      : `${formatCapitalUsd(latestPoint.value)} · ${series.source === 'TOTAL' ? (current ? '当前汇总' : '历史汇总') : presentation.state} · ${fmtDate(latestPoint.time)}`;
     return `<label class="capital-trend-toggle trend-${escapeHtml(series.source)} ${latestPoint ? '' : 'is-missing'}"><input type="checkbox" data-capital-trend="${escapeHtml(series.source)}" ${latestPoint && capitalTrendVisibility[series.source] ? 'checked' : ''} ${latestPoint ? '' : 'disabled'}><i aria-hidden="true"></i><span><b translate="no">${escapeHtml(series.label)}</b><small>${escapeHtml(summary)}</small></span></label>`;
   }).join('');
-  const totalSeries = historySeries.find(series => series.source === 'TOTAL');
+  const totalSeries = allHistorySeries.find(series => series.source === 'TOTAL');
   const latestCompleteTotal = totalSeries?.points.at(-1) || null;
   const totalHeadline = netWorth.total !== null && netWorth.total !== undefined
     ? formatCapitalUsd(netWorth.total)
@@ -2736,18 +2819,16 @@ async function renderCapitalCenter() {
       ? `最近完整汇总 ${formatCapitalUsd(latestCompleteTotal.value)} · ${fmtDate(latestCompleteTotal.time)}`
       : '尚无三方同一时间口径的完整记录';
   const sourceCards = [
-    {source:'BINANCE', label:'Binance', value:netWorth.venues?.BINANCE},
-    {source:'HYPERLIQUID', label:'Hyperliquid', value:netWorth.venues?.HYPERLIQUID},
-    {source:'VAULT', label:'Vault', value:netWorth.vault},
+    {source:'BINANCE', label:'Binance'},
+    {source:'HYPERLIQUID', label:'Hyperliquid'},
+    {source:'VAULT', label:'Vault'},
   ].map(source => {
     const sourceSeries = historySeries.find(series => series.source === source.source);
-    const latestPoint = sourceSeries?.points.at(-1);
-    const issue = capitalSourceIssue(netWorth.issues, source.source);
-    const current = source.value !== null && source.value !== undefined && !issue;
-    const value = current ? source.value : latestPoint?.value;
-    const state = current ? '当前可信' : issue || '等待数据';
-    const time = current ? netWorth.source_as_of?.[source.source] : latestPoint?.time;
-    return `<article class="capital-worth-card ${current ? 'is-current' : 'is-limited'}"><div><small translate="no">${escapeHtml(source.label)}</small><b>${formatCapitalUsd(value)}</b></div><span>${escapeHtml(state)}</span><p>${time ? `最后有效 ${fmtDate(time)}` : '尚无有效时间'} · 来源：<span translate="no">${escapeHtml(source.label)}</span> 只读账户</p></article>`;
+    const latestPoint = sourceSeries?.points.at(-1)
+      || allHistorySeries.find(series => series.source === source.source)?.points.at(-1);
+    const presentation = capitalSourcePresentation(netWorth, source.source, latestPoint);
+    const cardState = presentation.aligned ? (presentation.nearExpiry ? 'is-aging' : 'is-current') : 'is-limited';
+    return `<article class="capital-worth-card ${cardState}"><div><small translate="no">${escapeHtml(source.label)}</small><b>${formatCapitalUsd(presentation.value)}</b></div><span>${escapeHtml(presentation.state)}</span><p>${presentation.observedAt ? `${escapeHtml(presentation.freshness)} · ${fmtDate(presentation.observedAt)}` : '尚无有效时间'}<br>数据来源：<span translate="no">${escapeHtml(source.label)}</span> 只读账户</p></article>`;
   }).join('');
   const changes = historySeries.map(series => ({series, change:capitalSeriesChange(series)}))
     .filter(item => item.change)
@@ -2770,12 +2851,12 @@ async function renderCapitalCenter() {
     0,
   );
   const chartCoverage = chartStart && chartEnd
-    ? `${fmtDate(chartStart)} 至 ${fmtDate(chartEnd)} · ${chartGapCount ? `${chartGapCount} 处断档未连线` : '没有检测到断档'}`
+    ? `最近 ${CAPITAL_CHART_WINDOW_HOURS} 小时 · ${fmtDate(chartStart)} 至 ${fmtDate(chartEnd)} · ${chartGapCount ? `${chartGapCount} 处断档未连线` : '没有检测到断档'}`
     : '尚无有效时间范围';
   const issueDetails = [...new Set((netWorth.issues || []).map(issue => {
     const source = String(issue).split(':')[1];
     const lastTime = source && netWorth.source_as_of?.[source];
-    return `${formatCapitalIssue(issue)}${lastTime ? `（最后有效 ${fmtDate(lastTime)}）` : ''}`;
+    return `${formatCapitalIssue(issue)}${lastTime ? `（最后记录 ${fmtDate(lastTime)}）` : ''}`;
   }))];
   const trustCopy = netWorth.complete
     ? '三方数据完整、新鲜且时间对齐，可以计算当前汇总。'
@@ -2806,7 +2887,7 @@ async function renderCapitalCenter() {
   const legacyStats = main.querySelector('.capital-page > .stats');
   legacyStats.outerHTML = `<section class="capital-overview" aria-label="当前资金净值"><article class="capital-total-card ${netWorth.complete ? 'is-current' : 'is-limited'}"><small>当前三方总净值</small><b>${escapeHtml(totalHeadline)}</b><p>${escapeHtml(totalSupporting)}</p></article><div class="capital-source-cards">${sourceCards}</div></section><section class="capital-trust-panel ${netWorth.complete ? 'is-current' : 'is-limited'}"><div><b>${netWorth.complete ? '数据可信，可用于当前汇总' : '当前汇总已阻断'}</b><p>${escapeHtml(trustCopy)}</p></div><span>${netWorth.complete ? '完整' : '需关注'}</span></section>`;
   const chartPanel = main.querySelector('.capital-chart-panel');
-  chartPanel.innerHTML = `<div class="chart-head"><div><p class="eyebrow">资金净值趋势</p><h2>四条固定资金曲线</h2><p class="subtle">Binance、Hyperliquid、Vault 与三方汇总。汇总只使用 ${Number(netWorth.alignment_tolerance_seconds || 60)} 秒内对齐的三方事实；缺失、过期、错位和断档都不会补零或强行连线。</p></div><div class="chart-head-value"><b>${escapeHtml(totalHeadline)}</b><small>${escapeHtml(totalSupporting)}</small></div></div><div class="capital-chart-meta"><span>${escapeHtml(chartCoverage)}</span><span>纵轴按当前可见数据自动缩放；请结合金额和百分比判断变化</span></div><div class="chart-legend" role="group" aria-label="选择显示的资金曲线">${chartLegend}</div>${hasHistory ? `<div class="capital-chart-wrap"><canvas id="capital-chart" height="300" aria-label="Binance、Hyperliquid、Vault 和三方汇总四条 USD 资金趋势"></canvas><div class="capital-chart-tooltip" role="status" hidden></div></div>` : '<div class="chart-empty">尚无可绘制的资金历史；缺失数据不会补零。</div>'}<div class="capital-change-note ${abnormalChanges.length ? 'is-anomaly' : ''}"><b>${abnormalChanges.length ? '异常变化提示' : '最近变化'}</b><span>${escapeHtml(changeCopy)}</span></div>`;
+  chartPanel.innerHTML = `<div class="chart-head"><div><p class="eyebrow">资金净值趋势</p><h2>四条固定资金曲线</h2><p class="subtle">Binance、Hyperliquid、Vault 与三方汇总。汇总只使用 ${Number(netWorth.alignment_tolerance_seconds || 60)} 秒内对齐的三方事实；缺失、过期、错位和断档都不会补零或强行连线。</p></div><div class="chart-head-value"><b>${escapeHtml(totalHeadline)}</b><small>${escapeHtml(totalSupporting)}</small></div></div><div class="capital-chart-meta"><span>${escapeHtml(chartCoverage)}</span><span>断档按实际采样节奏的 3 倍判定（至少 ${Number(netWorth.history_gap_tolerance_seconds || 300)} 秒）；纵轴至少保留 0.5% 观察范围</span></div><div class="chart-legend" role="group" aria-label="选择显示的资金曲线">${chartLegend}</div>${hasHistory ? `<div class="capital-chart-wrap"><canvas id="capital-chart" height="300" aria-label="Binance、Hyperliquid、Vault 和三方汇总四条 USD 资金趋势"></canvas><div class="capital-chart-tooltip" role="status" hidden></div></div>` : '<div class="chart-empty">尚无可绘制的资金历史；缺失数据不会补零。</div>'}<div class="capital-change-note ${abnormalChanges.length ? 'is-anomaly' : ''}"><b>${abnormalChanges.length ? '异常变化提示' : '最近变化'}</b><span>${escapeHtml(changeCopy)}</span></div>`;
   const legacyIncomplete = chartPanel.nextElementSibling?.classList.contains('callout') ? chartPanel.nextElementSibling : null;
   legacyIncomplete?.remove();
   const capitalPositionsHeading = [...main.querySelectorAll('section > h2')].find(heading => heading.textContent === '资金位置');
@@ -2858,13 +2939,10 @@ function drawCapitalChart(series) {
   context.textBaseline = 'middle';
   bands.forEach(band => {
     const values = band.items.flatMap(item => item.points.map(point => point.value));
-    const minimumValue = Math.min(...values);
-    const maximumValue = Math.max(...values);
-    const rawRange = maximumValue - minimumValue;
-    const valuePadding = Math.max(rawRange * .18, Math.abs(maximumValue) * .0005, .001);
-    const range = Math.max(rawRange + valuePadding * 2, .002);
-    band.minimum = minimumValue - valuePadding;
-    band.maximum = band.minimum + range;
+    const domain = capitalAxisDomain(values);
+    const range = domain.range;
+    band.minimum = domain.minimum;
+    band.maximum = domain.maximum;
     band.y = value => band.bottom - ((band.bottom - band.top) * (value - band.minimum) / range);
     context.fillStyle = muted;
     context.textAlign = 'left';
@@ -2887,12 +2965,7 @@ function drawCapitalChart(series) {
     const colorIndex = ({BINANCE:0, HYPERLIQUID:1, VAULT:2, TOTAL:3})[item.source];
     const color = colors[colorIndex ?? seriesIndex] || colors[0];
     const projected = item.points.map(point => ({...point, x:x(point.time), y:band.y(point.value)}));
-    const points = projected.reduce((result, point, index) => {
-      const previous = result.at(-1);
-      if (!previous || point.breakBefore || point.x - previous.x >= 2 || index === projected.length - 1) result.push(point);
-      else result[result.length - 1] = point;
-      return result;
-    }, []);
+    const points = compactCapitalChartPoints(projected);
     context.beginPath();
     points.forEach((point, index) => {
       if (!index || point.breakBefore) context.moveTo(point.x, point.y);
