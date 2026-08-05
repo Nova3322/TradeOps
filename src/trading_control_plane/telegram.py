@@ -111,6 +111,10 @@ _ERROR_LABELS: dict[str, str] = {
     "ACTION_REFERENCE_EXPIRED": "操作凭证已过期，请使用最新通知",
     "ACTION_REFERENCE_SCOPE_INVALID": "操作凭证不属于当前用户或对象",
     "RBAC_DENIED": "当前身份没有执行该操作的权限",
+    "SELF_REVIEW_FORBIDDEN": "创建者不能审核自己的提案",
+    "REVIEW_ALREADY_RECORDED": "你的审核结论已经记录，无需重复操作",
+    "PROPOSAL_EXPIRED": "提案已经到期，不能再审核",
+    "PROPOSAL_NOT_REVIEWABLE": "提案已结束或不再等待审核",
 }
 
 

@@ -218,6 +218,28 @@ def test_authoritative_rejection_is_an_alert_and_never_claims_a_write() -> None:
     assert "对象版本已变化" in receipt["text"]
 
 
+def test_authoritative_self_review_rejection_explains_the_exact_reason() -> None:
+    fake = FakeBotApi()
+    bot, _bindings, _handled, recipient_id = gateway(fake)
+    bind(bot)
+    bot.set_action_handler(lambda _action, _update_id: "未执行: SELF_REVIEW_FORBIDDEN")
+    bot.send(proposal(recipient_id))
+    source_key = fake.calls[-1][1]["reply_markup"]["inline_keyboard"][1][0]["callback_data"]
+    bot.handle_update({"update_id": 30, "callback_query": callback("reject", source_key)})
+    confirmation = next(
+        payload for method, payload in reversed(fake.calls) if method == "editMessageText"
+    )
+    confirm_key = confirmation["reply_markup"]["inline_keyboard"][0][0]["callback_data"]
+    bot.handle_update({"update_id": 31, "callback_query": callback("confirm", confirm_key)})
+
+    receipt = next(
+        payload for method, payload in reversed(fake.calls) if method == "editMessageText"
+    )
+    assert "操作未执行" in receipt["text"]
+    assert "创建者不能审核自己的提案" in receipt["text"]
+    assert "SELF_REVIEW_FORBIDDEN" in receipt["text"]
+
+
 def test_private_start_binds_allowlisted_username_and_todo_is_available() -> None:
     fake = FakeBotApi()
     bot, bindings, _handled, recipient_id = gateway(fake)

@@ -180,7 +180,7 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
     assert "function confirmAction" in app_javascript.text
     assert "批准这份冻结提案？" in app_javascript.text
     assert "最高管理员直接批准本人提案" in app_javascript.text
-    assert "批准前需要再次确认；不会直接下单" in app_javascript.text
+    assert "批准或拒绝前都需要再次确认；不会直接下单" in app_javascript.text
     assert "二次强验证" not in app_javascript.text
     assert "无法登录：账号不存在、尚未分配岗位或已停用" in app_javascript.text  # noqa: RUF001
     assert 'placeholder="请输入分配给你的内部用户名"' in app_javascript.text
@@ -294,6 +294,9 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
     assert "? '通知受阻'" in app_javascript.text
     assert "使用 Web 审核" in app_javascript.text
     assert "系统机会 ${systemCount} 笔 · 人工判断 ${manualCount} 笔" in app_javascript.text
+    assert "拒绝并结束这份提案？" in app_javascript.text
+    assert "确认拒绝" in app_javascript.text
+    assert "批准或拒绝前都需要再次确认" in app_javascript.text
     assert "生产数据与资金连接" in app_javascript.text
     assert "等待资金库绑定" in app_javascript.text
     assert "当前无监控对象" in app_javascript.text

@@ -589,6 +589,20 @@ class TradingQueries:
             proposal = session.get(Proposal, proposal_id)
             if proposal is None:
                 raise DomainRejected("PROPOSAL_NOT_FOUND", "proposal does not exist")
+            reviewed_user_ids = set(
+                session.scalars(
+                    select(Approval.reviewer_id).where(Approval.proposal_id == proposal_id)
+                ).all()
+            )
+            reused_actor_ids = set(
+                session.scalars(
+                    select(AuditEvent.actor_id).where(
+                        AuditEvent.event_type == "PROPOSAL_DUPLICATE_REUSED",
+                        AuditEvent.object_type == "Proposal",
+                        AuditEvent.object_id == str(proposal_id),
+                    )
+                ).all()
+            )
             assignments = session.scalars(
                 select(RoleAssignment).where(RoleAssignment.role == Role.REVIEWER.value)
             ).all()
@@ -598,6 +612,8 @@ class TradingQueries:
                 if (item.account_scope is None or item.account_scope == proposal.account_id)
                 and (item.venue_scope is None or item.venue_scope == proposal.venue)
                 and item.user_id != proposal.proposer_id
+                and item.user_id not in reviewed_user_ids
+                and str(item.user_id) not in reused_actor_ids
             }
             users = session.scalars(
                 select(User).where(User.user_id.in_(reviewer_ids), User.active)

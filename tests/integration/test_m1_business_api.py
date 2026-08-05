@@ -824,9 +824,7 @@ def test_perptape_to_review_to_risk_and_authorization_api_flow(
             )
             assert approved.status_code == 200, approved.text
             assert approved.json()["status"] == "APPROVED"
-            assert approved.json()["detail"]["approvals"][0]["reviewer_username"] == (
-                "reviewer-1"
-            )
+            assert approved.json()["detail"]["approvals"][0]["reviewer_username"] == ("reviewer-1")
 
             replay = await client.post(
                 f"/api/proposals/{proposal_id}/reviews",
@@ -918,6 +916,104 @@ def test_perptape_candidate_can_start_as_explicit_live_proposal(
     asyncio.run(scenario())
 
 
+def test_high_risk_review_refreshes_only_the_remaining_reviewer_notification(
+    database: Database, service: TradingService
+) -> None:
+    ids = seed(service)
+    telegram = MockTelegramGateway()
+
+    async def scenario() -> None:
+        async with AsyncClient(
+            transport=ASGITransport(app=app(database, telegram)), base_url="http://test"
+        ) as client:
+            await login(client, "proposer")
+            created = await client.post(
+                "/api/proposals/manual",
+                json={
+                    "environment": "LIVE",
+                    "account_id": "acct-1",
+                    "venue": "BINANCE",
+                    "instrument_id": str(ids["instrument"]),
+                    "direction": "LONG",
+                    "risk_tier": "HIGH",
+                    "quantity": "0.001",
+                    "max_risk": "1",
+                    "expires_in_minutes": 480,
+                    "trigger_price": "120000",
+                    "invalidation_price": "118000",
+                    "rationale": "two independent reviewers must receive the current version",
+                    "idempotency_key": "high-risk-review-refresh",
+                },
+            )
+            assert created.status_code == 200, created.text
+            proposal_id = created.json()["proposal_id"]
+            first_version = created.json()["version"]
+            assert {item.reviewer_id for item in telegram.notifications()} == {
+                ids["reviewer_one"],
+                ids["reviewer_two"],
+            }
+
+            await logout(client)
+            await login(client, "reviewer-1")
+            first_grant = await client.post(
+                "/api/auth/mock/step-up",
+                json={
+                    "action": "proposal.approve",
+                    "object_id": proposal_id,
+                    "object_version": first_version,
+                },
+            )
+            first_review = await client.post(
+                f"/api/proposals/{proposal_id}/reviews",
+                json={
+                    "decision": "APPROVE",
+                    "reason": "first independent review",
+                    "expected_version": first_version,
+                    "action_grant": first_grant.json()["action_grant"],
+                },
+            )
+            assert first_review.status_code == 200, first_review.text
+            assert first_review.json()["status"] == "PENDING_REVIEW"
+            current_version = first_review.json()["detail"]["version"]
+
+            reviewer_one_notifications = [
+                item for item in telegram.notifications() if item.reviewer_id == ids["reviewer_one"]
+            ]
+            reviewer_two_notifications = [
+                item for item in telegram.notifications() if item.reviewer_id == ids["reviewer_two"]
+            ]
+            assert len(reviewer_one_notifications) == 1
+            assert [item.proposal_version for item in reviewer_two_notifications] == [
+                first_version,
+                current_version,
+            ]
+
+            await logout(client)
+            await login(client, "reviewer-2")
+            second_grant = await client.post(
+                "/api/auth/mock/step-up",
+                json={
+                    "action": "proposal.approve",
+                    "object_id": proposal_id,
+                    "object_version": current_version,
+                },
+            )
+            second_review = await client.post(
+                f"/api/proposals/{proposal_id}/reviews",
+                json={
+                    "decision": "APPROVE",
+                    "reason": "second independent review",
+                    "expected_version": current_version,
+                    "action_grant": second_grant.json()["action_grant"],
+                },
+            )
+            assert second_review.status_code == 200, second_review.text
+            assert second_review.json()["status"] == "APPROVED"
+            assert len(telegram.notifications()) == 3
+
+    asyncio.run(scenario())
+
+
 def test_manual_api_is_idempotent_and_semantic_conflicts_are_explicit(
     database: Database, service: TradingService
 ) -> None:
@@ -987,6 +1083,13 @@ def test_manual_api_is_idempotent_and_semantic_conflicts_are_explicit(
             assert cross_proposer.json()["proposal_id"] == first.json()["proposal_id"]
             assert cross_proposer.json()["actionable_for_current_user"] is False
             assert len(telegram.notifications()) == 3
+            eligible_reviewer_ids = {
+                item.user_id
+                for item in TradingQueries(database).reviewers_for_proposal(
+                    UUID(first.json()["proposal_id"])
+                )
+            }
+            assert second_proposer not in eligible_reviewer_ids
             self_review = await client.post(
                 f"/api/proposals/{first.json()['proposal_id']}/reviews",
                 json={

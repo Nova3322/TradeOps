@@ -1549,10 +1549,17 @@ def create_app(
             expected_version=payload.expected_version,
             now=now,
         )
+        detail = queries().proposal_detail(identity.user_id, proposal_id, now=now)
+        if result is ProposalStatus.PENDING_REVIEW:
+            notify_reviewers(
+                proposal_id,
+                int(detail["version"]),
+                str(detail["environment"]),
+            )
         return {
             "proposal_id": str(proposal_id),
             "status": result.value,
-            "detail": queries().proposal_detail(identity.user_id, proposal_id),
+            "detail": detail,
         }
 
     @app.post("/api/proposals/{proposal_id}/admin-approve")
@@ -5228,6 +5235,13 @@ def create_app(
             )
         except DomainRejected as exc:
             return f"未执行: {exc.code}"
+        if result is ProposalStatus.PENDING_REVIEW:
+            detail = queries().proposal_detail(action.recipient_id, action.proposal_id)
+            notify_reviewers(
+                action.proposal_id,
+                int(detail["version"]),
+                str(detail["environment"]),
+            )
         return f"审核已记录: {result.value}。未创建授权、订单或资金动作。"
 
     if isinstance(resolved_telegram, TelegramBotGateway):
