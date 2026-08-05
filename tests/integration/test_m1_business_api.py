@@ -1136,3 +1136,76 @@ def test_manual_api_is_idempotent_and_semantic_conflicts_are_explicit(
             )
             == 2
         )
+
+
+def test_manual_proposal_accepts_u_margin_amount_and_resolves_frozen_quantity(
+    database: Database, service: TradingService
+) -> None:
+    ids = seed(service)
+    service.register_instrument(
+        actor_id=ids["admin"],
+        venue="BINANCE",
+        symbol="BTCUSD_PERP",
+        tick_size=Decimal("0.1"),
+        lot_size=Decimal("1"),
+        minimum_notional=Decimal("100"),
+        contract_multiplier=Decimal("100"),
+        quote_currency="USD",
+        collateral_currency="BTC",
+        protection_supported=True,
+        now=datetime.now(UTC),
+    )
+
+    async def scenario() -> None:
+        async with AsyncClient(
+            transport=ASGITransport(app=app(database, MockTelegramGateway())),
+            base_url="http://test",
+        ) as client:
+            await login(client, "proposer")
+            catalog = await client.get("/api/instruments")
+            assert catalog.status_code == 200, catalog.text
+            assert catalog.json()["catalog_scope"] == {
+                "contract_family": "U_MARGINED_PERPETUAL",
+                "strategy_allowlist_applied": False,
+                "exchange_trading_status_required": True,
+            }
+            assert [item["symbol"] for item in catalog.json()["data"]] == ["BTCUSDT"]
+
+            payload = {
+                "environment": "LIVE",
+                "account_id": "acct-1",
+                "venue": "BINANCE",
+                "instrument_id": str(ids["instrument"]),
+                "direction": "LONG",
+                "risk_tier": "MEDIUM",
+                "max_position_notional": "250",
+                "max_risk": "20",
+                "expires_in_minutes": 480,
+                "trigger_price": "120000",
+                "invalidation_price": "118000",
+                "rationale": "freeze a U-margined amount and resolve exact contract quantity",
+                "idempotency_key": "manual-usdt-notional",
+            }
+            created = await client.post("/api/proposals/manual", json=payload)
+            assert created.status_code == 200, created.text
+            assert Decimal(created.json()["quantity"]) == Decimal("0.002")
+            assert Decimal(created.json()["estimated_notional"]) == Decimal("240")
+            details = created.json()["frozen_payload"]["details"]
+            assert details["requested_max_position_notional"] == "250"
+            assert Decimal(details["resolved_position_notional"]) == Decimal("240")
+            assert details["position_notional_currency"] == "USDT"
+            assert Decimal(details["initial_quantity"]) == Decimal("0.002")
+
+            too_small = await client.post(
+                "/api/proposals/manual",
+                json={
+                    **payload,
+                    "max_position_notional": "100",
+                    "initial_position_notional": None,
+                    "idempotency_key": "manual-usdt-notional-too-small",
+                },
+            )
+            assert too_small.status_code == 422
+            assert too_small.json()["error"]["code"] == "POSITION_NOTIONAL_TOO_SMALL"
+
+    asyncio.run(scenario())

@@ -112,7 +112,7 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
 
     assert response.status_code == 200
     assert "交易控制台" in response.text
-    assert "/assets/app.js?v=117" in response.text
+    assert "/assets/app.js?v=118" in response.text
     assert "/assets/styles.css?v=48" in response.text
     assert 'aria-label="交易控制台首页"' in response.text
     assert '<a href="/" data-link><span>⌂</span>今日</a>' in response.text
@@ -244,6 +244,12 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
     assert "控制状态已变化" in app_javascript.text
     assert 'name="timeframes" type="checkbox"' in app_javascript.text
     assert "function updateManualProposalPreview" in app_javascript.text
+    assert "交易所当前在线的 U 本位永续合约" in app_javascript.text
+    assert "不受策略启用列表限制" in app_javascript.text
+    assert 'name="max_position_notional"' in app_javascript.text
+    assert "服务端按触发价、合约乘数和数量步长换算" in app_javascript.text
+    assert 'name="initial_position_notional"' in app_javascript.text
+    assert "仅展示已启用的可交易合约" not in app_javascript.text
     assert "只创建提案，不直接下单" in app_javascript.text  # noqa: RUF001
     assert "相同交易参数不会重复创建" in app_javascript.text
     assert "这笔交易要做什么" in app_javascript.text
@@ -379,7 +385,7 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
 
     service_worker = get(app, "/sw.js")
     assert service_worker.status_code == 200
-    assert "trading-shell-v97" in service_worker.text
+    assert "trading-shell-v98" in service_worker.text
     assert "self.skipWaiting()" in service_worker.text
     assert "self.clients.claim()" in service_worker.text
     assert "await fetch(event.request)" in service_worker.text

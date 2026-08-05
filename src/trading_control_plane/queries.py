@@ -191,7 +191,11 @@ class TradingQueries:
             ).all()
             values = session.scalars(
                 select(Instrument)
-                .where(Instrument.active)
+                .where(
+                    Instrument.active,
+                    Instrument.collateral_currency.in_(("USDT", "USDC")),
+                    Instrument.quote_currency == Instrument.collateral_currency,
+                )
                 .order_by(Instrument.venue, Instrument.symbol)
             ).all()
             return [
@@ -2459,7 +2463,11 @@ class TradingQueries:
             estimated_notional = (
                 None
                 if reference_price is None
-                else proposal.quantity * Decimal(str(reference_price))
+                else (
+                    proposal.quantity
+                    * Decimal(str(reference_price))
+                    * (Decimal(1) if instrument is None else instrument.contract_multiplier)
+                ).quantize(Decimal("0.000000000000000001"))
             )
         except (ArithmeticError, TypeError, ValueError):
             estimated_notional = None

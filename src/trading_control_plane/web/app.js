@@ -97,7 +97,7 @@ const ENGLISH_EXACT = new Map(Object.entries({
   '没有符合条件的机会':'No opportunities match these filters', '等待机会数据恢复':'Waiting for opportunity data',
   '当前没有突破候选':'No breakout candidates right now', '人工创建交易提案':'Manual trading proposal',
   '创建人工提案':'Create manual proposal', '返回机会':'Back to Opportunities', '交易意图':'Trading intent',
-  '风险边界':'Risk limits', '交易标的':'Instrument', '触发价格':'Trigger price', '最大持仓数量':'Maximum position size',
+  '风险边界':'Risk limits', '交易标的':'Instrument', '触发价格':'Trigger price', '最大持仓数量':'Maximum position size', '最大持仓金额':'Maximum position value',
   '高级执行参数':'Advanced execution settings', '限价（可选）':'Limit price (optional)', '提案理由':'Rationale',
   '创建并提交审核':'Create and submit for review', '提案预览':'Proposal preview', '提交前摘要':'Summary before submission',
   '选择交易标的':'Select an instrument', '计划名义价值':'Planned notional', '失效距离':'Distance to invalidation',
@@ -1742,18 +1742,18 @@ async function renderManualProposal() {
     <div class="compose-layout"><form id="manual-form" class="form-panel proposal-compose">
       <section class="form-section"><div class="section-title"><span>1</span><div><h2>交易意图</h2><p>选标的、定方向，说清从哪个价格开始执行。</p></div></div><div class="field-grid">
         <label>账户<span class="field-help">资金和权限归属</span><input name="account_id" value="acct-1" required></label>
-        <label>交易标的<span class="field-help">仅展示已启用的可交易合约</span><select name="instrument_id" required>${instruments.map(i => `<option value="${i.instrument_id}" data-venue="${escapeHtml(i.venue)}">${escapeHtml(i.venue)} · ${escapeHtml(i.symbol)}</option>`).join('')}</select></label>
+        <label>交易标的<span class="field-help">交易所当前在线的 U 本位永续合约，共 ${instruments.length} 个；不受策略启用列表限制</span><select name="instrument_id" required>${instruments.map(i => `<option value="${i.instrument_id}" data-venue="${escapeHtml(i.venue)}">${escapeHtml(i.venue)} · ${escapeHtml(i.symbol)}</option>`).join('')}</select></label>
         <label>方向<span class="field-help">做多或做空</span><select name="direction"><option value="LONG">做多</option><option value="SHORT">做空</option></select></label>
         <label>触发价格<span class="field-help">计划开始执行的位置</span><input name="trigger_price" type="number" step="any" min="0" required></label>
       </div></section>
-      <section class="form-section"><div class="section-title"><span>2</span><div><h2>风险边界</h2><p>用数量、最大损失和失效点限制这笔交易。</p></div></div><div class="field-grid">
+      <section class="form-section"><div class="section-title"><span>2</span><div><h2>风险边界</h2><p>用最大持仓金额、最大损失和失效点限制这笔交易。</p></div></div><div class="field-grid">
         <label>风险档位<span class="field-help">决定审核要求和允许的加仓次数</span><select name="risk_tier"><option value="LOW">低</option><option value="MEDIUM" selected>中</option><option value="HIGH">高</option></select></label>
-        <label>最大持仓数量<span class="field-help">该交易任务在任何时候都不能超过此数量</span><input name="quantity" type="number" step="any" min="0" required></label>
+        <label>最大持仓金额<span class="field-help">单位：<b data-position-currency>USDT</b>；服务端按触发价、合约乘数和数量步长换算</span><input name="max_position_notional" type="number" step="any" min="0" required></label>
         <label>最大风险<span class="field-help">以账户结算币计价</span><input name="max_risk" type="number" step="any" min="0" required></label>
         <label>失效价格<span class="field-help">到达后交易逻辑不再成立</span><input name="invalidation_price" type="number" step="any" min="0" required></label>
       </div></section>
       <details class="advanced-form"><summary><span>高级执行参数</span><small>分批入场、限价、自动加仓与有效期</small></summary><div class="field-grid">
-        <label>初仓数量<input name="initial_quantity" type="number" step="any" min="0" placeholder="默认等于总数量"></label>
+        <label>初仓金额（<span data-position-currency>USDT</span>）<input name="initial_position_notional" type="number" step="any" min="0" placeholder="默认等于最大持仓金额"></label>
         <label>限价（可选）<input name="limit_price" type="number" step="any" min="0"></label>
         <label>允许自动加仓<select name="allow_auto_add"><option value="false" selected>否</option><option value="true">是</option></select></label>
         <label>可用加仓次数<select name="requested_adds"><option value="0" selected>0</option><option value="1">1</option><option value="2">2</option><option value="3">3</option></select></label>
@@ -1774,14 +1774,15 @@ function updateManualProposalPreview(event) {
   const form = event.currentTarget;
   const data = Object.fromEntries(new FormData(form));
   const selected = instruments.find(item => item.instrument_id === data.instrument_id);
-  const trigger = Number(data.trigger_price); const quantity = Number(data.quantity);
+  const trigger = Number(data.trigger_price); const positionNotional = Number(data.max_position_notional);
   const intentReady = Boolean(selected && trigger > 0 && data.direction);
-  const riskReady = Number(data.max_risk) > 0 && Number(data.invalidation_price) > 0 && quantity > 0;
+  const riskReady = Number(data.max_risk) > 0 && Number(data.invalidation_price) > 0 && positionNotional > 0;
+  document.querySelectorAll('[data-position-currency]').forEach(node => { node.textContent = selected?.collateral_currency || 'U'; });
   document.querySelector('[data-preview-symbol]').textContent = selected ? `${selected.symbol} · ${selected.venue}` : '选择交易标的';
   const direction = document.querySelector('[data-preview-direction]');
   direction.textContent = fmtDirection(data.direction);
   direction.className = `preview-direction ${data.direction === 'SHORT' ? 'direction-short' : 'direction-long'}`;
-  document.querySelector('[data-preview-notional]').textContent = trigger > 0 && quantity > 0 ? fmtAmount(trigger * quantity, selected?.quote_currency) : '—';
+  document.querySelector('[data-preview-notional]').textContent = positionNotional > 0 ? fmtAmount(positionNotional, selected?.quote_currency) : '—';
   document.querySelector('[data-preview-risk]').textContent = data.max_risk ? `${fmtAmount(data.max_risk, selected?.collateral_currency)} · ${fmtRisk(data.risk_tier)}` : '—';
   document.querySelector('[data-preview-distance]').textContent = percentageDistance(data.trigger_price, data.invalidation_price);
   document.querySelector('[data-preview-expiry]').textContent = `${data.expires_in_hours || 8} 小时`;
@@ -1800,12 +1801,12 @@ async function submitManualProposal(event) {
   data.environment = 'LIVE';
   data.venue = selected.venue;
   data.limit_price = data.limit_price || null;
-  data.initial_quantity = data.initial_quantity || null;
+  data.initial_position_notional = data.initial_position_notional || null;
   data.add_trigger_price = data.add_trigger_price || null;
   data.allow_auto_add = data.allow_auto_add === 'true';
   data.requested_adds = Number(data.requested_adds);
   data.idempotency_key = crypto.randomUUID();
-  for (const field of ['quantity','initial_quantity','max_risk','trigger_price','limit_price','invalidation_price','add_trigger_price']) if (data[field] !== null) data[field] = String(data[field]);
+  for (const field of ['max_position_notional','initial_position_notional','max_risk','trigger_price','limit_price','invalidation_price','add_trigger_price']) if (data[field] !== null) data[field] = String(data[field]);
   data.expires_in_minutes = Number(data.expires_in_hours) * 60;
   delete data.expires_in_hours;
   try {

@@ -64,8 +64,10 @@ class ManualProposalRequest(BaseModel):
     instrument_id: UUID
     direction: Direction
     risk_tier: RiskTier
-    quantity: Decimal = Field(gt=0)
+    quantity: Decimal | None = Field(default=None, gt=0)
+    max_position_notional: Decimal | None = Field(default=None, gt=0)
     initial_quantity: Decimal | None = Field(default=None, gt=0)
+    initial_position_notional: Decimal | None = Field(default=None, gt=0)
     max_risk: Decimal = Field(gt=0)
     expires_in_minutes: int = Field(default=480, ge=480, le=1_440)
     trigger_price: Decimal = Field(gt=0)
@@ -84,6 +86,13 @@ class ManualProposalRequest(BaseModel):
 
     @model_validator(mode="after")
     def validate_auto_add_contract(self) -> ManualProposalRequest:
+        if (self.quantity is None) == (self.max_position_notional is None):
+            raise ValueError("provide exactly one of quantity or max_position_notional")
+        if self.max_position_notional is not None:
+            if self.initial_quantity is not None:
+                raise ValueError("notional proposals cannot provide initial_quantity")
+        elif self.initial_position_notional is not None:
+            raise ValueError("quantity proposals cannot provide initial_position_notional")
         _validate_auto_add_fields(self)
         return self
 
@@ -131,23 +140,35 @@ class ProposalDefaultConfigRequest(BaseModel):
 
 
 def _validate_auto_add_fields(value: ManualProposalRequest | SystemProposalRequest) -> None:
-    initial_quantity = value.quantity if value.initial_quantity is None else value.initial_quantity
-    if initial_quantity > value.quantity:
-        raise ValueError("initial_quantity cannot exceed the frozen total quantity cap")
+    if isinstance(value, ManualProposalRequest) and value.max_position_notional is not None:
+        total_position = value.max_position_notional
+        initial_position = (
+            total_position
+            if value.initial_position_notional is None
+            else value.initial_position_notional
+        )
+    else:
+        assert value.quantity is not None
+        total_position = value.quantity
+        initial_position = (
+            value.quantity if value.initial_quantity is None else value.initial_quantity
+        )
+    if initial_position > total_position:
+        raise ValueError("initial position cannot exceed the frozen total position cap")
     tier_limit = {RiskTier.LOW: 1, RiskTier.MEDIUM: 2, RiskTier.HIGH: 3}[value.risk_tier]
     if value.requested_adds > tier_limit:
         raise ValueError("requested_adds exceeds the selected risk tier limit")
     if value.allow_auto_add:
         if value.requested_adds == 0:
             raise ValueError("enabled AUTO_ADD requires at least one requested AddUnit")
-        if initial_quantity >= value.quantity:
-            raise ValueError("enabled AUTO_ADD requires quantity capacity after the initial order")
+        if initial_position >= total_position:
+            raise ValueError("enabled AUTO_ADD requires position capacity after the initial order")
         if value.add_trigger_price is None:
             raise ValueError("enabled AUTO_ADD requires a frozen add trigger price")
     elif (
         value.requested_adds != 0
         or value.add_trigger_price is not None
-        or initial_quantity != value.quantity
+        or initial_position != total_position
     ):
         raise ValueError("disabled AUTO_ADD cannot reserve AddUnits or Add quantity")
 

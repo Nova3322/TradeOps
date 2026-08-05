@@ -959,7 +959,15 @@ def create_app(
     def instruments(
         identity: SessionIdentity = identity_dependency,
     ) -> dict[str, Any]:
-        return {"data": queries().list_instruments(identity.user_id), "as_of": _now().isoformat()}
+        return {
+            "data": queries().list_instruments(identity.user_id),
+            "catalog_scope": {
+                "contract_family": "U_MARGINED_PERPETUAL",
+                "strategy_allowlist_applied": False,
+                "exchange_trading_status_required": True,
+            },
+            "as_of": _now().isoformat(),
+        }
 
     def notify_reviewers(
         proposal_id: UUID, proposal_version: int, environment: str = "SHADOW"
@@ -1446,6 +1454,78 @@ def create_app(
         identity: SessionIdentity = identity_dependency,
     ) -> dict[str, Any]:
         now = _now()
+        instrument = next(
+            (
+                item
+                for item in queries().list_instruments(identity.user_id)
+                if item["instrument_id"] == str(payload.instrument_id)
+            ),
+            None,
+        )
+        if instrument is None or instrument["venue"] != payload.venue:
+            raise DomainRejected(
+                "INSTRUMENT_UNAVAILABLE",
+                "instrument is outside the current U-margined venue catalog and permission scope",
+            )
+        quantity = payload.quantity
+        initial_quantity = payload.initial_quantity
+        resolved_position_notional: Decimal | None = None
+        position_notional_currency: str | None = None
+        if payload.max_position_notional is not None:
+            quote_currency = str(instrument["quote_currency"])
+            collateral_currency = str(instrument["collateral_currency"])
+            if quote_currency != collateral_currency or quote_currency not in {"USDT", "USDC"}:
+                raise DomainRejected(
+                    "POSITION_NOTIONAL_CURRENCY_UNSUPPORTED",
+                    "manual position amount requires one matching U-margined quote "
+                    "and collateral currency",
+                )
+            lot_size = Decimal(str(instrument["lot_size"]))
+            contract_multiplier = Decimal(str(instrument["contract_multiplier"]))
+            minimum_notional = Decimal(str(instrument["minimum_notional"]))
+
+            def quantity_from_notional(value: Decimal, *, error_code: str) -> Decimal:
+                raw_quantity = value / (payload.trigger_price * contract_multiplier)
+                steps = (raw_quantity / lot_size).to_integral_value(rounding=ROUND_DOWN)
+                resolved = steps * lot_size
+                resolved_notional = resolved * payload.trigger_price * contract_multiplier
+                if resolved <= 0 or resolved_notional < minimum_notional:
+                    raise DomainRejected(
+                        error_code,
+                        "position amount is below the current contract lot size "
+                        "or minimum notional",
+                    )
+                return resolved
+
+            quantity = quantity_from_notional(
+                payload.max_position_notional,
+                error_code="POSITION_NOTIONAL_TOO_SMALL",
+            )
+            initial_quantity = (
+                None
+                if payload.initial_position_notional is None
+                else quantity_from_notional(
+                    payload.initial_position_notional,
+                    error_code="INITIAL_POSITION_NOTIONAL_TOO_SMALL",
+                )
+            )
+            if initial_quantity is not None and initial_quantity > quantity:
+                raise DomainRejected(
+                    "INITIAL_POSITION_EXCEEDS_CAP",
+                    "resolved initial position exceeds the maximum position amount",
+                )
+            if (
+                payload.allow_auto_add
+                and initial_quantity is not None
+                and initial_quantity >= quantity
+            ):
+                raise DomainRejected(
+                    "INITIAL_POSITION_EXHAUSTS_CAP",
+                    "resolved initial position leaves no quantity capacity for AUTO_ADD",
+                )
+            resolved_position_notional = quantity * payload.trigger_price * contract_multiplier
+            position_notional_currency = quote_currency
+        assert quantity is not None
         proposal_id = service().create_proposal(
             actor_id=identity.user_id,
             source=ProposalSource.MANUAL,
@@ -1454,7 +1534,7 @@ def create_app(
             venue=payload.venue,
             instrument_id=payload.instrument_id,
             direction=payload.direction,
-            quantity=payload.quantity,
+            quantity=quantity,
             max_risk=payload.max_risk,
             expires_at=now + timedelta(minutes=payload.expires_in_minutes),
             idempotency_key=payload.idempotency_key,
@@ -1463,11 +1543,16 @@ def create_app(
                 "trigger_price": str(payload.trigger_price),
                 "limit_price": None if payload.limit_price is None else str(payload.limit_price),
                 "invalidation_price": str(payload.invalidation_price),
-                "initial_quantity": str(
-                    payload.quantity
-                    if payload.initial_quantity is None
-                    else payload.initial_quantity
+                "initial_quantity": str(quantity if initial_quantity is None else initial_quantity),
+                "requested_max_position_notional": (
+                    None
+                    if payload.max_position_notional is None
+                    else str(payload.max_position_notional)
                 ),
+                "resolved_position_notional": (
+                    None if resolved_position_notional is None else str(resolved_position_notional)
+                ),
+                "position_notional_currency": position_notional_currency,
                 "allow_auto_add": payload.allow_auto_add,
                 "requested_adds": payload.requested_adds,
                 "add_trigger_price": (
@@ -1483,9 +1568,19 @@ def create_app(
                 "instrument_id": str(payload.instrument_id),
                 "direction": payload.direction.value,
                 "risk_tier": payload.risk_tier.value,
-                "quantity": str(payload.quantity),
+                "quantity": str(quantity),
+                "max_position_notional": (
+                    None
+                    if payload.max_position_notional is None
+                    else str(payload.max_position_notional)
+                ),
                 "initial_quantity": (
-                    None if payload.initial_quantity is None else str(payload.initial_quantity)
+                    None if initial_quantity is None else str(initial_quantity)
+                ),
+                "initial_position_notional": (
+                    None
+                    if payload.initial_position_notional is None
+                    else str(payload.initial_position_notional)
                 ),
                 "max_risk": str(payload.max_risk),
                 "expires_in_minutes": payload.expires_in_minutes,

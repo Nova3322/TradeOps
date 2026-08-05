@@ -503,3 +503,28 @@ final result: passed; runtime alerts are readable, scoped to production campaign
 - Requested 430 px: `04-opportunity-after-430.jpg` (effective browser layout width 478 px).
 
 final result: passed; repeated adjacent facts were removed without weakening truth, permissions or fail-closed behavior
+
+## 2026-08-05: manual proposal U-margin catalog and amount semantics
+
+### P0 / P1 / P2 status
+
+- P0: none open. Browser acceptance did not submit a proposal; all order, capital, signature, broadcast and AUTO_ADD gates remained disabled.
+- P1 closed: the selector no longer claims to show a strategy-enabled subset. It truthfully exposes the exchange-active U-margined catalog inside the user's venue scope.
+- P1 closed: maximum position is entered as settlement-currency amount. The service revalidates the contract and resolves a lot-aligned quantity from price and multiplier before freezing the proposal.
+- P1 verified: unsupported settlement identity and below-minimum amounts fail closed; resolved quantities cannot silently exhaust an enabled AUTO_ADD reserve.
+- P2 verified: Binance renders USDT and Hyperliquid/HIP-3 renders USDC instead of mislabelling USDC-settled contracts as USDT.
+
+### Five-dimensional evidence
+
+- Code: shared catalog scope, server-side U-margin checks, amount-to-quantity conversion, frozen requested/resolved facts and correct multiplier-aware notional projection.
+- API: live `/api/instruments` reported 795 active U-margined contracts with no strategy allowlist applied: 530 Binance and 265 Hyperliquid/HIP-3.
+- Actual page: authenticated `/proposals/new` showed the truthful catalog explanation and the `最大持仓金额` input with dynamic USDT/USDC unit.
+- End-to-end runtime: 8014 restarted through `scripts/run_local.sh`, remained live/ready and did not create a production proposal during acceptance.
+- Tests: 13 PostgreSQL M1 integration tests, 20 Web/API shell tests, JavaScript/Python syntax, source lint and diff checks passed.
+
+### Accepted screenshots
+
+- Desktop: `artifacts/product-audit/manual-proposal-notional-2026-08-05/desktop.png`.
+- Requested responsive runs: `mobile-390.png` and `mobile-430.png`; the in-app browser reported effective widths of 619 px and 682 px with no document overflow.
+
+final result: passed; the manual form uses truthful U-margin catalog scope and settlement-currency amounts while preserving exact server-side quantity controls
