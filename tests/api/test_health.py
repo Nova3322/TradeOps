@@ -112,7 +112,7 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
 
     assert response.status_code == 200
     assert "交易控制台" in response.text
-    assert "/assets/app.js?v=123" in response.text
+    assert "/assets/app.js?v=130" in response.text
     assert "/assets/styles.css?v=50" in response.text
     assert 'aria-label="交易控制台首页"' in response.text
     assert '<a href="/" data-link><span>⌂</span>当前任务</a>' in response.text
@@ -355,7 +355,7 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
     assert "Telegram 审核通知受限" in app_javascript.text
     assert "? '通知可用'" in app_javascript.text
     assert "? '通知受阻'" in app_javascript.text
-    assert "使用 Web 审核" in app_javascript.text
+    assert "使用网页端审核" in app_javascript.text
     assert "系统机会 ${systemCount} 笔 · 人工判断 ${manualCount} 笔" in app_javascript.text
     assert "拒绝并结束这份提案？" in app_javascript.text
     assert "确认拒绝" in app_javascript.text
@@ -365,7 +365,7 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
     assert "当前无监控对象" in app_javascript.text
     assert "逐笔开仓可检查" in app_javascript.text
     assert "实时安全条件未通过" in app_javascript.text
-    assert "dry-run worker 已连接" in app_javascript.text
+    assert "仿真执行进程已连接" in app_javascript.text
     assert "Freqtrade worker 已接管" not in app_javascript.text
     assert "venue-sync-form" not in app_javascript.text
     assert "账户数据自动更新中" in app_javascript.text
@@ -396,7 +396,7 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
 
     service_worker = get(app, "/sw.js")
     assert service_worker.status_code == 200
-    assert "trading-shell-v103" in service_worker.text
+    assert "trading-shell-v110" in service_worker.text
     assert "self.skipWaiting()" in service_worker.text
     assert "self.clients.claim()" in service_worker.text
     assert "await fetch(event.request)" in service_worker.text
@@ -1458,8 +1458,8 @@ def test_system_and_venue_pages_distinguish_read_only_snapshots_from_live_execut
 
     assert "只读控制台可用，但 Freqtrade 执行底座尚未就绪" in source  # noqa: RUF001
     assert "Freqtrade 执行底座已就绪，但交易所只读连接受限" in source  # noqa: RUF001
-    assert "两个 Freqtrade worker 已通过 dry-run 检查" in source
-    assert "Freqtrade worker 未启动" in source
+    assert "两个 Freqtrade 执行进程已通过仿真模式检查" in source
+    assert "Freqtrade 执行进程未启动" in source
     assert "LIVE_ORDER_SEND 保持关闭" in source
     assert "fmtConnectionCategory(state.category)" in source
     assert "当前连接不可用，以下仅为最后一次保存快照" in source  # noqa: RUF001
@@ -1467,8 +1467,8 @@ def test_system_and_venue_pages_distinguish_read_only_snapshots_from_live_execut
     assert "Number(item.quantity) !== 0" in source
     assert "不计入当前委托" in source
     assert "当前账户没有未完成委托" in source
-    assert "执行由 Freqtrade worker 负责；本页不能下单" in source  # noqa: RUF001
-    assert "执行底座为 Freqtrade；控制面尚未接入 worker" in source  # noqa: RUF001
+    assert "执行由 Freqtrade 执行进程负责；本页不能下单" in source  # noqa: RUF001
+    assert "执行底座为 Freqtrade；控制面尚未接入执行进程" in source  # noqa: RUF001
     assert "status.execution_backend === 'FREQTRADE'" in source
     assert "status.worker_configured" in source
     assert "connectionProbeEvidence" in source
@@ -2007,3 +2007,79 @@ def test_mock_login_is_not_available_unless_explicitly_enabled() -> None:
     response = asyncio.run(post())
 
     assert response.status_code == 404
+
+
+def test_console_terminology_keeps_official_names_and_uses_natural_chinese() -> None:
+    node = shutil.which("node")
+    assert node is not None
+    app_path = Path(__file__).parents[2] / "src" / "trading_control_plane" / "web" / "app.js"
+    source = app_path.read_text()
+
+    assert ".replaceAll('Arbitrum', '阿比特鲁姆')" not in source
+    assert ".replaceAll('Telegram', '消息通知')" not in source
+    assert ".replaceAll('HYPERLIQUID', '链上永续')" not in source
+    assert ".replaceAll('PERPTAPE', '突破榜单')" not in source
+    assert "HYPERLIQUID:'Hyperliquid'" in source
+    assert "授权的自有 Arbitrum 钱包地址" in source
+    assert "Hyperliquid 充值桥地址（Bridge）" in source
+    assert "Safe 委托地址（delegate）" in source
+    assert "真实资金划转安全开关当前关闭" in source
+
+    script = textwrap.dedent(
+        r"""
+        import assert from "node:assert/strict";
+        import fs from "node:fs";
+        import vm from "node:vm";
+
+        const source = fs.readFileSync(process.argv[1], "utf8");
+        const from = source.indexOf("function translateChineseText");
+        const to = source.indexOf("\nconst localizedText", from);
+        assert.notEqual(from, -1);
+        assert.notEqual(to, -1);
+        const context = vm.createContext({});
+        vm.runInContext(source.slice(from, to) + "; this.translate = translateChineseText;", context);
+
+        assert.equal(
+          context.translate("授权自有 Arbitrum 地址"),
+          "授权的自有 Arbitrum 钱包地址",
+        );
+        assert.equal(
+          context.translate("HYPERLIQUID / PERPTAPE / Telegram / BNB Chain"),
+          "Hyperliquid / Perptape / Telegram / BNB Chain",
+        );
+        assert.equal(
+          context.translate("Safe Spending Limit delegate"),
+          "Safe 委托地址（delegate）",
+        );
+        assert.equal(
+          context.translate("Freqtrade worker 尚未通过 dry-run 检查"),
+          "Freqtrade 执行进程尚未通过仿真模式检查",
+        );
+
+        const englishFrom = source.indexOf("const ENGLISH_EXACT");
+        const englishTo = source.indexOf("\nfunction translateChineseText", englishFrom);
+        assert.notEqual(englishFrom, -1);
+        assert.notEqual(englishTo, -1);
+        const englishContext = vm.createContext({});
+        vm.runInContext(
+          source.slice(englishFrom, englishTo) + "; this.translate = translateEnglishText;",
+          englishContext,
+        );
+        assert.equal(
+          englishContext.translate("核心服务可用，但 币安、Hyperliquid 的实时开仓条件受阻"),
+          "Core services are available, but live entry requirements are blocked for Binance and Hyperliquid",
+        );
+        assert.equal(
+          englishContext.translate("币安 680 个合约；Hyperliquid 268 个合约，其中 HIP-3 91 个。"),
+          "Binance: 680 instruments; Hyperliquid: 268 instruments, including 91 HIP-3 markets.",
+        );
+        assert.doesNotMatch(englishContext.translate("尚未覆盖的新文案"), /details/);
+        """
+    )
+    completed = subprocess.run(  # noqa: S603
+        [node, "--input-type=module", "-e", script, str(app_path)],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stderr

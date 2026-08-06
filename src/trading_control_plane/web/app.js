@@ -151,6 +151,28 @@ const ENGLISH_EXACT = new Map(Object.entries({
   '链上资金库净值':'On-chain vault net worth', '净值状态':'Net-worth status', '资金划转控制':'Transfer control',
   '在途 / 占用':'In transit / reserved', '资金快照':'Capital snapshot', '资金构成':'Capital composition',
   '生产资金 · 缺失即阻断 · 不代签不广播':'Production capital · missing data blocks · no delegated signing or broadcast',
+  '生产资金 · 只读事实':'Production capital · read-only facts',
+  '先看总额、资金位置和数据可信度，再处理资金路径。缺失、过期或时间错位的数据不会补零，也不会参与汇总。':'Review the total, capital locations, and data reliability before using a capital route. Missing, stale, or misaligned data is never filled with zero or included in the total.',
+  '当前资金净值':'Current net worth',
+  '当前三方总净值':'Current combined net worth', '当前不可汇总':'Combined total unavailable',
+  '尚无三方同一时间口径的完整记录':'No complete three-source record is available for the same time window',
+  '当前汇总已阻断':'Combined total blocked', '需关注':'Attention required',
+  '数据来源：':'Source: ',
+  '四条固定资金曲线':'Four fixed capital series',
+  '币安、Hyperliquid、Vault 与三方汇总。汇总只使用 60 秒内对齐的三方事实；缺失、过期、错位和断档都不会补零或强行连线。':'Binance, Hyperliquid, Vault, and Combined total. The total uses only three-source facts aligned within 60 seconds; missing, stale, misaligned, or interrupted data is never filled with zero or forcibly connected.',
+  'Binance、Hyperliquid、Vault 与三方汇总。汇总只使用 60 秒内对齐的三方事实；缺失、过期、错位和断档都不会补零或强行连线。':'Binance, Hyperliquid, Vault, and Combined total. The total uses only three-source facts aligned within 60 seconds; missing, stale, misaligned, or interrupted data is never filled with zero or forcibly connected.',
+  '最近变化':'Latest change', '资金位置明细':'Capital location details',
+  'USD 金额统一精度：小额四位、大额两位；原资产余额保留在明细中。历史快照不会计入当前净值。':'USD values use four decimals for small balances and two for larger balances. Native-asset balances remain in the details, and historical snapshots are excluded from current net worth.',
+  '当前资金方案':'Current capital provider', '资金方案状态':'Capital-provider status',
+  '二选一':'Choose one', '资金方案':'Capital provider', '实时额度预检':'Live limit preflight',
+  '人控确认':'Human confirmation', '授权地址':'Authorized wallet', '目标入金':'Deposit to destination', '回执验证':'Verify receipt',
+  '选择 NoTilt Vault 或 Safe Spending Limits，再按对应额度规则转入币安。':'Choose NoTilt Vault or Safe Spending Limits, then deposit to Binance under that provider’s limit rules.',
+  '选择 NoTilt Vault 或 Safe Spending Limits，先到授权自有地址，再进入 Hyperliquid。':'Choose NoTilt Vault or Safe Spending Limits, move funds to the authorized owned wallet first, then deposit to Hyperliquid.',
+  '回流到用户选择的 NoTilt Vault 或 Safe Smart Account。':'Return funds to the selected NoTilt Vault or Safe Smart Account.',
+  '先从合约提回授权自有地址，再进入所选资金方案。':'Withdraw from the contract to the authorized owned wallet, then deposit into the selected capital provider.',
+  '统一安全边界：系统只使用当前选定的 NoTilt Vault；每条路径都重新校验地址、网络、资产、额度、实时状态与安全开关，且不在服务内签名或广播。':'Shared safety boundary: the system uses only the currently selected NoTilt Vault. Every route revalidates the address, network, asset, limits, live state, and safety controls; the service never signs or broadcasts.',
+  '统一安全边界：系统只使用当前选定的 Safe Spending Limits；每条路径都重新校验地址、网络、资产、额度、实时状态与安全开关，且不在服务内签名或广播。':'Shared safety boundary: the system uses only the currently selected Safe Spending Limits configuration. Every route revalidates the address, network, asset, limits, live state, and safety controls; the service never signs or broadcasts.',
+  'Binance、Hyperliquid、Vault 和三方汇总四条 USD 资金趋势':'Four USD capital series: Binance, Hyperliquid, Vault, and Combined total',
   '只保留四条明确资金路径。每次操作都先最终确认，再校验地址、网络、金额、额度和实时安全开关；当前缺少生产参数时只记录阻断与阶段，不会生成订单、签名或发送资金。':'Four fixed capital routes only. Every operation requires final confirmation and live validation of the destination, network, amount, limits, and safety gate. Missing production settings record a blocked stage only; no order, signature, or transfer is created.',
   '三方总净值':'Combined net worth', '资金库':'Vault', '币安 净值':'Binance net worth',
   'Hyperliquid 净值':'Hyperliquid net worth', '链上永续 净值':'Hyperliquid net worth', '资金操作':'Capital operations', '资金统计':'Capital history',
@@ -175,6 +197,15 @@ const ENGLISH_EXACT = new Map(Object.entries({
   '四条直达路径':'Four direct routes', '选择资金从哪里到哪里':'Choose the capital source and destination',
   '配置固定资金路径':'Configure fixed capital routes', '尚无数据库配置；当前读取安全环境配置':'No saved database configuration; using fail-closed environment settings',
   '管理员配置':'Administrator settings',
+  '授权自有 Arbitrum 地址':'Authorized owned Arbitrum wallet address',
+  '授权的自有 Arbitrum 钱包地址':'Authorized owned Arbitrum wallet address',
+  'Hyperliquid Bridge 地址':'Hyperliquid bridge address',
+  'Hyperliquid 充值桥地址（Bridge）':'Hyperliquid bridge address',
+  'Safe Spending Limit delegate':'Safe delegate address',
+  'Safe 委托地址（delegate）':'Safe delegate address',
+  'Safe Smart Account 和委托地址（delegate）':'Safe Smart Account and delegate address',
+  '缺少官方金库或 NoTilt Agent 授权范围':'Missing the trusted vault or NoTilt agent scope',
+  '始终由独立人控钱包处理；系统不会代为签名或广播':'Always handled by a separate human-controlled wallet; the system never signs or broadcasts on the user’s behalf',
   '先选路径，再在一个确认窗口里填写金额；安全说明不再重复四遍。':'Choose a route, then enter the amount in one confirmation dialog. The shared safety boundary is stated once.',
   '统一安全边界：':'Shared safety boundary: ',
   '每条路径都重新校验地址、网络、资产、额度、实时状态与安全开关。NoTilt 只构建官方 SDK 无签名请求；签名和广播只能由独立人控钱包逐笔完成。':'Every route revalidates the address, network, asset, limits, live state, and safety gate. NoTilt only builds unsigned requests from the official SDK; a separate human-controlled wallet must confirm every signature and broadcast.',
@@ -282,11 +313,11 @@ const ENGLISH_EXACT = new Map(Object.entries({
   '可以打开提案或交易任务继续追查；关联编号用于定位同一条操作记录。':'Open a proposal or trade to investigate further. Reference IDs connect events from the same operation.',
   '当前身份下没有可见操作记录。':'There are no visible activity records for this account.',
   '生产账户 · 数据读取':'Production accounts · data access', '生产账户 · 自动读取':'Production accounts · automatic read',
-  '在这里查看币安和链上永续账户的连接、余额、仓位、委托、成交、资金费与对账。日常交易仍从交易任务、系统状态和异常页面进入。':'Use this page to inspect Binance and Hyperliquid connections, balances, positions, orders, fills, funding, and reconciliation. Daily operations still start from Trades, System status, and Exceptions.',
+  '在这里查看币安和 Hyperliquid 账户的连接、余额、仓位、委托、成交、资金费与对账。日常交易仍从交易任务、系统状态和运行告警页面进入。':'Use this page to inspect Binance and Hyperliquid connections, balances, positions, orders, fills, funding, and reconciliation. Daily operations still start from Trades, System status, and Runtime alerts.',
   '刷新账户数据':'Refresh account data', '刷新页面':'Refresh page', '选择交易所':'Select exchange', '账户数据只读':'Account data read only',
   '统一账户':'Unified account', '账户数据已保存':'Account data saved',
   '最后更新':'Last updated', '账户数据自动更新中':'Account data updates automatically', '账户数据自动同步':'Account data sync is current', '自动同步等待连接恢复':'Automatic sync is waiting for the connection', '账户自动更新尚未启用':'Automatic account updates are not enabled',
-  '统一查看币安和链上永续的余额、当前仓位、当前委托、最近成交与资金费。系统按账户自动覆盖全部活跃标的，不需要逐个输入币对。':'View balances, positions, open orders, recent fills, and funding for Binance and Hyperliquid in one place. Account-wide synchronization automatically covers every active instrument; no symbol input is needed.',
+  '统一查看币安和 Hyperliquid 的余额、当前仓位、当前委托、最近成交与资金费。系统按账户自动覆盖全部活跃标的，不需要逐个输入币对。':'View balances, positions, open orders, recent fills, and funding for Binance and Hyperliquid in one place. Account-wide synchronization automatically covers every active instrument; no symbol input is needed.',
   '当前只展示已经保存的生产数据；配置连续读取服务后会自动更新。':'Only saved production data is shown. Configure the continuous reader to update it automatically.',
   '切换账户时只读取当前身份获准查看的范围。点击同步后，系统会从交易所获取数据、保存并立即运行对账。':'Changing accounts only reads scopes assigned to the current identity. Sync fetches exchange data, saves it, and immediately runs reconciliation.',
   '生产读取连接尚未配置或已关闭。页面只展示已经保存的数据，不会用其他数据填充。':'The production read connection is not configured or is disabled. This page shows saved data only and never fills gaps with substitute data.',
@@ -337,9 +368,9 @@ const ENGLISH_EXACT = new Map(Object.entries({
   '资金统计':'Capital history', '三方资金趋势':'Three-source capital trends', '等待数据':'Waiting for data',
   '最近完整历史：币安、Hyperliquid、NoTilt 与汇总趋势':'Latest complete history: Binance, Hyperliquid, NoTilt, and total',
   '上方卡片只显示仍在新鲜度窗口内的当前净值；曲线保留已确认历史快照。两者时间语义不同，缺失来源不会补零。':'The cards above show only current values inside the freshness window; the chart retains confirmed historical snapshots. These have different time semantics, and missing sources are never filled with zero.',
-  '每条线分别显示币安、链上永续和链上资金库的美元净值；只使用生产环境的已确认同步记录。':'Each line shows the USD net worth of Binance, Hyperliquid, or the on-chain vault. Only confirmed production synchronization records are used.',
+  '每条线分别显示币安、Hyperliquid 和链上资金库的美元净值；只使用生产环境的已确认同步记录。':'Each line shows the USD net worth of Binance, Hyperliquid, or the on-chain vault. Only confirmed production synchronization records are used.',
   '完成首次生产资金同步后，将在这里显示三方资金曲线。':'The three capital curves appear after the first production capital synchronization.',
-  '统一统计币安、链上永续和链上资金库的生产资金，并保留每次同步的净值变化。交易所与资金库之间可双向划转，但必须经过独立审核、限时授权和链上额度检查。':'Track production capital across Binance, Hyperliquid, and the on-chain vault, including each synchronized net-worth change. Transfers work in both directions between venues and the vault, subject to independent review, short-lived authorization, and on-chain budget checks.',
+  '统一统计币安、Hyperliquid 和链上资金库的生产资金，并保留每次同步的净值变化。交易所与资金库之间可双向划转，但必须经过独立审核、限时授权和链上额度检查。':'Track production capital across Binance, Hyperliquid, and the on-chain vault, including each synchronized net-worth change. Transfers work in both directions between venues and the vault, subject to independent review, short-lived authorization, and on-chain budget checks.',
   '新建人工提案':'New manual proposal', '查看提案':'View proposals',
   '新增风险已受限，减仓和退出仍可用':'New risk is restricted; reductions and exits remain available',
   '减仓和退出不受阻断。':'Reductions and exits remain available.', '查看突破榜单机会':'View breakout opportunities',
@@ -371,6 +402,15 @@ const ENGLISH_EXACT = new Map(Object.entries({
   '管理员暂停了所有新增风险':'Administrator paused all new risk', '管理员关闭了全局自动加仓':'Administrator disabled automatic scaling globally',
   '4 项恢复条件尚未满足。 减仓和退出不受阻断。':'Four recovery requirements are not yet satisfied. Reductions and exits remain available.',
   '尝试降低共振、成交量或持仓量门槛，或者清除部分筛选。':'Lower the resonance, volume, or open-interest threshold, or clear some filters.',
+  '交易执行底座':'Execution backend', '仿真执行进程已连接':'Simulation workers connected',
+  'Freqtrade 执行进程未启动':'Freqtrade workers not started', 'Freqtrade 执行进程检查未通过':'Freqtrade worker checks failed',
+  'Telegram 审核通知':'Telegram review notifications', '通知可用':'Notifications available', '通知受阻':'Notifications unavailable',
+  '等待首次轮询':'Waiting for the first poll',
+  '机器人尚未完成一次成功轮询；网页端审核队列仍是权威入口。':'The bot has not completed a successful poll yet. The web review queue remains the authoritative source.',
+  '网页端审核队列保持可用；资金、订单、风险开关与权限操作不对 Telegram 机器人开放':'The web review queue remains available. Capital, orders, risk controls, and access management are not exposed to the Telegram bot.',
+  'Perptape 机会源':'Perptape opportunity feed',
+  '仅验证执行适配与合约目录；不会发送真实订单':'Execution adapters and instrument catalogs only; no live orders are sent',
+  'Telegram 私聊机器人最近一次长轮询成功；批准和拒绝仍需二次确认并写入统一审计。':'The Telegram direct-message bot completed its latest long poll. Approvals and rejections still require confirmation and are written to the shared audit log.',
 }));
 
 const ENGLISH_PATTERNS = [
@@ -396,6 +436,28 @@ const ENGLISH_PATTERNS = [
   [/^已读取 (\d+) 个候选，可用于机会筛选和提案。$/, '$1 candidates loaded and available for opportunity screening and proposals.'],
   [/^只读 · 最近数据 (.+)$/, 'Read only · latest data $1'],
   [/^(\d+) 项阻塞$/, '$1 blockers'],
+  [/^核心服务可用，但 (?:币安|Binance)、Hyperliquid 的实时开仓条件受阻$/, 'Core services are available, but live entry requirements are blocked for Binance and Hyperliquid'],
+  [/^(\d+) 个默认账户范围共有 (\d+) 项实时条件未通过；请进入风险控制逐项查看原因、负责人和下一步。通过检查的范围仍需逐笔复核；自动加仓保持关闭。$/, '$1 default-account scopes have $2 failed live requirements. Open Risk controls for the reason, owner, and next step. Passing scopes still require per-order checks; automatic scaling remains disabled.'],
+  [/^(\d+) 个生产范围受阻$/, '$1 production scopes blocked'],
+  [/^风险政策正常，但 (?:币安|Binance)、Hyperliquid 的实时安全条件未通过；通过检查的范围仍需逐笔复核。自动加仓已关闭。$/, 'The risk policy is normal, but live safety requirements failed for Binance and Hyperliquid. Passing scopes still require per-order checks. Automatic scaling is disabled.'],
+  [/^(\d+) 项实时条件待处理；查看风险控制了解精确原因$/, '$1 live requirements need attention; open Risk controls for exact reasons'],
+  [/^(?:币安|Binance) (\d+) 个合约；Hyperliquid (\d+) 个合约，其中 HIP-3 (\d+) 个。$/, 'Binance: $1 instruments; Hyperliquid: $2 instruments, including $3 HIP-3 markets.'],
+  [/^最近成功 (.+)$/, 'Latest success $1'],
+  [/^(Binance|Hyperliquid)：数据已过期$/, '$1: data stale'],
+  [/^Vault：尚未同步$/, 'Vault: not synchronized'],
+  [/^(\d+) 小时前更新 · 当前有效窗口 (\d+) 分钟 · (.+)$/, 'Updated $1 hours ago · current freshness window $2 minutes · $3'],
+  [/^数据来源：(Binance|Hyperliquid|Vault) 只读账户$/, 'Source: $1 read-only account'],
+  [/^尚无有效时间$/, 'No valid timestamp'],
+  [/^Vault：尚未同步；(?:币安|Binance)：数据已过期（最后记录 (.+)）；Hyperliquid：数据已过期（最后记录 (.+)）。影响：当前三方总净值不计算，但其他有效单线继续保留。$/, 'Vault is not synchronized; Binance data is stale (last record $1); Hyperliquid data is stale (last record $2). Impact: the combined total is not calculated, while other valid series remain visible.'],
+  [/^最近 (\d+) 小时 · (.+) 至 (.+) · (\d+) 处断档未连线$/, 'Last $1 hours · $2 to $3 · $4 gaps left unconnected'],
+  [/^断档按实际采样节奏的 (\d+) 倍判定（至少 (\d+) 秒）；纵轴至少保留 (.+) 观察范围$/, 'A gap is detected at $1× the observed sampling interval (minimum $2 seconds); the y-axis keeps at least a $3 viewing range'],
+  [/^(Binance|Hyperliquid) \$(.+) · (Binance|Hyperliquid)：数据已过期 · (.+)$/, '$1 $$$2 · $3: data stale · $4'],
+  [/^\$(.+) · (Binance|Hyperliquid)：数据已过期 · (.+)$/, '$$$1 · $2: data stale · $3'],
+  [/^在途 \/ 占用 (.+)$/, 'In transit / reserved $1'],
+  [/^三方汇总 等待数据$/, 'Combined total · Waiting for data'],
+  [/^币安、Hyperliquid、Vault 和三方汇总四条 USD 资金趋势$/, 'Four USD capital series: Binance, Hyperliquid, Vault, and Combined total'],
+  [/^Hyperliquid 最新 ([^；]+)；图中最大单次变化为 (Binance|Hyperliquid) ([^，]+)，未达到 (.+) 异常阈值$/, 'Hyperliquid latest $1; the largest plotted change is $2 $3, below the $4 alert threshold'],
+  [/^(Binance|Hyperliquid)：数据已过期；不计入当前净值$/, '$1: data stale; excluded from current net worth'],
   [/^系统约每 (\d+) 秒读取一次完整账户；新出现的仓位和委托会自动纳入，最近成交与资金费同步保存。$/, 'The system reads the complete account about every $1 seconds. New positions and orders are included automatically, with recent fills and funding saved together.'],
   [/^(.+) · 向上突破$/, '$1 · breakout higher'],
   [/^(.+) · 向下突破$/, '$1 · breakout lower'],
@@ -419,8 +481,8 @@ function translateEnglishText(value) {
   const trimmed = source.trim();
   if (!trimmed) return source;
   const canonical = trimmed
-    .replace(/\bPERPTAPE\b/gi, '突破榜单')
-    .replace(/\bHYPERLIQUID\b/g, '链上永续')
+    .replace(/\bPERPTAPE\b/g, 'Perptape')
+    .replace(/\bHYPERLIQUID\b/g, 'Hyperliquid')
     .replace(/\bBINANCE\b/g, '币安')
     .replace(/([\u3400-\u9fff])\s+突破榜单/g, '$1突破榜单')
     .replace(/突破榜单\s+([\u3400-\u9fff])/g, '突破榜单$1');
@@ -433,8 +495,11 @@ function translateEnglishText(value) {
   if (!translated) {
     translated = canonical;
     ENGLISH_TERMS.forEach(([from, to]) => { translated = translated.split(from).join(` ${to} `); });
-    translated = translated.replace(/[\u3400-\u9fff]+/g, ' details ');
     translated = translated.replace(/\s+([,.;:!?])/g, '$1').replace(/\s{2,}/g, ' ').trim();
+    if (/[\u3400-\u9fff]/.test(translated)) translated = canonical;
+  }
+  if (!/[\u3400-\u9fff]/.test(translated)) {
+    translated = translated.replaceAll('，', ',').replaceAll('；', ';').replaceAll('：', ':').replaceAll('。', '.').replaceAll('（', '(').replaceAll('）', ')');
   }
   return source.replace(trimmed, translated);
 }
@@ -443,21 +508,36 @@ function translateChineseText(value) {
   return String(value ?? '')
     .replaceAll('Trading Console', '交易控制台')
     .replaceAll('PostgreSQL', '业务数据库')
-    .replaceAll('HYPERLIQUID', '链上永续')
+    .replaceAll('HYPERLIQUID', 'Hyperliquid')
     .replaceAll('BINANCE', '币安')
     .replaceAll('Binance', '币安')
-    .replaceAll('PERPTAPE', '突破榜单')
-    .replaceAll('Perptape', '突破榜单')
-    .replaceAll('Telegram', '消息通知')
+    .replaceAll('PERPTAPE', 'Perptape')
     .replaceAll('Passkey', '通行密钥')
-    .replaceAll('Arbitrum', '阿比特鲁姆')
     .replaceAll('Ethereum', '以太坊')
-    .replaceAll('BNB Chain', '币安智能链')
+    .replaceAll('授权自有 Arbitrum 地址', '授权的自有 Arbitrum 钱包地址')
+    .replaceAll('已授权 Arbitrum 自有地址', '已授权的自有 Arbitrum 钱包地址')
+    .replaceAll('已授权自有地址', '已授权的自有钱包地址')
+    .replaceAll('Hyperliquid Bridge 地址', 'Hyperliquid 充值桥地址（Bridge）')
+    .replaceAll('Safe Allowance Module 的 delegate 额度', 'Safe 额度模块（Allowance Module）的委托额度')
+    .replaceAll('Safe Smart Account 与 delegate 地址', 'Safe Smart Account 与委托地址（delegate）')
+    .replaceAll('Safe Spending Limit delegate', 'Safe 委托地址（delegate）')
+    .replaceAll('Safe Smart Account 和 delegate', 'Safe Smart Account 和委托地址（delegate）')
+    .replaceAll('当前 USDC 额度、余额、重置周期与 nonce', '当前 USDC 额度、余额、重置周期与交易序号（nonce）')
+    .replaceAll('人控 delegate 钱包', '人工控制的委托钱包（delegate）')
+    .replaceAll('独立 delegate 钱包', '独立的委托钱包（delegate）')
+    .replaceAll('API secret', 'API 密钥')
+    .replaceAll('Agent 不支持', '系统不会代为签名或广播')
+    .replaceAll('缺少官方金库或 Agent 范围', '缺少官方金库或 NoTilt Agent 授权范围')
+    .replaceAll('Freqtrade worker', 'Freqtrade 执行进程')
+    .replaceAll(' worker', ' 执行进程')
+    .replaceAll('dry-run', '仿真模式')
+    .replaceAll('Web 审核', '网页端审核')
     .replace(/([\u3400-\u9fff])\s+突破榜单/g, '$1突破榜单')
     .replace(/突破榜单\s+([\u3400-\u9fff])/g, '突破榜单$1')
     .replace(/\bLIVE\b/g, '实盘')
     .replace(/\bSHADOW\b/g, '模拟')
-    .replace(/\bTESTNET\b/g, '测试网');
+    .replace(/\bTESTNET\b/g, '测试网')
+    .replace(/([\u3400-\u9fff）])\s+([\u3400-\u9fff（])/g, '$1$2');
 }
 
 const localizedText = (value) => currentLanguage === 'en' ? translateEnglishText(value) : translateChineseText(value);
@@ -812,7 +892,7 @@ const accessRoleCatalog = [
   {role:'REVIEWER', label:'独立审核', copy:'独立审核冻结提案与风险恢复申请；不能发起提案、操作交易或查看资金。'},
   {role:'OPERATOR', label:'交易运维', copy:'运行风险、授权、订单、减仓、对账和交易所同步；不自动获得资金权限。'},
   {role:'TREASURY_ADMIN', label:'资金管理', copy:'查看与管理资金数据、划转和资金对账；与交易运维职责分离。'},
-  {role:'SYSTEM_ADMIN', label:'超级管理员', copy:'管理所有成员并可访问资金中心；所有资金动作仍受实时校验、最终确认和 Gate 约束。'},
+  {role:'SYSTEM_ADMIN', label:'超级管理员', copy:'管理所有成员并可访问资金中心；所有资金动作仍受实时校验、最终确认和安全开关约束。'},
 ];
 const loginDestination = () => {
   const destination = `${location.pathname}${location.search}`;
@@ -1338,7 +1418,7 @@ async function renderHome() {
   if (exceptions.length) priorityCards.push(`<a class="home-priority danger" href="/campaigns/alerts" data-link><span class="priority-number">1</span><div><small>严重运行告警</small><b>${exceptions.length} 项运行问题</b><p>影响 ${exceptionCampaigns.size} 个交易任务；${canOperate ? '结果未知、保护不足和对账差异不会被自动忽略。' : '当前身份只能查看，处理与风险动作由交易运维人员负责。'}</p></div><strong>查看运行告警 →</strong></a>`);
   if (riskLimited) priorityCards.push(`<a class="home-priority attention" href="/risk" data-link><span class="priority-number">${priorityCards.length + 1}</span><div><small>新增风险受限</small><b>${escapeHtml(riskControlStatusLabel(riskControl.policy.system_state))}</b><p>${riskControl.restore_conditions.blockers.length ? `${riskControl.restore_conditions.blockers.length} 项恢复条件尚未满足。` : '恢复条件已满足，仍需完成受控审核与执行。'} 减仓和退出不受阻断。</p></div><strong>查看恢复条件 →</strong></a>`);
   if (actionableReviews.length) priorityCards.push(`<a class="home-priority attention" href="/reviews" data-link><span class="priority-number">${priorityCards.length + 1}</span><div><small>独立审核队列</small><b>${actionableReviews.length} 笔非本人提案等待审核</b><p>${expiringReviews.length ? `${expiringReviews.length} 笔将在 30 分钟内到期。` : `最早一笔到期于 ${fmtDate(nextReview.expires_at)}。`} 系统机会 ${systemReviewCount} 笔，人工判断 ${manualReviewCount} 笔。</p></div><strong>打开审核队列 →</strong></a>`);
-  if (approvedAwaitingLaunch.length) priorityCards.push(`<a class="home-priority attention" href="/proposals" data-link><span class="priority-number">${priorityCards.length + 1}</span><div><small>交易待启动</small><b>${approvedAwaitingLaunch.length} 笔已批准提案尚未形成交易任务</b><p>先重新运行实时风险检查，再签发短期授权；缺少事实或 Gate 未满足时仍会阻断。</p></div><strong>查看当前提案 →</strong></a>`);
+  if (approvedAwaitingLaunch.length) priorityCards.push(`<a class="home-priority attention" href="/proposals" data-link><span class="priority-number">${priorityCards.length + 1}</span><div><small>交易待启动</small><b>${approvedAwaitingLaunch.length} 笔已批准提案尚未形成交易任务</b><p>先重新运行实时风险检查，再签发短期授权；缺少事实或安全开关未满足时仍会阻断。</p></div><strong>查看当前提案 →</strong></a>`);
   if (activeCampaigns.length) priorityCards.push(`<a class="home-priority" href="/campaigns" data-link><span class="priority-number">${priorityCards.length + 1}</span><div><small>持续观察</small><b>${activeCampaigns.length} 个运行中交易任务</b><p>${escapeHtml(activeCampaigns.slice(0, 3).map(item => `${item.venue} · ${fmtDirection(item.direction)} · ${fmtStatus(item.status)}`).join('；'))}</p></div><strong>查看运行中任务 →</strong></a>`);
   if (!priorityCards.length) priorityCards.push(`<a class="home-priority clear" href="/opportunities" data-link><span class="priority-number">✓</span><div><small>当前无待办</small><b>继续观察，不必为了操作而操作</b><p>${canPropose ? '机会只是候选；只有形成清楚交易判断时才创建提案。' : '当前身份可以观察机会，但不能创建提案；如有判断请交由提案发起人保存参数。'}</p></div><strong>查看机会 →</strong></a>`);
   main.innerHTML = `<section class="page home-page"><article class="home-status tone-${safety.tone}"><div><p class="eyebrow">${safety.eyebrow}</p><h1>${escapeHtml(safety.title)}</h1><p>${escapeHtml(safety.copy)}</p></div><a class="primary" href="${safety.href}" data-link>${escapeHtml(safety.action)}</a></article>
@@ -2386,7 +2466,7 @@ async function renderSystemStatus() {
     : policy.system_state !== 'NORMAL'
       ? `风险政策：${riskControlStatusLabel(policy.system_state)}；自动加仓：${riskControlStatusLabel(gate.status)}。`
       : !restoreConditions.ready
-        ? `风险政策正常，但${blockedRiskScopeLabels.length ? `${blockedRiskScopeLabels.join('、')}的` : ''}实时安全条件未通过；通过检查的范围仍需逐笔复核。自动加仓${riskControlStatusLabel(gate.status)}。`
+        ? `风险政策正常，但${blockedRiskScopeLabels.length ? ` ${blockedRiskScopeLabels.join('、')} 的` : ''}实时安全条件未通过；通过检查的范围仍需逐笔复核。自动加仓${riskControlStatusLabel(gate.status)}。`
         : `实时安全条件全部通过；每笔开仓仍由服务端重新检查。自动加仓${riskControlStatusLabel(gate.status)}。`;
   const perptape = runtime?.data?.external_boundaries?.perptape || {configured:false,status:'NOT_CONFIGURED',candidate_count:0,last_fetched_at:null,contract_version:'—'};
   const notilt = runtime?.data?.external_boundaries?.notilt || {enabled:false,gateway_available:false,configured_chains:[]};
@@ -2395,13 +2475,13 @@ async function renderSystemStatus() {
   const telegramHealthy = telegram.enabled && telegram.network_configured && telegramPolling.state === 'HEALTHY';
   const telegramFailureCopy = ({
     TELEGRAM_POLLING_CONFLICT:'另一个 Bot 实例正在使用同一长轮询；只保留一个生产轮询进程后重试。',
-    TELEGRAM_BOT_API_CONFLICT:'Bot API 报告会话冲突；检查是否存在另一轮询或 webhook 实例。',
-    TELEGRAM_AUTH_FAILED:'Bot API 拒绝当前凭据；由系统管理员核对 Bot 配置。',
-    TELEGRAM_RATE_LIMITED:'Bot API 正在限流；系统会按有界退避自动重试。',
-    TELEGRAM_NETWORK_UNAVAILABLE:'当前无法连接 Bot API；Web 审核队列仍可使用。',
-    TELEGRAM_RESPONSE_INVALID:'Bot API 返回了无法采信的响应；机器人动作保持关闭。',
-    TELEGRAM_BOT_API_REJECTED:'Bot API 拒绝轮询请求；由系统管理员检查机器人运行实例。',
-  })[telegramPolling.last_error_code] || '机器人尚未完成一次成功轮询；Web 审核队列仍是权威入口。';
+    TELEGRAM_BOT_API_CONFLICT:'Telegram 机器人接口报告会话冲突；检查是否存在另一轮询或 webhook 实例。',
+    TELEGRAM_AUTH_FAILED:'Telegram 机器人接口拒绝当前凭据；由系统管理员核对机器人配置。',
+    TELEGRAM_RATE_LIMITED:'Telegram 机器人接口正在限流；系统会按有界退避自动重试。',
+    TELEGRAM_NETWORK_UNAVAILABLE:'当前无法连接 Telegram 机器人接口；网页端审核队列仍可使用。',
+    TELEGRAM_RESPONSE_INVALID:'Telegram 机器人接口返回了无法采信的响应；机器人动作保持关闭。',
+    TELEGRAM_BOT_API_REJECTED:'Telegram 机器人接口拒绝轮询请求；由系统管理员检查机器人运行实例。',
+  })[telegramPolling.last_error_code] || '机器人尚未完成一次成功轮询；网页端审核队列仍是权威入口。';
   const telegramStatus = telegramHealthy
     ? '通知可用'
     : telegramPolling.state === 'DEGRADED'
@@ -2434,10 +2514,10 @@ async function renderSystemStatus() {
   const executionCopy = workersReady
     ? `Binance ${Number(executionWorkers.find(worker => worker.venue === 'BINANCE')?.active_pair_count || 0)} 个合约；Hyperliquid ${Number(hyperliquidWorker?.active_pair_count || 0)} 个合约，其中 HIP-3 ${Number(hyperliquidWorker?.hip3_pair_count || 0)} 个。`
     : workersDisabled
-      ? '当前只读控制台未启动 Binance 与 Hyperliquid 的 Freqtrade worker；不会把“未启动”误报为 worker 故障。'
+      ? '当前只读控制台未启动币安与 Hyperliquid 的 Freqtrade 执行进程；不会把“未启动”误报为进程故障。'
     : freqtrade?.error
       ? friendlyApiError(freqtrade.error)
-      : 'Freqtrade worker 尚未全部通过身份、期货模式、合约目录和 dry-run 检查。';
+      : 'Freqtrade 执行进程尚未全部通过身份、期货模式、合约目录和仿真模式检查。';
   const tradingConnectionsReady = Boolean(connections.BINANCE?.available && connections.HYPERLIQUID?.available);
   const activeMonitoring = campaigns.length > 0;
   const overallTone = !health.ready || !controlAvailable ? 'danger' : exceptions.length || !entryOpen || !perptapeAvailable || !workersReady || !tradingConnectionsReady || !telegramHealthy ? 'attention' : activeMonitoring ? 'success' : 'neutral';
@@ -2453,8 +2533,8 @@ async function renderSystemStatus() {
     systemHealthCard({title:'核心服务', status:health.ready ? '服务可用' : '服务不可用', tone:health.ready ? 'success' : 'danger', copy:health.ready ? '业务数据库和交易服务运行正常。' : '核心服务检查失败；不能把缺失响应当成正常。', meta:'数据缺失时自动阻止交易'}),
     systemHealthCard({title:'开仓与加仓', status:entryStatus, tone:entryOpen ? (addOpen ? 'success' : 'attention') : 'danger', copy:entryCopy, meta:restoreConditions.ready ? '每笔新增风险仍会重新检查账户、交易所与授权' : `${restoreConditions.blockers?.length || blockedRiskChecks.length} 项实时条件待处理；查看风险控制了解精确原因`}),
     ...monitoringCards,
-    systemHealthCard({title:'交易执行底座', status:workersReady ? 'dry-run worker 已连接' : workersDisabled ? 'Freqtrade worker 未启动' : 'Freqtrade worker 检查未通过', tone:workersReady || workersDisabled ? 'attention' : 'danger', copy:executionCopy, meta:workersReady ? '仅验证执行适配与合约目录；不会发送真实订单' : workersDisabled ? `需配置 worker 控制凭据后以 dry-run 启动；LIVE_ORDER_SEND 保持关闭${configuredHip3Dexes.length ? `；HIP-3 范围 ${configuredHip3Dexes.join('、')}` : ''}` : '身份、模式或合约目录不一致时禁止发送'}),
-    systemHealthCard({title:'审核通知', status:telegramStatus, tone:telegramHealthy ? 'success' : 'attention', copy:telegramHealthy ? '私聊 Bot 最近一次长轮询成功；批准和拒绝仍需二次确认并写入统一审计。' : telegramFailureCopy, meta:telegramHealthy ? `最近成功 ${fmtDate(telegramPolling.last_success_at)}` : 'Web 审核队列保持可用；资金、订单、风险开关与权限操作不对 Bot 开放'}),
+    systemHealthCard({title:'交易执行底座', status:workersReady ? '仿真执行进程已连接' : workersDisabled ? 'Freqtrade 执行进程未启动' : 'Freqtrade 执行进程检查未通过', tone:workersReady || workersDisabled ? 'attention' : 'danger', copy:executionCopy, meta:workersReady ? '仅验证执行适配与合约目录；不会发送真实订单' : workersDisabled ? `需配置执行进程控制凭据后以仿真模式启动；LIVE_ORDER_SEND 保持关闭${configuredHip3Dexes.length ? `；HIP-3 范围 ${configuredHip3Dexes.join('、')}` : ''}` : '身份、模式或合约目录不一致时禁止发送'}),
+    systemHealthCard({title:'Telegram 审核通知', status:telegramStatus, tone:telegramHealthy ? 'success' : 'attention', copy:telegramHealthy ? 'Telegram 私聊机器人最近一次长轮询成功；批准和拒绝仍需二次确认并写入统一审计。' : telegramFailureCopy, meta:telegramHealthy ? `最近成功 ${fmtDate(telegramPolling.last_success_at)}` : '网页端审核队列保持可用；资金、订单、风险开关与权限操作不对 Telegram 机器人开放'}),
     systemHealthCard({title:'Perptape 机会源', status:perptapeStatus, tone:perptapeTone, copy:perptapeAvailable ? `已读取 ${Number(opportunityHealth?.data?.length ?? perptape.candidate_count ?? 0)} 个候选，可用于机会筛选和提案。` : perptape.configured ? 'Perptape 已配置，但最近数据尚未形成可用连接结论。现有交易任务不受影响，新的外部机会不可用。' : 'Perptape 尚未配置；人工提案仍可使用。', meta:`只读 · 最近数据 ${fmtDate(perptape.last_fetched_at)}`}),
   ].join('');
   const connectionLabels = {
@@ -2504,11 +2584,11 @@ async function renderSystemStatus() {
     ? '只读控制台可用，但 Freqtrade 执行底座尚未就绪'
     : 'Freqtrade 执行底座已就绪，但交易所只读连接受限';
   const executionVerdictCopy = !workersReady
-    ? `${workersDisabled ? 'Freqtrade worker 尚未启动' : 'Freqtrade worker 尚未通过检查'}；${!tradingConnectionsReady ? '至少一个交易所只读连接也受限' : '交易所只读连接正常'}。系统不会把页面可访问误报为可执行交易。`
-    : '两个 Freqtrade worker 已通过 dry-run 检查；至少一个交易所只读账户连接当前受限。真实下单继续关闭，系统不会把执行底座可用误报为生产交易就绪。';
+    ? `${workersDisabled ? 'Freqtrade 执行进程尚未启动' : 'Freqtrade 执行进程尚未通过检查'}；${!tradingConnectionsReady ? '至少一个交易所只读连接也受限' : '交易所只读连接正常'}。系统不会把页面可访问误报为可执行交易。`
+    : '两个 Freqtrade 执行进程已通过仿真模式检查；至少一个交易所只读账户连接当前受限。真实下单继续关闭，系统不会把执行底座可用误报为生产交易就绪。';
   const riskVerdictTitle = policy.system_state === 'NORMAL'
     ? blockedRiskScopeLabels.length
-      ? `核心服务可用，但${blockedRiskScopeLabels.join('、')}的实时开仓条件受阻`
+      ? `核心服务可用，但 ${blockedRiskScopeLabels.join('、')} 的实时开仓条件受阻`
       : '核心服务可用，但实时开仓条件未全部通过'
     : `核心服务可用，但风险政策为${riskControlStatusLabel(policy.system_state)}`;
   const blockedRiskReasonCount = blockedRiskChecks.reduce((count, check) => count + new Set((check.reason || []).filter(reason => reason !== 'CURRENT')).size, 0);
@@ -2516,7 +2596,7 @@ async function renderSystemStatus() {
     ? `${blockedRiskChecks.length} 个默认账户范围共有 ${blockedRiskReasonCount} 项实时条件未通过；请进入风险控制逐项查看原因、负责人和下一步。通过检查的范围仍需逐笔复核；自动加仓保持关闭。`
     : '风险政策或实时生产事实尚未满足新增风险条件；每笔请求都会继续由服务端拒绝或重新校验。';
   const verdictTitle = !health.ready ? '核心服务未通过就绪检查' : !controlAvailable ? '核心服务可用，但风险政策未配置' : exceptions.length ? '核心服务可用，但存在风险阻断' : !entryOpen ? riskVerdictTitle : !workersReady || !tradingConnectionsReady ? executionVerdictTitle : !telegramHealthy ? '交易管理可用，但 Telegram 审核通知受限' : !perptapeAvailable ? '交易管理可用，但 Perptape 机会源受限' : !canViewOperations ? '核心服务与可见连接状态正常' : activeMonitoring ? '交易系统正在正常监控' : '核心服务可用，当前无运行中交易任务';
-  const verdictCopy = !health.ready ? '请先恢复数据库与服务状态，不要继续依赖旧数据。' : !controlAvailable ? `${friendlyApiError(control.error)} 新增风险保持关闭。` : exceptions.length ? `发现 ${exceptions.length} 项安全异常；受影响的新增风险会保持关闭。` : !entryOpen ? riskVerdictCopy : !workersReady || !tradingConnectionsReady ? executionVerdictCopy : !telegramHealthy ? `${telegramFailureCopy} 不影响 Web 审核，也不会放宽任何审核或交易边界。` : !perptapeAvailable ? `${perptapeStatus}。现有交易任务仍可管理，但新的 Perptape 机会暂不可用。` : !canViewOperations ? '当前身份未读取交易任务、保护和对账详情；页面仅对已授权的系统事实给出结论。' : activeMonitoring ? '运行中的交易任务没有检测到保护、敞口或对账阻断。' : '当前没有需要监控的交易任务；系统不会把“无监控对象”误报为“监控正常”。';
+  const verdictCopy = !health.ready ? '请先恢复数据库与服务状态，不要继续依赖旧数据。' : !controlAvailable ? `${friendlyApiError(control.error)} 新增风险保持关闭。` : exceptions.length ? `发现 ${exceptions.length} 项安全异常；受影响的新增风险会保持关闭。` : !entryOpen ? riskVerdictCopy : !workersReady || !tradingConnectionsReady ? executionVerdictCopy : !telegramHealthy ? `${telegramFailureCopy} 不影响网页端审核，也不会放宽任何审核或交易边界。` : !perptapeAvailable ? `${perptapeStatus}。现有交易任务仍可管理，但新的 Perptape 机会暂不可用。` : !canViewOperations ? '当前身份未读取交易任务、保护和对账详情；页面仅对已授权的系统事实给出结论。' : activeMonitoring ? '运行中的交易任务没有检测到保护、敞口或对账阻断。' : '当前没有需要监控的交易任务；系统不会把“无监控对象”误报为“监控正常”。';
   const verdictAction = exceptions.length && canViewOperations
     ? '<a class="primary" href="/campaigns/alerts" data-link>查看运行告警</a>'
     : !controlAvailable || !entryOpen
@@ -2526,7 +2606,7 @@ async function renderSystemStatus() {
         : !workersReady || !tradingConnectionsReady
           ? '<span class="status-pill">由系统管理员或交易运维人员处理</span>'
           : !telegramHealthy
-            ? '<a class="secondary" href="/reviews" data-link>使用 Web 审核</a>'
+            ? '<a class="secondary" href="/reviews" data-link>使用网页端审核</a>'
             : !perptapeAvailable && hasCapability('opportunity.view')
               ? '<a class="secondary" href="/opportunities" data-link>查看 Perptape</a>'
               : '<span class="status-pill status-APPROVED">无需立即动作</span>';
@@ -2898,13 +2978,13 @@ function formatDirectCapitalBlocker(code) {
     CAPITAL_AMOUNT_LIMIT_EXCEEDED:'金额超过已配置上限',
     CAPITAL_FEE_LIMIT_MISSING:'未配置最大费用上限',
     CAPITAL_MIN_RECEIVED_INVALID:'扣除最大费用后到账金额无效',
-    CAPITAL_TRANSFER_GATE_DISABLED:'真实资金划转 Gate 当前关闭',
+    CAPITAL_TRANSFER_GATE_DISABLED:'真实资金划转安全开关当前关闭',
     NOTILT_RELEASE_ADAPTER_UNAVAILABLE:'资金库释放适配器尚未启用',
     HYPERLIQUID_DEPOSIT_ADAPTER_UNAVAILABLE:'Hyperliquid 入金适配器尚未启用',
     HYPERLIQUID_WITHDRAWAL_ADAPTER_UNAVAILABLE:'Hyperliquid 提现适配器尚未启用',
     BINANCE_RESTRICTED_WITHDRAWAL_ADAPTER_UNAVAILABLE:'币安受限提现 API 尚未配置',
     SAFE_ADDRESS_MISSING:'未配置 Safe Smart Account',
-    SAFE_DELEGATE_ADDRESS_MISSING:'未配置 Safe Spending Limit delegate',
+    SAFE_DELEGATE_ADDRESS_MISSING:'未配置 Safe 委托地址（delegate）',
     SAFE_SPENDING_LIMIT_NOT_CONFIGURED:'Safe 只读 RPC 或 Spending Limit 范围未配置',
     SAFE_ALLOWANCE_PREFLIGHT_REQUIRED:'必须读取 Safe 当前额度、余额、重置周期与 nonce',
   }[code] || code);
@@ -2970,7 +3050,8 @@ async function renderCapitalCenter() {
     const summary = !latestPoint
       ? (fallbackPoint ? `${CAPITAL_CHART_WINDOW_HOURS} 小时无数据 · 最后记录 ${fmtDate(fallbackPoint.time)}` : '等待数据')
       : `${formatCapitalUsd(latestPoint.value)} · ${series.source === 'TOTAL' ? (current ? '当前汇总' : '历史汇总') : presentation.state} · ${fmtDate(latestPoint.time)}`;
-    return `<label class="capital-trend-toggle trend-${escapeHtml(series.source)} ${latestPoint ? '' : 'is-missing'}"><input type="checkbox" data-capital-trend="${escapeHtml(series.source)}" ${latestPoint && capitalTrendVisibility[series.source] ? 'checked' : ''} ${latestPoint ? '' : 'disabled'}><i aria-hidden="true"></i><span><b translate="no">${escapeHtml(series.label)}</b><small>${escapeHtml(summary)}</small></span></label>`;
+    const displayLabel = currentLanguage === 'en' && series.source === 'TOTAL' ? 'Combined total' : series.label;
+    return `<label class="capital-trend-toggle trend-${escapeHtml(series.source)} ${latestPoint ? '' : 'is-missing'}"><input type="checkbox" data-capital-trend="${escapeHtml(series.source)}" ${latestPoint && capitalTrendVisibility[series.source] ? 'checked' : ''} ${latestPoint ? '' : 'disabled'}><i aria-hidden="true"></i><span><b translate="no">${escapeHtml(displayLabel)}</b><small>${escapeHtml(summary)}</small></span></label>`;
   }).join('');
   const totalSeries = allHistorySeries.find(series => series.source === 'TOTAL');
   const latestCompleteTotal = totalSeries?.points.at(-1) || null;
@@ -3284,7 +3365,7 @@ function bindCapitalActions(historySeries = []) {
     const pathLabel = pathDefinition ? `${pathDefinition.from} → ${pathDefinition.to}` : path;
     directCapitalDialog?.close();
     const providerLabel = treasuryProvider === 'SAFE_SPENDING_LIMIT' ? 'Safe Spending Limits' : 'NoTilt Vault';
-    const confirmed = await confirmAction({title:'最终确认资金路径？', message:`使用 ${providerLabel} 检查 ${pathLabel}，金额 ${amount} USDC。系统会重新校验地址、网络、额度和 Gate；任何缺失都会阻断，不会发送资金。`, confirmLabel:'确认并执行安全检查'});
+    const confirmed = await confirmAction({title:'最终确认资金路径？', message:`使用 ${providerLabel} 检查 ${pathLabel}，金额 ${amount} USDC。系统会重新校验地址、网络、额度和安全开关；任何缺失都会阻断，不会发送资金。`, confirmLabel:'确认并执行安全检查'});
     if (!confirmed) { directCapitalDialog?.showModal(); return; }
     const button = currentForm.querySelector('button[type="submit"], button:not([type])');
     await withPending(button, '正在安全校验…', async () => {
@@ -3378,8 +3459,8 @@ async function renderVenueFacts() {
       : `核心市场${status.hip3_available ? ` + HIP-3${hip3Dexes.length ? `（${hip3Dexes.join('、')}）` : ''}` : ''}`;
   const executionDetail = status.execution_backend === 'FREQTRADE'
     ? status.worker_configured
-      ? (currentLanguage === 'en' ? 'Execution is handled by Freqtrade workers; this page cannot place orders' : '执行由 Freqtrade worker 负责；本页不能下单')
-      : (currentLanguage === 'en' ? 'Freqtrade is the execution backend, but no worker is connected; this page cannot place orders' : '执行底座为 Freqtrade；控制面尚未接入 worker，本页不能下单')
+      ? (currentLanguage === 'en' ? 'Execution is handled by Freqtrade workers; this page cannot place orders' : '执行由 Freqtrade 执行进程负责；本页不能下单')
+      : (currentLanguage === 'en' ? 'Freqtrade is the execution backend, but no worker is connected; this page cannot place orders' : '执行底座为 Freqtrade；控制面尚未接入执行进程，本页不能下单')
     : (currentLanguage === 'en' ? 'Legacy direct execution is isolated from this read-only page' : '旧直连执行已隔离于当前只读页面');
   const syncInterval = Number(status.automatic_sync_interval_seconds || 0);
   const automaticSyncCopyLocalized = status.automatic_sync_enabled && connected
@@ -3480,7 +3561,7 @@ function memberScope(member) {
 }
 
 function venueScopeOptions(selected = '') {
-  return `<option value="" ${selected ? '' : 'selected'}>全部交易所</option><option value="BINANCE" ${selected === 'BINANCE' ? 'selected' : ''}>币安</option><option value="HYPERLIQUID" ${selected === 'HYPERLIQUID' ? 'selected' : ''}>链上永续</option>`;
+  return `<option value="" ${selected ? '' : 'selected'}>全部交易所</option><option value="BINANCE" ${selected === 'BINANCE' ? 'selected' : ''}>币安</option><option value="HYPERLIQUID" ${selected === 'HYPERLIQUID' ? 'selected' : ''}>Hyperliquid</option>`;
 }
 
 async function renderAccessManagement() {
@@ -3490,7 +3571,7 @@ async function renderAccessManagement() {
     const roles = member.roles.map(item => item.role);
     const scope = memberScope(member);
     const roleTags = roles.map(role => `<span>${escapeHtml(fmtRole(role))}</span>`).join('');
-    const venueSummary = ({BINANCE:'币安',HYPERLIQUID:'链上永续'}[scope.venue] || scope.venue);
+    const venueSummary = ({BINANCE:'币安',HYPERLIQUID:'Hyperliquid'}[scope.venue] || scope.venue);
     const scopeSummary = scope.mixed ? '多个账户或交易所范围' : `${scope.account || '全部账户'} · ${scope.venue ? venueSummary : '全部交易所'}`;
     return `<details class="member-access-card ${member.active ? '' : 'is-inactive'}"><summary class="member-access-summary"><span class="member-summary-main"><b>${escapeHtml(member.username)}</b><small>${member.identity_bound ? '已绑定生产身份源' : '等待生产身份源绑定'} · ${escapeHtml(scopeSummary)}</small><span class="member-role-tags">${roleTags}</span></span><span class="member-summary-actions"><span class="status-pill ${member.active ? 'status-APPROVED' : ''}">${member.active ? '已启用' : '已停用'}</span><strong>${member.is_current_user ? '查看' : '编辑'}</strong></span></summary><form class="member-access-editor" data-user-access="${member.user_id}">
       ${member.is_current_user ? '<p class="safety-note">这是当前账号。为避免误锁死，必须由另一名系统管理员修改。</p>' : ''}
@@ -3500,7 +3581,7 @@ async function renderAccessManagement() {
       <div class="form-error" role="alert"></div>${member.is_current_user ? '' : '<div class="form-actions"><button class="secondary">保存权限</button></div>'}</form></details>`;
   }).join('');
   main.innerHTML = `<section class="page access-page"><header class="page-head"><div><p class="eyebrow">系统管理 · 权限配置</p><h1>成员权限</h1><p class="lede">按岗位勾选权限，不需要逐个页面配置。一个人可以组合多个岗位，还可以按账户和交易所限制每个用户能够查看和操作的数据。</p></div><span class="status-pill">${members.filter(item => item.active).length} 名启用成员</span></header>
-    <article class="card access-principles"><h2>权限分离原则</h2><div class="access-principle-grid"><p><b>审核与发起分开</b><span>审核人不能审核自己的提案；提案发起人不会自动获得执行权限。</span></p><p><b>交易与资金分开</b><span>交易运维人员看不到资金中心；系统管理员拥有最高管理权限，但资金动作仍受实时校验、最终确认和 Gate 约束。</span></p><p><b>身份与权限分开</b><span>生产环境仍由统一身份登录和通行密钥认证；这里仅管理内部授权，不创建密码。</span></p></div></article>
+    <article class="card access-principles"><h2>权限分离原则</h2><div class="access-principle-grid"><p><b>审核与发起分开</b><span>审核人不能审核自己的提案；提案发起人不会自动获得执行权限。</span></p><p><b>交易与资金分开</b><span>交易运维人员看不到资金中心；系统管理员拥有最高管理权限，但资金动作仍受实时校验、最终确认和安全开关约束。</span></p><p><b>身份与权限分开</b><span>生产环境仍由统一身份登录和通行密钥认证；这里仅管理内部授权，不创建密码。</span></p></div></article>
     <details class="card create-member-panel"><summary><span><b>新增内部成员</b><small>先创建授权记录，再由生产身份服务完成身份绑定</small></span><strong>展开</strong></summary><form id="create-member-form" class="toolbox-content"><div class="field-grid"><label>内部用户名<input name="username" pattern="[A-Za-z0-9._-]+" placeholder="例如 reviewer-li" required></label><label>账户范围<input name="account_scope" placeholder="留空 = 全部账户"></label><label>交易所范围<select name="venue_scope">${venueScopeOptions()}</select></label></div><div class="preset-row"><span>常用模板</span><button type="button" class="text-button" data-role-preset="REVIEWER">只审核</button><button type="button" class="text-button" data-role-preset="PROPOSER">只发起提案</button><button type="button" class="text-button" data-role-preset="OPERATOR">交易运维</button></div><div class="permission-grid">${accessRoleOptions([], 'create')}</div><div class="form-error" role="alert"></div><div class="form-actions"><button class="primary">创建成员</button></div></form></details>
     <div class="section-heading"><div><p class="eyebrow">当前用户</p><h2>现有成员</h2></div><span class="subtle">截止 ${fmtDate(result.as_of)}</span></div><div class="member-access-list">${cards}</div>
   </section>`;
@@ -3612,7 +3693,7 @@ function positionFactForm(item) { return `<form id="position-form" class="action
 
 function protectionFactForm(item) { return `<form id="protection-form" class="action-panel"><h3>确认当前模拟保护</h3><div class="field-grid"><label>保护订单编号<input name="venue_order_id" value="${escapeHtml(item.protection?.venue_order_id || 'shadow-stop')}" required></label><label>保护数量<input name="quantity" type="number" step="any" value="${escapeHtml(formNumber(Math.abs(Number(item.position.quantity))))}" required></label><label>触发价<input name="trigger_price" type="number" step="any" value="${escapeHtml(formNumber(item.protection?.trigger_price))}" required></label><label>覆盖状态<select name="coverage"><option value="full">已知且完整</option><option value="degraded">已知但不足</option><option value="unknown">结果未知</option></select></label></div><button class="primary">确认保护数据</button></form>`; }
 
-function targetForm(item) { return `<form id="target-form" class="action-panel"><h3>设定唯一减仓目标</h3><label>减仓后剩余数量<input name="target_quantity" type="number" step="any" min="0" max="${escapeHtml(Math.abs(Number(item.position.quantity)))}" required></label><label>处理速度<select name="urgency"><option value="NORMAL">常规</option><option value="URGENT" selected>紧急</option><option value="IMMEDIATE">立即</option></select></label><label>原因<input name="reason" value="人工降低当前风险" required></label><label>执行限价（链上永续必填）<input name="limit_price" type="number" step="any" min="0"></label><button class="primary">创建只减仓操作</button><button type="button" class="danger" data-auto-exit>评估失效价并退出</button></form>`; }
+function targetForm(item) { return `<form id="target-form" class="action-panel"><h3>设定唯一减仓目标</h3><label>减仓后剩余数量<input name="target_quantity" type="number" step="any" min="0" max="${escapeHtml(Math.abs(Number(item.position.quantity)))}" required></label><label>处理速度<select name="urgency"><option value="NORMAL">常规</option><option value="URGENT" selected>紧急</option><option value="IMMEDIATE">立即</option></select></label><label>原因<input name="reason" value="人工降低当前风险" required></label><label>执行限价（Hyperliquid 必填）<input name="limit_price" type="number" step="any" min="0"></label><button class="primary">创建只减仓操作</button><button type="button" class="danger" data-auto-exit>评估失效价并退出</button></form>`; }
 
 function managementPanel(item, candidates, candidateError, canOperate, canAddNow, active, protectionReady, reconciliationMatched) {
   const management = item.management || {};
