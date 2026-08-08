@@ -87,6 +87,14 @@ def test_safe_spending_limit_provider_is_selected_audited_and_never_signed(
 
     def executor(payload: dict[str, object]) -> dict[str, object]:
         assert payload["asset"] == "USDC"
+        if payload["operation"] == "read-limit":
+            return {
+                "chainId": 42161,
+                "moduleEnabled": True,
+                "balance": "90000000",
+                "available": "80000000",
+                "blockTimestamp": str(int(now.timestamp())),
+            }
         if payload["operation"] == "prepare-deposit":
             return {
                 "kind": "SAFE_ERC20_DEPOSIT_UNSIGNED_TRANSACTION",
@@ -138,6 +146,19 @@ def test_safe_spending_limit_provider_is_selected_audited_and_never_signed(
             assert configured.status_code == 200, configured.text
             direct_config = configured.json()["data"]["direct_configuration"]
             assert direct_config["treasury_provider"] == "SAFE_SPENDING_LIMIT"
+            net_worth = configured.json()["data"]["net_worth"]
+            assert net_worth["onchain_provider"] == "SAFE_SPENDING_LIMIT"
+            assert net_worth["onchain_probe"] == {
+                "provider": "SAFE_SPENDING_LIMIT",
+                "status": "SUCCESS",
+                "error_code": None,
+            }
+            assert net_worth["vault"] == "90.000000000000000000"
+            assert {
+                item["location_id"]
+                for item in configured.json()["data"]["balances"]
+                if item["location_type"] == "VAULT"
+            } == {"selected-onchain-treasury"}
             assert "0x7777777777777777777777777777777777777777" not in configured.text
 
             await _login(client, "safe-provider-treasury")

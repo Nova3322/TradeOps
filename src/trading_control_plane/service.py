@@ -10213,7 +10213,105 @@ class TradingService:
                     now=now,
                 )
                 fact_ids.append(fact.account_equity_id)
-            return tuple(fact_ids)
+        return tuple(fact_ids)
+
+    def record_safe_spending_snapshot(
+        self,
+        *,
+        actor_id: UUID,
+        safe_address: str,
+        asset: str,
+        balance: Decimal,
+        available_limit: Decimal,
+        module_enabled: bool,
+        observed_at: datetime,
+        now: datetime,
+    ) -> UUID:
+        """Persist one read-only Safe balance as the selected on-chain treasury fact."""
+        if balance < 0 or available_limit < 0:
+            _reject("SAFE_FACT_INVALID", "Safe balance and spending limit cannot be negative")
+        if observed_at > now + MAX_FACT_CLOCK_SKEW:
+            _reject("FACT_TIME_INVALID", "Safe block time cannot be in the future")
+        normalized_asset = asset.upper()
+        if normalized_asset not in USD_STABLE_ASSETS:
+            _reject("SAFE_ASSET_UNSUPPORTED", "Safe treasury snapshot requires a USD asset")
+        with self.database.session_factory.begin() as session:
+            self._require_role(session, actor_id, "capital.fact.record")
+            fact = session.scalar(
+                select(AccountEquity)
+                .where(
+                    AccountEquity.environment == ExecutionEnvironment.LIVE.value,
+                    AccountEquity.account_id == safe_address,
+                    AccountEquity.venue == "VAULT",
+                    AccountEquity.currency == normalized_asset,
+                )
+                .with_for_update()
+            )
+            withdrawable = min(balance, available_limit) if module_enabled else Decimal(0)
+            if fact is None:
+                fact = AccountEquity(
+                    account_id=safe_address,
+                    venue="VAULT",
+                    environment=ExecutionEnvironment.LIVE.value,
+                    equity=balance,
+                    available_balance=balance,
+                    withdrawable_balance=withdrawable,
+                    currency=normalized_asset,
+                    location_type="VAULT",
+                    control_status="READ_ONLY",
+                    deposit_status="READY",
+                    network="ARBITRUM",
+                    address_reference=safe_address,
+                    valuation_currency="USD",
+                    valuation_price=Decimal(1),
+                    valuation_equity=balance,
+                    valuation_observed_at=observed_at,
+                    fact_status=FactStatus.KNOWN.value,
+                    observed_at=observed_at,
+                    updated_at=now,
+                )
+                session.add(fact)
+                session.flush()
+            else:
+                fact.equity = balance
+                fact.available_balance = balance
+                fact.withdrawable_balance = withdrawable
+                fact.location_type = "VAULT"
+                fact.control_status = "READ_ONLY"
+                fact.deposit_status = "READY"
+                fact.network = "ARBITRUM"
+                fact.address_reference = safe_address
+                fact.valuation_currency = "USD"
+                fact.valuation_price = Decimal(1)
+                fact.valuation_equity = balance
+                fact.valuation_observed_at = observed_at
+                fact.fact_status = FactStatus.KNOWN.value
+                fact.observed_at = observed_at
+                fact.updated_at = now
+            observation_exists = session.scalar(
+                select(AccountEquityObservation.observation_id).where(
+                    AccountEquityObservation.account_equity_id == fact.account_equity_id,
+                    AccountEquityObservation.observed_at == observed_at,
+                )
+            )
+            self._record_account_equity_observation(session, fact, recorded_at=now)
+            if observation_exists is None:
+                self._audit(
+                    session,
+                    actor_id=str(actor_id),
+                    event_type="CAPITAL_SAFE_BALANCE_RECORDED",
+                    object_type="AccountEquity",
+                    object_id=fact.account_equity_id,
+                    reason=(
+                        "read-only Safe Spending Limits treasury snapshot; "
+                        f"module_enabled={str(module_enabled).lower()}; "
+                        "signing=false; broadcast=false"
+                    ),
+                    correlation_id=uuid4(),
+                    object_version=1,
+                    now=now,
+                )
+            return fact.account_equity_id
 
     def set_capital_automation_policy(
         self,

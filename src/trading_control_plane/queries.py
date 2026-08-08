@@ -5,7 +5,7 @@ from decimal import Decimal
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import and_, func, or_, select, text, tuple_
+from sqlalchemy import and_, false, func, or_, select, text, tuple_
 
 from trading_control_plane.database import Database
 from trading_control_plane.domain import DomainRejected, PrincipalType, Role
@@ -876,6 +876,8 @@ class TradingQueries:
         user_id: UUID,
         *,
         authoritative_live_accounts: dict[str, str] | None = None,
+        authoritative_live_treasury_account_id: str | None = None,
+        require_authoritative_live_treasury: bool = False,
     ) -> dict[str, Any]:
         with self.database.session_factory() as session:
             now = datetime.now(UTC)
@@ -896,6 +898,17 @@ class TradingQueries:
                 expected = authoritative_accounts.get(venue.upper())
                 return expected is None or expected == account_id
 
+            def is_authoritative_live_treasury(
+                environment: str,
+                location_type: str,
+                account_id: str,
+            ) -> bool:
+                if environment != "LIVE" or location_type != "VAULT":
+                    return True
+                if authoritative_live_treasury_account_id is None:
+                    return not require_authoritative_live_treasury
+                return account_id.lower() == authoritative_live_treasury_account_id.lower()
+
             assignments = session.scalars(
                 select(RoleAssignment).where(RoleAssignment.user_id == user_id)
             ).all()
@@ -912,6 +925,12 @@ class TradingQueries:
                     item.environment,
                     item.location_type,
                     item.venue,
+                    item.account_id,
+                ):
+                    return False
+                if not is_authoritative_live_treasury(
+                    item.environment,
+                    item.location_type,
                     item.account_id,
                 ):
                     return False
@@ -972,6 +991,18 @@ class TradingQueries:
                 observation_query = observation_query.where(
                     or_(*authoritative_history_scopes)
                 )
+            if require_authoritative_live_treasury:
+                observation_query = observation_query.where(
+                    or_(
+                        AccountEquityObservation.location_type != "VAULT",
+                        (
+                            false()
+                            if authoritative_live_treasury_account_id is None
+                            else func.lower(AccountEquityObservation.account_id)
+                            == authoritative_live_treasury_account_id.lower()
+                        ),
+                    )
+                )
             observations = list(
                 reversed(
                     session.scalars(
@@ -1013,6 +1044,12 @@ class TradingQueries:
                     item.environment,
                     item.location_type,
                     item.venue,
+                    item.account_id,
+                ):
+                    continue
+                if not is_authoritative_live_treasury(
+                    item.environment,
+                    item.location_type,
                     item.account_id,
                 ):
                     continue
@@ -1093,7 +1130,11 @@ class TradingQueries:
                         "account_equity_id": str(item.account_equity_id),
                         "environment": item.environment,
                         "location_type": item.location_type,
-                        "location_id": item.account_id,
+                        "location_id": (
+                            "selected-onchain-treasury"
+                            if item.environment == "LIVE" and item.location_type == "VAULT"
+                            else item.account_id
+                        ),
                         "venue": item.venue,
                         "asset": item.currency,
                         "equity": str(item.equity),
@@ -1103,7 +1144,11 @@ class TradingQueries:
                         "control_status": item.control_status,
                         "deposit_status": item.deposit_status,
                         "network": item.network,
-                        "address_reference": item.address_reference,
+                        "address_reference": (
+                            None
+                            if item.environment == "LIVE" and item.location_type == "VAULT"
+                            else item.address_reference
+                        ),
                         "valuation_currency": (
                             "USD"
                             if item.currency.upper() in USD_STABLE_ASSETS
@@ -1146,7 +1191,11 @@ class TradingQueries:
                     {
                         "source": ("VAULT" if item.location_type == "VAULT" else item.venue),
                         "location_type": item.location_type,
-                        "location_id": item.account_id,
+                        "location_id": (
+                            "selected-onchain-treasury"
+                            if item.location_type == "VAULT"
+                            else item.account_id
+                        ),
                         "venue": item.venue,
                         "asset": item.currency,
                         "equity": str(item.equity),

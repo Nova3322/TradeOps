@@ -112,7 +112,7 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
 
     assert response.status_code == 200
     assert "交易控制台" in response.text
-    assert "/assets/app.js?v=130" in response.text
+    assert "/assets/app.js?v=131" in response.text
     assert "/assets/styles.css?v=50" in response.text
     assert 'aria-label="交易控制台首页"' in response.text
     assert '<a href="/" data-link><span>⌂</span>当前任务</a>' in response.text
@@ -195,7 +195,7 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
     assert "function partitionCapitalRecords" in app_javascript.text
     assert "function capitalSourceSlots" in app_javascript.text
     assert "function capitalHistorySeries" in app_javascript.text
-    assert "固定四条线：币安、Hyperliquid、资金库和三方汇总" in app_javascript.text  # noqa: RUF001
+    assert "固定四条线：币安、Hyperliquid、链上金库和三方汇总" in app_javascript.text  # noqa: RUF001
     assert 'class="capital-route-grid"' in app_javascript.text
     assert 'data-open-capital-path="${escapeHtml(path.path)}"' in app_javascript.text
     assert 'id="direct-capital-dialog"' in app_javascript.text
@@ -208,7 +208,9 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
     assert 'name="treasury_provider" value="NOTILT_VAULT"' in app_javascript.text
     assert 'name="treasury_provider" value="SAFE_SPENDING_LIMIT"' in app_javascript.text
     assert "syncTreasuryProviderFields" in app_javascript.text
-    assert "系统只使用该方案创建之后的资金操作" in app_javascript.text
+    assert "系统只使用该金库创建之后的资金操作" in app_javascript.text
+    assert "当前链上金库" in app_javascript.text
+    assert "资金方案" not in app_javascript.text
     assert "data-treasury-provider" in app_javascript.text
     assert "3 项阻断，查看详情" not in app_javascript.text  # noqa: RUF001
     assert "项阻断，查看详情" in app_javascript.text  # noqa: RUF001
@@ -396,7 +398,7 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
 
     service_worker = get(app, "/sw.js")
     assert service_worker.status_code == 200
-    assert "trading-shell-v110" in service_worker.text
+    assert "trading-shell-v111" in service_worker.text
     assert "self.skipWaiting()" in service_worker.text
     assert "self.clients.claim()" in service_worker.text
     assert "await fetch(event.request)" in service_worker.text
@@ -1179,9 +1181,7 @@ def test_capital_web_projection_only_renders_live_records() -> None:
         );
 
         const slots = JSON.parse(vm.runInContext(
-          `JSON.stringify(capitalSourceSlots(records, {
-            chains:[{chain_id:42161, vault_configured:false}],
-          }))`,
+          `JSON.stringify(capitalSourceSlots(records, "SAFE_SPENDING_LIMIT", false))`,
           context,
         ));
         assert.equal(slots.length, 3);
@@ -1191,7 +1191,8 @@ def test_capital_web_projection_only_renders_live_records() -> None:
         assert.equal(slots[2].venue, "VAULT");
         assert.equal(slots[2].usd_equity, null);
         assert.equal(slots[2].fact_status, "MISSING");
-        assert.equal(slots[2].missing_detail, "未配置或未同步");
+        assert.equal(slots[2].source_label, "链上金库 · Safe Spending Limits");
+        assert.equal(slots[2].missing_detail, "链上金库 · Safe Spending Limits 尚未配置");
         assert.equal(slots.some(item => item.marker === "shadow-10000"), false);
 
         const liveInTransit = vm.runInContext(

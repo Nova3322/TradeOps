@@ -636,16 +636,6 @@ def create_app(
 
     def capital_snapshot(user_id: UUID) -> dict[str, Any]:
         direct_settings, saved_config = effective_direct_capital_settings(user_id)
-        snapshot = queries().capital_center(
-            user_id,
-            authoritative_live_accounts=authoritative_live_accounts(),
-        )
-        expected_interval = resolved_settings.runtime_sync_interval_seconds
-        snapshot["net_worth"]["history_expected_interval_seconds"] = expected_interval
-        snapshot["net_worth"]["history_gap_tolerance_seconds"] = max(
-            180,
-            expected_interval * 3,
-        )
         configured_chain_id: int | None
         try:
             configured_chain_id = notilt_chain_id_for_network(
@@ -658,6 +648,79 @@ def create_app(
             if configured_chain_id is None
             else resolved_settings.notilt_vaults.get(configured_chain_id)
         )
+        selected_provider = direct_settings.capital_direct_treasury_provider
+        selected_treasury_account_id = (
+            direct_settings.capital_direct_safe_address
+            if selected_provider == "SAFE_SPENDING_LIMIT"
+            else direct_settings.capital_direct_vault_address or configured_vault
+        )
+        safe_scope_ready = (
+            direct_settings.safe_spending_enabled
+            and direct_settings.safe_spending_arbitrum_rpc_url is not None
+            and direct_settings.capital_direct_safe_address is not None
+            and direct_settings.capital_direct_safe_delegate_address is not None
+        )
+        notilt_scope_ready = (
+            direct_settings.notilt_enabled
+            and direct_settings.notilt_agent_address is not None
+            and selected_treasury_account_id is not None
+        )
+        selected_scope_ready = (
+            safe_scope_ready
+            if selected_provider == "SAFE_SPENDING_LIMIT"
+            else notilt_scope_ready
+        )
+        onchain_probe: dict[str, Any] = {
+            "provider": selected_provider,
+            "status": "NOT_ATTEMPTED" if selected_scope_ready else "BLOCKED",
+            "error_code": (
+                "SAFE_SPENDING_LIMIT_NOT_CONFIGURED"
+                if selected_provider == "SAFE_SPENDING_LIMIT"
+                and not safe_scope_ready
+                else "NOTILT_VAULT_NOT_CONFIGURED"
+                if selected_provider == "NOTILT_VAULT" and not notilt_scope_ready
+                else None
+            ),
+        }
+        if selected_provider == "SAFE_SPENDING_LIMIT" and safe_scope_ready:
+            try:
+                safe_fact = resolved_safe_spending.read_limit(
+                    rpc_url=direct_settings.safe_spending_arbitrum_rpc_url,
+                    safe=direct_settings.capital_direct_safe_address,
+                    delegate=direct_settings.capital_direct_safe_delegate_address,
+                )
+                scale = Decimal(10) ** 6
+                observed_at = datetime.fromtimestamp(int(str(safe_fact["blockTimestamp"])), UTC)
+                service().record_safe_spending_snapshot(
+                    actor_id=user_id,
+                    safe_address=direct_settings.capital_direct_safe_address,
+                    asset="USDC",
+                    balance=Decimal(str(safe_fact["balance"])) / scale,
+                    available_limit=Decimal(str(safe_fact["available"])) / scale,
+                    module_enabled=bool(safe_fact["moduleEnabled"]),
+                    observed_at=observed_at,
+                    now=_now(),
+                )
+            except DomainRejected as exc:
+                onchain_probe.update(status="FAILED", error_code=exc.code)
+            except (KeyError, TypeError, ValueError, ArithmeticError):
+                onchain_probe.update(status="FAILED", error_code="SAFE_RESPONSE_INVALID")
+            else:
+                onchain_probe.update(status="SUCCESS", error_code=None)
+        snapshot = queries().capital_center(
+            user_id,
+            authoritative_live_accounts=authoritative_live_accounts(),
+            authoritative_live_treasury_account_id=selected_treasury_account_id,
+            require_authoritative_live_treasury=True,
+        )
+        expected_interval = resolved_settings.runtime_sync_interval_seconds
+        snapshot["net_worth"]["history_expected_interval_seconds"] = expected_interval
+        snapshot["net_worth"]["history_gap_tolerance_seconds"] = max(
+            180,
+            expected_interval * 3,
+        )
+        snapshot["net_worth"]["onchain_provider"] = selected_provider
+        snapshot["net_worth"]["onchain_probe"] = onchain_probe
         snapshot["direct_configuration"] = {
             "single_account_mode": True,
             "source": "VERSIONED_DATABASE" if saved_config is not None else "ENVIRONMENT",
@@ -670,6 +733,7 @@ def create_app(
             "asset": direct_settings.capital_direct_asset,
             "network": direct_settings.capital_direct_network,
             "treasury_provider": direct_settings.capital_direct_treasury_provider,
+            "selected_onchain_account_configured": selected_treasury_account_id is not None,
             "vault_id_configured": direct_settings.capital_direct_vault_id is not None,
             "vault_address_configured": (direct_settings.capital_direct_vault_address is not None),
             "owned_arbitrum_address_configured": (

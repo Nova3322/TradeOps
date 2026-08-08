@@ -464,6 +464,56 @@ def test_live_net_worth_and_risk_capital_combine_two_venues_and_vault(
     assert not any(issue.startswith("VENUE:") for issue in stale_center["net_worth"]["issues"])
 
 
+def test_capital_center_uses_only_the_selected_onchain_treasury(
+    database: Database, service: TradingService
+) -> None:
+    ids = seed(service)
+    now = datetime.now(UTC)
+    agent = "0x2222222222222222222222222222222222222222"
+    selected_vault = "0x1111111111111111111111111111111111111111"
+    other_vault = "0x3333333333333333333333333333333333333333"
+    for vault, balance in ((selected_vault, Decimal("30")), (other_vault, Decimal("70"))):
+        service.record_notilt_vault_snapshot(
+            actor_id=ids["proposer"],
+            snapshot=NoTiltVaultSnapshot(
+                chain_id=42161,
+                chain="ARBITRUM",
+                vault=vault,
+                agent=agent,
+                budgets=(
+                    notilt_budget(
+                        asset="USDC",
+                        balance=balance,
+                        vault=vault,
+                        agent=agent,
+                        now=now,
+                    ),
+                ),
+            ),
+            valuations={"USDC": UsdValuation(Decimal(1), balance, now)},
+            now=now,
+        )
+
+    center = TradingQueries(database).capital_center(
+        ids["proposer"],
+        authoritative_live_treasury_account_id=selected_vault,
+        require_authoritative_live_treasury=True,
+    )
+    assert center["net_worth"]["vault"] == "30.000000000000000000"
+    assert len(
+        [
+            item
+            for item in center["balances"]
+            if item["environment"] == "LIVE" and item["location_type"] == "VAULT"
+        ]
+    ) == 1
+    assert len(
+        [item for item in center["history"] if item["location_type"] == "VAULT"]
+    ) == 1
+    assert selected_vault not in str(center)
+    assert other_vault not in str(center)
+
+
 def test_live_net_worth_rejects_time_misaligned_sources(
     database: Database, service: TradingService
 ) -> None:
