@@ -46,9 +46,14 @@ from trading_control_plane.api_schemas import (
     CapitalScopeReconciliationRequest,
     CapitalTransferCreateRequest,
     CapitalTransferObservationRequest,
+    DirectCapitalBinanceReceiptRequest,
+    DirectCapitalBinanceSubmissionRequest,
     DirectCapitalConfigurationRequest,
+    DirectCapitalHyperliquidReceiptRequest,
     DirectCapitalOperationRequest,
+    DirectCapitalTreasuryReceiptRequest,
     DirectCapitalUnsignedPlanRequest,
+    DirectCapitalWalletSubmissionRequest,
     FundingFactRequest,
     HyperliquidReadOnlySyncRequest,
     HyperliquidTestnetProtectionRequest,
@@ -88,6 +93,7 @@ from trading_control_plane.binance import (
     BinancePortfolioMarginReadOnlyClient,
     BinanceReadOnlyClient,
 )
+from trading_control_plane.binance_capital import BinanceCapitalGateway
 from trading_control_plane.binance_execution import (
     BinancePortfolioMarginClient,
     BinanceTestnetClient,
@@ -125,6 +131,10 @@ from trading_control_plane.freqtrade import (
 from trading_control_plane.hyperliquid import (
     HyperliquidReadOnlyClient,
     resolve_hyperliquid_main_account,
+)
+from trading_control_plane.hyperliquid_capital import (
+    HYPERLIQUID_BRIDGE2_ADDRESS,
+    HyperliquidCapitalGateway,
 )
 from trading_control_plane.hyperliquid_execution import (
     HyperliquidLiveClient,
@@ -289,6 +299,8 @@ def create_app(
     notilt_gateway: NoTiltGateway | None = None,
     notilt_valuator: NoTiltUsdValuator | None = None,
     safe_spending_gateway: SafeSpendingGateway | None = None,
+    hyperliquid_capital_gateway: HyperliquidCapitalGateway | None = None,
+    binance_capital_gateway: BinanceCapitalGateway | None = None,
 ) -> FastAPI:
     resolved_settings = settings or get_settings()
     resolved_settings.validate_runtime_security()
@@ -503,6 +515,16 @@ def create_app(
     resolved_safe_spending = safe_spending_gateway or SafeSpendingGateway(
         timeout_seconds=resolved_settings.safe_spending_gateway_timeout_seconds
     )
+    resolved_hyperliquid_capital = hyperliquid_capital_gateway or HyperliquidCapitalGateway(
+        timeout_seconds=5
+    )
+    resolved_binance_capital = binance_capital_gateway or BinanceCapitalGateway(
+        base_url=resolved_settings.binance_capital_base_url,
+        api_key=resolved_settings.binance_capital_api_key,
+        api_secret=resolved_settings.binance_capital_api_secret,
+        recv_window_ms=resolved_settings.binance_recv_window_ms,
+        timeout_seconds=resolved_settings.binance_capital_timeout_seconds,
+    )
 
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
@@ -539,6 +561,8 @@ def create_app(
     app.state.notilt_gateway = resolved_notilt
     app.state.notilt_valuator = resolved_notilt_valuator
     app.state.safe_spending_gateway = resolved_safe_spending
+    app.state.hyperliquid_capital_gateway = resolved_hyperliquid_capital
+    app.state.binance_capital_gateway = resolved_binance_capital
 
     @app.exception_handler(DomainRejected)
     async def domain_rejected(_: Request, exc: DomainRejected) -> JSONResponse:
@@ -747,6 +771,10 @@ def create_app(
             ),
             "binance_withdrawal_destination_configured": (
                 direct_settings.capital_direct_binance_withdrawal_address is not None
+            ),
+            "binance_capital_credentials_configured": resolved_binance_capital.configured,
+            "binance_capital_submission_enabled": (
+                direct_settings.binance_capital_withdraw_enabled
             ),
             "hyperliquid_account_configured": (
                 direct_settings.capital_direct_hyperliquid_account_id is not None
@@ -4266,6 +4294,212 @@ def create_app(
             "data": capital_snapshot(identity.user_id),
         }
 
+    @app.post("/api/capital/direct-operations/{operation_id}/binance-preview")
+    def prepare_direct_binance_preview(
+        operation_id: UUID,
+        payload: DirectCapitalUnsignedPlanRequest,
+        identity: SessionIdentity = identity_dependency,
+    ) -> dict[str, Any]:
+        now = _now()
+        context = service().direct_capital_operation_context(
+            operation_id, identity.user_id, now=now
+        )
+        if int(context["version"]) != payload.expected_version:
+            raise DomainRejected("VERSION_CONFLICT", "direct capital operation changed; refresh")
+        path = DirectCapitalPath(str(context["path"]))
+        if path not in {
+            DirectCapitalPath.VAULT_TO_BINANCE,
+            DirectCapitalPath.BINANCE_TO_VAULT,
+        }:
+            raise DomainRejected(
+                "BINANCE_CAPITAL_PATH_INVALID", "this operation does not contain a Binance leg"
+            )
+        direct_settings, _ = effective_direct_capital_settings(identity.user_id)
+        if path is DirectCapitalPath.VAULT_TO_BINANCE:
+            destination = direct_settings.capital_direct_binance_deposit_address
+            source = context["source_reference"]
+            if destination is None or source is None:
+                raise DomainRejected(
+                    "BINANCE_CAPITAL_SCOPE_MISSING",
+                    "frozen treasury source and Binance deposit address are required",
+                )
+            artifact = resolved_binance_capital.prepare_deposit(
+                expected_address=destination,
+                amount=Decimal(str(context["min_received"])),
+                source_address=str(source),
+                now=now,
+            )
+        else:
+            destination = direct_settings.capital_direct_binance_withdrawal_address
+            max_fee = context["max_fee"]
+            if destination is None or max_fee is None:
+                raise DomainRejected(
+                    "BINANCE_CAPITAL_SCOPE_MISSING",
+                    "allowlisted treasury destination and fee limit are required",
+                )
+            if str(context["destination_reference"]).lower() != destination.lower():
+                raise DomainRejected(
+                    "BINANCE_CAPITAL_DESTINATION_MISMATCH",
+                    "frozen treasury destination does not match Binance configuration",
+                )
+            artifact = resolved_binance_capital.prepare_withdrawal(
+                destination=destination,
+                amount=Decimal(str(context["amount"])),
+                max_fee=Decimal(str(max_fee)),
+                operation_id=str(operation_id),
+                now=now,
+            )
+        version = service().record_direct_capital_binance_preview(
+            operation_id,
+            identity.user_id,
+            expected_version=payload.expected_version,
+            artifact=artifact,
+            idempotency_key=payload.idempotency_key,
+            now=now,
+        )
+        return {
+            "operation_id": str(operation_id),
+            "version": version,
+            "artifact": artifact,
+            "credentials_configured": resolved_binance_capital.configured,
+            "submission_enabled": direct_settings.binance_capital_withdraw_enabled,
+            "signing_material_returned": False,
+            "transfer_submitted": False,
+            "data": capital_snapshot(identity.user_id),
+        }
+
+    @app.post("/api/capital/direct-operations/{operation_id}/binance-submit")
+    def submit_direct_binance_withdrawal(
+        operation_id: UUID,
+        payload: DirectCapitalBinanceSubmissionRequest,
+        identity: SessionIdentity = identity_dependency,
+    ) -> dict[str, Any]:
+        now = _now()
+        context = service().direct_capital_operation_context(
+            operation_id, identity.user_id, now=now
+        )
+        if int(context["version"]) != payload.expected_version:
+            raise DomainRejected("VERSION_CONFLICT", "direct capital operation changed; refresh")
+        if context["path"] != DirectCapitalPath.BINANCE_TO_VAULT.value:
+            raise DomainRejected(
+                "BINANCE_CAPITAL_DIRECTION_INVALID", "only Binance withdrawals use this endpoint"
+            )
+        direct_settings, _ = effective_direct_capital_settings(identity.user_id)
+        if not direct_settings.binance_capital_withdraw_enabled:
+            raise DomainRejected(
+                "BINANCE_CAPITAL_SUBMISSION_DISABLED",
+                "Binance capital withdrawal transport is explicitly disabled",
+            )
+        if capital_snapshot(identity.user_id)["real_transfer_gate"] != "ENABLED":
+            raise DomainRejected(
+                "CAPITAL_TRANSFER_GATE_DISABLED",
+                "durable CAPITAL_TRANSFER gate is disabled",
+            )
+        preflight = next(
+            (
+                stage.get("artifact")
+                for stage in reversed(context["stages"])
+                if stage.get("code") == "BINANCE_RESTRICTED_WITHDRAWAL_PREFLIGHT_READY"
+            ),
+            None,
+        )
+        if not isinstance(preflight, dict):
+            raise DomainRejected(
+                "BINANCE_CAPITAL_PREFLIGHT_REQUIRED", "current live preflight is required"
+            )
+        submission = resolved_binance_capital.submit_withdrawal(preflight, now=now)
+        version = service().record_direct_capital_binance_submission(
+            operation_id,
+            identity.user_id,
+            expected_version=payload.expected_version,
+            submission=submission,
+            idempotency_key=payload.idempotency_key,
+            now=now,
+        )
+        return {
+            "operation_id": str(operation_id),
+            "version": version,
+            "submission": submission,
+            "credentials_returned": False,
+            "data": capital_snapshot(identity.user_id),
+        }
+
+    @app.post("/api/capital/direct-operations/{operation_id}/binance-receipt")
+    def verify_direct_binance_receipt(
+        operation_id: UUID,
+        payload: DirectCapitalBinanceReceiptRequest,
+        identity: SessionIdentity = identity_dependency,
+    ) -> dict[str, Any]:
+        now = _now()
+        context = service().direct_capital_operation_context(
+            operation_id, identity.user_id, now=now
+        )
+        if int(context["version"]) != payload.expected_version:
+            raise DomainRejected("VERSION_CONFLICT", "direct capital operation changed; refresh")
+        direct_settings, _ = effective_direct_capital_settings(identity.user_id)
+        if payload.stage == "BINANCE_DEPOSIT":
+            if context["path"] != DirectCapitalPath.VAULT_TO_BINANCE.value:
+                raise DomainRejected(
+                    "BINANCE_CAPITAL_RECEIPT_STAGE_INVALID", "deposit receipt does not match path"
+                )
+            assert payload.transaction_hash is not None
+            destination = direct_settings.capital_direct_binance_deposit_address
+            if destination is None:
+                raise DomainRejected(
+                    "BINANCE_CAPITAL_SCOPE_MISSING", "Binance deposit address is missing"
+                )
+            evidence = resolved_binance_capital.verify_deposit(
+                transaction_hash=payload.transaction_hash,
+                destination=destination,
+                amount=Decimal(str(context["min_received"])),
+            )
+        else:
+            if context["path"] != DirectCapitalPath.BINANCE_TO_VAULT.value:
+                raise DomainRejected(
+                    "BINANCE_CAPITAL_RECEIPT_STAGE_INVALID",
+                    "withdrawal receipt does not match path",
+                )
+            destination = direct_settings.capital_direct_binance_withdrawal_address
+            rpc_url = (
+                direct_settings.capital_arbitrum_rpc_url
+                or direct_settings.safe_spending_arbitrum_rpc_url
+            )
+            if destination is None or rpc_url is None:
+                raise DomainRejected(
+                    "BINANCE_CAPITAL_SCOPE_MISSING",
+                    "frozen treasury destination and trusted Arbitrum RPC are required",
+                )
+            withdrawal = resolved_binance_capital.verify_withdrawal(
+                order_id=str(operation_id),
+                destination=destination,
+                amount=Decimal(str(context["amount"])),
+            )
+            transaction_hash = str(withdrawal["transactionHash"])
+            chain = resolved_hyperliquid_capital.verify_arbitrum_usdc_credit_from_any_sender(
+                rpc_url=rpc_url,
+                transaction_hash=transaction_hash,
+                recipient=destination,
+                amount=str(context["amount"]),
+                min_confirmations=direct_settings.notilt_arbitrum_min_confirmations,
+            )
+            evidence = {"binance": withdrawal, "arbitrum": chain}
+        version = service().record_direct_capital_binance_receipt(
+            operation_id,
+            identity.user_id,
+            expected_version=payload.expected_version,
+            stage=payload.stage,
+            evidence=evidence,
+            idempotency_key=payload.idempotency_key,
+            now=now,
+        )
+        return {
+            "operation_id": str(operation_id),
+            "version": version,
+            "receipt": evidence,
+            "settlement": "CONFIRMED",
+            "data": capital_snapshot(identity.user_id),
+        }
+
     @app.post("/api/capital/direct-operations/{operation_id}/notilt-unsigned-preview")
     def prepare_direct_notilt_unsigned_preview(
         operation_id: UUID,
@@ -4284,6 +4518,12 @@ def create_app(
                 "direct capital operation changed; refresh before SDK preflight",
             )
         path = DirectCapitalPath(str(context["path"]))
+        if path is DirectCapitalPath.BINANCE_TO_VAULT:
+            raise DomainRejected(
+                "BINANCE_DIRECT_TREASURY_WITHDRAWAL_REQUIRED",
+                "Binance return uses the restricted withdrawal API directly to the selected "
+                "NoTilt Vault; no second wallet deposit may be built",
+            )
         if context["treasury_provider"] != "NOTILT_VAULT":
             raise DomainRejected(
                 "NOTILT_PLAN_SCOPE_MISMATCH",
@@ -4411,6 +4651,12 @@ def create_app(
                 "SAFE_PLAN_SCOPE_MISMATCH", "operation did not select Safe Spending Limits"
             )
         path = DirectCapitalPath(str(context["path"]))
+        if path is DirectCapitalPath.BINANCE_TO_VAULT:
+            raise DomainRejected(
+                "BINANCE_DIRECT_TREASURY_WITHDRAWAL_REQUIRED",
+                "Binance return uses the restricted withdrawal API directly to the selected "
+                "Safe; no second wallet deposit may be built",
+            )
         outbound = path in {
             DirectCapitalPath.VAULT_TO_BINANCE,
             DirectCapitalPath.VAULT_TO_HYPERLIQUID,
@@ -4471,6 +4717,370 @@ def create_app(
                 "A human-controlled delegate wallet must review and sign the exact hash; "
                 "this service cannot sign or broadcast."
             ),
+            "data": capital_snapshot(identity.user_id),
+        }
+
+    @app.post("/api/capital/direct-operations/{operation_id}/hyperliquid-preview")
+    def prepare_direct_hyperliquid_preview(
+        operation_id: UUID,
+        payload: DirectCapitalUnsignedPlanRequest,
+        identity: SessionIdentity = identity_dependency,
+    ) -> dict[str, Any]:
+        now = _now()
+        context = service().direct_capital_operation_context(
+            operation_id, identity.user_id, now=now
+        )
+        if int(context["version"]) != payload.expected_version:
+            raise DomainRejected("VERSION_CONFLICT", "direct capital operation changed; refresh")
+        path = DirectCapitalPath(str(context["path"]))
+        if path not in {
+            DirectCapitalPath.VAULT_TO_HYPERLIQUID,
+            DirectCapitalPath.HYPERLIQUID_TO_VAULT,
+        }:
+            raise DomainRejected(
+                "HYPERLIQUID_CAPITAL_PATH_INVALID",
+                "this capital operation does not contain a Hyperliquid leg",
+            )
+        direct_settings, _ = effective_direct_capital_settings(identity.user_id)
+        bridge = direct_settings.capital_direct_hyperliquid_bridge_address
+        owned = direct_settings.capital_direct_owned_arbitrum_address
+        if bridge is None or owned is None:
+            raise DomainRejected(
+                "HYPERLIQUID_CAPITAL_SCOPE_MISSING",
+                "official Bridge2 and the authorized Arbitrum wallet must be configured",
+            )
+        if bridge.lower() != HYPERLIQUID_BRIDGE2_ADDRESS:
+            raise DomainRejected(
+                "HYPERLIQUID_BRIDGE_UNTRUSTED",
+                "configured bridge does not match the official Arbitrum Bridge2 deployment",
+            )
+        main_account = resolve_hyperliquid_main_account(
+            base_url=direct_settings.hyperliquid_base_url,
+            account_address=direct_settings.hyperliquid_account_address,
+            api_wallet_address=direct_settings.hyperliquid_api_wallet_address,
+        )
+        if main_account is None:
+            raise DomainRejected(
+                "HYPERLIQUID_MAIN_ACCOUNT_MISSING",
+                "a Hyperliquid main account or resolvable authorized API wallet is required",
+            )
+        if path is DirectCapitalPath.VAULT_TO_HYPERLIQUID:
+            artifact = resolved_hyperliquid_capital.prepare_deposit(
+                base_url=direct_settings.hyperliquid_base_url,
+                main_account=main_account,
+                api_wallet_address=direct_settings.hyperliquid_api_wallet_address,
+                owned_arbitrum_address=owned,
+                bridge_address=bridge,
+                amount=str(context["min_received"]),
+                now=now,
+            )
+        else:
+            artifact = resolved_hyperliquid_capital.prepare_withdrawal(
+                base_url=direct_settings.hyperliquid_base_url,
+                main_account=main_account,
+                api_wallet_address=direct_settings.hyperliquid_api_wallet_address,
+                destination=owned,
+                amount=str(context["amount"]),
+                max_fee=context["max_fee"],
+                now=now,
+            )
+        version = service().record_direct_capital_hyperliquid_preview(
+            operation_id,
+            identity.user_id,
+            expected_version=payload.expected_version,
+            final_confirmed=payload.final_confirmed,
+            artifact=artifact,
+            idempotency_key=payload.idempotency_key,
+            now=now,
+        )
+        return {
+            "operation_id": str(operation_id),
+            "version": version,
+            "preview_kind": artifact["kind"],
+            "transport": "HYPERLIQUID_OFFICIAL_PROTOCOL_HUMAN_WALLET_HANDOFF",
+            "agent_wallet": artifact["agentWallet"],
+            "automatic_fallback": True,
+            "fallback_reason": artifact["fallbackReason"],
+            "signing": False,
+            "broadcast": False,
+            "artifact": artifact,
+            "next_step": (
+                "The main account or valid multisig wallet must re-check chain, destination, "
+                "amount, fee and method before signing. This service stores no signature material."
+            ),
+            "data": capital_snapshot(identity.user_id),
+        }
+
+    @app.post("/api/capital/direct-operations/{operation_id}/wallet-submission")
+    def record_direct_wallet_submission(
+        operation_id: UUID,
+        payload: DirectCapitalWalletSubmissionRequest,
+        identity: SessionIdentity = identity_dependency,
+    ) -> dict[str, Any]:
+        version = service().record_direct_capital_wallet_submission(
+            operation_id,
+            identity.user_id,
+            expected_version=payload.expected_version,
+            stage=payload.stage,
+            outcome=payload.outcome,
+            transaction_hash=payload.transaction_hash,
+            action_hash=payload.action_hash,
+            nonce=payload.nonce,
+            final_confirmed=payload.final_confirmed,
+            idempotency_key=payload.idempotency_key,
+            now=_now(),
+        )
+        return {
+            "operation_id": str(operation_id),
+            "version": version,
+            "outcome": payload.outcome,
+            "signing_material_stored": False,
+            "data": capital_snapshot(identity.user_id),
+        }
+
+    @app.post("/api/capital/direct-operations/{operation_id}/hyperliquid-receipt")
+    def verify_direct_hyperliquid_receipt(
+        operation_id: UUID,
+        payload: DirectCapitalHyperliquidReceiptRequest,
+        identity: SessionIdentity = identity_dependency,
+    ) -> dict[str, Any]:
+        now = _now()
+        context = service().direct_capital_operation_context(
+            operation_id, identity.user_id, now=now
+        )
+        if int(context["version"]) != payload.expected_version:
+            raise DomainRejected("VERSION_CONFLICT", "direct capital operation changed; refresh")
+        direct_settings, _ = effective_direct_capital_settings(identity.user_id)
+        main_account = resolve_hyperliquid_main_account(
+            base_url=direct_settings.hyperliquid_base_url,
+            account_address=direct_settings.hyperliquid_account_address,
+            api_wallet_address=direct_settings.hyperliquid_api_wallet_address,
+        )
+        owned = direct_settings.capital_direct_owned_arbitrum_address
+        bridge = direct_settings.capital_direct_hyperliquid_bridge_address
+        if main_account is None or owned is None or bridge is None:
+            raise DomainRejected(
+                "HYPERLIQUID_CAPITAL_SCOPE_MISSING",
+                "receipt verification requires the frozen main account, owned wallet and Bridge2",
+            )
+        artifact_stage = next(
+            (
+                stage
+                for stage in reversed(context["stages"])
+                if isinstance(stage, dict)
+                and isinstance(stage.get("artifact"), dict)
+                and str(stage["artifact"].get("kind", "")).startswith("HYPERLIQUID_")
+            ),
+            None,
+        )
+        if artifact_stage is None:
+            raise DomainRejected(
+                "HYPERLIQUID_CAPITAL_PREFLIGHT_REQUIRED",
+                "prepare a current unsigned Hyperliquid wallet request before verifying receipts",
+            )
+        artifact = dict(artifact_stage["artifact"])
+        try:
+            prepared_at = datetime.fromisoformat(str(artifact["preparedAt"]))
+        except (KeyError, TypeError, ValueError) as exc:
+            raise DomainRejected(
+                "HYPERLIQUID_CAPITAL_PLAN_INVALID", "stored Hyperliquid preflight is invalid"
+            ) from exc
+        expected_submission_code = (
+            "HYPERLIQUID_DEPOSIT_SUBMITTED_BY_HUMAN_WALLET"
+            if payload.stage.startswith("HYPERLIQUID_DEPOSIT")
+            else "HYPERLIQUID_CLASS_TRANSFER_SUBMITTED_BY_HUMAN_WALLET"
+            if payload.stage == "HYPERLIQUID_CLASS_TRANSFER_LEDGER"
+            else "HYPERLIQUID_WITHDRAWAL_SUBMITTED_BY_HUMAN_WALLET"
+        )
+        submission = next(
+            (
+                stage
+                for stage in reversed(context["stages"])
+                if isinstance(stage, dict)
+                and stage.get("code") == expected_submission_code
+            ),
+            None,
+        )
+        if submission is None:
+            raise DomainRejected(
+                "HYPERLIQUID_WALLET_SUBMISSION_REQUIRED",
+                "record the human wallet submission before verifying public receipts",
+            )
+        if payload.stage.startswith("HYPERLIQUID_DEPOSIT"):
+            submitted_hash = submission.get("transaction_hash")
+            supplied_hash = payload.transaction_hash or payload.action_hash
+            if submitted_hash is None or str(submitted_hash).lower() != str(supplied_hash).lower():
+                raise DomainRejected(
+                    "HYPERLIQUID_RECEIPT_REFERENCE_MISMATCH",
+                    "deposit receipt reference does not match the recorded wallet submission",
+                )
+        elif payload.stage in {
+            "HYPERLIQUID_WITHDRAWAL_LEDGER",
+            "HYPERLIQUID_CLASS_TRANSFER_LEDGER",
+        } and (
+            str(submission.get("action_hash", "")).lower()
+            != str(payload.action_hash).lower()
+            or submission.get("nonce") != payload.nonce
+        ):
+            raise DomainRejected(
+                "HYPERLIQUID_RECEIPT_REFERENCE_MISMATCH",
+                "withdrawal ledger evidence does not match the recorded signed action",
+            )
+        if payload.stage.endswith("LEDGER"):
+            evidence = resolved_hyperliquid_capital.verify_hyperliquid_ledger(
+                base_url=direct_settings.hyperliquid_base_url,
+                main_account=main_account,
+                receipt_kind=(
+                    "DEPOSIT"
+                    if "DEPOSIT" in payload.stage
+                    else "CLASS_TRANSFER"
+                    if "CLASS_TRANSFER" in payload.stage
+                    else "WITHDRAWAL"
+                ),
+                amount=str(artifact["amount"]),
+                prepared_at=prepared_at,
+                nonce=payload.nonce,
+                action_hash=payload.action_hash,
+                now=now,
+            )
+        else:
+            rpc_url = (
+                direct_settings.capital_arbitrum_rpc_url
+                or direct_settings.safe_spending_arbitrum_rpc_url
+            )
+            if rpc_url is None:
+                raise DomainRejected(
+                    "ARBITRUM_RPC_NOT_CONFIGURED",
+                    "a trusted Arbitrum RPC is required for public receipt verification",
+                )
+            if payload.stage == "HYPERLIQUID_DEPOSIT_ARBITRUM":
+                evidence = resolved_hyperliquid_capital.verify_arbitrum_usdc_transfer(
+                    rpc_url=rpc_url,
+                    transaction_hash=str(payload.transaction_hash),
+                    sender=owned,
+                    recipient=bridge,
+                    amount=str(artifact["amount"]),
+                    min_confirmations=direct_settings.notilt_arbitrum_min_confirmations,
+                )
+            else:
+                evidence = resolved_hyperliquid_capital.verify_arbitrum_usdc_credit(
+                    rpc_url=rpc_url,
+                    transaction_hash=str(payload.transaction_hash),
+                    sender=bridge,
+                    recipient=owned,
+                    amount=str(artifact["amount"]),
+                    min_confirmations=direct_settings.notilt_arbitrum_min_confirmations,
+                )
+        version = service().record_direct_capital_hyperliquid_receipt(
+            operation_id,
+            identity.user_id,
+            expected_version=payload.expected_version,
+            stage=payload.stage,
+            evidence=evidence,
+            idempotency_key=payload.idempotency_key,
+            now=now,
+        )
+        return {
+            "operation_id": str(operation_id),
+            "version": version,
+            "receipt": evidence,
+            "settlement": "HYPERLIQUID_LEG_CONFIRMED_TREASURY_RECEIPT_STILL_REQUIRED",
+            "data": capital_snapshot(identity.user_id),
+        }
+
+    @app.post("/api/capital/direct-operations/{operation_id}/treasury-receipt")
+    def verify_direct_treasury_receipt(
+        operation_id: UUID,
+        payload: DirectCapitalTreasuryReceiptRequest,
+        identity: SessionIdentity = identity_dependency,
+    ) -> dict[str, Any]:
+        now = _now()
+        context = service().direct_capital_operation_context(
+            operation_id, identity.user_id, now=now
+        )
+        if int(context["version"]) != payload.expected_version:
+            raise DomainRejected("VERSION_CONFLICT", "direct capital operation changed; refresh")
+        if context["path"] != DirectCapitalPath.HYPERLIQUID_TO_VAULT.value:
+            raise DomainRejected(
+                "TREASURY_RECEIPT_STAGE_INVALID",
+                "treasury receipt is only valid after a Hyperliquid withdrawal",
+            )
+        submitted = next(
+            (
+                stage
+                for stage in reversed(context["stages"])
+                if stage.get("code") == "TREASURY_DEPOSIT_SUBMITTED_BY_HUMAN_WALLET"
+            ),
+            None,
+        )
+        if submitted is None or str(submitted.get("transaction_hash", "")).lower() != (
+            payload.transaction_hash.lower()
+        ):
+            raise DomainRejected(
+                "TREASURY_RECEIPT_REFERENCE_MISMATCH",
+                "treasury receipt does not match a recorded human wallet submission",
+            )
+        direct_settings, _ = effective_direct_capital_settings(identity.user_id)
+        owned = direct_settings.capital_direct_owned_arbitrum_address
+        if owned is None:
+            raise DomainRejected(
+                "CAPITAL_OWNED_ARBITRUM_ADDRESS_MISSING",
+                "treasury receipt verification requires the authorized owned wallet",
+            )
+        if context["treasury_provider"] == "NOTILT_VAULT":
+            chain_id = notilt_chain_id_for_network(str(context["network"]))
+            _, vault = configured_notilt_scope(chain_id)
+            receipt = resolved_notilt.verify_receipt(
+                chain_id=chain_id,
+                vault=vault,
+                agent=owned,
+                receipt_kind="DEPOSIT",
+                transaction_hash=payload.transaction_hash,
+                min_confirmations=direct_settings.notilt_min_confirmations[chain_id],
+                asset=str(context["asset"]),
+                amount=str(context["min_received"]),
+            )
+            evidence = {
+                "kind": "NOTILT_DEPOSIT_RECEIPT",
+                "transaction_hash": receipt.transaction_hash,
+                "block_number": receipt.block_number,
+                "confirmations": receipt.confirmations,
+                "amount": (
+                    None if receipt.credited_amount is None else str(receipt.credited_amount)
+                ),
+            }
+        else:
+            safe = direct_settings.capital_direct_safe_address
+            rpc_url = (
+                direct_settings.capital_arbitrum_rpc_url
+                or direct_settings.safe_spending_arbitrum_rpc_url
+            )
+            if safe is None or rpc_url is None:
+                raise DomainRejected(
+                    "SAFE_SPENDING_LIMIT_NOT_CONFIGURED",
+                    "Safe address and trusted Arbitrum RPC are required for receipt verification",
+                )
+            evidence = resolved_hyperliquid_capital.verify_arbitrum_usdc_transfer(
+                rpc_url=rpc_url,
+                transaction_hash=payload.transaction_hash,
+                sender=owned,
+                recipient=safe,
+                amount=str(context["min_received"]),
+                min_confirmations=direct_settings.notilt_arbitrum_min_confirmations,
+            )
+        version = service().record_direct_capital_treasury_receipt(
+            operation_id,
+            identity.user_id,
+            expected_version=payload.expected_version,
+            evidence=evidence,
+            idempotency_key=payload.idempotency_key,
+            now=now,
+        )
+        return {
+            "operation_id": str(operation_id),
+            "version": version,
+            "receipt": evidence,
+            "settlement": "SETTLED_IF_ALL_HYPERLIQUID_AND_TREASURY_RECEIPTS_CONFIRMED",
             "data": capital_snapshot(identity.user_id),
         }
 

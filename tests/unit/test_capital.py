@@ -83,11 +83,9 @@ def test_mock_capital_adapter_is_deterministic_and_never_live() -> None:
         (
             DirectCapitalPath.BINANCE_TO_VAULT,
             [
-                "RESTRICTED_BINANCE_WITHDRAWAL_TO_AUTHORIZED_OWNED_ADDRESS",
-                "RECEIVE_AT_AUTHORIZED_OWNED_ADDRESS",
-                "PREPARE_NOTILT_SDK_DEPOSIT",
-                "HUMAN_WALLET_CONFIRMATION",
-                "VERIFY_NOTILT_DEPOSIT_RECEIPT",
+                "RESTRICTED_BINANCE_WITHDRAWAL_TO_SELECTED_TREASURY",
+                "VERIFY_BINANCE_WITHDRAWAL_RECEIPT",
+                "VERIFY_SELECTED_TREASURY_CREDIT",
             ],
         ),
     ],
@@ -103,7 +101,9 @@ def test_direct_capital_paths_are_explicit_and_never_broadcast(
         capital_direct_owned_arbitrum_address="0x2222222222222222222222222222222222222222",
         capital_direct_binance_account_id="binance-main",
         capital_direct_binance_deposit_address=("0x3333333333333333333333333333333333333333"),
-        capital_direct_binance_withdrawal_address=("0x2222222222222222222222222222222222222222"),
+        capital_direct_binance_withdrawal_address=("0x1111111111111111111111111111111111111111"),
+        binance_capital_api_key="capital-key",
+        binance_capital_api_secret="capital-secret",  # noqa: S106 - inert fixture credential
         capital_direct_hyperliquid_account_id="hyperliquid-main",
         capital_direct_hyperliquid_bridge_address=("0x4444444444444444444444444444444444444444"),
         capital_direct_max_amount=Decimal(1000),
@@ -124,7 +124,13 @@ def test_direct_capital_paths_are_explicit_and_never_broadcast(
     assert plan.receipt_status == "NOT_SUBMITTED"
     assert [stage["code"] for stage in plan.stages] == expected_stages
     assert all(stage["status"] == "BLOCKED" for stage in plan.stages)
-    assert any(code.endswith("ADAPTER_UNAVAILABLE") for code in plan.blockers)
+    if "HYPERLIQUID" in path.value:
+        assert "HYPERLIQUID_HUMAN_WALLET_CONFIRMATION_REQUIRED" in plan.blockers
+        assert not any(code.endswith("ADAPTER_UNAVAILABLE") for code in plan.blockers)
+    elif path is DirectCapitalPath.VAULT_TO_BINANCE:
+        assert "BINANCE_DEPOSIT_PREFLIGHT_REQUIRED" in plan.blockers
+    else:
+        assert "BINANCE_RESTRICTED_WITHDRAWAL_PREFLIGHT_REQUIRED" in plan.blockers
     if path in {
         DirectCapitalPath.VAULT_TO_BINANCE,
         DirectCapitalPath.VAULT_TO_HYPERLIQUID,

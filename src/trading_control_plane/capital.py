@@ -113,7 +113,6 @@ def build_direct_capital_plan(
     if path in {
         DirectCapitalPath.VAULT_TO_HYPERLIQUID,
         DirectCapitalPath.HYPERLIQUID_TO_VAULT,
-        DirectCapitalPath.BINANCE_TO_VAULT,
     }:
         required["CAPITAL_OWNED_ARBITRUM_ADDRESS_MISSING"] = owned_address
     if path in {
@@ -128,10 +127,14 @@ def build_direct_capital_plan(
         required["CAPITAL_BINANCE_WITHDRAWAL_ADDRESS_MISSING"] = withdrawal_address
         if (
             withdrawal_address
-            and owned_address
-            and withdrawal_address.lower() != owned_address.lower()
+            and vault_address
+            and withdrawal_address.lower() != vault_address.lower()
         ):
-            blockers.append("CAPITAL_BINANCE_WITHDRAWAL_ADDRESS_NOT_OWNED")
+            blockers.append("CAPITAL_BINANCE_WITHDRAWAL_ADDRESS_SCOPE_MISMATCH")
+    if venue == "BINANCE" and not (
+        settings.binance_capital_api_key and settings.binance_capital_api_secret
+    ):
+        blockers.append("BINANCE_CAPITAL_CREDENTIALS_MISSING")
     for code, value in required.items():
         if not value:
             blockers.append(code)
@@ -169,7 +172,10 @@ def build_direct_capital_plan(
             {"code": "VERIFY_DESTINATION_RECEIPTS", "status": "BLOCKED"},
         )
         blockers.extend(
-            ("SAFE_ALLOWANCE_PREFLIGHT_REQUIRED", "HYPERLIQUID_DEPOSIT_ADAPTER_UNAVAILABLE")
+            (
+                "SAFE_ALLOWANCE_PREFLIGHT_REQUIRED",
+                "HYPERLIQUID_HUMAN_WALLET_CONFIRMATION_REQUIRED",
+            )
         )
     elif is_safe and path is DirectCapitalPath.HYPERLIQUID_TO_VAULT:
         stages = (
@@ -179,19 +185,17 @@ def build_direct_capital_plan(
             {"code": "HUMAN_WALLET_CONFIRMATION", "status": "BLOCKED"},
             {"code": "VERIFY_SAFE_BALANCE_RECEIPT", "status": "BLOCKED"},
         )
-        blockers.append("HYPERLIQUID_WITHDRAWAL_ADAPTER_UNAVAILABLE")
+        blockers.append("HYPERLIQUID_HUMAN_WALLET_CONFIRMATION_REQUIRED")
     elif is_safe:
         stages = (
             {
-                "code": "RESTRICTED_BINANCE_WITHDRAWAL_TO_AUTHORIZED_OWNED_ADDRESS",
+                "code": "RESTRICTED_BINANCE_WITHDRAWAL_TO_SELECTED_TREASURY",
                 "status": "BLOCKED",
             },
-            {"code": "RECEIVE_AT_AUTHORIZED_OWNED_ADDRESS", "status": "BLOCKED"},
-            {"code": "BUILD_EXACT_USDC_TRANSFER_TO_SAFE", "status": "BLOCKED"},
-            {"code": "HUMAN_WALLET_CONFIRMATION", "status": "BLOCKED"},
-            {"code": "VERIFY_SAFE_BALANCE_RECEIPT", "status": "BLOCKED"},
+            {"code": "VERIFY_BINANCE_WITHDRAWAL_RECEIPT", "status": "BLOCKED"},
+            {"code": "VERIFY_SELECTED_TREASURY_CREDIT", "status": "BLOCKED"},
         )
-        blockers.append("BINANCE_RESTRICTED_WITHDRAWAL_ADAPTER_UNAVAILABLE")
+        blockers.append("BINANCE_RESTRICTED_WITHDRAWAL_PREFLIGHT_REQUIRED")
     elif path is DirectCapitalPath.VAULT_TO_BINANCE:
         execute_after = now + timedelta(minutes=10)
         stages = (
@@ -204,7 +208,7 @@ def build_direct_capital_plan(
             {"code": "REVALIDATE_RELEASE", "status": "BLOCKED"},
             {"code": "TRANSFER_TO_AUTHORIZED_BINANCE_ADDRESS", "status": "BLOCKED"},
         )
-        blockers.append("NOTILT_RELEASE_ADAPTER_UNAVAILABLE")
+        blockers.append("BINANCE_DEPOSIT_PREFLIGHT_REQUIRED")
     elif path is DirectCapitalPath.VAULT_TO_HYPERLIQUID:
         execute_after = now + timedelta(minutes=10)
         stages = (
@@ -217,7 +221,7 @@ def build_direct_capital_plan(
             {"code": "REVALIDATE_RELEASE", "status": "BLOCKED"},
             {"code": "DEPOSIT_TO_HYPERLIQUID_CONTRACT", "status": "BLOCKED"},
         )
-        blockers.append("HYPERLIQUID_DEPOSIT_ADAPTER_UNAVAILABLE")
+        blockers.append("HYPERLIQUID_HUMAN_WALLET_CONFIRMATION_REQUIRED")
     elif path is DirectCapitalPath.HYPERLIQUID_TO_VAULT:
         stages = (
             {"code": "WITHDRAW_FROM_HYPERLIQUID_CONTRACT", "status": "BLOCKED"},
@@ -226,25 +230,23 @@ def build_direct_capital_plan(
             {"code": "HUMAN_WALLET_CONFIRMATION", "status": "BLOCKED"},
             {"code": "VERIFY_NOTILT_DEPOSIT_RECEIPT", "status": "BLOCKED"},
         )
-        blockers.append("HYPERLIQUID_WITHDRAWAL_ADAPTER_UNAVAILABLE")
+        blockers.append("HYPERLIQUID_HUMAN_WALLET_CONFIRMATION_REQUIRED")
     else:
         stages = (
             {
-                "code": "RESTRICTED_BINANCE_WITHDRAWAL_TO_AUTHORIZED_OWNED_ADDRESS",
+                "code": "RESTRICTED_BINANCE_WITHDRAWAL_TO_SELECTED_TREASURY",
                 "status": "BLOCKED",
             },
-            {"code": "RECEIVE_AT_AUTHORIZED_OWNED_ADDRESS", "status": "BLOCKED"},
-            {"code": "PREPARE_NOTILT_SDK_DEPOSIT", "status": "BLOCKED"},
-            {"code": "HUMAN_WALLET_CONFIRMATION", "status": "BLOCKED"},
-            {"code": "VERIFY_NOTILT_DEPOSIT_RECEIPT", "status": "BLOCKED"},
+            {"code": "VERIFY_BINANCE_WITHDRAWAL_RECEIPT", "status": "BLOCKED"},
+            {"code": "VERIFY_SELECTED_TREASURY_CREDIT", "status": "BLOCKED"},
         )
-        blockers.append("BINANCE_RESTRICTED_WITHDRAWAL_ADAPTER_UNAVAILABLE")
+        blockers.append("BINANCE_RESTRICTED_WITHDRAWAL_PREFLIGHT_REQUIRED")
 
     source_reference = (
         vault_address
         if path in {DirectCapitalPath.VAULT_TO_BINANCE, DirectCapitalPath.VAULT_TO_HYPERLIQUID}
-        else vault_address
-        if is_safe and path is DirectCapitalPath.BINANCE_TO_VAULT
+        else account_id
+        if path is DirectCapitalPath.BINANCE_TO_VAULT
         else owned_address
     )
     destination_reference = (

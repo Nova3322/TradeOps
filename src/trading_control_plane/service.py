@@ -138,6 +138,8 @@ from trading_control_plane.perptape import (
     validate_perptape_feed_payload,
 )
 
+CAPITAL_HISTORY_MIN_INTERVAL = timedelta(minutes=1)
+
 ACTIVE_INTENT_STATUSES = {
     OrderIntentStatus.PENDING.value,
     OrderIntentStatus.RESERVED.value,
@@ -5701,14 +5703,14 @@ class TradingService:
         recorded_at: datetime,
     ) -> None:
         session.flush()
-        if (
-            session.scalar(
-                select(AccountEquityObservation.observation_id).where(
-                    AccountEquityObservation.account_equity_id == fact.account_equity_id,
-                    AccountEquityObservation.observed_at == fact.observed_at,
-                )
-            )
-            is not None
+        latest_observed_at = session.scalar(
+            select(AccountEquityObservation.observed_at)
+            .where(AccountEquityObservation.account_equity_id == fact.account_equity_id)
+            .order_by(AccountEquityObservation.observed_at.desc())
+            .limit(1)
+        )
+        if latest_observed_at is not None and (
+            fact.observed_at < latest_observed_at + CAPITAL_HISTORY_MIN_INTERVAL
         ):
             return
         usd_equity = None
@@ -9542,14 +9544,17 @@ class TradingService:
                 "CAPITAL_CONFIGURATION_INVALID",
                 "maximum fee must be lower than maximum amount",
             )
+        selected_treasury_address = (
+            vault_address if treasury_provider == "NOTILT_VAULT" else safe_address
+        )
         if (
-            owned_arbitrum_address is not None
+            selected_treasury_address is not None
             and binance_withdrawal_address is not None
-            and owned_arbitrum_address.lower() != binance_withdrawal_address.lower()
+            and selected_treasury_address.lower() != binance_withdrawal_address.lower()
         ):
             _reject(
-                "CAPITAL_BINANCE_WITHDRAWAL_ADDRESS_NOT_OWNED",
-                "Binance withdrawal must target the authorized owned wallet",
+                "CAPITAL_BINANCE_WITHDRAWAL_ADDRESS_SCOPE_MISMATCH",
+                "Binance withdrawal must target the selected on-chain treasury",
             )
         with self.database.session_factory.begin() as session:
             self._require_role(session, actor_id, operation)
@@ -9762,11 +9767,14 @@ class TradingService:
                 "asset": item.asset,
                 "network": item.network,
                 "amount": str(item.amount),
+                "max_fee": None if item.max_fee is None else str(item.max_fee),
                 "min_received": (
                     str(item.amount) if item.min_received is None else str(item.min_received)
                 ),
                 "source_reference": item.source_reference,
                 "destination_reference": item.destination_reference,
+                "stages": list(item.stages),
+                "created_at": item.created_at.isoformat(),
             }
 
     def record_direct_capital_unsigned_preview(
@@ -9977,6 +9985,851 @@ class TradingService:
                 object_type="DirectCapitalOperation",
                 object_id=operation_id,
                 reason=f"{artifact_kind}; signing=false; broadcast=false",
+                correlation_id=item.correlation_id,
+                object_version=item.version,
+                idempotency_key=idempotency_key,
+                now=now,
+            )
+            return item.version
+
+    def record_direct_capital_hyperliquid_preview(
+        self,
+        operation_id: UUID,
+        actor_id: UUID,
+        *,
+        expected_version: int,
+        final_confirmed: bool,
+        artifact: dict[str, Any],
+        idempotency_key: str,
+        now: datetime,
+    ) -> int:
+        if not final_confirmed:
+            _reject(
+                "CAPITAL_FINAL_CONFIRMATION_REQUIRED",
+                "Hyperliquid wallet handoff requires explicit confirmation",
+            )
+        kind = artifact.get("kind")
+        if kind not in {
+            "HYPERLIQUID_ARBITRUM_DEPOSIT_UNSIGNED_TRANSACTION",
+            "HYPERLIQUID_WITHDRAW3_TYPED_REQUEST",
+            "HYPERLIQUID_USD_CLASS_TRANSFER_TYPED_REQUEST",
+        }:
+            _reject(
+                "HYPERLIQUID_CAPITAL_PLAN_INVALID",
+                "Hyperliquid preflight returned an unsupported wallet request",
+            )
+        if artifact.get("signing") is not False or artifact.get("broadcast") is not False:
+            _reject(
+                "HYPERLIQUID_CAPITAL_PLAN_INVALID",
+                "Hyperliquid capital preflight must remain unsigned and unbroadcast",
+            )
+        operation = "capital.direct.hyperliquid_preview"
+        with self.database.session_factory.begin() as session:
+            item = session.get(DirectCapitalOperation, operation_id, with_for_update=True)
+            if item is None:
+                _reject(
+                    "CAPITAL_DIRECT_OPERATION_NOT_FOUND", "direct capital operation is missing"
+                )
+            self._require_role(session, actor_id, "capital.execute", item.account_id, item.venue)
+            expected_kinds = {
+                DirectCapitalPath.VAULT_TO_HYPERLIQUID.value: (
+                    {"HYPERLIQUID_ARBITRUM_DEPOSIT_UNSIGNED_TRANSACTION"}
+                ),
+                DirectCapitalPath.HYPERLIQUID_TO_VAULT.value: {
+                    "HYPERLIQUID_WITHDRAW3_TYPED_REQUEST",
+                    "HYPERLIQUID_USD_CLASS_TRANSFER_TYPED_REQUEST",
+                },
+            }.get(item.path, set())
+            if kind not in expected_kinds:
+                _reject(
+                    "HYPERLIQUID_CAPITAL_DIRECTION_INVALID",
+                    "Hyperliquid wallet request does not match the frozen capital path",
+                )
+            payload = {
+                "operation_id": str(operation_id),
+                "expected_version": expected_version,
+                "artifact": artifact,
+                "final_confirmed": True,
+            }
+            digest, response = self._idempotency(
+                session,
+                caller_id=str(actor_id),
+                operation=operation,
+                idempotency_key=idempotency_key,
+                payload=payload,
+            )
+            if response is not None:
+                return int(response["version"])
+            if item.version != expected_version:
+                _reject("VERSION_CONFLICT", "direct capital operation changed; refresh first")
+            if item.expires_at <= now:
+                _reject("CAPITAL_DIRECT_OPERATION_EXPIRED", "direct capital operation expired")
+            stage_code = (
+                "HYPERLIQUID_DEPOSIT_WALLET_REQUEST_READY"
+                if kind == "HYPERLIQUID_ARBITRUM_DEPOSIT_UNSIGNED_TRANSACTION"
+                else "HYPERLIQUID_CLASS_TRANSFER_WALLET_REQUEST_READY"
+                if kind == "HYPERLIQUID_USD_CLASS_TRANSFER_TYPED_REQUEST"
+                else "HYPERLIQUID_WITHDRAW3_WALLET_REQUEST_READY"
+            )
+            item.stages = [
+                *item.stages,
+                {
+                    "code": stage_code,
+                    "status": "READY_FOR_HUMAN_REVIEW",
+                    "artifact": artifact,
+                    "prepared_at": now.isoformat(),
+                    "signing": False,
+                    "broadcast": False,
+                    "agent_fallback": artifact.get("fallbackReason"),
+                },
+            ]
+            item.blockers = [
+                blocker
+                for blocker in item.blockers
+                if blocker
+                not in {
+                    "HYPERLIQUID_DEPOSIT_ADAPTER_UNAVAILABLE",
+                    "HYPERLIQUID_WITHDRAWAL_ADAPTER_UNAVAILABLE",
+                    *(
+                        {"HYPERLIQUID_WITHDRAWAL_REVALIDATION_REQUIRED"}
+                        if kind == "HYPERLIQUID_WITHDRAW3_TYPED_REQUEST"
+                        else set()
+                    ),
+                }
+            ]
+            item.status = "UNSIGNED_PLAN_READY"
+            item.version += 1
+            item.updated_at = now
+            result = {"operation_id": str(operation_id), "version": item.version}
+            self._save_receipt(
+                session,
+                caller_id=str(actor_id),
+                operation=operation,
+                idempotency_key=idempotency_key,
+                semantic_hash=digest,
+                response=result,
+                now=now,
+            )
+            self._audit(
+                session,
+                actor_id=str(actor_id),
+                event_type="CAPITAL_HYPERLIQUID_WALLET_REQUEST_PREPARED",
+                object_type="DirectCapitalOperation",
+                object_id=operation_id,
+                reason=f"{kind}; agent-capability-checked; signing=false; broadcast=false",
+                correlation_id=item.correlation_id,
+                object_version=item.version,
+                idempotency_key=idempotency_key,
+                now=now,
+            )
+            return item.version
+
+    def record_direct_capital_wallet_submission(
+        self,
+        operation_id: UUID,
+        actor_id: UUID,
+        *,
+        expected_version: int,
+        stage: str,
+        outcome: str,
+        transaction_hash: str | None,
+        action_hash: str | None,
+        nonce: int | None,
+        final_confirmed: bool,
+        idempotency_key: str,
+        now: datetime,
+    ) -> int:
+        if not final_confirmed:
+            _reject(
+                "CAPITAL_FINAL_CONFIRMATION_REQUIRED",
+                "wallet result recording requires explicit confirmation",
+            )
+        operation = "capital.direct.wallet_submission"
+        payload = {
+            "operation_id": str(operation_id),
+            "expected_version": expected_version,
+            "stage": stage,
+            "outcome": outcome,
+            "transaction_hash": transaction_hash,
+            "action_hash": action_hash,
+            "nonce": nonce,
+            "final_confirmed": True,
+        }
+        with self.database.session_factory.begin() as session:
+            item = session.get(DirectCapitalOperation, operation_id, with_for_update=True)
+            if item is None:
+                _reject(
+                    "CAPITAL_DIRECT_OPERATION_NOT_FOUND", "direct capital operation is missing"
+                )
+            self._require_role(session, actor_id, "capital.execute", item.account_id, item.venue)
+            digest, response = self._idempotency(
+                session,
+                caller_id=str(actor_id),
+                operation=operation,
+                idempotency_key=idempotency_key,
+                payload=payload,
+            )
+            if response is not None:
+                return int(response["version"])
+            if item.version != expected_version:
+                _reject("VERSION_CONFLICT", "direct capital operation changed; refresh first")
+            if item.expires_at <= now:
+                _reject("CAPITAL_DIRECT_OPERATION_EXPIRED", "direct capital operation expired")
+            allowed_stages = {
+                DirectCapitalPath.VAULT_TO_HYPERLIQUID.value: {"HYPERLIQUID_DEPOSIT"},
+                DirectCapitalPath.HYPERLIQUID_TO_VAULT.value: {
+                    "HYPERLIQUID_WITHDRAWAL",
+                    "HYPERLIQUID_CLASS_TRANSFER",
+                    "TREASURY_DEPOSIT",
+                },
+            }.get(item.path, set())
+            if stage not in allowed_stages:
+                _reject(
+                    "CAPITAL_WALLET_STAGE_INVALID",
+                    "wallet result does not match the frozen capital path",
+                )
+            preview = (
+                next(
+                    (
+                        existing
+                        for existing in reversed(item.stages)
+                        if isinstance(existing, dict)
+                        and str(existing.get("code", ""))
+                        in {
+                            "NOTILT_UNSIGNED_DEPOSIT_PREVIEW",
+                            "SAFE_DEPOSIT_UNSIGNED_TRANSACTION_READY",
+                        }
+                    ),
+                    None,
+                )
+                if stage == "TREASURY_DEPOSIT"
+                else next(
+                    (
+                        existing
+                        for existing in reversed(item.stages)
+                        if isinstance(existing, dict)
+                        and isinstance(existing.get("artifact"), dict)
+                        and str(existing["artifact"].get("kind", "")).startswith(
+                            "HYPERLIQUID_"
+                        )
+                    ),
+                    None,
+                )
+            )
+            if preview is None:
+                _reject(
+                    "HYPERLIQUID_CAPITAL_PREFLIGHT_REQUIRED",
+                    "prepare a current unsigned wallet request before recording a wallet result",
+                )
+            if outcome == "SUBMITTED" and stage != "TREASURY_DEPOSIT":
+                try:
+                    preview_expires_at = datetime.fromisoformat(
+                        str(preview["artifact"]["expiresAt"])
+                    )
+                except (KeyError, TypeError, ValueError) as exc:
+                    raise DomainRejected(
+                        "HYPERLIQUID_CAPITAL_PLAN_INVALID",
+                        "stored Hyperliquid preflight is invalid",
+                    ) from exc
+                if preview_expires_at <= now:
+                    _reject(
+                        "HYPERLIQUID_CAPITAL_PREFLIGHT_EXPIRED",
+                        "wallet request expired; rebuild it from current facts before signing",
+                    )
+            if outcome == "CANCELLED":
+                item.stages = [
+                    *item.stages,
+                    {
+                        "code": f"{stage}_WALLET_CANCELLED",
+                        "status": "CANCELLED_BY_USER",
+                        "recorded_at": now.isoformat(),
+                    },
+                ]
+                item.status = "BLOCKED"
+                item.receipt_status = "NOT_SUBMITTED"
+                item.blockers = list(
+                    dict.fromkeys([*item.blockers, "HUMAN_WALLET_CONFIRMATION_CANCELLED"])
+                )
+                event_type = "CAPITAL_HUMAN_WALLET_CANCELLED"
+            else:
+                item.stages = [
+                    *item.stages,
+                    {
+                        "code": f"{stage}_SUBMITTED_BY_HUMAN_WALLET",
+                        "status": "AWAITING_RECEIPT",
+                        "transaction_hash": transaction_hash,
+                        "action_hash": action_hash,
+                        "nonce": nonce,
+                        "recorded_at": now.isoformat(),
+                    },
+                ]
+                item.status = "AWAITING_RECEIPT"
+                item.receipt_status = "PENDING"
+                item.blockers = [
+                    blocker
+                    for blocker in item.blockers
+                    if blocker != "HUMAN_WALLET_CONFIRMATION_CANCELLED"
+                ]
+                event_type = "CAPITAL_HUMAN_WALLET_SUBMISSION_RECORDED"
+            item.version += 1
+            item.updated_at = now
+            result = {"operation_id": str(operation_id), "version": item.version}
+            self._save_receipt(
+                session,
+                caller_id=str(actor_id),
+                operation=operation,
+                idempotency_key=idempotency_key,
+                semantic_hash=digest,
+                response=result,
+                now=now,
+            )
+            self._audit(
+                session,
+                actor_id=str(actor_id),
+                event_type=event_type,
+                object_type="DirectCapitalOperation",
+                object_id=operation_id,
+                reason=f"stage={stage}; outcome={outcome}; no-signature-material-stored",
+                correlation_id=item.correlation_id,
+                object_version=item.version,
+                idempotency_key=idempotency_key,
+                now=now,
+            )
+            return item.version
+
+    def record_direct_capital_treasury_receipt(
+        self,
+        operation_id: UUID,
+        actor_id: UUID,
+        *,
+        expected_version: int,
+        evidence: dict[str, Any],
+        idempotency_key: str,
+        now: datetime,
+    ) -> int:
+        operation = "capital.direct.treasury_receipt"
+        with self.database.session_factory.begin() as session:
+            item = session.get(DirectCapitalOperation, operation_id, with_for_update=True)
+            if item is None:
+                _reject(
+                    "CAPITAL_DIRECT_OPERATION_NOT_FOUND", "direct capital operation is missing"
+                )
+            self._require_role(session, actor_id, "capital.execute", item.account_id, item.venue)
+            if item.path != DirectCapitalPath.HYPERLIQUID_TO_VAULT.value:
+                _reject(
+                    "TREASURY_RECEIPT_STAGE_INVALID",
+                    "treasury deposit receipt is only valid for Hyperliquid withdrawal paths",
+                )
+            payload = {
+                "operation_id": str(operation_id),
+                "expected_version": expected_version,
+                "evidence": evidence,
+            }
+            digest, response = self._idempotency(
+                session,
+                caller_id=str(actor_id),
+                operation=operation,
+                idempotency_key=idempotency_key,
+                payload=payload,
+            )
+            if response is not None:
+                return int(response["version"])
+            if item.version != expected_version:
+                _reject("VERSION_CONFLICT", "direct capital operation changed; refresh first")
+            if item.expires_at <= now:
+                _reject("CAPITAL_DIRECT_OPERATION_EXPIRED", "direct capital operation expired")
+            submitted = next(
+                (
+                    stage
+                    for stage in reversed(item.stages)
+                    if stage.get("code") == "TREASURY_DEPOSIT_SUBMITTED_BY_HUMAN_WALLET"
+                ),
+                None,
+            )
+            if submitted is None:
+                _reject(
+                    "TREASURY_WALLET_SUBMISSION_REQUIRED",
+                    "record the human wallet deposit transaction before receipt verification",
+                )
+            evidence_hash = str(
+                evidence.get("transactionHash") or evidence.get("transaction_hash") or ""
+            ).lower()
+            if evidence_hash != str(submitted.get("transaction_hash", "")).lower():
+                _reject(
+                    "TREASURY_RECEIPT_REFERENCE_MISMATCH",
+                    "treasury receipt does not match the recorded wallet submission",
+                )
+            code = "TREASURY_DESTINATION_RECEIPT_CONFIRMED"
+            if not any(stage.get("code") == code for stage in item.stages):
+                item.stages = [
+                    *item.stages,
+                    {
+                        "code": code,
+                        "status": "CONFIRMED",
+                        "evidence": evidence,
+                        "verified_at": now.isoformat(),
+                    },
+                ]
+                item.version += 1
+            confirmed = {str(stage.get("code")) for stage in item.stages}
+            required = {
+                "HYPERLIQUID_WITHDRAWAL_LEDGER_CONFIRMED",
+                "HYPERLIQUID_WITHDRAWAL_ARBITRUM_CONFIRMED",
+                code,
+            }
+            if required.issubset(confirmed):
+                item.status = "SETTLED"
+                item.receipt_status = "CONFIRMED"
+                item.blockers = [
+                    blocker
+                    for blocker in item.blockers
+                    if blocker
+                    not in {
+                        "TREASURY_DESTINATION_RECEIPT_REQUIRED",
+                        "HYPERLIQUID_HUMAN_WALLET_CONFIRMATION_REQUIRED",
+                    }
+                ]
+            else:
+                item.status = "AWAITING_RECEIPT"
+                item.receipt_status = "PENDING"
+            item.updated_at = now
+            result = {"operation_id": str(operation_id), "version": item.version}
+            self._save_receipt(
+                session,
+                caller_id=str(actor_id),
+                operation=operation,
+                idempotency_key=idempotency_key,
+                semantic_hash=digest,
+                response=result,
+                now=now,
+            )
+            self._audit(
+                session,
+                actor_id=str(actor_id),
+                event_type="CAPITAL_TREASURY_DESTINATION_RECEIPT_VERIFIED",
+                object_type="DirectCapitalOperation",
+                object_id=operation_id,
+                reason=(
+                    f"provider={item.treasury_provider}; public-receipt-verified; "
+                    f"settled={item.status == 'SETTLED'}"
+                ),
+                correlation_id=item.correlation_id,
+                object_version=item.version,
+                idempotency_key=idempotency_key,
+                now=now,
+            )
+            return item.version
+
+    def record_direct_capital_hyperliquid_receipt(
+        self,
+        operation_id: UUID,
+        actor_id: UUID,
+        *,
+        expected_version: int,
+        stage: str,
+        evidence: dict[str, Any],
+        idempotency_key: str,
+        now: datetime,
+    ) -> int:
+        operation = "capital.direct.hyperliquid_receipt"
+        with self.database.session_factory.begin() as session:
+            item = session.get(DirectCapitalOperation, operation_id, with_for_update=True)
+            if item is None:
+                _reject(
+                    "CAPITAL_DIRECT_OPERATION_NOT_FOUND", "direct capital operation is missing"
+                )
+            self._require_role(session, actor_id, "capital.execute", item.account_id, item.venue)
+            allowed = {
+                DirectCapitalPath.VAULT_TO_HYPERLIQUID.value: {
+                    "HYPERLIQUID_DEPOSIT_ARBITRUM",
+                    "HYPERLIQUID_DEPOSIT_LEDGER",
+                },
+                DirectCapitalPath.HYPERLIQUID_TO_VAULT.value: {
+                    "HYPERLIQUID_WITHDRAWAL_LEDGER",
+                    "HYPERLIQUID_WITHDRAWAL_ARBITRUM",
+                    "HYPERLIQUID_CLASS_TRANSFER_LEDGER",
+                },
+            }.get(item.path, set())
+            if stage not in allowed:
+                _reject(
+                    "HYPERLIQUID_RECEIPT_STAGE_INVALID",
+                    "receipt stage does not match the frozen capital path",
+                )
+            payload = {
+                "operation_id": str(operation_id),
+                "expected_version": expected_version,
+                "stage": stage,
+                "evidence": evidence,
+            }
+            digest, response = self._idempotency(
+                session,
+                caller_id=str(actor_id),
+                operation=operation,
+                idempotency_key=idempotency_key,
+                payload=payload,
+            )
+            if response is not None:
+                return int(response["version"])
+            if item.version != expected_version:
+                _reject("VERSION_CONFLICT", "direct capital operation changed; refresh first")
+            if item.expires_at <= now:
+                _reject("CAPITAL_DIRECT_OPERATION_EXPIRED", "direct capital operation expired")
+            code = f"{stage}_CONFIRMED"
+            if not any(existing.get("code") == code for existing in item.stages):
+                item.stages = [
+                    *item.stages,
+                    {
+                        "code": code,
+                        "status": "CONFIRMED",
+                        "evidence": evidence,
+                        "verified_at": now.isoformat(),
+                    },
+                ]
+                item.version += 1
+            confirmed = {str(existing.get("code")) for existing in item.stages}
+            required = (
+                {"HYPERLIQUID_CLASS_TRANSFER_LEDGER_CONFIRMED"}
+                if stage == "HYPERLIQUID_CLASS_TRANSFER_LEDGER"
+                else {
+                    f"{candidate}_CONFIRMED"
+                    for candidate in allowed
+                    if candidate != "HYPERLIQUID_CLASS_TRANSFER_LEDGER"
+                }
+            )
+            item.status = "AWAITING_RECEIPT"
+            item.receipt_status = "PENDING"
+            if required.issubset(confirmed):
+                if stage == "HYPERLIQUID_CLASS_TRANSFER_LEDGER":
+                    item.status = "BLOCKED"
+                    item.receipt_status = "CONFIRMED"
+                    item.blockers = list(
+                        dict.fromkeys(
+                            [
+                                *item.blockers,
+                                "HYPERLIQUID_WITHDRAWAL_REVALIDATION_REQUIRED",
+                            ]
+                        )
+                    )
+                elif (
+                    item.path == DirectCapitalPath.HYPERLIQUID_TO_VAULT.value
+                    and "TREASURY_DESTINATION_RECEIPT_CONFIRMED" in confirmed
+                ):
+                    item.status = "SETTLED"
+                    item.receipt_status = "CONFIRMED"
+                    item.blockers = [
+                        blocker
+                        for blocker in item.blockers
+                        if blocker
+                        not in {
+                            "TREASURY_DESTINATION_RECEIPT_REQUIRED",
+                            "HYPERLIQUID_HUMAN_WALLET_CONFIRMATION_REQUIRED",
+                        }
+                    ]
+                else:
+                    item.blockers = list(
+                        dict.fromkeys(
+                            [
+                                *item.blockers,
+                                (
+                                    "TREASURY_SOURCE_RECEIPT_REQUIRED"
+                                    if item.path
+                                    == DirectCapitalPath.VAULT_TO_HYPERLIQUID.value
+                                    else "TREASURY_DESTINATION_RECEIPT_REQUIRED"
+                                ),
+                            ]
+                        )
+                    )
+            item.updated_at = now
+            result = {"operation_id": str(operation_id), "version": item.version}
+            self._save_receipt(
+                session,
+                caller_id=str(actor_id),
+                operation=operation,
+                idempotency_key=idempotency_key,
+                semantic_hash=digest,
+                response=result,
+                now=now,
+            )
+            self._audit(
+                session,
+                actor_id=str(actor_id),
+                event_type="CAPITAL_HYPERLIQUID_RECEIPT_VERIFIED",
+                object_type="DirectCapitalOperation",
+                object_id=operation_id,
+                reason=f"stage={stage}; public-receipt-verified; destination-still-fail-closed",
+                correlation_id=item.correlation_id,
+                object_version=item.version,
+                idempotency_key=idempotency_key,
+                now=now,
+            )
+            return item.version
+
+    def record_direct_capital_binance_preview(
+        self,
+        operation_id: UUID,
+        actor_id: UUID,
+        *,
+        expected_version: int,
+        artifact: dict[str, Any],
+        idempotency_key: str,
+        now: datetime,
+    ) -> int:
+        kind = artifact.get("kind")
+        expected_path = {
+            "BINANCE_ARBITRUM_DEPOSIT_PREFLIGHT": DirectCapitalPath.VAULT_TO_BINANCE.value,
+            "BINANCE_RESTRICTED_WITHDRAWAL_PREFLIGHT": DirectCapitalPath.BINANCE_TO_VAULT.value,
+        }.get(str(kind))
+        if expected_path is None:
+            _reject("BINANCE_CAPITAL_PREFLIGHT_INVALID", "unsupported Binance preflight artifact")
+        operation = "capital.direct.binance_preview"
+        with self.database.session_factory.begin() as session:
+            item = session.get(DirectCapitalOperation, operation_id, with_for_update=True)
+            if item is None:
+                _reject("CAPITAL_DIRECT_OPERATION_NOT_FOUND", "direct capital operation is missing")
+            self._require_role(session, actor_id, "capital.execute", item.account_id, item.venue)
+            payload = {
+                "operation_id": str(operation_id),
+                "expected_version": expected_version,
+                "artifact": artifact,
+            }
+            digest, response = self._idempotency(
+                session,
+                caller_id=str(actor_id),
+                operation=operation,
+                idempotency_key=idempotency_key,
+                payload=payload,
+            )
+            if response is not None:
+                return int(response["version"])
+            if item.version != expected_version:
+                _reject("VERSION_CONFLICT", "direct capital operation changed; refresh first")
+            if item.path != expected_path:
+                _reject(
+                    "BINANCE_CAPITAL_DIRECTION_INVALID",
+                    "Binance preflight does not match path",
+                )
+            if item.expires_at <= now:
+                _reject("CAPITAL_DIRECT_OPERATION_EXPIRED", "direct capital operation expired")
+            item.stages = [
+                *item.stages,
+                {
+                    "code": (
+                        "BINANCE_DEPOSIT_PREFLIGHT_READY"
+                        if item.path == DirectCapitalPath.VAULT_TO_BINANCE.value
+                        else "BINANCE_RESTRICTED_WITHDRAWAL_PREFLIGHT_READY"
+                    ),
+                    "status": "READY_FOR_FINAL_CONFIRMATION",
+                    "artifact": artifact,
+                    "prepared_at": now.isoformat(),
+                },
+            ]
+            item.blockers = [
+                blocker
+                for blocker in item.blockers
+                if blocker
+                not in {
+                    "BINANCE_CAPITAL_CREDENTIALS_MISSING",
+                    "BINANCE_DEPOSIT_PREFLIGHT_REQUIRED",
+                    "BINANCE_RESTRICTED_WITHDRAWAL_PREFLIGHT_REQUIRED",
+                }
+            ]
+            item.version += 1
+            item.updated_at = now
+            result = {"operation_id": str(operation_id), "version": item.version}
+            self._save_receipt(
+                session,
+                caller_id=str(actor_id),
+                operation=operation,
+                idempotency_key=idempotency_key,
+                semantic_hash=digest,
+                response=result,
+                now=now,
+            )
+            self._audit(
+                session,
+                actor_id=str(actor_id),
+                event_type="CAPITAL_BINANCE_PREFLIGHT_VERIFIED",
+                object_type="DirectCapitalOperation",
+                object_id=operation_id,
+                reason=f"kind={kind}; credentials-redacted; no-transfer-submitted",
+                correlation_id=item.correlation_id,
+                object_version=item.version,
+                idempotency_key=idempotency_key,
+                now=now,
+            )
+            return item.version
+
+    def record_direct_capital_binance_submission(
+        self,
+        operation_id: UUID,
+        actor_id: UUID,
+        *,
+        expected_version: int,
+        submission: dict[str, Any],
+        idempotency_key: str,
+        now: datetime,
+    ) -> int:
+        operation = "capital.direct.binance_submission"
+        with self.database.session_factory.begin() as session:
+            item = session.get(DirectCapitalOperation, operation_id, with_for_update=True)
+            if item is None:
+                _reject("CAPITAL_DIRECT_OPERATION_NOT_FOUND", "direct capital operation is missing")
+            self._require_role(session, actor_id, "capital.execute", item.account_id, item.venue)
+            payload = {
+                "operation_id": str(operation_id),
+                "expected_version": expected_version,
+                "submission": submission,
+            }
+            digest, response = self._idempotency(
+                session,
+                caller_id=str(actor_id),
+                operation=operation,
+                idempotency_key=idempotency_key,
+                payload=payload,
+            )
+            if response is not None:
+                return int(response["version"])
+            if item.version != expected_version:
+                _reject("VERSION_CONFLICT", "direct capital operation changed; refresh first")
+            if item.path != DirectCapitalPath.BINANCE_TO_VAULT.value:
+                _reject(
+                    "BINANCE_CAPITAL_DIRECTION_INVALID",
+                    "submission is not a Binance withdrawal",
+                )
+            if not any(
+                stage.get("code") == "BINANCE_RESTRICTED_WITHDRAWAL_PREFLIGHT_READY"
+                for stage in item.stages
+            ):
+                _reject("BINANCE_CAPITAL_PREFLIGHT_REQUIRED", "current preflight is required")
+            item.stages = [
+                *item.stages,
+                {
+                    "code": "BINANCE_RESTRICTED_WITHDRAWAL_SUBMITTED",
+                    "status": "AWAITING_RECEIPT",
+                    "submission": submission,
+                    "recorded_at": now.isoformat(),
+                },
+            ]
+            item.status = "AWAITING_RECEIPT"
+            item.receipt_status = "PENDING"
+            item.blockers = [
+                blocker for blocker in item.blockers if blocker != "CAPITAL_TRANSFER_GATE_DISABLED"
+            ]
+            item.version += 1
+            item.updated_at = now
+            result = {"operation_id": str(operation_id), "version": item.version}
+            self._save_receipt(
+                session,
+                caller_id=str(actor_id),
+                operation=operation,
+                idempotency_key=idempotency_key,
+                semantic_hash=digest,
+                response=result,
+                now=now,
+            )
+            self._audit(
+                session,
+                actor_id=str(actor_id),
+                event_type="CAPITAL_BINANCE_WITHDRAWAL_SUBMITTED",
+                object_type="DirectCapitalOperation",
+                object_id=operation_id,
+                reason="restricted-api; final-confirmed; credentials-redacted",
+                correlation_id=item.correlation_id,
+                object_version=item.version,
+                idempotency_key=idempotency_key,
+                now=now,
+            )
+            return item.version
+
+    def record_direct_capital_binance_receipt(
+        self,
+        operation_id: UUID,
+        actor_id: UUID,
+        *,
+        expected_version: int,
+        stage: str,
+        evidence: dict[str, Any],
+        idempotency_key: str,
+        now: datetime,
+    ) -> int:
+        expected_path = {
+            "BINANCE_DEPOSIT": DirectCapitalPath.VAULT_TO_BINANCE.value,
+            "BINANCE_WITHDRAWAL": DirectCapitalPath.BINANCE_TO_VAULT.value,
+        }.get(stage)
+        if expected_path is None:
+            _reject("BINANCE_CAPITAL_RECEIPT_STAGE_INVALID", "unknown Binance receipt stage")
+        operation = "capital.direct.binance_receipt"
+        with self.database.session_factory.begin() as session:
+            item = session.get(DirectCapitalOperation, operation_id, with_for_update=True)
+            if item is None:
+                _reject("CAPITAL_DIRECT_OPERATION_NOT_FOUND", "direct capital operation is missing")
+            self._require_role(session, actor_id, "capital.execute", item.account_id, item.venue)
+            payload = {
+                "operation_id": str(operation_id),
+                "expected_version": expected_version,
+                "stage": stage,
+                "evidence": evidence,
+            }
+            digest, response = self._idempotency(
+                session,
+                caller_id=str(actor_id),
+                operation=operation,
+                idempotency_key=idempotency_key,
+                payload=payload,
+            )
+            if response is not None:
+                return int(response["version"])
+            if item.version != expected_version:
+                _reject("VERSION_CONFLICT", "direct capital operation changed; refresh first")
+            if item.path != expected_path:
+                _reject("BINANCE_CAPITAL_RECEIPT_STAGE_INVALID", "receipt does not match path")
+            if item.expires_at <= now:
+                _reject("CAPITAL_DIRECT_OPERATION_EXPIRED", "direct capital operation expired")
+            required_previous_stage = (
+                "BINANCE_DEPOSIT_PREFLIGHT_READY"
+                if stage == "BINANCE_DEPOSIT"
+                else "BINANCE_RESTRICTED_WITHDRAWAL_SUBMITTED"
+            )
+            if not any(
+                existing.get("code") == required_previous_stage for existing in item.stages
+            ):
+                _reject(
+                    "BINANCE_CAPITAL_PREVIOUS_STAGE_REQUIRED",
+                    "Binance receipt cannot be accepted before the frozen prior stage",
+                )
+            code = f"{stage}_RECEIPT_CONFIRMED"
+            if not any(existing.get("code") == code for existing in item.stages):
+                item.stages = [
+                    *item.stages,
+                    {
+                        "code": code,
+                        "status": "CONFIRMED",
+                        "evidence": evidence,
+                        "verified_at": now.isoformat(),
+                    },
+                ]
+                item.version += 1
+            item.status = "SETTLED"
+            item.receipt_status = "CONFIRMED"
+            item.blockers = []
+            item.updated_at = now
+            result = {"operation_id": str(operation_id), "version": item.version}
+            self._save_receipt(
+                session,
+                caller_id=str(actor_id),
+                operation=operation,
+                idempotency_key=idempotency_key,
+                semantic_hash=digest,
+                response=result,
+                now=now,
+            )
+            self._audit(
+                session,
+                actor_id=str(actor_id),
+                event_type="CAPITAL_BINANCE_RECEIPT_VERIFIED",
+                object_type="DirectCapitalOperation",
+                object_id=operation_id,
+                reason=f"stage={stage}; exact-receipt-and-chain-scope-verified",
                 correlation_id=item.correlation_id,
                 object_version=item.version,
                 idempotency_key=idempotency_key,

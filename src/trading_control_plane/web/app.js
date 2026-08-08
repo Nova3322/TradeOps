@@ -2663,7 +2663,7 @@ const LIVE_CAPITAL_SOURCES = [
   {key:'HYPERLIQUID', location_type:'VENUE', label:'Hyperliquid'},
   {key:'VAULT', location_type:'VAULT', label:'链上金库'},
 ];
-const CAPITAL_CHART_WINDOW_HOURS = 6;
+const CAPITAL_CHART_RANGE_MAX = 1000;
 const DIRECT_CAPITAL_PATHS = [
   {path:'VAULT_TO_BINANCE', from:'链上金库', to:'币安', badge:'二选一', action:'检查转入币安条件', copy:'选择 NoTilt Vault 或 Safe Spending Limits，再按对应额度规则转入币安。', steps:['选择链上金库','实时额度预检','人控确认','进入币安']},
   {path:'VAULT_TO_HYPERLIQUID', from:'链上金库', to:'Hyperliquid', badge:'二选一', action:'检查转入 Hyperliquid 条件', copy:'选择 NoTilt Vault 或 Safe Spending Limits，先到授权自有地址，再进入 Hyperliquid。', steps:['选择链上金库','额度预检','到达自有地址','合约入金']},
@@ -2671,6 +2671,7 @@ const DIRECT_CAPITAL_PATHS = [
   {path:'HYPERLIQUID_TO_VAULT', from:'Hyperliquid', to:'链上金库', badge:'二选一', action:'检查 Hyperliquid 回流条件', copy:'先从合约提回授权自有地址，再进入所选链上金库。', steps:['合约提现','授权地址','目标入金','回执验证']},
 ];
 let capitalTrendVisibility = {BINANCE:true, HYPERLIQUID:true, VAULT:true, TOTAL:true};
+let capitalChartRangeValue = CAPITAL_CHART_RANGE_MAX;
 let capitalChartResizeObserver = null;
 const OCCUPIED_CAPITAL_TRANSFER_STATUSES = new Set([
   'SOURCE_RESERVED', 'SUBMITTED', 'IN_FLIGHT', 'DESTINATION_CONFIRMED',
@@ -2909,12 +2910,59 @@ function capitalHistorySeries(history, alignmentToleranceSeconds = 60, gapTolera
   }];
 }
 
-function capitalHistoryWindow(history, hours = CAPITAL_CHART_WINDOW_HOURS) {
+function capitalHistoryWindow(history, startTime = null, endTime = null) {
+  if (startTime === null && endTime === null) return [...history];
+  const minimum = startTime === null ? Number.NEGATIVE_INFINITY : Number(startTime);
+  const maximum = endTime === null ? Number.POSITIVE_INFINITY : Number(endTime);
+  return history.filter(item => {
+    const timestamp = new Date(item.observed_at).getTime();
+    return Number.isFinite(timestamp) && timestamp >= minimum && timestamp <= maximum;
+  });
+}
+
+function capitalHistoryRange(history, sliderValue = CAPITAL_CHART_RANGE_MAX) {
   const timestamps = history.map(item => new Date(item.observed_at).getTime()).filter(Number.isFinite);
-  if (!timestamps.length) return [];
+  if (!timestamps.length) return {history:[], start:null, end:null, duration:0, complete:true};
+  const fullStart = Math.min(...timestamps);
   const end = Math.max(...timestamps);
-  const start = end - Math.max(1, Number(hours) || 24) * 60 * 60 * 1000;
-  return history.filter(item => new Date(item.observed_at).getTime() >= start);
+  const fullDuration = Math.max(0, end - fullStart);
+  const normalized = Math.min(
+    CAPITAL_CHART_RANGE_MAX,
+    Math.max(1, Number(sliderValue) || CAPITAL_CHART_RANGE_MAX),
+  );
+  const duration = normalized >= CAPITAL_CHART_RANGE_MAX
+    ? fullDuration
+    : Math.min(fullDuration, Math.max(60_000, fullDuration * normalized / CAPITAL_CHART_RANGE_MAX));
+  const start = end - duration;
+  return {
+    history:capitalHistoryWindow(history, start, end),
+    start, end, duration, fullStart, fullDuration,
+    complete:start <= fullStart,
+  };
+}
+
+function formatCapitalRangeDuration(milliseconds) {
+  const minutes = Math.max(1, Math.round(Number(milliseconds || 0) / 60_000));
+  if (minutes < 60) return `${minutes} 分钟`;
+  const hours = minutes / 60;
+  if (hours < 48) return `${hours < 10 ? hours.toFixed(1) : Math.round(hours)} 小时`;
+  const days = hours / 24;
+  if (days < 60) return `${days < 10 ? days.toFixed(1) : Math.round(days)} 天`;
+  const months = days / 30.4375;
+  if (months < 24) return `${months.toFixed(1)} 个月`;
+  return `${(days / 365.25).toFixed(1)} 年`;
+}
+
+function capitalHistoryCoverage(series, selection) {
+  const times = series.flatMap(item => item.points.map(point => point.time));
+  if (!times.length || selection.start === null || selection.end === null) {
+    return '尚无有效时间范围';
+  }
+  const gapCount = series.reduce(
+    (count, item) => count + item.points.filter(point => point.breakBefore).length,
+    0,
+  );
+  return `${selection.complete ? '完整历史' : `最近 ${formatCapitalRangeDuration(selection.duration)}`} · ${fmtDate(Math.min(...times))} 至 ${fmtDate(Math.max(...times))} · ${gapCount ? `${gapCount} 处断档未连线` : '没有检测到断档'}`;
 }
 
 function compactCapitalChartPoints(points, minimumDistance = 2) {
@@ -2977,7 +3025,8 @@ function formatDirectCapitalBlocker(code) {
     CAPITAL_HYPERLIQUID_CONTRACT_MISSING:'未配置 Hyperliquid 合约地址',
     CAPITAL_BINANCE_WHITELIST_ADDRESS_MISSING:'未配置币安白名单充值地址',
     CAPITAL_BINANCE_WITHDRAWAL_ADDRESS_MISSING:'未配置币安受限提现的白名单自有地址',
-    CAPITAL_BINANCE_WITHDRAWAL_ADDRESS_NOT_OWNED:'币安提现地址与已授权自有钱包不一致',
+    BINANCE_DIRECT_TREASURY_WITHDRAWAL_REQUIRED:'币安回流会直接提现到当前链上金库，不再生成第二笔钱包入金',
+    CAPITAL_BINANCE_WITHDRAWAL_ADDRESS_SCOPE_MISMATCH:'币安提现白名单地址与当前链上金库地址不一致',
     CAPITAL_AMOUNT_LIMIT_MISSING:'未配置单次金额上限',
     CAPITAL_AMOUNT_LIMIT_EXCEEDED:'金额超过已配置上限',
     CAPITAL_FEE_LIMIT_MISSING:'未配置最大费用上限',
@@ -2986,6 +3035,14 @@ function formatDirectCapitalBlocker(code) {
     NOTILT_RELEASE_ADAPTER_UNAVAILABLE:'资金库释放适配器尚未启用',
     HYPERLIQUID_DEPOSIT_ADAPTER_UNAVAILABLE:'Hyperliquid 入金适配器尚未启用',
     HYPERLIQUID_WITHDRAWAL_ADAPTER_UNAVAILABLE:'Hyperliquid 提现适配器尚未启用',
+    HYPERLIQUID_HUMAN_WALLET_CONFIRMATION_REQUIRED:'Hyperliquid 已完成协议预检；当前动作须由主钱包或有效多签逐笔确认',
+    HUMAN_WALLET_CONFIRMATION_CANCELLED:'用户已取消钱包确认；资金保持原位',
+    TREASURY_SOURCE_RECEIPT_REQUIRED:'仍需验证链上金库释放及到账回执',
+    TREASURY_DESTINATION_RECEIPT_REQUIRED:'仍需验证链上金库最终入金回执',
+    HYPERLIQUID_WITHDRAWAL_REVALIDATION_REQUIRED:'主账户资金归集已确认；须重新读取实时可提现余额后再生成 withdraw3',
+    BINANCE_CAPITAL_CREDENTIALS_MISSING:'未加载币安专用资金 API 凭据',
+    BINANCE_DEPOSIT_PREFLIGHT_REQUIRED:'需要读取并核对币安实时充值地址与网络状态',
+    BINANCE_RESTRICTED_WITHDRAWAL_PREFLIGHT_REQUIRED:'需要核对币安 API 权限、IP 限制、白名单、余额、额度和手续费',
     BINANCE_RESTRICTED_WITHDRAWAL_ADAPTER_UNAVAILABLE:'币安受限提现 API 尚未配置',
     SAFE_ADDRESS_MISSING:'未配置 Safe Smart Account',
     SAFE_DELEGATE_ADDRESS_MISSING:'未配置 Safe 委托地址（delegate）',
@@ -3007,6 +3064,9 @@ function formatDirectCapitalStage(code) {
     VERIFY_NOTILT_DEPOSIT_RECEIPT:'校验链、目标、方法、金额与回执',
     RESTRICTED_BINANCE_WITHDRAWAL:'调用受限币安提现 API',
     RESTRICTED_BINANCE_WITHDRAWAL_TO_AUTHORIZED_OWNED_ADDRESS:'币安受限提现至已授权自有地址',
+    RESTRICTED_BINANCE_WITHDRAWAL_TO_SELECTED_TREASURY:'币安受限提现至当前链上金库',
+    VERIFY_BINANCE_WITHDRAWAL_RECEIPT:'校验币安提现状态与交易哈希',
+    VERIFY_SELECTED_TREASURY_CREDIT:'校验当前链上金库到账',
     NOTILT_UNSIGNED_RELEASE_REQUEST_PREVIEW:'NoTilt 释放请求无签名预检',
     NOTILT_UNSIGNED_DEPOSIT_PREVIEW:'NoTilt 入金序列无签名预检',
     READ_SAFE_SPENDING_LIMIT:'读取 Safe Spending Limit',
@@ -3018,7 +3078,26 @@ function formatDirectCapitalStage(code) {
     BUILD_EXACT_USDC_TRANSFER_TO_SAFE:'构建精确 USDC 入金请求',
     VERIFY_SAFE_BALANCE_RECEIPT:'校验 Safe 入金与余额变化',
     RESTRICTED_BINANCE_WITHDRAWAL_TO_SAFE:'币安受限提现至 Safe',
+    BINANCE_DEPOSIT_PREFLIGHT_READY:'币安充值地址与网络预检已通过',
+    BINANCE_RESTRICTED_WITHDRAWAL_PREFLIGHT_READY:'币安受限提现预检已通过',
+    BINANCE_RESTRICTED_WITHDRAWAL_SUBMITTED:'币安受限提现已提交，等待回执',
+    BINANCE_DEPOSIT_RECEIPT_CONFIRMED:'币安充值到账已确认',
+    BINANCE_WITHDRAWAL_RECEIPT_CONFIRMED:'币安提现与 Arbitrum 到账已确认',
     SAFE_ALLOWANCE_SIGNATURE_REQUEST_READY:'Safe 精确签名请求已准备，等待人控钱包',
+    SAFE_DEPOSIT_UNSIGNED_TRANSACTION_READY:'Safe 入金无签名请求已准备',
+    HYPERLIQUID_DEPOSIT_WALLET_REQUEST_READY:'Hyperliquid 入金请求已准备，等待主钱包或多签',
+    HYPERLIQUID_WITHDRAW3_WALLET_REQUEST_READY:'Hyperliquid withdraw3 请求已准备，等待主钱包或多签',
+    HYPERLIQUID_CLASS_TRANSFER_WALLET_REQUEST_READY:'Hyperliquid 主账户资金归集请求已准备，等待主钱包或多签',
+    HYPERLIQUID_DEPOSIT_SUBMITTED_BY_HUMAN_WALLET:'Hyperliquid 入金已由人控钱包提交',
+    HYPERLIQUID_WITHDRAWAL_SUBMITTED_BY_HUMAN_WALLET:'Hyperliquid 提现已由人控钱包提交',
+    HYPERLIQUID_CLASS_TRANSFER_SUBMITTED_BY_HUMAN_WALLET:'Hyperliquid 主账户资金归集已由人控钱包提交',
+    TREASURY_DEPOSIT_SUBMITTED_BY_HUMAN_WALLET:'链上金库入金已由人控钱包提交',
+    HYPERLIQUID_DEPOSIT_ARBITRUM_CONFIRMED:'Arbitrum 入金交易已验证',
+    HYPERLIQUID_DEPOSIT_LEDGER_CONFIRMED:'Hyperliquid 入金账本已验证',
+    HYPERLIQUID_WITHDRAWAL_LEDGER_CONFIRMED:'Hyperliquid 提现账本已验证',
+    HYPERLIQUID_WITHDRAWAL_ARBITRUM_CONFIRMED:'Arbitrum 提现到账已验证',
+    HYPERLIQUID_CLASS_TRANSFER_LEDGER_CONFIRMED:'Hyperliquid 主账户资金归集账本已验证',
+    TREASURY_DESTINATION_RECEIPT_CONFIRMED:'链上金库最终到账已验证',
   }[code] || code);
 }
 
@@ -3039,8 +3118,9 @@ async function renderCapitalCenter() {
     netWorth.alignment_tolerance_seconds || 60,
     netWorth.history_gap_tolerance_seconds || 300,
   );
+  const historySelection = capitalHistoryRange(item.history || [], capitalChartRangeValue);
   const historySeries = capitalHistorySeries(
-    capitalHistoryWindow(item.history || []),
+    historySelection.history,
     netWorth.alignment_tolerance_seconds || 60,
     netWorth.history_gap_tolerance_seconds || 300,
   );
@@ -3055,7 +3135,7 @@ async function renderCapitalCenter() {
     const presentation = series.source === 'TOTAL' ? null : capitalSourcePresentation(netWorth, series.source, latestPoint || fallbackPoint);
     const current = latestPoint && (series.source === 'TOTAL' ? netWorth.complete : presentation.individuallyCurrent);
     const summary = !latestPoint
-      ? (fallbackPoint ? `${CAPITAL_CHART_WINDOW_HOURS} 小时无数据 · 最后记录 ${fmtDate(fallbackPoint.time)}` : '等待数据')
+      ? (fallbackPoint ? `所选范围无数据 · 最后记录 ${fmtDate(fallbackPoint.time)}` : '等待数据')
       : `${formatCapitalUsd(latestPoint.value)} · ${series.source === 'TOTAL' ? (current ? '当前汇总' : '历史汇总') : presentation.state} · ${fmtDate(latestPoint.time)}`;
     const displayLabel = currentLanguage === 'en' && series.source === 'TOTAL' ? 'Combined total' : series.label;
     return `<label class="capital-trend-toggle trend-${escapeHtml(series.source)} ${latestPoint ? '' : 'is-missing'}"><input type="checkbox" data-capital-trend="${escapeHtml(series.source)}" ${latestPoint && capitalTrendVisibility[series.source] ? 'checked' : ''} ${latestPoint ? '' : 'disabled'}><i aria-hidden="true"></i><span><b translate="no">${escapeHtml(displayLabel)}</b><small>${escapeHtml(summary)}</small></span></label>`;
@@ -3082,29 +3162,7 @@ async function renderCapitalCenter() {
     const cardState = presentation.aligned ? (presentation.nearExpiry ? 'is-aging' : 'is-current') : 'is-limited';
     return `<article class="capital-worth-card ${cardState}"><div><small translate="no">${escapeHtml(source.label)}</small><b>${formatCapitalUsd(presentation.value)}</b></div><span>${escapeHtml(presentation.state)}</span><p>${presentation.observedAt ? `${escapeHtml(presentation.freshness)} · ${fmtDate(presentation.observedAt)}` : '尚无有效时间'}<br>数据来源：<span translate="no">${escapeHtml(source.label)}</span> 只读账户</p></article>`;
   }).join('');
-  const changes = historySeries.map(series => ({series, change:capitalSeriesChange(series)}))
-    .filter(item => item.change)
-    .sort((left, right) => right.change.time - left.change.time);
-  const abnormalChanges = changes.filter(item => item.change.anomalous);
-  const latestChange = changes[0];
-  const largestChartChange = historySeries.map(series => ({
-    series, change:capitalSeriesLargestChange(series),
-  })).filter(item => item.change).sort((left, right) => Math.abs(right.change.delta) - Math.abs(left.change.delta))[0];
-  const changeCopy = abnormalChanges.length
-    ? abnormalChanges.slice(0, 2).map(({series, change}) => `${series.label} ${change.delta >= 0 ? '上升' : '下降'} ${formatCapitalUsd(Math.abs(change.delta))}（${Math.abs(change.percentage).toFixed(2)}%）`).join('；')
-    : latestChange && largestChartChange
-      ? `${latestChange.series.label} 最新 ${latestChange.change.delta >= 0 ? '+' : '-'}${formatCapitalUsd(Math.abs(latestChange.change.delta))}（${Math.abs(latestChange.change.percentage || 0).toFixed(2)}%）；图中最大单次变化为 ${largestChartChange.series.label} ${largestChartChange.change.delta >= 0 ? '+' : '-'}${formatCapitalUsd(Math.abs(largestChartChange.change.delta))}（${Math.abs(largestChartChange.change.percentage || 0).toFixed(2)}%），未达到 1% 异常阈值`
-      : '至少需要两个连续有效记录后才计算变化；跨断档数据不会比较。';
-  const chartTimes = historySeries.flatMap(series => series.points.map(point => point.time));
-  const chartStart = chartTimes.length ? Math.min(...chartTimes) : null;
-  const chartEnd = chartTimes.length ? Math.max(...chartTimes) : null;
-  const chartGapCount = historySeries.reduce(
-    (count, series) => count + series.points.filter(point => point.breakBefore).length,
-    0,
-  );
-  const chartCoverage = chartStart && chartEnd
-    ? `最近 ${CAPITAL_CHART_WINDOW_HOURS} 小时 · ${fmtDate(chartStart)} 至 ${fmtDate(chartEnd)} · ${chartGapCount ? `${chartGapCount} 处断档未连线` : '没有检测到断档'}`
-    : '尚无有效时间范围';
+  const chartCoverage = capitalHistoryCoverage(historySeries, historySelection);
   const issueDetails = [...new Set((netWorth.issues || []).map(issue => {
     const source = String(issue).split(':')[1];
     const lastTime = source && netWorth.source_as_of?.[source];
@@ -3137,7 +3195,24 @@ async function renderCapitalCenter() {
       ? `<details class="capital-blockers"><summary>${blockers.length} 项阻断，查看详情</summary><p>${escapeHtml(blockers.join('；'))}</p></details>`
       : '<span>无阻断</span>';
     const safeOutbound = operation.path === 'VAULT_TO_BINANCE' || operation.path === 'VAULT_TO_HYPERLIQUID';
-    return `<tr><td data-label="操作">${shortId(operation.operation_id)}<br><span class="subtle">${fmtDate(operation.final_confirmed_at)}</span></td><td data-label="路径 / 金额"><b>${escapeHtml(label)}</b><br><span class="subtle">${operation.treasury_provider === 'SAFE_SPENDING_LIMIT' ? 'Safe Spending Limits' : 'NoTilt Vault'}</span><br><span class="subtle">${fmtNumber(operation.amount)} ${escapeHtml(operation.asset)}</span></td><td data-label="阶段">${escapeHtml(stages || '尚无阶段')}</td><td data-label="状态 / 回执"><b>${escapeHtml(fmtStatus(operation.status))}</b><br><span class="subtle">回执：${escapeHtml(fmtStatus(operation.receipt_status))}</span></td><td data-label="精确阻断">${blockerDetails}<button class="text-button" data-capital-preview="${escapeHtml(operation.operation_id)}" data-preview-provider="${escapeHtml(operation.treasury_provider || 'NOTILT_VAULT')}" data-preview-direction="${safeOutbound ? 'OUTBOUND' : 'INBOUND'}" data-operation-version="${Number(operation.version || 1)}">${operation.treasury_provider === 'SAFE_SPENDING_LIMIT' ? (safeOutbound ? '读取 Safe 额度' : '生成 Safe 入金预检') : '生成 NoTilt 预检'}</button></td></tr>`;
+    const hyperliquidPath = operation.path === 'VAULT_TO_HYPERLIQUID' || operation.path === 'HYPERLIQUID_TO_VAULT';
+    const binancePath = operation.path === 'VAULT_TO_BINANCE' || operation.path === 'BINANCE_TO_VAULT';
+    const frozenStages = operation.stages || [];
+    const binancePreview = [...frozenStages].reverse().find(stage => stage.artifact?.kind?.startsWith('BINANCE_'));
+    const binanceSubmission = [...frozenStages].reverse().find(stage => stage.code === 'BINANCE_RESTRICTED_WITHDRAWAL_SUBMITTED');
+    const binanceReceiptConfirmed = frozenStages.some(stage => ['BINANCE_DEPOSIT_RECEIPT_CONFIRMED', 'BINANCE_WITHDRAWAL_RECEIPT_CONFIRMED'].includes(stage.code));
+    const hyperliquidPreview = [...frozenStages].reverse().find(stage => stage.artifact?.kind?.startsWith('HYPERLIQUID_'));
+    const walletStage = operation.path === 'VAULT_TO_HYPERLIQUID' ? 'HYPERLIQUID_DEPOSIT' : hyperliquidPreview?.artifact?.kind === 'HYPERLIQUID_USD_CLASS_TRANSFER_TYPED_REQUEST' ? 'HYPERLIQUID_CLASS_TRANSFER' : 'HYPERLIQUID_WITHDRAWAL';
+    const walletSubmission = [...frozenStages].reverse().find(stage => stage.code === `${walletStage}_SUBMITTED_BY_HUMAN_WALLET`);
+    const providerPreviewReady = frozenStages.some(stage => ['NOTILT_UNSIGNED_DEPOSIT_PREVIEW', 'SAFE_DEPOSIT_UNSIGNED_TRANSACTION_READY'].includes(stage.code));
+    const treasurySubmission = [...frozenStages].reverse().find(stage => stage.code === 'TREASURY_DEPOSIT_SUBMITTED_BY_HUMAN_WALLET');
+    const providerButton = operation.path === 'BINANCE_TO_VAULT' ? '' : `<button class="text-button" data-capital-preview="${escapeHtml(operation.operation_id)}" data-preview-provider="${escapeHtml(operation.treasury_provider || 'NOTILT_VAULT')}" data-preview-direction="${safeOutbound ? 'OUTBOUND' : 'INBOUND'}" data-operation-version="${Number(operation.version || 1)}">${operation.treasury_provider === 'SAFE_SPENDING_LIMIT' ? (safeOutbound ? '读取 Safe 额度' : '生成 Safe 入金预检') : '生成 NoTilt 预检'}</button>`;
+    const hyperliquidButton = hyperliquidPath ? `<button class="text-button" data-hyperliquid-preview="${escapeHtml(operation.operation_id)}" data-operation-version="${Number(operation.version || 1)}">${operation.path === 'VAULT_TO_HYPERLIQUID' ? '生成 Hyperliquid 入金请求' : '生成 Hyperliquid 提现请求'}</button>` : '';
+    const binanceButton = binancePath && !binanceReceiptConfirmed ? `<button class="text-button" data-binance-preview="${escapeHtml(operation.operation_id)}" data-operation-version="${Number(operation.version || 1)}">${operation.path === 'VAULT_TO_BINANCE' ? '核对币安充值地址' : '币安受限提现预检'}</button>` : '';
+    const binanceBoundary = binancePreview ? `<details class="capital-wallet-handoff"><summary>币安资金链路</summary><div class="wallet-handoff-facts"><b>${operation.path === 'VAULT_TO_BINANCE' ? '币安 Arbitrum 充值地址已实时核对' : '币安受限提现条件已实时核对'}</b><span>网络：${escapeHtml(binancePreview.artifact.network)}</span><span>金额：${escapeHtml(binancePreview.artifact.amount)} USDC</span><span>${operation.path === 'BINANCE_TO_VAULT' ? `手续费：${escapeHtml(binancePreview.artifact.fee)} USDC` : '链上签名：独立人控钱包 / 多签'}</span><code>${escapeHtml(binancePreview.artifact.destination)}</code><p>API Key、Secret、请求签名和钱包私钥均不会显示在页面、操作记录或审计日志中。</p></div>${operation.path === 'VAULT_TO_BINANCE' ? `<form class="binance-receipt-form" data-binance-receipt="${escapeHtml(operation.operation_id)}" data-binance-stage="BINANCE_DEPOSIT" data-operation-version="${Number(operation.version || 1)}"><label>钱包广播后的 Arbitrum 交易哈希<input name="transaction_hash" required pattern="0x[0-9a-fA-F]{64}" autocomplete="off"></label><button class="secondary" type="submit">验证币安充值到账</button><div class="form-error" role="alert"></div></form>` : binanceSubmission ? `<form class="binance-receipt-form" data-binance-receipt="${escapeHtml(operation.operation_id)}" data-binance-stage="BINANCE_WITHDRAWAL" data-operation-version="${Number(operation.version || 1)}"><button class="secondary" type="submit">验证币安提现与链上到账</button><div class="form-error" role="alert"></div></form>` : `<form class="binance-submit-form" data-binance-submit="${escapeHtml(operation.operation_id)}" data-operation-version="${Number(operation.version || 1)}"><label class="direct-capital-confirm"><input name="final_confirmed" type="checkbox" required><span>再次核对币种、网络、白名单地址、金额、手续费和额度</span></label><button class="primary" type="submit" ${directConfiguration.binance_capital_submission_enabled && item.real_transfer_gate === 'ENABLED' ? '' : 'disabled title="币安提现开关或 CAPITAL_TRANSFER 当前关闭"'}>最终确认并提交币安提现</button><p class="subtle">当前按钮受币安专用提现开关与 CAPITAL_TRANSFER 双重控制。</p><div class="form-error" role="alert"></div></form>`}</details>` : '';
+    const walletBoundary = hyperliquidPreview ? `<details class="capital-wallet-handoff"><summary>主钱包 / 多签确认</summary><div class="wallet-handoff-facts"><b>${hyperliquidPreview.artifact.kind === 'HYPERLIQUID_WITHDRAW3_TYPED_REQUEST' ? 'withdraw3 人工签名请求' : hyperliquidPreview.artifact.kind === 'HYPERLIQUID_USD_CLASS_TRANSFER_TYPED_REQUEST' ? '主账户资金归集人工签名请求' : 'Arbitrum USDC 入金请求'}</b><span>网络：${escapeHtml(hyperliquidPreview.artifact.network || 'Hyperliquid Mainnet / Arbitrum')}</span><span>金额：${escapeHtml(hyperliquidPreview.artifact.amount)} USDC</span><span>方法：${escapeHtml(hyperliquidPreview.artifact.method || (walletStage === 'HYPERLIQUID_CLASS_TRANSFER' ? 'HyperliquidTransaction:UsdClassTransfer' : 'HyperliquidTransaction:Withdraw'))}</span><span>费用上限：${escapeHtml(hyperliquidPreview.artifact.maxFee || '链上钱包确认时核对')}</span><code>${escapeHtml(hyperliquidPreview.artifact.destination || hyperliquidPreview.artifact.bridge || '请在钱包中核对目标')}</code><p>API/Agent Wallet 归属已检查；该动作要求主账户或有效多签签名，因此自动进入人控钱包，不属于连接失败。系统不接收签名内容。</p></div>${walletSubmission ? `<p class="subtle">钱包提交已记录，等待逐项验证 Hyperliquid 与 Arbitrum 回执。</p>` : `<form class="wallet-result-form" data-wallet-result="${escapeHtml(operation.operation_id)}" data-wallet-stage="${walletStage}" data-operation-version="${Number(operation.version || 1)}">${walletStage === 'HYPERLIQUID_DEPOSIT' ? '<label>Arbitrum 交易哈希<input name="transaction_hash" required pattern="0x[0-9a-fA-F]{64}" autocomplete="off"></label>' : `<label>Hyperliquid action hash<input name="action_hash" required pattern="0x[0-9a-fA-F]{64}" autocomplete="off"></label><label>签名 nonce<input name="nonce" type="number" required value="${Number(hyperliquidPreview.artifact.nonce || 0)}"></label>`}<label class="direct-capital-confirm"><input name="final_confirmed" type="checkbox" required><span>钱包已显示并由我逐项核对网络、目标、金额、费用与方法</span></label><div class="compact-actions"><button class="primary" type="submit">记录钱包已提交</button><button class="secondary" type="button" data-wallet-cancel>记录取消</button></div><div class="form-error" role="alert"></div></form>`}${walletSubmission ? `<form class="receipt-result-form" data-hl-receipt="${escapeHtml(operation.operation_id)}" data-receipt-path="${walletStage}" data-operation-version="${Number(operation.version || 1)}">${walletStage === 'HYPERLIQUID_DEPOSIT' ? `<input type="hidden" name="recorded_hash" value="${escapeHtml(walletSubmission.transaction_hash || '')}"><label>验证阶段<select name="stage"><option value="HYPERLIQUID_DEPOSIT_ARBITRUM">Arbitrum 入金交易</option><option value="HYPERLIQUID_DEPOSIT_LEDGER">Hyperliquid 入金账本</option></select></label>` : `<input type="hidden" name="action_hash" value="${escapeHtml(walletSubmission.action_hash || '')}"><input type="hidden" name="nonce" value="${Number(walletSubmission.nonce || 0)}"><label>验证阶段<select name="stage">${walletStage === 'HYPERLIQUID_CLASS_TRANSFER' ? '<option value="HYPERLIQUID_CLASS_TRANSFER_LEDGER">主账户资金归集账本</option>' : '<option value="HYPERLIQUID_WITHDRAWAL_LEDGER">Hyperliquid 提现账本</option><option value="HYPERLIQUID_WITHDRAWAL_ARBITRUM">Arbitrum 钱包到账</option>'}</select></label>${walletStage === 'HYPERLIQUID_CLASS_TRANSFER' ? '' : '<label data-arbitrum-hash>Arbitrum 到账交易哈希<input name="transaction_hash" pattern="0x[0-9a-fA-F]{64}" autocomplete="off"></label>'}` }<button class="secondary" type="submit">读取并验证公开回执</button><div class="form-error" role="alert"></div></form>` : ''}</details>` : '';
+    const treasuryWallet = operation.path === 'HYPERLIQUID_TO_VAULT' && providerPreviewReady ? `<details class="capital-wallet-handoff"><summary>最终存入${operation.treasury_provider === 'SAFE_SPENDING_LIMIT' ? ' Safe' : ' NoTilt Vault'}</summary>${treasurySubmission ? `<form class="treasury-receipt-form" data-treasury-receipt="${escapeHtml(operation.operation_id)}" data-operation-version="${Number(operation.version || 1)}"><input type="hidden" name="transaction_hash" value="${escapeHtml(treasurySubmission.transaction_hash || '')}"><button class="secondary" type="submit">验证链上金库到账</button><div class="form-error" role="alert"></div></form>` : `<form class="wallet-result-form" data-wallet-result="${escapeHtml(operation.operation_id)}" data-wallet-stage="TREASURY_DEPOSIT" data-operation-version="${Number(operation.version || 1)}"><label>钱包广播后的 Arbitrum 交易哈希<input name="transaction_hash" required pattern="0x[0-9a-fA-F]{64}" autocomplete="off"></label><label class="direct-capital-confirm"><input name="final_confirmed" type="checkbox" required><span>已在钱包中核对链、金库、USDC、金额和方法</span></label><div class="compact-actions"><button class="primary" type="submit">记录金库入金</button><button class="secondary" type="button" data-wallet-cancel>记录取消</button></div><div class="form-error" role="alert"></div></form>`}</details>` : '';
+    return `<tr><td data-label="操作">${shortId(operation.operation_id)}<br><span class="subtle">${fmtDate(operation.final_confirmed_at)}</span></td><td data-label="路径 / 金额"><b>${escapeHtml(label)}</b><br><span class="subtle">${operation.treasury_provider === 'SAFE_SPENDING_LIMIT' ? 'Safe Spending Limits' : 'NoTilt Vault'}</span><br><span class="subtle">${fmtNumber(operation.amount)} ${escapeHtml(operation.asset)}</span></td><td data-label="阶段">${escapeHtml(stages || '尚无阶段')}</td><td data-label="状态 / 回执"><b>${escapeHtml(fmtStatus(operation.status))}</b><br><span class="subtle">回执：${escapeHtml(fmtStatus(operation.receipt_status))}</span></td><td data-label="精确阻断">${blockerDetails}<div class="capital-operation-actions">${hyperliquidButton}${binanceButton}${providerButton}</div>${walletBoundary}${binanceBoundary}${treasuryWallet}</td></tr>`;
   }).join('');
   const legacyRows = transfers.live.map(transfer => `<tr><td data-label="记录">${shortId(transfer.capital_transfer_id)}</td><td data-label="方向">${escapeHtml(fmtCapitalDirection(transfer.direction))}</td><td data-label="金额">${fmtNumber(transfer.gross_amount)} ${escapeHtml(transfer.asset)}</td><td data-label="状态">${escapeHtml(fmtStatus(transfer.status))}</td><td data-label="外部回执">${escapeHtml(transfer.external_transfer_id || '未提交')}</td></tr>`).join('');
   const selectedProviderReady = selectedTreasuryProvider === 'SAFE_SPENDING_LIMIT'
@@ -3148,14 +3223,16 @@ async function renderCapitalCenter() {
     : selectedTreasuryProvider === 'SAFE_SPENDING_LIMIT'
       ? '缺少 Safe、delegate 或可信 RPC'
       : '缺少官方金库或 Agent 范围';
-  main.innerHTML = `<section class="page capital-page"><header class="page-head"><div><p class="eyebrow">生产资金 · 缺失即阻断 · 不代签不广播</p><h1>资金中心</h1><p class="lede">只保留四条明确资金路径。每次操作都先最终确认，再校验地址、网络、金额、额度和实时安全开关；当前缺少生产参数时只记录阻断与阶段，不会生成订单、签名或发送资金。</p></div></header><div class="stats"><div class="stat"><small>三方总净值</small><b>${fmtNumber(netWorth.total)} ${escapeHtml(netWorth.currency)}</b></div><div class="stat"><small>资金库</small><b>${fmtNumber(netWorth.vault)} ${escapeHtml(netWorth.currency)}</b></div>${venueNetWorth}<div class="stat"><small>净值状态</small><b style="font-size:14px">${escapeHtml(fmtStatus(netWorth.complete ? 'CURRENT' : 'INCOMPLETE'))}</b></div><div class="stat"><small>资金操作</small><b style="font-size:14px">${escapeHtml(fmtStatus(item.real_transfer_gate || 'DISABLED'))}</b></div><div class="stat"><small>在途 / 占用</small><b>${fmtNumber(liveInTransit)}</b></div></div><section class="capital-chart-panel"><div class="chart-head"><div><p class="eyebrow">资金统计</p><h2>资金净值趋势</h2><p class="subtle">固定四条线：币安、Hyperliquid、链上金库和三方汇总。缺失来源显示“等待数据”，不会补成 0；历史曲线不会冒充当前净值。</p></div><b>${fmtNumber(netWorth.total)} <small>${escapeHtml(netWorth.currency)}</small></b></div>${hasHistory ? `<canvas id="capital-chart" height="260" aria-label="币安、Hyperliquid、链上金库和三方汇总四条资金趋势"></canvas>` : '<div class="chart-empty">完成生产资金同步后才显示曲线；缺失数据不会补零。</div>'}<div class="chart-legend" role="group" aria-label="选择显示的资金曲线">${chartLegend}</div></section>${netWorth.complete ? '' : `<div class="callout"><b>净值不完整：</b>${escapeHtml([...new Set((netWorth.issues || []).map(formatCapitalIssue))].join('；') || '尚无资金数据')}</div>`}<section><h2>资金位置</h2><p class="subtle">固定展示三处资金；缺失金额显示为“—”，历史快照不会计入当前净值。</p>${capitalBalanceTable(liveBalanceRows, '尚无生产资金数据。')}</section><article class="card"><div class="card-heading"><div><p class="eyebrow">生产配置预检</p><h2>只显示是否配置，不回显地址或凭据</h2></div><span class="status-pill">单账户模式</span></div><dl class="definition-grid">${definition('网络 / 资产', `${directConfiguration.network || '—'} / ${directConfiguration.asset || '—'}`)}${definition('当前链上金库', selectedTreasuryProviderLabel)}${definition('链上金库状态', selectedProviderStatus)}${definition('自有钱包', directConfiguration.owned_arbitrum_address_configured ? '已配置' : '未配置')}${definition('币安受限路径', directConfiguration.binance_account_configured && directConfiguration.binance_whitelist_destination_configured && directConfiguration.binance_withdrawal_destination_configured ? '已配置' : '不完整')}${definition('Hyperliquid 路径', directConfiguration.hyperliquid_account_configured && directConfiguration.hyperliquid_contract_configured ? '已配置' : '不完整')}${definition('金额 / 费用上限', directConfiguration.limits_configured ? '已配置' : '未配置')}${definition('签名 / 广播', '始终由独立人控钱包处理；Agent 不支持')}</dl></article><section class="capital-routes-section"><div class="card-heading"><div><p class="eyebrow">四条直达路径</p><h2>选择资金从哪里到哪里</h2><p class="subtle">先选路径，再在一个确认窗口里填写金额；安全说明不再重复四遍。</p></div><span class="status-pill ${item.real_transfer_gate === 'ENABLED' ? 'status-APPROVED' : 'status-DISABLED'}">${escapeHtml(fmtStatus(item.real_transfer_gate || 'DISABLED'))}</span></div>${directConfigurationEditor}<div class="callout direct-capital-boundary" data-provider-boundary><b>统一安全边界：</b>系统只使用当前选定的 ${escapeHtml(selectedTreasuryProviderLabel)}；每条路径都重新校验地址、网络、资产、额度、实时状态与安全开关，且不在服务内签名或广播。</div><div class="capital-route-grid">${directPathCards}</div></section>${directCapitalDialog}<section><h2>操作日志、阶段与回执</h2>${directRows ? `<div class="table-wrap is-scrollable capital-operation-table"><table><thead><tr><th>操作</th><th>路径 / 金额</th><th>阶段</th><th>状态 / 回执</th><th>精确阻断</th></tr></thead><tbody>${directRows}</tbody></table></div>` : '<div class="callout">尚无直达资金操作。提交一次最终确认后，会在这里记录校验结果。</div>'}</section><section><h2>历史资金划转</h2><p class="subtle">旧流程只保留为只读审计记录，不再是四条直达操作的必经界面。</p>${legacyRows ? `<div class="table-wrap is-scrollable capital-history-table"><table><thead><tr><th>记录</th><th>方向</th><th>金额</th><th>状态</th><th>外部回执</th></tr></thead><tbody>${legacyRows}</tbody></table></div>` : '<div class="callout">尚无历史资金划转。</div>'}</section></section>`;
+  const capitalRangeText = historySelection.complete ? '全部历史' : `最近 ${formatCapitalRangeDuration(historySelection.duration)}`;
+  const capitalHistoryRangeControl = hasHistory ? `<div class="capital-history-range" aria-label="资金曲线时间范围"><div class="capital-history-range-copy"><small>时间范围</small><output for="capital-history-range" data-capital-range-label>${escapeHtml(capitalRangeText)}</output></div><div class="capital-history-range-slider"><input id="capital-history-range" type="range" data-capital-history-range min="1" max="${CAPITAL_CHART_RANGE_MAX}" step="1" value="${Number(capitalChartRangeValue)}" aria-label="拖动选择资金曲线时间范围" aria-valuetext="${escapeHtml(capitalRangeText)}"><div aria-hidden="true"><span>较短</span><span>全部</span></div></div></div>` : '';
+  main.innerHTML = `<section class="page capital-page"><header class="page-head"><div><p class="eyebrow">生产资金 · 缺失即阻断 · 不代签不广播</p><h1>资金中心</h1><p class="lede">只保留四条明确资金路径。每次操作都先最终确认，再校验地址、网络、金额、额度和实时安全开关；当前缺少生产参数时只记录阻断与阶段，不会生成订单、签名或发送资金。</p></div></header><div class="stats"><div class="stat"><small>三方总净值</small><b>${fmtNumber(netWorth.total)} ${escapeHtml(netWorth.currency)}</b></div><div class="stat"><small>资金库</small><b>${fmtNumber(netWorth.vault)} ${escapeHtml(netWorth.currency)}</b></div>${venueNetWorth}<div class="stat"><small>净值状态</small><b style="font-size:14px">${escapeHtml(fmtStatus(netWorth.complete ? 'CURRENT' : 'INCOMPLETE'))}</b></div><div class="stat"><small>资金操作</small><b style="font-size:14px">${escapeHtml(fmtStatus(item.real_transfer_gate || 'DISABLED'))}</b></div><div class="stat"><small>在途 / 占用</small><b>${fmtNumber(liveInTransit)}</b></div></div><section class="capital-chart-panel"><div class="chart-head"><div><p class="eyebrow">资金统计</p><h2>资金净值趋势</h2><p class="subtle">固定四条线：币安、Hyperliquid、链上金库和三方汇总。缺失来源显示“等待数据”，不会补成 0；历史曲线不会冒充当前净值。</p></div><b>${fmtNumber(netWorth.total)} <small>${escapeHtml(netWorth.currency)}</small></b></div>${hasHistory ? `<canvas id="capital-chart" height="260" aria-label="币安、Hyperliquid、链上金库和三方汇总四条资金趋势"></canvas>` : '<div class="chart-empty">完成生产资金同步后才显示曲线；缺失数据不会补零。</div>'}<div class="chart-legend" role="group" aria-label="选择显示的资金曲线">${chartLegend}</div></section>${netWorth.complete ? '' : `<div class="callout"><b>净值不完整：</b>${escapeHtml([...new Set((netWorth.issues || []).map(formatCapitalIssue))].join('；') || '尚无资金数据')}</div>`}<section><h2>资金位置</h2><p class="subtle">固定展示三处资金；缺失金额显示为“—”，历史快照不会计入当前净值。</p>${capitalBalanceTable(liveBalanceRows, '尚无生产资金数据。')}</section><article class="card"><div class="card-heading"><div><p class="eyebrow">生产配置预检</p><h2>只显示是否配置，不回显地址或凭据</h2></div><span class="status-pill">单账户模式</span></div><dl class="definition-grid">${definition('网络 / 资产', `${directConfiguration.network || '—'} / ${directConfiguration.asset || '—'}`)}${definition('当前链上金库', selectedTreasuryProviderLabel)}${definition('链上金库状态', selectedProviderStatus)}${definition('自有钱包', directConfiguration.owned_arbitrum_address_configured ? '已配置' : '未配置')}${definition('币安账户与地址', directConfiguration.binance_account_configured && directConfiguration.binance_whitelist_destination_configured && directConfiguration.binance_withdrawal_destination_configured ? '已配置' : '不完整')}${definition('币安专用资金 API', directConfiguration.binance_capital_credentials_configured ? '已加载（不回显）' : '未加载')}${definition('币安真实提现提交', directConfiguration.binance_capital_submission_enabled && item.real_transfer_gate === 'ENABLED' ? '已启用' : '关闭；仅可预检')}${definition('Hyperliquid 路径', directConfiguration.hyperliquid_account_configured && directConfiguration.hyperliquid_contract_configured ? '已配置' : '不完整')}${definition('金额 / 费用上限', directConfiguration.limits_configured ? '已配置' : '未配置')}${definition('签名 / 广播', '币安只使用专用受限 API；链上签名交给人控钱包或有效多签，服务端不读取私钥')}</dl></article><section class="capital-routes-section"><div class="card-heading"><div><p class="eyebrow">四条直达路径</p><h2>选择资金从哪里到哪里</h2><p class="subtle">先选路径，再在一个确认窗口里填写金额；安全说明不再重复四遍。</p></div><span class="status-pill ${item.real_transfer_gate === 'ENABLED' ? 'status-APPROVED' : 'status-DISABLED'}">${escapeHtml(fmtStatus(item.real_transfer_gate || 'DISABLED'))}</span></div>${directConfigurationEditor}<div class="callout direct-capital-boundary" data-provider-boundary><b>统一安全边界：</b>系统只使用当前选定的 ${escapeHtml(selectedTreasuryProviderLabel)}；每条路径都重新校验地址、网络、资产、额度、实时状态与安全开关。链上私钥不进入控制台；真实币安提现还需专用开关和 CAPITAL_TRANSFER 双重开启。</div><div class="capital-route-grid">${directPathCards}</div></section>${directCapitalDialog}<section><h2>操作日志、阶段与回执</h2>${directRows ? `<div class="table-wrap is-scrollable capital-operation-table"><table><thead><tr><th>操作</th><th>路径 / 金额</th><th>阶段</th><th>状态 / 回执</th><th>精确阻断</th></tr></thead><tbody>${directRows}</tbody></table></div>` : '<div class="callout">尚无直达资金操作。提交一次最终确认后，会在这里记录校验结果。</div>'}</section><section><h2>历史资金划转</h2><p class="subtle">旧流程只保留为只读审计记录，不再是四条直达操作的必经界面。</p>${legacyRows ? `<div class="table-wrap is-scrollable capital-history-table"><table><thead><tr><th>记录</th><th>方向</th><th>金额</th><th>状态</th><th>外部回执</th></tr></thead><tbody>${legacyRows}</tbody></table></div>` : '<div class="callout">尚无历史资金划转。</div>'}</section></section>`;
   const pageHead = main.querySelector('.capital-page > .page-head');
   pageHead.classList.add('capital-page-head');
   pageHead.innerHTML = `<div><p class="eyebrow">生产资金 · 只读事实</p><h1>资金中心</h1><p class="lede">先看总额、资金位置和数据可信度，再处理资金路径。缺失、过期或时间错位的数据不会补零，也不会参与汇总。</p></div><div class="capital-gate-summary"><small>资金操作</small><b>${escapeHtml(fmtStatus(item.real_transfer_gate || 'DISABLED'))}</b><span>在途 / 占用 ${fmtNumber(liveInTransit)} USDC</span></div>`;
   const legacyStats = main.querySelector('.capital-page > .stats');
   legacyStats.outerHTML = `<section class="capital-overview" aria-label="当前资金净值"><article class="capital-total-card ${netWorth.complete ? 'is-current' : 'is-limited'}"><small>当前三方总净值</small><b>${escapeHtml(totalHeadline)}</b><p>${escapeHtml(totalSupporting)}</p></article><div class="capital-source-cards">${sourceCards}</div></section><section class="capital-trust-panel ${netWorth.complete ? 'is-current' : 'is-limited'}"><div><b>${netWorth.complete ? '数据可信，可用于当前汇总' : '当前汇总已阻断'}</b><p>${escapeHtml(trustCopy)}</p></div><span>${netWorth.complete ? '完整' : '需关注'}</span></section>`;
   const chartPanel = main.querySelector('.capital-chart-panel');
-  chartPanel.innerHTML = `<div class="chart-head"><div><p class="eyebrow">资金净值趋势</p><h2>四条固定资金曲线</h2><p class="subtle">Binance、Hyperliquid、${escapeHtml(selectedOnchainSeriesLabel)} 与三方汇总。汇总只使用 ${Number(netWorth.alignment_tolerance_seconds || 60)} 秒内对齐的三方事实；缺失、过期、错位和断档都不会补零或强行连线。</p></div></div><div class="capital-chart-meta"><span>${escapeHtml(chartCoverage)}</span><span>断档按实际采样节奏的 3 倍判定（至少 ${Number(netWorth.history_gap_tolerance_seconds || 300)} 秒）；纵轴至少保留 0.05% 观察范围</span></div><div class="chart-legend" role="group" aria-label="选择显示的资金曲线">${chartLegend}</div>${hasHistory ? `<div class="capital-chart-wrap"><canvas id="capital-chart" height="300" aria-label="Binance、Hyperliquid、${escapeHtml(selectedOnchainSeriesLabel)} 和三方汇总四条 USD 资金趋势"></canvas><div class="capital-chart-tooltip" role="status" hidden></div></div>` : '<div class="chart-empty">尚无可绘制的资金历史；缺失数据不会补零。</div>'}<div class="capital-change-note ${abnormalChanges.length ? 'is-anomaly' : ''}"><b>${abnormalChanges.length ? '异常变化提示' : '最近变化'}</b><span>${escapeHtml(changeCopy)}</span></div>`;
+  chartPanel.innerHTML = `<div class="chart-head"><div><p class="eyebrow">资金净值趋势</p><h2>四条固定资金曲线</h2><p class="subtle">Binance、Hyperliquid、${escapeHtml(selectedOnchainSeriesLabel)} 与三方汇总。汇总只使用 ${Number(netWorth.alignment_tolerance_seconds || 60)} 秒内对齐的三方事实；缺失、过期、错位和断档都不会补零或强行连线。</p></div></div><div class="capital-chart-meta"><span data-capital-range-coverage>${escapeHtml(chartCoverage)}</span><span>断档按实际采样节奏的 3 倍判定（至少 ${Number(netWorth.history_gap_tolerance_seconds || 300)} 秒）；纵轴至少保留 0.05% 观察范围</span></div><div class="chart-legend" role="group" aria-label="选择显示的资金曲线">${chartLegend}</div>${hasHistory ? `<div class="capital-chart-wrap"><canvas id="capital-chart" height="300" aria-label="Binance、Hyperliquid、${escapeHtml(selectedOnchainSeriesLabel)} 和三方汇总四条 USD 资金趋势"></canvas><div class="capital-chart-tooltip" role="status" hidden></div></div>` : '<div class="chart-empty">尚无可绘制的资金历史；缺失数据不会补零。</div>'}${capitalHistoryRangeControl}`;
   const legacyIncomplete = chartPanel.nextElementSibling?.classList.contains('callout') ? chartPanel.nextElementSibling : null;
   legacyIncomplete?.remove();
   const capitalPositionsHeading = [...main.querySelectorAll('section > h2')].find(heading => heading.textContent === '资金位置');
@@ -3165,7 +3242,12 @@ async function renderCapitalCenter() {
     if (detail?.classList.contains('subtle')) detail.textContent = 'USD 金额统一精度：小额四位、大额两位；原资产余额保留在明细中。历史快照不会计入当前净值。';
   }
   drawCapitalChart(visibleHistorySeries);
-  bindCapitalActions(historySeries);
+  bindCapitalActions(historySeries, {
+    history:item.history || [],
+    alignmentToleranceSeconds:netWorth.alignment_tolerance_seconds || 60,
+    gapToleranceSeconds:netWorth.history_gap_tolerance_seconds || 300,
+    selectedOnchainSeriesLabel,
+  });
 }
 
 function drawCapitalChart(series) {
@@ -3287,10 +3369,40 @@ function drawCapitalChart(series) {
   canvas.onpointerleave = () => { if (tooltip) tooltip.hidden = true; };
 }
 
-function bindCapitalActions(historySeries = []) {
+function bindCapitalActions(historySeries = [], rangeContext = null) {
+  let activeHistorySeries = historySeries;
+  const redrawCapitalHistory = () => {
+    drawCapitalChart(activeHistorySeries.filter(series => capitalTrendVisibility[series.source]));
+  };
+  const rangeInput = document.querySelector('[data-capital-history-range]');
+  rangeInput?.addEventListener('input', event => {
+    capitalChartRangeValue = Number(event.currentTarget.value);
+    const selection = capitalHistoryRange(rangeContext?.history || [], capitalChartRangeValue);
+    activeHistorySeries = capitalHistorySeries(
+      selection.history,
+      rangeContext?.alignmentToleranceSeconds || 60,
+      rangeContext?.gapToleranceSeconds || 300,
+    );
+    activeHistorySeries.forEach(series => {
+      if (series.source === 'VAULT') {
+        series.label = rangeContext?.selectedOnchainSeriesLabel || '链上金库';
+      }
+    });
+    const rangeLabel = document.querySelector('[data-capital-range-label]');
+    const rangeText = selection.complete
+      ? '全部历史'
+      : `最近 ${formatCapitalRangeDuration(selection.duration)}`;
+    if (rangeLabel) {
+      rangeLabel.textContent = rangeText;
+    }
+    event.currentTarget.setAttribute('aria-valuetext', rangeText);
+    const coverage = document.querySelector('[data-capital-range-coverage]');
+    if (coverage) coverage.textContent = capitalHistoryCoverage(activeHistorySeries, selection);
+    redrawCapitalHistory();
+  });
   document.querySelectorAll('[data-capital-trend]').forEach(input => input.addEventListener('change', event => {
     capitalTrendVisibility[event.currentTarget.dataset.capitalTrend] = event.currentTarget.checked;
-    drawCapitalChart(historySeries.filter(series => capitalTrendVisibility[series.source]));
+    redrawCapitalHistory();
   }));
   capitalChartResizeObserver?.disconnect();
   const chartCanvas = document.querySelector('#capital-chart');
@@ -3300,7 +3412,7 @@ function bindCapitalActions(historySeries = []) {
       const nextWidth = Math.round(entries[0]?.contentRect?.width || chartCanvas.clientWidth);
       if (!nextWidth || nextWidth === previousWidth) return;
       previousWidth = nextWidth;
-      drawCapitalChart(historySeries.filter(series => capitalTrendVisibility[series.source]));
+      redrawCapitalHistory();
     });
     capitalChartResizeObserver.observe(chartCanvas);
   }
@@ -3318,6 +3430,114 @@ function bindCapitalActions(historySeries = []) {
         showToast(result.execution_blocked ? `已生成无签名预检，但仍被 ${result.blockers.length} 项条件阻断` : '无签名计划已生成；仍需独立人控钱包逐笔确认');
         await route();
       } catch (error) { showApiError(error); }
+    });
+  }));
+  document.querySelectorAll('[data-binance-preview]').forEach(button => button.addEventListener('click', async event => {
+    const target = event.currentTarget;
+    const confirmed = await confirmAction({title:'执行币安资金预检？', message:'只读取官方 Wallet API 的实时权限、IP 限制、USDC Arbitrum 网络、白名单、余额、额度、手续费或充值地址。不会提交提现，也不会回显 API Key、Secret 或签名。', confirmLabel:'确认并预检'});
+    if (!confirmed) return;
+    await withPending(target, '币安预检中…', async () => {
+      try {
+        await api(`/api/capital/direct-operations/${target.dataset.binancePreview}/binance-preview`, {method:'POST', body:JSON.stringify({expected_version:Number(target.dataset.operationVersion), final_confirmed:true, idempotency_key:crypto.randomUUID()})});
+        showToast('币安实时预检已完成；尚未提交任何资金操作');
+        await route();
+      } catch (error) { showApiError(error); }
+    });
+  }));
+  document.querySelectorAll('.binance-submit-form').forEach(form => form.addEventListener('submit', async event => {
+    event.preventDefault();
+    const current = event.currentTarget;
+    const confirmed = await confirmAction({title:'最终提交币安提现？', message:'这是实际资金操作。系统会使用已核对的专用受限 API，提交后只能通过固定 withdrawOrderId 查询状态，不会自动重试未知结果。', confirmLabel:'确认提交提现'});
+    if (!confirmed) return;
+    await withPending(event.submitter, '提交中…', async () => {
+      try {
+        await api(`/api/capital/direct-operations/${current.dataset.binanceSubmit}/binance-submit`, {method:'POST', body:JSON.stringify({expected_version:Number(current.dataset.operationVersion), final_confirmed:true, confirmation_phrase:'CONFIRM_BINANCE_WITHDRAWAL', idempotency_key:crypto.randomUUID()})});
+        showToast('币安提现已提交；等待币安与 Arbitrum 双重回执');
+        await route();
+      } catch (error) { showApiError(error, current.querySelector('.form-error')); }
+    });
+  }));
+  document.querySelectorAll('.binance-receipt-form').forEach(form => form.addEventListener('submit', async event => {
+    event.preventDefault();
+    const current = event.currentTarget;
+    const transactionHash = new FormData(current).get('transaction_hash');
+    const payload = {expected_version:Number(current.dataset.operationVersion), stage:current.dataset.binanceStage, idempotency_key:crypto.randomUUID()};
+    if (transactionHash) payload.transaction_hash = transactionHash;
+    await withPending(event.submitter, '核对回执中…', async () => {
+      try {
+        await api(`/api/capital/direct-operations/${current.dataset.binanceReceipt}/binance-receipt`, {method:'POST', body:JSON.stringify(payload)});
+        showToast('币安与链上回执已按冻结范围核对');
+        await route();
+      } catch (error) { showApiError(error, current.querySelector('.form-error')); }
+    });
+  }));
+  document.querySelectorAll('[data-hyperliquid-preview]').forEach(button => button.addEventListener('click', async event => {
+    const target = event.currentTarget;
+    const confirmed = await confirmAction({title:'生成 Hyperliquid 人控钱包请求？', message:'系统会先验证 API/Agent Wallet 与主账户归属、当前余额、官方 Bridge2、白名单、金额和费用。withdraw3 或链上入金不接受代理钱包时会自动转为主钱包/有效多签确认，不会记录私钥、签名或广播。', confirmLabel:'确认并生成'});
+    if (!confirmed) return;
+    await withPending(target, '协议预检中…', async () => {
+      try {
+        const result = await api(`/api/capital/direct-operations/${target.dataset.hyperliquidPreview}/hyperliquid-preview`, {method:'POST', body:JSON.stringify({expected_version:Number(target.dataset.operationVersion), final_confirmed:true, idempotency_key:crypto.randomUUID()})});
+        showToast(result.automatic_fallback ? '协议权限已核对：已自动切换为主钱包 / 多签逐笔确认' : 'Hyperliquid 预检已完成');
+        await route();
+      } catch (error) { showApiError(error); }
+    });
+  }));
+  document.querySelectorAll('.wallet-result-form').forEach(form => {
+    form.addEventListener('submit', async event => {
+      event.preventDefault();
+      const current = event.currentTarget;
+      const values = Object.fromEntries([...new FormData(current).entries()].filter(([, value]) => String(value).trim() && value !== 'on'));
+      if (values.nonce) values.nonce = Number(values.nonce);
+      const confirmed = await confirmAction({title:'记录人控钱包提交结果？', message:'只记录公开交易哈希或 action hash 与 nonce，不上传签名内容。系统随后仍会独立验证 Hyperliquid、Arbitrum 与链上金库回执。', confirmLabel:'确认记录'});
+      if (!confirmed) return;
+      await withPending(event.submitter, '记录中…', async () => {
+        try {
+          await api(`/api/capital/direct-operations/${current.dataset.walletResult}/wallet-submission`, {method:'POST', body:JSON.stringify({...values, expected_version:Number(current.dataset.operationVersion), stage:current.dataset.walletStage, outcome:'SUBMITTED', final_confirmed:true, idempotency_key:crypto.randomUUID()})});
+          showToast('钱包提交已记录；资金状态仍等待公开回执验证');
+          await route();
+        } catch (error) { showApiError(error, current.querySelector('.form-error')); }
+      });
+    });
+    form.querySelector('[data-wallet-cancel]')?.addEventListener('click', async event => {
+      const current = event.currentTarget.closest('.wallet-result-form');
+      const confirmed = await confirmAction({title:'记录钱包取消？', message:'取消后系统保持 fail-closed，不会将其记为协议故障，也不会继续资金流程。', confirmLabel:'确认取消'});
+      if (!confirmed) return;
+      try {
+        await api(`/api/capital/direct-operations/${current.dataset.walletResult}/wallet-submission`, {method:'POST', body:JSON.stringify({expected_version:Number(current.dataset.operationVersion), stage:current.dataset.walletStage, outcome:'CANCELLED', final_confirmed:true, idempotency_key:crypto.randomUUID()})});
+        showToast('已记录钱包取消；资金未由系统发送');
+        await route();
+      } catch (error) { showApiError(error, current.querySelector('.form-error')); }
+    });
+  });
+  document.querySelectorAll('.receipt-result-form').forEach(form => form.addEventListener('submit', async event => {
+    event.preventDefault();
+    const current = event.currentTarget;
+    const values = Object.fromEntries([...new FormData(current).entries()].filter(([, value]) => String(value).trim()));
+    const stage = values.stage;
+    const payload = {expected_version:Number(current.dataset.operationVersion), stage, idempotency_key:crypto.randomUUID()};
+    if (stage === 'HYPERLIQUID_DEPOSIT_ARBITRUM') payload.transaction_hash = values.recorded_hash;
+    if (stage === 'HYPERLIQUID_DEPOSIT_LEDGER') payload.action_hash = values.recorded_hash;
+    if (stage === 'HYPERLIQUID_WITHDRAWAL_LEDGER' || stage === 'HYPERLIQUID_CLASS_TRANSFER_LEDGER') { payload.action_hash = values.action_hash; payload.nonce = Number(values.nonce); }
+    if (stage === 'HYPERLIQUID_WITHDRAWAL_ARBITRUM') payload.transaction_hash = values.transaction_hash;
+    await withPending(event.submitter, '验证中…', async () => {
+      try {
+        await api(`/api/capital/direct-operations/${current.dataset.hlReceipt}/hyperliquid-receipt`, {method:'POST', body:JSON.stringify(payload)});
+        showToast('公开回执已验证；其他阶段仍按状态逐项等待');
+        await route();
+      } catch (error) { showApiError(error, current.querySelector('.form-error')); }
+    });
+  }));
+  document.querySelectorAll('.treasury-receipt-form').forEach(form => form.addEventListener('submit', async event => {
+    event.preventDefault();
+    const current = event.currentTarget;
+    const transactionHash = new FormData(current).get('transaction_hash');
+    await withPending(event.submitter, '验证金库到账…', async () => {
+      try {
+        await api(`/api/capital/direct-operations/${current.dataset.treasuryReceipt}/treasury-receipt`, {method:'POST', body:JSON.stringify({expected_version:Number(current.dataset.operationVersion), transaction_hash:transactionHash, idempotency_key:crypto.randomUUID()})});
+        showToast('链上金库到账已验证；仅在全部回执一致后标记完成');
+        await route();
+      } catch (error) { showApiError(error, current.querySelector('.form-error')); }
     });
   }));
   const directCapitalConfigForm = document.querySelector('#direct-capital-config-form');

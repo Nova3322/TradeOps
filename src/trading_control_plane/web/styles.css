@@ -282,6 +282,21 @@ button:disabled { opacity: .52; cursor: not-allowed; }
 .chart-head { display: flex; align-items: start; justify-content: space-between; gap: 20px; }
 .chart-head h2 { margin-bottom: 6px; }
 .capital-chart-meta { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 6px 18px; margin-top: 10px; color: var(--muted); font-size: 9px; line-height: 1.45; }
+.capital-history-range { display: grid; grid-template-columns: 1fr; gap: 6px; width: 100%; margin-top: 14px; padding: 12px 14px; border: 1px solid color-mix(in srgb, var(--accent) 32%, var(--line)); border-radius: 12px; background: color-mix(in srgb, var(--accent) 4%, var(--panel-strong)); }
+.capital-history-range-copy { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
+.capital-history-range-copy small { color: var(--accent); font-size: 9px; font-weight: 800; letter-spacing: .08em; text-transform: uppercase; }
+.capital-history-range output { font-size: 13px; font-weight: 850; }
+.capital-history-range span { color: var(--muted); font-size: 9px; }
+.capital-history-range-slider { display: grid; gap: 0; min-width: 0; width: 100%; }
+.capital-history-range-slider > div { display: flex; justify-content: space-between; gap: 12px; }
+.capital-history-range input[type="range"] { width: 100%; min-width: 0; height: 30px; margin: 0; appearance: none; -webkit-appearance: none; background: transparent; cursor: grab; }
+.capital-history-range input[type="range"]::-webkit-slider-runnable-track { height: 8px; border: 1px solid color-mix(in srgb, var(--accent) 35%, var(--line)); border-radius: 999px; background: color-mix(in srgb, var(--accent) 16%, var(--panel-strong)); }
+.capital-history-range input[type="range"]::-webkit-slider-thumb { width: 22px; height: 22px; margin-top: -8px; border: 3px solid var(--panel); border-radius: 50%; appearance: none; -webkit-appearance: none; background: var(--accent); box-shadow: 0 1px 6px color-mix(in srgb, var(--ink) 24%, transparent); }
+.capital-history-range input[type="range"]::-moz-range-track { height: 8px; border: 1px solid color-mix(in srgb, var(--accent) 35%, var(--line)); border-radius: 999px; background: color-mix(in srgb, var(--accent) 16%, var(--panel-strong)); }
+.capital-history-range input[type="range"]::-moz-range-progress { height: 8px; border-radius: 999px; background: var(--accent); }
+.capital-history-range input[type="range"]::-moz-range-thumb { width: 18px; height: 18px; border: 3px solid var(--panel); border-radius: 50%; background: var(--accent); box-shadow: 0 1px 6px color-mix(in srgb, var(--ink) 24%, transparent); }
+.capital-history-range input[type="range"]:active { cursor: grabbing; }
+.capital-history-range input[type="range"]:focus-visible { outline: 3px solid color-mix(in srgb, var(--accent) 35%, transparent); outline-offset: 4px; }
 .capital-chart-wrap { position: relative; min-width: 0; }
 #capital-chart { display: block; width: 100%; height: 300px; margin: 8px 0 0; touch-action: pan-y; }
 .capital-chart-tooltip { position: absolute; z-index: 2; display: grid; gap: 3px; min-width: 130px; padding: 9px 11px; border: 1px solid var(--line); border-radius: 9px; background: var(--panel-strong); box-shadow: 0 8px 24px color-mix(in srgb, var(--ink) 12%, transparent); pointer-events: none; }
@@ -299,10 +314,6 @@ button:disabled { opacity: .52; cursor: not-allowed; }
 .capital-trend-toggle b { overflow: hidden; color: var(--ink); font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
 .capital-trend-toggle small { margin-top: 2px; overflow: hidden; color: var(--muted); font-size: 9px; text-overflow: ellipsis; white-space: nowrap; }
 .capital-trend-toggle.is-missing { opacity: .62; cursor: not-allowed; }
-.capital-change-note { display: flex; gap: 8px; align-items: baseline; padding: 9px 11px; border-radius: 9px; background: var(--panel-strong); font-size: 9px; }
-.capital-change-note b { flex: 0 0 auto; }
-.capital-change-note span { color: var(--muted); }
-.capital-change-note.is-anomaly { background: color-mix(in srgb, var(--danger) 8%, var(--panel)); color: var(--danger); }
 .trend-BINANCE { --trend-color: var(--accent); }
 .trend-HYPERLIQUID { --trend-color: var(--warning); }
 .trend-VAULT { --trend-color: var(--danger); }
@@ -346,6 +357,16 @@ button:disabled { opacity: .52; cursor: not-allowed; }
 .capital-blockers { margin-bottom: 8px; }
 .capital-blockers summary { color: var(--warning); cursor: pointer; font-weight: 800; }
 .capital-blockers p { max-width: 42rem; margin: 8px 0 0; color: var(--muted); line-height: 1.55; }
+.capital-operation-actions { display: flex; flex-wrap: wrap; gap: 6px 12px; margin-top: 8px; }
+.capital-wallet-handoff { margin-top: 10px; border: 1px solid var(--line); border-radius: 10px; background: var(--panel); }
+.capital-wallet-handoff > summary { cursor: pointer; padding: 10px 12px; color: var(--accent); font-weight: 800; }
+.capital-wallet-handoff[open] > summary { border-bottom: 1px solid var(--line); }
+.capital-wallet-handoff form, .wallet-handoff-facts { display: grid; gap: 9px; padding: 12px; }
+.wallet-handoff-facts span, .wallet-handoff-facts p { color: var(--muted); font-size: 11px; line-height: 1.5; }
+.wallet-handoff-facts code { overflow-wrap: anywhere; padding: 8px; border-radius: 7px; background: var(--surface); font-size: 10px; }
+.capital-wallet-handoff label { display: grid; gap: 5px; color: var(--muted); font-size: 10px; font-weight: 700; }
+.capital-wallet-handoff input, .capital-wallet-handoff select { width: 100%; min-width: 0; }
+.compact-actions { display: flex; flex-wrap: wrap; gap: 8px; }
 .direct-capital-confirm { display: flex; align-items: center; gap: 8px; min-height: 40px; padding: 9px 11px; border: 1px solid var(--line); border-radius: 9px; color: var(--ink); }
 .direct-capital-confirm input { width: 16px; height: 16px; margin: 0; accent-color: var(--accent); }
 .chart-empty { min-height: 180px; display: grid; place-items: center; color: var(--muted); border: 1px dashed var(--line); border-radius: 12px; }
@@ -793,10 +814,10 @@ dialog::backdrop { background: rgba(4, 12, 10, .56); backdrop-filter: blur(3px);
   .capital-chart-panel { padding: 14px 10px; }
   .chart-head { display: grid; gap: 10px; }
   .capital-chart-meta { display: grid; }
+  .capital-history-range { grid-template-columns: 1fr; gap: 9px; }
   #capital-chart { height: 270px; }
   .chart-legend { grid-template-columns: 1fr 1fr; }
   .capital-trend-toggle { padding: 8px; }
-  .capital-change-note { display: grid; }
   .capital-page > .stats { grid-template-columns: 1fr; }
   .capital-route-flow b { font-size: 16px; }
 }

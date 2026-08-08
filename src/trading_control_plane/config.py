@@ -115,6 +115,11 @@ class Settings(BaseSettings):
     binance_api_key: str | None = Field(default=None, repr=False)
     binance_api_secret: str | None = Field(default=None, repr=False)
     binance_recv_window_ms: int = Field(default=10_000, ge=1_000, le=60_000)
+    binance_capital_base_url: str = "https://api.binance.com"
+    binance_capital_api_key: str | None = Field(default=None, repr=False)
+    binance_capital_api_secret: str | None = Field(default=None, repr=False)
+    binance_capital_timeout_seconds: float = Field(default=8, ge=1, le=15)
+    binance_capital_withdraw_enabled: bool = False
     binance_live_order_send_enabled: bool = False
     binance_live_base_url: str = "https://papi.binance.com"
     binance_testnet_order_send_enabled: bool = False
@@ -158,6 +163,7 @@ class Settings(BaseSettings):
     capital_direct_network: Literal["ARBITRUM"] = "ARBITRUM"
     capital_direct_max_amount: Decimal | None = Field(default=None, gt=0)
     capital_direct_max_fee: Decimal | None = Field(default=None, ge=0)
+    capital_arbitrum_rpc_url: str | None = None
     safe_spending_enabled: bool = False
     safe_spending_arbitrum_rpc_url: str | None = None
     capital_direct_safe_address: str | None = None
@@ -224,6 +230,13 @@ class Settings(BaseSettings):
         parse_hip3_dexes(value)
         return value
 
+    @field_validator("binance_capital_base_url")
+    @classmethod
+    def require_official_binance_capital_url(cls, value: str) -> str:
+        if value.rstrip("/") != "https://api.binance.com":
+            raise ValueError("Binance capital API must use https://api.binance.com")
+        return value.rstrip("/")
+
     @field_validator(
         "notilt_agent_address",
         "notilt_ethereum_vault_address",
@@ -255,6 +268,12 @@ class Settings(BaseSettings):
             self.binance_api_secret
         ):
             raise ValueError("Binance read-only key and secret must be configured together")
+        if bool(self.binance_capital_api_key) != bool(self.binance_capital_api_secret):
+            raise ValueError("Binance capital key and secret must be configured together")
+        if self.binance_capital_withdraw_enabled and not (
+            self.binance_capital_api_key and self.binance_capital_api_secret
+        ):
+            raise ValueError("enabled Binance capital withdrawal requires dedicated credentials")
         direct_send_enabled = any(
             (
                 self.binance_live_order_send_enabled,

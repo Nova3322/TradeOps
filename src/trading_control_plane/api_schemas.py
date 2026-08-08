@@ -376,6 +376,92 @@ class DirectCapitalUnsignedPlanRequest(BaseModel):
     idempotency_key: str = Field(min_length=1, max_length=160)
 
 
+class DirectCapitalWalletSubmissionRequest(BaseModel):
+    expected_version: int = Field(ge=1)
+    stage: Literal[
+        "HYPERLIQUID_DEPOSIT",
+        "HYPERLIQUID_WITHDRAWAL",
+        "HYPERLIQUID_CLASS_TRANSFER",
+        "TREASURY_DEPOSIT",
+    ]
+    outcome: Literal["SUBMITTED", "CANCELLED"]
+    transaction_hash: str | None = Field(default=None, pattern=r"^0x[0-9a-fA-F]{64}$")
+    action_hash: str | None = Field(default=None, pattern=r"^0x[0-9a-fA-F]{64}$")
+    nonce: int | None = Field(default=None, ge=1)
+    final_confirmed: Literal[True]
+    idempotency_key: str = Field(min_length=1, max_length=160)
+
+    @model_validator(mode="after")
+    def validate_wallet_result(self) -> DirectCapitalWalletSubmissionRequest:
+        if self.outcome == "CANCELLED":
+            if self.transaction_hash is not None or self.action_hash is not None:
+                raise ValueError("cancelled wallet requests cannot include transaction evidence")
+            return self
+        if self.stage in {"HYPERLIQUID_DEPOSIT", "TREASURY_DEPOSIT"} and (
+            self.transaction_hash is None
+        ):
+            raise ValueError("onchain wallet submission requires an Arbitrum transaction hash")
+        if self.stage in {"HYPERLIQUID_WITHDRAWAL", "HYPERLIQUID_CLASS_TRANSFER"} and (
+            self.action_hash is None or self.nonce is None
+        ):
+            raise ValueError("Hyperliquid withdrawal submission requires action hash and nonce")
+        return self
+
+
+class DirectCapitalHyperliquidReceiptRequest(BaseModel):
+    expected_version: int = Field(ge=1)
+    stage: Literal[
+        "HYPERLIQUID_DEPOSIT_ARBITRUM",
+        "HYPERLIQUID_DEPOSIT_LEDGER",
+        "HYPERLIQUID_WITHDRAWAL_LEDGER",
+        "HYPERLIQUID_WITHDRAWAL_ARBITRUM",
+        "HYPERLIQUID_CLASS_TRANSFER_LEDGER",
+    ]
+    transaction_hash: str | None = Field(default=None, pattern=r"^0x[0-9a-fA-F]{64}$")
+    action_hash: str | None = Field(default=None, pattern=r"^0x[0-9a-fA-F]{64}$")
+    nonce: int | None = Field(default=None, ge=1)
+    idempotency_key: str = Field(min_length=1, max_length=160)
+
+    @model_validator(mode="after")
+    def validate_receipt_reference(self) -> DirectCapitalHyperliquidReceiptRequest:
+        if self.stage.endswith("ARBITRUM") and self.transaction_hash is None:
+            raise ValueError("Arbitrum receipt verification requires a transaction hash")
+        if self.stage.endswith("LEDGER") and self.action_hash is None:
+            raise ValueError("Hyperliquid ledger verification requires an action hash")
+        if self.stage in {
+            "HYPERLIQUID_WITHDRAWAL_LEDGER",
+            "HYPERLIQUID_CLASS_TRANSFER_LEDGER",
+        } and self.nonce is None:
+            raise ValueError("withdrawal ledger verification requires the signed action nonce")
+        return self
+
+
+class DirectCapitalTreasuryReceiptRequest(BaseModel):
+    expected_version: int = Field(ge=1)
+    transaction_hash: str = Field(pattern=r"^0x[0-9a-fA-F]{64}$")
+    idempotency_key: str = Field(min_length=1, max_length=160)
+
+
+class DirectCapitalBinanceSubmissionRequest(BaseModel):
+    expected_version: int = Field(ge=1)
+    final_confirmed: Literal[True]
+    confirmation_phrase: Literal["CONFIRM_BINANCE_WITHDRAWAL"]
+    idempotency_key: str = Field(min_length=1, max_length=160)
+
+
+class DirectCapitalBinanceReceiptRequest(BaseModel):
+    expected_version: int = Field(ge=1)
+    stage: Literal["BINANCE_DEPOSIT", "BINANCE_WITHDRAWAL"]
+    transaction_hash: str | None = Field(default=None, pattern=r"^0x[0-9a-fA-F]{64}$")
+    idempotency_key: str = Field(min_length=1, max_length=160)
+
+    @model_validator(mode="after")
+    def validate_binance_receipt(self) -> DirectCapitalBinanceReceiptRequest:
+        if self.stage == "BINANCE_DEPOSIT" and self.transaction_hash is None:
+            raise ValueError("Binance deposit verification requires the Arbitrum transaction hash")
+        return self
+
+
 class DirectCapitalConfigurationRequest(BaseModel):
     network: Literal["ARBITRUM"] = "ARBITRUM"
     asset: Literal["USDC"] = "USDC"

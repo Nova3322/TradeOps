@@ -1299,11 +1299,30 @@ def test_capital_web_projection_only_renders_live_records() -> None:
             `capitalHistoryWindow([
               {observed_at:"2026-08-01T09:00:00Z"},
               {observed_at:"2026-08-02T10:00:00Z"}
-            ], 24).length`,
+            ], Date.parse("2026-08-02T00:00:00Z"), Date.parse("2026-08-03T00:00:00Z")).length`,
             context,
           ),
           1,
         );
+        const fullRange = JSON.parse(vm.runInContext(
+          `JSON.stringify(capitalHistoryRange([
+            {observed_at:"2026-08-01T09:00:00Z"},
+            {observed_at:"2026-08-02T10:00:00Z"}
+          ], 1000))`,
+          context,
+        ));
+        assert.equal(fullRange.history.length, 2);
+        assert.equal(fullRange.complete, true);
+        const narrowRange = JSON.parse(vm.runInContext(
+          `JSON.stringify(capitalHistoryRange([
+            {observed_at:"2026-08-01T09:00:00Z"},
+            {observed_at:"2026-08-02T06:00:00Z"},
+            {observed_at:"2026-08-02T10:00:00Z"}
+          ], 100))`,
+          context,
+        ));
+        assert.equal(narrowRange.history.length, 1);
+        assert.equal(narrowRange.complete, false);
         assert.equal(
           vm.runInContext(
             `capitalSeriesLargestChange(${JSON.stringify(staleBinance)})`,
@@ -1406,11 +1425,16 @@ def test_capital_web_projection_only_renders_live_records() -> None:
     app_source = app_path.read_text()
     assert "历史曲线不会冒充当前净值" in app_source
     assert "纵轴至少保留 0.05% 观察范围" in app_source
-    assert "跨断档数据不会比较" in app_source
+    assert "capital-change-note" not in app_source
     assert "capitalChartResizeObserver = new ResizeObserver" in app_source
     assert "function compactCapitalChartPoints" in app_source
     assert "history_gap_tolerance_seconds" in app_source
     assert "function capitalHistoryWindow" in app_source
+    assert "function capitalHistoryRange" in app_source
+    assert "data-capital-history-range" in app_source
+    assert "全部历史" in app_source
+    assert "资金曲线时间范围" in app_source
+    assert "条数据库记录" not in app_source
     assert 'data-label="数据状态"' in app_source
     assert 'class="table-wrap is-scrollable capital-operation-table"' in app_source
     assert ".capital-balance-table td::before" in stylesheet

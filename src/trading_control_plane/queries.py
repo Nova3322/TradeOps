@@ -1008,10 +1008,11 @@ class TradingQueries:
                     session.scalars(
                         observation_query.order_by(
                             AccountEquityObservation.observed_at.desc()
-                        ).limit(5_000)
+                        )
                     ).all()
                 )
             )
+            visible_observations = [item for item in observations if can_view_history(item)]
             risk_policy = session.scalar(select(RiskPolicy).where(RiskPolicy.active))
             max_fact_age = timedelta(
                 seconds=(risk_policy.max_fact_age_seconds if risk_policy is not None else 300)
@@ -1203,9 +1204,19 @@ class TradingQueries:
                         "usd_equity": (None if item.usd_equity is None else str(item.usd_equity)),
                         "observed_at": _iso(item.observed_at),
                     }
-                    for item in observations
-                    if can_view_history(item)
+                    for item in visible_observations
                 ],
+                "history_retention": {
+                    "complete": True,
+                    "minimum_interval_seconds": 60,
+                    "first_observed_at": _iso(visible_observations[0].observed_at)
+                    if visible_observations
+                    else None,
+                    "last_observed_at": _iso(visible_observations[-1].observed_at)
+                    if visible_observations
+                    else None,
+                    "stored_observations": len(visible_observations),
+                },
                 "net_worth": {
                     "environment": "LIVE",
                     "currency": "USD",
