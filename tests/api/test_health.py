@@ -112,13 +112,14 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
 
     assert response.status_code == 200
     assert "交易控制台" in response.text
-    assert "/assets/app.js?v=131" in response.text
-    assert "/assets/styles.css?v=50" in response.text
+    assert "/assets/app.js?v=133" in response.text
+    assert "/assets/styles.css?v=52" in response.text
     assert 'aria-label="交易控制台首页"' in response.text
     assert '<a href="/" data-link><span>⌂</span>当前任务</a>' in response.text
     assert '<span>⌁</span>实时机会</a>' in response.text
     assert '<span>¤</span>资金中心</a>' in response.text
     assert 'id="mobile-nav-toggle"' in response.text
+    assert 'id="scope-switcher"' in response.text
     assert 'id="confirm-dialog"' in response.text
 
     for route in (
@@ -174,6 +175,9 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
     assert 'href="/proposals/new"' not in response.text
     assert "Binance只读" not in response.text
     assert "const routeCapability = (path)" in app_javascript.text
+    assert "function renderScopeSetup()" in app_javascript.text
+    assert "api('/api/scopes/select'" in app_javascript.text
+    assert "api('/api/admin/team-members'" in app_javascript.text
     assert "当前任务只显示你的资金职责" in app_javascript.text
     assert "api('/api/risk-controls').catch(error => ({error}))" in app_javascript.text
     assert "riskControl.actions?.review_restore?.allowed === true" in app_javascript.text
@@ -186,7 +190,8 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
     assert "function handleUnauthorizedResponse" in app_javascript.text
     assert "function confirmAction" in app_javascript.text
     assert "批准这份冻结提案？" in app_javascript.text
-    assert "最高管理员直接批准本人提案" in app_javascript.text
+    assert "最高管理员直接批准本人提案" not in app_javascript.text
+    assert "proposal.admin_approve" not in app_javascript.text
     assert "批准或拒绝前都需要再次确认；不会直接下单" in app_javascript.text
     assert "二次强验证" not in app_javascript.text
     assert "用户名或密码不正确" in app_javascript.text

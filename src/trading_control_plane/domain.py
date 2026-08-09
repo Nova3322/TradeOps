@@ -34,6 +34,11 @@ class Role(StrEnum):
     SYSTEM_ADMIN = "SYSTEM_ADMIN"
 
 
+class WorkspaceRole(StrEnum):
+    MEMBER = "MEMBER"
+    ADMIN = "ADMIN"
+
+
 class PrincipalType(StrEnum):
     HUMAN = "HUMAN"
     SERVICE = "SERVICE"

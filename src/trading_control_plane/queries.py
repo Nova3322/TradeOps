@@ -33,12 +33,16 @@ from trading_control_plane.models import (
     RoleAssignment,
     RuntimeSourceHealth,
     SenderLease,
+    Team,
+    TeamMembership,
     TradingAuthorization,
     TransferAuthorization,
     TransferProposal,
     User,
     VenueFill,
     VenueOrder,
+    Workspace,
+    WorkspaceMembership,
 )
 from trading_control_plane.notilt import USD_STABLE_ASSETS
 from trading_control_plane.perptape import PerptapeCandidate, PerptapeFeedSnapshot
@@ -123,15 +127,94 @@ class TradingQueries:
             user = session.get(User, user_id)
             if user is None or not user.active:
                 raise DomainRejected("SESSION_REVOKED", "internal user is inactive or missing")
+            workspace_memberships = session.execute(
+                select(WorkspaceMembership, Workspace)
+                .join(Workspace, Workspace.workspace_id == WorkspaceMembership.workspace_id)
+                .where(
+                    WorkspaceMembership.user_id == user_id,
+                    WorkspaceMembership.active,
+                    Workspace.active,
+                )
+                .order_by(Workspace.name, Workspace.workspace_id)
+            ).all()
+            team_memberships = session.execute(
+                select(TeamMembership, Team)
+                .join(Team, Team.team_id == TeamMembership.team_id)
+                .where(
+                    TeamMembership.user_id == user_id,
+                    TeamMembership.active,
+                    Team.active,
+                )
+                .order_by(Team.name, Team.team_id)
+            ).all()
             roles = session.scalars(
                 select(RoleAssignment)
-                .where(RoleAssignment.user_id == user_id)
+                .where(
+                    RoleAssignment.user_id == user_id,
+                    RoleAssignment.team_id == user.active_team_id,
+                )
                 .order_by(RoleAssignment.role)
             ).all()
+            active_workspace = next(
+                (
+                    workspace
+                    for membership, workspace in workspace_memberships
+                    if membership.workspace_id == user.active_workspace_id
+                ),
+                None,
+            )
+            active_team = next(
+                (
+                    team
+                    for membership, team in team_memberships
+                    if membership.team_id == user.active_team_id
+                    and team.workspace_id == user.active_workspace_id
+                ),
+                None,
+            )
             return {
                 "user_id": str(user.user_id),
                 "username": user.username,
                 "auth_version": user.auth_version,
+                "active_workspace": (
+                    None
+                    if active_workspace is None
+                    else {
+                        "workspace_id": str(active_workspace.workspace_id),
+                        "name": active_workspace.name,
+                        "slug": active_workspace.slug,
+                    }
+                ),
+                "active_team": (
+                    None
+                    if active_team is None
+                    else {
+                        "team_id": str(active_team.team_id),
+                        "workspace_id": str(active_team.workspace_id),
+                        "name": active_team.name,
+                        "slug": active_team.slug,
+                        "trading_enabled": active_team.trading_enabled,
+                    }
+                ),
+                "workspaces": [
+                    {
+                        "workspace_id": str(workspace.workspace_id),
+                        "name": workspace.name,
+                        "slug": workspace.slug,
+                        "role": membership.role,
+                    }
+                    for membership, workspace in workspace_memberships
+                ],
+                "teams": [
+                    {
+                        "team_id": str(team.team_id),
+                        "workspace_id": str(team.workspace_id),
+                        "name": team.name,
+                        "slug": team.slug,
+                        "trading_enabled": team.trading_enabled,
+                    }
+                    for _membership, team in team_memberships
+                ],
                 "roles": [
                     {
                         "role": role.role,
@@ -146,16 +229,33 @@ class TradingQueries:
         if not self.service.can_user(actor_id, "user.manage"):
             raise DomainRejected("RBAC_DENIED", "user access management requires SYSTEM_ADMIN")
         with self.database.session_factory() as session:
+            actor = session.get(User, actor_id)
+            if actor is None or actor.active_team_id is None:
+                raise DomainRejected("TEAM_CONTEXT_REQUIRED", "select an active team")
             users = session.scalars(
                 select(User)
+                .join(TeamMembership, TeamMembership.user_id == User.user_id)
                 .where(User.principal_type == PrincipalType.HUMAN.value)
+                .where(TeamMembership.team_id == actor.active_team_id)
                 .order_by(User.username)
             ).all()
             assignments = session.scalars(
                 select(RoleAssignment)
-                .where(RoleAssignment.user_id.in_([item.user_id for item in users]))
+                .where(
+                    RoleAssignment.user_id.in_([item.user_id for item in users]),
+                    RoleAssignment.team_id == actor.active_team_id,
+                )
                 .order_by(RoleAssignment.role)
             ).all()
+            memberships = {
+                item.user_id: item
+                for item in session.scalars(
+                    select(TeamMembership).where(
+                        TeamMembership.team_id == actor.active_team_id,
+                        TeamMembership.user_id.in_([item.user_id for item in users]),
+                    )
+                )
+            }
             by_user: dict[UUID, list[dict[str, Any]]] = {item.user_id: [] for item in users}
             for assignment in assignments:
                 by_user[assignment.user_id].append(
@@ -171,7 +271,9 @@ class TradingQueries:
                     "username": user.username,
                     "identity_bound": user.identity_subject is not None,
                     "password_configured": user.password_hash is not None,
-                    "active": user.active,
+                    "active": user.active and memberships[user.user_id].active,
+                    "workspace_id": str(actor.active_workspace_id),
+                    "team_id": str(actor.active_team_id),
                     "roles": by_user[user.user_id],
                     "created_at": _iso(user.created_at),
                     "is_current_user": user.user_id == actor_id,

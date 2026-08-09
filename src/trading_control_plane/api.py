@@ -32,7 +32,6 @@ from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 from trading_control_plane import __version__
 from trading_control_plane.api_schemas import (
     AccountEquityFactRequest,
-    AdminDirectApproveRequest,
     AuthorizationRequest,
     AutoAddRequest,
     AutomaticExitRequest,
@@ -81,13 +80,17 @@ from trading_control_plane.api_schemas import (
     RiskControlDirectRestoreRequest,
     RiskDecisionRequest,
     RiskTightenRequest,
+    ScopeSelectRequest,
     SenderLeaseRequest,
     ShadowFillRequest,
     ShadowSendRequest,
     SystemProposalRequest,
+    TeamCreateRequest,
+    TeamMemberInviteRequest,
     TransferAuthorizationRequest,
     TransferProposalRequest,
     TransferReviewRequest,
+    WorkspaceCreateRequest,
 )
 from trading_control_plane.auth import SessionIdentity, SignedTokenService
 from trading_control_plane.binance import (
@@ -222,6 +225,10 @@ def _domain_status(code: str) -> int:
         "ACTION_REFERENCE_SCOPE_INVALID",
         "ACTION_REFERENCE_EXPIRED",
         "SELF_ACCESS_CHANGE_DENIED",
+        "WORKSPACE_ACCESS_DENIED",
+        "WORKSPACE_ADMIN_REQUIRED",
+        "TEAM_ACCESS_DENIED",
+        "WORKSPACE_MEMBERSHIP_INACTIVE",
     }:
         return status.HTTP_403_FORBIDDEN
     if code.endswith("_NOT_FOUND"):
@@ -237,6 +244,12 @@ def _domain_status(code: str) -> int:
         "PROPOSAL_NOT_APPROVED",
         "INITIAL_INTENT_ALREADY_EXISTS",
         "USERNAME_CONFLICT",
+        "WORKSPACE_SLUG_CONFLICT",
+        "TEAM_SLUG_CONFLICT",
+        "TEAM_MEMBERSHIP_CONFLICT",
+        "WORKSPACE_CONTEXT_REQUIRED",
+        "TEAM_CONTEXT_REQUIRED",
+        "TEAM_NOT_OPERATIONAL",
         "LAST_SYSTEM_ADMIN_REQUIRED",
     }:
         return status.HTTP_409_CONFLICT
@@ -1049,6 +1062,58 @@ def create_app(
             "expires_at": identity.expires_at.isoformat(),
         }
 
+    @app.get("/api/scopes")
+    def scopes(identity: SessionIdentity = identity_dependency) -> dict[str, Any]:
+        return {"data": queries().user_context(identity.user_id), "as_of": _now().isoformat()}
+
+    @app.post("/api/workspaces")
+    def create_workspace(
+        payload: WorkspaceCreateRequest,
+        identity: SessionIdentity = identity_dependency,
+    ) -> dict[str, Any]:
+        workspace_id = service().create_workspace(
+            actor_id=identity.user_id,
+            name=payload.name,
+            slug=payload.slug,
+            idempotency_key=payload.idempotency_key,
+            now=_now(),
+        )
+        return {
+            "workspace_id": str(workspace_id),
+            "session": queries().user_context(identity.user_id),
+        }
+
+    @app.post("/api/teams")
+    def create_team(
+        payload: TeamCreateRequest,
+        identity: SessionIdentity = identity_dependency,
+    ) -> dict[str, Any]:
+        team_id = service().create_team(
+            actor_id=identity.user_id,
+            name=payload.name,
+            slug=payload.slug,
+            idempotency_key=payload.idempotency_key,
+            now=_now(),
+        )
+        return {
+            "team_id": str(team_id),
+            "session": queries().user_context(identity.user_id),
+        }
+
+    @app.post("/api/scopes/select")
+    def select_scope(
+        payload: ScopeSelectRequest,
+        identity: SessionIdentity = identity_dependency,
+    ) -> dict[str, Any]:
+        service().select_scope(
+            actor_id=identity.user_id,
+            workspace_id=payload.workspace_id,
+            team_id=payload.team_id,
+            idempotency_key=payload.idempotency_key,
+            now=_now(),
+        )
+        return {"session": queries().user_context(identity.user_id)}
+
     @app.get("/api/admin/users")
     def managed_users(
         identity: SessionIdentity = identity_dependency,
@@ -1067,6 +1132,25 @@ def create_app(
             payload.account_scope,
             payload.venue_scope,
             payload.password,
+            now=_now(),
+        )
+        return {
+            "user_id": str(user_id),
+            "data": queries().managed_users(identity.user_id),
+        }
+
+    @app.post("/api/admin/team-members")
+    def add_team_member(
+        payload: TeamMemberInviteRequest,
+        identity: SessionIdentity = identity_dependency,
+    ) -> dict[str, Any]:
+        user_id = service().add_team_member(
+            username=payload.username,
+            roles=[Role(value) for value in payload.roles],
+            actor_id=identity.user_id,
+            account_scope=payload.account_scope,
+            venue_scope=payload.venue_scope,
+            idempotency_key=payload.idempotency_key,
             now=_now(),
         )
         return {
@@ -1102,14 +1186,10 @@ def create_app(
             and resolved_settings.environment in {"local", "test"}
         ):
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND)
-        if payload.action in {"proposal.approve", "proposal.admin_approve"}:
+        if payload.action == "proposal.approve":
             current_version = queries().proposal_version(payload.object_id)
             detail = queries().proposal_detail(identity.user_id, payload.object_id)
-            review_action = (
-                "proposal.review"
-                if payload.action == "proposal.approve"
-                else "proposal.admin_approve"
-            )
+            review_action = "proposal.review"
         elif payload.action == "capital.approve":
             current_version = queries().transfer_proposal_version(payload.object_id)
             detail = queries().transfer_proposal_detail(identity.user_id, payload.object_id)
@@ -1866,34 +1946,6 @@ def create_app(
             "proposal_id": str(proposal_id),
             "status": result.value,
             "detail": detail,
-        }
-
-    @app.post("/api/proposals/{proposal_id}/admin-approve")
-    def admin_direct_approve_proposal(
-        proposal_id: UUID,
-        payload: AdminDirectApproveRequest,
-        identity: SessionIdentity = identity_dependency,
-    ) -> dict[str, Any]:
-        now = _now()
-        token_service.verify_action_grant(
-            payload.action_grant,
-            user_id=identity.user_id,
-            action="proposal.admin_approve",
-            object_id=proposal_id,
-            object_version=payload.expected_version,
-            now=now,
-        )
-        result = service().admin_direct_approve_proposal(
-            proposal_id,
-            identity.user_id,
-            payload.reason,
-            payload.expected_version,
-            now=now,
-        )
-        return {
-            "proposal_id": str(proposal_id),
-            "status": result.value,
-            "detail": queries().proposal_detail(identity.user_id, proposal_id),
         }
 
     @app.post("/api/proposals/{proposal_id}/risk-decisions")

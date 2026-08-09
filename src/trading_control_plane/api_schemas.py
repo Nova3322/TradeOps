@@ -65,6 +65,39 @@ class ManagedUserAccessRequest(BaseModel):
         return value
 
 
+class WorkspaceCreateRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=120)
+    slug: str | None = Field(default=None, min_length=1, max_length=80)
+    idempotency_key: str = Field(min_length=1, max_length=160)
+
+
+class TeamCreateRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=120)
+    slug: str | None = Field(default=None, min_length=1, max_length=80)
+    idempotency_key: str = Field(min_length=1, max_length=160)
+
+
+class TeamMemberInviteRequest(BaseModel):
+    username: str = Field(min_length=1, max_length=120, pattern=r"^[A-Za-z0-9._-]+$")
+    roles: list[AccessRole] = Field(min_length=1, max_length=6)
+    account_scope: str | None = Field(default=None, min_length=1, max_length=120)
+    venue_scope: str | None = Field(default=None, min_length=1, max_length=64)
+    idempotency_key: str = Field(min_length=1, max_length=160)
+
+    @field_validator("roles")
+    @classmethod
+    def unique_roles(cls, value: list[AccessRole]) -> list[AccessRole]:
+        if len(value) != len(set(value)):
+            raise ValueError("roles must not contain duplicates")
+        return value
+
+
+class ScopeSelectRequest(BaseModel):
+    workspace_id: UUID
+    team_id: UUID | None = None
+    idempotency_key: str = Field(min_length=1, max_length=160)
+
+
 class ManualProposalRequest(BaseModel):
     environment: Literal["SHADOW", "TESTNET", "LIVE"] = "SHADOW"
     account_id: str = Field(min_length=1, max_length=120)
@@ -188,16 +221,9 @@ class ReviewRequest(BaseModel):
     action_grant: str | None = None
 
 
-class AdminDirectApproveRequest(BaseModel):
-    reason: str = Field(min_length=5, max_length=1_000)
-    expected_version: int = Field(ge=1)
-    action_grant: str
-
-
 class MockStepUpRequest(BaseModel):
     action: Literal[
         "proposal.approve",
-        "proposal.admin_approve",
         "capital.approve",
         "risk.restore.review",
         "risk.restore.execute",

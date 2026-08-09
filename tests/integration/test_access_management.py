@@ -150,8 +150,12 @@ async def exercise_access_management(database: Database) -> None:
             is False
         )
 
-        denied_login = await client.post("/api/auth/mock/login", json={"username": "reviewer-only"})
-        assert denied_login.status_code == 401, denied_login.text
+        team_disabled_login = await client.post(
+            "/api/auth/mock/login", json={"username": "reviewer-only"}
+        )
+        assert team_disabled_login.status_code == 200, team_disabled_login.text
+        assert team_disabled_login.json()["session"]["active_team"] is None
+        assert team_disabled_login.json()["session"]["roles"] == []
 
     with database.session_factory() as session:
         event_types = set(session.scalars(select(AuditEvent.event_type)).all())
@@ -270,12 +274,15 @@ async def exercise_six_identity_permission_matrix(database: Database) -> None:
                 json={"roles": ["OBSERVER"], "active": False},
             )
             assert disabled.status_code == 200, disabled.text
-            assert (await disabled_http.get("/api/auth/session")).status_code == 401
-            assert (await disabled_http.get("/admin/users")).status_code == 401
-            denied_login = await disabled_http.post(
+            scoped_session = await disabled_http.get("/api/auth/session")
+            assert scoped_session.status_code == 200
+            assert scoped_session.json()["session"]["active_team"] is None
+            assert (await disabled_http.get("/api/admin/users")).status_code == 403
+            relogin = await disabled_http.post(
                 "/api/auth/mock/login", json={"username": "matrix-disabled"}
             )
-            assert denied_login.status_code == 401
+            assert relogin.status_code == 200
+            assert relogin.json()["session"]["active_team"] is None
 
     assert service.can_user(admin_id, "user.manage") is True
 

@@ -1,6 +1,7 @@
 const main = document.querySelector('#main');
 const sidebar = document.querySelector('#sidebar');
 const identityChip = document.querySelector('#identity-chip');
+const scopeSwitcher = document.querySelector('#scope-switcher');
 const environmentBadge = document.querySelector('#environment-badge');
 const languageToggle = document.querySelector('#language-toggle');
 const mobileNavToggle = document.querySelector('#mobile-nav-toggle');
@@ -807,6 +808,11 @@ const apiErrorGuidance = {
   PERPTAPE_CACHE_INVALID:'Perptape 已保存的数据无法读取，请联系交易运维人员处理。',
   INSTRUMENT_UNAVAILABLE:'该交易合约尚未进入可交易合约目录，暂时不能创建提案。',
   RBAC_DENIED:'当前身份没有查看或执行此操作的权限。',
+  TEAM_NOT_OPERATIONAL:'当前团队仍处于安全配置阶段。请先完成团队账户、风险政策和数据范围配置。',
+  TEAM_CONTEXT_REQUIRED:'请先选择一个当前团队。',
+  WORKSPACE_CONTEXT_REQUIRED:'请先选择一个当前 Workspace。',
+  TEAM_ACCESS_DENIED:'你不是该团队的有效成员，系统已拒绝切换。',
+  WORKSPACE_ACCESS_DENIED:'你不是该 Workspace 的有效成员，系统已拒绝切换。',
   CAPABILITY_FORBIDDEN:'当前身份没有查看或执行此操作的权限。',
   LIVE_SCOPE_CONFIGURATION_REQUIRED:'实盘账户或交易所范围尚未配置完整。',
   NOTILT_RELEASE_BUDGET_MISSING:'当前资产没有可用的 NoTilt 实时额度，系统不会生成释放请求。',
@@ -871,6 +877,9 @@ const capabilityRoles = {
 const hasCapability = (capability) => (
   roleNames().includes('SYSTEM_ADMIN')
   || (capabilityRoles[capability] || []).some(role => roleNames().includes(role))
+);
+const currentWorkspaceMembership = () => (session?.workspaces || []).find(
+  workspace => workspace.workspace_id === session?.active_workspace?.workspace_id
 );
 const routeCapability = (path) => {
   if (path === '/') return null;
@@ -1018,12 +1027,22 @@ function showApiError(error, target = null) {
 function setShell(loggedIn) {
   sidebar.hidden = !loggedIn;
   identityChip.hidden = !loggedIn;
+  scopeSwitcher.hidden = !loggedIn;
   mobileNavToggle.hidden = !loggedIn;
   if (loggedIn) {
+    const currentWorkspaceId = session.active_workspace?.workspace_id || '';
+    const currentTeamId = session.active_team?.team_id || '';
+    scopeSwitcher.innerHTML = (session.workspaces || []).map(workspace => {
+      const teams = (session.teams || []).filter(team => team.workspace_id === workspace.workspace_id);
+      const workspaceOnly = `<option value="${escapeHtml(`${workspace.workspace_id}:`)}" ${workspace.workspace_id === currentWorkspaceId && !currentTeamId ? 'selected' : ''}>${escapeHtml(workspace.name)} / 选择团队</option>`;
+      const teamOptions = teams.map(team => `<option value="${escapeHtml(`${workspace.workspace_id}:${team.team_id}`)}" ${team.team_id === currentTeamId ? 'selected' : ''}>${escapeHtml(workspace.name)} / ${escapeHtml(team.name)}</option>`).join('');
+      return `<optgroup label="${escapeHtml(workspace.name)}">${workspaceOnly}${teamOptions}</optgroup>`;
+    }).join('');
     const rolePriority = ['SYSTEM_ADMIN','TREASURY_ADMIN','OPERATOR','REVIEWER','PROPOSER','OBSERVER'];
     const primaryRole = rolePriority.find(role => roleNames().includes(role));
     const identity = `${session.username} · ${localizedText(primaryRole ? fmtRole(primaryRole) : '未分配角色')}`;
-    const identityDetail = `${session.username} · ${roleNames().map(role => localizedText(fmtRole(role))).join(' / ') || localizedText('未分配角色')}`;
+    const scopeDetail = `${session.active_workspace?.name || '未选择 Workspace'} / ${session.active_team?.name || '未选择团队'}`;
+    const identityDetail = `${session.username} · ${scopeDetail} · ${roleNames().map(role => localizedText(fmtRole(role))).join(' / ') || localizedText('未分配角色')}`;
     identityChip.textContent = identity;
     identityChip.title = identityDetail;
     mobileSessionSummary.textContent = identity;
@@ -1194,6 +1213,11 @@ async function route() {
     return;
   }
   const path = location.pathname;
+  if (!session.active_workspace || !session.active_team || (!session.active_team.trading_enabled && path !== '/admin/users')) {
+    renderScopeSetup();
+    enhanceRenderedPage();
+    return;
+  }
   const requiredCapability = routeCapability(path);
   if (requiredCapability && !hasCapability(requiredCapability)) {
     main.innerHTML = `<section class="empty-state"><div><p class="eyebrow">权限范围</p><h2>当前职责不包含这个页面</h2><p>此页面需要“${escapeHtml(capabilityLabel(requiredCapability))}”权限。侧栏只展示当前身份可用入口；直接打开链接也不会绕过服务端权限。</p><div class="toolbar empty-actions"><a class="secondary" href="/" data-link>返回当前任务</a>${hasCapability('capital.view') ? '<a class="primary" href="/capital" data-link>进入资金中心</a>' : ''}</div></div></section>`;
@@ -2072,11 +2096,6 @@ async function renderProposalDetail(id) {
   const isExpired = item.status === 'PENDING_REVIEW' && new Date(item.expires_at).getTime() <= Date.now();
   const launchWindowExpired = proposalLaunchWindowExpired(item);
   const canReview = Boolean(item.actionable_for_current_user);
-  const canAdminDirectApprove = roleNames().includes('SYSTEM_ADMIN')
-    && item.status === 'PENDING_REVIEW'
-    && item.source === 'MANUAL'
-    && item.proposer_id === session.user_id
-    && !isExpired;
   const canOperate = roleNames().includes('OPERATOR') || roleNames().includes('SYSTEM_ADMIN');
   const details = item.frozen_payload?.details || {};
   const candidate = details.candidate || {};
@@ -2172,12 +2191,11 @@ async function renderProposalDetail(id) {
       <article class="card frozen-scope"><div class="card-heading"><div><p class="eyebrow">已保存参数</p><h2>提案范围</h2></div><span class="status-pill">不可编辑</span></div><dl class="definition-grid spacious">${definition('账户', '默认生产账户')}${definition('创建人', item.source === 'SYSTEM' ? '系统自动创建' : item.proposer_username || shortId(item.proposer_id))}${definition('交易所', item.venue)}${definition('方向', fmtDirection(item.direction))}${definition('风险档位', fmtRisk(item.risk_tier))}${definition('限价', fmtNumber(details.limit_price))}${definition('有效期 / 结果', `${fmtDate(proposalExpiryPresentation(item).at)} · ${proposalExpiryPresentation(item).state}`)}${definition('自动加仓', details.allow_auto_add ? `允许 · ${details.requested_adds} 次` : '关闭')}${definition('加仓触发价', fmtNumber(details.add_trigger_price))}${definition('来源候选', item.source === 'SYSTEM' ? '已冻结来源快照' : '人工创建')}${definition('来源快照时间', fmtDate(item.source_observed_at))}</dl></article>
       <article class="card review-trail"><div class="card-heading"><div><p class="eyebrow">审核记录</p><h2>审核记录</h2></div><span class="subtle">${item.approvals.length} 条记录</span></div>${item.approvals.length ? `<div class="review-timeline">${item.approvals.map(a => `<div class="review-event"><span class="${a.decision === 'APPROVE' ? 'approve-dot' : 'reject-dot'}"></span><div><b>${a.decision === 'APPROVE' ? '批准提案' : '拒绝提案'}</b><p>${escapeHtml(a.reason)}</p><small>${escapeHtml(a.reviewer_username || shortId(a.reviewer_id))} · ${fmtDate(a.created_at)}</small></div></div>`).join('')}</div>` : '<div class="empty-inline"><b>尚无审核记录</b><span>审核人的独立判断会按时间出现在这里。</span></div>'}</article>
     </div><aside class="stack proposal-actions-column">
-      <article class="card next-action tone-${nextAction.tone}"><p class="eyebrow">下一步</p><h2>${escapeHtml(nextAction.title)}</h2><p>${escapeHtml(nextAction.copy)}</p>${item.status === 'PENDING_REVIEW' && (canReview || canAdminDirectApprove) ? `<label>审核意见<span class="field-help">说明你核对了什么，以及判断依据</span><textarea id="review-reason" rows="4">已核对交易逻辑、保存参数与最大风险边界</textarea></label>${canReview ? '<div class="review-actions"><button class="primary" data-approve>批准提案</button><button class="danger" data-reject>拒绝提案</button></div>' : ''}${canAdminDirectApprove ? '<button class="secondary wide-action" data-admin-direct-approve>最高管理员直接批准本人提案</button><p class="microcopy">仅限本人创建的人工提案；需再次确认并获取短时操作凭证。只批准冻结提案，不运行风控、不授权、不创建订单。</p>' : '<p class="microcopy">批准或拒绝前都需要再次确认；不会直接下单。</p>'}<div class="form-error" id="review-error"></div>` : ''}${executionAction}<div class="form-error" id="execution-error"></div></article>
+      <article class="card next-action tone-${nextAction.tone}"><p class="eyebrow">下一步</p><h2>${escapeHtml(nextAction.title)}</h2><p>${escapeHtml(nextAction.copy)}</p>${item.status === 'PENDING_REVIEW' && canReview ? `<label>审核意见<span class="field-help">说明你核对了什么，以及判断依据</span><textarea id="review-reason" rows="4">已核对交易逻辑、保存参数与最大风险边界</textarea></label><div class="review-actions"><button class="primary" data-approve>批准提案</button><button class="danger" data-reject>拒绝提案</button></div><p class="microcopy">批准或拒绝前都需要再次确认；不会直接下单。</p><div class="form-error" id="review-error"></div>` : ''}${executionAction}<div class="form-error" id="execution-error"></div></article>
       <article class="card risk-engine-card"><div class="card-heading"><div><p class="eyebrow">风险检查</p><h2>${launchWindowExpired ? '最后一次风险检查' : '系统允许开多少'}</h2></div>${item.risk_decision ? `<span class="status-pill status-${escapeHtml(item.risk_decision.result)}">${escapeHtml(fmtStatus(item.risk_decision.result))}</span>` : '<span class="status-pill">未运行</span>'}</div>${riskDecisionPanel}</article>
       <article class="card authorization-card"><div class="card-heading"><div><p class="eyebrow">限时授权</p><h2>这份许可还能做什么</h2></div><span class="status-pill ${authorizationUsable ? 'status-APPROVED' : authorizationDone ? 'status-EXPIRED' : ''}">${authorizationState}</span></div>${authorizationPanel}</article>
     </aside></div></section>`;
   document.querySelector('[data-approve]')?.addEventListener('click', (event) => approveProposal(item, event.currentTarget));
-  document.querySelector('[data-admin-direct-approve]')?.addEventListener('click', (event) => adminDirectApproveProposal(item, event.currentTarget));
   document.querySelector('[data-reject]')?.addEventListener('click', (event) => rejectProposal(item, event.currentTarget));
   document.querySelector('[data-risk]')?.addEventListener('click', (event) => runRisk(item, event.currentTarget));
   document.querySelector('[data-authorize]')?.addEventListener('click', (event) => authorize(item, event.currentTarget));
@@ -2196,18 +2214,6 @@ async function approveProposal(item, button) {
       await api(`/api/proposals/${item.proposal_id}/reviews`, {method:'POST', body:JSON.stringify({decision:'APPROVE', reason:document.querySelector('#review-reason').value, expected_version:item.version, action_grant:grant.action_grant})});
       showToast('审核结果已记录'); await route();
     } catch (error) { showApiError(error, errorBox); }
-  });
-}
-
-async function adminDirectApproveProposal(item, button) {
-  const confirmed = await confirmAction({title:'最高管理员直接批准本人提案？', message:'仅本人创建的人工提案可走这条路径。系统会跳过独立审核人数要求，但仍只批准当前冻结提案；不会运行风险检查、签发交易授权、创建订单或下单。', confirmLabel:'确认并批准'});
-  if (!confirmed) return;
-  await withPending(button, '批准中…', async () => {
-    try {
-      const grant = await api('/api/auth/mock/step-up', {method:'POST', body:JSON.stringify({action:'proposal.admin_approve', object_id:item.proposal_id, object_version:item.version})});
-      await api(`/api/proposals/${item.proposal_id}/admin-approve`, {method:'POST', body:JSON.stringify({reason:document.querySelector('#review-reason').value, expected_version:item.version, action_grant:grant.action_grant})});
-      showToast('最高管理员直接批准已记录；仍需风险检查与新的短期授权'); await route();
-    } catch (error) { showApiError(error, document.querySelector('#review-error')); }
   });
 }
 
@@ -3786,6 +3792,93 @@ function factTable(title, headers, rows, emptyCopy = '当前没有已保存的�
   return `<section><h2>${escapeHtml(title)}</h2>${rows ? `<div class="table-scroll-hint venue-fact-scroll-hint">左右滑动查看完整${escapeHtml(title)}</div><div class="table-wrap is-scrollable venue-fact-table"><table><thead><tr>${headers}</tr></thead><tbody>${rows}</tbody></table></div>` : `<div class="callout ${emptyAttention ? 'tone-attention' : ''}">${escapeHtml(emptyCopy)}</div>`}</section>`;
 }
 
+function scopeCreationPanels({compact = false} = {}) {
+  const workspaceAdmin = currentWorkspaceMembership()?.role === 'ADMIN';
+  return `<div class="scope-creation-grid ${compact ? 'is-compact' : ''}">
+    <form class="card scope-create-form" id="create-workspace-form">
+      <div><p class="eyebrow">新的组织边界</p><h2>创建 Workspace</h2><p>创建者成为 Workspace 管理员。新 Workspace 不继承当前团队的成员、岗位或业务数据。</p></div>
+      <label>Workspace 名称<input name="name" maxlength="120" placeholder="例如 TradingOPS APAC" required></label>
+      <label>标识（可选）<input name="slug" maxlength="80" pattern="[a-z0-9-]+" placeholder="tradingops-apac"></label>
+      <div class="form-error" role="alert"></div><button class="secondary">创建并进入 Workspace</button>
+    </form>
+    ${workspaceAdmin ? `<form class="card scope-create-form" id="create-team-form">
+      <div><p class="eyebrow">当前 Workspace</p><h2>创建团队</h2><p>新团队默认处于安全配置阶段，不读取现有团队数据，也不开放交易能力。</p></div>
+      <label>团队名称<input name="name" maxlength="120" placeholder="例如 Alpha 策略组" required></label>
+      <label>标识（可选）<input name="slug" maxlength="80" pattern="[a-z0-9-]+" placeholder="alpha-desk"></label>
+      <div class="form-error" role="alert"></div><button class="primary">创建并进入团队</button>
+    </form>` : `<article class="card scope-create-form scope-readonly"><div><p class="eyebrow">Workspace 权限</p><h2>团队由管理员创建</h2><p>你可以进入已经加入的团队；创建团队需要当前 Workspace 的管理员权限。</p></div></article>`}
+  </div>`;
+}
+
+function bindScopeCreationForms() {
+  document.querySelector('#create-workspace-form')?.addEventListener('submit', async event => {
+    event.preventDefault();
+    const form = event.currentTarget;
+    const data = new FormData(form);
+    const payload = {name:data.get('name'), slug:data.get('slug') || null, idempotency_key:crypto.randomUUID()};
+    await withPending(event.submitter, '创建中…', async () => {
+      try {
+        const result = await api('/api/workspaces', {method:'POST', body:JSON.stringify(payload)});
+        session = result.session;
+        setShell(true);
+        history.replaceState({}, '', '/');
+        showToast('Workspace 已创建；请选择或创建团队');
+        await route();
+      } catch (error) { showApiError(error, form.querySelector('.form-error')); }
+    });
+  });
+  document.querySelector('#create-team-form')?.addEventListener('submit', async event => {
+    event.preventDefault();
+    const form = event.currentTarget;
+    const data = new FormData(form);
+    const payload = {name:data.get('name'), slug:data.get('slug') || null, idempotency_key:crypto.randomUUID()};
+    await withPending(event.submitter, '创建中…', async () => {
+      try {
+        const result = await api('/api/teams', {method:'POST', body:JSON.stringify(payload)});
+        session = result.session;
+        setShell(true);
+        history.replaceState({}, '', '/');
+        showToast('团队已创建并保持交易关闭；请先配置成员与安全边界');
+        await route();
+      } catch (error) { showApiError(error, form.querySelector('.form-error')); }
+    });
+  });
+}
+
+function renderScopeSetup() {
+  const activeWorkspace = session.active_workspace;
+  const activeTeam = session.active_team;
+  const workspaceTeams = (session.teams || []).filter(team => team.workspace_id === activeWorkspace?.workspace_id);
+  const workspaceAdmin = currentWorkspaceMembership()?.role === 'ADMIN';
+  const teamRows = workspaceTeams.map(team => `<button class="scope-team-row ${team.team_id === activeTeam?.team_id ? 'is-active' : ''}" type="button" data-select-workspace="${escapeHtml(team.workspace_id)}" data-select-team="${escapeHtml(team.team_id)}"><span><b>${escapeHtml(team.name)}</b><small>${team.trading_enabled ? '业务范围已启用' : '安全配置中 · 交易关闭'}</small></span><span class="status-pill ${team.trading_enabled ? 'status-APPROVED' : ''}">${team.team_id === activeTeam?.team_id ? '当前团队' : '进入'}</span></button>`).join('');
+  const setupReason = !activeWorkspace
+    ? '先创建或选择一个 Workspace。Workspace 是成员与团队的组织边界。'
+    : !activeTeam
+      ? '请选择已加入的团队；Workspace 管理员也可以创建新团队。'
+      : '此团队是全新的隔离边界。账户、风险政策和业务数据尚未完成团队归属，服务端保持所有业务能力关闭。';
+  main.innerHTML = `<section class="page scope-setup-page"><header class="page-head"><div><p class="eyebrow">Workspace → Team → Account</p><h1>${activeTeam ? escapeHtml(activeTeam.name) : '选择团队边界'}</h1><p class="lede">${escapeHtml(setupReason)}</p></div><span class="status-pill ${activeTeam?.trading_enabled ? 'status-APPROVED' : ''}">${activeTeam ? activeTeam.trading_enabled ? '已启用' : '安全配置中' : '尚未选择团队'}</span></header>
+    ${activeWorkspace ? `<article class="card scope-context-card"><div><p class="eyebrow">当前 Workspace</p><h2>${escapeHtml(activeWorkspace.name)}</h2><p>${workspaceAdmin ? '你是此 Workspace 的管理员，可创建隔离团队。' : '你是此 Workspace 的成员，只能进入已加入的团队。'}</p></div><div class="scope-team-list">${teamRows || '<p class="safety-note">你在此 Workspace 中尚未加入任何团队。</p>'}</div></article>` : ''}
+    ${activeTeam && !activeTeam.trading_enabled ? `<article class="home-status tone-attention"><div><p class="eyebrow">Fail closed</p><h2>团队业务能力尚未开放</h2><p>当前只允许成员与权限配置。提案、审核、交易、账户、风控和报表不会读取其他团队的全局数据；后续阶段完成业务实体归属和迁移后再显式启用。</p></div>${hasCapability('access.manage') ? '<a class="primary" href="/admin/users" data-link>配置团队成员</a>' : '<span class="status-pill">由团队管理员处理</span>'}</article>` : ''}
+    ${scopeCreationPanels()}
+  </section>`;
+  document.querySelectorAll('[data-select-team]').forEach(button => button.addEventListener('click', () => selectScope(button.dataset.selectWorkspace, button.dataset.selectTeam)));
+  bindScopeCreationForms();
+}
+
+async function selectScope(workspaceId, teamId = null) {
+  try {
+    const result = await api('/api/scopes/select', {method:'POST', body:JSON.stringify({workspace_id:workspaceId, team_id:teamId || null, idempotency_key:crypto.randomUUID()})});
+    session = result.session;
+    setShell(true);
+    history.replaceState({}, '', '/');
+    showToast(teamId ? '已切换团队；权限与数据范围已重新加载' : '已切换 Workspace；请选择团队');
+    await route();
+  } catch (error) {
+    setShell(true);
+    showApiError(error);
+  }
+}
+
 function accessRoleOptions(selectedRoles, prefix, disabled = false) {
   const selected = new Set(selectedRoles);
   return accessRoleCatalog.map(item => `<label class="permission-option" for="${prefix}-${item.role}"><input id="${prefix}-${item.role}" name="roles" type="checkbox" value="${item.role}" ${selected.has(item.role) ? 'checked' : ''} ${disabled ? 'disabled' : ''}><span><b>${escapeHtml(item.label)}</b><small>${escapeHtml(item.copy)}</small></span></label>`).join('');
@@ -3808,6 +3901,8 @@ function venueScopeOptions(selected = '') {
 async function renderAccessManagement() {
   const result = await api('/api/admin/users');
   const members = result.data;
+  const activeWorkspace = session.active_workspace;
+  const activeTeam = session.active_team;
   const cards = members.map(member => {
     const roles = member.roles.map(item => item.role);
     const scope = memberScope(member);
@@ -3817,18 +3912,33 @@ async function renderAccessManagement() {
     return `<details class="member-access-card ${member.active ? '' : 'is-inactive'}"><summary class="member-access-summary"><span class="member-summary-main"><b>${escapeHtml(member.username)}</b><small>${member.password_configured ? '密码已设置' : '尚未设置密码'} · ${escapeHtml(scopeSummary)}</small><span class="member-role-tags">${roleTags}</span></span><span class="member-summary-actions"><span class="status-pill ${member.active ? 'status-APPROVED' : ''}">${member.active ? '已启用' : '已停用'}</span><strong>${member.is_current_user ? '查看' : '编辑'}</strong></span></summary><form class="member-access-editor" data-user-access="${member.user_id}">
       ${member.is_current_user ? '<p class="safety-note">这是当前账号。为避免误锁死，必须由另一名系统管理员修改。</p>' : ''}
       <div class="permission-grid">${accessRoleOptions(roles, `member-${member.user_id}`, member.is_current_user)}</div>
-      <div class="scope-grid"><label>账户范围<input name="account_scope" value="${escapeHtml(scope.account)}" placeholder="留空 = 全部账户" ${member.is_current_user ? 'disabled' : ''}></label><label>交易所范围<select name="venue_scope" ${member.is_current_user ? 'disabled' : ''}>${venueScopeOptions(scope.venue)}</select></label><label>重置密码<input name="new_password" type="password" autocomplete="new-password" minlength="12" maxlength="128" placeholder="留空则不修改" ${member.is_current_user ? 'disabled' : ''}></label><label class="active-toggle"><input name="active" type="checkbox" ${member.active ? 'checked' : ''} ${member.is_current_user ? 'disabled' : ''}>允许登录和使用已分配权限</label></div>
+      <div class="scope-grid"><label>账户范围<input name="account_scope" value="${escapeHtml(scope.account)}" placeholder="留空 = 全部账户" ${member.is_current_user ? 'disabled' : ''}></label><label>交易所范围<select name="venue_scope" ${member.is_current_user ? 'disabled' : ''}>${venueScopeOptions(scope.venue)}</select></label><label>重置密码<input name="new_password" type="password" autocomplete="new-password" minlength="12" maxlength="128" placeholder="留空则不修改" ${member.is_current_user ? 'disabled' : ''}></label><label class="active-toggle"><input name="active" type="checkbox" ${member.active ? 'checked' : ''} ${member.is_current_user ? 'disabled' : ''}>允许进入当前团队并使用已分配权限</label></div>
       ${scope.mixed ? '<p class="danger-note">该成员当前有多个不同的数据范围。保存后，所选岗位会统一使用上面的账户和交易所范围，请先确认。</p>' : ''}
       <div class="form-error" role="alert"></div>${member.is_current_user ? '' : '<div class="form-actions"><button class="secondary">保存权限</button></div>'}</form></details>`;
   }).join('');
-  main.innerHTML = `<section class="page access-page"><header class="page-head"><div><p class="eyebrow">系统管理 · 权限配置</p><h1>成员权限</h1><p class="lede">按岗位勾选权限，不需要逐个页面配置。一个人可以组合多个岗位，还可以按账户和交易所限制每个用户能够查看和操作的数据。</p></div><span class="status-pill">${members.filter(item => item.active).length} 名启用成员</span></header>
+  main.innerHTML = `<section class="page access-page"><header class="page-head"><div><p class="eyebrow">${escapeHtml(activeWorkspace?.name || 'Workspace')} · ${escapeHtml(activeTeam?.name || 'Team')}</p><h1>团队成员与权限</h1><p class="lede">岗位、账户范围和交易所范围只在当前团队生效。同一用户加入另一个团队时必须重新分配最小权限。</p></div><span class="status-pill">${members.filter(item => item.active).length} 名启用成员</span></header>
+    ${activeTeam && !activeTeam.trading_enabled ? '<article class="home-status tone-attention"><div><p class="eyebrow">安全配置阶段</p><h2>当前仅开放团队管理</h2><p>业务实体尚未完成团队归属，服务端不会让这个新团队读取默认团队的提案、账户、订单或报表。真实下单、资金、签名和广播保持关闭。</p></div><a class="secondary" href="/" data-link>查看团队状态</a></article>' : ''}
     <article class="card access-principles"><h2>权限分离原则</h2><div class="access-principle-grid"><p><b>审核与发起分开</b><span>审核人不能审核自己的提案；提案发起人不会自动获得执行权限。</span></p><p><b>交易与资金分开</b><span>交易运维人员看不到资金中心；系统管理员拥有最高管理权限，但资金动作仍受实时校验、最终确认和安全开关约束。</span></p><p><b>身份与权限分开</b><span>密码只用于身份验证；岗位和账户范围仍由独立授权控制。</span></p></div></article>
+    ${scopeCreationPanels({compact:true})}
+    <details class="card create-member-panel"><summary><span><b>加入已有用户</b><small>把现有身份加入当前团队，并独立分配团队岗位</small></span><strong>展开</strong></summary><form id="invite-team-member-form" class="toolbox-content"><div class="field-grid"><label>现有账户名<input name="username" pattern="[A-Za-z0-9._-]+" placeholder="例如 kelly" required></label><label>账户范围<input name="account_scope" placeholder="留空 = 当前团队全部账户"></label><label>交易所范围<select name="venue_scope">${venueScopeOptions()}</select></label></div><div class="permission-grid">${accessRoleOptions([], 'invite')}</div><div class="form-error" role="alert"></div><div class="form-actions"><button class="secondary">加入当前团队</button></div></form></details>
     <details class="card create-member-panel"><summary><span><b>新增内部成员</b><small>创建账户、初始密码和最小必要权限</small></span><strong>展开</strong></summary><form id="create-member-form" class="toolbox-content"><div class="field-grid"><label>账户名<input name="username" pattern="[A-Za-z0-9._-]+" placeholder="例如 reviewer-li" required></label><label>初始密码<input name="password" type="password" autocomplete="new-password" minlength="12" maxlength="128" required placeholder="至少 12 个字符"></label><label>账户范围<input name="account_scope" placeholder="留空 = 全部账户"></label><label>交易所范围<select name="venue_scope">${venueScopeOptions()}</select></label></div><div class="preset-row"><span>常用模板</span><button type="button" class="text-button" data-role-preset="REVIEWER">只审核</button><button type="button" class="text-button" data-role-preset="PROPOSER">只发起提案</button><button type="button" class="text-button" data-role-preset="OPERATOR">交易运维</button></div><div class="permission-grid">${accessRoleOptions([], 'create')}</div><div class="form-error" role="alert"></div><div class="form-actions"><button class="primary">创建成员</button></div></form></details>
     <div class="section-heading"><div><p class="eyebrow">当前用户</p><h2>现有成员</h2></div><span class="subtle">截止 ${fmtDate(result.as_of)}</span></div><div class="member-access-list">${cards}</div>
   </section>`;
   document.querySelectorAll('[data-role-preset]').forEach(button => button.addEventListener('click', () => {
     document.querySelectorAll('#create-member-form input[name="roles"]').forEach(input => { input.checked = input.value === button.dataset.rolePreset; });
   }));
+  bindScopeCreationForms();
+  document.querySelector('#invite-team-member-form')?.addEventListener('submit', async event => {
+    event.preventDefault();
+    const form = event.currentTarget;
+    const data = new FormData(form);
+    const payload = {username:data.get('username'), roles:data.getAll('roles'), account_scope:data.get('account_scope') || null, venue_scope:(data.get('venue_scope') || '').toUpperCase() || null, idempotency_key:crypto.randomUUID()};
+    if (!payload.roles.length) { form.querySelector('.form-error').textContent = '至少选择一个当前团队岗位。'; return; }
+    await withPending(event.submitter, '加入中…', async () => {
+      try { await api('/api/admin/team-members', {method:'POST', body:JSON.stringify(payload)}); showToast(`${payload.username} 已加入当前团队；其他团队权限未改变`); await route(); }
+      catch (error) { showApiError(error, form.querySelector('.form-error')); }
+    });
+  });
   document.querySelector('#create-member-form')?.addEventListener('submit', async event => {
     event.preventDefault();
     const form = event.currentTarget;
@@ -4034,6 +4144,13 @@ mobileNavToggle.addEventListener('keydown', (event) => {
   else openMobileNav();
 });
 navBackdrop.addEventListener('click', () => closeMobileNav());
+scopeSwitcher.addEventListener('change', async () => {
+  const [workspaceId, teamId] = scopeSwitcher.value.split(':');
+  if (!workspaceId) return;
+  scopeSwitcher.disabled = true;
+  try { await selectScope(workspaceId, teamId || null); }
+  finally { scopeSwitcher.disabled = false; }
+});
 document.addEventListener('keydown', (event) => {
   if (event.key === 'Escape' && sidebar.classList.contains('open')) closeMobileNav();
 });

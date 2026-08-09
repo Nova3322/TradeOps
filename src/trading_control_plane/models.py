@@ -28,6 +28,47 @@ from trading_control_plane.database import Base
 AMOUNT = Numeric(38, 18)
 
 
+class Workspace(Base):
+    __tablename__ = "workspaces"
+    __table_args__ = (
+        UniqueConstraint("slug", name="uq_workspaces_slug"),
+        CheckConstraint("version >= 1", name="ck_workspaces_version"),
+    )
+
+    workspace_id: Mapped[UUID] = mapped_column(
+        Uuid(as_uuid=True), primary_key=True, default=uuid4
+    )
+    name: Mapped[str] = mapped_column(String(120), nullable=False)
+    slug: Mapped[str] = mapped_column(String(80), nullable=False)
+    created_by: Mapped[UUID] = mapped_column(ForeignKey("users.user_id"), nullable=False)
+    active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class Team(Base):
+    __tablename__ = "teams"
+    __table_args__ = (
+        UniqueConstraint("workspace_id", "slug", name="uq_teams_workspace_slug"),
+        CheckConstraint("version >= 1", name="ck_teams_version"),
+        Index("ix_teams_workspace_active", "workspace_id", "active"),
+    )
+
+    team_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid4)
+    workspace_id: Mapped[UUID] = mapped_column(
+        ForeignKey("workspaces.workspace_id", ondelete="CASCADE"), nullable=False
+    )
+    name: Mapped[str] = mapped_column(String(120), nullable=False)
+    slug: Mapped[str] = mapped_column(String(80), nullable=False)
+    created_by: Mapped[UUID] = mapped_column(ForeignKey("users.user_id"), nullable=False)
+    active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    trading_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
 class User(Base):
     __tablename__ = "users"
     __table_args__ = (
@@ -43,11 +84,75 @@ class User(Base):
     )
     identity_subject: Mapped[str | None] = mapped_column(String(255), nullable=True, unique=True)
     telegram_chat_id: Mapped[str | None] = mapped_column(String(120), nullable=True, unique=True)
+    active_workspace_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey(
+            "workspaces.workspace_id",
+            name="fk_users_active_workspace_id_workspaces",
+            use_alter=True,
+        ),
+        nullable=True,
+    )
+    active_team_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey(
+            "teams.team_id",
+            name="fk_users_active_team_id_teams",
+            use_alter=True,
+        ),
+        nullable=True,
+    )
     principal_type: Mapped[str] = mapped_column(String(16), nullable=False)
     active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
+
+
+class WorkspaceMembership(Base):
+    __tablename__ = "workspace_memberships"
+    __table_args__ = (
+        CheckConstraint("role IN ('MEMBER','ADMIN')", name="ck_workspace_memberships_role"),
+        UniqueConstraint(
+            "workspace_id", "user_id", name="uq_workspace_memberships_workspace_user"
+        ),
+        Index("ix_workspace_memberships_user_active", "user_id", "active"),
+    )
+
+    membership_id: Mapped[UUID] = mapped_column(
+        Uuid(as_uuid=True), primary_key=True, default=uuid4
+    )
+    workspace_id: Mapped[UUID] = mapped_column(
+        ForeignKey("workspaces.workspace_id", ondelete="CASCADE"), nullable=False
+    )
+    user_id: Mapped[UUID] = mapped_column(
+        ForeignKey("users.user_id", ondelete="CASCADE"), nullable=False
+    )
+    role: Mapped[str] = mapped_column(String(16), nullable=False)
+    active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    invited_by: Mapped[UUID | None] = mapped_column(ForeignKey("users.user_id"), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class TeamMembership(Base):
+    __tablename__ = "team_memberships"
+    __table_args__ = (
+        UniqueConstraint("team_id", "user_id", name="uq_team_memberships_team_user"),
+        Index("ix_team_memberships_user_active", "user_id", "active"),
+    )
+
+    membership_id: Mapped[UUID] = mapped_column(
+        Uuid(as_uuid=True), primary_key=True, default=uuid4
+    )
+    team_id: Mapped[UUID] = mapped_column(
+        ForeignKey("teams.team_id", ondelete="CASCADE"), nullable=False
+    )
+    user_id: Mapped[UUID] = mapped_column(
+        ForeignKey("users.user_id", ondelete="CASCADE"), nullable=False
+    )
+    active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    invited_by: Mapped[UUID | None] = mapped_column(ForeignKey("users.user_id"), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
 
 class RoleAssignment(Base):
@@ -58,11 +163,15 @@ class RoleAssignment(Base):
             name="ck_role_assignments_role",
         ),
         Index("ix_role_assignments_user", "user_id"),
+        Index("ix_role_assignments_team_user", "team_id", "user_id"),
     )
 
     assignment_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid4)
     user_id: Mapped[UUID] = mapped_column(
         ForeignKey("users.user_id", ondelete="CASCADE"), nullable=False
+    )
+    team_id: Mapped[UUID] = mapped_column(
+        ForeignKey("teams.team_id", ondelete="CASCADE"), nullable=False
     )
     role: Mapped[str] = mapped_column(String(32), nullable=False)
     account_scope: Mapped[str | None] = mapped_column(String(120), nullable=True)
@@ -1370,10 +1479,18 @@ class AuditEvent(Base):
     __table_args__ = (
         Index("ix_audit_events_object", "object_type", "object_id", "created_at"),
         Index("ix_audit_events_correlation", "correlation_id", "created_at"),
+        Index("ix_audit_events_workspace_created", "workspace_id", "created_at"),
+        Index("ix_audit_events_team_created", "team_id", "created_at"),
     )
 
     audit_event_id: Mapped[UUID] = mapped_column(
         Uuid(as_uuid=True), primary_key=True, default=uuid4
+    )
+    workspace_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("workspaces.workspace_id"), nullable=True
+    )
+    team_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("teams.team_id"), nullable=True
     )
     actor_id: Mapped[str] = mapped_column(String(255), nullable=False)
     event_type: Mapped[str] = mapped_column(String(120), nullable=False)

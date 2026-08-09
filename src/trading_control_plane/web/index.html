@@ -7,7 +7,7 @@
     <meta name="description" content="生产交易提案、审核、执行、资金与风险控制台">
     <link rel="manifest" href="/manifest.webmanifest">
     <link rel="icon" href="/assets/icon.svg" type="image/svg+xml">
-    <link rel="stylesheet" href="/assets/styles.css?v=50">
+    <link rel="stylesheet" href="/assets/styles.css?v=52">
     <title>交易控制台</title>
   </head>
   <body>
@@ -18,6 +18,7 @@
           <span><b>交易控制台</b><small>生产交易管理</small></span>
         </a>
         <div class="topbar-actions">
+          <select id="scope-switcher" class="scope-switcher" aria-label="当前 Workspace 和团队" hidden></select>
           <span id="environment-badge" class="env-badge">控制台</span>
           <button id="language-toggle" class="icon-button language-button" type="button" aria-label="切换中英文">中英切换</button>
           <button id="theme-toggle" class="icon-button" aria-label="切换主题">◐</button>
@@ -97,6 +98,6 @@
       </form>
     </dialog>
     <div id="toast" class="toast" role="status" aria-live="polite"></div>
-    <script type="module" src="/assets/app.js?v=131"></script>
+    <script type="module" src="/assets/app.js?v=133"></script>
   </body>
 </html>

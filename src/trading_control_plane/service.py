@@ -4,6 +4,7 @@ import base64
 import binascii
 import hashlib
 import json
+import re
 from collections.abc import Sequence
 from contextlib import AbstractContextManager, nullcontext
 from datetime import datetime, timedelta
@@ -63,6 +64,7 @@ from trading_control_plane.domain import (
     TargetDecision,
     TargetUrgency,
     VenueOrderStatus,
+    WorkspaceRole,
     compute_pnl,
     evaluate_risk,
     select_target_position,
@@ -114,12 +116,16 @@ from trading_control_plane.models import (
     RoleAssignment,
     RuntimeSourceHealth,
     SenderLease,
+    Team,
+    TeamMembership,
     TradingAuthorization,
     TransferAuthorization,
     TransferProposal,
     User,
     VenueFill,
     VenueOrder,
+    Workspace,
+    WorkspaceMembership,
 )
 from trading_control_plane.notilt import (
     USD_STABLE_ASSETS,
@@ -141,6 +147,8 @@ from trading_control_plane.perptape import (
 
 CAPITAL_HISTORY_MIN_INTERVAL = timedelta(minutes=1)
 PASSWORD_HASHER = PasswordHasher()
+SCOPE_SLUG_PATTERN = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,78}[a-z0-9])?$")
+TEAM_SETUP_ACTIONS = frozenset({"team.view", "team.manage", "user.manage", "role.manage"})
 
 ACTIVE_INTENT_STATUSES = {
     OrderIntentStatus.PENDING.value,
@@ -413,10 +421,23 @@ class TradingService:
         correlation_id: UUID,
         object_version: int,
         idempotency_key: str | None = None,
+        workspace_id: UUID | None = None,
+        team_id: UUID | None = None,
         now: datetime,
     ) -> None:
+        if workspace_id is None or team_id is None:
+            try:
+                actor_user_id = UUID(actor_id)
+            except ValueError:
+                actor_user_id = None
+            actor = None if actor_user_id is None else session.get(User, actor_user_id)
+            if actor is not None:
+                workspace_id = workspace_id or actor.active_workspace_id
+                team_id = team_id or actor.active_team_id
         session.add(
             AuditEvent(
+                workspace_id=workspace_id,
+                team_id=team_id,
                 actor_id=actor_id,
                 event_type=event_type,
                 object_type=object_type,
@@ -478,6 +499,67 @@ class TradingService:
             )
         )
 
+    @staticmethod
+    def _active_scope(
+        session: Session,
+        user_id: UUID,
+        *,
+        require_team: bool = True,
+    ) -> tuple[User, Workspace, Team | None]:
+        user = session.get(User, user_id)
+        if user is None or not user.active:
+            _reject("USER_NOT_AUTHORIZED", "user is missing or inactive")
+        if user.active_workspace_id is None:
+            _reject("WORKSPACE_CONTEXT_REQUIRED", "select an active workspace")
+        workspace = session.get(Workspace, user.active_workspace_id)
+        membership = session.scalar(
+            select(WorkspaceMembership).where(
+                WorkspaceMembership.workspace_id == user.active_workspace_id,
+                WorkspaceMembership.user_id == user_id,
+                WorkspaceMembership.active,
+            )
+        )
+        if workspace is None or not workspace.active or membership is None:
+            _reject("WORKSPACE_ACCESS_DENIED", "workspace membership is missing or inactive")
+        if user.active_team_id is None:
+            if require_team:
+                _reject("TEAM_CONTEXT_REQUIRED", "select an active team")
+            return user, workspace, None
+        team = session.get(Team, user.active_team_id)
+        team_membership = session.scalar(
+            select(TeamMembership).where(
+                TeamMembership.team_id == user.active_team_id,
+                TeamMembership.user_id == user_id,
+                TeamMembership.active,
+            )
+        )
+        if (
+            team is None
+            or not team.active
+            or team.workspace_id != workspace.workspace_id
+            or team_membership is None
+        ):
+            _reject("TEAM_ACCESS_DENIED", "team membership is missing or inactive")
+        return user, workspace, team
+
+    def _require_workspace_admin(
+        self,
+        session: Session,
+        user_id: UUID,
+    ) -> tuple[User, Workspace]:
+        user, workspace, _team = self._active_scope(session, user_id, require_team=False)
+        membership = session.scalar(
+            select(WorkspaceMembership).where(
+                WorkspaceMembership.workspace_id == workspace.workspace_id,
+                WorkspaceMembership.user_id == user_id,
+                WorkspaceMembership.role == WorkspaceRole.ADMIN.value,
+                WorkspaceMembership.active,
+            )
+        )
+        if membership is None:
+            _reject("WORKSPACE_ADMIN_REQUIRED", "workspace administration is required")
+        return user, workspace
+
     def _require_role(
         self,
         session: Session,
@@ -486,11 +568,18 @@ class TradingService:
         account_id: str | None = None,
         venue: str | None = None,
     ) -> None:
-        user = session.get(User, user_id)
-        if user is None or not user.active:
-            _reject("USER_NOT_AUTHORIZED", "user is missing or inactive")
+        _user, _workspace, team = self._active_scope(session, user_id)
+        assert team is not None
+        if not team.trading_enabled and action not in TEAM_SETUP_ACTIONS:
+            _reject(
+                "TEAM_NOT_OPERATIONAL",
+                "team data scope is not ready; configure scoped accounts and risk policy first",
+            )
         assignments = session.scalars(
-            select(RoleAssignment).where(RoleAssignment.user_id == user_id)
+            select(RoleAssignment).where(
+                RoleAssignment.user_id == user_id,
+                RoleAssignment.team_id == team.team_id,
+            )
         ).all()
         for assignment in assignments:
             role = Role(assignment.role)
@@ -529,9 +618,57 @@ class TradingService:
             )
             session.add(user)
             session.flush()
+            workspace = Workspace(
+                name="Default Workspace",
+                slug="default",
+                created_by=user.user_id,
+                active=True,
+                version=1,
+                created_at=now,
+                updated_at=now,
+            )
+            session.add(workspace)
+            session.flush()
+            team = Team(
+                workspace_id=workspace.workspace_id,
+                name="Default Team",
+                slug="default",
+                created_by=user.user_id,
+                active=True,
+                trading_enabled=True,
+                version=1,
+                created_at=now,
+                updated_at=now,
+            )
+            session.add(team)
+            session.flush()
+            user.active_workspace_id = workspace.workspace_id
+            user.active_team_id = team.team_id
+            session.add(
+                WorkspaceMembership(
+                    workspace_id=workspace.workspace_id,
+                    user_id=user.user_id,
+                    role=WorkspaceRole.ADMIN.value,
+                    active=True,
+                    invited_by=None,
+                    created_at=now,
+                    updated_at=now,
+                )
+            )
+            session.add(
+                TeamMembership(
+                    team_id=team.team_id,
+                    user_id=user.user_id,
+                    active=True,
+                    invited_by=None,
+                    created_at=now,
+                    updated_at=now,
+                )
+            )
             session.add(
                 RoleAssignment(
                     user_id=user.user_id,
+                    team_id=team.team_id,
                     role=Role.SYSTEM_ADMIN.value,
                     account_scope=None,
                     venue_scope=None,
@@ -547,21 +684,309 @@ class TradingService:
                 reason="first internal administrator",
                 correlation_id=uuid4(),
                 object_version=1,
+                workspace_id=workspace.workspace_id,
+                team_id=team.team_id,
                 now=now,
             )
             return user.user_id
 
+    @staticmethod
+    def _scope_slug(name: str, slug: str | None) -> tuple[str, str]:
+        normalized_name = " ".join(name.strip().split())
+        normalized_slug = (slug or normalized_name.lower().replace(" ", "-")).strip("-")
+        if not normalized_name or len(normalized_name) > 120:
+            _reject("SCOPE_NAME_INVALID", "workspace and team names must contain 1-120 characters")
+        if not SCOPE_SLUG_PATTERN.fullmatch(normalized_slug):
+            _reject(
+                "SCOPE_SLUG_INVALID",
+                "scope slug must use lowercase letters, digits, or hyphens",
+            )
+        return normalized_name, normalized_slug
+
+    def create_workspace(
+        self,
+        *,
+        actor_id: UUID,
+        name: str,
+        slug: str | None,
+        idempotency_key: str,
+        now: datetime,
+    ) -> UUID:
+        normalized_name, normalized_slug = self._scope_slug(name, slug)
+        payload = {"name": normalized_name, "slug": normalized_slug}
+        with self.database.session_factory.begin() as session:
+            actor = session.get(User, actor_id)
+            if actor is None or not actor.active:
+                _reject("USER_NOT_AUTHORIZED", "user is missing or inactive")
+            digest, replay = self._idempotency(
+                session,
+                caller_id=str(actor_id),
+                operation="workspace.create",
+                idempotency_key=idempotency_key,
+                payload=payload,
+            )
+            if replay is not None:
+                return UUID(str(replay["workspace_id"]))
+            if session.scalar(select(Workspace).where(Workspace.slug == normalized_slug)):
+                _reject("WORKSPACE_SLUG_CONFLICT", "workspace slug already exists")
+            workspace = Workspace(
+                name=normalized_name,
+                slug=normalized_slug,
+                created_by=actor_id,
+                active=True,
+                version=1,
+                created_at=now,
+                updated_at=now,
+            )
+            session.add(workspace)
+            session.flush()
+            session.add(
+                WorkspaceMembership(
+                    workspace_id=workspace.workspace_id,
+                    user_id=actor_id,
+                    role=WorkspaceRole.ADMIN.value,
+                    active=True,
+                    invited_by=None,
+                    created_at=now,
+                    updated_at=now,
+                )
+            )
+            actor.active_workspace_id = workspace.workspace_id
+            actor.active_team_id = None
+            response = {"workspace_id": str(workspace.workspace_id)}
+            self._audit(
+                session,
+                actor_id=str(actor_id),
+                event_type="WORKSPACE_CREATED",
+                object_type="Workspace",
+                object_id=workspace.workspace_id,
+                reason=f"workspace={normalized_slug}",
+                correlation_id=uuid4(),
+                idempotency_key=idempotency_key,
+                object_version=1,
+                workspace_id=workspace.workspace_id,
+                now=now,
+            )
+            self._save_receipt(
+                session,
+                caller_id=str(actor_id),
+                operation="workspace.create",
+                idempotency_key=idempotency_key,
+                semantic_hash=digest,
+                response=response,
+                now=now,
+            )
+            return workspace.workspace_id
+
+    def create_team(
+        self,
+        *,
+        actor_id: UUID,
+        name: str,
+        slug: str | None,
+        idempotency_key: str,
+        now: datetime,
+    ) -> UUID:
+        normalized_name, normalized_slug = self._scope_slug(name, slug)
+        with self.database.session_factory.begin() as session:
+            actor, workspace = self._require_workspace_admin(session, actor_id)
+            payload = {
+                "workspace_id": str(workspace.workspace_id),
+                "name": normalized_name,
+                "slug": normalized_slug,
+            }
+            caller = f"{actor_id}:{workspace.workspace_id}"
+            digest, replay = self._idempotency(
+                session,
+                caller_id=caller,
+                operation="team.create",
+                idempotency_key=idempotency_key,
+                payload=payload,
+            )
+            if replay is not None:
+                return UUID(str(replay["team_id"]))
+            existing = session.scalar(
+                select(Team).where(
+                    Team.workspace_id == workspace.workspace_id,
+                    Team.slug == normalized_slug,
+                )
+            )
+            if existing is not None:
+                _reject("TEAM_SLUG_CONFLICT", "team slug already exists in this workspace")
+            team = Team(
+                workspace_id=workspace.workspace_id,
+                name=normalized_name,
+                slug=normalized_slug,
+                created_by=actor_id,
+                active=True,
+                trading_enabled=False,
+                version=1,
+                created_at=now,
+                updated_at=now,
+            )
+            session.add(team)
+            session.flush()
+            session.add(
+                TeamMembership(
+                    team_id=team.team_id,
+                    user_id=actor_id,
+                    active=True,
+                    invited_by=None,
+                    created_at=now,
+                    updated_at=now,
+                )
+            )
+            session.add(
+                RoleAssignment(
+                    user_id=actor_id,
+                    team_id=team.team_id,
+                    role=Role.SYSTEM_ADMIN.value,
+                    account_scope=None,
+                    venue_scope=None,
+                    created_at=now,
+                )
+            )
+            actor.active_team_id = team.team_id
+            response = {"team_id": str(team.team_id)}
+            self._audit(
+                session,
+                actor_id=str(actor_id),
+                event_type="TEAM_CREATED",
+                object_type="Team",
+                object_id=team.team_id,
+                reason=f"team={normalized_slug};trading_enabled=false",
+                correlation_id=uuid4(),
+                idempotency_key=idempotency_key,
+                object_version=1,
+                workspace_id=workspace.workspace_id,
+                team_id=team.team_id,
+                now=now,
+            )
+            self._save_receipt(
+                session,
+                caller_id=caller,
+                operation="team.create",
+                idempotency_key=idempotency_key,
+                semantic_hash=digest,
+                response=response,
+                now=now,
+            )
+            return team.team_id
+
+    def select_scope(
+        self,
+        *,
+        actor_id: UUID,
+        workspace_id: UUID,
+        team_id: UUID | None,
+        idempotency_key: str,
+        now: datetime,
+    ) -> None:
+        payload = {
+            "workspace_id": str(workspace_id),
+            "team_id": None if team_id is None else str(team_id),
+        }
+        with self.database.session_factory.begin() as session:
+            actor = session.get(User, actor_id, with_for_update=True)
+            if actor is None or not actor.active:
+                _reject("USER_NOT_AUTHORIZED", "user is missing or inactive")
+            digest, replay = self._idempotency(
+                session,
+                caller_id=str(actor_id),
+                operation="scope.select",
+                idempotency_key=idempotency_key,
+                payload=payload,
+            )
+            if replay is not None:
+                return
+            workspace_membership = session.scalar(
+                select(WorkspaceMembership).where(
+                    WorkspaceMembership.workspace_id == workspace_id,
+                    WorkspaceMembership.user_id == actor_id,
+                    WorkspaceMembership.active,
+                )
+            )
+            workspace = session.get(Workspace, workspace_id)
+            if workspace is None or not workspace.active or workspace_membership is None:
+                _reject("WORKSPACE_ACCESS_DENIED", "workspace membership is missing or inactive")
+            if team_id is not None:
+                team = session.get(Team, team_id)
+                team_membership = session.scalar(
+                    select(TeamMembership).where(
+                        TeamMembership.team_id == team_id,
+                        TeamMembership.user_id == actor_id,
+                        TeamMembership.active,
+                    )
+                )
+                if (
+                    team is None
+                    or not team.active
+                    or team.workspace_id != workspace_id
+                    or team_membership is None
+                ):
+                    _reject("TEAM_ACCESS_DENIED", "team membership is missing or inactive")
+            actor.active_workspace_id = workspace_id
+            actor.active_team_id = team_id
+            self._audit(
+                session,
+                actor_id=str(actor_id),
+                event_type="SCOPE_SELECTED",
+                object_type="Workspace" if team_id is None else "Team",
+                object_id=workspace_id if team_id is None else team_id,
+                reason="active workspace/team scope changed",
+                correlation_id=uuid4(),
+                idempotency_key=idempotency_key,
+                object_version=1,
+                workspace_id=workspace_id,
+                team_id=team_id,
+                now=now,
+            )
+            self._save_receipt(
+                session,
+                caller_id=str(actor_id),
+                operation="scope.select",
+                idempotency_key=idempotency_key,
+                semantic_hash=digest,
+                response=payload,
+                now=now,
+            )
+
     def create_user(self, username: str, actor_id: UUID, *, now: datetime) -> UUID:
         with self.database.session_factory.begin() as session:
             self._require_role(session, actor_id, "user.manage")
+            _actor, workspace, team = self._active_scope(session, actor_id)
+            assert team is not None
             user = User(
                 username=username,
+                active_workspace_id=workspace.workspace_id,
+                active_team_id=team.team_id,
                 principal_type=PrincipalType.HUMAN.value,
                 active=True,
                 created_at=now,
             )
             session.add(user)
             session.flush()
+            session.add_all(
+                [
+                    WorkspaceMembership(
+                        workspace_id=workspace.workspace_id,
+                        user_id=user.user_id,
+                        role=WorkspaceRole.MEMBER.value,
+                        active=True,
+                        invited_by=actor_id,
+                        created_at=now,
+                        updated_at=now,
+                    ),
+                    TeamMembership(
+                        team_id=team.team_id,
+                        user_id=user.user_id,
+                        active=True,
+                        invited_by=actor_id,
+                        created_at=now,
+                        updated_at=now,
+                    ),
+                ]
+            )
             self._audit(
                 session,
                 actor_id=str(actor_id),
@@ -592,22 +1017,48 @@ class TradingService:
             _reject("USER_ACCESS_INVALID", "an active user requires a username and role")
         with self.database.session_factory.begin() as session:
             self._require_role(session, actor_id, "user.manage")
+            _actor, workspace, team = self._active_scope(session, actor_id)
+            assert team is not None
             if session.scalar(select(User).where(User.username == normalized_username)) is not None:
                 _reject("USERNAME_CONFLICT", "the internal username already exists")
             user = User(
                 username=normalized_username,
                 password_hash=(PASSWORD_HASHER.hash(password) if password is not None else None),
                 password_changed_at=(now if password is not None else None),
+                active_workspace_id=workspace.workspace_id,
+                active_team_id=team.team_id,
                 principal_type=PrincipalType.HUMAN.value,
                 active=True,
                 created_at=now,
             )
             session.add(user)
             session.flush()
+            session.add_all(
+                [
+                    WorkspaceMembership(
+                        workspace_id=workspace.workspace_id,
+                        user_id=user.user_id,
+                        role=WorkspaceRole.MEMBER.value,
+                        active=True,
+                        invited_by=actor_id,
+                        created_at=now,
+                        updated_at=now,
+                    ),
+                    TeamMembership(
+                        team_id=team.team_id,
+                        user_id=user.user_id,
+                        active=True,
+                        invited_by=actor_id,
+                        created_at=now,
+                        updated_at=now,
+                    ),
+                ]
+            )
             for role in normalized_roles:
                 session.add(
                     RoleAssignment(
                         user_id=user.user_id,
+                        team_id=team.team_id,
                         role=role.value,
                         account_scope=None if role is Role.SYSTEM_ADMIN else account_scope,
                         venue_scope=None if role is Role.SYSTEM_ADMIN else venue_scope,
@@ -623,6 +1074,141 @@ class TradingService:
                 reason=f"roles={','.join(sorted(role.value for role in normalized_roles))}",
                 correlation_id=uuid4(),
                 object_version=1,
+                now=now,
+            )
+            return user.user_id
+
+    def add_team_member(
+        self,
+        *,
+        username: str,
+        roles: Sequence[Role],
+        actor_id: UUID,
+        account_scope: str | None,
+        venue_scope: str | None,
+        idempotency_key: str,
+        now: datetime,
+    ) -> UUID:
+        normalized_username = username.strip()
+        normalized_roles = tuple(dict.fromkeys(roles))
+        if not normalized_username or not normalized_roles:
+            _reject("TEAM_INVITE_INVALID", "a team invitation requires a username and role")
+        with self.database.session_factory.begin() as session:
+            self._require_role(session, actor_id, "user.manage")
+            _actor, workspace, team = self._active_scope(session, actor_id)
+            assert team is not None
+            payload = {
+                "workspace_id": str(workspace.workspace_id),
+                "team_id": str(team.team_id),
+                "username": normalized_username,
+                "roles": sorted(role.value for role in normalized_roles),
+                "account_scope": account_scope,
+                "venue_scope": venue_scope,
+            }
+            caller = f"{actor_id}:{workspace.workspace_id}:{team.team_id}"
+            digest, replay = self._idempotency(
+                session,
+                caller_id=caller,
+                operation="team.member.add",
+                idempotency_key=idempotency_key,
+                payload=payload,
+            )
+            if replay is not None:
+                return UUID(str(replay["user_id"]))
+            user = session.scalar(
+                select(User).where(
+                    User.username == normalized_username,
+                    User.principal_type == PrincipalType.HUMAN.value,
+                    User.active,
+                )
+            )
+            if user is None:
+                _reject("USER_NOT_FOUND", "invitee must already have an active account")
+            team_membership = session.scalar(
+                select(TeamMembership).where(
+                    TeamMembership.team_id == team.team_id,
+                    TeamMembership.user_id == user.user_id,
+                )
+            )
+            if team_membership is not None and team_membership.active:
+                _reject("TEAM_MEMBERSHIP_CONFLICT", "user is already active in this team")
+            workspace_membership = session.scalar(
+                select(WorkspaceMembership).where(
+                    WorkspaceMembership.workspace_id == workspace.workspace_id,
+                    WorkspaceMembership.user_id == user.user_id,
+                )
+            )
+            if workspace_membership is None:
+                session.add(
+                    WorkspaceMembership(
+                        workspace_id=workspace.workspace_id,
+                        user_id=user.user_id,
+                        role=WorkspaceRole.MEMBER.value,
+                        active=True,
+                        invited_by=actor_id,
+                        created_at=now,
+                        updated_at=now,
+                    )
+                )
+            elif not workspace_membership.active:
+                _reject(
+                    "WORKSPACE_MEMBERSHIP_INACTIVE",
+                    "workspace membership must be restored by a workspace administrator",
+                )
+            if team_membership is None:
+                team_membership = TeamMembership(
+                    team_id=team.team_id,
+                    user_id=user.user_id,
+                    active=True,
+                    invited_by=actor_id,
+                    created_at=now,
+                    updated_at=now,
+                )
+                session.add(team_membership)
+            else:
+                team_membership.active = True
+                team_membership.invited_by = actor_id
+                team_membership.updated_at = now
+            session.execute(
+                delete(RoleAssignment).where(
+                    RoleAssignment.user_id == user.user_id,
+                    RoleAssignment.team_id == team.team_id,
+                )
+            )
+            for role in normalized_roles:
+                session.add(
+                    RoleAssignment(
+                        user_id=user.user_id,
+                        team_id=team.team_id,
+                        role=role.value,
+                        account_scope=None if role is Role.SYSTEM_ADMIN else account_scope,
+                        venue_scope=None if role is Role.SYSTEM_ADMIN else venue_scope,
+                        created_at=now,
+                    )
+                )
+            session.flush()
+            response = {"user_id": str(user.user_id)}
+            self._audit(
+                session,
+                actor_id=str(actor_id),
+                event_type="TEAM_MEMBER_ADDED",
+                object_type="TeamMembership",
+                object_id=team_membership.membership_id,
+                reason=f"user={user.user_id};roles={','.join(payload['roles'])}",
+                correlation_id=uuid4(),
+                idempotency_key=idempotency_key,
+                object_version=1,
+                workspace_id=workspace.workspace_id,
+                team_id=team.team_id,
+                now=now,
+            )
+            self._save_receipt(
+                session,
+                caller_id=caller,
+                operation="team.member.add",
+                idempotency_key=idempotency_key,
+                semantic_hash=digest,
+                response=response,
                 now=now,
             )
             return user.user_id
@@ -649,11 +1235,26 @@ class TradingService:
             )
         with self.database.session_factory.begin() as session:
             self._require_role(session, actor_id, "user.manage")
+            _actor, _workspace, team = self._active_scope(session, actor_id)
+            assert team is not None
             user = session.get(User, user_id, with_for_update=True)
             if user is None or user.principal_type != PrincipalType.HUMAN.value:
                 _reject("USER_NOT_FOUND", "the managed human user does not exist")
+            membership = session.scalar(
+                select(TeamMembership)
+                .where(
+                    TeamMembership.team_id == team.team_id,
+                    TeamMembership.user_id == user_id,
+                )
+                .with_for_update()
+            )
+            if membership is None:
+                _reject("TEAM_MEMBER_NOT_FOUND", "the user is not a member of the active team")
             current_assignments = session.scalars(
-                select(RoleAssignment).where(RoleAssignment.user_id == user_id)
+                select(RoleAssignment).where(
+                    RoleAssignment.user_id == user_id,
+                    RoleAssignment.team_id == team.team_id,
+                )
             ).all()
             current_roles = {Role(item.role) for item in current_assignments}
             removing_admin = Role.SYSTEM_ADMIN in current_roles and (
@@ -664,8 +1265,15 @@ class TradingService:
                     select(func.count(func.distinct(User.user_id)))
                     .select_from(User)
                     .join(RoleAssignment, RoleAssignment.user_id == User.user_id)
+                    .join(
+                        TeamMembership,
+                        (TeamMembership.user_id == User.user_id)
+                        & (TeamMembership.team_id == RoleAssignment.team_id),
+                    )
                     .where(
                         User.active,
+                        TeamMembership.active,
+                        RoleAssignment.team_id == team.team_id,
                         RoleAssignment.role == Role.SYSTEM_ADMIN.value,
                     )
                 )
@@ -674,18 +1282,27 @@ class TradingService:
                         "LAST_SYSTEM_ADMIN_REQUIRED",
                         "the last active system administrator cannot be removed or disabled",
                     )
-            session.execute(delete(RoleAssignment).where(RoleAssignment.user_id == user_id))
+            session.execute(
+                delete(RoleAssignment).where(
+                    RoleAssignment.user_id == user_id,
+                    RoleAssignment.team_id == team.team_id,
+                )
+            )
             for role in normalized_roles:
                 session.add(
                     RoleAssignment(
                         user_id=user_id,
+                        team_id=team.team_id,
                         role=role.value,
                         account_scope=None if role is Role.SYSTEM_ADMIN else account_scope,
                         venue_scope=None if role is Role.SYSTEM_ADMIN else venue_scope,
                         created_at=now,
                     )
                 )
-            user.active = active
+            membership.active = active
+            membership.updated_at = now
+            if not active and user.active_team_id == team.team_id:
+                user.active_team_id = None
             password_reset = new_password is not None
             if new_password is not None:
                 user.password_hash = PASSWORD_HASHER.hash(new_password)
@@ -805,14 +1422,39 @@ class TradingService:
     def create_service_principal(self, username: str, actor_id: UUID, *, now: datetime) -> UUID:
         with self.database.session_factory.begin() as session:
             self._require_role(session, actor_id, "user.manage")
+            _actor, workspace, team = self._active_scope(session, actor_id)
+            assert team is not None
             principal = User(
                 username=username,
+                active_workspace_id=workspace.workspace_id,
+                active_team_id=team.team_id,
                 principal_type=PrincipalType.SERVICE.value,
                 active=True,
                 created_at=now,
             )
             session.add(principal)
             session.flush()
+            session.add_all(
+                [
+                    WorkspaceMembership(
+                        workspace_id=workspace.workspace_id,
+                        user_id=principal.user_id,
+                        role=WorkspaceRole.MEMBER.value,
+                        active=True,
+                        invited_by=actor_id,
+                        created_at=now,
+                        updated_at=now,
+                    ),
+                    TeamMembership(
+                        team_id=team.team_id,
+                        user_id=principal.user_id,
+                        active=True,
+                        invited_by=actor_id,
+                        created_at=now,
+                        updated_at=now,
+                    ),
+                ]
+            )
             self._audit(
                 session,
                 actor_id=str(actor_id),
@@ -1031,10 +1673,22 @@ class TradingService:
     ) -> UUID:
         with self.database.session_factory.begin() as session:
             self._require_role(session, actor_id, "role.manage")
+            _actor, _workspace, team = self._active_scope(session, actor_id)
+            assert team is not None
             if session.get(User, user_id) is None:
                 _reject("USER_NOT_FOUND", "role target does not exist")
+            membership = session.scalar(
+                select(TeamMembership).where(
+                    TeamMembership.team_id == team.team_id,
+                    TeamMembership.user_id == user_id,
+                    TeamMembership.active,
+                )
+            )
+            if membership is None:
+                _reject("TEAM_MEMBER_NOT_FOUND", "role target is not active in this team")
             assignment = RoleAssignment(
                 user_id=user_id,
+                team_id=team.team_id,
                 role=role.value,
                 account_scope=account_scope,
                 venue_scope=venue_scope,
@@ -2139,95 +2793,6 @@ class TradingService:
         if result is None:
             raise RuntimeError("proposal review completed without a result")
         return result
-
-    def admin_direct_approve_proposal(
-        self,
-        proposal_id: UUID,
-        admin_id: UUID,
-        reason: str,
-        expected_version: int,
-        *,
-        now: datetime,
-    ) -> ProposalStatus:
-        """Approve a frozen proposal through the explicit SYSTEM_ADMIN override path.
-
-        This path records the administrator's decision only. It never runs risk,
-        issues a TradingAuthorization, creates an intent, or sends an order.
-        """
-        expired = False
-        with self.database.session_factory.begin() as session:
-            assignments = session.scalars(
-                select(RoleAssignment).where(RoleAssignment.user_id == admin_id)
-            ).all()
-            if not any(item.role == Role.SYSTEM_ADMIN.value for item in assignments):
-                _reject(
-                    "PROPOSAL_ADMIN_APPROVAL_REQUIRED",
-                    "direct proposal approval requires SYSTEM_ADMIN",
-                )
-            self._require_role(session, admin_id, "proposal.admin_approve")
-            proposal = session.get(Proposal, proposal_id, with_for_update=True)
-            if proposal is None:
-                _reject("PROPOSAL_NOT_FOUND", "proposal does not exist")
-            if proposal.version != expected_version:
-                _reject("VERSION_CONFLICT", "proposal version changed; refresh before approving")
-            if proposal.expires_at <= now:
-                proposal.status = ProposalStatus.EXPIRED.value
-                proposal.updated_at = now
-                proposal.version += 1
-                self._audit(
-                    session,
-                    actor_id=str(admin_id),
-                    event_type="PROPOSAL_EXPIRED",
-                    object_type="Proposal",
-                    object_id=proposal.proposal_id,
-                    reason="expired before administrator direct approval",
-                    correlation_id=proposal.correlation_id,
-                    object_version=proposal.version,
-                    now=now,
-                )
-                expired = True
-            elif proposal.status != ProposalStatus.PENDING_REVIEW.value:
-                _reject("PROPOSAL_NOT_REVIEWABLE", "proposal is not pending review")
-            elif proposal.source != ProposalSource.MANUAL.value or proposal.proposer_id != admin_id:
-                _reject(
-                    "PROPOSAL_ADMIN_DIRECT_APPROVAL_SCOPE_INVALID",
-                    "administrator direct approval is limited to their own manual proposal",
-                )
-            else:
-                duplicate = session.scalar(
-                    select(Approval).where(
-                        Approval.proposal_id == proposal_id,
-                        Approval.reviewer_id == admin_id,
-                    )
-                )
-                if duplicate is not None:
-                    _reject("REVIEW_ALREADY_RECORDED", "administrator already reviewed proposal")
-                session.add(
-                    Approval(
-                        proposal_id=proposal_id,
-                        reviewer_id=admin_id,
-                        decision=ReviewDecision.APPROVE.value,
-                        reason=f"SYSTEM_ADMIN direct approval: {reason}",
-                        created_at=now,
-                    )
-                )
-                proposal.status = ProposalStatus.APPROVED.value
-                proposal.updated_at = now
-                proposal.version += 1
-                self._audit(
-                    session,
-                    actor_id=str(admin_id),
-                    event_type="PROPOSAL_ADMIN_DIRECT_APPROVED",
-                    object_type="Proposal",
-                    object_id=proposal_id,
-                    reason=reason,
-                    correlation_id=proposal.correlation_id,
-                    object_version=proposal.version,
-                    now=now,
-                )
-        if expired:
-            _reject("PROPOSAL_EXPIRED", "proposal expired before administrator approval")
-        return ProposalStatus.APPROVED
 
     @staticmethod
     def _lock_risk_capacity(session: Session) -> None:
