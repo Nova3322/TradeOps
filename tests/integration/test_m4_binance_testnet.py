@@ -825,6 +825,7 @@ def test_read_only_sync_binds_legacy_freqtrade_fill_and_accepts_bounded_lot(
         campaign.updated_at = now
         session.add(
             VenueOrder(
+                team_id=campaign.team_id,
                 order_intent_id=intent.intent_id,
                 account_id="acct-testnet",
                 venue="BINANCE",
@@ -877,9 +878,7 @@ def test_read_only_sync_binds_legacy_freqtrade_fill_and_accepts_bounded_lot(
             quantity=Decimal("0.8"),
             entry=Decimal("100"),
             mark=Decimal("101"),
-            protection=BinanceProtection(
-                "native-stop-41", Decimal("0.8"), Decimal("95"), now
-            ),
+            protection=BinanceProtection("native-stop-41", Decimal("0.8"), Decimal("95"), now),
         ),
         environment=ExecutionEnvironment.TESTNET,
         now=now,
@@ -894,9 +893,7 @@ def test_read_only_sync_binds_legacy_freqtrade_fill_and_accepts_bounded_lot(
         order = session.scalar(
             select(VenueOrder).where(VenueOrder.order_intent_id == ids["opening"])
         )
-        fill = session.scalar(
-            select(VenueFill).where(VenueFill.venue_fill_id == "native-fill-41")
-        )
+        fill = session.scalar(select(VenueFill).where(VenueFill.venue_fill_id == "native-fill-41"))
         assert intent is not None and intent.status == OrderIntentStatus.FILLED.value
         assert order is not None and order.venue_order_id == "native-entry-41"
         assert fill is not None and fill.order_intent_id == ids["opening"]
@@ -921,6 +918,7 @@ def test_read_only_sync_recovers_unique_late_fill_for_unknown_freqtrade_intent(
         reservation.updated_at = now
         session.add(
             VenueOrder(
+                team_id=campaign.team_id,
                 order_intent_id=intent.intent_id,
                 account_id="acct-testnet",
                 venue="BINANCE",

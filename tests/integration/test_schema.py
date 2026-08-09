@@ -11,14 +11,21 @@ from sqlalchemy import inspect, select, text
 
 from trading_control_plane.database import REQUIRED_SCHEMA_REVISION, Base, Database
 from trading_control_plane.models import (
+    AccountEquity,
+    AccountEquityObservation,
     AuditEvent,
     CapabilityGate,
     ExchangeAccount,
+    FundingPayment,
+    Position,
     Proposal,
+    ReconciliationRun,
     RoleAssignment,
     Team,
     TeamMembership,
     User,
+    VenueFill,
+    VenueOrder,
     Workspace,
     WorkspaceMembership,
 )
@@ -68,6 +75,13 @@ def test_scope_migrations_backfill_existing_users_roles_proposals_and_audit(
     proposal_audit_id = uuid4()
     instrument_id = uuid4()
     proposal_id = uuid4()
+    position_id = uuid4()
+    equity_id = uuid4()
+    observation_id = uuid4()
+    venue_order_id = uuid4()
+    venue_fill_id = uuid4()
+    funding_payment_id = uuid4()
+    reconciliation_id = uuid4()
     now = datetime.now(UTC)
     with database.engine.begin() as connection:
         connection.execute(
@@ -112,6 +126,116 @@ def test_scope_migrations_backfill_existing_users_roles_proposals_and_audit(
                 "'USDT', 'USDT', true, true, :updated_at)"
             ),
             {"instrument_id": instrument_id, "updated_at": now},
+        )
+        connection.execute(
+            text(
+                "INSERT INTO positions "
+                "(position_id, account_id, venue, environment, instrument_id, quantity, "
+                "average_entry_price, mark_price, fact_status, observed_at, updated_at) "
+                "VALUES (:position_id, 'legacy-account', 'BINANCE', 'SHADOW', "
+                ":instrument_id, 0, 0, 100, 'KNOWN', :observed_at, :updated_at)"
+            ),
+            {
+                "position_id": position_id,
+                "instrument_id": instrument_id,
+                "observed_at": now,
+                "updated_at": now,
+            },
+        )
+        connection.execute(
+            text(
+                "INSERT INTO account_equities "
+                "(account_equity_id, account_id, venue, environment, equity, "
+                "available_balance, currency, fact_status, observed_at, updated_at, "
+                "valuation_currency, valuation_price, valuation_equity, "
+                "valuation_observed_at) VALUES "
+                "(:equity_id, 'legacy-account', 'BINANCE', 'SHADOW', 1000, 900, "
+                "'USDT', 'KNOWN', :observed_at, :updated_at, 'USD', 1, 1000, "
+                ":observed_at)"
+            ),
+            {"equity_id": equity_id, "observed_at": now, "updated_at": now},
+        )
+        connection.execute(
+            text(
+                "INSERT INTO account_equity_observations "
+                "(observation_id, account_equity_id, environment, location_type, "
+                "account_id, venue, currency, equity, available_balance, usd_equity, "
+                "observed_at, recorded_at) VALUES "
+                "(:observation_id, :equity_id, 'SHADOW', 'VENUE', 'legacy-account', "
+                "'BINANCE', 'USDT', 1000, 900, 1000, :observed_at, :recorded_at)"
+            ),
+            {
+                "observation_id": observation_id,
+                "equity_id": equity_id,
+                "observed_at": now,
+                "recorded_at": now,
+            },
+        )
+        connection.execute(
+            text(
+                "INSERT INTO venue_orders "
+                "(venue_order_fact_id, order_intent_id, account_id, venue, environment, "
+                "instrument_id, venue_order_id, client_order_id, side, order_type, "
+                "reduce_only, status, ordered_quantity, filled_quantity, observed_at, "
+                "updated_at) VALUES "
+                "(:fact_id, NULL, 'legacy-account', 'BINANCE', 'SHADOW', :instrument_id, "
+                "'legacy-order', 'legacy-client-order', 'BUY', 'LIMIT', false, 'FILLED', "
+                "1, 1, :observed_at, :updated_at)"
+            ),
+            {
+                "fact_id": venue_order_id,
+                "instrument_id": instrument_id,
+                "observed_at": now,
+                "updated_at": now,
+            },
+        )
+        connection.execute(
+            text(
+                "INSERT INTO venue_fills "
+                "(venue_fill_fact_id, venue, venue_fill_id, order_intent_id, campaign_id, "
+                "account_id, environment, instrument_id, side, quantity, price, fee, "
+                "fee_currency, slippage_cost, executed_at) VALUES "
+                "(:fact_id, 'BINANCE', 'legacy-fill', NULL, NULL, 'legacy-account', "
+                "'SHADOW', :instrument_id, 'BUY', 1, 100, 0, 'USDT', 0, :executed_at)"
+            ),
+            {
+                "fact_id": venue_fill_id,
+                "instrument_id": instrument_id,
+                "executed_at": now,
+            },
+        )
+        connection.execute(
+            text(
+                "INSERT INTO funding_payments "
+                "(funding_payment_id, campaign_id, account_id, venue, environment, "
+                "instrument_id, venue_payment_id, amount, currency, paid_at) VALUES "
+                "(:payment_id, NULL, 'legacy-account', 'BINANCE', 'SHADOW', "
+                ":instrument_id, 'legacy-funding', 0, 'USDT', :paid_at)"
+            ),
+            {
+                "payment_id": funding_payment_id,
+                "instrument_id": instrument_id,
+                "paid_at": now,
+            },
+        )
+        connection.execute(
+            text(
+                "INSERT INTO reconciliation_runs "
+                "(reconciliation_id, execution_scope, campaign_id, status, is_computed, "
+                "differences, resolution_reason, actor_id, correlation_id, started_at, "
+                "completed_at) VALUES "
+                "(:reconciliation_id, 'SHADOW:legacy-account:BINANCE', NULL, 'MATCH', "
+                "true, CAST(:differences AS jsonb), NULL, :actor_id, :correlation_id, "
+                ":started_at, :completed_at)"
+            ),
+            {
+                "reconciliation_id": reconciliation_id,
+                "differences": "[]",
+                "actor_id": str(user_id),
+                "correlation_id": uuid4(),
+                "started_at": now,
+                "completed_at": now,
+            },
         )
         connection.execute(
             text(
@@ -164,6 +288,15 @@ def test_scope_migrations_backfill_existing_users_roles_proposals_and_audit(
         audit = session.get(AuditEvent, audit_id)
         proposal = session.get(Proposal, proposal_id)
         proposal_audit = session.get(AuditEvent, proposal_audit_id)
+        legacy_facts = (
+            session.get(Position, position_id),
+            session.get(AccountEquity, equity_id),
+            session.get(AccountEquityObservation, observation_id),
+            session.get(VenueOrder, venue_order_id),
+            session.get(VenueFill, venue_fill_id),
+            session.get(FundingPayment, funding_payment_id),
+            session.get(ReconciliationRun, reconciliation_id),
+        )
         exchange_account = session.scalar(
             select(ExchangeAccount).where(
                 ExchangeAccount.team_id == team.team_id,
@@ -181,6 +314,7 @@ def test_scope_migrations_backfill_existing_users_roles_proposals_and_audit(
         assert audit.team_id == team.team_id
         assert audit.account_id is None
         assert proposal is not None and proposal.team_id == team.team_id
+        assert all(fact is not None and fact.team_id == team.team_id for fact in legacy_facts)
         assert exchange_account is not None
         assert exchange_account.registration_source == "MIGRATION"
         assert exchange_account.connection_status == "UNCONFIGURED"

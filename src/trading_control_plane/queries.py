@@ -599,21 +599,24 @@ class TradingQueries:
                     )
                 )
             )
-            approval_counts = dict(
-                session.execute(
+            approval_counts: dict[UUID, int] = {
+                proposal_id: int(count)
+                for proposal_id, count in session.execute(
                     select(Approval.proposal_id, func.count(Approval.approval_id))
                     .where(Approval.proposal_id.in_(proposal_ids))
                     .group_by(Approval.proposal_id)
                 ).all()
-            )
-            campaign_by_proposal = dict(
-                session.execute(
+                if proposal_id is not None
+            }
+            campaign_by_proposal: dict[UUID, UUID] = {
+                proposal_id: campaign_id
+                for proposal_id, campaign_id in session.execute(
                     select(Campaign.proposal_id, Campaign.campaign_id).where(
                         Campaign.team_id == team_id,
                         Campaign.proposal_id.in_(proposal_ids),
                     )
                 ).all()
-            )
+            }
             result: list[dict[str, Any]] = []
             for proposal, instrument in values:
                 if not self.service.can_user(user_id, "view", proposal.account_id, proposal.venue):
@@ -1152,6 +1155,7 @@ class TradingQueries:
         authoritative_live_treasury_account_id: str | None = None,
         require_authoritative_live_treasury: bool = False,
     ) -> dict[str, Any]:
+        workspace_id, team_id = self._active_scope_ids(user_id)
         with self.database.session_factory() as session:
             now = datetime.now(UTC)
             authoritative_accounts = {
@@ -1183,7 +1187,10 @@ class TradingQueries:
                 return account_id.lower() == authoritative_live_treasury_account_id.lower()
 
             assignments = session.scalars(
-                select(RoleAssignment).where(RoleAssignment.user_id == user_id)
+                select(RoleAssignment).where(
+                    RoleAssignment.user_id == user_id,
+                    RoleAssignment.team_id == team_id,
+                )
             ).all()
             if not self.service.can_user(user_id, "capital.view"):
                 raise DomainRejected("RBAC_DENIED", "capital center access is not assigned")
@@ -1222,7 +1229,9 @@ class TradingQueries:
                 )
 
             balances = session.scalars(
-                select(AccountEquity).order_by(
+                select(AccountEquity)
+                .where(AccountEquity.team_id == team_id)
+                .order_by(
                     AccountEquity.location_type,
                     AccountEquity.venue,
                     AccountEquity.account_id,
@@ -1247,7 +1256,8 @@ class TradingQueries:
                 )
             ).all()
             observation_query = select(AccountEquityObservation).where(
-                AccountEquityObservation.environment == "LIVE"
+                AccountEquityObservation.team_id == team_id,
+                AccountEquityObservation.environment == "LIVE",
             )
             if authoritative_accounts:
                 authoritative_history_scopes = [
@@ -1454,6 +1464,8 @@ class TradingQueries:
                 for key in ("AUTO_PROFIT_SWEEP", "AUTO_OPERATING_REFILL")
             }
             return {
+                "workspace_id": str(workspace_id),
+                "team_id": str(team_id),
                 "real_transfer_gate": None if gate is None else gate.status,
                 "real_transfer_reason": None if gate is None else gate.reason,
                 "balances": balance_data,
@@ -2115,6 +2127,7 @@ class TradingQueries:
             ).all()
             position = session.scalar(
                 select(Position).where(
+                    Position.team_id == campaign.team_id,
                     Position.account_id == campaign.account_id,
                     Position.venue == campaign.venue,
                     Position.environment == campaign.environment,
@@ -2142,7 +2155,10 @@ class TradingQueries:
             )
             reconciliation = session.scalar(
                 select(ReconciliationRun)
-                .where(ReconciliationRun.execution_scope == scope)
+                .where(
+                    ReconciliationRun.team_id == campaign.team_id,
+                    ReconciliationRun.execution_scope == scope,
+                )
                 .order_by(ReconciliationRun.completed_at.desc())
                 .limit(1)
             )
@@ -2589,6 +2605,7 @@ class TradingQueries:
     ) -> dict[str, Any]:
         if not self.service.can_user(user_id, "view", account_id, venue):
             raise DomainRejected("RBAC_DENIED", "venue facts are outside the current scope")
+        workspace_id, team_id = self._active_scope_ids(user_id)
         with self.database.session_factory() as session:
             instruments = session.scalars(
                 select(Instrument).where(Instrument.venue == venue).order_by(Instrument.symbol)
@@ -2596,6 +2613,7 @@ class TradingQueries:
             instrument_by_id = {item.instrument_id: item for item in instruments}
             positions = session.scalars(
                 select(Position).where(
+                    Position.team_id == team_id,
                     Position.account_id == account_id,
                     Position.venue == venue,
                     Position.environment == environment,
@@ -2614,6 +2632,7 @@ class TradingQueries:
             orders = session.scalars(
                 select(VenueOrder)
                 .where(
+                    VenueOrder.team_id == team_id,
                     VenueOrder.account_id == account_id,
                     VenueOrder.venue == venue,
                     VenueOrder.environment == environment,
@@ -2623,6 +2642,7 @@ class TradingQueries:
             fills = session.scalars(
                 select(VenueFill)
                 .where(
+                    VenueFill.team_id == team_id,
                     VenueFill.account_id == account_id,
                     VenueFill.venue == venue,
                     VenueFill.environment == environment,
@@ -2632,6 +2652,7 @@ class TradingQueries:
             funding = session.scalars(
                 select(FundingPayment)
                 .where(
+                    FundingPayment.team_id == team_id,
                     FundingPayment.account_id == account_id,
                     FundingPayment.venue == venue,
                     FundingPayment.environment == environment,
@@ -2640,6 +2661,7 @@ class TradingQueries:
             ).all()
             equity = session.scalar(
                 select(AccountEquity).where(
+                    AccountEquity.team_id == team_id,
                     AccountEquity.account_id == account_id,
                     AccountEquity.venue == venue,
                     AccountEquity.environment == environment,
@@ -2648,10 +2670,15 @@ class TradingQueries:
             execution_scope = f"{environment}:{account_id}:{venue}"
             reconciliation = session.scalar(
                 select(ReconciliationRun)
-                .where(ReconciliationRun.execution_scope == execution_scope)
+                .where(
+                    ReconciliationRun.team_id == team_id,
+                    ReconciliationRun.execution_scope == execution_scope,
+                )
                 .order_by(ReconciliationRun.completed_at.desc())
             )
             return {
+                "workspace_id": str(workspace_id),
+                "team_id": str(team_id),
                 "account_id": account_id,
                 "venue": venue,
                 "environment": environment,

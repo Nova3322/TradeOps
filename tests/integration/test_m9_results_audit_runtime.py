@@ -30,6 +30,7 @@ def add_recorded_cost_facts(database: Database, ids: dict[str, object], now: dat
         session.add_all(
             [
                 VenueFill(
+                    team_id=campaign.team_id,
                     venue="BINANCE",
                     venue_fill_id="m9-fill-1",
                     order_intent_id=intent.intent_id,
@@ -46,6 +47,7 @@ def add_recorded_cost_facts(database: Database, ids: dict[str, object], now: dat
                     executed_at=now,
                 ),
                 VenueFill(
+                    team_id=campaign.team_id,
                     venue="BINANCE",
                     venue_fill_id="m9-fill-2",
                     order_intent_id=intent.intent_id,
@@ -62,6 +64,7 @@ def add_recorded_cost_facts(database: Database, ids: dict[str, object], now: dat
                     executed_at=now,
                 ),
                 FundingPayment(
+                    team_id=campaign.team_id,
                     campaign_id=campaign.campaign_id,
                     account_id="acct-1",
                     venue="BINANCE",

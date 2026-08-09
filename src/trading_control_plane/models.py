@@ -1202,6 +1202,7 @@ class VenueOrder(Base):
     __tablename__ = "venue_orders"
     __table_args__ = (
         UniqueConstraint(
+            "team_id",
             "environment",
             "account_id",
             "venue",
@@ -1209,6 +1210,7 @@ class VenueOrder(Base):
             name="uq_venue_orders_external",
         ),
         UniqueConstraint(
+            "team_id",
             "environment",
             "account_id",
             "venue",
@@ -1229,15 +1231,29 @@ class VenueOrder(Base):
         CheckConstraint("filled_quantity >= 0", name="ck_venue_orders_filled_nonnegative"),
         Index(
             "ix_venue_orders_scope",
+            "team_id",
             "environment",
             "account_id",
             "venue",
             "instrument_id",
         ),
+        ForeignKeyConstraint(
+            ["team_id", "account_id", "venue"],
+            [
+                "exchange_accounts.team_id",
+                "exchange_accounts.account_id",
+                "exchange_accounts.venue",
+            ],
+            name="fk_venue_orders_team_exchange_account",
+            ondelete="RESTRICT",
+        ),
     )
 
     venue_order_fact_id: Mapped[UUID] = mapped_column(
         Uuid(as_uuid=True), primary_key=True, default=uuid4
+    )
+    team_id: Mapped[UUID] = mapped_column(
+        ForeignKey("teams.team_id", ondelete="RESTRICT"), nullable=False
     )
     order_intent_id: Mapped[UUID | None] = mapped_column(
         ForeignKey("order_intents.intent_id"), nullable=True
@@ -1262,6 +1278,7 @@ class VenueFill(Base):
     __tablename__ = "venue_fills"
     __table_args__ = (
         UniqueConstraint(
+            "team_id",
             "environment",
             "account_id",
             "venue",
@@ -1280,15 +1297,29 @@ class VenueFill(Base):
         Index("ix_venue_fills_campaign_time", "campaign_id", "executed_at"),
         Index(
             "ix_venue_fills_scope",
+            "team_id",
             "environment",
             "account_id",
             "venue",
             "instrument_id",
         ),
+        ForeignKeyConstraint(
+            ["team_id", "account_id", "venue"],
+            [
+                "exchange_accounts.team_id",
+                "exchange_accounts.account_id",
+                "exchange_accounts.venue",
+            ],
+            name="fk_venue_fills_team_exchange_account",
+            ondelete="RESTRICT",
+        ),
     )
 
     venue_fill_fact_id: Mapped[UUID] = mapped_column(
         Uuid(as_uuid=True), primary_key=True, default=uuid4
+    )
+    team_id: Mapped[UUID] = mapped_column(
+        ForeignKey("teams.team_id", ondelete="RESTRICT"), nullable=False
     )
     venue: Mapped[str] = mapped_column(String(64), nullable=False)
     venue_fill_id: Mapped[str] = mapped_column(String(255), nullable=False)
@@ -1314,6 +1345,7 @@ class Position(Base):
     __tablename__ = "positions"
     __table_args__ = (
         UniqueConstraint(
+            "team_id",
             "environment",
             "account_id",
             "venue",
@@ -1324,9 +1356,22 @@ class Position(Base):
             "environment IN ('SHADOW','TESTNET','LIVE')", name="ck_positions_environment"
         ),
         CheckConstraint("fact_status IN ('KNOWN','UNKNOWN')", name="ck_positions_fact_status"),
+        ForeignKeyConstraint(
+            ["team_id", "account_id", "venue"],
+            [
+                "exchange_accounts.team_id",
+                "exchange_accounts.account_id",
+                "exchange_accounts.venue",
+            ],
+            name="fk_positions_team_exchange_account",
+            ondelete="RESTRICT",
+        ),
     )
 
     position_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid4)
+    team_id: Mapped[UUID] = mapped_column(
+        ForeignKey("teams.team_id", ondelete="RESTRICT"), nullable=False
+    )
     account_id: Mapped[str] = mapped_column(String(120), nullable=False)
     venue: Mapped[str] = mapped_column(String(64), nullable=False)
     environment: Mapped[str] = mapped_column(String(16), nullable=False)
@@ -1365,11 +1410,19 @@ class AccountEquity(Base):
     __tablename__ = "account_equities"
     __table_args__ = (
         UniqueConstraint(
+            "team_id",
             "environment",
             "account_id",
             "venue",
             "currency",
             name="uq_account_equities_scope",
+        ),
+        UniqueConstraint(
+            "team_id",
+            "account_equity_id",
+            "account_id",
+            "venue",
+            name="uq_account_equities_team_identity",
         ),
         CheckConstraint(
             "environment IN ('SHADOW','TESTNET','LIVE')",
@@ -1405,6 +1458,9 @@ class AccountEquity(Base):
 
     account_equity_id: Mapped[UUID] = mapped_column(
         Uuid(as_uuid=True), primary_key=True, default=uuid4
+    )
+    team_id: Mapped[UUID] = mapped_column(
+        ForeignKey("teams.team_id", ondelete="RESTRICT"), nullable=False
     )
     account_id: Mapped[str] = mapped_column(String(120), nullable=False)
     venue: Mapped[str] = mapped_column(String(64), nullable=False)
@@ -1462,20 +1518,33 @@ class AccountEquityObservation(Base):
         ),
         Index(
             "ix_account_equity_observations_scope_time",
+            "team_id",
             "environment",
             "location_type",
             "venue",
             "account_id",
             "observed_at",
         ),
+        ForeignKeyConstraint(
+            ["team_id", "account_equity_id", "account_id", "venue"],
+            [
+                "account_equities.team_id",
+                "account_equities.account_equity_id",
+                "account_equities.account_id",
+                "account_equities.venue",
+            ],
+            name="fk_account_equity_observations_team_equity",
+            ondelete="CASCADE",
+        ),
     )
 
     observation_id: Mapped[UUID] = mapped_column(
         Uuid(as_uuid=True), primary_key=True, default=uuid4
     )
-    account_equity_id: Mapped[UUID] = mapped_column(
-        ForeignKey("account_equities.account_equity_id", ondelete="CASCADE"), nullable=False
+    team_id: Mapped[UUID] = mapped_column(
+        ForeignKey("teams.team_id", ondelete="RESTRICT"), nullable=False
     )
+    account_equity_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), nullable=False)
     environment: Mapped[str] = mapped_column(String(16), nullable=False)
     location_type: Mapped[str] = mapped_column(String(16), nullable=False)
     account_id: Mapped[str] = mapped_column(String(120), nullable=False)
@@ -1492,6 +1561,7 @@ class FundingPayment(Base):
     __tablename__ = "funding_payments"
     __table_args__ = (
         UniqueConstraint(
+            "team_id",
             "environment",
             "account_id",
             "venue",
@@ -1505,15 +1575,29 @@ class FundingPayment(Base):
         Index("ix_funding_payments_campaign_time", "campaign_id", "paid_at"),
         Index(
             "ix_funding_payments_scope",
+            "team_id",
             "environment",
             "account_id",
             "venue",
             "instrument_id",
         ),
+        ForeignKeyConstraint(
+            ["team_id", "account_id", "venue"],
+            [
+                "exchange_accounts.team_id",
+                "exchange_accounts.account_id",
+                "exchange_accounts.venue",
+            ],
+            name="fk_funding_payments_team_exchange_account",
+            ondelete="RESTRICT",
+        ),
     )
 
     funding_payment_id: Mapped[UUID] = mapped_column(
         Uuid(as_uuid=True), primary_key=True, default=uuid4
+    )
+    team_id: Mapped[UUID] = mapped_column(
+        ForeignKey("teams.team_id", ondelete="RESTRICT"), nullable=False
     )
     campaign_id: Mapped[UUID | None] = mapped_column(
         ForeignKey("campaigns.campaign_id"), nullable=True
@@ -1535,11 +1619,19 @@ class ReconciliationRun(Base):
             "status IN ('MATCH','DIFFERENCE','UNKNOWN','MANUAL_REQUIRED','RESOLVED')",
             name="ck_reconciliation_runs_status",
         ),
-        Index("ix_reconciliation_scope_completed", "execution_scope", "completed_at"),
+        Index(
+            "ix_reconciliation_scope_completed",
+            "team_id",
+            "execution_scope",
+            "completed_at",
+        ),
     )
 
     reconciliation_id: Mapped[UUID] = mapped_column(
         Uuid(as_uuid=True), primary_key=True, default=uuid4
+    )
+    team_id: Mapped[UUID] = mapped_column(
+        ForeignKey("teams.team_id", ondelete="RESTRICT"), nullable=False
     )
     execution_scope: Mapped[str] = mapped_column(String(255), nullable=False)
     campaign_id: Mapped[UUID | None] = mapped_column(ForeignKey("campaigns.campaign_id"))

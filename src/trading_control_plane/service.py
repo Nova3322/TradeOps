@@ -485,11 +485,17 @@ class TradingService:
                         if authorization is None
                         else session.get(Proposal, authorization.proposal_id)
                     )
-                elif object_type in {"OrderIntent", "RiskReservation"}:
-                    model = OrderIntent if object_type == "OrderIntent" else RiskReservation
-                    child = session.get(model, object_uuid)
+                elif object_type == "OrderIntent":
+                    intent = session.get(OrderIntent, object_uuid)
                     scoped_object = (
-                        None if child is None else session.get(Campaign, child.campaign_id)
+                        None if intent is None else session.get(Campaign, intent.campaign_id)
+                    )
+                elif object_type == "RiskReservation":
+                    reservation = session.get(RiskReservation, object_uuid)
+                    scoped_object = (
+                        None
+                        if reservation is None
+                        else session.get(Campaign, reservation.campaign_id)
                     )
                 elif object_type == "ProtectionOrder":
                     protection = session.get(ProtectionOrder, object_uuid)
@@ -1617,7 +1623,9 @@ class TradingService:
                 event_type="TEAM_MEMBER_ADDED",
                 object_type="TeamMembership",
                 object_id=team_membership.membership_id,
-                reason=f"user={user.user_id};roles={','.join(payload['roles'])}",
+                reason=(
+                    f"user={user.user_id};roles={','.join(role.value for role in normalized_roles)}"
+                ),
                 correlation_id=uuid4(),
                 idempotency_key=idempotency_key,
                 object_version=1,
@@ -3295,13 +3303,17 @@ class TradingService:
         self,
         session: Session,
         *,
+        team_id: UUID,
         environment: str,
         now: datetime,
         max_age: timedelta,
     ) -> tuple[bool, Decimal, list[dict[str, Any]], datetime]:
         rows = session.scalars(
             select(AccountEquity)
-            .where(AccountEquity.environment == environment)
+            .where(
+                AccountEquity.team_id == team_id,
+                AccountEquity.environment == environment,
+            )
             .order_by(
                 AccountEquity.location_type,
                 AccountEquity.venue,
@@ -3414,6 +3426,7 @@ class TradingService:
         position = session.scalar(
             select(Position)
             .where(
+                Position.team_id == proposal.team_id,
                 Position.account_id == proposal.account_id,
                 Position.venue == proposal.venue,
                 Position.environment == proposal.environment,
@@ -3424,6 +3437,7 @@ class TradingService:
         equity = session.scalar(
             select(AccountEquity)
             .where(
+                AccountEquity.team_id == proposal.team_id,
                 AccountEquity.account_id == proposal.account_id,
                 AccountEquity.venue == proposal.venue,
                 AccountEquity.environment == proposal.environment,
@@ -3460,6 +3474,7 @@ class TradingService:
         capital_known, managed_capital_usd, managed_facts, capital_as_of = (
             self._managed_capital_context(
                 session,
+                team_id=proposal.team_id,
                 environment=proposal.environment,
                 now=now,
                 max_age=max_age,
@@ -4061,6 +4076,7 @@ class TradingService:
             position = session.scalar(
                 select(Position)
                 .where(
+                    Position.team_id == proposal.team_id,
                     Position.account_id == account_id,
                     Position.venue == venue,
                     Position.environment == proposal.environment,
@@ -4380,6 +4396,7 @@ class TradingService:
                 policy = session.scalar(select(RiskPolicy).where(RiskPolicy.active))
                 position = session.scalar(
                     select(Position).where(
+                        Position.team_id == campaign.team_id,
                         Position.account_id == campaign.account_id,
                         Position.venue == campaign.venue,
                         Position.environment == campaign.environment,
@@ -4389,7 +4406,10 @@ class TradingService:
                 scope = _scope_key(campaign.environment, campaign.account_id, campaign.venue)
                 latest_reconciliation = session.scalar(
                     select(ReconciliationRun)
-                    .where(ReconciliationRun.execution_scope == scope)
+                    .where(
+                        ReconciliationRun.team_id == campaign.team_id,
+                        ReconciliationRun.execution_scope == scope,
+                    )
                     .order_by(ReconciliationRun.completed_at.desc())
                     .limit(1)
                 )
@@ -4409,6 +4429,7 @@ class TradingService:
                     and latest_reconciliation.completed_at >= position.observed_at
                 )
                 if close_unfilled_campaign:
+                    assert position is not None
                     campaign.status = CampaignStatus.CLOSED.value
                     campaign.current_target_quantity = Decimal(0)
                     campaign.target_reason = reason
@@ -4467,7 +4488,7 @@ class TradingService:
             _environment, account_id, venue = _scope_parts(execution_scope)
             if not owner_id or lease_duration <= timedelta(0):
                 _reject("SENDER_LEASE_INVALID", "owner and positive lease duration are required")
-            self._require_role(session, actor_id, "sender.manage", account_id, venue)
+            team = self._require_role(session, actor_id, "sender.manage", account_id, venue)
             lease = session.get(SenderLease, execution_scope, with_for_update=True)
             if lease is None:
                 token = 1
@@ -4489,7 +4510,10 @@ class TradingService:
                     _reject("SENDER_LEASE_HELD", "another sender still owns the live lease")
                 latest = session.scalar(
                     select(ReconciliationRun)
-                    .where(ReconciliationRun.execution_scope == execution_scope)
+                    .where(
+                        ReconciliationRun.team_id == team.team_id,
+                        ReconciliationRun.execution_scope == execution_scope,
+                    )
                     .order_by(ReconciliationRun.completed_at.desc())
                     .limit(1)
                 )
@@ -4677,6 +4701,7 @@ class TradingService:
                 _reject("PYRAMID_DISABLED", "Add venue send is blocked")
             position = session.scalar(
                 select(Position).where(
+                    Position.team_id == campaign.team_id,
                     Position.account_id == campaign.account_id,
                     Position.venue == campaign.venue,
                     Position.environment == campaign.environment,
@@ -4685,6 +4710,7 @@ class TradingService:
             )
             equity = session.scalar(
                 select(AccountEquity).where(
+                    AccountEquity.team_id == campaign.team_id,
                     AccountEquity.account_id == campaign.account_id,
                     AccountEquity.venue == campaign.venue,
                     AccountEquity.environment == campaign.environment,
@@ -4717,6 +4743,7 @@ class TradingService:
                     )
             capital_known, managed_capital_usd, _, _ = self._managed_capital_context(
                 session,
+                team_id=campaign.team_id,
                 environment=campaign.environment,
                 now=now,
                 max_age=max_age,
@@ -4927,6 +4954,7 @@ class TradingService:
                 )
             position = session.scalar(
                 select(Position).where(
+                    Position.team_id == campaign.team_id,
                     Position.account_id == campaign.account_id,
                     Position.venue == campaign.venue,
                     Position.environment == campaign.environment,
@@ -5322,6 +5350,7 @@ class TradingService:
             )
             if fact is None:
                 fact = VenueOrder(
+                    team_id=campaign.team_id,
                     order_intent_id=intent.intent_id,
                     account_id=campaign.account_id,
                     venue=campaign.venue,
@@ -5540,6 +5569,7 @@ class TradingService:
             )
             if fact is None:
                 fact = VenueOrder(
+                    team_id=campaign.team_id,
                     order_intent_id=intent.intent_id,
                     account_id=campaign.account_id,
                     venue=campaign.venue,
@@ -5669,6 +5699,7 @@ class TradingService:
                 _reject("PROTECTION_TRIGGER_INVALID", "protection trigger must be positive")
             position = session.scalar(
                 select(Position).where(
+                    Position.team_id == campaign.team_id,
                     Position.account_id == campaign.account_id,
                     Position.venue == campaign.venue,
                     Position.environment == campaign.environment,
@@ -5750,6 +5781,7 @@ class TradingService:
             position = session.scalar(
                 select(Position)
                 .where(
+                    Position.team_id == campaign.team_id,
                     Position.account_id == campaign.account_id,
                     Position.venue == campaign.venue,
                     Position.environment == campaign.environment,
@@ -5774,6 +5806,7 @@ class TradingService:
             order = session.scalar(
                 select(VenueOrder)
                 .where(
+                    VenueOrder.team_id == campaign.team_id,
                     VenueOrder.environment == campaign.environment,
                     VenueOrder.account_id == campaign.account_id,
                     VenueOrder.venue == campaign.venue,
@@ -5785,6 +5818,7 @@ class TradingService:
                 order = session.scalar(
                     select(VenueOrder)
                     .where(
+                        VenueOrder.team_id == campaign.team_id,
                         VenueOrder.environment == campaign.environment,
                         VenueOrder.account_id == campaign.account_id,
                         VenueOrder.venue == campaign.venue,
@@ -5794,6 +5828,7 @@ class TradingService:
                 )
             if order is None:
                 order = VenueOrder(
+                    team_id=campaign.team_id,
                     order_intent_id=None,
                     account_id=campaign.account_id,
                     venue=campaign.venue,
@@ -5919,6 +5954,7 @@ class TradingService:
                 if campaign is None
                 else session.scalar(
                     select(Position).where(
+                        Position.team_id == campaign.team_id,
                         Position.account_id == campaign.account_id,
                         Position.venue == campaign.venue,
                         Position.environment == campaign.environment,
@@ -6407,6 +6443,7 @@ class TradingService:
                 )
             position = session.scalar(
                 select(Position).where(
+                    Position.team_id == campaign.team_id,
                     Position.account_id == campaign.account_id,
                     Position.venue == campaign.venue,
                     Position.environment == campaign.environment,
@@ -6427,6 +6464,7 @@ class TradingService:
                 if protection is None
                 else session.scalar(
                     select(VenueOrder).where(
+                        VenueOrder.team_id == campaign.team_id,
                         VenueOrder.environment == campaign.environment,
                         VenueOrder.account_id == campaign.account_id,
                         VenueOrder.venue == campaign.venue,
@@ -6490,6 +6528,7 @@ class TradingService:
             )
             position = session.scalar(
                 select(Position).where(
+                    Position.team_id == campaign.team_id,
                     Position.account_id == campaign.account_id,
                     Position.venue == campaign.venue,
                     Position.environment == campaign.environment,
@@ -6508,6 +6547,7 @@ class TradingService:
             order = session.scalar(
                 select(VenueOrder)
                 .where(
+                    VenueOrder.team_id == campaign.team_id,
                     VenueOrder.environment == campaign.environment,
                     VenueOrder.account_id == campaign.account_id,
                     VenueOrder.venue == campaign.venue,
@@ -6578,6 +6618,7 @@ class TradingService:
                 team_id=campaign.team_id,
             )
             fact = VenueOrder(
+                team_id=campaign.team_id,
                 order_intent_id=intent_id,
                 account_id=campaign.account_id,
                 venue=campaign.venue,
@@ -6645,6 +6686,7 @@ class TradingService:
             )
             existing = session.scalar(
                 select(VenueFill).where(
+                    VenueFill.team_id == campaign.team_id,
                     VenueFill.environment == campaign.environment,
                     VenueFill.account_id == campaign.account_id,
                     VenueFill.venue == campaign.venue,
@@ -6689,6 +6731,7 @@ class TradingService:
             if current_filled + quantity > intent.quantity:
                 _reject("ORDER_INTENT_OVERFILLED", "cumulative fill exceeds intent quantity")
             fact = VenueFill(
+                team_id=campaign.team_id,
                 venue=campaign.venue,
                 venue_fill_id=venue_fill_id,
                 order_intent_id=intent_id,
@@ -6762,9 +6805,18 @@ class TradingService:
         if fact_time > now:
             _reject("FACT_TIME_INVALID", "position observation cannot be in the future")
         with self.database.session_factory.begin() as session:
-            self._require_role(session, actor_id, "venue.record", account_id, venue)
+            team = self._require_role(session, actor_id, "venue.record", account_id, venue)
+            self._ensure_exchange_account_reference(
+                session,
+                team=team,
+                actor_id=actor_id,
+                account_id=account_id,
+                venue=venue,
+                now=now,
+            )
             position = session.scalar(
                 select(Position).where(
+                    Position.team_id == team.team_id,
                     Position.account_id == account_id,
                     Position.venue == venue,
                     Position.environment == environment.value,
@@ -6773,6 +6825,7 @@ class TradingService:
             )
             if position is None:
                 position = Position(
+                    team_id=team.team_id,
                     account_id=account_id,
                     venue=venue,
                     environment=environment.value,
@@ -6827,7 +6880,12 @@ class TradingService:
             if position is None:
                 _reject("POSITION_NOT_FOUND", "protection position is missing")
             self._require_role(
-                session, actor_id, "venue.record", position.account_id, position.venue
+                session,
+                actor_id,
+                "venue.record",
+                position.account_id,
+                position.venue,
+                team_id=position.team_id,
             )
             protection = session.scalar(
                 select(ProtectionOrder).where(ProtectionOrder.position_id == position_id)
@@ -6901,6 +6959,7 @@ class TradingService:
             )
         session.add(
             AccountEquityObservation(
+                team_id=fact.team_id,
                 account_equity_id=fact.account_equity_id,
                 environment=fact.environment,
                 location_type=fact.location_type,
@@ -6933,9 +6992,18 @@ class TradingService:
         if fact_time > now:
             _reject("FACT_TIME_INVALID", "equity observation cannot be in the future")
         with self.database.session_factory.begin() as session:
-            self._require_role(session, actor_id, "venue.record", account_id, venue)
+            team = self._require_role(session, actor_id, "venue.record", account_id, venue)
+            self._ensure_exchange_account_reference(
+                session,
+                team=team,
+                actor_id=actor_id,
+                account_id=account_id,
+                venue=venue,
+                now=now,
+            )
             fact = session.scalar(
                 select(AccountEquity).where(
+                    AccountEquity.team_id == team.team_id,
                     AccountEquity.account_id == account_id,
                     AccountEquity.venue == venue,
                     AccountEquity.environment == environment.value,
@@ -6945,6 +7013,7 @@ class TradingService:
             stable = currency.upper() in USD_STABLE_ASSETS
             if fact is None:
                 fact = AccountEquity(
+                    team_id=team.team_id,
                     account_id=account_id,
                     venue=venue,
                     environment=environment.value,
@@ -7005,6 +7074,7 @@ class TradingService:
                 _reject("PNL_CURRENCY_MISMATCH", "funding currency lacks an FX conversion")
             existing = session.scalar(
                 select(FundingPayment).where(
+                    FundingPayment.team_id == campaign.team_id,
                     FundingPayment.environment == campaign.environment,
                     FundingPayment.account_id == campaign.account_id,
                     FundingPayment.venue == venue,
@@ -7020,6 +7090,7 @@ class TradingService:
                     return existing.funding_payment_id
                 raise IdempotencyConflict
             payment = FundingPayment(
+                team_id=campaign.team_id,
                 campaign_id=campaign_id,
                 account_id=campaign.account_id,
                 venue=venue,
@@ -7229,11 +7300,12 @@ class TradingService:
             self.database.session_factory.begin() if session is None else nullcontext(session)
         )
         with transaction as session:
-            self._require_role(session, actor_id, "venue.record", account_id, venue)
+            team = self._require_role(session, actor_id, "venue.record", account_id, venue)
             scoped = session.execute(
                 select(Position, Instrument)
                 .join(Instrument, Position.instrument_id == Instrument.instrument_id)
                 .where(
+                    Position.team_id == team.team_id,
                     Position.account_id == account_id,
                     Position.venue == venue,
                     Position.environment == environment.value,
@@ -7282,6 +7354,7 @@ class TradingService:
                     protection_order = session.scalar(
                         select(VenueOrder)
                         .where(
+                            VenueOrder.team_id == team.team_id,
                             VenueOrder.environment == environment.value,
                             VenueOrder.account_id == account_id,
                             VenueOrder.venue == venue,
@@ -7358,7 +7431,15 @@ class TradingService:
             self.database.session_factory.begin() if session is None else nullcontext(session)
         )
         with transaction as session:
-            self._require_role(session, actor_id, "venue.record", account_id, venue)
+            team = self._require_role(session, actor_id, "venue.record", account_id, venue)
+            self._ensure_exchange_account_reference(
+                session,
+                team=team,
+                actor_id=actor_id,
+                account_id=account_id,
+                venue=venue,
+                now=now,
+            )
             instrument = session.scalar(
                 select(Instrument)
                 .where(
@@ -7395,6 +7476,7 @@ class TradingService:
             position = session.scalar(
                 select(Position)
                 .where(
+                    Position.team_id == team.team_id,
                     Position.account_id == account_id,
                     Position.venue == venue,
                     Position.environment == environment.value,
@@ -7407,6 +7489,7 @@ class TradingService:
             )
             if position is None:
                 position = Position(
+                    team_id=team.team_id,
                     account_id=account_id,
                     venue=venue,
                     environment=environment.value,
@@ -7439,6 +7522,7 @@ class TradingService:
             equity = session.scalar(
                 select(AccountEquity)
                 .where(
+                    AccountEquity.team_id == team.team_id,
                     AccountEquity.account_id == account_id,
                     AccountEquity.venue == venue,
                     AccountEquity.environment == environment.value,
@@ -7449,6 +7533,7 @@ class TradingService:
             stable_equity = snapshot.equity.currency.upper() in USD_STABLE_ASSETS
             if equity is None:
                 equity = AccountEquity(
+                    team_id=team.team_id,
                     account_id=account_id,
                     venue=venue,
                     environment=environment.value,
@@ -7492,6 +7577,7 @@ class TradingService:
                     campaign = session.get(Campaign, intent.campaign_id)
                     if (
                         campaign is None
+                        or campaign.team_id != team.team_id
                         or campaign.account_id != account_id
                         or campaign.venue != venue
                         or campaign.environment != environment.value
@@ -7504,6 +7590,7 @@ class TradingService:
                 current_order = session.scalar(
                     select(VenueOrder)
                     .where(
+                        VenueOrder.team_id == team.team_id,
                         VenueOrder.environment == environment.value,
                         VenueOrder.account_id == account_id,
                         VenueOrder.venue == venue,
@@ -7515,6 +7602,7 @@ class TradingService:
                     current_order = session.scalar(
                         select(VenueOrder)
                         .where(
+                            VenueOrder.team_id == team.team_id,
                             VenueOrder.environment == environment.value,
                             VenueOrder.account_id == account_id,
                             VenueOrder.venue == venue,
@@ -7524,6 +7612,7 @@ class TradingService:
                     )
                 if current_order is None:
                     current_order = VenueOrder(
+                        team_id=team.team_id,
                         order_intent_id=None if intent is None else intent.intent_id,
                         account_id=account_id,
                         venue=venue,
@@ -7572,6 +7661,7 @@ class TradingService:
             for external_fill in snapshot.fills:
                 current_fill = session.scalar(
                     select(VenueFill).where(
+                        VenueFill.team_id == team.team_id,
                         VenueFill.environment == environment.value,
                         VenueFill.account_id == account_id,
                         VenueFill.venue == venue,
@@ -7580,6 +7670,7 @@ class TradingService:
                 )
                 venue_order = session.scalar(
                     select(VenueOrder).where(
+                        VenueOrder.team_id == team.team_id,
                         VenueOrder.environment == environment.value,
                         VenueOrder.account_id == account_id,
                         VenueOrder.venue == venue,
@@ -7592,6 +7683,7 @@ class TradingService:
                     # order; ambiguity remains unbound and therefore fail-closed in reconcile.
                     synthetic_candidates = session.scalars(
                         select(VenueOrder).where(
+                            VenueOrder.team_id == team.team_id,
                             VenueOrder.environment == environment.value,
                             VenueOrder.account_id == account_id,
                             VenueOrder.venue == venue,
@@ -7625,6 +7717,7 @@ class TradingService:
                             VenueOrder.order_intent_id == OrderIntent.intent_id,
                         )
                         .where(
+                            VenueOrder.team_id == team.team_id,
                             VenueOrder.environment == environment.value,
                             VenueOrder.account_id == account_id,
                             VenueOrder.venue == venue,
@@ -7661,6 +7754,7 @@ class TradingService:
                 if current_fill is None:
                     session.add(
                         VenueFill(
+                            team_id=team.team_id,
                             venue=venue,
                             venue_fill_id=external_fill.fill_id,
                             order_intent_id=None if intent is None else intent.intent_id,
@@ -7702,6 +7796,7 @@ class TradingService:
             bound_orders = session.scalars(
                 select(VenueOrder)
                 .where(
+                    VenueOrder.team_id == team.team_id,
                     VenueOrder.environment == environment.value,
                     VenueOrder.account_id == account_id,
                     VenueOrder.venue == venue,
@@ -7723,8 +7818,13 @@ class TradingService:
                 )
                 if bound_campaign is None:
                     _reject(f"{venue}_ORDER_BINDING_INVALID", "bound order campaign is missing")
+                if bound_campaign.team_id != team.team_id:
+                    _reject(f"{venue}_ORDER_BINDING_INVALID", "bound order crossed team scope")
                 intent_fills = session.scalars(
-                    select(VenueFill).where(VenueFill.order_intent_id == bound_intent.intent_id)
+                    select(VenueFill).where(
+                        VenueFill.team_id == team.team_id,
+                        VenueFill.order_intent_id == bound_intent.intent_id,
+                    )
                 ).all()
                 if any(fill.side != bound_intent.side for fill in intent_fills):
                     _reject("FILL_SIDE_MISMATCH", f"{venue} fill side changed intent semantics")
@@ -7832,6 +7932,7 @@ class TradingService:
             funding_campaign = session.scalar(
                 select(Campaign)
                 .where(
+                    Campaign.team_id == team.team_id,
                     Campaign.account_id == account_id,
                     Campaign.venue == venue,
                     Campaign.environment == environment.value,
@@ -7843,6 +7944,7 @@ class TradingService:
             for external_funding in snapshot.funding:
                 current_funding = session.scalar(
                     select(FundingPayment).where(
+                        FundingPayment.team_id == team.team_id,
                         FundingPayment.environment == environment.value,
                         FundingPayment.account_id == account_id,
                         FundingPayment.venue == venue,
@@ -7852,6 +7954,7 @@ class TradingService:
                 if current_funding is None:
                     session.add(
                         FundingPayment(
+                            team_id=team.team_id,
                             campaign_id=(
                                 None if funding_campaign is None else funding_campaign.campaign_id
                             ),
@@ -8023,6 +8126,7 @@ class TradingService:
             position = session.scalar(
                 select(Position)
                 .where(
+                    Position.team_id == campaign.team_id,
                     Position.account_id == campaign.account_id,
                     Position.venue == campaign.venue,
                     Position.environment == campaign.environment,
@@ -8087,6 +8191,7 @@ class TradingService:
             )
             position = session.scalar(
                 select(Position).where(
+                    Position.team_id == campaign.team_id,
                     Position.account_id == campaign.account_id,
                     Position.venue == campaign.venue,
                     Position.environment == campaign.environment,
@@ -8295,6 +8400,7 @@ class TradingService:
             position = session.scalar(
                 select(Position)
                 .where(
+                    Position.team_id == campaign.team_id,
                     Position.account_id == campaign.account_id,
                     Position.venue == campaign.venue,
                     Position.environment == campaign.environment,
@@ -8321,6 +8427,7 @@ class TradingService:
                 select(VenueOrder.venue_order_fact_id).where(
                     VenueOrder.account_id == campaign.account_id,
                     VenueOrder.venue == campaign.venue,
+                    VenueOrder.team_id == campaign.team_id,
                     VenueOrder.environment == campaign.environment,
                     VenueOrder.instrument_id == campaign.instrument_id,
                     VenueOrder.status.in_(
@@ -8368,6 +8475,7 @@ class TradingService:
                 entry_candidates = session.scalars(
                     select(VenueFill)
                     .where(
+                        VenueFill.team_id == campaign.team_id,
                         VenueFill.environment == campaign.environment,
                         VenueFill.account_id == campaign.account_id,
                         VenueFill.venue == campaign.venue,
@@ -8391,6 +8499,7 @@ class TradingService:
                     _reject("PNL_CURRENCY_MISMATCH", "entry fill currency lacks an FX conversion")
                 session.add(
                     VenueOrder(
+                        team_id=campaign.team_id,
                         order_intent_id=entry.intent_id,
                         account_id=campaign.account_id,
                         venue=campaign.venue,
@@ -8455,6 +8564,7 @@ class TradingService:
             candidates = session.scalars(
                 select(VenueFill)
                 .where(
+                    VenueFill.team_id == campaign.team_id,
                     VenueFill.environment == campaign.environment,
                     VenueFill.account_id == campaign.account_id,
                     VenueFill.venue == campaign.venue,
@@ -8513,6 +8623,7 @@ class TradingService:
             session.flush()
             session.add(
                 VenueOrder(
+                    team_id=campaign.team_id,
                     order_intent_id=exit_intent.intent_id,
                     account_id=campaign.account_id,
                     venue=campaign.venue,
@@ -8590,6 +8701,7 @@ class TradingService:
             position = session.scalar(
                 select(Position)
                 .where(
+                    Position.team_id == campaign.team_id,
                     Position.account_id == campaign.account_id,
                     Position.venue == campaign.venue,
                     Position.environment == campaign.environment,
@@ -10148,8 +10260,15 @@ class TradingService:
             )
         with self.database.session_factory.begin() as session:
             _environment, account_id, venue = _scope_parts(execution_scope)
-            self._require_role(session, actor_id, "reconcile", account_id, venue)
+            team = self._require_role(session, actor_id, "reconcile", account_id, venue)
+            if campaign_id is not None:
+                campaign = session.get(Campaign, campaign_id)
+                if campaign is None:
+                    _reject("CAMPAIGN_NOT_FOUND", "campaign does not exist")
+                if campaign.team_id != team.team_id:
+                    _reject("TEAM_SCOPE_DENIED", "campaign is outside the active team scope")
             run = ReconciliationRun(
+                team_id=team.team_id,
                 execution_scope=execution_scope,
                 campaign_id=campaign_id,
                 status=status.value,
@@ -10174,7 +10293,14 @@ class TradingService:
             if run is None:
                 _reject("RECONCILIATION_NOT_FOUND", "run does not exist")
             _environment, account_id, venue = _scope_parts(run.execution_scope)
-            self._require_role(session, actor_id, "reconcile", account_id, venue)
+            self._require_role(
+                session,
+                actor_id,
+                "reconcile",
+                account_id,
+                venue,
+                team_id=run.team_id,
+            )
             if run.status not in {
                 ReconciliationStatus.DIFFERENCE.value,
                 ReconciliationStatus.UNKNOWN.value,
@@ -10196,7 +10322,14 @@ class TradingService:
             if run is None:
                 _reject("RECONCILIATION_NOT_FOUND", "run does not exist")
             _environment, account_id, venue = _scope_parts(run.execution_scope)
-            self._require_role(session, actor_id, "reconcile", account_id, venue)
+            self._require_role(
+                session,
+                actor_id,
+                "reconcile",
+                account_id,
+                venue,
+                team_id=run.team_id,
+            )
             if run.status != ReconciliationStatus.MANUAL_REQUIRED.value:
                 _reject(
                     "RECONCILIATION_TRANSITION_INVALID",
@@ -10227,7 +10360,7 @@ class TradingService:
     ) -> UUID:
         environment, account_id, venue = _scope_parts(execution_scope)
         with self.database.session_factory.begin() as session:
-            self._require_role(session, actor_id, "reconcile", account_id, venue)
+            team = self._require_role(session, actor_id, "reconcile", account_id, venue)
             policy = session.scalar(select(RiskPolicy).where(RiskPolicy.active))
             max_age = (
                 timedelta(seconds=policy.max_fact_age_seconds)
@@ -10237,6 +10370,7 @@ class TradingService:
             campaigns = session.scalars(
                 select(Campaign)
                 .where(
+                    Campaign.team_id == team.team_id,
                     Campaign.account_id == account_id,
                     Campaign.venue == venue,
                     Campaign.environment == environment.value,
@@ -10248,6 +10382,7 @@ class TradingService:
             equity = session.scalar(
                 select(AccountEquity)
                 .where(
+                    AccountEquity.team_id == team.team_id,
                     AccountEquity.account_id == account_id,
                     AccountEquity.venue == venue,
                     AccountEquity.environment == environment.value,
@@ -10268,6 +10403,7 @@ class TradingService:
                     select(ProtectionOrder.venue_order_id)
                     .join(Position, ProtectionOrder.position_id == Position.position_id)
                     .where(
+                        Position.team_id == team.team_id,
                         Position.account_id == account_id,
                         Position.venue == venue,
                         Position.environment == environment.value,
@@ -10276,6 +10412,7 @@ class TradingService:
             )
             unbound_orders = session.scalars(
                 select(VenueOrder).where(
+                    VenueOrder.team_id == team.team_id,
                     VenueOrder.account_id == account_id,
                     VenueOrder.venue == venue,
                     VenueOrder.environment == environment.value,
@@ -10300,6 +10437,7 @@ class TradingService:
             active_instrument_ids = {campaign.instrument_id for campaign in campaigns}
             scope_positions = session.scalars(
                 select(Position).where(
+                    Position.team_id == team.team_id,
                     Position.account_id == account_id,
                     Position.venue == venue,
                     Position.environment == environment.value,
@@ -10389,6 +10527,7 @@ class TradingService:
                 position = session.scalar(
                     select(Position)
                     .where(
+                        Position.team_id == campaign.team_id,
                         Position.account_id == campaign.account_id,
                         Position.venue == campaign.venue,
                         Position.environment == campaign.environment,
@@ -10434,6 +10573,7 @@ class TradingService:
                 status = ReconciliationStatus.MATCH
                 result_differences = []
             run = ReconciliationRun(
+                team_id=team.team_id,
                 execution_scope=execution_scope,
                 campaign_id=None,
                 status=status.value,
@@ -10498,6 +10638,7 @@ class TradingService:
             position = session.scalar(
                 select(Position)
                 .where(
+                    Position.team_id == campaign.team_id,
                     Position.account_id == campaign.account_id,
                     Position.venue == campaign.venue,
                     Position.environment == campaign.environment,
@@ -10537,7 +10678,10 @@ class TradingService:
             scope = _scope_key(campaign.environment, campaign.account_id, campaign.venue)
             latest = session.scalar(
                 select(ReconciliationRun)
-                .where(ReconciliationRun.execution_scope == scope)
+                .where(
+                    ReconciliationRun.team_id == campaign.team_id,
+                    ReconciliationRun.execution_scope == scope,
+                )
                 .order_by(ReconciliationRun.completed_at.desc())
                 .limit(1)
             )
@@ -10608,6 +10752,7 @@ class TradingService:
             ).all()
             position = session.scalar(
                 select(Position).where(
+                    Position.team_id == campaign.team_id,
                     Position.account_id == campaign.account_id,
                     Position.venue == campaign.venue,
                     Position.environment == campaign.environment,
@@ -12111,16 +12256,26 @@ class TradingService:
             valuation_observed_at = observed_at
         fact_venue = venue if location_type == "VENUE" else "VAULT"
         with self.database.session_factory.begin() as session:
-            self._require_role(
+            team = self._require_role(
                 session,
                 actor_id,
                 "capital.fact.record",
                 location_id if location_type == "VENUE" else None,
                 venue if location_type == "VENUE" else None,
             )
+            if location_type == "VENUE":
+                self._ensure_exchange_account_reference(
+                    session,
+                    team=team,
+                    actor_id=actor_id,
+                    account_id=location_id,
+                    venue=venue,
+                    now=now,
+                )
             fact = session.scalar(
                 select(AccountEquity)
                 .where(
+                    AccountEquity.team_id == team.team_id,
                     AccountEquity.environment == environment.value,
                     AccountEquity.account_id == location_id,
                     AccountEquity.venue == fact_venue,
@@ -12130,6 +12285,7 @@ class TradingService:
             )
             if fact is None:
                 fact = AccountEquity(
+                    team_id=team.team_id,
                     account_id=location_id,
                     venue=fact_venue,
                     environment=environment.value,
@@ -12194,7 +12350,7 @@ class TradingService:
         if not snapshot.budgets:
             _reject("NOTILT_FACT_INVALID", "NoTilt snapshot must contain catalog assets")
         with self.database.session_factory.begin() as session:
-            self._require_role(session, actor_id, "capital.fact.record")
+            team = self._require_role(session, actor_id, "capital.fact.record")
             fact_ids: list[UUID] = []
             for budget in snapshot.budgets:
                 if (
@@ -12226,6 +12382,7 @@ class TradingService:
                 fact = session.scalar(
                     select(AccountEquity)
                     .where(
+                        AccountEquity.team_id == team.team_id,
                         AccountEquity.environment == ExecutionEnvironment.LIVE.value,
                         AccountEquity.account_id == snapshot.vault,
                         AccountEquity.venue == "VAULT",
@@ -12235,6 +12392,7 @@ class TradingService:
                 )
                 if fact is None:
                     fact = AccountEquity(
+                        team_id=team.team_id,
                         account_id=snapshot.vault,
                         venue="VAULT",
                         environment=ExecutionEnvironment.LIVE.value,
@@ -12312,10 +12470,11 @@ class TradingService:
         if normalized_asset not in USD_STABLE_ASSETS:
             _reject("SAFE_ASSET_UNSUPPORTED", "Safe treasury snapshot requires a USD asset")
         with self.database.session_factory.begin() as session:
-            self._require_role(session, actor_id, "capital.fact.record")
+            team = self._require_role(session, actor_id, "capital.fact.record")
             fact = session.scalar(
                 select(AccountEquity)
                 .where(
+                    AccountEquity.team_id == team.team_id,
                     AccountEquity.environment == ExecutionEnvironment.LIVE.value,
                     AccountEquity.account_id == safe_address,
                     AccountEquity.venue == "VAULT",
@@ -12326,6 +12485,7 @@ class TradingService:
             withdrawable = min(balance, available_limit) if module_enabled else Decimal(0)
             if fact is None:
                 fact = AccountEquity(
+                    team_id=team.team_id,
                     account_id=safe_address,
                     venue="VAULT",
                     environment=ExecutionEnvironment.LIVE.value,
@@ -12366,6 +12526,7 @@ class TradingService:
                 fact.updated_at = now
             observation_exists = session.scalar(
                 select(AccountEquityObservation.observation_id).where(
+                    AccountEquityObservation.team_id == team.team_id,
                     AccountEquityObservation.account_equity_id == fact.account_equity_id,
                     AccountEquityObservation.observed_at == observed_at,
                 )
@@ -12551,7 +12712,7 @@ class TradingService:
             policy = session.get(CapitalAutomationPolicy, policy_id, with_for_update=True)
             if policy is None:
                 _reject("CAPITAL_AUTOMATION_POLICY_NOT_FOUND", "capital policy is missing")
-            self._require_role(session, actor_id, operation, policy.account_id, policy.venue)
+            team = self._require_role(session, actor_id, operation, policy.account_id, policy.venue)
             digest, response = self._idempotency(
                 session,
                 caller_id=str(actor_id),
@@ -12582,6 +12743,7 @@ class TradingService:
             )
             self._assert_capital_scope_flat(
                 session,
+                team_id=team.team_id,
                 environment=policy.environment,
                 account_id=policy.account_id,
                 venue=policy.venue,
@@ -12593,8 +12755,9 @@ class TradingService:
             latest_match = session.scalar(
                 select(ReconciliationRun)
                 .where(
+                    ReconciliationRun.team_id == team.team_id,
                     ReconciliationRun.execution_scope
-                    == _scope_key(policy.environment, policy.account_id, policy.venue)
+                    == _scope_key(policy.environment, policy.account_id, policy.venue),
                 )
                 .order_by(ReconciliationRun.completed_at.desc())
                 .limit(1)
@@ -12612,6 +12775,7 @@ class TradingService:
                 )
             campaigns = session.scalars(
                 select(Campaign).where(
+                    Campaign.team_id == team.team_id,
                     Campaign.environment == policy.environment,
                     Campaign.account_id == policy.account_id,
                     Campaign.venue == policy.venue,
@@ -12656,6 +12820,7 @@ class TradingService:
                 )
             venue_fact = self._capital_balance(
                 session,
+                team_id=team.team_id,
                 environment=policy.environment,
                 endpoint_type="VENUE",
                 endpoint_id=policy.account_id,
@@ -12665,6 +12830,7 @@ class TradingService:
             )
             vault_fact = self._capital_balance(
                 session,
+                team_id=team.team_id,
                 environment=policy.environment,
                 endpoint_type="VAULT",
                 endpoint_id=policy.vault_id,
@@ -13164,6 +13330,7 @@ class TradingService:
     def _capital_balance(
         session: Session,
         *,
+        team_id: UUID,
         environment: str,
         endpoint_type: str,
         endpoint_id: str,
@@ -13172,6 +13339,7 @@ class TradingService:
         lock: bool = False,
     ) -> AccountEquity:
         statement = select(AccountEquity).where(
+            AccountEquity.team_id == team_id,
             AccountEquity.environment == environment,
             AccountEquity.account_id == endpoint_id,
             AccountEquity.venue == (venue if endpoint_type == "VENUE" else "VAULT"),
@@ -13195,9 +13363,10 @@ class TradingService:
         now: datetime,
     ) -> UUID:
         with self.database.session_factory.begin() as session:
-            self._require_role(session, actor_id, "capital.reconcile", account_id, venue)
+            team = self._require_role(session, actor_id, "capital.reconcile", account_id, venue)
             positions = session.scalars(
                 select(Position).where(
+                    Position.team_id == team.team_id,
                     Position.environment == environment.value,
                     Position.account_id == account_id,
                     Position.venue == venue,
@@ -13205,6 +13374,7 @@ class TradingService:
             ).all()
             orders = session.scalars(
                 select(VenueOrder).where(
+                    VenueOrder.team_id == team.team_id,
                     VenueOrder.environment == environment.value,
                     VenueOrder.account_id == account_id,
                     VenueOrder.venue == venue,
@@ -13212,6 +13382,7 @@ class TradingService:
             ).all()
             campaigns = session.scalars(
                 select(Campaign).where(
+                    Campaign.team_id == team.team_id,
                     Campaign.environment == environment.value,
                     Campaign.account_id == account_id,
                     Campaign.venue == venue,
@@ -13255,6 +13426,7 @@ class TradingService:
                 )
             )
             run = ReconciliationRun(
+                team_id=team.team_id,
                 execution_scope=_scope_key(environment.value, account_id, venue),
                 campaign_id=None,
                 status=status,
@@ -13274,6 +13446,7 @@ class TradingService:
     def _assert_capital_scope_flat(
         session: Session,
         *,
+        team_id: UUID,
         environment: str,
         account_id: str,
         venue: str,
@@ -13281,6 +13454,7 @@ class TradingService:
     ) -> None:
         positions = session.scalars(
             select(Position).where(
+                Position.team_id == team_id,
                 Position.environment == environment,
                 Position.account_id == account_id,
                 Position.venue == venue,
@@ -13303,6 +13477,7 @@ class TradingService:
             )
         campaigns = session.scalars(
             select(Campaign).where(
+                Campaign.team_id == team_id,
                 Campaign.environment == environment,
                 Campaign.account_id == account_id,
                 Campaign.venue == venue,
@@ -13326,6 +13501,7 @@ class TradingService:
         venue_order = session.scalar(
             select(VenueOrder.venue_order_fact_id)
             .where(
+                VenueOrder.team_id == team_id,
                 VenueOrder.environment == environment,
                 VenueOrder.account_id == account_id,
                 VenueOrder.venue == venue,
@@ -13362,7 +13538,7 @@ class TradingService:
             )
             if authorization is None:
                 _reject("TRANSFER_AUTHORIZATION_NOT_FOUND", "transfer authorization is missing")
-            self._require_role(
+            team = self._require_role(
                 session, actor_id, operation, authorization.account_id, authorization.venue
             )
             proposal = session.get(TransferProposal, authorization.transfer_proposal_id)
@@ -13406,6 +13582,7 @@ class TradingService:
                     )
             self._assert_capital_scope_flat(
                 session,
+                team_id=team.team_id,
                 environment=authorization.environment,
                 account_id=authorization.account_id,
                 venue=authorization.venue,
@@ -13415,12 +13592,13 @@ class TradingService:
                 latest = session.scalar(
                     select(ReconciliationRun)
                     .where(
+                        ReconciliationRun.team_id == team.team_id,
                         ReconciliationRun.execution_scope
                         == _scope_key(
                             authorization.environment,
                             authorization.account_id,
                             authorization.venue,
-                        )
+                        ),
                     )
                     .order_by(ReconciliationRun.completed_at.desc())
                     .limit(1)
@@ -13447,6 +13625,7 @@ class TradingService:
             )
             source = self._capital_balance(
                 session,
+                team_id=team.team_id,
                 environment=authorization.environment,
                 endpoint_type=authorization.source_type,
                 endpoint_id=authorization.source_id,
@@ -13456,6 +13635,7 @@ class TradingService:
             )
             destination = self._capital_balance(
                 session,
+                team_id=team.team_id,
                 environment=authorization.environment,
                 endpoint_type=authorization.destination_type,
                 endpoint_id=authorization.destination_id,
@@ -14010,7 +14190,7 @@ class TradingService:
             transfer = session.get(CapitalTransfer, capital_transfer_id, with_for_update=True)
             if transfer is None:
                 _reject("CAPITAL_TRANSFER_NOT_FOUND", "capital transfer does not exist")
-            self._require_role(
+            team = self._require_role(
                 session, actor_id, "capital.reconcile", transfer.account_id, transfer.venue
             )
             authorization = session.get(TransferAuthorization, transfer.transfer_authorization_id)
@@ -14023,6 +14203,7 @@ class TradingService:
             ):
                 source_fact = self._capital_balance(
                     session,
+                    team_id=team.team_id,
                     environment=authorization.environment,
                     endpoint_type=authorization.source_type,
                     endpoint_id=authorization.source_id,
@@ -14031,6 +14212,7 @@ class TradingService:
                 )
                 destination_fact = self._capital_balance(
                     session,
+                    team_id=team.team_id,
                     environment=authorization.environment,
                     endpoint_type=authorization.destination_type,
                     endpoint_id=authorization.destination_id,
@@ -14070,6 +14252,7 @@ class TradingService:
             else:
                 source = self._capital_balance(
                     session,
+                    team_id=team.team_id,
                     environment=authorization.environment,
                     endpoint_type=authorization.source_type,
                     endpoint_id=authorization.source_id,
@@ -14078,6 +14261,7 @@ class TradingService:
                 )
                 destination = self._capital_balance(
                     session,
+                    team_id=team.team_id,
                     environment=authorization.environment,
                     endpoint_type=authorization.destination_type,
                     endpoint_id=authorization.destination_id,
