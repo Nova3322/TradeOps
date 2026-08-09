@@ -85,6 +85,10 @@ def seed(service: TradingService) -> dict[str, UUID]:
         version="risk-v1",
         system_state=SystemRiskState.NORMAL,
         max_total_risk=Decimal("100"),
+        max_account_risk=Decimal("100"),
+        max_single_loss=Decimal("100"),
+        max_consecutive_losses=3,
+        loss_cooldown=timedelta(hours=1),
         max_fact_age=timedelta(seconds=30),
         now=NOW,
     )
@@ -1542,6 +1546,10 @@ def test_final_risk_check_rejects_policy_and_fact_changes_after_authorization(
         version="risk-kill",
         system_state=SystemRiskState.KILL_SWITCH,
         max_total_risk=Decimal("100"),
+        max_account_risk=Decimal("100"),
+        max_single_loss=Decimal("100"),
+        max_consecutive_losses=3,
+        loss_cooldown=timedelta(hours=1),
         max_fact_age=timedelta(seconds=30),
         now=NOW + timedelta(seconds=32),
     )
@@ -1797,6 +1805,10 @@ def test_add_requires_profit_position_protection_and_normal_risk_state(
         version="risk-no-pyramid",
         system_state=SystemRiskState.NO_PYRAMID,
         max_total_risk=Decimal("100"),
+        max_account_risk=Decimal("100"),
+        max_single_loss=Decimal("100"),
+        max_consecutive_losses=3,
+        loss_cooldown=timedelta(hours=1),
         max_fact_age=timedelta(seconds=30),
         now=NOW,
     )
@@ -2593,3 +2605,110 @@ def test_campaign_closes_and_releases_open_risk_only_after_exit_and_match(
         assert campaign.unrealized_pnl == 0
         assert campaign.final_pnl == Decimal("5")
         assert reservation is not None and reservation.status == "RELEASED"
+
+
+def test_configured_single_loss_limit_is_enforced_by_server_risk_decision(
+    database: Database,
+    service: TradingService,
+) -> None:
+    ids = seed(service)
+    service.configure_risk_policy(
+        actor_id=ids["admin"],
+        version="risk-v2-single-loss",
+        max_total_risk=Decimal("100"),
+        max_account_risk=Decimal("100"),
+        max_single_loss=Decimal("10"),
+        max_consecutive_losses=3,
+        loss_cooldown=timedelta(hours=1),
+        max_fact_age=timedelta(seconds=30),
+        expected_revision=1,
+        reason="tighten maximum loss per frozen proposal",
+        idempotency_key="risk-policy-single-loss",
+        now=NOW,
+    )
+    proposal_id = create_approved_proposal(
+        service,
+        ids,
+        key="single-loss-denied",
+        max_risk=Decimal("20"),
+    )
+
+    decision_id = service.decide_risk(
+        proposal_id=proposal_id,
+        actor_id=ids["operator"],
+        kind=IntentKind.INITIAL,
+        idempotency_key="single-loss-decision",
+        now=NOW,
+    )
+
+    with database.session_factory() as session:
+        decision = session.get(RiskDecision, decision_id)
+        assert decision is not None
+        assert decision.result == "DENY"
+        assert decision.reasons == ["SINGLE_LOSS_LIMIT_EXCEEDED"]
+        assert Decimal(decision.input_data["policy"]["max_single_loss"]) == Decimal("10")
+
+
+def test_team_and_account_loss_streak_apply_cooldown_before_new_risk(
+    database: Database,
+    service: TradingService,
+) -> None:
+    ids = seed(service)
+    for index in range(3):
+        proposal_id = create_approved_proposal(
+            service,
+            ids,
+            key=f"loss-streak-{index}",
+            max_risk=Decimal("5"),
+        )
+        authorization_id = issue_authorization(service, ids, proposal_id)
+        with database.session_factory.begin() as session:
+            proposal = session.get(Proposal, proposal_id)
+            authorization = session.get(TradingAuthorization, authorization_id)
+            assert proposal is not None and authorization is not None
+            session.add(
+                Campaign(
+                    team_id=proposal.team_id,
+                    proposal_id=proposal_id,
+                    authorization_id=authorization_id,
+                    account_id=proposal.account_id,
+                    venue=proposal.venue,
+                    environment=proposal.environment,
+                    instrument_id=proposal.instrument_id,
+                    direction=proposal.direction,
+                    status=CampaignStatus.CLOSED.value,
+                    current_target_quantity=Decimal(0),
+                    target_version=0,
+                    target_reason="loss fixture",
+                    target_urgency=TargetUrgency.IMMEDIATE.value,
+                    target_calculated_at=NOW,
+                    realized_pnl=Decimal("-1"),
+                    unrealized_pnl=Decimal(0),
+                    final_pnl=Decimal("-1"),
+                    created_at=NOW - timedelta(minutes=2 - index),
+                    updated_at=NOW,
+                )
+            )
+
+    proposal_id = create_approved_proposal(
+        service,
+        ids,
+        key="loss-streak-blocked",
+        max_risk=Decimal("5"),
+    )
+    decision_id = service.decide_risk(
+        proposal_id=proposal_id,
+        actor_id=ids["operator"],
+        kind=IntentKind.INITIAL,
+        idempotency_key="loss-streak-decision",
+        now=NOW + timedelta(seconds=10),
+    )
+
+    with database.session_factory() as session:
+        decision = session.get(RiskDecision, decision_id)
+        assert decision is not None
+        assert decision.result == "DENY"
+        assert decision.reasons == ["LOSS_COOLDOWN_ACTIVE"]
+        assert decision.input_data["team_consecutive_losses"] == 3
+        assert decision.input_data["account_consecutive_losses"] == 3
+        assert Decimal(decision.input_data["loss_cooldown_remaining_seconds"]) > 0

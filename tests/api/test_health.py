@@ -141,7 +141,9 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
     assert "timeoutError.code = 'REQUEST_TIMEOUT'" in app_javascript.text
     assert "networkError.code = 'NETWORK_ERROR'" in app_javascript.text
     assert "const REQUEST_TIMEOUT_MS = 15000" in app_javascript.text
-    assert "全局风险恢复由管理员控制" in app_javascript.text
+    assert "当前团队风险恢复仍由管理员控制" in app_javascript.text
+    assert 'id="risk-policy-form"' in app_javascript.text
+    assert "RISK_LIMITS_UNCONFIGURED" in app_javascript.text
     assert "if (error.status !== 403) throw error" in app_javascript.text
     assert "actionable_for_current_user" in app_javascript.text
     assert "item.proposer_id === session.user_id" in app_javascript.text
@@ -324,7 +326,7 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
     assert "当前作用域无运行告警" in app_javascript.text
     assert "api('/api/campaign-exceptions')" in app_javascript.text
     assert "if (error.status === 403) return null" in app_javascript.text
-    assert "全局风险恢复仍由管理员控制" in app_javascript.text
+    assert "当前团队风险恢复仍由管理员控制" in app_javascript.text
     assert "交易任务 · 运行告警详情" in app_javascript.text
     assert "POSITION_STALE" in app_javascript.text
     assert "function formatExceptionDetail" in app_javascript.text

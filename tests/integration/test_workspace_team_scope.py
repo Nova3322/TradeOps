@@ -18,10 +18,12 @@ from trading_control_plane.domain import (
     ExecutionEnvironment,
     ProposalSource,
     RiskTier,
+    SystemRiskState,
 )
 from trading_control_plane.models import (
     AuditEvent,
     Proposal,
+    RiskPolicy,
     RoleAssignment,
     Team,
     User,
@@ -377,3 +379,80 @@ def test_proposal_chain_defaults_to_active_team_and_denies_cross_team_access(
     assert [item["proposal_id"] for item in queries.list_proposals(admin_id)] == [
         str(proposal_a)
     ]
+
+
+def test_risk_policy_versions_and_status_are_isolated_by_active_team(
+    database: Database,
+) -> None:
+    now = datetime.now(UTC)
+    service = TradingService(database)
+    admin_id = service.bootstrap_admin("team-risk-admin", now=now)
+    default_context = TradingQueries(database).user_context(admin_id)
+    default_workspace_id = UUID(str(default_context["active_workspace"]["workspace_id"]))
+    default_team_id = UUID(str(default_context["active_team"]["team_id"]))
+    default_policy_id = service.set_risk_policy(
+        actor_id=admin_id,
+        version="shared-risk-v1",
+        system_state=SystemRiskState.NORMAL,
+        max_total_risk=Decimal("100"),
+        max_account_risk=Decimal("80"),
+        max_single_loss=Decimal("20"),
+        max_consecutive_losses=3,
+        loss_cooldown=timedelta(hours=1),
+        max_fact_age=timedelta(minutes=5),
+        now=now,
+    )
+
+    workspace_b = service.create_workspace(
+        actor_id=admin_id,
+        name="Risk Workspace B",
+        slug="risk-workspace-b",
+        idempotency_key="risk-workspace-b",
+        now=now,
+    )
+    team_b = service.create_team(
+        actor_id=admin_id,
+        name="Risk Team B",
+        slug="risk-team-b",
+        idempotency_key="risk-team-b",
+        now=now,
+    )
+    team_b_policy_id = service.configure_risk_policy(
+        actor_id=admin_id,
+        version="shared-risk-v1",
+        max_total_risk=Decimal("50"),
+        max_account_risk=Decimal("40"),
+        max_single_loss=Decimal("10"),
+        max_consecutive_losses=2,
+        loss_cooldown=timedelta(hours=2),
+        max_fact_age=timedelta(minutes=2),
+        expected_revision=0,
+        reason="explicit policy for second isolated team scope",
+        idempotency_key="risk-team-b-policy",
+        now=now,
+    )
+    team_b_status = service.risk_control_status(admin_id, (), now=now)
+    assert team_b_status["policy"]["policy_id"] == str(team_b_policy_id)
+    assert Decimal(team_b_status["policy"]["max_total_risk"]) == Decimal("50")
+
+    service.select_scope(
+        actor_id=admin_id,
+        workspace_id=default_workspace_id,
+        team_id=default_team_id,
+        idempotency_key="risk-return-default",
+        now=now,
+    )
+    default_status = service.risk_control_status(admin_id, (), now=now)
+    assert default_status["policy"]["policy_id"] == str(default_policy_id)
+    assert Decimal(default_status["policy"]["max_total_risk"]) == Decimal("100")
+
+    with database.session_factory() as session:
+        policies = session.scalars(
+            select(RiskPolicy).where(RiskPolicy.active).order_by(RiskPolicy.team_id)
+        ).all()
+        assert {policy.team_id for policy in policies} == {default_team_id, team_b}
+        assert {policy.version for policy in policies} == {"shared-risk-v1"}
+        second_team = session.get(Team, team_b)
+        assert second_team is not None
+        assert second_team.workspace_id == workspace_b
+        assert second_team.trading_enabled is False

@@ -24,6 +24,10 @@ def policy(**overrides: object) -> RiskPolicyInput:
         "version": "risk-v1",
         "system_state": SystemRiskState.NORMAL,
         "max_total_risk": Decimal("100"),
+        "max_account_risk": Decimal("80"),
+        "max_single_loss": Decimal("100"),
+        "max_consecutive_losses": 3,
+        "loss_cooldown": timedelta(hours=4),
         "max_fact_age": timedelta(seconds=30),
     }
     values.update(overrides)
@@ -36,6 +40,10 @@ def risk_input(**overrides: object) -> RiskEvaluationInput:
         "requested_quantity": Decimal("10"),
         "requested_risk": Decimal("40"),
         "current_risk": Decimal("20"),
+        "current_account_risk": Decimal("10"),
+        "team_consecutive_losses": 0,
+        "account_consecutive_losses": 0,
+        "loss_cooldown_remaining": timedelta(0),
         "fact_age": timedelta(seconds=1),
         "position_known": True,
         "equity_known": True,
@@ -56,6 +64,30 @@ def test_risk_engine_is_deterministic_and_scales_to_available_capacity() -> None
     assert first.allowed_quantity == Decimal("5.000000000000000000")
     assert first.allowed_risk == Decimal("50.000000000000000000")
     assert first.reasons == ("RISK_CAPACITY_SCALED",)
+
+
+def test_risk_engine_enforces_single_loss_account_capacity_and_loss_cooldown() -> None:
+    single_loss = evaluate_risk(policy(), risk_input(requested_risk=Decimal("101")))
+    account_capacity = evaluate_risk(
+        policy(),
+        risk_input(requested_risk=Decimal("30"), current_account_risk=Decimal("60")),
+    )
+    cooldown = evaluate_risk(
+        policy(),
+        risk_input(team_consecutive_losses=3, loss_cooldown_remaining=timedelta(minutes=1)),
+    )
+
+    assert single_loss.reasons == ("SINGLE_LOSS_LIMIT_EXCEEDED",)
+    assert account_capacity.result is RiskResult.SCALE
+    assert account_capacity.allowed_risk == Decimal("20.000000000000000000")
+    assert cooldown.reasons == ("LOSS_COOLDOWN_ACTIVE",)
+
+
+def test_risk_engine_fails_closed_when_new_limits_are_unconfigured() -> None:
+    result = evaluate_risk(policy(max_single_loss=None), risk_input())
+
+    assert result.result is RiskResult.DENY
+    assert result.reasons == ("RISK_LIMITS_UNCONFIGURED",)
 
 
 @pytest.mark.parametrize(

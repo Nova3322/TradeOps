@@ -20,6 +20,7 @@ from trading_control_plane.models import (
     Position,
     Proposal,
     ReconciliationRun,
+    RiskPolicy,
     RoleAssignment,
     Team,
     TeamMembership,
@@ -82,6 +83,7 @@ def test_scope_migrations_backfill_existing_users_roles_proposals_and_audit(
     venue_fill_id = uuid4()
     funding_payment_id = uuid4()
     reconciliation_id = uuid4()
+    risk_policy_id = uuid4()
     now = datetime.now(UTC)
     with database.engine.begin() as connection:
         connection.execute(
@@ -91,6 +93,20 @@ def test_scope_migrations_backfill_existing_users_roles_proposals_and_audit(
                 "VALUES (:user_id, :username, 'HUMAN', true, 1, :created_at)"
             ),
             {"user_id": user_id, "username": "legacy-admin", "created_at": now},
+        )
+        connection.execute(
+            text(
+                "INSERT INTO risk_policies "
+                "(policy_id, version, revision, system_state, max_total_risk, "
+                "max_fact_age_seconds, reason, active, updated_by, updated_at) "
+                "VALUES (:policy_id, 'legacy-risk-v1', 1, 'NORMAL', 100, 30, "
+                "'legacy risk policy', true, :updated_by, :updated_at)"
+            ),
+            {
+                "policy_id": risk_policy_id,
+                "updated_by": str(user_id),
+                "updated_at": now,
+            },
         )
         connection.execute(
             text(
@@ -331,6 +347,14 @@ def test_scope_migrations_backfill_existing_users_roles_proposals_and_audit(
                 WorkspaceMembership.active,
             )
         )
+        migrated_policy = session.get(RiskPolicy, risk_policy_id)
+        assert migrated_policy is not None
+        assert migrated_policy.team_id == team.team_id
+        assert migrated_policy.max_total_risk == 100
+        assert migrated_policy.max_account_risk is None
+        assert migrated_policy.max_single_loss is None
+        assert migrated_policy.max_consecutive_losses is None
+        assert migrated_policy.loss_cooldown_seconds is None
         assert session.scalar(
             select(TeamMembership).where(
                 TeamMembership.team_id == team.team_id,

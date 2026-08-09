@@ -1444,7 +1444,7 @@ async function renderHome() {
               eyebrow:canOperate ? '当前无待办' : '只读观察',
               title:canOperate ? `${clearScopeLabel}，没有必须立即处理的事项` : '当前没有运行告警或运行中交易任务',
               copy:canOperate
-                ? `系统没有发现阻断异常、待你审核的提案或运行中交易任务。${riskControl ? '' : '全局风险恢复仍由管理员控制。'} 可以继续观察机会。`
+                ? `系统没有发现阻断异常、待你审核的提案或运行中交易任务。${riskControl ? '' : '当前团队风险恢复仍由管理员控制。'} 可以继续观察机会。`
                 : '当前身份只查看市场与运行事实，不能启动交易、审核提案或改变风险状态。可以继续观察机会。',
               href:'/opportunities',
               action:'查看市场机会',
@@ -2296,6 +2296,8 @@ function formatControlBlocker(value) {
     COMPUTED_RECONCILIATION_MATCH_REQUIRED:`缺少最新计算型一致对账${scope}`,
     RECONCILIATION_STALE:`计算型对账早于最新事实或已过期${scope}`,
     CONTROL_SCOPE_INVALID:'受控账户范围格式无效',
+    RISK_POLICY_MISSING:'当前团队尚未创建风险政策',
+    RISK_LIMITS_UNCONFIGURED:'当前团队的单笔、连续亏损与冷却阈值未配置',
   }[code] || `未识别的安全阻断：${value}`);
 }
 
@@ -2322,10 +2324,22 @@ function formatRiskActionReason(value, conditions = {blockers:[]}) {
   }[value] || '当前状态不允许执行；请按实时条件和申请状态处理');
 }
 
+function renderRiskPolicyConfiguration(policy, allowed) {
+  if (!allowed) return policy?.limits_configured ? '' : '<div class="callout"><b>风险限额未配置：</b>只有当前团队的最高管理员可以填写明确阈值；在此之前，服务端拒绝全部新增风险。</div>';
+  const value = (name) => policy?.[name] ?? '';
+  const title = policy ? (policy.limits_configured ? '收紧团队风险政策' : '完成团队风险政策') : '创建团队风险政策';
+  const copy = policy?.limits_configured
+    ? '此入口只接受更严格的限额；放宽阈值需要独立审核的政策变更。保存后，本团队旧交易授权全部失效。'
+    : '所有阈值必须由管理员明确填写。Binance 参考页的具体 n 值仍不可访问，因此页面不预填、不推测；完成前新增风险保持阻断。';
+  return `<form id="risk-policy-form" class="form-panel compact-form"><h2>${title}</h2><p class="safety-note">${copy}</p><div class="field-grid"><label>政策版本<input name="version" maxlength="120" placeholder="例如 team-risk-2026-08-v1" required></label><label>团队最大总风险<input name="max_total_risk" type="number" step="any" min="0" value="${escapeHtml(value('max_total_risk'))}" required></label><label>单账户最大风险<input name="max_account_risk" type="number" step="any" min="0" value="${escapeHtml(value('max_account_risk'))}" required></label><label>最大单笔亏损<input name="max_single_loss" type="number" step="any" min="0" value="${escapeHtml(value('max_single_loss'))}" required></label><label>最大连续亏损次数<input name="max_consecutive_losses" type="number" step="1" min="1" value="${escapeHtml(value('max_consecutive_losses'))}" required></label><label>亏损冷却期（秒）<input name="loss_cooldown_seconds" type="number" step="1" min="1" value="${escapeHtml(value('loss_cooldown_seconds'))}" required></label><label>事实最大时效（秒）<input name="max_fact_age_seconds" type="number" step="1" min="1" value="${escapeHtml(value('max_fact_age_seconds'))}" required></label></div><label>变更理由<textarea name="reason" rows="3" minlength="10" required>按当前团队已确认的风险授权边界配置版本化政策</textarea></label><div class="form-error" role="alert"></div><div class="form-actions"><button class="primary">保存并使旧授权失效</button></div></form>`;
+}
+
 function renderRiskControlPanel(control) {
-  if (!control) return `<article class="card"><div class="card-heading"><div><p class="eyebrow">全局风险控制</p><h2>全局风险恢复由管理员控制</h2></div><span class="status-pill">当前权限范围</span></div><p class="subtle">当前身份只能查看获准访问的账户和交易所风险，不能读取或执行全局风险政策、自动加仓控制和恢复申请。</p><p class="safety-note">这不代表全局风险状态正常。新增风险仍会由系统强制检查；你仍可使用下表查看风险占用、唯一减仓目标和最近对账。</p><div class="toolbar"><a class="secondary" href="/" data-link>返回当前任务</a><a class="primary" href="/campaigns/alerts" data-link>查看运行告警</a></div></article>`;
+  if (!control) return `<article class="card"><div class="card-heading"><div><p class="eyebrow">团队风险控制</p><h2>当前职责不能查看团队政策</h2></div><span class="status-pill">当前权限范围</span></div><p class="subtle">当前身份只能查看获准访问的账户和交易所风险，不能读取或执行团队风险政策、自动加仓控制和恢复申请。</p><p class="safety-note">这不代表团队风险状态正常。新增风险仍会由服务端强制检查；你仍可使用下表查看风险占用、唯一减仓目标和最近对账。</p><div class="toolbar"><a class="secondary" href="/" data-link>返回当前任务</a><a class="primary" href="/campaigns/alerts" data-link>查看运行告警</a></div></article>`;
   const policy = control.policy;
   const gate = control.auto_add_gate;
+  const canConfigurePolicy = Boolean(control.actions?.configure_policy?.allowed);
+  if (!policy) return `<section class="risk-control-overview"><article class="home-status tone-attention"><div><p class="eyebrow">Fail closed</p><h2>当前团队尚无风险政策</h2><p>服务端不会读取其他团队的全局政策，也不会允许提案进入新增风险执行链路。</p></div><span class="status-pill status-DENY">新增风险阻断</span></article>${renderRiskPolicyConfiguration(null, canConfigurePolicy)}</section>`;
   const conditions = control.restore_conditions;
   const restoreGateLabel = conditions.ready ? '实时条件全部通过' : `${conditions.blockers.length} 项阻塞`;
   const blockedScopeCount = new Set((conditions.checks || [])
@@ -2391,12 +2405,16 @@ function renderRiskControlPanel(control) {
   const blockingConditions = blockingChecks.length
     ? `<div class="risk-blocking-conditions"><div class="risk-condition-section-head"><b>当前阻塞</b></div>${conditionTable(blockingRows)}</div>`
     : '<div class="success-note"><b>当前没有实时阻塞：</b>所有生产事实均通过本轮检查；后续操作仍会在服务端重新校验。</div>';
-  const conditionDetails = `<details class="operation-toolbox risk-condition-details" ${blockingChecks.length ? 'open' : ''}><summary><span><b>实时安全条件</b><small>${blockingChecks.length ? '阻塞优先展示；已通过条件收起' : '全部条件通过；恢复或新增风险时仍会重新校验'}</small></span><strong>${blockingChecks.length ? '当前必须处理' : '查看明细'}</strong></summary><div class="risk-condition-content"><p class="subtle">全局政策与生产账户事实分开判断。这里只把阻塞项作为当前待办，并逐项说明原因、负责角色和下一步。</p>${blockingConditions}${passedConditions}</div></details>`;
+  const conditionDetails = `<details class="operation-toolbox risk-condition-details" ${blockingChecks.length ? 'open' : ''}><summary><span><b>实时安全条件</b><small>${blockingChecks.length ? '阻塞优先展示；已通过条件收起' : '全部条件通过；恢复或新增风险时仍会重新校验'}</small></span><strong>${blockingChecks.length ? '当前必须处理' : '查看明细'}</strong></summary><div class="risk-condition-content"><p class="subtle">当前团队政策与生产账户事实分开判断。这里只把阻塞项作为当前待办，并逐项说明原因、负责角色和下一步。</p>${blockingConditions}${passedConditions}</div></details>`;
   const policyLabel = systemAlreadyNormal ? '政策正常' : riskControlStatusLabel(policy.system_state);
-  return `<section class="risk-control-overview"><div class="stats"><div class="stat"><small>风险政策</small><b>${policyLabel}</b></div><div class="stat"><small>生产范围</small><b>${productionFactLabel}</b></div><div class="stat"><small>自动加仓</small><b>${riskControlStatusLabel(gate.status)}</b></div><div class="stat"><small>实时条件</small><b>${restoreGateLabel}</b></div></div><div class="detail-layout"><article class="card"><h2>当前控制状态</h2><dl class="definition-grid">${definition('政策原因', formatControlReason(policy.reason))}${definition('政策更新人', policy.updated_by_username || shortId(policy.updated_by))}${definition('政策更新时间', fmtDate(policy.updated_at))}${definition('控制原因', formatControlReason(gate.reason))}${definition('控制操作人', gate.operator_username || shortId(gate.operator_id))}${definition('控制更新时间', fmtDate(gate.updated_at))}</dl><p class="safety-note">“仅允许减仓”仍允许减仓与退出；暂停新增风险后，旧 TradingAuthorization 永久失效。恢复不会开启 AUTO_ADD。</p></article>${actionSummary}</div>${normalRestoreState}${conditionDetails}${directForm}${requestForm}<div class="section-head"><div><p class="eyebrow">分权恢复</p><h2>当前恢复待办</h2></div></div><div class="stack">${requestCards}</div>${requestHistory}</section>`;
+  return `<section class="risk-control-overview"><div class="stats"><div class="stat"><small>风险政策</small><b>${policy.limits_configured ? policyLabel : '限额未配置'}</b></div><div class="stat"><small>生产范围</small><b>${productionFactLabel}</b></div><div class="stat"><small>自动加仓</small><b>${riskControlStatusLabel(gate.status)}</b></div><div class="stat"><small>实时条件</small><b>${restoreGateLabel}</b></div></div>${renderRiskPolicyConfiguration(policy, canConfigurePolicy)}<div class="detail-layout"><article class="card"><h2>当前团队控制状态</h2><dl class="definition-grid">${definition('团队最大总风险', fmtNumber(policy.max_total_risk))}${definition('单账户最大风险', policy.max_account_risk == null ? '未配置' : fmtNumber(policy.max_account_risk))}${definition('最大单笔亏损', policy.max_single_loss == null ? '未配置' : fmtNumber(policy.max_single_loss))}${definition('连续亏损 / 冷却', policy.max_consecutive_losses == null ? '未配置' : `${policy.max_consecutive_losses} 次 / ${policy.loss_cooldown_seconds} 秒`)}${definition('政策原因', formatControlReason(policy.reason))}${definition('政策更新人', policy.updated_by_username || shortId(policy.updated_by))}${definition('政策更新时间', fmtDate(policy.updated_at))}${definition('控制原因', formatControlReason(gate.reason))}${definition('控制操作人', gate.operator_username || shortId(gate.operator_id))}${definition('控制更新时间', fmtDate(gate.updated_at))}</dl><p class="safety-note">“仅允许减仓”仍允许减仓与退出；暂停新增风险后，本团队旧 TradingAuthorization 永久失效。恢复不会开启 AUTO_ADD。</p></article>${actionSummary}</div>${normalRestoreState}${conditionDetails}${directForm}${requestForm}<div class="section-head"><div><p class="eyebrow">分权恢复</p><h2>当前恢复待办</h2></div></div><div class="stack">${requestCards}</div>${requestHistory}</section>`;
 }
 
 async function bindRiskControlActions() {
+  document.querySelector('#risk-policy-form')?.addEventListener('submit', async event => {
+    event.preventDefault(); const form = event.currentTarget; const data = Object.fromEntries(new FormData(form)); const button = event.submitter || form.querySelector('button');
+    await withPending(button, '保存中…', async () => { try { const current = await api('/api/risk-controls'); const expectedRevision = Number(current.policy?.revision || 0); await api('/api/risk-controls/policy', {method:'PUT', body:JSON.stringify({version:data.version, max_total_risk:data.max_total_risk, max_account_risk:data.max_account_risk, max_single_loss:data.max_single_loss, max_consecutive_losses:Number(data.max_consecutive_losses), loss_cooldown_seconds:Number(data.loss_cooldown_seconds), max_fact_age_seconds:Number(data.max_fact_age_seconds), expected_revision:expectedRevision, reason:data.reason, idempotency_key:crypto.randomUUID()})}); showToast('团队风险政策已版本化保存；旧交易授权已失效'); await route(); } catch (error) { showApiError(error, form.querySelector('.form-error')); } });
+  });
   document.querySelector('#risk-restore-form')?.addEventListener('submit', async event => {
     event.preventDefault(); const form = event.currentTarget; const data = new FormData(form); const button = event.submitter || form.querySelector('button');
     await withPending(button, '冻结中…', async () => { try { await api('/api/risk-controls/restores', {method:'POST', body:JSON.stringify({reason:data.get('reason'), restore_auto_add:false, idempotency_key:crypto.randomUUID()})}); showToast('恢复申请已冻结，等待独立审核人员'); await route(); } catch (error) { showApiError(error, form.querySelector('.form-error')); } });
@@ -2655,7 +2673,7 @@ async function renderCampaignFacts(mode) {
   if (mode === 'risk') rows = visibleDetails.map(item => `<tr data-href="/campaigns/${item.campaign_id}"><td>${shortId(item.campaign_id)}</td><td>${escapeHtml(fmtStatus(item.status))}</td><td>${item.reservations.map(r => `${escapeHtml(fmtStatus(r.status))} ${fmtNumber(r.amount)}`).join(' · ') || '无预留'}</td><td>${fmtNumber(item.current_target_quantity)} · v${item.target_version}</td><td>${escapeHtml(fmtStatus(item.target_urgency || '—'))}</td><td>${escapeHtml(item.reconciliation ? fmtStatus(item.reconciliation.status) : '未对账')}</td></tr>`).join('');
   const headers = mode === 'orders' ? '<th>交易任务</th><th>意图</th><th>方向 / 数量</th><th>状态</th><th>交易所订单</th><th>更新时间</th>' : '<th>交易任务</th><th>状态</th><th>风险预留</th><th>目标</th><th>紧迫度</th><th>对账</th>';
   const pageLede = mode === 'risk'
-    ? '全局风险政策与每个生产账户范围分开判断；政策正常不代表所有账户都能新增风险。阻塞项会明确列出原因、负责人和下一步。'
+    ? '当前团队风险政策与每个生产账户范围分开判断；政策正常不代表所有账户都能新增风险。阻塞项会明确列出原因、负责人和下一步。'
     : '这里显示当前确认的数据；能够重新计算的汇总会按最新数据生成。';
   main.innerHTML = `<section class="page"><header class="page-head"><div><p class="eyebrow">生产交易数据</p><h1>${titles[mode]}</h1><p class="lede">${pageLede}</p></div></header>
     ${mode === 'risk' ? renderRiskControlPanel(riskControls) : ''}

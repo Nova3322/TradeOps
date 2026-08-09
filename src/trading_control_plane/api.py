@@ -81,6 +81,7 @@ from trading_control_plane.api_schemas import (
     RiskControlChangeReviewRequest,
     RiskControlDirectRestoreRequest,
     RiskDecisionRequest,
+    RiskPolicyConfigureRequest,
     RiskTightenRequest,
     ScopeSelectRequest,
     SenderLeaseRequest,
@@ -725,17 +726,23 @@ def create_app(
             ),
         }
         if selected_provider == "SAFE_SPENDING_LIMIT" and safe_scope_ready:
+            safe_rpc_url = direct_settings.safe_spending_arbitrum_rpc_url
+            safe_address = direct_settings.capital_direct_safe_address
+            safe_delegate = direct_settings.capital_direct_safe_delegate_address
+            assert safe_rpc_url is not None
+            assert safe_address is not None
+            assert safe_delegate is not None
             try:
                 safe_fact = resolved_safe_spending.read_limit(
-                    rpc_url=direct_settings.safe_spending_arbitrum_rpc_url,
-                    safe=direct_settings.capital_direct_safe_address,
-                    delegate=direct_settings.capital_direct_safe_delegate_address,
+                    rpc_url=safe_rpc_url,
+                    safe=safe_address,
+                    delegate=safe_delegate,
                 )
                 scale = Decimal(10) ** 6
                 observed_at = datetime.fromtimestamp(int(str(safe_fact["blockTimestamp"])), UTC)
                 service().record_safe_spending_snapshot(
                     actor_id=user_id,
-                    safe_address=direct_settings.capital_direct_safe_address,
+                    safe_address=safe_address,
                     asset="USDC",
                     balance=Decimal(str(safe_fact["balance"])) / scale,
                     available_limit=Decimal(str(safe_fact["available"])) / scale,
@@ -1258,7 +1265,10 @@ def create_app(
             detail = queries().transfer_proposal_detail(identity.user_id, payload.object_id)
             review_action = "capital.review"
         elif payload.action in {"risk.restore.review", "risk.restore.execute"}:
-            current_version = service().risk_control_change_version(payload.object_id)
+            current_version = service().risk_control_change_version(
+                payload.object_id,
+                identity.user_id,
+            )
             detail = {"account_id": None, "venue": None}
             review_action = payload.action
         elif payload.action == "risk.restore.direct":
@@ -2678,6 +2688,27 @@ def create_app(
             require_live_scope=True,
             now=_now(),
         )
+
+    @app.put("/api/risk-controls/policy")
+    def configure_risk_policy(
+        payload: RiskPolicyConfigureRequest,
+        identity: SessionIdentity = identity_dependency,
+    ) -> dict[str, Any]:
+        policy_id = service().configure_risk_policy(
+            actor_id=identity.user_id,
+            version=payload.version,
+            max_total_risk=payload.max_total_risk,
+            max_account_risk=payload.max_account_risk,
+            max_single_loss=payload.max_single_loss,
+            max_consecutive_losses=payload.max_consecutive_losses,
+            loss_cooldown=timedelta(seconds=payload.loss_cooldown_seconds),
+            max_fact_age=timedelta(seconds=payload.max_fact_age_seconds),
+            expected_revision=payload.expected_revision,
+            reason=payload.reason,
+            idempotency_key=payload.idempotency_key,
+            now=_now(),
+        )
+        return {"policy_id": str(policy_id)}
 
     @app.post("/api/risk-controls/restore-direct")
     def direct_risk_control_restore(

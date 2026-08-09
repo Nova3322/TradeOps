@@ -107,6 +107,10 @@ def seed(service: TradingService) -> dict[str, UUID]:
         version="risk-restore-v1",
         system_state=SystemRiskState.NORMAL,
         max_total_risk=Decimal("100"),
+        max_account_risk=Decimal("100"),
+        max_single_loss=Decimal("100"),
+        max_consecutive_losses=3,
+        loss_cooldown=timedelta(hours=1),
         max_fact_age=timedelta(hours=2),
         now=NOW,
     )
@@ -503,6 +507,10 @@ def test_tighten_actions_permanently_revoke_old_authorization(
             version="unsafe-direct-normal",
             system_state=SystemRiskState.NORMAL,
             max_total_risk=Decimal("100"),
+            max_account_risk=Decimal("100"),
+            max_single_loss=Decimal("100"),
+            max_consecutive_losses=3,
+            loss_cooldown=timedelta(hours=1),
             max_fact_age=timedelta(hours=2),
             now=NOW + timedelta(seconds=3),
         )

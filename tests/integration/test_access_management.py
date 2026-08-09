@@ -250,10 +250,7 @@ async def exercise_six_identity_permission_matrix(database: Database) -> None:
                 await login(member_http, username)
                 for endpoint in endpoints:
                     response = await member_http.get(endpoint)
-                    allowed_status = {
-                        "/api/opportunities": 503,
-                        "/api/risk-controls": 422,
-                    }.get(endpoint, 200)
+                    allowed_status = {"/api/opportunities": 503}.get(endpoint, 200)
                     expected_status = allowed_status if endpoint in permitted else 403
                     assert response.status_code == expected_status, (
                         username,

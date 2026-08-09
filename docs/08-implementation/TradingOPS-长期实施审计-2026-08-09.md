@@ -15,7 +15,7 @@
 | 权限 | `RoleAssignment`、`ROLE_ACTIONS`、服务端 `_require_role` | 六类岗位、团队/账户/交易所范围、默认拒绝；角色只在当前团队计算 | 后续把持久化账户根接入同一授权器，不另建平行 ACL |
 | 提案 | `Proposal`、`CommandReceipt` | 冻结载荷、版本、语义哈希、幂等、有效期；提案—风控—授权—Campaign 根已由团队约束 | 账户、策略和信号配置继续引用该状态机，不复制提案真源 |
 | 审核 | `Approval`、`review_proposal` | 服务端阻止普通创建者自审、高风险双审核 | 审计发现 SYSTEM_ADMIN 本人提案直批旁路；本批次删除 API、服务方法和页面入口 |
-| 风控 | `RiskPolicy`、`RiskDecision`、`RiskReservation` | 版本化总风险、事实新鲜度、状态机、原子占用 | 扩展单笔最大亏损、连续亏损、冷却期及团队/账户限制；仍由同一 Risk Engine 拒绝 |
+| 风控 | `RiskPolicy`、`RiskDecision`、`RiskReservation` | 团队化版本政策、总风险、单账户风险、最大单笔亏损、连续亏损、冷却期、事实新鲜度、状态机和原子占用 | 外部阈值 `n` 尚无事实，不预填；政策未完整配置时同一 Risk Engine 拒绝新增风险 |
 | 账户事实 | `ExchangeAccount` 与 `account_id + venue` 贯穿提案、授权、任务、订单、仓位、权益与报表 | 团队内同场所多账户、AES-GCM 凭据版本、连接/交易状态分离；Proposal 与订单/成交/仓位/权益/资金费事实由 Team 和账户复合边界约束；对账由 Team 隔离 | 运行连接仍读取部署配置，OKX/Bybit Adapter 未实现；资金提案/转移与 sender/task 根尚未团队化，不声称整条账户链已完成 |
 | 审计 | `AuditEvent` | actor、对象、版本、correlation、idempotency key、Workspace、Team；交易链事件带账户范围 | 后续为账户/资金独立根补齐同一范围；继续使用统一追加事件流 |
 | 执行 | Proposal → Approval → Risk → Authorization → Intent → Venue facts / Reconciliation | Binance、Hyperliquid 受 Gate 控制的执行链 | OKX、Bybit 实现同一 Venue Port；不新建第二套 OMS 或 Risk Engine |
@@ -75,7 +75,10 @@
 - `0018` 五维验收：本地生产结构完成 `0017 → 0018` 升级，隔离测试库完成 `0018 → 0017 → 0018` 往返且 `alembic check` 无漂移；单元、API、集成分别为 `347 / 22 / 216` 通过。全部危险能力关闭的本地 API 通过 `/health/live` 与 `/health/ready`；真实密码登录后的 `/venues` 与数据库一致显示 4 个迁移账户全部未配置、交易关闭，1440px 与 390px 均无横向溢出，页面未回显登录密码，登录后的浏览器控制台、页面异常和请求失败为 0。
 - `20260810_0019`：为订单、成交、仓位、账户权益、权益历史、资金费和对账增加非空 Team 根；团队、账户复合外键阻止跨团队错绑，外部订单/成交/资金费身份和账户事实唯一性按团队计算。服务端写入从当前团队赋值，场所事实页、资金事实聚合、计算型对账及其读取按团队过滤；遗留无团队事实只回填默认团队，迁移不会配置凭据或开启交易。
 - `0019` 五维验收：升级前备份为 `/private/tmp/trading-pre-0019-20260810.dump`；本地业务库完成 `0018 → 0019`，订单 8、成交 13、仓位 11、权益 6、权益历史 4151、资金费 0、对账 4421 条记录的 `team_id` 均非空，6 个 Team/账户复合约束存在，5 个危险 Gate 全部 `DISABLED`。隔离测试库完成 `0019 → 0018 → 0019` 往返及 `alembic check`，并从 `0015` 构造订单、成交、仓位、权益、权益历史、资金费和对账遗留事实，验证全部回填到默认团队；相同账户字符串的双团队事实/对账隔离和跨团队保护写入由测试覆盖。Ruff、变更模块 mypy、单元/API/集成分别为 `通过 / 通过 / 347 / 22 / 217`。本地 API `/health/live`、`/health/ready` 通过；真实密码登录后的 `/venues` 及 Binance/Hyperliquid 事实 API 的 Team 均与会话当前团队一致，4 个账户交易能力全部关闭，1440px/390px 无横向溢出、未泄露密码、浏览器错误为 0。Hyperliquid dry-run worker 启动探针因上游 `429 Too Many Requests` 未就绪，本次 API 验收显式关闭 runtime sync、Perptape WebSocket 与 Freqtrade workers，页面如实显示历史快照而非实时事实。
+- `20260810_0020`：复用 `RiskPolicy`、`RiskDecision`、`RiskReservation` 和既有提案—审核—执行链，不新增平行风控实体。政策版本、修订号、唯一活动政策、恢复申请和风险预留均按 Team 隔离；RiskDecision、Campaign、Authorization 与 Reservation 使用 Team 复合外键，跨团队错绑由数据库拒绝。政策新增单账户最大风险、最大单笔亏损、最大连续亏损和亏损冷却期；Risk Engine 在决策和下单意图最终检查两处使用同一不可变快照。连续亏损分别按团队和 `账户 + 场所 + 环境` 的最近已关闭 Campaign 计算，非亏损结束连续序列，冷却期内服务端返回 `LOSS_COOLDOWN_ACTIVE`。单笔超限返回 `SINGLE_LOSS_LIMIT_EXCEEDED`，团队或账户容量不足只按已有安全缩量语义处理。
+- `0020` 配置与迁移语义：遗留政策保留原总风险和事实时效，但四个新增阈值保持 `NULL`，并以 `RISK_LIMITS_UNCONFIGURED` 阻断新增风险；新团队没有政策时 `/api/risk-controls` 返回结构化 `RISK_POLICY_MISSING` 而不是读取其他团队。最高管理员可通过幂等、预期修订号保护的 Team API 明确创建或收紧政策；直接放宽返回 `REVIEWED_POLICY_CHANGE_REQUIRED`，政策变化使本团队旧 TradingAuthorization 失效。外部 Binance 页面在 2026-08-10 仍不可访问，规则 4 继续排除，其余规则不补写任何未知阈值。
+- `0020` 五维验收：隔离测试库位于 `20260810_0020 (head)`，`alembic check` 无漂移，`test_schema` 已覆盖遗留政策回填与迁移往返；变更源码 Ruff、mypy、Node 语法和 `git diff --check` 通过，单元/API 定向 41 个、完整集成 221 个通过。禁用运行同步、真实下单、测试网下单、资金和签名的本地 API 通过 `/health/ready`，真实密码登录后 `/api/risk-controls` 与 `/risk` 一致显示团队政策 `100 / 80 / 20 / 3 / 3600`，桌面端无浏览器错误。当前全站移动布局在 390px 仍会把内容压成不可读的窄列，因此阶段 9 响应式 UI 验收未完成，不以“无横向溢出”代替视觉可用性。本机 32771 数据库的归属与隔离边界尚未确认，未执行备份或升级；旧 8014 API 已停止，不使用旧 Schema 对外服务。
 - Proposal / Campaign 查询、实际结果和审计时间线按当前团队过滤；跨团队详情与变更返回 `TEAM_SCOPE_DENIED`。审核、授权、Intent 等强生命周期子对象继续经 Proposal / Campaign 根派生团队；可独立到达且可能没有 Campaign 的场所事实直接持久化 Team，避免相同账户字符串跨团队混算。
 - `AuditEvent.account_id` 对交易链事件由服务端对象真源推导；组织级事件保留为空，不伪造账户。
 - 创建者自审旁路已从服务端和页面移除；团队切换后即使账户字符串相同，也不能读取、提交、审核或执行另一团队的提案。
-- 当前阻断：团队风险政策、资金提案/授权/转移、RiskReservation、sender/task 与运行源配置仍未完成团队根迁移，数据库密文也尚未接入独立运行连接；OKX、Bybit Adapter 未实现。因此新团队继续不可增险，“已登记/已加密/事实已隔离”不是“连接正常”或“交易就绪”。
+- 当前阻断：资金提案/授权/转移、sender/task 与运行源配置仍未完成团队根迁移，数据库密文也尚未接入独立运行连接；信号源、OKX、Bybit Adapter 未实现。新增风险阈值必须由产品负责人明确配置，迁移不会代填。新团队继续不可增险，“已登记/已加密/事实已隔离/政策已保存”都不是“连接正常”或“交易就绪”。

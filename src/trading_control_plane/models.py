@@ -857,15 +857,36 @@ class CapitalAutomationPolicy(Base):
 class RiskPolicy(Base):
     __tablename__ = "risk_policies"
     __table_args__ = (
+        UniqueConstraint("team_id", "policy_id", name="uq_risk_policies_team_identity"),
+        UniqueConstraint("team_id", "version", name="uq_risk_policies_team_version"),
+        UniqueConstraint("team_id", "revision", name="uq_risk_policies_team_revision"),
         CheckConstraint(
             "system_state IN ('NORMAL','NO_PYRAMID','REDUCE_ONLY','KILL_SWITCH')",
             name="ck_risk_policies_system_state",
         ),
         CheckConstraint("max_total_risk > 0", name="ck_risk_policies_max_risk_positive"),
+        CheckConstraint("max_account_risk > 0", name="ck_risk_policies_account_risk_positive"),
+        CheckConstraint("max_single_loss > 0", name="ck_risk_policies_single_loss_positive"),
+        CheckConstraint(
+            "max_consecutive_losses > 0",
+            name="ck_risk_policies_consecutive_losses_positive",
+        ),
+        CheckConstraint(
+            "loss_cooldown_seconds > 0",
+            name="ck_risk_policies_loss_cooldown_positive",
+        ),
         CheckConstraint("max_fact_age_seconds > 0", name="ck_risk_policies_age_positive"),
+        CheckConstraint(
+            "(max_account_risk IS NULL AND max_single_loss IS NULL "
+            "AND max_consecutive_losses IS NULL AND loss_cooldown_seconds IS NULL) OR "
+            "(max_account_risk IS NOT NULL AND max_single_loss IS NOT NULL "
+            "AND max_consecutive_losses IS NOT NULL AND loss_cooldown_seconds IS NOT NULL)",
+            name="ck_risk_policies_limits_all_or_none",
+        ),
         CheckConstraint("revision >= 1", name="ck_risk_policies_revision"),
         Index(
             "uq_risk_policies_one_active",
+            "team_id",
             "active",
             unique=True,
             postgresql_where=text("active"),
@@ -873,10 +894,17 @@ class RiskPolicy(Base):
     )
 
     policy_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid4)
-    version: Mapped[str] = mapped_column(String(120), nullable=False, unique=True)
+    team_id: Mapped[UUID] = mapped_column(
+        ForeignKey("teams.team_id", ondelete="RESTRICT"), nullable=False
+    )
+    version: Mapped[str] = mapped_column(String(120), nullable=False)
     revision: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
     system_state: Mapped[str] = mapped_column(String(32), nullable=False)
     max_total_risk: Mapped[Decimal] = mapped_column(AMOUNT, nullable=False)
+    max_account_risk: Mapped[Decimal | None] = mapped_column(AMOUNT, nullable=True)
+    max_single_loss: Mapped[Decimal | None] = mapped_column(AMOUNT, nullable=True)
+    max_consecutive_losses: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    loss_cooldown_seconds: Mapped[int | None] = mapped_column(Integer, nullable=True)
     max_fact_age_seconds: Mapped[int] = mapped_column(Integer, nullable=False)
     reason: Mapped[str] = mapped_column(Text, nullable=False)
     active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
@@ -906,31 +934,42 @@ class RiskControlChangeRequest(Base):
         ),
         Index(
             "uq_risk_control_change_requests_pending",
-            text("(true)"),
+            "team_id",
             unique=True,
             postgresql_where=text("status IN ('PENDING_REVIEW','APPROVED')"),
+        ),
+        ForeignKeyConstraint(
+            ["team_id", "source_policy_id"],
+            ["risk_policies.team_id", "risk_policies.policy_id"],
+            name="fk_risk_control_change_requests_team_source_policy",
+            ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            ["team_id", "resulting_policy_id"],
+            ["risk_policies.team_id", "risk_policies.policy_id"],
+            name="fk_risk_control_change_requests_team_result_policy",
+            ondelete="RESTRICT",
         ),
         Index("ix_risk_control_change_requests_created", "created_at"),
     )
 
     request_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid4)
+    team_id: Mapped[UUID] = mapped_column(
+        ForeignKey("teams.team_id", ondelete="RESTRICT"), nullable=False
+    )
     requester_id: Mapped[UUID] = mapped_column(ForeignKey("users.user_id"), nullable=False)
     status: Mapped[str] = mapped_column(String(32), nullable=False)
     version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
     reason: Mapped[str] = mapped_column(Text, nullable=False)
     restore_auto_add: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     require_live_scope: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
-    source_policy_id: Mapped[UUID] = mapped_column(
-        ForeignKey("risk_policies.policy_id"), nullable=False
-    )
+    source_policy_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), nullable=False)
     source_policy_version: Mapped[str] = mapped_column(String(120), nullable=False)
     source_policy_revision: Mapped[int] = mapped_column(Integer, nullable=False)
     source_auto_add_status: Mapped[str] = mapped_column(String(16), nullable=False)
     source_auto_add_version: Mapped[int] = mapped_column(Integer, nullable=False)
     required_scopes: Mapped[list[dict[str, str]]] = mapped_column(JSONB, nullable=False)
-    resulting_policy_id: Mapped[UUID | None] = mapped_column(
-        ForeignKey("risk_policies.policy_id"), nullable=True
-    )
+    resulting_policy_id: Mapped[UUID | None] = mapped_column(Uuid(as_uuid=True), nullable=True)
     correlation_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), nullable=False)
     execute_after: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
@@ -952,6 +991,12 @@ class RiskDecision(Base):
             name="fk_risk_decisions_team_proposal",
             ondelete="CASCADE",
         ),
+        ForeignKeyConstraint(
+            ["team_id", "policy_id"],
+            ["risk_policies.team_id", "risk_policies.policy_id"],
+            name="fk_risk_decisions_team_policy",
+            ondelete="RESTRICT",
+        ),
     )
 
     decision_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid4)
@@ -959,7 +1004,7 @@ class RiskDecision(Base):
         ForeignKey("teams.team_id", ondelete="RESTRICT"), nullable=False
     )
     proposal_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), nullable=False)
-    policy_id: Mapped[UUID] = mapped_column(ForeignKey("risk_policies.policy_id"))
+    policy_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), nullable=False)
     input_data: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
     result: Mapped[str] = mapped_column(String(16), nullable=False)
     approved_quantity: Mapped[Decimal] = mapped_column(AMOUNT, nullable=False)
@@ -1032,6 +1077,7 @@ class Campaign(Base):
     __tablename__ = "campaigns"
     __table_args__ = (
         UniqueConstraint("authorization_id", name="uq_campaigns_authorization"),
+        UniqueConstraint("team_id", "campaign_id", name="uq_campaigns_team_identity"),
         CheckConstraint("direction IN ('LONG','SHORT')", name="ck_campaigns_direction"),
         CheckConstraint(
             "environment IN ('SHADOW','TESTNET','LIVE')", name="ck_campaigns_environment"
@@ -1098,16 +1144,30 @@ class RiskReservation(Base):
             name="ck_risk_reservations_status",
         ),
         CheckConstraint("amount >= 0", name="ck_risk_reservations_amount_nonnegative"),
+        ForeignKeyConstraint(
+            ["team_id", "campaign_id"],
+            ["campaigns.team_id", "campaigns.campaign_id"],
+            name="fk_risk_reservations_team_campaign",
+            ondelete="CASCADE",
+        ),
+        ForeignKeyConstraint(
+            ["team_id", "authorization_id"],
+            ["trading_authorizations.team_id", "trading_authorizations.authorization_id"],
+            name="fk_risk_reservations_team_authorization",
+            ondelete="CASCADE",
+        ),
         Index("ix_risk_reservations_campaign_status", "campaign_id", "status"),
+        Index("ix_risk_reservations_team_status", "team_id", "status"),
     )
 
     reservation_id: Mapped[UUID] = mapped_column(
         Uuid(as_uuid=True), primary_key=True, default=uuid4
     )
-    campaign_id: Mapped[UUID] = mapped_column(ForeignKey("campaigns.campaign_id"))
-    authorization_id: Mapped[UUID] = mapped_column(
-        ForeignKey("trading_authorizations.authorization_id")
+    team_id: Mapped[UUID] = mapped_column(
+        ForeignKey("teams.team_id", ondelete="RESTRICT"), nullable=False
     )
+    campaign_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), nullable=False)
+    authorization_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), nullable=False)
     status: Mapped[str] = mapped_column(String(24), nullable=False)
     amount: Mapped[Decimal] = mapped_column(AMOUNT, nullable=False)
     version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)

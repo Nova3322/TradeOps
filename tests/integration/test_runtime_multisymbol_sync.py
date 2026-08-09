@@ -89,6 +89,10 @@ def seed(database: Database, label: str) -> tuple[TradingService, UUID]:
         version=f"{label}-risk-v1",
         system_state=SystemRiskState.NORMAL,
         max_total_risk=Decimal(1_000),
+        max_account_risk=Decimal(1_000),
+        max_single_loss=Decimal(1_000),
+        max_consecutive_losses=3,
+        loss_cooldown=timedelta(hours=1),
         max_fact_age=timedelta(seconds=30),
         now=NOW,
     )

@@ -714,6 +714,19 @@ class RiskTightenRequest(BaseModel):
     idempotency_key: str = Field(min_length=1, max_length=160)
 
 
+class RiskPolicyConfigureRequest(BaseModel):
+    version: str = Field(min_length=1, max_length=120)
+    max_total_risk: Decimal = Field(gt=0)
+    max_account_risk: Decimal = Field(gt=0)
+    max_single_loss: Decimal = Field(gt=0)
+    max_consecutive_losses: int = Field(gt=0)
+    loss_cooldown_seconds: int = Field(gt=0)
+    max_fact_age_seconds: int = Field(gt=0)
+    expected_revision: int = Field(ge=0)
+    reason: str = Field(min_length=10, max_length=2_000)
+    idempotency_key: str = Field(min_length=1, max_length=160)
+
+
 class RiskControlChangeCreateRequest(BaseModel):
     reason: str = Field(min_length=10, max_length=2_000)
     restore_auto_add: bool = False

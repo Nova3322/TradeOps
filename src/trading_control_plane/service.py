@@ -162,6 +162,8 @@ TEAM_SETUP_ACTIONS = frozenset(
         "venue.view",
         "account.manage",
         "account.credentials.manage",
+        "system.view",
+        "risk_policy.manage",
     }
 )
 
@@ -2381,18 +2383,33 @@ class TradingService:
         version: str,
         system_state: SystemRiskState,
         max_total_risk: Decimal,
+        max_account_risk: Decimal,
+        max_single_loss: Decimal,
+        max_consecutive_losses: int,
+        loss_cooldown: timedelta,
         max_fact_age: timedelta,
         now: datetime,
     ) -> UUID:
         with self.database.session_factory.begin() as session:
-            self._require_role(session, actor_id, "risk_policy.manage")
-            if max_total_risk <= 0 or max_fact_age <= timedelta(0):
-                _reject("RISK_POLICY_INVALID", "risk capacity and fact age must be positive")
-            session.execute(
-                text("SELECT pg_advisory_xact_lock(:key)"),
-                {"key": RISK_CAPACITY_LOCK_KEY},
-            )
-            for current in session.scalars(select(RiskPolicy).where(RiskPolicy.active)).all():
+            team = self._require_role(session, actor_id, "risk_policy.manage")
+            if (
+                max_total_risk <= 0
+                or max_account_risk <= 0
+                or max_single_loss <= 0
+                or max_account_risk > max_total_risk
+                or max_single_loss > max_account_risk
+                or max_consecutive_losses <= 0
+                or loss_cooldown <= timedelta(0)
+                or max_fact_age <= timedelta(0)
+            ):
+                _reject("RISK_POLICY_INVALID", "all risk limits must be explicitly valid")
+            self._lock_risk_capacity(session, team.team_id)
+            for current in session.scalars(
+                select(RiskPolicy).where(
+                    RiskPolicy.team_id == team.team_id,
+                    RiskPolicy.active,
+                )
+            ).all():
                 if (
                     system_state is SystemRiskState.NORMAL
                     and current.system_state != SystemRiskState.NORMAL.value
@@ -2403,12 +2420,24 @@ class TradingService:
                         "reviewed restore",
                     )
                 current.active = False
-            previous_revision = session.scalar(select(func.max(RiskPolicy.revision))) or 0
+            previous_revision = (
+                session.scalar(
+                    select(func.max(RiskPolicy.revision)).where(
+                        RiskPolicy.team_id == team.team_id
+                    )
+                )
+                or 0
+            )
             policy = RiskPolicy(
+                team_id=team.team_id,
                 version=version,
                 revision=int(previous_revision) + 1,
                 system_state=system_state.value,
                 max_total_risk=max_total_risk,
+                max_account_risk=max_account_risk,
+                max_single_loss=max_single_loss,
+                max_consecutive_losses=max_consecutive_losses,
+                loss_cooldown_seconds=int(loss_cooldown.total_seconds()),
                 max_fact_age_seconds=int(max_fact_age.total_seconds()),
                 reason=system_state.value,
                 active=True,
@@ -2426,6 +2455,159 @@ class TradingService:
                 reason=system_state.value,
                 correlation_id=uuid4(),
                 object_version=1,
+                now=now,
+            )
+            return policy.policy_id
+
+    def configure_risk_policy(
+        self,
+        *,
+        actor_id: UUID,
+        version: str,
+        max_total_risk: Decimal,
+        max_account_risk: Decimal,
+        max_single_loss: Decimal,
+        max_consecutive_losses: int,
+        loss_cooldown: timedelta,
+        max_fact_age: timedelta,
+        expected_revision: int,
+        reason: str,
+        idempotency_key: str,
+        now: datetime,
+    ) -> UUID:
+        operation = "risk_policy.configure"
+        values = (max_total_risk, max_account_risk, max_single_loss)
+        if (
+            not version.strip()
+            or version.strip() != version
+            or len(version) > 120
+            or any(not value.is_finite() or value <= 0 for value in values)
+            or max_account_risk > max_total_risk
+            or max_single_loss > max_account_risk
+            or max_consecutive_losses <= 0
+            or loss_cooldown <= timedelta(0)
+            or max_fact_age <= timedelta(0)
+        ):
+            _reject("RISK_POLICY_INVALID", "all risk limits must be explicitly valid")
+        payload = {
+            "version": version,
+            "max_total_risk": str(max_total_risk),
+            "max_account_risk": str(max_account_risk),
+            "max_single_loss": str(max_single_loss),
+            "max_consecutive_losses": max_consecutive_losses,
+            "loss_cooldown_seconds": int(loss_cooldown.total_seconds()),
+            "max_fact_age_seconds": int(max_fact_age.total_seconds()),
+            "expected_revision": expected_revision,
+            "reason": reason,
+        }
+        with self.database.session_factory.begin() as session:
+            team = self._require_role(session, actor_id, "risk_policy.manage")
+            digest, replay = self._idempotency(
+                session,
+                caller_id=f"{actor_id}:{team.team_id}",
+                operation=operation,
+                idempotency_key=idempotency_key,
+                payload=payload,
+            )
+            if replay is not None:
+                return _as_uuid(str(replay["policy_id"]))
+            self._lock_risk_capacity(session, team.team_id)
+            current = session.scalar(
+                select(RiskPolicy)
+                .where(RiskPolicy.team_id == team.team_id, RiskPolicy.active)
+                .with_for_update()
+            )
+            current_revision = 0 if current is None else current.revision
+            if current_revision != expected_revision:
+                _reject("VERSION_CONFLICT", "risk policy changed before configuration")
+            if session.scalar(
+                select(RiskPolicy.policy_id).where(
+                    RiskPolicy.team_id == team.team_id,
+                    RiskPolicy.version == version,
+                )
+            ):
+                _reject("RISK_POLICY_VERSION_CONFLICT", "risk policy version already exists")
+            if current is not None and all(
+                value is not None
+                for value in (
+                    current.max_account_risk,
+                    current.max_single_loss,
+                    current.max_consecutive_losses,
+                    current.loss_cooldown_seconds,
+                )
+            ):
+                assert current.max_account_risk is not None
+                assert current.max_single_loss is not None
+                assert current.max_consecutive_losses is not None
+                assert current.loss_cooldown_seconds is not None
+                if (
+                    max_total_risk > current.max_total_risk
+                    or max_account_risk > current.max_account_risk
+                    or max_single_loss > current.max_single_loss
+                    or max_consecutive_losses > current.max_consecutive_losses
+                    or int(loss_cooldown.total_seconds()) < current.loss_cooldown_seconds
+                    or int(max_fact_age.total_seconds()) > current.max_fact_age_seconds
+                ):
+                    _reject(
+                        "REVIEWED_POLICY_CHANGE_REQUIRED",
+                        "loosening configured risk limits requires an independently "
+                        "reviewed change",
+                    )
+            if current is not None:
+                current.active = False
+            policy = RiskPolicy(
+                team_id=team.team_id,
+                version=version,
+                revision=current_revision + 1,
+                system_state=(
+                    SystemRiskState.NORMAL.value if current is None else current.system_state
+                ),
+                max_total_risk=max_total_risk,
+                max_account_risk=max_account_risk,
+                max_single_loss=max_single_loss,
+                max_consecutive_losses=max_consecutive_losses,
+                loss_cooldown_seconds=int(loss_cooldown.total_seconds()),
+                max_fact_age_seconds=int(max_fact_age.total_seconds()),
+                reason=reason,
+                active=True,
+                updated_by=str(actor_id),
+                updated_at=now,
+            )
+            session.add(policy)
+            session.flush()
+            for authorization in session.scalars(
+                select(TradingAuthorization)
+                .where(
+                    TradingAuthorization.team_id == team.team_id,
+                    TradingAuthorization.active,
+                )
+                .with_for_update()
+            ):
+                authorization.active = False
+                if authorization.add_revoked_at is None:
+                    authorization.add_revoked_at = now
+            result = {"policy_id": str(policy.policy_id), "revision": policy.revision}
+            self._save_receipt(
+                session,
+                caller_id=f"{actor_id}:{team.team_id}",
+                operation=operation,
+                idempotency_key=idempotency_key,
+                semantic_hash=digest,
+                response=result,
+                now=now,
+            )
+            self._audit(
+                session,
+                actor_id=str(actor_id),
+                event_type="RISK_POLICY_CONFIGURED",
+                object_type="RiskPolicy",
+                object_id=policy.policy_id,
+                reason=reason,
+                correlation_id=uuid4(),
+                object_version=policy.revision,
+                idempotency_key=idempotency_key,
+                workspace_id=team.workspace_id,
+                team_id=team.team_id,
                 now=now,
             )
             return policy.policy_id
@@ -3277,27 +3459,145 @@ class TradingService:
         return result
 
     @staticmethod
-    def _lock_risk_capacity(session: Session) -> None:
+    def _lock_risk_capacity(session: Session, team_id: UUID | None = None) -> None:
         session.execute(
             text("SELECT pg_advisory_xact_lock(:key)"),
-            {"key": RISK_CAPACITY_LOCK_KEY},
+            {
+                "key": (
+                    RISK_CAPACITY_LOCK_KEY
+                    if team_id is None
+                    else _advisory_lock_key(str(team_id), "risk-capacity", "team")
+                )
+            },
         )
 
     @staticmethod
-    def _occupied_risk(session: Session) -> Decimal:
-        reservations = session.scalars(
+    def _occupied_risk(
+        session: Session,
+        team_id: UUID,
+        *,
+        account_id: str | None = None,
+        venue: str | None = None,
+    ) -> Decimal:
+        query = (
             select(RiskReservation)
-            .where(RiskReservation.status.in_(OCCUPIED_RESERVATION_STATUSES))
-            .with_for_update()
+            .join(Campaign, Campaign.campaign_id == RiskReservation.campaign_id)
+            .where(
+                RiskReservation.team_id == team_id,
+                Campaign.team_id == team_id,
+                RiskReservation.status.in_(OCCUPIED_RESERVATION_STATUSES),
+            )
+        )
+        if account_id is not None:
+            query = query.where(Campaign.account_id == account_id)
+        if venue is not None:
+            query = query.where(Campaign.venue == venue)
+        reservations = session.scalars(
+            query.with_for_update(of=RiskReservation)
         ).all()
         return sum((reservation.amount for reservation in reservations), Decimal(0))
 
     @staticmethod
-    def _active_risk_policy(session: Session) -> RiskPolicy:
-        policy = session.scalar(select(RiskPolicy).where(RiskPolicy.active).with_for_update())
+    def _active_risk_policy(session: Session, team_id: UUID) -> RiskPolicy:
+        policy = session.scalar(
+            select(RiskPolicy)
+            .where(RiskPolicy.team_id == team_id, RiskPolicy.active)
+            .with_for_update()
+        )
         if policy is None:
             _reject("RISK_POLICY_MISSING", "no active risk policy exists")
         return policy
+
+    @staticmethod
+    def _risk_policy_input(
+        policy: RiskPolicy,
+        *,
+        effective_max_total_risk: Decimal | None = None,
+    ) -> RiskPolicyInput:
+        return RiskPolicyInput(
+            version=policy.version,
+            system_state=SystemRiskState(policy.system_state),
+            max_total_risk=(
+                policy.max_total_risk
+                if effective_max_total_risk is None
+                else effective_max_total_risk
+            ),
+            max_account_risk=policy.max_account_risk,
+            max_single_loss=policy.max_single_loss,
+            max_consecutive_losses=policy.max_consecutive_losses,
+            loss_cooldown=(
+                None
+                if policy.loss_cooldown_seconds is None
+                else timedelta(seconds=policy.loss_cooldown_seconds)
+            ),
+            max_fact_age=timedelta(seconds=policy.max_fact_age_seconds),
+        )
+
+    @staticmethod
+    def _consecutive_loss_snapshot(
+        session: Session,
+        *,
+        team_id: UUID,
+        environment: str,
+        account_id: str | None = None,
+        venue: str | None = None,
+    ) -> tuple[int, datetime | None]:
+        query = (
+            select(Campaign)
+            .where(
+                Campaign.team_id == team_id,
+                Campaign.environment == environment,
+                Campaign.status == CampaignStatus.CLOSED.value,
+            )
+            .order_by(Campaign.updated_at.desc(), Campaign.campaign_id.desc())
+        )
+        if account_id is not None:
+            query = query.where(Campaign.account_id == account_id)
+        if venue is not None:
+            query = query.where(Campaign.venue == venue)
+        streak = 0
+        latest_loss_at: datetime | None = None
+        for campaign in session.scalars(query):
+            if campaign.final_pnl >= 0:
+                break
+            streak += 1
+            if latest_loss_at is None:
+                latest_loss_at = campaign.updated_at
+        return streak, latest_loss_at
+
+    def _loss_limit_context(
+        self,
+        session: Session,
+        *,
+        proposal: Proposal,
+        policy: RiskPolicy,
+        now: datetime,
+    ) -> tuple[int, int, timedelta]:
+        team_streak, team_latest_loss_at = self._consecutive_loss_snapshot(
+            session,
+            team_id=proposal.team_id,
+            environment=proposal.environment,
+        )
+        account_streak, account_latest_loss_at = self._consecutive_loss_snapshot(
+            session,
+            team_id=proposal.team_id,
+            environment=proposal.environment,
+            account_id=proposal.account_id,
+            venue=proposal.venue,
+        )
+        if policy.loss_cooldown_seconds is None:
+            return team_streak, account_streak, timedelta(0)
+        threshold = policy.max_consecutive_losses
+        cooldown = timedelta(seconds=policy.loss_cooldown_seconds)
+        remaining: list[timedelta] = []
+        for streak, latest_loss_at in (
+            (team_streak, team_latest_loss_at),
+            (account_streak, account_latest_loss_at),
+        ):
+            if threshold is None or streak < threshold or latest_loss_at is None:
+                continue
+            remaining.append(max(timedelta(0), latest_loss_at + cooldown - now))
+        return team_streak, account_streak, max(remaining, default=timedelta(0))
 
     def _managed_capital_context(
         self,
@@ -3500,11 +3800,29 @@ class TradingService:
         fact_age = (
             timedelta(0) if -MAX_FACT_CLOCK_SKEW <= raw_fact_age < timedelta(0) else raw_fact_age
         )
+        current_account_risk = self._occupied_risk(
+            session,
+            proposal.team_id,
+            account_id=proposal.account_id,
+            venue=proposal.venue,
+        )
+        team_loss_streak, account_loss_streak, loss_cooldown_remaining = (
+            self._loss_limit_context(
+                session,
+                proposal=proposal,
+                policy=policy,
+                now=now,
+            )
+        )
         inputs = RiskEvaluationInput(
             kind=kind,
             requested_quantity=requested_quantity,
             requested_risk=requested_risk,
             current_risk=current_risk,
+            current_account_risk=current_account_risk,
+            team_consecutive_losses=team_loss_streak,
+            account_consecutive_losses=account_loss_streak,
+            loss_cooldown_remaining=loss_cooldown_remaining,
             fact_age=fact_age,
             position_known=position_known,
             equity_known=equity_known,
@@ -3518,12 +3836,27 @@ class TradingService:
             "requested_quantity": str(requested_quantity),
             "requested_risk": str(requested_risk),
             "current_risk": str(current_risk),
+            "current_account_risk": str(current_account_risk),
+            "team_consecutive_losses": team_loss_streak,
+            "account_consecutive_losses": account_loss_streak,
+            "loss_cooldown_remaining_seconds": str(
+                loss_cooldown_remaining.total_seconds()
+            ),
             "policy": {
+                "team_id": str(policy.team_id),
                 "policy_id": str(policy.policy_id),
                 "version": policy.version,
                 "revision": policy.revision,
                 "system_state": policy.system_state,
                 "max_total_risk": str(policy.max_total_risk),
+                "max_account_risk": (
+                    None if policy.max_account_risk is None else str(policy.max_account_risk)
+                ),
+                "max_single_loss": (
+                    None if policy.max_single_loss is None else str(policy.max_single_loss)
+                ),
+                "max_consecutive_losses": policy.max_consecutive_losses,
+                "loss_cooldown_seconds": policy.loss_cooldown_seconds,
                 "max_fact_age_seconds": policy.max_fact_age_seconds,
             },
             "position": None
@@ -3622,9 +3955,9 @@ class TradingService:
             if quantity <= 0 or quantity > proposal.quantity:
                 _reject("PROPOSAL_QUANTITY_EXCEEDED", "requested quantity exceeds proposal cap")
 
-            self._lock_risk_capacity(session)
-            policy = self._active_risk_policy(session)
-            current_risk = self._occupied_risk(session)
+            self._lock_risk_capacity(session, proposal.team_id)
+            policy = self._active_risk_policy(session, proposal.team_id)
+            current_risk = self._occupied_risk(session, proposal.team_id)
             requested_risk = proposal.max_risk * quantity / proposal.quantity
             if requested_risk > proposal.max_risk:
                 _reject("PROPOSAL_RISK_EXCEEDED", "requested risk exceeds proposal cap")
@@ -3639,15 +3972,13 @@ class TradingService:
                 now=now,
             )
             outcome = evaluate_risk(
-                RiskPolicyInput(
-                    version=policy.version,
-                    system_state=SystemRiskState(policy.system_state),
-                    max_total_risk=(
+                self._risk_policy_input(
+                    policy,
+                    effective_max_total_risk=(
                         effective_max_total_risk
                         if effective_max_total_risk > 0
                         else policy.max_total_risk
                     ),
-                    max_fact_age=timedelta(seconds=policy.max_fact_age_seconds),
                 ),
                 inputs,
             )
@@ -3729,8 +4060,8 @@ class TradingService:
             )
             if response is not None:
                 return _as_uuid(str(response["authorization_id"]))
-            self._lock_risk_capacity(session)
-            policy = self._active_risk_policy(session)
+            self._lock_risk_capacity(session, proposal.team_id)
+            policy = self._active_risk_policy(session, proposal.team_id)
             if policy.system_state != SystemRiskState.NORMAL.value:
                 _reject(
                     "AUTHORIZATION_RISK_STATE_INVALID",
@@ -3985,7 +4316,7 @@ class TradingService:
             )
             if response is not None:
                 return self._intent_creation(response)
-            self._lock_risk_capacity(session)
+            self._lock_risk_capacity(session, authorization.team_id)
             authorization = session.get(
                 TradingAuthorization,
                 authorization_id,
@@ -3994,7 +4325,7 @@ class TradingService:
             )
             if authorization is None:
                 _reject("AUTHORIZATION_INACTIVE", "authorization is missing or inactive")
-            policy = self._active_risk_policy(session)
+            policy = self._active_risk_policy(session, authorization.team_id)
             auto_add_gate: CapabilityGate | None = None
             if kind is IntentKind.ADD:
                 auto_add_gate = session.get(CapabilityGate, "AUTO_ADD", with_for_update=True)
@@ -4042,7 +4373,7 @@ class TradingService:
                         "this frozen proposal already produced its one initial intent",
                     )
 
-            occupied_risk = self._occupied_risk(session)
+            occupied_risk = self._occupied_risk(session, proposal.team_id)
             risk_amount = authorization.risk_limit * quantity / authorization.quantity_limit
             if risk_amount <= 0 or risk_amount > authorization.risk_limit:
                 _reject("AUTHORIZATION_RISK_EXCEEDED", "request exceeds risk authorization")
@@ -4057,15 +4388,13 @@ class TradingService:
                 now=now,
             )
             final_outcome = evaluate_risk(
-                RiskPolicyInput(
-                    version=policy.version,
-                    system_state=SystemRiskState(policy.system_state),
-                    max_total_risk=(
+                self._risk_policy_input(
+                    policy,
+                    effective_max_total_risk=(
                         effective_max_total_risk
                         if effective_max_total_risk > 0
                         else policy.max_total_risk
                     ),
-                    max_fact_age=timedelta(seconds=policy.max_fact_age_seconds),
                 ),
                 inputs,
             )
@@ -4178,9 +4507,22 @@ class TradingService:
             )
             if active is not None:
                 _reject("ACTIVE_ORDER_INTENT", "campaign already has unresolved intent")
-            if occupied_risk + risk_amount > policy.max_total_risk:
+            occupied_account_risk = self._occupied_risk(
+                session,
+                proposal.team_id,
+                account_id=proposal.account_id,
+                venue=proposal.venue,
+            )
+            if (
+                policy.max_account_risk is None
+                or policy.max_single_loss is None
+                or risk_amount > policy.max_single_loss
+                or occupied_risk + risk_amount > policy.max_total_risk
+                or occupied_account_risk + risk_amount > policy.max_account_risk
+            ):
                 _reject("RISK_CAPACITY_EXHAUSTED", "atomic risk capacity is exhausted")
             reservation = RiskReservation(
+                team_id=proposal.team_id,
                 campaign_id=campaign.campaign_id,
                 authorization_id=authorization_id,
                 status=ReservationStatus.RESERVED.value,
@@ -4672,7 +5014,12 @@ class TradingService:
             proposal = (
                 None if authorization is None else session.get(Proposal, authorization.proposal_id)
             )
-            policy = session.scalar(select(RiskPolicy).where(RiskPolicy.active))
+            policy = session.scalar(
+                select(RiskPolicy).where(
+                    RiskPolicy.team_id == campaign.team_id,
+                    RiskPolicy.active,
+                )
+            )
             if (
                 authorization is None
                 or proposal is None
@@ -4692,6 +5039,16 @@ class TradingService:
                 )
             if policy is None:
                 _reject("RISK_POLICY_UNKNOWN", "active risk policy is unavailable")
+            if any(
+                value is None
+                for value in (
+                    policy.max_account_risk,
+                    policy.max_single_loss,
+                    policy.max_consecutive_losses,
+                    policy.loss_cooldown_seconds,
+                )
+            ):
+                _reject("RISK_LIMITS_UNCONFIGURED", "team risk limits are not configured")
             state = SystemRiskState(policy.system_state)
             if state is SystemRiskState.KILL_SWITCH:
                 _reject("KILL_SWITCH", "new-risk venue send is blocked")
@@ -4753,8 +5110,18 @@ class TradingService:
                     "MANAGED_CAPITAL_UNKNOWN",
                     "new-risk venue send requires fresh total managed capital",
                 )
-            occupied_risk = self._occupied_risk(session)
-            if occupied_risk > min(policy.max_total_risk, managed_capital_usd):
+            occupied_risk = self._occupied_risk(session, campaign.team_id)
+            occupied_account_risk = self._occupied_risk(
+                session,
+                campaign.team_id,
+                account_id=campaign.account_id,
+                venue=campaign.venue,
+            )
+            assert policy.max_account_risk is not None
+            if (
+                occupied_risk > min(policy.max_total_risk, managed_capital_usd)
+                or occupied_account_risk > policy.max_account_risk
+            ):
                 _reject(
                     "RISK_CAPACITY_EXHAUSTED",
                     "current reservations exceed total managed capital risk capacity",
@@ -4778,6 +5145,7 @@ class TradingService:
             if (
                 session.scalar(
                     select(RiskReservation.reservation_id).where(
+                        RiskReservation.team_id == campaign.team_id,
                         RiskReservation.status == ReservationStatus.UNKNOWN.value
                     )
                 )
@@ -8709,7 +9077,7 @@ class TradingService:
                 )
                 .with_for_update()
             )
-            policy = self._active_risk_policy(session)
+            policy = self._active_risk_policy(session, campaign.team_id)
             if proposal is None or policy is None:
                 _reject("CAMPAIGN_MANAGEMENT_INVALID", "campaign management facts are incomplete")
             if position is None or position.fact_status != FactStatus.KNOWN.value:
@@ -8872,7 +9240,7 @@ class TradingService:
             )
             if response is not None:
                 return int(response["allowed_adds"])
-            self._lock_risk_capacity(session)
+            self._lock_risk_capacity(session, campaign.team_id)
             authorization = session.get(
                 TradingAuthorization, campaign.authorization_id, with_for_update=True
             )
@@ -8993,7 +9361,7 @@ class TradingService:
         operation = "risk.pause_new"
         payload = {"reason": reason}
         with self.database.session_factory.begin() as session:
-            self._require_role(session, actor_id, "risk.tighten")
+            team = self._require_role(session, actor_id, "risk.tighten")
             digest, response = self._idempotency(
                 session,
                 caller_id=str(actor_id),
@@ -9003,8 +9371,8 @@ class TradingService:
             )
             if response is not None:
                 return SystemRiskState(str(response["system_state"]))
-            self._lock_risk_capacity(session)
-            policy = self._active_risk_policy(session)
+            self._lock_risk_capacity(session, team.team_id)
+            policy = self._active_risk_policy(session, team.team_id)
             if policy.system_state != SystemRiskState.KILL_SWITCH.value:
                 policy.system_state = SystemRiskState.REDUCE_ONLY.value
                 policy.revision += 1
@@ -9014,6 +9382,7 @@ class TradingService:
             authorizations = session.scalars(
                 select(TradingAuthorization)
                 .where(
+                    TradingAuthorization.team_id == team.team_id,
                     TradingAuthorization.active,
                     TradingAuthorization.expires_at > now,
                 )
@@ -9091,6 +9460,11 @@ class TradingService:
         if (
             session.scalar(
                 select(OrderIntent.intent_id).where(
+                    OrderIntent.campaign_id.in_(
+                        select(Campaign.campaign_id).where(
+                            Campaign.team_id == policy.team_id
+                        )
+                    ),
                     OrderIntent.kind.in_({IntentKind.INITIAL.value, IntentKind.ADD.value}),
                     OrderIntent.status.in_(ACTIVE_INTENT_STATUSES),
                 )
@@ -9101,6 +9475,11 @@ class TradingService:
         if (
             session.scalar(
                 select(OrderIntent.intent_id).where(
+                    OrderIntent.campaign_id.in_(
+                        select(Campaign.campaign_id).where(
+                            Campaign.team_id == policy.team_id
+                        )
+                    ),
                     OrderIntent.status == OrderIntentStatus.UNKNOWN.value
                 )
             )
@@ -9110,6 +9489,7 @@ class TradingService:
         if (
             session.scalar(
                 select(VenueOrder.venue_order_fact_id).where(
+                    VenueOrder.team_id == policy.team_id,
                     VenueOrder.status == VenueOrderStatus.UNKNOWN.value
                 )
             )
@@ -9119,6 +9499,7 @@ class TradingService:
         if (
             session.scalar(
                 select(RiskReservation.reservation_id).where(
+                    RiskReservation.team_id == policy.team_id,
                     RiskReservation.status == ReservationStatus.UNKNOWN.value
                 )
             )
@@ -9127,7 +9508,10 @@ class TradingService:
             blockers.add("RISK_RESERVATION_UNKNOWN")
         if (
             session.scalar(
-                select(Campaign.campaign_id).where(Campaign.status == CampaignStatus.UNKNOWN.value)
+                select(Campaign.campaign_id).where(
+                    Campaign.team_id == policy.team_id,
+                    Campaign.status == CampaignStatus.UNKNOWN.value,
+                )
             )
             is not None
         ):
@@ -9135,6 +9519,7 @@ class TradingService:
         if (
             session.scalar(
                 select(VenueOrder.venue_order_fact_id).where(
+                    VenueOrder.team_id == policy.team_id,
                     VenueOrder.order_intent_id.is_(None),
                     VenueOrder.status.in_(
                         {
@@ -9170,6 +9555,7 @@ class TradingService:
                     blockers.add(f"READ_ONLY_SOURCE_STALE:{prefix}")
             equity = session.scalar(
                 select(AccountEquity).where(
+                    AccountEquity.team_id == policy.team_id,
                     AccountEquity.environment == environment.value,
                     AccountEquity.account_id == account_id,
                     AccountEquity.venue == venue,
@@ -9184,6 +9570,7 @@ class TradingService:
 
             positions = session.scalars(
                 select(Position).where(
+                    Position.team_id == policy.team_id,
                     Position.environment == environment.value,
                     Position.account_id == account_id,
                     Position.venue == venue,
@@ -9217,7 +9604,10 @@ class TradingService:
             execution_scope = _scope_key(environment.value, account_id, venue)
             reconciliation = session.scalar(
                 select(ReconciliationRun)
-                .where(ReconciliationRun.execution_scope == execution_scope)
+                .where(
+                    ReconciliationRun.team_id == policy.team_id,
+                    ReconciliationRun.execution_scope == execution_scope,
+                )
                 .order_by(ReconciliationRun.completed_at.desc())
                 .limit(1)
             )
@@ -9430,12 +9820,60 @@ class TradingService:
         now: datetime,
     ) -> dict[str, Any]:
         with self.database.session_factory() as session:
-            self._require_role(session, actor_id, "view")
-            policy = self._active_risk_policy(session)
+            team = self._require_role(session, actor_id, "system.view")
+            policy = session.scalar(
+                select(RiskPolicy).where(
+                    RiskPolicy.team_id == team.team_id,
+                    RiskPolicy.active,
+                )
+            )
             gate = session.get(CapabilityGate, "AUTO_ADD")
             if gate is None:
                 _reject("CAPABILITY_GATE_NOT_FOUND", "AUTO_ADD gate is missing")
-            campaigns = session.scalars(select(Campaign)).all()
+            if policy is None:
+                return {
+                    "policy": None,
+                    "auto_add_gate": {
+                        "status": gate.status,
+                        "version": gate.version,
+                        "reason": gate.reason,
+                        "operator_id": gate.operator_id,
+                        "operator_username": None,
+                        "updated_at": gate.updated_at.isoformat(),
+                    },
+                    "restore_conditions": {
+                        "ready": False,
+                        "live_scope_required": require_live_scope,
+                        "blockers": ["RISK_POLICY_MISSING"],
+                        "checks": [],
+                        "required_scopes": [],
+                        "cooldown_seconds": int(RISK_RESTORE_COOLDOWN.total_seconds()),
+                    },
+                    "actions": {
+                        "configure_policy": {
+                            "allowed": any(
+                                "risk_policy.manage" in ROLE_ACTIONS[Role(item.role)]
+                                or "*" in ROLE_ACTIONS[Role(item.role)]
+                                for item in session.scalars(
+                                    select(RoleAssignment).where(
+                                        RoleAssignment.user_id == actor_id,
+                                        RoleAssignment.team_id == team.team_id,
+                                    )
+                                )
+                            ),
+                            "reason": "RISK_POLICY_MISSING",
+                        },
+                        "direct_restore": {"allowed": False, "reason": "RISK_POLICY_MISSING"},
+                        "request_restore": {"allowed": False, "reason": "RISK_POLICY_MISSING"},
+                        "review_restore": {"allowed": False, "reason": "RISK_POLICY_MISSING"},
+                        "execute_restore": {"allowed": False, "reason": "RISK_POLICY_MISSING"},
+                    },
+                    "requests": [],
+                    "as_of": now.isoformat(),
+                }
+            campaigns = session.scalars(
+                select(Campaign).where(Campaign.team_id == team.team_id)
+            ).all()
             scopes = self._canonical_restore_scopes(
                 configured_scopes,
                 list(campaigns),
@@ -9450,8 +9888,19 @@ class TradingService:
                 require_live_scope=require_live_scope,
                 now=now,
             )
+            if any(
+                value is None
+                for value in (
+                    policy.max_account_risk,
+                    policy.max_single_loss,
+                    policy.max_consecutive_losses,
+                    policy.loss_cooldown_seconds,
+                )
+            ):
+                blockers = ["RISK_LIMITS_UNCONFIGURED", *blockers]
             requests = session.scalars(
                 select(RiskControlChangeRequest)
+                .where(RiskControlChangeRequest.team_id == team.team_id)
                 .order_by(RiskControlChangeRequest.created_at.desc())
                 .limit(20)
             ).all()
@@ -9500,7 +9949,10 @@ class TradingService:
                     }
                 )
             assignments = session.scalars(
-                select(RoleAssignment).where(RoleAssignment.user_id == actor_id)
+                select(RoleAssignment).where(
+                    RoleAssignment.user_id == actor_id,
+                    RoleAssignment.team_id == team.team_id,
+                )
             ).all()
             role_names = {item.role for item in assignments}
             restricted = policy.system_state != SystemRiskState.NORMAL.value
@@ -9553,12 +10005,30 @@ class TradingService:
             )
             return {
                 "policy": {
+                    "team_id": str(policy.team_id),
                     "policy_id": str(policy.policy_id),
                     "version": policy.version,
                     "revision": policy.revision,
                     "system_state": policy.system_state,
                     "reason": policy.reason,
                     "max_total_risk": str(policy.max_total_risk),
+                    "max_account_risk": (
+                        None if policy.max_account_risk is None else str(policy.max_account_risk)
+                    ),
+                    "max_single_loss": (
+                        None if policy.max_single_loss is None else str(policy.max_single_loss)
+                    ),
+                    "max_consecutive_losses": policy.max_consecutive_losses,
+                    "loss_cooldown_seconds": policy.loss_cooldown_seconds,
+                    "limits_configured": all(
+                        value is not None
+                        for value in (
+                            policy.max_account_risk,
+                            policy.max_single_loss,
+                            policy.max_consecutive_losses,
+                            policy.loss_cooldown_seconds,
+                        )
+                    ),
                     "max_fact_age_seconds": policy.max_fact_age_seconds,
                     "updated_by": policy.updated_by,
                     "updated_by_username": projected_username(policy.updated_by),
@@ -9581,6 +10051,10 @@ class TradingService:
                     "cooldown_seconds": int(RISK_RESTORE_COOLDOWN.total_seconds()),
                 },
                 "actions": {
+                    "configure_policy": {
+                        "allowed": is_admin,
+                        "reason": "READY" if is_admin else "SYSTEM_ADMIN_REQUIRED",
+                    },
                     "direct_restore": {
                         "allowed": direct_allowed,
                         "reason": (
@@ -9658,11 +10132,22 @@ class TradingService:
                 "as_of": now.isoformat(),
             }
 
-    def risk_control_change_version(self, request_id: UUID) -> int:
+    def risk_control_change_version(
+        self,
+        request_id: UUID,
+        actor_id: UUID | None = None,
+    ) -> int:
         with self.database.session_factory() as session:
             request = session.get(RiskControlChangeRequest, request_id)
             if request is None:
                 _reject("RISK_RESTORE_NOT_FOUND", "restore request does not exist")
+            if actor_id is not None:
+                self._require_role(
+                    session,
+                    actor_id,
+                    "system.view",
+                    team_id=request.team_id,
+                )
             return request.version
 
     def create_risk_control_change_request(
@@ -9684,12 +10169,14 @@ class TradingService:
             "require_live_scope": require_live_scope,
         }
         with self.database.session_factory.begin() as session:
+            team = self._require_action_assignment(session, actor_id, operation)
             requester = session.get(User, actor_id)
             if requester is None or requester.principal_type != PrincipalType.HUMAN.value:
                 _reject("SERVICE_REQUEST_FORBIDDEN", "risk restoration requires a human requester")
             operator_assignments = session.scalars(
                 select(RoleAssignment).where(
                     RoleAssignment.user_id == actor_id,
+                    RoleAssignment.team_id == team.team_id,
                     RoleAssignment.role == Role.OPERATOR.value,
                 )
             ).all()
@@ -9717,15 +10204,15 @@ class TradingService:
                 )
             digest, response = self._idempotency(
                 session,
-                caller_id=str(actor_id),
+                caller_id=f"{actor_id}:{team.team_id}",
                 operation=operation,
                 idempotency_key=idempotency_key,
                 payload=payload,
             )
             if response is not None:
                 return _as_uuid(str(response["request_id"]))
-            self._lock_risk_capacity(session)
-            policy = self._active_risk_policy(session)
+            self._lock_risk_capacity(session, team.team_id)
+            policy = self._active_risk_policy(session, team.team_id)
             gate = session.get(CapabilityGate, "AUTO_ADD", with_for_update=True)
             if gate is None:
                 _reject("CAPABILITY_GATE_NOT_FOUND", "AUTO_ADD gate is missing")
@@ -9742,6 +10229,7 @@ class TradingService:
                 session.scalars(
                     select(RiskControlChangeRequest)
                     .where(
+                        RiskControlChangeRequest.team_id == team.team_id,
                         RiskControlChangeRequest.status.in_(
                             {
                                 RiskPolicyChangeStatus.PENDING_REVIEW.value,
@@ -9781,7 +10269,9 @@ class TradingService:
                     pending = existing_request.request_id
             if pending is not None:
                 _reject("RISK_RESTORE_ALREADY_PENDING", "a reviewed restore is already active")
-            campaigns = list(session.scalars(select(Campaign)).all())
+            campaigns = list(
+                session.scalars(select(Campaign).where(Campaign.team_id == team.team_id)).all()
+            )
             scopes = self._canonical_restore_scopes(
                 configured_scopes,
                 campaigns,
@@ -9794,6 +10284,7 @@ class TradingService:
                 gate.updated_at if restore_auto_add else policy.updated_at,
             )
             request = RiskControlChangeRequest(
+                team_id=team.team_id,
                 requester_id=actor_id,
                 status=RiskPolicyChangeStatus.PENDING_REVIEW.value,
                 version=1,
@@ -9819,7 +10310,7 @@ class TradingService:
             result = {"request_id": str(request.request_id)}
             self._save_receipt(
                 session,
-                caller_id=str(actor_id),
+                caller_id=f"{actor_id}:{team.team_id}",
                 operation=operation,
                 idempotency_key=idempotency_key,
                 semantic_hash=digest,
@@ -9864,13 +10355,13 @@ class TradingService:
             request = session.get(RiskControlChangeRequest, request_id, with_for_update=True)
             if request is None:
                 _reject("RISK_RESTORE_NOT_FOUND", "restore request does not exist")
-            self._require_role(session, reviewer_id, operation)
+            self._require_role(session, reviewer_id, operation, team_id=request.team_id)
             reviewer = session.get(User, reviewer_id)
             if reviewer is None or reviewer.principal_type != PrincipalType.HUMAN.value:
                 _reject("SERVICE_REVIEW_FORBIDDEN", "risk restoration requires human reviewers")
             digest, response = self._idempotency(
                 session,
-                caller_id=str(reviewer_id),
+                caller_id=f"{reviewer_id}:{request.team_id}",
                 operation=operation,
                 idempotency_key=idempotency_key,
                 payload=payload,
@@ -9879,7 +10370,7 @@ class TradingService:
                 return RiskPolicyChangeStatus(str(response["status"]))
             if request.version != expected_version:
                 _reject("VERSION_CONFLICT", "restore request changed before review")
-            policy = self._active_risk_policy(session)
+            policy = self._active_risk_policy(session, request.team_id)
             gate = session.get(CapabilityGate, "AUTO_ADD")
             if gate is None:
                 _reject("CAPABILITY_GATE_NOT_FOUND", "AUTO_ADD gate is missing")
@@ -9940,7 +10431,7 @@ class TradingService:
                 response_value = {"status": request.status, "version": request.version}
                 self._save_receipt(
                     session,
-                    caller_id=str(reviewer_id),
+                    caller_id=f"{reviewer_id}:{request.team_id}",
                     operation=operation,
                     idempotency_key=idempotency_key,
                     semantic_hash=digest,
@@ -9987,13 +10478,13 @@ class TradingService:
             request = session.get(RiskControlChangeRequest, request_id, with_for_update=True)
             if request is None:
                 _reject("RISK_RESTORE_NOT_FOUND", "restore request does not exist")
-            self._require_role(session, actor_id, operation)
+            self._require_role(session, actor_id, operation, team_id=request.team_id)
             executor = session.get(User, actor_id)
             if executor is None or executor.principal_type != PrincipalType.HUMAN.value:
                 _reject("SERVICE_EXECUTION_FORBIDDEN", "risk restoration requires a human executor")
             digest, response = self._idempotency(
                 session,
-                caller_id=str(actor_id),
+                caller_id=f"{actor_id}:{request.team_id}",
                 operation=operation,
                 idempotency_key=idempotency_key,
                 payload=payload,
@@ -10018,14 +10509,18 @@ class TradingService:
                 _reject("RISK_RESTORE_NOT_APPROVED", "an independent approval is required")
             if request.requester_id == actor_id:
                 _reject("SELF_EXECUTION_FORBIDDEN", "requester cannot execute their restore")
-            self._lock_risk_capacity(session)
-            policy = self._active_risk_policy(session)
+            self._lock_risk_capacity(session, request.team_id)
+            policy = self._active_risk_policy(session, request.team_id)
             gate = session.get(CapabilityGate, "AUTO_ADD", with_for_update=True)
             if gate is None:
                 _reject("CAPABILITY_GATE_NOT_FOUND", "AUTO_ADD gate is missing")
             if self._risk_restore_request_drifted(request, policy, gate):
                 _reject("RISK_RESTORE_CONTROL_DRIFT", "risk controls changed after the request")
-            campaigns = list(session.scalars(select(Campaign)).all())
+            campaigns = list(
+                session.scalars(
+                    select(Campaign).where(Campaign.team_id == request.team_id)
+                ).all()
+            )
             current_scopes = self._canonical_restore_scopes(
                 configured_scopes,
                 campaigns,
@@ -10052,10 +10547,15 @@ class TradingService:
             policy.active = False
             next_revision = policy.revision + 1
             restored = RiskPolicy(
+                team_id=request.team_id,
                 version=f"restore-{next_revision}-{request.request_id.hex[:12]}",
                 revision=next_revision,
                 system_state=SystemRiskState.NORMAL.value,
                 max_total_risk=policy.max_total_risk,
+                max_account_risk=policy.max_account_risk,
+                max_single_loss=policy.max_single_loss,
+                max_consecutive_losses=policy.max_consecutive_losses,
+                loss_cooldown_seconds=policy.loss_cooldown_seconds,
                 max_fact_age_seconds=policy.max_fact_age_seconds,
                 reason=request.reason,
                 active=True,
@@ -10066,7 +10566,10 @@ class TradingService:
             session.flush()
             authorizations = session.scalars(
                 select(TradingAuthorization)
-                .where(TradingAuthorization.active)
+                .where(
+                    TradingAuthorization.team_id == request.team_id,
+                    TradingAuthorization.active,
+                )
                 .order_by(TradingAuthorization.authorization_id)
                 .with_for_update()
             ).all()
@@ -10082,7 +10585,7 @@ class TradingService:
             result = {"policy_id": str(restored.policy_id), "request_id": str(request_id)}
             self._save_receipt(
                 session,
-                caller_id=str(actor_id),
+                caller_id=f"{actor_id}:{request.team_id}",
                 operation=operation,
                 idempotency_key=idempotency_key,
                 semantic_hash=digest,
@@ -10120,9 +10623,12 @@ class TradingService:
             "require_live_scope": require_live_scope,
         }
         with self.database.session_factory.begin() as session:
-            self._require_role(session, actor_id, operation)
+            team = self._require_role(session, actor_id, operation)
             assignments = session.scalars(
-                select(RoleAssignment).where(RoleAssignment.user_id == actor_id)
+                select(RoleAssignment).where(
+                    RoleAssignment.user_id == actor_id,
+                    RoleAssignment.team_id == team.team_id,
+                )
             ).all()
             if not any(item.role == Role.SYSTEM_ADMIN.value for item in assignments):
                 _reject(
@@ -10134,21 +10640,23 @@ class TradingService:
                 _reject("SERVICE_EXECUTION_FORBIDDEN", "direct restoration requires a human")
             digest, response = self._idempotency(
                 session,
-                caller_id=str(actor_id),
+                caller_id=f"{actor_id}:{team.team_id}",
                 operation=operation,
                 idempotency_key=idempotency_key,
                 payload=payload,
             )
             if response is not None:
                 return _as_uuid(str(response["policy_id"]))
-            self._lock_risk_capacity(session)
-            policy = self._active_risk_policy(session)
+            self._lock_risk_capacity(session, team.team_id)
+            policy = self._active_risk_policy(session, team.team_id)
             if policy.system_state == SystemRiskState.NORMAL.value:
                 _reject("RISK_CONTROL_ALREADY_NORMAL", "risk policy is already normal")
             gate = session.get(CapabilityGate, "AUTO_ADD", with_for_update=True)
             if gate is None:
                 _reject("CAPABILITY_GATE_NOT_FOUND", "AUTO_ADD gate is missing")
-            campaigns = list(session.scalars(select(Campaign)).all())
+            campaigns = list(
+                session.scalars(select(Campaign).where(Campaign.team_id == team.team_id)).all()
+            )
             scopes = self._canonical_restore_scopes(
                 configured_scopes,
                 campaigns,
@@ -10168,10 +10676,15 @@ class TradingService:
             policy.active = False
             next_revision = policy.revision + 1
             restored = RiskPolicy(
+                team_id=team.team_id,
                 version=f"direct-restore-{next_revision}-{uuid4().hex[:12]}",
                 revision=next_revision,
                 system_state=SystemRiskState.NORMAL.value,
                 max_total_risk=policy.max_total_risk,
+                max_account_risk=policy.max_account_risk,
+                max_single_loss=policy.max_single_loss,
+                max_consecutive_losses=policy.max_consecutive_losses,
+                loss_cooldown_seconds=policy.loss_cooldown_seconds,
                 max_fact_age_seconds=policy.max_fact_age_seconds,
                 reason=reason,
                 active=True,
@@ -10183,6 +10696,7 @@ class TradingService:
             pending_requests = session.scalars(
                 select(RiskControlChangeRequest)
                 .where(
+                    RiskControlChangeRequest.team_id == team.team_id,
                     RiskControlChangeRequest.status.in_(
                         {
                             RiskPolicyChangeStatus.PENDING_REVIEW.value,
@@ -10211,7 +10725,10 @@ class TradingService:
                 )
             authorizations = session.scalars(
                 select(TradingAuthorization)
-                .where(TradingAuthorization.active)
+                .where(
+                    TradingAuthorization.team_id == team.team_id,
+                    TradingAuthorization.active,
+                )
                 .order_by(TradingAuthorization.authorization_id)
                 .with_for_update()
             ).all()
@@ -10222,7 +10739,7 @@ class TradingService:
             result = {"policy_id": str(restored.policy_id)}
             self._save_receipt(
                 session,
-                caller_id=str(actor_id),
+                caller_id=f"{actor_id}:{team.team_id}",
                 operation=operation,
                 idempotency_key=idempotency_key,
                 semantic_hash=digest,

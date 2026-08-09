@@ -206,8 +206,12 @@ class TargetUrgency(StrEnum):
 class RiskPolicyInput:
     version: str
     system_state: SystemRiskState
-    max_total_risk: Decimal
-    max_fact_age: timedelta
+    max_total_risk: Decimal | None
+    max_account_risk: Decimal | None
+    max_single_loss: Decimal | None
+    max_consecutive_losses: int | None
+    loss_cooldown: timedelta | None
+    max_fact_age: timedelta | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -216,6 +220,10 @@ class RiskEvaluationInput:
     requested_quantity: Decimal
     requested_risk: Decimal
     current_risk: Decimal
+    current_account_risk: Decimal
+    team_consecutive_losses: int
+    account_consecutive_losses: int
+    loss_cooldown_remaining: timedelta
     fact_age: timedelta
     position_known: bool
     equity_known: bool
@@ -299,10 +307,36 @@ def _deny(reason: str) -> RiskOutcome:
 def evaluate_risk(policy: RiskPolicyInput, inputs: RiskEvaluationInput) -> RiskOutcome:
     """Deterministically apply the current policy to current facts without persistence."""
 
+    if any(
+        value is None
+        for value in (
+            policy.max_total_risk,
+            policy.max_account_risk,
+            policy.max_single_loss,
+            policy.max_consecutive_losses,
+            policy.loss_cooldown,
+            policy.max_fact_age,
+        )
+    ):
+        return _deny("RISK_LIMITS_UNCONFIGURED")
+    assert policy.max_total_risk is not None
+    assert policy.max_account_risk is not None
+    assert policy.max_single_loss is not None
+    assert policy.max_consecutive_losses is not None
+    assert policy.loss_cooldown is not None
+    assert policy.max_fact_age is not None
     if (
         policy.max_total_risk <= 0
+        or policy.max_account_risk <= 0
+        or policy.max_single_loss <= 0
+        or policy.max_consecutive_losses <= 0
+        or policy.loss_cooldown <= timedelta(0)
         or policy.max_fact_age <= timedelta(0)
         or inputs.current_risk < 0
+        or inputs.current_account_risk < 0
+        or inputs.team_consecutive_losses < 0
+        or inputs.account_consecutive_losses < 0
+        or inputs.loss_cooldown_remaining < timedelta(0)
         or inputs.fact_age < timedelta(0)
         or inputs.requested_quantity <= 0
         or inputs.requested_risk <= 0
@@ -327,7 +361,18 @@ def evaluate_risk(policy: RiskPolicyInput, inputs: RiskEvaluationInput) -> RiskO
         return _deny("REDUCE_ONLY")
     if policy.system_state is SystemRiskState.NO_PYRAMID and inputs.kind is IntentKind.ADD:
         return _deny("PYRAMID_DISABLED")
-    available = max(Decimal(0), policy.max_total_risk - inputs.current_risk)
+    if inputs.requested_risk > policy.max_single_loss:
+        return _deny("SINGLE_LOSS_LIMIT_EXCEEDED")
+    if (
+        max(inputs.team_consecutive_losses, inputs.account_consecutive_losses)
+        >= policy.max_consecutive_losses
+        and inputs.loss_cooldown_remaining > timedelta(0)
+    ):
+        return _deny("LOSS_COOLDOWN_ACTIVE")
+    available = min(
+        max(Decimal(0), policy.max_total_risk - inputs.current_risk),
+        max(Decimal(0), policy.max_account_risk - inputs.current_account_risk),
+    )
     if available <= 0:
         return _deny("RISK_CAPACITY_EXHAUSTED")
     if inputs.requested_risk <= available:

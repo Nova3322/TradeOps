@@ -1271,6 +1271,10 @@ def test_runtime_worker_refreshes_perptape_two_venues_and_vault_without_sending(
         version="runtime-test-v1",
         system_state=SystemRiskState.NORMAL,
         max_total_risk=Decimal(1_000),
+        max_account_risk=Decimal(1_000),
+        max_single_loss=Decimal(1_000),
+        max_consecutive_losses=3,
+        loss_cooldown=timedelta(hours=1),
         max_fact_age=timedelta(minutes=5),
         now=NOW,
     )
