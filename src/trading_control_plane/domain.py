@@ -63,6 +63,21 @@ class ProposalStatus(StrEnum):
     EXPIRED = "EXPIRED"
 
 
+class SignalSourceMode(StrEnum):
+    PERPTAPE = "PERPTAPE"
+    WEBHOOK = "WEBHOOK"
+
+
+class SignalProvider(StrEnum):
+    TRADINGVIEW = "TRADINGVIEW"
+    MODEL = "MODEL"
+
+
+class SignalEventStatus(StrEnum):
+    RECEIVED = "RECEIVED"
+    PROPOSAL_CREATED = "PROPOSAL_CREATED"
+
+
 class ReviewDecision(StrEnum):
     APPROVE = "APPROVE"
     REJECT = "REJECT"

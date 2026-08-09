@@ -2905,6 +2905,9 @@ class TradingQueries:
             "source_link": proposal.source_link,
             "source_observed_at": _iso(proposal.source_observed_at),
             "source_readiness": proposal.source_readiness,
+            "signal_event_id": (
+                None if proposal.signal_event_id is None else str(proposal.signal_event_id)
+            ),
             "status": proposal.status,
             "version": proposal.version,
             "risk_tier": proposal.risk_tier,

@@ -28,6 +28,7 @@ from fastapi import (
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
+from pydantic import ValidationError
 
 from trading_control_plane import __version__
 from trading_control_plane.api_schemas import (
@@ -87,12 +88,15 @@ from trading_control_plane.api_schemas import (
     SenderLeaseRequest,
     ShadowFillRequest,
     ShadowSendRequest,
+    SignalProposalRequest,
+    SignalSourceConfigureRequest,
     SystemProposalRequest,
     TeamCreateRequest,
     TeamMemberInviteRequest,
     TransferAuthorizationRequest,
     TransferProposalRequest,
     TransferReviewRequest,
+    WebhookSignalPayload,
     WorkspaceCreateRequest,
 )
 from trading_control_plane.auth import SessionIdentity, SignedTokenService
@@ -118,6 +122,7 @@ from trading_control_plane.domain import (
     CapitalTransferStatus,
     CapitalTreasuryProvider,
     DirectCapitalPath,
+    Direction,
     DomainRejected,
     ExecutionEnvironment,
     IntentKind,
@@ -126,6 +131,7 @@ from trading_control_plane.domain import (
     ProposalStatus,
     ReviewDecision,
     Role,
+    SignalSourceMode,
     TargetCandidate,
 )
 from trading_control_plane.freqtrade import (
@@ -217,7 +223,13 @@ def _perptape_runtime_status(
 
 
 def _domain_status(code: str) -> int:
-    if code in {"LOGIN_DENIED", "AUTH_TOKEN_INVALID", "SESSION_EXPIRED", "SESSION_REVOKED"}:
+    if code in {
+        "LOGIN_DENIED",
+        "AUTH_TOKEN_INVALID",
+        "SESSION_EXPIRED",
+        "SESSION_REVOKED",
+        "SIGNAL_SIGNATURE_INVALID",
+    }:
         return status.HTTP_401_UNAUTHORIZED
     if code in {
         "RBAC_DENIED",
@@ -255,6 +267,11 @@ def _domain_status(code: str) -> int:
         "TEAM_CONTEXT_REQUIRED",
         "TEAM_NOT_OPERATIONAL",
         "LAST_SYSTEM_ADMIN_REQUIRED",
+        "SIGNAL_REPLAY_DETECTED",
+        "SIGNAL_ALREADY_CONSUMED",
+        "SIGNAL_SOURCE_MODE_MISMATCH",
+        "SIGNAL_SOURCE_DISABLED",
+        "AUTO_PROPOSAL_SOURCE_INVALID",
     }:
         return status.HTTP_409_CONFLICT
     if code in {
@@ -285,6 +302,7 @@ def _domain_status(code: str) -> int:
         "HYPERLIQUID_LIVE_UNAVAILABLE",
         "HYPERLIQUID_LIVE_OUTCOME_UNKNOWN",
         "DEFAULT_ACCOUNT_NOT_CONFIGURED",
+        "SIGNAL_SOURCE_NOT_CONFIGURED",
     }:
         return status.HTTP_503_SERVICE_UNAVAILABLE
     if code in {
@@ -335,6 +353,7 @@ def create_app(
         cache_ttl=timedelta(seconds=resolved_settings.perptape_cache_seconds),
         timeout_seconds=resolved_settings.perptape_timeout_seconds,
     )
+    team_perptape_clients: dict[tuple[UUID, int], PerptapeClient] = {}
 
     def telegram_review_todos(chat_id: str) -> list[ProposalNotification]:
         if not isinstance(resolved_database, Database):
@@ -1392,7 +1411,21 @@ def create_app(
                 )
             )
 
-    def current_perptape_candidates(*, now: datetime) -> list[PerptapeCandidate]:
+    def current_perptape_candidates(
+        *, user_id: UUID, now: datetime
+    ) -> list[PerptapeCandidate]:
+        runtime = service().perptape_source_runtime(user_id)
+        team_api_key = runtime["api_key"]
+        if team_api_key is not None:
+            cache_key = (UUID(str(runtime["signal_source_id"])), int(runtime["version"]))
+            client = team_perptape_clients.get(cache_key)
+            if client is None:
+                client = resolved_perptape.with_api_key(str(team_api_key))
+                for stale_key in tuple(team_perptape_clients):
+                    if stale_key[0] == cache_key[0]:
+                        team_perptape_clients.pop(stale_key, None)
+                team_perptape_clients[cache_key] = client
+            return client.list_candidates(now=now)
         if resolved_settings.runtime_sync_enabled:
             feed = queries().perptape_feed()
             if feed is None:
@@ -1418,8 +1451,10 @@ def create_app(
             return list(feed.candidates)
         return resolved_perptape.list_candidates(now=now)
 
-    def current_perptape_candidate(candidate_id: str, *, now: datetime) -> PerptapeCandidate:
-        candidates = current_perptape_candidates(now=now)
+    def current_perptape_candidate(
+        candidate_id: str, *, user_id: UUID, now: datetime
+    ) -> PerptapeCandidate:
+        candidates = current_perptape_candidates(user_id=user_id, now=now)
         for candidate in candidates:
             if candidate.candidate_id == candidate_id:
                 return candidate
@@ -1438,7 +1473,7 @@ def create_app(
         raise DomainRejected("PERPTAPE_CANDIDATE_NOT_FOUND", "candidate is no longer available")
 
     def opportunity_snapshot(*, user_id: UUID, now: datetime) -> dict[str, Any]:
-        source_candidates = current_perptape_candidates(now=now)
+        source_candidates = current_perptape_candidates(user_id=user_id, now=now)
         candidates = [
             candidate
             for candidate in source_candidates
@@ -1520,6 +1555,163 @@ def create_app(
             "discarded_candidate_count": len(source_candidates) - len(candidates),
             "data": data,
         }
+
+    @app.get("/api/signal-source")
+    def signal_source(
+        identity: SessionIdentity = identity_dependency,
+    ) -> dict[str, Any]:
+        result = service().signal_source_status(identity.user_id)
+        source = result.get("source")
+        if isinstance(source, dict) and isinstance(source.get("webhook"), dict):
+            source["webhook"]["endpoint_url"] = (
+                f"{resolved_settings.public_base_url.rstrip('/')}"
+                f"{source['webhook']['endpoint_path']}"
+            )
+        return {**result, "as_of": _now().isoformat()}
+
+    @app.put("/api/signal-source")
+    def update_signal_source(
+        payload: SignalSourceConfigureRequest,
+        identity: SessionIdentity = identity_dependency,
+    ) -> dict[str, Any]:
+        service().configure_signal_source(
+            actor_id=identity.user_id,
+            mode=SignalSourceMode(payload.mode),
+            secret=payload.secret.get_secret_value(),
+            enabled=payload.enabled,
+            webhook_max_age_seconds=payload.webhook_max_age_seconds,
+            expected_version=payload.expected_version,
+            idempotency_key=payload.idempotency_key,
+            now=_now(),
+        )
+        return signal_source(identity)
+
+    @app.post("/api/webhooks/signals/{signal_source_id}")
+    async def receive_webhook_signal(
+        signal_source_id: UUID,
+        request: Request,
+    ) -> JSONResponse:
+        if request.headers.get("content-type", "").split(";", 1)[0].strip().lower() != (
+            "application/json"
+        ):
+            raise DomainRejected("SIGNAL_CONTENT_TYPE_INVALID", "signal body must be JSON")
+        raw_body = await request.body()
+        if len(raw_body) > 65_536:
+            raise DomainRejected("SIGNAL_PAYLOAD_TOO_LARGE", "signal payload exceeds 64 KiB")
+        try:
+            payload = WebhookSignalPayload.model_validate_json(raw_body)
+        except ValidationError as exc:
+            raise DomainRejected(
+                "SIGNAL_PAYLOAD_INVALID",
+                "signal body does not match the versioned Webhook contract",
+            ) from exc
+        required_headers = {
+            "request_timestamp": request.headers.get("x-tradingops-timestamp"),
+            "nonce": request.headers.get("x-tradingops-nonce"),
+            "signature": request.headers.get("x-tradingops-signature"),
+            "idempotency_key": request.headers.get("idempotency-key"),
+        }
+        if any(value is None for value in required_headers.values()):
+            raise DomainRejected(
+                "SIGNAL_HEADERS_INVALID",
+                "timestamp, nonce, signature and idempotency headers are required",
+            )
+        event_id, replayed = service().ingest_webhook_signal(
+            signal_source_id,
+            raw_body=raw_body,
+            payload=payload.model_dump(mode="json"),
+            request_timestamp=str(required_headers["request_timestamp"]),
+            nonce=str(required_headers["nonce"]),
+            signature=str(required_headers["signature"]),
+            idempotency_key=str(required_headers["idempotency_key"]),
+            now=_now(),
+        )
+        return JSONResponse(
+            status_code=status.HTTP_200_OK if replayed else status.HTTP_202_ACCEPTED,
+            content={
+                "signal_event_id": str(event_id),
+                "status": "ACCEPTED",
+                "replayed": replayed,
+                "proposal_created": False,
+            },
+        )
+
+    @app.get("/api/signals")
+    def signals(
+        limit: int = Query(default=100, ge=1, le=200),
+        identity: SessionIdentity = identity_dependency,
+    ) -> dict[str, Any]:
+        return {
+            "data": service().list_signal_events(identity.user_id, limit=limit),
+            "as_of": _now().isoformat(),
+        }
+
+    @app.post("/api/signals/{signal_event_id}/proposals")
+    def create_signal_proposal(
+        signal_event_id: UUID,
+        payload: SignalProposalRequest,
+        identity: SessionIdentity = identity_dependency,
+    ) -> dict[str, Any]:
+        now = _now()
+        event = service().signal_event(identity.user_id, signal_event_id)
+        frozen_signal = {
+            key: event[key]
+            for key in (
+                "signal_event_id",
+                "workspace_id",
+                "team_id",
+                "signal_source_id",
+                "provider",
+                "external_id",
+                "venue",
+                "symbol",
+                "direction",
+                "strategy_id",
+                "strategy_version",
+                "timeframe",
+                "reference_price",
+                "occurred_at",
+                "received_at",
+                "payload_version",
+            )
+        }
+        proposal_id = service().create_proposal(
+            actor_id=identity.user_id,
+            source=ProposalSource.MANUAL,
+            risk_tier=payload.risk_tier,
+            account_id=payload.account_id,
+            venue=str(event["venue"]),
+            instrument_id=payload.instrument_id,
+            direction=Direction(str(event["direction"])),
+            quantity=payload.quantity,
+            max_risk=payload.max_risk,
+            expires_at=now + timedelta(minutes=payload.expires_in_minutes),
+            idempotency_key=payload.idempotency_key,
+            environment=ExecutionEnvironment(payload.environment),
+            source_observed_at=datetime.fromisoformat(str(event["occurred_at"])),
+            source_readiness="CURRENT",
+            signal_event_id=signal_event_id,
+            details={
+                "signal": frozen_signal,
+                "rationale": payload.rationale,
+            },
+            idempotency_payload={
+                "signal_event_id": str(signal_event_id),
+                "environment": payload.environment,
+                "account_id": payload.account_id,
+                "instrument_id": str(payload.instrument_id),
+                "risk_tier": payload.risk_tier.value,
+                "quantity": str(payload.quantity),
+                "max_risk": str(payload.max_risk),
+                "expires_in_minutes": payload.expires_in_minutes,
+                "rationale": payload.rationale,
+            },
+            submit_for_review=True,
+            now=now,
+        )
+        current = queries().proposal_detail(identity.user_id, proposal_id)
+        notify_reviewers(proposal_id, int(current["version"]), str(current["environment"]))
+        return current
 
     @app.get("/api/opportunities")
     def opportunities(
@@ -1624,7 +1816,11 @@ def create_app(
         identity: SessionIdentity = identity_dependency,
     ) -> dict[str, Any]:
         now = _now()
-        candidate = current_perptape_candidate(candidate_id, now=now)
+        candidate = current_perptape_candidate(
+            candidate_id,
+            user_id=identity.user_id,
+            now=now,
+        )
         if candidate.readiness != "READY" or candidate.data_health != "CURRENT":
             raise DomainRejected(
                 "PERPTAPE_CANDIDATE_NOT_READY", "candidate data is not ready for proposal review"
@@ -1672,9 +1868,14 @@ def create_app(
             identity.user_id, "proposal.create", payload.account_id, candidate.venue
         ):
             raise DomainRejected("RBAC_DENIED", "proposal creation is outside the current scope")
-        principal = queries().service_principal_by_username(
-            resolved_settings.perptape_service_username
+        principal_id = service().signal_service_principal(identity.user_id)
+        principal = (
+            queries().service_principal_by_username(resolved_settings.perptape_service_username)
+            if principal_id is None
+            else None
         )
+        proposal_actor_id = principal.user_id if principal is not None else principal_id
+        assert proposal_actor_id is not None
         instrument_id = queries().instrument_id_by_venue_symbol(candidate.venue, candidate.symbol)
         legacy_candidate_id = perptape_legacy_candidate_id(candidate)
         source_candidate_id = (
@@ -1711,7 +1912,7 @@ def create_app(
                 }
             )
         proposal_id = service().create_proposal(
-            actor_id=principal.user_id,
+            actor_id=proposal_actor_id,
             source=ProposalSource.SYSTEM,
             risk_tier=payload.risk_tier,
             account_id=payload.account_id,
@@ -1753,9 +1954,9 @@ def create_app(
             deduplicate_active_system_scope=True,
             now=now,
         )
-        current = queries().proposal_detail(principal.user_id, proposal_id)
+        current = queries().proposal_detail(proposal_actor_id, proposal_id)
         if current["status"] == ProposalStatus.DRAFT.value:
-            service().submit_proposal(proposal_id, principal.user_id, now=now)
+            service().submit_proposal(proposal_id, proposal_actor_id, now=now)
             current = queries().proposal_detail(identity.user_id, proposal_id)
             notify_reviewers(proposal_id, int(current["version"]), current["environment"])
         return current
@@ -1766,7 +1967,11 @@ def create_app(
         identity: SessionIdentity = identity_dependency,
     ) -> dict[str, Any]:
         now = _now()
-        candidate = current_perptape_candidate(candidate_id, now=now)
+        candidate = current_perptape_candidate(
+            candidate_id,
+            user_id=identity.user_id,
+            now=now,
+        )
         config = service().proposal_default_config(identity.user_id)
         if config is None:
             raise DomainRejected(
@@ -2511,7 +2716,7 @@ def create_app(
         now = _now()
         candidates = [
             item
-            for item in current_perptape_candidates(now=now)
+            for item in current_perptape_candidates(user_id=identity.user_id, now=now)
             if item.venue == detail["venue"]
             and item.symbol == symbol
             and item.direction.value == detail["direction"]
@@ -2533,7 +2738,11 @@ def create_app(
     ) -> dict[str, Any]:
         now = _now()
         detail = queries().campaign_detail(identity.user_id, campaign_id)
-        candidate = current_perptape_candidate(payload.candidate_id, now=now)
+        candidate = current_perptape_candidate(
+            payload.candidate_id,
+            user_id=identity.user_id,
+            now=now,
+        )
         created = service().create_order_intent(
             UUID(str(detail["authorization_id"])),
             identity.user_id,
@@ -6409,6 +6618,7 @@ def create_app(
 
         @app.get("/", include_in_schema=False)
         @app.get("/opportunities", include_in_schema=False)
+        @app.get("/signals", include_in_schema=False)
         @app.get("/opportunities/defaults", include_in_schema=False)
         @app.get("/proposals/new", include_in_schema=False)
         @app.get("/proposals", include_in_schema=False)

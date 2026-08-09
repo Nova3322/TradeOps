@@ -24,6 +24,7 @@ from trading_control_plane.models import (
     RoleAssignment,
     Team,
     TeamMembership,
+    TeamSignalSource,
     User,
     VenueFill,
     VenueOrder,
@@ -320,6 +321,9 @@ def test_scope_migrations_backfill_existing_users_roles_proposals_and_audit(
                 ExchangeAccount.venue == "BINANCE",
             )
         )
+        signal_source = session.scalar(
+            select(TeamSignalSource).where(TeamSignalSource.team_id == team.team_id)
+        )
         assert user is not None and workspace is not None and team is not None
         assert user.active_workspace_id == workspace.workspace_id
         assert user.active_team_id == team.team_id
@@ -335,6 +339,11 @@ def test_scope_migrations_backfill_existing_users_roles_proposals_and_audit(
         assert exchange_account.registration_source == "MIGRATION"
         assert exchange_account.connection_status == "UNCONFIGURED"
         assert exchange_account.trading_status == "DISABLED"
+        assert signal_source is not None
+        assert signal_source.mode == "PERPTAPE"
+        assert signal_source.enabled is True
+        assert signal_source.credential_ciphertext is None
+        assert signal_source.credential_metadata["credential_source"] == "RUNTIME_FALLBACK"
         assert proposal_audit is not None
         assert proposal_audit.workspace_id == workspace.workspace_id
         assert proposal_audit.team_id == team.team_id

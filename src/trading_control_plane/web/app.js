@@ -864,6 +864,7 @@ const currentRoleSummary = () => {
   return roles.map(fmtRole).join('、') || '未分配岗位';
 };
 const capabilityRoles = {
+  'signal.view':['OBSERVER','PROPOSER','REVIEWER','OPERATOR'],
   'opportunity.view':['OBSERVER','PROPOSER'],
   'proposal.view':['OBSERVER','PROPOSER','REVIEWER','OPERATOR'],
   'operations.view':['OBSERVER','OPERATOR'],
@@ -887,6 +888,7 @@ const routeCapability = (path) => {
   if (path === '/capital') return 'capital.view';
   if (path === '/opportunities/defaults') return 'proposal.create';
   if (path === '/opportunities') return 'opportunity.view';
+  if (path === '/signals') return 'signal.view';
   if (path === '/proposals/new') return 'proposal.create';
   if (path === '/reviews') return 'proposal.review';
   if (path === '/proposals' || path.startsWith('/proposals/')) return 'proposal.view';
@@ -896,7 +898,7 @@ const routeCapability = (path) => {
   if (path === '/admin/users') return 'access.manage';
   return 'operations.view';
 };
-const capabilityLabel = (capability) => ({'opportunity.view':'查看机会','proposal.view':'查看提案','operations.view':'交易运维','system.view':'查看系统状态','venue.view':'查看交易账户','capital.view':'资金管理','proposal.create':'发起提案','proposal.review':'独立审核','access.manage':'成员权限管理'}[capability] || capability);
+const capabilityLabel = (capability) => ({'signal.view':'查看信号源','opportunity.view':'查看机会','proposal.view':'查看提案','operations.view':'交易运维','system.view':'查看系统状态','venue.view':'查看交易账户','capital.view':'资金管理','proposal.create':'发起提案','proposal.review':'独立审核','access.manage':'成员权限管理'}[capability] || capability);
 const accessRoleCatalog = [
   {role:'OBSERVER', label:'只读观察', copy:'查看机会、提案、交易任务、系统状态和交易账户；不能执行动作。'},
   {role:'PROPOSER', label:'发起提案', copy:'查看机会并创建提案；不能审核自己的提案，也不能操作交易任务。'},
@@ -1214,7 +1216,7 @@ async function route() {
     return;
   }
   const path = location.pathname;
-  const teamSetupPaths = new Set(['/admin/users', '/venues']);
+  const teamSetupPaths = new Set(['/admin/users', '/venues', '/signals']);
   if (!session.active_workspace || !session.active_team || (!session.active_team.trading_enabled && !teamSetupPaths.has(path))) {
     renderScopeSetup();
     enhanceRenderedPage();
@@ -1229,6 +1231,7 @@ async function route() {
   main.innerHTML = '<section class="loading-state"><span class="spinner"></span><p>正在读取当前事实…</p></section>';
   try {
     if (path === '/') await renderHome();
+    else if (path === '/signals') await renderSignalSources();
     else if (path === '/opportunities') await renderOpportunities();
     else if (path === '/opportunities/defaults') await renderOpportunityDefaults();
     else if (path === '/proposals/new') await renderManualProposal();
@@ -1462,6 +1465,52 @@ async function renderHome() {
       <aside class="stack"><article class="card home-quick-start"><p class="eyebrow">${canPropose ? '新的交易判断' : '市场观察'}</p><h2>${canPropose ? '开始新的判断' : '继续观察市场机会'}</h2><p class="subtle">${canPropose ? '先看机会或写交易判断；这两条路径都只会创建提案，并进入独立审核。' : '当前身份只查看候选，不保存交易参数，也不会从这里新增风险。'}</p><div class="stacked-actions"><a class="primary" href="/opportunities" data-link>查看 Perptape 机会</a>${canPropose ? '<a class="secondary" href="/proposals/new" data-link>创建人工提案</a>' : ''}</div></article>
         <article class="card home-boundary"><p class="eyebrow">系统边界</p><h2>当前控制状态</h2><dl class="definition-grid">${definition('站点环境', fmtEnvironment(authStatus?.environment, true))}${definition('风险政策', riskPolicySummary)}${definition('真实下单', liveOrderSendLabel)}${definition('自动加仓', riskControl ? riskControlStatusLabel(riskControl.auto_add_gate.status) : '由管理员控制')}${definition('安全原则', '数据缺失即阻断')}</dl><p class="safety-note">页面只展示当前事实；任何真实发送仍需通过交易任务、短期授权、交易所配置和服务端安全开关的逐项检查。</p></article></aside></div></section>`;
   document.querySelector('[data-refresh]')?.addEventListener('click', route);
+}
+
+async function renderSignalSources() {
+  const [status, signalResponse, instrumentResponse] = await Promise.all([
+    api('/api/signal-source'),
+    api('/api/signals'),
+    hasCapability('proposal.create') ? api('/api/instruments') : Promise.resolve({data:[]}),
+  ]);
+  const source = status.source;
+  const events = signalResponse.data || [];
+  const instruments = instrumentResponse.data || [];
+  const canManage = Boolean(status.can_manage);
+  const credentialState = source?.credential?.state || 'UNCONFIGURED';
+  const credentialLabel = credentialState === 'CONFIGURED'
+    ? `已加密 · ${source.credential.key_hint || '脱敏元数据已保存'}`
+    : credentialState === 'RUNTIME_FALLBACK'
+      ? '仅使用部署级兼容 Key；尚未绑定团队 Key'
+      : '未配置';
+  const modeLabel = source?.mode === 'WEBHOOK' ? 'Webhook' : source?.mode === 'PERPTAPE' ? 'Perptape' : '未选择';
+  const configForm = canManage ? `<form id="signal-source-form" class="form-panel compact-form"><div class="card-heading"><div><p class="eyebrow">当前团队</p><h2>${source ? '切换或轮换信号源' : '配置唯一信号源'}</h2></div><span class="status-pill">${escapeHtml(modeLabel)}</span></div><div class="field-grid"><label>启用模式<select name="mode"><option value="PERPTAPE" ${source?.mode !== 'WEBHOOK' ? 'selected' : ''}>Perptape</option><option value="WEBHOOK" ${source?.mode === 'WEBHOOK' ? 'selected' : ''}>Webhook</option></select></label><label>Perptape Key / Webhook 签名密钥<input name="secret" type="password" minlength="8" maxlength="512" autocomplete="new-password" required></label><label>Webhook 最大时效（秒）<input name="webhook_max_age_seconds" type="number" min="30" max="900" value="${source?.webhook?.max_age_seconds || 300}" required></label><label class="checkbox-row"><input name="enabled" type="checkbox" ${source?.enabled !== false ? 'checked' : ''}><span>启用当前模式</span></label></div><p class="safety-note">切换为 Webhook 会停止 Perptape 自动提案政策。密钥只进入 AES-256-GCM 加密信封；页面、API、日志和审计均不回显明文。</p><div class="form-error" role="alert"></div><div class="form-actions"><button class="primary">加密保存新版本</button></div></form>` : '';
+  const sourceFacts = source ? `<article class="card"><div class="card-heading"><div><p class="eyebrow">信号源事实</p><h2>${escapeHtml(modeLabel)} · ${source.enabled ? '已启用' : '已停用'}</h2></div><span class="status-pill ${source.enabled ? 'status-APPROVED' : 'status-DISABLED'}">v${source.version}</span></div><dl class="definition-grid">${definition('凭据状态', credentialLabel)}${definition('服务身份', source.service_principal?.username || (source.mode === 'WEBHOOK' ? '不需要；由人员手动创建提案' : '兼容运行身份'))}${definition('更新人', source.updated_by_username || shortId(source.updated_by))}${definition('更新时间', fmtDate(source.updated_at))}</dl>${source.mode === 'PERPTAPE' ? '<div class="form-actions"><a class="primary" href="/opportunities" data-link>查看 Perptape 实时机会</a></div>' : ''}</article>` : '<article class="card"><p class="eyebrow">Fail closed</p><h2>当前团队尚未选择信号源</h2><p class="subtle">服务端不会读取其他团队或全局默认信号。由系统管理员选择 Perptape 或 Webhook 后再继续。</p></article>';
+  const webhookContract = source?.mode === 'WEBHOOK' ? `<article class="card"><p class="eyebrow">签名接入</p><h2>TradingView / 自研模型统一 Webhook</h2><dl class="definition-grid">${definition('接收地址', source.webhook.endpoint_url)}${definition('时效', `${source.webhook.max_age_seconds} 秒`)}${definition('提案语义', '仅记录信号；必须由获权人员手动创建冻结提案')}</dl><p class="safety-note">必须携带 <code>X-TradingOPS-Timestamp</code>、<code>X-TradingOPS-Nonce</code>、<code>Idempotency-Key</code> 和 <code>X-TradingOPS-Signature: v1=HMAC_SHA256(secret, timestamp.nonce.raw_body)</code>。过期、未来、重放、重复外部 ID、格式错误与签名错误均由服务端拒绝。</p></article>` : '';
+  const eventCards = events.map(event => {
+    const proposal = event.proposal;
+    const matching = instruments.filter(item => item.venue === event.venue && item.symbol === event.symbol);
+    const options = matching.map(item => `<option value="${escapeHtml(item.instrument_id)}">${escapeHtml(item.venue)} · ${escapeHtml(item.symbol)}</option>`).join('');
+    const action = proposal
+      ? `<a class="secondary" href="/proposals/${proposal.proposal_id}" data-link>查看提案 · ${escapeHtml(fmtStatus(proposal.status))}</a>`
+      : hasCapability('proposal.create') && options
+        ? `<details class="operation-toolbox"><summary><span><b>手动创建冻结提案</b><small>信号不会自动审核、风控或下单</small></span><strong>展开</strong></summary><form class="toolbox-content signal-proposal-form" data-signal-event-id="${event.signal_event_id}"><div class="field-grid"><label>账户<input name="account_id" required></label><label>合约<select name="instrument_id">${options}</select></label><label>环境<select name="environment"><option value="SHADOW">影子</option><option value="TESTNET">测试网</option><option value="LIVE">实盘</option></select></label><label>风险档位<select name="risk_tier"><option value="LOW">低</option><option value="MEDIUM">中</option><option value="HIGH">高</option></select></label><label>数量<input name="quantity" type="number" step="any" min="0.000000000000000001" required></label><label>最大风险<input name="max_risk" type="number" step="any" min="0.000000000000000001" required></label><label>有效时间（分钟）<input name="expires_in_minutes" type="number" min="480" max="1440" value="480" required></label></div><label>人工判断理由<textarea name="rationale" minlength="10" rows="3" required></textarea></label><div class="form-error" role="alert"></div><div class="form-actions"><button class="primary">创建并提交独立审核</button></div></form></details>`
+        : '<p class="safety-note">当前缺少提案权限或精确 Instrument Catalog 匹配；由负责人补齐后再创建提案。</p>';
+    return `<article class="card"><div class="card-heading"><div><p class="eyebrow">${escapeHtml(event.provider)} · ${escapeHtml(event.strategy_id)} ${escapeHtml(event.strategy_version)}</p><h2>${escapeHtml(event.symbol)} · ${escapeHtml(fmtDirection(event.direction))}</h2></div><span class="status-pill ${proposal ? 'status-APPROVED' : ''}">${proposal ? '已形成提案' : '仅信号'}</span></div><dl class="definition-grid">${definition('交易所', event.venue)}${definition('参考价', event.reference_price || '未提供')}${definition('信号时间', fmtDate(event.occurred_at))}${definition('接收时间', fmtDate(event.received_at))}${definition('外部 ID', event.external_id)}${definition('载荷版本', event.payload_version)}</dl>${action}</article>`;
+  }).join('');
+  main.innerHTML = `<section class="page"><header class="page-head"><div><p class="eyebrow">团队隔离</p><h1>信号源</h1><p class="lede">每个团队只启用 Perptape 或 Webhook 之一。信号最多形成冻结提案，不拥有审核、风控、交易或资金权限。</p></div><button class="secondary" data-refresh>刷新事实</button></header><div class="detail-layout">${sourceFacts}${webhookContract}</div>${configForm}<div class="section-head"><div><p class="eyebrow">当前团队</p><h2>最近 Webhook 信号</h2></div><span class="status-pill">${events.length} 条</span></div><div class="stack">${eventCards || '<article class="empty-state"><div><h2>尚无 Webhook 信号</h2><p>当前不会伪造样本信号。配置 Webhook 后，只显示签名、时效、重放和格式校验全部通过的事件。</p></div></article>'}</div></section>`;
+  document.querySelector('[data-refresh]')?.addEventListener('click', route);
+  document.querySelector('#signal-source-form')?.addEventListener('submit', async event => {
+    event.preventDefault(); const form = event.currentTarget; const data = Object.fromEntries(new FormData(form));
+    const body = {mode:data.mode, secret:data.secret, enabled:form.elements.enabled.checked, webhook_max_age_seconds:Number(data.webhook_max_age_seconds), expected_version:Number(source?.version || 0), idempotency_key:crypto.randomUUID()};
+    try { await withPending(event.submitter, '加密保存中…', () => api('/api/signal-source', {method:'PUT', body:JSON.stringify(body)})); form.reset(); showToast('当前团队信号源已切换并写入审计'); await route(); }
+    catch (error) { showApiError(error, form.querySelector('.form-error')); }
+  });
+  document.querySelectorAll('.signal-proposal-form').forEach(form => form.addEventListener('submit', async event => {
+    event.preventDefault(); const data = Object.fromEntries(new FormData(form)); data.expires_in_minutes = Number(data.expires_in_minutes); data.idempotency_key = crypto.randomUUID();
+    try { await withPending(event.submitter, '冻结中…', () => api(`/api/signals/${form.dataset.signalEventId}/proposals`, {method:'POST', body:JSON.stringify(data)})); showToast('冻结提案已进入独立审核；未创建订单'); await route(); }
+    catch (error) { showApiError(error, form.querySelector('.form-error')); }
+  }));
 }
 
 const OPPORTUNITY_TIMEFRAME_ORDER = ['1h', '4h', '1d', '1w'];

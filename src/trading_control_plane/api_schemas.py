@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime
 from decimal import Decimal
 from typing import Literal
 from uuid import UUID
@@ -132,6 +133,49 @@ class ExchangeAccountCreateRequest(BaseModel):
 class ExchangeCredentialRotateRequest(BaseModel):
     credentials: ExchangeCredentialRequest
     expected_version: int = Field(ge=1)
+    idempotency_key: str = Field(min_length=1, max_length=160)
+
+
+class SignalSourceConfigureRequest(BaseModel):
+    mode: Literal["PERPTAPE", "WEBHOOK"]
+    secret: SecretStr = Field(min_length=8, max_length=512)
+    enabled: bool = True
+    webhook_max_age_seconds: int = Field(default=300, ge=30, le=900)
+    expected_version: int = Field(ge=0)
+    idempotency_key: str = Field(min_length=1, max_length=160)
+
+
+class WebhookSignalPayload(BaseModel):
+    payload_version: Literal[1] = 1
+    provider: Literal["TRADINGVIEW", "MODEL"]
+    external_id: str = Field(min_length=1, max_length=160, pattern=r"^[A-Za-z0-9._:-]+$")
+    strategy_id: str = Field(min_length=1, max_length=120)
+    strategy_version: str = Field(min_length=1, max_length=120)
+    venue: Literal["BINANCE", "HYPERLIQUID", "OKX", "BYBIT"]
+    symbol: str = Field(min_length=1, max_length=120)
+    direction: Direction
+    signal_at: datetime
+    timeframe: str | None = Field(default=None, min_length=1, max_length=32)
+    reference_price: Decimal | None = Field(default=None, gt=0)
+    metadata: dict[str, str | int | float | bool | None] = Field(default_factory=dict)
+
+    @field_validator("signal_at")
+    @classmethod
+    def timezone_aware_signal(cls, value: datetime) -> datetime:
+        if value.utcoffset() is None:
+            raise ValueError("signal_at must include a timezone")
+        return value
+
+
+class SignalProposalRequest(BaseModel):
+    environment: Literal["SHADOW", "TESTNET", "LIVE"] = "SHADOW"
+    account_id: str = Field(min_length=1, max_length=120)
+    instrument_id: UUID
+    risk_tier: RiskTier
+    quantity: Decimal = Field(gt=0)
+    max_risk: Decimal = Field(gt=0)
+    expires_in_minutes: int = Field(default=480, ge=480, le=1_440)
+    rationale: str = Field(min_length=10, max_length=2_000)
     idempotency_key: str = Field(min_length=1, max_length=160)
 
 

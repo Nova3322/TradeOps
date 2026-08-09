@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import base64
 import binascii
+import hashlib
+import hmac
 import json
 import re
 import secrets
@@ -48,6 +50,18 @@ def credential_aad(
     ).encode()
 
 
+def scoped_secret_aad(
+    *,
+    team_id: UUID,
+    object_id: UUID,
+    purpose: str,
+    credential_version: int,
+) -> bytes:
+    return (
+        f"tradingops:{purpose}:{team_id}:{object_id}:{credential_version}"
+    ).encode()
+
+
 @dataclass(frozen=True, slots=True)
 class EncryptedCredentials:
     ciphertext: str
@@ -55,9 +69,9 @@ class EncryptedCredentials:
 
 
 class CredentialCipher:
-    """Versioned AES-256-GCM envelope for exchange credentials.
+    """Versioned AES-256-GCM envelope for scoped operational secrets.
 
-    The authenticated context binds a payload to one team, account, venue and
+    The authenticated context binds a payload to one team, object, purpose and
     rotation version. Decryption is deliberately separate from API projections.
     """
 
@@ -72,48 +86,45 @@ class CredentialCipher:
             )
         return AESGCM(self._key)
 
-    def encrypt(
+    def secret_fingerprint(self, secret: str, *, purpose: str) -> str:
+        if self._key is None:
+            raise DomainRejected(
+                "CREDENTIAL_ENCRYPTION_KEY_MISSING",
+                "credential writes require TRADING_CREDENTIAL_ENCRYPTION_KEY",
+            )
+        fingerprint_key = hmac.new(
+            self._key,
+            b"tradingops:secret-fingerprint:v1",
+            hashlib.sha256,
+        ).digest()
+        return hmac.new(
+            fingerprint_key,
+            purpose.encode() + b"\x00" + secret.encode(),
+            hashlib.sha256,
+        ).hexdigest()
+
+    def _encrypt_payload(
         self,
-        credentials: dict[str, str],
+        payload: dict[str, str],
         *,
-        team_id: UUID,
-        exchange_account_id: UUID,
-        venue: str,
-        credential_version: int,
+        aad: bytes,
+        metadata: dict[str, Any],
     ) -> EncryptedCredentials:
-        normalized = validate_exchange_credentials(venue, credentials)
         nonce = secrets.token_bytes(NONCE_BYTES)
         plaintext = json.dumps(
-            normalized,
+            payload,
             sort_keys=True,
             separators=(",", ":"),
             ensure_ascii=True,
         ).encode()
-        ciphertext = self._aes().encrypt(
-            nonce,
-            plaintext,
-            credential_aad(
-                team_id=team_id,
-                exchange_account_id=exchange_account_id,
-                venue=venue,
-                credential_version=credential_version,
-            ),
-        )
+        ciphertext = self._aes().encrypt(nonce, plaintext, aad)
         return EncryptedCredentials(
             ciphertext=f"{ENVELOPE_VERSION}:"
             f"{base64.urlsafe_b64encode(nonce + ciphertext).decode().rstrip('=')}",
-            metadata=credential_metadata(venue, normalized),
+            metadata=metadata,
         )
 
-    def decrypt(
-        self,
-        envelope: str,
-        *,
-        team_id: UUID,
-        exchange_account_id: UUID,
-        venue: str,
-        credential_version: int,
-    ) -> dict[str, str]:
+    def _decrypt_payload(self, envelope: str, *, aad: bytes) -> dict[str, str]:
         version, separator, payload = envelope.partition(":")
         if separator != ":" or version != ENVELOPE_VERSION:
             raise DomainRejected(
@@ -129,16 +140,7 @@ class CredentialCipher:
         if len(raw) <= NONCE_BYTES:
             raise DomainRejected("CREDENTIAL_ENVELOPE_INVALID", "credential envelope is malformed")
         try:
-            plaintext = self._aes().decrypt(
-                raw[:NONCE_BYTES],
-                raw[NONCE_BYTES:],
-                credential_aad(
-                    team_id=team_id,
-                    exchange_account_id=exchange_account_id,
-                    venue=venue,
-                    credential_version=credential_version,
-                ),
-            )
+            plaintext = self._aes().decrypt(raw[:NONCE_BYTES], raw[NONCE_BYTES:], aad)
         except InvalidTag as exc:
             raise DomainRejected(
                 "CREDENTIAL_AUTHENTICATION_FAILED",
@@ -156,7 +158,104 @@ class CredentialCipher:
             raise DomainRejected(
                 "CREDENTIAL_ENVELOPE_INVALID", "credential envelope payload is invalid"
             )
+        return decoded
+
+    def encrypt(
+        self,
+        credentials: dict[str, str],
+        *,
+        team_id: UUID,
+        exchange_account_id: UUID,
+        venue: str,
+        credential_version: int,
+    ) -> EncryptedCredentials:
+        normalized = validate_exchange_credentials(venue, credentials)
+        return self._encrypt_payload(
+            normalized,
+            aad=credential_aad(
+                team_id=team_id,
+                exchange_account_id=exchange_account_id,
+                venue=venue,
+                credential_version=credential_version,
+            ),
+            metadata=credential_metadata(venue, normalized),
+        )
+
+    def decrypt(
+        self,
+        envelope: str,
+        *,
+        team_id: UUID,
+        exchange_account_id: UUID,
+        venue: str,
+        credential_version: int,
+    ) -> dict[str, str]:
+        decoded = self._decrypt_payload(
+            envelope,
+            aad=credential_aad(
+                team_id=team_id,
+                exchange_account_id=exchange_account_id,
+                venue=venue,
+                credential_version=credential_version,
+            ),
+        )
         return validate_exchange_credentials(venue, decoded)
+
+    def encrypt_secret(
+        self,
+        secret: str,
+        *,
+        team_id: UUID,
+        object_id: UUID,
+        purpose: str,
+        credential_version: int,
+    ) -> EncryptedCredentials:
+        normalized = secret.strip()
+        if not normalized or normalized != secret:
+            raise DomainRejected(
+                "SCOPED_SECRET_INVALID",
+                "operational secret must be non-empty without surrounding whitespace",
+            )
+        return self._encrypt_payload(
+            {"secret": normalized},
+            aad=scoped_secret_aad(
+                team_id=team_id,
+                object_id=object_id,
+                purpose=purpose,
+                credential_version=credential_version,
+            ),
+            metadata={
+                "envelope_version": ENVELOPE_VERSION,
+                "purpose": purpose,
+                "key_hint": f"••••{normalized[-4:]}",
+            },
+        )
+
+    def decrypt_secret(
+        self,
+        envelope: str,
+        *,
+        team_id: UUID,
+        object_id: UUID,
+        purpose: str,
+        credential_version: int,
+    ) -> str:
+        decoded = self._decrypt_payload(
+            envelope,
+            aad=scoped_secret_aad(
+                team_id=team_id,
+                object_id=object_id,
+                purpose=purpose,
+                credential_version=credential_version,
+            ),
+        )
+        if not isinstance(decoded, dict) or set(decoded) != {"secret"} or not isinstance(
+            decoded["secret"], str
+        ):
+            raise DomainRejected(
+                "CREDENTIAL_ENVELOPE_INVALID", "credential envelope payload is invalid"
+            )
+        return decoded["secret"]
 
 
 def validate_exchange_credentials(venue: str, credentials: dict[str, str]) -> dict[str, str]:

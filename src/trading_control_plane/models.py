@@ -282,6 +282,122 @@ class PerptapeFeed(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
 
+class TeamSignalSource(Base):
+    __tablename__ = "team_signal_sources"
+    __table_args__ = (
+        CheckConstraint("mode IN ('PERPTAPE','WEBHOOK')", name="ck_team_signal_sources_mode"),
+        CheckConstraint("version >= 1", name="ck_team_signal_sources_version"),
+        CheckConstraint(
+            "credential_version >= 0", name="ck_team_signal_sources_credential_version"
+        ),
+        CheckConstraint(
+            "(credential_ciphertext IS NULL AND credential_version = 0) OR "
+            "(credential_ciphertext IS NOT NULL AND credential_version >= 1)",
+            name="ck_team_signal_sources_credential_envelope",
+        ),
+        CheckConstraint(
+            "webhook_max_age_seconds BETWEEN 30 AND 900",
+            name="ck_team_signal_sources_max_age",
+        ),
+        UniqueConstraint("team_id", name="uq_team_signal_sources_team"),
+        UniqueConstraint(
+            "team_id",
+            "signal_source_id",
+            name="uq_team_signal_sources_team_identity",
+        ),
+        Index("ix_team_signal_sources_enabled_mode", "enabled", "mode"),
+    )
+
+    signal_source_id: Mapped[UUID] = mapped_column(
+        Uuid(as_uuid=True), primary_key=True, default=uuid4
+    )
+    team_id: Mapped[UUID] = mapped_column(
+        ForeignKey("teams.team_id", ondelete="CASCADE"), nullable=False
+    )
+    mode: Mapped[str] = mapped_column(String(16), nullable=False)
+    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    credential_ciphertext: Mapped[str | None] = mapped_column(Text, nullable=True)
+    credential_metadata: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    credential_version: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    webhook_max_age_seconds: Mapped[int] = mapped_column(Integer, nullable=False, default=300)
+    service_principal_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("users.user_id", ondelete="RESTRICT"), nullable=True
+    )
+    version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    created_by: Mapped[UUID] = mapped_column(ForeignKey("users.user_id"), nullable=False)
+    updated_by: Mapped[UUID] = mapped_column(ForeignKey("users.user_id"), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class SignalEvent(Base):
+    __tablename__ = "signal_events"
+    __table_args__ = (
+        CheckConstraint(
+            "provider IN ('TRADINGVIEW','MODEL')", name="ck_signal_events_provider"
+        ),
+        CheckConstraint("direction IN ('LONG','SHORT')", name="ck_signal_events_direction"),
+        CheckConstraint(
+            "venue IN ('BINANCE','HYPERLIQUID','OKX','BYBIT')",
+            name="ck_signal_events_venue",
+        ),
+        CheckConstraint(
+            "status IN ('RECEIVED','PROPOSAL_CREATED')", name="ck_signal_events_status"
+        ),
+        CheckConstraint("payload_version >= 1", name="ck_signal_events_payload_version"),
+        CheckConstraint(
+            "reference_price IS NULL OR reference_price > 0",
+            name="ck_signal_events_reference_price",
+        ),
+        ForeignKeyConstraint(
+            ["team_id", "signal_source_id"],
+            ["team_signal_sources.team_id", "team_signal_sources.signal_source_id"],
+            name="fk_signal_events_team_source",
+            ondelete="RESTRICT",
+        ),
+        UniqueConstraint("team_id", "signal_event_id", name="uq_signal_events_team_identity"),
+        UniqueConstraint(
+            "team_id", "idempotency_key", name="uq_signal_events_team_idempotency"
+        ),
+        UniqueConstraint(
+            "signal_source_id", "nonce", name="uq_signal_events_source_nonce"
+        ),
+        UniqueConstraint(
+            "team_id",
+            "provider",
+            "external_id",
+            name="uq_signal_events_team_provider_external",
+        ),
+        Index("ix_signal_events_team_received", "team_id", "received_at"),
+    )
+
+    signal_event_id: Mapped[UUID] = mapped_column(
+        Uuid(as_uuid=True), primary_key=True, default=uuid4
+    )
+    team_id: Mapped[UUID] = mapped_column(
+        ForeignKey("teams.team_id", ondelete="RESTRICT"), nullable=False
+    )
+    signal_source_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), nullable=False)
+    provider: Mapped[str] = mapped_column(String(32), nullable=False)
+    external_id: Mapped[str] = mapped_column(String(160), nullable=False)
+    idempotency_key: Mapped[str] = mapped_column(String(160), nullable=False)
+    nonce: Mapped[str] = mapped_column(String(160), nullable=False)
+    payload_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    venue: Mapped[str] = mapped_column(String(64), nullable=False)
+    symbol: Mapped[str] = mapped_column(String(120), nullable=False)
+    direction: Mapped[str] = mapped_column(String(16), nullable=False)
+    strategy_id: Mapped[str] = mapped_column(String(120), nullable=False)
+    strategy_version: Mapped[str] = mapped_column(String(120), nullable=False)
+    timeframe: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    reference_price: Mapped[Decimal | None] = mapped_column(AMOUNT, nullable=True)
+    occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    received_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False)
+    normalized_payload: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    semantic_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    signature_version: Mapped[str] = mapped_column(String(16), nullable=False)
+
+
 class Proposal(Base):
     __tablename__ = "proposals"
     __table_args__ = (
@@ -314,12 +430,25 @@ class Proposal(Base):
             name="fk_proposals_team_exchange_account",
             ondelete="RESTRICT",
         ),
+        ForeignKeyConstraint(
+            ["team_id", "signal_event_id"],
+            ["signal_events.team_id", "signal_events.signal_event_id"],
+            name="fk_proposals_team_signal_event",
+            ondelete="RESTRICT",
+        ),
         Index(
             "uq_proposals_system_candidate",
             "team_id",
             "source_candidate_id",
             unique=True,
             postgresql_where=text("source = 'SYSTEM' AND source_candidate_id IS NOT NULL"),
+        ),
+        Index(
+            "uq_proposals_signal_event",
+            "team_id",
+            "signal_event_id",
+            unique=True,
+            postgresql_where=text("signal_event_id IS NOT NULL"),
         ),
     )
 
@@ -338,6 +467,7 @@ class Proposal(Base):
         DateTime(timezone=True), nullable=True
     )
     source_readiness: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    signal_event_id: Mapped[UUID | None] = mapped_column(Uuid(as_uuid=True), nullable=True)
     status: Mapped[str] = mapped_column(String(32), nullable=False)
     version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
     risk_tier: Mapped[str] = mapped_column(String(16), nullable=False)

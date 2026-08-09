@@ -31,7 +31,7 @@
 1. `Workspace` / `WorkspaceMembership`：组织与跨团队管理授权是独立边界；Workspace 管理员不自动获得任一团队的交易角色。
 2. `Team` / `TeamMembership`：同一成员可加入多个团队，而成员启停与团队角色有独立生命周期；现有 `User` 不能准确承载这些关系。
 3. `ExchangeAccount`：同交易所多账户、凭据轮换、连接状态和交易能力是独立生命周期，不能继续由单个进程环境变量充当真源。
-4. `SignalSourceConfig` / `WebhookSignal`：团队模式选择、签名密钥版本、重放窗口和已验证信号需要独立生命周期；提案仍复用 `Proposal`。
+4. `TeamSignalSource` / `SignalEvent`：团队模式选择、签名密钥版本、重放窗口和已验证信号需要独立生命周期；提案仍复用 `Proposal`。
 5. `NotificationRoute` / `NotificationDelivery`：路由、去重、重试与送达审计独立于用户权限；渠道不成为授权主体。
 
 以下能力不新增平行实体：团队岗位和账户范围继续扩展 `RoleAssignment`；Agent 复用 `User(principal_type=SERVICE)`；风险限制扩展 `RiskPolicy`；执行和报表继续引用现有账户、任务、成交与权益事实。
@@ -78,7 +78,10 @@
 - `20260810_0020`：复用 `RiskPolicy`、`RiskDecision`、`RiskReservation` 和既有提案—审核—执行链，不新增平行风控实体。政策版本、修订号、唯一活动政策、恢复申请和风险预留均按 Team 隔离；RiskDecision、Campaign、Authorization 与 Reservation 使用 Team 复合外键，跨团队错绑由数据库拒绝。政策新增单账户最大风险、最大单笔亏损、最大连续亏损和亏损冷却期；Risk Engine 在决策和下单意图最终检查两处使用同一不可变快照。连续亏损分别按团队和 `账户 + 场所 + 环境` 的最近已关闭 Campaign 计算，非亏损结束连续序列，冷却期内服务端返回 `LOSS_COOLDOWN_ACTIVE`。单笔超限返回 `SINGLE_LOSS_LIMIT_EXCEEDED`，团队或账户容量不足只按已有安全缩量语义处理。
 - `0020` 配置与迁移语义：遗留政策保留原总风险和事实时效，但四个新增阈值保持 `NULL`，并以 `RISK_LIMITS_UNCONFIGURED` 阻断新增风险；新团队没有政策时 `/api/risk-controls` 返回结构化 `RISK_POLICY_MISSING` 而不是读取其他团队。最高管理员可通过幂等、预期修订号保护的 Team API 明确创建或收紧政策；直接放宽返回 `REVIEWED_POLICY_CHANGE_REQUIRED`，政策变化使本团队旧 TradingAuthorization 失效。外部 Binance 页面在 2026-08-10 仍不可访问，规则 4 继续排除，其余规则不补写任何未知阈值。
 - `0020` 五维验收：隔离测试库位于 `20260810_0020 (head)`，`alembic check` 无漂移，`test_schema` 已覆盖遗留政策回填与迁移往返；变更源码 Ruff、mypy、Node 语法和 `git diff --check` 通过，单元/API 定向 41 个、完整集成 221 个通过。禁用运行同步、真实下单、测试网下单、资金和签名的本地 API 通过 `/health/ready`，真实密码登录后 `/api/risk-controls` 与 `/risk` 一致显示团队政策 `100 / 80 / 20 / 3 / 3600`，桌面端无浏览器错误。当前全站移动布局在 390px 仍会把内容压成不可读的窄列，因此阶段 9 响应式 UI 验收未完成，不以“无横向溢出”代替视觉可用性。本机 32771 数据库的归属与隔离边界尚未确认，未执行备份或升级；旧 8014 API 已停止，不使用旧 Schema 对外服务。
+- `20260810_0021`：每个 Team 只有一个 `TeamSignalSource`，启用模式为 Perptape 或 Webhook。Perptape Key 与 Webhook Secret 使用绑定 Team、SignalSource、用途和轮换版本的 AES-256-GCM 信封；API/页面只投影配置状态和尾号。Perptape 继续复用既有实时机会、SYSTEM 提案和独立审核链，并优先使用团队专属 service principal；旧团队只保留明确标记的 `RUNTIME_FALLBACK` 兼容状态，新团队没有信号源时失败关闭。
+- `0021` Webhook 契约：TradingView 与自研模型统一写入版本化 `SignalEvent`；原始请求使用 `timestamp.nonce.raw_body` 的 HMAC-SHA256 v1 签名，并同时校验 64 KiB 上限、JSON 格式、30–900 秒团队时效、30 秒未来偏差、nonce、Team 幂等键及 `provider + external_id`。接收成功只冻结信号并返回 `proposal_created=false`。只有精确获权 HUMAN 能把未消费事件转换为一个 MANUAL、`PENDING_REVIEW` 提案；SignalEvent 消费、Proposal 创建、冻结提交、幂等回执和审计位于同一数据库事务。服务端重新校验 Team、账户/场所权限、Instrument、symbol、direction 与当前 Webhook 模式，数据库唯一约束阻止第二个提案。后续审核、风控、授权和订单链没有旁路。
+- `0021` 五维验收：空隔离库完成全量升级至 `20260810_0021 (head)` 且 `alembic check` 无漂移，`test_schema` 覆盖旧 Team 的显式兼容回填及 `0021 → 0020 → 0021` 往返。Node 语法、变更源码 Ruff/mypy 和 `git diff --check` 通过；单元/API 共 372 个、完整集成 223 个通过。关闭 runtime sync、Perptape WebSocket、Freqtrade worker、真实/测试网下单、资金发送和签名的本地 API 在 8015 通过 `/health/live` 与 `/health/ready`；真实 Webhook 分别得到首次 `202`、相同语义幂等重放 `200`、错误签名 `401`。真实密码登录后的 `/signals` 页面显示 Team Webhook v2、密文状态、统一签名合同和一条已验证信号；页面手动创建后数据库为 `MANUAL / SHADOW / PENDING_REVIEW`，浏览器错误/警告为 0，页面密钥输入为空，审计明文匹配为 0，五个危险 Gate 全部 `DISABLED`。本机 32771 数据库继续未触碰；当前多 Team 持久 Perptape WebSocket worker 仍读取部署级连接，团队 Key 已用于页面按需实时读取但尚未绑定独立连续 worker，因此不把“团队 Key 已保存”表述为多团队持续连接已完成。阶段 9 的 1440/1024/430/390、深浅主题与可访问性全站验收继续后置。
 - Proposal / Campaign 查询、实际结果和审计时间线按当前团队过滤；跨团队详情与变更返回 `TEAM_SCOPE_DENIED`。审核、授权、Intent 等强生命周期子对象继续经 Proposal / Campaign 根派生团队；可独立到达且可能没有 Campaign 的场所事实直接持久化 Team，避免相同账户字符串跨团队混算。
 - `AuditEvent.account_id` 对交易链事件由服务端对象真源推导；组织级事件保留为空，不伪造账户。
 - 创建者自审旁路已从服务端和页面移除；团队切换后即使账户字符串相同，也不能读取、提交、审核或执行另一团队的提案。
-- 当前阻断：资金提案/授权/转移、sender/task 与运行源配置仍未完成团队根迁移，数据库密文也尚未接入独立运行连接；信号源、OKX、Bybit Adapter 未实现。新增风险阈值必须由产品负责人明确配置，迁移不会代填。新团队继续不可增险，“已登记/已加密/事实已隔离/政策已保存”都不是“连接正常”或“交易就绪”。
+- 当前阻断：资金提案/授权/转移、sender/task 与运行源配置仍未完成团队根迁移；数据库账户密文尚未接入独立交易所运行连接，多 Team Perptape 连续 worker 也尚未按 Team 绑定；OKX、Bybit Adapter 未实现。新增风险阈值必须由产品负责人明确配置，迁移不会代填。新团队继续不可增险，“已登记/已加密/事实已隔离/政策已保存”都不是“连接正常”或“交易就绪”。

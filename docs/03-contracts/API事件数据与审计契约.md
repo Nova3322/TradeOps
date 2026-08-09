@@ -159,7 +159,18 @@ MANUAL 草稿、预检与冻结命令至少携带：方向、触发价、委托�
 
 所有命令关联 Authorization 和 Risk Reservation；场所结果以私有事实确认。
 
-### 7.5 Capital
+### 7.5 团队信号源与 Webhook
+
+- 每个 Team 只有一个权威 `TeamSignalSource`，启用模式只能是 `PERPTAPE` 或 `WEBHOOK`；模式切换不复制 Proposal、Approval、Risk 或 OMS。
+- Perptape Key 与 Webhook Secret 使用绑定 Team、SignalSource、用途和轮换版本的 AES-256-GCM 信封保存。API、页面、审计与普通日志只暴露配置状态和尾号提示，不返回明文。
+- Webhook 接收 TradingView 与自研模型统一的 `payload_version=1` 载荷。请求必须为不超过 64 KiB 的 `application/json`，并提供 `X-TradingOPS-Timestamp`、`X-TradingOPS-Nonce`、`Idempotency-Key` 与 `X-TradingOPS-Signature`。
+- 签名版本 `v1` 使用 HMAC-SHA256：`v1=hex(HMAC(secret, timestamp + "." + nonce + "." + raw_body))`。服务端以常量时间比较签名，并按 Team 配置的 30–900 秒窗口同时校验请求时间与 `signal_at`；未来时间最多容忍 30 秒时钟偏差。
+- `nonce` 在 SignalSource 内唯一，`Idempotency-Key` 在 Team 内唯一，`provider + external_id` 在 Team 内唯一。同一幂等键且语义一致返回原 `SignalEvent`；语义冲突、nonce 重放或外部身份重放均拒绝。
+- 通过验证的载荷冻结为 Team 范围的 `SignalEvent`，保留 provider、策略版本、venue、symbol、direction、事件时间、归一化载荷和语义 hash。Webhook 接收只返回 `proposal_created=false`，不自动创建提案、不审核、不触发风控或下单。
+- 只有具备精确 Team/账户/场所 `proposal.create` 权限的 HUMAN 可把未消费 Webhook 信号转换为一个 MANUAL 提案；服务端重新校验 Instrument、venue、symbol、direction、账户范围与当前启用模式，并在同一数据库事务中立即提交为冻结的 `PENDING_REVIEW`。数据库约束保证一个 SignalEvent 最多关联一个 Proposal，后续仍经过独立审核、Risk、Authorization 与 OMS。
+- Perptape 候选继续复用实时机会页与既有 SYSTEM 提案路径；当前 Team 必须启用 Perptape，调用者必须具备读取或提案权限。缺少 Team 配置、密钥、数据新鲜度或 Instrument Catalog 精确匹配时失败关闭。
+
+### 7.6 Capital
 
 - 创建、审核、取消资金提案。
 - CTO 执行和对账 Capital Transfer。

@@ -3,11 +3,12 @@ from __future__ import annotations
 import base64
 import binascii
 import hashlib
+import hmac
 import json
 import re
 from collections.abc import Sequence
 from contextlib import AbstractContextManager, nullcontext
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Any, NoReturn
 from uuid import UUID, uuid4
@@ -63,6 +64,8 @@ from trading_control_plane.domain import (
     RiskResult,
     RiskTier,
     Role,
+    SignalEventStatus,
+    SignalSourceMode,
     SystemRiskState,
     TargetCandidate,
     TargetDecision,
@@ -121,8 +124,10 @@ from trading_control_plane.models import (
     RoleAssignment,
     RuntimeSourceHealth,
     SenderLease,
+    SignalEvent,
     Team,
     TeamMembership,
+    TeamSignalSource,
     TradingAuthorization,
     TransferAuthorization,
     TransferProposal,
@@ -153,6 +158,8 @@ from trading_control_plane.perptape import (
 CAPITAL_HISTORY_MIN_INTERVAL = timedelta(minutes=1)
 PASSWORD_HASHER = PasswordHasher()
 SCOPE_SLUG_PATTERN = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,78}[a-z0-9])?$")
+SIGNAL_NONCE_PATTERN = re.compile(r"^[A-Za-z0-9._:-]{16,160}$")
+SIGNAL_CLOCK_SKEW = timedelta(seconds=30)
 TEAM_SETUP_ACTIONS = frozenset(
     {
         "team.view",
@@ -164,6 +171,9 @@ TEAM_SETUP_ACTIONS = frozenset(
         "account.credentials.manage",
         "system.view",
         "risk_policy.manage",
+        "signal.view",
+        "signal.manage",
+        "opportunity.view",
     }
 )
 
@@ -208,10 +218,18 @@ ROLE_ACTIONS: dict[Role, frozenset[str]] = {
             "system.view",
             "venue.view",
             "results.view",
+            "signal.view",
         }
     ),
     Role.PROPOSER: frozenset(
-        {"view", "opportunity.view", "proposal.view", "proposal.create", "proposal.submit"}
+        {
+            "view",
+            "opportunity.view",
+            "proposal.view",
+            "proposal.create",
+            "proposal.submit",
+            "signal.view",
+        }
     ),
     Role.REVIEWER: frozenset(
         {
@@ -221,6 +239,7 @@ ROLE_ACTIONS: dict[Role, frozenset[str]] = {
             "system.view",
             "risk.restore.review",
             "risk.restore.execute",
+            "signal.view",
         }
     ),
     Role.OPERATOR: frozenset(
@@ -239,6 +258,7 @@ ROLE_ACTIONS: dict[Role, frozenset[str]] = {
             "sender.manage",
             "risk.tighten",
             "risk.restore.request",
+            "signal.view",
         }
     ),
     Role.TREASURY_ADMIN: frozenset(
@@ -793,6 +813,26 @@ class TradingService:
                     created_at=now,
                 )
             )
+            session.add(
+                TeamSignalSource(
+                    team_id=team.team_id,
+                    mode=SignalSourceMode.PERPTAPE.value,
+                    enabled=True,
+                    credential_ciphertext=None,
+                    credential_metadata={
+                        "credential_source": "RUNTIME_FALLBACK",
+                        "key_hint": None,
+                    },
+                    credential_version=0,
+                    webhook_max_age_seconds=300,
+                    service_principal_id=None,
+                    version=1,
+                    created_by=user.user_id,
+                    updated_by=user.user_id,
+                    created_at=now,
+                    updated_at=now,
+                )
+            )
             self._audit(
                 session,
                 actor_id="bootstrap",
@@ -990,6 +1030,590 @@ class TradingService:
                 now=now,
             )
             return team.team_id
+
+    @staticmethod
+    def _signal_source_payload(
+        source: TeamSignalSource,
+        *,
+        workspace_id: UUID,
+        updater: User | None,
+        service_principal: User | None,
+    ) -> dict[str, Any]:
+        if source.credential_ciphertext is not None:
+            credential_state = "CONFIGURED"
+        elif source.credential_metadata.get("credential_source") == "RUNTIME_FALLBACK":
+            credential_state = "RUNTIME_FALLBACK"
+        else:
+            credential_state = "UNCONFIGURED"
+        return {
+            "signal_source_id": str(source.signal_source_id),
+            "workspace_id": str(workspace_id),
+            "team_id": str(source.team_id),
+            "mode": source.mode,
+            "enabled": source.enabled,
+            "credential": {
+                "state": credential_state,
+                "version": source.credential_version,
+                "key_hint": source.credential_metadata.get("key_hint"),
+            },
+            "webhook": (
+                {
+                    "endpoint_path": f"/api/webhooks/signals/{source.signal_source_id}",
+                    "signature_version": "v1",
+                    "max_age_seconds": source.webhook_max_age_seconds,
+                    "automatic_proposal_supported": False,
+                }
+                if source.mode == SignalSourceMode.WEBHOOK.value
+                else None
+            ),
+            "service_principal": (
+                None
+                if service_principal is None
+                else {
+                    "user_id": str(service_principal.user_id),
+                    "username": service_principal.username,
+                }
+            ),
+            "version": source.version,
+            "updated_by": str(source.updated_by),
+            "updated_by_username": None if updater is None else updater.username,
+            "updated_at": source.updated_at.isoformat(),
+        }
+
+    def signal_source_status(self, actor_id: UUID) -> dict[str, Any]:
+        with self.database.session_factory() as session:
+            team = self._require_action_assignment(session, actor_id, "signal.view")
+            source = session.scalar(
+                select(TeamSignalSource).where(TeamSignalSource.team_id == team.team_id)
+            )
+            assignments = session.scalars(
+                select(RoleAssignment).where(
+                    RoleAssignment.user_id == actor_id,
+                    RoleAssignment.team_id == team.team_id,
+                )
+            ).all()
+            return {
+                "configured": source is not None,
+                "can_manage": any(
+                    item.account_scope is None
+                    and item.venue_scope is None
+                    and (
+                        "signal.manage" in ROLE_ACTIONS[Role(item.role)]
+                        or "*" in ROLE_ACTIONS[Role(item.role)]
+                    )
+                    for item in assignments
+                ),
+                "source": (
+                    None
+                    if source is None
+                    else self._signal_source_payload(
+                        source,
+                        workspace_id=team.workspace_id,
+                        updater=session.get(User, source.updated_by),
+                        service_principal=(
+                            None
+                            if source.service_principal_id is None
+                            else session.get(User, source.service_principal_id)
+                        ),
+                    )
+                ),
+            }
+
+    @staticmethod
+    def _ensure_signal_service_principal(
+        session: Session,
+        *,
+        team: Team,
+        actor_id: UUID,
+        now: datetime,
+    ) -> User:
+        username = f"signal-{team.team_id.hex}"
+        principal = session.scalar(select(User).where(User.username == username))
+        if principal is None:
+            principal = User(
+                username=username,
+                principal_type=PrincipalType.SERVICE.value,
+                active_workspace_id=team.workspace_id,
+                active_team_id=team.team_id,
+                active=True,
+                created_at=now,
+            )
+            session.add(principal)
+            session.flush()
+            session.add_all(
+                [
+                    WorkspaceMembership(
+                        workspace_id=team.workspace_id,
+                        user_id=principal.user_id,
+                        role=WorkspaceRole.MEMBER.value,
+                        active=True,
+                        invited_by=actor_id,
+                        created_at=now,
+                        updated_at=now,
+                    ),
+                    TeamMembership(
+                        team_id=team.team_id,
+                        user_id=principal.user_id,
+                        active=True,
+                        invited_by=actor_id,
+                        created_at=now,
+                        updated_at=now,
+                    ),
+                    RoleAssignment(
+                        user_id=principal.user_id,
+                        team_id=team.team_id,
+                        role=Role.PROPOSER.value,
+                        account_scope=None,
+                        venue_scope=None,
+                        created_at=now,
+                    ),
+                ]
+            )
+        if (
+            principal.principal_type != PrincipalType.SERVICE.value
+            or not principal.active
+            or principal.active_workspace_id != team.workspace_id
+            or principal.active_team_id != team.team_id
+        ):
+            _reject(
+                "SIGNAL_SERVICE_PRINCIPAL_INVALID",
+                "the dedicated signal principal is outside the active team",
+            )
+        return principal
+
+    def configure_signal_source(
+        self,
+        *,
+        actor_id: UUID,
+        mode: SignalSourceMode,
+        secret: str,
+        enabled: bool,
+        webhook_max_age_seconds: int,
+        expected_version: int,
+        idempotency_key: str,
+        now: datetime,
+    ) -> UUID:
+        normalized_secret = secret.strip()
+        secret_bytes = normalized_secret.encode()
+        if (
+            normalized_secret != secret
+            or len(secret_bytes) < (32 if mode is SignalSourceMode.WEBHOOK else 8)
+            or len(secret_bytes) > 512
+            or not 30 <= webhook_max_age_seconds <= 900
+        ):
+            _reject(
+                "SIGNAL_SOURCE_CONFIG_INVALID",
+                "signal credential or freshness boundary is invalid",
+            )
+        with self.database.session_factory.begin() as session:
+            team = self._require_role(session, actor_id, "signal.manage")
+            caller = f"{actor_id}:{team.team_id}"
+            payload = {
+                "mode": mode.value,
+                "secret_semantics": self.credential_cipher.secret_fingerprint(
+                    normalized_secret,
+                    purpose=f"signal-source:{team.team_id}:{mode.value.lower()}",
+                ),
+                "enabled": enabled,
+                "webhook_max_age_seconds": webhook_max_age_seconds,
+                "expected_version": expected_version,
+            }
+            digest, replay = self._idempotency(
+                session,
+                caller_id=caller,
+                operation="signal-source.configure",
+                idempotency_key=idempotency_key,
+                payload=payload,
+            )
+            if replay is not None:
+                return UUID(str(replay["signal_source_id"]))
+            source = session.scalar(
+                select(TeamSignalSource)
+                .where(TeamSignalSource.team_id == team.team_id)
+                .with_for_update()
+            )
+            current_version = 0 if source is None else source.version
+            if current_version != expected_version:
+                _reject("VERSION_CONFLICT", "signal source changed before configuration")
+            signal_source_id = uuid4() if source is None else source.signal_source_id
+            credential_version = 1 if source is None else source.credential_version + 1
+            encrypted = self.credential_cipher.encrypt_secret(
+                normalized_secret,
+                team_id=team.team_id,
+                object_id=signal_source_id,
+                purpose=f"signal-source:{mode.value.lower()}",
+                credential_version=credential_version,
+            )
+            principal = (
+                self._ensure_signal_service_principal(
+                    session,
+                    team=team,
+                    actor_id=actor_id,
+                    now=now,
+                )
+                if mode is SignalSourceMode.PERPTAPE
+                else None
+            )
+            if source is None:
+                source = TeamSignalSource(
+                    signal_source_id=signal_source_id,
+                    team_id=team.team_id,
+                    mode=mode.value,
+                    enabled=enabled,
+                    credential_ciphertext=encrypted.ciphertext,
+                    credential_metadata=encrypted.metadata,
+                    credential_version=credential_version,
+                    webhook_max_age_seconds=webhook_max_age_seconds,
+                    service_principal_id=(None if principal is None else principal.user_id),
+                    version=1,
+                    created_by=actor_id,
+                    updated_by=actor_id,
+                    created_at=now,
+                    updated_at=now,
+                )
+                session.add(source)
+            else:
+                source.mode = mode.value
+                source.enabled = enabled
+                source.credential_ciphertext = encrypted.ciphertext
+                source.credential_metadata = encrypted.metadata
+                source.credential_version = credential_version
+                source.webhook_max_age_seconds = webhook_max_age_seconds
+                source.service_principal_id = None if principal is None else principal.user_id
+                source.version += 1
+                source.updated_by = actor_id
+                source.updated_at = now
+            if mode is SignalSourceMode.WEBHOOK:
+                defaults = session.scalar(
+                    select(ProposalDefaultConfig)
+                    .where(
+                        ProposalDefaultConfig.team_id == team.team_id,
+                        ProposalDefaultConfig.active,
+                    )
+                    .with_for_update()
+                )
+                if defaults is not None and defaults.auto_proposal_enabled:
+                    defaults.active = False
+                    session.add(
+                        ProposalDefaultConfig(
+                            team_id=team.team_id,
+                            version=defaults.version + 1,
+                            environment=defaults.environment,
+                            account_id=defaults.account_id,
+                            risk_tier=defaults.risk_tier,
+                            notional=defaults.notional,
+                            max_risk=defaults.max_risk,
+                            invalidation_bps=defaults.invalidation_bps,
+                            expires_in_minutes=defaults.expires_in_minutes,
+                            rationale=defaults.rationale,
+                            auto_proposal_enabled=False,
+                            auto_proposal_min_timeframes=defaults.auto_proposal_min_timeframes,
+                            active=True,
+                            updated_by=actor_id,
+                            effective_at=now,
+                        )
+                    )
+            session.flush()
+            result = {"signal_source_id": str(source.signal_source_id)}
+            self._save_receipt(
+                session,
+                caller_id=caller,
+                operation="signal-source.configure",
+                idempotency_key=idempotency_key,
+                semantic_hash=digest,
+                response=result,
+                now=now,
+            )
+            self._audit(
+                session,
+                actor_id=str(actor_id),
+                event_type="SIGNAL_SOURCE_CONFIGURED",
+                object_type="TeamSignalSource",
+                object_id=source.signal_source_id,
+                reason=(
+                    f"mode={mode.value};enabled={str(enabled).lower()};"
+                    f"credential_version={credential_version}"
+                ),
+                correlation_id=uuid4(),
+                object_version=source.version,
+                idempotency_key=idempotency_key,
+                workspace_id=team.workspace_id,
+                team_id=team.team_id,
+                now=now,
+            )
+            return source.signal_source_id
+
+    def perptape_source_runtime(self, actor_id: UUID) -> dict[str, Any]:
+        with self.database.session_factory() as session:
+            team = self._require_action_assignment(session, actor_id, "signal.view")
+            source = session.scalar(
+                select(TeamSignalSource).where(TeamSignalSource.team_id == team.team_id)
+            )
+            if source is None:
+                _reject("SIGNAL_SOURCE_NOT_CONFIGURED", "the active team has no signal source")
+            if not source.enabled:
+                _reject("SIGNAL_SOURCE_DISABLED", "the active team signal source is disabled")
+            if source.mode != SignalSourceMode.PERPTAPE.value:
+                _reject(
+                    "SIGNAL_SOURCE_MODE_MISMATCH",
+                    "the active team uses Webhook signals instead of Perptape",
+                )
+            api_key = (
+                None
+                if source.credential_ciphertext is None
+                else self.credential_cipher.decrypt_secret(
+                    source.credential_ciphertext,
+                    team_id=team.team_id,
+                    object_id=source.signal_source_id,
+                    purpose="signal-source:perptape",
+                    credential_version=source.credential_version,
+                )
+            )
+            return {
+                "signal_source_id": source.signal_source_id,
+                "team_id": team.team_id,
+                "version": source.version,
+                "api_key": api_key,
+                "runtime_fallback": source.credential_ciphertext is None,
+                "service_principal_id": source.service_principal_id,
+            }
+
+    def signal_service_principal(self, actor_id: UUID) -> UUID | None:
+        runtime = self.perptape_source_runtime(actor_id)
+        value = runtime["service_principal_id"]
+        return None if value is None else UUID(str(value))
+
+    def ingest_webhook_signal(
+        self,
+        signal_source_id: UUID,
+        *,
+        raw_body: bytes,
+        payload: dict[str, Any],
+        request_timestamp: str,
+        nonce: str,
+        signature: str,
+        idempotency_key: str,
+        now: datetime,
+    ) -> tuple[UUID, bool]:
+        if len(raw_body) > 65_536:
+            _reject("SIGNAL_PAYLOAD_TOO_LARGE", "signal payload exceeds 64 KiB")
+        if not SIGNAL_NONCE_PATTERN.fullmatch(nonce) or not 1 <= len(idempotency_key) <= 160:
+            _reject("SIGNAL_HEADERS_INVALID", "signal nonce or idempotency key is invalid")
+        try:
+            request_time = datetime.fromtimestamp(int(request_timestamp), UTC)
+        except (OSError, OverflowError, TypeError, ValueError):
+            _reject("SIGNAL_TIMESTAMP_INVALID", "signal request timestamp is invalid")
+        with self.database.session_factory.begin() as session:
+            source = session.scalar(
+                select(TeamSignalSource)
+                .where(TeamSignalSource.signal_source_id == signal_source_id)
+                .with_for_update()
+            )
+            if source is None:
+                _reject("SIGNAL_SOURCE_NOT_FOUND", "signal endpoint does not exist")
+            if not source.enabled or source.mode != SignalSourceMode.WEBHOOK.value:
+                _reject("SIGNAL_SOURCE_DISABLED", "Webhook signal ingestion is disabled")
+            if source.credential_ciphertext is None:
+                _reject("SIGNAL_SOURCE_NOT_CONFIGURED", "Webhook signature secret is missing")
+            max_age = timedelta(seconds=source.webhook_max_age_seconds)
+            if request_time < now.astimezone(UTC) - max_age:
+                _reject("SIGNAL_REQUEST_STALE", "signal request timestamp is stale")
+            if request_time > now.astimezone(UTC) + SIGNAL_CLOCK_SKEW:
+                _reject("SIGNAL_TIMESTAMP_FUTURE", "signal request timestamp is in the future")
+            secret = self.credential_cipher.decrypt_secret(
+                source.credential_ciphertext,
+                team_id=source.team_id,
+                object_id=source.signal_source_id,
+                purpose="signal-source:webhook",
+                credential_version=source.credential_version,
+            )
+            signed = request_timestamp.encode() + b"." + nonce.encode() + b"." + raw_body
+            expected = "v1=" + hmac.new(secret.encode(), signed, hashlib.sha256).hexdigest()
+            if not hmac.compare_digest(signature, expected):
+                _reject("SIGNAL_SIGNATURE_INVALID", "signal signature verification failed")
+            try:
+                occurred_at = datetime.fromisoformat(str(payload["signal_at"]))
+                if occurred_at.utcoffset() is None:
+                    raise ValueError("timezone required")
+                occurred_at = occurred_at.astimezone(UTC)
+            except (KeyError, TypeError, ValueError):
+                _reject("SIGNAL_PAYLOAD_INVALID", "signal_at is invalid")
+            if occurred_at < now.astimezone(UTC) - max_age:
+                _reject("SIGNAL_STALE", "signal event is older than the team freshness window")
+            if occurred_at > now.astimezone(UTC) + SIGNAL_CLOCK_SKEW:
+                _reject("SIGNAL_TIMESTAMP_FUTURE", "signal event timestamp is in the future")
+            normalized = {
+                **payload,
+                "signal_at": occurred_at.isoformat(),
+                "reference_price": (
+                    None
+                    if payload.get("reference_price") is None
+                    else str(payload["reference_price"])
+                ),
+            }
+            semantic_hash = _semantic_hash(normalized)
+            existing = session.scalar(
+                select(SignalEvent).where(
+                    SignalEvent.team_id == source.team_id,
+                    SignalEvent.idempotency_key == idempotency_key,
+                )
+            )
+            if existing is not None:
+                if existing.semantic_hash != semantic_hash:
+                    raise IdempotencyConflict
+                return existing.signal_event_id, True
+            if session.scalar(
+                select(SignalEvent.signal_event_id).where(
+                    SignalEvent.signal_source_id == source.signal_source_id,
+                    SignalEvent.nonce == nonce,
+                )
+            ):
+                _reject("SIGNAL_REPLAY_DETECTED", "signal nonce was already accepted")
+            if session.scalar(
+                select(SignalEvent.signal_event_id).where(
+                    SignalEvent.team_id == source.team_id,
+                    SignalEvent.provider == str(payload["provider"]),
+                    SignalEvent.external_id == str(payload["external_id"]),
+                )
+            ):
+                _reject("SIGNAL_REPLAY_DETECTED", "signal external identity was already accepted")
+            event = SignalEvent(
+                team_id=source.team_id,
+                signal_source_id=source.signal_source_id,
+                provider=str(payload["provider"]),
+                external_id=str(payload["external_id"]),
+                idempotency_key=idempotency_key,
+                nonce=nonce,
+                payload_version=int(payload["payload_version"]),
+                venue=str(payload["venue"]),
+                symbol=str(payload["symbol"]),
+                direction=str(payload["direction"]),
+                strategy_id=str(payload["strategy_id"]),
+                strategy_version=str(payload["strategy_version"]),
+                timeframe=(None if payload.get("timeframe") is None else str(payload["timeframe"])),
+                reference_price=(
+                    None
+                    if payload.get("reference_price") is None
+                    else Decimal(str(payload["reference_price"]))
+                ),
+                occurred_at=occurred_at,
+                received_at=now,
+                status=SignalEventStatus.RECEIVED.value,
+                normalized_payload=normalized,
+                semantic_hash=semantic_hash,
+                signature_version="v1",
+            )
+            session.add(event)
+            session.flush()
+            team = session.get(Team, source.team_id)
+            assert team is not None
+            self._audit(
+                session,
+                actor_id=f"webhook:{source.signal_source_id}",
+                event_type="SIGNAL_RECEIVED",
+                object_type="SignalEvent",
+                object_id=event.signal_event_id,
+                reason=f"provider={event.provider};strategy={event.strategy_id}",
+                correlation_id=event.signal_event_id,
+                object_version=1,
+                idempotency_key=idempotency_key,
+                workspace_id=team.workspace_id,
+                team_id=team.team_id,
+                now=now,
+            )
+            return event.signal_event_id, False
+
+    @staticmethod
+    def _signal_event_payload(
+        event: SignalEvent,
+        *,
+        workspace_id: UUID,
+        proposal: Proposal | None,
+    ) -> dict[str, Any]:
+        return {
+            "signal_event_id": str(event.signal_event_id),
+            "workspace_id": str(workspace_id),
+            "team_id": str(event.team_id),
+            "signal_source_id": str(event.signal_source_id),
+            "provider": event.provider,
+            "external_id": event.external_id,
+            "venue": event.venue,
+            "symbol": event.symbol,
+            "direction": event.direction,
+            "strategy_id": event.strategy_id,
+            "strategy_version": event.strategy_version,
+            "timeframe": event.timeframe,
+            "reference_price": (
+                None if event.reference_price is None else str(event.reference_price)
+            ),
+            "occurred_at": event.occurred_at.isoformat(),
+            "received_at": event.received_at.isoformat(),
+            "status": event.status,
+            "payload_version": event.payload_version,
+            "proposal": (
+                None
+                if proposal is None
+                else {
+                    "proposal_id": str(proposal.proposal_id),
+                    "status": proposal.status,
+                    "version": proposal.version,
+                }
+            ),
+        }
+
+    def signal_event(self, actor_id: UUID, signal_event_id: UUID) -> dict[str, Any]:
+        with self.database.session_factory() as session:
+            team = self._require_action_assignment(session, actor_id, "signal.view")
+            event = session.scalar(
+                select(SignalEvent).where(
+                    SignalEvent.signal_event_id == signal_event_id,
+                    SignalEvent.team_id == team.team_id,
+                )
+            )
+            if event is None:
+                _reject(
+                    "SIGNAL_EVENT_NOT_FOUND",
+                    "signal event is outside the active team or does not exist",
+                )
+            proposal = session.scalar(
+                select(Proposal).where(
+                    Proposal.team_id == team.team_id,
+                    Proposal.signal_event_id == event.signal_event_id,
+                )
+            )
+            return self._signal_event_payload(
+                event,
+                workspace_id=team.workspace_id,
+                proposal=proposal,
+            )
+
+    def list_signal_events(self, actor_id: UUID, *, limit: int = 100) -> list[dict[str, Any]]:
+        with self.database.session_factory() as session:
+            team = self._require_action_assignment(session, actor_id, "signal.view")
+            events = session.scalars(
+                select(SignalEvent)
+                .where(SignalEvent.team_id == team.team_id)
+                .order_by(SignalEvent.received_at.desc(), SignalEvent.signal_event_id.desc())
+                .limit(min(max(limit, 1), 200))
+            ).all()
+            proposal_by_signal = {
+                proposal.signal_event_id: proposal
+                for proposal in session.scalars(
+                    select(Proposal).where(
+                        Proposal.team_id == team.team_id,
+                        Proposal.signal_event_id.in_([item.signal_event_id for item in events]),
+                    )
+                ).all()
+                if proposal.signal_event_id is not None
+            }
+            return [
+                self._signal_event_payload(
+                    event,
+                    workspace_id=team.workspace_id,
+                    proposal=proposal_by_signal.get(event.signal_event_id),
+                )
+                for event in events
+            ]
 
     @staticmethod
     def _exchange_account_definition(
@@ -2666,6 +3290,15 @@ class TradingService:
                     "automatic proposal policy is restricted to an active service principal",
                 )
             team = self._require_action_assignment(session, actor_id, "proposal.create")
+            source = session.scalar(
+                select(TeamSignalSource).where(TeamSignalSource.team_id == team.team_id)
+            )
+            if (
+                source is None
+                or not source.enabled
+                or source.mode != SignalSourceMode.PERPTAPE.value
+            ):
+                return None
             config = session.scalar(
                 select(ProposalDefaultConfig).where(
                     ProposalDefaultConfig.team_id == team.team_id,
@@ -2732,6 +3365,18 @@ class TradingService:
                 _reject(
                     "PROPOSAL_DEFAULT_ADMIN_REQUIRED",
                     "only a team SYSTEM_ADMIN can change team proposal defaults",
+                )
+            source = session.scalar(
+                select(TeamSignalSource).where(TeamSignalSource.team_id == team.team_id)
+            )
+            if auto_proposal_enabled and (
+                source is None
+                or not source.enabled
+                or source.mode != SignalSourceMode.PERPTAPE.value
+            ):
+                _reject(
+                    "AUTO_PROPOSAL_SOURCE_INVALID",
+                    "automatic proposals require the active team Perptape source",
                 )
             digest, response = self._idempotency(
                 session,
@@ -2817,10 +3462,12 @@ class TradingService:
         source_link: str | None = None,
         source_observed_at: datetime | None = None,
         source_readiness: str | None = None,
+        signal_event_id: UUID | None = None,
         details: dict[str, Any] | None = None,
         idempotency_payload: dict[str, Any] | None = None,
         deduplicate_active_manual_semantics: bool = False,
         deduplicate_active_system_scope: bool = False,
+        submit_for_review: bool = False,
         now: datetime,
     ) -> UUID:
         payload = {
@@ -2842,13 +3489,24 @@ class TradingService:
                 None if source_observed_at is None else source_observed_at.isoformat()
             ),
             "source_readiness": source_readiness,
+            "signal_event_id": None if signal_event_id is None else str(signal_event_id),
             "details": details or {},
             "deduplicate_active_manual_semantics": deduplicate_active_manual_semantics,
             "deduplicate_active_system_scope": deduplicate_active_system_scope,
+            "submit_for_review": submit_for_review,
         }
         operation = "proposal.create"
         with self.database.session_factory.begin() as session:
             team = self._require_role(session, actor_id, operation, account_id, venue)
+            if submit_for_review:
+                self._require_role(
+                    session,
+                    actor_id,
+                    "proposal.submit",
+                    account_id,
+                    venue,
+                    team_id=team.team_id,
+                )
             scoped_payload = {
                 **(payload if idempotency_payload is None else idempotency_payload),
                 "workspace_id": str(team.workspace_id),
@@ -2866,6 +3524,7 @@ class TradingService:
             principal = session.get(User, actor_id)
             if principal is None:
                 _reject("USER_NOT_AUTHORIZED", "proposal principal does not exist")
+            signal_event: SignalEvent | None = None
             if source is ProposalSource.MANUAL:
                 if principal.principal_type != PrincipalType.HUMAN.value:
                     _reject("PROPOSAL_SOURCE_INVALID", "MANUAL proposals require a human")
@@ -2876,12 +3535,48 @@ class TradingService:
                         "PROPOSAL_SOURCE_INVALID",
                         "MANUAL proposals cannot bind a source candidate",
                     )
+                if signal_event_id is not None:
+                    signal_event = session.scalar(
+                        select(SignalEvent)
+                        .where(
+                            SignalEvent.signal_event_id == signal_event_id,
+                            SignalEvent.team_id == team.team_id,
+                        )
+                        .with_for_update()
+                    )
+                    if signal_event is None:
+                        _reject(
+                            "SIGNAL_EVENT_NOT_FOUND",
+                            "signal event is outside the active team or does not exist",
+                        )
+                    if signal_event.status != SignalEventStatus.RECEIVED.value:
+                        _reject(
+                            "SIGNAL_ALREADY_CONSUMED",
+                            "signal event already created a proposal",
+                        )
+                    signal_source = session.scalar(
+                        select(TeamSignalSource).where(
+                            TeamSignalSource.signal_source_id
+                            == signal_event.signal_source_id,
+                            TeamSignalSource.team_id == team.team_id,
+                        )
+                    )
+                    if (
+                        signal_source is None
+                        or not signal_source.enabled
+                        or signal_source.mode != SignalSourceMode.WEBHOOK.value
+                    ):
+                        _reject(
+                            "SIGNAL_SOURCE_DISABLED",
+                            "the Webhook signal source is no longer enabled",
+                        )
             elif (
                 principal.principal_type != PrincipalType.SERVICE.value
                 or not strategy_id
                 or not strategy_version
                 or not source_candidate_id
                 or source_observed_at is None
+                or signal_event_id is not None
             ):
                 _reject(
                     "PROPOSAL_SOURCE_INVALID",
@@ -2890,6 +3585,15 @@ class TradingService:
             instrument = session.get(Instrument, instrument_id)
             if instrument is None or not instrument.active or instrument.venue != venue:
                 _reject("INSTRUMENT_UNAVAILABLE", "instrument is inactive or outside venue scope")
+            if signal_event is not None and (
+                signal_event.venue != venue
+                or signal_event.symbol != instrument.symbol
+                or signal_event.direction != direction.value
+            ):
+                _reject(
+                    "SIGNAL_PROPOSAL_MISMATCH",
+                    "proposal instrument, venue and direction must match the frozen signal",
+                )
             self._ensure_exchange_account_reference(
                 session,
                 team=team,
@@ -3065,6 +3769,7 @@ class TradingService:
                 source_link=source_link,
                 source_observed_at=source_observed_at,
                 source_readiness=source_readiness,
+                signal_event_id=signal_event_id,
                 status=ProposalStatus.DRAFT.value,
                 version=1,
                 risk_tier=risk_tier.value,
@@ -3092,6 +3797,23 @@ class TradingService:
             )
             session.add(proposal)
             session.flush()
+            if signal_event is not None:
+                signal_event.status = SignalEventStatus.PROPOSAL_CREATED.value
+                self._audit(
+                    session,
+                    actor_id=str(actor_id),
+                    event_type="SIGNAL_PROPOSAL_CREATED",
+                    object_type="SignalEvent",
+                    object_id=signal_event.signal_event_id,
+                    reason=f"proposal={proposal.proposal_id}",
+                    correlation_id=proposal.correlation_id,
+                    object_version=1,
+                    idempotency_key=idempotency_key,
+                    workspace_id=team.workspace_id,
+                    team_id=team.team_id,
+                    account_id=account_id,
+                    now=now,
+                )
             result = {"proposal_id": str(proposal.proposal_id)}
             self._save_receipt(
                 session,
@@ -3110,10 +3832,29 @@ class TradingService:
                 object_id=proposal.proposal_id,
                 reason=source.value,
                 correlation_id=correlation_id,
-                object_version=proposal.version,
+                object_version=1,
                 idempotency_key=idempotency_key,
                 now=now,
             )
+            if submit_for_review:
+                proposal.status = ProposalStatus.PENDING_REVIEW.value
+                proposal.frozen_at = now
+                proposal.version = 2
+                self._audit(
+                    session,
+                    actor_id=str(actor_id),
+                    event_type="PROPOSAL_SUBMITTED",
+                    object_type="Proposal",
+                    object_id=proposal.proposal_id,
+                    reason="frozen for review in the creating transaction",
+                    correlation_id=proposal.correlation_id,
+                    object_version=proposal.version,
+                    idempotency_key=idempotency_key,
+                    workspace_id=team.workspace_id,
+                    team_id=team.team_id,
+                    account_id=account_id,
+                    now=now,
+                )
             return proposal.proposal_id
 
     def expire_duplicate_active_manual_proposals(

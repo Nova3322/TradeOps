@@ -1,7 +1,7 @@
 # Trading 交易系统
 
 > 状态日期：2026-08-10
-> 当前状态：Workspace / 团队权限边界、团队交易账户与账户事实隔离、加密凭据、两场所只读连接、Perptape 精确合约身份与多周期待审核提案、LIVE/模拟资金隔离、分权风险恢复、受控资金路径和最小 Telegram 审核已实现；所有危险能力仍默认关闭
+> 当前状态：Workspace / 团队权限边界、团队交易账户与账户事实隔离、团队 Perptape / 签名 Webhook 单一信号源、加密凭据、两场所只读连接、版本化风控、LIVE/模拟资金隔离、分权风险恢复、受控资金路径和最小 Telegram 审核已实现；所有危险能力仍默认关闭
 
 本项目面向一个资本所有者、一个内部组织和多个内部用户。用户可以提交和审核提案、查看仓位、处理异常；系统在风险可控的前提下辅助执行交易并判断是否赚钱。不开放外部注册，不管理第三方资金，不建设机构级多租户、通用合规或通用认证平台。
 
@@ -11,7 +11,9 @@
 
 `ExchangeAccount` 是当前团队内 `account_id + venue` 的持久化真源，允许同一交易所登记多个账户。Binance、Hyperliquid、OKX、Bybit 的凭据通过版本化 AES-256-GCM 信封保存，密文的认证上下文绑定 Team、账户、Venue 和轮换版本；API 与页面只返回脱敏元数据。凭据保存后连接状态仅为 `NOT_VERIFIED`，交易状态仍为 `DISABLED`。现有运行读取/执行进程仍从受保护的部署环境加载各自凭据，尚未消费数据库密文；OKX、Bybit 连接适配器也仍标记为未实现，不能把“已登记”投影为“已连接”或“可交易”。
 
-`VenueOrder`、`VenueFill`、`Position`、`AccountEquity`、权益历史、`FundingPayment` 与计算型对账均持久化非空 Team 根；同一 `account_id + venue` 可在不同团队独立存在，服务端写入、查询、资金事实聚合和对账按当前团队过滤。旧事实只在迁移时回填到既有默认团队，不据此开启连接或交易。团队 `RiskPolicy`、资金提案/授权/转移及 sender/task 根仍待后续迁移，当前不得把账户事实隔离等同于整条资金与风险链已完成团队化。
+`VenueOrder`、`VenueFill`、`Position`、`AccountEquity`、权益历史、`FundingPayment` 与计算型对账均持久化非空 Team 根；同一 `account_id + venue` 可在不同团队独立存在，服务端写入、查询、资金事实聚合和对账按当前团队过滤。旧事实只在迁移时回填到既有默认团队，不据此开启连接或交易。资金提案/授权/转移及 sender/task 根仍待后续迁移，当前不得把账户事实隔离等同于整条资金链已完成团队化。
+
+`TeamSignalSource` 是当前团队的唯一信号模式真源。Perptape Key 和 Webhook HMAC 密钥复用同一 AES-256-GCM 信封，认证上下文绑定 Team、Signal Source、模式与轮换版本。Webhook 统一接收 TradingView 和自研模型，服务端验证 HMAC-SHA256、请求与事件时效、nonce 重放、外部身份、幂等键和版本化格式。通过的 Webhook 只写入 `SignalEvent`；必须由获权人员手动创建并冻结 Proposal，一个 SignalEvent 最多关联一个 Proposal。
 
 ## 从这里开始
 
@@ -24,7 +26,7 @@
 
 ## 当前不可绕过的规则
 
-- 信号和人工交易假设只能生成 Proposal，不能直接生成订单。
+- 信号和人工交易假设只能生成冻结 Proposal，不能直接生成审核、授权或订单；Webhook 信号还必须由人员手动创建 Proposal。
 - SYSTEM 与 MANUAL 初仓都必须经过人工审核；Risk Engine 始终可以拒绝或缩量。
 - 创建者不能自审；高风险提案需要两个不同 Reviewer。
 - Approval 只产生短期、有限范围的 TradingAuthorization，不产生永久权限。
@@ -45,15 +47,15 @@
 
 - API 进程：`uv run trading-api`
 - 只读同步进程：`uv run trading-sync-worker`；`--once` 用于一次性生产边界验收。它只读取 Perptape、Binance、Hyperliquid 和已配置 NoTilt Vault，持久化事实并运行对账，不拥有订单发送、资金签名或广播方法
-- Web/PWA：`/` 是唯一行动总览；核心主线为机会 → 审核队列 → 交易任务，运行告警详情位于 `/campaigns/alerts`，旧 `/exceptions` 只做兼容跳转。另有 `/risk` 风险、`/positions` 系统状态、`/venues` 交易账户、`/capital` 资金中心、`/admin/users` 管理员专属成员权限和 `/results` 结果/审计。资金中心默认只展示 LIVE；SHADOW/TESTNET 不计入真实净值。Vault 缺少事实时显示 `— · MISSING`，总净值也保持不完整，绝不把缺失投影为零
-- HTTP：健康检查、内部会话、Perptape 主站机会与可选 LIVE Proposal、Proposal/Review/Risk/Authorization、SHADOW/TESTNET/LIVE Campaign、AUTO_ADD/减仓/退出、资金事实/提案/授权、NoTilt 三链状态/同步/持久化未签名计划/回执确认、按环境结果/审计/运行状态，以及 Binance、Hyperliquid Core 的只读、TESTNET 与受控 LIVE API
+- Web/PWA：`/` 是唯一行动总览；`/signals` 选择团队 Perptape / Webhook 模式并展示签名事件，核心主线为信号或机会 → 冻结提案 → 独立审核 → 交易任务。运行告警详情位于 `/campaigns/alerts`，旧 `/exceptions` 只做兼容跳转。另有 `/risk`、`/positions`、`/venues`、`/capital`、`/admin/users` 和 `/results`。资金中心默认只展示 LIVE；SHADOW/TESTNET 不计入真实净值。Vault 缺少事实时显示 `— · MISSING`，总净值也保持不完整，绝不把缺失投影为零
+- HTTP：健康检查、内部会话、团队信号源配置、签名 Webhook / SignalEvent、Perptape 主站机会、Proposal/Review/Risk/Authorization、SHADOW/TESTNET/LIVE Campaign、AUTO_ADD/减仓/退出、资金事实/提案/授权、NoTilt 未签名计划/回执确认、按环境结果/审计/运行状态，以及 Binance、Hyperliquid Core 的只读、TESTNET 与受控 LIVE API
 - 内部业务：`trading_control_plane.service.TradingService`
 - 纯计算：`evaluate_risk`、`select_target_position`、`compute_pnl`
-- 数据库：PostgreSQL，Alembic head `20260810_0020`；Workspace、权限、交易账户、提案—执行聚合、账户事实、版本化风险政策与风险预留均使用团队范围。最大总风险、单账户风险、最大单笔亏损、最大连续亏损和冷却期由同一政策版本驱动；遗留政策的新阈值保持未配置并拒绝新增风险，不从外部参考页猜测数值。资金聚合和 sender/task 根仍按后续迁移 fail closed（另有 Alembic 版本表）
+- 数据库：PostgreSQL，Alembic head `20260810_0021`；Workspace、权限、信号源/SignalEvent、交易账户、提案—执行聚合、账户事实、版本化风险政策与风险预留均使用团队范围。最大总风险、单账户风险、最大单笔亏损、最大连续亏损和冷却期由同一政策版本驱动；遗留政策的新阈值保持未配置并拒绝新增风险。资金聚合和 sender/task 根仍按后续迁移 fail closed
 - 场所边界：Binance 与 Hyperliquid 的交易发送默认只允许进入各自隔离的 Freqtrade worker；Hyperliquid worker 通过显式 `hip3_dexes` allowlist 加载 HIP-3。仓库原有 `binance_execution.py` / `hyperliquid_execution.py` 只保留隔离兼容测试，默认后端不会加载其签名密钥，也会拒绝直接发送。交易所官方只读接口继续提供账户、仓位和目录事实；数据库中的 `LIVE_ORDER_SEND` 初始仍为 `DISABLED`
 - 资金边界：`capital.py` 提供 SHADOW/TESTNET Mock 提交和自动候选计算；`notilt.py` 通过官方 `@notilt/sdk` 固定支持 Ethereum、BNB Smart Chain、Arbitrum One，只读取官方部署/Registry/Vault、生成并持久化 `{chainId,to,data,value}` 未签名交易，并从可信生产 RPC 校验发送者、目标、函数、参数、事件、区块时间和逐链确认深度。服务没有 NoTilt 私钥字段，不签名、不广播，也不暴露 owner、白名单管理、Panic 或 Full Exit 能力；真实 `CAPITAL_TRANSFER` 与两个自动资金 Gate 均保持 `DISABLED`
 
-正式身份源按冻结决策使用托管 IdP 与 Passkey，但外部 IdP 尚未接入。本地/测试环境可显式启用仅识别已存在内部用户的 Mock 会话和 Mock step-up；生产环境硬拒绝启用 Mock 身份。Perptape 需单独配置平台 API Key；连续模式还必须显式启用 `TRADING_PERPTAPE_WEBSOCKET_ENABLED`。启用后只连接官方 `wss://perptape.com/ws/v1/alerts`，WebSocket 是实时主通道，`GET /api/v1/breakouts` 仅用于启动快照、周期对账、断线/序列缺口回补和短字段补全；未配置时机会入口明确返回不可用。
+正式身份源按冻结决策使用托管 IdP 与 Passkey，但外部 IdP 尚未接入。本地/测试环境可显式启用仅识别已存在内部用户的 Mock 会话和 Mock step-up；生产环境硬拒绝启用 Mock 身份。团队 Perptape Key 在 `/signals` 加密配置后可直接驱动现有机会页；迁移的旧团队保留明确标识的 `RUNTIME_FALLBACK`，不伪装成团队密钥已配置。当前常驻 WebSocket worker 仍只消费部署级 Perptape Key 和共享 feed；多团队常驻 worker 绑定尚未完成，不把按需页面读取声称为团队常驻同步。
 
 Binance 私有事实读取必须同时显式配置 `TRADING_BINANCE_READ_ONLY_ENABLED=true`、API Key/Secret 和 `TRADING_BINANCE_FACT_ENVIRONMENT=TESTNET|LIVE`。Unified Account 使用 `TRADING_BINANCE_ACCOUNT_MODE=PORTFOLIO_MARGIN` 和官方 `https://papi.binance.com`。未配置时页面只显示 PostgreSQL 已保存事实，不尝试联网。
 

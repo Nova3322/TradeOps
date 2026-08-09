@@ -112,7 +112,8 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
 
     assert response.status_code == 200
     assert "交易控制台" in response.text
-    assert "/assets/app.js?v=133" in response.text
+    assert "/assets/app.js?v=134" in response.text
+    assert 'href="/signals"' in response.text
     assert "/assets/styles.css?v=52" in response.text
     assert 'aria-label="交易控制台首页"' in response.text
     assert '<a href="/" data-link><span>⌂</span>当前任务</a>' in response.text
@@ -348,6 +349,9 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
     assert "currentLanguage === 'en' ? 'Connection check' : '连接检查'" in app_javascript.text
     assert 'href="/opportunities/defaults"' in app_javascript.text
     assert "function renderOpportunityDefaults" in app_javascript.text
+    assert "async function renderSignalSources" in app_javascript.text
+    assert "X-TradingOPS-Signature" in app_javascript.text
+    assert "signal-proposal-form" in app_javascript.text
     assert "覆盖币对" in app_javascript.text
     assert "方向机会" in app_javascript.text
     assert "完整周期信号" in app_javascript.text
