@@ -26,6 +26,7 @@ class SessionIdentity:
     username: str
     expires_at: datetime
     authentication_method: str
+    auth_version: int = 1
 
 
 @dataclass(frozen=True)
@@ -79,6 +80,7 @@ class SignedTokenService:
         now: datetime,
         ttl: timedelta,
         authentication_method: str,
+        auth_version: int = 1,
     ) -> str:
         expires_at = now + ttl
         return self._sign(
@@ -88,6 +90,7 @@ class SignedTokenService:
                 "username": username,
                 "exp": int(expires_at.timestamp()),
                 "amr": authentication_method,
+                "auth_version": auth_version,
             }
         )
 
@@ -104,6 +107,7 @@ class SignedTokenService:
                 username=str(payload["username"]),
                 expires_at=expires_at,
                 authentication_method=str(payload["amr"]),
+                auth_version=int(payload.get("auth_version", 1)),
             )
         except (KeyError, TypeError, ValueError) as exc:
             raise DomainRejected("AUTH_TOKEN_INVALID", "session claims are invalid") from exc

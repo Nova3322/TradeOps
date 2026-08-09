@@ -67,6 +67,7 @@ from trading_control_plane.api_schemas import (
     MockStepUpRequest,
     NoTiltReceiptRequest,
     OrderIntentRequest,
+    PasswordLoginRequest,
     PositionFactRequest,
     ProposalDefaultConfigRequest,
     ProtectionFactRequest,
@@ -152,6 +153,7 @@ from trading_control_plane.notilt import (
     NoTiltUnsignedTransaction,
     NoTiltUsdValuator,
 )
+from trading_control_plane.passwords import LoginAttemptLimiter, PasswordHasher
 from trading_control_plane.perptape import (
     PerptapeCandidate,
     PerptapeClient,
@@ -307,6 +309,8 @@ def create_app(
     configure_logging(resolved_settings.log_level)
     resolved_database = database or Database(resolved_settings.database_url)
     token_service = SignedTokenService(resolved_settings.session_signing_secret)
+    password_hasher = PasswordHasher()
+    login_limiter = LoginAttemptLimiter()
     resolved_perptape = perptape_client or PerptapeClient(
         base_url=resolved_settings.perptape_base_url,
         api_key=resolved_settings.perptape_api_key,
@@ -870,7 +874,9 @@ def create_app(
         if trading_session is None:
             raise DomainRejected("LOGIN_DENIED", "an internal login session is required")
         identity = token_service.verify_session(trading_session, now=_now())
-        queries().user_context(identity.user_id)
+        context = queries().user_context(identity.user_id)
+        if int(context["auth_version"]) != identity.auth_version:
+            raise DomainRejected("SESSION_REVOKED", "login session was revoked")
         return identity
 
     identity_dependency = Depends(current_identity)
@@ -908,13 +914,90 @@ def create_app(
     @app.get("/api/auth/status")
     def auth_status() -> dict[str, Any]:
         return {
-            "provider": "MANAGED_IDP_PASSKEY",
-            "provider_configured": False,
+            "provider": "PASSWORD",
+            "provider_configured": True,
+            "password_login_available": True,
             "mock_identity_available": (
                 resolved_settings.allow_mock_identity
                 and resolved_settings.environment in {"local", "test"}
             ),
             "environment": resolved_settings.environment,
+        }
+
+    @app.post("/api/auth/login")
+    def password_login(
+        payload: PasswordLoginRequest,
+        request: Request,
+        response: Response,
+    ) -> dict[str, Any]:
+        username = payload.username.strip()
+        client_host = request.client.host if request.client is not None else "unknown"
+        limiter_key = f"{client_host}:{username.casefold()}"
+        now = _now()
+        retry_after = login_limiter.retry_after(limiter_key, now=now)
+        if retry_after is not None:
+            raise HTTPException(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                detail={
+                    "error_code": "LOGIN_RATE_LIMITED",
+                    "message": "登录尝试过多，请稍后再试",  # noqa: RUF001
+                },
+                headers={"Retry-After": str(retry_after)},
+            )
+        credential = queries().password_credential(username)
+        encoded = (
+            str(credential["password_hash"])
+            if credential is not None and credential["password_hash"] is not None
+            else password_hasher.dummy_hash
+        )
+        password_valid = password_hasher.verify(payload.password, encoded)
+        credential_valid = bool(
+            credential is not None
+            and credential["active"]
+            and credential["principal_type"] == "HUMAN"
+            and credential["password_hash"] is not None
+            and password_valid
+        )
+        if not credential_valid:
+            locked_for = login_limiter.fail(limiter_key, now=now)
+            if locked_for is not None:
+                raise HTTPException(
+                    status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                    detail={
+                        "error_code": "LOGIN_RATE_LIMITED",
+                        "message": "登录尝试过多，请稍后再试",  # noqa: RUF001
+                    },
+                    headers={"Retry-After": str(locked_for)},
+                )
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail={"error_code": "LOGIN_DENIED", "message": "用户名或密码不正确"},
+            )
+        assert credential is not None
+        login_limiter.success(limiter_key)
+        token = token_service.issue_session(
+            user_id=credential["user_id"],
+            username=str(credential["username"]),
+            now=now,
+            ttl=timedelta(seconds=resolved_settings.session_ttl_seconds),
+            authentication_method="password-scrypt",
+            auth_version=int(credential["auth_version"]),
+        )
+        response.set_cookie(
+            SESSION_COOKIE,
+            token,
+            httponly=True,
+            secure=resolved_settings.environment in {"staging", "production"},
+            samesite="strict",
+            max_age=resolved_settings.session_ttl_seconds,
+            path="/",
+        )
+        return {
+            "session": queries().user_context(credential["user_id"]),
+            "authentication_method": "PASSWORD",
+            "expires_at": (
+                now + timedelta(seconds=resolved_settings.session_ttl_seconds)
+            ).isoformat(),
         }
 
     @app.post("/api/auth/mock/login")
@@ -932,6 +1015,7 @@ def create_app(
             now=now,
             ttl=timedelta(seconds=resolved_settings.session_ttl_seconds),
             authentication_method="mock-internal-user",
+            auth_version=user.auth_version,
         )
         response.set_cookie(
             SESSION_COOKIE,
@@ -982,6 +1066,7 @@ def create_app(
             identity.user_id,
             payload.account_scope,
             payload.venue_scope,
+            payload.password,
             now=_now(),
         )
         return {
@@ -1002,6 +1087,7 @@ def create_app(
             identity.user_id,
             payload.account_scope,
             payload.venue_scope,
+            payload.new_password,
             now=_now(),
         )
         return {"user_id": str(user_id), "data": queries().managed_users(identity.user_id)}

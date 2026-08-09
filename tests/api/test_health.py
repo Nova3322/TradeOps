@@ -189,8 +189,12 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
     assert "最高管理员直接批准本人提案" in app_javascript.text
     assert "批准或拒绝前都需要再次确认；不会直接下单" in app_javascript.text
     assert "二次强验证" not in app_javascript.text
-    assert "无法登录：账号不存在、尚未分配岗位或已停用" in app_javascript.text  # noqa: RUF001
-    assert 'placeholder="请输入分配给你的内部用户名"' in app_javascript.text
+    assert "用户名或密码不正确" in app_javascript.text
+    assert 'placeholder="请输入账户名"' in app_javascript.text
+    assert 'autocomplete="current-password"' in app_javascript.text
+    assert "api('/api/auth/login'" in app_javascript.text
+    assert "data?.detail?.error_code" in app_javascript.text
+    assert "body: JSON.stringify({username: new FormData" not in app_javascript.text
     assert "loginForm.querySelector('.form-error').textContent = ''" in app_javascript.text
     assert "function partitionCapitalRecords" in app_javascript.text
     assert "function capitalSourceSlots" in app_javascript.text

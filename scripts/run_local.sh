@@ -18,6 +18,7 @@ export TRADING_HYPERLIQUID_LIVE_ORDER_SEND_ENABLED=false
 export TRADING_HYPERLIQUID_TESTNET_ORDER_SEND_ENABLED=false
 export TRADING_FREQTRADE_LIVE_ORDER_SEND_ENABLED=false
 export TRADING_BINANCE_CAPITAL_WITHDRAW_ENABLED=false
+export TRADING_ALLOW_MOCK_IDENTITY=false
 export TRADING_EXECUTION_BACKEND=FREQTRADE
 export TRADING_API_PORT="${TRADING_API_PORT:-8014}"
 export TRADING_PUBLIC_BASE_URL="${TRADING_PUBLIC_BASE_URL:-http://127.0.0.1:${TRADING_API_PORT}}"
@@ -55,7 +56,18 @@ for trading_worker_port in 8081 8082; do
   fi
 done
 
-uv run python scripts/setup_local.py
+local_admin_password="${TRADING_LOCAL_ADMIN_PASSWORD:-}"
+if [[ -z "$local_admin_password" ]]; then
+  local_password_file="${TRADING_LOCAL_ADMIN_PASSWORD_FILE:-$PWD/.local/passwords/kelly_oooo}"
+  if [[ ! -f "$local_password_file" ]]; then
+    umask 077
+    mkdir -p "$(dirname "$local_password_file")"
+    python3 -c 'import secrets; print(secrets.token_urlsafe(24))' >"$local_password_file"
+  fi
+  local_admin_password="$(<"$local_password_file")"
+fi
+TRADING_LOCAL_ADMIN_PASSWORD="$local_admin_password" uv run python scripts/setup_local.py
+unset local_admin_password
 trading_runtime_pid=""
 if uv run python -c "from trading_control_plane.config import get_settings; raise SystemExit(0 if get_settings().runtime_sync_enabled else 1)"; then
   uv run trading-sync-worker &

@@ -30,8 +30,14 @@ class MockLoginRequest(BaseModel):
     username: str = Field(min_length=1, max_length=120)
 
 
+class PasswordLoginRequest(BaseModel):
+    username: str = Field(min_length=1, max_length=120, pattern=r"^[A-Za-z0-9._-]+$")
+    password: str = Field(min_length=12, max_length=128)
+
+
 class ManagedUserCreateRequest(BaseModel):
     username: str = Field(min_length=1, max_length=120, pattern=r"^[A-Za-z0-9._-]+$")
+    password: str = Field(min_length=12, max_length=128)
     roles: list[AccessRole] = Field(min_length=1, max_length=6)
     account_scope: str | None = Field(default=None, min_length=1, max_length=120)
     venue_scope: str | None = Field(default=None, min_length=1, max_length=64)
@@ -47,6 +53,7 @@ class ManagedUserCreateRequest(BaseModel):
 class ManagedUserAccessRequest(BaseModel):
     roles: list[AccessRole] = Field(min_length=1, max_length=6)
     active: bool = True
+    new_password: str | None = Field(default=None, min_length=12, max_length=128)
     account_scope: str | None = Field(default=None, min_length=1, max_length=120)
     venue_scope: str | None = Field(default=None, min_length=1, max_length=64)
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from datetime import UTC, datetime
 
 from alembic import command
@@ -86,6 +87,13 @@ def main() -> None:
         owner_id = _user_id(database, OWNER_USERNAME)
         if owner_id is None:
             owner_id = service.bootstrap_admin(OWNER_USERNAME, now=now)
+        local_admin_password = os.environ.get("TRADING_LOCAL_ADMIN_PASSWORD")
+        if local_admin_password:
+            service.ensure_local_human_password(
+                OWNER_USERNAME,
+                local_admin_password,
+                now=now,
+            )
         proposer_id = _ensure_user(
             database,
             service,

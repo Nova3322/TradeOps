@@ -128,6 +128,7 @@ from trading_control_plane.notilt import (
     NoTiltVaultSnapshot,
     UsdValuation,
 )
+from trading_control_plane.passwords import PasswordHasher
 from trading_control_plane.perptape import (
     PerptapeCandidate,
     PerptapeFeedSnapshot,
@@ -139,6 +140,7 @@ from trading_control_plane.perptape import (
 )
 
 CAPITAL_HISTORY_MIN_INTERVAL = timedelta(minutes=1)
+PASSWORD_HASHER = PasswordHasher()
 
 ACTIVE_INTENT_STATUSES = {
     OrderIntentStatus.PENDING.value,
@@ -580,6 +582,7 @@ class TradingService:
         actor_id: UUID,
         account_scope: str | None = None,
         venue_scope: str | None = None,
+        password: str | None = None,
         *,
         now: datetime,
     ) -> UUID:
@@ -593,6 +596,8 @@ class TradingService:
                 _reject("USERNAME_CONFLICT", "the internal username already exists")
             user = User(
                 username=normalized_username,
+                password_hash=(PASSWORD_HASHER.hash(password) if password is not None else None),
+                password_changed_at=(now if password is not None else None),
                 principal_type=PrincipalType.HUMAN.value,
                 active=True,
                 created_at=now,
@@ -630,6 +635,7 @@ class TradingService:
         actor_id: UUID,
         account_scope: str | None = None,
         venue_scope: str | None = None,
+        new_password: str | None = None,
         *,
         now: datetime,
     ) -> None:
@@ -680,6 +686,11 @@ class TradingService:
                     )
                 )
             user.active = active
+            password_reset = new_password is not None
+            if new_password is not None:
+                user.password_hash = PASSWORD_HASHER.hash(new_password)
+                user.password_changed_at = now
+                user.auth_version += 1
             self._audit(
                 session,
                 actor_id=str(actor_id),
@@ -688,12 +699,52 @@ class TradingService:
                 object_id=user_id,
                 reason=(
                     f"active={str(active).lower()};"
-                    f"roles={','.join(sorted(role.value for role in normalized_roles))}"
+                    f"roles={','.join(sorted(role.value for role in normalized_roles))};"
+                    f"password_reset={str(password_reset).lower()}"
                 ),
                 correlation_id=uuid4(),
                 object_version=1,
                 now=now,
             )
+
+    def ensure_local_human_password(
+        self,
+        username: str,
+        password: str,
+        *,
+        now: datetime,
+    ) -> bool:
+        """Set a local human credential without ever storing or auditing plaintext."""
+
+        with self.database.session_factory.begin() as session:
+            user = session.scalar(
+                select(User).where(
+                    User.username == username,
+                    User.principal_type == PrincipalType.HUMAN.value,
+                    User.active,
+                )
+            )
+            if user is None:
+                _reject("USER_NOT_FOUND", "the local human user does not exist")
+            if user.password_hash is not None and PASSWORD_HASHER.verify(
+                password, user.password_hash
+            ):
+                return False
+            user.password_hash = PASSWORD_HASHER.hash(password)
+            user.password_changed_at = now
+            user.auth_version += 1
+            self._audit(
+                session,
+                actor_id="local-setup",
+                event_type="USER_PASSWORD_CONFIGURED",
+                object_type="User",
+                object_id=user.user_id,
+                reason="local password credential configured or rotated",
+                correlation_id=uuid4(),
+                object_version=user.auth_version,
+                now=now,
+            )
+            return True
 
     def bind_telegram_private_chat(
         self,

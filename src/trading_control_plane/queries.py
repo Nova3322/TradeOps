@@ -89,6 +89,20 @@ class TradingQueries:
             session.expunge(user)
             return user
 
+    def password_credential(self, username: str) -> dict[str, Any] | None:
+        with self.database.session_factory() as session:
+            user = session.scalar(select(User).where(User.username == username))
+            if user is None:
+                return None
+            return {
+                "user_id": user.user_id,
+                "username": user.username,
+                "password_hash": user.password_hash,
+                "auth_version": user.auth_version,
+                "active": user.active,
+                "principal_type": user.principal_type,
+            }
+
     def service_principal_by_username(self, username: str) -> User:
         with self.database.session_factory() as session:
             user = session.scalar(select(User).where(User.username == username))
@@ -117,6 +131,7 @@ class TradingQueries:
             return {
                 "user_id": str(user.user_id),
                 "username": user.username,
+                "auth_version": user.auth_version,
                 "roles": [
                     {
                         "role": role.role,
@@ -155,6 +170,7 @@ class TradingQueries:
                     "user_id": str(user.user_id),
                     "username": user.username,
                     "identity_bound": user.identity_subject is not None,
+                    "password_configured": user.password_hash is not None,
                     "active": user.active,
                     "roles": by_user[user.user_id],
                     "created_at": _iso(user.created_at),

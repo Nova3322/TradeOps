@@ -26,5 +26,6 @@ dist/
 node_modules/
 
 # Local application output
+.local/
 var/
 logs/

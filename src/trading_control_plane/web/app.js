@@ -51,10 +51,10 @@ const ENGLISH_EXACT = new Map(Object.entries({
   '取消并关闭':'Cancel and close', '确认并继续':'Confirm and continue', '权限范围':'Permission scope',
   '当前职责不包含这个页面':'This page is outside your assigned role', '返回当前任务':'Back to current tasks', '进入资金中心':'Open Capital',
   '页面不存在':'Page not found', '返回机会页':'Back to Opportunities', '内部访问':'Internal access',
-  '进入交易控制台':'Open Trading Console', '需要统一身份登录':'Identity verification required',
-  '内部用户名':'Internal username', '进入控制台':'Open console', '统一身份服务尚未接入。':'The identity service is not connected.',
-  '请输入分配给你的内部用户名':'Enter the internal username assigned to you',
-  '无法登录：账号不存在、尚未分配岗位或已停用。请联系系统管理员确认成员状态。':'Unable to sign in: this account is unavailable, has no assigned role, or is disabled. Ask a system administrator to confirm your access.',
+  '进入交易控制台':'Open Trading Console', '账户密码验证':'Account password',
+  '账户':'Account', '密码':'Password', '登录':'Sign in', '请输入账户名':'Enter your account name',
+  '请输入密码':'Enter your password', '用户名或密码不正确。':'Incorrect account name or password.',
+  '登录尝试过多，请稍后再试。':'Too many sign-in attempts. Try again later.',
   '审核工作台':'Review workspace', '当前没有需要你审核的提案':'There are no proposals waiting for your review',
   '当前没有需要你处理的审核待办':'There are no review tasks requiring your action', '风险恢复':'Risk restoration',
   '当前没有风险恢复审核待办':'No risk-restoration review is pending', '风险恢复状态读取失败':'Risk-restoration status could not be loaded',
@@ -797,7 +797,8 @@ const actionErrorGuidance = {
   RISK_RESERVATION_UNRESOLVED:'风险预留仍处于不确定或待确认状态，必须先完成对账。',
 };
 const apiErrorGuidance = {
-  LOGIN_DENIED:'无法登录：账号不存在、尚未分配岗位或已停用。请联系系统管理员确认成员状态。',
+  LOGIN_DENIED:'用户名或密码不正确。',
+  LOGIN_RATE_LIMITED:'登录尝试过多，请稍后再试。',
   RISK_POLICY_MISSING:'风险政策尚未配置，因此系统已暂停创建和执行新增风险。请联系系统管理员完成配置。',
   PERPTAPE_NOT_CONFIGURED:'Perptape 尚未配置。人工提案仍可使用，外部机会将在完成配置后恢复。',
   PERPTAPE_UNAVAILABLE:'暂时无法连接 Perptape。人工提案仍可使用，请稍后重新检查外部机会。',
@@ -961,8 +962,15 @@ async function api(path, options = {}) {
     externalSignal?.removeEventListener('abort', abortFromExternalSignal);
   }
   if (!response.ok) {
-    const error = new Error(data?.error?.message || data?.detail?.error?.code || `HTTP ${response.status}`);
-    error.code = data?.error?.code || data?.detail?.error?.code || `HTTP_${response.status}`;
+    const detailError = data?.detail?.error;
+    const error = new Error(
+      data?.error?.message
+      || detailError?.message
+      || data?.detail?.message
+      || data?.detail?.error_code
+      || `HTTP ${response.status}`
+    );
+    error.code = data?.error?.code || detailError?.code || data?.detail?.error_code || `HTTP_${response.status}`;
     error.status = response.status;
     error.handled = response.status === 401 && handleUnauthorizedResponse();
     throw error;
@@ -1232,23 +1240,24 @@ async function route() {
 
 function renderLogin() {
   main.innerHTML = `<section class="login-page"><div class="login-card">
-    <span class="mock-ribbon">${authStatus.mock_identity_available ? '内部身份验证' : '需要统一身份登录'}</span>
+    <span class="mock-ribbon">账户密码验证</span>
     <p class="eyebrow" style="margin-top:18px">内部访问</p><h1>进入交易控制台</h1>
-    <p class="lede">系统不开放外部注册。只有已经分配岗位和数据范围的内部成员可以进入。</p>
+    <p class="lede">使用管理员分配的账户和密码登录。系统不开放外部注册。</p>
     ${sessionNotice ? `<div class="callout" role="status">${escapeHtml(sessionNotice)}</div>` : ''}
-    ${authStatus.mock_identity_available ? `<form id="login-form"><label>内部用户名<input name="username" autocomplete="username" required placeholder="请输入分配给你的内部用户名"></label><button class="primary">进入控制台</button><div class="form-error" role="alert"></div></form>` : '<div class="callout">统一身份服务尚未接入。</div>'}
+    <form id="login-form"><label>账户<input name="username" autocomplete="username" required placeholder="请输入账户名"></label><label>密码<input name="password" type="password" autocomplete="current-password" minlength="12" maxlength="128" required placeholder="请输入密码"></label><button class="primary">登录</button><div class="form-error" role="alert"></div></form>
   </div></section>`;
   const loginForm = document.querySelector('#login-form');
-  loginForm?.querySelector('input[name="username"]')?.addEventListener('input', () => {
+  loginForm?.querySelectorAll('input').forEach(input => input.addEventListener('input', () => {
     loginForm.querySelector('.form-error').textContent = '';
-  });
+  }));
   loginForm?.addEventListener('submit', async (event) => {
     event.preventDefault();
     const form = event.currentTarget;
     const button = form.querySelector('button');
     button.disabled = true;
     try {
-      const result = await api('/api/auth/mock/login', {method:'POST', body: JSON.stringify({username: new FormData(form).get('username')})});
+      const data = new FormData(form);
+      const result = await api('/api/auth/login', {method:'POST', body: JSON.stringify({username:data.get('username'), password:data.get('password')})});
       session = result.session;
       sessionNotice = '';
       authFailureActive = false;
@@ -3805,16 +3814,16 @@ async function renderAccessManagement() {
     const roleTags = roles.map(role => `<span>${escapeHtml(fmtRole(role))}</span>`).join('');
     const venueSummary = ({BINANCE:'币安',HYPERLIQUID:'Hyperliquid'}[scope.venue] || scope.venue);
     const scopeSummary = scope.mixed ? '多个账户或交易所范围' : `${scope.account || '全部账户'} · ${scope.venue ? venueSummary : '全部交易所'}`;
-    return `<details class="member-access-card ${member.active ? '' : 'is-inactive'}"><summary class="member-access-summary"><span class="member-summary-main"><b>${escapeHtml(member.username)}</b><small>${member.identity_bound ? '已绑定生产身份源' : '等待生产身份源绑定'} · ${escapeHtml(scopeSummary)}</small><span class="member-role-tags">${roleTags}</span></span><span class="member-summary-actions"><span class="status-pill ${member.active ? 'status-APPROVED' : ''}">${member.active ? '已启用' : '已停用'}</span><strong>${member.is_current_user ? '查看' : '编辑'}</strong></span></summary><form class="member-access-editor" data-user-access="${member.user_id}">
+    return `<details class="member-access-card ${member.active ? '' : 'is-inactive'}"><summary class="member-access-summary"><span class="member-summary-main"><b>${escapeHtml(member.username)}</b><small>${member.password_configured ? '密码已设置' : '尚未设置密码'} · ${escapeHtml(scopeSummary)}</small><span class="member-role-tags">${roleTags}</span></span><span class="member-summary-actions"><span class="status-pill ${member.active ? 'status-APPROVED' : ''}">${member.active ? '已启用' : '已停用'}</span><strong>${member.is_current_user ? '查看' : '编辑'}</strong></span></summary><form class="member-access-editor" data-user-access="${member.user_id}">
       ${member.is_current_user ? '<p class="safety-note">这是当前账号。为避免误锁死，必须由另一名系统管理员修改。</p>' : ''}
       <div class="permission-grid">${accessRoleOptions(roles, `member-${member.user_id}`, member.is_current_user)}</div>
-      <div class="scope-grid"><label>账户范围<input name="account_scope" value="${escapeHtml(scope.account)}" placeholder="留空 = 全部账户" ${member.is_current_user ? 'disabled' : ''}></label><label>交易所范围<select name="venue_scope" ${member.is_current_user ? 'disabled' : ''}>${venueScopeOptions(scope.venue)}</select></label><label class="active-toggle"><input name="active" type="checkbox" ${member.active ? 'checked' : ''} ${member.is_current_user ? 'disabled' : ''}>允许登录和使用已分配权限</label></div>
+      <div class="scope-grid"><label>账户范围<input name="account_scope" value="${escapeHtml(scope.account)}" placeholder="留空 = 全部账户" ${member.is_current_user ? 'disabled' : ''}></label><label>交易所范围<select name="venue_scope" ${member.is_current_user ? 'disabled' : ''}>${venueScopeOptions(scope.venue)}</select></label><label>重置密码<input name="new_password" type="password" autocomplete="new-password" minlength="12" maxlength="128" placeholder="留空则不修改" ${member.is_current_user ? 'disabled' : ''}></label><label class="active-toggle"><input name="active" type="checkbox" ${member.active ? 'checked' : ''} ${member.is_current_user ? 'disabled' : ''}>允许登录和使用已分配权限</label></div>
       ${scope.mixed ? '<p class="danger-note">该成员当前有多个不同的数据范围。保存后，所选岗位会统一使用上面的账户和交易所范围，请先确认。</p>' : ''}
       <div class="form-error" role="alert"></div>${member.is_current_user ? '' : '<div class="form-actions"><button class="secondary">保存权限</button></div>'}</form></details>`;
   }).join('');
   main.innerHTML = `<section class="page access-page"><header class="page-head"><div><p class="eyebrow">系统管理 · 权限配置</p><h1>成员权限</h1><p class="lede">按岗位勾选权限，不需要逐个页面配置。一个人可以组合多个岗位，还可以按账户和交易所限制每个用户能够查看和操作的数据。</p></div><span class="status-pill">${members.filter(item => item.active).length} 名启用成员</span></header>
-    <article class="card access-principles"><h2>权限分离原则</h2><div class="access-principle-grid"><p><b>审核与发起分开</b><span>审核人不能审核自己的提案；提案发起人不会自动获得执行权限。</span></p><p><b>交易与资金分开</b><span>交易运维人员看不到资金中心；系统管理员拥有最高管理权限，但资金动作仍受实时校验、最终确认和安全开关约束。</span></p><p><b>身份与权限分开</b><span>生产环境仍由统一身份登录和通行密钥认证；这里仅管理内部授权，不创建密码。</span></p></div></article>
-    <details class="card create-member-panel"><summary><span><b>新增内部成员</b><small>先创建授权记录，再由生产身份服务完成身份绑定</small></span><strong>展开</strong></summary><form id="create-member-form" class="toolbox-content"><div class="field-grid"><label>内部用户名<input name="username" pattern="[A-Za-z0-9._-]+" placeholder="例如 reviewer-li" required></label><label>账户范围<input name="account_scope" placeholder="留空 = 全部账户"></label><label>交易所范围<select name="venue_scope">${venueScopeOptions()}</select></label></div><div class="preset-row"><span>常用模板</span><button type="button" class="text-button" data-role-preset="REVIEWER">只审核</button><button type="button" class="text-button" data-role-preset="PROPOSER">只发起提案</button><button type="button" class="text-button" data-role-preset="OPERATOR">交易运维</button></div><div class="permission-grid">${accessRoleOptions([], 'create')}</div><div class="form-error" role="alert"></div><div class="form-actions"><button class="primary">创建成员</button></div></form></details>
+    <article class="card access-principles"><h2>权限分离原则</h2><div class="access-principle-grid"><p><b>审核与发起分开</b><span>审核人不能审核自己的提案；提案发起人不会自动获得执行权限。</span></p><p><b>交易与资金分开</b><span>交易运维人员看不到资金中心；系统管理员拥有最高管理权限，但资金动作仍受实时校验、最终确认和安全开关约束。</span></p><p><b>身份与权限分开</b><span>密码只用于身份验证；岗位和账户范围仍由独立授权控制。</span></p></div></article>
+    <details class="card create-member-panel"><summary><span><b>新增内部成员</b><small>创建账户、初始密码和最小必要权限</small></span><strong>展开</strong></summary><form id="create-member-form" class="toolbox-content"><div class="field-grid"><label>账户名<input name="username" pattern="[A-Za-z0-9._-]+" placeholder="例如 reviewer-li" required></label><label>初始密码<input name="password" type="password" autocomplete="new-password" minlength="12" maxlength="128" required placeholder="至少 12 个字符"></label><label>账户范围<input name="account_scope" placeholder="留空 = 全部账户"></label><label>交易所范围<select name="venue_scope">${venueScopeOptions()}</select></label></div><div class="preset-row"><span>常用模板</span><button type="button" class="text-button" data-role-preset="REVIEWER">只审核</button><button type="button" class="text-button" data-role-preset="PROPOSER">只发起提案</button><button type="button" class="text-button" data-role-preset="OPERATOR">交易运维</button></div><div class="permission-grid">${accessRoleOptions([], 'create')}</div><div class="form-error" role="alert"></div><div class="form-actions"><button class="primary">创建成员</button></div></form></details>
     <div class="section-heading"><div><p class="eyebrow">当前用户</p><h2>现有成员</h2></div><span class="subtle">截止 ${fmtDate(result.as_of)}</span></div><div class="member-access-list">${cards}</div>
   </section>`;
   document.querySelectorAll('[data-role-preset]').forEach(button => button.addEventListener('click', () => {
@@ -3824,17 +3833,17 @@ async function renderAccessManagement() {
     event.preventDefault();
     const form = event.currentTarget;
     const data = new FormData(form);
-    const payload = {username:data.get('username'), roles:data.getAll('roles'), account_scope:data.get('account_scope') || null, venue_scope:(data.get('venue_scope') || '').toUpperCase() || null};
+    const payload = {username:data.get('username'), password:data.get('password'), roles:data.getAll('roles'), account_scope:data.get('account_scope') || null, venue_scope:(data.get('venue_scope') || '').toUpperCase() || null};
     if (!payload.roles.length) { form.querySelector('.form-error').textContent = '至少选择一个岗位。'; return; }
     await withPending(event.submitter, '创建中…', async () => {
-      try { await api('/api/admin/users', {method:'POST', body:JSON.stringify(payload)}); showToast(`${payload.username} 已创建，等待身份源绑定`); await route(); }
+      try { await api('/api/admin/users', {method:'POST', body:JSON.stringify(payload)}); showToast(`${payload.username} 已创建并可使用账户密码登录`); await route(); }
       catch (error) { showApiError(error, form.querySelector('.form-error')); }
     });
   });
   document.querySelectorAll('[data-user-access]').forEach(form => form.addEventListener('submit', async event => {
     event.preventDefault();
     const data = new FormData(form);
-    const payload = {roles:data.getAll('roles'), active:data.get('active') === 'on', account_scope:data.get('account_scope') || null, venue_scope:(data.get('venue_scope') || '').toUpperCase() || null};
+    const payload = {roles:data.getAll('roles'), active:data.get('active') === 'on', account_scope:data.get('account_scope') || null, venue_scope:(data.get('venue_scope') || '').toUpperCase() || null, new_password:data.get('new_password') || null};
     if (!payload.roles.length) { form.querySelector('.form-error').textContent = '启用或停用成员时都要保留至少一个岗位记录。'; return; }
     await withPending(event.submitter, '保存中…', async () => {
       try { await api(`/api/admin/users/${form.dataset.userAccess}/access`, {method:'PUT', body:JSON.stringify(payload)}); showToast('成员权限已保存并写入审计'); await route(); }

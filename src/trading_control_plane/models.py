@@ -36,6 +36,11 @@ class User(Base):
 
     user_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid4)
     username: Mapped[str] = mapped_column(String(120), nullable=False, unique=True)
+    password_hash: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    auth_version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    password_changed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     identity_subject: Mapped[str | None] = mapped_column(String(255), nullable=True, unique=True)
     telegram_chat_id: Mapped[str | None] = mapped_column(String(120), nullable=True, unique=True)
     principal_type: Mapped[str] = mapped_column(String(16), nullable=False)

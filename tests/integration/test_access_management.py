@@ -41,8 +41,9 @@ async def login(client: AsyncClient, username: str) -> None:
 
 async def exercise_access_management(database: Database) -> None:
     admin_id = TradingService(database).bootstrap_admin("admin", now=datetime.now(UTC))
+    app = access_app(database)
     async with AsyncClient(
-        transport=ASGITransport(app=access_app(database)), base_url="http://test"
+        transport=ASGITransport(app=app), base_url="http://test"
     ) as client:
         await login(client, "admin")
         assert (await client.get("/api/capital")).status_code == 200
@@ -52,6 +53,7 @@ async def exercise_access_management(database: Database) -> None:
             "/api/admin/users",
             json={
                 "username": "reviewer-only",
+                "password": "reviewer-only-password",
                 "roles": ["REVIEWER"],
                 "account_scope": "acct-live",
                 "venue_scope": "BINANCE",
@@ -67,10 +69,33 @@ async def exercise_access_management(database: Database) -> None:
                 "venue_scope": "BINANCE",
             }
         ]
+        assert reviewer["password_configured"] is True
+
+        await client.post("/api/auth/logout")
+        wrong_password = await client.post(
+            "/api/auth/login",
+            json={"username": "reviewer-only", "password": "incorrect-password-value"},
+        )
+        assert wrong_password.status_code == 401
+        assert wrong_password.json()["detail"]["error_code"] == "LOGIN_DENIED"
+        assert "reviewer-only" not in wrong_password.text
+        password_login = await client.post(
+            "/api/auth/login",
+            json={"username": "reviewer-only", "password": "reviewer-only-password"},
+        )
+        assert password_login.status_code == 200, password_login.text
+        assert password_login.json()["authentication_method"] == "PASSWORD"
+        assert "HttpOnly" in password_login.headers["set-cookie"]
+        assert "SameSite=strict" in password_login.headers["set-cookie"]
+        await login(client, "admin")
 
         duplicate = await client.post(
             "/api/admin/users",
-            json={"username": "reviewer-only", "roles": ["REVIEWER"]},
+            json={
+                "username": "reviewer-only",
+                "password": "reviewer-only-password",
+                "roles": ["REVIEWER"],
+            },
         )
         assert duplicate.status_code == 409, duplicate.text
         assert duplicate.json()["error"]["code"] == "USERNAME_CONFLICT"
@@ -79,6 +104,7 @@ async def exercise_access_management(database: Database) -> None:
             "/api/admin/users",
             json={
                 "username": "mixed-non-admin",
+                "password": "mixed-non-admin-password",
                 "roles": ["PROPOSER", "REVIEWER", "OPERATOR", "TREASURY_ADMIN"],
             },
         )
@@ -154,7 +180,11 @@ async def exercise_six_identity_permission_matrix(database: Database) -> None:
         }.items():
             response = await admin_http.post(
                 "/api/admin/users",
-                json={"username": username, "roles": roles},
+                json={
+                    "username": username,
+                    "password": f"{username}-password",
+                    "roles": roles,
+                },
             )
             assert response.status_code == 200, response.text
             member_ids[username] = response.json()["user_id"]
