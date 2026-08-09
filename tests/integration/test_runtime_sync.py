@@ -1349,6 +1349,22 @@ def test_runtime_worker_refreshes_perptape_two_venues_and_vault_without_sending(
     assert first.net_worth["complete"] is True
     assert first.net_worth["issues"] == []
 
+    # The full integration suite can run longer than the runtime freshness
+    # window after module-level NOW is captured. Refresh only persisted feed
+    # timing here so this assertion continues to test shared-cache behavior.
+    api_now = datetime.now(UTC)
+    service.record_perptape_feed(
+        perptape_actor,
+        replace(
+            persisted_feed,
+            generated_at=api_now,
+            fetched_at=api_now,
+            next_allowed_at=api_now,
+        ),
+        now=api_now,
+        base_snapshot=persisted_feed,
+    )
+
     async def cached_api_scenario() -> None:
         def must_not_fetch(_url: str, _headers: dict[str, str], _timeout: float) -> dict[str, Any]:
             raise AssertionError("runtime-enabled API must use the shared PostgreSQL feed")

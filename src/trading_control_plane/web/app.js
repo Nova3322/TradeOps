@@ -812,6 +812,7 @@ const apiErrorGuidance = {
   TEAM_CONTEXT_REQUIRED:'请先选择一个当前团队。',
   WORKSPACE_CONTEXT_REQUIRED:'请先选择一个当前 Workspace。',
   TEAM_ACCESS_DENIED:'你不是该团队的有效成员，系统已拒绝切换。',
+  TEAM_SCOPE_DENIED:'该资源不属于当前团队；请切换到正确团队后重试。',
   WORKSPACE_ACCESS_DENIED:'你不是该 Workspace 的有效成员，系统已拒绝切换。',
   CAPABILITY_FORBIDDEN:'当前身份没有查看或执行此操作的权限。',
   LIVE_SCOPE_CONFIGURATION_REQUIRED:'实盘账户或交易所范围尚未配置完整。',

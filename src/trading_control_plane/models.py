@@ -10,6 +10,7 @@ from sqlalchemy import (
     CheckConstraint,
     DateTime,
     ForeignKey,
+    ForeignKeyConstraint,
     Index,
     Integer,
     Numeric,
@@ -247,8 +248,11 @@ class Proposal(Base):
             name="ck_proposals_system_strategy",
         ),
         Index("ix_proposals_status_expires", "status", "expires_at"),
+        Index("ix_proposals_team_status_expires", "team_id", "status", "expires_at"),
+        UniqueConstraint("team_id", "proposal_id", name="uq_proposals_team_identity"),
         Index(
             "uq_proposals_system_candidate",
+            "team_id",
             "source_candidate_id",
             unique=True,
             postgresql_where=text("source = 'SYSTEM' AND source_candidate_id IS NOT NULL"),
@@ -256,6 +260,9 @@ class Proposal(Base):
     )
 
     proposal_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid4)
+    team_id: Mapped[UUID] = mapped_column(
+        ForeignKey("teams.team_id", ondelete="RESTRICT"), nullable=False
+    )
     source: Mapped[str] = mapped_column(String(16), nullable=False)
     environment: Mapped[str] = mapped_column(String(16), nullable=False, default="SHADOW")
     proposer_id: Mapped[UUID] = mapped_column(ForeignKey("users.user_id"), nullable=False)
@@ -302,9 +309,12 @@ class ProposalDefaultConfig(Base):
             "auto_proposal_min_timeframes IN (3, 4)",
             name="ck_proposal_defaults_auto_timeframes",
         ),
-        UniqueConstraint("version", name="uq_proposal_default_configs_version"),
+        UniqueConstraint(
+            "team_id", "version", name="uq_proposal_default_configs_team_version"
+        ),
         Index(
             "uq_proposal_default_configs_active",
+            "team_id",
             "active",
             unique=True,
             postgresql_where=text("active"),
@@ -312,6 +322,9 @@ class ProposalDefaultConfig(Base):
     )
 
     config_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid4)
+    team_id: Mapped[UUID] = mapped_column(
+        ForeignKey("teams.team_id", ondelete="RESTRICT"), nullable=False
+    )
     version: Mapped[int] = mapped_column(Integer, nullable=False)
     environment: Mapped[str] = mapped_column(String(16), nullable=False)
     account_id: Mapped[str] = mapped_column(String(120), nullable=False)
@@ -871,10 +884,19 @@ class RiskDecision(Base):
         CheckConstraint("approved_quantity >= 0", name="ck_risk_decisions_quantity_nonnegative"),
         CheckConstraint("risk_amount >= 0", name="ck_risk_decisions_risk_nonnegative"),
         Index("ix_risk_decisions_proposal_created", "proposal_id", "created_at"),
+        ForeignKeyConstraint(
+            ["team_id", "proposal_id"],
+            ["proposals.team_id", "proposals.proposal_id"],
+            name="fk_risk_decisions_team_proposal",
+            ondelete="CASCADE",
+        ),
     )
 
     decision_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid4)
-    proposal_id: Mapped[UUID] = mapped_column(ForeignKey("proposals.proposal_id"))
+    team_id: Mapped[UUID] = mapped_column(
+        ForeignKey("teams.team_id", ondelete="RESTRICT"), nullable=False
+    )
+    proposal_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), nullable=False)
     policy_id: Mapped[UUID] = mapped_column(ForeignKey("risk_policies.policy_id"))
     input_data: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
     result: Mapped[str] = mapped_column(String(16), nullable=False)
@@ -891,6 +913,11 @@ class TradingAuthorization(Base):
     __tablename__ = "trading_authorizations"
     __table_args__ = (
         UniqueConstraint("proposal_id", name="uq_trading_authorizations_proposal"),
+        UniqueConstraint(
+            "team_id",
+            "authorization_id",
+            name="uq_trading_authorizations_team_identity",
+        ),
         CheckConstraint("direction IN ('LONG','SHORT')", name="ck_authorizations_direction"),
         CheckConstraint(
             "environment IN ('SHADOW','TESTNET','LIVE')",
@@ -906,12 +933,21 @@ class TradingAuthorization(Base):
         CheckConstraint(
             "used_adds >= 0 AND used_adds <= allowed_adds", name="ck_authorizations_adds"
         ),
+        ForeignKeyConstraint(
+            ["team_id", "proposal_id"],
+            ["proposals.team_id", "proposals.proposal_id"],
+            name="fk_trading_authorizations_team_proposal",
+            ondelete="CASCADE",
+        ),
     )
 
     authorization_id: Mapped[UUID] = mapped_column(
         Uuid(as_uuid=True), primary_key=True, default=uuid4
     )
-    proposal_id: Mapped[UUID] = mapped_column(ForeignKey("proposals.proposal_id"))
+    team_id: Mapped[UUID] = mapped_column(
+        ForeignKey("teams.team_id", ondelete="RESTRICT"), nullable=False
+    )
+    proposal_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), nullable=False)
     risk_decision_id: Mapped[UUID] = mapped_column(ForeignKey("risk_decisions.decision_id"))
     account_id: Mapped[str] = mapped_column(String(120), nullable=False)
     venue: Mapped[str] = mapped_column(String(64), nullable=False)
@@ -944,8 +980,21 @@ class Campaign(Base):
         ),
         CheckConstraint("current_target_quantity >= 0", name="ck_campaigns_target_nonnegative"),
         CheckConstraint("target_version >= 0", name="ck_campaigns_target_version_nonnegative"),
+        ForeignKeyConstraint(
+            ["team_id", "proposal_id"],
+            ["proposals.team_id", "proposals.proposal_id"],
+            name="fk_campaigns_team_proposal",
+            ondelete="CASCADE",
+        ),
+        ForeignKeyConstraint(
+            ["team_id", "authorization_id"],
+            ["trading_authorizations.team_id", "trading_authorizations.authorization_id"],
+            name="fk_campaigns_team_authorization",
+            ondelete="CASCADE",
+        ),
         Index(
             "uq_campaigns_one_unclosed_scope",
+            "team_id",
             "account_id",
             "venue",
             "environment",
@@ -956,10 +1005,11 @@ class Campaign(Base):
     )
 
     campaign_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid4)
-    proposal_id: Mapped[UUID] = mapped_column(ForeignKey("proposals.proposal_id"))
-    authorization_id: Mapped[UUID] = mapped_column(
-        ForeignKey("trading_authorizations.authorization_id")
+    team_id: Mapped[UUID] = mapped_column(
+        ForeignKey("teams.team_id", ondelete="RESTRICT"), nullable=False
     )
+    proposal_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), nullable=False)
+    authorization_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), nullable=False)
     account_id: Mapped[str] = mapped_column(String(120), nullable=False)
     venue: Mapped[str] = mapped_column(String(64), nullable=False)
     environment: Mapped[str] = mapped_column(String(16), nullable=False)
@@ -1481,6 +1531,12 @@ class AuditEvent(Base):
         Index("ix_audit_events_correlation", "correlation_id", "created_at"),
         Index("ix_audit_events_workspace_created", "workspace_id", "created_at"),
         Index("ix_audit_events_team_created", "team_id", "created_at"),
+        Index(
+            "ix_audit_events_team_account_created",
+            "team_id",
+            "account_id",
+            "created_at",
+        ),
     )
 
     audit_event_id: Mapped[UUID] = mapped_column(
@@ -1492,6 +1548,7 @@ class AuditEvent(Base):
     team_id: Mapped[UUID | None] = mapped_column(
         ForeignKey("teams.team_id"), nullable=True
     )
+    account_id: Mapped[str | None] = mapped_column(String(120), nullable=True)
     actor_id: Mapped[str] = mapped_column(String(255), nullable=False)
     event_type: Mapped[str] = mapped_column(String(120), nullable=False)
     object_type: Mapped[str] = mapped_column(String(120), nullable=False)

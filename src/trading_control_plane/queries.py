@@ -85,6 +85,14 @@ class TradingQueries:
         self.database = database
         self.service = TradingService(database)
 
+    def _active_scope_ids(self, user_id: UUID) -> tuple[UUID, UUID]:
+        context = self.user_context(user_id)
+        workspace = context.get("active_workspace")
+        team = context.get("active_team")
+        if not isinstance(workspace, dict) or not isinstance(team, dict):
+            raise DomainRejected("TEAM_CONTEXT_REQUIRED", "select an active team")
+        return UUID(str(workspace["workspace_id"])), UUID(str(team["team_id"]))
+
     def user_by_username(self, username: str) -> User:
         with self.database.session_factory() as session:
             user = session.scalar(select(User).where(User.username == username))
@@ -438,10 +446,12 @@ class TradingQueries:
         now: datetime | None = None,
     ) -> list[dict[str, Any]]:
         current_time = now or datetime.now(UTC)
+        workspace_id, team_id = self._active_scope_ids(user_id)
         with self.database.session_factory() as session:
             statement = (
                 select(Proposal, Instrument)
                 .join(Instrument, Instrument.instrument_id == Proposal.instrument_id)
+                .where(Proposal.team_id == team_id)
                 .order_by(Proposal.created_at.desc())
             )
             if status in {"DRAFT", "PENDING_REVIEW"}:
@@ -462,6 +472,7 @@ class TradingQueries:
             elif status is not None:
                 statement = statement.where(Proposal.status == status)
             values = session.execute(statement).all()
+            proposal_ids = [proposal.proposal_id for proposal, _instrument in values]
             proposer_names = {
                 item.user_id: item.username
                 for item in session.scalars(
@@ -471,7 +482,12 @@ class TradingQueries:
                 ).all()
             }
             reviewed_proposal_ids = set(
-                session.scalars(select(Approval.proposal_id).where(Approval.reviewer_id == user_id))
+                session.scalars(
+                    select(Approval.proposal_id).where(
+                        Approval.reviewer_id == user_id,
+                        Approval.proposal_id.in_(proposal_ids),
+                    )
+                )
             )
             reused_proposal_ids = set(
                 session.scalars(
@@ -479,18 +495,24 @@ class TradingQueries:
                         AuditEvent.event_type == "PROPOSAL_DUPLICATE_REUSED",
                         AuditEvent.object_type == "Proposal",
                         AuditEvent.actor_id == str(user_id),
+                        AuditEvent.team_id == team_id,
                     )
                 )
             )
             approval_counts = dict(
                 session.execute(
-                    select(Approval.proposal_id, func.count(Approval.approval_id)).group_by(
-                        Approval.proposal_id
-                    )
+                    select(Approval.proposal_id, func.count(Approval.approval_id))
+                    .where(Approval.proposal_id.in_(proposal_ids))
+                    .group_by(Approval.proposal_id)
                 ).all()
             )
             campaign_by_proposal = dict(
-                session.execute(select(Campaign.proposal_id, Campaign.campaign_id)).all()
+                session.execute(
+                    select(Campaign.proposal_id, Campaign.campaign_id).where(
+                        Campaign.team_id == team_id,
+                        Campaign.proposal_id.in_(proposal_ids),
+                    )
+                ).all()
             )
             result: list[dict[str, Any]] = []
             for proposal, instrument in values:
@@ -498,6 +520,7 @@ class TradingQueries:
                     continue
                 effective_status = _effective_proposal_status(proposal, current_time)
                 summary = self._proposal_summary(proposal, instrument)
+                summary["workspace_id"] = str(workspace_id)
                 summary["proposer_username"] = proposer_names.get(proposal.proposer_id)
                 summary["status"] = effective_status
                 summary["approval_count"] = int(approval_counts.get(proposal.proposal_id, 0))
@@ -532,12 +555,14 @@ class TradingQueries:
     ) -> list[dict[str, Any]]:
         """Return the current visible Perptape proposal occupying each trading scope."""
 
+        workspace_id, team_id = self._active_scope_ids(user_id)
         with self.database.session_factory() as session:
             values = session.execute(
                 select(Proposal, Instrument)
                 .join(Instrument, Instrument.instrument_id == Proposal.instrument_id)
                 .where(
                     Proposal.source == "SYSTEM",
+                    Proposal.team_id == team_id,
                     Proposal.strategy_id.in_(("perptape", "perptape-resonance")),
                     Proposal.environment == "LIVE",
                     Proposal.status.in_(("DRAFT", "PENDING_REVIEW")),
@@ -559,6 +584,8 @@ class TradingQueries:
                 if current is None:
                     grouped[key] = {
                         "proposal_id": str(proposal.proposal_id),
+                        "workspace_id": str(workspace_id),
+                        "team_id": str(proposal.team_id),
                         "status": _effective_proposal_status(proposal, now),
                         "venue": proposal.venue,
                         "symbol": instrument.symbol,
@@ -579,10 +606,13 @@ class TradingQueries:
         now: datetime | None = None,
     ) -> dict[str, Any]:
         current_time = now or datetime.now(UTC)
+        workspace_id, team_id = self._active_scope_ids(user_id)
         with self.database.session_factory() as session:
             proposal = session.get(Proposal, proposal_id)
             if proposal is None:
                 raise DomainRejected("PROPOSAL_NOT_FOUND", "proposal does not exist")
+            if proposal.team_id != team_id:
+                raise DomainRejected("TEAM_SCOPE_DENIED", "proposal is outside active team")
             if not self.service.can_user(user_id, "view", proposal.account_id, proposal.venue):
                 raise DomainRejected("RBAC_DENIED", "proposal is outside the current scope")
             approvals = session.scalars(
@@ -640,6 +670,7 @@ class TradingQueries:
             result = self._proposal_summary(
                 proposal, session.get(Instrument, proposal.instrument_id)
             )
+            result["workspace_id"] = str(workspace_id)
             effective_status = _effective_proposal_status(proposal, current_time)
             reused_by_current_user = session.scalar(
                 select(AuditEvent.audit_event_id)
@@ -667,6 +698,9 @@ class TradingQueries:
                     "approvals": [
                         {
                             "approval_id": str(item.approval_id),
+                            "workspace_id": str(workspace_id),
+                            "team_id": str(proposal.team_id),
+                            "account_id": proposal.account_id,
                             "reviewer_id": str(item.reviewer_id),
                             "reviewer_username": proposal_users.get(item.reviewer_id),
                             "decision": item.decision,
@@ -691,6 +725,9 @@ class TradingQueries:
                     if risk is None
                     else {
                         "decision_id": str(risk.decision_id),
+                        "workspace_id": str(workspace_id),
+                        "team_id": str(risk.team_id),
+                        "account_id": proposal.account_id,
                         "result": risk.result,
                         "approved_quantity": str(risk.approved_quantity),
                         "risk_amount": str(risk.risk_amount),
@@ -740,6 +777,9 @@ class TradingQueries:
                     if authorization is None
                     else {
                         "authorization_id": str(authorization.authorization_id),
+                        "workspace_id": str(workspace_id),
+                        "team_id": str(authorization.team_id),
+                        "account_id": authorization.account_id,
                         "environment": authorization.environment,
                         "created_at": _iso(authorization.created_at),
                         "quantity_limit": str(authorization.quantity_limit),
@@ -761,6 +801,9 @@ class TradingQueries:
                     if campaign is None or initial_intent is None
                     else {
                         "campaign_id": str(campaign.campaign_id),
+                        "workspace_id": str(workspace_id),
+                        "team_id": str(campaign.team_id),
+                        "account_id": campaign.account_id,
                         "campaign_status": campaign.status,
                         "intent_id": str(initial_intent.intent_id),
                         "intent_status": initial_intent.status,
@@ -797,7 +840,19 @@ class TradingQueries:
                 ).all()
             )
             assignments = session.scalars(
-                select(RoleAssignment).where(RoleAssignment.role == Role.REVIEWER.value)
+                select(RoleAssignment)
+                .join(
+                    TeamMembership,
+                    and_(
+                        TeamMembership.team_id == RoleAssignment.team_id,
+                        TeamMembership.user_id == RoleAssignment.user_id,
+                    ),
+                )
+                .where(
+                    RoleAssignment.team_id == proposal.team_id,
+                    RoleAssignment.role == Role.REVIEWER.value,
+                    TeamMembership.active,
+                )
             ).all()
             reviewer_ids = {
                 item.user_id
@@ -1479,8 +1534,12 @@ class TradingQueries:
             raise DomainRejected("ENVIRONMENT_INVALID", "results require an exact environment")
         if from_time is not None and to_time is not None and from_time > to_time:
             raise DomainRejected("TIME_RANGE_INVALID", "results from_time must not exceed to_time")
+        workspace_id, team_id = self._active_scope_ids(user_id)
         with self.database.session_factory() as session:
-            campaign_query = select(Campaign).where(Campaign.environment == environment)
+            campaign_query = select(Campaign).where(
+                Campaign.environment == environment,
+                Campaign.team_id == team_id,
+            )
             for field, value in (
                 (Campaign.venue, venue),
                 (Campaign.account_id, account_id),
@@ -1565,6 +1624,8 @@ class TradingQueries:
                 rows.append(
                     {
                         "campaign_id": str(campaign.campaign_id),
+                        "workspace_id": str(workspace_id),
+                        "team_id": str(team_id),
                         "environment": campaign.environment,
                         "actuality": {
                             "SHADOW": "SYNTHETIC_RECORDED_FACTS",
@@ -1660,12 +1721,16 @@ class TradingQueries:
     ) -> list[dict[str, Any]]:
         if environment not in {"SHADOW", "TESTNET", "LIVE"}:
             raise DomainRejected("ENVIRONMENT_INVALID", "audit requires an exact environment")
+        workspace_id, team_id = self._active_scope_ids(user_id)
         with self.database.session_factory() as session:
             object_ids: set[str] = set()
             proposals = [
                 item
                 for item in session.scalars(
-                    select(Proposal).where(Proposal.environment == environment)
+                    select(Proposal).where(
+                        Proposal.environment == environment,
+                        Proposal.team_id == team_id,
+                    )
                 ).all()
                 if self.service.can_user(user_id, "view", item.account_id, item.venue)
             ]
@@ -1674,7 +1739,10 @@ class TradingQueries:
             campaigns = [
                 item
                 for item in session.scalars(
-                    select(Campaign).where(Campaign.environment == environment)
+                    select(Campaign).where(
+                        Campaign.environment == environment,
+                        Campaign.team_id == team_id,
+                    )
                 ).all()
                 if self.service.can_user(user_id, "view", item.account_id, item.venue)
             ]
@@ -1776,7 +1844,11 @@ class TradingQueries:
                 return []
             events = session.scalars(
                 select(AuditEvent)
-                .where(AuditEvent.object_id.in_(object_ids))
+                .where(
+                    AuditEvent.object_id.in_(object_ids),
+                    AuditEvent.workspace_id == workspace_id,
+                    AuditEvent.team_id == team_id,
+                )
                 .order_by(AuditEvent.created_at.desc(), AuditEvent.audit_event_id)
                 .limit(limit)
             ).all()
@@ -1794,6 +1866,9 @@ class TradingQueries:
             return [
                 {
                     "audit_event_id": str(item.audit_event_id),
+                    "workspace_id": str(workspace_id),
+                    "team_id": str(team_id),
+                    "account_id": item.account_id,
                     "actor_id": item.actor_id,
                     "actor": actors.get(parsed_actor_ids[item.actor_id], item.actor_id)
                     if item.actor_id in parsed_actor_ids
@@ -1888,23 +1963,33 @@ class TradingQueries:
             }
 
     def list_campaigns(self, user_id: UUID) -> list[dict[str, Any]]:
+        workspace_id, team_id = self._active_scope_ids(user_id)
         with self.database.session_factory() as session:
             values = session.execute(
                 select(Campaign, Instrument)
                 .outerjoin(Instrument, Instrument.instrument_id == Campaign.instrument_id)
+                .where(Campaign.team_id == team_id)
                 .order_by(Campaign.updated_at.desc(), Campaign.campaign_id)
             ).all()
-            return [
-                self._campaign_summary(campaign, instrument)
-                for campaign, instrument in values
-                if self.service.can_user(user_id, "view", campaign.account_id, campaign.venue)
-            ]
+            result: list[dict[str, Any]] = []
+            for campaign, instrument in values:
+                if not self.service.can_user(
+                    user_id, "view", campaign.account_id, campaign.venue
+                ):
+                    continue
+                summary = self._campaign_summary(campaign, instrument)
+                summary["workspace_id"] = str(workspace_id)
+                result.append(summary)
+            return result
 
     def campaign_detail(self, user_id: UUID, campaign_id: UUID) -> dict[str, Any]:
+        workspace_id, team_id = self._active_scope_ids(user_id)
         with self.database.session_factory() as session:
             campaign = session.get(Campaign, campaign_id)
             if campaign is None:
                 raise DomainRejected("CAMPAIGN_NOT_FOUND", "campaign does not exist")
+            if campaign.team_id != team_id:
+                raise DomainRejected("TEAM_SCOPE_DENIED", "campaign is outside active team")
             if not self.service.can_user(user_id, "view", campaign.account_id, campaign.venue):
                 raise DomainRejected("RBAC_DENIED", "campaign is outside the current scope")
             instrument = session.get(Instrument, campaign.instrument_id)
@@ -1970,6 +2055,7 @@ class TradingQueries:
             lease = session.get(SenderLease, scope)
             orders_by_intent = {item.order_intent_id: item for item in orders}
             result = self._campaign_summary(campaign, instrument)
+            result["workspace_id"] = str(workspace_id)
             result.update(
                 {
                     "instrument": None
@@ -1994,6 +2080,9 @@ class TradingQueries:
                     "reservations": [
                         {
                             "reservation_id": str(item.reservation_id),
+                            "workspace_id": str(workspace_id),
+                            "team_id": str(campaign.team_id),
+                            "account_id": campaign.account_id,
                             "status": item.status,
                             "amount": str(item.amount),
                             "version": item.version,
@@ -2005,6 +2094,9 @@ class TradingQueries:
                     "intents": [
                         {
                             "intent_id": str(item.intent_id),
+                            "workspace_id": str(workspace_id),
+                            "team_id": str(campaign.team_id),
+                            "account_id": campaign.account_id,
                             "kind": item.kind,
                             "side": item.side,
                             "quantity": str(item.quantity),
@@ -2019,13 +2111,21 @@ class TradingQueries:
                             "version": item.version,
                             "created_at": _iso(item.created_at),
                             "updated_at": _iso(item.updated_at),
-                            "order": self._order_summary(orders_by_intent.get(item.intent_id)),
+                            "order": self._order_summary(
+                                orders_by_intent.get(item.intent_id),
+                                workspace_id=workspace_id,
+                                team_id=campaign.team_id,
+                                account_id=campaign.account_id,
+                            ),
                         }
                         for item in intents
                     ],
                     "fills": [
                         {
                             "fill_id": str(item.venue_fill_fact_id),
+                            "workspace_id": str(workspace_id),
+                            "team_id": str(campaign.team_id),
+                            "account_id": campaign.account_id,
                             "venue_fill_id": item.venue_fill_id,
                             "intent_id": str(item.order_intent_id),
                             "side": item.side,
@@ -2042,6 +2142,9 @@ class TradingQueries:
                     if position is None
                     else {
                         "position_id": str(position.position_id),
+                        "workspace_id": str(workspace_id),
+                        "team_id": str(campaign.team_id),
+                        "account_id": campaign.account_id,
                         "quantity": str(position.quantity),
                         "average_entry_price": str(position.average_entry_price),
                         "mark_price": str(position.mark_price),
@@ -2062,6 +2165,9 @@ class TradingQueries:
                     "funding": [
                         {
                             "venue_payment_id": item.venue_payment_id,
+                            "workspace_id": str(workspace_id),
+                            "team_id": str(campaign.team_id),
+                            "account_id": campaign.account_id,
                             "amount": str(item.amount),
                             "currency": item.currency,
                             "paid_at": _iso(item.paid_at),
@@ -2072,6 +2178,9 @@ class TradingQueries:
                     if reconciliation is None
                     else {
                         "reconciliation_id": str(reconciliation.reconciliation_id),
+                        "workspace_id": str(workspace_id),
+                        "team_id": str(campaign.team_id),
+                        "account_id": campaign.account_id,
                         "status": reconciliation.status,
                         "is_computed": reconciliation.is_computed,
                         "differences": reconciliation.differences,
@@ -2131,6 +2240,7 @@ class TradingQueries:
             return result
 
     def campaign_id_for_intent(self, user_id: UUID, intent_id: UUID) -> UUID:
+        _workspace_id, team_id = self._active_scope_ids(user_id)
         with self.database.session_factory() as session:
             intent = session.get(OrderIntent, intent_id)
             if intent is None:
@@ -2138,6 +2248,8 @@ class TradingQueries:
             campaign = session.get(Campaign, intent.campaign_id)
             if campaign is None:
                 raise DomainRejected("CAMPAIGN_NOT_FOUND", "intent campaign is missing")
+            if campaign.team_id != team_id:
+                raise DomainRejected("TEAM_SCOPE_DENIED", "intent is outside active team")
             if not self.service.can_user(user_id, "view", campaign.account_id, campaign.venue):
                 raise DomainRejected("RBAC_DENIED", "intent is outside the current scope")
             return campaign.campaign_id
@@ -2581,11 +2693,20 @@ class TradingQueries:
         }
 
     @staticmethod
-    def _order_summary(order: VenueOrder | None) -> dict[str, Any] | None:
+    def _order_summary(
+        order: VenueOrder | None,
+        *,
+        workspace_id: UUID | None = None,
+        team_id: UUID | None = None,
+        account_id: str | None = None,
+    ) -> dict[str, Any] | None:
         if order is None:
             return None
         return {
             "venue_order_fact_id": str(order.venue_order_fact_id),
+            "workspace_id": None if workspace_id is None else str(workspace_id),
+            "team_id": None if team_id is None else str(team_id),
+            "account_id": account_id or order.account_id,
             "venue_order_id": order.venue_order_id,
             "client_order_id": order.client_order_id,
             "status": order.status,
@@ -2603,6 +2724,7 @@ class TradingQueries:
     ) -> dict[str, Any]:
         return {
             "campaign_id": str(campaign.campaign_id),
+            "team_id": str(campaign.team_id),
             "proposal_id": str(campaign.proposal_id),
             "authorization_id": str(campaign.authorization_id),
             "account_id": campaign.account_id,
@@ -2652,6 +2774,7 @@ class TradingQueries:
             estimated_notional = None
         return {
             "proposal_id": str(proposal.proposal_id),
+            "team_id": str(proposal.team_id),
             "source": proposal.source,
             "environment": proposal.environment,
             "proposer_id": str(proposal.proposer_id),

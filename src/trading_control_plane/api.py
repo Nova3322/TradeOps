@@ -228,6 +228,7 @@ def _domain_status(code: str) -> int:
         "WORKSPACE_ACCESS_DENIED",
         "WORKSPACE_ADMIN_REQUIRED",
         "TEAM_ACCESS_DENIED",
+        "TEAM_SCOPE_DENIED",
         "WORKSPACE_MEMBERSHIP_INACTIVE",
     }:
         return status.HTTP_403_FORBIDDEN

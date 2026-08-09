@@ -11,7 +11,7 @@ from sqlalchemy import select
 from test_m7_capital_center import build_app, login, seed
 from test_m8_capital_automation import close_profitable_testnet_campaign
 
-from trading_control_plane.database import Database
+from trading_control_plane.database import REQUIRED_SCHEMA_REVISION, Base, Database
 from trading_control_plane.domain import DomainRejected
 from trading_control_plane.models import Campaign, FundingPayment, OrderIntent, VenueFill
 from trading_control_plane.queries import TradingQueries
@@ -146,8 +146,8 @@ def test_results_are_environment_separated_and_derive_costs_curve_and_audit(
 
     runtime = queries.runtime_snapshot(ids["operator"])
     assert runtime["database_ready"] is True
-    assert runtime["schema_revision"] == "20260809_0015"
-    assert runtime["business_table_count"] == 33
+    assert runtime["schema_revision"] == REQUIRED_SCHEMA_REVISION
+    assert runtime["business_table_count"] == len(Base.metadata.tables)
     assert set(runtime["capability_gates"]) == {
         "LIVE_ORDER_SEND",
         "CAPITAL_TRANSFER",

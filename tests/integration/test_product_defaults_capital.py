@@ -830,7 +830,22 @@ def test_proposal_defaults_and_direct_capital_are_permissioned_audited_and_block
                 for item in occupied.json()["data"]
                 if item["candidate_id"] == candidate.candidate_id
             )
-            assert occupied_candidate["active_proposal"] == {
+            active_proposal = occupied_candidate["active_proposal"]
+            assert active_proposal["workspace_id"]
+            assert active_proposal["team_id"]
+            assert {
+                key: active_proposal[key]
+                for key in (
+                    "proposal_id",
+                    "status",
+                    "venue",
+                    "symbol",
+                    "direction",
+                    "expires_at",
+                    "source_observed_at",
+                    "active_count",
+                )
+            } == {
                 "proposal_id": proposal_id,
                 "status": "PENDING_REVIEW",
                 "venue": "BINANCE",

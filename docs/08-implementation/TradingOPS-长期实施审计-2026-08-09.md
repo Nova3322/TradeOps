@@ -12,12 +12,12 @@
 | 领域 | 当前真源 | 已具备 | 当前缺口 / 处理原则 |
 | --- | --- | --- | --- |
 | 身份 | `User`、密码认证、短期 Session | HUMAN / SERVICE、scrypt、会话版本撤销 | 复用 `User` 表达 Agent；不新建 Agent 身份真源 |
-| 权限 | `RoleAssignment`、`ROLE_ACTIONS`、服务端 `_require_role` | 六类岗位、账户/交易所范围、默认拒绝 | 当前全局生效；增加 Workspace / Team 范围后由同一授权器裁决，不另建平行 ACL |
-| 提案 | `Proposal`、`CommandReceipt` | 冻结载荷、版本、语义哈希、幂等、有效期 | 增加团队、账户、策略和信号来源绑定；不复制提案状态机 |
+| 权限 | `RoleAssignment`、`ROLE_ACTIONS`、服务端 `_require_role` | 六类岗位、团队/账户/交易所范围、默认拒绝；角色只在当前团队计算 | 后续把持久化账户根接入同一授权器，不另建平行 ACL |
+| 提案 | `Proposal`、`CommandReceipt` | 冻结载荷、版本、语义哈希、幂等、有效期；提案—风控—授权—Campaign 根已由团队约束 | 账户、策略和信号配置继续引用该状态机，不复制提案真源 |
 | 审核 | `Approval`、`review_proposal` | 服务端阻止普通创建者自审、高风险双审核 | 审计发现 SYSTEM_ADMIN 本人提案直批旁路；本批次删除 API、服务方法和页面入口 |
 | 风控 | `RiskPolicy`、`RiskDecision`、`RiskReservation` | 版本化总风险、事实新鲜度、状态机、原子占用 | 扩展单笔最大亏损、连续亏损、冷却期及团队/账户限制；仍由同一 Risk Engine 拒绝 |
 | 账户事实 | `account_id + venue` 贯穿提案、授权、任务、订单、仓位、权益与报表 | 账户范围已进入多数权限与执行检查 | 缺少持久化交易所账户与加密凭据；同场所多账户不能由进程级配置准确表达，因此需新增独立账户实体 |
-| 审计 | `AuditEvent` | actor、对象、版本、correlation、idempotency key | 增加 `team_id` 与账户范围；继续使用统一追加事件流 |
+| 审计 | `AuditEvent` | actor、对象、版本、correlation、idempotency key、Workspace、Team；交易链事件带账户范围 | 后续为账户/资金独立根补齐同一范围；继续使用统一追加事件流 |
 | 执行 | Proposal → Approval → Risk → Authorization → Intent → Venue facts / Reconciliation | Binance、Hyperliquid 受 Gate 控制的执行链 | OKX、Bybit 实现同一 Venue Port；不新建第二套 OMS 或 Risk Engine |
 | 信号 | `PerptapeFeed`、实时机会页 | 缓存版本、新鲜度、只读同步、冻结系统提案 | 当前全局单 Key；需新增团队信号源配置。Webhook 只持久化已验证信号，暂不自动创建提案 |
 | 通知 | Telegram 发送与去重键 | 提案/资金通知、审核链接 | 统一事件 Outbox 后扩展 Slack、Lark、Email；渠道不进入权限主体或交易链 |
@@ -38,7 +38,7 @@
 
 ## 4. Workspace / 团队隔离迁移原则
 
-- 先创建默认 Workspace 与默认团队，把现有权限及根聚合回填到该范围，再把业务根聚合的 `workspace_id` / `team_id` 改为非空。
+- 先创建默认 Workspace 与默认团队，把现有权限及根聚合回填到该范围；业务根只持久化非空 `team_id`，`workspace_id` 由 Team 唯一派生，避免两个可漂移真源。API 对外物化 Workspace、Team、Account 三层范围。
 - 请求必须携带或从会话选择当前 Workspace 与团队；服务端验证 Workspace 成员、Team 成员和团队角色三层状态。
 - 权限顺序固定为 `Workspace → Team → Account → Venue → Action`；同一用户在不同团队的角色不继承、不合并。
 - Workspace 管理员只管理组织与团队；跨团队汇总使用显式授权路径，不自动获得团队交易、风控或资金动作。
@@ -66,3 +66,12 @@
 3. **后端 API**：跨团队、跨账户、越权、自审、重放、幂等冲突和陈旧版本均由服务端拒绝。
 4. **实际页面 / 端到端运行**：真实登录和团队切换路径，页面状态与 API/数据库一致，不把旧缓存标为实时。
 5. **自动化测试**：单元、集成、契约、浏览器、响应式与可访问性；UI 阶段另保留深浅主题截图。
+
+## 7. 已落地迁移与当前阻断
+
+- `20260809_0016`：新增 Workspace、Team、成员关系和团队化角色；现有用户、角色和审计回填默认范围。新团队 `trading_enabled=false`，账户与风险根尚未配置时拒绝业务动作。
+- `20260810_0017`：为 Proposal、ProposalDefaultConfig、RiskDecision、TradingAuthorization、Campaign 增加非空团队根和复合外键；系统候选去重、默认配置版本、未关闭 Campaign 唯一性全部按团队计算。
+- Proposal / Campaign 查询、实际结果和审计时间线按当前团队过滤；跨团队详情与变更返回 `TEAM_SCOPE_DENIED`。订单等子对象不重复存 Team，而是经 Campaign 外键派生并在 API 中物化完整范围。
+- `AuditEvent.account_id` 对交易链事件由服务端对象真源推导；组织级事件保留为空，不伪造账户。
+- 创建者自审旁路已从服务端和页面移除；团队切换后即使账户字符串相同，也不能读取、提交、审核或执行另一团队的提案。
+- 当前阻断：持久化 ExchangeAccount、团队风险政策及账户事实仍未完成，因此新团队继续不可增险；这不是“连接正常”或“交易就绪”。

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
 from alembic import command
@@ -13,6 +13,7 @@ from trading_control_plane.database import REQUIRED_SCHEMA_REVISION, Base, Datab
 from trading_control_plane.models import (
     AuditEvent,
     CapabilityGate,
+    Proposal,
     RoleAssignment,
     Team,
     TeamMembership,
@@ -55,7 +56,7 @@ def test_initial_schema_seeds_only_disabled_capability_gates(database: Database)
     }
 
 
-def test_workspace_team_migration_backfills_existing_users_roles_and_audit(
+def test_scope_migrations_backfill_existing_users_roles_proposals_and_audit(
     database: Database,
 ) -> None:
     config = Config("alembic.ini")
@@ -63,6 +64,9 @@ def test_workspace_team_migration_backfills_existing_users_roles_and_audit(
     user_id = uuid4()
     assignment_id = uuid4()
     audit_id = uuid4()
+    proposal_audit_id = uuid4()
+    instrument_id = uuid4()
+    proposal_id = uuid4()
     now = datetime.now(UTC)
     with database.engine.begin() as connection:
         connection.execute(
@@ -97,6 +101,57 @@ def test_workspace_team_migration_backfills_existing_users_roles_and_audit(
                 "created_at": now,
             },
         )
+        connection.execute(
+            text(
+                "INSERT INTO instruments "
+                "(instrument_id, venue, symbol, tick_size, lot_size, minimum_notional, "
+                "contract_multiplier, quote_currency, collateral_currency, active, "
+                "protection_supported, updated_at) VALUES "
+                "(:instrument_id, 'BINANCE', 'BTCUSDT', 0.1, 0.001, 5, 1, "
+                "'USDT', 'USDT', true, true, :updated_at)"
+            ),
+            {"instrument_id": instrument_id, "updated_at": now},
+        )
+        connection.execute(
+            text(
+                "INSERT INTO proposals "
+                "(proposal_id, source, environment, proposer_id, status, version, "
+                "risk_tier, account_id, venue, instrument_id, direction, quantity, "
+                "max_risk, frozen_payload, semantic_hash, expires_at, correlation_id, "
+                "created_at, updated_at) VALUES "
+                "(:proposal_id, 'MANUAL', 'SHADOW', :proposer_id, 'DRAFT', 1, "
+                "'LOW', 'legacy-account', 'BINANCE', :instrument_id, 'LONG', 0.01, "
+                "10, CAST(:frozen_payload AS jsonb), :semantic_hash, :expires_at, "
+                ":correlation_id, :created_at, :updated_at)"
+            ),
+            {
+                "proposal_id": proposal_id,
+                "proposer_id": user_id,
+                "instrument_id": instrument_id,
+                "frozen_payload": '{"legacy": true}',
+                "semantic_hash": "0" * 64,
+                "expires_at": now + timedelta(hours=1),
+                "correlation_id": uuid4(),
+                "created_at": now,
+                "updated_at": now,
+            },
+        )
+        connection.execute(
+            text(
+                "INSERT INTO audit_events "
+                "(audit_event_id, actor_id, event_type, object_type, object_id, reason, "
+                "correlation_id, object_version, created_at) VALUES "
+                "(:audit_id, :actor_id, 'PROPOSAL_CREATED', 'Proposal', :object_id, "
+                "'legacy proposal', :correlation_id, 1, :created_at)"
+            ),
+            {
+                "audit_id": proposal_audit_id,
+                "actor_id": str(user_id),
+                "object_id": str(proposal_id),
+                "correlation_id": uuid4(),
+                "created_at": now,
+            },
+        )
 
     command.upgrade(config, "head")
 
@@ -106,6 +161,8 @@ def test_workspace_team_migration_backfills_existing_users_roles_and_audit(
         team = session.scalar(select(Team).where(Team.slug == "default"))
         assignment = session.get(RoleAssignment, assignment_id)
         audit = session.get(AuditEvent, audit_id)
+        proposal = session.get(Proposal, proposal_id)
+        proposal_audit = session.get(AuditEvent, proposal_audit_id)
         assert user is not None and workspace is not None and team is not None
         assert user.active_workspace_id == workspace.workspace_id
         assert user.active_team_id == team.team_id
@@ -114,6 +171,12 @@ def test_workspace_team_migration_backfills_existing_users_roles_and_audit(
         assert assignment is not None and assignment.team_id == team.team_id
         assert audit is not None and audit.workspace_id == workspace.workspace_id
         assert audit.team_id == team.team_id
+        assert audit.account_id is None
+        assert proposal is not None and proposal.team_id == team.team_id
+        assert proposal_audit is not None
+        assert proposal_audit.workspace_id == workspace.workspace_id
+        assert proposal_audit.team_id == team.team_id
+        assert proposal_audit.account_id == "legacy-account"
         assert session.scalar(
             select(WorkspaceMembership).where(
                 WorkspaceMembership.workspace_id == workspace.workspace_id,
