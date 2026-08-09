@@ -28,6 +28,10 @@ from trading_control_plane.capital import (
     DirectCapitalPlan,
     evaluate_capital_automation,
 )
+from trading_control_plane.credentials import (
+    SUPPORTED_EXCHANGE_VENUES,
+    CredentialCipher,
+)
 from trading_control_plane.database import Database
 from trading_control_plane.domain import (
     AddCandidateFacts,
@@ -100,6 +104,7 @@ from trading_control_plane.models import (
     CommandReceipt,
     DirectCapitalConfiguration,
     DirectCapitalOperation,
+    ExchangeAccount,
     FundingPayment,
     Instrument,
     OrderIntent,
@@ -148,7 +153,17 @@ from trading_control_plane.perptape import (
 CAPITAL_HISTORY_MIN_INTERVAL = timedelta(minutes=1)
 PASSWORD_HASHER = PasswordHasher()
 SCOPE_SLUG_PATTERN = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,78}[a-z0-9])?$")
-TEAM_SETUP_ACTIONS = frozenset({"team.view", "team.manage", "user.manage", "role.manage"})
+TEAM_SETUP_ACTIONS = frozenset(
+    {
+        "team.view",
+        "team.manage",
+        "user.manage",
+        "role.manage",
+        "venue.view",
+        "account.manage",
+        "account.credentials.manage",
+    }
+)
 
 ACTIVE_INTENT_STATUSES = {
     OrderIntentStatus.PENDING.value,
@@ -402,8 +417,10 @@ class TradingService:
         database: Database,
         *,
         authoritative_live_accounts: dict[str, str] | None = None,
+        credential_encryption_key: str | None = None,
     ) -> None:
         self.database = database
+        self.credential_cipher = CredentialCipher(credential_encryption_key)
         self.authoritative_live_accounts = {
             venue.upper(): account_id
             for venue, account_id in (authoritative_live_accounts or {}).items()
@@ -965,6 +982,319 @@ class TradingService:
                 now=now,
             )
             return team.team_id
+
+    @staticmethod
+    def _exchange_account_definition(
+        account_id: str,
+        venue: str,
+        label: str | None,
+    ) -> tuple[str, str, str]:
+        normalized_account_id = account_id.strip()
+        normalized_venue = venue.strip().upper()
+        normalized_label = " ".join((label or normalized_account_id).strip().split())
+        if (
+            not normalized_account_id
+            or normalized_account_id != account_id
+            or len(normalized_account_id) > 120
+            or ":" in normalized_account_id
+        ):
+            _reject(
+                "EXCHANGE_ACCOUNT_INVALID",
+                "account ID must be exact, non-empty, at most 120 characters, and contain no colon",
+            )
+        if normalized_venue not in SUPPORTED_EXCHANGE_VENUES:
+            _reject("EXCHANGE_VENUE_UNSUPPORTED", "exchange venue is unsupported")
+        if not normalized_label or len(normalized_label) > 120:
+            _reject("EXCHANGE_ACCOUNT_INVALID", "account label must contain 1-120 characters")
+        return normalized_account_id, normalized_venue, normalized_label
+
+    def _ensure_exchange_account_reference(
+        self,
+        session: Session,
+        *,
+        team: Team,
+        actor_id: UUID,
+        account_id: str,
+        venue: str,
+        now: datetime,
+    ) -> ExchangeAccount:
+        normalized_account_id, normalized_venue, label = self._exchange_account_definition(
+            account_id, venue, account_id
+        )
+        session.execute(
+            text("SELECT pg_advisory_xact_lock(:key)"),
+            {
+                "key": _advisory_lock_key(
+                    str(team.team_id),
+                    "exchange-account-reference",
+                    f"{normalized_account_id}:{normalized_venue}",
+                )
+            },
+        )
+        account = session.scalar(
+            select(ExchangeAccount).where(
+                ExchangeAccount.team_id == team.team_id,
+                ExchangeAccount.account_id == normalized_account_id,
+                ExchangeAccount.venue == normalized_venue,
+            )
+        )
+        if account is not None:
+            if not account.active:
+                _reject("EXCHANGE_ACCOUNT_INACTIVE", "exchange account is inactive")
+            return account
+        account = ExchangeAccount(
+            team_id=team.team_id,
+            account_id=normalized_account_id,
+            venue=normalized_venue,
+            label=label,
+            registration_source="WORKFLOW_REFERENCE",
+            connection_status="UNCONFIGURED",
+            trading_status="DISABLED",
+            credentials_ciphertext=None,
+            credential_metadata={},
+            credential_version=0,
+            connection_error_code=None,
+            last_verified_at=None,
+            active=True,
+            version=1,
+            created_by=actor_id,
+            updated_by=actor_id,
+            created_at=now,
+            updated_at=now,
+        )
+        session.add(account)
+        session.flush()
+        self._audit(
+            session,
+            actor_id=str(actor_id),
+            event_type="EXCHANGE_ACCOUNT_REFERENCED",
+            object_type="ExchangeAccount",
+            object_id=account.exchange_account_id,
+            reason=f"venue={normalized_venue};credentials=unconfigured;trading=disabled",
+            correlation_id=uuid4(),
+            object_version=1,
+            workspace_id=team.workspace_id,
+            team_id=team.team_id,
+            account_id=normalized_account_id,
+            now=now,
+        )
+        return account
+
+    def create_exchange_account(
+        self,
+        *,
+        actor_id: UUID,
+        account_id: str,
+        venue: str,
+        label: str | None,
+        credentials: dict[str, str] | None,
+        idempotency_key: str,
+        now: datetime,
+    ) -> UUID:
+        normalized_account_id, normalized_venue, normalized_label = (
+            self._exchange_account_definition(account_id, venue, label)
+        )
+        credential_semantics = None if credentials is None else _semantic_hash(credentials)
+        with self.database.session_factory.begin() as session:
+            team = self._require_role(
+                session,
+                actor_id,
+                "account.manage",
+                normalized_account_id,
+                normalized_venue,
+            )
+            caller = f"{actor_id}:{team.team_id}"
+            payload = {
+                "team_id": str(team.team_id),
+                "account_id": normalized_account_id,
+                "venue": normalized_venue,
+                "label": normalized_label,
+                "credential_semantics": credential_semantics,
+            }
+            digest, replay = self._idempotency(
+                session,
+                caller_id=caller,
+                operation="exchange-account.create",
+                idempotency_key=idempotency_key,
+                payload=payload,
+            )
+            if replay is not None:
+                return UUID(str(replay["exchange_account_id"]))
+            if session.scalar(
+                select(ExchangeAccount).where(
+                    ExchangeAccount.team_id == team.team_id,
+                    ExchangeAccount.account_id == normalized_account_id,
+                    ExchangeAccount.venue == normalized_venue,
+                )
+            ):
+                _reject(
+                    "EXCHANGE_ACCOUNT_CONFLICT",
+                    "that account ID already exists for this exchange in the active team",
+                )
+            exchange_account_id = uuid4()
+            encrypted = (
+                None
+                if credentials is None
+                else self.credential_cipher.encrypt(
+                    credentials,
+                    team_id=team.team_id,
+                    exchange_account_id=exchange_account_id,
+                    venue=normalized_venue,
+                    credential_version=1,
+                )
+            )
+            account = ExchangeAccount(
+                exchange_account_id=exchange_account_id,
+                team_id=team.team_id,
+                account_id=normalized_account_id,
+                venue=normalized_venue,
+                label=normalized_label,
+                registration_source="MANUAL",
+                connection_status=("UNCONFIGURED" if encrypted is None else "NOT_VERIFIED"),
+                trading_status="DISABLED",
+                credentials_ciphertext=None if encrypted is None else encrypted.ciphertext,
+                credential_metadata={} if encrypted is None else encrypted.metadata,
+                credential_version=0 if encrypted is None else 1,
+                connection_error_code=None,
+                last_verified_at=None,
+                active=True,
+                version=1,
+                created_by=actor_id,
+                updated_by=actor_id,
+                created_at=now,
+                updated_at=now,
+            )
+            session.add(account)
+            response = {"exchange_account_id": str(exchange_account_id)}
+            self._save_receipt(
+                session,
+                caller_id=caller,
+                operation="exchange-account.create",
+                idempotency_key=idempotency_key,
+                semantic_hash=digest,
+                response=response,
+                now=now,
+            )
+            self._audit(
+                session,
+                actor_id=str(actor_id),
+                event_type="EXCHANGE_ACCOUNT_CREATED",
+                object_type="ExchangeAccount",
+                object_id=exchange_account_id,
+                reason=(
+                    f"venue={normalized_venue};credentials="
+                    f"{'configured-unverified' if encrypted is not None else 'unconfigured'};"
+                    "trading=disabled"
+                ),
+                correlation_id=uuid4(),
+                object_version=1,
+                idempotency_key=idempotency_key,
+                workspace_id=team.workspace_id,
+                team_id=team.team_id,
+                account_id=normalized_account_id,
+                now=now,
+            )
+            return exchange_account_id
+
+    def rotate_exchange_account_credentials(
+        self,
+        exchange_account_id: UUID,
+        *,
+        actor_id: UUID,
+        credentials: dict[str, str],
+        expected_version: int,
+        idempotency_key: str,
+        now: datetime,
+    ) -> int:
+        credential_semantics = _semantic_hash(credentials)
+        with self.database.session_factory.begin() as session:
+            _actor, _workspace, active_team = self._active_scope(session, actor_id)
+            assert active_team is not None
+            account = session.scalar(
+                select(ExchangeAccount)
+                .where(
+                    ExchangeAccount.exchange_account_id == exchange_account_id,
+                    ExchangeAccount.team_id == active_team.team_id,
+                )
+                .with_for_update()
+            )
+            if account is None:
+                _reject(
+                    "EXCHANGE_ACCOUNT_NOT_FOUND",
+                    "exchange account is outside the active team or does not exist",
+                )
+            self._require_role(
+                session,
+                actor_id,
+                "account.credentials.manage",
+                account.account_id,
+                account.venue,
+                team_id=account.team_id,
+            )
+            caller = f"{actor_id}:{account.team_id}"
+            payload = {
+                "exchange_account_id": str(exchange_account_id),
+                "expected_version": expected_version,
+                "credential_semantics": credential_semantics,
+            }
+            digest, replay = self._idempotency(
+                session,
+                caller_id=caller,
+                operation="exchange-account.credentials.rotate",
+                idempotency_key=idempotency_key,
+                payload=payload,
+            )
+            if replay is not None:
+                return int(replay["version"])
+            if account.version != expected_version:
+                _reject("VERSION_CONFLICT", "exchange account version changed")
+            next_credential_version = account.credential_version + 1
+            encrypted = self.credential_cipher.encrypt(
+                credentials,
+                team_id=account.team_id,
+                exchange_account_id=account.exchange_account_id,
+                venue=account.venue,
+                credential_version=next_credential_version,
+            )
+            account.credentials_ciphertext = encrypted.ciphertext
+            account.credential_metadata = encrypted.metadata
+            account.credential_version = next_credential_version
+            account.connection_status = "NOT_VERIFIED"
+            account.connection_error_code = None
+            account.last_verified_at = None
+            account.trading_status = "DISABLED"
+            account.version += 1
+            account.updated_by = actor_id
+            account.updated_at = now
+            response = {"version": account.version}
+            self._save_receipt(
+                session,
+                caller_id=caller,
+                operation="exchange-account.credentials.rotate",
+                idempotency_key=idempotency_key,
+                semantic_hash=digest,
+                response=response,
+                now=now,
+            )
+            self._audit(
+                session,
+                actor_id=str(actor_id),
+                event_type="EXCHANGE_ACCOUNT_CREDENTIALS_ROTATED",
+                object_type="ExchangeAccount",
+                object_id=account.exchange_account_id,
+                reason=(
+                    f"venue={account.venue};credential_version={next_credential_version};"
+                    "connection=not-verified;trading=disabled"
+                ),
+                correlation_id=uuid4(),
+                object_version=account.version,
+                idempotency_key=idempotency_key,
+                workspace_id=active_team.workspace_id,
+                team_id=account.team_id,
+                account_id=account.account_id,
+                now=now,
+            )
+            return account.version
 
     def select_scope(
         self,
@@ -2370,6 +2700,14 @@ class TradingService:
             instrument = session.get(Instrument, instrument_id)
             if instrument is None or not instrument.active or instrument.venue != venue:
                 _reject("INSTRUMENT_UNAVAILABLE", "instrument is inactive or outside venue scope")
+            self._ensure_exchange_account_reference(
+                session,
+                team=team,
+                actor_id=actor_id,
+                account_id=account_id,
+                venue=venue,
+                now=now,
+            )
             if expires_at <= now:
                 _reject("PROPOSAL_EXPIRY_INVALID", "proposal expiry must be in the future")
             if deduplicate_active_manual_semantics:
@@ -10925,9 +11263,7 @@ class TradingService:
         with self.database.session_factory.begin() as session:
             item = session.get(DirectCapitalOperation, operation_id, with_for_update=True)
             if item is None:
-                _reject(
-                    "CAPITAL_DIRECT_OPERATION_NOT_FOUND", "direct capital operation is missing"
-                )
+                _reject("CAPITAL_DIRECT_OPERATION_NOT_FOUND", "direct capital operation is missing")
             self._require_role(session, actor_id, "capital.execute", item.account_id, item.venue)
             expected_kinds = {
                 DirectCapitalPath.VAULT_TO_HYPERLIQUID.value: (
@@ -11056,9 +11392,7 @@ class TradingService:
         with self.database.session_factory.begin() as session:
             item = session.get(DirectCapitalOperation, operation_id, with_for_update=True)
             if item is None:
-                _reject(
-                    "CAPITAL_DIRECT_OPERATION_NOT_FOUND", "direct capital operation is missing"
-                )
+                _reject("CAPITAL_DIRECT_OPERATION_NOT_FOUND", "direct capital operation is missing")
             self._require_role(session, actor_id, "capital.execute", item.account_id, item.venue)
             digest, response = self._idempotency(
                 session,
@@ -11107,9 +11441,7 @@ class TradingService:
                         for existing in reversed(item.stages)
                         if isinstance(existing, dict)
                         and isinstance(existing.get("artifact"), dict)
-                        and str(existing["artifact"].get("kind", "")).startswith(
-                            "HYPERLIQUID_"
-                        )
+                        and str(existing["artifact"].get("kind", "")).startswith("HYPERLIQUID_")
                     ),
                     None,
                 )
@@ -11209,9 +11541,7 @@ class TradingService:
         with self.database.session_factory.begin() as session:
             item = session.get(DirectCapitalOperation, operation_id, with_for_update=True)
             if item is None:
-                _reject(
-                    "CAPITAL_DIRECT_OPERATION_NOT_FOUND", "direct capital operation is missing"
-                )
+                _reject("CAPITAL_DIRECT_OPERATION_NOT_FOUND", "direct capital operation is missing")
             self._require_role(session, actor_id, "capital.execute", item.account_id, item.venue)
             if item.path != DirectCapitalPath.HYPERLIQUID_TO_VAULT.value:
                 _reject(
@@ -11333,9 +11663,7 @@ class TradingService:
         with self.database.session_factory.begin() as session:
             item = session.get(DirectCapitalOperation, operation_id, with_for_update=True)
             if item is None:
-                _reject(
-                    "CAPITAL_DIRECT_OPERATION_NOT_FOUND", "direct capital operation is missing"
-                )
+                _reject("CAPITAL_DIRECT_OPERATION_NOT_FOUND", "direct capital operation is missing")
             self._require_role(session, actor_id, "capital.execute", item.account_id, item.venue)
             allowed = {
                 DirectCapitalPath.VAULT_TO_HYPERLIQUID.value: {
@@ -11430,8 +11758,7 @@ class TradingService:
                                 *item.blockers,
                                 (
                                     "TREASURY_SOURCE_RECEIPT_REQUIRED"
-                                    if item.path
-                                    == DirectCapitalPath.VAULT_TO_HYPERLIQUID.value
+                                    if item.path == DirectCapitalPath.VAULT_TO_HYPERLIQUID.value
                                     else "TREASURY_DESTINATION_RECEIPT_REQUIRED"
                                 ),
                             ]
@@ -11688,9 +12015,7 @@ class TradingService:
                 if stage == "BINANCE_DEPOSIT"
                 else "BINANCE_RESTRICTED_WITHDRAWAL_SUBMITTED"
             )
-            if not any(
-                existing.get("code") == required_previous_stage for existing in item.stages
-            ):
+            if not any(existing.get("code") == required_previous_stage for existing in item.stages):
                 _reject(
                     "BINANCE_CAPITAL_PREVIOUS_STAGE_REQUIRED",
                     "Binance receipt cannot be accepted before the frozen prior stage",

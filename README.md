@@ -1,13 +1,15 @@
 # Trading 交易系统
 
-> 状态日期：2026-08-03
-> 当前状态：两场所只读连接、Perptape 精确合约身份与多周期待审核提案、LIVE/模拟资金隔离、分权风险恢复、受控资金路径和最小 Telegram 审核已实现；所有危险能力仍默认关闭
+> 状态日期：2026-08-10
+> 当前状态：Workspace / 团队权限边界、团队交易账户登记与加密凭据、两场所只读连接、Perptape 精确合约身份与多周期待审核提案、LIVE/模拟资金隔离、分权风险恢复、受控资金路径和最小 Telegram 审核已实现；所有危险能力仍默认关闭
 
 本项目面向一个资本所有者、一个内部组织和多个内部用户。用户可以提交和审核提案、查看仓位、处理异常；系统在风险可控的前提下辅助执行交易并判断是否赚钱。不开放外部注册，不管理第三方资金，不建设机构级多租户、通用合规或通用认证平台。
 
 完整产品愿景包含 Binance、Hyperliquid、Web/PWA、Telegram、VenueAdapter、Freqtrade/OMS、Margin、Vault/CTO 和报表。这些目标不删除，但按可运行的端到端用户流程逐步开发。未实现能力保持关闭，不为未来可能性预建通用实体。
 
 交易执行的默认底座现统一为场所隔离的 Freqtrade worker：Binance futures 与 Hyperliquid futures 各自独立，Hyperliquid 通过显式 `hip3_dexes` allowlist 加载 HIP-3。控制面仍拥有提案、审核、风险、OrderIntent、fencing 和审计；交易所官方 API 只读客户端继续作为账户事实源。仓库内旧直接发送客户端仅供隔离兼容测试，默认运行配置会拒绝这条路径。`docker compose --profile execution-workers` 提供的是本地 dry-run worker，不构成实盘认证。
+
+`ExchangeAccount` 是当前团队内 `account_id + venue` 的持久化真源，允许同一交易所登记多个账户。Binance、Hyperliquid、OKX、Bybit 的凭据通过版本化 AES-256-GCM 信封保存，密文的认证上下文绑定 Team、账户、Venue 和轮换版本；API 与页面只返回脱敏元数据。凭据保存后连接状态仅为 `NOT_VERIFIED`，交易状态仍为 `DISABLED`。现有运行读取/执行进程仍从受保护的部署环境加载各自凭据，尚未消费数据库密文；OKX、Bybit 连接适配器也仍标记为未实现，不能把“已登记”投影为“已连接”或“可交易”。
 
 ## 从这里开始
 
@@ -45,7 +47,7 @@
 - HTTP：健康检查、内部会话、Perptape 主站机会与可选 LIVE Proposal、Proposal/Review/Risk/Authorization、SHADOW/TESTNET/LIVE Campaign、AUTO_ADD/减仓/退出、资金事实/提案/授权、NoTilt 三链状态/同步/持久化未签名计划/回执确认、按环境结果/审计/运行状态，以及 Binance、Hyperliquid Core 的只读、TESTNET 与受控 LIVE API
 - 内部业务：`trading_control_plane.service.TradingService`
 - 纯计算：`evaluate_risk`、`select_target_position`、`compute_pnl`
-- 数据库：PostgreSQL，Alembic head `20260805_0014`，33 张业务/运行表（另有 Alembic 版本表）
+- 数据库：PostgreSQL，Alembic head `20260810_0018`；账户、提案和执行根均使用团队范围（另有 Alembic 版本表）
 - 场所边界：Binance 与 Hyperliquid 的交易发送默认只允许进入各自隔离的 Freqtrade worker；Hyperliquid worker 通过显式 `hip3_dexes` allowlist 加载 HIP-3。仓库原有 `binance_execution.py` / `hyperliquid_execution.py` 只保留隔离兼容测试，默认后端不会加载其签名密钥，也会拒绝直接发送。交易所官方只读接口继续提供账户、仓位和目录事实；数据库中的 `LIVE_ORDER_SEND` 初始仍为 `DISABLED`
 - 资金边界：`capital.py` 提供 SHADOW/TESTNET Mock 提交和自动候选计算；`notilt.py` 通过官方 `@notilt/sdk` 固定支持 Ethereum、BNB Smart Chain、Arbitrum One，只读取官方部署/Registry/Vault、生成并持久化 `{chainId,to,data,value}` 未签名交易，并从可信生产 RPC 校验发送者、目标、函数、参数、事件、区块时间和逐链确认深度。服务没有 NoTilt 私钥字段，不签名、不广播，也不暴露 owner、白名单管理、Panic 或 Full Exit 能力；真实 `CAPITAL_TRANSFER` 与两个自动资金 Gate 均保持 `DISABLED`
 

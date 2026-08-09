@@ -53,6 +53,8 @@ from trading_control_plane.api_schemas import (
     DirectCapitalTreasuryReceiptRequest,
     DirectCapitalUnsignedPlanRequest,
     DirectCapitalWalletSubmissionRequest,
+    ExchangeAccountCreateRequest,
+    ExchangeCredentialRotateRequest,
     FundingFactRequest,
     HyperliquidReadOnlySyncRequest,
     HyperliquidTestnetProtectionRequest,
@@ -639,6 +641,7 @@ def create_app(
         return TradingService(
             business_database(),
             authoritative_live_accounts=authoritative_live_accounts(),
+            credential_encryption_key=resolved_settings.credential_encryption_key,
         )
 
     def effective_direct_capital_settings(user_id: UUID) -> tuple[Settings, dict[str, Any] | None]:
@@ -708,17 +711,14 @@ def create_app(
             and selected_treasury_account_id is not None
         )
         selected_scope_ready = (
-            safe_scope_ready
-            if selected_provider == "SAFE_SPENDING_LIMIT"
-            else notilt_scope_ready
+            safe_scope_ready if selected_provider == "SAFE_SPENDING_LIMIT" else notilt_scope_ready
         )
         onchain_probe: dict[str, Any] = {
             "provider": selected_provider,
             "status": "NOT_ATTEMPTED" if selected_scope_ready else "BLOCKED",
             "error_code": (
                 "SAFE_SPENDING_LIMIT_NOT_CONFIGURED"
-                if selected_provider == "SAFE_SPENDING_LIMIT"
-                and not safe_scope_ready
+                if selected_provider == "SAFE_SPENDING_LIMIT" and not safe_scope_ready
                 else "NOTILT_VAULT_NOT_CONFIGURED"
                 if selected_provider == "NOTILT_VAULT" and not notilt_scope_ready
                 else None
@@ -1099,6 +1099,68 @@ def create_app(
         return {
             "team_id": str(team_id),
             "session": queries().user_context(identity.user_id),
+        }
+
+    @app.get("/api/exchange-accounts")
+    def exchange_accounts(
+        identity: SessionIdentity = identity_dependency,
+    ) -> dict[str, Any]:
+        require_capability(identity, "venue.view")
+        result = queries().exchange_accounts(identity.user_id)
+        runtime_accounts = authoritative_live_accounts()
+        for item in result["data"]:
+            venue = str(item["venue"])
+            item["runtime_binding"] = {
+                "bound": runtime_accounts.get(venue) == item["account_id"],
+                "source": "PROCESS_ENVIRONMENT",
+                "read_only_connector": (
+                    "IMPLEMENTED" if venue in {"BINANCE", "HYPERLIQUID"} else "NOT_IMPLEMENTED"
+                ),
+                "trading_connector": (
+                    "FREQTRADE_EXTERNAL"
+                    if venue in {"BINANCE", "HYPERLIQUID"}
+                    else "NOT_IMPLEMENTED"
+                ),
+            }
+        return {"data": result, "as_of": _now().isoformat()}
+
+    @app.post("/api/exchange-accounts")
+    def create_exchange_account(
+        payload: ExchangeAccountCreateRequest,
+        identity: SessionIdentity = identity_dependency,
+    ) -> dict[str, Any]:
+        exchange_account_id = service().create_exchange_account(
+            actor_id=identity.user_id,
+            account_id=payload.account_id,
+            venue=payload.venue,
+            label=payload.label,
+            credentials=(None if payload.credentials is None else payload.credentials.plaintext()),
+            idempotency_key=payload.idempotency_key,
+            now=_now(),
+        )
+        return {
+            "exchange_account_id": str(exchange_account_id),
+            "data": queries().exchange_accounts(identity.user_id),
+        }
+
+    @app.put("/api/exchange-accounts/{exchange_account_id}/credentials")
+    def rotate_exchange_account_credentials(
+        exchange_account_id: UUID,
+        payload: ExchangeCredentialRotateRequest,
+        identity: SessionIdentity = identity_dependency,
+    ) -> dict[str, Any]:
+        version = service().rotate_exchange_account_credentials(
+            exchange_account_id,
+            actor_id=identity.user_id,
+            credentials=payload.credentials.plaintext(),
+            expected_version=payload.expected_version,
+            idempotency_key=payload.idempotency_key,
+            now=_now(),
+        )
+        return {
+            "exchange_account_id": str(exchange_account_id),
+            "version": version,
+            "data": queries().exchange_accounts(identity.user_id),
         }
 
     @app.post("/api/scopes/select")
@@ -5035,8 +5097,7 @@ def create_app(
             (
                 stage
                 for stage in reversed(context["stages"])
-                if isinstance(stage, dict)
-                and stage.get("code") == expected_submission_code
+                if isinstance(stage, dict) and stage.get("code") == expected_submission_code
             ),
             None,
         )
@@ -5057,8 +5118,7 @@ def create_app(
             "HYPERLIQUID_WITHDRAWAL_LEDGER",
             "HYPERLIQUID_CLASS_TRANSFER_LEDGER",
         } and (
-            str(submission.get("action_hash", "")).lower()
-            != str(payload.action_hash).lower()
+            str(submission.get("action_hash", "")).lower() != str(payload.action_hash).lower()
             or submission.get("nonce") != payload.nonce
         ):
             raise DomainRejected(

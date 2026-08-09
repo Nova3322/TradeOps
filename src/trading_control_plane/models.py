@@ -36,9 +36,7 @@ class Workspace(Base):
         CheckConstraint("version >= 1", name="ck_workspaces_version"),
     )
 
-    workspace_id: Mapped[UUID] = mapped_column(
-        Uuid(as_uuid=True), primary_key=True, default=uuid4
-    )
+    workspace_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid4)
     name: Mapped[str] = mapped_column(String(120), nullable=False)
     slug: Mapped[str] = mapped_column(String(80), nullable=False)
     created_by: Mapped[UUID] = mapped_column(ForeignKey("users.user_id"), nullable=False)
@@ -66,6 +64,68 @@ class Team(Base):
     active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     trading_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class ExchangeAccount(Base):
+    __tablename__ = "exchange_accounts"
+    __table_args__ = (
+        CheckConstraint(
+            "venue IN ('BINANCE','HYPERLIQUID','OKX','BYBIT')",
+            name="ck_exchange_accounts_venue",
+        ),
+        CheckConstraint(
+            "connection_status IN ('UNCONFIGURED','NOT_VERIFIED','VERIFIED','FAILED','STALE')",
+            name="ck_exchange_accounts_connection_status",
+        ),
+        CheckConstraint(
+            "trading_status IN ('DISABLED','BLOCKED','ELIGIBLE')",
+            name="ck_exchange_accounts_trading_status",
+        ),
+        CheckConstraint(
+            "registration_source IN ('MIGRATION','MANUAL','WORKFLOW_REFERENCE')",
+            name="ck_exchange_accounts_registration_source",
+        ),
+        CheckConstraint("version >= 1", name="ck_exchange_accounts_version"),
+        CheckConstraint("credential_version >= 0", name="ck_exchange_accounts_credential_version"),
+        CheckConstraint(
+            "(credentials_ciphertext IS NULL AND credential_version = 0) OR "
+            "(credentials_ciphertext IS NOT NULL AND credential_version >= 1)",
+            name="ck_exchange_accounts_credential_envelope",
+        ),
+        UniqueConstraint(
+            "team_id",
+            "account_id",
+            "venue",
+            name="uq_exchange_accounts_team_account_venue",
+        ),
+        Index("ix_exchange_accounts_team_active", "team_id", "active"),
+    )
+
+    exchange_account_id: Mapped[UUID] = mapped_column(
+        Uuid(as_uuid=True), primary_key=True, default=uuid4
+    )
+    team_id: Mapped[UUID] = mapped_column(
+        ForeignKey("teams.team_id", ondelete="RESTRICT"), nullable=False
+    )
+    account_id: Mapped[str] = mapped_column(String(120), nullable=False)
+    venue: Mapped[str] = mapped_column(String(64), nullable=False)
+    label: Mapped[str] = mapped_column(String(120), nullable=False)
+    registration_source: Mapped[str] = mapped_column(String(32), nullable=False)
+    connection_status: Mapped[str] = mapped_column(String(32), nullable=False)
+    trading_status: Mapped[str] = mapped_column(String(16), nullable=False)
+    credentials_ciphertext: Mapped[str | None] = mapped_column(Text, nullable=True)
+    credential_metadata: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    credential_version: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    connection_error_code: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    last_verified_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    created_by: Mapped[UUID] = mapped_column(ForeignKey("users.user_id"), nullable=False)
+    updated_by: Mapped[UUID] = mapped_column(ForeignKey("users.user_id"), nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
@@ -112,15 +172,11 @@ class WorkspaceMembership(Base):
     __tablename__ = "workspace_memberships"
     __table_args__ = (
         CheckConstraint("role IN ('MEMBER','ADMIN')", name="ck_workspace_memberships_role"),
-        UniqueConstraint(
-            "workspace_id", "user_id", name="uq_workspace_memberships_workspace_user"
-        ),
+        UniqueConstraint("workspace_id", "user_id", name="uq_workspace_memberships_workspace_user"),
         Index("ix_workspace_memberships_user_active", "user_id", "active"),
     )
 
-    membership_id: Mapped[UUID] = mapped_column(
-        Uuid(as_uuid=True), primary_key=True, default=uuid4
-    )
+    membership_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid4)
     workspace_id: Mapped[UUID] = mapped_column(
         ForeignKey("workspaces.workspace_id", ondelete="CASCADE"), nullable=False
     )
@@ -141,9 +197,7 @@ class TeamMembership(Base):
         Index("ix_team_memberships_user_active", "user_id", "active"),
     )
 
-    membership_id: Mapped[UUID] = mapped_column(
-        Uuid(as_uuid=True), primary_key=True, default=uuid4
-    )
+    membership_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid4)
     team_id: Mapped[UUID] = mapped_column(
         ForeignKey("teams.team_id", ondelete="CASCADE"), nullable=False
     )
@@ -250,6 +304,16 @@ class Proposal(Base):
         Index("ix_proposals_status_expires", "status", "expires_at"),
         Index("ix_proposals_team_status_expires", "team_id", "status", "expires_at"),
         UniqueConstraint("team_id", "proposal_id", name="uq_proposals_team_identity"),
+        ForeignKeyConstraint(
+            ["team_id", "account_id", "venue"],
+            [
+                "exchange_accounts.team_id",
+                "exchange_accounts.account_id",
+                "exchange_accounts.venue",
+            ],
+            name="fk_proposals_team_exchange_account",
+            ondelete="RESTRICT",
+        ),
         Index(
             "uq_proposals_system_candidate",
             "team_id",
@@ -309,9 +373,7 @@ class ProposalDefaultConfig(Base):
             "auto_proposal_min_timeframes IN (3, 4)",
             name="ck_proposal_defaults_auto_timeframes",
         ),
-        UniqueConstraint(
-            "team_id", "version", name="uq_proposal_default_configs_team_version"
-        ),
+        UniqueConstraint("team_id", "version", name="uq_proposal_default_configs_team_version"),
         Index(
             "uq_proposal_default_configs_active",
             "team_id",
@@ -1545,9 +1607,7 @@ class AuditEvent(Base):
     workspace_id: Mapped[UUID | None] = mapped_column(
         ForeignKey("workspaces.workspace_id"), nullable=True
     )
-    team_id: Mapped[UUID | None] = mapped_column(
-        ForeignKey("teams.team_id"), nullable=True
-    )
+    team_id: Mapped[UUID | None] = mapped_column(ForeignKey("teams.team_id"), nullable=True)
     account_id: Mapped[str | None] = mapped_column(String(120), nullable=True)
     actor_id: Mapped[str] = mapped_column(String(255), nullable=False)
     event_type: Mapped[str] = mapped_column(String(120), nullable=False)

@@ -4,7 +4,7 @@ from decimal import Decimal
 from typing import Literal
 from uuid import UUID
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, Field, SecretStr, field_validator, model_validator
 
 from trading_control_plane.domain import (
     CapitalDirection,
@@ -95,6 +95,43 @@ class TeamMemberInviteRequest(BaseModel):
 class ScopeSelectRequest(BaseModel):
     workspace_id: UUID
     team_id: UUID | None = None
+    idempotency_key: str = Field(min_length=1, max_length=160)
+
+
+class ExchangeCredentialRequest(BaseModel):
+    api_key: SecretStr | None = Field(default=None, min_length=1, max_length=512)
+    api_secret: SecretStr | None = Field(default=None, min_length=1, max_length=512)
+    passphrase: SecretStr | None = Field(default=None, min_length=1, max_length=512)
+    account_address: SecretStr | None = Field(default=None, min_length=1, max_length=120)
+    api_wallet_address: SecretStr | None = Field(default=None, min_length=1, max_length=120)
+    api_wallet_private_key: SecretStr | None = Field(default=None, min_length=1, max_length=512)
+
+    def plaintext(self) -> dict[str, str]:
+        return {
+            field: value.get_secret_value()
+            for field in (
+                "api_key",
+                "api_secret",
+                "passphrase",
+                "account_address",
+                "api_wallet_address",
+                "api_wallet_private_key",
+            )
+            if (value := getattr(self, field)) is not None
+        }
+
+
+class ExchangeAccountCreateRequest(BaseModel):
+    account_id: str = Field(min_length=1, max_length=120)
+    venue: Literal["BINANCE", "HYPERLIQUID", "OKX", "BYBIT"]
+    label: str | None = Field(default=None, min_length=1, max_length=120)
+    credentials: ExchangeCredentialRequest | None = None
+    idempotency_key: str = Field(min_length=1, max_length=160)
+
+
+class ExchangeCredentialRotateRequest(BaseModel):
+    credentials: ExchangeCredentialRequest
+    expected_version: int = Field(ge=1)
     idempotency_key: str = Field(min_length=1, max_length=160)
 
 
@@ -461,10 +498,14 @@ class DirectCapitalHyperliquidReceiptRequest(BaseModel):
             raise ValueError("Arbitrum receipt verification requires a transaction hash")
         if self.stage.endswith("LEDGER") and self.action_hash is None:
             raise ValueError("Hyperliquid ledger verification requires an action hash")
-        if self.stage in {
-            "HYPERLIQUID_WITHDRAWAL_LEDGER",
-            "HYPERLIQUID_CLASS_TRANSFER_LEDGER",
-        } and self.nonce is None:
+        if (
+            self.stage
+            in {
+                "HYPERLIQUID_WITHDRAWAL_LEDGER",
+                "HYPERLIQUID_CLASS_TRANSFER_LEDGER",
+            }
+            and self.nonce is None
+        ):
             raise ValueError("withdrawal ledger verification requires the signed action nonce")
         return self
 

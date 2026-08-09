@@ -19,6 +19,7 @@ from trading_control_plane.models import (
     CapitalAutomationPolicy,
     CapitalTransfer,
     DirectCapitalOperation,
+    ExchangeAccount,
     FundingPayment,
     Instrument,
     OrderIntent,
@@ -46,7 +47,7 @@ from trading_control_plane.models import (
 )
 from trading_control_plane.notilt import USD_STABLE_ASSETS
 from trading_control_plane.perptape import PerptapeCandidate, PerptapeFeedSnapshot
-from trading_control_plane.service import TradingService
+from trading_control_plane.service import ROLE_ACTIONS, TradingService
 
 
 def _iso(value: datetime | None) -> str | None:
@@ -288,6 +289,105 @@ class TradingQueries:
                 }
                 for user in users
             ]
+
+    def exchange_accounts(self, actor_id: UUID) -> dict[str, Any]:
+        workspace_id, team_id = self._active_scope_ids(actor_id)
+        with self.database.session_factory() as session:
+            assignments = session.scalars(
+                select(RoleAssignment).where(
+                    RoleAssignment.user_id == actor_id,
+                    RoleAssignment.team_id == team_id,
+                )
+            ).all()
+            if not any(
+                "venue.view" in ROLE_ACTIONS[Role(item.role)]
+                or "*" in ROLE_ACTIONS[Role(item.role)]
+                for item in assignments
+            ):
+                raise DomainRejected("RBAC_DENIED", "exchange account visibility is not assigned")
+            accounts = session.scalars(
+                select(ExchangeAccount)
+                .where(ExchangeAccount.team_id == team_id)
+                .order_by(ExchangeAccount.venue, ExchangeAccount.label, ExchangeAccount.account_id)
+            ).all()
+            visible = [
+                item
+                for item in accounts
+                if any(
+                    (
+                        assignment.account_scope is None
+                        or assignment.account_scope == item.account_id
+                    )
+                    and (assignment.venue_scope is None or assignment.venue_scope == item.venue)
+                    and (
+                        "venue.view" in ROLE_ACTIONS[Role(assignment.role)]
+                        or "*" in ROLE_ACTIONS[Role(assignment.role)]
+                    )
+                    for assignment in assignments
+                )
+            ]
+            return {
+                "workspace_id": str(workspace_id),
+                "team_id": str(team_id),
+                "can_manage": any(
+                    "account.manage" in ROLE_ACTIONS[Role(item.role)]
+                    or "*" in ROLE_ACTIONS[Role(item.role)]
+                    for item in assignments
+                ),
+                "supported_venues": ["BINANCE", "HYPERLIQUID", "OKX", "BYBIT"],
+                "data": [self._exchange_account_projection(item) for item in visible],
+            }
+
+    @staticmethod
+    def _exchange_account_projection(item: ExchangeAccount) -> dict[str, Any]:
+        metadata = dict(item.credential_metadata or {})
+        credential_state = "UNCONFIGURED" if item.credential_version == 0 else "CONFIGURED"
+        if item.trading_status == "ELIGIBLE":
+            trading_reason = "account policy is eligible; global and task gates still apply"
+        else:
+            trading_reason = (
+                "trading capability is disabled; connection status never enables order sending"
+            )
+        next_action = (
+            "add encrypted credentials"
+            if credential_state == "UNCONFIGURED"
+            else "run a supported no-side-effect connection verification"
+            if item.connection_status != "VERIFIED"
+            else "keep trading disabled until risk and live-send gates are explicitly approved"
+        )
+        return {
+            "exchange_account_id": str(item.exchange_account_id),
+            "team_id": str(item.team_id),
+            "account_id": item.account_id,
+            "venue": item.venue,
+            "label": item.label,
+            "registration_source": item.registration_source,
+            "active": item.active,
+            "version": item.version,
+            "connection": {
+                "status": item.connection_status,
+                "error_code": item.connection_error_code,
+                "last_verified_at": _iso(item.last_verified_at),
+                "read_only_capability": item.connection_status == "VERIFIED",
+            },
+            "trading": {
+                "status": item.trading_status,
+                "enabled": False,
+                "reason": trading_reason,
+            },
+            "credentials": {
+                "state": credential_state,
+                "version": item.credential_version,
+                "configured_fields": list(metadata.get("configured_fields") or []),
+                "key_hint": metadata.get("key_hint"),
+                "signing_material_configured": bool(
+                    metadata.get("signing_material_configured", False)
+                ),
+            },
+            "next_action": next_action,
+            "created_at": _iso(item.created_at),
+            "updated_at": _iso(item.updated_at),
+        }
 
     def telegram_chat_id(self, user_id: UUID) -> str | None:
         with self.database.session_factory() as session:
@@ -1161,9 +1261,7 @@ class TradingQueries:
                         for venue, account_id in authoritative_accounts.items()
                     ],
                 ]
-                observation_query = observation_query.where(
-                    or_(*authoritative_history_scopes)
-                )
+                observation_query = observation_query.where(or_(*authoritative_history_scopes))
             if require_authoritative_live_treasury:
                 observation_query = observation_query.where(
                     or_(
@@ -1179,9 +1277,7 @@ class TradingQueries:
             observations = list(
                 reversed(
                     session.scalars(
-                        observation_query.order_by(
-                            AccountEquityObservation.observed_at.desc()
-                        )
+                        observation_query.order_by(AccountEquityObservation.observed_at.desc())
                     ).all()
                 )
             )
@@ -1973,9 +2069,7 @@ class TradingQueries:
             ).all()
             result: list[dict[str, Any]] = []
             for campaign, instrument in values:
-                if not self.service.can_user(
-                    user_id, "view", campaign.account_id, campaign.venue
-                ):
+                if not self.service.can_user(user_id, "view", campaign.account_id, campaign.venue):
                     continue
                 summary = self._campaign_summary(campaign, instrument)
                 summary["workspace_id"] = str(workspace_id)
@@ -2795,9 +2889,7 @@ class TradingQueries:
             "collateral_currency": (None if instrument is None else instrument.collateral_currency),
             "direction": proposal.direction,
             "quantity": str(proposal.quantity),
-            "estimated_notional": (
-                None if estimated_notional is None else str(estimated_notional)
-            ),
+            "estimated_notional": (None if estimated_notional is None else str(estimated_notional)),
             "max_risk": str(proposal.max_risk),
             "expires_at": _iso(proposal.expires_at),
             "created_at": _iso(proposal.created_at),

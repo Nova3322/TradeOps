@@ -13,6 +13,7 @@ from trading_control_plane.database import REQUIRED_SCHEMA_REVISION, Base, Datab
 from trading_control_plane.models import (
     AuditEvent,
     CapabilityGate,
+    ExchangeAccount,
     Proposal,
     RoleAssignment,
     Team,
@@ -163,6 +164,13 @@ def test_scope_migrations_backfill_existing_users_roles_proposals_and_audit(
         audit = session.get(AuditEvent, audit_id)
         proposal = session.get(Proposal, proposal_id)
         proposal_audit = session.get(AuditEvent, proposal_audit_id)
+        exchange_account = session.scalar(
+            select(ExchangeAccount).where(
+                ExchangeAccount.team_id == team.team_id,
+                ExchangeAccount.account_id == "legacy-account",
+                ExchangeAccount.venue == "BINANCE",
+            )
+        )
         assert user is not None and workspace is not None and team is not None
         assert user.active_workspace_id == workspace.workspace_id
         assert user.active_team_id == team.team_id
@@ -173,6 +181,10 @@ def test_scope_migrations_backfill_existing_users_roles_proposals_and_audit(
         assert audit.team_id == team.team_id
         assert audit.account_id is None
         assert proposal is not None and proposal.team_id == team.team_id
+        assert exchange_account is not None
+        assert exchange_account.registration_source == "MIGRATION"
+        assert exchange_account.connection_status == "UNCONFIGURED"
+        assert exchange_account.trading_status == "DISABLED"
         assert proposal_audit is not None
         assert proposal_audit.workspace_id == workspace.workspace_id
         assert proposal_audit.team_id == team.team_id

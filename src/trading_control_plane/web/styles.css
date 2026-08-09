@@ -191,6 +191,17 @@ button:disabled { opacity: .52; cursor: not-allowed; }
 .account-sync-note.is-active .status-dot { background: var(--accent); }
 .account-sync-note b { display: block; font-size: 12px; }
 .account-sync-note p { margin: 4px 0 0; color: var(--muted); font-size: 11px; line-height: 1.5; }
+.exchange-account-registry { margin-bottom: 32px; }
+.exchange-account-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; margin-top: 16px; }
+.exchange-account-card { min-width: 0; }
+.account-capability-split { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; margin: 14px 0; }
+.account-capability-split > div { padding: 12px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface); }
+.account-capability-split small, .account-capability-split span { display: block; color: var(--muted); font-size: 10px; line-height: 1.45; }
+.account-capability-split b { display: block; margin: 5px 0; font-size: 13px; }
+.exchange-account-create { margin: 16px 0; }
+.exchange-credential-fields { margin: 0; padding: 16px; border: 1px solid var(--line); border-radius: 12px; }
+.exchange-credential-fields legend { padding: 0 6px; color: var(--muted); font-size: 11px; }
+.account-credential-rotate { margin-top: 12px; }
 .venue-technical-detail { margin-top: 8px; color: var(--muted); font-size: 10px; }
 .venue-technical-detail summary { width: fit-content; color: var(--accent); cursor: pointer; font-weight: 800; }
 .venue-technical-detail code { display: block; margin-top: 6px; overflow-wrap: anywhere; }
@@ -646,7 +657,7 @@ dialog::backdrop { background: rgba(4, 12, 10, .56); backdrop-filter: blur(3px);
   .authorization-card { order: 6; }
   .campaign-command-layout { grid-template-columns: 1fr; }
   .home-layout { grid-template-columns: 1fr; }
-  .system-health-grid, .permission-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .system-health-grid, .permission-grid, .exchange-account-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .filter-panel { grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; padding: 17px; }
   .timeframe-filter { grid-column: span 2; justify-content: flex-start; gap: 8px; }
 }
@@ -706,7 +717,7 @@ dialog::backdrop { background: rgba(4, 12, 10, .56); backdrop-filter: blur(3px);
   .stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .field-grid, .detail-layout, .definition-grid, .compose-layout, .proposal-detail-layout, .campaign-command, .home-status { grid-template-columns: 1fr; }
   .source-status, .venue-scope-card { grid-template-columns: 1fr; }
-  .system-health-grid, .permission-grid, .access-principle-grid, .scope-grid, .scope-creation-grid, .scope-context-card { grid-template-columns: 1fr; }
+  .system-health-grid, .permission-grid, .access-principle-grid, .scope-grid, .scope-creation-grid, .scope-context-card, .exchange-account-grid, .account-capability-split { grid-template-columns: 1fr; }
   .scope-switcher { max-width: 30vw; }
   .member-access-summary { align-items: flex-start; }
   .member-summary-actions { flex-direction: column; align-items: flex-end; }

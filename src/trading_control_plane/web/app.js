@@ -1214,7 +1214,8 @@ async function route() {
     return;
   }
   const path = location.pathname;
-  if (!session.active_workspace || !session.active_team || (!session.active_team.trading_enabled && path !== '/admin/users')) {
+  const teamSetupPaths = new Set(['/admin/users', '/venues']);
+  if (!session.active_workspace || !session.active_team || (!session.active_team.trading_enabled && !teamSetupPaths.has(path))) {
     renderScopeSetup();
     enhanceRenderedPage();
     return;
@@ -3663,14 +3664,68 @@ function latestVenueObservation(facts) {
   return values.length ? new Date(Math.max(...values)).toISOString() : null;
 }
 
+function exchangeCredentialFields(venue, prefix = '') {
+  const name = field => `${prefix}${field}`;
+  if (venue === 'HYPERLIQUID') return `<label>账户地址<input name="${name('account_address')}" type="password" autocomplete="new-password" required placeholder="0x…"></label><label>API Wallet 地址（可选）<input name="${name('api_wallet_address')}" type="password" autocomplete="new-password" placeholder="0x…"></label><label>API Wallet 私钥（配置交易身份时必填）<input name="${name('api_wallet_private_key')}" type="password" autocomplete="new-password" placeholder="加密保存且不会回显"></label>`;
+  const passphrase = venue === 'OKX' ? `<label>Passphrase<input name="${name('passphrase')}" type="password" autocomplete="new-password" required></label>` : '';
+  return `<label>API Key<input name="${name('api_key')}" type="password" autocomplete="new-password" required></label><label>API Secret<input name="${name('api_secret')}" type="password" autocomplete="new-password" required></label>${passphrase}`;
+}
+
+function exchangeAccountRegistry(registry) {
+  const accounts = registry.data || [];
+  const cards = accounts.map(item => {
+    const credentials = item.credentials || {};
+    const connector = item.runtime_binding?.read_only_connector === 'IMPLEMENTED' ? '只读适配器已实现' : '连接适配器待实现';
+    const connection = item.connection?.status === 'VERIFIED' ? '已验证' : item.connection?.status === 'NOT_VERIFIED' ? '待验证' : item.connection?.status === 'UNCONFIGURED' ? '未配置' : fmtStatus(item.connection?.status);
+    const trading = item.trading?.enabled ? '可交易' : '交易关闭';
+    const hint = credentials.key_hint || '无凭据提示';
+    return `<article class="card exchange-account-card"><div class="card-heading"><div><p class="eyebrow">${escapeHtml(item.venue)} · ${escapeHtml(item.account_id)}</p><h2>${escapeHtml(item.label)}</h2></div><span class="status-pill ${item.active ? 'status-APPROVED' : 'status-DISABLED'}">${item.active ? '已登记' : '已停用'}</span></div><div class="account-capability-split"><div><small>连接能力</small><b>${escapeHtml(connection)}</b><span>${escapeHtml(connector)} · ${item.runtime_binding?.bound ? '已绑定当前读取进程' : '未绑定读取进程'}</span></div><div><small>交易能力</small><b>${escapeHtml(trading)}</b><span>${escapeHtml(item.trading?.reason || '连接不会自动开启交易')}</span></div></div><dl class="definition-grid">${definition('凭据状态', credentials.state === 'CONFIGURED' ? `已加密 · ${hint}` : '未配置')}${definition('凭据版本', credentials.version || 0)}${definition('账户版本', item.version)}${definition('下一步', item.next_action)}</dl>${registry.can_manage ? `<details class="account-credential-rotate"><summary><span><b>${credentials.state === 'CONFIGURED' ? '轮换加密凭据' : '添加加密凭据'}</b><small>保存后连接重置为待验证，交易能力保持关闭</small></span><strong>展开</strong></summary><form class="toolbox-content exchange-credential-form" data-exchange-account-id="${escapeHtml(item.exchange_account_id)}" data-venue="${escapeHtml(item.venue)}" data-version="${item.version}"><div class="field-grid">${exchangeCredentialFields(item.venue)}</div><p class="safety-note">凭据只写入 AES-256-GCM 加密信封；页面和 API 只返回脱敏元数据。保存凭据不代表连接成功，也不会开启下单、签名或广播。</p><div class="form-error" role="alert"></div><div class="form-actions"><button class="primary">保存新凭据版本</button></div></form></details>` : ''}</article>`;
+  }).join('');
+  const create = registry.can_manage ? `<details class="card exchange-account-create"><summary><span><b>接入交易账户</b><small>同一交易所可登记多个独立账户；每个账户单独授权、风控与审计</small></span><strong>展开</strong></summary><form id="exchange-account-form" class="toolbox-content"><div class="field-grid"><label>交易所<select name="venue"><option value="BINANCE">Binance</option><option value="HYPERLIQUID">Hyperliquid</option><option value="OKX">OKX</option><option value="BYBIT">Bybit</option></select></label><label>内部账户 ID<input name="account_id" maxlength="120" placeholder="例如 binance-team-a-01" required></label><label>显示名称<input name="label" maxlength="120" placeholder="例如 主策略账户"></label></div><fieldset class="exchange-credential-fields"><legend>加密凭据</legend><div class="field-grid" data-create-credential-fields>${exchangeCredentialFields('BINANCE')}</div></fieldset><p class="safety-note">创建只登记当前团队的账户边界。连接验证与交易资格分别计算；交易、资金、签名和广播保持关闭。</p><div class="form-error" role="alert"></div><div class="form-actions"><button class="primary">登记并加密保存</button></div></form></details>` : '';
+  return `<section class="exchange-account-registry"><div class="section-heading"><div><p class="eyebrow">当前团队 · 账户真源</p><h2>账户与能力边界</h2><p>登记、连接、交易是三个不同事实。账户已登记或凭据已保存，都不表示连接成功，更不表示可下单。</p></div><span class="status-pill">${accounts.length} 个账户</span></div>${create}${cards ? `<div class="exchange-account-grid">${cards}</div>` : '<div class="callout tone-attention"><b>当前团队没有交易账户。</b><p>由系统管理员登记第一个账户；缺少账户、凭据或连接事实时保持安全阻断。</p></div>'}</section>`;
+}
+
+function credentialPayload(form, venue) {
+  const data = Object.fromEntries(new FormData(form));
+  const fields = venue === 'HYPERLIQUID'
+    ? ['account_address', 'api_wallet_address', 'api_wallet_private_key']
+    : venue === 'OKX' ? ['api_key', 'api_secret', 'passphrase'] : ['api_key', 'api_secret'];
+  return Object.fromEntries(fields.filter(field => data[field]).map(field => [field, data[field]]));
+}
+
+function bindExchangeAccountForms() {
+  const createForm = document.querySelector('#exchange-account-form');
+  const venueSelect = createForm?.elements.venue;
+  venueSelect?.addEventListener('change', () => {
+    createForm.querySelector('[data-create-credential-fields]').innerHTML = exchangeCredentialFields(venueSelect.value);
+  });
+  createForm?.addEventListener('submit', async event => {
+    event.preventDefault();
+    const form = event.currentTarget;
+    const data = Object.fromEntries(new FormData(form));
+    const body = {account_id:data.account_id, venue:data.venue, label:data.label || null, credentials:credentialPayload(form, data.venue), idempotency_key:crypto.randomUUID()};
+    try { await withPending(event.submitter, '加密保存中…', () => api('/api/exchange-accounts', {method:'POST', body:JSON.stringify(body)})); showToast('账户已登记；连接待验证，交易保持关闭'); await route(); }
+    catch (error) { showApiError(error, form.querySelector('.form-error')); }
+  });
+  document.querySelectorAll('.exchange-credential-form').forEach(form => form.addEventListener('submit', async event => {
+    event.preventDefault();
+    const venue = form.dataset.venue;
+    const body = {credentials:credentialPayload(form, venue), expected_version:Number(form.dataset.version), idempotency_key:crypto.randomUUID()};
+    try { await withPending(event.submitter, '加密保存中…', () => api(`/api/exchange-accounts/${form.dataset.exchangeAccountId}/credentials`, {method:'PUT', body:JSON.stringify(body)})); showToast('凭据版本已轮换；连接重置为待验证，交易保持关闭'); await route(); }
+    catch (error) { showApiError(error, form.querySelector('.form-error')); }
+  }));
+}
+
 async function renderVenueFacts() {
   const selectedVenue = (new URLSearchParams(location.search).get('venue') || (location.pathname.includes('hyperliquid') ? 'HYPERLIQUID' : 'BINANCE')).toUpperCase();
   const venue = selectedVenue === 'HYPERLIQUID' ? 'HYPERLIQUID' : 'BINANCE';
   const endpoint = venue.toLowerCase();
-  const [status, runtime] = await Promise.all([
+  const [status, runtime, accountResult] = await Promise.all([
     api(`/api/venues/${endpoint}/status`),
-    api('/api/runtime/status').catch(error => error.status === 403 ? null : Promise.reject(error)),
+    api('/api/runtime/status').catch(error => [403, 409].includes(error.status) ? null : Promise.reject(error)),
+    api('/api/exchange-accounts'),
   ]);
+  const registry = accountResult.data;
   const accountId = status.default_account_id;
   const facts = accountId
     ? (await api(`/api/venues/${endpoint}/facts?account_id=${encodeURIComponent(accountId)}`)).data
@@ -3746,7 +3801,8 @@ async function renderVenueFacts() {
           : connection
             ? '实时账户事实不可用；仅展示最后快照'
             : '无法验证实时连接；仅展示已保存事实';
-  main.innerHTML = `<section class="page venue-facts-page"><header class="page-head"><div><p class="eyebrow">生产账户 · 自动读取</p><h1>交易账户</h1><p class="lede">统一查看币安和 Hyperliquid（含 HIP-3）的余额、当前仓位、当前委托、最近成交与资金费。系统按账户自动覆盖全部活跃标的，不需要逐个输入币对。</p></div><button class="secondary" data-refresh>刷新当前状态</button></header>
+  main.innerHTML = `<section class="page venue-facts-page"><header class="page-head"><div><p class="eyebrow">团队账户 · 连接与交易分离</p><h1>交易账户</h1><p class="lede">登记 Binance、Hyperliquid、OKX 与 Bybit 多账户；凭据加密保存且永不回显。下方只读事实目前覆盖币安和 Hyperliquid（含 HIP-3），OKX 与 Bybit 连接适配器仍保持未实现。</p></div><button class="secondary" data-refresh>刷新当前状态</button></header>
+    ${exchangeAccountRegistry(registry)}
     <nav class="venue-switch" aria-label="选择交易所"><a class="${venue === 'BINANCE' ? 'active' : ''}" href="/venues?venue=BINANCE" data-link>Binance</a><a class="${venue === 'HYPERLIQUID' ? 'active' : ''}" href="/venues?venue=HYPERLIQUID" data-link>Hyperliquid</a></nav>
     <div class="stats venue-status-stats"><div class="stat"><small>连接状态</small><b class="${connected ? 'direction-long' : 'warning-text'}">${escapeHtml(connectionLabel)}</b><span>${escapeHtml(connectionSummary)}</span></div><div class="stat"><small>运行模式</small><b>${currentLanguage === 'en' ? 'Production account · read-only' : '生产账户 · 只读'}</b><span>${escapeHtml(venueDetail)} · ${escapeHtml(executionDetail)}</span></div><div class="stat"><small>交易账户</small><b>${accountId ? '已配置默认账户' : '未配置默认账户'}</b><span>${accountId ? `${escapeHtml(venue === 'BINANCE' ? (currentLanguage === 'en' ? 'Binance' : '币安') : 'Hyperliquid')} · ${currentLanguage === 'en' ? 'Bound production account · Single-account mode' : '生产账户已绑定 · 单账户模式'}` : '不会回退到示例账户或猜测范围'}</span></div><div class="stat"><small>${snapshotMode ? '最后快照' : '事实新鲜度'}</small><b>${fmtDate(lastSync)}</b><span>${currentLanguage === 'en' ? (lastSync ? snapshotMode ? 'Connection restricted; the data below is not live' : 'Latest saved facts; connection probes are verified separately' : 'No saved account facts') : (lastSync ? snapshotMode ? '连接受限；以下数据不是实时事实' : '最近保存时间；连接探针另行校验' : '尚无已保存事实')}</span></div></div>
     <article class="account-sync-note ${connected ? 'is-active' : ''}"><span class="status-dot"></span><div><b>${currentLanguage === 'en' ? 'Connection check' : '连接检查'}</b><p>${escapeHtml(connectionReason)}</p><span class="system-health-meta">${escapeHtml(connectionProbeEvidence)}</span>${connectionEvidence}</div></article>
@@ -3755,6 +3811,7 @@ async function renderVenueFacts() {
     ${accountId ? venueFactSections(facts, {snapshotMode, historyIncomplete}) : '<article class="danger-note venue-account-blocker"><b>未读取账户数据</b><p>请由系统管理员配置唯一默认生产账户。配置完成前，余额、仓位、委托、成交和资金费全部保持不可用，不会使用旧的 acct-1 或其他示例账户代替。</p></article>'}
   </section>`;
   document.querySelector('[data-refresh]')?.addEventListener('click', route);
+  bindExchangeAccountForms();
 }
 
 function venueFactSections(facts, {snapshotMode = false, historyIncomplete = false} = {}) {

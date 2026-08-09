@@ -45,6 +45,7 @@ class Settings(BaseSettings):
         min_length=32,
         repr=False,
     )
+    credential_encryption_key: str | None = Field(default=None, repr=False)
     allow_mock_identity: bool = False
     session_ttl_seconds: int = Field(default=28_800, ge=300, le=86_400)
     action_token_ttl_seconds: int = Field(default=300, ge=30, le=900)
