@@ -1,7 +1,7 @@
 # Trading 交易系统
 
 > 状态日期：2026-08-10
-> 当前状态：Workspace / 团队权限边界、团队交易账户与账户事实隔离、团队 Perptape / 签名 Webhook 单一信号源、加密凭据、两场所只读连接、版本化风控、LIVE/模拟资金隔离、分权风险恢复、受控资金路径和最小 Telegram 审核已实现；所有危险能力仍默认关闭
+> 当前状态：Workspace / 团队权限边界、团队交易账户与账户事实隔离、团队 Perptape / 签名 Webhook 单一信号源、加密凭据、四场所一次性只读连接验证、两场所持续事实同步、版本化风控、LIVE/模拟资金隔离、分权风险恢复、受控资金路径和最小 Telegram 审核已实现；所有危险能力仍默认关闭
 
 本项目面向一个资本所有者、一个内部组织和多个内部用户。用户可以提交和审核提案、查看仓位、处理异常；系统在风险可控的前提下辅助执行交易并判断是否赚钱。不开放外部注册，不管理第三方资金，不建设机构级多租户、通用合规或通用认证平台。
 
@@ -9,7 +9,16 @@
 
 交易执行的默认底座现统一为场所隔离的 Freqtrade worker：Binance futures 与 Hyperliquid futures 各自独立，Hyperliquid 通过显式 `hip3_dexes` allowlist 加载 HIP-3。控制面仍拥有提案、审核、风险、OrderIntent、fencing 和审计；交易所官方 API 只读客户端继续作为账户事实源。仓库内旧直接发送客户端仅供隔离兼容测试，默认运行配置会拒绝这条路径。`docker compose --profile execution-workers` 提供的是本地 dry-run worker，不构成实盘认证。
 
-`ExchangeAccount` 是当前团队内 `account_id + venue` 的持久化真源，允许同一交易所登记多个账户。Binance、Hyperliquid、OKX、Bybit 的凭据通过版本化 AES-256-GCM 信封保存，密文的认证上下文绑定 Team、账户、Venue 和轮换版本；API 与页面只返回脱敏元数据。凭据保存后连接状态仅为 `NOT_VERIFIED`，交易状态仍为 `DISABLED`。现有运行读取/执行进程仍从受保护的部署环境加载各自凭据，尚未消费数据库密文；OKX、Bybit 连接适配器也仍标记为未实现，不能把“已登记”投影为“已连接”或“可交易”。
+`ExchangeAccount` 是当前团队内 `account_id + venue` 的持久化真源，允许同一交易所登记多个账户。Binance、Hyperliquid、OKX、Bybit 的凭据通过版本化 AES-256-GCM 信封保存，密文的认证上下文绑定 Team、账户、Venue 和轮换版本；API 与页面只返回脱敏元数据。凭据保存后连接状态仅为 `NOT_VERIFIED`，交易状态仍为 `DISABLED`。获权的账户管理员可运行一次官方只读接口验证：服务端在短事务中校验 Team / Account / Venue 权限、幂等键和账户版本并解密，事务外发起无副作用探针，再以凭据版本复核结果；轮换并发会拒绝旧探针写回。成功只更新连接事实，不导入余额、不绑定持续 worker，也不启用交易、资金、签名或广播。
+
+| 场所 | 团队加密凭据 | 一次性连接验证 | 持续账户事实同步 | 交易执行 |
+| --- | --- | --- | --- | --- |
+| Binance | 已实现 | 已实现，标准 USD-M / Portfolio Margin 只读探针 | 已实现，但当前 worker 仍使用部署级凭据和单账户映射 | Freqtrade 外部 worker；默认关闭 |
+| Hyperliquid | 已实现 | 已实现，仅使用公开账户身份读取 Info API | 已实现，但当前 worker 仍使用部署级身份和单账户映射 | Freqtrade 外部 worker；默认关闭 |
+| OKX | 已实现 | 已实现，V5 私有只读余额探针 | 未实现 | 未实现 |
+| Bybit | 已实现 | 已实现，V5 Unified Account 只读余额探针 | 未实现 | 未实现 |
+
+“一次性连接验证成功”只证明该时刻的只读身份可用；它不等于持续事实新鲜、账户归属人工复核完成或交易就绪。运行读取/执行进程目前仍从受保护的部署环境加载凭据，尚未按多 Team / 多账户消费数据库信封。
 
 `VenueOrder`、`VenueFill`、`Position`、`AccountEquity`、权益历史、`FundingPayment` 与计算型对账均持久化非空 Team 根；同一 `account_id + venue` 可在不同团队独立存在，服务端写入、查询、资金事实聚合和对账按当前团队过滤。旧事实只在迁移时回填到既有默认团队，不据此开启连接或交易。资金提案/授权/转移及 sender/task 根仍待后续迁移，当前不得把账户事实隔离等同于整条资金链已完成团队化。
 

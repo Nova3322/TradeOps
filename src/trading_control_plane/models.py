@@ -119,6 +119,9 @@ class ExchangeAccount(Base):
     credential_metadata: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
     credential_version: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     connection_error_code: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    last_connection_check_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     last_verified_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )

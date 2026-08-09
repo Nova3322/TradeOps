@@ -201,6 +201,9 @@ button:disabled { opacity: .52; cursor: not-allowed; }
 .exchange-account-create { margin: 16px 0; }
 .exchange-credential-fields { margin: 0; padding: 16px; border: 1px solid var(--line); border-radius: 12px; }
 .exchange-credential-fields legend { padding: 0 6px; color: var(--muted); font-size: 11px; }
+.exchange-connection-form { display: grid; gap: 7px; margin: 14px 0; align-items: start; }
+.exchange-connection-form button { justify-self: start; }
+.exchange-connection-form small { color: var(--muted); line-height: 1.5; }
 .account-credential-rotate { margin-top: 12px; }
 .venue-technical-detail { margin-top: 8px; color: var(--muted); font-size: 10px; }
 .venue-technical-detail summary { width: fit-content; color: var(--accent); cursor: pointer; font-weight: 800; }

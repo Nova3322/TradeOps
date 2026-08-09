@@ -136,6 +136,11 @@ class ExchangeCredentialRotateRequest(BaseModel):
     idempotency_key: str = Field(min_length=1, max_length=160)
 
 
+class ExchangeConnectionVerifyRequest(BaseModel):
+    expected_version: int = Field(ge=1)
+    idempotency_key: str = Field(min_length=1, max_length=160)
+
+
 class SignalSourceConfigureRequest(BaseModel):
     mode: Literal["PERPTAPE", "WEBHOOK"]
     secret: SecretStr = Field(min_length=8, max_length=512)

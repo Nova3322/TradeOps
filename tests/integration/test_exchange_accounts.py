@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from uuid import UUID
@@ -15,6 +16,7 @@ from trading_control_plane.config import Settings
 from trading_control_plane.credentials import CredentialCipher
 from trading_control_plane.database import Database
 from trading_control_plane.domain import DomainRejected, ExecutionEnvironment
+from trading_control_plane.exchange_connection import ConnectionProbeResult
 from trading_control_plane.models import AuditEvent, ExchangeAccount, Team
 from trading_control_plane.perptape import PerptapeClient
 from trading_control_plane.queries import TradingQueries
@@ -46,6 +48,7 @@ def test_exchange_account_credentials_are_encrypted_scoped_and_never_projected(
     assert projection["data"][0]["connection"] == {
         "status": "NOT_VERIFIED",
         "error_code": None,
+        "checked_at": None,
         "last_verified_at": None,
         "read_only_capability": False,
     }
@@ -144,6 +147,13 @@ def test_account_setup_is_allowed_before_team_activation_and_cross_team_rotation
             expected_version=1,
             idempotency_key="cross-team-rotation",
             now=now + timedelta(seconds=2),
+        )
+    with pytest.raises(DomainRejected, match="EXCHANGE_ACCOUNT_NOT_FOUND"):
+        service.prepare_exchange_account_connection_verification(
+            second_account,
+            actor_id=admin,
+            expected_version=1,
+            idempotency_key="cross-team-connection-check",
         )
 
 
@@ -325,6 +335,8 @@ def test_exchange_account_api_masks_credentials_and_exposes_connector_truth(
                 "bound": True,
                 "source": "PROCESS_ENVIRONMENT",
                 "read_only_connector": "IMPLEMENTED",
+                "connection_verification_connector": "IMPLEMENTED",
+                "connection_verification_source": "DATABASE_ENVELOPE",
                 "trading_connector": "FREQTRADE_EXTERNAL",
             }
             assert item["connection"]["status"] == "NOT_VERIFIED"
@@ -334,3 +346,218 @@ def test_exchange_account_api_masks_credentials_and_exposes_connector_truth(
             assert "api-secret-never-return" not in page.text
 
     asyncio.run(scenario())
+
+
+class FakeExchangeConnectionVerifier:
+    def __init__(self, outcomes: Mapping[str, ConnectionProbeResult]) -> None:
+        self.outcomes = outcomes
+        self.calls: list[tuple[str, dict[str, str]]] = []
+
+    def verify(
+        self,
+        *,
+        venue: str,
+        credentials: Mapping[str, str],
+        now: datetime,
+    ) -> ConnectionProbeResult:
+        assert now.utcoffset() is not None
+        self.calls.append((venue, dict(credentials)))
+        return self.outcomes[venue]
+
+
+def test_four_venue_connection_verification_is_scoped_idempotent_and_never_enables_trading(
+    database: Database,
+) -> None:
+    now = datetime.now(UTC)
+    TradingService(database).bootstrap_admin("connection-api-admin", now=now)
+    verifier = FakeExchangeConnectionVerifier(
+        {
+            "BINANCE": ConnectionProbeResult(True, None),
+            "HYPERLIQUID": ConnectionProbeResult(True, None),
+            "OKX": ConnectionProbeResult(False, "OKX_AUTHENTICATION_FAILED"),
+            "BYBIT": ConnectionProbeResult(True, None),
+        }
+    )
+    settings = Settings(
+        environment="test",
+        database_url=str(database.engine.url),
+        allow_mock_identity=True,
+        session_signing_secret="connection-api-signing-secret-that-is-long-enough",  # noqa: S106
+        credential_encryption_key=encryption_key(),
+        public_base_url="http://test",
+        _env_file=None,
+    )
+    app = create_app(
+        settings,
+        database,
+        PerptapeClient(
+            base_url="https://perptape.com",
+            api_key=None,
+            contract_version="breakouts-v1",
+            cache_ttl=timedelta(minutes=1),
+        ),
+        exchange_connection_verifier=verifier,
+    )
+    credentials_by_venue = {
+        "BINANCE": {"api_key": "binance-key", "api_secret": "binance-secret"},
+        "HYPERLIQUID": {
+            "account_address": "0x1111111111111111111111111111111111111111",
+            "api_wallet_address": "0x2222222222222222222222222222222222222222",
+            "api_wallet_private_key": "private-key-must-not-reach-verifier",
+        },
+        "OKX": {
+            "api_key": "okx-key",
+            "api_secret": "okx-secret",
+            "passphrase": "okx-passphrase",
+        },
+        "BYBIT": {"api_key": "bybit-key", "api_secret": "bybit-secret"},
+    }
+
+    async def scenario() -> None:
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            login = await client.post(
+                "/api/auth/mock/login", json={"username": "connection-api-admin"}
+            )
+            assert login.status_code == 200
+            account_ids: dict[str, str] = {}
+            for venue, credentials in credentials_by_venue.items():
+                created = await client.post(
+                    "/api/exchange-accounts",
+                    json={
+                        "account_id": f"{venue.lower()}-team-account",
+                        "venue": venue,
+                        "label": f"{venue} Team Account",
+                        "credentials": credentials,
+                        "idempotency_key": f"create-{venue.lower()}-team-account",
+                    },
+                )
+                assert created.status_code == 200, created.text
+                account_ids[venue] = created.json()["exchange_account_id"]
+
+            results: dict[str, dict[str, object]] = {}
+            for venue, exchange_account_id in account_ids.items():
+                response = await client.post(
+                    f"/api/exchange-accounts/{exchange_account_id}/connection-verifications",
+                    json={
+                        "expected_version": 1,
+                        "idempotency_key": f"verify-{venue.lower()}-team-account",
+                    },
+                )
+                assert response.status_code == 200, response.text
+                assert all(
+                    secret not in response.text
+                    for secret in credentials_by_venue[venue].values()
+                )
+                results[venue] = response.json()
+
+            assert results["OKX"]["connection"] == {
+                "status": "FAILED",
+                "error_code": "OKX_AUTHENTICATION_FAILED",
+                "checked_at": results["OKX"]["connection"]["checked_at"],
+                "last_verified_at": None,
+            }
+            for venue in {"BINANCE", "HYPERLIQUID", "BYBIT"}:
+                assert results[venue]["connection"]["status"] == "VERIFIED"
+                assert results[venue]["connection"]["last_verified_at"] is not None
+            assert all(
+                result["trading"] == {"status": "DISABLED", "enabled": False}
+                for result in results.values()
+            )
+
+            replay = await client.post(
+                f"/api/exchange-accounts/{account_ids['BINANCE']}/connection-verifications",
+                json={
+                    "expected_version": 1,
+                    "idempotency_key": "verify-binance-team-account",
+                },
+            )
+            assert replay.status_code == 200
+            assert replay.json()["version"] == results["BINANCE"]["version"]
+            assert len(verifier.calls) == 4
+
+            listed = (await client.get("/api/exchange-accounts")).json()["data"]["data"]
+            by_venue = {item["venue"]: item for item in listed}
+            assert by_venue["OKX"]["connection"]["status"] == "FAILED"
+            assert by_venue["OKX"]["runtime_binding"]["read_only_connector"] == "NOT_IMPLEMENTED"
+            assert (
+                by_venue["OKX"]["runtime_binding"]["connection_verification_connector"]
+                == "IMPLEMENTED"
+            )
+            assert by_venue["BYBIT"]["permissions"]["can_verify_connection"] is True
+            assert all(item["trading"]["enabled"] is False for item in listed)
+
+    asyncio.run(scenario())
+
+    expected_verifier_credentials = {
+        **credentials_by_venue,
+        "HYPERLIQUID": {
+            "account_address": "0x1111111111111111111111111111111111111111",
+            "api_wallet_address": "0x2222222222222222222222222222222222222222",
+        },
+    }
+    assert dict(verifier.calls) == expected_verifier_credentials
+    assert "private-key-must-not-reach-verifier" not in repr(verifier.calls)
+    with database.session_factory() as session:
+        audits = session.scalars(
+            select(AuditEvent).where(
+                AuditEvent.event_type.in_(
+                    {
+                        "EXCHANGE_ACCOUNT_CONNECTION_VERIFIED",
+                        "EXCHANGE_ACCOUNT_CONNECTION_FAILED",
+                    }
+                )
+            )
+        ).all()
+        assert len(audits) == 4
+        assert all(
+            "secret" not in item.reason and "passphrase" not in item.reason
+            for item in audits
+        )
+        stored = session.scalars(select(ExchangeAccount)).all()
+        assert all(item.trading_status == "DISABLED" for item in stored)
+        assert all(item.last_connection_check_at is not None for item in stored)
+
+
+def test_connection_result_is_not_committed_after_credential_rotation(database: Database) -> None:
+    now = datetime.now(UTC)
+    service = TradingService(database, credential_encryption_key=encryption_key())
+    admin = service.bootstrap_admin("connection-race-admin", now=now)
+    exchange_account_id = service.create_exchange_account(
+        actor_id=admin,
+        account_id="bybit-race",
+        venue="BYBIT",
+        label="Bybit Race",
+        credentials={"api_key": "old-key", "api_secret": "old-secret"},
+        idempotency_key="create-bybit-race",
+        now=now,
+    )
+    command, replay = service.prepare_exchange_account_connection_verification(
+        exchange_account_id,
+        actor_id=admin,
+        expected_version=1,
+        idempotency_key="verify-before-rotation",
+    )
+    assert replay is None and command is not None
+    service.rotate_exchange_account_credentials(
+        exchange_account_id,
+        actor_id=admin,
+        credentials={"api_key": "new-key", "api_secret": "new-secret"},
+        expected_version=1,
+        idempotency_key="rotate-during-verification",
+        now=now + timedelta(seconds=1),
+    )
+
+    with pytest.raises(DomainRejected, match="VERSION_CONFLICT"):
+        service.record_exchange_account_connection_verification(
+            command,
+            ConnectionProbeResult(True, None),
+            actor_id=admin,
+            idempotency_key="verify-before-rotation",
+            now=now + timedelta(seconds=2),
+        )
+
+    projection = TradingQueries(database).exchange_accounts(admin)["data"][0]
+    assert projection["version"] == 2
+    assert projection["connection"]["status"] == "NOT_VERIFIED"
+    assert projection["connection"]["checked_at"] is None
+    assert projection["trading"]["enabled"] is False

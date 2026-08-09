@@ -326,6 +326,33 @@ class TradingQueries:
                     for assignment in assignments
                 )
             ]
+
+            def granted(account: ExchangeAccount, action: str) -> bool:
+                return any(
+                    (
+                        assignment.account_scope is None
+                        or assignment.account_scope == account.account_id
+                    )
+                    and (
+                        assignment.venue_scope is None
+                        or assignment.venue_scope == account.venue
+                    )
+                    and (
+                        action in ROLE_ACTIONS[Role(assignment.role)]
+                        or "*" in ROLE_ACTIONS[Role(assignment.role)]
+                    )
+                    for assignment in assignments
+                )
+
+            projected: list[dict[str, Any]] = []
+            for item in visible:
+                projection = self._exchange_account_projection(item)
+                projection["permissions"] = {
+                    "can_manage": granted(item, "account.manage"),
+                    "can_manage_credentials": granted(item, "account.credentials.manage"),
+                    "can_verify_connection": granted(item, "account.credentials.manage"),
+                }
+                projected.append(projection)
             return {
                 "workspace_id": str(workspace_id),
                 "team_id": str(team_id),
@@ -335,7 +362,7 @@ class TradingQueries:
                     for item in assignments
                 ),
                 "supported_venues": ["BINANCE", "HYPERLIQUID", "OKX", "BYBIT"],
-                "data": [self._exchange_account_projection(item) for item in visible],
+                "data": projected,
             }
 
     @staticmethod
@@ -367,6 +394,7 @@ class TradingQueries:
             "connection": {
                 "status": item.connection_status,
                 "error_code": item.connection_error_code,
+                "checked_at": _iso(item.last_connection_check_at),
                 "last_verified_at": _iso(item.last_verified_at),
                 "read_only_capability": item.connection_status == "VERIFIED",
             },

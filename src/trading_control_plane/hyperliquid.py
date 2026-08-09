@@ -397,6 +397,18 @@ class HyperliquidReadOnlyClient:
     def _info(self, payload: dict[str, Any]) -> JsonValue:
         return self._fetcher(f"{self._base_url}/info", payload, 5.0)
 
+    def verify_connection(self, *, now: datetime) -> None:
+        """Verify the configured public account identity through the official Info API."""
+
+        del now
+        account = self._resolved_account()
+        raw = self._info({"type": "clearinghouseState", "user": account})
+        if not isinstance(raw, dict) or not isinstance(raw.get("marginSummary"), dict):
+            raise DomainRejected(
+                "HYPERLIQUID_RESPONSE_INVALID",
+                "Hyperliquid clearinghouse account response is invalid",
+            )
+
     def _resolved_account(self) -> str:
         if self._account_address and ADDRESS_PATTERN.fullmatch(self._account_address):
             return self._account_address
@@ -514,6 +526,11 @@ class HyperliquidReadOnlyClient:
                 | self._order_symbols(orders, dex=dex)
             )
             if not target_symbols:
+                if not isinstance(meta_contexts, list) or not meta_contexts:
+                    raise DomainRejected(
+                        "HYPERLIQUID_RESPONSE_INVALID",
+                        "metaAndAssetCtxs response is invalid",
+                    )
                 meta = _require_dict(meta_contexts[0], "meta")
                 universe = _require_dict_list(meta.get("universe"), "meta universe")
                 seed = next(

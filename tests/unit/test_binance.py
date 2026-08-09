@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import io
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -386,6 +387,26 @@ def test_read_only_transport_retries_transient_network_failure(
     assert binance._default_fetcher("https://example.invalid", {}, 1.0) == {"ok": True}
     assert attempts == 3
     assert delays == [0.25, 0.5]
+
+
+def test_binance_transport_classifies_signed_api_error_body(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    error = urllib.error.HTTPError(
+        "https://fapi.binance.com/fapi/v3/balance",
+        400,
+        "bad request",
+        {},
+        io.BytesIO(b'{"code":-2015,"msg":"invalid key"}'),
+    )
+
+    def reject(*_args: object, **_kwargs: object) -> UrlResponse:
+        raise error
+
+    monkeypatch.setattr(urllib.request, "urlopen", reject)
+
+    with pytest.raises(DomainRejected, match="BINANCE_AUTHENTICATION_FAILED"):
+        binance._default_fetcher("https://fapi.binance.com/fapi/v3/balance", {}, 1.0)
 
 
 def test_default_binance_read_transports_parse_and_fail_closed(

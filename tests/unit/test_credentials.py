@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import secrets
 from uuid import uuid4
 
@@ -108,6 +109,30 @@ def test_scoped_secret_round_trip_and_authenticated_context() -> None:
             purpose="team-signal-source",
             credential_version=2,
         )
+
+
+def test_exchange_credential_fingerprint_is_keyed_and_purpose_bound() -> None:
+    credentials = {"api_key": "key", "api_secret": "guessable-secret"}
+    cipher = CredentialCipher(key())
+    fingerprint = cipher.exchange_credentials_fingerprint(
+        credentials,
+        venue="BINANCE",
+        purpose="exchange-account.create",
+    )
+
+    assert fingerprint != hashlib.sha256(
+        b'{"api_key":"key","api_secret":"guessable-secret"}'
+    ).hexdigest()
+    assert fingerprint == cipher.exchange_credentials_fingerprint(
+        credentials,
+        venue="BINANCE",
+        purpose="exchange-account.create",
+    )
+    assert fingerprint != cipher.exchange_credentials_fingerprint(
+        credentials,
+        venue="BINANCE",
+        purpose="exchange-account.credentials.rotate",
+    )
 
 
 def test_missing_key_and_invalid_venue_credentials_fail_closed() -> None:

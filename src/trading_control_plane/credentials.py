@@ -103,6 +103,24 @@ class CredentialCipher:
             hashlib.sha256,
         ).hexdigest()
 
+    def exchange_credentials_fingerprint(
+        self,
+        credentials: dict[str, str],
+        *,
+        venue: str,
+        purpose: str,
+    ) -> str:
+        """Keyed idempotency material that cannot be used to guess stored credentials."""
+
+        normalized = validate_exchange_credentials(venue, credentials)
+        canonical = json.dumps(
+            normalized,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=True,
+        )
+        return self.secret_fingerprint(canonical, purpose=purpose)
+
     def _encrypt_payload(
         self,
         payload: dict[str, str],

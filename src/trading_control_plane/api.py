@@ -55,6 +55,7 @@ from trading_control_plane.api_schemas import (
     DirectCapitalUnsignedPlanRequest,
     DirectCapitalWalletSubmissionRequest,
     ExchangeAccountCreateRequest,
+    ExchangeConnectionVerifyRequest,
     ExchangeCredentialRotateRequest,
     FundingFactRequest,
     HyperliquidReadOnlySyncRequest,
@@ -133,6 +134,10 @@ from trading_control_plane.domain import (
     Role,
     SignalSourceMode,
     TargetCandidate,
+)
+from trading_control_plane.exchange_connection import (
+    ExchangeConnectionVerifier,
+    ReadOnlyExchangeConnectionVerifier,
 )
 from trading_control_plane.freqtrade import (
     FreqtradeEntryCommand,
@@ -338,6 +343,7 @@ def create_app(
     safe_spending_gateway: SafeSpendingGateway | None = None,
     hyperliquid_capital_gateway: HyperliquidCapitalGateway | None = None,
     binance_capital_gateway: BinanceCapitalGateway | None = None,
+    exchange_connection_verifier: ExchangeConnectionVerifier | None = None,
 ) -> FastAPI:
     resolved_settings = settings or get_settings()
     resolved_settings.validate_runtime_security()
@@ -565,6 +571,9 @@ def create_app(
         recv_window_ms=resolved_settings.binance_recv_window_ms,
         timeout_seconds=resolved_settings.binance_capital_timeout_seconds,
     )
+    resolved_exchange_connection_verifier = (
+        exchange_connection_verifier or ReadOnlyExchangeConnectionVerifier()
+    )
 
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
@@ -603,6 +612,7 @@ def create_app(
     app.state.safe_spending_gateway = resolved_safe_spending
     app.state.hyperliquid_capital_gateway = resolved_hyperliquid_capital
     app.state.binance_capital_gateway = resolved_binance_capital
+    app.state.exchange_connection_verifier = resolved_exchange_connection_verifier
 
     @app.exception_handler(DomainRejected)
     async def domain_rejected(_: Request, exc: DomainRejected) -> JSONResponse:
@@ -1142,6 +1152,8 @@ def create_app(
                 "read_only_connector": (
                     "IMPLEMENTED" if venue in {"BINANCE", "HYPERLIQUID"} else "NOT_IMPLEMENTED"
                 ),
+                "connection_verification_connector": "IMPLEMENTED",
+                "connection_verification_source": "DATABASE_ENVELOPE",
                 "trading_connector": (
                     "FREQTRADE_EXTERNAL"
                     if venue in {"BINANCE", "HYPERLIQUID"}
@@ -1186,6 +1198,40 @@ def create_app(
         return {
             "exchange_account_id": str(exchange_account_id),
             "version": version,
+            "data": queries().exchange_accounts(identity.user_id),
+        }
+
+    @app.post("/api/exchange-accounts/{exchange_account_id}/connection-verifications")
+    def verify_exchange_account_connection(
+        exchange_account_id: UUID,
+        payload: ExchangeConnectionVerifyRequest,
+        identity: SessionIdentity = identity_dependency,
+    ) -> dict[str, Any]:
+        account_service = service()
+        command, replay = account_service.prepare_exchange_account_connection_verification(
+            exchange_account_id,
+            actor_id=identity.user_id,
+            expected_version=payload.expected_version,
+            idempotency_key=payload.idempotency_key,
+        )
+        if replay is not None:
+            result = replay
+        else:
+            assert command is not None
+            outcome = resolved_exchange_connection_verifier.verify(
+                venue=command.venue,
+                credentials=command.credentials,
+                now=_now(),
+            )
+            result = account_service.record_exchange_account_connection_verification(
+                command,
+                outcome,
+                actor_id=identity.user_id,
+                idempotency_key=payload.idempotency_key,
+                now=_now(),
+            )
+        return {
+            **result,
             "data": queries().exchange_accounts(identity.user_id),
         }
 

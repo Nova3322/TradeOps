@@ -8,6 +8,7 @@ import json
 import re
 from collections.abc import Sequence
 from contextlib import AbstractContextManager, nullcontext
+from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Any, NoReturn
@@ -76,6 +77,7 @@ from trading_control_plane.domain import (
     evaluate_risk,
     select_target_position,
 )
+from trading_control_plane.exchange_connection import ConnectionProbeResult
 from trading_control_plane.freqtrade import (
     FreqtradeEntryCommand,
     FreqtradeExitCommand,
@@ -160,6 +162,7 @@ PASSWORD_HASHER = PasswordHasher()
 SCOPE_SLUG_PATTERN = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,78}[a-z0-9])?$")
 SIGNAL_NONCE_PATTERN = re.compile(r"^[A-Za-z0-9._:-]{16,160}$")
 SIGNAL_CLOCK_SKEW = timedelta(seconds=30)
+CONNECTION_ERROR_CODE_PATTERN = re.compile(r"^[A-Z0-9_]{1,120}$")
 TEAM_SETUP_ACTIONS = frozenset(
     {
         "team.view",
@@ -188,6 +191,17 @@ ACTIVE_INTENT_STATUSES = {
 
 RISK_RESTORE_COOLDOWN = timedelta(minutes=15)
 RISK_RESTORE_TTL = timedelta(hours=24)
+
+
+@dataclass(frozen=True, slots=True)
+class PreparedExchangeConnectionVerification:
+    exchange_account_id: UUID
+    team_id: UUID
+    account_id: str
+    venue: str
+    account_version: int
+    credential_version: int
+    credentials: dict[str, str] = field(repr=False)
 
 OCCUPIED_RESERVATION_STATUSES = {
     ReservationStatus.RESERVED.value,
@@ -1686,6 +1700,7 @@ class TradingService:
             credential_metadata={},
             credential_version=0,
             connection_error_code=None,
+            last_connection_check_at=None,
             last_verified_at=None,
             active=True,
             version=1,
@@ -1726,7 +1741,6 @@ class TradingService:
         normalized_account_id, normalized_venue, normalized_label = (
             self._exchange_account_definition(account_id, venue, label)
         )
-        credential_semantics = None if credentials is None else _semantic_hash(credentials)
         with self.database.session_factory.begin() as session:
             team = self._require_role(
                 session,
@@ -1734,6 +1748,18 @@ class TradingService:
                 "account.manage",
                 normalized_account_id,
                 normalized_venue,
+            )
+            credential_semantics = (
+                None
+                if credentials is None
+                else self.credential_cipher.exchange_credentials_fingerprint(
+                    credentials,
+                    venue=normalized_venue,
+                    purpose=(
+                        f"exchange-account.create:{team.team_id}:"
+                        f"{normalized_account_id}:{normalized_venue}"
+                    ),
+                )
             )
             caller = f"{actor_id}:{team.team_id}"
             payload = {
@@ -1788,6 +1814,7 @@ class TradingService:
                 credential_metadata={} if encrypted is None else encrypted.metadata,
                 credential_version=0 if encrypted is None else 1,
                 connection_error_code=None,
+                last_connection_check_at=None,
                 last_verified_at=None,
                 active=True,
                 version=1,
@@ -1838,7 +1865,6 @@ class TradingService:
         idempotency_key: str,
         now: datetime,
     ) -> int:
-        credential_semantics = _semantic_hash(credentials)
         with self.database.session_factory.begin() as session:
             _actor, _workspace, active_team = self._active_scope(session, actor_id)
             assert active_team is not None
@@ -1862,6 +1888,11 @@ class TradingService:
                 account.account_id,
                 account.venue,
                 team_id=account.team_id,
+            )
+            credential_semantics = self.credential_cipher.exchange_credentials_fingerprint(
+                credentials,
+                venue=account.venue,
+                purpose=f"exchange-account.credentials.rotate:{account.exchange_account_id}",
             )
             caller = f"{actor_id}:{account.team_id}"
             payload = {
@@ -1893,6 +1924,7 @@ class TradingService:
             account.credential_version = next_credential_version
             account.connection_status = "NOT_VERIFIED"
             account.connection_error_code = None
+            account.last_connection_check_at = None
             account.last_verified_at = None
             account.trading_status = "DISABLED"
             account.version += 1
@@ -1927,6 +1959,219 @@ class TradingService:
                 now=now,
             )
             return account.version
+
+    @staticmethod
+    def _connection_verification_payload(
+        exchange_account_id: UUID,
+        expected_version: int,
+    ) -> dict[str, Any]:
+        return {
+            "exchange_account_id": str(exchange_account_id),
+            "expected_version": expected_version,
+        }
+
+    def prepare_exchange_account_connection_verification(
+        self,
+        exchange_account_id: UUID,
+        *,
+        actor_id: UUID,
+        expected_version: int,
+        idempotency_key: str,
+    ) -> tuple[PreparedExchangeConnectionVerification | None, dict[str, Any] | None]:
+        """Authorize and decrypt a version-pinned probe after checking for a replay."""
+
+        with self.database.session_factory.begin() as session:
+            _actor, _workspace, active_team = self._active_scope(session, actor_id)
+            assert active_team is not None
+            account = session.scalar(
+                select(ExchangeAccount).where(
+                    ExchangeAccount.exchange_account_id == exchange_account_id,
+                    ExchangeAccount.team_id == active_team.team_id,
+                )
+            )
+            if account is None:
+                _reject(
+                    "EXCHANGE_ACCOUNT_NOT_FOUND",
+                    "exchange account is outside the active team or does not exist",
+                )
+            self._require_role(
+                session,
+                actor_id,
+                "account.credentials.manage",
+                account.account_id,
+                account.venue,
+                team_id=account.team_id,
+            )
+            caller = f"{actor_id}:{account.team_id}"
+            _digest, replay = self._idempotency(
+                session,
+                caller_id=caller,
+                operation="exchange-account.connection.verify",
+                idempotency_key=idempotency_key,
+                payload=self._connection_verification_payload(
+                    exchange_account_id,
+                    expected_version,
+                ),
+            )
+            if replay is not None:
+                return None, replay
+            if not account.active:
+                _reject("EXCHANGE_ACCOUNT_INACTIVE", "exchange account is inactive")
+            if account.version != expected_version:
+                _reject("VERSION_CONFLICT", "exchange account version changed")
+            if account.credentials_ciphertext is None or account.credential_version < 1:
+                _reject(
+                    "EXCHANGE_ACCOUNT_CREDENTIALS_MISSING",
+                    "encrypted exchange credentials must be configured before verification",
+                )
+            credentials = self.credential_cipher.decrypt(
+                account.credentials_ciphertext,
+                team_id=account.team_id,
+                exchange_account_id=account.exchange_account_id,
+                venue=account.venue,
+                credential_version=account.credential_version,
+            )
+            if account.venue == "HYPERLIQUID":
+                credentials = {
+                    key: value
+                    for key, value in credentials.items()
+                    if key in {"account_address", "api_wallet_address"}
+                }
+            return (
+                PreparedExchangeConnectionVerification(
+                    exchange_account_id=account.exchange_account_id,
+                    team_id=account.team_id,
+                    account_id=account.account_id,
+                    venue=account.venue,
+                    account_version=account.version,
+                    credential_version=account.credential_version,
+                    credentials=credentials,
+                ),
+                None,
+            )
+
+    def record_exchange_account_connection_verification(
+        self,
+        command: PreparedExchangeConnectionVerification,
+        outcome: ConnectionProbeResult,
+        *,
+        actor_id: UUID,
+        idempotency_key: str,
+        now: datetime,
+    ) -> dict[str, Any]:
+        """Commit a probe only when its account and credential versions are still current."""
+
+        error_code = outcome.error_code
+        if outcome.success:
+            error_code = None
+        elif error_code is None or CONNECTION_ERROR_CODE_PATTERN.fullmatch(error_code) is None:
+            error_code = "READ_ONLY_PROBE_FAILED"
+        with self.database.session_factory.begin() as session:
+            _actor, _workspace, active_team = self._active_scope(session, actor_id)
+            assert active_team is not None
+            account = session.scalar(
+                select(ExchangeAccount)
+                .where(
+                    ExchangeAccount.exchange_account_id == command.exchange_account_id,
+                    ExchangeAccount.team_id == active_team.team_id,
+                )
+                .with_for_update()
+            )
+            if account is None:
+                _reject(
+                    "EXCHANGE_ACCOUNT_NOT_FOUND",
+                    "exchange account is outside the active team or does not exist",
+                )
+            self._require_role(
+                session,
+                actor_id,
+                "account.credentials.manage",
+                account.account_id,
+                account.venue,
+                team_id=account.team_id,
+            )
+            caller = f"{actor_id}:{account.team_id}"
+            digest, replay = self._idempotency(
+                session,
+                caller_id=caller,
+                operation="exchange-account.connection.verify",
+                idempotency_key=idempotency_key,
+                payload=self._connection_verification_payload(
+                    command.exchange_account_id,
+                    command.account_version,
+                ),
+            )
+            if replay is not None:
+                return replay
+            if (
+                account.version != command.account_version
+                or account.credential_version != command.credential_version
+                or account.team_id != command.team_id
+                or account.account_id != command.account_id
+                or account.venue != command.venue
+            ):
+                _reject(
+                    "VERSION_CONFLICT",
+                    "exchange account or credential version changed during verification",
+                )
+            account.connection_status = "VERIFIED" if outcome.success else "FAILED"
+            account.connection_error_code = error_code
+            account.last_connection_check_at = now
+            if outcome.success:
+                account.last_verified_at = now
+            account.version += 1
+            account.updated_by = actor_id
+            account.updated_at = now
+            response = {
+                "exchange_account_id": str(account.exchange_account_id),
+                "version": account.version,
+                "connection": {
+                    "status": account.connection_status,
+                    "error_code": account.connection_error_code,
+                    "checked_at": now.astimezone(UTC).isoformat(),
+                    "last_verified_at": (
+                        None
+                        if account.last_verified_at is None
+                        else account.last_verified_at.astimezone(UTC).isoformat()
+                    ),
+                },
+                "trading": {
+                    "status": account.trading_status,
+                    "enabled": False,
+                },
+            }
+            self._save_receipt(
+                session,
+                caller_id=caller,
+                operation="exchange-account.connection.verify",
+                idempotency_key=idempotency_key,
+                semantic_hash=digest,
+                response=response,
+                now=now,
+            )
+            self._audit(
+                session,
+                actor_id=str(actor_id),
+                event_type=(
+                    "EXCHANGE_ACCOUNT_CONNECTION_VERIFIED"
+                    if outcome.success
+                    else "EXCHANGE_ACCOUNT_CONNECTION_FAILED"
+                ),
+                object_type="ExchangeAccount",
+                object_id=account.exchange_account_id,
+                reason=(
+                    f"venue={account.venue};connection={account.connection_status.lower()};"
+                    f"error_code={error_code or 'none'};trading={account.trading_status.lower()}"
+                ),
+                correlation_id=uuid4(),
+                object_version=account.version,
+                idempotency_key=idempotency_key,
+                workspace_id=active_team.workspace_id,
+                team_id=account.team_id,
+                account_id=account.account_id,
+                now=now,
+            )
+            return response
 
     def select_scope(
         self,

@@ -1486,6 +1486,7 @@ async def exercise_live_cancel_outcome(database: Database, *, venue: str, unknow
 
 async def exercise_unknown_live_protection(database: Database, *, venue: str) -> None:
     service = TradingService(database)
+    action_now = datetime.now(UTC)
     is_binance = venue == "BINANCE"
     key = f"unknown-protection-{venue.lower()}"
     quantity = Decimal(5) if is_binance else Decimal("0.0002")
@@ -1504,17 +1505,17 @@ async def exercise_unknown_live_protection(database: Database, *, venue: str) ->
     )
     scope = f"LIVE:acct-{key}:{venue}"
     owner = f"{key}-worker"
-    token = service.acquire_sender(scope, owner, ids["operator"], NOW)
+    token = service.acquire_sender(scope, owner, ids["operator"], action_now)
     service.set_capability_gate(
         "LIVE_ORDER_SEND",
         CapabilityStatus.ENABLED,
         "unknown protection fixture",
         ids["admin"],
-        now=NOW,
+        now=action_now,
     )
     if is_binance:
         prepared = service.prepare_binance_live_send(
-            ids["opening"], ids["operator"], scope, owner, token, now=NOW
+            ids["opening"], ids["operator"], scope, owner, token, now=action_now
         )
         service.record_binance_live_order(
             ids["opening"],
@@ -1534,14 +1535,14 @@ async def exercise_unknown_live_protection(database: Database, *, venue: str) ->
                 stop_price=Decimal(0),
                 reduce_only=False,
                 close_position=False,
-                observed_at=NOW,
+                observed_at=action_now,
             ),
-            now=NOW,
+            now=action_now,
         )
         client: Any = FailingProtectionBinanceLiveClient()
     else:
         prepared = service.prepare_hyperliquid_live_send(
-            ids["opening"], ids["operator"], scope, owner, token, now=NOW
+            ids["opening"], ids["operator"], scope, owner, token, now=action_now
         )
         service.record_hyperliquid_live_order(
             ids["opening"],
@@ -1562,9 +1563,9 @@ async def exercise_unknown_live_protection(database: Database, *, venue: str) ->
                 stop_price=Decimal(0),
                 reduce_only=False,
                 close_position=False,
-                observed_at=NOW,
+                observed_at=action_now,
             ),
-            now=NOW,
+            now=action_now,
         )
         client = FailingProtectionHyperliquidLiveClient()
     position_id = service.record_position(
@@ -1577,7 +1578,7 @@ async def exercise_unknown_live_protection(database: Database, *, venue: str) ->
         True,
         ids["operator"],
         environment=ExecutionEnvironment.LIVE,
-        now=NOW,
+        now=action_now,
     )
     app = application(
         database,
@@ -1600,7 +1601,7 @@ async def exercise_unknown_live_protection(database: Database, *, venue: str) ->
             f"/api/campaigns/{ids['campaign']}/{prefix}/live/protection",
             json=payload,
         )
-        assert response.status_code == 503
+        assert response.status_code == 503, response.text
         assert response.json()["error"]["retryable"] is True
     with database.session_factory() as session:
         protection = session.scalar(
