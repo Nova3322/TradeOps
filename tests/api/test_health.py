@@ -112,9 +112,9 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
 
     assert response.status_code == 200
     assert "交易控制台" in response.text
-    assert "/assets/app.js?v=142" in response.text
+    assert "/assets/app.js?v=143" in response.text
     assert 'href="/signals"' in response.text
-    assert "/assets/styles.css?v=60" in response.text
+    assert "/assets/styles.css?v=61" in response.text
     assert 'aria-label="交易控制台首页"' in response.text
     assert '<a href="/" data-link><span>⌂</span>当前任务</a>' in response.text
     assert "<span>⌁</span>实时机会</a>" in response.text
@@ -443,15 +443,87 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
     assert ".source-facts" in stylesheet.text
     assert ".readiness-item" in stylesheet.text
     assert ".readiness-action" in stylesheet.text
+    assert ".error-state-guidance" in stylesheet.text
+    assert ".error-state h2:focus-visible" in stylesheet.text
     tablet_css = stylesheet.text.split("@media (max-width: 1180px)", 1)[1].split("@media", 1)[0]
     assert ".proposal-list-tools { grid-template-columns: minmax(220px, 1fr) 140px 140px; }" in tablet_css
 
     service_worker = get(app, "/sw.js")
     assert service_worker.status_code == 200
-    assert "trading-shell-v114" in service_worker.text
+    assert "trading-shell-v115" in service_worker.text
     assert "self.skipWaiting()" in service_worker.text
     assert "self.clients.claim()" in service_worker.text
     assert "await fetch(event.request)" in service_worker.text
+
+
+def test_error_state_explains_impact_owner_next_step_and_focus() -> None:
+    node = shutil.which("node")
+    assert node is not None
+    app_path = Path(__file__).parents[2] / "src" / "trading_control_plane" / "web" / "app.js"
+    script = textwrap.dedent(
+        r"""
+        import assert from "node:assert/strict";
+        import fs from "node:fs";
+        import vm from "node:vm";
+
+        const source = fs.readFileSync(process.argv[1], "utf8");
+        const from = source.indexOf("function errorView");
+        const to = source.indexOf("\nfunction cancelMobileNavFocus", from);
+        assert.notEqual(from, -1);
+        assert.notEqual(to, -1);
+        const context = vm.createContext({
+          escapeHtml: value => String(value ?? ""),
+          friendlyApiError: error => error.message,
+        });
+        vm.runInContext(source.slice(from, to), context);
+
+        const network = context.errorStateGuidance({
+          code:"NETWORK_ERROR",
+          message:"无法连接控制台服务，请检查网络后重试",
+        });
+        assert.equal(network.title, "连接已中断");
+        assert.match(network.impact, /离线前画面不得视为当前状态/);
+        assert.equal(network.owner, "平台运维或网络管理员");
+        assert.match(network.next, /不要重复提交任何结果未知的操作/);
+
+        const html = context.errorView({
+          code:"NETWORK_ERROR",
+          message:"无法连接控制台服务，请检查网络后重试",
+        });
+        assert.match(html, /role="alert" aria-live="assertive"/);
+        assert.match(html, /data-error-heading tabindex="-1"/);
+        assert.match(html, /<dt>影响<\/dt>/);
+        assert.match(html, /<dt>负责角色<\/dt>/);
+        assert.match(html, /<dt>下一步<\/dt>/);
+        assert.match(html, /NETWORK_ERROR/);
+        assert.match(html, /data-retry/);
+
+        const forbidden = context.errorStateGuidance({
+          code:"HTTP_403", status:403, message:"forbidden",
+        });
+        assert.equal(forbidden.owner, "团队管理员");
+        assert.match(forbidden.impact, /不会加载团队或账户数据/);
+
+        const missingPolicy = context.errorStateGuidance({
+          code:"RISK_POLICY_MISSING", message:"missing",
+        });
+        assert.equal(missingPolicy.owner, "系统管理员");
+        assert.match(missingPolicy.impact, /新增风险、影子启用/);
+
+        const bootstrapHtml = context.errorView({
+          code:"NETWORK_ERROR", message:"offline",
+        }, false);
+        assert.doesNotMatch(bootstrapHtml, /data-retry/);
+        assert.match(bootstrapHtml, /返回当前任务/);
+        """
+    )
+    completed = subprocess.run(  # noqa: S603
+        [node, "--input-type=module", "-e", script, str(app_path)],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stderr
 
 
 def test_manual_proposal_instrument_picker_filters_and_requires_exact_symbol() -> None:
@@ -2159,6 +2231,15 @@ def test_console_terminology_keeps_official_names_and_uses_natural_chinese() -> 
           "Exactly one signal-source mode is enabled for the current team.",
         );
         assert.equal(englishContext.translate("团队启用状态"), "Team activation status");
+        assert.equal(englishContext.translate("绩效报表"), "Performance reports");
+        assert.equal(englishContext.translate("影子模式"), "Shadow mode");
+        assert.equal(englishContext.translate("通知中心"), "Notification center");
+        assert.equal(englishContext.translate("当前 Workspace 和团队"), "Current Workspace and team");
+        assert.equal(englishContext.translate("负责角色"), "Responsible role");
+        assert.equal(
+          englishContext.translate("无法连接控制台服务，请检查网络后重试"),
+          "Cannot reach the Trading Console service. Check the network, then retry.",
+        );
         assert.equal(
           englishContext.translate("此清单直接投影 "),
           "This checklist directly projects ",

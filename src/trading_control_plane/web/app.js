@@ -40,7 +40,7 @@ const ENGLISH_EXACT = new Map(Object.entries({
   '只读用户':'Observer', '提案发起人':'Proposer', '审核人':'Reviewer', '交易运维人员':'Trading operator',
   '资金管理员':'Treasury administrator', '系统管理员':'Super administrator',
   '主导航':'Main navigation', '工作台':'Workspace', '团队配置':'Team setup', '治理与安全':'Governance and safety', '当前范围':'Current scope', '当前任务':'Current tasks', '实时机会':'Live opportunities', '审核队列':'Review queue',
-  '交易任务':'Trades', '系统状态':'System status', '资金':'Capital', '异常':'Exceptions',
+  '交易任务':'Trades', '绩效报表':'Performance reports', '影子模式':'Shadow mode', '通知中心':'Notification center', '系统状态':'System status', '资金':'Capital', '异常':'Exceptions',
   '交易账户':'Exchange accounts', '成员权限':'Access control',
   '业务数据库已连接':'Business database connected', '数据缺失时自动阻止交易':'Missing data blocks trading automatically',
   '退出当前会话':'Sign out', '正在读取当前事实…':'Loading current data…',
@@ -55,6 +55,22 @@ const ENGLISH_EXACT = new Map(Object.entries({
   '取消':'Cancel', '按此配置创建':'Create with these settings', '请再次确认':'Confirm again', '确认此操作？':'Confirm this action?',
   '取消并关闭':'Cancel and close', '确认并继续':'Confirm and continue', '权限范围':'Permission scope',
   '当前职责不包含这个页面':'This page is outside your assigned role', '返回当前任务':'Back to current tasks', '进入资金中心':'Open Capital',
+  '运行状态 · 已安全阻断':'Runtime status · safely blocked', '连接已中断':'Connection interrupted', '读取超时':'Request timed out',
+  '当前范围没有访问权限':'Current scope does not have access', '当前数据无法读取':'Current data cannot be loaded', '风险政策尚未配置':'Risk policy is not configured',
+  '当前 Workspace 和团队':'Current Workspace and team', '选择团队':'Select team',
+  '影响':'Impact', '负责角色':'Responsible role', '下一步':'Next step', '技术状态':'Technical status', '重新检查':'Retry',
+  '无法连接控制台服务，请检查网络后重试':'Cannot reach the Trading Console service. Check the network, then retry.',
+  '本页事实未更新；离线前画面不得视为当前状态，新增风险与写入操作保持阻断。':'Facts on this page were not updated. Do not treat the pre-disconnection view as current; new risk and write actions remain blocked.',
+  '平台运维或网络管理员':'Platform operations or network administrator',
+  '确认服务与网络恢复后重新检查；恢复前不要重复提交任何结果未知的操作。':'Restore the service and network, then retry. Do not resubmit any action with an unknown outcome before recovery.',
+  '本页事实未在时限内确认；新增风险与写入操作保持阻断。':'Page facts were not confirmed within the time limit; new risk and write actions remain blocked.',
+  '先确认服务负载与网络状态，再重新检查；写入超时必须先核对权威状态。':'Check service load and network health before retrying. After a write timeout, verify the authoritative state first.',
+  '当前页面不会加载团队或账户数据，也不会开放任何操作。':'This page will not load team or account data and exposes no actions.',
+  '团队管理员':'Team administrator', '返回当前任务，或由团队管理员核对岗位、账户与交易所范围。':'Return to current tasks, or ask a team administrator to verify the role, account, and venue scope.',
+  '新增风险、影子启用及相关写入保持阻断；既有减仓与退出边界不因页面提示而改变。':'New risk, Shadow activation, and related writes remain blocked. Existing reduction and exit boundaries are unchanged by this page.',
+  '保存当前团队的版本化风险政策后重新检查。':'Save a versioned risk policy for the current team, then retry.',
+  '本页事实不可用；依赖这些事实的操作保持阻断。':'Page facts are unavailable; actions depending on them remain blocked.',
+  '当前功能负责人或系统管理员':'Feature owner or system administrator', '根据上方原因恢复所需事实后重新检查。':'Restore the required facts described above, then retry.',
   '页面不存在':'Page not found', '返回机会页':'Back to Opportunities', '内部访问':'Internal access',
   '进入交易控制台':'Open Trading Console', '账户密码验证':'Account password',
   '账户':'Account', '密码':'Password', '登录':'Sign in', '请输入账户名':'Enter your account name',
@@ -1102,7 +1118,7 @@ function setShell(loggedIn) {
     const currentTeamId = session.active_team?.team_id || '';
     scopeSwitcher.innerHTML = (session.workspaces || []).map(workspace => {
       const teams = (session.teams || []).filter(team => team.workspace_id === workspace.workspace_id);
-      const workspaceOnly = `<option value="${escapeHtml(`${workspace.workspace_id}:`)}" ${workspace.workspace_id === currentWorkspaceId && !currentTeamId ? 'selected' : ''}>${escapeHtml(workspace.name)} / 选择团队</option>`;
+      const workspaceOnly = `<option value="${escapeHtml(`${workspace.workspace_id}:`)}" ${workspace.workspace_id === currentWorkspaceId && !currentTeamId ? 'selected' : ''}>${escapeHtml(workspace.name)} / ${escapeHtml(localizedText('选择团队'))}</option>`;
       const teamOptions = teams.map(team => `<option value="${escapeHtml(`${workspace.workspace_id}:${team.team_id}`)}" ${team.team_id === currentTeamId ? 'selected' : ''}>${escapeHtml(workspace.name)} / ${escapeHtml(team.name)}</option>`).join('');
       return `<optgroup label="${escapeHtml(workspace.name)}">${workspaceOnly}${teamOptions}</optgroup>`;
     }).join('');
@@ -1127,9 +1143,42 @@ function setShell(loggedIn) {
 }
 
 function errorView(error, retry = true) {
-  const isMissingPolicy = error?.code === 'RISK_POLICY_MISSING';
-  const title = isMissingPolicy ? '风险政策尚未配置' : '当前数据无法读取';
-  return `<section class="error-state"><div><h2>${escapeHtml(title)}</h2><p>${escapeHtml(friendlyApiError(error))}</p>${retry ? '<button class="secondary" data-retry>重新检查</button>' : ''}</div></section>`;
+  const guidance = errorStateGuidance(error);
+  return `<section class="error-state" role="alert" aria-live="assertive" aria-labelledby="error-state-title"><div><p class="eyebrow">运行状态 · 已安全阻断</p><h2 id="error-state-title" data-error-heading tabindex="-1">${escapeHtml(guidance.title)}</h2><p class="error-state-reason">${escapeHtml(guidance.reason)}</p><dl class="error-state-guidance"><div><dt>影响</dt><dd>${escapeHtml(guidance.impact)}</dd></div><div><dt>负责角色</dt><dd>${escapeHtml(guidance.owner)}</dd></div><div><dt>下一步</dt><dd>${escapeHtml(guidance.next)}</dd></div><div><dt>技术状态</dt><dd><code>${escapeHtml(error?.code || `HTTP_${error?.status || 'UNKNOWN'}`)}</code></dd></div></dl><div class="error-state-actions">${retry ? '<button class="primary" data-retry>重新检查</button>' : ''}<a class="secondary" href="/" data-link>返回当前任务</a></div></div></section>`;
+}
+
+function errorStateGuidance(error) {
+  const reason = friendlyApiError(error);
+  if (error?.code === 'NETWORK_ERROR') return {
+    title:'连接已中断', reason,
+    impact:'本页事实未更新；离线前画面不得视为当前状态，新增风险与写入操作保持阻断。',
+    owner:'平台运维或网络管理员',
+    next:'确认服务与网络恢复后重新检查；恢复前不要重复提交任何结果未知的操作。',
+  };
+  if (error?.code === 'REQUEST_TIMEOUT') return {
+    title:'读取超时', reason,
+    impact:'本页事实未在时限内确认；新增风险与写入操作保持阻断。',
+    owner:'平台运维或网络管理员',
+    next:'先确认服务负载与网络状态，再重新检查；写入超时必须先核对权威状态。',
+  };
+  if (error?.status === 403 || error?.code === 'HTTP_403') return {
+    title:'当前范围没有访问权限', reason,
+    impact:'当前页面不会加载团队或账户数据，也不会开放任何操作。',
+    owner:'团队管理员',
+    next:'返回当前任务，或由团队管理员核对岗位、账户与交易所范围。',
+  };
+  if (error?.code === 'RISK_POLICY_MISSING') return {
+    title:'风险政策尚未配置', reason,
+    impact:'新增风险、影子启用及相关写入保持阻断；既有减仓与退出边界不因页面提示而改变。',
+    owner:'系统管理员',
+    next:'保存当前团队的版本化风险政策后重新检查。',
+  };
+  return {
+    title:'当前数据无法读取', reason,
+    impact:'本页事实不可用；依赖这些事实的操作保持阻断。',
+    owner:'当前功能负责人或系统管理员',
+    next:'根据上方原因恢复所需事实后重新检查。',
+  };
 }
 
 function cancelMobileNavFocus() {
@@ -1338,6 +1387,7 @@ async function route() {
     }
     main.innerHTML = errorView(error);
     enhanceRenderedPage();
+    main.querySelector('[data-error-heading]')?.focus();
   }
 }
 
@@ -4934,4 +4984,8 @@ applyTheme(localStorage.getItem(THEME_STORAGE_KEY) || (preferredThemeMedia.match
 applyLanguageToDocument();
 if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js').catch(() => {});
 syncNavigationMode();
-bootstrap().catch((error) => { main.innerHTML = errorView(error, false); });
+bootstrap().catch((error) => {
+  main.innerHTML = errorView(error, false);
+  enhanceRenderedPage();
+  main.querySelector('[data-error-heading]')?.focus();
+});

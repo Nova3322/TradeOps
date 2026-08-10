@@ -715,6 +715,17 @@ textarea { resize: vertical; }
 pre { max-width: 100%; overflow: auto; background: var(--bg); padding: 13px; border-radius: 10px; color: var(--muted); font-size: 11px; line-height: 1.5; }
 .empty-state, .error-state, .loading-state { min-height: 420px; display: grid; place-items: center; align-content: center; text-align: center; color: var(--muted); }
 .empty-state h2, .error-state h2 { color: var(--ink); }
+.error-state { padding: 24px; text-align: left; }
+.error-state > div { width: min(680px, 100%); padding: 28px; border: 1px solid var(--line); border-left: 4px solid var(--danger); border-radius: 16px; background: var(--panel); box-shadow: var(--shadow-soft); }
+.error-state h2 { margin: 6px 0 10px; }
+.error-state h2:focus-visible { outline: 3px solid color-mix(in srgb, var(--accent) 42%, transparent); outline-offset: 5px; }
+.error-state-reason { margin: 0; line-height: 1.7; }
+.error-state-guidance { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; margin: 20px 0; }
+.error-state-guidance > div { min-width: 0; padding: 12px 14px; border: 1px solid var(--line); border-radius: 10px; background: var(--panel-soft); }
+.error-state-guidance dt { color: var(--muted); font-size: 9px; font-weight: 800; letter-spacing: .08em; text-transform: uppercase; }
+.error-state-guidance dd { margin: 5px 0 0; color: var(--ink); font-size: 12px; line-height: 1.55; overflow-wrap: anywhere; }
+.error-state-guidance code { color: var(--danger); }
+.error-state-actions { display: flex; flex-wrap: wrap; gap: 10px; }
 .error-code { font: 700 11px/1 monospace; color: var(--danger); background: color-mix(in srgb, var(--danger) 8%, transparent); padding: 7px 9px; border-radius: 8px; }
 .spinner { width: 26px; height: 26px; border: 3px solid var(--line); border-top-color: var(--accent); border-radius: 50%; animation: spin .8s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
@@ -934,6 +945,10 @@ dialog::backdrop { background: rgba(4, 12, 10, .56); backdrop-filter: blur(3px);
   .proposal-compose .form-actions .primary { width: 100%; }
   .advanced-form summary { display: grid; }
   .proposal-list-tools { grid-template-columns: 1fr; }
+  .error-state { min-height: 360px; padding: 16px 0; }
+  .error-state > div { padding: 22px 18px; }
+  .error-state-guidance { grid-template-columns: 1fr; }
+  .error-state-actions { display: grid; }
   .proposal-list-tools label:first-child, .proposal-list-tools > span { grid-column: auto; }
   .source-facts.manual-source { grid-template-columns: 1fr; }
   .review-actions { grid-template-columns: 1fr; }

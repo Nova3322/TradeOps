@@ -1,5 +1,35 @@
 # Trading console product QA
 
+## 2026-08-10: critical-flow and offline-recovery acceptance
+
+### P0 / P1 / P2 status
+
+- P0: none open. No proposal approval, authorization, order, funding, signing, transfer, or broadcast action was submitted.
+- P1 closed: a real API outage previously collapsed to a generic read error. The console now states the reason, impact, responsible role, next step, and technical status; it focuses an assertive alert heading and keeps new risk/write actions explicitly blocked.
+- P1 closed: restoring the API and selecting `Retry` returned to the requested trade route and cleared the alert. This is observed recovery behavior, not static-copy inspection.
+- P1 closed: the English shell no longer leaves reports, Shadow, notifications, active scope, team selection, or offline guidance in Chinese. Chinese and English logged-in outage screens expose the same facts and recovery actions.
+- P1 external: Perptape is not configured in the Compose runtime. The opportunity API returns the expected 503 and the page remains explicit and fail closed; live opportunity readiness is not claimed.
+- P2 open: automated heading focus and accessibility-tree semantics passed, but manual VoiceOver announcement cadence remains the final stage 9.3 acceptance item.
+
+### Five-dimensional evidence
+
+- Code: network, timeout, forbidden-scope, missing-policy, and unknown-failure guidance shares one error-state model; responsive styling, focus handling, translations, and asset revisions are `app v143`, `styles v61`, and service worker `v115`.
+- Database: no entity or migration change. Existing Workspace/team, account, proposal, capital, risk, and audit records remained the only truth.
+- API: real team setup, opportunity, capital, expired-proposal, outage, and recovery states ran against the PostgreSQL-backed Compose API. The expected Perptape 503 was preserved rather than hidden.
+- Actual pages: the new team redirected direct opportunity access to safe setup; production opportunities showed source unavailability; capital separated missing/stale facts; the expired proposal remained terminal; Chinese and English offline states were visually inspected.
+- End-to-end runtime: the API was stopped and restored twice for logged-in outage/recovery proof. `/health/ready` returned `ready` with `durable_store=postgresql` after the final restore.
+- Tests: 70 isolated PostgreSQL integration tests and all 23 health/web-shell tests passed. JavaScript/service-worker syntax and diff checks are part of the final commit gate.
+
+### Accepted evidence
+
+- Scope and evidence index: `artifacts/product-audit/critical-flow-2026-08-10/README.md`.
+- Setup boundary: `artifacts/product-audit/critical-flow-2026-08-10/01-team-setup-fail-closed.png`.
+- Opportunity and capital truth: `02-opportunities-unavailable.png` and `03-capital-partial-stale.png` in the same folder.
+- Terminal proposal: `04-expired-proposal-terminal.png`.
+- Bilingual outage guidance: `05-offline-guidance-fixed.png` and `06-offline-guidance-en.png`.
+
+final result: critical-flow exception states and real offline recovery passed; stage 9.3 remains open only for the manual VoiceOver cadence check
+
 ## 2026-08-10: exact responsive and accessibility acceptance
 
 ### P0 / P1 / P2 status
