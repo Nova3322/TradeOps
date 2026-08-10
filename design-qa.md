@@ -1,5 +1,34 @@
 # Trading console product QA
 
+## 2026-08-10: exact responsive and accessibility acceptance
+
+### P0 / P1 / P2 status
+
+- P0: none open. This tranche changes layout only; authorization, risk, idempotency, audit, and dangerous capability gates remain server-enforced and unchanged.
+- P1 closed: a real 1024 x 768 run found the historical-proposal result count extending beyond the document. The proposal filters now reflow at the content-constrained desktop/tablet breakpoint; the post-fix page has no document or main overflow.
+- P1 external: Perptape is not configured in the current Compose runtime. `/api/opportunities` therefore returned the expected 503 on the opportunity and aggregate system-status paths at each viewport. Both pages rendered an explicit unavailable/limited state and did not substitute stale or zero data.
+- P2 closed: 24 actual authenticated routes passed at 1440 x 900, 1024 x 768, 430 x 932, and 390 x 844: 96 page/viewport checks with no residual overflow, clipped non-table content, unnamed focusable control, unexplained visible disabled button, empty main region, or missing primary heading.
+- P2 closed: 28 sampled mobile Tab stops had visible `:focus-visible` outlines. Enter opened the menu and moved focus to its first route; Escape closed it and restored focus to the menu button.
+- P2 closed: Chrome accessibility trees for all 24 routes exposed one banner, one main landmark, one named level-one heading, and no unnamed interactive node. Live page regions contain the current fact/state text. Manual VoiceOver announcement cadence remains part of the final stage 9.3 browser acceptance rather than being inferred from the automated tree.
+
+### Five-dimensional evidence
+
+- Code: one bounded responsive rule moves the proposal filters and count onto safe grid rows at content-constrained widths; asset/cache revisions are `styles v60` and service worker `v114`.
+- Database: no entity or migration change; this remains a presentation-only correction over existing proposal truth.
+- API: all 24 routes rendered against the rebuilt PostgreSQL-backed Compose runtime. The only browser network warning was the exact fail-closed Perptape 503 described above.
+- Actual pages: 96 structural checks passed after the fix. The 1024 px historical-proposal page and all eight dark/light Shadow captures were visually inspected.
+- End-to-end runtime: Compose rebuilt successfully; `/health/ready` returned `ready` with `durable_store=postgresql`, and the API container reported healthy.
+- Tests: JavaScript and service-worker syntax passed; all 22 health/web-shell tests passed; the structured browser report finished with `PASSED_WITH_EXPECTED_EXTERNAL_WARNING`.
+
+### Accepted evidence
+
+- Structured report: `artifacts/product-audit/responsive-accessibility-2026-08-10/report.json`.
+- Scope and warning classification: `artifacts/product-audit/responsive-accessibility-2026-08-10/README.md`.
+- 1024 px regression proof: `artifacts/product-audit/responsive-accessibility-2026-08-10/proposal-history-1024x768-dark.jpg`.
+- Dark/light reference captures: `artifacts/product-audit/responsive-accessibility-2026-08-10/shadow-1440x900-dark.jpg` through `shadow-390x844-light.jpg`.
+
+final result: stage 9.2 automated responsive, keyboard, semantics, and theme-comparison acceptance passed; final manual VoiceOver and critical-flow exception-state browser acceptance continue in stage 9.3
+
 ## 2026-08-10: server-truth Shadow readiness guidance
 
 ### P0 / P1 / P2 status

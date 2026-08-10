@@ -749,6 +749,8 @@ dialog::backdrop { background: rgba(4, 12, 10, .56); backdrop-filter: blur(3px);
   .system-health-grid, .permission-grid, .exchange-account-grid, .notification-route-grid, .agent-fact-strip { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .filter-panel { grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; padding: 17px; }
   .timeframe-filter { grid-column: span 2; justify-content: flex-start; gap: 8px; }
+  .proposal-list-tools { grid-template-columns: minmax(220px, 1fr) 140px 140px; }
+  .proposal-list-tools > span { grid-column: 1 / -1; }
 }
 
 @media (min-width: 781px) and (max-width: 980px) {

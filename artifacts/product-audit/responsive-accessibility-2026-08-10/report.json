@@ -1,0 +1,3299 @@
+{
+  "baseUrl": "http://127.0.0.1:8022",
+  "viewports": {
+    "1440x900": [
+      {
+        "url": "/",
+        "title": "当前未发现运行阻断，没有必须立即处理的事项",
+        "h1Count": 1,
+        "theme": "dark",
+        "language": "zh-CN",
+        "viewport": {
+          "width": 1440,
+          "height": 900
+        },
+        "documentOverflow": false,
+        "mainOverflow": false,
+        "overflowing": [],
+        "focusableCount": 23,
+        "unnamedFocusables": [],
+        "disabledWithoutReason": [],
+        "activeNav": "/",
+        "currentScopeVisible": true,
+        "mobileMenuVisible": false,
+        "sidebarOpen": false,
+        "mainTextLength": 440,
+        "hasErrorView": false,
+        "mobileExpected": false,
+        "browserIssues": []
+      },
+      {
+        "url": "/signals",
+        "title": "信号源",
+        "h1Count": 1,
+        "theme": "dark",
+        "language": "zh-CN",
+        "viewport": {
+          "width": 1440,
+          "height": 900
+        },
+        "documentOverflow": false,
+        "mainOverflow": false,
+        "overflowing": [],
+        "focusableCount": 25,
+        "unnamedFocusables": [],
+        "disabledWithoutReason": [],
+        "activeNav": "/signals",
+        "currentScopeVisible": true,
+        "mobileMenuVisible": false,
+        "sidebarOpen": false,
+        "mainTextLength": 462,
+        "hasErrorView": false,
+        "mobileExpected": false,
+        "browserIssues": []
+      },
+      {
+        "url": "/opportunities",
+        "title": "实时机会",
+        "h1Count": 1,
+        "theme": "dark",
+        "language": "zh-CN",
+        "viewport": {
+          "width": 1440,
+          "height": 900
+        },
+        "documentOverflow": false,
+        "mainOverflow": false,
+        "overflowing": [],
+        "focusableCount": 22,
+        "unnamedFocusables": [],
+        "disabledWithoutReason": [],
+        "activeNav": "/opportunities",
+        "currentScopeVisible": true,
+        "mobileMenuVisible": false,
+        "sidebarOpen": false,
+        "mainTextLength": 325,
+        "hasErrorView": false,
+        "mobileExpected": false,
+        "browserIssues": [
+          {
+            "type": "Log.entryAdded",
+            "detail": {
+              "source": "network",
+              "level": "error",
+              "text": "Failed to load resource: the server responded with a status of 503 (Service Unavailable)",
+              "timestamp": 1786365424046.036,
+              "url": "http://127.0.0.1:8022/api/opportunities",
+              "networkRequestId": "72037.2706"
+            }
+          }
+        ]
+      },
+      {
+        "url": "/opportunities/defaults",
+        "title": "默认提案配置",
+        "h1Count": 1,
+        "theme": "dark",
+        "language": "zh-CN",
+        "viewport": {
+          "width": 1440,
+          "height": 900
+        },
+        "documentOverflow": false,
+        "mainOverflow": false,
+        "overflowing": [],
+        "focusableCount": 30,
+        "unnamedFocusables": [],
+        "disabledWithoutReason": [],
+        "activeNav": null,
+        "currentScopeVisible": true,
+        "mobileMenuVisible": false,
+        "sidebarOpen": false,
+        "mainTextLength": 437,
+        "hasErrorView": false,
+        "mobileExpected": false,
+        "browserIssues": []
+      },
+      {
+        "url": "/proposals/new",
+        "title": "创建人工提案",
+        "h1Count": 1,
+        "theme": "dark",
+        "language": "zh-CN",
+        "viewport": {
+          "width": 1440,
+          "height": 900
+        },
+        "documentOverflow": false,
+        "mainOverflow": false,
+        "overflowing": [],
+        "focusableCount": 35,
+        "unnamedFocusables": [],
+        "disabledWithoutReason": [],
+        "activeNav": null,
+        "currentScopeVisible": true,
+        "mobileMenuVisible": false,
+        "sidebarOpen": false,
+        "mainTextLength": 555,
+        "hasErrorView": false,
+        "mobileExpected": false,
+        "browserIssues": []
+      },
+      {
+        "url": "/reviews",
+        "title": "审核队列",
+        "h1Count": 1,
+        "theme": "dark",
+        "language": "zh-CN",
+        "viewport": {
+          "width": 1440,
+          "height": 900
+        },
+        "documentOverflow": false,
+        "mainOverflow": false,
+        "overflowing": [],
+        "focusableCount": 25,
+        "unnamedFocusables": [],
+        "disabledWithoutReason": [],
+        "activeNav": "/reviews",
+        "currentScopeVisible": true,
+        "mobileMenuVisible": false,
+        "sidebarOpen": false,
+        "mainTextLength": 186,
+        "hasErrorView": false,
+        "mobileExpected": false,
+        "browserIssues": []
+      },
+      {
+        "url": "/proposals",
+        "title": "当前提案",
+        "h1Count": 1,
+        "theme": "dark",
+        "language": "zh-CN",
+        "viewport": {
+          "width": 1440,
+          "height": 900
+        },
+        "documentOverflow": false,
+        "mainOverflow": false,
+        "overflowing": [],
+        "focusableCount": 25,
+        "unnamedFocusables": [],
+        "disabledWithoutReason": [],
+        "activeNav": null,
+        "currentScopeVisible": true,
+        "mobileMenuVisible": false,
+        "sidebarOpen": false,
+        "mainTextLength": 148,
+        "hasErrorView": false,
+        "mobileExpected": false,
+        "browserIssues": []
+      },
+      {
+        "url": "/proposals?history=1",
+        "title": "历史提案",
+        "h1Count": 1,
+        "theme": "dark",
+        "language": "zh-CN",
+        "viewport": {
+          "width": 1440,
+          "height": 900
+        },
+        "documentOverflow": false,
+        "mainOverflow": false,
+        "overflowing": [],
+        "focusableCount": 288,
+        "unnamedFocusables": [],
+        "disabledWithoutReason": [],
+        "activeNav": null,
+        "currentScopeVisible": true,
+        "mobileMenuVisible": false,
+        "sidebarOpen": false,
+        "mainTextLength": 28916,
+        "hasErrorView": false,
+        "mobileExpected": false,
+        "browserIssues": []
+      },
+      {
+        "url": "/proposals/adea0376-b870-437e-ba12-5fc0b9d025fc",
+        "title": "BMTUSDT",
+        "h1Count": 1,
+        "theme": "dark",
+        "language": "zh-CN",
+        "viewport": {
+          "width": 1440,
+          "height": 900
+        },
+        "documentOverflow": false,
+        "mainOverflow": false,
+        "overflowing": [],
+        "focusableCount": 21,
+        "unnamedFocusables": [],
+        "disabledWithoutReason": [],
+        "activeNav": null,
+        "currentScopeVisible": true,
+        "mobileMenuVisible": false,
+        "sidebarOpen": false,
+        "mainTextLength": 798,
+        "hasErrorView": false,
+        "mobileExpected": false,
+        "browserIssues": []
+      },
+      {
+        "url": "/campaigns",
+        "title": "交易任务",
+        "h1Count": 1,
+        "theme": "dark",
+        "language": "zh-CN",
+        "viewport": {
+          "width": 1440,
+          "height": 900
+        },
+        "documentOverflow": false,
+        "mainOverflow": false,
+        "overflowing": [],
+        "focusableCount": 24,
+        "unnamedFocusables": [],
+        "disabledWithoutReason": [],
+        "activeNav": "/campaigns",
+        "currentScopeVisible": true,
+        "mobileMenuVisible": false,
+        "sidebarOpen": false,
+        "mainTextLength": 431,
+        "hasErrorView": false,
+        "mobileExpected": false,
+        "browserIssues": []
+      },
+      {
+        "url": "/campaigns/45250eb6-c7de-494a-92f6-37cb346140c3",
+        "title": "xyz:TSLA 45250eb6…",
+        "h1Count": 1,
+        "theme": "dark",
+        "language": "zh-CN",
+        "viewport": {
+          "width": 1440,
+          "height": 900
+        },
+        "documentOverflow": false,
+        "mainOverflow": false,
+        "overflowing": [],
+        "focusableCount": 20,
+        "unnamedFocusables": [],
+        "disabledWithoutReason": [],
+        "activeNav": null,
+        "currentScopeVisible": true,
+        "mobileMenuVisible": false,
+        "sidebarOpen": false,
+        "mainTextLength": 785,
+        "hasErrorView": false,
+        "mobileExpected": false,
+        "browserIssues": []
+      },
+      {
+        "url": "/campaigns/alerts",
+        "title": "运行告警",
+        "h1Count": 1,
+        "theme": "dark",
+        "language": "zh-CN",
+        "viewport": {
+          "width": 1440,
+          "height": 900
+        },
+        "documentOverflow": false,
+        "mainOverflow": false,
+        "overflowing": [],
+        "focusableCount": 22,
+        "unnamedFocusables": [],
+        "disabledWithoutReason": [],
+        "activeNav": null,
+        "currentScopeVisible": true,
+        "mobileMenuVisible": false,
+        "sidebarOpen": false,
+        "mainTextLength": 231,
+        "hasErrorView": false,
+        "mobileExpected": false,
+        "browserIssues": []
+      },
+      {
+        "url": "/orders",
+        "title": "订单与成交",
+        "h1Count": 1,
+        "theme": "dark",
+        "language": "zh-CN",
+        "viewport": {
+          "width": 1440,
+          "height": 900
+        },
+        "documentOverflow": false,
+        "mainOverflow": false,
+        "overflowing": [],
+        "focusableCount": 25,
+        "unnamedFocusables": [],
+        "disabledWithoutReason": [],
+        "activeNav": null,
+        "currentScopeVisible": true,
+        "mobileMenuVisible": false,
+        "sidebarOpen": false,
+        "mainTextLength": 538,
+        "hasErrorView": false,
+        "mobileExpected": false,
+        "browserIssues": []
+      },
+      {
+        "url": "/risk",
+        "title": "风险与目标",
+        "h1Count": 1,
+        "theme": "dark",
+        "language": "zh-CN",
+        "viewport": {
+          "width": 1440,
+          "height": 900
+        },
+        "documentOverflow": false,
+        "mainOverflow": false,
+        "overflowing": [],
+        "focusableCount": 30,
+        "unnamedFocusables": [],
+        "disabledWithoutReason": [],
+        "activeNav": null,
+        "currentScopeVisible": true,
+        "mobileMenuVisible": false,
+        "sidebarOpen": false,
+        "mainTextLength": 1238,
+        "hasErrorView": false,
+        "mobileExpected": false,
+        "browserIssues": []
+      },
+      {
+        "url": "/shadow",
+        "title": "影子模式",
+        "h1Count": 1,
+        "theme": "dark",
+        "language": "zh-CN",
+        "viewport": {
+          "width": 1440,
+          "height": 900
+        },
+        "documentOverflow": false,
+        "mainOverflow": false,
+        "overflowing": [],
+        "focusableCount": 37,
+        "unnamedFocusables": [],
+        "disabledWithoutReason": [],
+        "activeNav": "/shadow",
+        "currentScopeVisible": true,
+        "mobileMenuVisible": false,
+        "sidebarOpen": false,
+        "mainTextLength": 25643,
+        "hasErrorView": false,
+        "mobileExpected": false,
+        "browserIssues": []
+      },
+      {
+        "url": "/results?environment=SHADOW",
+        "title": "绩效与风险报表",
+        "h1Count": 1,
+        "theme": "dark",
+        "language": "zh-CN",
+        "viewport": {
+          "width": 1440,
+          "height": 900
+        },
+        "documentOverflow": false,
+        "mainOverflow": false,
+        "overflowing": [],
+        "focusableCount": 31,
+        "unnamedFocusables": [],
+        "disabledWithoutReason": [],
+        "activeNav": "/results",
+        "currentScopeVisible": true,
+        "mobileMenuVisible": false,
+        "sidebarOpen": false,
+        "mainTextLength": 1480,
+        "hasErrorView": false,
+        "mobileExpected": false,
+        "browserIssues": []
+      },
+      {
+        "url": "/notifications",
+        "title": "通知中心",
+        "h1Count": 1,
+        "theme": "dark",
+        "language": "zh-CN",
+        "viewport": {
+          "width": 1440,
+          "height": 900
+        },
+        "documentOverflow": false,
+        "mainOverflow": false,
+        "overflowing": [],
+        "focusableCount": 31,
+        "unnamedFocusables": [],
+        "disabledWithoutReason": [],
+        "activeNav": "/notifications",
+        "currentScopeVisible": true,
+        "mobileMenuVisible": false,
+        "sidebarOpen": false,
+        "mainTextLength": 503,
+        "hasErrorView": false,
+        "mobileExpected": false,
+        "browserIssues": []
+      },
+      {
+        "url": "/positions",
+        "title": "系统状态",
+        "h1Count": 1,
+        "theme": "dark",
+        "language": "zh-CN",
+        "viewport": {
+          "width": 1440,
+          "height": 900
+        },
+        "documentOverflow": false,
+        "mainOverflow": false,
+        "overflowing": [],
+        "focusableCount": 25,
+        "unnamedFocusables": [],
+        "disabledWithoutReason": [],
+        "activeNav": "/positions",
+        "currentScopeVisible": true,
+        "mobileMenuVisible": false,
+        "sidebarOpen": false,
+        "mainTextLength": 1557,
+        "hasErrorView": false,
+        "mobileExpected": false,
+        "browserIssues": [
+          {
+            "type": "Log.entryAdded",
+            "detail": {
+              "source": "network",
+              "level": "error",
+              "text": "Failed to load resource: the server responded with a status of 503 (Service Unavailable)",
+              "timestamp": 1786365431996.756,
+              "url": "http://127.0.0.1:8022/api/opportunities",
+              "networkRequestId": "72037.2907"
+            }
+          }
+        ]
+      },
+      {
+        "url": "/capital",
+        "title": "资金中心",
+        "h1Count": 1,
+        "theme": "dark",
+        "language": "zh-CN",
+        "viewport": {
+          "width": 1440,
+          "height": 900
+        },
+        "documentOverflow": false,
+        "mainOverflow": false,
+        "overflowing": [],
+        "focusableCount": 44,
+        "unnamedFocusables": [],
+        "disabledWithoutReason": [],
+        "activeNav": "/capital",
+        "currentScopeVisible": true,
+        "mobileMenuVisible": false,
+        "sidebarOpen": false,
+        "mainTextLength": 2644,
+        "hasErrorView": false,
+        "mobileExpected": false,
+        "browserIssues": []
+      },
+      {
+        "url": "/venues",
+        "title": "交易账户",
+        "h1Count": 1,
+        "theme": "dark",
+        "language": "zh-CN",
+        "viewport": {
+          "width": 1440,
+          "height": 900
+        },
+        "documentOverflow": false,
+        "mainOverflow": false,
+        "overflowing": [],
+        "focusableCount": 45,
+        "unnamedFocusables": [],
+        "disabledWithoutReason": [],
+        "activeNav": "/venues",
+        "currentScopeVisible": true,
+        "mobileMenuVisible": false,
+        "sidebarOpen": false,
+        "mainTextLength": 1516,
+        "hasErrorView": false,
+        "mobileExpected": false,
+        "browserIssues": []
+      },
+      {
+        "url": "/venues/binance",
+        "title": "交易账户",
+        "h1Count": 1,
+        "theme": "dark",
+        "language": "zh-CN",
+        "viewport": {
+          "width": 1440,
+          "height": 900
+        },
+        "documentOverflow": false,
+        "mainOverflow": false,
+        "overflowing": [],
+        "focusableCount": 45,
+        "unnamedFocusables": [],
+        "disabledWithoutReason": [],
+        "activeNav": "/venues",
+        "currentScopeVisible": true,
+        "mobileMenuVisible": false,
+        "sidebarOpen": false,
+        "mainTextLength": 1516,
+        "hasErrorView": false,
+        "mobileExpected": false,
+        "browserIssues": []
+      },
+      {
+        "url": "/venues/hyperliquid",
+        "title": "交易账户",
+        "h1Count": 1,
+        "theme": "dark",
+        "language": "zh-CN",
+        "viewport": {
+          "width": 1440,
+          "height": 900
+        },
+        "documentOverflow": false,
+        "mainOverflow": false,
+        "overflowing": [],
+        "focusableCount": 45,
+        "unnamedFocusables": [],
+        "disabledWithoutReason": [],
+        "activeNav": "/venues",
+        "currentScopeVisible": true,
+        "mobileMenuVisible": false,
+        "sidebarOpen": false,
+        "mainTextLength": 1490,
+        "hasErrorView": false,
+        "mobileExpected": false,
+        "browserIssues": []
+      },
+      {
+        "url": "/admin/users",
+        "title": "团队成员与权限",
+        "h1Count": 1,
+        "theme": "dark",
+        "language": "zh-CN",
+        "viewport": {
+          "width": 1440,
+          "height": 900
+        },
+        "documentOverflow": false,
+        "mainOverflow": false,
+        "overflowing": [],
+        "focusableCount": 113,
+        "unnamedFocusables": [],
+        "disabledWithoutReason": [],
+        "activeNav": "/admin/users",
+        "currentScopeVisible": true,
+        "mobileMenuVisible": false,
+        "sidebarOpen": false,
+        "mainTextLength": 823,
+        "hasErrorView": false,
+        "mobileExpected": false,
+        "browserIssues": []
+      },
+      {
+        "url": "/admin/agents",
+        "title": "AI Agent 权限",
+        "h1Count": 1,
+        "theme": "dark",
+        "language": "zh-CN",
+        "viewport": {
+          "width": 1440,
+          "height": 900
+        },
+        "documentOverflow": false,
+        "mainOverflow": false,
+        "overflowing": [],
+        "focusableCount": 25,
+        "unnamedFocusables": [],
+        "disabledWithoutReason": [],
+        "activeNav": "/admin/agents",
+        "currentScopeVisible": true,
+        "mobileMenuVisible": false,
+        "sidebarOpen": false,
+        "mainTextLength": 745,
+        "hasErrorView": false,
+        "mobileExpected": false,
+        "browserIssues": []
+      }
+    ],
+    "1024x768": [
+      {
+        "url": "/",
+        "title": "当前未发现运行阻断，没有必须立即处理的事项",
+        "h1Count": 1,
+        "theme": "dark",
+        "language": "zh-CN",
+        "viewport": {
+          "width": 1024,
+          "height": 768
+        },
+        "documentOverflow": false,
+        "mainOverflow": false,
+        "overflowing": [],
+        "focusableCount": 23,
+        "unnamedFocusables": [],
+        "disabledWithoutReason": [],
+        "activeNav": "/",
+        "currentScopeVisible": true,
+        "mobileMenuVisible": false,
+        "sidebarOpen": false,
+        "mainTextLength": 440,
+        "hasErrorView": false,
+        "mobileExpected": false,
+        "browserIssues": []
+      },
+      {
+        "url": "/signals",
+        "title": "信号源",
+        "h1Count": 1,
+        "theme": "dark",
+        "language": "zh-CN",
+        "viewport": {
+          "width": 1024,
+          "height": 768
+        },
+        "documentOverflow": false,
+        "mainOverflow": false,
+        "overflowing": [],
+        "focusableCount": 25,
+        "unnamedFocusables": [],
+        "disabledWithoutReason": [],
+        "activeNav": "/signals",
+        "currentScopeVisible": true,
+        "mobileMenuVisible": false,
+        "sidebarOpen": false,
+        "mainTextLength": 462,
+        "hasErrorView": false,
+        "mobileExpected": false,
+        "browserIssues": []
+      },
+      {
+        "url": "/opportunities",
+        "title": "实时机会",
+        "h1Count": 1,
+        "theme": "dark",
+        "language": "zh-CN",
+        "viewport": {
+          "width": 1024,
+          "height": 768
+        },
+        "documentOverflow": false,
+        "mainOverflow": false,
+        "overflowing": [],
+        "focusableCount": 22,
+        "unnamedFocusables": [],
+        "disabledWithoutReason": [],
+        "activeNav": "/opportunities",
+        "currentScopeVisible": true,
+        "mobileMenuVisible": false,
+        "sidebarOpen": false,
+        "mainTextLength": 325,
+        "hasErrorView": false,
+        "mobileExpected": false,
+        "browserIssues": [
+          {
+            "type": "Log.entryAdded",
+            "detail": {
+              "source": "network",
+              "level": "error",
+              "text": "Failed to load resource: the server responded with a status of 503 (Service Unavailable)",
+              "timestamp": 1786365436886.04,
+              "url": "http://127.0.0.1:8022/api/opportunities",
+              "networkRequestId": "72037.3074"
+            }
+          }
+        ]
+      },
+      {
+        "url": "/opportunities/defaults",
+        "title": "默认提案配置",
+        "h1Count": 1,
+        "theme": "dark",
+        "language": "zh-CN",
+        "viewport": {
+          "width": 1024,
+          "height": 768
+        },
+        "documentOverflow": false,
+        "mainOverflow": false,
+        "overflowing": [],
+        "focusableCount": 30,
+        "unnamedFocusables": [],
+        "disabledWithoutReason": [],
+        "activeNav": null,
+        "currentScopeVisible": true,
+        "mobileMenuVisible": false,
+        "sidebarOpen": false,
+        "mainTextLength": 437,
+        "hasErrorView": false,
+        "mobileExpected": false,
+        "browserIssues": []
+      },
+      {
+        "url": "/proposals/new",
+        "title": "创建人工提案",
+        "h1Count": 1,
+        "theme": "dark",
+        "language": "zh-CN",
+        "viewport": {
+          "width": 1024,
+          "height": 768
+        },
+        "documentOverflow": false,
+        "mainOverflow": false,
+        "overflowing": [],
+        "focusableCount": 35,
+        "unnamedFocusables": [],
+        "disabledWithoutReason": [],
+        "activeNav": null,
+        "currentScopeVisible": true,
+        "mobileMenuVisible": false,
+        "sidebarOpen": false,
+        "mainTextLength": 555,
+        "hasErrorView": false,
+        "mobileExpected": false,
+        "browserIssues": []
+      },
+      {
+        "url": "/reviews",
+        "title": "审核队列",
+        "h1Count": 1,
+        "theme": "dark",
+        "language": "zh-CN",
+        "viewport": {
+          "width": 1024,
+          "height": 768
+        },
+        "documentOverflow": false,
+        "mainOverflow": false,
+        "overflowing": [],
+        "focusableCount": 25,
+        "unnamedFocusables": [],
+        "disabledWithoutReason": [],
+        "activeNav": "/reviews",
+        "currentScopeVisible": true,
+        "mobileMenuVisible": false,
+        "sidebarOpen": false,
+        "mainTextLength": 186,
+        "hasErrorView": false,
+        "mobileExpected": false,
+        "browserIssues": []
+      },
+      {
+        "url": "/proposals",
+        "title": "当前提案",
+        "h1Count": 1,
+        "theme": "dark",
+        "language": "zh-CN",
+        "viewport": {
+          "width": 1024,
+          "height": 768
+        },
+        "documentOverflow": false,
+        "mainOverflow": false,
+        "overflowing": [],
+        "focusableCount": 25,
+        "unnamedFocusables": [],
+        "disabledWithoutReason": [],
+        "activeNav": null,
+        "currentScopeVisible": true,
+        "mobileMenuVisible": false,
+        "sidebarOpen": false,
+        "mainTextLength": 148,
+        "hasErrorView": false,
+        "mobileExpected": false,
+        "browserIssues": []
+      },
+      {
+        "url": "/proposals?history=1",
+        "title": "历史提案",
+        "h1Count": 1,
+        "theme": "dark",
+        "language": "zh-CN",
+        "viewport": {
+          "width": 1024,
+          "height": 768
+        },
+        "documentOverflow": false,
+        "mainOverflow": false,
+        "overflowing": [],
+        "focusableCount": 289,
+        "unnamedFocusables": [],
+        "disabledWithoutReason": [],
+        "activeNav": null,
+        "currentScopeVisible": true,
+        "mobileMenuVisible": false,
+        "sidebarOpen": false,
+        "mainTextLength": 28916,
+        "hasErrorView": false,
+        "mobileExpected": false,
+        "browserIssues": []
+      },
+      {
+        "url": "/proposals/adea0376-b870-437e-ba12-5fc0b9d025fc",
+        "title": "BMTUSDT",
+        "h1Count": 1,
+        "theme": "dark",
+        "language": "zh-CN",
+        "viewport": {
+          "width": 1024,
+          "height": 768
+        },
+        "documentOverflow": false,
+        "mainOverflow": false,
+        "overflowing": [],
+        "focusableCount": 21,
+        "unnamedFocusables": [],
+        "disabledWithoutReason": [],
+        "activeNav": null,
+        "currentScopeVisible": true,
+        "mobileMenuVisible": false,
+        "sidebarOpen": false,
+        "mainTextLength": 798,
+        "hasErrorView": false,
+        "mobileExpected": false,
+        "browserIssues": []
+      },
+      {
+        "url": "/campaigns",
+        "title": "交易任务",
+        "h1Count": 1,
+        "theme": "dark",
+        "language": "zh-CN",
+        "viewport": {
+          "width": 1024,
+          "height": 768
+        },
+        "documentOverflow": false,
+        "mainOverflow": false,
+        "overflowing": [],
+        "focusableCount": 25,
+        "unnamedFocusables": [],
+        "disabledWithoutReason": [],
+        "activeNav": "/campaigns",
+        "currentScopeVisible": true,
+        "mobileMenuVisible": false,
+        "sidebarOpen": false,
+        "mainTextLength": 431,
+        "hasErrorView": false,
+        "mobileExpected": false,
+        "browserIssues": []
+      },
+      {
+        "url": "/campaigns/45250eb6-c7de-494a-92f6-37cb346140c3",
+        "title": "xyz:TSLA 45250eb6…",
+        "h1Count": 1,
+        "theme": "dark",
+        "language": "zh-CN",
+        "viewport": {
+          "width": 1024,
+          "height": 768
+        },
+        "documentOverflow": false,
+        "mainOverflow": false,
+        "overflowing": [],
+        "focusableCount": 20,
+        "unnamedFocusables": [],
+        "disabledWithoutReason": [],
+        "activeNav": null,
+        "currentScopeVisible": true,
+        "mobileMenuVisible": false,
+        "sidebarOpen": false,
+        "mainTextLength": 785,
+        "hasErrorView": false,
+        "mobileExpected": false,
+        "browserIssues": []
+      },
+      {
+        "url": "/campaigns/alerts",
+        "title": "运行告警",
+        "h1Count": 1,
+        "theme": "dark",
+        "language": "zh-CN",
+        "viewport": {
+          "width": 1024,
+          "height": 768
+        },
+        "documentOverflow": false,
+        "mainOverflow": false,
+        "overflowing": [],
+        "focusableCount": 22,
+        "unnamedFocusables": [],
+        "disabledWithoutReason": [],
+        "activeNav": null,
+        "currentScopeVisible": true,
+        "mobileMenuVisible": false,
+        "sidebarOpen": false,
+        "mainTextLength": 231,
+        "hasErrorView": false,
+        "mobileExpected": false,
+        "browserIssues": []
+      },
+      {
+        "url": "/orders",
+        "title": "订单与成交",
+        "h1Count": 1,
+        "theme": "dark",
+        "language": "zh-CN",
+        "viewport": {
+          "width": 1024,
+          "height": 768
+        },
+        "documentOverflow": false,
+        "mainOverflow": false,
+        "overflowing": [],
+        "focusableCount": 26,
+        "unnamedFocusables": [],
+        "disabledWithoutReason": [],
+        "activeNav": null,
+        "currentScopeVisible": true,
+        "mobileMenuVisible": false,
+        "sidebarOpen": false,
+        "mainTextLength": 538,
+        "hasErrorView": false,
+        "mobileExpected": false,
+        "browserIssues": []
+      },
+      {
+        "url": "/risk",
+        "title": "风险与目标",
+        "h1Count": 1,
+        "theme": "dark",
+        "language": "zh-CN",
+        "viewport": {
+          "width": 1024,
+          "height": 768
+        },
+        "documentOverflow": false,
+        "mainOverflow": false,
+        "overflowing": [],
+        "focusableCount": 32,
+        "unnamedFocusables": [],
+        "disabledWithoutReason": [],
+        "activeNav": null,
+        "currentScopeVisible": true,
+        "mobileMenuVisible": false,
+        "sidebarOpen": false,
+        "mainTextLength": 1238,
+        "hasErrorView": false,
+        "mobileExpected": false,
+        "browserIssues": []
+      },
+      {
+        "url": "/shadow",
+        "title": "影子模式",
+        "h1Count": 1,
+        "theme": "dark",
+        "language": "zh-CN",
+        "viewport": {
+          "width": 1024,
+          "height": 768
+        },
+        "documentOverflow": false,
+        "mainOverflow": false,
+        "overflowing": [],
+        "focusableCount": 38,
+        "unnamedFocusables": [],
+        "disabledWithoutReason": [],
+        "activeNav": "/shadow",
+        "currentScopeVisible": true,
+        "mobileMenuVisible": false,
+        "sidebarOpen": false,
+        "mainTextLength": 25643,
+        "hasErrorView": false,
+        "mobileExpected": false,
+        "browserIssues": []
+      },
+      {
+        "url": "/results?environment=SHADOW",
+        "title": "绩效与风险报表",
+        "h1Count": 1,
+        "theme": "dark",
+        "language": "zh-CN",
+        "viewport": {
+          "width": 1024,
+          "height": 768
+        },
+        "documentOverflow": false,
+        "mainOverflow": false,
+        "overflowing": [],
+        "focusableCount": 36,
+        "unnamedFocusables": [],
+        "disabledWithoutReason": [],
+        "activeNav": "/results",
+        "currentScopeVisible": true,
+        "mobileMenuVisible": false,
+        "sidebarOpen": false,
+        "mainTextLength": 1480,
+        "hasErrorView": false,
+        "mobileExpected": false,
+        "browserIssues": []
+      },
+      {
+        "url": "/notifications",
+        "title": "通知中心",
+        "h1Count": 1,
+        "theme": "dark",
+        "language": "zh-CN",
+        "viewport": {
+          "width": 1024,
+          "height": 768
+        },
+        "documentOverflow": false,
+        "mainOverflow": false,
+        "overflowing": [],
+        "focusableCount": 31,
+        "unnamedFocusables": [],
+        "disabledWithoutReason": [],
+        "activeNav": "/notifications",
+        "currentScopeVisible": true,
+        "mobileMenuVisible": false,
+        "sidebarOpen": false,
+        "mainTextLength": 503,
+        "hasErrorView": false,
+        "mobileExpected": false,
+        "browserIssues": []
+      },
+      {
+        "url": "/positions",
+        "title": "系统状态",
+        "h1Count": 1,
+        "theme": "dark",
+        "language": "zh-CN",
+        "viewport": {
+          "width": 1024,
+          "height": 768
+        },
+        "documentOverflow": false,
+        "mainOverflow": false,
+        "overflowing": [],
+        "focusableCount": 26,
+        "unnamedFocusables": [],
+        "disabledWithoutReason": [],
+        "activeNav": "/positions",
+        "currentScopeVisible": true,
+        "mobileMenuVisible": false,
+        "sidebarOpen": false,
+        "mainTextLength": 1557,
+        "hasErrorView": false,
+        "mobileExpected": false,
+        "browserIssues": [
+          {
+            "type": "Log.entryAdded",
+            "detail": {
+              "source": "network",
+              "level": "error",
+              "text": "Failed to load resource: the server responded with a status of 503 (Service Unavailable)",
+              "timestamp": 1786365444642.405,
+              "url": "http://127.0.0.1:8022/api/opportunities",
+              "networkRequestId": "72037.3269"
+            }
+          }
+        ]
+      },
+      {
+        "url": "/capital",
+        "title": "资金中心",
+        "h1Count": 1,
+        "theme": "dark",
+        "language": "zh-CN",
+        "viewport": {
+          "width": 1024,
+          "height": 768
+        },
+        "documentOverflow": false,
+        "mainOverflow": false,
+        "overflowing": [],
+        "focusableCount": 46,
+        "unnamedFocusables": [],
+        "disabledWithoutReason": [],
+        "activeNav": "/capital",
+        "currentScopeVisible": true,
+        "mobileMenuVisible": false,
+        "sidebarOpen": false,
+        "mainTextLength": 2644,
+        "hasErrorView": false,
+        "mobileExpected": false,
+        "browserIssues": []
+      },
+      {
+        "url": "/venues",
+        "title": "交易账户",
+        "h1Count": 1,
+        "theme": "dark",
+        "language": "zh-CN",
+        "viewport": {
+          "width": 1024,
+          "height": 768
+        },
+        "documentOverflow": false,
+        "mainOverflow": false,
+        "overflowing": [],
+        "focusableCount": 45,
+        "unnamedFocusables": [],
+        "disabledWithoutReason": [],
+        "activeNav": "/venues",
+        "currentScopeVisible": true,
+        "mobileMenuVisible": false,
+        "sidebarOpen": false,
+        "mainTextLength": 1516,
+        "hasErrorView": false,
+        "mobileExpected": false,
+        "browserIssues": []
+      },
+      {
+        "url": "/venues/binance",
+        "title": "交易账户",
+        "h1Count": 1,
+        "theme": "dark",
+        "language": "zh-CN",
+        "viewport": {
+          "width": 1024,
+          "height": 768
+        },
+        "documentOverflow": false,
+        "mainOverflow": false,
+        "overflowing": [],
+        "focusableCount": 45,
+        "unnamedFocusables": [],
+        "disabledWithoutReason": [],
+        "activeNav": "/venues",
+        "currentScopeVisible": true,
+        "mobileMenuVisible": false,
+        "sidebarOpen": false,
+        "mainTextLength": 1516,
+        "hasErrorView": false,
+        "mobileExpected": false,
+        "browserIssues": []
+      },
+      {
+        "url": "/venues/hyperliquid",
+        "title": "交易账户",
+        "h1Count": 1,
+        "theme": "dark",
+        "language": "zh-CN",
+        "viewport": {
+          "width": 1024,
+          "height": 768
+        },
+        "documentOverflow": false,
+        "mainOverflow": false,
+        "overflowing": [],
+        "focusableCount": 45,
+        "unnamedFocusables": [],
+        "disabledWithoutReason": [],
+        "activeNav": "/venues",
+        "currentScopeVisible": true,
+        "mobileMenuVisible": false,
+        "sidebarOpen": false,
+        "mainTextLength": 1490,
+        "hasErrorView": false,
+        "mobileExpected": false,
+        "browserIssues": []
+      },
+      {
+        "url": "/admin/users",
+        "title": "团队成员与权限",
+        "h1Count": 1,
+        "theme": "dark",
+        "language": "zh-CN",
+        "viewport": {
+          "width": 1024,
+          "height": 768
+        },
+        "documentOverflow": false,
+        "mainOverflow": false,
+        "overflowing": [],
+        "focusableCount": 113,
+        "unnamedFocusables": [],
+        "disabledWithoutReason": [],
+        "activeNav": "/admin/users",
+        "currentScopeVisible": true,
+        "mobileMenuVisible": false,
+        "sidebarOpen": false,
+        "mainTextLength": 823,
+        "hasErrorView": false,
+        "mobileExpected": false,
+        "browserIssues": []
+      },
+      {
+        "url": "/admin/agents",
+        "title": "AI Agent 权限",
+        "h1Count": 1,
+        "theme": "dark",
+        "language": "zh-CN",
+        "viewport": {
+          "width": 1024,
+          "height": 768
+        },
+        "documentOverflow": false,
+        "mainOverflow": false,
+        "overflowing": [],
+        "focusableCount": 25,
+        "unnamedFocusables": [],
+        "disabledWithoutReason": [],
+        "activeNav": "/admin/agents",
+        "currentScopeVisible": true,
+        "mobileMenuVisible": false,
+        "sidebarOpen": false,
+        "mainTextLength": 745,
+        "hasErrorView": false,
+        "mobileExpected": false,
+        "browserIssues": []
+      }
+    ],
+    "430x932": [
+      {
+        "url": "/",
+        "title": "当前未发现运行阻断，没有必须立即处理的事项",
+        "h1Count": 1,
+        "theme": "dark",
+        "language": "zh-CN",
+        "viewport": {
+          "width": 430,
+          "height": 932
+        },
+        "documentOverflow": false,
+        "mainOverflow": false,
+        "overflowing": [],
+        "focusableCount": 10,
+        "unnamedFocusables": [],
+        "disabledWithoutReason": [],
+        "activeNav": "/",
+        "currentScopeVisible": true,
+        "mobileMenuVisible": true,
+        "sidebarOpen": false,
+        "mainTextLength": 440,
+        "hasErrorView": false,
+        "mobileExpected": true,
+        "browserIssues": []
+      },
+      {
+        "url": "/signals",
+        "title": "信号源",
+        "h1Count": 1,
+        "theme": "dark",
+        "language": "zh-CN",
+        "viewport": {
+          "width": 430,
+          "height": 932
+        },
+        "documentOverflow": false,
+        "mainOverflow": false,
+        "overflowing": [],
+        "focusableCount": 12,
+        "unnamedFocusables": [],
+        "disabledWithoutReason": [],
+        "activeNav": "/signals",
+        "currentScopeVisible": true,
+        "mobileMenuVisible": true,
+        "sidebarOpen": false,
+        "mainTextLength": 462,
+        "hasErrorView": false,
+        "mobileExpected": true,
+        "browserIssues": []
+      },
+      {
+        "url": "/opportunities",
+        "title": "实时机会",
+        "h1Count": 1,
+        "theme": "dark",
+        "language": "zh-CN",
+        "viewport": {
+          "width": 430,
+          "height": 932
+        },
+        "documentOverflow": false,
+        "mainOverflow": false,
+        "overflowing": [],
+        "focusableCount": 9,
+        "unnamedFocusables": [],
+        "disabledWithoutReason": [],
+        "activeNav": "/opportunities",
+        "currentScopeVisible": true,
+        "mobileMenuVisible": true,
+        "sidebarOpen": false,
+        "mainTextLength": 325,
+        "hasErrorView": false,
+        "mobileExpected": true,
+        "browserIssues": [
+          {
+            "type": "Log.entryAdded",
+            "detail": {
+              "source": "network",
+              "level": "error",
+              "text": "Failed to load resource: the server responded with a status of 503 (Service Unavailable)",
+              "timestamp": 1786365449317.91,
+              "url": "http://127.0.0.1:8022/api/opportunities",
+              "networkRequestId": "72037.3436"
+            }
+          }
+        ]
+      },
+      {
+        "url": "/opportunities/defaults",
+        "title": "默认提案配置",
+        "h1Count": 1,
+        "theme": "dark",
+        "language": "zh-CN",
+        "viewport": {
+          "width": 430,
+          "height": 932
+        },
+        "documentOverflow": false,
+        "mainOverflow": false,
+        "overflowing": [],
+        "focusableCount": 17,
+        "unnamedFocusables": [],
+        "disabledWithoutReason": [],
+        "activeNav": null,
+        "currentScopeVisible": true,
+        "mobileMenuVisible": true,
+        "sidebarOpen": false,
+        "mainTextLength": 437,
+        "hasErrorView": false,
+        "mobileExpected": true,
+        "browserIssues": []
+      },
+      {
+        "url": "/proposals/new",
+        "title": "创建人工提案",
+        "h1Count": 1,
+        "theme": "dark",
+        "language": "zh-CN",
+        "viewport": {
+          "width": 430,
+          "height": 932
+        },
+        "documentOverflow": false,
+        "mainOverflow": false,
+        "overflowing": [],
+        "focusableCount": 22,
+        "unnamedFocusables": [],
+        "disabledWithoutReason": [],
+        "activeNav": null,
+        "currentScopeVisible": true,
+        "mobileMenuVisible": true,
+        "sidebarOpen": false,
+        "mainTextLength": 555,
+        "hasErrorView": false,
+        "mobileExpected": true,
+        "browserIssues": []
+      },
+      {
+        "url": "/reviews",
+        "title": "审核队列",
+        "h1Count": 1,
+        "theme": "dark",
+        "language": "zh-CN",
+        "viewport": {
+          "width": 430,
+          "height": 932
+        },
+        "documentOverflow": false,
+        "mainOverflow": false,
+        "overflowing": [],
+        "focusableCount": 12,
+        "unnamedFocusables": [],
+        "disabledWithoutReason": [],
+        "activeNav": "/reviews",
+        "currentScopeVisible": true,
+        "mobileMenuVisible": true,
+        "sidebarOpen": false,
+        "mainTextLength": 186,
+        "hasErrorView": false,
+        "mobileExpected": true,
+        "browserIssues": []
+      },
+      {
+        "url": "/proposals",
+        "title": "当前提案",
+        "h1Count": 1,
+        "theme": "dark",
+        "language": "zh-CN",
+        "viewport": {
+          "width": 430,
+          "height": 932
+        },
+        "documentOverflow": false,
+        "mainOverflow": false,
+        "overflowing": [],
+        "focusableCount": 12,
+        "unnamedFocusables": [],
+        "disabledWithoutReason": [],
+        "activeNav": null,
+        "currentScopeVisible": true,
+        "mobileMenuVisible": true,
+        "sidebarOpen": false,
+        "mainTextLength": 148,
+        "hasErrorView": false,
+        "mobileExpected": true,
+        "browserIssues": []
+      },
+      {
+        "url": "/proposals?history=1",
+        "title": "历史提案",
+        "h1Count": 1,
+        "theme": "dark",
+        "language": "zh-CN",
+        "viewport": {
+          "width": 430,
+          "height": 932
+        },
+        "documentOverflow": false,
+        "mainOverflow": false,
+        "overflowing": [],
+        "focusableCount": 275,
+        "unnamedFocusables": [],
+        "disabledWithoutReason": [],
+        "activeNav": null,
+        "currentScopeVisible": true,
+        "mobileMenuVisible": true,
+        "sidebarOpen": false,
+        "mainTextLength": 31791,
+        "hasErrorView": false,
+        "mobileExpected": true,
+        "browserIssues": []
+      },
+      {
+        "url": "/proposals/adea0376-b870-437e-ba12-5fc0b9d025fc",
+        "title": "BMTUSDT",
+        "h1Count": 1,
+        "theme": "dark",
+        "language": "zh-CN",
+        "viewport": {
+          "width": 430,
+          "height": 932
+        },
+        "documentOverflow": false,
+        "mainOverflow": false,
+        "overflowing": [],
+        "focusableCount": 8,
+        "unnamedFocusables": [],
+        "disabledWithoutReason": [],
+        "activeNav": null,
+        "currentScopeVisible": true,
+        "mobileMenuVisible": true,
+        "sidebarOpen": false,
+        "mainTextLength": 798,
+        "hasErrorView": false,
+        "mobileExpected": true,
+        "browserIssues": []
+      },
+      {
+        "url": "/campaigns",
+        "title": "交易任务",
+        "h1Count": 1,
+        "theme": "dark",
+        "language": "zh-CN",
+        "viewport": {
+          "width": 430,
+          "height": 932
+        },
+        "documentOverflow": false,
+        "mainOverflow": false,
+        "overflowing": [],
+        "focusableCount": 11,
+        "unnamedFocusables": [],
+        "disabledWithoutReason": [],
+        "activeNav": "/campaigns",
+        "currentScopeVisible": true,
+        "mobileMenuVisible": true,
+        "sidebarOpen": false,
+        "mainTextLength": 451,
+        "hasErrorView": false,
+        "mobileExpected": true,
+        "browserIssues": []
+      },
+      {
+        "url": "/campaigns/45250eb6-c7de-494a-92f6-37cb346140c3",
+        "title": "xyz:TSLA 45250eb6…",
+        "h1Count": 1,
+        "theme": "dark",
+        "language": "zh-CN",
+        "viewport": {
+          "width": 430,
+          "height": 932
+        },
+        "documentOverflow": false,
+        "mainOverflow": false,
+        "overflowing": [],
+        "focusableCount": 7,
+        "unnamedFocusables": [],
+        "disabledWithoutReason": [],
+        "activeNav": null,
+        "currentScopeVisible": true,
+        "mobileMenuVisible": true,
+        "sidebarOpen": false,
+        "mainTextLength": 785,
+        "hasErrorView": false,
+        "mobileExpected": true,
+        "browserIssues": []
+      },
+      {
+        "url": "/campaigns/alerts",
+        "title": "运行告警",
+        "h1Count": 1,
+        "theme": "dark",
+        "language": "zh-CN",
+        "viewport": {
+          "width": 430,
+          "height": 932
+        },
+        "documentOverflow": false,
+        "mainOverflow": false,
+        "overflowing": [],
+        "focusableCount": 9,
+        "unnamedFocusables": [],
+        "disabledWithoutReason": [],
+        "activeNav": null,
+        "currentScopeVisible": true,
+        "mobileMenuVisible": true,
+        "sidebarOpen": false,
+        "mainTextLength": 231,
+        "hasErrorView": false,
+        "mobileExpected": true,
+        "browserIssues": []
+      },
+      {
+        "url": "/orders",
+        "title": "订单与成交",
+        "h1Count": 1,
+        "theme": "dark",
+        "language": "zh-CN",
+        "viewport": {
+          "width": 430,
+          "height": 932
+        },
+        "documentOverflow": false,
+        "mainOverflow": false,
+        "overflowing": [],
+        "focusableCount": 13,
+        "unnamedFocusables": [],
+        "disabledWithoutReason": [],
+        "activeNav": null,
+        "currentScopeVisible": true,
+        "mobileMenuVisible": true,
+        "sidebarOpen": false,
+        "mainTextLength": 556,
+        "hasErrorView": false,
+        "mobileExpected": true,
+        "browserIssues": []
+      },
+      {
+        "url": "/risk",
+        "title": "风险与目标",
+        "h1Count": 1,
+        "theme": "dark",
+        "language": "zh-CN",
+        "viewport": {
+          "width": 430,
+          "height": 932
+        },
+        "documentOverflow": false,
+        "mainOverflow": false,
+        "overflowing": [],
+        "focusableCount": 17,
+        "unnamedFocusables": [],
+        "disabledWithoutReason": [],
+        "activeNav": null,
+        "currentScopeVisible": true,
+        "mobileMenuVisible": true,
+        "sidebarOpen": false,
+        "mainTextLength": 1242,
+        "hasErrorView": false,
+        "mobileExpected": true,
+        "browserIssues": []
+      },
+      {
+        "url": "/shadow",
+        "title": "影子模式",
+        "h1Count": 1,
+        "theme": "dark",
+        "language": "zh-CN",
+        "viewport": {
+          "width": 430,
+          "height": 932
+        },
+        "documentOverflow": false,
+        "mainOverflow": false,
+        "overflowing": [],
+        "focusableCount": 24,
+        "unnamedFocusables": [],
+        "disabledWithoutReason": [],
+        "activeNav": "/shadow",
+        "currentScopeVisible": true,
+        "mobileMenuVisible": true,
+        "sidebarOpen": false,
+        "mainTextLength": 25646,
+        "hasErrorView": false,
+        "mobileExpected": true,
+        "browserIssues": []
+      },
+      {
+        "url": "/results?environment=SHADOW",
+        "title": "绩效与风险报表",
+        "h1Count": 1,
+        "theme": "dark",
+        "language": "zh-CN",
+        "viewport": {
+          "width": 430,
+          "height": 932
+        },
+        "documentOverflow": false,
+        "mainOverflow": false,
+        "overflowing": [],
+        "focusableCount": 18,
+        "unnamedFocusables": [],
+        "disabledWithoutReason": [],
+        "activeNav": "/results",
+        "currentScopeVisible": true,
+        "mobileMenuVisible": true,
+        "sidebarOpen": false,
+        "mainTextLength": 1494,
+        "hasErrorView": false,
+        "mobileExpected": true,
+        "browserIssues": []
+      },
+      {
+        "url": "/notifications",
+        "title": "通知中心",
+        "h1Count": 1,
+        "theme": "dark",
+        "language": "zh-CN",
+        "viewport": {
+          "width": 430,
+          "height": 932
+        },
+        "documentOverflow": false,
+        "mainOverflow": false,
+        "overflowing": [],
+        "focusableCount": 18,
+        "unnamedFocusables": [],
+        "disabledWithoutReason": [],
+        "activeNav": "/notifications",
+        "currentScopeVisible": true,
+        "mobileMenuVisible": true,
+        "sidebarOpen": false,
+        "mainTextLength": 503,
+        "hasErrorView": false,
+        "mobileExpected": true,
+        "browserIssues": []
+      },
+      {
+        "url": "/positions",
+        "title": "系统状态",
+        "h1Count": 1,
+        "theme": "dark",
+        "language": "zh-CN",
+        "viewport": {
+          "width": 430,
+          "height": 932
+        },
+        "documentOverflow": false,
+        "mainOverflow": false,
+        "overflowing": [],
+        "focusableCount": 12,
+        "unnamedFocusables": [],
+        "disabledWithoutReason": [],
+        "activeNav": "/positions",
+        "currentScopeVisible": true,
+        "mobileMenuVisible": true,
+        "sidebarOpen": false,
+        "mainTextLength": 1580,
+        "hasErrorView": false,
+        "mobileExpected": true,
+        "browserIssues": [
+          {
+            "type": "Log.entryAdded",
+            "detail": {
+              "source": "network",
+              "level": "error",
+              "text": "Failed to load resource: the server responded with a status of 503 (Service Unavailable)",
+              "timestamp": 1786365456422.298,
+              "url": "http://127.0.0.1:8022/api/opportunities",
+              "networkRequestId": "72037.3630"
+            }
+          }
+        ]
+      },
+      {
+        "url": "/capital",
+        "title": "资金中心",
+        "h1Count": 1,
+        "theme": "dark",
+        "language": "zh-CN",
+        "viewport": {
+          "width": 430,
+          "height": 932
+        },
+        "documentOverflow": false,
+        "mainOverflow": false,
+        "overflowing": [],
+        "focusableCount": 31,
+        "unnamedFocusables": [],
+        "disabledWithoutReason": [],
+        "activeNav": "/capital",
+        "currentScopeVisible": true,
+        "mobileMenuVisible": true,
+        "sidebarOpen": false,
+        "mainTextLength": 2673,
+        "hasErrorView": false,
+        "mobileExpected": true,
+        "browserIssues": []
+      },
+      {
+        "url": "/venues",
+        "title": "交易账户",
+        "h1Count": 1,
+        "theme": "dark",
+        "language": "zh-CN",
+        "viewport": {
+          "width": 430,
+          "height": 932
+        },
+        "documentOverflow": false,
+        "mainOverflow": false,
+        "overflowing": [],
+        "focusableCount": 32,
+        "unnamedFocusables": [],
+        "disabledWithoutReason": [],
+        "activeNav": "/venues",
+        "currentScopeVisible": true,
+        "mobileMenuVisible": true,
+        "sidebarOpen": false,
+        "mainTextLength": 1516,
+        "hasErrorView": false,
+        "mobileExpected": true,
+        "browserIssues": []
+      },
+      {
+        "url": "/venues/binance",
+        "title": "交易账户",
+        "h1Count": 1,
+        "theme": "dark",
+        "language": "zh-CN",
+        "viewport": {
+          "width": 430,
+          "height": 932
+        },
+        "documentOverflow": false,
+        "mainOverflow": false,
+        "overflowing": [],
+        "focusableCount": 32,
+        "unnamedFocusables": [],
+        "disabledWithoutReason": [],
+        "activeNav": "/venues",
+        "currentScopeVisible": true,
+        "mobileMenuVisible": true,
+        "sidebarOpen": false,
+        "mainTextLength": 1516,
+        "hasErrorView": false,
+        "mobileExpected": true,
+        "browserIssues": []
+      },
+      {
+        "url": "/venues/hyperliquid",
+        "title": "交易账户",
+        "h1Count": 1,
+        "theme": "dark",
+        "language": "zh-CN",
+        "viewport": {
+          "width": 430,
+          "height": 932
+        },
+        "documentOverflow": false,
+        "mainOverflow": false,
+        "overflowing": [],
+        "focusableCount": 32,
+        "unnamedFocusables": [],
+        "disabledWithoutReason": [],
+        "activeNav": "/venues",
+        "currentScopeVisible": true,
+        "mobileMenuVisible": true,
+        "sidebarOpen": false,
+        "mainTextLength": 1490,
+        "hasErrorView": false,
+        "mobileExpected": true,
+        "browserIssues": []
+      },
+      {
+        "url": "/admin/users",
+        "title": "团队成员与权限",
+        "h1Count": 1,
+        "theme": "dark",
+        "language": "zh-CN",
+        "viewport": {
+          "width": 430,
+          "height": 932
+        },
+        "documentOverflow": false,
+        "mainOverflow": false,
+        "overflowing": [],
+        "focusableCount": 100,
+        "unnamedFocusables": [],
+        "disabledWithoutReason": [],
+        "activeNav": "/admin/users",
+        "currentScopeVisible": true,
+        "mobileMenuVisible": true,
+        "sidebarOpen": false,
+        "mainTextLength": 823,
+        "hasErrorView": false,
+        "mobileExpected": true,
+        "browserIssues": []
+      },
+      {
+        "url": "/admin/agents",
+        "title": "AI Agent 权限",
+        "h1Count": 1,
+        "theme": "dark",
+        "language": "zh-CN",
+        "viewport": {
+          "width": 430,
+          "height": 932
+        },
+        "documentOverflow": false,
+        "mainOverflow": false,
+        "overflowing": [],
+        "focusableCount": 12,
+        "unnamedFocusables": [],
+        "disabledWithoutReason": [],
+        "activeNav": "/admin/agents",
+        "currentScopeVisible": true,
+        "mobileMenuVisible": true,
+        "sidebarOpen": false,
+        "mainTextLength": 745,
+        "hasErrorView": false,
+        "mobileExpected": true,
+        "browserIssues": []
+      }
+    ],
+    "390x844": [
+      {
+        "url": "/",
+        "title": "当前未发现运行阻断，没有必须立即处理的事项",
+        "h1Count": 1,
+        "theme": "dark",
+        "language": "zh-CN",
+        "viewport": {
+          "width": 390,
+          "height": 844
+        },
+        "documentOverflow": false,
+        "mainOverflow": false,
+        "overflowing": [],
+        "focusableCount": 10,
+        "unnamedFocusables": [],
+        "disabledWithoutReason": [],
+        "activeNav": "/",
+        "currentScopeVisible": true,
+        "mobileMenuVisible": true,
+        "sidebarOpen": false,
+        "mainTextLength": 440,
+        "hasErrorView": false,
+        "mobileExpected": true,
+        "browserIssues": []
+      },
+      {
+        "url": "/signals",
+        "title": "信号源",
+        "h1Count": 1,
+        "theme": "dark",
+        "language": "zh-CN",
+        "viewport": {
+          "width": 390,
+          "height": 844
+        },
+        "documentOverflow": false,
+        "mainOverflow": false,
+        "overflowing": [],
+        "focusableCount": 12,
+        "unnamedFocusables": [],
+        "disabledWithoutReason": [],
+        "activeNav": "/signals",
+        "currentScopeVisible": true,
+        "mobileMenuVisible": true,
+        "sidebarOpen": false,
+        "mainTextLength": 462,
+        "hasErrorView": false,
+        "mobileExpected": true,
+        "browserIssues": []
+      },
+      {
+        "url": "/opportunities",
+        "title": "实时机会",
+        "h1Count": 1,
+        "theme": "dark",
+        "language": "zh-CN",
+        "viewport": {
+          "width": 390,
+          "height": 844
+        },
+        "documentOverflow": false,
+        "mainOverflow": false,
+        "overflowing": [],
+        "focusableCount": 9,
+        "unnamedFocusables": [],
+        "disabledWithoutReason": [],
+        "activeNav": "/opportunities",
+        "currentScopeVisible": true,
+        "mobileMenuVisible": true,
+        "sidebarOpen": false,
+        "mainTextLength": 325,
+        "hasErrorView": false,
+        "mobileExpected": true,
+        "browserIssues": [
+          {
+            "type": "Log.entryAdded",
+            "detail": {
+              "source": "network",
+              "level": "error",
+              "text": "Failed to load resource: the server responded with a status of 503 (Service Unavailable)",
+              "timestamp": 1786365461151.857,
+              "url": "http://127.0.0.1:8022/api/opportunities",
+              "networkRequestId": "72037.3797"
+            }
+          }
+        ]
+      },
+      {
+        "url": "/opportunities/defaults",
+        "title": "默认提案配置",
+        "h1Count": 1,
+        "theme": "dark",
+        "language": "zh-CN",
+        "viewport": {
+          "width": 390,
+          "height": 844
+        },
+        "documentOverflow": false,
+        "mainOverflow": false,
+        "overflowing": [],
+        "focusableCount": 17,
+        "unnamedFocusables": [],
+        "disabledWithoutReason": [],
+        "activeNav": null,
+        "currentScopeVisible": true,
+        "mobileMenuVisible": true,
+        "sidebarOpen": false,
+        "mainTextLength": 437,
+        "hasErrorView": false,
+        "mobileExpected": true,
+        "browserIssues": []
+      },
+      {
+        "url": "/proposals/new",
+        "title": "创建人工提案",
+        "h1Count": 1,
+        "theme": "dark",
+        "language": "zh-CN",
+        "viewport": {
+          "width": 390,
+          "height": 844
+        },
+        "documentOverflow": false,
+        "mainOverflow": false,
+        "overflowing": [],
+        "focusableCount": 22,
+        "unnamedFocusables": [],
+        "disabledWithoutReason": [],
+        "activeNav": null,
+        "currentScopeVisible": true,
+        "mobileMenuVisible": true,
+        "sidebarOpen": false,
+        "mainTextLength": 555,
+        "hasErrorView": false,
+        "mobileExpected": true,
+        "browserIssues": []
+      },
+      {
+        "url": "/reviews",
+        "title": "审核队列",
+        "h1Count": 1,
+        "theme": "dark",
+        "language": "zh-CN",
+        "viewport": {
+          "width": 390,
+          "height": 844
+        },
+        "documentOverflow": false,
+        "mainOverflow": false,
+        "overflowing": [],
+        "focusableCount": 12,
+        "unnamedFocusables": [],
+        "disabledWithoutReason": [],
+        "activeNav": "/reviews",
+        "currentScopeVisible": true,
+        "mobileMenuVisible": true,
+        "sidebarOpen": false,
+        "mainTextLength": 186,
+        "hasErrorView": false,
+        "mobileExpected": true,
+        "browserIssues": []
+      },
+      {
+        "url": "/proposals",
+        "title": "当前提案",
+        "h1Count": 1,
+        "theme": "dark",
+        "language": "zh-CN",
+        "viewport": {
+          "width": 390,
+          "height": 844
+        },
+        "documentOverflow": false,
+        "mainOverflow": false,
+        "overflowing": [],
+        "focusableCount": 12,
+        "unnamedFocusables": [],
+        "disabledWithoutReason": [],
+        "activeNav": null,
+        "currentScopeVisible": true,
+        "mobileMenuVisible": true,
+        "sidebarOpen": false,
+        "mainTextLength": 148,
+        "hasErrorView": false,
+        "mobileExpected": true,
+        "browserIssues": []
+      },
+      {
+        "url": "/proposals?history=1",
+        "title": "历史提案",
+        "h1Count": 1,
+        "theme": "dark",
+        "language": "zh-CN",
+        "viewport": {
+          "width": 390,
+          "height": 844
+        },
+        "documentOverflow": false,
+        "mainOverflow": false,
+        "overflowing": [],
+        "focusableCount": 275,
+        "unnamedFocusables": [],
+        "disabledWithoutReason": [],
+        "activeNav": null,
+        "currentScopeVisible": true,
+        "mobileMenuVisible": true,
+        "sidebarOpen": false,
+        "mainTextLength": 31791,
+        "hasErrorView": false,
+        "mobileExpected": true,
+        "browserIssues": []
+      },
+      {
+        "url": "/proposals/adea0376-b870-437e-ba12-5fc0b9d025fc",
+        "title": "BMTUSDT",
+        "h1Count": 1,
+        "theme": "dark",
+        "language": "zh-CN",
+        "viewport": {
+          "width": 390,
+          "height": 844
+        },
+        "documentOverflow": false,
+        "mainOverflow": false,
+        "overflowing": [],
+        "focusableCount": 8,
+        "unnamedFocusables": [],
+        "disabledWithoutReason": [],
+        "activeNav": null,
+        "currentScopeVisible": true,
+        "mobileMenuVisible": true,
+        "sidebarOpen": false,
+        "mainTextLength": 798,
+        "hasErrorView": false,
+        "mobileExpected": true,
+        "browserIssues": []
+      },
+      {
+        "url": "/campaigns",
+        "title": "交易任务",
+        "h1Count": 1,
+        "theme": "dark",
+        "language": "zh-CN",
+        "viewport": {
+          "width": 390,
+          "height": 844
+        },
+        "documentOverflow": false,
+        "mainOverflow": false,
+        "overflowing": [],
+        "focusableCount": 11,
+        "unnamedFocusables": [],
+        "disabledWithoutReason": [],
+        "activeNav": "/campaigns",
+        "currentScopeVisible": true,
+        "mobileMenuVisible": true,
+        "sidebarOpen": false,
+        "mainTextLength": 451,
+        "hasErrorView": false,
+        "mobileExpected": true,
+        "browserIssues": []
+      },
+      {
+        "url": "/campaigns/45250eb6-c7de-494a-92f6-37cb346140c3",
+        "title": "xyz:TSLA 45250eb6…",
+        "h1Count": 1,
+        "theme": "dark",
+        "language": "zh-CN",
+        "viewport": {
+          "width": 390,
+          "height": 844
+        },
+        "documentOverflow": false,
+        "mainOverflow": false,
+        "overflowing": [],
+        "focusableCount": 7,
+        "unnamedFocusables": [],
+        "disabledWithoutReason": [],
+        "activeNav": null,
+        "currentScopeVisible": true,
+        "mobileMenuVisible": true,
+        "sidebarOpen": false,
+        "mainTextLength": 785,
+        "hasErrorView": false,
+        "mobileExpected": true,
+        "browserIssues": []
+      },
+      {
+        "url": "/campaigns/alerts",
+        "title": "运行告警",
+        "h1Count": 1,
+        "theme": "dark",
+        "language": "zh-CN",
+        "viewport": {
+          "width": 390,
+          "height": 844
+        },
+        "documentOverflow": false,
+        "mainOverflow": false,
+        "overflowing": [],
+        "focusableCount": 9,
+        "unnamedFocusables": [],
+        "disabledWithoutReason": [],
+        "activeNav": null,
+        "currentScopeVisible": true,
+        "mobileMenuVisible": true,
+        "sidebarOpen": false,
+        "mainTextLength": 231,
+        "hasErrorView": false,
+        "mobileExpected": true,
+        "browserIssues": []
+      },
+      {
+        "url": "/orders",
+        "title": "订单与成交",
+        "h1Count": 1,
+        "theme": "dark",
+        "language": "zh-CN",
+        "viewport": {
+          "width": 390,
+          "height": 844
+        },
+        "documentOverflow": false,
+        "mainOverflow": false,
+        "overflowing": [],
+        "focusableCount": 13,
+        "unnamedFocusables": [],
+        "disabledWithoutReason": [],
+        "activeNav": null,
+        "currentScopeVisible": true,
+        "mobileMenuVisible": true,
+        "sidebarOpen": false,
+        "mainTextLength": 556,
+        "hasErrorView": false,
+        "mobileExpected": true,
+        "browserIssues": []
+      },
+      {
+        "url": "/risk",
+        "title": "风险与目标",
+        "h1Count": 1,
+        "theme": "dark",
+        "language": "zh-CN",
+        "viewport": {
+          "width": 390,
+          "height": 844
+        },
+        "documentOverflow": false,
+        "mainOverflow": false,
+        "overflowing": [],
+        "focusableCount": 17,
+        "unnamedFocusables": [],
+        "disabledWithoutReason": [],
+        "activeNav": null,
+        "currentScopeVisible": true,
+        "mobileMenuVisible": true,
+        "sidebarOpen": false,
+        "mainTextLength": 1242,
+        "hasErrorView": false,
+        "mobileExpected": true,
+        "browserIssues": []
+      },
+      {
+        "url": "/shadow",
+        "title": "影子模式",
+        "h1Count": 1,
+        "theme": "dark",
+        "language": "zh-CN",
+        "viewport": {
+          "width": 390,
+          "height": 844
+        },
+        "documentOverflow": false,
+        "mainOverflow": false,
+        "overflowing": [],
+        "focusableCount": 24,
+        "unnamedFocusables": [],
+        "disabledWithoutReason": [],
+        "activeNav": "/shadow",
+        "currentScopeVisible": true,
+        "mobileMenuVisible": true,
+        "sidebarOpen": false,
+        "mainTextLength": 25646,
+        "hasErrorView": false,
+        "mobileExpected": true,
+        "browserIssues": []
+      },
+      {
+        "url": "/results?environment=SHADOW",
+        "title": "绩效与风险报表",
+        "h1Count": 1,
+        "theme": "dark",
+        "language": "zh-CN",
+        "viewport": {
+          "width": 390,
+          "height": 844
+        },
+        "documentOverflow": false,
+        "mainOverflow": false,
+        "overflowing": [],
+        "focusableCount": 18,
+        "unnamedFocusables": [],
+        "disabledWithoutReason": [],
+        "activeNav": "/results",
+        "currentScopeVisible": true,
+        "mobileMenuVisible": true,
+        "sidebarOpen": false,
+        "mainTextLength": 1494,
+        "hasErrorView": false,
+        "mobileExpected": true,
+        "browserIssues": []
+      },
+      {
+        "url": "/notifications",
+        "title": "通知中心",
+        "h1Count": 1,
+        "theme": "dark",
+        "language": "zh-CN",
+        "viewport": {
+          "width": 390,
+          "height": 844
+        },
+        "documentOverflow": false,
+        "mainOverflow": false,
+        "overflowing": [],
+        "focusableCount": 18,
+        "unnamedFocusables": [],
+        "disabledWithoutReason": [],
+        "activeNav": "/notifications",
+        "currentScopeVisible": true,
+        "mobileMenuVisible": true,
+        "sidebarOpen": false,
+        "mainTextLength": 503,
+        "hasErrorView": false,
+        "mobileExpected": true,
+        "browserIssues": []
+      },
+      {
+        "url": "/positions",
+        "title": "系统状态",
+        "h1Count": 1,
+        "theme": "dark",
+        "language": "zh-CN",
+        "viewport": {
+          "width": 390,
+          "height": 844
+        },
+        "documentOverflow": false,
+        "mainOverflow": false,
+        "overflowing": [],
+        "focusableCount": 12,
+        "unnamedFocusables": [],
+        "disabledWithoutReason": [],
+        "activeNav": "/positions",
+        "currentScopeVisible": true,
+        "mobileMenuVisible": true,
+        "sidebarOpen": false,
+        "mainTextLength": 1580,
+        "hasErrorView": false,
+        "mobileExpected": true,
+        "browserIssues": [
+          {
+            "type": "Log.entryAdded",
+            "detail": {
+              "source": "network",
+              "level": "error",
+              "text": "Failed to load resource: the server responded with a status of 503 (Service Unavailable)",
+              "timestamp": 1786365468300.568,
+              "url": "http://127.0.0.1:8022/api/opportunities",
+              "networkRequestId": "72037.3992"
+            }
+          }
+        ]
+      },
+      {
+        "url": "/capital",
+        "title": "资金中心",
+        "h1Count": 1,
+        "theme": "dark",
+        "language": "zh-CN",
+        "viewport": {
+          "width": 390,
+          "height": 844
+        },
+        "documentOverflow": false,
+        "mainOverflow": false,
+        "overflowing": [],
+        "focusableCount": 31,
+        "unnamedFocusables": [],
+        "disabledWithoutReason": [],
+        "activeNav": "/capital",
+        "currentScopeVisible": true,
+        "mobileMenuVisible": true,
+        "sidebarOpen": false,
+        "mainTextLength": 2673,
+        "hasErrorView": false,
+        "mobileExpected": true,
+        "browserIssues": []
+      },
+      {
+        "url": "/venues",
+        "title": "交易账户",
+        "h1Count": 1,
+        "theme": "dark",
+        "language": "zh-CN",
+        "viewport": {
+          "width": 390,
+          "height": 844
+        },
+        "documentOverflow": false,
+        "mainOverflow": false,
+        "overflowing": [],
+        "focusableCount": 32,
+        "unnamedFocusables": [],
+        "disabledWithoutReason": [],
+        "activeNav": "/venues",
+        "currentScopeVisible": true,
+        "mobileMenuVisible": true,
+        "sidebarOpen": false,
+        "mainTextLength": 1516,
+        "hasErrorView": false,
+        "mobileExpected": true,
+        "browserIssues": []
+      },
+      {
+        "url": "/venues/binance",
+        "title": "交易账户",
+        "h1Count": 1,
+        "theme": "dark",
+        "language": "zh-CN",
+        "viewport": {
+          "width": 390,
+          "height": 844
+        },
+        "documentOverflow": false,
+        "mainOverflow": false,
+        "overflowing": [],
+        "focusableCount": 32,
+        "unnamedFocusables": [],
+        "disabledWithoutReason": [],
+        "activeNav": "/venues",
+        "currentScopeVisible": true,
+        "mobileMenuVisible": true,
+        "sidebarOpen": false,
+        "mainTextLength": 1516,
+        "hasErrorView": false,
+        "mobileExpected": true,
+        "browserIssues": []
+      },
+      {
+        "url": "/venues/hyperliquid",
+        "title": "交易账户",
+        "h1Count": 1,
+        "theme": "dark",
+        "language": "zh-CN",
+        "viewport": {
+          "width": 390,
+          "height": 844
+        },
+        "documentOverflow": false,
+        "mainOverflow": false,
+        "overflowing": [],
+        "focusableCount": 32,
+        "unnamedFocusables": [],
+        "disabledWithoutReason": [],
+        "activeNav": "/venues",
+        "currentScopeVisible": true,
+        "mobileMenuVisible": true,
+        "sidebarOpen": false,
+        "mainTextLength": 1490,
+        "hasErrorView": false,
+        "mobileExpected": true,
+        "browserIssues": []
+      },
+      {
+        "url": "/admin/users",
+        "title": "团队成员与权限",
+        "h1Count": 1,
+        "theme": "dark",
+        "language": "zh-CN",
+        "viewport": {
+          "width": 390,
+          "height": 844
+        },
+        "documentOverflow": false,
+        "mainOverflow": false,
+        "overflowing": [],
+        "focusableCount": 100,
+        "unnamedFocusables": [],
+        "disabledWithoutReason": [],
+        "activeNav": "/admin/users",
+        "currentScopeVisible": true,
+        "mobileMenuVisible": true,
+        "sidebarOpen": false,
+        "mainTextLength": 823,
+        "hasErrorView": false,
+        "mobileExpected": true,
+        "browserIssues": []
+      },
+      {
+        "url": "/admin/agents",
+        "title": "AI Agent 权限",
+        "h1Count": 1,
+        "theme": "dark",
+        "language": "zh-CN",
+        "viewport": {
+          "width": 390,
+          "height": 844
+        },
+        "documentOverflow": false,
+        "mainOverflow": false,
+        "overflowing": [],
+        "focusableCount": 12,
+        "unnamedFocusables": [],
+        "disabledWithoutReason": [],
+        "activeNav": "/admin/agents",
+        "currentScopeVisible": true,
+        "mobileMenuVisible": true,
+        "sidebarOpen": false,
+        "mainTextLength": 745,
+        "hasErrorView": false,
+        "mobileExpected": true,
+        "browserIssues": []
+      }
+    ]
+  },
+  "keyboard": {
+    "430x932": {
+      "tabSequence": [
+        {
+          "tag": "A",
+          "id": null,
+          "text": "交易控制台首页",
+          "visible": true,
+          "focusVisible": true,
+          "outline": "solid"
+        },
+        {
+          "tag": "SELECT",
+          "id": "scope-switcher",
+          "text": "当前 Workspace 和团队",
+          "visible": true,
+          "focusVisible": true,
+          "outline": "solid"
+        },
+        {
+          "tag": "BUTTON",
+          "id": "language-toggle",
+          "text": "切换中英文",
+          "visible": true,
+          "focusVisible": true,
+          "outline": "solid"
+        },
+        {
+          "tag": "BUTTON",
+          "id": "theme-toggle",
+          "text": "当前为深色主题；切换到浅色主题",
+          "visible": true,
+          "focusVisible": true,
+          "outline": "solid"
+        },
+        {
+          "tag": "BUTTON",
+          "id": "mobile-nav-toggle",
+          "text": "菜单",
+          "visible": true,
+          "focusVisible": true,
+          "outline": "solid"
+        },
+        {
+          "tag": "A",
+          "id": null,
+          "text": "查看风险配置",
+          "visible": true,
+          "focusVisible": true,
+          "outline": "solid"
+        },
+        {
+          "tag": "A",
+          "id": null,
+          "text": "查看此项 →",
+          "visible": true,
+          "focusVisible": true,
+          "outline": "solid"
+        },
+        {
+          "tag": "A",
+          "id": null,
+          "text": "查看此项 →",
+          "visible": true,
+          "focusVisible": true,
+          "outline": "solid"
+        },
+        {
+          "tag": "A",
+          "id": null,
+          "text": "查看此项 →",
+          "visible": true,
+          "focusVisible": true,
+          "outline": "solid"
+        },
+        {
+          "tag": "A",
+          "id": null,
+          "text": "处理此项 →",
+          "visible": true,
+          "focusVisible": true,
+          "outline": "solid"
+        },
+        {
+          "tag": "A",
+          "id": null,
+          "text": "管理交易账户",
+          "visible": true,
+          "focusVisible": true,
+          "outline": "solid"
+        },
+        {
+          "tag": "SELECT",
+          "id": null,
+          "text": "0GUSDT · USDT1000000BOBUSDT · USDT1000000MOGUSDT · USDT1000BONKUSDT · USDT1000CATUSDT · US",
+          "visible": true,
+          "focusVisible": true,
+          "outline": "solid"
+        },
+        {
+          "tag": "BUTTON",
+          "id": null,
+          "text": "增加标的",
+          "visible": true,
+          "focusVisible": true,
+          "outline": "solid"
+        },
+        {
+          "tag": "SELECT",
+          "id": null,
+          "text": "0GUSDT · USDT1000000BOBUSDT · USDT1000000MOGUSDT · USDT1000BONKUSDT · USDT1000CATUSDT · US",
+          "visible": true,
+          "focusVisible": true,
+          "outline": "solid"
+        }
+      ],
+      "menuOpened": {
+        "open": true,
+        "expanded": "true",
+        "focus": "/"
+      },
+      "menuClosed": {
+        "open": false,
+        "expanded": "false",
+        "focus": "mobile-nav-toggle"
+      }
+    },
+    "390x844": {
+      "tabSequence": [
+        {
+          "tag": "A",
+          "id": null,
+          "text": "交易控制台首页",
+          "visible": true,
+          "focusVisible": true,
+          "outline": "solid"
+        },
+        {
+          "tag": "SELECT",
+          "id": "scope-switcher",
+          "text": "当前 Workspace 和团队",
+          "visible": true,
+          "focusVisible": true,
+          "outline": "solid"
+        },
+        {
+          "tag": "BUTTON",
+          "id": "language-toggle",
+          "text": "切换中英文",
+          "visible": true,
+          "focusVisible": true,
+          "outline": "solid"
+        },
+        {
+          "tag": "BUTTON",
+          "id": "theme-toggle",
+          "text": "当前为深色主题；切换到浅色主题",
+          "visible": true,
+          "focusVisible": true,
+          "outline": "solid"
+        },
+        {
+          "tag": "BUTTON",
+          "id": "mobile-nav-toggle",
+          "text": "菜单",
+          "visible": true,
+          "focusVisible": true,
+          "outline": "solid"
+        },
+        {
+          "tag": "A",
+          "id": null,
+          "text": "查看风险配置",
+          "visible": true,
+          "focusVisible": true,
+          "outline": "solid"
+        },
+        {
+          "tag": "A",
+          "id": null,
+          "text": "查看此项 →",
+          "visible": true,
+          "focusVisible": true,
+          "outline": "solid"
+        },
+        {
+          "tag": "A",
+          "id": null,
+          "text": "查看此项 →",
+          "visible": true,
+          "focusVisible": true,
+          "outline": "solid"
+        },
+        {
+          "tag": "A",
+          "id": null,
+          "text": "查看此项 →",
+          "visible": true,
+          "focusVisible": true,
+          "outline": "solid"
+        },
+        {
+          "tag": "A",
+          "id": null,
+          "text": "处理此项 →",
+          "visible": true,
+          "focusVisible": true,
+          "outline": "solid"
+        },
+        {
+          "tag": "A",
+          "id": null,
+          "text": "管理交易账户",
+          "visible": true,
+          "focusVisible": true,
+          "outline": "solid"
+        },
+        {
+          "tag": "SELECT",
+          "id": null,
+          "text": "0GUSDT · USDT1000000BOBUSDT · USDT1000000MOGUSDT · USDT1000BONKUSDT · USDT1000CATUSDT · US",
+          "visible": true,
+          "focusVisible": true,
+          "outline": "solid"
+        },
+        {
+          "tag": "BUTTON",
+          "id": null,
+          "text": "增加标的",
+          "visible": true,
+          "focusVisible": true,
+          "outline": "solid"
+        },
+        {
+          "tag": "SELECT",
+          "id": null,
+          "text": "0GUSDT · USDT1000000BOBUSDT · USDT1000000MOGUSDT · USDT1000BONKUSDT · USDT1000CATUSDT · US",
+          "visible": true,
+          "focusVisible": true,
+          "outline": "solid"
+        }
+      ],
+      "menuOpened": {
+        "open": true,
+        "expanded": "true",
+        "focus": "/"
+      },
+      "menuClosed": {
+        "open": false,
+        "expanded": "false",
+        "focus": "mobile-nav-toggle"
+      }
+    }
+  },
+  "screenshots": [
+    "shadow-1440x900-dark.jpg",
+    "shadow-1440x900-light.jpg",
+    "shadow-1024x768-dark.jpg",
+    "shadow-1024x768-light.jpg",
+    "shadow-430x932-dark.jpg",
+    "shadow-430x932-light.jpg",
+    "shadow-390x844-dark.jpg",
+    "shadow-390x844-light.jpg",
+    "proposal-history-1024x768-dark.jpg"
+  ],
+  "accessibility": {
+    "viewport": "1440x900",
+    "routes": [
+      {
+        "route": "/",
+        "mainLandmarks": 1,
+        "bannerLandmarks": 1,
+        "navigationLandmarks": 1,
+        "headingCount": 4,
+        "h1": [
+          "当前未发现运行阻断，没有必须立即处理的事项"
+        ],
+        "namelessInteractive": [],
+        "nonemptyLiveRegions": [
+          {
+            "role": null,
+            "live": "polite",
+            "text": "当前无待办\n\n当前未发现运行阻断，没有必须立即处理的事项\n\n系统没有发现阻断异常、待你审核的提案或运行中交易任务。 可以继续观察机会。\n\n查看市场机会\n运行告警\n0\n无运行告警 / 无需处理\n非本人待审核\n0\n创建者不可审核自己的提案\n运行中交易任务\n0\n当前没有活动仓位流程\n风险政策\n正常\n真实下单已关闭 · 自动加仓已关闭\n\n处理顺序\n\n现在按这个顺序处理\n刷新当前数据\n✓\n当前无待办\n继续观察，不必为了操作而操作\n\n机会只是候选；只有形成清楚交易判断时才创建提案。\n\n查"
+          }
+        ]
+      },
+      {
+        "route": "/signals",
+        "mainLandmarks": 1,
+        "bannerLandmarks": 1,
+        "navigationLandmarks": 1,
+        "headingCount": 5,
+        "h1": [
+          "信号源"
+        ],
+        "namelessInteractive": [],
+        "nonemptyLiveRegions": [
+          {
+            "role": null,
+            "live": "polite",
+            "text": "团队隔离\n\n信号源\n\n每个团队只启用 Perptape 或 Webhook 之一。信号最多形成冻结提案，不拥有审核、风控、交易或资金权限。\n\n刷新事实\n\n信号源事实\n\nPerptape · 已启用\nv1\n凭据状态\n仅使用部署级兼容 Key；尚未绑定团队 Key\n服务身份\n兼容运行身份\n更新人\nkelly_oooo\n更新时间\n8月9日 23:53\n查看 Perptape 实时机会\n\n当前团队\n\n切换或轮换信号源\nPerptape\n启用模式\nPerptape\nWebhook\nPe"
+          }
+        ]
+      },
+      {
+        "route": "/opportunities",
+        "mainLandmarks": 1,
+        "bannerLandmarks": 1,
+        "navigationLandmarks": 1,
+        "headingCount": 3,
+        "h1": [
+          "实时机会"
+        ],
+        "namelessInteractive": [],
+        "nonemptyLiveRegions": [
+          {
+            "role": null,
+            "live": "polite",
+            "text": "Perptape · 实时机会流\n\n实时机会\n\n实时汇总同一币对、同一方向的多个突破周期。同一轮卡片、状态和按钮都来自同一个事实快照；创建时服务端仍会重新校验。\n\n连接已中断，正在重连\n＋ 人工提案\n刷新机会\n\nPerptape 数据源\n\n外部机会当前不可用\n\nPerptape 尚未配置。人工提案仍可使用，外部机会将在完成配置后恢复。 系统不会把过期候选当成当前机会。\n\n创建人工提案\n信号快照 —\n默认配置\n覆盖币对\n0\n按交易所和合约去重\n方向机会\n0\n同一币对做多、做空分"
+          }
+        ]
+      },
+      {
+        "route": "/opportunities/defaults",
+        "mainLandmarks": 1,
+        "bannerLandmarks": 1,
+        "navigationLandmarks": 1,
+        "headingCount": 3,
+        "h1": [
+          "默认提案配置"
+        ],
+        "namelessInteractive": [],
+        "nonemptyLiveRegions": [
+          {
+            "role": null,
+            "live": "polite",
+            "text": "机会 · 管理员设置\n\n默认提案配置\n\n这里只管理“一键创建”和之后新鲜多周期信号使用的默认值。每张卡片的高级配置只覆盖当前提案，人工提案不使用这里的参数。\n\n返回机会\n\n当前生效版本\n\n版本 v5\n已生效\n\n100.000000000000000000 USDT 名义仓位 · 最大风险 1.000000000000000000 · 有效期 8 小时 · 自动提案开启（4 周期）\n\n账户\nacct-1\n风险档位\n高风险\n更新人\nkelly_oooo\n生效时间\n8月5日 23:"
+          }
+        ]
+      },
+      {
+        "route": "/proposals/new",
+        "mainLandmarks": 1,
+        "bannerLandmarks": 1,
+        "navigationLandmarks": 1,
+        "headingCount": 4,
+        "h1": [
+          "创建人工提案"
+        ],
+        "namelessInteractive": [],
+        "nonemptyLiveRegions": [
+          {
+            "role": null,
+            "live": "polite",
+            "text": "人工创建交易提案\n\n创建人工提案\n\n先说明交易方向、计划规模和最多可以承受的损失。分批入场和自动加仓是高级选项；提交后只会保存当前判断，仍需独立审核和系统风险检查。\n\n真实环境 · 实盘\n1\n交易意图\n\n选标的、定方向，说清从哪个价格开始执行。\n\n账户\n资金和权限归属\n交易标的\n先选交易所，再输入完整币对；支持键盘输入和建议匹配，共 797 个在线 U 本位合约\n交易所\n币安\nHyperliquid\n币对\n当前交易所共 526 个在线合约；请输入完整币对或从建议中选择。\n方向"
+          },
+          {
+            "role": "status",
+            "live": "polite",
+            "text": "当前交易所共 526 个在线合约；请输入完整币对或从建议中选择。"
+          },
+          {
+            "role": null,
+            "live": "polite",
+            "text": "提案预览\n\n提交前摘要\n选择交易标的\n做多\n计划名义价值\n—\n最大风险\n—\n失效距离\n—\n有效期\n8 小时\n\n○ 补全交易意图\n\n○ 补全风险边界\n\n✓ 只创建提案，不直接下单"
+          }
+        ]
+      },
+      {
+        "route": "/reviews",
+        "mainLandmarks": 1,
+        "bannerLandmarks": 1,
+        "navigationLandmarks": 1,
+        "headingCount": 2,
+        "h1": [
+          "审核队列"
+        ],
+        "namelessInteractive": [],
+        "nonemptyLiveRegions": [
+          {
+            "role": null,
+            "live": "polite",
+            "text": "提案审核\n\n审核队列\n\n这里只保留真正需要你独立判断且尚未到期的提案，并按到期时间排序；高风险提案需要两名独立审核人。批准不等于下单。\n\n查看机会\n新建人工提案\n待我审核\n0\n需两人审核\n0\n30 分钟内到期\n0\n最早到期\n—\n待我审核\n当前提案\n历史记录\n当前没有待你审核的提案\n\n自己的提案、已经投过票、已到期或已结束的提案不会留在这里。\n\n返回当前任务\n查看全部提案"
+          }
+        ]
+      },
+      {
+        "route": "/proposals",
+        "mainLandmarks": 1,
+        "bannerLandmarks": 1,
+        "navigationLandmarks": 1,
+        "headingCount": 2,
+        "h1": [
+          "当前提案"
+        ],
+        "namelessInteractive": [],
+        "nonemptyLiveRegions": [
+          {
+            "role": null,
+            "live": "polite",
+            "text": "提案审核\n\n当前提案\n\n这里展示草稿、等待审核，以及仍在启动窗口内的已批准提案；批准后仍须完成实时风险检查与短期授权。\n\n查看机会\n新建人工提案\n当前提案\n0\n等待审核\n0\n待我审核\n当前提案\n历史记录\n当前没有进行中的提案\n\n可以从机会页一键创建，或提交一份人工提案。\n\n查看机会\n新建人工提案"
+          }
+        ]
+      },
+      {
+        "route": "/proposals?history=1",
+        "mainLandmarks": 1,
+        "bannerLandmarks": 1,
+        "navigationLandmarks": 1,
+        "headingCount": 1,
+        "h1": [
+          "历史提案"
+        ],
+        "namelessInteractive": [],
+        "nonemptyLiveRegions": [
+          {
+            "role": null,
+            "live": "polite",
+            "text": "提案审核\n\n历史提案\n\n这里保留已进入交易任务的提案、启动窗口已过期的批准记录，以及已过期或已拒绝记录；仍可启动的提案留在当前列表。\n\n查看机会\n新建人工提案\n历史记录\n261\n已进入交易\n4\n已过期\n257\n已拒绝\n0\n待我审核\n当前提案\n历史记录\n搜索标的\n方向\n全部方向\n做多\n做空\n风险\n全部档位\n低\n中\n高\n状态\n全部状态\n草稿\n待审核\n已批准\n已拒绝\n已过期\n261 个结果\n提案\t方向 / 交易规模\t风险边界\t状态\t提交时间\t有效期 / 结果\nBMTUSDT\n币安 "
+          }
+        ]
+      },
+      {
+        "route": "/proposals/adea0376-b870-437e-ba12-5fc0b9d025fc",
+        "mainLandmarks": 1,
+        "bannerLandmarks": 1,
+        "navigationLandmarks": 1,
+        "headingCount": 7,
+        "h1": [
+          "BMTUSDT"
+        ],
+        "namelessInteractive": [],
+        "nonemptyLiveRegions": [
+          {
+            "role": null,
+            "live": "polite",
+            "text": "真实环境 · 实盘 · Perptape 机会\n\nBMTUSDT\n做多\n已过期\n\n币安 · 生产账户范围 · 提案 adea0376… · 版本 2\n\n返回审核队列\n突破详情 ↗\n交易所图表 ↗\n1\n提案已保存\n8月10日 12:13\n2\n独立审核\n已过期\n3\n风险检查\n尚未运行\n4\n短期授权\n尚未签发\n\n交易判断摘要\n\n这笔交易要做什么\n高风险\n\n创建提案时，Perptape 中同一精确合约、同一方向在 1h、4h、1d、1w 同时突破。使用管理员保存的一键创建默认配置，仅"
+          }
+        ]
+      },
+      {
+        "route": "/campaigns",
+        "mainLandmarks": 1,
+        "bannerLandmarks": 1,
+        "navigationLandmarks": 1,
+        "headingCount": 1,
+        "h1": [
+          "交易任务"
+        ],
+        "namelessInteractive": [],
+        "nonemptyLiveRegions": [
+          {
+            "role": null,
+            "live": "polite",
+            "text": "交易任务\n\n每个交易任务覆盖一笔交易从授权、风险占用和下单意图，到成交、保护、减仓、对账与最终结果的完整生命周期。\n\n运行告警\n查看提案\n交易任务记录\n4\n建仓中 / 持仓中\n0\n结果未知\n0\n运行范围\n生产交易\n标的 / 方向\t账户 / 场所\t仓位目标\t状态\t最终盈亏\t更新时间\nxyz:TSLA\n做多\n45250eb6… · 查看详情\t默认账户\nHyperliquid\t已平仓\t已结束\t-0.00274 USDC\t8月4日 20:48\nxyz:TSLA\n做多\n192ea018"
+          }
+        ]
+      },
+      {
+        "route": "/campaigns/45250eb6-c7de-494a-92f6-37cb346140c3",
+        "mainLandmarks": 1,
+        "bannerLandmarks": 1,
+        "navigationLandmarks": 1,
+        "headingCount": 6,
+        "h1": [
+          "xyz:TSLA 45250eb6…"
+        ],
+        "namelessInteractive": [],
+        "nonemptyLiveRegions": [
+          {
+            "role": null,
+            "live": "polite",
+            "text": "真实环境 · 实盘 · Hyperliquid\n\nxyz:TSLA 45250eb6…\n\n已结束 · 做多 · 已平仓\n\n返回交易任务\n\n当前唯一推荐动作\n\n交易任务已完成并关闭\n\n风险预留已释放，成交与对账记录保留在当前交易任务中。\n\n返回交易任务\n当前仓位\n已平仓\n确认于 8月10日 12:32\n原生保护\n当前无仓位\n当前无仓位，无需保护\n进行中操作\n无进行中意图\n不会与新动作冲突\n最近对账\n对账一致 · 8月10日 12:32\n晚于当前仓位与操作记录\n已实现盈亏\n-0."
+          }
+        ]
+      },
+      {
+        "route": "/campaigns/alerts",
+        "mainLandmarks": 1,
+        "bannerLandmarks": 1,
+        "navigationLandmarks": 1,
+        "headingCount": 2,
+        "h1": [
+          "运行告警"
+        ],
+        "namelessInteractive": [],
+        "nonemptyLiveRegions": [
+          {
+            "role": null,
+            "live": "polite",
+            "text": "交易任务 · 运行告警详情\n\n运行告警\n\n只展示运行中生产交易任务需要人工处理的问题；风险恢复、资金异常和系统健康分别保留在各自页面。\n\n返回交易任务\n刷新\n受影响交易任务\n0\n运行问题\n0\n结果未知\n0\n数据过期\n0\n最近检查 8月10日 20:39\n无运行告警 / 当前无需处理\n\n检查范围：运行中的生产交易任务；未发现结果未知、数据过期、保护不足或对账差异。已关闭记录不会重新计入当前待办。\n\n最近检查：8月10日 20:39\n\n返回当前任务\n查看交易任务"
+          }
+        ]
+      },
+      {
+        "route": "/orders",
+        "mainLandmarks": 1,
+        "bannerLandmarks": 1,
+        "navigationLandmarks": 1,
+        "headingCount": 1,
+        "h1": [
+          "订单与成交"
+        ],
+        "namelessInteractive": [],
+        "nonemptyLiveRegions": [
+          {
+            "role": null,
+            "live": "polite",
+            "text": "生产交易数据\n\n订单与成交\n\n这里显示当前确认的数据；能够重新计算的汇总会按最新数据生成。\n\n交易任务\t意图\t方向 / 数量\t状态\t交易所订单\t更新时间\n45250eb6…查看详情\t初仓\t买入 0.037\t已成交\t509805628168 · 已成交\t8月4日 20:43\n45250eb6…查看详情\t退出 · 只减仓\t卖出 0.036\t已成交\trecovered-fill:488185786458956 · 已成交\t8月4日 20:48\n192ea018…查看详情\t初仓\t买入"
+          }
+        ]
+      },
+      {
+        "route": "/risk",
+        "mainLandmarks": 1,
+        "bannerLandmarks": 1,
+        "navigationLandmarks": 1,
+        "headingCount": 8,
+        "h1": [
+          "风险与目标"
+        ],
+        "namelessInteractive": [],
+        "nonemptyLiveRegions": [
+          {
+            "role": null,
+            "live": "polite",
+            "text": "生产交易数据\n\n风险与目标\n\n当前团队风险政策与每个生产账户范围分开判断；政策正常不代表所有账户都能新增风险。阻塞项会明确列出原因、负责人和下一步。\n\n风险政策\n限额未配置\n生产范围\n2 项待处理\n自动加仓\n已关闭\n实时条件\n2 项阻塞\n完成团队风险政策\n\n所有阈值必须由管理员明确填写。币安参考页的具体 n 值仍不可访问，因此页面不预填、不推测；完成前新增风险保持阻断。\n\n政策版本\n团队最大总风险\n单账户最大风险\n最大单笔亏损\n最大连续亏损次数\n亏损冷却期（秒）\n事实最大时效"
+          }
+        ]
+      },
+      {
+        "route": "/shadow",
+        "mainLandmarks": 1,
+        "bannerLandmarks": 1,
+        "navigationLandmarks": 1,
+        "headingCount": 22,
+        "h1": [
+          "影子模式"
+        ],
+        "namelessInteractive": [],
+        "nonemptyLiveRegions": [
+          {
+            "role": null,
+            "live": "polite",
+            "text": "虚拟资金 · 严格隔离\n\n影子模式\n\n用当前团队权限、提案、独立审核、风控、执行与报表链路运行模拟交易。全部事实固定为模拟，任何操作都不调用真实订单、资金、签名或广播连接器。\n\n生产团队 · 影子数据独立\n\n团队启用状态\n\n生产团队仍有 1 项影子准备度缺口\n\n缺口不会放宽生产或影子边界；按依赖顺序补齐后再运行完整模拟链路。\n\n查看风险配置\n\n团队启用路径\n\n服务端前置条件\n1 项阻断\n✓\n成员与职责\n已满足\n\n提案、独立审核与交易运维职责已在至少一个精确账户范围内形成闭环。"
+          }
+        ]
+      },
+      {
+        "route": "/results?environment=SHADOW",
+        "mainLandmarks": 1,
+        "bannerLandmarks": 1,
+        "navigationLandmarks": 1,
+        "headingCount": 7,
+        "h1": [
+          "绩效与风险报表"
+        ],
+        "namelessInteractive": [],
+        "nonemptyLiveRegions": [
+          {
+            "role": null,
+            "live": "polite",
+            "text": "Default Team · 影子模式 · 已记录历史\n\n绩效与风险报表\n\n仅聚合当前 Workspace / Team 及获授权账户的服务端事实。影子、测试网和真实数据严格分开；币种不混算。\n\n刷新当前报表\n\n数据性质\n\n影子模式\n\n这是合成事实，不是交易所成交或真实收益。 已读取 1 个交易任务、0 个已平仓结果和 3 条风险决策。\n\n可用\n环境\n影子模式\n测试网\n真实环境\n交易所\n全部\n币安\nHyperliquid\nOKX\nBybit\n账户\n策略\n策略版本\n信号源\n全部"
+          }
+        ]
+      },
+      {
+        "route": "/notifications",
+        "mainLandmarks": 1,
+        "bannerLandmarks": 1,
+        "navigationLandmarks": 1,
+        "headingCount": 4,
+        "h1": [
+          "通知中心"
+        ],
+        "namelessInteractive": [],
+        "nonemptyLiveRegions": [
+          {
+            "role": null,
+            "live": "polite",
+            "text": "Default Team · 团队级路由\n\n通知中心\n\n统一管理 Telegram、Slack、飞书 / Lark 和邮件。事件先写入当前团队的持久化投递队列, 再由最小权限进程发送。\n\n刷新投递事实\n已配置路由\n0\n0 条启用\n等待 / 重试\n0\n限流失败按退避计划自动重试\n已发送\n0\n每次投递都有审计记录\n需人工判断\n0\n结果未知不会盲目重发\n\n权限边界\n\n通知渠道不是交易主体\n\n交易已关闭 · 资金已关闭 · 签名已关闭 · 广播已关闭。测试通知只发送文本, 不触发业务"
+          }
+        ]
+      },
+      {
+        "route": "/positions",
+        "mainLandmarks": 1,
+        "bannerLandmarks": 1,
+        "navigationLandmarks": 1,
+        "headingCount": 12,
+        "h1": [
+          "系统状态"
+        ],
+        "namelessInteractive": [],
+        "nonemptyLiveRegions": [
+          {
+            "role": null,
+            "live": "polite",
+            "text": "交易系统状态\n\n系统状态\n\n这里直接说明系统能否工作、哪些能力受限，以及是否需要处理。绿色表示当前证据正常；黄色表示能力受限；红色表示必须先处理；灰色表示当前没有监控对象。\n\n刷新状态\n查看风险控制\n\n当前结论\n\n核心服务可用，但实时开仓条件未全部通过\n\n2 个默认账户范围共有 2 项实时条件未通过；请进入风险控制逐项查看原因、负责人和下一步。通过检查的范围仍需逐笔复核；自动加仓保持关闭。\n\n查看风险控制\n核心服务\n服务可用\n\n业务数据库和交易服务运行正常。\n\n数据缺失时自动"
+          }
+        ]
+      },
+      {
+        "route": "/capital",
+        "mainLandmarks": 1,
+        "bannerLandmarks": 1,
+        "navigationLandmarks": 1,
+        "headingCount": 7,
+        "h1": [
+          "资金中心"
+        ],
+        "namelessInteractive": [],
+        "nonemptyLiveRegions": [
+          {
+            "role": null,
+            "live": "polite",
+            "text": "生产资金 · 只读事实\n\n资金中心\n\n先看总额、资金位置和数据可信度，再处理资金路径。缺失、过期或时间错位的数据不会补零，也不会参与汇总。\n\n资金操作\n已关闭\n在途 / 占用 0 USDC\n当前三方总净值\n当前不可汇总\n\n尚无三方同一时间口径的完整记录\n\nBinance\n$9.9687\n币安：数据已过期\n\n8 小时前更新 · 当前有效窗口 30 分钟 · 8月10日 12:30\n数据来源：Binance 只读账户\n\nHyperliquid\n$9.9291\nHyperliqui"
+          }
+        ]
+      },
+      {
+        "route": "/venues",
+        "mainLandmarks": 1,
+        "bannerLandmarks": 1,
+        "navigationLandmarks": 2,
+        "headingCount": 6,
+        "h1": [
+          "交易账户"
+        ],
+        "namelessInteractive": [],
+        "nonemptyLiveRegions": [
+          {
+            "role": null,
+            "live": "polite",
+            "text": "团队账户 · 连接与交易分离\n\n交易账户\n\n币安、Hyperliquid、OKX 与 Bybit 均可使用团队加密凭据执行一次无副作用连接验证；连续账户事实同步目前仅覆盖币安和 Hyperliquid（含 HIP-3），验证成功也不会开启交易。\n\n刷新当前状态\n\n当前团队 · 账户真源\n\n账户与能力边界\n\n登记、连接、交易是三个不同事实。账户已登记或凭据已保存，都不表示连接成功，更不表示可下单。\n\n4 个账户\n接入交易账户同一交易所可登记多个独立账户；每个账户单独授权、风控与"
+          }
+        ]
+      },
+      {
+        "route": "/venues/binance",
+        "mainLandmarks": 1,
+        "bannerLandmarks": 1,
+        "navigationLandmarks": 2,
+        "headingCount": 6,
+        "h1": [
+          "交易账户"
+        ],
+        "namelessInteractive": [],
+        "nonemptyLiveRegions": [
+          {
+            "role": null,
+            "live": "polite",
+            "text": "团队账户 · 连接与交易分离\n\n交易账户\n\n币安、Hyperliquid、OKX 与 Bybit 均可使用团队加密凭据执行一次无副作用连接验证；连续账户事实同步目前仅覆盖币安和 Hyperliquid（含 HIP-3），验证成功也不会开启交易。\n\n刷新当前状态\n\n当前团队 · 账户真源\n\n账户与能力边界\n\n登记、连接、交易是三个不同事实。账户已登记或凭据已保存，都不表示连接成功，更不表示可下单。\n\n4 个账户\n接入交易账户同一交易所可登记多个独立账户；每个账户单独授权、风控与"
+          }
+        ]
+      },
+      {
+        "route": "/venues/hyperliquid",
+        "mainLandmarks": 1,
+        "bannerLandmarks": 1,
+        "navigationLandmarks": 2,
+        "headingCount": 6,
+        "h1": [
+          "交易账户"
+        ],
+        "namelessInteractive": [],
+        "nonemptyLiveRegions": [
+          {
+            "role": null,
+            "live": "polite",
+            "text": "团队账户 · 连接与交易分离\n\n交易账户\n\n币安、Hyperliquid、OKX 与 Bybit 均可使用团队加密凭据执行一次无副作用连接验证；连续账户事实同步目前仅覆盖币安和 Hyperliquid（含 HIP-3），验证成功也不会开启交易。\n\n刷新当前状态\n\n当前团队 · 账户真源\n\n账户与能力边界\n\n登记、连接、交易是三个不同事实。账户已登记或凭据已保存，都不表示连接成功，更不表示可下单。\n\n4 个账户\n接入交易账户同一交易所可登记多个独立账户；每个账户单独授权、风控与"
+          }
+        ]
+      },
+      {
+        "route": "/admin/users",
+        "mainLandmarks": 1,
+        "bannerLandmarks": 1,
+        "navigationLandmarks": 1,
+        "headingCount": 5,
+        "h1": [
+          "团队成员与权限"
+        ],
+        "namelessInteractive": [],
+        "nonemptyLiveRegions": [
+          {
+            "role": null,
+            "live": "polite",
+            "text": "Default Workspace · Default Team\n\n团队成员与权限\n\n岗位、账户范围和交易所范围只在当前团队生效。同一用户加入另一个团队时必须重新分配最小权限。\n\n5 名启用成员\n权限分离原则\n\n审核与发起分开\n审核人不能审核自己的提案；提案发起人不会自动获得执行权限。\n\n交易与资金分开\n交易运维人员看不到资金中心；系统管理员拥有最高管理权限，但资金动作仍受实时校验、最终确认和安全开关约束。\n\n身份与权限分开\n密码只用于身份验证；岗位和账户范围仍由独立授权控制"
+          }
+        ]
+      },
+      {
+        "route": "/admin/agents",
+        "mainLandmarks": 1,
+        "bannerLandmarks": 1,
+        "navigationLandmarks": 1,
+        "headingCount": 4,
+        "h1": [
+          "AI Agent 权限"
+        ],
+        "namelessInteractive": [],
+        "nonemptyLiveRegions": [
+          {
+            "role": null,
+            "live": "polite",
+            "text": "Default Workspace · Default Team\n\nAI Agent 权限\n\n为模型或自动化工作器创建团队固定、账户固定的 API 身份。Agent 与用户共享同一权限、独立审核、幂等和审计真源。\n\n0 个启用 Agent\n不可穿透的 Agent 边界\n\n最小角色\n仅观察、提案、独立审核；不授予交易、风控、资金或管理岗位。\n\n独立审核\n创建者仍不得审核自己的提案；服务端在角色判断前执行同一创建者校验。\n\n密钥隔离\nToken 仅首次响应显示；Agent 不读取"
+          }
+        ]
+      }
+    ]
+  },
+  "summary": {
+    "generatedAt": "2026-08-10T12:39:33.702426+00:00",
+    "sourceVersions": {
+      "app": 142,
+      "styles": 60,
+      "serviceWorker": 114
+    },
+    "routeCount": 24,
+    "viewportCount": 4,
+    "pageChecks": 96,
+    "structuralFailures": [],
+    "unexpectedBrowserIssues": [],
+    "expectedExternalWarnings": {
+      "count": 8,
+      "classification": "Perptape /api/opportunities returned the configured fail-closed 503 unavailable state; the affected pages rendered their explicit unavailable/limited state.",
+      "occurrences": [
+        {
+          "viewport": "1440x900",
+          "route": "/opportunities",
+          "kind": "PERPTAPE_UNAVAILABLE_503",
+          "sourceUrl": "http://127.0.0.1:8022/api/opportunities"
+        },
+        {
+          "viewport": "1440x900",
+          "route": "/positions",
+          "kind": "PERPTAPE_UNAVAILABLE_503",
+          "sourceUrl": "http://127.0.0.1:8022/api/opportunities"
+        },
+        {
+          "viewport": "1024x768",
+          "route": "/opportunities",
+          "kind": "PERPTAPE_UNAVAILABLE_503",
+          "sourceUrl": "http://127.0.0.1:8022/api/opportunities"
+        },
+        {
+          "viewport": "1024x768",
+          "route": "/positions",
+          "kind": "PERPTAPE_UNAVAILABLE_503",
+          "sourceUrl": "http://127.0.0.1:8022/api/opportunities"
+        },
+        {
+          "viewport": "430x932",
+          "route": "/opportunities",
+          "kind": "PERPTAPE_UNAVAILABLE_503",
+          "sourceUrl": "http://127.0.0.1:8022/api/opportunities"
+        },
+        {
+          "viewport": "430x932",
+          "route": "/positions",
+          "kind": "PERPTAPE_UNAVAILABLE_503",
+          "sourceUrl": "http://127.0.0.1:8022/api/opportunities"
+        },
+        {
+          "viewport": "390x844",
+          "route": "/opportunities",
+          "kind": "PERPTAPE_UNAVAILABLE_503",
+          "sourceUrl": "http://127.0.0.1:8022/api/opportunities"
+        },
+        {
+          "viewport": "390x844",
+          "route": "/positions",
+          "kind": "PERPTAPE_UNAVAILABLE_503",
+          "sourceUrl": "http://127.0.0.1:8022/api/opportunities"
+        }
+      ]
+    },
+    "keyboardChecks": {
+      "mobileViewports": 2,
+      "tabStopsSampled": 28,
+      "failures": []
+    },
+    "accessibilityTreeChecks": {
+      "routes": 24,
+      "failures": []
+    },
+    "screenshotCount": 9,
+    "result": "PASSED_WITH_EXPECTED_EXTERNAL_WARNING"
+  }
+}

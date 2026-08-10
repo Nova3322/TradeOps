@@ -114,7 +114,7 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
     assert "交易控制台" in response.text
     assert "/assets/app.js?v=142" in response.text
     assert 'href="/signals"' in response.text
-    assert "/assets/styles.css?v=59" in response.text
+    assert "/assets/styles.css?v=60" in response.text
     assert 'aria-label="交易控制台首页"' in response.text
     assert '<a href="/" data-link><span>⌂</span>当前任务</a>' in response.text
     assert "<span>⌁</span>实时机会</a>" in response.text
@@ -443,10 +443,12 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
     assert ".source-facts" in stylesheet.text
     assert ".readiness-item" in stylesheet.text
     assert ".readiness-action" in stylesheet.text
+    tablet_css = stylesheet.text.split("@media (max-width: 1180px)", 1)[1].split("@media", 1)[0]
+    assert ".proposal-list-tools { grid-template-columns: minmax(220px, 1fr) 140px 140px; }" in tablet_css
 
     service_worker = get(app, "/sw.js")
     assert service_worker.status_code == 200
-    assert "trading-shell-v113" in service_worker.text
+    assert "trading-shell-v114" in service_worker.text
     assert "self.skipWaiting()" in service_worker.text
     assert "self.clients.claim()" in service_worker.text
     assert "await fetch(event.request)" in service_worker.text
