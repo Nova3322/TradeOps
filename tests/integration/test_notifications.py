@@ -288,7 +288,6 @@ def test_notification_api_masks_configuration_and_test_send_has_no_business_auth
             _env_file=None,
         ),
         database,
-        notification_sender=sender,
     )
 
     async def scenario() -> None:
@@ -342,8 +341,21 @@ def test_notification_api_masks_configuration_and_test_send_has_no_business_auth
                 json={"idempotency_key": "api-route-test"},
             )
             assert tested.status_code == 200, tested.text
-            assert tested.json()["delivery_status"] == "SENT"
+            assert tested.json()["delivery_status"] == "QUEUED"
             assert private_webhook_url not in tested.text
+            assert sender.calls == []
+            delivery_id = tested.json()["event"]["notification_delivery_ids"][0]
+            assert tested.json()["center"]["deliveries"][0]["status"] == "PENDING"
+
+            dispatcher = NotificationDispatcher(
+                database,
+                credential_encryption_key=encryption_key(),
+                sender=sender,
+            )
+            assert dispatcher.dispatch_one(UUID(delivery_id), now=datetime.now(UTC)) == "SENT"
+            delivered = await admin_client.get("/api/notifications")
+            assert delivered.status_code == 200, delivered.text
+            assert delivered.json()["deliveries"][0]["status"] == "SENT"
             assert len(sender.calls) == 1
             assert sender.calls[0][0] == "SLACK"
             assert sender.calls[0][1]["webhook_url"] == private_webhook_url

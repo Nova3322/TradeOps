@@ -187,7 +187,7 @@ Binance、Hyperliquid Core、每个 HIP-3 DEX、账户 / 子账户、margin mode
 - 无法创建或批准新提案；客户端显示最后快照必须带时间戳和离线标识。
 - 既有自动 Add 是否继续严格按 `DEC-OPS-004`，客户端不得自行判断。
 - 止损、动态去杠杆和退出由服务端继续；无可靠告警且有真实仓位时按 `DEC-OPS-001` / `DEC-OPS-006` 降级。
-- 通知 delivery 的 `RETRY_WAIT` 只按已确认限速有界重试；`OUTCOME_UNKNOWN` 禁止自动重发，须先在渠道侧核对 event ID。恢复持续 worker 前先运行 `trading-notification-worker --once`，确认 Schema head、加密密钥、路由版本、失败码和审计投影；该 worker 不获得交易或资金能力。
+- 通知 API（包括测试）只入队；若 `PENDING` 持续增长，先执行 `docker compose ... ps notification-worker` 和 `trading-notification-worker --healthcheck`，再检查数据库 readiness、进程总开关与加密密钥。`RETRY_WAIT` 只按已确认限速有界重试；`DEAD_LETTER` 先修复确定性配置错误；`OUTCOME_UNKNOWN` 禁止自动重发，须先在渠道侧核对 event ID。恢复持续 worker 前先在隔离队列运行 `trading-notification-worker --once`，确认 Schema head、路由版本、失败码和审计投影；邮件的 SMTP 主机必须在进程 allowlist 中。该 worker 不获得交易或资金能力。
 
 ### RB-007 未授权订单、旁路或凭据泄漏
 

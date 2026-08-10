@@ -11,7 +11,7 @@ from datetime import UTC, datetime
 from trading_control_plane.config import Settings, get_settings
 from trading_control_plane.database import Database
 from trading_control_plane.logging import configure_logging
-from trading_control_plane.notification import NotificationDispatcher
+from trading_control_plane.notification import NotificationDispatcher, StdlibNotificationSender
 
 logger = logging.getLogger(__name__)
 
@@ -32,6 +32,9 @@ class NotificationWorker:
         self.dispatcher = NotificationDispatcher(
             database,
             credential_encryption_key=settings.credential_encryption_key,
+            sender=StdlibNotificationSender(
+                email_smtp_allowed_hosts=settings.notification_email_smtp_allowlist,
+            ),
         )
 
     def run_once(self) -> dict[str, object]:
@@ -58,7 +61,13 @@ class NotificationWorker:
 
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Run team notification delivery")
-    parser.add_argument("--once", action="store_true", help="run one delivery cycle")
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--once", action="store_true", help="run one delivery cycle")
+    mode.add_argument(
+        "--healthcheck",
+        action="store_true",
+        help="validate runtime gates and database readiness without sending",
+    )
     args = parser.parse_args(argv)
     settings = get_settings()
     settings.validate_runtime_security()
@@ -72,6 +81,19 @@ def main(argv: Sequence[str] | None = None) -> int:
         ready, reason = database.is_ready()
         if not ready:
             raise SystemExit(f"database is not ready: {reason}")
+        if args.healthcheck:
+            print(
+                json.dumps(
+                    {
+                        "component": "notification-worker",
+                        "database": "READY",
+                        "status": "READY",
+                    },
+                    separators=(",", ":"),
+                    sort_keys=True,
+                )
+            )
+            return 0
         worker = NotificationWorker(settings=settings, database=database)
         if args.once:
             print(json.dumps(worker.run_once(), separators=(",", ":"), sort_keys=True))

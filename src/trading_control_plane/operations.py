@@ -55,8 +55,7 @@ def connection_capability_matrix(
     binding_counts = database_binding_counts or {}
     worker_binding_counts = freqtrade_binding_counts or {}
     freqtrade_configured = any(
-        int(worker_binding_counts.get(venue, 0)) > 0
-        for venue in ("BINANCE", "HYPERLIQUID")
+        int(worker_binding_counts.get(venue, 0)) > 0 for venue in ("BINANCE", "HYPERLIQUID")
     )
     legacy_freqtrade_state = "configured" if legacy_freqtrade_configured else "absent"
     database_binance = int(binding_counts.get("BINANCE", 0)) > 0
@@ -88,8 +87,7 @@ def connection_capability_matrix(
                 enabled=(
                     settings.runtime_sync_enabled
                     if database_binance
-                    else settings.runtime_sync_enabled
-                    and settings.binance_read_only_enabled
+                    else settings.runtime_sync_enabled and settings.binance_read_only_enabled
                 ),
                 configured=database_binance or binance_read_configured,
             ),
@@ -104,8 +102,7 @@ def connection_capability_matrix(
                 enabled=(
                     settings.runtime_sync_enabled
                     if database_hyperliquid
-                    else settings.runtime_sync_enabled
-                    and settings.hyperliquid_read_only_enabled
+                    else settings.runtime_sync_enabled and settings.hyperliquid_read_only_enabled
                 ),
                 configured=database_hyperliquid or hyperliquid_read_configured,
             ),
@@ -176,7 +173,18 @@ def connection_capability_matrix(
                 configured=bool(settings.credential_encryption_key),
             ),
             "external_side_effect": "MESSAGE_SEND",
-            "boundary": "notification worker has no order, capital, signing or broadcast adapter",
+            "provider_controls": {
+                "EMAIL": (
+                    "ALLOWLIST_CONFIGURED"
+                    if settings.notification_email_smtp_allowlist
+                    else "BLOCKED_NO_SMTP_ALLOWLIST"
+                )
+            },
+            "boundary": (
+                "API only enqueues durable deliveries; the independent notification worker "
+                "has no order, capital, signing or broadcast adapter, and email SMTP requires "
+                "an exact process allowlist"
+            ),
         },
         {
             "capability": "AGENT_API",

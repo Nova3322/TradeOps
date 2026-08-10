@@ -20,6 +20,10 @@ from trading_control_plane.perptape import (
 
 DEFAULT_SESSION_SECRET = "local-development-session-secret-change-me"  # noqa: S105
 EVM_ADDRESS_PATTERN = re.compile(r"^0x[0-9a-fA-F]{40}$")
+PUBLIC_DNS_HOST_PATTERN = re.compile(
+    r"^(?=.{1,253}$)(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+"
+    r"[A-Za-z]{2,63}$"
+)
 
 
 class Settings(BaseSettings):
@@ -99,6 +103,7 @@ class Settings(BaseSettings):
     notification_worker_enabled: bool = False
     notification_worker_interval_seconds: int = Field(default=15, ge=5, le=300)
     notification_worker_batch_size: int = Field(default=50, ge=1, le=200)
+    notification_email_smtp_allowed_hosts: str = ""
     runtime_binance_account_id: str | None = None
     runtime_binance_symbol: str = "BTCUSDT"
     runtime_hyperliquid_account_id: str | None = None
@@ -189,6 +194,10 @@ class Settings(BaseSettings):
         return parse_hip3_dexes(self.freqtrade_hyperliquid_hip3_dexes)
 
     @property
+    def notification_email_smtp_allowlist(self) -> tuple[str, ...]:
+        return tuple(item for item in self.notification_email_smtp_allowed_hosts.split(",") if item)
+
+    @property
     def notilt_vaults(self) -> dict[int, str]:
         return {
             chain_id: address
@@ -248,6 +257,16 @@ class Settings(BaseSettings):
     def require_valid_hip3_dexes(cls, value: str) -> str:
         parse_hip3_dexes(value)
         return value
+
+    @field_validator("notification_email_smtp_allowed_hosts")
+    @classmethod
+    def require_valid_notification_smtp_allowlist(cls, value: str) -> str:
+        hosts = tuple(item.strip().lower() for item in value.split(",") if item.strip())
+        if len(hosts) != len(set(hosts)) or any(
+            PUBLIC_DNS_HOST_PATTERN.fullmatch(host) is None for host in hosts
+        ):
+            raise ValueError("notification email SMTP hosts must be unique public DNS hostnames")
+        return ",".join(hosts)
 
     @field_validator("binance_capital_base_url")
     @classmethod

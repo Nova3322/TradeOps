@@ -281,9 +281,7 @@ def test_lark_sender_freezes_official_payload_and_rejects_provider_error(
         "msg_type": "text",
         "content": {"text": "message text"},
         "timestamp": "1786291200",
-        "sign": StdlibNotificationSender._lark_signature(
-            "lark-signing-fixture", "1786291200"
-        ),
+        "sign": StdlibNotificationSender._lark_signature("lark-signing-fixture", "1786291200"),
     }
 
     monkeypatch.setattr(
@@ -336,7 +334,7 @@ def test_email_sender_requires_tls_and_maps_authentication_failure(
         "from_address": "ops@example.com",
         "to_address": "team@example.com",
     }
-    StdlibNotificationSender().send(
+    StdlibNotificationSender(email_smtp_allowed_hosts=("smtp.example.com",)).send(
         "EMAIL",
         configuration,
         NotificationMessage("subject", "text", "<p>text</p>"),
@@ -353,12 +351,40 @@ def test_email_sender_requires_tls_and_maps_authentication_failure(
     monkeypatch.setattr(smtplib, "SMTP_SSL", RejectedSmtp)
     monkeypatch.setattr(smtplib, "SMTP", RejectedSmtp)
     with pytest.raises(NotificationTransportError) as rejected:
-        StdlibNotificationSender().send(
+        StdlibNotificationSender(email_smtp_allowed_hosts=("smtp.example.com",)).send(
             "EMAIL",
             configuration,
             NotificationMessage("subject", "text", "<p>text</p>"),
         )
     assert rejected.value.code == "NOTIFICATION_EMAIL_AUTH_FAILED"
+
+
+def test_email_sender_rejects_unallowlisted_smtp_host_before_connect(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        smtplib,
+        "SMTP_SSL",
+        lambda *_args, **_kwargs: pytest.fail("SMTP must not open for an unallowlisted host"),
+    )
+    configuration = {
+        "smtp_host": "smtp.example.com",
+        "smtp_port": "465",
+        "username": "mailer",
+        "password": "fixture-password",
+        "from_address": "ops@example.com",
+        "to_address": "team@example.com",
+    }
+
+    with pytest.raises(NotificationTransportError) as rejected:
+        StdlibNotificationSender().send(
+            "EMAIL",
+            configuration,
+            NotificationMessage("subject", "text", "<p>text</p>"),
+        )
+
+    assert rejected.value.code == "NOTIFICATION_SMTP_HOST_NOT_ALLOWED"
+    assert rejected.value.retryable is False
 
 
 def test_telegram_sender_preserves_external_identity_and_classifies_network_failure(

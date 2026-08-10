@@ -39,15 +39,22 @@ def test_notification_worker_builds_dispatcher_with_only_notification_credential
     settings = Settings(
         database_url="postgresql+psycopg://unused:unused@127.0.0.1/unused",
         credential_encryption_key="G4dAqHdhSHI_KptQdXKVIgF_eVXWYFW3viBTPWLSBEs",
+        notification_email_smtp_allowed_hosts="smtp.example.com",
         _env_file=None,
     )
     database = object()
     observed: dict[str, object] = {}
 
-    def dispatcher(candidate: object, *, credential_encryption_key: str | None) -> object:
+    def dispatcher(
+        candidate: object,
+        *,
+        credential_encryption_key: str | None,
+        sender: object,
+    ) -> object:
         observed.update(
             database=candidate,
             credential_encryption_key=credential_encryption_key,
+            sender=sender,
         )
         return object()
 
@@ -59,7 +66,9 @@ def test_notification_worker_builds_dispatcher_with_only_notification_credential
     assert observed == {
         "database": database,
         "credential_encryption_key": settings.credential_encryption_key,
+        "sender": observed["sender"],
     }
+    assert observed["sender"].email_smtp_allowed_hosts == {"smtp.example.com"}  # type: ignore[union-attr]
 
 
 def test_notification_worker_continuous_loop_waits_between_cycles() -> None:
@@ -169,6 +178,45 @@ def test_notification_continuous_cli_installs_shutdown_handlers_and_disposes(
     assert database.disposed is True
 
 
+def test_notification_healthcheck_validates_gates_without_building_worker(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    settings = Settings(
+        database_url="postgresql+psycopg://unused:unused@127.0.0.1/unused",
+        credential_encryption_key="G4dAqHdhSHI_KptQdXKVIgF_eVXWYFW3viBTPWLSBEs",
+        notification_worker_enabled=True,
+        _env_file=None,
+    )
+
+    class FakeDatabase:
+        disposed = False
+
+        def is_ready(self) -> tuple[bool, str | None]:
+            return True, None
+
+        def dispose(self) -> None:
+            self.disposed = True
+
+    database = FakeDatabase()
+    monkeypatch.setattr(runtime_module, "get_settings", lambda: settings)
+    monkeypatch.setattr(runtime_module, "Database", lambda _url: database)
+    monkeypatch.setattr(runtime_module, "configure_logging", lambda _level: None)
+    monkeypatch.setattr(
+        runtime_module,
+        "NotificationWorker",
+        lambda **_kwargs: pytest.fail("healthcheck must not build a delivery worker"),
+    )
+
+    assert runtime_module.main(["--healthcheck"]) == 0
+    assert json.loads(capsys.readouterr().out) == {
+        "component": "notification-worker",
+        "database": "READY",
+        "status": "READY",
+    }
+    assert database.disposed is True
+
+
 @pytest.mark.parametrize(
     ("settings", "argv", "message"),
     [
@@ -187,6 +235,15 @@ def test_notification_continuous_cli_installs_shutdown_handlers_and_disposes(
                 _env_file=None,
             ),
             [],
+            "TRADING_NOTIFICATION_WORKER_ENABLED",
+        ),
+        (
+            Settings(
+                database_url="postgresql+psycopg://unused:unused@127.0.0.1/unused",
+                credential_encryption_key="G4dAqHdhSHI_KptQdXKVIgF_eVXWYFW3viBTPWLSBEs",
+                _env_file=None,
+            ),
+            ["--healthcheck"],
             "TRADING_NOTIFICATION_WORKER_ENABLED",
         ),
     ],

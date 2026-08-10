@@ -62,16 +62,27 @@ def test_connection_matrix_distinguishes_one_time_checks_from_continuous_runtime
         "BYBIT",
     ]
     assert matrix["BINANCE_CONTINUOUS_FACTS"]["deployment_state"] == "ENABLED"
-    assert matrix["OKX_CONTINUOUS_FACTS"]["implementation"] == (
-        "IMPLEMENTED_TEAM_ACCOUNT_BOUND"
-    )
-    assert matrix["BYBIT_CONTINUOUS_FACTS"]["implementation"] == (
-        "IMPLEMENTED_TEAM_ACCOUNT_BOUND"
-    )
+    assert matrix["OKX_CONTINUOUS_FACTS"]["implementation"] == ("IMPLEMENTED_TEAM_ACCOUNT_BOUND")
+    assert matrix["BYBIT_CONTINUOUS_FACTS"]["implementation"] == ("IMPLEMENTED_TEAM_ACCOUNT_BOUND")
     assert matrix["OKX_CONTINUOUS_FACTS"]["deployment_state"] == "DISABLED"
     assert matrix["OKX_BYBIT_EXECUTION"]["deployment_state"] == "UNAVAILABLE"
+    assert matrix["TEAM_NOTIFICATIONS"]["provider_controls"]["EMAIL"] == (
+        "BLOCKED_NO_SMTP_ALLOWLIST"
+    )
+    assert "API only enqueues" in matrix["TEAM_NOTIFICATIONS"]["boundary"]
     assert "exact-account ELIGIBLE status" in matrix["FREQTRADE_EXECUTION"]["boundary"]
     assert matrix["CAPITAL_SIGNING_BROADCAST"]["implementation"] == "NOT_IN_CONTROL_PLANE"
+
+
+def test_connection_matrix_reports_explicit_email_smtp_allowlist() -> None:
+    matrix = {
+        item["capability"]: item
+        for item in connection_capability_matrix(
+            safe_settings(notification_email_smtp_allowed_hosts="smtp.example.com")
+        )
+    }
+
+    assert matrix["TEAM_NOTIFICATIONS"]["provider_controls"]["EMAIL"] == ("ALLOWLIST_CONFIGURED")
 
 
 def test_connection_matrix_projects_database_bindings_behind_process_master_switch() -> None:
@@ -90,13 +101,9 @@ def test_connection_matrix_projects_database_bindings_behind_process_master_swit
         )
     }
 
-    assert stopped["BINANCE_CONTINUOUS_FACTS"]["deployment_state"] == (
-        "DISABLED_CONFIGURED"
-    )
+    assert stopped["BINANCE_CONTINUOUS_FACTS"]["deployment_state"] == ("DISABLED_CONFIGURED")
     assert running["BINANCE_CONTINUOUS_FACTS"]["deployment_state"] == "ENABLED"
-    assert stopped["OKX_CONTINUOUS_FACTS"]["deployment_state"] == (
-        "DISABLED_CONFIGURED"
-    )
+    assert stopped["OKX_CONTINUOUS_FACTS"]["deployment_state"] == ("DISABLED_CONFIGURED")
     assert running["OKX_CONTINUOUS_FACTS"]["deployment_state"] == "ENABLED"
     assert running["BYBIT_CONTINUOUS_FACTS"]["deployment_state"] == "ENABLED"
 
@@ -107,6 +114,24 @@ def test_environment_template_names_every_settings_field_without_values_from_run
     expected = {f"TRADING_{name.upper()}" for name in Settings.model_fields}
 
     assert expected <= declared
+
+
+def test_notification_worker_compose_contract_is_explicit_and_hardened() -> None:
+    compose = Path("compose.yaml").read_text(encoding="utf-8")
+    service = compose.split("  notification-worker:\n", 1)[1].split("\n  freqtrade-binance:", 1)[0]
+    launcher = Path("scripts/run_compose.sh").read_text(encoding="utf-8")
+
+    assert 'profiles: ["notifications"]' in service
+    assert 'TRADING_NOTIFICATION_WORKER_ENABLED: "true"' in service
+    assert "TRADING_NOTIFICATION_EMAIL_SMTP_ALLOWED_HOSTS" in compose
+    assert "trading-notification-worker\n        - --healthcheck" in service
+    assert "read_only: true" in service
+    assert 'cap_drop: ["ALL"]' in service
+    assert 'security_opt: ["no-new-privileges:true"]' in service
+    assert "restart: unless-stopped" in service
+    assert 'if [[ $1 != "--notifications" ]]' in launcher
+    assert "profiles+=(--profile notifications)" in launcher
+    assert "Notification delivery: disabled" in launcher
 
 
 def test_doctor_marks_enabled_but_incomplete_connection_as_blocked() -> None:

@@ -378,6 +378,11 @@ def render_notification_message(
 class StdlibNotificationSender:
     """Narrow outbound adapters. They expose no trading, funding, signing, or broadcast API."""
 
+    def __init__(self, *, email_smtp_allowed_hosts: tuple[str, ...] = ()) -> None:
+        self.email_smtp_allowed_hosts = frozenset(
+            host.strip().casefold() for host in email_smtp_allowed_hosts if host.strip()
+        )
+
     @staticmethod
     def _post_json(url: str, payload: dict[str, Any]) -> dict[str, Any] | None:
         request = urllib.request.Request(  # noqa: S310
@@ -482,6 +487,12 @@ class StdlibNotificationSender:
                     retryable=False,
                 )
             return NotificationSendResult()
+
+        if normalized["smtp_host"].casefold() not in self.email_smtp_allowed_hosts:
+            raise NotificationTransportError(
+                "NOTIFICATION_SMTP_HOST_NOT_ALLOWED",
+                retryable=False,
+            )
 
         email = EmailMessage()
         email["Subject"] = message.subject

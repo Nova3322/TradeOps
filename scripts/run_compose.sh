@@ -1,6 +1,21 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+profiles=(--profile console)
+notification_delivery=false
+if [[ $# -gt 1 ]]; then
+  echo "usage: $0 [--notifications]" >&2
+  exit 2
+fi
+if [[ $# -eq 1 ]]; then
+  if [[ $1 != "--notifications" ]]; then
+    echo "usage: $0 [--notifications]" >&2
+    exit 2
+  fi
+  profiles+=(--profile notifications)
+  notification_delivery=true
+fi
+
 project_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$project_root"
 
@@ -57,4 +72,9 @@ done
 
 echo "Local administrator password: $password_file"
 echo "TradingOPS URL: http://127.0.0.1:${TRADING_PUBLIC_PORT:-8000}"
-exec docker compose --env-file "$env_file" --profile console up --build
+if [[ $notification_delivery == true ]]; then
+  echo "Notification delivery: enabled by explicit --notifications profile"
+else
+  echo "Notification delivery: disabled (add --notifications to enable the worker)"
+fi
+exec docker compose --env-file "$env_file" "${profiles[@]}" up --build

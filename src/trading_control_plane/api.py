@@ -178,10 +178,6 @@ from trading_control_plane.hyperliquid_execution import (
 )
 from trading_control_plane.logging import configure_logging
 from trading_control_plane.metrics import DATABASE_READY
-from trading_control_plane.notification import (
-    NotificationDispatcher,
-    NotificationSender,
-)
 from trading_control_plane.notilt import (
     SUPPORTED_NOTILT_CHAINS,
     NoTiltGateway,
@@ -373,7 +369,6 @@ def create_app(
     hyperliquid_capital_gateway: HyperliquidCapitalGateway | None = None,
     binance_capital_gateway: BinanceCapitalGateway | None = None,
     exchange_connection_verifier: ExchangeConnectionVerifier | None = None,
-    notification_sender: NotificationSender | None = None,
 ) -> FastAPI:
     resolved_settings = settings or get_settings()
     resolved_settings.validate_runtime_security()
@@ -740,13 +735,6 @@ def create_app(
             confirmation_timeout_seconds=(
                 resolved_settings.freqtrade_confirmation_timeout_seconds
             ),
-        )
-
-    def notification_dispatcher() -> NotificationDispatcher:
-        return NotificationDispatcher(
-            business_database(),
-            credential_encryption_key=resolved_settings.credential_encryption_key,
-            sender=notification_sender,
         )
 
     def effective_direct_capital_settings(user_id: UUID) -> tuple[Settings, dict[str, Any] | None]:
@@ -2180,11 +2168,7 @@ def create_app(
             now=now,
         )
         delivery_ids = event["notification_delivery_ids"]
-        delivery_status = (
-            "UNROUTED"
-            if not delivery_ids
-            else notification_dispatcher().dispatch_one(UUID(delivery_ids[0]), now=now)
-        )
+        delivery_status = "UNROUTED" if not delivery_ids else "QUEUED"
         return {
             "event": event,
             "delivery_status": delivery_status,

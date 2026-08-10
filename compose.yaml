@@ -19,7 +19,7 @@ services:
   migrate:
     build:
       context: .
-    profiles: ["console"]
+    profiles: ["console", "notifications"]
     command: ["uv", "run", "--no-sync", "alembic", "upgrade", "head"]
     environment: &control-plane-environment
       TRADING_ENVIRONMENT: local
@@ -29,6 +29,7 @@ services:
       TRADING_ALLOW_MOCK_IDENTITY: "false"
       TRADING_RUNTIME_SYNC_ENABLED: "false"
       TRADING_NOTIFICATION_WORKER_ENABLED: "false"
+      TRADING_NOTIFICATION_EMAIL_SMTP_ALLOWED_HOSTS: ${TRADING_NOTIFICATION_EMAIL_SMTP_ALLOWED_HOSTS:-}
       TRADING_PERPTAPE_WEBSOCKET_ENABLED: "false"
       TRADING_FREQTRADE_WORKERS_ENABLED: "false"
       TRADING_FREQTRADE_LIVE_ORDER_SEND_ENABLED: "false"
@@ -51,7 +52,7 @@ services:
   setup:
     build:
       context: .
-    profiles: ["console"]
+    profiles: ["console", "notifications"]
     command: ["uv", "run", "--no-sync", "python", "scripts/setup_local.py"]
     environment:
       <<: *control-plane-environment
@@ -101,6 +102,38 @@ services:
     cap_drop: ["ALL"]
     security_opt: ["no-new-privileges:true"]
     restart: unless-stopped
+
+  notification-worker:
+    build:
+      context: .
+    profiles: ["notifications"]
+    command: ["uv", "run", "--no-sync", "trading-notification-worker"]
+    environment:
+      <<: *control-plane-environment
+      TRADING_NOTIFICATION_WORKER_ENABLED: "true"
+    depends_on:
+      setup:
+        condition: service_completed_successfully
+    healthcheck:
+      test:
+        - CMD
+        - uv
+        - run
+        - --no-sync
+        - trading-notification-worker
+        - --healthcheck
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 5s
+    init: true
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+    cap_drop: ["ALL"]
+    security_opt: ["no-new-privileges:true"]
+    restart: unless-stopped
+    stop_grace_period: 20s
 
   freqtrade-binance:
     image: freqtradeorg/freqtrade:2026.7

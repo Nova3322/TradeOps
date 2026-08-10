@@ -324,6 +324,7 @@ def test_notification_worker_is_off_by_default_and_requires_the_encryption_key()
     assert defaults.notification_worker_enabled is False
     assert defaults.notification_worker_batch_size == 50
     assert defaults.notification_worker_interval_seconds == 15
+    assert defaults.notification_email_smtp_allowlist == ()
 
     missing_key = Settings(
         database_url=database_url,
@@ -340,6 +341,23 @@ def test_notification_worker_is_off_by_default_and_requires_the_encryption_key()
         _env_file=None,
     )
     configured.validate_runtime_security()
+
+    allowlisted = Settings(
+        database_url=database_url,
+        notification_email_smtp_allowed_hosts=" SMTP.EXAMPLE.COM,mail.example.org ",
+        _env_file=None,
+    )
+    assert allowlisted.notification_email_smtp_allowlist == (
+        "smtp.example.com",
+        "mail.example.org",
+    )
+
+    with pytest.raises(ValidationError, match="public DNS hostnames"):
+        Settings(
+            database_url=database_url,
+            notification_email_smtp_allowed_hosts="localhost,127.0.0.1",
+            _env_file=None,
+        )
 
 
 @pytest.mark.parametrize(
