@@ -114,7 +114,10 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
     assert "交易控制台" in response.text
     assert "/assets/app.js?v=143" in response.text
     assert 'href="/signals"' in response.text
-    assert "/assets/styles.css?v=61" in response.text
+    assert "/assets/styles.css?v=62" in response.text
+    assert 'href="/assets/tradingops-logo.png" type="image/png"' in response.text
+    assert '<img src="/assets/tradingops-logo.png" alt="">' in response.text
+    assert '<span class="brand-mark" aria-hidden="true">T</span>' not in response.text
     assert 'aria-label="交易控制台首页"' in response.text
     assert '<a href="/" data-link><span>⌂</span>当前任务</a>' in response.text
     assert "<span>⌁</span>实时机会</a>" in response.text
@@ -450,10 +453,35 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
 
     service_worker = get(app, "/sw.js")
     assert service_worker.status_code == 200
-    assert "trading-shell-v115" in service_worker.text
+    assert "trading-shell-v116" in service_worker.text
+    assert "/assets/tradingops-logo.png" in service_worker.text
+    assert "/assets/tradingops-icon.svg" in service_worker.text
+    assert "/assets/icon.svg" not in service_worker.text
     assert "self.skipWaiting()" in service_worker.text
     assert "self.clients.claim()" in service_worker.text
     assert "await fetch(event.request)" in service_worker.text
+
+    manifest = get(app, "/manifest.webmanifest")
+    assert manifest.status_code == 200
+    manifest_payload = manifest.json()
+    assert manifest_payload["icons"] == [
+        {
+            "src": "/assets/tradingops-icon.svg",
+            "sizes": "any",
+            "type": "image/svg+xml",
+            "purpose": "any maskable",
+        }
+    ]
+
+    logo = get(app, "/assets/tradingops-logo.png")
+    assert logo.status_code == 200
+    assert logo.headers["content-type"] == "image/png"
+    assert len(logo.content) > 10_000
+
+    icon = get(app, "/assets/tradingops-icon.svg")
+    assert icon.status_code == 200
+    assert icon.headers["content-type"] == "image/svg+xml"
+    assert b"data:image/png;base64," in icon.content
 
 
 def test_error_state_explains_impact_owner_next_step_and_focus() -> None:

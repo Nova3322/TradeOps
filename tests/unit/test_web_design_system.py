@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import re
 from pathlib import Path
 
@@ -10,6 +11,8 @@ STYLESHEET = (
     / "web"
     / "styles.css"
 )
+LOGO = STYLESHEET.with_name("tradingops-logo.png")
+PRODUCT_OWNER_LOGO_SHA256 = "24b27b23e1007ade0de4bdc0bb6880ba087b3116be2b970f89abf84d023432ae"
 
 
 def _tokens(selector: str, source: str) -> dict[str, str]:
@@ -46,3 +49,10 @@ def test_web_design_tokens_are_complete_and_wcag_aa_in_both_themes() -> None:
         for foreground in ("ink", "muted", "accent", "danger", "warning"):
             for background in ("bg", "panel"):
                 assert _contrast(theme[foreground], theme[background]) >= 4.5
+
+
+def test_brand_logo_matches_the_product_owner_asset() -> None:
+    content = LOGO.read_bytes()
+
+    assert hashlib.sha256(content).hexdigest() == PRODUCT_OWNER_LOGO_SHA256
+    assert content.startswith(b"\x89PNG\r\n\x1a\n")

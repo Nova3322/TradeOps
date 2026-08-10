@@ -1,5 +1,35 @@
 # Trading console product QA
 
+## 2026-08-10: final browser-only UI/UX acceptance
+
+### P0 / P1 / P2 status
+
+- P0: none open. The pass used the current local Compose image and did not submit proposals, approvals, orders, capital actions, signatures, broadcasts, or Gate changes.
+- P1 external: Perptape is not configured. `/opportunities` and aggregate `/positions` each received the expected fail-closed `/api/opportunities` 503 at every viewport; the UI presented unavailable/limited facts and no unexpected browser issue remained.
+- P2 closed: 24 authenticated routes x 1440/1024/430/390 = 96 current-page checks have zero structural, accessibility-tree, keyboard, theme-persistence, or unexplained-disabled-control failures.
+- P2 closed: all 96 Chromium accessibility trees contain one banner, one main, one named level-one heading, and no unnamed interactive node. At 430 and 390, 28 Tab steps, mobile-menu focus transfer, Escape close, off-canvas hiding, and focus restoration passed.
+- P2 closed: dark/light selection persisted through reload with correct `aria-pressed`; reduced-motion emulation matched and sampled durations were capped at `0.01ms`; eight current screenshots were visually inspected without clipping or unequal theme hierarchy.
+- P2 closed: the latest supplied TradingOPS artwork is the byte-identical header/favicon source; Chromium confirmed its 188 x 194 intrinsic size, 36 x 36 uncropped rendered box, decorative-image semantics, named home link, Apple touch icon, exact SHA-256, and maskable PWA manifest entry. Desktop dark, 390 px light, and 512 px PWA renders were visually inspected; the superseded mark is absent from shipped assets.
+- Acceptance scope: per the product owner's explicit instruction, stage 9 closes on browser evidence; VoiceOver is not an acceptance requirement.
+
+### Five-dimensional evidence
+
+- Code: current assets are `app v143`, `styles v62`, and service worker `v116`; the supplied PNG replaces the old lettermark/favicon, while a square maskable wrapper preserves its pixels for PWA use.
+- Database: no entity or migration change; existing Workspace, Team, account, risk, proposal, execution, and audit facts remain authoritative.
+- API: the rebuilt local API is healthy/ready with PostgreSQL; expected Perptape absence remains a precise 503 rather than a false live/zero state.
+- Actual pages: 96 authenticated page/viewport checks passed; the long Shadow page was visually inspected in both themes at all four target widths.
+- End-to-end runtime: Chromium authenticated through the real password session against `127.0.0.1:8022`; routes, theme reload, keyboard navigation, reduced-motion media, network errors, and accessibility trees were observed in-browser.
+- Tests: complete unit/API validation is `446 passed`; the browser report is `PASSED_WITH_EXPECTED_EXTERNAL_WARNING` with no unexpected issue.
+
+### Accepted evidence
+
+- `artifacts/product-audit/responsive-accessibility-2026-08-10/README.md`
+- `artifacts/product-audit/responsive-accessibility-2026-08-10/report.json`
+- eight `shadow-{1440x900,1024x768,430x932,390x844}-{dark,light}.jpg` captures in that folder
+- `header-1440x900-dark.jpg`, `header-390x844-light.jpg`, and `tradingops-icon-512.png`
+
+final result: stage 9 browser-only responsive, theme, keyboard, semantics, reduced-motion, exceptional-state, and visual acceptance passed
+
 ## 2026-08-10: critical-flow and offline-recovery acceptance
 
 ### P0 / P1 / P2 status
@@ -9,7 +39,7 @@
 - P1 closed: restoring the API and selecting `Retry` returned to the requested trade route and cleared the alert. This is observed recovery behavior, not static-copy inspection.
 - P1 closed: the English shell no longer leaves reports, Shadow, notifications, active scope, team selection, or offline guidance in Chinese. Chinese and English logged-in outage screens expose the same facts and recovery actions.
 - P1 external: Perptape is not configured in the Compose runtime. The opportunity API returns the expected 503 and the page remains explicit and fail closed; live opportunity readiness is not claimed.
-- P2 open: automated heading focus and accessibility-tree semantics passed, but manual VoiceOver announcement cadence remains the final stage 9.3 acceptance item.
+- P2 closed: automated heading focus and accessibility-tree semantics passed; the later final browser-only pass supersedes the earlier VoiceOver follow-up item.
 
 ### Five-dimensional evidence
 
@@ -28,7 +58,7 @@
 - Terminal proposal: `04-expired-proposal-terminal.png`.
 - Bilingual outage guidance: `05-offline-guidance-fixed.png` and `06-offline-guidance-en.png`.
 
-final result: critical-flow exception states and real offline recovery passed; stage 9.3 remains open only for the manual VoiceOver cadence check
+final result: critical-flow exception states and real offline recovery passed; the final browser-only acceptance closes the former stage 9.3 follow-up
 
 ## 2026-08-10: exact responsive and accessibility acceptance
 
@@ -39,7 +69,7 @@ final result: critical-flow exception states and real offline recovery passed; s
 - P1 external: Perptape is not configured in the current Compose runtime. `/api/opportunities` therefore returned the expected 503 on the opportunity and aggregate system-status paths at each viewport. Both pages rendered an explicit unavailable/limited state and did not substitute stale or zero data.
 - P2 closed: 24 actual authenticated routes passed at 1440 x 900, 1024 x 768, 430 x 932, and 390 x 844: 96 page/viewport checks with no residual overflow, clipped non-table content, unnamed focusable control, unexplained visible disabled button, empty main region, or missing primary heading.
 - P2 closed: 28 sampled mobile Tab stops had visible `:focus-visible` outlines. Enter opened the menu and moved focus to its first route; Escape closed it and restored focus to the menu button.
-- P2 closed: Chrome accessibility trees for all 24 routes exposed one banner, one main landmark, one named level-one heading, and no unnamed interactive node. Live page regions contain the current fact/state text. Manual VoiceOver announcement cadence remains part of the final stage 9.3 browser acceptance rather than being inferred from the automated tree.
+- P2 closed: Chrome accessibility trees for all 24 routes exposed one banner, one main landmark, one named level-one heading, and no unnamed interactive node. Live page regions contain the current fact/state text; the later current-image browser pass repeats this at all four viewports.
 
 ### Five-dimensional evidence
 
@@ -57,7 +87,7 @@ final result: critical-flow exception states and real offline recovery passed; s
 - 1024 px regression proof: `artifacts/product-audit/responsive-accessibility-2026-08-10/proposal-history-1024x768-dark.jpg`.
 - Dark/light reference captures: `artifacts/product-audit/responsive-accessibility-2026-08-10/shadow-1440x900-dark.jpg` through `shadow-390x844-light.jpg`.
 
-final result: stage 9.2 automated responsive, keyboard, semantics, and theme-comparison acceptance passed; final manual VoiceOver and critical-flow exception-state browser acceptance continue in stage 9.3
+final result: stage 9.2 automated responsive, keyboard, semantics, and theme-comparison acceptance passed; the later browser-only final pass closes stage 9.3
 
 ## 2026-08-10: server-truth Shadow readiness guidance
 
