@@ -64,6 +64,8 @@ from trading_control_plane.api_schemas import (
     ExchangeCredentialRotateRequest,
     ExchangeRuntimeSyncRequest,
     ExchangeTradingEligibilityRequest,
+    FreqtradeWorkerConfigureRequest,
+    FreqtradeWorkerVerifyRequest,
     FundingFactRequest,
     HyperliquidReadOnlySyncRequest,
     HyperliquidTestnetProtectionRequest,
@@ -195,7 +197,7 @@ from trading_control_plane.perptape import (
 )
 from trading_control_plane.queries import TradingQueries
 from trading_control_plane.safe_spending import SafeSpendingGateway
-from trading_control_plane.service import TradingService
+from trading_control_plane.service import PreparedFreqtradeWorkerBinding, TradingService
 from trading_control_plane.telegram import (
     CampaignNotification,
     CapitalNotification,
@@ -702,6 +704,44 @@ def create_app(
             credential_encryption_key=resolved_settings.credential_encryption_key,
         )
 
+    def freqtrade_client_for_binding(
+        binding: PreparedFreqtradeWorkerBinding,
+    ) -> FreqtradeWorkerClient:
+        exact = next(
+            (
+                worker
+                for worker in resolved_freqtrade_workers
+                if worker.spec.matches_scope(
+                    team_id=str(binding.team_id),
+                    account_id=binding.account_id,
+                    venue=binding.venue,
+                )
+                and worker.spec.exchange_account_id == str(binding.exchange_account_id)
+                and worker.spec.name == binding.worker_name
+                and worker.spec.base_url == binding.worker_url
+            ),
+            None,
+        )
+        if exact is not None:
+            return exact
+        return FreqtradeWorkerClient(
+            FreqtradeWorkerSpec(
+                name=binding.worker_name,
+                venue=binding.venue,  # type: ignore[arg-type]
+                base_url=binding.worker_url,
+                username=binding.username,
+                password=binding.password,
+                hip3_dexes=binding.hip3_dexes,
+                exchange_account_id=str(binding.exchange_account_id),
+                team_id=str(binding.team_id),
+                account_id=binding.account_id,
+            ),
+            timeout_seconds=resolved_settings.freqtrade_timeout_seconds,
+            confirmation_timeout_seconds=(
+                resolved_settings.freqtrade_confirmation_timeout_seconds
+            ),
+        )
+
     def notification_dispatcher() -> NotificationDispatcher:
         return NotificationDispatcher(
             business_database(),
@@ -952,6 +992,22 @@ def create_app(
                 "DEFAULT_ACCOUNT_REQUIRED",
                 f"{venue} production facts are restricted to the configured default account",
             )
+
+    def require_registered_or_default_venue_account(
+        identity: SessionIdentity,
+        account_id: str,
+        venue: str,
+    ) -> None:
+        registry = queries().exchange_accounts(identity.user_id)
+        registered = any(
+            item["account_id"] == account_id and item["venue"] == venue
+            for item in registry["data"]
+        )
+        if not registered:
+            # Preserve the legacy single-account boundary until this venue is
+            # represented by the database-backed account registry.
+            require_default_venue_account(account_id, venue)
+        require_capability(identity, "venue.view", account_id, venue)
 
     def current_identity(
         trading_session: str | None = Cookie(default=None, alias=SESSION_COOKIE),
@@ -1361,6 +1417,71 @@ def create_app(
             idempotency_key=payload.idempotency_key,
             now=_now(),
         )
+        return {
+            **result,
+            "data": queries().exchange_accounts(identity.user_id),
+        }
+
+    @app.put("/api/exchange-accounts/{exchange_account_id}/freqtrade-worker")
+    def configure_exchange_account_freqtrade_worker(
+        exchange_account_id: UUID,
+        payload: FreqtradeWorkerConfigureRequest,
+        identity: SessionIdentity = identity_dependency,
+    ) -> dict[str, Any]:
+        result = service().configure_exchange_account_freqtrade_worker(
+            exchange_account_id,
+            actor_id=identity.user_id,
+            mode=payload.mode,
+            name=payload.name,
+            base_url=payload.base_url,
+            username=payload.plaintext_username(),
+            password=payload.plaintext_password(),
+            hip3_dexes=tuple(payload.hip3_dexes),
+            expected_version=payload.expected_version,
+            idempotency_key=payload.idempotency_key,
+            now=_now(),
+        )
+        return {
+            **result,
+            "data": queries().exchange_accounts(identity.user_id),
+        }
+
+    @app.post(
+        "/api/exchange-accounts/{exchange_account_id}/freqtrade-worker/verifications"
+    )
+    def verify_exchange_account_freqtrade_worker(
+        exchange_account_id: UUID,
+        payload: FreqtradeWorkerVerifyRequest,
+        identity: SessionIdentity = identity_dependency,
+    ) -> dict[str, Any]:
+        account_service = service()
+        binding, replay = account_service.prepare_exchange_account_freqtrade_verification(
+            exchange_account_id,
+            actor_id=identity.user_id,
+            expected_version=payload.expected_version,
+            idempotency_key=payload.idempotency_key,
+        )
+        if replay is not None:
+            result = replay
+        else:
+            assert binding is not None
+            worker = freqtrade_client_for_binding(binding)
+            try:
+                worker.probe(
+                    expected_mode=(
+                        "LIVE" if binding.worker_mode == "LIVE" else "DRY_RUN"
+                    )
+                )
+                error_code = None
+            except DomainRejected as exc:
+                error_code = exc.code
+            result = account_service.record_exchange_account_freqtrade_verification(
+                binding,
+                actor_id=identity.user_id,
+                error_code=error_code,
+                idempotency_key=payload.idempotency_key,
+                now=_now(),
+            )
         return {
             **result,
             "data": queries().exchange_accounts(identity.user_id),
@@ -2840,8 +2961,7 @@ def create_app(
         account_id: str,
         identity: SessionIdentity = identity_dependency,
     ) -> dict[str, Any]:
-        require_default_venue_account(account_id, "BINANCE")
-        require_capability(identity, "venue.view", account_id, "BINANCE")
+        require_registered_or_default_venue_account(identity, account_id, "BINANCE")
         return {
             "mode": "USER_DATA_READ_ONLY",
             "data": queries().venue_facts(
@@ -3053,8 +3173,7 @@ def create_app(
         account_id: str,
         identity: SessionIdentity = identity_dependency,
     ) -> dict[str, Any]:
-        require_default_venue_account(account_id, "HYPERLIQUID")
-        require_capability(identity, "venue.view", account_id, "HYPERLIQUID")
+        require_registered_or_default_venue_account(identity, account_id, "HYPERLIQUID")
         return {
             "mode": "INFO_READ_ONLY",
             "domain": "CORE_AND_CONFIGURED_HIP3",
@@ -6110,6 +6229,7 @@ def create_app(
         snapshot = queries().runtime_snapshot(identity.user_id)
         perptape_feed = snapshot["perptape_feed"]
         database_binding_counts = snapshot.pop("runtime_binding_counts")
+        freqtrade_binding_counts = snapshot.pop("freqtrade_binding_counts")
         signal_source = service().signal_source_status(identity.user_id)["source"]
         database_perptape_configured = bool(
             signal_source
@@ -6158,11 +6278,13 @@ def create_app(
                     "execution": {
                         "backend": resolved_settings.execution_backend,
                         "workers_enabled": resolved_settings.freqtrade_workers_enabled,
-                        "worker_count": len(resolved_freqtrade_workers),
+                        "worker_count": sum(freqtrade_binding_counts.values()),
+                        "account_binding_counts": freqtrade_binding_counts,
+                        "binding_source": "DATABASE_ACCOUNT_ENVELOPE",
+                        "legacy_unbound_default_count": len(resolved_freqtrade_workers),
                         "venues": ["BINANCE", "HYPERLIQUID"],
-                        "hyperliquid_hip3_dexes": list(resolved_settings.hyperliquid_hip3_dexes),
                         "direct_venue_send": False,
-                        "live_order_send": False,
+                        "live_order_send": resolved_settings.freqtrade_live_order_send_enabled,
                     },
                     "runtime_sync": {
                         "enabled": resolved_settings.runtime_sync_enabled,
@@ -6254,52 +6376,54 @@ def create_app(
     ) -> dict[str, Any]:
         require_capability(identity, "system.view")
         workers: list[dict[str, Any]] = []
-        for worker in resolved_freqtrade_workers:
-            if not resolved_settings.freqtrade_workers_enabled:
-                workers.append(
-                    {
-                        "name": worker.spec.name,
-                        "venue": worker.spec.venue,
-                        "backend": "FREQTRADE",
-                        "status": "DISABLED",
-                        "reason_code": "FREQTRADE_WORKERS_DISABLED",
-                        "hip3_dexes": list(worker.spec.hip3_dexes),
-                        "order_send": False,
-                    }
-                )
-                continue
-            try:
-                workers.append(
-                    worker.probe(
-                        expected_mode=(
-                            "LIVE"
-                            if resolved_settings.freqtrade_live_order_send_enabled
-                            else "DRY_RUN"
-                        )
-                    )
-                )
-            except DomainRejected as exc:
-                workers.append(
-                    {
-                        "name": worker.spec.name,
-                        "venue": worker.spec.venue,
-                        "backend": "FREQTRADE",
-                        "status": "BLOCKED",
-                        "reason_code": exc.code,
-                        "hip3_dexes": list(worker.spec.hip3_dexes),
-                        "order_send": False,
-                    }
-                )
+        for worker in (
+            item
+            for item in resolved_freqtrade_workers
+            if item.spec.exchange_account_id is None
+        ):
+            workers.append(
+                {
+                    "name": worker.spec.name,
+                    "venue": worker.spec.venue,
+                    "backend": "FREQTRADE",
+                    "status": (
+                        "DISABLED"
+                        if not resolved_settings.freqtrade_workers_enabled
+                        else "UNBOUND"
+                    ),
+                    "reason_code": (
+                        "FREQTRADE_WORKERS_DISABLED"
+                        if not resolved_settings.freqtrade_workers_enabled
+                        else "ACCOUNT_BINDING_REQUIRED"
+                    ),
+                    "scope_status": "UNBOUND_LEGACY_DEFAULT",
+                    "hip3_dexes": list(worker.spec.hip3_dexes),
+                    "order_send": False,
+                }
+            )
+        registry = queries().exchange_accounts(identity.user_id)
+        account_bindings = [
+            {
+                "exchange_account_id": item["exchange_account_id"],
+                "team_id": item["team_id"],
+                "account_id": item["account_id"],
+                "venue": item["venue"],
+                **item["execution_worker"],
+            }
+            for item in registry["data"]
+            if item["execution_worker"]["supported"]
+        ]
         return {
             "backend": resolved_settings.execution_backend,
             "workers_enabled": resolved_settings.freqtrade_workers_enabled,
             "direct_venue_send": False,
             "live_order_send": resolved_settings.freqtrade_live_order_send_enabled,
             "workers": workers,
+            "account_bindings": account_bindings,
             "as_of": _now().isoformat(),
         }
 
-    def require_freqtrade_live_worker(venue: str) -> FreqtradeWorkerClient:
+    def require_freqtrade_live_enabled() -> None:
         if (
             resolved_settings.execution_backend != "FREQTRADE"
             or not resolved_settings.freqtrade_workers_enabled
@@ -6309,16 +6433,12 @@ def create_app(
                 "FREQTRADE_LIVE_DISABLED",
                 "Freqtrade LIVE order send is explicitly disabled",
             )
-        worker = next(
-            (item for item in resolved_freqtrade_workers if item.spec.venue == venue),
-            None,
-        )
-        if worker is None:
-            raise DomainRejected(
-                "FREQTRADE_WORKER_NOT_CONFIGURED",
-                "the required venue-scoped Freqtrade worker is not configured",
-            )
-        return worker
+
+    def require_freqtrade_live_worker(
+        binding: PreparedFreqtradeWorkerBinding,
+    ) -> FreqtradeWorkerClient:
+        require_freqtrade_live_enabled()
+        return freqtrade_client_for_binding(binding)
 
     @app.post("/api/intents/{intent_id}/freqtrade/live/send")
     def send_freqtrade_live_order(
@@ -6332,20 +6452,29 @@ def create_app(
                 "FREQTRADE_LIVE_SCOPE_REQUIRED",
                 "Freqtrade LIVE sender requires an explicit LIVE scope",
             )
-        venue = parts[2].upper()
-        worker = require_freqtrade_live_worker(venue)
+        require_freqtrade_live_enabled()
         now = _now()
-        command = service().prepare_freqtrade_live_order(
+        execution_service = service()
+        binding = execution_service.freqtrade_live_worker_binding(
+            actor_id=identity.user_id,
+            execution_scope=payload.execution_scope,
+            owner_id=payload.owner_id,
+            fencing_token=payload.fencing_token,
+            now=now,
+        )
+        worker = require_freqtrade_live_worker(binding)
+        command = execution_service.prepare_freqtrade_live_order(
             intent_id,
             identity.user_id,
             payload.execution_scope,
             payload.owner_id,
             payload.fencing_token,
-            hip3_dexes=resolved_settings.hyperliquid_hip3_dexes,
+            hip3_dexes=binding.hip3_dexes,
             leverage=resolved_settings.freqtrade_live_leverage,
             now=now,
         )
         worker.probe(expected_mode="LIVE", required_pair=command.pair)
+        execution_service.validate_freqtrade_worker_binding(binding)
         try:
             if isinstance(command, FreqtradeEntryCommand):
                 trade = worker.force_enter(command)
@@ -6368,7 +6497,7 @@ def create_app(
                 "FREQTRADE_LIVE_OUTCOME_UNKNOWN",
                 "FREQTRADE_PROTECTION_UNCONFIRMED",
             }:
-                service().record_freqtrade_live_unknown(
+                execution_service.record_freqtrade_live_unknown(
                     intent_id,
                     identity.user_id,
                     payload.execution_scope,
@@ -6379,7 +6508,7 @@ def create_app(
                     now=_now(),
                 )
             raise
-        fact_id = service().record_freqtrade_live_order(
+        fact_id = execution_service.record_freqtrade_live_order(
             intent_id,
             identity.user_id,
             payload.execution_scope,
@@ -6392,7 +6521,7 @@ def create_app(
         campaign_id = queries().campaign_id_for_intent(identity.user_id, intent_id)
         protection_id = None
         if isinstance(command, FreqtradeEntryCommand):
-            protection_id = service().record_freqtrade_live_protection(
+            protection_id = execution_service.record_freqtrade_live_protection(
                 campaign_id,
                 identity.user_id,
                 payload.execution_scope,
@@ -6421,20 +6550,31 @@ def create_app(
     ) -> dict[str, Any]:
         detail = queries().campaign_detail(identity.user_id, campaign_id)
         venue = str(detail["venue"])
-        worker = require_freqtrade_live_worker(venue)
+        require_freqtrade_live_enabled()
+        execution_service = service()
+        binding = execution_service.freqtrade_live_worker_binding(
+            actor_id=identity.user_id,
+            execution_scope=payload.execution_scope,
+            owner_id=payload.owner_id,
+            fencing_token=payload.fencing_token,
+            now=_now(),
+            campaign_id=campaign_id,
+        )
+        worker = require_freqtrade_live_worker(binding)
         pair = freqtrade_pair(
             venue,
             str(detail["instrument"]["symbol"]),
-            hip3_dexes=resolved_settings.hyperliquid_hip3_dexes,
+            hip3_dexes=binding.hip3_dexes,
         )
         worker.probe(expected_mode="LIVE", required_pair=pair)
+        execution_service.validate_freqtrade_worker_binding(binding)
         trade = worker.find_open_trade(pair=pair)
         if trade is None:
             raise DomainRejected(
                 "FREQTRADE_POSITION_NOT_FOUND",
                 "Freqtrade has no unique open trade to verify protection",
             )
-        protection_id = service().record_freqtrade_live_protection(
+        protection_id = execution_service.record_freqtrade_live_protection(
             campaign_id,
             identity.user_id,
             payload.execution_scope,

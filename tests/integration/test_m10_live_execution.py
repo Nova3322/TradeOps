@@ -35,6 +35,7 @@ from trading_control_plane.domain import (
     TargetUrgency,
 )
 from trading_control_plane.exchange_connection import ConnectionProbeResult
+from trading_control_plane.freqtrade import FreqtradeWorkerClient, FreqtradeWorkerSpec
 from trading_control_plane.hyperliquid_execution import (
     HyperliquidLiveClient,
     HyperliquidTestnetOrder,
@@ -1754,6 +1755,97 @@ def test_binance_live_flow_is_gated_idempotent_fenced_and_cleans_protection(
     database: Database,
 ) -> None:
     asyncio.run(exercise_binance_live(database))
+
+
+def test_freqtrade_live_never_falls_back_to_an_unbound_venue_worker(
+    database: Database,
+) -> None:
+    service = TradingService(database, credential_encryption_key=credential_encryption_key())
+    ids = seed_live(
+        service,
+        key="freqtrade-unbound",
+        account_id="acct-freqtrade-unbound",
+        venue="BINANCE",
+        symbol="XRPUSDT",
+        quantity=Decimal(5),
+        mark_price=Decimal(1),
+        tick_size=Decimal("0.0001"),
+        lot_size=Decimal("0.1"),
+        minimum_notional=Decimal(5),
+    )
+    scope = "LIVE:acct-freqtrade-unbound:BINANCE"
+    owner = "freqtrade-unbound-worker"
+    token = service.acquire_sender(scope, owner, ids["operator"], NOW)
+    service.set_capability_gate(
+        "LIVE_ORDER_SEND",
+        CapabilityStatus.ENABLED,
+        "exact worker binding fixture",
+        ids["admin"],
+        now=NOW,
+    )
+    calls: list[str] = []
+
+    def forbidden_fetcher(
+        url: str,
+        method: str,
+        payload: dict[str, Any] | None,
+        headers: dict[str, str],
+        timeout: float,
+    ) -> dict[str, Any]:
+        del method, payload, headers, timeout
+        calls.append(url)
+        raise AssertionError("unbound venue worker must never be contacted")
+
+    legacy_worker = FreqtradeWorkerClient(
+        FreqtradeWorkerSpec(
+            name="binance-default",
+            venue="BINANCE",
+            base_url="http://127.0.0.1:18081",
+            username="legacy-user",
+            password="legacy-password",  # noqa: S106
+        ),
+        fetcher=forbidden_fetcher,
+    )
+    settings = Settings(
+        environment="test",
+        database_url=str(database.engine.url),
+        allow_mock_identity=True,
+        session_signing_secret="freqtrade-binding-test-secret-long-enough",  # noqa: S106
+        credential_encryption_key=credential_encryption_key(),
+        public_base_url="http://test",
+        execution_backend="FREQTRADE",
+        freqtrade_workers_enabled=True,
+        freqtrade_live_order_send_enabled=True,
+        _env_file=None,
+    )
+    app = create_app(
+        settings,
+        database,
+        PerptapeClient(
+            base_url="https://perptape.com",
+            api_key=None,
+            contract_version="breakouts-v1",
+            cache_ttl=timedelta(minutes=1),
+        ),
+        freqtrade_workers=(legacy_worker,),
+    )
+
+    async def scenario() -> None:
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as http:
+            await login(http, "freqtrade-unbound-operator")
+            response = await http.post(
+                f"/api/intents/{ids['opening']}/freqtrade/live/send",
+                json={
+                    "execution_scope": scope,
+                    "owner_id": owner,
+                    "fencing_token": token,
+                },
+            )
+            assert response.status_code == 422, response.text
+            assert response.json()["error"]["code"] == "FREQTRADE_WORKER_NOT_CONFIGURED"
+            assert calls == []
+
+    asyncio.run(scenario())
 
 
 def test_hyperliquid_live_flow_is_gated_idempotent_fenced_and_cleans_protection(

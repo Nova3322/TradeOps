@@ -17,6 +17,7 @@ from trading_control_plane.credentials import CredentialCipher
 from trading_control_plane.database import Database
 from trading_control_plane.domain import DomainRejected, ExecutionEnvironment, Role
 from trading_control_plane.exchange_connection import ConnectionProbeResult
+from trading_control_plane.freqtrade import FreqtradeWorkerClient, FreqtradeWorkerSpec
 from trading_control_plane.models import AuditEvent, ExchangeAccount, RoleAssignment, Team, User
 from trading_control_plane.perptape import PerptapeClient
 from trading_control_plane.queries import TradingQueries
@@ -291,7 +292,6 @@ def test_exchange_account_api_masks_credentials_and_exposes_connector_truth(
         allow_mock_identity=True,
         session_signing_secret="account-api-signing-secret-that-is-long-enough",  # noqa: S106
         credential_encryption_key=encryption_key(),
-        runtime_binance_account_id="binance-api-main",
         public_base_url="http://test",
         _env_file=None,
     )
@@ -343,11 +343,284 @@ def test_exchange_account_api_masks_credentials_and_exposes_connector_truth(
             }
             assert item["connection"]["status"] == "NOT_VERIFIED"
             assert item["trading"]["enabled"] is False
+            facts = await client.get(
+                "/api/venues/binance/facts", params={"account_id": "binance-api-main"}
+            )
+            assert facts.status_code == 200, facts.text
+            assert facts.json()["data"]["account_id"] == "binance-api-main"
             page = await client.get("/venues")
             assert page.status_code == 200
             assert "api-secret-never-return" not in page.text
 
     asyncio.run(scenario())
+
+
+def test_freqtrade_workers_are_encrypted_and_verified_per_exact_account(
+    database: Database,
+) -> None:
+    now = datetime.now(UTC)
+    service = TradingService(database, credential_encryption_key=encryption_key())
+    admin = service.bootstrap_admin("worker-binding-admin", now=now)
+    context = TradingQueries(database).user_context(admin)
+    team_id = context["active_team"]["team_id"]
+    first_id = service.create_exchange_account(
+        actor_id=admin,
+        account_id="binance-worker-a",
+        venue="BINANCE",
+        label="Binance Worker A",
+        credentials={"api_key": "account-key-a", "api_secret": "account-secret-a"},
+        idempotency_key="create-worker-account-a",
+        now=now,
+    )
+    second_id = service.create_exchange_account(
+        actor_id=admin,
+        account_id="binance-worker-b",
+        venue="BINANCE",
+        label="Binance Worker B",
+        credentials={"api_key": "account-key-b", "api_secret": "account-secret-b"},
+        idempotency_key="create-worker-account-b",
+        now=now,
+    )
+    observer = service.create_user("worker-binding-observer", admin, now=now)
+    service.assign_role(
+        observer,
+        Role.OBSERVER,
+        admin,
+        account_scope="binance-worker-a",
+        venue_scope="BINANCE",
+        now=now,
+    )
+    first_probe = WorkerProbeFixture(exchange="binance", dry_run=False)
+    second_probe = WorkerProbeFixture(exchange="binance", dry_run=True)
+    workers = (
+        FreqtradeWorkerClient(
+            FreqtradeWorkerSpec(
+                name="binance-worker-a",
+                venue="BINANCE",
+                base_url="http://127.0.0.1:18081",
+                username="worker-a-user",
+                password="worker-a-password",  # noqa: S106
+                exchange_account_id=str(first_id),
+                team_id=str(team_id),
+                account_id="binance-worker-a",
+            ),
+            fetcher=first_probe,
+        ),
+        FreqtradeWorkerClient(
+            FreqtradeWorkerSpec(
+                name="binance-worker-b",
+                venue="BINANCE",
+                base_url="http://127.0.0.1:18082",
+                username="worker-b-user",
+                password="worker-b-password",  # noqa: S106
+                exchange_account_id=str(second_id),
+                team_id=str(team_id),
+                account_id="binance-worker-b",
+            ),
+            fetcher=second_probe,
+        ),
+    )
+    settings = Settings(
+        environment="test",
+        database_url=str(database.engine.url),
+        allow_mock_identity=True,
+        session_signing_secret="worker-binding-api-secret-long-enough",  # noqa: S106
+        credential_encryption_key=encryption_key(),
+        public_base_url="http://test",
+        _env_file=None,
+    )
+    app = create_app(
+        settings,
+        database,
+        PerptapeClient(
+            base_url="https://perptape.com",
+            api_key=None,
+            contract_version="breakouts-v1",
+            cache_ttl=timedelta(minutes=1),
+        ),
+        freqtrade_workers=workers,
+    )
+
+    async def scenario() -> None:
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            login = await client.post(
+                "/api/auth/mock/login",
+                json={"username": "worker-binding-admin"},
+            )
+            assert login.status_code == 200
+            configurations = (
+                (
+                    first_id,
+                    "binance-worker-a",
+                    "http://127.0.0.1:18081",
+                    "worker-a-user",
+                    "worker-a-password",
+                    "LIVE",
+                ),
+                (
+                    second_id,
+                    "binance-worker-b",
+                    "http://127.0.0.1:18082",
+                    "worker-b-user",
+                    "worker-b-password",
+                    "DRY_RUN",
+                ),
+            )
+            for index, (account, name, url, username, password, mode) in enumerate(
+                configurations,
+                start=1,
+            ):
+                configured = await client.put(
+                    f"/api/exchange-accounts/{account}/freqtrade-worker",
+                    json={
+                        "mode": mode,
+                        "name": name,
+                        "base_url": url,
+                        "username": username,
+                        "password": password,
+                        "hip3_dexes": [],
+                        "expected_version": 1,
+                        "idempotency_key": f"configure-worker-{index}",
+                    },
+                )
+                assert configured.status_code == 200, configured.text
+                assert password not in configured.text
+                verified = await client.post(
+                    f"/api/exchange-accounts/{account}/freqtrade-worker/verifications",
+                    json={
+                        "expected_version": configured.json()["version"],
+                        "idempotency_key": f"verify-worker-{index}",
+                    },
+                )
+                assert verified.status_code == 200, verified.text
+                assert verified.json()["worker"]["status"] == "VERIFIED"
+                assert password not in verified.text
+
+            assert len(first_probe.calls) == 5
+            assert len(second_probe.calls) == 5
+            assert all(":18081/" in item for item in first_probe.calls)
+            assert all(":18082/" in item for item in second_probe.calls)
+            listed = await client.get("/api/exchange-accounts")
+            assert listed.status_code == 200
+            assert all(
+                secret not in listed.text
+                for secret in ("worker-a-password", "worker-b-password")
+            )
+            by_account = {
+                item["account_id"]: item
+                for item in listed.json()["data"]["data"]
+            }
+            assert by_account["binance-worker-a"]["execution_worker"]["scope"] == {
+                "team_id": str(team_id),
+                "account_id": "binance-worker-a",
+                "venue": "BINANCE",
+            }
+            assert by_account["binance-worker-a"]["execution_worker"]["live_ready"] is True
+            assert by_account["binance-worker-b"]["execution_worker"]["live_ready"] is False
+            status = await client.get("/api/execution/freqtrade/status")
+            assert status.status_code == 200
+            assert status.json()["workers"] == []
+            assert len(status.json()["account_bindings"]) == 2
+
+            logout = await client.post("/api/auth/logout")
+            assert logout.status_code == 200
+            observer_login = await client.post(
+                "/api/auth/mock/login",
+                json={"username": "worker-binding-observer"},
+            )
+            assert observer_login.status_code == 200
+            observer_listed = await client.get("/api/exchange-accounts")
+            assert observer_listed.status_code == 200
+            observer_accounts = observer_listed.json()["data"]["data"]
+            assert len(observer_accounts) == 1
+            assert observer_accounts[0]["account_id"] == "binance-worker-a"
+            assert observer_accounts[0]["execution_worker"]["endpoint"] is None
+            assert (
+                observer_accounts[0]["execution_worker"]["auth"]["username_hint"]
+                is None
+            )
+
+    asyncio.run(scenario())
+
+    with database.session_factory() as session:
+        stored = session.scalars(
+            select(ExchangeAccount).where(
+                ExchangeAccount.exchange_account_id.in_((first_id, second_id))
+            )
+        ).all()
+        assert len(stored) == 2
+        assert all(item.freqtrade_auth_ciphertext is not None for item in stored)
+        assert all(
+            secret not in repr(stored)
+            for secret in ("worker-a-password", "worker-b-password")
+        )
+        assert {
+            (item.account_id, item.freqtrade_worker_status, item.freqtrade_worker_mode)
+            for item in stored
+        } == {
+            ("binance-worker-a", "VERIFIED", "LIVE"),
+            ("binance-worker-b", "VERIFIED", "DRY_RUN"),
+        }
+
+
+def test_freqtrade_probe_cannot_commit_after_worker_rotation(database: Database) -> None:
+    now = datetime.now(UTC)
+    service = TradingService(database, credential_encryption_key=encryption_key())
+    admin = service.bootstrap_admin("worker-race-admin", now=now)
+    account_id = service.create_exchange_account(
+        actor_id=admin,
+        account_id="worker-race-account",
+        venue="BINANCE",
+        label="Worker Race",
+        credentials={"api_key": "account-key", "api_secret": "account-secret"},
+        idempotency_key="worker-race-account-create",
+        now=now,
+    )
+    configured = service.configure_exchange_account_freqtrade_worker(
+        account_id,
+        actor_id=admin,
+        mode="LIVE",
+        name="worker-race-v1",
+        base_url="http://127.0.0.1:18081",
+        username="worker-user-v1",
+        password="worker-password-v1",  # noqa: S106
+        hip3_dexes=(),
+        expected_version=1,
+        idempotency_key="worker-race-configure-v1",
+        now=now,
+    )
+    binding, replay = service.prepare_exchange_account_freqtrade_verification(
+        account_id,
+        actor_id=admin,
+        expected_version=int(configured["version"]),
+        idempotency_key="worker-race-verify-v1",
+    )
+    assert replay is None and binding is not None
+    rotated = service.configure_exchange_account_freqtrade_worker(
+        account_id,
+        actor_id=admin,
+        mode="LIVE",
+        name="worker-race-v2",
+        base_url="http://127.0.0.1:18082",
+        username="worker-user-v2",
+        password="worker-password-v2",  # noqa: S106
+        hip3_dexes=(),
+        expected_version=int(configured["version"]),
+        idempotency_key="worker-race-configure-v2",
+        now=now + timedelta(seconds=1),
+    )
+    with pytest.raises(DomainRejected, match="VERSION_CONFLICT"):
+        service.record_exchange_account_freqtrade_verification(
+            binding,
+            actor_id=admin,
+            error_code=None,
+            idempotency_key="worker-race-verify-v1",
+            now=now + timedelta(seconds=2),
+        )
+    projected = TradingQueries(database).exchange_accounts(admin)["data"][0]
+    assert projected["version"] == rotated["version"]
+    assert projected["execution_worker"]["name"] == "worker-race-v2"
+    assert projected["execution_worker"]["status"] == "NOT_VERIFIED"
 
 
 class FakeExchangeConnectionVerifier:
@@ -365,6 +638,43 @@ class FakeExchangeConnectionVerifier:
         assert now.utcoffset() is not None
         self.calls.append((venue, dict(credentials)))
         return self.outcomes[venue]
+
+
+class WorkerProbeFixture:
+    def __init__(self, *, exchange: str, dry_run: bool) -> None:
+        self.exchange = exchange
+        self.dry_run = dry_run
+        self.calls: list[str] = []
+
+    def __call__(
+        self,
+        url: str,
+        method: str,
+        payload: dict[str, object] | None,
+        headers: dict[str, str],
+        timeout: float,
+    ) -> dict[str, object]:
+        del method, payload, timeout
+        self.calls.append(url)
+        if url.endswith("/ping"):
+            return {"status": "pong"}
+        if url.endswith("/token/login"):
+            assert headers["Authorization"].startswith("Basic ")
+            return {"access_token": "scoped-probe-token"}
+        assert headers == {"Authorization": "Bearer scoped-probe-token"}
+        if url.endswith("/show_config"):
+            return {
+                "exchange": self.exchange,
+                "trading_mode": "futures",
+                "dry_run": self.dry_run,
+                "force_entry_enable": True,
+                "state": "RUNNING",
+            }
+        if url.endswith("/version"):
+            return {"version": "2026.8"}
+        if url.endswith("/whitelist"):
+            return {"whitelist": ["BTC/USDT:USDT"]}
+        raise AssertionError(url)
 
 
 def test_account_trading_eligibility_api_uses_exact_version_and_runtime_boundary(

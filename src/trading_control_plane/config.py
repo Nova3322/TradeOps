@@ -308,19 +308,14 @@ class Settings(BaseSettings):
             )
         if bool(self.freqtrade_api_username) != bool(self.freqtrade_api_password):
             raise ValueError("Freqtrade worker username and password must be configured together")
-        if self.freqtrade_workers_enabled and not (
-            self.freqtrade_api_username and self.freqtrade_api_password
-        ):
-            raise ValueError("enabled Freqtrade workers require explicit control credentials")
         if self.freqtrade_live_order_send_enabled and (
             self.execution_backend != "FREQTRADE"
             or not self.freqtrade_workers_enabled
-            or not self.freqtrade_api_username
-            or not self.freqtrade_api_password
+            or not self.credential_encryption_key
         ):
             raise ValueError(
                 "Freqtrade LIVE send requires the FREQTRADE backend, enabled workers and "
-                "explicit control credentials"
+                "database credential encryption for account-bound workers"
             )
         if (
             self.runtime_sync_enabled

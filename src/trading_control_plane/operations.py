@@ -31,6 +31,7 @@ def connection_capability_matrix(
     settings: Settings,
     *,
     database_binding_counts: Mapping[str, int] | None = None,
+    freqtrade_binding_counts: Mapping[str, int] | None = None,
 ) -> list[dict[str, Any]]:
     """Return a secret-free implementation/configuration matrix.
 
@@ -46,12 +47,18 @@ def connection_capability_matrix(
     hyperliquid_read_configured = bool(
         settings.hyperliquid_effective_account_address and settings.runtime_hyperliquid_account_id
     )
-    freqtrade_configured = bool(
+    legacy_freqtrade_configured = bool(
         settings.freqtrade_workers_enabled
         and settings.freqtrade_api_username
         and settings.freqtrade_api_password
     )
     binding_counts = database_binding_counts or {}
+    worker_binding_counts = freqtrade_binding_counts or {}
+    freqtrade_configured = any(
+        int(worker_binding_counts.get(venue, 0)) > 0
+        for venue in ("BINANCE", "HYPERLIQUID")
+    )
+    legacy_freqtrade_state = "configured" if legacy_freqtrade_configured else "absent"
     database_binance = int(binding_counts.get("BINANCE", 0)) > 0
     database_hyperliquid = int(binding_counts.get("HYPERLIQUID", 0)) > 0
     database_okx = int(binding_counts.get("OKX", 0)) > 0
@@ -138,7 +145,7 @@ def connection_capability_matrix(
         {
             "capability": "FREQTRADE_EXECUTION",
             "providers": ["BINANCE", "HYPERLIQUID"],
-            "implementation": "IMPLEMENTED_UNCERTIFIED",
+            "implementation": "IMPLEMENTED_TEAM_ACCOUNT_BOUND_UNCERTIFIED",
             "deployment_state": _deployment_state(
                 enabled=settings.freqtrade_live_order_send_enabled,
                 configured=freqtrade_configured,
@@ -146,8 +153,10 @@ def connection_capability_matrix(
             "external_side_effect": "ORDER_SEND",
             "boundary": (
                 "requires exact-account ELIGIBLE status, verified encrypted credentials, "
-                "continuous read-only binding, process switch, database gate, sender lease, "
-                "authorization and fresh risk"
+                "continuous read-only binding, a verified LIVE worker for the same Team/Account/"
+                "Venue, process switch, database gate, sender lease, authorization and fresh risk; "
+                f"legacy venue defaults are {legacy_freqtrade_state} "
+                "but never eligible for LIVE routing"
             ),
         },
         {
@@ -200,6 +209,7 @@ def build_diagnostic_report(
     database_report: dict[str, Any]
     gates: dict[str, str] | None = None
     database_binding_counts: dict[str, int] | None = None
+    freqtrade_binding_counts: dict[str, int] | None = None
     if database is None:
         database_report = {
             "checked": False,
@@ -239,6 +249,17 @@ def build_diagnostic_report(
                         )
                     )
                 }
+                freqtrade_binding_counts = {
+                    str(row.venue): int(row.binding_count)
+                    for row in connection.execute(
+                        text(
+                            "SELECT venue, count(*) AS binding_count "
+                            "FROM exchange_accounts "
+                            "WHERE freqtrade_worker_mode <> 'UNCONFIGURED' "
+                            "GROUP BY venue ORDER BY venue"
+                        )
+                    )
+                }
     enabled_gates = (
         [] if gates is None else [key for key, value in gates.items() if value != "DISABLED"]
     )
@@ -246,6 +267,7 @@ def build_diagnostic_report(
     capability_matrix = connection_capability_matrix(
         settings,
         database_binding_counts=database_binding_counts,
+        freqtrade_binding_counts=freqtrade_binding_counts,
     )
     configuration_ready = not any(
         item["deployment_state"] == "BLOCKED_MISCONFIGURED" for item in capability_matrix

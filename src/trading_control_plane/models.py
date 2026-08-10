@@ -95,6 +95,31 @@ class ExchangeAccount(Base):
         CheckConstraint("version >= 1", name="ck_exchange_accounts_version"),
         CheckConstraint("credential_version >= 0", name="ck_exchange_accounts_credential_version"),
         CheckConstraint(
+            "freqtrade_worker_mode IN ('UNCONFIGURED','DRY_RUN','LIVE')",
+            name="ck_exchange_accounts_freqtrade_worker_mode",
+        ),
+        CheckConstraint(
+            "freqtrade_worker_status IN "
+            "('UNCONFIGURED','NOT_VERIFIED','VERIFIED','FAILED','STALE')",
+            name="ck_exchange_accounts_freqtrade_worker_status",
+        ),
+        CheckConstraint(
+            "freqtrade_auth_version >= 0",
+            name="ck_exchange_accounts_freqtrade_auth_version",
+        ),
+        CheckConstraint(
+            "(freqtrade_worker_mode = 'UNCONFIGURED' "
+            "AND freqtrade_worker_status = 'UNCONFIGURED' "
+            "AND freqtrade_worker_name IS NULL AND freqtrade_worker_url IS NULL "
+            "AND freqtrade_auth_ciphertext IS NULL AND freqtrade_auth_version = 0) OR "
+            "(freqtrade_worker_mode IN ('DRY_RUN','LIVE') "
+            "AND freqtrade_worker_status <> 'UNCONFIGURED' "
+            "AND freqtrade_worker_name IS NOT NULL AND freqtrade_worker_url IS NOT NULL "
+            "AND freqtrade_auth_ciphertext IS NOT NULL AND freqtrade_auth_version >= 1 "
+            "AND venue IN ('BINANCE','HYPERLIQUID'))",
+            name="ck_exchange_accounts_freqtrade_worker_shape",
+        ),
+        CheckConstraint(
             "(credentials_ciphertext IS NULL AND credential_version = 0) OR "
             "(credentials_ciphertext IS NOT NULL AND credential_version >= 1)",
             name="ck_exchange_accounts_credential_envelope",
@@ -146,6 +171,27 @@ class ExchangeAccount(Base):
     runtime_sync_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     runtime_service_principal_id: Mapped[UUID | None] = mapped_column(
         ForeignKey("users.user_id", ondelete="RESTRICT"), nullable=True
+    )
+    freqtrade_worker_name: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    freqtrade_worker_url: Mapped[str | None] = mapped_column(String(2_048), nullable=True)
+    freqtrade_worker_mode: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="UNCONFIGURED"
+    )
+    freqtrade_worker_status: Mapped[str] = mapped_column(
+        String(32), nullable=False, default="UNCONFIGURED"
+    )
+    freqtrade_auth_ciphertext: Mapped[str | None] = mapped_column(Text, nullable=True)
+    freqtrade_auth_metadata: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, nullable=False, default=dict
+    )
+    freqtrade_auth_version: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    freqtrade_hip3_dexes: Mapped[list[str]] = mapped_column(JSONB, nullable=False, default=list)
+    freqtrade_error_code: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    freqtrade_last_check_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    freqtrade_last_verified_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
     )
     active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)

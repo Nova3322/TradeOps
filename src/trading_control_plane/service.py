@@ -86,6 +86,8 @@ from trading_control_plane.freqtrade import (
     FreqtradeExitCommand,
     FreqtradeTrade,
     freqtrade_pair,
+    parse_hip3_dexes,
+    validate_worker_url,
 )
 from trading_control_plane.hyperliquid import HyperliquidInstrument, HyperliquidReadOnlySnapshot
 from trading_control_plane.hyperliquid_execution import (
@@ -231,6 +233,24 @@ class PreparedRuntimeAccountBinding:
     account_version: int
     credential_version: int
     credentials: dict[str, str] = field(repr=False)
+
+
+@dataclass(frozen=True, slots=True)
+class PreparedFreqtradeWorkerBinding:
+    exchange_account_id: UUID
+    workspace_id: UUID
+    team_id: UUID
+    account_id: str
+    venue: str
+    account_version: int
+    worker_name: str
+    worker_url: str
+    worker_mode: str
+    worker_status: str
+    auth_version: int
+    username: str = field(repr=False)
+    password: str = field(repr=False)
+    hip3_dexes: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -2656,6 +2676,17 @@ class TradingService:
             connection_error_code=None,
             last_connection_check_at=None,
             last_verified_at=None,
+            freqtrade_worker_name=None,
+            freqtrade_worker_url=None,
+            freqtrade_worker_mode="UNCONFIGURED",
+            freqtrade_worker_status="UNCONFIGURED",
+            freqtrade_auth_ciphertext=None,
+            freqtrade_auth_metadata={},
+            freqtrade_auth_version=0,
+            freqtrade_hip3_dexes=[],
+            freqtrade_error_code=None,
+            freqtrade_last_check_at=None,
+            freqtrade_last_verified_at=None,
             active=True,
             version=1,
             created_by=actor_id,
@@ -2770,6 +2801,17 @@ class TradingService:
                 connection_error_code=None,
                 last_connection_check_at=None,
                 last_verified_at=None,
+                freqtrade_worker_name=None,
+                freqtrade_worker_url=None,
+                freqtrade_worker_mode="UNCONFIGURED",
+                freqtrade_worker_status="UNCONFIGURED",
+                freqtrade_auth_ciphertext=None,
+                freqtrade_auth_metadata={},
+                freqtrade_auth_version=0,
+                freqtrade_hip3_dexes=[],
+                freqtrade_error_code=None,
+                freqtrade_last_check_at=None,
+                freqtrade_last_verified_at=None,
                 active=True,
                 version=1,
                 created_by=actor_id,
@@ -3315,6 +3357,576 @@ class TradingService:
                 now=now,
             )
             return result
+
+    @staticmethod
+    def _freqtrade_auth_payload(username: str, password: str) -> str:
+        normalized_username = username.strip()
+        if (
+            not normalized_username
+            or normalized_username != username
+            or len(normalized_username) > 120
+        ):
+            _reject(
+                "FREQTRADE_WORKER_AUTH_INVALID",
+                "Freqtrade username must contain 1-120 characters without surrounding whitespace",
+            )
+        if not password or password.strip() != password or len(password) > 2_048:
+            _reject(
+                "FREQTRADE_WORKER_AUTH_INVALID",
+                "Freqtrade password must be non-empty without surrounding whitespace",
+            )
+        return json.dumps(
+            {"password": password, "username": normalized_username},
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=True,
+        )
+
+    @staticmethod
+    def _parse_freqtrade_auth_payload(payload: str) -> tuple[str, str]:
+        try:
+            decoded = json.loads(payload)
+        except json.JSONDecodeError as exc:
+            raise DomainRejected(
+                "FREQTRADE_WORKER_AUTH_INVALID",
+                "Freqtrade worker authentication envelope is invalid",
+            ) from exc
+        if (
+            not isinstance(decoded, dict)
+            or set(decoded) != {"username", "password"}
+            or not all(isinstance(value, str) for value in decoded.values())
+        ):
+            _reject(
+                "FREQTRADE_WORKER_AUTH_INVALID",
+                "Freqtrade worker authentication envelope is invalid",
+            )
+        return str(decoded["username"]), str(decoded["password"])
+
+    def configure_exchange_account_freqtrade_worker(
+        self,
+        exchange_account_id: UUID,
+        *,
+        actor_id: UUID,
+        mode: str,
+        name: str | None,
+        base_url: str | None,
+        username: str | None,
+        password: str | None,
+        hip3_dexes: tuple[str, ...],
+        expected_version: int,
+        idempotency_key: str,
+        now: datetime,
+    ) -> dict[str, Any]:
+        """Configure one encrypted Worker binding for one exact exchange account."""
+
+        normalized_mode = mode.upper()
+        if normalized_mode not in {"UNCONFIGURED", "DRY_RUN", "LIVE"}:
+            _reject("FREQTRADE_WORKER_MODE_INVALID", "Freqtrade worker mode is invalid")
+        normalized_name: str | None = None
+        normalized_url: str | None = None
+        auth_payload: str | None = None
+        normalized_hip3: tuple[str, ...] = ()
+        if normalized_mode == "UNCONFIGURED":
+            if (
+                any(value is not None for value in (name, base_url, username, password))
+                or hip3_dexes
+            ):
+                _reject(
+                    "FREQTRADE_WORKER_CONFIGURATION_INVALID",
+                    "unconfiguring a Freqtrade worker must not include endpoint or credentials",
+                )
+        else:
+            normalized_name = "" if name is None else name.strip()
+            if (
+                not normalized_name
+                or normalized_name != name
+                or len(normalized_name) > 120
+                or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,119}", normalized_name)
+                is None
+            ):
+                _reject(
+                    "FREQTRADE_WORKER_NAME_INVALID",
+                    "Freqtrade worker name must be a stable identifier",
+                )
+            try:
+                normalized_url = validate_worker_url("" if base_url is None else base_url)
+            except ValueError as exc:
+                raise DomainRejected("FREQTRADE_WORKER_URL_INVALID", str(exc)) from exc
+            if username is None or password is None:
+                _reject(
+                    "FREQTRADE_WORKER_AUTH_INVALID",
+                    "Freqtrade worker username and password are required together",
+                )
+            auth_payload = self._freqtrade_auth_payload(username, password)
+            try:
+                normalized_hip3 = parse_hip3_dexes(",".join(hip3_dexes))
+            except ValueError as exc:
+                raise DomainRejected("FREQTRADE_HIP3_SCOPE_INVALID", str(exc)) from exc
+        operation = "exchange-account.freqtrade-worker.configure"
+        with self.database.session_factory.begin() as session:
+            _actor, workspace, team = self._active_scope(session, actor_id)
+            assert team is not None
+            account = session.scalar(
+                select(ExchangeAccount)
+                .where(
+                    ExchangeAccount.exchange_account_id == exchange_account_id,
+                    ExchangeAccount.team_id == team.team_id,
+                )
+                .with_for_update()
+            )
+            if account is None:
+                _reject(
+                    "EXCHANGE_ACCOUNT_NOT_FOUND",
+                    "exchange account is outside the active team or does not exist",
+                )
+            self._require_role(
+                session,
+                actor_id,
+                "account.credentials.manage",
+                account.account_id,
+                account.venue,
+                team_id=account.team_id,
+            )
+            if normalized_mode != "UNCONFIGURED" and account.venue not in {
+                "BINANCE",
+                "HYPERLIQUID",
+            }:
+                _reject(
+                    "FREQTRADE_VENUE_UNSUPPORTED",
+                    "Freqtrade worker binding is restricted to Binance and Hyperliquid",
+                )
+            if account.venue != "HYPERLIQUID" and normalized_hip3:
+                _reject(
+                    "FREQTRADE_HIP3_SCOPE_INVALID",
+                    "HIP-3 DEX scope is only valid for Hyperliquid workers",
+                )
+            auth_semantics = (
+                None
+                if auth_payload is None
+                else self.credential_cipher.secret_fingerprint(
+                    auth_payload,
+                    purpose=f"freqtrade-worker-auth:{account.exchange_account_id}",
+                )
+            )
+            payload = {
+                "exchange_account_id": str(account.exchange_account_id),
+                "mode": normalized_mode,
+                "name": normalized_name,
+                "base_url": normalized_url,
+                "hip3_dexes": list(normalized_hip3),
+                "expected_version": expected_version,
+                "auth_semantics": auth_semantics,
+            }
+            caller = f"{actor_id}:{team.team_id}"
+            digest, replay = self._idempotency(
+                session,
+                caller_id=caller,
+                operation=operation,
+                idempotency_key=idempotency_key,
+                payload=payload,
+            )
+            if replay is not None:
+                return replay
+            if account.version != expected_version:
+                _reject("VERSION_CONFLICT", "exchange account version changed")
+            if normalized_mode == "UNCONFIGURED":
+                account.freqtrade_worker_name = None
+                account.freqtrade_worker_url = None
+                account.freqtrade_worker_mode = "UNCONFIGURED"
+                account.freqtrade_worker_status = "UNCONFIGURED"
+                account.freqtrade_auth_ciphertext = None
+                account.freqtrade_auth_metadata = {}
+                account.freqtrade_auth_version = 0
+                account.freqtrade_hip3_dexes = []
+            else:
+                assert (
+                    normalized_name is not None
+                    and normalized_url is not None
+                    and auth_payload is not None
+                    and username is not None
+                )
+                next_auth_version = account.freqtrade_auth_version + 1
+                encrypted = self.credential_cipher.encrypt_secret(
+                    auth_payload,
+                    team_id=account.team_id,
+                    object_id=account.exchange_account_id,
+                    purpose="freqtrade-worker-auth",
+                    credential_version=next_auth_version,
+                )
+                account.freqtrade_worker_name = normalized_name
+                account.freqtrade_worker_url = normalized_url
+                account.freqtrade_worker_mode = normalized_mode
+                account.freqtrade_worker_status = "NOT_VERIFIED"
+                account.freqtrade_auth_ciphertext = encrypted.ciphertext
+                account.freqtrade_auth_metadata = {
+                    "envelope_version": encrypted.metadata.get("envelope_version"),
+                    "purpose": "freqtrade-worker-auth",
+                    "username_hint": (
+                        username
+                        if len(username) <= 2
+                        else f"{username[0]}•••{username[-1]}"
+                    ),
+                }
+                account.freqtrade_auth_version = next_auth_version
+                account.freqtrade_hip3_dexes = list(normalized_hip3)
+            account.freqtrade_error_code = None
+            account.freqtrade_last_check_at = None
+            account.freqtrade_last_verified_at = None
+            account.version += 1
+            account.updated_by = actor_id
+            account.updated_at = now
+            result = {
+                "exchange_account_id": str(account.exchange_account_id),
+                "version": account.version,
+                "worker": {
+                    "mode": account.freqtrade_worker_mode,
+                    "status": account.freqtrade_worker_status,
+                    "auth_version": account.freqtrade_auth_version,
+                },
+            }
+            self._save_receipt(
+                session,
+                caller_id=caller,
+                operation=operation,
+                idempotency_key=idempotency_key,
+                semantic_hash=digest,
+                response=result,
+                now=now,
+            )
+            self._audit(
+                session,
+                actor_id=str(actor_id),
+                event_type="FREQTRADE_WORKER_CONFIGURED",
+                object_type="ExchangeAccount",
+                object_id=account.exchange_account_id,
+                reason=(
+                    f"venue={account.venue};mode={account.freqtrade_worker_mode.lower()};"
+                    f"status={account.freqtrade_worker_status.lower()};"
+                    "global_live_send_gate=unchanged"
+                ),
+                correlation_id=uuid4(),
+                object_version=account.version,
+                idempotency_key=idempotency_key,
+                workspace_id=workspace.workspace_id,
+                team_id=team.team_id,
+                account_id=account.account_id,
+                now=now,
+            )
+            return result
+
+    @staticmethod
+    def _freqtrade_verification_payload(
+        exchange_account_id: UUID,
+        expected_version: int,
+    ) -> dict[str, Any]:
+        return {
+            "exchange_account_id": str(exchange_account_id),
+            "expected_version": expected_version,
+        }
+
+    def prepare_exchange_account_freqtrade_verification(
+        self,
+        exchange_account_id: UUID,
+        *,
+        actor_id: UUID,
+        expected_version: int,
+        idempotency_key: str,
+    ) -> tuple[PreparedFreqtradeWorkerBinding | None, dict[str, Any] | None]:
+        with self.database.session_factory.begin() as session:
+            _actor, workspace, team = self._active_scope(session, actor_id)
+            assert team is not None
+            account = session.scalar(
+                select(ExchangeAccount).where(
+                    ExchangeAccount.exchange_account_id == exchange_account_id,
+                    ExchangeAccount.team_id == team.team_id,
+                )
+            )
+            if account is None:
+                _reject(
+                    "EXCHANGE_ACCOUNT_NOT_FOUND",
+                    "exchange account is outside the active team or does not exist",
+                )
+            self._require_role(
+                session,
+                actor_id,
+                "account.credentials.manage",
+                account.account_id,
+                account.venue,
+                team_id=account.team_id,
+            )
+            _digest, replay = self._idempotency(
+                session,
+                caller_id=f"{actor_id}:{team.team_id}",
+                operation="exchange-account.freqtrade-worker.verify",
+                idempotency_key=idempotency_key,
+                payload=self._freqtrade_verification_payload(
+                    exchange_account_id,
+                    expected_version,
+                ),
+            )
+            if replay is not None:
+                return None, replay
+            if account.version != expected_version:
+                _reject("VERSION_CONFLICT", "exchange account version changed")
+            if not account.active:
+                _reject("EXCHANGE_ACCOUNT_INACTIVE", "exchange account is inactive")
+            return self._prepared_freqtrade_worker_binding(account, workspace.workspace_id), None
+
+    def _prepared_freqtrade_worker_binding(
+        self,
+        account: ExchangeAccount,
+        workspace_id: UUID,
+        *,
+        require_live_verified: bool = False,
+    ) -> PreparedFreqtradeWorkerBinding:
+        if (
+            account.venue not in {"BINANCE", "HYPERLIQUID"}
+            or account.freqtrade_worker_mode == "UNCONFIGURED"
+            or account.freqtrade_worker_name is None
+            or account.freqtrade_worker_url is None
+            or account.freqtrade_auth_ciphertext is None
+            or account.freqtrade_auth_version < 1
+        ):
+            _reject(
+                "FREQTRADE_WORKER_NOT_CONFIGURED",
+                "the exact exchange account has no configured Freqtrade worker",
+            )
+        if require_live_verified and (
+            account.freqtrade_worker_mode != "LIVE"
+            or account.freqtrade_worker_status != "VERIFIED"
+        ):
+            _reject(
+                "FREQTRADE_WORKER_NOT_VERIFIED",
+                "LIVE execution requires a verified LIVE worker bound to the exact account",
+            )
+        payload = self.credential_cipher.decrypt_secret(
+            account.freqtrade_auth_ciphertext,
+            team_id=account.team_id,
+            object_id=account.exchange_account_id,
+            purpose="freqtrade-worker-auth",
+            credential_version=account.freqtrade_auth_version,
+        )
+        username, password = self._parse_freqtrade_auth_payload(payload)
+        return PreparedFreqtradeWorkerBinding(
+            exchange_account_id=account.exchange_account_id,
+            workspace_id=workspace_id,
+            team_id=account.team_id,
+            account_id=account.account_id,
+            venue=account.venue,
+            account_version=account.version,
+            worker_name=account.freqtrade_worker_name,
+            worker_url=account.freqtrade_worker_url,
+            worker_mode=account.freqtrade_worker_mode,
+            worker_status=account.freqtrade_worker_status,
+            auth_version=account.freqtrade_auth_version,
+            username=username,
+            password=password,
+            hip3_dexes=tuple(account.freqtrade_hip3_dexes or []),
+        )
+
+    def record_exchange_account_freqtrade_verification(
+        self,
+        binding: PreparedFreqtradeWorkerBinding,
+        *,
+        actor_id: UUID,
+        error_code: str | None,
+        idempotency_key: str,
+        now: datetime,
+    ) -> dict[str, Any]:
+        normalized_error = error_code
+        if normalized_error is not None and (
+            CONNECTION_ERROR_CODE_PATTERN.fullmatch(normalized_error) is None
+        ):
+            normalized_error = "FREQTRADE_WORKER_PROBE_FAILED"
+        with self.database.session_factory.begin() as session:
+            _actor, workspace, team = self._active_scope(session, actor_id)
+            assert team is not None
+            account = session.scalar(
+                select(ExchangeAccount)
+                .where(
+                    ExchangeAccount.exchange_account_id == binding.exchange_account_id,
+                    ExchangeAccount.team_id == team.team_id,
+                )
+                .with_for_update()
+            )
+            if account is None:
+                _reject(
+                    "EXCHANGE_ACCOUNT_NOT_FOUND",
+                    "exchange account is outside the active team or does not exist",
+                )
+            self._require_role(
+                session,
+                actor_id,
+                "account.credentials.manage",
+                account.account_id,
+                account.venue,
+                team_id=account.team_id,
+            )
+            caller = f"{actor_id}:{team.team_id}"
+            digest, replay = self._idempotency(
+                session,
+                caller_id=caller,
+                operation="exchange-account.freqtrade-worker.verify",
+                idempotency_key=idempotency_key,
+                payload=self._freqtrade_verification_payload(
+                    binding.exchange_account_id,
+                    binding.account_version,
+                ),
+            )
+            if replay is not None:
+                return replay
+            if (
+                account.version != binding.account_version
+                or account.team_id != binding.team_id
+                or account.account_id != binding.account_id
+                or account.venue != binding.venue
+                or account.freqtrade_auth_version != binding.auth_version
+                or account.freqtrade_worker_name != binding.worker_name
+                or account.freqtrade_worker_url != binding.worker_url
+                or account.freqtrade_worker_mode != binding.worker_mode
+            ):
+                _reject(
+                    "VERSION_CONFLICT",
+                    "Freqtrade worker binding changed during verification",
+                )
+            account.freqtrade_worker_status = (
+                "VERIFIED" if normalized_error is None else "FAILED"
+            )
+            account.freqtrade_error_code = normalized_error
+            account.freqtrade_last_check_at = now
+            if normalized_error is None:
+                account.freqtrade_last_verified_at = now
+            account.version += 1
+            account.updated_by = actor_id
+            account.updated_at = now
+            result = {
+                "exchange_account_id": str(account.exchange_account_id),
+                "version": account.version,
+                "worker": {
+                    "mode": account.freqtrade_worker_mode,
+                    "status": account.freqtrade_worker_status,
+                    "error_code": account.freqtrade_error_code,
+                    "checked_at": now.astimezone(UTC).isoformat(),
+                    "last_verified_at": (
+                        None
+                        if account.freqtrade_last_verified_at is None
+                        else account.freqtrade_last_verified_at.astimezone(UTC).isoformat()
+                    ),
+                },
+            }
+            self._save_receipt(
+                session,
+                caller_id=caller,
+                operation="exchange-account.freqtrade-worker.verify",
+                idempotency_key=idempotency_key,
+                semantic_hash=digest,
+                response=result,
+                now=now,
+            )
+            self._audit(
+                session,
+                actor_id=str(actor_id),
+                event_type=(
+                    "FREQTRADE_WORKER_VERIFIED"
+                    if normalized_error is None
+                    else "FREQTRADE_WORKER_VERIFICATION_FAILED"
+                ),
+                object_type="ExchangeAccount",
+                object_id=account.exchange_account_id,
+                reason=(
+                    f"venue={account.venue};mode={account.freqtrade_worker_mode.lower()};"
+                    f"status={account.freqtrade_worker_status.lower()};"
+                    f"error_code={normalized_error or 'none'};order_send=none"
+                ),
+                correlation_id=uuid4(),
+                object_version=account.version,
+                idempotency_key=idempotency_key,
+                workspace_id=workspace.workspace_id,
+                team_id=team.team_id,
+                account_id=account.account_id,
+                now=now,
+            )
+            return result
+
+    def freqtrade_live_worker_binding(
+        self,
+        *,
+        actor_id: UUID,
+        execution_scope: str,
+        owner_id: str,
+        fencing_token: int,
+        now: datetime,
+        campaign_id: UUID | None = None,
+    ) -> PreparedFreqtradeWorkerBinding:
+        environment, account_id, venue = _scope_parts(execution_scope)
+        if environment is not ExecutionEnvironment.LIVE:
+            _reject("FREQTRADE_LIVE_SCOPE_REQUIRED", "Freqtrade LIVE requires a LIVE scope")
+        with self.database.session_factory() as session:
+            team = self._require_role(session, actor_id, "venue.record", account_id, venue)
+            self._validate_sender(
+                session,
+                team.team_id,
+                execution_scope,
+                owner_id,
+                fencing_token,
+                now,
+            )
+            if campaign_id is not None:
+                campaign = session.get(Campaign, campaign_id)
+                if (
+                    campaign is None
+                    or campaign.team_id != team.team_id
+                    or execution_scope
+                    != _scope_key(
+                        campaign.environment,
+                        campaign.account_id,
+                        campaign.venue,
+                    )
+                ):
+                    _reject(
+                        "EXECUTION_SCOPE_MISMATCH",
+                        "Freqtrade worker scope does not match the campaign",
+                    )
+            live_gate = session.get(CapabilityGate, "LIVE_ORDER_SEND")
+            if live_gate is None or live_gate.status != CapabilityStatus.ENABLED.value:
+                _reject(
+                    "LIVE_ORDER_SEND_DISABLED",
+                    "LIVE order send requires the explicit capability gate",
+                )
+            account = self._require_exchange_account_live_ready(
+                session,
+                team_id=team.team_id,
+                account_id=account_id,
+                venue=venue,
+            )
+            return self._prepared_freqtrade_worker_binding(
+                account,
+                team.workspace_id,
+                require_live_verified=True,
+            )
+
+    def validate_freqtrade_worker_binding(
+        self,
+        binding: PreparedFreqtradeWorkerBinding,
+    ) -> None:
+        with self.database.session_factory() as session:
+            account = session.get(ExchangeAccount, binding.exchange_account_id)
+            if (
+                account is None
+                or account.team_id != binding.team_id
+                or account.account_id != binding.account_id
+                or account.venue != binding.venue
+                or account.version != binding.account_version
+                or account.freqtrade_worker_name != binding.worker_name
+                or account.freqtrade_worker_url != binding.worker_url
+                or account.freqtrade_worker_mode != "LIVE"
+                or account.freqtrade_worker_status != "VERIFIED"
+                or account.freqtrade_auth_version != binding.auth_version
+            ):
+                _reject(
+                    "FREQTRADE_WORKER_BINDING_CHANGED",
+                    "the exact account-bound Freqtrade worker changed before execution",
+                )
 
     def runtime_account_bindings(self) -> tuple[PreparedRuntimeAccountBinding, ...]:
         with self.database.session_factory() as session:

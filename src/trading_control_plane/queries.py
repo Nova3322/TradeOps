@@ -571,12 +571,17 @@ class TradingQueries:
             projected: list[dict[str, Any]] = []
             for item in visible:
                 projection = self._exchange_account_projection(item)
+                can_manage_credentials = granted(item, "account.credentials.manage")
                 projection["permissions"] = {
                     "can_manage": granted(item, "account.manage"),
                     "can_manage_trading": granted(item, "account.manage"),
-                    "can_manage_credentials": granted(item, "account.credentials.manage"),
-                    "can_verify_connection": granted(item, "account.credentials.manage"),
+                    "can_manage_credentials": can_manage_credentials,
+                    "can_verify_connection": can_manage_credentials,
+                    "can_manage_worker": can_manage_credentials,
                 }
+                if not can_manage_credentials:
+                    projection["execution_worker"]["endpoint"] = None
+                    projection["execution_worker"]["auth"]["username_hint"] = None
                 projected.append(projection)
             return {
                 "workspace_id": str(workspace_id),
@@ -613,6 +618,15 @@ class TradingQueries:
             next_action = "enable the database-bound continuous read-only sync"
         elif item.venue not in {"BINANCE", "HYPERLIQUID"}:
             next_action = "wait for an implemented trading connector; keep trading disabled"
+        elif item.venue in {"BINANCE", "HYPERLIQUID"} and (
+            item.freqtrade_worker_mode == "UNCONFIGURED"
+        ):
+            next_action = "bind one encrypted Freqtrade worker to this exact account"
+        elif item.venue in {"BINANCE", "HYPERLIQUID"} and (
+            item.freqtrade_worker_mode != "LIVE"
+            or item.freqtrade_worker_status != "VERIFIED"
+        ):
+            next_action = "verify an account-bound LIVE Freqtrade worker"
         elif item.trading_status == "ELIGIBLE":
             next_action = "verify global, sender, risk, and task gates before LIVE execution"
         else:
@@ -668,6 +682,39 @@ class TradingQueries:
                     if item.venue in {"BINANCE", "HYPERLIQUID"}
                     else "NOT_IMPLEMENTED"
                 ),
+            },
+            "execution_worker": {
+                "supported": item.venue in {"BINANCE", "HYPERLIQUID"},
+                "configured": item.freqtrade_worker_mode != "UNCONFIGURED",
+                "scope": {
+                    "team_id": str(item.team_id),
+                    "account_id": item.account_id,
+                    "venue": item.venue,
+                },
+                "name": item.freqtrade_worker_name,
+                "endpoint": item.freqtrade_worker_url,
+                "mode": item.freqtrade_worker_mode,
+                "status": item.freqtrade_worker_status,
+                "error_code": item.freqtrade_error_code,
+                "checked_at": _iso(item.freqtrade_last_check_at),
+                "last_verified_at": _iso(item.freqtrade_last_verified_at),
+                "hip3_dexes": list(item.freqtrade_hip3_dexes or []),
+                "auth": {
+                    "state": (
+                        "CONFIGURED"
+                        if item.freqtrade_auth_version > 0
+                        else "UNCONFIGURED"
+                    ),
+                    "version": item.freqtrade_auth_version,
+                    "username_hint": (item.freqtrade_auth_metadata or {}).get(
+                        "username_hint"
+                    ),
+                },
+                "live_ready": (
+                    item.freqtrade_worker_mode == "LIVE"
+                    and item.freqtrade_worker_status == "VERIFIED"
+                ),
+                "order_send": False,
             },
             "next_action": next_action,
             "created_at": _iso(item.created_at),
@@ -2786,6 +2833,17 @@ class TradingQueries:
                     .group_by(ExchangeAccount.venue)
                 ).all()
             }
+            freqtrade_binding_counts = {
+                venue: int(count)
+                for venue, count in session.execute(
+                    select(ExchangeAccount.venue, func.count())
+                    .where(
+                        ExchangeAccount.team_id == team_id,
+                        ExchangeAccount.freqtrade_worker_mode != "UNCONFIGURED",
+                    )
+                    .group_by(ExchangeAccount.venue)
+                ).all()
+            }
             return {
                 "database_ready": self.database.is_ready()[0],
                 "schema_revision": revision,
@@ -2836,6 +2894,7 @@ class TradingQueries:
                     for item in source_health
                 },
                 "runtime_binding_counts": runtime_binding_counts,
+                "freqtrade_binding_counts": freqtrade_binding_counts,
             }
 
     def runtime_source_health(

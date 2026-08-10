@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import base64
 from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
+import pytest
 from alembic import command
 from alembic.autogenerate import compare_metadata
 from alembic.config import Config
@@ -31,6 +33,7 @@ from trading_control_plane.models import (
     Workspace,
     WorkspaceMembership,
 )
+from trading_control_plane.service import TradingService
 
 
 def test_initial_schema_round_trip_and_metadata_match(database: Database) -> None:
@@ -64,6 +67,75 @@ def test_initial_schema_seeds_only_disabled_capability_gates(database: Database)
         "AUTO_PROFIT_SWEEP": "DISABLED",
         "AUTO_OPERATING_REFILL": "DISABLED",
     }
+
+
+def test_account_bound_freqtrade_worker_migration_guards_data_and_round_trips(
+    database: Database,
+) -> None:
+    config = Config("alembic.ini")
+    now = datetime.now(UTC)
+    encryption_key = base64.urlsafe_b64encode(
+        b"schema-worker-fixture-key-32-byte"[:32]
+    ).decode().rstrip("=")
+    service = TradingService(database, credential_encryption_key=encryption_key)
+    admin = service.bootstrap_admin("schema-worker-admin", now=now)
+    account_id = service.create_exchange_account(
+        actor_id=admin,
+        account_id="schema-worker-account",
+        venue="BINANCE",
+        label="Schema Worker Account",
+        credentials={"api_key": "fixture-key", "api_secret": "fixture-secret"},
+        idempotency_key="schema-worker-account-create",
+        now=now,
+    )
+    configured = service.configure_exchange_account_freqtrade_worker(
+        account_id,
+        actor_id=admin,
+        mode="LIVE",
+        name="schema-worker",
+        base_url="http://127.0.0.1:18081",
+        username="schema-user",
+        password="schema-password",  # noqa: S106
+        hip3_dexes=(),
+        expected_version=1,
+        idempotency_key="schema-worker-configure",
+        now=now,
+    )
+
+    with pytest.raises(
+        RuntimeError,
+        match="clearing every account-bound Freqtrade worker",
+    ):
+        command.downgrade(config, "20260811_0028")
+
+    service.configure_exchange_account_freqtrade_worker(
+        account_id,
+        actor_id=admin,
+        mode="UNCONFIGURED",
+        name=None,
+        base_url=None,
+        username=None,
+        password=None,
+        hip3_dexes=(),
+        expected_version=int(configured["version"]),
+        idempotency_key="schema-worker-clear",
+        now=now,
+    )
+    command.downgrade(config, "20260811_0028")
+    with database.engine.connect() as connection:
+        columns = {
+            item["name"]
+            for item in inspect(connection).get_columns("exchange_accounts")
+        }
+        assert "freqtrade_worker_mode" not in columns
+    command.upgrade(config, "head")
+    with database.engine.connect() as connection:
+        revision = connection.exec_driver_sql(
+            "SELECT version_num FROM alembic_version"
+        ).scalar_one()
+        differences = compare_metadata(MigrationContext.configure(connection), Base.metadata)
+    assert revision == REQUIRED_SCHEMA_REVISION
+    assert differences == []
 
 
 def test_notification_migration_round_trip(database: Database) -> None:

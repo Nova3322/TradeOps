@@ -137,10 +137,21 @@ class FreqtradeWorkerSpec:
     username: str | None
     password: str | None = field(repr=False)
     hip3_dexes: tuple[str, ...] = ()
+    exchange_account_id: str | None = None
+    team_id: str | None = None
+    account_id: str | None = None
 
     @property
     def credentials_configured(self) -> bool:
         return bool(self.username and self.password)
+
+    def matches_scope(self, *, team_id: str, account_id: str, venue: str) -> bool:
+        return (
+            self.team_id == team_id
+            and self.account_id == account_id
+            and self.venue == venue
+            and self.exchange_account_id is not None
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -341,6 +352,9 @@ class FreqtradeWorkerClient:
             username=spec.username,
             password=spec.password,
             hip3_dexes=spec.hip3_dexes,
+            exchange_account_id=spec.exchange_account_id,
+            team_id=spec.team_id,
+            account_id=spec.account_id,
         )
         self.timeout_seconds = timeout_seconds
         self.confirmation_timeout_seconds = confirmation_timeout_seconds
@@ -479,7 +493,7 @@ class FreqtradeWorkerClient:
                     "FREQTRADE_WORKER_NOT_RUNNING",
                     "Freqtrade LIVE worker is not running",
                 )
-        return {
+        result: JsonObject = {
             "name": self.spec.name,
             "venue": self.spec.venue,
             "backend": "FREQTRADE",
@@ -494,6 +508,11 @@ class FreqtradeWorkerClient:
             "hip3_pair_count": len(hip3_pairs),
             "order_send": expected_mode == "LIVE",
         }
+        if self.spec.exchange_account_id is not None:
+            result["exchange_account_id"] = self.spec.exchange_account_id
+            result["team_id"] = self.spec.team_id
+            result["account_id"] = self.spec.account_id
+        return result
 
     def _open_trades(self) -> tuple[FreqtradeTrade, ...]:
         value = self._authorized_request("status")

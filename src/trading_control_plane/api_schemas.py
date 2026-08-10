@@ -226,6 +226,51 @@ class ExchangeTradingEligibilityRequest(BaseModel):
     idempotency_key: str = Field(min_length=1, max_length=160)
 
 
+class FreqtradeWorkerConfigureRequest(BaseModel):
+    mode: Literal["UNCONFIGURED", "DRY_RUN", "LIVE"]
+    name: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=120,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]{0,119}$",
+    )
+    base_url: str | None = Field(default=None, min_length=1, max_length=2_048)
+    username: SecretStr | None = Field(default=None, min_length=1, max_length=120)
+    password: SecretStr | None = Field(default=None, min_length=1, max_length=2_048)
+    hip3_dexes: list[str] = Field(default_factory=list, max_length=32)
+    expected_version: int = Field(ge=1)
+    idempotency_key: str = Field(min_length=1, max_length=160)
+
+    @model_validator(mode="after")
+    def validate_configuration_shape(self) -> FreqtradeWorkerConfigureRequest:
+        configured = self.mode != "UNCONFIGURED"
+        provided = all(
+            value is not None
+            for value in (self.name, self.base_url, self.username, self.password)
+        )
+        if configured != provided:
+            raise ValueError(
+                "configured workers require name, base_url, username and password; "
+                "unconfigured workers must omit them"
+            )
+        if not configured and self.hip3_dexes:
+            raise ValueError("unconfigured workers must not include HIP-3 DEX scope")
+        if len(self.hip3_dexes) != len(set(self.hip3_dexes)):
+            raise ValueError("hip3_dexes must not contain duplicates")
+        return self
+
+    def plaintext_username(self) -> str | None:
+        return None if self.username is None else self.username.get_secret_value()
+
+    def plaintext_password(self) -> str | None:
+        return None if self.password is None else self.password.get_secret_value()
+
+
+class FreqtradeWorkerVerifyRequest(BaseModel):
+    expected_version: int = Field(ge=1)
+    idempotency_key: str = Field(min_length=1, max_length=160)
+
+
 class SignalSourceConfigureRequest(BaseModel):
     mode: Literal["PERPTAPE", "WEBHOOK"]
     secret: SecretStr = Field(min_length=8, max_length=512)

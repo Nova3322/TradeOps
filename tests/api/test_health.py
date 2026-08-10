@@ -112,7 +112,7 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
 
     assert response.status_code == 200
     assert "交易控制台" in response.text
-    assert "/assets/app.js?v=147" in response.text
+    assert "/assets/app.js?v=148" in response.text
     assert 'href="/signals"' in response.text
     assert "/assets/styles.css?v=64" in response.text
     assert 'href="/assets/tradingops-logo.png" type="image/png"' in response.text
@@ -478,7 +478,7 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
 
     service_worker = get(app, "/sw.js")
     assert service_worker.status_code == 200
-    assert "trading-shell-v119" in service_worker.text
+    assert "trading-shell-v120" in service_worker.text
     assert "/assets/tradingops-logo.png" in service_worker.text
     assert "/assets/tradingops-icon.svg" in service_worker.text
     assert "/assets/icon.svg" not in service_worker.text

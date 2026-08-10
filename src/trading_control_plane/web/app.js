@@ -4334,15 +4334,27 @@ function exchangeAccountRegistry(registry) {
     const tradingEligible = item.trading?.status === 'ELIGIBLE';
     const tradingConfigured = item.trading?.status !== 'DISABLED';
     const writeConnector = item.runtime_binding?.trading_connector === 'FREQTRADE_EXTERNAL';
+    const executionWorker = item.execution_worker || {};
     const teamLive = session?.active_team?.execution_mode === 'LIVE' && session.active_team?.trading_enabled;
-    const tradingReady = writeConnector && item.active && item.connection?.status === 'VERIFIED' && runtimeBound && teamLive;
+    const tradingReady = writeConnector && executionWorker.live_ready && item.active && item.connection?.status === 'VERIFIED' && runtimeBound && teamLive;
     const canConfigureTrading = permissions.can_manage_trading && (tradingConfigured || tradingReady);
-    const tradingReason = !permissions.can_manage_trading ? '当前角色没有该账户范围的账户管理权限。' : tradingConfigured ? '停用会立即撤销当前账户的交易资格；不会改变连接与只读同步。' : !writeConnector ? '该交易所的交易写入适配器尚未实现，服务端保持阻断。' : !teamLive ? '当前团队尚未进入真实模式并启用交易。' : item.connection?.status !== 'VERIFIED' ? '先完成当前凭据版本的只读连接验证。' : !runtimeBound ? '先启用连续只读同步，确保风控读取当前账户事实。' : '只启用当前团队与账户的交易资格；全局真实发送、发送者租约、风控、任务和进程安全开关仍分别生效。';
+    const tradingReason = !permissions.can_manage_trading ? '当前角色没有该账户范围的账户管理权限。' : tradingConfigured ? '停用会立即撤销当前账户的交易资格；不会改变连接与只读同步。' : !writeConnector ? '该交易所的交易写入适配器尚未实现，服务端保持阻断。' : !teamLive ? '当前团队尚未进入真实模式并启用交易。' : item.connection?.status !== 'VERIFIED' ? '先完成当前凭据版本的只读连接验证。' : !runtimeBound ? '先启用连续只读同步，确保风控读取当前账户事实。' : !executionWorker.live_ready ? '先在下方配置并验证当前账户专属的 LIVE Freqtrade Worker。' : '只启用当前团队与账户的交易资格；全局真实发送、发送者租约、风控、任务和进程安全开关仍分别生效。';
     const tradingControl = permissions.can_manage_trading
       ? `<form class="exchange-trading-form" data-exchange-account-id="${escapeHtml(item.exchange_account_id)}" data-version="${item.version}" data-enabled="${tradingEligible ? 'true' : 'false'}"><button class="${tradingEligible ? 'secondary' : 'danger'}" type="submit" aria-describedby="${tradingHelpId}" ${canConfigureTrading ? '' : 'disabled'}>${tradingConfigured ? '停用账户交易资格' : '启用账户交易资格'}</button><small id="${tradingHelpId}">${escapeHtml(tradingReason)}</small><div class="form-error" role="alert"></div></form>`
       : '';
     const credentialControl = permissions.can_manage_credentials ? `<details class="account-credential-rotate"><summary><span><b>${credentials.state === 'CONFIGURED' ? '轮换加密凭据' : '添加加密凭据'}</b><small>保存后连接重置为待验证，交易能力保持关闭</small></span><strong>展开</strong></summary><form class="toolbox-content exchange-credential-form" data-exchange-account-id="${escapeHtml(item.exchange_account_id)}" data-venue="${escapeHtml(item.venue)}" data-version="${item.version}"><div class="field-grid">${exchangeCredentialFields(item.venue)}</div><p class="safety-note">凭据只写入 AES-256-GCM 加密信封；页面和 API 只返回脱敏元数据。保存凭据不代表连接成功，也不会开启下单、签名或广播。</p><div class="form-error" role="alert"></div><div class="form-actions"><button class="primary">保存新凭据版本</button></div></form></details>` : '';
-    return `<article class="card exchange-account-card"><div class="card-heading"><div><p class="eyebrow">${escapeHtml(item.venue)} · ${escapeHtml(item.account_id)}</p><h2>${escapeHtml(item.label)}</h2></div><span class="status-pill ${item.active ? 'status-APPROVED' : 'status-DISABLED'}">${item.active ? '已登记' : '已停用'}</span></div><div class="account-capability-split"><div><small>连接能力</small><b>${escapeHtml(connection)}</b><span>${escapeHtml(connector)} · ${item.runtime_binding?.bound ? '连续读取已配置' : '连续读取未配置'}</span></div><div><small>交易能力</small><b>${escapeHtml(trading)}</b><span>${escapeHtml(fmtExchangeAccountCopy(item.trading?.reason || '连接不会自动开启交易'))}</span></div></div><dl class="definition-grid">${definition('凭据状态', credentials.state === 'CONFIGURED' ? `已加密 · ${hint}` : '未配置')}${definition('最近连接检查', fmtDate(item.connection?.checked_at))}${definition('最近验证成功', fmtDate(item.connection?.last_verified_at))}${definition('连接错误代码', item.connection?.error_code || '无')}${definition('凭据 / 账户版本', `${credentials.version || 0} / ${item.version}`)}${definition('下一步', fmtExchangeAccountCopy(item.next_action))}</dl>${verificationControl}${runtimeControl}${tradingControl}${credentialControl}</article>`;
+    const workerConfigured = Boolean(executionWorker.configured);
+    const workerStatus = executionWorker.status === 'VERIFIED' ? '已验证' : executionWorker.status === 'NOT_VERIFIED' ? '待验证' : executionWorker.status === 'UNCONFIGURED' ? '未配置' : fmtStatus(executionWorker.status);
+    const workerHelpId = `freqtrade-help-${item.exchange_account_id}`;
+    const workerVerifyReason = !permissions.can_manage_worker ? '当前角色没有该账户范围的凭据管理权限。' : !workerConfigured ? '先保存当前账户专属 Worker，再运行无下单验证。' : !item.active ? '账户已停用，Worker 验证被阻断。' : '核对交易所、期货模式、DRY_RUN/LIVE 模式与白名单；不会发送订单。';
+    const workerVerify = permissions.can_manage_worker && executionWorker.supported
+      ? `<form class="freqtrade-worker-verify-form" data-exchange-account-id="${escapeHtml(item.exchange_account_id)}" data-version="${item.version}"><button class="secondary" type="submit" aria-describedby="${workerHelpId}" ${workerConfigured && item.active ? '' : 'disabled'}>验证 Worker</button><small id="${workerHelpId}">${escapeHtml(workerVerifyReason)}</small><div class="form-error" role="alert"></div></form>`
+      : '';
+    const hip3Field = item.venue === 'HYPERLIQUID' ? `<label>HIP-3 DEX 白名单<input name="hip3_dexes" value="${escapeHtml((executionWorker.hip3_dexes || []).join(','))}" placeholder="例如 xyz（逗号分隔）"></label>` : '';
+    const workerControl = executionWorker.supported && permissions.can_manage_worker
+      ? `<details class="account-worker-config"><summary><span><b>账户专属执行 Worker</b><small>${escapeHtml(workerStatus)} · ${escapeHtml(executionWorker.mode || 'UNCONFIGURED')} · 仅绑定 ${escapeHtml(item.account_id)}</small></span><strong>展开</strong></summary><div class="toolbox-content"><dl class="definition-grid">${definition('绑定范围', `${item.account_id} · ${item.venue}`)}${definition('Worker', executionWorker.name || '未配置')}${definition('端点', executionWorker.endpoint || '未配置或无权查看')}${definition('认证', executionWorker.auth?.state === 'CONFIGURED' ? `已加密 · v${executionWorker.auth.version} · ${executionWorker.auth.username_hint || '已脱敏'}` : '未配置')}${definition('最近验证', fmtDate(executionWorker.last_verified_at))}${definition('错误代码', executionWorker.error_code || '无')}</dl>${workerVerify}<form class="freqtrade-worker-form" data-exchange-account-id="${escapeHtml(item.exchange_account_id)}" data-version="${item.version}"><div class="field-grid"><label>执行模式<select name="mode"><option value="DRY_RUN" ${executionWorker.mode === 'DRY_RUN' ? 'selected' : ''}>DRY_RUN</option><option value="LIVE" ${executionWorker.mode === 'LIVE' ? 'selected' : ''}>LIVE</option></select></label><label>Worker 名称<input name="name" maxlength="120" pattern="[A-Za-z0-9][A-Za-z0-9._-]*" value="${escapeHtml(executionWorker.name || `${item.venue.toLowerCase()}-${item.account_id}`)}" required></label><label>Worker URL<input name="base_url" type="url" maxlength="2048" value="${escapeHtml(executionWorker.endpoint || '')}" placeholder="https://worker.example:8080" required></label><label>控制用户名<input name="username" autocomplete="new-password" maxlength="120" required></label><label>控制密码<input name="password" type="password" autocomplete="new-password" maxlength="2048" required></label>${hip3Field}</div><p class="safety-note">控制凭据独立加密保存；保存只生成待验证绑定，不会改变全局真实发送、数据库 Gate、账户资格、签名或广播。</p><div class="form-error" role="alert"></div><div class="form-actions"><button class="primary">保存 Worker 新版本</button>${workerConfigured ? '<button class="secondary" type="button" data-freqtrade-unconfigure>移除绑定</button>' : ''}</div></form></div></details>`
+      : executionWorker.supported ? `<p class="safety-note">执行 Worker 由当前账户范围的凭据管理员配置；你的角色只看到脱敏状态。</p>` : '';
+    return `<article class="card exchange-account-card"><div class="card-heading"><div><p class="eyebrow">${escapeHtml(item.venue)} · ${escapeHtml(item.account_id)}</p><h2>${escapeHtml(item.label)}</h2></div><span class="status-pill ${item.active ? 'status-APPROVED' : 'status-DISABLED'}">${item.active ? '已登记' : '已停用'}</span></div><div class="account-capability-split"><div><small>连接能力</small><b>${escapeHtml(connection)}</b><span>${escapeHtml(connector)} · ${item.runtime_binding?.bound ? '连续读取已配置' : '连续读取未配置'}</span></div><div><small>交易能力</small><b>${escapeHtml(trading)}</b><span>${escapeHtml(fmtExchangeAccountCopy(item.trading?.reason || '连接不会自动开启交易'))}</span></div></div><dl class="definition-grid">${definition('凭据状态', credentials.state === 'CONFIGURED' ? `已加密 · ${hint}` : '未配置')}${definition('最近连接检查', fmtDate(item.connection?.checked_at))}${definition('最近验证成功', fmtDate(item.connection?.last_verified_at))}${definition('执行 Worker', executionWorker.supported ? `${workerStatus} · ${executionWorker.mode || 'UNCONFIGURED'}` : '当前场地不支持')}${definition('凭据 / 账户版本', `${credentials.version || 0} / ${item.version}`)}${definition('下一步', fmtExchangeAccountCopy(item.next_action))}</dl>${verificationControl}${runtimeControl}${tradingControl}${credentialControl}${workerControl}</article>`;
   }).join('');
   const create = registry.can_manage ? `<details class="card exchange-account-create"><summary><span><b>接入交易账户</b><small>同一交易所可登记多个独立账户；每个账户单独授权、风控与审计</small></span><strong>展开</strong></summary><form id="exchange-account-form" class="toolbox-content"><div class="field-grid"><label>交易所<select name="venue"><option value="BINANCE">Binance</option><option value="HYPERLIQUID">Hyperliquid</option><option value="OKX">OKX</option><option value="BYBIT">Bybit</option></select></label><label>内部账户 ID<input name="account_id" maxlength="120" placeholder="例如 binance-team-a-01" required></label><label>显示名称<input name="label" maxlength="120" placeholder="例如 主策略账户"></label></div><fieldset class="exchange-credential-fields"><legend>加密凭据</legend><div class="field-grid" data-create-credential-fields>${exchangeCredentialFields('BINANCE')}</div></fieldset><p class="safety-note">创建只登记当前团队的账户边界。连接验证与交易资格分别计算；交易、资金、签名和广播保持关闭。</p><div class="form-error" role="alert"></div><div class="form-actions"><button class="primary">登记并加密保存</button></div></form></details>` : '';
   return `<section class="exchange-account-registry"><div class="section-heading"><div><p class="eyebrow">当前团队 · 账户真源</p><h2>账户与能力边界</h2><p>登记、连接、交易是三个不同事实。账户已登记或凭据已保存，都不表示连接成功，更不表示可下单。</p></div><span class="status-pill">${accounts.length} 个账户</span></div>${create}${cards ? `<div class="exchange-account-grid">${cards}</div>` : '<div class="callout tone-attention"><b>当前团队没有交易账户。</b><p>由系统管理员登记第一个账户；缺少账户、凭据或连接事实时保持安全阻断。</p></div>'}</section>`;
@@ -4412,6 +4424,46 @@ function bindExchangeAccountForms() {
       await route();
     } catch (error) { showApiError(error, form.querySelector('.form-error')); }
   }));
+  document.querySelectorAll('.freqtrade-worker-form').forEach(form => {
+    form.addEventListener('submit', async event => {
+      event.preventDefault();
+      const data = Object.fromEntries(new FormData(form));
+      const body = {
+        mode:data.mode,
+        name:data.name,
+        base_url:data.base_url,
+        username:data.username,
+        password:data.password,
+        hip3_dexes:String(data.hip3_dexes || '').split(',').map(value => value.trim()).filter(Boolean),
+        expected_version:Number(form.dataset.version),
+        idempotency_key:crypto.randomUUID(),
+      };
+      try {
+        await withPending(event.submitter, '加密保存中…', () => api(`/api/exchange-accounts/${form.dataset.exchangeAccountId}/freqtrade-worker`, {method:'PUT', body:JSON.stringify(body)}));
+        showToast('账户专属 Worker 已保存为待验证；没有发送订单');
+        await route();
+      } catch (error) { showApiError(error, form.querySelector('.form-error')); }
+    });
+    form.querySelector('[data-freqtrade-unconfigure]')?.addEventListener('click', async event => {
+      const confirmed = await confirmAction({title:'移除当前账户的 Worker 绑定？', message:'移除后该账户的 Freqtrade LIVE 执行会由服务端拒绝；账户连接与只读同步保持不变。', confirmLabel:'确认移除绑定'});
+      if (!confirmed) return;
+      const body = {mode:'UNCONFIGURED', hip3_dexes:[], expected_version:Number(form.dataset.version), idempotency_key:crypto.randomUUID()};
+      try {
+        await withPending(event.currentTarget, '移除中…', () => api(`/api/exchange-accounts/${form.dataset.exchangeAccountId}/freqtrade-worker`, {method:'PUT', body:JSON.stringify(body)}));
+        showToast('Worker 绑定已移除；该账户的 Freqtrade LIVE 执行保持阻断');
+        await route();
+      } catch (error) { showApiError(error, form.querySelector('.form-error')); }
+    });
+  });
+  document.querySelectorAll('.freqtrade-worker-verify-form').forEach(form => form.addEventListener('submit', async event => {
+    event.preventDefault();
+    const body = {expected_version:Number(form.dataset.version), idempotency_key:crypto.randomUUID()};
+    try {
+      const result = await withPending(event.submitter, '验证中…', () => api(`/api/exchange-accounts/${form.dataset.exchangeAccountId}/freqtrade-worker/verifications`, {method:'POST', body:JSON.stringify(body)}));
+      showToast(result.worker?.status === 'VERIFIED' ? 'Worker 范围验证成功；真实发送 Gate 保持不变' : `Worker 验证失败：${result.worker?.error_code || 'FREQTRADE_WORKER_PROBE_FAILED'}`);
+      await route();
+    } catch (error) { showApiError(error, form.querySelector('.form-error')); }
+  }));
 }
 
 async function renderVenueFacts() {
@@ -4420,7 +4472,7 @@ async function renderVenueFacts() {
   const venue = ['BINANCE','HYPERLIQUID','OKX','BYBIT'].includes(selectedVenue) ? selectedVenue : 'BINANCE';
   const endpoint = venue.toLowerCase();
   const legacyStatusRequest = ['BINANCE','HYPERLIQUID'].includes(venue)
-    ? api(`/api/venues/${endpoint}/status`)
+    ? api(`/api/venues/${endpoint}/status`).catch(error => [403, 409].includes(error.status) ? null : Promise.reject(error))
     : Promise.resolve(null);
   const [legacyStatus, runtime, accountResult] = await Promise.all([
     legacyStatusRequest,
