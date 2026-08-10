@@ -1,0 +1,25 @@
+.git
+.github
+.venv
+.local
+.env
+.env.*
+!.env.example
+.coverage
+.hypothesis
+.mypy_cache
+.pytest_cache
+.ruff_cache
+__pycache__
+*.py[cod]
+artifacts
+build
+dist
+docs
+htmlcov
+logs
+node_modules
+DynamicPositionSizing-
+low_vol_breakout_bn
+交易系统 notion 文档
+仓位计算-新.xlsx

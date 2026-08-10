@@ -336,7 +336,7 @@ def test_notification_worker_is_off_by_default_and_requires_the_encryption_key()
     configured = Settings(
         database_url=database_url,
         notification_worker_enabled=True,
-        credential_encryption_key="configured-key",
+        credential_encryption_key="G4dAqHdhSHI_KptQdXKVIgF_eVXWYFW3viBTPWLSBEs",
         _env_file=None,
     )
     configured.validate_runtime_security()

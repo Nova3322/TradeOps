@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import base64
+import binascii
 import os
 import re
 from decimal import Decimal
@@ -211,6 +213,19 @@ class Settings(BaseSettings):
     def require_postgresql(cls, value: str) -> str:
         if not value.startswith(("postgresql://", "postgresql+psycopg://")):
             raise ValueError("database_url must use PostgreSQL with the psycopg driver")
+        return value
+
+    @field_validator("credential_encryption_key")
+    @classmethod
+    def require_aes_256_credential_key(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        try:
+            decoded = base64.urlsafe_b64decode(value + "=" * (-len(value) % 4))
+        except (ValueError, binascii.Error) as exc:
+            raise ValueError("credential encryption key must be URL-safe base64") from exc
+        if len(decoded) != 32:
+            raise ValueError("credential encryption key must decode to exactly 32 bytes")
         return value
 
     @field_validator("perptape_base_url")

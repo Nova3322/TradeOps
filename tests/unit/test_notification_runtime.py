@@ -87,7 +87,7 @@ def test_notification_once_cli_checks_readiness_runs_and_disposes(
 ) -> None:
     settings = Settings(
         database_url="postgresql+psycopg://unused:unused@127.0.0.1/unused",
-        credential_encryption_key="fixture-encryption-key",
+        credential_encryption_key="G4dAqHdhSHI_KptQdXKVIgF_eVXWYFW3viBTPWLSBEs",
         _env_file=None,
     )
 
@@ -183,7 +183,7 @@ def test_notification_continuous_cli_installs_shutdown_handlers_and_disposes(
         (
             Settings(
                 database_url="postgresql+psycopg://unused:unused@127.0.0.1/unused",
-                credential_encryption_key="fixture-encryption-key",
+                credential_encryption_key="G4dAqHdhSHI_KptQdXKVIgF_eVXWYFW3viBTPWLSBEs",
                 _env_file=None,
             ),
             [],
@@ -214,7 +214,7 @@ def test_notification_cli_reports_database_readiness_reason_and_disposes(
 ) -> None:
     settings = Settings(
         database_url="postgresql+psycopg://unused:unused@127.0.0.1/unused",
-        credential_encryption_key="fixture-encryption-key",
+        credential_encryption_key="G4dAqHdhSHI_KptQdXKVIgF_eVXWYFW3viBTPWLSBEs",
         _env_file=None,
     )
 

@@ -19,6 +19,7 @@ dependencies = [
 
 [project.scripts]
 trading-api = "trading_control_plane.__main__:main"
+trading-doctor = "trading_control_plane.operations:main"
 trading-notification-worker = "trading_control_plane.notification_runtime:main"
 trading-sync-worker = "trading_control_plane.runtime:main"
 

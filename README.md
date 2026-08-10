@@ -1,9 +1,19 @@
 # Trading 交易系统
 
 > 状态日期：2026-08-10
-> 当前状态：Workspace / 团队权限边界、团队交易账户与账户事实隔离、团队 Perptape / 签名 Webhook 单一信号源、加密凭据、四场所一次性只读连接验证、两场所持续事实同步、版本化风控、团队/账户/策略/信号源绩效与风险事件报表、Telegram/Slack/Lark/邮件团队通知、LIVE/模拟资金隔离、分权风险恢复、受控资金路径和最小 Telegram 审核已实现；所有危险能力仍默认关闭
+> 当前状态：Workspace / 团队权限边界、团队交易账户与账户事实隔离、团队 Perptape / 签名 Webhook 单一信号源、加密凭据、四场所一次性只读连接验证、两场所持续事实同步、版本化风控、团队/账户/策略/信号源绩效与风险事件报表、四渠道团队通知、LIVE/模拟资金隔离、团队 Agent 最小 API 权限、一条命令 Compose 和无秘密运维诊断已实现；所有危险能力仍默认关闭
 
-本项目面向一个资本所有者、一个内部组织和多个内部用户。用户可以提交和审核提案、查看仓位、处理异常；系统在风险可控的前提下辅助执行交易并判断是否赚钱。不开放外部注册，不管理第三方资金，不建设机构级多租户、通用合规或通用认证平台。
+本项目面向一个内部组织的多 Workspace、多交易 Team 和多个内部用户/Agent。用户可以提交和审核提案、查看仓位、处理异常；系统在风险可控的前提下辅助执行交易并判断是否赚钱。不开放无审核外部注册，不管理第三方资金，不建设通用合规或通用认证平台。
+
+## 快速启动
+
+完整 Docker Compose 控制台（PostgreSQL → 迁移 → 安全初始化 → API）：
+
+```bash
+./scripts/run_compose.sh
+```
+
+命令只绑定 `127.0.0.1:8000`，在未跟踪的 `.local/` 生成 `0600` 本地密钥/密码，并硬关闭真实/测试网下单、资金、签名与广播输出。使用 `uv run trading-doctor` 检查当前配置、Schema、五个 Gate 和连接能力矩阵，输出不包含秘密。完整部署、升级、备份和恢复说明见 [开源部署、配置、升级与恢复](docs/06-operations/开源部署配置升级与恢复.md)。
 
 完整产品愿景包含 Binance、Hyperliquid、Web/PWA、Telegram、VenueAdapter、Freqtrade/OMS、Margin、Vault/CTO 和报表。这些目标不删除，但按可运行的端到端用户流程逐步开发。未实现能力保持关闭，不为未来可能性预建通用实体。
 
@@ -36,6 +46,7 @@
 4. [本次架构收敛记录](docs/08-implementation/本次架构收敛记录.md)：KEEP/MERGE/SIMPLIFY/DELETE 和迁移结论。
 5. [交易系统总体方案](交易系统总体方案.md)：长期产品愿景和最高层原则。
 6. [产品化文档中心](docs/README.md)：专项文档地图与权威边界。
+7. [开源部署、配置、升级与恢复](docs/06-operations/开源部署配置升级与恢复.md)：一条命令、Compose、诊断、能力矩阵与运维流程。
 
 ## 当前不可绕过的规则
 
@@ -87,6 +98,7 @@ Safe Spending Limits 是与 NoTilt Vault 并列的直接资金方案。它固定
 
 ```bash
 uv sync
+uv run trading-doctor --skip-database
 uv run ruff format --check src tests
 uv run ruff check src tests
 uv run mypy src
@@ -113,9 +125,9 @@ TRADING_DATABASE_URL='postgresql+psycopg://.../trading_restore_test' ./scripts/r
 ./scripts/run_local.sh
 ```
 
-该命令会启动 `127.0.0.1:5434` 的 PostgreSQL、升级 Schema、幂等创建
+该命令会强制使用 `127.0.0.1:5434/trading_local` 的 PostgreSQL、升级 Schema、幂等创建
 `kelly_oooo` 内部超级管理员/Reviewer/Operator/Treasury、一个本地 Proposer 和第二 Reviewer，然后启动
-API。Telegram 默认仍关闭；先在 BotFather 撤销任何曾出现在聊天或日志中的旧 Token，把新
+API。Session、凭据加密和 dry-run worker 密钥持久化到未跟踪的 `.local/`，不使用共享 env 里的数据库 URL。Telegram 默认仍关闭；先在 BotFather 撤销任何曾出现在聊天或日志中的旧 Token，把新
 Token 仅写入 `.env.local`，再设置：
 
 ```dotenv
