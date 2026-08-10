@@ -4,6 +4,7 @@ const identityChip = document.querySelector('#identity-chip');
 const scopeControl = document.querySelector('#scope-control');
 const scopeSwitcher = document.querySelector('#scope-switcher');
 const environmentBadge = document.querySelector('#environment-badge');
+const teamSettingsLink = document.querySelector('#team-settings-link');
 const languageToggle = document.querySelector('#language-toggle');
 const themeToggle = document.querySelector('#theme-toggle');
 const themeColorMeta = document.querySelector('meta[name="theme-color"]');
@@ -39,7 +40,7 @@ const ENGLISH_EXACT = new Map(Object.entries({
   '中英切换':'Chinese / English', '切换中英文':'Switch between Chinese and English', '切换主题':'Switch theme', '主题':'Theme', '浅色':'Light', '深色':'Dark', '菜单':'Menu',
   '只读用户':'Observer', '提案发起人':'Proposer', '审核人':'Reviewer', '交易运维人员':'Trading operator',
   '资金管理员':'Treasury administrator', '系统管理员':'Super administrator',
-  '主导航':'Main navigation', '工作台':'Workspace', '团队配置':'Team setup', '治理与安全':'Governance and safety', '当前范围':'Current scope', '当前任务':'Current tasks', '实时机会':'Live opportunities', '审核队列':'Review queue',
+  '主导航':'Main navigation', '用户任务':'User tasks', '今日':'Today', '信号':'Signals', '提案':'Proposals', '交易':'Trading', '复盘':'Review', '团队设置':'Team settings', '当前范围':'Current scope', '当前任务':'Current tasks', '实时机会':'Live opportunities', '审核队列':'Review queue',
   '交易任务':'Trades', '绩效报表':'Performance reports', '影子模式':'Shadow mode', '通知中心':'Notification center', '系统状态':'System status', '资金':'Capital', '异常':'Exceptions',
   '交易账户':'Exchange accounts', '成员权限':'Access control',
   '业务数据库已连接':'Business database connected', '数据缺失时自动阻止交易':'Missing data blocks trading automatically',
@@ -962,7 +963,7 @@ const currentWorkspaceMembership = () => (session?.workspaces || []).find(
   workspace => workspace.workspace_id === session?.active_workspace?.workspace_id
 );
 const routeCapability = (path) => {
-  if (path === '/') return null;
+  if (path === '/' || path === '/settings') return null;
   if (path === '/capital') return 'capital.view';
   if (path === '/opportunities/defaults') return 'proposal.create';
   if (path === '/opportunities') return 'opportunity.view';
@@ -1113,6 +1114,7 @@ function setShell(loggedIn) {
   identityChip.hidden = !loggedIn;
   scopeControl.hidden = !loggedIn;
   mobileNavToggle.hidden = !loggedIn;
+  teamSettingsLink.hidden = !loggedIn || !session?.active_team;
   if (loggedIn) {
     const currentWorkspaceId = session.active_workspace?.workspace_id || '';
     const currentTeamId = session.active_team?.team_id || '';
@@ -1335,7 +1337,7 @@ async function route() {
     return;
   }
   const path = location.pathname;
-  const teamSetupPaths = new Set(['/admin/users', '/admin/agents', '/venues', '/signals', '/notifications', '/risk', '/shadow']);
+  const teamSetupPaths = new Set(['/settings', '/admin/users', '/admin/agents', '/venues', '/signals', '/notifications', '/risk', '/shadow']);
   if (!session.active_workspace || !session.active_team || (!session.active_team.trading_enabled && !teamSetupPaths.has(path))) {
     renderScopeSetup();
     enhanceRenderedPage();
@@ -1350,14 +1352,15 @@ async function route() {
   main.innerHTML = '<section class="loading-state"><span class="spinner"></span><p>正在读取当前事实…</p></section>';
   try {
     if (path === '/') await renderHome();
+    else if (path === '/settings') await renderTeamSettings();
     else if (path === '/signals') await renderSignalSources();
     else if (path === '/opportunities') await renderOpportunities();
     else if (path === '/opportunities/defaults') await renderOpportunityDefaults();
     else if (path === '/proposals/new') await renderManualProposal();
-    else if (path === '/reviews') await renderProposalList('PENDING_REVIEW', '审核队列');
+    else if (path === '/reviews') await renderProposalList('PENDING_REVIEW', '待我审核');
     else if (path === '/proposals') {
-      const historyMode = new URLSearchParams(location.search).get('history') === '1';
-      await renderProposalList(null, historyMode ? '历史提案' : '当前提案', historyMode);
+      const mineMode = new URLSearchParams(location.search).get('mine') === '1';
+      await renderProposalList(null, mineMode ? '我的提案' : '全部记录', mineMode);
     }
     else if (path === '/campaigns') await renderCampaignList();
     else if (path === '/shadow') await renderShadowWorkspace();
@@ -1608,7 +1611,7 @@ async function renderSignalSources() {
       ? '仅使用部署级兼容 Key；尚未绑定团队 Key'
       : '未配置';
   const modeLabel = source?.mode === 'WEBHOOK' ? 'Webhook' : source?.mode === 'PERPTAPE' ? 'Perptape' : '未选择';
-  const configForm = canManage ? `<form id="signal-source-form" class="form-panel compact-form"><div class="card-heading"><div><p class="eyebrow">当前团队</p><h2>${source ? '切换或轮换信号源' : '配置唯一信号源'}</h2></div><span class="status-pill">${escapeHtml(modeLabel)}</span></div><div class="field-grid"><label>启用模式<select name="mode"><option value="PERPTAPE" ${source?.mode !== 'WEBHOOK' ? 'selected' : ''}>Perptape</option><option value="WEBHOOK" ${source?.mode === 'WEBHOOK' ? 'selected' : ''}>Webhook</option></select></label><label>Perptape Key / Webhook 签名密钥<input name="secret" type="password" minlength="8" maxlength="512" autocomplete="new-password" required></label><label>Webhook 最大时效（秒）<input name="webhook_max_age_seconds" type="number" min="30" max="900" value="${source?.webhook?.max_age_seconds || 300}" required></label><label class="checkbox-row"><input name="enabled" type="checkbox" ${source?.enabled !== false ? 'checked' : ''}><span>启用当前模式</span></label></div><p class="safety-note">切换为 Webhook 会停止 Perptape 自动提案政策。密钥只进入 AES-256-GCM 加密信封；页面、API、日志和审计均不回显明文。</p><div class="form-error" role="alert"></div><div class="form-actions"><button class="primary">加密保存新版本</button></div></form>` : '';
+  const configForm = canManage ? `<details class="card create-member-panel" ${source ? '' : 'open'}><summary><span><b>信号源设置</b><small>${source ? '切换模式或轮换加密凭据' : '先配置唯一启用模式'}</small></span><strong>展开</strong></summary><form id="signal-source-form" class="toolbox-content compact-form"><div class="card-heading"><div><p class="eyebrow">当前团队</p><h2>${source ? '切换或轮换信号源' : '配置唯一信号源'}</h2></div><span class="status-pill">${escapeHtml(modeLabel)}</span></div><div class="field-grid"><label>启用模式<select name="mode"><option value="PERPTAPE" ${source?.mode !== 'WEBHOOK' ? 'selected' : ''}>Perptape</option><option value="WEBHOOK" ${source?.mode === 'WEBHOOK' ? 'selected' : ''}>Webhook</option></select></label><label>Perptape Key / Webhook 签名密钥<input name="secret" type="password" minlength="8" maxlength="512" autocomplete="new-password" required></label><label>Webhook 最大时效（秒）<input name="webhook_max_age_seconds" type="number" min="30" max="900" value="${source?.webhook?.max_age_seconds || 300}" required></label><label class="checkbox-row"><input name="enabled" type="checkbox" ${source?.enabled !== false ? 'checked' : ''}><span>启用当前模式</span></label></div><p class="safety-note">切换为 Webhook 会停止 Perptape 自动提案政策。密钥只进入 AES-256-GCM 加密信封；页面、API、日志和审计均不回显明文。</p><div class="form-error" role="alert"></div><div class="form-actions"><button class="primary">加密保存新版本</button></div></form></details>` : '';
   const sourceFacts = source ? `<article class="card"><div class="card-heading"><div><p class="eyebrow">信号源事实</p><h2>${escapeHtml(modeLabel)} · ${source.enabled ? '已启用' : '已停用'}</h2></div><span class="status-pill ${source.enabled ? 'status-APPROVED' : 'status-DISABLED'}">v${source.version}</span></div><dl class="definition-grid">${definition('凭据状态', credentialLabel)}${definition('服务身份', source.service_principal?.username || (source.mode === 'WEBHOOK' ? '不需要；由人员手动创建提案' : '兼容运行身份'))}${definition('更新人', source.updated_by_username || shortId(source.updated_by))}${definition('更新时间', fmtDate(source.updated_at))}</dl>${source.mode === 'PERPTAPE' ? '<div class="form-actions"><a class="primary" href="/opportunities" data-link>查看 Perptape 实时机会</a></div>' : ''}</article>` : '<article class="card"><p class="eyebrow">Fail closed</p><h2>当前团队尚未选择信号源</h2><p class="subtle">服务端不会读取其他团队或全局默认信号。由系统管理员选择 Perptape 或 Webhook 后再继续。</p></article>';
   const webhookContract = source?.mode === 'WEBHOOK' ? `<article class="card"><p class="eyebrow">签名接入</p><h2>TradingView / 自研模型统一 Webhook</h2><dl class="definition-grid">${definition('接收地址', source.webhook.endpoint_url)}${definition('时效', `${source.webhook.max_age_seconds} 秒`)}${definition('提案语义', '仅记录信号；必须由获权人员手动创建冻结提案')}</dl><p class="safety-note">必须携带 <code>X-TradingOPS-Timestamp</code>、<code>X-TradingOPS-Nonce</code>、<code>Idempotency-Key</code> 和 <code>X-TradingOPS-Signature: v1=HMAC_SHA256(secret, timestamp.nonce.raw_body)</code>。过期、未来、重放、重复外部 ID、格式错误与签名错误均由服务端拒绝。</p></article>` : '';
   const eventCards = events.map(event => {
@@ -1622,7 +1625,12 @@ async function renderSignalSources() {
         : '<p class="safety-note">当前缺少提案权限或精确 Instrument Catalog 匹配；由负责人补齐后再创建提案。</p>';
     return `<article class="card"><div class="card-heading"><div><p class="eyebrow">${escapeHtml(event.provider)} · ${escapeHtml(event.strategy_id)} ${escapeHtml(event.strategy_version)}</p><h2>${escapeHtml(event.symbol)} · ${escapeHtml(fmtDirection(event.direction))}</h2></div><span class="status-pill ${proposal ? 'status-APPROVED' : ''}">${proposal ? '已形成提案' : '仅信号'}</span></div><dl class="definition-grid">${definition('交易所', event.venue)}${definition('参考价', event.reference_price || '未提供')}${definition('信号时间', fmtDate(event.occurred_at))}${definition('接收时间', fmtDate(event.received_at))}${definition('外部 ID', event.external_id)}${definition('载荷版本', event.payload_version)}</dl>${action}</article>`;
   }).join('');
-  main.innerHTML = `<section class="page"><header class="page-head"><div><p class="eyebrow">团队隔离</p><h1>信号源</h1><p class="lede">每个团队只启用 Perptape 或 Webhook 之一。信号最多形成冻结提案，不拥有审核、风控、交易或资金权限。</p></div><button class="secondary" data-refresh>刷新事实</button></header><div class="detail-layout">${sourceFacts}${webhookContract}</div>${configForm}<div class="section-head"><div><p class="eyebrow">当前团队</p><h2>最近 Webhook 信号</h2></div><span class="status-pill">${events.length} 条</span></div><div class="stack">${eventCards || '<article class="empty-state"><div><h2>尚无 Webhook 信号</h2><p>当前不会伪造样本信号。配置 Webhook 后，只显示签名、时效、重放和格式校验全部通过的事件。</p></div></article>'}</div></section>`;
+  const activeSignalContent = source?.mode === 'WEBHOOK'
+    ? `<div class="section-head"><div><p class="eyebrow">当前团队</p><h2>最近 Webhook 信号</h2></div><span class="status-pill">${events.length} 条</span></div><div class="stack">${eventCards || '<article class="empty-state"><div><h2>尚无 Webhook 信号</h2><p>当前不会伪造样本信号。这里只显示签名、时效、重放和格式校验全部通过的事件。</p></div></article>'}</div>`
+    : source?.mode === 'PERPTAPE'
+      ? '<article class="home-status tone-success"><div><p class="eyebrow">Perptape</p><h2>实时机会复用同一事实页面</h2><p>机会卡片明确区分实时、过期、限流和不可用；服务端会在创建提案时重新校验。</p></div><a class="primary" href="/opportunities" data-link>查看实时机会</a></article>'
+      : '';
+  main.innerHTML = `<section class="page"><header class="page-head"><div><p class="eyebrow">团队输入</p><h1>信号</h1><p class="lede">先看当前信号和机会，再按需展开配置。每个团队只启用 Perptape 或 Webhook 之一；任何信号最多形成冻结提案。</p></div><button class="secondary" data-refresh>刷新事实</button></header><div class="section-tabs"><a class="active" href="/signals" data-link>当前信号</a>${source?.mode === 'PERPTAPE' || !source ? '<a href="/opportunities" data-link>Perptape 机会</a>' : ''}<a href="/settings" data-link>团队设置</a></div><div class="detail-layout">${sourceFacts}${webhookContract}</div>${configForm}${activeSignalContent}</section>`;
   document.querySelector('[data-refresh]')?.addEventListener('click', route);
   document.querySelector('#signal-source-form')?.addEventListener('submit', async event => {
     event.preventDefault(); const form = event.currentTarget; const data = Object.fromEntries(new FormData(form));
@@ -1749,6 +1757,7 @@ function renderOpportunitySnapshot(result, sourceError = null, preservedFilters 
   const venueBreakdown = opportunityVenueBreakdown(counts.symbols_by_venue);
   const defaultViewState = counts.eligible_opportunities ? 'ACTIONABLE' : 'ALL';
   main.innerHTML = `<section class="page" data-opportunity-snapshot="${escapeHtml(result?.snapshot_id || '')}"><header class="page-head"><div><p class="eyebrow">Perptape · 实时机会流</p><h1>实时机会</h1><p class="lede">实时汇总同一币对、同一方向的多个突破周期。同一轮卡片、状态和按钮都来自同一个事实快照；创建时服务端仍会重新校验。</p></div><div class="toolbar"><span class="status-pill" data-live-status>${sourceError ? '连接已中断，正在重连' : '正在连接'}</span>${canPropose ? '<a class="primary" href="/proposals/new" data-link>＋ 人工提案</a>' : ''}<button class="secondary" data-refresh>刷新机会</button></div></header>
+    <div class="section-tabs"><a href="/signals" data-link>信号概览</a><a class="active" href="/opportunities" data-link>Perptape 机会</a></div>
     ${sourceError ? `<article class="source-status tone-attention"><div><p class="eyebrow">Perptape 数据源</p><h2>外部机会当前不可用</h2><p>${escapeHtml(friendlyApiError(sourceError))} 系统不会把过期候选当成当前机会。</p></div>${canPropose ? '<a class="secondary" href="/proposals/new" data-link>创建人工提案</a>' : ''}</article>` : ''}
     ${!canPropose ? '<div class="callout"><b>只读模式：</b>当前身份可以查看、筛选候选并打开外部图表，但不能创建或修改提案。</div>' : ''}
     <div class="opportunity-tools"><span>信号快照 ${fmtDate(result?.snapshot_generated_at || result?.as_of)}</span>${canPropose ? `<a class="secondary" href="/opportunities/defaults" data-link>默认配置${proposalDefaults.configured ? '' : ' · 未完成'}</a>` : ''}</div>
@@ -2035,6 +2044,18 @@ function manualInstrumentMatch(allInstruments, venue, symbol) {
   ) || null;
 }
 
+function proposalTabs(active, canPropose, environmentQuery = '') {
+  const query = environmentQuery ? environmentQuery.slice(1) : '';
+  const mineHref = `/proposals?mine=1${query ? `&${query}` : ''}`;
+  const links = [
+    ['mine', mineHref, '我的提案'],
+    ['reviews', `/reviews${environmentQuery}`, '待我审核'],
+    ['all', `/proposals${environmentQuery}`, '全部记录'],
+  ];
+  if (canPropose) links.push(['create', `/proposals/new${environmentQuery}`, '手动创建']);
+  return `<div class="section-tabs">${links.map(([key, href, label]) => `<a class="${active === key ? 'active' : ''}" href="${href}" data-link>${label}</a>`).join('')}</div>`;
+}
+
 function syncManualInstrumentPicker(form, {clearSymbol = false} = {}) {
   const venue = form.elements.venue.value;
   const symbolInput = form.elements.instrument_symbol;
@@ -2075,7 +2096,9 @@ async function renderManualProposal() {
   instruments = result.data;
   const environment = currentWorkflowEnvironment();
   const environmentCopy = environment === 'SHADOW' ? '影子模式 · 只使用虚拟资金' : fmtEnvironment(environment, true);
+  const environmentQuery = environment === 'LIVE' ? '' : `?environment=${environment}`;
   main.innerHTML = `<section class="page"><header class="page-head"><div><p class="eyebrow">人工创建交易提案</p><h1>创建人工提案</h1><p class="lede">先说明交易方向、计划规模和最多可以承受的损失。分批入场和自动加仓是高级选项；提交后只会保存当前判断，仍需独立审核和系统风险检查。</p></div><span class="status-pill ${environment === 'SHADOW' ? 'status-APPROVED' : ''}">${escapeHtml(environmentCopy)}</span></header>
+    ${proposalTabs('create', true, environmentQuery)}
     <div class="compose-layout"><form id="manual-form" class="form-panel proposal-compose" data-environment="${escapeHtml(environment)}">
       <section class="form-section"><div class="section-title"><span>1</span><div><h2>交易意图</h2><p>选标的、定方向，说清从哪个价格开始执行。</p></div></div><div class="field-grid">
         <label>账户<span class="field-help">资金和权限归属</span><input name="account_id" value="acct-1" required></label>
@@ -2172,17 +2195,15 @@ async function submitManualProposal(event) {
   } catch (error) { showApiError(error, form.querySelector('.form-error')); button.disabled = false; }
 }
 
-async function renderProposalList(status, title, historyMode = false) {
+async function renderProposalList(status, title, mineMode = false) {
   const result = await api(`/api/proposals${status ? `?proposal_status=${status}` : ''}`);
   const environment = currentWorkflowEnvironment();
   const allItems = result.data.filter(item => item.environment === environment);
   const proposerOnly = hasCapability('proposal.create') && !hasCapability('proposal.review') && !hasCapability('operations.view');
   const visibleItems = proposerOnly ? allItems.filter(item => item.proposer_id === session.user_id) : allItems;
-  const operationsView = hasCapability('operations.view');
-  const isCurrentProposal = item => isCurrentProposalItem(item, operationsView);
   const scopedItems = status
     ? visibleItems.filter(item => item.actionable_for_current_user)
-    : visibleItems.filter(item => historyMode ? !isCurrentProposal(item) : isCurrentProposal(item));
+    : visibleItems.filter(item => !mineMode || item.proposer_id === session.user_id);
   const items = scopedItems
     .sort((left, right) => status
       ? new Date(left.expires_at) - new Date(right.expires_at)
@@ -2197,23 +2218,18 @@ async function renderProposalList(status, title, historyMode = false) {
   const earliestExpiry = items[0]?.expires_at;
   const canPropose = roleNames().includes('PROPOSER') || roleNames().includes('SYSTEM_ADMIN');
   const environmentQuery = environment === 'LIVE' ? '' : `?environment=${environment}`;
-  const createActions = canPropose ? `<div class="toolbar"><a class="secondary" href="${environment === 'SHADOW' ? '/shadow' : '/opportunities'}" data-link>${environment === 'SHADOW' ? '返回影子模式' : '查看机会'}</a><a class="primary" href="/proposals/new${environmentQuery}" data-link>新建人工提案</a></div>` : '';
+  const createActions = canPropose ? `<div class="toolbar"><a class="secondary" href="${environment === 'SHADOW' ? '/shadow' : '/opportunities'}" data-link>${environment === 'SHADOW' ? '返回影子模式' : '查看机会'}</a><a class="primary" href="/proposals/new${environmentQuery}" data-link>手动创建</a></div>` : '';
   const emptyState = status
     ? '<section class="empty-state"><div><h2>当前没有待你审核的提案</h2><p>自己的提案、已经投过票、已到期或已结束的提案不会留在这里。</p><div class="toolbar empty-actions"><a class="secondary" href="/" data-link>返回当前任务</a><a class="primary" href="/proposals" data-link>查看全部提案</a></div></div></section>'
-    : `<section class="empty-state"><div><h2>${historyMode ? '当前没有历史提案' : '当前没有进行中的提案'}</h2><p>${historyMode ? '已批准、已过期或已拒绝的提案会保留在这里供审计。' : canPropose ? '可以从机会页一键创建，或提交一份人工提案。' : '当前作用域内还没有需要继续跟踪的提案。'}</p>${historyMode ? '<a class="secondary" href="/proposals" data-link>返回当前提案</a>' : createActions}</div></section>`;
-  const proposalScopeCopy = operationsView
-    ? '这里展示草稿、等待审核，以及仍在启动窗口内的已批准提案；批准后仍须完成实时风险检查与短期授权。'
-    : '这里只展示仍在草稿或等待审核中的提案；批准后进入历史，后续交易生命周期由交易运维接手。';
-  const proposalHistoryCopy = operationsView
-    ? '这里保留已进入交易任务的提案、启动窗口已过期的批准记录，以及已过期或已拒绝记录；仍可启动的提案留在当前列表。'
-    : '这里只保留已批准、已过期或已拒绝的审计记录，不会把历史数量混入当前待办。';
-  main.innerHTML = `<section class="page"><header class="page-head"><div><p class="eyebrow">提案审核</p><h1>${escapeHtml(title)}</h1><p class="lede">${status ? '这里只保留真正需要你独立判断且尚未到期的提案，并按到期时间排序；高风险提案需要两名独立审核人。批准不等于下单。' : historyMode ? proposalHistoryCopy : proposalScopeCopy}</p></div>${createActions}</header>
+    : `<section class="empty-state"><div><h2>${mineMode ? '你还没有创建提案' : '当前团队还没有提案记录'}</h2><p>${canPropose ? '可以从机会页创建冻结提案，或手动提交一份交易判断。' : '当前作用域内还没有可查看的提案记录。'}</p>${createActions}</div></section>`;
+  const proposalScopeCopy = mineMode
+    ? '这里只汇总你在当前团队与账户范围内创建的提案；审核仍必须由另一名获权成员或 Agent 独立完成。'
+    : '这里保留当前团队可见的全部提案及其审计状态；待办以“待我审核”为准，批准仍不等于下单。';
+  main.innerHTML = `<section class="page"><header class="page-head"><div><p class="eyebrow">提案审核</p><h1>${escapeHtml(title)}</h1><p class="lede">${status ? '这里只保留真正需要你独立判断且尚未到期的提案，并按到期时间排序；高风险提案需要两名独立审核人。批准不等于下单。' : proposalScopeCopy}</p></div>${createActions}</header>
     <div class="stats proposal-stats">${status
       ? `<div class="stat"><small>待我审核</small><b>${items.length}</b></div><div class="stat"><small>需两人审核</small><b>${doubleReview}</b></div><div class="stat"><small>30 分钟内到期</small><b>${expiring}</b></div><div class="stat"><small>最早到期</small><b class="stat-date">${earliestExpiry ? fmtDate(earliestExpiry) : '—'}</b></div>`
-      : historyMode
-        ? `<div class="stat"><small>历史记录</small><b>${items.length}</b></div><div class="stat"><small>${operationsView ? '已进入交易' : '已批准'}</small><b>${approved}</b></div><div class="stat"><small>已过期</small><b>${expired}</b></div><div class="stat"><small>已拒绝</small><b>${rejected}</b></div>`
-        : `<div class="stat"><small>当前提案</small><b>${items.length}</b></div><div class="stat"><small>等待审核</small><b>${items.filter(item => item.status === 'PENDING_REVIEW').length}</b></div>`}</div>
-    <div class="section-tabs"><a class="${status ? 'active' : ''}" href="/reviews" data-link>待我审核</a><a class="${!status && !historyMode ? 'active' : ''}" href="/proposals" data-link>当前提案</a><a class="${historyMode ? 'active' : ''}" href="/proposals?history=1" data-link>历史记录</a></div>
+      : `<div class="stat"><small>${mineMode ? '我的提案' : '全部记录'}</small><b>${items.length}</b></div><div class="stat"><small>等待审核</small><b>${items.filter(item => item.status === 'PENDING_REVIEW').length}</b></div><div class="stat"><small>已批准</small><b>${approved}</b></div><div class="stat"><small>已拒绝 / 过期</small><b>${rejected + expired}</b></div>`}</div>
+    ${proposalTabs(status ? 'reviews' : mineMode ? 'mine' : 'all', canPropose, environmentQuery)}
     ${status && items.length ? `<p class="review-queue-summary">系统机会 ${systemCount} 笔 · 人工判断 ${manualCount} 笔。这里只统计你尚未投票、仍在有效期内的提案。</p>` : ''}
     ${items.length ? `<div class="proposal-list-tools"><label>搜索标的<input id="proposal-search" type="search" placeholder="BTCUSDT / xyz:TSLA"></label><label>方向<select id="proposal-direction"><option value="">全部方向</option><option value="LONG">做多</option><option value="SHORT">做空</option></select></label><label>风险<select id="proposal-risk"><option value="">全部档位</option><option value="LOW">低</option><option value="MEDIUM">中</option><option value="HIGH">高</option></select></label>${status ? '<label>来源<select id="proposal-source"><option value="">全部来源</option><option value="SYSTEM">系统机会</option><option value="MANUAL">人工判断</option></select></label>' : '<label>状态<select id="proposal-status"><option value="">全部状态</option><option value="DRAFT">草稿</option><option value="PENDING_REVIEW">待审核</option><option value="APPROVED">已批准</option><option value="REJECTED">已拒绝</option><option value="EXPIRED">已过期</option></select></label>'}<span><b data-proposal-count>${items.length}</b> 个结果</span></div><div class="table-wrap proposal-table"><table><thead><tr><th>提案</th><th>方向 / 交易规模</th><th>风险边界</th><th>${status ? '审核进度' : '状态'}</th><th>提交时间</th><th>有效期 / 结果</th></tr></thead><tbody>${items.map(item => `<tr data-href="/proposals/${item.proposal_id}" data-proposal-row data-search="${escapeHtml(`${item.symbol || ''} ${item.venue} ${item.proposer_username || ''}`.toLowerCase())}" data-direction="${escapeHtml(item.direction)}" data-risk="${escapeHtml(item.risk_tier)}" data-source="${escapeHtml(item.source)}" data-status="${escapeHtml(item.status)}"><td data-label="提案"><b>${escapeHtml(item.symbol || shortId(item.instrument_id))}</b><br><span class="subtle">${escapeHtml(fmtVenueLabel(item.venue))} · ${escapeHtml(item.source === 'SYSTEM' ? '系统机会' : '人工判断')}</span></td><td data-label="方向 / 交易规模"><span class="direction-pill ${item.direction === 'LONG' ? 'direction-long' : 'direction-short'}">${escapeHtml(fmtDirection(item.direction))}</span><br><b>${item.estimated_notional === null ? '名义价值待详情确认' : `名义价值 ${escapeHtml(fmtAmount(item.estimated_notional, item.quote_currency))}`}</b><br><span class="subtle">合约数量 ${fmtNumber(item.quantity)}</span></td><td data-label="风险边界"><b>最多损失 ${escapeHtml(fmtAmount(item.max_risk, item.collateral_currency))}</b><br><span class="subtle">${fmtRisk(item.risk_tier)}</span></td><td data-label="${status ? '审核进度' : '状态'}">${status ? `<b>已 ${Number(item.approval_count || 0)} / ${Number(item.required_approvals || (item.risk_tier === 'HIGH' ? 2 : 1))}</b><br><span class="subtle">仍需你的独立判断</span>` : `<span class="status-pill status-${escapeHtml(item.status)}">${escapeHtml(fmtStatus(item.status))}</span>${proposalStatusSupplement(item) ? `<br><span class="subtle">${escapeHtml(proposalStatusSupplement(item))}</span>` : ''}`}</td><td data-label="提交时间">${fmtDate(item.created_at)}<br><span class="subtle">版本 ${item.version}</span></td><td data-label="有效期 / 结果">${fmtDate(proposalExpiryPresentation(item).at)}<br><span class="subtle">${escapeHtml(proposalExpiryPresentation(item).state)}</span></td></tr>`).join('')}</tbody></table></div><section id="proposal-filter-empty" class="empty-state compact-empty" hidden><div><h2>没有符合条件的提案</h2><p>请清除搜索或调整筛选。</p></div></section>` : emptyState}</section>`;
   bindLinkedRows();
@@ -2614,10 +2630,21 @@ async function bindRiskControlActions() {
   }));
 }
 
+function tradingTabs(active) {
+  const links = [
+    ['campaigns', '/campaigns', '交易任务'],
+    ['risk', '/risk', '仓位与保护'],
+    ['orders', '/orders', '订单与成交'],
+    ['alerts', '/campaigns/alerts', '异常'],
+  ];
+  return `<div class="section-tabs">${links.map(([key, href, label]) => `<a class="${active === key ? 'active' : ''}" href="${href}" data-link>${label}</a>`).join('')}</div>`;
+}
+
 async function renderCampaignList() {
   const result = await api('/api/campaigns');
   const items = result.data.filter(item => item.environment === 'LIVE');
   main.innerHTML = `<section class="page"><header class="page-head"><div><h1>交易任务</h1><p class="lede">每个交易任务覆盖一笔交易从授权、风险占用和下单意图，到成交、保护、减仓、对账与最终结果的完整生命周期。</p></div><div class="toolbar"><a class="secondary" href="/campaigns/alerts" data-link>运行告警</a><a class="secondary" href="/proposals" data-link>查看提案</a></div></header>
+    ${tradingTabs('campaigns')}
     <div class="stats"><div class="stat"><small>交易任务记录</small><b>${items.length}</b></div><div class="stat"><small>建仓中 / 持仓中</small><b>${items.filter(i => ['OPEN','OPENING'].includes(i.status)).length}</b></div><div class="stat"><small>结果未知</small><b>${items.filter(i => i.status === 'UNKNOWN').length}</b></div><div class="stat"><small>运行范围</small><b style="font-size:14px">生产交易</b></div></div>
     ${items.length ? `<div class="table-wrap campaign-list-table"><table><thead><tr><th>标的 / 方向</th><th>账户 / 场所</th><th>仓位目标</th><th>状态</th><th>最终盈亏</th><th>更新时间</th></tr></thead><tbody>${items.map(item => `<tr data-href="/campaigns/${item.campaign_id}"><td data-label="标的 / 方向"><b>${escapeHtml(item.symbol || '标的未配置')}</b><br><span class="${item.direction === 'LONG' ? 'direction-long' : 'direction-short'}">${escapeHtml(fmtDirection(item.direction))}</span><br><a class="row-link" href="/campaigns/${item.campaign_id}" data-link>${shortId(item.campaign_id)} · 查看详情</a></td><td data-label="账户 / 场所">${escapeHtml(fmtDefaultAccountLabel(item.account_id))}<br><span class="subtle">${escapeHtml(fmtVenueLabel(item.venue))}</span></td><td data-label="仓位目标">${escapeHtml(campaignTargetLabel(item))}</td><td data-label="状态"><b class="status-${escapeHtml(item.status)}">${escapeHtml(fmtStatus(item.status))}</b></td><td data-label="最终盈亏">${escapeHtml(campaignPnlLabel(item, item.final_pnl))}</td><td data-label="更新时间">${fmtDate(item.updated_at)}</td></tr>`).join('')}</tbody></table></div>` : `<section class="empty-state"><div><h2>当前没有交易任务</h2><p>提案通过审核和风险检查后，交易运维人员才能发起开仓。</p></div></section>`}</section>`;
   bindLinkedRows();
@@ -3050,6 +3077,7 @@ async function renderCampaignFacts(mode) {
     ? '当前团队风险政策与每个生产账户范围分开判断；政策正常不代表所有账户都能新增风险。阻塞项会明确列出原因、负责人和下一步。'
     : '这里显示当前确认的数据；能够重新计算的汇总会按最新数据生成。';
   main.innerHTML = `<section class="page"><header class="page-head"><div><p class="eyebrow">生产交易数据</p><h1>${titles[mode]}</h1><p class="lede">${pageLede}</p></div></header>
+    ${tradingTabs(mode)}
     ${mode === 'risk' ? renderRiskControlPanel(riskControls) : ''}
     ${mode === 'risk' && roleNames().includes('SYSTEM_ADMIN') ? `<div class="form-panel compact-form"><h2>只允许收紧风险</h2><p class="safety-note">这些入口只能关闭自动加仓，或把系统切换为“仅允许减仓”；不能从这里恢复新增风险。</p><div class="toolbar"><button class="danger" data-disable-global-add ${riskControls?.auto_add_gate?.status === 'DISABLED' ? 'disabled title="自动加仓已经关闭"' : ''}>${riskControls?.auto_add_gate?.status === 'DISABLED' ? '自动加仓已关闭' : '关闭全局自动加仓'}</button><button class="danger" data-pause-new-risk ${riskControls?.policy?.system_state !== 'NORMAL' ? 'disabled title="新增风险已经暂停"' : ''}>${riskControls?.policy?.system_state !== 'NORMAL' ? '新增风险已暂停' : '暂停所有新增风险'}</button></div></div><div style="height:16px"></div>` : ''}
     ${rows ? `<div class="table-wrap"><table><thead><tr>${headers}</tr></thead><tbody>${rows}</tbody></table></div>` : mode === 'risk' ? (hasCapability('operations.view') ? '<section class="empty-state compact-empty-state"><div><h2>当前没有运行中的风险任务</h2><p>已结束任务不会占用当前风险工作区；可前往交易任务查看完整历史。</p><a class="secondary" href="/campaigns" data-link>查看交易任务</a></div></section>' : '') : '<section class="empty-state"><div><h2>当前没有可展示的数据</h2></div></section>'}</section>`;
@@ -4039,6 +4067,7 @@ async function renderRuntimeAlerts() {
     return `<article class="card exception-card"><div class="exception-card-head"><div><p class="eyebrow">${escapeHtml(severity)}运行告警</p><h2>${escapeHtml(guidance.title)}</h2></div><span class="status-pill status-DENY">${escapeHtml(exceptionCategory(item.code))}</span></div><dl class="definition-grid">${definition('受影响交易任务', shortId(item.campaign_id))}${definition('发生 / 首次可判定', fmtDate(item.occurred_at))}${definition('最近检查', fmtDate(item.last_checked_at || result.as_of))}${definition('具体阻断原因', guidance.copy)}${definition('影响', item.impact)}${definition('负责角色', item.owner_role)}${definition('下一步', item.next_action)}${definition('诊断编号', item.code)}</dl>${item.details?.length ? `<p class="subtle">事实详情：${escapeHtml(item.details.map(formatExceptionDetail).join('；'))}</p>` : ''}<p class="safety-note">${escapeHtml(item.action_unavailable_reason || '详情页不提供解除风控动作。')}</p><a class="primary" href="/campaigns/${item.campaign_id}" data-link>打开受影响交易任务</a></article>`;
   }).join('');
   main.innerHTML = `<section class="page exceptions-page"><header class="page-head"><div><p class="eyebrow">交易任务 · 运行告警详情</p><h1>运行告警</h1><p class="lede">只展示运行中生产交易任务需要人工处理的问题；风险恢复、资金异常和系统健康分别保留在各自页面。</p></div><div class="toolbar"><a class="secondary" href="/campaigns" data-link>返回交易任务</a><button class="secondary" data-refresh>刷新</button></div></header>
+    ${tradingTabs('alerts')}
     <div class="stats exception-stats"><div class="stat"><small>受影响交易任务</small><b class="${affectedCampaigns.size ? 'danger-text' : ''}">${affectedCampaigns.size}</b></div><div class="stat"><small>运行问题</small><b>${items.length}</b></div><div class="stat"><small>结果未知</small><b class="${unknownCount ? 'danger-text' : ''}">${unknownCount}</b></div><div class="stat"><small>数据过期</small><b class="${staleCount ? 'warning-text' : ''}">${staleCount}</b><span>最近检查 ${fmtDate(result.as_of)}</span></div></div>
     ${items.length ? `<div class="exception-grid">${cards}</div>` : `<section class="empty-state"><div><h2>无运行告警 / 当前无需处理</h2><p>检查范围：运行中的生产交易任务；未发现结果未知、数据过期、保护不足或对账差异。已关闭记录不会重新计入当前待办。</p><p class="subtle">最近检查：${fmtDate(result.as_of)}</p><div class="toolbar empty-actions"><a class="secondary" href="/" data-link>返回当前任务</a><a class="primary" href="/campaigns" data-link>查看交易任务</a></div></div></section>`}</section>`;
   document.querySelector('[data-refresh]')?.addEventListener('click', route);
@@ -4111,7 +4140,7 @@ async function renderActualResults() {
   const stateCopy = data.data_status === 'EMPTY'
     ? '当前团队和筛选范围没有已记录的交易结果或风险决策。'
     : `已读取 ${data.coverage.campaign_count} 个交易任务、${data.coverage.closed_campaign_count} 个已平仓结果和 ${data.coverage.risk_event_count} 条风险决策。`;
-  main.innerHTML = `<section class="page results-page"><header class="page-head"><div><p class="eyebrow">${escapeHtml(data.scope.team_name)} · ${resultEnvironmentLabel(environment)} · 已记录历史</p><h1>绩效与风险报表</h1><p class="lede">仅聚合当前 Workspace / Team 及获授权账户的服务端事实。影子、测试网和真实数据严格分开；币种不混算。</p></div><button class="secondary" data-refresh>刷新当前报表</button></header>
+  main.innerHTML = `<section class="page results-page"><header class="page-head"><div><p class="eyebrow">${escapeHtml(data.scope.team_name)} · ${resultEnvironmentLabel(environment)} · 已记录历史</p><h1>复盘</h1><p class="lede">收益、回撤、胜率、盈亏比和风险事件只聚合当前 Workspace / Team 及获授权账户的服务端事实。影子、测试网和真实数据严格分开；币种不混算。</p></div><button class="secondary" data-refresh>刷新当前报表</button></header>
     <article class="source-status ${environment === 'LIVE' ? 'tone-attention' : ''}"><div><p class="eyebrow">数据性质</p><h2>${escapeHtml(resultEnvironmentLabel(environment))}</h2><p>${escapeHtml(resultEnvironmentNotice(data.environment_notice))} ${escapeHtml(stateCopy)}</p></div><span class="status-pill">${escapeHtml(fmtStatus(data.data_status))}</span></article>
     <form id="results-filter-form" class="form-panel compact-form result-filters"><div class="field-grid"><label>环境<select name="environment"><option value="SHADOW" ${environment === 'SHADOW' ? 'selected' : ''}>影子模式</option><option value="TESTNET" ${environment === 'TESTNET' ? 'selected' : ''}>测试网</option><option value="LIVE" ${environment === 'LIVE' ? 'selected' : ''}>真实环境</option></select></label><label>交易所<select name="venue"><option value="">全部</option>${['BINANCE','HYPERLIQUID','OKX','BYBIT'].map(value => `<option value="${value}" ${current.get('venue') === value ? 'selected' : ''}>${escapeHtml(fmtVenueLabel(value))}</option>`).join('')}</select></label><label>账户<input name="account_id" value="${escapeHtml(current.get('account_id') || '')}" maxlength="120" placeholder="精确账户 ID"></label><label>策略<input name="strategy_id" value="${escapeHtml(current.get('strategy_id') || '')}" maxlength="120" placeholder="精确策略 ID"></label><label>策略版本<input name="strategy_version" value="${escapeHtml(current.get('strategy_version') || '')}" maxlength="120" placeholder="精确版本"></label><label>信号源<select name="signal_source_mode"><option value="">全部</option>${['PERPTAPE','WEBHOOK','MANUAL','SYSTEM'].map(value => `<option value="${value}" ${current.get('signal_source_mode') === value ? 'selected' : ''}>${escapeHtml(resultSourceModeLabel(value))}</option>`).join('')}</select></label><label>信号提供方<select name="signal_provider"><option value="">全部</option>${['TRADINGVIEW','MODEL','PERPTAPE'].map(value => `<option value="${value}" ${current.get('signal_provider') === value ? 'selected' : ''}>${escapeHtml(resultSignalProviderLabel(value))}</option>`).join('')}</select></label><label>起始时间<input name="from_time" type="datetime-local" value="${escapeHtml(resultDateTimeInput(current.get('from_time')))}"></label><label>截止时间<input name="to_time" type="datetime-local" value="${escapeHtml(resultDateTimeInput(current.get('to_time')))}"></label></div><div class="form-actions"><a class="secondary" href="/results?environment=${environment}" data-link>清除其他筛选</a><button class="primary" type="submit">应用筛选</button></div></form>
     ${headlineMetrics ? `<div class="stats results-stats">${headlineMetrics}</div>` : '<div class="callout"><b>暂无收益指标。</b><p>只有具备完整 Campaign PnL 真源的记录才会进入聚合。</p></div>'}
@@ -4576,6 +4605,53 @@ function venueScopeOptions(selected = '') {
   return `<option value="" ${selected ? '' : 'selected'}>全部交易所</option>${venues.map(venue => `<option value="${venue}" ${selected === venue ? 'selected' : ''}>${escapeHtml(fmtVenueLabel(venue))}</option>`).join('')}`;
 }
 
+async function renderTeamSettings() {
+  const canReadShadow = hasCapability('venue.view');
+  const canReadNotifications = hasCapability('notification.view');
+  const [shadowResponse, notificationResponse] = await Promise.all([
+    canReadShadow ? api('/api/shadow').catch(() => null) : Promise.resolve(null),
+    canReadNotifications ? api('/api/notifications').catch(() => null) : Promise.resolve(null),
+  ]);
+  const shadow = shadowResponse?.data || null;
+  const blockers = new Set(shadow?.activation?.blockers || []);
+  const enabledNotificationRoutes = (notificationResponse?.routes || []).filter(item => item.enabled);
+  const team = session.active_team;
+  const sourceReady = shadow ? !blockers.has('SIGNAL_SOURCE_REQUIRED') : null;
+  const accountReady = shadow ? !blockers.has('EXCHANGE_ACCOUNT_REQUIRED') : null;
+  const riskReady = shadow ? !blockers.has('RISK_POLICY_REQUIRED') && !blockers.has('RISK_LIMITS_REQUIRED') : null;
+  const notificationReady = notificationResponse ? enabledNotificationRoutes.length > 0 : null;
+  const shadowCycleReady = shadow
+    ? ['SHADOW','LIVE'].includes(shadow.execution_mode) && (shadow.campaigns || []).length > 0
+    : ['SHADOW','LIVE'].includes(team.execution_mode);
+  const step = (number, title, copy, complete) => `<article class="settings-step ${complete ? 'is-complete' : ''}"><span>${complete ? '✓' : number}</span><div><b>${escapeHtml(title)}</b><small>${escapeHtml(copy)}</small></div></article>`;
+  const statusLabel = value => value === true ? '已就绪' : value === false ? '需处理' : '由负责人确认';
+  const statusClass = value => value === true ? 'status-APPROVED' : value === false ? 'status-BLOCKED' : '';
+  const card = ({href, eyebrow, title, copy, status, meta = ''}) => `<a class="settings-card" href="${href}" data-link><div><p class="eyebrow">${escapeHtml(eyebrow)}</p><h3>${escapeHtml(title)}</h3><p>${escapeHtml(copy)}</p></div><div class="settings-card-meta"><span class="status-pill ${statusClass(status)}">${escapeHtml(statusLabel(status))}</span>${meta ? `<span class="subtle">${escapeHtml(meta)}</span>` : ''}</div></a>`;
+  const coreCards = [
+    hasCapability('access.manage') ? card({href:'/admin/users', eyebrow:'访问控制', title:'成员、Agent 与邀请', copy:'在同一入口分配团队角色和精确账户范围；创建者仍不得审核自己的提案。', status:true, meta:'团队管理员'}) : '',
+    hasCapability('signal.view') ? card({href:'/signals', eyebrow:'输入', title:'信号源', copy:'选择 Perptape 或 Webhook；信号最多形成冻结提案，不直接审核或下单。', status:sourceReady, meta:'唯一启用模式'}) : '',
+    hasCapability('venue.view') ? card({href:'/venues', eyebrow:'账户范围', title:'交易账户', copy:'统一管理 Binance、Hyperliquid、OKX 与 Bybit 的多个账户和连接能力。', status:accountReady, meta:'连接与交易分开'}) : '',
+    hasCapability('system.view') ? card({href:'/risk', eyebrow:'服务端真源', title:'风控政策', copy:'确认版本化风险预算、单笔亏损、连续亏损、冷却期和账户限制。', status:riskReady, meta:'超限服务端拒绝'}) : '',
+    hasCapability('notification.view') ? card({href:'/notifications', eyebrow:'团队路由', title:'通知', copy:'配置 Telegram、Slack、飞书 / Lark 和邮件；通知身份没有交易或资金权限。', status:notificationReady, meta:notificationResponse ? `${enabledNotificationRoutes.length} 条启用路由` : '最小权限'}) : '',
+    hasCapability('venue.view') ? card({href:'/shadow', eyebrow:'运行边界', title:'影子 / 真实模式', copy:'先用虚拟资金完成闭环；任何影子操作都不会触发真实订单、资金或签名。', status:shadowCycleReady, meta:team.execution_mode || 'SETUP'}) : '',
+  ].filter(Boolean).join('');
+  const advancedCards = [
+    hasCapability('access.manage') ? card({href:'/admin/agents', eyebrow:'按需启用', title:'AI Agent', copy:'创建团队固定、账户固定的 API 身份；Agent 不接触明文密钥，也不能绕过风控。', status:true, meta:'最小 API 权限'}) : '',
+    hasCapability('capital.view') ? card({href:'/capital', eyebrow:'资金权限可见', title:'高级资金功能', copy:'资金、自动化与直连路径仅向具有资金权限的团队成员显示，全部受 Gate 与最终确认约束。', status:null, meta:'默认关闭真实划转'}) : '',
+    roleNames().includes('SYSTEM_ADMIN') ? card({href:'/positions', eyebrow:'管理员', title:'系统诊断', copy:'查看运行事实、连接异常和恢复条件；正常日常操作不从这里开始。', status:null, meta:'异常时进入'}) : '',
+  ].filter(Boolean).join('');
+  main.innerHTML = `<section class="page settings-page"><header class="page-head"><div><p class="eyebrow">${escapeHtml(session.active_workspace?.name || 'Workspace')} · ${escapeHtml(team.name)}</p><h1>团队设置</h1><p class="lede">这里只管理当前团队的边界与按需能力。日常工作回到“今日、信号、提案、交易、复盘”；未授权能力不会出现。</p></div><a class="secondary" href="/" data-link>返回今日</a></header>
+    <section><div class="section-heading"><div><p class="eyebrow">首次就绪 · 四步</p><h2>先完成影子闭环，再考虑真实模式</h2></div><span class="status-pill ${shadowCycleReady ? 'status-APPROVED' : 'status-BLOCKED'}">${shadowCycleReady ? '影子闭环已建立' : '继续安全配置'}</span></div><div class="settings-progress">
+      ${step(1, '创建团队', 'Workspace 与 Team 隔离边界已建立。', true)}
+      ${step(2, '接入信号与账户', sourceReady && accountReady ? '唯一信号源与至少一个精确账户已就绪。' : '选择一个信号源并登记一个交易账户。', sourceReady === true && accountReady === true)}
+      ${step(3, '确认风控与通知', riskReady && notificationReady ? '风险政策与团队通知路由已确认。' : '保存默认风控并启用至少一条通知路由。', riskReady === true && notificationReady === true)}
+      ${step(4, '完成影子提案闭环', shadowCycleReady ? '已存在隔离的影子交易任务记录。' : '进入影子模式，完成信号、提案、独立审核、风控与模拟成交。', shadowCycleReady)}
+    </div></section>
+    <div class="settings-groups"><section><div class="section-heading"><div><p class="eyebrow">团队基础</p><h2>当前角色可管理的设置</h2></div></div><div class="settings-grid">${coreCards || '<article class="card"><h3>当前没有设置权限</h3><p class="subtle">由团队管理员完成配置；你的日常任务入口保持可用。</p></article>'}</div></section>
+    ${advancedCards ? `<section><div class="section-heading"><div><p class="eyebrow">按需能力</p><h2>需要时再启用</h2><p>这些能力不会进入主导航，也不会因为代码存在而自动开放。</p></div></div><div class="settings-grid">${advancedCards}</div></section>` : ''}</div>
+    <p class="safety-note">界面收敛不改变服务端权限、独立审核、团队与账户隔离、幂等、版本化快照、审计、风控及 fail-closed 行为。</p></section>`;
+}
+
 async function renderAccessManagement() {
   const result = await api('/api/admin/users');
   const members = result.data;
@@ -4595,6 +4671,7 @@ async function renderAccessManagement() {
       <div class="form-error" role="alert"></div>${member.is_current_user ? '' : '<div class="form-actions"><button class="secondary">保存权限</button></div>'}</form></details>`;
   }).join('');
   main.innerHTML = `<section class="page access-page"><header class="page-head"><div><p class="eyebrow">${escapeHtml(activeWorkspace?.name || 'Workspace')} · ${escapeHtml(activeTeam?.name || 'Team')}</p><h1>团队成员与权限</h1><p class="lede">岗位、账户范围和交易所范围只在当前团队生效。同一用户加入另一个团队时必须重新分配最小权限。</p></div><span class="status-pill">${members.filter(item => item.active).length} 名启用成员</span></header>
+    <div class="section-tabs"><a class="active" href="/admin/users" data-link>成员</a><a href="/admin/agents" data-link>Agent</a><a href="/settings" data-link>团队设置</a></div>
     ${activeTeam && !activeTeam.trading_enabled ? '<article class="home-status tone-attention"><div><p class="eyebrow">安全配置阶段</p><h2>当前仅开放团队管理</h2><p>业务实体尚未完成团队归属，服务端不会让这个新团队读取默认团队的提案、账户、订单或报表。真实下单、资金、签名和广播保持关闭。</p></div><a class="secondary" href="/" data-link>查看团队状态</a></article>' : ''}
     <article class="card access-principles"><h2>权限分离原则</h2><div class="access-principle-grid"><p><b>审核与发起分开</b><span>审核人不能审核自己的提案；提案发起人不会自动获得执行权限。</span></p><p><b>交易与资金分开</b><span>交易运维人员看不到资金中心；系统管理员拥有最高管理权限，但资金动作仍受实时校验、最终确认和安全开关约束。</span></p><p><b>身份与权限分开</b><span>密码只用于身份验证；岗位和账户范围仍由独立授权控制。</span></p></div></article>
     ${scopeCreationPanels({compact:true})}
@@ -4683,6 +4760,7 @@ async function renderAgentManagement(credentialResult = null) {
   }).join('');
   const unavailable = accounts.length === 0;
   main.innerHTML = `<section class="page access-page agent-page"><header class="page-head"><div><p class="eyebrow">${escapeHtml(session.active_workspace?.name || 'Workspace')} · ${escapeHtml(session.active_team?.name || 'Team')}</p><h1>AI Agent 权限</h1><p class="lede">为模型或自动化工作器创建团队固定、账户固定的 API 身份。Agent 与用户共享同一权限、独立审核、幂等和审计真源。</p></div><span class="status-pill">${agents.filter(item => item.active).length} 个启用 Agent</span></header>
+    <div class="section-tabs"><a href="/admin/users" data-link>成员</a><a class="active" href="/admin/agents" data-link>Agent</a><a href="/settings" data-link>团队设置</a></div>
     ${agentCredentialReveal(credentialResult)}
     <article class="card access-principles"><h2>不可穿透的 Agent 边界</h2><div class="access-principle-grid"><p><b>最小角色</b><span>仅观察、提案、独立审核；不授予交易、风控、资金或管理岗位。</span></p><p><b>独立审核</b><span>创建者仍不得审核自己的提案；服务端在角色判断前执行同一创建者校验。</span></p><p><b>密钥隔离</b><span>Token 仅首次响应显示；Agent 不读取交易所明文密钥，也不能生成人工动作授权。</span></p></div></article>
     ${unavailable ? '<article class="home-status tone-attention"><div><p class="eyebrow">创建受阻</p><h2>先登记一个团队交易账户</h2><p>Agent 必须绑定现有的精确账户与交易所范围；服务端不会创建通配范围或猜测账户。</p></div><a class="primary" href="/venues" data-link>登记交易账户</a></article>' : ''}
@@ -4898,13 +4976,29 @@ async function submitNamedForm(event, path) { event.preventDefault(); await camp
 
 function navigate(path) { history.pushState({}, '', path); route(); }
 function updateActiveNav() {
+  const path = location.pathname;
+  const activeGroup = path === '/'
+    ? 'today'
+    : path === '/signals' || path.startsWith('/opportunities')
+      ? 'signals'
+      : path === '/reviews' || path === '/proposals' || path.startsWith('/proposals/')
+        ? 'proposals'
+        : path === '/campaigns' || path.startsWith('/campaigns/') || ['/orders','/risk'].includes(path)
+          ? 'trading'
+          : path === '/results'
+            ? 'review'
+            : null;
   document.querySelectorAll('nav a').forEach((link) => {
-    const href = link.getAttribute('href');
-    const active = location.pathname === href || (href === '/venues' && location.pathname.startsWith('/venues/'));
+    const active = link.dataset.navGroup === activeGroup;
     link.classList.toggle('active', active);
     if (active) link.setAttribute('aria-current', 'page');
     else link.removeAttribute('aria-current');
   });
+  const settingsPaths = ['/settings','/admin/users','/admin/agents','/venues','/shadow','/notifications','/capital','/positions'];
+  const settingsActive = settingsPaths.includes(path) || path.startsWith('/venues/');
+  teamSettingsLink.classList.toggle('active', settingsActive);
+  if (settingsActive) teamSettingsLink.setAttribute('aria-current', 'page');
+  else teamSettingsLink.removeAttribute('aria-current');
 }
 
 document.addEventListener('click', (event) => {

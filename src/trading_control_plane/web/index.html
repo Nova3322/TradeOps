@@ -8,7 +8,7 @@
     <link rel="manifest" href="/manifest.webmanifest">
     <link rel="icon" href="/assets/tradingops-logo.png" type="image/png">
     <link rel="apple-touch-icon" href="/assets/tradingops-logo.png">
-    <link rel="stylesheet" href="/assets/styles.css?v=62">
+    <link rel="stylesheet" href="/assets/styles.css?v=63">
     <title>交易控制台</title>
   </head>
   <body>
@@ -24,6 +24,7 @@
             <select id="scope-switcher" class="scope-switcher" aria-label="当前 Workspace 和团队"></select>
           </label>
           <span id="environment-badge" class="env-badge">控制台</span>
+          <a id="team-settings-link" class="team-settings-link" href="/settings" data-link hidden>团队设置</a>
           <button id="language-toggle" class="icon-button language-button" type="button" aria-label="切换中英文">中英切换</button>
           <button id="theme-toggle" class="icon-button theme-button" type="button" aria-label="切换主题"><span aria-hidden="true">◐</span><span data-theme-label>主题</span></button>
           <div id="identity-chip" class="identity-chip" hidden></div>
@@ -34,26 +35,12 @@
       <aside id="sidebar" class="sidebar" hidden>
         <nav aria-label="主导航">
           <div class="nav-section" data-nav-section>
-            <p class="nav-section-label">工作台</p>
-            <a href="/" data-link><span>⌂</span>当前任务</a>
-            <a href="/opportunities" data-link data-nav-capability="opportunity.view"><span>⌁</span>实时机会</a>
-            <a href="/reviews" data-link data-nav-capability="proposal.review"><span>✓</span>审核队列</a>
-            <a href="/campaigns" data-link data-nav-capability="operations.view"><span>◎</span>交易任务</a>
-            <a href="/results" data-link data-nav-capability="results.view"><span>▦</span>绩效报表</a>
-          </div>
-          <div class="nav-section" data-nav-section>
-            <p class="nav-section-label">团队配置</p>
-            <a href="/signals" data-link data-nav-capability="signal.view"><span>⌖</span>信号源</a>
-            <a href="/venues" data-link data-nav-capability="venue.view"><span>◫</span>交易账户</a>
-            <a href="/shadow" data-link data-nav-capability="venue.view"><span>◐</span>影子模式</a>
-            <a href="/notifications" data-link data-nav-capability="notification.view"><span>◌</span>通知中心</a>
-          </div>
-          <div class="nav-section" data-nav-section>
-            <p class="nav-section-label">治理与安全</p>
-            <a href="/positions" data-link data-nav-capability="system.view"><span>↕</span>系统状态</a>
-            <a href="/capital" data-link data-nav-capability="capital.view"><span>¤</span>资金中心</a>
-            <a href="/admin/users" data-link data-nav-capability="access.manage"><span>◇</span>成员权限</a>
-            <a href="/admin/agents" data-link data-nav-capability="access.manage"><span>◈</span>AI Agent</a>
+            <p class="nav-section-label">用户任务</p>
+            <a href="/" data-link data-nav-group="today"><span>⌂</span>今日</a>
+            <a href="/signals" data-link data-nav-group="signals" data-nav-capability="signal.view"><span>⌁</span>信号</a>
+            <a href="/proposals" data-link data-nav-group="proposals" data-nav-capability="proposal.view"><span>◇</span>提案</a>
+            <a href="/campaigns" data-link data-nav-group="trading" data-nav-capability="operations.view"><span>◎</span>交易</a>
+            <a href="/results" data-link data-nav-group="review" data-nav-capability="results.view"><span>▦</span>复盘</a>
           </div>
         </nav>
         <div class="sidebar-foot">
@@ -116,6 +103,6 @@
       </form>
     </dialog>
     <div id="toast" class="toast" role="status" aria-live="polite"></div>
-    <script type="module" src="/assets/app.js?v=143"></script>
+    <script type="module" src="/assets/app.js?v=144"></script>
   </body>
 </html>
