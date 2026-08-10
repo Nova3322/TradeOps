@@ -144,7 +144,11 @@ def connection_capability_matrix(
                 configured=freqtrade_configured,
             ),
             "external_side_effect": "ORDER_SEND",
-            "boundary": "requires process switch, database gate, authorization and fresh risk",
+            "boundary": (
+                "requires exact-account ELIGIBLE status, verified encrypted credentials, "
+                "continuous read-only binding, process switch, database gate, sender lease, "
+                "authorization and fresh risk"
+            ),
         },
         {
             "capability": "OKX_BYBIT_EXECUTION",

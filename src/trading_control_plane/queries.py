@@ -573,6 +573,7 @@ class TradingQueries:
                 projection = self._exchange_account_projection(item)
                 projection["permissions"] = {
                     "can_manage": granted(item, "account.manage"),
+                    "can_manage_trading": granted(item, "account.manage"),
                     "can_manage_credentials": granted(item, "account.credentials.manage"),
                     "can_verify_connection": granted(item, "account.credentials.manage"),
                 }
@@ -595,20 +596,27 @@ class TradingQueries:
         credential_state = "UNCONFIGURED" if item.credential_version == 0 else "CONFIGURED"
         if item.trading_status == "ELIGIBLE":
             trading_reason = "account policy is eligible; global and task gates still apply"
+        elif item.trading_status == "BLOCKED":
+            trading_reason = (
+                "account eligibility is blocked because a required connection "
+                "or runtime fact was lost"
+            )
         else:
             trading_reason = (
                 "trading capability is disabled; connection status never enables order sending"
             )
-        next_action = (
-            "add encrypted credentials"
-            if credential_state == "UNCONFIGURED"
-            else "run a supported no-side-effect connection verification"
-            if item.connection_status != "VERIFIED"
-            else "enable the database-bound continuous read-only sync"
-            if item.venue in {"BINANCE", "HYPERLIQUID", "OKX", "BYBIT"}
-            and not item.runtime_sync_enabled
-            else "keep trading disabled until risk and live-send gates are explicitly approved"
-        )
+        if credential_state == "UNCONFIGURED":
+            next_action = "add encrypted credentials"
+        elif item.connection_status != "VERIFIED":
+            next_action = "run a supported no-side-effect connection verification"
+        elif not item.runtime_sync_enabled:
+            next_action = "enable the database-bound continuous read-only sync"
+        elif item.venue not in {"BINANCE", "HYPERLIQUID"}:
+            next_action = "wait for an implemented trading connector; keep trading disabled"
+        elif item.trading_status == "ELIGIBLE":
+            next_action = "verify global, sender, risk, and task gates before LIVE execution"
+        else:
+            next_action = "explicitly enable exact-account trading eligibility when approved"
         return {
             "exchange_account_id": str(item.exchange_account_id),
             "team_id": str(item.team_id),
@@ -627,7 +635,7 @@ class TradingQueries:
             },
             "trading": {
                 "status": item.trading_status,
-                "enabled": False,
+                "enabled": item.trading_status == "ELIGIBLE",
                 "reason": trading_reason,
             },
             "credentials": {

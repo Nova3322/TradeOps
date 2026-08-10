@@ -70,6 +70,7 @@ def test_connection_matrix_distinguishes_one_time_checks_from_continuous_runtime
     )
     assert matrix["OKX_CONTINUOUS_FACTS"]["deployment_state"] == "DISABLED"
     assert matrix["OKX_BYBIT_EXECUTION"]["deployment_state"] == "UNAVAILABLE"
+    assert "exact-account ELIGIBLE status" in matrix["FREQTRADE_EXECUTION"]["boundary"]
     assert matrix["CAPITAL_SIGNING_BROADCAST"]["implementation"] == "NOT_IN_CONTROL_PLANE"
 
 

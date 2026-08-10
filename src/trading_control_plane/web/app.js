@@ -749,9 +749,14 @@ const fmtOperationalCopy = (value) => String(value ?? '—')
   .replaceAll('安全开关 阻断', '安全开关阻断');
 const exchangeAccountCopy = {
   'account policy is eligible; global and task gates still apply':'账户政策允许；全局与任务安全开关仍需逐项通过',
+  'account eligibility is blocked because a required connection or runtime fact was lost':'账户交易资格已阻断；必需的连接或运行事实已失效',
   'trading capability is disabled; connection status never enables order sending':'交易能力已关闭；连接状态不会开启下单',
   'add encrypted credentials':'添加加密凭据',
   'run a supported no-side-effect connection verification':'运行无副作用只读连接验证',
+  'enable the database-bound continuous read-only sync':'启用数据库凭据绑定的连续只读同步',
+  'wait for an implemented trading connector; keep trading disabled':'等待交易写入适配器实现；继续保持交易关闭',
+  'verify global, sender, risk, and task gates before LIVE execution':'真实执行前逐项确认全局、发送者、风控与任务安全开关',
+  'explicitly enable exact-account trading eligibility when approved':'批准后显式启用当前账户的交易资格',
   'keep trading disabled until risk and live-send gates are explicitly approved':'保持交易关闭，直至风险与真实发送安全开关获得明确批准',
 };
 const fmtExchangeAccountCopy = (value) => currentLanguage === 'en'
@@ -4309,7 +4314,7 @@ function exchangeAccountRegistry(registry) {
     const permissions = item.permissions || {};
     const connector = item.runtime_binding?.connection_verification_connector === 'IMPLEMENTED' ? '无副作用验证适配器已实现' : '验证适配器待实现';
     const connection = item.connection?.status === 'VERIFIED' ? '已验证' : item.connection?.status === 'NOT_VERIFIED' ? '待验证' : item.connection?.status === 'UNCONFIGURED' ? '未配置' : fmtStatus(item.connection?.status);
-    const trading = item.trading?.enabled ? '可交易' : '交易关闭';
+    const trading = item.trading?.enabled ? '账户级已允许' : item.trading?.status === 'BLOCKED' ? '资格已阻断' : '交易关闭';
     const hint = credentials.key_hint || '无凭据提示';
     const verificationHelpId = `connection-help-${item.exchange_account_id}`;
     const canRunVerification = permissions.can_verify_connection && credentials.state === 'CONFIGURED' && item.active;
@@ -4325,8 +4330,19 @@ function exchangeAccountRegistry(registry) {
     const runtimeControl = permissions.can_manage_credentials
       ? `<form class="exchange-runtime-form" data-exchange-account-id="${escapeHtml(item.exchange_account_id)}" data-version="${item.version}" data-enabled="${runtimeBound ? 'true' : 'false'}"><button class="secondary" type="submit" aria-describedby="${runtimeHelpId}" ${canConfigureRuntime ? '' : 'disabled'}>${runtimeBound ? '停用连续只读同步' : '启用连续只读同步'}</button><small id="${runtimeHelpId}">${escapeHtml(runtimeReason)}</small><div class="form-error" role="alert"></div></form>`
       : '';
+    const tradingHelpId = `trading-help-${item.exchange_account_id}`;
+    const tradingEligible = item.trading?.status === 'ELIGIBLE';
+    const tradingConfigured = item.trading?.status !== 'DISABLED';
+    const writeConnector = item.runtime_binding?.trading_connector === 'FREQTRADE_EXTERNAL';
+    const teamLive = session?.active_team?.execution_mode === 'LIVE' && session.active_team?.trading_enabled;
+    const tradingReady = writeConnector && item.active && item.connection?.status === 'VERIFIED' && runtimeBound && teamLive;
+    const canConfigureTrading = permissions.can_manage_trading && (tradingConfigured || tradingReady);
+    const tradingReason = !permissions.can_manage_trading ? '当前角色没有该账户范围的账户管理权限。' : tradingConfigured ? '停用会立即撤销当前账户的交易资格；不会改变连接与只读同步。' : !writeConnector ? '该交易所的交易写入适配器尚未实现，服务端保持阻断。' : !teamLive ? '当前团队尚未进入真实模式并启用交易。' : item.connection?.status !== 'VERIFIED' ? '先完成当前凭据版本的只读连接验证。' : !runtimeBound ? '先启用连续只读同步，确保风控读取当前账户事实。' : '只启用当前团队与账户的交易资格；全局真实发送、发送者租约、风控、任务和进程安全开关仍分别生效。';
+    const tradingControl = permissions.can_manage_trading
+      ? `<form class="exchange-trading-form" data-exchange-account-id="${escapeHtml(item.exchange_account_id)}" data-version="${item.version}" data-enabled="${tradingEligible ? 'true' : 'false'}"><button class="${tradingEligible ? 'secondary' : 'danger'}" type="submit" aria-describedby="${tradingHelpId}" ${canConfigureTrading ? '' : 'disabled'}>${tradingConfigured ? '停用账户交易资格' : '启用账户交易资格'}</button><small id="${tradingHelpId}">${escapeHtml(tradingReason)}</small><div class="form-error" role="alert"></div></form>`
+      : '';
     const credentialControl = permissions.can_manage_credentials ? `<details class="account-credential-rotate"><summary><span><b>${credentials.state === 'CONFIGURED' ? '轮换加密凭据' : '添加加密凭据'}</b><small>保存后连接重置为待验证，交易能力保持关闭</small></span><strong>展开</strong></summary><form class="toolbox-content exchange-credential-form" data-exchange-account-id="${escapeHtml(item.exchange_account_id)}" data-venue="${escapeHtml(item.venue)}" data-version="${item.version}"><div class="field-grid">${exchangeCredentialFields(item.venue)}</div><p class="safety-note">凭据只写入 AES-256-GCM 加密信封；页面和 API 只返回脱敏元数据。保存凭据不代表连接成功，也不会开启下单、签名或广播。</p><div class="form-error" role="alert"></div><div class="form-actions"><button class="primary">保存新凭据版本</button></div></form></details>` : '';
-    return `<article class="card exchange-account-card"><div class="card-heading"><div><p class="eyebrow">${escapeHtml(item.venue)} · ${escapeHtml(item.account_id)}</p><h2>${escapeHtml(item.label)}</h2></div><span class="status-pill ${item.active ? 'status-APPROVED' : 'status-DISABLED'}">${item.active ? '已登记' : '已停用'}</span></div><div class="account-capability-split"><div><small>连接能力</small><b>${escapeHtml(connection)}</b><span>${escapeHtml(connector)} · ${item.runtime_binding?.bound ? '连续读取已配置' : '连续读取未配置'}</span></div><div><small>交易能力</small><b>${escapeHtml(trading)}</b><span>${escapeHtml(fmtExchangeAccountCopy(item.trading?.reason || '连接不会自动开启交易'))}</span></div></div><dl class="definition-grid">${definition('凭据状态', credentials.state === 'CONFIGURED' ? `已加密 · ${hint}` : '未配置')}${definition('最近连接检查', fmtDate(item.connection?.checked_at))}${definition('最近验证成功', fmtDate(item.connection?.last_verified_at))}${definition('连接错误代码', item.connection?.error_code || '无')}${definition('凭据 / 账户版本', `${credentials.version || 0} / ${item.version}`)}${definition('下一步', fmtExchangeAccountCopy(item.next_action))}</dl>${verificationControl}${runtimeControl}${credentialControl}</article>`;
+    return `<article class="card exchange-account-card"><div class="card-heading"><div><p class="eyebrow">${escapeHtml(item.venue)} · ${escapeHtml(item.account_id)}</p><h2>${escapeHtml(item.label)}</h2></div><span class="status-pill ${item.active ? 'status-APPROVED' : 'status-DISABLED'}">${item.active ? '已登记' : '已停用'}</span></div><div class="account-capability-split"><div><small>连接能力</small><b>${escapeHtml(connection)}</b><span>${escapeHtml(connector)} · ${item.runtime_binding?.bound ? '连续读取已配置' : '连续读取未配置'}</span></div><div><small>交易能力</small><b>${escapeHtml(trading)}</b><span>${escapeHtml(fmtExchangeAccountCopy(item.trading?.reason || '连接不会自动开启交易'))}</span></div></div><dl class="definition-grid">${definition('凭据状态', credentials.state === 'CONFIGURED' ? `已加密 · ${hint}` : '未配置')}${definition('最近连接检查', fmtDate(item.connection?.checked_at))}${definition('最近验证成功', fmtDate(item.connection?.last_verified_at))}${definition('连接错误代码', item.connection?.error_code || '无')}${definition('凭据 / 账户版本', `${credentials.version || 0} / ${item.version}`)}${definition('下一步', fmtExchangeAccountCopy(item.next_action))}</dl>${verificationControl}${runtimeControl}${tradingControl}${credentialControl}</article>`;
   }).join('');
   const create = registry.can_manage ? `<details class="card exchange-account-create"><summary><span><b>接入交易账户</b><small>同一交易所可登记多个独立账户；每个账户单独授权、风控与审计</small></span><strong>展开</strong></summary><form id="exchange-account-form" class="toolbox-content"><div class="field-grid"><label>交易所<select name="venue"><option value="BINANCE">Binance</option><option value="HYPERLIQUID">Hyperliquid</option><option value="OKX">OKX</option><option value="BYBIT">Bybit</option></select></label><label>内部账户 ID<input name="account_id" maxlength="120" placeholder="例如 binance-team-a-01" required></label><label>显示名称<input name="label" maxlength="120" placeholder="例如 主策略账户"></label></div><fieldset class="exchange-credential-fields"><legend>加密凭据</legend><div class="field-grid" data-create-credential-fields>${exchangeCredentialFields('BINANCE')}</div></fieldset><p class="safety-note">创建只登记当前团队的账户边界。连接验证与交易资格分别计算；交易、资金、签名和广播保持关闭。</p><div class="form-error" role="alert"></div><div class="form-actions"><button class="primary">登记并加密保存</button></div></form></details>` : '';
   return `<section class="exchange-account-registry"><div class="section-heading"><div><p class="eyebrow">当前团队 · 账户真源</p><h2>账户与能力边界</h2><p>登记、连接、交易是三个不同事实。账户已登记或凭据已保存，都不表示连接成功，更不表示可下单。</p></div><span class="status-pill">${accounts.length} 个账户</span></div>${create}${cards ? `<div class="exchange-account-grid">${cards}</div>` : '<div class="callout tone-attention"><b>当前团队没有交易账户。</b><p>由系统管理员登记第一个账户；缺少账户、凭据或连接事实时保持安全阻断。</p></div>'}</section>`;
@@ -4377,6 +4393,22 @@ function bindExchangeAccountForms() {
     try {
       await withPending(event.submitter, enabled ? '绑定中…' : '停用中…', () => api(`/api/exchange-accounts/${form.dataset.exchangeAccountId}/runtime-sync`, {method:'PUT', body:JSON.stringify(body)}));
       showToast(enabled ? '连续只读同步已绑定；交易能力仍保持关闭' : '连续只读同步已停用');
+      await route();
+    } catch (error) { showApiError(error, form.querySelector('.form-error')); }
+  }));
+  document.querySelectorAll('.exchange-trading-form').forEach(form => form.addEventListener('submit', async event => {
+    event.preventDefault();
+    const enabled = form.dataset.enabled !== 'true';
+    const confirmed = await confirmAction({
+      title: enabled ? '启用当前账户的交易资格？' : '停用当前账户的交易资格？',
+      message: enabled ? '只启用当前团队与账户的资格。全局真实发送、发送者租约、风控、任务和进程安全开关仍会独立阻断；本操作不会下单、签名或广播。' : '当前账户会立即失去交易资格；连接与只读同步保持不变，任何后续真实发送都由服务端拒绝。',
+      confirmLabel: enabled ? '确认启用账户资格' : '确认停用账户资格',
+    });
+    if (!confirmed) return;
+    const body = {enabled, expected_version:Number(form.dataset.version), idempotency_key:crypto.randomUUID()};
+    try {
+      await withPending(event.submitter, enabled ? '启用中…' : '停用中…', () => api(`/api/exchange-accounts/${form.dataset.exchangeAccountId}/trading-eligibility`, {method:'PUT', body:JSON.stringify(body)}));
+      showToast(enabled ? '账户交易资格已启用；其他真实执行安全开关保持不变' : '账户交易资格已停用');
       await route();
     } catch (error) { showApiError(error, form.querySelector('.form-error')); }
   }));

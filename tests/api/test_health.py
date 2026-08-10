@@ -112,7 +112,7 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
 
     assert response.status_code == 200
     assert "交易控制台" in response.text
-    assert "/assets/app.js?v=146" in response.text
+    assert "/assets/app.js?v=147" in response.text
     assert 'href="/signals"' in response.text
     assert "/assets/styles.css?v=64" in response.text
     assert 'href="/assets/tradingops-logo.png" type="image/png"' in response.text
@@ -274,6 +274,12 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
     assert "LOCAL:'本地运行'" in app_javascript.text
     assert "fmtExchangeAccountCopy(item.next_action)" in app_javascript.text
     assert "交易能力已关闭；连接状态不会开启下单" in app_javascript.text  # noqa: RUF001
+    assert "exchange-trading-form" in app_javascript.text
+    assert "/trading-eligibility" in app_javascript.text
+    assert (
+        "全局真实发送、发送者租约、风控、任务和进程安全开关仍会独立阻断"
+        in app_javascript.text
+    )
     assert "这是合成事实，不是交易所成交或真实收益" in app_javascript.text
     assert ".map(resultRiskReasonLabel)" in app_javascript.text
     assert "resultSignalProviderLabel(value)" in app_javascript.text
@@ -472,7 +478,7 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
 
     service_worker = get(app, "/sw.js")
     assert service_worker.status_code == 200
-    assert "trading-shell-v118" in service_worker.text
+    assert "trading-shell-v119" in service_worker.text
     assert "/assets/tradingops-logo.png" in service_worker.text
     assert "/assets/tradingops-icon.svg" in service_worker.text
     assert "/assets/icon.svg" not in service_worker.text

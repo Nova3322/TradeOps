@@ -367,6 +367,103 @@ class FakeExchangeConnectionVerifier:
         return self.outcomes[venue]
 
 
+def test_account_trading_eligibility_api_uses_exact_version_and_runtime_boundary(
+    database: Database,
+) -> None:
+    now = datetime.now(UTC)
+    TradingService(database).bootstrap_admin("trading-eligibility-api-admin", now=now)
+    verifier = FakeExchangeConnectionVerifier(
+        {"BINANCE": ConnectionProbeResult(True, None)}
+    )
+    settings = Settings(
+        environment="test",
+        database_url=str(database.engine.url),
+        allow_mock_identity=True,
+        session_signing_secret="trading-eligibility-api-secret-long-enough",  # noqa: S106
+        credential_encryption_key=encryption_key(),
+        public_base_url="http://test",
+        _env_file=None,
+    )
+    app = create_app(
+        settings,
+        database,
+        PerptapeClient(
+            base_url="https://perptape.com",
+            api_key=None,
+            contract_version="breakouts-v1",
+            cache_ttl=timedelta(minutes=1),
+        ),
+        exchange_connection_verifier=verifier,
+    )
+
+    async def scenario() -> None:
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            login = await client.post(
+                "/api/auth/mock/login",
+                json={"username": "trading-eligibility-api-admin"},
+            )
+            assert login.status_code == 200
+            created = await client.post(
+                "/api/exchange-accounts",
+                json={
+                    "account_id": "binance-api-eligible",
+                    "venue": "BINANCE",
+                    "label": "Binance API Eligible",
+                    "credentials": {"api_key": "key", "api_secret": "secret"},
+                    "idempotency_key": "create-api-eligible",
+                },
+            )
+            assert created.status_code == 200, created.text
+            account_id = created.json()["exchange_account_id"]
+            verified = await client.post(
+                f"/api/exchange-accounts/{account_id}/connection-verifications",
+                json={"expected_version": 1, "idempotency_key": "verify-api-eligible"},
+            )
+            assert verified.status_code == 200, verified.text
+            runtime = await client.put(
+                f"/api/exchange-accounts/{account_id}/runtime-sync",
+                json={
+                    "enabled": True,
+                    "expected_version": verified.json()["version"],
+                    "idempotency_key": "bind-api-eligible",
+                },
+            )
+            assert runtime.status_code == 200, runtime.text
+            enabled_payload = {
+                "enabled": True,
+                "expected_version": runtime.json()["version"],
+                "idempotency_key": "enable-api-eligible",
+            }
+            enabled = await client.put(
+                f"/api/exchange-accounts/{account_id}/trading-eligibility",
+                json=enabled_payload,
+            )
+            assert enabled.status_code == 200, enabled.text
+            assert enabled.json()["trading_status"] == "ELIGIBLE"
+            assert enabled.json()["trading_enabled"] is True
+            replay = await client.put(
+                f"/api/exchange-accounts/{account_id}/trading-eligibility",
+                json=enabled_payload,
+            )
+            assert replay.status_code == 200
+            assert replay.json()["version"] == enabled.json()["version"]
+
+            unbound = await client.put(
+                f"/api/exchange-accounts/{account_id}/runtime-sync",
+                json={
+                    "enabled": False,
+                    "expected_version": enabled.json()["version"],
+                    "idempotency_key": "unbind-api-eligible",
+                },
+            )
+            assert unbound.status_code == 200, unbound.text
+            item = unbound.json()["data"]["data"][0]
+            assert item["trading"]["status"] == "BLOCKED"
+            assert item["trading"]["enabled"] is False
+
+    asyncio.run(scenario())
+
+
 def test_four_venue_connection_verification_is_scoped_idempotent_and_never_enables_trading(
     database: Database,
 ) -> None:
@@ -589,6 +686,195 @@ def test_connection_result_is_not_committed_after_credential_rotation(database: 
     assert projection["connection"]["status"] == "NOT_VERIFIED"
     assert projection["connection"]["checked_at"] is None
     assert projection["trading"]["enabled"] is False
+
+
+def test_account_trading_eligibility_is_versioned_idempotent_and_fails_closed(
+    database: Database,
+) -> None:
+    now = datetime.now(UTC)
+    service = TradingService(database, credential_encryption_key=encryption_key())
+    admin = service.bootstrap_admin("trading-eligibility-admin", now=now)
+    exchange_account_id = service.create_exchange_account(
+        actor_id=admin,
+        account_id="binance-live-eligible",
+        venue="BINANCE",
+        label="Binance Live Eligible",
+        credentials={"api_key": "fixture-key", "api_secret": "fixture-secret"},
+        idempotency_key="create-trading-eligible-account",
+        now=now,
+    )
+    command, replay = service.prepare_exchange_account_connection_verification(
+        exchange_account_id,
+        actor_id=admin,
+        expected_version=1,
+        idempotency_key="verify-trading-eligible-account",
+    )
+    assert replay is None and command is not None
+    verified = service.record_exchange_account_connection_verification(
+        command,
+        ConnectionProbeResult(True, None),
+        actor_id=admin,
+        idempotency_key="verify-trading-eligible-account",
+        now=now + timedelta(seconds=1),
+    )
+    runtime = service.configure_exchange_account_runtime_sync(
+        exchange_account_id,
+        actor_id=admin,
+        enabled=True,
+        expected_version=int(verified["version"]),
+        idempotency_key="bind-trading-eligible-account",
+        now=now + timedelta(seconds=2),
+    )
+    eligible = service.configure_exchange_account_trading(
+        exchange_account_id,
+        actor_id=admin,
+        enabled=True,
+        expected_version=int(runtime["version"]),
+        idempotency_key="enable-exact-account-trading",
+        now=now + timedelta(seconds=3),
+    )
+    assert eligible == {
+        "exchange_account_id": str(exchange_account_id),
+        "trading_status": "ELIGIBLE",
+        "trading_enabled": True,
+        "version": 4,
+    }
+    assert service.configure_exchange_account_trading(
+        exchange_account_id,
+        actor_id=admin,
+        enabled=True,
+        expected_version=int(runtime["version"]),
+        idempotency_key="enable-exact-account-trading",
+        now=now + timedelta(seconds=4),
+    ) == eligible
+    projected = TradingQueries(database).exchange_accounts(admin)["data"][0]
+    assert projected["trading"]["status"] == "ELIGIBLE"
+    assert projected["trading"]["enabled"] is True
+    assert projected["permissions"]["can_manage_trading"] is True
+
+    disabled_runtime = service.configure_exchange_account_runtime_sync(
+        exchange_account_id,
+        actor_id=admin,
+        enabled=False,
+        expected_version=int(eligible["version"]),
+        idempotency_key="unbind-trading-eligible-account",
+        now=now + timedelta(seconds=5),
+    )
+    assert disabled_runtime["version"] == 5
+    blocked = TradingQueries(database).exchange_accounts(admin)["data"][0]
+    assert blocked["trading"] == {
+        "status": "BLOCKED",
+        "enabled": False,
+        "reason": (
+            "account eligibility is blocked because a required connection or runtime fact was lost"
+        ),
+    }
+    with pytest.raises(DomainRejected, match="ACCOUNT_TRADING_NOT_READY"):
+        service.configure_exchange_account_trading(
+            exchange_account_id,
+            actor_id=admin,
+            enabled=True,
+            expected_version=int(disabled_runtime["version"]),
+            idempotency_key="unsafe-reenable-account-trading",
+            now=now + timedelta(seconds=6),
+        )
+    rebound = service.configure_exchange_account_runtime_sync(
+        exchange_account_id,
+        actor_id=admin,
+        enabled=True,
+        expected_version=int(disabled_runtime["version"]),
+        idempotency_key="rebind-trading-eligible-account",
+        now=now + timedelta(seconds=7),
+    )
+    reeligible = service.configure_exchange_account_trading(
+        exchange_account_id,
+        actor_id=admin,
+        enabled=True,
+        expected_version=int(rebound["version"]),
+        idempotency_key="reenable-exact-account-trading",
+        now=now + timedelta(seconds=8),
+    )
+    failure_command, failure_replay = (
+        service.prepare_exchange_account_connection_verification(
+            exchange_account_id,
+            actor_id=admin,
+            expected_version=int(reeligible["version"]),
+            idempotency_key="fail-eligible-account-verification",
+        )
+    )
+    assert failure_replay is None and failure_command is not None
+    failed = service.record_exchange_account_connection_verification(
+        failure_command,
+        ConnectionProbeResult(False, "BINANCE_AUTHENTICATION_FAILED"),
+        actor_id=admin,
+        idempotency_key="fail-eligible-account-verification",
+        now=now + timedelta(seconds=9),
+    )
+    assert failed["trading"] == {"status": "BLOCKED", "enabled": False}
+    failed_projection = TradingQueries(database).exchange_accounts(admin)["data"][0]
+    assert failed_projection["runtime_binding"]["bound"] is False
+    assert failed_projection["trading"]["status"] == "BLOCKED"
+    with database.session_factory() as session:
+        audit = session.scalar(
+            select(AuditEvent).where(
+                AuditEvent.event_type
+                == "EXCHANGE_ACCOUNT_TRADING_ELIGIBILITY_ENABLED"
+            )
+        )
+        assert audit is not None
+        assert audit.account_id == "binance-live-eligible"
+        assert "global_live_send_gate=unchanged" in audit.reason
+
+
+def test_unimplemented_write_connector_rejects_account_trading_eligibility(
+    database: Database,
+) -> None:
+    now = datetime.now(UTC)
+    service = TradingService(database, credential_encryption_key=encryption_key())
+    admin = service.bootstrap_admin("okx-trading-eligibility-admin", now=now)
+    exchange_account_id = service.create_exchange_account(
+        actor_id=admin,
+        account_id="okx-read-only",
+        venue="OKX",
+        label="OKX Read Only",
+        credentials={"api_key": "key", "api_secret": "secret", "passphrase": "phrase"},
+        idempotency_key="create-okx-read-only",
+        now=now,
+    )
+    command, replay = service.prepare_exchange_account_connection_verification(
+        exchange_account_id,
+        actor_id=admin,
+        expected_version=1,
+        idempotency_key="verify-okx-read-only",
+    )
+    assert replay is None and command is not None
+    verified = service.record_exchange_account_connection_verification(
+        command,
+        ConnectionProbeResult(True, None),
+        actor_id=admin,
+        idempotency_key="verify-okx-read-only",
+        now=now + timedelta(seconds=1),
+    )
+    runtime = service.configure_exchange_account_runtime_sync(
+        exchange_account_id,
+        actor_id=admin,
+        enabled=True,
+        expected_version=int(verified["version"]),
+        idempotency_key="bind-okx-read-only",
+        now=now + timedelta(seconds=2),
+    )
+    with pytest.raises(DomainRejected, match="TRADING_CONNECTOR_UNAVAILABLE"):
+        service.configure_exchange_account_trading(
+            exchange_account_id,
+            actor_id=admin,
+            enabled=True,
+            expected_version=int(runtime["version"]),
+            idempotency_key="reject-okx-trading",
+            now=now + timedelta(seconds=3),
+        )
+    projected = TradingQueries(database).exchange_accounts(admin)["data"][0]
+    assert projected["runtime_binding"]["trading_connector"] == "NOT_IMPLEMENTED"
+    assert projected["trading"]["enabled"] is False
 
 
 def test_database_runtime_bindings_support_same_account_in_multiple_teams(

@@ -3143,6 +3143,8 @@ class TradingService:
                     account.runtime_service_principal_id,
                     False,
                 )
+                if account.trading_status == "ELIGIBLE":
+                    account.trading_status = "BLOCKED"
             account.runtime_sync_enabled = enabled
             account.version += 1
             account.updated_by = actor_id
@@ -3169,12 +3171,145 @@ class TradingService:
                 object_id=account.exchange_account_id,
                 reason=(
                     f"enabled={str(enabled).lower()};source=database-envelope;"
-                    "trading=disabled"
+                    f"trading={account.trading_status.lower()}"
                 ),
                 correlation_id=uuid4(),
                 object_version=account.version,
                 idempotency_key=idempotency_key,
                 workspace_id=team.workspace_id,
+                team_id=team.team_id,
+                account_id=account.account_id,
+                now=now,
+            )
+            return result
+
+    def configure_exchange_account_trading(
+        self,
+        exchange_account_id: UUID,
+        *,
+        actor_id: UUID,
+        enabled: bool,
+        expected_version: int,
+        idempotency_key: str,
+        now: datetime,
+    ) -> dict[str, Any]:
+        """Configure exact-account LIVE eligibility without opening global gates."""
+
+        operation = "exchange-account.trading.configure"
+        with self.database.session_factory.begin() as session:
+            _actor, workspace, team = self._active_scope(session, actor_id)
+            assert team is not None
+            account = session.scalar(
+                select(ExchangeAccount)
+                .where(
+                    ExchangeAccount.exchange_account_id == exchange_account_id,
+                    ExchangeAccount.team_id == team.team_id,
+                )
+                .with_for_update()
+            )
+            if account is None:
+                _reject(
+                    "EXCHANGE_ACCOUNT_NOT_FOUND",
+                    "exchange account is outside the active team or does not exist",
+                )
+            self._require_role(
+                session,
+                actor_id,
+                "account.manage",
+                account.account_id,
+                account.venue,
+                team_id=account.team_id,
+            )
+            payload = {
+                "exchange_account_id": str(account.exchange_account_id),
+                "enabled": enabled,
+                "expected_version": expected_version,
+            }
+            caller = f"{actor_id}:{team.team_id}"
+            digest, replay = self._idempotency(
+                session,
+                caller_id=caller,
+                operation=operation,
+                idempotency_key=idempotency_key,
+                payload=payload,
+            )
+            if replay is not None:
+                return replay
+            if account.version != expected_version:
+                _reject("VERSION_CONFLICT", "exchange account version changed")
+            if enabled:
+                if account.venue not in {"BINANCE", "HYPERLIQUID"}:
+                    _reject(
+                        "TRADING_CONNECTOR_UNAVAILABLE",
+                        "the exchange account has no implemented write connector",
+                    )
+                if not team.trading_enabled or team.execution_mode != TeamExecutionMode.LIVE.value:
+                    _reject(
+                        "TEAM_LIVE_MODE_REQUIRED",
+                        "account trading eligibility requires an active LIVE team",
+                    )
+                if (
+                    not account.active
+                    or account.connection_status != "VERIFIED"
+                    or account.credentials_ciphertext is None
+                    or account.credential_version < 1
+                    or not account.runtime_sync_enabled
+                    or account.runtime_service_principal_id is None
+                ):
+                    _reject(
+                        "ACCOUNT_TRADING_NOT_READY",
+                        "verified encrypted credentials and continuous read-only sync are required",
+                    )
+                assert account.runtime_service_principal_id is not None
+                self._require_exact_runtime_principal(
+                    session,
+                    principal_id=account.runtime_service_principal_id,
+                    team=team,
+                    role=Role.OPERATOR,
+                    account_id=account.account_id,
+                    venue=account.venue,
+                    error_code="RUNTIME_SERVICE_PRINCIPAL_INVALID",
+                    error_message=(
+                        "the read-only runtime principal is outside its exact account scope"
+                    ),
+                )
+            account.trading_status = "ELIGIBLE" if enabled else "DISABLED"
+            account.version += 1
+            account.updated_by = actor_id
+            account.updated_at = now
+            result = {
+                "exchange_account_id": str(account.exchange_account_id),
+                "trading_status": account.trading_status,
+                "trading_enabled": account.trading_status == "ELIGIBLE",
+                "version": account.version,
+            }
+            self._save_receipt(
+                session,
+                caller_id=caller,
+                operation=operation,
+                idempotency_key=idempotency_key,
+                semantic_hash=digest,
+                response=result,
+                now=now,
+            )
+            self._audit(
+                session,
+                actor_id=str(actor_id),
+                event_type=(
+                    "EXCHANGE_ACCOUNT_TRADING_ELIGIBILITY_ENABLED"
+                    if enabled
+                    else "EXCHANGE_ACCOUNT_TRADING_ELIGIBILITY_DISABLED"
+                ),
+                object_type="ExchangeAccount",
+                object_id=account.exchange_account_id,
+                reason=(
+                    f"venue={account.venue};trading={account.trading_status.lower()};"
+                    "global_live_send_gate=unchanged"
+                ),
+                correlation_id=uuid4(),
+                object_version=account.version,
+                idempotency_key=idempotency_key,
+                workspace_id=workspace.workspace_id,
                 team_id=team.team_id,
                 account_id=account.account_id,
                 now=now,
@@ -3591,6 +3726,8 @@ class TradingService:
                 account.last_verified_at = now
             else:
                 account.runtime_sync_enabled = False
+                if account.trading_status == "ELIGIBLE":
+                    account.trading_status = "BLOCKED"
                 self._set_internal_principal_active(
                     session,
                     account.runtime_service_principal_id,
@@ -3614,7 +3751,7 @@ class TradingService:
                 },
                 "trading": {
                     "status": account.trading_status,
-                    "enabled": False,
+                    "enabled": account.trading_status == "ELIGIBLE",
                 },
             }
             self._save_receipt(
@@ -8132,6 +8269,60 @@ class TradingService:
                 now,
             )
 
+    def _require_exchange_account_live_ready(
+        self,
+        session: Session,
+        *,
+        team_id: UUID,
+        account_id: str,
+        venue: str,
+    ) -> ExchangeAccount:
+        account = session.scalar(
+            select(ExchangeAccount).where(
+                ExchangeAccount.team_id == team_id,
+                ExchangeAccount.account_id == account_id,
+                ExchangeAccount.venue == venue,
+            )
+        )
+        if account is None or not account.active or account.trading_status != "ELIGIBLE":
+            _reject(
+                "EXCHANGE_ACCOUNT_TRADING_DISABLED",
+                "LIVE venue action requires exact account trading eligibility",
+            )
+        if (
+            account.connection_status != "VERIFIED"
+            or account.credentials_ciphertext is None
+            or account.credential_version < 1
+            or not account.runtime_sync_enabled
+            or account.runtime_service_principal_id is None
+        ):
+            _reject(
+                "EXCHANGE_ACCOUNT_TRADING_NOT_READY",
+                "LIVE venue action requires current account connection and runtime binding",
+            )
+        team = session.get(Team, team_id)
+        if (
+            team is None
+            or not team.trading_enabled
+            or team.execution_mode != TeamExecutionMode.LIVE.value
+        ):
+            _reject(
+                "TEAM_LIVE_MODE_REQUIRED",
+                "LIVE venue action requires an active LIVE team",
+            )
+        assert account.runtime_service_principal_id is not None
+        self._require_exact_runtime_principal(
+            session,
+            principal_id=account.runtime_service_principal_id,
+            team=team,
+            role=Role.OPERATOR,
+            account_id=account.account_id,
+            venue=account.venue,
+            error_code="EXCHANGE_ACCOUNT_TRADING_NOT_READY",
+            error_message="LIVE venue action requires the exact active read-only principal",
+        )
+        return account
+
     @staticmethod
     def _binance_client_order_id(intent_id: UUID) -> str:
         encoded = base64.urlsafe_b64encode(intent_id.bytes).rstrip(b"=").decode("ascii")
@@ -8201,6 +8392,12 @@ class TradingService:
                     "LIVE_ORDER_SEND_DISABLED",
                     "LIVE order send requires the explicit capability gate",
                 )
+            self._require_exchange_account_live_ready(
+                session,
+                team_id=campaign.team_id,
+                account_id=campaign.account_id,
+                venue=campaign.venue,
+            )
         if intent.status not in allowed_statuses:
             _reject("ORDER_INTENT_STATE_INVALID", "intent state does not allow this venue action")
         if intent.status == OrderIntentStatus.FILLED.value and intent.updated_at < now - timedelta(
@@ -9305,6 +9502,12 @@ class TradingService:
                         "LIVE_ORDER_SEND_DISABLED",
                         "LIVE protection requires the explicit capability gate",
                     )
+                self._require_exchange_account_live_ready(
+                    session,
+                    team_id=campaign.team_id,
+                    account_id=campaign.account_id,
+                    venue=campaign.venue,
+                )
             if trigger_price <= 0:
                 _reject("PROTECTION_TRIGGER_INVALID", "protection trigger must be positive")
             position = session.scalar(
@@ -10059,6 +10262,18 @@ class TradingService:
                 campaign.account_id,
                 campaign.venue,
                 team_id=campaign.team_id,
+            )
+            live_gate = session.get(CapabilityGate, "LIVE_ORDER_SEND")
+            if live_gate is None or live_gate.status != CapabilityStatus.ENABLED.value:
+                _reject(
+                    "LIVE_ORDER_SEND_DISABLED",
+                    "LIVE protection cancel requires the explicit capability gate",
+                )
+            self._require_exchange_account_live_ready(
+                session,
+                team_id=campaign.team_id,
+                account_id=campaign.account_id,
+                venue=campaign.venue,
             )
             if campaign.current_target_quantity != 0:
                 _reject(

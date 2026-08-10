@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import urllib.parse
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -33,6 +34,7 @@ from trading_control_plane.domain import (
     TargetCandidate,
     TargetUrgency,
 )
+from trading_control_plane.exchange_connection import ConnectionProbeResult
 from trading_control_plane.hyperliquid_execution import (
     HyperliquidLiveClient,
     HyperliquidTestnetOrder,
@@ -44,10 +46,15 @@ from trading_control_plane.models import (
     RiskReservation,
 )
 from trading_control_plane.perptape import PerptapeClient
+from trading_control_plane.queries import TradingQueries
 from trading_control_plane.service import TradingService
 
 NOW = datetime.now(UTC)
 HYPERLIQUID_ACCOUNT = "0x1111111111111111111111111111111111111111"
+
+
+def credential_encryption_key() -> str:
+    return base64.urlsafe_b64encode(b"live-execution-fixture-key-32byt"[:32]).decode().rstrip("=")
 
 
 class PortfolioMarginVenue:
@@ -291,6 +298,63 @@ class FailingProtectionHyperliquidLiveClient:
         raise DomainRejected("HYPERLIQUID_LIVE_OUTCOME_UNKNOWN", "controlled protection outcome")
 
 
+def register_live_exchange_account(
+    service: TradingService,
+    *,
+    admin: UUID,
+    key: str,
+    account_id: str,
+    venue: str,
+) -> UUID:
+    exchange_account = service.create_exchange_account(
+        actor_id=admin,
+        account_id=account_id,
+        venue=venue,
+        label=f"{key} account",
+        credentials=(
+            {"account_address": HYPERLIQUID_ACCOUNT}
+            if venue == "HYPERLIQUID"
+            else {"api_key": f"{key}-fixture-key", "api_secret": f"{key}-fixture-secret"}
+        ),
+        idempotency_key=f"{key}-account",
+        now=NOW,
+    )
+    connection_command, connection_replay = (
+        service.prepare_exchange_account_connection_verification(
+            exchange_account,
+            actor_id=admin,
+            expected_version=1,
+            idempotency_key=f"{key}-connection",
+        )
+    )
+    assert connection_replay is None and connection_command is not None
+    connection = service.record_exchange_account_connection_verification(
+        connection_command,
+        ConnectionProbeResult(True, None),
+        actor_id=admin,
+        idempotency_key=f"{key}-connection",
+        now=NOW,
+    )
+    runtime_binding = service.configure_exchange_account_runtime_sync(
+        exchange_account,
+        actor_id=admin,
+        enabled=True,
+        expected_version=int(connection["version"]),
+        idempotency_key=f"{key}-runtime-binding",
+        now=NOW,
+    )
+    trading_eligibility = service.configure_exchange_account_trading(
+        exchange_account,
+        actor_id=admin,
+        enabled=True,
+        expected_version=int(runtime_binding["version"]),
+        idempotency_key=f"{key}-trading-eligibility",
+        now=NOW,
+    )
+    assert trading_eligibility["trading_enabled"] is True
+    return exchange_account
+
+
 def seed_live(
     service: TradingService,
     *,
@@ -305,14 +369,12 @@ def seed_live(
     minimum_notional: Decimal,
 ) -> dict[str, UUID]:
     admin = service.bootstrap_admin(f"{key}-admin", now=NOW)
-    service.create_exchange_account(
-        actor_id=admin,
+    exchange_account = register_live_exchange_account(
+        service,
+        admin=admin,
+        key=key,
         account_id=account_id,
         venue=venue,
-        label=f"{key} account",
-        credentials=None,
-        idempotency_key=f"{key}-account",
-        now=NOW,
     )
     proposer = service.create_user(f"{key}-proposer", admin, now=NOW)
     reviewer_one = service.create_user(f"{key}-reviewer-1", admin, now=NOW)
@@ -439,6 +501,7 @@ def seed_live(
     )
     return {
         "admin": admin,
+        "exchange_account": exchange_account,
         "operator": operator,
         "runtime": runtime,
         "instrument": instrument,
@@ -492,7 +555,7 @@ async def login(http: AsyncClient, username: str) -> None:
 
 
 async def exercise_binance_live(database: Database) -> None:
-    service = TradingService(database)
+    service = TradingService(database, credential_encryption_key=credential_encryption_key())
     ids = seed_live(
         service,
         key="live-binance",
@@ -544,6 +607,29 @@ async def exercise_binance_live(database: Database) -> None:
             CapabilityStatus.ENABLED,
             "integration fixture",
             ids["admin"],
+            now=NOW,
+        )
+        account_projection = TradingQueries(database).exchange_accounts(ids["admin"])["data"][0]
+        disabled_account = service.configure_exchange_account_trading(
+            ids["exchange_account"],
+            actor_id=ids["admin"],
+            enabled=False,
+            expected_version=int(account_projection["version"]),
+            idempotency_key="live-binance-disable-account-trading",
+            now=NOW,
+        )
+        account_blocked = await http.post(
+            f"/api/intents/{ids['opening']}/binance/live/send", json=action
+        )
+        assert account_blocked.status_code == 422
+        assert account_blocked.json()["error"]["code"] == "EXCHANGE_ACCOUNT_TRADING_DISABLED"
+        assert venue.write_count == 0
+        service.configure_exchange_account_trading(
+            ids["exchange_account"],
+            actor_id=ids["admin"],
+            enabled=True,
+            expected_version=int(disabled_account["version"]),
+            idempotency_key="live-binance-reenable-account-trading",
             now=NOW,
         )
         service.record_runtime_source_health(
@@ -628,7 +714,7 @@ async def exercise_binance_live(database: Database) -> None:
 
 
 async def exercise_hyperliquid_live(database: Database) -> None:
-    service = TradingService(database)
+    service = TradingService(database, credential_encryption_key=credential_encryption_key())
     ids = seed_live(
         service,
         key="live-hyperliquid",
@@ -785,10 +871,17 @@ async def exercise_hyperliquid_live(database: Database) -> None:
 
 
 async def exercise_perptape_binance_live_lifecycle(database: Database) -> None:
-    service = TradingService(database)
+    service = TradingService(database, credential_encryption_key=credential_encryption_key())
     account_id = "acct-perptape-live"
     venue_name = "BINANCE"
     admin = service.bootstrap_admin("perptape-live-admin", now=NOW)
+    register_live_exchange_account(
+        service,
+        admin=admin,
+        key="perptape-live",
+        account_id=account_id,
+        venue=venue_name,
+    )
     proposer = service.create_user("perptape-live-proposer", admin, now=NOW)
     reviewer_one = service.create_user("perptape-live-reviewer-1", admin, now=NOW)
     reviewer_two = service.create_user("perptape-live-reviewer-2", admin, now=NOW)
@@ -1176,7 +1269,7 @@ async def exercise_failed_live_send(
     venue: str,
     code: str,
 ) -> None:
-    service = TradingService(database)
+    service = TradingService(database, credential_encryption_key=credential_encryption_key())
     is_binance = venue == "BINANCE"
     key = f"failed-{venue.lower()}-{code.lower()}"
     ids = seed_live(
@@ -1247,7 +1340,7 @@ async def exercise_failed_live_send(
 
 
 async def exercise_live_cancel(database: Database, *, venue: str) -> None:
-    service = TradingService(database)
+    service = TradingService(database, credential_encryption_key=credential_encryption_key())
     is_binance = venue == "BINANCE"
     key = f"cancel-{venue.lower()}"
     ids = seed_live(
@@ -1330,7 +1423,7 @@ async def exercise_live_cancel(database: Database, *, venue: str) -> None:
 
 
 async def exercise_live_recovery(database: Database, *, venue: str) -> None:
-    service = TradingService(database)
+    service = TradingService(database, credential_encryption_key=credential_encryption_key())
     is_binance = venue == "BINANCE"
     key = f"recover-{venue.lower()}"
     ids = seed_live(
@@ -1416,7 +1509,7 @@ async def exercise_live_recovery(database: Database, *, venue: str) -> None:
 
 
 async def exercise_live_cancel_outcome(database: Database, *, venue: str, unknown: bool) -> None:
-    service = TradingService(database)
+    service = TradingService(database, credential_encryption_key=credential_encryption_key())
     is_binance = venue == "BINANCE"
     key = f"cancel-outcome-{venue.lower()}-{unknown}"
     quantity = Decimal(5) if is_binance else Decimal("0.0002")
@@ -1532,7 +1625,7 @@ async def exercise_live_cancel_outcome(database: Database, *, venue: str, unknow
 
 
 async def exercise_unknown_live_protection(database: Database, *, venue: str) -> None:
-    service = TradingService(database)
+    service = TradingService(database, credential_encryption_key=credential_encryption_key())
     action_now = datetime.now(UTC)
     is_binance = venue == "BINANCE"
     key = f"unknown-protection-{venue.lower()}"

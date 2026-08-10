@@ -63,6 +63,7 @@ from trading_control_plane.api_schemas import (
     ExchangeConnectionVerifyRequest,
     ExchangeCredentialRotateRequest,
     ExchangeRuntimeSyncRequest,
+    ExchangeTradingEligibilityRequest,
     FundingFactRequest,
     HyperliquidReadOnlySyncRequest,
     HyperliquidTestnetProtectionRequest,
@@ -1334,6 +1335,25 @@ def create_app(
         identity: SessionIdentity = identity_dependency,
     ) -> dict[str, Any]:
         result = service().configure_exchange_account_runtime_sync(
+            exchange_account_id,
+            actor_id=identity.user_id,
+            enabled=payload.enabled,
+            expected_version=payload.expected_version,
+            idempotency_key=payload.idempotency_key,
+            now=_now(),
+        )
+        return {
+            **result,
+            "data": queries().exchange_accounts(identity.user_id),
+        }
+
+    @app.put("/api/exchange-accounts/{exchange_account_id}/trading-eligibility")
+    def configure_exchange_account_trading_eligibility(
+        exchange_account_id: UUID,
+        payload: ExchangeTradingEligibilityRequest,
+        identity: SessionIdentity = identity_dependency,
+    ) -> dict[str, Any]:
+        result = service().configure_exchange_account_trading(
             exchange_account_id,
             actor_id=identity.user_id,
             enabled=payload.enabled,
