@@ -1,5 +1,32 @@
 # Trading console product QA
 
+## 2026-08-10: server-truth Shadow readiness guidance
+
+### P0 / P1 / P2 status
+
+- P0: none open. The change only projects existing `/api/shadow` truth; team activation and all dangerous capability checks remain server-enforced.
+- P1 closed: the Shadow page no longer presents raw blocker codes as an undifferentiated list. It groups the existing server blockers into members/duties, signal source, exchange-account scope, and versioned risk without creating a second readiness truth.
+- P1 closed: each readiness step now states completion or blocking status, impact, responsible role, technical blocker code, and a permission-aware next route. Unknown future blocker codes remain visible and fail closed.
+- P1 closed: the hero chooses one primary next action from the first unresolved dependency mapped from server blockers. The current production team exposes `RISK_LIMITS_REQUIRED` and points to risk configuration instead of visually prioritizing historical Shadow reports.
+- P2 closed: the grouped checklist has matching dark/light hierarchy and reflows to a two-column mobile row without relying on color alone.
+- P2 open: exact 1024, 430, and 390 browser captures plus keyboard and screen-reader flow acceptance remain in stage 9.2.
+
+### Five-dimensional evidence
+
+- Code: grouped readiness catalog, unknown-code fallback, permission-aware next action, compact responsive checklist, and bilingual static labels.
+- Database: no model or migration change; readiness still comes from the existing versioned team, source, account, role, and risk records.
+- API: `/api/shadow` remains the only readiness truth and still returns exact blocker codes; the UI does not infer readiness from visual state.
+- Actual page: at 1422 x 800, the current page rendered three satisfied steps, one `RISK_LIMITS_REQUIRED` blocker, a single primary `/risk` action, no document overflow, and no browser console messages.
+- End-to-end runtime: the local Compose image was rebuilt and `/health/ready` returned PostgreSQL ready; live order, funding, signing, and broadcast remained closed.
+- Tests: JavaScript/service-worker syntax, 23 focused web design/API shell tests, and one Shadow HTTP/activation/page integration test passed.
+
+### Accepted screenshots
+
+- Dark theme: `artifacts/product-audit/shadow-readiness-2026-08-10/01-shadow-readiness-dark.jpg`.
+- Light theme: `artifacts/product-audit/shadow-readiness-2026-08-10/02-shadow-readiness-light.jpg`.
+
+final result: passed at the actual 1422 x 800 browser viewport; exact tablet/mobile and keyboard/accessibility acceptance remain open
+
 ## 2026-08-10: global shell and dual-theme design system
 
 ### P0 / P1 / P2 status

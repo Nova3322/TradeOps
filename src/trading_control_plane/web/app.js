@@ -416,6 +416,33 @@ const ENGLISH_EXACT = new Map(Object.entries({
   'Perptape 机会源':'Perptape opportunity feed',
   '仅验证执行适配与合约目录；不会发送真实订单':'Execution adapters and instrument catalogs only; no live orders are sent',
   'Telegram 私聊机器人最近一次长轮询成功；批准和拒绝仍需二次确认并写入统一审计。':'The Telegram direct-message bot completed its latest long poll. Approvals and rejections still require confirmation and are written to the shared audit log.',
+  '团队启用状态':'Team activation status', '团队启用路径':'Team activation path', '服务端前置条件':'Server-enforced prerequisites',
+  '成员与职责':'Members and duties', '信号源':'Signal source', '交易账户范围':'Exchange account scope',
+  '版本化风控':'Versioned risk controls', '明确进入影子模式':'Explicitly enter Shadow mode',
+  '已满足':'Satisfied', '需处理':'Action required', '等待前置条件':'Waiting for prerequisites',
+  '责任角色':'Responsible role', '处理此项 →':'Resolve this item →', '查看此项 →':'View this item →',
+  '配置成员权限':'Configure member access', '查看信号源设置':'View signal-source settings',
+  '查看交易账户':'View exchange accounts', '查看风险配置':'View risk controls',
+  '创建第一笔影子提案':'Create the first Shadow proposal', '查看影子报表':'View Shadow reports',
+  '初始化虚拟资金':'Initialize virtual capital', '团队管理员':'Team administrator',
+  '交易运维或团队管理员':'Trading operator or team administrator', '未知服务端阻断':'Unknown server blocker',
+  '提案、独立审核与交易运维职责已在至少一个精确账户范围内形成闭环。':'Proposal creation, independent review, and trading operations form a complete control loop for at least one exact account scope.',
+  '当前团队已启用且只启用一种信号源模式。':'Exactly one signal-source mode is enabled for the current team.',
+  '当前团队至少有一个启用的精确交易所账户范围。':'The current team has at least one active exact exchange-account scope.',
+  '版本化风险政策已覆盖账户风险、单笔亏损、连续亏损与冷却期。':'The versioned risk policy covers account risk, single-trade loss, consecutive losses, and cooldown.',
+  '先启用当前团队的 Perptape 或 Webhook 信号源':'Enable Perptape or Webhook for the current team',
+  '先保存当前团队的版本化风险政策':'Save a versioned risk policy for the current team',
+  '补齐单账户、单笔亏损、连续亏损与冷却期限制':'Complete account, single-loss, consecutive-loss, and cooldown limits',
+  '先登记至少一个当前团队交易账户':'Register at least one exchange account for the current team',
+  '至少配置两名不同成员承担提案与独立审核':'Assign proposal and independent-review duties to two different members',
+  '至少配置一名交易运维人员':'Assign at least one trading operator',
+  '全部服务端前置条件已满足；仍需团队管理员明确启用，系统不会自动打开业务能力。':'All server prerequisites are satisfied. A team administrator must still enable Shadow mode explicitly; the system never opens business capabilities automatically.',
+  '按下面的依赖顺序处理。每项都标明影响、责任角色和下一步；缺少任何一项都会保持交易关闭。':'Resolve the dependencies below in order. Every item states its impact, owner, and next step; any missing item keeps trading closed.',
+  '当前团队只允许 SHADOW 对象；真实订单、资金、签名和广播仍由服务端双重阻断。':'This team accepts Shadow objects only. Live orders, funding, signing, and broadcast remain blocked by the server.',
+  '缺口不会放宽生产或影子边界；按依赖顺序补齐后再运行完整模拟链路。':'The gap does not relax Production or Shadow boundaries. Resolve it in dependency order before running the full simulation flow.',
+  '生产与影子事实按环境、团队、账户、场所和标的分别存储；影子操作不会成为真实发送输入。':'Production and Shadow facts are stored separately by environment, team, account, venue, and instrument. Shadow actions never become live-send inputs.',
+  '此清单直接投影':'This checklist directly projects',
+  '返回的阻断码；页面不自行放宽条件。通知路由可独立配置，但不是当前影子启用的服务端门槛。':'blocker codes. The page never relaxes them. Notification routes are configured separately and are not a server prerequisite for Shadow activation.',
 }));
 
 const ENGLISH_PATTERNS = [
@@ -437,6 +464,9 @@ const ENGLISH_PATTERNS = [
   [/^(\d+) \/ (\d+) 可用$/, '$1 of $2 available'],
   [/^等待生产身份源绑定 · 创建于 (.+)$/, 'Waiting for production identity binding · created $1'],
   [/^(\d+) 项总阻断$/, '$1 total blockers'],
+  [/^(\d+) 项条件仍需完成$/, '$1 prerequisites remain'],
+  [/^生产团队仍有 (\d+) 项影子准备度缺口$/, 'Production Shadow-readiness gaps: $1'],
+  [/^(\d+) 个影子交易任务已进入可复盘链路$/, '$1 Shadow trades are ready for review'],
   [/^(\d+) 个运行中交易任务$/, '$1 active trades'],
   [/^已读取 (\d+) 个候选，可用于机会筛选和提案。$/, '$1 candidates loaded and available for opportunity screening and proposals.'],
   [/^只读 · 最近数据 (.+)$/, 'Read only · latest data $1'],
@@ -2554,6 +2584,85 @@ function shadowBlockerLabel(code) {
   })[code] || code;
 }
 
+const SHADOW_READINESS_CATALOG = [
+  {
+    id:'members',
+    label:'成员与职责',
+    blockers:['INDEPENDENT_REVIEWER_REQUIRED','OPERATOR_REQUIRED'],
+    href:'/admin/users',
+    capability:'access.manage',
+    action:'配置成员权限',
+    owner:'团队管理员',
+    readyCopy:'提案、独立审核与交易运维职责已在至少一个精确账户范围内形成闭环。',
+  },
+  {
+    id:'signal',
+    label:'信号源',
+    blockers:['SIGNAL_SOURCE_REQUIRED'],
+    href:'/signals',
+    capability:'signal.view',
+    action:'查看信号源设置',
+    owner:'团队管理员',
+    readyCopy:'当前团队已启用且只启用一种信号源模式。',
+  },
+  {
+    id:'account',
+    label:'交易账户范围',
+    blockers:['EXCHANGE_ACCOUNT_REQUIRED'],
+    href:'/venues',
+    capability:'venue.view',
+    action:'查看交易账户',
+    owner:'交易运维或团队管理员',
+    readyCopy:'当前团队至少有一个启用的精确交易所账户范围。',
+  },
+  {
+    id:'risk',
+    label:'版本化风控',
+    blockers:['RISK_POLICY_REQUIRED','RISK_LIMITS_REQUIRED'],
+    href:'/risk',
+    capability:'system.view',
+    action:'查看风险配置',
+    owner:'系统管理员',
+    readyCopy:'版本化风险政策已覆盖账户风险、单笔亏损、连续亏损与冷却期。',
+  },
+];
+
+function shadowReadinessSteps(activation) {
+  const blockers = new Set(activation.blockers || []);
+  const recognized = new Set(SHADOW_READINESS_CATALOG.flatMap(item => item.blockers));
+  const steps = SHADOW_READINESS_CATALOG.map(item => {
+    const activeBlockers = item.blockers.filter(code => blockers.has(code));
+    return {...item, activeBlockers, complete:activeBlockers.length === 0};
+  });
+  [...blockers].filter(code => !recognized.has(code)).forEach(code => steps.push({
+    id:`unknown-${code}`,
+    label:'未知服务端阻断',
+    blockers:[code],
+    activeBlockers:[code],
+    complete:false,
+    href:null,
+    capability:null,
+    action:'',
+    owner:'系统管理员',
+    readyCopy:'',
+  }));
+  return steps;
+}
+
+function shadowReadinessItem(step, index) {
+  const copy = step.complete
+    ? step.readyCopy
+    : step.activeBlockers.map(shadowBlockerLabel).join('；');
+  const canOpen = step.href && (!step.capability || hasCapability(step.capability));
+  const action = canOpen
+    ? `<a class="text-button readiness-action" href="${step.href}" data-link>${step.complete ? '查看此项 →' : '处理此项 →'}</a>`
+    : '';
+  const technicalCodes = step.activeBlockers.length
+    ? `<span class="readiness-code" translate="no">${step.activeBlockers.map(escapeHtml).join(' · ')}</span>`
+    : '';
+  return `<li class="readiness-item ${step.complete ? 'is-complete' : 'is-blocked'}" data-readiness-step="${escapeHtml(step.id)}"><span class="readiness-marker" aria-hidden="true">${step.complete ? '✓' : index + 1}</span><div class="readiness-copy"><div class="readiness-title"><h3>${escapeHtml(step.label)}</h3><span class="status-pill ${step.complete ? 'status-APPROVED' : 'status-BLOCKED'}">${step.complete ? '已满足' : '需处理'}</span></div><p>${escapeHtml(copy)}</p><div class="readiness-meta"><span><b>责任角色</b>${escapeHtml(step.owner)}</span>${technicalCodes}</div></div>${action}</li>`;
+}
+
 async function renderShadowWorkspace() {
   const response = await api('/api/shadow');
   const data = response.data;
@@ -2565,12 +2674,54 @@ async function renderShadowWorkspace() {
   const totalEquity = virtualCapital.reduce((sum, item) => sum + Number(item.equity || 0), 0);
   const totalAvailable = virtualCapital.reduce((sum, item) => sum + Number(item.risk_available || 0), 0);
   const modeLabel = data.execution_mode === 'SHADOW' ? '影子模式已启用' : data.execution_mode === 'LIVE' ? '生产团队 · 影子数据独立' : '安全配置中';
-  const blockerList = (activation.blockers || []).map(code => `<li><b>${escapeHtml(shadowBlockerLabel(code))}</b><span>${escapeHtml(code)}</span></li>`).join('');
-  const activationAction = data.execution_mode === 'SETUP'
-    ? activation.ready && activation.can_activate
+  const readinessSteps = shadowReadinessSteps(activation);
+  const firstPendingStep = readinessSteps.find(item => !item.complete);
+  const canOpenFirstPending = firstPendingStep?.href
+    && (!firstPendingStep.capability || hasCapability(firstPendingStep.capability));
+  let activationTitle;
+  let activationCopy;
+  let activationAction;
+  if (data.execution_mode === 'SETUP') {
+    activationTitle = activation.ready
+      ? '影子模式前置条件已满足'
+      : `${activation.blockers.length} 项条件仍需完成`;
+    activationCopy = activation.ready
+      ? '全部服务端前置条件已满足；仍需团队管理员明确启用，系统不会自动打开业务能力。'
+      : '按下面的依赖顺序处理。每项都标明影响、责任角色和下一步；缺少任何一项都会保持交易关闭。';
+    activationAction = activation.ready && activation.can_activate
       ? '<button class="primary" data-activate-shadow>明确进入影子模式</button>'
-      : `<span class="status-pill">${activation.can_activate ? '先完成阻塞项' : '由团队管理员启用'}</span>`
-    : '<span class="status-pill status-APPROVED">隔离边界已生效</span>';
+      : canOpenFirstPending
+        ? `<a class="primary" href="${firstPendingStep.href}" data-link>${escapeHtml(firstPendingStep.action)}</a>`
+        : `<span class="status-pill">${activation.can_activate ? '等待前置条件' : '由团队管理员启用'}</span>`;
+  } else if (data.execution_mode === 'SHADOW') {
+    activationTitle = !virtualCapital.length
+      ? '影子模式已隔离启用；下一步初始化虚拟资金'
+      : !campaigns.length
+        ? '虚拟资金已建立；运行第一笔完整影子流程'
+        : `${campaigns.length} 个影子交易任务已进入可复盘链路`;
+    activationCopy = '当前团队只允许 SHADOW 对象；真实订单、资金、签名和广播仍由服务端双重阻断。';
+    activationAction = !virtualCapital.length && accounts.some(account => account.can_initialize)
+      ? '<a class="primary" href="#shadow-accounts">初始化虚拟资金</a>'
+      : !campaigns.length && hasCapability('proposal.create')
+        ? '<a class="primary" href="/proposals/new?environment=SHADOW" data-link>创建第一笔影子提案</a>'
+        : campaigns.length && hasCapability('results.view')
+          ? '<a class="primary" href="/results?environment=SHADOW" data-link>查看影子报表</a>'
+          : '<span class="status-pill status-APPROVED">隔离边界已生效</span>';
+  } else {
+    activationTitle = firstPendingStep
+      ? `生产团队仍有 ${activation.blockers.length} 项影子准备度缺口`
+      : '生产团队的影子数据保持独立';
+    activationCopy = firstPendingStep
+      ? '缺口不会放宽生产或影子边界；按依赖顺序补齐后再运行完整模拟链路。'
+      : '生产与影子事实按环境、团队、账户、场所和标的分别存储；影子操作不会成为真实发送输入。';
+    activationAction = firstPendingStep && canOpenFirstPending
+      ? `<a class="primary" href="${firstPendingStep.href}" data-link>${escapeHtml(firstPendingStep.action)}</a>`
+      : firstPendingStep
+        ? `<span class="status-pill">由${escapeHtml(firstPendingStep.owner)}处理</span>`
+        : hasCapability('results.view')
+          ? '<a class="secondary" href="/results?environment=SHADOW" data-link>查看影子报表</a>'
+          : '<span class="status-pill status-APPROVED">隔离边界已生效</span>';
+  }
   const accountCards = accounts.map(account => {
     const capital = account.virtual_capital || [];
     const accountPositions = account.positions || [];
@@ -2588,10 +2739,11 @@ async function renderShadowWorkspace() {
   }).join('');
   const campaignRows = campaigns.map(item => `<tr data-href="/campaigns/${item.campaign_id}"><td data-label="影子任务"><b>${escapeHtml(item.symbol || shortId(item.instrument_id))}</b><br><a class="row-link" href="/campaigns/${item.campaign_id}" data-link>${shortId(item.campaign_id)} · 查看完整链路</a></td><td data-label="范围">${escapeHtml(item.account_id)}<br><span class="subtle">${escapeHtml(item.venue)}</span></td><td data-label="状态"><span class="status-pill status-${escapeHtml(item.status)}">${escapeHtml(fmtStatus(item.status))}</span></td><td data-label="虚拟盈亏">${escapeHtml(campaignPnlLabel(item, item.final_pnl))}</td><td data-label="更新时间">${fmtDate(item.updated_at)}</td></tr>`).join('');
   main.innerHTML = `<section class="page shadow-workspace"><header class="page-head"><div><p class="eyebrow">虚拟资金 · 严格隔离</p><h1>影子模式</h1><p class="lede">用当前团队权限、提案、独立审核、风控、执行与报表链路运行模拟交易。全部事实固定为 SHADOW，任何操作都不调用真实订单、资金、签名或广播连接器。</p></div><span class="status-pill ${data.execution_mode === 'SHADOW' ? 'status-APPROVED' : ''}">${escapeHtml(modeLabel)}</span></header>
-    <article class="home-status tone-${activation.ready ? 'success' : 'attention'}"><div><p class="eyebrow">团队启用状态</p><h2>${activation.ready ? '影子模式前置条件已满足' : `${activation.blockers.length} 项条件仍需完成`}</h2><p>${data.execution_mode === 'SETUP' ? '完成条件后必须由管理员明确启用；页面不会因配置存在而自动打开业务能力。' : '当前影子事实与生产事实按环境、团队、账户、场所和标的分开存储与计算。'}</p>${blockerList ? `<ul class="shadow-blockers">${blockerList}</ul>` : ''}</div>${activationAction}</article>
+    <article class="home-status tone-${activation.ready ? 'success' : 'attention'}"><div><p class="eyebrow">团队启用状态</p><h2>${escapeHtml(activationTitle)}</h2><p>${escapeHtml(activationCopy)}</p></div>${activationAction}</article>
+    <article class="card shadow-readiness-card" data-shadow-readiness><div class="card-heading"><div><p class="eyebrow">团队启用路径</p><h2>服务端前置条件</h2></div><span class="status-pill ${activation.ready ? 'status-APPROVED' : 'status-BLOCKED'}">${activation.ready ? '已满足' : `${activation.blockers.length} 项阻断`}</span></div><ol class="readiness-list">${readinessSteps.map(shadowReadinessItem).join('')}</ol><p class="microcopy">此清单直接投影 <code translate="no">/api/shadow</code> 返回的阻断码；页面不自行放宽条件。通知路由可独立配置，但不是当前影子启用的服务端门槛。</p></article>
     <div class="stats"><div class="stat"><small>虚拟净值（USD 稳定币）</small><b>${virtualCapital.length ? fmtNumber(totalEquity) : '未初始化'}</b></div><div class="stat"><small>未占用风险容量</small><b>${virtualCapital.length ? fmtNumber(totalAvailable) : '—'}</b></div><div class="stat"><small>影子标的</small><b>${positions.length}</b></div><div class="stat"><small>影子交易任务</small><b>${campaigns.length}</b></div></div>
     <article class="card shadow-safety-card"><div class="card-heading"><div><p class="eyebrow">不可穿透边界</p><h2>真实危险能力全部为关闭</h2></div><span class="status-pill status-APPROVED">VIRTUAL_ONLY</span></div><div class="shadow-safety-grid"><span><b>真实下单</b><small>关闭</small></span><span><b>资金划转</b><small>关闭</small></span><span><b>签名</b><small>关闭</small></span><span><b>广播</b><small>关闭</small></span><span><b>交易所连接器</b><small>本流程不调用</small></span></div><p class="safety-note">服务端以团队执行模式和每个对象的 environment 双重校验；前端状态仅用于说明，不替代拒绝。</p></article>
-    <div class="section-head"><div><p class="eyebrow">账户隔离</p><h2>虚拟资金与仓位范围</h2></div><a class="secondary" href="/venues" data-link>管理交易账户</a></div><div class="shadow-account-grid">${accountCards || '<section class="empty-state"><div><h2>当前没有可见交易账户</h2><p>先在当前团队登记一个账户。影子初始化只引用账户范围，不需要也不会读取明文凭据。</p><a class="primary" href="/venues" data-link>登记交易账户</a></div></section>'}</div>
+    <div class="section-head" id="shadow-accounts"><div><p class="eyebrow">账户隔离</p><h2>虚拟资金与仓位范围</h2></div><a class="secondary" href="/venues" data-link>管理交易账户</a></div><div class="shadow-account-grid">${accountCards || '<section class="empty-state"><div><h2>当前没有可见交易账户</h2><p>先在当前团队登记一个账户。影子初始化只引用账户范围，不需要也不会读取明文凭据。</p><a class="primary" href="/venues" data-link>登记交易账户</a></div></section>'}</div>
     <div class="section-head"><div><p class="eyebrow">完整流程</p><h2>影子交易任务</h2></div><div class="toolbar"><a class="secondary" href="/proposals?environment=SHADOW" data-link>查看影子提案</a>${hasCapability('proposal.create') ? '<a class="primary" href="/proposals/new?environment=SHADOW" data-link>创建影子提案</a>' : ''}</div></div>${campaignRows ? `<div class="table-wrap campaign-list-table"><table><thead><tr><th>影子任务</th><th>范围</th><th>状态</th><th>虚拟盈亏</th><th>更新时间</th></tr></thead><tbody>${campaignRows}</tbody></table></div>` : '<section class="empty-state compact-empty-state"><div><h2>尚无影子交易任务</h2><p>先初始化虚拟资金，再创建 SHADOW 提案并完成独立审核、风险检查和短期授权。</p></div></section>'}</section>`;
   document.querySelector('[data-activate-shadow]')?.addEventListener('click', async event => {
     await withPending(event.currentTarget, '启用中…', async () => {

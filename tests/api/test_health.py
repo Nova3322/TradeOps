@@ -112,9 +112,9 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
 
     assert response.status_code == 200
     assert "交易控制台" in response.text
-    assert "/assets/app.js?v=141" in response.text
+    assert "/assets/app.js?v=142" in response.text
     assert 'href="/signals"' in response.text
-    assert "/assets/styles.css?v=58" in response.text
+    assert "/assets/styles.css?v=59" in response.text
     assert 'aria-label="交易控制台首页"' in response.text
     assert '<a href="/" data-link><span>⌂</span>当前任务</a>' in response.text
     assert "<span>⌁</span>实时机会</a>" in response.text
@@ -149,6 +149,10 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
     assert "networkError.code = 'NETWORK_ERROR'" in app_javascript.text
     assert "const REQUEST_TIMEOUT_MS = 15000" in app_javascript.text
     assert "当前团队风险恢复仍由管理员控制" in app_javascript.text
+    assert "const SHADOW_READINESS_CATALOG" in app_javascript.text
+    assert 'data-shadow-readiness' in app_javascript.text
+    assert "firstPendingStep?.href" in app_javascript.text
+    assert "未知服务端阻断" in app_javascript.text
     assert 'id="risk-policy-form"' in app_javascript.text
     assert "RISK_LIMITS_UNCONFIGURED" in app_javascript.text
     assert "if (error.status !== 403) throw error" in app_javascript.text
@@ -437,10 +441,12 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
     assert ".proposal-preview" in stylesheet.text
     assert ".review-queue-summary" in stylesheet.text
     assert ".source-facts" in stylesheet.text
+    assert ".readiness-item" in stylesheet.text
+    assert ".readiness-action" in stylesheet.text
 
     service_worker = get(app, "/sw.js")
     assert service_worker.status_code == 200
-    assert "trading-shell-v112" in service_worker.text
+    assert "trading-shell-v113" in service_worker.text
     assert "self.skipWaiting()" in service_worker.text
     assert "self.clients.claim()" in service_worker.text
     assert "await fetch(event.request)" in service_worker.text
@@ -2141,6 +2147,19 @@ def test_console_terminology_keeps_official_names_and_uses_natural_chinese() -> 
         assert.equal(
           englishContext.translate("币安 680 个合约；Hyperliquid 268 个合约，其中 HIP-3 91 个。"),
           "Binance: 680 instruments; Hyperliquid: 268 instruments, including 91 HIP-3 markets.",
+        );
+        assert.equal(
+          englishContext.translate("生产团队仍有 1 项影子准备度缺口"),
+          "Production Shadow-readiness gaps: 1",
+        );
+        assert.equal(
+          englishContext.translate("当前团队已启用且只启用一种信号源模式。"),
+          "Exactly one signal-source mode is enabled for the current team.",
+        );
+        assert.equal(englishContext.translate("团队启用状态"), "Team activation status");
+        assert.equal(
+          englishContext.translate("此清单直接投影 "),
+          "This checklist directly projects ",
         );
         assert.doesNotMatch(englishContext.translate("尚未覆盖的新文案"), /details/);
         """
