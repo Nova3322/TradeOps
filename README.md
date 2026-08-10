@@ -39,13 +39,13 @@ TradingOPS 是**源码可用（source-available）**项目，不是 OSI 定义�
 
 “一次性连接验证成功”只证明该时刻的只读身份可用；它不等于持续事实新鲜、账户归属人工复核完成或交易就绪。运行读取/执行进程目前仍从受保护的部署环境加载凭据，尚未按多 Team / 多账户消费数据库信封。
 
-`VenueOrder`、`VenueFill`、`Position`、`AccountEquity`、权益历史、`FundingPayment` 与计算型对账均持久化非空 Team 根；同一 `account_id + venue` 可在不同团队独立存在，服务端写入、查询、资金事实聚合和对账按当前团队过滤。旧事实只在迁移时回填到既有默认团队，不据此开启连接或交易。资金提案/授权/转移及 sender/task 根仍待后续迁移，当前不得把账户事实隔离等同于整条资金链已完成团队化。
+`VenueOrder`、`VenueFill`、`Position`、`AccountEquity`、权益历史、`FundingPayment` 与计算型对账均持久化非空 Team 根；同一 `account_id + venue` 可在不同团队独立存在，服务端写入、查询、资金事实聚合和对账按当前团队过滤。资金提案、授权、转移、直连资金配置/操作、自动化政策与 sender lease 也使用非空 Team 根、团队复合外键和团队幂等身份；同名账户、配置版本和 execution scope 可在不同团队独立存在。旧事实只在迁移时优先按既有审计归属回填，冲突时 fail closed，不据此开启连接、交易或资金能力。
 
 `TeamSignalSource` 是当前团队的唯一信号模式真源。Perptape Key 和 Webhook HMAC 密钥复用同一 AES-256-GCM 信封，认证上下文绑定 Team、Signal Source、模式与轮换版本。Webhook 统一接收 TradingView 和自研模型，服务端验证 HMAC-SHA256、请求与事件时效、nonce 重放、外部身份、幂等键和版本化格式。通过的 Webhook 只写入 `SignalEvent`；必须由获权人员手动创建并冻结 Proposal，一个 SignalEvent 最多关联一个 Proposal。
 
 `/results` 由服务端 `results.view` 权限、当前 Workspace / Team、获授权账户和精确环境共同限定。页面按结算币种分别展示团队、账户、策略版本和信号源的已平仓净收益、未平仓当前值、绝对最大回撤、胜率、盈亏比及风险事件；没有形成 Campaign 的拒绝决策也保留。Webhook 归因只读取冻结 `SignalEvent`，不读取可变信号源配置。缺少覆盖完整范围的可信期初资本和 FX 真源时，百分比收益、百分比回撤与跨币种合计保持不可用，不用零值或静态换算代替事实。
 
-`/notifications` 由服务端 `notification.view` / `notification.manage` 和当前 Team 限定。Telegram、Slack、Lark 与邮件路由的凭据使用与交易账户一致的版本化 AES-256-GCM 信封，页面只显示目的地提示，不回传密文或明文。业务事务冻结模板、对象版本、作用域、语义哈希和幂等事件身份，再为匹配路由写入耐久 delivery；独立 `trading-notification-worker` 只拥有解密和通知发送能力。明确限速会有界退避，网络中断等不确定结果进入 `OUTCOME_UNKNOWN` 且不盲重发。通知路由没有交易、资金、签名或广播方法。旧资金对象尚无可靠 Team 根，因此统一资金通知明确标记 `SCOPE_MIGRATION_REQUIRED`，不会猜测映射。
+`/notifications` 由服务端 `notification.view` / `notification.manage` 和当前 Team 限定。Telegram、Slack、Lark 与邮件路由的凭据使用与交易账户一致的版本化 AES-256-GCM 信封，页面只显示目的地提示，不回传密文或明文。业务事务冻结模板、对象版本、作用域、语义哈希和幂等事件身份，再为匹配路由写入耐久 delivery；提案、风险、交易任务、团队信号、连接失败和资金状态都复用这一 Team 路由。独立 `trading-notification-worker` 只拥有解密和通知发送能力。明确限速会有界退避，网络中断等不确定结果进入 `OUTCOME_UNKNOWN` 且不盲重发。通知路由没有交易、资金、签名或广播方法。
 
 ## 从这里开始
 
@@ -85,7 +85,7 @@ TradingOPS 是**源码可用（source-available）**项目，不是 OSI 定义�
 - HTTP：健康检查、内部会话、团队信号源配置、签名 Webhook / SignalEvent、Perptape 主站机会、Proposal/Review/Risk/Authorization、SHADOW/TESTNET/LIVE Campaign、AUTO_ADD/减仓/退出、资金事实/提案/授权、NoTilt 未签名计划/回执确认、按环境结果/审计/运行状态，以及 Binance、Hyperliquid Core 的只读、TESTNET 与受控 LIVE API
 - 内部业务：`trading_control_plane.service.TradingService`
 - 纯计算：`evaluate_risk`、`select_target_position`、`compute_pnl`
-- 数据库：PostgreSQL，Alembic head `20260810_0025`；Workspace、权限、信号源/SignalEvent、交易账户、提案—执行聚合、账户事实、版本化风险政策与风险预留均使用团队范围。Team 以 `SETUP / SHADOW / LIVE` 明确执行模式；Shadow 复用现有 AccountEquity、Position、Proposal、Campaign、Order/Fill、RiskReservation、报表与审计，只增加团队模式列而不建立第二套模拟账本。Agent 复用现有 `User(SERVICE)`、TeamMembership、RoleAssignment、Proposal、Approval、CommandReceipt 和 AuditEvent，只为现有 User 增加 `INTERNAL / AGENT` 服务种类及不可逆 Token 生命周期字段，不新增身份、权限、审核或审计真源。最大总风险、单账户风险、最大单笔亏损、最大连续亏损和冷却期由同一政策版本驱动；遗留政策的新阈值保持未配置并拒绝新增风险。绩效报表复用既有 Campaign、Proposal、SignalEvent 与 RiskDecision，没有新增快照或第二套账本。通知仅新增团队路由与耐久 delivery 两个具有独立生命周期的实体；资金聚合和 sender/task 根仍按后续迁移 fail closed
+- 数据库：PostgreSQL，Alembic head `20260811_0026`；Workspace、权限、信号源/SignalEvent、交易账户、提案—执行聚合、账户事实、版本化风险政策、风险预留、资金工作流根与 sender lease 均使用团队范围。Team 以 `SETUP / SHADOW / LIVE` 明确执行模式；Shadow 复用现有 AccountEquity、Position、Proposal、Campaign、Order/Fill、RiskReservation、报表与审计，只增加团队模式列而不建立第二套模拟账本。Agent 复用现有 `User(SERVICE)`、TeamMembership、RoleAssignment、Proposal、Approval、CommandReceipt 和 AuditEvent，只为现有 User 增加 `INTERNAL / AGENT` 服务种类及不可逆 Token 生命周期字段，不新增身份、权限、审核或审计真源。最大总风险、单账户风险、最大单笔亏损、最大连续亏损和冷却期由同一政策版本驱动；遗留政策的新阈值保持未配置并拒绝新增风险。绩效报表复用既有 Campaign、Proposal、SignalEvent 与 RiskDecision，没有新增快照或第二套账本。通知仅新增团队路由与耐久 delivery 两个具有独立生命周期的实体；资金事件已接入同一团队路由
 - 场所边界：Binance 与 Hyperliquid 的交易发送默认只允许进入各自隔离的 Freqtrade worker；Hyperliquid worker 通过显式 `hip3_dexes` allowlist 加载 HIP-3。仓库原有 `binance_execution.py` / `hyperliquid_execution.py` 只保留隔离兼容测试，默认后端不会加载其签名密钥，也会拒绝直接发送。交易所官方只读接口继续提供账户、仓位和目录事实；数据库中的 `LIVE_ORDER_SEND` 初始仍为 `DISABLED`
 - 资金边界：`capital.py` 提供 SHADOW/TESTNET Mock 提交和自动候选计算；`notilt.py` 通过官方 `@notilt/sdk` 固定支持 Ethereum、BNB Smart Chain、Arbitrum One，只读取官方部署/Registry/Vault、生成并持久化 `{chainId,to,data,value}` 未签名交易，并从可信生产 RPC 校验发送者、目标、函数、参数、事件、区块时间和逐链确认深度。服务没有 NoTilt 私钥字段，不签名、不广播，也不暴露 owner、白名单管理、Panic 或 Full Exit 能力；真实 `CAPITAL_TRANSFER` 与两个自动资金 Gate 均保持 `DISABLED`
 

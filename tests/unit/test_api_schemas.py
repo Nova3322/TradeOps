@@ -171,7 +171,7 @@ def test_shadow_schemas_normalize_currency_and_bound_costs() -> None:
         )
 
 
-def test_notification_route_schema_keeps_secrets_wrapped_and_excludes_unready_events() -> None:
+def test_notification_route_schema_keeps_secrets_wrapped_and_limits_known_events() -> None:
     request = NotificationRouteWriteRequest.model_validate(
         {
             "name": "Slack alerts",
@@ -189,14 +189,25 @@ def test_notification_route_schema_keeps_secrets_wrapped_and_excludes_unready_ev
     }
     assert "hooks.slack.com" not in repr(request)
 
+    capital_request = NotificationRouteWriteRequest.model_validate(
+        {
+            "name": "Capital alerts",
+            "channel": "SLACK",
+            "event_types": ["CAPITAL_STATUS_CHANGED"],
+            "expected_version": 0,
+            "idempotency_key": "route-capital",
+        }
+    )
+    assert capital_request.event_types == ["CAPITAL_STATUS_CHANGED"]
+
     with pytest.raises(ValidationError):
         NotificationRouteWriteRequest.model_validate(
             {
-                "name": "Not ready",
+                "name": "Unknown event",
                 "channel": "SLACK",
-                "event_types": ["CAPITAL_STATUS_CHANGED"],
+                "event_types": ["UNKNOWN_EVENT"],
                 "expected_version": 0,
-                "idempotency_key": "route-capital",
+                "idempotency_key": "route-unknown",
             }
         )
 

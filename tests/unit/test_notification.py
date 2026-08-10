@@ -181,13 +181,17 @@ def test_lark_signature_matches_the_official_empty_message_hmac_contract() -> No
     assert StdlibNotificationSender._lark_signature(fixture_signing_value, timestamp) == expected
 
 
-def test_only_integrated_team_events_can_be_selected_for_routes() -> None:
+def test_integrated_team_events_can_be_selected_for_routes() -> None:
     assert normalize_notification_event_types(
-        ["signal_event_received", "PROPOSAL_REVIEW_REQUIRED"]
-    ) == ["PROPOSAL_REVIEW_REQUIRED", "SIGNAL_EVENT_RECEIVED"]
+        ["signal_event_received", "PROPOSAL_REVIEW_REQUIRED", "CAPITAL_STATUS_CHANGED"]
+    ) == [
+        "CAPITAL_STATUS_CHANGED",
+        "PROPOSAL_REVIEW_REQUIRED",
+        "SIGNAL_EVENT_RECEIVED",
+    ]
 
     with pytest.raises(DomainRejected) as blocked:
-        normalize_notification_event_types(["CAPITAL_STATUS_CHANGED"])
+        normalize_notification_event_types(["UNKNOWN_EVENT"])
     assert blocked.value.code == "NOTIFICATION_EVENT_TYPES_INVALID"
 
 

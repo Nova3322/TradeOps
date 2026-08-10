@@ -534,6 +534,11 @@ class TradingService:
                     "AccountEquityObservation": AccountEquityObservation,
                     "FundingPayment": FundingPayment,
                     "ProposalDefaultConfig": ProposalDefaultConfig,
+                    "TransferProposal": TransferProposal,
+                    "TransferAuthorization": TransferAuthorization,
+                    "CapitalTransfer": CapitalTransfer,
+                    "DirectCapitalOperation": DirectCapitalOperation,
+                    "CapitalAutomationPolicy": CapitalAutomationPolicy,
                 }
                 model = direct_account_models.get(object_type)
                 if model is not None:
@@ -582,6 +587,12 @@ class TradingService:
                             account_id = None
             if scoped_object is not None:
                 account_id = scoped_object.account_id
+                scoped_team_id = getattr(scoped_object, "team_id", None)
+                if scoped_team_id is not None:
+                    team_id = team_id or scoped_team_id
+                    if workspace_id is None:
+                        scoped_team = session.get(Team, scoped_team_id)
+                        workspace_id = None if scoped_team is None else scoped_team.workspace_id
         session.add(
             AuditEvent(
                 workspace_id=workspace_id,
@@ -1382,6 +1393,59 @@ class TradingService:
                 venue=None,
                 now=now,
                 target_route_id=route.notification_route_id,
+            )
+
+    def enqueue_capital_status_notification(
+        self,
+        *,
+        actor_id: UUID,
+        team_id: UUID,
+        object_id: UUID,
+        object_type: str,
+        status: str,
+        environment: str,
+        account_id: str,
+        venue: str,
+        object_version: int,
+        summary: str,
+        now: datetime,
+    ) -> dict[str, Any]:
+        with self.database.session_factory.begin() as session:
+            team = self._require_role(
+                session,
+                actor_id,
+                "capital.view",
+                account_id,
+                venue,
+                team_id=team_id,
+            )
+            notification_key = (
+                f"{object_type}:{object_id}:{status}:v{object_version}"
+            )
+            return self._enqueue_notification_event(
+                session,
+                actor_id=str(actor_id),
+                team=team,
+                event_type="CAPITAL_STATUS_CHANGED",
+                payload={
+                    "summary": summary,
+                    "status": status,
+                    "environment": environment,
+                    "account_id": account_id,
+                    "venue": venue,
+                },
+                object_type=object_type,
+                object_id=object_id,
+                object_version=object_version,
+                idempotency_key=notification_key,
+                correlation_id=uuid5(
+                    NAMESPACE_URL,
+                    f"tradingops:{team.team_id}:capital-notification:{notification_key}",
+                ),
+                environment=environment,
+                account_id=account_id,
+                venue=venue,
+                now=now,
             )
 
     def bootstrap_admin(self, username: str, *, now: datetime) -> UUID:
@@ -5983,6 +6047,7 @@ class TradingService:
 
         occupied = session.scalars(
             select(CapitalTransfer).where(
+                CapitalTransfer.team_id == team_id,
                 CapitalTransfer.environment == environment,
                 CapitalTransfer.status.in_(OCCUPIED_CAPITAL_STATUSES),
             )
@@ -7254,11 +7319,16 @@ class TradingService:
             if not owner_id or lease_duration <= timedelta(0):
                 _reject("SENDER_LEASE_INVALID", "owner and positive lease duration are required")
             team = self._require_role(session, actor_id, "sender.manage", account_id, venue)
-            lease = session.get(SenderLease, execution_scope, with_for_update=True)
+            lease = session.get(
+                SenderLease,
+                (team.team_id, execution_scope),
+                with_for_update=True,
+            )
             if lease is None:
                 token = 1
                 session.add(
                     SenderLease(
+                        team_id=team.team_id,
                         execution_scope=execution_scope,
                         owner_id=owner_id,
                         fencing_token=token,
@@ -7282,7 +7352,12 @@ class TradingService:
                     .order_by(ReconciliationRun.completed_at.desc())
                     .limit(1)
                 )
-                policy = session.scalar(select(RiskPolicy).where(RiskPolicy.active))
+                policy = session.scalar(
+                    select(RiskPolicy).where(
+                        RiskPolicy.team_id == team.team_id,
+                        RiskPolicy.active,
+                    )
+                )
                 max_age = (
                     timedelta(seconds=policy.max_fact_age_seconds)
                     if policy is not None
@@ -7315,6 +7390,9 @@ class TradingService:
                 reason=owner_id,
                 correlation_id=uuid4(),
                 object_version=token,
+                workspace_id=team.workspace_id,
+                team_id=team.team_id,
+                account_id=account_id,
                 now=now,
             )
             return token
@@ -7322,13 +7400,14 @@ class TradingService:
     def _validate_sender(
         self,
         session: Session,
+        team_id: UUID,
         execution_scope: str,
         owner_id: str,
         fencing_token: int,
         now: datetime,
     ) -> None:
         _scope_parts(execution_scope)
-        lease = session.get(SenderLease, execution_scope)
+        lease = session.get(SenderLease, (team_id, execution_scope))
         if (
             lease is None
             or lease.owner_id != owner_id
@@ -7343,10 +7422,20 @@ class TradingService:
         execution_scope: str,
         owner_id: str,
         fencing_token: int,
+        actor_id: UUID,
         now: datetime,
     ) -> None:
         with self.database.session_factory() as session:
-            self._validate_sender(session, execution_scope, owner_id, fencing_token, now)
+            _environment, account_id, venue = _scope_parts(execution_scope)
+            team = self._require_role(session, actor_id, "sender.manage", account_id, venue)
+            self._validate_sender(
+                session,
+                team.team_id,
+                execution_scope,
+                owner_id,
+                fencing_token,
+                now,
+            )
 
     @staticmethod
     def _binance_client_order_id(intent_id: UUID) -> str:
@@ -7381,13 +7470,20 @@ class TradingService:
         require_limit_price: bool = False,
         environment: ExecutionEnvironment = ExecutionEnvironment.TESTNET,
     ) -> BinanceTestnetOrderCommand:
-        self._validate_sender(session, execution_scope, owner_id, fencing_token, now)
         intent = session.get(OrderIntent, intent_id)
         if intent is None:
             _reject("ORDER_INTENT_NOT_FOUND", "intent does not exist")
         campaign = session.get(Campaign, intent.campaign_id)
         if campaign is None:
             _reject("CAMPAIGN_NOT_FOUND", "intent campaign is missing")
+        self._validate_sender(
+            session,
+            campaign.team_id,
+            execution_scope,
+            owner_id,
+            fencing_token,
+            now,
+        )
         if campaign.environment != environment.value or campaign.venue != venue:
             _reject(
                 f"{venue}_{environment.value}_SCOPE_REQUIRED",
@@ -8095,13 +8191,20 @@ class TradingService:
         now: datetime,
     ) -> UUID:
         with self.database.session_factory.begin() as session:
-            self._validate_sender(session, execution_scope, owner_id, fencing_token, now)
             intent = session.get(OrderIntent, intent_id, with_for_update=True)
             if intent is None:
                 _reject("ORDER_INTENT_NOT_FOUND", "intent does not exist")
             campaign = session.get(Campaign, intent.campaign_id, with_for_update=True)
             if campaign is None:
                 _reject("CAMPAIGN_NOT_FOUND", "intent campaign is missing")
+            self._validate_sender(
+                session,
+                campaign.team_id,
+                execution_scope,
+                owner_id,
+                fencing_token,
+                now,
+            )
             if (
                 campaign.environment != environment.value
                 or campaign.venue != venue
@@ -8331,13 +8434,20 @@ class TradingService:
         now: datetime,
     ) -> None:
         with self.database.session_factory.begin() as session:
-            self._validate_sender(session, execution_scope, owner_id, fencing_token, now)
             intent = session.get(OrderIntent, intent_id, with_for_update=True)
             if intent is None:
                 _reject("ORDER_INTENT_NOT_FOUND", "intent does not exist")
             campaign = session.get(Campaign, intent.campaign_id, with_for_update=True)
             if campaign is None:
                 _reject("CAMPAIGN_NOT_FOUND", "intent campaign is missing")
+            self._validate_sender(
+                session,
+                campaign.team_id,
+                execution_scope,
+                owner_id,
+                fencing_token,
+                now,
+            )
             if (
                 campaign.environment != environment.value
                 or campaign.venue != venue
@@ -8457,10 +8567,17 @@ class TradingService:
         now: datetime,
     ) -> BinanceTestnetProtectionCommand:
         with self.database.session_factory() as session:
-            self._validate_sender(session, execution_scope, owner_id, fencing_token, now)
             campaign = session.get(Campaign, campaign_id)
             if campaign is None:
                 _reject("CAMPAIGN_NOT_FOUND", "campaign does not exist")
+            self._validate_sender(
+                session,
+                campaign.team_id,
+                execution_scope,
+                owner_id,
+                fencing_token,
+                now,
+            )
             if (
                 campaign.environment != environment.value
                 or campaign.venue != venue
@@ -8550,10 +8667,17 @@ class TradingService:
         now: datetime,
     ) -> UUID:
         with self.database.session_factory.begin() as session:
-            self._validate_sender(session, execution_scope, owner_id, fencing_token, now)
             campaign = session.get(Campaign, campaign_id)
             if campaign is None:
                 _reject("CAMPAIGN_NOT_FOUND", "campaign does not exist")
+            self._validate_sender(
+                session,
+                campaign.team_id,
+                execution_scope,
+                owner_id,
+                fencing_token,
+                now,
+            )
             if (
                 campaign.environment != environment.value
                 or campaign.venue != venue
@@ -9208,10 +9332,17 @@ class TradingService:
         now: datetime,
     ) -> ProtectionCancelCommand:
         with self.database.session_factory() as session:
-            self._validate_sender(session, execution_scope, owner_id, fencing_token, now)
             campaign = session.get(Campaign, campaign_id)
             if campaign is None:
                 _reject("CAMPAIGN_NOT_FOUND", "campaign does not exist")
+            self._validate_sender(
+                session,
+                campaign.team_id,
+                execution_scope,
+                owner_id,
+                fencing_token,
+                now,
+            )
             if (
                 campaign.environment != ExecutionEnvironment.LIVE.value
                 or campaign.venue != venue
@@ -9298,10 +9429,17 @@ class TradingService:
         now: datetime,
     ) -> None:
         with self.database.session_factory.begin() as session:
-            self._validate_sender(session, execution_scope, owner_id, fencing_token, now)
             campaign = session.get(Campaign, campaign_id)
             if campaign is None:
                 _reject("CAMPAIGN_NOT_FOUND", "campaign does not exist")
+            self._validate_sender(
+                session,
+                campaign.team_id,
+                execution_scope,
+                owner_id,
+                fencing_token,
+                now,
+            )
             if (
                 campaign.environment != ExecutionEnvironment.LIVE.value
                 or campaign.venue != venue
@@ -9833,13 +9971,20 @@ class TradingService:
         """Record a synthetic SHADOW send; this method never connects to a venue."""
 
         with self.database.session_factory.begin() as session:
-            self._validate_sender(session, execution_scope, owner_id, fencing_token, now)
             intent = session.get(OrderIntent, intent_id, with_for_update=True)
             if intent is None or intent.status != OrderIntentStatus.READY.value:
                 _reject("ORDER_INTENT_NOT_READY", "only a ready intent can be shadow-sent")
             campaign = session.get(Campaign, intent.campaign_id)
             if campaign is None:
                 _reject("CAMPAIGN_NOT_FOUND", "intent campaign is missing")
+            self._validate_sender(
+                session,
+                campaign.team_id,
+                execution_scope,
+                owner_id,
+                fencing_token,
+                now,
+            )
             if campaign.environment != ExecutionEnvironment.SHADOW.value:
                 _reject("SHADOW_SCOPE_REQUIRED", "synthetic order recording is SHADOW-only")
             expected_scope = _scope_key(campaign.environment, campaign.account_id, campaign.venue)
@@ -14393,9 +14538,12 @@ class TradingService:
 
     def direct_capital_configuration(self, actor_id: UUID) -> dict[str, Any] | None:
         with self.database.session_factory() as session:
-            self._require_role(session, actor_id, "capital.view")
+            team = self._require_role(session, actor_id, "capital.view")
             config = session.scalar(
-                select(DirectCapitalConfiguration).where(DirectCapitalConfiguration.active)
+                select(DirectCapitalConfiguration).where(
+                    DirectCapitalConfiguration.team_id == team.team_id,
+                    DirectCapitalConfiguration.active,
+                )
             )
             if config is None:
                 return None
@@ -14487,18 +14635,35 @@ class TradingService:
                 "Binance withdrawal must target the selected on-chain treasury",
             )
         with self.database.session_factory.begin() as session:
-            self._require_role(session, actor_id, operation)
+            team = self._require_role(session, actor_id, operation)
             assignments = session.scalars(
-                select(RoleAssignment).where(RoleAssignment.user_id == actor_id)
+                select(RoleAssignment).where(
+                    RoleAssignment.user_id == actor_id,
+                    RoleAssignment.team_id == team.team_id,
+                )
             ).all()
             if not any(item.role == Role.SYSTEM_ADMIN.value for item in assignments):
                 _reject(
                     "CAPITAL_CONFIGURATION_ADMIN_REQUIRED",
                     "direct capital configuration requires SYSTEM_ADMIN",
                 )
+            for configured_account_id, configured_venue in (
+                (binance_account_id, "BINANCE"),
+                (hyperliquid_account_id, "HYPERLIQUID"),
+            ):
+                if configured_account_id is None:
+                    continue
+                self._ensure_exchange_account_reference(
+                    session,
+                    team=team,
+                    actor_id=actor_id,
+                    account_id=configured_account_id,
+                    venue=configured_venue,
+                    now=now,
+                )
             digest, response = self._idempotency(
                 session,
-                caller_id=str(actor_id),
+                caller_id=f"{actor_id}:{team.team_id}",
                 operation=operation,
                 idempotency_key=idempotency_key,
                 payload=payload,
@@ -14507,13 +14672,17 @@ class TradingService:
                 return _as_uuid(str(response["config_id"]))
             current = session.scalar(
                 select(DirectCapitalConfiguration)
-                .where(DirectCapitalConfiguration.active)
+                .where(
+                    DirectCapitalConfiguration.team_id == team.team_id,
+                    DirectCapitalConfiguration.active,
+                )
                 .with_for_update()
             )
             next_version = 1 if current is None else current.version + 1
             if current is not None:
                 current.active = False
             config = DirectCapitalConfiguration(
+                team_id=team.team_id,
                 version=next_version,
                 active=True,
                 network=network,
@@ -14539,7 +14708,7 @@ class TradingService:
             result = {"config_id": str(config.config_id), "version": config.version}
             self._save_receipt(
                 session,
-                caller_id=str(actor_id),
+                caller_id=f"{actor_id}:{team.team_id}",
                 operation=operation,
                 idempotency_key=idempotency_key,
                 semantic_hash=digest,
@@ -14559,6 +14728,8 @@ class TradingService:
                 correlation_id=uuid4(),
                 object_version=config.version,
                 idempotency_key=idempotency_key,
+                workspace_id=team.workspace_id,
+                team_id=team.team_id,
                 now=now,
             )
             return config.config_id
@@ -14600,16 +14771,25 @@ class TradingService:
         }
         operation = "capital.direct.create"
         with self.database.session_factory.begin() as session:
-            self._require_role(
+            team = self._require_role(
                 session,
                 actor_id,
                 "capital.execute",
                 plan.account_id,
                 plan.venue,
             )
+            if plan.account_id is not None:
+                self._ensure_exchange_account_reference(
+                    session,
+                    team=team,
+                    actor_id=actor_id,
+                    account_id=plan.account_id,
+                    venue=plan.venue,
+                    now=now,
+                )
             digest, response = self._idempotency(
                 session,
-                caller_id=str(actor_id),
+                caller_id=f"{actor_id}:{team.team_id}",
                 operation=operation,
                 idempotency_key=idempotency_key,
                 payload=payload,
@@ -14618,6 +14798,7 @@ class TradingService:
                 return _as_uuid(str(response["operation_id"]))
             correlation_id = uuid4()
             direct_operation = DirectCapitalOperation(
+                team_id=team.team_id,
                 path=plan.path.value,
                 treasury_provider=plan.treasury_provider.value,
                 status=plan.status,
@@ -14649,7 +14830,7 @@ class TradingService:
             result = {"operation_id": str(direct_operation.operation_id)}
             self._save_receipt(
                 session,
-                caller_id=str(actor_id),
+                caller_id=f"{actor_id}:{team.team_id}",
                 operation=operation,
                 idempotency_key=idempotency_key,
                 semantic_hash=digest,
@@ -14666,6 +14847,9 @@ class TradingService:
                 correlation_id=correlation_id,
                 object_version=1,
                 idempotency_key=idempotency_key,
+                workspace_id=team.workspace_id,
+                team_id=team.team_id,
+                account_id=plan.account_id,
                 now=now,
             )
             return direct_operation.operation_id
@@ -14681,7 +14865,14 @@ class TradingService:
             item = session.get(DirectCapitalOperation, operation_id)
             if item is None:
                 _reject("CAPITAL_DIRECT_OPERATION_NOT_FOUND", "direct capital operation is missing")
-            self._require_role(session, actor_id, "capital.execute", item.account_id, item.venue)
+            self._require_role(
+                session,
+                actor_id,
+                "capital.execute",
+                item.account_id,
+                item.venue,
+                team_id=item.team_id,
+            )
             if item.expires_at <= now:
                 _reject("CAPITAL_DIRECT_OPERATION_EXPIRED", "direct capital operation expired")
             return {
@@ -14731,7 +14922,14 @@ class TradingService:
             item = session.get(DirectCapitalOperation, operation_id, with_for_update=True)
             if item is None:
                 _reject("CAPITAL_DIRECT_OPERATION_NOT_FOUND", "direct capital operation is missing")
-            self._require_role(session, actor_id, "capital.execute", item.account_id, item.venue)
+            self._require_role(
+                session,
+                actor_id,
+                "capital.execute",
+                item.account_id,
+                item.venue,
+                team_id=item.team_id,
+            )
             payload = {
                 "operation_id": str(operation_id),
                 "expected_version": expected_version,
@@ -14740,7 +14938,7 @@ class TradingService:
             }
             digest, response = self._idempotency(
                 session,
-                caller_id=str(actor_id),
+                caller_id=f"{actor_id}:{item.team_id}",
                 operation=operation,
                 idempotency_key=idempotency_key,
                 payload=payload,
@@ -14794,7 +14992,7 @@ class TradingService:
             result = {"operation_id": str(operation_id), "version": item.version}
             self._save_receipt(
                 session,
-                caller_id=str(actor_id),
+                caller_id=f"{actor_id}:{item.team_id}",
                 operation=operation,
                 idempotency_key=idempotency_key,
                 semantic_hash=digest,
@@ -14846,7 +15044,14 @@ class TradingService:
             item = session.get(DirectCapitalOperation, operation_id, with_for_update=True)
             if item is None:
                 _reject("CAPITAL_DIRECT_OPERATION_NOT_FOUND", "direct capital operation is missing")
-            self._require_role(session, actor_id, "capital.execute", item.account_id, item.venue)
+            self._require_role(
+                session,
+                actor_id,
+                "capital.execute",
+                item.account_id,
+                item.venue,
+                team_id=item.team_id,
+            )
             if item.treasury_provider != "SAFE_SPENDING_LIMIT":
                 _reject("SAFE_PLAN_SCOPE_MISMATCH", "operation did not select Safe Spending Limits")
             outbound = item.path in {
@@ -14870,7 +15075,7 @@ class TradingService:
             }
             digest, response = self._idempotency(
                 session,
-                caller_id=str(actor_id),
+                caller_id=f"{actor_id}:{item.team_id}",
                 operation=operation,
                 idempotency_key=idempotency_key,
                 payload=payload,
@@ -14901,7 +15106,7 @@ class TradingService:
             result = {"operation_id": str(operation_id), "version": item.version}
             self._save_receipt(
                 session,
-                caller_id=str(actor_id),
+                caller_id=f"{actor_id}:{item.team_id}",
                 operation=operation,
                 idempotency_key=idempotency_key,
                 semantic_hash=digest,
@@ -14958,7 +15163,14 @@ class TradingService:
             item = session.get(DirectCapitalOperation, operation_id, with_for_update=True)
             if item is None:
                 _reject("CAPITAL_DIRECT_OPERATION_NOT_FOUND", "direct capital operation is missing")
-            self._require_role(session, actor_id, "capital.execute", item.account_id, item.venue)
+            self._require_role(
+                session,
+                actor_id,
+                "capital.execute",
+                item.account_id,
+                item.venue,
+                team_id=item.team_id,
+            )
             expected_kinds = {
                 DirectCapitalPath.VAULT_TO_HYPERLIQUID.value: (
                     {"HYPERLIQUID_ARBITRUM_DEPOSIT_UNSIGNED_TRANSACTION"}
@@ -14981,7 +15193,7 @@ class TradingService:
             }
             digest, response = self._idempotency(
                 session,
-                caller_id=str(actor_id),
+                caller_id=f"{actor_id}:{item.team_id}",
                 operation=operation,
                 idempotency_key=idempotency_key,
                 payload=payload,
@@ -15031,7 +15243,7 @@ class TradingService:
             result = {"operation_id": str(operation_id), "version": item.version}
             self._save_receipt(
                 session,
-                caller_id=str(actor_id),
+                caller_id=f"{actor_id}:{item.team_id}",
                 operation=operation,
                 idempotency_key=idempotency_key,
                 semantic_hash=digest,
@@ -15087,10 +15299,17 @@ class TradingService:
             item = session.get(DirectCapitalOperation, operation_id, with_for_update=True)
             if item is None:
                 _reject("CAPITAL_DIRECT_OPERATION_NOT_FOUND", "direct capital operation is missing")
-            self._require_role(session, actor_id, "capital.execute", item.account_id, item.venue)
+            self._require_role(
+                session,
+                actor_id,
+                "capital.execute",
+                item.account_id,
+                item.venue,
+                team_id=item.team_id,
+            )
             digest, response = self._idempotency(
                 session,
-                caller_id=str(actor_id),
+                caller_id=f"{actor_id}:{item.team_id}",
                 operation=operation,
                 idempotency_key=idempotency_key,
                 payload=payload,
@@ -15200,7 +15419,7 @@ class TradingService:
             result = {"operation_id": str(operation_id), "version": item.version}
             self._save_receipt(
                 session,
-                caller_id=str(actor_id),
+                caller_id=f"{actor_id}:{item.team_id}",
                 operation=operation,
                 idempotency_key=idempotency_key,
                 semantic_hash=digest,
@@ -15236,7 +15455,14 @@ class TradingService:
             item = session.get(DirectCapitalOperation, operation_id, with_for_update=True)
             if item is None:
                 _reject("CAPITAL_DIRECT_OPERATION_NOT_FOUND", "direct capital operation is missing")
-            self._require_role(session, actor_id, "capital.execute", item.account_id, item.venue)
+            self._require_role(
+                session,
+                actor_id,
+                "capital.execute",
+                item.account_id,
+                item.venue,
+                team_id=item.team_id,
+            )
             if item.path != DirectCapitalPath.HYPERLIQUID_TO_VAULT.value:
                 _reject(
                     "TREASURY_RECEIPT_STAGE_INVALID",
@@ -15249,7 +15475,7 @@ class TradingService:
             }
             digest, response = self._idempotency(
                 session,
-                caller_id=str(actor_id),
+                caller_id=f"{actor_id}:{item.team_id}",
                 operation=operation,
                 idempotency_key=idempotency_key,
                 payload=payload,
@@ -15318,7 +15544,7 @@ class TradingService:
             result = {"operation_id": str(operation_id), "version": item.version}
             self._save_receipt(
                 session,
-                caller_id=str(actor_id),
+                caller_id=f"{actor_id}:{item.team_id}",
                 operation=operation,
                 idempotency_key=idempotency_key,
                 semantic_hash=digest,
@@ -15358,7 +15584,14 @@ class TradingService:
             item = session.get(DirectCapitalOperation, operation_id, with_for_update=True)
             if item is None:
                 _reject("CAPITAL_DIRECT_OPERATION_NOT_FOUND", "direct capital operation is missing")
-            self._require_role(session, actor_id, "capital.execute", item.account_id, item.venue)
+            self._require_role(
+                session,
+                actor_id,
+                "capital.execute",
+                item.account_id,
+                item.venue,
+                team_id=item.team_id,
+            )
             allowed = {
                 DirectCapitalPath.VAULT_TO_HYPERLIQUID.value: {
                     "HYPERLIQUID_DEPOSIT_ARBITRUM",
@@ -15383,7 +15616,7 @@ class TradingService:
             }
             digest, response = self._idempotency(
                 session,
-                caller_id=str(actor_id),
+                caller_id=f"{actor_id}:{item.team_id}",
                 operation=operation,
                 idempotency_key=idempotency_key,
                 payload=payload,
@@ -15462,7 +15695,7 @@ class TradingService:
             result = {"operation_id": str(operation_id), "version": item.version}
             self._save_receipt(
                 session,
-                caller_id=str(actor_id),
+                caller_id=f"{actor_id}:{item.team_id}",
                 operation=operation,
                 idempotency_key=idempotency_key,
                 semantic_hash=digest,
@@ -15505,7 +15738,14 @@ class TradingService:
             item = session.get(DirectCapitalOperation, operation_id, with_for_update=True)
             if item is None:
                 _reject("CAPITAL_DIRECT_OPERATION_NOT_FOUND", "direct capital operation is missing")
-            self._require_role(session, actor_id, "capital.execute", item.account_id, item.venue)
+            self._require_role(
+                session,
+                actor_id,
+                "capital.execute",
+                item.account_id,
+                item.venue,
+                team_id=item.team_id,
+            )
             payload = {
                 "operation_id": str(operation_id),
                 "expected_version": expected_version,
@@ -15513,7 +15753,7 @@ class TradingService:
             }
             digest, response = self._idempotency(
                 session,
-                caller_id=str(actor_id),
+                caller_id=f"{actor_id}:{item.team_id}",
                 operation=operation,
                 idempotency_key=idempotency_key,
                 payload=payload,
@@ -15557,7 +15797,7 @@ class TradingService:
             result = {"operation_id": str(operation_id), "version": item.version}
             self._save_receipt(
                 session,
-                caller_id=str(actor_id),
+                caller_id=f"{actor_id}:{item.team_id}",
                 operation=operation,
                 idempotency_key=idempotency_key,
                 semantic_hash=digest,
@@ -15593,7 +15833,14 @@ class TradingService:
             item = session.get(DirectCapitalOperation, operation_id, with_for_update=True)
             if item is None:
                 _reject("CAPITAL_DIRECT_OPERATION_NOT_FOUND", "direct capital operation is missing")
-            self._require_role(session, actor_id, "capital.execute", item.account_id, item.venue)
+            self._require_role(
+                session,
+                actor_id,
+                "capital.execute",
+                item.account_id,
+                item.venue,
+                team_id=item.team_id,
+            )
             payload = {
                 "operation_id": str(operation_id),
                 "expected_version": expected_version,
@@ -15601,7 +15848,7 @@ class TradingService:
             }
             digest, response = self._idempotency(
                 session,
-                caller_id=str(actor_id),
+                caller_id=f"{actor_id}:{item.team_id}",
                 operation=operation,
                 idempotency_key=idempotency_key,
                 payload=payload,
@@ -15639,7 +15886,7 @@ class TradingService:
             result = {"operation_id": str(operation_id), "version": item.version}
             self._save_receipt(
                 session,
-                caller_id=str(actor_id),
+                caller_id=f"{actor_id}:{item.team_id}",
                 operation=operation,
                 idempotency_key=idempotency_key,
                 semantic_hash=digest,
@@ -15682,7 +15929,14 @@ class TradingService:
             item = session.get(DirectCapitalOperation, operation_id, with_for_update=True)
             if item is None:
                 _reject("CAPITAL_DIRECT_OPERATION_NOT_FOUND", "direct capital operation is missing")
-            self._require_role(session, actor_id, "capital.execute", item.account_id, item.venue)
+            self._require_role(
+                session,
+                actor_id,
+                "capital.execute",
+                item.account_id,
+                item.venue,
+                team_id=item.team_id,
+            )
             payload = {
                 "operation_id": str(operation_id),
                 "expected_version": expected_version,
@@ -15691,7 +15945,7 @@ class TradingService:
             }
             digest, response = self._idempotency(
                 session,
-                caller_id=str(actor_id),
+                caller_id=f"{actor_id}:{item.team_id}",
                 operation=operation,
                 idempotency_key=idempotency_key,
                 payload=payload,
@@ -15733,7 +15987,7 @@ class TradingService:
             result = {"operation_id": str(operation_id), "version": item.version}
             self._save_receipt(
                 session,
-                caller_id=str(actor_id),
+                caller_id=f"{actor_id}:{item.team_id}",
                 operation=operation,
                 idempotency_key=idempotency_key,
                 semantic_hash=digest,
@@ -16159,10 +16413,18 @@ class TradingService:
         }
         operation = "capital.policy.manage"
         with self.database.session_factory.begin() as session:
-            self._require_role(session, actor_id, operation, account_id, venue)
+            team = self._require_role(session, actor_id, operation, account_id, venue)
+            self._ensure_exchange_account_reference(
+                session,
+                team=team,
+                actor_id=actor_id,
+                account_id=account_id,
+                venue=venue,
+                now=now,
+            )
             digest, response = self._idempotency(
                 session,
-                caller_id=str(actor_id),
+                caller_id=f"{actor_id}:{team.team_id}",
                 operation=operation,
                 idempotency_key=idempotency_key,
                 payload=payload,
@@ -16172,6 +16434,7 @@ class TradingService:
             policy = session.scalar(
                 select(CapitalAutomationPolicy)
                 .where(
+                    CapitalAutomationPolicy.team_id == team.team_id,
                     CapitalAutomationPolicy.environment == environment.value,
                     CapitalAutomationPolicy.account_id == account_id,
                     CapitalAutomationPolicy.venue == venue,
@@ -16181,6 +16444,7 @@ class TradingService:
             )
             if policy is None:
                 policy = CapitalAutomationPolicy(
+                    team_id=team.team_id,
                     environment=environment.value,
                     account_id=account_id,
                     venue=venue,
@@ -16223,7 +16487,7 @@ class TradingService:
             result = {"policy_id": str(policy.policy_id)}
             self._save_receipt(
                 session,
-                caller_id=str(actor_id),
+                caller_id=f"{actor_id}:{team.team_id}",
                 operation=operation,
                 idempotency_key=idempotency_key,
                 semantic_hash=digest,
@@ -16240,6 +16504,9 @@ class TradingService:
                 correlation_id=uuid4(),
                 object_version=policy.version,
                 idempotency_key=idempotency_key,
+                workspace_id=team.workspace_id,
+                team_id=team.team_id,
+                account_id=policy.account_id,
                 now=now,
             )
             return policy.policy_id
@@ -16261,10 +16528,17 @@ class TradingService:
             policy = session.get(CapitalAutomationPolicy, policy_id, with_for_update=True)
             if policy is None:
                 _reject("CAPITAL_AUTOMATION_POLICY_NOT_FOUND", "capital policy is missing")
-            team = self._require_role(session, actor_id, operation, policy.account_id, policy.venue)
+            team = self._require_role(
+                session,
+                actor_id,
+                operation,
+                policy.account_id,
+                policy.venue,
+                team_id=policy.team_id,
+            )
             digest, response = self._idempotency(
                 session,
-                caller_id=str(actor_id),
+                caller_id=f"{actor_id}:{team.team_id}",
                 operation=operation,
                 idempotency_key=idempotency_key,
                 payload=payload,
@@ -16284,9 +16558,9 @@ class TradingService:
                 text("SELECT pg_advisory_xact_lock(:key)"),
                 {
                     "key": _advisory_lock_key(
-                        policy.environment,
+                        str(team.team_id),
                         "capital-automation",
-                        f"{policy.account_id}:{policy.venue}:{policy.asset}",
+                        f"{policy.environment}:{policy.account_id}:{policy.venue}:{policy.asset}",
                     )
                 },
             )
@@ -16298,7 +16572,12 @@ class TradingService:
                 venue=policy.venue,
                 now=now,
             )
-            risk_policy = session.scalar(select(RiskPolicy).where(RiskPolicy.active))
+            risk_policy = session.scalar(
+                select(RiskPolicy).where(
+                    RiskPolicy.team_id == team.team_id,
+                    RiskPolicy.active,
+                )
+            )
             if risk_policy is None:
                 _reject("RISK_POLICY_MISSING", "capital automation requires an active risk policy")
             latest_match = session.scalar(
@@ -16338,6 +16617,7 @@ class TradingService:
             active_transfer = session.scalar(
                 select(CapitalTransfer.capital_transfer_id)
                 .where(
+                    CapitalTransfer.team_id == team.team_id,
                     CapitalTransfer.environment == policy.environment,
                     CapitalTransfer.account_id == policy.account_id,
                     CapitalTransfer.venue == policy.venue,
@@ -16348,6 +16628,7 @@ class TradingService:
             active_proposal = session.scalar(
                 select(TransferProposal.transfer_proposal_id)
                 .where(
+                    TransferProposal.team_id == team.team_id,
                     TransferProposal.environment == policy.environment,
                     TransferProposal.account_id == policy.account_id,
                     TransferProposal.venue == policy.venue,
@@ -16404,6 +16685,8 @@ class TradingService:
                     == CapitalTransfer.transfer_authorization_id,
                 )
                 .where(
+                    CapitalTransfer.team_id == team.team_id,
+                    TransferAuthorization.team_id == team.team_id,
                     CapitalTransfer.environment == policy.environment,
                     CapitalTransfer.account_id == policy.account_id,
                     CapitalTransfer.venue == policy.venue,
@@ -16482,6 +16765,7 @@ class TradingService:
                     "reconciliation_id": str(latest_match.reconciliation_id),
                 }
                 proposal = TransferProposal(
+                    team_id=team.team_id,
                     proposer_id=actor_id,
                     environment=policy.environment,
                     direction=direction.value,
@@ -16524,7 +16808,7 @@ class TradingService:
                 object_version = proposal.version
             self._save_receipt(
                 session,
-                caller_id=str(actor_id),
+                caller_id=f"{actor_id}:{team.team_id}",
                 operation=operation,
                 idempotency_key=idempotency_key,
                 semantic_hash=digest,
@@ -16545,6 +16829,9 @@ class TradingService:
                 correlation_id=uuid4(),
                 object_version=object_version,
                 idempotency_key=idempotency_key,
+                workspace_id=team.workspace_id,
+                team_id=team.team_id,
+                account_id=policy.account_id,
                 now=now,
             )
             return (
@@ -16608,10 +16895,18 @@ class TradingService:
         }
         operation = "capital.propose"
         with self.database.session_factory.begin() as session:
-            self._require_role(session, actor_id, operation, account_id, venue)
+            team = self._require_role(session, actor_id, operation, account_id, venue)
+            self._ensure_exchange_account_reference(
+                session,
+                team=team,
+                actor_id=actor_id,
+                account_id=account_id,
+                venue=venue,
+                now=now,
+            )
             digest, response = self._idempotency(
                 session,
-                caller_id=str(actor_id),
+                caller_id=f"{actor_id}:{team.team_id}",
                 operation=operation,
                 idempotency_key=idempotency_key,
                 payload=payload,
@@ -16619,6 +16914,7 @@ class TradingService:
             if response is not None:
                 return _as_uuid(str(response["transfer_proposal_id"]))
             proposal = TransferProposal(
+                team_id=team.team_id,
                 proposer_id=actor_id,
                 environment=environment.value,
                 direction=direction.value,
@@ -16651,7 +16947,7 @@ class TradingService:
             result = {"transfer_proposal_id": str(proposal.transfer_proposal_id)}
             self._save_receipt(
                 session,
-                caller_id=str(actor_id),
+                caller_id=f"{actor_id}:{team.team_id}",
                 operation=operation,
                 idempotency_key=idempotency_key,
                 semantic_hash=digest,
@@ -16668,6 +16964,9 @@ class TradingService:
                 correlation_id=proposal.correlation_id,
                 object_version=proposal.version,
                 idempotency_key=idempotency_key,
+                workspace_id=team.workspace_id,
+                team_id=team.team_id,
+                account_id=proposal.account_id,
                 now=now,
             )
             return proposal.transfer_proposal_id
@@ -16679,8 +16978,13 @@ class TradingService:
             proposal = session.get(TransferProposal, transfer_proposal_id, with_for_update=True)
             if proposal is None:
                 _reject("TRANSFER_PROPOSAL_NOT_FOUND", "transfer proposal does not exist")
-            self._require_role(
-                session, actor_id, "capital.submit", proposal.account_id, proposal.venue
+            team = self._require_role(
+                session,
+                actor_id,
+                "capital.submit",
+                proposal.account_id,
+                proposal.venue,
+                team_id=proposal.team_id,
             )
             if proposal.proposer_id != actor_id:
                 _reject("TRANSFER_PROPOSAL_OWNER_REQUIRED", "only the proposer may submit")
@@ -16704,6 +17008,9 @@ class TradingService:
                 reason="frozen for two independent Treasury reviewers",
                 correlation_id=proposal.correlation_id,
                 object_version=proposal.version,
+                workspace_id=team.workspace_id,
+                team_id=team.team_id,
+                account_id=proposal.account_id,
                 now=now,
             )
 
@@ -16725,8 +17032,13 @@ class TradingService:
                 _reject("VERSION_CONFLICT", "transfer proposal changed before review")
             if proposal.proposer_id == reviewer_id:
                 _reject("SELF_REVIEW_FORBIDDEN", "a transfer proposer cannot review it")
-            self._require_role(
-                session, reviewer_id, "capital.review", proposal.account_id, proposal.venue
+            team = self._require_role(
+                session,
+                reviewer_id,
+                "capital.review",
+                proposal.account_id,
+                proposal.venue,
+                team_id=proposal.team_id,
             )
             reviewer = session.get(User, reviewer_id)
             if reviewer is None or reviewer.principal_type != PrincipalType.HUMAN.value:
@@ -16781,6 +17093,9 @@ class TradingService:
                 reason=f"{decision.value}: {reason}",
                 correlation_id=proposal.correlation_id,
                 object_version=proposal.version,
+                workspace_id=team.workspace_id,
+                team_id=team.team_id,
+                account_id=proposal.account_id,
                 now=now,
             )
             return ProposalStatus(proposal.status)
@@ -16803,7 +17118,14 @@ class TradingService:
             proposal = session.get(TransferProposal, transfer_proposal_id)
             if proposal is None:
                 _reject("TRANSFER_PROPOSAL_NOT_FOUND", "transfer proposal does not exist")
-            self._require_role(session, actor_id, operation, proposal.account_id, proposal.venue)
+            team = self._require_role(
+                session,
+                actor_id,
+                operation,
+                proposal.account_id,
+                proposal.venue,
+                team_id=proposal.team_id,
+            )
             if proposal.proposer_id == actor_id:
                 _reject(
                     "CAPITAL_DUTY_SEPARATION_REQUIRED",
@@ -16811,7 +17133,7 @@ class TradingService:
                 )
             digest, response = self._idempotency(
                 session,
-                caller_id=str(actor_id),
+                caller_id=f"{actor_id}:{team.team_id}",
                 operation=operation,
                 idempotency_key=idempotency_key,
                 payload=payload,
@@ -16826,6 +17148,7 @@ class TradingService:
                     "transfer authorization must be short-lived",
                 )
             authorization = TransferAuthorization(
+                team_id=proposal.team_id,
                 transfer_proposal_id=proposal.transfer_proposal_id,
                 environment=proposal.environment,
                 direction=proposal.direction,
@@ -16854,7 +17177,7 @@ class TradingService:
             result = {"transfer_authorization_id": str(authorization.transfer_authorization_id)}
             self._save_receipt(
                 session,
-                caller_id=str(actor_id),
+                caller_id=f"{actor_id}:{team.team_id}",
                 operation=operation,
                 idempotency_key=idempotency_key,
                 semantic_hash=digest,
@@ -16871,6 +17194,9 @@ class TradingService:
                 correlation_id=proposal.correlation_id,
                 object_version=1,
                 idempotency_key=idempotency_key,
+                workspace_id=team.workspace_id,
+                team_id=team.team_id,
+                account_id=proposal.account_id,
                 now=now,
             )
             return authorization.transfer_authorization_id
@@ -17013,7 +17339,12 @@ class TradingService:
             _reject("CAPITAL_POSITION_UNKNOWN", "flat position facts are required")
         if any(item.fact_status != FactStatus.KNOWN.value for item in positions):
             _reject("CAPITAL_POSITION_UNKNOWN", "unknown position blocks capital transfer")
-        policy = session.scalar(select(RiskPolicy).where(RiskPolicy.active))
+        policy = session.scalar(
+            select(RiskPolicy).where(
+                RiskPolicy.team_id == team_id,
+                RiskPolicy.active,
+            )
+        )
         if policy is None or any(
             item.observed_at < now - timedelta(seconds=policy.max_fact_age_seconds)
             for item in positions
@@ -17088,11 +17419,18 @@ class TradingService:
             if authorization is None:
                 _reject("TRANSFER_AUTHORIZATION_NOT_FOUND", "transfer authorization is missing")
             team = self._require_role(
-                session, actor_id, operation, authorization.account_id, authorization.venue
+                session,
+                actor_id,
+                operation,
+                authorization.account_id,
+                authorization.venue,
+                team_id=authorization.team_id,
             )
             proposal = session.get(TransferProposal, authorization.transfer_proposal_id)
             if proposal is None:
                 _reject("TRANSFER_PROPOSAL_NOT_FOUND", "authorization proposal is missing")
+            if proposal.team_id != authorization.team_id:
+                _reject("TEAM_SCOPE_DENIED", "authorization lineage crosses team scope")
             if proposal.proposer_id == actor_id:
                 _reject(
                     "CAPITAL_DUTY_SEPARATION_REQUIRED",
@@ -17100,7 +17438,7 @@ class TradingService:
                 )
             digest, response = self._idempotency(
                 session,
-                caller_id=str(actor_id),
+                caller_id=f"{actor_id}:{team.team_id}",
                 operation=operation,
                 idempotency_key=idempotency_key,
                 payload=payload,
@@ -17165,9 +17503,10 @@ class TradingService:
                 text("SELECT pg_advisory_xact_lock(:key)"),
                 {
                     "key": _advisory_lock_key(
-                        authorization.environment,
+                        str(team.team_id),
                         "capital-source",
-                        f"{authorization.source_type}:{authorization.source_id}:"
+                        f"{authorization.environment}:{authorization.source_type}:"
+                        f"{authorization.source_id}:"
                         f"{authorization.asset}",
                     )
                 },
@@ -17196,6 +17535,7 @@ class TradingService:
                 _reject("CAPITAL_FACT_UNKNOWN", "control or destination deposit status is unsafe")
             occupied = session.scalar(
                 select(func.coalesce(func.sum(CapitalTransfer.reserved_amount), 0)).where(
+                    CapitalTransfer.team_id == team.team_id,
                     CapitalTransfer.environment == authorization.environment,
                     CapitalTransfer.source_id == authorization.source_id,
                     CapitalTransfer.asset == authorization.asset,
@@ -17210,6 +17550,7 @@ class TradingService:
             if withdrawable - Decimal(occupied or 0) < authorization.amount_limit:
                 _reject("CAPITAL_CAPACITY_EXCEEDED", "source confirmed capital is insufficient")
             transfer = CapitalTransfer(
+                team_id=team.team_id,
                 transfer_authorization_id=authorization.transfer_authorization_id,
                 environment=authorization.environment,
                 account_id=authorization.account_id,
@@ -17246,7 +17587,7 @@ class TradingService:
             result = {"capital_transfer_id": str(transfer.capital_transfer_id)}
             self._save_receipt(
                 session,
-                caller_id=str(actor_id),
+                caller_id=f"{actor_id}:{team.team_id}",
                 operation=operation,
                 idempotency_key=idempotency_key,
                 semantic_hash=digest,
@@ -17267,6 +17608,9 @@ class TradingService:
                 correlation_id=transfer.correlation_id,
                 object_version=transfer.version,
                 idempotency_key=idempotency_key,
+                workspace_id=team.workspace_id,
+                team_id=team.team_id,
+                account_id=transfer.account_id,
                 now=now,
             )
             return transfer.capital_transfer_id
@@ -17282,7 +17626,12 @@ class TradingService:
             if authorization is None:
                 _reject("TRANSFER_AUTHORIZATION_NOT_FOUND", "transfer authorization is missing")
             self._require_role(
-                session, actor_id, "capital.execute", transfer.account_id, transfer.venue
+                session,
+                actor_id,
+                "capital.execute",
+                transfer.account_id,
+                transfer.venue,
+                team_id=transfer.team_id,
             )
             if transfer.status != CapitalTransferStatus.SOURCE_RESERVED.value:
                 _reject("CAPITAL_TRANSFER_ALREADY_SUBMITTED", "capital transfer is not reserved")
@@ -17311,7 +17660,12 @@ class TradingService:
             if authorization is None:
                 _reject("TRANSFER_AUTHORIZATION_NOT_FOUND", "transfer authorization is missing")
             self._require_role(
-                session, actor_id, "capital.execute", transfer.account_id, transfer.venue
+                session,
+                actor_id,
+                "capital.execute",
+                transfer.account_id,
+                transfer.venue,
+                team_id=transfer.team_id,
             )
             if (
                 transfer.transport != "NOTILT"
@@ -17370,7 +17724,12 @@ class TradingService:
             if transfer is None:
                 _reject("CAPITAL_TRANSFER_NOT_FOUND", "capital transfer does not exist")
             self._require_role(
-                session, actor_id, "capital.execute", transfer.account_id, transfer.venue
+                session,
+                actor_id,
+                "capital.execute",
+                transfer.account_id,
+                transfer.venue,
+                team_id=transfer.team_id,
             )
             if transfer.environment != ExecutionEnvironment.LIVE.value:
                 _reject(
@@ -17624,7 +17983,12 @@ class TradingService:
             if transfer is None:
                 _reject("CAPITAL_TRANSFER_NOT_FOUND", "capital transfer does not exist")
             self._require_role(
-                session, actor_id, "capital.execute", transfer.account_id, transfer.venue
+                session,
+                actor_id,
+                "capital.execute",
+                transfer.account_id,
+                transfer.venue,
+                team_id=transfer.team_id,
             )
             if transfer.status == CapitalTransferStatus.SUBMITTED.value:
                 if transfer.external_transfer_id == submission.external_transfer_id:
@@ -17687,7 +18051,12 @@ class TradingService:
             if transfer is None:
                 _reject("CAPITAL_TRANSFER_NOT_FOUND", "capital transfer does not exist")
             self._require_role(
-                session, actor_id, "capital.reconcile", transfer.account_id, transfer.venue
+                session,
+                actor_id,
+                "capital.reconcile",
+                transfer.account_id,
+                transfer.venue,
+                team_id=transfer.team_id,
             )
             current = CapitalTransferStatus(transfer.status)
             if status is current:
@@ -17740,7 +18109,12 @@ class TradingService:
             if transfer is None:
                 _reject("CAPITAL_TRANSFER_NOT_FOUND", "capital transfer does not exist")
             team = self._require_role(
-                session, actor_id, "capital.reconcile", transfer.account_id, transfer.venue
+                session,
+                actor_id,
+                "capital.reconcile",
+                transfer.account_id,
+                transfer.venue,
+                team_id=transfer.team_id,
             )
             authorization = session.get(TransferAuthorization, transfer.transfer_authorization_id)
             if authorization is None:

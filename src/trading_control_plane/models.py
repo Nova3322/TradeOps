@@ -715,6 +715,21 @@ class RuntimeSourceHealth(Base):
 class TransferProposal(Base):
     __tablename__ = "transfer_proposals"
     __table_args__ = (
+        UniqueConstraint(
+            "team_id",
+            "transfer_proposal_id",
+            name="uq_transfer_proposals_team_identity",
+        ),
+        ForeignKeyConstraint(
+            ["team_id", "account_id", "venue"],
+            [
+                "exchange_accounts.team_id",
+                "exchange_accounts.account_id",
+                "exchange_accounts.venue",
+            ],
+            name="fk_transfer_proposals_team_exchange_account",
+            ondelete="RESTRICT",
+        ),
         CheckConstraint(
             "environment IN ('SHADOW','TESTNET','LIVE')",
             name="ck_transfer_proposals_environment",
@@ -740,11 +755,19 @@ class TransferProposal(Base):
             "min_received > 0 AND min_received <= amount",
             name="ck_transfer_proposals_min_received",
         ),
-        Index("ix_transfer_proposals_status_expires", "status", "expires_at"),
+        Index(
+            "ix_transfer_proposals_status_expires",
+            "team_id",
+            "status",
+            "expires_at",
+        ),
     )
 
     transfer_proposal_id: Mapped[UUID] = mapped_column(
         Uuid(as_uuid=True), primary_key=True, default=uuid4
+    )
+    team_id: Mapped[UUID] = mapped_column(
+        ForeignKey("teams.team_id", ondelete="RESTRICT"), nullable=False
     )
     proposer_id: Mapped[UUID] = mapped_column(ForeignKey("users.user_id"), nullable=False)
     environment: Mapped[str] = mapped_column(String(16), nullable=False)
@@ -826,7 +849,22 @@ class Approval(Base):
 class TransferAuthorization(Base):
     __tablename__ = "transfer_authorizations"
     __table_args__ = (
-        UniqueConstraint("transfer_proposal_id", name="uq_transfer_authorizations_proposal"),
+        UniqueConstraint(
+            "team_id",
+            "transfer_authorization_id",
+            name="uq_transfer_authorizations_team_identity",
+        ),
+        ForeignKeyConstraint(
+            ["team_id", "transfer_proposal_id"],
+            ["transfer_proposals.team_id", "transfer_proposals.transfer_proposal_id"],
+            name="fk_transfer_authorizations_team_proposal",
+            ondelete="RESTRICT",
+        ),
+        UniqueConstraint(
+            "team_id",
+            "transfer_proposal_id",
+            name="uq_transfer_authorizations_proposal",
+        ),
         CheckConstraint(
             "environment IN ('SHADOW','TESTNET','LIVE')",
             name="ck_transfer_authorizations_environment",
@@ -846,9 +884,10 @@ class TransferAuthorization(Base):
     transfer_authorization_id: Mapped[UUID] = mapped_column(
         Uuid(as_uuid=True), primary_key=True, default=uuid4
     )
-    transfer_proposal_id: Mapped[UUID] = mapped_column(
-        ForeignKey("transfer_proposals.transfer_proposal_id"), nullable=False
+    team_id: Mapped[UUID] = mapped_column(
+        ForeignKey("teams.team_id", ondelete="RESTRICT"), nullable=False
     )
+    transfer_proposal_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), nullable=False)
     environment: Mapped[str] = mapped_column(String(16), nullable=False)
     direction: Mapped[str] = mapped_column(String(24), nullable=False)
     purpose: Mapped[str] = mapped_column(String(32), nullable=False)
@@ -875,7 +914,30 @@ class TransferAuthorization(Base):
 class CapitalTransfer(Base):
     __tablename__ = "capital_transfers"
     __table_args__ = (
-        UniqueConstraint("transfer_authorization_id", name="uq_capital_transfers_authorization"),
+        UniqueConstraint(
+            "team_id",
+            "transfer_authorization_id",
+            name="uq_capital_transfers_authorization",
+        ),
+        ForeignKeyConstraint(
+            ["team_id", "transfer_authorization_id"],
+            [
+                "transfer_authorizations.team_id",
+                "transfer_authorizations.transfer_authorization_id",
+            ],
+            name="fk_capital_transfers_team_authorization",
+            ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            ["team_id", "account_id", "venue"],
+            [
+                "exchange_accounts.team_id",
+                "exchange_accounts.account_id",
+                "exchange_accounts.venue",
+            ],
+            name="fk_capital_transfers_team_exchange_account",
+            ondelete="RESTRICT",
+        ),
         CheckConstraint(
             "status IN ('SOURCE_RESERVED','SUBMITTED','IN_FLIGHT','DESTINATION_CONFIRMED',"
             "'SETTLED','UNKNOWN','FAILED_SOURCE_RESTORED','MANUAL_REQUIRED')",
@@ -908,15 +970,21 @@ class CapitalTransfer(Base):
             "'RELEASE_CANCELLATION_PLAN_READY','RELEASE_CANCELLED')",
             name="ck_capital_transfers_transport_state",
         ),
-        Index("ix_capital_transfers_status_updated", "status", "updated_at"),
+        Index(
+            "ix_capital_transfers_status_updated",
+            "team_id",
+            "status",
+            "updated_at",
+        ),
     )
 
     capital_transfer_id: Mapped[UUID] = mapped_column(
         Uuid(as_uuid=True), primary_key=True, default=uuid4
     )
-    transfer_authorization_id: Mapped[UUID] = mapped_column(
-        ForeignKey("transfer_authorizations.transfer_authorization_id"), nullable=False
+    team_id: Mapped[UUID] = mapped_column(
+        ForeignKey("teams.team_id", ondelete="RESTRICT"), nullable=False
     )
+    transfer_authorization_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), nullable=False)
     environment: Mapped[str] = mapped_column(String(16), nullable=False)
     account_id: Mapped[str] = mapped_column(String(120), nullable=False)
     venue: Mapped[str] = mapped_column(String(64), nullable=False)
@@ -965,7 +1033,11 @@ class CapitalTransfer(Base):
 class DirectCapitalConfiguration(Base):
     __tablename__ = "direct_capital_configurations"
     __table_args__ = (
-        UniqueConstraint("version", name="uq_direct_capital_configurations_version"),
+        UniqueConstraint(
+            "team_id",
+            "version",
+            name="uq_direct_capital_configurations_version",
+        ),
         CheckConstraint("version >= 1", name="ck_direct_capital_configuration_version"),
         CheckConstraint("network = 'ARBITRUM'", name="ck_direct_capital_configuration_network"),
         CheckConstraint("asset = 'USDC'", name="ck_direct_capital_configuration_asset"),
@@ -983,6 +1055,7 @@ class DirectCapitalConfiguration(Base):
         ),
         Index(
             "uq_direct_capital_configuration_active",
+            "team_id",
             "active",
             unique=True,
             postgresql_where=text("active"),
@@ -990,6 +1063,9 @@ class DirectCapitalConfiguration(Base):
     )
 
     config_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid4)
+    team_id: Mapped[UUID] = mapped_column(
+        ForeignKey("teams.team_id", ondelete="RESTRICT"), nullable=False
+    )
     version: Mapped[int] = mapped_column(Integer, nullable=False)
     active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     network: Mapped[str] = mapped_column(String(64), nullable=False, default="ARBITRUM")
@@ -1016,6 +1092,16 @@ class DirectCapitalConfiguration(Base):
 class DirectCapitalOperation(Base):
     __tablename__ = "direct_capital_operations"
     __table_args__ = (
+        ForeignKeyConstraint(
+            ["team_id", "account_id", "venue"],
+            [
+                "exchange_accounts.team_id",
+                "exchange_accounts.account_id",
+                "exchange_accounts.venue",
+            ],
+            name="fk_direct_capital_operations_team_exchange_account",
+            ondelete="RESTRICT",
+        ),
         CheckConstraint(
             "path IN ('VAULT_TO_BINANCE','VAULT_TO_HYPERLIQUID',"
             "'BINANCE_TO_VAULT','HYPERLIQUID_TO_VAULT')",
@@ -1046,10 +1132,13 @@ class DirectCapitalOperation(Base):
         CheckConstraint(
             "jsonb_typeof(blockers) = 'array'", name="ck_direct_capital_blockers_array"
         ),
-        Index("ix_direct_capital_operations_updated", "updated_at"),
+        Index("ix_direct_capital_operations_updated", "team_id", "updated_at"),
     )
 
     operation_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid4)
+    team_id: Mapped[UUID] = mapped_column(
+        ForeignKey("teams.team_id", ondelete="RESTRICT"), nullable=False
+    )
     treasury_provider: Mapped[str] = mapped_column(
         String(32), nullable=False, default="NOTILT_VAULT"
     )
@@ -1082,7 +1171,18 @@ class DirectCapitalOperation(Base):
 class CapitalAutomationPolicy(Base):
     __tablename__ = "capital_automation_policies"
     __table_args__ = (
+        ForeignKeyConstraint(
+            ["team_id", "account_id", "venue"],
+            [
+                "exchange_accounts.team_id",
+                "exchange_accounts.account_id",
+                "exchange_accounts.venue",
+            ],
+            name="fk_capital_automation_policies_team_exchange_account",
+            ondelete="RESTRICT",
+        ),
         UniqueConstraint(
+            "team_id",
             "environment",
             "account_id",
             "venue",
@@ -1113,6 +1213,9 @@ class CapitalAutomationPolicy(Base):
     )
 
     policy_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid4)
+    team_id: Mapped[UUID] = mapped_column(
+        ForeignKey("teams.team_id", ondelete="RESTRICT"), nullable=False
+    )
     environment: Mapped[str] = mapped_column(String(16), nullable=False)
     account_id: Mapped[str] = mapped_column(String(120), nullable=False)
     venue: Mapped[str] = mapped_column(String(64), nullable=False)
@@ -1992,6 +2095,9 @@ class SenderLease(Base):
         CheckConstraint("fencing_token >= 1", name="ck_sender_leases_token_positive"),
     )
 
+    team_id: Mapped[UUID] = mapped_column(
+        ForeignKey("teams.team_id", ondelete="RESTRICT"), primary_key=True
+    )
     execution_scope: Mapped[str] = mapped_column(String(255), primary_key=True)
     owner_id: Mapped[str] = mapped_column(String(255), nullable=False)
     fencing_token: Mapped[int] = mapped_column(Integer, nullable=False)

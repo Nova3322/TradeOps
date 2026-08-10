@@ -74,7 +74,8 @@ def test_agent_api_uses_team_rbac_independent_review_idempotency_and_token_rotat
             assert login.status_code == 200, login.text
             page = await admin.get("/admin/agents")
             assert page.status_code == 200
-            assert 'href="/admin/agents"' in page.text
+            assert 'id="main"' in page.text
+            assert "/assets/app.js?v=144" in page.text
             account = await admin.post(
                 "/api/exchange-accounts",
                 json={

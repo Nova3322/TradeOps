@@ -1508,7 +1508,10 @@ def create_app(
             detail = queries().proposal_detail(identity.user_id, payload.object_id)
             review_action = "proposal.review"
         elif payload.action == "capital.approve":
-            current_version = queries().transfer_proposal_version(payload.object_id)
+            current_version = queries().transfer_proposal_version(
+                identity.user_id,
+                payload.object_id,
+            )
             detail = queries().transfer_proposal_detail(identity.user_id, payload.object_id)
             review_action = "capital.review"
         elif payload.action in {"risk.restore.review", "risk.restore.execute"}:
@@ -1614,13 +1617,29 @@ def create_app(
         object_id: UUID,
         object_type: str,
         event_type: str,
+        actor_id: UUID,
+        team_id: UUID,
         environment: str,
         account_id: str,
         venue: str,
         object_version: int,
         summary: str,
     ) -> None:
-        for recipient in queries().treasury_users(account_id, venue):
+        notification_now = _now()
+        service().enqueue_capital_status_notification(
+            actor_id=actor_id,
+            team_id=team_id,
+            object_id=object_id,
+            object_type=object_type,
+            status=event_type,
+            environment=environment,
+            account_id=account_id,
+            venue=venue,
+            object_version=object_version,
+            summary=summary,
+            now=notification_now,
+        )
+        for recipient in queries().treasury_users(team_id, account_id, venue):
             notification_key = (
                 f"{object_type}:{object_id}:{event_type}:{object_version}:{recipient.user_id}"
             )
@@ -1635,7 +1654,7 @@ def create_app(
                     environment=environment,
                     summary=summary,
                     object_version=object_version,
-                    created_at=_now(),
+                    created_at=notification_now,
                 )
             )
 
@@ -6451,6 +6470,8 @@ def create_app(
                 object_id=proposal_id,
                 object_type="TransferProposal",
                 event_type="PENDING_REVIEW",
+                actor_id=identity.user_id,
+                team_id=UUID(str(detail["team_id"])),
                 environment=str(detail["environment"]),
                 account_id=str(detail["account_id"]),
                 venue=str(detail["venue"]),
@@ -6512,6 +6533,8 @@ def create_app(
             object_id=transfer_proposal_id,
             object_type="TransferProposal",
             event_type="PENDING_REVIEW",
+            actor_id=identity.user_id,
+            team_id=UUID(str(detail["team_id"])),
             environment=str(detail["environment"]),
             account_id=str(detail["account_id"]),
             venue=str(detail["venue"]),
@@ -6553,6 +6576,8 @@ def create_app(
             object_id=transfer_proposal_id,
             object_type="TransferProposal",
             event_type=f"REVIEW_{payload.decision}",
+            actor_id=identity.user_id,
+            team_id=UUID(str(detail["team_id"])),
             environment=str(detail["environment"]),
             account_id=str(detail["account_id"]),
             venue=str(detail["venue"]),
@@ -6610,6 +6635,8 @@ def create_app(
             object_id=transfer_id,
             object_type="CapitalTransfer",
             event_type=str(detail["status"]),
+            actor_id=identity.user_id,
+            team_id=UUID(str(detail["team_id"])),
             environment=str(detail["environment"]),
             account_id=str(detail["account_id"]),
             venue=str(detail["venue"]),
@@ -6911,6 +6938,8 @@ def create_app(
             object_id=capital_transfer_id,
             object_type="CapitalTransfer",
             event_type=f"NOTILT_{receipt_kind}_CONFIRMED",
+            actor_id=identity.user_id,
+            team_id=UUID(str(updated["team_id"])),
             environment=str(updated["environment"]),
             account_id=str(updated["account_id"]),
             venue=str(updated["venue"]),
@@ -6961,6 +6990,8 @@ def create_app(
             object_id=capital_transfer_id,
             object_type="CapitalTransfer",
             event_type=str(detail["status"]),
+            actor_id=identity.user_id,
+            team_id=UUID(str(detail["team_id"])),
             environment=str(detail["environment"]),
             account_id=str(detail["account_id"]),
             venue=str(detail["venue"]),
@@ -6982,6 +7013,8 @@ def create_app(
             object_id=capital_transfer_id,
             object_type="CapitalTransfer",
             event_type=f"RECONCILIATION_{result}",
+            actor_id=identity.user_id,
+            team_id=UUID(str(detail["team_id"])),
             environment=str(detail["environment"]),
             account_id=str(detail["account_id"]),
             venue=str(detail["venue"]),

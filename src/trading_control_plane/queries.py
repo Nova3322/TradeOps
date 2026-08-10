@@ -1233,7 +1233,19 @@ class TradingQueries:
                     "TRANSFER_PROPOSAL_NOT_FOUND", "transfer proposal does not exist"
                 )
             assignments = session.scalars(
-                select(RoleAssignment).where(RoleAssignment.role == Role.TREASURY_ADMIN.value)
+                select(RoleAssignment)
+                .join(
+                    TeamMembership,
+                    and_(
+                        TeamMembership.team_id == RoleAssignment.team_id,
+                        TeamMembership.user_id == RoleAssignment.user_id,
+                    ),
+                )
+                .where(
+                    RoleAssignment.team_id == proposal.team_id,
+                    RoleAssignment.role == Role.TREASURY_ADMIN.value,
+                    TeamMembership.active,
+                )
             ).all()
             reviewer_ids = {
                 item.user_id
@@ -1249,10 +1261,22 @@ class TradingQueries:
                 session.expunge(user)
             return list(users)
 
-    def treasury_users(self, account_id: str, venue: str) -> list[User]:
+    def treasury_users(self, team_id: UUID, account_id: str, venue: str) -> list[User]:
         with self.database.session_factory() as session:
             assignments = session.scalars(
-                select(RoleAssignment).where(RoleAssignment.role == Role.TREASURY_ADMIN.value)
+                select(RoleAssignment)
+                .join(
+                    TeamMembership,
+                    and_(
+                        TeamMembership.team_id == RoleAssignment.team_id,
+                        TeamMembership.user_id == RoleAssignment.user_id,
+                    ),
+                )
+                .where(
+                    RoleAssignment.team_id == team_id,
+                    RoleAssignment.role == Role.TREASURY_ADMIN.value,
+                    TeamMembership.active,
+                )
             ).all()
             user_ids = {
                 item.user_id
@@ -1267,19 +1291,23 @@ class TradingQueries:
                 session.expunge(user)
             return list(users)
 
-    def transfer_proposal_version(self, transfer_proposal_id: UUID) -> int:
+    def transfer_proposal_version(self, user_id: UUID, transfer_proposal_id: UUID) -> int:
+        _workspace_id, team_id = self._active_scope_ids(user_id)
         with self.database.session_factory() as session:
             proposal = session.get(TransferProposal, transfer_proposal_id)
             if proposal is None:
                 raise DomainRejected(
                     "TRANSFER_PROPOSAL_NOT_FOUND", "transfer proposal does not exist"
                 )
+            if proposal.team_id != team_id:
+                raise DomainRejected("TEAM_SCOPE_DENIED", "transfer proposal is outside scope")
             return proposal.version
 
     @staticmethod
     def _transfer_proposal_summary(item: TransferProposal) -> dict[str, Any]:
         return {
             "transfer_proposal_id": str(item.transfer_proposal_id),
+            "team_id": str(item.team_id),
             "proposer_id": str(item.proposer_id),
             "environment": item.environment,
             "direction": item.direction,
@@ -1306,12 +1334,15 @@ class TradingQueries:
         }
 
     def transfer_proposal_detail(self, user_id: UUID, transfer_proposal_id: UUID) -> dict[str, Any]:
+        workspace_id, team_id = self._active_scope_ids(user_id)
         with self.database.session_factory() as session:
             proposal = session.get(TransferProposal, transfer_proposal_id)
             if proposal is None:
                 raise DomainRejected(
                     "TRANSFER_PROPOSAL_NOT_FOUND", "transfer proposal does not exist"
                 )
+            if proposal.team_id != team_id:
+                raise DomainRejected("TEAM_SCOPE_DENIED", "transfer proposal is outside scope")
             if not self.service.can_user(
                 user_id, "capital.view", proposal.account_id, proposal.venue
             ):
@@ -1323,10 +1354,12 @@ class TradingQueries:
             ).all()
             authorization = session.scalar(
                 select(TransferAuthorization).where(
+                    TransferAuthorization.team_id == team_id,
                     TransferAuthorization.transfer_proposal_id == transfer_proposal_id
                 )
             )
             result = self._transfer_proposal_summary(proposal)
+            result["workspace_id"] = str(workspace_id)
             result.update(
                 {
                     "approvals": [
@@ -1356,6 +1389,7 @@ class TradingQueries:
     def _capital_transfer_summary(item: CapitalTransfer) -> dict[str, Any]:
         return {
             "capital_transfer_id": str(item.capital_transfer_id),
+            "team_id": str(item.team_id),
             "transfer_authorization_id": str(item.transfer_authorization_id),
             "environment": item.environment,
             "account_id": item.account_id,
@@ -1389,15 +1423,20 @@ class TradingQueries:
         }
 
     def capital_transfer_detail(self, user_id: UUID, capital_transfer_id: UUID) -> dict[str, Any]:
+        workspace_id, team_id = self._active_scope_ids(user_id)
         with self.database.session_factory() as session:
             transfer = session.get(CapitalTransfer, capital_transfer_id)
             if transfer is None:
                 raise DomainRejected("CAPITAL_TRANSFER_NOT_FOUND", "capital transfer is missing")
+            if transfer.team_id != team_id:
+                raise DomainRejected("TEAM_SCOPE_DENIED", "capital transfer is outside scope")
             if not self.service.can_user(
                 user_id, "capital.view", transfer.account_id, transfer.venue
             ):
                 raise DomainRejected("RBAC_DENIED", "capital transfer is outside scope")
-            return self._capital_transfer_summary(transfer)
+            result = self._capital_transfer_summary(transfer)
+            result["workspace_id"] = str(workspace_id)
+            return result
 
     def capital_center(
         self,
@@ -1490,18 +1529,28 @@ class TradingQueries:
                 )
             ).all()
             proposals = session.scalars(
-                select(TransferProposal).order_by(TransferProposal.updated_at.desc())
+                select(TransferProposal)
+                .where(TransferProposal.team_id == team_id)
+                .order_by(TransferProposal.updated_at.desc())
             ).all()
-            authorizations = session.scalars(select(TransferAuthorization)).all()
+            authorizations = session.scalars(
+                select(TransferAuthorization).where(TransferAuthorization.team_id == team_id)
+            ).all()
             authorization_by_proposal = {item.transfer_proposal_id: item for item in authorizations}
             transfers = session.scalars(
-                select(CapitalTransfer).order_by(CapitalTransfer.updated_at.desc())
+                select(CapitalTransfer)
+                .where(CapitalTransfer.team_id == team_id)
+                .order_by(CapitalTransfer.updated_at.desc())
             ).all()
             direct_operations = session.scalars(
-                select(DirectCapitalOperation).order_by(DirectCapitalOperation.updated_at.desc())
+                select(DirectCapitalOperation)
+                .where(DirectCapitalOperation.team_id == team_id)
+                .order_by(DirectCapitalOperation.updated_at.desc())
             ).all()
             policies = session.scalars(
-                select(CapitalAutomationPolicy).order_by(
+                select(CapitalAutomationPolicy)
+                .where(CapitalAutomationPolicy.team_id == team_id)
+                .order_by(
                     CapitalAutomationPolicy.environment,
                     CapitalAutomationPolicy.venue,
                     CapitalAutomationPolicy.account_id,
@@ -1544,7 +1593,12 @@ class TradingQueries:
                 )
             )
             visible_observations = [item for item in observations if can_view_history(item)]
-            risk_policy = session.scalar(select(RiskPolicy).where(RiskPolicy.active))
+            risk_policy = session.scalar(
+                select(RiskPolicy).where(
+                    RiskPolicy.team_id == team_id,
+                    RiskPolicy.active,
+                )
+            )
             max_fact_age = timedelta(
                 seconds=(risk_policy.max_fact_age_seconds if risk_policy is not None else 300)
             )
@@ -2579,7 +2633,10 @@ class TradingQueries:
             transfer_proposals = [
                 item
                 for item in session.scalars(
-                    select(TransferProposal).where(TransferProposal.environment == environment)
+                    select(TransferProposal).where(
+                        TransferProposal.team_id == team_id,
+                        TransferProposal.environment == environment,
+                    )
                 ).all()
                 if self.service.can_user(user_id, "capital.view", item.account_id, item.venue)
             ]
@@ -2588,6 +2645,7 @@ class TradingQueries:
             if transfer_proposal_ids:
                 transfer_authorizations = session.scalars(
                     select(TransferAuthorization).where(
+                        TransferAuthorization.team_id == team_id,
                         TransferAuthorization.transfer_proposal_id.in_(transfer_proposal_ids)
                     )
                 ).all()
@@ -2600,6 +2658,7 @@ class TradingQueries:
                         str(item.capital_transfer_id)
                         for item in session.scalars(
                             select(CapitalTransfer).where(
+                                CapitalTransfer.team_id == team_id,
                                 CapitalTransfer.transfer_authorization_id.in_(authorization_ids)
                             )
                         ).all()
@@ -2608,6 +2667,7 @@ class TradingQueries:
                 item
                 for item in session.scalars(
                     select(CapitalAutomationPolicy).where(
+                        CapitalAutomationPolicy.team_id == team_id,
                         CapitalAutomationPolicy.environment == environment
                     )
                 ).all()
@@ -3032,7 +3092,7 @@ class TradingQueries:
                 .order_by(ReconciliationRun.completed_at.desc())
                 .limit(1)
             )
-            lease = session.get(SenderLease, scope)
+            lease = session.get(SenderLease, (campaign.team_id, scope))
             orders_by_intent = {item.order_intent_id: item for item in orders}
             result = self._campaign_summary(campaign, instrument)
             result["workspace_id"] = str(workspace_id)

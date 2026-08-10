@@ -307,7 +307,7 @@ def test_notification_api_masks_configuration_and_test_send_has_no_business_auth
                 json={
                     "name": "API route",
                     "channel": "SLACK",
-                    "event_types": ["SIGNAL_EVENT_RECEIVED"],
+                    "event_types": ["SIGNAL_EVENT_RECEIVED", "CAPITAL_STATUS_CHANGED"],
                     "enabled": True,
                     "configuration": {"webhook_url": private_webhook_url},
                     "expected_version": 0,
@@ -328,7 +328,8 @@ def test_notification_api_masks_configuration_and_test_send_has_no_business_auth
                 for item in center["event_catalog"]
                 if item["event_type"] == "CAPITAL_STATUS_CHANGED"
             )
-            assert capital_event["integration_status"] == "SCOPE_MIGRATION_REQUIRED"
+            assert capital_event["integration_status"] == "ACTIVE"
+            assert capital_event["blocker"] is None
             assert center["channel_permissions"] == {
                 "trading": False,
                 "funding": False,
@@ -350,7 +351,7 @@ def test_notification_api_masks_configuration_and_test_send_has_no_business_auth
 
             shell = await admin_client.get("/notifications")
             assert shell.status_code == 200
-            assert 'href="/notifications"' in shell.text
+            assert 'href="/settings"' in shell.text
 
         async with AsyncClient(
             transport=ASGITransport(app=app),

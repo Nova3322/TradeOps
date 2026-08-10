@@ -1075,8 +1075,12 @@ def test_sender_fencing_rejects_old_owner_after_reconciled_takeover(
 
     assert second > first
     with pytest.raises(DomainRejected, match="FENCING_TOKEN_REJECTED"):
-        service.validate_sender("acct-1:BINANCE", "worker-a", first, takeover_time)
-    service.validate_sender("acct-1:BINANCE", "worker-b", second, takeover_time)
+        service.validate_sender(
+            "acct-1:BINANCE", "worker-a", first, ids["operator"], takeover_time
+        )
+    service.validate_sender(
+        "acct-1:BINANCE", "worker-b", second, ids["operator"], takeover_time
+    )
 
 
 def test_active_intent_blocks_duplicate_reduce_only_intent(service: TradingService) -> None:
@@ -2304,7 +2308,13 @@ def test_resolved_run_cannot_authorize_sender_takeover(service: TradingService) 
             ids["operator"],
             NOW + timedelta(minutes=2),
         )
-    service.validate_sender("acct-1:BINANCE", "worker-a", first, NOW + timedelta(seconds=30))
+    service.validate_sender(
+        "acct-1:BINANCE",
+        "worker-a",
+        first,
+        ids["operator"],
+        NOW + timedelta(seconds=30),
+    )
 
 
 def test_valid_fencing_token_cannot_send_for_another_scope(service: TradingService) -> None:
