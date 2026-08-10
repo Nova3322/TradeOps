@@ -62,6 +62,7 @@ from trading_control_plane.api_schemas import (
     ExchangeAccountCreateRequest,
     ExchangeConnectionVerifyRequest,
     ExchangeCredentialRotateRequest,
+    ExchangeRuntimeSyncRequest,
     FundingFactRequest,
     HyperliquidReadOnlySyncRequest,
     HyperliquidTestnetProtectionRequest,
@@ -224,8 +225,9 @@ def _perptape_runtime_status(
     feed: dict[str, Any],
     *,
     now: datetime,
+    configured: bool | None = None,
 ) -> str:
-    if not settings.perptape_api_key:
+    if not (bool(settings.perptape_api_key) if configured is None else configured):
         return "NOT_CONFIGURED"
     if not feed["available"]:
         return "WAITING" if settings.runtime_sync_enabled else "ON_DEMAND"
@@ -1250,23 +1252,6 @@ def create_app(
     ) -> dict[str, Any]:
         require_capability(identity, "venue.view")
         result = queries().exchange_accounts(identity.user_id)
-        runtime_accounts = authoritative_live_accounts()
-        for item in result["data"]:
-            venue = str(item["venue"])
-            item["runtime_binding"] = {
-                "bound": runtime_accounts.get(venue) == item["account_id"],
-                "source": "PROCESS_ENVIRONMENT",
-                "read_only_connector": (
-                    "IMPLEMENTED" if venue in {"BINANCE", "HYPERLIQUID"} else "NOT_IMPLEMENTED"
-                ),
-                "connection_verification_connector": "IMPLEMENTED",
-                "connection_verification_source": "DATABASE_ENVELOPE",
-                "trading_connector": (
-                    "FREQTRADE_EXTERNAL"
-                    if venue in {"BINANCE", "HYPERLIQUID"}
-                    else "NOT_IMPLEMENTED"
-                ),
-            }
         return {"data": result, "as_of": _now().isoformat()}
 
     @app.post("/api/exchange-accounts")
@@ -1337,6 +1322,25 @@ def create_app(
                 idempotency_key=payload.idempotency_key,
                 now=_now(),
             )
+        return {
+            **result,
+            "data": queries().exchange_accounts(identity.user_id),
+        }
+
+    @app.put("/api/exchange-accounts/{exchange_account_id}/runtime-sync")
+    def configure_exchange_account_runtime_sync(
+        exchange_account_id: UUID,
+        payload: ExchangeRuntimeSyncRequest,
+        identity: SessionIdentity = identity_dependency,
+    ) -> dict[str, Any]:
+        result = service().configure_exchange_account_runtime_sync(
+            exchange_account_id,
+            actor_id=identity.user_id,
+            enabled=payload.enabled,
+            expected_version=payload.expected_version,
+            idempotency_key=payload.idempotency_key,
+            now=_now(),
+        )
         return {
             **result,
             "data": queries().exchange_accounts(identity.user_id),
@@ -1672,7 +1676,7 @@ def create_app(
                 team_perptape_clients[cache_key] = client
             return client.list_candidates(now=now)
         if resolved_settings.runtime_sync_enabled:
-            feed = queries().perptape_feed()
+            feed = queries().perptape_feed(user_id)
             if feed is None:
                 raise DomainRejected(
                     "PERPTAPE_CACHE_UNAVAILABLE",
@@ -1724,7 +1728,11 @@ def create_app(
             for candidate in source_candidates
             if perptape_candidate_identity_is_displayable(candidate)
         ]
-        feed = queries().perptape_feed() if resolved_settings.runtime_sync_enabled else None
+        feed = (
+            queries().perptape_feed(user_id)
+            if resolved_settings.runtime_sync_enabled
+            else None
+        )
         active_instrument_keys = queries().active_instrument_keys(
             {
                 (candidate.venue, candidate.symbol)
@@ -6049,15 +6057,28 @@ def create_app(
         require_capability(identity, "system.view")
         snapshot = queries().runtime_snapshot(identity.user_id)
         perptape_feed = snapshot["perptape_feed"]
+        database_binding_counts = snapshot.pop("runtime_binding_counts")
+        signal_source = service().signal_source_status(identity.user_id)["source"]
+        database_perptape_configured = bool(
+            signal_source
+            and signal_source["enabled"]
+            and signal_source["mode"] == "PERPTAPE"
+            and signal_source["credential"]["state"] == "CONFIGURED"
+        )
         connection_states = project_runtime_connections(
             resolved_settings,
             snapshot["source_health"],
+            database_binding_counts=database_binding_counts,
+            database_perptape_configured=database_perptape_configured,
         )
-        perptape_configured = bool(resolved_settings.perptape_api_key)
+        perptape_configured = database_perptape_configured or bool(
+            resolved_settings.perptape_api_key
+        )
         perptape_status = _perptape_runtime_status(
             resolved_settings,
             perptape_feed,
             now=_now(),
+            configured=perptape_configured,
         )
         telegram_polling = (
             resolved_telegram.polling_health()
@@ -6095,11 +6116,14 @@ def create_app(
                         "enabled": resolved_settings.runtime_sync_enabled,
                         "interval_seconds": resolved_settings.runtime_sync_interval_seconds,
                         "binance_target_configured": bool(
-                            resolved_settings.runtime_binance_account_id
+                            database_binding_counts.get("BINANCE")
+                            or resolved_settings.runtime_binance_account_id
                         ),
                         "hyperliquid_target_configured": bool(
-                            resolved_settings.runtime_hyperliquid_account_id
+                            database_binding_counts.get("HYPERLIQUID")
+                            or resolved_settings.runtime_hyperliquid_account_id
                         ),
+                        "database_binding_counts": database_binding_counts,
                         "order_send_supported": False,
                         "capital_broadcast_supported": False,
                     },

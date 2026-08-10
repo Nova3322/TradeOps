@@ -15,9 +15,9 @@ from trading_control_plane.api import create_app
 from trading_control_plane.config import Settings
 from trading_control_plane.credentials import CredentialCipher
 from trading_control_plane.database import Database
-from trading_control_plane.domain import DomainRejected, ExecutionEnvironment
+from trading_control_plane.domain import DomainRejected, ExecutionEnvironment, Role
 from trading_control_plane.exchange_connection import ConnectionProbeResult
-from trading_control_plane.models import AuditEvent, ExchangeAccount, Team
+from trading_control_plane.models import AuditEvent, ExchangeAccount, RoleAssignment, Team, User
 from trading_control_plane.perptape import PerptapeClient
 from trading_control_plane.queries import TradingQueries
 from trading_control_plane.service import TradingService
@@ -332,11 +332,12 @@ def test_exchange_account_api_masks_credentials_and_exposes_connector_truth(
             assert "api-secret-never-return" not in listed.text
             item = listed.json()["data"]["data"][0]
             assert item["runtime_binding"] == {
-                "bound": True,
-                "source": "PROCESS_ENVIRONMENT",
+                "bound": False,
+                "source": "DATABASE_ENVELOPE",
                 "read_only_connector": "IMPLEMENTED",
                 "connection_verification_connector": "IMPLEMENTED",
                 "connection_verification_source": "DATABASE_ENVELOPE",
+                "service_principal_configured": False,
                 "trading_connector": "FREQTRADE_EXTERNAL",
             }
             assert item["connection"]["status"] == "NOT_VERIFIED"
@@ -475,8 +476,33 @@ def test_four_venue_connection_verification_is_scoped_idempotent_and_never_enabl
             assert replay.json()["version"] == results["BINANCE"]["version"]
             assert len(verifier.calls) == 4
 
+            for venue in {"BINANCE", "HYPERLIQUID"}:
+                enabled = await client.put(
+                    f"/api/exchange-accounts/{account_ids[venue]}/runtime-sync",
+                    json={
+                        "enabled": True,
+                        "expected_version": results[venue]["version"],
+                        "idempotency_key": f"enable-{venue.lower()}-runtime-sync",
+                    },
+                )
+                assert enabled.status_code == 200, enabled.text
+                assert enabled.json()["runtime_sync_enabled"] is True
+
+            unsupported = await client.put(
+                f"/api/exchange-accounts/{account_ids['BYBIT']}/runtime-sync",
+                json={
+                    "enabled": True,
+                    "expected_version": results["BYBIT"]["version"],
+                    "idempotency_key": "enable-bybit-runtime-sync",
+                },
+            )
+            assert unsupported.status_code == 422
+            assert unsupported.json()["error"]["code"] == "RUNTIME_CONNECTOR_NOT_IMPLEMENTED"
+
             listed = (await client.get("/api/exchange-accounts")).json()["data"]["data"]
             by_venue = {item["venue"]: item for item in listed}
+            assert by_venue["BINANCE"]["runtime_binding"]["bound"] is True
+            assert by_venue["HYPERLIQUID"]["runtime_binding"]["bound"] is True
             assert by_venue["OKX"]["connection"]["status"] == "FAILED"
             assert by_venue["OKX"]["runtime_binding"]["read_only_connector"] == "NOT_IMPLEMENTED"
             assert (
@@ -516,6 +542,16 @@ def test_four_venue_connection_verification_is_scoped_idempotent_and_never_enabl
         stored = session.scalars(select(ExchangeAccount)).all()
         assert all(item.trading_status == "DISABLED" for item in stored)
         assert all(item.last_connection_check_at is not None for item in stored)
+    bindings = TradingService(
+        database, credential_encryption_key=encryption_key()
+    ).runtime_account_bindings()
+    assert {(item.venue, item.account_id) for item in bindings} == {
+        ("BINANCE", "binance-team-account"),
+        ("HYPERLIQUID", "hyperliquid-team-account"),
+    }
+    assert all("secret" not in repr(item) for item in bindings)
+    hyperliquid_binding = next(item for item in bindings if item.venue == "HYPERLIQUID")
+    assert "api_wallet_private_key" not in hyperliquid_binding.credentials
 
 
 def test_connection_result_is_not_committed_after_credential_rotation(database: Database) -> None:
@@ -561,3 +597,153 @@ def test_connection_result_is_not_committed_after_credential_rotation(database: 
     assert projection["connection"]["status"] == "NOT_VERIFIED"
     assert projection["connection"]["checked_at"] is None
     assert projection["trading"]["enabled"] is False
+
+
+def test_database_runtime_bindings_support_same_account_in_multiple_teams(
+    database: Database,
+) -> None:
+    now = datetime.now(UTC)
+    service = TradingService(database, credential_encryption_key=encryption_key())
+    admin = service.bootstrap_admin("multi-team-runtime-admin", now=now)
+    context = TradingQueries(database).user_context(admin)
+    workspace_id = UUID(context["active_workspace"]["workspace_id"])
+    first_team_id = UUID(context["active_team"]["team_id"])
+
+    def create_verified_binding(label: str, secret: str, sequence: int) -> UUID:
+        exchange_account_id = service.create_exchange_account(
+            actor_id=admin,
+            account_id="shared-binance-main",
+            venue="BINANCE",
+            label=label,
+            credentials={"api_key": f"key-{sequence}", "api_secret": secret},
+            idempotency_key=f"create-runtime-account-{sequence}",
+            now=now + timedelta(seconds=sequence),
+        )
+        command, replay = service.prepare_exchange_account_connection_verification(
+            exchange_account_id,
+            actor_id=admin,
+            expected_version=1,
+            idempotency_key=f"verify-runtime-account-{sequence}",
+        )
+        assert replay is None and command is not None
+        verification = service.record_exchange_account_connection_verification(
+            command,
+            ConnectionProbeResult(True, None),
+            actor_id=admin,
+            idempotency_key=f"verify-runtime-account-{sequence}",
+            now=now + timedelta(seconds=sequence, milliseconds=100),
+        )
+        configured = service.configure_exchange_account_runtime_sync(
+            exchange_account_id,
+            actor_id=admin,
+            enabled=True,
+            expected_version=int(verification["version"]),
+            idempotency_key=f"enable-runtime-account-{sequence}",
+            now=now + timedelta(seconds=sequence, milliseconds=200),
+        )
+        assert configured["runtime_sync_enabled"] is True
+        return exchange_account_id
+
+    first_account_id = create_verified_binding(
+        "First Team Binance", "first-team-secret", 1
+    )
+    second_team_id = service.create_team(
+        actor_id=admin,
+        name="Runtime Accounts Two",
+        slug="runtime-accounts-two",
+        idempotency_key="create-runtime-accounts-two",
+        now=now + timedelta(seconds=2),
+    )
+    second_account_id = create_verified_binding(
+        "Second Team Binance", "second-team-secret", 3
+    )
+
+    bindings = service.runtime_account_bindings()
+    assert len(bindings) == 2
+    by_team = {item.team_id: item for item in bindings}
+    assert set(by_team) == {first_team_id, second_team_id}
+    assert all(item.account_id == "shared-binance-main" for item in bindings)
+    assert (
+        by_team[first_team_id].credentials["api_secret"] == "first-team-secret"  # noqa: S105
+    )
+    assert (
+        by_team[second_team_id].credentials["api_secret"]
+        == "second-team-secret"  # noqa: S105
+    )
+    assert all("secret" not in repr(item) for item in bindings)
+
+    with pytest.raises(DomainRejected, match="EXCHANGE_ACCOUNT_NOT_FOUND"):
+        service.configure_exchange_account_runtime_sync(
+            first_account_id,
+            actor_id=admin,
+            enabled=False,
+            expected_version=3,
+            idempotency_key="cross-team-disable-runtime-account",
+            now=now + timedelta(seconds=4),
+        )
+
+    service.rotate_exchange_account_credentials(
+        second_account_id,
+        actor_id=admin,
+        credentials={"api_key": "rotated-key", "api_secret": "rotated-secret"},
+        expected_version=3,
+        idempotency_key="rotate-second-runtime-account",
+        now=now + timedelta(seconds=5),
+    )
+    stale_second_binding = by_team[second_team_id]
+    with pytest.raises(DomainRejected, match="RUNTIME_BINDING_CHANGED"):
+        service.record_runtime_source_health(
+            stale_second_binding.service_principal_id,
+            {"BINANCE": {"status": "FAILED", "items_observed": 0}},
+            scopes={"BINANCE": (stale_second_binding.account_id, "BINANCE")},
+            runtime_account_binding=stale_second_binding,
+            now=now + timedelta(seconds=5, milliseconds=100),
+        )
+    remaining = service.runtime_account_bindings()
+    assert len(remaining) == 1 and remaining[0].team_id == first_team_id
+    service.select_scope(
+        actor_id=admin,
+        workspace_id=workspace_id,
+        team_id=first_team_id,
+        idempotency_key="select-first-runtime-team",
+        now=now + timedelta(seconds=6),
+    )
+    assert TradingQueries(database).exchange_accounts(admin)["data"][0][
+        "runtime_binding"
+    ]["bound"] is True
+    disabled = service.configure_exchange_account_runtime_sync(
+        first_account_id,
+        actor_id=admin,
+        enabled=False,
+        expected_version=remaining[0].account_version,
+        idempotency_key="disable-first-runtime-account",
+        now=now + timedelta(seconds=6, milliseconds=100),
+    )
+    with database.session_factory() as session:
+        principal = session.get(User, remaining[0].service_principal_id)
+        assert principal is not None and principal.active is False
+    reenabled = service.configure_exchange_account_runtime_sync(
+        first_account_id,
+        actor_id=admin,
+        enabled=True,
+        expected_version=int(disabled["version"]),
+        idempotency_key="reenable-first-runtime-account",
+        now=now + timedelta(seconds=6, milliseconds=200),
+    )
+    assert reenabled["runtime_sync_enabled"] is True
+    with database.session_factory() as session:
+        principal = session.get(User, remaining[0].service_principal_id)
+        assert principal is not None and principal.active is True
+    with database.session_factory.begin() as session:
+        session.add(
+            RoleAssignment(
+                user_id=remaining[0].service_principal_id,
+                team_id=first_team_id,
+                role=Role.OBSERVER.value,
+                account_scope=None,
+                venue_scope=None,
+                created_at=now + timedelta(seconds=7),
+            )
+        )
+    with pytest.raises(DomainRejected, match="RUNTIME_BINDING_INVALID"):
+        service.runtime_account_bindings()

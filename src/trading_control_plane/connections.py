@@ -146,26 +146,42 @@ def _projection(
 def project_runtime_connections(
     settings: Settings,
     source_health: Mapping[str, Mapping[str, Any]],
+    *,
+    database_binding_counts: Mapping[str, int] | None = None,
+    database_perptape_configured: bool = False,
 ) -> dict[str, dict[str, Any]]:
+    binding_counts = database_binding_counts or {}
+    database_binance = int(binding_counts.get("BINANCE", 0)) > 0
+    database_hyperliquid = int(binding_counts.get("HYPERLIQUID", 0)) > 0
     binance_credentials = (
         "COMPLETE"
-        if settings.binance_api_key and settings.binance_api_secret
+        if database_binance or (settings.binance_api_key and settings.binance_api_secret)
         else "PARTIAL"
         if settings.binance_api_key or settings.binance_api_secret
         else "MISSING"
     )
     hyperliquid_identity = (
         "COMPLETE"
-        if settings.hyperliquid_account_address or settings.hyperliquid_api_wallet_address
+        if database_hyperliquid
+        or settings.hyperliquid_account_address
+        or settings.hyperliquid_api_wallet_address
         else "MISSING"
     )
     notilt_identity = "COMPLETE" if settings.notilt_agent_address else "MISSING"
-    perptape_credentials = "COMPLETE" if settings.perptape_api_key else "MISSING"
+    perptape_credentials = (
+        "COMPLETE"
+        if database_perptape_configured or settings.perptape_api_key
+        else "MISSING"
+    )
     return {
         "BINANCE": _projection(
-            enabled=settings.binance_read_only_enabled,
+            enabled=(
+                settings.runtime_sync_enabled
+                if database_binance
+                else settings.binance_read_only_enabled
+            ),
             credential_state=binance_credentials,
-            config_complete=bool(settings.runtime_binance_account_id),
+            config_complete=database_binance or bool(settings.runtime_binance_account_id),
             health=_latest_health(source_health, "BINANCE"),
             owner_role="系统管理员",
             write_process_enabled=(
@@ -174,9 +190,14 @@ def project_runtime_connections(
             ),
         ),
         "HYPERLIQUID": _projection(
-            enabled=settings.hyperliquid_read_only_enabled,
+            enabled=(
+                settings.runtime_sync_enabled
+                if database_hyperliquid
+                else settings.hyperliquid_read_only_enabled
+            ),
             credential_state=hyperliquid_identity,
-            config_complete=bool(settings.runtime_hyperliquid_account_id),
+            config_complete=database_hyperliquid
+            or bool(settings.runtime_hyperliquid_account_id),
             health=_latest_health(source_health, "HYPERLIQUID"),
             owner_role="系统管理员",
             write_process_enabled=(
@@ -185,7 +206,11 @@ def project_runtime_connections(
             ),
         ),
         "PERPTAPE": _projection(
-            enabled=bool(settings.perptape_api_key),
+            enabled=(
+                settings.runtime_sync_enabled
+                if database_perptape_configured
+                else bool(settings.perptape_api_key)
+            ),
             credential_state=perptape_credentials,
             config_complete=True,
             health=_latest_health(source_health, "PERPTAPE"),

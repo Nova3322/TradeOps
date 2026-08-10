@@ -604,6 +604,8 @@ class TradingQueries:
             if credential_state == "UNCONFIGURED"
             else "run a supported no-side-effect connection verification"
             if item.connection_status != "VERIFIED"
+            else "enable the database-bound continuous read-only sync"
+            if item.venue in {"BINANCE", "HYPERLIQUID"} and not item.runtime_sync_enabled
             else "keep trading disabled until risk and live-send gates are explicitly approved"
         )
         return {
@@ -634,6 +636,25 @@ class TradingQueries:
                 "key_hint": metadata.get("key_hint"),
                 "signing_material_configured": bool(
                     metadata.get("signing_material_configured", False)
+                ),
+            },
+            "runtime_binding": {
+                "bound": item.runtime_sync_enabled,
+                "source": "DATABASE_ENVELOPE",
+                "read_only_connector": (
+                    "IMPLEMENTED"
+                    if item.venue in {"BINANCE", "HYPERLIQUID"}
+                    else "NOT_IMPLEMENTED"
+                ),
+                "connection_verification_connector": "IMPLEMENTED",
+                "connection_verification_source": "DATABASE_ENVELOPE",
+                "service_principal_configured": (
+                    item.runtime_service_principal_id is not None
+                ),
+                "trading_connector": (
+                    "FREQTRADE_EXTERNAL"
+                    if item.venue in {"BINANCE", "HYPERLIQUID"}
+                    else "NOT_IMPLEMENTED"
                 ),
             },
             "next_action": next_action,
@@ -769,9 +790,10 @@ class TradingQueries:
                 return None
             return legacy_candidate_id
 
-    def perptape_feed(self) -> PerptapeFeedSnapshot | None:
+    def perptape_feed(self, user_id: UUID) -> PerptapeFeedSnapshot | None:
+        _workspace_id, team_id = self._active_scope_ids(user_id)
         with self.database.session_factory() as session:
-            feed = session.get(PerptapeFeed, "BREAKOUTS")
+            feed = session.get(PerptapeFeed, (team_id, "BREAKOUTS"))
             if feed is None:
                 return None
             candidates: list[PerptapeCandidate] = []
@@ -2720,7 +2742,7 @@ class TradingQueries:
             ]
 
     def runtime_snapshot(self, user_id: UUID) -> dict[str, Any]:
-        self.user_context(user_id)
+        _workspace_id, team_id = self._active_scope_ids(user_id)
         with self.database.session_factory() as session:
             gates = session.scalars(
                 select(CapabilityGate).order_by(CapabilityGate.capability_key)
@@ -2732,10 +2754,26 @@ class TradingQueries:
                     "WHERE table_schema = 'public' AND table_name <> 'alembic_version'"
                 )
             ).scalar_one()
-            perptape_feed = session.get(PerptapeFeed, "BREAKOUTS")
+            perptape_feed = session.get(PerptapeFeed, (team_id, "BREAKOUTS"))
             source_health = session.scalars(
-                select(RuntimeSourceHealth).order_by(RuntimeSourceHealth.source_name)
+                select(RuntimeSourceHealth)
+                .where(RuntimeSourceHealth.team_id == team_id)
+                .order_by(
+                    RuntimeSourceHealth.source_name,
+                    RuntimeSourceHealth.account_id,
+                )
             ).all()
+            runtime_binding_counts = {
+                venue: int(count)
+                for venue, count in session.execute(
+                    select(ExchangeAccount.venue, func.count())
+                    .where(
+                        ExchangeAccount.team_id == team_id,
+                        ExchangeAccount.runtime_sync_enabled.is_(True),
+                    )
+                    .group_by(ExchangeAccount.venue)
+                ).all()
+            }
             return {
                 "database_ready": self.database.is_ready()[0],
                 "schema_revision": revision,
@@ -2768,8 +2806,14 @@ class TradingQueries:
                     }
                 ),
                 "source_health": {
-                    item.source_name: {
+                    (
+                        item.source_name
+                        if item.account_id is None
+                        else f"{item.source_name}:{item.account_id}"
+                    ): {
                         "status": item.status,
+                        "account_id": item.account_id,
+                        "venue": item.venue,
                         "items_observed": item.items_observed,
                         "error_code": item.error_code,
                         "checked_at": _iso(item.checked_at),
@@ -2779,15 +2823,33 @@ class TradingQueries:
                     }
                     for item in source_health
                 },
+                "runtime_binding_counts": runtime_binding_counts,
             }
 
-    def runtime_source_health(self, source_name: str) -> dict[str, Any] | None:
+    def runtime_source_health(
+        self,
+        user_id: UUID,
+        source_name: str,
+        *,
+        account_id: str | None = None,
+        venue: str | None = None,
+    ) -> dict[str, Any] | None:
+        _workspace_id, team_id = self._active_scope_ids(user_id)
         with self.database.session_factory() as session:
-            item = session.get(RuntimeSourceHealth, source_name)
+            item = session.scalar(
+                select(RuntimeSourceHealth).where(
+                    RuntimeSourceHealth.team_id == team_id,
+                    RuntimeSourceHealth.source_name == source_name,
+                    RuntimeSourceHealth.account_id == account_id,
+                    RuntimeSourceHealth.venue == venue,
+                )
+            )
             if item is None:
                 return None
             return {
                 "status": item.status,
+                "account_id": item.account_id,
+                "venue": item.venue,
                 "items_observed": item.items_observed,
                 "error_code": item.error_code,
                 "checked_at": _iso(item.checked_at),

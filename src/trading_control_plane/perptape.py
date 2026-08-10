@@ -1222,7 +1222,7 @@ class PerptapeClient:
             next_allowed_at = (
                 datetime.fromtimestamp(int(rate_limit["nextAllowedAt"]) / 1000, UTC)
                 if isinstance(rate_limit, dict) and rate_limit.get("nextAllowedAt") is not None
-                else now
+                else max(now, generated_at)
             )
         except (KeyError, OSError, OverflowError, TypeError, ValueError) as exc:
             raise DomainRejected(

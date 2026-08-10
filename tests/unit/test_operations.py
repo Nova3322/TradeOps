@@ -46,6 +46,7 @@ def test_connection_matrix_distinguishes_one_time_checks_from_continuous_runtime
         item["capability"]: item
         for item in connection_capability_matrix(
             safe_settings(
+                runtime_sync_enabled=True,
                 binance_read_only_enabled=True,
                 binance_api_key="read-key",
                 binance_api_secret="read-secret",  # noqa: S106 - inert fixture
@@ -66,6 +67,28 @@ def test_connection_matrix_distinguishes_one_time_checks_from_continuous_runtime
     assert matrix["CAPITAL_SIGNING_BROADCAST"]["implementation"] == "NOT_IN_CONTROL_PLANE"
 
 
+def test_connection_matrix_projects_database_bindings_behind_process_master_switch() -> None:
+    stopped = {
+        item["capability"]: item
+        for item in connection_capability_matrix(
+            safe_settings(runtime_sync_enabled=False),
+            database_binding_counts={"BINANCE": 2},
+        )
+    }
+    running = {
+        item["capability"]: item
+        for item in connection_capability_matrix(
+            safe_settings(runtime_sync_enabled=True),
+            database_binding_counts={"BINANCE": 2},
+        )
+    }
+
+    assert stopped["BINANCE_CONTINUOUS_FACTS"]["deployment_state"] == (
+        "DISABLED_CONFIGURED"
+    )
+    assert running["BINANCE_CONTINUOUS_FACTS"]["deployment_state"] == "ENABLED"
+
+
 def test_environment_template_names_every_settings_field_without_values_from_runtime() -> None:
     template = Path(".env.example").read_text(encoding="utf-8")
     declared = set(re.findall(r"^([A-Z][A-Z0-9_]*)=", template, re.MULTILINE))
@@ -76,7 +99,11 @@ def test_environment_template_names_every_settings_field_without_values_from_run
 
 def test_doctor_marks_enabled_but_incomplete_connection_as_blocked() -> None:
     report = build_diagnostic_report(
-        safe_settings(hyperliquid_read_only_enabled=True),
+        safe_settings(
+            runtime_sync_enabled=True,
+            hyperliquid_read_only_enabled=True,
+            runtime_hyperliquid_account_id="hyperliquid-main",
+        ),
         database=None,
     )
 

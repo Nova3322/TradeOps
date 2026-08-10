@@ -218,6 +218,32 @@ class PreparedExchangeConnectionVerification:
     credentials: dict[str, str] = field(repr=False)
 
 
+@dataclass(frozen=True, slots=True)
+class PreparedRuntimeAccountBinding:
+    exchange_account_id: UUID
+    workspace_id: UUID
+    team_id: UUID
+    service_principal_id: UUID
+    service_principal_username: str
+    account_id: str
+    venue: str
+    account_version: int
+    credential_version: int
+    credentials: dict[str, str] = field(repr=False)
+
+
+@dataclass(frozen=True, slots=True)
+class PreparedPerptapeRuntimeBinding:
+    signal_source_id: UUID
+    workspace_id: UUID
+    team_id: UUID
+    service_principal_id: UUID
+    service_principal_username: str
+    source_version: int
+    credential_version: int
+    api_key: str = field(repr=False)
+
+
 OCCUPIED_RESERVATION_STATUSES = {
     ReservationStatus.RESERVED.value,
     ReservationStatus.OPEN.value,
@@ -729,12 +755,17 @@ class TradingService:
         venue: str | None = None,
         *,
         team_id: UUID | None = None,
+        allow_setup: bool = False,
     ) -> Team:
         _user, _workspace, team = self._active_scope(session, user_id)
         assert team is not None
         if team_id is not None and team.team_id != team_id:
             _reject("TEAM_SCOPE_DENIED", "resource is outside the active team scope")
-        if not team.trading_enabled and action not in TEAM_SETUP_ACTIONS:
+        if (
+            not team.trading_enabled
+            and action not in TEAM_SETUP_ACTIONS
+            and not allow_setup
+        ):
             _reject(
                 "TEAM_NOT_OPERATIONAL",
                 "team data scope is not ready; configure scoped accounts and risk policy first",
@@ -2065,16 +2096,18 @@ class TradingService:
                     ),
                 ]
             )
-        if (
-            principal.principal_type != PrincipalType.SERVICE.value
-            or not principal.active
-            or principal.active_workspace_id != team.workspace_id
-            or principal.active_team_id != team.team_id
-        ):
-            _reject(
-                "SIGNAL_SERVICE_PRINCIPAL_INVALID",
-                "the dedicated signal principal is outside the active team",
-            )
+        principal = TradingService._require_exact_runtime_principal(
+            session,
+            principal_id=principal.user_id,
+            team=team,
+            role=Role.PROPOSER,
+            account_id=None,
+            venue=None,
+            error_code="SIGNAL_SERVICE_PRINCIPAL_INVALID",
+            error_message="the dedicated signal principal is outside the active team",
+            allow_inactive=True,
+        )
+        TradingService._set_internal_principal_active(session, principal.user_id, True)
         return principal
 
     def configure_signal_source(
@@ -2140,6 +2173,7 @@ class TradingService:
                 purpose=f"signal-source:{mode.value.lower()}",
                 credential_version=credential_version,
             )
+            previous_principal_id = None if source is None else source.service_principal_id
             principal = (
                 self._ensure_signal_service_principal(
                     session,
@@ -2147,6 +2181,19 @@ class TradingService:
                     actor_id=actor_id,
                     now=now,
                 )
+                if mode is SignalSourceMode.PERPTAPE and enabled
+                else None
+            )
+            if previous_principal_id is not None and principal is None:
+                self._set_internal_principal_active(
+                    session,
+                    previous_principal_id,
+                    False,
+                )
+            configured_principal_id = (
+                principal.user_id
+                if principal is not None
+                else previous_principal_id
                 if mode is SignalSourceMode.PERPTAPE
                 else None
             )
@@ -2160,7 +2207,7 @@ class TradingService:
                     credential_metadata=encrypted.metadata,
                     credential_version=credential_version,
                     webhook_max_age_seconds=webhook_max_age_seconds,
-                    service_principal_id=(None if principal is None else principal.user_id),
+                    service_principal_id=configured_principal_id,
                     version=1,
                     created_by=actor_id,
                     updated_by=actor_id,
@@ -2175,7 +2222,7 @@ class TradingService:
                 source.credential_metadata = encrypted.metadata
                 source.credential_version = credential_version
                 source.webhook_max_age_seconds = webhook_max_age_seconds
-                source.service_principal_id = None if principal is None else principal.user_id
+                source.service_principal_id = configured_principal_id
                 source.version += 1
                 source.updated_by = actor_id
                 source.updated_at = now
@@ -2832,6 +2879,12 @@ class TradingService:
             account.connection_error_code = None
             account.last_connection_check_at = None
             account.last_verified_at = None
+            account.runtime_sync_enabled = False
+            self._set_internal_principal_active(
+                session,
+                account.runtime_service_principal_id,
+                False,
+            )
             account.trading_status = "DISABLED"
             account.version += 1
             account.updated_by = actor_id
@@ -2865,6 +2918,521 @@ class TradingService:
                 now=now,
             )
             return account.version
+
+    @staticmethod
+    def _set_internal_principal_active(
+        session: Session,
+        principal_id: UUID | None,
+        active: bool,
+    ) -> None:
+        if principal_id is None:
+            return
+        principal = session.scalar(
+            select(User).where(User.user_id == principal_id).with_for_update()
+        )
+        if (
+            principal is None
+            or principal.principal_type != PrincipalType.SERVICE.value
+            or principal.service_kind != ServicePrincipalKind.INTERNAL.value
+        ):
+            return
+        if principal.active != active:
+            principal.active = active
+            principal.auth_version += 1
+
+    @staticmethod
+    def _require_exact_runtime_principal(
+        session: Session,
+        *,
+        principal_id: UUID,
+        team: Team,
+        role: Role,
+        account_id: str | None,
+        venue: str | None,
+        error_code: str,
+        error_message: str,
+        lock: bool = False,
+        allow_inactive: bool = False,
+    ) -> User:
+        principal_statement = select(User).where(User.user_id == principal_id)
+        workspace_membership_statement = select(WorkspaceMembership).where(
+            WorkspaceMembership.workspace_id == team.workspace_id,
+            WorkspaceMembership.user_id == principal_id,
+            WorkspaceMembership.active,
+        )
+        team_membership_statement = select(TeamMembership).where(
+            TeamMembership.team_id == team.team_id,
+            TeamMembership.user_id == principal_id,
+            TeamMembership.active,
+        )
+        assignments_statement = select(RoleAssignment).where(
+            RoleAssignment.user_id == principal_id
+        )
+        if lock:
+            principal_statement = principal_statement.with_for_update()
+            workspace_membership_statement = workspace_membership_statement.with_for_update()
+            team_membership_statement = team_membership_statement.with_for_update()
+            assignments_statement = assignments_statement.with_for_update()
+        principal = session.scalar(principal_statement)
+        workspace_membership = session.scalar(workspace_membership_statement)
+        team_membership = session.scalar(team_membership_statement)
+        assignments = session.scalars(assignments_statement).all()
+        exact_assignment = (
+            len(assignments) == 1
+            and assignments[0].team_id == team.team_id
+            and assignments[0].role == role.value
+            and assignments[0].account_scope == account_id
+            and assignments[0].venue_scope == venue
+        )
+        if (
+            principal is None
+            or principal.principal_type != PrincipalType.SERVICE.value
+            or principal.service_kind != ServicePrincipalKind.INTERNAL.value
+            or (not principal.active and not allow_inactive)
+            or principal.active_workspace_id != team.workspace_id
+            or principal.active_team_id != team.team_id
+            or workspace_membership is None
+            or team_membership is None
+            or not exact_assignment
+        ):
+            _reject(error_code, error_message)
+        return principal
+
+    @staticmethod
+    def _ensure_account_runtime_service_principal(
+        session: Session,
+        *,
+        team: Team,
+        account: ExchangeAccount,
+        actor_id: UUID,
+        now: datetime,
+    ) -> User:
+        username = f"runtime-{team.team_id.hex}-{account.exchange_account_id.hex}"
+        principal = session.scalar(select(User).where(User.username == username))
+        if principal is None:
+            principal = User(
+                username=username,
+                principal_type=PrincipalType.SERVICE.value,
+                service_kind=ServicePrincipalKind.INTERNAL.value,
+                active_workspace_id=team.workspace_id,
+                active_team_id=team.team_id,
+                active=True,
+                created_at=now,
+            )
+            session.add(principal)
+            session.flush()
+            session.add_all(
+                [
+                    WorkspaceMembership(
+                        workspace_id=team.workspace_id,
+                        user_id=principal.user_id,
+                        role=WorkspaceRole.MEMBER.value,
+                        active=True,
+                        invited_by=actor_id,
+                        created_at=now,
+                        updated_at=now,
+                    ),
+                    TeamMembership(
+                        team_id=team.team_id,
+                        user_id=principal.user_id,
+                        active=True,
+                        invited_by=actor_id,
+                        created_at=now,
+                        updated_at=now,
+                    ),
+                    RoleAssignment(
+                        user_id=principal.user_id,
+                        team_id=team.team_id,
+                        role=Role.OPERATOR.value,
+                        account_scope=account.account_id,
+                        venue_scope=account.venue,
+                        created_at=now,
+                    ),
+                ]
+            )
+        principal = TradingService._require_exact_runtime_principal(
+            session,
+            principal_id=principal.user_id,
+            team=team,
+            role=Role.OPERATOR,
+            account_id=account.account_id,
+            venue=account.venue,
+            error_code="RUNTIME_SERVICE_PRINCIPAL_INVALID",
+            error_message=(
+                "the read-only runtime principal is outside its exact team/account scope"
+            ),
+            allow_inactive=True,
+        )
+        TradingService._set_internal_principal_active(session, principal.user_id, True)
+        return principal
+
+    def configure_exchange_account_runtime_sync(
+        self,
+        exchange_account_id: UUID,
+        *,
+        actor_id: UUID,
+        enabled: bool,
+        expected_version: int,
+        idempotency_key: str,
+        now: datetime,
+    ) -> dict[str, Any]:
+        operation = "exchange-account.runtime-sync.configure"
+        with self.database.session_factory.begin() as session:
+            _actor, _workspace, team = self._active_scope(session, actor_id)
+            assert team is not None
+            account = session.scalar(
+                select(ExchangeAccount)
+                .where(
+                    ExchangeAccount.exchange_account_id == exchange_account_id,
+                    ExchangeAccount.team_id == team.team_id,
+                )
+                .with_for_update()
+            )
+            if account is None:
+                _reject(
+                    "EXCHANGE_ACCOUNT_NOT_FOUND",
+                    "exchange account is outside the active team or does not exist",
+                )
+            self._require_role(
+                session,
+                actor_id,
+                "account.credentials.manage",
+                account.account_id,
+                account.venue,
+                team_id=account.team_id,
+            )
+            payload = {
+                "exchange_account_id": str(account.exchange_account_id),
+                "enabled": enabled,
+                "expected_version": expected_version,
+            }
+            digest, replay = self._idempotency(
+                session,
+                caller_id=f"{actor_id}:{team.team_id}",
+                operation=operation,
+                idempotency_key=idempotency_key,
+                payload=payload,
+            )
+            if replay is not None:
+                return replay
+            if account.version != expected_version:
+                _reject("VERSION_CONFLICT", "exchange account version changed")
+            if enabled and account.venue not in {"BINANCE", "HYPERLIQUID"}:
+                _reject(
+                    "RUNTIME_CONNECTOR_NOT_IMPLEMENTED",
+                    "continuous read-only sync is not implemented for this exchange",
+                )
+            if enabled and (
+                not account.active
+                or account.connection_status != "VERIFIED"
+                or account.credentials_ciphertext is None
+                or account.credential_version < 1
+            ):
+                _reject(
+                    "RUNTIME_BINDING_NOT_READY",
+                    "an active verified account with encrypted credentials is required",
+                )
+            if enabled:
+                principal = self._ensure_account_runtime_service_principal(
+                    session,
+                    team=team,
+                    account=account,
+                    actor_id=actor_id,
+                    now=now,
+                )
+                account.runtime_service_principal_id = principal.user_id
+            else:
+                self._set_internal_principal_active(
+                    session,
+                    account.runtime_service_principal_id,
+                    False,
+                )
+            account.runtime_sync_enabled = enabled
+            account.version += 1
+            account.updated_by = actor_id
+            account.updated_at = now
+            result = {
+                "exchange_account_id": str(account.exchange_account_id),
+                "runtime_sync_enabled": account.runtime_sync_enabled,
+                "version": account.version,
+            }
+            self._save_receipt(
+                session,
+                caller_id=f"{actor_id}:{team.team_id}",
+                operation=operation,
+                idempotency_key=idempotency_key,
+                semantic_hash=digest,
+                response=result,
+                now=now,
+            )
+            self._audit(
+                session,
+                actor_id=str(actor_id),
+                event_type="EXCHANGE_ACCOUNT_RUNTIME_SYNC_CONFIGURED",
+                object_type="ExchangeAccount",
+                object_id=account.exchange_account_id,
+                reason=(
+                    f"enabled={str(enabled).lower()};source=database-envelope;"
+                    "trading=disabled"
+                ),
+                correlation_id=uuid4(),
+                object_version=account.version,
+                idempotency_key=idempotency_key,
+                workspace_id=team.workspace_id,
+                team_id=team.team_id,
+                account_id=account.account_id,
+                now=now,
+            )
+            return result
+
+    def runtime_account_bindings(self) -> tuple[PreparedRuntimeAccountBinding, ...]:
+        with self.database.session_factory() as session:
+            accounts = session.scalars(
+                select(ExchangeAccount)
+                .where(ExchangeAccount.runtime_sync_enabled)
+                .order_by(
+                    ExchangeAccount.team_id,
+                    ExchangeAccount.venue,
+                    ExchangeAccount.account_id,
+                )
+            ).all()
+            bindings: list[PreparedRuntimeAccountBinding] = []
+            for account in accounts:
+                team = session.get(Team, account.team_id)
+                if (
+                    team is None
+                    or not team.active
+                    or account.runtime_service_principal_id is None
+                    or not account.active
+                    or account.connection_status != "VERIFIED"
+                    or account.credentials_ciphertext is None
+                    or account.credential_version < 1
+                    or account.venue not in {"BINANCE", "HYPERLIQUID"}
+                ):
+                    _reject(
+                        "RUNTIME_BINDING_INVALID",
+                        "an enabled read-only runtime binding no longer matches its frozen scope",
+                    )
+                principal = self._require_exact_runtime_principal(
+                    session,
+                    principal_id=account.runtime_service_principal_id,
+                    team=team,
+                    role=Role.OPERATOR,
+                    account_id=account.account_id,
+                    venue=account.venue,
+                    error_code="RUNTIME_BINDING_INVALID",
+                    error_message=(
+                        "an enabled read-only runtime binding no longer matches its frozen scope"
+                    ),
+                )
+                credentials = self.credential_cipher.decrypt(
+                    account.credentials_ciphertext,
+                    team_id=account.team_id,
+                    exchange_account_id=account.exchange_account_id,
+                    venue=account.venue,
+                    credential_version=account.credential_version,
+                )
+                if account.venue == "HYPERLIQUID":
+                    credentials = {
+                        key: value
+                        for key, value in credentials.items()
+                        if key in {"account_address", "api_wallet_address"}
+                    }
+                bindings.append(
+                    PreparedRuntimeAccountBinding(
+                        exchange_account_id=account.exchange_account_id,
+                        workspace_id=team.workspace_id,
+                        team_id=team.team_id,
+                        service_principal_id=principal.user_id,
+                        service_principal_username=principal.username,
+                        account_id=account.account_id,
+                        venue=account.venue,
+                        account_version=account.version,
+                        credential_version=account.credential_version,
+                        credentials=credentials,
+                    )
+                )
+            return tuple(bindings)
+
+    def perptape_runtime_bindings(self) -> tuple[PreparedPerptapeRuntimeBinding, ...]:
+        with self.database.session_factory() as session:
+            sources = session.scalars(
+                select(TeamSignalSource)
+                .where(
+                    TeamSignalSource.enabled,
+                    TeamSignalSource.mode == SignalSourceMode.PERPTAPE.value,
+                    TeamSignalSource.credential_ciphertext.is_not(None),
+                )
+                .order_by(TeamSignalSource.team_id)
+            ).all()
+            bindings: list[PreparedPerptapeRuntimeBinding] = []
+            for source in sources:
+                team = session.get(Team, source.team_id)
+                if (
+                    team is None
+                    or not team.active
+                    or source.service_principal_id is None
+                ):
+                    _reject(
+                        "SIGNAL_SERVICE_PRINCIPAL_INVALID",
+                        "an enabled Perptape source is outside its exact team scope",
+                    )
+                principal = self._require_exact_runtime_principal(
+                    session,
+                    principal_id=source.service_principal_id,
+                    team=team,
+                    role=Role.PROPOSER,
+                    account_id=None,
+                    venue=None,
+                    error_code="SIGNAL_SERVICE_PRINCIPAL_INVALID",
+                    error_message="an enabled Perptape source is outside its exact team scope",
+                )
+                assert source.credential_ciphertext is not None
+                bindings.append(
+                    PreparedPerptapeRuntimeBinding(
+                        signal_source_id=source.signal_source_id,
+                        workspace_id=team.workspace_id,
+                        team_id=team.team_id,
+                        service_principal_id=principal.user_id,
+                        service_principal_username=principal.username,
+                        source_version=source.version,
+                        credential_version=source.credential_version,
+                        api_key=self.credential_cipher.decrypt_secret(
+                            source.credential_ciphertext,
+                            team_id=source.team_id,
+                            object_id=source.signal_source_id,
+                            purpose="signal-source:perptape",
+                            credential_version=source.credential_version,
+                        ),
+                    )
+                )
+            return tuple(bindings)
+
+    def validate_runtime_account_binding(
+        self, binding: PreparedRuntimeAccountBinding
+    ) -> None:
+        with self.database.session_factory() as session:
+            account = session.get(ExchangeAccount, binding.exchange_account_id)
+            if (
+                account is None
+                or account.team_id != binding.team_id
+                or account.account_id != binding.account_id
+                or account.venue != binding.venue
+                or not account.runtime_sync_enabled
+                or account.runtime_service_principal_id != binding.service_principal_id
+                or account.version != binding.account_version
+                or account.credential_version != binding.credential_version
+            ):
+                _reject(
+                    "RUNTIME_BINDING_CHANGED",
+                    "the database-bound runtime account changed during synchronization",
+                )
+
+    def validate_perptape_runtime_binding(
+        self, binding: PreparedPerptapeRuntimeBinding
+    ) -> None:
+        with self.database.session_factory() as session:
+            source = session.get(TeamSignalSource, binding.signal_source_id)
+            if (
+                source is None
+                or source.team_id != binding.team_id
+                or not source.enabled
+                or source.mode != SignalSourceMode.PERPTAPE.value
+                or source.service_principal_id != binding.service_principal_id
+                or source.version != binding.source_version
+                or source.credential_version != binding.credential_version
+            ):
+                _reject(
+                    "SIGNAL_RUNTIME_BINDING_CHANGED",
+                    "the team Perptape binding changed during synchronization",
+                )
+
+    @staticmethod
+    def _lock_runtime_account_binding(
+        session: Session,
+        binding: PreparedRuntimeAccountBinding,
+    ) -> ExchangeAccount:
+        account = session.scalar(
+            select(ExchangeAccount)
+            .where(ExchangeAccount.exchange_account_id == binding.exchange_account_id)
+            .with_for_update()
+        )
+        if (
+            account is None
+            or account.team_id != binding.team_id
+            or account.account_id != binding.account_id
+            or account.venue != binding.venue
+            or not account.runtime_sync_enabled
+            or account.runtime_service_principal_id != binding.service_principal_id
+            or account.version != binding.account_version
+            or account.credential_version != binding.credential_version
+        ):
+            _reject(
+                "RUNTIME_BINDING_CHANGED",
+                "the database-bound runtime account changed during synchronization",
+            )
+        team = session.get(Team, binding.team_id)
+        if team is None or not team.active:
+            _reject(
+                "RUNTIME_BINDING_CHANGED",
+                "the database-bound runtime account changed during synchronization",
+            )
+        TradingService._require_exact_runtime_principal(
+            session,
+            principal_id=binding.service_principal_id,
+            team=team,
+            role=Role.OPERATOR,
+            account_id=binding.account_id,
+            venue=binding.venue,
+            error_code="RUNTIME_BINDING_CHANGED",
+            error_message=(
+                "the database-bound runtime account changed during synchronization"
+            ),
+            lock=True,
+        )
+        return account
+
+    @staticmethod
+    def _lock_perptape_runtime_binding(
+        session: Session,
+        binding: PreparedPerptapeRuntimeBinding,
+    ) -> TeamSignalSource:
+        source = session.scalar(
+            select(TeamSignalSource)
+            .where(TeamSignalSource.signal_source_id == binding.signal_source_id)
+            .with_for_update()
+        )
+        if (
+            source is None
+            or source.team_id != binding.team_id
+            or not source.enabled
+            or source.mode != SignalSourceMode.PERPTAPE.value
+            or source.service_principal_id != binding.service_principal_id
+            or source.version != binding.source_version
+            or source.credential_version != binding.credential_version
+        ):
+            _reject(
+                "SIGNAL_RUNTIME_BINDING_CHANGED",
+                "the team Perptape binding changed during synchronization",
+            )
+        team = session.get(Team, binding.team_id)
+        if team is None or not team.active:
+            _reject(
+                "SIGNAL_RUNTIME_BINDING_CHANGED",
+                "the team Perptape binding changed during synchronization",
+            )
+        TradingService._require_exact_runtime_principal(
+            session,
+            principal_id=binding.service_principal_id,
+            team=team,
+            role=Role.PROPOSER,
+            account_id=None,
+            venue=None,
+            error_code="SIGNAL_RUNTIME_BINDING_CHANGED",
+            error_message="the team Perptape binding changed during synchronization",
+            lock=True,
+        )
+        return source
 
     @staticmethod
     def _connection_verification_payload(
@@ -3025,6 +3593,13 @@ class TradingService:
             account.last_connection_check_at = now
             if outcome.success:
                 account.last_verified_at = now
+            else:
+                account.runtime_sync_enabled = False
+                self._set_internal_principal_active(
+                    session,
+                    account.runtime_service_principal_id,
+                    False,
+                )
             account.version += 1
             account.updated_by = actor_id
             account.updated_at = now
@@ -4107,9 +4682,22 @@ class TradingService:
         actor_id: UUID,
         sources: dict[str, dict[str, Any]],
         *,
+        scopes: dict[str, tuple[str, str] | None] | None = None,
+        require_exact_account_scope: bool = True,
+        runtime_account_binding: PreparedRuntimeAccountBinding | None = None,
+        perptape_runtime_binding: PreparedPerptapeRuntimeBinding | None = None,
         now: datetime,
     ) -> None:
         with self.database.session_factory() as session, session.begin():
+            if runtime_account_binding is not None and perptape_runtime_binding is not None:
+                _reject(
+                    "RUNTIME_BINDING_INVALID",
+                    "runtime health cannot bind an account and signal source together",
+                )
+            if runtime_account_binding is not None:
+                self._lock_runtime_account_binding(session, runtime_account_binding)
+            if perptape_runtime_binding is not None:
+                self._lock_perptape_runtime_binding(session, perptape_runtime_binding)
             principal = session.get(User, actor_id)
             if (
                 principal is None
@@ -4120,6 +4708,8 @@ class TradingService:
                     "SERVICE_PRINCIPAL_REQUIRED",
                     "runtime source health requires an active service principal",
                 )
+            _principal, _workspace, team = self._active_scope(session, actor_id)
+            assert team is not None
             for source_name, result in sources.items():
                 status = str(result.get("status", ""))
                 error_code = result.get("error_code")
@@ -4143,7 +4733,57 @@ class TradingService:
                         "RUNTIME_HEALTH_ITEMS_INVALID",
                         "runtime source item count cannot be negative",
                     )
-                current = session.get(RuntimeSourceHealth, source_name)
+                requested_scope = (scopes or {}).get(source_name)
+                account_id: str | None = None
+                venue: str | None = None
+                if requested_scope is not None:
+                    account_id, venue = requested_scope
+                    account = session.scalar(
+                        select(ExchangeAccount).where(
+                            ExchangeAccount.team_id == team.team_id,
+                            ExchangeAccount.account_id == account_id,
+                            ExchangeAccount.venue == venue,
+                        )
+                    )
+                    if account is None:
+                        _reject(
+                            "RUNTIME_HEALTH_SCOPE_INVALID",
+                            "runtime source health account is outside the principal team",
+                        )
+                    assignment = session.scalar(
+                        select(RoleAssignment).where(
+                            RoleAssignment.team_id == team.team_id,
+                            RoleAssignment.user_id == actor_id,
+                            RoleAssignment.role == Role.OPERATOR.value,
+                            RoleAssignment.account_scope == account_id,
+                            RoleAssignment.venue_scope == venue,
+                        )
+                    )
+                    if assignment is None and not require_exact_account_scope:
+                        assignment = session.scalar(
+                            select(RoleAssignment).where(
+                                RoleAssignment.team_id == team.team_id,
+                                RoleAssignment.user_id == actor_id,
+                                RoleAssignment.role == Role.OPERATOR.value,
+                                RoleAssignment.account_scope.is_(None),
+                                RoleAssignment.venue_scope.is_(None),
+                            )
+                        )
+                    if assignment is None:
+                        _reject(
+                            "RUNTIME_HEALTH_SCOPE_DENIED",
+                            "runtime source health requires the exact account operator scope",
+                        )
+                current = session.scalar(
+                    select(RuntimeSourceHealth)
+                    .where(
+                        RuntimeSourceHealth.team_id == team.team_id,
+                        RuntimeSourceHealth.source_name == source_name,
+                        RuntimeSourceHealth.account_id == account_id,
+                        RuntimeSourceHealth.venue == venue,
+                    )
+                    .with_for_update()
+                )
                 if (
                     current is not None
                     and status == "SKIPPED"
@@ -4170,7 +4810,10 @@ class TradingService:
                 if current is None:
                     session.add(
                         RuntimeSourceHealth(
+                            team_id=team.team_id,
                             source_name=source_name,
+                            account_id=account_id,
+                            venue=venue,
                             status=status,
                             items_observed=items_observed,
                             error_code=error_code,
@@ -4198,6 +4841,7 @@ class TradingService:
         *,
         now: datetime,
         base_snapshot: PerptapeFeedSnapshot | None,
+        runtime_binding: PreparedPerptapeRuntimeBinding | None = None,
     ) -> int:
         now_utc = normalize_perptape_datetime(now)
         feed = bound_perptape_feed_snapshot(feed)
@@ -4218,8 +4862,22 @@ class TradingService:
         ):
             _reject("PERPTAPE_RESPONSE_INVALID", "Perptape feed metadata is inconsistent")
         with self.database.session_factory.begin() as session:
-            self._require_role(session, actor_id, "proposal.create")
-            current = session.get(PerptapeFeed, "BREAKOUTS", with_for_update=True)
+            if runtime_binding is not None:
+                self._lock_perptape_runtime_binding(session, runtime_binding)
+            _actor, workspace, team = self._active_scope(session, actor_id)
+            assert team is not None
+            self._require_role(
+                session,
+                actor_id,
+                "proposal.create",
+                team_id=team.team_id,
+                allow_setup=True,
+            )
+            current = session.get(
+                PerptapeFeed,
+                (team.team_id, "BREAKOUTS"),
+                with_for_update=True,
+            )
             current_feed = (
                 None
                 if current is None
@@ -4264,6 +4922,7 @@ class TradingService:
             candidates = [candidate.to_dict() for candidate in feed.candidates]
             if current is None:
                 current = PerptapeFeed(
+                    team_id=team.team_id,
                     feed_key="BREAKOUTS",
                     contract_version=feed.contract_version,
                     candidates=candidates,
@@ -4291,6 +4950,8 @@ class TradingService:
                 reason=f"{len(candidates)} candidates",
                 correlation_id=uuid4(),
                 object_version=current.version,
+                workspace_id=workspace.workspace_id,
+                team_id=team.team_id,
                 now=now,
             )
             return current.version
@@ -4459,6 +5120,7 @@ class TradingService:
         venue: str,
         instruments: Sequence[BinanceInstrument | HyperliquidInstrument],
         hip3_dexes: tuple[str, ...] = (),
+        runtime_binding: PreparedRuntimeAccountBinding | None = None,
         now: datetime,
     ) -> dict[str, int]:
         """Replace one venue's active Catalog set from a complete official read-only snapshot."""
@@ -4481,6 +5143,8 @@ class TradingService:
             _reject("INSTRUMENT_CATALOG_INVALID", "official active instrument catalog is invalid")
 
         with self.database.session_factory.begin() as session:
+            if runtime_binding is not None:
+                self._lock_runtime_account_binding(session, runtime_binding)
             self._require_role(session, actor_id, "venue.record", account_id, venue)
             existing = {
                 instrument.symbol: instrument
@@ -5044,6 +5708,7 @@ class TradingService:
         deduplicate_active_manual_semantics: bool = False,
         deduplicate_active_system_scope: bool = False,
         submit_for_review: bool = False,
+        perptape_runtime_binding: PreparedPerptapeRuntimeBinding | None = None,
         now: datetime,
     ) -> UUID:
         payload = {
@@ -5073,6 +5738,13 @@ class TradingService:
         }
         operation = "proposal.create"
         with self.database.session_factory.begin() as session:
+            if perptape_runtime_binding is not None:
+                if source is not ProposalSource.SYSTEM or signal_event_id is not None:
+                    _reject(
+                        "SIGNAL_RUNTIME_BINDING_INVALID",
+                        "Perptape runtime bindings only create system signal proposals",
+                    )
+                self._lock_perptape_runtime_binding(session, perptape_runtime_binding)
             team = self._require_role(session, actor_id, operation, account_id, venue)
             self._require_team_environment(team, environment)
             if submit_for_review:
@@ -5631,9 +6303,18 @@ class TradingService:
                     expired += 1
             return expired
 
-    def submit_proposal(self, proposal_id: UUID, actor_id: UUID, *, now: datetime) -> None:
+    def submit_proposal(
+        self,
+        proposal_id: UUID,
+        actor_id: UUID,
+        *,
+        perptape_runtime_binding: PreparedPerptapeRuntimeBinding | None = None,
+        now: datetime,
+    ) -> None:
         expired = False
         with self.database.session_factory.begin() as session:
+            if perptape_runtime_binding is not None:
+                self._lock_perptape_runtime_binding(session, perptape_runtime_binding)
             proposal = session.get(Proposal, proposal_id, with_for_update=True)
             if proposal is None:
                 _reject("PROPOSAL_NOT_FOUND", "proposal does not exist")
@@ -6118,7 +6799,14 @@ class TradingService:
 
         max_age = timedelta(seconds=policy.max_fact_age_seconds)
         source_health = (
-            session.get(RuntimeSourceHealth, proposal.venue)
+            session.scalar(
+                select(RuntimeSourceHealth).where(
+                    RuntimeSourceHealth.team_id == proposal.team_id,
+                    RuntimeSourceHealth.source_name == proposal.venue,
+                    RuntimeSourceHealth.account_id == proposal.account_id,
+                    RuntimeSourceHealth.venue == proposal.venue,
+                )
+            )
             if proposal.environment == ExecutionEnvironment.LIVE.value
             else None
         )
@@ -7607,7 +8295,14 @@ class TradingService:
             ):
                 _reject("EQUITY_UNKNOWN", "new-risk venue send requires fresh equity")
             if environment is ExecutionEnvironment.LIVE:
-                source_health = session.get(RuntimeSourceHealth, campaign.venue)
+                source_health = session.scalar(
+                    select(RuntimeSourceHealth).where(
+                        RuntimeSourceHealth.team_id == campaign.team_id,
+                        RuntimeSourceHealth.source_name == campaign.venue,
+                        RuntimeSourceHealth.account_id == campaign.account_id,
+                        RuntimeSourceHealth.venue == campaign.venue,
+                    )
+                )
                 if (
                     source_health is None
                     or source_health.status != "SUCCESS"
@@ -10596,6 +11291,7 @@ class TradingService:
         snapshots: tuple[BinanceReadOnlySnapshot, ...],
         *,
         environment: ExecutionEnvironment,
+        runtime_binding: PreparedRuntimeAccountBinding | None = None,
         now: datetime,
     ) -> dict[str, Any]:
         """Persist a fully parsed Binance account snapshot and cover absent positions."""
@@ -10606,6 +11302,7 @@ class TradingService:
             snapshots,
             venue="BINANCE",
             environment=environment,
+            runtime_binding=runtime_binding,
             now=now,
         )
 
@@ -10616,6 +11313,7 @@ class TradingService:
         snapshots: tuple[HyperliquidReadOnlySnapshot, ...],
         *,
         environment: ExecutionEnvironment,
+        runtime_binding: PreparedRuntimeAccountBinding | None = None,
         now: datetime,
     ) -> dict[str, Any]:
         """Persist a fully parsed Hyperliquid account snapshot and cover absent positions."""
@@ -10626,6 +11324,7 @@ class TradingService:
             snapshots,
             venue="HYPERLIQUID",
             environment=environment,
+            runtime_binding=runtime_binding,
             now=now,
         )
 
@@ -10637,6 +11336,7 @@ class TradingService:
         *,
         venue: str,
         environment: ExecutionEnvironment,
+        runtime_binding: PreparedRuntimeAccountBinding | None = None,
         now: datetime,
     ) -> dict[str, Any]:
         if not snapshots:
@@ -10688,6 +11388,8 @@ class TradingService:
             )
 
         with self.database.session_factory.begin() as session:
+            if runtime_binding is not None:
+                self._lock_runtime_account_binding(session, runtime_binding)
             persisted: dict[str, Any] = {}
             for snapshot in sorted(snapshots, key=lambda item: item.symbol):
                 persisted[snapshot.symbol] = self._ingest_read_only_snapshot(
@@ -12617,7 +13319,14 @@ class TradingService:
                 continue
             prefix = f"{environment.value}:{account_id}:{venue}"
             if require_live_scope:
-                source_health = session.get(RuntimeSourceHealth, venue)
+                source_health = session.scalar(
+                    select(RuntimeSourceHealth).where(
+                        RuntimeSourceHealth.team_id == policy.team_id,
+                        RuntimeSourceHealth.source_name == venue,
+                        RuntimeSourceHealth.account_id == account_id,
+                        RuntimeSourceHealth.venue == venue,
+                    )
+                )
                 if source_health is None:
                     blockers.add(f"READ_ONLY_SOURCE_MISSING:{prefix}")
                 elif source_health.status != "SUCCESS":

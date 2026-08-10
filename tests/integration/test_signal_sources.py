@@ -10,22 +10,31 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from uuid import UUID
 
+import pytest
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy import select
 
 from trading_control_plane.api import create_app
 from trading_control_plane.config import Settings
 from trading_control_plane.database import Database
-from trading_control_plane.domain import Role, SystemRiskState
+from trading_control_plane.domain import (
+    DomainRejected,
+    Role,
+    SignalSourceMode,
+    SystemRiskState,
+)
 from trading_control_plane.models import (
     AuditEvent,
     Proposal,
     RiskDecision,
     RiskPolicy,
+    RoleAssignment,
     SignalEvent,
     TeamSignalSource,
+    User,
 )
 from trading_control_plane.perptape import PerptapeClient
+from trading_control_plane.queries import TradingQueries
 from trading_control_plane.service import TradingService
 
 
@@ -468,3 +477,119 @@ def test_signal_events_are_hidden_across_team_switches(database: Database) -> No
         now=now + timedelta(seconds=1),
     )
     assert service.signal_source_status(admin)["source"]["mode"] == "PERPTAPE"
+
+
+def test_perptape_runtime_bindings_are_encrypted_versioned_and_team_scoped(
+    database: Database,
+) -> None:
+    now = datetime.now(UTC)
+    service = TradingService(database, credential_encryption_key=encryption_key())
+    admin = service.bootstrap_admin("perptape-binding-admin", now=now)
+    context = TradingQueries(database).user_context(admin)
+    workspace_id = UUID(context["active_workspace"]["workspace_id"])
+    first_team_id = UUID(context["active_team"]["team_id"])
+    service.configure_signal_source(
+        actor_id=admin,
+        mode=SignalSourceMode.PERPTAPE,
+        secret="first-team-perptape-key",  # noqa: S106
+        enabled=True,
+        webhook_max_age_seconds=300,
+        expected_version=1,
+        idempotency_key="configure-first-perptape-binding",
+        now=now,
+    )
+    second_team_id = service.create_team(
+        actor_id=admin,
+        name="Perptape Binding Two",
+        slug="perptape-binding-two",
+        idempotency_key="create-perptape-binding-two",
+        now=now + timedelta(seconds=1),
+    )
+    service.configure_signal_source(
+        actor_id=admin,
+        mode=SignalSourceMode.PERPTAPE,
+        secret="second-team-perptape-key",  # noqa: S106
+        enabled=True,
+        webhook_max_age_seconds=300,
+        expected_version=0,
+        idempotency_key="configure-second-perptape-binding",
+        now=now + timedelta(seconds=1),
+    )
+
+    bindings = service.perptape_runtime_bindings()
+    assert len(bindings) == 2
+    by_team = {item.team_id: item for item in bindings}
+    assert set(by_team) == {first_team_id, second_team_id}
+    assert by_team[first_team_id].api_key == "first-team-perptape-key"
+    assert by_team[second_team_id].api_key == "second-team-perptape-key"
+    assert all("perptape-key" not in repr(item) for item in bindings)
+
+    first_binding = by_team[first_team_id]
+    service.select_scope(
+        actor_id=admin,
+        workspace_id=workspace_id,
+        team_id=first_team_id,
+        idempotency_key="return-first-perptape-binding",
+        now=now + timedelta(seconds=2),
+    )
+    service.configure_signal_source(
+        actor_id=admin,
+        mode=SignalSourceMode.PERPTAPE,
+        secret="first-team-rotated-key",  # noqa: S106
+        enabled=True,
+        webhook_max_age_seconds=300,
+        expected_version=2,
+        idempotency_key="rotate-first-perptape-binding",
+        now=now + timedelta(seconds=3),
+    )
+    with pytest.raises(DomainRejected, match="SIGNAL_RUNTIME_BINDING_CHANGED"):
+        service.validate_perptape_runtime_binding(first_binding)
+    with pytest.raises(DomainRejected, match="SIGNAL_RUNTIME_BINDING_CHANGED"):
+        service.record_runtime_source_health(
+            first_binding.service_principal_id,
+            {"PERPTAPE": {"status": "FAILED", "items_observed": 0}},
+            perptape_runtime_binding=first_binding,
+            now=now + timedelta(seconds=3, milliseconds=100),
+        )
+
+    service.configure_signal_source(
+        actor_id=admin,
+        mode=SignalSourceMode.PERPTAPE,
+        secret="first-team-disabled-key",  # noqa: S106
+        enabled=False,
+        webhook_max_age_seconds=300,
+        expected_version=3,
+        idempotency_key="disable-first-perptape-binding",
+        now=now + timedelta(seconds=3, milliseconds=200),
+    )
+    with database.session_factory() as session:
+        principal = session.get(User, first_binding.service_principal_id)
+        assert principal is not None and principal.active is False
+    service.configure_signal_source(
+        actor_id=admin,
+        mode=SignalSourceMode.PERPTAPE,
+        secret="first-team-reenabled-key",  # noqa: S106
+        enabled=True,
+        webhook_max_age_seconds=300,
+        expected_version=4,
+        idempotency_key="reenable-first-perptape-binding",
+        now=now + timedelta(seconds=3, milliseconds=300),
+    )
+    with database.session_factory() as session:
+        principal = session.get(User, first_binding.service_principal_id)
+        assert principal is not None and principal.active is True
+
+    second_binding = by_team[second_team_id]
+    with database.session_factory.begin() as session:
+        session.add(
+            RoleAssignment(
+                user_id=second_binding.service_principal_id,
+                team_id=second_team_id,
+                role=Role.OBSERVER.value,
+                account_scope=None,
+                venue_scope=None,
+                created_at=now + timedelta(seconds=4),
+            )
+        )
+    with pytest.raises(DomainRejected, match="SIGNAL_SERVICE_PRINCIPAL_INVALID"):
+        service.perptape_runtime_bindings()

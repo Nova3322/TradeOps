@@ -42,7 +42,11 @@ from trading_control_plane.perptape import (
 )
 from trading_control_plane.perptape_stream import PerptapeStreamWorker
 from trading_control_plane.queries import TradingQueries
-from trading_control_plane.service import TradingService
+from trading_control_plane.service import (
+    PreparedPerptapeRuntimeBinding,
+    PreparedRuntimeAccountBinding,
+    TradingService,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -185,6 +189,28 @@ class RuntimeSyncReport:
         }
 
 
+@dataclass(frozen=True, slots=True)
+class RuntimeBindingSyncReport:
+    started_at: str
+    completed_at: str
+    sources: dict[str, SourceSyncResult]
+
+    @property
+    def successful(self) -> bool:
+        return bool(self.sources) and all(
+            item.status == "SUCCESS" for item in self.sources.values()
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "started_at": self.started_at,
+            "completed_at": self.completed_at,
+            "binding_source": "DATABASE_ENVELOPE",
+            "source_sync_successful": self.successful,
+            "sources": {key: asdict(value) for key, value in self.sources.items()},
+        }
+
+
 class RuntimeSyncWorker:
     """Continuously refresh read-only external facts without any venue write capability."""
 
@@ -208,7 +234,10 @@ class RuntimeSyncWorker:
         self.notilt = notilt
         self.notilt_valuator = notilt_valuator
         self.clock = clock
-        self.service = TradingService(database)
+        self.service = TradingService(
+            database,
+            credential_encryption_key=settings.credential_encryption_key,
+        )
         self.queries = TradingQueries(database)
         self._perptape_stream_thread: threading.Thread | None = None
 
@@ -277,7 +306,13 @@ class RuntimeSyncWorker:
                 "runtime venue synchronization requires a computed reconciliation MATCH",
             )
 
-    def _record_binance(self, actor_id: UUID, now: datetime) -> int:
+    def _record_binance(
+        self,
+        actor_id: UUID,
+        now: datetime,
+        *,
+        runtime_binding: PreparedRuntimeAccountBinding | None = None,
+    ) -> int:
         account_id = self.settings.runtime_binance_account_id
         if account_id is None:
             raise DomainRejected(
@@ -312,6 +347,7 @@ class RuntimeSyncWorker:
             account_id=account_id,
             venue="BINANCE",
             instruments=worker_instruments,
+            runtime_binding=runtime_binding,
             now=now,
         )
         snapshots = self.binance.read_account_snapshots(
@@ -322,6 +358,7 @@ class RuntimeSyncWorker:
             actor_id,
             snapshots,
             environment=ExecutionEnvironment(self.settings.binance_fact_environment),
+            runtime_binding=runtime_binding,
             now=now,
         )
         scope = f"{self.settings.binance_fact_environment}:{account_id}:BINANCE"
@@ -337,18 +374,29 @@ class RuntimeSyncWorker:
         )
         return int(persisted["positions_covered"])
 
-    def _record_perptape(self, actor_id: UUID, now: datetime) -> int:
+    def _record_perptape(
+        self,
+        actor_id: UUID,
+        now: datetime,
+        *,
+        runtime_binding: PreparedPerptapeRuntimeBinding | None = None,
+    ) -> int:
         now = self._normalize_runtime_time(now, continuous=False)
-        base = self.queries.perptape_feed()
+        base = self.queries.perptape_feed(actor_id)
         if (
             base is not None
             and base.contract_version == self.settings.perptape_contract_version
             and now < base.next_allowed_at
         ):
-            self._create_resonance_proposals(actor_id, base, now=now)
+            self._create_resonance_proposals(
+                actor_id,
+                base,
+                now=now,
+                runtime_binding=runtime_binding,
+            )
             return len(base.candidates)
         feed = self.perptape.refresh(now=now)
-        current = self.queries.perptape_feed()
+        current = self.queries.perptape_feed(actor_id)
         if current is not None and current.contract_version == feed.contract_version:
             feed = merge_incomplete_perptape_candidates(
                 feed,
@@ -366,6 +414,7 @@ class RuntimeSyncWorker:
             feed,
             now=now,
             base_snapshot=base,
+            runtime_binding=runtime_binding,
         )
         return len(feed.candidates)
 
@@ -376,14 +425,21 @@ class RuntimeSyncWorker:
         *,
         now: datetime,
         base_snapshot: PerptapeFeedSnapshot | None,
+        runtime_binding: PreparedPerptapeRuntimeBinding | None = None,
     ) -> None:
         self.service.record_perptape_feed(
             actor_id,
             feed,
             now=now,
             base_snapshot=base_snapshot,
+            runtime_binding=runtime_binding,
         )
-        self._create_resonance_proposals(actor_id, feed, now=now)
+        self._create_resonance_proposals(
+            actor_id,
+            feed,
+            now=now,
+            runtime_binding=runtime_binding,
+        )
 
     def _create_resonance_proposals(
         self,
@@ -391,7 +447,10 @@ class RuntimeSyncWorker:
         feed: PerptapeFeedSnapshot,
         *,
         now: datetime,
+        runtime_binding: PreparedPerptapeRuntimeBinding | None = None,
     ) -> int:
+        if runtime_binding is not None:
+            self.service.validate_perptape_runtime_binding(runtime_binding)
         config = self.service.proposal_automation_config(actor_id)
         if config is None or not config["auto_proposal_enabled"]:
             return 0
@@ -506,6 +565,9 @@ class RuntimeSyncWorker:
                     "default_config_id": config["config_id"],
                     "default_config_version": config["version"],
                     "configuration_mode": "AUTO_POLICY",
+                    "signal_source_version": (
+                        None if runtime_binding is None else runtime_binding.source_version
+                    ),
                     "trigger_price": str(primary.reference_price),
                     "invalidation_price": str(invalidation_price),
                     "initial_quantity": str(quantity),
@@ -523,15 +585,27 @@ class RuntimeSyncWorker:
                     "signal_identity": signal_identity,
                 },
                 deduplicate_active_system_scope=True,
+                perptape_runtime_binding=runtime_binding,
                 now=now,
             )
             detail = self.queries.proposal_detail(actor_id, proposal_id, now=now)
             if detail["status"] == ProposalStatus.DRAFT.value:
-                self.service.submit_proposal(proposal_id, actor_id, now=now)
+                self.service.submit_proposal(
+                    proposal_id,
+                    actor_id,
+                    perptape_runtime_binding=runtime_binding,
+                    now=now,
+                )
                 created += 1
         return created
 
-    def _record_hyperliquid(self, actor_id: UUID, now: datetime) -> int:
+    def _record_hyperliquid(
+        self,
+        actor_id: UUID,
+        now: datetime,
+        *,
+        runtime_binding: PreparedRuntimeAccountBinding | None = None,
+    ) -> int:
         account_id = self.settings.runtime_hyperliquid_account_id
         if account_id is None:
             raise DomainRejected(
@@ -549,6 +623,7 @@ class RuntimeSyncWorker:
             venue="HYPERLIQUID",
             instruments=self.hyperliquid.read_active_instruments(),
             hip3_dexes=self.settings.hyperliquid_hip3_dexes,
+            runtime_binding=runtime_binding,
             now=now,
         )
         snapshots = self.hyperliquid.read_account_snapshots(
@@ -561,6 +636,7 @@ class RuntimeSyncWorker:
             actor_id,
             snapshots,
             environment=environment,
+            runtime_binding=runtime_binding,
             now=now,
         )
         scope = f"{environment.value}:{account_id}:HYPERLIQUID"
@@ -627,9 +703,17 @@ class RuntimeSyncWorker:
         self,
         source_name: str,
         *,
+        actor_id: UUID,
+        account_id: str | None = None,
+        venue: str | None = None,
         now: datetime,
     ) -> SourceSyncResult | None:
-        health = self.queries.runtime_source_health(source_name)
+        health = self.queries.runtime_source_health(
+            actor_id,
+            source_name,
+            account_id=account_id,
+            venue=venue,
+        )
         if health is None or "RATE_LIMITED" not in str(health.get("error_code") or ""):
             return None
         retry_value = health.get("retry_at")
@@ -675,7 +759,13 @@ class RuntimeSyncWorker:
             results["BINANCE"] = SourceSyncResult("SKIPPED")
 
         if self.settings.hyperliquid_read_only_enabled:
-            cooldown = self._rate_limit_cooldown("HYPERLIQUID", now=started_at)
+            cooldown = self._rate_limit_cooldown(
+                "HYPERLIQUID",
+                actor_id=actor.user_id,
+                account_id=self.settings.runtime_hyperliquid_account_id,
+                venue="HYPERLIQUID",
+                now=started_at,
+            )
             if cooldown is None:
                 self._attempt(
                     "HYPERLIQUID",
@@ -729,6 +819,19 @@ class RuntimeSyncWorker:
         self.service.record_runtime_source_health(
             actor.user_id,
             {source: asdict(result) for source, result in results.items()},
+            scopes={
+                "BINANCE": (
+                    None
+                    if self.settings.runtime_binance_account_id is None
+                    else (self.settings.runtime_binance_account_id, "BINANCE")
+                ),
+                "HYPERLIQUID": (
+                    None
+                    if self.settings.runtime_hyperliquid_account_id is None
+                    else (self.settings.runtime_hyperliquid_account_id, "HYPERLIQUID")
+                ),
+            },
+            require_exact_account_scope=False,
             now=completed_at,
         )
         return RuntimeSyncReport(
@@ -737,6 +840,104 @@ class RuntimeSyncWorker:
             sources=results,
             net_worth=net_worth,
         )
+
+    def run_bound_account_once(
+        self,
+        binding: PreparedRuntimeAccountBinding,
+        *,
+        now: datetime,
+    ) -> SourceSyncResult:
+        if (
+            binding.service_principal_username
+            != self.settings.runtime_sync_service_username
+            or binding.account_id
+            not in {
+                self.settings.runtime_binance_account_id,
+                self.settings.runtime_hyperliquid_account_id,
+            }
+        ):
+            raise DomainRejected(
+                "RUNTIME_BINDING_WORKER_SCOPE_MISMATCH",
+                "the runtime worker does not match the frozen account binding",
+            )
+        result: SourceSyncResult
+        if binding.venue == "BINANCE":
+            results: dict[str, SourceSyncResult] = {}
+            self._attempt(
+                "BINANCE",
+                lambda: self._record_binance(
+                    binding.service_principal_id,
+                    now,
+                    runtime_binding=binding,
+                ),
+                results,
+            )
+            result = results["BINANCE"]
+        elif binding.venue == "HYPERLIQUID":
+            cooldown = self._rate_limit_cooldown(
+                "HYPERLIQUID",
+                actor_id=binding.service_principal_id,
+                account_id=binding.account_id,
+                venue=binding.venue,
+                now=now,
+            )
+            if cooldown is not None:
+                result = cooldown
+            else:
+                results = {}
+                self._attempt(
+                    "HYPERLIQUID",
+                    lambda: self._record_hyperliquid(
+                        binding.service_principal_id,
+                        now,
+                        runtime_binding=binding,
+                    ),
+                    results,
+                )
+                result = results["HYPERLIQUID"]
+        else:
+            raise DomainRejected(
+                "RUNTIME_CONNECTOR_NOT_IMPLEMENTED",
+                "continuous read-only sync is not implemented for this exchange",
+            )
+        self.service.record_runtime_source_health(
+            binding.service_principal_id,
+            {binding.venue: asdict(result)},
+            scopes={binding.venue: (binding.account_id, binding.venue)},
+            runtime_account_binding=binding,
+            now=now,
+        )
+        return result
+
+    def run_bound_perptape_once(
+        self,
+        binding: PreparedPerptapeRuntimeBinding,
+        *,
+        now: datetime,
+    ) -> SourceSyncResult:
+        if binding.service_principal_username != self.settings.perptape_service_username:
+            raise DomainRejected(
+                "SIGNAL_RUNTIME_WORKER_SCOPE_MISMATCH",
+                "the runtime worker does not match the frozen Perptape binding",
+            )
+        results: dict[str, SourceSyncResult] = {}
+        self._attempt(
+            "PERPTAPE",
+            lambda: self._record_perptape(
+                binding.service_principal_id,
+                now,
+                runtime_binding=binding,
+            ),
+            results,
+        )
+        result = results["PERPTAPE"]
+        self.service.record_runtime_source_health(
+            binding.service_principal_id,
+            {"PERPTAPE": asdict(result)},
+            perptape_runtime_binding=binding,
+            now=now,
+        )
+        return result
 
     def run_forever(self, stop_event: threading.Event) -> None:
         stream: PerptapeStreamWorker | None = None
@@ -755,7 +956,7 @@ class RuntimeSyncWorker:
                     websocket_url=self.settings.perptape_websocket_url,
                     api_key=self.settings.perptape_api_key,
                     contract_version=self.settings.perptape_contract_version,
-                    load_snapshot=self.queries.perptape_feed,
+                    load_snapshot=lambda: self.queries.perptape_feed(perptape_actor.user_id),
                     record_snapshot=lambda feed, now, base_snapshot: self._record_perptape_snapshot(
                         perptape_actor.user_id,
                         feed,
@@ -869,6 +1070,135 @@ def build_runtime_worker(settings: Settings, database: Database) -> RuntimeSyncW
     )
 
 
+class RuntimeBindingSupervisor:
+    """Refresh every explicitly enabled database binding in its frozen team scope."""
+
+    def __init__(
+        self,
+        *,
+        settings: Settings,
+        database: Database,
+        clock: Callable[[], datetime] = lambda: datetime.now(UTC),
+        worker_factory: Callable[[Settings, Database], RuntimeSyncWorker] = build_runtime_worker,
+    ) -> None:
+        self.settings = settings
+        self.database = database
+        self.clock = clock
+        self.worker_factory = worker_factory
+        self.service = TradingService(
+            database,
+            credential_encryption_key=settings.credential_encryption_key,
+        )
+
+    def has_bindings(self) -> bool:
+        return bool(
+            self.service.runtime_account_bindings()
+            or self.service.perptape_runtime_bindings()
+        )
+
+    def _account_worker(self, binding: PreparedRuntimeAccountBinding) -> RuntimeSyncWorker:
+        updates: dict[str, Any] = {
+            "runtime_sync_service_username": binding.service_principal_username,
+            "runtime_binance_account_id": (
+                binding.account_id if binding.venue == "BINANCE" else None
+            ),
+            "runtime_hyperliquid_account_id": (
+                binding.account_id if binding.venue == "HYPERLIQUID" else None
+            ),
+            "binance_read_only_enabled": binding.venue == "BINANCE",
+            "hyperliquid_read_only_enabled": binding.venue == "HYPERLIQUID",
+            "binance_fact_environment": "LIVE",
+            "hyperliquid_fact_environment": "LIVE",
+            "perptape_api_key": None,
+            "perptape_websocket_enabled": False,
+            "notilt_enabled": False,
+        }
+        if binding.venue == "BINANCE":
+            updates.update(
+                binance_api_key=binding.credentials.get("api_key"),
+                binance_api_secret=binding.credentials.get("api_secret"),
+            )
+        else:
+            updates.update(
+                hyperliquid_account_address=binding.credentials.get("account_address"),
+                hyperliquid_api_wallet_address=binding.credentials.get(
+                    "api_wallet_address"
+                ),
+                hyperliquid_api_wallet_private_key=None,
+            )
+        return self.worker_factory(self.settings.model_copy(update=updates), self.database)
+
+    def _perptape_worker(
+        self, binding: PreparedPerptapeRuntimeBinding
+    ) -> RuntimeSyncWorker:
+        scoped = self.settings.model_copy(
+            update={
+                "perptape_api_key": binding.api_key,
+                "perptape_service_username": binding.service_principal_username,
+                "perptape_websocket_enabled": False,
+                "binance_read_only_enabled": False,
+                "hyperliquid_read_only_enabled": False,
+                "notilt_enabled": False,
+            }
+        )
+        return self.worker_factory(scoped, self.database)
+
+    def run_once(
+        self,
+        *,
+        started_at: datetime | None = None,
+        completed_at: datetime | None = None,
+    ) -> RuntimeBindingSyncReport:
+        headroom = timedelta(seconds=self.settings.runtime_sync_interval_seconds + 30)
+        started_at = normalize_perptape_operational_datetime(
+            self.clock() if started_at is None else started_at,
+            required_headroom=headroom,
+        )
+        completed_at = normalize_perptape_operational_datetime(
+            self.clock() if completed_at is None else completed_at,
+            required_headroom=headroom,
+        )
+        results: dict[str, SourceSyncResult] = {}
+        for account_binding in self.service.runtime_account_bindings():
+            key = (
+                f"{account_binding.team_id}:{account_binding.venue}:"
+                f"{account_binding.account_id}"
+            )
+            results[key] = self._account_worker(
+                account_binding
+            ).run_bound_account_once(
+                account_binding,
+                now=started_at,
+            )
+        for signal_binding in self.service.perptape_runtime_bindings():
+            key = f"{signal_binding.team_id}:PERPTAPE"
+            results[key] = self._perptape_worker(
+                signal_binding
+            ).run_bound_perptape_once(
+                signal_binding,
+                now=started_at,
+            )
+        return RuntimeBindingSyncReport(
+            started_at=started_at.isoformat(),
+            completed_at=completed_at.isoformat(),
+            sources=results,
+        )
+
+    def run_forever(self, stop_event: threading.Event) -> None:
+        while not stop_event.is_set():
+            report = self.run_once()
+            logger.info(
+                "Database-bound read-only synchronization cycle completed",
+                extra={
+                    "event": "runtime_binding_sync_cycle_completed",
+                    "result": "READY" if report.successful else "DEGRADED",
+                    "component": "runtime-sync",
+                },
+            )
+            if stop_event.wait(self.settings.runtime_sync_interval_seconds):
+                break
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Run read-only trading fact synchronization")
     parser.add_argument("--once", action="store_true", help="run one synchronization cycle")
@@ -879,16 +1209,31 @@ def main(argv: Sequence[str] | None = None) -> int:
     if not args.once and not settings.runtime_sync_enabled:
         raise SystemExit("TRADING_RUNTIME_SYNC_ENABLED must be true for continuous mode")
     database = Database(settings.database_url)
-    worker: RuntimeSyncWorker | None = None
+    worker: RuntimeSyncWorker | RuntimeBindingSupervisor | None = None
     try:
         ready, reason = database.is_ready()
         if not ready:
             raise SystemExit(f"database is not ready: {reason}")
-        worker = build_runtime_worker(settings, database)
+        binding_supervisor = RuntimeBindingSupervisor(
+            settings=settings,
+            database=database,
+            worker_factory=build_runtime_worker,
+        )
+        worker = (
+            binding_supervisor
+            if settings.runtime_sync_enabled
+            and bool(getattr(binding_supervisor, "has_bindings", lambda: True)())
+            else build_runtime_worker(settings, database)
+        )
         if args.once:
             report = worker.run_once()
             print(json.dumps(report.to_dict(), separators=(",", ":"), sort_keys=True))
-            return 0 if report.ready_for_new_risk else 1
+            accepted = (
+                report.ready_for_new_risk
+                if isinstance(report, RuntimeSyncReport)
+                else report.successful
+            )
+            return 0 if accepted else 1
         stop_event = threading.Event()
         for signal_number in (signal.SIGINT, signal.SIGTERM):
             signal.signal(signal_number, lambda _signal, _frame: stop_event.set())

@@ -50,6 +50,24 @@ def parsed_feed() -> PerptapeFeedSnapshot:
     ).refresh(now=NOW)
 
 
+def test_feed_without_rate_limit_tolerates_sub_millisecond_server_lead() -> None:
+    observed_at = NOW + timedelta(microseconds=999)
+    payload = response()
+    payload["generatedAt"] = int((NOW + timedelta(milliseconds=1)).timestamp() * 1_000)
+    client = PerptapeClient(
+        base_url="https://perptape.com",
+        api_key="key",
+        contract_version="breakouts-v1",
+        cache_ttl=timedelta(0),
+        fetcher=lambda _url, _headers, _timeout: payload,
+    )
+
+    snapshot = client.refresh(now=observed_at)
+
+    assert snapshot.generated_at == NOW + timedelta(milliseconds=1)
+    assert snapshot.next_allowed_at >= snapshot.generated_at
+
+
 def response() -> dict[str, object]:
     return {
         "type": "breakouts",

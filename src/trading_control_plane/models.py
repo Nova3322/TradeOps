@@ -99,6 +99,12 @@ class ExchangeAccount(Base):
             "(credentials_ciphertext IS NOT NULL AND credential_version >= 1)",
             name="ck_exchange_accounts_credential_envelope",
         ),
+        CheckConstraint(
+            "NOT runtime_sync_enabled OR (active AND connection_status = 'VERIFIED' "
+            "AND credential_version >= 1 AND venue IN ('BINANCE','HYPERLIQUID') "
+            "AND runtime_service_principal_id IS NOT NULL)",
+            name="ck_exchange_accounts_runtime_sync_ready",
+        ),
         UniqueConstraint(
             "team_id",
             "account_id",
@@ -106,6 +112,12 @@ class ExchangeAccount(Base):
             name="uq_exchange_accounts_team_account_venue",
         ),
         Index("ix_exchange_accounts_team_active", "team_id", "active"),
+        Index(
+            "ix_exchange_accounts_runtime_sync",
+            "team_id",
+            "runtime_sync_enabled",
+            "venue",
+        ),
     )
 
     exchange_account_id: Mapped[UUID] = mapped_column(
@@ -129,6 +141,10 @@ class ExchangeAccount(Base):
     )
     last_verified_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
+    )
+    runtime_sync_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    runtime_service_principal_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("users.user_id", ondelete="RESTRICT"), nullable=True
     )
     active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
@@ -309,6 +325,9 @@ class PerptapeFeed(Base):
         CheckConstraint("version >= 1", name="ck_perptape_feeds_version"),
     )
 
+    team_id: Mapped[UUID] = mapped_column(
+        ForeignKey("teams.team_id", ondelete="CASCADE"), primary_key=True
+    )
     feed_key: Mapped[str] = mapped_column(String(32), primary_key=True)
     contract_version: Mapped[str] = mapped_column(String(120), nullable=False)
     candidates: Mapped[list[dict[str, Any]]] = mapped_column(JSONB, nullable=False)
@@ -687,6 +706,24 @@ class ProposalDefaultConfig(Base):
 class RuntimeSourceHealth(Base):
     __tablename__ = "runtime_source_health"
     __table_args__ = (
+        ForeignKeyConstraint(
+            ["team_id", "account_id", "venue"],
+            [
+                "exchange_accounts.team_id",
+                "exchange_accounts.account_id",
+                "exchange_accounts.venue",
+            ],
+            name="fk_runtime_source_health_team_exchange_account",
+            ondelete="RESTRICT",
+        ),
+        UniqueConstraint(
+            "team_id",
+            "source_name",
+            "account_id",
+            "venue",
+            name="uq_runtime_source_health_scope",
+            postgresql_nulls_not_distinct=True,
+        ),
         CheckConstraint(
             "status IN ('SUCCESS','FAILED','SKIPPED')",
             name="ck_runtime_source_health_status",
@@ -699,9 +736,24 @@ class RuntimeSourceHealth(Base):
             "consecutive_failures >= 0",
             name="ck_runtime_source_health_failures_nonnegative",
         ),
+        CheckConstraint(
+            "(account_id IS NULL AND venue IS NULL) OR "
+            "(account_id IS NOT NULL AND venue IN "
+            "('BINANCE','HYPERLIQUID','OKX','BYBIT'))",
+            name="ck_runtime_source_health_account_scope",
+        ),
+        Index("ix_runtime_source_health_team_checked", "team_id", "checked_at"),
     )
 
-    source_name: Mapped[str] = mapped_column(String(64), primary_key=True)
+    runtime_source_health_id: Mapped[UUID] = mapped_column(
+        Uuid(as_uuid=True), primary_key=True, default=uuid4
+    )
+    team_id: Mapped[UUID] = mapped_column(
+        ForeignKey("teams.team_id", ondelete="CASCADE"), nullable=False
+    )
+    source_name: Mapped[str] = mapped_column(String(64), nullable=False)
+    account_id: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    venue: Mapped[str | None] = mapped_column(String(64), nullable=True)
     status: Mapped[str] = mapped_column(String(16), nullable=False)
     items_observed: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     error_code: Mapped[str | None] = mapped_column(String(120), nullable=True)

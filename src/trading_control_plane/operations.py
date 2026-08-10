@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from typing import Any
 
 from pydantic import ValidationError
@@ -27,7 +27,11 @@ def _deployment_state(*, enabled: bool, configured: bool) -> str:
     return "DISABLED_CONFIGURED" if configured else "DISABLED"
 
 
-def connection_capability_matrix(settings: Settings) -> list[dict[str, Any]]:
+def connection_capability_matrix(
+    settings: Settings,
+    *,
+    database_binding_counts: Mapping[str, int] | None = None,
+) -> list[dict[str, Any]]:
     """Return a secret-free implementation/configuration matrix.
 
     Team-owned credentials are deliberately reported as TEAM_CONFIGURATION rather
@@ -47,6 +51,9 @@ def connection_capability_matrix(settings: Settings) -> list[dict[str, Any]]:
         and settings.freqtrade_api_username
         and settings.freqtrade_api_password
     )
+    binding_counts = database_binding_counts or {}
+    database_binance = int(binding_counts.get("BINANCE", 0)) > 0
+    database_hyperliquid = int(binding_counts.get("HYPERLIQUID", 0)) > 0
     return [
         {
             "capability": "TEAM_SIGNAL_SOURCE",
@@ -67,24 +74,34 @@ def connection_capability_matrix(settings: Settings) -> list[dict[str, Any]]:
         {
             "capability": "BINANCE_CONTINUOUS_FACTS",
             "providers": ["BINANCE"],
-            "implementation": "IMPLEMENTED_SINGLE_DEPLOYMENT_SCOPE",
+            "implementation": "IMPLEMENTED_TEAM_ACCOUNT_BOUND",
             "deployment_state": _deployment_state(
-                enabled=settings.binance_read_only_enabled,
-                configured=binance_read_configured,
+                enabled=(
+                    settings.runtime_sync_enabled
+                    if database_binance
+                    else settings.runtime_sync_enabled
+                    and settings.binance_read_only_enabled
+                ),
+                configured=database_binance or binance_read_configured,
             ),
             "external_side_effect": "READ_ONLY",
-            "boundary": "not yet sourced from each Team credential envelope",
+            "boundary": "database binding is explicit, versioned and read-only",
         },
         {
             "capability": "HYPERLIQUID_CONTINUOUS_FACTS",
             "providers": ["HYPERLIQUID"],
-            "implementation": "IMPLEMENTED_SINGLE_DEPLOYMENT_SCOPE",
+            "implementation": "IMPLEMENTED_TEAM_ACCOUNT_BOUND",
             "deployment_state": _deployment_state(
-                enabled=settings.hyperliquid_read_only_enabled,
-                configured=hyperliquid_read_configured,
+                enabled=(
+                    settings.runtime_sync_enabled
+                    if database_hyperliquid
+                    else settings.runtime_sync_enabled
+                    and settings.hyperliquid_read_only_enabled
+                ),
+                configured=database_hyperliquid or hyperliquid_read_configured,
             ),
             "external_side_effect": "READ_ONLY",
-            "boundary": "not yet sourced from each Team credential envelope",
+            "boundary": "database binding strips signing material and is read-only",
         },
         {
             "capability": "OKX_BYBIT_CONTINUOUS_FACTS",
@@ -162,6 +179,7 @@ def build_diagnostic_report(
     }
     database_report: dict[str, Any]
     gates: dict[str, str] | None = None
+    database_binding_counts: dict[str, int] | None = None
     if database is None:
         database_report = {
             "checked": False,
@@ -191,11 +209,24 @@ def build_diagnostic_report(
                         )
                     )
                 }
+                database_binding_counts = {
+                    str(row.venue): int(row.binding_count)
+                    for row in connection.execute(
+                        text(
+                            "SELECT venue, count(*) AS binding_count "
+                            "FROM exchange_accounts WHERE runtime_sync_enabled "
+                            "GROUP BY venue ORDER BY venue"
+                        )
+                    )
+                }
     enabled_gates = (
         [] if gates is None else [key for key, value in gates.items() if value != "DISABLED"]
     )
     enabled_transports = [key for key, value in dangerous_switches.items() if value]
-    capability_matrix = connection_capability_matrix(settings)
+    capability_matrix = connection_capability_matrix(
+        settings,
+        database_binding_counts=database_binding_counts,
+    )
     configuration_ready = not any(
         item["deployment_state"] == "BLOCKED_MISCONFIGURED" for item in capability_matrix
     )
