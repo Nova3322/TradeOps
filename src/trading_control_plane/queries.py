@@ -6,6 +6,7 @@ from typing import Any
 from uuid import UUID
 
 from sqlalchemy import and_, false, func, or_, select, text, tuple_
+from sqlalchemy.orm import Session
 
 from trading_control_plane.database import Database
 from trading_control_plane.domain import DomainRejected, PrincipalType, Role
@@ -34,6 +35,7 @@ from trading_control_plane.models import (
     RoleAssignment,
     RuntimeSourceHealth,
     SenderLease,
+    SignalEvent,
     Team,
     TeamMembership,
     TradingAuthorization,
@@ -52,6 +54,133 @@ from trading_control_plane.service import ROLE_ACTIONS, TradingService
 
 def _iso(value: datetime | None) -> str | None:
     return None if value is None else value.astimezone(UTC).isoformat()
+
+
+PERPTAPE_STRATEGIES = frozenset({"perptape", "perptape-resonance"})
+
+
+def _report_attribution(session: Session, proposal: Proposal) -> dict[str, Any]:
+    """Project immutable proposal/signal facts without consulting the mutable source config."""
+
+    signal = (
+        None
+        if proposal.signal_event_id is None
+        else session.scalar(
+            select(SignalEvent).where(
+                SignalEvent.signal_event_id == proposal.signal_event_id,
+                SignalEvent.team_id == proposal.team_id,
+            )
+        )
+    )
+    if signal is not None:
+        return {
+            "source_type": "MANUAL",
+            "strategy_id": signal.strategy_id,
+            "strategy_version": signal.strategy_version,
+            "signal_source_mode": "WEBHOOK",
+            "signal_source_id": str(signal.signal_source_id),
+            "signal_provider": signal.provider,
+            "signal_external_id": signal.external_id,
+            "attribution": "FROZEN_SIGNAL_EVENT",
+        }
+    if proposal.source == "SYSTEM":
+        perptape = proposal.strategy_id in PERPTAPE_STRATEGIES
+        return {
+            "source_type": proposal.strategy_id,
+            "strategy_id": proposal.strategy_id,
+            "strategy_version": proposal.strategy_version,
+            "signal_source_mode": "PERPTAPE" if perptape else "SYSTEM",
+            "signal_source_id": None,
+            "signal_provider": "PERPTAPE" if perptape else None,
+            "signal_external_id": proposal.source_candidate_id,
+            "attribution": "FROZEN_PROPOSAL",
+        }
+    return {
+        "source_type": "MANUAL",
+        "strategy_id": None,
+        "strategy_version": None,
+        "signal_source_mode": "MANUAL",
+        "signal_source_id": None,
+        "signal_provider": None,
+        "signal_external_id": None,
+        "attribution": "FROZEN_PROPOSAL",
+    }
+
+
+def _performance_metrics(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    closed = [item for item in rows if item["status"] == "CLOSED"]
+    open_rows = [item for item in rows if item["status"] != "CLOSED"]
+    wins = [
+        Decimal(str(item["final_pnl"]))
+        for item in closed
+        if Decimal(str(item["final_pnl"])) > 0
+    ]
+    losses = [
+        Decimal(str(item["final_pnl"]))
+        for item in closed
+        if Decimal(str(item["final_pnl"])) < 0
+    ]
+    gross_profit = sum(wins, Decimal(0))
+    gross_loss_abs = abs(sum(losses, Decimal(0)))
+    average_win = None if not wins else gross_profit / len(wins)
+    average_loss_abs = None if not losses else gross_loss_abs / len(losses)
+    win_rate = None if not closed else Decimal(len(wins)) / Decimal(len(closed))
+    profit_loss_ratio = None
+    if average_win is not None and average_loss_abs not in {None, Decimal(0)}:
+        assert average_loss_abs is not None
+        profit_loss_ratio = average_win / average_loss_abs
+    profit_factor = None if gross_loss_abs == 0 else gross_profit / gross_loss_abs
+    cumulative = Decimal(0)
+    peak = Decimal(0)
+    maximum_drawdown = Decimal(0)
+    points: list[dict[str, str | None]] = []
+    for item in closed:
+        cumulative += Decimal(str(item["final_pnl"]))
+        peak = max(peak, cumulative)
+        drawdown = peak - cumulative
+        maximum_drawdown = max(maximum_drawdown, drawdown)
+        points.append(
+            {
+                "campaign_id": str(item["campaign_id"]),
+                "at": None if item["updated_at"] is None else str(item["updated_at"]),
+                "cumulative_pnl": str(cumulative),
+                "running_peak": str(peak),
+                "drawdown": str(drawdown),
+            }
+        )
+    return {
+        "campaign_count": len(rows),
+        "closed_count": len(closed),
+        "open_count": len(rows) - len(closed),
+        "win_count": len(wins),
+        "loss_count": len(losses),
+        "breakeven_count": len(closed) - len(wins) - len(losses),
+        "net_pnl": str(sum((Decimal(str(item["final_pnl"])) for item in rows), Decimal(0))),
+        "closed_net_pnl": str(
+            sum((Decimal(str(item["final_pnl"])) for item in closed), Decimal(0))
+        ),
+        "open_current_pnl": str(
+            sum((Decimal(str(item["final_pnl"])) for item in open_rows), Decimal(0))
+        ),
+        "gross_profit": str(gross_profit),
+        "gross_loss_abs": str(gross_loss_abs),
+        "average_win": None if average_win is None else str(average_win),
+        "average_loss_abs": None if average_loss_abs is None else str(average_loss_abs),
+        "win_rate": None if win_rate is None else str(win_rate),
+        "profit_loss_ratio": None if profit_loss_ratio is None else str(profit_loss_ratio),
+        "profit_factor": None if profit_factor is None else str(profit_factor),
+        "maximum_drawdown": str(maximum_drawdown),
+        "percentage_return": None,
+        "percentage_drawdown": None,
+        "availability": {
+            "win_rate": "AVAILABLE" if closed else "NO_CLOSED_CAMPAIGNS",
+            "profit_loss_ratio": (
+                "AVAILABLE" if profit_loss_ratio is not None else "REQUIRES_WIN_AND_LOSS"
+            ),
+            "percentage_metrics": "OPENING_CAPITAL_UNAVAILABLE",
+        },
+        "curve": points,
+    }
 
 
 def _uuid_or_none(value: str) -> UUID | None:
@@ -1657,6 +1786,10 @@ class TradingQueries:
         source_type: str | None = None,
         source_candidate_id: str | None = None,
         source_version: str | None = None,
+        strategy_id: str | None = None,
+        strategy_version: str | None = None,
+        signal_source_mode: str | None = None,
+        signal_provider: str | None = None,
         venue: str | None = None,
         account_id: str | None = None,
         instrument_id: UUID | None = None,
@@ -1668,6 +1801,16 @@ class TradingQueries:
     ) -> dict[str, Any]:
         if environment not in {"SHADOW", "TESTNET", "LIVE"}:
             raise DomainRejected("ENVIRONMENT_INVALID", "results require an exact environment")
+        if signal_source_mode not in {None, "PERPTAPE", "WEBHOOK", "MANUAL", "SYSTEM"}:
+            raise DomainRejected(
+                "SIGNAL_SOURCE_MODE_INVALID",
+                "results require an exact supported signal source mode",
+            )
+        if signal_provider not in {None, "TRADINGVIEW", "MODEL", "PERPTAPE"}:
+            raise DomainRejected(
+                "SIGNAL_PROVIDER_INVALID",
+                "results require an exact supported signal provider",
+            )
         if from_time is not None and to_time is not None and from_time > to_time:
             raise DomainRejected("TIME_RANGE_INVALID", "results from_time must not exceed to_time")
         workspace_id, team_id = self._active_scope_ids(user_id)
@@ -1696,25 +1839,49 @@ class TradingQueries:
                 ).all()
                 if self.service.can_user(user_id, "view", item.account_id, item.venue)
             ]
+            attribution_cache: dict[UUID, dict[str, Any]] = {}
+
+            def report_attribution(proposal: Proposal) -> dict[str, Any]:
+                attribution = attribution_cache.get(proposal.proposal_id)
+                if attribution is None:
+                    attribution = _report_attribution(session, proposal)
+                    attribution_cache[proposal.proposal_id] = attribution
+                return attribution
+
             rows: list[dict[str, Any]] = []
             totals: dict[str, dict[str, Decimal]] = {}
             for campaign in campaigns:
                 proposal = session.get(Proposal, campaign.proposal_id)
-                proposal_source_type = (
-                    None
-                    if proposal is None
-                    else (proposal.strategy_id if proposal.source == "SYSTEM" else "MANUAL")
-                )
+                attribution = None if proposal is None else report_attribution(proposal)
                 if source is not None and (proposal is None or proposal.source != source):
                     continue
-                if source_type is not None and proposal_source_type != source_type:
+                if source_type is not None and (
+                    attribution is None or attribution["source_type"] != source_type
+                ):
                     continue
                 if source_candidate_id is not None and (
                     proposal is None or proposal.source_candidate_id != source_candidate_id
                 ):
                     continue
                 if source_version is not None and (
-                    proposal is None or proposal.strategy_version != source_version
+                    attribution is None or attribution["strategy_version"] != source_version
+                ):
+                    continue
+                if strategy_id is not None and (
+                    attribution is None or attribution["strategy_id"] != strategy_id
+                ):
+                    continue
+                if strategy_version is not None and (
+                    attribution is None or attribution["strategy_version"] != strategy_version
+                ):
+                    continue
+                if signal_source_mode is not None and (
+                    attribution is None
+                    or attribution["signal_source_mode"] != signal_source_mode
+                ):
+                    continue
+                if signal_provider is not None and (
+                    attribution is None or attribution["signal_provider"] != signal_provider
                 ):
                     continue
                 if risk_tier is not None and (proposal is None or proposal.risk_tier != risk_tier):
@@ -1740,7 +1907,7 @@ class TradingQueries:
                 fees = sum((item.fee for item in fills), Decimal(0))
                 slippage = sum((item.slippage_cost for item in fills), Decimal(0))
                 funding_total = sum((item.amount for item in funding), Decimal(0))
-                bucket = totals.setdefault(
+                total_bucket = totals.setdefault(
                     currency,
                     {
                         "realized_pnl": Decimal(0),
@@ -1751,12 +1918,12 @@ class TradingQueries:
                         "slippage": Decimal(0),
                     },
                 )
-                bucket["realized_pnl"] += campaign.realized_pnl
-                bucket["unrealized_pnl"] += campaign.unrealized_pnl
-                bucket["final_pnl"] += campaign.final_pnl
-                bucket["fees"] += fees
-                bucket["funding"] += funding_total
-                bucket["slippage"] += slippage
+                total_bucket["realized_pnl"] += campaign.realized_pnl
+                total_bucket["unrealized_pnl"] += campaign.unrealized_pnl
+                total_bucket["final_pnl"] += campaign.final_pnl
+                total_bucket["fees"] += fees
+                total_bucket["funding"] += funding_total
+                total_bucket["slippage"] += slippage
                 rows.append(
                     {
                         "campaign_id": str(campaign.campaign_id),
@@ -1776,11 +1943,36 @@ class TradingQueries:
                         "currency": currency,
                         "direction": campaign.direction,
                         "source": None if proposal is None else proposal.source,
-                        "source_type": proposal_source_type,
+                        "source_type": (
+                            None if attribution is None else attribution["source_type"]
+                        ),
+                        "strategy_id": (
+                            None if attribution is None else attribution["strategy_id"]
+                        ),
+                        "strategy_version": (
+                            None if attribution is None else attribution["strategy_version"]
+                        ),
+                        "signal_source_mode": (
+                            None if attribution is None else attribution["signal_source_mode"]
+                        ),
+                        "signal_source_id": (
+                            None if attribution is None else attribution["signal_source_id"]
+                        ),
+                        "signal_provider": (
+                            None if attribution is None else attribution["signal_provider"]
+                        ),
+                        "signal_external_id": (
+                            None if attribution is None else attribution["signal_external_id"]
+                        ),
+                        "source_attribution": (
+                            None if attribution is None else attribution["attribution"]
+                        ),
                         "source_candidate_id": (
                             None if proposal is None else proposal.source_candidate_id
                         ),
-                        "source_version": (None if proposal is None else proposal.strategy_version),
+                        "source_version": (
+                            None if attribution is None else attribution["strategy_version"]
+                        ),
                         "risk_tier": None if proposal is None else proposal.risk_tier,
                         "fill_count": len(fills),
                         "filled_quantity": str(sum((item.quantity for item in fills), Decimal(0))),
@@ -1795,41 +1987,262 @@ class TradingQueries:
                     }
                 )
 
-            curves: dict[str, dict[str, Any]] = {}
-            for currency in totals:
-                cumulative = Decimal(0)
-                peak = Decimal(0)
-                maximum_drawdown = Decimal(0)
-                points: list[dict[str, str | None]] = []
-                for row in rows:
-                    if row["currency"] != currency or row["status"] != "CLOSED":
-                        continue
-                    cumulative += Decimal(str(row["final_pnl"]))
-                    peak = max(peak, cumulative)
-                    drawdown = peak - cumulative
-                    maximum_drawdown = max(maximum_drawdown, drawdown)
-                    points.append(
+            risk_proposal_query = select(Proposal).where(
+                Proposal.environment == environment,
+                Proposal.team_id == team_id,
+            )
+            for field, value in (
+                (Proposal.venue, venue),
+                (Proposal.account_id, account_id),
+                (Proposal.instrument_id, instrument_id),
+                (Proposal.direction, direction),
+            ):
+                if value is not None:
+                    risk_proposal_query = risk_proposal_query.where(field == value)
+            campaign_proposal_ids = {
+                item.proposal_id for item in campaigns if campaign_id in {None, item.campaign_id}
+            }
+            risk_proposals: dict[UUID, tuple[Proposal, dict[str, Any]]] = {}
+            for proposal in session.scalars(risk_proposal_query).all():
+                if not self.service.can_user(
+                    user_id, "view", proposal.account_id, proposal.venue
+                ):
+                    continue
+                if campaign_id is not None and proposal.proposal_id not in campaign_proposal_ids:
+                    continue
+                attribution = report_attribution(proposal)
+                if source is not None and proposal.source != source:
+                    continue
+                if source_type is not None and attribution["source_type"] != source_type:
+                    continue
+                if source_candidate_id is not None and (
+                    proposal.source_candidate_id != source_candidate_id
+                ):
+                    continue
+                if source_version is not None and (
+                    attribution["strategy_version"] != source_version
+                ):
+                    continue
+                if strategy_id is not None and attribution["strategy_id"] != strategy_id:
+                    continue
+                if strategy_version is not None and (
+                    attribution["strategy_version"] != strategy_version
+                ):
+                    continue
+                if signal_source_mode is not None and (
+                    attribution["signal_source_mode"] != signal_source_mode
+                ):
+                    continue
+                if signal_provider is not None and (
+                    attribution["signal_provider"] != signal_provider
+                ):
+                    continue
+                if risk_tier is not None and proposal.risk_tier != risk_tier:
+                    continue
+                risk_proposals[proposal.proposal_id] = (proposal, attribution)
+
+            risk_events: list[dict[str, Any]] = []
+            if risk_proposals:
+                decision_query = select(RiskDecision).where(
+                    RiskDecision.team_id == team_id,
+                    RiskDecision.proposal_id.in_(risk_proposals),
+                )
+                if from_time is not None:
+                    decision_query = decision_query.where(
+                        RiskDecision.created_at >= from_time
+                    )
+                if to_time is not None:
+                    decision_query = decision_query.where(RiskDecision.created_at <= to_time)
+                for decision in session.scalars(
+                    decision_query.order_by(RiskDecision.created_at, RiskDecision.decision_id)
+                ).all():
+                    proposal, attribution = risk_proposals[decision.proposal_id]
+                    policy = session.get(RiskPolicy, decision.policy_id)
+                    risk_events.append(
                         {
-                            "campaign_id": str(row["campaign_id"]),
-                            "at": None if row["updated_at"] is None else str(row["updated_at"]),
-                            "cumulative_pnl": str(cumulative),
-                            "running_peak": str(peak),
-                            "drawdown": str(drawdown),
+                            "decision_id": str(decision.decision_id),
+                            "proposal_id": str(proposal.proposal_id),
+                            "workspace_id": str(workspace_id),
+                            "team_id": str(team_id),
+                            "environment": environment,
+                            "account_id": proposal.account_id,
+                            "venue": proposal.venue,
+                            "instrument_id": str(proposal.instrument_id),
+                            "direction": proposal.direction,
+                            "risk_tier": proposal.risk_tier,
+                            "source": proposal.source,
+                            **attribution,
+                            "result": decision.result,
+                            "reasons": list(decision.reasons),
+                            "risk_amount": str(decision.risk_amount),
+                            "approved_quantity": str(decision.approved_quantity),
+                            "policy_id": str(decision.policy_id),
+                            "policy_version": None if policy is None else policy.version,
+                            "policy_revision": None if policy is None else policy.revision,
+                            "data_as_of": _iso(decision.data_as_of),
+                            "created_at": _iso(decision.created_at),
                         }
                     )
+
+            curves: dict[str, dict[str, Any]] = {}
+            for currency in totals:
+                metrics = _performance_metrics(
+                    [item for item in rows if item["currency"] == currency]
+                )
                 curves[currency] = {
-                    "points": points,
-                    "maximum_drawdown": str(maximum_drawdown),
+                    "points": metrics["curve"],
+                    "maximum_drawdown": metrics["maximum_drawdown"],
                     "unit": currency,
                     "percentage_available": False,
                 }
+
+            team = session.get(Team, team_id)
+            team_name = "Unknown Team" if team is None else team.name
+            dimension_buckets: dict[str, dict[str, dict[str, Any]]] = {
+                "team": {
+                    str(team_id): {
+                        "key": str(team_id),
+                        "label": team_name,
+                        "scope": {"team_id": str(team_id), "team_name": team_name},
+                        "campaigns": [],
+                        "risk_events": [],
+                    }
+                },
+                "account": {},
+                "strategy": {},
+                "signal_source": {},
+            }
+
+            def add_dimension_record(record: dict[str, Any], *, risk_event: bool) -> None:
+                strategy_key = ":".join(
+                    [
+                        str(record.get("strategy_id") or "MANUAL"),
+                        str(record.get("strategy_version") or "UNVERSIONED"),
+                    ]
+                )
+                signal_key = ":".join(
+                    [
+                        str(record.get("signal_source_mode") or "UNKNOWN"),
+                        str(record.get("signal_source_id") or "NO_SOURCE_ID"),
+                        str(record.get("signal_provider") or "NO_PROVIDER"),
+                    ]
+                )
+                descriptors = {
+                    "team": (
+                        str(team_id),
+                        team_name,
+                        {"team_id": str(team_id), "team_name": team_name},
+                    ),
+                    "account": (
+                        f"{record['venue']}:{record['account_id']}",
+                        f"{record['account_id']} / {record['venue']}",
+                        {
+                            "account_id": record["account_id"],
+                            "venue": record["venue"],
+                        },
+                    ),
+                    "strategy": (
+                        strategy_key,
+                        (
+                            "MANUAL"
+                            if record.get("strategy_id") is None
+                            else (
+                                f"{record['strategy_id']} / "
+                                f"{record.get('strategy_version') or '—'}"
+                            )
+                        ),
+                        {
+                            "strategy_id": record.get("strategy_id"),
+                            "strategy_version": record.get("strategy_version"),
+                        },
+                    ),
+                    "signal_source": (
+                        signal_key,
+                        " / ".join(
+                            filter(
+                                None,
+                                [
+                                    record.get("signal_source_mode"),
+                                    record.get("signal_provider"),
+                                ],
+                            )
+                        ),
+                        {
+                            "signal_source_mode": record.get("signal_source_mode"),
+                            "signal_source_id": record.get("signal_source_id"),
+                            "signal_provider": record.get("signal_provider"),
+                        },
+                    ),
+                }
+                target = "risk_events" if risk_event else "campaigns"
+                for dimension, (key, label, scope) in descriptors.items():
+                    bucket = dimension_buckets[dimension].setdefault(
+                        key,
+                        {
+                            "key": key,
+                            "label": label,
+                            "scope": scope,
+                            "campaigns": [],
+                            "risk_events": [],
+                        },
+                    )
+                    bucket[target].append(record)
+
+            for row in rows:
+                add_dimension_record(row, risk_event=False)
+            for event in risk_events:
+                add_dimension_record(event, risk_event=True)
+
+            dimensions: dict[str, list[dict[str, Any]]] = {}
+            for dimension, buckets in dimension_buckets.items():
+                groups: list[dict[str, Any]] = []
+                for dimension_bucket in buckets.values():
+                    currency_rows: dict[str, list[dict[str, Any]]] = {}
+                    for row in dimension_bucket["campaigns"]:
+                        currency_rows.setdefault(str(row["currency"]), []).append(row)
+                    result_counts: dict[str, int] = {}
+                    reason_counts: dict[str, int] = {}
+                    for event in dimension_bucket["risk_events"]:
+                        result_counts[event["result"]] = (
+                            result_counts.get(event["result"], 0) + 1
+                        )
+                        for reason in event["reasons"]:
+                            reason_counts[reason] = reason_counts.get(reason, 0) + 1
+                    groups.append(
+                        {
+                            "key": dimension_bucket["key"],
+                            "label": dimension_bucket["label"],
+                            "scope": dimension_bucket["scope"],
+                            "campaign_count": len(dimension_bucket["campaigns"]),
+                            "risk_event_count": len(dimension_bucket["risk_events"]),
+                            "risk_events_by_result": result_counts,
+                            "risk_events_by_reason": reason_counts,
+                            "metrics_by_currency": {
+                                currency: _performance_metrics(currency_campaigns)
+                                for currency, currency_campaigns in currency_rows.items()
+                            },
+                        }
+                    )
+                dimensions[dimension] = sorted(groups, key=lambda item: item["label"])
+
             return {
+                "scope": {
+                    "workspace_id": str(workspace_id),
+                    "team_id": str(team_id),
+                    "team_name": team_name,
+                },
                 "environment": environment,
+                "report_state": "RECORDED_HISTORY",
+                "data_status": "AVAILABLE" if rows or risk_events else "EMPTY",
                 "filters": {
                     "source": source,
                     "source_type": source_type,
                     "source_candidate_id": source_candidate_id,
                     "source_version": source_version,
+                    "strategy_id": strategy_id,
+                    "strategy_version": strategy_version,
+                    "signal_source_mode": signal_source_mode,
+                    "signal_provider": signal_provider,
                     "venue": venue,
                     "account_id": account_id,
                     "instrument_id": None if instrument_id is None else str(instrument_id),
@@ -1845,6 +2258,21 @@ class TradingQueries:
                     "LIVE": "Recorded LIVE facts; no profitability guarantee",
                 }[environment],
                 "campaigns": rows,
+                "risk_events": risk_events,
+                "dimensions": dimensions,
+                "coverage": {
+                    "campaign_count": len(rows),
+                    "closed_campaign_count": sum(
+                        1 for item in rows if item["status"] == "CLOSED"
+                    ),
+                    "risk_event_count": len(risk_events),
+                    "currency_mixing": "SEPARATED",
+                    "percentage_metrics": "OPENING_CAPITAL_UNAVAILABLE",
+                    "time_filter_semantics": {
+                        "campaigns": "campaign.updated_at",
+                        "risk_events": "risk_decision.created_at",
+                    },
+                },
                 "totals_by_currency": {
                     currency: {key: str(value) for key, value in values.items()}
                     for currency, values in totals.items()

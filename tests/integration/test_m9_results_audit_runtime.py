@@ -103,6 +103,50 @@ def test_results_are_environment_separated_and_derive_costs_curve_and_audit(
     curve = results["curves_by_currency"]["USDT"]
     assert curve["percentage_available"] is False
     assert curve["points"][0]["cumulative_pnl"] == "180.000000000000000000"
+    assert results["scope"]["team_id"] == campaign["team_id"]
+    assert results["report_state"] == "RECORDED_HISTORY"
+    assert results["data_status"] == "AVAILABLE"
+    team_group = results["dimensions"]["team"][0]
+    team_metrics = team_group["metrics_by_currency"]["USDT"]
+    assert team_metrics["campaign_count"] == 1
+    assert team_metrics["closed_count"] == 1
+    assert team_metrics["win_count"] == 1
+    assert team_metrics["loss_count"] == 0
+    assert team_metrics["win_rate"] == "1"
+    assert team_metrics["profit_loss_ratio"] is None
+    assert team_metrics["maximum_drawdown"] == "0"
+    assert team_metrics["percentage_return"] is None
+    assert team_metrics["availability"]["percentage_metrics"] == (
+        "OPENING_CAPITAL_UNAVAILABLE"
+    )
+    assert results["dimensions"]["account"][0]["scope"] == {
+        "account_id": "acct-1",
+        "venue": "BINANCE",
+    }
+    assert results["dimensions"]["strategy"][0]["scope"] == {
+        "strategy_id": None,
+        "strategy_version": None,
+    }
+    assert results["dimensions"]["signal_source"][0]["scope"] == {
+        "signal_source_mode": "MANUAL",
+        "signal_source_id": None,
+        "signal_provider": None,
+    }
+    assert len(results["risk_events"]) == 1
+    assert results["risk_events"][0]["result"] == "ALLOW"
+    assert results["risk_events"][0]["account_id"] == "acct-1"
+    assert team_group["risk_events_by_result"] == {"ALLOW": 1}
+    assert results["coverage"] == {
+        "campaign_count": 1,
+        "closed_campaign_count": 1,
+        "risk_event_count": 1,
+        "currency_mixing": "SEPARATED",
+        "percentage_metrics": "OPENING_CAPITAL_UNAVAILABLE",
+        "time_filter_semantics": {
+            "campaigns": "campaign.updated_at",
+            "risk_events": "risk_decision.created_at",
+        },
+    }
     assert queries.actual_results(ids["operator"], "SHADOW")["campaigns"] == []
     assert (
         len(
@@ -190,6 +234,8 @@ def test_results_audit_and_runtime_api_do_not_mix_environments_or_expose_secrets
             assert testnet.status_code == 200 and len(testnet.json()["data"]["campaigns"]) == 1
             assert shadow.status_code == 200 and shadow.json()["data"]["campaigns"] == []
             assert invalid.status_code == 422
+            assert testnet.json()["data"]["dimensions"]["team"][0]["risk_event_count"] == 1
+            assert testnet.json()["data"]["coverage"]["currency_mixing"] == "SEPARATED"
             filtered = await client.get(
                 "/api/results",
                 params={

@@ -204,6 +204,12 @@ button:disabled { opacity: .52; cursor: not-allowed; }
 .exchange-connection-form { display: grid; gap: 7px; margin: 14px 0; align-items: start; }
 .exchange-connection-form button { justify-self: start; }
 .exchange-connection-form small { color: var(--muted); line-height: 1.5; }
+.results-page > section, .results-page > .callout { margin-top: 30px; }
+.result-filters { margin-bottom: 18px; }
+.results-stats { grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); }
+.result-stat span { display: block; margin-top: 7px; color: var(--muted); font-size: 10px; line-height: 1.5; }
+.result-dimension { min-width: 0; }
+.result-table table { min-width: 860px; }
 .account-credential-rotate { margin-top: 12px; }
 .venue-technical-detail { margin-top: 8px; color: var(--muted); font-size: 10px; }
 .venue-technical-detail summary { width: fit-content; color: var(--accent); cursor: pointer; font-weight: 800; }
@@ -796,6 +802,14 @@ dialog::backdrop { background: rgba(4, 12, 10, .56); backdrop-filter: blur(3px);
   .campaign-list-table td { width: 100%; display: grid; grid-template-columns: 104px minmax(0, 1fr); gap: 10px; padding: 7px 0; border: 0; font-size: 12px; overflow-wrap: anywhere; }
   .campaign-list-table td::before { content: attr(data-label); color: var(--muted); font-size: 10px; font-weight: 750; letter-spacing: .04em; }
   .campaign-list-table td > .row-link { grid-column: 2; }
+  .result-table { overflow: visible; border: 0; background: transparent; scrollbar-gutter: auto; }
+  .result-table table { min-width: 0; }
+  .result-table thead { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
+  .result-table tbody { display: grid; gap: 10px; }
+  .result-table tr { display: block; padding: 14px; border: 1px solid var(--line); border-radius: 12px; background: var(--panel-strong); }
+  .result-table td { width: 100%; display: grid; grid-template-columns: 104px minmax(0, 1fr); gap: 10px; padding: 7px 0; border: 0; font-size: 12px; overflow-wrap: anywhere; }
+  .result-table td::before { content: attr(data-label); color: var(--muted); font-size: 10px; font-weight: 750; letter-spacing: .04em; }
+  .result-table td[colspan] { grid-template-columns: 104px minmax(0, 1fr); }
   .result-summary { display: block; }
   .result-summary span { display: block; margin-top: 5px; }
   .opportunity-pagination button { width: 100%; }

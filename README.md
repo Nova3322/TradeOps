@@ -1,7 +1,7 @@
 # Trading 交易系统
 
 > 状态日期：2026-08-10
-> 当前状态：Workspace / 团队权限边界、团队交易账户与账户事实隔离、团队 Perptape / 签名 Webhook 单一信号源、加密凭据、四场所一次性只读连接验证、两场所持续事实同步、版本化风控、LIVE/模拟资金隔离、分权风险恢复、受控资金路径和最小 Telegram 审核已实现；所有危险能力仍默认关闭
+> 当前状态：Workspace / 团队权限边界、团队交易账户与账户事实隔离、团队 Perptape / 签名 Webhook 单一信号源、加密凭据、四场所一次性只读连接验证、两场所持续事实同步、版本化风控、团队/账户/策略/信号源绩效与风险事件报表、LIVE/模拟资金隔离、分权风险恢复、受控资金路径和最小 Telegram 审核已实现；所有危险能力仍默认关闭
 
 本项目面向一个资本所有者、一个内部组织和多个内部用户。用户可以提交和审核提案、查看仓位、处理异常；系统在风险可控的前提下辅助执行交易并判断是否赚钱。不开放外部注册，不管理第三方资金，不建设机构级多租户、通用合规或通用认证平台。
 
@@ -23,6 +23,8 @@
 `VenueOrder`、`VenueFill`、`Position`、`AccountEquity`、权益历史、`FundingPayment` 与计算型对账均持久化非空 Team 根；同一 `account_id + venue` 可在不同团队独立存在，服务端写入、查询、资金事实聚合和对账按当前团队过滤。旧事实只在迁移时回填到既有默认团队，不据此开启连接或交易。资金提案/授权/转移及 sender/task 根仍待后续迁移，当前不得把账户事实隔离等同于整条资金链已完成团队化。
 
 `TeamSignalSource` 是当前团队的唯一信号模式真源。Perptape Key 和 Webhook HMAC 密钥复用同一 AES-256-GCM 信封，认证上下文绑定 Team、Signal Source、模式与轮换版本。Webhook 统一接收 TradingView 和自研模型，服务端验证 HMAC-SHA256、请求与事件时效、nonce 重放、外部身份、幂等键和版本化格式。通过的 Webhook 只写入 `SignalEvent`；必须由获权人员手动创建并冻结 Proposal，一个 SignalEvent 最多关联一个 Proposal。
+
+`/results` 由服务端 `results.view` 权限、当前 Workspace / Team、获授权账户和精确环境共同限定。页面按结算币种分别展示团队、账户、策略版本和信号源的已平仓净收益、未平仓当前值、绝对最大回撤、胜率、盈亏比及风险事件；没有形成 Campaign 的拒绝决策也保留。Webhook 归因只读取冻结 `SignalEvent`，不读取可变信号源配置。缺少覆盖完整范围的可信期初资本和 FX 真源时，百分比收益、百分比回撤与跨币种合计保持不可用，不用零值或静态换算代替事实。
 
 ## 从这里开始
 
@@ -60,7 +62,7 @@
 - HTTP：健康检查、内部会话、团队信号源配置、签名 Webhook / SignalEvent、Perptape 主站机会、Proposal/Review/Risk/Authorization、SHADOW/TESTNET/LIVE Campaign、AUTO_ADD/减仓/退出、资金事实/提案/授权、NoTilt 未签名计划/回执确认、按环境结果/审计/运行状态，以及 Binance、Hyperliquid Core 的只读、TESTNET 与受控 LIVE API
 - 内部业务：`trading_control_plane.service.TradingService`
 - 纯计算：`evaluate_risk`、`select_target_position`、`compute_pnl`
-- 数据库：PostgreSQL，Alembic head `20260810_0021`；Workspace、权限、信号源/SignalEvent、交易账户、提案—执行聚合、账户事实、版本化风险政策与风险预留均使用团队范围。最大总风险、单账户风险、最大单笔亏损、最大连续亏损和冷却期由同一政策版本驱动；遗留政策的新阈值保持未配置并拒绝新增风险。资金聚合和 sender/task 根仍按后续迁移 fail closed
+- 数据库：PostgreSQL，Alembic head `20260810_0022`；Workspace、权限、信号源/SignalEvent、交易账户、提案—执行聚合、账户事实、版本化风险政策与风险预留均使用团队范围。最大总风险、单账户风险、最大单笔亏损、最大连续亏损和冷却期由同一政策版本驱动；遗留政策的新阈值保持未配置并拒绝新增风险。绩效报表复用既有 Campaign、Proposal、SignalEvent 与 RiskDecision，没有新增快照或第二套账本。资金聚合和 sender/task 根仍按后续迁移 fail closed
 - 场所边界：Binance 与 Hyperliquid 的交易发送默认只允许进入各自隔离的 Freqtrade worker；Hyperliquid worker 通过显式 `hip3_dexes` allowlist 加载 HIP-3。仓库原有 `binance_execution.py` / `hyperliquid_execution.py` 只保留隔离兼容测试，默认后端不会加载其签名密钥，也会拒绝直接发送。交易所官方只读接口继续提供账户、仓位和目录事实；数据库中的 `LIVE_ORDER_SEND` 初始仍为 `DISABLED`
 - 资金边界：`capital.py` 提供 SHADOW/TESTNET Mock 提交和自动候选计算；`notilt.py` 通过官方 `@notilt/sdk` 固定支持 Ethereum、BNB Smart Chain、Arbitrum One，只读取官方部署/Registry/Vault、生成并持久化 `{chainId,to,data,value}` 未签名交易，并从可信生产 RPC 校验发送者、目标、函数、参数、事件、区块时间和逐链确认深度。服务没有 NoTilt 私钥字段，不签名、不广播，也不暴露 owner、白名单管理、Panic 或 Full Exit 能力；真实 `CAPITAL_TRANSFER` 与两个自动资金 Gate 均保持 `DISABLED`
 

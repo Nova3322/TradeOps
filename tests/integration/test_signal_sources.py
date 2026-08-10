@@ -16,8 +16,15 @@ from sqlalchemy import select
 from trading_control_plane.api import create_app
 from trading_control_plane.config import Settings
 from trading_control_plane.database import Database
-from trading_control_plane.domain import Role
-from trading_control_plane.models import AuditEvent, Proposal, SignalEvent, TeamSignalSource
+from trading_control_plane.domain import Role, SystemRiskState
+from trading_control_plane.models import (
+    AuditEvent,
+    Proposal,
+    RiskDecision,
+    RiskPolicy,
+    SignalEvent,
+    TeamSignalSource,
+)
 from trading_control_plane.perptape import PerptapeClient
 from trading_control_plane.service import TradingService
 
@@ -95,6 +102,18 @@ def test_team_signal_source_perptape_key_and_signed_webhook_flow(
         label="Signal Account",
         credentials=None,
         idempotency_key="signal-account-create",
+        now=now,
+    )
+    service.set_risk_policy(
+        actor_id=admin,
+        version="signal-report-risk-v1",
+        system_state=SystemRiskState.NORMAL,
+        max_total_risk=Decimal("100"),
+        max_account_risk=Decimal("100"),
+        max_single_loss=Decimal("20"),
+        max_consecutive_losses=3,
+        loss_cooldown=timedelta(hours=1),
+        max_fact_age=timedelta(minutes=5),
         now=now,
     )
     proposer = service.create_user("signal-proposer", admin, now=now)
@@ -363,6 +382,62 @@ def test_team_signal_source_perptape_key_and_signed_webhook_flow(
                 assert proposal.version == 2
                 assert proposal.frozen_at is not None
                 assert webhook_secret not in "".join(audit_reasons)
+
+            with database.session_factory.begin() as session:
+                proposal = session.get(Proposal, UUID(proposal_id))
+                assert proposal is not None
+                policy = session.scalar(
+                    select(RiskPolicy).where(
+                        RiskPolicy.team_id == proposal.team_id,
+                        RiskPolicy.active,
+                    )
+                )
+                assert policy is not None
+                session.add(
+                    RiskDecision(
+                        team_id=proposal.team_id,
+                        proposal_id=proposal.proposal_id,
+                        policy_id=policy.policy_id,
+                        input_data={"fixture": "webhook-denial"},
+                        result="DENY",
+                        approved_quantity=Decimal(0),
+                        risk_amount=Decimal(0),
+                        reasons=["STALE_FACTS"],
+                        data_as_of=signal_at,
+                        actor_id=str(admin),
+                        correlation_id=proposal.correlation_id,
+                        created_at=signal_at,
+                    )
+                )
+
+            await login(client, "signal-admin")
+            report = await client.get(
+                "/api/results",
+                params={
+                    "environment": "SHADOW",
+                    "strategy_id": "breakout-model",
+                    "strategy_version": "2026.08",
+                    "signal_source_mode": "WEBHOOK",
+                    "signal_provider": "TRADINGVIEW",
+                },
+            )
+            assert report.status_code == 200, report.text
+            report_data = report.json()["data"]
+            assert report_data["campaigns"] == []
+            assert len(report_data["risk_events"]) == 1
+            risk_event = report_data["risk_events"][0]
+            assert risk_event["strategy_id"] == "breakout-model"
+            assert risk_event["strategy_version"] == "2026.08"
+            assert risk_event["signal_source_mode"] == "WEBHOOK"
+            assert risk_event["signal_source_id"] == source_id
+            assert risk_event["signal_provider"] == "TRADINGVIEW"
+            assert risk_event["attribution"] == "FROZEN_SIGNAL_EVENT"
+            signal_groups = report_data["dimensions"]["signal_source"]
+            assert signal_groups[0]["risk_event_count"] == 1
+            assert signal_groups[0]["risk_events_by_result"] == {"DENY": 1}
+            assert report_data["coverage"]["percentage_metrics"] == (
+                "OPENING_CAPITAL_UNAVAILABLE"
+            )
 
     asyncio.run(scenario())
 

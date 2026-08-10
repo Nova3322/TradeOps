@@ -868,6 +868,7 @@ const capabilityRoles = {
   'opportunity.view':['OBSERVER','PROPOSER'],
   'proposal.view':['OBSERVER','PROPOSER','REVIEWER','OPERATOR'],
   'operations.view':['OBSERVER','OPERATOR'],
+  'results.view':['OBSERVER','OPERATOR'],
   'system.view':['OBSERVER','REVIEWER','OPERATOR'],
   'venue.view':['OBSERVER','OPERATOR'],
   'venue.sync':['OPERATOR'],
@@ -893,12 +894,13 @@ const routeCapability = (path) => {
   if (path === '/reviews') return 'proposal.review';
   if (path === '/proposals' || path.startsWith('/proposals/')) return 'proposal.view';
   if (path === '/campaigns' || path.startsWith('/campaigns/') || path === '/orders' || path === '/exceptions') return 'operations.view';
+  if (path === '/results') return 'results.view';
   if (path === '/positions' || path === '/risk') return 'system.view';
   if (path === '/venues' || path.startsWith('/venues/')) return 'venue.view';
   if (path === '/admin/users') return 'access.manage';
   return 'operations.view';
 };
-const capabilityLabel = (capability) => ({'signal.view':'查看信号源','opportunity.view':'查看机会','proposal.view':'查看提案','operations.view':'交易运维','system.view':'查看系统状态','venue.view':'查看交易账户','capital.view':'资金管理','proposal.create':'发起提案','proposal.review':'独立审核','access.manage':'成员权限管理'}[capability] || capability);
+const capabilityLabel = (capability) => ({'signal.view':'查看信号源','opportunity.view':'查看机会','proposal.view':'查看提案','operations.view':'交易运维','results.view':'查看绩效报表','system.view':'查看系统状态','venue.view':'查看交易账户','capital.view':'资金管理','proposal.create':'发起提案','proposal.review':'独立审核','access.manage':'成员权限管理'}[capability] || capability);
 const accessRoleCatalog = [
   {role:'OBSERVER', label:'只读观察', copy:'查看机会、提案、交易任务、系统状态和交易账户；不能执行动作。'},
   {role:'PROPOSER', label:'发起提案', copy:'查看机会并创建提案；不能审核自己的提案，也不能操作交易任务。'},
@@ -1241,6 +1243,7 @@ async function route() {
       await renderProposalList(null, historyMode ? '历史提案' : '当前提案', historyMode);
     }
     else if (path === '/campaigns') await renderCampaignList();
+    else if (path === '/results') await renderActualResults();
     else if (path === '/campaigns/alerts') await renderRuntimeAlerts();
     else if (path === '/positions') await renderSystemStatus();
     else if (path === '/orders') await renderCampaignFacts('orders');
@@ -3717,6 +3720,87 @@ async function renderRuntimeAlerts() {
     <div class="stats exception-stats"><div class="stat"><small>受影响交易任务</small><b class="${affectedCampaigns.size ? 'danger-text' : ''}">${affectedCampaigns.size}</b></div><div class="stat"><small>运行问题</small><b>${items.length}</b></div><div class="stat"><small>结果未知</small><b class="${unknownCount ? 'danger-text' : ''}">${unknownCount}</b></div><div class="stat"><small>数据过期</small><b class="${staleCount ? 'warning-text' : ''}">${staleCount}</b><span>最近检查 ${fmtDate(result.as_of)}</span></div></div>
     ${items.length ? `<div class="exception-grid">${cards}</div>` : `<section class="empty-state"><div><h2>无运行告警 / 当前无需处理</h2><p>检查范围：运行中的生产交易任务；未发现结果未知、数据过期、保护不足或对账差异。已关闭记录不会重新计入当前待办。</p><p class="subtle">最近检查：${fmtDate(result.as_of)}</p><div class="toolbar empty-actions"><a class="secondary" href="/" data-link>返回当前任务</a><a class="primary" href="/campaigns" data-link>查看交易任务</a></div></div></section>`}</section>`;
   document.querySelector('[data-refresh]')?.addEventListener('click', route);
+}
+
+const resultRateLabel = value => value === null || value === undefined
+  ? '—'
+  : `${fmtNumber(Number(value) * 100)}%`;
+const resultRatioLabel = value => value === null || value === undefined ? '—' : fmtNumber(value);
+const resultEnvironmentLabel = value => ({SHADOW:'影子模式',TESTNET:'测试网',LIVE:'真实环境'}[value] || value);
+const resultSourceLabel = item => [item.signal_source_mode, item.signal_provider].filter(Boolean).join(' / ') || '未归因';
+const resultStrategyLabel = item => item.strategy_id
+  ? `${item.strategy_id} / ${item.strategy_version || '—'}`
+  : '人工提案';
+
+function resultDimensionRows(groups) {
+  return (groups || []).flatMap(group => {
+    const metrics = Object.entries(group.metrics_by_currency || {});
+    const risk = group.risk_events_by_result || {};
+    const riskLabel = `拒绝 ${risk.DENY || 0} · 缩量 ${risk.SCALE || 0} · 通过 ${risk.ALLOW || 0}`;
+    if (!metrics.length) return `<tr><td data-label="范围"><b>${escapeHtml(group.label)}</b></td><td data-label="币种">—</td><td data-label="结果" colspan="5">暂无已记录交易结果</td><td data-label="风险决策">${escapeHtml(riskLabel)}</td></tr>`;
+    return metrics.map(([currency, item]) => `<tr><td data-label="范围"><b>${escapeHtml(group.label)}</b></td><td data-label="币种">${escapeHtml(currency)}</td><td data-label="已平仓净收益">${fmtAmount(item.closed_net_pnl, currency)}<br><span class="subtle">未平仓当前值 ${fmtAmount(item.open_current_pnl, currency)}</span></td><td data-label="最大回撤">${fmtAmount(item.maximum_drawdown, currency)}</td><td data-label="胜率">${resultRateLabel(item.win_rate)}</td><td data-label="盈亏比">${resultRatioLabel(item.profit_loss_ratio)}</td><td data-label="已平 / 全部">${item.closed_count} / ${item.campaign_count}</td><td data-label="风险决策">${escapeHtml(riskLabel)}</td></tr>`);
+  }).join('');
+}
+
+function resultDimensionSection(title, copy, groups) {
+  const rows = resultDimensionRows(groups);
+  return `<section class="result-dimension"><div class="section-heading"><div><p class="eyebrow">绩效维度</p><h2>${escapeHtml(title)}</h2><p>${escapeHtml(copy)}</p></div><span class="status-pill">${groups?.length || 0} 个分组</span></div>${rows ? `<div class="table-wrap result-table"><table><thead><tr><th>范围</th><th>币种</th><th>已平仓净收益</th><th>最大回撤</th><th>胜率</th><th>盈亏比</th><th>已平 / 全部</th><th>风险决策</th></tr></thead><tbody>${rows}</tbody></table></div>` : '<div class="callout">当前筛选范围没有可归因记录。</div>'}</section>`;
+}
+
+function resultDateTimeInput(value) {
+  if (!value) return '';
+  const date = new Date(value);
+  if (!Number.isFinite(date.getTime())) return '';
+  const local = new Date(date.getTime() - date.getTimezoneOffset() * 60000);
+  return local.toISOString().slice(0, 16);
+}
+
+async function renderActualResults() {
+  const current = new URLSearchParams(location.search);
+  const environment = ['SHADOW','TESTNET','LIVE'].includes(current.get('environment'))
+    ? current.get('environment')
+    : 'SHADOW';
+  const allowed = ['venue','account_id','strategy_id','strategy_version','signal_source_mode','signal_provider','from_time','to_time'];
+  const request = new URLSearchParams({environment});
+  allowed.forEach(key => { if (current.get(key)) request.set(key, current.get(key)); });
+  const response = await api(`/api/results?${request.toString()}`);
+  const data = response.data;
+  const teamGroup = data.dimensions?.team?.[0];
+  const teamMetrics = Object.entries(teamGroup?.metrics_by_currency || {});
+  const headlineMetrics = teamMetrics.map(([currency, item]) => `<article class="stat result-stat"><small>${escapeHtml(currency)} · 已平仓净收益</small><b>${fmtAmount(item.closed_net_pnl, currency)}</b><span>未平仓当前值 ${fmtAmount(item.open_current_pnl, currency)} · 胜率 ${resultRateLabel(item.win_rate)} · 盈亏比 ${resultRatioLabel(item.profit_loss_ratio)} · 最大回撤 ${fmtAmount(item.maximum_drawdown, currency)}</span></article>`).join('');
+  const events = data.risk_events || [];
+  const eventRows = events.slice().reverse().map(item => `<tr><td data-label="决策时间">${fmtDate(item.created_at)}</td><td data-label="账户">${escapeHtml(item.account_id)}<br><span class="subtle">${escapeHtml(item.venue)}</span></td><td data-label="策略 / 来源">${escapeHtml(resultStrategyLabel(item))}<br><span class="subtle">${escapeHtml(resultSourceLabel(item))}</span></td><td data-label="结果"><span class="status-pill status-${escapeHtml(item.result)}">${escapeHtml(fmtStatus(item.result))}</span></td><td data-label="原因">${escapeHtml((item.reasons || []).join('、') || '无额外原因')}</td><td data-label="政策版本">${escapeHtml(item.policy_version || '—')} / r${escapeHtml(item.policy_revision || '—')}</td><td data-label="批准风险">${fmtNumber(item.risk_amount)}</td></tr>`).join('');
+  const campaignRows = (data.campaigns || []).slice().reverse().map(item => `<tr data-href="/campaigns/${item.campaign_id}"><td data-label="更新时间">${fmtDate(item.updated_at)}</td><td data-label="标的"><b>${escapeHtml(item.symbol || shortId(item.instrument_id))}</b><br><span class="subtle">${escapeHtml(fmtDirection(item.direction))}</span></td><td data-label="账户">${escapeHtml(item.account_id)}<br><span class="subtle">${escapeHtml(item.venue)}</span></td><td data-label="策略 / 来源">${escapeHtml(resultStrategyLabel(item))}<br><span class="subtle">${escapeHtml(resultSourceLabel(item))}</span></td><td data-label="状态">${escapeHtml(fmtStatus(item.status))}</td><td data-label="总盈亏">${fmtAmount(item.final_pnl, item.currency)}</td></tr>`).join('');
+  const stateCopy = data.data_status === 'EMPTY'
+    ? '当前团队和筛选范围没有已记录的交易结果或风险决策。'
+    : `已读取 ${data.coverage.campaign_count} 个交易任务、${data.coverage.closed_campaign_count} 个已平仓结果和 ${data.coverage.risk_event_count} 条风险决策。`;
+  main.innerHTML = `<section class="page results-page"><header class="page-head"><div><p class="eyebrow">${escapeHtml(data.scope.team_name)} · ${resultEnvironmentLabel(environment)} · 已记录历史</p><h1>绩效与风险报表</h1><p class="lede">仅聚合当前 Workspace / Team 及获授权账户的服务端事实。影子、测试网和真实数据严格分开；币种不混算。</p></div><button class="secondary" data-refresh>刷新当前报表</button></header>
+    <article class="source-status ${environment === 'LIVE' ? 'tone-attention' : ''}"><div><p class="eyebrow">数据性质</p><h2>${escapeHtml(resultEnvironmentLabel(environment))}</h2><p>${escapeHtml(data.environment_notice)} ${escapeHtml(stateCopy)}</p></div><span class="status-pill">${escapeHtml(data.data_status)}</span></article>
+    <form id="results-filter-form" class="form-panel compact-form result-filters"><div class="field-grid"><label>环境<select name="environment"><option value="SHADOW" ${environment === 'SHADOW' ? 'selected' : ''}>影子模式</option><option value="TESTNET" ${environment === 'TESTNET' ? 'selected' : ''}>测试网</option><option value="LIVE" ${environment === 'LIVE' ? 'selected' : ''}>真实环境</option></select></label><label>交易所<select name="venue"><option value="">全部</option>${['BINANCE','HYPERLIQUID','OKX','BYBIT'].map(value => `<option value="${value}" ${current.get('venue') === value ? 'selected' : ''}>${value}</option>`).join('')}</select></label><label>账户<input name="account_id" value="${escapeHtml(current.get('account_id') || '')}" maxlength="120" placeholder="精确账户 ID"></label><label>策略<input name="strategy_id" value="${escapeHtml(current.get('strategy_id') || '')}" maxlength="120" placeholder="精确策略 ID"></label><label>策略版本<input name="strategy_version" value="${escapeHtml(current.get('strategy_version') || '')}" maxlength="120" placeholder="精确版本"></label><label>信号源<select name="signal_source_mode"><option value="">全部</option>${['PERPTAPE','WEBHOOK','MANUAL','SYSTEM'].map(value => `<option value="${value}" ${current.get('signal_source_mode') === value ? 'selected' : ''}>${value}</option>`).join('')}</select></label><label>信号提供方<select name="signal_provider"><option value="">全部</option>${['TRADINGVIEW','MODEL','PERPTAPE'].map(value => `<option value="${value}" ${current.get('signal_provider') === value ? 'selected' : ''}>${value}</option>`).join('')}</select></label><label>起始时间<input name="from_time" type="datetime-local" value="${escapeHtml(resultDateTimeInput(current.get('from_time')))}"></label><label>截止时间<input name="to_time" type="datetime-local" value="${escapeHtml(resultDateTimeInput(current.get('to_time')))}"></label></div><div class="form-actions"><a class="secondary" href="/results?environment=${environment}" data-link>清除其他筛选</a><button class="primary" type="submit">应用筛选</button></div></form>
+    ${headlineMetrics ? `<div class="stats results-stats">${headlineMetrics}</div>` : '<div class="callout"><b>暂无收益指标。</b><p>只有具备完整 Campaign PnL 真源的记录才会进入聚合。</p></div>'}
+    <div class="callout tone-attention"><b>百分比收益率与百分比回撤暂不可用。</b><p>当前没有覆盖所有账户、币种和时间边界的可信期初资本，因此只展示结算币种绝对收益和绝对回撤，不伪造百分比。</p></div>
+    ${resultDimensionSection('账户', '同一交易所的不同账户独立计算，不跨账户合并风险事件。', data.dimensions?.account)}
+    ${resultDimensionSection('策略与版本', 'Webhook 使用冻结 SignalEvent 的策略版本；Perptape 使用冻结提案快照。', data.dimensions?.strategy)}
+    ${resultDimensionSection('信号源', 'Perptape、Webhook、直接人工提案和其他系统来源分开归因。', data.dimensions?.signal_source)}
+    <section><div class="section-heading"><div><p class="eyebrow">服务端决策</p><h2>风险事件</h2><p>包含通过、缩量和拒绝；即使提案没有形成交易任务，拒绝事件仍会保留。</p></div><span class="status-pill">${events.length} 条</span></div>${eventRows ? `<div class="table-wrap result-table"><table><thead><tr><th>决策时间</th><th>账户</th><th>策略 / 来源</th><th>结果</th><th>原因</th><th>政策版本</th><th>批准风险</th></tr></thead><tbody>${eventRows}</tbody></table></div>` : '<div class="callout">当前范围没有已记录的风险决策。</div>'}</section>
+    <section><div class="section-heading"><div><p class="eyebrow">可追溯明细</p><h2>交易任务结果</h2></div><span class="status-pill">${data.campaigns.length} 条</span></div>${campaignRows ? `<div class="table-wrap result-table"><table><thead><tr><th>更新时间</th><th>标的</th><th>账户</th><th>策略 / 来源</th><th>状态</th><th>总盈亏</th></tr></thead><tbody>${campaignRows}</tbody></table></div>` : '<div class="callout">当前范围没有交易任务结果。</div>'}</section>
+  </section>`;
+  document.querySelector('[data-refresh]')?.addEventListener('click', route);
+  document.querySelector('#results-filter-form')?.addEventListener('submit', event => {
+    event.preventDefault();
+    const form = event.currentTarget;
+    const values = Object.fromEntries(new FormData(form));
+    const next = new URLSearchParams({environment:values.environment});
+    ['venue','account_id','strategy_id','strategy_version','signal_source_mode','signal_provider'].forEach(key => {
+      if (values[key]) next.set(key, values[key]);
+    });
+    ['from_time','to_time'].forEach(key => {
+      if (values[key]) next.set(key, new Date(values[key]).toISOString());
+    });
+    history.replaceState({}, '', `/results?${next.toString()}`);
+    route();
+  });
+  bindLinkedRows();
 }
 
 function latestVenueObservation(facts) {

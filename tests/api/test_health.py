@@ -112,9 +112,9 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
 
     assert response.status_code == 200
     assert "交易控制台" in response.text
-    assert "/assets/app.js?v=134" in response.text
+    assert "/assets/app.js?v=135" in response.text
     assert 'href="/signals"' in response.text
-    assert "/assets/styles.css?v=52" in response.text
+    assert "/assets/styles.css?v=53" in response.text
     assert 'aria-label="交易控制台首页"' in response.text
     assert '<a href="/" data-link><span>⌂</span>当前任务</a>' in response.text
     assert '<span>⌁</span>实时机会</a>' in response.text
@@ -128,6 +128,7 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
         "/venues/hyperliquid",
         "/opportunities/defaults",
         "/proposals",
+        "/results",
     ):
         routed_shell = get(app, route)
         assert routed_shell.status_code == 200
@@ -167,9 +168,10 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
     assert "你的审核已记录" in app_javascript.text
     assert 'data-nav-capability="opportunity.view"' in response.text
     assert 'href="/admin/users"' in response.text
-    assert 'href="/results"' not in response.text
-    assert "renderActualResults" not in app_javascript.text
-    assert "/api/results" not in app_javascript.text
+    assert 'href="/results"' in response.text
+    assert 'data-nav-capability="results.view"' in response.text
+    assert "renderActualResults" in app_javascript.text
+    assert "/api/results" in app_javascript.text
     assert "/api/audit" not in app_javascript.text
     assert "'access.manage':['SYSTEM_ADMIN']" in app_javascript.text
     assert "'system.view':['OBSERVER','REVIEWER','OPERATOR']" in app_javascript.text

@@ -5576,6 +5576,14 @@ def create_app(
         source_type: str | None = Query(default=None, min_length=1, max_length=120),
         source_candidate_id: str | None = Query(default=None, min_length=1, max_length=160),
         source_version: str | None = Query(default=None, min_length=1, max_length=120),
+        strategy_id: str | None = Query(default=None, min_length=1, max_length=120),
+        strategy_version: str | None = Query(default=None, min_length=1, max_length=120),
+        signal_source_mode: str | None = Query(
+            default=None, pattern="^(PERPTAPE|WEBHOOK|MANUAL|SYSTEM)$"
+        ),
+        signal_provider: str | None = Query(
+            default=None, pattern="^(TRADINGVIEW|MODEL|PERPTAPE)$"
+        ),
         venue: str | None = Query(default=None, min_length=1, max_length=64),
         account_id: str | None = Query(default=None, min_length=1, max_length=120),
         instrument_id: UUID | None = None,
@@ -5595,6 +5603,10 @@ def create_app(
                 source_type=source_type,
                 source_candidate_id=source_candidate_id,
                 source_version=source_version,
+                strategy_id=strategy_id,
+                strategy_version=strategy_version,
+                signal_source_mode=signal_source_mode,
+                signal_provider=signal_provider,
                 venue=venue,
                 account_id=account_id,
                 instrument_id=instrument_id,
