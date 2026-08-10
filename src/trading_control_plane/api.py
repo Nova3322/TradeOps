@@ -68,6 +68,8 @@ from trading_control_plane.api_schemas import (
     ManualProposalRequest,
     MockLoginRequest,
     MockStepUpRequest,
+    NotificationRouteWriteRequest,
+    NotificationTestRequest,
     NoTiltReceiptRequest,
     OrderIntentRequest,
     PasswordLoginRequest,
@@ -164,6 +166,10 @@ from trading_control_plane.hyperliquid_execution import (
 )
 from trading_control_plane.logging import configure_logging
 from trading_control_plane.metrics import DATABASE_READY
+from trading_control_plane.notification import (
+    NotificationDispatcher,
+    NotificationSender,
+)
 from trading_control_plane.notilt import (
     SUPPORTED_NOTILT_CHAINS,
     NoTiltGateway,
@@ -277,6 +283,8 @@ def _domain_status(code: str) -> int:
         "SIGNAL_SOURCE_MODE_MISMATCH",
         "SIGNAL_SOURCE_DISABLED",
         "AUTO_PROPOSAL_SOURCE_INVALID",
+        "NOTIFICATION_ROUTE_NAME_CONFLICT",
+        "NOTIFICATION_ROUTE_UNAVAILABLE",
     }:
         return status.HTTP_409_CONFLICT
     if code in {
@@ -308,6 +316,7 @@ def _domain_status(code: str) -> int:
         "HYPERLIQUID_LIVE_OUTCOME_UNKNOWN",
         "DEFAULT_ACCOUNT_NOT_CONFIGURED",
         "SIGNAL_SOURCE_NOT_CONFIGURED",
+        "CREDENTIAL_ENCRYPTION_KEY_MISSING",
     }:
         return status.HTTP_503_SERVICE_UNAVAILABLE
     if code in {
@@ -344,6 +353,7 @@ def create_app(
     hyperliquid_capital_gateway: HyperliquidCapitalGateway | None = None,
     binance_capital_gateway: BinanceCapitalGateway | None = None,
     exchange_connection_verifier: ExchangeConnectionVerifier | None = None,
+    notification_sender: NotificationSender | None = None,
 ) -> FastAPI:
     resolved_settings = settings or get_settings()
     resolved_settings.validate_runtime_security()
@@ -672,6 +682,13 @@ def create_app(
             business_database(),
             authoritative_live_accounts=authoritative_live_accounts(),
             credential_encryption_key=resolved_settings.credential_encryption_key,
+        )
+
+    def notification_dispatcher() -> NotificationDispatcher:
+        return NotificationDispatcher(
+            business_database(),
+            credential_encryption_key=resolved_settings.credential_encryption_key,
+            sender=notification_sender,
         )
 
     def effective_direct_capital_settings(user_id: UUID) -> tuple[Settings, dict[str, Any] | None]:
@@ -1457,9 +1474,7 @@ def create_app(
                 )
             )
 
-    def current_perptape_candidates(
-        *, user_id: UUID, now: datetime
-    ) -> list[PerptapeCandidate]:
+    def current_perptape_candidates(*, user_id: UUID, now: datetime) -> list[PerptapeCandidate]:
         runtime = service().perptape_source_runtime(user_id)
         team_api_key = runtime["api_key"]
         if team_api_key is not None:
@@ -1758,6 +1773,90 @@ def create_app(
         current = queries().proposal_detail(identity.user_id, proposal_id)
         notify_reviewers(proposal_id, int(current["version"]), str(current["environment"]))
         return current
+
+    @app.get("/api/notifications")
+    def notifications(
+        limit: int = Query(default=100, ge=1, le=200),
+        identity: SessionIdentity = identity_dependency,
+    ) -> dict[str, Any]:
+        return {
+            **queries().notification_center(identity.user_id, limit=limit),
+            "as_of": _now().isoformat(),
+        }
+
+    @app.post("/api/notification-routes")
+    def create_notification_route(
+        payload: NotificationRouteWriteRequest,
+        identity: SessionIdentity = identity_dependency,
+    ) -> dict[str, Any]:
+        result = service().configure_notification_route(
+            actor_id=identity.user_id,
+            notification_route_id=None,
+            name=payload.name,
+            channel=payload.channel,
+            event_types=list(payload.event_types),
+            enabled=payload.enabled,
+            configuration=(
+                None if payload.configuration is None else payload.configuration.plaintext()
+            ),
+            expected_version=payload.expected_version,
+            idempotency_key=payload.idempotency_key,
+            now=_now(),
+        )
+        return {
+            "result": result,
+            "center": queries().notification_center(identity.user_id),
+        }
+
+    @app.put("/api/notification-routes/{notification_route_id}")
+    def update_notification_route(
+        notification_route_id: UUID,
+        payload: NotificationRouteWriteRequest,
+        identity: SessionIdentity = identity_dependency,
+    ) -> dict[str, Any]:
+        result = service().configure_notification_route(
+            actor_id=identity.user_id,
+            notification_route_id=notification_route_id,
+            name=payload.name,
+            channel=payload.channel,
+            event_types=list(payload.event_types),
+            enabled=payload.enabled,
+            configuration=(
+                None if payload.configuration is None else payload.configuration.plaintext()
+            ),
+            expected_version=payload.expected_version,
+            idempotency_key=payload.idempotency_key,
+            now=_now(),
+        )
+        return {
+            "result": result,
+            "center": queries().notification_center(identity.user_id),
+        }
+
+    @app.post("/api/notification-routes/{notification_route_id}/tests")
+    def test_notification_route(
+        notification_route_id: UUID,
+        payload: NotificationTestRequest,
+        identity: SessionIdentity = identity_dependency,
+    ) -> dict[str, Any]:
+        now = _now()
+        event = service().enqueue_test_notification(
+            actor_id=identity.user_id,
+            notification_route_id=notification_route_id,
+            idempotency_key=payload.idempotency_key,
+            now=now,
+        )
+        delivery_ids = event["notification_delivery_ids"]
+        delivery_status = (
+            "UNROUTED"
+            if not delivery_ids
+            else notification_dispatcher().dispatch_one(UUID(delivery_ids[0]), now=now)
+        )
+        return {
+            "event": event,
+            "delivery_status": delivery_status,
+            "center": queries().notification_center(identity.user_id),
+        }
 
     @app.get("/api/opportunities")
     def opportunities(
@@ -5581,9 +5680,7 @@ def create_app(
         signal_source_mode: str | None = Query(
             default=None, pattern="^(PERPTAPE|WEBHOOK|MANUAL|SYSTEM)$"
         ),
-        signal_provider: str | None = Query(
-            default=None, pattern="^(TRADINGVIEW|MODEL|PERPTAPE)$"
-        ),
+        signal_provider: str | None = Query(default=None, pattern="^(TRADINGVIEW|MODEL|PERPTAPE)$"),
         venue: str | None = Query(default=None, min_length=1, max_length=64),
         account_id: str | None = Query(default=None, min_length=1, max_length=120),
         instrument_id: UUID | None = None,
@@ -6689,6 +6786,7 @@ def create_app(
         @app.get("/exceptions", include_in_schema=False)
         @app.get("/capital", include_in_schema=False)
         @app.get("/results", include_in_schema=False)
+        @app.get("/notifications", include_in_schema=False)
         @app.get("/venues", include_in_schema=False)
         @app.get("/venues/binance", include_in_schema=False)
         @app.get("/venues/hyperliquid", include_in_schema=False)

@@ -333,12 +333,130 @@ class TeamSignalSource(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
 
+class NotificationRoute(Base):
+    __tablename__ = "notification_routes"
+    __table_args__ = (
+        CheckConstraint(
+            "channel IN ('TELEGRAM','SLACK','LARK','EMAIL')",
+            name="ck_notification_routes_channel",
+        ),
+        CheckConstraint(
+            "jsonb_typeof(event_types) = 'array'", name="ck_notification_routes_events"
+        ),
+        CheckConstraint("version >= 1", name="ck_notification_routes_version"),
+        CheckConstraint(
+            "credential_version >= 1", name="ck_notification_routes_credential_version"
+        ),
+        UniqueConstraint("team_id", "name", name="uq_notification_routes_team_name"),
+        UniqueConstraint(
+            "team_id", "notification_route_id", name="uq_notification_routes_team_identity"
+        ),
+        Index("ix_notification_routes_team_enabled", "team_id", "enabled"),
+    )
+
+    notification_route_id: Mapped[UUID] = mapped_column(
+        Uuid(as_uuid=True), primary_key=True, default=uuid4
+    )
+    team_id: Mapped[UUID] = mapped_column(
+        ForeignKey("teams.team_id", ondelete="CASCADE"), nullable=False
+    )
+    name: Mapped[str] = mapped_column(String(120), nullable=False)
+    channel: Mapped[str] = mapped_column(String(16), nullable=False)
+    event_types: Mapped[list[str]] = mapped_column(JSONB, nullable=False)
+    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    configuration_ciphertext: Mapped[str] = mapped_column(Text, nullable=False)
+    configuration_metadata: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    credential_version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    created_by: Mapped[UUID] = mapped_column(ForeignKey("users.user_id"), nullable=False)
+    updated_by: Mapped[UUID] = mapped_column(ForeignKey("users.user_id"), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class NotificationDelivery(Base):
+    __tablename__ = "notification_deliveries"
+    __table_args__ = (
+        CheckConstraint(
+            "channel IN ('TELEGRAM','SLACK','LARK','EMAIL')",
+            name="ck_notification_deliveries_channel",
+        ),
+        CheckConstraint(
+            "status IN ('PENDING','RETRY_WAIT','SENDING','SENT','DEAD_LETTER',"
+            "'OUTCOME_UNKNOWN','CANCELLED')",
+            name="ck_notification_deliveries_status",
+        ),
+        CheckConstraint("template_version >= 1", name="ck_notification_deliveries_template"),
+        CheckConstraint("route_version >= 1", name="ck_notification_deliveries_route_version"),
+        CheckConstraint("attempt_count >= 0", name="ck_notification_deliveries_attempt_count"),
+        CheckConstraint(
+            "max_attempts BETWEEN 1 AND 10", name="ck_notification_deliveries_max_attempts"
+        ),
+        CheckConstraint(
+            "length(semantic_hash) = 64", name="ck_notification_deliveries_semantic_hash"
+        ),
+        ForeignKeyConstraint(
+            ["team_id", "notification_route_id"],
+            ["notification_routes.team_id", "notification_routes.notification_route_id"],
+            name="fk_notification_deliveries_team_route",
+            ondelete="RESTRICT",
+        ),
+        UniqueConstraint(
+            "notification_route_id",
+            "notification_event_id",
+            name="uq_notification_deliveries_route_event",
+        ),
+        Index(
+            "ix_notification_deliveries_due",
+            "status",
+            "next_attempt_at",
+        ),
+        Index(
+            "ix_notification_deliveries_team_created",
+            "team_id",
+            "created_at",
+        ),
+    )
+
+    notification_delivery_id: Mapped[UUID] = mapped_column(
+        Uuid(as_uuid=True), primary_key=True, default=uuid4
+    )
+    notification_event_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), nullable=False)
+    team_id: Mapped[UUID] = mapped_column(
+        ForeignKey("teams.team_id", ondelete="RESTRICT"), nullable=False
+    )
+    notification_route_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), nullable=False)
+    route_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    channel: Mapped[str] = mapped_column(String(16), nullable=False)
+    event_type: Mapped[str] = mapped_column(String(120), nullable=False)
+    template_key: Mapped[str] = mapped_column(String(120), nullable=False)
+    template_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    payload: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    semantic_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    object_type: Mapped[str] = mapped_column(String(120), nullable=False)
+    object_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    object_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    environment: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    account_id: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    venue: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    status: Mapped[str] = mapped_column(String(24), nullable=False)
+    attempt_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    max_attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=5)
+    next_attempt_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    last_attempt_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    external_delivery_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    last_error_code: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    correlation_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), nullable=False)
+    idempotency_key: Mapped[str] = mapped_column(String(160), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
 class SignalEvent(Base):
     __tablename__ = "signal_events"
     __table_args__ = (
-        CheckConstraint(
-            "provider IN ('TRADINGVIEW','MODEL')", name="ck_signal_events_provider"
-        ),
+        CheckConstraint("provider IN ('TRADINGVIEW','MODEL')", name="ck_signal_events_provider"),
         CheckConstraint("direction IN ('LONG','SHORT')", name="ck_signal_events_direction"),
         CheckConstraint(
             "venue IN ('BINANCE','HYPERLIQUID','OKX','BYBIT')",
@@ -359,12 +477,8 @@ class SignalEvent(Base):
             ondelete="RESTRICT",
         ),
         UniqueConstraint("team_id", "signal_event_id", name="uq_signal_events_team_identity"),
-        UniqueConstraint(
-            "team_id", "idempotency_key", name="uq_signal_events_team_idempotency"
-        ),
-        UniqueConstraint(
-            "signal_source_id", "nonce", name="uq_signal_events_source_nonce"
-        ),
+        UniqueConstraint("team_id", "idempotency_key", name="uq_signal_events_team_idempotency"),
+        UniqueConstraint("signal_source_id", "nonce", name="uq_signal_events_source_nonce"),
         UniqueConstraint(
             "team_id",
             "provider",

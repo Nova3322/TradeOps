@@ -94,6 +94,9 @@ class Settings(BaseSettings):
     runtime_sync_enabled: bool = False
     runtime_sync_interval_seconds: int = Field(default=60, ge=30, le=3_600)
     runtime_sync_service_username: str = "runtime-sync"
+    notification_worker_enabled: bool = False
+    notification_worker_interval_seconds: int = Field(default=15, ge=5, le=300)
+    notification_worker_batch_size: int = Field(default=50, ge=1, le=200)
     runtime_binance_account_id: str | None = None
     runtime_binance_symbol: str = "BTCUSDT"
     runtime_hyperliquid_account_id: str | None = None
@@ -363,6 +366,8 @@ class Settings(BaseSettings):
             raise ValueError("automatic Perptape proposals require the platform API key")
         if self.perptape_auto_proposal_enabled and not self.perptape_auto_proposal_account_id:
             raise ValueError("automatic Perptape proposals require an internal account ID")
+        if self.notification_worker_enabled and not self.credential_encryption_key:
+            raise ValueError("enabled notification worker requires the credential encryption key")
         if (
             self.perptape_websocket_reconnect_initial_seconds
             > self.perptape_websocket_reconnect_max_seconds

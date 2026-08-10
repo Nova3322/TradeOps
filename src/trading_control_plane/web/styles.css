@@ -210,6 +210,33 @@ button:disabled { opacity: .52; cursor: not-allowed; }
 .result-stat span { display: block; margin-top: 7px; color: var(--muted); font-size: 10px; line-height: 1.5; }
 .result-dimension { min-width: 0; }
 .result-table table { min-width: 860px; }
+.notification-page > section { margin-top: 30px; }
+.notification-route-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
+.notification-route-card { align-self: start; }
+.notification-route-card form > fieldset, .notification-route-create fieldset { margin: 18px 0 0; padding: 15px; border: 1px solid var(--line); border-radius: 12px; }
+.notification-route-card fieldset legend, .notification-route-create fieldset legend { padding: 0 6px; color: var(--muted); font-size: 11px; font-weight: 750; }
+.notification-event-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+.notification-event-option { display: grid; grid-template-columns: 18px minmax(0, 1fr); gap: 9px; align-items: start; padding: 11px; border: 1px solid var(--line); border-radius: 10px; background: var(--panel-strong); cursor: pointer; }
+.notification-event-option:has(input:checked) { border-color: color-mix(in srgb, var(--accent) 42%, var(--line)); background: color-mix(in srgb, var(--accent-2) 58%, var(--panel)); }
+.notification-event-option.is-blocked { cursor: not-allowed; opacity: .66; }
+.notification-event-option input { width: 16px; height: 16px; margin: 2px 0 0; accent-color: var(--accent); }
+.notification-event-option b, .notification-event-option small { display: block; }
+.notification-event-option b { color: var(--ink); font-size: 11px; }
+.notification-event-option small { margin-top: 4px; color: var(--muted); font-size: 9px; line-height: 1.45; }
+.notification-route-create { margin: 22px 0 28px; padding: 0; overflow: hidden; }
+.notification-route-create > summary, .notification-credential-rotate > summary { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 18px 20px; cursor: pointer; }
+.notification-route-create > summary b, .notification-route-create > summary small, .notification-credential-rotate > summary b, .notification-credential-rotate > summary small { display: block; }
+.notification-route-create > summary small, .notification-credential-rotate > summary small { margin-top: 5px; color: var(--muted); font-size: 10px; font-weight: 500; }
+.notification-route-create[open] > summary { border-bottom: 1px solid var(--line); }
+.notification-route-create .toolbox-content { padding-top: 20px; }
+.notification-credential-rotate { margin-top: 18px; border: 1px solid var(--line); border-radius: 12px; background: var(--panel-strong); }
+.notification-credential-rotate[open] > summary { border-bottom: 1px solid var(--line); }
+.notification-credential-rotate > .field-grid { padding: 16px; }
+.tag-row { display: flex; flex-wrap: wrap; gap: 7px; margin: 0 0 18px; }
+.notification-route-card .tag { letter-spacing: 0; }
+.notification-table table { min-width: 860px; }
+.status-pill.status-RETRY_WAIT { border-color: color-mix(in srgb, var(--warning) 35%, var(--line)); color: var(--warning); }
+.status-pill.status-DEAD_LETTER, .status-pill.status-OUTCOME_UNKNOWN { border-color: color-mix(in srgb, var(--danger) 35%, var(--line)); background: color-mix(in srgb, var(--danger) 8%, var(--panel)); color: var(--danger); }
 .account-credential-rotate { margin-top: 12px; }
 .venue-technical-detail { margin-top: 8px; color: var(--muted); font-size: 10px; }
 .venue-technical-detail summary { width: fit-content; color: var(--accent); cursor: pointer; font-weight: 800; }
@@ -666,7 +693,7 @@ dialog::backdrop { background: rgba(4, 12, 10, .56); backdrop-filter: blur(3px);
   .authorization-card { order: 6; }
   .campaign-command-layout { grid-template-columns: 1fr; }
   .home-layout { grid-template-columns: 1fr; }
-  .system-health-grid, .permission-grid, .exchange-account-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .system-health-grid, .permission-grid, .exchange-account-grid, .notification-route-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .filter-panel { grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; padding: 17px; }
   .timeframe-filter { grid-column: span 2; justify-content: flex-start; gap: 8px; }
 }
@@ -726,7 +753,8 @@ dialog::backdrop { background: rgba(4, 12, 10, .56); backdrop-filter: blur(3px);
   .stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .field-grid, .detail-layout, .definition-grid, .compose-layout, .proposal-detail-layout, .campaign-command, .home-status { grid-template-columns: 1fr; }
   .source-status, .venue-scope-card { grid-template-columns: 1fr; }
-  .system-health-grid, .permission-grid, .access-principle-grid, .scope-grid, .scope-creation-grid, .scope-context-card, .exchange-account-grid, .account-capability-split { grid-template-columns: 1fr; }
+  .system-health-grid, .permission-grid, .access-principle-grid, .scope-grid, .scope-creation-grid, .scope-context-card, .exchange-account-grid, .account-capability-split, .notification-route-grid { grid-template-columns: 1fr; }
+  .notification-event-grid { grid-template-columns: 1fr; }
   .scope-switcher { max-width: 30vw; }
   .member-access-summary { align-items: flex-start; }
   .member-summary-actions { flex-direction: column; align-items: flex-end; }
@@ -812,6 +840,13 @@ dialog::backdrop { background: rgba(4, 12, 10, .56); backdrop-filter: blur(3px);
   .result-table td[colspan] { grid-template-columns: 104px minmax(0, 1fr); }
   .result-summary { display: block; }
   .result-summary span { display: block; margin-top: 5px; }
+  .notification-table { overflow: visible; border: 0; background: transparent; scrollbar-gutter: auto; }
+  .notification-table table { min-width: 0; }
+  .notification-table thead { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
+  .notification-table tbody { display: grid; gap: 10px; }
+  .notification-table tr { display: block; padding: 14px; border: 1px solid var(--line); border-radius: 12px; background: var(--panel-strong); }
+  .notification-table td { width: 100%; display: grid; grid-template-columns: 104px minmax(0, 1fr); gap: 10px; padding: 7px 0; border: 0; font-size: 12px; overflow-wrap: anywhere; }
+  .notification-table td::before { content: attr(data-label); color: var(--muted); font-size: 10px; font-weight: 750; letter-spacing: .04em; }
   .opportunity-pagination button { width: 100%; }
   .chart-head { display: block; }
   .capital-overview { grid-template-columns: 1fr; }

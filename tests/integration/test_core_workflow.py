@@ -346,7 +346,14 @@ def test_proposal_idempotency_and_semantic_conflict(
     with database.session_factory() as session:
         assert duplicate == proposal_id
         assert session.scalar(select(func.count()).select_from(Proposal)) == 1
-        assert session.scalar(select(func.count()).select_from(CommandReceipt)) == 1
+        assert (
+            session.scalar(
+                select(func.count())
+                .select_from(CommandReceipt)
+                .where(CommandReceipt.operation == "proposal.create")
+            )
+            == 1
+        )
 
 
 def test_concurrent_manual_semantic_duplicates_reuse_one_active_proposal(
@@ -452,7 +459,14 @@ def test_perptape_manual_and_automatic_entry_points_share_one_active_scope(
     assert one_click_id == automatic_id
     with database.session_factory() as session:
         assert session.scalar(select(func.count()).select_from(Proposal)) == 1
-        assert session.scalar(select(func.count()).select_from(CommandReceipt)) == 1
+        assert (
+            session.scalar(
+                select(func.count())
+                .select_from(CommandReceipt)
+                .where(CommandReceipt.operation == "proposal.create")
+            )
+            == 1
+        )
         assert (
             session.scalar(
                 select(func.count())

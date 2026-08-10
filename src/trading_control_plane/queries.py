@@ -23,6 +23,8 @@ from trading_control_plane.models import (
     ExchangeAccount,
     FundingPayment,
     Instrument,
+    NotificationDelivery,
+    NotificationRoute,
     OrderIntent,
     PerptapeFeed,
     Position,
@@ -46,6 +48,10 @@ from trading_control_plane.models import (
     VenueOrder,
     Workspace,
     WorkspaceMembership,
+)
+from trading_control_plane.notification import (
+    NOTIFICATION_TEMPLATES,
+    ROUTABLE_NOTIFICATION_EVENT_TYPES,
 )
 from trading_control_plane.notilt import USD_STABLE_ASSETS
 from trading_control_plane.perptape import PerptapeCandidate, PerptapeFeedSnapshot
@@ -111,14 +117,10 @@ def _performance_metrics(rows: list[dict[str, Any]]) -> dict[str, Any]:
     closed = [item for item in rows if item["status"] == "CLOSED"]
     open_rows = [item for item in rows if item["status"] != "CLOSED"]
     wins = [
-        Decimal(str(item["final_pnl"]))
-        for item in closed
-        if Decimal(str(item["final_pnl"])) > 0
+        Decimal(str(item["final_pnl"])) for item in closed if Decimal(str(item["final_pnl"])) > 0
     ]
     losses = [
-        Decimal(str(item["final_pnl"]))
-        for item in closed
-        if Decimal(str(item["final_pnl"])) < 0
+        Decimal(str(item["final_pnl"])) for item in closed if Decimal(str(item["final_pnl"])) < 0
     ]
     gross_profit = sum(wins, Decimal(0))
     gross_loss_abs = abs(sum(losses, Decimal(0)))
@@ -462,10 +464,7 @@ class TradingQueries:
                         assignment.account_scope is None
                         or assignment.account_scope == account.account_id
                     )
-                    and (
-                        assignment.venue_scope is None
-                        or assignment.venue_scope == account.venue
-                    )
+                    and (assignment.venue_scope is None or assignment.venue_scope == account.venue)
                     and (
                         action in ROLE_ACTIONS[Role(assignment.role)]
                         or "*" in ROLE_ACTIONS[Role(assignment.role)]
@@ -1777,6 +1776,131 @@ class TradingQueries:
                 },
             }
 
+    def notification_center(
+        self,
+        user_id: UUID,
+        *,
+        limit: int = 100,
+    ) -> dict[str, Any]:
+        workspace_id, team_id = self._active_scope_ids(user_id)
+        if not self.service.can_user(user_id, "notification.view"):
+            raise DomainRejected(
+                "RBAC_DENIED",
+                "notification.view is not allowed in the active team",
+            )
+        bounded_limit = min(max(limit, 1), 200)
+        can_manage = self.service.can_user(user_id, "notification.manage")
+        with self.database.session_factory() as session:
+            team = session.get(Team, team_id)
+            routes = session.scalars(
+                select(NotificationRoute)
+                .where(NotificationRoute.team_id == team_id)
+                .order_by(NotificationRoute.name, NotificationRoute.notification_route_id)
+            ).all()
+            deliveries = session.scalars(
+                select(NotificationDelivery)
+                .where(NotificationDelivery.team_id == team_id)
+                .order_by(
+                    NotificationDelivery.created_at.desc(),
+                    NotificationDelivery.notification_delivery_id.desc(),
+                )
+                .limit(bounded_limit)
+            ).all()
+            status_counts = {
+                str(status): int(count)
+                for status, count in session.execute(
+                    select(
+                        NotificationDelivery.status,
+                        func.count(NotificationDelivery.notification_delivery_id),
+                    )
+                    .where(NotificationDelivery.team_id == team_id)
+                    .group_by(NotificationDelivery.status)
+                )
+            }
+            return {
+                "scope": {
+                    "workspace_id": str(workspace_id),
+                    "team_id": str(team_id),
+                    "team_name": "Unknown Team" if team is None else team.name,
+                },
+                "can_manage": can_manage,
+                "channel_permissions": {
+                    "trading": False,
+                    "funding": False,
+                    "signing": False,
+                    "broadcast": False,
+                },
+                "event_catalog": [
+                    {
+                        "event_type": template.event_type,
+                        "template_key": template.key,
+                        "template_version": template.version,
+                        "title": template.title,
+                        "integration_status": (
+                            "ACTIVE"
+                            if template.event_type in ROUTABLE_NOTIFICATION_EVENT_TYPES
+                            else "SCOPE_MIGRATION_REQUIRED"
+                        ),
+                        "blocker": (
+                            None
+                            if template.event_type in ROUTABLE_NOTIFICATION_EVENT_TYPES
+                            else ("团队资金真源尚未迁移完成; 不会把旧资金对象猜测映射到团队。")
+                        ),
+                    }
+                    for template in NOTIFICATION_TEMPLATES.values()
+                    if template.event_type != "TEST_NOTIFICATION"
+                ],
+                "routes": [
+                    {
+                        "notification_route_id": str(route.notification_route_id),
+                        "workspace_id": str(workspace_id),
+                        "team_id": str(team_id),
+                        "name": route.name,
+                        "channel": route.channel,
+                        "event_types": list(route.event_types),
+                        "enabled": route.enabled,
+                        "configuration_state": "ENCRYPTED",
+                        "configuration_metadata": route.configuration_metadata,
+                        "credential_version": route.credential_version,
+                        "version": route.version,
+                        "updated_at": _iso(route.updated_at),
+                    }
+                    for route in routes
+                ],
+                "deliveries": [
+                    {
+                        "notification_delivery_id": str(delivery.notification_delivery_id),
+                        "notification_event_id": str(delivery.notification_event_id),
+                        "notification_route_id": str(delivery.notification_route_id),
+                        "workspace_id": str(workspace_id),
+                        "team_id": str(team_id),
+                        "channel": delivery.channel,
+                        "event_type": delivery.event_type,
+                        "template_key": delivery.template_key,
+                        "template_version": delivery.template_version,
+                        "payload": delivery.payload,
+                        "object_type": delivery.object_type,
+                        "object_id": delivery.object_id,
+                        "object_version": delivery.object_version,
+                        "environment": delivery.environment,
+                        "account_id": delivery.account_id,
+                        "venue": delivery.venue,
+                        "status": delivery.status,
+                        "attempt_count": delivery.attempt_count,
+                        "max_attempts": delivery.max_attempts,
+                        "next_attempt_at": _iso(delivery.next_attempt_at),
+                        "last_attempt_at": _iso(delivery.last_attempt_at),
+                        "sent_at": _iso(delivery.sent_at),
+                        "last_error_code": delivery.last_error_code,
+                        "created_at": _iso(delivery.created_at),
+                        "updated_at": _iso(delivery.updated_at),
+                    }
+                    for delivery in deliveries
+                ],
+                "delivery_status_counts": status_counts,
+                "delivery_limit": bounded_limit,
+            }
+
     def actual_results(
         self,
         user_id: UUID,
@@ -1876,8 +2000,7 @@ class TradingQueries:
                 ):
                     continue
                 if signal_source_mode is not None and (
-                    attribution is None
-                    or attribution["signal_source_mode"] != signal_source_mode
+                    attribution is None or attribution["signal_source_mode"] != signal_source_mode
                 ):
                     continue
                 if signal_provider is not None and (
@@ -2004,9 +2127,7 @@ class TradingQueries:
             }
             risk_proposals: dict[UUID, tuple[Proposal, dict[str, Any]]] = {}
             for proposal in session.scalars(risk_proposal_query).all():
-                if not self.service.can_user(
-                    user_id, "view", proposal.account_id, proposal.venue
-                ):
+                if not self.service.can_user(user_id, "view", proposal.account_id, proposal.venue):
                     continue
                 if campaign_id is not None and proposal.proposal_id not in campaign_proposal_ids:
                     continue
@@ -2048,9 +2169,7 @@ class TradingQueries:
                     RiskDecision.proposal_id.in_(risk_proposals),
                 )
                 if from_time is not None:
-                    decision_query = decision_query.where(
-                        RiskDecision.created_at >= from_time
-                    )
+                    decision_query = decision_query.where(RiskDecision.created_at >= from_time)
                 if to_time is not None:
                     decision_query = decision_query.where(RiskDecision.created_at <= to_time)
                 for decision in session.scalars(
@@ -2147,8 +2266,7 @@ class TradingQueries:
                             "MANUAL"
                             if record.get("strategy_id") is None
                             else (
-                                f"{record['strategy_id']} / "
-                                f"{record.get('strategy_version') or '—'}"
+                                f"{record['strategy_id']} / {record.get('strategy_version') or '—'}"
                             )
                         ),
                         {
@@ -2203,9 +2321,7 @@ class TradingQueries:
                     result_counts: dict[str, int] = {}
                     reason_counts: dict[str, int] = {}
                     for event in dimension_bucket["risk_events"]:
-                        result_counts[event["result"]] = (
-                            result_counts.get(event["result"], 0) + 1
-                        )
+                        result_counts[event["result"]] = result_counts.get(event["result"], 0) + 1
                         for reason in event["reasons"]:
                             reason_counts[reason] = reason_counts.get(reason, 0) + 1
                     groups.append(
@@ -2262,9 +2378,7 @@ class TradingQueries:
                 "dimensions": dimensions,
                 "coverage": {
                     "campaign_count": len(rows),
-                    "closed_campaign_count": sum(
-                        1 for item in rows if item["status"] == "CLOSED"
-                    ),
+                    "closed_campaign_count": sum(1 for item in rows if item["status"] == "CLOSED"),
                     "risk_event_count": len(risk_events),
                     "currency_mixing": "SEPARATED",
                     "percentage_metrics": "OPENING_CAPITAL_UNAVAILABLE",

@@ -1,7 +1,7 @@
 # Trading 交易系统
 
 > 状态日期：2026-08-10
-> 当前状态：Workspace / 团队权限边界、团队交易账户与账户事实隔离、团队 Perptape / 签名 Webhook 单一信号源、加密凭据、四场所一次性只读连接验证、两场所持续事实同步、版本化风控、团队/账户/策略/信号源绩效与风险事件报表、LIVE/模拟资金隔离、分权风险恢复、受控资金路径和最小 Telegram 审核已实现；所有危险能力仍默认关闭
+> 当前状态：Workspace / 团队权限边界、团队交易账户与账户事实隔离、团队 Perptape / 签名 Webhook 单一信号源、加密凭据、四场所一次性只读连接验证、两场所持续事实同步、版本化风控、团队/账户/策略/信号源绩效与风险事件报表、Telegram/Slack/Lark/邮件团队通知、LIVE/模拟资金隔离、分权风险恢复、受控资金路径和最小 Telegram 审核已实现；所有危险能力仍默认关闭
 
 本项目面向一个资本所有者、一个内部组织和多个内部用户。用户可以提交和审核提案、查看仓位、处理异常；系统在风险可控的前提下辅助执行交易并判断是否赚钱。不开放外部注册，不管理第三方资金，不建设机构级多租户、通用合规或通用认证平台。
 
@@ -25,6 +25,8 @@
 `TeamSignalSource` 是当前团队的唯一信号模式真源。Perptape Key 和 Webhook HMAC 密钥复用同一 AES-256-GCM 信封，认证上下文绑定 Team、Signal Source、模式与轮换版本。Webhook 统一接收 TradingView 和自研模型，服务端验证 HMAC-SHA256、请求与事件时效、nonce 重放、外部身份、幂等键和版本化格式。通过的 Webhook 只写入 `SignalEvent`；必须由获权人员手动创建并冻结 Proposal，一个 SignalEvent 最多关联一个 Proposal。
 
 `/results` 由服务端 `results.view` 权限、当前 Workspace / Team、获授权账户和精确环境共同限定。页面按结算币种分别展示团队、账户、策略版本和信号源的已平仓净收益、未平仓当前值、绝对最大回撤、胜率、盈亏比及风险事件；没有形成 Campaign 的拒绝决策也保留。Webhook 归因只读取冻结 `SignalEvent`，不读取可变信号源配置。缺少覆盖完整范围的可信期初资本和 FX 真源时，百分比收益、百分比回撤与跨币种合计保持不可用，不用零值或静态换算代替事实。
+
+`/notifications` 由服务端 `notification.view` / `notification.manage` 和当前 Team 限定。Telegram、Slack、Lark 与邮件路由的凭据使用与交易账户一致的版本化 AES-256-GCM 信封，页面只显示目的地提示，不回传密文或明文。业务事务冻结模板、对象版本、作用域、语义哈希和幂等事件身份，再为匹配路由写入耐久 delivery；独立 `trading-notification-worker` 只拥有解密和通知发送能力。明确限速会有界退避，网络中断等不确定结果进入 `OUTCOME_UNKNOWN` 且不盲重发。通知路由没有交易、资金、签名或广播方法。旧资金对象尚无可靠 Team 根，因此统一资金通知明确标记 `SCOPE_MIGRATION_REQUIRED`，不会猜测映射。
 
 ## 从这里开始
 
@@ -58,11 +60,12 @@
 
 - API 进程：`uv run trading-api`
 - 只读同步进程：`uv run trading-sync-worker`；`--once` 用于一次性生产边界验收。它只读取 Perptape、Binance、Hyperliquid 和已配置 NoTilt Vault，持久化事实并运行对账，不拥有订单发送、资金签名或广播方法
-- Web/PWA：`/` 是唯一行动总览；`/signals` 选择团队 Perptape / Webhook 模式并展示签名事件，核心主线为信号或机会 → 冻结提案 → 独立审核 → 交易任务。运行告警详情位于 `/campaigns/alerts`，旧 `/exceptions` 只做兼容跳转。另有 `/risk`、`/positions`、`/venues`、`/capital`、`/admin/users` 和 `/results`。资金中心默认只展示 LIVE；SHADOW/TESTNET 不计入真实净值。Vault 缺少事实时显示 `— · MISSING`，总净值也保持不完整，绝不把缺失投影为零
+- 通知进程：`uv run trading-notification-worker --once` 可执行一次 delivery 验收；持续模式还要求 `TRADING_NOTIFICATION_WORKER_ENABLED=true`。该进程默认关闭，只消费团队通知 delivery，不导入订单、资金、签名或广播适配器
+- Web/PWA：`/` 是唯一行动总览；`/signals` 选择团队 Perptape / Webhook 模式并展示签名事件，核心主线为信号或机会 → 冻结提案 → 独立审核 → 交易任务。运行告警详情位于 `/campaigns/alerts`，旧 `/exceptions` 只做兼容跳转。另有 `/risk`、`/positions`、`/venues`、`/capital`、`/admin/users`、`/results` 和 `/notifications`。资金中心默认只展示 LIVE；SHADOW/TESTNET 不计入真实净值。Vault 缺少事实时显示 `— · MISSING`，总净值也保持不完整，绝不把缺失投影为零
 - HTTP：健康检查、内部会话、团队信号源配置、签名 Webhook / SignalEvent、Perptape 主站机会、Proposal/Review/Risk/Authorization、SHADOW/TESTNET/LIVE Campaign、AUTO_ADD/减仓/退出、资金事实/提案/授权、NoTilt 未签名计划/回执确认、按环境结果/审计/运行状态，以及 Binance、Hyperliquid Core 的只读、TESTNET 与受控 LIVE API
 - 内部业务：`trading_control_plane.service.TradingService`
 - 纯计算：`evaluate_risk`、`select_target_position`、`compute_pnl`
-- 数据库：PostgreSQL，Alembic head `20260810_0022`；Workspace、权限、信号源/SignalEvent、交易账户、提案—执行聚合、账户事实、版本化风险政策与风险预留均使用团队范围。最大总风险、单账户风险、最大单笔亏损、最大连续亏损和冷却期由同一政策版本驱动；遗留政策的新阈值保持未配置并拒绝新增风险。绩效报表复用既有 Campaign、Proposal、SignalEvent 与 RiskDecision，没有新增快照或第二套账本。资金聚合和 sender/task 根仍按后续迁移 fail closed
+- 数据库：PostgreSQL，Alembic head `20260810_0023`；Workspace、权限、信号源/SignalEvent、交易账户、提案—执行聚合、账户事实、版本化风险政策与风险预留均使用团队范围。最大总风险、单账户风险、最大单笔亏损、最大连续亏损和冷却期由同一政策版本驱动；遗留政策的新阈值保持未配置并拒绝新增风险。绩效报表复用既有 Campaign、Proposal、SignalEvent 与 RiskDecision，没有新增快照或第二套账本。通知仅新增团队路由与耐久 delivery 两个具有独立生命周期的实体；资金聚合和 sender/task 根仍按后续迁移 fail closed
 - 场所边界：Binance 与 Hyperliquid 的交易发送默认只允许进入各自隔离的 Freqtrade worker；Hyperliquid worker 通过显式 `hip3_dexes` allowlist 加载 HIP-3。仓库原有 `binance_execution.py` / `hyperliquid_execution.py` 只保留隔离兼容测试，默认后端不会加载其签名密钥，也会拒绝直接发送。交易所官方只读接口继续提供账户、仓位和目录事实；数据库中的 `LIVE_ORDER_SEND` 初始仍为 `DISABLED`
 - 资金边界：`capital.py` 提供 SHADOW/TESTNET Mock 提交和自动候选计算；`notilt.py` 通过官方 `@notilt/sdk` 固定支持 Ethereum、BNB Smart Chain、Arbitrum One，只读取官方部署/Registry/Vault、生成并持久化 `{chainId,to,data,value}` 未签名交易，并从可信生产 RPC 校验发送者、目标、函数、参数、事件、区块时间和逐链确认深度。服务没有 NoTilt 私钥字段，不签名、不广播，也不暴露 owner、白名单管理、Panic 或 Full Exit 能力；真实 `CAPITAL_TRANSFER` 与两个自动资金 Gate 均保持 `DISABLED`
 
@@ -91,6 +94,8 @@ TEST_DATABASE_URL='postgresql+psycopg://.../trading_test' uv run pytest --cov=tr
 TRADING_DATABASE_URL='postgresql+psycopg://.../trading_test' uv run alembic upgrade head
 TRADING_RUNTIME_SYNC_ENABLED=true uv run trading-sync-worker --once
 TRADING_RUNTIME_SYNC_ENABLED=true uv run trading-sync-worker
+TRADING_CREDENTIAL_ENCRYPTION_KEY='...' uv run trading-notification-worker --once
+TRADING_NOTIFICATION_WORKER_ENABLED=true TRADING_CREDENTIAL_ENCRYPTION_KEY='...' uv run trading-notification-worker
 TRADING_DATABASE_URL='postgresql+psycopg://.../trading_test' ./scripts/backup_postgres.sh /absolute/path/trading.dump
 TRADING_DATABASE_URL='postgresql+psycopg://.../trading_restore_test' ./scripts/restore_test_postgres.sh /absolute/path/trading.dump
 ```

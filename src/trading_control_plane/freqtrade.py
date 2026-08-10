@@ -412,7 +412,7 @@ class FreqtradeWorkerClient:
         """Verify worker identity, mode and exact tradable scope without sending an order."""
 
         ping = self._request("ping")
-        if ping.get("status") != "pong":
+        if not isinstance(ping, dict) or ping.get("status") != "pong":
             raise DomainRejected(
                 "FREQTRADE_WORKER_RESPONSE_INVALID",
                 "Freqtrade worker ping response is invalid",
@@ -519,7 +519,7 @@ class FreqtradeWorkerClient:
             raise DomainRejected(
                 "FREQTRADE_SCOPE_AMBIGUOUS",
                 "multiple live Freqtrade trades match the controlled scope",
-        )
+            )
         return matches[0] if matches else None
 
     def _find_filled_entry(self, *, pair: str, enter_tag: str) -> FreqtradeTrade | None:

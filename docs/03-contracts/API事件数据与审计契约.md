@@ -19,7 +19,7 @@
 - Trading 是受管账户唯一日常订单发送者；任何外部 API 都不能绕过 Proposal、Approval、Authorization、Risk 与 OMS。
 - Freqtrade 是执行后端，只接受 Trading 签发的一次性 `OrderIntent`，不接受 Web、Telegram、FreqUI 或策略旁路增险。
 - API 返回“已受理”不等于交易所成交；通知送达不等于业务完成。
-- `DEC-ARCH-002` 已确认当前使用关系型权威状态、同事务幂等回执和基本审计。Outbox/Inbox 只在真实异步消费者或不可逆外部副作用出现后按具体恢复合同增加。
+- `DEC-ARCH-002` 已确认当前使用关系型权威状态、同事务幂等回执和基本审计。真实通知副作用现使用仅限 Team notification delivery 的窄型 outbox；其他领域仍只在出现具体异步消费者或不可逆副作用后按恢复合同增加，不建设通用 Outbox/Inbox 平台。
 - 事件至少一次投递；重复、乱序、超时和重启不能产生第二个订单、第二次 Add 消费或第二次资本移动。
 
 ---

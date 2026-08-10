@@ -150,6 +150,73 @@ class SignalSourceConfigureRequest(BaseModel):
     idempotency_key: str = Field(min_length=1, max_length=160)
 
 
+NotificationChannel = Literal["TELEGRAM", "SLACK", "LARK", "EMAIL"]
+NotificationEventType = Literal[
+    "PROPOSAL_REVIEW_REQUIRED",
+    "RISK_DECISION_RECORDED",
+    "CAMPAIGN_STATUS_CHANGED",
+    "SIGNAL_EVENT_RECEIVED",
+    "CONNECTION_CHECK_FAILED",
+]
+
+
+class NotificationRouteConfigurationRequest(BaseModel):
+    bot_token: SecretStr | None = Field(default=None, min_length=20, max_length=2_048)
+    chat_id: SecretStr | None = Field(default=None, min_length=1, max_length=120)
+    webhook_url: SecretStr | None = Field(default=None, min_length=1, max_length=2_048)
+    signing_secret: SecretStr | None = Field(default=None, min_length=1, max_length=2_048)
+    smtp_host: SecretStr | None = Field(default=None, min_length=1, max_length=253)
+    smtp_port: int | None = Field(default=None, ge=1, le=65_535)
+    username: SecretStr | None = Field(default=None, min_length=1, max_length=2_048)
+    password: SecretStr | None = Field(default=None, min_length=1, max_length=2_048)
+    from_address: SecretStr | None = Field(default=None, min_length=3, max_length=255)
+    to_address: SecretStr | None = Field(default=None, min_length=3, max_length=255)
+
+    def plaintext(self) -> dict[str, str]:
+        values: dict[str, str] = {}
+        for field_name in (
+            "bot_token",
+            "chat_id",
+            "webhook_url",
+            "signing_secret",
+            "smtp_host",
+            "username",
+            "password",
+            "from_address",
+            "to_address",
+        ):
+            value = getattr(self, field_name)
+            if value is not None:
+                values[field_name] = value.get_secret_value()
+        if self.smtp_port is not None:
+            values["smtp_port"] = str(self.smtp_port)
+        return values
+
+
+class NotificationRouteWriteRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=120)
+    channel: NotificationChannel
+    event_types: list[NotificationEventType] = Field(min_length=1, max_length=6)
+    enabled: bool = True
+    configuration: NotificationRouteConfigurationRequest | None = None
+    expected_version: int = Field(ge=0)
+    idempotency_key: str = Field(min_length=1, max_length=160)
+
+    @field_validator("event_types")
+    @classmethod
+    def unique_notification_event_types(
+        cls,
+        value: list[NotificationEventType],
+    ) -> list[NotificationEventType]:
+        if len(value) != len(set(value)):
+            raise ValueError("event_types must not contain duplicates")
+        return value
+
+
+class NotificationTestRequest(BaseModel):
+    idempotency_key: str = Field(min_length=1, max_length=160)
+
+
 class WebhookSignalPayload(BaseModel):
     payload_version: Literal[1] = 1
     provider: Literal["TRADINGVIEW", "MODEL"]

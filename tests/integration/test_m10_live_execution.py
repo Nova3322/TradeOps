@@ -1312,7 +1312,13 @@ async def exercise_live_recovery(database: Database, *, venue: str) -> None:
     )
     scope = f"LIVE:acct-{key}:{venue}"
     owner = f"{key}-worker"
-    token = service.acquire_sender(scope, owner, ids["operator"], NOW)
+    token = service.acquire_sender(
+        scope,
+        owner,
+        ids["operator"],
+        NOW,
+        lease_duration=timedelta(minutes=30),
+    )
     service.set_capability_gate(
         "LIVE_ORDER_SEND",
         CapabilityStatus.ENABLED,
@@ -1393,7 +1399,13 @@ async def exercise_live_cancel_outcome(database: Database, *, venue: str, unknow
     )
     scope = f"LIVE:acct-{key}:{venue}"
     owner = f"{key}-worker"
-    token = service.acquire_sender(scope, owner, ids["operator"], NOW)
+    token = service.acquire_sender(
+        scope,
+        owner,
+        ids["operator"],
+        NOW,
+        lease_duration=timedelta(minutes=30),
+    )
     service.set_capability_gate(
         "LIVE_ORDER_SEND",
         CapabilityStatus.ENABLED,

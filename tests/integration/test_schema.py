@@ -66,6 +66,28 @@ def test_initial_schema_seeds_only_disabled_capability_gates(database: Database)
     }
 
 
+def test_notification_migration_round_trip(database: Database) -> None:
+    config = Config("alembic.ini")
+
+    command.downgrade(config, "20260810_0022")
+    with database.engine.connect() as connection:
+        tables = set(inspect(connection).get_table_names())
+        assert "notification_routes" not in tables
+        assert "notification_deliveries" not in tables
+
+    command.upgrade(config, "20260810_0023")
+    with database.engine.connect() as connection:
+        tables = set(inspect(connection).get_table_names())
+        differences = compare_metadata(MigrationContext.configure(connection), Base.metadata)
+        revision = connection.exec_driver_sql(
+            "SELECT version_num FROM alembic_version"
+        ).scalar_one()
+
+    assert revision == REQUIRED_SCHEMA_REVISION
+    assert {"notification_routes", "notification_deliveries"}.issubset(tables)
+    assert differences == []
+
+
 def test_scope_migrations_backfill_existing_users_roles_proposals_and_audit(
     database: Database,
 ) -> None:

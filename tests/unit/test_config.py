@@ -318,6 +318,30 @@ def test_perptape_websocket_requires_explicit_worker_and_key() -> None:
     enabled.validate_runtime_security()
 
 
+def test_notification_worker_is_off_by_default_and_requires_the_encryption_key() -> None:
+    database_url = "postgresql+psycopg://user:pass@localhost/trading"
+    defaults = Settings(database_url=database_url, _env_file=None)
+    assert defaults.notification_worker_enabled is False
+    assert defaults.notification_worker_batch_size == 50
+    assert defaults.notification_worker_interval_seconds == 15
+
+    missing_key = Settings(
+        database_url=database_url,
+        notification_worker_enabled=True,
+        _env_file=None,
+    )
+    with pytest.raises(ValueError, match="credential encryption key"):
+        missing_key.validate_runtime_security()
+
+    configured = Settings(
+        database_url=database_url,
+        notification_worker_enabled=True,
+        credential_encryption_key="configured-key",
+        _env_file=None,
+    )
+    configured.validate_runtime_security()
+
+
 @pytest.mark.parametrize(
     ("field", "value"),
     [

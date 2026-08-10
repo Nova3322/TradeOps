@@ -112,13 +112,13 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
 
     assert response.status_code == 200
     assert "交易控制台" in response.text
-    assert "/assets/app.js?v=135" in response.text
+    assert "/assets/app.js?v=136" in response.text
     assert 'href="/signals"' in response.text
-    assert "/assets/styles.css?v=53" in response.text
+    assert "/assets/styles.css?v=54" in response.text
     assert 'aria-label="交易控制台首页"' in response.text
     assert '<a href="/" data-link><span>⌂</span>当前任务</a>' in response.text
-    assert '<span>⌁</span>实时机会</a>' in response.text
-    assert '<span>¤</span>资金中心</a>' in response.text
+    assert "<span>⌁</span>实时机会</a>" in response.text
+    assert "<span>¤</span>资金中心</a>" in response.text
     assert 'id="mobile-nav-toggle"' in response.text
     assert 'id="scope-switcher"' in response.text
     assert 'id="confirm-dialog"' in response.text
@@ -129,6 +129,7 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
         "/opportunities/defaults",
         "/proposals",
         "/results",
+        "/notifications",
     ):
         routed_shell = get(app, route)
         assert routed_shell.status_code == 200
@@ -170,8 +171,12 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
     assert 'href="/admin/users"' in response.text
     assert 'href="/results"' in response.text
     assert 'data-nav-capability="results.view"' in response.text
+    assert 'href="/notifications"' in response.text
+    assert 'data-nav-capability="notification.view"' in response.text
     assert "renderActualResults" in app_javascript.text
     assert "/api/results" in app_javascript.text
+    assert "renderNotifications" in app_javascript.text
+    assert "/api/notifications" in app_javascript.text
     assert "/api/audit" not in app_javascript.text
     assert "'access.manage':['SYSTEM_ADMIN']" in app_javascript.text
     assert "'system.view':['OBSERVER','REVIEWER','OPERATOR']" in app_javascript.text
@@ -1548,7 +1553,9 @@ def test_system_and_venue_pages_distinguish_read_only_snapshots_from_live_execut
     assert "最后一次保存快照中没有未完成委托；这不能确认当前仍无挂单。" in source  # noqa: RUF001
     assert "实时账户事实不可用；仅展示最后快照" in source
     assert "尚无可用连接结论" not in source
-    assert "fmtNumber(facts.equity?.available_balance)} ${escapeHtml(facts.equity?.currency" in source
+    assert (
+        "fmtNumber(facts.equity?.available_balance)} ${escapeHtml(facts.equity?.currency" in source
+    )
     styles = app_path.with_name("styles.css").read_text()
     assert ".venue-status-stats { grid-template-columns: 1fr; }" in styles
     assert ".connection-status-table tr { display: block;" in styles

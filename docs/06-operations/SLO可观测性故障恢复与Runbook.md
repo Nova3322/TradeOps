@@ -35,6 +35,7 @@
 | CTO / Vault | 资金授权与划转 | 停止新划转，不影响交易所仓位退出 |
 | Audit Store | 追加审计与证据 | 按 `DEC-OPS-007` 停止增险，保留预认证减险路径 |
 | Web / PWA / Telegram | 展示、审核、通知和受限控制 | 不成为事实源；服务端安全动作继续 |
+| Notification worker | Team 通知 delivery、明确限速重试与未知结果隔离 | 停止新投递，不重放未知结果；不影响服务端交易/资金边界 |
 
 Binance、Hyperliquid Core、每个 HIP-3 DEX、账户 / 子账户、margin mode 和 `collateral_pool_id` 分别建立健康状态和告警，不允许一个聚合绿色状态掩盖局部故障。
 
@@ -186,6 +187,7 @@ Binance、Hyperliquid Core、每个 HIP-3 DEX、账户 / 子账户、margin mode
 - 无法创建或批准新提案；客户端显示最后快照必须带时间戳和离线标识。
 - 既有自动 Add 是否继续严格按 `DEC-OPS-004`，客户端不得自行判断。
 - 止损、动态去杠杆和退出由服务端继续；无可靠告警且有真实仓位时按 `DEC-OPS-001` / `DEC-OPS-006` 降级。
+- 通知 delivery 的 `RETRY_WAIT` 只按已确认限速有界重试；`OUTCOME_UNKNOWN` 禁止自动重发，须先在渠道侧核对 event ID。恢复持续 worker 前先运行 `trading-notification-worker --once`，确认 Schema head、加密密钥、路由版本、失败码和审计投影；该 worker 不获得交易或资金能力。
 
 ### RB-007 未授权订单、旁路或凭据泄漏
 

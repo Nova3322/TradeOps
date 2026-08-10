@@ -5,6 +5,7 @@ from pydantic import ValidationError
 
 from trading_control_plane.api_schemas import (
     ManualProposalRequest,
+    NotificationRouteWriteRequest,
     ProposalDefaultConfigRequest,
     SystemProposalRequest,
     TransferProposalRequest,
@@ -124,5 +125,35 @@ def test_trade_proposals_and_defaults_require_at_least_eight_hours() -> None:
                 "expires_in_minutes": 120,
                 "rationale": "too short for human review",
                 "idempotency_key": "short-default",
+            }
+        )
+
+
+def test_notification_route_schema_keeps_secrets_wrapped_and_excludes_unready_events() -> None:
+    request = NotificationRouteWriteRequest.model_validate(
+        {
+            "name": "Slack alerts",
+            "channel": "SLACK",
+            "event_types": ["SIGNAL_EVENT_RECEIVED"],
+            "configuration": {"webhook_url": "https://hooks.slack.com/services/T/B/secret"},
+            "expected_version": 0,
+            "idempotency_key": "route-create",
+        }
+    )
+
+    assert request.configuration is not None
+    assert request.configuration.plaintext() == {
+        "webhook_url": "https://hooks.slack.com/services/T/B/secret"
+    }
+    assert "hooks.slack.com" not in repr(request)
+
+    with pytest.raises(ValidationError):
+        NotificationRouteWriteRequest.model_validate(
+            {
+                "name": "Not ready",
+                "channel": "SLACK",
+                "event_types": ["CAPITAL_STATUS_CHANGED"],
+                "expected_version": 0,
+                "idempotency_key": "route-capital",
             }
         )

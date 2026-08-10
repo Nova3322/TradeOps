@@ -591,7 +591,7 @@ const proposalExpiryPresentation = item => {
   }
   return {at:item.expires_at, state:fmtTimeRemaining(item.expires_at)};
 };
-const statusLabels = {DRAFT:'草稿',PENDING_REVIEW:'待审核',APPROVED:'已批准',REJECTED:'已拒绝',EXPIRED:'已过期',ALLOW:'通过',SCALE:'缩小仓位',DENY:'拒绝',PENDING:'等待中',RESERVED:'已预留',READY:'待发送',SENT:'已发送',PARTIALLY_FILLED:'部分成交',FILLED:'已成交',CANCELLED:'已取消',UNKNOWN:'结果未知',KNOWN:'已确认',OPENING:'建仓中',OPEN:'持仓中',REDUCING:'减仓中',CLOSING:'退出中',CLOSED:'已结束',ACTIVE:'有效',DEGRADED:'保护不足',RELEASED:'已释放',MATCH:'对账一致',DIFFERENCE:'存在差异',MANUAL_REQUIRED:'需要人工处理',RESOLVED:'已解决',NORMAL:'正常',URGENT:'紧急',IMMEDIATE:'立即',ENABLED:'已开启',DISABLED:'已关闭',SUCCESS:'连接正常',FAILED:'连接失败',SKIPPED:'未运行',STALE:'数据已过期',WAITING:'等待首次同步',NOT_CONFIGURED:'未配置',ON_DEMAND:'按需读取',MISSING:'缺失',CURRENT:'当前有效',INCOMPLETE:'数据不完整',CONTROLLED:'受控',READ_ONLY:'只读',BLOCKED:'已安全阻断',NOT_SUBMITTED:'未提交',SOURCE_RESERVED:'源端已预留',SUBMITTED:'已提交',IN_FLIGHT:'划转中',DESTINATION_CONFIRMED:'目的端已确认',SETTLED:'已结算',FAILED_SOURCE_RESTORED:'失败，源端已恢复',DEPOSIT_PLAN_READY:'充值计划待执行',DEPOSIT_CONFIRMED:'充值已确认',RELEASE_REQUEST_PLAN_READY:'释放申请计划待执行',RELEASE_REQUEST_CONFIRMED:'释放申请已确认',RELEASE_EXECUTION_PLAN_READY:'释放执行计划待执行',RELEASE_EXECUTION_CONFIRMED:'释放执行已确认',RELEASE_CANCELLATION_PLAN_READY:'释放取消计划待执行',RELEASE_CANCELLED:'释放已取消'};
+const statusLabels = {DRAFT:'草稿',PENDING_REVIEW:'待审核',APPROVED:'已批准',REJECTED:'已拒绝',EXPIRED:'已过期',ALLOW:'通过',SCALE:'缩小仓位',DENY:'拒绝',PENDING:'等待中',RETRY_WAIT:'等待重试',SENDING:'发送中',DEAD_LETTER:'投递失败',OUTCOME_UNKNOWN:'发送结果未知',RESERVED:'已预留',READY:'待发送',SENT:'已发送',PARTIALLY_FILLED:'部分成交',FILLED:'已成交',CANCELLED:'已取消',UNKNOWN:'结果未知',KNOWN:'已确认',OPENING:'建仓中',OPEN:'持仓中',REDUCING:'减仓中',CLOSING:'退出中',CLOSED:'已结束',ACTIVE:'有效',DEGRADED:'保护不足',RELEASED:'已释放',MATCH:'对账一致',DIFFERENCE:'存在差异',MANUAL_REQUIRED:'需要人工处理',RESOLVED:'已解决',NORMAL:'正常',URGENT:'紧急',IMMEDIATE:'立即',ENABLED:'已开启',DISABLED:'已关闭',SUCCESS:'连接正常',FAILED:'连接失败',SKIPPED:'未运行',STALE:'数据已过期',WAITING:'等待首次同步',NOT_CONFIGURED:'未配置',ON_DEMAND:'按需读取',MISSING:'缺失',CURRENT:'当前有效',INCOMPLETE:'数据不完整',CONTROLLED:'受控',READ_ONLY:'只读',BLOCKED:'已安全阻断',NOT_SUBMITTED:'未提交',SOURCE_RESERVED:'源端已预留',SUBMITTED:'已提交',IN_FLIGHT:'划转中',DESTINATION_CONFIRMED:'目的端已确认',SETTLED:'已结算',FAILED_SOURCE_RESTORED:'失败，源端已恢复',DEPOSIT_PLAN_READY:'充值计划待执行',DEPOSIT_CONFIRMED:'充值已确认',RELEASE_REQUEST_PLAN_READY:'释放申请计划待执行',RELEASE_REQUEST_CONFIRMED:'释放申请已确认',RELEASE_EXECUTION_PLAN_READY:'释放执行计划待执行',RELEASE_EXECUTION_CONFIRMED:'释放执行已确认',RELEASE_CANCELLATION_PLAN_READY:'释放取消计划待执行',RELEASE_CANCELLED:'释放已取消'};
 const riskLabels = {LOW:'低风险',MEDIUM:'中风险',HIGH:'高风险'};
 const intentKindLabels = {INITIAL:'初仓',ADD:'加仓',REDUCE:'减仓',EXIT:'退出'};
 const directionLabels = {LONG:'做多',SHORT:'做空'};
@@ -869,6 +869,7 @@ const capabilityRoles = {
   'proposal.view':['OBSERVER','PROPOSER','REVIEWER','OPERATOR'],
   'operations.view':['OBSERVER','OPERATOR'],
   'results.view':['OBSERVER','OPERATOR'],
+  'notification.view':['OBSERVER','PROPOSER','REVIEWER','OPERATOR','TREASURY_ADMIN'],
   'system.view':['OBSERVER','REVIEWER','OPERATOR'],
   'venue.view':['OBSERVER','OPERATOR'],
   'venue.sync':['OPERATOR'],
@@ -895,12 +896,13 @@ const routeCapability = (path) => {
   if (path === '/proposals' || path.startsWith('/proposals/')) return 'proposal.view';
   if (path === '/campaigns' || path.startsWith('/campaigns/') || path === '/orders' || path === '/exceptions') return 'operations.view';
   if (path === '/results') return 'results.view';
+  if (path === '/notifications') return 'notification.view';
   if (path === '/positions' || path === '/risk') return 'system.view';
   if (path === '/venues' || path.startsWith('/venues/')) return 'venue.view';
   if (path === '/admin/users') return 'access.manage';
   return 'operations.view';
 };
-const capabilityLabel = (capability) => ({'signal.view':'查看信号源','opportunity.view':'查看机会','proposal.view':'查看提案','operations.view':'交易运维','results.view':'查看绩效报表','system.view':'查看系统状态','venue.view':'查看交易账户','capital.view':'资金管理','proposal.create':'发起提案','proposal.review':'独立审核','access.manage':'成员权限管理'}[capability] || capability);
+const capabilityLabel = (capability) => ({'signal.view':'查看信号源','opportunity.view':'查看机会','proposal.view':'查看提案','operations.view':'交易运维','results.view':'查看绩效报表','notification.view':'查看通知中心','system.view':'查看系统状态','venue.view':'查看交易账户','capital.view':'资金管理','proposal.create':'发起提案','proposal.review':'独立审核','access.manage':'成员权限管理'}[capability] || capability);
 const accessRoleCatalog = [
   {role:'OBSERVER', label:'只读观察', copy:'查看机会、提案、交易任务、系统状态和交易账户；不能执行动作。'},
   {role:'PROPOSER', label:'发起提案', copy:'查看机会并创建提案；不能审核自己的提案，也不能操作交易任务。'},
@@ -1218,7 +1220,7 @@ async function route() {
     return;
   }
   const path = location.pathname;
-  const teamSetupPaths = new Set(['/admin/users', '/venues', '/signals']);
+  const teamSetupPaths = new Set(['/admin/users', '/venues', '/signals', '/notifications']);
   if (!session.active_workspace || !session.active_team || (!session.active_team.trading_enabled && !teamSetupPaths.has(path))) {
     renderScopeSetup();
     enhanceRenderedPage();
@@ -1244,6 +1246,7 @@ async function route() {
     }
     else if (path === '/campaigns') await renderCampaignList();
     else if (path === '/results') await renderActualResults();
+    else if (path === '/notifications') await renderNotifications();
     else if (path === '/campaigns/alerts') await renderRuntimeAlerts();
     else if (path === '/positions') await renderSystemStatus();
     else if (path === '/orders') await renderCampaignFacts('orders');
@@ -3801,6 +3804,120 @@ async function renderActualResults() {
     route();
   });
   bindLinkedRows();
+}
+
+const notificationChannelLabel = value => ({TELEGRAM:'Telegram',SLACK:'Slack',LARK:'飞书 / Lark',EMAIL:'邮件'}[value] || value);
+const notificationEventLabel = value => ({PROPOSAL_REVIEW_REQUIRED:'提案等待独立审核',RISK_DECISION_RECORDED:'风险决策已记录',CAMPAIGN_STATUS_CHANGED:'交易任务状态变化',CAPITAL_STATUS_CHANGED:'资金流程状态变化',SIGNAL_EVENT_RECEIVED:'收到团队信号',CONNECTION_CHECK_FAILED:'账户连接验证失败',TEST_NOTIFICATION:'渠道测试'}[value] || value);
+
+function notificationEventOptions(catalog, selected = []) {
+  const enabled = new Set(selected);
+  return catalog.map(item => {
+    const active = item.integration_status === 'ACTIVE';
+    const checked = enabled.has(item.event_type);
+    const help = active ? `模板 ${item.template_key} v${item.template_version}` : item.blocker;
+    return `<label class="notification-event-option ${active ? '' : 'is-blocked'}"><input type="checkbox" name="event_types" value="${escapeHtml(item.event_type)}" ${checked ? 'checked' : ''} ${active ? '' : 'disabled'}><span><b>${escapeHtml(notificationEventLabel(item.event_type))}</b><small>${escapeHtml(help)}</small></span></label>`;
+  }).join('');
+}
+
+function notificationConfigurationFields(channel, {required = false} = {}) {
+  const requiredAttr = required ? 'required' : '';
+  const secret = 'type="password" autocomplete="new-password"';
+  if (channel === 'TELEGRAM') return `<label>Bot Token<input name="bot_token" ${secret} ${requiredAttr} placeholder="由 BotFather 签发"></label><label>目标 Chat ID<input name="chat_id" ${secret} ${requiredAttr} placeholder="不会回显"></label>`;
+  if (channel === 'SLACK') return `<label>Incoming Webhook URL<input name="webhook_url" ${secret} ${requiredAttr} placeholder="https://hooks.slack.com/services/…"></label>`;
+  if (channel === 'LARK') return `<label>飞书 / Lark Webhook URL<input name="webhook_url" ${secret} ${requiredAttr} placeholder="https://open.feishu.cn/open-apis/bot/v2/hook/…"></label><label>签名密钥（可选）<input name="signing_secret" ${secret} placeholder="启用机器人签名校验时填写"></label>`;
+  return `<label>SMTP 主机<input name="smtp_host" ${requiredAttr} placeholder="smtp.example.com"></label><label>加密端口<select name="smtp_port" ${requiredAttr}><option value="587">587 · STARTTLS</option><option value="465">465 · TLS</option></select></label><label>SMTP 用户名<input name="username" ${secret} ${requiredAttr}></label><label>SMTP 密码<input name="password" ${secret} ${requiredAttr}></label><label>发件地址<input name="from_address" type="email" ${requiredAttr}></label><label>收件地址<input name="to_address" type="email" ${requiredAttr}></label>`;
+}
+
+function notificationRoutePayload(form) {
+  const data = Object.fromEntries(new FormData(form));
+  const channel = form.dataset.channel || data.channel;
+  const fieldNames = channel === 'TELEGRAM'
+    ? ['bot_token','chat_id']
+    : channel === 'SLACK'
+      ? ['webhook_url']
+      : channel === 'LARK'
+        ? ['webhook_url','signing_secret']
+        : ['smtp_host','smtp_port','username','password','from_address','to_address'];
+  const emailCredentialEntered = channel !== 'EMAIL' || ['smtp_host','username','password','from_address','to_address'].some(name => data[name]);
+  const configuration = emailCredentialEntered
+    ? Object.fromEntries(fieldNames.filter(name => data[name]).map(name => [name, name === 'smtp_port' ? Number(data[name]) : data[name]]))
+    : {};
+  return {
+    name:data.name,
+    channel,
+    event_types:new FormData(form).getAll('event_types'),
+    enabled:data.enabled === 'true',
+    configuration:Object.keys(configuration).length ? configuration : null,
+    expected_version:Number(form.dataset.version || 0),
+    idempotency_key:crypto.randomUUID(),
+  };
+}
+
+async function renderNotifications() {
+  const data = await api('/api/notifications');
+  const routesById = new Map(data.routes.map(item => [item.notification_route_id, item]));
+  const defaultEvents = ['PROPOSAL_REVIEW_REQUIRED','RISK_DECISION_RECORDED'];
+  const counts = data.delivery_status_counts || {};
+  const waiting = (counts.PENDING || 0) + (counts.RETRY_WAIT || 0) + (counts.SENDING || 0);
+  const attention = (counts.DEAD_LETTER || 0) + (counts.OUTCOME_UNKNOWN || 0);
+  const createForm = data.can_manage ? `<details class="card notification-route-create"><summary><span><b>新建团队通知路由</b><small>每条路由只接收所选事件, 凭据独立加密保存</small></span><strong>展开</strong></summary><form id="notification-route-create-form" class="toolbox-content" data-version="0" data-channel="TELEGRAM"><div class="field-grid"><label>路由名称<input name="name" maxlength="120" required placeholder="例如 提案审核群"></label><label>通知渠道<select name="channel"><option value="TELEGRAM">Telegram</option><option value="SLACK">Slack</option><option value="LARK">飞书 / Lark</option><option value="EMAIL">邮件</option></select></label><label>路由状态<select name="enabled"><option value="true">启用</option><option value="false">停用</option></select></label></div><fieldset><legend>订阅事件</legend><div class="notification-event-grid">${notificationEventOptions(data.event_catalog, defaultEvents)}</div></fieldset><fieldset><legend>加密渠道配置</legend><div class="field-grid" data-notification-create-config>${notificationConfigurationFields('TELEGRAM', {required:true})}</div></fieldset><p class="safety-note">保存只建立通知路由。通知进程没有交易、资金、签名或广播接口；API 和页面只返回脱敏目的地。</p><div class="form-error" role="alert"></div><div class="form-actions"><button class="primary" type="submit">加密保存路由</button></div></form></details>` : '';
+  const routeCards = data.routes.map(item => {
+    const destination = item.configuration_metadata?.destination_hint || '已加密配置';
+    const eventTags = item.event_types.map(eventType => `<span class="tag">${escapeHtml(notificationEventLabel(eventType))}</span>`).join('');
+    if (!data.can_manage) return `<article class="card notification-route-card"><div class="card-heading"><div><p class="eyebrow">${escapeHtml(notificationChannelLabel(item.channel))} · ${escapeHtml(destination)}</p><h2>${escapeHtml(item.name)}</h2></div><span class="status-pill ${item.enabled ? 'status-APPROVED' : 'status-DISABLED'}">${item.enabled ? '已启用' : '已停用'}</span></div><div class="tag-row">${eventTags}</div><dl class="definition-grid">${definition('配置状态', 'AES-256-GCM 加密')}${definition('路由 / 凭据版本', `${item.version} / ${item.credential_version}`)}${definition('最近更新', fmtDate(item.updated_at))}</dl></article>`;
+    return `<article class="card notification-route-card"><div class="card-heading"><div><p class="eyebrow">${escapeHtml(notificationChannelLabel(item.channel))} · ${escapeHtml(destination)}</p><h2>${escapeHtml(item.name)}</h2></div><span class="status-pill ${item.enabled ? 'status-APPROVED' : 'status-DISABLED'}">${item.enabled ? '已启用' : '已停用'}</span></div><form class="notification-route-form" data-route-id="${escapeHtml(item.notification_route_id)}" data-version="${item.version}" data-channel="${escapeHtml(item.channel)}"><div class="field-grid"><label>路由名称<input name="name" value="${escapeHtml(item.name)}" maxlength="120" required></label><label>通知渠道<input value="${escapeHtml(notificationChannelLabel(item.channel))}" disabled><input name="channel" type="hidden" value="${escapeHtml(item.channel)}"></label><label>路由状态<select name="enabled"><option value="true" ${item.enabled ? 'selected' : ''}>启用</option><option value="false" ${item.enabled ? '' : 'selected'}>停用</option></select></label></div><fieldset><legend>订阅事件</legend><div class="notification-event-grid">${notificationEventOptions(data.event_catalog, item.event_types)}</div></fieldset><details class="notification-credential-rotate"><summary><span><b>轮换加密渠道配置</b><small>留空则保留当前凭据版本</small></span><strong>展开</strong></summary><div class="field-grid">${notificationConfigurationFields(item.channel)}</div></details><div class="form-error" role="alert"></div><div class="form-actions"><button class="secondary" type="button" data-notification-test ${item.enabled ? '' : 'disabled title="先启用并保存路由"'}>发送渠道测试</button><button class="primary" type="submit">保存路由版本</button></div></form></article>`;
+  }).join('');
+  const deliveryRows = data.deliveries.map(item => {
+    const route = routesById.get(item.notification_route_id);
+    const timing = item.status === 'RETRY_WAIT' ? `下次 ${fmtDate(item.next_attempt_at)}` : item.sent_at ? fmtDate(item.sent_at) : fmtDate(item.created_at);
+    return `<tr><td data-label="事件"><b>${escapeHtml(notificationEventLabel(item.event_type))}</b><br><span class="subtle">${escapeHtml(item.payload?.summary || item.object_type)}</span></td><td data-label="路由">${escapeHtml(route?.name || shortId(item.notification_route_id))}<br><span class="subtle">${escapeHtml(notificationChannelLabel(item.channel))}</span></td><td data-label="范围">${escapeHtml(item.environment || '团队级')}<br><span class="subtle">${escapeHtml([item.account_id,item.venue].filter(Boolean).join(' · ') || '无账户范围')}</span></td><td data-label="状态"><span class="status-pill status-${escapeHtml(item.status)}">${escapeHtml(fmtStatus(item.status))}</span><br><span class="subtle">${item.attempt_count} / ${item.max_attempts} 次</span></td><td data-label="时间">${escapeHtml(timing)}</td><td data-label="错误">${escapeHtml(item.last_error_code || '—')}</td></tr>`;
+  }).join('');
+  const blockedCatalog = data.event_catalog.filter(item => item.integration_status !== 'ACTIVE');
+  main.innerHTML = `<section class="page notification-page"><header class="page-head"><div><p class="eyebrow">${escapeHtml(data.scope.team_name)} · 团队级路由</p><h1>通知中心</h1><p class="lede">统一管理 Telegram、Slack、飞书 / Lark 和邮件。事件先写入当前团队的持久化投递队列, 再由最小权限进程发送。</p></div><button class="secondary" data-refresh>刷新投递事实</button></header>
+    <div class="stats notification-stats"><article class="stat"><small>已配置路由</small><b>${data.routes.length}</b><span>${data.routes.filter(item => item.enabled).length} 条启用</span></article><article class="stat"><small>等待 / 重试</small><b>${waiting}</b><span>限流失败按退避计划自动重试</span></article><article class="stat"><small>已发送</small><b>${counts.SENT || 0}</b><span>每次投递都有审计记录</span></article><article class="stat"><small>需人工判断</small><b class="${attention ? 'danger-text' : ''}">${attention}</b><span>结果未知不会盲目重发</span></article></div>
+    <article class="source-status"><div><p class="eyebrow">权限边界</p><h2>通知渠道不是交易主体</h2><p>交易 ${fmtStatus(data.channel_permissions.trading ? 'ENABLED' : 'DISABLED')} · 资金 ${fmtStatus(data.channel_permissions.funding ? 'ENABLED' : 'DISABLED')} · 签名 ${fmtStatus(data.channel_permissions.signing ? 'ENABLED' : 'DISABLED')} · 广播 ${fmtStatus(data.channel_permissions.broadcast ? 'ENABLED' : 'DISABLED')}。测试通知只发送文本, 不触发业务动作。</p></div><span class="status-pill status-READ_ONLY">最小权限</span></article>
+    ${blockedCatalog.length ? `<div class="callout tone-attention"><b>资金通知事件尚未开放路由。</b><p>${escapeHtml(blockedCatalog.map(item => item.blocker).filter(Boolean).join(' '))}</p></div>` : ''}
+    ${createForm}
+    <section><div class="section-heading"><div><p class="eyebrow">脱敏配置</p><h2>团队通知路由</h2><p>修改路由会创建新版本；旧版本待发送任务会取消, 不会使用新凭据发送旧快照。</p></div><span class="status-pill">${data.routes.length} 条</span></div>${routeCards ? `<div class="notification-route-grid">${routeCards}</div>` : '<div class="callout tone-attention"><b>当前团队尚未配置通知路由。</b><p>系统事件仍会写审计；配置路由前不会向外部渠道发送。</p></div>'}</section>
+    <section><div class="section-heading"><div><p class="eyebrow">持久化投递</p><h2>最近投递记录</h2><p>网络结果未知时停止自动重试, 避免外部渠道重复消息；明确限流才进入重试等待。</p></div><span class="status-pill">${data.deliveries.length} 条</span></div>${deliveryRows ? `<div class="table-wrap notification-table"><table><thead><tr><th>事件</th><th>路由</th><th>范围</th><th>状态</th><th>时间</th><th>错误</th></tr></thead><tbody>${deliveryRows}</tbody></table></div>` : '<div class="callout">当前团队没有通知投递记录。</div>'}</section>
+  </section>`;
+  document.querySelector('[data-refresh]')?.addEventListener('click', route);
+  const newRouteForm = document.querySelector('#notification-route-create-form');
+  newRouteForm?.elements.channel.addEventListener('change', () => {
+    const channel = newRouteForm.elements.channel.value;
+    newRouteForm.dataset.channel = channel;
+    newRouteForm.querySelector('[data-notification-create-config]').innerHTML = notificationConfigurationFields(channel, {required:true});
+  });
+  newRouteForm?.addEventListener('submit', event => {
+    event.preventDefault();
+    const form = event.currentTarget;
+    withPending(event.submitter, '保存中…', async () => {
+      try {
+        await api('/api/notification-routes', {method:'POST', body:JSON.stringify(notificationRoutePayload(form))});
+        showToast('通知路由已加密保存');
+        await route();
+      } catch (error) { showApiError(error, form.querySelector('.form-error')); }
+    });
+  });
+  document.querySelectorAll('.notification-route-form').forEach(form => {
+    form.addEventListener('submit', event => {
+      event.preventDefault();
+      withPending(event.submitter, '保存中…', async () => {
+        try {
+          await api(`/api/notification-routes/${form.dataset.routeId}`, {method:'PUT', body:JSON.stringify(notificationRoutePayload(form))});
+          showToast('通知路由新版本已保存');
+          await route();
+        } catch (error) { showApiError(error, form.querySelector('.form-error')); }
+      });
+    });
+    form.querySelector('[data-notification-test]')?.addEventListener('click', event => withPending(event.currentTarget, '发送中…', async () => {
+      try {
+        const result = await api(`/api/notification-routes/${form.dataset.routeId}/tests`, {method:'POST', body:JSON.stringify({idempotency_key:crypto.randomUUID()})});
+        showToast(result.delivery_status === 'SENT' ? '测试通知已确认发送' : `测试投递状态: ${fmtStatus(result.delivery_status)}`);
+        await route();
+      } catch (error) { showApiError(error, form.querySelector('.form-error')); }
+    }));
+  });
 }
 
 function latestVenueObservation(facts) {
