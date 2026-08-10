@@ -26,6 +26,7 @@ AccessRole = Literal[
     "SYSTEM_ADMIN",
 ]
 AgentAccessRole = Literal["OBSERVER", "PROPOSER", "REVIEWER"]
+VenueScope = Literal["BINANCE", "HYPERLIQUID", "OKX", "BYBIT"]
 
 
 class MockLoginRequest(BaseModel):
@@ -42,7 +43,7 @@ class ManagedUserCreateRequest(BaseModel):
     password: str = Field(min_length=12, max_length=128)
     roles: list[AccessRole] = Field(min_length=1, max_length=6)
     account_scope: str | None = Field(default=None, min_length=1, max_length=120)
-    venue_scope: str | None = Field(default=None, min_length=1, max_length=64)
+    venue_scope: VenueScope | None = None
 
     @field_validator("roles")
     @classmethod
@@ -57,7 +58,7 @@ class ManagedUserAccessRequest(BaseModel):
     active: bool = True
     new_password: str | None = Field(default=None, min_length=12, max_length=128)
     account_scope: str | None = Field(default=None, min_length=1, max_length=120)
-    venue_scope: str | None = Field(default=None, min_length=1, max_length=64)
+    venue_scope: VenueScope | None = None
 
     @field_validator("roles")
     @classmethod
@@ -71,7 +72,7 @@ class AgentCreateRequest(BaseModel):
     username: str = Field(min_length=1, max_length=120, pattern=r"^[A-Za-z0-9._-]+$")
     roles: list[AgentAccessRole] = Field(min_length=1, max_length=3)
     account_scope: str = Field(min_length=1, max_length=120)
-    venue_scope: Literal["BINANCE", "HYPERLIQUID", "OKX", "BYBIT"]
+    venue_scope: VenueScope
     expires_in_days: int = Field(default=90, ge=1, le=365)
     idempotency_key: str = Field(min_length=1, max_length=160)
 
@@ -87,7 +88,7 @@ class AgentAccessRequest(BaseModel):
     roles: list[AgentAccessRole] = Field(max_length=3)
     active: bool = True
     account_scope: str = Field(min_length=1, max_length=120)
-    venue_scope: Literal["BINANCE", "HYPERLIQUID", "OKX", "BYBIT"]
+    venue_scope: VenueScope
     expected_auth_version: int = Field(ge=1)
     idempotency_key: str = Field(min_length=1, max_length=160)
 
@@ -130,7 +131,7 @@ class TeamShadowActivationRequest(BaseModel):
 
 class ShadowScopeInitializeRequest(BaseModel):
     account_id: str = Field(min_length=1, max_length=120)
-    venue: Literal["BINANCE", "HYPERLIQUID", "OKX", "BYBIT"]
+    venue: VenueScope
     instrument_id: UUID
     currency: str = Field(min_length=1, max_length=32, pattern=r"^[A-Za-z0-9._-]+$")
     initial_equity: Decimal | None = Field(default=None, gt=0)
@@ -154,7 +155,7 @@ class TeamMemberInviteRequest(BaseModel):
     username: str = Field(min_length=1, max_length=120, pattern=r"^[A-Za-z0-9._-]+$")
     roles: list[AccessRole] = Field(min_length=1, max_length=6)
     account_scope: str | None = Field(default=None, min_length=1, max_length=120)
-    venue_scope: str | None = Field(default=None, min_length=1, max_length=64)
+    venue_scope: VenueScope | None = None
     idempotency_key: str = Field(min_length=1, max_length=160)
 
     @field_validator("roles")
@@ -196,7 +197,7 @@ class ExchangeCredentialRequest(BaseModel):
 
 class ExchangeAccountCreateRequest(BaseModel):
     account_id: str = Field(min_length=1, max_length=120)
-    venue: Literal["BINANCE", "HYPERLIQUID", "OKX", "BYBIT"]
+    venue: VenueScope
     label: str | None = Field(default=None, min_length=1, max_length=120)
     credentials: ExchangeCredentialRequest | None = None
     idempotency_key: str = Field(min_length=1, max_length=160)
@@ -295,7 +296,7 @@ class WebhookSignalPayload(BaseModel):
     external_id: str = Field(min_length=1, max_length=160, pattern=r"^[A-Za-z0-9._:-]+$")
     strategy_id: str = Field(min_length=1, max_length=120)
     strategy_version: str = Field(min_length=1, max_length=120)
-    venue: Literal["BINANCE", "HYPERLIQUID", "OKX", "BYBIT"]
+    venue: VenueScope
     symbol: str = Field(min_length=1, max_length=120)
     direction: Direction
     signal_at: datetime
@@ -395,7 +396,7 @@ class SystemProposalRequest(BaseModel):
 class AgentProposalRequest(BaseModel):
     environment: Literal["SHADOW", "TESTNET", "LIVE"] = "SHADOW"
     account_id: str = Field(min_length=1, max_length=120)
-    venue: Literal["BINANCE", "HYPERLIQUID", "OKX", "BYBIT"]
+    venue: VenueScope
     instrument_id: UUID
     direction: Direction
     risk_tier: RiskTier

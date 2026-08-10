@@ -112,9 +112,9 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
 
     assert response.status_code == 200
     assert "交易控制台" in response.text
-    assert "/assets/app.js?v=139" in response.text
+    assert "/assets/app.js?v=140" in response.text
     assert 'href="/signals"' in response.text
-    assert "/assets/styles.css?v=56" in response.text
+    assert "/assets/styles.css?v=57" in response.text
     assert 'aria-label="交易控制台首页"' in response.text
     assert '<a href="/" data-link><span>⌂</span>当前任务</a>' in response.text
     assert "<span>⌁</span>实时机会</a>" in response.text
@@ -240,6 +240,14 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
     assert "NOT_SUBMITTED:'未提交'" in app_javascript.text
     assert "账户范围" in app_javascript.text
     assert "默认账户" in app_javascript.text
+    assert "const venues = ['BINANCE','HYPERLIQUID','OKX','BYBIT'];" in app_javascript.text
+    assert "environmentBadge.textContent = fmtEnvironment(authStatus?.environment);" in app_javascript.text
+    assert "LOCAL:'本地运行'" in app_javascript.text
+    assert "fmtExchangeAccountCopy(item.next_action)" in app_javascript.text
+    assert "交易能力已关闭；连接状态不会开启下单" in app_javascript.text  # noqa: RUF001
+    assert "这是合成事实，不是交易所成交或真实收益" in app_javascript.text
+    assert ".map(resultRiskReasonLabel)" in app_javascript.text
+    assert "resultSignalProviderLabel(value)" in app_javascript.text
     assert "{BINANCE:'Binance', HYPERLIQUID:'Hyperliquid'}" in app_javascript.text
     assert "当前三方总净值" in app_javascript.text
     assert "当前不可汇总" in app_javascript.text

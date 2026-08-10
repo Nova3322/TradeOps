@@ -323,6 +323,15 @@ def _reject(code: str, detail: str) -> NoReturn:
     raise DomainRejected(code, detail)
 
 
+def _normalize_venue_scope(venue_scope: str | None) -> str | None:
+    if venue_scope is None:
+        return None
+    normalized = venue_scope.strip().upper()
+    if normalized not in SUPPORTED_EXCHANGE_VENUES:
+        _reject("VENUE_SCOPE_UNSUPPORTED", "venue scope is unsupported")
+    return normalized
+
+
 def _canonical(value: dict[str, Any]) -> str:
     return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
 
@@ -3171,6 +3180,7 @@ class TradingService:
     ) -> UUID:
         normalized_username = username.strip()
         normalized_roles = tuple(dict.fromkeys(roles))
+        normalized_venue_scope = _normalize_venue_scope(venue_scope)
         if not normalized_username or not normalized_roles:
             _reject("USER_ACCESS_INVALID", "an active user requires a username and role")
         with self.database.session_factory.begin() as session:
@@ -3219,7 +3229,7 @@ class TradingService:
                         team_id=team.team_id,
                         role=role.value,
                         account_scope=None if role is Role.SYSTEM_ADMIN else account_scope,
-                        venue_scope=None if role is Role.SYSTEM_ADMIN else venue_scope,
+                        venue_scope=(None if role is Role.SYSTEM_ADMIN else normalized_venue_scope),
                         created_at=now,
                     )
                 )
@@ -3249,6 +3259,7 @@ class TradingService:
     ) -> UUID:
         normalized_username = username.strip()
         normalized_roles = tuple(dict.fromkeys(roles))
+        normalized_venue_scope = _normalize_venue_scope(venue_scope)
         if not normalized_username or not normalized_roles:
             _reject("TEAM_INVITE_INVALID", "a team invitation requires a username and role")
         with self.database.session_factory.begin() as session:
@@ -3261,7 +3272,7 @@ class TradingService:
                 "username": normalized_username,
                 "roles": sorted(role.value for role in normalized_roles),
                 "account_scope": account_scope,
-                "venue_scope": venue_scope,
+                "venue_scope": normalized_venue_scope,
             }
             caller = f"{actor_id}:{workspace.workspace_id}:{team.team_id}"
             digest, replay = self._idempotency(
@@ -3340,7 +3351,7 @@ class TradingService:
                         team_id=team.team_id,
                         role=role.value,
                         account_scope=None if role is Role.SYSTEM_ADMIN else account_scope,
-                        venue_scope=None if role is Role.SYSTEM_ADMIN else venue_scope,
+                        venue_scope=(None if role is Role.SYSTEM_ADMIN else normalized_venue_scope),
                         created_at=now,
                     )
                 )
@@ -3386,6 +3397,7 @@ class TradingService:
         now: datetime,
     ) -> None:
         normalized_roles = tuple(dict.fromkeys(roles))
+        normalized_venue_scope = _normalize_venue_scope(venue_scope)
         if active and not normalized_roles:
             _reject("USER_ACCESS_INVALID", "an active user requires at least one role")
         if user_id == actor_id:
@@ -3455,7 +3467,7 @@ class TradingService:
                         team_id=team.team_id,
                         role=role.value,
                         account_scope=None if role is Role.SYSTEM_ADMIN else account_scope,
-                        venue_scope=None if role is Role.SYSTEM_ADMIN else venue_scope,
+                        venue_scope=(None if role is Role.SYSTEM_ADMIN else normalized_venue_scope),
                         created_at=now,
                     )
                 )

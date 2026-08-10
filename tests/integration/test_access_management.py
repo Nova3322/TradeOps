@@ -42,9 +42,7 @@ async def login(client: AsyncClient, username: str) -> None:
 async def exercise_access_management(database: Database) -> None:
     admin_id = TradingService(database).bootstrap_admin("admin", now=datetime.now(UTC))
     app = access_app(database)
-    async with AsyncClient(
-        transport=ASGITransport(app=app), base_url="http://test"
-    ) as client:
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         await login(client, "admin")
         assert (await client.get("/api/capital")).status_code == 200
         assert (await client.get("/admin/users")).status_code == 200
@@ -70,6 +68,32 @@ async def exercise_access_management(database: Database) -> None:
             }
         ]
         assert reviewer["password_configured"] is True
+
+        bybit_observer = await client.post(
+            "/api/admin/users",
+            json={
+                "username": "bybit-observer",
+                "password": "bybit-observer-password",
+                "roles": ["OBSERVER"],
+                "venue_scope": "BYBIT",
+            },
+        )
+        assert bybit_observer.status_code == 200, bybit_observer.text
+        assert next(
+            item
+            for item in bybit_observer.json()["data"]
+            if item["user_id"] == bybit_observer.json()["user_id"]
+        )["roles"] == [{"role": "OBSERVER", "account_scope": None, "venue_scope": "BYBIT"}]
+        invalid_venue_scope = await client.post(
+            "/api/admin/users",
+            json={
+                "username": "invalid-venue-observer",
+                "password": "invalid-venue-observer-password",
+                "roles": ["OBSERVER"],
+                "venue_scope": "UNSUPPORTED",
+            },
+        )
+        assert invalid_venue_scope.status_code == 422, invalid_venue_scope.text
 
         await client.post("/api/auth/logout")
         wrong_password = await client.post(

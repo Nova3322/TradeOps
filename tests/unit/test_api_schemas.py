@@ -7,12 +7,15 @@ from trading_control_plane.api_schemas import (
     AgentAccessRequest,
     AgentCreateRequest,
     AgentProposalRequest,
+    ManagedUserAccessRequest,
+    ManagedUserCreateRequest,
     ManualProposalRequest,
     NotificationRouteWriteRequest,
     ProposalDefaultConfigRequest,
     ShadowScopeInitializeRequest,
     ShadowSimulationRequest,
     SystemProposalRequest,
+    TeamMemberInviteRequest,
     TransferProposalRequest,
 )
 
@@ -253,3 +256,29 @@ def test_agent_schemas_limit_roles_require_exact_scope_and_current_time_shape() 
                 "rationale": "model facts are frozen for independent review",
             }
         )
+
+
+def test_human_access_schemas_share_the_four_exchange_scope_values() -> None:
+    cases = (
+        (
+            ManagedUserCreateRequest,
+            {
+                "username": "observer-bybit",
+                "password": "observer-password",
+                "roles": ["OBSERVER"],
+            },
+        ),
+        (ManagedUserAccessRequest, {"roles": ["OBSERVER"], "active": True}),
+        (
+            TeamMemberInviteRequest,
+            {
+                "username": "observer-bybit",
+                "roles": ["OBSERVER"],
+                "idempotency_key": "invite-bybit",
+            },
+        ),
+    )
+    for schema, payload in cases:
+        assert schema.model_validate({**payload, "venue_scope": "BYBIT"}).venue_scope == "BYBIT"
+        with pytest.raises(ValidationError):
+            schema.model_validate({**payload, "venue_scope": "UNSUPPORTED"})

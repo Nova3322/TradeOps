@@ -591,7 +591,7 @@ const proposalExpiryPresentation = item => {
   }
   return {at:item.expires_at, state:fmtTimeRemaining(item.expires_at)};
 };
-const statusLabels = {DRAFT:'草稿',PENDING_REVIEW:'待审核',APPROVED:'已批准',REJECTED:'已拒绝',EXPIRED:'已过期',ALLOW:'通过',SCALE:'缩小仓位',DENY:'拒绝',PENDING:'等待中',RETRY_WAIT:'等待重试',SENDING:'发送中',DEAD_LETTER:'投递失败',OUTCOME_UNKNOWN:'发送结果未知',RESERVED:'已预留',READY:'待发送',SENT:'已发送',PARTIALLY_FILLED:'部分成交',FILLED:'已成交',CANCELLED:'已取消',UNKNOWN:'结果未知',KNOWN:'已确认',OPENING:'建仓中',OPEN:'持仓中',REDUCING:'减仓中',CLOSING:'退出中',CLOSED:'已结束',ACTIVE:'有效',DEGRADED:'保护不足',RELEASED:'已释放',MATCH:'对账一致',DIFFERENCE:'存在差异',MANUAL_REQUIRED:'需要人工处理',RESOLVED:'已解决',NORMAL:'正常',URGENT:'紧急',IMMEDIATE:'立即',ENABLED:'已开启',DISABLED:'已关闭',SUCCESS:'连接正常',FAILED:'连接失败',SKIPPED:'未运行',STALE:'数据已过期',WAITING:'等待首次同步',NOT_CONFIGURED:'未配置',ON_DEMAND:'按需读取',MISSING:'缺失',CURRENT:'当前有效',INCOMPLETE:'数据不完整',CONTROLLED:'受控',READ_ONLY:'只读',BLOCKED:'已安全阻断',NOT_SUBMITTED:'未提交',SOURCE_RESERVED:'源端已预留',SUBMITTED:'已提交',IN_FLIGHT:'划转中',DESTINATION_CONFIRMED:'目的端已确认',SETTLED:'已结算',FAILED_SOURCE_RESTORED:'失败，源端已恢复',DEPOSIT_PLAN_READY:'充值计划待执行',DEPOSIT_CONFIRMED:'充值已确认',RELEASE_REQUEST_PLAN_READY:'释放申请计划待执行',RELEASE_REQUEST_CONFIRMED:'释放申请已确认',RELEASE_EXECUTION_PLAN_READY:'释放执行计划待执行',RELEASE_EXECUTION_CONFIRMED:'释放执行已确认',RELEASE_CANCELLATION_PLAN_READY:'释放取消计划待执行',RELEASE_CANCELLED:'释放已取消'};
+const statusLabels = {DRAFT:'草稿',PENDING_REVIEW:'待审核',APPROVED:'已批准',REJECTED:'已拒绝',EXPIRED:'已过期',ALLOW:'通过',SCALE:'缩小仓位',DENY:'拒绝',PENDING:'等待中',RETRY_WAIT:'等待重试',SENDING:'发送中',DEAD_LETTER:'投递失败',OUTCOME_UNKNOWN:'发送结果未知',RESERVED:'已预留',READY:'待发送',SENT:'已发送',PARTIALLY_FILLED:'部分成交',FILLED:'已成交',CANCELLED:'已取消',UNKNOWN:'结果未知',KNOWN:'已确认',OPENING:'建仓中',OPEN:'持仓中',REDUCING:'减仓中',CLOSING:'退出中',CLOSED:'已结束',ACTIVE:'有效',DEGRADED:'保护不足',RELEASED:'已释放',MATCH:'对账一致',DIFFERENCE:'存在差异',MANUAL_REQUIRED:'需要人工处理',RESOLVED:'已解决',NORMAL:'正常',URGENT:'紧急',IMMEDIATE:'立即',ENABLED:'已开启',DISABLED:'已关闭',SUCCESS:'连接正常',FAILED:'连接失败',SKIPPED:'未运行',STALE:'数据已过期',WAITING:'等待首次同步',NOT_CONFIGURED:'未配置',ON_DEMAND:'按需读取',MISSING:'缺失',CURRENT:'当前有效',INCOMPLETE:'数据不完整',EMPTY:'暂无数据',AVAILABLE:'可用',CONTROLLED:'受控',READ_ONLY:'只读',BLOCKED:'已安全阻断',NOT_SUBMITTED:'未提交',SOURCE_RESERVED:'源端已预留',SUBMITTED:'已提交',IN_FLIGHT:'划转中',DESTINATION_CONFIRMED:'目的端已确认',SETTLED:'已结算',FAILED_SOURCE_RESTORED:'失败，源端已恢复',DEPOSIT_PLAN_READY:'充值计划待执行',DEPOSIT_CONFIRMED:'充值已确认',RELEASE_REQUEST_PLAN_READY:'释放申请计划待执行',RELEASE_REQUEST_CONFIRMED:'释放申请已确认',RELEASE_EXECUTION_PLAN_READY:'释放执行计划待执行',RELEASE_EXECUTION_CONFIRMED:'释放执行已确认',RELEASE_CANCELLATION_PLAN_READY:'释放取消计划待执行',RELEASE_CANCELLED:'释放已取消'};
 const riskLabels = {LOW:'低风险',MEDIUM:'中风险',HIGH:'高风险'};
 const intentKindLabels = {INITIAL:'初仓',ADD:'加仓',REDUCE:'减仓',EXIT:'退出'};
 const directionLabels = {LONG:'做多',SHORT:'做空'};
@@ -657,14 +657,25 @@ const fmtDirection = (value) => directionLabels[value] || value || '未知方向
 const fmtSide = (value) => currentLanguage === 'en'
   ? sideEnglishLabels[value] || value || 'Unknown side'
   : sideLabels[value] || value || '未知方向';
+const deploymentEnvironmentLabels = {
+  LOCAL:'本地运行', TEST:'测试运行', PRODUCTION:'生产运行',
+  LIVE:'真实环境', TESTNET:'测试网', SHADOW:'影子模式',
+};
+const deploymentEnvironmentEnglishLabels = {
+  LOCAL:'Local runtime', TEST:'Test runtime', PRODUCTION:'Production runtime',
+  LIVE:'Live environment', TESTNET:'Testnet', SHADOW:'Shadow mode',
+};
 const fmtEnvironment = (value, withCode = false) => {
-  void value;
-  void withCode;
-  return localizedText('生产环境');
+  const code = String(value || '').trim().toUpperCase();
+  const labels = currentLanguage === 'en'
+    ? deploymentEnvironmentEnglishLabels
+    : deploymentEnvironmentLabels;
+  const label = labels[code] || (currentLanguage === 'en' ? 'Unknown environment' : '环境未确认');
+  return withCode && code ? `${label} · ${code}` : label;
 };
 const fmtVenueLabel = (value) => currentLanguage === 'en'
-  ? ({BINANCE:'Binance', HYPERLIQUID:'Hyperliquid', '币安':'Binance', '链上永续':'Hyperliquid'}[value] || value || 'Unknown venue')
-  : ({BINANCE:'币安', HYPERLIQUID:'Hyperliquid', '币安':'币安', '链上永续':'Hyperliquid'}[value] || value || '交易所未配置');
+  ? ({BINANCE:'Binance', HYPERLIQUID:'Hyperliquid', OKX:'OKX', BYBIT:'Bybit', '币安':'Binance', '链上永续':'Hyperliquid'}[value] || value || 'Unknown venue')
+  : ({BINANCE:'币安', HYPERLIQUID:'Hyperliquid', OKX:'OKX', BYBIT:'Bybit', '币安':'币安', '链上永续':'Hyperliquid'}[value] || value || '交易所未配置');
 const fmtDefaultAccountLabel = (accountId) => accountId
   ? localizedText('默认账户')
   : localizedText('账户未配置');
@@ -685,6 +696,16 @@ const fmtOperationalCopy = (value) => String(value ?? '—')
   .replaceAll('独立 Gate', '独立安全开关')
   .replaceAll('Gate', '安全开关')
   .replaceAll('安全开关 阻断', '安全开关阻断');
+const exchangeAccountCopy = {
+  'account policy is eligible; global and task gates still apply':'账户政策允许；全局与任务安全开关仍需逐项通过',
+  'trading capability is disabled; connection status never enables order sending':'交易能力已关闭；连接状态不会开启下单',
+  'add encrypted credentials':'添加加密凭据',
+  'run a supported no-side-effect connection verification':'运行无副作用只读连接验证',
+  'keep trading disabled until risk and live-send gates are explicitly approved':'保持交易关闭，直至风险与真实发送安全开关获得明确批准',
+};
+const fmtExchangeAccountCopy = (value) => currentLanguage === 'en'
+  ? String(value || '—')
+  : (exchangeAccountCopy[String(value || '')] || fmtOperationalCopy(value));
 
 function fmtConnectionCapability(key, state) {
   if (state.write_process_enabled) {
@@ -1204,7 +1225,8 @@ function formNumber(value, fallback = '') {
 
 async function bootstrap() {
   authStatus = await api('/api/auth/status');
-  environmentBadge.textContent = localizedText('生产环境');
+  environmentBadge.textContent = fmtEnvironment(authStatus?.environment);
+  environmentBadge.dataset.environment = String(authStatus?.environment || 'unknown').toLowerCase();
   try {
     const result = await api('/api/auth/session');
     session = result.session;
@@ -3816,8 +3838,23 @@ const resultRateLabel = value => value === null || value === undefined
   ? '—'
   : `${fmtNumber(Number(value) * 100)}%`;
 const resultRatioLabel = value => value === null || value === undefined ? '—' : fmtNumber(value);
-const resultEnvironmentLabel = value => ({SHADOW:'影子模式',TESTNET:'测试网',LIVE:'真实环境'}[value] || value);
-const resultSourceLabel = item => [item.signal_source_mode, item.signal_provider].filter(Boolean).join(' / ') || '未归因';
+const resultEnvironmentLabel = value => fmtEnvironment(value);
+const resultEnvironmentNotices = {
+  'Synthetic facts; not exchange execution or profit':'这是合成事实，不是交易所成交或真实收益。',
+  'Recorded non-production facts; not live profit':'这是已记录的非生产事实，不是真实收益。',
+  'Recorded LIVE facts; no profitability guarantee':'这是已记录的真实环境事实，不代表或保证盈利。',
+};
+const resultEnvironmentNotice = value => currentLanguage === 'en'
+  ? String(value || '')
+  : (resultEnvironmentNotices[String(value || '')] || fmtOperationalCopy(value));
+const resultSourceModeLabel = value => currentLanguage === 'en'
+  ? ({PERPTAPE:'Perptape',WEBHOOK:'Webhook',MANUAL:'Manual proposal',SYSTEM:'System proposal'}[value] || value)
+  : ({PERPTAPE:'Perptape',WEBHOOK:'Webhook',MANUAL:'人工提案',SYSTEM:'系统提案'}[value] || value);
+const resultSignalProviderLabel = value => currentLanguage === 'en'
+  ? ({TRADINGVIEW:'TradingView',MODEL:'Custom model',PERPTAPE:'Perptape'}[value] || value)
+  : ({TRADINGVIEW:'TradingView',MODEL:'自研模型',PERPTAPE:'Perptape'}[value] || value);
+const resultSourceLabel = item => [resultSourceModeLabel(item.signal_source_mode), resultSignalProviderLabel(item.signal_provider)].filter(Boolean).join(' / ') || '未归因';
+const resultRiskReasonLabel = reason => riskReasonGuidance[reason]?.label || `待核实（${reason}）`;
 const resultStrategyLabel = item => item.strategy_id
   ? `${item.strategy_id} / ${item.strategy_version || '—'}`
   : '人工提案';
@@ -3859,14 +3896,14 @@ async function renderActualResults() {
   const teamMetrics = Object.entries(teamGroup?.metrics_by_currency || {});
   const headlineMetrics = teamMetrics.map(([currency, item]) => `<article class="stat result-stat"><small>${escapeHtml(currency)} · 已平仓净收益</small><b>${fmtAmount(item.closed_net_pnl, currency)}</b><span>未平仓当前值 ${fmtAmount(item.open_current_pnl, currency)} · 胜率 ${resultRateLabel(item.win_rate)} · 盈亏比 ${resultRatioLabel(item.profit_loss_ratio)} · 最大回撤 ${fmtAmount(item.maximum_drawdown, currency)}</span></article>`).join('');
   const events = data.risk_events || [];
-  const eventRows = events.slice().reverse().map(item => `<tr><td data-label="决策时间">${fmtDate(item.created_at)}</td><td data-label="账户">${escapeHtml(item.account_id)}<br><span class="subtle">${escapeHtml(item.venue)}</span></td><td data-label="策略 / 来源">${escapeHtml(resultStrategyLabel(item))}<br><span class="subtle">${escapeHtml(resultSourceLabel(item))}</span></td><td data-label="结果"><span class="status-pill status-${escapeHtml(item.result)}">${escapeHtml(fmtStatus(item.result))}</span></td><td data-label="原因">${escapeHtml((item.reasons || []).join('、') || '无额外原因')}</td><td data-label="政策版本">${escapeHtml(item.policy_version || '—')} / r${escapeHtml(item.policy_revision || '—')}</td><td data-label="批准风险">${fmtNumber(item.risk_amount)}</td></tr>`).join('');
-  const campaignRows = (data.campaigns || []).slice().reverse().map(item => `<tr data-href="/campaigns/${item.campaign_id}"><td data-label="更新时间">${fmtDate(item.updated_at)}</td><td data-label="标的"><b>${escapeHtml(item.symbol || shortId(item.instrument_id))}</b><br><span class="subtle">${escapeHtml(fmtDirection(item.direction))}</span></td><td data-label="账户">${escapeHtml(item.account_id)}<br><span class="subtle">${escapeHtml(item.venue)}</span></td><td data-label="策略 / 来源">${escapeHtml(resultStrategyLabel(item))}<br><span class="subtle">${escapeHtml(resultSourceLabel(item))}</span></td><td data-label="状态">${escapeHtml(fmtStatus(item.status))}</td><td data-label="总盈亏">${fmtAmount(item.final_pnl, item.currency)}</td></tr>`).join('');
+  const eventRows = events.slice().reverse().map(item => `<tr><td data-label="决策时间">${fmtDate(item.created_at)}</td><td data-label="账户">${escapeHtml(item.account_id)}<br><span class="subtle">${escapeHtml(fmtVenueLabel(item.venue))}</span></td><td data-label="策略 / 来源">${escapeHtml(resultStrategyLabel(item))}<br><span class="subtle">${escapeHtml(resultSourceLabel(item))}</span></td><td data-label="结果"><span class="status-pill status-${escapeHtml(item.result)}">${escapeHtml(fmtStatus(item.result))}</span></td><td data-label="原因">${escapeHtml((item.reasons || []).map(resultRiskReasonLabel).join('、') || '无额外原因')}</td><td data-label="政策版本">${escapeHtml(item.policy_version || '—')} / r${escapeHtml(item.policy_revision || '—')}</td><td data-label="批准风险">${fmtNumber(item.risk_amount)}</td></tr>`).join('');
+  const campaignRows = (data.campaigns || []).slice().reverse().map(item => `<tr data-href="/campaigns/${item.campaign_id}"><td data-label="更新时间">${fmtDate(item.updated_at)}</td><td data-label="标的"><b>${escapeHtml(item.symbol || shortId(item.instrument_id))}</b><br><span class="subtle">${escapeHtml(fmtDirection(item.direction))}</span></td><td data-label="账户">${escapeHtml(item.account_id)}<br><span class="subtle">${escapeHtml(fmtVenueLabel(item.venue))}</span></td><td data-label="策略 / 来源">${escapeHtml(resultStrategyLabel(item))}<br><span class="subtle">${escapeHtml(resultSourceLabel(item))}</span></td><td data-label="状态">${escapeHtml(fmtStatus(item.status))}</td><td data-label="总盈亏">${fmtAmount(item.final_pnl, item.currency)}</td></tr>`).join('');
   const stateCopy = data.data_status === 'EMPTY'
     ? '当前团队和筛选范围没有已记录的交易结果或风险决策。'
     : `已读取 ${data.coverage.campaign_count} 个交易任务、${data.coverage.closed_campaign_count} 个已平仓结果和 ${data.coverage.risk_event_count} 条风险决策。`;
   main.innerHTML = `<section class="page results-page"><header class="page-head"><div><p class="eyebrow">${escapeHtml(data.scope.team_name)} · ${resultEnvironmentLabel(environment)} · 已记录历史</p><h1>绩效与风险报表</h1><p class="lede">仅聚合当前 Workspace / Team 及获授权账户的服务端事实。影子、测试网和真实数据严格分开；币种不混算。</p></div><button class="secondary" data-refresh>刷新当前报表</button></header>
-    <article class="source-status ${environment === 'LIVE' ? 'tone-attention' : ''}"><div><p class="eyebrow">数据性质</p><h2>${escapeHtml(resultEnvironmentLabel(environment))}</h2><p>${escapeHtml(data.environment_notice)} ${escapeHtml(stateCopy)}</p></div><span class="status-pill">${escapeHtml(data.data_status)}</span></article>
-    <form id="results-filter-form" class="form-panel compact-form result-filters"><div class="field-grid"><label>环境<select name="environment"><option value="SHADOW" ${environment === 'SHADOW' ? 'selected' : ''}>影子模式</option><option value="TESTNET" ${environment === 'TESTNET' ? 'selected' : ''}>测试网</option><option value="LIVE" ${environment === 'LIVE' ? 'selected' : ''}>真实环境</option></select></label><label>交易所<select name="venue"><option value="">全部</option>${['BINANCE','HYPERLIQUID','OKX','BYBIT'].map(value => `<option value="${value}" ${current.get('venue') === value ? 'selected' : ''}>${value}</option>`).join('')}</select></label><label>账户<input name="account_id" value="${escapeHtml(current.get('account_id') || '')}" maxlength="120" placeholder="精确账户 ID"></label><label>策略<input name="strategy_id" value="${escapeHtml(current.get('strategy_id') || '')}" maxlength="120" placeholder="精确策略 ID"></label><label>策略版本<input name="strategy_version" value="${escapeHtml(current.get('strategy_version') || '')}" maxlength="120" placeholder="精确版本"></label><label>信号源<select name="signal_source_mode"><option value="">全部</option>${['PERPTAPE','WEBHOOK','MANUAL','SYSTEM'].map(value => `<option value="${value}" ${current.get('signal_source_mode') === value ? 'selected' : ''}>${value}</option>`).join('')}</select></label><label>信号提供方<select name="signal_provider"><option value="">全部</option>${['TRADINGVIEW','MODEL','PERPTAPE'].map(value => `<option value="${value}" ${current.get('signal_provider') === value ? 'selected' : ''}>${value}</option>`).join('')}</select></label><label>起始时间<input name="from_time" type="datetime-local" value="${escapeHtml(resultDateTimeInput(current.get('from_time')))}"></label><label>截止时间<input name="to_time" type="datetime-local" value="${escapeHtml(resultDateTimeInput(current.get('to_time')))}"></label></div><div class="form-actions"><a class="secondary" href="/results?environment=${environment}" data-link>清除其他筛选</a><button class="primary" type="submit">应用筛选</button></div></form>
+    <article class="source-status ${environment === 'LIVE' ? 'tone-attention' : ''}"><div><p class="eyebrow">数据性质</p><h2>${escapeHtml(resultEnvironmentLabel(environment))}</h2><p>${escapeHtml(resultEnvironmentNotice(data.environment_notice))} ${escapeHtml(stateCopy)}</p></div><span class="status-pill">${escapeHtml(fmtStatus(data.data_status))}</span></article>
+    <form id="results-filter-form" class="form-panel compact-form result-filters"><div class="field-grid"><label>环境<select name="environment"><option value="SHADOW" ${environment === 'SHADOW' ? 'selected' : ''}>影子模式</option><option value="TESTNET" ${environment === 'TESTNET' ? 'selected' : ''}>测试网</option><option value="LIVE" ${environment === 'LIVE' ? 'selected' : ''}>真实环境</option></select></label><label>交易所<select name="venue"><option value="">全部</option>${['BINANCE','HYPERLIQUID','OKX','BYBIT'].map(value => `<option value="${value}" ${current.get('venue') === value ? 'selected' : ''}>${escapeHtml(fmtVenueLabel(value))}</option>`).join('')}</select></label><label>账户<input name="account_id" value="${escapeHtml(current.get('account_id') || '')}" maxlength="120" placeholder="精确账户 ID"></label><label>策略<input name="strategy_id" value="${escapeHtml(current.get('strategy_id') || '')}" maxlength="120" placeholder="精确策略 ID"></label><label>策略版本<input name="strategy_version" value="${escapeHtml(current.get('strategy_version') || '')}" maxlength="120" placeholder="精确版本"></label><label>信号源<select name="signal_source_mode"><option value="">全部</option>${['PERPTAPE','WEBHOOK','MANUAL','SYSTEM'].map(value => `<option value="${value}" ${current.get('signal_source_mode') === value ? 'selected' : ''}>${escapeHtml(resultSourceModeLabel(value))}</option>`).join('')}</select></label><label>信号提供方<select name="signal_provider"><option value="">全部</option>${['TRADINGVIEW','MODEL','PERPTAPE'].map(value => `<option value="${value}" ${current.get('signal_provider') === value ? 'selected' : ''}>${escapeHtml(resultSignalProviderLabel(value))}</option>`).join('')}</select></label><label>起始时间<input name="from_time" type="datetime-local" value="${escapeHtml(resultDateTimeInput(current.get('from_time')))}"></label><label>截止时间<input name="to_time" type="datetime-local" value="${escapeHtml(resultDateTimeInput(current.get('to_time')))}"></label></div><div class="form-actions"><a class="secondary" href="/results?environment=${environment}" data-link>清除其他筛选</a><button class="primary" type="submit">应用筛选</button></div></form>
     ${headlineMetrics ? `<div class="stats results-stats">${headlineMetrics}</div>` : '<div class="callout"><b>暂无收益指标。</b><p>只有具备完整 Campaign PnL 真源的记录才会进入聚合。</p></div>'}
     <div class="callout tone-attention"><b>百分比收益率与百分比回撤暂不可用。</b><p>当前没有覆盖所有账户、币种和时间边界的可信期初资本，因此只展示结算币种绝对收益和绝对回撤，不伪造百分比。</p></div>
     ${resultDimensionSection('账户', '同一交易所的不同账户独立计算，不跨账户合并风险事件。', data.dimensions?.account)}
@@ -4042,7 +4079,7 @@ function exchangeAccountRegistry(registry) {
       ? `<form class="exchange-connection-form" data-exchange-account-id="${escapeHtml(item.exchange_account_id)}" data-version="${item.version}"><button class="secondary" type="submit" aria-describedby="${verificationHelpId}" ${canRunVerification ? '' : 'disabled'}>验证只读连接</button><small id="${verificationHelpId}">${escapeHtml(verificationReason)}</small><div class="form-error" role="alert"></div></form>`
       : `<p class="safety-note">${escapeHtml(verificationReason)} 由该账户范围的系统管理员执行验证。</p>`;
     const credentialControl = permissions.can_manage_credentials ? `<details class="account-credential-rotate"><summary><span><b>${credentials.state === 'CONFIGURED' ? '轮换加密凭据' : '添加加密凭据'}</b><small>保存后连接重置为待验证，交易能力保持关闭</small></span><strong>展开</strong></summary><form class="toolbox-content exchange-credential-form" data-exchange-account-id="${escapeHtml(item.exchange_account_id)}" data-venue="${escapeHtml(item.venue)}" data-version="${item.version}"><div class="field-grid">${exchangeCredentialFields(item.venue)}</div><p class="safety-note">凭据只写入 AES-256-GCM 加密信封；页面和 API 只返回脱敏元数据。保存凭据不代表连接成功，也不会开启下单、签名或广播。</p><div class="form-error" role="alert"></div><div class="form-actions"><button class="primary">保存新凭据版本</button></div></form></details>` : '';
-    return `<article class="card exchange-account-card"><div class="card-heading"><div><p class="eyebrow">${escapeHtml(item.venue)} · ${escapeHtml(item.account_id)}</p><h2>${escapeHtml(item.label)}</h2></div><span class="status-pill ${item.active ? 'status-APPROVED' : 'status-DISABLED'}">${item.active ? '已登记' : '已停用'}</span></div><div class="account-capability-split"><div><small>连接能力</small><b>${escapeHtml(connection)}</b><span>${escapeHtml(connector)} · ${item.runtime_binding?.bound ? '连续读取进程已绑定' : '连续读取进程未绑定'}</span></div><div><small>交易能力</small><b>${escapeHtml(trading)}</b><span>${escapeHtml(item.trading?.reason || '连接不会自动开启交易')}</span></div></div><dl class="definition-grid">${definition('凭据状态', credentials.state === 'CONFIGURED' ? `已加密 · ${hint}` : '未配置')}${definition('最近连接检查', fmtDate(item.connection?.checked_at))}${definition('最近验证成功', fmtDate(item.connection?.last_verified_at))}${definition('连接错误代码', item.connection?.error_code || '无')}${definition('凭据 / 账户版本', `${credentials.version || 0} / ${item.version}`)}${definition('下一步', item.next_action)}</dl>${verificationControl}${credentialControl}</article>`;
+    return `<article class="card exchange-account-card"><div class="card-heading"><div><p class="eyebrow">${escapeHtml(item.venue)} · ${escapeHtml(item.account_id)}</p><h2>${escapeHtml(item.label)}</h2></div><span class="status-pill ${item.active ? 'status-APPROVED' : 'status-DISABLED'}">${item.active ? '已登记' : '已停用'}</span></div><div class="account-capability-split"><div><small>连接能力</small><b>${escapeHtml(connection)}</b><span>${escapeHtml(connector)} · ${item.runtime_binding?.bound ? '连续读取进程已绑定' : '连续读取进程未绑定'}</span></div><div><small>交易能力</small><b>${escapeHtml(trading)}</b><span>${escapeHtml(fmtExchangeAccountCopy(item.trading?.reason || '连接不会自动开启交易'))}</span></div></div><dl class="definition-grid">${definition('凭据状态', credentials.state === 'CONFIGURED' ? `已加密 · ${hint}` : '未配置')}${definition('最近连接检查', fmtDate(item.connection?.checked_at))}${definition('最近验证成功', fmtDate(item.connection?.last_verified_at))}${definition('连接错误代码', item.connection?.error_code || '无')}${definition('凭据 / 账户版本', `${credentials.version || 0} / ${item.version}`)}${definition('下一步', fmtExchangeAccountCopy(item.next_action))}</dl>${verificationControl}${credentialControl}</article>`;
   }).join('');
   const create = registry.can_manage ? `<details class="card exchange-account-create"><summary><span><b>接入交易账户</b><small>同一交易所可登记多个独立账户；每个账户单独授权、风控与审计</small></span><strong>展开</strong></summary><form id="exchange-account-form" class="toolbox-content"><div class="field-grid"><label>交易所<select name="venue"><option value="BINANCE">Binance</option><option value="HYPERLIQUID">Hyperliquid</option><option value="OKX">OKX</option><option value="BYBIT">Bybit</option></select></label><label>内部账户 ID<input name="account_id" maxlength="120" placeholder="例如 binance-team-a-01" required></label><label>显示名称<input name="label" maxlength="120" placeholder="例如 主策略账户"></label></div><fieldset class="exchange-credential-fields"><legend>加密凭据</legend><div class="field-grid" data-create-credential-fields>${exchangeCredentialFields('BINANCE')}</div></fieldset><p class="safety-note">创建只登记当前团队的账户边界。连接验证与交易资格分别计算；交易、资金、签名和广播保持关闭。</p><div class="form-error" role="alert"></div><div class="form-actions"><button class="primary">登记并加密保存</button></div></form></details>` : '';
   return `<section class="exchange-account-registry"><div class="section-heading"><div><p class="eyebrow">当前团队 · 账户真源</p><h2>账户与能力边界</h2><p>登记、连接、交易是三个不同事实。账户已登记或凭据已保存，都不表示连接成功，更不表示可下单。</p></div><span class="status-pill">${accounts.length} 个账户</span></div>${create}${cards ? `<div class="exchange-account-grid">${cards}</div>` : '<div class="callout tone-attention"><b>当前团队没有交易账户。</b><p>由系统管理员登记第一个账户；缺少账户、凭据或连接事实时保持安全阻断。</p></div>'}</section>`;
@@ -4325,7 +4362,8 @@ function memberScope(member) {
 }
 
 function venueScopeOptions(selected = '') {
-  return `<option value="" ${selected ? '' : 'selected'}>全部交易所</option><option value="BINANCE" ${selected === 'BINANCE' ? 'selected' : ''}>币安</option><option value="HYPERLIQUID" ${selected === 'HYPERLIQUID' ? 'selected' : ''}>Hyperliquid</option>`;
+  const venues = ['BINANCE','HYPERLIQUID','OKX','BYBIT'];
+  return `<option value="" ${selected ? '' : 'selected'}>全部交易所</option>${venues.map(venue => `<option value="${venue}" ${selected === venue ? 'selected' : ''}>${escapeHtml(fmtVenueLabel(venue))}</option>`).join('')}`;
 }
 
 async function renderAccessManagement() {
@@ -4337,7 +4375,7 @@ async function renderAccessManagement() {
     const roles = member.roles.map(item => item.role);
     const scope = memberScope(member);
     const roleTags = roles.map(role => `<span>${escapeHtml(fmtRole(role))}</span>`).join('');
-    const venueSummary = ({BINANCE:'币安',HYPERLIQUID:'Hyperliquid'}[scope.venue] || scope.venue);
+    const venueSummary = fmtVenueLabel(scope.venue);
     const scopeSummary = scope.mixed ? '多个账户或交易所范围' : `${scope.account || '全部账户'} · ${scope.venue ? venueSummary : '全部交易所'}`;
     return `<details class="member-access-card ${member.active ? '' : 'is-inactive'}"><summary class="member-access-summary"><span class="member-summary-main"><b>${escapeHtml(member.username)}</b><small>${member.password_configured ? '密码已设置' : '尚未设置密码'} · ${escapeHtml(scopeSummary)}</small><span class="member-role-tags">${roleTags}</span></span><span class="member-summary-actions"><span class="status-pill ${member.active ? 'status-APPROVED' : ''}">${member.active ? '已启用' : '已停用'}</span><strong>${member.is_current_user ? '查看' : '编辑'}</strong></span></summary><form class="member-access-editor" data-user-access="${member.user_id}">
       ${member.is_current_user ? '<p class="safety-note">这是当前账号。为避免误锁死，必须由另一名系统管理员修改。</p>' : ''}
