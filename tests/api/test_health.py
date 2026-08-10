@@ -112,9 +112,9 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
 
     assert response.status_code == 200
     assert "交易控制台" in response.text
-    assert "/assets/app.js?v=138" in response.text
+    assert "/assets/app.js?v=139" in response.text
     assert 'href="/signals"' in response.text
-    assert "/assets/styles.css?v=55" in response.text
+    assert "/assets/styles.css?v=56" in response.text
     assert 'aria-label="交易控制台首页"' in response.text
     assert '<a href="/" data-link><span>⌂</span>当前任务</a>' in response.text
     assert "<span>⌁</span>实时机会</a>" in response.text
@@ -136,6 +136,7 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
         assert "交易控制台" in routed_shell.text
 
     assert get(app, "/admin/users").status_code == 401
+    assert get(app, "/admin/agents").status_code == 401
 
     app_javascript = get(app, "/assets/app.js")
     assert app_javascript.status_code == 200
@@ -169,6 +170,7 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
     assert "你的审核已记录" in app_javascript.text
     assert 'data-nav-capability="opportunity.view"' in response.text
     assert 'href="/admin/users"' in response.text
+    assert 'href="/admin/agents"' in response.text
     assert 'href="/results"' in response.text
     assert 'data-nav-capability="results.view"' in response.text
     assert 'href="/notifications"' in response.text

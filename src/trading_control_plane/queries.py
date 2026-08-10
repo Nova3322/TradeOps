@@ -9,7 +9,12 @@ from sqlalchemy import and_, false, func, or_, select, text, tuple_
 from sqlalchemy.orm import Session
 
 from trading_control_plane.database import Database
-from trading_control_plane.domain import DomainRejected, PrincipalType, Role
+from trading_control_plane.domain import (
+    DomainRejected,
+    PrincipalType,
+    Role,
+    ServicePrincipalKind,
+)
 from trading_control_plane.models import (
     AccountEquity,
     AccountEquityObservation,
@@ -316,6 +321,8 @@ class TradingQueries:
                 "user_id": str(user.user_id),
                 "username": user.username,
                 "auth_version": user.auth_version,
+                "principal_type": user.principal_type,
+                "service_kind": user.service_kind,
                 "active_workspace": (
                     None
                     if active_workspace is None
@@ -422,6 +429,93 @@ class TradingQueries:
                 }
                 for user in users
             ]
+
+    def managed_agents(
+        self,
+        actor_id: UUID,
+        *,
+        now: datetime | None = None,
+    ) -> list[dict[str, Any]]:
+        if not self.service.can_user(actor_id, "user.manage"):
+            raise DomainRejected("RBAC_DENIED", "agent access management requires SYSTEM_ADMIN")
+        observed_at = datetime.now(UTC) if now is None else now
+        with self.database.session_factory() as session:
+            actor = session.get(User, actor_id)
+            if actor is None or actor.active_team_id is None:
+                raise DomainRejected("TEAM_CONTEXT_REQUIRED", "select an active team")
+            agents = session.scalars(
+                select(User)
+                .join(TeamMembership, TeamMembership.user_id == User.user_id)
+                .where(
+                    User.principal_type == PrincipalType.SERVICE.value,
+                    User.service_kind == ServicePrincipalKind.AGENT.value,
+                    TeamMembership.team_id == actor.active_team_id,
+                )
+                .order_by(User.username)
+            ).all()
+            if not agents:
+                return []
+            memberships = {
+                item.user_id: item
+                for item in session.scalars(
+                    select(TeamMembership).where(
+                        TeamMembership.team_id == actor.active_team_id,
+                        TeamMembership.user_id.in_([item.user_id for item in agents]),
+                    )
+                )
+            }
+            assignments = session.scalars(
+                select(RoleAssignment)
+                .where(
+                    RoleAssignment.team_id == actor.active_team_id,
+                    RoleAssignment.user_id.in_([item.user_id for item in agents]),
+                )
+                .order_by(RoleAssignment.role)
+            ).all()
+            by_user: dict[UUID, list[dict[str, Any]]] = {item.user_id: [] for item in agents}
+            for assignment in assignments:
+                by_user[assignment.user_id].append(
+                    {
+                        "role": assignment.role,
+                        "account_scope": assignment.account_scope,
+                        "venue_scope": assignment.venue_scope,
+                    }
+                )
+            result: list[dict[str, Any]] = []
+            for agent in agents:
+                membership = memberships[agent.user_id]
+                active = bool(agent.active and membership.active)
+                token_status = (
+                    "INACTIVE"
+                    if not active
+                    else "EXPIRED"
+                    if agent.agent_token_expires_at is None
+                    or agent.agent_token_expires_at <= observed_at
+                    else "ACTIVE"
+                )
+                result.append(
+                    {
+                        "agent_id": str(agent.user_id),
+                        "username": agent.username,
+                        "principal_type": agent.principal_type,
+                        "service_kind": agent.service_kind,
+                        "workspace_id": str(actor.active_workspace_id),
+                        "team_id": str(actor.active_team_id),
+                        "active": active,
+                        "auth_version": agent.auth_version,
+                        "roles": by_user[agent.user_id],
+                        "token": {
+                            "status": token_status,
+                            "hint": agent.agent_token_hint,
+                            "version": agent.agent_token_version,
+                            "created_at": _iso(agent.agent_token_created_at),
+                            "expires_at": _iso(agent.agent_token_expires_at),
+                            "last_used_at": _iso(agent.agent_token_last_used_at),
+                        },
+                        "created_at": _iso(agent.created_at),
+                    }
+                )
+            return result
 
     def exchange_accounts(self, actor_id: UUID) -> dict[str, Any]:
         workspace_id, team_id = self._active_scope_ids(actor_id)

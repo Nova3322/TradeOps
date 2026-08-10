@@ -17,6 +17,7 @@ from fastapi import (
     Cookie,
     Depends,
     FastAPI,
+    Header,
     HTTPException,
     Query,
     Request,
@@ -33,6 +34,10 @@ from pydantic import ValidationError
 from trading_control_plane import __version__
 from trading_control_plane.api_schemas import (
     AccountEquityFactRequest,
+    AgentAccessRequest,
+    AgentCreateRequest,
+    AgentProposalRequest,
+    AgentTokenRotationRequest,
     AuthorizationRequest,
     AutoAddRequest,
     AutomaticExitRequest,
@@ -242,6 +247,8 @@ def _domain_status(code: str) -> int:
         "AUTH_TOKEN_INVALID",
         "SESSION_EXPIRED",
         "SESSION_REVOKED",
+        "AGENT_TOKEN_INVALID",
+        "AGENT_TOKEN_EXPIRED",
         "SIGNAL_SIGNATURE_INVALID",
     }:
         return status.HTTP_401_UNAUTHORIZED
@@ -259,8 +266,13 @@ def _domain_status(code: str) -> int:
         "TEAM_ACCESS_DENIED",
         "TEAM_SCOPE_DENIED",
         "WORKSPACE_MEMBERSHIP_INACTIVE",
+        "AGENT_STEP_UP_FORBIDDEN",
+        "AGENT_IDENTITY_REQUIRED",
+        "AGENT_PROPOSAL_ENDPOINT_REQUIRED",
     }:
         return status.HTTP_403_FORBIDDEN
+    if code == "AUTH_CREDENTIAL_AMBIGUOUS":
+        return status.HTTP_400_BAD_REQUEST
     if code.endswith("_NOT_FOUND"):
         return status.HTTP_404_NOT_FOUND
     if code == "PERPTAPE_RATE_LIMITED":
@@ -940,7 +952,34 @@ def create_app(
 
     def current_identity(
         trading_session: str | None = Cookie(default=None, alias=SESSION_COOKIE),
+        authorization: str | None = Header(default=None),
     ) -> SessionIdentity:
+        if trading_session is not None and authorization is not None:
+            raise DomainRejected(
+                "AUTH_CREDENTIAL_AMBIGUOUS",
+                "send either a login session or one Bearer credential, not both",
+            )
+        if authorization is not None:
+            scheme, separator, credential = authorization.partition(" ")
+            if (
+                separator != " "
+                or scheme.casefold() != "bearer"
+                or not credential
+                or credential.strip() != credential
+                or " " in credential
+            ):
+                raise DomainRejected("AGENT_TOKEN_INVALID", "agent API credential is invalid")
+            authenticated = service().authenticate_agent_token(credential, now=_now())
+            context = queries().user_context(UUID(str(authenticated["user_id"])))
+            if int(context["auth_version"]) != int(authenticated["auth_version"]):
+                raise DomainRejected("SESSION_REVOKED", "agent access changed during login")
+            return SessionIdentity(
+                user_id=UUID(str(authenticated["user_id"])),
+                username=str(authenticated["username"]),
+                expires_at=authenticated["expires_at"],
+                authentication_method="agent-token-v1",
+                auth_version=int(authenticated["auth_version"]),
+            )
         if trading_session is None:
             raise DomainRejected("LOGIN_DENIED", "an internal login session is required")
         identity = token_service.verify_session(trading_session, now=_now())
@@ -948,6 +987,9 @@ def create_app(
         if int(context["auth_version"]) != identity.auth_version:
             raise DomainRejected("SESSION_REVOKED", "login session was revoked")
         return identity
+
+    def is_agent_identity(identity: SessionIdentity) -> bool:
+        return identity.authentication_method == "agent-token-v1"
 
     identity_dependency = Depends(current_identity)
 
@@ -1376,11 +1418,86 @@ def create_app(
         )
         return {"user_id": str(user_id), "data": queries().managed_users(identity.user_id)}
 
+    @app.get("/api/admin/agents")
+    def managed_agents(
+        identity: SessionIdentity = identity_dependency,
+    ) -> dict[str, Any]:
+        return {
+            "data": queries().managed_agents(identity.user_id, now=_now()),
+            "as_of": _now().isoformat(),
+        }
+
+    @app.post("/api/admin/agents")
+    def create_agent(
+        payload: AgentCreateRequest,
+        identity: SessionIdentity = identity_dependency,
+    ) -> dict[str, Any]:
+        result = service().create_agent(
+            username=payload.username,
+            roles=[Role(value) for value in payload.roles],
+            account_scope=payload.account_scope,
+            venue_scope=payload.venue_scope,
+            expires_in_days=payload.expires_in_days,
+            idempotency_key=payload.idempotency_key,
+            actor_id=identity.user_id,
+            now=_now(),
+        )
+        return {
+            "result": result,
+            "data": queries().managed_agents(identity.user_id, now=_now()),
+        }
+
+    @app.put("/api/admin/agents/{agent_id}/access")
+    def update_agent_access(
+        agent_id: UUID,
+        payload: AgentAccessRequest,
+        identity: SessionIdentity = identity_dependency,
+    ) -> dict[str, Any]:
+        result = service().update_agent_access(
+            agent_id,
+            roles=[Role(value) for value in payload.roles],
+            active=payload.active,
+            account_scope=payload.account_scope,
+            venue_scope=payload.venue_scope,
+            expected_auth_version=payload.expected_auth_version,
+            idempotency_key=payload.idempotency_key,
+            actor_id=identity.user_id,
+            now=_now(),
+        )
+        return {
+            "result": result,
+            "data": queries().managed_agents(identity.user_id, now=_now()),
+        }
+
+    @app.post("/api/admin/agents/{agent_id}/token-rotations")
+    def rotate_agent_token(
+        agent_id: UUID,
+        payload: AgentTokenRotationRequest,
+        identity: SessionIdentity = identity_dependency,
+    ) -> dict[str, Any]:
+        result = service().rotate_agent_token(
+            agent_id,
+            expected_token_version=payload.expected_token_version,
+            expires_in_days=payload.expires_in_days,
+            idempotency_key=payload.idempotency_key,
+            actor_id=identity.user_id,
+            now=_now(),
+        )
+        return {
+            "result": result,
+            "data": queries().managed_agents(identity.user_id, now=_now()),
+        }
+
     @app.post("/api/auth/mock/step-up")
     def mock_step_up(
         payload: MockStepUpRequest,
         identity: SessionIdentity = identity_dependency,
     ) -> dict[str, Any]:
+        if is_agent_identity(identity):
+            raise DomainRejected(
+                "AGENT_STEP_UP_FORBIDDEN",
+                "Agent credentials cannot mint human action grants",
+            )
         if not (
             resolved_settings.allow_mock_identity
             and resolved_settings.environment in {"local", "test"}
@@ -2008,6 +2125,11 @@ def create_app(
         payload: SystemProposalRequest,
         identity: SessionIdentity = identity_dependency,
     ) -> dict[str, Any]:
+        if is_agent_identity(identity):
+            raise DomainRejected(
+                "AGENT_PROPOSAL_ENDPOINT_REQUIRED",
+                "Agents must use the audited /api/agent/proposals contract",
+            )
         now = _now()
         candidate = current_perptape_candidate(
             candidate_id,
@@ -2200,6 +2322,89 @@ def create_app(
             identity,
         )
 
+    @app.post("/api/agent/proposals")
+    def create_agent_proposal(
+        payload: AgentProposalRequest,
+        identity: SessionIdentity = identity_dependency,
+    ) -> dict[str, Any]:
+        if not is_agent_identity(identity):
+            raise DomainRejected(
+                "AGENT_IDENTITY_REQUIRED",
+                "this endpoint requires a team-scoped Agent Bearer credential",
+            )
+        now = _now()
+        generated_at = payload.generated_at.astimezone(UTC)
+        if generated_at > now + timedelta(seconds=30) or now - generated_at > timedelta(minutes=5):
+            raise DomainRejected(
+                "AGENT_PROPOSAL_STALE",
+                "Agent proposal facts must be current within five minutes",
+            )
+        details = {
+            "trigger_price": str(payload.trigger_price),
+            "limit_price": None if payload.limit_price is None else str(payload.limit_price),
+            "invalidation_price": str(payload.invalidation_price),
+            "initial_quantity": str(payload.quantity),
+            "allow_auto_add": False,
+            "requested_adds": 0,
+            "add_trigger_price": None,
+            "rationale": payload.rationale,
+            "agent": {
+                "principal_id": str(identity.user_id),
+                "model_id": payload.model_id,
+                "model_version": payload.model_version,
+                "request_id": payload.request_id,
+                "generated_at": generated_at.isoformat(),
+            },
+        }
+        idempotency_payload = {
+            "source": ProposalSource.SYSTEM.value,
+            "environment": payload.environment,
+            "account_id": payload.account_id,
+            "venue": payload.venue,
+            "instrument_id": str(payload.instrument_id),
+            "direction": payload.direction.value,
+            "risk_tier": payload.risk_tier.value,
+            "quantity": str(payload.quantity),
+            "max_risk": str(payload.max_risk),
+            "expires_in_minutes": payload.expires_in_minutes,
+            "strategy_id": payload.model_id,
+            "strategy_version": payload.model_version,
+            "request_id": payload.request_id,
+            "generated_at": generated_at.isoformat(),
+            "details": details,
+            "submit_for_review": True,
+        }
+        proposal_id = service().create_proposal(
+            actor_id=identity.user_id,
+            source=ProposalSource.SYSTEM,
+            risk_tier=payload.risk_tier,
+            account_id=payload.account_id,
+            venue=payload.venue,
+            instrument_id=payload.instrument_id,
+            direction=payload.direction,
+            quantity=payload.quantity,
+            max_risk=payload.max_risk,
+            expires_at=now + timedelta(minutes=payload.expires_in_minutes),
+            idempotency_key=payload.idempotency_key,
+            strategy_id=payload.model_id,
+            strategy_version=payload.model_version,
+            environment=ExecutionEnvironment(payload.environment),
+            source_candidate_id=f"agent:{identity.user_id}:{payload.request_id}",
+            source_link=None,
+            source_observed_at=generated_at,
+            source_readiness="READY",
+            details=details,
+            idempotency_payload=idempotency_payload,
+            submit_for_review=True,
+            now=now,
+        )
+        detail = queries().proposal_detail(identity.user_id, proposal_id, now=now)
+        return {
+            "proposal_id": str(proposal_id),
+            "status": detail["status"],
+            "detail": detail,
+        }
+
     @app.post("/api/proposals/manual")
     def create_manual_proposal(
         payload: ManualProposalRequest,
@@ -2385,7 +2590,13 @@ def create_app(
         identity: SessionIdentity = identity_dependency,
     ) -> dict[str, Any]:
         now = _now()
-        if payload.decision == "APPROVE":
+        agent_call = is_agent_identity(identity)
+        if agent_call and payload.idempotency_key is None:
+            raise DomainRejected(
+                "AGENT_IDEMPOTENCY_REQUIRED",
+                "Agent reviews require an explicit idempotency key",
+            )
+        if payload.decision == "APPROVE" and not agent_call:
             if payload.action_grant is None:
                 raise DomainRejected(
                     "ACTION_GRANT_REQUIRED", "proposal approval requires action-level step-up"
@@ -2404,6 +2615,7 @@ def create_app(
             ReviewDecision(payload.decision),
             payload.reason,
             expected_version=payload.expected_version,
+            idempotency_key=payload.idempotency_key,
             now=now,
         )
         detail = queries().proposal_detail(identity.user_id, proposal_id, now=now)
@@ -6847,6 +7059,7 @@ def create_app(
             return FileResponse(WEB_ROOT / "sw.js", media_type="application/javascript")
 
         @app.get("/admin/users", include_in_schema=False)
+        @app.get("/admin/agents", include_in_schema=False)
         def managed_users_web(
             identity: SessionIdentity = identity_dependency,
         ) -> FileResponse:

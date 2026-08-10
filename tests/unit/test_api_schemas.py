@@ -4,6 +4,9 @@ import pytest
 from pydantic import ValidationError
 
 from trading_control_plane.api_schemas import (
+    AgentAccessRequest,
+    AgentCreateRequest,
+    AgentProposalRequest,
     ManualProposalRequest,
     NotificationRouteWriteRequest,
     ProposalDefaultConfigRequest,
@@ -191,5 +194,62 @@ def test_notification_route_schema_keeps_secrets_wrapped_and_excludes_unready_ev
                 "event_types": ["CAPITAL_STATUS_CHANGED"],
                 "expected_version": 0,
                 "idempotency_key": "route-capital",
+            }
+        )
+
+
+def test_agent_schemas_limit_roles_require_exact_scope_and_current_time_shape() -> None:
+    created = AgentCreateRequest.model_validate(
+        {
+            "username": "model-alpha",
+            "roles": ["PROPOSER", "REVIEWER"],
+            "account_scope": "paper-1",
+            "venue_scope": "BINANCE",
+            "idempotency_key": "agent-create",
+        }
+    )
+    proposal = AgentProposalRequest.model_validate(
+        {
+            **proposal_payload(),
+            "model_id": "alpha",
+            "model_version": "2026.08",
+            "request_id": "request-00000001",
+            "generated_at": "2026-08-10T08:00:00+00:00",
+            "rationale": "model facts are frozen for independent review",
+        }
+    )
+
+    assert created.expires_in_days == 90
+    assert proposal.expires_in_minutes == 480
+    with pytest.raises(ValidationError):
+        AgentCreateRequest.model_validate(
+            {
+                "username": "operator-agent",
+                "roles": ["OPERATOR"],
+                "account_scope": "paper-1",
+                "venue_scope": "BINANCE",
+                "idempotency_key": "agent-operator",
+            }
+        )
+    with pytest.raises(ValidationError, match="active agent requires a role"):
+        AgentAccessRequest.model_validate(
+            {
+                "roles": [],
+                "active": True,
+                "account_scope": "paper-1",
+                "venue_scope": "BINANCE",
+                "expected_auth_version": 1,
+                "idempotency_key": "agent-empty-role",
+            }
+        )
+    with pytest.raises(ValidationError, match="timezone"):
+        AgentProposalRequest.model_validate(
+            {
+                **proposal_payload(),
+                "model_id": "alpha",
+                "model_version": "2026.08",
+                "request_id": "request-00000001",
+                "generated_at": "2026-08-10T08:00:00",
+                "rationale": "model facts are frozen for independent review",
             }
         )

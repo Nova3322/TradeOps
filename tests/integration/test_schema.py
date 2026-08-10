@@ -75,7 +75,7 @@ def test_notification_migration_round_trip(database: Database) -> None:
         assert "notification_routes" not in tables
         assert "notification_deliveries" not in tables
 
-    command.upgrade(config, "20260810_0024")
+    command.upgrade(config, "head")
     with database.engine.connect() as connection:
         tables = set(inspect(connection).get_table_names())
         differences = compare_metadata(MigrationContext.configure(connection), Base.metadata)
@@ -108,6 +108,53 @@ def test_team_execution_mode_migration_round_trip(database: Database) -> None:
     assert revision == REQUIRED_SCHEMA_REVISION
     assert "execution_mode" in columns
     assert "ck_teams_execution_mode" in checks
+    assert differences == []
+
+
+def test_agent_credential_migration_backfills_internal_services_and_round_trips(
+    database: Database,
+) -> None:
+    config = Config("alembic.ini")
+    command.downgrade(config, "20260810_0024")
+    service_user_id = uuid4()
+    with database.engine.begin() as connection:
+        connection.execute(
+            text(
+                "INSERT INTO users "
+                "(user_id, username, principal_type, active, auth_version, created_at) "
+                "VALUES (:user_id, 'pre-agent-service', 'SERVICE', true, 1, :created_at)"
+            ),
+            {"user_id": service_user_id, "created_at": datetime.now(UTC)},
+        )
+
+    command.upgrade(config, "head")
+    with database.engine.connect() as connection:
+        columns = {item["name"] for item in inspect(connection).get_columns("users")}
+        checks = {item["name"] for item in inspect(connection).get_check_constraints("users")}
+        row = connection.execute(
+            text(
+                "SELECT service_kind, agent_token_version, agent_token_digest "
+                "FROM users WHERE user_id = :user_id"
+            ),
+            {"user_id": service_user_id},
+        ).one()
+        differences = compare_metadata(MigrationContext.configure(connection), Base.metadata)
+
+    assert {
+        "service_kind",
+        "agent_token_digest",
+        "agent_token_hint",
+        "agent_token_version",
+        "agent_token_created_at",
+        "agent_token_expires_at",
+        "agent_token_last_used_at",
+    }.issubset(columns)
+    assert {
+        "ck_users_service_kind",
+        "ck_users_agent_token_version",
+        "ck_users_agent_token_shape",
+    }.issubset(checks)
+    assert row == ("INTERNAL", 0, None)
     assert differences == []
 
 

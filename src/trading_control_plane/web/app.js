@@ -905,7 +905,7 @@ const routeCapability = (path) => {
   if (path === '/notifications') return 'notification.view';
   if (path === '/positions' || path === '/risk') return 'system.view';
   if (path === '/venues' || path.startsWith('/venues/')) return 'venue.view';
-  if (path === '/admin/users') return 'access.manage';
+  if (path === '/admin/users' || path === '/admin/agents') return 'access.manage';
   return 'operations.view';
 };
 const capabilityLabel = (capability) => ({'signal.view':'查看信号源','opportunity.view':'查看机会','proposal.view':'查看提案','operations.view':'交易运维','results.view':'查看绩效报表','notification.view':'查看通知中心','system.view':'查看系统状态','venue.view':'查看交易账户','capital.view':'资金管理','proposal.create':'发起提案','proposal.review':'独立审核','access.manage':'成员权限管理'}[capability] || capability);
@@ -1226,7 +1226,7 @@ async function route() {
     return;
   }
   const path = location.pathname;
-  const teamSetupPaths = new Set(['/admin/users', '/venues', '/signals', '/notifications', '/risk', '/shadow']);
+  const teamSetupPaths = new Set(['/admin/users', '/admin/agents', '/venues', '/signals', '/notifications', '/risk', '/shadow']);
   if (!session.active_workspace || !session.active_team || (!session.active_team.trading_enabled && !teamSetupPaths.has(path))) {
     renderScopeSetup();
     enhanceRenderedPage();
@@ -1262,6 +1262,7 @@ async function route() {
     else if (path === '/exceptions') { history.replaceState({}, '', '/campaigns/alerts'); await renderRuntimeAlerts(); }
     else if (path === '/venues' || path === '/venues/binance' || path === '/venues/hyperliquid') await renderVenueFacts();
     else if (path === '/admin/users') await renderAccessManagement();
+    else if (path === '/admin/agents') await renderAgentManagement();
     else {
       const campaignMatch = path.match(/^\/campaigns\/([0-9a-f-]+)$/i);
       const proposalMatch = path.match(/^\/proposals\/([0-9a-f-]+)$/i);
@@ -4387,6 +4388,97 @@ async function renderAccessManagement() {
     await withPending(event.submitter, '保存中…', async () => {
       try { await api(`/api/admin/users/${form.dataset.userAccess}/access`, {method:'PUT', body:JSON.stringify(payload)}); showToast('成员权限已保存并写入审计'); await route(); }
       catch (error) { showApiError(error, form.querySelector('.form-error')); }
+    });
+  }));
+}
+
+const agentRoleCatalog = accessRoleCatalog.filter(item => ['OBSERVER','PROPOSER','REVIEWER'].includes(item.role));
+
+function agentRoleOptions(selectedRoles, prefix) {
+  const selected = new Set(selectedRoles);
+  return agentRoleCatalog.map(item => `<label class="permission-option" for="${prefix}-${item.role}"><input id="${prefix}-${item.role}" name="roles" type="checkbox" value="${item.role}" ${selected.has(item.role) ? 'checked' : ''}><span><b>${escapeHtml(item.label)}</b><small>${escapeHtml(item.copy)}</small></span></label>`).join('');
+}
+
+function agentScopeOptions(accounts, selectedAccount = '', selectedVenue = '') {
+  return accounts.map(account => {
+    const value = `${account.account_id}::${account.venue}`;
+    const selected = account.account_id === selectedAccount && account.venue === selectedVenue;
+    return `<option value="${escapeHtml(value)}" ${selected ? 'selected' : ''}>${escapeHtml(account.label)} · ${escapeHtml(account.account_id)} · ${escapeHtml(account.venue)}</option>`;
+  }).join('');
+}
+
+function agentCredentialReveal(result) {
+  if (!result) return '';
+  if (!result.token) return `<article class="home-status tone-attention agent-token-reveal" role="status"><div><p class="eyebrow">凭据未再次返回</p><h2>该幂等请求已完成</h2><p>服务端只在首次创建或轮换响应中返回明文 Token。若首次响应已丢失，请对该 Agent 执行凭据轮换。</p></div><span class="status-pill">${escapeHtml(result.token_hint || '已保存摘要')}</span></article>`;
+  return `<article class="agent-token-reveal" role="status" aria-live="polite"><div class="card-heading"><div><p class="eyebrow">仅显示一次 · 不会持久化到页面存储</p><h2>立即复制 Agent Token</h2></div><span class="status-pill status-APPROVED">版本 ${escapeHtml(result.token_version)}</span></div><p>离开或刷新本页后将不再显示。控制台和 API 列表只保留不可逆摘要与末尾提示。</p><label>Bearer Token<textarea data-agent-plaintext-token readonly rows="3" spellcheck="false" aria-label="仅显示一次的 Agent Bearer Token">${escapeHtml(result.token)}</textarea></label><div class="toolbar"><button class="primary" type="button" data-copy-agent-token>复制 Token</button><span class="subtle">到期 ${fmtDate(result.token_expires_at)}</span></div></article>`;
+}
+
+async function renderAgentManagement(credentialResult = null) {
+  const [agentResponse, accountResponse] = await Promise.all([
+    api('/api/admin/agents'),
+    api('/api/exchange-accounts'),
+  ]);
+  const agents = agentResponse.data;
+  const accounts = accountResponse.data.data.filter(item => item.active !== false);
+  const defaultScopeOptions = agentScopeOptions(accounts);
+  const cards = agents.map(agent => {
+    const roles = agent.roles.map(item => item.role);
+    const scope = agent.roles[0] || {};
+    const selectedOptions = agentScopeOptions(accounts, scope.account_scope, scope.venue_scope);
+    const roleTags = roles.map(role => `<span>${escapeHtml(fmtRole(role))}</span>`).join('') || '<span>未分配</span>';
+    const token = agent.token;
+    return `<details class="member-access-card agent-access-card ${agent.active ? '' : 'is-inactive'}"><summary class="member-access-summary"><span class="member-summary-main"><b>${escapeHtml(agent.username)}</b><small>${escapeHtml(scope.account_scope || '无账户范围')} · ${escapeHtml(scope.venue_scope || '无交易所范围')} · Token ${escapeHtml(token.status)}</small><span class="member-role-tags">${roleTags}</span></span><span class="member-summary-actions"><span class="status-pill ${agent.active && token.status === 'ACTIVE' ? 'status-APPROVED' : ''}">${agent.active ? token.status === 'ACTIVE' ? '可认证' : '凭据到期' : '已停用'}</span><strong>编辑</strong></span></summary><form class="member-access-editor" data-agent-access="${agent.agent_id}" data-auth-version="${agent.auth_version}">
+      <div class="agent-fact-strip"><span><b>Token 摘要</b><small>${escapeHtml(token.hint || '—')}</small></span><span><b>版本</b><small>${escapeHtml(token.version)}</small></span><span><b>到期</b><small>${fmtDate(token.expires_at)}</small></span><span><b>最近使用</b><small>${fmtDate(token.last_used_at)}</small></span></div>
+      <div class="permission-grid agent-permission-grid">${agentRoleOptions(roles, `agent-${agent.agent_id}`)}</div>
+      <div class="scope-grid"><label>唯一账户与交易所范围<select name="scope" required>${selectedOptions}</select></label><label class="active-toggle"><input name="active" type="checkbox" ${agent.active ? 'checked' : ''}>允许此 Token 在当前团队认证</label></div>
+      <p class="microcopy">Agent 只能获得观察、提案或独立审核权限；不提供交易执行、风控决策、资金、账户凭据、签名或广播权限。</p><div class="form-error" role="alert"></div><div class="form-actions"><button class="secondary">保存最小权限</button><button class="text-button" type="button" data-rotate-agent="${agent.agent_id}" data-token-version="${token.version}">轮换 Token</button></div></form></details>`;
+  }).join('');
+  const unavailable = accounts.length === 0;
+  main.innerHTML = `<section class="page access-page agent-page"><header class="page-head"><div><p class="eyebrow">${escapeHtml(session.active_workspace?.name || 'Workspace')} · ${escapeHtml(session.active_team?.name || 'Team')}</p><h1>AI Agent 权限</h1><p class="lede">为模型或自动化工作器创建团队固定、账户固定的 API 身份。Agent 与用户共享同一权限、独立审核、幂等和审计真源。</p></div><span class="status-pill">${agents.filter(item => item.active).length} 个启用 Agent</span></header>
+    ${agentCredentialReveal(credentialResult)}
+    <article class="card access-principles"><h2>不可穿透的 Agent 边界</h2><div class="access-principle-grid"><p><b>最小角色</b><span>仅观察、提案、独立审核；不授予交易、风控、资金或管理岗位。</span></p><p><b>独立审核</b><span>创建者仍不得审核自己的提案；服务端在角色判断前执行同一创建者校验。</span></p><p><b>密钥隔离</b><span>Token 仅首次响应显示；Agent 不读取交易所明文密钥，也不能生成人工动作授权。</span></p></div></article>
+    ${unavailable ? '<article class="home-status tone-attention"><div><p class="eyebrow">创建受阻</p><h2>先登记一个团队交易账户</h2><p>Agent 必须绑定现有的精确账户与交易所范围；服务端不会创建通配范围或猜测账户。</p></div><a class="primary" href="/venues" data-link>登记交易账户</a></article>' : ''}
+    <details class="card create-member-panel" ${agents.length ? '' : 'open'}><summary><span><b>创建团队 Agent</b><small>Token 只显示一次；创建后默认不具备任何危险能力</small></span><strong>展开</strong></summary><form id="create-agent-form" class="toolbox-content"><div class="field-grid"><label>Agent 名称<input name="username" pattern="[A-Za-z0-9._-]+" placeholder="例如 alpha-model" required></label><label>唯一账户与交易所范围<select name="scope" required ${unavailable ? 'disabled' : ''}>${defaultScopeOptions}</select></label><label>Token 有效天数<input name="expires_in_days" type="number" min="1" max="365" value="90" required></label></div><div class="permission-grid agent-permission-grid">${agentRoleOptions([], 'agent-create')}</div><p class="microcopy">提案 Agent 调用 <code>POST /api/agent/proposals</code>，最多创建已冻结且等待独立审核的 SYSTEM 提案；不会自动风控、授权或下单。</p><div class="form-error" role="alert"></div><div class="form-actions"><button class="primary" ${unavailable ? 'disabled title="先登记团队交易账户"' : ''}>创建并显示一次 Token</button></div></form></details>
+    <div class="section-heading"><div><p class="eyebrow">当前团队</p><h2>Agent 身份</h2></div><span class="subtle">截止 ${fmtDate(agentResponse.as_of)}</span></div><div class="member-access-list">${cards || '<section class="empty-state"><div><h2>尚未创建 Agent</h2><p>先绑定一个精确账户范围，再只授予当前工作器需要的最小角色。</p></div></section>'}</div>
+  </section>`;
+
+  document.querySelector('[data-copy-agent-token]')?.addEventListener('click', async event => {
+    const field = document.querySelector('[data-agent-plaintext-token]');
+    if (!field) return;
+    try { await navigator.clipboard.writeText(field.value); showToast('Token 已复制；请保存到受控的秘密管理器'); }
+    catch (_error) { field.focus(); field.select(); showToast('浏览器未允许自动复制；Token 已选中'); }
+  });
+  document.querySelector('#create-agent-form')?.addEventListener('submit', async event => {
+    event.preventDefault();
+    const form = event.currentTarget;
+    const data = new FormData(form);
+    const [account_scope, venue_scope] = String(data.get('scope') || '').split('::');
+    const payload = {username:data.get('username'), roles:data.getAll('roles'), account_scope, venue_scope, expires_in_days:Number(data.get('expires_in_days')), idempotency_key:crypto.randomUUID()};
+    if (!payload.roles.length) { form.querySelector('.form-error').textContent = '至少选择一个观察、提案或审核角色。'; return; }
+    await withPending(event.submitter, '创建中…', async () => {
+      try { const response = await api('/api/admin/agents', {method:'POST', body:JSON.stringify(payload)}); await renderAgentManagement(response.result); enhanceRenderedPage(); }
+      catch (error) { showApiError(error, form.querySelector('.form-error')); }
+    });
+  });
+  document.querySelectorAll('[data-agent-access]').forEach(form => form.addEventListener('submit', async event => {
+    event.preventDefault();
+    const data = new FormData(form);
+    const active = data.get('active') === 'on';
+    const roles = data.getAll('roles');
+    const [account_scope, venue_scope] = String(data.get('scope') || '').split('::');
+    if (active && !roles.length) { form.querySelector('.form-error').textContent = '启用 Agent 时至少保留一个最小角色。'; return; }
+    const payload = {roles, active, account_scope, venue_scope, expected_auth_version:Number(form.dataset.authVersion), idempotency_key:crypto.randomUUID()};
+    await withPending(event.submitter, '保存中…', async () => {
+      try { await api(`/api/admin/agents/${form.dataset.agentAccess}/access`, {method:'PUT', body:JSON.stringify(payload)}); showToast('Agent 权限已保存；服务端立即按新范围拒绝旧访问'); await renderAgentManagement(); enhanceRenderedPage(); }
+      catch (error) { showApiError(error, form.querySelector('.form-error')); }
+    });
+  }));
+  document.querySelectorAll('[data-rotate-agent]').forEach(button => button.addEventListener('click', async event => {
+    const confirmed = await confirmAction({title:'轮换 Agent Token？', message:'当前 Token 会立即失效。新 Token 只在下一次响应中显示一次。', confirmLabel:'确认轮换'});
+    if (!confirmed) return;
+    await withPending(event.currentTarget, '轮换中…', async () => {
+      try { const response = await api(`/api/admin/agents/${event.currentTarget.dataset.rotateAgent}/token-rotations`, {method:'POST', body:JSON.stringify({expected_token_version:Number(event.currentTarget.dataset.tokenVersion), expires_in_days:90, idempotency_key:crypto.randomUUID()})}); await renderAgentManagement(response.result); enhanceRenderedPage(); }
+      catch (error) { showApiError(error); }
     });
   }));
 }

@@ -25,6 +25,7 @@ AccessRole = Literal[
     "TREASURY_ADMIN",
     "SYSTEM_ADMIN",
 ]
+AgentAccessRole = Literal["OBSERVER", "PROPOSER", "REVIEWER"]
 
 
 class MockLoginRequest(BaseModel):
@@ -64,6 +65,50 @@ class ManagedUserAccessRequest(BaseModel):
         if len(value) != len(set(value)):
             raise ValueError("roles must not contain duplicates")
         return value
+
+
+class AgentCreateRequest(BaseModel):
+    username: str = Field(min_length=1, max_length=120, pattern=r"^[A-Za-z0-9._-]+$")
+    roles: list[AgentAccessRole] = Field(min_length=1, max_length=3)
+    account_scope: str = Field(min_length=1, max_length=120)
+    venue_scope: Literal["BINANCE", "HYPERLIQUID", "OKX", "BYBIT"]
+    expires_in_days: int = Field(default=90, ge=1, le=365)
+    idempotency_key: str = Field(min_length=1, max_length=160)
+
+    @field_validator("roles")
+    @classmethod
+    def unique_roles(cls, value: list[AgentAccessRole]) -> list[AgentAccessRole]:
+        if len(value) != len(set(value)):
+            raise ValueError("roles must not contain duplicates")
+        return value
+
+
+class AgentAccessRequest(BaseModel):
+    roles: list[AgentAccessRole] = Field(max_length=3)
+    active: bool = True
+    account_scope: str = Field(min_length=1, max_length=120)
+    venue_scope: Literal["BINANCE", "HYPERLIQUID", "OKX", "BYBIT"]
+    expected_auth_version: int = Field(ge=1)
+    idempotency_key: str = Field(min_length=1, max_length=160)
+
+    @field_validator("roles")
+    @classmethod
+    def unique_roles(cls, value: list[AgentAccessRole]) -> list[AgentAccessRole]:
+        if len(value) != len(set(value)):
+            raise ValueError("roles must not contain duplicates")
+        return value
+
+    @model_validator(mode="after")
+    def require_active_role(self) -> AgentAccessRequest:
+        if self.active and not self.roles:
+            raise ValueError("an active agent requires a role")
+        return self
+
+
+class AgentTokenRotationRequest(BaseModel):
+    expected_token_version: int = Field(ge=1)
+    expires_in_days: int = Field(default=90, ge=1, le=365)
+    idempotency_key: str = Field(min_length=1, max_length=160)
 
 
 class WorkspaceCreateRequest(BaseModel):
@@ -347,6 +392,38 @@ class SystemProposalRequest(BaseModel):
         return self
 
 
+class AgentProposalRequest(BaseModel):
+    environment: Literal["SHADOW", "TESTNET", "LIVE"] = "SHADOW"
+    account_id: str = Field(min_length=1, max_length=120)
+    venue: Literal["BINANCE", "HYPERLIQUID", "OKX", "BYBIT"]
+    instrument_id: UUID
+    direction: Direction
+    risk_tier: RiskTier
+    quantity: Decimal = Field(gt=0)
+    max_risk: Decimal = Field(gt=0)
+    expires_in_minutes: int = Field(default=480, ge=480, le=1_440)
+    trigger_price: Decimal = Field(gt=0)
+    invalidation_price: Decimal = Field(gt=0)
+    limit_price: Decimal | None = Field(default=None, gt=0)
+    model_id: str = Field(min_length=1, max_length=80, pattern=r"^[A-Za-z0-9._:-]+$")
+    model_version: str = Field(min_length=1, max_length=80)
+    request_id: str = Field(
+        min_length=16,
+        max_length=80,
+        pattern=r"^[A-Za-z0-9._:-]+$",
+    )
+    generated_at: datetime
+    rationale: str = Field(min_length=10, max_length=2_000)
+    idempotency_key: str = Field(min_length=1, max_length=160)
+
+    @field_validator("generated_at")
+    @classmethod
+    def timezone_aware_generated_at(cls, value: datetime) -> datetime:
+        if value.utcoffset() is None:
+            raise ValueError("generated_at must include a timezone")
+        return value
+
+
 class ProposalDefaultConfigRequest(BaseModel):
     account_id: str = Field(min_length=1, max_length=120)
     risk_tier: RiskTier
@@ -399,6 +476,7 @@ class ReviewRequest(BaseModel):
     reason: str = Field(min_length=2, max_length=1_000)
     expected_version: int = Field(ge=1)
     action_grant: str | None = None
+    idempotency_key: str | None = Field(default=None, min_length=1, max_length=160)
 
 
 class MockStepUpRequest(BaseModel):

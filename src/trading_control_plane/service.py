@@ -17,6 +17,7 @@ from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 from sqlalchemy import delete, func, select, text
 from sqlalchemy.orm import Session
 
+from trading_control_plane.agent import issue_agent_token, parse_agent_token, validate_agent_roles
 from trading_control_plane.binance import BinanceInstrument, BinanceReadOnlySnapshot
 from trading_control_plane.binance_execution import (
     BinanceTestnetOrder,
@@ -65,6 +66,7 @@ from trading_control_plane.domain import (
     RiskResult,
     RiskTier,
     Role,
+    ServicePrincipalKind,
     SignalEventStatus,
     SignalSourceMode,
     SystemRiskState,
@@ -768,6 +770,102 @@ class TradingService:
             except DomainRejected:
                 return False
             return True
+
+    @staticmethod
+    def _require_agent_scope(
+        session: Session,
+        *,
+        team: Team,
+        account_id: str,
+        venue: str,
+    ) -> ExchangeAccount:
+        normalized_account_id, normalized_venue, _label = (
+            TradingService._exchange_account_definition(account_id, venue, account_id)
+        )
+        account = session.scalar(
+            select(ExchangeAccount).where(
+                ExchangeAccount.team_id == team.team_id,
+                ExchangeAccount.account_id == normalized_account_id,
+                ExchangeAccount.venue == normalized_venue,
+                ExchangeAccount.active,
+            )
+        )
+        if account is None:
+            _reject(
+                "AGENT_SCOPE_INVALID",
+                "agent access requires an existing active account and exact venue scope",
+            )
+        return account
+
+    def _agent_token_digest(self, user_id: UUID, version: int, token: str) -> str:
+        return self.credential_cipher.secret_fingerprint(
+            token,
+            purpose=f"agent-api-token:{user_id}:v{version}",
+        )
+
+    def authenticate_agent_token(self, token: str, *, now: datetime) -> dict[str, Any]:
+        """Authenticate one opaque Agent credential without exposing token material."""
+
+        agent_id = parse_agent_token(token)
+        with self.database.session_factory.begin() as session:
+            principal = session.get(User, agent_id, with_for_update=True)
+            if (
+                principal is None
+                or not principal.active
+                or principal.principal_type != PrincipalType.SERVICE.value
+                or principal.service_kind != ServicePrincipalKind.AGENT.value
+                or principal.agent_token_digest is None
+                or principal.agent_token_expires_at is None
+            ):
+                _reject("AGENT_TOKEN_INVALID", "agent API credential is invalid")
+            expected = self._agent_token_digest(
+                principal.user_id,
+                principal.agent_token_version,
+                token,
+            )
+            if not hmac.compare_digest(expected, principal.agent_token_digest):
+                _reject("AGENT_TOKEN_INVALID", "agent API credential is invalid")
+            if principal.agent_token_expires_at <= now:
+                _reject("AGENT_TOKEN_EXPIRED", "agent API credential has expired")
+            if principal.active_workspace_id is None or principal.active_team_id is None:
+                _reject("AGENT_TOKEN_INVALID", "agent API credential is invalid")
+            workspace = session.get(Workspace, principal.active_workspace_id)
+            team = session.get(Team, principal.active_team_id)
+            workspace_membership = session.scalar(
+                select(WorkspaceMembership).where(
+                    WorkspaceMembership.workspace_id == principal.active_workspace_id,
+                    WorkspaceMembership.user_id == principal.user_id,
+                    WorkspaceMembership.active,
+                )
+            )
+            team_membership = session.scalar(
+                select(TeamMembership).where(
+                    TeamMembership.team_id == principal.active_team_id,
+                    TeamMembership.user_id == principal.user_id,
+                    TeamMembership.active,
+                )
+            )
+            if (
+                workspace is None
+                or not workspace.active
+                or team is None
+                or not team.active
+                or team.workspace_id != workspace.workspace_id
+                or workspace_membership is None
+                or team_membership is None
+            ):
+                _reject("AGENT_TOKEN_INVALID", "agent API credential is invalid")
+            if (
+                principal.agent_token_last_used_at is None
+                or now - principal.agent_token_last_used_at >= timedelta(minutes=5)
+            ):
+                principal.agent_token_last_used_at = now
+            return {
+                "user_id": principal.user_id,
+                "username": principal.username,
+                "auth_version": principal.auth_version,
+                "expires_at": principal.agent_token_expires_at,
+            }
 
     def _require_action_assignment(
         self,
@@ -1857,6 +1955,7 @@ class TradingService:
             principal = User(
                 username=username,
                 principal_type=PrincipalType.SERVICE.value,
+                service_kind=ServicePrincipalKind.INTERNAL.value,
                 active_workspace_id=team.workspace_id,
                 active_team_id=team.team_id,
                 active=True,
@@ -3480,6 +3579,403 @@ class TradingService:
             )
             return user.username
 
+    def create_agent(
+        self,
+        *,
+        username: str,
+        roles: Sequence[Role],
+        account_scope: str,
+        venue_scope: str,
+        expires_in_days: int,
+        idempotency_key: str,
+        actor_id: UUID,
+        now: datetime,
+    ) -> dict[str, Any]:
+        normalized_username = username.strip()
+        normalized_roles = validate_agent_roles(tuple(roles))
+        if (
+            not normalized_username
+            or normalized_username != username
+            or len(normalized_username) > 120
+            or not 1 <= expires_in_days <= 365
+        ):
+            _reject("AGENT_ACCESS_INVALID", "agent identity or credential lifetime is invalid")
+        with self.database.session_factory.begin() as session:
+            self._require_role(session, actor_id, "user.manage")
+            _actor, workspace, team = self._active_scope(session, actor_id)
+            assert team is not None
+            account = self._require_agent_scope(
+                session,
+                team=team,
+                account_id=account_scope,
+                venue=venue_scope,
+            )
+            caller = f"{actor_id}:{team.team_id}"
+            operation = "agent.create"
+            payload = {
+                "workspace_id": str(workspace.workspace_id),
+                "team_id": str(team.team_id),
+                "username": normalized_username,
+                "roles": sorted(role.value for role in normalized_roles),
+                "account_scope": account.account_id,
+                "venue_scope": account.venue,
+                "expires_in_days": expires_in_days,
+            }
+            digest, replay = self._idempotency(
+                session,
+                caller_id=caller,
+                operation=operation,
+                idempotency_key=idempotency_key,
+                payload=payload,
+            )
+            if replay is not None:
+                return {**replay, "token": None, "display_once": False, "replayed": True}
+            if session.scalar(select(User).where(User.username == normalized_username)) is not None:
+                _reject("USERNAME_CONFLICT", "the internal username already exists")
+
+            agent_id = uuid4()
+            issued = issue_agent_token(agent_id)
+            expires_at = now + timedelta(days=expires_in_days)
+            token_version = 1
+            principal = User(
+                user_id=agent_id,
+                username=normalized_username,
+                active_workspace_id=workspace.workspace_id,
+                active_team_id=team.team_id,
+                principal_type=PrincipalType.SERVICE.value,
+                service_kind=ServicePrincipalKind.AGENT.value,
+                agent_token_digest=self._agent_token_digest(
+                    agent_id,
+                    token_version,
+                    issued.token,
+                ),
+                agent_token_hint=issued.hint,
+                agent_token_version=token_version,
+                agent_token_created_at=now,
+                agent_token_expires_at=expires_at,
+                auth_version=1,
+                active=True,
+                created_at=now,
+            )
+            session.add(principal)
+            session.flush()
+            session.add_all(
+                [
+                    WorkspaceMembership(
+                        workspace_id=workspace.workspace_id,
+                        user_id=agent_id,
+                        role=WorkspaceRole.MEMBER.value,
+                        active=True,
+                        invited_by=actor_id,
+                        created_at=now,
+                        updated_at=now,
+                    ),
+                    TeamMembership(
+                        team_id=team.team_id,
+                        user_id=agent_id,
+                        active=True,
+                        invited_by=actor_id,
+                        created_at=now,
+                        updated_at=now,
+                    ),
+                ]
+            )
+            for role in normalized_roles:
+                session.add(
+                    RoleAssignment(
+                        user_id=agent_id,
+                        team_id=team.team_id,
+                        role=role.value,
+                        account_scope=account.account_id,
+                        venue_scope=account.venue,
+                        created_at=now,
+                    )
+                )
+            response = {
+                "agent_id": str(agent_id),
+                "username": normalized_username,
+                "workspace_id": str(workspace.workspace_id),
+                "team_id": str(team.team_id),
+                "roles": sorted(role.value for role in normalized_roles),
+                "account_scope": account.account_id,
+                "venue_scope": account.venue,
+                "active": True,
+                "auth_version": principal.auth_version,
+                "token_hint": issued.hint,
+                "token_version": token_version,
+                "token_created_at": now.isoformat(),
+                "token_expires_at": expires_at.isoformat(),
+            }
+            self._save_receipt(
+                session,
+                caller_id=caller,
+                operation=operation,
+                idempotency_key=idempotency_key,
+                semantic_hash=digest,
+                response=response,
+                now=now,
+            )
+            self._audit(
+                session,
+                actor_id=str(actor_id),
+                event_type="AGENT_CREATED",
+                object_type="User",
+                object_id=agent_id,
+                reason=(
+                    f"roles={','.join(sorted(role.value for role in normalized_roles))};"
+                    f"scope={account.account_id}:{account.venue};token_version=1"
+                ),
+                correlation_id=uuid4(),
+                object_version=principal.auth_version,
+                idempotency_key=idempotency_key,
+                workspace_id=workspace.workspace_id,
+                team_id=team.team_id,
+                account_id=account.account_id,
+                now=now,
+            )
+            return {
+                **response,
+                "token": issued.token,
+                "display_once": True,
+                "replayed": False,
+            }
+
+    def update_agent_access(
+        self,
+        agent_id: UUID,
+        *,
+        roles: Sequence[Role],
+        active: bool,
+        account_scope: str,
+        venue_scope: str,
+        expected_auth_version: int,
+        idempotency_key: str,
+        actor_id: UUID,
+        now: datetime,
+    ) -> dict[str, Any]:
+        normalized_roles = validate_agent_roles(tuple(roles), active=active)
+        with self.database.session_factory.begin() as session:
+            self._require_role(session, actor_id, "user.manage")
+            _actor, workspace, team = self._active_scope(session, actor_id)
+            assert team is not None
+            account = self._require_agent_scope(
+                session,
+                team=team,
+                account_id=account_scope,
+                venue=venue_scope,
+            )
+            caller = f"{actor_id}:{team.team_id}"
+            operation = f"agent.access:{agent_id}"
+            payload = {
+                "agent_id": str(agent_id),
+                "roles": sorted(role.value for role in normalized_roles),
+                "active": active,
+                "account_scope": account.account_id,
+                "venue_scope": account.venue,
+                "expected_auth_version": expected_auth_version,
+            }
+            digest, replay = self._idempotency(
+                session,
+                caller_id=caller,
+                operation=operation,
+                idempotency_key=idempotency_key,
+                payload=payload,
+            )
+            if replay is not None:
+                return replay
+            principal = session.get(User, agent_id, with_for_update=True)
+            membership = session.scalar(
+                select(TeamMembership)
+                .where(
+                    TeamMembership.team_id == team.team_id,
+                    TeamMembership.user_id == agent_id,
+                )
+                .with_for_update()
+            )
+            if (
+                principal is None
+                or principal.principal_type != PrincipalType.SERVICE.value
+                or principal.service_kind != ServicePrincipalKind.AGENT.value
+                or principal.active_workspace_id != workspace.workspace_id
+                or principal.active_team_id != team.team_id
+                or membership is None
+            ):
+                _reject("AGENT_NOT_FOUND", "agent is outside the active team or does not exist")
+            if principal.auth_version != expected_auth_version:
+                _reject("VERSION_CONFLICT", "agent access changed; refresh before updating")
+            workspace_membership = session.scalar(
+                select(WorkspaceMembership)
+                .where(
+                    WorkspaceMembership.workspace_id == workspace.workspace_id,
+                    WorkspaceMembership.user_id == agent_id,
+                )
+                .with_for_update()
+            )
+            if workspace_membership is None:
+                _reject("AGENT_NOT_FOUND", "agent workspace membership is missing")
+            session.execute(
+                delete(RoleAssignment).where(
+                    RoleAssignment.user_id == agent_id,
+                    RoleAssignment.team_id == team.team_id,
+                )
+            )
+            for role in normalized_roles:
+                session.add(
+                    RoleAssignment(
+                        user_id=agent_id,
+                        team_id=team.team_id,
+                        role=role.value,
+                        account_scope=account.account_id,
+                        venue_scope=account.venue,
+                        created_at=now,
+                    )
+                )
+            principal.active = active
+            principal.auth_version += 1
+            membership.active = active
+            membership.updated_at = now
+            workspace_membership.active = active
+            workspace_membership.updated_at = now
+            response = {
+                "agent_id": str(agent_id),
+                "active": active,
+                "auth_version": principal.auth_version,
+                "roles": sorted(role.value for role in normalized_roles),
+                "account_scope": account.account_id,
+                "venue_scope": account.venue,
+            }
+            self._save_receipt(
+                session,
+                caller_id=caller,
+                operation=operation,
+                idempotency_key=idempotency_key,
+                semantic_hash=digest,
+                response=response,
+                now=now,
+            )
+            self._audit(
+                session,
+                actor_id=str(actor_id),
+                event_type="AGENT_ACCESS_UPDATED",
+                object_type="User",
+                object_id=agent_id,
+                reason=(
+                    f"active={str(active).lower()};"
+                    f"roles={','.join(sorted(role.value for role in normalized_roles))};"
+                    f"scope={account.account_id}:{account.venue}"
+                ),
+                correlation_id=uuid4(),
+                object_version=principal.auth_version,
+                idempotency_key=idempotency_key,
+                workspace_id=workspace.workspace_id,
+                team_id=team.team_id,
+                account_id=account.account_id,
+                now=now,
+            )
+            return response
+
+    def rotate_agent_token(
+        self,
+        agent_id: UUID,
+        *,
+        expected_token_version: int,
+        expires_in_days: int,
+        idempotency_key: str,
+        actor_id: UUID,
+        now: datetime,
+    ) -> dict[str, Any]:
+        if not 1 <= expires_in_days <= 365:
+            _reject("AGENT_ACCESS_INVALID", "agent credential lifetime is invalid")
+        with self.database.session_factory.begin() as session:
+            self._require_role(session, actor_id, "user.manage")
+            _actor, workspace, team = self._active_scope(session, actor_id)
+            assert team is not None
+            caller = f"{actor_id}:{team.team_id}"
+            operation = f"agent.token.rotate:{agent_id}"
+            payload = {
+                "agent_id": str(agent_id),
+                "expected_token_version": expected_token_version,
+                "expires_in_days": expires_in_days,
+            }
+            digest, replay = self._idempotency(
+                session,
+                caller_id=caller,
+                operation=operation,
+                idempotency_key=idempotency_key,
+                payload=payload,
+            )
+            if replay is not None:
+                return {**replay, "token": None, "display_once": False, "replayed": True}
+            principal = session.get(User, agent_id, with_for_update=True)
+            membership = session.scalar(
+                select(TeamMembership).where(
+                    TeamMembership.team_id == team.team_id,
+                    TeamMembership.user_id == agent_id,
+                )
+            )
+            if (
+                principal is None
+                or principal.principal_type != PrincipalType.SERVICE.value
+                or principal.service_kind != ServicePrincipalKind.AGENT.value
+                or principal.active_workspace_id != workspace.workspace_id
+                or principal.active_team_id != team.team_id
+                or membership is None
+            ):
+                _reject("AGENT_NOT_FOUND", "agent is outside the active team or does not exist")
+            if principal.agent_token_version != expected_token_version:
+                _reject("VERSION_CONFLICT", "agent token changed; refresh before rotating")
+            next_version = principal.agent_token_version + 1
+            issued = issue_agent_token(agent_id)
+            expires_at = now + timedelta(days=expires_in_days)
+            principal.agent_token_digest = self._agent_token_digest(
+                agent_id,
+                next_version,
+                issued.token,
+            )
+            principal.agent_token_hint = issued.hint
+            principal.agent_token_version = next_version
+            principal.agent_token_created_at = now
+            principal.agent_token_expires_at = expires_at
+            principal.agent_token_last_used_at = None
+            principal.auth_version += 1
+            response = {
+                "agent_id": str(agent_id),
+                "token_hint": issued.hint,
+                "token_version": next_version,
+                "token_created_at": now.isoformat(),
+                "token_expires_at": expires_at.isoformat(),
+                "auth_version": principal.auth_version,
+            }
+            self._save_receipt(
+                session,
+                caller_id=caller,
+                operation=operation,
+                idempotency_key=idempotency_key,
+                semantic_hash=digest,
+                response=response,
+                now=now,
+            )
+            self._audit(
+                session,
+                actor_id=str(actor_id),
+                event_type="AGENT_TOKEN_ROTATED",
+                object_type="User",
+                object_id=agent_id,
+                reason=f"token_version={next_version};previous credential revoked",
+                correlation_id=uuid4(),
+                object_version=principal.auth_version,
+                idempotency_key=idempotency_key,
+                workspace_id=workspace.workspace_id,
+                team_id=team.team_id,
+                now=now,
+            )
+            return {
+                **response,
+                "token": issued.token,
+                "display_once": True,
+                "replayed": False,
+            }
+
     def create_service_principal(self, username: str, actor_id: UUID, *, now: datetime) -> UUID:
         with self.database.session_factory.begin() as session:
             self._require_role(session, actor_id, "user.manage")
@@ -3490,6 +3986,7 @@ class TradingService:
                 active_workspace_id=workspace.workspace_id,
                 active_team_id=team.team_id,
                 principal_type=PrincipalType.SERVICE.value,
+                service_kind=ServicePrincipalKind.INTERNAL.value,
                 active=True,
                 created_at=now,
             )
@@ -5129,6 +5626,7 @@ class TradingService:
         reason: str,
         expected_version: int | None = None,
         *,
+        idempotency_key: str | None = None,
         now: datetime,
     ) -> ProposalStatus:
         expired = False
@@ -5137,8 +5635,6 @@ class TradingService:
             proposal = session.get(Proposal, proposal_id, with_for_update=True)
             if proposal is None:
                 _reject("PROPOSAL_NOT_FOUND", "proposal does not exist")
-            if expected_version is not None and proposal.version != expected_version:
-                _reject("VERSION_CONFLICT", "proposal version changed; refresh before reviewing")
             if _is_manual_proposal_originator(session, proposal, reviewer_id):
                 _reject("SELF_REVIEW_FORBIDDEN", "a proposer cannot review the same proposal")
             self._require_role(
@@ -5149,6 +5645,25 @@ class TradingService:
                 proposal.venue,
                 team_id=proposal.team_id,
             )
+            digest: str | None = None
+            operation = f"proposal.review:{proposal_id}"
+            if idempotency_key is not None:
+                digest, replay = self._idempotency(
+                    session,
+                    caller_id=f"{reviewer_id}:{proposal.team_id}",
+                    operation=operation,
+                    idempotency_key=idempotency_key,
+                    payload={
+                        "proposal_id": str(proposal_id),
+                        "decision": decision.value,
+                        "reason": reason,
+                        "expected_version": expected_version,
+                    },
+                )
+                if replay is not None:
+                    return ProposalStatus(str(replay["status"]))
+            if expected_version is not None and proposal.version != expected_version:
+                _reject("VERSION_CONFLICT", "proposal version changed; refresh before reviewing")
             if proposal.expires_at <= now:
                 proposal.status = ProposalStatus.EXPIRED.value
                 proposal.updated_at = now
@@ -5214,6 +5729,17 @@ class TradingService:
                     now=now,
                 )
                 result = ProposalStatus(proposal.status)
+                if idempotency_key is not None:
+                    assert digest is not None
+                    self._save_receipt(
+                        session,
+                        caller_id=f"{reviewer_id}:{proposal.team_id}",
+                        operation=operation,
+                        idempotency_key=idempotency_key,
+                        semantic_hash=digest,
+                        response={"status": result.value},
+                        now=now,
+                    )
         if expired:
             _reject("PROPOSAL_EXPIRED", "proposal expired before review")
         if result is None:

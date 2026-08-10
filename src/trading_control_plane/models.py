@@ -142,6 +142,22 @@ class User(Base):
     __tablename__ = "users"
     __table_args__ = (
         CheckConstraint("principal_type IN ('HUMAN','SERVICE')", name="ck_users_principal_type"),
+        CheckConstraint(
+            "(principal_type = 'HUMAN' AND service_kind IS NULL) OR "
+            "(principal_type = 'SERVICE' AND service_kind IN ('INTERNAL','AGENT'))",
+            name="ck_users_service_kind",
+        ),
+        CheckConstraint("agent_token_version >= 0", name="ck_users_agent_token_version"),
+        CheckConstraint(
+            "(service_kind = 'AGENT' AND agent_token_version >= 1 "
+            "AND agent_token_digest IS NOT NULL AND agent_token_hint IS NOT NULL "
+            "AND agent_token_created_at IS NOT NULL AND agent_token_expires_at IS NOT NULL) OR "
+            "(service_kind IS DISTINCT FROM 'AGENT' AND agent_token_version = 0 "
+            "AND agent_token_digest IS NULL AND agent_token_hint IS NULL "
+            "AND agent_token_created_at IS NULL AND agent_token_expires_at IS NULL "
+            "AND agent_token_last_used_at IS NULL)",
+            name="ck_users_agent_token_shape",
+        ),
     )
 
     user_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid4)
@@ -170,6 +186,19 @@ class User(Base):
         nullable=True,
     )
     principal_type: Mapped[str] = mapped_column(String(16), nullable=False)
+    service_kind: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    agent_token_digest: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    agent_token_hint: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    agent_token_version: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    agent_token_created_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    agent_token_expires_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    agent_token_last_used_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()

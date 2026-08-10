@@ -44,6 +44,11 @@ class PrincipalType(StrEnum):
     SERVICE = "SERVICE"
 
 
+class ServicePrincipalKind(StrEnum):
+    INTERNAL = "INTERNAL"
+    AGENT = "AGENT"
+
+
 class ExecutionEnvironment(StrEnum):
     SHADOW = "SHADOW"
     TESTNET = "TESTNET"

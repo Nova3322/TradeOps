@@ -189,6 +189,17 @@ MANUAL 草稿、预检与冻结命令至少携带：方向、触发价、委托�
 
 请求状态为 `PENDING_REVIEW / APPROVED / REJECTED / EXPIRED / EXECUTED`，创建后 24 小时到期，最近一次相关收紧后至少冷却 15 分钟。生产没有运行时 LIVE scope 时以 `LIVE_SCOPE_CONFIGURATION_REQUIRED` fail closed；`KILL_SWITCH` 返回人工事故恢复要求，不允许通过该 API 放宽。风险恢复 API 不在 Telegram 暴露。
 
+### 7.7 Team Agent API
+
+- `GET /api/admin/agents`：仅 Team `SYSTEM_ADMIN`，投影 Agent 角色、精确 Account/Venue、启停状态、Token 摘要/版本/到期/最近使用；不返回 digest、明文 Token 或场所凭据。
+- `POST /api/admin/agents`：创建复用 `User(SERVICE, AGENT)` 的团队身份，只接受 `OBSERVER / PROPOSER / REVIEWER`，要求现有活动 ExchangeAccount 的精确账户与场所范围。明文 Token 只在首次非重放响应返回；幂等重放只返回元数据。
+- `PUT /api/admin/agents/{agent_id}/access`：以 `expected_auth_version`、幂等键和当前 Team 约束更新最小角色、精确范围与启停状态。
+- `POST /api/admin/agents/{agent_id}/token-rotations`：以 `expected_token_version` 轮换；旧 Token 在事务提交后立即失效，新 Token 同样只显示一次。
+- `POST /api/agent/proposals`：只接受 Agent Bearer；验证五分钟时效、30 秒未来偏差、模型/版本/request ID、Team/Account/Venue RBAC、Instrument 与格式后，复用 SYSTEM Proposal 并在同一事务冻结为 `PENDING_REVIEW`。该入口不自动审核、风控、授权或下单。
+- `POST /api/proposals/{proposal_id}/reviews`：Agent 审核必须提供 `idempotency_key`，复用同一 Approval、自审禁止、对象版本、账户范围与 AuditEvent；Agent Token 不能兑换 HUMAN action grant。HUMAN 批准仍必须提供对象版本绑定的 step-up action grant。
+
+Bearer 与 HUMAN Cookie 同时出现时返回 `AUTH_CREDENTIAL_AMBIGUOUS`；Token 无效、轮换失效、身份停用或团队成员失效均 fail closed。Agent 不获得 OPERATOR、TREASURY_ADMIN 或 SYSTEM_ADMIN，因此不能调用风险决定、订单、资金、凭据写入、签名或广播链路。
+
 ---
 
 ## 八、统一事件信封
