@@ -112,9 +112,9 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
 
     assert response.status_code == 200
     assert "交易控制台" in response.text
-    assert "/assets/app.js?v=136" in response.text
+    assert "/assets/app.js?v=138" in response.text
     assert 'href="/signals"' in response.text
-    assert "/assets/styles.css?v=54" in response.text
+    assert "/assets/styles.css?v=55" in response.text
     assert 'aria-label="交易控制台首页"' in response.text
     assert '<a href="/" data-link><span>⌂</span>当前任务</a>' in response.text
     assert "<span>⌁</span>实时机会</a>" in response.text
@@ -288,7 +288,9 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
     assert 'placeholder="BTCUSDT / acct-1"' not in app_javascript.text
     assert 'placeholder="BTCUSDT / xyz:TSLA"' in app_javascript.text
     assert "definition('账户', item.account_id)" not in app_javascript.text
-    assert "definition('账户', '默认生产账户')" in app_javascript.text
+    assert "definition('账户', shadowProposal ? '虚拟账户范围' : '生产账户范围')" in (
+        app_javascript.text
+    )
     assert "a.reviewer_username || shortId(a.reviewer_id)" in app_javascript.text
     assert 'data-label="提交时间"' in app_javascript.text
     assert "INITIAL_INTENT_ALREADY_EXISTS" in app_javascript.text

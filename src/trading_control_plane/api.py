@@ -90,12 +90,15 @@ from trading_control_plane.api_schemas import (
     ScopeSelectRequest,
     SenderLeaseRequest,
     ShadowFillRequest,
+    ShadowScopeInitializeRequest,
     ShadowSendRequest,
+    ShadowSimulationRequest,
     SignalProposalRequest,
     SignalSourceConfigureRequest,
     SystemProposalRequest,
     TeamCreateRequest,
     TeamMemberInviteRequest,
+    TeamShadowActivationRequest,
     TransferAuthorizationRequest,
     TransferProposalRequest,
     TransferReviewRequest,
@@ -1152,6 +1155,51 @@ def create_app(
         return {
             "team_id": str(team_id),
             "session": queries().user_context(identity.user_id),
+        }
+
+    @app.get("/api/shadow")
+    def shadow_workspace(
+        identity: SessionIdentity = identity_dependency,
+    ) -> dict[str, Any]:
+        require_capability(identity, "venue.view")
+        return {"data": queries().shadow_workspace(identity.user_id), "as_of": _now().isoformat()}
+
+    @app.post("/api/teams/{team_id}/shadow-activation")
+    def activate_shadow_mode(
+        team_id: UUID,
+        payload: TeamShadowActivationRequest,
+        identity: SessionIdentity = identity_dependency,
+    ) -> dict[str, Any]:
+        result = service().activate_team_shadow_mode(
+            actor_id=identity.user_id,
+            team_id=team_id,
+            expected_version=payload.expected_version,
+            idempotency_key=payload.idempotency_key,
+            now=_now(),
+        )
+        return {
+            "data": result,
+            "session": queries().user_context(identity.user_id),
+        }
+
+    @app.post("/api/shadow/scopes")
+    def initialize_shadow_scope(
+        payload: ShadowScopeInitializeRequest,
+        identity: SessionIdentity = identity_dependency,
+    ) -> dict[str, Any]:
+        result = service().initialize_shadow_scope(
+            actor_id=identity.user_id,
+            account_id=payload.account_id,
+            venue=payload.venue,
+            instrument_id=payload.instrument_id,
+            currency=payload.currency,
+            initial_equity=payload.initial_equity,
+            idempotency_key=payload.idempotency_key,
+            now=_now(),
+        )
+        return {
+            "result": result,
+            "data": queries().shadow_workspace(identity.user_id),
         }
 
     @app.get("/api/exchange-accounts")
@@ -4300,6 +4348,30 @@ def create_app(
             "detail": queries().campaign_detail(identity.user_id, campaign_id),
         }
 
+    @app.post("/api/intents/{intent_id}/shadow-simulations")
+    def simulate_shadow_execution(
+        intent_id: UUID,
+        payload: ShadowSimulationRequest,
+        identity: SessionIdentity = identity_dependency,
+    ) -> dict[str, Any]:
+        result = service().simulate_shadow_execution(
+            intent_id=intent_id,
+            actor_id=identity.user_id,
+            expected_version=payload.expected_version,
+            reference_price=payload.reference_price,
+            fee_bps=payload.fee_bps,
+            slippage_bps=payload.slippage_bps,
+            idempotency_key=payload.idempotency_key,
+            now=_now(),
+        )
+        return {
+            "result": result,
+            "detail": queries().campaign_detail(
+                identity.user_id,
+                UUID(str(result["campaign_id"])),
+            ),
+        }
+
     @app.post("/api/intents/{intent_id}/unknown")
     def mark_intent_unknown(
         intent_id: UUID,
@@ -4307,7 +4379,13 @@ def create_app(
         identity: SessionIdentity = identity_dependency,
     ) -> dict[str, Any]:
         campaign_id = queries().campaign_id_for_intent(identity.user_id, intent_id)
-        service().mark_intent_unknown(intent_id, identity.user_id, payload.reason, now=_now())
+        service().mark_intent_unknown(
+            intent_id,
+            identity.user_id,
+            payload.reason,
+            required_environment=ExecutionEnvironment.SHADOW,
+            now=_now(),
+        )
         notify_campaign(
             identity.user_id,
             campaign_id,
@@ -4329,6 +4407,7 @@ def create_app(
             identity.user_id,
             OrderIntentStatus(payload.terminal_status),
             payload.reason,
+            required_environment=ExecutionEnvironment.SHADOW,
             now=_now(),
         )
         return queries().campaign_detail(identity.user_id, campaign_id)
@@ -4347,6 +4426,8 @@ def create_app(
             payload.trigger_price,
             payload.fully_covered,
             identity.user_id,
+            campaign_id=campaign_id,
+            required_environment=ExecutionEnvironment.SHADOW,
             known=payload.known,
             now=_now(),
         )
@@ -4380,6 +4461,7 @@ def create_app(
             payload.amount,
             payload.currency,
             identity.user_id,
+            required_environment=ExecutionEnvironment.SHADOW,
             now=_now(),
         )
         return {
@@ -6787,6 +6869,7 @@ def create_app(
         @app.get("/capital", include_in_schema=False)
         @app.get("/results", include_in_schema=False)
         @app.get("/notifications", include_in_schema=False)
+        @app.get("/shadow", include_in_schema=False)
         @app.get("/venues", include_in_schema=False)
         @app.get("/venues/binance", include_in_schema=False)
         @app.get("/venues/hyperliquid", include_in_schema=False)

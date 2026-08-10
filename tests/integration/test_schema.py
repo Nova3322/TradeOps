@@ -75,7 +75,7 @@ def test_notification_migration_round_trip(database: Database) -> None:
         assert "notification_routes" not in tables
         assert "notification_deliveries" not in tables
 
-    command.upgrade(config, "20260810_0023")
+    command.upgrade(config, "20260810_0024")
     with database.engine.connect() as connection:
         tables = set(inspect(connection).get_table_names())
         differences = compare_metadata(MigrationContext.configure(connection), Base.metadata)
@@ -85,6 +85,29 @@ def test_notification_migration_round_trip(database: Database) -> None:
 
     assert revision == REQUIRED_SCHEMA_REVISION
     assert {"notification_routes", "notification_deliveries"}.issubset(tables)
+    assert differences == []
+
+
+def test_team_execution_mode_migration_round_trip(database: Database) -> None:
+    config = Config("alembic.ini")
+
+    command.downgrade(config, "20260810_0023")
+    with database.engine.connect() as connection:
+        columns = {item["name"] for item in inspect(connection).get_columns("teams")}
+        assert "execution_mode" not in columns
+
+    command.upgrade(config, "head")
+    with database.engine.connect() as connection:
+        columns = {item["name"] for item in inspect(connection).get_columns("teams")}
+        checks = {item["name"] for item in inspect(connection).get_check_constraints("teams")}
+        revision = connection.exec_driver_sql(
+            "SELECT version_num FROM alembic_version"
+        ).scalar_one()
+        differences = compare_metadata(MigrationContext.configure(connection), Base.metadata)
+
+    assert revision == REQUIRED_SCHEMA_REVISION
+    assert "execution_mode" in columns
+    assert "ck_teams_execution_mode" in checks
     assert differences == []
 
 

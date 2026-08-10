@@ -50,6 +50,12 @@ class ExecutionEnvironment(StrEnum):
     LIVE = "LIVE"
 
 
+class TeamExecutionMode(StrEnum):
+    SETUP = "SETUP"
+    SHADOW = "SHADOW"
+    LIVE = "LIVE"
+
+
 class ProposalSource(StrEnum):
     SYSTEM = "SYSTEM"
     MANUAL = "MANUAL"
@@ -378,11 +384,9 @@ def evaluate_risk(policy: RiskPolicyInput, inputs: RiskEvaluationInput) -> RiskO
         return _deny("PYRAMID_DISABLED")
     if inputs.requested_risk > policy.max_single_loss:
         return _deny("SINGLE_LOSS_LIMIT_EXCEEDED")
-    if (
-        max(inputs.team_consecutive_losses, inputs.account_consecutive_losses)
-        >= policy.max_consecutive_losses
-        and inputs.loss_cooldown_remaining > timedelta(0)
-    ):
+    if max(
+        inputs.team_consecutive_losses, inputs.account_consecutive_losses
+    ) >= policy.max_consecutive_losses and inputs.loss_cooldown_remaining > timedelta(0):
         return _deny("LOSS_COOLDOWN_ACTIVE")
     available = min(
         max(Decimal(0), policy.max_total_risk - inputs.current_risk),

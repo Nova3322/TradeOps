@@ -78,6 +78,33 @@ class TeamCreateRequest(BaseModel):
     idempotency_key: str = Field(min_length=1, max_length=160)
 
 
+class TeamShadowActivationRequest(BaseModel):
+    expected_version: int = Field(ge=1)
+    idempotency_key: str = Field(min_length=1, max_length=160)
+
+
+class ShadowScopeInitializeRequest(BaseModel):
+    account_id: str = Field(min_length=1, max_length=120)
+    venue: Literal["BINANCE", "HYPERLIQUID", "OKX", "BYBIT"]
+    instrument_id: UUID
+    currency: str = Field(min_length=1, max_length=32, pattern=r"^[A-Za-z0-9._-]+$")
+    initial_equity: Decimal | None = Field(default=None, gt=0)
+    idempotency_key: str = Field(min_length=1, max_length=160)
+
+    @field_validator("currency")
+    @classmethod
+    def normalize_currency(cls, value: str) -> str:
+        return value.upper()
+
+
+class ShadowSimulationRequest(BaseModel):
+    expected_version: int = Field(ge=1)
+    reference_price: Decimal = Field(gt=0)
+    fee_bps: Decimal = Field(default=Decimal("4"), ge=0, le=100)
+    slippage_bps: Decimal = Field(default=Decimal("2"), ge=0, le=500)
+    idempotency_key: str = Field(min_length=1, max_length=160)
+
+
 class TeamMemberInviteRequest(BaseModel):
     username: str = Field(min_length=1, max_length=120, pattern=r"^[A-Za-z0-9._-]+$")
     roles: list[AccessRole] = Field(min_length=1, max_length=6)

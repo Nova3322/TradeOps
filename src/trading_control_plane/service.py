@@ -71,6 +71,7 @@ from trading_control_plane.domain import (
     TargetCandidate,
     TargetDecision,
     TargetUrgency,
+    TeamExecutionMode,
     VenueOrderStatus,
     WorkspaceRole,
     compute_pnl,
@@ -164,6 +165,7 @@ from trading_control_plane.perptape import (
     perptape_snapshot_identity,
     validate_perptape_feed_payload,
 )
+from trading_control_plane.shadow import apply_shadow_fill, quote_shadow_execution
 
 CAPITAL_HISTORY_MIN_INTERVAL = timedelta(minutes=1)
 PASSWORD_HASHER = PasswordHasher()
@@ -732,6 +734,27 @@ class TradingService:
             return team
         _reject("RBAC_DENIED", f"{action} is not allowed in the requested scope")
 
+    @staticmethod
+    def _require_team_environment(team: Team, environment: ExecutionEnvironment) -> None:
+        mode = (
+            TeamExecutionMode.LIVE.value
+            if team.execution_mode == TeamExecutionMode.SETUP.value and team.trading_enabled
+            else team.execution_mode
+        )
+        if mode == TeamExecutionMode.SETUP.value:
+            _reject(
+                "TEAM_SETUP_INCOMPLETE",
+                "team must complete setup and explicitly enter SHADOW mode",
+            )
+        if (
+            mode == TeamExecutionMode.SHADOW.value
+            and environment is not ExecutionEnvironment.SHADOW
+        ):
+            _reject(
+                "TEAM_SHADOW_ONLY",
+                "team is isolated to SHADOW; TESTNET and LIVE workflows are blocked",
+            )
+
     def can_user(
         self,
         user_id: UUID,
@@ -1284,6 +1307,7 @@ class TradingService:
                 created_by=user.user_id,
                 active=True,
                 trading_enabled=True,
+                execution_mode=TeamExecutionMode.LIVE.value,
                 version=1,
                 created_at=now,
                 updated_at=now,
@@ -1488,6 +1512,7 @@ class TradingService:
                 created_by=actor_id,
                 active=True,
                 trading_enabled=False,
+                execution_mode=TeamExecutionMode.SETUP.value,
                 version=1,
                 created_at=now,
                 updated_at=now,
@@ -1540,6 +1565,195 @@ class TradingService:
                 now=now,
             )
             return team.team_id
+
+    @staticmethod
+    def _shadow_activation_blockers(session: Session, team: Team) -> list[str]:
+        blockers: list[str] = []
+        source = session.scalar(
+            select(TeamSignalSource).where(TeamSignalSource.team_id == team.team_id)
+        )
+        if source is None or not source.enabled:
+            blockers.append("SIGNAL_SOURCE_REQUIRED")
+        policy = session.scalar(
+            select(RiskPolicy).where(
+                RiskPolicy.team_id == team.team_id,
+                RiskPolicy.active,
+            )
+        )
+        if policy is None:
+            blockers.append("RISK_POLICY_REQUIRED")
+        elif any(
+            value is None
+            for value in (
+                policy.max_account_risk,
+                policy.max_single_loss,
+                policy.max_consecutive_losses,
+                policy.loss_cooldown_seconds,
+            )
+        ):
+            blockers.append("RISK_LIMITS_REQUIRED")
+        accounts = session.scalars(
+            select(ExchangeAccount).where(
+                ExchangeAccount.team_id == team.team_id,
+                ExchangeAccount.active,
+            )
+        ).all()
+        if not accounts:
+            blockers.append("EXCHANGE_ACCOUNT_REQUIRED")
+
+        member_ids = set(
+            session.scalars(
+                select(TeamMembership.user_id)
+                .join(User, User.user_id == TeamMembership.user_id)
+                .where(
+                    TeamMembership.team_id == team.team_id,
+                    TeamMembership.active,
+                    User.active,
+                )
+            )
+        )
+        assignments = session.scalars(
+            select(RoleAssignment).where(
+                RoleAssignment.team_id == team.team_id,
+                RoleAssignment.user_id.in_(member_ids),
+            )
+        ).all()
+
+        def scoped_users(action: str, account: ExchangeAccount) -> set[UUID]:
+            return {
+                assignment.user_id
+                for assignment in assignments
+                if (
+                    assignment.account_scope is None
+                    or assignment.account_scope == account.account_id
+                )
+                and (assignment.venue_scope is None or assignment.venue_scope == account.venue)
+                and (
+                    action in ROLE_ACTIONS[Role(assignment.role)]
+                    or "*" in ROLE_ACTIONS[Role(assignment.role)]
+                )
+            }
+
+        independent_ready = any(
+            any(
+                proposer != reviewer
+                for proposer in scoped_users("proposal.create", account)
+                for reviewer in scoped_users("proposal.review", account)
+            )
+            for account in accounts
+        )
+        operator_ready = any(scoped_users("order.prepare", account) for account in accounts)
+        if not independent_ready:
+            blockers.append("INDEPENDENT_REVIEWER_REQUIRED")
+        if not operator_ready:
+            blockers.append("OPERATOR_REQUIRED")
+        return blockers
+
+    def shadow_activation_status(self, actor_id: UUID) -> dict[str, Any]:
+        with self.database.session_factory() as session:
+            team = self._require_role(session, actor_id, "team.view")
+            assignments = session.scalars(
+                select(RoleAssignment).where(
+                    RoleAssignment.team_id == team.team_id,
+                    RoleAssignment.user_id == actor_id,
+                )
+            ).all()
+            blockers = self._shadow_activation_blockers(session, team)
+            return {
+                "workspace_id": str(team.workspace_id),
+                "team_id": str(team.team_id),
+                "team_name": team.name,
+                "execution_mode": team.execution_mode,
+                "trading_enabled": team.trading_enabled,
+                "version": team.version,
+                "blockers": blockers,
+                "ready": not blockers,
+                "can_activate": any(
+                    "team.manage" in ROLE_ACTIONS[Role(item.role)]
+                    or "*" in ROLE_ACTIONS[Role(item.role)]
+                    for item in assignments
+                ),
+            }
+
+    def activate_team_shadow_mode(
+        self,
+        *,
+        actor_id: UUID,
+        team_id: UUID,
+        expected_version: int,
+        idempotency_key: str,
+        now: datetime,
+    ) -> dict[str, Any]:
+        operation = "team.shadow.activate"
+        payload = {
+            "team_id": str(team_id),
+            "expected_version": expected_version,
+            "execution_mode": TeamExecutionMode.SHADOW.value,
+        }
+        with self.database.session_factory.begin() as session:
+            active_team = self._require_role(session, actor_id, "team.manage", team_id=team_id)
+            digest, replay = self._idempotency(
+                session,
+                caller_id=f"{actor_id}:{active_team.team_id}",
+                operation=operation,
+                idempotency_key=idempotency_key,
+                payload=payload,
+            )
+            if replay is not None:
+                return replay
+            team = session.get(Team, team_id, with_for_update=True)
+            if team is None or team.team_id != active_team.team_id:
+                _reject("TEAM_SCOPE_DENIED", "team is outside the active scope")
+            if team.version != expected_version:
+                _reject("VERSION_CONFLICT", "team changed before SHADOW activation")
+            if team.execution_mode == TeamExecutionMode.LIVE.value:
+                _reject("TEAM_MODE_TRANSITION_INVALID", "LIVE teams do not downgrade here")
+            already_active = team.execution_mode == TeamExecutionMode.SHADOW.value
+            if not already_active:
+                blockers = self._shadow_activation_blockers(session, team)
+                if blockers:
+                    _reject(
+                        "TEAM_SHADOW_PREREQUISITES_MISSING",
+                        ",".join(blockers),
+                    )
+                team.execution_mode = TeamExecutionMode.SHADOW.value
+                team.trading_enabled = True
+                team.version += 1
+                team.updated_at = now
+            result = {
+                "team_id": str(team.team_id),
+                "execution_mode": team.execution_mode,
+                "trading_enabled": team.trading_enabled,
+                "version": team.version,
+            }
+            self._save_receipt(
+                session,
+                caller_id=f"{actor_id}:{active_team.team_id}",
+                operation=operation,
+                idempotency_key=idempotency_key,
+                semantic_hash=digest,
+                response=result,
+                now=now,
+            )
+            self._audit(
+                session,
+                actor_id=str(actor_id),
+                event_type="TEAM_SHADOW_MODE_ACTIVATED",
+                object_type="Team",
+                object_id=team.team_id,
+                reason=(
+                    "already active; no state change"
+                    if already_active
+                    else "setup passed; LIVE, funding, signing and broadcast remain off"
+                ),
+                correlation_id=uuid4(),
+                object_version=team.version,
+                idempotency_key=idempotency_key,
+                workspace_id=team.workspace_id,
+                team_id=team.team_id,
+                now=now,
+            )
+            return result
 
     @staticmethod
     def _signal_source_payload(
@@ -4143,6 +4357,7 @@ class TradingService:
             )
         with self.database.session_factory.begin() as session:
             team = self._require_role(session, actor_id, operation)
+            self._require_team_environment(team, ExecutionEnvironment.LIVE)
             assignments = session.scalars(
                 select(RoleAssignment).where(
                     RoleAssignment.user_id == actor_id,
@@ -4286,6 +4501,7 @@ class TradingService:
         operation = "proposal.create"
         with self.database.session_factory.begin() as session:
             team = self._require_role(session, actor_id, operation, account_id, venue)
+            self._require_team_environment(team, environment)
             if submit_for_review:
                 self._require_role(
                     session,
@@ -5880,6 +6096,15 @@ class TradingService:
                 authorization.venue,
                 team_id=authorization.team_id,
             )
+            proposal_environment = ExecutionEnvironment(
+                session.scalar(
+                    select(Proposal.environment).where(
+                        Proposal.proposal_id == authorization.proposal_id
+                    )
+                )
+                or ExecutionEnvironment.SHADOW.value
+            )
+            self._require_team_environment(active_team, proposal_environment)
             digest, response = self._idempotency(
                 session,
                 caller_id=f"{actor_id}:{active_team.team_id}",
@@ -6087,6 +6312,41 @@ class TradingService:
                 account_id=proposal.account_id,
                 venue=proposal.venue,
             )
+            if proposal.environment == ExecutionEnvironment.SHADOW.value:
+                instrument = session.get(Instrument, proposal.instrument_id)
+                shadow_equity = (
+                    None
+                    if instrument is None
+                    else session.scalar(
+                        select(AccountEquity)
+                        .where(
+                            AccountEquity.team_id == proposal.team_id,
+                            AccountEquity.account_id == proposal.account_id,
+                            AccountEquity.venue == proposal.venue,
+                            AccountEquity.environment == ExecutionEnvironment.SHADOW.value,
+                            AccountEquity.currency == instrument.collateral_currency,
+                        )
+                        .with_for_update()
+                    )
+                )
+                if (
+                    shadow_equity is None
+                    or shadow_equity.fact_status != FactStatus.KNOWN.value
+                    or shadow_equity.control_status != "CONTROLLED"
+                ):
+                    _reject(
+                        "SHADOW_EQUITY_REQUIRED",
+                        "new virtual risk requires controlled SHADOW capital",
+                    )
+                risk_available = max(
+                    Decimal(0),
+                    shadow_equity.available_balance - occupied_account_risk,
+                )
+                if risk_amount > risk_available:
+                    _reject(
+                        "SHADOW_CAPITAL_INSUFFICIENT",
+                        "requested risk exceeds unreserved virtual capital",
+                    )
             if (
                 policy.max_account_risk is None
                 or policy.max_single_loss is None
@@ -6195,7 +6455,13 @@ class TradingService:
         intent.add_unit_consumed = True
 
     def mark_intent_unknown(
-        self, intent_id: UUID, actor_id: UUID, reason: str, *, now: datetime
+        self,
+        intent_id: UUID,
+        actor_id: UUID,
+        reason: str,
+        *,
+        required_environment: ExecutionEnvironment | None = None,
+        now: datetime,
     ) -> None:
         with self.database.session_factory.begin() as session:
             intent = session.get(OrderIntent, intent_id, with_for_update=True)
@@ -6204,6 +6470,14 @@ class TradingService:
             campaign = session.get(Campaign, intent.campaign_id)
             if campaign is None:
                 _reject("CAMPAIGN_NOT_FOUND", "intent campaign does not exist")
+            if (
+                required_environment is not None
+                and campaign.environment != required_environment.value
+            ):
+                _reject(
+                    "EXECUTION_ENVIRONMENT_MISMATCH",
+                    "intent is outside the requested execution environment",
+                )
             self._require_role(
                 session,
                 actor_id,
@@ -6264,6 +6538,7 @@ class TradingService:
         terminal_status: OrderIntentStatus,
         reason: str,
         *,
+        required_environment: ExecutionEnvironment | None = None,
         now: datetime,
     ) -> None:
         if terminal_status not in {OrderIntentStatus.CANCELLED, OrderIntentStatus.REJECTED}:
@@ -6275,6 +6550,14 @@ class TradingService:
             campaign = session.get(Campaign, intent.campaign_id)
             if campaign is None:
                 _reject("CAMPAIGN_NOT_FOUND", "intent campaign does not exist")
+            if (
+                required_environment is not None
+                and campaign.environment != required_environment.value
+            ):
+                _reject(
+                    "EXECUTION_ENVIRONMENT_MISMATCH",
+                    "intent is outside the requested execution environment",
+                )
             self._require_role(
                 session,
                 actor_id,
@@ -8555,6 +8838,449 @@ class TradingService:
                 now=now,
             )
 
+    def initialize_shadow_scope(
+        self,
+        *,
+        actor_id: UUID,
+        account_id: str,
+        venue: str,
+        instrument_id: UUID,
+        currency: str,
+        initial_equity: Decimal | None,
+        idempotency_key: str,
+        now: datetime,
+    ) -> dict[str, Any]:
+        operation = "shadow.scope.initialize"
+        normalized_currency = currency.upper()
+        payload = {
+            "account_id": account_id,
+            "venue": venue,
+            "instrument_id": str(instrument_id),
+            "currency": normalized_currency,
+            "initial_equity": None if initial_equity is None else str(initial_equity),
+        }
+        if initial_equity is not None and (not initial_equity.is_finite() or initial_equity <= 0):
+            _reject("SHADOW_EQUITY_INVALID", "initial virtual equity must be positive")
+        with self.database.session_factory.begin() as session:
+            team = self._require_role(session, actor_id, "account.manage", account_id, venue)
+            self._require_team_environment(team, ExecutionEnvironment.SHADOW)
+            digest, replay = self._idempotency(
+                session,
+                caller_id=f"{actor_id}:{team.team_id}",
+                operation=operation,
+                idempotency_key=idempotency_key,
+                payload={**payload, "team_id": str(team.team_id)},
+            )
+            if replay is not None:
+                return replay
+            account = session.scalar(
+                select(ExchangeAccount)
+                .where(
+                    ExchangeAccount.team_id == team.team_id,
+                    ExchangeAccount.account_id == account_id,
+                    ExchangeAccount.venue == venue,
+                    ExchangeAccount.active,
+                )
+                .with_for_update()
+            )
+            if account is None:
+                _reject(
+                    "EXCHANGE_ACCOUNT_NOT_FOUND",
+                    "shadow scope requires an active account in the current team",
+                )
+            instrument = session.get(Instrument, instrument_id)
+            if instrument is None or not instrument.active or instrument.venue != venue:
+                _reject("INSTRUMENT_UNAVAILABLE", "shadow instrument is outside the account venue")
+            if instrument.collateral_currency.upper() != normalized_currency:
+                _reject(
+                    "SHADOW_CURRENCY_MISMATCH",
+                    "virtual capital must use the instrument collateral currency",
+                )
+            if normalized_currency not in USD_STABLE_ASSETS:
+                _reject(
+                    "SHADOW_CURRENCY_UNSUPPORTED",
+                    "shadow capital currently requires an explicit USD stable collateral asset",
+                )
+            equity = session.scalar(
+                select(AccountEquity)
+                .where(
+                    AccountEquity.team_id == team.team_id,
+                    AccountEquity.account_id == account_id,
+                    AccountEquity.venue == venue,
+                    AccountEquity.environment == ExecutionEnvironment.SHADOW.value,
+                    AccountEquity.currency == normalized_currency,
+                )
+                .with_for_update()
+            )
+            equity_created = equity is None
+            if equity is None:
+                if initial_equity is None:
+                    _reject(
+                        "SHADOW_EQUITY_REQUIRED",
+                        "first scope for this account requires explicit virtual equity",
+                    )
+                equity = AccountEquity(
+                    team_id=team.team_id,
+                    account_id=account_id,
+                    venue=venue,
+                    environment=ExecutionEnvironment.SHADOW.value,
+                    equity=initial_equity,
+                    available_balance=initial_equity,
+                    withdrawable_balance=Decimal(0),
+                    currency=normalized_currency,
+                    location_type="VENUE",
+                    control_status="CONTROLLED",
+                    deposit_status="READY",
+                    network=None,
+                    address_reference=None,
+                    valuation_currency="USD",
+                    valuation_price=Decimal(1),
+                    valuation_equity=initial_equity,
+                    valuation_observed_at=now,
+                    fact_status=FactStatus.KNOWN.value,
+                    observed_at=now,
+                    updated_at=now,
+                )
+                session.add(equity)
+                session.flush()
+                self._record_account_equity_observation(session, equity, recorded_at=now)
+            elif initial_equity is not None:
+                _reject(
+                    "SHADOW_EQUITY_ALREADY_INITIALIZED",
+                    "existing virtual capital cannot be reset through scope initialization",
+                )
+            position = session.scalar(
+                select(Position)
+                .where(
+                    Position.team_id == team.team_id,
+                    Position.account_id == account_id,
+                    Position.venue == venue,
+                    Position.environment == ExecutionEnvironment.SHADOW.value,
+                    Position.instrument_id == instrument_id,
+                )
+                .with_for_update()
+            )
+            position_created = position is None
+            if position is None:
+                position = Position(
+                    team_id=team.team_id,
+                    account_id=account_id,
+                    venue=venue,
+                    environment=ExecutionEnvironment.SHADOW.value,
+                    instrument_id=instrument_id,
+                    quantity=Decimal(0),
+                    average_entry_price=Decimal(0),
+                    mark_price=Decimal(0),
+                    fact_status=FactStatus.KNOWN.value,
+                    observed_at=now,
+                    updated_at=now,
+                )
+                session.add(position)
+                session.flush()
+            result = {
+                "workspace_id": str(team.workspace_id),
+                "team_id": str(team.team_id),
+                "environment": ExecutionEnvironment.SHADOW.value,
+                "account_equity_id": str(equity.account_equity_id),
+                "position_id": str(position.position_id),
+                "equity_created": equity_created,
+                "position_created": position_created,
+            }
+            self._save_receipt(
+                session,
+                caller_id=f"{actor_id}:{team.team_id}",
+                operation=operation,
+                idempotency_key=idempotency_key,
+                semantic_hash=digest,
+                response=result,
+                now=now,
+            )
+            self._audit(
+                session,
+                actor_id=str(actor_id),
+                event_type="SHADOW_SCOPE_INITIALIZED",
+                object_type="Position",
+                object_id=position.position_id,
+                reason=(
+                    f"account={account_id};venue={venue};currency={normalized_currency};"
+                    f"equity_created={str(equity_created).lower()}"
+                ),
+                correlation_id=uuid4(),
+                object_version=1,
+                idempotency_key=idempotency_key,
+                workspace_id=team.workspace_id,
+                team_id=team.team_id,
+                account_id=account_id,
+                now=now,
+            )
+            return result
+
+    def simulate_shadow_execution(
+        self,
+        *,
+        intent_id: UUID,
+        actor_id: UUID,
+        expected_version: int,
+        reference_price: Decimal,
+        fee_bps: Decimal,
+        slippage_bps: Decimal,
+        idempotency_key: str,
+        now: datetime,
+    ) -> dict[str, Any]:
+        operation = "shadow.execution.simulate"
+        with self.database.session_factory.begin() as session:
+            intent = session.get(OrderIntent, intent_id, with_for_update=True)
+            if intent is None:
+                _reject("ORDER_INTENT_NOT_FOUND", "intent does not exist")
+            campaign = session.get(Campaign, intent.campaign_id, with_for_update=True)
+            if campaign is None:
+                _reject("CAMPAIGN_NOT_FOUND", "intent campaign is missing")
+            team = self._require_role(
+                session,
+                actor_id,
+                "venue.record",
+                campaign.account_id,
+                campaign.venue,
+                team_id=campaign.team_id,
+            )
+            self._require_team_environment(team, ExecutionEnvironment.SHADOW)
+            if campaign.environment != ExecutionEnvironment.SHADOW.value:
+                _reject(
+                    "SHADOW_SCOPE_REQUIRED",
+                    "the deterministic simulator accepts SHADOW intents only",
+                )
+            payload = {
+                "intent_id": str(intent_id),
+                "expected_version": expected_version,
+                "reference_price": str(reference_price),
+                "fee_bps": str(fee_bps),
+                "slippage_bps": str(slippage_bps),
+                "team_id": str(team.team_id),
+            }
+            digest, replay = self._idempotency(
+                session,
+                caller_id=f"{actor_id}:{team.team_id}",
+                operation=operation,
+                idempotency_key=idempotency_key,
+                payload=payload,
+            )
+            if replay is not None:
+                return replay
+            if intent.version != expected_version:
+                _reject("VERSION_CONFLICT", "intent changed before shadow simulation")
+            if intent.status != OrderIntentStatus.READY.value:
+                _reject("ORDER_INTENT_NOT_READY", "one-shot simulation requires a ready intent")
+            if session.scalar(
+                select(VenueOrder.venue_order_fact_id).where(
+                    VenueOrder.order_intent_id == intent_id
+                )
+            ):
+                _reject("SHADOW_ORDER_EXISTS", "intent already has a venue-order fact")
+            instrument = session.get(Instrument, campaign.instrument_id)
+            proposal = session.get(Proposal, campaign.proposal_id)
+            if instrument is None or proposal is None:
+                _reject("SHADOW_SCOPE_INCOMPLETE", "instrument or frozen proposal is missing")
+            position = session.scalar(
+                select(Position)
+                .where(
+                    Position.team_id == campaign.team_id,
+                    Position.account_id == campaign.account_id,
+                    Position.venue == campaign.venue,
+                    Position.environment == ExecutionEnvironment.SHADOW.value,
+                    Position.instrument_id == campaign.instrument_id,
+                )
+                .with_for_update()
+            )
+            if position is None or position.fact_status != FactStatus.KNOWN.value:
+                _reject("SHADOW_POSITION_REQUIRED", "initialize a known virtual position first")
+            equity = session.scalar(
+                select(AccountEquity)
+                .where(
+                    AccountEquity.team_id == campaign.team_id,
+                    AccountEquity.account_id == campaign.account_id,
+                    AccountEquity.venue == campaign.venue,
+                    AccountEquity.environment == ExecutionEnvironment.SHADOW.value,
+                    AccountEquity.currency == instrument.collateral_currency,
+                )
+                .with_for_update()
+            )
+            if (
+                equity is None
+                or equity.fact_status != FactStatus.KNOWN.value
+                or equity.control_status != "CONTROLLED"
+            ):
+                _reject("SHADOW_EQUITY_REQUIRED", "known controlled virtual equity is required")
+            quote = quote_shadow_execution(
+                side=intent.side,
+                quantity=intent.quantity,
+                reference_price=reference_price,
+                tick_size=instrument.tick_size,
+                contract_multiplier=instrument.contract_multiplier,
+                fee_bps=fee_bps,
+                slippage_bps=slippage_bps,
+            )
+            next_position = apply_shadow_fill(
+                current_quantity=position.quantity,
+                current_average_entry_price=position.average_entry_price,
+                side=intent.side,
+                fill_quantity=intent.quantity,
+                fill_price=quote.fill_price,
+                reduce_only=intent.reduce_only,
+            )
+            order_identity = f"shadow-order-{intent.intent_id}"
+            fill_identity = f"shadow-fill-{intent.intent_id}-v{intent.version}"
+            order = VenueOrder(
+                team_id=campaign.team_id,
+                order_intent_id=intent.intent_id,
+                account_id=campaign.account_id,
+                venue=campaign.venue,
+                environment=ExecutionEnvironment.SHADOW.value,
+                instrument_id=campaign.instrument_id,
+                venue_order_id=order_identity,
+                client_order_id=order_identity,
+                side=intent.side,
+                order_type="SIMULATED_MARKET",
+                reduce_only=intent.reduce_only,
+                status=VenueOrderStatus.FILLED.value,
+                ordered_quantity=intent.quantity,
+                filled_quantity=intent.quantity,
+                observed_at=now,
+                updated_at=now,
+            )
+            fill = VenueFill(
+                team_id=campaign.team_id,
+                venue=campaign.venue,
+                venue_fill_id=fill_identity,
+                order_intent_id=intent.intent_id,
+                campaign_id=campaign.campaign_id,
+                account_id=campaign.account_id,
+                environment=ExecutionEnvironment.SHADOW.value,
+                instrument_id=campaign.instrument_id,
+                side=intent.side,
+                quantity=intent.quantity,
+                price=quote.fill_price,
+                fee=quote.fee,
+                fee_currency=instrument.collateral_currency,
+                slippage_cost=quote.slippage_cost,
+                executed_at=now,
+            )
+            session.add_all([order, fill])
+            position.quantity = next_position.quantity
+            position.average_entry_price = next_position.average_entry_price
+            position.mark_price = quote.fill_price
+            position.observed_at = now
+            position.updated_at = now
+            self._consume_add_unit(session, intent)
+            previous_status = intent.status
+            intent.status = OrderIntentStatus.FILLED.value
+            intent.updated_at = now
+            intent.version += 1
+            if intent.reservation_id is not None:
+                reservation = session.get(
+                    RiskReservation,
+                    intent.reservation_id,
+                    with_for_update=True,
+                )
+                if reservation is not None:
+                    reservation.status = ReservationStatus.OPEN.value
+                    reservation.updated_at = now
+                    reservation.version += 1
+            campaign.status = (
+                CampaignStatus.CLOSING.value
+                if next_position.quantity == 0
+                else CampaignStatus.OPEN.value
+            )
+            campaign.updated_at = now
+            protection = session.scalar(
+                select(ProtectionOrder)
+                .where(ProtectionOrder.position_id == position.position_id)
+                .with_for_update()
+            )
+            if next_position.quantity != 0:
+                trigger_price = self._proposal_detail_decimal(proposal, "invalidation_price")
+                if protection is None:
+                    protection = ProtectionOrder(
+                        position_id=position.position_id,
+                        venue_order_id=f"shadow-protection-{campaign.campaign_id}",
+                        quantity=abs(next_position.quantity),
+                        trigger_price=trigger_price,
+                        status=ProtectionStatus.ACTIVE.value,
+                        fully_covered=True,
+                        observed_at=now,
+                        updated_at=now,
+                    )
+                    session.add(protection)
+                else:
+                    protection.quantity = abs(next_position.quantity)
+                    protection.trigger_price = trigger_price
+                    protection.status = ProtectionStatus.ACTIVE.value
+                    protection.fully_covered = True
+                    protection.observed_at = now
+                    protection.updated_at = now
+            elif protection is not None:
+                protection.quantity = Decimal(0)
+                protection.status = ProtectionStatus.DEGRADED.value
+                protection.fully_covered = False
+                protection.observed_at = now
+                protection.updated_at = now
+            previous_pnl = campaign.final_pnl
+            pnl = self._update_campaign_pnl(session, campaign, position, now=now)
+            self._apply_shadow_pnl_delta(
+                session,
+                campaign=campaign,
+                equity=equity,
+                previous_pnl=previous_pnl,
+                actor_id=actor_id,
+                correlation_id=intent.correlation_id,
+                now=now,
+            )
+            session.flush()
+            result = {
+                "campaign_id": str(campaign.campaign_id),
+                "intent_id": str(intent.intent_id),
+                "intent_version": intent.version,
+                "venue_order_fact_id": str(order.venue_order_fact_id),
+                "venue_fill_fact_id": str(fill.venue_fill_fact_id),
+                "position_id": str(position.position_id),
+                "account_equity_id": str(equity.account_equity_id),
+                "environment": ExecutionEnvironment.SHADOW.value,
+                "fill_price": str(quote.fill_price),
+                "fee": str(quote.fee),
+                "slippage_cost": str(quote.slippage_cost),
+                "position_quantity": str(position.quantity),
+                "equity": str(equity.equity),
+                "total_pnl": str(pnl.total_pnl),
+            }
+            self._save_receipt(
+                session,
+                caller_id=f"{actor_id}:{team.team_id}",
+                operation=operation,
+                idempotency_key=idempotency_key,
+                semantic_hash=digest,
+                response=result,
+                now=now,
+            )
+            self._audit(
+                session,
+                actor_id=str(actor_id),
+                event_type="SHADOW_EXECUTION_SIMULATED",
+                object_type="VenueFill",
+                object_id=fill.venue_fill_fact_id,
+                reason=(
+                    f"reference={reference_price};fill={quote.fill_price};"
+                    f"fee_bps={fee_bps};slippage_bps={slippage_bps}"
+                ),
+                correlation_id=intent.correlation_id,
+                object_version=intent.version,
+                idempotency_key=idempotency_key,
+                workspace_id=team.workspace_id,
+                team_id=team.team_id,
+                account_id=campaign.account_id,
+                now=now,
+            )
+            INTENT_TRANSITIONS.labels(previous_status, intent.status).inc()
+            return result
+
     def record_shadow_order(
         self,
         intent_id: UUID,
@@ -8576,10 +9302,12 @@ class TradingService:
             campaign = session.get(Campaign, intent.campaign_id)
             if campaign is None:
                 _reject("CAMPAIGN_NOT_FOUND", "intent campaign is missing")
+            if campaign.environment != ExecutionEnvironment.SHADOW.value:
+                _reject("SHADOW_SCOPE_REQUIRED", "synthetic order recording is SHADOW-only")
             expected_scope = _scope_key(campaign.environment, campaign.account_id, campaign.venue)
             if execution_scope != expected_scope:
                 _reject("EXECUTION_SCOPE_MISMATCH", "sender scope does not match campaign scope")
-            self._require_role(
+            team = self._require_role(
                 session,
                 actor_id,
                 "venue.record",
@@ -8587,6 +9315,7 @@ class TradingService:
                 campaign.venue,
                 team_id=campaign.team_id,
             )
+            self._require_team_environment(team, ExecutionEnvironment.SHADOW)
             fact = VenueOrder(
                 team_id=campaign.team_id,
                 order_intent_id=intent_id,
@@ -8646,7 +9375,9 @@ class TradingService:
             campaign = session.get(Campaign, intent.campaign_id)
             if campaign is None:
                 _reject("CAMPAIGN_NOT_FOUND", "intent campaign is missing")
-            self._require_role(
+            if campaign.environment != ExecutionEnvironment.SHADOW.value:
+                _reject("SHADOW_SCOPE_REQUIRED", "synthetic fill recording is SHADOW-only")
+            team = self._require_role(
                 session,
                 actor_id,
                 "venue.record",
@@ -8654,6 +9385,7 @@ class TradingService:
                 campaign.venue,
                 team_id=campaign.team_id,
             )
+            self._require_team_environment(team, ExecutionEnvironment.SHADOW)
             existing = session.scalar(
                 select(VenueFill).where(
                     VenueFill.team_id == campaign.team_id,
@@ -8776,6 +9508,14 @@ class TradingService:
             _reject("FACT_TIME_INVALID", "position observation cannot be in the future")
         with self.database.session_factory.begin() as session:
             team = self._require_role(session, actor_id, "venue.record", account_id, venue)
+            if (
+                environment is ExecutionEnvironment.SHADOW
+                and team.execution_mode == TeamExecutionMode.SHADOW.value
+            ):
+                _reject(
+                    "SHADOW_FACTS_SIMULATOR_MANAGED",
+                    "active team SHADOW positions are managed by the simulator",
+                )
             self._ensure_exchange_account_reference(
                 session,
                 team=team,
@@ -8838,6 +9578,8 @@ class TradingService:
         fully_covered: bool,
         actor_id: UUID,
         *,
+        campaign_id: UUID | None = None,
+        required_environment: ExecutionEnvironment | None = None,
         known: bool = True,
         observed_at: datetime | None = None,
         now: datetime,
@@ -8849,6 +9591,29 @@ class TradingService:
             position = session.get(Position, position_id)
             if position is None:
                 _reject("POSITION_NOT_FOUND", "protection position is missing")
+            if (
+                required_environment is not None
+                and position.environment != required_environment.value
+            ):
+                _reject(
+                    "EXECUTION_ENVIRONMENT_MISMATCH",
+                    "position is outside the requested execution environment",
+                )
+            if campaign_id is not None:
+                campaign = session.get(Campaign, campaign_id)
+                if campaign is None:
+                    _reject("CAMPAIGN_NOT_FOUND", "protection campaign is missing")
+                if (
+                    campaign.team_id != position.team_id
+                    or campaign.account_id != position.account_id
+                    or campaign.venue != position.venue
+                    or campaign.environment != position.environment
+                    or campaign.instrument_id != position.instrument_id
+                ):
+                    _reject(
+                        "CAMPAIGN_POSITION_SCOPE_MISMATCH",
+                        "protection position is outside the campaign scope",
+                    )
             self._require_role(
                 session,
                 actor_id,
@@ -8963,6 +9728,14 @@ class TradingService:
             _reject("FACT_TIME_INVALID", "equity observation cannot be in the future")
         with self.database.session_factory.begin() as session:
             team = self._require_role(session, actor_id, "venue.record", account_id, venue)
+            if (
+                environment is ExecutionEnvironment.SHADOW
+                and team.execution_mode == TeamExecutionMode.SHADOW.value
+            ):
+                _reject(
+                    "SHADOW_FACTS_SIMULATOR_MANAGED",
+                    "active team SHADOW equity is managed by initialization and the simulator",
+                )
             self._ensure_exchange_account_reference(
                 session,
                 team=team,
@@ -8990,6 +9763,11 @@ class TradingService:
                     equity=equity,
                     available_balance=available_balance,
                     currency=currency,
+                    location_type="VENUE",
+                    control_status=(
+                        "CONTROLLED" if environment is ExecutionEnvironment.SHADOW else "READ_ONLY"
+                    ),
+                    deposit_status="READY",
                     valuation_currency="USD" if stable else None,
                     valuation_price=Decimal(1) if stable else None,
                     valuation_equity=equity if stable else None,
@@ -9004,6 +9782,10 @@ class TradingService:
                 fact.equity = equity
                 fact.available_balance = available_balance
                 fact.currency = currency
+                if environment is ExecutionEnvironment.SHADOW:
+                    fact.location_type = "VENUE"
+                    fact.control_status = "CONTROLLED"
+                    fact.deposit_status = "READY"
                 fact.valuation_currency = "USD" if stable else None
                 fact.valuation_price = Decimal(1) if stable else None
                 fact.valuation_equity = equity if stable else None
@@ -9023,12 +9805,21 @@ class TradingService:
         currency: str,
         actor_id: UUID,
         *,
+        required_environment: ExecutionEnvironment | None = None,
         now: datetime,
     ) -> UUID:
         with self.database.session_factory.begin() as session:
             campaign = session.get(Campaign, campaign_id)
             if campaign is None:
                 _reject("CAMPAIGN_NOT_FOUND", "funding campaign is missing")
+            if (
+                required_environment is not None
+                and campaign.environment != required_environment.value
+            ):
+                _reject(
+                    "EXECUTION_ENVIRONMENT_MISMATCH",
+                    "campaign is outside the requested execution environment",
+                )
             self._require_role(
                 session,
                 actor_id,
@@ -12817,7 +13608,16 @@ class TradingService:
                 for reservation in reservations
             ):
                 _reject("RISK_RESERVATION_UNRESOLVED", "campaign risk is not confirmed closed")
+            previous_pnl = campaign.final_pnl
             self._update_campaign_pnl(session, campaign, position, now=now)
+            self._apply_shadow_pnl_delta(
+                session,
+                campaign=campaign,
+                previous_pnl=previous_pnl,
+                actor_id=actor_id,
+                correlation_id=uuid4(),
+                now=now,
+            )
             for reservation in reservations:
                 if reservation.status == ReservationStatus.OPEN.value:
                     reservation.status = ReservationStatus.RELEASED.value
@@ -12884,7 +13684,95 @@ class TradingService:
             )
             if position is None or position.fact_status != FactStatus.KNOWN.value:
                 _reject("POSITION_UNKNOWN", "PnL requires known current position")
-            return self._update_campaign_pnl(session, campaign, position, fills=fills, now=now)
+            previous_pnl = campaign.final_pnl
+            result = self._update_campaign_pnl(
+                session,
+                campaign,
+                position,
+                fills=fills,
+                now=now,
+            )
+            self._apply_shadow_pnl_delta(
+                session,
+                campaign=campaign,
+                previous_pnl=previous_pnl,
+                actor_id=actor_id,
+                correlation_id=uuid4(),
+                now=now,
+            )
+            return result
+
+    def _apply_shadow_pnl_delta(
+        self,
+        session: Session,
+        *,
+        campaign: Campaign,
+        previous_pnl: Decimal,
+        actor_id: UUID,
+        correlation_id: UUID,
+        now: datetime,
+        equity: AccountEquity | None = None,
+    ) -> None:
+        if campaign.environment != ExecutionEnvironment.SHADOW.value:
+            return
+        instrument = session.get(Instrument, campaign.instrument_id)
+        if instrument is None:
+            _reject("INSTRUMENT_UNAVAILABLE", "campaign instrument is missing")
+        if equity is None:
+            equity = session.scalar(
+                select(AccountEquity)
+                .where(
+                    AccountEquity.team_id == campaign.team_id,
+                    AccountEquity.account_id == campaign.account_id,
+                    AccountEquity.venue == campaign.venue,
+                    AccountEquity.environment == ExecutionEnvironment.SHADOW.value,
+                    AccountEquity.currency == instrument.collateral_currency,
+                )
+                .with_for_update()
+            )
+        if (
+            equity is None
+            or equity.fact_status != FactStatus.KNOWN.value
+            or equity.control_status != "CONTROLLED"
+        ):
+            _reject(
+                "SHADOW_EQUITY_REQUIRED",
+                "SHADOW PnL requires known controlled virtual equity",
+            )
+        delta = campaign.final_pnl - previous_pnl
+        if delta == 0:
+            return
+        next_equity = equity.equity + delta
+        next_available = equity.available_balance + delta
+        if next_equity < 0 or next_available < 0:
+            _reject(
+                "SHADOW_CAPITAL_EXHAUSTED",
+                "simulated loss exceeds the remaining virtual capital",
+            )
+        equity.equity = next_equity
+        equity.available_balance = next_available
+        equity.valuation_currency = "USD"
+        equity.valuation_price = Decimal(1)
+        equity.valuation_equity = next_equity
+        equity.valuation_observed_at = now
+        equity.fact_status = FactStatus.KNOWN.value
+        equity.observed_at = now
+        equity.updated_at = now
+        self._record_account_equity_observation(session, equity, recorded_at=now)
+        self._audit(
+            session,
+            actor_id=str(actor_id),
+            event_type="SHADOW_EQUITY_MARKED_TO_MODEL",
+            object_type="AccountEquity",
+            object_id=equity.account_equity_id,
+            reason=f"campaign={campaign.campaign_id};pnl_delta={delta}",
+            correlation_id=correlation_id,
+            object_version=campaign.target_version,
+            workspace_id=None,
+            team_id=campaign.team_id,
+            account_id=campaign.account_id,
+            now=now,
+        )
 
     def _update_campaign_pnl(
         self,

@@ -51,6 +51,10 @@ class Team(Base):
     __table_args__ = (
         UniqueConstraint("workspace_id", "slug", name="uq_teams_workspace_slug"),
         CheckConstraint("version >= 1", name="ck_teams_version"),
+        CheckConstraint(
+            "execution_mode IN ('SETUP','SHADOW','LIVE')",
+            name="ck_teams_execution_mode",
+        ),
         Index("ix_teams_workspace_active", "workspace_id", "active"),
     )
 
@@ -63,6 +67,7 @@ class Team(Base):
     created_by: Mapped[UUID] = mapped_column(ForeignKey("users.user_id"), nullable=False)
     active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     trading_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    execution_mode: Mapped[str] = mapped_column(String(16), nullable=False, default="SETUP")
     version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)

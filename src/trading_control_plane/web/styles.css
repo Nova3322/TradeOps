@@ -906,3 +906,29 @@ dialog::backdrop { background: rgba(4, 12, 10, .56); backdrop-filter: blur(3px);
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { scroll-behavior: auto !important; animation-duration: .01ms !important; animation-iteration-count: 1 !important; transition-duration: .01ms !important; }
 }
+
+.shadow-workspace { --shadow-accent: #6fc4aa; }
+.shadow-account-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
+.shadow-account-card { min-width: 0; }
+.shadow-capital-grid { margin: 16px 0; padding: 14px; border: 1px solid var(--line); border-radius: 12px; background: var(--panel-soft); }
+.shadow-position-list { display: grid; gap: 8px; margin: 12px 0 16px; }
+.shadow-position-list > div { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 11px 12px; border: 1px solid var(--line); border-radius: 10px; }
+.shadow-position-list span { display: grid; gap: 3px; min-width: 0; }
+.shadow-position-list small { color: var(--muted); overflow-wrap: anywhere; }
+.shadow-position-list strong { color: var(--shadow-accent); font-variant-numeric: tabular-nums; }
+.shadow-blockers { display: grid; gap: 7px; padding: 0; margin: 14px 0 0; list-style: none; }
+.shadow-blockers li { display: flex; justify-content: space-between; gap: 14px; padding: 9px 11px; border: 1px solid var(--line); border-radius: 9px; background: var(--panel-soft); }
+.shadow-blockers span { color: var(--muted); font-size: 11px; overflow-wrap: anywhere; }
+.shadow-safety-grid { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 10px; margin: 15px 0; }
+.shadow-safety-grid span { display: grid; gap: 5px; padding: 12px; border: 1px solid var(--line); border-radius: 10px; background: var(--panel-soft); }
+.shadow-safety-grid small { color: var(--shadow-accent); font-weight: 750; }
+.compact-heading { margin-top: 20px; }
+
+@media (max-width: 1100px) {
+  .shadow-safety-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+}
+
+@media (max-width: 780px) {
+  .shadow-account-grid, .shadow-safety-grid { grid-template-columns: 1fr; }
+  .shadow-blockers li { display: grid; }
+}

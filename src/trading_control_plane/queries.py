@@ -334,6 +334,7 @@ class TradingQueries:
                         "name": active_team.name,
                         "slug": active_team.slug,
                         "trading_enabled": active_team.trading_enabled,
+                        "execution_mode": active_team.execution_mode,
                     }
                 ),
                 "workspaces": [
@@ -352,6 +353,7 @@ class TradingQueries:
                         "name": team.name,
                         "slug": team.slug,
                         "trading_enabled": team.trading_enabled,
+                        "execution_mode": team.execution_mode,
                     }
                     for _membership, team in team_memberships
                 ],
@@ -2657,6 +2659,210 @@ class TradingQueries:
                 summary["workspace_id"] = str(workspace_id)
                 result.append(summary)
             return result
+
+    def shadow_workspace(self, user_id: UUID) -> dict[str, Any]:
+        """Project team-scoped virtual capital without exposing live credentials."""
+
+        workspace_id, team_id = self._active_scope_ids(user_id)
+        activation = self.service.shadow_activation_status(user_id)
+        with self.database.session_factory() as session:
+            team = session.get(Team, team_id)
+            if team is None or not team.active or team.workspace_id != workspace_id:
+                raise DomainRejected("TEAM_SCOPE_DENIED", "active team is unavailable")
+            assignments = session.scalars(
+                select(RoleAssignment).where(
+                    RoleAssignment.user_id == user_id,
+                    RoleAssignment.team_id == team_id,
+                )
+            ).all()
+
+            def granted(action: str, account_id: str, venue: str) -> bool:
+                return any(
+                    (item.account_scope is None or item.account_scope == account_id)
+                    and (item.venue_scope is None or item.venue_scope == venue)
+                    and (
+                        action in ROLE_ACTIONS[Role(item.role)]
+                        or "*" in ROLE_ACTIONS[Role(item.role)]
+                    )
+                    for item in assignments
+                )
+
+            accounts = [
+                item
+                for item in session.scalars(
+                    select(ExchangeAccount)
+                    .where(ExchangeAccount.team_id == team_id, ExchangeAccount.active)
+                    .order_by(
+                        ExchangeAccount.venue,
+                        ExchangeAccount.label,
+                        ExchangeAccount.account_id,
+                    )
+                ).all()
+                if granted("venue.view", item.account_id, item.venue)
+            ]
+            equities = session.scalars(
+                select(AccountEquity).where(
+                    AccountEquity.team_id == team_id,
+                    AccountEquity.environment == "SHADOW",
+                )
+            ).all()
+            positions = session.execute(
+                select(Position, Instrument)
+                .join(Instrument, Instrument.instrument_id == Position.instrument_id)
+                .where(
+                    Position.team_id == team_id,
+                    Position.environment == "SHADOW",
+                )
+                .order_by(Position.venue, Position.account_id, Instrument.symbol)
+            ).all()
+            campaigns = session.execute(
+                select(Campaign, Instrument)
+                .outerjoin(Instrument, Instrument.instrument_id == Campaign.instrument_id)
+                .where(
+                    Campaign.team_id == team_id,
+                    Campaign.environment == "SHADOW",
+                )
+                .order_by(Campaign.updated_at.desc(), Campaign.campaign_id)
+            ).all()
+            occupied = {
+                (account_id, venue): Decimal(str(amount))
+                for account_id, venue, amount in session.execute(
+                    select(
+                        Campaign.account_id,
+                        Campaign.venue,
+                        func.coalesce(func.sum(RiskReservation.amount), 0),
+                    )
+                    .join(Campaign, Campaign.campaign_id == RiskReservation.campaign_id)
+                    .where(
+                        Campaign.team_id == team_id,
+                        Campaign.environment == "SHADOW",
+                        RiskReservation.status.in_(("RESERVED", "OPEN", "UNKNOWN")),
+                    )
+                    .group_by(Campaign.account_id, Campaign.venue)
+                ).all()
+            }
+            instrument_rows = session.scalars(
+                select(Instrument)
+                .where(
+                    Instrument.active,
+                    Instrument.collateral_currency.in_(tuple(USD_STABLE_ASSETS)),
+                    Instrument.quote_currency == Instrument.collateral_currency,
+                )
+                .order_by(Instrument.venue, Instrument.symbol)
+            ).all()
+            gates = {
+                item.capability_key: item.status
+                for item in session.scalars(
+                    select(CapabilityGate).where(
+                        CapabilityGate.capability_key.in_(
+                            ("LIVE_ORDER_SEND", "CAPITAL_TRANSFER", "SIGNING", "BROADCAST")
+                        )
+                    )
+                ).all()
+            }
+
+            equity_by_scope: dict[tuple[str, str], list[AccountEquity]] = {}
+            for item in equities:
+                equity_by_scope.setdefault((item.account_id, item.venue), []).append(item)
+            position_by_scope: dict[tuple[str, str], list[tuple[Position, Instrument]]] = {}
+            for position, instrument in positions:
+                position_by_scope.setdefault((position.account_id, position.venue), []).append(
+                    (position, instrument)
+                )
+
+            account_rows: list[dict[str, Any]] = []
+            for account in accounts:
+                scope = (account.account_id, account.venue)
+                scope_equities = equity_by_scope.get(scope, [])
+                scope_occupied = occupied.get(scope, Decimal(0))
+                account_rows.append(
+                    {
+                        "exchange_account_id": str(account.exchange_account_id),
+                        "account_id": account.account_id,
+                        "venue": account.venue,
+                        "label": account.label,
+                        "connection_status": account.connection_status,
+                        "trading_status": account.trading_status,
+                        "credential_state": (
+                            "UNCONFIGURED"
+                            if account.credential_version == 0
+                            else "CONFIGURED_REDACTED"
+                        ),
+                        "can_initialize": granted(
+                            "account.manage", account.account_id, account.venue
+                        ),
+                        "occupied_risk": str(scope_occupied),
+                        "virtual_capital": [
+                            {
+                                "account_equity_id": str(item.account_equity_id),
+                                "currency": item.currency,
+                                "equity": str(item.equity),
+                                "available_balance": str(item.available_balance),
+                                "risk_available": str(
+                                    max(Decimal(0), item.available_balance - scope_occupied)
+                                ),
+                                "fact_status": item.fact_status,
+                                "control_status": item.control_status,
+                                "observed_at": _iso(item.observed_at),
+                            }
+                            for item in scope_equities
+                        ],
+                        "positions": [
+                            {
+                                "position_id": str(position.position_id),
+                                "instrument_id": str(position.instrument_id),
+                                "symbol": instrument.symbol,
+                                "quantity": str(position.quantity),
+                                "average_entry_price": str(position.average_entry_price),
+                                "mark_price": str(position.mark_price),
+                                "fact_status": position.fact_status,
+                                "observed_at": _iso(position.observed_at),
+                            }
+                            for position, instrument in position_by_scope.get(scope, [])
+                        ],
+                        "instruments": [
+                            {
+                                "instrument_id": str(item.instrument_id),
+                                "symbol": item.symbol,
+                                "currency": item.collateral_currency,
+                                "tick_size": str(item.tick_size),
+                                "lot_size": str(item.lot_size),
+                            }
+                            for item in instrument_rows
+                            if item.venue == account.venue
+                        ],
+                    }
+                )
+
+            campaign_rows = []
+            for campaign, instrument in campaigns:
+                if not granted("view", campaign.account_id, campaign.venue):
+                    continue
+                campaign_summary = self._campaign_summary(campaign, instrument)
+                campaign_summary["workspace_id"] = str(workspace_id)
+                campaign_rows.append(campaign_summary)
+
+            return {
+                "workspace_id": str(workspace_id),
+                "team_id": str(team_id),
+                "team_name": team.name,
+                "execution_mode": team.execution_mode,
+                "trading_enabled": team.trading_enabled,
+                "version": team.version,
+                "activation": activation,
+                "safety_boundary": {
+                    "environment": "SHADOW",
+                    "capital": "VIRTUAL_ONLY",
+                    "venue_connectors_used": False,
+                    "live_order_send": False,
+                    "funding": False,
+                    "signing": False,
+                    "broadcast": False,
+                    "runtime_gate_status": gates,
+                },
+                "accounts": account_rows,
+                "campaigns": campaign_rows,
+            }
 
     def campaign_detail(self, user_id: UUID, campaign_id: UUID) -> dict[str, Any]:
         workspace_id, team_id = self._active_scope_ids(user_id)
