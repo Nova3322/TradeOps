@@ -716,7 +716,7 @@ pre { max-width: 100%; overflow: auto; background: var(--bg); padding: 13px; bor
 .empty-state, .error-state, .loading-state { min-height: 420px; display: grid; place-items: center; align-content: center; text-align: center; color: var(--muted); }
 .empty-state h2, .error-state h2 { color: var(--ink); }
 .error-state { padding: 24px; text-align: left; }
-.error-state > div { width: min(680px, 100%); padding: 28px; border: 1px solid var(--line); border-left: 4px solid var(--danger); border-radius: 16px; background: var(--panel); box-shadow: var(--shadow-soft); }
+.error-state > div { width: min(680px, 100%); padding: 28px; border: 1px solid var(--line); border-left: 4px solid var(--danger); border-radius: 16px; background: var(--panel); box-shadow: var(--shadow-quiet); }
 .error-state h2 { margin: 6px 0 10px; }
 .error-state h2:focus-visible { outline: 3px solid color-mix(in srgb, var(--accent) 42%, transparent); outline-offset: 5px; }
 .error-state-reason { margin: 0; line-height: 1.7; }
