@@ -1,0 +1,42 @@
+TradingOPS Licensing Notice
+
+Copyright (c) 2026 TradingOPS contributors.
+
+The original TradingOPS software in this repository is source-available. It is
+not offered under an OSI-approved open-source license.
+
+You may use the original TradingOPS software under either of these alternatives:
+
+1. Combined Community License
+
+   BOTH of the following documents apply as one combined license:
+
+   - LICENSES/PolyForm-Noncommercial-1.0.0.md
+   - LICENSES/TradingOPS-Community-Team-Exception-1.0.md
+
+   The PolyForm text is reproduced unchanged. The TradingOPS exception grants
+   member-owned trading use to eligible natural persons and Community Teams,
+   and replaces PolyForm's permission for noncommercial organizations for this
+   software. PolyForm Noncommercial 1.0.0 is not offered on a standalone basis.
+
+2. TradingOPS Commercial License
+
+   Commercial rights require a separate written agreement executed by the
+   applicable copyright holder and the licensee. The agreement template is at:
+
+   - LICENSES/TradingOPS-Commercial-License-1.0.md
+
+   The repository copy of that template is not an offer and grants no
+   commercial rights by itself. SaaS, hosted or managed service, white-label,
+   and resale rights are separate commercial scopes; permission for one does
+   not imply permission for another.
+
+If you do not have a fully executed TradingOPS Commercial License, your rights
+are limited to the Combined Community License.
+
+Third-party components, dependencies, generated artifacts, and separately
+identified files remain under their respective licenses. No trademark rights
+are granted.
+
+Required Notice: Copyright (c) 2026 TradingOPS contributors.
+Required Notice: TradingOPS Community use requires both PolyForm Noncommercial 1.0.0 and the TradingOPS Community Team Exception 1.0; organizational and commercial use requires a separately executed TradingOPS Commercial License.

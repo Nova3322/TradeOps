@@ -3,7 +3,16 @@
 > 状态日期：2026-08-10
 > 当前状态：Workspace / 团队权限边界、团队交易账户与账户事实隔离、团队 Perptape / 签名 Webhook 单一信号源、加密凭据、四场所一次性只读连接验证、两场所持续事实同步、版本化风控、团队/账户/策略/信号源绩效与风险事件报表、四渠道团队通知、LIVE/模拟资金隔离、团队 Agent 最小 API 权限、一条命令 Compose 和无秘密运维诊断已实现；所有危险能力仍默认关闭
 
-本项目面向一个内部组织的多 Workspace、多交易 Team 和多个内部用户/Agent。用户可以提交和审核提案、查看仓位、处理异常；系统在风险可控的前提下辅助执行交易并判断是否赚钱。不开放无审核外部注册，不管理第三方资金，不建设通用合规或通用认证平台。
+本项目面向个人和内部团队的多 Workspace、多交易 Team 和多个内部用户/Agent。用户可以提交和审核提案、查看仓位、处理异常；系统在风险可控的前提下辅助执行交易并判断是否赚钱。不开放无审核外部注册，不管理第三方资金，不建设通用合规或通用认证平台。
+
+## 许可
+
+TradingOPS 是**源码可用（source-available）**项目，不是 OSI 定义的开源软件。原始项目代码采用二选一许可：
+
+1. **社区许可**：必须同时遵守 [PolyForm Noncommercial 1.0.0](LICENSES/PolyForm-Noncommercial-1.0.0.md) 和 [TradingOPS Community Team Exception 1.0](LICENSES/TradingOPS-Community-Team-Exception-1.0.md)。个人及最多 3 名自然人的团队可免费使用本人或成员自有资金交易并保留利润；任何公司、基金、工作室、非营利机构、政府机构或其他组织使用都需要商业许可。
+2. **商业许可**：必须与适用版权方另行签署 [TradingOPS Commercial License](LICENSES/TradingOPS-Commercial-License-1.0.md)。组织内部使用、SaaS、托管/代运维、白标/OEM 和转售是分别授权的商业范围；获得其中一项不自动获得其他项。仓库中的未签署模板本身不授予商业权利。
+
+完整控制条款见 [LICENSE](LICENSE) 和 [NOTICE](NOTICE)。社区许可不允许使用客户、投资人、雇主或其他非成员资金，也不允许向第三方提供交易管理服务。第三方依赖继续遵守各自许可证。
 
 ## 快速启动
 
@@ -13,7 +22,7 @@
 ./scripts/run_compose.sh
 ```
 
-命令只绑定 `127.0.0.1:8000`，在未跟踪的 `.local/` 生成 `0600` 本地密钥/密码，并硬关闭真实/测试网下单、资金、签名与广播输出。使用 `uv run trading-doctor` 检查当前配置、Schema、五个 Gate 和连接能力矩阵，输出不包含秘密。完整部署、升级、备份和恢复说明见 [开源部署、配置、升级与恢复](docs/06-operations/开源部署配置升级与恢复.md)。
+命令只绑定 `127.0.0.1:8000`，在未跟踪的 `.local/` 生成 `0600` 本地密钥/密码，并硬关闭真实/测试网下单、资金、签名与广播输出。使用 `uv run trading-doctor` 检查当前配置、Schema、五个 Gate 和连接能力矩阵，输出不包含秘密。完整部署、升级、备份和恢复说明见 [源码发布、配置、升级与恢复](docs/06-operations/开源部署配置升级与恢复.md)。
 
 完整产品愿景包含 Binance、Hyperliquid、Web/PWA、Telegram、VenueAdapter、Freqtrade/OMS、Margin、Vault/CTO 和报表。这些目标不删除，但按可运行的端到端用户流程逐步开发。未实现能力保持关闭，不为未来可能性预建通用实体。
 
@@ -46,7 +55,7 @@
 4. [本次架构收敛记录](docs/08-implementation/本次架构收敛记录.md)：KEEP/MERGE/SIMPLIFY/DELETE 和迁移结论。
 5. [交易系统总体方案](交易系统总体方案.md)：长期产品愿景和最高层原则。
 6. [产品化文档中心](docs/README.md)：专项文档地图与权威边界。
-7. [开源部署、配置、升级与恢复](docs/06-operations/开源部署配置升级与恢复.md)：一条命令、Compose、诊断、能力矩阵与运维流程。
+7. [源码发布、配置、升级与恢复](docs/06-operations/开源部署配置升级与恢复.md)：许可边界、一条命令、Compose、诊断、能力矩阵与运维流程。
 
 ## 当前不可绕过的规则
 

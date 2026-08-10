@@ -24,6 +24,27 @@ database.
 - Never commit secrets, dumps, `.env.local`, `.local/`, private screenshots, account identifiers, or
   unredacted logs.
 
+## Contributor license grant
+
+By intentionally submitting a contribution to TradingOPS, you represent that you have the right to
+submit it and grant the TradingOPS project maintainers, acting as licensors for the project, a
+perpetual, worldwide, royalty-free, irrevocable, non-exclusive copyright license to reproduce,
+modify, prepare derivative works of, publicly display, publicly perform, distribute, sublicense, and
+relicense the contribution as part of TradingOPS under both:
+
+1. the Combined Community License identified in `LICENSE`; and
+2. separately executed TradingOPS Commercial Licenses.
+
+You also grant a corresponding patent license for patent claims you can license that are necessarily
+infringed by the contribution alone or by its combination with TradingOPS. This grant does not
+transfer your copyright ownership. It does allow the project to maintain the dual-license model,
+including paid organizational, SaaS, hosted, white-label, and resale scopes.
+
+Submission through a pull request or another intentional contribution channel constitutes acceptance
+of this grant. Do not submit employer-owned, client-owned, third-party, or encumbered material unless
+you have written authority to make this grant. The pull request template records the contributor's
+confirmation.
+
 ## Verification
 
 ```bash
