@@ -1,5 +1,33 @@
 # Trading console product QA
 
+## 2026-08-10: global shell and dual-theme design system
+
+### P0 / P1 / P2 status
+
+- P0: none open. Runtime truth, permissions, risk controls, and dangerous capability gates were not changed.
+- P1 closed: the shell now exposes the active Workspace / Team as a persistent labelled control instead of an unlabelled select, and the local deployment no longer competes visually with the active scope.
+- P1 closed: navigation is grouped into workbench, team setup, and governance/safety without duplicating routes or capability truth. Empty groups are hidden from identities that have no visible route in that group.
+- P1 closed: light and dark themes now share complete surface tokens, including the previously undefined `surface` and `panel-soft` values. Manual selection persists across reload; the OS preference remains the default until a manual choice is stored.
+- P1 closed: status labels now combine text and a consistent shape/color cue for current, waiting, stale, missing, blocked, read-only, and disabled states. Color is not the only cue.
+- P2 closed: the desktop priority headline, top-bar controls, cards, radii, focus ring, and spacing were tightened while preserving the existing information hierarchy and single primary action.
+- P2 open: exact 1024, 430, and 390 browser captures plus keyboard and screen-reader flow acceptance remain in the next stage.
+
+### Five-dimensional evidence
+
+- Code: centralized surface, typography, radius, control, focus, and status tokens; persistent theme controller; capability-aware navigation groups.
+- Database: no model or migration change was required for this UI-only tranche.
+- API: existing current-scope, environment, capability, and page APIs remain the only truth sources.
+- Actual pages: all 13 authenticated routes rendered at 1422 x 800 with the active scope visible, no document-level horizontal overflow, and no browser console messages.
+- End-to-end runtime: the current image was rebuilt through Docker Compose; theme selection survived a page reload and the same facts/actions remained present in both themes.
+- Tests: focused web/API, WCAG token, JavaScript, service-worker, and shadow-page tests passed.
+
+### Accepted screenshots
+
+- Dark theme: `artifacts/product-audit/trading-shell-design-system-2026-08-10/01-home-dark.jpg`.
+- Light theme: `artifacts/product-audit/trading-shell-design-system-2026-08-10/02-home-light.jpg`.
+
+final result: global shell and dual-theme design-system tranche passed; exact tablet/mobile and keyboard/accessibility acceptance remain open
+
 ## 2026-08-05: active proposal truth on the opportunity page
 
 ### P0 / P1 / P2 status

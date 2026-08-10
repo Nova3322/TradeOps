@@ -1,9 +1,12 @@
 const main = document.querySelector('#main');
 const sidebar = document.querySelector('#sidebar');
 const identityChip = document.querySelector('#identity-chip');
+const scopeControl = document.querySelector('#scope-control');
 const scopeSwitcher = document.querySelector('#scope-switcher');
 const environmentBadge = document.querySelector('#environment-badge');
 const languageToggle = document.querySelector('#language-toggle');
+const themeToggle = document.querySelector('#theme-toggle');
+const themeColorMeta = document.querySelector('meta[name="theme-color"]');
 const mobileNavToggle = document.querySelector('#mobile-nav-toggle');
 const mobileSessionSummary = document.querySelector('#mobile-session-summary');
 const navBackdrop = document.querySelector('#nav-backdrop');
@@ -28,14 +31,15 @@ let mobileNavFocusFrame = null;
 let mobileNavFocusToken = 0;
 const REQUEST_TIMEOUT_MS = 15000;
 const LANGUAGE_STORAGE_KEY = 'trading-language';
+const THEME_STORAGE_KEY = 'trading-theme';
 let currentLanguage = localStorage.getItem(LANGUAGE_STORAGE_KEY) === 'en' ? 'en' : 'zh-CN';
 
 const ENGLISH_EXACT = new Map(Object.entries({
   '交易控制台':'Trading Console', '交易控制台首页':'Trading Console home', '生产交易管理':'Production trading operations', '生产环境':'Production',
-  '中英切换':'Chinese / English', '切换中英文':'Switch between Chinese and English', '切换主题':'Switch theme', '菜单':'Menu',
+  '中英切换':'Chinese / English', '切换中英文':'Switch between Chinese and English', '切换主题':'Switch theme', '主题':'Theme', '浅色':'Light', '深色':'Dark', '菜单':'Menu',
   '只读用户':'Observer', '提案发起人':'Proposer', '审核人':'Reviewer', '交易运维人员':'Trading operator',
   '资金管理员':'Treasury administrator', '系统管理员':'Super administrator',
-  '主导航':'Main navigation', '当前任务':'Current tasks', '实时机会':'Live opportunities', '审核队列':'Review queue',
+  '主导航':'Main navigation', '工作台':'Workspace', '团队配置':'Team setup', '治理与安全':'Governance and safety', '当前范围':'Current scope', '当前任务':'Current tasks', '实时机会':'Live opportunities', '审核队列':'Review queue',
   '交易任务':'Trades', '系统状态':'System status', '资金':'Capital', '异常':'Exceptions',
   '交易账户':'Exchange accounts', '成员权限':'Access control',
   '业务数据库已连接':'Business database connected', '数据缺失时自动阻止交易':'Missing data blocks trading automatically',
@@ -1061,7 +1065,7 @@ function showApiError(error, target = null) {
 function setShell(loggedIn) {
   sidebar.hidden = !loggedIn;
   identityChip.hidden = !loggedIn;
-  scopeSwitcher.hidden = !loggedIn;
+  scopeControl.hidden = !loggedIn;
   mobileNavToggle.hidden = !loggedIn;
   if (loggedIn) {
     const currentWorkspaceId = session.active_workspace?.workspace_id || '';
@@ -1077,12 +1081,16 @@ function setShell(loggedIn) {
     const identity = `${session.username} · ${localizedText(primaryRole ? fmtRole(primaryRole) : '未分配角色')}`;
     const scopeDetail = `${session.active_workspace?.name || '未选择 Workspace'} / ${session.active_team?.name || '未选择团队'}`;
     const identityDetail = `${session.username} · ${scopeDetail} · ${roleNames().map(role => localizedText(fmtRole(role))).join(' / ') || localizedText('未分配角色')}`;
-    identityChip.textContent = identity;
+    identityChip.innerHTML = `<strong>${escapeHtml(session.username)}</strong><span>${escapeHtml(localizedText(primaryRole ? fmtRole(primaryRole) : '未分配角色'))}</span>`;
     identityChip.title = identityDetail;
+    identityChip.setAttribute('aria-label', identityDetail);
     mobileSessionSummary.textContent = identity;
     mobileSessionSummary.title = identityDetail;
     document.querySelectorAll('[data-nav-capability]').forEach(link => {
       link.hidden = !hasCapability(link.dataset.navCapability);
+    });
+    document.querySelectorAll('[data-nav-section]').forEach(section => {
+      section.hidden = ![...section.querySelectorAll('a')].some(link => !link.hidden);
     });
   }
   closeMobileNav({restoreFocus:false});
@@ -4739,13 +4747,38 @@ document.querySelector('#logout-button').addEventListener('click', async (event)
     await route();
   } catch (error) { showApiError(error); }
 }));
-document.querySelector('#theme-toggle').addEventListener('click', () => { const next = document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark'; document.documentElement.dataset.theme = next; localStorage.setItem('trading-theme', next); });
+const preferredThemeMedia = matchMedia('(prefers-color-scheme: dark)');
+function applyTheme(theme, {persist = false} = {}) {
+  const normalized = theme === 'dark' ? 'dark' : 'light';
+  document.documentElement.dataset.theme = normalized;
+  themeToggle.dataset.theme = normalized;
+  themeToggle.setAttribute('aria-pressed', String(normalized === 'dark'));
+  const currentLabel = normalized === 'dark'
+    ? (currentLanguage === 'en' ? 'Dark' : '深色')
+    : (currentLanguage === 'en' ? 'Light' : '浅色');
+  const nextLabel = normalized === 'dark'
+    ? (currentLanguage === 'en' ? 'light' : '浅色')
+    : (currentLanguage === 'en' ? 'dark' : '深色');
+  themeToggle.querySelector('[data-theme-label]').textContent = currentLabel;
+  themeToggle.setAttribute('aria-label', currentLanguage === 'en'
+    ? `${currentLabel} theme; switch to ${nextLabel}`
+    : `当前为${currentLabel}主题；切换到${nextLabel}主题`);
+  themeToggle.title = themeToggle.getAttribute('aria-label');
+  if (themeColorMeta) themeColorMeta.content = normalized === 'dark' ? '#0b100f' : '#f4f6f3';
+  if (persist) localStorage.setItem(THEME_STORAGE_KEY, normalized);
+}
+themeToggle.addEventListener('click', () => {
+  applyTheme(document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark', {persist:true});
+});
+preferredThemeMedia.addEventListener?.('change', event => {
+  if (!localStorage.getItem(THEME_STORAGE_KEY)) applyTheme(event.matches ? 'dark' : 'light');
+});
 languageToggle.addEventListener('click', () => {
   currentLanguage = currentLanguage === 'en' ? 'zh-CN' : 'en';
   localStorage.setItem(LANGUAGE_STORAGE_KEY, currentLanguage);
   location.reload();
 });
-document.documentElement.dataset.theme = localStorage.getItem('trading-theme') || (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light');
+applyTheme(localStorage.getItem(THEME_STORAGE_KEY) || (preferredThemeMedia.matches ? 'dark' : 'light'));
 applyLanguageToDocument();
 if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js').catch(() => {});
 syncNavigationMode();

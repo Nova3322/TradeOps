@@ -112,15 +112,18 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
 
     assert response.status_code == 200
     assert "交易控制台" in response.text
-    assert "/assets/app.js?v=140" in response.text
+    assert "/assets/app.js?v=141" in response.text
     assert 'href="/signals"' in response.text
-    assert "/assets/styles.css?v=57" in response.text
+    assert "/assets/styles.css?v=58" in response.text
     assert 'aria-label="交易控制台首页"' in response.text
     assert '<a href="/" data-link><span>⌂</span>当前任务</a>' in response.text
     assert "<span>⌁</span>实时机会</a>" in response.text
     assert "<span>¤</span>资金中心</a>" in response.text
     assert 'id="mobile-nav-toggle"' in response.text
     assert 'id="scope-switcher"' in response.text
+    assert 'id="scope-control"' in response.text
+    assert 'class="nav-section" data-nav-section' in response.text
+    assert 'data-theme-label' in response.text
     assert 'id="confirm-dialog"' in response.text
 
     for route in (
@@ -418,6 +421,11 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
     assert ".proposal-table tr { display: block;" in stylesheet.text
     assert ".proposal-table td::before { content: attr(data-label);" in stylesheet.text
     assert ".capital-route-grid" in stylesheet.text
+    assert "--panel-soft:" in stylesheet.text
+    assert "--surface:" in stylesheet.text
+    assert ".nav-section-label" in stylesheet.text
+    assert ".theme-button" in stylesheet.text
+    assert ".status-AVAILABLE" in stylesheet.text
     assert ".capital-trend-toggle" in stylesheet.text
     assert ".capital-blockers" in stylesheet.text
     assert ".treasury-provider-choice" in stylesheet.text
@@ -432,7 +440,7 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
 
     service_worker = get(app, "/sw.js")
     assert service_worker.status_code == 200
-    assert "trading-shell-v111" in service_worker.text
+    assert "trading-shell-v112" in service_worker.text
     assert "self.skipWaiting()" in service_worker.text
     assert "self.clients.claim()" in service_worker.text
     assert "await fetch(event.request)" in service_worker.text
@@ -1673,7 +1681,7 @@ def test_web_request_lifecycle_in_node() -> None:
         );
         const logoutSource = extract(
           "document.querySelector('#logout-button')",
-          "\ndocument.querySelector('#theme-toggle')",
+          "\nconst preferredThemeMedia",
         );
         const unauthorizedSource = extract(
           "function handleUnauthorizedResponse",
