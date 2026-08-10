@@ -229,6 +229,57 @@ def test_database_binding_supervisor_builds_exact_scoped_read_only_workers() -> 
     assert "perptape-fixture-key" not in repr(signal_binding)
 
 
+def test_database_binding_supervisor_keeps_okx_secrets_out_of_settings() -> None:
+    binding = PreparedRuntimeAccountBinding(
+        exchange_account_id=UUID("55555555-5555-5555-5555-555555555555"),
+        workspace_id=UUID("22222222-2222-2222-2222-222222222222"),
+        team_id=UUID("11111111-1111-1111-1111-111111111111"),
+        service_principal_id=UUID("33333333-3333-3333-3333-333333333333"),
+        service_principal_username="runtime-okx-account",
+        account_id="okx-team-main",
+        venue="OKX",
+        account_version=3,
+        credential_version=1,
+        credentials={
+            "api_key": "okx-fixture-key",
+            "api_secret": "okx-fixture-secret",
+            "passphrase": "okx-fixture-passphrase",
+        },
+    )
+
+    class FakeWorker:
+        installed: PreparedRuntimeAccountBinding | None = None
+
+        def install_database_account_reader(
+            self, account_binding: PreparedRuntimeAccountBinding
+        ) -> None:
+            self.installed = account_binding
+
+    captured: list[Settings] = []
+
+    def factory(settings: Settings, _database: Any) -> FakeWorker:
+        captured.append(settings)
+        return FakeWorker()
+
+    supervisor = RuntimeBindingSupervisor(
+        settings=Settings(
+            database_url="postgresql+psycopg://unused:unused@127.0.0.1/unused",
+            _env_file=None,
+        ),
+        database=object(),  # type: ignore[arg-type]
+        worker_factory=factory,  # type: ignore[arg-type]
+    )
+
+    worker = supervisor._account_worker(binding)
+
+    assert worker.installed is binding
+    serialized = repr(captured[0].model_dump())
+    assert "okx-fixture-key" not in serialized
+    assert "okx-fixture-secret" not in serialized
+    assert "okx-fixture-passphrase" not in serialized
+    assert "okx-fixture-secret" not in repr(binding)
+
+
 def test_runtime_rate_limit_cooldown_skips_only_until_retry_deadline() -> None:
     now = datetime(2026, 8, 5, 1, 0, tzinfo=UTC)
     worker: Any = object.__new__(RuntimeSyncWorker)

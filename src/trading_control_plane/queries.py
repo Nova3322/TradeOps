@@ -605,7 +605,8 @@ class TradingQueries:
             else "run a supported no-side-effect connection verification"
             if item.connection_status != "VERIFIED"
             else "enable the database-bound continuous read-only sync"
-            if item.venue in {"BINANCE", "HYPERLIQUID"} and not item.runtime_sync_enabled
+            if item.venue in {"BINANCE", "HYPERLIQUID", "OKX", "BYBIT"}
+            and not item.runtime_sync_enabled
             else "keep trading disabled until risk and live-send gates are explicitly approved"
         )
         return {
@@ -641,10 +642,13 @@ class TradingQueries:
             "runtime_binding": {
                 "bound": item.runtime_sync_enabled,
                 "source": "DATABASE_ENVELOPE",
-                "read_only_connector": (
-                    "IMPLEMENTED"
-                    if item.venue in {"BINANCE", "HYPERLIQUID"}
-                    else "NOT_IMPLEMENTED"
+                "read_only_connector": "IMPLEMENTED",
+                "read_only_scope": (
+                    "USDT_LINEAR_PERPETUALS"
+                    if item.venue in {"OKX", "BYBIT"}
+                    else "USD_M_PERPETUALS"
+                    if item.venue == "BINANCE"
+                    else "CORE_AND_CONFIGURED_HIP3"
                 ),
                 "connection_verification_connector": "IMPLEMENTED",
                 "connection_verification_source": "DATABASE_ENVELOPE",
@@ -3599,6 +3603,18 @@ class TradingQueries:
             raise DomainRejected("RBAC_DENIED", "venue facts are outside the current scope")
         workspace_id, team_id = self._active_scope_ids(user_id)
         with self.database.session_factory() as session:
+            account = session.scalar(
+                select(ExchangeAccount.exchange_account_id).where(
+                    ExchangeAccount.team_id == team_id,
+                    ExchangeAccount.account_id == account_id,
+                    ExchangeAccount.venue == venue,
+                )
+            )
+            if account is None:
+                raise DomainRejected(
+                    "EXCHANGE_ACCOUNT_NOT_FOUND",
+                    "venue facts require a registered account in the active team",
+                )
             instruments = session.scalars(
                 select(Instrument).where(Instrument.venue == venue).order_by(Instrument.symbol)
             ).all()

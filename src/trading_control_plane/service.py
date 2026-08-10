@@ -168,6 +168,7 @@ from trading_control_plane.perptape import (
     validate_perptape_feed_payload,
 )
 from trading_control_plane.shadow import apply_shadow_fill, quote_shadow_execution
+from trading_control_plane.venue_read_only import VenueInstrument, VenueReadOnlySnapshot
 
 CAPITAL_HISTORY_MIN_INTERVAL = timedelta(minutes=1)
 PASSWORD_HASHER = PasswordHasher()
@@ -3117,11 +3118,6 @@ class TradingService:
                 return replay
             if account.version != expected_version:
                 _reject("VERSION_CONFLICT", "exchange account version changed")
-            if enabled and account.venue not in {"BINANCE", "HYPERLIQUID"}:
-                _reject(
-                    "RUNTIME_CONNECTOR_NOT_IMPLEMENTED",
-                    "continuous read-only sync is not implemented for this exchange",
-                )
             if enabled and (
                 not account.active
                 or account.connection_status != "VERIFIED"
@@ -3207,7 +3203,7 @@ class TradingService:
                     or account.connection_status != "VERIFIED"
                     or account.credentials_ciphertext is None
                     or account.credential_version < 1
-                    or account.venue not in {"BINANCE", "HYPERLIQUID"}
+                    or account.venue not in SUPPORTED_EXCHANGE_VENUES
                 ):
                     _reject(
                         "RUNTIME_BINDING_INVALID",
@@ -5118,18 +5114,29 @@ class TradingService:
         actor_id: UUID,
         account_id: str,
         venue: str,
-        instruments: Sequence[BinanceInstrument | HyperliquidInstrument],
+        instruments: Sequence[BinanceInstrument | HyperliquidInstrument | VenueInstrument],
         hip3_dexes: tuple[str, ...] = (),
         runtime_binding: PreparedRuntimeAccountBinding | None = None,
         now: datetime,
     ) -> dict[str, int]:
         """Replace one venue's active Catalog set from a complete official read-only snapshot."""
 
-        if venue not in {"BINANCE", "HYPERLIQUID"} or not instruments:
+        if venue not in SUPPORTED_EXCHANGE_VENUES or not instruments:
             _reject("INSTRUMENT_CATALOG_INVALID", "official active instrument catalog is invalid")
         symbols = [instrument.symbol for instrument in instruments]
         for symbol in symbols:
-            freqtrade_pair(venue, symbol, hip3_dexes=hip3_dexes)
+            if venue in {"BINANCE", "HYPERLIQUID"}:
+                freqtrade_pair(venue, symbol, hip3_dexes=hip3_dexes)
+            elif venue == "OKX" and re.fullmatch(r"[A-Z0-9]{1,64}-USDT-SWAP", symbol) is None:
+                _reject(
+                    "INSTRUMENT_CATALOG_INVALID",
+                    "OKX catalog requires exact USDT linear SWAP identities",
+                )
+            elif venue == "BYBIT" and re.fullmatch(r"[A-Z0-9]{1,64}USDT", symbol) is None:
+                _reject(
+                    "INSTRUMENT_CATALOG_INVALID",
+                    "Bybit catalog requires exact USDT linear perpetual identities",
+                )
         if len(symbols) != len(set(symbols)) or any(
             not instrument.active
             or not instrument.symbol
@@ -11328,11 +11335,57 @@ class TradingService:
             now=now,
         )
 
+    def ingest_okx_read_only_account_snapshot(
+        self,
+        account_id: str,
+        actor_id: UUID,
+        snapshots: tuple[VenueReadOnlySnapshot, ...],
+        *,
+        environment: ExecutionEnvironment,
+        runtime_binding: PreparedRuntimeAccountBinding | None = None,
+        now: datetime,
+    ) -> dict[str, Any]:
+        """Persist one complete normalized OKX USDT linear SWAP account read."""
+
+        return self._ingest_read_only_account_snapshot(
+            account_id,
+            actor_id,
+            snapshots,
+            venue="OKX",
+            environment=environment,
+            runtime_binding=runtime_binding,
+            now=now,
+        )
+
+    def ingest_bybit_read_only_account_snapshot(
+        self,
+        account_id: str,
+        actor_id: UUID,
+        snapshots: tuple[VenueReadOnlySnapshot, ...],
+        *,
+        environment: ExecutionEnvironment,
+        runtime_binding: PreparedRuntimeAccountBinding | None = None,
+        now: datetime,
+    ) -> dict[str, Any]:
+        """Persist one complete normalized Bybit Unified USDT linear account read."""
+
+        return self._ingest_read_only_account_snapshot(
+            account_id,
+            actor_id,
+            snapshots,
+            venue="BYBIT",
+            environment=environment,
+            runtime_binding=runtime_binding,
+            now=now,
+        )
+
     def _ingest_read_only_account_snapshot(
         self,
         account_id: str,
         actor_id: UUID,
-        snapshots: tuple[BinanceReadOnlySnapshot | HyperliquidReadOnlySnapshot, ...],
+        snapshots: tuple[
+            BinanceReadOnlySnapshot | HyperliquidReadOnlySnapshot | VenueReadOnlySnapshot, ...
+        ],
         *,
         venue: str,
         environment: ExecutionEnvironment,
@@ -11562,7 +11615,7 @@ class TradingService:
         self,
         account_id: str,
         actor_id: UUID,
-        snapshot: BinanceReadOnlySnapshot | HyperliquidReadOnlySnapshot,
+        snapshot: BinanceReadOnlySnapshot | HyperliquidReadOnlySnapshot | VenueReadOnlySnapshot,
         *,
         venue: str,
         environment: ExecutionEnvironment,

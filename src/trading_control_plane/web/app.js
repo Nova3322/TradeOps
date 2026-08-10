@@ -1512,10 +1512,10 @@ async function renderHome() {
   const activeCampaignIds = new Set(activeCampaigns.map(item => item.campaign_id));
   const exceptions = exceptionResponse.data.filter(item => activeCampaignIds.has(item.campaign_id));
   const exceptionCampaigns = new Set(exceptions.map(item => item.campaign_id));
-  const riskLimited = Boolean(riskControl && riskControl.policy.system_state !== 'NORMAL');
+  const riskLimited = Boolean(riskControl?.policy && riskControl.policy.system_state !== 'NORMAL');
   const riskPolicySummary = riskControl?.policy?.system_state === 'NORMAL'
     ? '正常'
-    : riskControl ? riskControlStatusLabel(riskControl.policy.system_state) : '由管理员控制';
+    : riskControl?.policy ? riskControlStatusLabel(riskControl.policy.system_state) : '未配置';
   const liveOrderSendEnabled = runtime.capability_gates?.LIVE_ORDER_SEND?.status === 'ENABLED'
     && runtime.external_boundaries?.execution?.live_order_send === true;
   const liveOrderSendLabel = liveOrderSendEnabled ? '已开启' : '已关闭';
@@ -4383,28 +4383,70 @@ function bindExchangeAccountForms() {
 }
 
 async function renderVenueFacts() {
-  const selectedVenue = (new URLSearchParams(location.search).get('venue') || (location.pathname.includes('hyperliquid') ? 'HYPERLIQUID' : 'BINANCE')).toUpperCase();
-  const venue = selectedVenue === 'HYPERLIQUID' ? 'HYPERLIQUID' : 'BINANCE';
+  const params = new URLSearchParams(location.search);
+  const selectedVenue = (params.get('venue') || (location.pathname.includes('hyperliquid') ? 'HYPERLIQUID' : 'BINANCE')).toUpperCase();
+  const venue = ['BINANCE','HYPERLIQUID','OKX','BYBIT'].includes(selectedVenue) ? selectedVenue : 'BINANCE';
   const endpoint = venue.toLowerCase();
-  const [status, runtime, accountResult] = await Promise.all([
-    api(`/api/venues/${endpoint}/status`),
+  const legacyStatusRequest = ['BINANCE','HYPERLIQUID'].includes(venue)
+    ? api(`/api/venues/${endpoint}/status`)
+    : Promise.resolve(null);
+  const [legacyStatus, runtime, accountResult] = await Promise.all([
+    legacyStatusRequest,
     api('/api/runtime/status').catch(error => [403, 409].includes(error.status) ? null : Promise.reject(error)),
     api('/api/exchange-accounts'),
   ]);
   const registry = accountResult.data;
-  const accountId = status.default_account_id;
+  const venueAccounts = (registry.data || []).filter(item => item.venue === venue && item.active);
+  const requestedAccount = params.get('account_id');
+  const preferredAccount = requestedAccount || legacyStatus?.default_account_id;
+  const account = venueAccounts.find(item => item.account_id === preferredAccount) || venueAccounts[0] || null;
+  const accountId = account?.account_id || null;
+  const processRuntimeEnabled = Boolean(runtime?.data?.external_boundaries?.runtime_sync?.enabled);
+  const status = legacyStatus || {
+    venue,
+    execution_backend:'UNAVAILABLE',
+    worker_configured:false,
+    automatic_sync_enabled:Boolean(processRuntimeEnabled && account?.runtime_binding?.bound),
+    automatic_sync_interval_seconds:runtime?.data?.external_boundaries?.runtime_sync?.interval_seconds || 0,
+    default_account_id:accountId,
+    fact_environment:'LIVE',
+  };
+  if (account) {
+    status.automatic_sync_enabled = Boolean(processRuntimeEnabled && account.runtime_binding?.bound);
+    status.default_account_id = accountId;
+  }
   const facts = accountId
     ? (await api(`/api/venues/${endpoint}/facts?account_id=${encodeURIComponent(accountId)}`)).data
     : null;
-  const connection = runtime?.data?.connections?.[venue] || null;
+  const aggregateConnection = runtime?.data?.connections?.[venue] || null;
+  const exactHealth = accountId ? runtime?.data?.source_health?.[`${venue}:${accountId}`] : null;
+  const connection = exactHealth
+    ? {
+        ...aggregateConnection,
+        available:exactHealth.status === 'SUCCESS' && status.automatic_sync_enabled,
+        category:exactHealth.status === 'SUCCESS'
+          ? status.automatic_sync_enabled ? 'READ_ONLY_CONNECTED' : 'EXPLICITLY_DISABLED'
+          : String(exactHealth.error_code || '').includes('HISTORY_INCOMPLETE')
+            ? 'READ_ONLY_CONNECTED_HISTORY_INCOMPLETE'
+            : exactHealth.status === 'SKIPPED' ? 'PROBE_SKIPPED' : 'READ_ONLY_PROBE_FAILED',
+        error_code:exactHealth.error_code,
+        checked_at:exactHealth.checked_at,
+        last_success_at:exactHealth.last_success_at,
+        retry_at:exactHealth.retry_at,
+        consecutive_failures:exactHealth.consecutive_failures,
+        reason:aggregateConnection?.reason || '该账户最近一次只读同步没有形成可用实时事实。',
+        owner_role:aggregateConnection?.owner_role || '系统管理员',
+        next_action:aggregateConnection?.next_action || '检查精确账户错误代码并等待下一次有界重试。',
+      }
+    : aggregateConnection;
   const connected = Boolean(accountId && connection?.available);
-  const connectionLabel = accountId ? fmtConnectionCategory(connection?.category) : '默认账户未配置';
+  const connectionLabel = accountId ? fmtConnectionCategory(connection?.category) : '当前团队未配置账户';
   const historyIncomplete = connection?.category === 'READ_ONLY_CONNECTED_HISTORY_INCOMPLETE';
   const connectionEvidence = connection?.error_code
     ? `<details class="venue-technical-detail"><summary>查看技术分类</summary><code translate="no">${escapeHtml(connection.error_code)}</code></details>`
     : '';
   const connectionReason = !accountId
-    ? (currentLanguage === 'en' ? 'No unique production account is configured, so no account facts were read. Owner: system administrator. Next: configure the default production account and retry.' : '没有配置唯一生产账户，系统没有读取任何账户事实。负责：系统管理员；下一步：配置该交易所的默认生产账户后重试。')
+    ? (currentLanguage === 'en' ? 'No account is registered for this venue in the active team, so no facts were read. Owner: system administrator. Next: register and verify one account.' : '当前团队没有登记该交易所账户，系统未读取账户事实。负责：系统管理员；下一步：登记并验证一个账户。')
     : connection
     ? (currentLanguage === 'en' ? `${fmtConnectionReason(connection)} Owner: ${translateEnglishText(connection.owner_role)}. Next: ${fmtConnectionNextAction(connection)}` : `${fmtConnectionReason(connection)} 负责：${connection.owner_role}；下一步：${fmtConnectionNextAction(connection)}`)
     : (currentLanguage === 'en' ? 'This identity cannot read the unified connection probe. The page shows saved facts only and does not claim a live connection.' : '当前身份无法读取统一连接探针；页面仅展示已保存账户事实，不能据此声称实时已连接。');
@@ -4422,11 +4464,17 @@ async function renderVenueFacts() {
   const venueDetail = currentLanguage === 'en'
     ? venue === 'BINANCE'
       ? ({PORTFOLIO_MARGIN:'Unified account',MAIN_ACCOUNT:'Main account',SUBACCOUNT:'Subaccount'}[status.account_mode] || 'Unknown account mode')
-      : `Core markets${status.hip3_available ? ` + HIP-3${hip3Dexes.length ? ` (${hip3Dexes.join(', ')})` : ''}` : ''}`
+      : venue === 'HYPERLIQUID'
+        ? `Core markets${status.hip3_available ? ` + HIP-3${hip3Dexes.length ? ` (${hip3Dexes.join(', ')})` : ''}` : ''}`
+        : venue === 'OKX' ? 'USDT linear SWAP scope' : 'Unified USDT linear perpetual scope'
     : venue === 'BINANCE'
       ? (accountModeLabels[status.account_mode] || '账户模式未知')
-      : `核心市场${status.hip3_available ? ` + HIP-3${hip3Dexes.length ? `（${hip3Dexes.join('、')}）` : ''}` : ''}`;
-  const executionDetail = status.execution_backend === 'FREQTRADE'
+      : venue === 'HYPERLIQUID'
+        ? `核心市场${status.hip3_available ? ` + HIP-3${hip3Dexes.length ? `（${hip3Dexes.join('、')}）` : ''}` : ''}`
+        : venue === 'OKX' ? 'USDT 线性永续范围' : '统一账户 USDT 线性永续范围';
+  const executionDetail = ['OKX','BYBIT'].includes(venue)
+    ? (currentLanguage === 'en' ? 'Read-only facts are implemented; order execution is unavailable' : '只读事实已实现；订单执行尚未开放')
+    : status.execution_backend === 'FREQTRADE'
     ? status.worker_configured
       ? (currentLanguage === 'en' ? 'Execution is handled by Freqtrade workers; this page cannot place orders' : '执行由 Freqtrade 执行进程负责；本页不能下单')
       : (currentLanguage === 'en' ? 'Freqtrade is the execution backend, but no worker is connected; this page cannot place orders' : '执行底座为 Freqtrade；控制面尚未接入执行进程，本页不能下单')
@@ -4467,16 +4515,26 @@ async function renderVenueFacts() {
           : connection
             ? '实时账户事实不可用；仅展示最后快照'
             : '无法验证实时连接；仅展示已保存事实';
-  main.innerHTML = `<section class="page venue-facts-page"><header class="page-head"><div><p class="eyebrow">团队账户 · 连接与交易分离</p><h1>交易账户</h1><p class="lede">Binance、Hyperliquid、OKX 与 Bybit 均可使用团队加密凭据执行一次无副作用连接验证；连续账户事实同步目前仅覆盖币安和 Hyperliquid（含 HIP-3），验证成功也不会开启交易。</p></div><button class="secondary" data-refresh>刷新当前状态</button></header>
+  const venueLabels = {BINANCE:'Binance',HYPERLIQUID:'Hyperliquid',OKX:'OKX',BYBIT:'Bybit'};
+  const accountSelector = venueAccounts.length > 1
+    ? `<label class="venue-account-select">当前账户<select data-venue-account>${venueAccounts.map(item => `<option value="${escapeHtml(item.account_id)}" ${item.account_id === accountId ? 'selected' : ''}>${escapeHtml(item.label)} · ${escapeHtml(item.account_id)}</option>`).join('')}</select></label>`
+    : '';
+  main.innerHTML = `<section class="page venue-facts-page"><header class="page-head"><div><p class="eyebrow">团队账户 · 连接与交易分离</p><h1>交易账户</h1><p class="lede">Binance、Hyperliquid、OKX 与 Bybit 均支持团队加密凭据、无副作用连接验证和账户范围连续只读事实；OKX 与 Bybit 当前严格限定 USDT 线性永续，验证或读取成功都不会开启交易。</p></div><button class="secondary" data-refresh>刷新当前状态</button></header>
     ${exchangeAccountRegistry(registry)}
-    <nav class="venue-switch" aria-label="选择交易所"><a class="${venue === 'BINANCE' ? 'active' : ''}" href="/venues?venue=BINANCE" data-link>Binance</a><a class="${venue === 'HYPERLIQUID' ? 'active' : ''}" href="/venues?venue=HYPERLIQUID" data-link>Hyperliquid</a></nav>
-    <div class="stats venue-status-stats"><div class="stat"><small>连接状态</small><b class="${connected ? 'direction-long' : 'warning-text'}">${escapeHtml(connectionLabel)}</b><span>${escapeHtml(connectionSummary)}</span></div><div class="stat"><small>运行模式</small><b>${currentLanguage === 'en' ? 'Production account · read-only' : '生产账户 · 只读'}</b><span>${escapeHtml(venueDetail)} · ${escapeHtml(executionDetail)}</span></div><div class="stat"><small>交易账户</small><b>${accountId ? '已配置默认账户' : '未配置默认账户'}</b><span>${accountId ? `${escapeHtml(venue === 'BINANCE' ? (currentLanguage === 'en' ? 'Binance' : '币安') : 'Hyperliquid')} · ${currentLanguage === 'en' ? 'Bound production account · Single-account mode' : '生产账户已绑定 · 单账户模式'}` : '不会回退到示例账户或猜测范围'}</span></div><div class="stat"><small>${snapshotMode ? '最后快照' : '事实新鲜度'}</small><b>${fmtDate(lastSync)}</b><span>${currentLanguage === 'en' ? (lastSync ? snapshotMode ? 'Connection restricted; the data below is not live' : 'Latest saved facts; connection probes are verified separately' : 'No saved account facts') : (lastSync ? snapshotMode ? '连接受限；以下数据不是实时事实' : '最近保存时间；连接探针另行校验' : '尚无已保存事实')}</span></div></div>
+    <nav class="venue-switch" aria-label="选择交易所">${['BINANCE','HYPERLIQUID','OKX','BYBIT'].map(item => `<a class="${venue === item ? 'active' : ''}" href="/venues?venue=${item}" data-link>${venueLabels[item]}</a>`).join('')}</nav>
+    ${accountSelector}
+    <div class="stats venue-status-stats"><div class="stat"><small>连接状态</small><b class="${connected ? 'direction-long' : 'warning-text'}">${escapeHtml(connectionLabel)}</b><span>${escapeHtml(connectionSummary)}</span></div><div class="stat"><small>运行模式</small><b>${currentLanguage === 'en' ? 'Production account · read-only' : '生产账户 · 只读'}</b><span>${escapeHtml(venueDetail)} · ${escapeHtml(executionDetail)}</span></div><div class="stat"><small>交易账户</small><b>${accountId ? '已选择当前账户' : '当前团队未配置账户'}</b><span>${accountId ? `${escapeHtml(venueLabels[venue])} · ${escapeHtml(accountId)} · ${currentLanguage === 'en' ? 'Exact team/account scope' : '精确团队/账户范围'}` : '不会回退到示例账户或猜测范围'}</span></div><div class="stat"><small>${snapshotMode ? '最后快照' : '事实新鲜度'}</small><b>${fmtDate(lastSync)}</b><span>${currentLanguage === 'en' ? (lastSync ? snapshotMode ? 'Connection restricted; the data below is not live' : 'Latest saved facts; connection probes are verified separately' : 'No saved account facts') : (lastSync ? snapshotMode ? '连接受限；以下数据不是实时事实' : '最近保存时间；连接探针另行校验' : '尚无已保存事实')}</span></div></div>
     <article class="account-sync-note ${connected ? 'is-active' : ''}"><span class="status-dot"></span><div><b>${currentLanguage === 'en' ? 'Connection check' : '连接检查'}</b><p>${escapeHtml(connectionReason)}</p><span class="system-health-meta">${escapeHtml(connectionProbeEvidence)}</span>${connectionEvidence}</div></article>
     <article class="account-sync-note ${status.automatic_sync_enabled && connected ? 'is-active' : ''}"><span class="status-dot"></span><div><b>${status.automatic_sync_enabled && connected ? '账户数据自动同步' : status.automatic_sync_enabled ? '自动同步等待连接恢复' : '账户自动更新尚未启用'}</b><p>${escapeHtml(automaticSyncCopy)}</p></div></article>
     ${snapshotMode ? `<article class="danger-note venue-snapshot-warning"><b>当前连接不可用，以下仅为最后一次保存快照</b><p>这些余额、仓位、订单与成交不能作为实时交易依据。恢复只读连接并完成新一轮同步后，页面才会重新标记为当前事实。</p></article>` : ''}
-    ${accountId ? venueFactSections(facts, {snapshotMode, historyIncomplete}) : '<article class="danger-note venue-account-blocker"><b>未读取账户数据</b><p>请由系统管理员配置唯一默认生产账户。配置完成前，余额、仓位、委托、成交和资金费全部保持不可用，不会使用旧的 acct-1 或其他示例账户代替。</p></article>'}
+    ${accountId ? venueFactSections(facts, {snapshotMode, historyIncomplete}) : '<article class="danger-note venue-account-blocker"><b>未读取账户数据</b><p>请由系统管理员在当前团队登记并验证该交易所账户。完成前，余额、仓位、委托、成交和资金费保持不可用，不会使用其他团队或示例账户代替。</p></article>'}
   </section>`;
   document.querySelector('[data-refresh]')?.addEventListener('click', route);
+  document.querySelector('[data-venue-account]')?.addEventListener('change', event => {
+    const next = new URLSearchParams({venue, account_id:event.currentTarget.value});
+    history.pushState({}, '', `/venues?${next.toString()}`);
+    route();
+  });
   bindExchangeAccountForms();
 }
 

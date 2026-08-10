@@ -112,9 +112,9 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
 
     assert response.status_code == 200
     assert "交易控制台" in response.text
-    assert "/assets/app.js?v=144" in response.text
+    assert "/assets/app.js?v=146" in response.text
     assert 'href="/signals"' in response.text
-    assert "/assets/styles.css?v=63" in response.text
+    assert "/assets/styles.css?v=64" in response.text
     assert 'href="/assets/tradingops-logo.png" type="image/png"' in response.text
     assert '<img src="/assets/tradingops-logo.png" alt="">' in response.text
     assert '<span class="brand-mark" aria-hidden="true">T</span>' not in response.text
@@ -219,6 +219,8 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
     assert "api('/api/admin/team-members'" in app_javascript.text
     assert "当前任务只显示你的资金职责" in app_javascript.text
     assert "api('/api/risk-controls').catch(error => ({error}))" in app_javascript.text
+    assert "Boolean(riskControl?.policy && riskControl.policy.system_state !== 'NORMAL')" in app_javascript.text
+    assert "riskControl?.policy ? riskControlStatusLabel(riskControl.policy.system_state) : '未配置'" in app_javascript.text
     assert "riskControl.actions?.review_restore?.allowed === true" in app_javascript.text
     assert "riskControl.actions?.execute_restore?.allowed === true" in app_javascript.text
     assert "当前没有风险恢复审核待办" in app_javascript.text  # noqa: RUF001
@@ -470,7 +472,7 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
 
     service_worker = get(app, "/sw.js")
     assert service_worker.status_code == 200
-    assert "trading-shell-v116" in service_worker.text
+    assert "trading-shell-v118" in service_worker.text
     assert "/assets/tradingops-logo.png" in service_worker.text
     assert "/assets/tradingops-icon.svg" in service_worker.text
     assert "/assets/icon.svg" not in service_worker.text
@@ -1684,7 +1686,8 @@ def test_system_and_venue_pages_distinguish_read_only_snapshots_from_live_execut
     assert "生产账户 ${accountId}" not in source
     assert "生产账户 ${check.scope.account_id}" not in source
     assert "独立安全开关" in source
-    assert "币安和 Hyperliquid（含 HIP-3）" in source
+    assert "OKX 与 Bybit 当前严格限定 USDT 线性永续" in source
+    assert "['BINANCE','HYPERLIQUID','OKX','BYBIT'].includes(selectedVenue)" in source
     assert "shortId(accountId)" not in source
     assert 'class="table-wrap is-scrollable venue-fact-table"' in source
     assert "connectionCategoryEnglishLabels" in source

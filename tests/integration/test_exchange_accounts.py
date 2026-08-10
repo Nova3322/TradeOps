@@ -335,6 +335,7 @@ def test_exchange_account_api_masks_credentials_and_exposes_connector_truth(
                 "bound": False,
                 "source": "DATABASE_ENVELOPE",
                 "read_only_connector": "IMPLEMENTED",
+                "read_only_scope": "USD_M_PERPETUALS",
                 "connection_verification_connector": "IMPLEMENTED",
                 "connection_verification_source": "DATABASE_ENVELOPE",
                 "service_principal_configured": False,
@@ -476,7 +477,7 @@ def test_four_venue_connection_verification_is_scoped_idempotent_and_never_enabl
             assert replay.json()["version"] == results["BINANCE"]["version"]
             assert len(verifier.calls) == 4
 
-            for venue in {"BINANCE", "HYPERLIQUID"}:
+            for venue in {"BINANCE", "HYPERLIQUID", "BYBIT"}:
                 enabled = await client.put(
                     f"/api/exchange-accounts/{account_ids[venue]}/runtime-sync",
                     json={
@@ -488,28 +489,18 @@ def test_four_venue_connection_verification_is_scoped_idempotent_and_never_enabl
                 assert enabled.status_code == 200, enabled.text
                 assert enabled.json()["runtime_sync_enabled"] is True
 
-            unsupported = await client.put(
-                f"/api/exchange-accounts/{account_ids['BYBIT']}/runtime-sync",
-                json={
-                    "enabled": True,
-                    "expected_version": results["BYBIT"]["version"],
-                    "idempotency_key": "enable-bybit-runtime-sync",
-                },
-            )
-            assert unsupported.status_code == 422
-            assert unsupported.json()["error"]["code"] == "RUNTIME_CONNECTOR_NOT_IMPLEMENTED"
-
             listed = (await client.get("/api/exchange-accounts")).json()["data"]["data"]
             by_venue = {item["venue"]: item for item in listed}
             assert by_venue["BINANCE"]["runtime_binding"]["bound"] is True
             assert by_venue["HYPERLIQUID"]["runtime_binding"]["bound"] is True
             assert by_venue["OKX"]["connection"]["status"] == "FAILED"
-            assert by_venue["OKX"]["runtime_binding"]["read_only_connector"] == "NOT_IMPLEMENTED"
+            assert by_venue["OKX"]["runtime_binding"]["read_only_connector"] == "IMPLEMENTED"
             assert (
                 by_venue["OKX"]["runtime_binding"]["connection_verification_connector"]
                 == "IMPLEMENTED"
             )
             assert by_venue["BYBIT"]["permissions"]["can_verify_connection"] is True
+            assert by_venue["BYBIT"]["runtime_binding"]["bound"] is True
             assert all(item["trading"]["enabled"] is False for item in listed)
 
     asyncio.run(scenario())
@@ -548,6 +539,7 @@ def test_four_venue_connection_verification_is_scoped_idempotent_and_never_enabl
     assert {(item.venue, item.account_id) for item in bindings} == {
         ("BINANCE", "binance-team-account"),
         ("HYPERLIQUID", "hyperliquid-team-account"),
+        ("BYBIT", "bybit-team-account"),
     }
     assert all("secret" not in repr(item) for item in bindings)
     hyperliquid_binding = next(item for item in bindings if item.venue == "HYPERLIQUID")

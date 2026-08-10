@@ -18,6 +18,7 @@ from trading_control_plane.binance import (
     BinancePortfolioMarginReadOnlyClient,
     BinanceReadOnlyClient,
 )
+from trading_control_plane.bybit import BybitReadOnlyClient
 from trading_control_plane.config import Settings, get_settings
 from trading_control_plane.database import Database
 from trading_control_plane.domain import (
@@ -32,6 +33,7 @@ from trading_control_plane.domain import (
 from trading_control_plane.hyperliquid import HyperliquidReadOnlyClient
 from trading_control_plane.logging import configure_logging
 from trading_control_plane.notilt import NoTiltGateway, NoTiltUsdValuator
+from trading_control_plane.okx import OkxReadOnlyClient
 from trading_control_plane.perptape import (
     PERPTAPE_OPERATIONAL_TIME_HEADROOM,
     PerptapeCandidate,
@@ -240,6 +242,32 @@ class RuntimeSyncWorker:
         )
         self.queries = TradingQueries(database)
         self._perptape_stream_thread: threading.Thread | None = None
+        self._database_account_reader: OkxReadOnlyClient | BybitReadOnlyClient | None = None
+        self._database_account_scope: tuple[str, str] | None = None
+
+    def install_database_account_reader(
+        self,
+        binding: PreparedRuntimeAccountBinding,
+    ) -> None:
+        """Install one short-lived DB-envelope reader without copying secrets to Settings."""
+
+        if binding.venue == "OKX":
+            self._database_account_reader = OkxReadOnlyClient(
+                api_key=binding.credentials["api_key"],
+                api_secret=binding.credentials["api_secret"],
+                passphrase=binding.credentials["passphrase"],
+            )
+        elif binding.venue == "BYBIT":
+            self._database_account_reader = BybitReadOnlyClient(
+                api_key=binding.credentials["api_key"],
+                api_secret=binding.credentials["api_secret"],
+            )
+        else:
+            raise DomainRejected(
+                "RUNTIME_BINDING_WORKER_SCOPE_MISMATCH",
+                "the normalized account reader is restricted to OKX and Bybit",
+            )
+        self._database_account_scope = (binding.venue, binding.account_id)
 
     @property
     def dependencies_in_use(self) -> bool:
@@ -652,6 +680,66 @@ class RuntimeSyncWorker:
         )
         return int(persisted["positions_covered"])
 
+    def _record_database_normalized_venue(
+        self,
+        binding: PreparedRuntimeAccountBinding,
+        now: datetime,
+    ) -> int:
+        reader = self._database_account_reader
+        if reader is None or self._database_account_scope != (
+            binding.venue,
+            binding.account_id,
+        ):
+            raise DomainRejected(
+                "RUNTIME_BINDING_WORKER_SCOPE_MISMATCH",
+                "the runtime worker lacks the frozen OKX or Bybit account reader",
+            )
+        instruments = reader.read_active_instruments()
+        self.service.synchronize_active_venue_instruments(
+            actor_id=binding.service_principal_id,
+            account_id=binding.account_id,
+            venue=binding.venue,
+            instruments=instruments,
+            runtime_binding=binding,
+            now=now,
+        )
+        snapshots = reader.read_account_snapshots((), now=now)
+        if binding.venue == "OKX":
+            persisted = self.service.ingest_okx_read_only_account_snapshot(
+                binding.account_id,
+                binding.service_principal_id,
+                snapshots,
+                environment=ExecutionEnvironment.LIVE,
+                runtime_binding=binding,
+                now=now,
+            )
+        elif binding.venue == "BYBIT":
+            persisted = self.service.ingest_bybit_read_only_account_snapshot(
+                binding.account_id,
+                binding.service_principal_id,
+                snapshots,
+                environment=ExecutionEnvironment.LIVE,
+                runtime_binding=binding,
+                now=now,
+            )
+        else:
+            raise DomainRejected(
+                "RUNTIME_BINDING_WORKER_SCOPE_MISMATCH",
+                "normalized runtime facts are restricted to OKX and Bybit",
+            )
+        self._require_scope_match(
+            f"LIVE:{binding.account_id}:{binding.venue}",
+            binding.service_principal_id,
+            now,
+            source_error_code=(
+                None
+                if persisted["history_error_code"] is None
+                else f"{binding.venue}_HISTORY_INCOMPLETE:"
+                f"{persisted['history_error_code']}"
+            ),
+        )
+        return int(persisted["positions_covered"])
+
     def _record_notilt(self, actor_id: UUID, chain_id: int, now: datetime) -> int:
         agent = self.settings.notilt_agent_address
         vault = self.settings.notilt_vaults.get(chain_id)
@@ -850,11 +938,18 @@ class RuntimeSyncWorker:
         if (
             binding.service_principal_username
             != self.settings.runtime_sync_service_username
-            or binding.account_id
-            not in {
-                self.settings.runtime_binance_account_id,
-                self.settings.runtime_hyperliquid_account_id,
-            }
+            or (
+                binding.venue in {"BINANCE", "HYPERLIQUID"}
+                and binding.account_id
+                not in {
+                    self.settings.runtime_binance_account_id,
+                    self.settings.runtime_hyperliquid_account_id,
+                }
+            )
+            or (
+                binding.venue in {"OKX", "BYBIT"}
+                and self._database_account_scope != (binding.venue, binding.account_id)
+            )
         ):
             raise DomainRejected(
                 "RUNTIME_BINDING_WORKER_SCOPE_MISMATCH",
@@ -895,11 +990,26 @@ class RuntimeSyncWorker:
                     results,
                 )
                 result = results["HYPERLIQUID"]
-        else:
-            raise DomainRejected(
-                "RUNTIME_CONNECTOR_NOT_IMPLEMENTED",
-                "continuous read-only sync is not implemented for this exchange",
+        elif binding.venue in {"OKX", "BYBIT"}:
+            cooldown = self._rate_limit_cooldown(
+                binding.venue,
+                actor_id=binding.service_principal_id,
+                account_id=binding.account_id,
+                venue=binding.venue,
+                now=now,
             )
+            if cooldown is not None:
+                result = cooldown
+            else:
+                results = {}
+                self._attempt(
+                    binding.venue,
+                    lambda: self._record_database_normalized_venue(binding, now),
+                    results,
+                )
+                result = results[binding.venue]
+        else:
+            raise DomainRejected("RUNTIME_BINDING_INVALID", "runtime venue is unsupported")
         self.service.record_runtime_source_health(
             binding.service_principal_id,
             {binding.venue: asdict(result)},
@@ -1118,7 +1228,7 @@ class RuntimeBindingSupervisor:
                 binance_api_key=binding.credentials.get("api_key"),
                 binance_api_secret=binding.credentials.get("api_secret"),
             )
-        else:
+        elif binding.venue == "HYPERLIQUID":
             updates.update(
                 hyperliquid_account_address=binding.credentials.get("account_address"),
                 hyperliquid_api_wallet_address=binding.credentials.get(
@@ -1126,7 +1236,16 @@ class RuntimeBindingSupervisor:
                 ),
                 hyperliquid_api_wallet_private_key=None,
             )
-        return self.worker_factory(self.settings.model_copy(update=updates), self.database)
+        worker = self.worker_factory(self.settings.model_copy(update=updates), self.database)
+        if binding.venue in {"OKX", "BYBIT"}:
+            installer = getattr(worker, "install_database_account_reader", None)
+            if installer is None:
+                raise DomainRejected(
+                    "RUNTIME_BINDING_WORKER_SCOPE_MISMATCH",
+                    "runtime worker cannot install the database-bound venue reader",
+                )
+            installer(binding)
+        return worker
 
     def _perptape_worker(
         self, binding: PreparedPerptapeRuntimeBinding

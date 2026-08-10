@@ -63,6 +63,12 @@ from trading_control_plane.queries import TradingQueries
 from trading_control_plane.runtime import RuntimeBindingSupervisor, RuntimeSyncWorker
 from trading_control_plane.service import TradingService
 from trading_control_plane.telegram import MockTelegramGateway
+from trading_control_plane.venue_read_only import (
+    VenueEquity,
+    VenueInstrument,
+    VenuePosition,
+    VenueReadOnlySnapshot,
+)
 
 NOW = datetime.now(UTC)
 AGENT = "0x2222222222222222222222222222222222222222"
@@ -1688,6 +1694,151 @@ def test_database_bound_supervisor_persists_account_facts_without_trading(
         "BINANCE",
         account_id="bound-binance-main",
         venue="BINANCE",
+    )
+    assert health is not None and health["status"] == "SUCCESS"
+    account = TradingQueries(database).exchange_accounts(admin)["data"][0]
+    assert account["runtime_binding"]["bound"] is True
+    assert account["trading"]["enabled"] is False
+
+
+@pytest.mark.parametrize(
+    ("venue", "credentials", "symbol"),
+    [
+        (
+            "OKX",
+            {"api_key": "okx-key", "api_secret": "okx-secret", "passphrase": "okx-pass"},
+            "BTC-USDT-SWAP",
+        ),
+        (
+            "BYBIT",
+            {"api_key": "bybit-key", "api_secret": "bybit-secret"},
+            "BTCUSDT",
+        ),
+    ],
+)
+def test_database_bound_okx_bybit_facts_use_exact_account_scope_without_trading(
+    database: Database,
+    venue: str,
+    credentials: dict[str, str],
+    symbol: str,
+) -> None:
+    service = TradingService(database, credential_encryption_key=runtime_encryption_key())
+    admin = service.bootstrap_admin(f"bound-{venue.lower()}-admin", now=NOW)
+    account_id = f"bound-{venue.lower()}-main"
+    exchange_account_id = service.create_exchange_account(
+        actor_id=admin,
+        account_id=account_id,
+        venue=venue,
+        label=f"Bound {venue}",
+        credentials=credentials,
+        idempotency_key=f"create-{account_id}",
+        now=NOW,
+    )
+    command, replay = service.prepare_exchange_account_connection_verification(
+        exchange_account_id,
+        actor_id=admin,
+        expected_version=1,
+        idempotency_key=f"verify-{account_id}",
+    )
+    assert replay is None and command is not None
+    verification = service.record_exchange_account_connection_verification(
+        command,
+        ConnectionProbeResult(True, None),
+        actor_id=admin,
+        idempotency_key=f"verify-{account_id}",
+        now=NOW,
+    )
+    service.configure_exchange_account_runtime_sync(
+        exchange_account_id,
+        actor_id=admin,
+        enabled=True,
+        expected_version=int(verification["version"]),
+        idempotency_key=f"enable-{account_id}",
+        now=NOW,
+    )
+    service.set_risk_policy(
+        actor_id=admin,
+        version=f"{venue.lower()}-runtime-risk-v1",
+        system_state=SystemRiskState.NORMAL,
+        max_total_risk=Decimal(1_000),
+        max_account_risk=Decimal(1_000),
+        max_single_loss=Decimal(1_000),
+        max_consecutive_losses=3,
+        loss_cooldown=timedelta(hours=1),
+        max_fact_age=timedelta(minutes=5),
+        now=NOW,
+    )
+    binding = service.runtime_account_bindings()[0]
+    instrument = VenueInstrument(
+        symbol=symbol,
+        tick_size=Decimal("0.1"),
+        lot_size=Decimal("0.001"),
+        minimum_notional=Decimal("5"),
+        quote_currency="USDT",
+        collateral_currency="USDT",
+        active=True,
+    )
+    snapshot = VenueReadOnlySnapshot(
+        symbol=symbol,
+        observed_at=NOW,
+        instrument=instrument,
+        orders=(),
+        fills=(),
+        position=VenuePosition(Decimal(0), Decimal(0), Decimal("50000"), NOW),
+        equity=VenueEquity(Decimal("1000"), Decimal("900"), "USD", NOW),
+        funding=(),
+        protection=None,
+    )
+
+    class Reader:
+        @staticmethod
+        def read_active_instruments() -> tuple[VenueInstrument, ...]:
+            return (instrument,)
+
+        @staticmethod
+        def read_account_snapshots(
+            symbols: tuple[str, ...], *, now: datetime
+        ) -> tuple[VenueReadOnlySnapshot, ...]:
+            assert symbols == ()
+            assert now == NOW
+            return (snapshot,)
+
+    settings = Settings(
+        database_url=str(database.engine.url),
+        credential_encryption_key=runtime_encryption_key(),
+        runtime_sync_enabled=True,
+        runtime_sync_service_username=binding.service_principal_username,
+        _env_file=None,
+    )
+    worker = RuntimeSyncWorker(
+        settings=settings,
+        database=database,
+        perptape=PerptapeClient(
+            base_url="https://perptape.com",
+            api_key=None,
+            contract_version="breakouts-v1",
+            cache_ttl=timedelta(minutes=1),
+        ),
+        binance=BinanceReader(),  # type: ignore[arg-type]
+        hyperliquid=HyperliquidReader(),  # type: ignore[arg-type]
+        notilt=NoTiltReader(),  # type: ignore[arg-type]
+        notilt_valuator=NoTiltUsdValuator(),
+        clock=lambda: NOW,
+    )
+    worker._database_account_reader = Reader()  # type: ignore[assignment]
+    worker._database_account_scope = (venue, account_id)
+
+    result = worker.run_bound_account_once(binding, now=NOW)
+
+    assert result.status == "SUCCESS"
+    facts = TradingQueries(database).venue_facts(admin, account_id, venue, "LIVE")
+    assert facts["equity"]["equity"] == "1000.000000000000000000"
+    assert facts["positions"][0]["symbol"] == symbol
+    health = TradingQueries(database).runtime_source_health(
+        admin,
+        venue,
+        account_id=account_id,
+        venue=venue,
     )
     assert health is not None and health["status"] == "SUCCESS"
     account = TradingQueries(database).exchange_accounts(admin)["data"][0]

@@ -195,6 +195,22 @@ def test_only_system_admin_manages_members_while_admin_keeps_highest_permissions
 async def exercise_six_identity_permission_matrix(database: Database) -> None:
     service = TradingService(database)
     admin_id = service.bootstrap_admin("matrix-admin", now=datetime.now(UTC))
+    now = datetime.now(UTC)
+    for venue, account_id in (
+        ("BINANCE", "acct-live"),
+        ("HYPERLIQUID", "acct-hl"),
+        ("OKX", "acct-okx"),
+        ("BYBIT", "acct-bybit"),
+    ):
+        service.create_exchange_account(
+            actor_id=admin_id,
+            account_id=account_id,
+            venue=venue,
+            label=f"{venue} matrix account",
+            credentials=None,
+            idempotency_key=f"matrix-{venue.lower()}-account",
+            now=now,
+        )
     app = access_app(database)
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as admin_http:
         await login(admin_http, "matrix-admin")
@@ -233,6 +249,8 @@ async def exercise_six_identity_permission_matrix(database: Database) -> None:
             "/api/venues/hyperliquid/testnet/status",
             "/api/venues/binance/facts?account_id=acct-live",
             "/api/venues/hyperliquid/facts?account_id=acct-hl",
+            "/api/venues/okx/facts?account_id=acct-okx",
+            "/api/venues/bybit/facts?account_id=acct-bybit",
             "/api/capital",
             "/api/admin/users",
             "/admin/users",
@@ -265,6 +283,8 @@ async def exercise_six_identity_permission_matrix(database: Database) -> None:
                 "/api/venues/hyperliquid/testnet/status",
                 "/api/venues/binance/facts?account_id=acct-live",
                 "/api/venues/hyperliquid/facts?account_id=acct-hl",
+                "/api/venues/okx/facts?account_id=acct-okx",
+                "/api/venues/bybit/facts?account_id=acct-bybit",
             },
         }
         for username, permitted in allowed.items():

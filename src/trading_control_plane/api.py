@@ -3048,6 +3048,38 @@ def create_app(
             "as_of": _now().isoformat(),
         }
 
+    def database_bound_venue_facts(
+        venue: str,
+        account_id: str,
+        identity: SessionIdentity,
+    ) -> dict[str, Any]:
+        require_capability(identity, "venue.view", account_id, venue)
+        return {
+            "mode": "DATABASE_BOUND_READ_ONLY",
+            "domain": "USDT_LINEAR_PERPETUALS",
+            "data": queries().venue_facts(
+                identity.user_id,
+                account_id,
+                venue,
+                ExecutionEnvironment.LIVE.value,
+            ),
+            "as_of": _now().isoformat(),
+        }
+
+    @app.get("/api/venues/okx/facts")
+    def okx_read_only_facts(
+        account_id: str,
+        identity: SessionIdentity = identity_dependency,
+    ) -> dict[str, Any]:
+        return database_bound_venue_facts("OKX", account_id, identity)
+
+    @app.get("/api/venues/bybit/facts")
+    def bybit_read_only_facts(
+        account_id: str,
+        identity: SessionIdentity = identity_dependency,
+    ) -> dict[str, Any]:
+        return database_bound_venue_facts("BYBIT", account_id, identity)
+
     @app.post("/api/venues/hyperliquid/sync")
     def sync_hyperliquid_read_only_facts(
         payload: HyperliquidReadOnlySyncRequest,

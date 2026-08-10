@@ -54,6 +54,8 @@ def connection_capability_matrix(
     binding_counts = database_binding_counts or {}
     database_binance = int(binding_counts.get("BINANCE", 0)) > 0
     database_hyperliquid = int(binding_counts.get("HYPERLIQUID", 0)) > 0
+    database_okx = int(binding_counts.get("OKX", 0)) > 0
+    database_bybit = int(binding_counts.get("BYBIT", 0)) > 0
     return [
         {
             "capability": "TEAM_SIGNAL_SOURCE",
@@ -104,12 +106,26 @@ def connection_capability_matrix(
             "boundary": "database binding strips signing material and is read-only",
         },
         {
-            "capability": "OKX_BYBIT_CONTINUOUS_FACTS",
-            "providers": ["OKX", "BYBIT"],
-            "implementation": "NOT_IMPLEMENTED",
-            "deployment_state": "UNAVAILABLE",
-            "external_side_effect": "NONE",
-            "boundary": "connection verification is available; continuous facts are not",
+            "capability": "OKX_CONTINUOUS_FACTS",
+            "providers": ["OKX"],
+            "implementation": "IMPLEMENTED_TEAM_ACCOUNT_BOUND",
+            "deployment_state": _deployment_state(
+                enabled=settings.runtime_sync_enabled and database_okx,
+                configured=database_okx,
+            ),
+            "external_side_effect": "READ_ONLY",
+            "boundary": "USDT linear SWAP facts only; unsupported exposure fails closed",
+        },
+        {
+            "capability": "BYBIT_CONTINUOUS_FACTS",
+            "providers": ["BYBIT"],
+            "implementation": "IMPLEMENTED_TEAM_ACCOUNT_BOUND",
+            "deployment_state": _deployment_state(
+                enabled=settings.runtime_sync_enabled and database_bybit,
+                configured=database_bybit,
+            ),
+            "external_side_effect": "READ_ONLY",
+            "boundary": "Unified USDT linear facts only; unsupported exposure fails closed",
         },
         {
             "capability": "SHADOW_EXECUTION",

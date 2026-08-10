@@ -62,7 +62,13 @@ def test_connection_matrix_distinguishes_one_time_checks_from_continuous_runtime
         "BYBIT",
     ]
     assert matrix["BINANCE_CONTINUOUS_FACTS"]["deployment_state"] == "ENABLED"
-    assert matrix["OKX_BYBIT_CONTINUOUS_FACTS"]["implementation"] == "NOT_IMPLEMENTED"
+    assert matrix["OKX_CONTINUOUS_FACTS"]["implementation"] == (
+        "IMPLEMENTED_TEAM_ACCOUNT_BOUND"
+    )
+    assert matrix["BYBIT_CONTINUOUS_FACTS"]["implementation"] == (
+        "IMPLEMENTED_TEAM_ACCOUNT_BOUND"
+    )
+    assert matrix["OKX_CONTINUOUS_FACTS"]["deployment_state"] == "DISABLED"
     assert matrix["OKX_BYBIT_EXECUTION"]["deployment_state"] == "UNAVAILABLE"
     assert matrix["CAPITAL_SIGNING_BROADCAST"]["implementation"] == "NOT_IN_CONTROL_PLANE"
 
@@ -72,14 +78,14 @@ def test_connection_matrix_projects_database_bindings_behind_process_master_swit
         item["capability"]: item
         for item in connection_capability_matrix(
             safe_settings(runtime_sync_enabled=False),
-            database_binding_counts={"BINANCE": 2},
+            database_binding_counts={"BINANCE": 2, "OKX": 1, "BYBIT": 1},
         )
     }
     running = {
         item["capability"]: item
         for item in connection_capability_matrix(
             safe_settings(runtime_sync_enabled=True),
-            database_binding_counts={"BINANCE": 2},
+            database_binding_counts={"BINANCE": 2, "OKX": 1, "BYBIT": 1},
         )
     }
 
@@ -87,6 +93,11 @@ def test_connection_matrix_projects_database_bindings_behind_process_master_swit
         "DISABLED_CONFIGURED"
     )
     assert running["BINANCE_CONTINUOUS_FACTS"]["deployment_state"] == "ENABLED"
+    assert stopped["OKX_CONTINUOUS_FACTS"]["deployment_state"] == (
+        "DISABLED_CONFIGURED"
+    )
+    assert running["OKX_CONTINUOUS_FACTS"]["deployment_state"] == "ENABLED"
+    assert running["BYBIT_CONTINUOUS_FACTS"]["deployment_state"] == "ENABLED"
 
 
 def test_environment_template_names_every_settings_field_without_values_from_runtime() -> None:

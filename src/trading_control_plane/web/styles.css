@@ -231,6 +231,8 @@ button:disabled { opacity: .52; cursor: not-allowed; }
 .venue-switch { display: inline-flex; gap: 4px; margin-bottom: 18px; padding: 4px; border: 1px solid var(--line); border-radius: 12px; background: var(--panel); }
 .venue-switch a { min-width: 130px; padding: 9px 14px; border-radius: 8px; text-align: center; color: var(--muted); font-size: 12px; font-weight: 800; }
 .venue-switch a.active { background: var(--accent); color: var(--panel); }
+.venue-account-select { display: grid; grid-template-columns: auto minmax(220px, 360px); align-items: center; gap: 10px; width: fit-content; max-width: 100%; margin: -4px 0 18px; color: var(--muted); font-size: 11px; font-weight: 750; }
+.venue-account-select select { width: 100%; min-width: 0; }
 .venue-status-stats .stat span, .system-health-meta { display: block; margin-top: 7px; color: var(--muted); font-size: 10px; line-height: 1.45; }
 .account-sync-note { display: flex; align-items: flex-start; gap: 11px; margin-bottom: 24px; padding: 14px 16px; border: 1px solid var(--line); border-radius: 12px; background: var(--panel); }
 .account-sync-note .status-dot { margin-top: 5px; background: var(--warning); }
@@ -849,6 +851,7 @@ dialog::backdrop { background: rgba(4, 12, 10, .56); backdrop-filter: blur(3px);
   .member-summary-actions { flex-direction: column; align-items: flex-end; }
   .venue-switch { display: grid; grid-template-columns: 1fr 1fr; width: 100%; }
   .venue-switch a { min-width: 0; }
+  .venue-account-select { grid-template-columns: 1fr; width: 100%; }
   .home-status .primary { width: 100%; }
   .home-priority { grid-template-columns: 38px minmax(0, 1fr); align-items: start; }
   .home-priority strong { grid-column: 2; }

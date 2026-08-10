@@ -153,6 +153,8 @@ def project_runtime_connections(
     binding_counts = database_binding_counts or {}
     database_binance = int(binding_counts.get("BINANCE", 0)) > 0
     database_hyperliquid = int(binding_counts.get("HYPERLIQUID", 0)) > 0
+    database_okx = int(binding_counts.get("OKX", 0)) > 0
+    database_bybit = int(binding_counts.get("BYBIT", 0)) > 0
     binance_credentials = (
         "COMPLETE"
         if database_binance or (settings.binance_api_key and settings.binance_api_secret)
@@ -204,6 +206,22 @@ def project_runtime_connections(
                 settings.hyperliquid_live_order_send_enabled
                 or settings.hyperliquid_testnet_order_send_enabled
             ),
+        ),
+        "OKX": _projection(
+            enabled=settings.runtime_sync_enabled and database_okx,
+            credential_state="COMPLETE" if database_okx else "MISSING",
+            config_complete=database_okx,
+            health=_latest_health(source_health, "OKX"),
+            owner_role="系统管理员",
+            write_process_enabled=False,
+        ),
+        "BYBIT": _projection(
+            enabled=settings.runtime_sync_enabled and database_bybit,
+            credential_state="COMPLETE" if database_bybit else "MISSING",
+            config_complete=database_bybit,
+            health=_latest_health(source_health, "BYBIT"),
+            owner_role="系统管理员",
+            write_process_enabled=False,
         ),
         "PERPTAPE": _projection(
             enabled=(

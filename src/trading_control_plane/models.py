@@ -101,7 +101,8 @@ class ExchangeAccount(Base):
         ),
         CheckConstraint(
             "NOT runtime_sync_enabled OR (active AND connection_status = 'VERIFIED' "
-            "AND credential_version >= 1 AND venue IN ('BINANCE','HYPERLIQUID') "
+            "AND credential_version >= 1 "
+            "AND venue IN ('BINANCE','HYPERLIQUID','OKX','BYBIT') "
             "AND runtime_service_principal_id IS NOT NULL)",
             name="ck_exchange_accounts_runtime_sync_ready",
         ),
