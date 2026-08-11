@@ -3272,6 +3272,16 @@ class TradingQueries:
                             "trigger_observed_at": _iso(item.trigger_observed_at),
                             "add_unit_consumed": item.add_unit_consumed,
                             "status": item.status,
+                            "dispatch": (
+                                None
+                                if item.dispatch_backend is None
+                                else {
+                                    "backend": item.dispatch_backend,
+                                    "account_version": item.dispatch_account_version,
+                                    "auth_version": item.dispatch_auth_version,
+                                    "started_at": _iso(item.dispatch_started_at),
+                                }
+                            ),
                             "version": item.version,
                             "created_at": _iso(item.created_at),
                             "updated_at": _iso(item.updated_at),
@@ -3452,6 +3462,18 @@ class TradingQueries:
                         )
                     )
             for intent in detail["intents"]:
+                if intent["status"] == "DISPATCHING":
+                    exceptions.append(
+                        self._exception(
+                            campaign_id,
+                            "ORDER_DISPATCH_UNRESOLVED",
+                            "BLOCKING",
+                            object_id=str(intent["intent_id"]),
+                            occurred_at=str(
+                                intent["dispatch"]["started_at"] or intent["updated_at"]
+                            ),
+                        )
+                    )
                 if intent["status"] == "UNKNOWN":
                     exceptions.append(
                         self._exception(

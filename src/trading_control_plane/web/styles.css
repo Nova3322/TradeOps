@@ -576,15 +576,15 @@ button:disabled { opacity: .52; cursor: not-allowed; }
 .status-pill.status-APPROVED, .status-pill.status-ALLOW { border-color: color-mix(in srgb, var(--accent) 28%, var(--line)); background: var(--accent-2); color: var(--accent); }
 .status-pill.status-REJECTED, .status-pill.status-DENY, .status-pill.status-EXPIRED { border-color: color-mix(in srgb, var(--danger) 28%, var(--line)); background: color-mix(in srgb, var(--danger) 8%, var(--panel)); color: var(--danger); }
 .status-pill:is(.status-APPROVED,.status-ALLOW,.status-SUCCESS,.status-ACTIVE,.status-CURRENT,.status-AVAILABLE,.status-ENABLED,.status-SETTLED,.status-FILLED,.status-MATCH,.status-READY),
-.status-pill:is(.status-PENDING_REVIEW,.status-SCALE,.status-RETRY_WAIT,.status-WAITING,.status-STALE,.status-INCOMPLETE,.status-DEGRADED),
+.status-pill:is(.status-PENDING_REVIEW,.status-DISPATCHING,.status-SCALE,.status-RETRY_WAIT,.status-WAITING,.status-STALE,.status-INCOMPLETE,.status-DEGRADED),
 .status-pill:is(.status-REJECTED,.status-DENY,.status-EXPIRED,.status-FAILED,.status-DEAD_LETTER,.status-OUTCOME_UNKNOWN,.status-BLOCKED,.status-MISSING,.status-UNKNOWN),
 .status-pill:is(.status-READ_ONLY,.status-DISABLED,.status-NOT_CONFIGURED,.status-ON_DEMAND,.status-EMPTY,.status-SKIPPED) { gap: 6px; }
 .status-pill:is(.status-APPROVED,.status-ALLOW,.status-SUCCESS,.status-ACTIVE,.status-CURRENT,.status-AVAILABLE,.status-ENABLED,.status-SETTLED,.status-FILLED,.status-MATCH,.status-READY)::before,
-.status-pill:is(.status-PENDING_REVIEW,.status-SCALE,.status-RETRY_WAIT,.status-WAITING,.status-STALE,.status-INCOMPLETE,.status-DEGRADED)::before,
+.status-pill:is(.status-PENDING_REVIEW,.status-DISPATCHING,.status-SCALE,.status-RETRY_WAIT,.status-WAITING,.status-STALE,.status-INCOMPLETE,.status-DEGRADED)::before,
 .status-pill:is(.status-REJECTED,.status-DENY,.status-EXPIRED,.status-FAILED,.status-DEAD_LETTER,.status-OUTCOME_UNKNOWN,.status-BLOCKED,.status-MISSING,.status-UNKNOWN)::before,
 .status-pill:is(.status-READ_ONLY,.status-DISABLED,.status-NOT_CONFIGURED,.status-ON_DEMAND,.status-EMPTY,.status-SKIPPED)::before { content: ""; width: 6px; height: 6px; flex: 0 0 6px; border-radius: 50%; background: currentColor; }
 .status-pill:is(.status-APPROVED,.status-ALLOW,.status-SUCCESS,.status-ACTIVE,.status-CURRENT,.status-AVAILABLE,.status-ENABLED,.status-SETTLED,.status-FILLED,.status-MATCH,.status-READY) { border-color: color-mix(in srgb, var(--accent) 30%, var(--line)); background: color-mix(in srgb, var(--accent-2) 72%, var(--panel)); color: var(--accent); }
-.status-pill:is(.status-PENDING_REVIEW,.status-SCALE,.status-RETRY_WAIT,.status-WAITING,.status-STALE,.status-INCOMPLETE,.status-DEGRADED) { border-color: color-mix(in srgb, var(--warning) 32%, var(--line)); background: color-mix(in srgb, var(--warning) 8%, var(--panel)); color: var(--warning); }
+.status-pill:is(.status-PENDING_REVIEW,.status-DISPATCHING,.status-SCALE,.status-RETRY_WAIT,.status-WAITING,.status-STALE,.status-INCOMPLETE,.status-DEGRADED) { border-color: color-mix(in srgb, var(--warning) 32%, var(--line)); background: color-mix(in srgb, var(--warning) 8%, var(--panel)); color: var(--warning); }
 .status-pill:is(.status-REJECTED,.status-DENY,.status-EXPIRED,.status-FAILED,.status-DEAD_LETTER,.status-OUTCOME_UNKNOWN,.status-BLOCKED,.status-MISSING,.status-UNKNOWN) { border-color: color-mix(in srgb, var(--danger) 32%, var(--line)); background: color-mix(in srgb, var(--danger) 8%, var(--panel)); color: var(--danger); }
 .status-pill:is(.status-READ_ONLY,.status-DISABLED,.status-NOT_CONFIGURED,.status-ON_DEMAND,.status-EMPTY,.status-SKIPPED) { border-color: var(--line); background: var(--surface); color: var(--muted); }
 .empty-actions { justify-content: center; margin-top: 18px; }
@@ -665,7 +665,7 @@ button:disabled { opacity: .52; cursor: not-allowed; }
 .entry-boundary a { color: var(--accent); font-size: 11px; font-weight: 800; }
 .direction-long { color: var(--accent); }
 .direction-short { color: var(--danger); }
-.status-PENDING_REVIEW { color: var(--warning); }
+.status-PENDING_REVIEW, .status-DISPATCHING { color: var(--warning); }
 .status-APPROVED, .status-ALLOW { color: var(--accent); }
 .status-SCALE { color: var(--warning); }
 .status-REJECTED, .status-DENY { color: var(--danger); }

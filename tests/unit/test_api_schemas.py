@@ -7,6 +7,7 @@ from trading_control_plane.api_schemas import (
     AgentAccessRequest,
     AgentCreateRequest,
     AgentProposalRequest,
+    FreqtradeLiveActionRequest,
     ManagedUserAccessRequest,
     ManagedUserCreateRequest,
     ManualProposalRequest,
@@ -34,6 +35,27 @@ def proposal_payload() -> dict[str, object]:
         "rationale": "frozen user request",
         "idempotency_key": "manual-proposal",
     }
+
+
+def test_freqtrade_live_dispatch_requires_an_explicit_idempotency_key() -> None:
+    request = FreqtradeLiveActionRequest.model_validate(
+        {
+            "execution_scope": "LIVE:acct-1:BINANCE",
+            "owner_id": "execution-worker-1",
+            "fencing_token": 7,
+            "idempotency_key": "dispatch-intent-1",
+        }
+    )
+
+    assert request.idempotency_key == "dispatch-intent-1"
+    with pytest.raises(ValidationError):
+        FreqtradeLiveActionRequest.model_validate(
+            {
+                "execution_scope": "LIVE:acct-1:BINANCE",
+                "owner_id": "execution-worker-1",
+                "fencing_token": 7,
+            }
+        )
 
 
 def test_auto_add_proposal_requires_frozen_capacity_trigger_and_tier_limit() -> None:

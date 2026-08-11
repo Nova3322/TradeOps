@@ -1665,9 +1665,35 @@ class OrderIntent(Base):
         CheckConstraint("kind IN ('INITIAL','ADD','REDUCE','EXIT')", name="ck_order_intents_kind"),
         CheckConstraint("side IN ('BUY','SELL')", name="ck_order_intents_side"),
         CheckConstraint(
-            "status IN ('PENDING','RESERVED','READY','SENT','PARTIALLY_FILLED','FILLED',"
-            "'CANCELLED','REJECTED','UNKNOWN')",
+            "status IN ('PENDING','RESERVED','READY','DISPATCHING','SENT',"
+            "'PARTIALLY_FILLED','FILLED','CANCELLED','REJECTED','UNKNOWN')",
             name="ck_order_intents_status",
+        ),
+        CheckConstraint(
+            "dispatch_backend IS NULL OR dispatch_backend = 'FREQTRADE'",
+            name="ck_order_intents_dispatch_backend",
+        ),
+        CheckConstraint(
+            "dispatch_account_version IS NULL OR dispatch_account_version >= 1",
+            name="ck_order_intents_dispatch_account_version",
+        ),
+        CheckConstraint(
+            "dispatch_auth_version IS NULL OR dispatch_auth_version >= 1",
+            name="ck_order_intents_dispatch_auth_version",
+        ),
+        CheckConstraint(
+            "dispatch_fencing_token IS NULL OR dispatch_fencing_token >= 1",
+            name="ck_order_intents_dispatch_fencing_token",
+        ),
+        CheckConstraint(
+            "(dispatch_backend IS NULL AND dispatch_account_version IS NULL "
+            "AND dispatch_auth_version IS NULL AND dispatch_owner_id IS NULL "
+            "AND dispatch_fencing_token IS NULL AND dispatch_started_at IS NULL "
+            "AND dispatch_external_id IS NULL) OR "
+            "(dispatch_backend = 'FREQTRADE' AND dispatch_account_version IS NOT NULL "
+            "AND dispatch_auth_version IS NOT NULL AND dispatch_owner_id IS NOT NULL "
+            "AND dispatch_fencing_token IS NOT NULL AND dispatch_started_at IS NOT NULL)",
+            name="ck_order_intents_dispatch_shape",
         ),
         CheckConstraint("quantity > 0", name="ck_order_intents_quantity_positive"),
         CheckConstraint(
@@ -1684,7 +1710,8 @@ class OrderIntent(Base):
             "campaign_id",
             unique=True,
             postgresql_where=text(
-                "status IN ('PENDING','RESERVED','READY','SENT','PARTIALLY_FILLED','UNKNOWN')"
+                "status IN ('PENDING','RESERVED','READY','DISPATCHING','SENT',"
+                "'PARTIALLY_FILLED','UNKNOWN')"
             ),
         ),
     )
@@ -1715,6 +1742,15 @@ class OrderIntent(Base):
         DateTime(timezone=True), nullable=True
     )
     status: Mapped[str] = mapped_column(String(32), nullable=False)
+    dispatch_backend: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    dispatch_account_version: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    dispatch_auth_version: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    dispatch_owner_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    dispatch_fencing_token: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    dispatch_external_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    dispatch_started_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     semantic_hash: Mapped[str] = mapped_column(String(64), nullable=False)
     actor_id: Mapped[str] = mapped_column(String(255), nullable=False)
     correlation_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), nullable=False)

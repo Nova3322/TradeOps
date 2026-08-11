@@ -201,6 +201,7 @@ ACTIVE_INTENT_STATUSES = {
     OrderIntentStatus.PENDING.value,
     OrderIntentStatus.RESERVED.value,
     OrderIntentStatus.READY.value,
+    OrderIntentStatus.DISPATCHING.value,
     OrderIntentStatus.SENT.value,
     OrderIntentStatus.PARTIALLY_FILLED.value,
     OrderIntentStatus.UNKNOWN.value,
@@ -251,6 +252,13 @@ class PreparedFreqtradeWorkerBinding:
     username: str = field(repr=False)
     password: str = field(repr=False)
     hip3_dexes: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class PreparedFreqtradeDispatch:
+    mode: str
+    external_trade_id: str | None
+    intent_version: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -3921,6 +3929,286 @@ class TradingService:
                     "FREQTRADE_WORKER_BINDING_CHANGED",
                     "the exact account-bound Freqtrade worker changed before execution",
                 )
+
+    def start_freqtrade_live_dispatch(
+        self,
+        intent_id: UUID,
+        *,
+        actor_id: UUID,
+        execution_scope: str,
+        owner_id: str,
+        fencing_token: int,
+        binding: PreparedFreqtradeWorkerBinding,
+        command: FreqtradeEntryCommand | FreqtradeExitCommand,
+        external_trade_id: str | None,
+        idempotency_key: str,
+        now: datetime,
+    ) -> PreparedFreqtradeDispatch:
+        """Persist the exact external handoff before a Freqtrade write can occur."""
+
+        if not idempotency_key or len(idempotency_key) > 160:
+            _reject(
+                "IDEMPOTENCY_KEY_INVALID",
+                "Freqtrade dispatch requires an idempotency key of 1-160 characters",
+            )
+        if owner_id != owner_id.strip() or not owner_id:
+            _reject("SENDER_OWNER_INVALID", "sender owner identity is invalid")
+        if isinstance(command, FreqtradeEntryCommand):
+            if external_trade_id is not None:
+                _reject(
+                    "FREQTRADE_DISPATCH_IDENTITY_INVALID",
+                    "entry dispatch must not pre-bind an external trade identity",
+                )
+            command_payload = {
+                "kind": "ENTRY",
+                "pair": command.pair,
+                "side": command.side,
+                "max_quantity": str(command.max_quantity),
+                "enter_tag": command.enter_tag,
+                "client_order_id": command.client_order_id,
+            }
+        else:
+            normalized_external_id = (
+                "" if external_trade_id is None else external_trade_id.strip()
+            )
+            if (
+                not normalized_external_id
+                or normalized_external_id != external_trade_id
+                or len(normalized_external_id) > 255
+            ):
+                _reject(
+                    "FREQTRADE_POSITION_NOT_FOUND",
+                    "exit dispatch requires the exact current Freqtrade trade identity",
+                )
+            command_payload = {
+                "kind": "EXIT",
+                "pair": command.pair,
+                "max_quantity": str(command.max_quantity),
+                "client_order_id": command.client_order_id,
+                "external_trade_id": normalized_external_id,
+            }
+        environment, account_id, venue = _scope_parts(execution_scope)
+        if environment is not ExecutionEnvironment.LIVE:
+            _reject("FREQTRADE_LIVE_SCOPE_REQUIRED", "Freqtrade LIVE requires a LIVE scope")
+        operation = f"freqtrade-live.dispatch:{intent_id}"
+        with self.database.session_factory.begin() as session:
+            intent = session.get(OrderIntent, intent_id, with_for_update=True)
+            campaign = None if intent is None else session.get(Campaign, intent.campaign_id)
+            if intent is None or campaign is None:
+                _reject("ORDER_INTENT_NOT_FOUND", "Freqtrade intent campaign is unavailable")
+            if (
+                campaign.environment != ExecutionEnvironment.LIVE.value
+                or campaign.account_id != account_id
+                or campaign.venue != venue
+                or execution_scope
+                != _scope_key(campaign.environment, campaign.account_id, campaign.venue)
+            ):
+                _reject(
+                    "EXECUTION_SCOPE_MISMATCH",
+                    "Freqtrade dispatch is outside the intent's exact execution scope",
+                )
+            self._require_role(
+                session,
+                actor_id,
+                "venue.record",
+                campaign.account_id,
+                campaign.venue,
+                team_id=campaign.team_id,
+            )
+            self._validate_sender(
+                session,
+                campaign.team_id,
+                execution_scope,
+                owner_id,
+                fencing_token,
+                now,
+            )
+            live_gate = session.get(CapabilityGate, "LIVE_ORDER_SEND")
+            if live_gate is None or live_gate.status != CapabilityStatus.ENABLED.value:
+                _reject(
+                    "LIVE_ORDER_SEND_DISABLED",
+                    "LIVE order send requires the explicit capability gate",
+                )
+            account = self._require_exchange_account_live_ready(
+                session,
+                team_id=campaign.team_id,
+                account_id=campaign.account_id,
+                venue=campaign.venue,
+            )
+            if (
+                binding.exchange_account_id != account.exchange_account_id
+                or binding.team_id != account.team_id
+                or binding.account_id != account.account_id
+                or binding.venue != account.venue
+                or binding.account_version != account.version
+                or binding.worker_name != account.freqtrade_worker_name
+                or binding.worker_url != account.freqtrade_worker_url
+                or binding.worker_mode != "LIVE"
+                or binding.worker_status != "VERIFIED"
+                or binding.auth_version != account.freqtrade_auth_version
+            ):
+                _reject(
+                    "FREQTRADE_WORKER_BINDING_CHANGED",
+                    "the exact account-bound Freqtrade worker changed before dispatch",
+                )
+            if isinstance(command, FreqtradeEntryCommand) == intent.reduce_only:
+                _reject(
+                    "FREQTRADE_DISPATCH_IDENTITY_INVALID",
+                    "Freqtrade dispatch kind does not match the frozen intent",
+                )
+            payload = {
+                "intent_id": str(intent.intent_id),
+                "intent_semantic_hash": intent.semantic_hash,
+                "execution_scope": execution_scope,
+                "exchange_account_id": str(binding.exchange_account_id),
+                "account_version": binding.account_version,
+                "worker_name": binding.worker_name,
+                "auth_version": binding.auth_version,
+                "command": command_payload,
+            }
+            # The durable handoff belongs to the exact team/account intent, not to
+            # one process lifetime. A newly fenced, authorized sender may therefore
+            # recover the same key by query after a crash without creating a second
+            # external write.
+            caller = f"team:{campaign.team_id}"
+            digest, replay = self._idempotency(
+                session,
+                caller_id=caller,
+                operation=operation,
+                idempotency_key=idempotency_key,
+                payload=payload,
+            )
+            if replay is not None:
+                if (
+                    intent.dispatch_backend != "FREQTRADE"
+                    or intent.dispatch_account_version != binding.account_version
+                    or intent.dispatch_auth_version != binding.auth_version
+                ):
+                    _reject(
+                        "FREQTRADE_DISPATCH_SNAPSHOT_CHANGED",
+                        "persisted Freqtrade dispatch scope changed before recovery",
+                    )
+                if isinstance(command, FreqtradeExitCommand) and (
+                    intent.dispatch_external_id != external_trade_id
+                ):
+                    _reject(
+                        "FREQTRADE_DISPATCH_SNAPSHOT_CHANGED",
+                        "persisted Freqtrade exit identity changed before recovery",
+                    )
+                if intent.status == OrderIntentStatus.FILLED.value:
+                    mode = "COMPLETED"
+                elif intent.status in {
+                    OrderIntentStatus.DISPATCHING.value,
+                    OrderIntentStatus.UNKNOWN.value,
+                }:
+                    mode = "QUERY_ONLY"
+                else:
+                    _reject(
+                        "FREQTRADE_DISPATCH_STATE_INVALID",
+                        "persisted Freqtrade dispatch is not recoverable",
+                    )
+                return PreparedFreqtradeDispatch(
+                    mode=mode,
+                    external_trade_id=intent.dispatch_external_id,
+                    intent_version=intent.version,
+                )
+            if intent.dispatch_backend is not None:
+                _reject(
+                    "FREQTRADE_DISPATCH_ALREADY_STARTED",
+                    "the intent already has a durable Freqtrade dispatch identity",
+                )
+            if intent.status != OrderIntentStatus.READY.value:
+                _reject(
+                    "ORDER_INTENT_STATE_INVALID",
+                    "only a READY intent can begin a new Freqtrade dispatch",
+                )
+            previous = intent.status
+            intent.status = OrderIntentStatus.DISPATCHING.value
+            intent.dispatch_backend = "FREQTRADE"
+            intent.dispatch_account_version = binding.account_version
+            intent.dispatch_auth_version = binding.auth_version
+            intent.dispatch_owner_id = owner_id
+            intent.dispatch_fencing_token = fencing_token
+            intent.dispatch_external_id = external_trade_id
+            intent.dispatch_started_at = now
+            intent.version += 1
+            intent.updated_at = now
+            response = {
+                "intent_id": str(intent.intent_id),
+                "dispatch_status": OrderIntentStatus.DISPATCHING.value,
+                "intent_version": intent.version,
+            }
+            self._save_receipt(
+                session,
+                caller_id=caller,
+                operation=operation,
+                idempotency_key=idempotency_key,
+                semantic_hash=digest,
+                response=response,
+                now=now,
+            )
+            self._audit(
+                session,
+                actor_id=str(actor_id),
+                event_type="FREQTRADE_LIVE_DISPATCH_STARTED",
+                object_type="OrderIntent",
+                object_id=intent.intent_id,
+                reason=(
+                    f"worker={binding.worker_name};account_version={binding.account_version};"
+                    f"auth_version={binding.auth_version};fencing_token={fencing_token}"
+                ),
+                correlation_id=intent.correlation_id,
+                object_version=intent.version,
+                idempotency_key=idempotency_key,
+                workspace_id=binding.workspace_id,
+                team_id=campaign.team_id,
+                account_id=campaign.account_id,
+                now=now,
+            )
+            INTENT_TRANSITIONS.labels(previous, intent.status).inc()
+            return PreparedFreqtradeDispatch(
+                mode="SEND",
+                external_trade_id=intent.dispatch_external_id,
+                intent_version=intent.version,
+            )
+
+    def freqtrade_dispatch_external_id(
+        self,
+        intent_id: UUID,
+        *,
+        actor_id: UUID,
+        execution_scope: str,
+    ) -> str | None:
+        """Read only the persisted backend identity for an exact intent scope."""
+
+        with self.database.session_factory() as session:
+            intent = session.get(OrderIntent, intent_id)
+            campaign = None if intent is None else session.get(Campaign, intent.campaign_id)
+            if intent is None or campaign is None:
+                _reject("ORDER_INTENT_NOT_FOUND", "Freqtrade intent campaign is unavailable")
+            if execution_scope != _scope_key(
+                campaign.environment,
+                campaign.account_id,
+                campaign.venue,
+            ):
+                _reject(
+                    "EXECUTION_SCOPE_MISMATCH",
+                    "Freqtrade dispatch identity is outside the exact intent scope",
+                )
+            self._require_role(
+                session,
+                actor_id,
+                "venue.record",
+                campaign.account_id,
+                campaign.venue,
+                team_id=campaign.team_id,
+            )
+            if intent.dispatch_backend not in {None, "FREQTRADE"}:
+                _reject(
+                    "FREQTRADE_DISPATCH_SNAPSHOT_CHANGED",
+                    "the intent is bound to a different execution backend",
+                )
+            return intent.dispatch_external_id
 
     def runtime_account_bindings(self) -> tuple[PreparedRuntimeAccountBinding, ...]:
         with self.database.session_factory() as session:
@@ -9318,9 +9606,11 @@ class TradingService:
                 now,
                 {
                     OrderIntentStatus.READY.value,
+                    OrderIntentStatus.DISPATCHING.value,
                     OrderIntentStatus.SENT.value,
                     OrderIntentStatus.PARTIALLY_FILLED.value,
                     OrderIntentStatus.FILLED.value,
+                    OrderIntentStatus.UNKNOWN.value,
                 },
                 venue=venue,
                 environment=ExecutionEnvironment.LIVE,
@@ -9688,6 +9978,7 @@ class TradingService:
         expected_limit_price: Decimal | None = None,
         allow_bounded_quantity: bool = False,
         environment: ExecutionEnvironment = ExecutionEnvironment.TESTNET,
+        dispatch_external_id: str | None = None,
         now: datetime,
     ) -> UUID:
         with self.database.session_factory.begin() as session:
@@ -9737,6 +10028,21 @@ class TradingService:
                 identity_code=identity_code,
                 allow_bounded_quantity=allow_bounded_quantity,
             )
+            if dispatch_external_id is not None:
+                if intent.dispatch_backend != "FREQTRADE":
+                    _reject(
+                        "FREQTRADE_DISPATCH_SNAPSHOT_MISSING",
+                        "Freqtrade result requires a durable dispatch snapshot",
+                    )
+                if (
+                    intent.dispatch_external_id is not None
+                    and intent.dispatch_external_id != dispatch_external_id
+                ):
+                    _reject(
+                        "FREQTRADE_DISPATCH_SNAPSHOT_CHANGED",
+                        "Freqtrade result changed the persisted external trade identity",
+                    )
+                intent.dispatch_external_id = dispatch_external_id
             fact = session.scalar(
                 select(VenueOrder)
                 .where(VenueOrder.order_intent_id == intent.intent_id)
@@ -9963,6 +10269,11 @@ class TradingService:
                 campaign.venue,
                 team_id=campaign.team_id,
             )
+            if (
+                intent.status == OrderIntentStatus.UNKNOWN.value
+                and intent.dispatch_backend == "FREQTRADE"
+            ):
+                return
             fact = session.scalar(
                 select(VenueOrder)
                 .where(VenueOrder.order_intent_id == intent.intent_id)
@@ -10559,6 +10870,7 @@ class TradingService:
             venue=venue,
             allow_bounded_quantity=True,
             environment=ExecutionEnvironment.LIVE,
+            dispatch_external_id=trade.trade_id,
             now=now,
         )
         if isinstance(command, FreqtradeEntryCommand):
@@ -15702,6 +16014,8 @@ class TradingService:
                         differences.append(f"ORDER_INTENT_OVERFILLED:{intent.intent_id}")
                     if intent.status == OrderIntentStatus.UNKNOWN.value:
                         unknown.append(f"ORDER_INTENT_UNKNOWN:{intent.intent_id}")
+                    elif intent.status == OrderIntentStatus.DISPATCHING.value:
+                        unknown.append(f"ORDER_DISPATCH_UNRESOLVED:{intent.intent_id}")
                     if (
                         intent.status == OrderIntentStatus.FILLED.value
                         and intent_order is not None

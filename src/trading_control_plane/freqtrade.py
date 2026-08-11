@@ -678,6 +678,11 @@ class FreqtradeWorkerClient:
         except DomainRejected as exc:
             if exc.code != "FREQTRADE_WORKER_UNAVAILABLE":
                 raise
+        return self.recover_entry(command)
+
+    def recover_entry(self, command: FreqtradeEntryCommand) -> FreqtradeTrade:
+        """Query a previously dispatched entry without issuing another write."""
+
         deadline = time.monotonic() + self.confirmation_timeout_seconds
         while time.monotonic() <= deadline:
             found = self._find_filled_entry(pair=command.pair, enter_tag=command.enter_tag)
@@ -691,7 +696,7 @@ class FreqtradeWorkerClient:
             time.sleep(0.25)
         raise DomainRejected(
             "FREQTRADE_LIVE_OUTCOME_UNKNOWN",
-            "Freqtrade entry outcome could not be confirmed within the bounded timeout",
+            "Freqtrade entry outcome could not be confirmed by query within the bounded timeout",
         )
 
     def force_exit(self, trade_id: str, *, pair: str) -> FreqtradeTrade:
@@ -718,6 +723,11 @@ class FreqtradeWorkerClient:
         except DomainRejected as exc:
             if exc.code != "FREQTRADE_WORKER_UNAVAILABLE":
                 raise
+        return self.recover_exit(trade_id, pair=pair)
+
+    def recover_exit(self, trade_id: str, *, pair: str) -> FreqtradeTrade:
+        """Query a previously dispatched exit without issuing another write."""
+
         deadline = time.monotonic() + self.confirmation_timeout_seconds
         while time.monotonic() <= deadline:
             open_trade = self.find_open_trade(pair=pair)
@@ -737,5 +747,5 @@ class FreqtradeWorkerClient:
             time.sleep(0.25)
         raise DomainRejected(
             "FREQTRADE_LIVE_OUTCOME_UNKNOWN",
-            "Freqtrade exit outcome could not be confirmed within the bounded timeout",
+            "Freqtrade exit outcome could not be confirmed by query within the bounded timeout",
         )

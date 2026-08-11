@@ -469,15 +469,19 @@ def test_live_worker_force_entry_is_idempotent_and_force_exit_is_bounded(
     )
 
     opened = client.force_enter(command)
+    recovered = client.recover_entry(command)
     replayed = client.force_enter(command)
     closed = client.force_exit(opened.trade_id, pair=command.pair)
+    recovered_closed = client.recover_exit(opened.trade_id, pair=command.pair)
 
     assert opened.amount == Decimal("0.08")
+    assert recovered.trade_id == opened.trade_id
     assert replayed.trade_id == opened.trade_id
     assert opened.stoploss_order_id == "stop-41"
     assert opened.entry_order_id == "entry-41"
     assert opened.exit_order_id is None
     assert closed.exit_order_id == "exit-41"
+    assert recovered_closed.exit_order_id == "exit-41"
     assert closed.is_open is False
     assert state["writes"] == ["entry", "exit"]
 

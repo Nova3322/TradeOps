@@ -158,6 +158,7 @@ Binance、Hyperliquid Core、每个 HIP-3 DEX、账户 / 子账户、margin mode
 
 ### RB-002 订单发送结果未知或部分成交
 
+- 派发中断：若 OrderIntent 已是 `DISPATCHING`，说明外部写前的账户/凭据版本、sender fencing、幂等键与派发时间已经提交；只用原幂等键查询绑定 Worker 的原 trade，禁止再次调用 `forceenter` / `forceexit`，也禁止换键生成替代请求。
 - 自动：意图进入 Unknown，计入最坏 Unknown Heat，禁止同对象新意图。
 - 处置：用 client / venue order ID 查询原订单和最近成交；不得生成替代订单。
 - 部分成交：保护真实成交数量，未成交部分不算 Open Heat；按原意图完成撤销或终态。
@@ -251,7 +252,7 @@ TRADING_DATABASE_URL="$DISPOSABLE_RESTORE_DATABASE_URL" \
 
 当前完整 Compose 入口是 `./scripts/run_compose.sh`，本机 Python 入口是 `./scripts/run_local.sh`。两者都使用 `trading_local` PostgreSQL 16，先升级至当前 Alembic head，再幂等初始化内部用户。`run_local.sh` 强制连接 `127.0.0.1:5434/trading_local`，不会把共享 `.env.local` 的数据库 URL 当成本地目标。准确的本地管理员用户名是小写 `kelly_oooo`（四个 `o`），另有 `local-proposer`、`local-reviewer-two` 及 SERVICE principals。本地密钥与密码仅保存在权限 `0600` 的 `.local/`；其他 Token、API Key 和私钥只从服务端秘密环境读取，不复制到命令历史、文档或提交。
 
-当前 Schema 为 42 张业务/运行表（另有 Alembic 版本表），Alembic head 为 `20260811_0030`。本地启动不使用 SQLite，也不应连接真实交易数据库；测试和恢复演练继续使用名称以 `_test` 结尾的独立 PostgreSQL。运行 `uv run trading-doctor` 可以无秘密地核对配置、Schema、Gate、逐账户 Freqtrade Worker 绑定和连接能力。详细流程见 [开源部署、配置、升级与恢复](开源部署配置升级与恢复.md)。
+当前 Schema 为 42 张业务/运行表（另有 Alembic 版本表），Alembic head 为 `20260811_0031`。本地启动不使用 SQLite，也不应连接真实交易数据库；测试和恢复演练继续使用名称以 `_test` 结尾的独立 PostgreSQL。运行 `uv run trading-doctor` 可以无秘密地核对配置、Schema、Gate、逐账户 Freqtrade Worker 绑定和连接能力。详细流程见 [开源部署、配置、升级与恢复](开源部署配置升级与恢复.md)。
 
 2026-07-19 已完成一次本地演练：custom-format 归档可由 `pg_restore --list` 解析；独立 `trading_m9_restore_test` 恢复后有 26 张业务表、Alembic revision `20260718_0001`、五个默认关闭 Gate，数据库 readiness 与 `alembic check` 均通过；演练库和归档随后删除。
 

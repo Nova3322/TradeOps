@@ -69,6 +69,46 @@ def test_initial_schema_seeds_only_disabled_capability_gates(database: Database)
     }
 
 
+def test_durable_freqtrade_dispatch_migration_round_trips(database: Database) -> None:
+    config = Config("alembic.ini")
+
+    command.downgrade(config, "20260811_0030")
+    with database.engine.connect() as connection:
+        columns = {item["name"] for item in inspect(connection).get_columns("order_intents")}
+        assert "dispatch_backend" not in columns
+
+    command.upgrade(config, "head")
+    with database.engine.connect() as connection:
+        columns = {item["name"] for item in inspect(connection).get_columns("order_intents")}
+        checks = {
+            item["name"]: str(item["sqltext"])
+            for item in inspect(connection).get_check_constraints("order_intents")
+        }
+        indexes = {
+            item["name"]: item for item in inspect(connection).get_indexes("order_intents")
+        }
+        revision = connection.exec_driver_sql(
+            "SELECT version_num FROM alembic_version"
+        ).scalar_one()
+        differences = compare_metadata(MigrationContext.configure(connection), Base.metadata)
+
+    assert revision == REQUIRED_SCHEMA_REVISION
+    assert {
+        "dispatch_backend",
+        "dispatch_account_version",
+        "dispatch_auth_version",
+        "dispatch_owner_id",
+        "dispatch_fencing_token",
+        "dispatch_external_id",
+        "dispatch_started_at",
+    } <= columns
+    assert "DISPATCHING" in checks["ck_order_intents_status"]
+    assert "DISPATCHING" in str(
+        indexes["uq_order_intents_one_active_campaign"]["dialect_options"]
+    )
+    assert differences == []
+
+
 def test_account_bound_freqtrade_worker_migration_guards_data_and_round_trips(
     database: Database,
 ) -> None:

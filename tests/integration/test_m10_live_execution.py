@@ -35,7 +35,11 @@ from trading_control_plane.domain import (
     TargetUrgency,
 )
 from trading_control_plane.exchange_connection import ConnectionProbeResult
-from trading_control_plane.freqtrade import FreqtradeWorkerClient, FreqtradeWorkerSpec
+from trading_control_plane.freqtrade import (
+    FreqtradeEntryCommand,
+    FreqtradeWorkerClient,
+    FreqtradeWorkerSpec,
+)
 from trading_control_plane.hyperliquid_execution import (
     HyperliquidLiveClient,
     HyperliquidTestnetOrder,
@@ -43,6 +47,7 @@ from trading_control_plane.hyperliquid_execution import (
 from trading_control_plane.models import (
     CapabilityGate,
     OrderIntent,
+    Position,
     ProtectionOrder,
     RiskReservation,
 )
@@ -1849,6 +1854,7 @@ def test_freqtrade_live_never_falls_back_to_an_unbound_venue_worker(
                     "execution_scope": scope,
                     "owner_id": owner,
                     "fencing_token": token,
+                    "idempotency_key": "freqtrade-unbound-dispatch",
                 },
             )
             assert response.status_code == 422, response.text
@@ -2035,6 +2041,50 @@ def test_okx_bybit_live_execution_reuses_exact_account_freqtrade_chain(
         ids["admin"],
         now=NOW,
     )
+    if venue == "OKX":
+        durable_binding = service.freqtrade_live_worker_binding(
+            actor_id=ids["operator"],
+            execution_scope=scope,
+            owner_id=owner,
+            fencing_token=token,
+            now=NOW,
+        )
+        durable_command = service.prepare_freqtrade_live_order(
+            ids["opening"],
+            ids["operator"],
+            scope,
+            owner,
+            token,
+            now=NOW,
+        )
+        assert isinstance(durable_command, FreqtradeEntryCommand)
+        started = service.start_freqtrade_live_dispatch(
+            ids["opening"],
+            actor_id=ids["operator"],
+            execution_scope=scope,
+            owner_id=owner,
+            fencing_token=token,
+            binding=durable_binding,
+            command=durable_command,
+            external_trade_id=None,
+            idempotency_key=f"{key}-dispatch",
+            now=NOW,
+        )
+        assert started.mode == "SEND"
+        # Simulate a process dying after the worker accepted the write but before
+        # Trading recorded the result. The mark may move before the retry; the
+        # persisted semantic handoff must still recover by query only.
+        fixture.entry_tag = durable_command.enter_tag
+        with database.session_factory.begin() as session:
+            position = session.scalar(
+                select(Position).where(
+                    Position.account_id == account_id,
+                    Position.venue == venue,
+                    Position.environment == "LIVE",
+                )
+            )
+            assert position is not None
+            position.mark_price = Decimal("1.01")
 
     async def scenario() -> None:
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as http:
@@ -2045,20 +2095,39 @@ def test_okx_bybit_live_execution_reuses_exact_account_freqtrade_chain(
                     "execution_scope": scope,
                     "owner_id": owner,
                     "fencing_token": token,
+                    "idempotency_key": f"{key}-dispatch",
                 },
             )
             assert response.status_code == 200, response.text
             assert response.json()["backend"] == "FREQTRADE"
             assert response.json()["pair"] == "XRP/USDT:USDT"
             assert response.json()["worker"] == f"{exchange}-exact-worker"
+            assert response.json()["replayed"] is (venue == "OKX")
+            first_payload = response.json()
+            replay = await http.post(
+                f"/api/intents/{ids['opening']}/freqtrade/live/send",
+                json={
+                    "execution_scope": scope,
+                    "owner_id": owner,
+                    "fencing_token": token,
+                    "idempotency_key": f"{key}-dispatch",
+                },
+            )
+            assert replay.status_code == 200, replay.text
+            assert replay.json()["replayed"] is True
+            assert replay.json()["venue_order_fact_id"] == first_payload["venue_order_fact_id"]
+            assert replay.json()["protection_id"] == first_payload["protection_id"]
 
     asyncio.run(scenario())
 
-    assert fixture.write_count == 1
+    assert fixture.write_count == (0 if venue == "OKX" else 1)
     with database.session_factory() as session:
         intent = session.get(OrderIntent, ids["opening"])
         protection = session.scalar(select(ProtectionOrder))
         assert intent is not None and intent.status == "FILLED"
+        assert intent.dispatch_backend == "FREQTRADE"
+        assert intent.dispatch_external_id == f"{exchange}-trade-1"
+        assert intent.dispatch_started_at is not None and intent.dispatch_started_at >= NOW
         assert protection is not None and protection.status == "ACTIVE"
         assert protection.venue_order_id == f"{exchange}-stop-1"
 

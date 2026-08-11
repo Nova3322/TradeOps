@@ -1057,6 +1057,10 @@ class BinanceTestnetActionRequest(BaseModel):
     fencing_token: int = Field(ge=1)
 
 
+class FreqtradeLiveActionRequest(BinanceTestnetActionRequest):
+    idempotency_key: str = Field(min_length=1, max_length=160)
+
+
 class BinanceTestnetProtectionRequest(BinanceTestnetActionRequest):
     trigger_price: Decimal = Field(gt=0)
 

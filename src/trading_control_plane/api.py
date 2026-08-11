@@ -64,6 +64,7 @@ from trading_control_plane.api_schemas import (
     ExchangeCredentialRotateRequest,
     ExchangeRuntimeSyncRequest,
     ExchangeTradingEligibilityRequest,
+    FreqtradeLiveActionRequest,
     FreqtradeWorkerConfigureRequest,
     FreqtradeWorkerVerifyRequest,
     FundingFactRequest,
@@ -378,6 +379,7 @@ def _domain_status(code: str) -> int:
         "AUTO_PROPOSAL_SOURCE_INVALID",
         "NOTIFICATION_ROUTE_NAME_CONFLICT",
         "NOTIFICATION_ROUTE_UNAVAILABLE",
+        "FREQTRADE_DISPATCH_ALREADY_STARTED",
     }:
         return status.HTTP_409_CONFLICT
     if code in {
@@ -407,6 +409,9 @@ def _domain_status(code: str) -> int:
         "HYPERLIQUID_LIVE_NOT_CONFIGURED",
         "HYPERLIQUID_LIVE_UNAVAILABLE",
         "HYPERLIQUID_LIVE_OUTCOME_UNKNOWN",
+        "FREQTRADE_WORKER_UNAVAILABLE",
+        "FREQTRADE_LIVE_OUTCOME_UNKNOWN",
+        "FREQTRADE_PROTECTION_UNCONFIRMED",
         "DEFAULT_ACCOUNT_NOT_CONFIGURED",
         "SIGNAL_SOURCE_NOT_CONFIGURED",
         "CREDENTIAL_ENCRYPTION_KEY_MISSING",
@@ -421,6 +426,7 @@ def _domain_status(code: str) -> int:
         "HYPERLIQUID_RESPONSE_INVALID",
         "HYPERLIQUID_TESTNET_RESPONSE_INVALID",
         "HYPERLIQUID_LIVE_RESPONSE_INVALID",
+        "FREQTRADE_WORKER_RESPONSE_INVALID",
     }:
         return status.HTTP_502_BAD_GATEWAY
     return status.HTTP_422_UNPROCESSABLE_CONTENT
@@ -739,6 +745,9 @@ def create_app(
                         "HYPERLIQUID_TESTNET_UNAVAILABLE",
                         "HYPERLIQUID_LIVE_UNAVAILABLE",
                         "HYPERLIQUID_LIVE_OUTCOME_UNKNOWN",
+                        "FREQTRADE_WORKER_UNAVAILABLE",
+                        "FREQTRADE_LIVE_OUTCOME_UNKNOWN",
+                        "FREQTRADE_PROTECTION_UNCONFIRMED",
                     },
                 }
             },
@@ -6526,7 +6535,7 @@ def create_app(
     @app.post("/api/intents/{intent_id}/freqtrade/live/send")
     def send_freqtrade_live_order(
         intent_id: UUID,
-        payload: BinanceTestnetActionRequest,
+        payload: FreqtradeLiveActionRequest,
         identity: SessionIdentity = identity_dependency,
     ) -> dict[str, Any]:
         parts = payload.execution_scope.split(":")
@@ -6558,11 +6567,14 @@ def create_app(
         )
         worker.probe(expected_mode="LIVE", required_pair=command.pair)
         execution_service.validate_freqtrade_worker_binding(binding)
-        try:
-            if isinstance(command, FreqtradeEntryCommand):
-                trade = worker.force_enter(command)
-            else:
-                assert isinstance(command, FreqtradeExitCommand)
+        external_trade_id = None
+        if isinstance(command, FreqtradeExitCommand):
+            external_trade_id = execution_service.freqtrade_dispatch_external_id(
+                intent_id,
+                actor_id=identity.user_id,
+                execution_scope=payload.execution_scope,
+            )
+            if external_trade_id is None:
                 current = worker.find_open_trade(pair=command.pair)
                 if current is None:
                     raise DomainRejected(
@@ -6574,7 +6586,70 @@ def create_app(
                         "FREQTRADE_ORDER_IDENTITY_CONFLICT",
                         "Freqtrade open amount exceeds the frozen exit boundary",
                     )
-                trade = worker.force_exit(current.trade_id, pair=command.pair)
+                external_trade_id = current.trade_id
+        dispatch = execution_service.start_freqtrade_live_dispatch(
+            intent_id,
+            actor_id=identity.user_id,
+            execution_scope=payload.execution_scope,
+            owner_id=payload.owner_id,
+            fencing_token=payload.fencing_token,
+            binding=binding,
+            command=command,
+            external_trade_id=external_trade_id,
+            idempotency_key=payload.idempotency_key,
+            now=_now(),
+        )
+        campaign_id = queries().campaign_id_for_intent(identity.user_id, intent_id)
+        if dispatch.mode == "COMPLETED":
+            detail = queries().campaign_detail(identity.user_id, campaign_id)
+            completed_intent = next(
+                (
+                    item
+                    for item in detail["intents"]
+                    if item["intent_id"] == str(intent_id)
+                ),
+                None,
+            )
+            completed_order = (
+                None if completed_intent is None else completed_intent.get("order")
+            )
+            completed_protection = detail.get("protection")
+            return {
+                "venue_order_fact_id": (
+                    None
+                    if completed_order is None
+                    else completed_order["venue_order_fact_id"]
+                ),
+                "protection_id": (
+                    None
+                    if completed_protection is None
+                    else completed_protection["protection_id"]
+                ),
+                "backend": "FREQTRADE",
+                "environment": "LIVE",
+                "worker": worker.spec.name,
+                "trade_id": dispatch.external_trade_id,
+                "pair": command.pair,
+                "is_open": isinstance(command, FreqtradeEntryCommand),
+                "replayed": True,
+                "detail": detail,
+            }
+        try:
+            execution_service.validate_freqtrade_worker_binding(binding)
+            if isinstance(command, FreqtradeEntryCommand):
+                trade = (
+                    worker.force_enter(command)
+                    if dispatch.mode == "SEND"
+                    else worker.recover_entry(command)
+                )
+            else:
+                assert isinstance(command, FreqtradeExitCommand)
+                assert dispatch.external_trade_id is not None
+                trade = (
+                    worker.force_exit(dispatch.external_trade_id, pair=command.pair)
+                    if dispatch.mode == "SEND"
+                    else worker.recover_exit(dispatch.external_trade_id, pair=command.pair)
+                )
         except DomainRejected as exc:
             if exc.code in {
                 "FREQTRADE_LIVE_OUTCOME_UNKNOWN",
@@ -6601,7 +6676,6 @@ def create_app(
             trade,
             now=_now(),
         )
-        campaign_id = queries().campaign_id_for_intent(identity.user_id, intent_id)
         protection_id = None
         if isinstance(command, FreqtradeEntryCommand):
             protection_id = execution_service.record_freqtrade_live_protection(
@@ -6622,6 +6696,7 @@ def create_app(
             "trade_id": trade.trade_id,
             "pair": trade.pair,
             "is_open": trade.is_open,
+            "replayed": dispatch.mode != "SEND",
             "detail": queries().campaign_detail(identity.user_id, campaign_id),
         }
 
