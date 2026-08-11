@@ -1674,9 +1674,46 @@ class TradingService:
                     updated_at=now,
                 )
             )
+            team = Team(
+                workspace_id=workspace.workspace_id,
+                name=normalized_name,
+                slug="default",
+                created_by=actor_id,
+                active=True,
+                trading_enabled=False,
+                execution_mode=TeamExecutionMode.SETUP.value,
+                version=1,
+                created_at=now,
+                updated_at=now,
+            )
+            session.add(team)
+            session.flush()
+            session.add_all(
+                [
+                    TeamMembership(
+                        team_id=team.team_id,
+                        user_id=actor_id,
+                        active=True,
+                        invited_by=None,
+                        created_at=now,
+                        updated_at=now,
+                    ),
+                    RoleAssignment(
+                        user_id=actor_id,
+                        team_id=team.team_id,
+                        role=Role.SYSTEM_ADMIN.value,
+                        account_scope=None,
+                        venue_scope=None,
+                        created_at=now,
+                    ),
+                ]
+            )
             actor.active_workspace_id = workspace.workspace_id
-            actor.active_team_id = None
-            response = {"workspace_id": str(workspace.workspace_id)}
+            actor.active_team_id = team.team_id
+            response = {
+                "workspace_id": str(workspace.workspace_id),
+                "team_id": str(team.team_id),
+            }
             self._audit(
                 session,
                 actor_id=str(actor_id),
@@ -1688,6 +1725,20 @@ class TradingService:
                 idempotency_key=idempotency_key,
                 object_version=1,
                 workspace_id=workspace.workspace_id,
+                now=now,
+            )
+            self._audit(
+                session,
+                actor_id=str(actor_id),
+                event_type="TEAM_CREATED",
+                object_type="Team",
+                object_id=team.team_id,
+                reason="team=default;created_with_workspace=true;trading_enabled=false",
+                correlation_id=uuid4(),
+                idempotency_key=idempotency_key,
+                object_version=1,
+                workspace_id=workspace.workspace_id,
+                team_id=team.team_id,
                 now=now,
             )
             self._save_receipt(

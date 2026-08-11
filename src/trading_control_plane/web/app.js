@@ -3,6 +3,7 @@ const sidebar = document.querySelector('#sidebar');
 const identityChip = document.querySelector('#identity-chip');
 const scopeControl = document.querySelector('#scope-control');
 const scopeSwitcher = document.querySelector('#scope-switcher');
+const scopeSwitcherMenu = document.querySelector('#workspace-switcher-menu');
 const environmentBadge = document.querySelector('#environment-badge');
 const languageToggle = document.querySelector('#language-toggle');
 const themeToggle = document.querySelector('#theme-toggle');
@@ -981,7 +982,7 @@ const currentWorkspaceMembership = () => (session?.workspaces || []).find(
   workspace => workspace.workspace_id === session?.active_workspace?.workspace_id
 );
 const routeCapability = (path) => {
-  if (path === '/') return null;
+  if (path === '/' || path === '/workspaces' || path === '/home') return null;
   if (path === '/capital') return 'capital.view';
   if (path === '/opportunities/defaults') return 'proposal.create';
   if (path === '/opportunities') return 'opportunity.view';
@@ -1008,8 +1009,7 @@ const accessRoleCatalog = [
   {role:'SYSTEM_ADMIN', label:'超级管理员', copy:'管理所有成员并可访问资金中心；所有资金动作仍受实时校验、最终确认和安全开关约束。'},
 ];
 const loginDestination = () => {
-  const destination = `${location.pathname}${location.search}`;
-  return destination;
+  return '/';
 };
 
 async function api(path, options = {}) {
@@ -1127,20 +1127,42 @@ function showApiError(error, target = null) {
   else showToast(message, 'error');
 }
 
-function setShell(loggedIn) {
-  sidebar.hidden = !loggedIn;
+function workspaceDefaultTeamId(workspace) {
+  if (!workspace) return null;
+  return workspace.default_team_id
+    || (session?.teams || []).find(team => team.workspace_id === workspace.workspace_id && team.slug === 'default')?.team_id
+    || (session?.teams || []).find(team => team.workspace_id === workspace.workspace_id)?.team_id
+    || null;
+}
+
+function renderWorkspaceSwitcher() {
+  if (!session) return;
+  const activeWorkspaceId = session.active_workspace?.workspace_id;
+  const activeWorkspace = (session.workspaces || []).find(item => item.workspace_id === activeWorkspaceId);
+  const nameTarget = scopeSwitcher.querySelector('[data-workspace-name]');
+  if (nameTarget) nameTarget.textContent = activeWorkspace?.name || '选择工作区';
+  scopeSwitcherMenu.innerHTML = `<div class="workspace-switcher-menu-head"><span>工作区</span><small>${(session.workspaces || []).length} 个可用</small></div>
+    <div class="workspace-switcher-options">${(session.workspaces || []).map(workspace => {
+      const selected = workspace.workspace_id === activeWorkspaceId;
+      const teamId = workspaceDefaultTeamId(workspace);
+      return `<button class="workspace-switcher-option ${selected ? 'is-active' : ''}" type="button" role="menuitem" data-switch-workspace="${escapeHtml(workspace.workspace_id)}" data-switch-team="${escapeHtml(teamId || '')}"><span class="workspace-option-avatar" aria-hidden="true">${escapeHtml(workspace.name.slice(0, 1).toUpperCase())}</span><span><b>${escapeHtml(workspace.name)}</b><small>${escapeHtml(`${workspace.member_count ?? 0} 名成员${workspace.agent_count ? ` · ${workspace.agent_count} 个 Agent` : ''}`)}</small></span><strong>${selected ? '当前' : '进入'}</strong></button>`;
+    }).join('')}</div>
+    <div class="workspace-switcher-menu-actions"><a href="/" data-link role="menuitem">创建新工作区</a><a href="/" data-link role="menuitem">查看所有工作区</a></div>`;
+}
+
+function closeWorkspaceSwitcher({restoreFocus = false} = {}) {
+  scopeSwitcherMenu.hidden = true;
+  scopeSwitcher.setAttribute('aria-expanded', 'false');
+  if (restoreFocus && !scopeSwitcher.hidden) scopeSwitcher.focus();
+}
+
+function setShell(loggedIn, {workspaceGate = false} = {}) {
+  sidebar.hidden = !loggedIn || workspaceGate;
   identityChip.hidden = !loggedIn;
-  scopeControl.hidden = !loggedIn;
-  mobileNavToggle.hidden = !loggedIn;
+  scopeControl.hidden = !loggedIn || workspaceGate;
+  mobileNavToggle.hidden = !loggedIn || workspaceGate;
   if (loggedIn) {
-    const currentWorkspaceId = session.active_workspace?.workspace_id || '';
-    const currentTeamId = session.active_team?.team_id || '';
-    scopeSwitcher.innerHTML = (session.workspaces || []).map(workspace => {
-      const teams = (session.teams || []).filter(team => team.workspace_id === workspace.workspace_id);
-      const workspaceOnly = `<option value="${escapeHtml(`${workspace.workspace_id}:`)}" ${workspace.workspace_id === currentWorkspaceId && !currentTeamId ? 'selected' : ''}>${escapeHtml(workspace.name)} / ${escapeHtml(localizedText('选择团队'))}</option>`;
-      const teamOptions = teams.map(team => `<option value="${escapeHtml(`${workspace.workspace_id}:${team.team_id}`)}" ${team.team_id === currentTeamId ? 'selected' : ''}>${escapeHtml(workspace.name)} / ${escapeHtml(team.name)}</option>`).join('');
-      return `<optgroup label="${escapeHtml(workspace.name)}">${workspaceOnly}${teamOptions}</optgroup>`;
-    }).join('');
+    renderWorkspaceSwitcher();
     const rolePriority = ['SYSTEM_ADMIN','TREASURY_ADMIN','OPERATOR','REVIEWER','PROPOSER','OBSERVER'];
     const primaryRole = rolePriority.find(role => roleNames().includes(role));
     const identity = `${session.username} · ${localizedText(primaryRole ? fmtRole(primaryRole) : '未分配角色')}`;
@@ -1158,12 +1180,13 @@ function setShell(loggedIn) {
       section.hidden = ![...section.querySelectorAll('a')].some(link => !link.hidden);
     });
   }
+  closeWorkspaceSwitcher();
   closeMobileNav({restoreFocus:false});
 }
 
 function errorView(error, retry = true) {
   const guidance = errorStateGuidance(error);
-  return `<section class="error-state" role="alert" aria-live="assertive" aria-labelledby="error-state-title"><div><p class="eyebrow">运行状态 · 已安全阻断</p><h2 id="error-state-title" data-error-heading tabindex="-1">${escapeHtml(guidance.title)}</h2><p class="error-state-reason">${escapeHtml(guidance.reason)}</p><dl class="error-state-guidance"><div><dt>影响</dt><dd>${escapeHtml(guidance.impact)}</dd></div><div><dt>负责角色</dt><dd>${escapeHtml(guidance.owner)}</dd></div><div><dt>下一步</dt><dd>${escapeHtml(guidance.next)}</dd></div><div><dt>技术状态</dt><dd><code>${escapeHtml(error?.code || `HTTP_${error?.status || 'UNKNOWN'}`)}</code></dd></div></dl><div class="error-state-actions">${retry ? '<button class="primary" data-retry>重新检查</button>' : ''}<a class="secondary" href="/" data-link>返回当前任务</a></div></div></section>`;
+  return `<section class="error-state" role="alert" aria-live="assertive" aria-labelledby="error-state-title"><div><p class="eyebrow">运行状态 · 已安全阻断</p><h2 id="error-state-title" data-error-heading tabindex="-1">${escapeHtml(guidance.title)}</h2><p class="error-state-reason">${escapeHtml(guidance.reason)}</p><dl class="error-state-guidance"><div><dt>影响</dt><dd>${escapeHtml(guidance.impact)}</dd></div><div><dt>负责角色</dt><dd>${escapeHtml(guidance.owner)}</dd></div><div><dt>下一步</dt><dd>${escapeHtml(guidance.next)}</dd></div><div><dt>技术状态</dt><dd><code>${escapeHtml(error?.code || `HTTP_${error?.status || 'UNKNOWN'}`)}</code></dd></div></dl><div class="error-state-actions">${retry ? '<button class="primary" data-retry>重新检查</button>' : ''}<a class="secondary" href="/home" data-link>返回当前任务</a></div></div></section>`;
 }
 
 function errorStateGuidance(error) {
@@ -1339,7 +1362,7 @@ async function bootstrap() {
   } catch (error) {
     if (error.status !== 401) console.error(error);
   }
-  setShell(Boolean(session));
+  setShell(Boolean(session), {workspaceGate:Boolean(session) && ['/', '/workspaces'].includes(location.pathname)});
   await route();
 }
 
@@ -1349,11 +1372,19 @@ async function route() {
   updateActiveNav();
   closeMobileNav({restoreFocus:false});
   if (!session) {
+    setShell(false);
     renderLogin();
     enhanceRenderedPage();
     return;
   }
   const path = location.pathname;
+  if (path === '/' || path === '/workspaces') {
+    setShell(true, {workspaceGate:true});
+    renderWorkspaceGateway();
+    enhanceRenderedPage();
+    return;
+  }
+  setShell(true);
   const teamSetupPaths = new Set(['/admin/users', '/admin/agents', '/venues', '/signals', '/notifications', '/risk', '/shadow']);
   if (!session.active_workspace || !session.active_team || (!session.active_team.trading_enabled && !teamSetupPaths.has(path))) {
     renderScopeSetup();
@@ -1362,13 +1393,13 @@ async function route() {
   }
   const requiredCapability = routeCapability(path);
   if (requiredCapability && !hasCapability(requiredCapability)) {
-    main.innerHTML = `<section class="empty-state"><div><p class="eyebrow">权限范围</p><h2>当前职责不包含这个页面</h2><p>此页面需要“${escapeHtml(capabilityLabel(requiredCapability))}”权限。侧栏只展示当前身份可用入口；直接打开链接也不会绕过服务端权限。</p><div class="toolbar empty-actions"><a class="secondary" href="/" data-link>返回当前任务</a>${hasCapability('capital.view') ? '<a class="primary" href="/capital" data-link>进入资金中心</a>' : ''}</div></div></section>`;
+    main.innerHTML = `<section class="empty-state"><div><p class="eyebrow">权限范围</p><h2>当前职责不包含这个页面</h2><p>此页面需要“${escapeHtml(capabilityLabel(requiredCapability))}”权限。侧栏只展示当前身份可用入口；直接打开链接也不会绕过服务端权限。</p><div class="toolbar empty-actions"><a class="secondary" href="/home" data-link>返回当前任务</a>${hasCapability('capital.view') ? '<a class="primary" href="/capital" data-link>进入资金中心</a>' : ''}</div></div></section>`;
     enhanceRenderedPage();
     return;
   }
   main.innerHTML = '<section class="loading-state"><span class="spinner"></span><p>正在读取当前事实…</p></section>';
   try {
-    if (path === '/') await renderHome();
+    if (path === '/home') await renderHome();
     else if (path === '/signals') await renderSignalSources();
     else if (path === '/opportunities') await renderOpportunities();
     else if (path === '/opportunities/defaults') await renderOpportunityDefaults();
@@ -2297,7 +2328,7 @@ async function renderProposalList(status, title, historyMode = false) {
   const environmentQuery = environment === 'LIVE' ? '' : `?environment=${environment}`;
   const createActions = canPropose ? `<div class="toolbar"><a class="secondary" href="${environment === 'SHADOW' ? '/shadow' : '/opportunities'}" data-link>${environment === 'SHADOW' ? '返回影子模式' : '查看机会'}</a><a class="primary" href="/proposals/new${environmentQuery}" data-link>新建人工提案</a></div>` : '';
   const emptyState = status
-    ? '<section class="empty-state"><div><h2>当前没有待你审核的提案</h2><p>自己的提案、已经投过票、已到期或已结束的提案不会留在这里。</p><div class="toolbar empty-actions"><a class="secondary" href="/" data-link>返回当前任务</a><a class="primary" href="/proposals" data-link>查看全部提案</a></div></div></section>'
+    ? '<section class="empty-state"><div><h2>当前没有待你审核的提案</h2><p>自己的提案、已经投过票、已到期或已结束的提案不会留在这里。</p><div class="toolbar empty-actions"><a class="secondary" href="/home" data-link>返回当前任务</a><a class="primary" href="/proposals" data-link>查看全部提案</a></div></div></section>'
     : `<section class="empty-state"><div><h2>${historyMode ? '当前没有历史提案' : '当前没有进行中的提案'}</h2><p>${historyMode ? '已批准、已过期或已拒绝的提案会保留在这里供审计。' : canPropose ? '可以从机会页一键创建，或提交一份人工提案。' : '当前作用域内还没有需要继续跟踪的提案。'}</p>${historyMode ? '<a class="secondary" href="/proposals" data-link>返回当前提案</a>' : createActions}</div></section>`;
   const proposalScopeCopy = operationsView
     ? '这里展示草稿、等待审核，以及仍在启动窗口内的已批准提案；批准后仍须完成实时风险检查与短期授权。'
@@ -2611,7 +2642,7 @@ function renderRiskPolicyConfiguration(policy, allowed) {
 }
 
 function renderRiskControlPanel(control) {
-  if (!control) return `<article class="card"><div class="card-heading"><div><p class="eyebrow">团队风险控制</p><h2>当前职责不能查看团队政策</h2></div><span class="status-pill">当前权限范围</span></div><p class="subtle">当前身份只能查看获准访问的账户和交易所风险，不能读取或执行团队风险政策、自动加仓控制和恢复申请。</p><p class="safety-note">这不代表团队风险状态正常。新增风险仍会由服务端强制检查；你仍可使用下表查看风险占用、唯一减仓目标和最近对账。</p><div class="toolbar"><a class="secondary" href="/" data-link>返回当前任务</a><a class="primary" href="/campaigns/alerts" data-link>查看运行告警</a></div></article>`;
+  if (!control) return `<article class="card"><div class="card-heading"><div><p class="eyebrow">团队风险控制</p><h2>当前职责不能查看团队政策</h2></div><span class="status-pill">当前权限范围</span></div><p class="subtle">当前身份只能查看获准访问的账户和交易所风险，不能读取或执行团队风险政策、自动加仓控制和恢复申请。</p><p class="safety-note">这不代表团队风险状态正常。新增风险仍会由服务端强制检查；你仍可使用下表查看风险占用、唯一减仓目标和最近对账。</p><div class="toolbar"><a class="secondary" href="/home" data-link>返回当前任务</a><a class="primary" href="/campaigns/alerts" data-link>查看运行告警</a></div></article>`;
   const policy = control.policy;
   const gate = control.auto_add_gate;
   const canConfigurePolicy = Boolean(control.actions?.configure_policy?.allowed);
@@ -4154,7 +4185,7 @@ async function renderRuntimeAlerts() {
   }).join('');
   main.innerHTML = `<section class="page exceptions-page"><header class="page-head"><div><p class="eyebrow">交易任务 · 运行告警详情</p><h1>运行告警</h1><p class="lede">只展示运行中生产交易任务需要人工处理的问题；风险恢复、资金异常和系统健康分别保留在各自页面。</p></div><div class="toolbar"><a class="secondary" href="/campaigns" data-link>返回交易任务</a><button class="secondary" data-refresh>刷新</button></div></header>
     <div class="stats exception-stats"><div class="stat"><small>受影响交易任务</small><b class="${affectedCampaigns.size ? 'danger-text' : ''}">${affectedCampaigns.size}</b></div><div class="stat"><small>运行问题</small><b>${items.length}</b></div><div class="stat"><small>结果未知</small><b class="${unknownCount ? 'danger-text' : ''}">${unknownCount}</b></div><div class="stat"><small>数据过期</small><b class="${staleCount ? 'warning-text' : ''}">${staleCount}</b><span>最近检查 ${fmtDate(result.as_of)}</span></div></div>
-    ${items.length ? `<div class="exception-grid">${cards}</div>` : `<section class="empty-state"><div><h2>无运行告警 / 当前无需处理</h2><p>检查范围：运行中的生产交易任务；未发现结果未知、数据过期、保护不足或对账差异。已关闭记录不会重新计入当前待办。</p><p class="subtle">最近检查：${fmtDate(result.as_of)}</p><div class="toolbar empty-actions"><a class="secondary" href="/" data-link>返回当前任务</a><a class="primary" href="/campaigns" data-link>查看交易任务</a></div></div></section>`}</section>`;
+    ${items.length ? `<div class="exception-grid">${cards}</div>` : `<section class="empty-state"><div><h2>无运行告警 / 当前无需处理</h2><p>检查范围：运行中的生产交易任务；未发现结果未知、数据过期、保护不足或对账差异。已关闭记录不会重新计入当前待办。</p><p class="subtle">最近检查：${fmtDate(result.as_of)}</p><div class="toolbar empty-actions"><a class="secondary" href="/home" data-link>返回当前任务</a><a class="primary" href="/campaigns" data-link>查看交易任务</a></div></div></section>`}</section>`;
   document.querySelector('[data-refresh]')?.addEventListener('click', route);
 }
 
@@ -4739,15 +4770,41 @@ function factTable(title, headers, rows, emptyCopy = '当前没有已保存的�
   return `<section><h2>${escapeHtml(title)}</h2>${rows ? `<div class="table-scroll-hint venue-fact-scroll-hint">左右滑动查看完整${escapeHtml(title)}</div><div class="table-wrap is-scrollable venue-fact-table"><table><thead><tr>${headers}</tr></thead><tbody>${rows}</tbody></table></div>` : `<div class="callout ${emptyAttention ? 'tone-attention' : ''}">${escapeHtml(emptyCopy)}</div>`}</section>`;
 }
 
+function workspaceCreationForm({gateway = false} = {}) {
+  return `<form class="${gateway ? 'workspace-gateway-create' : 'card scope-create-form'}" id="create-workspace-form" data-destination="/home">
+    <div><p class="eyebrow">新的隔离边界</p><h2>${gateway ? '创建工作区' : '创建 Workspace'}</h2><p>创建后自动建立同名默认团队。成员、账户、权限与交易数据不会继承其他工作区。</p></div>
+    <label>工作区名称<input name="name" maxlength="120" placeholder="例如 TradingOPS APAC" required></label>
+    <label>标识（可选）<input name="slug" maxlength="80" pattern="[a-z0-9-]+" placeholder="tradingops-apac"></label>
+    <div class="form-error" role="alert"></div><button class="primary">创建并进入</button>
+  </form>`;
+}
+
+function renderWorkspaceGateway() {
+  const workspaces = session.workspaces || [];
+  const workspaceCards = workspaces.map(workspace => {
+    const teamId = workspaceDefaultTeamId(workspace);
+    const active = workspace.workspace_id === session.active_workspace?.workspace_id;
+    const memberSummary = `${workspace.member_count ?? 0} 名成员${workspace.agent_count ? ` · ${workspace.agent_count} 个 Agent` : ''}`;
+    return `<button class="workspace-gateway-option ${active ? 'is-active' : ''}" type="button" data-enter-workspace="${escapeHtml(workspace.workspace_id)}" data-enter-team="${escapeHtml(teamId || '')}"><span class="workspace-gateway-avatar" aria-hidden="true">${escapeHtml(workspace.name.slice(0, 1).toUpperCase())}</span><span class="workspace-gateway-option-copy"><b>${escapeHtml(workspace.name)}</b><small>${escapeHtml(memberSummary)} · ${workspace.role === 'ADMIN' ? '管理员' : '成员'}</small></span><span class="workspace-gateway-option-state">${teamId ? '进入' : '继续设置'}</span></button>`;
+  }).join('');
+  const createContent = workspaceCreationForm({gateway:true});
+  main.innerHTML = `<section class="workspace-gateway-page" aria-labelledby="workspace-gateway-title">
+    <div class="workspace-gateway-tabs" role="tablist" aria-label="入口类型"><span role="tab" aria-selected="true">工作区</span><span role="tab" aria-selected="false" aria-disabled="true">个人账户</span></div>
+    <article class="workspace-gateway-card">
+      <span class="workspace-gateway-logo" aria-hidden="true"><img src="/assets/tradingops-logo.png" alt=""></span>
+      <div class="workspace-gateway-heading"><p class="eyebrow">TradingOPS Workspace</p><h1 id="workspace-gateway-title">${workspaces.length ? '选择工作区' : '创建第一个工作区'}</h1><p>${workspaces.length ? '每个工作区拥有独立成员、默认团队、账户、权限与交易数据。' : '工作区是成员、默认团队、账户、权限与交易数据的隔离边界。'}</p></div>
+      ${workspaces.length ? `<div class="workspace-gateway-list">${workspaceCards}</div><details class="workspace-gateway-create-panel"><summary>创建新工作区</summary>${createContent}</details>` : createContent}
+    </article>
+    <p class="workspace-gateway-footnote">进入后仍可从侧栏切换工作区。服务端会重新加载对应团队、成员和权限范围。</p>
+  </section>`;
+  document.querySelectorAll('[data-enter-workspace]').forEach(button => button.addEventListener('click', () => withPending(button, '进入中…', () => selectScope(button.dataset.enterWorkspace, button.dataset.enterTeam || null, {destination:'/home'}))));
+  bindScopeCreationForms();
+}
+
 function scopeCreationPanels({compact = false} = {}) {
   const workspaceAdmin = currentWorkspaceMembership()?.role === 'ADMIN';
   return `<div class="scope-creation-grid ${compact ? 'is-compact' : ''}">
-    <form class="card scope-create-form" id="create-workspace-form">
-      <div><p class="eyebrow">新的组织边界</p><h2>创建 Workspace</h2><p>创建者成为 Workspace 管理员。新 Workspace 不继承当前团队的成员、岗位或业务数据。</p></div>
-      <label>Workspace 名称<input name="name" maxlength="120" placeholder="例如 TradingOPS APAC" required></label>
-      <label>标识（可选）<input name="slug" maxlength="80" pattern="[a-z0-9-]+" placeholder="tradingops-apac"></label>
-      <div class="form-error" role="alert"></div><button class="secondary">创建并进入 Workspace</button>
-    </form>
+    ${workspaceCreationForm()}
     ${workspaceAdmin ? `<form class="card scope-create-form" id="create-team-form">
       <div><p class="eyebrow">当前 Workspace</p><h2>创建团队</h2><p>新团队默认处于安全配置阶段，不读取现有团队数据，也不开放交易能力。</p></div>
       <label>团队名称<input name="name" maxlength="120" placeholder="例如 Alpha 策略组" required></label>
@@ -4768,8 +4825,8 @@ function bindScopeCreationForms() {
         const result = await api('/api/workspaces', {method:'POST', body:JSON.stringify(payload)});
         session = result.session;
         setShell(true);
-        history.replaceState({}, '', '/');
-        showToast('Workspace 已创建；请选择或创建团队');
+        history.replaceState({}, '', form.dataset.destination || '/home');
+        showToast('工作区与默认团队已创建；交易能力保持关闭');
         await route();
       } catch (error) { showApiError(error, form.querySelector('.form-error')); }
     });
@@ -4784,7 +4841,7 @@ function bindScopeCreationForms() {
         const result = await api('/api/teams', {method:'POST', body:JSON.stringify(payload)});
         session = result.session;
         setShell(true);
-        history.replaceState({}, '', '/');
+        history.replaceState({}, '', '/home');
         showToast('团队已创建并保持交易关闭；请先配置成员与安全边界');
         await route();
       } catch (error) { showApiError(error, form.querySelector('.form-error')); }
@@ -4812,13 +4869,13 @@ function renderScopeSetup() {
   bindScopeCreationForms();
 }
 
-async function selectScope(workspaceId, teamId = null) {
+async function selectScope(workspaceId, teamId = null, {destination = '/home'} = {}) {
   try {
     const result = await api('/api/scopes/select', {method:'POST', body:JSON.stringify({workspace_id:workspaceId, team_id:teamId || null, idempotency_key:crypto.randomUUID()})});
     session = result.session;
     setShell(true);
-    history.replaceState({}, '', '/');
-    showToast(teamId ? '已切换团队；权限与数据范围已重新加载' : '已切换 Workspace；请选择团队');
+    history.replaceState({}, '', destination);
+    showToast(teamId ? '已切换工作区；团队、成员与权限范围已重新加载' : '已切换工作区；请选择团队');
     await route();
   } catch (error) {
     setShell(true);
@@ -4865,7 +4922,7 @@ async function renderAccessManagement() {
       <div class="form-error" role="alert"></div>${member.is_current_user ? '' : '<div class="form-actions"><button class="secondary">保存权限</button></div>'}</form></details>`;
   }).join('');
   main.innerHTML = `<section class="page access-page"><header class="page-head"><div><p class="eyebrow">${escapeHtml(activeWorkspace?.name || 'Workspace')} · ${escapeHtml(activeTeam?.name || 'Team')}</p><h1>团队成员与权限</h1><p class="lede">岗位、账户范围和交易所范围只在当前团队生效。同一用户加入另一个团队时必须重新分配最小权限。</p></div><span class="status-pill">${members.filter(item => item.active).length} 名启用成员</span></header>
-    ${activeTeam && !activeTeam.trading_enabled ? '<article class="home-status tone-attention"><div><p class="eyebrow">安全配置阶段</p><h2>当前仅开放团队管理</h2><p>业务实体尚未完成团队归属，服务端不会让这个新团队读取默认团队的提案、账户、订单或报表。真实下单、资金、签名和广播保持关闭。</p></div><a class="secondary" href="/" data-link>查看团队状态</a></article>' : ''}
+    ${activeTeam && !activeTeam.trading_enabled ? '<article class="home-status tone-attention"><div><p class="eyebrow">安全配置阶段</p><h2>当前仅开放团队管理</h2><p>业务实体尚未完成团队归属，服务端不会让这个新团队读取默认团队的提案、账户、订单或报表。真实下单、资金、签名和广播保持关闭。</p></div><a class="secondary" href="/home" data-link>查看团队状态</a></article>' : ''}
     <article class="card access-principles"><h2>权限分离原则</h2><div class="access-principle-grid"><p><b>审核与发起分开</b><span>审核人不能审核自己的提案；提案发起人不会自动获得执行权限。</span></p><p><b>交易与资金分开</b><span>交易运维人员看不到资金中心；系统管理员拥有最高管理权限，但资金动作仍受实时校验、最终确认和安全开关约束。</span></p><p><b>身份与权限分开</b><span>密码只用于身份验证；岗位和账户范围仍由独立授权控制。</span></p></div></article>
     ${scopeCreationPanels({compact:true})}
     <details class="card create-member-panel"><summary><span><b>加入已有用户</b><small>把现有身份加入当前团队，并独立分配团队岗位</small></span><strong>展开</strong></summary><form id="invite-team-member-form" class="toolbox-content"><div class="field-grid"><label>现有账户名<input name="username" pattern="[A-Za-z0-9._-]+" placeholder="例如 kelly" required></label><label>账户范围<input name="account_scope" placeholder="留空 = 当前团队全部账户"></label><label>交易所范围<select name="venue_scope">${venueScopeOptions()}</select></label></div><div class="permission-grid">${accessRoleOptions([], 'invite')}</div><div class="form-error" role="alert"></div><div class="form-actions"><button class="secondary">加入当前团队</button></div></form></details>
@@ -5179,9 +5236,17 @@ function updateActiveNav() {
 }
 
 document.addEventListener('click', (event) => {
+  const workspaceOption = event.target.closest('[data-switch-workspace]');
+  if (workspaceOption) {
+    event.preventDefault();
+    closeWorkspaceSwitcher();
+    withPending(workspaceOption, '进入中…', () => selectScope(workspaceOption.dataset.switchWorkspace, workspaceOption.dataset.switchTeam || null));
+    return;
+  }
   const link = event.target.closest('[data-link]');
   if (link) { event.preventDefault(); navigate(link.getAttribute('href')); }
   if (event.target.closest('[data-retry]')) route();
+  if (!scopeControl.contains(event.target)) closeWorkspaceSwitcher();
 });
 window.addEventListener('popstate', route);
 window.addEventListener('resize', syncNavigationMode);
@@ -5194,15 +5259,18 @@ mobileNavToggle.addEventListener('keydown', (event) => {
   else openMobileNav();
 });
 navBackdrop.addEventListener('click', () => closeMobileNav());
-scopeSwitcher.addEventListener('change', async () => {
-  const [workspaceId, teamId] = scopeSwitcher.value.split(':');
-  if (!workspaceId) return;
-  scopeSwitcher.disabled = true;
-  try { await selectScope(workspaceId, teamId || null); }
-  finally { scopeSwitcher.disabled = false; }
+scopeSwitcher.addEventListener('click', () => {
+  const opening = scopeSwitcherMenu.hidden;
+  if (opening) {
+    renderWorkspaceSwitcher();
+    scopeSwitcherMenu.hidden = false;
+    scopeSwitcher.setAttribute('aria-expanded', 'true');
+    scopeSwitcherMenu.querySelector('[role="menuitem"]')?.focus();
+  } else closeWorkspaceSwitcher({restoreFocus:true});
 });
 document.addEventListener('keydown', (event) => {
   if (event.key === 'Escape' && sidebar.classList.contains('open')) closeMobileNav();
+  if (event.key === 'Escape' && !scopeSwitcherMenu.hidden) closeWorkspaceSwitcher({restoreFocus:true});
 });
 document.querySelectorAll('[data-close-dialog]').forEach(button => button.addEventListener('click', () => dialog.close()));
 document.querySelector('#system-proposal-form').addEventListener('submit', async (event) => {

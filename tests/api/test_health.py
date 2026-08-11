@@ -172,14 +172,14 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
 
     assert response.status_code == 200
     assert "交易控制台" in response.text
-    assert "/assets/app.js?v=156" in response.text
+    assert "/assets/app.js?v=157" in response.text
     assert 'href="/signals"' in response.text
-    assert "/assets/styles.css?v=66" in response.text
+    assert "/assets/styles.css?v=68" in response.text
     assert 'href="/assets/tradingops-logo.png" type="image/png"' in response.text
     assert '<img src="/assets/tradingops-logo.png" alt="">' in response.text
     assert '<span class="brand-mark" aria-hidden="true">T</span>' not in response.text
     assert 'aria-label="交易控制台首页"' in response.text
-    assert '<a href="/" data-link><span>⌂</span>当前任务</a>' in response.text
+    assert '<a href="/home" data-link><span>⌂</span>当前任务</a>' in response.text
     assert '<span>⌁</span>实时机会</a>' in response.text
     assert '<span>✓</span>审核队列</a>' in response.text
     assert '<span>¤</span>资金中心</a>' in response.text
@@ -189,12 +189,15 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
     assert 'id="team-settings-link"' not in response.text
     assert 'id="mobile-nav-toggle"' in response.text
     assert 'id="scope-switcher"' in response.text
+    assert 'id="workspace-switcher-menu"' in response.text
     assert 'id="scope-control"' in response.text
     assert 'class="nav-section" data-nav-section' in response.text
     assert 'data-theme-label' in response.text
     assert 'id="confirm-dialog"' in response.text
 
     for route in (
+        "/home",
+        "/workspaces",
         "/venues",
         "/venues/hyperliquid",
         "/opportunities/defaults",
@@ -214,7 +217,8 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
     app_javascript = get(app, "/assets/app.js")
     assert app_javascript.status_code == 200
     assert "history.replaceState({}, '', loginDestination());" in app_javascript.text
-    assert "const destination = `${location.pathname}${location.search}`;" in app_javascript.text
+    assert "const loginDestination = () => {\n  return '/';\n};" in app_javascript.text
+    assert "function renderWorkspaceGateway()" in app_javascript.text
     assert "timeoutError.code = 'REQUEST_TIMEOUT'" in app_javascript.text
     assert "networkError.code = 'NETWORK_ERROR'" in app_javascript.text
     assert "const REQUEST_TIMEOUT_MS = 15000" in app_javascript.text
@@ -542,7 +546,7 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
 
     service_worker = get(app, "/sw.js")
     assert service_worker.status_code == 200
-    assert "trading-shell-v128" in service_worker.text
+    assert "trading-shell-v129" in service_worker.text
     assert "/assets/tradingops-logo.png" in service_worker.text
     assert "/assets/tradingops-icon.svg" in service_worker.text
     assert "/assets/icon.svg" not in service_worker.text

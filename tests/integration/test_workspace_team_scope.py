@@ -88,8 +88,27 @@ def test_workspace_and_team_roles_are_selected_and_calculated_independently(
             )
             assert workspace.status_code == 200, workspace.text
             workspace_id = workspace.json()["workspace_id"]
-            assert workspace.json()["session"]["active_team"] is None
-            assert workspace.json()["session"]["roles"] == []
+            default_team_id = workspace.json()["session"]["active_team"]["team_id"]
+            assert workspace.json()["session"]["active_team"]["slug"] == "default"
+            assert workspace.json()["session"]["active_team"]["name"] == "Trading Operations"
+            assert [item["role"] for item in workspace.json()["session"]["roles"]] == [
+                "SYSTEM_ADMIN"
+            ]
+            created_workspace = next(
+                item
+                for item in workspace.json()["session"]["workspaces"]
+                if item["workspace_id"] == workspace_id
+            )
+            assert created_workspace == {
+                "workspace_id": workspace_id,
+                "name": "Trading Operations",
+                "slug": "trading-operations",
+                "role": "ADMIN",
+                "member_count": 1,
+                "agent_count": 0,
+                "team_count": 1,
+                "default_team_id": default_team_id,
+            }
 
             replay = await client.post(
                 "/api/workspaces",
@@ -221,6 +240,7 @@ def test_workspace_and_team_roles_are_selected_and_calculated_independently(
         assert [(team.slug, team.trading_enabled) for team in teams] == [
             ("alpha", False),
             ("beta", False),
+            ("default", False),
         ]
         kelly = session.scalar(select(User).where(User.username == "kelly-scope"))
         assert kelly is not None

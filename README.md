@@ -81,7 +81,7 @@ TradingOPS 是**源码可用（source-available）**项目，不是 OSI 定义�
 - API 进程：`uv run trading-api`
 - 只读同步进程：`uv run trading-sync-worker`；`--once` 用于一次性边界验收。启用数据库绑定时，它逐 Team/Account 解密独立信封并读取 Perptape、Binance、Hyperliquid、OKX 或 Bybit；没有数据库绑定时继续兼容既有部署级只读/Vault 配置。它不拥有订单发送、资金签名或广播方法
 - 通知进程：API（包括渠道测试）只写耐久队列，不直接外发。`uv run trading-notification-worker --healthcheck` 只验证安全开关、密钥和数据库，`--once` 执行一次 delivery 周期；持续模式还要求 `TRADING_NOTIFICATION_WORKER_ENABLED=true`。该进程默认关闭，只消费团队通知 delivery，不导入订单、资金、签名或广播适配器；邮件还要求 `TRADING_NOTIFICATION_EMAIL_SMTP_ALLOWED_HOSTS` 精确列出 SMTP 主机
-- Web/PWA：`/` 是唯一行动总览；`/signals` 选择团队 Perptape / Webhook 模式并展示签名事件，核心主线为信号或机会 → 冻结提案 → 独立审核 → 交易任务。`/shadow` 提供显式团队启用、虚拟资金初始化、模拟仓位、确定性成交和影子任务入口，并把真实下单、资金、签名、广播及场所连接器显示为关闭。运行告警详情位于 `/campaigns/alerts`，旧 `/exceptions` 只做兼容跳转。另有 `/risk`、`/positions`、`/venues`、`/capital`、`/admin/users`、`/admin/agents`、`/results` 和 `/notifications`；Agent 页面只显示一次新 Token，列表只保留摘要、版本、到期和使用事实。资金中心默认只展示 LIVE；SHADOW/TESTNET 不计入真实净值。Vault 缺少事实时显示 `— · MISSING`，总净值也保持不完整，绝不把缺失投影为零
+- Web/PWA：`/`（兼容 `/workspaces`）是登录后的工作区选择页；创建工作区会原子建立同名默认 Team，进入后 `/home` 是行动总览，侧栏可切换工作区并重新加载隔离的团队、成员与权限。`/signals` 选择团队 Perptape / Webhook 模式并展示签名事件，核心主线为信号或机会 → 冻结提案 → 独立审核 → 交易任务。`/shadow` 提供显式团队启用、虚拟资金初始化、模拟仓位、确定性成交和影子任务入口，并把真实下单、资金、签名、广播及场所连接器显示为关闭。运行告警详情位于 `/campaigns/alerts`，旧 `/exceptions` 只做兼容跳转。另有 `/risk`、`/positions`、`/venues`、`/capital`、`/admin/users`、`/admin/agents`、`/results` 和 `/notifications`；Agent 页面只显示一次新 Token，列表只保留摘要、版本、到期和使用事实。资金中心默认只展示 LIVE；SHADOW/TESTNET 不计入真实净值。Vault 缺少事实时显示 `— · MISSING`，总净值也保持不完整，绝不把缺失投影为零
 - HTTP：健康检查、内部会话、团队信号源配置、签名 Webhook / SignalEvent、Perptape 主站机会、Proposal/Review/Risk/Authorization、SHADOW/TESTNET/LIVE Campaign、AUTO_ADD/减仓/退出、资金事实/提案/授权、NoTilt 未签名计划/回执确认、按环境结果/审计/运行状态，四场所只读事实，以及 Binance、Hyperliquid Core 的 TESTNET 与受控 LIVE API
 - 内部业务：`trading_control_plane.service.TradingService`
 - 纯计算：`evaluate_risk`、`select_target_position`、`compute_pnl`
@@ -138,7 +138,7 @@ Compose 默认不启动后台读取或外发进程。`./scripts/run_compose.sh -
 
 该命令会强制使用 `127.0.0.1:5434/trading_local` 的 PostgreSQL、升级 Schema、幂等创建
 `kelly_oooo` 内部超级管理员/Reviewer/Operator/Treasury、一个本地 Proposer 和第二 Reviewer，然后启动
-API。Session、凭据加密和 dry-run worker 密钥持久化到未跟踪的 `.local/`，不使用共享 env 里的数据库 URL。Telegram 默认仍关闭；先在 BotFather 撤销任何曾出现在聊天或日志中的旧 Token，把新
+API。Session、凭据加密和可选 dry-run worker 密钥持久化到未跟踪的 `.local/`，不使用共享 env 里的数据库 URL。默认不启动 Freqtrade workers；只有显式设置 `TRADING_LOCAL_FREQTRADE_WORKERS_ENABLED=true` 才启动并等待 Binance、Hyperliquid 两个 dry-run worker，就绪失败时保持 API 未启动。Telegram 默认仍关闭；先在 BotFather 撤销任何曾出现在聊天或日志中的旧 Token，把新
 Token 仅写入 `.env.local`，再设置：
 
 ```dotenv

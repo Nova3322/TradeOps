@@ -292,6 +292,33 @@ class TradingQueries:
                 )
                 .order_by(Team.name, Team.team_id)
             ).all()
+            workspace_ids = [
+                workspace.workspace_id for _membership, workspace in workspace_memberships
+            ]
+            workspace_principal_counts: dict[UUID, dict[str, int]] = {
+                workspace_id: {"human": 0, "agent": 0} for workspace_id in workspace_ids
+            }
+            if workspace_ids:
+                count_rows = session.execute(
+                    select(
+                        WorkspaceMembership.workspace_id,
+                        User.principal_type,
+                        func.count(User.user_id),
+                    )
+                    .join(User, User.user_id == WorkspaceMembership.user_id)
+                    .where(
+                        WorkspaceMembership.workspace_id.in_(workspace_ids),
+                        WorkspaceMembership.active,
+                        User.active,
+                    )
+                    .group_by(WorkspaceMembership.workspace_id, User.principal_type)
+                ).all()
+                for workspace_id, principal_type, count in count_rows:
+                    key = "human" if principal_type == PrincipalType.HUMAN.value else "agent"
+                    workspace_principal_counts[workspace_id][key] = int(count)
+            accessible_teams_by_workspace: dict[UUID, list[Team]] = {}
+            for _membership, team in team_memberships:
+                accessible_teams_by_workspace.setdefault(team.workspace_id, []).append(team)
             roles = session.scalars(
                 select(RoleAssignment)
                 .where(
@@ -350,6 +377,33 @@ class TradingQueries:
                         "name": workspace.name,
                         "slug": workspace.slug,
                         "role": membership.role,
+                        "member_count": workspace_principal_counts[workspace.workspace_id][
+                            "human"
+                        ],
+                        "agent_count": workspace_principal_counts[workspace.workspace_id][
+                            "agent"
+                        ],
+                        "team_count": len(
+                            accessible_teams_by_workspace.get(workspace.workspace_id, [])
+                        ),
+                        "default_team_id": next(
+                            (
+                                str(team.team_id)
+                                for team in accessible_teams_by_workspace.get(
+                                    workspace.workspace_id, []
+                                )
+                                if team.slug == "default"
+                            ),
+                            (
+                                str(
+                                    accessible_teams_by_workspace[workspace.workspace_id][
+                                        0
+                                    ].team_id
+                                )
+                                if accessible_teams_by_workspace.get(workspace.workspace_id)
+                                else None
+                            ),
+                        ),
                     }
                     for membership, workspace in workspace_memberships
                 ],

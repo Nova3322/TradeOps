@@ -731,3 +731,33 @@ final result: passed; users can type a symbol directly without weakening exact e
 - No form was submitted during visual QA and no transfer, signature, or broadcast occurred.
 
 final result: passed
+
+---
+
+# Design QA — Workspace entry and switcher
+
+final result: passed
+
+## Compared references
+
+- Workspace entry reference: `/var/folders/c1/6j8smjg96430htljxp_sx8sr0000gn/T/codex-clipboard-e3989144-589c-4afb-bb1c-288e5bf90eb9.png`
+- Workspace switcher reference: `/var/folders/c1/6j8smjg96430htljxp_sx8sr0000gn/T/codex-clipboard-225a352b-b93e-43c1-83a4-68c69a35c633.png`
+- TradingOPS entry capture: `/private/tmp/trading-workspaces-1440-light.png`
+- TradingOPS switcher capture: `/private/tmp/trading-workspace-switcher-1440-light.png`
+- Side-by-side comparisons: `/private/tmp/workspace-chooser-comparison.png` and `/private/tmp/workspace-switcher-comparison.png`
+
+## QA dimensions
+
+1. Structure and hierarchy: passed. The authenticated entry keeps the reference's quiet full-page composition, centered workspace focus, compact top controls, and one obvious action per workspace. The in-console switcher remains anchored above the existing navigation and overlays the rail without moving task content.
+2. Visual treatment: passed. Existing TradingOPS colors, typography, radii, shadows, focus treatment, and latest logo are retained. Light and dark themes expose identical workspace facts and actions.
+3. Content and product adaptation: passed. Wallet and external identity actions from the reference were intentionally replaced with server-backed TradingOPS workspace selection. Cards show isolated member and Agent counts; creation states that a default team is created and trading remains closed.
+4. Responsive behavior: passed. Browser-measured document and main widths matched the viewport at 1440, 1024, 430, and 390 CSS pixels. The 430 and 390 workspace cards remain readable without horizontal scrolling; the mobile rail and workspace menu also remain within 430 pixels.
+5. Interaction and accessibility: passed. Workspace cards, the rail switcher, menu items, creation disclosure, theme control, and mobile navigation are semantic controls with visible text. The page exposes a named region, tablist, headings, menu roles, expanded state, and a visible keyboard focus outline. Browser console errors and warnings: 0.
+
+## Intentional differences from Safe
+
+- TradingOPS keeps its existing product shell and brand rather than copying Safe branding, navigation, wallet controls, or assets.
+- The first page assumes an authenticated TradingOPS identity and selects an isolation boundary; it does not repeat sign-in methods.
+- A workspace maps to an automatically created default team while preserving existing multi-team compatibility behind the service boundary.
+
+final result: passed
