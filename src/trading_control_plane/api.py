@@ -7474,7 +7474,6 @@ def create_app(
             return FileResponse(WEB_ROOT / "index.html")
 
         @app.get("/", include_in_schema=False)
-        @app.get("/settings", include_in_schema=False)
         @app.get("/opportunities", include_in_schema=False)
         @app.get("/signals", include_in_schema=False)
         @app.get("/opportunities/defaults", include_in_schema=False)

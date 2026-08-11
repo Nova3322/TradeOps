@@ -172,20 +172,21 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
 
     assert response.status_code == 200
     assert "交易控制台" in response.text
-    assert "/assets/app.js?v=155" in response.text
+    assert "/assets/app.js?v=156" in response.text
     assert 'href="/signals"' in response.text
-    assert "/assets/styles.css?v=65" in response.text
+    assert "/assets/styles.css?v=66" in response.text
     assert 'href="/assets/tradingops-logo.png" type="image/png"' in response.text
     assert '<img src="/assets/tradingops-logo.png" alt="">' in response.text
     assert '<span class="brand-mark" aria-hidden="true">T</span>' not in response.text
     assert 'aria-label="交易控制台首页"' in response.text
-    assert '<a href="/" data-link data-nav-group="today"><span>⌂</span>今日</a>' in response.text
-    assert '<a href="/signals" data-link data-nav-group="signals"' in response.text
-    assert '<a href="/proposals" data-link data-nav-group="proposals"' in response.text
-    assert '<a href="/campaigns" data-link data-nav-group="trading"' in response.text
-    assert '<a href="/results" data-link data-nav-group="review"' in response.text
-    assert 'id="team-settings-link"' in response.text
-    assert response.text.count('data-nav-group=') == 5
+    assert '<a href="/" data-link><span>⌂</span>当前任务</a>' in response.text
+    assert '<span>⌁</span>实时机会</a>' in response.text
+    assert '<span>✓</span>审核队列</a>' in response.text
+    assert '<span>¤</span>资金中心</a>' in response.text
+    assert response.text.count('class="nav-section" data-nav-section') == 3
+    assert response.text.count('data-nav-capability=') == 12
+    assert 'data-nav-group=' not in response.text
+    assert 'id="team-settings-link"' not in response.text
     assert 'id="mobile-nav-toggle"' in response.text
     assert 'id="scope-switcher"' in response.text
     assert 'id="scope-control"' in response.text
@@ -196,7 +197,6 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
     for route in (
         "/venues",
         "/venues/hyperliquid",
-        "/settings",
         "/opportunities/defaults",
         "/proposals",
         "/results",
@@ -205,6 +205,8 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
         routed_shell = get(app, route)
         assert routed_shell.status_code == 200
         assert "交易控制台" in routed_shell.text
+
+    assert get(app, "/settings").status_code == 404
 
     assert get(app, "/admin/users").status_code == 401
     assert get(app, "/admin/agents").status_code == 401
@@ -234,38 +236,27 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
     assert "当前身份不读取任务详情" in app_javascript.text
     assert "由交易运维人员查看" in app_javascript.text
     assert 'href="/proposals" data-link>查看提案记录</a>' in app_javascript.text
-    assert "new URLSearchParams(location.search).get('mine') === '1'" in app_javascript.text
+    assert "new URLSearchParams(location.search).get('history') === '1'" in app_javascript.text
     assert "proposalAwaitingLaunch(item)" in app_javascript.text
     assert "const proposerOnly = hasCapability('proposal.create')" in app_javascript.text
     assert "item.proposer_id === session.user_id) : allItems" in app_javascript.text
-    assert "function proposalTabs(active, canPropose" in app_javascript.text
+    assert "historyMode ? !isCurrentProposal(item)" in app_javascript.text
     assert '<option value="OKX">OKX</option><option value="BYBIT">Bybit</option>' in (
         app_javascript.text
     )
-    for task_label in ("我的提案", "待我审核", "全部记录", "手动创建"):
-        assert task_label in app_javascript.text
+    assert 'href="/proposals?history=1" data-link>历史记录</a>' in app_javascript.text
     assert "approvedAwaitingLaunch" in app_javascript.text
     assert "批准不会自动下单" in app_javascript.text
     assert "你的审核已记录" in app_javascript.text
-    assert 'data-nav-capability="signal.view"' in response.text
-    assert "href:'/admin/users'" in app_javascript.text
-    assert "href:'/admin/agents'" in app_javascript.text
+    assert 'data-nav-capability="opportunity.view"' in response.text
+    assert 'href="/admin/users"' in response.text
+    assert 'href="/admin/agents"' in response.text
     assert 'href="/results"' in response.text
     assert 'data-nav-capability="results.view"' in response.text
-    assert "href:'/notifications'" in app_javascript.text
-    assert "hasCapability('notification.view')" in app_javascript.text
-    assert "async function renderTeamSettings()" in app_javascript.text
+    assert 'href="/notifications"' in response.text
+    assert 'data-nav-capability="notification.view"' in response.text
+    assert "async function renderTeamSettings()" not in app_javascript.text
     assert "Exact-account LIVE Freqtrade worker verified" in app_javascript.text
-    for setup_step in (
-        "创建团队",
-        "接入信号与账户",
-        "确认风控与通知",
-        "完成影子提案闭环",
-    ):
-        assert setup_step in app_javascript.text
-    assert "hasCapability('access.manage') ? card" in app_javascript.text
-    assert "hasCapability('capital.view') ? card" in app_javascript.text
-    assert "roleNames().includes('SYSTEM_ADMIN') ? card" in app_javascript.text
     assert "renderActualResults" in app_javascript.text
     assert "/api/results" in app_javascript.text
     assert "renderNotifications" in app_javascript.text
@@ -432,7 +423,7 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
     assert "approvedAwaitingLaunch = canOperate" in app_javascript.text
     assert "proposalLaunchWindowExpired(item)" in app_javascript.text
     assert "item.status === 'APPROVED' && !proposalLaunchWindowExpired(item)" in app_javascript.text
-    assert "已拒绝 / 过期" in app_javascript.text
+    assert "operationsView ? '已进入交易' : '已批准'" in app_javascript.text
     assert "审核已批准，但启动窗口已过期" in app_javascript.text  # noqa: RUF001
     assert "当前提案不可再签发" in app_javascript.text  # noqa: RUF001
     assert (
@@ -551,7 +542,7 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
 
     service_worker = get(app, "/sw.js")
     assert service_worker.status_code == 200
-    assert "trading-shell-v127" in service_worker.text
+    assert "trading-shell-v128" in service_worker.text
     assert "/assets/tradingops-logo.png" in service_worker.text
     assert "/assets/tradingops-icon.svg" in service_worker.text
     assert "/assets/icon.svg" not in service_worker.text

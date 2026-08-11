@@ -363,7 +363,7 @@ def test_notification_api_masks_configuration_and_test_send_has_no_business_auth
 
             shell = await admin_client.get("/notifications")
             assert shell.status_code == 200
-            assert 'href="/settings"' in shell.text
+            assert 'href="/notifications"' in shell.text
 
         async with AsyncClient(
             transport=ASGITransport(app=app),
