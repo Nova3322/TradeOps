@@ -1,0 +1,75 @@
+{
+  "captured_at": "2026-08-12T01:45:02+08:00",
+  "target": "http://127.0.0.1:8033/results",
+  "scope": {
+    "workspace": "Default Workspace",
+    "team": "Shadow Desk",
+    "environment": "SHADOW",
+    "generation": 1
+  },
+  "report": {
+    "library": "QuantStats",
+    "version": "0.0.81",
+    "periods_per_year": 365,
+    "nav_points": 32,
+    "return_periods": 30,
+    "readiness": {
+      "RETURNS_READY": true,
+      "POSITIONS_READY": true,
+      "TRANSACTIONS_READY": true,
+      "BENCHMARK_READY": false
+    }
+  },
+  "responsive_checks": [
+    {
+      "requested_width": 1440,
+      "document_client_width": 1600,
+      "document_scroll_width": 1600,
+      "main_client_width": 1376,
+      "main_scroll_width": 1376,
+      "iframe_client_width": 1179,
+      "iframe_scroll_width": 1179,
+      "horizontal_overflow": false,
+      "screenshot": "results-1440.jpg"
+    },
+    {
+      "requested_width": 1024,
+      "document_client_width": 1138,
+      "document_scroll_width": 1138,
+      "main_client_width": 914,
+      "main_scroll_width": 914,
+      "iframe_client_width": 822,
+      "iframe_scroll_width": 822,
+      "horizontal_overflow": false,
+      "screenshot": "results-1024.jpg"
+    },
+    {
+      "requested_width": 430,
+      "document_client_width": 478,
+      "document_scroll_width": 478,
+      "main_client_width": 478,
+      "main_scroll_width": 478,
+      "iframe_client_width": 447,
+      "iframe_scroll_width": 447,
+      "horizontal_overflow": false,
+      "screenshot": "results-430.jpg"
+    },
+    {
+      "requested_width": 390,
+      "document_client_width": 433,
+      "document_scroll_width": 433,
+      "main_client_width": 433,
+      "main_scroll_width": 433,
+      "iframe_client_width": 402,
+      "iframe_scroll_width": 402,
+      "horizontal_overflow": false,
+      "screenshot": "results-390.jpg"
+    }
+  ],
+  "theme_checks": {
+    "dark": "results-390-report.jpg",
+    "light": "results-390-light-report.jpg"
+  },
+  "legacy_results_headings_found": 0,
+  "browser_console_warning_or_error_count": 0
+}

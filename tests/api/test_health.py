@@ -212,7 +212,8 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
     assert "/assets/app-core.js?v=170" in response.text
     assert "/assets/app.js?v=170" in response.text
     assert 'href="/signals"' in response.text
-    assert "/assets/styles.css?v=72" in response.text
+    assert "/assets/styles.css?v=73" in response.text
+    assert "/assets/reporting.js?v=171" in response.text
     assert 'href="/assets/tradingops-logo.png" type="image/png"' in response.text
     assert '<img src="/assets/tradingops-logo.png" alt="">' in response.text
     assert '<span class="brand-mark" aria-hidden="true">T</span>' not in response.text
@@ -410,9 +411,11 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
     assert "exchange-trading-form" in app_javascript.text
     assert "/trading-eligibility" in app_javascript.text
     assert "全局真实发送、发送者租约、风控、任务和进程安全开关仍会独立阻断" in app_javascript.text
-    assert "这是合成事实，不是交易所成交或真实收益" in app_javascript.text
-    assert ".map(resultRiskReasonLabel)" in app_javascript.text
-    assert "resultSignalProviderLabel(value)" in app_javascript.text
+    assert "这是合成事实，不是交易所成交或真实收益" not in app_javascript.text
+    assert ".map(resultRiskReasonLabel)" not in app_javascript.text
+    assert "resultSignalProviderLabel(value)" not in app_javascript.text
+    assert "/api/results/quantstats/options" in app_javascript.text
+    assert "使用服务端 QuantStats 完整报表" in app_javascript.text
     assert "{BINANCE:'Binance', HYPERLIQUID:'Hyperliquid'}" in app_javascript.text
     assert "当前三方总净值" in app_javascript.text
     assert "当前不可汇总" in app_javascript.text
@@ -621,7 +624,7 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
 
     service_worker = get(app, "/sw.js")
     assert service_worker.status_code == 200
-    assert "trading-shell-v142" in service_worker.text
+    assert "trading-shell-v143" in service_worker.text
     assert "/assets/tradingops-logo.png" in service_worker.text
     assert "/assets/tradingops-icon.svg" in service_worker.text
     assert "/assets/icon.svg" not in service_worker.text

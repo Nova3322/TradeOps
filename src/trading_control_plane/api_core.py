@@ -206,6 +206,10 @@ from trading_control_plane.perptape import (
     perptape_candidate_identity_is_displayable,
     perptape_legacy_candidate_id,
 )
+from trading_control_plane.quantstats_adapter import (
+    QuantStatsReportAdapter,
+    report_metadata,
+)
 from trading_control_plane.queries import TradingQueries
 from trading_control_plane.safe_spending import SafeSpendingGateway
 from trading_control_plane.service import PreparedFreqtradeWorkerBinding, TradingService
@@ -574,6 +578,7 @@ __all__ = [
     "ProposalSource",
     "ProposalStatus",
     "ProtectionFactRequest",
+    "QuantStatsReportAdapter",
     "Query",
     "ReadOnlyExchangeConnectionVerifier",
     "ReadinessDatabase",
@@ -650,6 +655,7 @@ __all__ = [
     "perptape_legacy_candidate_id",
     "project_runtime_connections",
     "quote",
+    "report_metadata",
     "resolve_hyperliquid_main_account",
     "status",
     "timedelta",

@@ -114,6 +114,58 @@ class TeamShadowAccount(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
 
+class AnalyticsEquitySnapshot(Base):
+    __tablename__ = "analytics_equity_snapshots"
+    __table_args__ = (
+        CheckConstraint(
+            "environment IN ('SHADOW','LIVE')",
+            name="ck_analytics_equity_snapshots_environment",
+        ),
+        CheckConstraint(
+            "(environment = 'SHADOW' AND generation IS NOT NULL) OR "
+            "(environment = 'LIVE' AND generation IS NULL)",
+            name="ck_analytics_equity_snapshots_generation",
+        ),
+        CheckConstraint("equity >= 0", name="ck_analytics_equity_snapshots_equity"),
+        CheckConstraint("version >= 1", name="ck_analytics_equity_snapshots_version"),
+        UniqueConstraint(
+            "team_id",
+            "environment",
+            "source_kind",
+            "source_id",
+            name="uq_analytics_equity_snapshots_source",
+        ),
+        Index(
+            "ix_analytics_equity_snapshots_scope_time",
+            "team_id",
+            "environment",
+            "generation",
+            "observed_at",
+        ),
+    )
+
+    snapshot_id: Mapped[UUID] = mapped_column(
+        Uuid(as_uuid=True), primary_key=True, default=uuid4
+    )
+    team_id: Mapped[UUID] = mapped_column(
+        ForeignKey("teams.team_id", ondelete="RESTRICT"), nullable=False
+    )
+    environment: Mapped[str] = mapped_column(String(16), nullable=False)
+    account_id: Mapped[str] = mapped_column(String(120), nullable=False)
+    venue: Mapped[str] = mapped_column(String(64), nullable=False)
+    generation: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    equity: Mapped[Decimal] = mapped_column(AMOUNT, nullable=False)
+    currency: Mapped[str] = mapped_column(String(32), nullable=False)
+    source_kind: Mapped[str] = mapped_column(String(64), nullable=False)
+    source_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    version: Mapped[int] = mapped_column(Integer, nullable=False)
+    fact_metadata: Mapped[dict[str, Any]] = mapped_column(
+        "metadata", JSONB, nullable=False, default=dict
+    )
+    observed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    recorded_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
 class ShadowInstrument(Base):
     __tablename__ = "shadow_instruments"
     __table_args__ = (

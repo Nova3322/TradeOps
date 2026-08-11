@@ -144,6 +144,7 @@ class TradingModeService(ServiceComponent):
         )
         session.add(account)
         session.flush()
+        self._record_shadow_equity_snapshot(session, account=account, now=now)
         self.transactions._audit(
             session,
             actor_id=str(actor_id),
@@ -166,6 +167,37 @@ class TradingModeService(ServiceComponent):
             now=now,
         )
         return account
+
+    @staticmethod
+    def _record_shadow_equity_snapshot(
+        session: Session,
+        *,
+        account: TeamShadowAccount,
+        now: datetime,
+    ) -> None:
+        session.add(
+            AnalyticsEquitySnapshot(
+                team_id=account.team_id,
+                environment=ExecutionEnvironment.SHADOW.value,
+                account_id="TEAM_SHADOW",
+                venue="TRADINGOPS",
+                generation=account.generation,
+                equity=account.equity,
+                currency="U",
+                source_kind="TEAM_SHADOW_ACCOUNT",
+                source_id=f"{account.shadow_account_id}:{account.version}",
+                version=account.version,
+                fact_metadata={
+                    "shadow_account_id": str(account.shadow_account_id),
+                    "initial_equity": str(account.initial_equity),
+                    "realized_pnl": str(account.realized_pnl),
+                    "unrealized_pnl": str(account.unrealized_pnl),
+                    "fees_paid": str(account.fees_paid),
+                },
+                observed_at=now,
+                recorded_at=now,
+            )
+        )
 
     @staticmethod
     def _shadow_mode_blockers(session: Session, team_id: UUID) -> list[dict[str, Any]]:
@@ -814,6 +846,7 @@ class TradingModeService(ServiceComponent):
         account.realized_pnl += state.realized_pnl
         account.fees_paid += fee
         self._refresh_account(session, account=account, now=now)
+        self._record_shadow_equity_snapshot(session, account=account, now=now)
         session.flush()
         rule_summary = {
             "side": order.side,

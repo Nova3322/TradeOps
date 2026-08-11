@@ -533,6 +533,26 @@ class WorkspaceService(ServiceComponent):
                 )
                 session.add(shadow_account)
                 session.flush()
+                session.add(
+                    AnalyticsEquitySnapshot(
+                        team_id=team.team_id,
+                        environment=ExecutionEnvironment.SHADOW.value,
+                        account_id="TEAM_SHADOW",
+                        venue="TRADINGOPS",
+                        generation=shadow_account.generation,
+                        equity=shadow_account.equity,
+                        currency="U",
+                        source_kind="TEAM_SHADOW_ACCOUNT",
+                        source_id=f"{shadow_account.shadow_account_id}:{shadow_account.version}",
+                        version=shadow_account.version,
+                        fact_metadata={
+                            "shadow_account_id": str(shadow_account.shadow_account_id),
+                            "initial_equity": str(shadow_account.initial_equity),
+                        },
+                        observed_at=now,
+                        recorded_at=now,
+                    )
+                )
             result = {
                 "team_id": str(team.team_id),
                 "execution_mode": team.execution_mode,

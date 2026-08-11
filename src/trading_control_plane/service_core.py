@@ -113,6 +113,7 @@ from trading_control_plane.metrics import (
 from trading_control_plane.models import (
     AccountEquity,
     AccountEquityObservation,
+    AnalyticsEquitySnapshot,
     ApiClient,
     Approval,
     AuditEvent,
@@ -642,6 +643,7 @@ __all__ = [
     "AccountEquity",
     "AccountEquityObservation",
     "AddCandidateFacts",
+    "AnalyticsEquitySnapshot",
     "Any",
     "ApiClient",
     "ApiClientState",

@@ -27,6 +27,7 @@ from trading_control_plane.api_core import (
     OrderIntentStatus,
     PositionFactRequest,
     ProtectionFactRequest,
+    QuantStatsReportAdapter,
     Query,
     ReconciliationReasonRequest,
     ReconciliationRequest,
@@ -47,6 +48,7 @@ from trading_control_plane.api_core import (
     freqtrade_pair,
     perptape_legacy_candidate_id,
     project_runtime_connections,
+    report_metadata,
     timedelta,
 )
 from trading_control_plane.api_routes.context import ApiRouteContext
@@ -1670,6 +1672,63 @@ class _ExecutionRoutes:
                     from_time=from_time,
                     to_time=to_time,
                 ),
+                "as_of": _now().isoformat(),
+            }
+
+        @self.app.get("/api/results/quantstats/options")
+        def quantstats_options(
+            identity: SessionIdentity = self.identity_dependency,
+        ) -> dict[str, Any]:
+            self.require_capability(identity, "results.view")
+            return {
+                "data": self.queries().analytics_report_options(identity.user_id),
+                "as_of": _now().isoformat(),
+            }
+
+        @self.app.get("/api/results/quantstats")
+        def quantstats_report(
+            environment: str = Query(pattern="^(SHADOW|LIVE)$"),
+            account_id: str | None = Query(default=None, min_length=1, max_length=120),
+            venue: str | None = Query(
+                default=None, pattern="^(BINANCE|HYPERLIQUID|OKX|BYBIT)$"
+            ),
+            generation: int | None = Query(default=None, ge=1),
+            from_time: datetime | None = None,
+            to_time: datetime | None = None,
+            identity: SessionIdentity = self.identity_dependency,
+        ) -> dict[str, Any]:
+            self.require_capability(identity, "results.view")
+            dataset = self.queries().analytics_dataset(
+                identity.user_id,
+                environment,
+                account_id=account_id,
+                venue=venue,
+                generation=generation,
+                from_time=from_time,
+                to_time=to_time,
+            )
+            report = QuantStatsReportAdapter.render(dataset)
+            options = self.queries().analytics_report_options(identity.user_id)
+            return {
+                "data": {
+                    "scope": {
+                        "workspace_id": str(dataset.scope.workspace_id),
+                        "team_id": str(dataset.scope.team_id),
+                        "team_name": dataset.scope.team_name,
+                        "account_ids": list(dataset.scope.account_ids),
+                        "venues": list(dataset.scope.venues),
+                    },
+                    "current_trading_mode": options["current_trading_mode"],
+                    "environment": dataset.scope.environment,
+                    "generation": dataset.scope.generation,
+                    "from_time": dataset.scope.from_time.isoformat(),
+                    "to_time": dataset.scope.to_time.isoformat(),
+                    "data_status": "READY",
+                    "coverage": dataset.coverage,
+                    "metadata": dataset.metadata,
+                    "quantstats": report_metadata(report),
+                    "report_html": report.html,
+                },
                 "as_of": _now().isoformat(),
             }
 

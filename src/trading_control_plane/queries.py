@@ -4,6 +4,7 @@ from trading_control_plane.database import Database
 from trading_control_plane.query_component import QueryRuntime
 from trading_control_plane.query_core import _performance_metrics as _performance_metrics
 from trading_control_plane.query_domains.accounts import AccountQueries
+from trading_control_plane.query_domains.analytics import AnalyticsQueries
 from trading_control_plane.query_domains.capital import CapitalQueries
 from trading_control_plane.query_domains.execution import ExecutionQueries
 from trading_control_plane.query_domains.proposals import ProposalQueries
@@ -20,6 +21,7 @@ class TradingQueries:
         self.runtime = QueryRuntime(database=database, service=TradingService(database))
         self._workspace = WorkspaceQueries(self.runtime, self)
         self._accounts = AccountQueries(self.runtime, self)
+        self._analytics = AnalyticsQueries(self.runtime, self)
         self._signals = SignalQueries(self.runtime, self)
         self._proposals = ProposalQueries(self.runtime, self)
         self._risk = RiskQueries(self.runtime, self)
@@ -38,6 +40,8 @@ class TradingQueries:
         self.capital_transfer_detail = self._capital.capital_transfer_detail
         self.capital_center = self._capital.capital_center
         self.actual_results = self._execution.actual_results
+        self.analytics_report_options = self._analytics.analytics_report_options
+        self.analytics_dataset = self._analytics.analytics_dataset
         self.audit_timeline = self._execution.audit_timeline
         self.runtime_snapshot = self._execution.runtime_snapshot
         self.runtime_source_health = self._execution.runtime_source_health

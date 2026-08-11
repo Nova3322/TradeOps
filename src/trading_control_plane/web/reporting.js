@@ -16,46 +16,6 @@ async function renderRuntimeAlerts() {
   document.querySelector('[data-refresh]')?.addEventListener('click', route);
 }
 
-const resultRateLabel = value => value === null || value === undefined
-  ? '—'
-  : `${fmtNumber(Number(value) * 100)}%`;
-const resultRatioLabel = value => value === null || value === undefined ? '—' : fmtNumber(value);
-const resultEnvironmentLabel = value => fmtEnvironment(value);
-const resultEnvironmentNotices = {
-  'Synthetic facts; not exchange execution or profit':'这是合成事实，不是交易所成交或真实收益。',
-  'Recorded non-production facts; not live profit':'这是已记录的非生产事实，不是真实收益。',
-  'Recorded LIVE facts; no profitability guarantee':'这是已记录的真实环境事实，不代表或保证盈利。',
-};
-const resultEnvironmentNotice = value => currentLanguage === 'en'
-  ? String(value || '')
-  : (resultEnvironmentNotices[String(value || '')] || fmtOperationalCopy(value));
-const resultSourceModeLabel = value => currentLanguage === 'en'
-  ? ({PERPTAPE:'Perptape',WEBHOOK:'Webhook',MANUAL:'Manual proposal',SYSTEM:'System proposal'}[value] || value)
-  : ({PERPTAPE:'Perptape',WEBHOOK:'Webhook',MANUAL:'人工提案',SYSTEM:'系统提案'}[value] || value);
-const resultSignalProviderLabel = value => currentLanguage === 'en'
-  ? ({TRADINGVIEW:'TradingView',MODEL:'Custom model',PERPTAPE:'Perptape'}[value] || value)
-  : ({TRADINGVIEW:'TradingView',MODEL:'自研模型',PERPTAPE:'Perptape'}[value] || value);
-const resultSourceLabel = item => [resultSourceModeLabel(item.signal_source_mode), resultSignalProviderLabel(item.signal_provider)].filter(Boolean).join(' / ') || '未归因';
-const resultRiskReasonLabel = reason => riskReasonGuidance[reason]?.label || `待核实（${reason}）`;
-const resultStrategyLabel = item => item.strategy_id
-  ? `${item.strategy_id} / ${item.strategy_version || '—'}`
-  : '人工提案';
-
-function resultDimensionRows(groups) {
-  return (groups || []).flatMap(group => {
-    const metrics = Object.entries(group.metrics_by_currency || {});
-    const risk = group.risk_events_by_result || {};
-    const riskLabel = `拒绝 ${risk.DENY || 0} · 缩量 ${risk.SCALE || 0} · 通过 ${risk.ALLOW || 0}`;
-    if (!metrics.length) return `<tr><td data-label="范围"><b>${escapeHtml(group.label)}</b></td><td data-label="币种">—</td><td data-label="结果" colspan="5">暂无已记录交易结果</td><td data-label="风险决策">${escapeHtml(riskLabel)}</td></tr>`;
-    return metrics.map(([currency, item]) => `<tr><td data-label="范围"><b>${escapeHtml(group.label)}</b></td><td data-label="币种">${escapeHtml(currency)}</td><td data-label="已平仓净收益">${fmtAmount(item.closed_net_pnl, currency)}<br><span class="subtle">未平仓当前值 ${fmtAmount(item.open_current_pnl, currency)}</span></td><td data-label="最大回撤">${fmtAmount(item.maximum_drawdown, currency)}</td><td data-label="胜率">${resultRateLabel(item.win_rate)}</td><td data-label="盈亏比">${resultRatioLabel(item.profit_loss_ratio)}</td><td data-label="已平 / 全部">${item.closed_count} / ${item.campaign_count}</td><td data-label="风险决策">${escapeHtml(riskLabel)}</td></tr>`);
-  }).join('');
-}
-
-function resultDimensionSection(title, copy, groups) {
-  const rows = resultDimensionRows(groups);
-  return `<section class="result-dimension"><div class="section-heading"><div><p class="eyebrow">绩效维度</p><h2>${escapeHtml(title)}</h2><p>${escapeHtml(copy)}</p></div><span class="status-pill">${groups?.length || 0} 个分组</span></div>${rows ? `<div class="table-wrap result-table"><table><thead><tr><th>范围</th><th>币种</th><th>已平仓净收益</th><th>最大回撤</th><th>胜率</th><th>盈亏比</th><th>已平 / 全部</th><th>风险决策</th></tr></thead><tbody>${rows}</tbody></table></div>` : '<div class="callout">当前筛选范围没有可归因记录。</div>'}</section>`;
-}
-
 function resultDateTimeInput(value) {
   if (!value) return '';
   const date = new Date(value);
@@ -64,35 +24,51 @@ function resultDateTimeInput(value) {
   return local.toISOString().slice(0, 16);
 }
 
+function quantStatsDefaultRange() {
+  const now = new Date();
+  const end = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate(), 23, 59, 59, 999));
+  const start = new Date(end);
+  start.setUTCDate(start.getUTCDate() - 30);
+  start.setUTCHours(0, 0, 0, 0);
+  return {from_time:start.toISOString(), to_time:end.toISOString()};
+}
+
+function quantStatsThemeHtml(reportHtml) {
+  const theme = document.documentElement.dataset.theme;
+  if (!['light','dark'].includes(theme)) return reportHtml;
+  return reportHtml.replace(/<body\b/i, `<body data-tradingops-theme="${theme}"`);
+}
+
+function resizeQuantStatsFrame(frame) {
+  try {
+    const height = frame.contentDocument?.documentElement?.scrollHeight;
+    if (Number.isFinite(height) && height > 0) frame.style.height = `${height + 24}px`;
+  } catch (_error) {
+    frame.style.height = '12000px';
+  }
+}
+
 async function renderActualResults() {
   const current = new URLSearchParams(location.search);
-  const environment = ['SHADOW','TESTNET','LIVE'].includes(current.get('environment'))
-    ? current.get('environment')
-    : 'SHADOW';
-  const allowed = ['venue','account_id','strategy_id','strategy_version','signal_source_mode','signal_provider','from_time','to_time'];
-  const request = new URLSearchParams({environment});
-  allowed.forEach(key => { if (current.get(key)) request.set(key, current.get(key)); });
-  const response = await api(`/api/results?${request.toString()}`);
-  const data = response.data;
-  const teamGroup = data.dimensions?.team?.[0];
-  const teamMetrics = Object.entries(teamGroup?.metrics_by_currency || {});
-  const headlineMetrics = teamMetrics.map(([currency, item]) => `<article class="stat result-stat"><small>${escapeHtml(currency)} · 已平仓净收益</small><b>${fmtAmount(item.closed_net_pnl, currency)}</b><span>未平仓当前值 ${fmtAmount(item.open_current_pnl, currency)} · 胜率 ${resultRateLabel(item.win_rate)} · 盈亏比 ${resultRatioLabel(item.profit_loss_ratio)} · 最大回撤 ${fmtAmount(item.maximum_drawdown, currency)}</span></article>`).join('');
-  const events = data.risk_events || [];
-  const eventRows = events.slice().reverse().map(item => `<tr><td data-label="决策时间">${fmtDate(item.created_at)}</td><td data-label="账户">${escapeHtml(item.account_id)}<br><span class="subtle">${escapeHtml(fmtVenueLabel(item.venue))}</span></td><td data-label="策略 / 来源">${escapeHtml(resultStrategyLabel(item))}<br><span class="subtle">${escapeHtml(resultSourceLabel(item))}</span></td><td data-label="结果"><span class="status-pill status-${escapeHtml(item.result)}">${escapeHtml(fmtStatus(item.result))}</span></td><td data-label="原因">${escapeHtml((item.reasons || []).map(resultRiskReasonLabel).join('、') || '无额外原因')}</td><td data-label="政策版本">${escapeHtml(item.policy_version || '—')} / r${escapeHtml(item.policy_revision || '—')}</td><td data-label="批准风险">${fmtNumber(item.risk_amount)}</td></tr>`).join('');
-  const campaignRows = (data.campaigns || []).slice().reverse().map(item => `<tr data-href="/campaigns/${item.campaign_id}"><td data-label="更新时间">${fmtDate(item.updated_at)}</td><td data-label="标的"><b>${escapeHtml(item.symbol || shortId(item.instrument_id))}</b><br><span class="subtle">${escapeHtml(fmtDirection(item.direction))}</span></td><td data-label="账户">${escapeHtml(item.account_id)}<br><span class="subtle">${escapeHtml(fmtVenueLabel(item.venue))}</span></td><td data-label="策略 / 来源">${escapeHtml(resultStrategyLabel(item))}<br><span class="subtle">${escapeHtml(resultSourceLabel(item))}</span></td><td data-label="状态">${escapeHtml(fmtStatus(item.status))}</td><td data-label="总盈亏">${fmtAmount(item.final_pnl, item.currency)}</td></tr>`).join('');
-  const stateCopy = data.data_status === 'EMPTY'
-    ? '当前团队和筛选范围没有已记录的交易结果或风险决策。'
-    : `已读取 ${data.coverage.campaign_count} 个交易任务、${data.coverage.closed_campaign_count} 个已平仓结果和 ${data.coverage.risk_event_count} 条风险决策。`;
-  main.innerHTML = `<section class="page results-page"><header class="page-head"><div><p class="eyebrow">${escapeHtml(data.scope.team_name)} · ${resultEnvironmentLabel(environment)} · 已记录历史</p><h1>绩效与风险报表</h1><p class="lede">仅聚合当前 Workspace / Team 及获授权账户的服务端事实。影子、测试网和真实数据严格分开；币种不混算。</p></div><button class="secondary" data-refresh>刷新当前报表</button></header>
-    <article class="source-status ${environment === 'LIVE' ? 'tone-attention' : ''}"><div><p class="eyebrow">数据性质</p><h2>${escapeHtml(resultEnvironmentLabel(environment))}</h2><p>${escapeHtml(resultEnvironmentNotice(data.environment_notice))} ${escapeHtml(stateCopy)}</p></div><span class="status-pill">${escapeHtml(fmtStatus(data.data_status))}</span></article>
-    <form id="results-filter-form" class="form-panel compact-form result-filters"><div class="field-grid"><label>环境<select name="environment"><option value="SHADOW" ${environment === 'SHADOW' ? 'selected' : ''}>影子模式</option><option value="TESTNET" ${environment === 'TESTNET' ? 'selected' : ''}>测试网</option><option value="LIVE" ${environment === 'LIVE' ? 'selected' : ''}>真实环境</option></select></label><label>交易所<select name="venue"><option value="">全部</option>${['BINANCE','HYPERLIQUID','OKX','BYBIT'].map(value => `<option value="${value}" ${current.get('venue') === value ? 'selected' : ''}>${escapeHtml(fmtVenueLabel(value))}</option>`).join('')}</select></label><label>账户<input name="account_id" value="${escapeHtml(current.get('account_id') || '')}" maxlength="120" placeholder="精确账户 ID"></label><label>策略<input name="strategy_id" value="${escapeHtml(current.get('strategy_id') || '')}" maxlength="120" placeholder="精确策略 ID"></label><label>策略版本<input name="strategy_version" value="${escapeHtml(current.get('strategy_version') || '')}" maxlength="120" placeholder="精确版本"></label><label>信号源<select name="signal_source_mode"><option value="">全部</option>${['PERPTAPE','WEBHOOK','MANUAL','SYSTEM'].map(value => `<option value="${value}" ${current.get('signal_source_mode') === value ? 'selected' : ''}>${escapeHtml(resultSourceModeLabel(value))}</option>`).join('')}</select></label><label>信号提供方<select name="signal_provider"><option value="">全部</option>${['TRADINGVIEW','MODEL','PERPTAPE'].map(value => `<option value="${value}" ${current.get('signal_provider') === value ? 'selected' : ''}>${escapeHtml(resultSignalProviderLabel(value))}</option>`).join('')}</select></label><label>起始时间<input name="from_time" type="datetime-local" value="${escapeHtml(resultDateTimeInput(current.get('from_time')))}"></label><label>截止时间<input name="to_time" type="datetime-local" value="${escapeHtml(resultDateTimeInput(current.get('to_time')))}"></label></div><div class="form-actions"><a class="secondary" href="/results?environment=${environment}" data-link>清除其他筛选</a><button class="primary" type="submit">应用筛选</button></div></form>
-    ${headlineMetrics ? `<div class="stats results-stats">${headlineMetrics}</div>` : '<div class="callout"><b>暂无收益指标。</b><p>只有具备完整 Campaign PnL 真源的记录才会进入聚合。</p></div>'}
-    <div class="callout tone-attention"><b>百分比收益率与百分比回撤暂不可用。</b><p>当前没有覆盖所有账户、币种和时间边界的可信期初资本，因此只展示结算币种绝对收益和绝对回撤，不伪造百分比。</p></div>
-    ${resultDimensionSection('账户', '同一交易所的不同账户独立计算，不跨账户合并风险事件。', data.dimensions?.account)}
-    ${resultDimensionSection('策略与版本', 'Webhook 使用冻结 SignalEvent 的策略版本；Perptape 使用冻结提案快照。', data.dimensions?.strategy)}
-    ${resultDimensionSection('信号源', 'Perptape、Webhook、直接人工提案和其他系统来源分开归因。', data.dimensions?.signal_source)}
-    <section><div class="section-heading"><div><p class="eyebrow">服务端决策</p><h2>风险事件</h2><p>包含通过、缩量和拒绝；即使提案没有形成交易任务，拒绝事件仍会保留。</p></div><span class="status-pill">${events.length} 条</span></div>${eventRows ? `<div class="table-wrap result-table"><table><thead><tr><th>决策时间</th><th>账户</th><th>策略 / 来源</th><th>结果</th><th>原因</th><th>政策版本</th><th>批准风险</th></tr></thead><tbody>${eventRows}</tbody></table></div>` : '<div class="callout">当前范围没有已记录的风险决策。</div>'}</section>
-    <section><div class="section-heading"><div><p class="eyebrow">可追溯明细</p><h2>交易任务结果</h2></div><span class="status-pill">${data.campaigns.length} 条</span></div>${campaignRows ? `<div class="table-wrap result-table"><table><thead><tr><th>更新时间</th><th>标的</th><th>账户</th><th>策略 / 来源</th><th>状态</th><th>总盈亏</th></tr></thead><tbody>${campaignRows}</tbody></table></div>` : '<div class="callout">当前范围没有交易任务结果。</div>'}</section>
+  const optionsResponse = await api('/api/results/quantstats/options');
+  const options = optionsResponse.data;
+  const modeDefault = ['SHADOW','LIVE'].includes(options.current_trading_mode) ? options.current_trading_mode : 'SHADOW';
+  const environment = ['SHADOW','LIVE'].includes(current.get('environment')) ? current.get('environment') : modeDefault;
+  const defaults = quantStatsDefaultRange();
+  const fromTime = current.get('from_time') || defaults.from_time;
+  const toTime = current.get('to_time') || defaults.to_time;
+  const requestedGeneration = Number(current.get('generation'));
+  const activeGeneration = options.shadow_generations.find(item => item.status === 'ACTIVE')?.generation;
+  const generation = Number.isInteger(requestedGeneration) && requestedGeneration > 0 ? requestedGeneration : activeGeneration;
+  const selectedAccount = current.get('account_id') || '';
+  const selectedVenue = current.get('venue') || '';
+  const accountOptions = options.accounts.map(item => `<option value="${escapeHtml(item.account_id)}" data-venue="${escapeHtml(item.venue)}" ${selectedAccount === item.account_id && (!selectedVenue || selectedVenue === item.venue) ? 'selected' : ''}>${escapeHtml(item.label)} · ${escapeHtml(fmtVenueLabel(item.venue))}</option>`).join('');
+  const generationOptions = options.shadow_generations.map(item => `<option value="${item.generation}" ${generation === item.generation ? 'selected' : ''}>generation ${item.generation} · ${escapeHtml(fmtStatus(item.status))}</option>`).join('');
+  main.innerHTML = `<section class="page results-page quantstats-page"><header class="page-head"><div><p class="eyebrow">${escapeHtml(options.scope.workspace_name)} · ${escapeHtml(options.scope.team_name)}</p><h1>绩效报表</h1><p class="lede">使用服务端 QuantStats 完整报表。收益率只来自可信净值并剔除非绩效现金流；订单仅用于执行与审计。</p></div><button class="secondary" data-refresh>重新生成</button></header>
+    <article class="source-status ${options.current_trading_mode === 'LIVE' ? 'tone-attention' : ''}"><div><p class="eyebrow">当前交易模式</p><h2>${escapeHtml(fmtEnvironment(options.current_trading_mode))}</h2><p>报表环境只查询历史，不改变 Team 模式，也不会开启交易、资金、签名或广播能力。</p></div><span class="status-pill">${escapeHtml(options.dataset_version)}</span></article>
+    <form id="results-filter-form" class="form-panel compact-form result-filters"><div class="field-grid"><label>环境<select name="environment"><option value="SHADOW" ${environment === 'SHADOW' ? 'selected' : ''}>影子模式</option><option value="LIVE" ${environment === 'LIVE' ? 'selected' : ''}>生产历史</option></select></label><label>账户<select name="account_id" ${environment === 'SHADOW' ? 'disabled' : ''}><option value="">全部有权限账户</option>${accountOptions}</select></label><label>交易所<select name="venue" ${environment === 'SHADOW' ? 'disabled' : ''}><option value="">全部</option>${['BINANCE','HYPERLIQUID','OKX','BYBIT'].map(value => `<option value="${value}" ${selectedVenue === value ? 'selected' : ''}>${escapeHtml(fmtVenueLabel(value))}</option>`).join('')}</select></label><label>SHADOW generation<select name="generation" ${environment === 'LIVE' ? 'disabled' : ''}>${generationOptions}</select></label><label>起始时间<input name="from_time" type="datetime-local" value="${escapeHtml(resultDateTimeInput(fromTime))}" required></label><label>截止时间<input name="to_time" type="datetime-local" value="${escapeHtml(resultDateTimeInput(toTime))}" required></label></div><div class="form-actions"><button class="primary" type="submit">生成 QuantStats 报表</button></div></form>
+    <section class="quantstats-status" data-quantstats-status><div class="loading-card"><span class="spinner"></span><b>正在生成只读报表</b><p>服务端正在验证净值连续性、现金流、估值、范围和 generation。</p></div></section>
+    <section class="quantstats-report-shell" data-quantstats-report hidden><div class="section-heading"><div><p class="eyebrow">QuantStats · UTC 24/7 · 365 periods/year</p><h2>完整绩效报表</h2><p data-quantstats-coverage></p></div><span class="status-pill status-READY">READY</span></div><iframe class="quantstats-frame" title="QuantStats 完整绩效报表" sandbox="allow-same-origin" referrerpolicy="no-referrer"></iframe></section>
   </section>`;
   document.querySelector('[data-refresh]')?.addEventListener('click', route);
   document.querySelector('#results-filter-form')?.addEventListener('submit', event => {
@@ -100,16 +76,33 @@ async function renderActualResults() {
     const form = event.currentTarget;
     const values = Object.fromEntries(new FormData(form));
     const next = new URLSearchParams({environment:values.environment});
-    ['venue','account_id','strategy_id','strategy_version','signal_source_mode','signal_provider'].forEach(key => {
-      if (values[key]) next.set(key, values[key]);
-    });
+    ['venue','account_id','generation'].forEach(key => { if (values[key]) next.set(key, values[key]); });
     ['from_time','to_time'].forEach(key => {
       if (values[key]) next.set(key, new Date(values[key]).toISOString());
     });
     history.replaceState({}, '', `/results?${next.toString()}`);
     route();
   });
-  bindLinkedRows();
+  const request = new URLSearchParams({environment,from_time:fromTime,to_time:toTime});
+  if (environment === 'SHADOW' && generation) request.set('generation', generation);
+  if (environment === 'LIVE' && selectedAccount) request.set('account_id', selectedAccount);
+  if (environment === 'LIVE' && selectedVenue) request.set('venue', selectedVenue);
+  try {
+    const response = await api(`/api/results/quantstats?${request.toString()}`);
+    const data = response.data;
+    const readiness = data.quantstats.readiness;
+    const status = document.querySelector('[data-quantstats-status]');
+    status.innerHTML = `<div class="quantstats-readiness">${Object.entries(readiness).map(([key,value]) => `<span class="status-pill ${value ? 'status-READY' : 'status-DISABLED'}">${escapeHtml(key)} · ${value ? 'READY' : 'NOT READY'}</span>`).join('')}</div>`;
+    const shell = document.querySelector('[data-quantstats-report]');
+    const frame = shell.querySelector('.quantstats-frame');
+    shell.hidden = false;
+    shell.querySelector('[data-quantstats-coverage]').textContent = `${data.coverage.nav_point_count} 个净值点 · ${data.coverage.return_count} 个收益周期 · ${data.coverage.transaction_count} 条去重成交 · QuantStats ${data.quantstats.version}`;
+    frame.addEventListener('load', () => resizeQuantStatsFrame(frame), {once:true});
+    frame.srcdoc = quantStatsThemeHtml(data.report_html);
+  } catch (error) {
+    const status = document.querySelector('[data-quantstats-status]');
+    status.innerHTML = `<div class="callout tone-attention"><b>报表数据未就绪 · ${escapeHtml(error.code || 'ANALYTICS_NOT_READY')}</b><p>${escapeHtml(error.message || '服务端拒绝使用不完整事实生成收益率。')}</p><p class="subtle">系统没有补零、推测净值或使用成交盈亏伪造收益率。</p></div>`;
+  }
 }
 
 const notificationChannelLabel = value => ({TELEGRAM:'Telegram',SLACK:'Slack',LARK:'飞书 / Lark',EMAIL:'邮件'}[value] || value);
