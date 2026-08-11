@@ -1565,6 +1565,7 @@ def create_app(
         @app.get("/capital", include_in_schema=False)
         @app.get("/results", include_in_schema=False)
         @app.get("/notifications", include_in_schema=False)
+        @app.get("/trading-mode", include_in_schema=False)
         @app.get("/shadow", include_in_schema=False)
         @app.get("/venues", include_in_schema=False)
         @app.get("/venues/binance", include_in_schema=False)

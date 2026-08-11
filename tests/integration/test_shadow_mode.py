@@ -3,8 +3,10 @@ from __future__ import annotations
 import asyncio
 import base64
 import secrets
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from unittest.mock import patch
 from uuid import UUID
 
 import pytest
@@ -32,12 +34,21 @@ from trading_control_plane.models import (
     Campaign,
     Position,
     ProtectionOrder,
+    ShadowFill,
+    ShadowOrder,
+    ShadowPosition,
     Team,
+    TeamShadowAccount,
     VenueFill,
     VenueOrder,
 )
 from trading_control_plane.perptape import PerptapeClient
 from trading_control_plane.queries import TradingQueries
+from trading_control_plane.request_context import (
+    ApiClientRequestContext,
+    bind_api_client_context,
+    reset_api_client_context,
+)
 from trading_control_plane.service import TradingService
 
 NOW = datetime(2026, 8, 10, 8, tzinfo=UTC)
@@ -429,7 +440,11 @@ def test_shadow_http_api_exposes_activation_scope_and_real_page(
 
             activated = await client.post(
                 f"/api/teams/{ids['team']}/shadow-activation",
-                json={"expected_version": 1, "idempotency_key": "api-shadow-activation"},
+                json={
+                    "confirmation": "SWITCH_TO_SHADOW",
+                    "expected_version": 1,
+                    "idempotency_key": "api-shadow-activation",
+                },
             )
             assert activated.status_code == 200, activated.text
             assert activated.json()["session"]["active_team"]["execution_mode"] == "SHADOW"
@@ -527,6 +542,534 @@ def test_shadow_http_api_exposes_activation_scope_and_real_page(
             page = await client.get("/shadow")
             assert page.status_code == 200
             assert 'id="main"' in page.text
-            assert "/assets/app.js?v=169" in page.text
+            assert "/assets/app.js?v=170" in page.text
 
     asyncio.run(scenario())
+
+
+def activate_unified_shadow(
+    service: TradingService,
+    ids: dict[str, UUID],
+    *,
+    key: str,
+) -> dict[str, object]:
+    configure_shadow_prerequisites(service, ids)
+    return service.set_team_execution_mode(
+        actor_id=ids["admin"],
+        team_id=ids["team"],
+        mode="SHADOW",
+        confirmation="SWITCH_TO_SHADOW",
+        expected_version=1,
+        idempotency_key=key,
+        now=NOW,
+    )
+
+
+def create_unified_order(
+    service: TradingService,
+    ids: dict[str, UUID],
+    *,
+    key: str,
+    order_type: str = "MARKET",
+    side: str = "BUY",
+    quantity: str = "1",
+    latest_price: str | None = "100",
+    limit_price: str | None = None,
+    observed_at: datetime | None = NOW,
+) -> dict[str, object]:
+    return service.create_shadow_order(
+        actor_id=ids["operator"],
+        account_id="paper-1",
+        venue="BINANCE",
+        symbol="BTCUSDT",
+        catalog_instrument_id=ids["instrument"],
+        side=side,
+        order_type=order_type,
+        quantity=Decimal(quantity),
+        limit_price=None if limit_price is None else Decimal(limit_price),
+        latest_price=None if latest_price is None else Decimal(latest_price),
+        observed_at=observed_at,
+        price_tick=Decimal("0.1"),
+        quantity_step=Decimal("0.001"),
+        contract_multiplier=Decimal("1"),
+        is_derivative=True,
+        fee_bps=Decimal("4"),
+        slippage_bps=Decimal("2"),
+        idempotency_key=key,
+        now=NOW,
+    )
+
+
+def test_team_mode_unified_market_limit_protection_and_reset_are_atomic(
+    database: Database,
+) -> None:
+    service, ids = shadow_team_fixture(database)
+    activated = activate_unified_shadow(service, ids, key="unified-activate")
+    assert activated["execution_mode"] == "SHADOW"
+    assert activated["dangerous_capabilities_changed"] is False
+    assert activated["shadow_account"]["equity"] == "100000"
+
+    with patch.object(service, "prepare_binance_live_send") as live_send:
+        market = create_unified_order(service, ids, key="unified-market")
+        open_limit = create_unified_order(
+            service,
+            ids,
+            key="unified-limit",
+            order_type="LIMIT",
+            limit_price="90",
+        )
+        assert live_send.call_count == 0
+
+    assert market["environment"] == "SHADOW"
+    assert market["status"] == "FILLED"
+    assert market["filled_quantity"] == market["quantity"] == "1"
+    assert market["fill"]["price"] == "100.1"
+    assert market["fill"]["fee"] == "0.040040000000000000"
+    assert open_limit["status"] == "OPEN"
+    assert "fill" not in open_limit
+
+    matched = service.match_shadow_order(
+        actor_id=ids["operator"],
+        shadow_order_id=UUID(open_limit["shadow_order_id"]),
+        expected_version=1,
+        latest_price=Decimal("89"),
+        observed_at=NOW + timedelta(seconds=1),
+        price_tick=Decimal("0.1"),
+        quantity_step=Decimal("0.001"),
+        contract_multiplier=Decimal("1"),
+        is_derivative=True,
+        fee_bps=Decimal("4"),
+        slippage_bps=Decimal("2"),
+        idempotency_key="unified-limit-match",
+        now=NOW + timedelta(seconds=1),
+    )
+    replay = service.match_shadow_order(
+        actor_id=ids["operator"],
+        shadow_order_id=UUID(open_limit["shadow_order_id"]),
+        expected_version=1,
+        latest_price=Decimal("89"),
+        observed_at=NOW + timedelta(seconds=1),
+        price_tick=Decimal("0.1"),
+        quantity_step=Decimal("0.001"),
+        contract_multiplier=Decimal("1"),
+        is_derivative=True,
+        fee_bps=Decimal("4"),
+        slippage_bps=Decimal("2"),
+        idempotency_key="unified-limit-match",
+        now=NOW + timedelta(seconds=1),
+    )
+    assert matched == replay
+    assert matched["status"] == "FILLED"
+    assert Decimal(matched["fill"]["price"]) == Decimal("90")
+
+    protection = service.create_shadow_protection(
+        actor_id=ids["operator"],
+        shadow_position_id=UUID(matched["shadow_position_id"]),
+        trigger_type="STOP_LOSS",
+        execution_type="MARKET",
+        trigger_price=Decimal("80"),
+        limit_price=None,
+        idempotency_key="unified-stop",
+        now=NOW + timedelta(seconds=2),
+    )
+    assert protection["reduce_only"] is True
+    assert protection["status"] == "OPEN"
+    stopped = service.match_shadow_order(
+        actor_id=ids["operator"],
+        shadow_order_id=UUID(protection["shadow_order_id"]),
+        expected_version=1,
+        latest_price=Decimal("79"),
+        observed_at=NOW + timedelta(seconds=3),
+        price_tick=Decimal("0.1"),
+        quantity_step=Decimal("0.001"),
+        contract_multiplier=Decimal("1"),
+        is_derivative=True,
+        fee_bps=Decimal("4"),
+        slippage_bps=Decimal("2"),
+        idempotency_key="unified-stop-match",
+        now=NOW + timedelta(seconds=3),
+    )
+    assert stopped["status"] == "FILLED"
+    assert Decimal(stopped["filled_quantity"]) == Decimal(stopped["quantity"]) == Decimal("2")
+
+    short_order = create_unified_order(
+        service,
+        ids,
+        key="unified-short-market",
+        side="SELL",
+    )
+    take_profit = service.create_shadow_protection(
+        actor_id=ids["operator"],
+        shadow_position_id=UUID(short_order["shadow_position_id"]),
+        trigger_type="TAKE_PROFIT",
+        execution_type="LIMIT",
+        trigger_price=Decimal("90"),
+        limit_price=Decimal("89"),
+        idempotency_key="unified-short-tp-limit",
+        now=NOW + timedelta(seconds=4),
+    )
+    triggered = service.match_shadow_order(
+        actor_id=ids["operator"],
+        shadow_order_id=UUID(take_profit["shadow_order_id"]),
+        expected_version=1,
+        latest_price=Decimal("90"),
+        observed_at=NOW + timedelta(seconds=5),
+        price_tick=Decimal("0.1"),
+        quantity_step=Decimal("0.001"),
+        contract_multiplier=Decimal("1"),
+        is_derivative=True,
+        fee_bps=Decimal("4"),
+        slippage_bps=Decimal("2"),
+        idempotency_key="unified-short-tp-trigger",
+        now=NOW + timedelta(seconds=5),
+    )
+    assert triggered["status"] == "TRIGGERED"
+    assert "fill" not in triggered
+    limit_protected = service.match_shadow_order(
+        actor_id=ids["operator"],
+        shadow_order_id=UUID(take_profit["shadow_order_id"]),
+        expected_version=2,
+        latest_price=Decimal("88"),
+        observed_at=NOW + timedelta(seconds=6),
+        price_tick=Decimal("0.1"),
+        quantity_step=Decimal("0.001"),
+        contract_multiplier=Decimal("1"),
+        is_derivative=True,
+        fee_bps=Decimal("4"),
+        slippage_bps=Decimal("2"),
+        idempotency_key="unified-short-tp-fill",
+        now=NOW + timedelta(seconds=6),
+    )
+    assert limit_protected["status"] == "FILLED"
+    assert Decimal(limit_protected["fill"]["price"]) == Decimal("89")
+
+    status = service.trading_mode_status(actor_id=ids["admin"], now=NOW)
+    before_reset = status["shadow_account"]
+    reset = service.reset_shadow_account(
+        actor_id=ids["admin"],
+        expected_version=before_reset["version"],
+        confirmation="RESET_TO_100000_U",
+        idempotency_key="unified-reset",
+        now=NOW + timedelta(seconds=7),
+    )
+    assert reset["previous_generation"] == 1
+    assert reset["shadow_account"]["generation"] == 2
+    assert reset["shadow_account"]["equity"] == "100000"
+    assert reset["shadow_account"]["available_balance"] == "100000"
+    assert reset["shadow_account"]["realized_pnl"] == "0"
+    assert reset["shadow_account"]["fees_paid"] == "0"
+
+    with database.session_factory() as session:
+        assert session.scalar(select(func.count()).select_from(ShadowFill)) == 5
+        assert session.scalar(select(func.count()).select_from(ShadowOrder)) == 5
+        assert session.scalar(select(func.count()).select_from(TeamShadowAccount)) == 2
+        archived = session.scalar(
+            select(TeamShadowAccount).where(TeamShadowAccount.generation == 1)
+        )
+        assert archived is not None and archived.status == "ARCHIVED"
+        assert session.scalar(
+            select(func.count())
+            .select_from(ShadowPosition)
+            .where(ShadowPosition.status == "ARCHIVED")
+        ) == 1
+        assert session.scalar(select(func.count()).select_from(VenueOrder)) == 0
+        assert session.scalar(select(func.count()).select_from(VenueFill)) == 0
+
+
+@pytest.mark.parametrize(
+    ("latest_price", "observed_at", "price_tick", "quantity_step", "multiplier", "code"),
+    [
+        (None, NOW, "0.1", "0.001", "1", "SHADOW_PRICE_MISSING"),
+        ("0", NOW, "0.1", "0.001", "1", "SHADOW_PRICE_INVALID"),
+        ("100", NOW - timedelta(minutes=2), "0.1", "0.001", "1", "SHADOW_PRICE_STALE"),
+        ("100", NOW, None, "0.001", "1", "SHADOW_PRICE_PRECISION_MISSING"),
+        ("100", NOW, "0.1", None, "1", "SHADOW_QUANTITY_PRECISION_MISSING"),
+        ("100", NOW, "0.1", "0.001", None, "SHADOW_CONTRACT_MULTIPLIER_MISSING"),
+    ],
+)
+def test_shadow_market_facts_fail_closed_with_stable_codes_and_audit(
+    database: Database,
+    latest_price: str | None,
+    observed_at: datetime,
+    price_tick: str | None,
+    quantity_step: str | None,
+    multiplier: str | None,
+    code: str,
+) -> None:
+    service, ids = shadow_team_fixture(database)
+    activate_unified_shadow(service, ids, key=f"activate-{code}")
+    with pytest.raises(DomainRejected) as rejected:
+        service.create_shadow_order(
+            actor_id=ids["operator"],
+            account_id="paper-1",
+            venue="BINANCE",
+            symbol="ETHUSDT",
+            catalog_instrument_id=None,
+            side="BUY",
+            order_type="MARKET",
+            quantity=Decimal("1"),
+            limit_price=None,
+            latest_price=None if latest_price is None else Decimal(latest_price),
+            observed_at=observed_at,
+            price_tick=None if price_tick is None else Decimal(price_tick),
+            quantity_step=None if quantity_step is None else Decimal(quantity_step),
+            contract_multiplier=None if multiplier is None else Decimal(multiplier),
+            is_derivative=True,
+            fee_bps=Decimal("4"),
+            slippage_bps=Decimal("2"),
+            idempotency_key=f"blocked-{code}",
+            now=NOW,
+        )
+    assert rejected.value.code == code
+    with database.session_factory() as session:
+        assert session.scalar(select(func.count()).select_from(ShadowOrder)) == 0
+        audit = session.scalar(
+            select(AuditEvent).where(
+                AuditEvent.event_type == "SHADOW_EXECUTION_BLOCKED",
+                AuditEvent.idempotency_key == f"blocked-{code}",
+            )
+        )
+        assert audit is not None
+        assert audit.rule_summary["error_code"] == code
+
+
+def test_shadow_fill_failure_rolls_back_all_ledger_facts(database: Database) -> None:
+    service, ids = shadow_team_fixture(database)
+    activate_unified_shadow(service, ids, key="rollback-activate")
+    with pytest.raises(DomainRejected, match="SHADOW_CAPITAL_INSUFFICIENT"):
+        create_unified_order(
+            service,
+            ids,
+            key="oversized-order",
+            quantity="2000",
+        )
+    with database.session_factory() as session:
+        account = session.scalar(select(TeamShadowAccount))
+        assert account is not None
+        assert account.equity == Decimal("100000")
+        assert account.available_balance == Decimal("100000")
+        assert session.scalar(select(func.count()).select_from(ShadowOrder)) == 0
+        assert session.scalar(select(func.count()).select_from(ShadowFill)) == 0
+        assert session.scalar(select(func.count()).select_from(ShadowPosition)) == 0
+
+
+def test_concurrent_shadow_matching_records_at_most_one_fill(database: Database) -> None:
+    service, ids = shadow_team_fixture(database)
+    activate_unified_shadow(service, ids, key="concurrent-activate")
+    order = create_unified_order(
+        service,
+        ids,
+        key="concurrent-open-limit",
+        order_type="LIMIT",
+        limit_price="90",
+    )
+
+    def match() -> dict[str, object]:
+        return service.match_shadow_order(
+            actor_id=ids["operator"],
+            shadow_order_id=UUID(order["shadow_order_id"]),
+            expected_version=1,
+            latest_price=Decimal("89"),
+            observed_at=NOW + timedelta(seconds=1),
+            price_tick=Decimal("0.1"),
+            quantity_step=Decimal("0.001"),
+            contract_multiplier=Decimal("1"),
+            is_derivative=True,
+            fee_bps=Decimal("4"),
+            slippage_bps=Decimal("2"),
+            idempotency_key="concurrent-match-same-key",
+            now=NOW + timedelta(seconds=1),
+        )
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        left, right = tuple(executor.map(lambda _value: match(), range(2)))
+    assert left == right
+    assert left["status"] == "FILLED"
+    with database.session_factory() as session:
+        assert session.scalar(select(func.count()).select_from(ShadowFill)) == 1
+        stored_order = session.get(ShadowOrder, UUID(order["shadow_order_id"]))
+        assert stored_order is not None
+        assert stored_order.filled_quantity == stored_order.quantity
+
+
+def test_trading_mode_api_is_persisted_team_scoped_and_ignores_environment_override(
+    database: Database,
+) -> None:
+    _service, ids = shadow_team_fixture(database)
+    configure_shadow_prerequisites(_service, ids)
+
+    async def scenario() -> None:
+        async with AsyncClient(
+            transport=ASGITransport(app=shadow_app(database)),
+            base_url="http://test",
+        ) as client:
+            login = await client.post("/api/auth/mock/login", json={"username": "shadow-admin"})
+            assert login.status_code == 200
+            before = await client.get("/api/trading-mode")
+            assert before.status_code == 200
+            assert before.json()["data"]["execution_mode"] == "SETUP"
+            switched = await client.put(
+                f"/api/teams/{ids['team']}/trading-mode",
+                json={
+                    "mode": "SHADOW",
+                    "confirmation": "SWITCH_TO_SHADOW",
+                    "expected_version": 1,
+                    "idempotency_key": "api-unified-switch",
+                },
+            )
+            assert switched.status_code == 200, switched.text
+            assert switched.json()["data"]["shadow_account"]["equity"] == "100000"
+            created = await client.post(
+                "/api/trading-mode/shadow/orders",
+                json={
+                    "account_id": "paper-1",
+                    "venue": "BINANCE",
+                    "symbol": "BTCUSDT",
+                    "catalog_instrument_id": str(ids["instrument"]),
+                    "side": "BUY",
+                    "order_type": "MARKET",
+                    "quantity": "1",
+                    "latest_price": "100",
+                    "observed_at": datetime.now(UTC).isoformat(),
+                    "price_tick": "0.1",
+                    "quantity_step": "0.001",
+                    "contract_multiplier": "1",
+                    "environment": "LIVE",
+                    "idempotency_key": "api-forced-environment",
+                },
+            )
+            assert created.status_code == 200, created.text
+            assert created.json()["data"]["environment"] == "SHADOW"
+            refreshed = await client.get("/api/trading-mode")
+            assert refreshed.json()["data"]["execution_mode"] == "SHADOW"
+            assert refreshed.json()["data"]["shadow_account"]["equity"] != "100000"
+            denied = await client.put(
+                "/api/teams/00000000-0000-0000-0000-000000000001/trading-mode",
+                json={
+                    "mode": "LIVE",
+                    "confirmation": "SWITCH_TO_LIVE",
+                    "expected_version": 2,
+                    "idempotency_key": "cross-team-denied",
+                },
+            )
+            assert denied.status_code in {403, 409}
+            assert denied.json()["error"]["code"] == "TEAM_SCOPE_DENIED"
+
+    asyncio.run(scenario())
+
+
+def test_live_mode_regression_human_version_idempotency_and_shadow_blockers(
+    database: Database,
+) -> None:
+    service, ids = shadow_team_fixture(database)
+    activate_unified_shadow(service, ids, key="mode-regression-shadow")
+    live = service.set_team_execution_mode(
+        actor_id=ids["admin"],
+        team_id=ids["team"],
+        mode="LIVE",
+        confirmation="SWITCH_TO_LIVE",
+        expected_version=2,
+        idempotency_key="mode-regression-live",
+        now=NOW + timedelta(seconds=1),
+    )
+    replay = service.set_team_execution_mode(
+        actor_id=ids["admin"],
+        team_id=ids["team"],
+        mode="LIVE",
+        confirmation="SWITCH_TO_LIVE",
+        expected_version=2,
+        idempotency_key="mode-regression-live",
+        now=NOW + timedelta(seconds=1),
+    )
+    assert live == replay
+    assert live["execution_mode"] == "LIVE"
+    assert live["dangerous_capabilities_changed"] is False
+
+    proposal = service.create_proposal(
+        actor_id=ids["proposer"],
+        source=ProposalSource.MANUAL,
+        risk_tier=RiskTier.LOW,
+        account_id="paper-1",
+        venue="BINANCE",
+        instrument_id=ids["instrument"],
+        direction=Direction.LONG,
+        quantity=Decimal("1"),
+        max_risk=Decimal("10"),
+        expires_at=NOW + timedelta(hours=8),
+        idempotency_key="live-path-unchanged",
+        environment=ExecutionEnvironment.LIVE,
+        details={
+            "trigger_price": "100",
+            "invalidation_price": "90",
+            "initial_quantity": "1",
+        },
+        now=NOW + timedelta(seconds=2),
+    )
+    assert proposal is not None
+
+    with database.session_factory.begin() as session:
+        session.add(
+            Position(
+                team_id=ids["team"],
+                account_id="paper-1",
+                venue="BINANCE",
+                environment="LIVE",
+                instrument_id=ids["instrument"],
+                quantity=Decimal("1"),
+                average_entry_price=Decimal("100"),
+                mark_price=Decimal("100"),
+                fact_status="KNOWN",
+                observed_at=NOW,
+                updated_at=NOW,
+            )
+        )
+    with pytest.raises(DomainRejected) as blocked:
+        service.set_team_execution_mode(
+            actor_id=ids["admin"],
+            team_id=ids["team"],
+            mode="SHADOW",
+            confirmation="SWITCH_TO_SHADOW",
+            expected_version=3,
+            idempotency_key="live-position-blocks-shadow",
+            now=NOW + timedelta(seconds=3),
+        )
+    assert blocked.value.code == "TEAM_MODE_SHADOW_BLOCKED"
+    assert "LIVE_POSITIONS_OPEN(1)" in blocked.value.detail
+    with database.session_factory() as session:
+        team = session.get(Team, ids["team"])
+        assert team is not None and team.execution_mode == "LIVE"
+        audit = session.scalar(
+            select(AuditEvent).where(
+                AuditEvent.event_type == "TEAM_TRADING_MODE_BLOCKED",
+                AuditEvent.idempotency_key == "live-position-blocks-shadow",
+            )
+        )
+        assert audit is not None
+        assert audit.rule_summary["blockers"] == [
+            {"code": "LIVE_POSITIONS_OPEN", "count": 1}
+        ]
+
+    context_token = bind_api_client_context(
+        ApiClientRequestContext(
+            owner_user_id=ids["admin"],
+            api_client_id=UUID("00000000-0000-0000-0000-000000000111"),
+            workspace_id=UUID(live["workspace_id"]),
+            team_id=ids["team"],
+            account_id="paper-1",
+            venue="BINANCE",
+        )
+    )
+    try:
+        with pytest.raises(DomainRejected) as human_only:
+            service.set_team_execution_mode(
+                actor_id=ids["admin"],
+                team_id=ids["team"],
+                mode="SHADOW",
+                confirmation="SWITCH_TO_SHADOW",
+                expected_version=3,
+                idempotency_key="api-client-mode-denied",
+                now=NOW + timedelta(seconds=4),
+            )
+        assert human_only.value.code == "HUMAN_WEB_CONFIRMATION_REQUIRED"
+    finally:
+        reset_api_client_context(context_token)

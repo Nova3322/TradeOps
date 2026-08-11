@@ -131,7 +131,7 @@ async function renderProposalList(status, title, historyMode = false) {
   const earliestExpiry = items[0]?.expires_at;
   const canPropose = roleNames().includes('PROPOSER') || roleNames().includes('SYSTEM_ADMIN');
   const environmentQuery = environment === 'LIVE' ? '' : `?environment=${environment}`;
-  const createActions = canPropose ? `<div class="toolbar"><a class="secondary" href="${environment === 'SHADOW' ? '/shadow' : '/opportunities'}" data-link>${environment === 'SHADOW' ? '返回影子模式' : '查看机会'}</a><a class="primary" href="/proposals/new${environmentQuery}" data-link>新建人工提案</a></div>` : '';
+  const createActions = canPropose ? `<div class="toolbar"><a class="secondary" href="${environment === 'SHADOW' ? '/trading-mode' : '/opportunities'}" data-link>${environment === 'SHADOW' ? '返回交易模式' : '查看机会'}</a><a class="primary" href="/proposals/new${environmentQuery}" data-link>新建人工提案</a></div>` : '';
   const emptyState = status
     ? '<section class="empty-state"><div><h2>当前没有待你审核的提案</h2><p>自己的提案、已经投过票、已到期或已结束的提案不会留在这里。</p><div class="toolbar empty-actions"><a class="secondary" href="/home" data-link>返回当前任务</a><a class="primary" href="/proposals" data-link>查看全部提案</a></div></div></section>'
     : `<section class="empty-state"><div><h2>${historyMode ? '当前没有历史提案' : '当前没有进行中的提案'}</h2><p>${historyMode ? '已批准、已过期或已拒绝的提案会保留在这里供审计。' : canPropose ? '可以从机会页一键创建，或提交一份人工提案。' : '当前作用域内还没有需要继续跟踪的提案。'}</p>${historyMode ? '<a class="secondary" href="/proposals" data-link>返回当前提案</a>' : createActions}</div></section>`;

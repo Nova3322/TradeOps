@@ -1089,6 +1089,16 @@ dialog::backdrop { background: rgba(4, 12, 10, .56); backdrop-filter: blur(3px);
 }
 
 .shadow-workspace { --shadow-accent: #6fc4aa; }
+.mode-layout { display: grid; grid-template-columns: minmax(0, 1.2fr) minmax(300px, .8fr); gap: 16px; margin: 18px 0 24px; }
+.mode-choice-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; margin: 16px 0; }
+.mode-choice { min-width: 0; min-height: 126px; display: grid; align-content: center; gap: 8px; padding: 18px; border: 1px solid var(--line); border-radius: 13px; background: var(--panel-soft); color: var(--ink); text-align: left; cursor: pointer; }
+.mode-choice b { font-size: 17px; }
+.mode-choice small { color: var(--muted); line-height: 1.55; }
+.mode-choice.is-selected { border-color: var(--shadow-accent); box-shadow: 0 0 0 3px color-mix(in srgb, var(--shadow-accent) 14%, transparent); }
+.mode-choice.live-choice { border-color: var(--danger); background: color-mix(in srgb, var(--danger) 7%, var(--panel)); box-shadow: 0 0 0 3px color-mix(in srgb, var(--danger) 10%, transparent); }
+.persistent-shadow-banner, .live-mode-warning { margin-bottom: 18px; }
+.shadow-match-form, .shadow-protection-form { min-width: min(420px, 100%); padding: 12px 0 0; }
+.trading-mode-page .stats { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 .shadow-account-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
 .shadow-account-card { min-width: 0; }
 .shadow-capital-grid { margin: 16px 0; padding: 14px; border: 1px solid var(--line); border-radius: 12px; background: var(--panel-soft); }
@@ -1121,7 +1131,9 @@ dialog::backdrop { background: rgba(4, 12, 10, .56); backdrop-filter: blur(3px);
 }
 
 @media (max-width: 780px) {
-  .shadow-account-grid, .shadow-safety-grid { grid-template-columns: 1fr; }
+  .shadow-account-grid, .shadow-safety-grid, .mode-layout, .mode-choice-grid, .trading-mode-page .stats { grid-template-columns: 1fr; }
+  .mode-choice { min-height: 0; }
+  .shadow-match-form, .shadow-protection-form { min-width: 0; }
   .readiness-item { grid-template-columns: 32px minmax(0, 1fr); gap: 10px; align-items: start; }
   .readiness-marker { width: 28px; height: 28px; }
   .readiness-action { grid-column: 2; justify-self: start; }

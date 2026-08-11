@@ -42,6 +42,9 @@ class TransactionService:
         workspace_id: UUID | None = None,
         team_id: UUID | None = None,
         account_id: str | None = None,
+        environment: str | None = None,
+        generation: int | None = None,
+        rule_summary: dict[str, Any] | None = None,
         now: datetime,
     ) -> None:
         api_context = current_api_client_context()
@@ -81,6 +84,9 @@ class TransactionService:
                     "CapitalTransfer": CapitalTransfer,
                     "DirectCapitalOperation": DirectCapitalOperation,
                     "CapitalAutomationPolicy": CapitalAutomationPolicy,
+                    "ShadowOrder": ShadowOrder,
+                    "ShadowFill": ShadowFill,
+                    "ShadowPosition": ShadowPosition,
                 }
                 model = direct_account_models.get(object_type)
                 if model is not None:
@@ -128,7 +134,11 @@ class TransactionService:
                         except DomainRejected:
                             account_id = None
             if scoped_object is not None:
-                account_id = scoped_object.account_id
+                account_id = getattr(
+                    scoped_object,
+                    "account_id",
+                    getattr(scoped_object, "source_account_id", None),
+                )
                 scoped_team_id = getattr(scoped_object, "team_id", None)
                 if scoped_team_id is not None:
                     team_id = team_id or scoped_team_id
@@ -140,6 +150,9 @@ class TransactionService:
                 workspace_id=workspace_id,
                 team_id=team_id,
                 account_id=account_id,
+                environment=environment,
+                generation=generation,
+                rule_summary=rule_summary,
                 actor_id=actor_id,
                 api_client_id=api_client_id,
                 event_type=event_type,

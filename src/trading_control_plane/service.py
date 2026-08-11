@@ -44,6 +44,7 @@ from trading_control_plane.service_domains.risk_policy import PolicyRiskService
 from trading_control_plane.service_domains.risk_reconciliation import ReconciliationRiskService
 from trading_control_plane.service_domains.risk_recovery import RecoveryRiskService
 from trading_control_plane.service_domains.signals import SignalService
+from trading_control_plane.service_domains.trading_mode import TradingModeService
 from trading_control_plane.service_domains.workspace import WorkspaceService
 from trading_control_plane.service_transactions import TransactionService
 
@@ -90,6 +91,7 @@ class TradingService:
         self._execution_facts = FactIngestionExecutionService(self.runtime, self)
         self._execution_campaign = CampaignExecutionService(self.runtime, self)
         self._execution_shadow = ShadowExecutionService(self.runtime, self)
+        self._trading_mode = TradingModeService(self.runtime, self)
         self._execution_freqtrade = FreqtradeRecoveryExecutionService(self.runtime, self)
         self._capital_direct = DirectOperationCapitalService(self.runtime, self)
         self._capital_transfer = TransferCapitalService(self.runtime, self)
@@ -292,6 +294,12 @@ class TradingService:
         self.initialize_shadow_scope = self._execution_shadow.initialize_shadow_scope
         self.simulate_shadow_execution = self._execution_shadow.simulate_shadow_execution
         self.record_shadow_order = self._execution_shadow.record_shadow_order
+        self.trading_mode_status = self._trading_mode.trading_mode_status
+        self.set_team_execution_mode = self._trading_mode.set_team_execution_mode
+        self.create_shadow_order = self._trading_mode.create_shadow_order
+        self.match_shadow_order = self._trading_mode.match_shadow_order
+        self.create_shadow_protection = self._trading_mode.create_shadow_protection
+        self.reset_shadow_account = self._trading_mode.reset_shadow_account
         self.record_fill = self._execution_facts.record_fill
         self.record_position = self._execution_facts.record_position
         self.record_protection = self._execution_facts.record_protection

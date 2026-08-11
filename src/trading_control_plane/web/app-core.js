@@ -94,7 +94,7 @@ const ENGLISH_EXACT = new Map(Object.entries({
   '只读用户':'Observer', '提案发起人':'Proposer', '审核人':'Reviewer', '交易运维人员':'Trading operator',
   '资金管理员':'Treasury administrator', '系统管理员':'Super administrator',
   '主导航':'Main navigation', '工作台':'Workspace', '团队配置':'Team setup', '治理与安全':'Governance and safety', '当前范围':'Current scope', '当前任务':'Current tasks', '实时机会':'Live opportunities', '审核队列':'Review queue',
-  '交易任务':'Trades', '绩效报表':'Performance reports', '影子模式':'Shadow mode', '通知中心':'Notification center', '系统状态':'System status', '资金':'Capital', '异常':'Exceptions',
+  '交易任务':'Trades', '绩效报表':'Performance reports', '交易模式':'Trading mode', '影子模式':'Shadow mode', '通知中心':'Notification center', '系统状态':'System status', '资金':'Capital', '异常':'Exceptions',
   '交易账户':'Exchange accounts', '成员权限':'Access control',
   '业务数据库已连接':'Business database connected', '数据缺失时自动阻止交易':'Missing data blocks trading automatically',
   '退出当前会话':'Sign out', '正在读取当前事实…':'Loading current data…',
@@ -1051,7 +1051,7 @@ const routeCapability = (path) => {
   if (path === '/reviews') return 'proposal.review';
   if (path === '/proposals' || path.startsWith('/proposals/')) return 'proposal.view';
   if (path === '/campaigns' || path.startsWith('/campaigns/') || path === '/orders' || path === '/exceptions') return 'operations.view';
-  if (path === '/shadow') return 'venue.view';
+  if (path === '/shadow' || path === '/trading-mode') return 'venue.view';
   if (path === '/results') return 'results.view';
   if (path === '/notifications') return 'notification.view';
   if (path === '/positions' || path === '/risk') return 'system.view';
@@ -1468,7 +1468,7 @@ async function route() {
     return;
   }
   setShell(true);
-  const teamSetupPaths = new Set(['/admin/users', '/admin/agents', '/profile/api-access', '/venues', '/signals', '/notifications', '/risk', '/shadow']);
+  const teamSetupPaths = new Set(['/admin/users', '/admin/agents', '/profile/api-access', '/venues', '/signals', '/notifications', '/risk', '/shadow', '/trading-mode']);
   if (!session.active_workspace || !session.active_team || (!session.active_team.trading_enabled && !teamSetupPaths.has(path))) {
     renderScopeSetup();
     enhanceRenderedPage();
@@ -1493,7 +1493,7 @@ async function route() {
       await renderProposalList(null, historyMode ? '历史提案' : '当前提案', historyMode);
     }
     else if (path === '/campaigns') await renderCampaignList();
-    else if (path === '/shadow') await renderShadowWorkspace();
+    else if (path === '/shadow' || path === '/trading-mode') await renderTradingMode();
     else if (path === '/results') await renderActualResults();
     else if (path === '/notifications') await renderNotifications();
     else if (path === '/campaigns/alerts') await renderRuntimeAlerts();

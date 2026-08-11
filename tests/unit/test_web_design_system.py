@@ -12,6 +12,8 @@ STYLESHEET = (
     / "styles.css"
 )
 LOGO = STYLESHEET.with_name("tradingops-logo.png")
+INDEX = STYLESHEET.with_name("index.html")
+EXECUTION = STYLESHEET.with_name("execution.js")
 PRODUCT_OWNER_LOGO_SHA256 = "24b27b23e1007ade0de4bdc0bb6880ba087b3116be2b970f89abf84d023432ae"
 
 
@@ -56,3 +58,15 @@ def test_brand_logo_matches_the_product_owner_asset() -> None:
 
     assert hashlib.sha256(content).hexdigest() == PRODUCT_OWNER_LOGO_SHA256
     assert content.startswith(b"\x89PNG\r\n\x1a\n")
+
+
+def test_primary_navigation_and_page_use_trading_mode_copy() -> None:
+    index = INDEX.read_text()
+    execution = EXECUTION.read_text()
+
+    assert 'href="/trading-mode"' in index
+    assert '<span>◐</span>交易模式</a>' in index
+    assert '<span>◐</span>影子模式</a>' not in index
+    assert '<h1>交易模式</h1>' in execution
+    assert "仅 TradingOPS 内部模拟，不会向交易所发送订单" in execution  # noqa: RUF001
+    assert "重置为 100,000 U" in execution

@@ -153,8 +153,87 @@ class TeamCreateRequest(BaseModel):
 
 
 class TeamShadowActivationRequest(BaseModel):
+    confirmation: Literal["SWITCH_TO_SHADOW"]
     expected_version: int = Field(ge=1)
     idempotency_key: str = Field(min_length=1, max_length=160)
+
+
+class TeamTradingModeRequest(BaseModel):
+    mode: Literal["LIVE", "SHADOW"]
+    confirmation: Literal["SWITCH_TO_LIVE", "SWITCH_TO_SHADOW"]
+    expected_version: int = Field(ge=1)
+    idempotency_key: str = Field(min_length=1, max_length=160)
+
+    @model_validator(mode="after")
+    def confirmation_matches_mode(self) -> TeamTradingModeRequest:
+        if self.confirmation != f"SWITCH_TO_{self.mode}":
+            raise ValueError("confirmation must match selected trading mode")
+        return self
+
+
+class ShadowAccountResetRequest(BaseModel):
+    confirmation: Literal["RESET_TO_100000_U"]
+    expected_version: int = Field(ge=1)
+    idempotency_key: str = Field(min_length=1, max_length=160)
+
+
+class ShadowOrderCreateRequest(BaseModel):
+    account_id: str = Field(min_length=1, max_length=120)
+    venue: VenueScope
+    symbol: str | None = Field(default=None, min_length=1, max_length=120)
+    catalog_instrument_id: UUID | None = None
+    side: Literal["BUY", "SELL"]
+    order_type: Literal["MARKET", "LIMIT"]
+    quantity: Decimal = Field(gt=0)
+    limit_price: Decimal | None = Field(default=None, gt=0)
+    latest_price: Decimal | None = None
+    observed_at: datetime | None = None
+    price_tick: Decimal | None = None
+    quantity_step: Decimal | None = None
+    contract_multiplier: Decimal | None = None
+    is_derivative: bool = True
+    fee_bps: Decimal = Field(default=Decimal("4"), ge=0, le=100)
+    slippage_bps: Decimal = Field(default=Decimal("2"), ge=0, le=500)
+    idempotency_key: str = Field(min_length=1, max_length=160)
+
+    @model_validator(mode="after")
+    def validate_order_shape(self) -> ShadowOrderCreateRequest:
+        if self.symbol is None and self.catalog_instrument_id is None:
+            raise ValueError("symbol or catalog_instrument_id is required")
+        if self.order_type == "LIMIT" and self.limit_price is None:
+            raise ValueError("LIMIT order requires limit_price")
+        if self.order_type == "MARKET" and self.limit_price is not None:
+            raise ValueError("MARKET order cannot include limit_price")
+        return self
+
+
+class ShadowOrderMatchRequest(BaseModel):
+    expected_version: int = Field(ge=1)
+    latest_price: Decimal | None = None
+    observed_at: datetime | None = None
+    price_tick: Decimal | None = None
+    quantity_step: Decimal | None = None
+    contract_multiplier: Decimal | None = None
+    is_derivative: bool = True
+    fee_bps: Decimal = Field(default=Decimal("4"), ge=0, le=100)
+    slippage_bps: Decimal = Field(default=Decimal("2"), ge=0, le=500)
+    idempotency_key: str = Field(min_length=1, max_length=160)
+
+
+class ShadowProtectionCreateRequest(BaseModel):
+    trigger_type: Literal["STOP_LOSS", "TAKE_PROFIT"]
+    execution_type: Literal["MARKET", "LIMIT"]
+    trigger_price: Decimal = Field(gt=0)
+    limit_price: Decimal | None = Field(default=None, gt=0)
+    idempotency_key: str = Field(min_length=1, max_length=160)
+
+    @model_validator(mode="after")
+    def validate_protection_shape(self) -> ShadowProtectionCreateRequest:
+        if self.execution_type == "LIMIT" and self.limit_price is None:
+            raise ValueError("LIMIT protection requires limit_price")
+        if self.execution_type == "MARKET" and self.limit_price is not None:
+            raise ValueError("MARKET protection cannot include limit_price")
+        return self
 
 
 class ShadowScopeInitializeRequest(BaseModel):

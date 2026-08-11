@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from decimal import ROUND_CEILING, ROUND_FLOOR, Decimal
+from decimal import ROUND_CEILING, ROUND_FLOOR, ROUND_HALF_EVEN, Decimal
 
 from trading_control_plane.domain import MONEY_QUANTUM, DomainRejected
 
@@ -20,6 +20,60 @@ class ShadowExecutionQuote:
 class ShadowPositionState:
     quantity: Decimal
     average_entry_price: Decimal
+
+
+@dataclass(frozen=True, slots=True)
+class ShadowLedgerPositionState:
+    quantity: Decimal
+    average_entry_price: Decimal
+    realized_pnl: Decimal
+
+
+def quantize_shadow_step(
+    value: Decimal,
+    step: Decimal,
+    *,
+    rounding: str = ROUND_HALF_EVEN,
+) -> Decimal:
+    if not _finite_positive(value) or not _finite_positive(step):
+        raise DomainRejected(
+            "SHADOW_PRECISION_INVALID", "value and precision step must be positive"
+        )
+    return (value / step).to_integral_value(rounding=rounding) * step
+
+
+def shadow_limit_crossed(*, side: str, latest_price: Decimal, limit_price: Decimal) -> bool:
+    if side not in {"BUY", "SELL"}:
+        raise DomainRejected("SHADOW_SIDE_INVALID", "shadow side must be BUY or SELL")
+    if not _finite_positive(latest_price) or not _finite_positive(limit_price):
+        raise DomainRejected("SHADOW_PRICE_INVALID", "latest and limit prices must be positive")
+    return latest_price <= limit_price if side == "BUY" else latest_price >= limit_price
+
+
+def shadow_protection_triggered(
+    *,
+    position_quantity: Decimal,
+    trigger_type: str,
+    latest_price: Decimal,
+    trigger_price: Decimal,
+) -> bool:
+    if position_quantity == 0:
+        return False
+    if trigger_type not in {"STOP_LOSS", "TAKE_PROFIT"}:
+        raise DomainRejected("SHADOW_TRIGGER_TYPE_INVALID", "unknown protection trigger type")
+    if not _finite_positive(latest_price) or not _finite_positive(trigger_price):
+        raise DomainRejected("SHADOW_PRICE_INVALID", "latest and trigger prices must be positive")
+    if position_quantity > 0:
+        return (
+            latest_price <= trigger_price
+            if trigger_type == "STOP_LOSS"
+            else latest_price >= trigger_price
+        )
+    return (
+        latest_price >= trigger_price
+        if trigger_type == "STOP_LOSS"
+        else latest_price <= trigger_price
+    )
 
 
 def _finite_positive(value: Decimal) -> bool:
@@ -115,3 +169,45 @@ def apply_shadow_fill(
     else:
         average = fill_price
     return ShadowPositionState(next_quantity, average.quantize(MONEY_QUANTUM))
+
+
+def apply_shadow_ledger_fill(
+    *,
+    current_quantity: Decimal,
+    current_average_entry_price: Decimal,
+    side: str,
+    fill_quantity: Decimal,
+    fill_price: Decimal,
+    contract_multiplier: Decimal,
+    reduce_only: bool,
+) -> ShadowLedgerPositionState:
+    next_state = apply_shadow_fill(
+        current_quantity=current_quantity,
+        current_average_entry_price=current_average_entry_price,
+        side=side,
+        fill_quantity=fill_quantity,
+        fill_price=fill_price,
+        reduce_only=reduce_only,
+    )
+    if not _finite_positive(contract_multiplier):
+        raise DomainRejected(
+            "SHADOW_CONTRACT_MULTIPLIER_INVALID",
+            "contract multiplier must be finite and positive",
+        )
+    signed_fill = fill_quantity if side == "BUY" else -fill_quantity
+    opposite = current_quantity != 0 and (current_quantity > 0) != (signed_fill > 0)
+    closed_quantity = min(abs(current_quantity), fill_quantity) if opposite else Decimal(0)
+    realized = Decimal(0)
+    if closed_quantity:
+        direction = Decimal(1) if current_quantity > 0 else Decimal(-1)
+        realized = (
+            (fill_price - current_average_entry_price)
+            * closed_quantity
+            * contract_multiplier
+            * direction
+        ).quantize(MONEY_QUANTUM)
+    return ShadowLedgerPositionState(
+        quantity=next_state.quantity,
+        average_entry_price=next_state.average_entry_price,
+        realized_pnl=realized,
+    )

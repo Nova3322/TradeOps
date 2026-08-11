@@ -3,7 +3,14 @@ from decimal import Decimal
 import pytest
 
 from trading_control_plane.domain import DomainRejected
-from trading_control_plane.shadow import apply_shadow_fill, quote_shadow_execution
+from trading_control_plane.shadow import (
+    apply_shadow_fill,
+    apply_shadow_ledger_fill,
+    quantize_shadow_step,
+    quote_shadow_execution,
+    shadow_limit_crossed,
+    shadow_protection_triggered,
+)
 
 
 def test_shadow_quote_applies_adverse_tick_rounding_and_explicit_costs() -> None:
@@ -129,3 +136,98 @@ def test_shadow_reduce_only_cannot_increase_or_reverse(side: str, quantity: str)
             fill_price=Decimal("100"),
             reduce_only=True,
         )
+
+
+def test_shadow_market_formula_uses_decimal_without_partial_fill() -> None:
+    buy = quote_shadow_execution(
+        side="BUY",
+        quantity=Decimal("0.125"),
+        reference_price=Decimal("20000"),
+        tick_size=Decimal("0.01"),
+        contract_multiplier=Decimal("1"),
+        fee_bps=Decimal("5"),
+        slippage_bps=Decimal("10"),
+    )
+    sell = quote_shadow_execution(
+        side="SELL",
+        quantity=Decimal("0.125"),
+        reference_price=Decimal("20000"),
+        tick_size=Decimal("0.01"),
+        contract_multiplier=Decimal("1"),
+        fee_bps=Decimal("5"),
+        slippage_bps=Decimal("10"),
+    )
+
+    assert buy.fill_price == Decimal("20020.00")
+    assert sell.fill_price == Decimal("19980.00")
+    assert buy.fee == Decimal("1.251250000000000000")
+    assert sell.fee == Decimal("1.248750000000000000")
+
+
+@pytest.mark.parametrize(
+    ("side", "latest", "limit", "crossed"),
+    [
+        ("BUY", "99", "100", True),
+        ("BUY", "101", "100", False),
+        ("SELL", "101", "100", True),
+        ("SELL", "99", "100", False),
+    ],
+)
+def test_shadow_limit_crossing(side: str, latest: str, limit: str, crossed: bool) -> None:
+    assert shadow_limit_crossed(
+        side=side,
+        latest_price=Decimal(latest),
+        limit_price=Decimal(limit),
+    ) is crossed
+
+
+@pytest.mark.parametrize(
+    ("quantity", "trigger_type", "latest", "trigger", "triggered"),
+    [
+        ("1", "STOP_LOSS", "90", "95", True),
+        ("1", "TAKE_PROFIT", "110", "105", True),
+        ("-1", "STOP_LOSS", "110", "105", True),
+        ("-1", "TAKE_PROFIT", "90", "95", True),
+        ("1", "STOP_LOSS", "100", "95", False),
+        ("-1", "TAKE_PROFIT", "100", "95", False),
+    ],
+)
+def test_shadow_long_short_protection_triggers(
+    quantity: str,
+    trigger_type: str,
+    latest: str,
+    trigger: str,
+    triggered: bool,
+) -> None:
+    assert shadow_protection_triggered(
+        position_quantity=Decimal(quantity),
+        trigger_type=trigger_type,
+        latest_price=Decimal(latest),
+        trigger_price=Decimal(trigger),
+    ) is triggered
+
+
+def test_shadow_precision_and_realized_pnl_are_deterministic() -> None:
+    assert quantize_shadow_step(Decimal("1.23456"), Decimal("0.001")) == Decimal("1.235")
+    closed_long = apply_shadow_ledger_fill(
+        current_quantity=Decimal("2"),
+        current_average_entry_price=Decimal("100"),
+        side="SELL",
+        fill_quantity=Decimal("2"),
+        fill_price=Decimal("110"),
+        contract_multiplier=Decimal("0.1"),
+        reduce_only=True,
+    )
+    closed_short = apply_shadow_ledger_fill(
+        current_quantity=Decimal("-2"),
+        current_average_entry_price=Decimal("100"),
+        side="BUY",
+        fill_quantity=Decimal("2"),
+        fill_price=Decimal("90"),
+        contract_multiplier=Decimal("0.1"),
+        reduce_only=True,
+    )
+    assert closed_long.quantity == 0
+    assert closed_long.realized_pnl == Decimal("2.000000000000000000")
+    assert closed_short.quantity == 0
+    assert closed_short.realized_pnl == Decimal("2.000000000000000000")

@@ -142,9 +142,14 @@ from trading_control_plane.models import (
     RoleAssignment,
     RuntimeSourceHealth,
     SenderLease,
+    ShadowFill,
+    ShadowInstrument,
+    ShadowOrder,
+    ShadowPosition,
     SignalEvent,
     Team,
     TeamMembership,
+    TeamShadowAccount,
     TeamSignalSource,
     TradingAuthorization,
     TransferAuthorization,
@@ -179,7 +184,14 @@ from trading_control_plane.perptape import (
     validate_perptape_feed_payload,
 )
 from trading_control_plane.request_context import current_api_client_context
-from trading_control_plane.shadow import apply_shadow_fill, quote_shadow_execution
+from trading_control_plane.shadow import (
+    apply_shadow_fill,
+    apply_shadow_ledger_fill,
+    quantize_shadow_step,
+    quote_shadow_execution,
+    shadow_limit_crossed,
+    shadow_protection_triggered,
+)
 from trading_control_plane.venue_read_only import VenueInstrument, VenueReadOnlySnapshot
 
 CAPITAL_HISTORY_MIN_INTERVAL = timedelta(minutes=1)
@@ -721,6 +733,10 @@ __all__ = [
     "Sequence",
     "ServicePrincipalKind",
     "Session",
+    "ShadowFill",
+    "ShadowInstrument",
+    "ShadowOrder",
+    "ShadowPosition",
     "SignalEvent",
     "SignalEventStatus",
     "SignalSourceMode",
@@ -731,6 +747,7 @@ __all__ = [
     "Team",
     "TeamExecutionMode",
     "TeamMembership",
+    "TeamShadowAccount",
     "TeamSignalSource",
     "TradingAuthorization",
     "TransferAuthorization",
@@ -759,6 +776,7 @@ __all__ = [
     "_system_proposal_strategy_family",
     "apply_perptape_feed_delta",
     "apply_shadow_fill",
+    "apply_shadow_ledger_fill",
     "base64",
     "binascii",
     "bound_perptape_feed_snapshot",
@@ -784,10 +802,13 @@ __all__ = [
     "parse_api_client_token",
     "parse_hip3_dexes",
     "perptape_snapshot_identity",
+    "quantize_shadow_step",
     "quote_shadow_execution",
     "re",
     "select",
     "select_target_position",
+    "shadow_limit_crossed",
+    "shadow_protection_triggered",
     "text",
     "timedelta",
     "uuid4",

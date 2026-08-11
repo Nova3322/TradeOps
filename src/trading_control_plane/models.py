@@ -73,6 +73,97 @@ class Team(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
 
+class TeamShadowAccount(Base):
+    __tablename__ = "team_shadow_accounts"
+    __table_args__ = (
+        CheckConstraint("generation >= 1", name="ck_team_shadow_accounts_generation"),
+        CheckConstraint(
+            "initial_equity = 100000 AND equity >= 0 AND available_balance >= 0",
+            name="ck_team_shadow_accounts_balances",
+        ),
+        CheckConstraint("fees_paid >= 0", name="ck_team_shadow_accounts_fees_nonnegative"),
+        CheckConstraint(
+            "status IN ('ACTIVE','ARCHIVED')", name="ck_team_shadow_accounts_status"
+        ),
+        CheckConstraint("version >= 1", name="ck_team_shadow_accounts_version"),
+        UniqueConstraint("team_id", "generation", name="uq_team_shadow_accounts_generation"),
+        Index(
+            "uq_team_shadow_accounts_active",
+            "team_id",
+            unique=True,
+            postgresql_where=text("status = 'ACTIVE'"),
+        ),
+    )
+
+    shadow_account_id: Mapped[UUID] = mapped_column(
+        Uuid(as_uuid=True), primary_key=True, default=uuid4
+    )
+    team_id: Mapped[UUID] = mapped_column(
+        ForeignKey("teams.team_id", ondelete="RESTRICT"), nullable=False
+    )
+    generation: Mapped[int] = mapped_column(Integer, nullable=False)
+    initial_equity: Mapped[Decimal] = mapped_column(AMOUNT, nullable=False)
+    equity: Mapped[Decimal] = mapped_column(AMOUNT, nullable=False)
+    available_balance: Mapped[Decimal] = mapped_column(AMOUNT, nullable=False)
+    realized_pnl: Mapped[Decimal] = mapped_column(AMOUNT, nullable=False)
+    unrealized_pnl: Mapped[Decimal] = mapped_column(AMOUNT, nullable=False)
+    fees_paid: Mapped[Decimal] = mapped_column(AMOUNT, nullable=False)
+    status: Mapped[str] = mapped_column(String(16), nullable=False)
+    version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class ShadowInstrument(Base):
+    __tablename__ = "shadow_instruments"
+    __table_args__ = (
+        CheckConstraint(
+            "venue IN ('BINANCE','HYPERLIQUID','OKX','BYBIT')",
+            name="ck_shadow_instruments_venue",
+        ),
+        CheckConstraint(
+            "price_tick IS NULL OR price_tick > 0", name="ck_shadow_instruments_price_tick"
+        ),
+        CheckConstraint(
+            "quantity_step IS NULL OR quantity_step > 0",
+            name="ck_shadow_instruments_quantity_step",
+        ),
+        CheckConstraint(
+            "contract_multiplier IS NULL OR contract_multiplier > 0",
+            name="ck_shadow_instruments_multiplier",
+        ),
+        CheckConstraint(
+            "latest_price IS NULL OR latest_price > 0",
+            name="ck_shadow_instruments_latest_price",
+        ),
+        CheckConstraint("version >= 1", name="ck_shadow_instruments_version"),
+        UniqueConstraint("team_id", "venue", "symbol", name="uq_shadow_instruments_scope"),
+    )
+
+    shadow_instrument_id: Mapped[UUID] = mapped_column(
+        Uuid(as_uuid=True), primary_key=True, default=uuid4
+    )
+    team_id: Mapped[UUID] = mapped_column(
+        ForeignKey("teams.team_id", ondelete="RESTRICT"), nullable=False
+    )
+    catalog_instrument_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("instruments.instrument_id", ondelete="SET NULL"), nullable=True
+    )
+    venue: Mapped[str] = mapped_column(String(64), nullable=False)
+    symbol: Mapped[str] = mapped_column(String(120), nullable=False)
+    price_tick: Mapped[Decimal | None] = mapped_column(AMOUNT, nullable=True)
+    quantity_step: Mapped[Decimal | None] = mapped_column(AMOUNT, nullable=True)
+    contract_multiplier: Mapped[Decimal | None] = mapped_column(AMOUNT, nullable=True)
+    is_derivative: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    latest_price: Mapped[Decimal | None] = mapped_column(AMOUNT, nullable=True)
+    price_observed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
 class ExchangeAccount(Base):
     __tablename__ = "exchange_accounts"
     __table_args__ = (
@@ -1836,6 +1927,200 @@ class CommandReceipt(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
 
+class ShadowPosition(Base):
+    __tablename__ = "shadow_positions"
+    __table_args__ = (
+        CheckConstraint("generation >= 1", name="ck_shadow_positions_generation"),
+        CheckConstraint(
+            "average_entry_price >= 0 AND mark_price > 0",
+            name="ck_shadow_positions_prices",
+        ),
+        CheckConstraint(
+            "status IN ('OPEN','CLOSED','ARCHIVED')", name="ck_shadow_positions_status"
+        ),
+        CheckConstraint("version >= 1", name="ck_shadow_positions_version"),
+        UniqueConstraint(
+            "team_id",
+            "generation",
+            "shadow_instrument_id",
+            name="uq_shadow_positions_generation_instrument",
+        ),
+        ForeignKeyConstraint(
+            ["team_id", "source_account_id", "venue"],
+            [
+                "exchange_accounts.team_id",
+                "exchange_accounts.account_id",
+                "exchange_accounts.venue",
+            ],
+            name="fk_shadow_positions_exchange_account",
+            ondelete="RESTRICT",
+        ),
+        Index("ix_shadow_positions_active", "team_id", "generation", "status"),
+    )
+
+    shadow_position_id: Mapped[UUID] = mapped_column(
+        Uuid(as_uuid=True), primary_key=True, default=uuid4
+    )
+    shadow_account_id: Mapped[UUID] = mapped_column(
+        ForeignKey("team_shadow_accounts.shadow_account_id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    team_id: Mapped[UUID] = mapped_column(
+        ForeignKey("teams.team_id", ondelete="RESTRICT"), nullable=False
+    )
+    generation: Mapped[int] = mapped_column(Integer, nullable=False)
+    shadow_instrument_id: Mapped[UUID] = mapped_column(
+        ForeignKey("shadow_instruments.shadow_instrument_id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    source_account_id: Mapped[str] = mapped_column(String(120), nullable=False)
+    venue: Mapped[str] = mapped_column(String(64), nullable=False)
+    quantity: Mapped[Decimal] = mapped_column(AMOUNT, nullable=False)
+    average_entry_price: Mapped[Decimal] = mapped_column(AMOUNT, nullable=False)
+    mark_price: Mapped[Decimal] = mapped_column(AMOUNT, nullable=False)
+    realized_pnl: Mapped[Decimal] = mapped_column(AMOUNT, nullable=False)
+    unrealized_pnl: Mapped[Decimal] = mapped_column(AMOUNT, nullable=False)
+    status: Mapped[str] = mapped_column(String(16), nullable=False)
+    version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class ShadowOrder(Base):
+    __tablename__ = "shadow_orders"
+    __table_args__ = (
+        CheckConstraint("generation >= 1", name="ck_shadow_orders_generation"),
+        CheckConstraint("side IN ('BUY','SELL')", name="ck_shadow_orders_side"),
+        CheckConstraint(
+            "order_type IN ('MARKET','LIMIT','PROTECTION')", name="ck_shadow_orders_type"
+        ),
+        CheckConstraint(
+            "status IN ('OPEN','TRIGGERED','FILLED','CANCELLED','BLOCKED')",
+            name="ck_shadow_orders_status",
+        ),
+        CheckConstraint(
+            "quantity > 0 AND filled_quantity >= 0 AND filled_quantity <= quantity",
+            name="ck_shadow_orders_quantities",
+        ),
+        CheckConstraint("fee >= 0", name="ck_shadow_orders_fee"),
+        CheckConstraint(
+            "(order_type = 'LIMIT' AND limit_price IS NOT NULL AND limit_price > 0) OR "
+            "(order_type = 'MARKET' AND limit_price IS NULL) OR "
+            "(order_type = 'PROTECTION' AND trigger_price IS NOT NULL "
+            "AND trigger_type IN ('STOP_LOSS','TAKE_PROFIT') "
+            "AND execution_type IN ('MARKET','LIMIT') "
+            "AND ((execution_type = 'LIMIT' AND limit_price IS NOT NULL AND limit_price > 0) "
+            "OR (execution_type = 'MARKET' AND limit_price IS NULL)))",
+            name="ck_shadow_orders_shape",
+        ),
+        CheckConstraint(
+            "(order_type = 'PROTECTION' AND reduce_only) OR order_type <> 'PROTECTION'",
+            name="ck_shadow_orders_protection_reduce_only",
+        ),
+        CheckConstraint("version >= 1", name="ck_shadow_orders_version"),
+        ForeignKeyConstraint(
+            ["team_id", "source_account_id", "venue"],
+            [
+                "exchange_accounts.team_id",
+                "exchange_accounts.account_id",
+                "exchange_accounts.venue",
+            ],
+            name="fk_shadow_orders_exchange_account",
+            ondelete="RESTRICT",
+        ),
+        UniqueConstraint("order_intent_id", name="uq_shadow_orders_intent"),
+        UniqueConstraint(
+            "team_id", "generation", "idempotency_key", name="uq_shadow_orders_idempotency"
+        ),
+        Index("ix_shadow_orders_open", "team_id", "generation", "status"),
+    )
+
+    shadow_order_id: Mapped[UUID] = mapped_column(
+        Uuid(as_uuid=True), primary_key=True, default=uuid4
+    )
+    shadow_account_id: Mapped[UUID] = mapped_column(
+        ForeignKey("team_shadow_accounts.shadow_account_id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    team_id: Mapped[UUID] = mapped_column(
+        ForeignKey("teams.team_id", ondelete="RESTRICT"), nullable=False
+    )
+    generation: Mapped[int] = mapped_column(Integer, nullable=False)
+    shadow_instrument_id: Mapped[UUID] = mapped_column(
+        ForeignKey("shadow_instruments.shadow_instrument_id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    source_account_id: Mapped[str] = mapped_column(String(120), nullable=False)
+    venue: Mapped[str] = mapped_column(String(64), nullable=False)
+    campaign_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("campaigns.campaign_id", ondelete="SET NULL"), nullable=True
+    )
+    order_intent_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("order_intents.intent_id", ondelete="SET NULL"), nullable=True
+    )
+    shadow_position_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("shadow_positions.shadow_position_id", ondelete="SET NULL"), nullable=True
+    )
+    side: Mapped[str] = mapped_column(String(8), nullable=False)
+    order_type: Mapped[str] = mapped_column(String(16), nullable=False)
+    quantity: Mapped[Decimal] = mapped_column(AMOUNT, nullable=False)
+    limit_price: Mapped[Decimal | None] = mapped_column(AMOUNT, nullable=True)
+    trigger_price: Mapped[Decimal | None] = mapped_column(AMOUNT, nullable=True)
+    trigger_type: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    execution_type: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    reduce_only: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    status: Mapped[str] = mapped_column(String(16), nullable=False)
+    filled_quantity: Mapped[Decimal] = mapped_column(AMOUNT, nullable=False)
+    fill_price: Mapped[Decimal | None] = mapped_column(AMOUNT, nullable=True)
+    fee: Mapped[Decimal] = mapped_column(AMOUNT, nullable=False)
+    realized_pnl: Mapped[Decimal] = mapped_column(AMOUNT, nullable=False)
+    correlation_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), nullable=False)
+    idempotency_key: Mapped[str] = mapped_column(String(160), nullable=False)
+    version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class ShadowFill(Base):
+    __tablename__ = "shadow_fills"
+    __table_args__ = (
+        CheckConstraint("generation >= 1", name="ck_shadow_fills_generation"),
+        CheckConstraint("side IN ('BUY','SELL')", name="ck_shadow_fills_side"),
+        CheckConstraint(
+            "quantity > 0 AND price > 0 AND notional > 0 AND fee >= 0",
+            name="ck_shadow_fills_amounts",
+        ),
+        UniqueConstraint("shadow_order_id", name="uq_shadow_fills_order"),
+        Index("ix_shadow_fills_team_time", "team_id", "generation", "executed_at"),
+    )
+
+    shadow_fill_id: Mapped[UUID] = mapped_column(
+        Uuid(as_uuid=True), primary_key=True, default=uuid4
+    )
+    shadow_order_id: Mapped[UUID] = mapped_column(
+        ForeignKey("shadow_orders.shadow_order_id", ondelete="RESTRICT"), nullable=False
+    )
+    shadow_account_id: Mapped[UUID] = mapped_column(
+        ForeignKey("team_shadow_accounts.shadow_account_id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    team_id: Mapped[UUID] = mapped_column(
+        ForeignKey("teams.team_id", ondelete="RESTRICT"), nullable=False
+    )
+    generation: Mapped[int] = mapped_column(Integer, nullable=False)
+    shadow_instrument_id: Mapped[UUID] = mapped_column(
+        ForeignKey("shadow_instruments.shadow_instrument_id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    side: Mapped[str] = mapped_column(String(8), nullable=False)
+    quantity: Mapped[Decimal] = mapped_column(AMOUNT, nullable=False)
+    price: Mapped[Decimal] = mapped_column(AMOUNT, nullable=False)
+    notional: Mapped[Decimal] = mapped_column(AMOUNT, nullable=False)
+    fee: Mapped[Decimal] = mapped_column(AMOUNT, nullable=False)
+    realized_pnl: Mapped[Decimal] = mapped_column(AMOUNT, nullable=False)
+    executed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
 class VenueOrder(Base):
     __tablename__ = "venue_orders"
     __table_args__ = (
@@ -2327,6 +2612,14 @@ class AuditEvent(Base):
         Index("ix_audit_events_workspace_created", "workspace_id", "created_at"),
         Index("ix_audit_events_team_created", "team_id", "created_at"),
         Index("ix_audit_events_api_client_created", "api_client_id", "created_at"),
+        CheckConstraint(
+            "environment IS NULL OR environment IN ('SHADOW','TESTNET','LIVE')",
+            name="ck_audit_events_environment",
+        ),
+        CheckConstraint(
+            "generation IS NULL OR generation >= 1",
+            name="ck_audit_events_generation",
+        ),
         Index(
             "ix_audit_events_team_account_created",
             "team_id",
@@ -2343,6 +2636,9 @@ class AuditEvent(Base):
     )
     team_id: Mapped[UUID | None] = mapped_column(ForeignKey("teams.team_id"), nullable=True)
     account_id: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    environment: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    generation: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    rule_summary: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
     actor_id: Mapped[str] = mapped_column(String(255), nullable=False)
     api_client_id: Mapped[UUID | None] = mapped_column(
         ForeignKey("api_clients.api_client_id", ondelete="RESTRICT"), nullable=True

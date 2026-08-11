@@ -12,6 +12,8 @@ from trading_control_plane.service_transactions import TransactionService
 
 
 class ServiceFacade(Protocol):
+    def _shadow_activation_blockers(self, session: Session, team: Team) -> list[str]: ...
+
     def _exchange_account_definition(
         self, account_id: str, venue: str, label: str | None
     ) -> tuple[str, str, str]: ...

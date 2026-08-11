@@ -504,6 +504,35 @@ class WorkspaceService(ServiceComponent):
                 team.trading_enabled = True
                 team.version += 1
                 team.updated_at = now
+            shadow_account = session.scalar(
+                select(TeamShadowAccount).where(
+                    TeamShadowAccount.team_id == team.team_id,
+                    TeamShadowAccount.status == "ACTIVE",
+                )
+            )
+            shadow_account_created = shadow_account is None
+            if shadow_account is None:
+                latest_generation = session.scalar(
+                    select(func.max(TeamShadowAccount.generation)).where(
+                        TeamShadowAccount.team_id == team.team_id
+                    )
+                )
+                shadow_account = TeamShadowAccount(
+                    team_id=team.team_id,
+                    generation=int(latest_generation or 0) + 1,
+                    initial_equity=Decimal("100000"),
+                    equity=Decimal("100000"),
+                    available_balance=Decimal("100000"),
+                    realized_pnl=Decimal(0),
+                    unrealized_pnl=Decimal(0),
+                    fees_paid=Decimal(0),
+                    status="ACTIVE",
+                    version=1,
+                    created_at=now,
+                    updated_at=now,
+                )
+                session.add(shadow_account)
+                session.flush()
             result = {
                 "team_id": str(team.team_id),
                 "execution_mode": team.execution_mode,
@@ -537,6 +566,28 @@ class WorkspaceService(ServiceComponent):
                 team_id=team.team_id,
                 now=now,
             )
+            if shadow_account_created:
+                self.transactions._audit(
+                    session,
+                    actor_id=str(actor_id),
+                    event_type="SHADOW_ACCOUNT_INITIALIZED",
+                    object_type="TeamShadowAccount",
+                    object_id=shadow_account.shadow_account_id,
+                    reason="generation=1;initial_equity=100000",
+                    correlation_id=uuid4(),
+                    object_version=shadow_account.version,
+                    idempotency_key=idempotency_key,
+                    workspace_id=team.workspace_id,
+                    team_id=team.team_id,
+                    environment=ExecutionEnvironment.SHADOW.value,
+                    generation=shadow_account.generation,
+                    rule_summary={
+                        "initial_equity": "100000",
+                        "capital_unit": "USDT_EQUIVALENT",
+                        "status": "ACTIVE",
+                    },
+                    now=now,
+                )
             return result
 
     def select_scope(
