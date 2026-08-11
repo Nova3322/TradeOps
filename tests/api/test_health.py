@@ -172,7 +172,7 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
 
     assert response.status_code == 200
     assert "交易控制台" in response.text
-    assert "/assets/app.js?v=151" in response.text
+    assert "/assets/app.js?v=154" in response.text
     assert 'href="/signals"' in response.text
     assert "/assets/styles.css?v=64" in response.text
     assert 'href="/assets/tradingops-logo.png" type="image/png"' in response.text
@@ -239,6 +239,9 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
     assert "const proposerOnly = hasCapability('proposal.create')" in app_javascript.text
     assert "item.proposer_id === session.user_id) : allItems" in app_javascript.text
     assert "function proposalTabs(active, canPropose" in app_javascript.text
+    assert '<option value="OKX">OKX</option><option value="BYBIT">Bybit</option>' in (
+        app_javascript.text
+    )
     for task_label in ("我的提案", "待我审核", "全部记录", "手动创建"):
         assert task_label in app_javascript.text
     assert "approvedAwaitingLaunch" in app_javascript.text
@@ -252,6 +255,7 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
     assert "href:'/notifications'" in app_javascript.text
     assert "hasCapability('notification.view')" in app_javascript.text
     assert "async function renderTeamSettings()" in app_javascript.text
+    assert "Exact-account LIVE Freqtrade worker verified" in app_javascript.text
     for setup_step in (
         "创建团队",
         "接入信号与账户",
@@ -505,7 +509,7 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
     assert "当前无监控对象" in app_javascript.text
     assert "逐笔开仓可检查" in app_javascript.text
     assert "实时安全条件未通过" in app_javascript.text
-    assert "仿真执行进程已连接" in app_javascript.text
+    assert "精确账户 Worker 已验证" in app_javascript.text
     assert "Freqtrade worker 已接管" not in app_javascript.text
     assert "venue-sync-form" not in app_javascript.text
     assert "账户数据自动更新中" in app_javascript.text
@@ -547,7 +551,7 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
 
     service_worker = get(app, "/sw.js")
     assert service_worker.status_code == 200
-    assert "trading-shell-v123" in service_worker.text
+    assert "trading-shell-v126" in service_worker.text
     assert "/assets/tradingops-logo.png" in service_worker.text
     assert "/assets/tradingops-icon.svg" in service_worker.text
     assert "/assets/icon.svg" not in service_worker.text
@@ -657,7 +661,11 @@ def test_manual_proposal_instrument_picker_filters_and_requires_exact_symbol() -
     assert 'input name="instrument_symbol" aria-label="币对"' in source
     assert 'list="manual-instrument-options"' in source
     assert '<option value="HYPERLIQUID">Hyperliquid</option>' in source
-    assert "Hyperliquid（含 HIP-3）" in source
+    assert '<option value="OKX">OKX</option>' in source
+    assert '<option value="BYBIT">Bybit</option>' in source
+    assert 'select name="account_id" required' in source
+    assert "api('/api/exchange-accounts')" in source
+    assert "venue === 'HYPERLIQUID' ? '（含 HIP-3）' : ''" in source
     assert "form.elements.instrument_symbol.reportValidity()" in source
     assert "delete data.instrument_symbol" in source
 
@@ -675,7 +683,9 @@ def test_manual_proposal_instrument_picker_filters_and_requires_exact_symbol() -
         const context = vm.createContext({});
         vm.runInContext(
           source.slice(from, to)
-            + "; this.options = manualInstrumentOptions; this.match = manualInstrumentMatch;",
+            + "; this.options = manualInstrumentOptions;"
+            + " this.match = manualInstrumentMatch;"
+            + " this.accountOptions = manualAccountOptions;",
           context,
         );
         const instruments = [
@@ -692,6 +702,15 @@ def test_manual_proposal_instrument_picker_filters_and_requires_exact_symbol() -
         assert.equal(context.match(instruments, "HYPERLIQUID", "XYZ:aapl").instrument_id, "h-aapl");
         assert.equal(context.match(instruments, "BINANCE", "BTC"), null);
         assert.equal(context.match(instruments, "HYPERLIQUID", "BTCUSDT"), null);
+        const accounts = [
+          {account_id:"okx-a",venue:"OKX",active:true},
+          {account_id:"okx-disabled",venue:"OKX",active:false},
+          {account_id:"bybit-a",venue:"BYBIT",active:true},
+        ];
+        assert.deepEqual(
+          Array.from(context.accountOptions(accounts, "OKX"), item => item.account_id),
+          ["okx-a"],
+        );
         """
     )
     completed = subprocess.run(  # noqa: S603
@@ -1727,19 +1746,23 @@ def test_system_and_venue_pages_distinguish_read_only_snapshots_from_live_execut
 
     assert "只读控制台可用，但 Freqtrade 执行底座尚未就绪" in source  # noqa: RUF001
     assert "Freqtrade 执行底座已就绪，但交易所只读连接受限" in source  # noqa: RUF001
-    assert "两个 Freqtrade 执行进程已通过仿真模式检查" in source
+    assert "const accountBoundWorkers = Array.isArray(freqtrade?.account_bindings)" in source
+    assert "已保存 ${configuredWorkers.length} 个精确账户 Worker 绑定" in source
     assert "Freqtrade 执行进程未启动" in source
     assert "LIVE_ORDER_SEND 保持关闭" in source
+    assert "OKX:['OKX','生产账户','/venues?venue=OKX'" in source
+    assert "BYBIT:['Bybit','生产账户','/venues?venue=BYBIT'" in source
+    assert "${availableSources} / ${connectionSourceCount} 可用" in source
     assert "fmtConnectionCategory(state.category)" in source
     assert "当前连接不可用，以下仅为最后一次保存快照" in source  # noqa: RUF001
     assert "自动同步等待连接恢复" in source
     assert "Number(item.quantity) !== 0" in source
     assert "不计入当前委托" in source
     assert "当前账户没有未完成委托" in source
-    assert "执行由 Freqtrade 执行进程负责；本页不能下单" in source  # noqa: RUF001
-    assert "执行底座为 Freqtrade；控制面尚未接入执行进程" in source  # noqa: RUF001
-    assert "status.execution_backend === 'FREQTRADE'" in source
-    assert "status.worker_configured" in source
+    assert "精确账户 LIVE Freqtrade Worker 已验证；下单操作仍只在交易任务中进行" in source
+    assert "精确账户 Freqtrade Worker 尚未配置；订单发送保持阻断" in source
+    assert "const executionWorker = account?.execution_worker || null" in source
+    assert "executionWorker?.live_ready" in source
     assert "connectionProbeEvidence" in source
     assert "上游失败时按有界退避计划重试" in source
     assert 'data-label="读取状态与处理建议"' in source

@@ -21,6 +21,8 @@ JsonValue = JsonObject | list[Any]
 JsonFetcher = Callable[[str, str, JsonObject | None, dict[str, str], float], JsonValue]
 
 BINANCE_PERPETUAL_PATTERN = re.compile(r"^(?P<base>[^\s/:]{1,64})USDT$")
+OKX_PERPETUAL_PATTERN = re.compile(r"^(?P<base>[A-Z0-9]{1,64})-USDT-SWAP$")
+BYBIT_PERPETUAL_PATTERN = re.compile(r"^(?P<base>[A-Z0-9]{1,64})USDT$")
 HYPERLIQUID_CORE_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 HYPERLIQUID_HIP3_PATTERN = re.compile(
     r"^(?P<dex>[a-z0-9][a-z0-9_-]{0,31}):(?P<coin>[A-Za-z0-9][A-Za-z0-9._-]{0,63})$"
@@ -50,10 +52,26 @@ def freqtrade_pair(venue: str, symbol: str, *, hip3_dexes: tuple[str, ...] = ())
                 "Binance Freqtrade routing requires an exact USDⓈ-M USDT perpetual symbol",
             )
         return f"{match.group('base')}/USDT:USDT"
+    if venue == "OKX":
+        match = OKX_PERPETUAL_PATTERN.fullmatch(symbol)
+        if match is None:
+            raise DomainRejected(
+                "FREQTRADE_INSTRUMENT_UNSUPPORTED",
+                "OKX Freqtrade routing requires an exact USDT linear SWAP symbol",
+            )
+        return f"{match.group('base')}/USDT:USDT"
+    if venue == "BYBIT":
+        match = BYBIT_PERPETUAL_PATTERN.fullmatch(symbol)
+        if match is None:
+            raise DomainRejected(
+                "FREQTRADE_INSTRUMENT_UNSUPPORTED",
+                "Bybit Freqtrade routing requires an exact USDT linear perpetual symbol",
+            )
+        return f"{match.group('base')}/USDT:USDT"
     if venue != "HYPERLIQUID":
         raise DomainRejected(
             "FREQTRADE_VENUE_UNSUPPORTED",
-            "Freqtrade execution is restricted to Binance and Hyperliquid",
+            "Freqtrade execution is restricted to supported TradingOPS venues",
         )
     hip3 = HYPERLIQUID_HIP3_PATTERN.fullmatch(symbol)
     if hip3 is not None:
@@ -132,7 +150,7 @@ def _default_fetcher(
 @dataclass(frozen=True, slots=True)
 class FreqtradeWorkerSpec:
     name: str
-    venue: Literal["BINANCE", "HYPERLIQUID"]
+    venue: Literal["BINANCE", "HYPERLIQUID", "OKX", "BYBIT"]
     base_url: str
     username: str | None
     password: str | None = field(repr=False)
@@ -180,6 +198,7 @@ class FreqtradeTrade:
     amount: Decimal
     stake_amount: Decimal
     open_rate: Decimal
+    current_rate: Decimal
     close_rate: Decimal | None
     is_open: bool
     enter_tag: str
@@ -312,6 +331,11 @@ def parse_freqtrade_trade(value: JsonObject) -> FreqtradeTrade:
         amount=_decimal(value.get("amount"), "amount", positive=True),
         stake_amount=_decimal(value.get("stake_amount"), "stake_amount", positive=True),
         open_rate=_decimal(value.get("open_rate"), "open_rate", positive=True),
+        current_rate=_decimal(
+            value.get("current_rate", value.get("open_rate")),
+            "current_rate",
+            positive=True,
+        ),
         close_rate=(
             None
             if close_rate_raw in {None, 0, "0", "0.0"}
@@ -445,7 +469,12 @@ class FreqtradeWorkerClient:
         assert isinstance(version, dict)
         assert isinstance(whitelist_response, dict)
         exchange = config.get("exchange")
-        expected_exchange = "binance" if self.spec.venue == "BINANCE" else "hyperliquid"
+        expected_exchange = {
+            "BINANCE": "binance",
+            "HYPERLIQUID": "hyperliquid",
+            "OKX": "okx",
+            "BYBIT": "bybit",
+        }[self.spec.venue]
         if exchange != expected_exchange or config.get("trading_mode") != "futures":
             raise DomainRejected(
                 "FREQTRADE_WORKER_SCOPE_MISMATCH",

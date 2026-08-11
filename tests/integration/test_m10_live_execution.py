@@ -315,7 +315,11 @@ def register_live_exchange_account(
         credentials=(
             {"account_address": HYPERLIQUID_ACCOUNT}
             if venue == "HYPERLIQUID"
-            else {"api_key": f"{key}-fixture-key", "api_secret": f"{key}-fixture-secret"}
+            else {
+                "api_key": f"{key}-fixture-key",
+                "api_secret": f"{key}-fixture-secret",
+                **({"passphrase": f"{key}-fixture-passphrase"} if venue == "OKX" else {}),
+            }
         ),
         idempotency_key=f"{key}-account",
         now=NOW,
@@ -1775,7 +1779,13 @@ def test_freqtrade_live_never_falls_back_to_an_unbound_venue_worker(
     )
     scope = "LIVE:acct-freqtrade-unbound:BINANCE"
     owner = "freqtrade-unbound-worker"
-    token = service.acquire_sender(scope, owner, ids["operator"], NOW)
+    token = service.acquire_sender(
+        scope,
+        owner,
+        ids["operator"],
+        NOW,
+        lease_duration=timedelta(minutes=30),
+    )
     service.set_capability_gate(
         "LIVE_ORDER_SEND",
         CapabilityStatus.ENABLED,
@@ -1846,6 +1856,211 @@ def test_freqtrade_live_never_falls_back_to_an_unbound_venue_worker(
             assert calls == []
 
     asyncio.run(scenario())
+
+
+@pytest.mark.parametrize(
+    ("venue", "symbol", "exchange"),
+    [
+        ("OKX", "XRP-USDT-SWAP", "okx"),
+        ("BYBIT", "XRPUSDT", "bybit"),
+    ],
+)
+def test_okx_bybit_live_execution_reuses_exact_account_freqtrade_chain(
+    database: Database, venue: str, symbol: str, exchange: str
+) -> None:
+    service = TradingService(database, credential_encryption_key=credential_encryption_key())
+    key = f"freqtrade-{venue.lower()}"
+    account_id = f"acct-{key}"
+    ids = seed_live(
+        service,
+        key=key,
+        account_id=account_id,
+        venue=venue,
+        symbol=symbol,
+        quantity=Decimal(5),
+        mark_price=Decimal(1),
+        tick_size=Decimal("0.0001"),
+        lot_size=Decimal("0.1"),
+        minimum_notional=Decimal(5),
+    )
+    account_projection = TradingQueries(database).exchange_accounts(ids["admin"])["data"][0]
+    worker_url = "http://127.0.0.1:18085"
+    configured = service.configure_exchange_account_freqtrade_worker(
+        ids["exchange_account"],
+        actor_id=ids["admin"],
+        mode="LIVE",
+        name=f"{exchange}-exact-worker",
+        base_url=worker_url,
+        username="control-plane",
+        password="worker-fixture-password",  # noqa: S106
+        hip3_dexes=(),
+        expected_version=int(account_projection["version"]),
+        idempotency_key=f"{key}-worker-configure",
+        now=NOW,
+    )
+    binding, replay = service.prepare_exchange_account_freqtrade_verification(
+        ids["exchange_account"],
+        actor_id=ids["admin"],
+        expected_version=int(configured["version"]),
+        idempotency_key=f"{key}-worker-verify",
+    )
+    assert replay is None and binding is not None
+    service.record_exchange_account_freqtrade_verification(
+        binding,
+        actor_id=ids["admin"],
+        error_code=None,
+        idempotency_key=f"{key}-worker-verify",
+        now=NOW,
+    )
+
+    class ExactWorkerFixture:
+        def __init__(self) -> None:
+            self.entry_tag: str | None = None
+            self.write_count = 0
+
+        def __call__(
+            self,
+            url: str,
+            method: str,
+            payload: dict[str, Any] | None,
+            headers: dict[str, str],
+            timeout: float,
+        ) -> dict[str, Any] | list[dict[str, Any]]:
+            del headers, timeout
+            path = urllib.parse.urlparse(url).path
+            if path.endswith("/ping"):
+                return {"status": "pong"}
+            if path.endswith("/token/login"):
+                return {"access_token": "short-lived-token"}
+            if path.endswith("/show_config"):
+                return {
+                    "exchange": exchange,
+                    "trading_mode": "futures",
+                    "dry_run": False,
+                    "force_entry_enable": True,
+                    "state": "running",
+                }
+            if path.endswith("/version"):
+                return {"version": "2026.3"}
+            if path.endswith("/whitelist"):
+                return {"whitelist": ["XRP/USDT:USDT"]}
+            if path.endswith("/forceenter"):
+                assert method == "POST" and payload is not None
+                assert payload["pair"] == "XRP/USDT:USDT"
+                self.entry_tag = str(payload["entry_tag"])
+                self.write_count += 1
+                return {"status": "created"}
+            if path.endswith("/status"):
+                if self.entry_tag is None:
+                    return []
+                return [
+                    {
+                        "trade_id": f"{exchange}-trade-1",
+                        "pair": "XRP/USDT:USDT",
+                        "is_short": False,
+                        "amount": "5",
+                        "stake_amount": "4.9",
+                        "open_rate": "1",
+                        "current_rate": "1",
+                        "close_rate": None,
+                        "is_open": True,
+                        "enter_tag": self.entry_tag,
+                        "leverage": "1",
+                        "stop_loss_abs": "0.95",
+                        "stoploss_order_id": f"{exchange}-stop-1",
+                        "open_timestamp": int(NOW.timestamp() * 1000),
+                        "orders": [
+                            {
+                                "ft_order_side": "buy",
+                                "order_id": f"{exchange}-entry-1",
+                                "status": "closed",
+                                "is_open": False,
+                            }
+                        ],
+                    }
+                ]
+            raise AssertionError((method, path))
+
+    fixture = ExactWorkerFixture()
+    worker = FreqtradeWorkerClient(
+        FreqtradeWorkerSpec(
+            name=binding.worker_name,
+            venue=venue,  # type: ignore[arg-type]
+            base_url=worker_url,
+            username="control-plane",
+            password="worker-fixture-password",  # noqa: S106
+            exchange_account_id=str(ids["exchange_account"]),
+            team_id=str(binding.team_id),
+            account_id=account_id,
+        ),
+        confirmation_timeout_seconds=10,
+        fetcher=fixture,
+    )
+    settings = Settings(
+        environment="test",
+        database_url=str(database.engine.url),
+        allow_mock_identity=True,
+        session_signing_secret="freqtrade-okx-bybit-test-secret-long-enough",  # noqa: S106
+        credential_encryption_key=credential_encryption_key(),
+        public_base_url="http://test",
+        execution_backend="FREQTRADE",
+        freqtrade_workers_enabled=True,
+        freqtrade_live_order_send_enabled=True,
+        _env_file=None,
+    )
+    app = create_app(
+        settings,
+        database,
+        PerptapeClient(
+            base_url="https://perptape.com",
+            api_key=None,
+            contract_version="breakouts-v1",
+            cache_ttl=timedelta(minutes=1),
+        ),
+        freqtrade_workers=(worker,),
+    )
+    scope = f"LIVE:{account_id}:{venue}"
+    owner = f"{key}-worker"
+    token = service.acquire_sender(
+        scope,
+        owner,
+        ids["operator"],
+        NOW,
+        lease_duration=timedelta(minutes=30),
+    )
+    service.set_capability_gate(
+        "LIVE_ORDER_SEND",
+        CapabilityStatus.ENABLED,
+        "OKX/Bybit exact-account Freqtrade integration fixture",
+        ids["admin"],
+        now=NOW,
+    )
+
+    async def scenario() -> None:
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as http:
+            await login(http, f"{key}-operator")
+            response = await http.post(
+                f"/api/intents/{ids['opening']}/freqtrade/live/send",
+                json={
+                    "execution_scope": scope,
+                    "owner_id": owner,
+                    "fencing_token": token,
+                },
+            )
+            assert response.status_code == 200, response.text
+            assert response.json()["backend"] == "FREQTRADE"
+            assert response.json()["pair"] == "XRP/USDT:USDT"
+            assert response.json()["worker"] == f"{exchange}-exact-worker"
+
+    asyncio.run(scenario())
+
+    assert fixture.write_count == 1
+    with database.session_factory() as session:
+        intent = session.get(OrderIntent, ids["opening"])
+        protection = session.scalar(select(ProtectionOrder))
+        assert intent is not None and intent.status == "FILLED"
+        assert protection is not None and protection.status == "ACTIVE"
+        assert protection.venue_order_id == f"{exchange}-stop-1"
 
 
 def test_hyperliquid_live_flow_is_gated_idempotent_fenced_and_cleans_protection(

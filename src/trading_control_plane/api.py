@@ -1372,7 +1372,12 @@ def create_app(
     def exchange_accounts(
         identity: SessionIdentity = identity_dependency,
     ) -> dict[str, Any]:
-        require_capability(identity, "venue.view")
+        try:
+            require_capability(identity, "venue.view")
+        except DomainRejected as exc:
+            if exc.code != "RBAC_DENIED":
+                raise
+            require_capability(identity, "proposal.create")
         result = queries().exchange_accounts(identity.user_id)
         return {"data": result, "as_of": _now().isoformat()}
 
@@ -6359,7 +6364,7 @@ def create_app(
                         "account_binding_counts": freqtrade_binding_counts,
                         "binding_source": "DATABASE_ACCOUNT_ENVELOPE",
                         "legacy_unbound_default_count": len(resolved_freqtrade_workers),
-                        "venues": ["BINANCE", "HYPERLIQUID"],
+                        "venues": ["BINANCE", "HYPERLIQUID", "OKX", "BYBIT"],
                         "direct_venue_send": False,
                         "live_order_send": resolved_settings.freqtrade_live_order_send_enabled,
                     },

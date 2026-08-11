@@ -2116,6 +2116,22 @@ function manualInstrumentMatch(allInstruments, venue, symbol) {
   ) || null;
 }
 
+function manualAccountOptions(allAccounts, venue) {
+  return allAccounts.filter(item => item.active && item.venue === venue);
+}
+
+function syncManualAccountPicker(form, allAccounts) {
+  const venue = form.elements.venue.value;
+  const accountSelect = form.elements.account_id;
+  const available = manualAccountOptions(allAccounts, venue);
+  const current = available.find(item => item.account_id === accountSelect.value);
+  accountSelect.innerHTML = available.length
+    ? available.map(item => `<option value="${escapeHtml(item.account_id)}" ${item.account_id === current?.account_id ? 'selected' : ''}>${escapeHtml(item.label)} · ${escapeHtml(item.account_id)}</option>`).join('')
+    : '<option value="">当前交易所没有可用账户</option>';
+  accountSelect.setCustomValidity(available.length ? '' : '请先在团队设置中登记当前交易所账户。');
+  return available;
+}
+
 function proposalTabs(active, canPropose, environmentQuery = '') {
   const query = environmentQuery ? environmentQuery.slice(1) : '';
   const mineHref = `/proposals?mine=1${query ? `&${query}` : ''}`;
@@ -2146,8 +2162,8 @@ function syncManualInstrumentPicker(form, {clearSymbol = false} = {}) {
   );
   if (selected) {
     status.textContent = currentLanguage === 'en'
-      ? `Matched: ${venue === 'BINANCE' ? 'Binance' : 'Hyperliquid / HIP-3'} · ${selected.symbol}`
-      : `已匹配：${venue === 'BINANCE' ? '币安' : 'Hyperliquid（含 HIP-3）'} · ${selected.symbol}`;
+      ? `Matched: ${fmtVenueLabel(venue)}${venue === 'HYPERLIQUID' ? ' / HIP-3' : ''} · ${selected.symbol}`
+      : `已匹配：${fmtVenueLabel(venue)}${venue === 'HYPERLIQUID' ? '（含 HIP-3）' : ''} · ${selected.symbol}`;
     status.dataset.state = 'matched';
   } else if (symbolInput.value) {
     status.textContent = currentLanguage === 'en'
@@ -2164,8 +2180,12 @@ function syncManualInstrumentPicker(form, {clearSymbol = false} = {}) {
 }
 
 async function renderManualProposal() {
-  const result = await api('/api/instruments');
+  const [result, accountResult] = await Promise.all([
+    api('/api/instruments'),
+    api('/api/exchange-accounts'),
+  ]);
   instruments = result.data;
+  const proposalAccounts = accountResult.data?.data || [];
   const environment = currentWorkflowEnvironment();
   const environmentCopy = environment === 'SHADOW' ? '影子模式 · 只使用虚拟资金' : fmtEnvironment(environment, true);
   const environmentQuery = environment === 'LIVE' ? '' : `?environment=${environment}`;
@@ -2173,8 +2193,8 @@ async function renderManualProposal() {
     ${proposalTabs('create', true, environmentQuery)}
     <div class="compose-layout"><form id="manual-form" class="form-panel proposal-compose" data-environment="${escapeHtml(environment)}">
       <section class="form-section"><div class="section-title"><span>1</span><div><h2>交易意图</h2><p>选标的、定方向，说清从哪个价格开始执行。</p></div></div><div class="field-grid">
-        <label>账户<span class="field-help">资金和权限归属</span><input name="account_id" value="acct-1" required></label>
-        <div class="instrument-field"><span class="field-label">交易标的</span><span class="field-help">先选交易所，再输入完整币对；支持键盘输入和建议匹配，共 ${instruments.length} 个在线 U 本位合约</span><div class="instrument-picker"><label><span>交易所</span><select name="venue" aria-label="交易所" required><option value="BINANCE">币安</option><option value="HYPERLIQUID">Hyperliquid</option></select></label><label><span>币对</span><input name="instrument_symbol" aria-label="币对" list="manual-instrument-options" autocomplete="off" spellcheck="false" placeholder="例如 BTCUSDT" required></label></div><input name="instrument_id" type="hidden"><datalist id="manual-instrument-options"></datalist><span class="instrument-match" data-instrument-match data-state="idle" role="status" aria-live="polite"></span></div>
+        <label>账户<span class="field-help">仅显示当前团队与交易所中获权的精确账户</span><select name="account_id" required></select></label>
+        <div class="instrument-field"><span class="field-label">交易标的</span><span class="field-help">先选交易所，再输入完整币对；支持键盘输入和建议匹配，共 ${instruments.length} 个在线 U 本位合约</span><div class="instrument-picker"><label><span>交易所</span><select name="venue" aria-label="交易所" required><option value="BINANCE">币安</option><option value="HYPERLIQUID">Hyperliquid</option><option value="OKX">OKX</option><option value="BYBIT">Bybit</option></select></label><label><span>币对</span><input name="instrument_symbol" aria-label="币对" list="manual-instrument-options" autocomplete="off" spellcheck="false" placeholder="例如 BTCUSDT" required></label></div><input name="instrument_id" type="hidden"><datalist id="manual-instrument-options"></datalist><span class="instrument-match" data-instrument-match data-state="idle" role="status" aria-live="polite"></span></div>
         <label>方向<span class="field-help">做多或做空</span><select name="direction"><option value="LONG">做多</option><option value="SHORT">做空</option></select></label>
         <label>触发价格<span class="field-help">计划开始执行的位置</span><input name="trigger_price" type="number" step="any" min="0" required></label>
       </div></section>
@@ -2200,6 +2220,7 @@ async function renderManualProposal() {
   form.addEventListener('submit', submitManualProposal);
   form.addEventListener('input', updateManualProposalPreview);
   form.elements.venue.addEventListener('change', () => {
+    syncManualAccountPicker(form, proposalAccounts);
     syncManualInstrumentPicker(form, {clearSymbol:true});
     updateManualProposalPreview({currentTarget:form});
     form.elements.instrument_symbol.focus();
@@ -2209,6 +2230,7 @@ async function renderManualProposal() {
     const selected = syncManualInstrumentPicker(form);
     if (selected) form.elements.instrument_symbol.value = selected.symbol;
   });
+  syncManualAccountPicker(form, proposalAccounts);
   syncManualInstrumentPicker(form);
   updateManualProposalPreview({currentTarget:form});
 }
@@ -3012,20 +3034,32 @@ async function renderSystemStatus() {
             ? '连接状态未知'
             : '尚未配置';
   const perptapeTone = perptapeAvailable ? 'success' : perptape.configured ? 'attention' : 'danger';
-  const executionWorkers = Array.isArray(freqtrade?.workers) ? freqtrade.workers : [];
+  const accountBoundWorkers = Array.isArray(freqtrade?.account_bindings) ? freqtrade.account_bindings : [];
+  const configuredWorkers = accountBoundWorkers.filter(worker => worker.configured);
+  const verifiedWorkers = configuredWorkers.filter(worker => worker.status === 'VERIFIED');
   const workersReady = freqtrade?.backend === 'FREQTRADE'
-    && executionWorkers.length === 2
-    && executionWorkers.every(worker => worker.status === 'READY' && worker.dry_run === true);
+    && freqtrade?.workers_enabled === true
+    && configuredWorkers.length > 0
+    && verifiedWorkers.length === configuredWorkers.length;
   const workersDisabled = freqtrade?.workers_enabled === false;
-  const hyperliquidWorker = executionWorkers.find(worker => worker.venue === 'HYPERLIQUID');
-  const configuredHip3Dexes = Array.isArray(hyperliquidWorker?.hip3_dexes) ? hyperliquidWorker.hip3_dexes : [];
+  const configuredVenueCounts = configuredWorkers.reduce((counts, worker) => {
+    counts[worker.venue] = Number(counts[worker.venue] || 0) + 1;
+    return counts;
+  }, {});
+  const configuredVenueSummary = Object.entries(configuredVenueCounts)
+    .map(([venue, count]) => `${fmtVenueLabel(venue)} ${count}`)
+    .join('、');
   const executionCopy = workersReady
-    ? `Binance ${Number(executionWorkers.find(worker => worker.venue === 'BINANCE')?.active_pair_count || 0)} 个合约；Hyperliquid ${Number(hyperliquidWorker?.active_pair_count || 0)} 个合约，其中 HIP-3 ${Number(hyperliquidWorker?.hip3_pair_count || 0)} 个。`
+    ? `${verifiedWorkers.length} 个精确账户 Worker 已通过最近一次验证${configuredVenueSummary ? `：${configuredVenueSummary}` : ''}。`
     : workersDisabled
-      ? '当前只读控制台未启动币安与 Hyperliquid 的 Freqtrade 执行进程；不会把“未启动”误报为进程故障。'
+      ? configuredWorkers.length
+        ? `已保存 ${configuredWorkers.length} 个精确账户 Worker 绑定${configuredVenueSummary ? `（${configuredVenueSummary}）` : ''}；当前进程安全开关关闭，不会连接 Worker 或发送订单。`
+        : '当前没有已配置的精确账户 Freqtrade Worker；执行进程安全开关保持关闭。'
     : freqtrade?.error
       ? friendlyApiError(freqtrade.error)
-      : 'Freqtrade 执行进程尚未全部通过身份、期货模式、合约目录和仿真模式检查。';
+      : configuredWorkers.length
+        ? `${verifiedWorkers.length} / ${configuredWorkers.length} 个精确账户 Worker 已验证；未验证绑定禁止执行。`
+        : '当前没有可由执行进程加载的精确账户 Freqtrade Worker。';
   const tradingConnectionsReady = Boolean(connections.BINANCE?.available && connections.HYPERLIQUID?.available);
   const activeMonitoring = campaigns.length > 0;
   const overallTone = !health.ready || !controlAvailable ? 'danger' : exceptions.length || !entryOpen || !perptapeAvailable || !workersReady || !tradingConnectionsReady || !telegramHealthy ? 'attention' : activeMonitoring ? 'success' : 'neutral';
@@ -3041,13 +3075,15 @@ async function renderSystemStatus() {
     systemHealthCard({title:'核心服务', status:health.ready ? '服务可用' : '服务不可用', tone:health.ready ? 'success' : 'danger', copy:health.ready ? '业务数据库和交易服务运行正常。' : '核心服务检查失败；不能把缺失响应当成正常。', meta:'数据缺失时自动阻止交易'}),
     systemHealthCard({title:'开仓与加仓', status:entryStatus, tone:entryOpen ? (addOpen ? 'success' : 'attention') : 'danger', copy:entryCopy, meta:restoreConditions.ready ? '每笔新增风险仍会重新检查账户、交易所与授权' : `${restoreConditions.blockers?.length || blockedRiskChecks.length} 项实时条件待处理；查看风险控制了解精确原因`}),
     ...monitoringCards,
-    systemHealthCard({title:'交易执行底座', status:workersReady ? '仿真执行进程已连接' : workersDisabled ? 'Freqtrade 执行进程未启动' : 'Freqtrade 执行进程检查未通过', tone:workersReady || workersDisabled ? 'attention' : 'danger', copy:executionCopy, meta:workersReady ? '仅验证执行适配与合约目录；不会发送真实订单' : workersDisabled ? `需配置执行进程控制凭据后以仿真模式启动；LIVE_ORDER_SEND 保持关闭${configuredHip3Dexes.length ? `；HIP-3 范围 ${configuredHip3Dexes.join('、')}` : ''}` : '身份、模式或合约目录不一致时禁止发送'}),
+    systemHealthCard({title:'交易执行底座', status:workersReady ? '精确账户 Worker 已验证' : workersDisabled ? 'Freqtrade 执行进程未启动' : 'Freqtrade 执行进程检查未通过', tone:workersReady || workersDisabled ? 'attention' : 'danger', copy:executionCopy, meta:workersReady ? (freqtrade.live_order_send ? '真实订单发送已启用；账户资格、风险、授权与发送者租约仍会逐项复核' : '精确账户验证已通过；LIVE_ORDER_SEND 保持关闭') : workersDisabled ? `${configuredWorkers.length ? '数据库绑定已保留；' : ''}FREQTRADE_WORKERS_ENABLED 与 LIVE_ORDER_SEND 保持关闭` : '身份、模式或精确账户绑定不一致时禁止发送'}),
     systemHealthCard({title:'Telegram 审核通知', status:telegramStatus, tone:telegramHealthy ? 'success' : 'attention', copy:telegramHealthy ? 'Telegram 私聊机器人最近一次长轮询成功；批准和拒绝仍需二次确认并写入统一审计。' : telegramFailureCopy, meta:telegramHealthy ? `最近成功 ${fmtDate(telegramPolling.last_success_at)}` : '网页端审核队列保持可用；资金、订单、风险开关与权限操作不对 Telegram 机器人开放'}),
     systemHealthCard({title:'Perptape 机会源', status:perptapeStatus, tone:perptapeTone, copy:perptapeAvailable ? `已读取 ${Number(opportunityHealth?.data?.length ?? perptape.candidate_count ?? 0)} 个候选，可用于机会筛选和提案。` : perptape.configured ? 'Perptape 已配置，但最近数据尚未形成可用连接结论。现有交易任务不受影响，新的外部机会不可用。' : 'Perptape 尚未配置；人工提案仍可使用。', meta:`只读 · 最近数据 ${fmtDate(perptape.last_fetched_at)}`}),
   ].join('');
   const connectionLabels = {
     BINANCE:['币安','生产账户','/venues?venue=BINANCE','查看账户数据 →'],
     HYPERLIQUID:['Hyperliquid','生产账户','/venues?venue=HYPERLIQUID','查看账户数据 →'],
+    OKX:['OKX','生产账户','/venues?venue=OKX','查看账户数据 →'],
+    BYBIT:['Bybit','生产账户','/venues?venue=BYBIT','查看账户数据 →'],
     PERPTAPE:['突破榜单','市场机会','/opportunities','查看机会 →'],
     NOTILT:['链上资金库','生产资金','/capital','查看资金 →'],
   };
@@ -3088,6 +3124,7 @@ async function renderSystemStatus() {
     return `<tr><td data-label="数据源"><b>${label[0]}</b>${errorEvidence}</td><td data-label="读取状态与处理建议"><span class="status-pill ${state.available ? 'status-APPROVED' : ''}">${state.available ? (currentLanguage === 'en' ? 'Read-only connected' : '只读已连接') : escapeHtml(categoryLabel)}</span><br><span class="subtle">${escapeHtml(fmtConnectionReason(state))}</span><br><span class="subtle">${escapeHtml(probeEvidence)}</span><br><span class="subtle">${escapeHtml(ownership)}</span></td><td data-label="运行范围">${label[1]}</td><td data-label="可用能力">${escapeHtml(capability)}</td><td data-label="下一步">${action}</td></tr>`;
   }).join('');
   const availableSources = Object.keys(connectionLabels).filter(key => connections[key]?.available).length;
+  const connectionSourceCount = Object.keys(connectionLabels).length;
   const executionVerdictTitle = !workersReady
     ? '只读控制台可用，但 Freqtrade 执行底座尚未就绪'
     : 'Freqtrade 执行底座已就绪，但交易所只读连接受限';
@@ -3121,7 +3158,7 @@ async function renderSystemStatus() {
   main.innerHTML = `<section class="page system-status-page"><header class="page-head"><div><p class="eyebrow">交易系统状态</p><h1>系统状态</h1><p class="lede">这里直接说明系统能否工作、哪些能力受限，以及是否需要处理。绿色表示当前证据正常；黄色表示能力受限；红色表示必须先处理；灰色表示当前没有监控对象。</p></div><div class="toolbar"><button class="secondary" data-refresh>刷新状态</button><a class="secondary" href="/risk" data-link>查看风险控制</a></div></header>
     <article class="home-status tone-${overallTone}"><div><p class="eyebrow">当前结论</p><h2>${escapeHtml(verdictTitle)}</h2><p>${escapeHtml(verdictCopy)}</p></div>${verdictAction}</article>
     <div class="system-health-grid">${cards}</div>
-    <section><div class="section-heading"><div><p class="eyebrow">外部数据连接</p><h2>生产数据与资金连接</h2></div><span class="status-pill">${availableSources} / 4 可用</span></div><div class="table-scroll-hint connection-scroll-hint" data-table-hint>左右滑动查看完整连接状态</div><div class="table-wrap connection-status-table"><table><thead><tr><th>数据源</th><th>读取状态与处理建议</th><th>运行范围</th><th>可用能力</th><th></th></tr></thead><tbody>${connectionRows}</tbody></table></div></section>
+    <section><div class="section-heading"><div><p class="eyebrow">外部数据连接</p><h2>生产数据与资金连接</h2></div><span class="status-pill">${availableSources} / ${connectionSourceCount} 可用</span></div><div class="table-scroll-hint connection-scroll-hint" data-table-hint>左右滑动查看完整连接状态</div><div class="table-wrap connection-status-table"><table><thead><tr><th>数据源</th><th>读取状态与处理建议</th><th>运行范围</th><th>可用能力</th><th></th></tr></thead><tbody>${connectionRows}</tbody></table></div></section>
     ${codes.size ? `<section><div class="section-heading"><div><p class="eyebrow">交易任务运行告警</p><h2>需要处理的问题类型</h2></div><a class="secondary" href="/campaigns/alerts" data-link>查看运行告警</a></div><div class="exception-code-list">${[...codes].sort().map(code => `<span>${escapeHtml(explainException(code).title)}</span>`).join('')}</div></section>` : ''}
   </section>`;
   document.querySelector('[data-refresh]')?.addEventListener('click', route);
@@ -4623,13 +4660,14 @@ async function renderVenueFacts() {
       : venue === 'HYPERLIQUID'
         ? `核心市场${status.hip3_available ? ` + HIP-3${hip3Dexes.length ? `（${hip3Dexes.join('、')}）` : ''}` : ''}`
         : venue === 'OKX' ? 'USDT 线性永续范围' : '统一账户 USDT 线性永续范围';
-  const executionDetail = ['OKX','BYBIT'].includes(venue)
-    ? (currentLanguage === 'en' ? 'Read-only facts are implemented; order execution is unavailable' : '只读事实已实现；订单执行尚未开放')
-    : status.execution_backend === 'FREQTRADE'
-    ? status.worker_configured
-      ? (currentLanguage === 'en' ? 'Execution is handled by Freqtrade workers; this page cannot place orders' : '执行由 Freqtrade 执行进程负责；本页不能下单')
-      : (currentLanguage === 'en' ? 'Freqtrade is the execution backend, but no worker is connected; this page cannot place orders' : '执行底座为 Freqtrade；控制面尚未接入执行进程，本页不能下单')
-    : (currentLanguage === 'en' ? 'Legacy direct execution is isolated from this read-only page' : '旧直连执行已隔离于当前只读页面');
+  const executionWorker = account?.execution_worker || null;
+  const executionDetail = executionWorker?.live_ready
+    ? (currentLanguage === 'en' ? 'Exact-account LIVE Freqtrade worker verified; order actions remain in Trading' : '精确账户 LIVE Freqtrade Worker 已验证；下单操作仍只在交易任务中进行')
+    : executionWorker?.configured
+      ? (currentLanguage === 'en' ? `Exact-account Freqtrade worker: ${executionWorker.status}; this page cannot place orders` : `精确账户 Freqtrade Worker：${fmtStatus(executionWorker.status)}；本页不能下单`)
+      : executionWorker?.supported
+        ? (currentLanguage === 'en' ? 'Exact-account Freqtrade worker is not configured; order sending remains blocked' : '精确账户 Freqtrade Worker 尚未配置；订单发送保持阻断')
+        : (currentLanguage === 'en' ? 'No supported execution worker is available; order sending remains blocked' : '没有可用的受控执行 Worker；订单发送保持阻断');
   const syncInterval = Number(status.automatic_sync_interval_seconds || 0);
   const automaticSyncCopyLocalized = status.automatic_sync_enabled && connected
     ? historyIncomplete

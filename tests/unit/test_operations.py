@@ -65,7 +65,16 @@ def test_connection_matrix_distinguishes_one_time_checks_from_continuous_runtime
     assert matrix["OKX_CONTINUOUS_FACTS"]["implementation"] == ("IMPLEMENTED_TEAM_ACCOUNT_BOUND")
     assert matrix["BYBIT_CONTINUOUS_FACTS"]["implementation"] == ("IMPLEMENTED_TEAM_ACCOUNT_BOUND")
     assert matrix["OKX_CONTINUOUS_FACTS"]["deployment_state"] == "DISABLED"
-    assert matrix["OKX_BYBIT_EXECUTION"]["deployment_state"] == "UNAVAILABLE"
+    assert matrix["FREQTRADE_EXECUTION"]["providers"] == [
+        "BINANCE",
+        "HYPERLIQUID",
+        "OKX",
+        "BYBIT",
+    ]
+    assert matrix["OKX_BYBIT_EXECUTION"]["implementation"] == (
+        "IMPLEMENTED_VIA_FREQTRADE_EXECUTION_UNCERTIFIED"
+    )
+    assert matrix["OKX_BYBIT_EXECUTION"]["deployment_state"] == "DISABLED"
     assert matrix["TEAM_NOTIFICATIONS"]["provider_controls"]["EMAIL"] == (
         "BLOCKED_NO_SMTP_ALLOWLIST"
     )
@@ -106,6 +115,21 @@ def test_connection_matrix_projects_database_bindings_behind_process_master_swit
     assert stopped["OKX_CONTINUOUS_FACTS"]["deployment_state"] == ("DISABLED_CONFIGURED")
     assert running["OKX_CONTINUOUS_FACTS"]["deployment_state"] == "ENABLED"
     assert running["BYBIT_CONTINUOUS_FACTS"]["deployment_state"] == "ENABLED"
+
+
+def test_connection_matrix_projects_okx_bybit_workers_without_a_second_oms() -> None:
+    matrix = {
+        item["capability"]: item
+        for item in connection_capability_matrix(
+            safe_settings(freqtrade_live_order_send_enabled=False),
+            freqtrade_binding_counts={"OKX": 1, "BYBIT": 1},
+        )
+    }
+
+    assert matrix["FREQTRADE_EXECUTION"]["deployment_state"] == "DISABLED_CONFIGURED"
+    assert matrix["OKX_BYBIT_EXECUTION"]["deployment_state"] == "DISABLED_CONFIGURED"
+    assert matrix["OKX_BYBIT_EXECUTION"]["external_side_effect"] == "ORDER_SEND"
+    assert "never creates a second venue OMS" in matrix["OKX_BYBIT_EXECUTION"]["boundary"]
 
 
 def test_environment_template_names_every_settings_field_without_values_from_runtime() -> None:

@@ -116,7 +116,7 @@ class ExchangeAccount(Base):
             "AND freqtrade_worker_status <> 'UNCONFIGURED' "
             "AND freqtrade_worker_name IS NOT NULL AND freqtrade_worker_url IS NOT NULL "
             "AND freqtrade_auth_ciphertext IS NOT NULL AND freqtrade_auth_version >= 1 "
-            "AND venue IN ('BINANCE','HYPERLIQUID'))",
+            "AND venue IN ('BINANCE','HYPERLIQUID','OKX','BYBIT'))",
             name="ck_exchange_accounts_freqtrade_worker_shape",
         ),
         CheckConstraint(

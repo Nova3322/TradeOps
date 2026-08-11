@@ -3280,11 +3280,6 @@ class TradingService:
             if account.version != expected_version:
                 _reject("VERSION_CONFLICT", "exchange account version changed")
             if enabled:
-                if account.venue not in {"BINANCE", "HYPERLIQUID"}:
-                    _reject(
-                        "TRADING_CONNECTOR_UNAVAILABLE",
-                        "the exchange account has no implemented write connector",
-                    )
                 if not team.trading_enabled or team.execution_mode != TeamExecutionMode.LIVE.value:
                     _reject(
                         "TEAM_LIVE_MODE_REQUIRED",
@@ -3487,13 +3482,12 @@ class TradingService:
                 account.venue,
                 team_id=account.team_id,
             )
-            if normalized_mode != "UNCONFIGURED" and account.venue not in {
-                "BINANCE",
-                "HYPERLIQUID",
-            }:
+            if normalized_mode != "UNCONFIGURED" and account.venue not in (
+                SUPPORTED_EXCHANGE_VENUES
+            ):
                 _reject(
                     "FREQTRADE_VENUE_UNSUPPORTED",
-                    "Freqtrade worker binding is restricted to Binance and Hyperliquid",
+                    "Freqtrade worker binding requires a supported TradingOPS venue",
                 )
             if account.venue != "HYPERLIQUID" and normalized_hip3:
                 _reject(
@@ -3680,7 +3674,7 @@ class TradingService:
         require_live_verified: bool = False,
     ) -> PreparedFreqtradeWorkerBinding:
         if (
-            account.venue not in {"BINANCE", "HYPERLIQUID"}
+            account.venue not in SUPPORTED_EXCHANGE_VENUES
             or account.freqtrade_worker_mode == "UNCONFIGURED"
             or account.freqtrade_worker_name is None
             or account.freqtrade_worker_url is None
@@ -5874,17 +5868,12 @@ class TradingService:
             _reject("INSTRUMENT_CATALOG_INVALID", "official active instrument catalog is invalid")
         symbols = [instrument.symbol for instrument in instruments]
         for symbol in symbols:
-            if venue in {"BINANCE", "HYPERLIQUID"}:
+            try:
                 freqtrade_pair(venue, symbol, hip3_dexes=hip3_dexes)
-            elif venue == "OKX" and re.fullmatch(r"[A-Z0-9]{1,64}-USDT-SWAP", symbol) is None:
+            except DomainRejected as exc:
                 _reject(
                     "INSTRUMENT_CATALOG_INVALID",
-                    "OKX catalog requires exact USDT linear SWAP identities",
-                )
-            elif venue == "BYBIT" and re.fullmatch(r"[A-Z0-9]{1,64}USDT", symbol) is None:
-                _reject(
-                    "INSTRUMENT_CATALOG_INVALID",
-                    "Bybit catalog requires exact USDT linear perpetual identities",
+                    f"official catalog symbol is not executable: {exc.code}",
                 )
         if len(symbols) != len(set(symbols)) or any(
             not instrument.active
@@ -10541,7 +10530,7 @@ class TradingService:
             venue = campaign.venue
             side = intent.side
             reduce_only = intent.reduce_only
-        return self.record_binance_testnet_order(
+        fact_id = self.record_binance_testnet_order(
             intent_id,
             actor_id,
             execution_scope,
@@ -10572,6 +10561,26 @@ class TradingService:
             environment=ExecutionEnvironment.LIVE,
             now=now,
         )
+        if isinstance(command, FreqtradeEntryCommand):
+            position_quantity = trade.amount if trade.side == "long" else -trade.amount
+            average_entry_price = trade.open_rate
+        else:
+            position_quantity = Decimal(0)
+            average_entry_price = Decimal(0)
+        self.record_position(
+            campaign.account_id,
+            campaign.venue,
+            campaign.instrument_id,
+            position_quantity,
+            average_entry_price,
+            trade.close_rate or trade.current_rate,
+            True,
+            actor_id,
+            environment=ExecutionEnvironment.LIVE,
+            observed_at=trade.observed_at,
+            now=now,
+        )
+        return fact_id
 
     def record_freqtrade_live_unknown(
         self,

@@ -390,6 +390,15 @@ def test_freqtrade_workers_are_encrypted_and_verified_per_exact_account(
         venue_scope="BINANCE",
         now=now,
     )
+    proposer = service.create_user("worker-binding-proposer", admin, now=now)
+    service.assign_role(
+        proposer,
+        Role.PROPOSER,
+        admin,
+        account_scope="binance-worker-a",
+        venue_scope="BINANCE",
+        now=now,
+    )
     first_probe = WorkerProbeFixture(exchange="binance", dry_run=False)
     second_probe = WorkerProbeFixture(exchange="binance", dry_run=True)
     workers = (
@@ -539,6 +548,21 @@ def test_freqtrade_workers_are_encrypted_and_verified_per_exact_account(
                 observer_accounts[0]["execution_worker"]["auth"]["username_hint"]
                 is None
             )
+
+            logout = await client.post("/api/auth/logout")
+            assert logout.status_code == 200
+            proposer_login = await client.post(
+                "/api/auth/mock/login",
+                json={"username": "worker-binding-proposer"},
+            )
+            assert proposer_login.status_code == 200
+            proposer_listed = await client.get("/api/exchange-accounts")
+            assert proposer_listed.status_code == 200
+            proposer_accounts = proposer_listed.json()["data"]["data"]
+            assert [item["account_id"] for item in proposer_accounts] == [
+                "binance-worker-a"
+            ]
+            assert proposer_accounts[0]["execution_worker"]["endpoint"] is None
 
     asyncio.run(scenario())
 
@@ -1136,33 +1160,39 @@ def test_account_trading_eligibility_is_versioned_idempotent_and_fails_closed(
         assert "global_live_send_gate=unchanged" in audit.reason
 
 
-def test_unimplemented_write_connector_rejects_account_trading_eligibility(
-    database: Database,
+@pytest.mark.parametrize("venue", ["OKX", "BYBIT"])
+def test_okx_bybit_reuse_exact_account_freqtrade_eligibility(
+    database: Database, venue: str
 ) -> None:
     now = datetime.now(UTC)
     service = TradingService(database, credential_encryption_key=encryption_key())
-    admin = service.bootstrap_admin("okx-trading-eligibility-admin", now=now)
+    slug = venue.lower()
+    admin = service.bootstrap_admin(f"{slug}-trading-eligibility-admin", now=now)
     exchange_account_id = service.create_exchange_account(
         actor_id=admin,
-        account_id="okx-read-only",
-        venue="OKX",
-        label="OKX Read Only",
-        credentials={"api_key": "key", "api_secret": "secret", "passphrase": "phrase"},
-        idempotency_key="create-okx-read-only",
+        account_id=f"{slug}-live-account",
+        venue=venue,
+        label=f"{venue} Live Account",
+        credentials={
+            "api_key": "key",
+            "api_secret": "secret",
+            **({"passphrase": "phrase"} if venue == "OKX" else {}),
+        },
+        idempotency_key=f"create-{slug}-live-account",
         now=now,
     )
     command, replay = service.prepare_exchange_account_connection_verification(
         exchange_account_id,
         actor_id=admin,
         expected_version=1,
-        idempotency_key="verify-okx-read-only",
+        idempotency_key=f"verify-{slug}-live-account",
     )
     assert replay is None and command is not None
     verified = service.record_exchange_account_connection_verification(
         command,
         ConnectionProbeResult(True, None),
         actor_id=admin,
-        idempotency_key="verify-okx-read-only",
+        idempotency_key=f"verify-{slug}-live-account",
         now=now + timedelta(seconds=1),
     )
     runtime = service.configure_exchange_account_runtime_sync(
@@ -1170,21 +1200,55 @@ def test_unimplemented_write_connector_rejects_account_trading_eligibility(
         actor_id=admin,
         enabled=True,
         expected_version=int(verified["version"]),
-        idempotency_key="bind-okx-read-only",
+        idempotency_key=f"bind-{slug}-live-account",
         now=now + timedelta(seconds=2),
     )
-    with pytest.raises(DomainRejected, match="TRADING_CONNECTOR_UNAVAILABLE"):
-        service.configure_exchange_account_trading(
-            exchange_account_id,
-            actor_id=admin,
-            enabled=True,
-            expected_version=int(runtime["version"]),
-            idempotency_key="reject-okx-trading",
-            now=now + timedelta(seconds=3),
-        )
+    configured = service.configure_exchange_account_freqtrade_worker(
+        exchange_account_id,
+        actor_id=admin,
+        mode="LIVE",
+        name=f"{slug}-account-worker",
+        base_url="http://127.0.0.1:18083",
+        username="control-plane",
+        password="worker-fixture-password",  # noqa: S106
+        hip3_dexes=(),
+        expected_version=int(runtime["version"]),
+        idempotency_key=f"configure-{slug}-account-worker",
+        now=now + timedelta(seconds=3),
+    )
+    binding, worker_replay = service.prepare_exchange_account_freqtrade_verification(
+        exchange_account_id,
+        actor_id=admin,
+        expected_version=int(configured["version"]),
+        idempotency_key=f"verify-{slug}-account-worker",
+    )
+    assert worker_replay is None and binding is not None
+    worker_verified = service.record_exchange_account_freqtrade_verification(
+        binding,
+        actor_id=admin,
+        error_code=None,
+        idempotency_key=f"verify-{slug}-account-worker",
+        now=now + timedelta(seconds=4),
+    )
+    eligible = service.configure_exchange_account_trading(
+        exchange_account_id,
+        actor_id=admin,
+        enabled=True,
+        expected_version=int(worker_verified["version"]),
+        idempotency_key=f"enable-{slug}-trading",
+        now=now + timedelta(seconds=5),
+    )
+    assert eligible["trading_status"] == "ELIGIBLE"
     projected = TradingQueries(database).exchange_accounts(admin)["data"][0]
-    assert projected["runtime_binding"]["trading_connector"] == "NOT_IMPLEMENTED"
-    assert projected["trading"]["enabled"] is False
+    assert projected["runtime_binding"]["trading_connector"] == "FREQTRADE_EXTERNAL"
+    assert projected["execution_worker"]["supported"] is True
+    assert projected["execution_worker"]["scope"] == {
+        "team_id": str(binding.team_id),
+        "account_id": f"{slug}-live-account",
+        "venue": venue,
+    }
+    assert projected["execution_worker"]["live_ready"] is True
+    assert projected["trading"]["enabled"] is True
 
 
 def test_database_runtime_bindings_support_same_account_in_multiple_teams(

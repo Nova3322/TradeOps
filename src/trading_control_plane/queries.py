@@ -526,11 +526,13 @@ class TradingQueries:
                     RoleAssignment.team_id == team_id,
                 )
             ).all()
-            if not any(
-                "venue.view" in ROLE_ACTIONS[Role(item.role)]
-                or "*" in ROLE_ACTIONS[Role(item.role)]
-                for item in assignments
-            ):
+            listing_actions = {"venue.view", "proposal.create"}
+
+            def can_list_account(assignment: RoleAssignment) -> bool:
+                actions = ROLE_ACTIONS[Role(assignment.role)]
+                return "*" in actions or not listing_actions.isdisjoint(actions)
+
+            if not any(can_list_account(item) for item in assignments):
                 raise DomainRejected("RBAC_DENIED", "exchange account visibility is not assigned")
             accounts = session.scalars(
                 select(ExchangeAccount)
@@ -546,10 +548,7 @@ class TradingQueries:
                         or assignment.account_scope == item.account_id
                     )
                     and (assignment.venue_scope is None or assignment.venue_scope == item.venue)
-                    and (
-                        "venue.view" in ROLE_ACTIONS[Role(assignment.role)]
-                        or "*" in ROLE_ACTIONS[Role(assignment.role)]
-                    )
+                    and can_list_account(assignment)
                     for assignment in assignments
                 )
             ]
@@ -616,13 +615,9 @@ class TradingQueries:
             next_action = "run a supported no-side-effect connection verification"
         elif not item.runtime_sync_enabled:
             next_action = "enable the database-bound continuous read-only sync"
-        elif item.venue not in {"BINANCE", "HYPERLIQUID"}:
-            next_action = "wait for an implemented trading connector; keep trading disabled"
-        elif item.venue in {"BINANCE", "HYPERLIQUID"} and (
-            item.freqtrade_worker_mode == "UNCONFIGURED"
-        ):
+        elif item.freqtrade_worker_mode == "UNCONFIGURED":
             next_action = "bind one encrypted Freqtrade worker to this exact account"
-        elif item.venue in {"BINANCE", "HYPERLIQUID"} and (
+        elif (
             item.freqtrade_worker_mode != "LIVE"
             or item.freqtrade_worker_status != "VERIFIED"
         ):
@@ -677,14 +672,10 @@ class TradingQueries:
                 "service_principal_configured": (
                     item.runtime_service_principal_id is not None
                 ),
-                "trading_connector": (
-                    "FREQTRADE_EXTERNAL"
-                    if item.venue in {"BINANCE", "HYPERLIQUID"}
-                    else "NOT_IMPLEMENTED"
-                ),
+                "trading_connector": "FREQTRADE_EXTERNAL",
             },
             "execution_worker": {
-                "supported": item.venue in {"BINANCE", "HYPERLIQUID"},
+                "supported": True,
                 "configured": item.freqtrade_worker_mode != "UNCONFIGURED",
                 "scope": {
                     "team_id": str(item.team_id),

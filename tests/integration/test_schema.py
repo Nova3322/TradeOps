@@ -138,6 +138,79 @@ def test_account_bound_freqtrade_worker_migration_guards_data_and_round_trips(
     assert differences == []
 
 
+@pytest.mark.parametrize("venue", ["OKX", "BYBIT"])
+def test_okx_bybit_freqtrade_constraint_migration_guards_data_and_round_trips(
+    database: Database, venue: str
+) -> None:
+    config = Config("alembic.ini")
+    now = datetime.now(UTC)
+    encryption_key = base64.urlsafe_b64encode(b"s" * 32).decode().rstrip("=")
+    service = TradingService(database, credential_encryption_key=encryption_key)
+    slug = venue.lower()
+    admin = service.bootstrap_admin(f"schema-{slug}-worker-admin", now=now)
+    account_id = service.create_exchange_account(
+        actor_id=admin,
+        account_id=f"schema-{slug}-worker-account",
+        venue=venue,
+        label=f"Schema {venue} Worker Account",
+        credentials={
+            "api_key": "fixture-key",
+            "api_secret": "fixture-secret",
+            **({"passphrase": "fixture-passphrase"} if venue == "OKX" else {}),
+        },
+        idempotency_key=f"schema-{slug}-worker-account-create",
+        now=now,
+    )
+    configured = service.configure_exchange_account_freqtrade_worker(
+        account_id,
+        actor_id=admin,
+        mode="LIVE",
+        name=f"schema-{slug}-worker",
+        base_url="http://127.0.0.1:18084",
+        username="schema-user",
+        password="schema-password",  # noqa: S106
+        hip3_dexes=(),
+        expected_version=1,
+        idempotency_key=f"schema-{slug}-worker-configure",
+        now=now,
+    )
+
+    with pytest.raises(
+        RuntimeError,
+        match="clearing every OKX/Bybit account-bound Freqtrade worker",
+    ):
+        command.downgrade(config, "20260811_0029")
+
+    service.configure_exchange_account_freqtrade_worker(
+        account_id,
+        actor_id=admin,
+        mode="UNCONFIGURED",
+        name=None,
+        base_url=None,
+        username=None,
+        password=None,
+        hip3_dexes=(),
+        expected_version=int(configured["version"]),
+        idempotency_key=f"schema-{slug}-worker-clear",
+        now=now,
+    )
+    command.downgrade(config, "20260811_0029")
+    with database.engine.connect() as connection:
+        revision = connection.exec_driver_sql(
+            "SELECT version_num FROM alembic_version"
+        ).scalar_one()
+    assert revision == "20260811_0029"
+
+    command.upgrade(config, "head")
+    with database.engine.connect() as connection:
+        revision = connection.exec_driver_sql(
+            "SELECT version_num FROM alembic_version"
+        ).scalar_one()
+        differences = compare_metadata(MigrationContext.configure(connection), Base.metadata)
+    assert revision == REQUIRED_SCHEMA_REVISION
+    assert differences == []
+
+
 def test_notification_migration_round_trip(database: Database) -> None:
     config = Config("alembic.ini")
 

@@ -55,7 +55,8 @@ def connection_capability_matrix(
     binding_counts = database_binding_counts or {}
     worker_binding_counts = freqtrade_binding_counts or {}
     freqtrade_configured = any(
-        int(worker_binding_counts.get(venue, 0)) > 0 for venue in ("BINANCE", "HYPERLIQUID")
+        int(worker_binding_counts.get(venue, 0)) > 0
+        for venue in ("BINANCE", "HYPERLIQUID", "OKX", "BYBIT")
     )
     legacy_freqtrade_state = "configured" if legacy_freqtrade_configured else "absent"
     database_binance = int(binding_counts.get("BINANCE", 0)) > 0
@@ -141,7 +142,7 @@ def connection_capability_matrix(
         },
         {
             "capability": "FREQTRADE_EXECUTION",
-            "providers": ["BINANCE", "HYPERLIQUID"],
+            "providers": ["BINANCE", "HYPERLIQUID", "OKX", "BYBIT"],
             "implementation": "IMPLEMENTED_TEAM_ACCOUNT_BOUND_UNCERTIFIED",
             "deployment_state": _deployment_state(
                 enabled=settings.freqtrade_live_order_send_enabled,
@@ -159,10 +160,19 @@ def connection_capability_matrix(
         {
             "capability": "OKX_BYBIT_EXECUTION",
             "providers": ["OKX", "BYBIT"],
-            "implementation": "NOT_IMPLEMENTED",
-            "deployment_state": "UNAVAILABLE",
-            "external_side_effect": "NONE",
-            "boundary": "no order adapter exists",
+            "implementation": "IMPLEMENTED_VIA_FREQTRADE_EXECUTION_UNCERTIFIED",
+            "deployment_state": _deployment_state(
+                enabled=settings.freqtrade_live_order_send_enabled,
+                configured=any(
+                    int(worker_binding_counts.get(venue, 0)) > 0
+                    for venue in ("OKX", "BYBIT")
+                ),
+            ),
+            "external_side_effect": "ORDER_SEND",
+            "boundary": (
+                "compatibility projection only; execution reuses the same exact-account "
+                "Freqtrade path and never creates a second venue OMS"
+            ),
         },
         {
             "capability": "TEAM_NOTIFICATIONS",
