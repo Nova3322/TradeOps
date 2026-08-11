@@ -952,6 +952,10 @@ const apiErrorGuidance = {
   PASSWORD_UNCHANGED:'新密码必须与当前密码不同。',
   AUTH_VERSION_CONFLICT:'登录身份已变化，请刷新页面后重新验证。',
   PASSWORD_AUTH_REQUIRED:'当前会话不是密码登录，请使用密码重新登录后修改。',
+  AGENT_TOKEN_INVALID:'该 API Client Token 已失效、已轮换或不匹配。请使用当前 Token。',
+  AGENT_TOKEN_EXPIRED:'该 API Client Token 已到期。请在网页中轮换 Token。',
+  API_CLIENT_RATE_LIMITED:'该 API Client 请求过于频繁，请稍后重试。',
+  API_CLIENT_REVOKED:'该 API Client 已永久撤销；需要接入时请创建新的 Client。',
   RISK_POLICY_MISSING:'风险政策尚未配置，因此系统已暂停创建和执行新增风险。请联系系统管理员完成配置。',
   PERPTAPE_NOT_CONFIGURED:'Perptape 尚未配置。人工提案仍可使用，外部机会将在完成配置后恢复。',
   PERPTAPE_UNAVAILABLE:'暂时无法连接 Perptape。人工提案仍可使用，请稍后重新检查外部机会。',
@@ -1038,7 +1042,7 @@ const currentWorkspaceMembership = () => (session?.workspaces || []).find(
   workspace => workspace.workspace_id === session?.active_workspace?.workspace_id
 );
 const routeCapability = (path) => {
-  if (path === '/' || path === '/workspaces' || path === '/home') return null;
+  if (path === '/' || path === '/workspaces' || path === '/home' || path === '/profile/api-access' || path === '/admin/agents') return null;
   if (path === '/capital') return 'capital.view';
   if (path === '/opportunities/defaults') return 'proposal.create';
   if (path === '/opportunities') return 'opportunity.view';
@@ -1052,7 +1056,7 @@ const routeCapability = (path) => {
   if (path === '/notifications') return 'notification.view';
   if (path === '/positions' || path === '/risk') return 'system.view';
   if (path === '/venues' || path.startsWith('/venues/')) return 'venue.view';
-  if (path === '/admin/users' || path === '/admin/agents') return 'access.manage';
+  if (path === '/admin/users') return 'access.manage';
   return 'operations.view';
 };
 const capabilityLabel = (capability) => ({'signal.view':'查看信号源','opportunity.view':'查看机会','proposal.view':'查看提案','operations.view':'交易运维','results.view':'查看绩效报表','notification.view':'查看通知中心','system.view':'查看系统状态','venue.view':'查看交易账户','capital.view':'资金管理','proposal.create':'发起提案','proposal.review':'独立审核','access.manage':'成员权限管理'}[capability] || capability);
@@ -1202,7 +1206,7 @@ function renderWorkspaceSwitcher() {
     <div class="workspace-switcher-options">${(session.workspaces || []).map(workspace => {
       const selected = workspace.workspace_id === activeWorkspaceId;
       const teamId = workspaceDefaultTeamId(workspace);
-      return `<button class="workspace-switcher-option ${selected ? 'is-active' : ''}" type="button" role="menuitem" data-switch-workspace="${escapeHtml(workspace.workspace_id)}" data-switch-team="${escapeHtml(teamId || '')}"><span class="workspace-option-avatar" aria-hidden="true">${escapeHtml(workspace.name.slice(0, 1).toUpperCase())}</span><span><b>${escapeHtml(workspace.name)}</b><small>${escapeHtml(`${workspace.member_count ?? 0} 名成员${workspace.agent_count ? ` · ${workspace.agent_count} 个 Agent` : ''}`)}</small></span><strong>${selected ? '当前' : '进入'}</strong></button>`;
+      return `<button class="workspace-switcher-option ${selected ? 'is-active' : ''}" type="button" role="menuitem" data-switch-workspace="${escapeHtml(workspace.workspace_id)}" data-switch-team="${escapeHtml(teamId || '')}"><span class="workspace-option-avatar" aria-hidden="true">${escapeHtml(workspace.name.slice(0, 1).toUpperCase())}</span><span><b>${escapeHtml(workspace.name)}</b><small>${escapeHtml(`${workspace.member_count ?? 0} 名成员`)}</small></span><strong>${selected ? '当前' : '进入'}</strong></button>`;
     }).join('')}</div>
     <div class="workspace-switcher-menu-actions"><a href="/" data-link role="menuitem">创建新工作区</a><a href="/" data-link role="menuitem">查看所有工作区</a></div>`;
 }
@@ -1387,7 +1391,23 @@ function confirmAction({title, message, confirmLabel}) {
   confirmDialog.returnValue = '';
   confirmDialog.showModal();
   return new Promise((resolve) => {
-    confirmDialog.addEventListener('close', () => resolve(confirmDialog.returnValue === 'confirm'), {once:true});
+    const submit = confirmDialog.querySelector('#confirm-submit');
+    const cancelButtons = [...confirmDialog.querySelectorAll('[value="cancel"]')];
+    let settled = false;
+    const finish = confirmed => {
+      if (settled) return;
+      settled = true;
+      submit?.removeEventListener('click', confirm);
+      cancelButtons.forEach(button => button.removeEventListener('click', cancel));
+      confirmDialog.removeEventListener('cancel', cancel);
+      if (confirmDialog.open) confirmDialog.close(confirmed ? 'confirm' : 'cancel');
+      resolve(confirmed);
+    };
+    const confirm = event => { event.preventDefault(); finish(true); };
+    const cancel = event => { event.preventDefault(); finish(false); };
+    submit?.addEventListener('click', confirm, {once:true});
+    cancelButtons.forEach(button => button.addEventListener('click', cancel, {once:true}));
+    confirmDialog.addEventListener('cancel', cancel, {once:true});
   });
 }
 
@@ -1448,7 +1468,7 @@ async function route() {
     return;
   }
   setShell(true);
-  const teamSetupPaths = new Set(['/admin/users', '/admin/agents', '/venues', '/signals', '/notifications', '/risk', '/shadow']);
+  const teamSetupPaths = new Set(['/admin/users', '/admin/agents', '/profile/api-access', '/venues', '/signals', '/notifications', '/risk', '/shadow']);
   if (!session.active_workspace || !session.active_team || (!session.active_team.trading_enabled && !teamSetupPaths.has(path))) {
     renderScopeSetup();
     enhanceRenderedPage();
@@ -1484,7 +1504,7 @@ async function route() {
     else if (path === '/exceptions') { history.replaceState({}, '', '/campaigns/alerts'); await renderRuntimeAlerts(); }
     else if (path === '/venues' || path === '/venues/binance' || path === '/venues/hyperliquid') await renderVenueFacts();
     else if (path === '/admin/users') await renderAccessManagement();
-    else if (path === '/admin/agents') await renderAgentManagement();
+    else if (path === '/profile/api-access' || path === '/admin/agents') await renderApiAccess();
     else {
       const campaignMatch = path.match(/^\/campaigns\/([0-9a-f-]+)$/i);
       const proposalMatch = path.match(/^\/proposals\/([0-9a-f-]+)$/i);

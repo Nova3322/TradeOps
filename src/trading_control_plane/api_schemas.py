@@ -119,6 +119,27 @@ class AgentTokenRotationRequest(BaseModel):
     idempotency_key: str = Field(min_length=1, max_length=160)
 
 
+class ApiClientCreateRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=120, pattern=r"^[A-Za-z0-9._-]+$")
+    workspace_id: UUID
+    team_id: UUID
+    account_id: str = Field(min_length=1, max_length=120)
+    venue: VenueScope
+    expires_in_days: int = Field(default=90, ge=1, le=365)
+    idempotency_key: str = Field(min_length=1, max_length=160)
+
+
+class ApiClientStateRequest(BaseModel):
+    active: bool
+    expected_version: int = Field(ge=1)
+    idempotency_key: str = Field(min_length=1, max_length=160)
+
+
+class ApiClientRevokeRequest(BaseModel):
+    expected_version: int = Field(ge=1)
+    idempotency_key: str = Field(min_length=1, max_length=160)
+
+
 class WorkspaceCreateRequest(BaseModel):
     name: str = Field(min_length=1, max_length=120)
     slug: str | None = Field(default=None, min_length=1, max_length=80)

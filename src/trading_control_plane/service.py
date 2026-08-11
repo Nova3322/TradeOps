@@ -22,6 +22,7 @@ from trading_control_plane.service_core import (
     PreparedRuntimeAccountBinding as PreparedRuntimeAccountBinding,
 )
 from trading_control_plane.service_domains.accounts import AccountService
+from trading_control_plane.service_domains.api_clients import ApiClientService
 from trading_control_plane.service_domains.capital_automation import AutomationCapitalService
 from trading_control_plane.service_domains.capital_direct import DirectOperationCapitalService
 from trading_control_plane.service_domains.capital_notilt import NoTiltCapitalService
@@ -77,6 +78,7 @@ class TradingService:
         )
         self._workspace = WorkspaceService(self.runtime, self)
         self._accounts = AccountService(self.runtime, self)
+        self._api_clients = ApiClientService(self.runtime, self)
         self._signals = SignalService(self.runtime, self)
         self._proposals = ProposalService(self.runtime, self)
         self._risk_policy = PolicyRiskService(self.runtime, self)
@@ -412,9 +414,8 @@ class TradingService:
         self._require_role = self.runtime.transactions._require_role
         self._require_team_environment = self.runtime.transactions._require_team_environment
         self.can_user = self.runtime.transactions.can_user
-        self._require_agent_scope = self._workspace._require_agent_scope
-        self._agent_token_digest = self._workspace._agent_token_digest
-        self.authenticate_agent_token = self._workspace.authenticate_agent_token
+        self.authenticate_api_client_token = self._api_clients.authenticate_api_client_token
+        self.authenticate_agent_token = self._api_clients.authenticate_agent_token
         self._require_action_assignment = self.runtime.transactions._require_action_assignment
         self.configure_notification_route = self.runtime.transactions.configure_notification_route
         self._enqueue_notification_event = self.runtime.transactions._enqueue_notification_event
@@ -444,9 +445,13 @@ class TradingService:
         self.change_own_password = self._workspace.change_own_password
         self.ensure_local_human_password = self._workspace.ensure_local_human_password
         self.bind_telegram_private_chat = self._workspace.bind_telegram_private_chat
-        self.create_agent = self._workspace.create_agent
-        self.update_agent_access = self._workspace.update_agent_access
-        self.rotate_agent_token = self._workspace.rotate_agent_token
+        self.create_api_client = self._api_clients.create_api_client
+        self.update_api_client_state = self._api_clients.update_api_client_state
+        self.rotate_api_client_token = self._api_clients.rotate_api_client_token
+        self.revoke_api_client = self._api_clients.revoke_api_client
+        self.create_agent = self._api_clients.create_agent
+        self.update_agent_access = self._api_clients.update_agent_access
+        self.rotate_agent_token = self._api_clients.rotate_agent_token
         self.create_service_principal = self._workspace.create_service_principal
         self.assign_role = self._workspace.assign_role
 

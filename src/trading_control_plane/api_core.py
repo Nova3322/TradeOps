@@ -39,6 +39,9 @@ from trading_control_plane.api_schemas import (
     AgentCreateRequest,
     AgentProposalRequest,
     AgentTokenRotationRequest,
+    ApiClientCreateRequest,
+    ApiClientRevokeRequest,
+    ApiClientStateRequest,
     AuthorizationRequest,
     AutoAddRequest,
     AutomaticExitRequest,
@@ -187,7 +190,11 @@ from trading_control_plane.notilt import (
     NoTiltUnsignedTransaction,
     NoTiltUsdValuator,
 )
-from trading_control_plane.passwords import LoginAttemptLimiter, PasswordHasher
+from trading_control_plane.passwords import (
+    ApiClientRateLimiter,
+    LoginAttemptLimiter,
+    PasswordHasher,
+)
 from trading_control_plane.perptape import (
     PerptapeCandidate,
     PerptapeClient,
@@ -350,13 +357,15 @@ def _domain_status(code: str) -> int:
         "AGENT_STEP_UP_FORBIDDEN",
         "AGENT_IDENTITY_REQUIRED",
         "AGENT_PROPOSAL_ENDPOINT_REQUIRED",
+        "API_CLIENT_SCOPE_DENIED",
+        "HUMAN_WEB_CONFIRMATION_REQUIRED",
     }:
         return status.HTTP_403_FORBIDDEN
     if code == "AUTH_CREDENTIAL_AMBIGUOUS":
         return status.HTTP_400_BAD_REQUEST
     if code.endswith("_NOT_FOUND"):
         return status.HTTP_404_NOT_FOUND
-    if code == "PERPTAPE_RATE_LIMITED":
+    if code in {"PERPTAPE_RATE_LIMITED", "API_CLIENT_RATE_LIMITED"}:
         return status.HTTP_429_TOO_MANY_REQUESTS
     if code in {
         "IDEMPOTENCY_CONFLICT",
@@ -382,6 +391,8 @@ def _domain_status(code: str) -> int:
         "NOTIFICATION_ROUTE_NAME_CONFLICT",
         "NOTIFICATION_ROUTE_UNAVAILABLE",
         "FREQTRADE_DISPATCH_ALREADY_STARTED",
+        "API_CLIENT_NAME_CONFLICT",
+        "API_CLIENT_REVOKED",
     }:
         return status.HTTP_409_CONFLICT
     if code in {
@@ -451,6 +462,10 @@ __all__ = [
     "AgentProposalRequest",
     "AgentTokenRotationRequest",
     "Any",
+    "ApiClientCreateRequest",
+    "ApiClientRateLimiter",
+    "ApiClientRevokeRequest",
+    "ApiClientStateRequest",
     "AsyncIterator",
     "AuthorizationRequest",
     "AutoAddRequest",

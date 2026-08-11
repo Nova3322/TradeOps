@@ -44,6 +44,12 @@ class TransactionService:
         account_id: str | None = None,
         now: datetime,
     ) -> None:
+        api_context = current_api_client_context()
+        api_client_id = None
+        if api_context is not None and actor_id == str(api_context.owner_user_id):
+            api_client_id = api_context.api_client_id
+            workspace_id = workspace_id or api_context.workspace_id
+            team_id = team_id or api_context.team_id
         if workspace_id is None or team_id is None:
             try:
                 actor_user_id = UUID(actor_id)
@@ -135,6 +141,7 @@ class TransactionService:
                 team_id=team_id,
                 account_id=account_id,
                 actor_id=actor_id,
+                api_client_id=api_client_id,
                 event_type=event_type,
                 object_type=object_type,
                 object_id=str(object_id),
@@ -155,6 +162,9 @@ class TransactionService:
         idempotency_key: str,
         payload: dict[str, Any],
     ) -> tuple[str, dict[str, Any] | None]:
+        api_context = current_api_client_context()
+        if api_context is not None:
+            caller_id = f"api-client:{api_context.api_client_id}:{caller_id}"
         session.execute(
             text("SELECT pg_advisory_xact_lock(:key)"),
             {"key": _advisory_lock_key(caller_id, operation, idempotency_key)},
@@ -173,8 +183,8 @@ class TransactionService:
             raise IdempotencyConflict
         return digest, receipt.response
 
-    @staticmethod
     def _save_receipt(
+        self,
         session: Session,
         *,
         caller_id: str,
@@ -184,6 +194,9 @@ class TransactionService:
         response: dict[str, Any],
         now: datetime,
     ) -> None:
+        api_context = current_api_client_context()
+        if api_context is not None:
+            caller_id = f"api-client:{api_context.api_client_id}:{caller_id}"
         session.add(
             CommandReceipt(
                 caller_id=caller_id,
@@ -205,26 +218,33 @@ class TransactionService:
         user = session.get(User, user_id)
         if user is None or not user.active:
             _reject("USER_NOT_AUTHORIZED", "user is missing or inactive")
-        if user.active_workspace_id is None:
+        api_context = current_api_client_context()
+        if api_context is not None and api_context.owner_user_id != user_id:
+            _reject("API_CLIENT_SCOPE_DENIED", "API Client owner does not match the request actor")
+        workspace_id = (
+            api_context.workspace_id if api_context is not None else user.active_workspace_id
+        )
+        team_id = api_context.team_id if api_context is not None else user.active_team_id
+        if workspace_id is None:
             _reject("WORKSPACE_CONTEXT_REQUIRED", "select an active workspace")
-        workspace = session.get(Workspace, user.active_workspace_id)
+        workspace = session.get(Workspace, workspace_id)
         membership = session.scalar(
             select(WorkspaceMembership).where(
-                WorkspaceMembership.workspace_id == user.active_workspace_id,
+                WorkspaceMembership.workspace_id == workspace_id,
                 WorkspaceMembership.user_id == user_id,
                 WorkspaceMembership.active,
             )
         )
         if workspace is None or not workspace.active or membership is None:
             _reject("WORKSPACE_ACCESS_DENIED", "workspace membership is missing or inactive")
-        if user.active_team_id is None:
+        if team_id is None:
             if require_team:
                 _reject("TEAM_CONTEXT_REQUIRED", "select an active team")
             return user, workspace, None
-        team = session.get(Team, user.active_team_id)
+        team = session.get(Team, team_id)
         team_membership = session.scalar(
             select(TeamMembership).where(
-                TeamMembership.team_id == user.active_team_id,
+                TeamMembership.team_id == team_id,
                 TeamMembership.user_id == user_id,
                 TeamMembership.active,
             )
@@ -267,6 +287,20 @@ class TransactionService:
         team_id: UUID | None = None,
         allow_setup: bool = False,
     ) -> Team:
+        api_context = current_api_client_context()
+        if api_context is not None:
+            if (
+                action in API_CLIENT_HUMAN_ONLY_ACTIONS
+                or action not in API_CLIENT_ALLOWED_BUSINESS_ACTIONS
+            ):
+                _reject(
+                    "HUMAN_WEB_CONFIRMATION_REQUIRED",
+                    f"{action} requires the owner to use an interactive web session",
+                )
+            if account_id is not None and account_id != api_context.account_id:
+                _reject("API_CLIENT_SCOPE_DENIED", "resource is outside the API Client account")
+            if venue is not None and venue != api_context.venue:
+                _reject("API_CLIENT_SCOPE_DENIED", "resource is outside the API Client venue")
         _user, _workspace, team = self._active_scope(session, user_id)
         assert team is not None
         if team_id is not None and team.team_id != team_id:
@@ -335,6 +369,16 @@ class TransactionService:
         action: str,
     ) -> Team:
         """Require an active-team grant; the eventual write rechecks object scope."""
+
+        api_context = current_api_client_context()
+        if api_context is not None and (
+            action in API_CLIENT_HUMAN_ONLY_ACTIONS
+            or action not in API_CLIENT_ALLOWED_BUSINESS_ACTIONS
+        ):
+            _reject(
+                "HUMAN_WEB_CONFIRMATION_REQUIRED",
+                f"{action} requires the owner to use an interactive web session",
+            )
 
         _user, _workspace, team = self._active_scope(session, user_id)
         assert team is not None

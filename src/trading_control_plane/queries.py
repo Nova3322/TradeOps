@@ -68,7 +68,9 @@ class TradingQueries:
         self.service_principal_by_username = self._workspace.service_principal_by_username
         self.user_context = self._workspace.user_context
         self.managed_users = self._workspace.managed_users
-        self.managed_agents = self._workspace.managed_agents
+        self.api_clients = self._workspace.api_clients
+        self.api_client_scopes = self._workspace.api_client_scopes
+        self.managed_agents = self._workspace.api_clients
         self.telegram_chat_id = self._workspace.telegram_chat_id
         self.telegram_user_id = self._workspace.telegram_user_id
         self.notification_center = self._workspace.notification_center

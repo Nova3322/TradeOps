@@ -7,6 +7,7 @@ from trading_control_plane.api_core import (
     UUID,
     WEB_ROOT,
     Any,
+    ApiClientRateLimiter,
     AsyncIterator,
     BinanceCapitalGateway,
     BinancePortfolioMarginClient,
@@ -107,6 +108,11 @@ from trading_control_plane.api_routes.risk import register_risk_routes
 from trading_control_plane.api_routes.signals import register_signals_routes
 from trading_control_plane.api_routes.system import register_system_routes
 from trading_control_plane.api_routes.workspace import register_workspace_routes
+from trading_control_plane.request_context import (
+    ApiClientRequestContext,
+    bind_api_client_context,
+    reset_api_client_context,
+)
 
 
 def create_app(
@@ -137,6 +143,7 @@ def create_app(
     token_service = SignedTokenService(resolved_settings.session_signing_secret)
     password_hasher = PasswordHasher()
     login_limiter = LoginAttemptLimiter()
+    api_client_limiter = ApiClientRateLimiter()
     resolved_perptape = perptape_client or PerptapeClient(
         base_url=resolved_settings.perptape_base_url,
         api_key=resolved_settings.perptape_api_key,
@@ -757,10 +764,10 @@ def create_app(
             require_default_venue_account(account_id, venue)
         require_capability(identity, "venue.view", account_id, venue)
 
-    def current_identity(
+    async def current_identity(
         trading_session: str | None = Cookie(default=None, alias=SESSION_COOKIE),
         authorization: str | None = Header(default=None),
-    ) -> SessionIdentity:
+    ) -> AsyncIterator[SessionIdentity]:
         if trading_session is not None and authorization is not None:
             raise DomainRejected(
                 "AUTH_CREDENTIAL_AMBIGUOUS",
@@ -776,27 +783,59 @@ def create_app(
                 or " " in credential
             ):
                 raise DomainRejected("AGENT_TOKEN_INVALID", "agent API credential is invalid")
-            authenticated = service().authenticate_agent_token(credential, now=_now())
-            context = queries().user_context(UUID(str(authenticated["user_id"])))
-            if int(context["auth_version"]) != int(authenticated["auth_version"]):
-                raise DomainRejected("SESSION_REVOKED", "agent access changed during login")
-            return SessionIdentity(
+            now = _now()
+            authenticated = service().authenticate_api_client_token(credential, now=now)
+            retry_after = api_client_limiter.consume(
+                str(authenticated["api_client_id"]),
+                now=now,
+            )
+            if retry_after is not None:
+                raise DomainRejected(
+                    "API_CLIENT_RATE_LIMITED",
+                    f"API Client request rate exceeded; retry after {retry_after} seconds",
+                )
+            api_client_id = UUID(str(authenticated["api_client_id"]))
+            workspace_id = UUID(str(authenticated["workspace_id"]))
+            team_id = UUID(str(authenticated["team_id"]))
+            account_id = str(authenticated["account_id"])
+            venue = str(authenticated["venue"])
+            identity = SessionIdentity(
                 user_id=UUID(str(authenticated["user_id"])),
                 username=str(authenticated["username"]),
                 expires_at=authenticated["expires_at"],
-                authentication_method="agent-token-v1",
+                authentication_method="api-client-token-v1",
                 auth_version=int(authenticated["auth_version"]),
+                api_client_id=api_client_id,
+                api_client_name=str(authenticated["api_client_name"]),
+                workspace_id=workspace_id,
+                team_id=team_id,
+                account_id=account_id,
+                venue=venue,
             )
+            request_context = ApiClientRequestContext(
+                owner_user_id=identity.user_id,
+                api_client_id=api_client_id,
+                workspace_id=workspace_id,
+                team_id=team_id,
+                account_id=account_id,
+                venue=venue,
+            )
+            context_token = bind_api_client_context(request_context)
+            try:
+                yield identity
+            finally:
+                reset_api_client_context(context_token)
+            return
         if trading_session is None:
             raise DomainRejected("LOGIN_DENIED", "an internal login session is required")
         identity = token_service.verify_session(trading_session, now=_now())
         context = queries().user_context(identity.user_id)
         if int(context["auth_version"]) != identity.auth_version:
             raise DomainRejected("SESSION_REVOKED", "login session was revoked")
-        return identity
+        yield identity
 
     def is_agent_identity(identity: SessionIdentity) -> bool:
-        return identity.authentication_method == "agent-token-v1"
+        return identity.api_client_id is not None
 
     identity_dependency = Depends(current_identity)
 
@@ -1500,7 +1539,6 @@ def create_app(
             return FileResponse(WEB_ROOT / "sw.js", media_type="application/javascript")
 
         @app.get("/admin/users", include_in_schema=False)
-        @app.get("/admin/agents", include_in_schema=False)
         def managed_users_web(
             identity: SessionIdentity = identity_dependency,
         ) -> FileResponse:
@@ -1510,6 +1548,8 @@ def create_app(
         @app.get("/", include_in_schema=False)
         @app.get("/home", include_in_schema=False)
         @app.get("/workspaces", include_in_schema=False)
+        @app.get("/profile/api-access", include_in_schema=False)
+        @app.get("/admin/agents", include_in_schema=False)
         @app.get("/opportunities", include_in_schema=False)
         @app.get("/signals", include_in_schema=False)
         @app.get("/opportunities/defaults", include_in_schema=False)

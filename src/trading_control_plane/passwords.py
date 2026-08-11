@@ -109,3 +109,20 @@ class LoginAttemptLimiter:
     def success(self, key: str) -> None:
         self._failures.pop(key, None)
         self._locked_until.pop(key, None)
+
+
+@dataclass
+class ApiClientRateLimiter:
+    max_requests: int = 120
+    window: timedelta = timedelta(minutes=1)
+    _requests: dict[str, list[datetime]] = field(default_factory=dict)
+
+    def consume(self, key: str, *, now: datetime) -> int | None:
+        threshold = now - self.window
+        requests = [item for item in self._requests.get(key, []) if item > threshold]
+        if len(requests) >= self.max_requests:
+            retry_at = min(requests) + self.window
+            return max(1, int((retry_at - now).total_seconds()))
+        requests.append(now)
+        self._requests[key] = requests
+        return None

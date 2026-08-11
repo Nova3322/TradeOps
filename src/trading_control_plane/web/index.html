@@ -8,7 +8,7 @@
     <link rel="manifest" href="/manifest.webmanifest">
     <link rel="icon" href="/assets/tradingops-logo.png" type="image/png">
     <link rel="apple-touch-icon" href="/assets/tradingops-logo.png">
-    <link rel="stylesheet" href="/assets/styles.css?v=70">
+    <link rel="stylesheet" href="/assets/styles.css?v=71">
     <title>交易控制台</title>
   </head>
   <body>
@@ -25,6 +25,7 @@
             <section id="user-menu-panel" class="user-menu-panel" role="dialog" aria-label="用户菜单" hidden>
               <header class="user-menu-head"><div><small>登录身份</small><strong data-user-menu-name>—</strong></div><span data-user-menu-auth>密码登录</span></header>
               <dl class="user-menu-context"><div><dt>当前工作区</dt><dd data-user-menu-workspace>—</dd></div><div><dt>默认团队</dt><dd data-user-menu-team>—</dd></div><div><dt>当前职责</dt><dd data-user-menu-role>—</dd></div></dl>
+              <a class="user-menu-api-link" href="/profile/api-access" data-link><span><small>个人中心</small><b>API 接入</b></span><strong>管理自己的 API Agent</strong></a>
               <section class="user-preferences" aria-labelledby="personal-preferences-title">
                 <div class="user-menu-section-head"><div><small>个人设置</small><h2 id="personal-preferences-title">个人偏好</h2></div></div>
                 <div class="preference-controls">
@@ -88,7 +89,6 @@
             <a href="/positions" data-link data-nav-capability="system.view"><span>↕</span>系统状态</a>
             <a href="/capital" data-link data-nav-capability="capital.view"><span>¤</span>资金中心</a>
             <a href="/admin/users" data-link data-nav-capability="access.manage"><span>◇</span>成员权限</a>
-            <a href="/admin/agents" data-link data-nav-capability="access.manage"><span>◈</span>AI Agent</a>
           </div>
         </nav>
         <div class="sidebar-foot">
@@ -150,15 +150,15 @@
       </form>
     </dialog>
     <div id="toast" class="toast" role="status" aria-live="polite"></div>
-    <script defer src="/assets/app-core.js?v=160"></script>
-    <script defer src="/assets/workspace.js?v=160"></script>
-    <script defer src="/assets/signals.js?v=160"></script>
-    <script defer src="/assets/proposals.js?v=160"></script>
-    <script defer src="/assets/risk.js?v=160"></script>
-    <script defer src="/assets/execution.js?v=160"></script>
-    <script defer src="/assets/capital.js?v=160"></script>
-    <script defer src="/assets/reporting.js?v=160"></script>
-    <script defer src="/assets/accounts.js?v=160"></script>
-    <script defer src="/assets/app.js?v=160"></script>
+    <script defer src="/assets/app-core.js?v=169"></script>
+    <script defer src="/assets/workspace.js?v=169"></script>
+    <script defer src="/assets/signals.js?v=169"></script>
+    <script defer src="/assets/proposals.js?v=169"></script>
+    <script defer src="/assets/risk.js?v=169"></script>
+    <script defer src="/assets/execution.js?v=169"></script>
+    <script defer src="/assets/capital.js?v=169"></script>
+    <script defer src="/assets/reporting.js?v=169"></script>
+    <script defer src="/assets/accounts.js?v=169"></script>
+    <script defer src="/assets/app.js?v=169"></script>
   </body>
 </html>

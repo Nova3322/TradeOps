@@ -11,10 +11,13 @@ from alembic.config import Config
 from alembic.migration import MigrationContext
 from sqlalchemy import inspect, select, text
 
+from trading_control_plane.agent import issue_agent_token
+from trading_control_plane.credentials import CredentialCipher
 from trading_control_plane.database import REQUIRED_SCHEMA_REVISION, Base, Database
 from trading_control_plane.models import (
     AccountEquity,
     AccountEquityObservation,
+    ApiClient,
     AuditEvent,
     CapabilityGate,
     ExchangeAccount,
@@ -54,6 +57,176 @@ def test_initial_schema_round_trip_and_metadata_match(database: Database) -> Non
     assert differences == []
 
 
+def test_legacy_role_bearing_agent_migrates_to_owner_inherited_api_client(
+    database: Database,
+) -> None:
+    config = Config("alembic.ini")
+    now = datetime.now(UTC)
+    encryption_key = base64.urlsafe_b64encode(b"legacy-agent-migration-key-32byt"[:32]).decode(
+        "ascii"
+    )
+    service = TradingService(database, credential_encryption_key=encryption_key)
+    owner_id = service.bootstrap_admin("legacy-agent-owner", now=now)
+    service.create_exchange_account(
+        actor_id=owner_id,
+        account_id="legacy-agent-account",
+        venue="BINANCE",
+        label="Legacy Agent Account",
+        credentials=None,
+        idempotency_key="legacy-agent-account",
+        now=now,
+    )
+    with database.session_factory() as session:
+        owner = session.get(User, owner_id)
+        assert owner is not None
+        assert owner.active_workspace_id is not None
+        assert owner.active_team_id is not None
+        workspace_id = owner.active_workspace_id
+        team_id = owner.active_team_id
+
+    command.downgrade(config, "20260811_0031")
+    legacy_id = uuid4()
+    issued = issue_agent_token(legacy_id)
+    digest = CredentialCipher(encryption_key).secret_fingerprint(
+        issued.token,
+        purpose=f"agent-api-token:{legacy_id}:v1",
+    )
+    audit_id = uuid4()
+    with database.engine.begin() as connection:
+        connection.execute(
+            text(
+                """
+                INSERT INTO users (
+                    user_id, username, auth_version, active_workspace_id, active_team_id,
+                    principal_type, service_kind, agent_token_digest, agent_token_hint,
+                    agent_token_version, agent_token_created_at, agent_token_expires_at,
+                    active, created_at
+                ) VALUES (
+                    :user_id, :username, 1, :workspace_id, :team_id,
+                    'SERVICE', 'AGENT', :digest, :hint, 1, :created_at, :expires_at,
+                    true, :created_at
+                )
+                """
+            ),
+            {
+                "user_id": legacy_id,
+                "username": "legacy-role-agent",
+                "workspace_id": workspace_id,
+                "team_id": team_id,
+                "digest": digest,
+                "hint": issued.hint,
+                "created_at": now,
+                "expires_at": now + timedelta(days=30),
+            },
+        )
+        connection.execute(
+            text(
+                """
+                INSERT INTO workspace_memberships (
+                    membership_id, workspace_id, user_id, role, active, invited_by,
+                    created_at, updated_at
+                ) VALUES (
+                    :membership_id, :workspace_id, :user_id, 'MEMBER', true, :owner_id,
+                    :created_at, :created_at
+                )
+                """
+            ),
+            {
+                "membership_id": uuid4(),
+                "workspace_id": workspace_id,
+                "user_id": legacy_id,
+                "owner_id": owner_id,
+                "created_at": now,
+            },
+        )
+        connection.execute(
+            text(
+                """
+                INSERT INTO team_memberships (
+                    membership_id, team_id, user_id, active, invited_by, created_at, updated_at
+                ) VALUES (
+                    :membership_id, :team_id, :user_id, true, :owner_id, :created_at, :created_at
+                )
+                """
+            ),
+            {
+                "membership_id": uuid4(),
+                "team_id": team_id,
+                "user_id": legacy_id,
+                "owner_id": owner_id,
+                "created_at": now,
+            },
+        )
+        connection.execute(
+            text(
+                """
+                INSERT INTO role_assignments (
+                    assignment_id, user_id, team_id, role, account_scope, venue_scope, created_at
+                ) VALUES (
+                    :assignment_id, :user_id, :team_id, 'PROPOSER',
+                    'legacy-agent-account', 'BINANCE', :created_at
+                )
+                """
+            ),
+            {
+                "assignment_id": uuid4(),
+                "user_id": legacy_id,
+                "team_id": team_id,
+                "created_at": now,
+            },
+        )
+        connection.execute(
+            text(
+                """
+                INSERT INTO audit_events (
+                    audit_event_id, workspace_id, team_id, account_id, actor_id,
+                    event_type, object_type, object_id, reason, correlation_id,
+                    idempotency_key, object_version, created_at
+                ) VALUES (
+                    :audit_id, :workspace_id, :team_id, 'legacy-agent-account', :actor_id,
+                    'LEGACY_AGENT_USED', 'User', :object_id, 'legacy attributed event',
+                    :correlation_id, NULL, 1, :created_at
+                )
+                """
+            ),
+            {
+                "audit_id": audit_id,
+                "workspace_id": workspace_id,
+                "team_id": team_id,
+                "actor_id": str(legacy_id),
+                "object_id": str(legacy_id),
+                "correlation_id": uuid4(),
+                "created_at": now,
+            },
+        )
+
+    command.upgrade(config, "head")
+    migrated_service = TradingService(database, credential_encryption_key=encryption_key)
+    authenticated = migrated_service.authenticate_api_client_token(
+        issued.token, now=now + timedelta(minutes=1)
+    )
+    with database.session_factory() as session:
+        client = session.get(ApiClient, legacy_id)
+        legacy_user = session.get(User, legacy_id)
+        copied_roles = session.scalars(
+            select(RoleAssignment).where(RoleAssignment.user_id == legacy_id)
+        ).all()
+        migrated_audit = session.get(AuditEvent, audit_id)
+
+        assert client is not None
+        assert client.owner_user_id == owner_id
+        assert client.account_id == "legacy-agent-account"
+        assert client.venue == "BINANCE"
+        assert client.state == "ACTIVE"
+        assert legacy_user is not None and legacy_user.active is False
+        assert copied_roles == []
+        assert migrated_audit is not None
+        assert migrated_audit.actor_id == str(owner_id)
+        assert migrated_audit.api_client_id == legacy_id
+    assert authenticated["user_id"] == owner_id
+    assert authenticated["api_client_id"] == legacy_id
+
+
 def test_initial_schema_seeds_only_disabled_capability_gates(database: Database) -> None:
     with database.session_factory() as session:
         gates = {
@@ -84,9 +257,7 @@ def test_durable_freqtrade_dispatch_migration_round_trips(database: Database) ->
             item["name"]: str(item["sqltext"])
             for item in inspect(connection).get_check_constraints("order_intents")
         }
-        indexes = {
-            item["name"]: item for item in inspect(connection).get_indexes("order_intents")
-        }
+        indexes = {item["name"]: item for item in inspect(connection).get_indexes("order_intents")}
         revision = connection.exec_driver_sql(
             "SELECT version_num FROM alembic_version"
         ).scalar_one()
@@ -103,9 +274,7 @@ def test_durable_freqtrade_dispatch_migration_round_trips(database: Database) ->
         "dispatch_started_at",
     } <= columns
     assert "DISPATCHING" in checks["ck_order_intents_status"]
-    assert "DISPATCHING" in str(
-        indexes["uq_order_intents_one_active_campaign"]["dialect_options"]
-    )
+    assert "DISPATCHING" in str(indexes["uq_order_intents_one_active_campaign"]["dialect_options"])
     assert differences == []
 
 
@@ -114,9 +283,9 @@ def test_account_bound_freqtrade_worker_migration_guards_data_and_round_trips(
 ) -> None:
     config = Config("alembic.ini")
     now = datetime.now(UTC)
-    encryption_key = base64.urlsafe_b64encode(
-        b"schema-worker-fixture-key-32-byte"[:32]
-    ).decode().rstrip("=")
+    encryption_key = (
+        base64.urlsafe_b64encode(b"schema-worker-fixture-key-32-byte"[:32]).decode().rstrip("=")
+    )
     service = TradingService(database, credential_encryption_key=encryption_key)
     admin = service.bootstrap_admin("schema-worker-admin", now=now)
     account_id = service.create_exchange_account(
@@ -163,10 +332,7 @@ def test_account_bound_freqtrade_worker_migration_guards_data_and_round_trips(
     )
     command.downgrade(config, "20260811_0028")
     with database.engine.connect() as connection:
-        columns = {
-            item["name"]
-            for item in inspect(connection).get_columns("exchange_accounts")
-        }
+        columns = {item["name"] for item in inspect(connection).get_columns("exchange_accounts")}
         assert "freqtrade_worker_mode" not in columns
     command.upgrade(config, "head")
     with database.engine.connect() as connection:

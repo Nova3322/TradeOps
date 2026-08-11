@@ -268,6 +268,65 @@ class User(Base):
     )
 
 
+class ApiClient(Base):
+    __tablename__ = "api_clients"
+    __table_args__ = (
+        CheckConstraint(
+            "state IN ('ACTIVE','DISABLED','REVOKED')",
+            name="ck_api_clients_state",
+        ),
+        CheckConstraint("token_version >= 1", name="ck_api_clients_token_version"),
+        CheckConstraint("version >= 1", name="ck_api_clients_version"),
+        CheckConstraint(
+            "(state = 'REVOKED' AND revoked_at IS NOT NULL) OR "
+            "(state <> 'REVOKED' AND revoked_at IS NULL)",
+            name="ck_api_clients_revocation_shape",
+        ),
+        UniqueConstraint("owner_user_id", "name", name="uq_api_clients_owner_name"),
+        ForeignKeyConstraint(
+            ["team_id", "account_id", "venue"],
+            [
+                "exchange_accounts.team_id",
+                "exchange_accounts.account_id",
+                "exchange_accounts.venue",
+            ],
+            name="fk_api_clients_exchange_account_scope",
+            ondelete="RESTRICT",
+        ),
+        Index("ix_api_clients_owner_state", "owner_user_id", "state"),
+        Index("ix_api_clients_team_scope", "team_id", "account_id", "venue"),
+    )
+
+    api_client_id: Mapped[UUID] = mapped_column(
+        Uuid(as_uuid=True), primary_key=True, default=uuid4
+    )
+    owner_user_id: Mapped[UUID] = mapped_column(
+        ForeignKey("users.user_id", ondelete="CASCADE"), nullable=False
+    )
+    name: Mapped[str] = mapped_column(String(120), nullable=False)
+    workspace_id: Mapped[UUID] = mapped_column(
+        ForeignKey("workspaces.workspace_id", ondelete="RESTRICT"), nullable=False
+    )
+    team_id: Mapped[UUID] = mapped_column(
+        ForeignKey("teams.team_id", ondelete="RESTRICT"), nullable=False
+    )
+    account_id: Mapped[str] = mapped_column(String(120), nullable=False)
+    venue: Mapped[str] = mapped_column(String(64), nullable=False)
+    state: Mapped[str] = mapped_column(String(16), nullable=False, default="ACTIVE")
+    token_digest: Mapped[str] = mapped_column(String(64), nullable=False)
+    token_hint: Mapped[str] = mapped_column(String(32), nullable=False)
+    token_version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    token_created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    token_expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    token_last_used_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
 class WorkspaceMembership(Base):
     __tablename__ = "workspace_memberships"
     __table_args__ = (
@@ -2267,6 +2326,7 @@ class AuditEvent(Base):
         Index("ix_audit_events_correlation", "correlation_id", "created_at"),
         Index("ix_audit_events_workspace_created", "workspace_id", "created_at"),
         Index("ix_audit_events_team_created", "team_id", "created_at"),
+        Index("ix_audit_events_api_client_created", "api_client_id", "created_at"),
         Index(
             "ix_audit_events_team_account_created",
             "team_id",
@@ -2284,6 +2344,9 @@ class AuditEvent(Base):
     team_id: Mapped[UUID | None] = mapped_column(ForeignKey("teams.team_id"), nullable=True)
     account_id: Mapped[str | None] = mapped_column(String(120), nullable=True)
     actor_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    api_client_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("api_clients.api_client_id", ondelete="RESTRICT"), nullable=True
+    )
     event_type: Mapped[str] = mapped_column(String(120), nullable=False)
     object_type: Mapped[str] = mapped_column(String(120), nullable=False)
     object_id: Mapped[str] = mapped_column(String(255), nullable=False)

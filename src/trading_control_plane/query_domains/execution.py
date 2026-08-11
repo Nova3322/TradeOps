@@ -660,6 +660,9 @@ class ExecutionQueries(QueryComponent):
                     "team_id": str(team_id),
                     "account_id": item.account_id,
                     "actor_id": item.actor_id,
+                    "api_client_id": (
+                        None if item.api_client_id is None else str(item.api_client_id)
+                    ),
                     "actor": actors.get(parsed_actor_ids[item.actor_id], item.actor_id)
                     if item.actor_id in parsed_actor_ids
                     else item.actor_id,

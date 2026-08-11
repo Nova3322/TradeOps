@@ -27,6 +27,12 @@ class SessionIdentity:
     expires_at: datetime
     authentication_method: str
     auth_version: int = 1
+    api_client_id: UUID | None = None
+    api_client_name: str | None = None
+    workspace_id: UUID | None = None
+    team_id: UUID | None = None
+    account_id: str | None = None
+    venue: str | None = None
 
 
 @dataclass(frozen=True)

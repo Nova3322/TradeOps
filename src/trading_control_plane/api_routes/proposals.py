@@ -402,7 +402,8 @@ class _ProposalsRoutes:
                 "add_trigger_price": None,
                 "rationale": payload.rationale,
                 "agent": {
-                    "principal_id": str(identity.user_id),
+                    "owner_user_id": str(identity.user_id),
+                    "api_client_id": str(identity.api_client_id),
                     "model_id": payload.model_id,
                     "model_version": payload.model_version,
                     "request_id": payload.request_id,
@@ -442,7 +443,7 @@ class _ProposalsRoutes:
                 strategy_id=payload.model_id,
                 strategy_version=payload.model_version,
                 environment=ExecutionEnvironment(payload.environment),
-                source_candidate_id=f"agent:{identity.user_id}:{payload.request_id}",
+                source_candidate_id=(f"api-client:{identity.api_client_id}:{payload.request_id}"),
                 source_link=None,
                 source_observed_at=generated_at,
                 source_readiness="READY",
@@ -665,7 +666,12 @@ class _ProposalsRoutes:
                     "AGENT_IDEMPOTENCY_REQUIRED",
                     "Agent reviews require an explicit idempotency key",
                 )
-            if payload.decision == "APPROVE" and not agent_call:
+            if payload.decision == "APPROVE":
+                if agent_call:
+                    raise DomainRejected(
+                        "HUMAN_WEB_CONFIRMATION_REQUIRED",
+                        "proposal approval requires the owner to complete step-up in the web UI",
+                    )
                 if payload.action_grant is None:
                     raise DomainRejected(
                         "ACTION_GRANT_REQUIRED", "proposal approval requires action-level step-up"

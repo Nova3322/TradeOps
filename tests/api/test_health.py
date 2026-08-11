@@ -209,28 +209,30 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
 
     assert response.status_code == 200
     assert "交易控制台" in response.text
-    assert "/assets/app-core.js?v=160" in response.text
-    assert "/assets/app.js?v=160" in response.text
+    assert "/assets/app-core.js?v=169" in response.text
+    assert "/assets/app.js?v=169" in response.text
     assert 'href="/signals"' in response.text
-    assert "/assets/styles.css?v=70" in response.text
+    assert "/assets/styles.css?v=71" in response.text
     assert 'href="/assets/tradingops-logo.png" type="image/png"' in response.text
     assert '<img src="/assets/tradingops-logo.png" alt="">' in response.text
     assert '<span class="brand-mark" aria-hidden="true">T</span>' not in response.text
     assert 'aria-label="交易控制台首页"' in response.text
     assert '<a href="/home" data-link><span>⌂</span>当前任务</a>' in response.text
-    assert '<span>⌁</span>实时机会</a>' in response.text
-    assert '<span>✓</span>审核队列</a>' in response.text
-    assert '<span>¤</span>资金中心</a>' in response.text
+    assert "<span>⌁</span>实时机会</a>" in response.text
+    assert "<span>✓</span>审核队列</a>" in response.text
+    assert "<span>¤</span>资金中心</a>" in response.text
     assert response.text.count('class="nav-section" data-nav-section') == 3
-    assert response.text.count('data-nav-capability=') == 12
-    assert 'data-nav-group=' not in response.text
+    assert response.text.count("data-nav-capability=") == 11
+    assert "data-nav-group=" not in response.text
     assert 'id="team-settings-link"' not in response.text
     assert 'id="mobile-nav-toggle"' in response.text
     assert 'id="scope-switcher"' in response.text
     assert 'id="workspace-switcher-menu"' in response.text
     assert 'id="user-menu"' in response.text
+    assert 'href="/profile/api-access"' in response.text
+    assert "API 接入" in response.text
     assert 'id="password-change-form"' in response.text
-    assert response.text.count('data-preference-select=') == 2
+    assert response.text.count("data-preference-select=") == 2
     assert response.text.count('aria-haspopup="listbox"') == 2
     assert response.text.count('role="listbox"') == 2
     assert "个人账户" not in response.text
@@ -257,7 +259,8 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
     assert get(app, "/settings").status_code == 404
 
     assert get(app, "/admin/users").status_code == 401
-    assert get(app, "/admin/agents").status_code == 401
+    assert get(app, "/admin/agents").status_code == 200
+    assert get(app, "/profile/api-access").status_code == 200
 
     assert get(app, "/assets/app.js").status_code == 200
     app_javascript = SimpleNamespace(text=frontend_source())
@@ -277,7 +280,7 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
     assert "const REQUEST_TIMEOUT_MS = 15000" in app_javascript.text
     assert "当前团队风险恢复仍由管理员控制" in app_javascript.text
     assert "const SHADOW_READINESS_CATALOG" in app_javascript.text
-    assert 'data-shadow-readiness' in app_javascript.text
+    assert "data-shadow-readiness" in app_javascript.text
     assert "firstPendingStep?.href" in app_javascript.text
     assert "未知服务端阻断" in app_javascript.text
     assert 'id="risk-policy-form"' in app_javascript.text
@@ -307,7 +310,7 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
     assert "你的审核已记录" in app_javascript.text
     assert 'data-nav-capability="opportunity.view"' in response.text
     assert 'href="/admin/users"' in response.text
-    assert 'href="/admin/agents"' in response.text
+    assert 'href="/admin/agents"' not in response.text
     assert 'href="/results"' in response.text
     assert 'data-nav-capability="results.view"' in response.text
     assert 'href="/notifications"' in response.text
@@ -317,6 +320,14 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
     assert "renderActualResults" in app_javascript.text
     assert "/api/results" in app_javascript.text
     assert "renderNotifications" in app_javascript.text
+    assert "async function renderApiAccess" in app_javascript.text
+    assert "/api/profile/api-clients" in app_javascript.text
+    assert "/api/api-client/connection" in app_javascript.text
+    assert "不保存角色副本" in app_javascript.text
+    assert "agentRoleCatalog" not in app_javascript.text
+    assert "workspace.agent_count" not in app_javascript.text
+    assert "const trigger = event.currentTarget" in app_javascript.text
+    assert "该 API Client Token 已失效、已轮换或不匹配" in app_javascript.text
     assert "/api/notifications" in app_javascript.text
     assert "/api/audit" not in app_javascript.text
     assert "'access.manage':['SYSTEM_ADMIN']" in app_javascript.text
@@ -331,8 +342,14 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
     assert "api('/api/admin/team-members'" in app_javascript.text
     assert "当前任务只显示你的资金职责" in app_javascript.text
     assert "api('/api/risk-controls').catch(error => ({error}))" in app_javascript.text
-    assert "Boolean(riskControl?.policy && riskControl.policy.system_state !== 'NORMAL')" in app_javascript.text
-    assert "riskControl?.policy ? riskControlStatusLabel(riskControl.policy.system_state) : '未配置'" in app_javascript.text
+    assert (
+        "Boolean(riskControl?.policy && riskControl.policy.system_state !== 'NORMAL')"
+        in app_javascript.text
+    )
+    assert (
+        "riskControl?.policy ? riskControlStatusLabel(riskControl.policy.system_state) : '未配置'"
+        in app_javascript.text
+    )
     assert "riskControl.actions?.review_restore?.allowed === true" in app_javascript.text
     assert "riskControl.actions?.execute_restore?.allowed === true" in app_javascript.text
     assert "当前没有风险恢复审核待办" in app_javascript.text  # noqa: RUF001
@@ -342,6 +359,7 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
     assert "error.handled = response.status === 401" in app_javascript.text
     assert "function handleUnauthorizedResponse" in app_javascript.text
     assert "function confirmAction" in app_javascript.text
+    assert "confirmDialog.close(confirmed ? 'confirm' : 'cancel')" in app_javascript.text
     assert "批准这份冻结提案？" in app_javascript.text
     assert "最高管理员直接批准本人提案" not in app_javascript.text
     assert "proposal.admin_approve" not in app_javascript.text
@@ -382,16 +400,16 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
     assert "账户范围" in app_javascript.text
     assert "默认账户" in app_javascript.text
     assert "const venues = ['BINANCE','HYPERLIQUID','OKX','BYBIT'];" in app_javascript.text
-    assert "environmentBadge.textContent = fmtEnvironment(authStatus?.environment);" in app_javascript.text
+    assert (
+        "environmentBadge.textContent = fmtEnvironment(authStatus?.environment);"
+        in app_javascript.text
+    )
     assert "LOCAL:'本地运行'" in app_javascript.text
     assert "fmtExchangeAccountCopy(item.next_action)" in app_javascript.text
     assert "交易能力已关闭；连接状态不会开启下单" in app_javascript.text  # noqa: RUF001
     assert "exchange-trading-form" in app_javascript.text
     assert "/trading-eligibility" in app_javascript.text
-    assert (
-        "全局真实发送、发送者租约、风控、任务和进程安全开关仍会独立阻断"
-        in app_javascript.text
-    )
+    assert "全局真实发送、发送者租约、风控、任务和进程安全开关仍会独立阻断" in app_javascript.text
     assert "这是合成事实，不是交易所成交或真实收益" in app_javascript.text
     assert ".map(resultRiskReasonLabel)" in app_javascript.text
     assert "resultSignalProviderLabel(value)" in app_javascript.text
@@ -504,8 +522,7 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
     assert "new WebSocket(`${scheme}://${location.host}/ws/opportunities`)" in app_javascript.text
     assert (
         "message.type === 'error') {\n"
-        "      setOpportunityConnectionState('页面更新正常', true);"
-        in app_javascript.text
+        "      setOpportunityConnectionState('页面更新正常', true);" in app_javascript.text
     )
     assert "WEBSOCKET_LIVE:'上游 WebSocket 实时流'" in app_javascript.text
     assert "POLLING_FALLBACK:'HTTPS 轮询回退'" in app_javascript.text
@@ -597,11 +614,14 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
     assert ".error-state-guidance" in stylesheet.text
     assert ".error-state h2:focus-visible" in stylesheet.text
     tablet_css = stylesheet.text.split("@media (max-width: 1180px)", 1)[1].split("@media", 1)[0]
-    assert ".proposal-list-tools { grid-template-columns: minmax(220px, 1fr) 140px 140px; }" in tablet_css
+    assert (
+        ".proposal-list-tools { grid-template-columns: minmax(220px, 1fr) 140px 140px; }"
+        in tablet_css
+    )
 
     service_worker = get(app, "/sw.js")
     assert service_worker.status_code == 200
-    assert "trading-shell-v132" in service_worker.text
+    assert "trading-shell-v141" in service_worker.text
     assert "/assets/tradingops-logo.png" in service_worker.text
     assert "/assets/tradingops-icon.svg" in service_worker.text
     assert "/assets/icon.svg" not in service_worker.text

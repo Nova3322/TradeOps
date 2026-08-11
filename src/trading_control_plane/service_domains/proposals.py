@@ -356,7 +356,14 @@ class ProposalService(ServiceComponent):
                             "the Webhook signal source is no longer enabled",
                         )
             elif (
-                principal.principal_type != PrincipalType.SERVICE.value
+                (
+                    principal.principal_type != PrincipalType.SERVICE.value
+                    and not (
+                        (api_context := current_api_client_context()) is not None
+                        and api_context.owner_user_id == actor_id
+                        and principal.principal_type == PrincipalType.HUMAN.value
+                    )
+                )
                 or not strategy_id
                 or not strategy_version
                 or not source_candidate_id
@@ -365,7 +372,8 @@ class ProposalService(ServiceComponent):
             ):
                 _reject(
                     "PROPOSAL_SOURCE_INVALID",
-                    "SYSTEM proposals require a service principal, strategy version and candidate",
+                    "SYSTEM proposals require a service or HUMAN-owned API Client, strategy "
+                    "version and candidate",
                 )
             instrument = session.get(Instrument, instrument_id)
             if instrument is None or not instrument.active or instrument.venue != venue:

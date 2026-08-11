@@ -7,6 +7,9 @@ from trading_control_plane.api_core import (
     AgentCreateRequest,
     AgentTokenRotationRequest,
     Any,
+    ApiClientCreateRequest,
+    ApiClientRevokeRequest,
+    ApiClientStateRequest,
     DomainRejected,
     HTTPException,
     ManagedUserAccessRequest,
@@ -51,6 +54,13 @@ class _WorkspaceRoutes:
         self.configured_risk_scopes = dependencies.configured_risk_scopes
         self.is_agent_identity = dependencies.is_agent_identity
         self.resolved_telegram = dependencies.telegram
+
+    def require_human_session(self, identity: SessionIdentity) -> None:
+        if self.is_agent_identity(identity):
+            raise DomainRejected(
+                "HUMAN_WEB_CONFIRMATION_REQUIRED",
+                "this action requires the owner to use an interactive web session",
+            )
 
     def register_auth(self) -> None:
         @self.app.get("/api/auth/status")
@@ -187,6 +197,7 @@ class _WorkspaceRoutes:
             response: Response,
             identity: SessionIdentity = self.identity_dependency,
         ) -> dict[str, Any]:
+            self.require_human_session(identity)
             if identity.authentication_method != "password-scrypt":
                 raise DomainRejected(
                     "PASSWORD_AUTH_REQUIRED",
@@ -247,6 +258,7 @@ class _WorkspaceRoutes:
             payload: WorkspaceCreateRequest,
             identity: SessionIdentity = self.identity_dependency,
         ) -> dict[str, Any]:
+            self.require_human_session(identity)
             workspace_id = self.service().create_workspace(
                 actor_id=identity.user_id,
                 name=payload.name,
@@ -264,6 +276,7 @@ class _WorkspaceRoutes:
             payload: TeamCreateRequest,
             identity: SessionIdentity = self.identity_dependency,
         ) -> dict[str, Any]:
+            self.require_human_session(identity)
             team_id = self.service().create_team(
                 actor_id=identity.user_id,
                 name=payload.name,
@@ -329,6 +342,7 @@ class _WorkspaceRoutes:
             payload: ScopeSelectRequest,
             identity: SessionIdentity = self.identity_dependency,
         ) -> dict[str, Any]:
+            self.require_human_session(identity)
             self.service().select_scope(
                 actor_id=identity.user_id,
                 workspace_id=payload.workspace_id,
@@ -353,6 +367,7 @@ class _WorkspaceRoutes:
             payload: ManagedUserCreateRequest,
             identity: SessionIdentity = self.identity_dependency,
         ) -> dict[str, Any]:
+            self.require_human_session(identity)
             user_id = self.service().create_managed_user(
                 payload.username,
                 [Role(value) for value in payload.roles],
@@ -392,6 +407,7 @@ class _WorkspaceRoutes:
             payload: ManagedUserAccessRequest,
             identity: SessionIdentity = self.identity_dependency,
         ) -> dict[str, Any]:
+            self.require_human_session(identity)
             self.service().update_managed_user_access(
                 user_id,
                 [Role(value) for value in payload.roles],
@@ -404,12 +420,137 @@ class _WorkspaceRoutes:
             )
             return {"user_id": str(user_id), "data": self.queries().managed_users(identity.user_id)}
 
+        @self.app.get("/api/profile/api-clients")
+        def api_clients(
+            identity: SessionIdentity = self.identity_dependency,
+        ) -> dict[str, Any]:
+            self.require_human_session(identity)
+            return {
+                "data": self.queries().api_clients(identity.user_id, now=_now()),
+                "as_of": _now().isoformat(),
+            }
+
+        @self.app.get("/api/profile/api-client-scopes")
+        def api_client_scopes(
+            identity: SessionIdentity = self.identity_dependency,
+        ) -> dict[str, Any]:
+            self.require_human_session(identity)
+            return {
+                "data": self.queries().api_client_scopes(identity.user_id),
+                "as_of": _now().isoformat(),
+            }
+
+        @self.app.post("/api/profile/api-clients")
+        def create_api_client(
+            payload: ApiClientCreateRequest,
+            identity: SessionIdentity = self.identity_dependency,
+        ) -> dict[str, Any]:
+            self.require_human_session(identity)
+            result = self.service().create_api_client(
+                name=payload.name,
+                workspace_id=payload.workspace_id,
+                team_id=payload.team_id,
+                account_id=payload.account_id,
+                venue=payload.venue,
+                expires_in_days=payload.expires_in_days,
+                idempotency_key=payload.idempotency_key,
+                actor_id=identity.user_id,
+                now=_now(),
+            )
+            return {
+                "result": result,
+                "data": self.queries().api_clients(identity.user_id, now=_now()),
+            }
+
+        @self.app.put("/api/profile/api-clients/{api_client_id}/state")
+        def update_api_client_state(
+            api_client_id: UUID,
+            payload: ApiClientStateRequest,
+            identity: SessionIdentity = self.identity_dependency,
+        ) -> dict[str, Any]:
+            self.require_human_session(identity)
+            result = self.service().update_api_client_state(
+                api_client_id,
+                active=payload.active,
+                expected_version=payload.expected_version,
+                idempotency_key=payload.idempotency_key,
+                actor_id=identity.user_id,
+                now=_now(),
+            )
+            return {
+                "result": result,
+                "data": self.queries().api_clients(identity.user_id, now=_now()),
+            }
+
+        @self.app.post("/api/profile/api-clients/{api_client_id}/token-rotations")
+        def rotate_api_client_token(
+            api_client_id: UUID,
+            payload: AgentTokenRotationRequest,
+            identity: SessionIdentity = self.identity_dependency,
+        ) -> dict[str, Any]:
+            self.require_human_session(identity)
+            result = self.service().rotate_api_client_token(
+                api_client_id,
+                expected_token_version=payload.expected_token_version,
+                expires_in_days=payload.expires_in_days,
+                idempotency_key=payload.idempotency_key,
+                actor_id=identity.user_id,
+                now=_now(),
+            )
+            return {
+                "result": result,
+                "data": self.queries().api_clients(identity.user_id, now=_now()),
+            }
+
+        @self.app.post("/api/profile/api-clients/{api_client_id}/revoke")
+        def revoke_api_client(
+            api_client_id: UUID,
+            payload: ApiClientRevokeRequest,
+            identity: SessionIdentity = self.identity_dependency,
+        ) -> dict[str, Any]:
+            self.require_human_session(identity)
+            result = self.service().revoke_api_client(
+                api_client_id,
+                expected_version=payload.expected_version,
+                idempotency_key=payload.idempotency_key,
+                actor_id=identity.user_id,
+                now=_now(),
+            )
+            return {
+                "result": result,
+                "data": self.queries().api_clients(identity.user_id, now=_now()),
+            }
+
+        @self.app.get("/api/api-client/connection")
+        def api_client_connection(
+            identity: SessionIdentity = self.identity_dependency,
+        ) -> dict[str, Any]:
+            if not self.is_agent_identity(identity):
+                raise DomainRejected(
+                    "AGENT_IDENTITY_REQUIRED",
+                    "this endpoint requires an API Client Bearer credential",
+                )
+            context = self.queries().user_context(identity.user_id)
+            return {
+                "connected": True,
+                "owner_user_id": str(identity.user_id),
+                "api_client_id": str(identity.api_client_id),
+                "api_client_name": identity.api_client_name,
+                "scope": context["api_client_scope"],
+                "effective_roles": context["roles"],
+                "permissions_source": "HUMAN_DYNAMIC",
+                "as_of": _now().isoformat(),
+            }
+
+        # Legacy paths remain as read/write compatibility aliases. They now list
+        # only the current HUMAN user's clients and never persist independent roles.
         @self.app.get("/api/admin/agents")
         def managed_agents(
             identity: SessionIdentity = self.identity_dependency,
         ) -> dict[str, Any]:
+            self.require_human_session(identity)
             return {
-                "data": self.queries().managed_agents(identity.user_id, now=_now()),
+                "data": self.queries().api_clients(identity.user_id, now=_now()),
                 "as_of": _now().isoformat(),
             }
 
@@ -418,6 +559,7 @@ class _WorkspaceRoutes:
             payload: AgentCreateRequest,
             identity: SessionIdentity = self.identity_dependency,
         ) -> dict[str, Any]:
+            self.require_human_session(identity)
             result = self.service().create_agent(
                 username=payload.username,
                 roles=[Role(value) for value in payload.roles],
@@ -430,7 +572,7 @@ class _WorkspaceRoutes:
             )
             return {
                 "result": result,
-                "data": self.queries().managed_agents(identity.user_id, now=_now()),
+                "data": self.queries().api_clients(identity.user_id, now=_now()),
             }
 
         @self.app.put("/api/admin/agents/{agent_id}/access")
@@ -439,6 +581,7 @@ class _WorkspaceRoutes:
             payload: AgentAccessRequest,
             identity: SessionIdentity = self.identity_dependency,
         ) -> dict[str, Any]:
+            self.require_human_session(identity)
             result = self.service().update_agent_access(
                 agent_id,
                 roles=[Role(value) for value in payload.roles],
@@ -452,7 +595,7 @@ class _WorkspaceRoutes:
             )
             return {
                 "result": result,
-                "data": self.queries().managed_agents(identity.user_id, now=_now()),
+                "data": self.queries().api_clients(identity.user_id, now=_now()),
             }
 
         @self.app.post("/api/admin/agents/{agent_id}/token-rotations")
@@ -461,6 +604,7 @@ class _WorkspaceRoutes:
             payload: AgentTokenRotationRequest,
             identity: SessionIdentity = self.identity_dependency,
         ) -> dict[str, Any]:
+            self.require_human_session(identity)
             result = self.service().rotate_agent_token(
                 agent_id,
                 expected_token_version=payload.expected_token_version,
@@ -471,7 +615,7 @@ class _WorkspaceRoutes:
             )
             return {
                 "result": result,
-                "data": self.queries().managed_agents(identity.user_id, now=_now()),
+                "data": self.queries().api_clients(identity.user_id, now=_now()),
             }
 
     def register_notification(self) -> None:

@@ -57,6 +57,9 @@ class WorkspaceQueries(QueryComponent):
             user = session.get(User, user_id)
             if user is None or not user.active:
                 raise DomainRejected("SESSION_REVOKED", "internal user is inactive or missing")
+            api_context = current_api_client_context()
+            if api_context is not None and api_context.owner_user_id != user_id:
+                raise DomainRejected("API_CLIENT_SCOPE_DENIED", "API Client owner mismatch")
             workspace_memberships = session.execute(
                 select(WorkspaceMembership, Workspace)
                 .join(Workspace, Workspace.workspace_id == WorkspaceMembership.workspace_id)
@@ -77,6 +80,17 @@ class WorkspaceQueries(QueryComponent):
                 )
                 .order_by(Team.name, Team.team_id)
             ).all()
+            if api_context is not None:
+                workspace_memberships = [
+                    item
+                    for item in workspace_memberships
+                    if item[1].workspace_id == api_context.workspace_id
+                ]
+                team_memberships = [
+                    item
+                    for item in team_memberships
+                    if item[1].team_id == api_context.team_id
+                ]
             workspace_ids = [
                 workspace.workspace_id for _membership, workspace in workspace_memberships
             ]
@@ -108,15 +122,32 @@ class WorkspaceQueries(QueryComponent):
                 select(RoleAssignment)
                 .where(
                     RoleAssignment.user_id == user_id,
-                    RoleAssignment.team_id == user.active_team_id,
+                    RoleAssignment.team_id
+                    == (
+                        api_context.team_id
+                        if api_context is not None
+                        else user.active_team_id
+                    ),
                 )
                 .order_by(RoleAssignment.role)
             ).all()
+            if api_context is not None:
+                roles = [
+                    role
+                    for role in roles
+                    if (role.account_scope is None or role.account_scope == api_context.account_id)
+                    and (role.venue_scope is None or role.venue_scope == api_context.venue)
+                ]
             active_workspace = next(
                 (
                     workspace
                     for membership, workspace in workspace_memberships
-                    if membership.workspace_id == user.active_workspace_id
+                    if membership.workspace_id
+                    == (
+                        api_context.workspace_id
+                        if api_context is not None
+                        else user.active_workspace_id
+                    )
                 ),
                 None,
             )
@@ -124,8 +155,14 @@ class WorkspaceQueries(QueryComponent):
                 (
                     team
                     for membership, team in team_memberships
-                    if membership.team_id == user.active_team_id
-                    and team.workspace_id == user.active_workspace_id
+                    if membership.team_id
+                    == (api_context.team_id if api_context is not None else user.active_team_id)
+                    and team.workspace_id
+                    == (
+                        api_context.workspace_id
+                        if api_context is not None
+                        else user.active_workspace_id
+                    )
                 ),
                 None,
             )
@@ -135,6 +172,18 @@ class WorkspaceQueries(QueryComponent):
                 "auth_version": user.auth_version,
                 "principal_type": user.principal_type,
                 "service_kind": user.service_kind,
+                "api_client_scope": (
+                    None
+                    if api_context is None
+                    else {
+                        "api_client_id": str(api_context.api_client_id),
+                        "workspace_id": str(api_context.workspace_id),
+                        "team_id": str(api_context.team_id),
+                        "account_id": api_context.account_id,
+                        "venue": api_context.venue,
+                        "permissions_source": "HUMAN_DYNAMIC",
+                    }
+                ),
                 "active_workspace": (
                     None
                     if active_workspace is None
@@ -346,6 +395,204 @@ class WorkspaceQueries(QueryComponent):
                             "last_used_at": _iso(agent.agent_token_last_used_at),
                         },
                         "created_at": _iso(agent.created_at),
+                    }
+                )
+            return result
+
+    def api_clients(
+        self,
+        owner_id: UUID,
+        *,
+        now: datetime | None = None,
+    ) -> list[dict[str, Any]]:
+        if current_api_client_context() is not None:
+            raise DomainRejected(
+                "HUMAN_WEB_CONFIRMATION_REQUIRED",
+                "API Client inventory is available only in an interactive HUMAN session",
+            )
+        observed_at = datetime.now(UTC) if now is None else now
+        with self.database.session_factory() as session:
+            owner = session.get(User, owner_id)
+            if (
+                owner is None
+                or not owner.active
+                or owner.principal_type != PrincipalType.HUMAN.value
+            ):
+                raise DomainRejected("SESSION_REVOKED", "internal user is inactive or missing")
+            clients = session.scalars(
+                select(ApiClient)
+                .where(ApiClient.owner_user_id == owner_id)
+                .order_by(ApiClient.created_at.desc(), ApiClient.api_client_id)
+            ).all()
+            result: list[dict[str, Any]] = []
+            for client in clients:
+                workspace = session.get(Workspace, client.workspace_id)
+                team = session.get(Team, client.team_id)
+                workspace_membership = session.scalar(
+                    select(WorkspaceMembership).where(
+                        WorkspaceMembership.workspace_id == client.workspace_id,
+                        WorkspaceMembership.user_id == owner_id,
+                        WorkspaceMembership.active,
+                    )
+                )
+                team_membership = session.scalar(
+                    select(TeamMembership).where(
+                        TeamMembership.team_id == client.team_id,
+                        TeamMembership.user_id == owner_id,
+                        TeamMembership.active,
+                    )
+                )
+                account = session.scalar(
+                    select(ExchangeAccount).where(
+                        ExchangeAccount.team_id == client.team_id,
+                        ExchangeAccount.account_id == client.account_id,
+                        ExchangeAccount.venue == client.venue,
+                        ExchangeAccount.active,
+                    )
+                )
+                assignments = session.scalars(
+                    select(RoleAssignment)
+                    .where(
+                        RoleAssignment.user_id == owner_id,
+                        RoleAssignment.team_id == client.team_id,
+                    )
+                    .order_by(RoleAssignment.role)
+                ).all()
+                effective_roles = [
+                    assignment.role
+                    for assignment in assignments
+                    if (
+                        assignment.account_scope is None
+                        or assignment.account_scope == client.account_id
+                    )
+                    and (
+                        assignment.venue_scope is None
+                        or assignment.venue_scope == client.venue
+                    )
+                ]
+                access_status = (
+                    "WORKSPACE_ACCESS_REVOKED"
+                    if workspace is None or not workspace.active or workspace_membership is None
+                    else "TEAM_ACCESS_REVOKED"
+                    if team is None or not team.active or team_membership is None
+                    else "ACCOUNT_SCOPE_REVOKED"
+                    if account is None
+                    else "NO_CURRENT_PERMISSION"
+                    if not effective_roles
+                    else "AVAILABLE"
+                )
+                token_status = (
+                    "REVOKED"
+                    if client.state == ApiClientState.REVOKED.value
+                    else "DISABLED"
+                    if client.state == ApiClientState.DISABLED.value
+                    else "EXPIRED"
+                    if client.token_expires_at <= observed_at
+                    else "BLOCKED"
+                    if access_status != "AVAILABLE"
+                    else "ACTIVE"
+                )
+                result.append(
+                    {
+                        "api_client_id": str(client.api_client_id),
+                        "name": client.name,
+                        "owner_user_id": str(owner_id),
+                        "workspace": {
+                            "workspace_id": str(client.workspace_id),
+                            "name": None if workspace is None else workspace.name,
+                        },
+                        "team": {
+                            "team_id": str(client.team_id),
+                            "name": None if team is None else team.name,
+                        },
+                        "account_id": client.account_id,
+                        "venue": client.venue,
+                        "state": client.state,
+                        "version": client.version,
+                        "access_status": access_status,
+                        "permissions_source": "HUMAN_DYNAMIC",
+                        "effective_roles": effective_roles,
+                        "token": {
+                            "status": token_status,
+                            "hint": client.token_hint,
+                            "version": client.token_version,
+                            "created_at": _iso(client.token_created_at),
+                            "expires_at": _iso(client.token_expires_at),
+                            "last_used_at": _iso(client.token_last_used_at),
+                        },
+                        "revoked_at": _iso(client.revoked_at),
+                        "created_at": _iso(client.created_at),
+                        "updated_at": _iso(client.updated_at),
+                    }
+                )
+            return result
+
+    def api_client_scopes(self, owner_id: UUID) -> list[dict[str, Any]]:
+        if current_api_client_context() is not None:
+            raise DomainRejected(
+                "HUMAN_WEB_CONFIRMATION_REQUIRED",
+                "API Client scope selection requires an interactive HUMAN session",
+            )
+        with self.database.session_factory() as session:
+            owner = session.get(User, owner_id)
+            if owner is None or not owner.active:
+                raise DomainRejected("SESSION_REVOKED", "internal user is inactive or missing")
+            rows = session.execute(
+                select(ExchangeAccount, Team, Workspace)
+                .join(Team, Team.team_id == ExchangeAccount.team_id)
+                .join(Workspace, Workspace.workspace_id == Team.workspace_id)
+                .join(
+                    TeamMembership,
+                    and_(
+                        TeamMembership.team_id == Team.team_id,
+                        TeamMembership.user_id == owner_id,
+                        TeamMembership.active,
+                    ),
+                )
+                .join(
+                    WorkspaceMembership,
+                    and_(
+                        WorkspaceMembership.workspace_id == Workspace.workspace_id,
+                        WorkspaceMembership.user_id == owner_id,
+                        WorkspaceMembership.active,
+                    ),
+                )
+                .where(
+                    ExchangeAccount.active,
+                    Team.active,
+                    Workspace.active,
+                )
+                .order_by(Workspace.name, Team.name, ExchangeAccount.venue, ExchangeAccount.label)
+            ).all()
+            result: list[dict[str, Any]] = []
+            for account, team, workspace in rows:
+                assignments = session.scalars(
+                    select(RoleAssignment).where(
+                        RoleAssignment.user_id == owner_id,
+                        RoleAssignment.team_id == team.team_id,
+                    )
+                ).all()
+                if not any(
+                    (
+                        assignment.account_scope is None
+                        or assignment.account_scope == account.account_id
+                    )
+                    and (
+                        assignment.venue_scope is None
+                        or assignment.venue_scope == account.venue
+                    )
+                    for assignment in assignments
+                ):
+                    continue
+                result.append(
+                    {
+                        "workspace_id": str(workspace.workspace_id),
+                        "workspace_name": workspace.name,
+                        "team_id": str(team.team_id),
+                        "team_name": team.name,
+                        "account_id": account.account_id,
+                        "account_label": account.label,
+                        "venue": account.venue,
                     }
                 )
             return result

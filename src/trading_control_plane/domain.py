@@ -49,6 +49,12 @@ class ServicePrincipalKind(StrEnum):
     AGENT = "AGENT"
 
 
+class ApiClientState(StrEnum):
+    ACTIVE = "ACTIVE"
+    DISABLED = "DISABLED"
+    REVOKED = "REVOKED"
+
+
 class ExecutionEnvironment(StrEnum):
     SHADOW = "SHADOW"
     TESTNET = "TESTNET"

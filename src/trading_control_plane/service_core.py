@@ -19,7 +19,14 @@ from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 from sqlalchemy import delete, func, select, text
 from sqlalchemy.orm import Session
 
-from trading_control_plane.agent import issue_agent_token, parse_agent_token, validate_agent_roles
+from trading_control_plane.agent import (
+    AGENT_TOKEN_MARKER,
+    issue_agent_token,
+    issue_api_client_token,
+    parse_agent_token,
+    parse_api_client_token,
+    validate_agent_roles,
+)
 from trading_control_plane.binance import BinanceInstrument, BinanceReadOnlySnapshot
 from trading_control_plane.binance_execution import (
     BinanceTestnetOrder,
@@ -38,6 +45,7 @@ from trading_control_plane.credentials import (
 )
 from trading_control_plane.domain import (
     AddCandidateFacts,
+    ApiClientState,
     CampaignStatus,
     CapabilityStatus,
     CapitalDirection,
@@ -105,6 +113,7 @@ from trading_control_plane.metrics import (
 from trading_control_plane.models import (
     AccountEquity,
     AccountEquityObservation,
+    ApiClient,
     Approval,
     AuditEvent,
     Campaign,
@@ -169,6 +178,7 @@ from trading_control_plane.perptape import (
     perptape_snapshot_identity,
     validate_perptape_feed_payload,
 )
+from trading_control_plane.request_context import current_api_client_context
 from trading_control_plane.shadow import apply_shadow_fill, quote_shadow_execution
 from trading_control_plane.venue_read_only import VenueInstrument, VenueReadOnlySnapshot
 
@@ -196,6 +206,52 @@ TEAM_SETUP_ACTIONS = frozenset(
         "opportunity.view",
         "notification.view",
         "notification.manage",
+    }
+)
+
+API_CLIENT_HUMAN_ONLY_ACTIONS = frozenset(
+    {
+        "team.manage",
+        "user.manage",
+        "role.manage",
+        "account.manage",
+        "account.credentials.manage",
+        "signal.manage",
+        "notification.manage",
+        "risk_policy.manage",
+        "risk.restore.request",
+        "risk.restore.review",
+        "risk.restore.execute",
+        "capital.fact.record",
+        "capital.propose",
+        "capital.submit",
+        "capital.review",
+        "capital.authorize",
+        "capital.execute",
+        "capital.reconcile",
+        "capital.policy.manage",
+        "capital.automation.evaluate",
+        "authorization.issue",
+        "sender.manage",
+    }
+)
+
+API_CLIENT_ALLOWED_BUSINESS_ACTIONS = frozenset(
+    {
+        "view",
+        "team.view",
+        "opportunity.view",
+        "proposal.view",
+        "proposal.create",
+        "proposal.submit",
+        "proposal.review",
+        "operations.view",
+        "system.view",
+        "venue.view",
+        "results.view",
+        "signal.view",
+        "notification.view",
+        "capital.view",
     }
 )
 
@@ -539,6 +595,9 @@ def fact_is_stale(observed_at: datetime, now: datetime, max_age: timedelta) -> b
 
 __all__ = [
     "ACTIVE_INTENT_STATUSES",
+    "AGENT_TOKEN_MARKER",
+    "API_CLIENT_ALLOWED_BUSINESS_ACTIONS",
+    "API_CLIENT_HUMAN_ONLY_ACTIONS",
     "CAPITAL_HISTORY_MIN_INTERVAL",
     "CONNECTION_ERROR_CODE_PATTERN",
     "DEFAULT_FREQTRADE_LEVERAGE",
@@ -572,6 +631,8 @@ __all__ = [
     "AccountEquityObservation",
     "AddCandidateFacts",
     "Any",
+    "ApiClient",
+    "ApiClientState",
     "Approval",
     "AuditEvent",
     "BinanceInstrument",
@@ -702,6 +763,7 @@ __all__ = [
     "binascii",
     "bound_perptape_feed_snapshot",
     "compute_pnl",
+    "current_api_client_context",
     "datetime",
     "delete",
     "evaluate_capital_automation",
@@ -712,12 +774,14 @@ __all__ = [
     "hashlib",
     "hmac",
     "issue_agent_token",
+    "issue_api_client_token",
     "json",
     "normalize_notification_event_types",
     "normalize_perptape_datetime",
     "notification_template",
     "nullcontext",
     "parse_agent_token",
+    "parse_api_client_token",
     "parse_hip3_dexes",
     "perptape_snapshot_identity",
     "quote_shadow_execution",

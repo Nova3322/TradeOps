@@ -18,7 +18,7 @@ document.addEventListener('click', (event) => {
     return;
   }
   const link = event.target.closest('[data-link]');
-  if (link) { event.preventDefault(); navigate(link.getAttribute('href')); }
+  if (link) { event.preventDefault(); closeUserMenu(); navigate(link.getAttribute('href')); }
   if (event.target.closest('[data-retry]')) route();
   if (!scopeControl.contains(event.target)) closeWorkspaceSwitcher();
   preferenceSelects.forEach((select, kind) => {

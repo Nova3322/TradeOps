@@ -10,6 +10,7 @@ from sqlalchemy import and_, false, func, or_, select, text, tuple_
 from sqlalchemy.orm import Session
 
 from trading_control_plane.domain import (
+    ApiClientState,
     DomainRejected,
     PrincipalType,
     Role,
@@ -18,6 +19,7 @@ from trading_control_plane.domain import (
 from trading_control_plane.models import (
     AccountEquity,
     AccountEquityObservation,
+    ApiClient,
     Approval,
     AuditEvent,
     Campaign,
@@ -60,6 +62,7 @@ from trading_control_plane.notification import (
 )
 from trading_control_plane.notilt import USD_STABLE_ASSETS
 from trading_control_plane.perptape import PerptapeCandidate, PerptapeFeedSnapshot
+from trading_control_plane.request_context import current_api_client_context
 from trading_control_plane.service import ROLE_ACTIONS
 from trading_control_plane.service_core import fact_is_stale
 
@@ -230,6 +233,8 @@ __all__ = [
     "AccountEquity",
     "AccountEquityObservation",
     "Any",
+    "ApiClient",
+    "ApiClientState",
     "Approval",
     "AuditEvent",
     "Campaign",
@@ -278,6 +283,7 @@ __all__ = [
     "_report_attribution",
     "_uuid_or_none",
     "and_",
+    "current_api_client_context",
     "datetime",
     "fact_is_stale",
     "false",
