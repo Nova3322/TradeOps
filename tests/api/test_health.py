@@ -210,6 +210,7 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
     assert response.status_code == 200
     assert "交易控制台" in response.text
     assert "/assets/app-core.js?v=170" in response.text
+    assert "/assets/workspace.js?v=171" in response.text
     assert "/assets/app.js?v=170" in response.text
     assert 'href="/signals"' in response.text
     assert "/assets/styles.css?v=73" in response.text
@@ -268,6 +269,17 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
     assert "history.replaceState({}, '', loginDestination());" in app_javascript.text
     assert "const loginDestination = () => {\n  return '/';\n};" in app_javascript.text
     assert "function renderWorkspaceGateway()" in app_javascript.text
+    workspace_javascript = (WEB_ROOT / "workspace.js").read_text()
+    access_management = workspace_javascript.split(
+        "async function renderAccessManagement()", maxsplit=1
+    )[1].split("\nfunction apiScopeOptions", maxsplit=1)[0]
+    assert "scopeCreationPanels" not in access_management
+    assert "bindScopeCreationForms" not in access_management
+    assert 'id="invite-team-member-form"' in access_management
+    assert 'id="create-member-form"' in access_management
+    assert "权限分离原则" in access_management
+    assert "${scopeCreationPanels()}" in workspace_javascript
+    assert "workspace-gateway-create-panel" in workspace_javascript
     assert "api('/api/auth/password'" in app_javascript.text
     assert "const PREFERENCE_OPTIONS" in app_javascript.text
     assert "function normalizeThemePreference" in app_javascript.text
@@ -624,7 +636,7 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
 
     service_worker = get(app, "/sw.js")
     assert service_worker.status_code == 200
-    assert "trading-shell-v143" in service_worker.text
+    assert "trading-shell-v144" in service_worker.text
     assert "/assets/tradingops-logo.png" in service_worker.text
     assert "/assets/tradingops-icon.svg" in service_worker.text
     assert "/assets/icon.svg" not in service_worker.text
