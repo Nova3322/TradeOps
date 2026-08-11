@@ -1,10 +1,16 @@
+# Embedded JavaScript fixtures preserve product copy and are checked by Node.
+# ruff: noqa: E501, RUF001, RUF100
+
 import asyncio
 import json
 import shutil
 import subprocess
+import tempfile
 import textwrap
 from datetime import UTC, datetime, timedelta
+from functools import cache
 from pathlib import Path
+from types import SimpleNamespace
 
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient, Response
@@ -15,6 +21,37 @@ from trading_control_plane.api import (
     create_app,
 )
 from trading_control_plane.config import Settings
+
+WEB_ROOT = Path(__file__).parents[2] / "src" / "trading_control_plane" / "web"
+FRONTEND_SCRIPTS = (
+    "app-core.js",
+    "workspace.js",
+    "signals.js",
+    "proposals.js",
+    "risk.js",
+    "execution.js",
+    "capital.js",
+    "reporting.js",
+    "accounts.js",
+    "app.js",
+)
+
+
+def frontend_source() -> str:
+    return "\n".join((WEB_ROOT / name).read_text() for name in FRONTEND_SCRIPTS)
+
+
+@cache
+def frontend_bundle_path() -> Path:
+    with tempfile.NamedTemporaryFile(
+        mode="w",
+        encoding="utf-8",
+        prefix="tradingops-frontend-",
+        suffix=".js",
+        delete=False,
+    ) as bundle:
+        bundle.write(frontend_source())
+        return Path(bundle.name)
 
 
 class FakeDatabase:
@@ -172,7 +209,8 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
 
     assert response.status_code == 200
     assert "交易控制台" in response.text
-    assert "/assets/app.js?v=157" in response.text
+    assert "/assets/app-core.js?v=158" in response.text
+    assert "/assets/app.js?v=158" in response.text
     assert 'href="/signals"' in response.text
     assert "/assets/styles.css?v=68" in response.text
     assert 'href="/assets/tradingops-logo.png" type="image/png"' in response.text
@@ -214,8 +252,8 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
     assert get(app, "/admin/users").status_code == 401
     assert get(app, "/admin/agents").status_code == 401
 
-    app_javascript = get(app, "/assets/app.js")
-    assert app_javascript.status_code == 200
+    assert get(app, "/assets/app.js").status_code == 200
+    app_javascript = SimpleNamespace(text=frontend_source())
     assert "history.replaceState({}, '', loginDestination());" in app_javascript.text
     assert "const loginDestination = () => {\n  return '/';\n};" in app_javascript.text
     assert "function renderWorkspaceGateway()" in app_javascript.text
@@ -546,7 +584,7 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
 
     service_worker = get(app, "/sw.js")
     assert service_worker.status_code == 200
-    assert "trading-shell-v129" in service_worker.text
+    assert "trading-shell-v130" in service_worker.text
     assert "/assets/tradingops-logo.png" in service_worker.text
     assert "/assets/tradingops-icon.svg" in service_worker.text
     assert "/assets/icon.svg" not in service_worker.text
@@ -580,7 +618,7 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
 def test_error_state_explains_impact_owner_next_step_and_focus() -> None:
     node = shutil.which("node")
     assert node is not None
-    app_path = Path(__file__).parents[2] / "src" / "trading_control_plane" / "web" / "app.js"
+    app_path = frontend_bundle_path()
     script = textwrap.dedent(
         r"""
         import assert from "node:assert/strict";
@@ -650,7 +688,7 @@ def test_error_state_explains_impact_owner_next_step_and_focus() -> None:
 def test_manual_proposal_instrument_picker_filters_and_requires_exact_symbol() -> None:
     node = shutil.which("node")
     assert node is not None
-    app_path = Path(__file__).parents[2] / "src" / "trading_control_plane" / "web" / "app.js"
+    app_path = frontend_bundle_path()
     source = app_path.read_text()
     assert 'select name="venue" aria-label="交易所"' in source
     assert 'input name="instrument_symbol" aria-label="币对"' in source
@@ -720,7 +758,7 @@ def test_manual_proposal_instrument_picker_filters_and_requires_exact_symbol() -
 def test_closed_campaign_labels_are_flat_currency_aware_and_action_free() -> None:
     node = shutil.which("node")
     assert node is not None
-    app_path = Path(__file__).parents[2] / "src" / "trading_control_plane" / "web" / "app.js"
+    app_path = frontend_bundle_path()
     script = textwrap.dedent(
         r"""
         import assert from "node:assert/strict";
@@ -781,7 +819,7 @@ def test_closed_campaign_labels_are_flat_currency_aware_and_action_free() -> Non
 def test_proposal_launch_window_projection_excludes_expired_approvals() -> None:
     node = shutil.which("node")
     assert node is not None
-    app_path = Path(__file__).parents[2] / "src" / "trading_control_plane" / "web" / "app.js"
+    app_path = frontend_bundle_path()
     script = textwrap.dedent(
         r"""
         import assert from "node:assert/strict";
@@ -847,7 +885,7 @@ def test_proposal_launch_window_projection_excludes_expired_approvals() -> None:
 def test_reviewer_today_combines_proposal_and_risk_restore_work_without_false_zero() -> None:
     node = shutil.which("node")
     assert node is not None
-    app_path = Path(__file__).parents[2] / "src" / "trading_control_plane" / "web" / "app.js"
+    app_path = frontend_bundle_path()
     script = textwrap.dedent(
         r"""
         import assert from "node:assert/strict";
@@ -905,7 +943,7 @@ def test_reviewer_today_combines_proposal_and_risk_restore_work_without_false_ze
 def test_runtime_alert_copy_keeps_internal_codes_out_of_primary_labels() -> None:
     node = shutil.which("node")
     assert node is not None
-    app_path = Path(__file__).parents[2] / "src" / "trading_control_plane" / "web" / "app.js"
+    app_path = frontend_bundle_path()
     script = textwrap.dedent(
         r"""
         import assert from "node:assert/strict";
@@ -952,7 +990,7 @@ def test_runtime_alert_copy_keeps_internal_codes_out_of_primary_labels() -> None
 def test_opportunity_card_explains_exact_catalog_blocker() -> None:
     node = shutil.which("node")
     assert node is not None
-    app_path = Path(__file__).parents[2] / "src" / "trading_control_plane" / "web" / "app.js"
+    app_path = frontend_bundle_path()
     script = textwrap.dedent(
         r"""
         import assert from "node:assert/strict";
@@ -1087,7 +1125,7 @@ def test_opportunity_card_explains_exact_catalog_blocker() -> None:
 def test_opportunity_groups_keep_multiple_timeframes_and_direction_separate() -> None:
     node = shutil.which("node")
     assert node is not None
-    app_path = Path(__file__).parents[2] / "src" / "trading_control_plane" / "web" / "app.js"
+    app_path = frontend_bundle_path()
     script = textwrap.dedent(
         r"""
         import assert from "node:assert/strict";
@@ -1256,7 +1294,7 @@ def test_opportunity_groups_keep_multiple_timeframes_and_direction_separate() ->
 def test_opportunity_filters_render_a_bounded_page_and_keep_all_matches() -> None:
     node = shutil.which("node")
     assert node is not None
-    app_path = Path(__file__).parents[2] / "src" / "trading_control_plane" / "web" / "app.js"
+    app_path = frontend_bundle_path()
     script = textwrap.dedent(
         r"""
         import assert from "node:assert/strict";
@@ -1327,7 +1365,7 @@ def test_opportunity_filters_render_a_bounded_page_and_keep_all_matches() -> Non
 def test_proposal_review_projection_uses_frozen_resonance_and_plain_risk_reasons() -> None:
     node = shutil.which("node")
     assert node is not None
-    app_path = Path(__file__).parents[2] / "src" / "trading_control_plane" / "web" / "app.js"
+    app_path = frontend_bundle_path()
     script = textwrap.dedent(
         r"""
         import assert from "node:assert/strict";
@@ -1406,7 +1444,7 @@ def test_proposal_review_projection_uses_frozen_resonance_and_plain_risk_reasons
 def test_capital_web_projection_only_renders_live_records() -> None:
     node = shutil.which("node")
     assert node is not None
-    app_path = Path(__file__).parents[2] / "src" / "trading_control_plane" / "web" / "app.js"
+    app_path = frontend_bundle_path()
     script = textwrap.dedent(
         r"""
         import assert from "node:assert/strict";
@@ -1700,7 +1738,7 @@ def test_capital_web_projection_only_renders_live_records() -> None:
 
 
 def test_risk_workspace_prioritizes_current_actions_and_hides_closed_tasks() -> None:
-    app_path = Path(__file__).parents[2] / "src" / "trading_control_plane" / "web" / "app.js"
+    app_path = frontend_bundle_path()
     source = app_path.read_text()
 
     assert "系统管理员（最高权限）" in source  # noqa: RUF001
@@ -1729,14 +1767,14 @@ def test_risk_workspace_prioritizes_current_actions_and_hides_closed_tasks() -> 
     assert 'data-label="精确原因"' in source
     assert "wrapper.closest('.risk-condition-details')" in source
     assert "roleNames().join('、')" not in source
-    styles = app_path.with_name("styles.css").read_text()
+    styles = (WEB_ROOT / "styles.css").read_text()
     assert ".risk-condition-details tr { display: block;" in styles
     assert ".risk-condition-scroll-hint { display: none; }" in styles
     assert ".risk-passed-conditions" in styles
 
 
 def test_system_and_venue_pages_distinguish_read_only_snapshots_from_live_execution() -> None:
-    app_path = Path(__file__).parents[2] / "src" / "trading_control_plane" / "web" / "app.js"
+    app_path = frontend_bundle_path()
     source = app_path.read_text()
 
     assert "只读控制台可用，但 Freqtrade 执行底座尚未就绪" in source  # noqa: RUF001
@@ -1797,7 +1835,7 @@ def test_system_and_venue_pages_distinguish_read_only_snapshots_from_live_execut
     assert (
         "fmtNumber(facts.equity?.available_balance)} ${escapeHtml(facts.equity?.currency" in source
     )
-    styles = app_path.with_name("styles.css").read_text()
+    styles = (WEB_ROOT / "styles.css").read_text()
     assert ".venue-status-stats { grid-template-columns: 1fr; }" in styles
     assert ".connection-status-table tr { display: block;" in styles
     assert ".connection-scroll-hint { display: none; }" in styles
@@ -1807,7 +1845,7 @@ def test_system_and_venue_pages_distinguish_read_only_snapshots_from_live_execut
 def test_venue_snapshot_empty_states_do_not_claim_current_account_state() -> None:
     node = shutil.which("node")
     assert node is not None
-    app_path = Path(__file__).parents[2] / "src" / "trading_control_plane" / "web" / "app.js"
+    app_path = frontend_bundle_path()
     script = textwrap.dedent(
         r"""
         import assert from "node:assert/strict";
@@ -1816,7 +1854,7 @@ def test_venue_snapshot_empty_states_do_not_claim_current_account_state() -> Non
 
         const source = fs.readFileSync(process.argv[1], "utf8");
         const from = source.indexOf("function venueFactSections");
-        const to = source.indexOf("\nfunction accessRoleOptions", from);
+        const to = source.indexOf("\nfunction navigate", from);
         assert.notEqual(from, -1);
         assert.notEqual(to, -1);
         const context = vm.createContext({
@@ -1872,7 +1910,7 @@ def test_venue_snapshot_empty_states_do_not_claim_current_account_state() -> Non
 def test_web_request_lifecycle_in_node() -> None:
     node = shutil.which("node")
     assert node is not None
-    app_path = Path(__file__).parents[2] / "src" / "trading_control_plane" / "web" / "app.js"
+    app_path = frontend_bundle_path()
     script = textwrap.dedent(
         r"""
         import assert from "node:assert/strict";
@@ -2302,7 +2340,7 @@ def test_mock_login_is_not_available_unless_explicitly_enabled() -> None:
 def test_console_terminology_keeps_official_names_and_uses_natural_chinese() -> None:
     node = shutil.which("node")
     assert node is not None
-    app_path = Path(__file__).parents[2] / "src" / "trading_control_plane" / "web" / "app.js"
+    app_path = frontend_bundle_path()
     source = app_path.read_text()
 
     assert ".replaceAll('Arbitrum', '阿比特鲁姆')" not in source

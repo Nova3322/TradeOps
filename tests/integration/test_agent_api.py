@@ -75,7 +75,7 @@ def test_agent_api_uses_team_rbac_independent_review_idempotency_and_token_rotat
             page = await admin.get("/admin/agents")
             assert page.status_code == 200
             assert 'id="main"' in page.text
-            assert "/assets/app.js?v=157" in page.text
+            assert "/assets/app.js?v=158" in page.text
             account = await admin.post(
                 "/api/exchange-accounts",
                 json={
@@ -186,10 +186,7 @@ def test_agent_api_uses_team_rbac_independent_review_idempotency_and_token_rotat
                 },
             )
             assert general_proposal.status_code == 403
-            assert (
-                general_proposal.json()["error"]["code"]
-                == "AGENT_PROPOSAL_ENDPOINT_REQUIRED"
-            )
+            assert general_proposal.json()["error"]["code"] == "AGENT_PROPOSAL_ENDPOINT_REQUIRED"
 
             proposal_payload = {
                 "environment": "SHADOW",

@@ -1451,7 +1451,10 @@ def test_runtime_worker_refreshes_perptape_two_venues_and_vault_without_sending(
         max_single_loss=Decimal(1_000),
         max_consecutive_losses=3,
         loss_cooldown=timedelta(hours=1),
-        max_fact_age=timedelta(minutes=5),
+        # Keep the freshness policy wider than the full PostgreSQL suite runtime.
+        # The worker still uses a fixed clock, so a short window makes this
+        # readiness assertion depend on test collection order rather than facts.
+        max_fact_age=timedelta(hours=1),
         now=NOW,
     )
     settings = Settings(

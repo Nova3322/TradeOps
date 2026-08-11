@@ -1,5 +1,20 @@
-const CACHE = 'trading-shell-v129';
-const SHELL = ['/assets/styles.css', '/assets/app.js', '/assets/tradingops-logo.png', '/assets/tradingops-icon.svg', '/manifest.webmanifest'];
+const CACHE = 'trading-shell-v130';
+const SHELL = [
+  '/assets/styles.css',
+  '/assets/app-core.js',
+  '/assets/workspace.js',
+  '/assets/signals.js',
+  '/assets/proposals.js',
+  '/assets/risk.js',
+  '/assets/execution.js',
+  '/assets/capital.js',
+  '/assets/reporting.js',
+  '/assets/accounts.js',
+  '/assets/app.js',
+  '/assets/tradingops-logo.png',
+  '/assets/tradingops-icon.svg',
+  '/manifest.webmanifest',
+];
 self.addEventListener('install', (event) => event.waitUntil(
   caches.open(CACHE).then((cache) => cache.addAll(SHELL)).then(() => self.skipWaiting()),
 ));
