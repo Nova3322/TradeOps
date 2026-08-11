@@ -209,10 +209,10 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
 
     assert response.status_code == 200
     assert "交易控制台" in response.text
-    assert "/assets/app-core.js?v=158" in response.text
-    assert "/assets/app.js?v=158" in response.text
+    assert "/assets/app-core.js?v=159" in response.text
+    assert "/assets/app.js?v=159" in response.text
     assert 'href="/signals"' in response.text
-    assert "/assets/styles.css?v=68" in response.text
+    assert "/assets/styles.css?v=69" in response.text
     assert 'href="/assets/tradingops-logo.png" type="image/png"' in response.text
     assert '<img src="/assets/tradingops-logo.png" alt="">' in response.text
     assert '<span class="brand-mark" aria-hidden="true">T</span>' not in response.text
@@ -228,9 +228,13 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
     assert 'id="mobile-nav-toggle"' in response.text
     assert 'id="scope-switcher"' in response.text
     assert 'id="workspace-switcher-menu"' in response.text
+    assert 'id="user-menu"' in response.text
+    assert 'id="password-change-form"' in response.text
+    assert response.text.count("data-theme-option=") == 3
+    assert "个人账户" not in response.text
     assert 'id="scope-control"' in response.text
     assert 'class="nav-section" data-nav-section' in response.text
-    assert 'data-theme-label' in response.text
+    assert 'data-theme-option="system"' in response.text
     assert 'id="confirm-dialog"' in response.text
 
     for route in (
@@ -257,6 +261,9 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
     assert "history.replaceState({}, '', loginDestination());" in app_javascript.text
     assert "const loginDestination = () => {\n  return '/';\n};" in app_javascript.text
     assert "function renderWorkspaceGateway()" in app_javascript.text
+    assert "api('/api/auth/password'" in app_javascript.text
+    assert "workspace-gateway-tabs" not in app_javascript.text
+    assert "个人账户</span>" not in app_javascript.text
     assert "timeoutError.code = 'REQUEST_TIMEOUT'" in app_javascript.text
     assert "networkError.code = 'NETWORK_ERROR'" in app_javascript.text
     assert "const REQUEST_TIMEOUT_MS = 15000" in app_javascript.text
@@ -562,7 +569,8 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
     assert "--panel-soft:" in stylesheet.text
     assert "--surface:" in stylesheet.text
     assert ".nav-section-label" in stylesheet.text
-    assert ".theme-button" in stylesheet.text
+    assert ".theme-options" in stylesheet.text
+    assert ".user-menu-panel" in stylesheet.text
     assert ".status-AVAILABLE" in stylesheet.text
     assert ".capital-trend-toggle" in stylesheet.text
     assert ".capital-blockers" in stylesheet.text
@@ -584,7 +592,7 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
 
     service_worker = get(app, "/sw.js")
     assert service_worker.status_code == 200
-    assert "trading-shell-v130" in service_worker.text
+    assert "trading-shell-v131" in service_worker.text
     assert "/assets/tradingops-logo.png" in service_worker.text
     assert "/assets/tradingops-icon.svg" in service_worker.text
     assert "/assets/icon.svg" not in service_worker.text

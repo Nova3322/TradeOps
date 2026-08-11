@@ -441,6 +441,7 @@ class TradingService:
         self.create_managed_user = self._workspace.create_managed_user
         self.add_team_member = self._workspace.add_team_member
         self.update_managed_user_access = self._workspace.update_managed_user_access
+        self.change_own_password = self._workspace.change_own_password
         self.ensure_local_human_password = self._workspace.ensure_local_human_password
         self.bind_telegram_private_chat = self._workspace.bind_telegram_private_chat
         self.create_agent = self._workspace.create_agent

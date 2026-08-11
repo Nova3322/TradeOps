@@ -111,6 +111,73 @@ async def exercise_access_management(database: Database) -> None:
         assert password_login.json()["authentication_method"] == "PASSWORD"
         assert "HttpOnly" in password_login.headers["set-cookie"]
         assert "SameSite=strict" in password_login.headers["set-cookie"]
+        password_session = password_login.json()["session"]
+        stale_session_client = AsyncClient(
+            transport=ASGITransport(app=app),
+            base_url="http://test",
+        )
+        stale_session_login = await stale_session_client.post(
+            "/api/auth/login",
+            json={"username": "reviewer-only", "password": "reviewer-only-password"},
+        )
+        assert stale_session_login.status_code == 200, stale_session_login.text
+        rotation_idempotency_key = "reviewer-password-rotation-1"
+        wrong_current_password = await client.post(
+            "/api/auth/password",
+            json={
+                "current_password": "incorrect-password-value",
+                "new_password": "reviewer-only-password-v2",
+                "expected_auth_version": password_session["auth_version"],
+                "idempotency_key": "reviewer-password-wrong-current",
+            },
+        )
+        assert wrong_current_password.status_code == 422, wrong_current_password.text
+        assert wrong_current_password.json()["error"]["code"] == "CURRENT_PASSWORD_INVALID"
+        password_change_payload = {
+            "current_password": "reviewer-only-password",
+            "new_password": "reviewer-only-password-v2",
+            "expected_auth_version": password_session["auth_version"],
+            "idempotency_key": rotation_idempotency_key,
+        }
+        password_change = await client.post("/api/auth/password", json=password_change_payload)
+        assert password_change.status_code == 200, password_change.text
+        assert password_change.json()["authentication_method"] == "PASSWORD"
+        assert password_change.json()["other_sessions_revoked"] is True
+        assert password_change.json()["session"]["auth_version"] == (
+            password_session["auth_version"] + 1
+        )
+        assert "HttpOnly" in password_change.headers["set-cookie"]
+        assert "SameSite=strict" in password_change.headers["set-cookie"]
+        stale_session_check = await stale_session_client.get("/api/auth/session")
+        assert stale_session_check.status_code == 401
+        await stale_session_client.aclose()
+        replay = await client.post("/api/auth/password", json=password_change_payload)
+        assert replay.status_code == 200, replay.text
+        assert replay.json()["session"]["auth_version"] == password_change.json()["session"][
+            "auth_version"
+        ]
+        assert (await client.get("/api/auth/session")).status_code == 200
+        with database.session_factory() as session:
+            password_audit = session.scalar(
+                select(AuditEvent).where(
+                    AuditEvent.event_type == "USER_PASSWORD_CHANGED",
+                    AuditEvent.idempotency_key == rotation_idempotency_key,
+                )
+            )
+            assert password_audit is not None
+            assert password_audit.actor_id == str(reviewer_id)
+            assert "reviewer-only-password" not in password_audit.reason
+        await client.post("/api/auth/logout")
+        old_password_login = await client.post(
+            "/api/auth/login",
+            json={"username": "reviewer-only", "password": "reviewer-only-password"},
+        )
+        assert old_password_login.status_code == 401
+        new_password_login = await client.post(
+            "/api/auth/login",
+            json={"username": "reviewer-only", "password": "reviewer-only-password-v2"},
+        )
+        assert new_password_login.status_code == 200, new_password_login.text
         await login(client, "admin")
 
         duplicate = await client.post(

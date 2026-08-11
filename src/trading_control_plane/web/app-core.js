@@ -1,12 +1,20 @@
 const main = document.querySelector('#main');
 const sidebar = document.querySelector('#sidebar');
+const userMenu = document.querySelector('#user-menu');
 const identityChip = document.querySelector('#identity-chip');
+const userMenuPanel = document.querySelector('#user-menu-panel');
+const userMenuName = document.querySelector('[data-user-menu-name]');
+const userMenuAuth = document.querySelector('[data-user-menu-auth]');
+const userMenuWorkspace = document.querySelector('[data-user-menu-workspace]');
+const userMenuTeam = document.querySelector('[data-user-menu-team]');
+const userMenuRole = document.querySelector('[data-user-menu-role]');
+const passwordChangeForm = document.querySelector('#password-change-form');
 const scopeControl = document.querySelector('#scope-control');
 const scopeSwitcher = document.querySelector('#scope-switcher');
 const scopeSwitcherMenu = document.querySelector('#workspace-switcher-menu');
 const environmentBadge = document.querySelector('#environment-badge');
 const languageToggle = document.querySelector('#language-toggle');
-const themeToggle = document.querySelector('#theme-toggle');
+const themeOptionButtons = [...document.querySelectorAll('[data-theme-option]')];
 const themeColorMeta = document.querySelector('meta[name="theme-color"]');
 const mobileNavToggle = document.querySelector('#mobile-nav-toggle');
 const mobileSessionSummary = document.querySelector('#mobile-session-summary');
@@ -15,6 +23,7 @@ const dialog = document.querySelector('#system-proposal-dialog');
 const confirmDialog = document.querySelector('#confirm-dialog');
 const toast = document.querySelector('#toast');
 let session = null;
+let sessionAuthenticationMethod = '';
 let authStatus = null;
 let instruments = [];
 let opportunities = [];
@@ -38,7 +47,12 @@ let currentLanguage = localStorage.getItem(LANGUAGE_STORAGE_KEY) === 'en' ? 'en'
 
 const ENGLISH_EXACT = new Map(Object.entries({
   '交易控制台':'Trading Console', '交易控制台首页':'Trading Console home', '生产交易管理':'Production trading operations', '生产环境':'Production',
-  '中英切换':'Chinese / English', '切换中英文':'Switch between Chinese and English', '切换主题':'Switch theme', '主题':'Theme', '浅色':'Light', '深色':'Dark', '菜单':'Menu',
+  '中英切换':'Chinese / English', '切换中英文':'Switch between Chinese and English', '主题偏好':'Theme preference', '跟随系统':'System', '浅色':'Light', '深色':'Dark', '菜单':'Menu',
+  '用户菜单':'User menu', '登录身份':'Sign-in identity', '密码登录':'Password sign-in', '内部会话':'Internal session',
+  '当前工作区':'Current workspace', '默认团队':'Default team', '当前职责':'Current role', '个人设置':'Personal settings', '个人偏好':'Preferences',
+  '安全':'Security', '修改登录密码':'Change sign-in password', '展开':'Expand', '当前密码':'Current password', '新密码':'New password', '确认新密码':'Confirm new password',
+  '修改后会撤销其他设备和浏览器中的旧会话。':'Changing your password revokes older sessions on other devices and browsers.', '更新密码':'Update password',
+  '两次输入的新密码不一致。':'The new-password entries do not match.', '密码已更新；其他旧会话已撤销':'Password updated; older sessions have been revoked',
   '只读用户':'Observer', '提案发起人':'Proposer', '审核人':'Reviewer', '交易运维人员':'Trading operator',
   '资金管理员':'Treasury administrator', '系统管理员':'Super administrator',
   '主导航':'Main navigation', '工作台':'Workspace', '团队配置':'Team setup', '治理与安全':'Governance and safety', '当前范围':'Current scope', '当前任务':'Current tasks', '实时机会':'Live opportunities', '审核队列':'Review queue',
@@ -896,6 +910,10 @@ const actionErrorGuidance = {
 const apiErrorGuidance = {
   LOGIN_DENIED:'用户名或密码不正确。',
   LOGIN_RATE_LIMITED:'登录尝试过多，请稍后再试。',
+  CURRENT_PASSWORD_INVALID:'当前密码不正确。',
+  PASSWORD_UNCHANGED:'新密码必须与当前密码不同。',
+  AUTH_VERSION_CONFLICT:'登录身份已变化，请刷新页面后重新验证。',
+  PASSWORD_AUTH_REQUIRED:'当前会话不是密码登录，请使用密码重新登录后修改。',
   RISK_POLICY_MISSING:'风险政策尚未配置，因此系统已暂停创建和执行新增风险。请联系系统管理员完成配置。',
   PERPTAPE_NOT_CONFIGURED:'Perptape 尚未配置。人工提案仍可使用，外部机会将在完成配置后恢复。',
   PERPTAPE_UNAVAILABLE:'暂时无法连接 Perptape。人工提案仍可使用，请稍后重新检查外部机会。',
@@ -1105,6 +1123,7 @@ function handleUnauthorizedResponse() {
   if (!session) return false;
   authFailureActive = true;
   session = null;
+  sessionAuthenticationMethod = '';
   sessionNotice = '会话已失效。请重新验证内部身份，完成后会返回当前页面。';
   if (toastTimer) clearTimeout(toastTimer);
   toastTimer = null;
@@ -1158,20 +1177,24 @@ function closeWorkspaceSwitcher({restoreFocus = false} = {}) {
 
 function setShell(loggedIn, {workspaceGate = false} = {}) {
   sidebar.hidden = !loggedIn || workspaceGate;
-  identityChip.hidden = !loggedIn;
+  userMenu.hidden = !loggedIn;
   scopeControl.hidden = !loggedIn || workspaceGate;
   mobileNavToggle.hidden = !loggedIn || workspaceGate;
   if (loggedIn) {
     renderWorkspaceSwitcher();
     const rolePriority = ['SYSTEM_ADMIN','TREASURY_ADMIN','OPERATOR','REVIEWER','PROPOSER','OBSERVER'];
     const primaryRole = rolePriority.find(role => roleNames().includes(role));
-    const identity = `${session.username} · ${localizedText(primaryRole ? fmtRole(primaryRole) : '未分配角色')}`;
     const scopeDetail = `${session.active_workspace?.name || '未选择 Workspace'} / ${session.active_team?.name || '未选择团队'}`;
     const identityDetail = `${session.username} · ${scopeDetail} · ${roleNames().map(role => localizedText(fmtRole(role))).join(' / ') || localizedText('未分配角色')}`;
     identityChip.innerHTML = `<strong>${escapeHtml(session.username)}</strong><span>${escapeHtml(localizedText(primaryRole ? fmtRole(primaryRole) : '未分配角色'))}</span>`;
     identityChip.title = identityDetail;
     identityChip.setAttribute('aria-label', identityDetail);
-    mobileSessionSummary.textContent = identity;
+    userMenuName.textContent = session.username;
+    userMenuAuth.textContent = sessionAuthenticationMethod === 'password-scrypt' || sessionAuthenticationMethod === 'PASSWORD' ? localizedText('密码登录') : localizedText('内部会话');
+    userMenuWorkspace.textContent = session.active_workspace?.name || localizedText('未选择 Workspace');
+    userMenuTeam.textContent = session.active_team?.name || localizedText('未选择团队');
+    userMenuRole.textContent = localizedText(primaryRole ? fmtRole(primaryRole) : '未分配角色');
+    mobileSessionSummary.textContent = scopeDetail;
     mobileSessionSummary.title = identityDetail;
     document.querySelectorAll('[data-nav-capability]').forEach(link => {
       link.hidden = !hasCapability(link.dataset.navCapability);
@@ -1180,6 +1203,7 @@ function setShell(loggedIn, {workspaceGate = false} = {}) {
       section.hidden = ![...section.querySelectorAll('a')].some(link => !link.hidden);
     });
   }
+  closeUserMenu();
   closeWorkspaceSwitcher();
   closeMobileNav({restoreFocus:false});
 }
@@ -1359,6 +1383,7 @@ async function bootstrap() {
   try {
     const result = await api('/api/auth/session');
     session = result.session;
+    sessionAuthenticationMethod = result.authentication_method || '';
   } catch (error) {
     if (error.status !== 401) console.error(error);
   }

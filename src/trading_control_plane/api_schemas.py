@@ -38,6 +38,13 @@ class PasswordLoginRequest(BaseModel):
     password: str = Field(min_length=12, max_length=128)
 
 
+class PasswordChangeRequest(BaseModel):
+    current_password: str = Field(min_length=12, max_length=128)
+    new_password: str = Field(min_length=12, max_length=128)
+    expected_auth_version: int = Field(ge=1)
+    idempotency_key: str = Field(min_length=1, max_length=160)
+
+
 class ManagedUserCreateRequest(BaseModel):
     username: str = Field(min_length=1, max_length=120, pattern=r"^[A-Za-z0-9._-]+$")
     password: str = Field(min_length=12, max_length=128)

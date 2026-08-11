@@ -21,6 +21,7 @@ document.addEventListener('click', (event) => {
   if (link) { event.preventDefault(); navigate(link.getAttribute('href')); }
   if (event.target.closest('[data-retry]')) route();
   if (!scopeControl.contains(event.target)) closeWorkspaceSwitcher();
+  if (!userMenu.contains(event.target)) closeUserMenu();
 });
 window.addEventListener('popstate', route);
 window.addEventListener('resize', syncNavigationMode);
@@ -45,6 +46,7 @@ scopeSwitcher.addEventListener('click', () => {
 document.addEventListener('keydown', (event) => {
   if (event.key === 'Escape' && sidebar.classList.contains('open')) closeMobileNav();
   if (event.key === 'Escape' && !scopeSwitcherMenu.hidden) closeWorkspaceSwitcher({restoreFocus:true});
+  if (event.key === 'Escape' && !userMenuPanel.hidden) closeUserMenu({restoreFocus:true});
 });
 document.querySelectorAll('[data-close-dialog]').forEach(button => button.addEventListener('click', () => dialog.close()));
 document.querySelector('#system-proposal-form').addEventListener('submit', async (event) => {
@@ -57,43 +59,86 @@ document.querySelector('#logout-button').addEventListener('click', async (event)
   try {
     await api('/api/auth/logout', {method:'POST'});
     session = null;
+    sessionAuthenticationMethod = '';
     setShell(false);
     history.replaceState({}, '', '/');
     await route();
   } catch (error) { showApiError(error); }
 }));
-const preferredThemeMedia = matchMedia('(prefers-color-scheme: dark)');
-function applyTheme(theme, {persist = false} = {}) {
-  const normalized = theme === 'dark' ? 'dark' : 'light';
-  document.documentElement.dataset.theme = normalized;
-  themeToggle.dataset.theme = normalized;
-  themeToggle.setAttribute('aria-pressed', String(normalized === 'dark'));
-  const currentLabel = normalized === 'dark'
-    ? (currentLanguage === 'en' ? 'Dark' : '深色')
-    : (currentLanguage === 'en' ? 'Light' : '浅色');
-  const nextLabel = normalized === 'dark'
-    ? (currentLanguage === 'en' ? 'light' : '浅色')
-    : (currentLanguage === 'en' ? 'dark' : '深色');
-  themeToggle.querySelector('[data-theme-label]').textContent = currentLabel;
-  themeToggle.setAttribute('aria-label', currentLanguage === 'en'
-    ? `${currentLabel} theme; switch to ${nextLabel}`
-    : `当前为${currentLabel}主题；切换到${nextLabel}主题`);
-  themeToggle.title = themeToggle.getAttribute('aria-label');
-  if (themeColorMeta) themeColorMeta.content = normalized === 'dark' ? '#0b100f' : '#f4f6f3';
-  if (persist) localStorage.setItem(THEME_STORAGE_KEY, normalized);
+function closeUserMenu({restoreFocus = false} = {}) {
+  userMenuPanel.hidden = true;
+  identityChip.setAttribute('aria-expanded', 'false');
+  if (restoreFocus && !userMenu.hidden) identityChip.focus();
 }
-themeToggle.addEventListener('click', () => {
-  applyTheme(document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark', {persist:true});
+
+identityChip.addEventListener('click', () => {
+  const opening = userMenuPanel.hidden;
+  closeWorkspaceSwitcher();
+  userMenuPanel.hidden = !opening;
+  identityChip.setAttribute('aria-expanded', String(opening));
+  if (opening) userMenuPanel.querySelector('button, input, summary')?.focus({preventScroll:true});
 });
-preferredThemeMedia.addEventListener?.('change', event => {
-  if (!localStorage.getItem(THEME_STORAGE_KEY)) applyTheme(event.matches ? 'dark' : 'light');
+
+passwordChangeForm.addEventListener('input', () => {
+  passwordChangeForm.querySelector('.form-error').textContent = '';
+});
+passwordChangeForm.addEventListener('submit', async (event) => {
+  event.preventDefault();
+  const form = event.currentTarget;
+  const data = new FormData(form);
+  if (data.get('new_password') !== data.get('confirm_password')) {
+    form.querySelector('.form-error').textContent = localizedText('两次输入的新密码不一致。');
+    return;
+  }
+  await withPending(event.submitter, '更新中…', async () => {
+    try {
+      const result = await api('/api/auth/password', {
+        method:'POST',
+        body:JSON.stringify({
+          current_password:data.get('current_password'),
+          new_password:data.get('new_password'),
+          expected_auth_version:session.auth_version,
+          idempotency_key:crypto.randomUUID(),
+        }),
+      });
+      session = result.session;
+      sessionAuthenticationMethod = result.authentication_method || 'PASSWORD';
+      form.reset();
+      form.closest('details').open = false;
+      setShell(true, {workspaceGate:['/', '/workspaces'].includes(location.pathname)});
+      showToast('密码已更新；其他旧会话已撤销');
+    } catch (error) {
+      showApiError(error, form.querySelector('.form-error'));
+    }
+  });
+});
+
+const preferredThemeMedia = matchMedia('(prefers-color-scheme: dark)');
+function applyTheme(preference, {persist = false} = {}) {
+  const normalizedPreference = ['light', 'dark'].includes(preference) ? preference : 'system';
+  const resolved = normalizedPreference === 'system'
+    ? (preferredThemeMedia.matches ? 'dark' : 'light')
+    : normalizedPreference;
+  document.documentElement.dataset.theme = resolved;
+  document.documentElement.dataset.themePreference = normalizedPreference;
+  themeOptionButtons.forEach(button => {
+    button.setAttribute('aria-pressed', String(button.dataset.themeOption === normalizedPreference));
+  });
+  if (themeColorMeta) themeColorMeta.content = resolved === 'dark' ? '#0b100f' : '#f4f6f3';
+  if (persist) localStorage.setItem(THEME_STORAGE_KEY, normalizedPreference);
+}
+themeOptionButtons.forEach(button => button.addEventListener('click', () => {
+  applyTheme(button.dataset.themeOption, {persist:true});
+}));
+preferredThemeMedia.addEventListener?.('change', () => {
+  if ((localStorage.getItem(THEME_STORAGE_KEY) || 'system') === 'system') applyTheme('system');
 });
 languageToggle.addEventListener('click', () => {
   currentLanguage = currentLanguage === 'en' ? 'zh-CN' : 'en';
   localStorage.setItem(LANGUAGE_STORAGE_KEY, currentLanguage);
   location.reload();
 });
-applyTheme(localStorage.getItem(THEME_STORAGE_KEY) || (preferredThemeMedia.matches ? 'dark' : 'light'));
+applyTheme(localStorage.getItem(THEME_STORAGE_KEY) || 'system');
 applyLanguageToDocument();
 if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js').catch(() => {});
 syncNavigationMode();

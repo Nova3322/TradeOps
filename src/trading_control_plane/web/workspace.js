@@ -19,6 +19,7 @@ function renderLogin() {
       const data = new FormData(form);
       const result = await api('/api/auth/login', {method:'POST', body: JSON.stringify({username:data.get('username'), password:data.get('password')})});
       session = result.session;
+      sessionAuthenticationMethod = result.authentication_method || '';
       sessionNotice = '';
       authFailureActive = false;
       setShell(true);
@@ -199,7 +200,7 @@ async function renderHome() {
 }
 function workspaceCreationForm({gateway = false} = {}) {
   return `<form class="${gateway ? 'workspace-gateway-create' : 'card scope-create-form'}" id="create-workspace-form" data-destination="/home">
-    <div><p class="eyebrow">新的隔离边界</p><h2>${gateway ? '创建工作区' : '创建 Workspace'}</h2><p>创建后自动建立同名默认团队。成员、账户、权限与交易数据不会继承其他工作区。</p></div>
+    <div><p class="eyebrow">新的隔离边界</p><h2>${gateway ? '创建工作区' : '创建 Workspace'}</h2><p>个人使用时初始只有创建者，系统仍自动建立同名默认团队。交易所账户始终归属工作区与团队，不存在个人账户旁路。</p></div>
     <label>工作区名称<input name="name" maxlength="120" placeholder="例如 TradingOPS APAC" required></label>
     <label>标识（可选）<input name="slug" maxlength="80" pattern="[a-z0-9-]+" placeholder="tradingops-apac"></label>
     <div class="form-error" role="alert"></div><button class="primary">创建并进入</button>
@@ -216,10 +217,9 @@ function renderWorkspaceGateway() {
   }).join('');
   const createContent = workspaceCreationForm({gateway:true});
   main.innerHTML = `<section class="workspace-gateway-page" aria-labelledby="workspace-gateway-title">
-    <div class="workspace-gateway-tabs" role="tablist" aria-label="入口类型"><span role="tab" aria-selected="true">工作区</span><span role="tab" aria-selected="false" aria-disabled="true">个人账户</span></div>
     <article class="workspace-gateway-card">
       <span class="workspace-gateway-logo" aria-hidden="true"><img src="/assets/tradingops-logo.png" alt=""></span>
-      <div class="workspace-gateway-heading"><p class="eyebrow">TradingOPS Workspace</p><h1 id="workspace-gateway-title">${workspaces.length ? '选择工作区' : '创建第一个工作区'}</h1><p>${workspaces.length ? '每个工作区拥有独立成员、默认团队、账户、权限与交易数据。' : '工作区是成员、默认团队、账户、权限与交易数据的隔离边界。'}</p></div>
+      <div class="workspace-gateway-heading"><p class="eyebrow">TradingOPS Workspace</p><h1 id="workspace-gateway-title">${workspaces.length ? '选择工作区' : '创建第一个工作区'}</h1><p>${workspaces.length ? '每个工作区拥有独立成员、默认团队、账户、权限与交易数据。' : '个人使用时创建单人工作区；系统仍会建立同名默认团队。'}</p></div>
       ${workspaces.length ? `<div class="workspace-gateway-list">${workspaceCards}</div><details class="workspace-gateway-create-panel"><summary>创建新工作区</summary>${createContent}</details>` : createContent}
     </article>
     <p class="workspace-gateway-footnote">进入后仍可从侧栏切换工作区。服务端会重新加载对应团队、成员和权限范围。</p>

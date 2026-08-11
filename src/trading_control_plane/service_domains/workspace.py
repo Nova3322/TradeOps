@@ -1091,6 +1091,79 @@ class WorkspaceService(ServiceComponent):
                 now=now,
             )
 
+    def change_own_password(
+        self,
+        *,
+        actor_id: UUID,
+        current_password: str,
+        new_password: str,
+        expected_auth_version: int,
+        idempotency_key: str,
+        now: datetime,
+    ) -> int:
+        """Rotate the authenticated human's password and revoke older sessions."""
+
+        with self.database.session_factory.begin() as session:
+            user = session.get(User, actor_id, with_for_update=True)
+            if (
+                user is None
+                or not user.active
+                or user.principal_type != PrincipalType.HUMAN.value
+                or user.password_hash is None
+            ):
+                _reject("PASSWORD_CHANGE_DENIED", "an active password identity is required")
+            payload = {
+                "user_id": str(actor_id),
+                "expected_auth_version": expected_auth_version,
+                "new_password_length": len(new_password),
+            }
+            digest, replay = self.transactions._idempotency(
+                session,
+                caller_id=str(actor_id),
+                operation="user.password.change",
+                idempotency_key=idempotency_key,
+                payload=payload,
+            )
+            if replay is not None:
+                return int(replay["auth_version"])
+            if user.auth_version != expected_auth_version:
+                _reject(
+                    "AUTH_VERSION_CONFLICT",
+                    "the login identity changed before password update",
+                )
+            if not PASSWORD_HASHER.verify(current_password, user.password_hash):
+                _reject("CURRENT_PASSWORD_INVALID", "the current password is incorrect")
+            if PASSWORD_HASHER.verify(new_password, user.password_hash):
+                _reject("PASSWORD_UNCHANGED", "the new password must differ from the current one")
+            user.password_hash = PASSWORD_HASHER.hash(new_password)
+            user.password_changed_at = now
+            user.auth_version += 1
+            response = {"auth_version": user.auth_version}
+            self.transactions._audit(
+                session,
+                actor_id=str(actor_id),
+                event_type="USER_PASSWORD_CHANGED",
+                object_type="User",
+                object_id=user.user_id,
+                reason="authentication=password-scrypt;other_sessions_revoked=true",
+                correlation_id=uuid4(),
+                idempotency_key=idempotency_key,
+                object_version=user.auth_version,
+                workspace_id=user.active_workspace_id,
+                team_id=user.active_team_id,
+                now=now,
+            )
+            self.transactions._save_receipt(
+                session,
+                caller_id=str(actor_id),
+                operation="user.password.change",
+                idempotency_key=idempotency_key,
+                semantic_hash=digest,
+                response=response,
+                now=now,
+            )
+            return user.auth_version
+
     def ensure_local_human_password(
         self,
         username: str,

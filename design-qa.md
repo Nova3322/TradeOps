@@ -761,3 +761,41 @@ final result: passed
 - A workspace maps to an automatically created default team while preserving existing multi-team compatibility behind the service boundary.
 
 final result: passed
+
+---
+
+# Design QA — Direct workspace chooser and user menu
+
+## Scope and comparison
+
+- Source reference: `/var/folders/c1/6j8smjg96430htljxp_sx8sr0000gn/T/codex-clipboard-e2b6a215-3b3e-428b-8733-d879b3527911.png`
+- Final workspace chooser: `/private/tmp/trading-workspace-gateway-1440-light.png`
+- Final desktop user menu: `/private/tmp/trading-user-menu-1440-light.png`
+- Final tablet user menu: `/private/tmp/trading-user-menu-1024-light.png`
+- Final mobile user menus: `/private/tmp/trading-user-menu-430-light.png` and `/private/tmp/trading-user-menu-390-light.png`
+- Side-by-side review: `/private/tmp/trading-workspace-reference-vs-implementation.png`
+
+## Findings and fixes
+
+1. P1 closed: removed the `工作区 / 个人账户` tablist and its disabled personal-account affordance. The authenticated first page now exposes one named `选择工作区` region and no personal exchange-account route.
+2. P1 closed: moved login identity, current workspace/default team/role, language, three-state theme preference, password rotation, and logout into the top-right user menu.
+3. P1 closed: password rotation is server-validated, idempotent, audited, updates the session revision, and revokes older sessions. Browser QA opened and inspected the form without submitting the final password-change action.
+4. P1 closed: personal use remains the existing workspace lifecycle. A newly created workspace begins with its creator and atomically creates the same-name default team; exchange accounts stay bound to an exact workspace/team scope.
+5. P2 closed: kept the compact identity trigger visible on tablet and mobile, with its full accessible name intact and a fixed, scrollable menu that stays inside the viewport.
+
+## Browser acceptance
+
+- Desktop and tablet: chooser, user menu, identity facts, language control, system/light/dark theme choices, password fields, and workspace switcher passed at 1440 and 1024 target sizes.
+- Mobile: 430 and 390 target sizes retained the identity trigger and complete menu with no document-level horizontal overflow or clipped controls.
+- Theme persistence: dark selection survived a page reload; final state was returned to light.
+- Workspace flow: selecting `Default Workspace` entered `/home`; the sidebar switcher then exposed both workspaces with current/enter states.
+- Browser console warnings and errors: 0.
+- The browser viewport override was reset after responsive testing.
+
+## Safety and data truth
+
+- No exchange-account ownership shortcut or personal-account entity was introduced.
+- No database migration was required; Alembic remained at `20260811_0031` and detected no schema operations.
+- Visual changes did not alter server RBAC, team/account isolation, idempotency, risk controls, shadow/live separation, or default-disabled live sending and funding gates.
+
+final result: passed

@@ -15,6 +15,7 @@ from trading_control_plane.api_core import (
     MockStepUpRequest,
     NotificationRouteWriteRequest,
     NotificationTestRequest,
+    PasswordChangeRequest,
     PasswordLoginRequest,
     Query,
     Request,
@@ -179,6 +180,49 @@ class _WorkspaceRoutes:
         def logout(response: Response) -> dict[str, str]:
             response.delete_cookie(SESSION_COOKIE, path="/")
             return {"status": "logged_out"}
+
+        @self.app.post("/api/auth/password")
+        def change_password(
+            payload: PasswordChangeRequest,
+            response: Response,
+            identity: SessionIdentity = self.identity_dependency,
+        ) -> dict[str, Any]:
+            if identity.authentication_method != "password-scrypt":
+                raise DomainRejected(
+                    "PASSWORD_AUTH_REQUIRED",
+                    "password changes require a password-authenticated session",
+                )
+            now = _now()
+            auth_version = self.service().change_own_password(
+                actor_id=identity.user_id,
+                current_password=payload.current_password,
+                new_password=payload.new_password,
+                expected_auth_version=payload.expected_auth_version,
+                idempotency_key=payload.idempotency_key,
+                now=now,
+            )
+            token = self.token_service.issue_session(
+                user_id=identity.user_id,
+                username=identity.username,
+                now=now,
+                ttl=timedelta(seconds=self.resolved_settings.session_ttl_seconds),
+                authentication_method="password-scrypt",
+                auth_version=auth_version,
+            )
+            response.set_cookie(
+                SESSION_COOKIE,
+                token,
+                httponly=True,
+                secure=self.resolved_settings.environment in {"staging", "production"},
+                samesite="strict",
+                max_age=self.resolved_settings.session_ttl_seconds,
+                path="/",
+            )
+            return {
+                "session": self.queries().user_context(identity.user_id),
+                "authentication_method": "PASSWORD",
+                "other_sessions_revoked": True,
+            }
 
         @self.app.get("/api/auth/session")
         def auth_session(
