@@ -1,33 +1,12 @@
 from __future__ import annotations
 
-from trading_control_plane.query_core import (
-    NOTIFICATION_TEMPLATES,
-    ROUTABLE_NOTIFICATION_EVENT_TYPES,
-    UTC,
-    UUID,
-    Any,
-    DomainRejected,
-    NotificationDelivery,
-    NotificationRoute,
-    PrincipalType,
-    QueryMixinBase,
-    RoleAssignment,
-    ServicePrincipalKind,
-    Team,
-    TeamMembership,
-    User,
-    Workspace,
-    WorkspaceMembership,
-    _iso,
-    datetime,
-    func,
-    select,
-)
+from trading_control_plane.query_component import QueryComponent
+
+# ruff: noqa: F403, F405
+from trading_control_plane.query_core import *
 
 
-class WorkspaceQueryMixin(QueryMixinBase):
-    """Workspace, identity, access, Telegram, and notification projections."""
-
+class WorkspaceQueries(QueryComponent):
     def _active_scope_ids(self, user_id: UUID) -> tuple[UUID, UUID]:
         context = self.user_context(user_id)
         workspace = context.get("active_workspace")

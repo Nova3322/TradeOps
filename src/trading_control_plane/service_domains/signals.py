@@ -1,67 +1,13 @@
 from __future__ import annotations
 
-from trading_control_plane.service_core import (
-    MAX_FACT_CLOCK_SKEW,
-    ROLE_ACTIONS,
-    SIGNAL_CLOCK_SKEW,
-    SIGNAL_NONCE_PATTERN,
-    SUPPORTED_EXCHANGE_VENUES,
-    UTC,
-    UUID,
-    Any,
-    BinanceInstrument,
-    Decimal,
-    DomainRejected,
-    ExchangeAccount,
-    HyperliquidInstrument,
-    IdempotencyConflict,
-    Instrument,
-    PerptapeCandidate,
-    PerptapeFeed,
-    PerptapeFeedSnapshot,
-    PreparedPerptapeRuntimeBinding,
-    PreparedRuntimeAccountBinding,
-    PrincipalType,
-    Proposal,
-    ProposalDefaultConfig,
-    Role,
-    RoleAssignment,
-    RuntimeSourceHealth,
-    Sequence,
-    ServiceMixinBase,
-    ServicePrincipalKind,
-    Session,
-    SignalEvent,
-    SignalEventStatus,
-    SignalSourceMode,
-    Team,
-    TeamMembership,
-    TeamSignalSource,
-    User,
-    VenueInstrument,
-    WorkspaceMembership,
-    WorkspaceRole,
-    _reject,
-    _semantic_hash,
-    apply_perptape_feed_delta,
-    bound_perptape_feed_snapshot,
-    datetime,
-    freqtrade_pair,
-    hashlib,
-    hmac,
-    normalize_perptape_datetime,
-    perptape_snapshot_identity,
-    select,
-    timedelta,
-    uuid4,
-    validate_perptape_feed_payload,
-)
-from trading_control_plane.service_domains.accounts import AccountServiceMixin
+from trading_control_plane.service_component import ServiceComponent
+
+# The domain implementation intentionally consumes the explicit service_core export surface.
+# ruff: noqa: F403, F405
+from trading_control_plane.service_core import *
 
 
-class SignalServiceMixin(ServiceMixinBase):
-    """Signal-source, runtime-feed, event-ingestion, and instrument-catalog transactions."""
-
+class SignalService(ServiceComponent):
     @staticmethod
     def _signal_source_payload(
         source: TeamSignalSource,
@@ -113,7 +59,7 @@ class SignalServiceMixin(ServiceMixinBase):
 
     def signal_source_status(self, actor_id: UUID) -> dict[str, Any]:
         with self.database.session_factory() as session:
-            team = self._require_action_assignment(session, actor_id, "signal.view")
+            team = self.transactions._require_action_assignment(session, actor_id, "signal.view")
             source = session.scalar(
                 select(TeamSignalSource).where(TeamSignalSource.team_id == team.team_id)
             )
@@ -150,8 +96,8 @@ class SignalServiceMixin(ServiceMixinBase):
                 ),
             }
 
-    @staticmethod
     def _ensure_signal_service_principal(
+        self,
         session: Session,
         *,
         team: Team,
@@ -201,7 +147,7 @@ class SignalServiceMixin(ServiceMixinBase):
                     ),
                 ]
             )
-        principal = AccountServiceMixin._require_exact_runtime_principal(
+        principal = self.facade._require_exact_runtime_principal(
             session,
             principal_id=principal.user_id,
             team=team,
@@ -212,7 +158,7 @@ class SignalServiceMixin(ServiceMixinBase):
             error_message="the dedicated signal principal is outside the active team",
             allow_inactive=True,
         )
-        AccountServiceMixin._set_internal_principal_active(session, principal.user_id, True)
+        self.facade._set_internal_principal_active(session, principal.user_id, True)
         return principal
 
     def configure_signal_source(
@@ -240,7 +186,7 @@ class SignalServiceMixin(ServiceMixinBase):
                 "signal credential or freshness boundary is invalid",
             )
         with self.database.session_factory.begin() as session:
-            team = self._require_role(session, actor_id, "signal.manage")
+            team = self.transactions._require_role(session, actor_id, "signal.manage")
             caller = f"{actor_id}:{team.team_id}"
             payload = {
                 "mode": mode.value,
@@ -252,7 +198,7 @@ class SignalServiceMixin(ServiceMixinBase):
                 "webhook_max_age_seconds": webhook_max_age_seconds,
                 "expected_version": expected_version,
             }
-            digest, replay = self._idempotency(
+            digest, replay = self.transactions._idempotency(
                 session,
                 caller_id=caller,
                 operation="signal-source.configure",
@@ -290,7 +236,7 @@ class SignalServiceMixin(ServiceMixinBase):
                 else None
             )
             if previous_principal_id is not None and principal is None:
-                self._set_internal_principal_active(
+                self.facade._set_internal_principal_active(
                     session,
                     previous_principal_id,
                     False,
@@ -363,7 +309,7 @@ class SignalServiceMixin(ServiceMixinBase):
                     )
             session.flush()
             result = {"signal_source_id": str(source.signal_source_id)}
-            self._save_receipt(
+            self.transactions._save_receipt(
                 session,
                 caller_id=caller,
                 operation="signal-source.configure",
@@ -372,7 +318,7 @@ class SignalServiceMixin(ServiceMixinBase):
                 response=result,
                 now=now,
             )
-            self._audit(
+            self.transactions._audit(
                 session,
                 actor_id=str(actor_id),
                 event_type="SIGNAL_SOURCE_CONFIGURED",
@@ -393,7 +339,7 @@ class SignalServiceMixin(ServiceMixinBase):
 
     def perptape_source_runtime(self, actor_id: UUID) -> dict[str, Any]:
         with self.database.session_factory() as session:
-            team = self._require_action_assignment(session, actor_id, "signal.view")
+            team = self.transactions._require_action_assignment(session, actor_id, "signal.view")
             source = session.scalar(
                 select(TeamSignalSource).where(TeamSignalSource.team_id == team.team_id)
             )
@@ -555,7 +501,7 @@ class SignalServiceMixin(ServiceMixinBase):
             session.flush()
             team = session.get(Team, source.team_id)
             assert team is not None
-            self._audit(
+            self.transactions._audit(
                 session,
                 actor_id=f"webhook:{source.signal_source_id}",
                 event_type="SIGNAL_RECEIVED",
@@ -569,7 +515,7 @@ class SignalServiceMixin(ServiceMixinBase):
                 team_id=team.team_id,
                 now=now,
             )
-            self._enqueue_notification_event(
+            self.transactions._enqueue_notification_event(
                 session,
                 actor_id=f"webhook:{source.signal_source_id}",
                 team=team,
@@ -635,7 +581,7 @@ class SignalServiceMixin(ServiceMixinBase):
 
     def signal_event(self, actor_id: UUID, signal_event_id: UUID) -> dict[str, Any]:
         with self.database.session_factory() as session:
-            team = self._require_action_assignment(session, actor_id, "signal.view")
+            team = self.transactions._require_action_assignment(session, actor_id, "signal.view")
             event = session.scalar(
                 select(SignalEvent).where(
                     SignalEvent.signal_event_id == signal_event_id,
@@ -661,7 +607,7 @@ class SignalServiceMixin(ServiceMixinBase):
 
     def list_signal_events(self, actor_id: UUID, *, limit: int = 100) -> list[dict[str, Any]]:
         with self.database.session_factory() as session:
-            team = self._require_action_assignment(session, actor_id, "signal.view")
+            team = self.transactions._require_action_assignment(session, actor_id, "signal.view")
             events = session.scalars(
                 select(SignalEvent)
                 .where(SignalEvent.team_id == team.team_id)
@@ -705,9 +651,9 @@ class SignalServiceMixin(ServiceMixinBase):
                     "runtime health cannot bind an account and signal source together",
                 )
             if runtime_account_binding is not None:
-                self._lock_runtime_account_binding(session, runtime_account_binding)
+                self.facade._lock_runtime_account_binding(session, runtime_account_binding)
             if perptape_runtime_binding is not None:
-                self._lock_perptape_runtime_binding(session, perptape_runtime_binding)
+                self.facade._lock_perptape_runtime_binding(session, perptape_runtime_binding)
             principal = session.get(User, actor_id)
             if (
                 principal is None
@@ -718,7 +664,7 @@ class SignalServiceMixin(ServiceMixinBase):
                     "SERVICE_PRINCIPAL_REQUIRED",
                     "runtime source health requires an active service principal",
                 )
-            _principal, _workspace, team = self._active_scope(session, actor_id)
+            _principal, _workspace, team = self.transactions._active_scope(session, actor_id)
             assert team is not None
             for source_name, result in sources.items():
                 status = str(result.get("status", ""))
@@ -873,10 +819,10 @@ class SignalServiceMixin(ServiceMixinBase):
             _reject("PERPTAPE_RESPONSE_INVALID", "Perptape feed metadata is inconsistent")
         with self.database.session_factory.begin() as session:
             if runtime_binding is not None:
-                self._lock_perptape_runtime_binding(session, runtime_binding)
-            _actor, workspace, team = self._active_scope(session, actor_id)
+                self.facade._lock_perptape_runtime_binding(session, runtime_binding)
+            _actor, workspace, team = self.transactions._active_scope(session, actor_id)
             assert team is not None
-            self._require_role(
+            self.transactions._require_role(
                 session,
                 actor_id,
                 "proposal.create",
@@ -951,7 +897,7 @@ class SignalServiceMixin(ServiceMixinBase):
                 current.next_allowed_at = feed.next_allowed_at
                 current.version += 1
                 current.updated_at = now
-            self._audit(
+            self.transactions._audit(
                 session,
                 actor_id=str(actor_id),
                 event_type="PERPTAPE_FEED_RECORDED",
@@ -982,7 +928,7 @@ class SignalServiceMixin(ServiceMixinBase):
         now: datetime,
     ) -> UUID:
         with self.database.session_factory.begin() as session:
-            self._require_role(session, actor_id, "instrument.manage")
+            self.transactions._require_role(session, actor_id, "instrument.manage")
             instrument = Instrument(
                 venue=venue,
                 symbol=symbol,
@@ -998,7 +944,7 @@ class SignalServiceMixin(ServiceMixinBase):
             )
             session.add(instrument)
             session.flush()
-            self._audit(
+            self.transactions._audit(
                 session,
                 actor_id=str(actor_id),
                 event_type="INSTRUMENT_REGISTERED",
@@ -1029,7 +975,7 @@ class SignalServiceMixin(ServiceMixinBase):
         """Refresh a read-only venue contract catalog entry from official venue metadata."""
 
         with self.database.session_factory.begin() as session:
-            self._require_role(session, actor_id, "venue.record", account_id, venue)
+            self.transactions._require_role(session, actor_id, "venue.record", account_id, venue)
             instrument = session.scalar(
                 select(Instrument)
                 .where(Instrument.venue == venue, Instrument.symbol == symbol)
@@ -1061,7 +1007,7 @@ class SignalServiceMixin(ServiceMixinBase):
                 instrument.collateral_currency = collateral_currency
                 instrument.active = active
                 instrument.updated_at = now
-            self._audit(
+            self.transactions._audit(
                 session,
                 actor_id=str(actor_id),
                 event_type=event_type,
@@ -1112,8 +1058,8 @@ class SignalServiceMixin(ServiceMixinBase):
 
         with self.database.session_factory.begin() as session:
             if runtime_binding is not None:
-                self._lock_runtime_account_binding(session, runtime_binding)
-            self._require_role(session, actor_id, "venue.record", account_id, venue)
+                self.facade._lock_runtime_account_binding(session, runtime_binding)
+            self.transactions._require_role(session, actor_id, "venue.record", account_id, venue)
             existing = {
                 instrument.symbol: instrument
                 for instrument in session.scalars(
@@ -1187,7 +1133,7 @@ class SignalServiceMixin(ServiceMixinBase):
                     deactivated += 1
 
             if created or refreshed or deactivated:
-                self._audit(
+                self.transactions._audit(
                     session,
                     actor_id=str(actor_id),
                     event_type="INSTRUMENT_CATALOG_SYNCED",

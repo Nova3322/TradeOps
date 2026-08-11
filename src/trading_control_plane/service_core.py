@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-# This module is the explicit dependency surface shared by the domain mixins.
-# Imports are re-exported intentionally so each mixin can declare only the names it consumes.
+# This module is the explicit dependency surface shared by the domain components.
+# Imports are re-exported intentionally so each component can declare only the names it consumes.
 import base64
 import binascii
 import hashlib
@@ -35,9 +35,7 @@ from trading_control_plane.capital import (
 )
 from trading_control_plane.credentials import (
     SUPPORTED_EXCHANGE_VENUES,
-    CredentialCipher,
 )
-from trading_control_plane.database import Database
 from trading_control_plane.domain import (
     AddCandidateFacts,
     CampaignStatus,
@@ -175,6 +173,8 @@ from trading_control_plane.shadow import apply_shadow_fill, quote_shadow_executi
 from trading_control_plane.venue_read_only import VenueInstrument, VenueReadOnlySnapshot
 
 CAPITAL_HISTORY_MIN_INTERVAL = timedelta(minutes=1)
+DEFAULT_SENDER_LEASE_DURATION = timedelta(minutes=1)
+DEFAULT_FREQTRADE_LEVERAGE = Decimal(1)
 PASSWORD_HASHER = PasswordHasher()
 SCOPE_SLUG_PATTERN = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,78}[a-z0-9])?$")
 SIGNAL_NONCE_PATTERN = re.compile(r"^[A-Za-z0-9._:-]{16,160}$")
@@ -537,27 +537,12 @@ def fact_is_stale(observed_at: datetime, now: datetime, max_age: timedelta) -> b
     return observed_at > now + MAX_FACT_CLOCK_SKEW or now - observed_at > max_age
 
 
-class ServiceMixinBase:
-    """Typing surface for methods composed by the public transactional facade."""
-
-    database: Database
-    credential_cipher: CredentialCipher
-    authoritative_live_accounts: dict[str, str]
-
-    def _idempotency(self, *args: Any, **kwargs: Any) -> tuple[str, dict[str, Any] | None]:
-        raise NotImplementedError
-
-    def _intent_creation(self, value: dict[str, Any]) -> IntentCreation:
-        raise NotImplementedError
-
-    def __getattr__(self, name: str) -> Any:
-        raise AttributeError(name)
-
-
 __all__ = [
     "ACTIVE_INTENT_STATUSES",
     "CAPITAL_HISTORY_MIN_INTERVAL",
     "CONNECTION_ERROR_CODE_PATTERN",
+    "DEFAULT_FREQTRADE_LEVERAGE",
+    "DEFAULT_SENDER_LEASE_DURATION",
     "FENCING_REJECTIONS",
     "INTENT_TRANSITIONS",
     "MAX_ADD_UNITS",
@@ -673,7 +658,6 @@ __all__ = [
     "RuntimeSourceHealth",
     "SenderLease",
     "Sequence",
-    "ServiceMixinBase",
     "ServicePrincipalKind",
     "Session",
     "SignalEvent",

@@ -1,1 +1,1 @@
-"""Read-model mixins grouped by the same domains as the transactional service."""
+"""Typed read-model components grouped by business domain."""

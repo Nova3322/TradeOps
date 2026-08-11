@@ -1,38 +1,12 @@
 from __future__ import annotations
 
-from trading_control_plane.query_core import (
-    UTC,
-    UUID,
-    Any,
-    Approval,
-    AuditEvent,
-    Campaign,
-    Decimal,
-    DomainRejected,
-    Instrument,
-    OrderIntent,
-    Proposal,
-    QueryMixinBase,
-    RiskDecision,
-    Role,
-    RoleAssignment,
-    TeamMembership,
-    TradingAuthorization,
-    User,
-    _effective_proposal_status,
-    _iso,
-    _proposal_execution_status,
-    and_,
-    datetime,
-    func,
-    or_,
-    select,
-)
+from trading_control_plane.query_component import QueryComponent
+
+# ruff: noqa: F403, F405
+from trading_control_plane.query_core import *
 
 
-class ProposalQueryMixin(QueryMixinBase):
-    """Proposal lists, frozen details, versions, and reviewer projections."""
-
+class ProposalQueries(QueryComponent):
     def list_proposals(
         self,
         user_id: UUID,
@@ -41,7 +15,7 @@ class ProposalQueryMixin(QueryMixinBase):
         now: datetime | None = None,
     ) -> list[dict[str, Any]]:
         current_time = now or datetime.now(UTC)
-        workspace_id, team_id = self._active_scope_ids(user_id)
+        workspace_id, team_id = self.facade._active_scope_ids(user_id)
         with self.database.session_factory() as session:
             statement = (
                 select(Proposal, Instrument)
@@ -117,7 +91,7 @@ class ProposalQueryMixin(QueryMixinBase):
                 if not self.service.can_user(user_id, "view", proposal.account_id, proposal.venue):
                     continue
                 effective_status = _effective_proposal_status(proposal, current_time)
-                summary = self._proposal_summary(proposal, instrument)
+                summary = self.facade._proposal_summary(proposal, instrument)
                 summary["workspace_id"] = str(workspace_id)
                 summary["proposer_username"] = proposer_names.get(proposal.proposer_id)
                 summary["status"] = effective_status
@@ -153,7 +127,7 @@ class ProposalQueryMixin(QueryMixinBase):
     ) -> list[dict[str, Any]]:
         """Return the current visible Perptape proposal occupying each trading scope."""
 
-        workspace_id, team_id = self._active_scope_ids(user_id)
+        workspace_id, team_id = self.facade._active_scope_ids(user_id)
         with self.database.session_factory() as session:
             values = session.execute(
                 select(Proposal, Instrument)
@@ -204,7 +178,7 @@ class ProposalQueryMixin(QueryMixinBase):
         now: datetime | None = None,
     ) -> dict[str, Any]:
         current_time = now or datetime.now(UTC)
-        workspace_id, team_id = self._active_scope_ids(user_id)
+        workspace_id, team_id = self.facade._active_scope_ids(user_id)
         with self.database.session_factory() as session:
             proposal = session.get(Proposal, proposal_id)
             if proposal is None:
@@ -265,7 +239,7 @@ class ProposalQueryMixin(QueryMixinBase):
             risk_equity = risk_inputs.get("equity")
             risk_capital = risk_inputs.get("managed_capital", {})
             risk_protection = risk_inputs.get("protection")
-            result = self._proposal_summary(
+            result = self.facade._proposal_summary(
                 proposal, session.get(Instrument, proposal.instrument_id)
             )
             result["workspace_id"] = str(workspace_id)

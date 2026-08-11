@@ -1,51 +1,18 @@
 from __future__ import annotations
 
-from trading_control_plane.service_core import (
-    UUID,
-    Any,
-    Approval,
-    Decimal,
-    Direction,
-    ExecutionEnvironment,
-    Instrument,
-    PreparedPerptapeRuntimeBinding,
-    PrincipalType,
-    Proposal,
-    ProposalDefaultConfig,
-    ProposalSource,
-    ProposalStatus,
-    ReviewDecision,
-    RiskTier,
-    Role,
-    RoleAssignment,
-    ServiceMixinBase,
-    SignalEvent,
-    SignalEventStatus,
-    SignalSourceMode,
-    Team,
-    TeamSignalSource,
-    User,
-    _advisory_lock_key,
-    _as_uuid,
-    _is_manual_proposal_originator,
-    _manual_execution_key,
-    _proposal_manual_execution_key,
-    _reject,
-    _system_proposal_strategy_family,
-    datetime,
-    func,
-    select,
-    text,
-    uuid4,
-)
+from trading_control_plane.service_component import ServiceComponent
+
+# The domain implementation intentionally consumes the explicit service_core export surface.
+# ruff: noqa: F403, F405
+from trading_control_plane.service_core import *
 
 
-class ProposalServiceMixin(ServiceMixinBase):
-    """Frozen proposal creation, defaults, submission, and independent review transactions."""
-
+class ProposalService(ServiceComponent):
     def proposal_default_config(self, actor_id: UUID) -> dict[str, Any] | None:
         with self.database.session_factory() as session:
-            team = self._require_action_assignment(session, actor_id, "proposal.create")
+            team = self.transactions._require_action_assignment(
+                session, actor_id, "proposal.create"
+            )
             config = session.scalar(
                 select(ProposalDefaultConfig).where(
                     ProposalDefaultConfig.team_id == team.team_id,
@@ -96,7 +63,9 @@ class ProposalServiceMixin(ServiceMixinBase):
                     "PROPOSAL_AUTOMATION_SERVICE_REQUIRED",
                     "automatic proposal policy is restricted to an active service principal",
                 )
-            team = self._require_action_assignment(session, actor_id, "proposal.create")
+            team = self.transactions._require_action_assignment(
+                session, actor_id, "proposal.create"
+            )
             source = session.scalar(
                 select(TeamSignalSource).where(TeamSignalSource.team_id == team.team_id)
             )
@@ -161,8 +130,8 @@ class ProposalServiceMixin(ServiceMixinBase):
                 "automatic proposal threshold must be three or four timeframes",
             )
         with self.database.session_factory.begin() as session:
-            team = self._require_role(session, actor_id, operation)
-            self._require_team_environment(team, ExecutionEnvironment.LIVE)
+            team = self.transactions._require_role(session, actor_id, operation)
+            self.transactions._require_team_environment(team, ExecutionEnvironment.LIVE)
             assignments = session.scalars(
                 select(RoleAssignment).where(
                     RoleAssignment.user_id == actor_id,
@@ -186,7 +155,7 @@ class ProposalServiceMixin(ServiceMixinBase):
                     "AUTO_PROPOSAL_SOURCE_INVALID",
                     "automatic proposals require the active team Perptape source",
                 )
-            digest, response = self._idempotency(
+            digest, response = self.transactions._idempotency(
                 session,
                 caller_id=f"{actor_id}:{team.team_id}",
                 operation=operation,
@@ -226,7 +195,7 @@ class ProposalServiceMixin(ServiceMixinBase):
             session.add(config)
             session.flush()
             result = {"config_id": str(config.config_id), "version": config.version}
-            self._save_receipt(
+            self.transactions._save_receipt(
                 session,
                 caller_id=f"{actor_id}:{team.team_id}",
                 operation=operation,
@@ -235,7 +204,7 @@ class ProposalServiceMixin(ServiceMixinBase):
                 response=result,
                 now=now,
             )
-            self._audit(
+            self.transactions._audit(
                 session,
                 actor_id=str(actor_id),
                 event_type="PROPOSAL_DEFAULTS_UPDATED",
@@ -312,11 +281,11 @@ class ProposalServiceMixin(ServiceMixinBase):
                         "SIGNAL_RUNTIME_BINDING_INVALID",
                         "Perptape runtime bindings only create system signal proposals",
                     )
-                self._lock_perptape_runtime_binding(session, perptape_runtime_binding)
-            team = self._require_role(session, actor_id, operation, account_id, venue)
-            self._require_team_environment(team, environment)
+                self.facade._lock_perptape_runtime_binding(session, perptape_runtime_binding)
+            team = self.transactions._require_role(session, actor_id, operation, account_id, venue)
+            self.transactions._require_team_environment(team, environment)
             if submit_for_review:
-                self._require_role(
+                self.transactions._require_role(
                     session,
                     actor_id,
                     "proposal.submit",
@@ -329,7 +298,7 @@ class ProposalServiceMixin(ServiceMixinBase):
                 "workspace_id": str(team.workspace_id),
                 "team_id": str(team.team_id),
             }
-            digest, response = self._idempotency(
+            digest, response = self.transactions._idempotency(
                 session,
                 caller_id=f"{actor_id}:{team.team_id}",
                 operation=operation,
@@ -410,7 +379,7 @@ class ProposalServiceMixin(ServiceMixinBase):
                     "SIGNAL_PROPOSAL_MISMATCH",
                     "proposal instrument, venue and direction must match the frozen signal",
                 )
-            self._ensure_exchange_account_reference(
+            self.facade._ensure_exchange_account_reference(
                 session,
                 team=team,
                 actor_id=actor_id,
@@ -486,7 +455,7 @@ class ProposalServiceMixin(ServiceMixinBase):
                 )
                 if existing is not None:
                     result = {"proposal_id": str(existing.proposal_id)}
-                    self._save_receipt(
+                    self.transactions._save_receipt(
                         session,
                         caller_id=f"{actor_id}:{team.team_id}",
                         operation=operation,
@@ -495,7 +464,7 @@ class ProposalServiceMixin(ServiceMixinBase):
                         response=result,
                         now=now,
                     )
-                    self._audit(
+                    self.transactions._audit(
                         session,
                         actor_id=str(actor_id),
                         event_type="PROPOSAL_DUPLICATE_REUSED",
@@ -560,7 +529,7 @@ class ProposalServiceMixin(ServiceMixinBase):
                     .limit(1)
                 )
                 if existing is not None:
-                    self._audit(
+                    self.transactions._audit(
                         session,
                         actor_id=str(actor_id),
                         event_type="PROPOSAL_DUPLICATE_REUSED",
@@ -615,7 +584,7 @@ class ProposalServiceMixin(ServiceMixinBase):
             session.flush()
             if signal_event is not None:
                 signal_event.status = SignalEventStatus.PROPOSAL_CREATED.value
-                self._audit(
+                self.transactions._audit(
                     session,
                     actor_id=str(actor_id),
                     event_type="SIGNAL_PROPOSAL_CREATED",
@@ -631,7 +600,7 @@ class ProposalServiceMixin(ServiceMixinBase):
                     now=now,
                 )
             result = {"proposal_id": str(proposal.proposal_id)}
-            self._save_receipt(
+            self.transactions._save_receipt(
                 session,
                 caller_id=f"{actor_id}:{team.team_id}",
                 operation=operation,
@@ -640,7 +609,7 @@ class ProposalServiceMixin(ServiceMixinBase):
                 response=result,
                 now=now,
             )
-            self._audit(
+            self.transactions._audit(
                 session,
                 actor_id=str(actor_id),
                 event_type="PROPOSAL_CREATED",
@@ -656,7 +625,7 @@ class ProposalServiceMixin(ServiceMixinBase):
                 proposal.status = ProposalStatus.PENDING_REVIEW.value
                 proposal.frozen_at = now
                 proposal.version = 2
-                self._audit(
+                self.transactions._audit(
                     session,
                     actor_id=str(actor_id),
                     event_type="PROPOSAL_SUBMITTED",
@@ -671,7 +640,7 @@ class ProposalServiceMixin(ServiceMixinBase):
                     account_id=account_id,
                     now=now,
                 )
-                self._enqueue_proposal_review_notification(
+                self.transactions._enqueue_proposal_review_notification(
                     session,
                     actor_id=actor_id,
                     team=team,
@@ -690,7 +659,7 @@ class ProposalServiceMixin(ServiceMixinBase):
         """Keep one active proposal per exact frozen manual trade and audit the surplus."""
 
         with self.database.session_factory.begin() as session:
-            team = self._require_role(session, actor_id, "user.manage")
+            team = self.transactions._require_role(session, actor_id, "user.manage")
             session.execute(
                 text("SELECT pg_advisory_xact_lock(:key)"),
                 {
@@ -738,7 +707,7 @@ class ProposalServiceMixin(ServiceMixinBase):
                 )
                 canonical = matching[0]
                 for duplicate in matching[1:]:
-                    self._audit(
+                    self.transactions._audit(
                         session,
                         actor_id=str(duplicate.proposer_id),
                         event_type="PROPOSAL_DUPLICATE_REUSED",
@@ -752,7 +721,7 @@ class ProposalServiceMixin(ServiceMixinBase):
                     duplicate.status = ProposalStatus.EXPIRED.value
                     duplicate.updated_at = now
                     duplicate.version += 1
-                    self._audit(
+                    self.transactions._audit(
                         session,
                         actor_id=str(actor_id),
                         event_type="PROPOSAL_DUPLICATE_EXPIRED",
@@ -791,7 +760,7 @@ class ProposalServiceMixin(ServiceMixinBase):
                     "PROPOSAL_AUTOMATION_SERVICE_REQUIRED",
                     "duplicate cleanup is restricted to an active service principal",
                 )
-            _actor, _workspace, team = self._active_scope(session, actor_id)
+            _actor, _workspace, team = self.transactions._active_scope(session, actor_id)
             assert team is not None
             strategy_family, strategy_ids = _system_proposal_strategy_family(strategy_id)
             session.execute(
@@ -855,7 +824,7 @@ class ProposalServiceMixin(ServiceMixinBase):
                     duplicate.status = ProposalStatus.EXPIRED.value
                     duplicate.updated_at = now
                     duplicate.version += 1
-                    self._audit(
+                    self.transactions._audit(
                         session,
                         actor_id=str(actor_id),
                         event_type="PROPOSAL_DUPLICATE_EXPIRED",
@@ -882,11 +851,11 @@ class ProposalServiceMixin(ServiceMixinBase):
         expired = False
         with self.database.session_factory.begin() as session:
             if perptape_runtime_binding is not None:
-                self._lock_perptape_runtime_binding(session, perptape_runtime_binding)
+                self.facade._lock_perptape_runtime_binding(session, perptape_runtime_binding)
             proposal = session.get(Proposal, proposal_id, with_for_update=True)
             if proposal is None:
                 _reject("PROPOSAL_NOT_FOUND", "proposal does not exist")
-            self._require_role(
+            self.transactions._require_role(
                 session,
                 actor_id,
                 "proposal.submit",
@@ -900,7 +869,7 @@ class ProposalServiceMixin(ServiceMixinBase):
                 proposal.status = ProposalStatus.EXPIRED.value
                 proposal.updated_at = now
                 proposal.version += 1
-                self._audit(
+                self.transactions._audit(
                     session,
                     actor_id=str(actor_id),
                     event_type="PROPOSAL_EXPIRED",
@@ -919,7 +888,7 @@ class ProposalServiceMixin(ServiceMixinBase):
                 proposal.frozen_at = now
                 proposal.updated_at = now
                 proposal.version += 1
-                self._audit(
+                self.transactions._audit(
                     session,
                     actor_id=str(actor_id),
                     event_type="PROPOSAL_SUBMITTED",
@@ -932,7 +901,7 @@ class ProposalServiceMixin(ServiceMixinBase):
                 )
                 team = session.get(Team, proposal.team_id)
                 assert team is not None
-                self._enqueue_proposal_review_notification(
+                self.transactions._enqueue_proposal_review_notification(
                     session,
                     actor_id=actor_id,
                     team=team,
@@ -962,7 +931,7 @@ class ProposalServiceMixin(ServiceMixinBase):
                 _reject("PROPOSAL_NOT_FOUND", "proposal does not exist")
             if _is_manual_proposal_originator(session, proposal, reviewer_id):
                 _reject("SELF_REVIEW_FORBIDDEN", "a proposer cannot review the same proposal")
-            self._require_role(
+            self.transactions._require_role(
                 session,
                 reviewer_id,
                 "proposal.review",
@@ -973,7 +942,7 @@ class ProposalServiceMixin(ServiceMixinBase):
             digest: str | None = None
             operation = f"proposal.review:{proposal_id}"
             if idempotency_key is not None:
-                digest, replay = self._idempotency(
+                digest, replay = self.transactions._idempotency(
                     session,
                     caller_id=f"{reviewer_id}:{proposal.team_id}",
                     operation=operation,
@@ -993,7 +962,7 @@ class ProposalServiceMixin(ServiceMixinBase):
                 proposal.status = ProposalStatus.EXPIRED.value
                 proposal.updated_at = now
                 proposal.version += 1
-                self._audit(
+                self.transactions._audit(
                     session,
                     actor_id=str(reviewer_id),
                     event_type="PROPOSAL_EXPIRED",
@@ -1042,7 +1011,7 @@ class ProposalServiceMixin(ServiceMixinBase):
                         proposal.status = ProposalStatus.APPROVED.value
                 proposal.updated_at = now
                 proposal.version += 1
-                self._audit(
+                self.transactions._audit(
                     session,
                     actor_id=str(reviewer_id),
                     event_type="PROPOSAL_REVIEWED",
@@ -1056,7 +1025,7 @@ class ProposalServiceMixin(ServiceMixinBase):
                 result = ProposalStatus(proposal.status)
                 if idempotency_key is not None:
                     assert digest is not None
-                    self._save_receipt(
+                    self.transactions._save_receipt(
                         session,
                         caller_id=f"{reviewer_id}:{proposal.team_id}",
                         operation=operation,

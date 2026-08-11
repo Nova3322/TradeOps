@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from typing import cast
-
 from trading_control_plane.api_core import (
     UUID,
     Any,
@@ -31,11 +29,13 @@ def register_signals_routes(context: ApiRouteContext) -> None:
     """Register signals routes against one application dependency context."""
 
     app = context.app
-    identity_dependency = context.require("identity_dependency")
-    notify_reviewers = context.require("notify_reviewers")
-    queries = context.require("queries")
-    resolved_settings = context.require("resolved_settings")
-    service = context.require("service")
+    dependencies = context.signals
+    common = dependencies.common
+    identity_dependency = common.identity
+    notify_reviewers = dependencies.notify_reviewers
+    queries = common.queries
+    resolved_settings = common.settings
+    service = common.service
 
     @app.get("/api/signal-source")
     def signal_source(
@@ -203,4 +203,4 @@ def register_signals_routes(context: ApiRouteContext) -> None:
         )
         current = queries().proposal_detail(identity.user_id, proposal_id)
         notify_reviewers(proposal_id, int(current["version"]), str(current["environment"]))
-        return cast(dict[str, Any], current)
+        return current

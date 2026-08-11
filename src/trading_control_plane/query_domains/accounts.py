@@ -1,32 +1,14 @@
 from __future__ import annotations
 
-from trading_control_plane.query_core import (
-    ROLE_ACTIONS,
-    UUID,
-    AccountEquity,
-    Any,
-    DomainRejected,
-    ExchangeAccount,
-    FundingPayment,
-    Instrument,
-    Position,
-    ProtectionOrder,
-    QueryMixinBase,
-    ReconciliationRun,
-    Role,
-    RoleAssignment,
-    VenueFill,
-    VenueOrder,
-    _iso,
-    select,
-)
+from trading_control_plane.query_component import QueryComponent
+
+# ruff: noqa: F403, F405
+from trading_control_plane.query_core import *
 
 
-class AccountQueryMixin(QueryMixinBase):
-    """Exchange-account, instrument inventory, and venue-fact projections."""
-
+class AccountQueries(QueryComponent):
     def exchange_accounts(self, actor_id: UUID) -> dict[str, Any]:
-        workspace_id, team_id = self._active_scope_ids(actor_id)
+        workspace_id, team_id = self.facade._active_scope_ids(actor_id)
         with self.database.session_factory() as session:
             assignments = session.scalars(
                 select(RoleAssignment).where(
@@ -218,7 +200,7 @@ class AccountQueryMixin(QueryMixinBase):
     ) -> dict[str, Any]:
         if not self.service.can_user(user_id, "view", account_id, venue):
             raise DomainRejected("RBAC_DENIED", "venue facts are outside the current scope")
-        workspace_id, team_id = self._active_scope_ids(user_id)
+        workspace_id, team_id = self.facade._active_scope_ids(user_id)
         with self.database.session_factory() as session:
             account = session.scalar(
                 select(ExchangeAccount.exchange_account_id).where(

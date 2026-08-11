@@ -1,42 +1,12 @@
 from __future__ import annotations
 
-from trading_control_plane.query_core import (
-    USD_STABLE_ASSETS,
-    UTC,
-    UUID,
-    AccountEquity,
-    AccountEquityObservation,
-    Any,
-    Approval,
-    CapabilityGate,
-    CapitalAutomationPolicy,
-    CapitalTransfer,
-    Decimal,
-    DirectCapitalOperation,
-    DomainRejected,
-    QueryMixinBase,
-    RiskPolicy,
-    Role,
-    RoleAssignment,
-    TeamMembership,
-    TransferAuthorization,
-    TransferProposal,
-    User,
-    _iso,
-    and_,
-    datetime,
-    fact_is_stale,
-    false,
-    func,
-    or_,
-    select,
-    timedelta,
-)
+from trading_control_plane.query_component import QueryComponent
+
+# ruff: noqa: F403, F405
+from trading_control_plane.query_core import *
 
 
-class CapitalQueryMixin(QueryMixinBase):
-    """Treasury review, transfer, balance, and capital-center projections."""
-
+class CapitalQueries(QueryComponent):
     def treasury_reviewers_for_transfer(self, transfer_proposal_id: UUID) -> list[User]:
         with self.database.session_factory() as session:
             proposal = session.get(TransferProposal, transfer_proposal_id)
@@ -104,7 +74,7 @@ class CapitalQueryMixin(QueryMixinBase):
             return list(users)
 
     def transfer_proposal_version(self, user_id: UUID, transfer_proposal_id: UUID) -> int:
-        _workspace_id, team_id = self._active_scope_ids(user_id)
+        _workspace_id, team_id = self.facade._active_scope_ids(user_id)
         with self.database.session_factory() as session:
             proposal = session.get(TransferProposal, transfer_proposal_id)
             if proposal is None:
@@ -146,7 +116,7 @@ class CapitalQueryMixin(QueryMixinBase):
         }
 
     def transfer_proposal_detail(self, user_id: UUID, transfer_proposal_id: UUID) -> dict[str, Any]:
-        workspace_id, team_id = self._active_scope_ids(user_id)
+        workspace_id, team_id = self.facade._active_scope_ids(user_id)
         with self.database.session_factory() as session:
             proposal = session.get(TransferProposal, transfer_proposal_id)
             if proposal is None:
@@ -235,7 +205,7 @@ class CapitalQueryMixin(QueryMixinBase):
         }
 
     def capital_transfer_detail(self, user_id: UUID, capital_transfer_id: UUID) -> dict[str, Any]:
-        workspace_id, team_id = self._active_scope_ids(user_id)
+        workspace_id, team_id = self.facade._active_scope_ids(user_id)
         with self.database.session_factory() as session:
             transfer = session.get(CapitalTransfer, capital_transfer_id)
             if transfer is None:
@@ -258,7 +228,7 @@ class CapitalQueryMixin(QueryMixinBase):
         authoritative_live_treasury_account_id: str | None = None,
         require_authoritative_live_treasury: bool = False,
     ) -> dict[str, Any]:
-        workspace_id, team_id = self._active_scope_ids(user_id)
+        workspace_id, team_id = self.facade._active_scope_ids(user_id)
         with self.database.session_factory() as session:
             now = datetime.now(UTC)
             authoritative_accounts = {

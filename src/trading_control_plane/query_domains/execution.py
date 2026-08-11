@@ -1,56 +1,12 @@
 from __future__ import annotations
 
-from trading_control_plane.query_core import (
-    ROLE_ACTIONS,
-    USD_STABLE_ASSETS,
-    UUID,
-    AccountEquity,
-    Any,
-    AuditEvent,
-    Campaign,
-    CapabilityGate,
-    CapitalAutomationPolicy,
-    CapitalTransfer,
-    Decimal,
-    DomainRejected,
-    ExchangeAccount,
-    FundingPayment,
-    Instrument,
-    OrderIntent,
-    PerptapeFeed,
-    Position,
-    Proposal,
-    ProtectionOrder,
-    QueryMixinBase,
-    ReconciliationRun,
-    RiskDecision,
-    RiskPolicy,
-    RiskReservation,
-    Role,
-    RoleAssignment,
-    RuntimeSourceHealth,
-    SenderLease,
-    Team,
-    TradingAuthorization,
-    TransferAuthorization,
-    TransferProposal,
-    User,
-    VenueFill,
-    VenueOrder,
-    _iso,
-    _performance_metrics,
-    _report_attribution,
-    _uuid_or_none,
-    datetime,
-    func,
-    select,
-    text,
-)
+from trading_control_plane.query_component import QueryComponent
+
+# ruff: noqa: F403, F405
+from trading_control_plane.query_core import *
 
 
-class ExecutionQueryMixin(QueryMixinBase):
-    """Campaign, runtime, shadow, audit, and performance projections."""
-
+class ExecutionQueries(QueryComponent):
     def actual_results(
         self,
         user_id: UUID,
@@ -87,7 +43,7 @@ class ExecutionQueryMixin(QueryMixinBase):
             )
         if from_time is not None and to_time is not None and from_time > to_time:
             raise DomainRejected("TIME_RANGE_INVALID", "results from_time must not exceed to_time")
-        workspace_id, team_id = self._active_scope_ids(user_id)
+        workspace_id, team_id = self.facade._active_scope_ids(user_id)
         with self.database.session_factory() as session:
             campaign_query = select(Campaign).where(
                 Campaign.environment == environment,
@@ -549,7 +505,7 @@ class ExecutionQueryMixin(QueryMixinBase):
     ) -> list[dict[str, Any]]:
         if environment not in {"SHADOW", "TESTNET", "LIVE"}:
             raise DomainRejected("ENVIRONMENT_INVALID", "audit requires an exact environment")
-        workspace_id, team_id = self._active_scope_ids(user_id)
+        workspace_id, team_id = self.facade._active_scope_ids(user_id)
         with self.database.session_factory() as session:
             object_ids: set[str] = set()
             proposals = [
@@ -720,7 +676,7 @@ class ExecutionQueryMixin(QueryMixinBase):
             ]
 
     def runtime_snapshot(self, user_id: UUID) -> dict[str, Any]:
-        _workspace_id, team_id = self._active_scope_ids(user_id)
+        _workspace_id, team_id = self.facade._active_scope_ids(user_id)
         with self.database.session_factory() as session:
             gates = session.scalars(
                 select(CapabilityGate).order_by(CapabilityGate.capability_key)
@@ -824,7 +780,7 @@ class ExecutionQueryMixin(QueryMixinBase):
         account_id: str | None = None,
         venue: str | None = None,
     ) -> dict[str, Any] | None:
-        _workspace_id, team_id = self._active_scope_ids(user_id)
+        _workspace_id, team_id = self.facade._active_scope_ids(user_id)
         with self.database.session_factory() as session:
             item = session.scalar(
                 select(RuntimeSourceHealth).where(
@@ -849,7 +805,7 @@ class ExecutionQueryMixin(QueryMixinBase):
             }
 
     def list_campaigns(self, user_id: UUID) -> list[dict[str, Any]]:
-        workspace_id, team_id = self._active_scope_ids(user_id)
+        workspace_id, team_id = self.facade._active_scope_ids(user_id)
         with self.database.session_factory() as session:
             values = session.execute(
                 select(Campaign, Instrument)
@@ -869,7 +825,7 @@ class ExecutionQueryMixin(QueryMixinBase):
     def shadow_workspace(self, user_id: UUID) -> dict[str, Any]:
         """Project team-scoped virtual capital without exposing live credentials."""
 
-        workspace_id, team_id = self._active_scope_ids(user_id)
+        workspace_id, team_id = self.facade._active_scope_ids(user_id)
         activation = self.service.shadow_activation_status(user_id)
         with self.database.session_factory() as session:
             team = session.get(Team, team_id)
@@ -1071,7 +1027,7 @@ class ExecutionQueryMixin(QueryMixinBase):
             }
 
     def campaign_detail(self, user_id: UUID, campaign_id: UUID) -> dict[str, Any]:
-        workspace_id, team_id = self._active_scope_ids(user_id)
+        workspace_id, team_id = self.facade._active_scope_ids(user_id)
         with self.database.session_factory() as session:
             campaign = session.get(Campaign, campaign_id)
             if campaign is None:
@@ -1342,7 +1298,7 @@ class ExecutionQueryMixin(QueryMixinBase):
             return result
 
     def campaign_id_for_intent(self, user_id: UUID, intent_id: UUID) -> UUID:
-        _workspace_id, team_id = self._active_scope_ids(user_id)
+        _workspace_id, team_id = self.facade._active_scope_ids(user_id)
         with self.database.session_factory() as session:
             intent = session.get(OrderIntent, intent_id)
             if intent is None:

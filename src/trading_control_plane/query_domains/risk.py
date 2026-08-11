@@ -1,21 +1,12 @@
 from __future__ import annotations
 
-from trading_control_plane.query_core import (
-    UUID,
-    Any,
-    Decimal,
-    QueryMixinBase,
-    RiskPolicy,
-    datetime,
-    fact_is_stale,
-    select,
-    timedelta,
-)
+from trading_control_plane.query_component import QueryComponent
+
+# ruff: noqa: F403, F405
+from trading_control_plane.query_core import *
 
 
-class RiskQueryMixin(QueryMixinBase):
-    """Fail-closed exception and risk-attention projections."""
-
+class RiskQueries(QueryComponent):
     def list_exceptions(self, user_id: UUID, *, now: datetime) -> list[dict[str, Any]]:
         exceptions: list[dict[str, Any]] = []
         with self.database.session_factory() as session:
@@ -23,10 +14,10 @@ class RiskQueryMixin(QueryMixinBase):
             max_fact_age = timedelta(
                 seconds=(risk_policy.max_fact_age_seconds if risk_policy is not None else 300)
             )
-        for campaign in self.list_campaigns(user_id):
+        for campaign in self.facade.list_campaigns(user_id):
             if campaign["status"] == "CLOSED":
                 continue
-            detail = self.campaign_detail(user_id, UUID(str(campaign["campaign_id"])))
+            detail = self.facade.campaign_detail(user_id, UUID(str(campaign["campaign_id"])))
             campaign_id = str(campaign["campaign_id"])
             campaign_occurred_at = str(campaign["updated_at"] or campaign["created_at"])
             if campaign["status"] == "UNKNOWN":

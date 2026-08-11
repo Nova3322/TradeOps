@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from typing import cast
-
 from trading_control_plane.api_core import (
     UUID,
     Any,
@@ -23,25 +21,24 @@ def register_risk_routes(context: ApiRouteContext) -> None:
     """Register risk routes against one application dependency context."""
 
     app = context.app
-    configured_risk_scopes = context.require("configured_risk_scopes")
-    identity_dependency = context.require("identity_dependency")
-    require_capability = context.require("require_capability")
-    service = context.require("service")
-    token_service = context.require("token_service")
+    dependencies = context.risk
+    common = dependencies.common
+    configured_risk_scopes = dependencies.configured_risk_scopes
+    identity_dependency = common.identity
+    require_capability = common.require_capability
+    service = common.service
+    token_service = dependencies.token_service
 
     @app.get("/api/risk-controls")
     def risk_controls(
         identity: SessionIdentity = identity_dependency,
     ) -> dict[str, Any]:
         require_capability(identity, "system.view")
-        return cast(
-            dict[str, Any],
-            service().risk_control_status(
-                identity.user_id,
-                configured_risk_scopes(),
-                require_live_scope=True,
-                now=_now(),
-            ),
+        return service().risk_control_status(
+            identity.user_id,
+            configured_risk_scopes(),
+            require_live_scope=True,
+            now=_now(),
         )
 
     @app.put("/api/risk-controls/policy")
@@ -111,14 +108,11 @@ def register_risk_routes(context: ApiRouteContext) -> None:
             require_live_scope=True,
             now=_now(),
         )
-        return cast(
-            dict[str, Any],
-            service().risk_control_status(
-                identity.user_id,
-                configured_risk_scopes(),
-                require_live_scope=True,
-                now=_now(),
-            ),
+        return service().risk_control_status(
+            identity.user_id,
+            configured_risk_scopes(),
+            require_live_scope=True,
+            now=_now(),
         ) | {"request_id": str(request_id)}
 
     @app.post("/api/risk-controls/restores/{request_id}/reviews")

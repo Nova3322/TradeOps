@@ -18,7 +18,7 @@ def register_system_routes(context: ApiRouteContext) -> None:
     """Register system routes against one application dependency context."""
 
     app = context.app
-    resolved_database = context.require("resolved_database")
+    resolved_database = context.system.database
 
     @app.get("/health/live", tags=["health"])
     def liveness() -> dict[str, str]:

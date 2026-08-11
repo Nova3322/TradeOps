@@ -1,60 +1,13 @@
 from __future__ import annotations
 
-from trading_control_plane.service_core import (
-    CONNECTION_ERROR_CODE_PATTERN,
-    INTENT_TRANSITIONS,
-    SUPPORTED_EXCHANGE_VENUES,
-    UTC,
-    UUID,
-    Any,
-    Campaign,
-    CapabilityGate,
-    CapabilityStatus,
-    ConnectionProbeResult,
-    DomainRejected,
-    ExchangeAccount,
-    ExecutionEnvironment,
-    FreqtradeEntryCommand,
-    FreqtradeExitCommand,
-    OrderIntent,
-    OrderIntentStatus,
-    PreparedExchangeConnectionVerification,
-    PreparedFreqtradeDispatch,
-    PreparedFreqtradeWorkerBinding,
-    PreparedPerptapeRuntimeBinding,
-    PreparedRuntimeAccountBinding,
-    PrincipalType,
-    Role,
-    RoleAssignment,
-    ServiceMixinBase,
-    ServicePrincipalKind,
-    Session,
-    SignalSourceMode,
-    Team,
-    TeamExecutionMode,
-    TeamMembership,
-    TeamSignalSource,
-    User,
-    WorkspaceMembership,
-    WorkspaceRole,
-    _advisory_lock_key,
-    _reject,
-    _scope_key,
-    _scope_parts,
-    datetime,
-    json,
-    parse_hip3_dexes,
-    re,
-    select,
-    text,
-    uuid4,
-    validate_worker_url,
-)
+from trading_control_plane.service_component import ServiceComponent
+
+# The domain implementation intentionally consumes the explicit service_core export surface.
+# ruff: noqa: F403, F405
+from trading_control_plane.service_core import *
 
 
-class AccountServiceMixin(ServiceMixinBase):
-    """Exchange-account registry, credentials, runtime bindings, and worker configuration."""
-
+class AccountService(ServiceComponent):
     @staticmethod
     def _exchange_account_definition(
         account_id: str,
@@ -148,7 +101,7 @@ class AccountServiceMixin(ServiceMixinBase):
         )
         session.add(account)
         session.flush()
-        self._audit(
+        self.transactions._audit(
             session,
             actor_id=str(actor_id),
             event_type="EXCHANGE_ACCOUNT_REFERENCED",
@@ -179,7 +132,7 @@ class AccountServiceMixin(ServiceMixinBase):
             self._exchange_account_definition(account_id, venue, label)
         )
         with self.database.session_factory.begin() as session:
-            team = self._require_role(
+            team = self.transactions._require_role(
                 session,
                 actor_id,
                 "account.manage",
@@ -206,7 +159,7 @@ class AccountServiceMixin(ServiceMixinBase):
                 "label": normalized_label,
                 "credential_semantics": credential_semantics,
             }
-            digest, replay = self._idempotency(
+            digest, replay = self.transactions._idempotency(
                 session,
                 caller_id=caller,
                 operation="exchange-account.create",
@@ -273,7 +226,7 @@ class AccountServiceMixin(ServiceMixinBase):
             )
             session.add(account)
             response = {"exchange_account_id": str(exchange_account_id)}
-            self._save_receipt(
+            self.transactions._save_receipt(
                 session,
                 caller_id=caller,
                 operation="exchange-account.create",
@@ -282,7 +235,7 @@ class AccountServiceMixin(ServiceMixinBase):
                 response=response,
                 now=now,
             )
-            self._audit(
+            self.transactions._audit(
                 session,
                 actor_id=str(actor_id),
                 event_type="EXCHANGE_ACCOUNT_CREATED",
@@ -314,7 +267,7 @@ class AccountServiceMixin(ServiceMixinBase):
         now: datetime,
     ) -> int:
         with self.database.session_factory.begin() as session:
-            _actor, _workspace, active_team = self._active_scope(session, actor_id)
+            _actor, _workspace, active_team = self.transactions._active_scope(session, actor_id)
             assert active_team is not None
             account = session.scalar(
                 select(ExchangeAccount)
@@ -329,7 +282,7 @@ class AccountServiceMixin(ServiceMixinBase):
                     "EXCHANGE_ACCOUNT_NOT_FOUND",
                     "exchange account is outside the active team or does not exist",
                 )
-            self._require_role(
+            self.transactions._require_role(
                 session,
                 actor_id,
                 "account.credentials.manage",
@@ -348,7 +301,7 @@ class AccountServiceMixin(ServiceMixinBase):
                 "expected_version": expected_version,
                 "credential_semantics": credential_semantics,
             }
-            digest, replay = self._idempotency(
+            digest, replay = self.transactions._idempotency(
                 session,
                 caller_id=caller,
                 operation="exchange-account.credentials.rotate",
@@ -385,7 +338,7 @@ class AccountServiceMixin(ServiceMixinBase):
             account.updated_by = actor_id
             account.updated_at = now
             response = {"version": account.version}
-            self._save_receipt(
+            self.transactions._save_receipt(
                 session,
                 caller_id=caller,
                 operation="exchange-account.credentials.rotate",
@@ -394,7 +347,7 @@ class AccountServiceMixin(ServiceMixinBase):
                 response=response,
                 now=now,
             )
-            self._audit(
+            self.transactions._audit(
                 session,
                 actor_id=str(actor_id),
                 event_type="EXCHANGE_ACCOUNT_CREDENTIALS_ROTATED",
@@ -543,7 +496,7 @@ class AccountServiceMixin(ServiceMixinBase):
                     ),
                 ]
             )
-        principal = AccountServiceMixin._require_exact_runtime_principal(
+        principal = AccountService._require_exact_runtime_principal(
             session,
             principal_id=principal.user_id,
             team=team,
@@ -556,7 +509,7 @@ class AccountServiceMixin(ServiceMixinBase):
             ),
             allow_inactive=True,
         )
-        AccountServiceMixin._set_internal_principal_active(session, principal.user_id, True)
+        AccountService._set_internal_principal_active(session, principal.user_id, True)
         return principal
 
     def configure_exchange_account_runtime_sync(
@@ -571,7 +524,7 @@ class AccountServiceMixin(ServiceMixinBase):
     ) -> dict[str, Any]:
         operation = "exchange-account.runtime-sync.configure"
         with self.database.session_factory.begin() as session:
-            _actor, _workspace, team = self._active_scope(session, actor_id)
+            _actor, _workspace, team = self.transactions._active_scope(session, actor_id)
             assert team is not None
             account = session.scalar(
                 select(ExchangeAccount)
@@ -586,7 +539,7 @@ class AccountServiceMixin(ServiceMixinBase):
                     "EXCHANGE_ACCOUNT_NOT_FOUND",
                     "exchange account is outside the active team or does not exist",
                 )
-            self._require_role(
+            self.transactions._require_role(
                 session,
                 actor_id,
                 "account.credentials.manage",
@@ -599,7 +552,7 @@ class AccountServiceMixin(ServiceMixinBase):
                 "enabled": enabled,
                 "expected_version": expected_version,
             }
-            digest, replay = self._idempotency(
+            digest, replay = self.transactions._idempotency(
                 session,
                 caller_id=f"{actor_id}:{team.team_id}",
                 operation=operation,
@@ -646,7 +599,7 @@ class AccountServiceMixin(ServiceMixinBase):
                 "runtime_sync_enabled": account.runtime_sync_enabled,
                 "version": account.version,
             }
-            self._save_receipt(
+            self.transactions._save_receipt(
                 session,
                 caller_id=f"{actor_id}:{team.team_id}",
                 operation=operation,
@@ -655,7 +608,7 @@ class AccountServiceMixin(ServiceMixinBase):
                 response=result,
                 now=now,
             )
-            self._audit(
+            self.transactions._audit(
                 session,
                 actor_id=str(actor_id),
                 event_type="EXCHANGE_ACCOUNT_RUNTIME_SYNC_CONFIGURED",
@@ -689,7 +642,7 @@ class AccountServiceMixin(ServiceMixinBase):
 
         operation = "exchange-account.trading.configure"
         with self.database.session_factory.begin() as session:
-            _actor, workspace, team = self._active_scope(session, actor_id)
+            _actor, workspace, team = self.transactions._active_scope(session, actor_id)
             assert team is not None
             account = session.scalar(
                 select(ExchangeAccount)
@@ -704,7 +657,7 @@ class AccountServiceMixin(ServiceMixinBase):
                     "EXCHANGE_ACCOUNT_NOT_FOUND",
                     "exchange account is outside the active team or does not exist",
                 )
-            self._require_role(
+            self.transactions._require_role(
                 session,
                 actor_id,
                 "account.manage",
@@ -718,7 +671,7 @@ class AccountServiceMixin(ServiceMixinBase):
                 "expected_version": expected_version,
             }
             caller = f"{actor_id}:{team.team_id}"
-            digest, replay = self._idempotency(
+            digest, replay = self.transactions._idempotency(
                 session,
                 caller_id=caller,
                 operation=operation,
@@ -770,7 +723,7 @@ class AccountServiceMixin(ServiceMixinBase):
                 "trading_enabled": account.trading_status == "ELIGIBLE",
                 "version": account.version,
             }
-            self._save_receipt(
+            self.transactions._save_receipt(
                 session,
                 caller_id=caller,
                 operation=operation,
@@ -779,7 +732,7 @@ class AccountServiceMixin(ServiceMixinBase):
                 response=result,
                 now=now,
             )
-            self._audit(
+            self.transactions._audit(
                 session,
                 actor_id=str(actor_id),
                 event_type=(
@@ -908,7 +861,7 @@ class AccountServiceMixin(ServiceMixinBase):
                 raise DomainRejected("FREQTRADE_HIP3_SCOPE_INVALID", str(exc)) from exc
         operation = "exchange-account.freqtrade-worker.configure"
         with self.database.session_factory.begin() as session:
-            _actor, workspace, team = self._active_scope(session, actor_id)
+            _actor, workspace, team = self.transactions._active_scope(session, actor_id)
             assert team is not None
             account = session.scalar(
                 select(ExchangeAccount)
@@ -923,7 +876,7 @@ class AccountServiceMixin(ServiceMixinBase):
                     "EXCHANGE_ACCOUNT_NOT_FOUND",
                     "exchange account is outside the active team or does not exist",
                 )
-            self._require_role(
+            self.transactions._require_role(
                 session,
                 actor_id,
                 "account.credentials.manage",
@@ -961,7 +914,7 @@ class AccountServiceMixin(ServiceMixinBase):
                 "auth_semantics": auth_semantics,
             }
             caller = f"{actor_id}:{team.team_id}"
-            digest, replay = self._idempotency(
+            digest, replay = self.transactions._idempotency(
                 session,
                 caller_id=caller,
                 operation=operation,
@@ -1025,7 +978,7 @@ class AccountServiceMixin(ServiceMixinBase):
                     "auth_version": account.freqtrade_auth_version,
                 },
             }
-            self._save_receipt(
+            self.transactions._save_receipt(
                 session,
                 caller_id=caller,
                 operation=operation,
@@ -1034,7 +987,7 @@ class AccountServiceMixin(ServiceMixinBase):
                 response=result,
                 now=now,
             )
-            self._audit(
+            self.transactions._audit(
                 session,
                 actor_id=str(actor_id),
                 event_type="FREQTRADE_WORKER_CONFIGURED",
@@ -1074,7 +1027,7 @@ class AccountServiceMixin(ServiceMixinBase):
         idempotency_key: str,
     ) -> tuple[PreparedFreqtradeWorkerBinding | None, dict[str, Any] | None]:
         with self.database.session_factory.begin() as session:
-            _actor, workspace, team = self._active_scope(session, actor_id)
+            _actor, workspace, team = self.transactions._active_scope(session, actor_id)
             assert team is not None
             account = session.scalar(
                 select(ExchangeAccount).where(
@@ -1087,7 +1040,7 @@ class AccountServiceMixin(ServiceMixinBase):
                     "EXCHANGE_ACCOUNT_NOT_FOUND",
                     "exchange account is outside the active team or does not exist",
                 )
-            self._require_role(
+            self.transactions._require_role(
                 session,
                 actor_id,
                 "account.credentials.manage",
@@ -1095,7 +1048,7 @@ class AccountServiceMixin(ServiceMixinBase):
                 account.venue,
                 team_id=account.team_id,
             )
-            _digest, replay = self._idempotency(
+            _digest, replay = self.transactions._idempotency(
                 session,
                 caller_id=f"{actor_id}:{team.team_id}",
                 operation="exchange-account.freqtrade-worker.verify",
@@ -1179,7 +1132,7 @@ class AccountServiceMixin(ServiceMixinBase):
         ):
             normalized_error = "FREQTRADE_WORKER_PROBE_FAILED"
         with self.database.session_factory.begin() as session:
-            _actor, workspace, team = self._active_scope(session, actor_id)
+            _actor, workspace, team = self.transactions._active_scope(session, actor_id)
             assert team is not None
             account = session.scalar(
                 select(ExchangeAccount)
@@ -1194,7 +1147,7 @@ class AccountServiceMixin(ServiceMixinBase):
                     "EXCHANGE_ACCOUNT_NOT_FOUND",
                     "exchange account is outside the active team or does not exist",
                 )
-            self._require_role(
+            self.transactions._require_role(
                 session,
                 actor_id,
                 "account.credentials.manage",
@@ -1203,7 +1156,7 @@ class AccountServiceMixin(ServiceMixinBase):
                 team_id=account.team_id,
             )
             caller = f"{actor_id}:{team.team_id}"
-            digest, replay = self._idempotency(
+            digest, replay = self.transactions._idempotency(
                 session,
                 caller_id=caller,
                 operation="exchange-account.freqtrade-worker.verify",
@@ -1252,7 +1205,7 @@ class AccountServiceMixin(ServiceMixinBase):
                     ),
                 },
             }
-            self._save_receipt(
+            self.transactions._save_receipt(
                 session,
                 caller_id=caller,
                 operation="exchange-account.freqtrade-worker.verify",
@@ -1261,7 +1214,7 @@ class AccountServiceMixin(ServiceMixinBase):
                 response=result,
                 now=now,
             )
-            self._audit(
+            self.transactions._audit(
                 session,
                 actor_id=str(actor_id),
                 event_type=(
@@ -1300,8 +1253,10 @@ class AccountServiceMixin(ServiceMixinBase):
         if environment is not ExecutionEnvironment.LIVE:
             _reject("FREQTRADE_LIVE_SCOPE_REQUIRED", "Freqtrade LIVE requires a LIVE scope")
         with self.database.session_factory() as session:
-            team = self._require_role(session, actor_id, "venue.record", account_id, venue)
-            self._validate_sender(
+            team = self.transactions._require_role(
+                session, actor_id, "venue.record", account_id, venue
+            )
+            self.facade._validate_sender(
                 session,
                 team.team_id,
                 execution_scope,
@@ -1331,7 +1286,7 @@ class AccountServiceMixin(ServiceMixinBase):
                     "LIVE_ORDER_SEND_DISABLED",
                     "LIVE order send requires the explicit capability gate",
                 )
-            account = self._require_exchange_account_live_ready(
+            account = self.facade._require_exchange_account_live_ready(
                 session,
                 team_id=team.team_id,
                 account_id=account_id,
@@ -1441,7 +1396,7 @@ class AccountServiceMixin(ServiceMixinBase):
                     "EXECUTION_SCOPE_MISMATCH",
                     "Freqtrade dispatch is outside the intent's exact execution scope",
                 )
-            self._require_role(
+            self.transactions._require_role(
                 session,
                 actor_id,
                 "venue.record",
@@ -1449,7 +1404,7 @@ class AccountServiceMixin(ServiceMixinBase):
                 campaign.venue,
                 team_id=campaign.team_id,
             )
-            self._validate_sender(
+            self.facade._validate_sender(
                 session,
                 campaign.team_id,
                 execution_scope,
@@ -1463,7 +1418,7 @@ class AccountServiceMixin(ServiceMixinBase):
                     "LIVE_ORDER_SEND_DISABLED",
                     "LIVE order send requires the explicit capability gate",
                 )
-            account = self._require_exchange_account_live_ready(
+            account = self.facade._require_exchange_account_live_ready(
                 session,
                 team_id=campaign.team_id,
                 account_id=campaign.account_id,
@@ -1505,7 +1460,7 @@ class AccountServiceMixin(ServiceMixinBase):
             # recover the same key by query after a crash without creating a second
             # external write.
             caller = f"team:{campaign.team_id}"
-            digest, replay = self._idempotency(
+            digest, replay = self.transactions._idempotency(
                 session,
                 caller_id=caller,
                 operation=operation,
@@ -1572,7 +1527,7 @@ class AccountServiceMixin(ServiceMixinBase):
                 "dispatch_status": OrderIntentStatus.DISPATCHING.value,
                 "intent_version": intent.version,
             }
-            self._save_receipt(
+            self.transactions._save_receipt(
                 session,
                 caller_id=caller,
                 operation=operation,
@@ -1581,7 +1536,7 @@ class AccountServiceMixin(ServiceMixinBase):
                 response=response,
                 now=now,
             )
-            self._audit(
+            self.transactions._audit(
                 session,
                 actor_id=str(actor_id),
                 event_type="FREQTRADE_LIVE_DISPATCH_STARTED",
@@ -1629,7 +1584,7 @@ class AccountServiceMixin(ServiceMixinBase):
                     "EXECUTION_SCOPE_MISMATCH",
                     "Freqtrade dispatch identity is outside the exact intent scope",
                 )
-            self._require_role(
+            self.transactions._require_role(
                 session,
                 actor_id,
                 "venue.record",
@@ -1828,7 +1783,7 @@ class AccountServiceMixin(ServiceMixinBase):
                 "RUNTIME_BINDING_CHANGED",
                 "the database-bound runtime account changed during synchronization",
             )
-        AccountServiceMixin._require_exact_runtime_principal(
+        AccountService._require_exact_runtime_principal(
             session,
             principal_id=binding.service_principal_id,
             team=team,
@@ -1870,7 +1825,7 @@ class AccountServiceMixin(ServiceMixinBase):
                 "SIGNAL_RUNTIME_BINDING_CHANGED",
                 "the team Perptape binding changed during synchronization",
             )
-        AccountServiceMixin._require_exact_runtime_principal(
+        AccountService._require_exact_runtime_principal(
             session,
             principal_id=binding.service_principal_id,
             team=team,
@@ -1904,7 +1859,7 @@ class AccountServiceMixin(ServiceMixinBase):
         """Authorize and decrypt a version-pinned probe after checking for a replay."""
 
         with self.database.session_factory.begin() as session:
-            _actor, _workspace, active_team = self._active_scope(session, actor_id)
+            _actor, _workspace, active_team = self.transactions._active_scope(session, actor_id)
             assert active_team is not None
             account = session.scalar(
                 select(ExchangeAccount).where(
@@ -1917,7 +1872,7 @@ class AccountServiceMixin(ServiceMixinBase):
                     "EXCHANGE_ACCOUNT_NOT_FOUND",
                     "exchange account is outside the active team or does not exist",
                 )
-            self._require_role(
+            self.transactions._require_role(
                 session,
                 actor_id,
                 "account.credentials.manage",
@@ -1926,7 +1881,7 @@ class AccountServiceMixin(ServiceMixinBase):
                 team_id=account.team_id,
             )
             caller = f"{actor_id}:{account.team_id}"
-            _digest, replay = self._idempotency(
+            _digest, replay = self.transactions._idempotency(
                 session,
                 caller_id=caller,
                 operation="exchange-account.connection.verify",
@@ -1990,7 +1945,7 @@ class AccountServiceMixin(ServiceMixinBase):
         elif error_code is None or CONNECTION_ERROR_CODE_PATTERN.fullmatch(error_code) is None:
             error_code = "READ_ONLY_PROBE_FAILED"
         with self.database.session_factory.begin() as session:
-            _actor, _workspace, active_team = self._active_scope(session, actor_id)
+            _actor, _workspace, active_team = self.transactions._active_scope(session, actor_id)
             assert active_team is not None
             account = session.scalar(
                 select(ExchangeAccount)
@@ -2005,7 +1960,7 @@ class AccountServiceMixin(ServiceMixinBase):
                     "EXCHANGE_ACCOUNT_NOT_FOUND",
                     "exchange account is outside the active team or does not exist",
                 )
-            self._require_role(
+            self.transactions._require_role(
                 session,
                 actor_id,
                 "account.credentials.manage",
@@ -2014,7 +1969,7 @@ class AccountServiceMixin(ServiceMixinBase):
                 team_id=account.team_id,
             )
             caller = f"{actor_id}:{account.team_id}"
-            digest, replay = self._idempotency(
+            digest, replay = self.transactions._idempotency(
                 session,
                 caller_id=caller,
                 operation="exchange-account.connection.verify",
@@ -2072,7 +2027,7 @@ class AccountServiceMixin(ServiceMixinBase):
                     "enabled": account.trading_status == "ELIGIBLE",
                 },
             }
-            self._save_receipt(
+            self.transactions._save_receipt(
                 session,
                 caller_id=caller,
                 operation="exchange-account.connection.verify",
@@ -2082,7 +2037,7 @@ class AccountServiceMixin(ServiceMixinBase):
                 now=now,
             )
             correlation_id = uuid4()
-            self._audit(
+            self.transactions._audit(
                 session,
                 actor_id=str(actor_id),
                 event_type=(
@@ -2105,7 +2060,7 @@ class AccountServiceMixin(ServiceMixinBase):
                 now=now,
             )
             if not outcome.success:
-                self._enqueue_notification_event(
+                self.transactions._enqueue_notification_event(
                     session,
                     actor_id=str(actor_id),
                     team=active_team,

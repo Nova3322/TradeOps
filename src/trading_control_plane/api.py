@@ -89,7 +89,18 @@ from trading_control_plane.api_core import (
 )
 from trading_control_plane.api_routes.accounts import register_accounts_routes
 from trading_control_plane.api_routes.capital import register_capital_routes
-from trading_control_plane.api_routes.context import ApiRouteContext
+from trading_control_plane.api_routes.context import (
+    AccountRouteDependencies,
+    ApiRouteContext,
+    AuthenticatedRouteDependencies,
+    CapitalRouteDependencies,
+    ExecutionRouteDependencies,
+    ProposalRouteDependencies,
+    RiskRouteDependencies,
+    SignalRouteDependencies,
+    SystemRouteDependencies,
+    WorkspaceRouteDependencies,
+)
 from trading_control_plane.api_routes.execution import register_execution_routes
 from trading_control_plane.api_routes.proposals import register_proposals_routes
 from trading_control_plane.api_routes.risk import register_risk_routes
@@ -1370,7 +1381,101 @@ def create_app(
             )
         return f"审核已记录: {result.value}。未创建授权、订单或资金动作。"
 
-    route_context = ApiRouteContext(app=app, dependencies=dict(locals()))
+    authenticated_dependencies = AuthenticatedRouteDependencies(
+        identity=identity_dependency,
+        queries=queries,
+        service=service,
+        settings=resolved_settings,
+        require_capability=require_capability,
+    )
+    route_context = ApiRouteContext(
+        app=app,
+        system=SystemRouteDependencies(database=resolved_database),
+        workspace=WorkspaceRouteDependencies(
+            common=authenticated_dependencies,
+            configured_risk_scopes=configured_risk_scopes,
+            is_agent_identity=is_agent_identity,
+            login_limiter=login_limiter,
+            password_hasher=password_hasher,
+            telegram=resolved_telegram,
+            token_service=token_service,
+        ),
+        accounts=AccountRouteDependencies(
+            common=authenticated_dependencies,
+            database_bound_venue_facts=database_bound_venue_facts,
+            freqtrade_client_for_binding=freqtrade_client_for_binding,
+            require_binance_testnet=require_binance_testnet,
+            require_default_venue_account=require_default_venue_account,
+            require_registered_or_default_venue_account=(
+                require_registered_or_default_venue_account
+            ),
+            binance=resolved_binance,
+            binance_live=resolved_binance_live,
+            binance_testnet=resolved_binance_testnet,
+            binance_testnet_reader=resolved_binance_testnet_reader,
+            exchange_connection_verifier=resolved_exchange_connection_verifier,
+            hyperliquid=resolved_hyperliquid,
+            hyperliquid_live=resolved_hyperliquid_live,
+            hyperliquid_testnet=resolved_hyperliquid_testnet,
+        ),
+        signals=SignalRouteDependencies(
+            common=authenticated_dependencies,
+            notify_reviewers=notify_reviewers,
+        ),
+        proposals=ProposalRouteDependencies(
+            common=authenticated_dependencies,
+            current_perptape_candidate=current_perptape_candidate,
+            is_agent_identity=is_agent_identity,
+            notify_reviewers=notify_reviewers,
+            opportunity_snapshot=opportunity_snapshot,
+            token_service=token_service,
+        ),
+        risk=RiskRouteDependencies(
+            common=authenticated_dependencies,
+            configured_risk_scopes=configured_risk_scopes,
+            token_service=token_service,
+        ),
+        execution=ExecutionRouteDependencies(
+            common=authenticated_dependencies,
+            current_perptape_candidate=current_perptape_candidate,
+            current_perptape_candidates=current_perptape_candidates,
+            notify_campaign=notify_campaign,
+            rejected_hyperliquid_order=rejected_hyperliquid_order,
+            rejected_testnet_order=rejected_testnet_order,
+            require_binance_live=require_binance_live,
+            require_binance_testnet=require_binance_testnet,
+            require_freqtrade_live_enabled=require_freqtrade_live_enabled,
+            require_freqtrade_live_worker=require_freqtrade_live_worker,
+            require_hyperliquid_live=require_hyperliquid_live,
+            require_hyperliquid_testnet=require_hyperliquid_testnet,
+            binance_live=resolved_binance_live,
+            binance_testnet=resolved_binance_testnet,
+            freqtrade_workers=resolved_freqtrade_workers,
+            hyperliquid=resolved_hyperliquid,
+            hyperliquid_live=resolved_hyperliquid_live,
+            hyperliquid_testnet=resolved_hyperliquid_testnet,
+            notilt=resolved_notilt,
+            telegram=resolved_telegram,
+            unknown_hyperliquid_protection=unknown_hyperliquid_protection,
+            unknown_testnet_protection=unknown_testnet_protection,
+        ),
+        capital=CapitalRouteDependencies(
+            common=authenticated_dependencies,
+            capital_snapshot=capital_snapshot,
+            configured_notilt_scope=configured_notilt_scope,
+            effective_direct_capital_settings=effective_direct_capital_settings,
+            notify_capital=notify_capital,
+            notilt_chain_id_for_network=notilt_chain_id_for_network,
+            binance_capital=resolved_binance_capital,
+            capital_transfer=resolved_capital_transfer,
+            hyperliquid_capital=resolved_hyperliquid_capital,
+            notilt=resolved_notilt,
+            safe_spending=resolved_safe_spending,
+            sync_configured_notilt_vault=sync_configured_notilt_vault,
+            token_service=token_service,
+            verify_live_notilt_release_budget=verify_live_notilt_release_budget,
+        ),
+    )
     register_system_routes(route_context)
     register_workspace_routes(route_context)
     register_accounts_routes(route_context)

@@ -1,26 +1,12 @@
 from __future__ import annotations
 
-from trading_control_plane.query_core import (
-    UUID,
-    Any,
-    DomainRejected,
-    Instrument,
-    PerptapeCandidate,
-    PerptapeFeed,
-    PerptapeFeedSnapshot,
-    Proposal,
-    QueryMixinBase,
-    RoleAssignment,
-    User,
-    _iso,
-    select,
-    tuple_,
-)
+from trading_control_plane.query_component import QueryComponent
+
+# ruff: noqa: F403, F405
+from trading_control_plane.query_core import *
 
 
-class SignalQueryMixin(QueryMixinBase):
-    """Instrument-catalog and Perptape signal-feed projections."""
-
+class SignalQueries(QueryComponent):
     def list_instruments(self, user_id: UUID) -> list[dict[str, Any]]:
         with self.database.session_factory() as session:
             user = session.get(User, user_id)
@@ -132,7 +118,7 @@ class SignalQueryMixin(QueryMixinBase):
             return legacy_candidate_id
 
     def perptape_feed(self, user_id: UUID) -> PerptapeFeedSnapshot | None:
-        _workspace_id, team_id = self._active_scope_ids(user_id)
+        _workspace_id, team_id = self.facade._active_scope_ids(user_id)
         with self.database.session_factory() as session:
             feed = session.get(PerptapeFeed, (team_id, "BREAKOUTS"))
             if feed is None:

@@ -9,7 +9,6 @@ from uuid import UUID
 from sqlalchemy import and_, false, func, or_, select, text, tuple_
 from sqlalchemy.orm import Session
 
-from trading_control_plane.database import Database
 from trading_control_plane.domain import (
     DomainRejected,
     PrincipalType,
@@ -61,7 +60,7 @@ from trading_control_plane.notification import (
 )
 from trading_control_plane.notilt import USD_STABLE_ASSETS
 from trading_control_plane.perptape import PerptapeCandidate, PerptapeFeedSnapshot
-from trading_control_plane.service import ROLE_ACTIONS, TradingService
+from trading_control_plane.service import ROLE_ACTIONS
 from trading_control_plane.service_core import fact_is_stale
 
 
@@ -219,17 +218,6 @@ def _proposal_execution_status(
     return "AWAITING_LAUNCH"
 
 
-class QueryMixinBase:
-    """Typing surface for projections composed by the public query facade."""
-
-    database: Database
-    service: TradingService
-
-    def _proposal_summary(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
-        raise NotImplementedError
-
-    def __getattr__(self, name: str) -> Any:
-        raise AttributeError(name)
 
 
 __all__ = [
@@ -264,7 +252,6 @@ __all__ = [
     "PrincipalType",
     "Proposal",
     "ProtectionOrder",
-    "QueryMixinBase",
     "ReconciliationRun",
     "RiskDecision",
     "RiskPolicy",
