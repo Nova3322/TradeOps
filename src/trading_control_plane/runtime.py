@@ -213,6 +213,24 @@ class RuntimeBindingSyncReport:
         }
 
 
+@dataclass(slots=True)
+class _BoundPerptapeStream:
+    binding: PreparedPerptapeRuntimeBinding
+    worker: RuntimeSyncWorker
+    stream: PerptapeStreamWorker
+    stop_event: threading.Event
+    thread: threading.Thread
+
+    @property
+    def version(self) -> tuple[UUID, UUID, int, int]:
+        return (
+            self.binding.team_id,
+            self.binding.service_principal_id,
+            self.binding.source_version,
+            self.binding.credential_version,
+        )
+
+
 class RuntimeSyncWorker:
     """Continuously refresh read-only external facts without any venue write capability."""
 
@@ -1049,6 +1067,45 @@ class RuntimeSyncWorker:
         )
         return result
 
+    def build_bound_perptape_stream(
+        self,
+        binding: PreparedPerptapeRuntimeBinding,
+    ) -> PerptapeStreamWorker:
+        """Build one stream whose reads and writes remain frozen to one Team source."""
+
+        if (
+            binding.service_principal_username != self.settings.perptape_service_username
+            or binding.api_key != self.settings.perptape_api_key
+        ):
+            raise DomainRejected(
+                "SIGNAL_RUNTIME_WORKER_SCOPE_MISMATCH",
+                "the runtime worker does not match the frozen Perptape binding",
+            )
+        self.service.validate_perptape_runtime_binding(binding)
+        return PerptapeStreamWorker(
+            client=self.perptape,
+            websocket_url=self.settings.perptape_websocket_url,
+            api_key=binding.api_key,
+            contract_version=self.settings.perptape_contract_version,
+            load_snapshot=lambda: self.queries.perptape_feed(binding.service_principal_id),
+            record_snapshot=lambda feed, now, base_snapshot: self._record_perptape_snapshot(
+                binding.service_principal_id,
+                feed,
+                now=now,
+                base_snapshot=base_snapshot,
+                runtime_binding=binding,
+            ),
+            timeout_seconds=self.settings.perptape_timeout_seconds,
+            heartbeat_timeout_seconds=(self.settings.perptape_websocket_heartbeat_timeout_seconds),
+            reconciliation_interval_seconds=(
+                self.settings.perptape_websocket_reconciliation_seconds
+            ),
+            reconnect_initial_seconds=(self.settings.perptape_websocket_reconnect_initial_seconds),
+            reconnect_max_seconds=self.settings.perptape_websocket_reconnect_max_seconds,
+            max_reconnect_attempts=(self.settings.perptape_websocket_max_reconnect_attempts),
+            clock=self.clock,
+        )
+
     def run_forever(self, stop_event: threading.Event) -> None:
         stream: PerptapeStreamWorker | None = None
         stream_thread: threading.Thread | None = None
@@ -1199,6 +1256,12 @@ class RuntimeBindingSupervisor:
             database,
             credential_encryption_key=settings.credential_encryption_key,
         )
+        self._perptape_streams: dict[UUID, _BoundPerptapeStream] = {}
+        self._failed_perptape_stream_versions: dict[UUID, tuple[UUID, UUID, int, int]] = {}
+
+    @property
+    def dependencies_in_use(self) -> bool:
+        return any(handle.thread.is_alive() for handle in self._perptape_streams.values())
 
     def has_bindings(self) -> bool:
         return bool(
@@ -1262,11 +1325,175 @@ class RuntimeBindingSupervisor:
         )
         return self.worker_factory(scoped, self.database)
 
+    @staticmethod
+    def _perptape_binding_version(
+        binding: PreparedPerptapeRuntimeBinding,
+    ) -> tuple[UUID, UUID, int, int]:
+        return (
+            binding.team_id,
+            binding.service_principal_id,
+            binding.source_version,
+            binding.credential_version,
+        )
+
+    def _record_perptape_stream_health(
+        self,
+        binding: PreparedPerptapeRuntimeBinding,
+        result: SourceSyncResult,
+        *,
+        now: datetime,
+    ) -> None:
+        try:
+            self.service.record_runtime_source_health(
+                binding.service_principal_id,
+                {"PERPTAPE_WEBSOCKET": asdict(result)},
+                perptape_runtime_binding=binding,
+                now=now,
+            )
+        except DomainRejected as exc:
+            logger.info(
+                "Stale Team Perptape stream health was not recorded",
+                extra={
+                    "event": "perptape_team_stream_health_rejected",
+                    "component": "perptape",
+                    "error_code": exc.code,
+                    "team_id": str(binding.team_id),
+                },
+            )
+
+    def _stop_perptape_stream(self, handle: _BoundPerptapeStream) -> None:
+        handle.stop_event.set()
+        timeout_seconds = (
+            self.settings.perptape_timeout_seconds
+            + min(self.settings.perptape_timeout_seconds, 5)
+            + 2
+        )
+        handle.thread.join(timeout=timeout_seconds)
+        if handle.thread.is_alive():
+            raise DomainRejected(
+                "PERPTAPE_STREAM_STOP_TIMEOUT",
+                "a Team Perptape WebSocket did not stop within its bounded timeout",
+            )
+
+    def _start_perptape_stream(
+        self,
+        binding: PreparedPerptapeRuntimeBinding,
+        *,
+        now: datetime,
+    ) -> None:
+        version = self._perptape_binding_version(binding)
+        try:
+            worker = self._perptape_worker(binding)
+            stream = worker.build_bound_perptape_stream(binding)
+        except DomainRejected as exc:
+            self._failed_perptape_stream_versions[binding.signal_source_id] = version
+            self._record_perptape_stream_health(
+                binding,
+                SourceSyncResult("FAILED", error_code=exc.code),
+                now=now,
+            )
+            return
+        stop_event = threading.Event()
+        thread = threading.Thread(
+            target=stream.run_forever,
+            args=(stop_event,),
+            name=f"perptape-team-stream-{str(binding.team_id)[:8]}",
+        )
+        handle = _BoundPerptapeStream(
+            binding=binding,
+            worker=worker,
+            stream=stream,
+            stop_event=stop_event,
+            thread=thread,
+        )
+        self._perptape_streams[binding.signal_source_id] = handle
+        self._failed_perptape_stream_versions.pop(binding.signal_source_id, None)
+        thread.start()
+        self._record_perptape_stream_health(
+            binding,
+            SourceSyncResult("SKIPPED", error_code="PERPTAPE_STREAM_STARTING"),
+            now=now,
+        )
+
+    def _reconcile_perptape_streams(
+        self,
+        bindings: Sequence[PreparedPerptapeRuntimeBinding],
+        *,
+        now: datetime,
+    ) -> None:
+        current = {binding.signal_source_id: binding for binding in bindings}
+        for signal_source_id, handle in tuple(self._perptape_streams.items()):
+            binding = current.get(signal_source_id)
+            current_version = None if binding is None else self._perptape_binding_version(binding)
+            if not handle.thread.is_alive():
+                self._perptape_streams.pop(signal_source_id, None)
+                if current_version == handle.version:
+                    error_code = handle.stream.fatal_error_code or "PERPTAPE_STREAM_STOPPED"
+                    self._failed_perptape_stream_versions[signal_source_id] = handle.version
+                    self._record_perptape_stream_health(
+                        handle.binding,
+                        SourceSyncResult("FAILED", error_code=error_code),
+                        now=now,
+                    )
+                continue
+            if current_version != handle.version:
+                self._stop_perptape_stream(handle)
+                self._perptape_streams.pop(signal_source_id, None)
+
+        active_ids = set(current)
+        for signal_source_id in tuple(self._failed_perptape_stream_versions):
+            if signal_source_id not in active_ids:
+                self._failed_perptape_stream_versions.pop(signal_source_id, None)
+
+        for signal_source_id, binding in current.items():
+            if signal_source_id in self._perptape_streams:
+                continue
+            version = self._perptape_binding_version(binding)
+            if self._failed_perptape_stream_versions.get(signal_source_id) == version:
+                continue
+            self._start_perptape_stream(binding, now=now)
+
+        for handle in tuple(self._perptape_streams.values()):
+            if not handle.thread.is_alive():
+                continue
+            result = (
+                SourceSyncResult(
+                    "SUCCESS",
+                    items_observed=handle.stream.stats.messages_received,
+                )
+                if handle.stream.connection_healthy
+                else SourceSyncResult(
+                    "SKIPPED",
+                    error_code="PERPTAPE_STREAM_STARTING",
+                )
+            )
+            self._record_perptape_stream_health(handle.binding, result, now=now)
+
+    def _shutdown_perptape_streams(self) -> None:
+        handles = tuple(self._perptape_streams.values())
+        for handle in handles:
+            handle.stop_event.set()
+        timeout_seconds = (
+            self.settings.perptape_timeout_seconds
+            + min(self.settings.perptape_timeout_seconds, 5)
+            + 2
+        )
+        for handle in handles:
+            handle.thread.join(timeout=timeout_seconds)
+        if any(handle.thread.is_alive() for handle in handles):
+            raise DomainRejected(
+                "PERPTAPE_STREAM_STOP_TIMEOUT",
+                "one or more Team Perptape WebSockets did not stop within their bounded timeout",
+            )
+        self._perptape_streams.clear()
+
     def run_once(
         self,
         *,
         started_at: datetime | None = None,
         completed_at: datetime | None = None,
+        account_bindings: Sequence[PreparedRuntimeAccountBinding] | None = None,
+        signal_bindings: Sequence[PreparedPerptapeRuntimeBinding] | None = None,
     ) -> RuntimeBindingSyncReport:
         headroom = timedelta(seconds=self.settings.runtime_sync_interval_seconds + 30)
         started_at = normalize_perptape_operational_datetime(
@@ -1278,7 +1505,11 @@ class RuntimeBindingSupervisor:
             required_headroom=headroom,
         )
         results: dict[str, SourceSyncResult] = {}
-        for account_binding in self.service.runtime_account_bindings():
+        if account_bindings is None:
+            account_bindings = self.service.runtime_account_bindings()
+        if signal_bindings is None:
+            signal_bindings = self.service.perptape_runtime_bindings()
+        for account_binding in account_bindings:
             key = (
                 f"{account_binding.team_id}:{account_binding.venue}:"
                 f"{account_binding.account_id}"
@@ -1289,7 +1520,7 @@ class RuntimeBindingSupervisor:
                 account_binding,
                 now=started_at,
             )
-        for signal_binding in self.service.perptape_runtime_bindings():
+        for signal_binding in signal_bindings:
             key = f"{signal_binding.team_id}:PERPTAPE"
             results[key] = self._perptape_worker(
                 signal_binding
@@ -1304,28 +1535,51 @@ class RuntimeBindingSupervisor:
         )
 
     def run_forever(self, stop_event: threading.Event) -> None:
-        while not stop_event.is_set():
-            report = self.run_once()
-            logger.info(
-                "Database-bound read-only synchronization cycle completed",
-                extra={
-                    "event": "runtime_binding_sync_cycle_completed",
-                    "result": "READY" if report.successful else "DEGRADED",
-                    "component": "runtime-sync",
-                },
-            )
-            if stop_event.wait(self.settings.runtime_sync_interval_seconds):
-                break
+        try:
+            while not stop_event.is_set():
+                account_bindings = self.service.runtime_account_bindings()
+                signal_bindings = self.service.perptape_runtime_bindings()
+                started_at = normalize_perptape_operational_datetime(self.clock())
+                if self.settings.perptape_websocket_enabled:
+                    self._reconcile_perptape_streams(signal_bindings, now=started_at)
+                report = self.run_once(
+                    started_at=started_at,
+                    account_bindings=account_bindings,
+                    signal_bindings=signal_bindings,
+                )
+                if self.settings.perptape_websocket_enabled:
+                    self._reconcile_perptape_streams(
+                        signal_bindings,
+                        now=normalize_perptape_operational_datetime(self.clock()),
+                    )
+                logger.info(
+                    "Database-bound read-only synchronization cycle completed",
+                    extra={
+                        "event": "runtime_binding_sync_cycle_completed",
+                        "result": "READY" if report.successful else "DEGRADED",
+                        "component": "runtime-sync",
+                    },
+                )
+                if stop_event.wait(self.settings.runtime_sync_interval_seconds):
+                    break
+        finally:
+            self._shutdown_perptape_streams()
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Run read-only trading fact synchronization")
-    parser.add_argument("--once", action="store_true", help="run one synchronization cycle")
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--once", action="store_true", help="run one synchronization cycle")
+    mode.add_argument(
+        "--healthcheck",
+        action="store_true",
+        help="validate the supervised runtime worker without external probes",
+    )
     args = parser.parse_args(argv)
     settings = get_settings()
     settings.validate_runtime_security()
     configure_logging(settings.log_level)
-    if not args.once and not settings.runtime_sync_enabled:
+    if (args.healthcheck or not args.once) and not settings.runtime_sync_enabled:
         raise SystemExit("TRADING_RUNTIME_SYNC_ENABLED must be true for continuous mode")
     database = Database(settings.database_url)
     worker: RuntimeSyncWorker | RuntimeBindingSupervisor | None = None
@@ -1333,6 +1587,21 @@ def main(argv: Sequence[str] | None = None) -> int:
         ready, reason = database.is_ready()
         if not ready:
             raise SystemExit(f"database is not ready: {reason}")
+        if args.healthcheck:
+            print(
+                json.dumps(
+                    {
+                        "component": "runtime-sync",
+                        "database": "READY",
+                        "runtime_sync_enabled": True,
+                        "status": "READY",
+                        "team_perptape_websocket_requested": (settings.perptape_websocket_enabled),
+                    },
+                    separators=(",", ":"),
+                    sort_keys=True,
+                )
+            )
+            return 0
         binding_supervisor = RuntimeBindingSupervisor(
             settings=settings,
             database=database,

@@ -161,6 +161,7 @@ def test_team_signal_source_perptape_key_and_signed_webhook_flow(
             )
             assert configured_perptape.status_code == 200, configured_perptape.text
             assert configured_perptape.json()["source"]["credential"]["state"] == "CONFIGURED"
+            assert configured_perptape.json()["source"]["runtime"]["state"] == "WAITING"
             assert perptape_key not in configured_perptape.text
             opportunities = await client.get("/api/opportunities")
             assert opportunities.status_code == 200, opportunities.text

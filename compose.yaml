@@ -19,7 +19,7 @@ services:
   migrate:
     build:
       context: .
-    profiles: ["console", "notifications"]
+    profiles: ["console", "runtime", "notifications"]
     command: ["uv", "run", "--no-sync", "alembic", "upgrade", "head"]
     environment: &control-plane-environment
       TRADING_ENVIRONMENT: local
@@ -52,7 +52,7 @@ services:
   setup:
     build:
       context: .
-    profiles: ["console", "notifications"]
+    profiles: ["console", "runtime", "notifications"]
     command: ["uv", "run", "--no-sync", "python", "scripts/setup_local.py"]
     environment:
       <<: *control-plane-environment
@@ -102,6 +102,39 @@ services:
     cap_drop: ["ALL"]
     security_opt: ["no-new-privileges:true"]
     restart: unless-stopped
+
+  runtime-worker:
+    build:
+      context: .
+    profiles: ["runtime"]
+    command: ["uv", "run", "--no-sync", "trading-sync-worker"]
+    environment:
+      <<: *control-plane-environment
+      TRADING_RUNTIME_SYNC_ENABLED: "true"
+      TRADING_PERPTAPE_WEBSOCKET_ENABLED: ${TRADING_PERPTAPE_WEBSOCKET_ENABLED:-false}
+    depends_on:
+      setup:
+        condition: service_completed_successfully
+    healthcheck:
+      test:
+        - CMD
+        - uv
+        - run
+        - --no-sync
+        - trading-sync-worker
+        - --healthcheck
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 5s
+    init: true
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+    cap_drop: ["ALL"]
+    security_opt: ["no-new-privileges:true"]
+    restart: unless-stopped
+    stop_grace_period: 45s
 
   notification-worker:
     build:

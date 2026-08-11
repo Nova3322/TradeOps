@@ -34,6 +34,7 @@ from trading_control_plane.domain import (
     ReviewDecision,
     RiskTier,
     Role,
+    SignalSourceMode,
     SystemRiskState,
 )
 from trading_control_plane.exchange_connection import ConnectionProbeResult
@@ -2233,3 +2234,159 @@ def test_websocket_alert_updates_the_existing_authoritative_perptape_feed(
     assert persisted.candidates[0].readiness == "READY"
     assert stream.stats.alerts_applied == 1
     assert len(https_calls) == 1
+
+
+def test_database_bound_team_websocket_updates_exact_feed_and_health(
+    database: Database,
+) -> None:
+    encryption_key = runtime_encryption_key()
+    service = TradingService(database, credential_encryption_key=encryption_key)
+    admin = service.bootstrap_admin("bound-stream-admin", now=NOW)
+    current = service.signal_source_status(admin)["source"]
+    service.configure_signal_source(
+        actor_id=admin,
+        mode=SignalSourceMode.PERPTAPE,
+        secret="bound-team-stream-secret",  # noqa: S106
+        enabled=True,
+        webhook_max_age_seconds=300,
+        expected_version=0 if current is None else int(current["version"]),
+        idempotency_key="configure-bound-team-stream",
+        now=NOW,
+    )
+    binding = service.perptape_runtime_bindings()[0]
+    event_time = NOW + timedelta(seconds=1)
+    alert_applied = threading.Event()
+
+    class Socket:
+        def __init__(self) -> None:
+            self.messages = deque(
+                [
+                    json.dumps(
+                        {
+                            "e": "hello",
+                            "seq": 1,
+                            "E": int(NOW.timestamp() * 1_000),
+                        }
+                    ),
+                    json.dumps(
+                        {
+                            "e": "alert",
+                            "seq": 2,
+                            "E": int(event_time.timestamp() * 1_000),
+                            "d": {
+                                "id": "bound-team-alert-1",
+                                "ex": "BN",
+                                "s": "ETHUSDT",
+                                "cs": "ETHUSDT",
+                                "dir": "HH",
+                                "p": 4_000,
+                                "th": 3_900,
+                                "tf": "1h",
+                                "t": int(event_time.timestamp() * 1_000),
+                                "u": int(event_time.timestamp() * 1_000),
+                                "kr": {"status": "ready"},
+                                "vq24": 2_000_000,
+                                "oi": 1_000_000,
+                            },
+                        }
+                    ),
+                ]
+            )
+
+        def send(self, _message: str) -> None:
+            return None
+
+        def recv(self, timeout: float | None = None) -> str | bytes:
+            assert timeout == 1.0
+            if self.messages:
+                return self.messages.popleft()
+            alert_applied.set()
+            threading.Event().wait(0.01)
+            raise TimeoutError
+
+    @contextmanager
+    def connector(
+        url: str,
+        headers: dict[str, str],
+        timeout: float,
+    ) -> Iterator[PerptapeSocket]:
+        assert url == "wss://perptape.com/ws/v1/alerts"
+        assert headers["x-api-key"] == "bound-team-stream-secret"
+        assert timeout == 5
+        yield Socket()
+
+    settings = Settings(
+        database_url=str(database.engine.url),
+        credential_encryption_key=encryption_key,
+        runtime_sync_enabled=True,
+        perptape_websocket_enabled=True,
+        perptape_timeout_seconds=5,
+        perptape_websocket_reconnect_initial_seconds=0.1,
+        perptape_websocket_reconnect_max_seconds=1,
+        _env_file=None,
+    )
+    built_streams: list[PerptapeStreamWorker] = []
+
+    class BoundWorker(RuntimeSyncWorker):
+        def build_bound_perptape_stream(
+            self,
+            prepared: Any,
+        ) -> PerptapeStreamWorker:
+            stream = super().build_bound_perptape_stream(prepared)
+            stream._connector = connector
+            built_streams.append(stream)
+            return stream
+
+    def worker_factory(scoped: Settings, scoped_database: Database) -> RuntimeSyncWorker:
+        return BoundWorker(
+            settings=scoped,
+            database=scoped_database,
+            perptape=PerptapeClient(
+                base_url="https://perptape.com",
+                api_key=scoped.perptape_api_key,
+                contract_version="breakouts-v1",
+                cache_ttl=timedelta(minutes=1),
+                timeout_seconds=5,
+                fetcher=lambda _url, _headers, _timeout: {
+                    "type": "breakouts",
+                    "generatedAt": int(NOW.timestamp() * 1_000),
+                    "data": [],
+                },
+            ),
+            binance=BinanceReader(),  # type: ignore[arg-type]
+            hyperliquid=HyperliquidReader(),  # type: ignore[arg-type]
+            notilt=NoTiltReader(),  # type: ignore[arg-type]
+            notilt_valuator=NoTiltUsdValuator(),
+            clock=lambda: event_time + timedelta(seconds=1),
+        )
+
+    supervisor = RuntimeBindingSupervisor(
+        settings=settings,
+        database=database,
+        clock=lambda: event_time + timedelta(seconds=1),
+        worker_factory=worker_factory,
+    )
+    try:
+        supervisor._reconcile_perptape_streams((binding,), now=NOW)
+        assert alert_applied.wait(2)
+        assert built_streams[0].stats.alerts_applied == 1
+        supervisor._reconcile_perptape_streams(
+            (binding,),
+            now=event_time + timedelta(seconds=2),
+        )
+
+        feed = TradingQueries(database).perptape_feed(admin)
+        assert feed is not None
+        assert [item.symbol for item in feed.candidates] == ["ETHUSDT"]
+        health = TradingQueries(database).runtime_source_health(
+            admin,
+            "PERPTAPE_WEBSOCKET",
+        )
+        assert health is not None
+        assert health["status"] == "SUCCESS"
+        assert health["items_observed"] == 2
+        assert "bound-team-stream-secret" not in repr(health)
+    finally:
+        supervisor._shutdown_perptape_streams()
+
+    assert supervisor.dependencies_in_use is False

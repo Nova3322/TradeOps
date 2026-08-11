@@ -242,6 +242,83 @@ def _perptape_runtime_status(
     return "STALE" if now - fetched_at > stale_after else "SUCCESS"
 
 
+def _perptape_transport_status(
+    settings: Settings,
+    source_health: dict[str, Any],
+    *,
+    now: datetime,
+) -> dict[str, Any]:
+    websocket = source_health.get("PERPTAPE_WEBSOCKET")
+    polling = source_health.get("PERPTAPE")
+    freshness = timedelta(
+        seconds=max(
+            settings.runtime_sync_interval_seconds * 2 + int(settings.perptape_timeout_seconds),
+            settings.perptape_websocket_heartbeat_timeout_seconds * 2,
+        )
+    )
+
+    def fresh(value: Any) -> bool:
+        if not isinstance(value, dict):
+            return False
+        try:
+            checked_at = datetime.fromisoformat(str(value["checked_at"]))
+        except (KeyError, TypeError, ValueError):
+            return False
+        age = now - checked_at
+        return checked_at.tzinfo is not None and age >= -timedelta(seconds=30) and age <= freshness
+
+    polling_live = (
+        fresh(polling) and isinstance(polling, dict) and polling.get("status") == "SUCCESS"
+    )
+    websocket_fresh = fresh(websocket)
+    websocket_status = websocket.get("status") if isinstance(websocket, dict) else None
+    websocket_error_value = websocket.get("error_code") if isinstance(websocket, dict) else None
+    websocket_error = None if websocket_error_value is None else str(websocket_error_value)
+    state: str
+    primary_channel: str | None
+    fallback_active: bool
+    error_code: str | None
+    if websocket_fresh and websocket_status == "SUCCESS":
+        state = "WEBSOCKET_LIVE"
+        primary_channel = "WEBSOCKET"
+        fallback_active = False
+        error_code = None
+    elif websocket_fresh and websocket_status == "SKIPPED":
+        state = "WEBSOCKET_STARTING"
+        primary_channel = "HTTPS_POLLING" if polling_live else None
+        fallback_active = polling_live
+        error_code = websocket_error or "PERPTAPE_STREAM_STARTING"
+    elif isinstance(websocket, dict) and (websocket_status == "FAILED" or not websocket_fresh):
+        state = "POLLING_FALLBACK" if polling_live else "WEBSOCKET_FAILED"
+        primary_channel = "HTTPS_POLLING" if polling_live else None
+        fallback_active = polling_live
+        error_code = websocket_error if websocket_fresh else "PERPTAPE_WEBSOCKET_HEALTH_STALE"
+    elif polling_live:
+        state = "POLLING_ONLY"
+        primary_channel = "HTTPS_POLLING"
+        fallback_active = False
+        error_code = None
+    elif isinstance(polling, dict) and fresh(polling) and polling.get("status") == "FAILED":
+        state = "POLLING_FAILED"
+        primary_channel = None
+        fallback_active = False
+        polling_error = polling.get("error_code")
+        error_code = None if polling_error is None else str(polling_error)
+    else:
+        state = "WAITING"
+        primary_channel = None
+        fallback_active = False
+        error_code = None
+    return {
+        "state": state,
+        "primary_channel": primary_channel,
+        "fallback_active": fallback_active,
+        "error_code": error_code,
+        "websocket": websocket,
+        "polling": polling,
+    }
+
+
 def _domain_status(code: str) -> int:
     if code in {
         "LOGIN_DENIED",
@@ -575,7 +652,9 @@ def create_app(
                 hip3_dexes=resolved_settings.hyperliquid_hip3_dexes,
             ),
             timeout_seconds=resolved_settings.freqtrade_timeout_seconds,
-            confirmation_timeout_seconds=(resolved_settings.freqtrade_confirmation_timeout_seconds),
+            confirmation_timeout_seconds=(
+                resolved_settings.freqtrade_confirmation_timeout_seconds
+            ),
         ),
     )
     resolved_capital_transfer = capital_transfer_adapter or MockCapitalTransferAdapter()
@@ -732,9 +811,7 @@ def create_app(
                 account_id=binding.account_id,
             ),
             timeout_seconds=resolved_settings.freqtrade_timeout_seconds,
-            confirmation_timeout_seconds=(
-                resolved_settings.freqtrade_confirmation_timeout_seconds
-            ),
+            confirmation_timeout_seconds=(resolved_settings.freqtrade_confirmation_timeout_seconds),
         )
 
     def effective_direct_capital_settings(user_id: UUID) -> tuple[Settings, dict[str, Any] | None]:
@@ -1948,6 +2025,17 @@ def create_app(
             source["webhook"]["endpoint_url"] = (
                 f"{resolved_settings.public_base_url.rstrip('/')}"
                 f"{source['webhook']['endpoint_path']}"
+            )
+        if (
+            isinstance(source, dict)
+            and source.get("enabled") is True
+            and source.get("mode") == "PERPTAPE"
+        ):
+            runtime = queries().runtime_snapshot(identity.user_id)
+            source["runtime"] = _perptape_transport_status(
+                resolved_settings,
+                runtime["source_health"],
+                now=_now(),
             )
         return {**result, "as_of": _now().isoformat()}
 
@@ -6236,6 +6324,11 @@ def create_app(
             now=_now(),
             configured=perptape_configured,
         )
+        perptape_transport = _perptape_transport_status(
+            resolved_settings,
+            snapshot["source_health"],
+            now=_now(),
+        )
         telegram_polling = (
             resolved_telegram.polling_health()
             if isinstance(resolved_telegram, TelegramBotGateway)
@@ -6294,6 +6387,7 @@ def create_app(
                         "candidate_count": perptape_feed["candidate_count"],
                         "last_fetched_at": perptape_feed["fetched_at"],
                         "last_generated_at": perptape_feed["generated_at"],
+                        "transport": perptape_transport,
                     },
                     "binance_read_only": {
                         "enabled": resolved_settings.binance_read_only_enabled,

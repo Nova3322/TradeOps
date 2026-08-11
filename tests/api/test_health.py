@@ -9,7 +9,11 @@ from pathlib import Path
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient, Response
 
-from trading_control_plane.api import _perptape_runtime_status, create_app
+from trading_control_plane.api import (
+    _perptape_runtime_status,
+    _perptape_transport_status,
+    create_app,
+)
 from trading_control_plane.config import Settings
 
 
@@ -106,13 +110,69 @@ def test_perptape_runtime_status_distinguishes_configuration_and_freshness() -> 
     assert _perptape_runtime_status(continuous, mismatched_feed, now=now) == "STALE"
 
 
+def test_perptape_transport_status_distinguishes_live_stream_and_polling_fallback() -> None:
+    now = datetime.now(UTC)
+    configured = settings().model_copy(update={"runtime_sync_enabled": True})
+    polling = {
+        "status": "SUCCESS",
+        "checked_at": (now - timedelta(seconds=10)).isoformat(),
+        "error_code": None,
+    }
+    live = _perptape_transport_status(
+        configured,
+        {
+            "PERPTAPE": polling,
+            "PERPTAPE_WEBSOCKET": {
+                "status": "SUCCESS",
+                "checked_at": (now - timedelta(seconds=5)).isoformat(),
+                "error_code": None,
+            },
+        },
+        now=now,
+    )
+    assert live["state"] == "WEBSOCKET_LIVE"
+    assert live["primary_channel"] == "WEBSOCKET"
+    assert live["fallback_active"] is False
+
+    fallback = _perptape_transport_status(
+        configured,
+        {
+            "PERPTAPE": polling,
+            "PERPTAPE_WEBSOCKET": {
+                "status": "FAILED",
+                "checked_at": now.isoformat(),
+                "error_code": "PERPTAPE_AUTH_FAILED",
+            },
+        },
+        now=now,
+    )
+    assert fallback["state"] == "POLLING_FALLBACK"
+    assert fallback["primary_channel"] == "HTTPS_POLLING"
+    assert fallback["fallback_active"] is True
+    assert fallback["error_code"] == "PERPTAPE_AUTH_FAILED"
+
+    stale = _perptape_transport_status(
+        configured,
+        {
+            "PERPTAPE_WEBSOCKET": {
+                "status": "SUCCESS",
+                "checked_at": (now - timedelta(hours=1)).isoformat(),
+                "error_code": None,
+            }
+        },
+        now=now,
+    )
+    assert stale["state"] == "WEBSOCKET_FAILED"
+    assert stale["error_code"] == "PERPTAPE_WEBSOCKET_HEALTH_STALE"
+
+
 def test_web_shell_is_served_without_claiming_business_readiness() -> None:
     app = create_app(settings(), FakeDatabase(ready=False))
     response = get(app, "/")
 
     assert response.status_code == 200
     assert "交易控制台" in response.text
-    assert "/assets/app.js?v=149" in response.text
+    assert "/assets/app.js?v=151" in response.text
     assert 'href="/signals"' in response.text
     assert "/assets/styles.css?v=64" in response.text
     assert 'href="/assets/tradingops-logo.png" type="image/png"' in response.text
@@ -390,6 +450,15 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
     assert "运行中的 LIVE 交易任务" not in app_javascript.text
     assert "打开交易任务并按顺序处理" in app_javascript.text
     assert "new WebSocket(`${scheme}://${location.host}/ws/opportunities`)" in app_javascript.text
+    assert (
+        "message.type === 'error') {\n"
+        "      setOpportunityConnectionState('页面更新正常', true);"
+        in app_javascript.text
+    )
+    assert "WEBSOCKET_LIVE:'上游 WebSocket 实时流'" in app_javascript.text
+    assert "POLLING_FALLBACK:'HTTPS 轮询回退'" in app_javascript.text
+    assert "upstreamLive ? '实时机会' : '机会快照'" in app_javascript.text
+    assert "页面不会把轮询快照标成实时流" in app_javascript.text
     assert "function groupOpportunities" in app_javascript.text
     assert "function opportunitySnapshotCounts" in app_javascript.text
     assert 'class="signal-chip-full"' in app_javascript.text
@@ -478,7 +547,7 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
 
     service_worker = get(app, "/sw.js")
     assert service_worker.status_code == 200
-    assert "trading-shell-v121" in service_worker.text
+    assert "trading-shell-v123" in service_worker.text
     assert "/assets/tradingops-logo.png" in service_worker.text
     assert "/assets/tradingops-icon.svg" in service_worker.text
     assert "/assets/icon.svg" not in service_worker.text

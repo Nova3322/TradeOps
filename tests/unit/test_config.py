@@ -288,7 +288,7 @@ def test_runtime_configuration_rejects_partial_external_credentials(
         settings.validate_runtime_security()
 
 
-def test_perptape_websocket_requires_explicit_worker_and_key() -> None:
+def test_perptape_websocket_requires_explicit_worker_and_a_credential_source() -> None:
     database_url = "postgresql+psycopg://user:pass@localhost/trading"
     missing_worker = Settings(
         database_url=database_url,
@@ -299,14 +299,14 @@ def test_perptape_websocket_requires_explicit_worker_and_key() -> None:
     with pytest.raises(ValueError, match="runtime sync worker"):
         missing_worker.validate_runtime_security()
 
-    missing_key = Settings(
+    missing_credential_source = Settings(
         database_url=database_url,
         runtime_sync_enabled=True,
         perptape_websocket_enabled=True,
         _env_file=None,
     )
-    with pytest.raises(ValueError, match="platform API key"):
-        missing_key.validate_runtime_security()
+    with pytest.raises(ValueError, match="database credential encryption key"):
+        missing_credential_source.validate_runtime_security()
 
     enabled = Settings(
         database_url=database_url,
@@ -316,6 +316,15 @@ def test_perptape_websocket_requires_explicit_worker_and_key() -> None:
         _env_file=None,
     )
     enabled.validate_runtime_security()
+
+    database_bound = Settings(
+        database_url=database_url,
+        runtime_sync_enabled=True,
+        perptape_websocket_enabled=True,
+        credential_encryption_key=("eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHg"),
+        _env_file=None,
+    )
+    database_bound.validate_runtime_security()
 
 
 def test_notification_worker_is_off_by_default_and_requires_the_encryption_key() -> None:

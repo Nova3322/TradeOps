@@ -387,8 +387,13 @@ class Settings(BaseSettings):
             raise ValueError("enabled Telegram requires an existing internal username")
         if self.perptape_websocket_enabled and not self.runtime_sync_enabled:
             raise ValueError("enabled Perptape WebSocket requires the runtime sync worker")
-        if self.perptape_websocket_enabled and not self.perptape_api_key:
-            raise ValueError("enabled Perptape WebSocket requires the platform API key")
+        if self.perptape_websocket_enabled and not (
+            self.perptape_api_key or self.credential_encryption_key
+        ):
+            raise ValueError(
+                "enabled Perptape WebSocket requires a platform API key or database "
+                "credential encryption key"
+            )
         if self.perptape_auto_proposal_enabled and not self.runtime_sync_enabled:
             raise ValueError("automatic Perptape proposals require the runtime sync worker")
         if self.perptape_auto_proposal_enabled and not self.perptape_api_key:

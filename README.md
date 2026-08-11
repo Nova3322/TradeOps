@@ -89,7 +89,7 @@ TradingOPS 是**源码可用（source-available）**项目，不是 OSI 定义�
 - 执行边界：Binance 与 Hyperliquid 的交易发送只允许进入与当前 Team/Account/Venue 精确匹配且验证为 LIVE 的 Freqtrade worker；同一场地的其他账户或旧进程默认值不得接管。Hyperliquid worker 通过账户级显式 `hip3_dexes` allowlist 加载 HIP-3。仓库原有 `binance_execution.py` / `hyperliquid_execution.py` 只保留隔离兼容测试，默认后端不会加载其签名密钥，也会拒绝直接发送。交易所官方只读接口继续提供账户、仓位和目录事实；数据库中的 `LIVE_ORDER_SEND` 初始仍为 `DISABLED`
 - 资金边界：`capital.py` 提供 SHADOW/TESTNET Mock 提交和自动候选计算；`notilt.py` 通过官方 `@notilt/sdk` 固定支持 Ethereum、BNB Smart Chain、Arbitrum One，只读取官方部署/Registry/Vault、生成并持久化 `{chainId,to,data,value}` 未签名交易，并从可信生产 RPC 校验发送者、目标、函数、参数、事件、区块时间和逐链确认深度。服务没有 NoTilt 私钥字段，不签名、不广播，也不暴露 owner、白名单管理、Panic 或 Full Exit 能力；真实 `CAPITAL_TRANSFER` 与两个自动资金 Gate 均保持 `DISABLED`
 
-正式身份源按冻结决策使用托管 IdP 与 Passkey，但外部 IdP 尚未接入。本地/测试环境可显式启用仅识别已存在内部用户的 Mock 会话和 Mock step-up；生产环境硬拒绝启用 Mock 身份。团队 Perptape Key 在 `/signals` 加密配置后可直接驱动现有机会页，也可由数据库绑定的轮询 worker 按 Team 持续更新独立当前 feed；迁移的旧团队保留明确标识的 `RUNTIME_FALLBACK`，不伪装成团队密钥已配置。数据库绑定模式暂不启动逐 Team WebSocket，持续轮询仍保留完整时效、版本和失败事实。
+正式身份源按冻结决策使用托管 IdP 与 Passkey，但外部 IdP 尚未接入。本地/测试环境可显式启用仅识别已存在内部用户的 Mock 会话和 Mock step-up；生产环境硬拒绝启用 Mock 身份。团队 Perptape Key 在 `/signals` 加密配置后可直接驱动现有机会页，也可由数据库绑定 worker 按 Team 更新独立当前 feed；迁移的旧团队保留明确标识的 `RUNTIME_FALLBACK`，不伪装成团队密钥已配置。逐 Team WebSocket 只有在 runtime worker 与独立 WebSocket 总开关都显式开启后启动，并持续使用 HTTPS 轮询校准；流鉴权、协议或有界重连失败只阻断该 Team 的流并回退轮询，运行状态不会把轮询快照冒充实时流。
 
 Binance 私有事实读取必须同时显式配置 `TRADING_BINANCE_READ_ONLY_ENABLED=true`、API Key/Secret 和 `TRADING_BINANCE_FACT_ENVIRONMENT=TESTNET|LIVE`。Unified Account 使用 `TRADING_BINANCE_ACCOUNT_MODE=PORTFOLIO_MARGIN` 和官方 `https://papi.binance.com`。未配置时页面只显示 PostgreSQL 已保存事实，不尝试联网。
 
@@ -101,7 +101,7 @@ NoTilt 只保存公开 whitelist agent 与逐链 Vault 地址。配置 `TRADING_
 
 Safe Spending Limits 是与 NoTilt Vault 并列的直接资金方案。它固定使用 Safe 官方 Allowance Module 部署目录、Arbitrum One 与原生 USDC：Safe 作为来源时实时读取模块启用状态、delegate、额度、已用额度、余额、重置周期与 nonce，只输出待人控 delegate 钱包确认的精确哈希；Safe 作为去处时只输出从已授权自有地址到目标 Safe 的精确 USDC `transfer` 无签名交易。系统不接受任意链、Token、模块或 calldata，不读取私钥、不创建钱包客户端、不签名、不广播。生产使用前须显式配置可信 HTTPS RPC、Safe Smart Account 和公开 delegate 地址，且资金 Gate 仍独立保持关闭。
 
-只读同步进程默认关闭。管理员先为当前凭据版本完成一次无副作用验证，再为具体 Team/Account 显式启用数据库绑定；部署端还必须独立开启 `TRADING_RUNTIME_SYNC_ENABLED`。worker 每周期枚举所有有效绑定，在内存中解密各自 AES-GCM 信封，并以精确 Team/Account/Venue INTERNAL principal 刷新 Binance、Hyperliquid、OKX 或 Bybit 事实；Team Perptape Key 以独立 PROPOSER principal 更新该 Team 的当前 feed。OKX 当前限定 USDT 线性 SWAP，Bybit 限定 Unified USDT 线性永续；非支持敞口、目录/Mark 覆盖不完整或历史边界不完整都会阻断新的风险。没有数据库绑定时继续使用既有部署级 Perptape/账户/Vault 兼容模式。某个来源失败不会伪造零值，旧事实按风险政策自然转为陈旧；数据库“已绑定”只表示配置真源，不表示 worker 活着或交易已开启。逐 Team Perptape WebSocket 仍默认关闭；停止 worker 或关闭进程总开关不改变 Schema 或交易 Gate。2026-07-31 的历史部署级 `--once` 验收读取 200 个 Perptape 候选，并同步 Binance Unified Account 与 Hyperliquid 主账户；由于尚无 Vault 地址，当时报告明确为 `ready_for_new_risk=false`。
+只读同步进程默认关闭。管理员先为当前凭据版本完成一次无副作用验证，再为具体 Team/Account 显式启用数据库绑定；部署端还必须独立开启 `TRADING_RUNTIME_SYNC_ENABLED`。worker 每周期枚举所有有效绑定，在内存中解密各自 AES-GCM 信封，并以精确 Team/Account/Venue INTERNAL principal 刷新 Binance、Hyperliquid、OKX 或 Bybit 事实；Team Perptape Key 以独立 PROPOSER principal 更新该 Team 的当前 feed。开启 `TRADING_PERPTAPE_WEBSOCKET_ENABLED` 后，每个有效 Team source 拥有独立流、停止事件与版本身份；凭据或源版本变化先有界停止旧流再启动新流，一个 Team 的致命失败不会停止其他 Team 或 HTTPS 轮询。OKX 当前限定 USDT 线性 SWAP，Bybit 限定 Unified USDT 线性永续；非支持敞口、目录/Mark 覆盖不完整或历史边界不完整都会阻断新的风险。没有数据库绑定时继续使用既有部署级 Perptape/账户/Vault 兼容模式。某个来源失败不会伪造零值，旧事实按风险政策自然转为陈旧；数据库“已绑定”只表示配置真源，不表示 worker 活着或交易已开启。逐 Team WebSocket 和 runtime worker 均默认关闭；停止 worker 或关闭进程总开关不改变 Schema 或交易 Gate。2026-07-31 的历史部署级 `--once` 验收读取 200 个 Perptape 候选，并同步 Binance Unified Account 与 Hyperliquid 主账户；由于尚无 Vault 地址，当时报告明确为 `ready_for_new_risk=false`。
 
 ## 本地开发
 
@@ -126,7 +126,7 @@ TRADING_DATABASE_URL='postgresql+psycopg://.../trading_restore_test' ./scripts/r
 
 本机敏感值只放在 `.env.local`；可提交变量名模板为 `.env.example`。不得把密钥值写入代码、文档、日志或测试制品。
 
-Compose 默认不启动外发进程。只有显式执行 `./scripts/run_compose.sh --notifications` 才加入受健康检查和自动重启监督的通知 worker；路由配置仍不授予交易或资金权限。
+Compose 默认不启动后台读取或外发进程。`./scripts/run_compose.sh --runtime` 显式加入受健康检查和自动重启监督的只读同步 worker；只有再设置 `TRADING_PERPTAPE_WEBSOCKET_ENABLED=true` 才启动逐 Team 流。`./scripts/run_compose.sh --notifications` 显式加入通知 worker；两个参数可组合。它们都不授予订单、资金、签名或广播权限。
 
 ### 本地真实 Telegram
 

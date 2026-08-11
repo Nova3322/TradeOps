@@ -3,18 +3,31 @@ set -euo pipefail
 
 profiles=(--profile console)
 notification_delivery=false
-if [[ $# -gt 1 ]]; then
-  echo "usage: $0 [--notifications]" >&2
-  exit 2
-fi
-if [[ $# -eq 1 ]]; then
-  if [[ $1 != "--notifications" ]]; then
-    echo "usage: $0 [--notifications]" >&2
-    exit 2
-  fi
-  profiles+=(--profile notifications)
-  notification_delivery=true
-fi
+runtime_sync=false
+for option in "$@"; do
+  case "$option" in
+    --runtime)
+      if [[ $runtime_sync == true ]]; then
+        echo "duplicate option: --runtime" >&2
+        exit 2
+      fi
+      profiles+=(--profile runtime)
+      runtime_sync=true
+      ;;
+    --notifications)
+      if [[ $notification_delivery == true ]]; then
+        echo "duplicate option: --notifications" >&2
+        exit 2
+      fi
+      profiles+=(--profile notifications)
+      notification_delivery=true
+      ;;
+    *)
+      echo "usage: $0 [--runtime] [--notifications]" >&2
+      exit 2
+      ;;
+  esac
+done
 
 project_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$project_root"
@@ -76,5 +89,10 @@ if [[ $notification_delivery == true ]]; then
   echo "Notification delivery: enabled by explicit --notifications profile"
 else
   echo "Notification delivery: disabled (add --notifications to enable the worker)"
+fi
+if [[ $runtime_sync == true ]]; then
+  echo "Read-only runtime synchronization: enabled by explicit --runtime profile"
+else
+  echo "Read-only runtime synchronization: disabled (add --runtime to enable the worker)"
 fi
 exec docker compose --env-file "$env_file" "${profiles[@]}" up --build

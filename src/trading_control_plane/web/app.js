@@ -20,6 +20,7 @@ let instruments = [];
 let opportunities = [];
 let opportunityGroups = [];
 let proposalDefaults = {configured:false, can_manage:false, data:null};
+let opportunitySourceRuntime = null;
 let opportunitySocket = null;
 let opportunityReconnectTimer = null;
 let opportunityReconnectAttempt = 0;
@@ -431,6 +432,18 @@ const ENGLISH_EXACT = new Map(Object.entries({
   '机器人尚未完成一次成功轮询；网页端审核队列仍是权威入口。':'The bot has not completed a successful poll yet. The web review queue remains the authoritative source.',
   '网页端审核队列保持可用；资金、订单、风险开关与权限操作不对 Telegram 机器人开放':'The web review queue remains available. Capital, orders, risk controls, and access management are not exposed to the Telegram bot.',
   'Perptape 机会源':'Perptape opportunity feed',
+  '连续接入':'Continuous transport', 'WebSocket 实时流':'Live WebSocket stream',
+  'WebSocket 启动中':'WebSocket starting', 'HTTPS 轮询回退':'HTTPS polling fallback',
+  'HTTPS 定时轮询':'Scheduled HTTPS polling', '连续接入失败':'Continuous transport failed',
+  '轮询失败':'Polling failed', '等待首次运行事实':'Waiting for the first runtime fact',
+  '机会页复用当前团队唯一事实':'The opportunity page uses the current team’s single authoritative feed',
+  '查看机会':'View opportunities', '上游 WebSocket 实时流':'Upstream live WebSocket stream',
+  '上游流启动中':'Upstream stream starting', '上游轮询失败':'Upstream polling failed',
+  '上游流不可用':'Upstream stream unavailable', '等待首次同步':'Waiting for first synchronization',
+  '机会快照':'Opportunity snapshot', '页面正在连接':'Page connecting',
+  '页面更新正常':'Page updates connected', '页面连接已中断，正在重连':'Page connection interrupted; reconnecting',
+  '连续接入降级':'Continuous transport degraded', '当前使用 HTTPS 轮询事实':'Using HTTPS polling facts',
+  '连续信号接入未通过':'Continuous signal transport is unavailable',
   '仅验证执行适配与合约目录；不会发送真实订单':'Execution adapters and instrument catalogs only; no live orders are sent',
   'Telegram 私聊机器人最近一次长轮询成功；批准和拒绝仍需二次确认并写入统一审计。':'The Telegram direct-message bot completed its latest long poll. Approvals and rejections still require confirmation and are written to the shared audit log.',
   '团队启用状态':'Team activation status', '团队启用路径':'Team activation path', '服务端前置条件':'Server-enforced prerequisites',
@@ -1616,8 +1629,37 @@ async function renderSignalSources() {
       ? '仅使用部署级兼容 Key；尚未绑定团队 Key'
       : '未配置';
   const modeLabel = source?.mode === 'WEBHOOK' ? 'Webhook' : source?.mode === 'PERPTAPE' ? 'Perptape' : '未选择';
+  const runtimeState = source?.mode === 'PERPTAPE' && source.enabled === false
+    ? 'DISABLED'
+    : source?.runtime?.state || 'WAITING';
+  const runtimeLabels = {
+    WEBSOCKET_LIVE:'WebSocket 实时流',
+    WEBSOCKET_STARTING:'WebSocket 启动中',
+    POLLING_FALLBACK:'HTTPS 轮询回退',
+    POLLING_ONLY:'HTTPS 定时轮询',
+    WEBSOCKET_FAILED:'连续接入失败',
+    POLLING_FAILED:'轮询失败',
+    DISABLED:'已停用',
+    WAITING:'等待首次运行事实',
+  };
+  const runtimeLabel = runtimeLabels[runtimeState] || runtimeState;
+  const runtimeCopy = {
+    WEBSOCKET_LIVE:'已观测到当前团队 WebSocket 心跳或告警；HTTPS 轮询继续校准同一事实。',
+    WEBSOCKET_STARTING:'团队 WebSocket 正在建立；已有成功轮询时继续以轮询事实回退。',
+    POLLING_FALLBACK:'WebSocket 当前不可用；团队级 HTTPS 轮询仍在更新，不会伪装成实时流。',
+    POLLING_ONLY:'当前只观测到团队级 HTTPS 定时轮询，页面不会把轮询快照标成实时流。',
+    WEBSOCKET_FAILED:'WebSocket 与轮询均未形成当前可用事实；旧候选不会被当成实时机会。',
+    POLLING_FAILED:'最近一次团队轮询失败；旧候选按时效规则转为过期并阻断提案。',
+    DISABLED:'当前团队已停用 Perptape；worker 不会使用该凭据或更新机会。',
+    WAITING:'信号源已配置，但尚未观测到 worker 的流或轮询运行事实。',
+  }[runtimeState] || '只显示服务端已记录的当前运行事实。';
+  const runtimeTone = runtimeState === 'WEBSOCKET_LIVE' || runtimeState === 'POLLING_ONLY'
+    ? 'success'
+    : runtimeState === 'WEBSOCKET_FAILED' || runtimeState === 'POLLING_FAILED'
+      ? 'danger'
+      : runtimeState === 'DISABLED' ? 'neutral' : 'attention';
   const configForm = canManage ? `<details class="card create-member-panel" ${source ? '' : 'open'}><summary><span><b>信号源设置</b><small>${source ? '切换模式或轮换加密凭据' : '先配置唯一启用模式'}</small></span><strong>展开</strong></summary><form id="signal-source-form" class="toolbox-content compact-form"><div class="card-heading"><div><p class="eyebrow">当前团队</p><h2>${source ? '切换或轮换信号源' : '配置唯一信号源'}</h2></div><span class="status-pill">${escapeHtml(modeLabel)}</span></div><div class="field-grid"><label>启用模式<select name="mode"><option value="PERPTAPE" ${source?.mode !== 'WEBHOOK' ? 'selected' : ''}>Perptape</option><option value="WEBHOOK" ${source?.mode === 'WEBHOOK' ? 'selected' : ''}>Webhook</option></select></label><label>Perptape Key / Webhook 签名密钥<input name="secret" type="password" minlength="8" maxlength="512" autocomplete="new-password" required></label><label>Webhook 最大时效（秒）<input name="webhook_max_age_seconds" type="number" min="30" max="900" value="${source?.webhook?.max_age_seconds || 300}" required></label><label class="checkbox-row"><input name="enabled" type="checkbox" ${source?.enabled !== false ? 'checked' : ''}><span>启用当前模式</span></label></div><p class="safety-note">切换为 Webhook 会停止 Perptape 自动提案政策。密钥只进入 AES-256-GCM 加密信封；页面、API、日志和审计均不回显明文。</p><div class="form-error" role="alert"></div><div class="form-actions"><button class="primary">加密保存新版本</button></div></form></details>` : '';
-  const sourceFacts = source ? `<article class="card"><div class="card-heading"><div><p class="eyebrow">信号源事实</p><h2>${escapeHtml(modeLabel)} · ${source.enabled ? '已启用' : '已停用'}</h2></div><span class="status-pill ${source.enabled ? 'status-APPROVED' : 'status-DISABLED'}">v${source.version}</span></div><dl class="definition-grid">${definition('凭据状态', credentialLabel)}${definition('服务身份', source.service_principal?.username || (source.mode === 'WEBHOOK' ? '不需要；由人员手动创建提案' : '兼容运行身份'))}${definition('更新人', source.updated_by_username || shortId(source.updated_by))}${definition('更新时间', fmtDate(source.updated_at))}</dl>${source.mode === 'PERPTAPE' ? '<div class="form-actions"><a class="primary" href="/opportunities" data-link>查看 Perptape 实时机会</a></div>' : ''}</article>` : '<article class="card"><p class="eyebrow">Fail closed</p><h2>当前团队尚未选择信号源</h2><p class="subtle">服务端不会读取其他团队或全局默认信号。由系统管理员选择 Perptape 或 Webhook 后再继续。</p></article>';
+  const sourceFacts = source ? `<article class="card"><div class="card-heading"><div><p class="eyebrow">信号源事实</p><h2>${escapeHtml(modeLabel)} · ${source.enabled ? '已启用' : '已停用'}</h2></div><span class="status-pill ${source.enabled ? 'status-APPROVED' : 'status-DISABLED'}">v${source.version}</span></div><dl class="definition-grid">${definition('凭据状态', credentialLabel)}${definition('服务身份', source.service_principal?.username || (source.mode === 'WEBHOOK' ? '不需要；由人员手动创建提案' : '兼容运行身份'))}${source.mode === 'PERPTAPE' ? definition('连续接入', runtimeLabel) : ''}${definition('更新人', source.updated_by_username || shortId(source.updated_by))}${definition('更新时间', fmtDate(source.updated_at))}</dl>${source.mode === 'PERPTAPE' ? '<div class="form-actions"><a class="primary" href="/opportunities" data-link>查看 Perptape 机会</a></div>' : ''}</article>` : '<article class="card"><p class="eyebrow">Fail closed</p><h2>当前团队尚未选择信号源</h2><p class="subtle">服务端不会读取其他团队或全局默认信号。由系统管理员选择 Perptape 或 Webhook 后再继续。</p></article>';
   const webhookContract = source?.mode === 'WEBHOOK' ? `<article class="card"><p class="eyebrow">签名接入</p><h2>TradingView / 自研模型统一 Webhook</h2><dl class="definition-grid">${definition('接收地址', source.webhook.endpoint_url)}${definition('时效', `${source.webhook.max_age_seconds} 秒`)}${definition('提案语义', '仅记录信号；必须由获权人员手动创建冻结提案')}</dl><p class="safety-note">必须携带 <code>X-TradingOPS-Timestamp</code>、<code>X-TradingOPS-Nonce</code>、<code>Idempotency-Key</code> 和 <code>X-TradingOPS-Signature: v1=HMAC_SHA256(secret, timestamp.nonce.raw_body)</code>。过期、未来、重放、重复外部 ID、格式错误与签名错误均由服务端拒绝。</p></article>` : '';
   const eventCards = events.map(event => {
     const proposal = event.proposal;
@@ -1633,7 +1675,7 @@ async function renderSignalSources() {
   const activeSignalContent = source?.mode === 'WEBHOOK'
     ? `<div class="section-head"><div><p class="eyebrow">当前团队</p><h2>最近 Webhook 信号</h2></div><span class="status-pill">${events.length} 条</span></div><div class="stack">${eventCards || '<article class="empty-state"><div><h2>尚无 Webhook 信号</h2><p>当前不会伪造样本信号。这里只显示签名、时效、重放和格式校验全部通过的事件。</p></div></article>'}</div>`
     : source?.mode === 'PERPTAPE'
-      ? '<article class="home-status tone-success"><div><p class="eyebrow">Perptape</p><h2>实时机会复用同一事实页面</h2><p>机会卡片明确区分实时、过期、限流和不可用；服务端会在创建提案时重新校验。</p></div><a class="primary" href="/opportunities" data-link>查看实时机会</a></article>'
+      ? `<article class="home-status tone-${runtimeTone}"><div><p class="eyebrow">Perptape · ${escapeHtml(runtimeLabel)}</p><h2>机会页复用当前团队唯一事实</h2><p>${escapeHtml(runtimeCopy)} 服务端会在创建提案时重新校验时效与资格。</p></div><a class="primary" href="/opportunities" data-link>查看机会</a></article>`
       : '';
   main.innerHTML = `<section class="page"><header class="page-head"><div><p class="eyebrow">团队输入</p><h1>信号</h1><p class="lede">先看当前信号和机会，再按需展开配置。每个团队只启用 Perptape 或 Webhook 之一；任何信号最多形成冻结提案。</p></div><button class="secondary" data-refresh>刷新事实</button></header><div class="section-tabs"><a class="active" href="/signals" data-link>当前信号</a>${source?.mode === 'PERPTAPE' || !source ? '<a href="/opportunities" data-link>Perptape 机会</a>' : ''}<a href="/settings" data-link>团队设置</a></div><div class="detail-layout">${sourceFacts}${webhookContract}</div>${configForm}${activeSignalContent}</section>`;
   document.querySelector('[data-refresh]')?.addEventListener('click', route);
@@ -1761,8 +1803,25 @@ function renderOpportunitySnapshot(result, sourceError = null, preservedFilters 
   const counts = opportunitySnapshotCounts(opportunities, items);
   const venueBreakdown = opportunityVenueBreakdown(counts.symbols_by_venue);
   const defaultViewState = counts.eligible_opportunities ? 'ACTIONABLE' : 'ALL';
-  main.innerHTML = `<section class="page" data-opportunity-snapshot="${escapeHtml(result?.snapshot_id || '')}"><header class="page-head"><div><p class="eyebrow">Perptape · 实时机会流</p><h1>实时机会</h1><p class="lede">实时汇总同一币对、同一方向的多个突破周期。同一轮卡片、状态和按钮都来自同一个事实快照；创建时服务端仍会重新校验。</p></div><div class="toolbar"><span class="status-pill" data-live-status>${sourceError ? '连接已中断，正在重连' : '正在连接'}</span>${canPropose ? '<a class="primary" href="/proposals/new" data-link>＋ 人工提案</a>' : ''}<button class="secondary" data-refresh>刷新机会</button></div></header>
+  const transportState = opportunitySourceRuntime?.state || 'WAITING';
+  const upstreamLive = transportState === 'WEBSOCKET_LIVE';
+  const transportLabel = ({
+    WEBSOCKET_LIVE:'上游 WebSocket 实时流',
+    WEBSOCKET_STARTING:'上游流启动中',
+    POLLING_FALLBACK:'HTTPS 轮询回退',
+    POLLING_ONLY:'HTTPS 定时轮询',
+    WEBSOCKET_FAILED:'上游流不可用',
+    POLLING_FAILED:'上游轮询失败',
+    WAITING:'等待首次同步',
+  })[transportState] || transportState;
+  const transportNotice = transportState === 'POLLING_FALLBACK'
+    ? '<article class="source-status tone-attention"><div><p class="eyebrow">连续接入降级</p><h2>当前使用 HTTPS 轮询事实</h2><p>WebSocket 当前不可用；页面继续展示团队轮询快照，并明确保留采集时间与时效阻断。</p></div></article>'
+    : transportState === 'WEBSOCKET_FAILED' || transportState === 'POLLING_FAILED'
+      ? '<article class="source-status tone-danger"><div><p class="eyebrow">Fail closed</p><h2>连续信号接入未通过</h2><p>仅保留可辨识的旧快照；过期或缺失事实不会创建新提案。</p></div></article>'
+      : '';
+  main.innerHTML = `<section class="page" data-opportunity-snapshot="${escapeHtml(result?.snapshot_id || '')}"><header class="page-head"><div><p class="eyebrow">Perptape · ${escapeHtml(transportLabel)}</p><h1>${upstreamLive ? '实时机会' : '机会快照'}</h1><p class="lede">${upstreamLive ? '实时流' : '当前快照'}汇总同一币对、同一方向的多个突破周期。同一轮卡片、状态和按钮都来自同一个服务端事实快照；创建时仍会重新校验。</p></div><div class="toolbar"><span class="status-pill" data-live-status>${sourceError ? '页面连接已中断，正在重连' : '页面正在连接'}</span>${canPropose ? '<a class="primary" href="/proposals/new" data-link>＋ 人工提案</a>' : ''}<button class="secondary" data-refresh>刷新机会</button></div></header>
     <div class="section-tabs"><a href="/signals" data-link>信号概览</a><a class="active" href="/opportunities" data-link>Perptape 机会</a></div>
+    ${transportNotice}
     ${sourceError ? `<article class="source-status tone-attention"><div><p class="eyebrow">Perptape 数据源</p><h2>外部机会当前不可用</h2><p>${escapeHtml(friendlyApiError(sourceError))} 系统不会把过期候选当成当前机会。</p></div>${canPropose ? '<a class="secondary" href="/proposals/new" data-link>创建人工提案</a>' : ''}</article>` : ''}
     ${!canPropose ? '<div class="callout"><b>只读模式：</b>当前身份可以查看、筛选候选并打开外部图表，但不能创建或修改提案。</div>' : ''}
     <div class="opportunity-tools"><span>信号快照 ${fmtDate(result?.snapshot_generated_at || result?.as_of)}</span>${canPropose ? `<a class="secondary" href="/opportunities/defaults" data-link>默认配置${proposalDefaults.configured ? '' : ' · 未完成'}</a>` : ''}</div>
@@ -1815,7 +1874,7 @@ function openOpportunityStream() {
     } else if (message.type === 'heartbeat') {
       setOpportunityConnectionState('页面更新正常', true);
     } else if (message.type === 'error') {
-      setOpportunityConnectionState('连接已中断，正在重连');
+      setOpportunityConnectionState('页面更新正常', true);
     }
   });
   socket.addEventListener('close', () => {
@@ -1834,9 +1893,10 @@ async function renderOpportunities() {
   opportunityVisibleLimit = OPPORTUNITY_PAGE_SIZE;
   let result = null;
   let sourceError = null;
-  const [opportunityResponse, defaultResponse] = await Promise.allSettled([
+  const [opportunityResponse, defaultResponse, sourceResponse] = await Promise.allSettled([
     api('/api/opportunities'),
     hasCapability('proposal.create') ? api('/api/proposal-defaults') : Promise.resolve(null),
+    api('/api/signal-source'),
   ]);
   if (defaultResponse.status === 'fulfilled') {
     if (defaultResponse.value) proposalDefaults = defaultResponse.value;
@@ -1849,6 +1909,13 @@ async function renderOpportunities() {
     const error = opportunityResponse.reason;
     if (error?.status === 401 || error?.status === 403) throw error;
     sourceError = error;
+  }
+  if (sourceResponse.status === 'fulfilled') {
+    opportunitySourceRuntime = sourceResponse.value?.source?.runtime || null;
+  } else if (sourceResponse.reason?.status === 401 || sourceResponse.reason?.status === 403) {
+    throw sourceResponse.reason;
+  } else {
+    opportunitySourceRuntime = null;
   }
   renderOpportunitySnapshot(result, sourceError);
   openOpportunityStream();

@@ -287,6 +287,14 @@ def test_results_audit_and_runtime_api_do_not_mix_environments_or_expose_secrets
                 "candidate_count": 0,
                 "last_fetched_at": None,
                 "last_generated_at": None,
+                "transport": {
+                    "state": "WAITING",
+                    "primary_channel": None,
+                    "fallback_active": False,
+                    "error_code": None,
+                    "websocket": None,
+                    "polling": None,
+                },
             }
             assert payload["external_boundaries"]["capital_transfer"] == {
                 "mode": "MOCK_OR_NOTILT_UNSIGNED_HANDOFF",
