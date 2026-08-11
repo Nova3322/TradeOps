@@ -8,7 +8,7 @@
     <link rel="manifest" href="/manifest.webmanifest">
     <link rel="icon" href="/assets/tradingops-logo.png" type="image/png">
     <link rel="apple-touch-icon" href="/assets/tradingops-logo.png">
-    <link rel="stylesheet" href="/assets/styles.css?v=69">
+    <link rel="stylesheet" href="/assets/styles.css?v=70">
     <title>交易控制台</title>
   </head>
   <body>
@@ -26,11 +26,18 @@
               <header class="user-menu-head"><div><small>登录身份</small><strong data-user-menu-name>—</strong></div><span data-user-menu-auth>密码登录</span></header>
               <dl class="user-menu-context"><div><dt>当前工作区</dt><dd data-user-menu-workspace>—</dd></div><div><dt>默认团队</dt><dd data-user-menu-team>—</dd></div><div><dt>当前职责</dt><dd data-user-menu-role>—</dd></div></dl>
               <section class="user-preferences" aria-labelledby="personal-preferences-title">
-                <div class="user-menu-section-head"><div><small>个人设置</small><h2 id="personal-preferences-title">个人偏好</h2></div><button id="language-toggle" class="text-button preference-language" type="button" aria-label="切换中英文">中英切换</button></div>
-                <div class="theme-options" role="group" aria-label="主题偏好">
-                  <button type="button" data-theme-option="system" aria-pressed="false">跟随系统</button>
-                  <button type="button" data-theme-option="light" aria-pressed="false">浅色</button>
-                  <button type="button" data-theme-option="dark" aria-pressed="false">深色</button>
+                <div class="user-menu-section-head"><div><small>个人设置</small><h2 id="personal-preferences-title">个人偏好</h2></div></div>
+                <div class="preference-controls">
+                  <div class="preference-select" data-preference-select="language">
+                    <span id="language-preference-label" class="preference-label">界面语言</span>
+                    <button id="language-preference-trigger" class="preference-trigger" type="button" aria-haspopup="listbox" aria-expanded="false" aria-controls="language-preference-menu" aria-labelledby="language-preference-label language-preference-value"><span id="language-preference-value" data-preference-value>中文</span><span class="preference-chevron" aria-hidden="true">⌄</span></button>
+                    <div id="language-preference-menu" class="preference-menu" role="listbox" aria-labelledby="language-preference-label" hidden></div>
+                  </div>
+                  <div class="preference-select" data-preference-select="theme">
+                    <span id="theme-preference-label" class="preference-label">主题模式</span>
+                    <button id="theme-preference-trigger" class="preference-trigger" type="button" aria-haspopup="listbox" aria-expanded="false" aria-controls="theme-preference-menu" aria-labelledby="theme-preference-label theme-preference-value"><span id="theme-preference-value" data-preference-value>跟随系统</span><span class="preference-chevron" aria-hidden="true">⌄</span></button>
+                    <div id="theme-preference-menu" class="preference-menu" role="listbox" aria-labelledby="theme-preference-label" hidden></div>
+                  </div>
                 </div>
               </section>
               <details class="user-password-panel">
@@ -143,15 +150,15 @@
       </form>
     </dialog>
     <div id="toast" class="toast" role="status" aria-live="polite"></div>
-    <script defer src="/assets/app-core.js?v=159"></script>
-    <script defer src="/assets/workspace.js?v=159"></script>
-    <script defer src="/assets/signals.js?v=159"></script>
-    <script defer src="/assets/proposals.js?v=159"></script>
-    <script defer src="/assets/risk.js?v=159"></script>
-    <script defer src="/assets/execution.js?v=159"></script>
-    <script defer src="/assets/capital.js?v=159"></script>
-    <script defer src="/assets/reporting.js?v=159"></script>
-    <script defer src="/assets/accounts.js?v=159"></script>
-    <script defer src="/assets/app.js?v=159"></script>
+    <script defer src="/assets/app-core.js?v=160"></script>
+    <script defer src="/assets/workspace.js?v=160"></script>
+    <script defer src="/assets/signals.js?v=160"></script>
+    <script defer src="/assets/proposals.js?v=160"></script>
+    <script defer src="/assets/risk.js?v=160"></script>
+    <script defer src="/assets/execution.js?v=160"></script>
+    <script defer src="/assets/capital.js?v=160"></script>
+    <script defer src="/assets/reporting.js?v=160"></script>
+    <script defer src="/assets/accounts.js?v=160"></script>
+    <script defer src="/assets/app.js?v=160"></script>
   </body>
 </html>

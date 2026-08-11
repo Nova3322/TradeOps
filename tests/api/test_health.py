@@ -209,10 +209,10 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
 
     assert response.status_code == 200
     assert "交易控制台" in response.text
-    assert "/assets/app-core.js?v=159" in response.text
-    assert "/assets/app.js?v=159" in response.text
+    assert "/assets/app-core.js?v=160" in response.text
+    assert "/assets/app.js?v=160" in response.text
     assert 'href="/signals"' in response.text
-    assert "/assets/styles.css?v=69" in response.text
+    assert "/assets/styles.css?v=70" in response.text
     assert 'href="/assets/tradingops-logo.png" type="image/png"' in response.text
     assert '<img src="/assets/tradingops-logo.png" alt="">' in response.text
     assert '<span class="brand-mark" aria-hidden="true">T</span>' not in response.text
@@ -230,11 +230,14 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
     assert 'id="workspace-switcher-menu"' in response.text
     assert 'id="user-menu"' in response.text
     assert 'id="password-change-form"' in response.text
-    assert response.text.count("data-theme-option=") == 3
+    assert response.text.count('data-preference-select=') == 2
+    assert response.text.count('aria-haspopup="listbox"') == 2
+    assert response.text.count('role="listbox"') == 2
     assert "个人账户" not in response.text
     assert 'id="scope-control"' in response.text
     assert 'class="nav-section" data-nav-section' in response.text
-    assert 'data-theme-option="system"' in response.text
+    assert 'id="language-preference-value"' in response.text
+    assert 'id="theme-preference-value"' in response.text
     assert 'id="confirm-dialog"' in response.text
 
     for route in (
@@ -262,6 +265,11 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
     assert "const loginDestination = () => {\n  return '/';\n};" in app_javascript.text
     assert "function renderWorkspaceGateway()" in app_javascript.text
     assert "api('/api/auth/password'" in app_javascript.text
+    assert "const PREFERENCE_OPTIONS" in app_javascript.text
+    assert "function normalizeThemePreference" in app_javascript.text
+    assert "function initializePreferenceDropdowns" in app_javascript.text
+    assert "currentThemePreference === 'system'" in app_javascript.text
+    assert "['ArrowDown', 'ArrowUp', 'Home', 'End']" in app_javascript.text
     assert "workspace-gateway-tabs" not in app_javascript.text
     assert "个人账户</span>" not in app_javascript.text
     assert "timeoutError.code = 'REQUEST_TIMEOUT'" in app_javascript.text
@@ -569,7 +577,8 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
     assert "--panel-soft:" in stylesheet.text
     assert "--surface:" in stylesheet.text
     assert ".nav-section-label" in stylesheet.text
-    assert ".theme-options" in stylesheet.text
+    assert ".preference-trigger" in stylesheet.text
+    assert ".preference-menu" in stylesheet.text
     assert ".user-menu-panel" in stylesheet.text
     assert ".status-AVAILABLE" in stylesheet.text
     assert ".capital-trend-toggle" in stylesheet.text
@@ -592,7 +601,7 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
 
     service_worker = get(app, "/sw.js")
     assert service_worker.status_code == 200
-    assert "trading-shell-v131" in service_worker.text
+    assert "trading-shell-v132" in service_worker.text
     assert "/assets/tradingops-logo.png" in service_worker.text
     assert "/assets/tradingops-icon.svg" in service_worker.text
     assert "/assets/icon.svg" not in service_worker.text
@@ -621,6 +630,68 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
     assert icon.status_code == 200
     assert icon.headers["content-type"] == "image/svg+xml"
     assert b"data:image/png;base64," in icon.content
+
+
+def test_preference_configuration_and_legacy_theme_normalization_in_node() -> None:
+    node = shutil.which("node")
+    assert node is not None
+    app_path = frontend_bundle_path()
+    script = textwrap.dedent(
+        r"""
+        import fs from "node:fs";
+        import vm from "node:vm";
+
+        const source = fs.readFileSync(process.argv[1], "utf8");
+        const from = source.indexOf("const PREFERENCE_OPTIONS");
+        const to = source.indexOf("\nlet currentLanguage", from);
+        if (from < 0 || to < 0) throw new Error("preference configuration missing");
+        const context = vm.createContext({});
+        vm.runInContext(
+          source.slice(from, to) + `;
+            this.options = PREFERENCE_OPTIONS;
+            this.normalizeLanguage = normalizeLanguagePreference;
+            this.normalizeTheme = normalizeThemePreference;`,
+          context,
+        );
+        console.log(JSON.stringify({
+          language:context.options.language,
+          theme:context.options.theme,
+          languageAliases:[
+            context.normalizeLanguage("zh-cn"),
+            context.normalizeLanguage("en-US"),
+            context.normalizeLanguage("unsupported"),
+          ],
+          themeAliases:[
+            context.normalizeTheme(null),
+            context.normalizeTheme("auto"),
+            context.normalizeTheme("DEFAULT"),
+            context.normalizeTheme("DARK"),
+            context.normalizeTheme('"light"'),
+            context.normalizeTheme("unsupported"),
+          ],
+        }));
+        """
+    )
+    completed = subprocess.run(  # noqa: S603
+        [node, "--input-type=module", "-e", script, str(app_path)],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stderr
+    assert json.loads(completed.stdout) == {
+        "language": [
+            {"value": "zh-CN", "label": "中文"},
+            {"value": "en", "label": "English"},
+        ],
+        "theme": [
+            {"value": "system", "label": "跟随系统"},
+            {"value": "light", "label": "浅色"},
+            {"value": "dark", "label": "深色"},
+        ],
+        "languageAliases": ["zh-CN", "en", "zh-CN"],
+        "themeAliases": ["system", "system", "system", "dark", "light", "system"],
+    }
 
 
 def test_error_state_explains_impact_owner_next_step_and_focus() -> None:

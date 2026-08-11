@@ -799,3 +799,32 @@ final result: passed
 - Visual changes did not alter server RBAC, team/account isolation, idempotency, risk controls, shadow/live separation, or default-disabled live sending and funding gates.
 
 final result: passed
+
+---
+
+# Design QA — Compact language and theme dropdowns
+
+## Scope and evidence
+
+- Desktop light control: `/private/tmp/trading-preferences-1440-light.png`
+- Language menu: `/private/tmp/trading-language-menu-1440-light.png`
+- Desktop dark theme menu: `/private/tmp/trading-theme-menu-1440-dark.png`
+- Tablet: `/private/tmp/trading-preferences-1024-light.png`
+- Mobile: `/private/tmp/trading-preferences-430-light.png` and `/private/tmp/trading-preferences-390-dark.png`
+
+## Browser acceptance
+
+1. Information density: passed. Language and theme now use two equal-width compact controls rather than a standalone language action and three persistent theme buttons. Both triggers show their current value and a disclosure arrow.
+2. Configurability: passed. The language menu is generated from one option configuration and currently exposes `中文` and `English`; theme uses the same rendering path for `跟随系统`, `浅色`, and `深色`.
+3. Keyboard and ARIA: passed. Triggers expose `aria-haspopup="listbox"`, controlled listboxes expose selected options, Arrow keys move option focus, Escape closes and restores trigger focus, and outside clicks close only the open preference menu.
+4. Persistence: passed. English survived a reload before the UI was returned to Chinese. Dark survived reload, entering a workspace, switching to `NineHeavens`, and switching back to `Default Workspace`. Final preference was restored to `system`, resolving to the current light OS scheme.
+5. Responsive behavior: passed. Browser-measured document width equaled the viewport at 1440, 1024, 430, and 390 CSS pixels. The user panel, both controls, and open option menus stayed within each viewport without horizontal overflow.
+6. Theme parity: passed. The same labels, selected state, focus treatment, and actions remain available in light and dark themes. The system preference retains the live `prefers-color-scheme` listener; manual choices remain stable until changed.
+7. Runtime quality: passed. Latest local service returned live/ready state, the tested page loaded the `v160` frontend shell, and browser console warnings and errors were 0.
+
+## Safety boundary
+
+- Frontend preference controls only; no backend permission, account, proposal, review, risk, execution, funding, signing, or broadcast path changed.
+- Existing workspace/team/account isolation and default-disabled dangerous capabilities remain unchanged.
+
+final result: passed

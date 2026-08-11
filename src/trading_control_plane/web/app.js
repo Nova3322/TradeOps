@@ -21,6 +21,9 @@ document.addEventListener('click', (event) => {
   if (link) { event.preventDefault(); navigate(link.getAttribute('href')); }
   if (event.target.closest('[data-retry]')) route();
   if (!scopeControl.contains(event.target)) closeWorkspaceSwitcher();
+  preferenceSelects.forEach((select, kind) => {
+    if (!select.contains(event.target)) closePreferenceDropdown(kind);
+  });
   if (!userMenu.contains(event.target)) closeUserMenu();
 });
 window.addEventListener('popstate', route);
@@ -46,6 +49,10 @@ scopeSwitcher.addEventListener('click', () => {
 document.addEventListener('keydown', (event) => {
   if (event.key === 'Escape' && sidebar.classList.contains('open')) closeMobileNav();
   if (event.key === 'Escape' && !scopeSwitcherMenu.hidden) closeWorkspaceSwitcher({restoreFocus:true});
+  if (event.key === 'Escape' && closePreferenceDropdowns({restoreFocus:true})) {
+    event.preventDefault();
+    return;
+  }
   if (event.key === 'Escape' && !userMenuPanel.hidden) closeUserMenu({restoreFocus:true});
 });
 document.querySelectorAll('[data-close-dialog]').forEach(button => button.addEventListener('click', () => dialog.close()));
@@ -66,6 +73,7 @@ document.querySelector('#logout-button').addEventListener('click', async (event)
   } catch (error) { showApiError(error); }
 }));
 function closeUserMenu({restoreFocus = false} = {}) {
+  closePreferenceDropdowns();
   userMenuPanel.hidden = true;
   identityChip.setAttribute('aria-expanded', 'false');
   if (restoreFocus && !userMenu.hidden) identityChip.focus();
@@ -78,6 +86,139 @@ identityChip.addEventListener('click', () => {
   identityChip.setAttribute('aria-expanded', String(opening));
   if (opening) userMenuPanel.querySelector('button, input, summary')?.focus({preventScroll:true});
 });
+
+function preferenceElements(kind) {
+  const select = preferenceSelects.get(kind);
+  return {
+    select,
+    trigger:select?.querySelector('.preference-trigger'),
+    value:select?.querySelector('[data-preference-value]'),
+    menu:select?.querySelector('.preference-menu'),
+  };
+}
+
+function preferenceOptionLabel(kind, option) {
+  return kind === 'language' ? option.label : localizedText(option.label);
+}
+
+function activePreferenceValue(kind) {
+  return kind === 'language' ? currentLanguage : currentThemePreference;
+}
+
+function renderPreferenceDropdown(kind) {
+  const {value, menu} = preferenceElements(kind);
+  const options = PREFERENCE_OPTIONS[kind] || [];
+  const selectedValue = activePreferenceValue(kind);
+  menu.innerHTML = options.map(option => `<button class="preference-option" type="button" role="option" tabindex="-1" data-preference-option="${escapeHtml(option.value)}" aria-selected="${String(option.value === selectedValue)}">${escapeHtml(preferenceOptionLabel(kind, option))}</button>`).join('');
+  const selected = options.find(option => option.value === selectedValue) || options[0];
+  value.textContent = selected ? preferenceOptionLabel(kind, selected) : '—';
+}
+
+function updatePreferenceDropdown(kind, selectedValue) {
+  const {value, menu} = preferenceElements(kind);
+  const options = PREFERENCE_OPTIONS[kind] || [];
+  const selected = options.find(option => option.value === selectedValue) || options[0];
+  value.textContent = selected ? preferenceOptionLabel(kind, selected) : '—';
+  menu.querySelectorAll('[data-preference-option]').forEach(option => {
+    option.setAttribute('aria-selected', String(option.dataset.preferenceOption === selectedValue));
+  });
+}
+
+function closePreferenceDropdown(kind, {restoreFocus = false} = {}) {
+  const {trigger, menu} = preferenceElements(kind);
+  if (!menu || menu.hidden) return false;
+  menu.hidden = true;
+  trigger.setAttribute('aria-expanded', 'false');
+  if (restoreFocus) trigger.focus({preventScroll:true});
+  return true;
+}
+
+function closePreferenceDropdowns({except = null, restoreFocus = false} = {}) {
+  let closed = false;
+  preferenceSelects.forEach((_select, kind) => {
+    if (kind !== except) closed = closePreferenceDropdown(kind, {restoreFocus}) || closed;
+  });
+  return closed;
+}
+
+function openPreferenceDropdown(kind, {focus = 'selected'} = {}) {
+  const {trigger, menu} = preferenceElements(kind);
+  closePreferenceDropdowns({except:kind});
+  menu.hidden = false;
+  trigger.setAttribute('aria-expanded', 'true');
+  const options = [...menu.querySelectorAll('[data-preference-option]')];
+  const selectedIndex = Math.max(0, options.findIndex(option => option.getAttribute('aria-selected') === 'true'));
+  const index = focus === 'first' ? 0 : focus === 'last' ? options.length - 1 : selectedIndex;
+  options[index]?.focus({preventScroll:true});
+}
+
+function selectPreference(kind, value) {
+  if (!(PREFERENCE_OPTIONS[kind] || []).some(option => option.value === value)) return;
+  if (kind === 'theme') {
+    applyTheme(value, {persist:true});
+    closePreferenceDropdown(kind, {restoreFocus:true});
+    return;
+  }
+  const nextLanguage = normalizeLanguagePreference(value);
+  if (nextLanguage === currentLanguage) {
+    closePreferenceDropdown(kind, {restoreFocus:true});
+    return;
+  }
+  currentLanguage = nextLanguage;
+  localStorage.setItem(LANGUAGE_STORAGE_KEY, currentLanguage);
+  updatePreferenceDropdown(kind, currentLanguage);
+  closePreferenceDropdown(kind, {restoreFocus:true});
+  location.reload();
+}
+
+function movePreferenceFocus(menu, currentOption, key) {
+  const options = [...menu.querySelectorAll('[data-preference-option]')];
+  if (!options.length) return;
+  const currentIndex = Math.max(0, options.indexOf(currentOption));
+  const targetIndex = key === 'Home'
+    ? 0
+    : key === 'End'
+      ? options.length - 1
+      : (currentIndex + (key === 'ArrowDown' ? 1 : -1) + options.length) % options.length;
+  options[targetIndex].focus({preventScroll:true});
+}
+
+function initializePreferenceDropdowns() {
+  preferenceSelects.forEach((select, kind) => {
+    renderPreferenceDropdown(kind);
+    const {trigger, menu} = preferenceElements(kind);
+    trigger.addEventListener('click', () => {
+      if (menu.hidden) openPreferenceDropdown(kind);
+      else closePreferenceDropdown(kind, {restoreFocus:true});
+    });
+    trigger.addEventListener('keydown', event => {
+      if (!['ArrowDown', 'ArrowUp'].includes(event.key)) return;
+      event.preventDefault();
+      openPreferenceDropdown(kind, {focus:event.key === 'ArrowUp' ? 'last' : 'selected'});
+    });
+    menu.addEventListener('click', event => {
+      const option = event.target.closest('[data-preference-option]');
+      if (option) selectPreference(kind, option.dataset.preferenceOption);
+    });
+    menu.addEventListener('keydown', event => {
+      const option = event.target.closest('[data-preference-option]');
+      if (!option) return;
+      if (['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key)) {
+        event.preventDefault();
+        movePreferenceFocus(menu, option, event.key);
+      } else if (['Enter', ' '].includes(event.key)) {
+        event.preventDefault();
+        selectPreference(kind, option.dataset.preferenceOption);
+      } else if (event.key === 'Escape') {
+        event.preventDefault();
+        event.stopPropagation();
+        closePreferenceDropdown(kind, {restoreFocus:true});
+      } else if (event.key === 'Tab') {
+        closePreferenceDropdown(kind);
+      }
+    });
+  });
+}
 
 passwordChangeForm.addEventListener('input', () => {
   passwordChangeForm.querySelector('.form-error').textContent = '';
@@ -115,30 +256,30 @@ passwordChangeForm.addEventListener('submit', async (event) => {
 
 const preferredThemeMedia = matchMedia('(prefers-color-scheme: dark)');
 function applyTheme(preference, {persist = false} = {}) {
-  const normalizedPreference = ['light', 'dark'].includes(preference) ? preference : 'system';
+  const normalizedPreference = normalizeThemePreference(preference);
   const resolved = normalizedPreference === 'system'
     ? (preferredThemeMedia.matches ? 'dark' : 'light')
     : normalizedPreference;
+  currentThemePreference = normalizedPreference;
   document.documentElement.dataset.theme = resolved;
   document.documentElement.dataset.themePreference = normalizedPreference;
-  themeOptionButtons.forEach(button => {
-    button.setAttribute('aria-pressed', String(button.dataset.themeOption === normalizedPreference));
-  });
+  updatePreferenceDropdown('theme', normalizedPreference);
   if (themeColorMeta) themeColorMeta.content = resolved === 'dark' ? '#0b100f' : '#f4f6f3';
   if (persist) localStorage.setItem(THEME_STORAGE_KEY, normalizedPreference);
 }
-themeOptionButtons.forEach(button => button.addEventListener('click', () => {
-  applyTheme(button.dataset.themeOption, {persist:true});
-}));
 preferredThemeMedia.addEventListener?.('change', () => {
-  if ((localStorage.getItem(THEME_STORAGE_KEY) || 'system') === 'system') applyTheme('system');
+  if (currentThemePreference === 'system') applyTheme('system');
 });
-languageToggle.addEventListener('click', () => {
-  currentLanguage = currentLanguage === 'en' ? 'zh-CN' : 'en';
+const storedLanguagePreference = localStorage.getItem(LANGUAGE_STORAGE_KEY);
+if (storedLanguagePreference && storedLanguagePreference !== currentLanguage) {
   localStorage.setItem(LANGUAGE_STORAGE_KEY, currentLanguage);
-  location.reload();
+}
+const storedThemePreference = localStorage.getItem(THEME_STORAGE_KEY);
+currentThemePreference = normalizeThemePreference(storedThemePreference);
+initializePreferenceDropdowns();
+applyTheme(currentThemePreference, {
+  persist:Boolean(storedThemePreference && storedThemePreference !== currentThemePreference),
 });
-applyTheme(localStorage.getItem(THEME_STORAGE_KEY) || 'system');
 applyLanguageToDocument();
 if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js').catch(() => {});
 syncNavigationMode();

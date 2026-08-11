@@ -13,8 +13,9 @@ const scopeControl = document.querySelector('#scope-control');
 const scopeSwitcher = document.querySelector('#scope-switcher');
 const scopeSwitcherMenu = document.querySelector('#workspace-switcher-menu');
 const environmentBadge = document.querySelector('#environment-badge');
-const languageToggle = document.querySelector('#language-toggle');
-const themeOptionButtons = [...document.querySelectorAll('[data-theme-option]')];
+const preferenceSelects = new Map(
+  [...document.querySelectorAll('[data-preference-select]')].map(element => [element.dataset.preferenceSelect, element]),
+);
 const themeColorMeta = document.querySelector('meta[name="theme-color"]');
 const mobileNavToggle = document.querySelector('#mobile-nav-toggle');
 const mobileSessionSummary = document.querySelector('#mobile-session-summary');
@@ -43,11 +44,48 @@ let mobileNavFocusToken = 0;
 const REQUEST_TIMEOUT_MS = 15000;
 const LANGUAGE_STORAGE_KEY = 'trading-language';
 const THEME_STORAGE_KEY = 'trading-theme';
-let currentLanguage = localStorage.getItem(LANGUAGE_STORAGE_KEY) === 'en' ? 'en' : 'zh-CN';
+const PREFERENCE_OPTIONS = Object.freeze({
+  language:Object.freeze([
+    Object.freeze({value:'zh-CN', label:'中文'}),
+    Object.freeze({value:'en', label:'English'}),
+  ]),
+  theme:Object.freeze([
+    Object.freeze({value:'system', label:'跟随系统'}),
+    Object.freeze({value:'light', label:'浅色'}),
+    Object.freeze({value:'dark', label:'深色'}),
+  ]),
+});
+const LEGACY_THEME_PREFERENCE_ALIASES = Object.freeze({
+  auto:'system', default:'system', os:'system', 'follow-system':'system',
+});
+
+function normalizeLanguagePreference(value) {
+  const normalized = String(value || '').trim();
+  const aliases = {'zh':'zh-CN', 'zh-cn':'zh-CN', 'en-us':'en', 'en-gb':'en'};
+  const candidate = aliases[normalized.toLowerCase()] || normalized;
+  return PREFERENCE_OPTIONS.language.some(option => option.value === candidate)
+    ? candidate
+    : PREFERENCE_OPTIONS.language[0].value;
+}
+
+function normalizeThemePreference(value) {
+  let normalized = String(value || '').trim();
+  if (normalized.startsWith('"') && normalized.endsWith('"')) {
+    try { normalized = JSON.parse(normalized); } catch (_error) { normalized = ''; }
+  }
+  normalized = String(normalized || '').trim().toLowerCase();
+  const candidate = LEGACY_THEME_PREFERENCE_ALIASES[normalized] || normalized || 'system';
+  return PREFERENCE_OPTIONS.theme.some(option => option.value === candidate)
+    ? candidate
+    : 'system';
+}
+
+let currentLanguage = normalizeLanguagePreference(localStorage.getItem(LANGUAGE_STORAGE_KEY));
+let currentThemePreference = 'system';
 
 const ENGLISH_EXACT = new Map(Object.entries({
   '交易控制台':'Trading Console', '交易控制台首页':'Trading Console home', '生产交易管理':'Production trading operations', '生产环境':'Production',
-  '中英切换':'Chinese / English', '切换中英文':'Switch between Chinese and English', '主题偏好':'Theme preference', '跟随系统':'System', '浅色':'Light', '深色':'Dark', '菜单':'Menu',
+  '中英切换':'Chinese / English', '切换中英文':'Switch between Chinese and English', '主题偏好':'Theme preference', '界面语言':'Language', '主题模式':'Theme', '跟随系统':'System', '浅色':'Light', '深色':'Dark', '菜单':'Menu',
   '用户菜单':'User menu', '登录身份':'Sign-in identity', '密码登录':'Password sign-in', '内部会话':'Internal session',
   '当前工作区':'Current workspace', '默认团队':'Default team', '当前职责':'Current role', '个人设置':'Personal settings', '个人偏好':'Preferences',
   '安全':'Security', '修改登录密码':'Change sign-in password', '展开':'Expand', '当前密码':'Current password', '新密码':'New password', '确认新密码':'Confirm new password',
