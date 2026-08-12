@@ -244,11 +244,12 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
 
     assert response.status_code == 200
     assert "交易控制台" in response.text
-    assert "/assets/app-core.js?v=171" in response.text
+    assert "/assets/app-core.js?v=176" in response.text
     assert "/assets/workspace.js?v=171" in response.text
     assert "/assets/app.js?v=170" in response.text
     assert 'href="/signals"' in response.text
-    assert "/assets/styles.css?v=74" in response.text
+    assert "/assets/styles.css?v=77" in response.text
+    assert "/assets/accounts.js?v=172" in response.text
     assert "/assets/reporting.js?v=171" in response.text
     assert 'href="/assets/tradingops-logo.png" type="image/png"' in response.text
     assert '<img src="/assets/tradingops-logo.png" alt="">' in response.text
@@ -288,6 +289,8 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
         "/workspaces",
         "/venues",
         "/venues/hyperliquid",
+        "/venues/binance-main",
+        "/venues/shadow",
         "/webhook-signals",
         "/opportunities/defaults",
         "/proposals",
@@ -468,7 +471,7 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
         in app_javascript.text
     )
     assert "LOCAL:'本地运行'" in app_javascript.text
-    assert "fmtExchangeAccountCopy(item.next_action)" in app_javascript.text
+    assert "exchangeAccountListState(item, runtime)" in app_javascript.text
     assert "交易能力已关闭；连接状态不会开启下单" in app_javascript.text  # noqa: RUF001
     assert "exchange-trading-form" in app_javascript.text
     assert "/trading-eligibility" in app_javascript.text
@@ -689,7 +692,7 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
 
     service_worker = get(app, "/sw.js")
     assert service_worker.status_code == 200
-    assert "trading-shell-v145" in service_worker.text
+    assert "trading-shell-v147" in service_worker.text
     assert "/assets/tradingops-logo.png" in service_worker.text
     assert "/assets/tradingops-icon.svg" in service_worker.text
     assert "/assets/icon.svg" not in service_worker.text
@@ -1984,8 +1987,8 @@ def test_system_and_venue_pages_distinguish_read_only_snapshots_from_live_execut
     assert "生产账户 ${accountId}" not in source
     assert "生产账户 ${check.scope.account_id}" not in source
     assert "独立安全开关" in source
-    assert "OKX 与 Bybit 当前严格限定 USDT 线性永续" in source
-    assert "['BINANCE','HYPERLIQUID','OKX','BYBIT'].includes(selectedVenue)" in source
+    assert "USDT 线性永续范围" in source
+    assert "['ALL','SHADOW','BINANCE','HYPERLIQUID','OKX','BYBIT'].includes(selectedVenue)" in source
     assert "shortId(accountId)" not in source
     assert 'class="table-wrap is-scrollable venue-fact-table"' in source
     assert "connectionCategoryEnglishLabels" in source
@@ -2007,6 +2010,65 @@ def test_system_and_venue_pages_distinguish_read_only_snapshots_from_live_execut
     assert ".connection-status-table tr { display: block;" in styles
     assert ".connection-scroll-hint { display: none; }" in styles
     assert ".callout.tone-attention" in styles
+
+
+def test_venue_list_is_compact_and_account_configuration_moves_to_detail() -> None:
+    source = (WEB_ROOT / "accounts.js").read_text()
+    routes = (WEB_ROOT / "app-core.js").read_text()
+    styles = (WEB_ROOT / "styles.css").read_text()
+
+    list_page = source.split("async function renderVenueAccounts()", maxsplit=1)[1].split(
+        "async function renderVenueAccountDetail", maxsplit=1
+    )[0]
+    detail_page = source.split("function exchangeAccountDetailConfiguration", maxsplit=1)[1]
+
+    assert "当前空间" in list_page
+    assert "账户总数" in list_page
+    assert "实盘异常" in list_page
+    assert "实盘账户" in list_page
+    assert "模拟账户" in list_page
+    assert "账户筛选" in list_page
+    assert "最近同步或检查" in list_page
+    assert "state.action" in list_page
+    assert "接入实盘账户" in list_page
+    assert "account-primary-action" in list_page
+    assert "查看详情" not in list_page
+    assert "account-card-actions" not in list_page
+    assert "connect-account-dialog" in source
+    assert "showModal()" in list_page
+    assert "/api/trading-mode" in list_page
+    assert "exchange-credential-form" not in list_page
+    assert "freqtrade-worker-form" not in list_page
+    assert "venueFactSections" not in list_page
+    assert "凭据配置与轮换" in detail_page
+    assert "连接与连续同步" in detail_page
+    assert "账户状态及历史快照" in detail_page
+    assert "Worker 与交易资格高级设置" in detail_page
+    assert "测试 Fixture 账户已隐藏" in source
+    assert "测试 Fixture</span>" in source
+    assert "最近只读探针成功，但连续同步当前关闭" in source
+    assert "探针成功 · 同步关闭" in source
+    assert "No action is required" not in source
+    assert "SWITCH_TO_SHADOW" in source
+    assert "expected_version:data.version" in source
+    assert "idempotency_key:crypto.randomUUID()" in source
+    assert "renderVenueAccountDetail(venueAccountMatch[1])" in routes
+    assert "path === '/venues/shadow'" in routes
+    assert "path.startsWith('/venues/')" in routes
+    assert ".account-detail-config-grid" in styles
+    assert ".account-list-facts { grid-template-columns: 1fr; }" in styles
+    assert ".account-list-hero, .account-list-section-head { display: grid;" in styles
+    assert ".account-list-stats { grid-template-columns: 1fr; }" in styles
+
+
+def test_venue_account_detail_route_serves_the_spa_shell() -> None:
+    app = create_app(settings(), FakeDatabase(ready=False))
+
+    response = get(app, "/venues/binance-main")
+
+    assert response.status_code == 200
+    assert "交易控制台" in response.text
+    assert "/assets/accounts.js?v=172" in response.text
 
 
 def test_venue_snapshot_empty_states_do_not_claim_current_account_state() -> None:

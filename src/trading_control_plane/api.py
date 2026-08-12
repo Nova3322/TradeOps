@@ -1572,11 +1572,17 @@ def create_app(
         @app.get("/venues", include_in_schema=False)
         @app.get("/venues/binance", include_in_schema=False)
         @app.get("/venues/hyperliquid", include_in_schema=False)
+        @app.get("/venues/{account_id}", include_in_schema=False)
         @app.get("/proposals/{proposal_id}", include_in_schema=False)
         @app.get("/campaigns/{campaign_id}", include_in_schema=False)
-        def web_app(proposal_id: str | None = None, campaign_id: str | None = None) -> FileResponse:
+        def web_app(
+            proposal_id: str | None = None,
+            campaign_id: str | None = None,
+            account_id: str | None = None,
+        ) -> FileResponse:
             del proposal_id
             del campaign_id
+            del account_id
             return FileResponse(WEB_ROOT / "index.html")
 
     return app

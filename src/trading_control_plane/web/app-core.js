@@ -87,13 +87,13 @@ const ENGLISH_EXACT = new Map(Object.entries({
   '交易控制台':'Trading Console', '交易控制台首页':'Trading Console home', '生产交易管理':'Production trading operations', '生产环境':'Production',
   '中英切换':'Chinese / English', '切换中英文':'Switch between Chinese and English', '主题偏好':'Theme preference', '界面语言':'Language', '主题模式':'Theme', '跟随系统':'System', '浅色':'Light', '深色':'Dark', '菜单':'Menu',
   '用户菜单':'User menu', '登录身份':'Sign-in identity', '密码登录':'Password sign-in', '内部会话':'Internal session',
-  '当前工作区':'Current workspace', '默认团队':'Default team', '当前职责':'Current role', '个人设置':'Personal settings', '个人偏好':'Preferences',
+  '当前工作区':'Current workspace', '当前空间':'Current space', '当前职责':'Current role', '个人设置':'Personal settings', '个人偏好':'Preferences',
   '安全':'Security', '修改登录密码':'Change sign-in password', '展开':'Expand', '当前密码':'Current password', '新密码':'New password', '确认新密码':'Confirm new password',
   '修改后会撤销其他设备和浏览器中的旧会话。':'Changing your password revokes older sessions on other devices and browsers.', '更新密码':'Update password',
   '两次输入的新密码不一致。':'The new-password entries do not match.', '密码已更新；其他旧会话已撤销':'Password updated; older sessions have been revoked',
   '只读用户':'Observer', '提案发起人':'Proposer', '审核人':'Reviewer', '交易运维人员':'Trading operator',
   '资金管理员':'Treasury administrator', '系统管理员':'Super administrator',
-  '主导航':'Main navigation', '工作台':'Workspace', '团队配置':'Team setup', '治理与安全':'Governance and safety', '当前范围':'Current scope', '当前任务':'Current tasks', '实时信号':'Live signals', '实时机会':'Live opportunities', 'Webhook 信号':'Webhook signals', '审核队列':'Review queue',
+  '主导航':'Main navigation', '工作台':'Workspace', '空间配置':'Space setup', '治理与安全':'Governance and safety', '当前范围':'Current scope', '当前任务':'Current tasks', '实时信号':'Live signals', '实时机会':'Live opportunities', 'Webhook 信号':'Webhook signals', '审核队列':'Review queue',
   '交易任务':'Trades', '绩效报表':'Performance reports', '交易模式':'Trading mode', '影子模式':'Shadow mode', '通知中心':'Notification center', '系统状态':'System status', '资金':'Capital', '异常':'Exceptions',
   '交易账户':'Exchange accounts', '成员权限':'Access control',
   '业务数据库已连接':'Business database connected', '数据缺失时自动阻止交易':'Missing data blocks trading automatically',
@@ -1472,7 +1472,7 @@ async function route() {
   }
   setShell(true);
   const teamSetupPaths = new Set(['/admin/users', '/admin/agents', '/profile/api-access', '/venues', '/signals', '/webhook-signals', '/notifications', '/risk', '/shadow', '/trading-mode']);
-  if (!session.active_workspace || !session.active_team || (!session.active_team.trading_enabled && !teamSetupPaths.has(path))) {
+  if (!session.active_workspace || !session.active_team || (!session.active_team.trading_enabled && !teamSetupPaths.has(path) && !path.startsWith('/venues/'))) {
     renderScopeSetup();
     enhanceRenderedPage();
     return;
@@ -1506,13 +1506,21 @@ async function route() {
     else if (path === '/risk') await renderCampaignFacts('risk');
     else if (path === '/capital') await renderCapitalCenter();
     else if (path === '/exceptions') { history.replaceState({}, '', '/campaigns/alerts'); await renderRuntimeAlerts(); }
-    else if (path === '/venues' || path === '/venues/binance' || path === '/venues/hyperliquid') await renderVenueFacts();
+    else if (path === '/venues') await renderVenueAccounts();
+    else if (path === '/venues/binance' || path === '/venues/hyperliquid') {
+      const legacyVenue = path.endsWith('/hyperliquid') ? 'HYPERLIQUID' : 'BINANCE';
+      history.replaceState({}, '', `/venues?venue=${legacyVenue}`);
+      await renderVenueAccounts();
+    }
+    else if (path === '/venues/shadow') await renderVenueShadowAccount();
     else if (path === '/admin/users') await renderAccessManagement();
     else if (path === '/profile/api-access' || path === '/admin/agents') await renderApiAccess();
     else {
       const campaignMatch = path.match(/^\/campaigns\/([0-9a-f-]+)$/i);
       const proposalMatch = path.match(/^\/proposals\/([0-9a-f-]+)$/i);
-      if (campaignMatch) await renderCampaignDetail(campaignMatch[1]);
+      const venueAccountMatch = path.match(/^\/venues\/([^/]+)$/);
+      if (venueAccountMatch) await renderVenueAccountDetail(venueAccountMatch[1]);
+      else if (campaignMatch) await renderCampaignDetail(campaignMatch[1]);
       else if (proposalMatch) await renderProposalDetail(proposalMatch[1]);
       else main.innerHTML = '<section class="empty-state"><div><h2>页面不存在</h2><a class="primary" href="/opportunities" data-link>返回机会页</a></div></section>';
     }

@@ -8,7 +8,7 @@
     <link rel="manifest" href="/manifest.webmanifest">
     <link rel="icon" href="/assets/tradingops-logo.png" type="image/png">
     <link rel="apple-touch-icon" href="/assets/tradingops-logo.png">
-    <link rel="stylesheet" href="/assets/styles.css?v=74">
+    <link rel="stylesheet" href="/assets/styles.css?v=77">
     <title>交易控制台</title>
   </head>
   <body>
@@ -24,7 +24,7 @@
             <button id="identity-chip" class="identity-chip" type="button" aria-haspopup="dialog" aria-expanded="false" aria-controls="user-menu-panel"></button>
             <section id="user-menu-panel" class="user-menu-panel" role="dialog" aria-label="用户菜单" hidden>
               <header class="user-menu-head"><div><small>登录身份</small><strong data-user-menu-name>—</strong></div><span data-user-menu-auth>密码登录</span></header>
-              <dl class="user-menu-context"><div><dt>当前工作区</dt><dd data-user-menu-workspace>—</dd></div><div><dt>默认团队</dt><dd data-user-menu-team>—</dd></div><div><dt>当前职责</dt><dd data-user-menu-role>—</dd></div></dl>
+              <dl class="user-menu-context"><div><dt>当前工作区</dt><dd data-user-menu-workspace>—</dd></div><div><dt>当前空间</dt><dd data-user-menu-team>—</dd></div><div><dt>当前职责</dt><dd data-user-menu-role>—</dd></div></dl>
               <a class="user-menu-api-link" href="/profile/api-access" data-link><span><small>个人中心</small><b>API 接入</b></span><strong>管理自己的 API Agent</strong></a>
               <section class="user-preferences" aria-labelledby="personal-preferences-title">
                 <div class="user-menu-section-head"><div><small>个人设置</small><h2 id="personal-preferences-title">个人偏好</h2></div></div>
@@ -82,7 +82,7 @@
             <a href="/results" data-link data-nav-capability="results.view"><span>▦</span>绩效报表</a>
           </div>
           <div class="nav-section" data-nav-section>
-            <p class="nav-section-label">团队配置</p>
+            <p class="nav-section-label">空间配置</p>
             <a href="/signals" data-link data-nav-capability="signal.view"><span>⌖</span>信号源</a>
             <a href="/venues" data-link data-nav-capability="venue.view"><span>◫</span>交易账户</a>
             <a href="/trading-mode" data-link data-nav-capability="venue.view"><span>◐</span>交易模式</a>
@@ -154,7 +154,7 @@
       </form>
     </dialog>
     <div id="toast" class="toast" role="status" aria-live="polite"></div>
-    <script defer src="/assets/app-core.js?v=171"></script>
+    <script defer src="/assets/app-core.js?v=176"></script>
     <script defer src="/assets/workspace.js?v=171"></script>
     <script defer src="/assets/signals.js?v=171"></script>
     <script defer src="/assets/proposals.js?v=170"></script>
@@ -162,7 +162,7 @@
     <script defer src="/assets/execution.js?v=170"></script>
     <script defer src="/assets/capital.js?v=170"></script>
     <script defer src="/assets/reporting.js?v=171"></script>
-    <script defer src="/assets/accounts.js?v=170"></script>
+    <script defer src="/assets/accounts.js?v=172"></script>
     <script defer src="/assets/app.js?v=170"></script>
   </body>
 </html>
