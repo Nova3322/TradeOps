@@ -6,5 +6,5 @@
   "display": "standalone",
   "background_color": "#f1f4f0",
   "theme_color": "#101616",
-  "icons": [{"src": "/assets/icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any maskable"}]
+  "icons": [{"src": "/assets/tradingops-icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any maskable"}]
 }

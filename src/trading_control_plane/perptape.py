@@ -1116,6 +1116,18 @@ class PerptapeClient:
                 self._consecutive_remote_rate_limits,
             )
 
+    def with_api_key(self, api_key: str) -> PerptapeClient:
+        """Create an isolated team client while preserving the tested transport contract."""
+
+        return PerptapeClient(
+            base_url=self._base_url,
+            api_key=api_key,
+            contract_version=self._contract_version,
+            cache_ttl=self._cache_ttl,
+            timeout_seconds=self._timeout_seconds,
+            fetcher=self._fetcher,
+        )
+
     def list_candidates(self, *, now: datetime) -> list[PerptapeCandidate]:
         return list(self.refresh(now=now).candidates)
 
@@ -1210,7 +1222,7 @@ class PerptapeClient:
             next_allowed_at = (
                 datetime.fromtimestamp(int(rate_limit["nextAllowedAt"]) / 1000, UTC)
                 if isinstance(rate_limit, dict) and rate_limit.get("nextAllowedAt") is not None
-                else now
+                else max(now, generated_at)
             )
         except (KeyError, OSError, OverflowError, TypeError, ValueError) as exc:
             raise DomainRejected(

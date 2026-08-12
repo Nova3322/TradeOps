@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+from datetime import datetime
 from decimal import Decimal
 from typing import Literal
 from uuid import UUID
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, Field, SecretStr, field_validator, model_validator
 
 from trading_control_plane.domain import (
     CapitalDirection,
@@ -24,6 +25,8 @@ AccessRole = Literal[
     "TREASURY_ADMIN",
     "SYSTEM_ADMIN",
 ]
+AgentAccessRole = Literal["OBSERVER", "PROPOSER", "REVIEWER"]
+VenueScope = Literal["BINANCE", "HYPERLIQUID", "OKX", "BYBIT"]
 
 
 class MockLoginRequest(BaseModel):
@@ -35,12 +38,19 @@ class PasswordLoginRequest(BaseModel):
     password: str = Field(min_length=12, max_length=128)
 
 
+class PasswordChangeRequest(BaseModel):
+    current_password: str = Field(min_length=12, max_length=128)
+    new_password: str = Field(min_length=12, max_length=128)
+    expected_auth_version: int = Field(ge=1)
+    idempotency_key: str = Field(min_length=1, max_length=160)
+
+
 class ManagedUserCreateRequest(BaseModel):
     username: str = Field(min_length=1, max_length=120, pattern=r"^[A-Za-z0-9._-]+$")
     password: str = Field(min_length=12, max_length=128)
     roles: list[AccessRole] = Field(min_length=1, max_length=6)
     account_scope: str | None = Field(default=None, min_length=1, max_length=120)
-    venue_scope: str | None = Field(default=None, min_length=1, max_length=64)
+    venue_scope: VenueScope | None = None
 
     @field_validator("roles")
     @classmethod
@@ -55,7 +65,7 @@ class ManagedUserAccessRequest(BaseModel):
     active: bool = True
     new_password: str | None = Field(default=None, min_length=12, max_length=128)
     account_scope: str | None = Field(default=None, min_length=1, max_length=120)
-    venue_scope: str | None = Field(default=None, min_length=1, max_length=64)
+    venue_scope: VenueScope | None = None
 
     @field_validator("roles")
     @classmethod
@@ -63,6 +73,479 @@ class ManagedUserAccessRequest(BaseModel):
         if len(value) != len(set(value)):
             raise ValueError("roles must not contain duplicates")
         return value
+
+
+class AgentCreateRequest(BaseModel):
+    username: str = Field(min_length=1, max_length=120, pattern=r"^[A-Za-z0-9._-]+$")
+    roles: list[AgentAccessRole] = Field(min_length=1, max_length=3)
+    account_scope: str = Field(min_length=1, max_length=120)
+    venue_scope: VenueScope
+    expires_in_days: int = Field(default=90, ge=1, le=365)
+    idempotency_key: str = Field(min_length=1, max_length=160)
+
+    @field_validator("roles")
+    @classmethod
+    def unique_roles(cls, value: list[AgentAccessRole]) -> list[AgentAccessRole]:
+        if len(value) != len(set(value)):
+            raise ValueError("roles must not contain duplicates")
+        return value
+
+
+class AgentAccessRequest(BaseModel):
+    roles: list[AgentAccessRole] = Field(max_length=3)
+    active: bool = True
+    account_scope: str = Field(min_length=1, max_length=120)
+    venue_scope: VenueScope
+    expected_auth_version: int = Field(ge=1)
+    idempotency_key: str = Field(min_length=1, max_length=160)
+
+    @field_validator("roles")
+    @classmethod
+    def unique_roles(cls, value: list[AgentAccessRole]) -> list[AgentAccessRole]:
+        if len(value) != len(set(value)):
+            raise ValueError("roles must not contain duplicates")
+        return value
+
+    @model_validator(mode="after")
+    def require_active_role(self) -> AgentAccessRequest:
+        if self.active and not self.roles:
+            raise ValueError("an active agent requires a role")
+        return self
+
+
+class AgentTokenRotationRequest(BaseModel):
+    expected_token_version: int = Field(ge=1)
+    expires_in_days: int = Field(default=90, ge=1, le=365)
+    idempotency_key: str = Field(min_length=1, max_length=160)
+
+
+class ApiClientCreateRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=120, pattern=r"^[A-Za-z0-9._-]+$")
+    workspace_id: UUID
+    team_id: UUID
+    account_id: str = Field(min_length=1, max_length=120)
+    venue: VenueScope
+    expires_in_days: int = Field(default=90, ge=1, le=365)
+    idempotency_key: str = Field(min_length=1, max_length=160)
+
+
+class ApiClientStateRequest(BaseModel):
+    active: bool
+    expected_version: int = Field(ge=1)
+    idempotency_key: str = Field(min_length=1, max_length=160)
+
+
+class ApiClientRevokeRequest(BaseModel):
+    expected_version: int = Field(ge=1)
+    idempotency_key: str = Field(min_length=1, max_length=160)
+
+
+class WorkspaceCreateRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=120)
+    slug: str | None = Field(default=None, min_length=1, max_length=80)
+    idempotency_key: str = Field(min_length=1, max_length=160)
+
+
+class TeamCreateRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=120)
+    slug: str | None = Field(default=None, min_length=1, max_length=80)
+    idempotency_key: str = Field(min_length=1, max_length=160)
+
+
+class TeamShadowActivationRequest(BaseModel):
+    confirmation: Literal["SWITCH_TO_SHADOW"]
+    expected_version: int = Field(ge=1)
+    idempotency_key: str = Field(min_length=1, max_length=160)
+
+
+class TeamTradingModeRequest(BaseModel):
+    mode: Literal["LIVE", "SHADOW"]
+    confirmation: Literal["SWITCH_TO_LIVE", "SWITCH_TO_SHADOW"]
+    expected_version: int = Field(ge=1)
+    idempotency_key: str = Field(min_length=1, max_length=160)
+
+    @model_validator(mode="after")
+    def confirmation_matches_mode(self) -> TeamTradingModeRequest:
+        if self.confirmation != f"SWITCH_TO_{self.mode}":
+            raise ValueError("confirmation must match selected trading mode")
+        return self
+
+
+class ShadowAccountResetRequest(BaseModel):
+    confirmation: Literal["RESET_TO_100000_U"]
+    expected_version: int = Field(ge=1)
+    idempotency_key: str = Field(min_length=1, max_length=160)
+
+
+class AnalyticsReportCreateRequest(BaseModel):
+    engine: Literal["QUANTSTATS", "PYFOLIO"]
+    environment: Literal["SHADOW", "LIVE"]
+    account_id: str | None = Field(default=None, min_length=1, max_length=120)
+    venue: VenueScope | None = None
+    generation: int | None = Field(default=None, ge=1)
+    from_time: datetime
+    to_time: datetime
+    idempotency_key: str = Field(min_length=1, max_length=160)
+
+    @model_validator(mode="after")
+    def validate_report_scope(self) -> AnalyticsReportCreateRequest:
+        if self.environment == "SHADOW" and (self.account_id is not None or self.venue is not None):
+            raise ValueError("SHADOW reports use the Team unified virtual account")
+        if self.environment == "LIVE" and self.generation is not None:
+            raise ValueError("LIVE reports do not have a SHADOW generation")
+        return self
+
+
+class ShadowOrderCreateRequest(BaseModel):
+    account_id: str = Field(min_length=1, max_length=120)
+    venue: VenueScope
+    symbol: str | None = Field(default=None, min_length=1, max_length=120)
+    catalog_instrument_id: UUID | None = None
+    side: Literal["BUY", "SELL"]
+    order_type: Literal["MARKET", "LIMIT"]
+    quantity: Decimal = Field(gt=0)
+    limit_price: Decimal | None = Field(default=None, gt=0)
+    latest_price: Decimal | None = None
+    observed_at: datetime | None = None
+    price_tick: Decimal | None = None
+    quantity_step: Decimal | None = None
+    contract_multiplier: Decimal | None = None
+    is_derivative: bool = True
+    fee_bps: Decimal = Field(default=Decimal("4"), ge=0, le=100)
+    slippage_bps: Decimal = Field(default=Decimal("2"), ge=0, le=500)
+    idempotency_key: str = Field(min_length=1, max_length=160)
+
+    @model_validator(mode="after")
+    def validate_order_shape(self) -> ShadowOrderCreateRequest:
+        if self.symbol is None and self.catalog_instrument_id is None:
+            raise ValueError("symbol or catalog_instrument_id is required")
+        if self.order_type == "LIMIT" and self.limit_price is None:
+            raise ValueError("LIMIT order requires limit_price")
+        if self.order_type == "MARKET" and self.limit_price is not None:
+            raise ValueError("MARKET order cannot include limit_price")
+        return self
+
+
+class ShadowOrderMatchRequest(BaseModel):
+    expected_version: int = Field(ge=1)
+    latest_price: Decimal | None = None
+    observed_at: datetime | None = None
+    price_tick: Decimal | None = None
+    quantity_step: Decimal | None = None
+    contract_multiplier: Decimal | None = None
+    is_derivative: bool = True
+    fee_bps: Decimal = Field(default=Decimal("4"), ge=0, le=100)
+    slippage_bps: Decimal = Field(default=Decimal("2"), ge=0, le=500)
+    idempotency_key: str = Field(min_length=1, max_length=160)
+
+
+class ShadowProtectionCreateRequest(BaseModel):
+    trigger_type: Literal["STOP_LOSS", "TAKE_PROFIT"]
+    execution_type: Literal["MARKET", "LIMIT"]
+    trigger_price: Decimal = Field(gt=0)
+    limit_price: Decimal | None = Field(default=None, gt=0)
+    idempotency_key: str = Field(min_length=1, max_length=160)
+
+    @model_validator(mode="after")
+    def validate_protection_shape(self) -> ShadowProtectionCreateRequest:
+        if self.execution_type == "LIMIT" and self.limit_price is None:
+            raise ValueError("LIMIT protection requires limit_price")
+        if self.execution_type == "MARKET" and self.limit_price is not None:
+            raise ValueError("MARKET protection cannot include limit_price")
+        return self
+
+
+class ShadowScopeInitializeRequest(BaseModel):
+    account_id: str = Field(min_length=1, max_length=120)
+    venue: VenueScope
+    instrument_id: UUID
+    currency: str = Field(min_length=1, max_length=32, pattern=r"^[A-Za-z0-9._-]+$")
+    initial_equity: Decimal | None = Field(default=None, gt=0)
+    idempotency_key: str = Field(min_length=1, max_length=160)
+
+    @field_validator("currency")
+    @classmethod
+    def normalize_currency(cls, value: str) -> str:
+        return value.upper()
+
+
+class ShadowSimulationRequest(BaseModel):
+    expected_version: int = Field(ge=1)
+    reference_price: Decimal = Field(gt=0)
+    fee_bps: Decimal = Field(default=Decimal("4"), ge=0, le=100)
+    slippage_bps: Decimal = Field(default=Decimal("2"), ge=0, le=500)
+    idempotency_key: str = Field(min_length=1, max_length=160)
+
+
+class TeamMemberInviteRequest(BaseModel):
+    username: str = Field(min_length=1, max_length=120, pattern=r"^[A-Za-z0-9._-]+$")
+    roles: list[AccessRole] = Field(min_length=1, max_length=6)
+    account_scope: str | None = Field(default=None, min_length=1, max_length=120)
+    venue_scope: VenueScope | None = None
+    idempotency_key: str = Field(min_length=1, max_length=160)
+
+    @field_validator("roles")
+    @classmethod
+    def unique_roles(cls, value: list[AccessRole]) -> list[AccessRole]:
+        if len(value) != len(set(value)):
+            raise ValueError("roles must not contain duplicates")
+        return value
+
+
+class ScopeSelectRequest(BaseModel):
+    workspace_id: UUID
+    team_id: UUID | None = None
+    idempotency_key: str = Field(min_length=1, max_length=160)
+
+
+class ExchangeCredentialRequest(BaseModel):
+    api_key: SecretStr | None = Field(default=None, min_length=1, max_length=512)
+    api_secret: SecretStr | None = Field(default=None, min_length=1, max_length=512)
+    passphrase: SecretStr | None = Field(default=None, min_length=1, max_length=512)
+    account_address: SecretStr | None = Field(default=None, min_length=1, max_length=120)
+    api_wallet_address: SecretStr | None = Field(default=None, min_length=1, max_length=120)
+    api_wallet_private_key: SecretStr | None = Field(default=None, min_length=1, max_length=512)
+
+    def plaintext(self) -> dict[str, str]:
+        return {
+            field: value.get_secret_value()
+            for field in (
+                "api_key",
+                "api_secret",
+                "passphrase",
+                "account_address",
+                "api_wallet_address",
+                "api_wallet_private_key",
+            )
+            if (value := getattr(self, field)) is not None
+        }
+
+
+class ExchangeAccountCreateRequest(BaseModel):
+    account_id: str = Field(min_length=1, max_length=120)
+    venue: VenueScope
+    label: str | None = Field(default=None, min_length=1, max_length=120)
+    credentials: ExchangeCredentialRequest | None = None
+    idempotency_key: str = Field(min_length=1, max_length=160)
+
+
+class ExchangeCredentialRotateRequest(BaseModel):
+    credentials: ExchangeCredentialRequest
+    expected_version: int = Field(ge=1)
+    idempotency_key: str = Field(min_length=1, max_length=160)
+
+
+class ExchangeConnectionVerifyRequest(BaseModel):
+    expected_version: int = Field(ge=1)
+    idempotency_key: str = Field(min_length=1, max_length=160)
+
+
+class ExchangeRuntimeSyncRequest(BaseModel):
+    enabled: bool
+    expected_version: int = Field(ge=1)
+    idempotency_key: str = Field(min_length=1, max_length=160)
+
+
+class ExchangeTradingEligibilityRequest(BaseModel):
+    enabled: bool
+    expected_version: int = Field(ge=1)
+    idempotency_key: str = Field(min_length=1, max_length=160)
+
+
+class FreqtradeWorkerConfigureRequest(BaseModel):
+    mode: Literal["UNCONFIGURED", "DRY_RUN", "LIVE"]
+    name: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=120,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]{0,119}$",
+    )
+    base_url: str | None = Field(default=None, min_length=1, max_length=2_048)
+    username: SecretStr | None = Field(default=None, min_length=1, max_length=120)
+    password: SecretStr | None = Field(default=None, min_length=1, max_length=2_048)
+    hip3_dexes: list[str] = Field(default_factory=list, max_length=32)
+    expected_version: int = Field(ge=1)
+    idempotency_key: str = Field(min_length=1, max_length=160)
+
+    @model_validator(mode="after")
+    def validate_configuration_shape(self) -> FreqtradeWorkerConfigureRequest:
+        configured = self.mode != "UNCONFIGURED"
+        provided = all(
+            value is not None
+            for value in (self.name, self.base_url, self.username, self.password)
+        )
+        if configured != provided:
+            raise ValueError(
+                "configured workers require name, base_url, username and password; "
+                "unconfigured workers must omit them"
+            )
+        if not configured and self.hip3_dexes:
+            raise ValueError("unconfigured workers must not include HIP-3 DEX scope")
+        if len(self.hip3_dexes) != len(set(self.hip3_dexes)):
+            raise ValueError("hip3_dexes must not contain duplicates")
+        return self
+
+    def plaintext_username(self) -> str | None:
+        return None if self.username is None else self.username.get_secret_value()
+
+    def plaintext_password(self) -> str | None:
+        return None if self.password is None else self.password.get_secret_value()
+
+
+class FreqtradeWorkerVerifyRequest(BaseModel):
+    expected_version: int = Field(ge=1)
+    idempotency_key: str = Field(min_length=1, max_length=160)
+
+
+class SignalSourceConfigureRequest(BaseModel):
+    mode: Literal["PERPTAPE", "WEBHOOK"]
+    secret: SecretStr = Field(min_length=8, max_length=512)
+    enabled: bool = True
+    webhook_max_age_seconds: int = Field(default=300, ge=30, le=900)
+    expected_version: int = Field(ge=0)
+    idempotency_key: str = Field(min_length=1, max_length=160)
+
+
+class SignalSourceCreateRequest(BaseModel):
+    name: str = Field(min_length=2, max_length=120)
+    mode: Literal["PERPTAPE", "WEBHOOK"]
+    secret: SecretStr | None = Field(default=None, min_length=8, max_length=512)
+    enabled: bool = True
+    webhook_max_age_seconds: int = Field(default=300, ge=30, le=900)
+    expected_version: Literal[0] = 0
+    idempotency_key: str = Field(min_length=1, max_length=160)
+
+
+class SignalSourceUpdateRequest(BaseModel):
+    name: str = Field(min_length=2, max_length=120)
+    webhook_max_age_seconds: int = Field(default=300, ge=30, le=900)
+    expected_version: int = Field(ge=1)
+    idempotency_key: str = Field(min_length=1, max_length=160)
+
+
+class SignalSourceCredentialRotateRequest(BaseModel):
+    secret: SecretStr | None = Field(default=None, min_length=8, max_length=512)
+    expected_version: int = Field(ge=1)
+    idempotency_key: str = Field(min_length=1, max_length=160)
+
+
+class SignalSourceStateRequest(BaseModel):
+    enabled: bool
+    expected_version: int = Field(ge=1)
+    idempotency_key: str = Field(min_length=1, max_length=160)
+
+
+class SignalSourceTestRequest(BaseModel):
+    expected_version: int = Field(ge=1)
+    idempotency_key: str = Field(min_length=1, max_length=160)
+
+
+class SignalSourceDeleteRequest(BaseModel):
+    confirm_name: str = Field(min_length=2, max_length=120)
+    expected_version: int = Field(ge=1)
+    idempotency_key: str = Field(min_length=1, max_length=160)
+
+
+NotificationChannel = Literal["TELEGRAM", "SLACK", "LARK", "EMAIL"]
+NotificationEventType = Literal[
+    "PROPOSAL_REVIEW_REQUIRED",
+    "RISK_DECISION_RECORDED",
+    "CAMPAIGN_STATUS_CHANGED",
+    "CAPITAL_STATUS_CHANGED",
+    "SIGNAL_EVENT_RECEIVED",
+    "CONNECTION_CHECK_FAILED",
+]
+
+
+class NotificationRouteConfigurationRequest(BaseModel):
+    bot_token: SecretStr | None = Field(default=None, min_length=20, max_length=2_048)
+    chat_id: SecretStr | None = Field(default=None, min_length=1, max_length=120)
+    webhook_url: SecretStr | None = Field(default=None, min_length=1, max_length=2_048)
+    signing_secret: SecretStr | None = Field(default=None, min_length=1, max_length=2_048)
+    smtp_host: SecretStr | None = Field(default=None, min_length=1, max_length=253)
+    smtp_port: int | None = Field(default=None, ge=1, le=65_535)
+    username: SecretStr | None = Field(default=None, min_length=1, max_length=2_048)
+    password: SecretStr | None = Field(default=None, min_length=1, max_length=2_048)
+    from_address: SecretStr | None = Field(default=None, min_length=3, max_length=255)
+    to_address: SecretStr | None = Field(default=None, min_length=3, max_length=255)
+
+    def plaintext(self) -> dict[str, str]:
+        values: dict[str, str] = {}
+        for field_name in (
+            "bot_token",
+            "chat_id",
+            "webhook_url",
+            "signing_secret",
+            "smtp_host",
+            "username",
+            "password",
+            "from_address",
+            "to_address",
+        ):
+            value = getattr(self, field_name)
+            if value is not None:
+                values[field_name] = value.get_secret_value()
+        if self.smtp_port is not None:
+            values["smtp_port"] = str(self.smtp_port)
+        return values
+
+
+class NotificationRouteWriteRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=120)
+    channel: NotificationChannel
+    event_types: list[NotificationEventType] = Field(min_length=1, max_length=6)
+    enabled: bool = True
+    configuration: NotificationRouteConfigurationRequest | None = None
+    expected_version: int = Field(ge=0)
+    idempotency_key: str = Field(min_length=1, max_length=160)
+
+    @field_validator("event_types")
+    @classmethod
+    def unique_notification_event_types(
+        cls,
+        value: list[NotificationEventType],
+    ) -> list[NotificationEventType]:
+        if len(value) != len(set(value)):
+            raise ValueError("event_types must not contain duplicates")
+        return value
+
+
+class NotificationTestRequest(BaseModel):
+    idempotency_key: str = Field(min_length=1, max_length=160)
+
+
+class WebhookSignalPayload(BaseModel):
+    payload_version: Literal[1] = 1
+    provider: Literal["TRADINGVIEW", "MODEL"]
+    external_id: str = Field(min_length=1, max_length=160, pattern=r"^[A-Za-z0-9._:-]+$")
+    strategy_id: str = Field(min_length=1, max_length=120)
+    strategy_version: str = Field(min_length=1, max_length=120)
+    venue: VenueScope
+    symbol: str = Field(min_length=1, max_length=120)
+    direction: Direction
+    signal_at: datetime
+    timeframe: str | None = Field(default=None, min_length=1, max_length=32)
+    reference_price: Decimal | None = Field(default=None, gt=0)
+    metadata: dict[str, str | int | float | bool | None] = Field(default_factory=dict)
+
+    @field_validator("signal_at")
+    @classmethod
+    def timezone_aware_signal(cls, value: datetime) -> datetime:
+        if value.utcoffset() is None:
+            raise ValueError("signal_at must include a timezone")
+        return value
+
+
+class SignalProposalRequest(BaseModel):
+    environment: Literal["SHADOW", "TESTNET", "LIVE"] = "SHADOW"
+    account_id: str = Field(min_length=1, max_length=120)
+    instrument_id: UUID
+    risk_tier: RiskTier
+    quantity: Decimal = Field(gt=0)
+    max_risk: Decimal = Field(gt=0)
+    expires_in_minutes: int = Field(default=480, ge=480, le=1_440)
+    rationale: str = Field(min_length=10, max_length=2_000)
+    idempotency_key: str = Field(min_length=1, max_length=160)
 
 
 class ManualProposalRequest(BaseModel):
@@ -134,6 +617,38 @@ class SystemProposalRequest(BaseModel):
         return self
 
 
+class AgentProposalRequest(BaseModel):
+    environment: Literal["SHADOW", "TESTNET", "LIVE"] = "SHADOW"
+    account_id: str = Field(min_length=1, max_length=120)
+    venue: VenueScope
+    instrument_id: UUID
+    direction: Direction
+    risk_tier: RiskTier
+    quantity: Decimal = Field(gt=0)
+    max_risk: Decimal = Field(gt=0)
+    expires_in_minutes: int = Field(default=480, ge=480, le=1_440)
+    trigger_price: Decimal = Field(gt=0)
+    invalidation_price: Decimal = Field(gt=0)
+    limit_price: Decimal | None = Field(default=None, gt=0)
+    model_id: str = Field(min_length=1, max_length=80, pattern=r"^[A-Za-z0-9._:-]+$")
+    model_version: str = Field(min_length=1, max_length=80)
+    request_id: str = Field(
+        min_length=16,
+        max_length=80,
+        pattern=r"^[A-Za-z0-9._:-]+$",
+    )
+    generated_at: datetime
+    rationale: str = Field(min_length=10, max_length=2_000)
+    idempotency_key: str = Field(min_length=1, max_length=160)
+
+    @field_validator("generated_at")
+    @classmethod
+    def timezone_aware_generated_at(cls, value: datetime) -> datetime:
+        if value.utcoffset() is None:
+            raise ValueError("generated_at must include a timezone")
+        return value
+
+
 class ProposalDefaultConfigRequest(BaseModel):
     account_id: str = Field(min_length=1, max_length=120)
     risk_tier: RiskTier
@@ -186,18 +701,12 @@ class ReviewRequest(BaseModel):
     reason: str = Field(min_length=2, max_length=1_000)
     expected_version: int = Field(ge=1)
     action_grant: str | None = None
-
-
-class AdminDirectApproveRequest(BaseModel):
-    reason: str = Field(min_length=5, max_length=1_000)
-    expected_version: int = Field(ge=1)
-    action_grant: str
+    idempotency_key: str | None = Field(default=None, min_length=1, max_length=160)
 
 
 class MockStepUpRequest(BaseModel):
     action: Literal[
         "proposal.approve",
-        "proposal.admin_approve",
         "capital.approve",
         "risk.restore.review",
         "risk.restore.execute",
@@ -435,10 +944,14 @@ class DirectCapitalHyperliquidReceiptRequest(BaseModel):
             raise ValueError("Arbitrum receipt verification requires a transaction hash")
         if self.stage.endswith("LEDGER") and self.action_hash is None:
             raise ValueError("Hyperliquid ledger verification requires an action hash")
-        if self.stage in {
-            "HYPERLIQUID_WITHDRAWAL_LEDGER",
-            "HYPERLIQUID_CLASS_TRANSFER_LEDGER",
-        } and self.nonce is None:
+        if (
+            self.stage
+            in {
+                "HYPERLIQUID_WITHDRAWAL_LEDGER",
+                "HYPERLIQUID_CLASS_TRANSFER_LEDGER",
+            }
+            and self.nonce is None
+        ):
             raise ValueError("withdrawal ledger verification requires the signed action nonce")
         return self
 
@@ -647,6 +1160,19 @@ class RiskTightenRequest(BaseModel):
     idempotency_key: str = Field(min_length=1, max_length=160)
 
 
+class RiskPolicyConfigureRequest(BaseModel):
+    version: str = Field(min_length=1, max_length=120)
+    max_total_risk: Decimal = Field(gt=0)
+    max_account_risk: Decimal = Field(gt=0)
+    max_single_loss: Decimal = Field(gt=0)
+    max_consecutive_losses: int = Field(gt=0)
+    loss_cooldown_seconds: int = Field(gt=0)
+    max_fact_age_seconds: int = Field(gt=0)
+    expected_revision: int = Field(ge=0)
+    reason: str = Field(min_length=10, max_length=2_000)
+    idempotency_key: str = Field(min_length=1, max_length=160)
+
+
 class RiskControlChangeCreateRequest(BaseModel):
     reason: str = Field(min_length=10, max_length=2_000)
     restore_auto_add: bool = False
@@ -695,6 +1221,10 @@ class BinanceTestnetActionRequest(BaseModel):
     execution_scope: str = Field(min_length=3, max_length=255)
     owner_id: str = Field(min_length=1, max_length=255)
     fencing_token: int = Field(ge=1)
+
+
+class FreqtradeLiveActionRequest(BinanceTestnetActionRequest):
+    idempotency_key: str = Field(min_length=1, max_length=160)
 
 
 class BinanceTestnetProtectionRequest(BinanceTestnetActionRequest):

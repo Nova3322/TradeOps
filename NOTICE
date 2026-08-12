@@ -1,0 +1,16 @@
+TradingOPS
+Copyright (c) 2026 COPYRIGHT_HOLDER.
+
+Original TradingOPS code and documentation are offered under:
+
+  GPL-3.0-only OR LicenseRef-TradingOPS-Commercial-1.0
+
+The GPL option permits commercial use, modification, and distribution subject
+to its terms. The commercial option requires a separately executed agreement
+and is intended for closed-source integration, proprietary distribution, and
+other negotiated terms.
+
+Commercial license contact: COMMERCIAL_EMAIL
+
+Third-party components retain their own licenses. See LICENSE,
+THIRD_PARTY_NOTICES.md, sbom.cdx.json, and LICENSES/.

@@ -42,9 +42,7 @@ async def login(client: AsyncClient, username: str) -> None:
 async def exercise_access_management(database: Database) -> None:
     admin_id = TradingService(database).bootstrap_admin("admin", now=datetime.now(UTC))
     app = access_app(database)
-    async with AsyncClient(
-        transport=ASGITransport(app=app), base_url="http://test"
-    ) as client:
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         await login(client, "admin")
         assert (await client.get("/api/capital")).status_code == 200
         assert (await client.get("/admin/users")).status_code == 200
@@ -71,6 +69,32 @@ async def exercise_access_management(database: Database) -> None:
         ]
         assert reviewer["password_configured"] is True
 
+        bybit_observer = await client.post(
+            "/api/admin/users",
+            json={
+                "username": "bybit-observer",
+                "password": "bybit-observer-password",
+                "roles": ["OBSERVER"],
+                "venue_scope": "BYBIT",
+            },
+        )
+        assert bybit_observer.status_code == 200, bybit_observer.text
+        assert next(
+            item
+            for item in bybit_observer.json()["data"]
+            if item["user_id"] == bybit_observer.json()["user_id"]
+        )["roles"] == [{"role": "OBSERVER", "account_scope": None, "venue_scope": "BYBIT"}]
+        invalid_venue_scope = await client.post(
+            "/api/admin/users",
+            json={
+                "username": "invalid-venue-observer",
+                "password": "invalid-venue-observer-password",
+                "roles": ["OBSERVER"],
+                "venue_scope": "UNSUPPORTED",
+            },
+        )
+        assert invalid_venue_scope.status_code == 422, invalid_venue_scope.text
+
         await client.post("/api/auth/logout")
         wrong_password = await client.post(
             "/api/auth/login",
@@ -87,6 +111,73 @@ async def exercise_access_management(database: Database) -> None:
         assert password_login.json()["authentication_method"] == "PASSWORD"
         assert "HttpOnly" in password_login.headers["set-cookie"]
         assert "SameSite=strict" in password_login.headers["set-cookie"]
+        password_session = password_login.json()["session"]
+        stale_session_client = AsyncClient(
+            transport=ASGITransport(app=app),
+            base_url="http://test",
+        )
+        stale_session_login = await stale_session_client.post(
+            "/api/auth/login",
+            json={"username": "reviewer-only", "password": "reviewer-only-password"},
+        )
+        assert stale_session_login.status_code == 200, stale_session_login.text
+        rotation_idempotency_key = "reviewer-password-rotation-1"
+        wrong_current_password = await client.post(
+            "/api/auth/password",
+            json={
+                "current_password": "incorrect-password-value",
+                "new_password": "reviewer-only-password-v2",
+                "expected_auth_version": password_session["auth_version"],
+                "idempotency_key": "reviewer-password-wrong-current",
+            },
+        )
+        assert wrong_current_password.status_code == 422, wrong_current_password.text
+        assert wrong_current_password.json()["error"]["code"] == "CURRENT_PASSWORD_INVALID"
+        password_change_payload = {
+            "current_password": "reviewer-only-password",
+            "new_password": "reviewer-only-password-v2",
+            "expected_auth_version": password_session["auth_version"],
+            "idempotency_key": rotation_idempotency_key,
+        }
+        password_change = await client.post("/api/auth/password", json=password_change_payload)
+        assert password_change.status_code == 200, password_change.text
+        assert password_change.json()["authentication_method"] == "PASSWORD"
+        assert password_change.json()["other_sessions_revoked"] is True
+        assert password_change.json()["session"]["auth_version"] == (
+            password_session["auth_version"] + 1
+        )
+        assert "HttpOnly" in password_change.headers["set-cookie"]
+        assert "SameSite=strict" in password_change.headers["set-cookie"]
+        stale_session_check = await stale_session_client.get("/api/auth/session")
+        assert stale_session_check.status_code == 401
+        await stale_session_client.aclose()
+        replay = await client.post("/api/auth/password", json=password_change_payload)
+        assert replay.status_code == 200, replay.text
+        assert replay.json()["session"]["auth_version"] == password_change.json()["session"][
+            "auth_version"
+        ]
+        assert (await client.get("/api/auth/session")).status_code == 200
+        with database.session_factory() as session:
+            password_audit = session.scalar(
+                select(AuditEvent).where(
+                    AuditEvent.event_type == "USER_PASSWORD_CHANGED",
+                    AuditEvent.idempotency_key == rotation_idempotency_key,
+                )
+            )
+            assert password_audit is not None
+            assert password_audit.actor_id == str(reviewer_id)
+            assert "reviewer-only-password" not in password_audit.reason
+        await client.post("/api/auth/logout")
+        old_password_login = await client.post(
+            "/api/auth/login",
+            json={"username": "reviewer-only", "password": "reviewer-only-password"},
+        )
+        assert old_password_login.status_code == 401
+        new_password_login = await client.post(
+            "/api/auth/login",
+            json={"username": "reviewer-only", "password": "reviewer-only-password-v2"},
+        )
+        assert new_password_login.status_code == 200, new_password_login.text
         await login(client, "admin")
 
         duplicate = await client.post(
@@ -150,8 +241,12 @@ async def exercise_access_management(database: Database) -> None:
             is False
         )
 
-        denied_login = await client.post("/api/auth/mock/login", json={"username": "reviewer-only"})
-        assert denied_login.status_code == 401, denied_login.text
+        team_disabled_login = await client.post(
+            "/api/auth/mock/login", json={"username": "reviewer-only"}
+        )
+        assert team_disabled_login.status_code == 200, team_disabled_login.text
+        assert team_disabled_login.json()["session"]["active_team"] is None
+        assert team_disabled_login.json()["session"]["roles"] == []
 
     with database.session_factory() as session:
         event_types = set(session.scalars(select(AuditEvent.event_type)).all())
@@ -167,6 +262,22 @@ def test_only_system_admin_manages_members_while_admin_keeps_highest_permissions
 async def exercise_six_identity_permission_matrix(database: Database) -> None:
     service = TradingService(database)
     admin_id = service.bootstrap_admin("matrix-admin", now=datetime.now(UTC))
+    now = datetime.now(UTC)
+    for venue, account_id in (
+        ("BINANCE", "acct-live"),
+        ("HYPERLIQUID", "acct-hl"),
+        ("OKX", "acct-okx"),
+        ("BYBIT", "acct-bybit"),
+    ):
+        service.create_exchange_account(
+            actor_id=admin_id,
+            account_id=account_id,
+            venue=venue,
+            label=f"{venue} matrix account",
+            credentials=None,
+            idempotency_key=f"matrix-{venue.lower()}-account",
+            now=now,
+        )
     app = access_app(database)
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as admin_http:
         await login(admin_http, "matrix-admin")
@@ -205,6 +316,8 @@ async def exercise_six_identity_permission_matrix(database: Database) -> None:
             "/api/venues/hyperliquid/testnet/status",
             "/api/venues/binance/facts?account_id=acct-live",
             "/api/venues/hyperliquid/facts?account_id=acct-hl",
+            "/api/venues/okx/facts?account_id=acct-okx",
+            "/api/venues/bybit/facts?account_id=acct-bybit",
             "/api/capital",
             "/api/admin/users",
             "/admin/users",
@@ -237,6 +350,8 @@ async def exercise_six_identity_permission_matrix(database: Database) -> None:
                 "/api/venues/hyperliquid/testnet/status",
                 "/api/venues/binance/facts?account_id=acct-live",
                 "/api/venues/hyperliquid/facts?account_id=acct-hl",
+                "/api/venues/okx/facts?account_id=acct-okx",
+                "/api/venues/bybit/facts?account_id=acct-bybit",
             },
         }
         for username, permitted in allowed.items():
@@ -246,10 +361,7 @@ async def exercise_six_identity_permission_matrix(database: Database) -> None:
                 await login(member_http, username)
                 for endpoint in endpoints:
                     response = await member_http.get(endpoint)
-                    allowed_status = {
-                        "/api/opportunities": 503,
-                        "/api/risk-controls": 422,
-                    }.get(endpoint, 200)
+                    allowed_status = {"/api/opportunities": 503}.get(endpoint, 200)
                     expected_status = allowed_status if endpoint in permitted else 403
                     assert response.status_code == expected_status, (
                         username,
@@ -270,12 +382,15 @@ async def exercise_six_identity_permission_matrix(database: Database) -> None:
                 json={"roles": ["OBSERVER"], "active": False},
             )
             assert disabled.status_code == 200, disabled.text
-            assert (await disabled_http.get("/api/auth/session")).status_code == 401
-            assert (await disabled_http.get("/admin/users")).status_code == 401
-            denied_login = await disabled_http.post(
+            scoped_session = await disabled_http.get("/api/auth/session")
+            assert scoped_session.status_code == 200
+            assert scoped_session.json()["session"]["active_team"] is None
+            assert (await disabled_http.get("/api/admin/users")).status_code == 403
+            relogin = await disabled_http.post(
                 "/api/auth/mock/login", json={"username": "matrix-disabled"}
             )
-            assert denied_login.status_code == 401
+            assert relogin.status_code == 200
+            assert relogin.json()["session"]["active_team"] is None
 
     assert service.can_user(admin_id, "user.manage") is True
 

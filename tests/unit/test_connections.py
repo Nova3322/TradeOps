@@ -12,6 +12,7 @@ def test_connection_projection_uses_current_probe_and_never_exposes_credentials(
         perptape_api_key="perptape-secret",
         runtime_binance_account_id="binance-main",
         runtime_hyperliquid_account_id="hyperliquid-main",
+        runtime_sync_enabled=True,
         binance_read_only_enabled=True,
         binance_api_key="binance-key",
         binance_api_secret="binance-secret",  # noqa: S106
@@ -29,10 +30,21 @@ def test_connection_projection_uses_current_probe_and_never_exposes_credentials(
             "error_code": None,
             "checked_at": "2026-08-02T12:00:00+00:00",
         }
-        for source in ("BINANCE", "HYPERLIQUID", "PERPTAPE", "NOTILT:42161")
+        for source in (
+            "BINANCE",
+            "HYPERLIQUID",
+            "OKX:okx-main",
+            "BYBIT:bybit-main",
+            "PERPTAPE",
+            "NOTILT:42161",
+        )
     }
 
-    projected = project_runtime_connections(settings, health)
+    projected = project_runtime_connections(
+        settings,
+        health,
+        database_binding_counts={"OKX": 1, "BYBIT": 1},
+    )
 
     assert all(item["available"] for item in projected.values())
     assert all(item["category"] == "READ_ONLY_CONNECTED" for item in projected.values())
@@ -54,6 +66,8 @@ def test_connection_projection_distinguishes_configuration_and_probe_failures() 
     missing = project_runtime_connections(Settings(database_url=base, _env_file=None), {})
     assert missing["BINANCE"]["category"] == "CREDENTIALS_NOT_LOADED"
     assert missing["HYPERLIQUID"]["category"] == "CREDENTIALS_NOT_LOADED"
+    assert missing["OKX"]["category"] == "CREDENTIALS_NOT_LOADED"
+    assert missing["BYBIT"]["category"] == "CREDENTIALS_NOT_LOADED"
     assert missing["PERPTAPE"]["category"] == "CREDENTIALS_NOT_LOADED"
     assert missing["NOTILT"]["category"] == "CREDENTIALS_NOT_LOADED"
 

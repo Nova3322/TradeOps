@@ -27,6 +27,7 @@ from trading_control_plane.hyperliquid_capital import (
 )
 from trading_control_plane.models import (
     AccountEquityObservation,
+    Approval,
     AuditEvent,
     DirectCapitalOperation,
     OrderIntent,
@@ -829,7 +830,22 @@ def test_proposal_defaults_and_direct_capital_are_permissioned_audited_and_block
                 for item in occupied.json()["data"]
                 if item["candidate_id"] == candidate.candidate_id
             )
-            assert occupied_candidate["active_proposal"] == {
+            active_proposal = occupied_candidate["active_proposal"]
+            assert active_proposal["workspace_id"]
+            assert active_proposal["team_id"]
+            assert {
+                key: active_proposal[key]
+                for key in (
+                    "proposal_id",
+                    "status",
+                    "venue",
+                    "symbol",
+                    "direction",
+                    "expires_at",
+                    "source_observed_at",
+                    "active_count",
+                )
+            } == {
                 "proposal_id": proposal_id,
                 "status": "PENDING_REVIEW",
                 "venue": "BINANCE",
@@ -952,7 +968,7 @@ def test_proposal_defaults_and_direct_capital_are_permissioned_audited_and_block
     assert "CAPITAL_DIRECT_OPERATION_BLOCKED" in events
 
 
-def test_system_admin_direct_approval_requires_step_up_and_never_authorizes_or_orders(
+def test_system_admin_cannot_approve_own_proposal_or_use_a_direct_override(
     database: Database,
 ) -> None:
     service = TradingService(database)
@@ -1000,115 +1016,42 @@ def test_system_admin_direct_approval_requires_step_up_and_never_authorizes_or_o
             proposal_id = created.json()["proposal_id"]
             version = created.json()["version"]
 
-            denied = await client.post(
-                f"/api/proposals/{proposal_id}/admin-approve",
-                json={
-                    "reason": "explicit administrator approval after reviewing frozen facts",
-                    "expected_version": version,
-                    "action_grant": "missing-step-up",
-                },
-            )
-            assert denied.status_code == 401
-
             grant = await client.post(
                 "/api/auth/mock/step-up",
                 json={
-                    "action": "proposal.admin_approve",
+                    "action": "proposal.approve",
                     "object_id": proposal_id,
                     "object_version": version,
                 },
             )
             assert grant.status_code == 200, grant.text
-            approved = await client.post(
-                f"/api/proposals/{proposal_id}/admin-approve",
+            denied = await client.post(
+                f"/api/proposals/{proposal_id}/reviews",
                 json={
-                    "reason": "explicit administrator approval after reviewing frozen facts",
+                    "decision": "APPROVE",
+                    "reason": "the creator must still use an independent reviewer",
                     "expected_version": version,
                     "action_grant": grant.json()["action_grant"],
                 },
             )
-            assert approved.status_code == 200, approved.text
-            assert approved.json()["status"] == "APPROVED"
+            assert denied.status_code == 403, denied.text
+            assert denied.json()["error"]["code"] == "SELF_REVIEW_FORBIDDEN"
+
+            removed_override = await client.post(
+                f"/api/proposals/{proposal_id}/admin-approve",
+                json={
+                    "reason": "there is no direct approval path",
+                    "expected_version": version,
+                    "action_grant": grant.json()["action_grant"],
+                },
+            )
+            assert removed_override.status_code == 404
 
     asyncio.run(scenario())
     with database.session_factory() as session:
         assert session.query(TradingAuthorization).count() == 0
         assert session.query(OrderIntent).count() == 0
-        events = set(session.scalars(select(AuditEvent.event_type)).all())
-    assert "PROPOSAL_ADMIN_DIRECT_APPROVED" in events
-
-
-def test_system_admin_cannot_direct_approve_another_creators_proposal(
-    database: Database,
-) -> None:
-    service = TradingService(database)
-    now = datetime.now(UTC)
-    admin = service.bootstrap_admin("direct-scope-admin", now=now)
-    proposer = service.create_user("direct-scope-proposer", admin, now=now)
-    service.assign_role(proposer, Role.PROPOSER, admin, now=now)
-    instrument_id = service.register_instrument(
-        actor_id=admin,
-        venue="BINANCE",
-        symbol="SOLUSDT",
-        tick_size=Decimal("0.01"),
-        lot_size=Decimal("0.01"),
-        minimum_notional=Decimal("5"),
-        contract_multiplier=Decimal("1"),
-        quote_currency="USDT",
-        collateral_currency="USDT",
-        protection_supported=True,
-        now=now,
-    )
-
-    async def scenario() -> None:
-        async with AsyncClient(
-            transport=ASGITransport(app=_app(database)),
-            base_url="http://test",
-        ) as client:
-            await _login(client, "direct-scope-proposer")
-            created = await client.post(
-                "/api/proposals/manual",
-                json={
-                    "environment": "LIVE",
-                    "account_id": "acct-live",
-                    "venue": "BINANCE",
-                    "instrument_id": str(instrument_id),
-                    "direction": "LONG",
-                    "risk_tier": "LOW",
-                    "quantity": "1",
-                    "max_risk": "5",
-                    "expires_in_minutes": 480,
-                    "trigger_price": "100",
-                    "invalidation_price": "95",
-                    "rationale": "independent review remains required",
-                    "idempotency_key": "direct-scope-proposal",
-                },
-            )
-            assert created.status_code == 200, created.text
-            proposal_id = created.json()["proposal_id"]
-            version = created.json()["version"]
-            await _login(client, "direct-scope-admin")
-            grant = await client.post(
-                "/api/auth/mock/step-up",
-                json={
-                    "action": "proposal.admin_approve",
-                    "object_id": proposal_id,
-                    "object_version": version,
-                },
-            )
-            assert grant.status_code == 200, grant.text
-            denied = await client.post(
-                f"/api/proposals/{proposal_id}/admin-approve",
-                json={
-                    "reason": "must not bypass another creator's independent review",
-                    "expected_version": version,
-                    "action_grant": grant.json()["action_grant"],
-                },
-            )
-            assert denied.status_code == 422, denied.text
-            assert denied.json()["error"]["code"] == "PROPOSAL_ADMIN_DIRECT_APPROVAL_SCOPE_INVALID"
-
-    asyncio.run(scenario())
+        assert session.query(Approval).count() == 0
 
 
 def test_direct_binance_return_does_not_build_redundant_notilt_wallet_deposit(

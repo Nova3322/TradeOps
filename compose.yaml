@@ -16,6 +16,158 @@ services:
     volumes:
       - trading-postgres-local:/var/lib/postgresql/data
 
+  migrate:
+    build:
+      context: .
+    profiles: ["console", "runtime", "notifications"]
+    command: ["uv", "run", "--no-sync", "alembic", "upgrade", "head"]
+    environment: &control-plane-environment
+      TRADING_ENVIRONMENT: local
+      TRADING_DATABASE_URL: ${TRADING_DATABASE_URL:?set by scripts/run_compose.sh}
+      TRADING_SESSION_SIGNING_SECRET: ${TRADING_SESSION_SIGNING_SECRET:?set by scripts/run_compose.sh}
+      TRADING_CREDENTIAL_ENCRYPTION_KEY: ${TRADING_CREDENTIAL_ENCRYPTION_KEY:?set by scripts/run_compose.sh}
+      TRADING_ALLOW_MOCK_IDENTITY: "false"
+      TRADING_RUNTIME_SYNC_ENABLED: "false"
+      TRADING_NOTIFICATION_WORKER_ENABLED: "false"
+      TRADING_NOTIFICATION_EMAIL_SMTP_ALLOWED_HOSTS: ${TRADING_NOTIFICATION_EMAIL_SMTP_ALLOWED_HOSTS:-}
+      TRADING_PERPTAPE_WEBSOCKET_ENABLED: "false"
+      TRADING_FREQTRADE_WORKERS_ENABLED: "false"
+      TRADING_FREQTRADE_LIVE_ORDER_SEND_ENABLED: "false"
+      TRADING_BINANCE_LIVE_ORDER_SEND_ENABLED: "false"
+      TRADING_BINANCE_TESTNET_ORDER_SEND_ENABLED: "false"
+      TRADING_HYPERLIQUID_LIVE_ORDER_SEND_ENABLED: "false"
+      TRADING_HYPERLIQUID_TESTNET_ORDER_SEND_ENABLED: "false"
+      TRADING_BINANCE_CAPITAL_WITHDRAW_ENABLED: "false"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    init: true
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+    cap_drop: ["ALL"]
+    security_opt: ["no-new-privileges:true"]
+    restart: "no"
+
+  setup:
+    build:
+      context: .
+    profiles: ["console", "runtime", "notifications"]
+    command: ["uv", "run", "--no-sync", "python", "scripts/setup_local.py"]
+    environment:
+      <<: *control-plane-environment
+      TRADING_LOCAL_ADMIN_PASSWORD: ${TRADING_LOCAL_ADMIN_PASSWORD:?set by scripts/run_compose.sh}
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    init: true
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+    cap_drop: ["ALL"]
+    security_opt: ["no-new-privileges:true"]
+    restart: "no"
+
+  api:
+    build:
+      context: .
+    profiles: ["console"]
+    command: ["uv", "run", "--no-sync", "trading-api"]
+    environment:
+      <<: *control-plane-environment
+      TRADING_API_HOST: 0.0.0.0
+      TRADING_API_PORT: 8000
+      TRADING_PUBLIC_BASE_URL: http://127.0.0.1:${TRADING_PUBLIC_PORT:-8000}
+    depends_on:
+      setup:
+        condition: service_completed_successfully
+    ports:
+      - "127.0.0.1:${TRADING_PUBLIC_PORT:-8000}:8000"
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - >-
+          import urllib.request;
+          urllib.request.urlopen('http://127.0.0.1:8000/health/ready', timeout=2).read()
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 5s
+    init: true
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+    cap_drop: ["ALL"]
+    security_opt: ["no-new-privileges:true"]
+    restart: unless-stopped
+
+  runtime-worker:
+    build:
+      context: .
+    profiles: ["runtime"]
+    command: ["uv", "run", "--no-sync", "trading-sync-worker"]
+    environment:
+      <<: *control-plane-environment
+      TRADING_RUNTIME_SYNC_ENABLED: "true"
+      TRADING_PERPTAPE_WEBSOCKET_ENABLED: ${TRADING_PERPTAPE_WEBSOCKET_ENABLED:-false}
+    depends_on:
+      setup:
+        condition: service_completed_successfully
+    healthcheck:
+      test:
+        - CMD
+        - uv
+        - run
+        - --no-sync
+        - trading-sync-worker
+        - --healthcheck
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 5s
+    init: true
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+    cap_drop: ["ALL"]
+    security_opt: ["no-new-privileges:true"]
+    restart: unless-stopped
+    stop_grace_period: 45s
+
+  notification-worker:
+    build:
+      context: .
+    profiles: ["notifications"]
+    command: ["uv", "run", "--no-sync", "trading-notification-worker"]
+    environment:
+      <<: *control-plane-environment
+      TRADING_NOTIFICATION_WORKER_ENABLED: "true"
+    depends_on:
+      setup:
+        condition: service_completed_successfully
+    healthcheck:
+      test:
+        - CMD
+        - uv
+        - run
+        - --no-sync
+        - trading-notification-worker
+        - --healthcheck
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 5s
+    init: true
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+    cap_drop: ["ALL"]
+    security_opt: ["no-new-privileges:true"]
+    restart: unless-stopped
+    stop_grace_period: 20s
+
   freqtrade-binance:
     image: freqtradeorg/freqtrade:2026.7
     profiles: ["execution-workers"]

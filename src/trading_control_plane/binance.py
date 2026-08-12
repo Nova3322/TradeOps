@@ -51,9 +51,18 @@ def _default_fetcher(url: str, headers: dict[str, str], timeout: float) -> JsonV
                 body = response.read()
             break
         except urllib.error.HTTPError as exc:
-            if exc.code in {401, 403}:
+            exchange_code: int | None = None
+            try:
+                error_body = json.loads(exc.read())
+                if isinstance(error_body, dict):
+                    raw_code = error_body.get("code")
+                    if isinstance(raw_code, (int, str)) and not isinstance(raw_code, bool):
+                        exchange_code = int(raw_code)
+            except (json.JSONDecodeError, TypeError, ValueError):
+                pass
+            if exc.code in {401, 403} or exchange_code in {-2014, -2015, -1022}:
                 code = "BINANCE_AUTHENTICATION_FAILED"
-            elif exc.code == 429:
+            elif exc.code == 429 or exchange_code == -1003:
                 code = "BINANCE_RATE_LIMITED"
             else:
                 code = "BINANCE_READ_ONLY_UNAVAILABLE"
@@ -251,6 +260,19 @@ class BinanceReadOnlyClient:
             {"X-MBX-APIKEY": self._api_key},
             5.0,
         )
+
+    def verify_connection(self, *, now: datetime) -> None:
+        """Authenticate one USD-M account read without persisting account facts."""
+
+        raw = self._signed_get(
+            "/fapi/v3/balance",
+            {},
+            timestamp_ms=int(now.timestamp() * 1000),
+        )
+        if not isinstance(raw, list) or not all(isinstance(item, dict) for item in raw):
+            raise DomainRejected(
+                "BINANCE_RESPONSE_INVALID", "Binance account balance response is invalid"
+            )
 
     def read_snapshot(self, symbol: str, *, now: datetime) -> BinanceReadOnlySnapshot:
         if not symbol or symbol != symbol.upper():
@@ -702,6 +724,18 @@ class BinancePortfolioMarginReadOnlyClient:
     def _market_get(self, path: str, params: dict[str, str]) -> JsonValue:
         query = urllib.parse.urlencode(params)
         return self._fetcher(f"https://fapi.binance.com{path}?{query}", {}, 5.0)
+
+    def verify_connection(self, *, now: datetime) -> None:
+        """Authenticate one Portfolio Margin account read without ingesting facts."""
+
+        del now
+        timestamp_ms = self._server_time_fetcher(5.0)
+        raw = self._signed_get("/papi/v1/account", {}, timestamp_ms=timestamp_ms)
+        if not isinstance(raw, dict) or not isinstance(raw.get("totalWalletBalance"), str):
+            raise DomainRejected(
+                "BINANCE_RESPONSE_INVALID",
+                "Binance Portfolio Margin account response is invalid",
+            )
 
     def read_snapshot(self, symbol: str, *, now: datetime) -> BinanceReadOnlySnapshot:
         del now

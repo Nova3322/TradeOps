@@ -10,6 +10,23 @@ def test_database_is_mandatory(monkeypatch: pytest.MonkeyPatch) -> None:
         Settings(_env_file=None)  # type: ignore[call-arg]
 
 
+def test_empty_optional_environment_values_are_treated_as_unconfigured(tmp_path) -> None:
+    env_file = tmp_path / ".env.local"
+    env_file.write_text(
+        "TRADING_DATABASE_URL=postgresql+psycopg://user:pass@localhost/trading\n"
+        "TRADING_TELEGRAM_BOT_TOKEN=\n"
+        "TRADING_NOTILT_AGENT_ADDRESS=\n"
+        "TRADING_CAPITAL_DIRECT_MAX_AMOUNT=\n",
+        encoding="utf-8",
+    )
+
+    settings = Settings(_env_file=env_file)
+
+    assert settings.telegram_bot_token is None
+    assert settings.notilt_agent_address is None
+    assert settings.capital_direct_max_amount is None
+
+
 def test_non_postgresql_database_is_rejected() -> None:
     with pytest.raises(ValidationError, match="must use PostgreSQL"):
         Settings(database_url="sqlite:///local.db", _env_file=None)
@@ -144,8 +161,8 @@ def test_real_telegram_is_default_off_and_requires_binding_configuration() -> No
         database_url="postgresql+psycopg://user:pass@localhost/trading",
         telegram_enabled=True,
         telegram_bot_token=token,
-        telegram_allowed_username="kelly_oooo",
-        telegram_internal_username="kelly_oooo",
+        telegram_allowed_username="telegram-owner",
+        telegram_internal_username="telegram-owner",
         _env_file=None,
     )
     configured.validate_runtime_security()
@@ -288,7 +305,7 @@ def test_runtime_configuration_rejects_partial_external_credentials(
         settings.validate_runtime_security()
 
 
-def test_perptape_websocket_requires_explicit_worker_and_key() -> None:
+def test_perptape_websocket_requires_explicit_worker_and_a_credential_source() -> None:
     database_url = "postgresql+psycopg://user:pass@localhost/trading"
     missing_worker = Settings(
         database_url=database_url,
@@ -299,14 +316,14 @@ def test_perptape_websocket_requires_explicit_worker_and_key() -> None:
     with pytest.raises(ValueError, match="runtime sync worker"):
         missing_worker.validate_runtime_security()
 
-    missing_key = Settings(
+    missing_credential_source = Settings(
         database_url=database_url,
         runtime_sync_enabled=True,
         perptape_websocket_enabled=True,
         _env_file=None,
     )
-    with pytest.raises(ValueError, match="platform API key"):
-        missing_key.validate_runtime_security()
+    with pytest.raises(ValueError, match="database credential encryption key"):
+        missing_credential_source.validate_runtime_security()
 
     enabled = Settings(
         database_url=database_url,
@@ -316,6 +333,57 @@ def test_perptape_websocket_requires_explicit_worker_and_key() -> None:
         _env_file=None,
     )
     enabled.validate_runtime_security()
+
+    database_bound = Settings(
+        database_url=database_url,
+        runtime_sync_enabled=True,
+        perptape_websocket_enabled=True,
+        credential_encryption_key=("eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHg"),
+        _env_file=None,
+    )
+    database_bound.validate_runtime_security()
+
+
+def test_notification_worker_is_off_by_default_and_requires_the_encryption_key() -> None:
+    database_url = "postgresql+psycopg://user:pass@localhost/trading"
+    defaults = Settings(database_url=database_url, _env_file=None)
+    assert defaults.notification_worker_enabled is False
+    assert defaults.notification_worker_batch_size == 50
+    assert defaults.notification_worker_interval_seconds == 15
+    assert defaults.notification_email_smtp_allowlist == ()
+
+    missing_key = Settings(
+        database_url=database_url,
+        notification_worker_enabled=True,
+        _env_file=None,
+    )
+    with pytest.raises(ValueError, match="credential encryption key"):
+        missing_key.validate_runtime_security()
+
+    configured = Settings(
+        database_url=database_url,
+        notification_worker_enabled=True,
+        credential_encryption_key="G4dAqHdhSHI_KptQdXKVIgF_eVXWYFW3viBTPWLSBEs",
+        _env_file=None,
+    )
+    configured.validate_runtime_security()
+
+    allowlisted = Settings(
+        database_url=database_url,
+        notification_email_smtp_allowed_hosts=" SMTP.EXAMPLE.COM,mail.example.org ",
+        _env_file=None,
+    )
+    assert allowlisted.notification_email_smtp_allowlist == (
+        "smtp.example.com",
+        "mail.example.org",
+    )
+
+    with pytest.raises(ValidationError, match="public DNS hostnames"):
+        Settings(
+            database_url=database_url,
+            notification_email_smtp_allowed_hosts="localhost,127.0.0.1",
+            _env_file=None,
+        )
 
 
 @pytest.mark.parametrize(

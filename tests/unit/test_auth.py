@@ -7,7 +7,11 @@ import pytest
 
 from trading_control_plane.auth import SignedTokenService
 from trading_control_plane.domain import DomainRejected
-from trading_control_plane.passwords import LoginAttemptLimiter, PasswordHasher
+from trading_control_plane.passwords import (
+    ApiClientRateLimiter,
+    LoginAttemptLimiter,
+    PasswordHasher,
+)
 
 NOW = datetime(2026, 7, 19, 8, tzinfo=UTC)
 USER_ID = UUID("00000000-0000-0000-0000-000000000001")
@@ -123,10 +127,20 @@ def test_password_policy_requires_a_real_secret() -> None:
 
 def test_login_attempt_limiter_locks_and_clears_a_credential_scope() -> None:
     limiter = LoginAttemptLimiter(max_attempts=2, lockout=timedelta(minutes=2))
-    key = "127.0.0.1:kelly_oooo"
+    key = "127.0.0.1:telegram-owner"
 
     assert limiter.fail(key, now=NOW) is None
     assert limiter.fail(key, now=NOW + timedelta(seconds=1)) == 120
     assert limiter.retry_after(key, now=NOW + timedelta(seconds=2)) == 119
     limiter.success(key)
     assert limiter.retry_after(key, now=NOW + timedelta(seconds=2)) is None
+
+
+def test_api_client_rate_limit_is_isolated_by_client_and_recovers_after_window() -> None:
+    limiter = ApiClientRateLimiter(max_requests=2, window=timedelta(minutes=1))
+
+    assert limiter.consume("client-a", now=NOW) is None
+    assert limiter.consume("client-a", now=NOW + timedelta(seconds=1)) is None
+    assert limiter.consume("client-a", now=NOW + timedelta(seconds=2)) == 58
+    assert limiter.consume("client-b", now=NOW + timedelta(seconds=2)) is None
+    assert limiter.consume("client-a", now=NOW + timedelta(seconds=61)) is None

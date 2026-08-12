@@ -85,6 +85,10 @@ def seed_campaign(database: Database) -> dict[str, UUID]:
         version="m6-risk-v1",
         system_state=SystemRiskState.NORMAL,
         max_total_risk=Decimal("100"),
+        max_account_risk=Decimal("100"),
+        max_single_loss=Decimal("100"),
+        max_consecutive_losses=3,
+        loss_cooldown=timedelta(hours=1),
         max_fact_age=timedelta(minutes=5),
         now=now,
     )

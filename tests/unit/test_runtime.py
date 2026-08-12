@@ -1,8 +1,9 @@
+import threading
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta, timezone
 from types import SimpleNamespace
 from typing import Any
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import pytest
 
@@ -11,12 +12,17 @@ from trading_control_plane.config import Settings
 from trading_control_plane.domain import DomainRejected, ReconciliationStatus
 from trading_control_plane.perptape import PerptapeClient, PerptapeFeedSnapshot
 from trading_control_plane.runtime import (
+    RuntimeBindingSupervisor,
     RuntimeSyncReport,
     RuntimeSyncWorker,
     SourceSyncResult,
     build_runtime_worker,
     perptape_resonance_groups,
     perptape_resonance_signal_identity,
+)
+from trading_control_plane.service import (
+    PreparedPerptapeRuntimeBinding,
+    PreparedRuntimeAccountBinding,
 )
 
 
@@ -133,38 +139,308 @@ def test_runtime_readiness_requires_both_source_success_and_complete_capital() -
     assert failed.ready_for_new_risk is False
 
 
+def test_database_binding_supervisor_builds_exact_scoped_read_only_workers() -> None:
+    team_id = UUID("11111111-1111-1111-1111-111111111111")
+    workspace_id = UUID("22222222-2222-2222-2222-222222222222")
+    account_principal = UUID("33333333-3333-3333-3333-333333333333")
+    signal_principal = UUID("44444444-4444-4444-4444-444444444444")
+    account_binding = PreparedRuntimeAccountBinding(
+        exchange_account_id=UUID("55555555-5555-5555-5555-555555555555"),
+        workspace_id=workspace_id,
+        team_id=team_id,
+        service_principal_id=account_principal,
+        service_principal_username="runtime-team-account",
+        account_id="binance-team-main",
+        venue="BINANCE",
+        account_version=3,
+        credential_version=1,
+        credentials={"api_key": "fixture-key", "api_secret": "fixture-secret"},
+    )
+    signal_binding = PreparedPerptapeRuntimeBinding(
+        signal_source_id=UUID("66666666-6666-6666-6666-666666666666"),
+        workspace_id=workspace_id,
+        team_id=team_id,
+        service_principal_id=signal_principal,
+        service_principal_username="signal-team-source",
+        source_version=2,
+        credential_version=1,
+        api_key="perptape-fixture-key",
+    )
+    built: list[Settings] = []
+
+    class FakeWorker:
+        def __init__(self, settings: Settings) -> None:
+            self.settings = settings
+
+        def run_bound_account_once(
+            self, binding: PreparedRuntimeAccountBinding, *, now: datetime
+        ) -> SourceSyncResult:
+            assert binding is account_binding
+            assert now == datetime(2026, 8, 5, tzinfo=UTC)
+            assert self.settings.runtime_binance_account_id == "binance-team-main"
+            assert self.settings.runtime_hyperliquid_account_id is None
+            assert self.settings.binance_api_key == "fixture-key"
+            assert self.settings.binance_api_secret == "fixture-secret"  # noqa: S105
+            assert self.settings.binance_read_only_enabled is True
+            assert self.settings.hyperliquid_read_only_enabled is False
+            return SourceSyncResult("SUCCESS", items_observed=2)
+
+        def run_bound_perptape_once(
+            self, binding: PreparedPerptapeRuntimeBinding, *, now: datetime
+        ) -> SourceSyncResult:
+            assert binding is signal_binding
+            assert now == datetime(2026, 8, 5, tzinfo=UTC)
+            assert self.settings.perptape_api_key == "perptape-fixture-key"
+            assert self.settings.perptape_service_username == "signal-team-source"
+            assert self.settings.binance_read_only_enabled is False
+            assert self.settings.hyperliquid_read_only_enabled is False
+            return SourceSyncResult("SUCCESS", items_observed=4)
+
+    def factory(settings: Settings, _database: Any) -> FakeWorker:
+        built.append(settings)
+        return FakeWorker(settings)
+
+    settings = Settings(
+        database_url="postgresql+psycopg://unused:unused@127.0.0.1/unused",
+        _env_file=None,
+    )
+    supervisor = RuntimeBindingSupervisor(
+        settings=settings,
+        database=object(),  # type: ignore[arg-type]
+        clock=lambda: datetime(2026, 8, 5, tzinfo=UTC),
+        worker_factory=factory,  # type: ignore[arg-type]
+    )
+    supervisor.service = SimpleNamespace(
+        runtime_account_bindings=lambda: (account_binding,),
+        perptape_runtime_bindings=lambda: (signal_binding,),
+    )
+
+    report = supervisor.run_once()
+
+    assert report.successful is True
+    assert report.to_dict()["binding_source"] == "DATABASE_ENVELOPE"
+    assert report.sources == {
+        f"{team_id}:BINANCE:binance-team-main": SourceSyncResult(
+            "SUCCESS", items_observed=2
+        ),
+        f"{team_id}:PERPTAPE": SourceSyncResult("SUCCESS", items_observed=4),
+    }
+    assert len(built) == 2
+    assert "fixture-secret" not in repr(account_binding)
+    assert "perptape-fixture-key" not in repr(signal_binding)
+
+
+def test_database_binding_supervisor_isolates_team_stream_failure_and_restarts_rotation() -> None:
+    now = datetime(2026, 8, 11, tzinfo=UTC)
+    workspace_id = UUID("22222222-2222-2222-2222-222222222222")
+    first = PreparedPerptapeRuntimeBinding(
+        signal_source_id=UUID("11111111-1111-1111-1111-111111111111"),
+        workspace_id=workspace_id,
+        team_id=UUID("33333333-3333-3333-3333-333333333333"),
+        service_principal_id=UUID("44444444-4444-4444-4444-444444444444"),
+        service_principal_username="signal-team-first",
+        source_version=2,
+        credential_version=1,
+        api_key="first-team-secret",
+    )
+    second = PreparedPerptapeRuntimeBinding(
+        signal_source_id=UUID("55555555-5555-5555-5555-555555555555"),
+        workspace_id=workspace_id,
+        team_id=UUID("66666666-6666-6666-6666-666666666666"),
+        service_principal_id=UUID("77777777-7777-7777-7777-777777777777"),
+        service_principal_username="signal-team-second",
+        source_version=4,
+        credential_version=3,
+        api_key="second-team-secret",
+    )
+    created: list[tuple[PreparedPerptapeRuntimeBinding, Any]] = []
+    second_builds = 0
+
+    class FakeStream:
+        def __init__(self, *, fatal: bool) -> None:
+            self.fatal = fatal
+            self.fatal_error_code: str | None = None
+            self.connection_healthy = False
+            self.stats = SimpleNamespace(messages_received=0)
+            self.started = threading.Event()
+
+        def run_forever(self, stop_event: threading.Event) -> None:
+            self.started.set()
+            if self.fatal:
+                self.fatal_error_code = "PERPTAPE_AUTH_FAILED"
+                stop_event.set()
+                return
+            self.connection_healthy = True
+            self.stats.messages_received = 2
+            stop_event.wait()
+
+    class FakeWorker:
+        def __init__(self, scoped: Settings) -> None:
+            self.scoped = scoped
+
+        def build_bound_perptape_stream(
+            self, binding: PreparedPerptapeRuntimeBinding
+        ) -> FakeStream:
+            nonlocal second_builds
+            assert self.scoped.perptape_api_key == binding.api_key
+            assert self.scoped.perptape_service_username == (binding.service_principal_username)
+            fatal = binding.signal_source_id == second.signal_source_id and second_builds == 0
+            if binding.signal_source_id == second.signal_source_id:
+                second_builds += 1
+            stream = FakeStream(fatal=fatal)
+            created.append((binding, stream))
+            return stream
+
+    health: list[tuple[UUID, dict[str, dict[str, Any]]]] = []
+
+    def record_health(
+        actor_id: UUID,
+        sources: dict[str, dict[str, Any]],
+        **kwargs: Any,
+    ) -> None:
+        assert kwargs["perptape_runtime_binding"].service_principal_id == actor_id
+        assert kwargs["now"] == now
+        health.append((actor_id, sources))
+
+    supervisor = RuntimeBindingSupervisor(
+        settings=Settings(
+            database_url="postgresql+psycopg://unused:unused@127.0.0.1/unused",
+            runtime_sync_enabled=True,
+            perptape_websocket_enabled=True,
+            credential_encryption_key=("eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHg"),
+            _env_file=None,
+        ),
+        database=object(),  # type: ignore[arg-type]
+        clock=lambda: now,
+        worker_factory=lambda scoped, _database: FakeWorker(scoped),  # type: ignore[arg-type]
+    )
+    supervisor.service = SimpleNamespace(record_runtime_source_health=record_health)
+
+    try:
+        supervisor._reconcile_perptape_streams((first, second), now=now)
+        assert all(stream.started.wait(1) for _binding, stream in created)
+        supervisor._reconcile_perptape_streams((first, second), now=now)
+
+        assert first.signal_source_id in supervisor._perptape_streams
+        assert second.signal_source_id not in supervisor._perptape_streams
+        assert second_builds == 1
+        assert any(
+            actor_id == second.service_principal_id
+            and sources["PERPTAPE_WEBSOCKET"]["status"] == "FAILED"
+            and sources["PERPTAPE_WEBSOCKET"]["error_code"] == "PERPTAPE_AUTH_FAILED"
+            for actor_id, sources in health
+        )
+
+        supervisor._reconcile_perptape_streams((first, second), now=now)
+        assert second_builds == 1
+
+        rotated = replace(
+            second,
+            source_version=5,
+            credential_version=4,
+            api_key="rotated-team-secret",
+        )
+        supervisor._reconcile_perptape_streams((first, rotated), now=now)
+        replacement = supervisor._perptape_streams[second.signal_source_id]
+        assert replacement.stream.started.wait(1)
+        assert replacement.stream.connection_healthy is True
+        assert second_builds == 2
+        assert second.signal_source_id not in supervisor._failed_perptape_stream_versions
+        assert first.api_key not in repr(health)
+        assert second.api_key not in repr(health)
+    finally:
+        supervisor._shutdown_perptape_streams()
+
+    assert supervisor.dependencies_in_use is False
+
+
+def test_database_binding_supervisor_keeps_okx_secrets_out_of_settings() -> None:
+    binding = PreparedRuntimeAccountBinding(
+        exchange_account_id=UUID("55555555-5555-5555-5555-555555555555"),
+        workspace_id=UUID("22222222-2222-2222-2222-222222222222"),
+        team_id=UUID("11111111-1111-1111-1111-111111111111"),
+        service_principal_id=UUID("33333333-3333-3333-3333-333333333333"),
+        service_principal_username="runtime-okx-account",
+        account_id="okx-team-main",
+        venue="OKX",
+        account_version=3,
+        credential_version=1,
+        credentials={
+            "api_key": "okx-fixture-key",
+            "api_secret": "okx-fixture-secret",
+            "passphrase": "okx-fixture-passphrase",
+        },
+    )
+
+    class FakeWorker:
+        installed: PreparedRuntimeAccountBinding | None = None
+
+        def install_database_account_reader(
+            self, account_binding: PreparedRuntimeAccountBinding
+        ) -> None:
+            self.installed = account_binding
+
+    captured: list[Settings] = []
+
+    def factory(settings: Settings, _database: Any) -> FakeWorker:
+        captured.append(settings)
+        return FakeWorker()
+
+    supervisor = RuntimeBindingSupervisor(
+        settings=Settings(
+            database_url="postgresql+psycopg://unused:unused@127.0.0.1/unused",
+            _env_file=None,
+        ),
+        database=object(),  # type: ignore[arg-type]
+        worker_factory=factory,  # type: ignore[arg-type]
+    )
+
+    worker = supervisor._account_worker(binding)
+
+    assert worker.installed is binding
+    serialized = repr(captured[0].model_dump())
+    assert "okx-fixture-key" not in serialized
+    assert "okx-fixture-secret" not in serialized
+    assert "okx-fixture-passphrase" not in serialized
+    assert "okx-fixture-secret" not in repr(binding)
+
+
 def test_runtime_rate_limit_cooldown_skips_only_until_retry_deadline() -> None:
     now = datetime(2026, 8, 5, 1, 0, tzinfo=UTC)
     worker: Any = object.__new__(RuntimeSyncWorker)
     worker.queries = SimpleNamespace(
-        runtime_source_health=lambda _source: {
+        runtime_source_health=lambda _actor, _source, **_scope: {
             "error_code": "HYPERLIQUID_RATE_LIMITED",
             "retry_at": (now + timedelta(minutes=2)).isoformat(),
         }
     )
 
-    cooldown = worker._rate_limit_cooldown("HYPERLIQUID", now=now)
+    cooldown = worker._rate_limit_cooldown(
+        "HYPERLIQUID", actor_id=uuid4(), now=now
+    )
 
     assert cooldown == SourceSyncResult(
         "SKIPPED",
         error_code="HYPERLIQUID_RATE_LIMITED_COOLDOWN",
     )
     assert worker._rate_limit_cooldown(
-        "HYPERLIQUID", now=now + timedelta(minutes=2)
+        "HYPERLIQUID", actor_id=uuid4(), now=now + timedelta(minutes=2)
     ) is None
 
 
 def test_runtime_rate_limit_cooldown_fails_open_to_a_real_probe_on_bad_metadata() -> None:
     worker: Any = object.__new__(RuntimeSyncWorker)
     worker.queries = SimpleNamespace(
-        runtime_source_health=lambda _source: {
+        runtime_source_health=lambda _actor, _source, **_scope: {
             "error_code": "HYPERLIQUID_RATE_LIMITED",
             "retry_at": "not-a-time",
         }
     )
 
     assert worker._rate_limit_cooldown(
-        "HYPERLIQUID", now=datetime(2026, 8, 5, tzinfo=UTC)
+        "HYPERLIQUID",
+        actor_id=uuid4(),
+        now=datetime(2026, 8, 5, tzinfo=UTC),
     ) is None
 
 
@@ -350,7 +626,7 @@ def test_runtime_https_snapshot_preserves_persisted_incomplete_stream_target() -
         perptape_cache_seconds=60,
         perptape_websocket_reconciliation_seconds=300,
     )
-    worker.queries = SimpleNamespace(perptape_feed=lambda: current)
+    worker.queries = SimpleNamespace(perptape_feed=lambda _actor: current)
     worker.perptape = SimpleNamespace(refresh=lambda **_kwargs: incoming)
     worker.service = SimpleNamespace(
         record_perptape_feed=lambda _actor_id, feed, **_kwargs: recorded.append(feed),
@@ -691,7 +967,7 @@ def test_runtime_enabled_websocket_is_started_and_joined_on_shutdown(
         service_principal_by_username=lambda _username: SimpleNamespace(
             user_id=UUID("11111111-1111-1111-1111-111111111111")
         ),
-        perptape_feed=lambda: None,
+        perptape_feed=lambda _actor: None,
     )
     worker.service = SimpleNamespace(record_perptape_feed=lambda *_args, **_kwargs: 1)
     worker.perptape = object()
@@ -760,6 +1036,11 @@ def test_runtime_continuous_cli_installs_stop_handlers_and_disposes(
         "build_runtime_worker",
         lambda _settings, _database: worker,
     )
+    monkeypatch.setattr(
+        runtime_module,
+        "RuntimeBindingSupervisor",
+        lambda **_kwargs: worker,
+    )
     monkeypatch.setattr(runtime_module, "configure_logging", lambda _level: None)
     monkeypatch.setattr(
         runtime_module.signal,
@@ -770,6 +1051,40 @@ def test_runtime_continuous_cli_installs_stop_handlers_and_disposes(
     assert runtime_module.main([]) == 0
     assert installed_signals == [runtime_module.signal.SIGINT, runtime_module.signal.SIGTERM]
     assert worker.cycles == 1
+    assert database.disposed is True
+
+
+def test_runtime_healthcheck_reports_supervised_process_without_external_probe(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    settings = Settings(
+        database_url="postgresql+psycopg://unused:unused@127.0.0.1/unused",
+        runtime_sync_enabled=True,
+        perptape_websocket_enabled=True,
+        credential_encryption_key=("eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHg"),
+        _env_file=None,
+    )
+
+    class FakeDatabase:
+        disposed = False
+
+        def is_ready(self) -> tuple[bool, str | None]:
+            return True, None
+
+        def dispose(self) -> None:
+            self.disposed = True
+
+    database = FakeDatabase()
+    monkeypatch.setattr(runtime_module, "get_settings", lambda: settings)
+    monkeypatch.setattr(runtime_module, "Database", lambda _url: database)
+    monkeypatch.setattr(runtime_module, "configure_logging", lambda _level: None)
+
+    assert runtime_module.main(["--healthcheck"]) == 0
+    result = capsys.readouterr().out
+    assert '"component":"runtime-sync"' in result
+    assert '"status":"READY"' in result
+    assert '"team_perptape_websocket_requested":true' in result
     assert database.disposed is True
 
 
@@ -807,6 +1122,11 @@ def test_runtime_does_not_dispose_database_while_stream_thread_is_alive(
         runtime_module,
         "build_runtime_worker",
         lambda _settings, _database: FakeWorker(),
+    )
+    monkeypatch.setattr(
+        runtime_module,
+        "RuntimeBindingSupervisor",
+        lambda **_kwargs: FakeWorker(),
     )
     monkeypatch.setattr(runtime_module, "configure_logging", lambda _level: None)
     monkeypatch.setattr(runtime_module.signal, "signal", lambda *_args: None)

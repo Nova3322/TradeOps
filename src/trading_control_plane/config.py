@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import base64
+import binascii
 import os
 import re
 from decimal import Decimal
@@ -18,6 +20,10 @@ from trading_control_plane.perptape import (
 
 DEFAULT_SESSION_SECRET = "local-development-session-secret-change-me"  # noqa: S105
 EVM_ADDRESS_PATTERN = re.compile(r"^0x[0-9a-fA-F]{40}$")
+PUBLIC_DNS_HOST_PATTERN = re.compile(
+    r"^(?=.{1,253}$)(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+"
+    r"[A-Za-z]{2,63}$"
+)
 
 
 class Settings(BaseSettings):
@@ -30,6 +36,7 @@ class Settings(BaseSettings):
         env_prefix="TRADING_",
         env_file=(".env.local", ".env.production.local"),
         env_file_encoding="utf-8",
+        env_ignore_empty=True,
         extra="ignore",
         populate_by_name=True,
     )
@@ -45,6 +52,7 @@ class Settings(BaseSettings):
         min_length=32,
         repr=False,
     )
+    credential_encryption_key: str | None = Field(default=None, repr=False)
     allow_mock_identity: bool = False
     session_ttl_seconds: int = Field(default=28_800, ge=300, le=86_400)
     action_token_ttl_seconds: int = Field(default=300, ge=30, le=900)
@@ -93,6 +101,10 @@ class Settings(BaseSettings):
     runtime_sync_enabled: bool = False
     runtime_sync_interval_seconds: int = Field(default=60, ge=30, le=3_600)
     runtime_sync_service_username: str = "runtime-sync"
+    notification_worker_enabled: bool = False
+    notification_worker_interval_seconds: int = Field(default=15, ge=5, le=300)
+    notification_worker_batch_size: int = Field(default=50, ge=1, le=200)
+    notification_email_smtp_allowed_hosts: str = ""
     runtime_binance_account_id: str | None = None
     runtime_binance_symbol: str = "BTCUSDT"
     runtime_hyperliquid_account_id: str | None = None
@@ -183,6 +195,10 @@ class Settings(BaseSettings):
         return parse_hip3_dexes(self.freqtrade_hyperliquid_hip3_dexes)
 
     @property
+    def notification_email_smtp_allowlist(self) -> tuple[str, ...]:
+        return tuple(item for item in self.notification_email_smtp_allowed_hosts.split(",") if item)
+
+    @property
     def notilt_vaults(self) -> dict[int, str]:
         return {
             chain_id: address
@@ -209,6 +225,19 @@ class Settings(BaseSettings):
             raise ValueError("database_url must use PostgreSQL with the psycopg driver")
         return value
 
+    @field_validator("credential_encryption_key")
+    @classmethod
+    def require_aes_256_credential_key(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        try:
+            decoded = base64.urlsafe_b64decode(value + "=" * (-len(value) % 4))
+        except (ValueError, binascii.Error) as exc:
+            raise ValueError("credential encryption key must be URL-safe base64") from exc
+        if len(decoded) != 32:
+            raise ValueError("credential encryption key must decode to exactly 32 bytes")
+        return value
+
     @field_validator("perptape_base_url")
     @classmethod
     def require_official_perptape_http_url(cls, value: str) -> str:
@@ -229,6 +258,16 @@ class Settings(BaseSettings):
     def require_valid_hip3_dexes(cls, value: str) -> str:
         parse_hip3_dexes(value)
         return value
+
+    @field_validator("notification_email_smtp_allowed_hosts")
+    @classmethod
+    def require_valid_notification_smtp_allowlist(cls, value: str) -> str:
+        hosts = tuple(item.strip().lower() for item in value.split(",") if item.strip())
+        if len(hosts) != len(set(hosts)) or any(
+            PUBLIC_DNS_HOST_PATTERN.fullmatch(host) is None for host in hosts
+        ):
+            raise ValueError("notification email SMTP hosts must be unique public DNS hostnames")
+        return ",".join(hosts)
 
     @field_validator("binance_capital_base_url")
     @classmethod
@@ -289,19 +328,14 @@ class Settings(BaseSettings):
             )
         if bool(self.freqtrade_api_username) != bool(self.freqtrade_api_password):
             raise ValueError("Freqtrade worker username and password must be configured together")
-        if self.freqtrade_workers_enabled and not (
-            self.freqtrade_api_username and self.freqtrade_api_password
-        ):
-            raise ValueError("enabled Freqtrade workers require explicit control credentials")
         if self.freqtrade_live_order_send_enabled and (
             self.execution_backend != "FREQTRADE"
             or not self.freqtrade_workers_enabled
-            or not self.freqtrade_api_username
-            or not self.freqtrade_api_password
+            or not self.credential_encryption_key
         ):
             raise ValueError(
                 "Freqtrade LIVE send requires the FREQTRADE backend, enabled workers and "
-                "explicit control credentials"
+                "database credential encryption for account-bound workers"
             )
         if (
             self.runtime_sync_enabled
@@ -354,14 +388,21 @@ class Settings(BaseSettings):
             raise ValueError("enabled Telegram requires an existing internal username")
         if self.perptape_websocket_enabled and not self.runtime_sync_enabled:
             raise ValueError("enabled Perptape WebSocket requires the runtime sync worker")
-        if self.perptape_websocket_enabled and not self.perptape_api_key:
-            raise ValueError("enabled Perptape WebSocket requires the platform API key")
+        if self.perptape_websocket_enabled and not (
+            self.perptape_api_key or self.credential_encryption_key
+        ):
+            raise ValueError(
+                "enabled Perptape WebSocket requires a platform API key or database "
+                "credential encryption key"
+            )
         if self.perptape_auto_proposal_enabled and not self.runtime_sync_enabled:
             raise ValueError("automatic Perptape proposals require the runtime sync worker")
         if self.perptape_auto_proposal_enabled and not self.perptape_api_key:
             raise ValueError("automatic Perptape proposals require the platform API key")
         if self.perptape_auto_proposal_enabled and not self.perptape_auto_proposal_account_id:
             raise ValueError("automatic Perptape proposals require an internal account ID")
+        if self.notification_worker_enabled and not self.credential_encryption_key:
+            raise ValueError("enabled notification worker requires the credential encryption key")
         if (
             self.perptape_websocket_reconnect_initial_seconds
             > self.perptape_websocket_reconnect_max_seconds

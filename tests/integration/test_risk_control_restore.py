@@ -107,6 +107,10 @@ def seed(service: TradingService) -> dict[str, UUID]:
         version="risk-restore-v1",
         system_state=SystemRiskState.NORMAL,
         max_total_risk=Decimal("100"),
+        max_account_risk=Decimal("100"),
+        max_single_loss=Decimal("100"),
+        max_consecutive_losses=3,
+        loss_cooldown=timedelta(hours=1),
         max_fact_age=timedelta(hours=2),
         now=NOW,
     )
@@ -503,6 +507,10 @@ def test_tighten_actions_permanently_revoke_old_authorization(
             version="unsafe-direct-normal",
             system_state=SystemRiskState.NORMAL,
             max_total_risk=Decimal("100"),
+            max_account_risk=Decimal("100"),
+            max_single_loss=Decimal("100"),
+            max_consecutive_losses=3,
+            loss_cooldown=timedelta(hours=1),
             max_fact_age=timedelta(hours=2),
             now=NOW + timedelta(seconds=3),
         )
@@ -726,6 +734,14 @@ def test_system_admin_direct_restore_requires_live_conditions_and_keeps_auto_add
         ids["admin"],
         now=NOW,
     )
+    service.assign_role(
+        runtime_actor,
+        Role.OPERATOR,
+        ids["admin"],
+        account_scope="acct-1",
+        venue_scope="BINANCE",
+        now=NOW,
+    )
     enable_auto_add_for_test(database, ids["admin"], now=NOW)
     old_authorization_id = issue_add_authorization(service, ids)
     service.disable_global_auto_add(
@@ -814,6 +830,7 @@ def test_system_admin_direct_restore_requires_live_conditions_and_keeps_auto_add
                 "error_code": "BINANCE_RATE_LIMITED",
             }
         },
+        scopes={"BINANCE": ("acct-1", "BINANCE")},
         now=ready_at + timedelta(seconds=1, milliseconds=200),
     )
     failed_probe = service.risk_control_status(
@@ -867,6 +884,7 @@ def test_system_admin_direct_restore_requires_live_conditions_and_keeps_auto_add
     service.record_runtime_source_health(
         runtime_actor,
         {"BINANCE": {"status": "SUCCESS", "items_observed": 1}},
+        scopes={"BINANCE": ("acct-1", "BINANCE")},
         now=ready_at + timedelta(seconds=1, milliseconds=400),
     )
     restored_policy_id = service.direct_restore_risk_controls(
