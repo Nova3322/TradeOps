@@ -40,6 +40,11 @@ class FactIngestionExecutionService(ServiceComponent):
                 team_id=campaign.team_id,
             )
             self.transactions._require_team_environment(team, ExecutionEnvironment.SHADOW)
+            if team.execution_mode_locked_at is not None:
+                _reject(
+                    "SHADOW_LEGACY_EXECUTION_RETIRED",
+                    "mode-locked Teams use atomic unified shadow fills only",
+                )
             existing = session.scalar(
                 select(VenueFill).where(
                     VenueFill.team_id == campaign.team_id,

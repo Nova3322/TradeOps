@@ -431,6 +431,7 @@ class TradingModeService(ServiceComponent):
             else:
                 previous_mode = team.execution_mode
                 team.execution_mode = normalized_mode
+                team.execution_mode_locked_at = now
                 if previous_mode == TeamExecutionMode.SETUP.value:
                     team.trading_enabled = True
                 team.version += 1
@@ -747,6 +748,171 @@ class TradingModeService(ServiceComponent):
         account.version += 1
         account.updated_at = now
 
+    def _sync_linked_workflow_after_fill(
+        self,
+        session: Session,
+        *,
+        actor_id: UUID,
+        team: Team,
+        account: TeamShadowAccount,
+        instrument: ShadowInstrument,
+        position: ShadowPosition,
+        order: ShadowOrder,
+        now: datetime,
+    ) -> None:
+        """Advance a proposal-backed workflow from the same locked SHADOW ledger fill."""
+
+        campaign = (
+            None
+            if order.campaign_id is None
+            else session.get(Campaign, order.campaign_id, with_for_update=True)
+        )
+        intent = (
+            None
+            if order.order_intent_id is None
+            else session.get(OrderIntent, order.order_intent_id, with_for_update=True)
+        )
+        if intent is not None:
+            previous_status = intent.status
+            self.facade._consume_add_unit(session, intent)
+            intent.status = OrderIntentStatus.FILLED.value
+            intent.updated_at = now
+            intent.version += 1
+            if intent.reservation_id is not None:
+                reservation = session.get(
+                    RiskReservation, intent.reservation_id, with_for_update=True
+                )
+                if reservation is not None:
+                    reservation.status = ReservationStatus.OPEN.value
+                    reservation.updated_at = now
+                    reservation.version += 1
+            INTENT_TRANSITIONS.labels(previous_status, intent.status).inc()
+        if campaign is None:
+            return
+
+        campaign_fee = session.scalar(
+            select(func.coalesce(func.sum(ShadowOrder.fee), 0)).where(
+                ShadowOrder.campaign_id == campaign.campaign_id,
+                ShadowOrder.generation == account.generation,
+                ShadowOrder.status == "FILLED",
+            )
+        )
+        campaign.realized_pnl = position.realized_pnl - Decimal(campaign_fee or 0)
+        campaign.unrealized_pnl = position.unrealized_pnl
+        campaign.final_pnl = campaign.realized_pnl + campaign.unrealized_pnl
+        campaign.status = (
+            CampaignStatus.OPEN.value
+            if position.quantity != 0
+            else CampaignStatus.CLOSED.value
+        )
+        campaign.updated_at = now
+
+        if position.quantity == 0:
+            reservations = session.scalars(
+                select(RiskReservation)
+                .where(
+                    RiskReservation.campaign_id == campaign.campaign_id,
+                    RiskReservation.status != ReservationStatus.RELEASED.value,
+                )
+                .with_for_update()
+            ).all()
+            for reservation in reservations:
+                reservation.status = ReservationStatus.RELEASED.value
+                reservation.updated_at = now
+                reservation.version += 1
+            authorization = session.get(
+                TradingAuthorization, campaign.authorization_id, with_for_update=True
+            )
+            if authorization is not None:
+                authorization.active = False
+            return
+
+        proposal = session.get(Proposal, campaign.proposal_id)
+        if proposal is None or intent is None or intent.kind not in {
+            IntentKind.INITIAL.value,
+            IntentKind.ADD.value,
+        }:
+            return
+        trigger_price = self.facade._proposal_detail_decimal(proposal, "invalidation_price")
+        assert instrument.price_tick is not None
+        trigger_price = quantize_shadow_step(trigger_price, instrument.price_tick)
+        protection = session.scalar(
+            select(ShadowOrder)
+            .where(
+                ShadowOrder.campaign_id == campaign.campaign_id,
+                ShadowOrder.generation == account.generation,
+                ShadowOrder.order_type == "PROTECTION",
+                ShadowOrder.status.in_(("OPEN", "TRIGGERED")),
+            )
+            .with_for_update()
+        )
+        if protection is None:
+            protection = ShadowOrder(
+                shadow_account_id=account.shadow_account_id,
+                team_id=team.team_id,
+                generation=account.generation,
+                shadow_instrument_id=instrument.shadow_instrument_id,
+                source_account_id=order.source_account_id,
+                venue=order.venue,
+                campaign_id=campaign.campaign_id,
+                order_intent_id=None,
+                shadow_position_id=position.shadow_position_id,
+                side="SELL" if position.quantity > 0 else "BUY",
+                order_type="PROTECTION",
+                quantity=abs(position.quantity),
+                limit_price=None,
+                trigger_price=trigger_price,
+                trigger_type="STOP_LOSS",
+                execution_type="MARKET",
+                reduce_only=True,
+                status="OPEN",
+                filled_quantity=Decimal(0),
+                fill_price=None,
+                fee=Decimal(0),
+                realized_pnl=Decimal(0),
+                correlation_id=order.correlation_id,
+                idempotency_key=f"{order.idempotency_key}:stop-loss",
+                version=1,
+                created_at=now,
+                updated_at=now,
+            )
+            session.add(protection)
+            session.flush()
+            self.transactions._audit(
+                session,
+                actor_id=str(actor_id),
+                event_type="SHADOW_PROTECTION_CREATED",
+                object_type="ShadowOrder",
+                object_id=protection.shadow_order_id,
+                reason="proposal invalidation price;execution_type=MARKET;reduce_only=true",
+                correlation_id=protection.correlation_id,
+                object_version=protection.version,
+                idempotency_key=protection.idempotency_key,
+                workspace_id=team.workspace_id,
+                team_id=team.team_id,
+                account_id=order.source_account_id,
+                environment=ExecutionEnvironment.SHADOW.value,
+                generation=account.generation,
+                rule_summary={
+                    "campaign_id": str(campaign.campaign_id),
+                    "trigger_type": "STOP_LOSS",
+                    "execution_type": "MARKET",
+                    "trigger_price": str(trigger_price),
+                    "quantity": str(abs(position.quantity)),
+                    "reduce_only": True,
+                    "venue_write_adapter_calls": 0,
+                },
+                now=now,
+            )
+        else:
+            protection.shadow_position_id = position.shadow_position_id
+            protection.side = "SELL" if position.quantity > 0 else "BUY"
+            protection.quantity = abs(position.quantity)
+            protection.trigger_price = trigger_price
+            protection.status = "OPEN"
+            protection.version += 1
+            protection.updated_at = now
+
     def _fill_order(
         self,
         session: Session,
@@ -846,6 +1012,16 @@ class TradingModeService(ServiceComponent):
         account.realized_pnl += state.realized_pnl
         account.fees_paid += fee
         self._refresh_account(session, account=account, now=now)
+        self._sync_linked_workflow_after_fill(
+            session,
+            actor_id=actor_id,
+            team=team,
+            account=account,
+            instrument=instrument,
+            position=position,
+            order=order,
+            now=now,
+        )
         self._record_shadow_equity_snapshot(session, account=account, now=now)
         session.flush()
         rule_summary = {
@@ -1017,6 +1193,154 @@ class TradingModeService(ServiceComponent):
             event_type=event_type,
             now=now,
         )
+
+    def _simulate_linked_shadow_intent(
+        self,
+        session: Session,
+        *,
+        actor_id: UUID,
+        team: Team,
+        campaign: Campaign,
+        intent: OrderIntent,
+        proposal: Proposal,
+        catalog: Instrument,
+        reference_price: Decimal,
+        fee_bps: Decimal,
+        slippage_bps: Decimal,
+        idempotency_key: str,
+        now: datetime,
+    ) -> dict[str, Any]:
+        """Create and match one proposal-backed order in the active Team generation."""
+
+        account = self._active_shadow_account(session, team.team_id, lock=True)
+        if account is None:
+            _reject("SHADOW_ACCOUNT_MISSING", "Team virtual account is not initialized")
+        self._require_active_exchange_account(
+            session,
+            team_id=team.team_id,
+            account_id=campaign.account_id,
+            venue=campaign.venue,
+            lock=True,
+        )
+        existing = session.scalar(
+            select(ShadowOrder).where(ShadowOrder.order_intent_id == intent.intent_id)
+        )
+        if existing is not None:
+            _reject("SHADOW_ORDER_EXISTS", "intent already belongs to a unified shadow order")
+        instrument = self._resolve_instrument(
+            session,
+            team_id=team.team_id,
+            venue=campaign.venue,
+            symbol=catalog.symbol,
+            catalog_instrument_id=catalog.instrument_id,
+            latest_price=reference_price,
+            observed_at=now,
+            price_tick=catalog.tick_size,
+            quantity_step=catalog.lot_size,
+            contract_multiplier=catalog.contract_multiplier,
+            is_derivative=True,
+            now=now,
+        )
+        assert instrument.quantity_step is not None
+        quantity = quantize_shadow_step(
+            intent.quantity, instrument.quantity_step, rounding=ROUND_FLOOR
+        )
+        if quantity <= 0:
+            _reject("SHADOW_QUANTITY_BELOW_PRECISION", "intent quantity rounds to zero")
+        limit_price = None
+        if intent.limit_price is not None:
+            assert instrument.price_tick is not None
+            limit_price = quantize_shadow_step(intent.limit_price, instrument.price_tick)
+        order = ShadowOrder(
+            shadow_account_id=account.shadow_account_id,
+            team_id=team.team_id,
+            generation=account.generation,
+            shadow_instrument_id=instrument.shadow_instrument_id,
+            source_account_id=campaign.account_id,
+            venue=campaign.venue,
+            campaign_id=campaign.campaign_id,
+            order_intent_id=intent.intent_id,
+            shadow_position_id=None,
+            side=intent.side,
+            order_type="LIMIT" if limit_price is not None else "MARKET",
+            quantity=quantity,
+            limit_price=limit_price,
+            trigger_price=None,
+            trigger_type=None,
+            execution_type=None,
+            reduce_only=intent.reduce_only,
+            status="OPEN",
+            filled_quantity=Decimal(0),
+            fill_price=None,
+            fee=Decimal(0),
+            realized_pnl=Decimal(0),
+            correlation_id=intent.correlation_id,
+            idempotency_key=idempotency_key,
+            version=1,
+            created_at=now,
+            updated_at=now,
+        )
+        session.add(order)
+        session.flush()
+        self.transactions._audit(
+            session,
+            actor_id=str(actor_id),
+            event_type="SHADOW_ORDER_CREATED",
+            object_type="ShadowOrder",
+            object_id=order.shadow_order_id,
+            reason=f"proposal_intent={intent.intent_id};type={order.order_type};quantity={quantity}",
+            correlation_id=order.correlation_id,
+            object_version=order.version,
+            idempotency_key=idempotency_key,
+            workspace_id=team.workspace_id,
+            team_id=team.team_id,
+            account_id=campaign.account_id,
+            environment=ExecutionEnvironment.SHADOW.value,
+            generation=account.generation,
+            rule_summary={
+                "proposal_id": str(proposal.proposal_id),
+                "campaign_id": str(campaign.campaign_id),
+                "intent_id": str(intent.intent_id),
+                "order_type": order.order_type,
+                "side": intent.side,
+                "quantity": str(quantity),
+                "limit_price": None if limit_price is None else str(limit_price),
+                "reference_price": str(reference_price),
+                "fee_bps": str(fee_bps),
+                "slippage_bps": str(slippage_bps),
+                "venue_write_adapter_calls": 0,
+            },
+            now=now,
+        )
+        fill = self._match_order(
+            session,
+            actor_id=actor_id,
+            team=team,
+            account=account,
+            instrument=instrument,
+            order=order,
+            fee_bps=fee_bps,
+            slippage_bps=slippage_bps,
+            now=now,
+        )
+        if fill is None:
+            previous_status = intent.status
+            intent.status = OrderIntentStatus.SENT.value
+            intent.updated_at = now
+            intent.version += 1
+            INTENT_TRANSITIONS.labels(previous_status, intent.status).inc()
+        result = self._order_payload(order, fill)
+        result.update(
+            {
+                "campaign_id": str(campaign.campaign_id),
+                "intent_id": str(intent.intent_id),
+                "intent_version": intent.version,
+                "shadow_account_id": str(account.shadow_account_id),
+                "generation": account.generation,
+                "shadow_account": self._account_payload(account),
+            }
+        )
+        return result
 
     def create_shadow_order(
         self,
@@ -1614,6 +1938,26 @@ class TradingModeService(ServiceComponent):
                 order.status = "CANCELLED"
                 order.version += 1
                 order.updated_at = now
+                if order.order_intent_id is not None:
+                    intent = session.get(
+                        OrderIntent, order.order_intent_id, with_for_update=True
+                    )
+                    if intent is not None and intent.status in ACTIVE_INTENT_STATUSES:
+                        previous_status = intent.status
+                        intent.status = OrderIntentStatus.CANCELLED.value
+                        intent.version += 1
+                        intent.updated_at = now
+                        if intent.reservation_id is not None:
+                            reservation = session.get(
+                                RiskReservation,
+                                intent.reservation_id,
+                                with_for_update=True,
+                            )
+                            if reservation is not None:
+                                reservation.status = ReservationStatus.RELEASED.value
+                                reservation.version += 1
+                                reservation.updated_at = now
+                        INTENT_TRANSITIONS.labels(previous_status, intent.status).inc()
             positions = session.scalars(
                 select(ShadowPosition)
                 .where(ShadowPosition.shadow_account_id == account.shadow_account_id)

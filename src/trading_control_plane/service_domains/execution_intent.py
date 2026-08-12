@@ -163,19 +163,59 @@ class IntentExecutionService(ServiceComponent):
                 reason = final_outcome.reasons[0] if final_outcome.reasons else "RISK_REJECTED"
                 _reject("FINAL_RISK_CHECK_FAILED", reason)
 
-            position = session.scalar(
-                select(Position)
-                .where(
-                    Position.team_id == proposal.team_id,
-                    Position.account_id == account_id,
-                    Position.venue == venue,
-                    Position.environment == proposal.environment,
-                    Position.instrument_id == instrument_id,
-                )
-                .with_for_update()
+            position: Position | None = None
+            shadow_position: ShadowPosition | None = None
+            shadow_account: TeamShadowAccount | None = None
+            unified_shadow = (
+                proposal.environment == ExecutionEnvironment.SHADOW.value
+                and active_team.execution_mode_locked_at is not None
             )
-            if position is None or position.fact_status != FactStatus.KNOWN.value:
-                _reject("POSITION_UNKNOWN", "new risk requires a current known position fact")
+            if unified_shadow:
+                shadow_account = session.scalar(
+                    select(TeamShadowAccount)
+                    .where(
+                        TeamShadowAccount.team_id == proposal.team_id,
+                        TeamShadowAccount.status == "ACTIVE",
+                    )
+                    .with_for_update()
+                )
+                if shadow_account is None:
+                    _reject(
+                        "SHADOW_ACCOUNT_MISSING",
+                        "Team virtual account is not initialized",
+                    )
+                shadow_instrument = session.scalar(
+                    select(ShadowInstrument).where(
+                        ShadowInstrument.team_id == proposal.team_id,
+                        ShadowInstrument.catalog_instrument_id == instrument_id,
+                    )
+                )
+                if shadow_instrument is not None:
+                    shadow_position = session.scalar(
+                        select(ShadowPosition)
+                        .where(
+                            ShadowPosition.shadow_account_id
+                            == shadow_account.shadow_account_id,
+                            ShadowPosition.generation == shadow_account.generation,
+                            ShadowPosition.shadow_instrument_id
+                            == shadow_instrument.shadow_instrument_id,
+                        )
+                        .with_for_update()
+                    )
+            else:
+                position = session.scalar(
+                    select(Position)
+                    .where(
+                        Position.team_id == proposal.team_id,
+                        Position.account_id == account_id,
+                        Position.venue == venue,
+                        Position.environment == proposal.environment,
+                        Position.instrument_id == instrument_id,
+                    )
+                    .with_for_update()
+                )
+                if position is None or position.fact_status != FactStatus.KNOWN.value:
+                    _reject("POSITION_UNKNOWN", "new risk requires a current known position fact")
 
             campaign = session.scalar(
                 select(Campaign)
@@ -184,7 +224,14 @@ class IntentExecutionService(ServiceComponent):
             )
             campaign_created = campaign is None
             if kind is IntentKind.INITIAL:
-                if position.quantity != 0:
+                if unified_shadow:
+                    current_quantity = (
+                        Decimal(0) if shadow_position is None else shadow_position.quantity
+                    )
+                else:
+                    assert position is not None
+                    current_quantity = position.quantity
+                if current_quantity != 0:
                     _reject("POSITION_NOT_FLAT", "INITIAL requires a confirmed flat position")
                 conflicting_campaign = session.scalar(
                     select(Campaign)
@@ -253,11 +300,18 @@ class IntentExecutionService(ServiceComponent):
                 }:
                     _reject("ADD_CAMPAIGN_REQUIRED", "ADD requires an existing known campaign")
                 expected_long = campaign.direction == Direction.LONG.value
-                if position.quantity == 0 or (position.quantity > 0) != expected_long:
+                current_position = (
+                    shadow_position
+                    if unified_shadow
+                    else position
+                )
+                if current_position is None or current_position.quantity == 0 or (
+                    current_position.quantity > 0
+                ) != expected_long:
                     _reject("ADD_POSITION_INVALID", "ADD requires an existing aligned position")
                 unrealized_pnl = (
-                    position.mark_price - position.average_entry_price
-                ) * position.quantity
+                    current_position.mark_price - current_position.average_entry_price
+                ) * current_position.quantity
                 if unrealized_pnl <= 0:
                     _reject("ADD_NOT_PROFITABLE", "ADD requires strictly positive unrealized PnL")
 
@@ -275,35 +329,11 @@ class IntentExecutionService(ServiceComponent):
                 account_id=proposal.account_id,
                 venue=proposal.venue,
             )
-            if proposal.environment == ExecutionEnvironment.SHADOW.value:
-                instrument = session.get(Instrument, proposal.instrument_id)
-                shadow_equity = (
-                    None
-                    if instrument is None
-                    else session.scalar(
-                        select(AccountEquity)
-                        .where(
-                            AccountEquity.team_id == proposal.team_id,
-                            AccountEquity.account_id == proposal.account_id,
-                            AccountEquity.venue == proposal.venue,
-                            AccountEquity.environment == ExecutionEnvironment.SHADOW.value,
-                            AccountEquity.currency == instrument.collateral_currency,
-                        )
-                        .with_for_update()
-                    )
-                )
-                if (
-                    shadow_equity is None
-                    or shadow_equity.fact_status != FactStatus.KNOWN.value
-                    or shadow_equity.control_status != "CONTROLLED"
-                ):
-                    _reject(
-                        "SHADOW_EQUITY_REQUIRED",
-                        "new virtual risk requires controlled SHADOW capital",
-                    )
+            if unified_shadow:
+                assert shadow_account is not None
                 risk_available = max(
                     Decimal(0),
-                    shadow_equity.available_balance - occupied_account_risk,
+                    shadow_account.available_balance - occupied_account_risk,
                 )
                 if risk_amount > risk_available:
                     _reject(
@@ -331,6 +361,12 @@ class IntentExecutionService(ServiceComponent):
             session.add(reservation)
             session.flush()
             side = "BUY" if direction is Direction.LONG else "SELL"
+            legacy_position_id = None
+            legacy_position_observed_at = None
+            if not unified_shadow:
+                assert position is not None
+                legacy_position_id = position.position_id
+                legacy_position_observed_at = position.observed_at
             intent = OrderIntent(
                 campaign_id=campaign.campaign_id,
                 authorization_id=authorization_id,
@@ -346,8 +382,8 @@ class IntentExecutionService(ServiceComponent):
                 trigger_observed_at=(None if add_candidate is None else add_candidate.observed_at),
                 add_unit_consumed=False,
                 target_version=None,
-                position_id=position.position_id,
-                position_observed_at=position.observed_at,
+                position_id=legacy_position_id,
+                position_observed_at=legacy_position_observed_at,
                 status=OrderIntentStatus.READY.value,
                 semantic_hash=digest,
                 actor_id=str(actor_id),

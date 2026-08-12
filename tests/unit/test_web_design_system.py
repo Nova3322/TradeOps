@@ -14,6 +14,7 @@ STYLESHEET = (
 LOGO = STYLESHEET.with_name("tradingops-logo.png")
 INDEX = STYLESHEET.with_name("index.html")
 EXECUTION = STYLESHEET.with_name("execution.js")
+APP_CORE = STYLESHEET.with_name("app-core.js")
 PRODUCT_OWNER_LOGO_SHA256 = "24b27b23e1007ade0de4bdc0bb6880ba087b3116be2b970f89abf84d023432ae"
 
 
@@ -70,3 +71,14 @@ def test_primary_navigation_and_page_use_trading_mode_copy() -> None:
     assert '<h1>交易模式</h1>' in execution
     assert "仅 TradingOPS 内部模拟，不会向交易所发送订单" in execution  # noqa: RUF001
     assert "重置为 100,000 U" in execution
+
+
+def test_workflow_environment_comes_only_from_persisted_team_mode() -> None:
+    app_core = APP_CORE.read_text()
+    start = app_core.index("const currentWorkflowEnvironment")
+    end = app_core.index("const roleLabels", start)
+    implementation = app_core[start:end]
+
+    assert "active_team?.execution_mode" in implementation
+    assert "URLSearchParams" not in implementation
+    assert "TESTNET" not in implementation

@@ -462,6 +462,27 @@ def test_team_execution_mode_migration_round_trip(database: Database) -> None:
     assert differences == []
 
 
+def test_team_execution_environment_lock_migration_round_trip(database: Database) -> None:
+    config = Config("alembic.ini")
+
+    command.downgrade(config, "20260812_0034")
+    with database.engine.connect() as connection:
+        columns = {item["name"] for item in inspect(connection).get_columns("teams")}
+        assert "execution_mode_locked_at" not in columns
+
+    command.upgrade(config, "head")
+    with database.engine.connect() as connection:
+        columns = {item["name"] for item in inspect(connection).get_columns("teams")}
+        revision = connection.exec_driver_sql(
+            "SELECT version_num FROM alembic_version"
+        ).scalar_one()
+        differences = compare_metadata(MigrationContext.configure(connection), Base.metadata)
+
+    assert revision == REQUIRED_SCHEMA_REVISION
+    assert "execution_mode_locked_at" in columns
+    assert differences == []
+
+
 def test_agent_credential_migration_backfills_internal_services_and_round_trips(
     database: Database,
 ) -> None:

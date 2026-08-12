@@ -4,6 +4,7 @@ import asyncio
 import base64
 import secrets
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import ExitStack
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from unittest.mock import patch
@@ -29,7 +30,6 @@ from trading_control_plane.domain import (
     SystemRiskState,
 )
 from trading_control_plane.models import (
-    AccountEquity,
     AuditEvent,
     Campaign,
     Position,
@@ -52,6 +52,28 @@ from trading_control_plane.request_context import (
 from trading_control_plane.service import TradingService
 
 NOW = datetime(2026, 8, 10, 8, tzinfo=UTC)
+
+VENUE_WRITE_ENTRYPOINTS = (
+    "prepare_binance_testnet_send",
+    "prepare_binance_testnet_cancel",
+    "prepare_binance_testnet_recovery",
+    "prepare_binance_testnet_protection",
+    "prepare_binance_live_send",
+    "prepare_binance_live_cancel",
+    "prepare_binance_live_recovery",
+    "prepare_binance_live_protection",
+    "prepare_hyperliquid_testnet_send",
+    "prepare_hyperliquid_testnet_cancel",
+    "prepare_hyperliquid_testnet_recovery",
+    "prepare_hyperliquid_testnet_protection",
+    "prepare_hyperliquid_live_send",
+    "prepare_hyperliquid_live_cancel",
+    "prepare_hyperliquid_live_recovery",
+    "prepare_hyperliquid_live_protection",
+    # OKX and Bybit writes are routed exclusively through an account-bound Freqtrade worker.
+    "prepare_freqtrade_live_order",
+    "prepare_live_protection_cancel",
+)
 
 
 def encryption_key() -> str:
@@ -228,7 +250,7 @@ def test_shadow_virtual_capital_execution_and_reports_are_strictly_isolated(
         venue="BINANCE",
         instrument_id=ids["instrument"],
         currency="USDT",
-        initial_equity=Decimal("10000"),
+        initial_equity=Decimal("100000"),
         idempotency_key="initialize-shadow-scope",
         now=NOW,
     )
@@ -239,14 +261,16 @@ def test_shadow_virtual_capital_execution_and_reports_are_strictly_isolated(
             venue="BINANCE",
             instrument_id=ids["instrument"],
             currency="USDT",
-            initial_equity=Decimal("10000"),
+            initial_equity=Decimal("100000"),
             idempotency_key="initialize-shadow-scope",
             now=NOW,
         )
         == initialized
     )
 
-    with pytest.raises(DomainRejected, match="SHADOW_EQUITY_ALREADY_INITIALIZED"):
+    assert initialized["scope_initialization_retired"] is True
+    assert initialized["generation"] == 1
+    with pytest.raises(DomainRejected, match="SHADOW_INITIAL_EQUITY_FIXED"):
         service.initialize_shadow_scope(
             actor_id=ids["admin"],
             account_id="paper-1",
@@ -342,18 +366,27 @@ def test_shadow_virtual_capital_execution_and_reports_are_strictly_isolated(
         idempotency_key="shadow-intent",
         now=NOW,
     )
-    simulation = service.simulate_shadow_execution(
-        intent_id=intent.intent_id,
-        actor_id=ids["operator"],
-        expected_version=1,
-        reference_price=Decimal("100"),
-        fee_bps=Decimal("4"),
-        slippage_bps=Decimal("2"),
-        idempotency_key="shadow-simulation",
-        now=NOW + timedelta(seconds=1),
+    token = service.acquire_sender(
+        "paper-1:BINANCE", "retired-shadow-worker", ids["operator"], NOW
     )
-    assert (
-        service.simulate_shadow_execution(
+    with pytest.raises(DomainRejected) as retired_send:
+        service.record_shadow_order(
+            intent.intent_id,
+            ids["operator"],
+            "paper-1:BINANCE",
+            "retired-shadow-worker",
+            token,
+            "legacy-shadow-order",
+            now=NOW + timedelta(seconds=1),
+        )
+    assert retired_send.value.code == "SHADOW_LEGACY_EXECUTION_RETIRED"
+
+    with ExitStack() as stack:
+        write_guards = [
+            stack.enter_context(patch.object(service, name))
+            for name in VENUE_WRITE_ENTRYPOINTS
+        ]
+        simulation = service.simulate_shadow_execution(
             intent_id=intent.intent_id,
             actor_id=ids["operator"],
             expected_version=1,
@@ -363,8 +396,20 @@ def test_shadow_virtual_capital_execution_and_reports_are_strictly_isolated(
             idempotency_key="shadow-simulation",
             now=NOW + timedelta(seconds=1),
         )
-        == simulation
-    )
+        assert (
+            service.simulate_shadow_execution(
+                intent_id=intent.intent_id,
+                actor_id=ids["operator"],
+                expected_version=1,
+                reference_price=Decimal("100"),
+                fee_bps=Decimal("4"),
+                slippage_bps=Decimal("2"),
+                idempotency_key="shadow-simulation",
+                now=NOW + timedelta(seconds=1),
+            )
+            == simulation
+        )
+        assert all(guard.call_count == 0 for guard in write_guards)
 
     queries = TradingQueries(database)
     workspace = queries.shadow_workspace(ids["admin"])
@@ -376,9 +421,15 @@ def test_shadow_virtual_capital_execution_and_reports_are_strictly_isolated(
         for key in ("live_order_send", "funding", "signing", "broadcast")
     )
     assert workspace["accounts"][0]["credential_state"] == "UNCONFIGURED"
-    assert workspace["accounts"][0]["virtual_capital"][0]["equity"] == ("9999.859960000000000000")
+    status = service.trading_mode_status(actor_id=ids["admin"], now=NOW)
+    assert Decimal(status["shadow_account"]["equity"]) == Decimal(
+        "99999.859960000000000000"
+    )
     assert len(workspace["campaigns"]) == 1
-    assert len(queries.actual_results(ids["admin"], "SHADOW")["campaigns"]) == 1
+    shadow_results = queries.actual_results(ids["admin"], "SHADOW")
+    assert len(shadow_results["campaigns"]) == 1
+    assert shadow_results["campaigns"][0]["fill_count"] == 1
+    assert Decimal(shadow_results["campaigns"][0]["fees"]) > 0
     assert queries.actual_results(ids["admin"], "LIVE")["campaigns"] == []
 
     with pytest.raises(DomainRejected, match="TEAM_SHADOW_ONLY"):
@@ -397,18 +448,38 @@ def test_shadow_virtual_capital_execution_and_reports_are_strictly_isolated(
             environment=ExecutionEnvironment.LIVE,
             now=NOW,
         )
+    with pytest.raises(DomainRejected, match="TEAM_SHADOW_ONLY"):
+        service.create_proposal(
+            actor_id=ids["proposer"],
+            source=ProposalSource.MANUAL,
+            risk_tier=RiskTier.LOW,
+            account_id="paper-1",
+            venue="BINANCE",
+            instrument_id=ids["instrument"],
+            direction=Direction.LONG,
+            quantity=Decimal("1"),
+            max_risk=Decimal("10"),
+            expires_at=NOW + timedelta(hours=8),
+            idempotency_key="testnet-proposal-blocked",
+            environment=ExecutionEnvironment.TESTNET,
+            now=NOW,
+        )
 
     with database.session_factory() as session:
         campaign = session.get(Campaign, intent.campaign_id)
-        equity = session.get(AccountEquity, UUID(initialized["account_equity_id"]))
-        position = session.get(Position, UUID(initialized["position_id"]))
         assert campaign is not None and campaign.environment == "SHADOW"
-        assert equity is not None and equity.environment == "SHADOW"
-        assert position is not None and position.environment == "SHADOW"
+        shadow_account = session.get(
+            TeamShadowAccount, UUID(initialized["shadow_account_id"])
+        )
+        position = session.scalar(select(ShadowPosition))
+        assert shadow_account is not None and shadow_account.generation == 1
+        assert position is not None and position.generation == 1
         assert position.quantity == Decimal("1")
-        assert session.scalar(select(func.count()).select_from(VenueOrder)) == 1
-        assert session.scalar(select(func.count()).select_from(VenueFill)) == 1
-        assert session.scalar(select(func.count()).select_from(ProtectionOrder)) == 1
+        assert session.scalar(select(func.count()).select_from(ShadowOrder)) == 2
+        assert session.scalar(select(func.count()).select_from(ShadowFill)) == 1
+        assert session.scalar(select(func.count()).select_from(VenueOrder)) == 0
+        assert session.scalar(select(func.count()).select_from(VenueFill)) == 0
+        assert session.scalar(select(func.count()).select_from(ProtectionOrder)) == 0
         assert (
             session.scalar(
                 select(func.count())
@@ -456,14 +527,15 @@ def test_shadow_http_api_exposes_activation_scope_and_real_page(
                     "venue": "BINANCE",
                     "instrument_id": str(ids["instrument"]),
                     "currency": "usdt",
-                    "initial_equity": "10000",
+                    "initial_equity": "100000",
                     "idempotency_key": "api-shadow-scope",
                 },
             )
             assert initialized.status_code == 200, initialized.text
-            payload = initialized.json()["data"]
-            assert payload["accounts"][0]["virtual_capital"][0]["currency"] == "USDT"
-            assert payload["safety_boundary"]["venue_connectors_used"] is False
+            payload = initialized.json()
+            assert payload["result"]["scope_initialization_retired"] is True
+            assert payload["result"]["generation"] == 1
+            assert payload["data"]["safety_boundary"]["venue_connectors_used"] is False
 
             flow_now = datetime.now(UTC)
             proposal = service.create_proposal(
@@ -609,7 +681,11 @@ def test_team_mode_unified_market_limit_protection_and_reset_are_atomic(
     assert activated["dangerous_capabilities_changed"] is False
     assert activated["shadow_account"]["equity"] == "100000"
 
-    with patch.object(service, "prepare_binance_live_send") as live_send:
+    with ExitStack() as stack:
+        write_guards = [
+            stack.enter_context(patch.object(service, name))
+            for name in VENUE_WRITE_ENTRYPOINTS
+        ]
         market = create_unified_order(service, ids, key="unified-market")
         open_limit = create_unified_order(
             service,
@@ -618,7 +694,7 @@ def test_team_mode_unified_market_limit_protection_and_reset_are_atomic(
             order_type="LIMIT",
             limit_price="90",
         )
-        assert live_send.call_count == 0
+        assert all(guard.call_count == 0 for guard in write_guards)
 
     assert market["environment"] == "SHADOW"
     assert market["status"] == "FILLED"
@@ -1006,6 +1082,27 @@ def test_live_mode_regression_human_version_idempotency_and_shadow_blockers(
         now=NOW + timedelta(seconds=2),
     )
     assert proposal is not None
+    for blocked_environment in (
+        ExecutionEnvironment.SHADOW,
+        ExecutionEnvironment.TESTNET,
+    ):
+        with pytest.raises(DomainRejected) as mismatch:
+            service.create_proposal(
+                actor_id=ids["proposer"],
+                source=ProposalSource.MANUAL,
+                risk_tier=RiskTier.LOW,
+                account_id="paper-1",
+                venue="BINANCE",
+                instrument_id=ids["instrument"],
+                direction=Direction.LONG,
+                quantity=Decimal("1"),
+                max_risk=Decimal("10"),
+                expires_at=NOW + timedelta(hours=8),
+                idempotency_key=f"live-mode-blocks-{blocked_environment.value.lower()}",
+                environment=blocked_environment,
+                now=NOW + timedelta(seconds=2),
+            )
+        assert mismatch.value.code == "TEAM_LIVE_ONLY"
 
     with database.session_factory.begin() as session:
         session.add(

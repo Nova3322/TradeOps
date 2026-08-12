@@ -82,6 +82,23 @@ class ServiceFacade(Protocol):
 
     def _consume_add_unit(self, session: Session, intent: OrderIntent) -> None: ...
 
+    def _simulate_linked_shadow_intent(
+        self,
+        session: Session,
+        *,
+        actor_id: UUID,
+        team: Team,
+        campaign: Campaign,
+        intent: OrderIntent,
+        proposal: Proposal,
+        catalog: Instrument,
+        reference_price: Decimal,
+        fee_bps: Decimal,
+        slippage_bps: Decimal,
+        idempotency_key: str,
+        now: datetime,
+    ) -> dict[str, Any]: ...
+
     def _validate_sender(
         self,
         session: Session,

@@ -68,6 +68,9 @@ class Team(Base):
     active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     trading_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     execution_mode: Mapped[str] = mapped_column(String(16), nullable=False, default="SETUP")
+    execution_mode_locked_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)

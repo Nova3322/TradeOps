@@ -352,6 +352,16 @@ class TransactionService:
                 "TEAM_SETUP_INCOMPLETE",
                 "team must complete setup and explicitly enter SHADOW mode",
             )
+        if team.execution_mode_locked_at is not None and environment.value != mode:
+            if mode == TeamExecutionMode.SHADOW.value:
+                _reject(
+                    "TEAM_SHADOW_ONLY",
+                    "Team mode is locked to SHADOW; TESTNET and LIVE workflows are blocked",
+                )
+            _reject(
+                "TEAM_LIVE_ONLY",
+                "Team mode is locked to LIVE; SHADOW and TESTNET workflows are blocked",
+            )
         if (
             mode == TeamExecutionMode.SHADOW.value
             and environment is not ExecutionEnvironment.SHADOW

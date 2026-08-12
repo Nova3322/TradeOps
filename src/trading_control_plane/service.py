@@ -209,6 +209,9 @@ class TradingService:
         self.set_capability_gate = self._capital_automation.set_capability_gate
         self.create_order_intent = self._execution_intent.create_order_intent
         self._consume_add_unit = self._execution_intent._consume_add_unit
+        self._simulate_linked_shadow_intent = (
+            self._trading_mode._simulate_linked_shadow_intent
+        )
         self.mark_intent_unknown = self._execution_intent.mark_intent_unknown
         self.release_unfilled_intent = self._execution_intent.release_unfilled_intent
         self.acquire_sender = self._execution_intent.acquire_sender

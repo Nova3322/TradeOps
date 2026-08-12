@@ -718,9 +718,8 @@ const capitalPurposeLabels = {AUTO_PROFIT_SWEEP:'自动归集利润',AUTO_OPERAT
 const capitalTransportLabels = {MOCK:'模拟执行',NOTILT_UNSIGNED_HANDOFF:'NoTilt 未签名交接'};
 const environmentLabels = {LIVE:'生产环境',SHADOW:'影子模式',TESTNET:'测试网',production:'生产环境',test:'测试环境',development:'开发环境',local:'本地环境'};
 const currentWorkflowEnvironment = () => {
-  const requested = new URLSearchParams(location.search).get('environment');
-  if (['LIVE','SHADOW','TESTNET'].includes(requested)) return requested;
-  return session?.active_team?.execution_mode === 'SHADOW' ? 'SHADOW' : 'LIVE';
+  const persistedMode = session?.active_team?.execution_mode;
+  return ['LIVE','SHADOW'].includes(persistedMode) ? persistedMode : 'SETUP';
 };
 const roleLabels = {OBSERVER:'只读用户',PROPOSER:'提案发起人',REVIEWER:'审核人',OPERATOR:'交易运维人员',TREASURY_ADMIN:'资金管理员',SYSTEM_ADMIN:'系统管理员',SYSTEM:'系统'};
 const readinessLabels = {READY:'可用',DEGRADED:'数据不完整',INCOMPLETE:'数据不完整',STALE:'数据已过期'};

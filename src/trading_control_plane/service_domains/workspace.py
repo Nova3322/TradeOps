@@ -501,6 +501,7 @@ class WorkspaceService(ServiceComponent):
                         ",".join(blockers),
                     )
                 team.execution_mode = TeamExecutionMode.SHADOW.value
+                team.execution_mode_locked_at = now
                 team.trading_enabled = True
                 team.version += 1
                 team.updated_at = now
