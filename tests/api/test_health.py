@@ -247,9 +247,9 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
     assert "/assets/workspace.js?v=171" in response.text
     assert "/assets/app.js?v=170" in response.text
     assert 'href="/signals"' in response.text
-    assert "/assets/styles.css?v=77" in response.text
+    assert "/assets/styles.css?v=78" in response.text
+    assert "/assets/reporting.js?v=172" in response.text
     assert "/assets/accounts.js?v=172" in response.text
-    assert "/assets/reporting.js?v=171" in response.text
     assert 'href="/assets/tradingops-logo.png" type="image/png"' in response.text
     assert '<img src="/assets/tradingops-logo.png" alt="">' in response.text
     assert '<span class="brand-mark" aria-hidden="true">T</span>' not in response.text
