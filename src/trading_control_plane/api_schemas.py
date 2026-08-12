@@ -177,6 +177,25 @@ class ShadowAccountResetRequest(BaseModel):
     idempotency_key: str = Field(min_length=1, max_length=160)
 
 
+class AnalyticsReportCreateRequest(BaseModel):
+    engine: Literal["QUANTSTATS", "PYFOLIO"]
+    environment: Literal["SHADOW", "LIVE"]
+    account_id: str | None = Field(default=None, min_length=1, max_length=120)
+    venue: VenueScope | None = None
+    generation: int | None = Field(default=None, ge=1)
+    from_time: datetime
+    to_time: datetime
+    idempotency_key: str = Field(min_length=1, max_length=160)
+
+    @model_validator(mode="after")
+    def validate_report_scope(self) -> AnalyticsReportCreateRequest:
+        if self.environment == "SHADOW" and (self.account_id is not None or self.venue is not None):
+            raise ValueError("SHADOW reports use the Team unified virtual account")
+        if self.environment == "LIVE" and self.generation is not None:
+            raise ValueError("LIVE reports do not have a SHADOW generation")
+        return self
+
+
 class ShadowOrderCreateRequest(BaseModel):
     account_id: str = Field(min_length=1, max_length=120)
     venue: VenueScope

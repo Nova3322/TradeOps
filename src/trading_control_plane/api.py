@@ -1459,8 +1459,8 @@ def create_app(
         ),
         signals=SignalRouteDependencies(
             common=authenticated_dependencies,
-            notify_reviewers=notify_reviewers,
             current_perptape_candidates=current_perptape_candidates,
+            notify_reviewers=notify_reviewers,
         ),
         proposals=ProposalRouteDependencies(
             common=authenticated_dependencies,
@@ -1552,8 +1552,8 @@ def create_app(
         @app.get("/profile/api-access", include_in_schema=False)
         @app.get("/admin/agents", include_in_schema=False)
         @app.get("/opportunities", include_in_schema=False)
-        @app.get("/signals", include_in_schema=False)
         @app.get("/webhook-signals", include_in_schema=False)
+        @app.get("/signals", include_in_schema=False)
         @app.get("/opportunities/defaults", include_in_schema=False)
         @app.get("/proposals/new", include_in_schema=False)
         @app.get("/proposals", include_in_schema=False)

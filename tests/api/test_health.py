@@ -75,7 +75,6 @@ def test_webhook_signals_are_a_separate_dynamic_workspace() -> None:
     assert "grid-template-columns: 1fr" in styles
 
 
-
 @cache
 def frontend_bundle_path() -> Path:
     with tempfile.NamedTemporaryFile(
@@ -330,8 +329,12 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
     assert "path === '/webhook-signals'" in app_javascript.text
     assert "await renderWebhookSignals()" in app_javascript.text
     signals_javascript = (WEB_ROOT / "signals.js").read_text()
-    signal_settings = signals_javascript.split("async function renderSignalSources()", maxsplit=1)[1].split("const WEBHOOK_SIGNAL_BLOCKERS", maxsplit=1)[0]
-    webhook_page = signals_javascript.split("async function renderWebhookSignals", maxsplit=1)[1].split("function signalSourceFormDirty", maxsplit=1)[0]
+    signal_settings = signals_javascript.split("async function renderSignalSources()", maxsplit=1)[
+        1
+    ].split("const WEBHOOK_SIGNAL_BLOCKERS", maxsplit=1)[0]
+    webhook_page = signals_javascript.split("async function renderWebhookSignals", maxsplit=1)[
+        1
+    ].split("function signalSourceFormDirty", maxsplit=1)[0]
     assert "api('/api/signals')" not in signal_settings
     assert "api(`/api/webhook-signals?" in webhook_page
     assert "sources.map(source =>" in webhook_page
@@ -479,8 +482,9 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
     assert "这是合成事实，不是交易所成交或真实收益" not in app_javascript.text
     assert ".map(resultRiskReasonLabel)" not in app_javascript.text
     assert "resultSignalProviderLabel(value)" not in app_javascript.text
-    assert "/api/results/quantstats/options" in app_javascript.text
-    assert "使用服务端 QuantStats 完整报表" in app_javascript.text
+    assert "/api/results/report-engines" in app_javascript.text
+    assert "/api/results/reports" in app_javascript.text
+    assert "QuantStats 与 Pyfolio Reloaded 使用同一份可信净值" in app_javascript.text
     assert "{BINANCE:'Binance', HYPERLIQUID:'Hyperliquid'}" in app_javascript.text
     assert "当前三方总净值" in app_javascript.text
     assert "当前不可汇总" in app_javascript.text

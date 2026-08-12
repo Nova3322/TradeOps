@@ -42,6 +42,8 @@ class TradingQueries:
         self.actual_results = self._execution.actual_results
         self.analytics_report_options = self._analytics.analytics_report_options
         self.analytics_dataset = self._analytics.analytics_dataset
+        self.analytics_report = self._analytics.analytics_report
+        self.analytics_report_artifact = self._analytics.analytics_report_artifact
         self.audit_timeline = self._execution.audit_timeline
         self.runtime_snapshot = self._execution.runtime_snapshot
         self.runtime_source_health = self._execution.runtime_source_health

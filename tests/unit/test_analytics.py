@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from importlib.metadata import PackageNotFoundError
 from unittest.mock import patch
 from uuid import uuid4
 
@@ -20,11 +21,14 @@ from trading_control_plane.analytics import (
     derive_24_7_returns,
 )
 from trading_control_plane.domain import DomainRejected
+from trading_control_plane.pyfolio_adapter import PyfolioReportAdapter
 from trading_control_plane.quantstats_adapter import (
     QuantStatsReportAdapter,
     analytics_frames,
     sanitize_quantstats_html,
 )
+from trading_control_plane.report_engines import render_report
+from trading_control_plane.reporting_frames import analytics_frames as shared_analytics_frames
 from trading_control_plane.venue_read_only import (
     VenueEquity,
     VenueFill,
@@ -287,10 +291,21 @@ def analytics_dataset(days: int = 31) -> AnalyticsDataset:
     )
     return AnalyticsDataset(
         scope=scope,
-        nav_series=(),
+        nav_series=tuple(
+            NavPoint(
+                NOW + timedelta(days=offset),
+                Decimal("100000") * (Decimal("1.001") ** offset),
+                "U",
+                f"nav-{offset}",
+            )
+            for offset in range(days + 1)
+        ),
         external_cashflows=(),
         returns=tuple(
-            ReturnPoint(NOW + timedelta(days=offset), Decimal("0.001"))
+            ReturnPoint(
+                NOW + timedelta(days=offset),
+                Decimal("0.001") if offset % 7 else Decimal("-0.0025"),
+            )
             for offset in range(1, days + 1)
         ),
         positions=(),
@@ -304,6 +319,7 @@ def test_report_boundary_exposes_future_compatible_pandas_frames() -> None:
     frames = analytics_frames(analytics_dataset(days=3))
 
     assert frames.returns.name == "returns"
+    assert frames.equity.name == "equity"
     assert str(frames.returns.index.tz) == "UTC"
     assert list(frames.transactions.columns) == [
         "symbol",
@@ -319,6 +335,85 @@ def test_report_boundary_exposes_future_compatible_pandas_frames() -> None:
         "TRANSACTIONS_READY": True,
         "BENCHMARK_READY": False,
     }
+
+
+def test_both_engines_receive_the_identical_standardized_frames() -> None:
+    dataset = analytics_dataset(days=45)
+    quantstats = render_report("QUANTSTATS", dataset)
+    pyfolio = render_report("PYFOLIO", dataset)
+    expected = shared_analytics_frames(dataset)
+
+    assert quantstats.readiness == pyfolio.readiness == expected.readiness
+    assert quantstats.metrics.keys() == pyfolio.metrics.keys()
+    assert pyfolio.chart_count == 5
+    assert "pyfolio-reloaded" in pyfolio.html
+    assert pyfolio.html.count("data:image/png;base64,") == 5
+
+
+def test_pyfolio_reloaded_generates_real_metrics_and_charts() -> None:
+    report = PyfolioReportAdapter.render(analytics_dataset(days=60))
+
+    assert report.version == "0.9.9"
+    assert report.chart_count == 5
+    assert set(report.metrics) == {
+        "total_return",
+        "annual_return",
+        "annual_volatility",
+        "sharpe",
+        "sortino",
+        "max_drawdown",
+        "win_rate",
+        "fees",
+    }
+    assert "Content-Security-Policy" in report.html
+
+
+def test_pyfolio_dependency_failure_has_a_stable_error_code() -> None:
+    with (
+        patch(
+            "trading_control_plane.pyfolio_adapter.version",
+            side_effect=PackageNotFoundError("pyfolio-reloaded"),
+        ),
+        pytest.raises(DomainRejected) as rejected,
+    ):
+        PyfolioReportAdapter.render(analytics_dataset(days=60))
+    assert rejected.value.code == "PYFOLIO_DEPENDENCY_MISSING"
+
+
+def test_pyfolio_generation_failure_has_a_stable_error_code() -> None:
+    with (
+        patch("pyfolio.timeseries.perf_stats", side_effect=RuntimeError("plot failed")),
+        pytest.raises(DomainRejected) as rejected,
+    ):
+        PyfolioReportAdapter.render(analytics_dataset(days=60))
+    assert rejected.value.code == "PYFOLIO_REPORT_FAILED"
+
+
+def test_report_boundary_rejects_missing_non_finite_or_duplicate_values() -> None:
+    dataset = analytics_dataset(days=3)
+    bad = AnalyticsDataset(
+        scope=dataset.scope,
+        nav_series=dataset.nav_series,
+        external_cashflows=(),
+        returns=(
+            ReturnPoint(NOW + timedelta(days=1), Decimal("NaN")),
+            ReturnPoint(NOW + timedelta(days=1), Decimal("0.1")),
+        ),
+        positions=(),
+        transactions=(),
+        benchmark_returns=None,
+        coverage=dataset.coverage,
+    )
+    with pytest.raises(DomainRejected) as rejected:
+        shared_analytics_frames(bad)
+    assert rejected.value.code == "ANALYTICS_RETURNS_INVALID"
+
+
+@pytest.mark.parametrize("engine", ("QUANTSTATS", "PYFOLIO"))
+def test_report_engines_fail_closed_for_insufficient_history(engine: str) -> None:
+    with pytest.raises(DomainRejected) as rejected:
+        render_report(engine, analytics_dataset(days=10))
+    assert rejected.value.code == "ANALYTICS_HISTORY_INSUFFICIENT"
 
 
 def test_quantstats_generates_offline_sanitized_responsive_html() -> None:

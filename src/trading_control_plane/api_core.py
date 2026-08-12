@@ -39,6 +39,7 @@ from trading_control_plane.api_schemas import (
     AgentCreateRequest,
     AgentProposalRequest,
     AgentTokenRotationRequest,
+    AnalyticsReportCreateRequest,
     ApiClientCreateRequest,
     ApiClientRevokeRequest,
     ApiClientStateRequest,
@@ -217,6 +218,7 @@ from trading_control_plane.quantstats_adapter import (
     report_metadata,
 )
 from trading_control_plane.queries import TradingQueries
+from trading_control_plane.report_engines import render_report, report_engine_catalog
 from trading_control_plane.safe_spending import SafeSpendingGateway
 from trading_control_plane.service import PreparedFreqtradeWorkerBinding, TradingService
 from trading_control_plane.telegram import (
@@ -476,6 +478,7 @@ __all__ = [
     "AgentCreateRequest",
     "AgentProposalRequest",
     "AgentTokenRotationRequest",
+    "AnalyticsReportCreateRequest",
     "Any",
     "ApiClientCreateRequest",
     "ApiClientRateLimiter",
@@ -667,6 +670,8 @@ __all__ = [
     "perptape_legacy_candidate_id",
     "project_runtime_connections",
     "quote",
+    "render_report",
+    "report_engine_catalog",
     "report_metadata",
     "resolve_hyperliquid_main_account",
     "status",

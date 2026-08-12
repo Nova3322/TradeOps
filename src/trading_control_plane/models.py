@@ -85,9 +85,7 @@ class TeamShadowAccount(Base):
             name="ck_team_shadow_accounts_balances",
         ),
         CheckConstraint("fees_paid >= 0", name="ck_team_shadow_accounts_fees_nonnegative"),
-        CheckConstraint(
-            "status IN ('ACTIVE','ARCHIVED')", name="ck_team_shadow_accounts_status"
-        ),
+        CheckConstraint("status IN ('ACTIVE','ARCHIVED')", name="ck_team_shadow_accounts_status"),
         CheckConstraint("version >= 1", name="ck_team_shadow_accounts_version"),
         UniqueConstraint("team_id", "generation", name="uq_team_shadow_accounts_generation"),
         Index(
@@ -147,9 +145,7 @@ class AnalyticsEquitySnapshot(Base):
         ),
     )
 
-    snapshot_id: Mapped[UUID] = mapped_column(
-        Uuid(as_uuid=True), primary_key=True, default=uuid4
-    )
+    snapshot_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid4)
     team_id: Mapped[UUID] = mapped_column(
         ForeignKey("teams.team_id", ondelete="RESTRICT"), nullable=False
     )
@@ -167,6 +163,75 @@ class AnalyticsEquitySnapshot(Base):
     )
     observed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     recorded_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class AnalyticsReport(Base):
+    __tablename__ = "analytics_reports"
+    __table_args__ = (
+        CheckConstraint(
+            "engine IN ('QUANTSTATS','PYFOLIO')",
+            name="ck_analytics_reports_engine",
+        ),
+        CheckConstraint(
+            "environment IN ('SHADOW','LIVE')",
+            name="ck_analytics_reports_environment",
+        ),
+        CheckConstraint(
+            "(environment = 'SHADOW' AND generation IS NOT NULL) OR "
+            "(environment = 'LIVE' AND generation IS NULL)",
+            name="ck_analytics_reports_generation",
+        ),
+        CheckConstraint("status IN ('READY','FAILED')", name="ck_analytics_reports_status"),
+        CheckConstraint("chart_count >= 0", name="ck_analytics_reports_chart_count"),
+        CheckConstraint("version >= 1", name="ck_analytics_reports_version"),
+        UniqueConstraint(
+            "team_id",
+            "created_by",
+            "idempotency_key",
+            name="uq_analytics_reports_idempotency",
+        ),
+        Index(
+            "ix_analytics_reports_scope_created",
+            "team_id",
+            "environment",
+            "generation",
+            "created_at",
+        ),
+    )
+
+    report_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid4)
+    workspace_id: Mapped[UUID] = mapped_column(
+        ForeignKey("workspaces.workspace_id", ondelete="RESTRICT"), nullable=False
+    )
+    team_id: Mapped[UUID] = mapped_column(
+        ForeignKey("teams.team_id", ondelete="RESTRICT"), nullable=False
+    )
+    created_by: Mapped[UUID] = mapped_column(
+        ForeignKey("users.user_id", ondelete="RESTRICT"), nullable=False
+    )
+    engine: Mapped[str] = mapped_column(String(32), nullable=False)
+    library_name: Mapped[str] = mapped_column(String(80), nullable=False)
+    library_version: Mapped[str] = mapped_column(String(32), nullable=False)
+    dataset_version: Mapped[str] = mapped_column(String(64), nullable=False)
+    environment: Mapped[str] = mapped_column(String(16), nullable=False)
+    generation: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    account_ids: Mapped[list[str]] = mapped_column(JSONB, nullable=False)
+    venues: Mapped[list[str]] = mapped_column(JSONB, nullable=False)
+    from_time: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    to_time: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    status: Mapped[str] = mapped_column(String(16), nullable=False)
+    metrics: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    chart_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    coverage: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    report_metadata: Mapped[dict[str, Any]] = mapped_column("metadata", JSONB, nullable=False)
+    artifact_html: Mapped[str] = mapped_column(Text, nullable=False)
+    artifact_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    idempotency_key: Mapped[str] = mapped_column(String(160), nullable=False)
+    correlation_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), nullable=False)
+    version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    generated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
 
 class ShadowInstrument(Base):
@@ -443,9 +508,7 @@ class ApiClient(Base):
         Index("ix_api_clients_team_scope", "team_id", "account_id", "venue"),
     )
 
-    api_client_id: Mapped[UUID] = mapped_column(
-        Uuid(as_uuid=True), primary_key=True, default=uuid4
-    )
+    api_client_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid4)
     owner_user_id: Mapped[UUID] = mapped_column(
         ForeignKey("users.user_id", ondelete="CASCADE"), nullable=False
     )

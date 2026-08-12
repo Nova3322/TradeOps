@@ -1,8 +1,9 @@
 from __future__ import annotations
 
-from pandas import DataFrame
+from typing import ClassVar
 
 from freqtrade.strategy import IStrategy
+from pandas import DataFrame
 
 
 class ControlPlaneOnlyStrategy(IStrategy):
@@ -10,7 +11,7 @@ class ControlPlaneOnlyStrategy(IStrategy):
 
     timeframe = "5m"
     can_short = True
-    minimal_roi = {"0": 100.0}
+    minimal_roi: ClassVar[dict[str, float]] = {"0": 100.0}
     stoploss = -0.99
     trailing_stop = False
     position_adjustment_enable = False

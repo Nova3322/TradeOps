@@ -22,6 +22,7 @@ from trading_control_plane.service_core import (
     PreparedRuntimeAccountBinding as PreparedRuntimeAccountBinding,
 )
 from trading_control_plane.service_domains.accounts import AccountService
+from trading_control_plane.service_domains.analytics_reports import AnalyticsReportService
 from trading_control_plane.service_domains.api_clients import ApiClientService
 from trading_control_plane.service_domains.capital_automation import AutomationCapitalService
 from trading_control_plane.service_domains.capital_direct import DirectOperationCapitalService
@@ -79,6 +80,7 @@ class TradingService:
         )
         self._workspace = WorkspaceService(self.runtime, self)
         self._accounts = AccountService(self.runtime, self)
+        self._analytics_reports = AnalyticsReportService(self.runtime, self)
         self._api_clients = ApiClientService(self.runtime, self)
         self._signals = SignalService(self.runtime, self)
         self._proposals = ProposalService(self.runtime, self)
@@ -100,6 +102,7 @@ class TradingService:
         self._capital_reconciliation = ReconciliationCapitalService(self.runtime, self)
 
         self._exchange_account_definition = self._accounts._exchange_account_definition
+        self.persist_analytics_report = self._analytics_reports.persist_report
         self._ensure_exchange_account_reference = self._accounts._ensure_exchange_account_reference
         self.create_exchange_account = self._accounts.create_exchange_account
         self.rotate_exchange_account_credentials = (

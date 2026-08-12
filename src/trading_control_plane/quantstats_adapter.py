@@ -10,10 +10,9 @@ from pathlib import Path
 from typing import Any
 from unittest.mock import patch
 
-import pandas as pd  # type: ignore[import-untyped]
-
 from trading_control_plane.analytics import PERIODS_PER_YEAR, AnalyticsDataset
 from trading_control_plane.domain import DomainRejected
+from trading_control_plane.reporting_frames import AnalyticsFrames, analytics_frames
 
 os.environ.setdefault("MPLBACKEND", "Agg")
 os.environ.setdefault(
@@ -22,111 +21,18 @@ os.environ.setdefault(
 
 
 @dataclass(frozen=True, slots=True)
-class AnalyticsFrames:
-    returns: pd.Series[float]
-    positions: pd.DataFrame
-    transactions: pd.DataFrame
-    benchmark_returns: pd.Series[float] | None
-    readiness: dict[str, bool]
-
-
-@dataclass(frozen=True, slots=True)
 class QuantStatsReport:
     html: str
     version: str
     frames: AnalyticsFrames
+    metrics: dict[str, str]
+    chart_count: int
 
 
 def _network_download_forbidden(*_args: object, **_kwargs: object) -> None:
     raise DomainRejected(
         "QUANTSTATS_EXTERNAL_DOWNLOAD_FORBIDDEN",
         "QuantStats reports must use persisted TradingOPS returns only",
-    )
-
-
-def analytics_frames(dataset: AnalyticsDataset) -> AnalyticsFrames:
-    """Convert Decimal domain facts to Pandas only at the report boundary."""
-
-    returns = pd.Series(
-        [float(item.value) for item in dataset.returns],
-        index=pd.DatetimeIndex([item.observed_at for item in dataset.returns], tz="UTC"),
-        name="returns",
-        dtype="float64",
-    )
-    position_rows = [
-        {
-            "date": item.observed_at,
-            "symbol": item.symbol,
-            "market_value": float(item.market_value),
-        }
-        for item in dataset.positions
-    ]
-    if position_rows:
-        positions = (
-            pd.DataFrame(position_rows)
-            .pivot_table(
-                index="date",
-                columns="symbol",
-                values="market_value",
-                aggfunc="last",
-            )
-            .sort_index()
-        )
-        positions.index = pd.DatetimeIndex(positions.index, tz="UTC")
-    else:
-        positions = pd.DataFrame(index=pd.DatetimeIndex([], tz="UTC"))
-    transaction_rows = [
-        {
-            "date": item.executed_at,
-            "symbol": item.symbol,
-            "amount": float(item.signed_amount),
-            "price": float(item.price),
-            "txn_dollars": float(-item.signed_amount * item.price * item.contract_multiplier),
-            "commission": float(item.fee),
-            "fill_id": item.fill_id,
-        }
-        for item in dataset.transactions
-    ]
-    transactions = pd.DataFrame(
-        transaction_rows,
-        columns=(
-            "date",
-            "symbol",
-            "amount",
-            "price",
-            "txn_dollars",
-            "commission",
-            "fill_id",
-        ),
-    )
-    if not transactions.empty:
-        transactions = transactions.set_index("date").sort_index()
-        transactions.index = pd.DatetimeIndex(transactions.index, tz="UTC")
-    else:
-        transactions = transactions.drop(columns=["date"])
-        transactions.index = pd.DatetimeIndex([], tz="UTC")
-    benchmark = None
-    if dataset.benchmark_returns is not None:
-        benchmark = pd.Series(
-            [float(item.value) for item in dataset.benchmark_returns],
-            index=pd.DatetimeIndex(
-                [item.observed_at for item in dataset.benchmark_returns], tz="UTC"
-            ),
-            name="benchmark",
-            dtype="float64",
-        )
-    readiness = {
-        "RETURNS_READY": not returns.empty,
-        "POSITIONS_READY": bool(dataset.coverage.get("positions_complete", False)),
-        "TRANSACTIONS_READY": bool(dataset.coverage.get("transactions_complete", False)),
-        "BENCHMARK_READY": benchmark is not None and not benchmark.empty,
-    }
-    return AnalyticsFrames(
-        returns=returns,
-        positions=positions,
-        transactions=transactions,
-        benchmark_returns=benchmark,
-        readiness=readiness,
     )
 
 
@@ -227,6 +133,29 @@ class QuantStatsReportAdapter:
                 html=sanitize_quantstats_html(raw),
                 version=str(qs.__version__),
                 frames=frames,
+                metrics={
+                    "total_return": str(float(qs.stats.comp(frames.returns))),
+                    "annual_return": str(
+                        float(qs.stats.cagr(frames.returns, periods=PERIODS_PER_YEAR))
+                    ),
+                    "annual_volatility": str(
+                        float(
+                            qs.stats.volatility(
+                                frames.returns, periods=PERIODS_PER_YEAR
+                            )
+                        )
+                    ),
+                    "sharpe": str(
+                        float(qs.stats.sharpe(frames.returns, periods=PERIODS_PER_YEAR))
+                    ),
+                    "sortino": str(
+                        float(qs.stats.sortino(frames.returns, periods=PERIODS_PER_YEAR))
+                    ),
+                    "max_drawdown": str(float(qs.stats.max_drawdown(frames.returns))),
+                    "win_rate": str(float(qs.stats.win_rate(frames.returns))),
+                    "fees": str(float(frames.transactions["commission"].sum())),
+                },
+                chart_count=raw.lower().count("<svg") + raw.lower().count("data:image"),
             )
         except DomainRejected:
             raise
@@ -243,6 +172,8 @@ def report_metadata(report: QuantStatsReport) -> dict[str, Any]:
         "version": report.version,
         "periods_per_year": PERIODS_PER_YEAR,
         "readiness": report.frames.readiness,
+        "metrics": report.metrics,
+        "chart_count": report.chart_count,
         "external_market_downloads": False,
         "exchange_write_adapter_calls": 0,
     }

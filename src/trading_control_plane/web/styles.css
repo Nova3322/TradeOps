@@ -153,7 +153,6 @@ a { color: inherit; text-decoration: none; }
 .sidebar nav a { min-height: 38px; padding: 9px 11px; border-radius: 10px; color: var(--muted); font-size: 13px; font-weight: 680; display: flex; gap: 11px; align-items: center; transition: background-color .16s ease, color .16s ease, transform .16s ease; }
 .sidebar nav .nav-child-link { min-height: 32px; margin-left: 28px; padding: 7px 10px; font-size: 11px; }
 .sidebar nav .nav-child-link::before { content: ""; width: 5px; height: 5px; flex: 0 0 auto; border-radius: 50%; background: color-mix(in srgb, currentColor 52%, transparent); }
-.sidebar nav a { min-height: 38px; padding: 9px 11px; border-radius: 10px; color: var(--muted); font-size: 13px; font-weight: 680; display: flex; gap: 11px; align-items: center; transition: background-color .16s ease, color .16s ease, transform .16s ease; }
 .sidebar nav a:hover { background: color-mix(in srgb, var(--accent-2) 48%, transparent); color: var(--ink); }
 .sidebar nav a.active { background: var(--accent-2); color: var(--accent); }
 .sidebar nav a.active::after { content: ""; width: 5px; height: 5px; margin-left: auto; border-radius: 50%; background: currentColor; }
@@ -380,6 +379,7 @@ button:disabled { opacity: .52; cursor: not-allowed; }
 .quantstats-report-shell { min-width: 0; overflow: hidden; border: 1px solid var(--line); border-radius: 15px; background: var(--panel); }
 .quantstats-report-shell .section-heading { margin: 0; padding: 18px 20px; border-bottom: 1px solid var(--line); }
 .quantstats-frame { display: block; width: 100%; min-width: 0; min-height: 780px; border: 0; background: var(--panel); }
+.report-common-metrics { padding: 16px; margin: 0; grid-template-columns: repeat(4, minmax(0, 1fr)); border-bottom: 1px solid var(--line); }
 .notification-page > section { margin-top: 30px; }
 .notification-route-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
 .notification-route-card { align-self: start; }
@@ -1028,7 +1028,6 @@ dialog::backdrop { background: rgba(4, 12, 10, .56); backdrop-filter: blur(3px);
   .sidebar.open { transform: translateX(0); visibility: visible; transition-delay: 0s; }
   .sidebar nav { display: grid; gap: 6px; overflow-y: auto; }
   .sidebar nav a { min-height: 48px; display: flex; gap: 12px; padding: 11px 13px; font-size: 14px; }
-  .sidebar nav .nav-child-link { min-height: 42px; margin-left: 30px; font-size: 13px; }
   .sidebar nav a span { font-size: 17px; }
   .sidebar-foot { display: grid; margin-top: 18px; }
   .mobile-session-summary { display: block; color: var(--ink); font-weight: 750; line-height: 1.5; overflow-wrap: anywhere; }
@@ -1047,6 +1046,7 @@ dialog::backdrop { background: rgba(4, 12, 10, .56); backdrop-filter: blur(3px);
   .quantstats-page .result-filters .field-grid { grid-template-columns: 1fr; }
   .quantstats-report-shell .section-heading { display: grid; align-items: start; gap: 10px; padding: 15px; }
   .quantstats-frame { min-height: 900px; }
+  .report-common-metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .member-access-summary { align-items: flex-start; }
   .member-summary-actions { flex-direction: column; align-items: flex-end; }
   .venue-switch { display: grid; grid-template-columns: 1fr 1fr; width: 100%; }

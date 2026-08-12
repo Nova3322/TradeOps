@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import hashlib
 from collections import defaultdict
 from collections.abc import Sequence
+from hmac import compare_digest
 
 from trading_control_plane.analytics import (
     ANALYTICS_DATASET_VERSION,
@@ -25,6 +27,87 @@ from trading_control_plane.query_core import *
 
 
 class AnalyticsQueries(QueryComponent):
+    @staticmethod
+    def _report_summary(report: AnalyticsReport) -> dict[str, Any]:
+        return {
+            "report_id": str(report.report_id),
+            "engine": report.engine,
+            "library": report.library_name,
+            "library_version": report.library_version,
+            "dataset_version": report.dataset_version,
+            "status": report.status,
+            "workspace_id": str(report.workspace_id),
+            "team_id": str(report.team_id),
+            "environment": report.environment,
+            "generation": report.generation,
+            "account_ids": report.account_ids,
+            "venues": report.venues,
+            "from_time": report.from_time.astimezone(UTC).isoformat(),
+            "to_time": report.to_time.astimezone(UTC).isoformat(),
+            "generated_at": report.generated_at.astimezone(UTC).isoformat(),
+            "metrics": report.metrics,
+            "chart_count": report.chart_count,
+            "coverage": report.coverage,
+            "metadata": report.report_metadata,
+            "artifact": {
+                "content_type": "text/html; charset=utf-8",
+                "sha256": report.artifact_sha256,
+                "size_bytes": len(report.artifact_html.encode("utf-8")),
+                "view_url": f"/api/results/reports/{report.report_id}/artifact",
+                "download_url": f"/api/results/reports/{report.report_id}/download",
+            },
+        }
+
+    def analytics_report(self, user_id: UUID, report_id: UUID) -> dict[str, Any]:
+        workspace_id, team_id = self.facade._active_scope_ids(user_id)
+        with self.database.session_factory() as session:
+            report = session.scalar(
+                select(AnalyticsReport).where(
+                    AnalyticsReport.report_id == report_id,
+                    AnalyticsReport.workspace_id == workspace_id,
+                    AnalyticsReport.team_id == team_id,
+                )
+            )
+            if report is None:
+                raise DomainRejected(
+                    "ANALYTICS_REPORT_NOT_FOUND",
+                    "report is outside the active Workspace and Team scope",
+                )
+            if report.environment == "LIVE":
+                allowed = {
+                    (item.account_id, item.venue)
+                    for item in session.scalars(
+                        select(ExchangeAccount).where(
+                            ExchangeAccount.team_id == team_id,
+                            ExchangeAccount.active,
+                        )
+                    ).all()
+                    if self.service.can_user(
+                        user_id, "view", item.account_id, item.venue
+                    )
+                }
+                if any(
+                    not any(account == item[0] for item in allowed)
+                    for account in report.account_ids
+                ):
+                    raise DomainRejected(
+                        "ANALYTICS_ACCOUNT_SCOPE_DENIED",
+                        "report account is outside the authorized Team scope",
+                    )
+            return self._report_summary(report)
+
+    def analytics_report_artifact(self, user_id: UUID, report_id: UUID) -> tuple[str, str]:
+        self.analytics_report(user_id, report_id)
+        with self.database.session_factory() as session:
+            report = session.get(AnalyticsReport, report_id)
+            assert report is not None
+            actual = hashlib.sha256(report.artifact_html.encode("utf-8")).hexdigest()
+            if not compare_digest(actual, report.artifact_sha256):
+                raise DomainRejected(
+                    "ANALYTICS_ARTIFACT_INTEGRITY_FAILED",
+                    "persisted report artifact failed integrity validation",
+                )
+            return report.artifact_html, report.engine.lower()
     @staticmethod
     def _validate_request(
         environment: str,
@@ -199,6 +282,13 @@ class AnalyticsQueries(QueryComponent):
                 AnalyticsEquitySnapshot.snapshot_id,
             )
         ).all()
+        fixture_rows = [
+            row
+            for row in snapshot_rows
+            if row.source_kind.startswith("TRADINGOPS_SHADOW_ANALYTICS_")
+        ]
+        if fixture_rows:
+            snapshot_rows = fixture_rows
         nav = tuple(
             NavPoint(row.observed_at, row.equity, row.currency, row.source_id)
             for row in snapshot_rows
@@ -247,6 +337,7 @@ class AnalyticsQueries(QueryComponent):
                     net_exposure=market_value,
                 )
             )
+        historical_positions: list[PositionSnapshot] = []
         fill_rows = session.execute(
             select(ShadowFill, ShadowOrder, ShadowInstrument)
             .join(ShadowOrder, ShadowOrder.shadow_order_id == ShadowFill.shadow_order_id)
@@ -291,6 +382,28 @@ class AnalyticsQueries(QueryComponent):
                 )
             )
         fills = deduplicate_fills(tuple(fills_list))
+        running_quantities: dict[tuple[str, str], Decimal] = defaultdict(Decimal)
+        for fill in fills:
+            key = (fill.venue, fill.symbol)
+            running_quantities[key] += fill.signed_amount
+            market_value = (
+                running_quantities[key] * fill.price * fill.contract_multiplier
+            )
+            historical_positions.append(
+                PositionSnapshot(
+                    account_id="TEAM_SHADOW",
+                    venue=fill.venue,
+                    environment="SHADOW",
+                    observed_at=fill.executed_at,
+                    symbol=fill.symbol,
+                    signed_quantity=running_quantities[key],
+                    mark_price=fill.price,
+                    market_value=market_value,
+                    gross_exposure=abs(market_value),
+                    net_exposure=market_value,
+                    source_fill_id=fill.fill_id,
+                )
+            )
         order_rows = session.execute(
             select(ShadowOrder, ShadowInstrument)
             .join(
@@ -353,7 +466,7 @@ class AnalyticsQueries(QueryComponent):
             nav=nav,
             external_cashflows=(),
             returns=returns,
-            positions=tuple(positions),
+            positions=tuple(historical_positions + positions),
             fills=fills,
             orders=orders,
             cashflows=cashflows,

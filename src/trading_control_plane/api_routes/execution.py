@@ -4,6 +4,7 @@ from trading_control_plane.api_core import (
     UUID,
     AccountEquityFactRequest,
     AddCandidateFacts,
+    AnalyticsReportCreateRequest,
     Any,
     AutoAddRequest,
     AutomaticExitRequest,
@@ -32,6 +33,7 @@ from trading_control_plane.api_core import (
     ReconciliationReasonRequest,
     ReconciliationRequest,
     ReductionIntentRequest,
+    Response,
     RiskTightenRequest,
     SenderLeaseRequest,
     SessionIdentity,
@@ -48,6 +50,8 @@ from trading_control_plane.api_core import (
     freqtrade_pair,
     perptape_legacy_candidate_id,
     project_runtime_connections,
+    render_report,
+    report_engine_catalog,
     report_metadata,
     timedelta,
 )
@@ -1684,6 +1688,107 @@ class _ExecutionRoutes:
                 "data": self.queries().analytics_report_options(identity.user_id),
                 "as_of": _now().isoformat(),
             }
+
+        @self.app.get("/api/results/report-engines")
+        def analytics_report_engines(
+            identity: SessionIdentity = self.identity_dependency,
+        ) -> dict[str, Any]:
+            self.require_capability(identity, "results.view")
+            return {
+                "data": {
+                    "engines": report_engine_catalog(),
+                    "options": self.queries().analytics_report_options(identity.user_id),
+                },
+                "as_of": _now().isoformat(),
+            }
+
+        @self.app.post("/api/results/reports", status_code=201)
+        def create_analytics_report(
+            payload: AnalyticsReportCreateRequest,
+            identity: SessionIdentity = self.identity_dependency,
+        ) -> dict[str, Any]:
+            self.require_capability(identity, "results.view")
+            dataset = self.queries().analytics_dataset(
+                identity.user_id,
+                payload.environment,
+                account_id=payload.account_id,
+                venue=payload.venue,
+                generation=payload.generation,
+                from_time=payload.from_time,
+                to_time=payload.to_time,
+            )
+            artifact = render_report(payload.engine, dataset)
+            created = self.service().persist_analytics_report(
+                identity.user_id,
+                dataset,
+                artifact,
+                payload.idempotency_key,
+                now=_now(),
+            )
+            return {
+                "data": self.queries().analytics_report(
+                    identity.user_id, UUID(created["report_id"])
+                ),
+                "as_of": _now().isoformat(),
+            }
+
+        @self.app.get("/api/results/reports/{report_id}")
+        def analytics_report_status(
+            report_id: UUID,
+            identity: SessionIdentity = self.identity_dependency,
+        ) -> dict[str, Any]:
+            self.require_capability(identity, "results.view")
+            return {
+                "data": self.queries().analytics_report(identity.user_id, report_id),
+                "as_of": _now().isoformat(),
+            }
+
+        @self.app.get("/api/results/reports/{report_id}/artifact")
+        def analytics_report_artifact(
+            report_id: UUID,
+            identity: SessionIdentity = self.identity_dependency,
+        ) -> Response:
+            self.require_capability(identity, "results.view")
+            artifact, _engine = self.queries().analytics_report_artifact(
+                identity.user_id, report_id
+            )
+            return Response(
+                content=artifact,
+                media_type="text/html",
+                headers={
+                    "Cache-Control": "private, no-store",
+                    "Content-Security-Policy": (
+                        "sandbox; default-src 'none'; img-src data:; "
+                        "style-src 'unsafe-inline'"
+                    ),
+                    "X-Content-Type-Options": "nosniff",
+                },
+            )
+
+        @self.app.get("/api/results/reports/{report_id}/download")
+        def download_analytics_report(
+            report_id: UUID,
+            identity: SessionIdentity = self.identity_dependency,
+        ) -> Response:
+            self.require_capability(identity, "results.view")
+            artifact, engine = self.queries().analytics_report_artifact(
+                identity.user_id, report_id
+            )
+            return Response(
+                content=artifact,
+                media_type="text/html",
+                headers={
+                    "Cache-Control": "private, no-store",
+                    "Content-Disposition": (
+                        f'attachment; filename="tradingops-{engine}-{report_id}.html"'
+                    ),
+                    "Content-Security-Policy": (
+                        "sandbox; default-src 'none'; img-src data:; "
+                        "style-src 'unsafe-inline'"
+                    ),
+                    "X-Content-Type-Options": "nosniff",
+                },
+            )
 
         @self.app.get("/api/results/quantstats")
         def quantstats_report(

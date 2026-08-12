@@ -50,8 +50,12 @@ function resizeQuantStatsFrame(frame) {
 
 async function renderActualResults() {
   const current = new URLSearchParams(location.search);
-  const optionsResponse = await api('/api/results/quantstats/options');
-  const options = optionsResponse.data;
+  const catalogResponse = await api('/api/results/report-engines');
+  const options = catalogResponse.data.options;
+  const engines = catalogResponse.data.engines;
+  const requestedEngine = current.get('engine') || 'QUANTSTATS';
+  const engine = engines.some(item => item.engine === requestedEngine && item.available) ? requestedEngine : engines.find(item => item.available)?.engine;
+  const selectedEngine = engines.find(item => item.engine === engine);
   const modeDefault = ['SHADOW','LIVE'].includes(options.current_trading_mode) ? options.current_trading_mode : 'SHADOW';
   const environment = ['SHADOW','LIVE'].includes(current.get('environment')) ? current.get('environment') : modeDefault;
   const defaults = quantStatsDefaultRange();
@@ -64,18 +68,19 @@ async function renderActualResults() {
   const selectedVenue = current.get('venue') || '';
   const accountOptions = options.accounts.map(item => `<option value="${escapeHtml(item.account_id)}" data-venue="${escapeHtml(item.venue)}" ${selectedAccount === item.account_id && (!selectedVenue || selectedVenue === item.venue) ? 'selected' : ''}>${escapeHtml(item.label)} · ${escapeHtml(fmtVenueLabel(item.venue))}</option>`).join('');
   const generationOptions = options.shadow_generations.map(item => `<option value="${item.generation}" ${generation === item.generation ? 'selected' : ''}>generation ${item.generation} · ${escapeHtml(fmtStatus(item.status))}</option>`).join('');
-  main.innerHTML = `<section class="page results-page quantstats-page"><header class="page-head"><div><p class="eyebrow">${escapeHtml(options.scope.workspace_name)} · ${escapeHtml(options.scope.team_name)}</p><h1>绩效报表</h1><p class="lede">使用服务端 QuantStats 完整报表。收益率只来自可信净值并剔除非绩效现金流；订单仅用于执行与审计。</p></div><button class="secondary" data-refresh>重新生成</button></header>
+  const engineOptions = engines.map(item => `<option value="${item.engine}" ${engine === item.engine ? 'selected' : ''} ${item.available ? '' : 'disabled'}>${escapeHtml(item.label)} · ${item.available ? escapeHtml(item.version) : escapeHtml(item.error_code)}</option>`).join('');
+  main.innerHTML = `<section class="page results-page quantstats-page"><header class="page-head"><div><p class="eyebrow">${escapeHtml(options.scope.workspace_name)} · ${escapeHtml(options.scope.team_name)}</p><h1>绩效报表</h1><p class="lede">QuantStats 与 Pyfolio Reloaded 使用同一份可信净值、收益率、成交、持仓、手续费及基准数据；订单仅用于执行与审计。</p></div><button class="secondary" data-refresh>刷新</button></header>
     <article class="source-status ${options.current_trading_mode === 'LIVE' ? 'tone-attention' : ''}"><div><p class="eyebrow">当前交易模式</p><h2>${escapeHtml(fmtEnvironment(options.current_trading_mode))}</h2><p>报表环境只查询历史，不改变 Team 模式，也不会开启交易、资金、签名或广播能力。</p></div><span class="status-pill">${escapeHtml(options.dataset_version)}</span></article>
-    <form id="results-filter-form" class="form-panel compact-form result-filters"><div class="field-grid"><label>环境<select name="environment"><option value="SHADOW" ${environment === 'SHADOW' ? 'selected' : ''}>影子模式</option><option value="LIVE" ${environment === 'LIVE' ? 'selected' : ''}>生产历史</option></select></label><label>账户<select name="account_id" ${environment === 'SHADOW' ? 'disabled' : ''}><option value="">全部有权限账户</option>${accountOptions}</select></label><label>交易所<select name="venue" ${environment === 'SHADOW' ? 'disabled' : ''}><option value="">全部</option>${['BINANCE','HYPERLIQUID','OKX','BYBIT'].map(value => `<option value="${value}" ${selectedVenue === value ? 'selected' : ''}>${escapeHtml(fmtVenueLabel(value))}</option>`).join('')}</select></label><label>SHADOW generation<select name="generation" ${environment === 'LIVE' ? 'disabled' : ''}>${generationOptions}</select></label><label>起始时间<input name="from_time" type="datetime-local" value="${escapeHtml(resultDateTimeInput(fromTime))}" required></label><label>截止时间<input name="to_time" type="datetime-local" value="${escapeHtml(resultDateTimeInput(toTime))}" required></label></div><div class="form-actions"><button class="primary" type="submit">生成 QuantStats 报表</button></div></form>
+    <form id="results-filter-form" class="form-panel compact-form result-filters"><div class="field-grid"><label>报表引擎<select name="engine">${engineOptions}</select></label><label>环境<select name="environment"><option value="SHADOW" ${environment === 'SHADOW' ? 'selected' : ''}>影子模式</option><option value="LIVE" ${environment === 'LIVE' ? 'selected' : ''}>生产历史</option></select></label><label>账户<select name="account_id" ${environment === 'SHADOW' ? 'disabled' : ''}><option value="">全部有权限账户</option>${accountOptions}</select></label><label>交易所<select name="venue" ${environment === 'SHADOW' ? 'disabled' : ''}><option value="">全部</option>${['BINANCE','HYPERLIQUID','OKX','BYBIT'].map(value => `<option value="${value}" ${selectedVenue === value ? 'selected' : ''}>${escapeHtml(fmtVenueLabel(value))}</option>`).join('')}</select></label><label>SHADOW generation<select name="generation" ${environment === 'LIVE' ? 'disabled' : ''}>${generationOptions}</select></label><label>起始时间<input name="from_time" type="datetime-local" value="${escapeHtml(resultDateTimeInput(fromTime))}" required></label><label>截止时间<input name="to_time" type="datetime-local" value="${escapeHtml(resultDateTimeInput(toTime))}" required></label></div><div class="form-actions"><button class="primary" type="submit">生成 ${escapeHtml(selectedEngine?.label || engine)} 报表</button></div></form>
     <section class="quantstats-status" data-quantstats-status><div class="loading-card"><span class="spinner"></span><b>正在生成只读报表</b><p>服务端正在验证净值连续性、现金流、估值、范围和 generation。</p></div></section>
-    <section class="quantstats-report-shell" data-quantstats-report hidden><div class="section-heading"><div><p class="eyebrow">QuantStats · UTC 24/7 · 365 periods/year</p><h2>完整绩效报表</h2><p data-quantstats-coverage></p></div><span class="status-pill status-READY">READY</span></div><iframe class="quantstats-frame" title="QuantStats 完整绩效报表" sandbox="allow-same-origin" referrerpolicy="no-referrer"></iframe></section>
+    <section class="quantstats-report-shell" data-quantstats-report hidden><div class="section-heading"><div><p class="eyebrow">${escapeHtml(selectedEngine?.label || engine)} · UTC 24/7 · 365 periods/year</p><h2>完整绩效报表</h2><p data-quantstats-coverage></p></div><div class="form-actions"><a class="secondary" data-report-view target="_blank" rel="noopener">新窗口查看</a><a class="primary" data-report-download>下载 HTML</a></div></div><div class="stats report-common-metrics" data-report-metrics></div><iframe class="quantstats-frame" title="${escapeHtml(selectedEngine?.label || engine)} 完整绩效报表" sandbox="allow-same-origin" referrerpolicy="no-referrer"></iframe></section>
   </section>`;
   document.querySelector('[data-refresh]')?.addEventListener('click', route);
   document.querySelector('#results-filter-form')?.addEventListener('submit', event => {
     event.preventDefault();
     const form = event.currentTarget;
     const values = Object.fromEntries(new FormData(form));
-    const next = new URLSearchParams({environment:values.environment});
+    const next = new URLSearchParams({engine:values.engine,environment:values.environment});
     ['venue','account_id','generation'].forEach(key => { if (values[key]) next.set(key, values[key]); });
     ['from_time','to_time'].forEach(key => {
       if (values[key]) next.set(key, new Date(values[key]).toISOString());
@@ -83,22 +88,29 @@ async function renderActualResults() {
     history.replaceState({}, '', `/results?${next.toString()}`);
     route();
   });
-  const request = new URLSearchParams({environment,from_time:fromTime,to_time:toTime});
-  if (environment === 'SHADOW' && generation) request.set('generation', generation);
-  if (environment === 'LIVE' && selectedAccount) request.set('account_id', selectedAccount);
-  if (environment === 'LIVE' && selectedVenue) request.set('venue', selectedVenue);
   try {
-    const response = await api(`/api/results/quantstats?${request.toString()}`);
+    const body = {engine,environment,from_time:fromTime,to_time:toTime,idempotency_key:crypto.randomUUID()};
+    if (environment === 'SHADOW' && generation) body.generation = generation;
+    if (environment === 'LIVE' && selectedAccount) body.account_id = selectedAccount;
+    if (environment === 'LIVE' && selectedVenue) body.venue = selectedVenue;
+    const response = await api('/api/results/reports', {method:'POST',body:JSON.stringify(body)});
     const data = response.data;
-    const readiness = data.quantstats.readiness;
+    const readiness = data.metadata.readiness;
     const status = document.querySelector('[data-quantstats-status]');
     status.innerHTML = `<div class="quantstats-readiness">${Object.entries(readiness).map(([key,value]) => `<span class="status-pill ${value ? 'status-READY' : 'status-DISABLED'}">${escapeHtml(key)} · ${value ? 'READY' : 'NOT READY'}</span>`).join('')}</div>`;
     const shell = document.querySelector('[data-quantstats-report]');
     const frame = shell.querySelector('.quantstats-frame');
     shell.hidden = false;
-    shell.querySelector('[data-quantstats-coverage]').textContent = `${data.coverage.nav_point_count} 个净值点 · ${data.coverage.return_count} 个收益周期 · ${data.coverage.transaction_count} 条去重成交 · QuantStats ${data.quantstats.version}`;
+    shell.querySelector('[data-quantstats-coverage]').textContent = `${data.coverage.nav_point_count} 个净值点 · ${data.coverage.return_count} 个收益周期 · ${data.coverage.transaction_count} 条去重成交 · ${data.library} ${data.library_version} · ${data.chart_count} 张图表`;
+    const labels = {total_return:'总收益',annual_return:'年化收益',annual_volatility:'波动率',sharpe:'Sharpe',sortino:'Sortino',max_drawdown:'最大回撤',win_rate:'胜率',fees:'手续费'};
+    shell.querySelector('[data-report-metrics]').innerHTML = Object.entries(data.metrics).map(([key,value]) => {
+      const display = key === 'fees' ? `${value} U` : ['sharpe','sortino'].includes(key) ? Number(value).toFixed(2) : `${(Number(value) * 100).toFixed(2)}%`;
+      return `<article class="stat"><small>${escapeHtml(labels[key] || key)}</small><b>${escapeHtml(display)}</b><span>${escapeHtml(data.engine)}</span></article>`;
+    }).join('');
+    shell.querySelector('[data-report-view]').href = data.artifact.view_url;
+    shell.querySelector('[data-report-download]').href = data.artifact.download_url;
     frame.addEventListener('load', () => resizeQuantStatsFrame(frame), {once:true});
-    frame.srcdoc = quantStatsThemeHtml(data.report_html);
+    frame.src = data.artifact.view_url;
   } catch (error) {
     const status = document.querySelector('[data-quantstats-status]');
     status.innerHTML = `<div class="callout tone-attention"><b>报表数据未就绪 · ${escapeHtml(error.code || 'ANALYTICS_NOT_READY')}</b><p>${escapeHtml(error.message || '服务端拒绝使用不完整事实生成收益率。')}</p><p class="subtle">系统没有补零、推测净值或使用成交盈亏伪造收益率。</p></div>`;

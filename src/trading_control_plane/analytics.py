@@ -116,6 +116,7 @@ class PositionSnapshot:
     market_value: Decimal
     gross_exposure: Decimal
     net_exposure: Decimal
+    source_fill_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
