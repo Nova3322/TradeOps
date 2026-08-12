@@ -6,6 +6,7 @@ from decimal import Decimal
 from typing import Any
 from uuid import UUID
 
+from conftest import set_test_team_environment
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy import func, select
 
@@ -167,6 +168,7 @@ def test_telegram_todo_excludes_expired_frozen_proposals(database: Database) -> 
     service = TradingService(database)
     now = datetime.now(UTC)
     admin = service.bootstrap_admin("telegram-todo-admin", now=now - timedelta(hours=3))
+    set_test_team_environment(database, admin, "SHADOW")
     proposer = service.create_user(
         "telegram-todo-proposer",
         admin,

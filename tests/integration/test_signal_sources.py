@@ -11,6 +11,7 @@ from decimal import Decimal
 from uuid import UUID
 
 import pytest
+from conftest import set_test_team_environment
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy import select
 
@@ -91,6 +92,7 @@ def test_team_signal_source_perptape_key_and_signed_webhook_flow(
     now = datetime.now(UTC)
     service = TradingService(database, credential_encryption_key=encryption_key())
     admin = service.bootstrap_admin("signal-admin", now=now)
+    set_test_team_environment(database, admin, "SHADOW")
     instrument_id = service.register_instrument(
         actor_id=admin,
         venue="BINANCE",
@@ -454,6 +456,7 @@ def test_multiple_webhooks_coexist_with_perptape_and_retain_source_history(
     now = datetime.now(UTC)
     service = TradingService(database, credential_encryption_key=encryption_key())
     admin = service.bootstrap_admin("multi-signal-admin", now=now)
+    set_test_team_environment(database, admin, "SHADOW")
     instrument_id = service.register_instrument(
         actor_id=admin,
         venue="BINANCE",

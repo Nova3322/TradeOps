@@ -57,7 +57,8 @@ def test_package_metadata_uses_the_public_dual_license_expression() -> None:
         "License :: OSI Approved :: GNU General Public License v3 (GPLv3)" in project["classifiers"]
     )
     assert pyproject["tool"]["hatch"]["build"]["targets"]["wheel"]["force-include"] == {
-        "docs/AI_API_QUICKSTART.md": "trading_control_plane/web/AI_API_QUICKSTART.md"
+        "docs/AI_API_QUICKSTART.md": "trading_control_plane/web/AI_API_QUICKSTART.md",
+        "docs/API_KEY_QUICKSTART.md": "trading_control_plane/web/API_KEY_QUICKSTART.md",
     }
 
 

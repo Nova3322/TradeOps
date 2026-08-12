@@ -1146,7 +1146,12 @@ class VenueCommandExecutionService(ServiceComponent):
                     Position.instrument_id == campaign.instrument_id,
                 )
             )
-            policy = session.scalar(select(RiskPolicy).where(RiskPolicy.active))
+            policy = session.scalar(
+                select(RiskPolicy).where(
+                    RiskPolicy.team_id == campaign.team_id,
+                    RiskPolicy.active,
+                )
+            )
             if (
                 position is None
                 or position.fact_status != FactStatus.KNOWN.value

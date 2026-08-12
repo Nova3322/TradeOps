@@ -265,13 +265,12 @@ class CapitalQueries(QueryComponent):
                     RoleAssignment.team_id == team_id,
                 )
             ).all()
-            if not self.service.can_user(user_id, "capital.view"):
-                raise DomainRejected("RBAC_DENIED", "capital center access is not assigned")
-            treasury_assignments = [
-                item
+            if not any(
+                "capital.view" in ROLE_ACTIONS[Role(item.role)]
+                or "*" in ROLE_ACTIONS[Role(item.role)]
                 for item in assignments
-                if item.role in {Role.TREASURY_ADMIN.value, Role.SYSTEM_ADMIN.value}
-            ]
+            ):
+                raise DomainRejected("RBAC_DENIED", "capital center access is not assigned")
 
             def can_view_history(item: AccountEquityObservation) -> bool:
                 if not is_authoritative_live_venue(
@@ -287,18 +286,11 @@ class CapitalQueries(QueryComponent):
                     item.account_id,
                 ):
                     return False
-                if item.location_type == "VAULT":
-                    return any(
-                        assignment.account_scope is None and assignment.venue_scope is None
-                        for assignment in treasury_assignments
-                    )
-                return any(
-                    (
-                        assignment.account_scope is None
-                        or assignment.account_scope == item.account_id
-                    )
-                    and (assignment.venue_scope is None or assignment.venue_scope == item.venue)
-                    for assignment in treasury_assignments
+                return self.service.can_user(
+                    user_id,
+                    "capital.view",
+                    item.account_id,
+                    item.venue,
                 )
 
             balances = session.scalars(

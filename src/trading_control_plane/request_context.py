@@ -7,14 +7,12 @@ from uuid import UUID
 
 @dataclass(frozen=True, slots=True)
 class ApiClientRequestContext:
-    """Request-local HUMAN attribution and immutable API Client scope."""
+    """Request-local HUMAN attribution and Team context for one API Key."""
 
     owner_user_id: UUID
     api_client_id: UUID
     workspace_id: UUID
     team_id: UUID
-    account_id: str
-    venue: str
 
 
 _api_client_context: ContextVar[ApiClientRequestContext | None] = ContextVar(

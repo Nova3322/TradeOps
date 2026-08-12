@@ -7,6 +7,7 @@ from typing import Any
 from uuid import UUID
 
 import pytest
+from conftest import set_test_team_environment
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 
@@ -58,6 +59,7 @@ def seed_campaign(database: Database) -> dict[str, UUID]:
     service = TradingService(database)
     now = datetime.now(UTC) - timedelta(seconds=2)
     admin = service.bootstrap_admin("admin", now=now)
+    set_test_team_environment(database, admin, "SHADOW")
     proposer = service.create_user("proposer", admin, now=now)
     reviewer = service.create_user("reviewer", admin, now=now)
     operator = service.create_user("operator", admin, now=now)

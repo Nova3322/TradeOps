@@ -6,6 +6,7 @@ import json
 import secrets
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from unittest.mock import patch
 from uuid import UUID
 
 from fastapi import FastAPI
@@ -21,10 +22,17 @@ from trading_control_plane.models import (
     AuditEvent,
     CommandReceipt,
     RoleAssignment,
+    Team,
     TeamMembership,
     User,
 )
 from trading_control_plane.perptape import PerptapeClient
+from trading_control_plane.queries import TradingQueries
+from trading_control_plane.request_context import (
+    ApiClientRequestContext,
+    bind_api_client_context,
+    reset_api_client_context,
+)
 from trading_control_plane.service import TradingService
 
 
@@ -53,7 +61,7 @@ def api_client_app(database: Database) -> FastAPI:
     return create_app(settings, database, perptape)
 
 
-def test_human_owned_api_client_dynamic_rbac_scope_audit_and_token_lifecycle(
+def test_user_owned_api_key_dynamic_rbac_scope_audit_and_token_lifecycle(
     database: Database,
 ) -> None:
     now = datetime.now(UTC)
@@ -76,7 +84,7 @@ def test_human_owned_api_client_dynamic_rbac_scope_audit_and_token_lifecycle(
         actor_id=admin_id,
         account_id="paper-api-1",
         venue="BINANCE",
-        label="API Client scope",
+        label="Primary API Key account",
         credentials=None,
         idempotency_key="api-account-one",
         now=now,
@@ -85,23 +93,42 @@ def test_human_owned_api_client_dynamic_rbac_scope_audit_and_token_lifecycle(
         actor_id=admin_id,
         account_id="paper-api-2",
         venue="BINANCE",
-        label="Outside API Client scope",
+        label="Second RBAC account",
         credentials=None,
         idempotency_key="api-account-two",
         now=now,
     )
+    with database.session_factory() as session:
+        admin = session.get(User, admin_id)
+        assert admin is not None and admin.active_team_id is not None
+        team = session.get(Team, admin.active_team_id)
+        assert team is not None
+        assert team.execution_mode == "LIVE"
+        assert team.execution_mode_locked_at == now
+        team_id = team.team_id
+        team_version = team.version
+    switched = service.set_team_execution_mode(
+        actor_id=admin_id,
+        team_id=team_id,
+        mode="SHADOW",
+        confirmation="SWITCH_TO_SHADOW",
+        expected_version=team_version,
+        idempotency_key="api-key-shadow-mode",
+        now=now,
+    )
+    assert switched["execution_mode"] == "SHADOW"
     owner_id = service.create_managed_user(
         "api-owner",
-        [Role.PROPOSER, Role.REVIEWER],
+        [Role.OBSERVER, Role.PROPOSER, Role.REVIEWER],
         admin_id,
-        "paper-api-1",
-        "BINANCE",
+        None,
+        None,
         "ordinary-user-password",
         now=now,
     )
     app = api_client_app(database)
 
-    async def bearer_get(token: str, path: str = "/api/api-client/connection") -> Response:
+    async def bearer_get(token: str, path: str = "/api/api-key/connection") -> Response:
         async with AsyncClient(
             transport=ASGITransport(app=app),
             base_url="http://test",
@@ -120,37 +147,36 @@ def test_human_owned_api_client_dynamic_rbac_scope_audit_and_token_lifecycle(
             team_id = session["active_team"]["team_id"]
             assert session["principal_type"] == "HUMAN"
 
-            page = await owner.get("/profile/api-access")
+            page = await owner.get("/profile/api-keys")
             assert page.status_code == 200
-            assert 'href="/profile/api-access"' in page.text
+            assert 'href="/profile/api-keys"' in page.text
             assert 'href="/admin/agents"' not in page.text
             assert "/assets/app.js?v=175" in page.text
 
-            scopes = await owner.get("/api/profile/api-client-scopes")
+            scopes = await owner.get("/api/profile/api-key-contexts")
             assert scopes.status_code == 200, scopes.text
-            assert [(item["account_id"], item["venue"]) for item in scopes.json()["data"]] == [
-                ("paper-api-1", "BINANCE")
-            ]
+            assert len(scopes.json()["data"]) == 1
+            assert scopes.json()["data"][0]["scope_model"] == "USER_RBAC"
+            assert scopes.json()["data"][0]["account_id"] is None
+            assert scopes.json()["data"][0]["venue"] is None
 
             create_payload = {
                 "name": "owner-alpha",
                 "workspace_id": workspace_id,
                 "team_id": team_id,
-                "account_id": "paper-api-1",
-                "venue": "BINANCE",
                 "expires_in_days": 30,
                 "idempotency_key": "create-owner-alpha",
             }
-            created = await owner.post("/api/profile/api-clients", json=create_payload)
+            created = await owner.post("/api/profile/api-keys", json=create_payload)
             assert created.status_code == 200, created.text
             alpha = created.json()["result"]
             alpha_token = alpha["token"]
-            alpha_id = alpha["api_client_id"]
+            alpha_id = alpha["api_key_id"]
             assert alpha["owner_user_id"] == str(owner_id)
             assert alpha["display_once"] is True
             assert alpha_token.startswith("tradingops_api_v1.")
 
-            replay = await owner.post("/api/profile/api-clients", json=create_payload)
+            replay = await owner.post("/api/profile/api-keys", json=create_payload)
             assert replay.status_code == 200, replay.text
             assert replay.json()["result"]["token"] is None
             assert replay.json()["result"]["display_once"] is False
@@ -160,33 +186,23 @@ def test_human_owned_api_client_dynamic_rbac_scope_audit_and_token_lifecycle(
                 json={
                     **create_payload,
                     "name": "owner-beta",
+                    "account_id": "paper-api-1",
+                    "venue": "BINANCE",
                     "idempotency_key": "create-owner-beta",
                 },
             )
             assert second.status_code == 200, second.text
             beta = second.json()["result"]
             beta_token = beta["token"]
-            beta_id = beta["api_client_id"]
+            beta_id = beta["api_key_id"]
 
-            outside = await owner.post(
-                "/api/profile/api-clients",
-                json={
-                    **create_payload,
-                    "name": "outside-client",
-                    "account_id": "paper-api-2",
-                    "idempotency_key": "outside-client",
-                },
-            )
-            assert outside.status_code == 422
-            assert outside.json()["error"]["code"] == "API_CLIENT_SCOPE_INVALID"
-
-            listed = await owner.get("/api/profile/api-clients")
+            listed = await owner.get("/api/profile/api-keys")
             assert listed.status_code == 200, listed.text
             assert {item["permissions_source"] for item in listed.json()["data"]} == {
                 "HUMAN_DYNAMIC"
             }
             assert {tuple(item["effective_roles"]) for item in listed.json()["data"]} == {
-                ("PROPOSER", "REVIEWER")
+                ("OBSERVER", "PROPOSER", "REVIEWER")
             }
             for token in (alpha_token, beta_token):
                 assert token not in listed.text
@@ -202,13 +218,16 @@ def test_human_owned_api_client_dynamic_rbac_scope_audit_and_token_lifecycle(
         connection = await bearer_get(alpha_token)
         assert connection.status_code == 200, connection.text
         assert connection.json()["owner_user_id"] == str(owner_id)
-        assert connection.json()["api_client_id"] == alpha_id
+        assert connection.json()["api_key_id"] == alpha_id
         assert connection.json()["permissions_source"] == "HUMAN_DYNAMIC"
         assert [item["role"] for item in connection.json()["effective_roles"]] == [
+            "OBSERVER",
             "PROPOSER",
             "REVIEWER",
         ]
-        assert connection.json()["scope"]["account_id"] == "paper-api-1"
+        assert connection.json()["scope"]["account_id"] is None
+        assert connection.json()["scope"]["venue"] is None
+        assert connection.json()["scope"]["scope_model"] == "USER_RBAC"
 
         proposal_payload = {
             "environment": "SHADOW",
@@ -235,7 +254,7 @@ def test_human_owned_api_client_dynamic_rbac_scope_audit_and_token_lifecycle(
             base_url="http://test",
             headers={"Authorization": f"Bearer {alpha_token}"},
         ) as alpha_client:
-            proposed = await alpha_client.post("/api/agent/proposals", json=proposal_payload)
+            proposed = await alpha_client.post("/api/api-key/proposals", json=proposal_payload)
             assert proposed.status_code == 200, proposed.text
             proposal_id = proposed.json()["proposal_id"]
             assert proposed.json()["detail"]["proposer_id"] == str(owner_id)
@@ -259,14 +278,20 @@ def test_human_owned_api_client_dynamic_rbac_scope_audit_and_token_lifecycle(
                     "idempotency_key": "api-client-cross-scope",
                 },
             )
-            assert cross_scope.status_code == 403
-            assert cross_scope.json()["error"]["code"] == "API_CLIENT_SCOPE_DENIED"
+            assert cross_scope.status_code == 200, cross_scope.text
+            assert cross_scope.json()["detail"]["account_id"] == "paper-api-2"
 
+            accounts = await alpha_client.get("/api/exchange-accounts")
+            assert accounts.status_code == 200, accounts.text
+            assert {item["account_id"] for item in accounts.json()["data"]["data"]} == {
+                "paper-api-1",
+                "paper-api-2",
+            }
             approval_without_human_step_up = await alpha_client.post(
                 f"/api/proposals/{proposal_id}/reviews",
                 json={
                     "decision": "APPROVE",
-                    "reason": "API Client must not possess a human action grant",
+                    "reason": "API Key must not possess a human action grant",
                     "expected_version": 2,
                     "idempotency_key": "alpha-approval-denied",
                 },
@@ -276,7 +301,7 @@ def test_human_owned_api_client_dynamic_rbac_scope_audit_and_token_lifecycle(
                 "HUMAN_WEB_CONFIRMATION_REQUIRED"
             )
 
-            client_inventory = await alpha_client.get("/api/profile/api-clients")
+            client_inventory = await alpha_client.get("/api/profile/api-keys")
             assert client_inventory.status_code == 403
             assert client_inventory.json()["error"]["code"] == ("HUMAN_WEB_CONFIRMATION_REQUIRED")
 
@@ -357,15 +382,32 @@ def test_human_owned_api_client_dynamic_rbac_scope_audit_and_token_lifecycle(
             headers={"Authorization": f"Bearer {alpha_token}"},
         ) as tightened_client:
             denied = await tightened_client.post(
-                "/api/agent/proposals",
+                "/api/api-key/proposals",
                 json={
                     **proposal_payload,
+                    "account_id": "paper-api-2",
                     "request_id": "request-api-client-0003",
                     "idempotency_key": "api-client-after-tightening",
                 },
             )
             assert denied.status_code == 403
             assert denied.json()["error"]["code"] == "RBAC_DENIED"
+
+        context_token = bind_api_client_context(
+            ApiClientRequestContext(
+                owner_user_id=owner_id,
+                api_client_id=UUID(alpha_id),
+                workspace_id=UUID(connection.json()["scope"]["workspace_id"]),
+                team_id=UUID(connection.json()["scope"]["team_id"]),
+            )
+        )
+        try:
+            queries = TradingQueries(database)
+            with patch.object(queries.service, "shadow_activation_status", return_value={}):
+                shadow = queries.shadow_workspace(owner_id)
+        finally:
+            reset_api_client_context(context_token)
+        assert [item["account_id"] for item in shadow["accounts"]] == ["paper-api-1"]
 
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as admin:
             login = await admin.post("/api/auth/mock/login", json={"username": "api-client-admin"})
@@ -385,7 +427,7 @@ def test_human_owned_api_client_dynamic_rbac_scope_audit_and_token_lifecycle(
             login = await owner.post("/api/auth/mock/login", json={"username": "api-owner"})
             assert login.status_code == 200
             rotated = await owner.post(
-                f"/api/profile/api-clients/{beta_id}/token-rotations",
+                f"/api/profile/api-keys/{beta_id}/rotations",
                 json={
                     "expected_token_version": 1,
                     "expires_in_days": 30,
@@ -396,7 +438,7 @@ def test_human_owned_api_client_dynamic_rbac_scope_audit_and_token_lifecycle(
             rotated_beta_token = rotated.json()["result"]["token"]
             assert rotated.json()["result"]["display_once"] is True
             rotate_replay = await owner.post(
-                f"/api/profile/api-clients/{beta_id}/token-rotations",
+                f"/api/profile/api-keys/{beta_id}/rotations",
                 json={
                     "expected_token_version": 1,
                     "expires_in_days": 30,
@@ -406,12 +448,12 @@ def test_human_owned_api_client_dynamic_rbac_scope_audit_and_token_lifecycle(
             assert rotate_replay.status_code == 200
             assert rotate_replay.json()["result"]["token"] is None
 
-            listed = await owner.get("/api/profile/api-clients")
+            listed = await owner.get("/api/profile/api-keys")
             beta_row = next(
                 item for item in listed.json()["data"] if item["api_client_id"] == beta_id
             )
             disabled = await owner.put(
-                f"/api/profile/api-clients/{beta_id}/state",
+                f"/api/profile/api-keys/{beta_id}/state",
                 json={
                     "active": False,
                     "expected_version": beta_row["version"],
@@ -428,7 +470,7 @@ def test_human_owned_api_client_dynamic_rbac_scope_audit_and_token_lifecycle(
             login = await owner.post("/api/auth/mock/login", json={"username": "api-owner"})
             assert login.status_code == 200
             enabled = await owner.put(
-                f"/api/profile/api-clients/{beta_id}/state",
+                f"/api/profile/api-keys/{beta_id}/state",
                 json={
                     "active": True,
                     "expected_version": disabled_version,
@@ -444,7 +486,7 @@ def test_human_owned_api_client_dynamic_rbac_scope_audit_and_token_lifecycle(
             login = await owner.post("/api/auth/mock/login", json={"username": "api-owner"})
             assert login.status_code == 200
             revoked = await owner.post(
-                f"/api/profile/api-clients/{beta_id}/revoke",
+                f"/api/profile/api-keys/{beta_id}/revoke",
                 json={
                     "expected_version": enabled_version,
                     "idempotency_key": "revoke-owner-beta",
@@ -453,7 +495,7 @@ def test_human_owned_api_client_dynamic_rbac_scope_audit_and_token_lifecycle(
             assert revoked.status_code == 200, revoked.text
             revoked_version = revoked.json()["result"]["version"]
             cannot_enable = await owner.put(
-                f"/api/profile/api-clients/{beta_id}/state",
+                f"/api/profile/api-keys/{beta_id}/state",
                 json={
                     "active": True,
                     "expected_version": revoked_version,
@@ -535,6 +577,7 @@ def test_human_owned_api_client_dynamic_rbac_scope_audit_and_token_lifecycle(
         audits = session.scalars(select(AuditEvent)).all()
         receipts = session.scalars(select(CommandReceipt)).all()
         assert len(api_clients) == 2
+        assert all(client.account_id is None and client.venue is None for client in api_clients)
         assert service_users == []
         assert client_role_rows == []
         assert proposal_audit is not None

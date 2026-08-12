@@ -243,8 +243,8 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
 
     assert response.status_code == 200
     assert "交易控制台" in response.text
-    assert "/assets/app-core.js?v=192" in response.text
-    assert "/assets/workspace.js?v=178" in response.text
+    assert "/assets/app-core.js?v=198" in response.text
+    assert "/assets/workspace.js?v=179" in response.text
     assert "/assets/signals.js?v=174" in response.text
     assert "/assets/proposals.js?v=175" in response.text
     assert "/assets/capital.js?v=173" in response.text
@@ -300,9 +300,9 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
     assert 'class="header-preferences"' in topbar
     assert 'id="scope-control"' in topbar
     assert "data-preference-select=" not in user_menu
-    assert 'href="/profile/api-access"' in response.text
-    assert response.text.count('href="/profile/api-access"') == 1
-    assert "API 接入" in response.text
+    assert 'href="/profile/api-keys"' in response.text
+    assert response.text.count('href="/profile/api-keys"') == 1
+    assert "API Key" in response.text
     assert 'id="password-change-form"' in response.text
     assert response.text.count("data-preference-select=") == 2
     assert response.text.count('aria-haspopup="listbox"') == 2
@@ -336,12 +336,13 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
     assert get(app, "/admin/users").status_code == 401
     assert get(app, "/admin/agents").status_code == 200
     assert get(app, "/profile/api-access").status_code == 200
+    assert get(app, "/profile/api-keys").status_code == 200
 
     openapi = get(app, "/openapi.json")
     assert openapi.status_code == 200
     assert openapi.json()["openapi"].startswith("3.")
     for path in (
-        "/api/api-client/connection",
+        "/api/api-key/connection",
         "/api/instruments",
         "/api/opportunities",
         "/api/proposals",
@@ -351,14 +352,16 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
     ):
         assert path in openapi.json()["paths"]
 
-    quickstart = get(app, "/docs/AI_API_QUICKSTART.md")
+    quickstart = get(app, "/docs/API_KEY_QUICKSTART.md")
     assert quickstart.status_code == 200
     assert quickstart.headers["content-type"].startswith("text/markdown")
-    for placeholder in ("BASE_URL", "TOKEN", "WORKSPACE_ID", "TEAM_ID", "ACCOUNT_ID"):
+    for placeholder in ("BASE_URL", "API_KEY", "WORKSPACE_ID", "TEAM_ID"):
         assert placeholder in quickstart.text
     assert "完整接口合同以运行中的 [`/openapi.json`](/openapi.json) 为唯一真源" in quickstart.text
-    assert "缺失、过期或限流数据不得视为实时数据" in quickstart.text
-    assert "下单、资金划转、钱包签名和广播默认关闭" in quickstart.text
+    assert "不设置独立 Account / Venue Scope" in quickstart.text
+    assert "缺失、过期、丢失、不完整或限流数据" in quickstart.text
+    assert "SIGNING`、`BROADCAST` 保持关闭" in quickstart.text
+    assert get(app, "/docs/AI_API_QUICKSTART.md").status_code == 200
 
     assert get(app, "/assets/app.js").status_code == 200
     app_javascript = SimpleNamespace(text=frontend_source())
@@ -380,11 +383,11 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
         api_access.index(item) for item in ordered_sections
     )
     assert 'href="/openapi.json"' in api_access
-    assert 'href="/docs/AI_API_QUICKSTART.md"' in api_access
-    assert "API_AGENT_SYSTEM_PROMPT" in workspace_javascript
+    assert 'href="/docs/API_KEY_QUICKSTART.md"' in api_access
+    assert "API_KEY_USAGE_RULES" in workspace_javascript
     assert "默认只调用只读 GET 接口" in workspace_javascript
     assert "data-copy-api-snippet" in workspace_javascript
-    assert "Token 明文只在创建或轮换成功时显示一次" in api_access
+    assert "API Key 明文只在创建或轮换成功时显示一次" in api_access
     assert '<b translate="no">LIVE / SHADOW</b>' in api_access
     assert '<code translate="no">GET /api/results?environment=SHADOW</code>' in api_access
     assert "缺失、过期或限流不等于实时" in api_access
@@ -484,13 +487,16 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
     assert "/api/results" in app_javascript.text
     assert "renderNotifications" in app_javascript.text
     assert "async function renderApiAccess" in app_javascript.text
-    assert "/api/profile/api-clients" in app_javascript.text
-    assert "/api/api-client/connection" in app_javascript.text
-    assert "不保存角色副本" in app_javascript.text
+    assert "/api/profile/api-keys" in app_javascript.text
+    assert "/api/api-key/connection" in app_javascript.text
+    assert "不保存独立权限或账户范围" in app_javascript.text
     assert "agentRoleCatalog" not in app_javascript.text
     assert "workspace.agent_count" not in app_javascript.text
     assert "const trigger = event.currentTarget" in app_javascript.text
-    assert "该 API Client Token 已失效、已轮换或不匹配" in app_javascript.text
+    assert "该 API Key 已失效、已轮换或不匹配" in app_javascript.text
+    assert "'复制 cURL':'Copy cURL'" in app_javascript.text
+    assert "'可连接':'Available', '详情':'Details'" in app_javascript.text
+    assert "'参数；以 OpenAPI 为准。':'parameters; use OpenAPI.'" in app_javascript.text
     assert "/api/notifications" in app_javascript.text
     assert "api('/api/audit" not in app_javascript.text
     assert "'access.manage':['SYSTEM_ADMIN']" in app_javascript.text
@@ -792,7 +798,7 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
 
     service_worker = get(app, "/sw.js")
     assert service_worker.status_code == 200
-    assert "trading-shell-v166" in service_worker.text
+    assert "trading-shell-v172" in service_worker.text
     assert "/assets/fonts/IBMPlexSansSC-Regular.woff2" in service_worker.text
     assert "/assets/fonts/IBMPlexSansSC-SemiBold.woff2" in service_worker.text
     assert "/assets/fonts/IBMPlexMono-Regular.woff2" in service_worker.text
@@ -2749,6 +2755,13 @@ def test_console_terminology_keeps_official_names_and_uses_natural_chinese() -> 
         );
         assert.equal(englishContext.translate("团队启用状态"), "Team activation status");
         assert.equal(englishContext.translate("绩效报表"), "Performance reports");
+        assert.equal(englishContext.translate("API 接入"), "API access");
+        assert.equal(englishContext.translate("创建用户凭证"), "Create a user credential");
+        assert.equal(
+          englishContext.translate("只固定 Workspace / Team 上下文；Account / Venue 由用户当前 RBAC 逐资源校验。"),
+          "Only the Workspace / Team context is fixed. Account / Venue access is checked per resource against the user's current RBAC.",
+        );
+        assert.equal(englishContext.translate("3 个可连接"), "3 available");
         assert.equal(englishContext.translate("影子模式"), "Shadow mode");
         assert.equal(englishContext.translate("通知中心"), "Notification center");
         assert.equal(englishContext.translate("当前 Workspace 和团队"), "Current Workspace and team");

@@ -9,7 +9,6 @@ from trading_control_plane.query_core import *
 class AccountQueries(QueryComponent):
     def exchange_accounts(self, actor_id: UUID) -> dict[str, Any]:
         workspace_id, team_id = self.facade._active_scope_ids(actor_id)
-        api_context = current_api_client_context()
         with self.database.session_factory() as session:
             assignments = session.scalars(
                 select(RoleAssignment).where(
@@ -33,41 +32,23 @@ class AccountQueries(QueryComponent):
             visible = [
                 item
                 for item in accounts
-                if (
-                    api_context is None
-                    or (
-                        item.account_id == api_context.account_id
-                        and item.venue == api_context.venue
-                    )
-                )
                 if any(
-                    (
-                        assignment.account_scope is None
-                        or assignment.account_scope == item.account_id
-                    )
-                    and (assignment.venue_scope is None or assignment.venue_scope == item.venue)
-                    and can_list_account(assignment)
-                    for assignment in assignments
+                    self.service.can_user(actor_id, action, item.account_id, item.venue)
+                    for action in listing_actions
                 )
             ]
 
             def granted(account: ExchangeAccount, action: str) -> bool:
-                if api_context is not None and action in {
+                if current_api_client_context() is not None and action in {
                     "account.manage",
                     "account.credentials.manage",
                 }:
                     return False
-                return any(
-                    (
-                        assignment.account_scope is None
-                        or assignment.account_scope == account.account_id
-                    )
-                    and (assignment.venue_scope is None or assignment.venue_scope == account.venue)
-                    and (
-                        action in ROLE_ACTIONS[Role(assignment.role)]
-                        or "*" in ROLE_ACTIONS[Role(assignment.role)]
-                    )
-                    for assignment in assignments
+                return self.service.can_user(
+                    actor_id,
+                    action,
+                    account.account_id,
+                    account.venue,
                 )
 
             projected: list[dict[str, Any]] = []
@@ -89,10 +70,10 @@ class AccountQueries(QueryComponent):
                 "workspace_id": str(workspace_id),
                 "team_id": str(team_id),
                 "can_manage": any(
-                    api_context is None
+                    current_api_client_context() is None
                     and (
-                    "account.manage" in ROLE_ACTIONS[Role(item.role)]
-                    or "*" in ROLE_ACTIONS[Role(item.role)]
+                        "account.manage" in ROLE_ACTIONS[Role(item.role)]
+                        or "*" in ROLE_ACTIONS[Role(item.role)]
                     )
                     for item in assignments
                 ),

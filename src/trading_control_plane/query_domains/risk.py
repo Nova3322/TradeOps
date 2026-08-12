@@ -9,8 +9,14 @@ from trading_control_plane.query_core import *
 class RiskQueries(QueryComponent):
     def list_exceptions(self, user_id: UUID, *, now: datetime) -> list[dict[str, Any]]:
         exceptions: list[dict[str, Any]] = []
+        _workspace_id, team_id = self.facade._active_scope_ids(user_id)
         with self.database.session_factory() as session:
-            risk_policy = session.scalar(select(RiskPolicy).where(RiskPolicy.active))
+            risk_policy = session.scalar(
+                select(RiskPolicy).where(
+                    RiskPolicy.team_id == team_id,
+                    RiskPolicy.active,
+                )
+            )
             max_fact_age = timedelta(
                 seconds=(risk_policy.max_fact_age_seconds if risk_policy is not None else 300)
             )

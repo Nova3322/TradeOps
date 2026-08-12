@@ -7,6 +7,7 @@ from decimal import Decimal
 from typing import Any
 from uuid import UUID
 
+from conftest import set_test_team_environment
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy import select
@@ -123,6 +124,7 @@ class MutableTestnetReader:
 def seed_testnet(service: TradingService, *, key: str = "m4") -> dict[str, UUID]:
     now = datetime.now(UTC)
     admin = service.bootstrap_admin(f"{key}-admin", now=now)
+    set_test_team_environment(service.database, admin, "TESTNET")
     proposer = service.create_user(f"{key}-proposer", admin, now=now)
     reviewer_one = service.create_user(f"{key}-reviewer-1", admin, now=now)
     reviewer_two = service.create_user(f"{key}-reviewer-2", admin, now=now)

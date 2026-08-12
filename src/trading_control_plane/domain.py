@@ -64,6 +64,7 @@ class ExecutionEnvironment(StrEnum):
 class TeamExecutionMode(StrEnum):
     SETUP = "SETUP"
     SHADOW = "SHADOW"
+    TESTNET = "TESTNET"
     LIVE = "LIVE"
 
 

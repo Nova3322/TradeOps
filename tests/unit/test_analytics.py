@@ -285,6 +285,7 @@ def analytics_dataset(days: int = 31) -> AnalyticsDataset:
         environment="SHADOW",
         account_ids=("TEAM_SHADOW",),
         venues=("TRADINGOPS",),
+        account_venues=(),
         generation=2,
         from_time=NOW,
         to_time=NOW + timedelta(days=days),

@@ -46,6 +46,7 @@ class AnalyticsScope:
     environment: str
     account_ids: tuple[str, ...]
     venues: tuple[str, ...]
+    account_venues: tuple[tuple[str, str], ...]
     from_time: datetime
     to_time: datetime
     generation: int | None = None
@@ -59,6 +60,33 @@ class AnalyticsScope:
             _reject("ANALYTICS_TIME_RANGE_INVALID", "from_time must be earlier than to_time")
         if self.environment == "SHADOW" and self.generation is None:
             _reject("ANALYTICS_GENERATION_REQUIRED", "SHADOW analytics requires one generation")
+        if self.environment == "SHADOW" and self.account_venues:
+            _reject(
+                "ANALYTICS_ACCOUNT_SCOPE_INVALID",
+                "SHADOW analytics cannot contain LIVE account and venue scopes",
+            )
+        if self.environment == "LIVE":
+            exact_scopes = tuple(sorted(set(self.account_venues)))
+            if not exact_scopes:
+                _reject(
+                    "ANALYTICS_ACCOUNT_SCOPE_REQUIRED",
+                    "LIVE analytics requires exact account and venue scopes",
+                )
+            if exact_scopes != self.account_venues:
+                _reject(
+                    "ANALYTICS_ACCOUNT_SCOPE_INVALID",
+                    "LIVE analytics account and venue scopes must be unique and sorted",
+                )
+            if tuple(sorted({item[0] for item in exact_scopes})) != self.account_ids:
+                _reject(
+                    "ANALYTICS_ACCOUNT_SCOPE_INVALID",
+                    "account_ids must match exact account and venue scopes",
+                )
+            if tuple(sorted({item[1] for item in exact_scopes})) != self.venues:
+                _reject(
+                    "ANALYTICS_ACCOUNT_SCOPE_INVALID",
+                    "venues must match exact account and venue scopes",
+                )
 
 
 @dataclass(frozen=True, slots=True)
@@ -99,9 +127,7 @@ class CanonicalFill:
 
     @property
     def idempotency_key(self) -> str:
-        return ":".join(
-            (self.environment, self.account_id, self.venue, self.fill_id)
-        )
+        return ":".join((self.environment, self.account_id, self.venue, self.fill_id))
 
 
 @dataclass(frozen=True, slots=True)

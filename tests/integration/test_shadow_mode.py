@@ -1152,8 +1152,6 @@ def test_live_mode_regression_human_version_idempotency_and_shadow_blockers(
             api_client_id=UUID("00000000-0000-0000-0000-000000000111"),
             workspace_id=UUID(live["workspace_id"]),
             team_id=ids["team"],
-            account_id="paper-1",
-            venue="BINANCE",
         )
     )
     try:

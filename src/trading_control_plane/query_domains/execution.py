@@ -852,23 +852,9 @@ class ExecutionQueries(QueryComponent):
             team = session.get(Team, team_id)
             if team is None or not team.active or team.workspace_id != workspace_id:
                 raise DomainRejected("TEAM_SCOPE_DENIED", "active team is unavailable")
-            assignments = session.scalars(
-                select(RoleAssignment).where(
-                    RoleAssignment.user_id == user_id,
-                    RoleAssignment.team_id == team_id,
-                )
-            ).all()
 
             def granted(action: str, account_id: str, venue: str) -> bool:
-                return any(
-                    (item.account_scope is None or item.account_scope == account_id)
-                    and (item.venue_scope is None or item.venue_scope == venue)
-                    and (
-                        action in ROLE_ACTIONS[Role(item.role)]
-                        or "*" in ROLE_ACTIONS[Role(item.role)]
-                    )
-                    for item in assignments
-                )
+                return self.service.can_user(user_id, action, account_id, venue)
 
             accounts = [
                 item
@@ -1151,8 +1137,7 @@ class ExecutionQueries(QueryComponent):
                     shadow_protection = session.scalar(
                         select(ShadowOrder).where(
                             ShadowOrder.campaign_id == campaign.campaign_id,
-                            ShadowOrder.shadow_position_id
-                            == shadow_position.shadow_position_id,
+                            ShadowOrder.shadow_position_id == shadow_position.shadow_position_id,
                             ShadowOrder.order_type == "PROTECTION",
                             ShadowOrder.status.in_(("OPEN", "TRIGGERED")),
                         )
@@ -1182,9 +1167,7 @@ class ExecutionQueries(QueryComponent):
             )
             lease = session.get(SenderLease, (campaign.team_id, scope))
             orders_by_intent = {item.order_intent_id: item for item in orders}
-            shadow_orders_by_intent = {
-                item.order_intent_id: item for item in shadow_orders
-            }
+            shadow_orders_by_intent = {item.order_intent_id: item for item in shadow_orders}
             result = self._campaign_summary(campaign, instrument)
             result["workspace_id"] = str(workspace_id)
             result.update(

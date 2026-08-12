@@ -7,6 +7,7 @@ from threading import Barrier
 from uuid import UUID
 
 import pytest
+from conftest import set_test_team_environment
 from sqlalchemy import select
 
 from trading_control_plane.database import Database
@@ -81,6 +82,7 @@ def test_live_restore_scope_projection_excludes_shadow_scopes_and_campaigns() ->
 
 def seed(service: TradingService) -> dict[str, UUID]:
     admin = service.bootstrap_admin("risk-admin", now=NOW)
+    set_test_team_environment(service.database, admin, "SHADOW")
     proposer = service.create_user("risk-proposer", admin, now=NOW)
     reviewer_one = service.create_user("risk-reviewer-1", admin, now=NOW)
     reviewer_two = service.create_user("risk-reviewer-2", admin, now=NOW)
@@ -775,6 +777,9 @@ def test_system_admin_direct_restore_requires_live_conditions_and_keeps_auto_add
         now=NOW + timedelta(minutes=2, seconds=1),
     )
 
+    # This legacy restore fixture intentionally exercises both SHADOW history
+    # and current LIVE readiness; production Teams never switch this way.
+    set_test_team_environment(database, ids["admin"], "LIVE")
     ready_at = NOW + timedelta(minutes=17)
     service.record_position(
         "acct-1",
