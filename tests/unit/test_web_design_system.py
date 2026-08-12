@@ -69,8 +69,74 @@ def test_primary_navigation_and_page_use_trading_mode_copy() -> None:
     assert '<span>◐</span>交易模式</a>' in index
     assert '<span>◐</span>影子模式</a>' not in index
     assert '<h1>交易模式</h1>' in execution
-    assert "仅 TradingOPS 内部模拟，不会向交易所发送订单" in execution  # noqa: RUF001
+    assert "仅在 TradingOPS 内部模拟，不会向交易所发送订单" in execution  # noqa: RUF001
     assert "重置为 100,000 U" in execution
+
+
+def test_trading_mode_page_is_a_compact_space_level_switcher() -> None:
+    execution = EXECUTION.read_text()
+    mode_page = execution.split("async function renderTradingMode()", maxsplit=1)[1].split(
+        "async function renderShadowWorkspace()", maxsplit=1
+    )[0]
+
+    for expected in (
+        "当前空间",
+        "当前模式",
+        "生产模式",
+        "影子模式",
+        "影响范围",
+        "查看交易账户",
+        "危险能力：真实下单、资金划转、自动加仓均关闭",  # noqa: RUF001
+        "查看模拟账户",
+        "重置模拟资产",
+    ):
+        assert expected in mode_page
+    assert 'aria-pressed="${isLive}"' in mode_page
+    assert 'aria-pressed="${isShadow}"' in mode_page
+    assert "session?.active_workspace?.name || data.team_name" in mode_page
+    assert "confirmAction" in mode_page
+
+    for removed in (
+        "Workspace ",
+        "当前 Team",
+        '<div class="stats">',
+        '<table>',
+        'id="shadow-order-form"',
+        "价格精度",
+        "合约乘数",
+        "手续费 bps",
+        "滑点 bps",
+        "generation",
+        "Decimal",
+        "SETUP",
+    ):
+        assert removed not in mode_page
+
+
+def test_shadow_trading_details_are_moved_off_the_mode_switcher() -> None:
+    execution = EXECUTION.read_text()
+    detail_page = execution.split("function renderShadowAccountDetails(data)", maxsplit=1)[
+        1
+    ].split("async function renderTradingMode()", maxsplit=1)[0]
+
+    assert 'href="/trading-mode?view=shadow-account"' in execution
+    assert '<h1>模拟账户</h1>' in detail_page
+    assert 'id="shadow-order-form"' in detail_page
+    assert "模拟持仓" in detail_page
+    assert "未成交订单" in detail_page
+    assert "shadow-match-form" in detail_page
+    assert "shadow-protection-form" in detail_page
+
+
+def test_trading_mode_mutations_keep_server_side_safety_contracts() -> None:
+    execution = EXECUTION.read_text()
+
+    assert "expected_version:data.version" in execution
+    assert "confirmation:`SWITCH_TO_${mode}`" in execution
+    assert "idempotency_key:crypto.randomUUID()" in execution
+    assert "expected_version:account.version" in execution
+    assert "confirmation:'RESET_TO_100000_U'" in execution
+    assert "'/api/trading-mode/shadow/reset'" in execution
 
 
 def test_workflow_environment_comes_only_from_persisted_team_mode() -> None:

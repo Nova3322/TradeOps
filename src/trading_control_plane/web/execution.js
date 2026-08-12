@@ -97,69 +97,51 @@ function shadowReadinessItem(step, index) {
   return `<li class="readiness-item ${step.complete ? 'is-complete' : 'is-blocked'}" data-readiness-step="${escapeHtml(step.id)}"><span class="readiness-marker" aria-hidden="true">${step.complete ? '✓' : index + 1}</span><div class="readiness-copy"><div class="readiness-title"><h3>${escapeHtml(step.label)}</h3><span class="status-pill ${step.complete ? 'status-APPROVED' : 'status-BLOCKED'}">${step.complete ? '已满足' : '需处理'}</span></div><p>${escapeHtml(copy)}</p><div class="readiness-meta"><span><b>责任角色</b>${escapeHtml(step.owner)}</span>${technicalCodes}</div></div>${action}</li>`;
 }
 
-async function renderTradingMode() {
-  if (location.pathname === '/shadow') {
-    history.replaceState({}, '', '/trading-mode');
-    updateActiveNav();
-  }
-  const response = await api('/api/trading-mode');
-  const data = response.data;
+function shadowAccountSummary(data) {
   const account = data.shadow_account;
-  const isShadow = data.execution_mode === 'SHADOW';
-  const isLive = data.execution_mode === 'LIVE';
-  const accounts = data.accounts || [];
-  const positions = data.positions || [];
-  const orders = data.orders || [];
-  const gates = data.dangerous_capabilities || {};
-  const accountOptions = accounts.map(item => `<option value="${escapeHtml(item.account_id)}" data-venue="${escapeHtml(item.venue)}">${escapeHtml(item.label)} · ${escapeHtml(item.venue)}</option>`).join('');
-  const affectedAccounts = accounts.length
-    ? `<div class="table-wrap"><table><thead><tr><th>交易账户</th><th>场所</th><th>连接</th><th>真实交易资格</th></tr></thead><tbody>${accounts.map(item => `<tr><td data-label="交易账户"><b>${escapeHtml(item.label)}</b><br><span class="subtle">${escapeHtml(item.account_id)}</span></td><td data-label="场所">${escapeHtml(item.venue)}</td><td data-label="连接">${escapeHtml(fmtStatus(item.connection_status))}</td><td data-label="真实交易资格">${escapeHtml(fmtStatus(item.trading_status))}</td></tr>`).join('')}</tbody></table></div>`
-    : '<section class="empty-state compact-empty-state"><div><h2>当前 Team 尚无交易所账户</h2><p>模式仍由 Team 持久化；登记账户后会自动受同一模式约束。</p></div></section>';
-  const positionRows = positions.length
-    ? `<div class="table-wrap"><table><thead><tr><th>模拟持仓</th><th>数量</th><th>均价 / 标记</th><th>盈亏</th><th>保护单</th></tr></thead><tbody>${positions.map(item => `<tr><td data-label="模拟持仓"><b>${escapeHtml(item.symbol)}</b><br><span class="subtle">${escapeHtml(item.venue)} · ${shortId(item.shadow_position_id)}</span></td><td data-label="数量">${fmtNumber(item.quantity)}</td><td data-label="均价 / 标记">${fmtNumber(item.average_entry_price)} / ${fmtNumber(item.mark_price)}</td><td data-label="盈亏">已实现 ${fmtNumber(item.realized_pnl)}<br><span class="subtle">未实现 ${fmtNumber(item.unrealized_pnl)}</span></td><td data-label="保护单"><details><summary>添加止损 / 止盈</summary><form class="compact-form shadow-protection-form" data-position-id="${escapeHtml(item.shadow_position_id)}"><div class="field-grid"><label>触发类型<select name="trigger_type"><option value="STOP_LOSS">止损</option><option value="TAKE_PROFIT">止盈</option></select></label><label>执行类型<select name="execution_type"><option value="MARKET">市价</option><option value="LIMIT">限价</option></select></label><label>触发价<input name="trigger_price" type="number" step="any" min="0" required></label><label>限价（限价执行时）<input name="limit_price" type="number" step="any" min="0"></label></div><div class="form-error" role="alert"></div><button class="secondary" type="submit">创建 reduce-only 保护单</button></form></details></td></tr>`).join('')}</tbody></table></div>`
-    : '<p class="subtle">当前 generation 尚无模拟持仓。</p>';
-  const orderRows = orders.length
-    ? `<div class="table-wrap"><table><thead><tr><th>未成交订单</th><th>类型</th><th>数量</th><th>触发 / 限价</th><th>新行情撮合</th></tr></thead><tbody>${orders.map(item => `<tr><td data-label="未成交订单"><b>${escapeHtml(item.symbol)}</b><br><span class="subtle">${shortId(item.shadow_order_id)} · v${item.version}</span></td><td data-label="类型">${escapeHtml(item.order_type)} · ${escapeHtml(item.side)}<br><span class="subtle">${escapeHtml(item.status)}</span></td><td data-label="数量">${fmtNumber(item.quantity)}</td><td data-label="触发 / 限价">${item.trigger_price ? fmtNumber(item.trigger_price) : '—'} / ${item.limit_price ? fmtNumber(item.limit_price) : '—'}</td><td data-label="新行情撮合"><form class="shadow-match-form compact-form" data-order-id="${escapeHtml(item.shadow_order_id)}" data-version="${item.version}"><div class="field-grid"><label>最新价<input name="latest_price" type="number" step="any" min="0" required></label><label>价格精度<input name="price_tick" type="number" step="any" min="0" value="0.1" required></label><label>数量精度<input name="quantity_step" type="number" step="any" min="0" value="0.001" required></label><label>合约乘数<input name="contract_multiplier" type="number" step="any" min="0" value="1" required></label></div><div class="form-error" role="alert"></div><button class="secondary" type="submit">按新行情撮合</button></form></td></tr>`).join('')}</tbody></table></div>`
-    : '<p class="subtle">当前 generation 尚无未成交订单。</p>';
-  main.innerHTML = `<section class="page trading-mode-page shadow-workspace"><header class="page-head"><div><p class="eyebrow">Workspace ${shortId(data.workspace_id)} · Team ${shortId(data.team_id)}</p><h1>交易模式</h1><p class="lede">为当前 Team 统一选择生产模式或影子模式；该状态作用于 Team 下全部交易所账户，并且只由服务端持久化状态决定。</p></div><span class="status-pill ${isShadow ? 'status-APPROVED' : isLive ? 'status-BLOCKED' : ''}">${isShadow ? '影子模式 SHADOW' : isLive ? '生产模式 LIVE' : '设置中 SETUP'}</span></header>
-    ${isShadow ? '<article class="home-status tone-success persistent-shadow-banner"><div><p class="eyebrow">SHADOW 边界持续生效</p><h2>仅 TradingOPS 内部模拟，不会向交易所发送订单</h2><p>可读取真实行情与合约规格；下单、撤单、签名、广播和资金写适配器调用次数固定为 0。</p></div><span class="status-pill status-APPROVED">INTERNAL ONLY</span></article>' : ''}
-    ${isLive ? '<article class="home-status tone-danger live-mode-warning"><div><p class="eyebrow">高风险环境</p><h2>当前 Team 处于生产模式</h2><p>模式只允许进入既有真实执行路径；不会自动开启真实下单、资金划转、自动加仓或其他危险能力。</p></div><span class="status-pill status-BLOCKED">LIVE</span></article>' : ''}
-    <div class="mode-layout"><article class="card mode-selector-card"><div class="card-heading"><div><p class="eyebrow">当前 Team</p><h2>${escapeHtml(data.team_name)}</h2></div><span class="status-pill">版本 ${data.version}</span></div><div class="mode-choice-grid"><button class="mode-choice ${isLive ? 'is-selected live-choice' : ''}" type="button" data-switch-mode="LIVE"><b>生产模式</b><small>LIVE · 沿用既有风控、审核、授权、Sender Lease、连接检查与危险能力开关</small></button><button class="mode-choice ${isShadow ? 'is-selected shadow-choice' : ''}" type="button" data-switch-mode="SHADOW"><b>影子模式</b><small>SHADOW · 全部新事实进入 TradingOPS 内部模拟账本</small></button></div><p class="safety-note">切换需要 team.manage、人工网页会话、明确二次确认、expected_version 与幂等键。切换不会转换任何历史 environment。</p></article>
-    <article class="card"><div class="card-heading"><div><p class="eyebrow">危险能力</p><h2>模式与能力开关相互独立</h2></div><span class="status-pill">默认关闭</span></div><dl class="definition-grid">${definition('真实下单 LIVE_ORDER_SEND', gates.LIVE_ORDER_SEND || 'DISABLED')}${definition('资金划转 CAPITAL_TRANSFER', gates.CAPITAL_TRANSFER || 'DISABLED')}${definition('自动加仓 AUTO_ADD', gates.AUTO_ADD || 'DISABLED')}</dl><p class="microcopy">生产模式不代表已获真实下单资格；每次真实动作仍经过原有权限、风控、授权、连接与租约边界。</p></article></div>
-    <div class="section-head"><div><p class="eyebrow">统一影响范围</p><h2>全部交易所账户</h2></div><a class="secondary" href="/venues" data-link>管理账户</a></div>${affectedAccounts}
-    <div class="section-head"><div><p class="eyebrow">Team 虚拟账户</p><h2>100,000 U 模拟资产</h2></div>${isShadow && account ? '<button class="danger" type="button" data-reset-shadow>重置为 100,000 U</button>' : ''}</div>
-    <div class="stats"><div class="stat"><small>总资产</small><b>${account ? `${fmtNumber(account.equity)} U` : '—'}</b></div><div class="stat"><small>可用资产</small><b>${account ? `${fmtNumber(account.available_balance)} U` : '—'}</b></div><div class="stat"><small>已实现盈亏</small><b>${account ? fmtNumber(account.realized_pnl) : '—'}</b></div><div class="stat"><small>未实现盈亏</small><b>${account ? fmtNumber(account.unrealized_pnl) : '—'}</b></div><div class="stat"><small>手续费</small><b>${account ? fmtNumber(account.fees_paid) : '—'}</b></div><div class="stat"><small>持仓 / 未成交</small><b>${data.position_count} / ${data.open_order_count}</b></div></div>
-    ${isShadow && account && accountOptions ? `<article class="card"><div class="card-heading"><div><p class="eyebrow">确定性模拟执行器</p><h2>创建模拟订单</h2></div><span class="status-pill status-APPROVED">Decimal · 完全成交</span></div><form id="shadow-order-form" class="form-panel"><div class="field-grid"><label>来源账户<select name="account_id" required>${accountOptions}</select></label><label>标的<input name="symbol" value="BTCUSDT" maxlength="120" required></label><label>方向<select name="side"><option value="BUY">BUY</option><option value="SELL">SELL</option></select></label><label>订单类型<select name="order_type"><option value="MARKET">市价</option><option value="LIMIT">限价</option></select></label><label>数量<input name="quantity" type="number" step="any" min="0" value="0.01" required></label><label>限价（限价单）<input name="limit_price" type="number" step="any" min="0"></label><label>最新价<input name="latest_price" type="number" step="any" min="0" required></label><label>价格精度<input name="price_tick" type="number" step="any" min="0" value="0.1" required></label><label>数量精度<input name="quantity_step" type="number" step="any" min="0" value="0.001" required></label><label>合约乘数<input name="contract_multiplier" type="number" step="any" min="0" value="1" required></label><label>手续费 bps<input name="fee_bps" type="number" step="any" min="0" max="100" value="4" required></label><label>滑点 bps<input name="slippage_bps" type="number" step="any" min="0" max="500" value="2" required></label></div><p class="microcopy">行情时间由浏览器提交当前 UTC 时间，服务端执行新鲜度、正数与必要规格的 fail-closed 校验。</p><div class="form-error" role="alert"></div><button class="primary" type="submit">创建并尝试撮合</button></form></article>` : ''}
-    <div class="section-head"><div><p class="eyebrow">内部账本事实</p><h2>模拟持仓</h2></div><span class="status-pill">generation ${account?.generation || '—'}</span></div>${positionRows}
-    <div class="section-head"><div><p class="eyebrow">一次性完全成交</p><h2>未成交与已触发限价单</h2></div></div>${orderRows}
-    <article class="card shadow-safety-card"><div class="card-heading"><div><p class="eyebrow">安全边界</p><h2>真实历史与模拟账本严格分离</h2></div><span class="status-pill status-APPROVED">0 venue writes</span></div><div class="shadow-safety-grid"><span><b>交易所下单 / 撤单</b><small>禁止</small></span><span><b>签名 / 广播</b><small>禁止</small></span><span><b>真实行情 / 规格</b><small>只读允许</small></span><span><b>SHADOW 历史</b><small>不可转 LIVE</small></span><span><b>SETUP</b><small>内部状态</small></span></div></article></section>`;
-  document.querySelectorAll('[data-switch-mode]').forEach(button => button.addEventListener('click', async event => {
-    const trigger = event.currentTarget;
-    const mode = trigger.dataset.switchMode;
-    if (mode === data.execution_mode) return;
-    const confirmed = await confirmAction({title:`切换至${mode === 'LIVE' ? '生产模式' : '影子模式'}？`, message:mode === 'LIVE' ? '这是高风险环境切换，但不会自动开启真实下单或其他危险能力。' : '若存在执行中的 LIVE 请求、真实挂单或真实持仓，服务端会明确阻断。', confirmLabel:`确认切换至 ${mode}`});
-    if (!confirmed) return;
-    await withPending(trigger, '切换中…', async () => {
-      try {
-        const result = await api(`/api/teams/${data.team_id}/trading-mode`, {method:'PUT', body:JSON.stringify({mode, confirmation:`SWITCH_TO_${mode}`, expected_version:data.version, idempotency_key:crypto.randomUUID()})});
-        session = result.session;
-        showToast(`当前 Team 已切换至 ${mode}`);
-        await route();
-      } catch (error) { showApiError(error); }
-    });
-  }));
+  if (!account) return '模拟资产尚未初始化';
+  return `模拟资产：${fmtNumber(account.equity)} U｜持仓 ${data.position_count}｜未成交 ${data.open_order_count}`;
+}
+
+function bindShadowReset(data) {
+  const account = data.shadow_account;
   document.querySelector('[data-reset-shadow]')?.addEventListener('click', async event => {
     const trigger = event.currentTarget;
-    const confirmed = await confirmAction({title:'重置模拟资产？', message:'未成交模拟订单会取消，当前持仓和 generation 会归档；历史订单、成交、盈亏与审计全部保留。', confirmLabel:'重置为 100,000 U'});
+    const confirmed = await confirmAction({title:'重置模拟资产？', message:'未成交模拟订单会取消，当前持仓会归档；历史订单、成交、盈亏与审计全部保留。', confirmLabel:'重置为 100,000 U'});
     if (!confirmed) return;
     await withPending(trigger, '重置中…', async () => {
       try {
         await api('/api/trading-mode/shadow/reset', {method:'POST', body:JSON.stringify({confirmation:'RESET_TO_100000_U', expected_version:account.version, idempotency_key:crypto.randomUUID()})});
-        showToast('模拟资产已重置为 100,000 U，历史 generation 已归档');
+        showToast('模拟资产已重置为 100,000 U，历史记录已归档');
         await route();
       } catch (error) { showApiError(error); }
     });
   });
+}
+
+function renderShadowAccountDetails(data) {
+  const account = data.shadow_account;
+  const currentSpaceName = session?.active_workspace?.name || data.team_name;
+  const accounts = data.accounts || [];
+  const positions = data.positions || [];
+  const orders = data.orders || [];
+  const accountOptions = accounts.map(item => `<option value="${escapeHtml(item.account_id)}" data-venue="${escapeHtml(item.venue)}">${escapeHtml(item.label)} · ${escapeHtml(item.venue)}</option>`).join('');
+  const positionRows = positions.length
+    ? `<div class="table-wrap"><table><thead><tr><th>模拟持仓</th><th>数量</th><th>均价 / 标记</th><th>盈亏</th><th>保护单</th></tr></thead><tbody>${positions.map(item => `<tr><td data-label="模拟持仓"><b>${escapeHtml(item.symbol)}</b><br><span class="subtle">${escapeHtml(item.venue)} · ${shortId(item.shadow_position_id)}</span></td><td data-label="数量">${fmtNumber(item.quantity)}</td><td data-label="均价 / 标记">${fmtNumber(item.average_entry_price)} / ${fmtNumber(item.mark_price)}</td><td data-label="盈亏">已实现 ${fmtNumber(item.realized_pnl)}<br><span class="subtle">未实现 ${fmtNumber(item.unrealized_pnl)}</span></td><td data-label="保护单"><details><summary>添加止损 / 止盈</summary><form class="compact-form shadow-protection-form" data-position-id="${escapeHtml(item.shadow_position_id)}"><div class="field-grid"><label>触发类型<select name="trigger_type"><option value="STOP_LOSS">止损</option><option value="TAKE_PROFIT">止盈</option></select></label><label>执行类型<select name="execution_type"><option value="MARKET">市价</option><option value="LIMIT">限价</option></select></label><label>触发价<input name="trigger_price" type="number" step="any" min="0" required></label><label>限价（限价执行时）<input name="limit_price" type="number" step="any" min="0"></label></div><div class="form-error" role="alert"></div><button class="secondary" type="submit">创建只减仓保护单</button></form></details></td></tr>`).join('')}</tbody></table></div>`
+    : '<p class="subtle">当前没有模拟持仓。</p>';
+  const orderRows = orders.length
+    ? `<div class="table-wrap"><table><thead><tr><th>未成交订单</th><th>类型</th><th>数量</th><th>触发 / 限价</th><th>新行情撮合</th></tr></thead><tbody>${orders.map(item => `<tr><td data-label="未成交订单"><b>${escapeHtml(item.symbol)}</b><br><span class="subtle">${shortId(item.shadow_order_id)}</span></td><td data-label="类型">${escapeHtml(item.order_type)} · ${escapeHtml(item.side)}<br><span class="subtle">${escapeHtml(item.status)}</span></td><td data-label="数量">${fmtNumber(item.quantity)}</td><td data-label="触发 / 限价">${item.trigger_price ? fmtNumber(item.trigger_price) : '—'} / ${item.limit_price ? fmtNumber(item.limit_price) : '—'}</td><td data-label="新行情撮合"><form class="shadow-match-form compact-form" data-order-id="${escapeHtml(item.shadow_order_id)}" data-version="${item.version}"><div class="field-grid"><label>最新价<input name="latest_price" type="number" step="any" min="0" required></label><label>价格精度<input name="price_tick" type="number" step="any" min="0" value="0.1" required></label><label>数量精度<input name="quantity_step" type="number" step="any" min="0" value="0.001" required></label><label>合约乘数<input name="contract_multiplier" type="number" step="any" min="0" value="1" required></label></div><div class="form-error" role="alert"></div><button class="secondary" type="submit">按新行情撮合</button></form></td></tr>`).join('')}</tbody></table></div>`
+    : '<p class="subtle">当前没有未成交订单。</p>';
+  if (data.execution_mode !== 'SHADOW' || !account) {
+    main.innerHTML = `<section class="page shadow-workspace"><header class="page-head"><div><p class="eyebrow">当前空间：${escapeHtml(currentSpaceName)}</p><h1>模拟账户</h1><p class="lede">进入影子模式后，模拟账户才会初始化并提供模拟交易明细。</p></div><a class="secondary" href="/trading-mode" data-link>返回交易模式</a></header></section>`;
+    return;
+  }
+  main.innerHTML = `<section class="page shadow-workspace"><header class="page-head"><div><p class="eyebrow">当前空间：${escapeHtml(currentSpaceName)}</p><h1>模拟账户</h1><p class="lede">模拟下单、持仓、未成交订单与账本数据集中在此页面。</p></div><a class="secondary" href="/trading-mode" data-link>返回交易模式</a></header>
+    <div class="stats"><div class="stat"><small>总资产</small><b>${fmtNumber(account.equity)} U</b></div><div class="stat"><small>可用资产</small><b>${fmtNumber(account.available_balance)} U</b></div><div class="stat"><small>已实现盈亏</small><b>${fmtNumber(account.realized_pnl)}</b></div><div class="stat"><small>未实现盈亏</small><b>${fmtNumber(account.unrealized_pnl)}</b></div><div class="stat"><small>手续费</small><b>${fmtNumber(account.fees_paid)}</b></div><div class="stat"><small>持仓 / 未成交</small><b>${data.position_count} / ${data.open_order_count}</b></div></div>
+    ${accountOptions ? `<article class="card"><div class="card-heading"><div><p class="eyebrow">模拟执行</p><h2>创建模拟订单</h2></div></div><form id="shadow-order-form" class="form-panel"><div class="field-grid"><label>来源账户<select name="account_id" required>${accountOptions}</select></label><label>标的<input name="symbol" value="BTCUSDT" maxlength="120" required></label><label>方向<select name="side"><option value="BUY">BUY</option><option value="SELL">SELL</option></select></label><label>订单类型<select name="order_type"><option value="MARKET">市价</option><option value="LIMIT">限价</option></select></label><label>数量<input name="quantity" type="number" step="any" min="0" value="0.01" required></label><label>限价（限价单）<input name="limit_price" type="number" step="any" min="0"></label><label>最新价<input name="latest_price" type="number" step="any" min="0" required></label><label>价格精度<input name="price_tick" type="number" step="any" min="0" value="0.1" required></label><label>数量精度<input name="quantity_step" type="number" step="any" min="0" value="0.001" required></label><label>合约乘数<input name="contract_multiplier" type="number" step="any" min="0" value="1" required></label><label>手续费 bps<input name="fee_bps" type="number" step="any" min="0" max="100" value="4" required></label><label>滑点 bps<input name="slippage_bps" type="number" step="any" min="0" max="500" value="2" required></label></div><div class="form-error" role="alert"></div><button class="primary" type="submit">创建并尝试撮合</button></form></article>` : '<p class="subtle">当前空间没有可用于模拟的交易账户。</p>'}
+    <div class="section-head"><div><p class="eyebrow">模拟账户明细</p><h2>模拟持仓</h2></div></div>${positionRows}
+    <div class="section-head"><div><p class="eyebrow">模拟账户明细</p><h2>未成交订单</h2></div></div>${orderRows}</section>`;
+  bindShadowReset(data);
   document.querySelector('#shadow-order-form')?.addEventListener('submit', async event => {
     event.preventDefault();
     const form = event.currentTarget;
@@ -169,7 +151,7 @@ async function renderTradingMode() {
     await withPending(event.submitter, '模拟中…', async () => {
       try {
         const result = await api('/api/trading-mode/shadow/orders', {method:'POST', body:JSON.stringify(payload)});
-        showToast(result.data.status === 'FILLED' ? '模拟订单已一次性完全成交并原子记账' : '限价单未穿越，保持 OPEN');
+        showToast(result.data.status === 'FILLED' ? '模拟订单已完全成交并记账' : '限价单未满足条件，继续等待');
         await route();
       } catch (error) { showApiError(error, form.querySelector('.form-error')); }
     });
@@ -193,11 +175,60 @@ async function renderTradingMode() {
     await withPending(event.submitter, '创建中…', async () => {
       try {
         await api(`/api/trading-mode/shadow/positions/${form.dataset.positionId}/protections`, {method:'POST', body:JSON.stringify(payload)});
-        showToast('reduce-only 保护单已创建');
+        showToast('只减仓保护单已创建');
         await route();
       } catch (error) { showApiError(error, form.querySelector('.form-error')); }
     });
   }));
+  bindLinkedRows();
+}
+
+async function renderTradingMode() {
+  if (location.pathname === '/shadow') {
+    history.replaceState({}, '', '/trading-mode');
+    updateActiveNav();
+  }
+  const response = await api('/api/trading-mode');
+  const data = response.data;
+  if (new URLSearchParams(location.search).get('view') === 'shadow-account') {
+    renderShadowAccountDetails(data);
+    return;
+  }
+  const account = data.shadow_account;
+  const isShadow = data.execution_mode === 'SHADOW';
+  const isLive = data.execution_mode === 'LIVE';
+  const accounts = data.accounts || [];
+  const gates = data.dangerous_capabilities || {};
+  const currentSpaceName = session?.active_workspace?.name || data.team_name;
+  const currentMode = isShadow ? '影子模式' : isLive ? '生产模式' : '待设置';
+  const dangerousCapabilitiesClosed = ['LIVE_ORDER_SEND', 'CAPITAL_TRANSFER', 'AUTO_ADD'].every(key => gates[key] === 'DISABLED');
+  const dangerousCopy = dangerousCapabilitiesClosed
+    ? '危险能力：真实下单、资金划转、自动加仓均关闭'
+    : '危险能力：存在非关闭状态，请立即前往系统状态检查';
+  main.innerHTML = `<section class="page trading-mode-page shadow-workspace"><header class="page-head"><div><h1>交易模式</h1><p class="lede">查看和切换当前空间的交易模式。</p></div></header>
+    <article class="card mode-selector-card"><dl class="definition-grid">${definition('当前空间', currentSpaceName)}${definition('当前模式', currentMode)}</dl>
+    <div class="mode-choice-grid" role="group" aria-label="选择交易模式"><button class="mode-choice ${isLive ? 'is-selected live-choice' : ''}" type="button" data-switch-mode="LIVE" aria-pressed="${isLive}"><b>生产模式</b></button><button class="mode-choice ${isShadow ? 'is-selected shadow-choice' : ''}" type="button" data-switch-mode="SHADOW" aria-pressed="${isShadow}"><b>影子模式</b></button></div>
+    <p class="safety-note">${isShadow ? '仅在 TradingOPS 内部模拟，不会向交易所发送订单。' : '选择生产模式不会自动开启任何危险能力。'}</p>
+    <p><b>影响范围：</b>${accounts.length} 个交易账户　<a class="text-button" href="/venues" data-link>查看交易账户 →</a></p>
+    <p class="microcopy">${dangerousCopy}</p>
+    ${isShadow ? `<div class="shadow-capital-grid"><b>${shadowAccountSummary(data)}</b></div><div class="toolbar"><a class="secondary" href="/trading-mode?view=shadow-account" data-link>查看模拟账户</a>${account ? '<button class="danger" type="button" data-reset-shadow>重置模拟资产</button>' : ''}</div>` : ''}</article></section>`;
+  document.querySelectorAll('[data-switch-mode]').forEach(button => button.addEventListener('click', async event => {
+    const trigger = event.currentTarget;
+    const mode = trigger.dataset.switchMode;
+    if (mode === data.execution_mode) return;
+    const modeLabel = mode === 'LIVE' ? '生产模式' : '影子模式';
+    const confirmed = await confirmAction({title:`切换至${modeLabel}？`, message:mode === 'LIVE' ? '这是高风险环境切换，但不会自动开启真实下单或其他危险能力。' : '若存在执行中的生产请求、真实挂单或真实持仓，服务端会明确阻断。', confirmLabel:`确认切换至${modeLabel}`});
+    if (!confirmed) return;
+    await withPending(trigger, '切换中…', async () => {
+      try {
+        const result = await api(`/api/teams/${data.team_id}/trading-mode`, {method:'PUT', body:JSON.stringify({mode, confirmation:`SWITCH_TO_${mode}`, expected_version:data.version, idempotency_key:crypto.randomUUID()})});
+        session = result.session;
+        showToast(`当前空间已切换至${mode === 'LIVE' ? '生产模式' : '影子模式'}`);
+        await route();
+      } catch (error) { showApiError(error); }
+    });
+  }));
+  if (isShadow && account) bindShadowReset(data);
   bindLinkedRows();
 }
 
