@@ -80,7 +80,6 @@ document.querySelector('#logout-button').addEventListener('click', async (event)
   } catch (error) { showApiError(error); }
 }));
 function closeUserMenu({restoreFocus = false} = {}) {
-  closePreferenceDropdowns();
   userMenuPanel.hidden = true;
   identityChip.setAttribute('aria-expanded', 'false');
   if (restoreFocus && !userMenu.hidden) identityChip.focus();
@@ -88,6 +87,7 @@ function closeUserMenu({restoreFocus = false} = {}) {
 
 identityChip.addEventListener('click', () => {
   const opening = userMenuPanel.hidden;
+  closePreferenceDropdowns();
   closeWorkspaceSwitcher();
   userMenuPanel.hidden = !opening;
   identityChip.setAttribute('aria-expanded', String(opening));

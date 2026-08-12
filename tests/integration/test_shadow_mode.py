@@ -614,7 +614,7 @@ def test_shadow_http_api_exposes_activation_scope_and_real_page(
             page = await client.get("/shadow")
             assert page.status_code == 200
             assert 'id="main"' in page.text
-            assert "/assets/app.js?v=174" in page.text
+            assert "/assets/app.js?v=175" in page.text
 
     asyncio.run(scenario())
 

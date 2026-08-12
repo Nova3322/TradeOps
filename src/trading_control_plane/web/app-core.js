@@ -87,7 +87,7 @@ let focusNextRouteHeading = false;
 
 const ENGLISH_EXACT = new Map(Object.entries({
   '交易控制台':'Trading Console', '交易控制台首页':'Trading Console home', '生产交易管理':'Production trading operations', '受控交易运营':'Controlled trading operations', '生产环境':'Production',
-  '中英切换':'Chinese / English', '切换中英文':'Switch between Chinese and English', '切换':'Switch', '主题偏好':'Theme preference', '界面语言':'Language', '主题模式':'Theme', '跟随系统':'System', '浅色':'Light', '深色':'Dark', '菜单':'Menu',
+  '中英切换':'Chinese / English', '切换中英文':'Switch between Chinese and English', '切换':'Switch', '主题偏好':'Theme preference', '语言':'Language', '主题':'Theme', '界面语言':'Language', '主题模式':'Theme', '跟随系统':'System', '浅色':'Light', '深色':'Dark', '菜单':'Menu',
   '用户菜单':'User menu', '登录身份':'Sign-in identity', '密码登录':'Password sign-in', '内部会话':'Internal session',
   '当前工作区':'Current workspace', '当前空间':'Current space', '当前团队':'Current team', '当前职责':'Current role', '个人设置':'Personal settings', '个人偏好':'Preferences',
   '安全':'Security', '修改登录密码':'Change sign-in password', '展开':'Expand', '当前密码':'Current password', '新密码':'New password', '确认新密码':'Confirm new password',
@@ -95,7 +95,7 @@ const ENGLISH_EXACT = new Map(Object.entries({
   '两次输入的新密码不一致。':'The new-password entries do not match.', '密码已更新；其他旧会话已撤销':'Password updated; older sessions have been revoked',
   '只读用户':'Observer', '提案发起人':'Proposer', '审核人':'Reviewer', '交易运维人员':'Trading operator',
   '资金管理员':'Treasury administrator', '系统管理员':'Super administrator',
-  '主导航':'Main navigation', '工作台':'Workspace', '空间配置':'Space setup', '治理与安全':'Governance and safety', '交易流程':'Trade workflow', '运行与风控':'Operations and risk', '团队设置':'Team settings', '当前范围':'Current scope', '当前任务':'Current tasks', '实时信号':'Live signals', '实时机会':'Live opportunities', 'Webhook 信号':'Webhook signals', '审核队列':'Review queue',
+  '主导航':'Main navigation', '工作台':'Workspace', '空间配置':'Space setup', '治理与安全':'Governance and safety', '交易流程':'Trade workflow', '运行与风控':'Operations and risk', '团队设置':'Team settings', '当前范围':'Current scope', '当前任务':'Current tasks', '实时信号':'Live signals', '实时机会':'Live opportunities', 'Webhook 信号':'Webhook signals', '提案管理':'Proposals', '审核队列':'Review queue',
   '交易任务':'Trades', '绩效报表':'Performance reports', '交易模式':'Trading mode', '影子模式':'Shadow mode', '通知中心':'Notification center', '风险控制':'Risk controls', '系统状态':'System status', '资金':'Capital', '异常':'Exceptions',
   '交易账户':'Exchange accounts', '成员权限':'Access control',
   '业务数据库已连接':'Business database connected', '数据缺失时自动阻止交易':'Missing data blocks trading automatically', '跳到主要内容':'Skip to main content',

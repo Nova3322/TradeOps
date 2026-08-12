@@ -12,7 +12,7 @@
     <link rel="preload" href="/assets/fonts/IBMPlexSansSC-SemiBold.woff2" as="font" type="font/woff2" crossorigin>
     <link rel="preload" href="/assets/fonts/IBMPlexMono-Regular.woff2" as="font" type="font/woff2" crossorigin>
     <link rel="preload" href="/assets/fonts/IBMPlexMono-SemiBold.woff2" as="font" type="font/woff2" crossorigin>
-    <link rel="stylesheet" href="/assets/styles.css?v=88">
+    <link rel="stylesheet" href="/assets/styles.css?v=92">
     <title>交易控制台</title>
   </head>
   <body>
@@ -23,8 +23,32 @@
           <span class="brand-mark" aria-hidden="true"><img src="/assets/tradingops-logo.png" alt=""></span>
           <span><b>交易控制台</b><small>受控交易运营</small></span>
         </a>
+        <div id="scope-control" class="workspace-switcher" hidden>
+          <button id="scope-switcher" class="workspace-switcher-trigger" type="button" aria-haspopup="menu" aria-expanded="false" aria-controls="workspace-switcher-menu">
+            <span class="workspace-switcher-avatar" aria-hidden="true"><img src="/assets/tradingops-logo.png" alt=""></span>
+            <span class="workspace-switcher-copy"><strong data-workspace-name>选择工作区</strong><small>Workspace</small></span>
+            <span class="workspace-switcher-action">切换</span>
+          </button>
+          <div id="workspace-switcher-menu" class="workspace-switcher-menu" role="menu" hidden></div>
+        </div>
         <div class="topbar-actions">
           <time id="current-date" class="current-date"></time>
+          <div class="header-preferences" aria-label="个人偏好">
+            <div class="preference-select" data-preference-select="language">
+              <button id="language-preference-trigger" class="preference-trigger" type="button" aria-haspopup="listbox" aria-expanded="false" aria-controls="language-preference-menu" aria-labelledby="language-preference-label language-preference-value">
+                <span class="preference-trigger-copy"><small id="language-preference-label" class="preference-label">语言</small><span id="language-preference-value" data-preference-value>中文</span></span>
+                <span class="preference-chevron" aria-hidden="true">⌄</span>
+              </button>
+              <div id="language-preference-menu" class="preference-menu" role="listbox" aria-labelledby="language-preference-label" hidden></div>
+            </div>
+            <div class="preference-select" data-preference-select="theme">
+              <button id="theme-preference-trigger" class="preference-trigger" type="button" aria-haspopup="listbox" aria-expanded="false" aria-controls="theme-preference-menu" aria-labelledby="theme-preference-label theme-preference-value">
+                <span class="preference-trigger-copy"><small id="theme-preference-label" class="preference-label">主题</small><span id="theme-preference-value" data-preference-value>跟随系统</span></span>
+                <span class="preference-chevron" aria-hidden="true">⌄</span>
+              </button>
+              <div id="theme-preference-menu" class="preference-menu" role="listbox" aria-labelledby="theme-preference-label" hidden></div>
+            </div>
+          </div>
           <span id="environment-badge" class="env-badge">控制台</span>
           <div id="user-menu" class="user-menu" hidden>
             <button id="identity-chip" class="identity-chip" type="button" aria-haspopup="dialog" aria-expanded="false" aria-controls="user-menu-panel"></button>
@@ -32,21 +56,6 @@
               <header class="user-menu-head"><div><small>登录身份</small><strong data-user-menu-name>—</strong></div><span data-user-menu-auth>密码登录</span></header>
               <dl class="user-menu-context"><div><dt>当前工作区</dt><dd data-user-menu-workspace>—</dd></div><div><dt>当前团队</dt><dd data-user-menu-team>—</dd></div><div><dt>当前职责</dt><dd data-user-menu-role>—</dd></div></dl>
               <a class="user-menu-api-link" href="/profile/api-access" data-link><span><small>个人中心</small><b>API 接入</b></span><strong>管理自己的 API Agent</strong></a>
-              <section class="user-preferences" aria-labelledby="personal-preferences-title">
-                <div class="user-menu-section-head"><div><small>个人设置</small><h2 id="personal-preferences-title">个人偏好</h2></div></div>
-                <div class="preference-controls">
-                  <div class="preference-select" data-preference-select="language">
-                    <span id="language-preference-label" class="preference-label">界面语言</span>
-                    <button id="language-preference-trigger" class="preference-trigger" type="button" aria-haspopup="listbox" aria-expanded="false" aria-controls="language-preference-menu" aria-labelledby="language-preference-label language-preference-value"><span id="language-preference-value" data-preference-value>中文</span><span class="preference-chevron" aria-hidden="true">⌄</span></button>
-                    <div id="language-preference-menu" class="preference-menu" role="listbox" aria-labelledby="language-preference-label" hidden></div>
-                  </div>
-                  <div class="preference-select" data-preference-select="theme">
-                    <span id="theme-preference-label" class="preference-label">主题模式</span>
-                    <button id="theme-preference-trigger" class="preference-trigger" type="button" aria-haspopup="listbox" aria-expanded="false" aria-controls="theme-preference-menu" aria-labelledby="theme-preference-label theme-preference-value"><span id="theme-preference-value" data-preference-value>跟随系统</span><span class="preference-chevron" aria-hidden="true">⌄</span></button>
-                    <div id="theme-preference-menu" class="preference-menu" role="listbox" aria-labelledby="theme-preference-label" hidden></div>
-                  </div>
-                </div>
-              </section>
               <details class="user-password-panel">
                 <summary><span><small>安全</small><b>修改登录密码</b></span><strong>展开</strong></summary>
                 <form id="password-change-form" class="user-password-form">
@@ -66,44 +75,41 @@
       </header>
 
       <aside id="sidebar" class="sidebar" hidden>
-        <div id="scope-control" class="workspace-switcher" hidden>
-          <button id="scope-switcher" class="workspace-switcher-trigger" type="button" aria-haspopup="menu" aria-expanded="false" aria-controls="workspace-switcher-menu">
-            <span class="workspace-switcher-avatar" aria-hidden="true"><img src="/assets/tradingops-logo.png" alt=""></span>
-            <span class="workspace-switcher-copy"><strong data-workspace-name>选择工作区</strong><small>Workspace</small></span>
-            <span class="workspace-switcher-action">切换</span>
-          </button>
-          <div id="workspace-switcher-menu" class="workspace-switcher-menu" role="menu" hidden></div>
-        </div>
         <nav aria-label="主导航">
           <div class="nav-section" data-nav-section>
             <p class="nav-section-label">工作台</p>
-            <a href="/home" data-link><span>⌂</span>当前任务</a>
+            <a href="/home" data-link>当前任务</a>
+          </div>
+          <div class="nav-section" data-nav-section>
+            <p class="nav-section-label">交易流程</p>
             <div class="nav-link-group" role="group" aria-label="实时信号">
-              <p class="nav-link-group-label"><span aria-hidden="true">⌁</span>实时信号</p>
+              <p class="nav-link-group-label">实时信号</p>
               <a class="nav-child-link" href="/opportunities" data-link data-nav-capability="opportunity.view">Perptape</a>
               <a class="nav-child-link" href="/webhook-signals" data-link data-nav-capability="signal.view">Webhook 信号</a>
             </div>
-            <a href="/reviews" data-link data-nav-capability="proposal.review"><span>✓</span>审核队列</a>
-            <a href="/campaigns" data-link data-nav-capability="operations.view"><span>◎</span>交易任务</a>
-            <a href="/results" data-link data-nav-capability="results.view"><span>▦</span>绩效报表</a>
+            <a href="/proposals" data-link data-nav-capability="proposal.view">提案管理</a>
+            <a href="/reviews" data-link data-nav-capability="proposal.review">审核队列</a>
+            <a href="/campaigns" data-link data-nav-capability="operations.view">交易任务</a>
+            <a href="/results" data-link data-nav-capability="results.view">绩效报表</a>
           </div>
           <div class="nav-section" data-nav-section>
-            <p class="nav-section-label">空间配置</p>
-            <a href="/signals" data-link data-nav-capability="signal.view"><span>⌖</span>信号源</a>
-            <a href="/venues" data-link data-nav-capability="venue.view"><span>◫</span>交易账户</a>
-            <a href="/trading-mode" data-link data-nav-capability="venue.view"><span>◐</span>交易模式</a>
-            <a href="/notifications" data-link data-nav-capability="notification.view"><span>◌</span>通知中心</a>
+            <p class="nav-section-label">运行与风控</p>
+            <a href="/trading-mode" data-link data-nav-capability="venue.view">交易模式</a>
+            <a href="/venues" data-link data-nav-capability="venue.view">交易账户</a>
+            <a href="/capital" data-link data-nav-capability="capital.view">资金中心</a>
+            <a href="/risk" data-link data-nav-capability="system.view">风险控制</a>
+            <a href="/positions" data-link data-nav-capability="system.view">系统状态</a>
+            <a href="/notifications" data-link data-nav-capability="notification.view">通知中心</a>
           </div>
           <div class="nav-section" data-nav-section>
-            <p class="nav-section-label">治理与安全</p>
-            <a href="/positions" data-link data-nav-capability="system.view"><span>↕</span>系统状态</a>
-            <a href="/capital" data-link data-nav-capability="capital.view"><span>¤</span>资金中心</a>
-            <a href="/admin/users" data-link data-nav-capability="access.manage"><span>◇</span>成员权限</a>
+            <p class="nav-section-label">团队设置</p>
+            <a href="/signals" data-link data-nav-capability="signal.view">信号源</a>
+            <a href="/admin/users" data-link data-nav-capability="access.manage">成员权限</a>
           </div>
         </nav>
         <div class="sidebar-foot">
           <div id="mobile-session-summary" class="mobile-session-summary"></div>
-          <div><span class="status-dot"></span> 业务数据库已连接</div>
+          <div>业务数据库已连接</div>
           <div>数据缺失时自动阻止交易</div>
         </div>
       </aside>
@@ -160,7 +166,7 @@
       </form>
     </dialog>
     <div id="toast" class="toast" role="status" aria-live="polite"></div>
-    <script defer src="/assets/app-core.js?v=190"></script>
+    <script defer src="/assets/app-core.js?v=192"></script>
     <script defer src="/assets/workspace.js?v=178"></script>
     <script defer src="/assets/signals.js?v=174"></script>
     <script defer src="/assets/proposals.js?v=175"></script>
@@ -169,6 +175,6 @@
     <script defer src="/assets/capital.js?v=173"></script>
     <script defer src="/assets/reporting.js?v=172"></script>
     <script defer src="/assets/accounts.js?v=172"></script>
-    <script defer src="/assets/app.js?v=174"></script>
+    <script defer src="/assets/app.js?v=175"></script>
   </body>
 </html>

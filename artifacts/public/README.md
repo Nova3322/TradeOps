@@ -1,10 +1,9 @@
 # Public artifacts
 
-Only sanitized product screenshots captured from synthetic fixtures belong
-here. The four API Access images cover CSS viewports 1440, 1024, 430, and 390;
-they contain no Token plaintext, exchange credential, real account, balance,
-personal identifier, private log, or production status.
+Only one representative, sanitized product screenshot captured from synthetic
+fixtures is retained here. `api-access-1440.png` contains no Token plaintext,
+exchange credential, real account, balance, personal identifier, private log,
+or production status.
 
-The 1440 and 430 captures use the light theme; the 1024 and 390 captures use
-the dark theme. Each PNG has the exact named viewport width and was captured
-from an isolated local database containing synthetic users only.
+Responsive acceptance screenshots for 1024, 430, and 390 are generated as
+temporary test artifacts and are not stored in the repository.

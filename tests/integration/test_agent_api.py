@@ -124,7 +124,7 @@ def test_human_owned_api_client_dynamic_rbac_scope_audit_and_token_lifecycle(
             assert page.status_code == 200
             assert 'href="/profile/api-access"' in page.text
             assert 'href="/admin/agents"' not in page.text
-            assert "/assets/app.js?v=174" in page.text
+            assert "/assets/app.js?v=175" in page.text
 
             scopes = await owner.get("/api/profile/api-client-scopes")
             assert scopes.status_code == 200, scopes.text

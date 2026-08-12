@@ -9,6 +9,7 @@ LOGO = STYLESHEET.with_name("tradingops-logo.png")
 INDEX = STYLESHEET.with_name("index.html")
 EXECUTION = STYLESHEET.with_name("execution.js")
 APP_CORE = STYLESHEET.with_name("app-core.js")
+APP = STYLESHEET.with_name("app.js")
 WORKSPACE = STYLESHEET.with_name("workspace.js")
 SIGNALS = STYLESHEET.with_name("signals.js")
 PROPOSALS = STYLESHEET.with_name("proposals.js")
@@ -134,7 +135,7 @@ def test_primary_navigation_and_page_use_trading_mode_copy() -> None:
     execution = EXECUTION.read_text()
 
     assert 'href="/trading-mode"' in index
-    assert "空间配置" in index
+    assert "运行与风控" in index
     assert "<span>◐</span>影子模式</a>" not in index
     assert "<h1>交易模式</h1>" in execution
     assert "仅在 TradingOPS 内部模拟，不会向交易所发送订单" in execution  # noqa: RUF001
@@ -146,19 +147,21 @@ def test_role_navigation_and_task_entries_match_capabilities() -> None:
     workspace = WORKSPACE.read_text()
     signals = SIGNALS.read_text()
 
-    workbench_section = index.split('<p class="nav-section-label">工作台</p>', maxsplit=1)[1].split(
-        '<p class="nav-section-label">空间配置</p>', maxsplit=1
+    trade_section = index.split('<p class="nav-section-label">交易流程</p>', maxsplit=1)[1].split(
+        '<p class="nav-section-label">运行与风控</p>', maxsplit=1
     )[0]
-    space_section = index.split('<p class="nav-section-label">空间配置</p>', maxsplit=1)[1].split(
-        '<p class="nav-section-label">治理与安全</p>', maxsplit=1
-    )[0]
-    governance_section = index.split('<p class="nav-section-label">治理与安全</p>', maxsplit=1)[1]
-    assert 'href="/reviews"' in workbench_section
-    assert 'href="/campaigns"' in workbench_section
-    assert 'href="/signals"' in space_section
-    assert 'href="/notifications"' in space_section
-    assert 'href="/capital"' in governance_section
-    assert 'href="/admin/users"' in governance_section
+    operations_section = index.split(
+        '<p class="nav-section-label">运行与风控</p>', maxsplit=1
+    )[1].split('<p class="nav-section-label">团队设置</p>', maxsplit=1)[0]
+    team_section = index.split('<p class="nav-section-label">团队设置</p>', maxsplit=1)[1]
+    assert 'href="/proposals"' in trade_section
+    assert 'href="/reviews"' in trade_section
+    assert 'href="/campaigns"' in trade_section
+    assert 'href="/capital"' in operations_section
+    assert 'href="/risk"' in operations_section
+    assert 'href="/notifications"' in operations_section
+    assert 'href="/signals"' in team_section
+    assert 'href="/admin/users"' in team_section
     assert 'data-role-preset="OBSERVER"' in workspace
     assert 'data-role-preset="TREASURY_ADMIN"' in workspace
     assert "observerOnly" in workspace
@@ -177,15 +180,17 @@ def test_primary_navigation_preserves_the_established_order() -> None:
         "/home",
         "/opportunities",
         "/webhook-signals",
+        "/proposals",
         "/reviews",
         "/campaigns",
         "/results",
-        "/signals",
-        "/venues",
         "/trading-mode",
-        "/notifications",
-        "/positions",
+        "/venues",
         "/capital",
+        "/risk",
+        "/positions",
+        "/notifications",
+        "/signals",
         "/admin/users",
     ]
 
@@ -213,8 +218,9 @@ def test_hierarchy_pass_uses_neutral_surfaces_readable_type_and_one_primary_acti
     assert "font-size: 12px;" in styles
     assert ".primary, .secondary, .danger, button {" in styles
     assert '<p class="nav-section-label">工作台</p>' in index
-    assert '<p class="nav-section-label">空间配置</p>' in index
-    assert '<p class="nav-section-label">治理与安全</p>' in index
+    assert '<p class="nav-section-label">交易流程</p>' in index
+    assert '<p class="nav-section-label">运行与风控</p>' in index
+    assert '<p class="nav-section-label">团队设置</p>' in index
     assert '<a class="text-link" href="/proposals"' in workspace
     assert '<a class="secondary" href="/opportunities"' in workspace
 
@@ -352,9 +358,15 @@ def test_institutional_minimal_shell_and_semantic_color_rules() -> None:
 
     topbar = index.split('<header class="topbar">', maxsplit=1)[1].split("</header>", maxsplit=1)[0]
     sidebar = index.split('<aside id="sidebar"', maxsplit=1)[1].split("</aside>", maxsplit=1)[0]
-    assert 'id="scope-control"' not in topbar
+    assert 'id="scope-control"' in topbar
     assert 'id="current-date"' in topbar
-    assert 'id="scope-control"' in sidebar
+    assert 'class="header-preferences"' in topbar
+    assert topbar.count("data-preference-select=") == 2
+    user_menu = index.split('<section id="user-menu-panel"', maxsplit=1)[1].split(
+        "</section>", maxsplit=1
+    )[0]
+    assert "data-preference-select=" not in user_menu
+    assert 'id="scope-control"' not in sidebar
     assert "Institutional Minimal — selected product direction" in styles
     assert "--radius-md: 5px" in styles
     light = _tokens(":root", styles)
@@ -383,3 +395,44 @@ def test_institutional_minimal_shell_and_semantic_color_rules() -> None:
     assert ".direction-long, .direction-short" in styles
     assert "--chart-source-1" in styles
     assert "['--chart-source-1','--chart-source-2','--chart-source-3','--chart-total']" in capital
+
+
+def test_navigation_hierarchy_uses_neutral_states_and_accessible_current_page() -> None:
+    index = INDEX.read_text()
+    styles = STYLESHEET.read_text()
+    app = APP.read_text()
+
+    assert '<p class="nav-link-group-label">实时信号</p>' in index
+    assert '<span aria-hidden="true">⌁</span>' not in index
+    assert '<span>⌂</span>' not in index
+    assert "--sidebar-bg: #191919;" in styles
+    assert "--nav-active-bg: #f5f1e8;" in styles
+    assert ".nav-section + .nav-section {" in styles
+    assert "border-top: 1px solid var(--nav-divider);" in styles
+    assert ".nav-link-group::before {" in styles
+    assert 'a[aria-current="page"]' in styles
+    assert "cursor: pointer;" in styles
+    assert "link.setAttribute('aria-current', 'page')" in app
+    assert "else link.removeAttribute('aria-current')" in app
+
+
+def test_header_preferences_are_not_closed_by_the_user_menu_outside_click() -> None:
+    app = APP.read_text()
+
+    close_user_menu = app.split("function closeUserMenu", maxsplit=1)[1].split(
+        "identityChip.addEventListener", maxsplit=1
+    )[0]
+    identity_menu_handler = app.split("identityChip.addEventListener", maxsplit=1)[1].split(
+        "function preferenceElements", maxsplit=1
+    )[0]
+    assert "closePreferenceDropdowns" not in close_user_menu
+    assert "closePreferenceDropdowns();" in identity_menu_handler
+
+
+def test_workspace_gate_header_reclaims_the_hidden_scope_column() -> None:
+    styles = STYLESHEET.read_text()
+
+    assert ".topbar > .topbar-actions { grid-column: 3; }" in styles
+    assert '.topbar:has(> #scope-control[hidden]) {' in styles
+    assert "grid-template-columns: 220px minmax(0, 1fr);" in styles
+    assert '.topbar:has(> #scope-control[hidden]) > .topbar-actions { grid-column: 2; }' in styles

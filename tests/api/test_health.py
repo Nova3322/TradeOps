@@ -243,14 +243,14 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
 
     assert response.status_code == 200
     assert "交易控制台" in response.text
-    assert "/assets/app-core.js?v=190" in response.text
+    assert "/assets/app-core.js?v=192" in response.text
     assert "/assets/workspace.js?v=178" in response.text
     assert "/assets/signals.js?v=174" in response.text
     assert "/assets/proposals.js?v=175" in response.text
     assert "/assets/capital.js?v=173" in response.text
-    assert "/assets/app.js?v=174" in response.text
+    assert "/assets/app.js?v=175" in response.text
     assert 'href="/signals"' in response.text
-    assert "/assets/styles.css?v=88" in response.text
+    assert "/assets/styles.css?v=92" in response.text
     for font_name in (
         "IBMPlexSansSC-Regular.woff2",
         "IBMPlexSansSC-SemiBold.woff2",
@@ -267,10 +267,11 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
     assert '<img src="/assets/tradingops-logo.png" alt="">' in response.text
     assert '<span class="brand-mark" aria-hidden="true">T</span>' not in response.text
     assert 'aria-label="交易控制台首页"' in response.text
-    assert '<a href="/home" data-link><span>⌂</span>当前任务</a>' in response.text
+    assert '<a href="/home" data-link>当前任务</a>' in response.text
     assert '<p class="nav-section-label">工作台</p>' in response.text
-    assert '<p class="nav-section-label">空间配置</p>' in response.text
-    assert '<p class="nav-section-label">治理与安全</p>' in response.text
+    assert '<p class="nav-section-label">交易流程</p>' in response.text
+    assert '<p class="nav-section-label">运行与风控</p>' in response.text
+    assert '<p class="nav-section-label">团队设置</p>' in response.text
     assert 'href="/opportunities"' in response.text
     assert ">Perptape</a>" in response.text
     assert 'href="/webhook-signals"' in response.text
@@ -278,16 +279,27 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
     assert '<a class="skip-link" href="#main">跳到主要内容</a>' in response.text
     assert '<main id="main" class="main-content" tabindex="-1">' in response.text
     assert 'id="main" class="main-content" aria-live=' not in response.text
-    assert "<span>✓</span>审核队列</a>" in response.text
-    assert "<span>¤</span>资金中心</a>" in response.text
-    assert response.text.count("data-nav-section") == 3
-    assert response.text.count("data-nav-capability=") == 12
+    assert '>提案管理</a>' in response.text
+    assert '>审核队列</a>' in response.text
+    assert '>资金中心</a>' in response.text
+    assert '>风险控制</a>' in response.text
+    assert response.text.count("data-nav-section") == 4
+    assert response.text.count("data-nav-capability=") == 14
     assert "data-nav-group=" not in response.text
     assert 'id="team-settings-link"' not in response.text
     assert 'id="mobile-nav-toggle"' in response.text
     assert 'id="scope-switcher"' in response.text
     assert 'id="workspace-switcher-menu"' in response.text
     assert 'id="user-menu"' in response.text
+    topbar = response.text.split('<header class="topbar">', maxsplit=1)[1].split(
+        "</header>", maxsplit=1
+    )[0]
+    user_menu = response.text.split('<section id="user-menu-panel"', maxsplit=1)[1].split(
+        "</section>", maxsplit=1
+    )[0]
+    assert 'class="header-preferences"' in topbar
+    assert 'id="scope-control"' in topbar
+    assert "data-preference-select=" not in user_menu
     assert 'href="/profile/api-access"' in response.text
     assert response.text.count('href="/profile/api-access"') == 1
     assert "API 接入" in response.text
