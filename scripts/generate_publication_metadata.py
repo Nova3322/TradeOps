@@ -10,6 +10,7 @@ import os
 import re
 import subprocess
 import sys
+import tempfile
 import uuid
 from pathlib import Path
 
@@ -87,7 +88,10 @@ def _installed_python_licenses() -> dict[tuple[str, str], str]:
 
 def _run_json(command: list[str]) -> dict:
     environment = os.environ.copy()
-    environment.setdefault("UV_CACHE_DIR", "/private/tmp/tradingops-uv-cache")
+    environment.setdefault(
+        "UV_CACHE_DIR",
+        str(Path(tempfile.gettempdir()) / "tradingops-uv-cache"),
+    )
     completed = subprocess.run(  # noqa: S603 - fixed internal command list
         command,
         cwd=ROOT,
