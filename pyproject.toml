@@ -43,7 +43,7 @@ trading-sync-worker = "trading_control_plane.runtime:main"
 [dependency-groups]
 dev = [
   "httpx>=0.28,<1",
-  "mypy>=1.18,<2",
+  "mypy>=1.18,<3",
   "pytest>=9.1.1,<10",
   "pytest-cov>=7,<8",
   "ruff>=0.14,<1",
