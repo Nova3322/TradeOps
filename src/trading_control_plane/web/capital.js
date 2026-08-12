@@ -421,6 +421,24 @@ function formatDirectCapitalStage(code) {
   }[code] || code);
 }
 
+function capitalViewSelection(search = location.search) {
+  const requested = new URLSearchParams(search).get('view');
+  return ['routes','activity'].includes(requested) ? requested : 'overview';
+}
+
+function groupCapitalView(nodes, view, activeView) {
+  const available = nodes.filter(Boolean);
+  if (!available.length) return null;
+  const panel = document.createElement('div');
+  panel.className = 'capital-view-panel';
+  panel.dataset.capitalViewPanel = view;
+  panel.setAttribute('aria-labelledby', `capital-view-tab-${view}`);
+  panel.hidden = view !== activeView;
+  available[0].before(panel);
+  available.forEach(node => panel.append(node));
+  return panel;
+}
+
 async function renderCapitalCenter() {
   const result = await api('/api/capital');
   const item = result.data;
@@ -561,7 +579,33 @@ async function renderCapitalCenter() {
     const detail = capitalPositionsHeading.nextElementSibling;
     if (detail?.classList.contains('subtle')) detail.textContent = 'USD 金额统一精度：小额四位、大额两位；原资产余额保留在明细中。历史快照不会计入当前净值。';
   }
-  drawCapitalChart(visibleHistorySeries);
+  const activeCapitalView = capitalViewSelection();
+  const capitalNavigation = document.createElement('nav');
+  capitalNavigation.className = 'section-tabs capital-section-tabs';
+  capitalNavigation.setAttribute('aria-label', '资金中心页面');
+  capitalNavigation.innerHTML = `<a id="capital-view-tab-overview" class="${activeCapitalView === 'overview' ? 'active' : ''}" href="/capital" data-link ${activeCapitalView === 'overview' ? 'aria-current="page"' : ''}><span>资金总览</span><b>${netWorth.complete ? '完整' : '需关注'}</b></a><a id="capital-view-tab-routes" class="${activeCapitalView === 'routes' ? 'active' : ''}" href="/capital?view=routes" data-link ${activeCapitalView === 'routes' ? 'aria-current="page"' : ''}><span>资金路径</span><b>${escapeHtml(fmtStatus(item.real_transfer_gate || 'DISABLED'))}</b></a><a id="capital-view-tab-activity" class="${activeCapitalView === 'activity' ? 'active' : ''}" href="/capital?view=activity" data-link ${activeCapitalView === 'activity' ? 'aria-current="page"' : ''}><span>操作与回执</span><b>${Number(item.direct_operations?.length || 0)}</b></a>`;
+  pageHead.after(capitalNavigation);
+  const overviewPanel = groupCapitalView([
+    main.querySelector('.capital-overview'),
+    main.querySelector('.capital-trust-panel'),
+    chartPanel,
+    capitalPositionsHeading?.closest('section'),
+  ], 'overview', activeCapitalView);
+  const configurationCard = [...main.querySelectorAll('.capital-page > article.card')].find(card => card.querySelector('h2')?.textContent === '只显示是否配置，不回显地址或凭据');
+  const routesPanel = groupCapitalView([
+    configurationCard,
+    main.querySelector('.capital-routes-section'),
+  ], 'routes', activeCapitalView);
+  const operationHeading = [...main.querySelectorAll('.capital-page > section > h2')].find(heading => heading.textContent === '操作日志、阶段与回执');
+  const historyHeading = [...main.querySelectorAll('.capital-page > section > h2')].find(heading => heading.textContent === '历史资金划转');
+  const activityPanel = groupCapitalView([
+    operationHeading?.closest('section'),
+    historyHeading?.closest('section'),
+  ], 'activity', activeCapitalView);
+  [overviewPanel, routesPanel, activityPanel].filter(Boolean).forEach(panel => {
+    panel.setAttribute('role', 'region');
+  });
+  if (activeCapitalView === 'overview') drawCapitalChart(visibleHistorySeries);
   bindCapitalActions(historySeries, {
     history:item.history || [],
     alignmentToleranceSeconds:netWorth.alignment_tolerance_seconds || 60,
@@ -590,7 +634,7 @@ function drawCapitalChart(series) {
     context.fillText('请至少选择一条有数据的曲线', width / 2, height / 2);
     return;
   }
-  const colors = ['--accent','--warning','--danger','--ink'].map(name => styles.getPropertyValue(name).trim());
+  const colors = ['--chart-source-1','--chart-source-2','--chart-source-3','--chart-total'].map(name => styles.getPropertyValue(name).trim());
   const times = allPoints.map(point => point.time);
   const minimumTime = Math.min(...times);
   const maximumTime = Math.max(...times);

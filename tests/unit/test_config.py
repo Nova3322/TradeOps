@@ -10,6 +10,23 @@ def test_database_is_mandatory(monkeypatch: pytest.MonkeyPatch) -> None:
         Settings(_env_file=None)  # type: ignore[call-arg]
 
 
+def test_empty_optional_environment_values_are_treated_as_unconfigured(tmp_path) -> None:
+    env_file = tmp_path / ".env.local"
+    env_file.write_text(
+        "TRADING_DATABASE_URL=postgresql+psycopg://user:pass@localhost/trading\n"
+        "TRADING_TELEGRAM_BOT_TOKEN=\n"
+        "TRADING_NOTILT_AGENT_ADDRESS=\n"
+        "TRADING_CAPITAL_DIRECT_MAX_AMOUNT=\n",
+        encoding="utf-8",
+    )
+
+    settings = Settings(_env_file=env_file)
+
+    assert settings.telegram_bot_token is None
+    assert settings.notilt_agent_address is None
+    assert settings.capital_direct_max_amount is None
+
+
 def test_non_postgresql_database_is_rejected() -> None:
     with pytest.raises(ValidationError, match="must use PostgreSQL"):
         Settings(database_url="sqlite:///local.db", _env_file=None)
@@ -144,8 +161,8 @@ def test_real_telegram_is_default_off_and_requires_binding_configuration() -> No
         database_url="postgresql+psycopg://user:pass@localhost/trading",
         telegram_enabled=True,
         telegram_bot_token=token,
-        telegram_allowed_username="kelly_oooo",
-        telegram_internal_username="kelly_oooo",
+        telegram_allowed_username="telegram-owner",
+        telegram_internal_username="telegram-owner",
         _env_file=None,
     )
     configured.validate_runtime_security()

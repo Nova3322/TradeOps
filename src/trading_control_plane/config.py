@@ -36,6 +36,7 @@ class Settings(BaseSettings):
         env_prefix="TRADING_",
         env_file=(".env.local", ".env.production.local"),
         env_file_encoding="utf-8",
+        env_ignore_empty=True,
         extra="ignore",
         populate_by_name=True,
     )

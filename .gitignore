@@ -29,3 +29,14 @@ node_modules/
 .local/
 var/
 logs/
+
+# Private strategy sources, imported research, and local workbooks
+DynamicPositionSizing-/
+low_vol_breakout_bn/
+交易系统 notion 文档/
+*.xlsx
+
+# Only the explicitly curated, redacted publication gallery is versioned.
+artifacts/*
+!artifacts/public/
+!artifacts/public/**

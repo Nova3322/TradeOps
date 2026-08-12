@@ -63,9 +63,15 @@ export TRADING_FREQTRADE_WORKERS_ENABLED="${TRADING_LOCAL_FREQTRADE_WORKERS_ENAB
 export TRADING_FREQTRADE_API_USERNAME="${TRADING_FREQTRADE_API_USERNAME:-trading-control}"
 export TRADING_FREQTRADE_API_PASSWORD="${TRADING_FREQTRADE_API_PASSWORD:-$(<"$local_secret_dir/freqtrade-password")}"
 
+export TRADING_LOCAL_ADMIN_USERNAME="${TRADING_LOCAL_ADMIN_USERNAME:-trading-admin}"
+if [[ ! "$TRADING_LOCAL_ADMIN_USERNAME" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,119}$ ]]; then
+  echo "TRADING_LOCAL_ADMIN_USERNAME must be a safe 1-120 character local identifier" >&2
+  exit 2
+fi
+
 local_admin_password="${TRADING_LOCAL_ADMIN_PASSWORD:-}"
 if [[ -z "$local_admin_password" ]]; then
-  local_password_file="${TRADING_LOCAL_ADMIN_PASSWORD_FILE:-$PWD/.local/passwords/kelly_oooo}"
+  local_password_file="${TRADING_LOCAL_ADMIN_PASSWORD_FILE:-$PWD/.local/passwords/$TRADING_LOCAL_ADMIN_USERNAME}"
   if [[ ! -f "$local_password_file" ]]; then
     umask 077
     mkdir -p "$(dirname "$local_password_file")"

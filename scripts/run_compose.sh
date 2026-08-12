@@ -34,7 +34,12 @@ cd "$project_root"
 
 runtime_dir="$project_root/.local/compose"
 env_file="$runtime_dir/runtime.env"
-password_file="$project_root/.local/passwords/kelly_oooo"
+local_admin_username="${TRADING_LOCAL_ADMIN_USERNAME:-trading-admin}"
+if [[ ! "$local_admin_username" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,119}$ ]]; then
+  echo "TRADING_LOCAL_ADMIN_USERNAME must be a safe 1-120 character local identifier" >&2
+  exit 2
+fi
+password_file="${TRADING_LOCAL_ADMIN_PASSWORD_FILE:-$project_root/.local/passwords/$local_admin_username}"
 mkdir -p "$runtime_dir" "$(dirname "$password_file")"
 chmod 700 "$project_root/.local" "$runtime_dir" "$(dirname "$password_file")"
 
@@ -44,6 +49,7 @@ if [[ ! -f "$env_file" ]]; then
 from __future__ import annotations
 
 import base64
+import os
 import secrets
 import sys
 from pathlib import Path
@@ -59,6 +65,9 @@ values = {
     "TRADING_SESSION_SIGNING_SECRET": secrets.token_urlsafe(48),
     "TRADING_CREDENTIAL_ENCRYPTION_KEY": credential_key,
     "TRADING_LOCAL_ADMIN_PASSWORD": admin_password,
+    "TRADING_LOCAL_ADMIN_USERNAME": os.environ.get(
+        "TRADING_LOCAL_ADMIN_USERNAME", "trading-admin"
+    ),
 }
 env_path.write_text(
     "".join(f"{key}={value}\n" for key, value in values.items()),
@@ -75,6 +84,7 @@ required_variables=(
   TRADING_SESSION_SIGNING_SECRET
   TRADING_CREDENTIAL_ENCRYPTION_KEY
   TRADING_LOCAL_ADMIN_PASSWORD
+  TRADING_LOCAL_ADMIN_USERNAME
 )
 for variable in "${required_variables[@]}"; do
   if ! grep -q "^${variable}=." "$env_file"; then

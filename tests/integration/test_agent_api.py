@@ -124,7 +124,7 @@ def test_human_owned_api_client_dynamic_rbac_scope_audit_and_token_lifecycle(
             assert page.status_code == 200
             assert 'href="/profile/api-access"' in page.text
             assert 'href="/admin/agents"' not in page.text
-            assert "/assets/app.js?v=170" in page.text
+            assert "/assets/app.js?v=174" in page.text
 
             scopes = await owner.get("/api/profile/api-client-scopes")
             assert scopes.status_code == 200, scopes.text
@@ -499,6 +499,14 @@ def test_human_owned_api_client_dynamic_rbac_scope_audit_and_token_lifecycle(
             db_owner.active = True
 
         assert (await bearer_get(alpha_token)).status_code == 200
+        with database.session_factory.begin() as session:
+            alpha_client = session.get(ApiClient, UUID(alpha_id), with_for_update=True)
+            assert alpha_client is not None
+            alpha_client.token_expires_at = datetime.now(UTC) - timedelta(seconds=1)
+
+        expired = await bearer_get(alpha_token)
+        assert expired.status_code == 401
+        assert expired.json()["error"]["code"] == "AGENT_TOKEN_EXPIRED"
         return {
             "alpha_id": alpha_id,
             "beta_id": beta_id,

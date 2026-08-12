@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import tomllib
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 LICENSES = ROOT / "LICENSES"
-POLYFORM_SHA256 = "c0ea4a896d2c8c394b29f9427589996db826cd501c512279ff0ed3ef48fabbe5"
+GPL_SHA256 = "3972dc9744f6499f0f9b2dbf76696f2ae7ad8af9b23dde66d6af86c9dfb36986"
+LICENSE_EXPRESSION = "GPL-3.0-only OR LicenseRef-TradingOPS-Commercial-1.0"
 
 
 def _read(path: Path) -> str:
@@ -17,64 +19,71 @@ def _normalized(path: Path) -> str:
     return " ".join(_read(path).split())
 
 
-def test_official_polyform_text_is_vendored_unchanged() -> None:
-    content = (LICENSES / "PolyForm-Noncommercial-1.0.0.md").read_bytes()
+def test_official_gpl_text_is_vendored_unchanged() -> None:
+    content = (LICENSES / "GPL-3.0-only.txt").read_bytes()
 
-    assert hashlib.sha256(content).hexdigest() == POLYFORM_SHA256
+    assert hashlib.sha256(content).hexdigest() == GPL_SHA256
 
 
-def test_root_notice_requires_the_complete_community_license() -> None:
+def test_root_notice_describes_the_dual_license_without_restricting_gpl_commerce() -> None:
     license_notice = _normalized(ROOT / "LICENSE")
     notice = _normalized(ROOT / "NOTICE")
 
     for content in (license_notice, notice):
-        assert "PolyForm Noncommercial 1.0.0" in content
-        assert "TradingOPS Community Team Exception 1.0" in content
-        assert "separately executed TradingOPS Commercial License" in content
-        assert "Required Notice:" in content
-
-    assert "not offered under an OSI-approved open-source license" in license_notice
-    assert "grants no commercial rights by itself" in license_notice
+        assert LICENSE_EXPRESSION in content
+        assert "permits commercial use" in content
+        assert "separate" in content and "commercial" in content.lower()
+    assert "does not reduce or replace rights already received under the GPL" in license_notice
+    assert "THIRD_PARTY_NOTICES.md" in notice
 
 
-def test_community_exception_freezes_product_boundary() -> None:
-    exception = _read(LICENSES / "TradingOPS-Community-Team-Exception-1.0.md")
+def test_commercial_reference_is_not_self_executing_and_preserves_gpl_rights() -> None:
+    commercial = _normalized(LICENSES / "LicenseRef-TradingOPS-Commercial-1.0.txt")
 
-    assert "no more than three natural persons" in exception
-    assert "Member-Owned Trading" in exception
-    assert "beneficially owned solely" in exception
-    assert "Noncommercial Organizations" in exception
-    assert "replaced in full" in exception
-    assert "Any use by or for an Organization requires" in exception
-    for scope in ("SaaS", "Hosted or Managed Service", "White-Label", "Resale"):
-        assert scope in exception
-    assert "Authorization for one scope does not authorize any other scope" in exception
+    assert "not an offer and not a grant of commercial rights" in commercial
+    assert "written agreement" in commercial
+    assert "Nothing in a commercial agreement" in commercial
+    assert "The GPL permits commercial use" in commercial
+    assert "Third-party components" in commercial
 
 
-def test_commercial_template_is_not_self_executing() -> None:
-    commercial = _read(LICENSES / "TradingOPS-Commercial-License-1.0.md")
+def test_package_metadata_uses_the_public_dual_license_expression() -> None:
+    pyproject = tomllib.loads(_read(ROOT / "pyproject.toml"))
+    project = pyproject["project"]
 
-    assert "No rights are granted by this repository copy" in commercial
-    assert "LICENSOR" in commercial
-    assert "LICENSEE" in commercial
-    assert "FEE_AND_PAYMENT_TERMS" in commercial
-    assert "GOVERNING_LAW" in commercial
-    assert "sign it" in commercial
-
-
-def test_package_metadata_uses_custom_dual_license_expression() -> None:
-    project = tomllib.loads(_read(ROOT / "pyproject.toml"))["project"]
-
-    assert project["license"] == (
-        "LicenseRef-TradingOPS-Community-1.0 OR LicenseRef-TradingOPS-Commercial-1.0"
-    )
+    assert project["license"] == LICENSE_EXPRESSION
     assert project["license-files"] == ["LICENSE", "NOTICE", "LICENSES/*"]
+    assert (
+        "License :: OSI Approved :: GNU General Public License v3 (GPLv3)" in project["classifiers"]
+    )
+    assert pyproject["tool"]["hatch"]["build"]["targets"]["wheel"]["force-include"] == {
+        "docs/AI_API_QUICKSTART.md": "trading_control_plane/web/AI_API_QUICKSTART.md"
+    }
 
 
-def test_contributions_include_dual_license_grant() -> None:
+def test_contributions_include_explicit_dual_license_cla_grant() -> None:
     contributing = _read(ROOT / "CONTRIBUTING.md")
+    cla = _read(ROOT / "CLA.md")
     pull_request_template = _normalized(ROOT / ".github/pull_request_template.md")
 
-    assert "Contributor license grant" in contributing
-    assert "TradingOPS Commercial License" in contributing
-    assert "Combined Community License" in pull_request_template
+    assert "Contributor License Agreement" in contributing
+    assert LICENSE_EXPRESSION in contributing
+    assert "retain copyright ownership" in cla
+    assert "relicense the contribution" in cla
+    assert "GPL-3.0-only" in cla and "commercial licenses" in cla
+    assert "CLA.md" in pull_request_template
+
+
+def test_third_party_inventory_and_sbom_cover_bundled_fonts_and_dependencies() -> None:
+    notices = _read(ROOT / "THIRD_PARTY_NOTICES.md")
+    sbom = json.loads(_read(ROOT / "sbom.cdx.json"))
+
+    assert "IBM Plex" in notices and "SIL Open Font License 1.1" in notices
+    assert (LICENSES / "IBM-Plex-OFL-1.1.txt").is_file()
+    assert sbom["bomFormat"] == "CycloneDX"
+    assert sbom["specVersion"] == "1.5"
+    assert len(sbom["components"]) >= 100
+    assert all(
+        component.get("licenses") and "NOASSERTION" not in str(component["licenses"])
+        for component in sbom["components"]
+    )

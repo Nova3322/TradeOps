@@ -1,172 +1,174 @@
-# Trading 交易系统
+# TradingOPS
 
-> 状态日期：2026-08-11
-> 当前状态：Workspace / 团队权限边界、团队交易账户与账户事实隔离、团队 Perptape / 签名 Webhook 单一信号源、加密凭据、四场所一次性只读连接验证与持续账户事实、版本化风控、团队/账户/策略/信号源绩效与风险事件报表、四渠道团队通知、LIVE/模拟资金隔离、团队 Agent 最小 API 权限、一条命令 Compose 和无秘密运维诊断已实现；所有危险能力仍默认关闭
+**Fail-closed trading governance and operations control plane**
 
-本项目面向个人和内部团队的多 Workspace、多交易 Team 和多个内部用户/Agent。用户可以提交和审核提案、查看仓位、处理异常；系统在风险可控的前提下辅助执行交易并判断是否赚钱。不开放无审核外部注册，不管理第三方资金，不建设通用合规或通用认证平台。
+[简体中文](README.zh-CN.md) · [API quickstart](docs/API_QUICKSTART.md) ·
+[Architecture](docs/ARCHITECTURE.md) · [Security](SECURITY.md) ·
+[License](#license)
 
-## 许可
+TradingOPS sits between strategy engines and real execution. It turns candidate
+intent into frozen proposals, independent review, limited authorization,
+risk-gated execution, audit evidence, and capital reconciliation.
 
-TradingOPS 是**源码可用（source-available）**项目，不是 OSI 定义的开源软件。原始项目代码采用二选一许可：
+> It is not a strategy marketplace, custodial wallet, exchange, or automatic
+> profit system.
 
-1. **社区许可**：必须同时遵守 [PolyForm Noncommercial 1.0.0](LICENSES/PolyForm-Noncommercial-1.0.0.md) 和 [TradingOPS Community Team Exception 1.0](LICENSES/TradingOPS-Community-Team-Exception-1.0.md)。个人及最多 3 名自然人的团队可免费使用本人或成员自有资金交易并保留利润；任何公司、基金、工作室、非营利机构、政府机构或其他组织使用都需要商业许可。
-2. **商业许可**：必须与适用版权方另行签署 [TradingOPS Commercial License](LICENSES/TradingOPS-Commercial-License-1.0.md)。组织内部使用、SaaS、托管/代运维、白标/OEM 和转售是分别授权的商业范围；获得其中一项不自动获得其他项。仓库中的未签署模板本身不授予商业权利。
+![TradingOPS API access using synthetic fixtures](artifacts/public/api-access-1440.png)
 
-完整控制条款见 [LICENSE](LICENSE) 和 [NOTICE](NOTICE)。社区许可不允许使用客户、投资人、雇主或其他非成员资金，也不允许向第三方提供交易管理服务。第三方依赖继续遵守各自许可证。
+## Why it exists
 
-## 快速启动
+Trading engines are good at research, signals, portfolio logic, and venue
+connectivity. Real operations also need separation of duties, immutable decision
+inputs, exact account scope, server-side risk checks, replay-safe commands,
+unknown-outcome recovery, and evidence that connects approval to execution.
+TradingOPS owns that governance boundary without becoming a second strategy or
+execution truth source.
 
-完整 Docker Compose 控制台（PostgreSQL → 迁移 → 安全初始化 → API）：
+## Core workflow
 
-```bash
-./scripts/run_compose.sh
+```text
+strategy or signal
+      -> source/freshness validation
+      -> frozen proposal
+      -> independent review
+      -> scope + risk + capability gates
+      -> idempotent execution adapter
+      -> reconciliation and audit evidence
 ```
 
-命令只绑定 `127.0.0.1:8000`，在未跟踪的 `.local/` 生成 `0600` 本地密钥/密码，并硬关闭真实/测试网下单、资金、签名与广播输出。使用 `uv run trading-doctor` 检查当前配置、Schema、五个 Gate 和连接能力矩阵，输出不包含秘密。完整部署、升级、备份和恢复说明见 [源码发布、配置、升级与恢复](docs/06-operations/开源部署配置升级与恢复.md)。
+- **Workspace / Team isolation** — membership, roles, accounts, and records are
+  checked server-side at every boundary.
+- **Frozen proposals** — material terms are versioned before review.
+- **Independent review** — a proposer cannot approve its own proposal.
+- **Fail-closed risk** — missing, stale, lost, incomplete, or rate-limited data
+  is neither real-time data nor zero.
+- **Controlled execution** — external effects require explicit process and
+  persistent database gates, idempotency, and reconciliation.
+- **Human-owned API Clients** — Tokens inherit current roles dynamically and are
+  fixed to one Workspace, Team, Account, and Venue.
 
-完整产品愿景包含 Binance、Hyperliquid、Web/PWA、Telegram、VenueAdapter、Freqtrade/OMS、Margin、Vault/CTO 和报表。这些目标不删除，但按可运行的端到端用户流程逐步开发。未实现能力保持关闭，不为未来可能性预建通用实体。
+## Five-minute safe start
 
-交易执行的默认底座现统一为**逐 Team/Account/Venue 一对一绑定**的 Freqtrade worker：Binance、Hyperliquid、OKX 与 Bybit 账户分别保存加密控制凭据、模式、端点、验证状态和版本，Hyperliquid 另以显式 `hip3_dexes` allowlist 加载 HIP-3。场地级进程默认值只用于本地 dry-run 诊断，LIVE 路由永不回退到未绑定 worker。控制面仍拥有提案、审核、风险、OrderIntent、fencing 和审计；交易所官方 API 只读客户端继续作为账户事实源。仓库内旧直接发送客户端仅供隔离兼容测试，默认运行配置会拒绝这条路径。`docker compose --profile execution-workers` 提供的是本地 dry-run worker，不构成实盘认证。
-
-`ExchangeAccount` 是当前团队内 `account_id + venue` 的持久化真源，允许同一交易所登记多个账户。Binance、Hyperliquid、OKX、Bybit 的凭据通过版本化 AES-256-GCM 信封保存，密文的认证上下文绑定 Team、账户、Venue 和轮换版本；API 与页面只返回脱敏元数据。凭据保存后连接状态仅为 `NOT_VERIFIED`，交易状态仍为 `DISABLED`。获权的账户管理员可运行一次官方只读接口验证：服务端在短事务中校验 Team / Account / Venue 权限、幂等键和账户版本并解密，事务外发起无副作用探针，再以凭据版本复核结果；轮换并发会拒绝旧探针写回。成功只更新连接事实，不导入余额、不绑定持续 worker，也不启用交易、资金、签名或广播。
-
-| 场所 | 团队加密凭据 | 一次性连接验证 | 持续账户事实同步 | 交易执行 |
-| --- | --- | --- | --- | --- |
-| Binance | 已实现 | 已实现，标准 USD-M / Portfolio Margin 只读探针 | 已实现，逐 Team/Account 数据库绑定 | Freqtrade 外部 worker；默认关闭 |
-| Hyperliquid | 已实现 | 已实现，仅使用公开账户身份读取 Info API | 已实现，逐 Team/Account 数据库绑定 | Freqtrade 外部 worker；默认关闭 |
-| OKX | 已实现 | 已实现，V5 私有只读余额探针 | 已实现，USDT 线性 SWAP、逐 Team/Account 数据库绑定 | Freqtrade 外部 worker；默认关闭、未生产认证 |
-| Bybit | 已实现 | 已实现，V5 Unified Account 只读余额探针 | 已实现，Unified USDT 线性永续、逐 Team/Account 数据库绑定 | Freqtrade 外部 worker；默认关闭、未生产认证 |
-
-“一次性连接验证成功”只证明该时刻的只读身份可用；它不等于持续事实新鲜、账户归属人工复核完成或交易就绪。持续 worker 只为已验证且显式启用的账户在内存中解密数据库信封；OKX/Bybit 遇到非支持衍生品敞口、目录或历史不完整时 fail closed。四个场所都必须再具备精确账户 LIVE Worker、账户资格、进程开关、数据库 Gate、sender lease、授权和新鲜风控事实，执行权限默认分别关闭。
-
-`VenueOrder`、`VenueFill`、`Position`、`AccountEquity`、权益历史、`FundingPayment` 与计算型对账均持久化非空 Team 根；同一 `account_id + venue` 可在不同团队独立存在，服务端写入、查询、资金事实聚合和对账按当前团队过滤。资金提案、授权、转移、直连资金配置/操作、自动化政策与 sender lease 也使用非空 Team 根、团队复合外键和团队幂等身份；同名账户、配置版本和 execution scope 可在不同团队独立存在。旧事实只在迁移时优先按既有审计归属回填，冲突时 fail closed，不据此开启连接、交易或资金能力。
-
-`TeamSignalSource` 是当前团队的唯一信号模式真源。Perptape Key 和 Webhook HMAC 密钥复用同一 AES-256-GCM 信封，认证上下文绑定 Team、Signal Source、模式与轮换版本。Webhook 统一接收 TradingView 和自研模型，服务端验证 HMAC-SHA256、请求与事件时效、nonce 重放、外部身份、幂等键和版本化格式。通过的 Webhook 只写入 `SignalEvent`；必须由获权人员手动创建并冻结 Proposal，一个 SignalEvent 最多关联一个 Proposal。
-
-`/results` 由服务端 `results.view` 权限、当前 Workspace / Team、获授权账户和精确环境共同限定。页面按结算币种分别展示团队、账户、策略版本和信号源的已平仓净收益、未平仓当前值、绝对最大回撤、胜率、盈亏比及风险事件；没有形成 Campaign 的拒绝决策也保留。Webhook 归因只读取冻结 `SignalEvent`，不读取可变信号源配置。缺少覆盖完整范围的可信期初资本和 FX 真源时，百分比收益、百分比回撤与跨币种合计保持不可用，不用零值或静态换算代替事实。
-
-`/notifications` 由服务端 `notification.view` / `notification.manage` 和当前 Team 限定。Telegram、Slack、Lark 与邮件路由的凭据使用与交易账户一致的版本化 AES-256-GCM 信封，页面只显示目的地提示，不回传密文或明文。业务事务冻结模板、对象版本、作用域、语义哈希和幂等事件身份，再为匹配路由写入耐久 delivery；提案、风险、交易任务、团队信号、连接失败和资金状态都复用这一 Team 路由。独立 `trading-notification-worker` 只拥有解密和通知发送能力。明确限速会有界退避，网络中断等不确定结果进入 `OUTCOME_UNKNOWN` 且不盲重发。通知路由没有交易、资金、签名或广播方法。
-
-## 从这里开始
-
-1. [当前实现基线](docs/08-implementation/当前实现基线.md)：当前代码、Schema、入口和明确缺口。
-2. [核心业务不变量](docs/08-implementation/核心业务不变量.md)：当前必须保持的风险与执行语义。
-3. [后续端到端开发路线](docs/08-implementation/后续端到端开发路线.md)：按用户流程推进的开发顺序。
-4. [本次架构收敛记录](docs/08-implementation/本次架构收敛记录.md)：KEEP/MERGE/SIMPLIFY/DELETE 和迁移结论。
-5. [交易系统总体方案](交易系统总体方案.md)：长期产品愿景和最高层原则。
-6. [产品化文档中心](docs/README.md)：专项文档地图与权威边界。
-7. [源码发布、配置、升级与恢复](docs/06-operations/开源部署配置升级与恢复.md)：许可边界、一条命令、Compose、诊断、能力矩阵与运维流程。
-
-## 当前不可绕过的规则
-
-- 信号和人工交易假设只能生成冻结 Proposal，不能直接生成审核、授权或订单；Webhook 信号还必须由人员手动创建 Proposal。
-- SYSTEM 与 MANUAL 初仓都必须经过人工审核；Risk Engine 始终可以拒绝或缩量。
-- 创建者不能自审；高风险提案需要两个不同 Reviewer。
-- Approval 只产生短期、有限范围的 TradingAuthorization，不产生永久权限。
-- 数据陈旧、仓位未知、保护未知或订单结果 Unknown 时禁止新增风险。
-- Perptape 候选身份包含源场所 raw symbol；同一 canonical symbol 的不同报价合约不得合并。旧候选 ID 只有唯一匹配当前候选，且既有 Proposal 的 instrument/venue/direction 与冻结候选身份快照全部精确一致时才兼容；歧义或不一致时拒绝。
-- Reservation、OrderIntent 和幂等回执必须原子提交；Unknown 不能提前释放或自动重发。
-- 多个退出候选合并为唯一更小目标仓位；有活动 OrderIntent 时不重复生成减仓意图。
-- 场所真实订单、成交、仓位、保护、余额和资金费必须与内部预期分开并对账；SHADOW、TESTNET、LIVE 使用独立事实作用域。
-- 每个 execution scope 只有一个有效 sender；新 owner 接管后旧 fencing token 无效。
-- `LIVE_ORDER_SEND`、`CAPITAL_TRANSFER`、`AUTO_ADD`、`AUTO_PROFIT_SWEEP` 与 `AUTO_OPERATING_REFILL` 默认 `DISABLED`。
-- AUTO_ADD 从 `DISABLED` 变为 `ENABLED` 只能通过 `RiskControlChangeRequest` 受复核恢复流程；不能由管理员直接翻转 Gate。每个 Add 仍需冻结 Proposal、分档 AddUnit、后续 Perptape 候选、盈利仓位、足额保护、新鲜事实、剩余授权和最终 Risk Engine 同时通过。只有首个正成交消费 AddUnit，零成交取消/拒绝不消费，Unknown 冻结后续新增风险。
-- 既有资金 Proposal/双人复核/Transfer Authorization 生命周期继续与交易授权分离。面向资金管理员的四条直接路径不再强制经过该旧界面，但仍要求显式最终确认、可信配置、地址/网络/资产/金额/限额/新鲜状态重验、完整审计和阶段回执；生产参数或 Adapter 缺失时 fail closed。活动仓位、未解决订单或 Unknown 禁止 Vault 救仓，Unknown 不释放或重发。
-- 自动利润归集和自动运营补充使用两个独立 Gate；当前只根据空仓、无订单、无 Unknown、机器 MATCH、已确认余额和已关闭 Campaign 净 PnL 生成待双人复核的非生产候选，不自动提交资金。浮盈不能归集，净亏损不能触发运营补充。
-- 风险恢复分两条受控路径：最高管理员可在全部实时条件满足时直接恢复；操作人员只能创建冻结申请，并由具备独立审核职责的他人审核后执行。两条路径都重验事实、版本和 scope、写入审计、保持 AUTO_ADD 关闭，并使旧 TradingAuthorization 与旧 AddUnit 永久失效。生产未配置 LIVE scope 时 fail closed，`KILL_SWITCH` 不进入常规恢复流程。
-- Telegram 已提供默认关闭的真实 Bot API 私聊长轮询、中文 HTML 审核卡、`/start`/`/help`/`/status`/`/todo`、内部用户绑定，以及冻结提案的两步批准/拒绝。它只承担提醒、待办和独立审核；Campaign、资金、风险 Gate、成员权限、签名与广播入口在 review-only 模式全部抑制。创建者自审、对象版本、有效期、身份绑定和幂等仍由服务端重验。正式 IdP/Passkey 仍未接入：本服务的 `SignedTokenService` 仅以本地 HMAC 验证 action grant；只有 local/test 提供 Mock grant 发行，生产 issuer、IdP/WebAuthn 和外部签名验证仍未实现。Binance Unified Account 与 Hyperliquid Core 的危险写能力保持独立关闭。
-
-## 当前代码入口
-
-- API 进程：`uv run trading-api`
-- 只读同步进程：`uv run trading-sync-worker`；`--once` 用于一次性边界验收。启用数据库绑定时，它逐 Team/Account 解密独立信封并读取 Perptape、Binance、Hyperliquid、OKX 或 Bybit；没有数据库绑定时继续兼容既有部署级只读/Vault 配置。它不拥有订单发送、资金签名或广播方法
-- 通知进程：API（包括渠道测试）只写耐久队列，不直接外发。`uv run trading-notification-worker --healthcheck` 只验证安全开关、密钥和数据库，`--once` 执行一次 delivery 周期；持续模式还要求 `TRADING_NOTIFICATION_WORKER_ENABLED=true`。该进程默认关闭，只消费团队通知 delivery，不导入订单、资金、签名或广播适配器；邮件还要求 `TRADING_NOTIFICATION_EMAIL_SMTP_ALLOWED_HOSTS` 精确列出 SMTP 主机
-- Web/PWA：`/`（兼容 `/workspaces`）是登录后的工作区选择页；创建工作区会原子建立同名默认 Team，进入后 `/home` 是行动总览，侧栏可切换工作区并重新加载隔离的团队、成员与权限。`/signals` 选择团队 Perptape / Webhook 模式并展示签名事件，核心主线为信号或机会 → 冻结提案 → 独立审核 → 交易任务。`/shadow` 提供显式团队启用、虚拟资金初始化、模拟仓位、确定性成交和影子任务入口，并把真实下单、资金、签名、广播及场所连接器显示为关闭。运行告警详情位于 `/campaigns/alerts`，旧 `/exceptions` 只做兼容跳转。另有 `/risk`、`/positions`、`/venues`、`/capital`、`/admin/users`、`/admin/agents`、`/results` 和 `/notifications`；Agent 页面只显示一次新 Token，列表只保留摘要、版本、到期和使用事实。资金中心默认只展示 LIVE；SHADOW/TESTNET 不计入真实净值。Vault 缺少事实时显示 `— · MISSING`，总净值也保持不完整，绝不把缺失投影为零
-- HTTP：健康检查、内部会话、团队信号源配置、签名 Webhook / SignalEvent、Perptape 主站机会、Proposal/Review/Risk/Authorization、SHADOW/TESTNET/LIVE Campaign、AUTO_ADD/减仓/退出、资金事实/提案/授权、NoTilt 未签名计划/回执确认、按环境结果/审计/运行状态，四场所只读事实，以及 Binance、Hyperliquid Core 的 TESTNET 与受控 LIVE API
-- 内部业务：`trading_control_plane.service.TradingService`
-- 纯计算：`evaluate_risk`、`select_target_position`、`compute_pnl`
-- 数据库：PostgreSQL，Alembic head `20260811_0031`；Workspace、权限、信号源/SignalEvent、交易账户、提案—执行聚合、账户事实、版本化风险政策、风险预留、资金工作流根、sender lease、Perptape 当前 feed 与运行源健康均使用团队范围，账户探针健康再带精确 Account/Venue。Freqtrade Worker 绑定复用 `ExchangeAccount` 保存加密认证、端点、模式、白名单和验证版本，不增加第二个账户真源；OrderIntent 只增加派发快照字段和 `DISPATCHING` 状态，不建立第二套执行账本。Team 以 `SETUP / SHADOW / LIVE` 明确执行模式；Shadow 复用现有 AccountEquity、Position、Proposal、Campaign、Order/Fill、RiskReservation、报表与审计，只增加团队模式列而不建立第二套模拟账本。Agent 复用现有 `User(SERVICE)`、TeamMembership、RoleAssignment、Proposal、Approval、CommandReceipt 和 AuditEvent，只为现有 User 增加 `INTERNAL / AGENT` 服务种类及不可逆 Token 生命周期字段，不新增身份、权限、审核或审计真源。最大总风险、单账户风险、最大单笔亏损、最大连续亏损和冷却期由同一政策版本驱动；遗留政策的新阈值保持未配置并拒绝新增风险。绩效报表复用既有 Campaign、Proposal、SignalEvent 与 RiskDecision，没有新增快照或第二套账本。通知仅新增团队路由与耐久 delivery 两个具有独立生命周期的实体；资金事件已接入同一团队路由
-- 执行边界：Binance、Hyperliquid、OKX 与 Bybit 的交易发送只允许进入与当前 Team/Account/Venue 精确匹配且验证为 LIVE 的 Freqtrade worker；同一场地的其他账户或旧进程默认值不得接管。外部写之前，服务端先把精确账户/凭据版本、sender fencing、幂等键和派发时间持久化到 OrderIntent 并进入 `DISPATCHING`；同一键重试只查询既有 trade，不再次调用 `forceenter` / `forceexit`。OKX 只映射精确 `*-USDT-SWAP`，Bybit 只映射精确 `*USDT`，Hyperliquid worker 通过账户级显式 `hip3_dexes` allowlist 加载 HIP-3。仓库原有 `binance_execution.py` / `hyperliquid_execution.py` 只保留隔离兼容测试，默认后端不会加载其签名密钥，也会拒绝直接发送。交易所官方只读接口继续提供账户、仓位和目录事实；数据库中的 `LIVE_ORDER_SEND` 初始仍为 `DISABLED`
-- 资金边界：`capital.py` 提供 SHADOW/TESTNET Mock 提交和自动候选计算；`notilt.py` 通过官方 `@notilt/sdk` 固定支持 Ethereum、BNB Smart Chain、Arbitrum One，只读取官方部署/Registry/Vault、生成并持久化 `{chainId,to,data,value}` 未签名交易，并从可信生产 RPC 校验发送者、目标、函数、参数、事件、区块时间和逐链确认深度。服务没有 NoTilt 私钥字段，不签名、不广播，也不暴露 owner、白名单管理、Panic 或 Full Exit 能力；真实 `CAPITAL_TRANSFER` 与两个自动资金 Gate 均保持 `DISABLED`
-
-正式身份源按冻结决策使用托管 IdP 与 Passkey，但外部 IdP 尚未接入。本地/测试环境可显式启用仅识别已存在内部用户的 Mock 会话和 Mock step-up；生产环境硬拒绝启用 Mock 身份。团队 Perptape Key 在 `/signals` 加密配置后可直接驱动现有机会页，也可由数据库绑定 worker 按 Team 更新独立当前 feed；迁移的旧团队保留明确标识的 `RUNTIME_FALLBACK`，不伪装成团队密钥已配置。逐 Team WebSocket 只有在 runtime worker 与独立 WebSocket 总开关都显式开启后启动，并持续使用 HTTPS 轮询校准；流鉴权、协议或有界重连失败只阻断该 Team 的流并回退轮询，运行状态不会把轮询快照冒充实时流。
-
-Binance 私有事实读取必须同时显式配置 `TRADING_BINANCE_READ_ONLY_ENABLED=true`、API Key/Secret 和 `TRADING_BINANCE_FACT_ENVIRONMENT=TESTNET|LIVE`。Unified Account 使用 `TRADING_BINANCE_ACCOUNT_MODE=PORTFOLIO_MARGIN` 和官方 `https://papi.binance.com`。未配置时页面只显示 PostgreSQL 已保存事实，不尝试联网。
-
-Binance TESTNET 订单还必须单独配置 `TRADING_BINANCE_TESTNET_ORDER_SEND_ENABLED=true` 和独立 TESTNET Key/Secret。LIVE 必须同时显式设置进程开关 `TRADING_BINANCE_LIVE_ORDER_SEND_ENABLED=true` 和数据库 Gate `LIVE_ORDER_SEND=ENABLED`；客户端只接受官方 PAPI 主机，使用不超过 32 字符的稳定 client order identity 先查询再发送。Unknown 只允许查询恢复，不盲重发。2026-07-31 的最小主网实证验证了默认 Gate 拒绝、真实开仓、幂等查询、fencing、reduce-only 保护、退出、保护取消、对账和最终空仓；实证结束后 Gate 已关闭。
-
-Hyperliquid Core 默认使用 `TRADING_HYPERLIQUID_ACCOUNT_ADDRESS` 指定的主账户；若只配置 API Wallet，系统通过官方 `userRole` 解析所属主账户。只有显式设置 `TRADING_HYPERLIQUID_SUBACCOUNT_ADDRESS` 时，事实与动作才切换到子账户并在 Exchange 请求携带 `vaultAddress`。只读同步必须开启 `TRADING_HYPERLIQUID_READ_ONLY_ENABLED=true`；LIVE 还必须同时设置 `TRADING_HYPERLIQUID_LIVE_ORDER_SEND_ENABLED=true`、本地 API Wallet 私钥和数据库 `LIVE_ORDER_SEND` Gate。私钥只从运行环境读取且不写入仓库或日志。2026-07-31 的最小主网实证验证了主账户解析、显式价格 IOC、稳定 cloid 幂等、fencing、trigger 保护、退出、保护取消、对账、PnL 和最终空仓；实证结束后 Gate 已关闭。
-
-NoTilt 只保存公开 whitelist agent 与逐链 Vault 地址。配置 `TRADING_NOTILT_ENABLED=true` 后，可查询 Registry assignment；只有相应 `TRADING_NOTILT_*_VAULT_ADDRESS` 已配置、官方 Vault 身份匹配、事实和 USD 估值新鲜时才写入 LIVE 资金事实。Vault、Binance 和 Hyperliquid 的已确认 USD 净值合并展示；任一必需来源未知或过期时总净值和新增风险均 fail closed。当前受信 Registry assignment 尚未激活，且缺少可验证的生产 Vault scope，因此资金中心把 Vault 标记为缺失，不能生成可执行计划。四条直接路径只会在可信 Arbitrum/USDC 目录、授权自有地址、白名单、限额、延迟和实时预算全部通过后构建受限未签名请求；Binance→Vault 还需要受限提现 Adapter，Hyperliquid→Vault 保持“合约→授权自有地址→NoTilt deposit”两段路径。服务不读取钱包秘密、不签名、不广播，最终动作只能在独立人控钱包逐笔确认；`CAPITAL_TRANSFER` Gate 仍保持关闭。
-
-Safe Spending Limits 是与 NoTilt Vault 并列的直接资金方案。它固定使用 Safe 官方 Allowance Module 部署目录、Arbitrum One 与原生 USDC：Safe 作为来源时实时读取模块启用状态、delegate、额度、已用额度、余额、重置周期与 nonce，只输出待人控 delegate 钱包确认的精确哈希；Safe 作为去处时只输出从已授权自有地址到目标 Safe 的精确 USDC `transfer` 无签名交易。系统不接受任意链、Token、模块或 calldata，不读取私钥、不创建钱包客户端、不签名、不广播。生产使用前须显式配置可信 HTTPS RPC、Safe Smart Account 和公开 delegate 地址，且资金 Gate 仍独立保持关闭。
-
-只读同步进程默认关闭。管理员先为当前凭据版本完成一次无副作用验证，再为具体 Team/Account 显式启用数据库绑定；部署端还必须独立开启 `TRADING_RUNTIME_SYNC_ENABLED`。worker 每周期枚举所有有效绑定，在内存中解密各自 AES-GCM 信封，并以精确 Team/Account/Venue INTERNAL principal 刷新 Binance、Hyperliquid、OKX 或 Bybit 事实；Team Perptape Key 以独立 PROPOSER principal 更新该 Team 的当前 feed。开启 `TRADING_PERPTAPE_WEBSOCKET_ENABLED` 后，每个有效 Team source 拥有独立流、停止事件与版本身份；凭据或源版本变化先有界停止旧流再启动新流，一个 Team 的致命失败不会停止其他 Team 或 HTTPS 轮询。OKX 当前限定 USDT 线性 SWAP，Bybit 限定 Unified USDT 线性永续；非支持敞口、目录/Mark 覆盖不完整或历史边界不完整都会阻断新的风险。没有数据库绑定时继续使用既有部署级 Perptape/账户/Vault 兼容模式。某个来源失败不会伪造零值，旧事实按风险政策自然转为陈旧；数据库“已绑定”只表示配置真源，不表示 worker 活着或交易已开启。逐 Team WebSocket 和 runtime worker 均默认关闭；停止 worker 或关闭进程总开关不改变 Schema 或交易 Gate。2026-07-31 的历史部署级 `--once` 验收读取 200 个 Perptape 候选，并同步 Binance Unified Account 与 Hyperliquid 主账户；由于尚无 Vault 地址，当时报告明确为 `ready_for_new_risk=false`。
-
-## 本地开发
+Requirements: Python 3.12+, [uv](https://docs.astral.sh/uv/), Docker, and Docker
+Compose.
 
 ```bash
-uv sync
-uv run trading-doctor --skip-database
-uv run ruff format --check src tests
-uv run ruff check src tests
-uv run mypy src
-TEST_DATABASE_URL='postgresql+psycopg://.../trading_test' uv run pytest --cov=trading_control_plane
-TRADING_DATABASE_URL='postgresql+psycopg://.../trading_test' uv run alembic upgrade head
-TRADING_RUNTIME_SYNC_ENABLED=true uv run trading-sync-worker --once
-TRADING_RUNTIME_SYNC_ENABLED=true uv run trading-sync-worker
-TRADING_CREDENTIAL_ENCRYPTION_KEY='...' uv run trading-notification-worker --once
-TRADING_NOTIFICATION_WORKER_ENABLED=true TRADING_CREDENTIAL_ENCRYPTION_KEY='...' uv run trading-notification-worker
-TRADING_DATABASE_URL='postgresql+psycopg://.../trading_test' ./scripts/backup_postgres.sh /absolute/path/trading.dump
-TRADING_DATABASE_URL='postgresql+psycopg://.../trading_restore_test' ./scripts/restore_test_postgres.sh /absolute/path/trading.dump
-```
-
-集成测试数据库名必须以 `_test` 结尾。测试夹具会删除并重建其 `public` schema，禁止指向任何真实交易数据库。
-恢复脚本同样硬限制到预先创建、可丢弃的 `*_test` 数据库；当前不存在生产恢复自动化，不能把本地演练命令用于真实数据库。
-
-本机敏感值只放在 `.env.local`；可提交变量名模板为 `.env.example`。不得把密钥值写入代码、文档、日志或测试制品。
-
-Compose 默认不启动后台读取或外发进程。`./scripts/run_compose.sh --runtime` 显式加入受健康检查和自动重启监督的只读同步 worker；只有再设置 `TRADING_PERPTAPE_WEBSOCKET_ENABLED=true` 才启动逐 Team 流。`./scripts/run_compose.sh --notifications` 显式加入通知 worker；两个参数可组合。它们都不授予订单、资金、签名或广播权限。
-
-### 本地真实 Telegram
-
-首次运行使用独立的本地 PostgreSQL：
-
-```bash
+git clone https://github.com/nineheavens223-sys/TradeOps.git
+cd TradeOps
+cp .env.example .env.local
+export TRADING_LOCAL_ADMIN_USERNAME=trading-admin
+uv sync --frozen
 ./scripts/run_local.sh
 ```
 
-该命令会强制使用 `127.0.0.1:5434/trading_local` 的 PostgreSQL、升级 Schema、幂等创建
-`kelly_oooo` 内部超级管理员/Reviewer/Operator/Treasury、一个本地 Proposer 和第二 Reviewer，然后启动
-API。Session、凭据加密和可选 dry-run worker 密钥持久化到未跟踪的 `.local/`，不使用共享 env 里的数据库 URL。默认不启动 Freqtrade workers；只有显式设置 `TRADING_LOCAL_FREQTRADE_WORKERS_ENABLED=true` 才启动并等待 Binance、Hyperliquid 两个 dry-run worker，就绪失败时保持 API 未启动。Telegram 默认仍关闭；先在 BotFather 撤销任何曾出现在聊天或日志中的旧 Token，把新
-Token 仅写入 `.env.local`，再设置：
+Open <http://127.0.0.1:8014>. The generated local password is stored at:
 
-```dotenv
-TRADING_TELEGRAM_ENABLED=true
-TRADING_TELEGRAM_ALLOWED_USERNAME=kelly_oooo
-TRADING_TELEGRAM_INTERNAL_USERNAME=kelly_oooo
+```text
+.local/passwords/trading-admin
 ```
 
-启动后用 `@kelly_oooo` 在 Bot 私聊发送 `/start`。首次绑定校验白名单用户名，成功后只认
-Telegram 数字私聊 ID，并在每次按钮操作时重新加载 Trading RBAC、对象版本、有效期和幂等
-状态。群聊、转发或另一账号点击均拒绝。review-only 模式可在私聊中对冻结提案执行两步
-批准/拒绝，并写回统一审计；创建者自审与独立审核限制不变。管理员的“创建并直接批准”仍只在
-Web 中提供二次确认和审计。Telegram 本身不等于强认证。`TRADING_PUBLIC_BASE_URL=http://127.0.0.1:8014` 只适合在同一台电脑
-打开审核链接；手机访问需要一个能到达本机的受控 HTTPS 地址。
+The file is mode `0600`, `.local/` is ignored, external integrations are off,
+and every dangerous capability gate remains disabled. Start with read-only data
+and SHADOW workflows. Do not add exchange or wallet credentials until you have
+reviewed [`SECURITY.md`](SECURITY.md) and the runtime boundary.
 
-## 文档与参考材料边界
+### Health and API
 
-| 路径 | 定位 | 当前实现真源 |
-| --- | --- | --- |
-| `docs/08-implementation/` | 当前实现、核心不变量、路线与收敛记录 | 是 |
-| `交易系统总体方案.md` | 长期产品原则与愿景 | 原则真源，不代表已实现 |
-| `策略合同与数值化验收门.md` | 历史研究材料 | 不驱动当前实现；本仓库不建设回测或通用策略平台 |
-| `docs/` 其他专项文档 | 产品、领域、执行、质量和运维长期合同 | 按状态和当前基线解释 |
-| `DynamicPositionSizing-/` | 历史原型参考 | 否 |
-| `low_vol_breakout_bn/` | 历史原型参考 | 否 |
-| `交易系统 notion 文档/` | 历史 Notion 资料 | 否 |
-| `仓位计算-新.xlsx` | 研究附件 | 否 |
+```bash
+curl http://127.0.0.1:8014/health/live
+curl http://127.0.0.1:8014/health/ready
+open http://127.0.0.1:8014/openapi.json
+```
 
-如长期文档与当前代码能力冲突，以“尚未实现、对应 Gate 关闭”处理；不得创建证明平台、绑定层或快照层来填补文档与产品流程之间的空白。
+API/AI onboarding is in [`docs/API_QUICKSTART.md`](docs/API_QUICKSTART.md) and
+[`docs/AI_API_QUICKSTART.md`](docs/AI_API_QUICKSTART.md). The running
+`/openapi.json` document is the only complete interface contract.
 
-当前产品尚未进入 Codex Security 审计阶段。按用户明确约束，Codex Security 及其所有审计 Skill、插件和模块保持停用；除非用户以后明确重新授权，否则只执行常规代码检查、测试和数据库一致性验证。
+## Architecture
+
+TradingOPS is a Python/FastAPI application with PostgreSQL durability, a
+server-rendered JavaScript operations console, explicit venue/treasury adapters,
+and separate optional workers. PostgreSQL remains authoritative for identity,
+roles, scope, proposals, reviews, gates, receipts, and audit events.
+
+See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the boundary diagram and
+safety invariants.
+
+## What TradingOPS is — and is not
+
+- Freqtrade, Hummingbot, NautilusTrader, and QuantConnect LEAN primarily provide
+  strategy, simulation, portfolio, connector, and/or execution-engine
+  capabilities. TradingOPS treats engines as an integration ecosystem.
+- Fireblocks overlaps in policy and approval but also provides wallet and key
+  infrastructure; TradingOPS is not a custodian.
+- Talos is a broader institutional trading platform spanning connectivity,
+  execution, portfolio, settlement, and post-trade workflows. TradingOPS is a
+  narrower self-hostable governance control plane.
+
+The evidence-backed comparison and official links are in
+[`docs/COMPETITIVE_POSITIONING.md`](docs/COMPETITIVE_POSITIONING.md).
+
+## Safety boundary
+
+A new installation must keep these persistent capabilities `DISABLED`:
+
+- `AUTO_ADD`
+- `AUTO_OPERATING_REFILL`
+- `AUTO_PROFIT_SWEEP`
+- `CAPITAL_TRANSFER`
+- `LIVE_ORDER_SEND`
+
+Order send, capital transfer, wallet signing, and broadcast are separately gated
+and off by default. A UI control, role label, API prompt, environment name, or
+process health check does not authorize an external effect.
+
+Never commit `.env.local`, `.local/`, database dumps, private strategies,
+account/balance data, raw logs, or unsanitized screenshots.
+
+The exact include/exclude and history rules are documented in
+[`docs/PUBLICATION_BOUNDARY.md`](docs/PUBLICATION_BOUNDARY.md).
+
+## Project maturity
+
+TradingOPS is **pre-1.0**. The repository contains tested governance, review,
+risk, execution, capital, audit, and API-client foundations, but production
+readiness is deployment-specific. Operators remain responsible for threat
+modeling, provider configuration, backups, monitoring, legal obligations,
+incident response, and independent review of real-capital activation.
+
+See [`ROADMAP.md`](ROADMAP.md), [`CHANGELOG.md`](CHANGELOG.md), and
+[`docs/RELEASING.md`](docs/RELEASING.md).
+
+## Development and governance
+
+- [Contributing and verification](CONTRIBUTING.md)
+- [Contributor License Agreement](CLA.md)
+- [Governance](GOVERNANCE.md)
+- [Code of Conduct](CODE_OF_CONDUCT.md)
+- [Support](SUPPORT.md)
+- [Security policy](SECURITY.md)
+- [Third-party notices](THIRD_PARTY_NOTICES.md)
+- [CycloneDX SBOM](sbom.cdx.json)
+
+## License
+
+TradingOPS uses:
+
+```text
+GPL-3.0-only OR LicenseRef-TradingOPS-Commercial-1.0
+```
+
+The GPL option permits commercial use, modification, and distribution subject
+to GPLv3's terms, including applicable source and copyleft obligations. Parties
+that need closed-source integration, proprietary distribution, or negotiated
+commercial terms may obtain a separate commercial license.
+
+Commercial licensing: `COMMERCIAL_EMAIL`
+
+Private security reports: `SECURITY_EMAIL` or the repository's private security
+advisory channel.
+
+See [`LICENSE`](LICENSE), the unmodified
+[`GPL-3.0-only`](LICENSES/GPL-3.0-only.txt) text, and the
+[commercial license reference](LICENSES/LicenseRef-TradingOPS-Commercial-1.0.txt).
+Third-party components retain their own licenses.

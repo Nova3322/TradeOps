@@ -243,11 +243,24 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
 
     assert response.status_code == 200
     assert "交易控制台" in response.text
-    assert "/assets/app-core.js?v=176" in response.text
-    assert "/assets/workspace.js?v=171" in response.text
-    assert "/assets/app.js?v=170" in response.text
+    assert "/assets/app-core.js?v=190" in response.text
+    assert "/assets/workspace.js?v=178" in response.text
+    assert "/assets/signals.js?v=174" in response.text
+    assert "/assets/proposals.js?v=175" in response.text
+    assert "/assets/capital.js?v=173" in response.text
+    assert "/assets/app.js?v=174" in response.text
     assert 'href="/signals"' in response.text
-    assert "/assets/styles.css?v=78" in response.text
+    assert "/assets/styles.css?v=88" in response.text
+    for font_name in (
+        "IBMPlexSansSC-Regular.woff2",
+        "IBMPlexSansSC-SemiBold.woff2",
+        "IBMPlexMono-Regular.woff2",
+        "IBMPlexMono-SemiBold.woff2",
+    ):
+        assert (
+            f'href="/assets/fonts/{font_name}" as="font" type="font/woff2" crossorigin'
+            in response.text
+        )
     assert "/assets/reporting.js?v=172" in response.text
     assert "/assets/accounts.js?v=172" in response.text
     assert 'href="/assets/tradingops-logo.png" type="image/png"' in response.text
@@ -255,14 +268,19 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
     assert '<span class="brand-mark" aria-hidden="true">T</span>' not in response.text
     assert 'aria-label="交易控制台首页"' in response.text
     assert '<a href="/home" data-link><span>⌂</span>当前任务</a>' in response.text
-    assert 'class="nav-link-group" role="group" aria-label="实时信号"' in response.text
+    assert '<p class="nav-section-label">工作台</p>' in response.text
+    assert '<p class="nav-section-label">空间配置</p>' in response.text
+    assert '<p class="nav-section-label">治理与安全</p>' in response.text
     assert 'href="/opportunities"' in response.text
     assert ">Perptape</a>" in response.text
     assert 'href="/webhook-signals"' in response.text
     assert ">Webhook 信号</a>" in response.text
+    assert '<a class="skip-link" href="#main">跳到主要内容</a>' in response.text
+    assert '<main id="main" class="main-content" tabindex="-1">' in response.text
+    assert 'id="main" class="main-content" aria-live=' not in response.text
     assert "<span>✓</span>审核队列</a>" in response.text
     assert "<span>¤</span>资金中心</a>" in response.text
-    assert response.text.count('class="nav-section" data-nav-section') == 3
+    assert response.text.count("data-nav-section") == 3
     assert response.text.count("data-nav-capability=") == 12
     assert "data-nav-group=" not in response.text
     assert 'id="team-settings-link"' not in response.text
@@ -271,6 +289,7 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
     assert 'id="workspace-switcher-menu"' in response.text
     assert 'id="user-menu"' in response.text
     assert 'href="/profile/api-access"' in response.text
+    assert response.text.count('href="/profile/api-access"') == 1
     assert "API 接入" in response.text
     assert 'id="password-change-form"' in response.text
     assert response.text.count("data-preference-select=") == 2
@@ -306,12 +325,61 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
     assert get(app, "/admin/agents").status_code == 200
     assert get(app, "/profile/api-access").status_code == 200
 
+    openapi = get(app, "/openapi.json")
+    assert openapi.status_code == 200
+    assert openapi.json()["openapi"].startswith("3.")
+    for path in (
+        "/api/api-client/connection",
+        "/api/instruments",
+        "/api/opportunities",
+        "/api/proposals",
+        "/api/campaigns",
+        "/api/results",
+        "/api/audit",
+    ):
+        assert path in openapi.json()["paths"]
+
+    quickstart = get(app, "/docs/AI_API_QUICKSTART.md")
+    assert quickstart.status_code == 200
+    assert quickstart.headers["content-type"].startswith("text/markdown")
+    for placeholder in ("BASE_URL", "TOKEN", "WORKSPACE_ID", "TEAM_ID", "ACCOUNT_ID"):
+        assert placeholder in quickstart.text
+    assert "完整接口合同以运行中的 [`/openapi.json`](/openapi.json) 为唯一真源" in quickstart.text
+    assert "缺失、过期或限流数据不得视为实时数据" in quickstart.text
+    assert "下单、资金划转、钱包签名和广播默认关闭" in quickstart.text
+
     assert get(app, "/assets/app.js").status_code == 200
     app_javascript = SimpleNamespace(text=frontend_source())
     assert "history.replaceState({}, '', loginDestination());" in app_javascript.text
     assert "const loginDestination = () => {\n  return '/';\n};" in app_javascript.text
     assert "function renderWorkspaceGateway()" in app_javascript.text
     workspace_javascript = (WEB_ROOT / "workspace.js").read_text()
+    api_access = workspace_javascript.split(
+        "async function renderApiAccess(credentialResult = null)", maxsplit=1
+    )[1]
+    ordered_sections = [
+        'id="api-quickstart"',
+        'id="api-token"',
+        'id="api-agent"',
+        'id="api-safety"',
+        'id="api-contract"',
+    ]
+    assert [api_access.index(item) for item in ordered_sections] == sorted(
+        api_access.index(item) for item in ordered_sections
+    )
+    assert 'href="/openapi.json"' in api_access
+    assert 'href="/docs/AI_API_QUICKSTART.md"' in api_access
+    assert "API_AGENT_SYSTEM_PROMPT" in workspace_javascript
+    assert "默认只调用只读 GET 接口" in workspace_javascript
+    assert "data-copy-api-snippet" in workspace_javascript
+    assert "Token 明文只在创建或轮换成功时显示一次" in api_access
+    assert '<b translate="no">LIVE / SHADOW</b>' in api_access
+    assert '<code translate="no">GET /api/results?environment=SHADOW</code>' in api_access
+    assert "缺失、过期或限流不等于实时" in api_access
+    assert "LIVE_ORDER_SEND" in api_access
+    assert "CAPITAL_TRANSFER" in api_access
+    assert "交易所密钥" in api_access
+    assert "签名材料" in api_access
     access_management = workspace_javascript.split(
         "async function renderAccessManagement()", maxsplit=1
     )[1].split("\nfunction apiScopeOptions", maxsplit=1)[0]
@@ -326,6 +394,8 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
     assert "const PREFERENCE_OPTIONS" in app_javascript.text
     assert "function normalizeThemePreference" in app_javascript.text
     assert "function initializePreferenceDropdowns" in app_javascript.text
+    assert "matchMedia('(max-width: 1100px)').matches" in app_javascript.text
+    assert "matchMedia('(max-width: 980px)').matches" not in app_javascript.text
     assert "path === '/webhook-signals'" in app_javascript.text
     assert "await renderWebhookSignals()" in app_javascript.text
     signals_javascript = (WEB_ROOT / "signals.js").read_text()
@@ -357,6 +427,18 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
     assert "if (error.status !== 403) throw error" in app_javascript.text
     assert "actionable_for_current_user" in app_javascript.text
     assert "item.proposer_id === session.user_id" in app_javascript.text
+    assert "function reviewEnvironmentSelection(search = location.search)" in app_javascript.text
+    assert "reviewEnvironment === 'ALL' || item.environment === reviewEnvironment" in (
+        app_javascript.text
+    )
+    assert "const pending = pendingResponse.data;" in app_javascript.text
+    assert "const pending = pendingResponse.data.filter(item => item.environment === 'LIVE')" not in (
+        app_javascript.text
+    )
+    assert 'aria-label="审核环境范围"' in app_javascript.text
+    assert "const createActions = !status && canPropose" in app_javascript.text
+    assert "params.set('environment', reviewEnvironment)" in app_javascript.text
+    assert "?environment=${reviewEnvironment}" in app_javascript.text
     assert "只统计草稿和等待审核" in app_javascript.text
     assert "const canViewOperations = hasCapability('operations.view')" in app_javascript.text
     assert "canViewOperations ? api('/api/campaigns')" in app_javascript.text
@@ -364,7 +446,7 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
     assert "api('/api/venues/hyperliquid/status')" not in app_javascript.text
     assert "当前身份不读取任务详情" in app_javascript.text
     assert "由交易运维人员查看" in app_javascript.text
-    assert 'href="/proposals" data-link>查看提案记录</a>' in app_javascript.text
+    assert 'href="/proposals" data-link>查看提案记录 →</a>' in app_javascript.text
     assert "new URLSearchParams(location.search).get('history') === '1'" in app_javascript.text
     assert "proposalAwaitingLaunch(item)" in app_javascript.text
     assert "const proposerOnly = hasCapability('proposal.create')" in app_javascript.text
@@ -398,7 +480,7 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
     assert "const trigger = event.currentTarget" in app_javascript.text
     assert "该 API Client Token 已失效、已轮换或不匹配" in app_javascript.text
     assert "/api/notifications" in app_javascript.text
-    assert "/api/audit" not in app_javascript.text
+    assert "api('/api/audit" not in app_javascript.text
     assert "'access.manage':['SYSTEM_ADMIN']" in app_javascript.text
     assert "'system.view':['OBSERVER','REVIEWER','OPERATOR']" in app_javascript.text
     assert '[translate="no"]' in app_javascript.text
@@ -680,6 +762,8 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
     assert ".proposal-detail-layout" in stylesheet.text
     assert ".proposal-preview" in stylesheet.text
     assert ".review-queue-summary" in stylesheet.text
+    assert ".review-environment-switcher" in stylesheet.text
+    assert "(max-width: 1100px)" in stylesheet.text
     assert ".source-facts" in stylesheet.text
     assert ".readiness-item" in stylesheet.text
     assert ".readiness-action" in stylesheet.text
@@ -696,7 +780,11 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
 
     service_worker = get(app, "/sw.js")
     assert service_worker.status_code == 200
-    assert "trading-shell-v147" in service_worker.text
+    assert "trading-shell-v166" in service_worker.text
+    assert "/assets/fonts/IBMPlexSansSC-Regular.woff2" in service_worker.text
+    assert "/assets/fonts/IBMPlexSansSC-SemiBold.woff2" in service_worker.text
+    assert "/assets/fonts/IBMPlexMono-Regular.woff2" in service_worker.text
+    assert "/assets/fonts/IBMPlexMono-SemiBold.woff2" in service_worker.text
     assert "/assets/tradingops-logo.png" in service_worker.text
     assert "/assets/tradingops-icon.svg" in service_worker.text
     assert "/assets/icon.svg" not in service_worker.text
@@ -720,6 +808,11 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
     assert logo.status_code == 200
     assert logo.headers["content-type"] == "image/png"
     assert len(logo.content) > 10_000
+
+    font = get(app, "/assets/fonts/IBMPlexSansSC-Regular.woff2")
+    assert font.status_code == 200
+    assert font.headers["content-type"] == "font/woff2"
+    assert font.content.startswith(b"wOF2")
 
     icon = get(app, "/assets/tradingops-icon.svg")
     assert icon.status_code == 200

@@ -1,6 +1,7 @@
 {
-  "name": "trading-control-plane-notilt-gateway",
+  "name": "tradingops-notilt-gateway",
   "version": "0.1.0",
+  "license": "GPL-3.0-only OR LicenseRef-TradingOPS-Commercial-1.0",
   "private": true,
   "type": "module",
   "engines": {

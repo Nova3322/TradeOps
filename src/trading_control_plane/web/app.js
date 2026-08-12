@@ -1,10 +1,17 @@
-function navigate(path) { history.pushState({}, '', path); route(); }
+function navigate(path) { focusNextRouteHeading = true; history.pushState({}, '', path); route(); }
 function updateActiveNav() {
-  document.querySelectorAll('nav a').forEach((link) => {
+  const proposalSource = new URLSearchParams(location.search).get('from');
+  document.querySelectorAll('#sidebar nav a').forEach((link) => {
     const href = link.getAttribute('href');
-    const active = location.pathname === href || (href === '/venues' && location.pathname.startsWith('/venues/'));
+    const active = location.pathname === href
+      || (href === '/venues' && location.pathname.startsWith('/venues/'))
+      || (href === '/reviews' && location.pathname.startsWith('/proposals/') && proposalSource === 'reviews')
+      || (href === '/proposals' && location.pathname.startsWith('/proposals/') && proposalSource !== 'reviews')
+      || (href === '/campaigns' && location.pathname.startsWith('/campaigns/'));
     link.classList.toggle('active', active);
-    if (active) link.setAttribute('aria-current', 'page');
+    if (active) {
+      link.setAttribute('aria-current', 'page');
+    }
     else link.removeAttribute('aria-current');
   });
 }
@@ -264,7 +271,7 @@ function applyTheme(preference, {persist = false} = {}) {
   document.documentElement.dataset.theme = resolved;
   document.documentElement.dataset.themePreference = normalizedPreference;
   updatePreferenceDropdown('theme', normalizedPreference);
-  if (themeColorMeta) themeColorMeta.content = resolved === 'dark' ? '#0b100f' : '#f4f6f3';
+  if (themeColorMeta) themeColorMeta.content = resolved === 'dark' ? '#0d1110' : '#f5f4f0';
   if (persist) localStorage.setItem(THEME_STORAGE_KEY, normalizedPreference);
 }
 preferredThemeMedia.addEventListener?.('change', () => {

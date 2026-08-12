@@ -127,7 +127,7 @@ def test_password_policy_requires_a_real_secret() -> None:
 
 def test_login_attempt_limiter_locks_and_clears_a_credential_scope() -> None:
     limiter = LoginAttemptLimiter(max_attempts=2, lockout=timedelta(minutes=2))
-    key = "127.0.0.1:kelly_oooo"
+    key = "127.0.0.1:telegram-owner"
 
     assert limiter.fail(key, now=NOW) is None
     assert limiter.fail(key, now=NOW + timedelta(seconds=1)) == 120

@@ -1,42 +1,30 @@
-TradingOPS Licensing Notice
+TradingOPS Dual-License Notice
 
-Copyright (c) 2026 TradingOPS contributors.
+SPDX-License-Identifier: GPL-3.0-only OR LicenseRef-TradingOPS-Commercial-1.0
 
-The original TradingOPS software in this repository is source-available. It is
-not offered under an OSI-approved open-source license.
+Copyright (c) 2026 COPYRIGHT_HOLDER.
 
-You may use the original TradingOPS software under either of these alternatives:
+You may use the original TradingOPS software in this repository under either:
 
-1. Combined Community License
+1. GNU General Public License version 3 only (GPL-3.0-only). The complete,
+   unmodified license text is in `LICENSES/GPL-3.0-only.txt`; or
+2. a separate TradingOPS Commercial License executed with the applicable
+   copyright holder. The repository reference terms are in
+   `LICENSES/LicenseRef-TradingOPS-Commercial-1.0.txt`.
 
-   BOTH of the following documents apply as one combined license:
+The GPL permits commercial use, modification, and distribution. Its copyleft
+and source-availability obligations apply when covered works are conveyed.
+Organizations that need closed-source integration, proprietary distribution,
+or negotiated warranties, support, indemnities, or other commercial terms may
+obtain a separate commercial license. The commercial option does not reduce or
+replace rights already received under the GPL.
 
-   - LICENSES/PolyForm-Noncommercial-1.0.0.md
-   - LICENSES/TradingOPS-Community-Team-Exception-1.0.md
+Commercial license contact: COMMERCIAL_EMAIL
 
-   The PolyForm text is reproduced unchanged. The TradingOPS exception grants
-   member-owned trading use to eligible natural persons and Community Teams,
-   and replaces PolyForm's permission for noncommercial organizations for this
-   software. PolyForm Noncommercial 1.0.0 is not offered on a standalone basis.
+Unless a file states otherwise, original source code and documentation in this
+repository use the SPDX expression above. Third-party software, fonts, generated
+artifacts, and separately identified files remain under their own licenses. See
+`THIRD_PARTY_NOTICES.md`, `sbom.cdx.json`, and `LICENSES/`.
 
-2. TradingOPS Commercial License
-
-   Commercial rights require a separate written agreement executed by the
-   applicable copyright holder and the licensee. The agreement template is at:
-
-   - LICENSES/TradingOPS-Commercial-License-1.0.md
-
-   The repository copy of that template is not an offer and grants no
-   commercial rights by itself. SaaS, hosted or managed service, white-label,
-   and resale rights are separate commercial scopes; permission for one does
-   not imply permission for another.
-
-If you do not have a fully executed TradingOPS Commercial License, your rights
-are limited to the Combined Community License.
-
-Third-party components, dependencies, generated artifacts, and separately
-identified files remain under their respective licenses. No trademark rights
-are granted.
-
-Required Notice: Copyright (c) 2026 TradingOPS contributors.
-Required Notice: TradingOPS Community use requires both PolyForm Noncommercial 1.0.0 and the TradingOPS Community Team Exception 1.0; organizational and commercial use requires a separately executed TradingOPS Commercial License.
+No trademark rights are granted. THE SOFTWARE IS PROVIDED WITHOUT WARRANTY TO
+THE EXTENT PERMITTED BY THE APPLICABLE LICENSE.

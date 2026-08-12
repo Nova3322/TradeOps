@@ -1,0 +1,40 @@
+name: Bug report
+description: Report a reproducible TradingOPS defect without sensitive data.
+title: "[Bug]: "
+labels: ["bug", "triage"]
+body:
+  - type: markdown
+    attributes:
+      value: Never include credentials, private account data, orders, balances, or unredacted logs.
+  - type: input
+    id: version
+    attributes:
+      label: Version or commit
+    validations:
+      required: true
+  - type: dropdown
+    id: mode
+    attributes:
+      label: Environment
+      options: [SHADOW, TESTNET, LIVE read-only, Local fixture]
+    validations:
+      required: true
+  - type: textarea
+    id: behavior
+    attributes:
+      label: Expected and observed behavior
+      description: Include minimal redacted steps and the displayed data status/time.
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Redacted evidence
+      description: Link or paste only synthetic/redacted evidence.
+  - type: checkboxes
+    id: safety
+    attributes:
+      label: Safety check
+      options:
+        - label: I removed secrets, personal identifiers, accounts, balances, wallet addresses, and private logs.
+          required: true

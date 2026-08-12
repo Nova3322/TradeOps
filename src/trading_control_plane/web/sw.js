@@ -1,4 +1,4 @@
-const CACHE = 'trading-shell-v147';
+const CACHE = 'trading-shell-v166';
 const SHELL = [
   '/assets/styles.css',
   '/assets/app-core.js',
@@ -11,6 +11,10 @@ const SHELL = [
   '/assets/reporting.js',
   '/assets/accounts.js',
   '/assets/app.js',
+  '/assets/fonts/IBMPlexSansSC-Regular.woff2',
+  '/assets/fonts/IBMPlexSansSC-SemiBold.woff2',
+  '/assets/fonts/IBMPlexMono-Regular.woff2',
+  '/assets/fonts/IBMPlexMono-SemiBold.woff2',
   '/assets/tradingops-logo.png',
   '/assets/tradingops-icon.svg',
   '/manifest.webmanifest',

@@ -1,61 +1,64 @@
 # Contributing to TradingOPS
 
+Thank you for improving a fail-closed trading governance system. Contributions
+must preserve the operational and licensing boundaries below.
+
 ## Development setup
 
 ```bash
+cp .env.example .env.local
 uv sync --frozen
-./scripts/run_compose.sh
+./scripts/run_local.sh
 ```
 
-Use a disposable PostgreSQL database whose name ends in `_test` for integration tests. Do not point
-tests, restore scripts, migrations, screenshots, or fixtures at a production or shared trading
-database.
+The local launcher generates private runtime secrets under `.local/`, creates a
+local administrator named by `TRADING_LOCAL_ADMIN_USERNAME`, forces every
+external side-effect switch off, and uses a PostgreSQL database isolated from
+production.
 
 ## Change rules
 
-- Reuse the existing User, Team, Account, Proposal, Approval, Risk, execution, receipt, and audit
-  sources before adding an entity or state store.
-- Server-side authorization, risk, idempotency, account scope, and audit checks are mandatory; UI
-  hiding is not enforcement.
-- Keep SHADOW, TESTNET, and LIVE facts explicit and isolated. Missing or stale data is not zero or
-  live data.
-- New external side effects require stable idempotency, query-before-retry, unknown-outcome handling,
-  versioned evidence, and disabled-by-default process and database gates.
-- Never commit secrets, dumps, `.env.local`, `.local/`, private screenshots, account identifiers, or
-  unredacted logs.
+- Reuse the existing User, Workspace, Team, Account, Proposal, Approval, Risk,
+  execution, receipt, and audit sources before adding another entity or store.
+- Server-side authorization, independent review, scope, risk, idempotency, and
+  audit checks are authoritative. UI visibility is not authorization.
+- Keep SHADOW, TESTNET, and LIVE explicit and isolated. Missing, stale, or
+  rate-limited data is neither real-time data nor zero.
+- New external side effects require durable idempotency, query-before-retry,
+  unknown-outcome handling, reconciliation, audit, and disabled-by-default
+  process and database gates.
+- Never commit secrets, `.env.local`, `.local/`, database dumps, private
+  strategies, account identifiers, balances, unredacted logs, or raw screenshots.
+- Use synthetic fixture names and values in code, tests, docs, and screenshots.
 
-## Contributor license grant
+## Contributor License Agreement
 
-By intentionally submitting a contribution to TradingOPS, you represent that you have the right to
-submit it and grant the TradingOPS project maintainers, acting as licensors for the project, a
-perpetual, worldwide, royalty-free, irrevocable, non-exclusive copyright license to reproduce,
-modify, prepare derivative works of, publicly display, publicly perform, distribute, sublicense, and
-relicense the contribution as part of TradingOPS under both:
+Every contribution requires acceptance of [`CLA.md`](CLA.md). The CLA does not
+transfer copyright; it gives the project the rights required for the
+`GPL-3.0-only OR LicenseRef-TradingOPS-Commercial-1.0` dual-license model.
 
-1. the Combined Community License identified in `LICENSE`; and
-2. separately executed TradingOPS Commercial Licenses.
-
-You also grant a corresponding patent license for patent claims you can license that are necessarily
-infringed by the contribution alone or by its combination with TradingOPS. This grant does not
-transfer your copyright ownership. It does allow the project to maintain the dual-license model,
-including paid organizational, SaaS, hosted, white-label, and resale scopes.
-
-Submission through a pull request or another intentional contribution channel constitutes acceptance
-of this grant. Do not submit employer-owned, client-owned, third-party, or encumbered material unless
-you have written authority to make this grant. The pull request template records the contributor's
-confirmation.
+Do not submit employer-owned, customer-owned, third-party, or encumbered
+material without written authority. Identify third-party code and licenses in
+the pull request.
 
 ## Verification
 
 ```bash
-uv run ruff format --check src tests
-uv run ruff check src tests
+UV_CACHE_DIR=/tmp/tradingops-uv uv sync --frozen
+uv run ruff check .
 uv run mypy src
-TEST_DATABASE_URL='postgresql+psycopg://.../trading_test' uv run pytest
-uv run trading-doctor --skip-database
-docker compose --env-file .local/compose/runtime.env --profile console config --quiet
+TEST_DATABASE_URL='postgresql+psycopg://USER:PASSWORD@HOST:PORT/trading_test' uv run pytest
+python scripts/generate_publication_metadata.py --check
+python scripts/verify_public_release.py
 ```
 
-Changes to migrations, APIs, pages, or operational behavior must include the corresponding database,
-backend, actual-page/runtime, and automated-test evidence. Keep unrelated untracked artifacts out of
-the commit.
+Use a disposable PostgreSQL database whose name ends in `_test`. Never point
+migrations, restores, tests, screenshots, or fixtures at a shared or production
+database.
+
+## Pull requests
+
+Keep changes small, document code/API/page/runtime/test evidence, and state any
+migration, security, license, privacy, or compatibility impact. Maintainers may
+request a threat model for changes touching identity, credentials, risk,
+execution, capital, signing, or external side effects.

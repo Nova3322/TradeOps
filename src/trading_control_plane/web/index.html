@@ -3,28 +3,34 @@
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-    <meta name="theme-color" content="#0b100f">
+    <meta name="theme-color" content="#101010">
     <meta name="description" content="生产交易提案、审核、执行、资金与风险控制台">
     <link rel="manifest" href="/manifest.webmanifest">
     <link rel="icon" href="/assets/tradingops-logo.png" type="image/png">
     <link rel="apple-touch-icon" href="/assets/tradingops-logo.png">
-    <link rel="stylesheet" href="/assets/styles.css?v=78">
+    <link rel="preload" href="/assets/fonts/IBMPlexSansSC-Regular.woff2" as="font" type="font/woff2" crossorigin>
+    <link rel="preload" href="/assets/fonts/IBMPlexSansSC-SemiBold.woff2" as="font" type="font/woff2" crossorigin>
+    <link rel="preload" href="/assets/fonts/IBMPlexMono-Regular.woff2" as="font" type="font/woff2" crossorigin>
+    <link rel="preload" href="/assets/fonts/IBMPlexMono-SemiBold.woff2" as="font" type="font/woff2" crossorigin>
+    <link rel="stylesheet" href="/assets/styles.css?v=88">
     <title>交易控制台</title>
   </head>
   <body>
+    <a class="skip-link" href="#main">跳到主要内容</a>
     <div class="app-shell">
       <header class="topbar">
         <a class="brand" href="/" data-link aria-label="交易控制台首页">
           <span class="brand-mark" aria-hidden="true"><img src="/assets/tradingops-logo.png" alt=""></span>
-          <span><b>交易控制台</b><small>生产交易管理</small></span>
+          <span><b>交易控制台</b><small>受控交易运营</small></span>
         </a>
         <div class="topbar-actions">
+          <time id="current-date" class="current-date"></time>
           <span id="environment-badge" class="env-badge">控制台</span>
           <div id="user-menu" class="user-menu" hidden>
             <button id="identity-chip" class="identity-chip" type="button" aria-haspopup="dialog" aria-expanded="false" aria-controls="user-menu-panel"></button>
             <section id="user-menu-panel" class="user-menu-panel" role="dialog" aria-label="用户菜单" hidden>
               <header class="user-menu-head"><div><small>登录身份</small><strong data-user-menu-name>—</strong></div><span data-user-menu-auth>密码登录</span></header>
-              <dl class="user-menu-context"><div><dt>当前工作区</dt><dd data-user-menu-workspace>—</dd></div><div><dt>当前空间</dt><dd data-user-menu-team>—</dd></div><div><dt>当前职责</dt><dd data-user-menu-role>—</dd></div></dl>
+              <dl class="user-menu-context"><div><dt>当前工作区</dt><dd data-user-menu-workspace>—</dd></div><div><dt>当前团队</dt><dd data-user-menu-team>—</dd></div><div><dt>当前职责</dt><dd data-user-menu-role>—</dd></div></dl>
               <a class="user-menu-api-link" href="/profile/api-access" data-link><span><small>个人中心</small><b>API 接入</b></span><strong>管理自己的 API Agent</strong></a>
               <section class="user-preferences" aria-labelledby="personal-preferences-title">
                 <div class="user-menu-section-head"><div><small>个人设置</small><h2 id="personal-preferences-title">个人偏好</h2></div></div>
@@ -103,7 +109,7 @@
       </aside>
       <button id="nav-backdrop" class="nav-backdrop" type="button" aria-label="关闭主导航" hidden></button>
 
-      <main id="main" class="main-content" aria-live="polite">
+      <main id="main" class="main-content" tabindex="-1">
         <section class="loading-state"><span class="spinner"></span><p>正在读取当前事实…</p></section>
       </main>
     </div>
@@ -154,15 +160,15 @@
       </form>
     </dialog>
     <div id="toast" class="toast" role="status" aria-live="polite"></div>
-    <script defer src="/assets/app-core.js?v=176"></script>
-    <script defer src="/assets/workspace.js?v=171"></script>
-    <script defer src="/assets/signals.js?v=173"></script>
-    <script defer src="/assets/proposals.js?v=170"></script>
+    <script defer src="/assets/app-core.js?v=190"></script>
+    <script defer src="/assets/workspace.js?v=178"></script>
+    <script defer src="/assets/signals.js?v=174"></script>
+    <script defer src="/assets/proposals.js?v=175"></script>
     <script defer src="/assets/risk.js?v=170"></script>
     <script defer src="/assets/execution.js?v=170"></script>
-    <script defer src="/assets/capital.js?v=170"></script>
+    <script defer src="/assets/capital.js?v=173"></script>
     <script defer src="/assets/reporting.js?v=172"></script>
     <script defer src="/assets/accounts.js?v=172"></script>
-    <script defer src="/assets/app.js?v=170"></script>
+    <script defer src="/assets/app.js?v=174"></script>
   </body>
 </html>

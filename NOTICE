@@ -1,18 +1,16 @@
 TradingOPS
-Copyright (c) 2026 TradingOPS contributors.
+Copyright (c) 2026 COPYRIGHT_HOLDER.
 
-Original TradingOPS code is source-available under either:
+Original TradingOPS code and documentation are offered under:
 
-1. the Combined Community License, consisting of both
-   PolyForm Noncommercial 1.0.0 and the TradingOPS Community Team Exception
-   1.0; or
-2. a separately executed TradingOPS Commercial License.
+  GPL-3.0-only OR LicenseRef-TradingOPS-Commercial-1.0
 
-The repository's commercial agreement template grants no rights until signed
-by both the applicable copyright holder and the licensee.
+The GPL option permits commercial use, modification, and distribution subject
+to its terms. The commercial option requires a separately executed agreement
+and is intended for closed-source integration, proprietary distribution, and
+other negotiated terms.
 
-Required Notice: Copyright (c) 2026 TradingOPS contributors.
-Required Notice: TradingOPS Community use requires both PolyForm Noncommercial 1.0.0 and the TradingOPS Community Team Exception 1.0; organizational and commercial use requires a separately executed TradingOPS Commercial License.
+Commercial license contact: COMMERCIAL_EMAIL
 
-See LICENSE and LICENSES/ for the controlling terms. Third-party components
-remain under their respective licenses.
+Third-party components retain their own licenses. See LICENSE,
+THIRD_PARTY_NOTICES.md, sbom.cdx.json, and LICENSES/.

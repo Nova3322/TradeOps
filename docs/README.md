@@ -1,69 +1,12 @@
-# Trading 产品化文档中心
+# TradingOPS public documentation
 
-> 状态日期：2026-07-19
-> 实盘效力：无；文档不签发交易、资金或部署授权
-
-本目录同时承载当前实现基线和长期产品愿景。阅读时必须区分“代码已实现”“后续目标”“研究/发布验收材料”；未实现的长期描述不得被当作当前业务入口、数据真源或建表理由。
-
-## 权威顺序
-
-| 顺序 | 文档 | 负责内容 |
-| ---: | --- | --- |
-| 1 | [交易系统总体方案](../交易系统总体方案.md) | 资本所有权、风险底线、唯一订单出口和长期产品愿景 |
-| 2 | [当前实现基线](08-implementation/当前实现基线.md) | 当前代码、Schema、入口、默认关闭和缺口 |
-| 3 | [核心业务不变量](08-implementation/核心业务不变量.md) | 当前实现必须保持的业务语义和验证 |
-| 4 | [决策与研究登记](00-governance/待确认决策清单.md) | 决策状态；旧的同时交付结论受当前渐进式路线修订 |
-| 5 | [文档治理与权威矩阵](00-governance/文档治理与权威矩阵.md) | 文档状态、冲突和废弃规则 |
-| 6 | 各专项文档 | 其领域的长期合同与未来验收输入 |
-
-发生冲突时：风险底线不能放宽；当前能力以实现基线和可运行测试为准；长期愿景按端到端路线逐步实现。
-
-## 实施文档
-
-`docs/08-implementation/` 只保留四份长期文档：
-
-- [当前实现基线](08-implementation/当前实现基线.md)
-- [核心业务不变量](08-implementation/核心业务不变量.md)
-- [后续端到端开发路线](08-implementation/后续端到端开发路线.md)
-- [本次架构收敛记录](08-implementation/本次架构收敛记录.md)
-
-不再为每张表、每个状态、每个哈希、每次迁移或每个内部动作创建 WP/evidence 文档。代码、测试、迁移和 Git 历史足以覆盖的逐包说明不重复保存。
-
-## 专项文档地图
-
-| 领域 | 文档 | 当前用途 |
-| --- | --- | --- |
-| 治理 | [文档治理与权威矩阵](00-governance/文档治理与权威矩阵.md) | 权威、状态、冲突和历史材料规则 |
-| 治理 | [术语表](00-governance/术语表.md) | 统一资金、风险、授权、执行和状态词义 |
-| 治理 | [决策与研究登记](00-governance/待确认决策清单.md) | 决策与外部事实登记 |
-| 产品 | [产品需求文档](01-product/产品需求文档.md) | 完整愿景、角色、用户旅程和非目标 |
-| 产品 | [用户旅程与交互规格](01-product/用户旅程与交互规格.md) | Web/PWA、Telegram 和异常交互的未来合同 |
-| 产品 | [身份权限与审批矩阵](01-product/身份权限与审批矩阵.md) | 内部身份、作用域、审批和职责分离 |
-| 领域 | [系统架构与部署拓扑](02-domain/系统架构与部署拓扑.md) | 长期组件与故障域；当前实现以基线为准 |
-| 领域 | [领域模型与状态机](02-domain/领域模型与状态机.md) | 核心状态语义；不得据此新增重复当前/历史/投影表 |
-| 领域 | [风险引擎规格](02-domain/风险引擎规格.md) | 风险口径和长期政策；纯计算优先 |
-| 合同 | [API、事件、数据与审计契约](03-contracts/API事件数据与审计契约.md) | 长期接口合同；当前业务 API 以实现基线和代码为准 |
-| 合同 | [Instrument Catalog 合同](03-contracts/市场数据与Instrument-Catalog合同.md) | 标的身份、精度、状态和新鲜度 |
-| 合同 | [财务对账与 PnL](03-contracts/财务对账与PnL口径.md) | 成交、费用、资金费和 PnL 口径 |
-| 执行 | [OMS/VenueAdapter 规范](04-execution/OMS-Freqtrade-VenueAdapter执行规范.md) | 唯一订单所有权的长期合同；当前已有两个默认关闭的窄 TESTNET 适配合同，不存在通用 Freqtrade 平台 |
-| 执行 | [Binance 验收清单](04-execution/Binance执行认证清单.md) | 未来发布验证清单，不是证书软件平台需求 |
-| 执行 | [Hyperliquid 验收清单](04-execution/Hyperliquid执行认证清单.md) | 未来发布验证清单，不是证书软件平台需求 |
-| 执行 | [Vault 与 CTO](04-execution/Vault与CTO资金规范.md) | NoTilt 三链只读、统一净值、持久化未签名计划和链上回执验证已实现；真实划转 Gate 关闭 |
-| 质量 | [安全与威胁模型](05-quality/安全与威胁模型.md) | 一般安全原则和风险边界 |
-| 质量 | [测试验证与发布计划](05-quality/测试验证与发布计划.md) | 按已实现端到端流程逐步扩展验证 |
-| 运维 | [SLO/Runbook](06-operations/SLO可观测性故障恢复与Runbook.md) | 故障降级、恢复和未来生产运维 |
-| 运维 | [源码发布、配置、升级与恢复](06-operations/开源部署配置升级与恢复.md) | 许可边界、一条命令、Compose、默认安全、诊断、能力矩阵和数据库演练 |
-| 运维 | [实施路线图](06-operations/实施路线图与工作分解.md) | 与当前端到端路线一致的里程碑 |
-| 登记 | [主策略参数与能力认证登记表](07-registers/主策略参数与能力认证登记表.md) | 研究与未来发布记录，不驱动持久化证书平台 |
-| 登记 | [需求追踪与证据矩阵](07-registers/需求追踪与证据矩阵.md) | 长期需求追踪；当前结果以自动测试和 Git 为证据 |
-
-## 开发与文档规则
-
-1. 完整愿景可以一次定义，但工程按可运行端到端用户流程逐步交付。
-2. 每个里程碑必须形成一个用户可操作、可拒绝、可恢复的流程。
-3. 未开发能力保持关闭，不为其预建通用服务、权限语言、证书、证据包、快照或绑定平台。
-4. 派生值使用纯函数或查询；当前状态优先进入核心对象；审计需求优先使用 `audit_events`。
-5. 只有不可替代的权威状态、跨重启保存需求或不可逆外部副作用，才足以新增持久实体。
-6. WP、迁移、表、服务、测试、文档和代码行数都不是进度指标。
-7. 专业认证与发布证据在真实适配器和外部副作用出现后按实际范围验证，不提前工程化成平台。
-8. 文档必须区分已实现的 SHADOW Web/PWA、Mock Telegram、Binance/Hyperliquid Core 窄合同，和尚未实现的托管身份、真实 Telegram Bot、真实账户验证、HIP-3 与实盘发送能力。
+- [Architecture and safety boundary](ARCHITECTURE.md)
+- [API quickstart](API_QUICKSTART.md)
+- [AI/API quickstart in Chinese](AI_API_QUICKSTART.md)
+- [Competitive positioning](COMPETITIVE_POSITIONING.md)
+- [Public repository boundary](PUBLICATION_BOUNDARY.md)
+- [Release process](RELEASING.md)
+- [Git history cleanup plan](security/HISTORY_CLEANUP_PLAN.md)
+- [Security policy](../SECURITY.md)
+- [Governance](../GOVERNANCE.md)
+- [Roadmap](../ROADMAP.md)

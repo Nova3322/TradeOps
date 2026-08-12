@@ -17,6 +17,7 @@ const preferenceSelects = new Map(
   [...document.querySelectorAll('[data-preference-select]')].map(element => [element.dataset.preferenceSelect, element]),
 );
 const themeColorMeta = document.querySelector('meta[name="theme-color"]');
+const currentDate = document.querySelector('#current-date');
 const mobileNavToggle = document.querySelector('#mobile-nav-toggle');
 const mobileSessionSummary = document.querySelector('#mobile-session-summary');
 const navBackdrop = document.querySelector('#nav-backdrop');
@@ -82,21 +83,22 @@ function normalizeThemePreference(value) {
 
 let currentLanguage = normalizeLanguagePreference(localStorage.getItem(LANGUAGE_STORAGE_KEY));
 let currentThemePreference = 'system';
+let focusNextRouteHeading = false;
 
 const ENGLISH_EXACT = new Map(Object.entries({
-  '交易控制台':'Trading Console', '交易控制台首页':'Trading Console home', '生产交易管理':'Production trading operations', '生产环境':'Production',
-  '中英切换':'Chinese / English', '切换中英文':'Switch between Chinese and English', '主题偏好':'Theme preference', '界面语言':'Language', '主题模式':'Theme', '跟随系统':'System', '浅色':'Light', '深色':'Dark', '菜单':'Menu',
+  '交易控制台':'Trading Console', '交易控制台首页':'Trading Console home', '生产交易管理':'Production trading operations', '受控交易运营':'Controlled trading operations', '生产环境':'Production',
+  '中英切换':'Chinese / English', '切换中英文':'Switch between Chinese and English', '切换':'Switch', '主题偏好':'Theme preference', '界面语言':'Language', '主题模式':'Theme', '跟随系统':'System', '浅色':'Light', '深色':'Dark', '菜单':'Menu',
   '用户菜单':'User menu', '登录身份':'Sign-in identity', '密码登录':'Password sign-in', '内部会话':'Internal session',
-  '当前工作区':'Current workspace', '当前空间':'Current space', '当前职责':'Current role', '个人设置':'Personal settings', '个人偏好':'Preferences',
+  '当前工作区':'Current workspace', '当前空间':'Current space', '当前团队':'Current team', '当前职责':'Current role', '个人设置':'Personal settings', '个人偏好':'Preferences',
   '安全':'Security', '修改登录密码':'Change sign-in password', '展开':'Expand', '当前密码':'Current password', '新密码':'New password', '确认新密码':'Confirm new password',
   '修改后会撤销其他设备和浏览器中的旧会话。':'Changing your password revokes older sessions on other devices and browsers.', '更新密码':'Update password',
   '两次输入的新密码不一致。':'The new-password entries do not match.', '密码已更新；其他旧会话已撤销':'Password updated; older sessions have been revoked',
   '只读用户':'Observer', '提案发起人':'Proposer', '审核人':'Reviewer', '交易运维人员':'Trading operator',
   '资金管理员':'Treasury administrator', '系统管理员':'Super administrator',
-  '主导航':'Main navigation', '工作台':'Workspace', '空间配置':'Space setup', '治理与安全':'Governance and safety', '当前范围':'Current scope', '当前任务':'Current tasks', '实时信号':'Live signals', '实时机会':'Live opportunities', 'Webhook 信号':'Webhook signals', '审核队列':'Review queue',
-  '交易任务':'Trades', '绩效报表':'Performance reports', '交易模式':'Trading mode', '影子模式':'Shadow mode', '通知中心':'Notification center', '系统状态':'System status', '资金':'Capital', '异常':'Exceptions',
+  '主导航':'Main navigation', '工作台':'Workspace', '空间配置':'Space setup', '治理与安全':'Governance and safety', '交易流程':'Trade workflow', '运行与风控':'Operations and risk', '团队设置':'Team settings', '当前范围':'Current scope', '当前任务':'Current tasks', '实时信号':'Live signals', '实时机会':'Live opportunities', 'Webhook 信号':'Webhook signals', '审核队列':'Review queue',
+  '交易任务':'Trades', '绩效报表':'Performance reports', '交易模式':'Trading mode', '影子模式':'Shadow mode', '通知中心':'Notification center', '风险控制':'Risk controls', '系统状态':'System status', '资金':'Capital', '异常':'Exceptions',
   '交易账户':'Exchange accounts', '成员权限':'Access control',
-  '业务数据库已连接':'Business database connected', '数据缺失时自动阻止交易':'Missing data blocks trading automatically',
+  '业务数据库已连接':'Business database connected', '数据缺失时自动阻止交易':'Missing data blocks trading automatically', '跳到主要内容':'Skip to main content',
   '退出当前会话':'Sign out', '正在读取当前事实…':'Loading current data…',
   '突破榜单机会':'Breakout opportunity', '保存候选并提交审核':'Save candidate and submit for review',
   '默认配置':'Default settings', '约 100 USDT 名义仓位 · 1 USDT 最大风险 · 2% 失效距离':'About 100 USDT notional · 1 USDT maximum risk · 2% invalidation distance',
@@ -144,7 +146,7 @@ const ENGLISH_EXACT = new Map(Object.entries({
   '当前身份尚未分配业务职责':'No business responsibilities are assigned to this account', '风险提醒':'Risk alert',
   '处理风险异常':'Resolve risk exceptions', '查看风险异常':'View risk exceptions', '新增风险受限':'New risk restricted',
   '查看限制与恢复条件':'View restrictions and recovery conditions', '需要审核':'Review required', '查看审核队列':'View review queue',
-  '交易运行中':'Trades are active', '查看运行中交易任务':'View active trades', '当前无待办':'Nothing requires action',
+  '交易运行中':'Trades are active', '查看运行中交易任务':'View active trades', '当前无待办':'Nothing requires action', '独立审核待办':'Independent review tasks',
   '交易待启动':'Trade setup pending', '查看当前提案':'View current proposals', '启动窗口已过期':'Launch window expired', '有效期 / 结果':'Validity / outcome',
   '审核已批准，但启动窗口已过期':'Approved, but the launch window has expired',
   '审核结论已保留，但不能再运行风险检查、签发授权或创建交易任务。需要按当前市场条件创建新提案。':'The review decision is retained, but risk checks, authorization, and trade creation are no longer allowed. Create a new proposal using current market conditions.',
@@ -156,7 +158,7 @@ const ENGLISH_EXACT = new Map(Object.entries({
   '市场观察':'Market watch', '开始新的判断':'Start a new thesis', '继续观察市场机会':'Continue watching opportunities',
   '查看突破榜单机会':'View breakout opportunities', '创建人工提案':'Create manual proposal', '系统边界':'System controls',
   '当前控制状态':'Current control state', '站点环境':'Runtime', '风险政策':'Risk policy', '自动加仓':'Automatic scaling',
-  '安全原则':'Safety rule', '数据缺失即阻断':'Missing data blocks trading', '连接不可用':'Connection unavailable',
+  '安全原则':'Safety rule', '数据缺失即阻断':'Missing data blocks trading', '连接不可用':'Connection unavailable', '风险边界':'Risk boundary',
   '人工提案':'Manual proposal', '刷新机会':'Refresh opportunities', '突破榜单数据源':'Breakout data source', '信号源设置':'Signal source settings', '提案资格':'Proposal eligibility',
   '外部机会当前不可用':'External opportunities are unavailable', '当前候选':'Current candidates', '可创建提案':'Eligible proposals',
   '可交易合约':'Tradable instruments', '数据截止':'Data as of', '数据源状态':'Source status', '不可用':'Unavailable',
@@ -182,12 +184,24 @@ const ENGLISH_EXACT = new Map(Object.entries({
   '当前提案':'Current proposals', '历史提案':'Proposal history', '历史记录':'History', '已批准':'Approved', '已进入交易':'Entered trading',
   '等待审核':'Waiting for review', '高风险':'High risk', '30 分钟内到期':'Expires within 30 minutes',
   '需两人审核':'Two reviewers required', '最早到期':'Earliest expiry',
-  '待我审核':'Assigned to me', '搜索标的':'Search instrument', '全部方向':'All directions',
+  '待我审核':'Assigned to me', '搜索标的':'Search instrument', '全部方向':'All directions', '来源':'Source', '全部来源':'All sources', '系统机会':'System opportunity', '人工判断':'Manual thesis', '个结果':'results', '查看详情':'View details', '返回审核队列':'Back to review queue', '批准提案':'Approve proposal', '拒绝提案':'Reject proposal',
+  '方向 / 交易规模':'Direction / trade size', '审核进度':'Review progress', '仍需你的独立判断':'Still needs your independent decision', '审核范围':'Review scope', '审核环境范围':'Review environment scope', '选择审核环境':'Select review environment', '生产':'Production', '影子':'Shadow',
+  'Perptape 机会':'Perptape opportunity', 'Live environment · LIVE · Perptape 机会':'Live environment · LIVE · Perptape opportunity', '提案已保存':'Proposal saved', '提案流程':'Proposal workflow', '等待判断':'Awaiting decision', '风险检查':'Risk check', '尚未运行':'Not run', '短期授权':'Short-lived authorization', '尚未签发':'Not issued', '未签发':'Not issued',
+  '交易判断摘要':'Trading thesis summary', '这笔交易要做什么':'What this trade intends to do', '估算名义价值':'Estimated notional', '合约数量':'Contract quantity', '初仓':'Initial entry', '失效位置':'Invalidation level', '距触发':'From trigger', '生产账户范围':'Production account scope', '加仓触发价':'Scale-in trigger price', '创建时来源快照':'Source snapshot at creation', '创建时可用':'Available at creation', '快照时间':'Snapshot time',
+  '已保存参数':'Saved parameters', '提案范围':'Proposal scope', '不可编辑':'Read only', '限价':'Limit price', '来源候选':'Source candidate', '来源快照时间':'Source snapshot time',
+  '审核历史':'Review history', '尚无审核记录':'No review record yet', '审核人的独立判断会按时间出现在这里。':'Independent reviewer decisions appear here chronologically.',
+  '需要你的独立判断':'Your independent decision is required', '审核意见':'Review note', '说明你核对了什么，以及判断依据':'State what you checked and the basis for your decision', '已核对交易逻辑、保存参数与最大风险边界':'Checked the trade thesis, saved parameters, and maximum-risk boundary',
+  '批准或拒绝前都需要再次确认；不会直接下单。':'Approval or rejection requires final confirmation; neither places an order.', '系统允许开多少':'How much the system may open', '等待审核通过':'Waiting for approval',
+  '风险检查会读取服务端最新仓位、权益、受管资金、保护和总风险容量。':'The risk check reads current server-side positions, equity, governed capital, protection, and total risk capacity.', '限时授权':'Time-limited authorization', '这份许可还能做什么':'What this authorization permits', '风险通过后可签发':'Available only after risk passes',
+  '授权同时限制有效期、数量、风险金额、权限范围和可用加仓次数。':'Authorization is bounded by expiry, quantity, risk amount, permission scope, and available scale-ins.',
+  '生产与影子提案保持独立标记；切换筛选不会改变团队交易模式。':'Production and Shadow proposals remain distinctly labelled. Filtering does not change the team trading mode.',
+  '统一汇总当前团队内需要你独立判断、尚未到期且尚未投票的提案。生产与影子环境始终分开标记；批准不等于下单。':'This inbox combines current-team proposals that still need your independent decision, have not expired, and have not received your vote. Production and Shadow stay distinctly labelled; approval never places an order.',
   '风险':'Risk', '全部档位':'All levels', '提交时间':'Submitted', '到期':'Expires', '状态':'Status',
   '数量':'Quantity', '最多':'Up to', '人工':'Manual', '版本':'Version', '当前没有待你审核的提案':'No proposals are waiting for your review',
   '当前没有进行中的提案':'No active proposals', '当前没有历史提案':'No proposal history',
-  '返回当前提案':'Back to current proposals', '没有符合条件的提案':'No proposals match these filters',
+  '返回当前提案':'Back to current proposals', '返回历史提案':'Back to proposal history', '返回审核队列':'Back to review queue', '没有符合条件的提案':'No proposals match these filters',
   '默认生产账户':'Default production account', '创建人':'Created by', '系统自动创建':'Created automatically', '已冻结来源快照':'Frozen source snapshot',
+  '请清除搜索或调整筛选。':'Clear the search or adjust the filters.',
   '风险参数来自管理员保存的默认配置。':'Risk parameters use the administrator-saved defaults.',
   '提案已冻结，仍需人工审核；不会自动授权或下单。':'The proposal is frozen and still requires human review; it will not authorize or place an order automatically.',
   '这里只保留已批准、已过期或已拒绝的审计记录，不会把历史数量混入当前待办。':'Only approved, expired, or rejected audit records appear here; history is not counted as current work.',
@@ -302,7 +316,8 @@ const ENGLISH_EXACT = new Map(Object.entries({
   '资金路径安全预检':'Capital-route safety preflight', '金额（USDC）':'Amount (USDC)', '输入划转金额':'Enter transfer amount',
   '我已核对资金方向与金额':'I verified the direction and amount', '最终确认并检查':'Confirm and run preflight',
   '提交只会重新校验地址、网络、资产、额度和实时安全开关。任何条件缺失都会阻断；系统不会签名、广播或发送资金。':'Submitting only revalidates the address, network, asset, limits, and live safety gate. Any missing condition blocks the operation; the system never signs, broadcasts, or transfers funds.',
-  '操作日志、阶段与回执':'Operation log, stages, and receipts', '生成无签名预检':'Build unsigned preflight',
+  '资金中心页面':'Capital center pages', '资金总览':'Capital overview', '资金路径':'Capital routes', '操作与回执':'Operations and receipts',
+  '完整':'Complete', '操作日志、阶段与回执':'Operation log, stages, and receipts', '生成无签名预检':'Build unsigned preflight',
   '申请资金库释放 → 等待 10 分钟 → 到期重新校验 → 转入已授权币安地址':'Request vault release → wait 10 minutes → revalidate → deposit to the authorized Binance address',
   '已安全阻断':'Safely blocked', '回执：未提交':'Receipt: not submitted',
   '历史资金划转':'Historical capital transfers', '尚无历史资金划转。':'No historical capital transfers.',
@@ -314,6 +329,7 @@ const ENGLISH_EXACT = new Map(Object.entries({
   '审核与发起分开':'Proposal and review are separate', '交易与资金分开':'Trading and treasury are separate',
   '身份与权限分开':'Identity and authorization are separate', '新增内部成员':'Add internal member', '展开':'Expand',
   '账户范围':'Account scope', '交易所范围':'Exchange scope', '常用模板':'Role templates', '只审核':'Review only',
+  '无需操作':'No action required', '当前身份保持只读；Perptape 恢复后会自动重连。如需形成提案，请联系提案发起人。':'This role remains read only. TradingOPS reconnects automatically after Perptape recovers; contact a proposer to create a proposal.',
   '只发起提案':'Propose only', '交易运维':'Trading operations', '创建成员':'Create member', '当前用户':'Current users',
   '现有成员':'Existing members', '已启用':'Enabled', '已停用':'Disabled', '保存权限':'Save access',
   '允许登录和使用已分配权限':'Allow sign-in and assigned permissions', '低':'Low', '中':'Medium', '高':'High',
@@ -528,7 +544,32 @@ const ENGLISH_EXACT = new Map(Object.entries({
 }));
 
 const ENGLISH_PATTERNS = [
+  [/^(生产|影子)环境 · (LIVE|SHADOW) · Perptape 机会$/, (_match, label, environment) => `${label === '生产' ? 'Production' : 'Shadow'} environment · ${environment} · Perptape opportunity`],
+  [/^(币安|Binance) · (生产|影子)账户范围 · 提案 (.+) · 版本 (\d+)$/, (_match, venue, environment, proposal, version) => `${venue === '币安' ? 'Binance' : venue} · ${environment === '生产' ? 'Production' : 'Shadow'} account scope · Proposal ${proposal} · Version ${version}`],
+  [/^剩余 (值|\d+) 小时 (值|\d+) 分钟$/, '$1 hours $2 minutes remaining'],
+  [/^(\d+) 小时 (\d+) 分钟$/, '$1 hours $2 minutes'],
+  [/^(.+) · 剩余 (\d+) 小时 (\d+) 分钟$/, '$1 · $2 hours $3 minutes remaining'],
+  [/^初仓 (.+)$/, 'Initial entry $1'],
+  [/^距触发 (.+)$/, '$1 from trigger'],
+  [/^核对名义价值、最大风险、失效位置和创建时来源快照。高风险提案需要两名不同审核人；当前已记录 (\d+) 票。剩余 (\d+) 小时 (\d+) 分钟。$/, 'Check the notional value, maximum risk, invalidation level, and creation-time source snapshot. High-risk proposals require two different reviewers; $1 votes are recorded. $2 hours $3 minutes remain.'],
+  [/^剩余 (.+)$/, '$1 remaining'],
+  [/^有效期 \/ 结果$/, 'Validity / outcome'],
+  [/^核对名义价值、最大风险、失效位置和创建时来源快照。高风险提案需要两名不同审核人；当前已记录 (\d+) 票。剩余 (.+)。$/, 'Check the notional value, maximum risk, invalidation level, and creation-time source snapshot. High-risk proposals require two different reviewers; $1 votes are recorded. $2 remains.'],
+  [/^创建提案时，Perptape 中同一精确合约、同一方向在 (.+) 同时突破。使用管理员保存的一键创建默认配置，仅创建待审核提案。 来源与参数已冻结，仅创建待审核提案；不会自动授权或下单。$/, 'At creation, the same exact Perptape contract and direction broke out across $1. Administrator-saved defaults created a pending proposal only. Source and parameters are frozen; no authorization or order is created automatically.'],
   [/^([0-9a-f]+…) · 查看详情$/i, '$1 · view details'],
+  [/^(\d+) 笔提案等待独立审核$/, '$1 proposals require independent review'],
+  [/^(.+) · 系统机会$/, '$1 · system opportunity'],
+  [/^(.+) · 人工判断$/, '$1 · manual thesis'],
+  [/^名义价值 (.+)$/, 'Notional $1'],
+  [/^合约数量 (.+)$/, 'Contract quantity $1'],
+  [/^最多损失 (.+)$/, 'Maximum loss $1'],
+  [/^已 (\d+) \/ (\d+)$/, '$1 of $2'],
+  [/^剩余 (\d+) 小时 (\d+) 分钟$/, '$1 hours $2 minutes remaining'],
+  [/^当前没有运行阻断。生产 (\d+) 笔，影子 (\d+) 笔；打开队列逐项判断，批准不会直接产生订单。$/, 'There is no runtime blocker. Production: $1; Shadow: $2. Review each proposal in the inbox; approval never places an order.'],
+  [/^生产 (\d+) · 影子 (\d+)$/, 'Production $1 · Shadow $2'],
+  [/^最早一笔到期于 (.+)。生产 (\d+) 笔，影子 (\d+) 笔。$/, 'The earliest expires at $1. Production: $2; Shadow: $3.'],
+  [/^(\d+) 笔将在 30 分钟内到期。生产 (\d+) 笔，影子 (\d+) 笔。$/, '$1 proposals expire within 30 minutes. Production: $2; Shadow: $3.'],
+  [/^当前筛选：生产 (\d+) 笔 · 影子 (\d+) 笔；系统机会 (\d+) 笔 · 人工判断 (\d+) 笔。这里只统计你尚未投票、仍在有效期内的提案。$/, 'Current filter: Production $1 · Shadow $2; system opportunities $3 · manual theses $4. Only unexpired proposals that have not received your vote are counted.'],
   [/^(\d+) 个交易任务$/, '$1 trades'], [/^(\d+) 项阻断$/, '$1 blockers'], [/^(\d+) 项需要处理$/, '$1 issues require action'],
   [/^(\d+) 项阻断，查看详情$/, '$1 blockers; view details'],
   [/^(\d+) 项敞口不确定$/, '$1 exposure issues'], [/^(\d+) 项未一致$/, '$1 reconciliation issues'],
@@ -662,6 +703,12 @@ const localizedText = (value) => currentLanguage === 'en' ? translateEnglishText
 function applyLanguageToDocument(root = document.body) {
   document.documentElement.lang = currentLanguage;
   document.title = currentLanguage === 'en' ? 'Trading Console' : '交易控制台';
+  if (currentDate) {
+    currentDate.dateTime = new Date().toISOString().slice(0, 10);
+    currentDate.textContent = new Intl.DateTimeFormat(currentLanguage, {
+      year:'numeric', month:'2-digit', day:'2-digit', weekday:'short',
+    }).format(new Date());
+  }
   const description = document.querySelector('meta[name="description"]');
   if (description) description.content = currentLanguage === 'en'
     ? 'Production trading proposals, reviews, execution, capital, and risk controls'
@@ -674,8 +721,8 @@ function applyLanguageToDocument(root = document.body) {
     const next = localizedText(node.nodeValue);
     if (next !== node.nodeValue) node.nodeValue = next;
   });
-  root.querySelectorAll?.('[placeholder], [aria-label], [title]').forEach((element) => {
-    ['placeholder','aria-label','title'].forEach((attribute) => {
+  root.querySelectorAll?.('[placeholder], [aria-label], [title], [data-label]').forEach((element) => {
+    ['placeholder','aria-label','title','data-label'].forEach((attribute) => {
       if (!element.hasAttribute(attribute)) return;
       const value = element.getAttribute(attribute);
       const next = localizedText(value);
@@ -1163,6 +1210,10 @@ function showToast(message, kind = 'success') {
 function handleUnauthorizedResponse() {
   if (authFailureActive) return true;
   if (!session) return false;
+  const requiredCapability = typeof routeCapability === 'function' && typeof location !== 'undefined'
+    ? routeCapability(location.pathname)
+    : null;
+  if (requiredCapability && typeof hasCapability === 'function' && !hasCapability(requiredCapability)) return false;
   authFailureActive = true;
   session = null;
   sessionAuthenticationMethod = '';
@@ -1299,7 +1350,7 @@ function cancelMobileNavFocus() {
 }
 
 function openMobileNav() {
-  if (!session || !matchMedia('(max-width: 980px)').matches) return;
+  if (!session || !matchMedia('(max-width: 1100px)').matches) return;
   cancelMobileNavFocus();
   sidebar.classList.add('open');
   sidebar.inert = false;
@@ -1326,7 +1377,7 @@ function openMobileNav() {
 
 function closeMobileNav({restoreFocus = true} = {}) {
   cancelMobileNavFocus();
-  const mobile = matchMedia('(max-width: 980px)').matches;
+  const mobile = matchMedia('(max-width: 1100px)').matches;
   sidebar.classList.remove('open');
   navBackdrop.hidden = true;
   mobileNavToggle.setAttribute('aria-expanded', 'false');
@@ -1348,12 +1399,13 @@ function bindLinkedRows() {
     const firstCell = row.querySelector('td');
     if (firstCell && !firstCell.querySelector('.row-link')) {
       const context = firstCell.textContent.trim().replace(/\s+/g, ' ');
+      const subject = firstCell.querySelector('b')?.textContent.trim() || context;
       const link = document.createElement('a');
       link.className = 'row-link';
       link.href = row.dataset.href;
       link.dataset.link = '';
-      link.textContent = '查看详情';
-      link.setAttribute('aria-label', `查看 ${context}`);
+      link.textContent = localizedText('查看详情');
+      link.setAttribute('aria-label', currentLanguage === 'en' ? `View ${subject}` : `查看 ${subject}`);
       firstCell.append(link);
     }
     row.addEventListener('click', (event) => {
@@ -1385,6 +1437,15 @@ function enhanceRenderedPage() {
   bindLinkedRows();
   enhanceTables();
   applyLanguageToDocument();
+  main.removeAttribute('aria-busy');
+  if (focusNextRouteHeading) {
+    focusNextRouteHeading = false;
+    const heading = main.querySelector('h1, h2');
+    if (heading) {
+      heading.tabIndex = -1;
+      heading.focus({preventScroll:true});
+    }
+  }
 }
 
 function confirmAction({title, message, confirmLabel}) {
@@ -1457,6 +1518,7 @@ async function route() {
   window.scrollTo(0, 0);
   updateActiveNav();
   closeMobileNav({restoreFocus:false});
+  main.setAttribute('aria-busy', 'true');
   if (!session) {
     setShell(false);
     renderLogin();

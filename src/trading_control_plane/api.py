@@ -384,7 +384,7 @@ def create_app(
         lifespan=lifespan,
         docs_url=None,
         redoc_url=None,
-        openapi_url=None,
+        openapi_url="/openapi.json",
     )
     app.state.settings = resolved_settings
     app.state.database = resolved_database
@@ -1538,6 +1538,15 @@ def create_app(
         @app.get("/sw.js", include_in_schema=False)
         def service_worker() -> FileResponse:
             return FileResponse(WEB_ROOT / "sw.js", media_type="application/javascript")
+
+        @app.get("/docs/AI_API_QUICKSTART.md", include_in_schema=False)
+        def ai_api_quickstart() -> FileResponse:
+            packaged_quickstart = WEB_ROOT / "AI_API_QUICKSTART.md"
+            source_quickstart = WEB_ROOT.parents[2] / "docs" / "AI_API_QUICKSTART.md"
+            return FileResponse(
+                packaged_quickstart if packaged_quickstart.is_file() else source_quickstart,
+                media_type="text/markdown; charset=utf-8",
+            )
 
         @app.get("/admin/users", include_in_schema=False)
         def managed_users_web(

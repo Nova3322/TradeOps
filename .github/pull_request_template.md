@@ -13,5 +13,5 @@
 ## Contributor terms
 
 - [ ] I have read and agree to the contributor license grant in `CONTRIBUTING.md`,
-      including distribution of my contribution under both the Combined Community
-      License and separately executed TradingOPS Commercial Licenses.
+      including the `CLA.md` grant that permits distribution under GPL-3.0-only and
+      separately offered TradingOPS commercial terms.
