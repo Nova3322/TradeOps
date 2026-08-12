@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import urllib.parse
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -33,6 +34,12 @@ from trading_control_plane.domain import (
     TargetCandidate,
     TargetUrgency,
 )
+from trading_control_plane.exchange_connection import ConnectionProbeResult
+from trading_control_plane.freqtrade import (
+    FreqtradeEntryCommand,
+    FreqtradeWorkerClient,
+    FreqtradeWorkerSpec,
+)
 from trading_control_plane.hyperliquid_execution import (
     HyperliquidLiveClient,
     HyperliquidTestnetOrder,
@@ -40,14 +47,20 @@ from trading_control_plane.hyperliquid_execution import (
 from trading_control_plane.models import (
     CapabilityGate,
     OrderIntent,
+    Position,
     ProtectionOrder,
     RiskReservation,
 )
 from trading_control_plane.perptape import PerptapeClient
+from trading_control_plane.queries import TradingQueries
 from trading_control_plane.service import TradingService
 
 NOW = datetime.now(UTC)
 HYPERLIQUID_ACCOUNT = "0x1111111111111111111111111111111111111111"
+
+
+def credential_encryption_key() -> str:
+    return base64.urlsafe_b64encode(b"live-execution-fixture-key-32byt"[:32]).decode().rstrip("=")
 
 
 class PortfolioMarginVenue:
@@ -291,6 +304,67 @@ class FailingProtectionHyperliquidLiveClient:
         raise DomainRejected("HYPERLIQUID_LIVE_OUTCOME_UNKNOWN", "controlled protection outcome")
 
 
+def register_live_exchange_account(
+    service: TradingService,
+    *,
+    admin: UUID,
+    key: str,
+    account_id: str,
+    venue: str,
+) -> UUID:
+    exchange_account = service.create_exchange_account(
+        actor_id=admin,
+        account_id=account_id,
+        venue=venue,
+        label=f"{key} account",
+        credentials=(
+            {"account_address": HYPERLIQUID_ACCOUNT}
+            if venue == "HYPERLIQUID"
+            else {
+                "api_key": f"{key}-fixture-key",
+                "api_secret": f"{key}-fixture-secret",
+                **({"passphrase": f"{key}-fixture-passphrase"} if venue == "OKX" else {}),
+            }
+        ),
+        idempotency_key=f"{key}-account",
+        now=NOW,
+    )
+    connection_command, connection_replay = (
+        service.prepare_exchange_account_connection_verification(
+            exchange_account,
+            actor_id=admin,
+            expected_version=1,
+            idempotency_key=f"{key}-connection",
+        )
+    )
+    assert connection_replay is None and connection_command is not None
+    connection = service.record_exchange_account_connection_verification(
+        connection_command,
+        ConnectionProbeResult(True, None),
+        actor_id=admin,
+        idempotency_key=f"{key}-connection",
+        now=NOW,
+    )
+    runtime_binding = service.configure_exchange_account_runtime_sync(
+        exchange_account,
+        actor_id=admin,
+        enabled=True,
+        expected_version=int(connection["version"]),
+        idempotency_key=f"{key}-runtime-binding",
+        now=NOW,
+    )
+    trading_eligibility = service.configure_exchange_account_trading(
+        exchange_account,
+        actor_id=admin,
+        enabled=True,
+        expected_version=int(runtime_binding["version"]),
+        idempotency_key=f"{key}-trading-eligibility",
+        now=NOW,
+    )
+    assert trading_eligibility["trading_enabled"] is True
+    return exchange_account
+
+
 def seed_live(
     service: TradingService,
     *,
@@ -305,6 +379,13 @@ def seed_live(
     minimum_notional: Decimal,
 ) -> dict[str, UUID]:
     admin = service.bootstrap_admin(f"{key}-admin", now=NOW)
+    exchange_account = register_live_exchange_account(
+        service,
+        admin=admin,
+        key=key,
+        account_id=account_id,
+        venue=venue,
+    )
     proposer = service.create_user(f"{key}-proposer", admin, now=NOW)
     reviewer_one = service.create_user(f"{key}-reviewer-1", admin, now=NOW)
     reviewer_two = service.create_user(f"{key}-reviewer-2", admin, now=NOW)
@@ -334,13 +415,26 @@ def seed_live(
         version=f"{key}-risk-v1",
         system_state=SystemRiskState.NORMAL,
         max_total_risk=Decimal(100),
+        max_account_risk=Decimal(100),
+        max_single_loss=Decimal(100),
+        max_consecutive_losses=3,
+        loss_cooldown=timedelta(hours=1),
         max_fact_age=timedelta(minutes=10),
         now=NOW,
     )
     runtime = service.create_service_principal(f"{key}-runtime", admin, now=NOW)
+    service.assign_role(
+        runtime,
+        Role.OPERATOR,
+        admin,
+        account_scope=account_id,
+        venue_scope=venue,
+        now=NOW,
+    )
     service.record_runtime_source_health(
         runtime,
         {venue: {"status": "SUCCESS", "items_observed": 1}},
+        scopes={venue: (account_id, venue)},
         now=NOW,
     )
     service.record_position(
@@ -417,6 +511,7 @@ def seed_live(
     )
     return {
         "admin": admin,
+        "exchange_account": exchange_account,
         "operator": operator,
         "runtime": runtime,
         "instrument": instrument,
@@ -470,7 +565,7 @@ async def login(http: AsyncClient, username: str) -> None:
 
 
 async def exercise_binance_live(database: Database) -> None:
-    service = TradingService(database)
+    service = TradingService(database, credential_encryption_key=credential_encryption_key())
     ids = seed_live(
         service,
         key="live-binance",
@@ -524,9 +619,33 @@ async def exercise_binance_live(database: Database) -> None:
             ids["admin"],
             now=NOW,
         )
+        account_projection = TradingQueries(database).exchange_accounts(ids["admin"])["data"][0]
+        disabled_account = service.configure_exchange_account_trading(
+            ids["exchange_account"],
+            actor_id=ids["admin"],
+            enabled=False,
+            expected_version=int(account_projection["version"]),
+            idempotency_key="live-binance-disable-account-trading",
+            now=NOW,
+        )
+        account_blocked = await http.post(
+            f"/api/intents/{ids['opening']}/binance/live/send", json=action
+        )
+        assert account_blocked.status_code == 422
+        assert account_blocked.json()["error"]["code"] == "EXCHANGE_ACCOUNT_TRADING_DISABLED"
+        assert venue.write_count == 0
+        service.configure_exchange_account_trading(
+            ids["exchange_account"],
+            actor_id=ids["admin"],
+            enabled=True,
+            expected_version=int(disabled_account["version"]),
+            idempotency_key="live-binance-reenable-account-trading",
+            now=NOW,
+        )
         service.record_runtime_source_health(
             ids["runtime"],
             {"BINANCE": {"status": "FAILED", "error_code": "BINANCE_NETWORK_UNAVAILABLE"}},
+            scopes={"BINANCE": ("acct-live-binance", "BINANCE")},
             now=NOW,
         )
         source_blocked = await http.post(
@@ -538,6 +657,7 @@ async def exercise_binance_live(database: Database) -> None:
         service.record_runtime_source_health(
             ids["runtime"],
             {"BINANCE": {"status": "SUCCESS", "items_observed": 1}},
+            scopes={"BINANCE": ("acct-live-binance", "BINANCE")},
             now=NOW,
         )
         sent = await http.post(f"/api/intents/{ids['opening']}/binance/live/send", json=action)
@@ -604,7 +724,7 @@ async def exercise_binance_live(database: Database) -> None:
 
 
 async def exercise_hyperliquid_live(database: Database) -> None:
-    service = TradingService(database)
+    service = TradingService(database, credential_encryption_key=credential_encryption_key())
     ids = seed_live(
         service,
         key="live-hyperliquid",
@@ -674,6 +794,9 @@ async def exercise_hyperliquid_live(database: Database) -> None:
                     "error_code": "HYPERLIQUID_NETWORK_UNAVAILABLE",
                 }
             },
+            scopes={
+                "HYPERLIQUID": ("acct-live-hyperliquid", "HYPERLIQUID")
+            },
             now=NOW,
         )
         source_blocked = await http.post(
@@ -686,6 +809,9 @@ async def exercise_hyperliquid_live(database: Database) -> None:
         service.record_runtime_source_health(
             ids["runtime"],
             {"HYPERLIQUID": {"status": "SUCCESS", "items_observed": 1}},
+            scopes={
+                "HYPERLIQUID": ("acct-live-hyperliquid", "HYPERLIQUID")
+            },
             now=NOW,
         )
         sent = await http.post(
@@ -755,10 +881,17 @@ async def exercise_hyperliquid_live(database: Database) -> None:
 
 
 async def exercise_perptape_binance_live_lifecycle(database: Database) -> None:
-    service = TradingService(database)
+    service = TradingService(database, credential_encryption_key=credential_encryption_key())
     account_id = "acct-perptape-live"
     venue_name = "BINANCE"
     admin = service.bootstrap_admin("perptape-live-admin", now=NOW)
+    register_live_exchange_account(
+        service,
+        admin=admin,
+        key="perptape-live",
+        account_id=account_id,
+        venue=venue_name,
+    )
     proposer = service.create_user("perptape-live-proposer", admin, now=NOW)
     reviewer_one = service.create_user("perptape-live-reviewer-1", admin, now=NOW)
     reviewer_two = service.create_user("perptape-live-reviewer-2", admin, now=NOW)
@@ -790,6 +923,10 @@ async def exercise_perptape_binance_live_lifecycle(database: Database) -> None:
         version="perptape-live-risk-v1",
         system_state=SystemRiskState.NORMAL,
         max_total_risk=Decimal(100),
+        max_account_risk=Decimal(100),
+        max_single_loss=Decimal(100),
+        max_consecutive_losses=3,
+        loss_cooldown=timedelta(hours=1),
         max_fact_age=timedelta(minutes=10),
         now=NOW,
     )
@@ -817,9 +954,18 @@ async def exercise_perptape_binance_live_lifecycle(database: Database) -> None:
         now=NOW,
     )
     runtime = service.create_service_principal("perptape-live-runtime", admin, now=NOW)
+    service.assign_role(
+        runtime,
+        Role.OPERATOR,
+        admin,
+        account_scope=account_id,
+        venue_scope=venue_name,
+        now=NOW,
+    )
     service.record_runtime_source_health(
         runtime,
         {venue_name: {"status": "SUCCESS", "items_observed": 1}},
+        scopes={venue_name: (account_id, venue_name)},
         now=NOW,
     )
     candidate_time = int(datetime.now(UTC).timestamp() * 1000)
@@ -1133,7 +1279,7 @@ async def exercise_failed_live_send(
     venue: str,
     code: str,
 ) -> None:
-    service = TradingService(database)
+    service = TradingService(database, credential_encryption_key=credential_encryption_key())
     is_binance = venue == "BINANCE"
     key = f"failed-{venue.lower()}-{code.lower()}"
     ids = seed_live(
@@ -1204,7 +1350,7 @@ async def exercise_failed_live_send(
 
 
 async def exercise_live_cancel(database: Database, *, venue: str) -> None:
-    service = TradingService(database)
+    service = TradingService(database, credential_encryption_key=credential_encryption_key())
     is_binance = venue == "BINANCE"
     key = f"cancel-{venue.lower()}"
     ids = seed_live(
@@ -1287,7 +1433,7 @@ async def exercise_live_cancel(database: Database, *, venue: str) -> None:
 
 
 async def exercise_live_recovery(database: Database, *, venue: str) -> None:
-    service = TradingService(database)
+    service = TradingService(database, credential_encryption_key=credential_encryption_key())
     is_binance = venue == "BINANCE"
     key = f"recover-{venue.lower()}"
     ids = seed_live(
@@ -1304,7 +1450,13 @@ async def exercise_live_recovery(database: Database, *, venue: str) -> None:
     )
     scope = f"LIVE:acct-{key}:{venue}"
     owner = f"{key}-worker"
-    token = service.acquire_sender(scope, owner, ids["operator"], NOW)
+    token = service.acquire_sender(
+        scope,
+        owner,
+        ids["operator"],
+        NOW,
+        lease_duration=timedelta(minutes=30),
+    )
     service.set_capability_gate(
         "LIVE_ORDER_SEND",
         CapabilityStatus.ENABLED,
@@ -1367,7 +1519,7 @@ async def exercise_live_recovery(database: Database, *, venue: str) -> None:
 
 
 async def exercise_live_cancel_outcome(database: Database, *, venue: str, unknown: bool) -> None:
-    service = TradingService(database)
+    service = TradingService(database, credential_encryption_key=credential_encryption_key())
     is_binance = venue == "BINANCE"
     key = f"cancel-outcome-{venue.lower()}-{unknown}"
     quantity = Decimal(5) if is_binance else Decimal("0.0002")
@@ -1385,7 +1537,13 @@ async def exercise_live_cancel_outcome(database: Database, *, venue: str, unknow
     )
     scope = f"LIVE:acct-{key}:{venue}"
     owner = f"{key}-worker"
-    token = service.acquire_sender(scope, owner, ids["operator"], NOW)
+    token = service.acquire_sender(
+        scope,
+        owner,
+        ids["operator"],
+        NOW,
+        lease_duration=timedelta(minutes=30),
+    )
     service.set_capability_gate(
         "LIVE_ORDER_SEND",
         CapabilityStatus.ENABLED,
@@ -1477,7 +1635,8 @@ async def exercise_live_cancel_outcome(database: Database, *, venue: str, unknow
 
 
 async def exercise_unknown_live_protection(database: Database, *, venue: str) -> None:
-    service = TradingService(database)
+    service = TradingService(database, credential_encryption_key=credential_encryption_key())
+    action_now = datetime.now(UTC)
     is_binance = venue == "BINANCE"
     key = f"unknown-protection-{venue.lower()}"
     quantity = Decimal(5) if is_binance else Decimal("0.0002")
@@ -1496,17 +1655,17 @@ async def exercise_unknown_live_protection(database: Database, *, venue: str) ->
     )
     scope = f"LIVE:acct-{key}:{venue}"
     owner = f"{key}-worker"
-    token = service.acquire_sender(scope, owner, ids["operator"], NOW)
+    token = service.acquire_sender(scope, owner, ids["operator"], action_now)
     service.set_capability_gate(
         "LIVE_ORDER_SEND",
         CapabilityStatus.ENABLED,
         "unknown protection fixture",
         ids["admin"],
-        now=NOW,
+        now=action_now,
     )
     if is_binance:
         prepared = service.prepare_binance_live_send(
-            ids["opening"], ids["operator"], scope, owner, token, now=NOW
+            ids["opening"], ids["operator"], scope, owner, token, now=action_now
         )
         service.record_binance_live_order(
             ids["opening"],
@@ -1526,14 +1685,14 @@ async def exercise_unknown_live_protection(database: Database, *, venue: str) ->
                 stop_price=Decimal(0),
                 reduce_only=False,
                 close_position=False,
-                observed_at=NOW,
+                observed_at=action_now,
             ),
-            now=NOW,
+            now=action_now,
         )
         client: Any = FailingProtectionBinanceLiveClient()
     else:
         prepared = service.prepare_hyperliquid_live_send(
-            ids["opening"], ids["operator"], scope, owner, token, now=NOW
+            ids["opening"], ids["operator"], scope, owner, token, now=action_now
         )
         service.record_hyperliquid_live_order(
             ids["opening"],
@@ -1554,9 +1713,9 @@ async def exercise_unknown_live_protection(database: Database, *, venue: str) ->
                 stop_price=Decimal(0),
                 reduce_only=False,
                 close_position=False,
-                observed_at=NOW,
+                observed_at=action_now,
             ),
-            now=NOW,
+            now=action_now,
         )
         client = FailingProtectionHyperliquidLiveClient()
     position_id = service.record_position(
@@ -1569,7 +1728,7 @@ async def exercise_unknown_live_protection(database: Database, *, venue: str) ->
         True,
         ids["operator"],
         environment=ExecutionEnvironment.LIVE,
-        now=NOW,
+        now=action_now,
     )
     app = application(
         database,
@@ -1592,7 +1751,7 @@ async def exercise_unknown_live_protection(database: Database, *, venue: str) ->
             f"/api/campaigns/{ids['campaign']}/{prefix}/live/protection",
             json=payload,
         )
-        assert response.status_code == 503
+        assert response.status_code == 503, response.text
         assert response.json()["error"]["retryable"] is True
     with database.session_factory() as session:
         protection = session.scalar(
@@ -1605,6 +1764,372 @@ def test_binance_live_flow_is_gated_idempotent_fenced_and_cleans_protection(
     database: Database,
 ) -> None:
     asyncio.run(exercise_binance_live(database))
+
+
+def test_freqtrade_live_never_falls_back_to_an_unbound_venue_worker(
+    database: Database,
+) -> None:
+    service = TradingService(database, credential_encryption_key=credential_encryption_key())
+    ids = seed_live(
+        service,
+        key="freqtrade-unbound",
+        account_id="acct-freqtrade-unbound",
+        venue="BINANCE",
+        symbol="XRPUSDT",
+        quantity=Decimal(5),
+        mark_price=Decimal(1),
+        tick_size=Decimal("0.0001"),
+        lot_size=Decimal("0.1"),
+        minimum_notional=Decimal(5),
+    )
+    scope = "LIVE:acct-freqtrade-unbound:BINANCE"
+    owner = "freqtrade-unbound-worker"
+    token = service.acquire_sender(
+        scope,
+        owner,
+        ids["operator"],
+        NOW,
+        lease_duration=timedelta(minutes=30),
+    )
+    service.set_capability_gate(
+        "LIVE_ORDER_SEND",
+        CapabilityStatus.ENABLED,
+        "exact worker binding fixture",
+        ids["admin"],
+        now=NOW,
+    )
+    calls: list[str] = []
+
+    def forbidden_fetcher(
+        url: str,
+        method: str,
+        payload: dict[str, Any] | None,
+        headers: dict[str, str],
+        timeout: float,
+    ) -> dict[str, Any]:
+        del method, payload, headers, timeout
+        calls.append(url)
+        raise AssertionError("unbound venue worker must never be contacted")
+
+    legacy_worker = FreqtradeWorkerClient(
+        FreqtradeWorkerSpec(
+            name="binance-default",
+            venue="BINANCE",
+            base_url="http://127.0.0.1:18081",
+            username="legacy-user",
+            password="legacy-password",  # noqa: S106
+        ),
+        fetcher=forbidden_fetcher,
+    )
+    settings = Settings(
+        environment="test",
+        database_url=str(database.engine.url),
+        allow_mock_identity=True,
+        session_signing_secret="freqtrade-binding-test-secret-long-enough",  # noqa: S106
+        credential_encryption_key=credential_encryption_key(),
+        public_base_url="http://test",
+        execution_backend="FREQTRADE",
+        freqtrade_workers_enabled=True,
+        freqtrade_live_order_send_enabled=True,
+        _env_file=None,
+    )
+    app = create_app(
+        settings,
+        database,
+        PerptapeClient(
+            base_url="https://perptape.com",
+            api_key=None,
+            contract_version="breakouts-v1",
+            cache_ttl=timedelta(minutes=1),
+        ),
+        freqtrade_workers=(legacy_worker,),
+    )
+
+    async def scenario() -> None:
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as http:
+            await login(http, "freqtrade-unbound-operator")
+            response = await http.post(
+                f"/api/intents/{ids['opening']}/freqtrade/live/send",
+                json={
+                    "execution_scope": scope,
+                    "owner_id": owner,
+                    "fencing_token": token,
+                    "idempotency_key": "freqtrade-unbound-dispatch",
+                },
+            )
+            assert response.status_code == 422, response.text
+            assert response.json()["error"]["code"] == "FREQTRADE_WORKER_NOT_CONFIGURED"
+            assert calls == []
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize(
+    ("venue", "symbol", "exchange"),
+    [
+        ("OKX", "XRP-USDT-SWAP", "okx"),
+        ("BYBIT", "XRPUSDT", "bybit"),
+    ],
+)
+def test_okx_bybit_live_execution_reuses_exact_account_freqtrade_chain(
+    database: Database, venue: str, symbol: str, exchange: str
+) -> None:
+    service = TradingService(database, credential_encryption_key=credential_encryption_key())
+    key = f"freqtrade-{venue.lower()}"
+    account_id = f"acct-{key}"
+    ids = seed_live(
+        service,
+        key=key,
+        account_id=account_id,
+        venue=venue,
+        symbol=symbol,
+        quantity=Decimal(5),
+        mark_price=Decimal(1),
+        tick_size=Decimal("0.0001"),
+        lot_size=Decimal("0.1"),
+        minimum_notional=Decimal(5),
+    )
+    account_projection = TradingQueries(database).exchange_accounts(ids["admin"])["data"][0]
+    worker_url = "http://127.0.0.1:18085"
+    configured = service.configure_exchange_account_freqtrade_worker(
+        ids["exchange_account"],
+        actor_id=ids["admin"],
+        mode="LIVE",
+        name=f"{exchange}-exact-worker",
+        base_url=worker_url,
+        username="control-plane",
+        password="worker-fixture-password",  # noqa: S106
+        hip3_dexes=(),
+        expected_version=int(account_projection["version"]),
+        idempotency_key=f"{key}-worker-configure",
+        now=NOW,
+    )
+    binding, replay = service.prepare_exchange_account_freqtrade_verification(
+        ids["exchange_account"],
+        actor_id=ids["admin"],
+        expected_version=int(configured["version"]),
+        idempotency_key=f"{key}-worker-verify",
+    )
+    assert replay is None and binding is not None
+    service.record_exchange_account_freqtrade_verification(
+        binding,
+        actor_id=ids["admin"],
+        error_code=None,
+        idempotency_key=f"{key}-worker-verify",
+        now=NOW,
+    )
+
+    class ExactWorkerFixture:
+        def __init__(self) -> None:
+            self.entry_tag: str | None = None
+            self.write_count = 0
+
+        def __call__(
+            self,
+            url: str,
+            method: str,
+            payload: dict[str, Any] | None,
+            headers: dict[str, str],
+            timeout: float,
+        ) -> dict[str, Any] | list[dict[str, Any]]:
+            del headers, timeout
+            path = urllib.parse.urlparse(url).path
+            if path.endswith("/ping"):
+                return {"status": "pong"}
+            if path.endswith("/token/login"):
+                return {"access_token": "short-lived-token"}
+            if path.endswith("/show_config"):
+                return {
+                    "exchange": exchange,
+                    "trading_mode": "futures",
+                    "dry_run": False,
+                    "force_entry_enable": True,
+                    "state": "running",
+                }
+            if path.endswith("/version"):
+                return {"version": "2026.3"}
+            if path.endswith("/whitelist"):
+                return {"whitelist": ["XRP/USDT:USDT"]}
+            if path.endswith("/forceenter"):
+                assert method == "POST" and payload is not None
+                assert payload["pair"] == "XRP/USDT:USDT"
+                self.entry_tag = str(payload["entry_tag"])
+                self.write_count += 1
+                return {"status": "created"}
+            if path.endswith("/status"):
+                if self.entry_tag is None:
+                    return []
+                return [
+                    {
+                        "trade_id": f"{exchange}-trade-1",
+                        "pair": "XRP/USDT:USDT",
+                        "is_short": False,
+                        "amount": "5",
+                        "stake_amount": "4.9",
+                        "open_rate": "1",
+                        "current_rate": "1",
+                        "close_rate": None,
+                        "is_open": True,
+                        "enter_tag": self.entry_tag,
+                        "leverage": "1",
+                        "stop_loss_abs": "0.95",
+                        "stoploss_order_id": f"{exchange}-stop-1",
+                        "open_timestamp": int(NOW.timestamp() * 1000),
+                        "orders": [
+                            {
+                                "ft_order_side": "buy",
+                                "order_id": f"{exchange}-entry-1",
+                                "status": "closed",
+                                "is_open": False,
+                            }
+                        ],
+                    }
+                ]
+            raise AssertionError((method, path))
+
+    fixture = ExactWorkerFixture()
+    worker = FreqtradeWorkerClient(
+        FreqtradeWorkerSpec(
+            name=binding.worker_name,
+            venue=venue,  # type: ignore[arg-type]
+            base_url=worker_url,
+            username="control-plane",
+            password="worker-fixture-password",  # noqa: S106
+            exchange_account_id=str(ids["exchange_account"]),
+            team_id=str(binding.team_id),
+            account_id=account_id,
+        ),
+        confirmation_timeout_seconds=10,
+        fetcher=fixture,
+    )
+    settings = Settings(
+        environment="test",
+        database_url=str(database.engine.url),
+        allow_mock_identity=True,
+        session_signing_secret="freqtrade-okx-bybit-test-secret-long-enough",  # noqa: S106
+        credential_encryption_key=credential_encryption_key(),
+        public_base_url="http://test",
+        execution_backend="FREQTRADE",
+        freqtrade_workers_enabled=True,
+        freqtrade_live_order_send_enabled=True,
+        _env_file=None,
+    )
+    app = create_app(
+        settings,
+        database,
+        PerptapeClient(
+            base_url="https://perptape.com",
+            api_key=None,
+            contract_version="breakouts-v1",
+            cache_ttl=timedelta(minutes=1),
+        ),
+        freqtrade_workers=(worker,),
+    )
+    scope = f"LIVE:{account_id}:{venue}"
+    owner = f"{key}-worker"
+    token = service.acquire_sender(
+        scope,
+        owner,
+        ids["operator"],
+        NOW,
+        lease_duration=timedelta(minutes=30),
+    )
+    service.set_capability_gate(
+        "LIVE_ORDER_SEND",
+        CapabilityStatus.ENABLED,
+        "OKX/Bybit exact-account Freqtrade integration fixture",
+        ids["admin"],
+        now=NOW,
+    )
+    if venue == "OKX":
+        durable_binding = service.freqtrade_live_worker_binding(
+            actor_id=ids["operator"],
+            execution_scope=scope,
+            owner_id=owner,
+            fencing_token=token,
+            now=NOW,
+        )
+        durable_command = service.prepare_freqtrade_live_order(
+            ids["opening"],
+            ids["operator"],
+            scope,
+            owner,
+            token,
+            now=NOW,
+        )
+        assert isinstance(durable_command, FreqtradeEntryCommand)
+        started = service.start_freqtrade_live_dispatch(
+            ids["opening"],
+            actor_id=ids["operator"],
+            execution_scope=scope,
+            owner_id=owner,
+            fencing_token=token,
+            binding=durable_binding,
+            command=durable_command,
+            external_trade_id=None,
+            idempotency_key=f"{key}-dispatch",
+            now=NOW,
+        )
+        assert started.mode == "SEND"
+        # Simulate a process dying after the worker accepted the write but before
+        # Trading recorded the result. The mark may move before the retry; the
+        # persisted semantic handoff must still recover by query only.
+        fixture.entry_tag = durable_command.enter_tag
+        with database.session_factory.begin() as session:
+            position = session.scalar(
+                select(Position).where(
+                    Position.account_id == account_id,
+                    Position.venue == venue,
+                    Position.environment == "LIVE",
+                )
+            )
+            assert position is not None
+            position.mark_price = Decimal("1.01")
+
+    async def scenario() -> None:
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as http:
+            await login(http, f"{key}-operator")
+            response = await http.post(
+                f"/api/intents/{ids['opening']}/freqtrade/live/send",
+                json={
+                    "execution_scope": scope,
+                    "owner_id": owner,
+                    "fencing_token": token,
+                    "idempotency_key": f"{key}-dispatch",
+                },
+            )
+            assert response.status_code == 200, response.text
+            assert response.json()["backend"] == "FREQTRADE"
+            assert response.json()["pair"] == "XRP/USDT:USDT"
+            assert response.json()["worker"] == f"{exchange}-exact-worker"
+            assert response.json()["replayed"] is (venue == "OKX")
+            first_payload = response.json()
+            replay = await http.post(
+                f"/api/intents/{ids['opening']}/freqtrade/live/send",
+                json={
+                    "execution_scope": scope,
+                    "owner_id": owner,
+                    "fencing_token": token,
+                    "idempotency_key": f"{key}-dispatch",
+                },
+            )
+            assert replay.status_code == 200, replay.text
+            assert replay.json()["replayed"] is True
+            assert replay.json()["venue_order_fact_id"] == first_payload["venue_order_fact_id"]
+            assert replay.json()["protection_id"] == first_payload["protection_id"]
+
+    asyncio.run(scenario())
+
+    assert fixture.write_count == (0 if venue == "OKX" else 1)
+    with database.session_factory() as session:
+        intent = session.get(OrderIntent, ids["opening"])
+        protection = session.scalar(select(ProtectionOrder))
+        assert intent is not None and intent.status == "FILLED"
+        assert intent.dispatch_backend == "FREQTRADE"
+        assert intent.dispatch_external_id == f"{exchange}-trade-1"
+        assert intent.dispatch_started_at is not None and intent.dispatch_started_at >= NOW
+        assert protection is not None and protection.status == "ACTIVE"
+        assert protection.venue_order_id == f"{exchange}-stop-1"
 
 
 def test_hyperliquid_live_flow_is_gated_idempotent_fenced_and_cleans_protection(

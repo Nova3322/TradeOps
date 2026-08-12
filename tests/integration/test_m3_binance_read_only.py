@@ -124,6 +124,10 @@ def seed(service: TradingService) -> dict[str, UUID]:
         version="m3-risk-v1",
         system_state=SystemRiskState.NORMAL,
         max_total_risk=Decimal("100"),
+        max_account_risk=Decimal("100"),
+        max_single_loss=Decimal("100"),
+        max_consecutive_losses=3,
+        loss_cooldown=timedelta(hours=1),
         max_fact_age=timedelta(minutes=5),
         now=now,
     )
@@ -305,8 +309,8 @@ async def run_m3_flow(database: Database) -> None:
         missing_account = await missing_account_http.get(
             "/api/venues/binance/facts", params={"account_id": "acct-live"}
         )
-        assert missing_account.status_code == 503, missing_account.text
-        assert missing_account.json()["error"]["code"] == "DEFAULT_ACCOUNT_NOT_CONFIGURED"
+        assert missing_account.status_code == 200, missing_account.text
+        assert missing_account.json()["data"]["account_id"] == "acct-live"
         assert missing_account_client.calls == []
 
     with database.session_factory() as session:

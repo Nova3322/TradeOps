@@ -1,23 +1,43 @@
 [project]
 name = "trading-control-plane"
 version = "0.1.0"
-description = "Fail-closed SHADOW trading core for one internal organization"
+description = "Fail-closed trading governance and operations control plane"
 readme = "README.md"
 requires-python = ">=3.12,<3.15"
+license = "GPL-3.0-only OR LicenseRef-TradingOPS-Commercial-1.0"
+license-files = ["LICENSE", "NOTICE", "LICENSES/*"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "License :: OSI Approved :: GNU General Public License v3 (GPLv3)",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.12",
+  "Topic :: Office/Business :: Financial :: Investment",
+]
 dependencies = [
   "alembic>=1.18.5,<2",
+  "cryptography>=50,<51",
   "fastapi>=0.128,<1",
   "hyperliquid-python-sdk>=0.24,<0.25",
   "prometheus-client>=0.23,<1",
   "psycopg[binary]>=3.2,<4",
   "pydantic-settings>=2.12,<3",
+  "pyfolio-reloaded==0.9.9",
+  "quantstats==0.0.81",
   "sqlalchemy>=2.0.51,<2.1",
   "uvicorn[standard]>=0.40,<1",
   "websockets>=15,<17",
 ]
 
+[project.urls]
+Homepage = "https://github.com/nineheavens223-sys/TradeOps"
+Repository = "https://github.com/nineheavens223-sys/TradeOps.git"
+Issues = "https://github.com/nineheavens223-sys/TradeOps/issues"
+Security = "https://github.com/nineheavens223-sys/TradeOps/security/advisories/new"
+
 [project.scripts]
 trading-api = "trading_control_plane.__main__:main"
+trading-doctor = "trading_control_plane.operations:main"
+trading-notification-worker = "trading_control_plane.notification_runtime:main"
 trading-sync-worker = "trading_control_plane.runtime:main"
 
 [dependency-groups]
@@ -35,6 +55,9 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/trading_control_plane"]
+
+[tool.hatch.build.targets.wheel.force-include]
+"docs/AI_API_QUICKSTART.md" = "trading_control_plane/web/AI_API_QUICKSTART.md"
 
 [tool.pytest.ini_options]
 addopts = "-ra --strict-config --strict-markers"

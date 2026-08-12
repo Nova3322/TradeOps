@@ -17,34 +17,34 @@ def test_private_chat_binding_is_idempotent_audited_and_cannot_be_reassigned(
     service: TradingService,
 ) -> None:
     now = datetime.now(UTC)
-    owner_id = service.bootstrap_admin("kelly_oooo", now=now)
+    owner_id = service.bootstrap_admin("telegram-owner", now=now)
     other_id = service.create_user("other-user", owner_id, now=now)
 
     assert (
         service.bind_telegram_private_chat(
-            internal_username="kelly_oooo",
-            telegram_username="kelly_oooo",
+            internal_username="telegram-owner",
+            telegram_username="telegram-owner",
             telegram_chat_id="789",
             now=now,
         )
-        == "kelly_oooo"
+        == "telegram-owner"
     )
     assert (
         service.bind_telegram_private_chat(
-            internal_username="kelly_oooo",
-            telegram_username="kelly_oooo",
+            internal_username="telegram-owner",
+            telegram_username="telegram-owner",
             telegram_chat_id="789",
             now=now,
         )
-        == "kelly_oooo"
+        == "telegram-owner"
     )
     assert TradingQueries(database).telegram_chat_id(owner_id) == "789"
     assert TradingQueries(database).telegram_chat_id(other_id) is None
 
     with pytest.raises(DomainRejected, match="already has another"):
         service.bind_telegram_private_chat(
-            internal_username="kelly_oooo",
-            telegram_username="kelly_oooo",
+            internal_username="telegram-owner",
+            telegram_username="telegram-owner",
             telegram_chat_id="999",
             now=now,
         )

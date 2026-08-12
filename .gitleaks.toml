@@ -1,0 +1,41 @@
+title = "TradingOPS public secret-scanning policy"
+
+[extend]
+useDefault = true
+
+# These are exact, inert fixture/format markers used by tests and parsers. No
+# directory-wide exemptions are permitted; new high-entropy values still fail.
+[[allowlists]]
+description = "Public token format marker"
+regexTarget = "match"
+regexes = ['''tradingops_api_v1''']
+
+[[allowlists]]
+description = "Synthetic test signing secrets"
+regexTarget = "match"
+regexes = ['''[a-z0-9-]*test-signing-secret-that-is-long-enough''']
+
+[[allowlists]]
+description = "Synthetic Fernet key fixture"
+regexTarget = "match"
+regexes = ['''G4dAqHdhSHI_KptQdXKVIgF_eVXWYFW3viBTPWLSBEs''']
+
+[[allowlists]]
+description = "Deterministic idempotency fixtures"
+regexTarget = "match"
+regexes = ['''(?:m[1-7]|signal)-[a-z0-9-]+''']
+
+[[allowlists]]
+description = "Historical deterministic idempotency fixtures"
+regexTarget = "match"
+regexes = ['''(?:prepare-reduction-[a-z0-9-]+|disable-live-order-0001)''']
+
+[[allowlists]]
+description = "Synthetic exchange credential fixtures"
+regexTarget = "match"
+regexes = ['''replacement-(?:4321|secret)''']
+
+[[allowlists]]
+description = "Public chain token address fixture"
+regexTarget = "match"
+regexes = ['''0xaf88d065e77c8cc2239327c5edb3a432268e5831''']

@@ -1,0 +1,44 @@
+TradingOPS Commercial License Reference 1.0
+
+Copyright (c) 2026 COPYRIGHT_HOLDER.
+
+1. Purpose
+
+TradingOPS is available under GPL-3.0-only. This document describes the
+alternative commercial licensing path for parties that require terms not
+provided by the GPL, including closed-source integration, proprietary
+redistribution, managed-service rights, negotiated support, warranty,
+indemnity, or deployment scope.
+
+2. Separate agreement required
+
+This repository copy is a license reference, not an offer and not a grant of
+commercial rights. Commercial rights arise only through a written agreement
+executed by the applicable copyright holder or its authorized licensing entity
+and the licensee. That agreement must identify the licensed version or commit,
+permitted products and deployments, redistribution and hosting scope, term,
+fees, support, warranties, liability allocation, and governing law.
+
+3. GPL rights preserved
+
+Nothing in a commercial agreement or this reference limits rights already
+received under GPL-3.0-only. The GPL permits commercial use. A commercial
+license is an optional alternative for licensees that choose negotiated terms.
+
+4. Third-party material
+
+A commercial agreement covers only copyright interests the licensor is
+entitled to license. Third-party components remain subject to their respective
+licenses and notices. The licensee remains responsible for third-party license
+compliance.
+
+5. No implied rights
+
+No trademark, patent, support, warranty, indemnity, hosted-service, or
+redistribution rights are implied by this repository reference. No person may
+represent that commercial rights have been granted without an executed
+agreement.
+
+Commercial inquiries: COMMERCIAL_EMAIL
+
+Do not put confidential commercial terms in a public issue.

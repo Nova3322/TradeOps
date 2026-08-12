@@ -176,6 +176,10 @@ def seed(service: TradingService, *, key: str) -> dict[str, UUID]:
         version=f"{key}-risk-v1",
         system_state=SystemRiskState.NORMAL,
         max_total_risk=Decimal(100),
+        max_account_risk=Decimal(100),
+        max_single_loss=Decimal(100),
+        max_consecutive_losses=3,
+        loss_cooldown=timedelta(hours=1),
         max_fact_age=timedelta(minutes=10),
         now=now,
     )
@@ -506,7 +510,7 @@ def test_core_program_owns_proposal_to_ioc_protection_reconcile_exit_and_pnl(
     asyncio.run(complete_flow(database))
 
 
-async def missing_default_account_fails_closed(database: Database) -> None:
+async def registered_account_facts_do_not_require_a_process_default(database: Database) -> None:
     service = TradingService(database)
     seed(service, key="m5-missing-account")
     venue = SimulatedHyperliquidCore()
@@ -519,13 +523,13 @@ async def missing_default_account_fails_closed(database: Database) -> None:
         response = await http.get(
             "/api/venues/hyperliquid/facts", params={"account_id": ACCOUNT_ID}
         )
-        assert response.status_code == 503, response.text
-        assert response.json()["error"]["code"] == "DEFAULT_ACCOUNT_NOT_CONFIGURED"
+        assert response.status_code == 200, response.text
+        assert response.json()["data"]["account_id"] == ACCOUNT_ID
         assert reader.snapshot is None
 
 
-def test_hyperliquid_facts_require_the_configured_default_account(database: Database) -> None:
-    asyncio.run(missing_default_account_fails_closed(database))
+def test_hyperliquid_facts_use_the_database_registered_account(database: Database) -> None:
+    asyncio.run(registered_account_facts_do_not_require_a_process_default(database))
 
 
 async def unknown_and_fencing(database: Database) -> None:

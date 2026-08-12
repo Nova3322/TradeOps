@@ -11,7 +11,7 @@ from sqlalchemy import select
 from test_m7_capital_center import build_app, login, seed
 from test_m8_capital_automation import close_profitable_testnet_campaign
 
-from trading_control_plane.database import Database
+from trading_control_plane.database import REQUIRED_SCHEMA_REVISION, Base, Database
 from trading_control_plane.domain import DomainRejected
 from trading_control_plane.models import Campaign, FundingPayment, OrderIntent, VenueFill
 from trading_control_plane.queries import TradingQueries
@@ -30,6 +30,7 @@ def add_recorded_cost_facts(database: Database, ids: dict[str, object], now: dat
         session.add_all(
             [
                 VenueFill(
+                    team_id=campaign.team_id,
                     venue="BINANCE",
                     venue_fill_id="m9-fill-1",
                     order_intent_id=intent.intent_id,
@@ -46,6 +47,7 @@ def add_recorded_cost_facts(database: Database, ids: dict[str, object], now: dat
                     executed_at=now,
                 ),
                 VenueFill(
+                    team_id=campaign.team_id,
                     venue="BINANCE",
                     venue_fill_id="m9-fill-2",
                     order_intent_id=intent.intent_id,
@@ -62,6 +64,7 @@ def add_recorded_cost_facts(database: Database, ids: dict[str, object], now: dat
                     executed_at=now,
                 ),
                 FundingPayment(
+                    team_id=campaign.team_id,
                     campaign_id=campaign.campaign_id,
                     account_id="acct-1",
                     venue="BINANCE",
@@ -100,6 +103,50 @@ def test_results_are_environment_separated_and_derive_costs_curve_and_audit(
     curve = results["curves_by_currency"]["USDT"]
     assert curve["percentage_available"] is False
     assert curve["points"][0]["cumulative_pnl"] == "180.000000000000000000"
+    assert results["scope"]["team_id"] == campaign["team_id"]
+    assert results["report_state"] == "RECORDED_HISTORY"
+    assert results["data_status"] == "AVAILABLE"
+    team_group = results["dimensions"]["team"][0]
+    team_metrics = team_group["metrics_by_currency"]["USDT"]
+    assert team_metrics["campaign_count"] == 1
+    assert team_metrics["closed_count"] == 1
+    assert team_metrics["win_count"] == 1
+    assert team_metrics["loss_count"] == 0
+    assert team_metrics["win_rate"] == "1"
+    assert team_metrics["profit_loss_ratio"] is None
+    assert team_metrics["maximum_drawdown"] == "0"
+    assert team_metrics["percentage_return"] is None
+    assert team_metrics["availability"]["percentage_metrics"] == (
+        "OPENING_CAPITAL_UNAVAILABLE"
+    )
+    assert results["dimensions"]["account"][0]["scope"] == {
+        "account_id": "acct-1",
+        "venue": "BINANCE",
+    }
+    assert results["dimensions"]["strategy"][0]["scope"] == {
+        "strategy_id": None,
+        "strategy_version": None,
+    }
+    assert results["dimensions"]["signal_source"][0]["scope"] == {
+        "signal_source_mode": "MANUAL",
+        "signal_source_id": None,
+        "signal_provider": None,
+    }
+    assert len(results["risk_events"]) == 1
+    assert results["risk_events"][0]["result"] == "ALLOW"
+    assert results["risk_events"][0]["account_id"] == "acct-1"
+    assert team_group["risk_events_by_result"] == {"ALLOW": 1}
+    assert results["coverage"] == {
+        "campaign_count": 1,
+        "closed_campaign_count": 1,
+        "risk_event_count": 1,
+        "currency_mixing": "SEPARATED",
+        "percentage_metrics": "OPENING_CAPITAL_UNAVAILABLE",
+        "time_filter_semantics": {
+            "campaigns": "campaign.updated_at",
+            "risk_events": "risk_decision.created_at",
+        },
+    }
     assert queries.actual_results(ids["operator"], "SHADOW")["campaigns"] == []
     assert (
         len(
@@ -146,8 +193,8 @@ def test_results_are_environment_separated_and_derive_costs_curve_and_audit(
 
     runtime = queries.runtime_snapshot(ids["operator"])
     assert runtime["database_ready"] is True
-    assert runtime["schema_revision"] == "20260809_0015"
-    assert runtime["business_table_count"] == 33
+    assert runtime["schema_revision"] == REQUIRED_SCHEMA_REVISION
+    assert runtime["business_table_count"] == len(Base.metadata.tables)
     assert set(runtime["capability_gates"]) == {
         "LIVE_ORDER_SEND",
         "CAPITAL_TRANSFER",
@@ -187,6 +234,8 @@ def test_results_audit_and_runtime_api_do_not_mix_environments_or_expose_secrets
             assert testnet.status_code == 200 and len(testnet.json()["data"]["campaigns"]) == 1
             assert shadow.status_code == 200 and shadow.json()["data"]["campaigns"] == []
             assert invalid.status_code == 422
+            assert testnet.json()["data"]["dimensions"]["team"][0]["risk_event_count"] == 1
+            assert testnet.json()["data"]["coverage"]["currency_mixing"] == "SEPARATED"
             filtered = await client.get(
                 "/api/results",
                 params={
@@ -238,6 +287,14 @@ def test_results_audit_and_runtime_api_do_not_mix_environments_or_expose_secrets
                 "candidate_count": 0,
                 "last_fetched_at": None,
                 "last_generated_at": None,
+                "transport": {
+                    "state": "WAITING",
+                    "primary_channel": None,
+                    "fallback_active": False,
+                    "error_code": None,
+                    "websocket": None,
+                    "polling": None,
+                },
             }
             assert payload["external_boundaries"]["capital_transfer"] == {
                 "mode": "MOCK_OR_NOTILT_UNSIGNED_HANDOFF",

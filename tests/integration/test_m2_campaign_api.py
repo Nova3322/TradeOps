@@ -61,6 +61,10 @@ def seed_authorized_campaign(service: TradingService) -> dict[str, UUID]:
         version="m2-risk-v1",
         system_state=SystemRiskState.NORMAL,
         max_total_risk=Decimal("100"),
+        max_account_risk=Decimal("100"),
+        max_single_loss=Decimal("100"),
+        max_consecutive_losses=3,
+        loss_cooldown=timedelta(hours=1),
         max_fact_age=timedelta(minutes=5),
         now=now,
     )
@@ -481,8 +485,11 @@ def test_exception_view_marks_active_facts_stale_but_ignores_closed_history(
         now=now,
     )
     with database.session_factory.begin() as session:
+        campaign = session.get(Campaign, opening.campaign_id)
+        assert campaign is not None
         session.add(
             ReconciliationRun(
+                team_id=campaign.team_id,
                 execution_scope="acct-1:BINANCE",
                 campaign_id=opening.campaign_id,
                 status="MATCH",

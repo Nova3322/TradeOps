@@ -21,6 +21,8 @@ JsonValue = JsonObject | list[Any]
 JsonFetcher = Callable[[str, str, JsonObject | None, dict[str, str], float], JsonValue]
 
 BINANCE_PERPETUAL_PATTERN = re.compile(r"^(?P<base>[^\s/:]{1,64})USDT$")
+OKX_PERPETUAL_PATTERN = re.compile(r"^(?P<base>[A-Z0-9]{1,64})-USDT-SWAP$")
+BYBIT_PERPETUAL_PATTERN = re.compile(r"^(?P<base>[A-Z0-9]{1,64})USDT$")
 HYPERLIQUID_CORE_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 HYPERLIQUID_HIP3_PATTERN = re.compile(
     r"^(?P<dex>[a-z0-9][a-z0-9_-]{0,31}):(?P<coin>[A-Za-z0-9][A-Za-z0-9._-]{0,63})$"
@@ -50,10 +52,26 @@ def freqtrade_pair(venue: str, symbol: str, *, hip3_dexes: tuple[str, ...] = ())
                 "Binance Freqtrade routing requires an exact USDⓈ-M USDT perpetual symbol",
             )
         return f"{match.group('base')}/USDT:USDT"
+    if venue == "OKX":
+        match = OKX_PERPETUAL_PATTERN.fullmatch(symbol)
+        if match is None:
+            raise DomainRejected(
+                "FREQTRADE_INSTRUMENT_UNSUPPORTED",
+                "OKX Freqtrade routing requires an exact USDT linear SWAP symbol",
+            )
+        return f"{match.group('base')}/USDT:USDT"
+    if venue == "BYBIT":
+        match = BYBIT_PERPETUAL_PATTERN.fullmatch(symbol)
+        if match is None:
+            raise DomainRejected(
+                "FREQTRADE_INSTRUMENT_UNSUPPORTED",
+                "Bybit Freqtrade routing requires an exact USDT linear perpetual symbol",
+            )
+        return f"{match.group('base')}/USDT:USDT"
     if venue != "HYPERLIQUID":
         raise DomainRejected(
             "FREQTRADE_VENUE_UNSUPPORTED",
-            "Freqtrade execution is restricted to Binance and Hyperliquid",
+            "Freqtrade execution is restricted to supported TradingOPS venues",
         )
     hip3 = HYPERLIQUID_HIP3_PATTERN.fullmatch(symbol)
     if hip3 is not None:
@@ -132,15 +150,26 @@ def _default_fetcher(
 @dataclass(frozen=True, slots=True)
 class FreqtradeWorkerSpec:
     name: str
-    venue: Literal["BINANCE", "HYPERLIQUID"]
+    venue: Literal["BINANCE", "HYPERLIQUID", "OKX", "BYBIT"]
     base_url: str
     username: str | None
     password: str | None = field(repr=False)
     hip3_dexes: tuple[str, ...] = ()
+    exchange_account_id: str | None = None
+    team_id: str | None = None
+    account_id: str | None = None
 
     @property
     def credentials_configured(self) -> bool:
         return bool(self.username and self.password)
+
+    def matches_scope(self, *, team_id: str, account_id: str, venue: str) -> bool:
+        return (
+            self.team_id == team_id
+            and self.account_id == account_id
+            and self.venue == venue
+            and self.exchange_account_id is not None
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -169,6 +198,7 @@ class FreqtradeTrade:
     amount: Decimal
     stake_amount: Decimal
     open_rate: Decimal
+    current_rate: Decimal
     close_rate: Decimal | None
     is_open: bool
     enter_tag: str
@@ -301,6 +331,11 @@ def parse_freqtrade_trade(value: JsonObject) -> FreqtradeTrade:
         amount=_decimal(value.get("amount"), "amount", positive=True),
         stake_amount=_decimal(value.get("stake_amount"), "stake_amount", positive=True),
         open_rate=_decimal(value.get("open_rate"), "open_rate", positive=True),
+        current_rate=_decimal(
+            value.get("current_rate", value.get("open_rate")),
+            "current_rate",
+            positive=True,
+        ),
         close_rate=(
             None
             if close_rate_raw in {None, 0, "0", "0.0"}
@@ -341,6 +376,9 @@ class FreqtradeWorkerClient:
             username=spec.username,
             password=spec.password,
             hip3_dexes=spec.hip3_dexes,
+            exchange_account_id=spec.exchange_account_id,
+            team_id=spec.team_id,
+            account_id=spec.account_id,
         )
         self.timeout_seconds = timeout_seconds
         self.confirmation_timeout_seconds = confirmation_timeout_seconds
@@ -412,7 +450,7 @@ class FreqtradeWorkerClient:
         """Verify worker identity, mode and exact tradable scope without sending an order."""
 
         ping = self._request("ping")
-        if ping.get("status") != "pong":
+        if not isinstance(ping, dict) or ping.get("status") != "pong":
             raise DomainRejected(
                 "FREQTRADE_WORKER_RESPONSE_INVALID",
                 "Freqtrade worker ping response is invalid",
@@ -431,7 +469,12 @@ class FreqtradeWorkerClient:
         assert isinstance(version, dict)
         assert isinstance(whitelist_response, dict)
         exchange = config.get("exchange")
-        expected_exchange = "binance" if self.spec.venue == "BINANCE" else "hyperliquid"
+        expected_exchange = {
+            "BINANCE": "binance",
+            "HYPERLIQUID": "hyperliquid",
+            "OKX": "okx",
+            "BYBIT": "bybit",
+        }[self.spec.venue]
         if exchange != expected_exchange or config.get("trading_mode") != "futures":
             raise DomainRejected(
                 "FREQTRADE_WORKER_SCOPE_MISMATCH",
@@ -479,7 +522,7 @@ class FreqtradeWorkerClient:
                     "FREQTRADE_WORKER_NOT_RUNNING",
                     "Freqtrade LIVE worker is not running",
                 )
-        return {
+        result: JsonObject = {
             "name": self.spec.name,
             "venue": self.spec.venue,
             "backend": "FREQTRADE",
@@ -494,6 +537,11 @@ class FreqtradeWorkerClient:
             "hip3_pair_count": len(hip3_pairs),
             "order_send": expected_mode == "LIVE",
         }
+        if self.spec.exchange_account_id is not None:
+            result["exchange_account_id"] = self.spec.exchange_account_id
+            result["team_id"] = self.spec.team_id
+            result["account_id"] = self.spec.account_id
+        return result
 
     def _open_trades(self) -> tuple[FreqtradeTrade, ...]:
         value = self._authorized_request("status")
@@ -519,7 +567,7 @@ class FreqtradeWorkerClient:
             raise DomainRejected(
                 "FREQTRADE_SCOPE_AMBIGUOUS",
                 "multiple live Freqtrade trades match the controlled scope",
-        )
+            )
         return matches[0] if matches else None
 
     def _find_filled_entry(self, *, pair: str, enter_tag: str) -> FreqtradeTrade | None:
@@ -630,6 +678,11 @@ class FreqtradeWorkerClient:
         except DomainRejected as exc:
             if exc.code != "FREQTRADE_WORKER_UNAVAILABLE":
                 raise
+        return self.recover_entry(command)
+
+    def recover_entry(self, command: FreqtradeEntryCommand) -> FreqtradeTrade:
+        """Query a previously dispatched entry without issuing another write."""
+
         deadline = time.monotonic() + self.confirmation_timeout_seconds
         while time.monotonic() <= deadline:
             found = self._find_filled_entry(pair=command.pair, enter_tag=command.enter_tag)
@@ -643,7 +696,7 @@ class FreqtradeWorkerClient:
             time.sleep(0.25)
         raise DomainRejected(
             "FREQTRADE_LIVE_OUTCOME_UNKNOWN",
-            "Freqtrade entry outcome could not be confirmed within the bounded timeout",
+            "Freqtrade entry outcome could not be confirmed by query within the bounded timeout",
         )
 
     def force_exit(self, trade_id: str, *, pair: str) -> FreqtradeTrade:
@@ -670,6 +723,11 @@ class FreqtradeWorkerClient:
         except DomainRejected as exc:
             if exc.code != "FREQTRADE_WORKER_UNAVAILABLE":
                 raise
+        return self.recover_exit(trade_id, pair=pair)
+
+    def recover_exit(self, trade_id: str, *, pair: str) -> FreqtradeTrade:
+        """Query a previously dispatched exit without issuing another write."""
+
         deadline = time.monotonic() + self.confirmation_timeout_seconds
         while time.monotonic() <= deadline:
             open_trade = self.find_open_trade(pair=pair)
@@ -689,5 +747,5 @@ class FreqtradeWorkerClient:
             time.sleep(0.25)
         raise DomainRejected(
             "FREQTRADE_LIVE_OUTCOME_UNKNOWN",
-            "Freqtrade exit outcome could not be confirmed within the bounded timeout",
+            "Freqtrade exit outcome could not be confirmed by query within the bounded timeout",
         )

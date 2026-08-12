@@ -69,6 +69,10 @@ def seed(service: TradingService) -> dict[str, UUID]:
         version="m7-risk-v1",
         system_state=SystemRiskState.NORMAL,
         max_total_risk=Decimal("100"),
+        max_account_risk=Decimal("100"),
+        max_single_loss=Decimal("100"),
+        max_consecutive_losses=3,
+        loss_cooldown=timedelta(hours=1),
         max_fact_age=timedelta(minutes=5),
         now=now,
     )
@@ -327,6 +331,7 @@ def test_live_net_worth_and_risk_capital_combine_two_venues_and_vault(
     with database.session_factory() as session:
         known, total, facts, _ = service._managed_capital_context(
             session,
+            team_id=UUID(center["team_id"]),
             environment=ExecutionEnvironment.LIVE.value,
             now=now,
             max_age=timedelta(minutes=5),
@@ -414,6 +419,7 @@ def test_live_net_worth_and_risk_capital_combine_two_venues_and_vault(
     with database.session_factory() as session:
         known, total, facts, _ = authoritative_service._managed_capital_context(
             session,
+            team_id=UUID(center["team_id"]),
             environment=ExecutionEnvironment.LIVE.value,
             now=now,
             max_age=timedelta(minutes=5),
@@ -435,6 +441,7 @@ def test_live_net_worth_and_risk_capital_combine_two_venues_and_vault(
     with database.session_factory() as session:
         controlled, _, _, _ = service._managed_capital_context(
             session,
+            team_id=UUID(center["team_id"]),
             environment=ExecutionEnvironment.LIVE.value,
             now=now,
             max_age=timedelta(minutes=5),

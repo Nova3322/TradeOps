@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import threading
 from collections import deque
@@ -33,8 +34,10 @@ from trading_control_plane.domain import (
     ReviewDecision,
     RiskTier,
     Role,
+    SignalSourceMode,
     SystemRiskState,
 )
+from trading_control_plane.exchange_connection import ConnectionProbeResult
 from trading_control_plane.hyperliquid import (
     HyperliquidEquity,
     HyperliquidInstrument,
@@ -58,14 +61,24 @@ from trading_control_plane.perptape import (
 )
 from trading_control_plane.perptape_stream import PerptapeSocket, PerptapeStreamWorker
 from trading_control_plane.queries import TradingQueries
-from trading_control_plane.runtime import RuntimeSyncWorker
+from trading_control_plane.runtime import RuntimeBindingSupervisor, RuntimeSyncWorker
 from trading_control_plane.service import TradingService
 from trading_control_plane.telegram import MockTelegramGateway
+from trading_control_plane.venue_read_only import (
+    VenueEquity,
+    VenueInstrument,
+    VenuePosition,
+    VenueReadOnlySnapshot,
+)
 
 NOW = datetime.now(UTC)
 AGENT = "0x2222222222222222222222222222222222222222"
 VAULT = "0x1111111111111111111111111111111111111111"
 OWNER = "0x3333333333333333333333333333333333333333"
+
+
+def runtime_encryption_key() -> str:
+    return base64.urlsafe_b64encode(b"runtime-binding-test-key-32-bytes"[:32]).decode().rstrip("=")
 
 
 class BinanceReader:
@@ -390,7 +403,7 @@ def test_concurrent_perptape_writers_merge_stale_snapshot_identities(
 
     assert errors == []
     assert all(not thread.is_alive() for thread in threads)
-    persisted = queries.perptape_feed()
+    persisted = queries.perptape_feed(actor)
     assert persisted is not None
     assert [candidate.symbol for candidate in persisted.candidates] == [
         "BASEUSDT",
@@ -460,7 +473,7 @@ def test_concurrent_same_key_never_allows_older_fact_to_win(
             base_snapshot=base,
         )
 
-    persisted = queries.perptape_feed()
+    persisted = queries.perptape_feed(actor)
     assert persisted is not None
     assert len(persisted.candidates) == 1
     assert persisted.candidates[0].observed_at == fresh.candidates[0].observed_at
@@ -515,7 +528,7 @@ def test_three_way_merge_does_not_revive_completed_candidate(
             base_snapshot=base,
         )
 
-    persisted = queries.perptape_feed()
+    persisted = queries.perptape_feed(actor)
     assert persisted is not None
     assert {candidate.symbol for candidate in persisted.candidates} == {
         "TARGETUSDT",
@@ -573,7 +586,7 @@ def test_three_way_delete_tombstone_wins_over_unchanged_stale_snapshot(
             base_snapshot=base,
         )
 
-    persisted = queries.perptape_feed()
+    persisted = queries.perptape_feed(actor)
     assert persisted is not None
     assert [candidate.symbol for candidate in persisted.candidates] == [
         "KEEPUSDT",
@@ -647,7 +660,7 @@ def test_three_way_delete_conflict_preserves_only_provably_newer_or_healthier_fa
             base_snapshot=base,
         )
 
-    persisted = queries.perptape_feed()
+    persisted = queries.perptape_feed(actor)
     assert persisted is not None
     assert bool(persisted.candidates) is expected_present
     if expected_present:
@@ -697,7 +710,7 @@ def test_three_way_metadata_does_not_restore_stale_next_allowed_at(
             base_snapshot=base,
         )
 
-    persisted = queries.perptape_feed()
+    persisted = queries.perptape_feed(actor)
     assert persisted is not None
     assert persisted.next_allowed_at == new_deadline
     assert {candidate.symbol for candidate in persisted.candidates} == {
@@ -756,7 +769,7 @@ def test_three_way_three_writers_and_retry_are_idempotent(
     )
 
     assert retry_version == version
-    persisted = queries.perptape_feed()
+    persisted = queries.perptape_feed(actor)
     assert persisted is not None
     assert [candidate.symbol for candidate in persisted.candidates] == [
         "FIRSTUSDT",
@@ -827,7 +840,7 @@ def test_three_way_window_trim_is_a_stable_tombstone(
             base_snapshot=base,
         )
 
-    persisted = queries.perptape_feed()
+    persisted = queries.perptape_feed(actor)
     assert persisted is not None
     symbols = {candidate.symbol for candidate in persisted.candidates}
     assert len(persisted.candidates) == PERPTAPE_CANDIDATE_WINDOW
@@ -866,7 +879,7 @@ def test_postgres_perptape_payload_is_bounded_to_candidate_window(
         base_snapshot=None,
     )
 
-    persisted = queries.perptape_feed()
+    persisted = queries.perptape_feed(actor)
     assert persisted is not None
     assert len(persisted.candidates) == 2_048
     assert persisted.candidates[0].symbol == "B2USDT"
@@ -916,7 +929,7 @@ def test_postgres_rejects_oversized_payload_before_replacing_authoritative_feed(
             base_snapshot=original,
         )
 
-    persisted = queries.perptape_feed()
+    persisted = queries.perptape_feed(actor)
     assert persisted is not None
     assert perptape_snapshot_identity(persisted) == perptape_snapshot_identity(original)
 
@@ -948,7 +961,7 @@ def test_postgres_first_write_rejects_naive_metadata_without_creating_feed(
             now=NOW,
             base_snapshot=None,
         )
-    assert queries.perptape_feed() is None
+    assert queries.perptape_feed(actor) is None
 
 
 @pytest.mark.parametrize("initial_write", [True, False])
@@ -1006,7 +1019,7 @@ def test_postgres_rejects_utc_conversion_overflow_without_mutating_feed(
             base_snapshot=None if initial_write else valid,
         )
 
-    persisted = queries.perptape_feed()
+    persisted = queries.perptape_feed(actor)
     if initial_write:
         assert persisted is None
     else:
@@ -1051,7 +1064,7 @@ def test_postgres_rejects_invalid_service_clock_without_mutating_feed(
             base_snapshot=None if initial_write else valid,
         )
 
-    persisted = queries.perptape_feed()
+    persisted = queries.perptape_feed(actor)
     if initial_write:
         assert persisted is None
     else:
@@ -1093,7 +1106,7 @@ def test_postgres_exact_utc_max_feed_remains_updatable_at_same_fetched_at(
         base_snapshot=initial,
     )
 
-    persisted = queries.perptape_feed()
+    persisted = queries.perptape_feed(actor)
     assert persisted is not None
     assert first_version == 1
     assert second_version == 2
@@ -1130,7 +1143,7 @@ def test_postgres_rejects_decimal_extremes_without_creating_feed(
                 now=NOW,
                 base_snapshot=None,
             )
-        assert queries.perptape_feed() is None
+        assert queries.perptape_feed(actor) is None
 
 
 @pytest.mark.parametrize(
@@ -1206,7 +1219,7 @@ def test_runtime_health_preserves_last_success_and_rate_limit_backoff(
         },
         now=first_failure,
     )
-    failed = queries.runtime_source_health("HYPERLIQUID")
+    failed = queries.runtime_source_health(actor, "HYPERLIQUID")
     assert failed is not None
     assert failed["status"] == "FAILED"
     assert failed["checked_at"] == first_failure.isoformat()
@@ -1224,7 +1237,7 @@ def test_runtime_health_preserves_last_success_and_rate_limit_backoff(
         },
         now=first_failure + timedelta(seconds=30),
     )
-    assert queries.runtime_source_health("HYPERLIQUID") == failed
+    assert queries.runtime_source_health(actor, "HYPERLIQUID") == failed
 
     second_failure = first_failure + timedelta(seconds=60)
     service.record_runtime_source_health(
@@ -1237,7 +1250,7 @@ def test_runtime_health_preserves_last_success_and_rate_limit_backoff(
         },
         now=second_failure,
     )
-    repeated = queries.runtime_source_health("HYPERLIQUID")
+    repeated = queries.runtime_source_health(actor, "HYPERLIQUID")
     assert repeated is not None
     assert repeated["retry_at"] == (second_failure + timedelta(seconds=120)).isoformat()
     assert repeated["consecutive_failures"] == 2
@@ -1249,11 +1262,158 @@ def test_runtime_health_preserves_last_success_and_rate_limit_backoff(
         {"HYPERLIQUID": {"status": "SUCCESS", "items_observed": 4}},
         now=recovered_at,
     )
-    recovered = queries.runtime_source_health("HYPERLIQUID")
+    recovered = queries.runtime_source_health(actor, "HYPERLIQUID")
     assert recovered is not None
     assert recovered["last_success_at"] == recovered_at.isoformat()
     assert recovered["retry_at"] is None
     assert recovered["consecutive_failures"] == 0
+
+
+def test_runtime_feed_and_health_are_isolated_by_team_and_account(
+    database: Database,
+) -> None:
+    service = TradingService(database)
+    queries = TradingQueries(database)
+    admin = service.bootstrap_admin("runtime-scope-admin", now=NOW)
+    context = queries.user_context(admin)
+    workspace_id = UUID(context["active_workspace"]["workspace_id"])
+    first_team_id = UUID(context["active_team"]["team_id"])
+    service.create_exchange_account(
+        actor_id=admin,
+        account_id="shared-runtime-account",
+        venue="BINANCE",
+        label="First Runtime Account",
+        credentials=None,
+        idempotency_key="create-first-runtime-account",
+        now=NOW,
+    )
+    first_principal = service.create_service_principal(
+        "runtime-scope-first", admin, now=NOW
+    )
+    service.assign_role(
+        first_principal,
+        Role.OPERATOR,
+        admin,
+        account_scope="shared-runtime-account",
+        venue_scope="BINANCE",
+        now=NOW,
+    )
+    service.assign_role(first_principal, Role.PROPOSER, admin, now=NOW)
+    client = perptape_test_client()
+    first_feed = perptape_feed(
+        perptape_candidate(
+            client,
+            symbol="BTCUSDT",
+            triggered_at=NOW,
+            observed_at=NOW,
+        ),
+        fetched_at=NOW,
+    )
+    service.record_perptape_feed(
+        first_principal,
+        first_feed,
+        now=NOW,
+        base_snapshot=None,
+    )
+    service.record_runtime_source_health(
+        first_principal,
+        {"BINANCE": {"status": "SUCCESS", "items_observed": 1}},
+        scopes={"BINANCE": ("shared-runtime-account", "BINANCE")},
+        now=NOW,
+    )
+
+    second_team_id = service.create_team(
+        actor_id=admin,
+        name="Runtime Scope Two",
+        slug="runtime-scope-two",
+        idempotency_key="create-runtime-scope-two",
+        now=NOW + timedelta(seconds=1),
+    )
+    service.create_exchange_account(
+        actor_id=admin,
+        account_id="shared-runtime-account",
+        venue="BINANCE",
+        label="Second Runtime Account",
+        credentials=None,
+        idempotency_key="create-second-runtime-account",
+        now=NOW + timedelta(seconds=1),
+    )
+    second_principal = service.create_service_principal(
+        "runtime-scope-second", admin, now=NOW + timedelta(seconds=1)
+    )
+    service.assign_role(
+        second_principal,
+        Role.OPERATOR,
+        admin,
+        account_scope="shared-runtime-account",
+        venue_scope="BINANCE",
+        now=NOW + timedelta(seconds=1),
+    )
+    service.assign_role(
+        second_principal,
+        Role.PROPOSER,
+        admin,
+        now=NOW + timedelta(seconds=1),
+    )
+    second_feed = perptape_feed(
+        perptape_candidate(
+            client,
+            symbol="ETHUSDT",
+            triggered_at=NOW + timedelta(seconds=1),
+            observed_at=NOW + timedelta(seconds=1),
+        ),
+        fetched_at=NOW + timedelta(seconds=1),
+    )
+    service.record_perptape_feed(
+        second_principal,
+        second_feed,
+        now=NOW + timedelta(seconds=1),
+        base_snapshot=None,
+    )
+    service.record_runtime_source_health(
+        second_principal,
+        {
+            "BINANCE": {
+                "status": "FAILED",
+                "items_observed": 0,
+                "error_code": "BINANCE_AUTHENTICATION_FAILED",
+            }
+        },
+        scopes={"BINANCE": ("shared-runtime-account", "BINANCE")},
+        now=NOW + timedelta(seconds=1),
+    )
+
+    assert second_team_id != first_team_id
+    assert queries.perptape_feed(second_principal).candidates[0].symbol == "ETHUSDT"  # type: ignore[union-attr]
+    second_health = queries.runtime_source_health(
+        second_principal,
+        "BINANCE",
+        account_id="shared-runtime-account",
+        venue="BINANCE",
+    )
+    assert second_health is not None and second_health["status"] == "FAILED"
+    assert "BINANCE:shared-runtime-account" in queries.runtime_snapshot(admin)[
+        "source_health"
+    ]
+
+    service.select_scope(
+        actor_id=admin,
+        workspace_id=workspace_id,
+        team_id=first_team_id,
+        idempotency_key="return-first-runtime-scope",
+        now=NOW + timedelta(seconds=2),
+    )
+    assert queries.perptape_feed(first_principal).candidates[0].symbol == "BTCUSDT"  # type: ignore[union-attr]
+    first_health = queries.runtime_source_health(
+        first_principal,
+        "BINANCE",
+        account_id="shared-runtime-account",
+        venue="BINANCE",
+    )
+    assert first_health is not None and first_health["status"] == "SUCCESS"
+    assert queries.runtime_snapshot(admin)["source_health"][
+        "BINANCE:shared-runtime-account"
+    ]["status"] == "SUCCESS"
 
 
 def test_runtime_worker_refreshes_perptape_two_venues_and_vault_without_sending(
@@ -1264,6 +1424,22 @@ def test_runtime_worker_refreshes_perptape_two_venues_and_vault_without_sending(
     actor = service.create_service_principal("runtime-sync", admin, now=NOW)
     perptape_actor = service.create_service_principal("perptape", admin, now=NOW)
     service.assign_role(actor, Role.OPERATOR, admin, now=NOW)
+    service.assign_role(
+        actor,
+        Role.OPERATOR,
+        admin,
+        account_scope="binance-main",
+        venue_scope="BINANCE",
+        now=NOW,
+    )
+    service.assign_role(
+        actor,
+        Role.OPERATOR,
+        admin,
+        account_scope="hyperliquid-main",
+        venue_scope="HYPERLIQUID",
+        now=NOW,
+    )
     service.assign_role(actor, Role.TREASURY_ADMIN, admin, now=NOW)
     service.assign_role(perptape_actor, Role.PROPOSER, admin, now=NOW)
     service.set_risk_policy(
@@ -1271,7 +1447,14 @@ def test_runtime_worker_refreshes_perptape_two_venues_and_vault_without_sending(
         version="runtime-test-v1",
         system_state=SystemRiskState.NORMAL,
         max_total_risk=Decimal(1_000),
-        max_fact_age=timedelta(minutes=5),
+        max_account_risk=Decimal(1_000),
+        max_single_loss=Decimal(1_000),
+        max_consecutive_losses=3,
+        loss_cooldown=timedelta(hours=1),
+        # Keep the freshness policy wider than the full PostgreSQL suite runtime.
+        # The worker still uses a fixed clock, so a short window makes this
+        # readiness assertion depend on test collection order rather than facts.
+        max_fact_age=timedelta(hours=1),
         now=NOW,
     )
     settings = Settings(
@@ -1349,6 +1532,22 @@ def test_runtime_worker_refreshes_perptape_two_venues_and_vault_without_sending(
     assert first.net_worth["complete"] is True
     assert first.net_worth["issues"] == []
 
+    # The full integration suite can run longer than the runtime freshness
+    # window after module-level NOW is captured. Refresh only persisted feed
+    # timing here so this assertion continues to test shared-cache behavior.
+    api_now = datetime.now(UTC)
+    service.record_perptape_feed(
+        perptape_actor,
+        replace(
+            persisted_feed,
+            generated_at=api_now,
+            fetched_at=api_now,
+            next_allowed_at=api_now,
+        ),
+        now=api_now,
+        base_snapshot=persisted_feed,
+    )
+
     async def cached_api_scenario() -> None:
         def must_not_fetch(_url: str, _headers: dict[str, str], _timeout: float) -> dict[str, Any]:
             raise AssertionError("runtime-enabled API must use the shared PostgreSQL feed")
@@ -1390,6 +1589,265 @@ def test_runtime_worker_refreshes_perptape_two_venues_and_vault_without_sending(
             assert len(opportunities.json()["data"]) == 1
 
     asyncio.run(cached_api_scenario())
+
+
+def test_database_bound_supervisor_persists_account_facts_without_trading(
+    database: Database,
+) -> None:
+    service = TradingService(
+        database,
+        credential_encryption_key=runtime_encryption_key(),
+    )
+    admin = service.bootstrap_admin("bound-runtime-admin", now=NOW)
+    exchange_account_id = service.create_exchange_account(
+        actor_id=admin,
+        account_id="bound-binance-main",
+        venue="BINANCE",
+        label="Bound Binance Main",
+        credentials={"api_key": "bound-key", "api_secret": "bound-secret"},
+        idempotency_key="create-bound-binance-main",
+        now=NOW,
+    )
+    command, replay = service.prepare_exchange_account_connection_verification(
+        exchange_account_id,
+        actor_id=admin,
+        expected_version=1,
+        idempotency_key="verify-bound-binance-main",
+    )
+    assert replay is None and command is not None
+    verification = service.record_exchange_account_connection_verification(
+        command,
+        ConnectionProbeResult(True, None),
+        actor_id=admin,
+        idempotency_key="verify-bound-binance-main",
+        now=NOW,
+    )
+    service.configure_exchange_account_runtime_sync(
+        exchange_account_id,
+        actor_id=admin,
+        enabled=True,
+        expected_version=int(verification["version"]),
+        idempotency_key="enable-bound-binance-main",
+        now=NOW,
+    )
+    service.set_risk_policy(
+        actor_id=admin,
+        version="bound-runtime-risk-v1",
+        system_state=SystemRiskState.NORMAL,
+        max_total_risk=Decimal(1_000),
+        max_account_risk=Decimal(1_000),
+        max_single_loss=Decimal(1_000),
+        max_consecutive_losses=3,
+        loss_cooldown=timedelta(hours=1),
+        max_fact_age=timedelta(minutes=5),
+        now=NOW,
+    )
+    settings = Settings(
+        database_url=str(database.engine.url),
+        credential_encryption_key=runtime_encryption_key(),
+        runtime_sync_enabled=True,
+        runtime_sync_interval_seconds=60,
+        _env_file=None,
+    )
+    observed_settings: list[Settings] = []
+
+    def worker_factory(scoped: Settings, scoped_database: Database) -> RuntimeSyncWorker:
+        observed_settings.append(scoped)
+        return RuntimeSyncWorker(
+            settings=scoped,
+            database=scoped_database,
+            perptape=PerptapeClient(
+                base_url="https://perptape.com",
+                api_key=None,
+                contract_version="breakouts-v1",
+                cache_ttl=timedelta(minutes=1),
+            ),
+            binance=BinanceReader(),  # type: ignore[arg-type]
+            hyperliquid=HyperliquidReader(),  # type: ignore[arg-type]
+            notilt=NoTiltReader(),  # type: ignore[arg-type]
+            notilt_valuator=NoTiltUsdValuator(),
+            clock=lambda: NOW,
+        )
+
+    supervisor = RuntimeBindingSupervisor(
+        settings=settings,
+        database=database,
+        clock=lambda: NOW,
+        worker_factory=worker_factory,
+    )
+
+    assert supervisor.has_bindings() is True
+    report = supervisor.run_once(started_at=NOW, completed_at=NOW)
+
+    assert report.successful is True
+    assert len(report.sources) == 1
+    assert next(iter(report.sources.values())).items_observed == 1
+    assert len(observed_settings) == 1
+    assert observed_settings[0].binance_api_key == "bound-key"
+    assert observed_settings[0].binance_api_secret == "bound-secret"  # noqa: S105
+    facts = TradingQueries(database).venue_facts(
+        admin,
+        "bound-binance-main",
+        "BINANCE",
+        "LIVE",
+    )
+    assert facts["equity"]["equity"] == "10.000000000000000000"
+    assert facts["positions"][0]["quantity"] == "0E-18"
+    health = TradingQueries(database).runtime_source_health(
+        admin,
+        "BINANCE",
+        account_id="bound-binance-main",
+        venue="BINANCE",
+    )
+    assert health is not None and health["status"] == "SUCCESS"
+    account = TradingQueries(database).exchange_accounts(admin)["data"][0]
+    assert account["runtime_binding"]["bound"] is True
+    assert account["trading"]["enabled"] is False
+
+
+@pytest.mark.parametrize(
+    ("venue", "credentials", "symbol"),
+    [
+        (
+            "OKX",
+            {"api_key": "okx-key", "api_secret": "okx-secret", "passphrase": "okx-pass"},
+            "BTC-USDT-SWAP",
+        ),
+        (
+            "BYBIT",
+            {"api_key": "bybit-key", "api_secret": "bybit-secret"},
+            "BTCUSDT",
+        ),
+    ],
+)
+def test_database_bound_okx_bybit_facts_use_exact_account_scope_without_trading(
+    database: Database,
+    venue: str,
+    credentials: dict[str, str],
+    symbol: str,
+) -> None:
+    service = TradingService(database, credential_encryption_key=runtime_encryption_key())
+    admin = service.bootstrap_admin(f"bound-{venue.lower()}-admin", now=NOW)
+    account_id = f"bound-{venue.lower()}-main"
+    exchange_account_id = service.create_exchange_account(
+        actor_id=admin,
+        account_id=account_id,
+        venue=venue,
+        label=f"Bound {venue}",
+        credentials=credentials,
+        idempotency_key=f"create-{account_id}",
+        now=NOW,
+    )
+    command, replay = service.prepare_exchange_account_connection_verification(
+        exchange_account_id,
+        actor_id=admin,
+        expected_version=1,
+        idempotency_key=f"verify-{account_id}",
+    )
+    assert replay is None and command is not None
+    verification = service.record_exchange_account_connection_verification(
+        command,
+        ConnectionProbeResult(True, None),
+        actor_id=admin,
+        idempotency_key=f"verify-{account_id}",
+        now=NOW,
+    )
+    service.configure_exchange_account_runtime_sync(
+        exchange_account_id,
+        actor_id=admin,
+        enabled=True,
+        expected_version=int(verification["version"]),
+        idempotency_key=f"enable-{account_id}",
+        now=NOW,
+    )
+    service.set_risk_policy(
+        actor_id=admin,
+        version=f"{venue.lower()}-runtime-risk-v1",
+        system_state=SystemRiskState.NORMAL,
+        max_total_risk=Decimal(1_000),
+        max_account_risk=Decimal(1_000),
+        max_single_loss=Decimal(1_000),
+        max_consecutive_losses=3,
+        loss_cooldown=timedelta(hours=1),
+        max_fact_age=timedelta(minutes=5),
+        now=NOW,
+    )
+    binding = service.runtime_account_bindings()[0]
+    instrument = VenueInstrument(
+        symbol=symbol,
+        tick_size=Decimal("0.1"),
+        lot_size=Decimal("0.001"),
+        minimum_notional=Decimal("5"),
+        quote_currency="USDT",
+        collateral_currency="USDT",
+        active=True,
+    )
+    snapshot = VenueReadOnlySnapshot(
+        symbol=symbol,
+        observed_at=NOW,
+        instrument=instrument,
+        orders=(),
+        fills=(),
+        position=VenuePosition(Decimal(0), Decimal(0), Decimal("50000"), NOW),
+        equity=VenueEquity(Decimal("1000"), Decimal("900"), "USD", NOW),
+        funding=(),
+        protection=None,
+    )
+
+    class Reader:
+        @staticmethod
+        def read_active_instruments() -> tuple[VenueInstrument, ...]:
+            return (instrument,)
+
+        @staticmethod
+        def read_account_snapshots(
+            symbols: tuple[str, ...], *, now: datetime
+        ) -> tuple[VenueReadOnlySnapshot, ...]:
+            assert symbols == ()
+            assert now == NOW
+            return (snapshot,)
+
+    settings = Settings(
+        database_url=str(database.engine.url),
+        credential_encryption_key=runtime_encryption_key(),
+        runtime_sync_enabled=True,
+        runtime_sync_service_username=binding.service_principal_username,
+        _env_file=None,
+    )
+    worker = RuntimeSyncWorker(
+        settings=settings,
+        database=database,
+        perptape=PerptapeClient(
+            base_url="https://perptape.com",
+            api_key=None,
+            contract_version="breakouts-v1",
+            cache_ttl=timedelta(minutes=1),
+        ),
+        binance=BinanceReader(),  # type: ignore[arg-type]
+        hyperliquid=HyperliquidReader(),  # type: ignore[arg-type]
+        notilt=NoTiltReader(),  # type: ignore[arg-type]
+        notilt_valuator=NoTiltUsdValuator(),
+        clock=lambda: NOW,
+    )
+    worker._database_account_reader = Reader()  # type: ignore[assignment]
+    worker._database_account_scope = (venue, account_id)
+
+    result = worker.run_bound_account_once(binding, now=NOW)
+
+    assert result.status == "SUCCESS"
+    facts = TradingQueries(database).venue_facts(admin, account_id, venue, "LIVE")
+    assert facts["equity"]["equity"] == "1000.000000000000000000"
+    assert facts["positions"][0]["symbol"] == symbol
+    health = TradingQueries(database).runtime_source_health(
+        admin,
+        venue,
+        account_id=account_id,
+        venue=venue,
+    )
+    assert health is not None and health["status"] == "SUCCESS"
+    account = TradingQueries(database).exchange_accounts(admin)["data"][0]
+    assert account["runtime_binding"]["bound"] is True
+    assert account["trading"]["enabled"] is False
 
 
 def test_three_timeframe_resonance_creates_one_pending_system_proposal(
@@ -1753,7 +2211,7 @@ def test_websocket_alert_updates_the_existing_authoritative_perptape_feed(
         websocket_url="wss://perptape.com/ws/v1/alerts",
         api_key="integration-stream-key",
         contract_version="breakouts-v1",
-        load_snapshot=queries.perptape_feed,
+        load_snapshot=lambda: queries.perptape_feed(perptape_actor),
         record_snapshot=lambda feed, now, base_snapshot: service.record_perptape_feed(
             perptape_actor,
             feed,
@@ -1772,10 +2230,166 @@ def test_websocket_alert_updates_the_existing_authoritative_perptape_feed(
 
     stream.run_forever(stop)
 
-    persisted = queries.perptape_feed()
+    persisted = queries.perptape_feed(perptape_actor)
     assert persisted is not None
     assert len(persisted.candidates) == 1
     assert persisted.candidates[0].symbol == "ETHUSDT"
     assert persisted.candidates[0].readiness == "READY"
     assert stream.stats.alerts_applied == 1
     assert len(https_calls) == 1
+
+
+def test_database_bound_team_websocket_updates_exact_feed_and_health(
+    database: Database,
+) -> None:
+    encryption_key = runtime_encryption_key()
+    service = TradingService(database, credential_encryption_key=encryption_key)
+    admin = service.bootstrap_admin("bound-stream-admin", now=NOW)
+    current = service.signal_source_status(admin)["source"]
+    service.configure_signal_source(
+        actor_id=admin,
+        mode=SignalSourceMode.PERPTAPE,
+        secret="bound-team-stream-secret",  # noqa: S106
+        enabled=True,
+        webhook_max_age_seconds=300,
+        expected_version=0 if current is None else int(current["version"]),
+        idempotency_key="configure-bound-team-stream",
+        now=NOW,
+    )
+    binding = service.perptape_runtime_bindings()[0]
+    event_time = NOW + timedelta(seconds=1)
+    alert_applied = threading.Event()
+
+    class Socket:
+        def __init__(self) -> None:
+            self.messages = deque(
+                [
+                    json.dumps(
+                        {
+                            "e": "hello",
+                            "seq": 1,
+                            "E": int(NOW.timestamp() * 1_000),
+                        }
+                    ),
+                    json.dumps(
+                        {
+                            "e": "alert",
+                            "seq": 2,
+                            "E": int(event_time.timestamp() * 1_000),
+                            "d": {
+                                "id": "bound-team-alert-1",
+                                "ex": "BN",
+                                "s": "ETHUSDT",
+                                "cs": "ETHUSDT",
+                                "dir": "HH",
+                                "p": 4_000,
+                                "th": 3_900,
+                                "tf": "1h",
+                                "t": int(event_time.timestamp() * 1_000),
+                                "u": int(event_time.timestamp() * 1_000),
+                                "kr": {"status": "ready"},
+                                "vq24": 2_000_000,
+                                "oi": 1_000_000,
+                            },
+                        }
+                    ),
+                ]
+            )
+
+        def send(self, _message: str) -> None:
+            return None
+
+        def recv(self, timeout: float | None = None) -> str | bytes:
+            assert timeout == 1.0
+            if self.messages:
+                return self.messages.popleft()
+            alert_applied.set()
+            threading.Event().wait(0.01)
+            raise TimeoutError
+
+    @contextmanager
+    def connector(
+        url: str,
+        headers: dict[str, str],
+        timeout: float,
+    ) -> Iterator[PerptapeSocket]:
+        assert url == "wss://perptape.com/ws/v1/alerts"
+        assert headers["x-api-key"] == "bound-team-stream-secret"
+        assert timeout == 5
+        yield Socket()
+
+    settings = Settings(
+        database_url=str(database.engine.url),
+        credential_encryption_key=encryption_key,
+        runtime_sync_enabled=True,
+        perptape_websocket_enabled=True,
+        perptape_timeout_seconds=5,
+        perptape_websocket_reconnect_initial_seconds=0.1,
+        perptape_websocket_reconnect_max_seconds=1,
+        _env_file=None,
+    )
+    built_streams: list[PerptapeStreamWorker] = []
+
+    class BoundWorker(RuntimeSyncWorker):
+        def build_bound_perptape_stream(
+            self,
+            prepared: Any,
+        ) -> PerptapeStreamWorker:
+            stream = super().build_bound_perptape_stream(prepared)
+            stream._connector = connector
+            built_streams.append(stream)
+            return stream
+
+    def worker_factory(scoped: Settings, scoped_database: Database) -> RuntimeSyncWorker:
+        return BoundWorker(
+            settings=scoped,
+            database=scoped_database,
+            perptape=PerptapeClient(
+                base_url="https://perptape.com",
+                api_key=scoped.perptape_api_key,
+                contract_version="breakouts-v1",
+                cache_ttl=timedelta(minutes=1),
+                timeout_seconds=5,
+                fetcher=lambda _url, _headers, _timeout: {
+                    "type": "breakouts",
+                    "generatedAt": int(NOW.timestamp() * 1_000),
+                    "data": [],
+                },
+            ),
+            binance=BinanceReader(),  # type: ignore[arg-type]
+            hyperliquid=HyperliquidReader(),  # type: ignore[arg-type]
+            notilt=NoTiltReader(),  # type: ignore[arg-type]
+            notilt_valuator=NoTiltUsdValuator(),
+            clock=lambda: event_time + timedelta(seconds=1),
+        )
+
+    supervisor = RuntimeBindingSupervisor(
+        settings=settings,
+        database=database,
+        clock=lambda: event_time + timedelta(seconds=1),
+        worker_factory=worker_factory,
+    )
+    try:
+        supervisor._reconcile_perptape_streams((binding,), now=NOW)
+        assert alert_applied.wait(2)
+        assert built_streams[0].stats.alerts_applied == 1
+        supervisor._reconcile_perptape_streams(
+            (binding,),
+            now=event_time + timedelta(seconds=2),
+        )
+
+        feed = TradingQueries(database).perptape_feed(admin)
+        assert feed is not None
+        assert [item.symbol for item in feed.candidates] == ["ETHUSDT"]
+        health = TradingQueries(database).runtime_source_health(
+            admin,
+            "PERPTAPE_WEBSOCKET",
+        )
+        assert health is not None
+        assert health["status"] == "SUCCESS"
+        assert health["items_observed"] == 2
+        assert "bound-team-stream-secret" not in repr(health)
+    finally:
+        supervisor._shutdown_perptape_streams()
+
+    assert supervisor.dependencies_in_use is False

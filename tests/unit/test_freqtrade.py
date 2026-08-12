@@ -31,6 +31,26 @@ def test_exact_catalog_symbols_map_to_freqtrade_ccxt_pairs() -> None:
     assert freqtrade_pair("BINANCE", "币安人生USDT") == "币安人生/USDT:USDT"
     assert freqtrade_pair("HYPERLIQUID", "BTC") == "BTC/USDC:USDC"
     assert freqtrade_pair("HYPERLIQUID", "xyz:TSLA", hip3_dexes=("xyz",)) == "XYZ-TSLA/USDC:USDC"
+    assert freqtrade_pair("OKX", "BTC-USDT-SWAP") == "BTC/USDT:USDT"
+    assert freqtrade_pair("BYBIT", "BTCUSDT") == "BTC/USDT:USDT"
+
+
+@pytest.mark.parametrize(
+    ("venue", "symbol"),
+    [
+        ("OKX", "BTCUSDT"),
+        ("OKX", "btc-USDT-SWAP"),
+        ("OKX", "BTC-USDC-SWAP"),
+        ("BYBIT", "BTC-USDT-SWAP"),
+        ("BYBIT", "btcusdt"),
+        ("BYBIT", "BTCUSDC"),
+    ],
+)
+def test_okx_bybit_pair_mapping_rejects_non_exact_linear_symbols(
+    venue: str, symbol: str
+) -> None:
+    with pytest.raises(DomainRejected, match="FREQTRADE_INSTRUMENT_UNSUPPORTED"):
+        freqtrade_pair(venue, symbol)
 
 
 def test_portfolio_margin_balance_uses_unified_account_not_negative_um_subwallet() -> None:
@@ -221,6 +241,54 @@ def test_worker_probe_fails_closed_on_scope_mismatch() -> None:
         client.probe()
 
 
+@pytest.mark.parametrize(("venue", "exchange"), [("OKX", "okx"), ("BYBIT", "bybit")])
+def test_worker_probe_accepts_exact_okx_bybit_exchange_scope(
+    venue: str, exchange: str
+) -> None:
+    def fetcher(
+        url: str,
+        method: str,
+        payload: dict[str, Any] | None,
+        headers: dict[str, str],
+        timeout: float,
+    ) -> dict[str, Any]:
+        del method, payload, headers, timeout
+        if url.endswith("/ping"):
+            return {"status": "pong"}
+        if url.endswith("/token/login"):
+            return {"access_token": "token"}
+        if url.endswith("/show_config"):
+            return {
+                "exchange": exchange,
+                "trading_mode": "futures",
+                "dry_run": False,
+                "force_entry_enable": True,
+                "state": "running",
+            }
+        if url.endswith("/version"):
+            return {"version": "2026.3"}
+        if url.endswith("/whitelist"):
+            return {"whitelist": ["BTC/USDT:USDT"]}
+        raise AssertionError(url)
+
+    client = FreqtradeWorkerClient(
+        FreqtradeWorkerSpec(
+            name=f"{exchange}-account-worker",
+            venue=venue,  # type: ignore[arg-type]
+            base_url="http://127.0.0.1:8082",
+            username="control-plane",
+            password="fixture-password",  # noqa: S106
+        ),
+        fetcher=fetcher,
+    )
+
+    result = client.probe(expected_mode="LIVE", required_pair="BTC/USDT:USDT")
+
+    assert result["venue"] == venue
+    assert result["exchange"] == exchange
+    assert result["order_send"] is True
+
+
 def test_worker_probe_rejects_live_mode_and_missing_hip3_scope() -> None:
     state = {"dry_run": False, "whitelist": ["XYZ-TSLA/USDC:USDC"]}
 
@@ -401,15 +469,19 @@ def test_live_worker_force_entry_is_idempotent_and_force_exit_is_bounded(
     )
 
     opened = client.force_enter(command)
+    recovered = client.recover_entry(command)
     replayed = client.force_enter(command)
     closed = client.force_exit(opened.trade_id, pair=command.pair)
+    recovered_closed = client.recover_exit(opened.trade_id, pair=command.pair)
 
     assert opened.amount == Decimal("0.08")
+    assert recovered.trade_id == opened.trade_id
     assert replayed.trade_id == opened.trade_id
     assert opened.stoploss_order_id == "stop-41"
     assert opened.entry_order_id == "entry-41"
     assert opened.exit_order_id is None
     assert closed.exit_order_id == "exit-41"
+    assert recovered_closed.exit_order_id == "exit-41"
     assert closed.is_open is False
     assert state["writes"] == ["entry", "exit"]
 

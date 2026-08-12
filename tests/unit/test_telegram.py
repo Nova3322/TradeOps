@@ -69,15 +69,15 @@ def gateway(
     recipient_id = uuid4()
 
     def bind(chat_id: str, telegram_username: str, internal_username: str) -> str:
-        assert telegram_username == "kelly_oooo"
-        assert internal_username == "kelly_oooo"
+        assert telegram_username == "telegram-owner"
+        assert internal_username == "telegram-owner"
         bindings[str(recipient_id)] = chat_id
         return internal_username
 
     instance = TelegramBotGateway(
         token=token,
-        allowed_username="@kelly_oooo",
-        internal_username="kelly_oooo",
+        allowed_username="@telegram-owner",
+        internal_username="telegram-owner",
         binder=bind,
         chat_resolver=lambda user_id: bindings.get(str(user_id)),
         todo_resolver=lambda chat_id: (
@@ -104,7 +104,7 @@ def bind(bot: TelegramBotGateway) -> None:
             "update_id": 1,
             "message": {
                 "text": "/start",
-                "from": {"id": 789, "username": "kelly_oooo"},
+                "from": {"id": 789, "username": "telegram-owner"},
                 "chat": {"id": 789, "type": "private"},
             },
         }
@@ -252,7 +252,7 @@ def test_private_start_binds_allowlisted_username_and_todo_is_available() -> Non
             "update_id": 2,
             "message": {
                 "text": "/todo",
-                "from": {"id": 789, "username": "kelly_oooo"},
+                "from": {"id": 789, "username": "telegram-owner"},
                 "chat": {"id": 789, "type": "private"},
             },
         }
@@ -284,7 +284,7 @@ def test_todo_limits_message_to_earliest_ten_and_reports_omitted_count() -> None
             "update_id": 2,
             "message": {
                 "text": "/todo",
-                "from": {"id": 789, "username": "kelly_oooo"},
+                "from": {"id": 789, "username": "telegram-owner"},
                 "chat": {"id": 789, "type": "private"},
             },
         }
@@ -303,7 +303,7 @@ def test_start_rejects_different_username_and_group_chat() -> None:
     bot, bindings, _handled, _recipient_id = gateway(fake)
     for update_id, username, chat_type in (
         (1, "intruder", "private"),
-        (2, "kelly_oooo", "group"),
+        (2, "telegram-owner", "group"),
     ):
         bot.handle_update(
             {
@@ -381,8 +381,8 @@ def test_binding_failure_and_missing_handler_fail_closed() -> None:
     recipient_id = uuid4()
     bot = TelegramBotGateway(
         token=token,
-        allowed_username="kelly_oooo",
-        internal_username="kelly_oooo",
+        allowed_username="telegram-owner",
+        internal_username="telegram-owner",
         binder=lambda *_args: (_ for _ in ()).throw(RuntimeError("no binding")),
         chat_resolver=lambda _user_id: "789",
         client=TelegramBotClient(token, base_url="https://telegram.invalid", poster=fake.poster),
@@ -450,9 +450,9 @@ def test_polling_health_reports_successful_long_poll_without_enabling_actions() 
     token = "123456789:abcdefghijklmnopqrstuvwxyz"  # noqa: S105
     bot = TelegramBotGateway(
         token=token,
-        allowed_username="kelly_oooo",
-        internal_username="kelly_oooo",
-        binder=lambda *_args: "kelly_oooo",
+        allowed_username="telegram-owner",
+        internal_username="telegram-owner",
+        binder=lambda *_args: "telegram-owner",
         chat_resolver=lambda _user_id: None,
         client=TelegramBotClient(token, base_url="https://telegram.invalid", poster=poster),
     )
@@ -515,7 +515,7 @@ def test_help_status_and_unknown_commands_explain_narrow_boundary() -> None:
                 "update_id": update_id,
                 "message": {
                     "text": command,
-                    "from": {"id": 789, "username": "kelly_oooo"},
+                    "from": {"id": 789, "username": "telegram-owner"},
                     "chat": {"id": 789, "type": "private"},
                 },
             }

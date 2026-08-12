@@ -167,6 +167,12 @@ class PerptapeStreamWorker:
         self.fatal_error_code: str | None = None
         self.stats = PerptapeStreamStats()
 
+    @property
+    def connection_healthy(self) -> bool:
+        """Report an observed heartbeat or alert, never configuration intent."""
+
+        return self._connection_healthy
+
     @staticmethod
     def _safe_record_time(now: datetime, current: PerptapeFeedSnapshot | None) -> datetime:
         now = normalize_perptape_datetime(now)

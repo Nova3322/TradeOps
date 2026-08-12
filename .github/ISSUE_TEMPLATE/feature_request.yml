@@ -1,0 +1,26 @@
+name: Feature request
+description: Propose a governance or operations improvement.
+title: "[Feature]: "
+labels: ["enhancement", "triage"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Operator problem
+      description: Describe the task, role, and failure mode before describing a solution.
+    validations:
+      required: true
+  - type: textarea
+    id: boundary
+    attributes:
+      label: Safety boundary
+      description: Explain effects on authorization, review independence, scope, idempotency, audit, and LIVE/SHADOW isolation.
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance evidence
+      description: List code, API, real-page, end-to-end, and test evidence.
+    validations:
+      required: true

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 from datetime import UTC, datetime
 
 from alembic import command
@@ -13,11 +14,14 @@ from trading_control_plane.domain import CapabilityStatus, PrincipalType, Role
 from trading_control_plane.models import CapabilityGate, RoleAssignment, User
 from trading_control_plane.service import TradingService
 
-OWNER_USERNAME = "kelly_oooo"
-PROPOSER_USERNAME = "local-proposer"
-SECOND_REVIEWER_USERNAME = "local-reviewer-two"
-PERPTAPE_USERNAME = "perptape"
-RUNTIME_SYNC_USERNAME = "runtime-sync"
+LOCAL_USERNAME_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,119}$")
+
+
+def _local_username(variable: str, default: str) -> str:
+    value = os.environ.get(variable, default).strip()
+    if not LOCAL_USERNAME_PATTERN.fullmatch(value):
+        raise RuntimeError(f"{variable} must be a safe 1-120 character local identifier")
+    return value
 
 
 def _user_id(database: Database, username: str):
@@ -79,46 +83,57 @@ def _ensure_role(
 
 def main() -> None:
     settings = get_settings()
+    owner_username = _local_username("TRADING_LOCAL_ADMIN_USERNAME", "trading-admin")
+    proposer_username = _local_username("TRADING_LOCAL_PROPOSER_USERNAME", "trading-proposer")
+    second_reviewer_username = _local_username(
+        "TRADING_LOCAL_SECOND_REVIEWER_USERNAME", "trading-reviewer"
+    )
+    perptape_username = _local_username(
+        "TRADING_PERPTAPE_SERVICE_USERNAME", settings.perptape_service_username
+    )
+    runtime_sync_username = _local_username(
+        "TRADING_RUNTIME_SYNC_SERVICE_USERNAME", settings.runtime_sync_service_username
+    )
     command.upgrade(Config("alembic.ini"), "head")
     database = Database(settings.database_url)
     service = TradingService(database)
     now = datetime.now(UTC)
     try:
-        owner_id = _user_id(database, OWNER_USERNAME)
+        owner_id = _user_id(database, owner_username)
         if owner_id is None:
-            owner_id = service.bootstrap_admin(OWNER_USERNAME, now=now)
+            owner_id = service.bootstrap_admin(owner_username, now=now)
         local_admin_password = os.environ.get("TRADING_LOCAL_ADMIN_PASSWORD")
         if local_admin_password:
             service.ensure_local_human_password(
-                OWNER_USERNAME,
+                owner_username,
                 local_admin_password,
                 now=now,
             )
         proposer_id = _ensure_user(
             database,
             service,
-            PROPOSER_USERNAME,
+            proposer_username,
             owner_id,
             now=now,
         )
         second_reviewer_id = _ensure_user(
             database,
             service,
-            SECOND_REVIEWER_USERNAME,
+            second_reviewer_username,
             owner_id,
             now=now,
         )
         perptape_id = _ensure_service_principal(
             database,
             service,
-            PERPTAPE_USERNAME,
+            perptape_username,
             owner_id,
             now=now,
         )
         runtime_sync_id = _ensure_service_principal(
             database,
             service,
-            RUNTIME_SYNC_USERNAME,
+            runtime_sync_username,
             owner_id,
             now=now,
         )

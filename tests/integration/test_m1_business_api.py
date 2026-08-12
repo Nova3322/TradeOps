@@ -68,6 +68,10 @@ def seed(service: TradingService) -> dict[str, UUID]:
         version="m1-risk-v1",
         system_state=SystemRiskState.NORMAL,
         max_total_risk=Decimal("100"),
+        max_account_risk=Decimal("100"),
+        max_single_loss=Decimal("100"),
+        max_consecutive_losses=3,
+        loss_cooldown=timedelta(hours=1),
         max_fact_age=timedelta(minutes=5),
         now=now,
     )
@@ -247,6 +251,84 @@ def app(
 async def login(client: AsyncClient, username: str) -> None:
     response = await client.post("/api/auth/mock/login", json={"username": username})
     assert response.status_code == 200, response.text
+
+
+def test_team_risk_policy_api_versions_explicit_limits_and_rejects_non_admin(
+    database: Database,
+) -> None:
+    service = TradingService(database)
+    seed(service)
+
+    async def scenario() -> None:
+        async with AsyncClient(
+            transport=ASGITransport(app=app(database, MockTelegramGateway())),
+            base_url="http://test",
+        ) as client:
+            await login(client, "admin")
+            current = await client.get("/api/risk-controls")
+            assert current.status_code == 200, current.text
+            assert current.json()["policy"]["limits_configured"] is True
+            changed = await client.put(
+                "/api/risk-controls/policy",
+                json={
+                    "version": "m1-risk-v2-tightened",
+                    "max_total_risk": "90",
+                    "max_account_risk": "80",
+                    "max_single_loss": "50",
+                    "max_consecutive_losses": 2,
+                    "loss_cooldown_seconds": 7200,
+                    "max_fact_age_seconds": 240,
+                    "expected_revision": 1,
+                    "reason": "tighten explicit team and account risk limits",
+                    "idempotency_key": "m1-risk-policy-api",
+                },
+            )
+            assert changed.status_code == 200, changed.text
+            projected = (await client.get("/api/risk-controls")).json()["policy"]
+            assert projected["revision"] == 2
+            assert projected["max_account_risk"] == "80.000000000000000000"
+            assert projected["max_single_loss"] == "50.000000000000000000"
+            assert projected["max_consecutive_losses"] == 2
+            assert projected["loss_cooldown_seconds"] == 7200
+
+            loosened = await client.put(
+                "/api/risk-controls/policy",
+                json={
+                    "version": "m1-risk-v3-loosened",
+                    "max_total_risk": "95",
+                    "max_account_risk": "80",
+                    "max_single_loss": "50",
+                    "max_consecutive_losses": 2,
+                    "loss_cooldown_seconds": 7200,
+                    "max_fact_age_seconds": 240,
+                    "expected_revision": 2,
+                    "reason": "attempt to loosen one configured team limit directly",
+                    "idempotency_key": "m1-risk-policy-loosened",
+                },
+            )
+            assert loosened.status_code == 422
+            assert loosened.json()["error"]["code"] == "REVIEWED_POLICY_CHANGE_REQUIRED"
+
+            await login(client, "proposer")
+            denied = await client.put(
+                "/api/risk-controls/policy",
+                json={
+                    "version": "forbidden-policy",
+                    "max_total_risk": "80",
+                    "max_account_risk": "70",
+                    "max_single_loss": "40",
+                    "max_consecutive_losses": 2,
+                    "loss_cooldown_seconds": 7200,
+                    "max_fact_age_seconds": 200,
+                    "expected_revision": 2,
+                    "reason": "attempt outside assigned team risk administration",
+                    "idempotency_key": "forbidden-risk-policy",
+                },
+            )
+            assert denied.status_code == 403
+            assert denied.json()["error"]["code"] == "RBAC_DENIED"
+
+    asyncio.run(scenario())
 
 
 async def logout(client: AsyncClient) -> None:

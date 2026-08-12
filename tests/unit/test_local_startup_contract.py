@@ -6,18 +6,20 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 
 
-def test_local_console_starts_only_control_plane_dry_run_workers() -> None:
+def test_local_console_keeps_optional_dry_run_workers_off_by_default() -> None:
     script = (ROOT / "scripts" / "run_local.sh").read_text()
 
     assert "TRADING_EXECUTION_BACKEND=FREQTRADE" in script
     assert 'TRADING_API_PORT="${TRADING_API_PORT:-8014}"' in script
-    assert "TRADING_FREQTRADE_WORKERS_ENABLED=true" in script
+    assert 'TRADING_LOCAL_FREQTRADE_WORKERS_ENABLED:-false' in script
+    assert 'if [[ "$TRADING_FREQTRADE_WORKERS_ENABLED" == true ]]' in script
     assert "--profile execution-workers up -d" in script
     assert "freqtrade-binance" in script
     assert "freqtrade-hyperliquid" in script
     assert "TRADING_FREQTRADE_LIVE_ORDER_SEND_ENABLED=false" in script
     assert "TRADING_BINANCE_LIVE_ORDER_SEND_ENABLED=false" in script
     assert "TRADING_HYPERLIQUID_LIVE_ORDER_SEND_ENABLED=false" in script
+    assert "docker compose stop freqtrade-binance freqtrade-hyperliquid" in script
     assert "--profile live-smoke" not in script
 
 

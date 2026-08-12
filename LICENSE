@@ -1,0 +1,30 @@
+TradingOPS Dual-License Notice
+
+SPDX-License-Identifier: GPL-3.0-only OR LicenseRef-TradingOPS-Commercial-1.0
+
+Copyright (c) 2026 COPYRIGHT_HOLDER.
+
+You may use the original TradingOPS software in this repository under either:
+
+1. GNU General Public License version 3 only (GPL-3.0-only). The complete,
+   unmodified license text is in `LICENSES/GPL-3.0-only.txt`; or
+2. a separate TradingOPS Commercial License executed with the applicable
+   copyright holder. The repository reference terms are in
+   `LICENSES/LicenseRef-TradingOPS-Commercial-1.0.txt`.
+
+The GPL permits commercial use, modification, and distribution. Its copyleft
+and source-availability obligations apply when covered works are conveyed.
+Organizations that need closed-source integration, proprietary distribution,
+or negotiated warranties, support, indemnities, or other commercial terms may
+obtain a separate commercial license. The commercial option does not reduce or
+replace rights already received under the GPL.
+
+Commercial license contact: COMMERCIAL_EMAIL
+
+Unless a file states otherwise, original source code and documentation in this
+repository use the SPDX expression above. Third-party software, fonts, generated
+artifacts, and separately identified files remain under their own licenses. See
+`THIRD_PARTY_NOTICES.md`, `sbom.cdx.json`, and `LICENSES/`.
+
+No trademark rights are granted. THE SOFTWARE IS PROVIDED WITHOUT WARRANTY TO
+THE EXTENT PERMITTED BY THE APPLICABLE LICENSE.

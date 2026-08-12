@@ -1,16 +1,91 @@
+# Embedded JavaScript fixtures preserve product copy and are checked by Node.
+# ruff: noqa: E501, RUF001, RUF100
+
 import asyncio
 import json
 import shutil
 import subprocess
+import tempfile
 import textwrap
 from datetime import UTC, datetime, timedelta
+from functools import cache
 from pathlib import Path
+from types import SimpleNamespace
 
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient, Response
 
-from trading_control_plane.api import _perptape_runtime_status, create_app
+from trading_control_plane.api import (
+    _perptape_runtime_status,
+    _perptape_transport_status,
+    create_app,
+)
 from trading_control_plane.config import Settings
+
+WEB_ROOT = Path(__file__).parents[2] / "src" / "trading_control_plane" / "web"
+FRONTEND_SCRIPTS = (
+    "app-core.js",
+    "workspace.js",
+    "signals.js",
+    "proposals.js",
+    "risk.js",
+    "execution.js",
+    "capital.js",
+    "reporting.js",
+    "accounts.js",
+    "app.js",
+)
+
+
+def frontend_source() -> str:
+    return "\n".join((WEB_ROOT / name).read_text() for name in FRONTEND_SCRIPTS)
+
+
+def test_webhook_signals_are_a_separate_dynamic_workspace() -> None:
+    shell = (WEB_ROOT / "index.html").read_text()
+    application = (WEB_ROOT / "app-core.js").read_text()
+    signals = (WEB_ROOT / "signals.js").read_text()
+    styles = (WEB_ROOT / "styles.css").read_text()
+
+    assert 'class="nav-link-group" role="group" aria-label="实时信号"' in shell
+    assert 'href="/opportunities"' in shell
+    assert 'href="/webhook-signals"' in shell
+    assert "path === '/webhook-signals'" in application
+    assert "await renderWebhookSignals()" in application
+
+    perptape = signals.split("const OPPORTUNITY_TIMEFRAME_ORDER", maxsplit=1)[1]
+    webhook = signals.split("async function renderWebhookSignals", maxsplit=1)[1].split(
+        "function signalSourceFormDirty", maxsplit=1
+    )[0]
+    assert "api('/api/opportunities')" in perptape
+    assert "api(`/api/webhook-signals?" in webhook
+    assert "sources.map(source =>" in webhook
+    assert "source.name" in webhook
+    assert 'tabindex="${selectedSource' in webhook
+    assert "['ArrowLeft', 'ArrowRight', 'Home', 'End']" in webhook
+    assert "restoreFocus" in webhook
+    assert "TradingView BTC" not in webhook
+    assert "策略系统 A" not in webhook
+    assert "量化模型 B" not in webhook
+    assert "data-signal-event-id" in signals
+    assert "proposal_eligibility" in webhook
+    assert "freshness" in webhook
+    assert ".webhook-signal-facts" in styles
+    assert "grid-template-columns: repeat(4, minmax(0, 1fr))" in styles
+    assert "grid-template-columns: 1fr" in styles
+
+
+@cache
+def frontend_bundle_path() -> Path:
+    with tempfile.NamedTemporaryFile(
+        mode="w",
+        encoding="utf-8",
+        prefix="tradingops-frontend-",
+        suffix=".js",
+        delete=False,
+    ) as bundle:
+        bundle.write(frontend_source())
+        return Path(bundle.name)
 
 
 class FakeDatabase:
@@ -106,44 +181,276 @@ def test_perptape_runtime_status_distinguishes_configuration_and_freshness() -> 
     assert _perptape_runtime_status(continuous, mismatched_feed, now=now) == "STALE"
 
 
+def test_perptape_transport_status_distinguishes_live_stream_and_polling_fallback() -> None:
+    now = datetime.now(UTC)
+    configured = settings().model_copy(update={"runtime_sync_enabled": True})
+    polling = {
+        "status": "SUCCESS",
+        "checked_at": (now - timedelta(seconds=10)).isoformat(),
+        "error_code": None,
+    }
+    live = _perptape_transport_status(
+        configured,
+        {
+            "PERPTAPE": polling,
+            "PERPTAPE_WEBSOCKET": {
+                "status": "SUCCESS",
+                "checked_at": (now - timedelta(seconds=5)).isoformat(),
+                "error_code": None,
+            },
+        },
+        now=now,
+    )
+    assert live["state"] == "WEBSOCKET_LIVE"
+    assert live["primary_channel"] == "WEBSOCKET"
+    assert live["fallback_active"] is False
+
+    fallback = _perptape_transport_status(
+        configured,
+        {
+            "PERPTAPE": polling,
+            "PERPTAPE_WEBSOCKET": {
+                "status": "FAILED",
+                "checked_at": now.isoformat(),
+                "error_code": "PERPTAPE_AUTH_FAILED",
+            },
+        },
+        now=now,
+    )
+    assert fallback["state"] == "POLLING_FALLBACK"
+    assert fallback["primary_channel"] == "HTTPS_POLLING"
+    assert fallback["fallback_active"] is True
+    assert fallback["error_code"] == "PERPTAPE_AUTH_FAILED"
+
+    stale = _perptape_transport_status(
+        configured,
+        {
+            "PERPTAPE_WEBSOCKET": {
+                "status": "SUCCESS",
+                "checked_at": (now - timedelta(hours=1)).isoformat(),
+                "error_code": None,
+            }
+        },
+        now=now,
+    )
+    assert stale["state"] == "WEBSOCKET_FAILED"
+    assert stale["error_code"] == "PERPTAPE_WEBSOCKET_HEALTH_STALE"
+
+
 def test_web_shell_is_served_without_claiming_business_readiness() -> None:
     app = create_app(settings(), FakeDatabase(ready=False))
     response = get(app, "/")
 
     assert response.status_code == 200
     assert "交易控制台" in response.text
-    assert "/assets/app.js?v=131" in response.text
-    assert "/assets/styles.css?v=50" in response.text
+    assert "/assets/app-core.js?v=192" in response.text
+    assert "/assets/workspace.js?v=178" in response.text
+    assert "/assets/signals.js?v=174" in response.text
+    assert "/assets/proposals.js?v=175" in response.text
+    assert "/assets/capital.js?v=173" in response.text
+    assert "/assets/app.js?v=175" in response.text
+    assert 'href="/signals"' in response.text
+    assert "/assets/styles.css?v=92" in response.text
+    for font_name in (
+        "IBMPlexSansSC-Regular.woff2",
+        "IBMPlexSansSC-SemiBold.woff2",
+        "IBMPlexMono-Regular.woff2",
+        "IBMPlexMono-SemiBold.woff2",
+    ):
+        assert (
+            f'href="/assets/fonts/{font_name}" as="font" type="font/woff2" crossorigin'
+            in response.text
+        )
+    assert "/assets/reporting.js?v=172" in response.text
+    assert "/assets/accounts.js?v=172" in response.text
+    assert 'href="/assets/tradingops-logo.png" type="image/png"' in response.text
+    assert '<img src="/assets/tradingops-logo.png" alt="">' in response.text
+    assert '<span class="brand-mark" aria-hidden="true">T</span>' not in response.text
     assert 'aria-label="交易控制台首页"' in response.text
-    assert '<a href="/" data-link><span>⌂</span>当前任务</a>' in response.text
-    assert '<span>⌁</span>实时机会</a>' in response.text
-    assert '<span>¤</span>资金中心</a>' in response.text
+    assert '<a href="/home" data-link>当前任务</a>' in response.text
+    assert '<p class="nav-section-label">工作台</p>' in response.text
+    assert '<p class="nav-section-label">交易流程</p>' in response.text
+    assert '<p class="nav-section-label">运行与风控</p>' in response.text
+    assert '<p class="nav-section-label">团队设置</p>' in response.text
+    assert 'href="/opportunities"' in response.text
+    assert ">Perptape</a>" in response.text
+    assert 'href="/webhook-signals"' in response.text
+    assert ">Webhook 信号</a>" in response.text
+    assert '<a class="skip-link" href="#main">跳到主要内容</a>' in response.text
+    assert '<main id="main" class="main-content" tabindex="-1">' in response.text
+    assert 'id="main" class="main-content" aria-live=' not in response.text
+    assert '>提案管理</a>' in response.text
+    assert '>审核队列</a>' in response.text
+    assert '>资金中心</a>' in response.text
+    assert '>风险控制</a>' in response.text
+    assert response.text.count("data-nav-section") == 4
+    assert response.text.count("data-nav-capability=") == 14
+    assert "data-nav-group=" not in response.text
+    assert 'id="team-settings-link"' not in response.text
     assert 'id="mobile-nav-toggle"' in response.text
+    assert 'id="scope-switcher"' in response.text
+    assert 'id="workspace-switcher-menu"' in response.text
+    assert 'id="user-menu"' in response.text
+    topbar = response.text.split('<header class="topbar">', maxsplit=1)[1].split(
+        "</header>", maxsplit=1
+    )[0]
+    user_menu = response.text.split('<section id="user-menu-panel"', maxsplit=1)[1].split(
+        "</section>", maxsplit=1
+    )[0]
+    assert 'class="header-preferences"' in topbar
+    assert 'id="scope-control"' in topbar
+    assert "data-preference-select=" not in user_menu
+    assert 'href="/profile/api-access"' in response.text
+    assert response.text.count('href="/profile/api-access"') == 1
+    assert "API 接入" in response.text
+    assert 'id="password-change-form"' in response.text
+    assert response.text.count("data-preference-select=") == 2
+    assert response.text.count('aria-haspopup="listbox"') == 2
+    assert response.text.count('role="listbox"') == 2
+    assert "个人账户" not in response.text
+    assert 'id="scope-control"' in response.text
+    assert 'class="nav-section" data-nav-section' in response.text
+    assert 'id="language-preference-value"' in response.text
+    assert 'id="theme-preference-value"' in response.text
     assert 'id="confirm-dialog"' in response.text
 
     for route in (
+        "/home",
+        "/workspaces",
         "/venues",
         "/venues/hyperliquid",
+        "/venues/binance-main",
+        "/venues/shadow",
+        "/webhook-signals",
         "/opportunities/defaults",
         "/proposals",
+        "/results",
+        "/notifications",
     ):
         routed_shell = get(app, route)
         assert routed_shell.status_code == 200
         assert "交易控制台" in routed_shell.text
 
-    assert get(app, "/admin/users").status_code == 401
+    assert get(app, "/settings").status_code == 404
 
-    app_javascript = get(app, "/assets/app.js")
-    assert app_javascript.status_code == 200
+    assert get(app, "/admin/users").status_code == 401
+    assert get(app, "/admin/agents").status_code == 200
+    assert get(app, "/profile/api-access").status_code == 200
+
+    openapi = get(app, "/openapi.json")
+    assert openapi.status_code == 200
+    assert openapi.json()["openapi"].startswith("3.")
+    for path in (
+        "/api/api-client/connection",
+        "/api/instruments",
+        "/api/opportunities",
+        "/api/proposals",
+        "/api/campaigns",
+        "/api/results",
+        "/api/audit",
+    ):
+        assert path in openapi.json()["paths"]
+
+    quickstart = get(app, "/docs/AI_API_QUICKSTART.md")
+    assert quickstart.status_code == 200
+    assert quickstart.headers["content-type"].startswith("text/markdown")
+    for placeholder in ("BASE_URL", "TOKEN", "WORKSPACE_ID", "TEAM_ID", "ACCOUNT_ID"):
+        assert placeholder in quickstart.text
+    assert "完整接口合同以运行中的 [`/openapi.json`](/openapi.json) 为唯一真源" in quickstart.text
+    assert "缺失、过期或限流数据不得视为实时数据" in quickstart.text
+    assert "下单、资金划转、钱包签名和广播默认关闭" in quickstart.text
+
+    assert get(app, "/assets/app.js").status_code == 200
+    app_javascript = SimpleNamespace(text=frontend_source())
     assert "history.replaceState({}, '', loginDestination());" in app_javascript.text
-    assert "const destination = `${location.pathname}${location.search}`;" in app_javascript.text
+    assert "const loginDestination = () => {\n  return '/';\n};" in app_javascript.text
+    assert "function renderWorkspaceGateway()" in app_javascript.text
+    workspace_javascript = (WEB_ROOT / "workspace.js").read_text()
+    api_access = workspace_javascript.split(
+        "async function renderApiAccess(credentialResult = null)", maxsplit=1
+    )[1]
+    ordered_sections = [
+        'id="api-quickstart"',
+        'id="api-token"',
+        'id="api-agent"',
+        'id="api-safety"',
+        'id="api-contract"',
+    ]
+    assert [api_access.index(item) for item in ordered_sections] == sorted(
+        api_access.index(item) for item in ordered_sections
+    )
+    assert 'href="/openapi.json"' in api_access
+    assert 'href="/docs/AI_API_QUICKSTART.md"' in api_access
+    assert "API_AGENT_SYSTEM_PROMPT" in workspace_javascript
+    assert "默认只调用只读 GET 接口" in workspace_javascript
+    assert "data-copy-api-snippet" in workspace_javascript
+    assert "Token 明文只在创建或轮换成功时显示一次" in api_access
+    assert '<b translate="no">LIVE / SHADOW</b>' in api_access
+    assert '<code translate="no">GET /api/results?environment=SHADOW</code>' in api_access
+    assert "缺失、过期或限流不等于实时" in api_access
+    assert "LIVE_ORDER_SEND" in api_access
+    assert "CAPITAL_TRANSFER" in api_access
+    assert "交易所密钥" in api_access
+    assert "签名材料" in api_access
+    access_management = workspace_javascript.split(
+        "async function renderAccessManagement()", maxsplit=1
+    )[1].split("\nfunction apiScopeOptions", maxsplit=1)[0]
+    assert "scopeCreationPanels" not in access_management
+    assert "bindScopeCreationForms" not in access_management
+    assert 'id="invite-team-member-form"' in access_management
+    assert 'id="create-member-form"' in access_management
+    assert "权限分离原则" in access_management
+    assert "${scopeCreationPanels()}" in workspace_javascript
+    assert "workspace-gateway-create-panel" in workspace_javascript
+    assert "api('/api/auth/password'" in app_javascript.text
+    assert "const PREFERENCE_OPTIONS" in app_javascript.text
+    assert "function normalizeThemePreference" in app_javascript.text
+    assert "function initializePreferenceDropdowns" in app_javascript.text
+    assert "matchMedia('(max-width: 1100px)').matches" in app_javascript.text
+    assert "matchMedia('(max-width: 980px)').matches" not in app_javascript.text
+    assert "path === '/webhook-signals'" in app_javascript.text
+    assert "await renderWebhookSignals()" in app_javascript.text
+    signals_javascript = (WEB_ROOT / "signals.js").read_text()
+    signal_settings = signals_javascript.split("async function renderSignalSources()", maxsplit=1)[
+        1
+    ].split("const WEBHOOK_SIGNAL_BLOCKERS", maxsplit=1)[0]
+    webhook_page = signals_javascript.split("async function renderWebhookSignals", maxsplit=1)[
+        1
+    ].split("function signalSourceFormDirty", maxsplit=1)[0]
+    assert "api('/api/signals')" not in signal_settings
+    assert "api(`/api/webhook-signals?" in webhook_page
+    assert "sources.map(source =>" in webhook_page
+    assert "data-signal-event-id" in signals_javascript
+    assert "Perptape 保留在独立页面" in webhook_page
+    assert "currentThemePreference === 'system'" in app_javascript.text
+    assert "['ArrowDown', 'ArrowUp', 'Home', 'End']" in app_javascript.text
+    assert "workspace-gateway-tabs" not in app_javascript.text
+    assert "个人账户</span>" not in app_javascript.text
     assert "timeoutError.code = 'REQUEST_TIMEOUT'" in app_javascript.text
     assert "networkError.code = 'NETWORK_ERROR'" in app_javascript.text
     assert "const REQUEST_TIMEOUT_MS = 15000" in app_javascript.text
-    assert "全局风险恢复由管理员控制" in app_javascript.text
+    assert "当前团队风险恢复仍由管理员控制" in app_javascript.text
+    assert "const SHADOW_READINESS_CATALOG" in app_javascript.text
+    assert "async function renderTradingMode()" in app_javascript.text
+    assert "api('/api/trading-mode')" in app_javascript.text
+    assert "重置为 100,000 U" in app_javascript.text
+    assert 'id="risk-policy-form"' in app_javascript.text
+    assert "RISK_LIMITS_UNCONFIGURED" in app_javascript.text
     assert "if (error.status !== 403) throw error" in app_javascript.text
     assert "actionable_for_current_user" in app_javascript.text
     assert "item.proposer_id === session.user_id" in app_javascript.text
+    assert "function reviewEnvironmentSelection(search = location.search)" in app_javascript.text
+    assert "reviewEnvironment === 'ALL' || item.environment === reviewEnvironment" in (
+        app_javascript.text
+    )
+    assert "const pending = pendingResponse.data;" in app_javascript.text
+    assert "const pending = pendingResponse.data.filter(item => item.environment === 'LIVE')" not in (
+        app_javascript.text
+    )
+    assert 'aria-label="审核环境范围"' in app_javascript.text
+    assert "const createActions = !status && canPropose" in app_javascript.text
+    assert "params.set('environment', reviewEnvironment)" in app_javascript.text
+    assert "?environment=${reviewEnvironment}" in app_javascript.text
     assert "只统计草稿和等待审核" in app_javascript.text
     assert "const canViewOperations = hasCapability('operations.view')" in app_javascript.text
     assert "canViewOperations ? api('/api/campaigns')" in app_javascript.text
@@ -151,22 +458,41 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
     assert "api('/api/venues/hyperliquid/status')" not in app_javascript.text
     assert "当前身份不读取任务详情" in app_javascript.text
     assert "由交易运维人员查看" in app_javascript.text
-    assert 'href="/proposals" data-link>查看提案记录</a>' in app_javascript.text
+    assert 'href="/proposals" data-link>查看提案记录 →</a>' in app_javascript.text
     assert "new URLSearchParams(location.search).get('history') === '1'" in app_javascript.text
     assert "proposalAwaitingLaunch(item)" in app_javascript.text
-    assert "historyMode ? !isCurrentProposal(item)" in app_javascript.text
     assert "const proposerOnly = hasCapability('proposal.create')" in app_javascript.text
     assert "item.proposer_id === session.user_id) : allItems" in app_javascript.text
+    assert "historyMode ? !isCurrentProposal(item)" in app_javascript.text
+    assert '<option value="OKX">OKX</option><option value="BYBIT">Bybit</option>' in (
+        app_javascript.text
+    )
     assert 'href="/proposals?history=1" data-link>历史记录</a>' in app_javascript.text
     assert "approvedAwaitingLaunch" in app_javascript.text
     assert "批准不会自动下单" in app_javascript.text
     assert "你的审核已记录" in app_javascript.text
     assert 'data-nav-capability="opportunity.view"' in response.text
     assert 'href="/admin/users"' in response.text
-    assert 'href="/results"' not in response.text
-    assert "renderActualResults" not in app_javascript.text
-    assert "/api/results" not in app_javascript.text
-    assert "/api/audit" not in app_javascript.text
+    assert 'href="/admin/agents"' not in response.text
+    assert 'href="/results"' in response.text
+    assert 'data-nav-capability="results.view"' in response.text
+    assert 'href="/notifications"' in response.text
+    assert 'data-nav-capability="notification.view"' in response.text
+    assert "async function renderTeamSettings()" not in app_javascript.text
+    assert "Exact-account LIVE Freqtrade worker verified" in app_javascript.text
+    assert "renderActualResults" in app_javascript.text
+    assert "/api/results" in app_javascript.text
+    assert "renderNotifications" in app_javascript.text
+    assert "async function renderApiAccess" in app_javascript.text
+    assert "/api/profile/api-clients" in app_javascript.text
+    assert "/api/api-client/connection" in app_javascript.text
+    assert "不保存角色副本" in app_javascript.text
+    assert "agentRoleCatalog" not in app_javascript.text
+    assert "workspace.agent_count" not in app_javascript.text
+    assert "const trigger = event.currentTarget" in app_javascript.text
+    assert "该 API Client Token 已失效、已轮换或不匹配" in app_javascript.text
+    assert "/api/notifications" in app_javascript.text
+    assert "api('/api/audit" not in app_javascript.text
     assert "'access.manage':['SYSTEM_ADMIN']" in app_javascript.text
     assert "'system.view':['OBSERVER','REVIEWER','OPERATOR']" in app_javascript.text
     assert '[translate="no"]' in app_javascript.text
@@ -174,8 +500,19 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
     assert 'href="/proposals/new"' not in response.text
     assert "Binance只读" not in response.text
     assert "const routeCapability = (path)" in app_javascript.text
+    assert "function renderScopeSetup()" in app_javascript.text
+    assert "api('/api/scopes/select'" in app_javascript.text
+    assert "api('/api/admin/team-members'" in app_javascript.text
     assert "当前任务只显示你的资金职责" in app_javascript.text
     assert "api('/api/risk-controls').catch(error => ({error}))" in app_javascript.text
+    assert (
+        "Boolean(riskControl?.policy && riskControl.policy.system_state !== 'NORMAL')"
+        in app_javascript.text
+    )
+    assert (
+        "riskControl?.policy ? riskControlStatusLabel(riskControl.policy.system_state) : '未配置'"
+        in app_javascript.text
+    )
     assert "riskControl.actions?.review_restore?.allowed === true" in app_javascript.text
     assert "riskControl.actions?.execute_restore?.allowed === true" in app_javascript.text
     assert "当前没有风险恢复审核待办" in app_javascript.text  # noqa: RUF001
@@ -185,8 +522,10 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
     assert "error.handled = response.status === 401" in app_javascript.text
     assert "function handleUnauthorizedResponse" in app_javascript.text
     assert "function confirmAction" in app_javascript.text
+    assert "confirmDialog.close(confirmed ? 'confirm' : 'cancel')" in app_javascript.text
     assert "批准这份冻结提案？" in app_javascript.text
-    assert "最高管理员直接批准本人提案" in app_javascript.text
+    assert "最高管理员直接批准本人提案" not in app_javascript.text
+    assert "proposal.admin_approve" not in app_javascript.text
     assert "批准或拒绝前都需要再次确认；不会直接下单" in app_javascript.text
     assert "二次强验证" not in app_javascript.text
     assert "用户名或密码不正确" in app_javascript.text
@@ -223,6 +562,23 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
     assert "NOT_SUBMITTED:'未提交'" in app_javascript.text
     assert "账户范围" in app_javascript.text
     assert "默认账户" in app_javascript.text
+    assert "const venues = ['BINANCE','HYPERLIQUID','OKX','BYBIT'];" in app_javascript.text
+    assert (
+        "environmentBadge.textContent = fmtEnvironment(authStatus?.environment);"
+        in app_javascript.text
+    )
+    assert "LOCAL:'本地运行'" in app_javascript.text
+    assert "exchangeAccountListState(item, runtime)" in app_javascript.text
+    assert "交易能力已关闭；连接状态不会开启下单" in app_javascript.text  # noqa: RUF001
+    assert "exchange-trading-form" in app_javascript.text
+    assert "/trading-eligibility" in app_javascript.text
+    assert "全局真实发送、发送者租约、风控、任务和进程安全开关仍会独立阻断" in app_javascript.text
+    assert "这是合成事实，不是交易所成交或真实收益" not in app_javascript.text
+    assert ".map(resultRiskReasonLabel)" not in app_javascript.text
+    assert "resultSignalProviderLabel(value)" not in app_javascript.text
+    assert "/api/results/report-engines" in app_javascript.text
+    assert "/api/results/reports" in app_javascript.text
+    assert "QuantStats 与 Pyfolio Reloaded 使用同一份可信净值" in app_javascript.text
     assert "{BINANCE:'Binance', HYPERLIQUID:'Hyperliquid'}" in app_javascript.text
     assert "当前三方总净值" in app_javascript.text
     assert "当前不可汇总" in app_javascript.text
@@ -273,7 +629,9 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
     assert 'placeholder="BTCUSDT / acct-1"' not in app_javascript.text
     assert 'placeholder="BTCUSDT / xyz:TSLA"' in app_javascript.text
     assert "definition('账户', item.account_id)" not in app_javascript.text
-    assert "definition('账户', '默认生产账户')" in app_javascript.text
+    assert "definition('账户', shadowProposal ? '虚拟账户范围' : '生产账户范围')" in (
+        app_javascript.text
+    )
     assert "a.reviewer_username || shortId(a.reviewer_id)" in app_javascript.text
     assert 'data-label="提交时间"' in app_javascript.text
     assert "INITIAL_INTENT_ALREADY_EXISTS" in app_javascript.text
@@ -306,7 +664,7 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
     assert "approvedAwaitingLaunch = canOperate" in app_javascript.text
     assert "proposalLaunchWindowExpired(item)" in app_javascript.text
     assert "item.status === 'APPROVED' && !proposalLaunchWindowExpired(item)" in app_javascript.text
-    assert "operationsView ? '已进入交易' : '已批准'" in app_javascript.text  # noqa: RUF001
+    assert "operationsView ? '已进入交易' : '已批准'" in app_javascript.text
     assert "审核已批准，但启动窗口已过期" in app_javascript.text  # noqa: RUF001
     assert "当前提案不可再签发" in app_javascript.text  # noqa: RUF001
     assert (
@@ -319,7 +677,7 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
     assert "当前作用域无运行告警" in app_javascript.text
     assert "api('/api/campaign-exceptions')" in app_javascript.text
     assert "if (error.status === 403) return null" in app_javascript.text
-    assert "全局风险恢复仍由管理员控制" in app_javascript.text
+    assert "当前团队风险恢复仍由管理员控制" in app_javascript.text
     assert "交易任务 · 运行告警详情" in app_javascript.text
     assert "POSITION_STALE" in app_javascript.text
     assert "function formatExceptionDetail" in app_javascript.text
@@ -328,6 +686,14 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
     assert "运行中的 LIVE 交易任务" not in app_javascript.text
     assert "打开交易任务并按顺序处理" in app_javascript.text
     assert "new WebSocket(`${scheme}://${location.host}/ws/opportunities`)" in app_javascript.text
+    assert (
+        "message.type === 'error') {\n"
+        "      setOpportunityConnectionState('页面更新正常', true);" in app_javascript.text
+    )
+    assert "WEBSOCKET_LIVE:'上游 WebSocket 实时流'" in app_javascript.text
+    assert "POLLING_FALLBACK:'HTTPS 轮询回退'" in app_javascript.text
+    assert "upstreamLive ? '实时机会' : '机会快照'" in app_javascript.text
+    assert "旧快照、失败或降级状态不会标记为实时" in app_javascript.text
     assert "function groupOpportunities" in app_javascript.text
     assert "function opportunitySnapshotCounts" in app_javascript.text
     assert 'class="signal-chip-full"' in app_javascript.text
@@ -341,6 +707,9 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
     assert "currentLanguage === 'en' ? 'Connection check' : '连接检查'" in app_javascript.text
     assert 'href="/opportunities/defaults"' in app_javascript.text
     assert "function renderOpportunityDefaults" in app_javascript.text
+    assert "async function renderSignalSources" in app_javascript.text
+    assert "签名、请求时间、Nonce、幂等、重放、大小和版本格式" in app_javascript.text
+    assert "signal-proposal-form" in app_javascript.text
     assert "覆盖币对" in app_javascript.text
     assert "方向机会" in app_javascript.text
     assert "完整周期信号" in app_javascript.text
@@ -371,7 +740,7 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
     assert "当前无监控对象" in app_javascript.text
     assert "逐笔开仓可检查" in app_javascript.text
     assert "实时安全条件未通过" in app_javascript.text
-    assert "仿真执行进程已连接" in app_javascript.text
+    assert "精确账户 Worker 已验证" in app_javascript.text
     assert "Freqtrade worker 已接管" not in app_javascript.text
     assert "venue-sync-form" not in app_javascript.text
     assert "账户数据自动更新中" in app_javascript.text
@@ -388,6 +757,13 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
     assert ".proposal-table tr { display: block;" in stylesheet.text
     assert ".proposal-table td::before { content: attr(data-label);" in stylesheet.text
     assert ".capital-route-grid" in stylesheet.text
+    assert "--panel-soft:" in stylesheet.text
+    assert "--surface:" in stylesheet.text
+    assert ".nav-section-label" in stylesheet.text
+    assert ".preference-trigger" in stylesheet.text
+    assert ".preference-menu" in stylesheet.text
+    assert ".user-menu-panel" in stylesheet.text
+    assert ".status-AVAILABLE" in stylesheet.text
     assert ".capital-trend-toggle" in stylesheet.text
     assert ".capital-blockers" in stylesheet.text
     assert ".treasury-provider-choice" in stylesheet.text
@@ -398,26 +774,210 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
     assert ".proposal-detail-layout" in stylesheet.text
     assert ".proposal-preview" in stylesheet.text
     assert ".review-queue-summary" in stylesheet.text
+    assert ".review-environment-switcher" in stylesheet.text
+    assert "(max-width: 1100px)" in stylesheet.text
     assert ".source-facts" in stylesheet.text
+    assert ".readiness-item" in stylesheet.text
+    assert ".readiness-action" in stylesheet.text
+    assert ".webhook-source-tabs" in stylesheet.text
+    assert ".webhook-signal-facts" in stylesheet.text
+    assert ".nav-child-link" in stylesheet.text
+    assert ".error-state-guidance" in stylesheet.text
+    assert ".error-state h2:focus-visible" in stylesheet.text
+    tablet_css = stylesheet.text.split("@media (max-width: 1180px)", 1)[1].split("@media", 1)[0]
+    assert (
+        ".proposal-list-tools { grid-template-columns: minmax(220px, 1fr) 140px 140px; }"
+        in tablet_css
+    )
 
     service_worker = get(app, "/sw.js")
     assert service_worker.status_code == 200
-    assert "trading-shell-v111" in service_worker.text
+    assert "trading-shell-v166" in service_worker.text
+    assert "/assets/fonts/IBMPlexSansSC-Regular.woff2" in service_worker.text
+    assert "/assets/fonts/IBMPlexSansSC-SemiBold.woff2" in service_worker.text
+    assert "/assets/fonts/IBMPlexMono-Regular.woff2" in service_worker.text
+    assert "/assets/fonts/IBMPlexMono-SemiBold.woff2" in service_worker.text
+    assert "/assets/tradingops-logo.png" in service_worker.text
+    assert "/assets/tradingops-icon.svg" in service_worker.text
+    assert "/assets/icon.svg" not in service_worker.text
     assert "self.skipWaiting()" in service_worker.text
     assert "self.clients.claim()" in service_worker.text
     assert "await fetch(event.request)" in service_worker.text
+
+    manifest = get(app, "/manifest.webmanifest")
+    assert manifest.status_code == 200
+    manifest_payload = manifest.json()
+    assert manifest_payload["icons"] == [
+        {
+            "src": "/assets/tradingops-icon.svg",
+            "sizes": "any",
+            "type": "image/svg+xml",
+            "purpose": "any maskable",
+        }
+    ]
+
+    logo = get(app, "/assets/tradingops-logo.png")
+    assert logo.status_code == 200
+    assert logo.headers["content-type"] == "image/png"
+    assert len(logo.content) > 10_000
+
+    font = get(app, "/assets/fonts/IBMPlexSansSC-Regular.woff2")
+    assert font.status_code == 200
+    assert font.headers["content-type"] == "font/woff2"
+    assert font.content.startswith(b"wOF2")
+
+    icon = get(app, "/assets/tradingops-icon.svg")
+    assert icon.status_code == 200
+    assert icon.headers["content-type"] == "image/svg+xml"
+    assert b"data:image/png;base64," in icon.content
+
+
+def test_preference_configuration_and_legacy_theme_normalization_in_node() -> None:
+    node = shutil.which("node")
+    assert node is not None
+    app_path = frontend_bundle_path()
+    script = textwrap.dedent(
+        r"""
+        import fs from "node:fs";
+        import vm from "node:vm";
+
+        const source = fs.readFileSync(process.argv[1], "utf8");
+        const from = source.indexOf("const PREFERENCE_OPTIONS");
+        const to = source.indexOf("\nlet currentLanguage", from);
+        if (from < 0 || to < 0) throw new Error("preference configuration missing");
+        const context = vm.createContext({});
+        vm.runInContext(
+          source.slice(from, to) + `;
+            this.options = PREFERENCE_OPTIONS;
+            this.normalizeLanguage = normalizeLanguagePreference;
+            this.normalizeTheme = normalizeThemePreference;`,
+          context,
+        );
+        console.log(JSON.stringify({
+          language:context.options.language,
+          theme:context.options.theme,
+          languageAliases:[
+            context.normalizeLanguage("zh-cn"),
+            context.normalizeLanguage("en-US"),
+            context.normalizeLanguage("unsupported"),
+          ],
+          themeAliases:[
+            context.normalizeTheme(null),
+            context.normalizeTheme("auto"),
+            context.normalizeTheme("DEFAULT"),
+            context.normalizeTheme("DARK"),
+            context.normalizeTheme('"light"'),
+            context.normalizeTheme("unsupported"),
+          ],
+        }));
+        """
+    )
+    completed = subprocess.run(  # noqa: S603
+        [node, "--input-type=module", "-e", script, str(app_path)],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stderr
+    assert json.loads(completed.stdout) == {
+        "language": [
+            {"value": "zh-CN", "label": "中文"},
+            {"value": "en", "label": "English"},
+        ],
+        "theme": [
+            {"value": "system", "label": "跟随系统"},
+            {"value": "light", "label": "浅色"},
+            {"value": "dark", "label": "深色"},
+        ],
+        "languageAliases": ["zh-CN", "en", "zh-CN"],
+        "themeAliases": ["system", "system", "system", "dark", "light", "system"],
+    }
+
+
+def test_error_state_explains_impact_owner_next_step_and_focus() -> None:
+    node = shutil.which("node")
+    assert node is not None
+    app_path = frontend_bundle_path()
+    script = textwrap.dedent(
+        r"""
+        import assert from "node:assert/strict";
+        import fs from "node:fs";
+        import vm from "node:vm";
+
+        const source = fs.readFileSync(process.argv[1], "utf8");
+        const from = source.indexOf("function errorView");
+        const to = source.indexOf("\nfunction cancelMobileNavFocus", from);
+        assert.notEqual(from, -1);
+        assert.notEqual(to, -1);
+        const context = vm.createContext({
+          escapeHtml: value => String(value ?? ""),
+          friendlyApiError: error => error.message,
+        });
+        vm.runInContext(source.slice(from, to), context);
+
+        const network = context.errorStateGuidance({
+          code:"NETWORK_ERROR",
+          message:"无法连接控制台服务，请检查网络后重试",
+        });
+        assert.equal(network.title, "连接已中断");
+        assert.match(network.impact, /离线前画面不得视为当前状态/);
+        assert.equal(network.owner, "平台运维或网络管理员");
+        assert.match(network.next, /不要重复提交任何结果未知的操作/);
+
+        const html = context.errorView({
+          code:"NETWORK_ERROR",
+          message:"无法连接控制台服务，请检查网络后重试",
+        });
+        assert.match(html, /role="alert" aria-live="assertive"/);
+        assert.match(html, /data-error-heading tabindex="-1"/);
+        assert.match(html, /<dt>影响<\/dt>/);
+        assert.match(html, /<dt>负责角色<\/dt>/);
+        assert.match(html, /<dt>下一步<\/dt>/);
+        assert.match(html, /NETWORK_ERROR/);
+        assert.match(html, /data-retry/);
+
+        const forbidden = context.errorStateGuidance({
+          code:"HTTP_403", status:403, message:"forbidden",
+        });
+        assert.equal(forbidden.owner, "团队管理员");
+        assert.match(forbidden.impact, /不会加载团队或账户数据/);
+
+        const missingPolicy = context.errorStateGuidance({
+          code:"RISK_POLICY_MISSING", message:"missing",
+        });
+        assert.equal(missingPolicy.owner, "系统管理员");
+        assert.match(missingPolicy.impact, /新增风险、影子启用/);
+
+        const bootstrapHtml = context.errorView({
+          code:"NETWORK_ERROR", message:"offline",
+        }, false);
+        assert.doesNotMatch(bootstrapHtml, /data-retry/);
+        assert.match(bootstrapHtml, /返回当前任务/);
+        """
+    )
+    completed = subprocess.run(  # noqa: S603
+        [node, "--input-type=module", "-e", script, str(app_path)],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stderr
 
 
 def test_manual_proposal_instrument_picker_filters_and_requires_exact_symbol() -> None:
     node = shutil.which("node")
     assert node is not None
-    app_path = Path(__file__).parents[2] / "src" / "trading_control_plane" / "web" / "app.js"
+    app_path = frontend_bundle_path()
     source = app_path.read_text()
     assert 'select name="venue" aria-label="交易所"' in source
     assert 'input name="instrument_symbol" aria-label="币对"' in source
     assert 'list="manual-instrument-options"' in source
     assert '<option value="HYPERLIQUID">Hyperliquid</option>' in source
-    assert "Hyperliquid（含 HIP-3）" in source
+    assert '<option value="OKX">OKX</option>' in source
+    assert '<option value="BYBIT">Bybit</option>' in source
+    assert 'select name="account_id" required' in source
+    assert "api('/api/exchange-accounts')" in source
+    assert "venue === 'HYPERLIQUID' ? '（含 HIP-3）' : ''" in source
     assert "form.elements.instrument_symbol.reportValidity()" in source
     assert "delete data.instrument_symbol" in source
 
@@ -435,7 +995,9 @@ def test_manual_proposal_instrument_picker_filters_and_requires_exact_symbol() -
         const context = vm.createContext({});
         vm.runInContext(
           source.slice(from, to)
-            + "; this.options = manualInstrumentOptions; this.match = manualInstrumentMatch;",
+            + "; this.options = manualInstrumentOptions;"
+            + " this.match = manualInstrumentMatch;"
+            + " this.accountOptions = manualAccountOptions;",
           context,
         );
         const instruments = [
@@ -452,6 +1014,15 @@ def test_manual_proposal_instrument_picker_filters_and_requires_exact_symbol() -
         assert.equal(context.match(instruments, "HYPERLIQUID", "XYZ:aapl").instrument_id, "h-aapl");
         assert.equal(context.match(instruments, "BINANCE", "BTC"), null);
         assert.equal(context.match(instruments, "HYPERLIQUID", "BTCUSDT"), null);
+        const accounts = [
+          {account_id:"okx-a",venue:"OKX",active:true},
+          {account_id:"okx-disabled",venue:"OKX",active:false},
+          {account_id:"bybit-a",venue:"BYBIT",active:true},
+        ];
+        assert.deepEqual(
+          Array.from(context.accountOptions(accounts, "OKX"), item => item.account_id),
+          ["okx-a"],
+        );
         """
     )
     completed = subprocess.run(  # noqa: S603
@@ -466,7 +1037,7 @@ def test_manual_proposal_instrument_picker_filters_and_requires_exact_symbol() -
 def test_closed_campaign_labels_are_flat_currency_aware_and_action_free() -> None:
     node = shutil.which("node")
     assert node is not None
-    app_path = Path(__file__).parents[2] / "src" / "trading_control_plane" / "web" / "app.js"
+    app_path = frontend_bundle_path()
     script = textwrap.dedent(
         r"""
         import assert from "node:assert/strict";
@@ -527,7 +1098,7 @@ def test_closed_campaign_labels_are_flat_currency_aware_and_action_free() -> Non
 def test_proposal_launch_window_projection_excludes_expired_approvals() -> None:
     node = shutil.which("node")
     assert node is not None
-    app_path = Path(__file__).parents[2] / "src" / "trading_control_plane" / "web" / "app.js"
+    app_path = frontend_bundle_path()
     script = textwrap.dedent(
         r"""
         import assert from "node:assert/strict";
@@ -593,7 +1164,7 @@ def test_proposal_launch_window_projection_excludes_expired_approvals() -> None:
 def test_reviewer_today_combines_proposal_and_risk_restore_work_without_false_zero() -> None:
     node = shutil.which("node")
     assert node is not None
-    app_path = Path(__file__).parents[2] / "src" / "trading_control_plane" / "web" / "app.js"
+    app_path = frontend_bundle_path()
     script = textwrap.dedent(
         r"""
         import assert from "node:assert/strict";
@@ -651,7 +1222,7 @@ def test_reviewer_today_combines_proposal_and_risk_restore_work_without_false_ze
 def test_runtime_alert_copy_keeps_internal_codes_out_of_primary_labels() -> None:
     node = shutil.which("node")
     assert node is not None
-    app_path = Path(__file__).parents[2] / "src" / "trading_control_plane" / "web" / "app.js"
+    app_path = frontend_bundle_path()
     script = textwrap.dedent(
         r"""
         import assert from "node:assert/strict";
@@ -698,7 +1269,7 @@ def test_runtime_alert_copy_keeps_internal_codes_out_of_primary_labels() -> None
 def test_opportunity_card_explains_exact_catalog_blocker() -> None:
     node = shutil.which("node")
     assert node is not None
-    app_path = Path(__file__).parents[2] / "src" / "trading_control_plane" / "web" / "app.js"
+    app_path = frontend_bundle_path()
     script = textwrap.dedent(
         r"""
         import assert from "node:assert/strict";
@@ -833,7 +1404,7 @@ def test_opportunity_card_explains_exact_catalog_blocker() -> None:
 def test_opportunity_groups_keep_multiple_timeframes_and_direction_separate() -> None:
     node = shutil.which("node")
     assert node is not None
-    app_path = Path(__file__).parents[2] / "src" / "trading_control_plane" / "web" / "app.js"
+    app_path = frontend_bundle_path()
     script = textwrap.dedent(
         r"""
         import assert from "node:assert/strict";
@@ -1002,7 +1573,7 @@ def test_opportunity_groups_keep_multiple_timeframes_and_direction_separate() ->
 def test_opportunity_filters_render_a_bounded_page_and_keep_all_matches() -> None:
     node = shutil.which("node")
     assert node is not None
-    app_path = Path(__file__).parents[2] / "src" / "trading_control_plane" / "web" / "app.js"
+    app_path = frontend_bundle_path()
     script = textwrap.dedent(
         r"""
         import assert from "node:assert/strict";
@@ -1073,7 +1644,7 @@ def test_opportunity_filters_render_a_bounded_page_and_keep_all_matches() -> Non
 def test_proposal_review_projection_uses_frozen_resonance_and_plain_risk_reasons() -> None:
     node = shutil.which("node")
     assert node is not None
-    app_path = Path(__file__).parents[2] / "src" / "trading_control_plane" / "web" / "app.js"
+    app_path = frontend_bundle_path()
     script = textwrap.dedent(
         r"""
         import assert from "node:assert/strict";
@@ -1152,7 +1723,7 @@ def test_proposal_review_projection_uses_frozen_resonance_and_plain_risk_reasons
 def test_capital_web_projection_only_renders_live_records() -> None:
     node = shutil.which("node")
     assert node is not None
-    app_path = Path(__file__).parents[2] / "src" / "trading_control_plane" / "web" / "app.js"
+    app_path = frontend_bundle_path()
     script = textwrap.dedent(
         r"""
         import assert from "node:assert/strict";
@@ -1446,7 +2017,7 @@ def test_capital_web_projection_only_renders_live_records() -> None:
 
 
 def test_risk_workspace_prioritizes_current_actions_and_hides_closed_tasks() -> None:
-    app_path = Path(__file__).parents[2] / "src" / "trading_control_plane" / "web" / "app.js"
+    app_path = frontend_bundle_path()
     source = app_path.read_text()
 
     assert "系统管理员（最高权限）" in source  # noqa: RUF001
@@ -1475,31 +2046,35 @@ def test_risk_workspace_prioritizes_current_actions_and_hides_closed_tasks() -> 
     assert 'data-label="精确原因"' in source
     assert "wrapper.closest('.risk-condition-details')" in source
     assert "roleNames().join('、')" not in source
-    styles = app_path.with_name("styles.css").read_text()
+    styles = (WEB_ROOT / "styles.css").read_text()
     assert ".risk-condition-details tr { display: block;" in styles
     assert ".risk-condition-scroll-hint { display: none; }" in styles
     assert ".risk-passed-conditions" in styles
 
 
 def test_system_and_venue_pages_distinguish_read_only_snapshots_from_live_execution() -> None:
-    app_path = Path(__file__).parents[2] / "src" / "trading_control_plane" / "web" / "app.js"
+    app_path = frontend_bundle_path()
     source = app_path.read_text()
 
     assert "只读控制台可用，但 Freqtrade 执行底座尚未就绪" in source  # noqa: RUF001
     assert "Freqtrade 执行底座已就绪，但交易所只读连接受限" in source  # noqa: RUF001
-    assert "两个 Freqtrade 执行进程已通过仿真模式检查" in source
+    assert "const accountBoundWorkers = Array.isArray(freqtrade?.account_bindings)" in source
+    assert "已保存 ${configuredWorkers.length} 个精确账户 Worker 绑定" in source
     assert "Freqtrade 执行进程未启动" in source
     assert "LIVE_ORDER_SEND 保持关闭" in source
+    assert "OKX:['OKX','生产账户','/venues?venue=OKX'" in source
+    assert "BYBIT:['Bybit','生产账户','/venues?venue=BYBIT'" in source
+    assert "${availableSources} / ${connectionSourceCount} 可用" in source
     assert "fmtConnectionCategory(state.category)" in source
     assert "当前连接不可用，以下仅为最后一次保存快照" in source  # noqa: RUF001
     assert "自动同步等待连接恢复" in source
     assert "Number(item.quantity) !== 0" in source
     assert "不计入当前委托" in source
     assert "当前账户没有未完成委托" in source
-    assert "执行由 Freqtrade 执行进程负责；本页不能下单" in source  # noqa: RUF001
-    assert "执行底座为 Freqtrade；控制面尚未接入执行进程" in source  # noqa: RUF001
-    assert "status.execution_backend === 'FREQTRADE'" in source
-    assert "status.worker_configured" in source
+    assert "精确账户 LIVE Freqtrade Worker 已验证；下单操作仍只在交易任务中进行" in source
+    assert "精确账户 Freqtrade Worker 尚未配置；订单发送保持阻断" in source
+    assert "const executionWorker = account?.execution_worker || null" in source
+    assert "executionWorker?.live_ready" in source
     assert "connectionProbeEvidence" in source
     assert "上游失败时按有界退避计划重试" in source
     assert 'data-label="读取状态与处理建议"' in source
@@ -1521,7 +2096,8 @@ def test_system_and_venue_pages_distinguish_read_only_snapshots_from_live_execut
     assert "生产账户 ${accountId}" not in source
     assert "生产账户 ${check.scope.account_id}" not in source
     assert "独立安全开关" in source
-    assert "币安和 Hyperliquid（含 HIP-3）" in source
+    assert "USDT 线性永续范围" in source
+    assert "['ALL','SHADOW','BINANCE','HYPERLIQUID','OKX','BYBIT'].includes(selectedVenue)" in source
     assert "shortId(accountId)" not in source
     assert 'class="table-wrap is-scrollable venue-fact-table"' in source
     assert "connectionCategoryEnglishLabels" in source
@@ -1535,18 +2111,79 @@ def test_system_and_venue_pages_distinguish_read_only_snapshots_from_live_execut
     assert "最后一次保存快照中没有未完成委托；这不能确认当前仍无挂单。" in source  # noqa: RUF001
     assert "实时账户事实不可用；仅展示最后快照" in source
     assert "尚无可用连接结论" not in source
-    assert "fmtNumber(facts.equity?.available_balance)} ${escapeHtml(facts.equity?.currency" in source
-    styles = app_path.with_name("styles.css").read_text()
+    assert (
+        "fmtNumber(facts.equity?.available_balance)} ${escapeHtml(facts.equity?.currency" in source
+    )
+    styles = (WEB_ROOT / "styles.css").read_text()
     assert ".venue-status-stats { grid-template-columns: 1fr; }" in styles
     assert ".connection-status-table tr { display: block;" in styles
     assert ".connection-scroll-hint { display: none; }" in styles
     assert ".callout.tone-attention" in styles
 
 
+def test_venue_list_is_compact_and_account_configuration_moves_to_detail() -> None:
+    source = (WEB_ROOT / "accounts.js").read_text()
+    routes = (WEB_ROOT / "app-core.js").read_text()
+    styles = (WEB_ROOT / "styles.css").read_text()
+
+    list_page = source.split("async function renderVenueAccounts()", maxsplit=1)[1].split(
+        "async function renderVenueAccountDetail", maxsplit=1
+    )[0]
+    detail_page = source.split("function exchangeAccountDetailConfiguration", maxsplit=1)[1]
+
+    assert "当前空间" in list_page
+    assert "账户总数" in list_page
+    assert "实盘异常" in list_page
+    assert "实盘账户" in list_page
+    assert "模拟账户" in list_page
+    assert "账户筛选" in list_page
+    assert "最近同步或检查" in list_page
+    assert "state.action" in list_page
+    assert "接入实盘账户" in list_page
+    assert "account-primary-action" in list_page
+    assert "查看详情" not in list_page
+    assert "account-card-actions" not in list_page
+    assert "connect-account-dialog" in source
+    assert "showModal()" in list_page
+    assert "/api/trading-mode" in list_page
+    assert "exchange-credential-form" not in list_page
+    assert "freqtrade-worker-form" not in list_page
+    assert "venueFactSections" not in list_page
+    assert "凭据配置与轮换" in detail_page
+    assert "连接与连续同步" in detail_page
+    assert "账户状态及历史快照" in detail_page
+    assert "Worker 与交易资格高级设置" in detail_page
+    assert "测试 Fixture 账户已隐藏" in source
+    assert "测试 Fixture</span>" in source
+    assert "最近只读探针成功，但连续同步当前关闭" in source
+    assert "探针成功 · 同步关闭" in source
+    assert "No action is required" not in source
+    assert "SWITCH_TO_SHADOW" in source
+    assert "expected_version:data.version" in source
+    assert "idempotency_key:crypto.randomUUID()" in source
+    assert "renderVenueAccountDetail(venueAccountMatch[1])" in routes
+    assert "path === '/venues/shadow'" in routes
+    assert "path.startsWith('/venues/')" in routes
+    assert ".account-detail-config-grid" in styles
+    assert ".account-list-facts { grid-template-columns: 1fr; }" in styles
+    assert ".account-list-hero, .account-list-section-head { display: grid;" in styles
+    assert ".account-list-stats { grid-template-columns: 1fr; }" in styles
+
+
+def test_venue_account_detail_route_serves_the_spa_shell() -> None:
+    app = create_app(settings(), FakeDatabase(ready=False))
+
+    response = get(app, "/venues/binance-main")
+
+    assert response.status_code == 200
+    assert "交易控制台" in response.text
+    assert "/assets/accounts.js?v=172" in response.text
+
+
 def test_venue_snapshot_empty_states_do_not_claim_current_account_state() -> None:
     node = shutil.which("node")
     assert node is not None
-    app_path = Path(__file__).parents[2] / "src" / "trading_control_plane" / "web" / "app.js"
+    app_path = frontend_bundle_path()
     script = textwrap.dedent(
         r"""
         import assert from "node:assert/strict";
@@ -1555,7 +2192,7 @@ def test_venue_snapshot_empty_states_do_not_claim_current_account_state() -> Non
 
         const source = fs.readFileSync(process.argv[1], "utf8");
         const from = source.indexOf("function venueFactSections");
-        const to = source.indexOf("\nfunction accessRoleOptions", from);
+        const to = source.indexOf("\nfunction navigate", from);
         assert.notEqual(from, -1);
         assert.notEqual(to, -1);
         const context = vm.createContext({
@@ -1611,7 +2248,7 @@ def test_venue_snapshot_empty_states_do_not_claim_current_account_state() -> Non
 def test_web_request_lifecycle_in_node() -> None:
     node = shutil.which("node")
     assert node is not None
-    app_path = Path(__file__).parents[2] / "src" / "trading_control_plane" / "web" / "app.js"
+    app_path = frontend_bundle_path()
     script = textwrap.dedent(
         r"""
         import assert from "node:assert/strict";
@@ -1641,7 +2278,7 @@ def test_web_request_lifecycle_in_node() -> None:
         );
         const logoutSource = extract(
           "document.querySelector('#logout-button')",
-          "\ndocument.querySelector('#theme-toggle')",
+          "\nconst preferredThemeMedia",
         );
         const unauthorizedSource = extract(
           "function handleUnauthorizedResponse",
@@ -2041,7 +2678,7 @@ def test_mock_login_is_not_available_unless_explicitly_enabled() -> None:
 def test_console_terminology_keeps_official_names_and_uses_natural_chinese() -> None:
     node = shutil.which("node")
     assert node is not None
-    app_path = Path(__file__).parents[2] / "src" / "trading_control_plane" / "web" / "app.js"
+    app_path = frontend_bundle_path()
     source = app_path.read_text()
 
     assert ".replaceAll('Arbitrum', '阿比特鲁姆')" not in source
@@ -2101,6 +2738,28 @@ def test_console_terminology_keeps_official_names_and_uses_natural_chinese() -> 
         assert.equal(
           englishContext.translate("币安 680 个合约；Hyperliquid 268 个合约，其中 HIP-3 91 个。"),
           "Binance: 680 instruments; Hyperliquid: 268 instruments, including 91 HIP-3 markets.",
+        );
+        assert.equal(
+          englishContext.translate("生产团队仍有 1 项影子准备度缺口"),
+          "Production Shadow-readiness gaps: 1",
+        );
+        assert.equal(
+          englishContext.translate("当前团队已启用且只启用一种信号源模式。"),
+          "Exactly one signal-source mode is enabled for the current team.",
+        );
+        assert.equal(englishContext.translate("团队启用状态"), "Team activation status");
+        assert.equal(englishContext.translate("绩效报表"), "Performance reports");
+        assert.equal(englishContext.translate("影子模式"), "Shadow mode");
+        assert.equal(englishContext.translate("通知中心"), "Notification center");
+        assert.equal(englishContext.translate("当前 Workspace 和团队"), "Current Workspace and team");
+        assert.equal(englishContext.translate("负责角色"), "Responsible role");
+        assert.equal(
+          englishContext.translate("无法连接控制台服务，请检查网络后重试"),
+          "Cannot reach the Trading Console service. Check the network, then retry.",
+        );
+        assert.equal(
+          englishContext.translate("此清单直接投影 "),
+          "This checklist directly projects ",
         );
         assert.doesNotMatch(englishContext.translate("尚未覆盖的新文案"), /details/);
         """
