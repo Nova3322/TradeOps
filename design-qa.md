@@ -310,6 +310,36 @@ final result: desktop batch passed; mobile and external Telegram/connection evid
 
 final result: passed
 
+---
+
+# Design QA — Independent Webhook signals workspace
+
+## Scope and evidence
+
+- Desktop: `/private/tmp/trading-webhook-signals-1440.jpg`
+- Mobile header and filters: `/private/tmp/trading-webhook-signals-390-top.jpg`
+- Mobile signal facts: `/private/tmp/trading-webhook-signals-390-card.jpg`
+- Tested CSS viewport widths: 1440, 1024, 430, and 390.
+
+## Browser acceptance
+
+1. Separation: passed. `实时信号` exposes independent `Perptape` and `Webhook 信号` children. `/opportunities` retained its existing opportunity page and `/webhook-signals` contained no Perptape cards.
+2. Dynamic sources: passed. The source tablist rendered `TradingView BTC`, `策略系统 A`, and `量化模型 B` from server-created sources; selecting one source returned only its exact event.
+3. Filters and facts: passed. Exchange, symbol, direction, timeframe, freshness, and proposal-eligibility filters were present. Cards exposed source, strategy, exchange, symbol, direction, timeframe, price, occurred time, received time, freshness, blocker, and proposal state.
+4. Identity preservation: passed. Three source-scoped events retained three distinct event IDs; the UI did not group, merge, overwrite, or client-side deduplicate them.
+5. Responsive behavior: passed. Browser-measured document width equaled the viewport at all four target widths. Desktop facts used four columns; 430 and 390 used one column. Source tabs and cards stayed within the viewport.
+6. Keyboard and ARIA: passed. The source selector is a named tablist with roving tab focus; ArrowLeft, ArrowRight, Home, and End switch sources and restore focus to the selected tab.
+7. Runtime quality: passed. Browser console warnings and errors were 0. The viewport override was reset after testing.
+
+## Safety boundary
+
+- Webhook events remained space-scoped and permission-checked.
+- Stale signals were blocked by the server before proposal creation.
+- Browser fixtures created no proposal, review, order, signature, broadcast, or transfer.
+- `AUTO_ADD`, `AUTO_OPERATING_REFILL`, `AUTO_PROFIT_SWEEP`, `CAPITAL_TRANSFER`, and `LIVE_ORDER_SEND` remained `DISABLED`.
+
+final result: passed
+
 ## Previous: opportunity filter single-row visual QA
 
 ## Source and state

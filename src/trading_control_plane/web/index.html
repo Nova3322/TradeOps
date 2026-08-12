@@ -8,7 +8,7 @@
     <link rel="manifest" href="/manifest.webmanifest">
     <link rel="icon" href="/assets/tradingops-logo.png" type="image/png">
     <link rel="apple-touch-icon" href="/assets/tradingops-logo.png">
-    <link rel="stylesheet" href="/assets/styles.css?v=73">
+    <link rel="stylesheet" href="/assets/styles.css?v=74">
     <title>交易控制台</title>
   </head>
   <body>
@@ -72,7 +72,11 @@
           <div class="nav-section" data-nav-section>
             <p class="nav-section-label">工作台</p>
             <a href="/home" data-link><span>⌂</span>当前任务</a>
-            <a href="/opportunities" data-link data-nav-capability="opportunity.view"><span>⌁</span>实时机会</a>
+            <div class="nav-link-group" role="group" aria-label="实时信号">
+              <p class="nav-link-group-label"><span aria-hidden="true">⌁</span>实时信号</p>
+              <a class="nav-child-link" href="/opportunities" data-link data-nav-capability="opportunity.view">Perptape</a>
+              <a class="nav-child-link" href="/webhook-signals" data-link data-nav-capability="signal.view">Webhook 信号</a>
+            </div>
             <a href="/reviews" data-link data-nav-capability="proposal.review"><span>✓</span>审核队列</a>
             <a href="/campaigns" data-link data-nav-capability="operations.view"><span>◎</span>交易任务</a>
             <a href="/results" data-link data-nav-capability="results.view"><span>▦</span>绩效报表</a>
@@ -150,9 +154,9 @@
       </form>
     </dialog>
     <div id="toast" class="toast" role="status" aria-live="polite"></div>
-    <script defer src="/assets/app-core.js?v=170"></script>
+    <script defer src="/assets/app-core.js?v=171"></script>
     <script defer src="/assets/workspace.js?v=171"></script>
-    <script defer src="/assets/signals.js?v=170"></script>
+    <script defer src="/assets/signals.js?v=171"></script>
     <script defer src="/assets/proposals.js?v=170"></script>
     <script defer src="/assets/risk.js?v=170"></script>
     <script defer src="/assets/execution.js?v=170"></script>

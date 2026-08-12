@@ -209,9 +209,7 @@ def test_team_signal_source_perptape_key_and_signed_webhook_flow(
                 "content-type": "application/json",
                 "x-tradingops-timestamp": request_timestamp,
                 "x-tradingops-nonce": nonce,
-                "x-tradingops-signature": signature(
-                    webhook_secret, request_timestamp, nonce, body
-                ),
+                "x-tradingops-signature": signature(webhook_secret, request_timestamp, nonce, body),
                 "idempotency-key": "signal-event-001",
             }
             accepted = await client.post(
@@ -445,9 +443,415 @@ def test_team_signal_source_perptape_key_and_signed_webhook_flow(
             signal_groups = report_data["dimensions"]["signal_source"]
             assert signal_groups[0]["risk_event_count"] == 1
             assert signal_groups[0]["risk_events_by_result"] == {"DENY": 1}
-            assert report_data["coverage"]["percentage_metrics"] == (
-                "OPENING_CAPITAL_UNAVAILABLE"
+            assert report_data["coverage"]["percentage_metrics"] == ("OPENING_CAPITAL_UNAVAILABLE")
+
+    asyncio.run(scenario())
+
+
+def test_multiple_webhooks_coexist_with_perptape_and_retain_source_history(
+    database: Database,
+) -> None:
+    now = datetime.now(UTC)
+    service = TradingService(database, credential_encryption_key=encryption_key())
+    admin = service.bootstrap_admin("multi-signal-admin", now=now)
+    instrument_id = service.register_instrument(
+        actor_id=admin,
+        venue="BINANCE",
+        symbol="BTCUSDT",
+        tick_size=Decimal("0.1"),
+        lot_size=Decimal("0.001"),
+        minimum_notional=Decimal("5"),
+        contract_multiplier=Decimal("1"),
+        quote_currency="USDT",
+        collateral_currency="USDT",
+        protection_supported=True,
+        now=now,
+    )
+    original_context = service.signal_source_status(admin)
+    workspace_id = UUID(original_context["source"]["workspace_id"])
+    original_team_id = UUID(original_context["source"]["team_id"])
+    fetched_headers: list[dict[str, str]] = []
+
+    async def scenario() -> None:
+        async with AsyncClient(
+            transport=ASGITransport(app=signal_app(database, fetched_headers)),
+            base_url="http://test",
+        ) as client:
+            await login(client, "multi-signal-admin")
+            initial = await client.get("/api/signal-sources")
+            assert initial.status_code == 200, initial.text
+            perptape = initial.json()["data"][0]
+            assert perptape["mode"] == "PERPTAPE"
+            assert perptape["enabled"] is True
+            perptape_key = "multi-source-perptape-key"
+            configured_perptape = await client.put(
+                "/api/signal-source",
+                json={
+                    "mode": "PERPTAPE",
+                    "secret": perptape_key,
+                    "enabled": True,
+                    "webhook_max_age_seconds": 300,
+                    "expected_version": perptape["version"],
+                    "idempotency_key": "configure-multi-source-perptape",
+                },
             )
+            assert configured_perptape.status_code == 200, configured_perptape.text
+            assert perptape_key not in configured_perptape.text
+            perptape = configured_perptape.json()["source"]
+
+            first_secret = secrets.token_urlsafe(32)
+            first_create_body = {
+                "name": "TradingView BTC",
+                "mode": "WEBHOOK",
+                "secret": first_secret,
+                "enabled": True,
+                "webhook_max_age_seconds": 180,
+                "expected_version": 0,
+                "idempotency_key": "multi-webhook-first",
+            }
+            first = await client.post("/api/signal-sources", json=first_create_body)
+            assert first.status_code == 201, first.text
+            assert first.headers["cache-control"] == "no-store"
+            assert first.json()["one_time_secret"] == first_secret
+            first_source = first.json()["source"]
+            first_id = first_source["signal_source_id"]
+
+            create_replay = await client.post("/api/signal-sources", json=first_create_body)
+            assert create_replay.status_code == 200, create_replay.text
+            assert create_replay.json()["source"]["signal_source_id"] == first_id
+            assert create_replay.json()["one_time_secret"] is None
+
+            second = await client.post(
+                "/api/signal-sources",
+                json={
+                    "name": "Model ETH",
+                    "mode": "WEBHOOK",
+                    "enabled": True,
+                    "webhook_max_age_seconds": 300,
+                    "expected_version": 0,
+                    "idempotency_key": "multi-webhook-second",
+                },
+            )
+            assert second.status_code == 201, second.text
+            second_secret = second.json()["one_time_secret"]
+            assert isinstance(second_secret, str) and len(second_secret) >= 32
+            second_id = second.json()["source"]["signal_source_id"]
+            assert second_id != first_id
+
+            listed = await client.get("/api/signal-sources")
+            assert listed.status_code == 200, listed.text
+            sources = listed.json()["data"]
+            assert {(item["mode"], item["name"]) for item in sources} == {
+                ("PERPTAPE", "Perptape"),
+                ("WEBHOOK", "TradingView BTC"),
+                ("WEBHOOK", "Model ETH"),
+            }
+            assert all(item["enabled"] for item in sources)
+            assert first_secret not in listed.text
+            assert second_secret not in listed.text
+
+            perptape_test = await client.post(
+                f"/api/signal-sources/{perptape['signal_source_id']}/tests",
+                json={
+                    "expected_version": perptape["version"],
+                    "idempotency_key": "test-perptape-source",
+                },
+            )
+            assert perptape_test.status_code == 200, perptape_test.text
+            assert perptape_test.json()["status"] == "SUCCESS"
+
+            webhook_test = await client.post(
+                f"/api/signal-sources/{first_id}/tests",
+                json={
+                    "expected_version": 1,
+                    "idempotency_key": "test-first-webhook",
+                },
+            )
+            assert webhook_test.status_code == 200, webhook_test.text
+            assert webhook_test.json()["status"] == "SUCCESS"
+            assert webhook_test.json()["version"] == 2
+            webhook_test_replay = await client.post(
+                f"/api/signal-sources/{first_id}/tests",
+                json={
+                    "expected_version": 1,
+                    "idempotency_key": "test-first-webhook",
+                },
+            )
+            assert webhook_test_replay.status_code == 200, webhook_test_replay.text
+            assert webhook_test_replay.json()["version"] == 2
+
+            rotated_secret = secrets.token_urlsafe(32)
+            rotation_body = {
+                "secret": rotated_secret,
+                "expected_version": 2,
+                "idempotency_key": "rotate-first-webhook",
+            }
+            rotated = await client.post(
+                f"/api/signal-sources/{first_id}/credential-rotations",
+                json=rotation_body,
+            )
+            assert rotated.status_code == 200, rotated.text
+            assert rotated.json()["one_time_secret"] == rotated_secret
+            assert rotated.json()["source"]["credential"]["version"] == 2
+            rotation_replay = await client.post(
+                f"/api/signal-sources/{first_id}/credential-rotations",
+                json=rotation_body,
+            )
+            assert rotation_replay.status_code == 200, rotation_replay.text
+            assert rotation_replay.json()["one_time_secret"] is None
+
+            version_conflict = await client.put(
+                f"/api/signal-sources/{first_id}",
+                json={
+                    "name": "TradingView BTC",
+                    "webhook_max_age_seconds": 240,
+                    "expected_version": 2,
+                    "idempotency_key": "stale-webhook-update",
+                },
+            )
+            assert version_conflict.status_code == 409, version_conflict.text
+            assert version_conflict.json()["error"]["code"] == "VERSION_CONFLICT"
+
+            signal_at = datetime.now(UTC)
+            payload = {
+                "payload_version": 1,
+                "provider": "TRADINGVIEW",
+                "external_id": "multi-source-btc-001",
+                "strategy_id": "multi-source",
+                "strategy_version": "v1",
+                "venue": "BINANCE",
+                "symbol": "BTCUSDT",
+                "direction": "LONG",
+                "signal_at": signal_at.isoformat(),
+                "timeframe": "1h",
+                "reference_price": "100",
+                "metadata": {"retained": True},
+            }
+            body = json.dumps(payload, separators=(",", ":")).encode()
+            request_timestamp = str(int(signal_at.timestamp()))
+            nonce = "multi-source-nonce-0001"
+            accepted = await client.post(
+                f"/api/webhooks/signals/{first_id}",
+                content=body,
+                headers={
+                    "content-type": "application/json",
+                    "x-tradingops-timestamp": request_timestamp,
+                    "x-tradingops-nonce": nonce,
+                    "x-tradingops-signature": signature(
+                        rotated_secret, request_timestamp, nonce, body
+                    ),
+                    "idempotency-key": "multi-source-event-001",
+                },
+            )
+            assert accepted.status_code == 202, accepted.text
+            event_id = UUID(accepted.json()["signal_event_id"])
+            accepted_by_second_source = await client.post(
+                f"/api/webhooks/signals/{second_id}",
+                content=body,
+                headers={
+                    "content-type": "application/json",
+                    "x-tradingops-timestamp": request_timestamp,
+                    "x-tradingops-nonce": nonce,
+                    "x-tradingops-signature": signature(
+                        second_secret, request_timestamp, nonce, body
+                    ),
+                    "idempotency-key": "multi-source-event-001",
+                },
+            )
+            assert accepted_by_second_source.status_code == 202, accepted_by_second_source.text
+            second_event_id = accepted_by_second_source.json()["signal_event_id"]
+            assert second_event_id != str(event_id)
+
+            webhook_page = await client.get("/api/webhook-signals")
+            assert webhook_page.status_code == 200, webhook_page.text
+            webhook_payload = webhook_page.json()
+            assert webhook_payload["total"] == 2
+            assert {
+                (item["signal_source_id"], item["signal_event_id"])
+                for item in webhook_payload["data"]
+            } == {(first_id, str(event_id)), (second_id, second_event_id)}
+            assert {
+                (item["signal_source_id"], item["name"]) for item in webhook_payload["sources"]
+            } == {(first_id, "TradingView BTC"), (second_id, "Model ETH")}
+            assert all(
+                item["proposal_eligibility"] == "ELIGIBLE"
+                and item["freshness"]["status"] == "CURRENT"
+                for item in webhook_payload["data"]
+            )
+
+            first_source_page = await client.get(
+                "/api/webhook-signals",
+                params={
+                    "signal_source_id": first_id,
+                    "venue": "BINANCE",
+                    "symbol": "BTCUSDT",
+                    "direction": "LONG",
+                    "timeframe": "1h",
+                    "freshness": "CURRENT",
+                    "proposal_eligibility": "ELIGIBLE",
+                },
+            )
+            assert first_source_page.status_code == 200, first_source_page.text
+            assert first_source_page.json()["total"] == 1
+            assert first_source_page.json()["data"][0]["signal_event_id"] == str(event_id)
+
+            with database.session_factory.begin() as session:
+                second_event = session.get(SignalEvent, UUID(second_event_id))
+                assert second_event is not None
+                second_event.occurred_at = signal_at - timedelta(minutes=10)
+
+            stale_source_page = await client.get(
+                "/api/webhook-signals",
+                params={
+                    "signal_source_id": second_id,
+                    "freshness": "STALE",
+                    "proposal_eligibility": "BLOCKED",
+                },
+            )
+            assert stale_source_page.status_code == 200, stale_source_page.text
+            assert stale_source_page.json()["total"] == 1
+            stale_signal = stale_source_page.json()["data"][0]
+            assert stale_signal["signal_event_id"] == second_event_id
+            assert stale_signal["freshness"]["status"] == "STALE"
+            assert stale_signal["proposal_blocker"] == "SIGNAL_STALE"
+
+            stale_proposal = await client.post(
+                f"/api/signals/{second_event_id}/proposals",
+                json={
+                    "environment": "SHADOW",
+                    "account_id": "signal-account",
+                    "instrument_id": str(instrument_id),
+                    "risk_tier": "LOW",
+                    "quantity": "0.01",
+                    "max_risk": "1",
+                    "expires_in_minutes": 480,
+                    "rationale": "A stale Webhook signal must remain blocked server-side.",
+                    "idempotency_key": "stale-multi-source-proposal",
+                },
+            )
+            assert stale_proposal.status_code == 422, stale_proposal.text
+            assert stale_proposal.json()["error"]["code"] == "SIGNAL_STALE"
+
+            after_signal = await client.get("/api/signal-sources")
+            first_after_signal = next(
+                item for item in after_signal.json()["data"] if item["signal_source_id"] == first_id
+            )
+            assert first_after_signal["signals"]["count"] == 1
+            assert first_after_signal["signals"]["last_received_at"] is not None
+            assert first_after_signal["webhook"]["last_valid_event_at"] is not None
+            second_after_signal = next(
+                item
+                for item in after_signal.json()["data"]
+                if item["signal_source_id"] == second_id
+            )
+            assert second_after_signal["signals"]["count"] == 1
+
+            service.create_team(
+                actor_id=admin,
+                name="Other Signal Space",
+                slug="other-signal-space",
+                idempotency_key="create-other-signal-space",
+                now=now + timedelta(seconds=1),
+            )
+            cross_space = await client.post(
+                f"/api/signal-sources/{first_id}/state",
+                json={
+                    "enabled": False,
+                    "expected_version": 3,
+                    "idempotency_key": "cross-space-disable",
+                },
+            )
+            assert cross_space.status_code == 404, cross_space.text
+            assert cross_space.json()["error"]["code"] == "SIGNAL_SOURCE_NOT_FOUND"
+            isolated_page = await client.get("/api/webhook-signals")
+            assert isolated_page.status_code == 200, isolated_page.text
+            assert isolated_page.json()["sources"] == []
+            assert isolated_page.json()["data"] == []
+            assert isolated_page.json()["total"] == 0
+            service.select_scope(
+                actor_id=admin,
+                workspace_id=workspace_id,
+                team_id=original_team_id,
+                idempotency_key="return-to-original-signal-space",
+                now=now + timedelta(seconds=2),
+            )
+
+            disabled = await client.post(
+                f"/api/signal-sources/{first_id}/state",
+                json={
+                    "enabled": False,
+                    "expected_version": 3,
+                    "idempotency_key": "disable-first-webhook",
+                },
+            )
+            assert disabled.status_code == 200, disabled.text
+            disabled_source = next(
+                item for item in disabled.json()["data"] if item["signal_source_id"] == first_id
+            )
+            assert disabled_source["enabled"] is False
+            assert disabled_source["version"] == 4
+
+            enabled = await client.post(
+                f"/api/signal-sources/{first_id}/state",
+                json={
+                    "enabled": True,
+                    "expected_version": 4,
+                    "idempotency_key": "reenable-first-webhook",
+                },
+            )
+            assert enabled.status_code == 200, enabled.text
+
+            deleted = await client.request(
+                "DELETE",
+                f"/api/signal-sources/{first_id}",
+                json={
+                    "confirm_name": "TradingView BTC",
+                    "expected_version": 5,
+                    "idempotency_key": "delete-first-webhook",
+                },
+            )
+            assert deleted.status_code == 200, deleted.text
+            assert first_id not in {item["signal_source_id"] for item in deleted.json()["data"]}
+
+            after_delete = await client.post(
+                f"/api/webhooks/signals/{first_id}",
+                content=body,
+                headers={
+                    "content-type": "application/json",
+                    "x-tradingops-timestamp": request_timestamp,
+                    "x-tradingops-nonce": "multi-source-nonce-0002",
+                    "x-tradingops-signature": signature(
+                        rotated_secret,
+                        request_timestamp,
+                        "multi-source-nonce-0002",
+                        body,
+                    ),
+                    "idempotency-key": "multi-source-event-after-delete",
+                },
+            )
+            assert after_delete.status_code == 404, after_delete.text
+
+            with database.session_factory() as session:
+                retained_source = session.get(TeamSignalSource, UUID(first_id))
+                retained_event = session.get(SignalEvent, event_id)
+                events = set(
+                    session.scalars(
+                        select(AuditEvent.event_type).where(AuditEvent.object_id == first_id)
+                    ).all()
+                )
+                assert retained_source is not None
+                assert retained_source.deleted_at is not None
+                assert retained_source.enabled is False
+                assert retained_event is not None
+                assert retained_event.signal_source_id == retained_source.signal_source_id
+                assert {
+                    "SIGNAL_SOURCE_CREATED",
+                    "SIGNAL_SOURCE_TEST_SUCCEEDED",
+                    "SIGNAL_SOURCE_CREDENTIAL_ROTATED",
+                    "SIGNAL_SOURCE_DISABLED",
+                    "SIGNAL_SOURCE_ENABLED",
+                    "SIGNAL_SOURCE_DELETED",
+                } <= events
 
     asyncio.run(scenario())
 

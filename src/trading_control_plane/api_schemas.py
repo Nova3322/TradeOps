@@ -387,6 +387,46 @@ class SignalSourceConfigureRequest(BaseModel):
     idempotency_key: str = Field(min_length=1, max_length=160)
 
 
+class SignalSourceCreateRequest(BaseModel):
+    name: str = Field(min_length=2, max_length=120)
+    mode: Literal["PERPTAPE", "WEBHOOK"]
+    secret: SecretStr | None = Field(default=None, min_length=8, max_length=512)
+    enabled: bool = True
+    webhook_max_age_seconds: int = Field(default=300, ge=30, le=900)
+    expected_version: Literal[0] = 0
+    idempotency_key: str = Field(min_length=1, max_length=160)
+
+
+class SignalSourceUpdateRequest(BaseModel):
+    name: str = Field(min_length=2, max_length=120)
+    webhook_max_age_seconds: int = Field(default=300, ge=30, le=900)
+    expected_version: int = Field(ge=1)
+    idempotency_key: str = Field(min_length=1, max_length=160)
+
+
+class SignalSourceCredentialRotateRequest(BaseModel):
+    secret: SecretStr | None = Field(default=None, min_length=8, max_length=512)
+    expected_version: int = Field(ge=1)
+    idempotency_key: str = Field(min_length=1, max_length=160)
+
+
+class SignalSourceStateRequest(BaseModel):
+    enabled: bool
+    expected_version: int = Field(ge=1)
+    idempotency_key: str = Field(min_length=1, max_length=160)
+
+
+class SignalSourceTestRequest(BaseModel):
+    expected_version: int = Field(ge=1)
+    idempotency_key: str = Field(min_length=1, max_length=160)
+
+
+class SignalSourceDeleteRequest(BaseModel):
+    confirm_name: str = Field(min_length=2, max_length=120)
+    expected_version: int = Field(ge=1)
+    idempotency_key: str = Field(min_length=1, max_length=160)
+
+
 NotificationChannel = Literal["TELEGRAM", "SLACK", "LARK", "EMAIL"]
 NotificationEventType = Literal[
     "PROPOSAL_REVIEW_REQUIRED",

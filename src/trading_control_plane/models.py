@@ -607,13 +607,30 @@ class TeamSignalSource(Base):
             "webhook_max_age_seconds BETWEEN 30 AND 900",
             name="ck_team_signal_sources_max_age",
         ),
-        UniqueConstraint("team_id", name="uq_team_signal_sources_team"),
+        CheckConstraint(
+            "consecutive_failures >= 0",
+            name="ck_team_signal_sources_consecutive_failures",
+        ),
         UniqueConstraint(
             "team_id",
             "signal_source_id",
             name="uq_team_signal_sources_team_identity",
         ),
         Index("ix_team_signal_sources_enabled_mode", "enabled", "mode"),
+        Index("ix_team_signal_sources_team_deleted", "team_id", "deleted_at"),
+        Index(
+            "uq_team_signal_sources_active_perptape",
+            "team_id",
+            unique=True,
+            postgresql_where=text("mode = 'PERPTAPE' AND deleted_at IS NULL"),
+        ),
+        Index(
+            "uq_team_signal_sources_active_name",
+            "team_id",
+            "name",
+            unique=True,
+            postgresql_where=text("deleted_at IS NULL"),
+        ),
     )
 
     signal_source_id: Mapped[UUID] = mapped_column(
@@ -622,6 +639,7 @@ class TeamSignalSource(Base):
     team_id: Mapped[UUID] = mapped_column(
         ForeignKey("teams.team_id", ondelete="CASCADE"), nullable=False
     )
+    name: Mapped[str] = mapped_column(String(120), nullable=False)
     mode: Mapped[str] = mapped_column(String(16), nullable=False)
     enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     credential_ciphertext: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -631,11 +649,19 @@ class TeamSignalSource(Base):
     service_principal_id: Mapped[UUID | None] = mapped_column(
         ForeignKey("users.user_id", ondelete="RESTRICT"), nullable=True
     )
+    last_checked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_success_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_error_code: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    consecutive_failures: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
     created_by: Mapped[UUID] = mapped_column(ForeignKey("users.user_id"), nullable=False)
     updated_by: Mapped[UUID] = mapped_column(ForeignKey("users.user_id"), nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    deleted_by: Mapped[UUID | None] = mapped_column(
+        ForeignKey("users.user_id", ondelete="RESTRICT"), nullable=True
+    )
 
 
 class NotificationRoute(Base):
@@ -782,13 +808,17 @@ class SignalEvent(Base):
             ondelete="RESTRICT",
         ),
         UniqueConstraint("team_id", "signal_event_id", name="uq_signal_events_team_identity"),
-        UniqueConstraint("team_id", "idempotency_key", name="uq_signal_events_team_idempotency"),
+        UniqueConstraint(
+            "signal_source_id",
+            "idempotency_key",
+            name="uq_signal_events_source_idempotency",
+        ),
         UniqueConstraint("signal_source_id", "nonce", name="uq_signal_events_source_nonce"),
         UniqueConstraint(
-            "team_id",
+            "signal_source_id",
             "provider",
             "external_id",
-            name="uq_signal_events_team_provider_external",
+            name="uq_signal_events_source_provider_external",
         ),
         Index("ix_signal_events_team_received", "team_id", "received_at"),
     )

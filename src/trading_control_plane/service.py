@@ -402,7 +402,16 @@ class TradingService:
         self.reconcile_campaign = self._risk_reconciliation.reconcile_campaign
         self._signal_source_payload = self._signals._signal_source_payload
         self.signal_source_status = self._signals.signal_source_status
+        self.signal_sources_status = self._signals.signal_sources_status
         self._ensure_signal_service_principal = self._signals._ensure_signal_service_principal
+        self.create_signal_source = self._signals.create_signal_source
+        self.update_signal_source_details = self._signals.update_signal_source_details
+        self.rotate_signal_source_credential = (
+            self._signals.rotate_signal_source_credential
+        )
+        self.set_signal_source_enabled = self._signals.set_signal_source_enabled
+        self.record_signal_source_test = self._signals.record_signal_source_test
+        self.delete_signal_source = self._signals.delete_signal_source
         self.configure_signal_source = self._signals.configure_signal_source
         self.perptape_source_runtime = self._signals.perptape_source_runtime
         self.signal_service_principal = self._signals.signal_service_principal
@@ -410,6 +419,7 @@ class TradingService:
         self._signal_event_payload = self._signals._signal_event_payload
         self.signal_event = self._signals.signal_event
         self.list_signal_events = self._signals.list_signal_events
+        self.list_webhook_signal_events = self._signals.list_webhook_signal_events
         self.record_runtime_source_health = self._signals.record_runtime_source_health
         self.record_perptape_feed = self._signals.record_perptape_feed
         self.register_instrument = self._signals.register_instrument

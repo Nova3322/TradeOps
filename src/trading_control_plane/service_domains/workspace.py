@@ -81,6 +81,7 @@ class WorkspaceService(ServiceComponent):
             session.add(
                 TeamSignalSource(
                     team_id=team.team_id,
+                    name="Perptape",
                     mode=SignalSourceMode.PERPTAPE.value,
                     enabled=True,
                     credential_ciphertext=None,
@@ -91,11 +92,17 @@ class WorkspaceService(ServiceComponent):
                     credential_version=0,
                     webhook_max_age_seconds=300,
                     service_principal_id=None,
+                    last_checked_at=None,
+                    last_success_at=None,
+                    last_error_code=None,
+                    consecutive_failures=0,
                     version=1,
                     created_by=user.user_id,
                     updated_by=user.user_id,
                     created_at=now,
                     updated_at=now,
+                    deleted_at=None,
+                    deleted_by=None,
                 )
             )
             self.transactions._audit(
@@ -352,9 +359,15 @@ class WorkspaceService(ServiceComponent):
     def _shadow_activation_blockers(session: Session, team: Team) -> list[str]:
         blockers: list[str] = []
         source = session.scalar(
-            select(TeamSignalSource).where(TeamSignalSource.team_id == team.team_id)
+            select(TeamSignalSource)
+            .where(
+                TeamSignalSource.team_id == team.team_id,
+                TeamSignalSource.deleted_at.is_(None),
+                TeamSignalSource.enabled,
+            )
+            .limit(1)
         )
-        if source is None or not source.enabled:
+        if source is None:
             blockers.append("SIGNAL_SOURCE_REQUIRED")
         policy = session.scalar(
             select(RiskPolicy).where(

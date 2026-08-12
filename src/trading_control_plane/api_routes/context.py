@@ -112,6 +112,7 @@ class AccountRouteDependencies:
 @dataclass(frozen=True, slots=True)
 class SignalRouteDependencies:
     common: AuthenticatedRouteDependencies
+    current_perptape_candidates: CurrentPerptapeCandidates
     notify_reviewers: Callable[[UUID, int, str], None]
 
 

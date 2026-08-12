@@ -41,6 +41,41 @@ def frontend_source() -> str:
     return "\n".join((WEB_ROOT / name).read_text() for name in FRONTEND_SCRIPTS)
 
 
+def test_webhook_signals_are_a_separate_dynamic_workspace() -> None:
+    shell = (WEB_ROOT / "index.html").read_text()
+    application = (WEB_ROOT / "app-core.js").read_text()
+    signals = (WEB_ROOT / "signals.js").read_text()
+    styles = (WEB_ROOT / "styles.css").read_text()
+
+    assert 'class="nav-link-group" role="group" aria-label="实时信号"' in shell
+    assert 'href="/opportunities"' in shell
+    assert 'href="/webhook-signals"' in shell
+    assert "path === '/webhook-signals'" in application
+    assert "await renderWebhookSignals()" in application
+
+    perptape = signals.split("const OPPORTUNITY_TIMEFRAME_ORDER", maxsplit=1)[1]
+    webhook = signals.split("async function renderWebhookSignals", maxsplit=1)[1].split(
+        "function signalSourceFormDirty", maxsplit=1
+    )[0]
+    assert "api('/api/opportunities')" in perptape
+    assert "api(`/api/webhook-signals?" in webhook
+    assert "sources.map(source =>" in webhook
+    assert "source.name" in webhook
+    assert 'tabindex="${selectedSource' in webhook
+    assert "['ArrowLeft', 'ArrowRight', 'Home', 'End']" in webhook
+    assert "restoreFocus" in webhook
+    assert "TradingView BTC" not in webhook
+    assert "策略系统 A" not in webhook
+    assert "量化模型 B" not in webhook
+    assert "data-signal-event-id" in signals
+    assert "proposal_eligibility" in webhook
+    assert "freshness" in webhook
+    assert ".webhook-signal-facts" in styles
+    assert "grid-template-columns: repeat(4, minmax(0, 1fr))" in styles
+    assert "grid-template-columns: 1fr" in styles
+
+
+
 @cache
 def frontend_bundle_path() -> Path:
     with tempfile.NamedTemporaryFile(
@@ -209,22 +244,26 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
 
     assert response.status_code == 200
     assert "交易控制台" in response.text
-    assert "/assets/app-core.js?v=170" in response.text
+    assert "/assets/app-core.js?v=171" in response.text
     assert "/assets/workspace.js?v=171" in response.text
     assert "/assets/app.js?v=170" in response.text
     assert 'href="/signals"' in response.text
-    assert "/assets/styles.css?v=73" in response.text
+    assert "/assets/styles.css?v=74" in response.text
     assert "/assets/reporting.js?v=171" in response.text
     assert 'href="/assets/tradingops-logo.png" type="image/png"' in response.text
     assert '<img src="/assets/tradingops-logo.png" alt="">' in response.text
     assert '<span class="brand-mark" aria-hidden="true">T</span>' not in response.text
     assert 'aria-label="交易控制台首页"' in response.text
     assert '<a href="/home" data-link><span>⌂</span>当前任务</a>' in response.text
-    assert "<span>⌁</span>实时机会</a>" in response.text
+    assert 'class="nav-link-group" role="group" aria-label="实时信号"' in response.text
+    assert 'href="/opportunities"' in response.text
+    assert ">Perptape</a>" in response.text
+    assert 'href="/webhook-signals"' in response.text
+    assert ">Webhook 信号</a>" in response.text
     assert "<span>✓</span>审核队列</a>" in response.text
     assert "<span>¤</span>资金中心</a>" in response.text
     assert response.text.count('class="nav-section" data-nav-section') == 3
-    assert response.text.count("data-nav-capability=") == 11
+    assert response.text.count("data-nav-capability=") == 12
     assert "data-nav-group=" not in response.text
     assert 'id="team-settings-link"' not in response.text
     assert 'id="mobile-nav-toggle"' in response.text
@@ -249,6 +288,7 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
         "/workspaces",
         "/venues",
         "/venues/hyperliquid",
+        "/webhook-signals",
         "/opportunities/defaults",
         "/proposals",
         "/results",
@@ -284,6 +324,16 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
     assert "const PREFERENCE_OPTIONS" in app_javascript.text
     assert "function normalizeThemePreference" in app_javascript.text
     assert "function initializePreferenceDropdowns" in app_javascript.text
+    assert "path === '/webhook-signals'" in app_javascript.text
+    assert "await renderWebhookSignals()" in app_javascript.text
+    signals_javascript = (WEB_ROOT / "signals.js").read_text()
+    signal_settings = signals_javascript.split("async function renderSignalSources()", maxsplit=1)[1].split("const WEBHOOK_SIGNAL_BLOCKERS", maxsplit=1)[0]
+    webhook_page = signals_javascript.split("async function renderWebhookSignals", maxsplit=1)[1].split("function signalSourceFormDirty", maxsplit=1)[0]
+    assert "api('/api/signals')" not in signal_settings
+    assert "api(`/api/webhook-signals?" in webhook_page
+    assert "sources.map(source =>" in webhook_page
+    assert "data-signal-event-id" in signals_javascript
+    assert "Perptape 保留在独立页面" in webhook_page
     assert "currentThemePreference === 'system'" in app_javascript.text
     assert "['ArrowDown', 'ArrowUp', 'Home', 'End']" in app_javascript.text
     assert "workspace-gateway-tabs" not in app_javascript.text
@@ -542,7 +592,7 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
     assert "WEBSOCKET_LIVE:'上游 WebSocket 实时流'" in app_javascript.text
     assert "POLLING_FALLBACK:'HTTPS 轮询回退'" in app_javascript.text
     assert "upstreamLive ? '实时机会' : '机会快照'" in app_javascript.text
-    assert "页面不会把轮询快照标成实时流" in app_javascript.text
+    assert "旧快照、失败或降级状态不会标记为实时" in app_javascript.text
     assert "function groupOpportunities" in app_javascript.text
     assert "function opportunitySnapshotCounts" in app_javascript.text
     assert 'class="signal-chip-full"' in app_javascript.text
@@ -557,7 +607,7 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
     assert 'href="/opportunities/defaults"' in app_javascript.text
     assert "function renderOpportunityDefaults" in app_javascript.text
     assert "async function renderSignalSources" in app_javascript.text
-    assert "X-TradingOPS-Signature" in app_javascript.text
+    assert "签名、请求时间、Nonce、幂等、重放、大小和版本格式" in app_javascript.text
     assert "signal-proposal-form" in app_javascript.text
     assert "覆盖币对" in app_javascript.text
     assert "方向机会" in app_javascript.text
@@ -626,6 +676,9 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
     assert ".source-facts" in stylesheet.text
     assert ".readiness-item" in stylesheet.text
     assert ".readiness-action" in stylesheet.text
+    assert ".webhook-source-tabs" in stylesheet.text
+    assert ".webhook-signal-facts" in stylesheet.text
+    assert ".nav-child-link" in stylesheet.text
     assert ".error-state-guidance" in stylesheet.text
     assert ".error-state h2:focus-visible" in stylesheet.text
     tablet_css = stylesheet.text.split("@media (max-width: 1180px)", 1)[1].split("@media", 1)[0]
@@ -636,7 +689,7 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
 
     service_worker = get(app, "/sw.js")
     assert service_worker.status_code == 200
-    assert "trading-shell-v144" in service_worker.text
+    assert "trading-shell-v145" in service_worker.text
     assert "/assets/tradingops-logo.png" in service_worker.text
     assert "/assets/tradingops-icon.svg" in service_worker.text
     assert "/assets/icon.svg" not in service_worker.text

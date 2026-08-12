@@ -1675,6 +1675,7 @@ class AccountService(ServiceComponent):
                 .where(
                     TeamSignalSource.enabled,
                     TeamSignalSource.mode == SignalSourceMode.PERPTAPE.value,
+                    TeamSignalSource.deleted_at.is_(None),
                     TeamSignalSource.credential_ciphertext.is_not(None),
                 )
                 .order_by(TeamSignalSource.team_id)
@@ -1743,6 +1744,7 @@ class AccountService(ServiceComponent):
                 source is None
                 or source.team_id != binding.team_id
                 or not source.enabled
+                or source.deleted_at is not None
                 or source.mode != SignalSourceMode.PERPTAPE.value
                 or source.service_principal_id != binding.service_principal_id
                 or source.version != binding.source_version
@@ -1810,6 +1812,7 @@ class AccountService(ServiceComponent):
             source is None
             or source.team_id != binding.team_id
             or not source.enabled
+            or source.deleted_at is not None
             or source.mode != SignalSourceMode.PERPTAPE.value
             or source.service_principal_id != binding.service_principal_id
             or source.version != binding.source_version

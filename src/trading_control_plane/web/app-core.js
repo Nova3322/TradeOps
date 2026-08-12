@@ -93,7 +93,7 @@ const ENGLISH_EXACT = new Map(Object.entries({
   '两次输入的新密码不一致。':'The new-password entries do not match.', '密码已更新；其他旧会话已撤销':'Password updated; older sessions have been revoked',
   '只读用户':'Observer', '提案发起人':'Proposer', '审核人':'Reviewer', '交易运维人员':'Trading operator',
   '资金管理员':'Treasury administrator', '系统管理员':'Super administrator',
-  '主导航':'Main navigation', '工作台':'Workspace', '团队配置':'Team setup', '治理与安全':'Governance and safety', '当前范围':'Current scope', '当前任务':'Current tasks', '实时机会':'Live opportunities', '审核队列':'Review queue',
+  '主导航':'Main navigation', '工作台':'Workspace', '团队配置':'Team setup', '治理与安全':'Governance and safety', '当前范围':'Current scope', '当前任务':'Current tasks', '实时信号':'Live signals', '实时机会':'Live opportunities', 'Webhook 信号':'Webhook signals', '审核队列':'Review queue',
   '交易任务':'Trades', '绩效报表':'Performance reports', '交易模式':'Trading mode', '影子模式':'Shadow mode', '通知中心':'Notification center', '系统状态':'System status', '资金':'Capital', '异常':'Exceptions',
   '交易账户':'Exchange accounts', '成员权限':'Access control',
   '业务数据库已连接':'Business database connected', '数据缺失时自动阻止交易':'Missing data blocks trading automatically',
@@ -157,7 +157,7 @@ const ENGLISH_EXACT = new Map(Object.entries({
   '查看突破榜单机会':'View breakout opportunities', '创建人工提案':'Create manual proposal', '系统边界':'System controls',
   '当前控制状态':'Current control state', '站点环境':'Runtime', '风险政策':'Risk policy', '自动加仓':'Automatic scaling',
   '安全原则':'Safety rule', '数据缺失即阻断':'Missing data blocks trading', '连接不可用':'Connection unavailable',
-  '人工提案':'Manual proposal', '刷新机会':'Refresh opportunities', '突破榜单数据源':'Breakout data source',
+  '人工提案':'Manual proposal', '刷新机会':'Refresh opportunities', '突破榜单数据源':'Breakout data source', '信号源设置':'Signal source settings', '提案资格':'Proposal eligibility',
   '外部机会当前不可用':'External opportunities are unavailable', '当前候选':'Current candidates', '可创建提案':'Eligible proposals',
   '可交易合约':'Tradable instruments', '数据截止':'Data as of', '数据源状态':'Source status', '不可用':'Unavailable',
   '连接正常':'Connected', '交易所':'Exchange', '全部':'All', '币对':'Symbol', '共振周期':'Resonance', '突破周期':'Breakout timeframe',
@@ -1045,6 +1045,7 @@ const routeCapability = (path) => {
   if (path === '/capital') return 'capital.view';
   if (path === '/opportunities/defaults') return 'proposal.create';
   if (path === '/opportunities') return 'opportunity.view';
+  if (path === '/webhook-signals') return 'signal.view';
   if (path === '/signals') return 'signal.view';
   if (path === '/proposals/new') return 'proposal.create';
   if (path === '/reviews') return 'proposal.review';
@@ -1239,6 +1240,9 @@ function setShell(loggedIn, {workspaceGate = false} = {}) {
     mobileSessionSummary.title = identityDetail;
     document.querySelectorAll('[data-nav-capability]').forEach(link => {
       link.hidden = !hasCapability(link.dataset.navCapability);
+    });
+    document.querySelectorAll('.nav-link-group').forEach(group => {
+      group.hidden = ![...group.querySelectorAll('a')].some(link => !link.hidden);
     });
     document.querySelectorAll('[data-nav-section]').forEach(section => {
       section.hidden = ![...section.querySelectorAll('a')].some(link => !link.hidden);
@@ -1467,7 +1471,7 @@ async function route() {
     return;
   }
   setShell(true);
-  const teamSetupPaths = new Set(['/admin/users', '/admin/agents', '/profile/api-access', '/venues', '/signals', '/notifications', '/risk', '/shadow', '/trading-mode']);
+  const teamSetupPaths = new Set(['/admin/users', '/admin/agents', '/profile/api-access', '/venues', '/signals', '/webhook-signals', '/notifications', '/risk', '/shadow', '/trading-mode']);
   if (!session.active_workspace || !session.active_team || (!session.active_team.trading_enabled && !teamSetupPaths.has(path))) {
     renderScopeSetup();
     enhanceRenderedPage();
@@ -1483,6 +1487,7 @@ async function route() {
   try {
     if (path === '/home') await renderHome();
     else if (path === '/signals') await renderSignalSources();
+    else if (path === '/webhook-signals') await renderWebhookSignals();
     else if (path === '/opportunities') await renderOpportunities();
     else if (path === '/opportunities/defaults') await renderOpportunityDefaults();
     else if (path === '/proposals/new') await renderManualProposal();

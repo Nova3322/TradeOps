@@ -67,7 +67,11 @@ class ProposalService(ServiceComponent):
                 session, actor_id, "proposal.create"
             )
             source = session.scalar(
-                select(TeamSignalSource).where(TeamSignalSource.team_id == team.team_id)
+                select(TeamSignalSource).where(
+                    TeamSignalSource.team_id == team.team_id,
+                    TeamSignalSource.mode == SignalSourceMode.PERPTAPE.value,
+                    TeamSignalSource.deleted_at.is_(None),
+                )
             )
             if (
                 source is None
@@ -144,7 +148,11 @@ class ProposalService(ServiceComponent):
                     "only a team SYSTEM_ADMIN can change team proposal defaults",
                 )
             source = session.scalar(
-                select(TeamSignalSource).where(TeamSignalSource.team_id == team.team_id)
+                select(TeamSignalSource).where(
+                    TeamSignalSource.team_id == team.team_id,
+                    TeamSignalSource.mode == SignalSourceMode.PERPTAPE.value,
+                    TeamSignalSource.deleted_at.is_(None),
+                )
             )
             if auto_proposal_enabled and (
                 source is None
@@ -344,6 +352,7 @@ class ProposalService(ServiceComponent):
                         select(TeamSignalSource).where(
                             TeamSignalSource.signal_source_id == signal_event.signal_source_id,
                             TeamSignalSource.team_id == team.team_id,
+                            TeamSignalSource.deleted_at.is_(None),
                         )
                     )
                     if (
@@ -354,6 +363,13 @@ class ProposalService(ServiceComponent):
                         _reject(
                             "SIGNAL_SOURCE_DISABLED",
                             "the Webhook signal source is no longer enabled",
+                        )
+                    if signal_event.occurred_at < now.astimezone(UTC) - timedelta(
+                        seconds=signal_source.webhook_max_age_seconds
+                    ):
+                        _reject(
+                            "SIGNAL_STALE",
+                            "the Webhook signal is outside its source freshness window",
                         )
             elif (
                 (
