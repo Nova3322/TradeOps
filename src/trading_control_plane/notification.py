@@ -653,6 +653,7 @@ class NotificationDispatcher:
                 .where(
                     NotificationRoute.notification_route_id == delivery.notification_route_id,
                     NotificationRoute.team_id == delivery.team_id,
+                    NotificationRoute.deleted_at.is_(None),
                 )
                 .with_for_update()
             )

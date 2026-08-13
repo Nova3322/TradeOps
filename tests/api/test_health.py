@@ -244,13 +244,13 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
     assert response.status_code == 200
     assert "交易控制台" in response.text
     assert "/assets/app-core.js?v=198" in response.text
-    assert "/assets/workspace.js?v=179" in response.text
-    assert "/assets/signals.js?v=174" in response.text
+    assert "/assets/workspace.js?v=180" in response.text
+    assert "/assets/signals.js?v=175" in response.text
     assert "/assets/proposals.js?v=175" in response.text
     assert "/assets/capital.js?v=173" in response.text
     assert "/assets/app.js?v=175" in response.text
     assert 'href="/signals"' in response.text
-    assert "/assets/styles.css?v=93" in response.text
+    assert "/assets/styles.css?v=94" in response.text
     for font_name in (
         "IBMPlexSansSC-Regular.woff2",
         "IBMPlexSansSC-SemiBold.woff2",
@@ -261,8 +261,8 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
             f'href="/assets/fonts/{font_name}" as="font" type="font/woff2" crossorigin'
             in response.text
         )
-    assert "/assets/reporting.js?v=172" in response.text
-    assert "/assets/accounts.js?v=173" in response.text
+    assert "/assets/reporting.js?v=173" in response.text
+    assert "/assets/accounts.js?v=174" in response.text
     assert 'href="/assets/tradingops-logo.png" type="image/png"' in response.text
     assert '<img src="/assets/tradingops-logo.png" alt="">' in response.text
     assert '<span class="brand-mark" aria-hidden="true">T</span>' not in response.text
@@ -2148,7 +2148,8 @@ def test_venue_list_is_compact_and_account_configuration_moves_to_detail() -> No
     assert "接入实盘账户" in list_page
     assert "account-primary-action" in list_page
     assert "查看详情" not in list_page
-    assert "account-card-actions" not in list_page
+    assert "account-card-actions" in list_page
+    assert "data-delete-exchange-account" in list_page
     assert "connect-account-dialog" in source
     assert "showModal()" in list_page
     assert "/api/trading-mode" in list_page
@@ -2189,7 +2190,7 @@ def test_venue_account_detail_route_serves_the_spa_shell() -> None:
 
     assert response.status_code == 200
     assert "交易控制台" in response.text
-    assert "/assets/accounts.js?v=173" in response.text
+    assert "/assets/accounts.js?v=174" in response.text
 
 
 def test_venue_snapshot_empty_states_do_not_claim_current_account_state() -> None:

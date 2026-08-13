@@ -73,6 +73,11 @@
   --success: #3f6b55;
   --success-soft: #edf3ef;
   --danger: #963d3a;
+  --danger-soft: #f7eeee;
+  --market-up: #2f6d4f;
+  --market-up-soft: #edf5f0;
+  --market-down: #a04440;
+  --market-down-soft: #f8efee;
   --warning: #805a12;
   --chart-source-1: #505050;
   --chart-source-2: #777777;
@@ -109,6 +114,11 @@
   --success: #83bda6;
   --success-soft: #1c2a22;
   --danger: #d9817d;
+  --danger-soft: #2c1d1d;
+  --market-up: #86c6a8;
+  --market-up-soft: #19271f;
+  --market-down: #e08b86;
+  --market-down-soft: #2c1d1d;
   --warning: #c7a05e;
   --chart-source-1: #c8c8c4;
   --chart-source-2: #999995;
@@ -377,8 +387,12 @@ button:disabled { opacity: .52; cursor: not-allowed; }
 .signal-chip { display: inline-flex; flex: 0 0 auto; align-items: center; min-width: 0; min-height: 28px; border: 1px solid var(--line); border-radius: 999px; padding: 4px 9px; white-space: nowrap; font-size: 12px; font-weight: 600; background: var(--bg); }
 .signal-chip-full { display: none; }
 .signal-chip-short { display: inline; }
-.signal-chip.direction-long { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 42%, var(--line)); }
-.signal-chip.direction-short { color: var(--danger); border-color: color-mix(in srgb, var(--danger) 38%, var(--line)); }
+.signal-chip.direction-long { color: var(--market-up); border-color: color-mix(in srgb, var(--market-up) 38%, var(--line)); background: var(--market-up-soft); }
+.signal-chip.direction-short { color: var(--market-down); border-color: color-mix(in srgb, var(--market-down) 38%, var(--line)); background: var(--market-down-soft); }
+[data-opportunity-card], .webhook-signal-card { position: relative; overflow: hidden; }
+[data-opportunity-card]::before, .webhook-signal-card::before { position: absolute; inset: 0 auto 0 0; width: 3px; content: ""; }
+[data-opportunity-direction="LONG"]::before, .webhook-signal-card[data-signal-direction="LONG"]::before { background: var(--market-up); }
+[data-opportunity-direction="SHORT"]::before, .webhook-signal-card[data-signal-direction="SHORT"]::before { background: var(--market-down); }
 @container (min-width: 520px) {
   .signal-chip-full { display: inline; }
   .signal-chip-short { display: none; }
@@ -926,8 +940,8 @@ button:disabled { opacity: .52; cursor: not-allowed; }
 .entry-boundary b { color: var(--accent); font-size: 12px; }
 .entry-boundary span { color: var(--muted); font-size: 12px; }
 .entry-boundary a { color: var(--accent); font-size: 12px; font-weight: 600; }
-.direction-long { color: var(--accent); }
-.direction-short { color: var(--danger); }
+.direction-long { color: var(--market-up); }
+.direction-short { color: var(--market-down); }
 .status-PENDING_REVIEW, .status-DISPATCHING { color: var(--warning); }
 .status-APPROVED, .status-ALLOW { color: var(--success); }
 .status-SCALE { color: var(--warning); }
@@ -1632,11 +1646,14 @@ h2 { font-size: 21px; }
 .direction-pill,
 .status-pill,
 .risk-badge { border-radius: 3px; }
-.direction-long, .direction-short,
-.signal-chip.direction-long, .signal-chip.direction-short {
-  border-color: var(--line);
-  color: var(--ink);
-}
+.direction-long { color: var(--market-up); }
+.direction-short { color: var(--market-down); }
+.signal-chip.direction-long { border-color: color-mix(in srgb, var(--market-up) 38%, var(--line)); background: var(--market-up-soft); color: var(--market-up); }
+.signal-chip.direction-short { border-color: color-mix(in srgb, var(--market-down) 38%, var(--line)); background: var(--market-down-soft); color: var(--market-down); }
+
+.account-card-actions { display: flex; align-items: stretch; gap: 8px; margin: 16px 20px 20px; }
+.account-card-actions .account-primary-action { flex: 1 1 auto; margin: 0; }
+.account-delete-action { flex: 0 0 auto; }
 
 .table-wrap { border-radius: 3px; background: transparent; }
 table { background: transparent; }

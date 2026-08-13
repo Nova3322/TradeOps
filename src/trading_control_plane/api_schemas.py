@@ -75,6 +75,10 @@ class ManagedUserAccessRequest(BaseModel):
         return value
 
 
+class TeamMemberRemoveRequest(BaseModel):
+    idempotency_key: str = Field(min_length=1, max_length=160)
+
+
 class AgentCreateRequest(BaseModel):
     username: str = Field(min_length=1, max_length=120, pattern=r"^[A-Za-z0-9._-]+$")
     roles: list[AgentAccessRole] = Field(min_length=1, max_length=3)
@@ -330,6 +334,11 @@ class ExchangeAccountCreateRequest(BaseModel):
     idempotency_key: str = Field(min_length=1, max_length=160)
 
 
+class ExchangeAccountDeleteRequest(BaseModel):
+    expected_version: int = Field(ge=1)
+    idempotency_key: str = Field(min_length=1, max_length=160)
+
+
 class ExchangeCredentialRotateRequest(BaseModel):
     credentials: ExchangeCredentialRequest
     expected_version: int = Field(ge=1)
@@ -511,6 +520,11 @@ class NotificationRouteWriteRequest(BaseModel):
 
 
 class NotificationTestRequest(BaseModel):
+    idempotency_key: str = Field(min_length=1, max_length=160)
+
+
+class NotificationRouteDeleteRequest(BaseModel):
+    expected_version: int = Field(ge=1)
     idempotency_key: str = Field(min_length=1, max_length=160)
 
 

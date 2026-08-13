@@ -591,7 +591,10 @@ class WorkspaceQueries(QueryComponent):
             team = session.get(Team, team_id)
             routes = session.scalars(
                 select(NotificationRoute)
-                .where(NotificationRoute.team_id == team_id)
+                .where(
+                    NotificationRoute.team_id == team_id,
+                    NotificationRoute.deleted_at.is_(None),
+                )
                 .order_by(NotificationRoute.name, NotificationRoute.notification_route_id)
             ).all()
             deliveries = session.scalars(

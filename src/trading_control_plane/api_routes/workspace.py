@@ -16,6 +16,7 @@ from trading_control_plane.api_core import (
     ManagedUserCreateRequest,
     MockLoginRequest,
     MockStepUpRequest,
+    NotificationRouteDeleteRequest,
     NotificationRouteWriteRequest,
     NotificationTestRequest,
     PasswordChangeRequest,
@@ -33,6 +34,7 @@ from trading_control_plane.api_core import (
     ShadowScopeInitializeRequest,
     TeamCreateRequest,
     TeamMemberInviteRequest,
+    TeamMemberRemoveRequest,
     TeamShadowActivationRequest,
     TeamTradingModeRequest,
     WorkspaceCreateRequest,
@@ -549,6 +551,21 @@ class _WorkspaceRoutes:
             )
             return {"user_id": str(user_id), "data": self.queries().managed_users(identity.user_id)}
 
+        @self.app.delete("/api/admin/team-members/{user_id}")
+        def remove_team_member(
+            user_id: UUID,
+            payload: TeamMemberRemoveRequest,
+            identity: SessionIdentity = self.identity_dependency,
+        ) -> dict[str, Any]:
+            self.require_human_session(identity)
+            result = self.service().remove_team_member(
+                user_id=user_id,
+                actor_id=identity.user_id,
+                idempotency_key=payload.idempotency_key,
+                now=_now(),
+            )
+            return {**result, "data": self.queries().managed_users(identity.user_id)}
+
         @self.app.get("/api/profile/api-keys")
         @self.app.get("/api/profile/api-clients")
         def api_clients(
@@ -881,6 +898,25 @@ class _WorkspaceRoutes:
                 configuration=(
                     None if payload.configuration is None else payload.configuration.plaintext()
                 ),
+                expected_version=payload.expected_version,
+                idempotency_key=payload.idempotency_key,
+                now=_now(),
+            )
+            return {
+                "result": result,
+                "center": self.queries().notification_center(identity.user_id),
+            }
+
+        @self.app.delete("/api/notification-routes/{notification_route_id}")
+        def delete_notification_route(
+            notification_route_id: UUID,
+            payload: NotificationRouteDeleteRequest,
+            identity: SessionIdentity = self.identity_dependency,
+        ) -> dict[str, Any]:
+            self.require_human_session(identity)
+            result = self.service().delete_notification_route(
+                actor_id=identity.user_id,
+                notification_route_id=notification_route_id,
                 expected_version=payload.expected_version,
                 idempotency_key=payload.idempotency_key,
                 now=_now(),

@@ -392,7 +392,10 @@ def test_institutional_minimal_shell_and_semantic_color_rules() -> None:
     assert "radial-gradient" not in styles
     assert "drop-shadow" not in styles
     assert ".account-list-hero::after" not in styles
-    assert ".direction-long, .direction-short" in styles
+    assert "--market-up: #2f6d4f" in styles
+    assert "--market-down: #a04440" in styles
+    assert ".direction-long { color: var(--market-up); }" in styles
+    assert ".direction-short { color: var(--market-down); }" in styles
     assert "--chart-source-1" in styles
     assert "['--chart-source-1','--chart-source-2','--chart-source-3','--chart-total']" in capital
 

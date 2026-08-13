@@ -248,9 +248,43 @@ async def exercise_access_management(database: Database) -> None:
         assert team_disabled_login.json()["session"]["active_team"] is None
         assert team_disabled_login.json()["session"]["roles"] == []
 
+        await login(client, "admin")
+        remove_payload = {"idempotency_key": "remove-reviewer-from-team"}
+        removed = await client.request(
+            "DELETE",
+            f"/api/admin/team-members/{reviewer_id}",
+            json=remove_payload,
+        )
+        assert removed.status_code == 200, removed.text
+        assert removed.json()["status"] == "REMOVED"
+        assert all(item["user_id"] != reviewer_id for item in removed.json()["data"])
+        replay = await client.request(
+            "DELETE",
+            f"/api/admin/team-members/{reviewer_id}",
+            json=remove_payload,
+        )
+        assert replay.status_code == 200, replay.text
+        readded = await client.post(
+            "/api/admin/team-members",
+            json={
+                "username": "reviewer-only",
+                "roles": ["REVIEWER"],
+                "account_scope": "acct-live",
+                "venue_scope": "BINANCE",
+                "idempotency_key": "readd-reviewer-to-team",
+            },
+        )
+        assert readded.status_code == 200, readded.text
+        assert any(item["user_id"] == reviewer_id for item in readded.json()["data"])
+
     with database.session_factory() as session:
         event_types = set(session.scalars(select(AuditEvent.event_type)).all())
-        assert {"USER_ACCESS_CREATED", "USER_ACCESS_UPDATED"} <= event_types
+        assert {
+            "USER_ACCESS_CREATED",
+            "USER_ACCESS_UPDATED",
+            "TEAM_MEMBER_REMOVED",
+            "TEAM_MEMBER_ADDED",
+        } <= event_types
 
 
 def test_only_system_admin_manages_members_while_admin_keeps_highest_permissions(

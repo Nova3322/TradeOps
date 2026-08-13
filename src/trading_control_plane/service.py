@@ -105,6 +105,7 @@ class TradingService:
         self.persist_analytics_report = self._analytics_reports.persist_report
         self._ensure_exchange_account_reference = self._accounts._ensure_exchange_account_reference
         self.create_exchange_account = self._accounts.create_exchange_account
+        self.delete_exchange_account = self._accounts.delete_exchange_account
         self.rotate_exchange_account_credentials = (
             self._accounts.rotate_exchange_account_credentials
         )
@@ -442,6 +443,7 @@ class TradingService:
         self.authenticate_agent_token = self._api_clients.authenticate_agent_token
         self._require_action_assignment = self.runtime.transactions._require_action_assignment
         self.configure_notification_route = self.runtime.transactions.configure_notification_route
+        self.delete_notification_route = self.runtime.transactions.delete_notification_route
         self._enqueue_notification_event = self.runtime.transactions._enqueue_notification_event
         self._enqueue_proposal_review_notification = (
             self.runtime.transactions._enqueue_proposal_review_notification
@@ -465,6 +467,7 @@ class TradingService:
         self.create_user = self._workspace.create_user
         self.create_managed_user = self._workspace.create_managed_user
         self.add_team_member = self._workspace.add_team_member
+        self.remove_team_member = self._workspace.remove_team_member
         self.update_managed_user_access = self._workspace.update_managed_user_access
         self.change_own_password = self._workspace.change_own_password
         self.ensure_local_human_password = self._workspace.ensure_local_human_password

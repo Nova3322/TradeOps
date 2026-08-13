@@ -5,33 +5,15 @@ from trading_control_plane.service_component import ServiceComponent
 # The domain implementation intentionally consumes the explicit service_core export surface.
 # ruff: noqa: F403, F405
 from trading_control_plane.service_core import *
+from trading_control_plane.service_domains.account_registry import (
+    delete_exchange_account,
+    exchange_account_definition,
+)
 
 
 class AccountService(ServiceComponent):
-    @staticmethod
-    def _exchange_account_definition(
-        account_id: str,
-        venue: str,
-        label: str | None,
-    ) -> tuple[str, str, str]:
-        normalized_account_id = account_id.strip()
-        normalized_venue = venue.strip().upper()
-        normalized_label = " ".join((label or normalized_account_id).strip().split())
-        if (
-            not normalized_account_id
-            or normalized_account_id != account_id
-            or len(normalized_account_id) > 120
-            or ":" in normalized_account_id
-        ):
-            _reject(
-                "EXCHANGE_ACCOUNT_INVALID",
-                "account ID must be exact, non-empty, at most 120 characters, and contain no colon",
-            )
-        if normalized_venue not in SUPPORTED_EXCHANGE_VENUES:
-            _reject("EXCHANGE_VENUE_UNSUPPORTED", "exchange venue is unsupported")
-        if not normalized_label or len(normalized_label) > 120:
-            _reject("EXCHANGE_ACCOUNT_INVALID", "account label must contain 1-120 characters")
-        return normalized_account_id, normalized_venue, normalized_label
+    _exchange_account_definition = staticmethod(exchange_account_definition)
+    delete_exchange_account = delete_exchange_account
 
     def _ensure_exchange_account_reference(
         self,
@@ -168,18 +150,21 @@ class AccountService(ServiceComponent):
             )
             if replay is not None:
                 return UUID(str(replay["exchange_account_id"]))
-            if session.scalar(
+            existing = session.scalar(
                 select(ExchangeAccount).where(
                     ExchangeAccount.team_id == team.team_id,
                     ExchangeAccount.account_id == normalized_account_id,
                     ExchangeAccount.venue == normalized_venue,
                 )
-            ):
+            )
+            if existing is not None and existing.active:
                 _reject(
                     "EXCHANGE_ACCOUNT_CONFLICT",
                     "that account ID already exists for this exchange in the active team",
                 )
-            exchange_account_id = uuid4()
+            exchange_account_id = (
+                existing.exchange_account_id if existing is not None else uuid4()
+            )
             encrypted = (
                 None
                 if credentials is None
@@ -191,40 +176,50 @@ class AccountService(ServiceComponent):
                     credential_version=1,
                 )
             )
-            account = ExchangeAccount(
-                exchange_account_id=exchange_account_id,
-                team_id=team.team_id,
-                account_id=normalized_account_id,
-                venue=normalized_venue,
-                label=normalized_label,
-                registration_source="MANUAL",
-                connection_status=("UNCONFIGURED" if encrypted is None else "NOT_VERIFIED"),
-                trading_status="DISABLED",
-                credentials_ciphertext=None if encrypted is None else encrypted.ciphertext,
-                credential_metadata={} if encrypted is None else encrypted.metadata,
-                credential_version=0 if encrypted is None else 1,
-                connection_error_code=None,
-                last_connection_check_at=None,
-                last_verified_at=None,
-                freqtrade_worker_name=None,
-                freqtrade_worker_url=None,
-                freqtrade_worker_mode="UNCONFIGURED",
-                freqtrade_worker_status="UNCONFIGURED",
-                freqtrade_auth_ciphertext=None,
-                freqtrade_auth_metadata={},
-                freqtrade_auth_version=0,
-                freqtrade_hip3_dexes=[],
-                freqtrade_error_code=None,
-                freqtrade_last_check_at=None,
-                freqtrade_last_verified_at=None,
-                active=True,
-                version=1,
-                created_by=actor_id,
-                updated_by=actor_id,
-                created_at=now,
-                updated_at=now,
-            )
-            session.add(account)
+            if existing is None:
+                account = ExchangeAccount(
+                    exchange_account_id=exchange_account_id,
+                    team_id=team.team_id,
+                    account_id=normalized_account_id,
+                    venue=normalized_venue,
+                    label=normalized_label,
+                    registration_source="MANUAL",
+                    created_by=actor_id,
+                    created_at=now,
+                )
+                session.add(account)
+                event_type = "EXCHANGE_ACCOUNT_CREATED"
+                object_version = 1
+            else:
+                account = existing
+                event_type = "EXCHANGE_ACCOUNT_RESTORED"
+                account.version += 1
+                object_version = account.version
+            account.label = normalized_label
+            account.registration_source = "MANUAL"
+            account.connection_status = "UNCONFIGURED" if encrypted is None else "NOT_VERIFIED"
+            account.trading_status = "DISABLED"
+            account.credentials_ciphertext = None if encrypted is None else encrypted.ciphertext
+            account.credential_metadata = {} if encrypted is None else encrypted.metadata
+            account.credential_version = 0 if encrypted is None else 1
+            account.connection_error_code = None
+            account.last_connection_check_at = None
+            account.last_verified_at = None
+            account.runtime_sync_enabled = False
+            account.freqtrade_worker_name = None
+            account.freqtrade_worker_url = None
+            account.freqtrade_worker_mode = "UNCONFIGURED"
+            account.freqtrade_worker_status = "UNCONFIGURED"
+            account.freqtrade_auth_ciphertext = None
+            account.freqtrade_auth_metadata = {}
+            account.freqtrade_auth_version = 0
+            account.freqtrade_hip3_dexes = []
+            account.freqtrade_error_code = None
+            account.freqtrade_last_check_at = None
+            account.freqtrade_last_verified_at = None
+            account.active = True
+            account.updated_by = actor_id
+            account.updated_at = now
             response = {"exchange_account_id": str(exchange_account_id)}
             self.transactions._save_receipt(
                 session,
@@ -238,7 +233,7 @@ class AccountService(ServiceComponent):
             self.transactions._audit(
                 session,
                 actor_id=str(actor_id),
-                event_type="EXCHANGE_ACCOUNT_CREATED",
+                event_type=event_type,
                 object_type="ExchangeAccount",
                 object_id=exchange_account_id,
                 reason=(
@@ -247,7 +242,7 @@ class AccountService(ServiceComponent):
                     "trading=disabled"
                 ),
                 correlation_id=uuid4(),
-                object_version=1,
+                object_version=object_version,
                 idempotency_key=idempotency_key,
                 workspace_id=team.workspace_id,
                 team_id=team.team_id,

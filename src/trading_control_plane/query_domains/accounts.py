@@ -26,7 +26,7 @@ class AccountQueries(QueryComponent):
                 raise DomainRejected("RBAC_DENIED", "exchange account visibility is not assigned")
             accounts = session.scalars(
                 select(ExchangeAccount)
-                .where(ExchangeAccount.team_id == team_id)
+                .where(ExchangeAccount.team_id == team_id, ExchangeAccount.active)
                 .order_by(ExchangeAccount.venue, ExchangeAccount.label, ExchangeAccount.account_id)
             ).all()
             visible = [
@@ -57,6 +57,7 @@ class AccountQueries(QueryComponent):
                 can_manage_credentials = granted(item, "account.credentials.manage")
                 projection["permissions"] = {
                     "can_manage": granted(item, "account.manage"),
+                    "can_delete": granted(item, "account.manage"),
                     "can_manage_trading": granted(item, "account.manage"),
                     "can_manage_credentials": can_manage_credentials,
                     "can_verify_connection": can_manage_credentials,
