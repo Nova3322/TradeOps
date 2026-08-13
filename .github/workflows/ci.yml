@@ -42,12 +42,12 @@ jobs:
           uv run python scripts/verify_public_release.py
 
   unit:
-    name: unit-api-${{ matrix.shard }}-of-3
+    name: unit-${{ matrix.target }}
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        shard: [1, 2, 3]
+        target: [general, stream-pending, stream-rest]
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
       - uses: actions/setup-python@42375524e23c412d93fb67b49958b491fce71c38 # v5.4.0
@@ -64,21 +64,28 @@ jobs:
           uv sync --all-groups --frozen
       - name: Run unit and API shard
         env:
-          SHARD: ${{ matrix.shard }}
-          TOTAL_SHARDS: 3
+          TARGET: ${{ matrix.target }}
         shell: bash
         run: |
           set -euo pipefail
-          mapfile -t nodeids < <(uv run pytest --collect-only -q tests/unit tests/api | grep '::')
-          selected=()
-          for index in "${!nodeids[@]}"; do
-            if (( index % TOTAL_SHARDS == SHARD - 1 )); then
-              selected+=("${nodeids[$index]}")
-            fi
-          done
-          printf 'Shard %s/%s: %s\n' "$SHARD" "$TOTAL_SHARDS" "${selected[*]}"
-          test "${#selected[@]}" -gt 0
-          uv run pytest -q "${selected[@]}"
+          case "$TARGET" in
+            general)
+              uv run pytest -q tests/unit tests/api \
+                --ignore=tests/unit/test_perptape_stream.py
+              ;;
+            stream-pending)
+              uv run pytest -q \
+                tests/unit/test_perptape_stream.py::test_pending_window_fails_closed_at_2049_without_eviction_or_more_io
+              ;;
+            stream-rest)
+              uv run pytest -q tests/unit/test_perptape_stream.py \
+                -k 'not test_pending_window_fails_closed_at_2049_without_eviction_or_more_io'
+              ;;
+            *)
+              echo "Unknown unit target: $TARGET" >&2
+              exit 2
+              ;;
+          esac
 
   integration:
     name: integration-${{ matrix.shard }}-of-3
