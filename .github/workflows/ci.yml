@@ -69,24 +69,13 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          mapfile -t selected < <(python - <<'PY'
-          import os
-          from pathlib import Path
-
-          shard = int(os.environ["SHARD"]) - 1
-          total = int(os.environ["TOTAL_SHARDS"])
-          bins: list[tuple[int, list[Path]]] = [(0, []) for _ in range(total)]
-          files = [*Path("tests/unit").glob("test_*.py"), *Path("tests/api").glob("test_*.py")]
-          files.sort(key=lambda path: (-path.stat().st_size, str(path)))
-          for path in files:
-              target = min(range(total), key=lambda index: (bins[index][0], index))
-              size, paths = bins[target]
-              paths.append(path)
-              bins[target] = (size + path.stat().st_size, paths)
-          for path in sorted(bins[shard][1]):
-              print(path)
-          PY
-          )
+          mapfile -t nodeids < <(uv run pytest --collect-only -q tests/unit tests/api | grep '::')
+          selected=()
+          for index in "${!nodeids[@]}"; do
+            if (( index % TOTAL_SHARDS == SHARD - 1 )); then
+              selected+=("${nodeids[$index]}")
+            fi
+          done
           printf 'Shard %s/%s: %s\n' "$SHARD" "$TOTAL_SHARDS" "${selected[*]}"
           test "${#selected[@]}" -gt 0
           uv run pytest -q "${selected[@]}"
