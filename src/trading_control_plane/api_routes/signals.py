@@ -436,7 +436,9 @@ def register_signals_routes(context: ApiRouteContext) -> None:
             max_risk=payload.max_risk,
             expires_at=now + timedelta(minutes=payload.expires_in_minutes),
             idempotency_key=payload.idempotency_key,
-            environment=ExecutionEnvironment(payload.environment),
+            environment=(
+                None if payload.environment is None else ExecutionEnvironment(payload.environment)
+            ),
             source_observed_at=datetime.fromisoformat(str(event["occurred_at"])),
             source_readiness="CURRENT",
             signal_event_id=signal_event_id,

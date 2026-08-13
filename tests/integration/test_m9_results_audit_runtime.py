@@ -147,7 +147,8 @@ def test_results_are_environment_separated_and_derive_costs_curve_and_audit(
             "risk_events": "risk_decision.created_at",
         },
     }
-    assert queries.actual_results(ids["operator"], "SHADOW")["campaigns"] == []
+    with pytest.raises(DomainRejected, match="ENVIRONMENT_INVALID"):
+        queries.actual_results(ids["operator"], "LEGACY")
     assert (
         len(
             queries.actual_results(
@@ -229,10 +230,8 @@ def test_results_audit_and_runtime_api_do_not_mix_environments_or_expose_secrets
         ) as client:
             await login(client, "operator")
             testnet = await client.get("/api/results?environment=TESTNET")
-            shadow = await client.get("/api/results?environment=SHADOW")
             invalid = await client.get("/api/results?environment=ALL")
             assert testnet.status_code == 200 and len(testnet.json()["data"]["campaigns"]) == 1
-            assert shadow.status_code == 200 and shadow.json()["data"]["campaigns"] == []
             assert invalid.status_code == 422
             assert testnet.json()["data"]["dimensions"]["team"][0]["risk_event_count"] == 1
             assert testnet.json()["data"]["coverage"]["currency_mixing"] == "SEPARATED"

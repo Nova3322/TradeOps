@@ -242,7 +242,7 @@ class ProposalService(ServiceComponent):
         idempotency_key: str,
         strategy_id: str | None = None,
         strategy_version: str | None = None,
-        environment: ExecutionEnvironment = ExecutionEnvironment.SHADOW,
+        environment: ExecutionEnvironment | None = None,
         source_candidate_id: str | None = None,
         source_link: str | None = None,
         source_observed_at: datetime | None = None,
@@ -268,7 +268,7 @@ class ProposalService(ServiceComponent):
             "expires_at": expires_at.isoformat(),
             "strategy_id": strategy_id,
             "strategy_version": strategy_version,
-            "environment": environment.value,
+            "environment": None if environment is None else environment.value,
             "source_candidate_id": source_candidate_id,
             "source_link": source_link,
             "source_observed_at": (
@@ -291,7 +291,22 @@ class ProposalService(ServiceComponent):
                     )
                 self.facade._lock_perptape_runtime_binding(session, perptape_runtime_binding)
             team = self.transactions._require_role(session, actor_id, operation, account_id, venue)
-            self.transactions._require_team_environment(team, environment)
+            if team.execution_mode not in {
+                TeamExecutionMode.TESTNET.value,
+                TeamExecutionMode.LIVE.value,
+            }:
+                _reject(
+                    "TEAM_SETUP_INCOMPLETE",
+                    "team must select TESTNET or LIVE before creating proposals",
+                )
+            actual_environment = ExecutionEnvironment(team.execution_mode)
+            if environment is not None and environment is not actual_environment:
+                _reject(
+                    "PROPOSAL_ENVIRONMENT_MISMATCH",
+                    "proposal environment must match the server-owned team current mode",
+                )
+            environment = actual_environment
+            payload["environment"] = environment.value
             if submit_for_review:
                 self.transactions._require_role(
                     session,

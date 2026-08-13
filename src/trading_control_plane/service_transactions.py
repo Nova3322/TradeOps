@@ -84,9 +84,6 @@ class TransactionService:
                     "CapitalTransfer": CapitalTransfer,
                     "DirectCapitalOperation": DirectCapitalOperation,
                     "CapitalAutomationPolicy": CapitalAutomationPolicy,
-                    "ShadowOrder": ShadowOrder,
-                    "ShadowFill": ShadowFill,
-                    "ShadowPosition": ShadowPosition,
                 }
                 model = direct_account_models.get(object_type)
                 if model is not None:
@@ -338,38 +335,21 @@ class TransactionService:
 
     @staticmethod
     def _require_team_environment(team: Team, environment: ExecutionEnvironment) -> None:
-        mode = (
-            TeamExecutionMode.LIVE.value
-            if team.execution_mode == TeamExecutionMode.SETUP.value and team.trading_enabled
-            else team.execution_mode
-        )
+        mode = team.execution_mode
         if mode == TeamExecutionMode.SETUP.value:
             _reject(
                 "TEAM_SETUP_INCOMPLETE",
-                "team must complete setup and explicitly enter SHADOW mode",
+                "team must complete setup and explicitly select TESTNET or LIVE",
             )
         if environment.value != mode:
-            if mode == TeamExecutionMode.SHADOW.value:
-                _reject(
-                    "TEAM_SHADOW_ONLY",
-                    "Team mode is locked to SHADOW; TESTNET and LIVE workflows are blocked",
-                )
             if mode == TeamExecutionMode.TESTNET.value:
                 _reject(
                     "TEAM_TESTNET_ONLY",
-                    "Team mode is locked to TESTNET; SHADOW and LIVE workflows are blocked",
+                    "Team mode is locked to TESTNET; LIVE workflows are blocked",
                 )
             _reject(
                 "TEAM_LIVE_ONLY",
-                "Team mode is locked to LIVE; SHADOW and TESTNET workflows are blocked",
-            )
-        if (
-            mode == TeamExecutionMode.SHADOW.value
-            and environment is not ExecutionEnvironment.SHADOW
-        ):
-            _reject(
-                "TEAM_SHADOW_ONLY",
-                "team is isolated to SHADOW; TESTNET and LIVE workflows are blocked",
+                "Team mode is locked to LIVE; TESTNET workflows are blocked",
             )
 
     def can_user(
@@ -441,8 +421,8 @@ class TransactionService:
     ) -> dict[str, Any]:
         normalized_name = " ".join(name.strip().split())
         normalized_environment = environment.strip().upper()
-        if normalized_environment not in {"SHADOW", "LIVE"}:
-            _reject("NOTIFICATION_ROUTE_INVALID", "environment must be SHADOW or LIVE")
+        if normalized_environment not in {"TESTNET", "LIVE"}:
+            _reject("NOTIFICATION_ROUTE_INVALID", "environment must be TESTNET or LIVE")
         normalized_channel = channel.strip().upper()
         normalized_events = normalize_notification_event_types(event_types)
         if not normalized_name or len(normalized_name) > 120:
@@ -560,7 +540,7 @@ class TransactionService:
                     purpose=(
                         f"notification-route:{normalized_channel.lower()}"
                         if normalized_environment == "LIVE"
-                        else f"notification-route:shadow:{normalized_channel.lower()}"
+                        else f"notification-route:testnet:{normalized_channel.lower()}"
                     ),
                     credential_version=credential_version,
                 )

@@ -6,7 +6,7 @@ from decimal import Decimal
 from uuid import UUID
 
 import pytest
-from conftest import set_test_team_environment
+from conftest import add_exchange_account_fixture, set_test_team_environment
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy import select
@@ -46,6 +46,25 @@ def seed(service: TradingService) -> dict[str, UUID]:
     now = datetime.now(UTC) - timedelta(seconds=2)
     admin = service.bootstrap_admin("admin", now=now)
     set_test_team_environment(service.database, admin, "TESTNET")
+    add_exchange_account_fixture(
+        service.database, admin, "acct-1", "BINANCE", environment="TESTNET"
+    )
+    add_exchange_account_fixture(
+        service.database, admin, "binance-main", "BINANCE", environment="LIVE"
+    )
+    add_exchange_account_fixture(
+        service.database, admin, "hyperliquid-main", "HYPERLIQUID", environment="LIVE"
+    )
+    add_exchange_account_fixture(
+        service.database, admin, "retired-binance-account", "BINANCE", environment="LIVE"
+    )
+    add_exchange_account_fixture(
+        service.database,
+        admin,
+        "retired-hyperliquid-account",
+        "HYPERLIQUID",
+        environment="LIVE",
+    )
     proposer = service.create_user("treasury-proposer", admin, now=now)
     reviewer_one = service.create_user("treasury-reviewer-1", admin, now=now)
     reviewer_two = service.create_user("treasury-reviewer-2", admin, now=now)
@@ -248,6 +267,7 @@ def test_live_net_worth_and_risk_capital_combine_two_venues_and_vault(
     database: Database, service: TradingService
 ) -> None:
     ids = seed(service)
+    set_test_team_environment(database, ids["admin"], "LIVE")
     now = datetime.now(UTC)
     service.record_account_equity(
         "binance-main",
@@ -398,7 +418,12 @@ def test_live_net_worth_and_risk_capital_combine_two_venues_and_vault(
             base_url="http://test",
         ) as client:
             await login(client, "treasury-proposer")
-            response = await client.get("/api/capital")
+            response = await client.get(
+                "/api/capital",
+                params={
+                    "accounts": "BINANCE|binance-main,HYPERLIQUID|hyperliquid-main"
+                },
+            )
             assert response.status_code == 200
             payload = response.json()["data"]
             assert {
@@ -527,6 +552,7 @@ def test_live_net_worth_rejects_time_misaligned_sources(
     database: Database, service: TradingService
 ) -> None:
     ids = seed(service)
+    set_test_team_environment(database, ids["admin"], "LIVE")
     now = datetime.now(UTC)
     service.record_account_equity(
         "binance-main", "BINANCE", Decimal("10"), Decimal("10"), "USDT", True,
@@ -1332,7 +1358,7 @@ def test_capital_api_requires_treasury_step_up_and_telegram_is_notification_only
             center = await client.get("/api/capital")
             assert center.status_code == 200
             assert center.json()["data"]["real_transfer_gate"] == "DISABLED"
-            assert center.json()["data"]["in_transit"] == "0"
+            assert center.json()["data"]["in_transit"] is None
 
             page = await client.get("/capital")
             assert page.status_code == 200
@@ -1388,6 +1414,7 @@ def test_notilt_live_plan_requires_full_capital_authority_and_never_broadcasts(
     database: Database, service: TradingService
 ) -> None:
     ids = seed(service)
+    set_test_team_environment(database, ids["admin"], "LIVE")
     now = datetime.now(UTC)
     service.record_position(
         "binance-main",
@@ -1557,6 +1584,7 @@ def test_notilt_fee_outside_authorization_requires_verified_cancellation(
     database: Database, service: TradingService
 ) -> None:
     ids = seed(service)
+    set_test_team_environment(database, ids["admin"], "LIVE")
     now = datetime.now(UTC)
     vault = "0x1111111111111111111111111111111111111111"
     agent = "0x2222222222222222222222222222222222222222"
@@ -1751,6 +1779,7 @@ def test_notilt_deposit_receipt_and_fresh_source_facts_settle_exactly_once(
     database: Database, service: TradingService
 ) -> None:
     ids = seed(service)
+    set_test_team_environment(database, ids["admin"], "LIVE")
     now = datetime.now(UTC)
     vault = "0x1111111111111111111111111111111111111111"
     agent = "0x2222222222222222222222222222222222222222"

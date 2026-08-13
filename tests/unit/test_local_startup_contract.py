@@ -11,7 +11,7 @@ def test_local_console_keeps_optional_dry_run_workers_off_by_default() -> None:
 
     assert "TRADING_EXECUTION_BACKEND=FREQTRADE" in script
     assert 'TRADING_API_PORT="${TRADING_API_PORT:-8014}"' in script
-    assert 'TRADING_LOCAL_FREQTRADE_WORKERS_ENABLED:-false' in script
+    assert "TRADING_LOCAL_FREQTRADE_WORKERS_ENABLED:-false" in script
     assert 'if [[ "$TRADING_FREQTRADE_WORKERS_ENABLED" == true ]]' in script
     assert "--profile execution-workers up -d" in script
     assert "freqtrade-binance" in script

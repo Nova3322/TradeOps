@@ -9,6 +9,8 @@ from trading_control_plane.api_core import (
     DomainRejected,
     ExchangeAccountCreateRequest,
     ExchangeAccountDeleteRequest,
+    ExchangeAccountStateRequest,
+    ExchangeAccountUpdateRequest,
     ExchangeConnectionVerifyRequest,
     ExchangeCredentialRotateRequest,
     ExchangeRuntimeSyncRequest,
@@ -142,9 +144,7 @@ class _AccountsRoutes:
                 account_id=payload.account_id,
                 venue=payload.venue,
                 label=payload.label,
-                credentials=(
-                    None if payload.credentials is None else payload.credentials.plaintext()
-                ),
+                credentials=payload.credentials.plaintext(),
                 idempotency_key=payload.idempotency_key,
                 now=_now(),
             )
@@ -162,6 +162,7 @@ class _AccountsRoutes:
             result = self.service().delete_exchange_account(
                 exchange_account_id,
                 actor_id=identity.user_id,
+                confirmation=payload.confirmation,
                 expected_version=payload.expected_version,
                 idempotency_key=payload.idempotency_key,
                 now=_now(),
@@ -170,6 +171,39 @@ class _AccountsRoutes:
                 **result,
                 "data": self.exchange_accounts_projection(identity.user_id),
             }
+
+        @self.app.put("/api/exchange-accounts/{exchange_account_id}")
+        def update_exchange_account(
+            exchange_account_id: UUID,
+            payload: ExchangeAccountUpdateRequest,
+            identity: SessionIdentity = self.identity_dependency,
+        ) -> dict[str, Any]:
+            result = self.service().update_exchange_account(
+                exchange_account_id,
+                actor_id=identity.user_id,
+                label=payload.label,
+                expected_version=payload.expected_version,
+                idempotency_key=payload.idempotency_key,
+                now=_now(),
+            )
+            return {**result, "data": self.exchange_accounts_projection(identity.user_id)}
+
+        @self.app.put("/api/exchange-accounts/{exchange_account_id}/state")
+        def set_exchange_account_state(
+            exchange_account_id: UUID,
+            payload: ExchangeAccountStateRequest,
+            identity: SessionIdentity = self.identity_dependency,
+        ) -> dict[str, Any]:
+            result = self.service().set_exchange_account_state(
+                exchange_account_id,
+                actor_id=identity.user_id,
+                enabled=payload.enabled,
+                confirmation=payload.confirmation,
+                expected_version=payload.expected_version,
+                idempotency_key=payload.idempotency_key,
+                now=_now(),
+            )
+            return {**result, "data": self.exchange_accounts_projection(identity.user_id)}
 
         @self.app.put("/api/exchange-accounts/{exchange_account_id}/credentials")
         def rotate_exchange_account_credentials(
@@ -210,6 +244,7 @@ class _AccountsRoutes:
                 assert command is not None
                 outcome = self.resolved_exchange_connection_verifier.verify(
                     venue=command.venue,
+                    environment=command.environment,
                     credentials=command.credentials,
                     now=_now(),
                 )

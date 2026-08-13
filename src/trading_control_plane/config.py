@@ -91,7 +91,7 @@ class Settings(BaseSettings):
     perptape_websocket_max_reconnect_attempts: int = Field(default=8, ge=1, le=20)
     perptape_auto_proposal_enabled: bool = False
     perptape_auto_proposal_account_id: str | None = None
-    perptape_auto_proposal_environment: Literal["SHADOW", "TESTNET", "LIVE"] = "LIVE"
+    perptape_auto_proposal_environment: Literal["TESTNET", "LIVE"] = "LIVE"
     perptape_auto_proposal_risk_tier: Literal["LOW", "MEDIUM", "HIGH"] = "MEDIUM"
     perptape_auto_proposal_min_timeframes: int = Field(default=3, ge=3, le=4)
     perptape_auto_proposal_notional: Decimal = Field(default=Decimal(100), gt=0)

@@ -794,9 +794,7 @@ async def exercise_hyperliquid_live(database: Database) -> None:
                     "error_code": "HYPERLIQUID_NETWORK_UNAVAILABLE",
                 }
             },
-            scopes={
-                "HYPERLIQUID": ("acct-live-hyperliquid", "HYPERLIQUID")
-            },
+            scopes={"HYPERLIQUID": ("acct-live-hyperliquid", "HYPERLIQUID")},
             now=NOW,
         )
         source_blocked = await http.post(
@@ -809,9 +807,7 @@ async def exercise_hyperliquid_live(database: Database) -> None:
         service.record_runtime_source_health(
             ids["runtime"],
             {"HYPERLIQUID": {"status": "SUCCESS", "items_observed": 1}},
-            scopes={
-                "HYPERLIQUID": ("acct-live-hyperliquid", "HYPERLIQUID")
-            },
+            scopes={"HYPERLIQUID": ("acct-live-hyperliquid", "HYPERLIQUID")},
             now=NOW,
         )
         sent = await http.post(

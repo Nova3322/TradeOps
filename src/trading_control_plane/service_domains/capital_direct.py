@@ -24,13 +24,9 @@ class DirectOperationCapitalService(ServiceComponent):
             "treasury_provider": config.treasury_provider,
             "vault_id": config.vault_id,
             "vault_address_configured": config.vault_address is not None,
-            "owned_arbitrum_address_configured": (
-                config.owned_arbitrum_address is not None
-            ),
+            "owned_arbitrum_address_configured": (config.owned_arbitrum_address is not None),
             "binance_account_id": config.binance_account_id,
-            "binance_deposit_address_configured": (
-                config.binance_deposit_address is not None
-            ),
+            "binance_deposit_address_configured": (config.binance_deposit_address is not None),
             "binance_withdrawal_address_configured": (
                 config.binance_withdrawal_address is not None
             ),
@@ -40,12 +36,8 @@ class DirectOperationCapitalService(ServiceComponent):
             ),
             "safe_address_configured": config.safe_address is not None,
             "safe_delegate_address_configured": config.safe_delegate_address is not None,
-            "vault_withdrawal_private_key_configured": (
-                config.vault_withdrawal_key_version > 0
-            ),
-            "safe_withdrawal_private_key_configured": (
-                config.safe_withdrawal_key_version > 0
-            ),
+            "vault_withdrawal_private_key_configured": (config.vault_withdrawal_key_version > 0),
+            "safe_withdrawal_private_key_configured": (config.safe_withdrawal_key_version > 0),
             "max_amount": None if config.max_amount is None else str(config.max_amount),
             "max_fee": None if config.max_fee is None else str(config.max_fee),
             "updated_by": str(config.updated_by),
@@ -74,8 +66,11 @@ class DirectOperationCapitalService(ServiceComponent):
         include_sensitive_addresses: bool = False,
     ) -> dict[str, Any] | None:
         normalized_environment = environment.strip().upper()
-        if normalized_environment not in {"SHADOW", "LIVE"}:
-            _reject("CAPITAL_CONFIGURATION_INVALID", "environment must be SHADOW or LIVE")
+        if normalized_environment != "LIVE":
+            _reject(
+                "CAPITAL_CONFIGURATION_INVALID",
+                "direct capital configuration is available only in LIVE",
+            )
         with self.database.session_factory() as session:
             team = self.transactions._require_role(session, actor_id, "capital.view")
             config = session.scalar(
@@ -119,8 +114,11 @@ class DirectOperationCapitalService(ServiceComponent):
         now: datetime,
     ) -> UUID:
         normalized_environment = environment.strip().upper()
-        if normalized_environment not in {"SHADOW", "LIVE"}:
-            _reject("CAPITAL_CONFIGURATION_INVALID", "environment must be SHADOW or LIVE")
+        if normalized_environment != "LIVE":
+            _reject(
+                "CAPITAL_CONFIGURATION_INVALID",
+                "direct capital configuration is available only in LIVE",
+            )
         operation = f"capital.configuration.manage:{normalized_environment}"
         payload = {
             "environment": normalized_environment,
@@ -247,13 +245,11 @@ class DirectOperationCapitalService(ServiceComponent):
             next_version = 1 if current is None else current.version + 1
             if current is not None:
                 current.active = False
-            vault_key_version = (
-                (0 if current is None else current.vault_withdrawal_key_version)
-                + (1 if vault_withdrawal_private_key is not None else 0)
+            vault_key_version = (0 if current is None else current.vault_withdrawal_key_version) + (
+                1 if vault_withdrawal_private_key is not None else 0
             )
-            safe_key_version = (
-                (0 if current is None else current.safe_withdrawal_key_version)
-                + (1 if safe_withdrawal_private_key is not None else 0)
+            safe_key_version = (0 if current is None else current.safe_withdrawal_key_version) + (
+                1 if safe_withdrawal_private_key is not None else 0
             )
             vault_key_ciphertext = (
                 None if current is None else current.vault_withdrawal_key_ciphertext
@@ -394,9 +390,7 @@ class DirectOperationCapitalService(ServiceComponent):
             )
             if plan.account_id is not None:
                 account_environment = (
-                    team.execution_mode
-                    if team.execution_mode in {"SHADOW", "TESTNET", "LIVE"}
-                    else "LIVE"
+                    team.execution_mode if team.execution_mode in {"TESTNET", "LIVE"} else "LIVE"
                 )
                 self.facade._ensure_exchange_account_reference(
                     session,

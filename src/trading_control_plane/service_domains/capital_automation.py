@@ -156,7 +156,7 @@ class AutomationCapitalService(ServiceComponent):
                 event_type="CAPITAL_AUTOMATION_POLICY_SET",
                 object_type="CapitalAutomationPolicy",
                 object_id=policy.policy_id,
-                reason="SHADOW/TESTNET thresholds frozen; both automation gates remain independent",
+                reason="TESTNET thresholds frozen; both automation gates remain independent",
                 correlation_id=uuid4(),
                 object_version=policy.version,
                 idempotency_key=idempotency_key,

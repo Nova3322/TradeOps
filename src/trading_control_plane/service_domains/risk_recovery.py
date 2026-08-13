@@ -598,8 +598,7 @@ class RecoveryRiskService(ServiceComponent):
                 and active_request.status == RiskPolicyChangeStatus.APPROVED.value
                 and active_request.requester_id != actor_id
                 and (
-                    active_request.change_type
-                    not in {"RESUME_NEW_RISK", "ENABLE_AUTO_ADD"}
+                    active_request.change_type not in {"RESUME_NEW_RISK", "ENABLE_AUTO_ADD"}
                     or not blockers
                 )
                 and active_request.execute_after <= now
@@ -1037,12 +1036,9 @@ class RecoveryRiskService(ServiceComponent):
             if gate is None:
                 _reject("CAPABILITY_GATE_NOT_FOUND", "AUTO_ADD gate is missing")
             if (
-                (
-                    request.change_type == "RESUME_NEW_RISK"
-                    and policy.system_state == SystemRiskState.NORMAL.value
-                )
-                or self._risk_restore_request_drifted(request, policy, gate)
-            ):
+                request.change_type == "RESUME_NEW_RISK"
+                and policy.system_state == SystemRiskState.NORMAL.value
+            ) or self._risk_restore_request_drifted(request, policy, gate):
                 _reject(
                     "RISK_RESTORE_CONTROL_DRIFT",
                     "restore request no longer matches current controls",

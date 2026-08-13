@@ -7,11 +7,21 @@ from typing import Any
 from uuid import UUID
 
 import pytest
-from conftest import set_test_team_environment
+from conftest import add_exchange_account_fixture, set_test_team_environment
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
+from sqlalchemy import select
 
 from trading_control_plane.api import create_app
+from trading_control_plane.binance import (
+    BinanceEquity,
+    BinanceFill,
+    BinanceInstrument,
+    BinanceOrder,
+    BinancePosition,
+    BinanceReadOnlySnapshot,
+)
+from trading_control_plane.binance_execution import BinanceTestnetOrder
 from trading_control_plane.config import Settings
 from trading_control_plane.database import Database
 from trading_control_plane.domain import (
@@ -19,6 +29,7 @@ from trading_control_plane.domain import (
     CapabilityStatus,
     Direction,
     DomainRejected,
+    ExecutionEnvironment,
     IntentKind,
     ProposalSource,
     ReviewDecision,
@@ -26,10 +37,137 @@ from trading_control_plane.domain import (
     Role,
     SystemRiskState,
 )
-from trading_control_plane.models import CapabilityGate, OrderIntent, TradingAuthorization
+from trading_control_plane.models import (
+    CapabilityGate,
+    OrderIntent,
+    TradingAuthorization,
+    VenueOrder,
+)
 from trading_control_plane.perptape import PerptapeClient
 from trading_control_plane.service import TradingService
 from trading_control_plane.telegram import MockTelegramGateway
+
+
+class AcceptedBinanceTestnetClient:
+    configured = True
+
+    def ensure_order(self, command: Any, *, now: datetime) -> BinanceTestnetOrder:
+        return BinanceTestnetOrder(
+            order_id=f"fixture-{command.client_order_id}",
+            client_order_id=command.client_order_id,
+            status="SENT",
+            side=command.side,
+            order_type="MARKET",
+            ordered_quantity=command.quantity,
+            filled_quantity=Decimal(0),
+            stop_price=Decimal(0),
+            reduce_only=command.reduce_only,
+            close_position=False,
+            observed_at=now,
+        )
+
+
+def record_accepted_testnet_order(
+    service: TradingService,
+    intent_id: UUID,
+    actor_id: UUID,
+    execution_scope: str,
+    owner_id: str,
+    fencing_token: int,
+    *,
+    now: datetime,
+) -> BinanceTestnetOrder:
+    command = service.prepare_binance_testnet_send(
+        intent_id,
+        actor_id,
+        execution_scope,
+        owner_id,
+        fencing_token,
+        now=now,
+    )
+    result = AcceptedBinanceTestnetClient().ensure_order(command, now=now)
+    service.record_binance_testnet_order(
+        intent_id,
+        actor_id,
+        execution_scope,
+        owner_id,
+        fencing_token,
+        command,
+        result,
+        now=now,
+    )
+    return result
+
+
+def ingest_testnet_fills(
+    service: TradingService,
+    intent_id: UUID,
+    actor_id: UUID,
+    fills: tuple[tuple[str, Decimal], ...],
+    *,
+    position_quantity: Decimal,
+    now: datetime,
+) -> None:
+    with service.database.session_factory() as session:
+        order = session.scalar(select(VenueOrder).where(VenueOrder.order_intent_id == intent_id))
+        assert order is not None
+        ordered_quantity = order.ordered_quantity
+        side = order.side
+        order_id = order.venue_order_id
+        client_order_id = order.client_order_id
+    filled_quantity = sum((quantity for _, quantity in fills), Decimal(0))
+    status = "FILLED" if filled_quantity == ordered_quantity else "PARTIALLY_FILLED"
+    service.ingest_binance_read_only_snapshot(
+        "acct-1",
+        actor_id,
+        BinanceReadOnlySnapshot(
+            symbol="BTCUSDT",
+            observed_at=now,
+            instrument=BinanceInstrument(
+                "BTCUSDT",
+                Decimal("0.1"),
+                Decimal("0.001"),
+                Decimal("5"),
+                "USDT",
+                "USDT",
+                True,
+            ),
+            orders=(
+                BinanceOrder(
+                    order_id,
+                    client_order_id,
+                    status,
+                    side,
+                    "MARKET",
+                    ordered_quantity,
+                    filled_quantity,
+                    Decimal(0),
+                    False,
+                    False,
+                    now,
+                ),
+            ),
+            fills=tuple(
+                BinanceFill(
+                    fill_id,
+                    order_id,
+                    side,
+                    quantity,
+                    Decimal("110"),
+                    Decimal(0),
+                    "USDT",
+                    now,
+                )
+                for fill_id, quantity in fills
+            ),
+            position=BinancePosition(position_quantity, Decimal("100"), Decimal("110"), now),
+            equity=BinanceEquity(Decimal("10000"), Decimal("9000"), "USDT", now),
+            funding=(),
+            protection=None,
+        ),
+        environment=ExecutionEnvironment.TESTNET,
+        now=now,
+    )
 
 
 def perptape_payload(observed_at: datetime) -> dict[str, Any]:
@@ -59,7 +197,8 @@ def seed_campaign(database: Database) -> dict[str, UUID]:
     service = TradingService(database)
     now = datetime.now(UTC) - timedelta(seconds=2)
     admin = service.bootstrap_admin("admin", now=now)
-    set_test_team_environment(database, admin, "SHADOW")
+    set_test_team_environment(database, admin, "TESTNET")
+    add_exchange_account_fixture(database, admin, "acct-1", "BINANCE")
     proposer = service.create_user("proposer", admin, now=now)
     reviewer = service.create_user("reviewer", admin, now=now)
     operator = service.create_user("operator", admin, now=now)
@@ -182,26 +321,22 @@ def seed_campaign(database: Database) -> dict[str, UUID]:
         "m6-opening",
         now=now,
     )
-    token = service.acquire_sender("acct-1:BINANCE", "m6-worker", operator, now)
-    service.record_shadow_order(
+    token = service.acquire_sender("TESTNET:acct-1:BINANCE", "m6-worker", operator, now)
+    record_accepted_testnet_order(
+        service,
         opening.intent_id,
         operator,
-        "acct-1:BINANCE",
+        "TESTNET:acct-1:BINANCE",
         "m6-worker",
         token,
-        "m6-shadow-open",
         now=now,
     )
-    service.record_fill(
+    ingest_testnet_fills(
+        service,
         opening.intent_id,
         operator,
-        "m6-opening-fill",
-        "BUY",
-        Decimal("0.5"),
-        Decimal("100"),
-        Decimal(0),
-        "USDT",
-        Decimal(0),
+        (("m6-opening-fill", Decimal("0.5")),),
+        position_quantity=Decimal("0.5"),
         now=now,
     )
     position = service.record_position(
@@ -246,9 +381,19 @@ def build_app(
         allow_mock_identity=True,
         session_signing_secret="m6-test-signing-secret-that-is-long-enough",  # noqa: S106
         public_base_url="http://test",
+        execution_backend="DIRECT_LEGACY",
+        binance_testnet_order_send_enabled=True,
+        binance_testnet_api_key="fixture-key",
+        binance_testnet_api_secret="fixture-secret",  # noqa: S106
         _env_file=None,
     )
-    return create_app(settings, database, perptape, telegram)
+    return create_app(
+        settings,
+        database,
+        perptape,
+        telegram,
+        binance_testnet_client=AcceptedBinanceTestnetClient(),  # type: ignore[arg-type]
+    )
 
 
 async def login(client: AsyncClient) -> None:
@@ -313,36 +458,36 @@ async def run_m6_flow(database: Database) -> None:
         lease = await client.post(
             "/api/sender-leases",
             json={
-                "execution_scope": "acct-1:BINANCE",
+                "execution_scope": "TESTNET:acct-1:BINANCE",
                 "owner_id": "m6-worker",
                 "lease_seconds": 120,
             },
         )
         assert lease.status_code == 200, lease.text
         send = await client.post(
-            f"/api/intents/{add_intent_id}/shadow-send",
+            f"/api/intents/{add_intent_id}/binance-testnet/send",
             json={
-                "execution_scope": "acct-1:BINANCE",
+                "execution_scope": "TESTNET:acct-1:BINANCE",
                 "owner_id": "m6-worker",
                 "fencing_token": lease.json()["fencing_token"],
-                "venue_order_id": "m6-shadow-add",
             },
         )
         assert send.status_code == 200, send.text
-        for fill_id, quantity in (("m6-add-fill-1", "0.1"), ("m6-add-fill-2", "0.15")):
-            fill = await client.post(
-                f"/api/intents/{add_intent_id}/fills",
-                json={
-                    "venue_fill_id": fill_id,
-                    "side": "BUY",
-                    "quantity": quantity,
-                    "price": "110",
-                    "fee": "0",
-                    "fee_currency": "USDT",
-                    "slippage_cost": "0",
-                },
+        cumulative_fills: list[tuple[str, Decimal]] = []
+        for fill_id, quantity in (
+            ("m6-add-fill-1", Decimal("0.1")),
+            ("m6-add-fill-2", Decimal("0.15")),
+        ):
+            cumulative_fills.append((fill_id, quantity))
+            ingest_testnet_fills(
+                TradingService(database),
+                add_intent_id,
+                ids["operator"],
+                tuple(cumulative_fills),
+                position_quantity=Decimal("0.5")
+                + sum((item[1] for item in cumulative_fills), Decimal(0)),
+                now=datetime.now(UTC),
             )
-            assert fill.status_code == 200, fill.text
             with database.session_factory() as session:
                 authorization = session.get(TradingAuthorization, ids["authorization"])
                 assert authorization is not None and authorization.used_adds == 1

@@ -841,7 +841,7 @@ def create_app(
     identity_dependency = Depends(current_identity)
 
     def notify_reviewers(
-        proposal_id: UUID, proposal_version: int, environment: str = "SHADOW"
+        proposal_id: UUID, proposal_version: int, environment: str = "TESTNET"
     ) -> None:
         for reviewer in queries().reviewers_for_proposal(proposal_id):
             detail = queries().proposal_detail(reviewer.user_id, proposal_id)
@@ -1074,7 +1074,7 @@ def create_app(
         event_type: str,
         event_key: str,
         summary: str,
-        environment: str = "SHADOW",
+        environment: str = "TESTNET",
     ) -> None:
         detail = queries().campaign_detail(recipient_id, campaign_id)
         campaign_version = int(detail["target_version"])
@@ -1113,16 +1113,11 @@ def create_app(
             )
 
     def require_binance_testnet() -> None:
-        if resolved_settings.execution_backend != "DIRECT_LEGACY":
-            raise DomainRejected(
-                "DIRECT_EXECUTION_RETIRED",
-                "direct Binance sending is retired; execution belongs to the Freqtrade worker",
-            )
         if not resolved_settings.binance_testnet_order_send_enabled:
             raise DomainRejected(
                 "BINANCE_TESTNET_DISABLED", "Binance testnet order send is explicitly disabled"
             )
-        if not resolved_binance_testnet.configured:
+        if binance_testnet_client is not None and not resolved_binance_testnet.configured:
             raise DomainRejected(
                 "BINANCE_TESTNET_NOT_CONFIGURED", "Binance testnet credentials are not configured"
             )
@@ -1145,17 +1140,12 @@ def create_app(
             )
 
     def require_hyperliquid_testnet() -> None:
-        if resolved_settings.execution_backend != "DIRECT_LEGACY":
-            raise DomainRejected(
-                "DIRECT_EXECUTION_RETIRED",
-                "direct Hyperliquid sending is retired; execution belongs to the Freqtrade worker",
-            )
         if not resolved_settings.hyperliquid_testnet_order_send_enabled:
             raise DomainRejected(
                 "HYPERLIQUID_TESTNET_DISABLED",
                 "Hyperliquid Core testnet order send is explicitly disabled",
             )
-        if not resolved_hyperliquid_testnet.configured:
+        if hyperliquid_testnet_client is not None and not resolved_hyperliquid_testnet.configured:
             raise DomainRejected(
                 "HYPERLIQUID_TESTNET_NOT_CONFIGURED",
                 "Hyperliquid testnet account and injected signer are not configured",
@@ -1491,10 +1481,12 @@ def create_app(
             require_hyperliquid_testnet=require_hyperliquid_testnet,
             binance_live=resolved_binance_live,
             binance_testnet=resolved_binance_testnet,
+            binance_testnet_uses_database_credentials=(binance_testnet_client is None),
             freqtrade_workers=resolved_freqtrade_workers,
             hyperliquid=resolved_hyperliquid,
             hyperliquid_live=resolved_hyperliquid_live,
             hyperliquid_testnet=resolved_hyperliquid_testnet,
+            hyperliquid_testnet_uses_database_credentials=(hyperliquid_testnet_client is None),
             notilt=resolved_notilt,
             telegram=resolved_telegram,
             unknown_hyperliquid_protection=unknown_hyperliquid_protection,
@@ -1579,8 +1571,9 @@ def create_app(
         @app.get("/capital", include_in_schema=False)
         @app.get("/results", include_in_schema=False)
         @app.get("/notifications", include_in_schema=False)
+        @app.get("/accounts", include_in_schema=False)
+        @app.get("/team-settings", include_in_schema=False)
         @app.get("/trading-mode", include_in_schema=False)
-        @app.get("/shadow", include_in_schema=False)
         @app.get("/venues", include_in_schema=False)
         @app.get("/venues/binance", include_in_schema=False)
         @app.get("/venues/hyperliquid", include_in_schema=False)

@@ -27,15 +27,9 @@ from trading_control_plane.api_core import (
     Role,
     ScopeSelectRequest,
     SessionIdentity,
-    ShadowAccountResetRequest,
-    ShadowOrderCreateRequest,
-    ShadowOrderMatchRequest,
-    ShadowProtectionCreateRequest,
-    ShadowScopeInitializeRequest,
     TeamCreateRequest,
     TeamMemberInviteRequest,
     TeamMemberRemoveRequest,
-    TeamShadowActivationRequest,
     TeamTradingModeRequest,
     WorkspaceCreateRequest,
     _now,
@@ -296,16 +290,6 @@ class _WorkspaceRoutes:
                 "session": self.queries().user_context(identity.user_id),
             }
 
-        @self.app.get("/api/shadow")
-        def shadow_workspace(
-            identity: SessionIdentity = self.identity_dependency,
-        ) -> dict[str, Any]:
-            self.require_capability(identity, "venue.view")
-            return {
-                "data": self.queries().shadow_workspace(identity.user_id),
-                "as_of": _now().isoformat(),
-            }
-
         @self.app.get("/api/trading-mode")
         def trading_mode(
             identity: SessionIdentity = self.identity_dependency,
@@ -337,135 +321,6 @@ class _WorkspaceRoutes:
             return {
                 "data": result,
                 "session": self.queries().user_context(identity.user_id),
-            }
-
-        @self.app.post("/api/trading-mode/shadow/reset")
-        def reset_shadow_account(
-            payload: ShadowAccountResetRequest,
-            identity: SessionIdentity = self.identity_dependency,
-        ) -> dict[str, Any]:
-            self.require_human_session(identity)
-            return {
-                "data": self.service().reset_shadow_account(
-                    actor_id=identity.user_id,
-                    expected_version=payload.expected_version,
-                    confirmation=payload.confirmation,
-                    idempotency_key=payload.idempotency_key,
-                    now=_now(),
-                )
-            }
-
-        @self.app.post("/api/trading-mode/shadow/orders")
-        def create_shadow_order(
-            payload: ShadowOrderCreateRequest,
-            identity: SessionIdentity = self.identity_dependency,
-        ) -> dict[str, Any]:
-            return {
-                "data": self.service().create_shadow_order(
-                    actor_id=identity.user_id,
-                    account_id=payload.account_id,
-                    venue=payload.venue,
-                    symbol=payload.symbol,
-                    catalog_instrument_id=payload.catalog_instrument_id,
-                    side=payload.side,
-                    order_type=payload.order_type,
-                    quantity=payload.quantity,
-                    limit_price=payload.limit_price,
-                    latest_price=payload.latest_price,
-                    observed_at=payload.observed_at,
-                    price_tick=payload.price_tick,
-                    quantity_step=payload.quantity_step,
-                    contract_multiplier=payload.contract_multiplier,
-                    is_derivative=payload.is_derivative,
-                    fee_bps=payload.fee_bps,
-                    slippage_bps=payload.slippage_bps,
-                    idempotency_key=payload.idempotency_key,
-                    now=_now(),
-                )
-            }
-
-        @self.app.post("/api/trading-mode/shadow/orders/{shadow_order_id}/match")
-        def match_shadow_order(
-            shadow_order_id: UUID,
-            payload: ShadowOrderMatchRequest,
-            identity: SessionIdentity = self.identity_dependency,
-        ) -> dict[str, Any]:
-            return {
-                "data": self.service().match_shadow_order(
-                    actor_id=identity.user_id,
-                    shadow_order_id=shadow_order_id,
-                    expected_version=payload.expected_version,
-                    latest_price=payload.latest_price,
-                    observed_at=payload.observed_at,
-                    price_tick=payload.price_tick,
-                    quantity_step=payload.quantity_step,
-                    contract_multiplier=payload.contract_multiplier,
-                    is_derivative=payload.is_derivative,
-                    fee_bps=payload.fee_bps,
-                    slippage_bps=payload.slippage_bps,
-                    idempotency_key=payload.idempotency_key,
-                    now=_now(),
-                )
-            }
-
-        @self.app.post("/api/trading-mode/shadow/positions/{shadow_position_id}/protections")
-        def create_shadow_protection(
-            shadow_position_id: UUID,
-            payload: ShadowProtectionCreateRequest,
-            identity: SessionIdentity = self.identity_dependency,
-        ) -> dict[str, Any]:
-            return {
-                "data": self.service().create_shadow_protection(
-                    actor_id=identity.user_id,
-                    shadow_position_id=shadow_position_id,
-                    trigger_type=payload.trigger_type,
-                    execution_type=payload.execution_type,
-                    trigger_price=payload.trigger_price,
-                    limit_price=payload.limit_price,
-                    idempotency_key=payload.idempotency_key,
-                    now=_now(),
-                )
-            }
-
-        @self.app.post("/api/teams/{team_id}/shadow-activation")
-        def activate_shadow_mode(
-            team_id: UUID,
-            payload: TeamShadowActivationRequest,
-            identity: SessionIdentity = self.identity_dependency,
-        ) -> dict[str, Any]:
-            self.require_human_session(identity)
-            result = self.service().set_team_execution_mode(
-                actor_id=identity.user_id,
-                team_id=team_id,
-                mode="SHADOW",
-                confirmation=payload.confirmation,
-                expected_version=payload.expected_version,
-                idempotency_key=payload.idempotency_key,
-                now=_now(),
-            )
-            return {
-                "data": result,
-                "session": self.queries().user_context(identity.user_id),
-            }
-
-        @self.app.post("/api/shadow/scopes")
-        def initialize_shadow_scope(
-            payload: ShadowScopeInitializeRequest,
-            identity: SessionIdentity = self.identity_dependency,
-        ) -> dict[str, Any]:
-            result = self.service().initialize_shadow_scope(
-                actor_id=identity.user_id,
-                account_id=payload.account_id,
-                venue=payload.venue,
-                instrument_id=payload.instrument_id,
-                currency=payload.currency,
-                initial_equity=payload.initial_equity,
-                idempotency_key=payload.idempotency_key,
-                now=_now(),
-            )
-            return {
-                "result": result,
-                "data": self.queries().shadow_workspace(identity.user_id),
             }
 
         @self.app.post("/api/scopes/select")

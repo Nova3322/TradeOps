@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import base64
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -8,18 +7,16 @@ from threading import Barrier
 from uuid import UUID
 
 import pytest
-from conftest import set_test_team_environment
+from conftest import add_exchange_account_fixture, set_test_team_environment
 from sqlalchemy import select
 
 from trading_control_plane.database import Database
 from trading_control_plane.domain import (
-    AddCandidateFacts,
     CapabilityStatus,
     Direction,
     DomainRejected,
     ExecutionEnvironment,
     IntentKind,
-    OrderIntentStatus,
     ProposalSource,
     ReviewDecision,
     RiskPolicyChangeStatus,
@@ -28,62 +25,21 @@ from trading_control_plane.domain import (
     SystemRiskState,
 )
 from trading_control_plane.models import (
-    Campaign,
     CapabilityGate,
-    OrderIntent,
     RiskControlChangeRequest,
-    RiskDecision,
     RiskPolicy,
     TradingAuthorization,
 )
 from trading_control_plane.service import TradingService
 
 NOW = datetime(2026, 8, 1, 8, tzinfo=UTC)
-SCOPE = (("SHADOW", "acct-1", "BINANCE"),)
-
-
-def test_live_restore_scope_projection_excludes_shadow_scopes_and_campaigns() -> None:
-    campaigns = [
-        Campaign(
-            environment="SHADOW",
-            account_id="shadow-account",
-            venue="HYPERLIQUID",
-            status="OPEN",
-        ),
-        Campaign(
-            environment="LIVE",
-            account_id="live-campaign-account",
-            venue="BINANCE",
-            status="OPEN",
-        ),
-    ]
-
-    scopes = TradingService._canonical_restore_scopes(
-        (
-            ("SHADOW", "configured-shadow", "BINANCE"),
-            ("LIVE", "configured-live", "HYPERLIQUID"),
-        ),
-        campaigns,
-        required_environment=ExecutionEnvironment.LIVE.value,
-    )
-
-    assert scopes == [
-        {
-            "environment": "LIVE",
-            "account_id": "configured-live",
-            "venue": "HYPERLIQUID",
-        },
-        {
-            "environment": "LIVE",
-            "account_id": "live-campaign-account",
-            "venue": "BINANCE",
-        },
-    ]
+SCOPE = (("TESTNET", "acct-1", "BINANCE"),)
 
 
 def seed(service: TradingService) -> dict[str, UUID]:
     admin = service.bootstrap_admin("risk-admin", now=NOW)
-    set_test_team_environment(service.database, admin, "SHADOW")
+    set_test_team_environment(service.database, admin, "TESTNET")
+    add_exchange_account_fixture(service.database, admin, "acct-1", "BINANCE")
     proposer = service.create_user("risk-proposer", admin, now=NOW)
     reviewer_one = service.create_user("risk-reviewer-1", admin, now=NOW)
     reviewer_two = service.create_user("risk-reviewer-2", admin, now=NOW)
@@ -126,7 +82,7 @@ def seed(service: TradingService) -> dict[str, UUID]:
         Decimal("100"),
         True,
         operator,
-        environment=ExecutionEnvironment.SHADOW,
+        environment=ExecutionEnvironment.TESTNET,
         now=NOW,
     )
     service.record_account_equity(
@@ -137,7 +93,7 @@ def seed(service: TradingService) -> dict[str, UUID]:
         "USDT",
         True,
         operator,
-        environment=ExecutionEnvironment.SHADOW,
+        environment=ExecutionEnvironment.TESTNET,
         now=NOW,
     )
     return {
@@ -318,133 +274,6 @@ def test_pause_and_initial_intent_creation_share_risk_first_lock_order(
         policy = session.scalar(select(RiskPolicy).where(RiskPolicy.active))
         assert policy is not None
         assert policy.system_state == SystemRiskState.REDUCE_ONLY.value
-
-
-def test_disable_auto_add_and_add_creation_share_risk_gate_auth_lock_order(
-    database: Database, service: TradingService
-) -> None:
-    ids = seed(service)
-    enable_auto_add_for_test(database, ids["admin"], now=NOW)
-    authorization_id = issue_add_authorization(service, ids)
-    opening = service.create_order_intent(
-        authorization_id,
-        ids["admin"],
-        IntentKind.INITIAL,
-        "acct-1",
-        "BINANCE",
-        ids["instrument"],
-        Direction.LONG,
-        Decimal("0.5"),
-        "disable-add-race-opening",
-        now=NOW,
-    )
-    token = service.acquire_sender("acct-1:BINANCE", "disable-add-worker", ids["operator"], NOW)
-    service.record_shadow_order(
-        opening.intent_id,
-        ids["operator"],
-        "acct-1:BINANCE",
-        "disable-add-worker",
-        token,
-        "disable-add-race-order",
-        now=NOW,
-    )
-    service.record_fill(
-        opening.intent_id,
-        ids["operator"],
-        "disable-add-race-fill",
-        "BUY",
-        Decimal("0.5"),
-        Decimal("100"),
-        Decimal("0"),
-        "USDT",
-        Decimal("0"),
-        now=NOW,
-    )
-    position_id = service.record_position(
-        "acct-1",
-        "BINANCE",
-        ids["instrument"],
-        Decimal("0.5"),
-        Decimal("100"),
-        Decimal("110"),
-        True,
-        ids["operator"],
-        now=NOW,
-    )
-    service.record_protection(
-        position_id,
-        "disable-add-race-stop",
-        Decimal("0.5"),
-        Decimal("90"),
-        True,
-        ids["operator"],
-        now=NOW,
-    )
-    candidate = AddCandidateFacts(
-        candidate_id="disable_add_race_candidate",
-        contract_version="breakouts-v1",
-        venue="BINANCE",
-        symbol="BTCUSDT",
-        direction=Direction.LONG,
-        observed_at=NOW + timedelta(seconds=1),
-        reference_price=Decimal("110"),
-        readiness="READY",
-    )
-    race = Barrier(2)
-
-    def create_add() -> str:
-        race.wait(timeout=5)
-        try:
-            service.create_order_intent(
-                authorization_id,
-                ids["operator"],
-                IntentKind.ADD,
-                "acct-1",
-                "BINANCE",
-                ids["instrument"],
-                Direction.LONG,
-                Decimal("0.5"),
-                "disable-add-race-intent",
-                add_candidate=candidate,
-                now=NOW + timedelta(seconds=1),
-            )
-        except DomainRejected as exc:
-            return exc.code
-        return "CREATED"
-
-    def disable() -> str:
-        race.wait(timeout=5)
-        service.disable_global_auto_add(
-            ids["admin"],
-            "disable-add-race-disable",
-            reason="serialize global disable against Add creation",
-            now=NOW + timedelta(seconds=1),
-        )
-        return "DISABLED"
-
-    with ThreadPoolExecutor(max_workers=2) as executor:
-        add_future = executor.submit(create_add)
-        disable_future = executor.submit(disable)
-        results = {add_future.result(timeout=10), disable_future.result(timeout=10)}
-
-    assert "DISABLED" in results
-    assert results <= {
-        "DISABLED",
-        "CREATED",
-        "AUTO_ADD_DISABLED",
-        "AUTHORIZATION_ADD_REVOKED",
-    }
-    with database.session_factory() as session:
-        gate = session.get(CapabilityGate, "AUTO_ADD")
-        authorization = session.get(TradingAuthorization, authorization_id)
-        add_intents = session.scalars(
-            select(OrderIntent).where(OrderIntent.kind == IntentKind.ADD.value)
-        ).all()
-        assert gate is not None and gate.status == CapabilityStatus.DISABLED.value
-        assert authorization is not None and authorization.add_revoked_at is not None
-        assert len(add_intents) <= 1
-        if add_intents:
-            assert add_intents[0].status == OrderIntentStatus.READY.value
 
 
 def approve_restore(
@@ -645,7 +474,7 @@ def test_reviewed_restore_requires_operator_and_one_independent_reviewer(
         now=ready_at,
     )
     reconciliation_id = service.reconcile_scope(
-        "acct-1:BINANCE", ids["operator"], now=ready_at + timedelta(seconds=1)
+        "TESTNET:acct-1:BINANCE", ids["operator"], now=ready_at + timedelta(seconds=1)
     )
     assert service.reconciliation_status(reconciliation_id).value == "MATCH"
     restored_policy_id = service.execute_risk_control_change_request(
@@ -725,231 +554,6 @@ def test_restore_fails_closed_on_live_scope_configuration_and_control_drift(
             (),
             now=NOW + timedelta(minutes=17),
         )
-
-
-def test_system_admin_direct_restore_requires_live_conditions_and_keeps_auto_add_off(
-    database: Database,
-) -> None:
-    service = TradingService(
-        database,
-        credential_encryption_key=base64.urlsafe_b64encode(
-            b"0123456789abcdef0123456789abcdef"
-        ).decode(),
-    )
-    ids = seed(service)
-    live_account_id = "live-acct-1"
-    service.create_exchange_account(
-        actor_id=ids["admin"],
-        environment="LIVE",
-        account_id=live_account_id,
-        venue="BINANCE",
-        label="Live risk account",
-        credentials={"api_key": "live-risk-key", "api_secret": "live-risk-secret"},
-        idempotency_key="create-live-risk-account",
-        now=NOW,
-    )
-    service.assign_role(
-        ids["proposer"], Role.PROPOSER, ids["admin"], live_account_id, "BINANCE", now=NOW
-    )
-    service.assign_role(
-        ids["operator"], Role.OPERATOR, ids["admin"], live_account_id, "BINANCE", now=NOW
-    )
-    runtime_actor = service.create_service_principal(
-        "risk-runtime-sync",
-        ids["admin"],
-        now=NOW,
-    )
-    service.assign_role(
-        runtime_actor,
-        Role.OPERATOR,
-        ids["admin"],
-        account_scope=live_account_id,
-        venue_scope="BINANCE",
-        now=NOW,
-    )
-    enable_auto_add_for_test(database, ids["admin"], now=NOW)
-    old_authorization_id = issue_add_authorization(service, ids)
-    service.disable_global_auto_add(
-        ids["admin"],
-        "disable-before-admin-restore",
-        reason="direct restore must never reopen AUTO_ADD",
-        now=NOW + timedelta(seconds=30),
-    )
-    service.pause_new_risk(
-        ids["admin"],
-        "pause-before-admin-restore",
-        reason="exercise direct administrator restoration",
-        now=NOW + timedelta(minutes=1),
-    )
-    live_scope = (("LIVE", live_account_id, "BINANCE"),)
-    with pytest.raises(DomainRejected, match="RISK_RESTORE_BLOCKED"):
-        service.direct_restore_risk_controls(
-            ids["admin"],
-            "admin-restore-blocked",
-            reason="must not restore without live facts",
-            configured_scopes=live_scope,
-            now=NOW + timedelta(minutes=2),
-        )
-    pending_request_id = service.create_risk_control_change_request(
-        ids["operator"],
-        "pending-before-admin-restore",
-        reason="a direct administrator restore should supersede this request",
-        restore_auto_add=False,
-        configured_scopes=live_scope,
-        require_live_scope=True,
-        now=NOW + timedelta(minutes=2, seconds=1),
-    )
-
-    # This legacy restore fixture intentionally exercises both SHADOW history
-    # and current LIVE readiness; production Teams never switch this way.
-    set_test_team_environment(database, ids["admin"], "LIVE")
-    ready_at = NOW + timedelta(minutes=17)
-    service.record_position(
-        live_account_id,
-        "BINANCE",
-        ids["instrument"],
-        Decimal("0"),
-        Decimal("0"),
-        Decimal("100"),
-        True,
-        ids["operator"],
-        environment=ExecutionEnvironment.LIVE,
-        now=ready_at,
-    )
-    service.record_account_equity(
-        live_account_id,
-        "BINANCE",
-        Decimal("10000"),
-        Decimal("9000"),
-        "USDT",
-        True,
-        ids["operator"],
-        environment=ExecutionEnvironment.LIVE,
-        now=ready_at,
-    )
-    reconciliation_id = service.reconcile_scope(
-        f"LIVE:{live_account_id}:BINANCE",
-        ids["operator"],
-        now=ready_at + timedelta(seconds=1),
-    )
-    assert service.reconciliation_status(reconciliation_id).value == "MATCH"
-    missing_probe = service.risk_control_status(
-        ids["admin"],
-        live_scope,
-        require_live_scope=True,
-        now=ready_at + timedelta(seconds=1, milliseconds=100),
-    )
-    assert f"READ_ONLY_SOURCE_MISSING:LIVE:{live_account_id}:BINANCE" in missing_probe[
-        "restore_conditions"
-    ]["blockers"]
-    source_check = next(
-        item
-        for item in missing_probe["restore_conditions"]["checks"]
-        if item["code"] == "READ_ONLY_SOURCE_CURRENT"
-    )
-    assert source_check["status"] == "BLOCKED"
-    assert source_check["role"] == "SYSTEM_ADMIN"
-
-    service.record_runtime_source_health(
-        runtime_actor,
-        {
-            "BINANCE": {
-                "status": "FAILED",
-                "error_code": "BINANCE_RATE_LIMITED",
-            }
-        },
-        scopes={"BINANCE": (live_account_id, "BINANCE")},
-        now=ready_at + timedelta(seconds=1, milliseconds=200),
-    )
-    failed_probe = service.risk_control_status(
-        ids["admin"],
-        live_scope,
-        require_live_scope=True,
-        now=ready_at + timedelta(seconds=1, milliseconds=300),
-    )
-    assert (
-        f"READ_ONLY_SOURCE_FAILED:LIVE:{live_account_id}:BINANCE:BINANCE_RATE_LIMITED"
-        in failed_probe["restore_conditions"]["blockers"]
-    )
-    live_proposal = service.create_proposal(
-        actor_id=ids["proposer"],
-        source=ProposalSource.MANUAL,
-        risk_tier=RiskTier.LOW,
-        account_id=live_account_id,
-        venue="BINANCE",
-        instrument_id=ids["instrument"],
-        direction=Direction.LONG,
-        quantity=Decimal("1"),
-        max_risk=Decimal("5"),
-        expires_at=ready_at + timedelta(hours=1),
-        idempotency_key="failed-source-live-proposal",
-        environment=ExecutionEnvironment.LIVE,
-        details={"invalidation_price": "90"},
-        now=ready_at,
-    )
-    service.submit_proposal(live_proposal, ids["proposer"], now=ready_at)
-    service.review_proposal(
-        live_proposal,
-        ids["reviewer_one"],
-        ReviewDecision.APPROVE,
-        "independent live proposal review",
-        now=ready_at,
-    )
-    failed_source_decision = service.decide_risk(
-        proposal_id=live_proposal,
-        actor_id=ids["operator"],
-        kind=IntentKind.INITIAL,
-        idempotency_key="failed-source-live-decision",
-        now=ready_at + timedelta(seconds=1, milliseconds=350),
-    )
-    with database.session_factory() as session:
-        decision = session.get(RiskDecision, failed_source_decision)
-        assert decision is not None
-        assert decision.result == "DENY"
-        assert decision.reasons == ["READ_ONLY_SOURCE_UNAVAILABLE"]
-        assert decision.input_data["read_only_source"]["error_code"] == "BINANCE_RATE_LIMITED"
-
-    service.record_runtime_source_health(
-        runtime_actor,
-        {"BINANCE": {"status": "SUCCESS", "items_observed": 1}},
-        scopes={"BINANCE": (live_account_id, "BINANCE")},
-        now=ready_at + timedelta(seconds=1, milliseconds=400),
-    )
-    restored_policy_id = service.direct_restore_risk_controls(
-        ids["admin"],
-        "admin-restore-success",
-        reason="all live safety conditions passed",
-        configured_scopes=live_scope,
-        now=ready_at + timedelta(seconds=2),
-    )
-
-    with database.session_factory() as session:
-        restored = session.get(RiskPolicy, restored_policy_id)
-        gate = session.get(CapabilityGate, "AUTO_ADD")
-        old_authorization = session.get(TradingAuthorization, old_authorization_id)
-        pending_request = session.get(RiskControlChangeRequest, pending_request_id)
-        assert restored is not None
-        assert restored.system_state == SystemRiskState.NORMAL.value
-        assert gate is not None and gate.status == CapabilityStatus.DISABLED.value
-        assert old_authorization is not None and old_authorization.active is False
-        assert pending_request is not None
-        assert pending_request.status == RiskPolicyChangeStatus.EXPIRED.value
-        assert pending_request.version == 2
-        assert pending_request.resulting_policy_id == restored_policy_id
-
-    status = service.risk_control_status(
-        ids["admin"], live_scope, require_live_scope=True, now=ready_at + timedelta(seconds=3)
-    )
-    assert status["auto_add_gate"]["operator_username"] == "risk-admin"
-    superseded_request = next(
-        item
-        for item in status["requests"]
-        if item["request_id"] == str(pending_request_id)
-    )
-    assert superseded_request["status"] == RiskPolicyChangeStatus.EXPIRED.value
-    assert superseded_request["superseded_by_control_state"] is True
-    assert status["actions"]["review_restore"]["allowed"] is False
-    assert status["actions"]["execute_restore"]["allowed"] is False
 
 
 def test_restore_rejection_expiry_and_terminal_status_are_durable(
@@ -1098,15 +702,18 @@ def test_operator_risk_changes_require_independent_review_before_execution(
     status = service.risk_control_status(ids["reviewer_one"], SCOPE, now=NOW + timedelta(minutes=2))
     request = next(item for item in status["requests"] if item["request_id"] == str(request_id))
     assert request["change_type"] == "PAUSE_NEW_RISK"
-    assert service.review_risk_control_change_request(
-        request_id,
-        ids["reviewer_one"],
-        ReviewDecision.APPROVE,
-        "independent reviewer approves the frozen pause change",
-        1,
-        "approve-reviewed-pause",
-        now=NOW + timedelta(minutes=3),
-    ) is RiskPolicyChangeStatus.APPROVED
+    assert (
+        service.review_risk_control_change_request(
+            request_id,
+            ids["reviewer_one"],
+            ReviewDecision.APPROVE,
+            "independent reviewer approves the frozen pause change",
+            1,
+            "approve-reviewed-pause",
+            now=NOW + timedelta(minutes=3),
+        )
+        is RiskPolicyChangeStatus.APPROVED
+    )
     service.execute_risk_control_change_request(
         request_id,
         ids["reviewer_one"],

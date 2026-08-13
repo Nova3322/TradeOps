@@ -56,14 +56,12 @@ class ApiClientState(StrEnum):
 
 
 class ExecutionEnvironment(StrEnum):
-    SHADOW = "SHADOW"
     TESTNET = "TESTNET"
     LIVE = "LIVE"
 
 
 class TeamExecutionMode(StrEnum):
     SETUP = "SETUP"
-    SHADOW = "SHADOW"
     TESTNET = "TESTNET"
     LIVE = "LIVE"
 

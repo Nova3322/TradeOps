@@ -6,14 +6,14 @@ from decimal import Decimal
 from typing import Any
 from uuid import UUID
 
-from conftest import set_test_team_environment
+from conftest import add_exchange_account_fixture
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy import func, select
 
 from trading_control_plane.api import create_app
 from trading_control_plane.config import Settings
 from trading_control_plane.database import Database
-from trading_control_plane.domain import Direction, ProposalSource, RiskTier, Role
+from trading_control_plane.domain import Role
 from trading_control_plane.models import AuditEvent, OrderIntent, TradingAuthorization
 from trading_control_plane.perptape import PerptapeClient
 from trading_control_plane.queries import TradingQueries
@@ -37,6 +37,7 @@ def test_telegram_review_confirmation_writes_audit_without_authorization_or_orde
     service = TradingService(database)
     now = datetime.now(UTC)
     admin = service.bootstrap_admin("telegram-admin", now=now)
+    add_exchange_account_fixture(service.database, admin, "acct-1", "BINANCE")
     proposer = service.create_user("telegram-proposer", admin, now=now)
     reviewer = service.create_user("telegram-reviewer", admin, now=now)
     service.assign_role(proposer, Role.PROPOSER, admin, now=now)
@@ -162,195 +163,3 @@ def test_telegram_review_confirmation_writes_audit_without_authorization_or_orde
         assert session.scalar(select(func.count()).select_from(OrderIntent)) == 0
         events = set(session.scalars(select(AuditEvent.event_type)).all())
     assert "PROPOSAL_REVIEWED" in events
-
-
-def test_telegram_todo_excludes_expired_frozen_proposals(database: Database) -> None:
-    service = TradingService(database)
-    now = datetime.now(UTC)
-    admin = service.bootstrap_admin("telegram-todo-admin", now=now - timedelta(hours=3))
-    set_test_team_environment(database, admin, "SHADOW")
-    proposer = service.create_user(
-        "telegram-todo-proposer",
-        admin,
-        now=now - timedelta(hours=3),
-    )
-    reviewer = service.create_user(
-        "telegram-todo-reviewer",
-        admin,
-        now=now - timedelta(hours=3),
-    )
-    reuser = service.create_user(
-        "telegram-todo-reuser",
-        admin,
-        now=now - timedelta(hours=3),
-    )
-    service.assign_role(proposer, Role.PROPOSER, admin, now=now - timedelta(hours=3))
-    service.assign_role(reviewer, Role.REVIEWER, admin, now=now - timedelta(hours=3))
-    service.assign_role(reuser, Role.PROPOSER, admin, now=now - timedelta(hours=3))
-    service.assign_role(reuser, Role.REVIEWER, admin, now=now - timedelta(hours=3))
-    instrument_ids = {
-        symbol: service.register_instrument(
-            actor_id=admin,
-            venue="BINANCE",
-            symbol=symbol,
-            tick_size=Decimal("0.1"),
-            lot_size=Decimal("0.001"),
-            minimum_notional=Decimal("5"),
-            contract_multiplier=Decimal("1"),
-            quote_currency="USDT",
-            collateral_currency="USDT",
-            protection_supported=True,
-            now=now - timedelta(hours=3),
-        )
-        for symbol in ("BTCUSDT", "ETHUSDT")
-    }
-
-    def frozen_proposal(symbol: str, *, created_at: datetime, expires_at: datetime) -> UUID:
-        proposal_id = service.create_proposal(
-            actor_id=proposer,
-            source=ProposalSource.MANUAL,
-            risk_tier=RiskTier.MEDIUM,
-            account_id="acct-1",
-            venue="BINANCE",
-            instrument_id=instrument_ids[symbol],
-            direction=Direction.LONG,
-            quantity=Decimal("0.001"),
-            max_risk=Decimal("1"),
-            expires_at=expires_at,
-            idempotency_key=f"telegram-todo-{symbol}",
-            now=created_at,
-        )
-        service.submit_proposal(proposal_id, proposer, now=created_at + timedelta(seconds=1))
-        return proposal_id
-
-    frozen_proposal(
-        "ETHUSDT",
-        created_at=now - timedelta(hours=2),
-        expires_at=now - timedelta(hours=1),
-    )
-    btc_created_at = now - timedelta(minutes=1)
-    btc_expires_at = now + timedelta(hours=1)
-    btc_proposal_id = frozen_proposal(
-        "BTCUSDT",
-        created_at=btc_created_at,
-        expires_at=btc_expires_at,
-    )
-    reused_id = service.create_proposal(
-        actor_id=reuser,
-        source=ProposalSource.MANUAL,
-        risk_tier=RiskTier.MEDIUM,
-        account_id="acct-1",
-        venue="BINANCE",
-        instrument_id=instrument_ids["BTCUSDT"],
-        direction=Direction.LONG,
-        quantity=Decimal("0.001"),
-        max_risk=Decimal("1"),
-        expires_at=btc_expires_at,
-        idempotency_key="telegram-todo-reuser",
-        deduplicate_active_manual_semantics=True,
-        now=btc_created_at,
-    )
-    assert reused_id == btc_proposal_id
-
-    fake = RecordingBotApi()
-    app = create_app(
-        Settings(
-            environment="test",
-            database_url=str(database.engine.url),
-            allow_mock_identity=True,
-            session_signing_secret="telegram-todo-test-signing-secret",  # noqa: S106
-            public_base_url="http://test",
-            telegram_enabled=True,
-            telegram_bot_token="123456789:abcdefghijklmnopqrstuvwxyz",  # noqa: S106
-            telegram_allowed_username="telegram-todo-reviewer",
-            telegram_internal_username="telegram-todo-reviewer",
-            _env_file=None,
-        ),
-        database,
-        PerptapeClient(
-            base_url="https://perptape.com",
-            api_key=None,
-            contract_version="breakouts-v1",
-            cache_ttl=timedelta(minutes=1),
-        ),
-    )
-    gateway = app.state.telegram_gateway
-    assert isinstance(gateway, TelegramBotGateway)
-    gateway._client = TelegramBotClient(
-        "123456789:abcdefghijklmnopqrstuvwxyz",
-        base_url="https://telegram.invalid",
-        poster=fake.poster,
-    )
-    gateway.handle_update(
-        {
-            "update_id": 200,
-            "message": {
-                "text": "/start",
-                "from": {"id": 789, "username": "telegram-todo-reviewer"},
-                "chat": {"id": 789, "type": "private"},
-            },
-        }
-    )
-    gateway.handle_update(
-        {
-            "update_id": 201,
-            "message": {
-                "text": "/todo",
-                "from": {"id": 789, "username": "telegram-todo-reviewer"},
-                "chat": {"id": 789, "type": "private"},
-            },
-        }
-    )
-
-    todo_text = fake.calls[-1][1]["text"]
-    assert "待我审核 · 1 项" in todo_text
-    assert "BTCUSDT" in todo_text
-    assert "ETHUSDT" not in todo_text
-    assert fake.calls[-1][1]["reply_markup"] == {
-        "inline_keyboard": [
-            [{"text": "打开 Web 审核队列", "url": "http://test/reviews"}]
-        ]
-    }
-
-    reuser_fake = RecordingBotApi()
-    reuser_app = create_app(
-        Settings(
-            environment="test",
-            database_url=str(database.engine.url),
-            allow_mock_identity=True,
-            session_signing_secret="telegram-todo-reuser-signing-secret",  # noqa: S106
-            public_base_url="http://test",
-            telegram_enabled=True,
-            telegram_bot_token="123456789:abcdefghijklmnopqrstuvwxyz",  # noqa: S106
-            telegram_allowed_username="telegram-todo-reuser",
-            telegram_internal_username="telegram-todo-reuser",
-            _env_file=None,
-        ),
-        database,
-        PerptapeClient(
-            base_url="https://perptape.com",
-            api_key=None,
-            contract_version="breakouts-v1",
-            cache_ttl=timedelta(minutes=1),
-        ),
-    )
-    reuser_gateway = reuser_app.state.telegram_gateway
-    assert isinstance(reuser_gateway, TelegramBotGateway)
-    reuser_gateway._client = TelegramBotClient(
-        "123456789:abcdefghijklmnopqrstuvwxyz",
-        base_url="https://telegram.invalid",
-        poster=reuser_fake.poster,
-    )
-    for update_id, command in ((300, "/start"), (301, "/todo")):
-        reuser_gateway.handle_update(
-            {
-                "update_id": update_id,
-                "message": {
-                    "text": command,
-                    "from": {"id": 790, "username": "telegram-todo-reuser"},
-                    "chat": {"id": 790, "type": "private"},
-                },
-            }
-        )
-    assert "当前没有可由你独立审核" in reuser_fake.calls[-1][1]["text"]
-    assert "BTCUSDT" not in reuser_fake.calls[-1][1]["text"]

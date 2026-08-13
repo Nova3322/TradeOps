@@ -15,9 +15,7 @@ from trading_control_plane.domain import DomainRejected
 from trading_control_plane.reporting_frames import AnalyticsFrames, analytics_frames
 
 os.environ.setdefault("MPLBACKEND", "Agg")
-os.environ.setdefault(
-    "MPLCONFIGDIR", str(Path(tempfile.gettempdir()) / "tradingops-matplotlib")
-)
+os.environ.setdefault("MPLCONFIGDIR", str(Path(tempfile.gettempdir()) / "tradingops-matplotlib"))
 
 
 @dataclass(frozen=True, slots=True)
@@ -40,9 +38,7 @@ _SCRIPT = re.compile(r"<script\b[^>]*>.*?</script\s*>", re.IGNORECASE | re.DOTAL
 _ACTIVE_TAG = re.compile(
     r"</?(?:iframe|object|embed|form|input|button)\b[^>]*>", re.IGNORECASE | re.DOTALL
 )
-_EVENT_ATTRIBUTE = re.compile(
-    r"\s+on[a-z]+\s*=\s*(?:\"[^\"]*\"|'[^']*'|[^\s>]+)", re.IGNORECASE
-)
+_EVENT_ATTRIBUTE = re.compile(r"\s+on[a-z]+\s*=\s*(?:\"[^\"]*\"|'[^']*'|[^\s>]+)", re.IGNORECASE)
 _EXTERNAL_LINK = re.compile(r"<link\b[^>]*>", re.IGNORECASE | re.DOTALL)
 _EXTERNAL_HREF = re.compile(
     r"\s+(?:href|target)\s*=\s*(?:\"[^\"]*\"|'[^']*'|[^\s>]+)", re.IGNORECASE
@@ -76,13 +72,11 @@ def sanitize_quantstats_html(raw: str) -> str:
         raise DomainRejected(
             "QUANTSTATS_HTML_INVALID", "QuantStats output is missing a document head"
         )
-    sanitized = re.sub(
-        r"</head>", security + "</head>", sanitized, count=1, flags=re.IGNORECASE
-    )
+    sanitized = re.sub(r"</head>", security + "</head>", sanitized, count=1, flags=re.IGNORECASE)
     lowered = sanitized.lower()
     if any(
         marker in lowered
-        for marker in ("<script", " onload=", "<iframe", "<object", "<embed", "href=\"http")
+        for marker in ("<script", " onload=", "<iframe", "<object", "<embed", 'href="http')
     ):
         raise DomainRejected(
             "QUANTSTATS_HTML_UNSAFE", "QuantStats output failed the active-content boundary"
@@ -139,15 +133,9 @@ class QuantStatsReportAdapter:
                         float(qs.stats.cagr(frames.returns, periods=PERIODS_PER_YEAR))
                     ),
                     "annual_volatility": str(
-                        float(
-                            qs.stats.volatility(
-                                frames.returns, periods=PERIODS_PER_YEAR
-                            )
-                        )
+                        float(qs.stats.volatility(frames.returns, periods=PERIODS_PER_YEAR))
                     ),
-                    "sharpe": str(
-                        float(qs.stats.sharpe(frames.returns, periods=PERIODS_PER_YEAR))
-                    ),
+                    "sharpe": str(float(qs.stats.sharpe(frames.returns, periods=PERIODS_PER_YEAR))),
                     "sortino": str(
                         float(qs.stats.sortino(frames.returns, periods=PERIODS_PER_YEAR))
                     ),

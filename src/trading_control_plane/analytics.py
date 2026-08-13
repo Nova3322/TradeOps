@@ -52,41 +52,38 @@ class AnalyticsScope:
     generation: int | None = None
 
     def __post_init__(self) -> None:
-        if self.environment not in {"SHADOW", "LIVE"}:
-            _reject("ANALYTICS_ENVIRONMENT_INVALID", "analytics supports only SHADOW or LIVE")
+        if self.environment not in {"TESTNET", "LIVE"}:
+            _reject("ANALYTICS_ENVIRONMENT_INVALID", "analytics supports TESTNET or LIVE")
         start = _utc(self.from_time, "from_time")
         end = _utc(self.to_time, "to_time")
         if start >= end:
             _reject("ANALYTICS_TIME_RANGE_INVALID", "from_time must be earlier than to_time")
-        if self.environment == "SHADOW" and self.generation is None:
-            _reject("ANALYTICS_GENERATION_REQUIRED", "SHADOW analytics requires one generation")
-        if self.environment == "SHADOW" and self.account_venues:
+        if self.generation is not None:
+            _reject(
+                "ANALYTICS_GENERATION_FORBIDDEN",
+                "TESTNET and LIVE analytics do not use ledger generations",
+            )
+        exact_scopes = tuple(sorted(set(self.account_venues)))
+        if not exact_scopes:
+            _reject(
+                "ANALYTICS_ACCOUNT_SCOPE_REQUIRED",
+                "analytics requires exact account and venue scopes",
+            )
+        if exact_scopes != self.account_venues:
             _reject(
                 "ANALYTICS_ACCOUNT_SCOPE_INVALID",
-                "SHADOW analytics cannot contain LIVE account and venue scopes",
+                "analytics account and venue scopes must be unique and sorted",
             )
-        if self.environment == "LIVE":
-            exact_scopes = tuple(sorted(set(self.account_venues)))
-            if not exact_scopes:
-                _reject(
-                    "ANALYTICS_ACCOUNT_SCOPE_REQUIRED",
-                    "LIVE analytics requires exact account and venue scopes",
-                )
-            if exact_scopes != self.account_venues:
-                _reject(
-                    "ANALYTICS_ACCOUNT_SCOPE_INVALID",
-                    "LIVE analytics account and venue scopes must be unique and sorted",
-                )
-            if tuple(sorted({item[0] for item in exact_scopes})) != self.account_ids:
-                _reject(
-                    "ANALYTICS_ACCOUNT_SCOPE_INVALID",
-                    "account_ids must match exact account and venue scopes",
-                )
-            if tuple(sorted({item[1] for item in exact_scopes})) != self.venues:
-                _reject(
-                    "ANALYTICS_ACCOUNT_SCOPE_INVALID",
-                    "venues must match exact account and venue scopes",
-                )
+        if tuple(sorted({item[0] for item in exact_scopes})) != self.account_ids:
+            _reject(
+                "ANALYTICS_ACCOUNT_SCOPE_INVALID",
+                "account_ids must match exact account and venue scopes",
+            )
+        if tuple(sorted({item[1] for item in exact_scopes})) != self.venues:
+            _reject(
+                "ANALYTICS_ACCOUNT_SCOPE_INVALID",
+                "venues must match exact account and venue scopes",
+            )
 
 
 @dataclass(frozen=True, slots=True)
@@ -209,7 +206,7 @@ def canonicalize_venue_snapshot(
     normalized_venue = venue.strip().upper()
     if normalized_venue not in {"BINANCE", "HYPERLIQUID", "OKX", "BYBIT"}:
         _reject("ANALYTICS_VENUE_INVALID", "unsupported venue for canonical analytics")
-    if environment not in {"SHADOW", "TESTNET", "LIVE"}:
+    if environment not in {"TESTNET", "LIVE"}:
         _reject("ANALYTICS_ENVIRONMENT_INVALID", "canonical facts require an exact environment")
     multiplier = _positive(contract_multiplier, "contract_multiplier")
     settlement = snapshot.instrument.collateral_currency.upper()

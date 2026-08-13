@@ -200,7 +200,10 @@ class _ProposalsRoutes:
                 ).quantize(Decimal("0.000000000000000001"), rounding=ROUND_DOWN)
                 if (
                     payload.default_config_version != default_config["version"]
-                    or payload.environment != default_config["environment"]
+                    or (
+                        payload.environment is not None
+                        and payload.environment != default_config["environment"]
+                    )
                     or payload.account_id != default_config["account_id"]
                     or payload.risk_tier.value != default_config["risk_tier"]
                     or payload.quantity != expected_quantity
@@ -284,7 +287,11 @@ class _ProposalsRoutes:
                 idempotency_key=f"perptape:{source_candidate_id}",
                 strategy_id="perptape",
                 strategy_version=candidate.source_contract_version,
-                environment=ExecutionEnvironment(payload.environment),
+                environment=(
+                    None
+                    if payload.environment is None
+                    else ExecutionEnvironment(payload.environment)
+                ),
                 source_candidate_id=source_candidate_id,
                 source_link=candidate.detail_url,
                 source_observed_at=candidate.observed_at,
@@ -443,7 +450,11 @@ class _ProposalsRoutes:
                 idempotency_key=payload.idempotency_key,
                 strategy_id=payload.model_id,
                 strategy_version=payload.model_version,
-                environment=ExecutionEnvironment(payload.environment),
+                environment=(
+                    None
+                    if payload.environment is None
+                    else ExecutionEnvironment(payload.environment)
+                ),
                 source_candidate_id=(f"api-client:{identity.api_client_id}:{payload.request_id}"),
                 source_link=None,
                 source_observed_at=generated_at,
@@ -551,7 +562,11 @@ class _ProposalsRoutes:
                 max_risk=payload.max_risk,
                 expires_at=now + timedelta(minutes=payload.expires_in_minutes),
                 idempotency_key=payload.idempotency_key,
-                environment=ExecutionEnvironment(payload.environment),
+                environment=(
+                    None
+                    if payload.environment is None
+                    else ExecutionEnvironment(payload.environment)
+                ),
                 details={
                     "trigger_price": str(payload.trigger_price),
                     "limit_price": None
@@ -626,7 +641,9 @@ class _ProposalsRoutes:
             if current["status"] == ProposalStatus.DRAFT.value:
                 self.service().submit_proposal(proposal_id, identity.user_id, now=now)
                 current = self.queries().proposal_detail(identity.user_id, proposal_id)
-                self.notify_reviewers(proposal_id, int(current["version"]), payload.environment)
+                self.notify_reviewers(
+                    proposal_id, int(current["version"]), str(current["environment"])
+                )
             return current
 
     def register_review(self) -> None:

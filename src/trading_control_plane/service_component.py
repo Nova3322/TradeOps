@@ -12,8 +12,6 @@ from trading_control_plane.service_transactions import TransactionService
 
 
 class ServiceFacade(Protocol):
-    def _shadow_activation_blockers(self, session: Session, team: Team) -> list[str]: ...
-
     def _exchange_account_definition(
         self, account_id: str, venue: str, label: str | None
     ) -> tuple[str, str, str]: ...
@@ -82,23 +80,6 @@ class ServiceFacade(Protocol):
     ) -> None: ...
 
     def _consume_add_unit(self, session: Session, intent: OrderIntent) -> None: ...
-
-    def _simulate_linked_shadow_intent(
-        self,
-        session: Session,
-        *,
-        actor_id: UUID,
-        team: Team,
-        campaign: Campaign,
-        intent: OrderIntent,
-        proposal: Proposal,
-        catalog: Instrument,
-        reference_price: Decimal,
-        fee_bps: Decimal,
-        slippage_bps: Decimal,
-        idempotency_key: str,
-        now: datetime,
-    ) -> dict[str, Any]: ...
 
     def _validate_sender(
         self,
@@ -218,25 +199,13 @@ class ServiceFacade(Protocol):
         known: bool,
         actor_id: UUID,
         *,
-        environment: ExecutionEnvironment = ExecutionEnvironment.SHADOW,
+        environment: ExecutionEnvironment = ExecutionEnvironment.TESTNET,
         observed_at: datetime | None = None,
         now: datetime,
     ) -> UUID: ...
 
     def _record_account_equity_observation(
         self, session: Session, fact: AccountEquity, *, recorded_at: datetime
-    ) -> None: ...
-
-    def _apply_shadow_pnl_delta(
-        self,
-        session: Session,
-        *,
-        campaign: Campaign,
-        previous_pnl: Decimal,
-        actor_id: UUID,
-        correlation_id: UUID,
-        now: datetime,
-        equity: AccountEquity | None = None,
     ) -> None: ...
 
     def _update_campaign_pnl(

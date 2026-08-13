@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import urllib.parse
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -125,6 +126,16 @@ def seed_testnet(service: TradingService, *, key: str = "m4") -> dict[str, UUID]
     now = datetime.now(UTC)
     admin = service.bootstrap_admin(f"{key}-admin", now=now)
     set_test_team_environment(service.database, admin, "TESTNET")
+    service.create_exchange_account(
+        actor_id=admin,
+        environment=ExecutionEnvironment.TESTNET,
+        account_id="acct-testnet",
+        venue="BINANCE",
+        label="Binance Testnet",
+        credentials={"api_key": "testnet-key", "api_secret": "testnet-secret"},
+        idempotency_key=f"{key}-testnet-account",
+        now=now,
+    )
     proposer = service.create_user(f"{key}-proposer", admin, now=now)
     reviewer_one = service.create_user(f"{key}-reviewer-1", admin, now=now)
     reviewer_two = service.create_user(f"{key}-reviewer-2", admin, now=now)
@@ -363,7 +374,12 @@ def snapshot(
 
 
 async def run_complete_testnet_flow(database: Database) -> None:
-    service = TradingService(database)
+    service = TradingService(
+        database,
+        credential_encryption_key=base64.urlsafe_b64encode(b"testnet-flow-key-32-bytes-long!!"[:32])
+        .decode()
+        .rstrip("="),
+    )
     ids = seed_testnet(service)
     venue = SimulatedTestnetVenue()
     reader = MutableTestnetReader()
@@ -563,7 +579,12 @@ def test_controlled_testnet_flow_handles_partial_protection_exit_reconcile_and_p
 
 
 async def run_unknown_recovery(database: Database) -> None:
-    service = TradingService(database)
+    service = TradingService(
+        database,
+        credential_encryption_key=base64.urlsafe_b64encode(b"testnet-flow-key-32-bytes-long!!"[:32])
+        .decode()
+        .rstrip("="),
+    )
     ids = seed_testnet(service, key="m4-recovery")
     venue = SimulatedTestnetVenue()
     venue.unknown_after_next_post = True
@@ -626,7 +647,12 @@ def test_unknown_keeps_risk_and_restart_recovers_by_query_without_resend(
 
 
 async def run_cancel_and_fencing(database: Database) -> None:
-    service = TradingService(database)
+    service = TradingService(
+        database,
+        credential_encryption_key=base64.urlsafe_b64encode(b"testnet-flow-key-32-bytes-long!!"[:32])
+        .decode()
+        .rstrip("="),
+    )
     ids = seed_testnet(service, key="m4-cancel")
     venue = SimulatedTestnetVenue()
     reader = MutableTestnetReader()
@@ -670,7 +696,12 @@ def test_fencing_rejects_before_external_call_and_zero_fill_cancel_releases_once
 
 
 async def run_rejection(database: Database) -> None:
-    service = TradingService(database)
+    service = TradingService(
+        database,
+        credential_encryption_key=base64.urlsafe_b64encode(b"testnet-flow-key-32-bytes-long!!"[:32])
+        .decode()
+        .rstrip("="),
+    )
     ids = seed_testnet(service, key="m4-reject")
     venue = SimulatedTestnetVenue()
     venue.reject_next_post = True
@@ -710,7 +741,12 @@ def test_confirmed_testnet_rejection_is_terminal_and_releases_zero_fill_risk(
 
 
 async def run_partial_cancel(database: Database) -> None:
-    service = TradingService(database)
+    service = TradingService(
+        database,
+        credential_encryption_key=base64.urlsafe_b64encode(b"testnet-flow-key-32-bytes-long!!"[:32])
+        .decode()
+        .rstrip("="),
+    )
     ids = seed_testnet(service, key="m4-partial-cancel")
     venue = SimulatedTestnetVenue()
     reader = MutableTestnetReader()
@@ -787,7 +823,12 @@ def test_partial_fill_cancel_is_terminal_but_does_not_release_open_risk(
 
 
 async def run_disabled_guard(database: Database) -> None:
-    service = TradingService(database)
+    service = TradingService(
+        database,
+        credential_encryption_key=base64.urlsafe_b64encode(b"testnet-flow-key-32-bytes-long!!"[:32])
+        .decode()
+        .rstrip("="),
+    )
     ids = seed_testnet(service, key="m4-disabled")
     venue = SimulatedTestnetVenue()
     reader = MutableTestnetReader()
@@ -818,7 +859,12 @@ def test_testnet_send_is_default_off_and_disabled_guard_precedes_external_call(
 def test_read_only_sync_binds_legacy_freqtrade_fill_and_accepts_bounded_lot(
     database: Database,
 ) -> None:
-    service = TradingService(database)
+    service = TradingService(
+        database,
+        credential_encryption_key=base64.urlsafe_b64encode(b"testnet-flow-key-32-bytes-long!!"[:32])
+        .decode()
+        .rstrip("="),
+    )
     ids = seed_testnet(service, key="m4-freqtrade-fill")
     now = datetime.now(UTC)
     with database.session_factory.begin() as session:
@@ -908,7 +954,12 @@ def test_read_only_sync_binds_legacy_freqtrade_fill_and_accepts_bounded_lot(
 def test_read_only_sync_recovers_unique_late_fill_for_unknown_freqtrade_intent(
     database: Database,
 ) -> None:
-    service = TradingService(database)
+    service = TradingService(
+        database,
+        credential_encryption_key=base64.urlsafe_b64encode(b"testnet-flow-key-32-bytes-long!!"[:32])
+        .decode()
+        .rstrip("="),
+    )
     ids = seed_testnet(service, key="m4-freqtrade-late-fill")
     now = datetime.now(UTC)
     with database.session_factory.begin() as session:
@@ -1067,7 +1118,12 @@ def test_read_only_sync_recovers_unique_late_fill_for_unknown_freqtrade_intent(
 def test_emergency_recovery_binds_interrupted_ready_entry_and_cleanup(
     database: Database,
 ) -> None:
-    service = TradingService(database)
+    service = TradingService(
+        database,
+        credential_encryption_key=base64.urlsafe_b64encode(b"testnet-flow-key-32-bytes-long!!"[:32])
+        .decode()
+        .rstrip("="),
+    )
     ids = seed_testnet(service, key="m4-freqtrade-interrupted-entry")
     now = datetime.now(UTC)
     observed_at = now + timedelta(seconds=1)

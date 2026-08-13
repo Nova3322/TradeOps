@@ -151,10 +151,12 @@ class ExecutionRouteDependencies:
     require_hyperliquid_testnet: Callable[[], None]
     binance_live: BinancePortfolioMarginClient
     binance_testnet: BinanceTestnetClient
+    binance_testnet_uses_database_credentials: bool
     freqtrade_workers: tuple[FreqtradeWorkerClient, ...]
     hyperliquid: HyperliquidReadOnlyClient
     hyperliquid_live: HyperliquidLiveClient
     hyperliquid_testnet: HyperliquidTestnetClient
+    hyperliquid_testnet_uses_database_credentials: bool
     notilt: NoTiltGateway
     telegram: TelegramGateway
     unknown_hyperliquid_protection: Callable[

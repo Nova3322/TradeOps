@@ -4,8 +4,10 @@ import asyncio
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from uuid import UUID
 
 import pytest
+from conftest import add_exchange_account_fixture
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy import select
 
@@ -39,6 +41,12 @@ from trading_control_plane.safe_spending import SafeSpendingGateway
 from trading_control_plane.service import TradingService
 
 
+def _add_live_accounts(database: Database, admin: UUID) -> None:
+    add_exchange_account_fixture(database, admin, "binance-main", "BINANCE")
+    add_exchange_account_fixture(database, admin, "hyperliquid-main", "HYPERLIQUID")
+    add_exchange_account_fixture(database, admin, "acct-live", "BINANCE")
+
+
 async def _login(client: AsyncClient, username: str) -> None:
     response = await client.post("/api/auth/mock/login", json={"username": username})
     assert response.status_code == 200, response.text
@@ -50,6 +58,7 @@ def test_live_balance_history_is_persisted_no_faster_than_once_per_minute(
     service = TradingService(database)
     start = datetime.now(UTC).replace(microsecond=0)
     actor = service.bootstrap_admin("capital-history-admin", now=start)
+    _add_live_accounts(database, actor)
     for seconds, equity in ((0, "10"), (30, "11"), (60, "12")):
         observed_at = start + timedelta(seconds=seconds)
         service.record_account_equity(
@@ -66,9 +75,7 @@ def test_live_balance_history_is_persisted_no_faster_than_once_per_minute(
         )
     with database.session_factory() as session:
         observations = session.scalars(
-            select(AccountEquityObservation).order_by(
-                AccountEquityObservation.observed_at
-            )
+            select(AccountEquityObservation).order_by(AccountEquityObservation.observed_at)
         ).all()
     assert [item.equity for item in observations] == [Decimal("10"), Decimal("12")]
     assert observations[1].observed_at - observations[0].observed_at == timedelta(minutes=1)
@@ -140,7 +147,8 @@ def test_hyperliquid_withdrawal_auto_falls_back_to_wallet_and_settles_only_after
 ) -> None:
     service = TradingService(database)
     now = datetime.now(UTC)
-    service.bootstrap_admin("hl-capital-admin", now=now)
+    admin = service.bootstrap_admin("hl-capital-admin", now=now)
+    _add_live_accounts(database, admin)
     state: dict[str, object] = {}
     withdrawal_hash = "0x" + "ab" * 32
     withdrawal_arbitrum_hash = "0x" + "cd" * 32
@@ -171,13 +179,9 @@ def test_hyperliquid_withdrawal_auto_falls_back_to_wallet_and_settles_only_after
 
     bridge_topic = f"0x{HYPERLIQUID_BRIDGE2_ADDRESS[2:].rjust(64, '0')}"
     main_topic = f"0x{main[2:].rjust(64, '0')}"
-    safe_transfer_data = (
-        "0xa9059cbb" + safe[2:].rjust(64, "0") + hex(99_000_000)[2:].rjust(64, "0")
-    )
+    safe_transfer_data = "0xa9059cbb" + safe[2:].rjust(64, "0") + hex(99_000_000)[2:].rjust(64, "0")
 
-    def rpc_fetcher(
-        _url: str, method: str, params: list[object], _timeout: float
-    ) -> object:
+    def rpc_fetcher(_url: str, method: str, params: list[object], _timeout: float) -> object:
         tx_hash = str(params[0]) if params else ""
         if method == "eth_blockNumber":
             return "0x78"
@@ -232,9 +236,7 @@ def test_hyperliquid_withdrawal_auto_falls_back_to_wallet_and_settles_only_after
                 rpc_fetcher=rpc_fetcher,
             ),
         )
-        async with AsyncClient(
-            transport=ASGITransport(app=app), base_url="http://test"
-        ) as client:
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
             await _login(client, "hl-capital-admin")
             configured = await client.put(
                 "/api/capital/direct-configuration",
@@ -242,9 +244,7 @@ def test_hyperliquid_withdrawal_auto_falls_back_to_wallet_and_settles_only_after
                     "treasury_provider": "SAFE_SPENDING_LIMIT",
                     "safe_address": safe,
                     "binance_withdrawal_address": safe,
-                    "safe_delegate_address": (
-                        "0x8888888888888888888888888888888888888888"
-                    ),
+                    "safe_delegate_address": ("0x8888888888888888888888888888888888888888"),
                     "hyperliquid_bridge_address": HYPERLIQUID_BRIDGE2_ADDRESS,
                     "idempotency_key": "hl-capital-config",
                 },
@@ -354,10 +354,7 @@ def test_hyperliquid_withdrawal_auto_falls_back_to_wallet_and_settles_only_after
 
     asyncio.run(scenario())
     with database.session_factory() as session:
-        events = {
-            item.event_type
-            for item in session.scalars(select(AuditEvent)).all()
-        }
+        events = {item.event_type for item in session.scalars(select(AuditEvent)).all()}
     assert "CAPITAL_HYPERLIQUID_WALLET_REQUEST_PREPARED" in events
     assert "CAPITAL_HUMAN_WALLET_SUBMISSION_RECORDED" in events
     assert "CAPITAL_HYPERLIQUID_RECEIPT_VERIFIED" in events
@@ -370,6 +367,7 @@ def test_safe_spending_limit_provider_is_selected_audited_and_never_signed(
     service = TradingService(database)
     now = datetime.now(UTC)
     admin = service.bootstrap_admin("safe-provider-admin", now=now)
+    _add_live_accounts(database, admin)
     treasury = service.create_user("safe-provider-treasury", admin, now=now)
     service.assign_role(treasury, Role.TREASURY_ADMIN, admin, now=now)
 
@@ -427,9 +425,7 @@ def test_safe_spending_limit_provider_is_selected_audited_and_never_signed(
                 json={
                     "treasury_provider": "SAFE_SPENDING_LIMIT",
                     "safe_address": "0x7777777777777777777777777777777777777777",
-                    "binance_withdrawal_address": (
-                        "0x7777777777777777777777777777777777777777"
-                    ),
+                    "binance_withdrawal_address": ("0x7777777777777777777777777777777777777777"),
                     "safe_delegate_address": "0x8888888888888888888888888888888888888888",
                     "idempotency_key": "safe-provider-configure",
                 },
@@ -524,6 +520,7 @@ def test_binance_restricted_withdrawal_runs_frozen_preflight_submission_and_dual
     service = TradingService(database)
     now = datetime.now(UTC)
     admin_id = service.bootstrap_admin("binance-capital-admin", now=now)
+    _add_live_accounts(database, admin_id)
     service.set_capability_gate(
         "CAPITAL_TRANSFER",
         CapabilityStatus.ENABLED,
@@ -707,6 +704,7 @@ def test_proposal_defaults_and_direct_capital_are_permissioned_audited_and_block
     service = TradingService(database)
     now = datetime.now(UTC)
     admin = service.bootstrap_admin("product-admin", now=now)
+    _add_live_accounts(database, admin)
     proposer = service.create_user("product-proposer", admin, now=now)
     treasury = service.create_user("product-treasury", admin, now=now)
     observer = service.create_user("product-observer", admin, now=now)
@@ -974,6 +972,7 @@ def test_system_admin_cannot_approve_own_proposal_or_use_a_direct_override(
     service = TradingService(database)
     now = datetime.now(UTC)
     admin = service.bootstrap_admin("direct-approval-admin", now=now)
+    _add_live_accounts(database, admin)
     instrument_id = service.register_instrument(
         actor_id=admin,
         venue="BINANCE",
@@ -1060,6 +1059,7 @@ def test_direct_binance_return_does_not_build_redundant_notilt_wallet_deposit(
     service = TradingService(database)
     now = datetime.now(UTC)
     admin = service.bootstrap_admin("notilt-direct-admin", now=now)
+    _add_live_accounts(database, admin)
     treasury = service.create_user("notilt-direct-treasury", admin, now=now)
     service.assign_role(treasury, Role.TREASURY_ADMIN, admin, now=now)
 
@@ -1174,10 +1174,7 @@ def test_direct_binance_return_does_not_build_redundant_notilt_wallet_deposit(
                 },
             )
             assert preview.status_code == 422, preview.text
-            assert (
-                preview.json()["error"]["code"]
-                == "BINANCE_DIRECT_TREASURY_WITHDRAWAL_REQUIRED"
-            )
+            assert preview.json()["error"]["code"] == "BINANCE_DIRECT_TREASURY_WITHDRAWAL_REQUIRED"
 
     asyncio.run(scenario())
     with database.session_factory() as session:
@@ -1198,6 +1195,7 @@ def test_direct_notilt_return_rejects_non_deposit_sdk_function(database: Databas
     service = TradingService(database)
     now = datetime.now(UTC)
     admin = service.bootstrap_admin("notilt-plan-admin", now=now)
+    _add_live_accounts(database, admin)
     treasury = service.create_user("notilt-plan-treasury", admin, now=now)
     service.assign_role(treasury, Role.TREASURY_ADMIN, admin, now=now)
 
@@ -1312,6 +1310,7 @@ def test_direct_notilt_release_rereads_live_agent_budget_before_unsigned_preview
     now = datetime.now(UTC)
     case_name = expected_code or "SAFE"
     admin = service.bootstrap_admin(f"release-admin-{case_name}", now=now)
+    _add_live_accounts(database, admin)
     treasury = service.create_user(f"release-treasury-{case_name}", admin, now=now)
     service.assign_role(treasury, Role.TREASURY_ADMIN, admin, now=now)
     calls: list[str] = []

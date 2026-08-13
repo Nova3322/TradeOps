@@ -9,6 +9,7 @@ from typing import Any
 from uuid import UUID
 
 import pytest
+from conftest import add_exchange_account_fixture
 from sqlalchemy import func, select
 
 from trading_control_plane.binance import (
@@ -127,6 +128,13 @@ def ingest(
     now: datetime,
     *snapshots: BinanceReadOnlySnapshot,
 ) -> dict[str, Any]:
+    add_exchange_account_fixture(
+        service.database,
+        actor,
+        account_id,
+        "BINANCE",
+        environment=environment.value,
+    )
     return service.ingest_binance_read_only_account_snapshot(
         account_id,
         actor,
@@ -210,6 +218,13 @@ def ingest_hyperliquid(
     now: datetime,
     *snapshots: HyperliquidReadOnlySnapshot,
 ) -> dict[str, Any]:
+    add_exchange_account_fixture(
+        service.database,
+        actor,
+        "account-a",
+        "HYPERLIQUID",
+        environment="LIVE",
+    )
     return service.ingest_hyperliquid_read_only_account_snapshot(
         "account-a",
         actor,

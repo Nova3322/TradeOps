@@ -49,7 +49,6 @@ class TradingQueries:
         self.runtime_snapshot = self._execution.runtime_snapshot
         self.runtime_source_health = self._execution.runtime_source_health
         self.list_campaigns = self._execution.list_campaigns
-        self.shadow_workspace = self._execution.shadow_workspace
         self.campaign_detail = self._execution.campaign_detail
         self.campaign_id_for_intent = self._execution.campaign_id_for_intent
         self._order_summary = self._execution._order_summary

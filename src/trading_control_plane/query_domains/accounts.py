@@ -26,7 +26,10 @@ class AccountQueries(QueryComponent):
                 raise DomainRejected("RBAC_DENIED", "exchange account visibility is not assigned")
             accounts = session.scalars(
                 select(ExchangeAccount)
-                .where(ExchangeAccount.team_id == team_id, ExchangeAccount.active)
+                .where(
+                    ExchangeAccount.team_id == team_id,
+                    ExchangeAccount.deleted_at.is_(None),
+                )
                 .order_by(ExchangeAccount.venue, ExchangeAccount.label, ExchangeAccount.account_id)
             ).all()
             visible = [
