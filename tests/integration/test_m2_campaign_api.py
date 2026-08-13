@@ -6,6 +6,7 @@ from decimal import Decimal
 from typing import Any
 from uuid import UUID, uuid4
 
+from conftest import set_test_team_environment
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy import func, select
@@ -32,6 +33,7 @@ from trading_control_plane.telegram import MockTelegramGateway
 def seed_authorized_campaign(service: TradingService) -> dict[str, UUID]:
     now = datetime.now(UTC)
     admin = service.bootstrap_admin("admin", now=now)
+    set_test_team_environment(service.database, admin, "SHADOW")
     proposer = service.create_user("proposer", admin, now=now)
     reviewer_one = service.create_user("reviewer-1", admin, now=now)
     reviewer_two = service.create_user("reviewer-2", admin, now=now)

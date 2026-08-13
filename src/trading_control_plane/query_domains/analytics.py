@@ -42,6 +42,7 @@ class AnalyticsQueries(QueryComponent):
             "generation": report.generation,
             "account_ids": report.account_ids,
             "venues": report.venues,
+            "account_scopes": report.account_scopes,
             "from_time": report.from_time.astimezone(UTC).isoformat(),
             "to_time": report.to_time.astimezone(UTC).isoformat(),
             "generated_at": report.generated_at.astimezone(UTC).isoformat(),
@@ -74,25 +75,29 @@ class AnalyticsQueries(QueryComponent):
                     "report is outside the active Workspace and Team scope",
                 )
             if report.environment == "LIVE":
-                allowed = {
-                    (item.account_id, item.venue)
-                    for item in session.scalars(
-                        select(ExchangeAccount).where(
-                            ExchangeAccount.team_id == team_id,
-                            ExchangeAccount.active,
-                        )
-                    ).all()
-                    if self.service.can_user(
-                        user_id, "view", item.account_id, item.venue
+                exact_scopes = report.account_scopes
+                if not exact_scopes or any(
+                    not isinstance(item, dict)
+                    or not isinstance(item.get("account_id"), str)
+                    or not isinstance(item.get("venue"), str)
+                    for item in exact_scopes
+                ):
+                    raise DomainRejected(
+                        "ANALYTICS_ACCOUNT_SCOPE_UNAVAILABLE",
+                        "report does not contain verified exact account and venue scopes",
                     )
-                }
                 if any(
-                    not any(account == item[0] for item in allowed)
-                    for account in report.account_ids
+                    not self.service.can_user(
+                        user_id,
+                        "view",
+                        item["account_id"],
+                        item["venue"],
+                    )
+                    for item in exact_scopes
                 ):
                     raise DomainRejected(
                         "ANALYTICS_ACCOUNT_SCOPE_DENIED",
-                        "report account is outside the authorized Team scope",
+                        "report account and venue scope is outside current user RBAC",
                     )
             return self._report_summary(report)
 
@@ -108,6 +113,7 @@ class AnalyticsQueries(QueryComponent):
                     "persisted report artifact failed integrity validation",
                 )
             return report.artifact_html, report.engine.lower()
+
     @staticmethod
     def _validate_request(
         environment: str,
@@ -155,9 +161,7 @@ class AnalyticsQueries(QueryComponent):
                     .where(ExchangeAccount.team_id == team_id, ExchangeAccount.active)
                     .order_by(ExchangeAccount.venue, ExchangeAccount.account_id)
                 ).all()
-                if self.service.can_user(
-                    user_id, "view", account.account_id, account.venue
-                )
+                if self.service.can_user(user_id, "view", account.account_id, account.venue)
             ]
             generations = session.scalars(
                 select(TeamShadowAccount)
@@ -255,13 +259,9 @@ class AnalyticsQueries(QueryComponent):
             TeamShadowAccount.team_id == team.team_id
         )
         if generation is None:
-            account_statement = account_statement.where(
-                TeamShadowAccount.status == "ACTIVE"
-            )
+            account_statement = account_statement.where(TeamShadowAccount.status == "ACTIVE")
         else:
-            account_statement = account_statement.where(
-                TeamShadowAccount.generation == generation
-            )
+            account_statement = account_statement.where(TeamShadowAccount.generation == generation)
         shadow_account = session.scalar(account_statement)
         if shadow_account is None:
             raise DomainRejected(
@@ -303,8 +303,7 @@ class AnalyticsQueries(QueryComponent):
             select(ShadowPosition, ShadowInstrument)
             .join(
                 ShadowInstrument,
-                ShadowInstrument.shadow_instrument_id
-                == ShadowPosition.shadow_instrument_id,
+                ShadowInstrument.shadow_instrument_id == ShadowPosition.shadow_instrument_id,
             )
             .where(
                 ShadowPosition.team_id == team.team_id,
@@ -386,9 +385,7 @@ class AnalyticsQueries(QueryComponent):
         for fill in fills:
             key = (fill.venue, fill.symbol)
             running_quantities[key] += fill.signed_amount
-            market_value = (
-                running_quantities[key] * fill.price * fill.contract_multiplier
-            )
+            market_value = running_quantities[key] * fill.price * fill.contract_multiplier
             historical_positions.append(
                 PositionSnapshot(
                     account_id="TEAM_SHADOW",
@@ -457,6 +454,7 @@ class AnalyticsQueries(QueryComponent):
             environment="SHADOW",
             account_ids=("TEAM_SHADOW",),
             venues=("TRADINGOPS",),
+            account_venues=(),
             generation=selected_generation,
             from_time=start,
             to_time=end,
@@ -471,6 +469,7 @@ class AnalyticsQueries(QueryComponent):
             orders=orders,
             cashflows=cashflows,
             sources={"TEAM_SHADOW_ACCOUNT", "SHADOW_ORDER", "SHADOW_FILL"},
+            positions_complete=True,
         )
 
     def _live_dataset(
@@ -548,8 +547,7 @@ class AnalyticsQueries(QueryComponent):
             to_time=end,
         )
         instruments = {
-            item.instrument_id: item
-            for item in session.scalars(select(Instrument)).all()
+            item.instrument_id: item for item in session.scalars(select(Instrument)).all()
         }
         position_facts = session.scalars(
             select(Position)
@@ -576,9 +574,7 @@ class AnalyticsQueries(QueryComponent):
                     "LIVE position instrument or mark price is missing",
                 )
             market_value = (
-                position_fact.quantity
-                * position_fact.mark_price
-                * instrument.contract_multiplier
+                position_fact.quantity * position_fact.mark_price * instrument.contract_multiplier
             )
             positions.append(
                 PositionSnapshot(
@@ -625,17 +621,13 @@ class AnalyticsQueries(QueryComponent):
                         else fill_fact.venue_fill_id
                     ),
                     signed_amount=(
-                        fill_fact.quantity
-                        if fill_fact.side == "BUY"
-                        else -fill_fact.quantity
+                        fill_fact.quantity if fill_fact.side == "BUY" else -fill_fact.quantity
                     ),
                     quantity=fill_fact.quantity,
                     price=fill_fact.price,
                     contract_multiplier=instrument.contract_multiplier,
                     notional=abs(
-                        fill_fact.quantity
-                        * fill_fact.price
-                        * instrument.contract_multiplier
+                        fill_fact.quantity * fill_fact.price * instrument.contract_multiplier
                     ),
                     fee=fill_fact.fee,
                     fee_currency=fill_fact.fee_currency,
@@ -728,6 +720,7 @@ class AnalyticsQueries(QueryComponent):
             environment="LIVE",
             account_ids=tuple(sorted({item.account_id for item in accounts})),
             venues=tuple(sorted({item.venue for item in accounts})),
+            account_venues=tuple(sorted({(item.account_id, item.venue) for item in accounts})),
             generation=None,
             from_time=start,
             to_time=end,
@@ -749,6 +742,7 @@ class AnalyticsQueries(QueryComponent):
                 "FUNDING_PAYMENT",
                 "CAPITAL_TRANSFER",
             },
+            positions_complete=False,
         )
 
     @staticmethod
@@ -767,9 +761,7 @@ class AnalyticsQueries(QueryComponent):
             key = (item.account_id, item.venue, item.currency)
             by_source_day[key][item.observed_at.astimezone(UTC).date()] = item
         if not by_source_day:
-            raise DomainRejected(
-                "ANALYTICS_NAV_CONTINUITY_MISSING", "LIVE equity history is empty"
-            )
+            raise DomainRejected("ANALYTICS_NAV_CONTINUITY_MISSING", "LIVE equity history is empty")
         day_sets = [set(items) for items in by_source_day.values()]
         first_days = day_sets[0]
         if any(days != first_days for days in day_sets[1:]):
@@ -787,9 +779,7 @@ class AnalyticsQueries(QueryComponent):
                     observed_at=observed_at,
                     equity=equity,
                     currency="USD",
-                    source_id="|".join(
-                        sorted(str(item.observation_id) for item in rows)
-                    ),
+                    source_id="|".join(sorted(str(item.observation_id) for item in rows)),
                 )
             )
         return tuple(result)
@@ -861,6 +851,7 @@ class AnalyticsQueries(QueryComponent):
         orders: tuple[CanonicalOrder, ...],
         cashflows: tuple[Cashflow, ...],
         sources: set[str],
+        positions_complete: bool,
     ) -> AnalyticsDataset:
         coverage = {
             "nav_point_count": len(nav),
@@ -869,7 +860,7 @@ class AnalyticsQueries(QueryComponent):
             "position_snapshot_count": len(positions),
             "transaction_count": len(fills),
             "order_count": len(orders),
-            "positions_complete": True,
+            "positions_complete": positions_complete,
             "transactions_complete": True,
         }
         metadata = {
@@ -882,6 +873,11 @@ class AnalyticsQueries(QueryComponent):
             "fill_pnl_used_as_returns": False,
             "pandas_is_source_of_truth": False,
             "quantstats_is_source_of_truth": False,
+            "position_history_source": (
+                "PERSISTED_SNAPSHOTS"
+                if positions_complete
+                else "CURRENT_STATE_ONLY_NO_HISTORICAL_SNAPSHOTS"
+            ),
         }
         return AnalyticsDataset(
             scope=scope,

@@ -29,7 +29,12 @@ class CampaignExecutionService(ServiceComponent):
                 campaign.venue,
                 team_id=campaign.team_id,
             )
-            policy = session.scalar(select(RiskPolicy).where(RiskPolicy.active))
+            policy = session.scalar(
+                select(RiskPolicy).where(
+                    RiskPolicy.team_id == campaign.team_id,
+                    RiskPolicy.active,
+                )
+            )
             if policy is None:
                 _reject("RISK_POLICY_MISSING", "target update requires an active policy")
             position = session.scalar(
@@ -109,7 +114,12 @@ class CampaignExecutionService(ServiceComponent):
             )
             if position is None or position.fact_status != FactStatus.KNOWN.value:
                 _reject("POSITION_UNKNOWN", "reduction requires current known position")
-            policy = session.scalar(select(RiskPolicy).where(RiskPolicy.active))
+            policy = session.scalar(
+                select(RiskPolicy).where(
+                    RiskPolicy.team_id == campaign.team_id,
+                    RiskPolicy.active,
+                )
+            )
             if policy is None:
                 _reject("RISK_POLICY_MISSING", "reduction requires an active policy")
             if now - position.observed_at > timedelta(seconds=policy.max_fact_age_seconds):
@@ -442,7 +452,12 @@ class CampaignExecutionService(ServiceComponent):
             )
             if campaign.status == CampaignStatus.CLOSED.value:
                 return
-            policy = session.scalar(select(RiskPolicy).where(RiskPolicy.active))
+            policy = session.scalar(
+                select(RiskPolicy).where(
+                    RiskPolicy.team_id == campaign.team_id,
+                    RiskPolicy.active,
+                )
+            )
             position = session.scalar(
                 select(Position)
                 .where(

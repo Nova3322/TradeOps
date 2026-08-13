@@ -172,6 +172,7 @@ class FactIngestionExecutionService(ServiceComponent):
             if (
                 environment is ExecutionEnvironment.SHADOW
                 and team.execution_mode == TeamExecutionMode.SHADOW.value
+                and team.execution_mode_locked_at is not None
             ):
                 _reject(
                     "SHADOW_FACTS_SIMULATOR_MANAGED",
@@ -394,6 +395,7 @@ class FactIngestionExecutionService(ServiceComponent):
             if (
                 environment is ExecutionEnvironment.SHADOW
                 and team.execution_mode == TeamExecutionMode.SHADOW.value
+                and team.execution_mode_locked_at is not None
             ):
                 _reject(
                     "SHADOW_FACTS_SIMULATOR_MANAGED",

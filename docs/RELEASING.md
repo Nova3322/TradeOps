@@ -14,7 +14,7 @@ identity. Local `refs/codex/snapshots/*` are tool state and must never be pushed
 5. Run formatting, lint, typing, migrations, unit, integration, API, and browser
    end-to-end tests against disposable infrastructure.
 6. Start from a copy of `.env.example`; verify `/health/live`, `/health/ready`,
-   `/openapi.json`, login, roles, API Client lifecycle, and all persistent gates.
+   `/openapi.json`, login, roles, API Key lifecycle, and all persistent gates.
 7. Inspect 1440, 1024, 430, and 390 screenshots for both themes. Screenshots must
    use synthetic fixtures and contain no credential or private operational data.
 8. Update `CHANGELOG.md`, version metadata, and release notes.

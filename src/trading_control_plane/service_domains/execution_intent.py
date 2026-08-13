@@ -194,8 +194,7 @@ class IntentExecutionService(ServiceComponent):
                     shadow_position = session.scalar(
                         select(ShadowPosition)
                         .where(
-                            ShadowPosition.shadow_account_id
-                            == shadow_account.shadow_account_id,
+                            ShadowPosition.shadow_account_id == shadow_account.shadow_account_id,
                             ShadowPosition.generation == shadow_account.generation,
                             ShadowPosition.shadow_instrument_id
                             == shadow_instrument.shadow_instrument_id,
@@ -300,14 +299,12 @@ class IntentExecutionService(ServiceComponent):
                 }:
                     _reject("ADD_CAMPAIGN_REQUIRED", "ADD requires an existing known campaign")
                 expected_long = campaign.direction == Direction.LONG.value
-                current_position = (
-                    shadow_position
-                    if unified_shadow
-                    else position
-                )
-                if current_position is None or current_position.quantity == 0 or (
-                    current_position.quantity > 0
-                ) != expected_long:
+                current_position = shadow_position if unified_shadow else position
+                if (
+                    current_position is None
+                    or current_position.quantity == 0
+                    or (current_position.quantity > 0) != expected_long
+                ):
                     _reject("ADD_POSITION_INVALID", "ADD requires an existing aligned position")
                 unrealized_pnl = (
                     current_position.mark_price - current_position.average_entry_price
@@ -610,7 +607,12 @@ class IntentExecutionService(ServiceComponent):
                     authorization.used_quantity -= intent.quantity
             close_unfilled_campaign = False
             if intent.kind == IntentKind.INITIAL.value:
-                policy = session.scalar(select(RiskPolicy).where(RiskPolicy.active))
+                policy = session.scalar(
+                    select(RiskPolicy).where(
+                        RiskPolicy.team_id == campaign.team_id,
+                        RiskPolicy.active,
+                    )
+                )
                 position = session.scalar(
                     select(Position).where(
                         Position.team_id == campaign.team_id,

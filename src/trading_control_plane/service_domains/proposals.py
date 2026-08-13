@@ -388,7 +388,7 @@ class ProposalService(ServiceComponent):
             ):
                 _reject(
                     "PROPOSAL_SOURCE_INVALID",
-                    "SYSTEM proposals require a service or HUMAN-owned API Client, strategy "
+                    "SYSTEM proposals require a service or user-owned API Key, strategy "
                     "version and candidate",
                 )
             instrument = session.get(Instrument, instrument_id)

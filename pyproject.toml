@@ -58,6 +58,7 @@ packages = ["src/trading_control_plane"]
 
 [tool.hatch.build.targets.wheel.force-include]
 "docs/AI_API_QUICKSTART.md" = "trading_control_plane/web/AI_API_QUICKSTART.md"
+"docs/API_KEY_QUICKSTART.md" = "trading_control_plane/web/API_KEY_QUICKSTART.md"
 
 [tool.pytest.ini_options]
 addopts = "-ra --strict-config --strict-markers"

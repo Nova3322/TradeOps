@@ -7,6 +7,7 @@ from decimal import Decimal
 from typing import Any
 from uuid import UUID
 
+from conftest import set_test_team_environment
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy import func, select
@@ -38,6 +39,7 @@ from trading_control_plane.telegram import MockTelegramGateway
 def seed(service: TradingService) -> dict[str, UUID]:
     now = datetime.now(UTC)
     admin = service.bootstrap_admin("admin", now=now)
+    set_test_team_environment(service.database, admin, "SHADOW")
     proposer = service.create_user("proposer", admin, now=now)
     reviewer_one = service.create_user("reviewer-1", admin, now=now)
     reviewer_two = service.create_user("reviewer-2", admin, now=now)
@@ -969,7 +971,8 @@ def test_perptape_to_review_to_risk_and_authorization_api_flow(
 def test_perptape_candidate_can_start_as_explicit_live_proposal(
     database: Database, service: TradingService
 ) -> None:
-    seed(service)
+    ids = seed(service)
+    set_test_team_environment(database, ids["admin"], "LIVE")
     telegram = MockTelegramGateway()
 
     async def scenario() -> None:
@@ -1003,6 +1006,7 @@ def test_high_risk_review_refreshes_only_the_remaining_reviewer_notification(
     database: Database, service: TradingService
 ) -> None:
     ids = seed(service)
+    set_test_team_environment(database, ids["admin"], "LIVE")
     telegram = MockTelegramGateway()
 
     async def scenario() -> None:
@@ -1189,9 +1193,9 @@ def test_manual_api_is_idempotent_and_semantic_conflicts_are_explicit(
                 "/api/proposals/manual",
                 json={**payload, "idempotency_key": "manual-api-live", "environment": "LIVE"},
             )
-            assert live_scope.status_code == 200
-            assert live_scope.json()["proposal_id"] != first.json()["proposal_id"]
-            assert len(telegram.notifications()) == 6
+            assert live_scope.status_code == 422
+            assert live_scope.json()["error"]["code"] == "TEAM_SHADOW_ONLY"
+            assert len(telegram.notifications()) == 3
 
             conflict = await client.post(
                 "/api/proposals/manual", json={**payload, "quantity": "0.2"}
@@ -1205,11 +1209,11 @@ def test_manual_api_is_idempotent_and_semantic_conflicts_are_explicit(
             )
             assert distinct.status_code == 200
             assert distinct.json()["proposal_id"] != first.json()["proposal_id"]
-            assert len(telegram.notifications()) == 9
+            assert len(telegram.notifications()) == 6
 
     asyncio.run(scenario())
     with database.session_factory() as session:
-        assert session.scalar(select(func.count()).select_from(Proposal)) == 3
+        assert session.scalar(select(func.count()).select_from(Proposal)) == 2
         assert (
             session.scalar(
                 select(func.count())
@@ -1224,6 +1228,7 @@ def test_manual_proposal_accepts_u_margin_amount_and_resolves_frozen_quantity(
     database: Database, service: TradingService
 ) -> None:
     ids = seed(service)
+    set_test_team_environment(database, ids["admin"], "LIVE")
     service.register_instrument(
         actor_id=ids["admin"],
         venue="BINANCE",

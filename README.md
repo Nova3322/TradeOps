@@ -44,8 +44,8 @@ strategy or signal
   is neither real-time data nor zero.
 - **Controlled execution** — external effects require explicit process and
   persistent database gates, idempotency, and reconciliation.
-- **Human-owned API Clients** — Tokens inherit current roles dynamically and are
-  fixed to one Workspace, Team, Account, and Venue.
+- **User-owned API Keys** — Credentials inherit the owner's current RBAC
+  dynamically; Account and Venue access is checked per resource.
 
 ## Five-minute safe start
 

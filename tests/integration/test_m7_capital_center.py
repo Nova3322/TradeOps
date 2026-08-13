@@ -6,6 +6,7 @@ from decimal import Decimal
 from uuid import UUID
 
 import pytest
+from conftest import set_test_team_environment
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy import select
@@ -44,6 +45,7 @@ from trading_control_plane.telegram import MockTelegramGateway
 def seed(service: TradingService) -> dict[str, UUID]:
     now = datetime.now(UTC) - timedelta(seconds=2)
     admin = service.bootstrap_admin("admin", now=now)
+    set_test_team_environment(service.database, admin, "TESTNET")
     proposer = service.create_user("treasury-proposer", admin, now=now)
     reviewer_one = service.create_user("treasury-reviewer-1", admin, now=now)
     reviewer_two = service.create_user("treasury-reviewer-2", admin, now=now)

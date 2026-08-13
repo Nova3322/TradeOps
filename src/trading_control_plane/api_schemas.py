@@ -123,8 +123,9 @@ class ApiClientCreateRequest(BaseModel):
     name: str = Field(min_length=1, max_length=120, pattern=r"^[A-Za-z0-9._-]+$")
     workspace_id: UUID
     team_id: UUID
-    account_id: str = Field(min_length=1, max_length=120)
-    venue: VenueScope
+    # Accepted but ignored for compatibility with the former API Client scope model.
+    account_id: str | None = Field(default=None, min_length=1, max_length=120)
+    venue: VenueScope | None = None
     expires_in_days: int = Field(default=90, ge=1, le=365)
     idempotency_key: str = Field(min_length=1, max_length=160)
 
@@ -371,8 +372,7 @@ class FreqtradeWorkerConfigureRequest(BaseModel):
     def validate_configuration_shape(self) -> FreqtradeWorkerConfigureRequest:
         configured = self.mode != "UNCONFIGURED"
         provided = all(
-            value is not None
-            for value in (self.name, self.base_url, self.username, self.password)
+            value is not None for value in (self.name, self.base_url, self.username, self.password)
         )
         if configured != provided:
             raise ValueError(

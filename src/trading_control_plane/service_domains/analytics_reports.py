@@ -26,6 +26,10 @@ class AnalyticsReportService(ServiceComponent):
             "generation": dataset.scope.generation,
             "account_ids": list(dataset.scope.account_ids),
             "venues": list(dataset.scope.venues),
+            "account_scopes": [
+                {"account_id": account_id, "venue": venue}
+                for account_id, venue in dataset.scope.account_venues
+            ],
             "from_time": dataset.scope.from_time.isoformat(),
             "to_time": dataset.scope.to_time.isoformat(),
         }
@@ -61,6 +65,7 @@ class AnalyticsReportService(ServiceComponent):
                 generation=dataset.scope.generation,
                 account_ids=list(dataset.scope.account_ids),
                 venues=list(dataset.scope.venues),
+                account_scopes=payload["account_scopes"],
                 from_time=dataset.scope.from_time,
                 to_time=dataset.scope.to_time,
                 status="READY",
@@ -113,6 +118,7 @@ class AnalyticsReportService(ServiceComponent):
                     "from_time": report.from_time.isoformat(),
                     "to_time": report.to_time.isoformat(),
                     "coverage": report.coverage,
+                    "account_scopes": report.account_scopes,
                     "artifact_sha256": report.artifact_sha256,
                     "exchange_write_adapter_calls": 0,
                 },

@@ -233,7 +233,7 @@ class TransactionService:
             _reject("USER_NOT_AUTHORIZED", "user is missing or inactive")
         api_context = current_api_client_context()
         if api_context is not None and api_context.owner_user_id != user_id:
-            _reject("API_CLIENT_SCOPE_DENIED", "API Client owner does not match the request actor")
+            _reject("API_CLIENT_SCOPE_DENIED", "API Key owner does not match the request actor")
         workspace_id = (
             api_context.workspace_id if api_context is not None else user.active_workspace_id
         )
@@ -310,10 +310,6 @@ class TransactionService:
                     "HUMAN_WEB_CONFIRMATION_REQUIRED",
                     f"{action} requires the owner to use an interactive web session",
                 )
-            if account_id is not None and account_id != api_context.account_id:
-                _reject("API_CLIENT_SCOPE_DENIED", "resource is outside the API Client account")
-            if venue is not None and venue != api_context.venue:
-                _reject("API_CLIENT_SCOPE_DENIED", "resource is outside the API Client venue")
         _user, _workspace, team = self._active_scope(session, user_id)
         assert team is not None
         if team_id is not None and team.team_id != team_id:
@@ -352,11 +348,16 @@ class TransactionService:
                 "TEAM_SETUP_INCOMPLETE",
                 "team must complete setup and explicitly enter SHADOW mode",
             )
-        if team.execution_mode_locked_at is not None and environment.value != mode:
+        if environment.value != mode:
             if mode == TeamExecutionMode.SHADOW.value:
                 _reject(
                     "TEAM_SHADOW_ONLY",
                     "Team mode is locked to SHADOW; TESTNET and LIVE workflows are blocked",
+                )
+            if mode == TeamExecutionMode.TESTNET.value:
+                _reject(
+                    "TEAM_TESTNET_ONLY",
+                    "Team mode is locked to TESTNET; SHADOW and LIVE workflows are blocked",
                 )
             _reject(
                 "TEAM_LIVE_ONLY",

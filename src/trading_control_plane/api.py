@@ -792,13 +792,11 @@ def create_app(
             if retry_after is not None:
                 raise DomainRejected(
                     "API_CLIENT_RATE_LIMITED",
-                    f"API Client request rate exceeded; retry after {retry_after} seconds",
+                    f"API Key request rate exceeded; retry after {retry_after} seconds",
                 )
             api_client_id = UUID(str(authenticated["api_client_id"]))
             workspace_id = UUID(str(authenticated["workspace_id"]))
             team_id = UUID(str(authenticated["team_id"]))
-            account_id = str(authenticated["account_id"])
-            venue = str(authenticated["venue"])
             identity = SessionIdentity(
                 user_id=UUID(str(authenticated["user_id"])),
                 username=str(authenticated["username"]),
@@ -809,16 +807,12 @@ def create_app(
                 api_client_name=str(authenticated["api_client_name"]),
                 workspace_id=workspace_id,
                 team_id=team_id,
-                account_id=account_id,
-                venue=venue,
             )
             request_context = ApiClientRequestContext(
                 owner_user_id=identity.user_id,
                 api_client_id=api_client_id,
                 workspace_id=workspace_id,
                 team_id=team_id,
-                account_id=account_id,
-                venue=venue,
             )
             context_token = bind_api_client_context(request_context)
             try:
@@ -1539,10 +1533,11 @@ def create_app(
         def service_worker() -> FileResponse:
             return FileResponse(WEB_ROOT / "sw.js", media_type="application/javascript")
 
+        @app.get("/docs/API_KEY_QUICKSTART.md", include_in_schema=False)
         @app.get("/docs/AI_API_QUICKSTART.md", include_in_schema=False)
-        def ai_api_quickstart() -> FileResponse:
-            packaged_quickstart = WEB_ROOT / "AI_API_QUICKSTART.md"
-            source_quickstart = WEB_ROOT.parents[2] / "docs" / "AI_API_QUICKSTART.md"
+        def api_key_quickstart() -> FileResponse:
+            packaged_quickstart = WEB_ROOT / "API_KEY_QUICKSTART.md"
+            source_quickstart = WEB_ROOT.parents[2] / "docs" / "API_KEY_QUICKSTART.md"
             return FileResponse(
                 packaged_quickstart if packaged_quickstart.is_file() else source_quickstart,
                 media_type="text/markdown; charset=utf-8",
@@ -1558,6 +1553,7 @@ def create_app(
         @app.get("/", include_in_schema=False)
         @app.get("/home", include_in_schema=False)
         @app.get("/workspaces", include_in_schema=False)
+        @app.get("/profile/api-keys", include_in_schema=False)
         @app.get("/profile/api-access", include_in_schema=False)
         @app.get("/admin/agents", include_in_schema=False)
         @app.get("/opportunities", include_in_schema=False)

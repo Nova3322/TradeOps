@@ -130,7 +130,12 @@ class ReconciliationRiskService(ServiceComponent):
             team = self.transactions._require_role(
                 session, actor_id, "reconcile", account_id, venue
             )
-            policy = session.scalar(select(RiskPolicy).where(RiskPolicy.active))
+            policy = session.scalar(
+                select(RiskPolicy).where(
+                    RiskPolicy.team_id == team.team_id,
+                    RiskPolicy.active,
+                )
+            )
             max_age = (
                 timedelta(seconds=policy.max_fact_age_seconds)
                 if policy is not None
