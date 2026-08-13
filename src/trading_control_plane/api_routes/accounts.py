@@ -138,6 +138,7 @@ class _AccountsRoutes:
         ) -> dict[str, Any]:
             exchange_account_id = self.service().create_exchange_account(
                 actor_id=identity.user_id,
+                environment=payload.environment,
                 account_id=payload.account_id,
                 venue=payload.venue,
                 label=payload.label,

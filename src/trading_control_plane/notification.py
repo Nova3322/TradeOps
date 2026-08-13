@@ -682,7 +682,11 @@ class NotificationDispatcher:
                     route.configuration_ciphertext,
                     team_id=route.team_id,
                     object_id=route.notification_route_id,
-                    purpose=f"notification-route:{route.channel.lower()}",
+                    purpose=(
+                        f"notification-route:{route.channel.lower()}"
+                        if route.environment == "LIVE"
+                        else f"notification-route:shadow:{route.channel.lower()}"
+                    ),
                     credential_version=route.credential_version,
                 )
                 decoded = json.loads(raw_configuration)

@@ -137,8 +137,10 @@ def test_primary_navigation_and_page_use_trading_mode_copy() -> None:
     assert 'href="/trading-mode"' in index
     assert "运行与风控" in index
     assert "<span>◐</span>影子模式</a>" not in index
-    assert "<h1>交易模式</h1>" in execution
-    assert "仅在 TradingOPS 内部模拟，不会向交易所发送订单" in execution  # noqa: RUF001
+    assert "<h1>模式与账户</h1>" in execution
+    assert "影子账户不接收交易所 API" in execution
+    assert "通知账户" in execution
+    assert "影子配置只服务模拟账本，不会调用交易所、签名或广播" in execution  # noqa: RUF001
     assert "重置为 100,000 U" in execution
 
 
@@ -185,7 +187,6 @@ def test_primary_navigation_preserves_the_established_order() -> None:
         "/campaigns",
         "/results",
         "/trading-mode",
-        "/venues",
         "/capital",
         "/risk",
         "/positions",
@@ -282,18 +283,19 @@ def test_trading_mode_page_is_a_compact_space_level_switcher() -> None:
 
     for expected in (
         "当前空间",
-        "当前模式",
-        "生产模式",
+        "当前运行",
+        "实盘模式",
         "影子模式",
-        "影响范围",
-        "查看交易账户",
+        "交易所账户",
+        "Vault 与 Safe",
+        "通知账户",
         "危险能力：真实下单、资金划转、自动加仓均关闭",  # noqa: RUF001
-        "查看模拟账户",
+        "查看模拟账本",
         "重置模拟资产",
     ):
         assert expected in mode_page
-    assert 'aria-pressed="${isLive}"' in mode_page
-    assert 'aria-pressed="${isShadow}"' in mode_page
+    assert "selectedEnvironment === 'LIVE'" in mode_page
+    assert "selectedEnvironment === 'SHADOW'" in mode_page
     assert "session?.active_workspace?.name || data.team_name" in mode_page
     assert "confirmAction" in mode_page
 
@@ -312,6 +314,31 @@ def test_trading_mode_page_is_a_compact_space_level_switcher() -> None:
         "SETUP",
     ):
         assert removed not in mode_page
+
+
+def test_capital_and_risk_pages_expose_environment_scoped_account_workflows() -> None:
+    capital = CAPITAL.read_text()
+    risk = CAPITAL.with_name("risk.js").read_text()
+    execution = EXECUTION.read_text()
+
+    for expected in (
+        "模式与账户筛选",
+        "选择要叠加的账户曲线（可多选）",  # noqa: RUF001
+        "只影响展示",
+        "selected_account_keys",
+        "account_options",
+    ):
+        assert expected in capital
+    for expected in (
+        "管理员直接控制",
+        "恢复自动加仓",
+        "暂停所有风险",
+        "解除风险暂停",
+    ):
+        assert expected in execution
+    assert "发起风控变更提案" in risk
+    assert "POLICY_UPDATE" in risk
+    assert "提案 · 独立审核" in risk
 
 
 def test_shadow_trading_details_are_moved_off_the_mode_switcher() -> None:

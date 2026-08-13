@@ -73,6 +73,7 @@ class ReconciliationCapitalService(ServiceComponent):
                     actor_id=actor_id,
                     account_id=location_id,
                     venue=venue,
+                    environment=environment.value,
                     now=now,
                 )
             fact = session.scalar(

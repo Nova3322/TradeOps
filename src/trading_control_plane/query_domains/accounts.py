@@ -116,6 +116,7 @@ class AccountQueries(QueryComponent):
             "team_id": str(item.team_id),
             "account_id": item.account_id,
             "venue": item.venue,
+            "environment": item.environment,
             "label": item.label,
             "registration_source": item.registration_source,
             "active": item.active,
@@ -203,6 +204,7 @@ class AccountQueries(QueryComponent):
             account = session.scalar(
                 select(ExchangeAccount.exchange_account_id).where(
                     ExchangeAccount.team_id == team_id,
+                    ExchangeAccount.environment == environment,
                     ExchangeAccount.account_id == account_id,
                     ExchangeAccount.venue == venue,
                 )

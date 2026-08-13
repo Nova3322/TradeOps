@@ -379,6 +379,7 @@ def _domain_status(code: str) -> int:
         "AGENT_PROPOSAL_ENDPOINT_REQUIRED",
         "API_CLIENT_SCOPE_DENIED",
         "HUMAN_WEB_CONFIRMATION_REQUIRED",
+        "RISK_CHANGE_REVIEW_REQUIRED",
     }:
         return status.HTTP_403_FORBIDDEN
     if code == "AUTH_CREDENTIAL_AMBIGUOUS":

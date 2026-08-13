@@ -183,12 +183,39 @@ function renderShadowAccountDetails(data) {
   bindLinkedRows();
 }
 
+function modeAccountEnvironmentLabel(environment) {
+  return environment === 'SHADOW' ? '影子模式' : '实盘模式';
+}
+
+function modeAccountCapitalForm(environment, configuration, canManage) {
+  const value = key => escapeHtml(configuration?.[key] || '');
+  const configured = key => configuration?.[key] ? '已加密配置；留空保持当前值' : '加密保存且不会回显';
+  const addressPlaceholder = key => configuration?.[`${key}_configured`] ? '已配置；留空保持当前值' : '0x…';
+  if (!canManage) return `<article class="card"><div class="card-heading"><div><p class="eyebrow">${modeAccountEnvironmentLabel(environment)} · 资金账户</p><h2>金库与提取账户</h2></div><span class="status-pill">仅管理员可修改</span></div><dl class="definition-grid">${definition('NoTilt Vault', configuration?.vault_address_configured ? '已配置' : '未配置')}${definition('Safe 提取合约', configuration?.safe_address_configured ? '已配置' : '未配置')}${definition('提取地址私钥', configuration?.vault_withdrawal_private_key_configured || configuration?.safe_withdrawal_private_key_configured ? '已加密配置' : '未配置')}</dl></article>`;
+  const provider = configuration?.treasury_provider || 'NOTILT_VAULT';
+  return `<details class="card mode-account-config" open><summary><span><b>金库、提取地址与密钥</b><small>${modeAccountEnvironmentLabel(environment)}独立配置 · 私钥仅加密保存且不回显</small></span><strong>配置</strong></summary><form class="toolbox-content mode-capital-config-form" data-environment="${environment}"><div class="field-grid"><label>链上资金方案<select name="treasury_provider"><option value="NOTILT_VAULT" ${provider === 'NOTILT_VAULT' ? 'selected' : ''}>NoTilt Vault</option><option value="SAFE_SPENDING_LIMIT" ${provider === 'SAFE_SPENDING_LIMIT' ? 'selected' : ''}>Safe Spending Limits</option></select></label><label>NoTilt Vault 编号<input name="vault_id" value="${value('vault_id')}"></label><label>NoTilt Vault 合约地址<input name="vault_address" placeholder="${addressPlaceholder('vault_address')}"></label><label>Vault 提取白名单地址<input name="owned_arbitrum_address" placeholder="${addressPlaceholder('owned_arbitrum_address')}"></label><label>Vault 白名单地址私钥<input name="vault_withdrawal_private_key" type="password" autocomplete="new-password" minlength="32" placeholder="${configured('vault_withdrawal_private_key_configured')}"></label><label>Safe 提取合约地址<input name="safe_address" placeholder="${addressPlaceholder('safe_address')}"></label><label>Safe 提取地址<input name="safe_delegate_address" placeholder="${addressPlaceholder('safe_delegate_address')}"></label><label>Safe 提取地址私钥<input name="safe_withdrawal_private_key" type="password" autocomplete="new-password" minlength="32" placeholder="${configured('safe_withdrawal_private_key_configured')}"></label><label>币安资金账户<input name="binance_account_id" value="${value('binance_account_id')}"></label><label>币安白名单入金地址<input name="binance_deposit_address" placeholder="${addressPlaceholder('binance_deposit_address')}"></label><label>币安受限提现地址<input name="binance_withdrawal_address" placeholder="${addressPlaceholder('binance_withdrawal_address')}"></label><label>Hyperliquid 资金账户<input name="hyperliquid_account_id" value="${value('hyperliquid_account_id')}"></label><label>Hyperliquid Bridge 合约地址<input name="hyperliquid_bridge_address" placeholder="${addressPlaceholder('hyperliquid_bridge_address')}"></label><label>单次金额上限（USDC）<input name="max_amount" type="number" step="any" min="0.000001" value="${value('max_amount')}"></label><label>最大费用上限（USDC）<input name="max_fee" type="number" step="any" min="0" value="${value('max_fee')}"></label></div><p class="safety-note">${environment === 'SHADOW' ? '影子配置只服务模拟账本，不会调用交易所、签名或广播。' : '实盘私钥采用团队与环境绑定的加密信封保存；页面和 API 永不回显明文，任何资金动作仍受独立安全开关与最终确认约束。'}</p><div class="form-error" role="alert"></div><button class="primary">保存${modeAccountEnvironmentLabel(environment)}资金账户</button></form></details>`;
+}
+
+function modeNotificationAccountForm(environment, data) {
+  if (!data || !data.can_manage) return '';
+  const catalog = data.event_catalog || [];
+  const routes = (data.routes || []).filter(item => item.environment === environment);
+  const cards = routes.map(item => `<article class="card mode-notification-account"><div class="card-heading"><div><p class="eyebrow">${escapeHtml(notificationChannelLabel(item.channel))} · ${modeAccountEnvironmentLabel(environment)}</p><h3>${escapeHtml(item.name)}</h3></div><span class="status-pill ${item.enabled ? 'status-APPROVED' : 'status-DISABLED'}">${item.enabled ? '已启用' : '已停用'}</span></div><dl class="definition-grid">${definition('目的地', item.configuration_metadata?.destination_hint || '已加密')}${definition('订阅事件', `${item.event_types.length} 项`)}${definition('凭据版本', item.credential_version)}</dl><details><summary>修改通知账户</summary><form class="compact-form mode-notification-update-form" data-environment="${environment}" data-channel="${escapeHtml(item.channel)}" data-version="${item.version}" data-route-id="${escapeHtml(item.notification_route_id)}"><div class="field-grid"><label>账户名称<input name="name" value="${escapeHtml(item.name)}" required></label><label>状态<select name="enabled"><option value="true" ${item.enabled ? 'selected' : ''}>启用</option><option value="false" ${item.enabled ? '' : 'selected'}>停用</option></select></label></div><input name="channel" type="hidden" value="${escapeHtml(item.channel)}"><fieldset><legend>订阅事件</legend><div class="notification-event-grid">${notificationEventOptions(catalog, item.event_types)}</div></fieldset><fieldset><legend>轮换加密凭据（留空保持当前值）</legend><div class="field-grid">${notificationConfigurationFields(item.channel)}</div></fieldset><div class="form-error" role="alert"></div><div class="form-actions"><button class="primary">保存修改</button><button class="danger" type="button" data-mode-delete-notification="${escapeHtml(item.notification_route_id)}" data-route-version="${item.version}" data-route-name="${escapeHtml(item.name)}">删除通知账户</button></div></form></details></article>`).join('');
+  const defaults = catalog.filter(item => item.integration_status === 'ACTIVE').slice(0, 2).map(item => item.event_type);
+  return `<details class="card mode-account-config"><summary><span><b>通知账户</b><small>${routes.length} 个${modeAccountEnvironmentLabel(environment)}通知账户 · Telegram、Slack、飞书或邮件</small></span><strong>配置</strong></summary><div class="toolbox-content"><form class="mode-notification-create-form" data-environment="${environment}" data-channel="TELEGRAM" data-version="0"><div class="field-grid"><label>账户名称<input name="name" maxlength="120" required placeholder="例如 ${modeAccountEnvironmentLabel(environment)}审核群"></label><label>通知渠道<select name="channel"><option value="TELEGRAM">Telegram</option><option value="SLACK">Slack</option><option value="LARK">飞书 / Lark</option><option value="EMAIL">邮件</option></select></label></div><input name="enabled" type="hidden" value="true"><fieldset><legend>订阅事件</legend><div class="notification-event-grid">${notificationEventOptions(catalog, defaults)}</div></fieldset><fieldset><legend>加密通知凭据</legend><div class="field-grid" data-mode-notification-fields>${notificationConfigurationFields('TELEGRAM', {required:true})}</div></fieldset><div class="form-error" role="alert"></div><button class="primary">添加通知账户</button></form>${cards ? `<div class="mode-notification-grid">${cards}</div>` : '<p class="subtle">当前模式尚未添加通知账户。</p>'}</div></details>`;
+}
+
 async function renderTradingMode() {
   if (location.pathname === '/shadow') {
     history.replaceState({}, '', '/trading-mode');
     updateActiveNav();
   }
-  const response = await api('/api/trading-mode');
+  const [response, accountResponse, capitalConfigurations, notificationData] = await Promise.all([
+    api('/api/trading-mode'),
+    api('/api/exchange-accounts'),
+    api('/api/capital/direct-configurations').catch(() => ({data:{SHADOW:null,LIVE:null},can_manage:false})),
+    api('/api/notifications').catch(() => null),
+  ]);
   const data = response.data;
   if (new URLSearchParams(location.search).get('view') === 'shadow-account') {
     renderShadowAccountDetails(data);
@@ -198,6 +225,9 @@ async function renderTradingMode() {
   const isShadow = data.execution_mode === 'SHADOW';
   const isLive = data.execution_mode === 'LIVE';
   const accounts = data.accounts || [];
+  const selectedEnvironment = new URLSearchParams(location.search).get('environment') === 'SHADOW' ? 'SHADOW' : data.execution_mode === 'SHADOW' ? 'SHADOW' : 'LIVE';
+  const configuredAccounts = (accountResponse.data?.data || []).filter(item => item.environment === selectedEnvironment);
+  const canManageAccounts = Boolean(accountResponse.data?.can_manage);
   const gates = data.dangerous_capabilities || {};
   const currentSpaceName = session?.active_workspace?.name || data.team_name;
   const currentMode = isShadow ? '影子模式' : isLive ? '生产模式' : '待设置';
@@ -205,13 +235,10 @@ async function renderTradingMode() {
   const dangerousCopy = dangerousCapabilitiesClosed
     ? '危险能力：真实下单、资金划转、自动加仓均关闭'
     : '危险能力：存在非关闭状态，请立即前往系统状态检查';
-  main.innerHTML = `<section class="page trading-mode-page shadow-workspace"><header class="page-head"><div><h1>交易模式</h1><p class="lede">查看和切换当前空间的交易模式。</p></div></header>
-    <article class="card mode-selector-card"><dl class="definition-grid">${definition('当前空间', currentSpaceName)}${definition('当前模式', currentMode)}</dl>
-    <div class="mode-choice-grid" role="group" aria-label="选择交易模式"><button class="mode-choice ${isLive ? 'is-selected live-choice' : ''}" type="button" data-switch-mode="LIVE" aria-pressed="${isLive}"><b>生产模式</b></button><button class="mode-choice ${isShadow ? 'is-selected shadow-choice' : ''}" type="button" data-switch-mode="SHADOW" aria-pressed="${isShadow}"><b>影子模式</b></button></div>
-    <p class="safety-note">${isShadow ? '仅在 TradingOPS 内部模拟，不会向交易所发送订单。' : '选择生产模式不会自动开启任何危险能力。'}</p>
-    <p><b>影响范围：</b>${accounts.length} 个交易账户　<a class="text-button" href="/venues" data-link>查看交易账户 →</a></p>
-    <p class="microcopy">${dangerousCopy}</p>
-    ${isShadow ? `<div class="shadow-capital-grid"><b>${shadowAccountSummary(data)}</b></div><div class="toolbar"><a class="secondary" href="/trading-mode?view=shadow-account" data-link>查看模拟账户</a>${account ? '<button class="danger" type="button" data-reset-shadow>重置模拟资产</button>' : ''}</div>` : ''}</article></section>`;
+  const accountCards = configuredAccounts.map(item => `<article class="card mode-exchange-account"><div class="card-heading"><div><p class="eyebrow">${escapeHtml(exchangeVenueLabels[item.venue] || item.venue)} · ${escapeHtml(item.account_id)}</p><h3>${escapeHtml(item.label)}</h3></div><span class="status-pill ${item.credentials.state === 'CONFIGURED' || selectedEnvironment === 'SHADOW' ? 'status-APPROVED' : 'status-DISABLED'}">${selectedEnvironment === 'SHADOW' ? '无需 API' : item.credentials.state === 'CONFIGURED' ? 'API 已加密' : 'API 未配置'}</span></div><dl class="definition-grid">${definition('账户模式', modeAccountEnvironmentLabel(selectedEnvironment))}${definition('连接状态', selectedEnvironment === 'SHADOW' ? '内部模拟账本' : fmtStatus(item.connection.status))}${definition('最近更新', fmtDate(item.updated_at))}</dl><div class="form-actions">${selectedEnvironment === 'LIVE' ? `<a class="secondary" href="/venues/${escapeHtml(item.account_id)}?venue=${escapeHtml(item.venue)}" data-link>管理账户</a>` : ''}${item.permissions?.can_delete ? `<button class="danger" type="button" data-mode-delete-account="${escapeHtml(item.exchange_account_id)}" data-account-version="${item.version}" data-account-name="${escapeHtml(item.label)}">删除</button>` : ''}</div></article>`).join('');
+  const credentialFields = selectedEnvironment === 'LIVE' ? `<fieldset><legend>交易所 API 凭据</legend><div class="field-grid" data-mode-exchange-credentials>${exchangeCredentialFields('BINANCE')}</div></fieldset>` : '<p class="safety-note">影子账户只使用内部模拟账本，不填写也不保存交易所 API。</p>';
+  const createAccount = canManageAccounts ? `<details class="card mode-account-config" open><summary><span><b>添加${modeAccountEnvironmentLabel(selectedEnvironment)}交易所账户</b><small>${selectedEnvironment === 'LIVE' ? '账户与交易所 API 分环境加密保存' : '无需交易所 API'}</small></span><strong>添加</strong></summary><form class="toolbox-content mode-exchange-account-form" data-environment="${selectedEnvironment}"><div class="field-grid"><label>交易所<select name="venue">${Object.entries(exchangeVenueLabels).map(([key,label]) => `<option value="${key}">${label}</option>`).join('')}</select></label><label>账户 ID<input name="account_id" maxlength="120" required></label><label>账户名称<input name="label" maxlength="120" required></label></div>${credentialFields}<div class="form-error" role="alert"></div><button class="primary">添加账户</button></form></details>` : '';
+  main.innerHTML = `<section class="page trading-mode-page mode-accounts-page"><header class="page-head"><div><p class="eyebrow">当前空间 · ${escapeHtml(currentSpaceName)}</p><h1>模式与账户</h1><p class="lede">在一个位置切换影子/实盘模式，并分别维护交易所、Vault、Safe 与通知账户。两种模式的数据与凭据互不混用。</p></div><span class="status-pill ${isLive ? 'status-ATTENTION' : 'status-APPROVED'}">当前运行：${escapeHtml(currentMode)}</span></header><article class="card mode-selector-card"><div class="mode-choice-grid" role="group" aria-label="选择交易模式"><button class="mode-choice ${selectedEnvironment === 'LIVE' ? 'is-selected live-choice' : ''}" type="button" data-switch-mode="LIVE" aria-pressed="${selectedEnvironment === 'LIVE'}"><b>实盘模式</b><small>${isLive ? '当前运行' : '切换并查看配置'}</small></button><button class="mode-choice ${selectedEnvironment === 'SHADOW' ? 'is-selected shadow-choice' : ''}" type="button" data-switch-mode="SHADOW" aria-pressed="${selectedEnvironment === 'SHADOW'}"><b>影子模式</b><small>${isShadow ? '当前运行' : '切换并查看配置'}</small></button></div><p class="safety-note">${selectedEnvironment === 'SHADOW' ? '影子账户、金库和通知只服务内部模拟，不读取实盘 API。' : '进入实盘模式不会自动开启真实下单、资金划转或自动加仓。'}</p><p class="microcopy">${dangerousCopy}</p>${isShadow ? `<div class="toolbar"><a class="secondary" href="/trading-mode?view=shadow-account" data-link>查看模拟账本</a>${account ? '<button class="danger" type="button" data-reset-shadow>重置模拟资产</button>' : ''}</div>` : ''}</article><section><div class="section-heading"><div><p class="eyebrow">${modeAccountEnvironmentLabel(selectedEnvironment)} · 独立账户集</p><h2>交易所账户</h2><p>${selectedEnvironment === 'LIVE' ? '实盘账户必须配置各自交易所 API；凭据仅加密保存。' : '影子账户不接收交易所 API，只提供隔离的模拟账户范围。'}</p></div><span class="status-pill">${configuredAccounts.length} 个</span></div>${createAccount}${accountCards ? `<div class="mode-account-grid">${accountCards}</div>` : '<div class="callout">当前模式尚未添加交易所账户。</div>'}</section><section><div class="section-heading"><div><p class="eyebrow">${modeAccountEnvironmentLabel(selectedEnvironment)} · 独立资金范围</p><h2>Vault 与 Safe</h2></div></div>${modeAccountCapitalForm(selectedEnvironment, capitalConfigurations.data?.[selectedEnvironment], capitalConfigurations.can_manage)}</section><section><div class="section-heading"><div><p class="eyebrow">${modeAccountEnvironmentLabel(selectedEnvironment)} · 独立消息范围</p><h2>通知账户</h2></div></div>${modeNotificationAccountForm(selectedEnvironment, notificationData)}</section></section>`;
   document.querySelectorAll('[data-switch-mode]').forEach(button => button.addEventListener('click', async event => {
     const trigger = event.currentTarget;
     const mode = trigger.dataset.switchMode;
@@ -224,6 +251,102 @@ async function renderTradingMode() {
         const result = await api(`/api/teams/${data.team_id}/trading-mode`, {method:'PUT', body:JSON.stringify({mode, confirmation:`SWITCH_TO_${mode}`, expected_version:data.version, idempotency_key:crypto.randomUUID()})});
         session = result.session;
         showToast(`当前空间已切换至${mode === 'LIVE' ? '生产模式' : '影子模式'}`);
+        await route();
+      } catch (error) { showApiError(error); }
+    });
+  }));
+  const exchangeForm = document.querySelector('.mode-exchange-account-form');
+  exchangeForm?.elements.venue.addEventListener('change', event => {
+    const credentials = exchangeForm.querySelector('[data-mode-exchange-credentials]');
+    if (credentials) credentials.innerHTML = exchangeCredentialFields(event.currentTarget.value);
+  });
+  exchangeForm?.addEventListener('submit', async event => {
+    event.preventDefault();
+    const form = event.currentTarget;
+    const values = Object.fromEntries(new FormData(form));
+    const credentialNames = values.venue === 'HYPERLIQUID'
+      ? ['account_address','api_wallet_address','api_wallet_private_key']
+      : values.venue === 'OKX'
+        ? ['api_key','api_secret','passphrase']
+        : ['api_key','api_secret'];
+    const credentials = Object.fromEntries(credentialNames.filter(name => values[name]).map(name => [name, values[name]]));
+    const payload = {
+      environment:form.dataset.environment,
+      venue:values.venue,
+      account_id:values.account_id,
+      label:values.label,
+      credentials:form.dataset.environment === 'LIVE' ? credentials : null,
+      idempotency_key:crypto.randomUUID(),
+    };
+    await withPending(event.submitter, '添加中…', async () => {
+      try {
+        await api('/api/exchange-accounts', {method:'POST', body:JSON.stringify(payload)});
+        showToast(`${modeAccountEnvironmentLabel(form.dataset.environment)}交易所账户已添加`);
+        await route();
+      } catch (error) { showApiError(error, form.querySelector('.form-error')); }
+    });
+  });
+  document.querySelectorAll('[data-mode-delete-account]').forEach(button => button.addEventListener('click', async event => {
+    const trigger = event.currentTarget;
+    const confirmed = await confirmAction({title:`删除${trigger.dataset.accountName}？`, message:'账户配置会归档；历史交易、资金和审计记录继续保留。存在未结束交易任务或资金操作时服务端会阻断。', confirmLabel:'确认删除'});
+    if (!confirmed) return;
+    await withPending(trigger, '删除中…', async () => {
+      try {
+        await api(`/api/exchange-accounts/${trigger.dataset.modeDeleteAccount}`, {method:'DELETE', body:JSON.stringify({expected_version:Number(trigger.dataset.accountVersion), idempotency_key:crypto.randomUUID()})});
+        showToast('账户已删除，历史记录已保留');
+        await route();
+      } catch (error) { showApiError(error); }
+    });
+  }));
+  document.querySelectorAll('.mode-capital-config-form').forEach(form => form.addEventListener('submit', async event => {
+    event.preventDefault();
+    const values = Object.fromEntries(new FormData(form));
+    const payload = {environment:form.dataset.environment, network:'ARBITRUM', asset:'USDC', idempotency_key:crypto.randomUUID()};
+    Object.entries(values).filter(([, value]) => value !== '').forEach(([key, value]) => { payload[key] = value; });
+    await withPending(event.submitter, '加密保存中…', async () => {
+      try {
+        await api('/api/capital/direct-configuration', {method:'PUT', body:JSON.stringify(payload)});
+        showToast(`${modeAccountEnvironmentLabel(form.dataset.environment)}资金账户已保存`);
+        await route();
+      } catch (error) { showApiError(error, form.querySelector('.form-error')); }
+    });
+  }));
+  document.querySelectorAll('.mode-notification-create-form').forEach(form => {
+    form.elements.channel.addEventListener('change', event => {
+      form.dataset.channel = event.currentTarget.value;
+      form.querySelector('[data-mode-notification-fields]').innerHTML = notificationConfigurationFields(event.currentTarget.value, {required:true});
+    });
+    form.addEventListener('submit', async event => {
+      event.preventDefault();
+      const payload = {...notificationRoutePayload(form), environment:form.dataset.environment};
+      await withPending(event.submitter, '加密保存中…', async () => {
+        try {
+          await api('/api/notification-routes', {method:'POST', body:JSON.stringify(payload)});
+          showToast(`${modeAccountEnvironmentLabel(form.dataset.environment)}通知账户已添加`);
+          await route();
+        } catch (error) { showApiError(error, form.querySelector('.form-error')); }
+      });
+    });
+  });
+  document.querySelectorAll('.mode-notification-update-form').forEach(form => form.addEventListener('submit', async event => {
+    event.preventDefault();
+    const payload = {...notificationRoutePayload(form), environment:form.dataset.environment};
+    await withPending(event.submitter, '保存中…', async () => {
+      try {
+        await api(`/api/notification-routes/${form.dataset.routeId}`, {method:'PUT', body:JSON.stringify(payload)});
+        showToast('通知账户修改已保存');
+        await route();
+      } catch (error) { showApiError(error, form.querySelector('.form-error')); }
+    });
+  }));
+  document.querySelectorAll('[data-mode-delete-notification]').forEach(button => button.addEventListener('click', async event => {
+    const trigger = event.currentTarget;
+    const confirmed = await confirmAction({title:`删除${trigger.dataset.routeName}？`, message:'该通知账户会停用并归档，历史投递与审计记录继续保留。', confirmLabel:'确认删除'});
+    if (!confirmed) return;
+    await withPending(trigger, '删除中…', async () => {
+      try {
+        await api(`/api/notification-routes/${trigger.dataset.modeDeleteNotification}`, {method:'DELETE', body:JSON.stringify({expected_version:Number(trigger.dataset.routeVersion), idempotency_key:crypto.randomUUID()})});
+        showToast('通知账户已删除');
         await route();
       } catch (error) { showApiError(error); }
     });
@@ -442,9 +565,9 @@ async function renderSystemStatus() {
   const verdictAction = exceptions.length && canViewOperations
     ? '<a class="primary" href="/campaigns/alerts" data-link>查看运行告警</a>'
     : !controlAvailable || !entryOpen
-      ? '<a class="secondary" href="/risk" data-link>查看风险控制</a>'
+      ? '<a class="secondary" href="/risk" data-link>查看风控中心</a>'
       : (!workersReady || !tradingConnectionsReady) && canViewVenues
-        ? '<a class="secondary" href="/venues" data-link>查看交易账户</a>'
+        ? '<a class="secondary" href="/trading-mode" data-link>查看模式与账户</a>'
         : !workersReady || !tradingConnectionsReady
           ? '<span class="status-pill">由系统管理员或交易运维人员处理</span>'
           : !telegramHealthy
@@ -452,7 +575,7 @@ async function renderSystemStatus() {
             : !perptapeAvailable && hasCapability('opportunity.view')
               ? '<a class="secondary" href="/opportunities" data-link>查看 Perptape</a>'
               : '<span class="status-pill status-APPROVED">无需立即动作</span>';
-  main.innerHTML = `<section class="page system-status-page"><header class="page-head"><div><p class="eyebrow">交易系统状态</p><h1>系统状态</h1><p class="lede">这里直接说明系统能否工作、哪些能力受限，以及是否需要处理。绿色表示当前证据正常；黄色表示能力受限；红色表示必须先处理；灰色表示当前没有监控对象。</p></div><div class="toolbar"><button class="secondary" data-refresh>刷新状态</button><a class="secondary" href="/risk" data-link>查看风险控制</a></div></header>
+  main.innerHTML = `<section class="page system-status-page"><header class="page-head"><div><p class="eyebrow">交易系统状态</p><h1>系统状态</h1><p class="lede">这里直接说明系统能否工作、哪些能力受限，以及是否需要处理。绿色表示当前证据正常；黄色表示能力受限；红色表示必须先处理；灰色表示当前没有监控对象。</p></div><div class="toolbar"><button class="secondary" data-refresh>刷新状态</button><a class="secondary" href="/risk" data-link>查看风控中心</a></div></header>
     <article class="home-status tone-${overallTone}"><div><p class="eyebrow">当前结论</p><h2>${escapeHtml(verdictTitle)}</h2><p>${escapeHtml(verdictCopy)}</p></div>${verdictAction}</article>
     <div class="system-health-grid">${cards}</div>
     <section><div class="section-heading"><div><p class="eyebrow">外部数据连接</p><h2>生产数据与资金连接</h2></div><span class="status-pill">${availableSources} / ${connectionSourceCount} 可用</span></div><div class="table-scroll-hint connection-scroll-hint" data-table-hint>左右滑动查看完整连接状态</div><div class="table-wrap connection-status-table"><table><thead><tr><th>数据源</th><th>读取状态与处理建议</th><th>运行范围</th><th>可用能力</th><th></th></tr></thead><tbody>${connectionRows}</tbody></table></div></section>
@@ -473,7 +596,7 @@ async function renderCampaignFacts(mode) {
       if (error.status !== 403) throw error;
     }
   }
-  const titles = {orders:'订单与成交', risk:'风险与目标'};
+  const titles = {orders:'订单与成交', risk:'风控中心'};
   const visibleDetails = mode === 'risk' ? details.filter(item => item.status !== 'CLOSED') : details;
   let rows = '';
   if (mode === 'orders') rows = visibleDetails.flatMap(item => item.intents.map(intent => `<tr data-href="/campaigns/${item.campaign_id}"><td>${shortId(item.campaign_id)}</td><td>${escapeHtml(fmtIntentKind(intent.kind))}${intent.reduce_only ? ' · 只减仓' : ''}</td><td>${escapeHtml(fmtSide(intent.side))} ${fmtNumber(intent.quantity)}</td><td>${escapeHtml(fmtStatus(intent.status))}</td><td>${intent.order ? `${escapeHtml(intent.order.venue_order_id)} · ${escapeHtml(fmtStatus(intent.order.status))}` : '尚未记录交易所回执'}</td><td>${fmtDate(intent.updated_at)}</td></tr>`)).join('');
@@ -484,7 +607,7 @@ async function renderCampaignFacts(mode) {
     : '这里显示当前确认的数据；能够重新计算的汇总会按最新数据生成。';
   main.innerHTML = `<section class="page"><header class="page-head"><div><p class="eyebrow">生产交易数据</p><h1>${titles[mode]}</h1><p class="lede">${pageLede}</p></div></header>
     ${mode === 'risk' ? renderRiskControlPanel(riskControls) : ''}
-    ${mode === 'risk' && roleNames().includes('SYSTEM_ADMIN') ? `<div class="form-panel compact-form"><h2>只允许收紧风险</h2><p class="safety-note">这些入口只能关闭自动加仓，或把系统切换为“仅允许减仓”；不能从这里恢复新增风险。</p><div class="toolbar"><button class="danger" data-disable-global-add ${riskControls?.auto_add_gate?.status === 'DISABLED' ? 'disabled title="自动加仓已经关闭"' : ''}>${riskControls?.auto_add_gate?.status === 'DISABLED' ? '自动加仓已关闭' : '关闭全局自动加仓'}</button><button class="danger" data-pause-new-risk ${riskControls?.policy?.system_state !== 'NORMAL' ? 'disabled title="新增风险已经暂停"' : ''}>${riskControls?.policy?.system_state !== 'NORMAL' ? '新增风险已暂停' : '暂停所有新增风险'}</button></div></div><div style="height:16px"></div>` : ''}
+    ${mode === 'risk' && roleNames().includes('SYSTEM_ADMIN') ? `<div class="form-panel compact-form risk-admin-controls"><div class="card-heading"><div><p class="eyebrow">加减仓与全局暂停</p><h2>管理员直接控制</h2></div><span class="status-pill">直接修改</span></div><p class="safety-note">关闭/恢复自动加仓与暂停/解除风险暂停彼此独立。任何恢复都会重新校验服务端状态，不会复活旧交易授权。</p><div class="toolbar"><button class="${riskControls?.auto_add_gate?.status === 'DISABLED' ? 'primary' : 'danger'}" data-${riskControls?.auto_add_gate?.status === 'DISABLED' ? 'enable' : 'disable'}-global-add>${riskControls?.auto_add_gate?.status === 'DISABLED' ? '恢复自动加仓' : '关闭自动加仓'}</button><button class="${riskControls?.policy?.system_state === 'NORMAL' ? 'danger' : 'primary'}" data-${riskControls?.policy?.system_state === 'NORMAL' ? 'pause' : 'unpause'}-new-risk>${riskControls?.policy?.system_state === 'NORMAL' ? '暂停所有风险' : '解除风险暂停'}</button></div></div><div style="height:16px"></div>` : ''}
     ${rows ? `<div class="table-wrap"><table><thead><tr>${headers}</tr></thead><tbody>${rows}</tbody></table></div>` : mode === 'risk' ? (hasCapability('operations.view') ? '<section class="empty-state compact-empty-state"><div><h2>当前没有运行中的风险任务</h2><p>已结束任务不会占用当前风险工作区；可前往交易任务查看完整历史。</p><a class="secondary" href="/campaigns" data-link>查看交易任务</a></div></section>' : '') : '<section class="empty-state"><div><h2>当前没有可展示的数据</h2></div></section>'}</section>`;
   bindLinkedRows();
   if (mode === 'risk') await bindRiskControlActions();
@@ -498,6 +621,26 @@ async function renderCampaignFacts(mode) {
     successMessage:'系统已切换为“仅允许减仓”；只能收紧风险和退出',
     confirm:{title:'暂停所有新增风险？', message:'确认后，系统将只允许减仓。已有仓位仍可减仓或退出，但新的初仓和加仓会被拒绝。', confirmLabel:'切换为仅允许减仓'},
   }));
+  document.querySelector('[data-enable-global-add]')?.addEventListener('click', (event) => campaignAction('/api/operations/auto-add/enable', {reason:'administrator enabled AUTO_ADD from Web', idempotency_key:crypto.randomUUID()}, {
+    button:event.currentTarget,
+    successMessage:'自动加仓全局开关已恢复；每次加仓仍需逐笔通过风险、保护与对账检查',
+    confirm:{title:'恢复自动加仓？', message:'只恢复全局开关，不会复活旧授权或旧加仓次数；每次加仓仍需重新授权并通过实时检查。', confirmLabel:'确认恢复自动加仓'},
+  }));
+  document.querySelector('[data-unpause-new-risk]')?.addEventListener('click', async event => {
+    const trigger = event.currentTarget;
+    const confirmed = await confirmAction({title:'解除风险暂停？', message:'系统会再次验证全部生产账户条件并创建新的 NORMAL 政策；旧交易授权不会恢复。', confirmLabel:'确认解除风险暂停'});
+    if (!confirmed) return;
+    await withPending(trigger, '验证中…', async () => {
+      try {
+        const status = await api('/api/risk-controls');
+        const policy = status.policy;
+        const grant = await api('/api/auth/mock/step-up', {method:'POST', body:JSON.stringify({action:'risk.restore.direct', object_id:policy.policy_id, object_version:policy.revision})});
+        await api('/api/risk-controls/restore-direct', {method:'POST', body:JSON.stringify({reason:'administrator resumed new risk from Web', idempotency_key:crypto.randomUUID(), action_grant:grant.action_grant})});
+        showToast('风险暂停已解除；旧交易授权保持失效');
+        await route();
+      } catch (error) { showApiError(error); }
+    });
+  });
 }
 
 const LIVE_CAPITAL_SOURCES = [
@@ -512,7 +655,7 @@ const DIRECT_CAPITAL_PATHS = [
   {path:'BINANCE_TO_VAULT', from:'币安', to:'链上金库', badge:'二选一', action:'检查币安回流条件', copy:'回流到用户选择的 NoTilt Vault 或 Safe Smart Account。', steps:['提现预检','授权地址','目标入金','回执验证']},
   {path:'HYPERLIQUID_TO_VAULT', from:'Hyperliquid', to:'链上金库', badge:'二选一', action:'检查 Hyperliquid 回流条件', copy:'先从合约提回授权自有地址，再进入所选链上金库。', steps:['合约提现','授权地址','目标入金','回执验证']},
 ];
-let capitalTrendVisibility = {BINANCE:true, HYPERLIQUID:true, VAULT:true, TOTAL:true};
+let capitalTrendVisibility = {TOTAL:true};
 let capitalChartRangeValue = CAPITAL_CHART_RANGE_MAX;
 let capitalChartResizeObserver = null;
 const OCCUPIED_CAPITAL_TRANSFER_STATUSES = new Set([

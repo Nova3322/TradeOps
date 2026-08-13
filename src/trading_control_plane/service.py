@@ -380,6 +380,7 @@ class TradingService:
         self._validate_add_candidate = self._risk_authorization._validate_add_candidate
         self.disable_campaign_auto_add = self._risk_authorization.disable_campaign_auto_add
         self.disable_global_auto_add = self._risk_authorization.disable_global_auto_add
+        self.enable_global_auto_add = self._risk_authorization.enable_global_auto_add
         self.pause_new_risk = self._risk_authorization.pause_new_risk
         self._canonical_restore_scopes = self._risk_recovery._canonical_restore_scopes
         self._risk_restore_blockers = self._risk_recovery._risk_restore_blockers

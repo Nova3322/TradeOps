@@ -491,6 +491,7 @@ class AnalyticsQueries(QueryComponent):
             )
         account_query = select(ExchangeAccount).where(
             ExchangeAccount.team_id == team.team_id,
+            ExchangeAccount.environment == "LIVE",
             ExchangeAccount.active,
         )
         if account_id is not None:

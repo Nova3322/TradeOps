@@ -157,32 +157,6 @@ class PolicyRiskService(ServiceComponent):
                 )
             ):
                 _reject("RISK_POLICY_VERSION_CONFLICT", "risk policy version already exists")
-            if current is not None and all(
-                value is not None
-                for value in (
-                    current.max_account_risk,
-                    current.max_single_loss,
-                    current.max_consecutive_losses,
-                    current.loss_cooldown_seconds,
-                )
-            ):
-                assert current.max_account_risk is not None
-                assert current.max_single_loss is not None
-                assert current.max_consecutive_losses is not None
-                assert current.loss_cooldown_seconds is not None
-                if (
-                    max_total_risk > current.max_total_risk
-                    or max_account_risk > current.max_account_risk
-                    or max_single_loss > current.max_single_loss
-                    or max_consecutive_losses > current.max_consecutive_losses
-                    or int(loss_cooldown.total_seconds()) < current.loss_cooldown_seconds
-                    or int(max_fact_age.total_seconds()) > current.max_fact_age_seconds
-                ):
-                    _reject(
-                        "REVIEWED_POLICY_CHANGE_REQUIRED",
-                        "loosening configured risk limits requires an independently "
-                        "reviewed change",
-                    )
             if current is not None:
                 current.active = False
             policy = RiskPolicy(

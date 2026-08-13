@@ -108,6 +108,7 @@ def test_team_signal_source_perptape_key_and_signed_webhook_flow(
     )
     service.create_exchange_account(
         actor_id=admin,
+        environment="SHADOW",
         account_id="signal-account",
         venue="BINANCE",
         label="Signal Account",

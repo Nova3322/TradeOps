@@ -23,11 +23,15 @@ class AccountService(ServiceComponent):
         actor_id: UUID,
         account_id: str,
         venue: str,
+        environment: str = "LIVE",
         now: datetime,
     ) -> ExchangeAccount:
         normalized_account_id, normalized_venue, label = self._exchange_account_definition(
             account_id, venue, account_id
         )
+        normalized_environment = environment.strip().upper()
+        if normalized_environment not in {"SHADOW", "TESTNET", "LIVE"}:
+            _reject("EXCHANGE_ACCOUNT_INVALID", "account environment is unsupported")
         session.execute(
             text("SELECT pg_advisory_xact_lock(:key)"),
             {
@@ -41,6 +45,7 @@ class AccountService(ServiceComponent):
         account = session.scalar(
             select(ExchangeAccount).where(
                 ExchangeAccount.team_id == team.team_id,
+                ExchangeAccount.environment == normalized_environment,
                 ExchangeAccount.account_id == normalized_account_id,
                 ExchangeAccount.venue == normalized_venue,
             )
@@ -48,11 +53,14 @@ class AccountService(ServiceComponent):
         if account is not None:
             if not account.active:
                 _reject("EXCHANGE_ACCOUNT_INACTIVE", "exchange account is inactive")
+            if account.environment != normalized_environment:
+                _reject("EXCHANGE_ACCOUNT_ENVIRONMENT_CONFLICT", "account environment conflict")
             return account
         account = ExchangeAccount(
             team_id=team.team_id,
             account_id=normalized_account_id,
             venue=normalized_venue,
+            environment=normalized_environment,
             label=label,
             registration_source="WORKFLOW_REFERENCE",
             connection_status="UNCONFIGURED",
@@ -89,7 +97,10 @@ class AccountService(ServiceComponent):
             event_type="EXCHANGE_ACCOUNT_REFERENCED",
             object_type="ExchangeAccount",
             object_id=account.exchange_account_id,
-            reason=f"venue={normalized_venue};credentials=unconfigured;trading=disabled",
+            reason=(
+                f"environment={normalized_environment};venue={normalized_venue};"
+                "credentials=unconfigured;trading=disabled"
+            ),
             correlation_id=uuid4(),
             object_version=1,
             workspace_id=team.workspace_id,
@@ -103,6 +114,7 @@ class AccountService(ServiceComponent):
         self,
         *,
         actor_id: UUID,
+        environment: str = "LIVE",
         account_id: str,
         venue: str,
         label: str | None,
@@ -113,6 +125,11 @@ class AccountService(ServiceComponent):
         normalized_account_id, normalized_venue, normalized_label = (
             self._exchange_account_definition(account_id, venue, label)
         )
+        normalized_environment = environment.strip().upper()
+        if normalized_environment not in {"SHADOW", "TESTNET", "LIVE"}:
+            _reject("EXCHANGE_ACCOUNT_INVALID", "account environment is unsupported")
+        if normalized_environment == "SHADOW" and credentials is not None:
+            _reject("SHADOW_ACCOUNT_CREDENTIALS_FORBIDDEN", "shadow API credentials forbidden")
         with self.database.session_factory.begin() as session:
             team = self.transactions._require_role(
                 session,
@@ -136,6 +153,7 @@ class AccountService(ServiceComponent):
             caller = f"{actor_id}:{team.team_id}"
             payload = {
                 "team_id": str(team.team_id),
+                "environment": normalized_environment,
                 "account_id": normalized_account_id,
                 "venue": normalized_venue,
                 "label": normalized_label,
@@ -153,6 +171,7 @@ class AccountService(ServiceComponent):
             existing = session.scalar(
                 select(ExchangeAccount).where(
                     ExchangeAccount.team_id == team.team_id,
+                    ExchangeAccount.environment == normalized_environment,
                     ExchangeAccount.account_id == normalized_account_id,
                     ExchangeAccount.venue == normalized_venue,
                 )
@@ -160,7 +179,7 @@ class AccountService(ServiceComponent):
             if existing is not None and existing.active:
                 _reject(
                     "EXCHANGE_ACCOUNT_CONFLICT",
-                    "that account ID already exists for this exchange in the active team",
+                    "that account ID already exists for this exchange and environment",
                 )
             exchange_account_id = (
                 existing.exchange_account_id if existing is not None else uuid4()
@@ -196,6 +215,7 @@ class AccountService(ServiceComponent):
                 account.version += 1
                 object_version = account.version
             account.label = normalized_label
+            account.environment = normalized_environment
             account.registration_source = "MANUAL"
             account.connection_status = "UNCONFIGURED" if encrypted is None else "NOT_VERIFIED"
             account.trading_status = "DISABLED"
@@ -237,7 +257,7 @@ class AccountService(ServiceComponent):
                 object_type="ExchangeAccount",
                 object_id=exchange_account_id,
                 reason=(
-                    f"venue={normalized_venue};credentials="
+                    f"environment={normalized_environment};venue={normalized_venue};credentials="
                     f"{'configured-unverified' if encrypted is not None else 'unconfigured'};"
                     "trading=disabled"
                 ),
@@ -634,7 +654,6 @@ class AccountService(ServiceComponent):
         now: datetime,
     ) -> dict[str, Any]:
         """Configure exact-account LIVE eligibility without opening global gates."""
-
         operation = "exchange-account.trading.configure"
         with self.database.session_factory.begin() as session:
             _actor, workspace, team = self.transactions._active_scope(session, actor_id)
@@ -811,7 +830,6 @@ class AccountService(ServiceComponent):
         now: datetime,
     ) -> dict[str, Any]:
         """Configure one encrypted Worker binding for one exact exchange account."""
-
         normalized_mode = mode.upper()
         if normalized_mode not in {"UNCONFIGURED", "DRY_RUN", "LIVE"}:
             _reject("FREQTRADE_WORKER_MODE_INVALID", "Freqtrade worker mode is invalid")
@@ -1331,7 +1349,6 @@ class AccountService(ServiceComponent):
         now: datetime,
     ) -> PreparedFreqtradeDispatch:
         """Persist the exact external handoff before a Freqtrade write can occur."""
-
         if not idempotency_key or len(idempotency_key) > 160:
             _reject(
                 "IDEMPOTENCY_KEY_INVALID",
@@ -1564,7 +1581,6 @@ class AccountService(ServiceComponent):
         execution_scope: str,
     ) -> str | None:
         """Read only the persisted backend identity for an exact intent scope."""
-
         with self.database.session_factory() as session:
             intent = session.get(OrderIntent, intent_id)
             campaign = None if intent is None else session.get(Campaign, intent.campaign_id)
@@ -1855,7 +1871,6 @@ class AccountService(ServiceComponent):
         idempotency_key: str,
     ) -> tuple[PreparedExchangeConnectionVerification | None, dict[str, Any] | None]:
         """Authorize and decrypt a version-pinned probe after checking for a replay."""
-
         with self.database.session_factory.begin() as session:
             _actor, _workspace, active_team = self.transactions._active_scope(session, actor_id)
             assert active_team is not None
@@ -1936,7 +1951,6 @@ class AccountService(ServiceComponent):
         now: datetime,
     ) -> dict[str, Any]:
         """Commit a probe only when its account and credential versions are still current."""
-
         error_code = outcome.error_code
         if outcome.success:
             error_code = None

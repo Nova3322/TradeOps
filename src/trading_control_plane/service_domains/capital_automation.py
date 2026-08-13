@@ -75,6 +75,7 @@ class AutomationCapitalService(ServiceComponent):
                 actor_id=actor_id,
                 account_id=account_id,
                 venue=venue,
+                environment=environment.value,
                 now=now,
             )
             digest, response = self.transactions._idempotency(

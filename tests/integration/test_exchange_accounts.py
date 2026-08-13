@@ -28,6 +28,86 @@ def encryption_key() -> str:
     return base64.urlsafe_b64encode(b"exchange-account-test-key-32byt!"[:32]).decode().rstrip("=")
 
 
+def test_exchange_accounts_are_environment_scoped_and_shadow_rejects_api_credentials(
+    database: Database,
+) -> None:
+    now = datetime.now(UTC)
+    service = TradingService(database, credential_encryption_key=encryption_key())
+    admin = service.bootstrap_admin("mode-account-admin", now=now)
+    shadow_id = service.create_exchange_account(
+        actor_id=admin,
+        environment="SHADOW",
+        account_id="shadow-binance",
+        venue="BINANCE",
+        label="Shadow Binance",
+        credentials=None,
+        idempotency_key="shadow-account-create",
+        now=now,
+    )
+    live_id = service.create_exchange_account(
+        actor_id=admin,
+        environment="LIVE",
+        account_id="live-binance",
+        venue="BINANCE",
+        label="Live Binance",
+        credentials={"api_key": "live-api-key", "api_secret": "live-api-secret"},
+        idempotency_key="live-account-create",
+        now=now,
+    )
+
+    projection = TradingQueries(database).exchange_accounts(admin)["data"]
+    assert {(item["environment"], item["account_id"]) for item in projection} == {
+        ("SHADOW", "shadow-binance"),
+        ("LIVE", "live-binance"),
+    }
+    shadow = next(item for item in projection if item["exchange_account_id"] == str(shadow_id))
+    live = next(item for item in projection if item["exchange_account_id"] == str(live_id))
+    assert shadow["credentials"]["state"] == "UNCONFIGURED"
+    assert live["credentials"]["state"] == "CONFIGURED"
+    for environment, account_id, amount in (
+        (ExecutionEnvironment.SHADOW, "shadow-binance", Decimal("1000")),
+        (ExecutionEnvironment.LIVE, "live-binance", Decimal("500")),
+    ):
+        service.record_account_equity(
+            account_id,
+            "BINANCE",
+            amount,
+            amount,
+            "USDT",
+            True,
+            admin,
+            environment=environment,
+            observed_at=now,
+            now=now,
+        )
+    live_display = TradingQueries(database).capital_display(
+        admin,
+        "LIVE",
+        {"BINANCE|live-binance"},
+    )
+    assert live_display["selected_account_keys"] == ["BINANCE|live-binance"]
+    assert {item["account_id"] for item in live_display["account_options"]} == {
+        "live-binance"
+    }
+    assert Decimal(live_display["net_worth"]["total"]) == Decimal("500")
+    shadow_display = TradingQueries(database).capital_display(admin, "SHADOW")
+    assert {item["account_id"] for item in shadow_display["account_options"]} == {
+        "shadow-binance"
+    }
+    assert Decimal(shadow_display["net_worth"]["total"]) == Decimal("1000")
+    with pytest.raises(DomainRejected, match="SHADOW_ACCOUNT_CREDENTIALS_FORBIDDEN"):
+        service.create_exchange_account(
+            actor_id=admin,
+            environment="SHADOW",
+            account_id="shadow-with-secret",
+            venue="BINANCE",
+            label="Invalid Shadow",
+            credentials={"api_key": "forbidden", "api_secret": "forbidden-secret"},
+            idempotency_key="shadow-secret-rejected",
+            now=now,
+        )
+
+
 def test_exchange_account_credentials_are_encrypted_scoped_and_never_projected(
     database: Database,
 ) -> None:

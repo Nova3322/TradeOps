@@ -327,6 +327,7 @@ class ExchangeCredentialRequest(BaseModel):
 
 
 class ExchangeAccountCreateRequest(BaseModel):
+    environment: Literal["SHADOW", "LIVE"] = "LIVE"
     account_id: str = Field(min_length=1, max_length=120)
     venue: VenueScope
     label: str | None = Field(default=None, min_length=1, max_length=120)
@@ -500,6 +501,7 @@ class NotificationRouteConfigurationRequest(BaseModel):
 
 
 class NotificationRouteWriteRequest(BaseModel):
+    environment: Literal["SHADOW", "LIVE"] = "LIVE"
     name: str = Field(min_length=1, max_length=120)
     channel: NotificationChannel
     event_types: list[NotificationEventType] = Field(min_length=1, max_length=6)
@@ -997,6 +999,7 @@ class DirectCapitalBinanceReceiptRequest(BaseModel):
 
 
 class DirectCapitalConfigurationRequest(BaseModel):
+    environment: Literal["SHADOW", "LIVE"] = "LIVE"
     network: Literal["ARBITRUM"] = "ARBITRUM"
     asset: Literal["USDC"] = "USDC"
     treasury_provider: CapitalTreasuryProvider | None = None
@@ -1010,6 +1013,12 @@ class DirectCapitalConfigurationRequest(BaseModel):
     hyperliquid_bridge_address: str | None = None
     safe_address: str | None = None
     safe_delegate_address: str | None = None
+    vault_withdrawal_private_key: SecretStr | None = Field(
+        default=None, min_length=32, max_length=512
+    )
+    safe_withdrawal_private_key: SecretStr | None = Field(
+        default=None, min_length=32, max_length=512
+    )
     max_amount: Decimal | None = Field(default=None, gt=0)
     max_fee: Decimal | None = Field(default=None, ge=0)
     idempotency_key: str = Field(min_length=1, max_length=160)
@@ -1188,8 +1197,16 @@ class RiskPolicyConfigureRequest(BaseModel):
 
 
 class RiskControlChangeCreateRequest(BaseModel):
+    change_type: Literal[
+        "POLICY_UPDATE",
+        "DISABLE_AUTO_ADD",
+        "ENABLE_AUTO_ADD",
+        "PAUSE_NEW_RISK",
+        "RESUME_NEW_RISK",
+    ] = "RESUME_NEW_RISK"
     reason: str = Field(min_length=10, max_length=2_000)
     restore_auto_add: bool = False
+    requested_policy: dict[str, str | int] = Field(default_factory=dict)
     idempotency_key: str = Field(min_length=1, max_length=160)
 
 

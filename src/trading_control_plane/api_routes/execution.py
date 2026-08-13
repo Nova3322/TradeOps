@@ -295,6 +295,19 @@ class _ExecutionRoutes:
             )
             return {"status": "DISABLED"}
 
+        @self.app.post("/api/operations/auto-add/enable")
+        def enable_global_auto_add(
+            payload: RiskTightenRequest,
+            identity: SessionIdentity = self.identity_dependency,
+        ) -> dict[str, str]:
+            self.service().enable_global_auto_add(
+                identity.user_id,
+                payload.idempotency_key,
+                reason=payload.reason,
+                now=_now(),
+            )
+            return {"status": "ENABLED"}
+
         @self.app.post("/api/operations/pause-new-risk")
         def pause_new_risk(
             payload: RiskTightenRequest,

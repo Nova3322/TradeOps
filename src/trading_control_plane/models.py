@@ -293,6 +293,10 @@ class ExchangeAccount(Base):
             name="ck_exchange_accounts_venue",
         ),
         CheckConstraint(
+            "environment IN ('SHADOW','TESTNET','LIVE')",
+            name="ck_exchange_accounts_environment",
+        ),
+        CheckConstraint(
             "connection_status IN ('UNCONFIGURED','NOT_VERIFIED','VERIFIED','FAILED','STALE')",
             name="ck_exchange_accounts_connection_status",
         ),
@@ -351,6 +355,12 @@ class ExchangeAccount(Base):
         ),
         Index("ix_exchange_accounts_team_active", "team_id", "active"),
         Index(
+            "ix_exchange_accounts_team_environment_active",
+            "team_id",
+            "environment",
+            "active",
+        ),
+        Index(
             "ix_exchange_accounts_runtime_sync",
             "team_id",
             "runtime_sync_enabled",
@@ -366,6 +376,7 @@ class ExchangeAccount(Base):
     )
     account_id: Mapped[str] = mapped_column(String(120), nullable=False)
     venue: Mapped[str] = mapped_column(String(64), nullable=False)
+    environment: Mapped[str] = mapped_column(String(16), nullable=False, default="LIVE")
     label: Mapped[str] = mapped_column(String(120), nullable=False)
     registration_source: Mapped[str] = mapped_column(String(32), nullable=False)
     connection_status: Mapped[str] = mapped_column(String(32), nullable=False)
@@ -728,6 +739,10 @@ class NotificationRoute(Base):
             name="ck_notification_routes_channel",
         ),
         CheckConstraint(
+            "environment IN ('SHADOW','LIVE')",
+            name="ck_notification_routes_environment",
+        ),
+        CheckConstraint(
             "jsonb_typeof(event_types) = 'array'", name="ck_notification_routes_events"
         ),
         CheckConstraint("version >= 1", name="ck_notification_routes_version"),
@@ -737,6 +752,7 @@ class NotificationRoute(Base):
         Index(
             "uq_notification_routes_team_active_name",
             "team_id",
+            "environment",
             "name",
             unique=True,
             postgresql_where=text("deleted_at IS NULL"),
@@ -754,6 +770,7 @@ class NotificationRoute(Base):
         ForeignKey("teams.team_id", ondelete="CASCADE"), nullable=False
     )
     name: Mapped[str] = mapped_column(String(120), nullable=False)
+    environment: Mapped[str] = mapped_column(String(16), nullable=False, default="LIVE")
     channel: Mapped[str] = mapped_column(String(16), nullable=False)
     event_types: Mapped[list[str]] = mapped_column(JSONB, nullable=False)
     enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
@@ -1435,10 +1452,15 @@ class DirectCapitalConfiguration(Base):
     __table_args__ = (
         UniqueConstraint(
             "team_id",
+            "environment",
             "version",
-            name="uq_direct_capital_configurations_version",
+            name="uq_direct_capital_configurations_environment_version",
         ),
         CheckConstraint("version >= 1", name="ck_direct_capital_configuration_version"),
+        CheckConstraint(
+            "environment IN ('SHADOW','LIVE')",
+            name="ck_direct_capital_configuration_environment",
+        ),
         CheckConstraint("network = 'ARBITRUM'", name="ck_direct_capital_configuration_network"),
         CheckConstraint("asset = 'USDC'", name="ck_direct_capital_configuration_asset"),
         CheckConstraint(
@@ -1453,9 +1475,20 @@ class DirectCapitalConfiguration(Base):
             "max_fee IS NULL OR max_fee >= 0",
             name="ck_direct_capital_configuration_max_fee",
         ),
+        CheckConstraint(
+            "(vault_withdrawal_key_ciphertext IS NULL AND vault_withdrawal_key_version = 0) OR "
+            "(vault_withdrawal_key_ciphertext IS NOT NULL AND vault_withdrawal_key_version >= 1)",
+            name="ck_direct_capital_configuration_vault_key",
+        ),
+        CheckConstraint(
+            "(safe_withdrawal_key_ciphertext IS NULL AND safe_withdrawal_key_version = 0) OR "
+            "(safe_withdrawal_key_ciphertext IS NOT NULL AND safe_withdrawal_key_version >= 1)",
+            name="ck_direct_capital_configuration_safe_key",
+        ),
         Index(
             "uq_direct_capital_configuration_active",
             "team_id",
+            "environment",
             "active",
             unique=True,
             postgresql_where=text("active"),
@@ -1467,6 +1500,7 @@ class DirectCapitalConfiguration(Base):
         ForeignKey("teams.team_id", ondelete="RESTRICT"), nullable=False
     )
     version: Mapped[int] = mapped_column(Integer, nullable=False)
+    environment: Mapped[str] = mapped_column(String(16), nullable=False, default="LIVE")
     active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     network: Mapped[str] = mapped_column(String(64), nullable=False, default="ARBITRUM")
     asset: Mapped[str] = mapped_column(String(32), nullable=False, default="USDC")
@@ -1483,6 +1517,20 @@ class DirectCapitalConfiguration(Base):
     hyperliquid_bridge_address: Mapped[str | None] = mapped_column(String(42), nullable=True)
     safe_address: Mapped[str | None] = mapped_column(String(42), nullable=True)
     safe_delegate_address: Mapped[str | None] = mapped_column(String(42), nullable=True)
+    vault_withdrawal_key_ciphertext: Mapped[str | None] = mapped_column(Text, nullable=True)
+    vault_withdrawal_key_metadata: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, nullable=False, default=dict
+    )
+    vault_withdrawal_key_version: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0
+    )
+    safe_withdrawal_key_ciphertext: Mapped[str | None] = mapped_column(Text, nullable=True)
+    safe_withdrawal_key_metadata: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, nullable=False, default=dict
+    )
+    safe_withdrawal_key_version: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0
+    )
     max_amount: Mapped[Decimal | None] = mapped_column(AMOUNT, nullable=True)
     max_fee: Mapped[Decimal | None] = mapped_column(AMOUNT, nullable=True)
     updated_by: Mapped[UUID] = mapped_column(ForeignKey("users.user_id"), nullable=False)
@@ -1703,6 +1751,11 @@ class RiskControlChangeRequest(Base):
             "status IN ('PENDING_REVIEW','APPROVED','REJECTED','EXPIRED','EXECUTED')",
             name="ck_risk_control_change_requests_status",
         ),
+        CheckConstraint(
+            "change_type IN ('POLICY_UPDATE','DISABLE_AUTO_ADD','ENABLE_AUTO_ADD',"
+            "'PAUSE_NEW_RISK','RESUME_NEW_RISK')",
+            name="ck_risk_control_change_requests_change_type",
+        ),
         CheckConstraint("version >= 1", name="ck_risk_control_change_requests_version"),
         CheckConstraint(
             "source_policy_revision >= 1 AND source_auto_add_version >= 1",
@@ -1743,6 +1796,12 @@ class RiskControlChangeRequest(Base):
     )
     requester_id: Mapped[UUID] = mapped_column(ForeignKey("users.user_id"), nullable=False)
     status: Mapped[str] = mapped_column(String(32), nullable=False)
+    change_type: Mapped[str] = mapped_column(
+        String(32), nullable=False, default="RESUME_NEW_RISK"
+    )
+    requested_policy: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, nullable=False, default=dict
+    )
     version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
     reason: Mapped[str] = mapped_column(Text, nullable=False)
     restore_auto_add: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)

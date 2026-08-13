@@ -153,6 +153,7 @@ def configure_shadow_prerequisites(service: TradingService, ids: dict[str, UUID]
     )
     service.create_exchange_account(
         actor_id=ids["admin"],
+        environment="SHADOW",
         account_id="paper-1",
         venue="BINANCE",
         label="Virtual Binance",
@@ -1061,11 +1062,31 @@ def test_live_mode_regression_human_version_idempotency_and_shadow_blockers(
     assert live["execution_mode"] == "LIVE"
     assert live["dangerous_capabilities_changed"] is False
 
+    live_account_id = "live-paper-1"
+    service.create_exchange_account(
+        actor_id=ids["admin"],
+        environment="LIVE",
+        account_id=live_account_id,
+        venue="BINANCE",
+        label="Live Binance",
+        credentials={"api_key": "live-mode-key", "api_secret": "live-mode-secret"},
+        idempotency_key="live-mode-account",
+        now=NOW + timedelta(seconds=2),
+    )
+    service.assign_role(
+        ids["proposer"],
+        Role.PROPOSER,
+        ids["admin"],
+        live_account_id,
+        "BINANCE",
+        now=NOW + timedelta(seconds=2),
+    )
+
     proposal = service.create_proposal(
         actor_id=ids["proposer"],
         source=ProposalSource.MANUAL,
         risk_tier=RiskTier.LOW,
-        account_id="paper-1",
+        account_id=live_account_id,
         venue="BINANCE",
         instrument_id=ids["instrument"],
         direction=Direction.LONG,
@@ -1091,7 +1112,7 @@ def test_live_mode_regression_human_version_idempotency_and_shadow_blockers(
                 actor_id=ids["proposer"],
                 source=ProposalSource.MANUAL,
                 risk_tier=RiskTier.LOW,
-                account_id="paper-1",
+                account_id=live_account_id,
                 venue="BINANCE",
                 instrument_id=ids["instrument"],
                 direction=Direction.LONG,
@@ -1108,7 +1129,7 @@ def test_live_mode_regression_human_version_idempotency_and_shadow_blockers(
         session.add(
             Position(
                 team_id=ids["team"],
-                account_id="paper-1",
+                account_id=live_account_id,
                 venue="BINANCE",
                 environment="LIVE",
                 instrument_id=ids["instrument"],

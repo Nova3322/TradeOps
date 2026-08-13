@@ -505,8 +505,15 @@ def create_app(
             confirmation_timeout_seconds=(resolved_settings.freqtrade_confirmation_timeout_seconds),
         )
 
-    def effective_direct_capital_settings(user_id: UUID) -> tuple[Settings, dict[str, Any] | None]:
-        config = service().direct_capital_configuration(user_id)
+    def effective_direct_capital_settings(
+        user_id: UUID,
+        environment: str = "LIVE",
+    ) -> tuple[Settings, dict[str, Any] | None]:
+        config = service().direct_capital_configuration(
+            user_id,
+            environment,
+            include_sensitive_addresses=True,
+        )
         if config is None:
             return resolved_settings, None
         return (

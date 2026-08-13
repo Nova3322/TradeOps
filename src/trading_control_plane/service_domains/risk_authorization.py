@@ -341,7 +341,19 @@ class AuthorizationRiskService(ServiceComponent):
         operation = "auto_add.disable"
         payload = {"reason": reason}
         with self.database.session_factory.begin() as session:
-            self.transactions._require_role(session, actor_id, "risk.tighten")
+            _actor, _workspace, team = self.transactions._active_scope(session, actor_id)
+            assert team is not None
+            if not session.scalar(
+                select(RoleAssignment.assignment_id).where(
+                    RoleAssignment.user_id == actor_id,
+                    RoleAssignment.team_id == team.team_id,
+                    RoleAssignment.role == Role.SYSTEM_ADMIN.value,
+                )
+            ):
+                _reject(
+                    "RISK_CHANGE_REVIEW_REQUIRED",
+                    "non-admin risk control changes require independent review",
+                )
             digest, response = self.transactions._idempotency(
                 session,
                 caller_id=str(actor_id),
@@ -401,7 +413,19 @@ class AuthorizationRiskService(ServiceComponent):
         operation = "risk.pause_new"
         payload = {"reason": reason}
         with self.database.session_factory.begin() as session:
-            team = self.transactions._require_role(session, actor_id, "risk.tighten")
+            _actor, _workspace, team = self.transactions._active_scope(session, actor_id)
+            assert team is not None
+            if not session.scalar(
+                select(RoleAssignment.assignment_id).where(
+                    RoleAssignment.user_id == actor_id,
+                    RoleAssignment.team_id == team.team_id,
+                    RoleAssignment.role == Role.SYSTEM_ADMIN.value,
+                )
+            ):
+                _reject(
+                    "RISK_CHANGE_REVIEW_REQUIRED",
+                    "non-admin risk control changes require independent review",
+                )
             digest, response = self.transactions._idempotency(
                 session,
                 caller_id=str(actor_id),
@@ -456,3 +480,66 @@ class AuthorizationRiskService(ServiceComponent):
                 now=now,
             )
             return SystemRiskState(policy.system_state)
+
+    def enable_global_auto_add(
+        self,
+        actor_id: UUID,
+        idempotency_key: str,
+        *,
+        reason: str,
+        now: datetime,
+    ) -> None:
+        operation = "auto_add.enable"
+        payload = {"reason": reason}
+        with self.database.session_factory.begin() as session:
+            team = self.transactions._require_role(session, actor_id, "risk.restore.direct")
+            if not session.scalar(
+                select(RoleAssignment.assignment_id).where(
+                    RoleAssignment.user_id == actor_id,
+                    RoleAssignment.team_id == team.team_id,
+                    RoleAssignment.role == Role.SYSTEM_ADMIN.value,
+                )
+            ):
+                _reject("RISK_CHANGE_REVIEW_REQUIRED", "SYSTEM_ADMIN is required")
+            digest, response = self.transactions._idempotency(
+                session,
+                caller_id=f"{actor_id}:{team.team_id}",
+                operation=operation,
+                idempotency_key=idempotency_key,
+                payload=payload,
+            )
+            if response is not None:
+                return
+            self.transactions._lock_risk_capacity(session, team.team_id)
+            policy = self.facade._active_risk_policy(session, team.team_id)
+            if policy.system_state != SystemRiskState.NORMAL.value:
+                _reject("RISK_RESTORE_BLOCKED", "risk policy must be NORMAL")
+            gate = session.get(CapabilityGate, "AUTO_ADD", with_for_update=True)
+            if gate is None:
+                _reject("CAPABILITY_GATE_NOT_FOUND", "AUTO_ADD gate is missing")
+            gate.status = CapabilityStatus.ENABLED.value
+            gate.reason = reason
+            gate.operator_id = str(actor_id)
+            gate.version += 1
+            gate.updated_at = now
+            self.transactions._save_receipt(
+                session,
+                caller_id=f"{actor_id}:{team.team_id}",
+                operation=operation,
+                idempotency_key=idempotency_key,
+                semantic_hash=digest,
+                response={"status": gate.status},
+                now=now,
+            )
+            self.transactions._audit(
+                session,
+                actor_id=str(actor_id),
+                event_type="AUTO_ADD_ENABLED",
+                object_type="CapabilityGate",
+                object_id="AUTO_ADD",
+                reason=reason,
+                correlation_id=uuid4(),
+                object_version=gate.version,
+                idempotency_key=idempotency_key,
+                now=now,
+            )

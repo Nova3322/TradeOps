@@ -866,6 +866,7 @@ class _WorkspaceRoutes:
             result = self.service().configure_notification_route(
                 actor_id=identity.user_id,
                 notification_route_id=None,
+                environment=payload.environment,
                 name=payload.name,
                 channel=payload.channel,
                 event_types=list(payload.event_types),
@@ -891,6 +892,7 @@ class _WorkspaceRoutes:
             result = self.service().configure_notification_route(
                 actor_id=identity.user_id,
                 notification_route_id=notification_route_id,
+                environment=payload.environment,
                 name=payload.name,
                 channel=payload.channel,
                 event_types=list(payload.event_types),
