@@ -48,6 +48,22 @@ class _AccountsRoutes:
         self.resolved_hyperliquid_live = dependencies.hyperliquid_live
         self.resolved_hyperliquid_testnet = dependencies.hyperliquid_testnet
 
+    def exchange_accounts_projection(self, actor_id: UUID) -> dict[str, Any]:
+        """Add deployment-owned Worker defaults without weakening account scope."""
+
+        result = self.queries().exchange_accounts(actor_id)
+        default_endpoints = {
+            "BINANCE": self.resolved_settings.freqtrade_binance_worker_url,
+            "HYPERLIQUID": self.resolved_settings.freqtrade_hyperliquid_worker_url,
+        }
+        for item in result["data"]:
+            if not item["permissions"]["can_manage_worker"]:
+                continue
+            endpoint = default_endpoints.get(item["venue"])
+            if endpoint is not None:
+                item["execution_worker"]["default_endpoint"] = endpoint
+        return result
+
     def reconciled_venue_sync(
         self,
         *,
@@ -111,7 +127,7 @@ class _AccountsRoutes:
                 if exc.code != "RBAC_DENIED":
                     raise
                 self.require_capability(identity, "proposal.create")
-            result = self.queries().exchange_accounts(identity.user_id)
+            result = self.exchange_accounts_projection(identity.user_id)
             return {"data": result, "as_of": _now().isoformat()}
 
         @self.app.post("/api/exchange-accounts")
@@ -132,7 +148,7 @@ class _AccountsRoutes:
             )
             return {
                 "exchange_account_id": str(exchange_account_id),
-                "data": self.queries().exchange_accounts(identity.user_id),
+                "data": self.exchange_accounts_projection(identity.user_id),
             }
 
         @self.app.put("/api/exchange-accounts/{exchange_account_id}/credentials")
@@ -152,7 +168,7 @@ class _AccountsRoutes:
             return {
                 "exchange_account_id": str(exchange_account_id),
                 "version": version,
-                "data": self.queries().exchange_accounts(identity.user_id),
+                "data": self.exchange_accounts_projection(identity.user_id),
             }
 
         @self.app.post("/api/exchange-accounts/{exchange_account_id}/connection-verifications")
@@ -186,7 +202,7 @@ class _AccountsRoutes:
                 )
             return {
                 **result,
-                "data": self.queries().exchange_accounts(identity.user_id),
+                "data": self.exchange_accounts_projection(identity.user_id),
             }
 
         @self.app.put("/api/exchange-accounts/{exchange_account_id}/runtime-sync")
@@ -205,7 +221,7 @@ class _AccountsRoutes:
             )
             return {
                 **result,
-                "data": self.queries().exchange_accounts(identity.user_id),
+                "data": self.exchange_accounts_projection(identity.user_id),
             }
 
         @self.app.put("/api/exchange-accounts/{exchange_account_id}/trading-eligibility")
@@ -224,7 +240,7 @@ class _AccountsRoutes:
             )
             return {
                 **result,
-                "data": self.queries().exchange_accounts(identity.user_id),
+                "data": self.exchange_accounts_projection(identity.user_id),
             }
 
         @self.app.put("/api/exchange-accounts/{exchange_account_id}/freqtrade-worker")
@@ -248,7 +264,7 @@ class _AccountsRoutes:
             )
             return {
                 **result,
-                "data": self.queries().exchange_accounts(identity.user_id),
+                "data": self.exchange_accounts_projection(identity.user_id),
             }
 
         @self.app.post(
@@ -287,7 +303,7 @@ class _AccountsRoutes:
                 )
             return {
                 **result,
-                "data": self.queries().exchange_accounts(identity.user_id),
+                "data": self.exchange_accounts_projection(identity.user_id),
             }
 
         @self.app.get("/api/instruments")

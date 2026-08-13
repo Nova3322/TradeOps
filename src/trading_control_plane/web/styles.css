@@ -463,6 +463,17 @@ button:disabled { opacity: .52; cursor: not-allowed; }
 .account-advanced-settings > summary small, .exchange-account-create > summary small { color: var(--muted); font-size: 12px; font-weight: 400; }
 .account-advanced-settings[open] > summary, .exchange-account-create[open] > summary { border-bottom: 1px solid var(--line); }
 .account-advanced-settings > .toolbox-content, .exchange-account-create > .toolbox-content { padding-top: 20px; }
+.account-worker-scope { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 5px 14px; align-items: baseline; margin: 0 0 18px; padding: 13px 15px; border: 1px solid color-mix(in srgb, var(--accent) 28%, var(--line)); border-radius: 10px; background: var(--accent-2); }
+.account-worker-scope span { color: var(--accent); font-size: 12px; font-weight: 600; }
+.account-worker-scope b { min-width: 0; overflow-wrap: anywhere; font-size: 13px; }
+.account-worker-scope small { grid-column: 1 / -1; color: var(--muted); font-size: 12px; line-height: 1.5; }
+.worker-endpoint-override { min-width: 0; align-self: start; border: 1px solid var(--line); border-radius: 10px; background: var(--surface); }
+.worker-endpoint-override > summary { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 11px 13px; cursor: pointer; }
+.worker-endpoint-override > summary span { min-width: 0; display: grid; gap: 3px; }
+.worker-endpoint-override > summary small { overflow-wrap: anywhere; color: var(--muted); font-size: 12px; font-weight: 400; line-height: 1.4; }
+.worker-endpoint-override > summary strong { color: var(--accent); font-size: 12px; }
+.worker-endpoint-override[open] > summary { border-bottom: 1px solid var(--line); }
+.worker-endpoint-override > label { padding: 12px 13px 13px; }
 .account-status-history { margin-top: 32px; }
 .account-status-history > #history > section { margin-top: 28px; }
 .account-capability-split { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; margin: 14px 0; }

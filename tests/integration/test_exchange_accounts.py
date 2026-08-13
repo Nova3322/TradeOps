@@ -526,6 +526,10 @@ def test_freqtrade_workers_are_encrypted_and_verified_per_exact_account(
             }
             assert by_account["binance-worker-a"]["execution_worker"]["live_ready"] is True
             assert by_account["binance-worker-b"]["execution_worker"]["live_ready"] is False
+            assert (
+                by_account["binance-worker-a"]["execution_worker"]["default_endpoint"]
+                == "http://127.0.0.1:8081"
+            )
             status = await client.get("/api/execution/freqtrade/status")
             assert status.status_code == 200
             assert status.json()["workers"] == []
@@ -544,6 +548,7 @@ def test_freqtrade_workers_are_encrypted_and_verified_per_exact_account(
             assert len(observer_accounts) == 1
             assert observer_accounts[0]["account_id"] == "binance-worker-a"
             assert observer_accounts[0]["execution_worker"]["endpoint"] is None
+            assert "default_endpoint" not in observer_accounts[0]["execution_worker"]
             assert (
                 observer_accounts[0]["execution_worker"]["auth"]["username_hint"]
                 is None
@@ -563,6 +568,7 @@ def test_freqtrade_workers_are_encrypted_and_verified_per_exact_account(
                 "binance-worker-a"
             ]
             assert proposer_accounts[0]["execution_worker"]["endpoint"] is None
+            assert "default_endpoint" not in proposer_accounts[0]["execution_worker"]
 
     asyncio.run(scenario())
 

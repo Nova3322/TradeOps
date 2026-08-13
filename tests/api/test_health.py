@@ -250,7 +250,7 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
     assert "/assets/capital.js?v=173" in response.text
     assert "/assets/app.js?v=175" in response.text
     assert 'href="/signals"' in response.text
-    assert "/assets/styles.css?v=92" in response.text
+    assert "/assets/styles.css?v=93" in response.text
     for font_name in (
         "IBMPlexSansSC-Regular.woff2",
         "IBMPlexSansSC-SemiBold.woff2",
@@ -262,7 +262,7 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
             in response.text
         )
     assert "/assets/reporting.js?v=172" in response.text
-    assert "/assets/accounts.js?v=172" in response.text
+    assert "/assets/accounts.js?v=173" in response.text
     assert 'href="/assets/tradingops-logo.png" type="image/png"' in response.text
     assert '<img src="/assets/tradingops-logo.png" alt="">' in response.text
     assert '<span class="brand-mark" aria-hidden="true">T</span>' not in response.text
@@ -798,7 +798,7 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
 
     service_worker = get(app, "/sw.js")
     assert service_worker.status_code == 200
-    assert "trading-shell-v172" in service_worker.text
+    assert "trading-shell-v173" in service_worker.text
     assert "/assets/fonts/IBMPlexSansSC-Regular.woff2" in service_worker.text
     assert "/assets/fonts/IBMPlexSansSC-SemiBold.woff2" in service_worker.text
     assert "/assets/fonts/IBMPlexMono-Regular.woff2" in service_worker.text
@@ -2159,6 +2159,12 @@ def test_venue_list_is_compact_and_account_configuration_moves_to_detail() -> No
     assert "连接与连续同步" in detail_page
     assert "账户状态及历史快照" in detail_page
     assert "Worker 与交易资格高级设置" in detail_page
+    assert "自动绑定当前账户" in detail_page
+    assert "空间和账户范围由当前页面自动确定，无需填写 URL" in detail_page
+    assert "已按部署配置自动选择" in detail_page
+    assert "不是工作空间或账户 URL" in detail_page
+    assert 'input name="base_url" type="hidden"' in detail_page
+    assert "data-worker-endpoint-override" in detail_page
     assert "测试 Fixture 账户已隐藏" in source
     assert "测试 Fixture</span>" in source
     assert "最近只读探针成功，但连续同步当前关闭" in source
@@ -2183,7 +2189,7 @@ def test_venue_account_detail_route_serves_the_spa_shell() -> None:
 
     assert response.status_code == 200
     assert "交易控制台" in response.text
-    assert "/assets/accounts.js?v=172" in response.text
+    assert "/assets/accounts.js?v=173" in response.text
 
 
 def test_venue_snapshot_empty_states_do_not_claim_current_account_state() -> None:
