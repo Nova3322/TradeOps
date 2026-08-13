@@ -102,6 +102,71 @@ def test_exchange_account_credentials_are_encrypted_scoped_and_never_projected(
     assert rotated["trading"]["enabled"] is False
 
 
+def test_exchange_account_delete_is_fail_closed_and_can_be_reconnected(
+    database: Database,
+) -> None:
+    now = datetime.now(UTC)
+    service = TradingService(database, credential_encryption_key=encryption_key())
+    admin = service.bootstrap_admin("account-delete-admin", now=now)
+    account_id = service.create_exchange_account(
+        actor_id=admin,
+        account_id="okx-removable",
+        venue="OKX",
+        label="Removable OKX",
+        credentials={"api_key": "key-one", "api_secret": "secret-one", "passphrase": "pass"},
+        idempotency_key="create-removable-account",
+        now=now,
+    )
+
+    deleted = service.delete_exchange_account(
+        account_id,
+        actor_id=admin,
+        expected_version=1,
+        idempotency_key="delete-removable-account",
+        now=now + timedelta(seconds=1),
+    )
+    assert deleted["status"] == "DELETED"
+    assert TradingQueries(database).exchange_accounts(admin)["data"] == []
+    assert service.delete_exchange_account(
+        account_id,
+        actor_id=admin,
+        expected_version=1,
+        idempotency_key="delete-removable-account",
+        now=now + timedelta(seconds=2),
+    ) == deleted
+    with database.session_factory() as session:
+        archived = session.get(ExchangeAccount, account_id)
+        assert archived is not None
+        assert archived.active is False
+        assert archived.credentials_ciphertext is None
+        assert archived.credential_version == 0
+        assert archived.runtime_sync_enabled is False
+        assert archived.trading_status == "DISABLED"
+
+    restored_id = service.create_exchange_account(
+        actor_id=admin,
+        account_id="okx-removable",
+        venue="OKX",
+        label="Reconnected OKX",
+        credentials=None,
+        idempotency_key="restore-removable-account",
+        now=now + timedelta(seconds=3),
+    )
+    assert restored_id == account_id
+    restored = TradingQueries(database).exchange_accounts(admin)["data"]
+    assert len(restored) == 1
+    assert restored[0]["label"] == "Reconnected OKX"
+    assert restored[0]["credentials"]["state"] == "UNCONFIGURED"
+    assert restored[0]["permissions"]["can_delete"] is True
+    with database.session_factory() as session:
+        events = set(
+            session.scalars(
+                select(AuditEvent.event_type).where(AuditEvent.object_id == str(account_id))
+            ).all()
+        )
+        assert {"EXCHANGE_ACCOUNT_DELETED", "EXCHANGE_ACCOUNT_RESTORED"} <= events
+
+
 def test_account_setup_is_allowed_before_team_activation_and_cross_team_rotation_is_denied(
     database: Database,
 ) -> None:

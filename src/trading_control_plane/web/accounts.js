@@ -256,6 +256,22 @@ function bindExchangeAccountForms() {
       await route();
     } catch (error) { showApiError(error, form.querySelector('.form-error')); }
   }));
+  document.querySelectorAll('[data-delete-exchange-account]').forEach(button => button.addEventListener('click', async event => {
+    const trigger = event.currentTarget;
+    const confirmed = await confirmAction({
+      title:`删除实盘账户“${trigger.dataset.accountLabel}”？`,
+      message:'账户会从当前空间移除，并立即停用连续同步、交易资格、Worker 和加密凭据。历史订单、成交、资金记录与审计仍会保留；有运行中交易任务或未决资金操作时服务端会阻断删除。',
+      confirmLabel:'确认删除账户',
+    });
+    if (!confirmed) return;
+    const body = {expected_version:Number(trigger.dataset.version), idempotency_key:crypto.randomUUID()};
+    try {
+      await withPending(trigger, '删除中…', () => api(`/api/exchange-accounts/${trigger.dataset.deleteExchangeAccount}`, {method:'DELETE', body:JSON.stringify(body)}));
+      showToast('实盘账户已删除；历史交易与审计记录已保留');
+      history.pushState({}, '', '/venues');
+      await route();
+    } catch (error) { showApiError(error); }
+  }));
 }
 
 async function renderVenueAccounts() {
@@ -279,7 +295,8 @@ async function renderVenueAccounts() {
     const state = exchangeAccountListState(item, runtime);
     const path = exchangeAccountPath(item);
     const venueLabel = exchangeVenueLabels[item.venue] || item.venue;
-    return `<article class="card exchange-account-card"><div class="account-card-head"><span class="account-venue-mark venue-${escapeHtml(item.venue)}" aria-hidden="true">${escapeHtml(venueLabel.slice(0, 1))}</span><div><div class="account-card-kicker"><span class="account-kind-badge is-live">实盘账户</span><span>${escapeHtml(item.account_id)}</span></div><h2>${escapeHtml(item.label)}</h2><p>${escapeHtml(venueLabel)} · 精确账户隔离</p></div><span class="status-pill ${state.tone}">${escapeHtml(state.label)}</span></div><dl class="account-list-facts"><div><dt>交易所</dt><dd>${escapeHtml(venueLabel)}</dd></div><div><dt>连接状态</dt><dd>${escapeHtml(state.label)}</dd></div><div><dt>${state.latestAt ? '最近同步或检查' : '数据新鲜度'}</dt><dd>${state.latestAt ? fmtDate(state.latestAt) : '尚无同步记录'}</dd></div></dl><a class="primary account-primary-action" href="${path}#${state.anchor}" data-link>${escapeHtml(state.action)}<span aria-hidden="true">→</span></a></article>`;
+    const deleteAction = item.permissions?.can_delete ? `<button class="danger account-delete-action" type="button" data-delete-exchange-account="${escapeHtml(item.exchange_account_id)}" data-account-label="${escapeHtml(item.label)}" data-version="${item.version}">删除</button>` : '';
+    return `<article class="card exchange-account-card"><div class="account-card-head"><span class="account-venue-mark venue-${escapeHtml(item.venue)}" aria-hidden="true">${escapeHtml(venueLabel.slice(0, 1))}</span><div><div class="account-card-kicker"><span class="account-kind-badge is-live">实盘账户</span><span>${escapeHtml(item.account_id)}</span></div><h2>${escapeHtml(item.label)}</h2><p>${escapeHtml(venueLabel)} · 精确账户隔离</p></div><span class="status-pill ${state.tone}">${escapeHtml(state.label)}</span></div><dl class="account-list-facts"><div><dt>交易所</dt><dd>${escapeHtml(venueLabel)}</dd></div><div><dt>连接状态</dt><dd>${escapeHtml(state.label)}</dd></div><div><dt>${state.latestAt ? '最近同步或检查' : '数据新鲜度'}</dt><dd>${state.latestAt ? fmtDate(state.latestAt) : '尚无同步记录'}</dd></div></dl><div class="account-card-actions"><a class="primary account-primary-action" href="${path}#${state.anchor}" data-link>${escapeHtml(state.action)}<span aria-hidden="true">→</span></a>${deleteAction}</div></article>`;
   }).join('');
   const cards = `${showShadowAccount ? shadowAccountCard(tradingMode) : ''}${liveCards}`;
   const filterOptions = [['ALL','全部账户'],['SHADOW','模拟账户'], ...Object.entries(exchangeVenueLabels)];
@@ -443,7 +460,8 @@ async function renderVenueAccountDetail(requestedAccountId) {
             ? '实时账户事实不可用；仅展示最后快照'
             : '无法验证实时连接；仅展示已保存事实';
   const fixtureBadge = isFixtureExchangeAccount(account) ? '<span class="status-pill status-RETRY_WAIT">测试 Fixture</span>' : '';
-  main.innerHTML = `<section class="page venue-facts-page venue-account-detail-page"><div class="detail-back-row"><a class="row-link" href="/venues" data-link>← 返回账户列表</a>${fixtureBadge}</div><header class="page-head"><div><p class="eyebrow">${escapeHtml(exchangeVenueLabels[venue] || venue)} · ${escapeHtml(accountId)}</p><h1>${escapeHtml(account.label)}</h1><p class="lede">当前空间内的精确账户配置、连接状态与历史快照。</p></div><button class="secondary" data-refresh>刷新当前状态</button></header>${exchangeAccountDetailConfiguration(account)}<section id="status" class="account-status-history"><div class="section-heading"><div><p class="eyebrow">账户状态及历史快照</p><h2>连接与数据</h2></div><span class="subtle">最近保存 ${fmtDate(lastSync)}</span></div><div class="stats venue-status-stats"><div class="stat"><small>连接状态</small><b class="${connected ? 'direction-long' : 'warning-text'}">${escapeHtml(connectionLabel)}</b><span>${escapeHtml(connectionSummary)}</span></div><div class="stat"><small>运行模式</small><b>${currentLanguage === 'en' ? 'Production account · read-only' : '生产账户 · 只读'}</b><span>${escapeHtml(venueDetail)} · ${escapeHtml(executionDetail)}</span></div><div class="stat"><small>账户范围</small><b>当前空间</b><span>${escapeHtml(exchangeVenueLabels[venue])} · ${escapeHtml(accountId)} · 精确空间/账户范围</span></div><div class="stat"><small>${snapshotMode ? '最后快照' : '事实新鲜度'}</small><b>${fmtDate(lastSync)}</b><span>${lastSync ? snapshotMode ? '连接受限；以下数据不是实时事实' : '最近保存时间；连接探针另行校验' : '尚无已保存事实'}</span></div></div>
+  const deleteAction = account.permissions?.can_delete ? `<button class="danger" type="button" data-delete-exchange-account="${escapeHtml(account.exchange_account_id)}" data-account-label="${escapeHtml(account.label)}" data-version="${account.version}">删除实盘账户</button>` : '';
+  main.innerHTML = `<section class="page venue-facts-page venue-account-detail-page"><div class="detail-back-row"><a class="row-link" href="/venues" data-link>← 返回账户列表</a>${fixtureBadge}</div><header class="page-head"><div><p class="eyebrow">${escapeHtml(exchangeVenueLabels[venue] || venue)} · ${escapeHtml(accountId)}</p><h1>${escapeHtml(account.label)}</h1><p class="lede">当前空间内的精确账户配置、连接状态与历史快照。</p></div><div class="toolbar"><button class="secondary" data-refresh>刷新当前状态</button>${deleteAction}</div></header>${exchangeAccountDetailConfiguration(account)}<section id="status" class="account-status-history"><div class="section-heading"><div><p class="eyebrow">账户状态及历史快照</p><h2>连接与数据</h2></div><span class="subtle">最近保存 ${fmtDate(lastSync)}</span></div><div class="stats venue-status-stats"><div class="stat"><small>连接状态</small><b class="${connected ? 'direction-long' : 'warning-text'}">${escapeHtml(connectionLabel)}</b><span>${escapeHtml(connectionSummary)}</span></div><div class="stat"><small>运行模式</small><b>${currentLanguage === 'en' ? 'Production account · read-only' : '生产账户 · 只读'}</b><span>${escapeHtml(venueDetail)} · ${escapeHtml(executionDetail)}</span></div><div class="stat"><small>账户范围</small><b>当前空间</b><span>${escapeHtml(exchangeVenueLabels[venue])} · ${escapeHtml(accountId)} · 精确空间/账户范围</span></div><div class="stat"><small>${snapshotMode ? '最后快照' : '事实新鲜度'}</small><b>${fmtDate(lastSync)}</b><span>${lastSync ? snapshotMode ? '连接受限；以下数据不是实时事实' : '最近保存时间；连接探针另行校验' : '尚无已保存事实'}</span></div></div>
     <article class="account-sync-note ${connected ? 'is-active' : ''}"><span class="status-dot"></span><div><b>${currentLanguage === 'en' ? 'Connection check' : '连接检查'}</b><p>${escapeHtml(connectionReason)}</p><span class="system-health-meta">${escapeHtml(connectionProbeEvidence)}</span>${connectionEvidence}</div></article>
     <article class="account-sync-note ${status.automatic_sync_enabled && connected ? 'is-active' : ''}"><span class="status-dot"></span><div><b>${status.automatic_sync_enabled && connected ? '账户数据自动同步' : status.automatic_sync_enabled ? '自动同步等待连接恢复' : '账户自动更新尚未启用'}</b><p>${escapeHtml(automaticSyncCopy)}</p></div></article>
     ${snapshotMode ? `<article class="danger-note venue-snapshot-warning"><b>当前连接不可用，以下仅为最后一次保存快照</b><p>这些余额、仓位、订单与成交不能作为实时交易依据。恢复只读连接并完成新一轮同步后，页面才会重新标记为当前事实。</p></article>` : ''}

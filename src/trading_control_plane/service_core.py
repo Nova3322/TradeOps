@@ -16,7 +16,7 @@ from decimal import Decimal
 from typing import Any, NoReturn
 from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 
-from sqlalchemy import delete, func, select, text
+from sqlalchemy import delete, func, select, text, update
 from sqlalchemy.orm import Session
 
 from trading_control_plane.agent import (
@@ -815,6 +815,7 @@ __all__ = [
     "shadow_protection_triggered",
     "text",
     "timedelta",
+    "update",
     "uuid4",
     "uuid5",
     "validate_agent_roles",

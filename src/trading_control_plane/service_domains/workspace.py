@@ -1081,6 +1081,120 @@ class WorkspaceService(ServiceComponent):
                 now=now,
             )
 
+    def remove_team_member(
+        self,
+        *,
+        user_id: UUID,
+        actor_id: UUID,
+        idempotency_key: str,
+        now: datetime,
+    ) -> dict[str, str]:
+        """Remove one human from the active team without deleting their identity or other teams."""
+
+        if user_id == actor_id:
+            _reject(
+                "SELF_ACCESS_CHANGE_DENIED",
+                "a system administrator cannot remove their own active team membership",
+            )
+        with self.database.session_factory.begin() as session:
+            self.transactions._require_role(session, actor_id, "user.manage")
+            _actor, workspace, team = self.transactions._active_scope(session, actor_id)
+            assert workspace is not None and team is not None
+            caller = f"{actor_id}:{team.team_id}"
+            payload = {"team_id": str(team.team_id), "user_id": str(user_id)}
+            digest, replay = self.transactions._idempotency(
+                session,
+                caller_id=caller,
+                operation="team.member.remove",
+                idempotency_key=idempotency_key,
+                payload=payload,
+            )
+            if replay is not None:
+                return {key: str(value) for key, value in replay.items()}
+            user = session.get(User, user_id, with_for_update=True)
+            if user is None or user.principal_type != PrincipalType.HUMAN.value:
+                _reject("USER_NOT_FOUND", "the managed human user does not exist")
+            membership = session.scalar(
+                select(TeamMembership)
+                .where(
+                    TeamMembership.team_id == team.team_id,
+                    TeamMembership.user_id == user_id,
+                )
+                .with_for_update()
+            )
+            if membership is None:
+                _reject("TEAM_MEMBER_NOT_FOUND", "the user is not a member of the active team")
+            current_roles = {
+                Role(item.role)
+                for item in session.scalars(
+                    select(RoleAssignment).where(
+                        RoleAssignment.user_id == user_id,
+                        RoleAssignment.team_id == team.team_id,
+                    )
+                ).all()
+            }
+            if Role.SYSTEM_ADMIN in current_roles:
+                active_admins = session.scalar(
+                    select(func.count(func.distinct(User.user_id)))
+                    .select_from(User)
+                    .join(RoleAssignment, RoleAssignment.user_id == User.user_id)
+                    .join(
+                        TeamMembership,
+                        (TeamMembership.user_id == User.user_id)
+                        & (TeamMembership.team_id == RoleAssignment.team_id),
+                    )
+                    .where(
+                        User.active,
+                        TeamMembership.active,
+                        RoleAssignment.team_id == team.team_id,
+                        RoleAssignment.role == Role.SYSTEM_ADMIN.value,
+                    )
+                )
+                if int(active_admins or 0) <= 1:
+                    _reject(
+                        "LAST_SYSTEM_ADMIN_REQUIRED",
+                        "the last active system administrator cannot be removed",
+                    )
+            session.execute(
+                delete(RoleAssignment).where(
+                    RoleAssignment.user_id == user_id,
+                    RoleAssignment.team_id == team.team_id,
+                )
+            )
+            membership_id = membership.membership_id
+            session.delete(membership)
+            if user.active_team_id == team.team_id:
+                user.active_team_id = None
+            response = {
+                "user_id": str(user_id),
+                "team_id": str(team.team_id),
+                "status": "REMOVED",
+            }
+            self.transactions._audit(
+                session,
+                actor_id=str(actor_id),
+                event_type="TEAM_MEMBER_REMOVED",
+                object_type="TeamMembership",
+                object_id=membership_id,
+                reason=f"user={user_id};identity_retained=true;other_teams_retained=true",
+                correlation_id=uuid4(),
+                idempotency_key=idempotency_key,
+                object_version=1,
+                workspace_id=workspace.workspace_id,
+                team_id=team.team_id,
+                now=now,
+            )
+            self.transactions._save_receipt(
+                session,
+                caller_id=caller,
+                operation="team.member.remove",
+                idempotency_key=idempotency_key,
+                semantic_hash=digest,
+                response=response,
+                now=now,
+            )
+            return response
+
     def change_own_password(
         self,
         *,

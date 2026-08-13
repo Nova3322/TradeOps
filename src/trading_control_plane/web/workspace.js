@@ -355,7 +355,7 @@ async function renderAccessManagement() {
       <div class="permission-grid">${accessRoleOptions(roles, `member-${member.user_id}`, member.is_current_user)}</div>
       <div class="scope-grid"><label>账户范围<input name="account_scope" value="${escapeHtml(scope.account)}" placeholder="留空 = 全部账户" ${member.is_current_user ? 'disabled' : ''}></label><label>交易所范围<select name="venue_scope" ${member.is_current_user ? 'disabled' : ''}>${venueScopeOptions(scope.venue)}</select></label><label>重置密码<input name="new_password" type="password" autocomplete="new-password" minlength="12" maxlength="128" placeholder="留空则不修改" ${member.is_current_user ? 'disabled' : ''}></label><label class="active-toggle"><input name="active" type="checkbox" ${member.active ? 'checked' : ''} ${member.is_current_user ? 'disabled' : ''}>允许进入当前团队并使用已分配权限</label></div>
       ${scope.mixed ? '<p class="danger-note">该成员当前有多个不同的数据范围。保存后，所选岗位会统一使用上面的账户和交易所范围，请先确认。</p>' : ''}
-      <div class="form-error" role="alert"></div>${member.is_current_user ? '' : '<div class="form-actions"><button class="secondary">保存权限</button></div>'}</form></details>`;
+      <div class="form-error" role="alert"></div>${member.is_current_user ? '' : `<div class="form-actions"><button class="secondary">保存权限</button><button class="danger" type="button" data-remove-team-member="${member.user_id}" data-member-name="${escapeHtml(member.username)}">移出团队</button></div>`}</form></details>`;
   }).join('');
   main.innerHTML = `<section class="page access-page"><header class="page-head"><div><p class="eyebrow">${escapeHtml(activeWorkspace?.name || 'Workspace')} · ${escapeHtml(activeTeam?.name || 'Team')}</p><h1>团队成员与权限</h1><p class="lede">岗位、账户范围和交易所范围只在当前团队生效。同一用户加入另一个团队时必须重新分配最小权限。</p></div><span class="status-pill">${members.filter(item => item.active).length} 名启用成员</span></header>
     ${activeTeam && !activeTeam.trading_enabled ? '<article class="home-status tone-attention"><div><p class="eyebrow">安全配置阶段</p><h2>当前仅开放团队管理</h2><p>业务实体尚未完成团队归属，服务端不会让这个新团队读取默认团队的提案、账户、订单或报表。真实下单、资金、签名和广播保持关闭。</p></div><a class="secondary" href="/home" data-link>查看团队状态</a></article>' : ''}
@@ -397,6 +397,22 @@ async function renderAccessManagement() {
     await withPending(event.submitter, '保存中…', async () => {
       try { await api(`/api/admin/users/${form.dataset.userAccess}/access`, {method:'PUT', body:JSON.stringify(payload)}); showToast('成员权限已保存并写入审计'); await route(); }
       catch (error) { showApiError(error, form.querySelector('.form-error')); }
+    });
+  }));
+  document.querySelectorAll('[data-remove-team-member]').forEach(button => button.addEventListener('click', async event => {
+    const trigger = event.currentTarget;
+    const confirmed = await confirmAction({
+      title:`将“${trigger.dataset.memberName}”移出当前团队？`,
+      message:'该成员在当前团队的岗位和访问范围会被删除，当前团队的会话权限立即失效；用户身份、密码、其他团队成员关系与历史审计记录都会保留。',
+      confirmLabel:'确认移出团队',
+    });
+    if (!confirmed) return;
+    await withPending(trigger, '移出中…', async () => {
+      try {
+        await api(`/api/admin/team-members/${trigger.dataset.removeTeamMember}`, {method:'DELETE', body:JSON.stringify({idempotency_key:crypto.randomUUID()})});
+        showToast(`${trigger.dataset.memberName} 已移出当前团队；用户身份与其他团队未改变`);
+        await route();
+      } catch (error) { showApiError(error, trigger.closest('form')?.querySelector('.form-error')); }
     });
   }));
 }

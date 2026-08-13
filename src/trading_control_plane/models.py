@@ -734,7 +734,13 @@ class NotificationRoute(Base):
         CheckConstraint(
             "credential_version >= 1", name="ck_notification_routes_credential_version"
         ),
-        UniqueConstraint("team_id", "name", name="uq_notification_routes_team_name"),
+        Index(
+            "uq_notification_routes_team_active_name",
+            "team_id",
+            "name",
+            unique=True,
+            postgresql_where=text("deleted_at IS NULL"),
+        ),
         UniqueConstraint(
             "team_id", "notification_route_id", name="uq_notification_routes_team_identity"
         ),
@@ -759,6 +765,10 @@ class NotificationRoute(Base):
     updated_by: Mapped[UUID] = mapped_column(ForeignKey("users.user_id"), nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    deleted_by: Mapped[UUID | None] = mapped_column(
+        ForeignKey("users.user_id", ondelete="RESTRICT"), nullable=True
+    )
 
 
 class NotificationDelivery(Base):

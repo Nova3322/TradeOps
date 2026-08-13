@@ -268,6 +268,65 @@ def test_notification_outbox_encrypts_routes_retries_known_failures_and_fences_v
     }.issubset(audit_types)
 
 
+def test_notification_route_delete_clears_secret_cancels_queue_and_allows_name_reuse(
+    database: Database,
+) -> None:
+    now = datetime.now(UTC)
+    service = TradingService(database, credential_encryption_key=encryption_key())
+    admin = service.bootstrap_admin("notification-delete-admin", now=now)
+    context = TradingQueries(database).user_context(admin)
+    team_id = UUID(context["active_team"]["team_id"])
+    route_id = configure_slack_route(
+        service,
+        admin,
+        now=now,
+        idempotency_key="notification-route-delete-fixture",
+    )
+    queued = enqueue_signal(
+        service,
+        team_id=team_id,
+        object_id="signal-delete-fixture",
+        idempotency_key="signal-delete-fixture",
+        now=now,
+    )
+    delivery_id = UUID(queued["notification_delivery_ids"][0])  # type: ignore[index]
+
+    deleted = service.delete_notification_route(
+        actor_id=admin,
+        notification_route_id=route_id,
+        expected_version=1,
+        idempotency_key="delete-notification-route",
+        now=now + timedelta(seconds=1),
+    )
+    assert deleted["status"] == "DELETED"
+    assert TradingQueries(database).notification_center(admin)["routes"] == []
+    assert service.delete_notification_route(
+        actor_id=admin,
+        notification_route_id=route_id,
+        expected_version=1,
+        idempotency_key="delete-notification-route",
+        now=now + timedelta(seconds=2),
+    ) == deleted
+    with database.session_factory() as session:
+        route = session.get(NotificationRoute, route_id)
+        delivery = session.get(NotificationDelivery, delivery_id)
+        assert route is not None and route.deleted_at is not None
+        assert route.enabled is False
+        assert route.configuration_ciphertext == "deleted"
+        assert route.configuration_metadata == {"deleted": True}
+        assert delivery is not None and delivery.status == "CANCELLED"
+        assert delivery.last_error_code == "NOTIFICATION_ROUTE_DELETED"
+
+    replacement = configure_slack_route(
+        service,
+        admin,
+        now=now + timedelta(seconds=3),
+        idempotency_key="notification-route-reuse-name",
+    )
+    assert replacement != route_id
+    assert len(TradingQueries(database).notification_center(admin)["routes"]) == 1
+
+
 def test_notification_api_masks_configuration_and_test_send_has_no_business_authority(
     database: Database,
 ) -> None:

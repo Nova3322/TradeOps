@@ -456,6 +456,7 @@ class TransactionService:
                     .where(
                         NotificationRoute.notification_route_id == notification_route_id,
                         NotificationRoute.team_id == team.team_id,
+                        NotificationRoute.deleted_at.is_(None),
                     )
                     .with_for_update()
                 )
@@ -529,6 +530,7 @@ class TransactionService:
                     NotificationRoute.team_id == team.team_id,
                     NotificationRoute.name == normalized_name,
                     NotificationRoute.notification_route_id != route_id,
+                    NotificationRoute.deleted_at.is_(None),
                 )
             )
             if name_conflict is not None:
@@ -612,6 +614,118 @@ class TransactionService:
             )
             return response
 
+    def delete_notification_route(
+        self,
+        *,
+        actor_id: UUID,
+        notification_route_id: UUID,
+        expected_version: int,
+        idempotency_key: str,
+        now: datetime,
+    ) -> dict[str, Any]:
+        """Archive a route, clear its secret, and retain immutable delivery history."""
+
+        with self.database.session_factory.begin() as session:
+            team = self._require_role(session, actor_id, "notification.manage")
+            route = session.scalar(
+                select(NotificationRoute)
+                .where(
+                    NotificationRoute.notification_route_id == notification_route_id,
+                    NotificationRoute.team_id == team.team_id,
+                )
+                .with_for_update()
+            )
+            if route is None:
+                _reject(
+                    "NOTIFICATION_ROUTE_NOT_FOUND",
+                    "notification route does not exist in the active team",
+                )
+            caller = f"{actor_id}:{team.team_id}"
+            payload = {
+                "notification_route_id": str(notification_route_id),
+                "expected_version": expected_version,
+            }
+            digest, replay = self._idempotency(
+                session,
+                caller_id=caller,
+                operation=f"notification-route.delete:{notification_route_id}",
+                idempotency_key=idempotency_key,
+                payload=payload,
+            )
+            if replay is not None:
+                return replay
+            if route.deleted_at is not None:
+                _reject(
+                    "NOTIFICATION_ROUTE_NOT_FOUND",
+                    "notification route does not exist in the active team",
+                )
+            if route.version != expected_version:
+                _reject("VERSION_CONFLICT", "notification route changed before deletion")
+            sending = session.scalar(
+                select(NotificationDelivery.notification_delivery_id)
+                .where(
+                    NotificationDelivery.team_id == team.team_id,
+                    NotificationDelivery.notification_route_id == notification_route_id,
+                    NotificationDelivery.status == "SENDING",
+                )
+                .limit(1)
+            )
+            if sending is not None:
+                _reject(
+                    "NOTIFICATION_ROUTE_DELETE_BLOCKED",
+                    "wait for the in-flight notification attempt to reach a known outcome",
+                )
+            session.execute(
+                update(NotificationDelivery)
+                .where(
+                    NotificationDelivery.team_id == team.team_id,
+                    NotificationDelivery.notification_route_id == notification_route_id,
+                    NotificationDelivery.status.in_(["PENDING", "RETRY_WAIT"]),
+                )
+                .values(
+                    status="CANCELLED",
+                    last_error_code="NOTIFICATION_ROUTE_DELETED",
+                    updated_at=now,
+                )
+            )
+            route.enabled = False
+            route.configuration_ciphertext = "deleted"
+            route.configuration_metadata = {"deleted": True}
+            route.deleted_at = now
+            route.deleted_by = actor_id
+            route.version += 1
+            route.updated_by = actor_id
+            route.updated_at = now
+            response = {
+                "notification_route_id": str(notification_route_id),
+                "status": "DELETED",
+                "version": route.version,
+            }
+            self._save_receipt(
+                session,
+                caller_id=caller,
+                operation=f"notification-route.delete:{notification_route_id}",
+                idempotency_key=idempotency_key,
+                semantic_hash=digest,
+                response=response,
+                now=now,
+            )
+            self._audit(
+                session,
+                actor_id=str(actor_id),
+                event_type="NOTIFICATION_ROUTE_DELETED",
+                object_type="NotificationRoute",
+                object_id=notification_route_id,
+                reason="enabled=false;credential=cleared;delivery_history_retained=true",
+                correlation_id=uuid4(),
+                object_version=route.version,
+                idempotency_key=idempotency_key,
+                workspace_id=team.workspace_id,
+                team_id=team.team_id,
+                now=now,
+            )
+            return response
+
     def _enqueue_notification_event(
         self,
         session: Session,
@@ -664,6 +778,7 @@ class TransactionService:
         route_query = select(NotificationRoute).where(
             NotificationRoute.team_id == team.team_id,
             NotificationRoute.enabled,
+            NotificationRoute.deleted_at.is_(None),
         )
         if target_route_id is not None:
             route_query = route_query.where(
@@ -875,6 +990,7 @@ class TransactionService:
                 select(NotificationRoute).where(
                     NotificationRoute.team_id == team.team_id,
                     NotificationRoute.notification_route_id == notification_route_id,
+                    NotificationRoute.deleted_at.is_(None),
                 )
             )
             if route is None:

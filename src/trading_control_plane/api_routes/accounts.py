@@ -8,6 +8,7 @@ from trading_control_plane.api_core import (
     BinanceReadOnlySyncRequest,
     DomainRejected,
     ExchangeAccountCreateRequest,
+    ExchangeAccountDeleteRequest,
     ExchangeConnectionVerifyRequest,
     ExchangeCredentialRotateRequest,
     ExchangeRuntimeSyncRequest,
@@ -148,6 +149,24 @@ class _AccountsRoutes:
             )
             return {
                 "exchange_account_id": str(exchange_account_id),
+                "data": self.exchange_accounts_projection(identity.user_id),
+            }
+
+        @self.app.delete("/api/exchange-accounts/{exchange_account_id}")
+        def delete_exchange_account(
+            exchange_account_id: UUID,
+            payload: ExchangeAccountDeleteRequest,
+            identity: SessionIdentity = self.identity_dependency,
+        ) -> dict[str, Any]:
+            result = self.service().delete_exchange_account(
+                exchange_account_id,
+                actor_id=identity.user_id,
+                expected_version=payload.expected_version,
+                idempotency_key=payload.idempotency_key,
+                now=_now(),
+            )
+            return {
+                **result,
                 "data": self.exchange_accounts_projection(identity.user_id),
             }
 
