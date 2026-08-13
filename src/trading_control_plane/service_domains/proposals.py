@@ -409,6 +409,7 @@ class ProposalService(ServiceComponent):
                 actor_id=actor_id,
                 account_id=account_id,
                 venue=venue,
+                environment=environment.value,
                 now=now,
             )
             if expires_at <= now:

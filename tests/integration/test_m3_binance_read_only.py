@@ -214,11 +214,19 @@ async def run_m3_flow(database: Database) -> None:
         assert result["facts"]["orders"][0]["intent_id"] is None
         instrument_id = UUID(result["persisted"]["instrument_id"])
 
-        # The same account/instrument can hold independent SHADOW facts without
+        # A separate SHADOW account can hold the same instrument without
         # overwriting or being included in the LIVE reconciliation.
         now = datetime.now(UTC)
+        service.assign_role(
+            ids["operator"],
+            Role.OPERATOR,
+            ids["admin"],
+            "acct-shadow",
+            "BINANCE",
+            now=now,
+        )
         service.record_position(
-            "acct-live",
+            "acct-shadow",
             "BINANCE",
             instrument_id,
             Decimal(0),
@@ -230,7 +238,7 @@ async def run_m3_flow(database: Database) -> None:
             now=now,
         )
         service.record_account_equity(
-            "acct-live",
+            "acct-shadow",
             "BINANCE",
             Decimal("1000"),
             Decimal("1000"),

@@ -95,6 +95,7 @@ def register_risk_routes(context: ApiRouteContext) -> None:
         return {"policy_id": str(restored_policy_id)}
 
     @app.post("/api/risk-controls/restores")
+    @app.post("/api/risk-controls/changes")
     def create_risk_control_restore(
         payload: RiskControlChangeCreateRequest,
         identity: SessionIdentity = identity_dependency,
@@ -104,6 +105,8 @@ def register_risk_routes(context: ApiRouteContext) -> None:
             payload.idempotency_key,
             reason=payload.reason,
             restore_auto_add=payload.restore_auto_add,
+            change_type=payload.change_type,
+            requested_policy=payload.requested_policy,
             configured_scopes=configured_risk_scopes(),
             require_live_scope=True,
             now=_now(),
@@ -116,6 +119,7 @@ def register_risk_routes(context: ApiRouteContext) -> None:
         ) | {"request_id": str(request_id)}
 
     @app.post("/api/risk-controls/restores/{request_id}/reviews")
+    @app.post("/api/risk-controls/changes/{request_id}/reviews")
     def review_risk_control_restore(
         request_id: UUID,
         payload: RiskControlChangeReviewRequest,
@@ -148,6 +152,7 @@ def register_risk_routes(context: ApiRouteContext) -> None:
         return {"request_id": str(request_id), "status": result.value}
 
     @app.post("/api/risk-controls/restores/{request_id}/execute")
+    @app.post("/api/risk-controls/changes/{request_id}/execute")
     def execute_risk_control_restore(
         request_id: UUID,
         payload: RiskControlChangeExecuteRequest,

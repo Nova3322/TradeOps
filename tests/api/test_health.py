@@ -282,9 +282,9 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
     assert '>提案管理</a>' in response.text
     assert '>审核队列</a>' in response.text
     assert '>资金中心</a>' in response.text
-    assert '>风险控制</a>' in response.text
+    assert '>风控中心</a>' in response.text
     assert response.text.count("data-nav-section") == 4
-    assert response.text.count("data-nav-capability=") == 14
+    assert response.text.count("data-nav-capability=") == 13
     assert "data-nav-group=" not in response.text
     assert 'id="team-settings-link"' not in response.text
     assert 'id="mobile-nav-toggle"' in response.text
@@ -554,12 +554,12 @@ def test_web_shell_is_served_without_claiming_business_readiness() -> None:
     assert "最终确认并检查" in app_javascript.text
     assert "检查转入币安条件" in app_javascript.text
     assert "检查 Hyperliquid 回流条件" in app_javascript.text
-    assert 'name="treasury_provider" value="NOTILT_VAULT"' in app_javascript.text
-    assert 'name="treasury_provider" value="SAFE_SPENDING_LIMIT"' in app_javascript.text
+    assert '<option value="NOTILT_VAULT"' in app_javascript.text
+    assert '<option value="SAFE_SPENDING_LIMIT"' in app_javascript.text
     assert "syncTreasuryProviderFields" in app_javascript.text
-    assert "系统只使用该金库创建之后的资金操作" in app_javascript.text
+    assert "系统只使用当前选定的" in app_javascript.text
     assert "当前链上金库" in app_javascript.text
-    assert "资金方案" not in app_javascript.text
+    assert "链上资金方案" in app_javascript.text
     assert "data-treasury-provider" in app_javascript.text
     assert "3 项阻断，查看详情" not in app_javascript.text  # noqa: RUF001
     assert "项阻断，查看详情" in app_javascript.text  # noqa: RUF001
@@ -2043,7 +2043,7 @@ def test_risk_workspace_prioritizes_current_actions_and_hides_closed_tasks() -> 
     assert "details.filter(item => item.status !== 'CLOSED')" in source
     assert "当前没有运行中的风险任务" in source
     assert "hasCapability('operations.view') ? '<section class=\"empty-state" in source
-    assert "自动加仓已经关闭" in source
+    assert "自动加仓保持关闭" in source
     assert (
         "HYPERLIQUID_RATE_LIMITED:'Hyperliquid 只读接口限流，系统会按计划重试'"  # noqa: RUF001
         in source

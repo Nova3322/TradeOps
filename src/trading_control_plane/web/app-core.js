@@ -139,7 +139,7 @@ const ENGLISH_EXACT = new Map(Object.entries({
   '当前仅部分列表接口提供':'Only some list endpoints provide', '：通知为 1–200，审计为 1–500。不要自行假设':': notifications 1–200 and audit 1–500. Do not assume', '、':',', '与':'and', '或':'or', '参数；以 OpenAPI 为准。':'parameters; use OpenAPI.',
   '主导航':'Main navigation', '工作台':'Workspace', '空间配置':'Space setup', '治理与安全':'Governance and safety', '交易流程':'Trade workflow', '运行与风控':'Operations and risk', '团队设置':'Team settings', '当前范围':'Current scope', '当前任务':'Current tasks', '实时信号':'Live signals', '实时机会':'Live opportunities', 'Webhook 信号':'Webhook signals', '提案管理':'Proposals', '审核队列':'Review queue',
   '交易任务':'Trades', '绩效报表':'Performance reports', '交易模式':'Trading mode', '影子模式':'Shadow mode', '通知中心':'Notification center', '风险控制':'Risk controls', '系统状态':'System status', '资金':'Capital', '异常':'Exceptions',
-  '交易账户':'Exchange accounts', '成员权限':'Access control',
+  '交易账户':'Exchange accounts', '模式与账户':'Mode & accounts', '风控中心':'Risk center', '成员权限':'Access control',
   '业务数据库已连接':'Business database connected', '数据缺失时自动阻止交易':'Missing data blocks trading automatically', '跳到主要内容':'Skip to main content',
   '退出当前会话':'Sign out', '正在读取当前事实…':'Loading current data…',
   '突破榜单机会':'Breakout opportunity', '保存候选并提交审核':'Save candidate and submit for review',
@@ -1611,7 +1611,7 @@ async function route() {
     else if (path === '/risk') await renderCampaignFacts('risk');
     else if (path === '/capital') await renderCapitalCenter();
     else if (path === '/exceptions') { history.replaceState({}, '', '/campaigns/alerts'); await renderRuntimeAlerts(); }
-    else if (path === '/venues') await renderVenueAccounts();
+    else if (path === '/venues') { history.replaceState({}, '', '/trading-mode'); await renderTradingMode(); }
     else if (path === '/venues/binance' || path === '/venues/hyperliquid') {
       const legacyVenue = path.endsWith('/hyperliquid') ? 'HYPERLIQUID' : 'BINANCE';
       history.replaceState({}, '', `/venues?venue=${legacyVenue}`);

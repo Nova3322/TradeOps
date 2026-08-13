@@ -1591,6 +1591,12 @@ class SignalService(ServiceComponent):
                     account = session.scalar(
                         select(ExchangeAccount).where(
                             ExchangeAccount.team_id == team.team_id,
+                            ExchangeAccount.environment
+                            == (
+                                team.execution_mode
+                                if team.execution_mode in {"SHADOW", "TESTNET", "LIVE"}
+                                else "LIVE"
+                            ),
                             ExchangeAccount.account_id == account_id,
                             ExchangeAccount.venue == venue,
                         )

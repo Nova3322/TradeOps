@@ -53,6 +53,7 @@ class ShadowExecutionService(ServiceComponent):
             account = session.scalar(
                 select(ExchangeAccount).where(
                     ExchangeAccount.team_id == team.team_id,
+                    ExchangeAccount.environment == "SHADOW",
                     ExchangeAccount.account_id == account_id,
                     ExchangeAccount.venue == venue,
                     ExchangeAccount.active,

@@ -512,6 +512,7 @@ class TradingModeService(ServiceComponent):
     ) -> ExchangeAccount:
         statement = select(ExchangeAccount).where(
             ExchangeAccount.team_id == team_id,
+            ExchangeAccount.environment == "SHADOW",
             ExchangeAccount.account_id == account_id,
             ExchangeAccount.venue == venue,
             ExchangeAccount.active,

@@ -110,6 +110,31 @@ def seed(service: TradingService) -> dict[str, UUID]:
     }
 
 
+def add_live_account(service: TradingService, ids: dict[str, UUID]) -> str:
+    account_id = "live-acct-1"
+    now = datetime.now(UTC)
+    service.create_exchange_account(
+        actor_id=ids["admin"],
+        environment="LIVE",
+        account_id=account_id,
+        venue="BINANCE",
+        label="Live Binance account",
+        credentials=None,
+        idempotency_key="m1-live-account",
+        now=now,
+    )
+    for key, role in (
+        ("proposer", Role.PROPOSER),
+        ("reviewer_one", Role.REVIEWER),
+        ("reviewer_two", Role.REVIEWER),
+        ("operator", Role.OPERATOR),
+        ("perptape", Role.PROPOSER),
+        ("runtime_sync", Role.OPERATOR),
+    ):
+        service.assign_role(ids[key], role, ids["admin"], account_id, "BINANCE", now=now)
+    return account_id
+
+
 def perptape_client() -> PerptapeClient:
     now_ms = int(datetime.now(UTC).timestamp() * 1000)
 
@@ -308,8 +333,9 @@ def test_team_risk_policy_api_versions_explicit_limits_and_rejects_non_admin(
                     "idempotency_key": "m1-risk-policy-loosened",
                 },
             )
-            assert loosened.status_code == 422
-            assert loosened.json()["error"]["code"] == "REVIEWED_POLICY_CHANGE_REQUIRED"
+            assert loosened.status_code == 200, loosened.text
+            loosened_policy = (await client.get("/api/risk-controls")).json()["policy"]
+            assert loosened_policy["revision"] == 3
 
             await login(client, "proposer")
             denied = await client.put(
@@ -322,7 +348,7 @@ def test_team_risk_policy_api_versions_explicit_limits_and_rejects_non_admin(
                     "max_consecutive_losses": 2,
                     "loss_cooldown_seconds": 7200,
                     "max_fact_age_seconds": 200,
-                    "expected_revision": 2,
+                    "expected_revision": 3,
                     "reason": "attempt outside assigned team risk administration",
                     "idempotency_key": "forbidden-risk-policy",
                 },
@@ -972,6 +998,7 @@ def test_perptape_candidate_can_start_as_explicit_live_proposal(
     database: Database, service: TradingService
 ) -> None:
     ids = seed(service)
+    live_account_id = add_live_account(service, ids)
     set_test_team_environment(database, ids["admin"], "LIVE")
     telegram = MockTelegramGateway()
 
@@ -986,7 +1013,7 @@ def test_perptape_candidate_can_start_as_explicit_live_proposal(
                 f"/api/opportunities/{candidate['candidate_id']}/proposals",
                 json={
                     "environment": "LIVE",
-                    "account_id": "acct-1",
+                    "account_id": live_account_id,
                     "risk_tier": "LOW",
                     "quantity": "0.001",
                     "max_risk": "1",
@@ -1006,6 +1033,7 @@ def test_high_risk_review_refreshes_only_the_remaining_reviewer_notification(
     database: Database, service: TradingService
 ) -> None:
     ids = seed(service)
+    live_account_id = add_live_account(service, ids)
     set_test_team_environment(database, ids["admin"], "LIVE")
     telegram = MockTelegramGateway()
 
@@ -1018,7 +1046,7 @@ def test_high_risk_review_refreshes_only_the_remaining_reviewer_notification(
                 "/api/proposals/manual",
                 json={
                     "environment": "LIVE",
-                    "account_id": "acct-1",
+                    "account_id": live_account_id,
                     "venue": "BINANCE",
                     "instrument_id": str(ids["instrument"]),
                     "direction": "LONG",
@@ -1228,6 +1256,7 @@ def test_manual_proposal_accepts_u_margin_amount_and_resolves_frozen_quantity(
     database: Database, service: TradingService
 ) -> None:
     ids = seed(service)
+    live_account_id = add_live_account(service, ids)
     set_test_team_environment(database, ids["admin"], "LIVE")
     service.register_instrument(
         actor_id=ids["admin"],
@@ -1260,7 +1289,7 @@ def test_manual_proposal_accepts_u_margin_amount_and_resolves_frozen_quantity(
 
             payload = {
                 "environment": "LIVE",
-                "account_id": "acct-1",
+                "account_id": live_account_id,
                 "venue": "BINANCE",
                 "instrument_id": str(ids["instrument"]),
                 "direction": "LONG",

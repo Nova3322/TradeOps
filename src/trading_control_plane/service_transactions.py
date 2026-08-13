@@ -429,6 +429,7 @@ class TransactionService:
         *,
         actor_id: UUID,
         notification_route_id: UUID | None,
+        environment: str = "LIVE",
         name: str,
         channel: str,
         event_types: list[str],
@@ -439,6 +440,9 @@ class TransactionService:
         now: datetime,
     ) -> dict[str, Any]:
         normalized_name = " ".join(name.strip().split())
+        normalized_environment = environment.strip().upper()
+        if normalized_environment not in {"SHADOW", "LIVE"}:
+            _reject("NOTIFICATION_ROUTE_INVALID", "environment must be SHADOW or LIVE")
         normalized_channel = channel.strip().upper()
         normalized_events = normalize_notification_event_types(event_types)
         if not normalized_name or len(normalized_name) > 120:
@@ -471,6 +475,11 @@ class TransactionService:
                     "NOTIFICATION_ROUTE_CHANNEL_IMMUTABLE",
                     "create a new route to change notification channel",
                 )
+            if route is not None and route.environment != normalized_environment:
+                _reject(
+                    "NOTIFICATION_ROUTE_ENVIRONMENT_IMMUTABLE",
+                    "create a new route to change notification environment",
+                )
             route_id = (
                 uuid5(
                     NAMESPACE_URL,
@@ -500,6 +509,7 @@ class TransactionService:
                 )
             payload = {
                 "notification_route_id": str(route_id),
+                "environment": normalized_environment,
                 "name": normalized_name,
                 "channel": normalized_channel,
                 "event_types": normalized_events,
@@ -528,6 +538,7 @@ class TransactionService:
             name_conflict = session.scalar(
                 select(NotificationRoute.notification_route_id).where(
                     NotificationRoute.team_id == team.team_id,
+                    NotificationRoute.environment == normalized_environment,
                     NotificationRoute.name == normalized_name,
                     NotificationRoute.notification_route_id != route_id,
                     NotificationRoute.deleted_at.is_(None),
@@ -546,7 +557,11 @@ class TransactionService:
                     _canonical(normalized_configuration),
                     team_id=team.team_id,
                     object_id=route_id,
-                    purpose=f"notification-route:{normalized_channel.lower()}",
+                    purpose=(
+                        f"notification-route:{normalized_channel.lower()}"
+                        if normalized_environment == "LIVE"
+                        else f"notification-route:shadow:{normalized_channel.lower()}"
+                    ),
                     credential_version=credential_version,
                 )
                 ciphertext = encrypted.ciphertext
@@ -555,6 +570,7 @@ class TransactionService:
                 route = NotificationRoute(
                     notification_route_id=route_id,
                     team_id=team.team_id,
+                    environment=normalized_environment,
                     name=normalized_name,
                     channel=normalized_channel,
                     event_types=normalized_events,
@@ -571,6 +587,7 @@ class TransactionService:
                 session.add(route)
             else:
                 route.name = normalized_name
+                route.environment = normalized_environment
                 route.event_types = normalized_events
                 route.enabled = enabled
                 route.configuration_ciphertext = ciphertext
@@ -780,6 +797,8 @@ class TransactionService:
             NotificationRoute.enabled,
             NotificationRoute.deleted_at.is_(None),
         )
+        if environment is not None:
+            route_query = route_query.where(NotificationRoute.environment == environment)
         if target_route_id is not None:
             route_query = route_query.where(
                 NotificationRoute.notification_route_id == target_route_id

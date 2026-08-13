@@ -192,9 +192,10 @@ def test_shadow_dataset_and_reset_keep_generations_separate(database: Database) 
 
 def test_live_dataset_uses_trusted_nav_and_never_mixes_shadow(database: Database) -> None:
     service, ids = activate_shadow(database)
+    live_account_id = "live-paper-1"
     for offset in range(4):
         service.record_account_equity(
-            account_id="paper-1",
+            account_id=live_account_id,
             venue="BINANCE",
             equity=Decimal("50000") + Decimal(offset * 250),
             available_balance=Decimal("50000") + Decimal(offset * 250),
@@ -213,7 +214,7 @@ def test_live_dataset_uses_trusted_nav_and_never_mixes_shadow(database: Database
                 venue_fill_id="live-partial-fill-1",
                 order_intent_id=None,
                 campaign_id=None,
-                account_id="paper-1",
+                account_id=live_account_id,
                 environment="LIVE",
                 instrument_id=ids["instrument"],
                 side="BUY",
@@ -230,7 +231,7 @@ def test_live_dataset_uses_trusted_nav_and_never_mixes_shadow(database: Database
     live = queries.analytics_dataset(
         ids["admin"],
         "LIVE",
-        account_id="paper-1",
+        account_id=live_account_id,
         venue="BINANCE",
         generation=None,
         from_time=START,
@@ -243,13 +244,15 @@ def test_live_dataset_uses_trusted_nav_and_never_mixes_shadow(database: Database
     assert len(live.returns) == 3
     assert len(live.transactions) == 1
     assert live.transactions[0].quantity == Decimal("0.25")
-    assert live.transactions[0].idempotency_key == ("LIVE:paper-1:BINANCE:live-partial-fill-1")
+    assert live.transactions[0].idempotency_key == (
+        f"LIVE:{live_account_id}:BINANCE:live-partial-fill-1"
+    )
     assert live.coverage["transaction_count"] == 1
     assert live.coverage["positions_complete"] is False
     assert live.metadata["position_history_source"] == (
         "CURRENT_STATE_ONLY_NO_HISTORICAL_SNAPSHOTS"
     )
-    assert live.scope.account_venues == (("paper-1", "BINANCE"),)
+    assert live.scope.account_venues == ((live_account_id, "BINANCE"),)
     assert all(point.currency == "USD" for point in live.nav_series)
     assert "TEAM_SHADOW_ACCOUNT" not in live.metadata["source_facts"]
     with database.session_factory() as session:

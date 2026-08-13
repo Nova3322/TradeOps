@@ -38,6 +38,7 @@ class TradingQueries:
         self.transfer_proposal_detail = self._capital.transfer_proposal_detail
         self._capital_transfer_summary = self._capital._capital_transfer_summary
         self.capital_transfer_detail = self._capital.capital_transfer_detail
+        self.capital_display = self._capital.capital_display
         self.capital_center = self._capital.capital_center
         self.actual_results = self._execution.actual_results
         self.analytics_report_options = self._analytics.analytics_report_options

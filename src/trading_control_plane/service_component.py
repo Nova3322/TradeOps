@@ -26,6 +26,7 @@ class ServiceFacade(Protocol):
         actor_id: UUID,
         account_id: str,
         venue: str,
+        environment: str = "LIVE",
         now: datetime,
     ) -> ExchangeAccount: ...
 

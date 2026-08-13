@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -728,9 +729,31 @@ def test_restore_fails_closed_on_live_scope_configuration_and_control_drift(
 
 def test_system_admin_direct_restore_requires_live_conditions_and_keeps_auto_add_off(
     database: Database,
-    service: TradingService,
 ) -> None:
+    service = TradingService(
+        database,
+        credential_encryption_key=base64.urlsafe_b64encode(
+            b"0123456789abcdef0123456789abcdef"
+        ).decode(),
+    )
     ids = seed(service)
+    live_account_id = "live-acct-1"
+    service.create_exchange_account(
+        actor_id=ids["admin"],
+        environment="LIVE",
+        account_id=live_account_id,
+        venue="BINANCE",
+        label="Live risk account",
+        credentials={"api_key": "live-risk-key", "api_secret": "live-risk-secret"},
+        idempotency_key="create-live-risk-account",
+        now=NOW,
+    )
+    service.assign_role(
+        ids["proposer"], Role.PROPOSER, ids["admin"], live_account_id, "BINANCE", now=NOW
+    )
+    service.assign_role(
+        ids["operator"], Role.OPERATOR, ids["admin"], live_account_id, "BINANCE", now=NOW
+    )
     runtime_actor = service.create_service_principal(
         "risk-runtime-sync",
         ids["admin"],
@@ -740,7 +763,7 @@ def test_system_admin_direct_restore_requires_live_conditions_and_keeps_auto_add
         runtime_actor,
         Role.OPERATOR,
         ids["admin"],
-        account_scope="acct-1",
+        account_scope=live_account_id,
         venue_scope="BINANCE",
         now=NOW,
     )
@@ -758,7 +781,7 @@ def test_system_admin_direct_restore_requires_live_conditions_and_keeps_auto_add
         reason="exercise direct administrator restoration",
         now=NOW + timedelta(minutes=1),
     )
-    live_scope = (("LIVE", "acct-1", "BINANCE"),)
+    live_scope = (("LIVE", live_account_id, "BINANCE"),)
     with pytest.raises(DomainRejected, match="RISK_RESTORE_BLOCKED"):
         service.direct_restore_risk_controls(
             ids["admin"],
@@ -782,7 +805,7 @@ def test_system_admin_direct_restore_requires_live_conditions_and_keeps_auto_add
     set_test_team_environment(database, ids["admin"], "LIVE")
     ready_at = NOW + timedelta(minutes=17)
     service.record_position(
-        "acct-1",
+        live_account_id,
         "BINANCE",
         ids["instrument"],
         Decimal("0"),
@@ -794,7 +817,7 @@ def test_system_admin_direct_restore_requires_live_conditions_and_keeps_auto_add
         now=ready_at,
     )
     service.record_account_equity(
-        "acct-1",
+        live_account_id,
         "BINANCE",
         Decimal("10000"),
         Decimal("9000"),
@@ -805,7 +828,7 @@ def test_system_admin_direct_restore_requires_live_conditions_and_keeps_auto_add
         now=ready_at,
     )
     reconciliation_id = service.reconcile_scope(
-        "LIVE:acct-1:BINANCE",
+        f"LIVE:{live_account_id}:BINANCE",
         ids["operator"],
         now=ready_at + timedelta(seconds=1),
     )
@@ -816,7 +839,7 @@ def test_system_admin_direct_restore_requires_live_conditions_and_keeps_auto_add
         require_live_scope=True,
         now=ready_at + timedelta(seconds=1, milliseconds=100),
     )
-    assert "READ_ONLY_SOURCE_MISSING:LIVE:acct-1:BINANCE" in missing_probe[
+    assert f"READ_ONLY_SOURCE_MISSING:LIVE:{live_account_id}:BINANCE" in missing_probe[
         "restore_conditions"
     ]["blockers"]
     source_check = next(
@@ -835,7 +858,7 @@ def test_system_admin_direct_restore_requires_live_conditions_and_keeps_auto_add
                 "error_code": "BINANCE_RATE_LIMITED",
             }
         },
-        scopes={"BINANCE": ("acct-1", "BINANCE")},
+        scopes={"BINANCE": (live_account_id, "BINANCE")},
         now=ready_at + timedelta(seconds=1, milliseconds=200),
     )
     failed_probe = service.risk_control_status(
@@ -845,14 +868,14 @@ def test_system_admin_direct_restore_requires_live_conditions_and_keeps_auto_add
         now=ready_at + timedelta(seconds=1, milliseconds=300),
     )
     assert (
-        "READ_ONLY_SOURCE_FAILED:LIVE:acct-1:BINANCE:BINANCE_RATE_LIMITED"
+        f"READ_ONLY_SOURCE_FAILED:LIVE:{live_account_id}:BINANCE:BINANCE_RATE_LIMITED"
         in failed_probe["restore_conditions"]["blockers"]
     )
     live_proposal = service.create_proposal(
         actor_id=ids["proposer"],
         source=ProposalSource.MANUAL,
         risk_tier=RiskTier.LOW,
-        account_id="acct-1",
+        account_id=live_account_id,
         venue="BINANCE",
         instrument_id=ids["instrument"],
         direction=Direction.LONG,
@@ -889,7 +912,7 @@ def test_system_admin_direct_restore_requires_live_conditions_and_keeps_auto_add
     service.record_runtime_source_health(
         runtime_actor,
         {"BINANCE": {"status": "SUCCESS", "items_observed": 1}},
-        scopes={"BINANCE": ("acct-1", "BINANCE")},
+        scopes={"BINANCE": (live_account_id, "BINANCE")},
         now=ready_at + timedelta(seconds=1, milliseconds=400),
     )
     restored_policy_id = service.direct_restore_risk_controls(
@@ -1047,3 +1070,52 @@ def test_expired_restore_does_not_block_a_replacement_request(
         assert expired.version == 2
         assert replacement is not None
         assert replacement.status == RiskPolicyChangeStatus.PENDING_REVIEW.value
+
+
+def test_operator_risk_changes_require_independent_review_before_execution(
+    database: Database,
+    service: TradingService,
+) -> None:
+    ids = seed(service)
+    with pytest.raises(DomainRejected, match="RISK_CHANGE_REVIEW_REQUIRED"):
+        service.pause_new_risk(
+            ids["operator"],
+            "operator-direct-pause-denied",
+            reason="ordinary operators must use the reviewed change workflow",
+            now=NOW + timedelta(minutes=1),
+        )
+
+    request_id = service.create_risk_control_change_request(
+        ids["operator"],
+        "operator-reviewed-pause",
+        change_type="PAUSE_NEW_RISK",
+        requested_policy={},
+        reason="pause all new risk after independent review",
+        restore_auto_add=False,
+        configured_scopes=SCOPE,
+        now=NOW + timedelta(minutes=2),
+    )
+    status = service.risk_control_status(ids["reviewer_one"], SCOPE, now=NOW + timedelta(minutes=2))
+    request = next(item for item in status["requests"] if item["request_id"] == str(request_id))
+    assert request["change_type"] == "PAUSE_NEW_RISK"
+    assert service.review_risk_control_change_request(
+        request_id,
+        ids["reviewer_one"],
+        ReviewDecision.APPROVE,
+        "independent reviewer approves the frozen pause change",
+        1,
+        "approve-reviewed-pause",
+        now=NOW + timedelta(minutes=3),
+    ) is RiskPolicyChangeStatus.APPROVED
+    service.execute_risk_control_change_request(
+        request_id,
+        ids["reviewer_one"],
+        2,
+        "execute-reviewed-pause",
+        SCOPE,
+        now=NOW + timedelta(minutes=4),
+    )
+    final = service.risk_control_status(ids["admin"], SCOPE, now=NOW + timedelta(minutes=5))
+    assert final["policy"]["system_state"] == SystemRiskState.REDUCE_ONLY.value
+    executed = next(item for item in final["requests"] if item["request_id"] == str(request_id))
+    assert executed["status"] == RiskPolicyChangeStatus.EXECUTED.value

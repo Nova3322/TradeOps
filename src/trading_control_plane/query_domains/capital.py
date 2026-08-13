@@ -220,6 +220,255 @@ class CapitalQueries(QueryComponent):
             result["workspace_id"] = str(workspace_id)
             return result
 
+    def capital_display(
+        self,
+        user_id: UUID,
+        environment: str,
+        selected_account_keys: set[str] | None = None,
+    ) -> dict[str, Any]:
+        """Return environment-scoped, multi-account read-only capital facts for charts."""
+
+        normalized_environment = environment.strip().upper()
+        if normalized_environment not in {"SHADOW", "LIVE"}:
+            raise DomainRejected(
+                "CAPITAL_ENVIRONMENT_INVALID",
+                "environment must be SHADOW or LIVE",
+            )
+        workspace_id, team_id = self.facade._active_scope_ids(user_id)
+        with self.database.session_factory() as session:
+            assignments = session.scalars(
+                select(RoleAssignment).where(
+                    RoleAssignment.user_id == user_id,
+                    RoleAssignment.team_id == team_id,
+                )
+            ).all()
+            if not any(
+                "capital.view" in ROLE_ACTIONS[Role(item.role)]
+                or "*" in ROLE_ACTIONS[Role(item.role)]
+                for item in assignments
+            ):
+                raise DomainRejected("RBAC_DENIED", "capital center access is not assigned")
+
+            def key_for(location_type: str, venue: str, account_id: str) -> str:
+                prefix = "VAULT" if location_type == "VAULT" else venue.upper()
+                return f"{prefix}|{account_id}"
+
+            accounts = session.scalars(
+                select(ExchangeAccount)
+                .where(
+                    ExchangeAccount.team_id == team_id,
+                    ExchangeAccount.environment == normalized_environment,
+                    ExchangeAccount.active,
+                )
+                .order_by(ExchangeAccount.venue, ExchangeAccount.label)
+            ).all()
+            options: dict[str, dict[str, str]] = {
+                key_for("VENUE", item.venue, item.account_id): {
+                    "key": key_for("VENUE", item.venue, item.account_id),
+                    "account_id": item.account_id,
+                    "venue": item.venue,
+                    "location_type": "VENUE",
+                    "label": item.label,
+                    "environment": normalized_environment,
+                }
+                for item in accounts
+                if self.service.can_user(user_id, "capital.view", item.account_id, item.venue)
+            }
+            config = session.scalar(
+                select(DirectCapitalConfiguration).where(
+                    DirectCapitalConfiguration.team_id == team_id,
+                    DirectCapitalConfiguration.environment == normalized_environment,
+                    DirectCapitalConfiguration.active,
+                )
+            )
+            if config is not None:
+                treasury_account = (
+                    config.safe_address
+                    if config.treasury_provider == "SAFE_SPENDING_LIMIT"
+                    else (config.vault_address or config.vault_id)
+                )
+                if treasury_account:
+                    key = key_for("VAULT", "VAULT", treasury_account)
+                    options[key] = {
+                        "key": key,
+                        "account_id": treasury_account,
+                        "venue": "VAULT",
+                        "location_type": "VAULT",
+                        "label": (
+                            "Safe Spending Limits"
+                            if config.treasury_provider == "SAFE_SPENDING_LIMIT"
+                            else "NoTilt Vault"
+                        ),
+                        "environment": normalized_environment,
+                    }
+            balances = session.scalars(
+                select(AccountEquity)
+                .where(
+                    AccountEquity.team_id == team_id,
+                    AccountEquity.environment == normalized_environment,
+                )
+                .order_by(
+                    AccountEquity.location_type,
+                    AccountEquity.venue,
+                    AccountEquity.account_id,
+                )
+            ).all()
+            for item in balances:
+                can_view = (
+                    self.service.can_user(user_id, "capital.view", item.account_id, item.venue)
+                    if item.location_type == "VENUE"
+                    else self.service.can_user(user_id, "capital.view")
+                )
+                if not can_view:
+                    continue
+                key = key_for(item.location_type, item.venue, item.account_id)
+                options.setdefault(
+                    key,
+                    {
+                        "key": key,
+                        "account_id": item.account_id,
+                        "venue": item.venue,
+                        "location_type": item.location_type,
+                        "label": "链上金库" if item.location_type == "VAULT" else item.account_id,
+                        "environment": normalized_environment,
+                    },
+                )
+            requested = set(selected_account_keys or ())
+            selected = requested.intersection(options) if requested else set(options)
+            now = datetime.now(UTC)
+            risk_policy = session.scalar(
+                select(RiskPolicy).where(RiskPolicy.team_id == team_id, RiskPolicy.active)
+            )
+            max_age = timedelta(
+                seconds=(risk_policy.max_fact_age_seconds if risk_policy is not None else 300)
+            )
+            balance_data: list[dict[str, Any]] = []
+            current_by_key: dict[str, Decimal] = {}
+            source_as_of: dict[str, str | None] = {key: None for key in selected}
+            issues: set[str] = set()
+            for item in balances:
+                key = key_for(item.location_type, item.venue, item.account_id)
+                if key not in selected:
+                    continue
+                valuation_time = item.observed_at
+                if item.currency.upper() in USD_STABLE_ASSETS:
+                    usd_equity = item.equity
+                    valuation_price = Decimal(1)
+                else:
+                    usd_equity = item.valuation_equity
+                    valuation_price = item.valuation_price
+                    if item.valuation_observed_at is not None:
+                        valuation_time = min(valuation_time, item.valuation_observed_at)
+                current = bool(
+                    item.fact_status == "KNOWN"
+                    and usd_equity is not None
+                    and valuation_price is not None
+                    and valuation_price > 0
+                    and not fact_is_stale(valuation_time, now, max_age)
+                )
+                if current:
+                    assert usd_equity is not None
+                    current_by_key[key] = current_by_key.get(key, Decimal(0)) + usd_equity
+                    source_as_of[key] = _iso(valuation_time)
+                else:
+                    issues.add(f"CURRENT_VALUE_MISSING:{key}")
+                balance_data.append(
+                    {
+                        "account_equity_id": str(item.account_equity_id),
+                        "environment": item.environment,
+                        "location_type": item.location_type,
+                        "location_id": item.account_id,
+                        "account_key": key,
+                        "source_label": options.get(key, {}).get("label", item.account_id),
+                        "venue": item.venue,
+                        "asset": item.currency,
+                        "equity": str(item.equity),
+                        "confirmed_available": str(
+                            item.available_balance
+                            if item.withdrawable_balance is None
+                            else item.withdrawable_balance
+                        ),
+                        "source_reserved": "0",
+                        "effective_available": str(
+                            item.available_balance
+                            if item.withdrawable_balance is None
+                            else item.withdrawable_balance
+                        ),
+                        "control_status": item.control_status,
+                        "deposit_status": item.deposit_status,
+                        "usd_equity": str(usd_equity) if current else None,
+                        "valuation_current": current,
+                        "fact_status": item.fact_status,
+                        "observed_at": _iso(item.observed_at),
+                    }
+                )
+            for key in selected - set(item["account_key"] for item in balance_data):
+                issues.add(f"MISSING_ACCOUNT_SOURCE:{key}")
+            observations = session.scalars(
+                select(AccountEquityObservation)
+                .where(
+                    AccountEquityObservation.team_id == team_id,
+                    AccountEquityObservation.environment == normalized_environment,
+                )
+                .order_by(AccountEquityObservation.observed_at)
+            ).all()
+            history = []
+            for item in observations:
+                key = key_for(item.location_type, item.venue, item.account_id)
+                if key not in selected or not self.service.can_user(
+                    user_id,
+                    "capital.view",
+                    item.account_id,
+                    item.venue,
+                ):
+                    continue
+                history.append(
+                    {
+                        "source": key,
+                        "source_label": options.get(key, {}).get("label", item.account_id),
+                        "location_type": item.location_type,
+                        "location_id": item.account_id,
+                        "account_key": key,
+                        "venue": item.venue,
+                        "asset": item.currency,
+                        "equity": str(item.equity),
+                        "available_balance": str(item.available_balance),
+                        "usd_equity": None if item.usd_equity is None else str(item.usd_equity),
+                        "observed_at": _iso(item.observed_at),
+                    }
+                )
+            return {
+                "workspace_id": str(workspace_id),
+                "team_id": str(team_id),
+                "environment": normalized_environment,
+                "account_options": list(options.values()),
+                "selected_account_keys": sorted(selected),
+                "balances": balance_data,
+                "history": history,
+                "net_worth": {
+                    "environment": normalized_environment,
+                    "currency": "USD",
+                    "max_fact_age_seconds": int(max_age.total_seconds()),
+                    "alignment_tolerance_seconds": 60,
+                    "history_gap_tolerance_seconds": 300,
+                    "source_as_of": source_as_of,
+                    "accounts": {
+                        key: (str(current_by_key[key]) if key in current_by_key else None)
+                        for key in selected
+                    },
+                    "venues": {},
+                    "vault": None,
+                    "total": (
+                        str(sum(current_by_key.values(), Decimal(0)))
+                        if selected and selected.issubset(current_by_key) and not issues
+                        else None
+                    ),
+                    "complete": bool(selected) and selected.issubset(current_by_key) and not issues,
+                    "issues": sorted(issues),
+                    "as_of": now.isoformat(),
+                },
+            }
+
     def capital_center(
         self,
         user_id: UUID,

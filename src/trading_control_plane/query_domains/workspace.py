@@ -656,6 +656,7 @@ class WorkspaceQueries(QueryComponent):
                         "workspace_id": str(workspace_id),
                         "team_id": str(team_id),
                         "name": route.name,
+                        "environment": route.environment,
                         "channel": route.channel,
                         "event_types": list(route.event_types),
                         "enabled": route.enabled,

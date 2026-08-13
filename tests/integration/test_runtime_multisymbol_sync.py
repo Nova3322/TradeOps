@@ -300,7 +300,7 @@ def test_complete_account_snapshot_covers_multisymbol_close_empty_idempotency_an
     ingest(
         service,
         actor,
-        "account-a",
+        "account-a-testnet",
         ExecutionEnvironment.TESTNET,
         NOW,
         snapshot("ETHUSDT", Decimal(4), NOW),
@@ -333,7 +333,7 @@ def test_complete_account_snapshot_covers_multisymbol_close_empty_idempotency_an
     assert scoped_positions(database, account_id="account-b", environment="LIVE")[
         "ETHUSDT"
     ].quantity == Decimal(3)
-    assert scoped_positions(database, account_id="account-a", environment="TESTNET")[
+    assert scoped_positions(database, account_id="account-a-testnet", environment="TESTNET")[
         "ETHUSDT"
     ].quantity == Decimal(4)
 

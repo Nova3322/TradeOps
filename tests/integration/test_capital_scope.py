@@ -68,6 +68,7 @@ def _set_direct_configuration(
     return service.set_direct_capital_configuration(
         actor_id,
         key,
+        environment="SHADOW",
         network="ARBITRUM",
         asset="USDC",
         treasury_provider="NOTILT_VAULT",
@@ -83,6 +84,68 @@ def _set_direct_configuration(
         max_fee=Decimal("10"),
         now=now,
     )
+
+
+def test_direct_capital_configuration_is_environment_scoped_and_keys_are_encrypted(
+    service: TradingService,
+) -> None:
+    now = datetime.now(UTC)
+    service = TradingService(
+        service.database,
+        credential_encryption_key=base64.urlsafe_b64encode(
+            b"0123456789abcdef0123456789abcdef"
+        )
+        .decode()
+        .rstrip("="),
+    )
+    admin = service.bootstrap_admin("capital-mode-admin", now=now)
+    secrets = {
+        "SHADOW": "shadow-vault-private-key-fixture-001",
+        "LIVE": "live-vault-private-key-fixture-0001",
+    }
+    for environment in ("SHADOW", "LIVE"):
+        service.set_direct_capital_configuration(
+            admin,
+            f"capital-{environment.lower()}-config",
+            environment=environment,
+            network="ARBITRUM",
+            asset="USDC",
+            treasury_provider="NOTILT_VAULT",
+            vault_id=f"{environment.lower()}-vault",
+            vault_address=None,
+            owned_arbitrum_address=None,
+            binance_account_id=None,
+            binance_deposit_address=None,
+            binance_withdrawal_address=None,
+            hyperliquid_account_id=None,
+            hyperliquid_bridge_address=None,
+            vault_withdrawal_private_key=secrets[environment],
+            max_amount=Decimal("1000"),
+            max_fee=Decimal("10"),
+            now=now,
+        )
+
+    shadow = service.direct_capital_configuration(admin, "SHADOW")
+    live = service.direct_capital_configuration(admin, "LIVE")
+    assert shadow is not None and shadow["environment"] == "SHADOW"
+    assert live is not None and live["environment"] == "LIVE"
+    assert shadow["vault_withdrawal_private_key_configured"] is True
+    assert live["vault_withdrawal_private_key_configured"] is True
+    assert all(secret not in repr((shadow, live)) for secret in secrets.values())
+    with service.database.session_factory() as session:
+        configs = session.scalars(
+            select(DirectCapitalConfiguration).where(DirectCapitalConfiguration.active)
+        ).all()
+        assert {(item.environment, item.version) for item in configs} == {
+            ("SHADOW", 1),
+            ("LIVE", 1),
+        }
+        assert all(item.vault_withdrawal_key_ciphertext for item in configs)
+        assert all(
+            secret not in str(item.vault_withdrawal_key_ciphertext)
+            for item in configs
+            for secret in secrets.values()
+        )
 
 
 def _set_automation_policy(
@@ -131,6 +194,7 @@ def test_capital_roots_idempotency_and_sender_leases_are_isolated_by_team(
     service.configure_notification_route(
         actor_id=admin,
         notification_route_id=None,
+        environment="SHADOW",
         name="Capital scope alerts",
         channel="SLACK",
         event_types=["CAPITAL_STATUS_CHANGED"],

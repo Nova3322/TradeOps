@@ -82,6 +82,7 @@ def test_user_owned_api_key_dynamic_rbac_scope_audit_and_token_lifecycle(
     )
     first_account_uuid = service.create_exchange_account(
         actor_id=admin_id,
+        environment="SHADOW",
         account_id="paper-api-1",
         venue="BINANCE",
         label="Primary API Key account",
@@ -91,6 +92,7 @@ def test_user_owned_api_key_dynamic_rbac_scope_audit_and_token_lifecycle(
     )
     service.create_exchange_account(
         actor_id=admin_id,
+        environment="SHADOW",
         account_id="paper-api-2",
         venue="BINANCE",
         label="Second RBAC account",
