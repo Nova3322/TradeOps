@@ -163,7 +163,7 @@ class _ProposalsRoutes:
             if self.is_agent_identity(identity):
                 raise DomainRejected(
                     "AGENT_PROPOSAL_ENDPOINT_REQUIRED",
-                    "Agents must use the audited /api/agent/proposals contract",
+                    "API Keys must use the audited /api/api-key/proposals contract",
                 )
             now = _now()
             candidate = self.current_perptape_candidate(
@@ -373,6 +373,7 @@ class _ProposalsRoutes:
             )
 
     def register_creation(self) -> None:
+        @self.app.post("/api/api-key/proposals")
         @self.app.post("/api/agent/proposals")
         def create_agent_proposal(
             payload: AgentProposalRequest,

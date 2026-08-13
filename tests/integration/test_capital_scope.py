@@ -8,7 +8,12 @@ from uuid import UUID
 import pytest
 from sqlalchemy import select
 
-from trading_control_plane.domain import CapitalDirection, DomainRejected, ExecutionEnvironment
+from trading_control_plane.domain import (
+    CapitalDirection,
+    DomainRejected,
+    ExecutionEnvironment,
+    Role,
+)
 from trading_control_plane.models import (
     CapitalAutomationPolicy,
     DirectCapitalConfiguration,
@@ -18,6 +23,11 @@ from trading_control_plane.models import (
     TransferProposal,
 )
 from trading_control_plane.queries import TradingQueries
+from trading_control_plane.request_context import (
+    ApiClientRequestContext,
+    bind_api_client_context,
+    reset_api_client_context,
+)
 from trading_control_plane.service import TradingService
 
 
@@ -110,9 +120,7 @@ def test_capital_roots_idempotency_and_sender_leases_are_isolated_by_team(
     now = datetime.now(UTC)
     service = TradingService(
         service.database,
-        credential_encryption_key=base64.urlsafe_b64encode(
-            b"0123456789abcdef0123456789abcdef"
-        )
+        credential_encryption_key=base64.urlsafe_b64encode(b"0123456789abcdef0123456789abcdef")
         .decode()
         .rstrip("="),
     )
@@ -127,9 +135,7 @@ def test_capital_roots_idempotency_and_sender_leases_are_isolated_by_team(
         channel="SLACK",
         event_types=["CAPITAL_STATUS_CHANGED"],
         enabled=True,
-        configuration={
-            "webhook_url": "https://hooks.slack.com/services/T/B/capital-scope-fixture"
-        },
+        configuration={"webhook_url": "https://hooks.slack.com/services/T/B/capital-scope-fixture"},
         expected_version=0,
         idempotency_key="capital-route-create",
         now=now,
@@ -200,9 +206,7 @@ def test_capital_roots_idempotency_and_sender_leases_are_isolated_by_team(
     assert _create_transfer(service, admin, key="shared-proposal-key", now=now) == proposal_b
 
     center_b = TradingQueries(service.database).capital_center(admin)
-    assert [item["transfer_proposal_id"] for item in center_b["proposals"]] == [
-        str(proposal_b)
-    ]
+    assert [item["transfer_proposal_id"] for item in center_b["proposals"]] == [str(proposal_b)]
     with pytest.raises(DomainRejected, match="TEAM_SCOPE_DENIED"):
         TradingQueries(service.database).transfer_proposal_detail(admin, proposal_a)
     with pytest.raises(DomainRejected, match="TEAM_SCOPE_DENIED"):
@@ -233,6 +237,61 @@ def test_capital_roots_idempotency_and_sender_leases_are_isolated_by_team(
         now=now,
     )
     center_a = TradingQueries(service.database).capital_center(admin)
-    assert [item["transfer_proposal_id"] for item in center_a["proposals"]] == [
-        str(proposal_a)
-    ]
+    assert [item["transfer_proposal_id"] for item in center_a["proposals"]] == [str(proposal_a)]
+
+
+def test_api_key_capital_history_is_filtered_by_exact_user_rbac_resource(
+    service: TradingService,
+) -> None:
+    now = datetime.now(UTC)
+    admin = service.bootstrap_admin("capital-history-admin", now=now)
+    context = TradingQueries(service.database).user_context(admin)
+    workspace_id = UUID(str(context["active_workspace"]["workspace_id"]))
+    team_id = UUID(str(context["active_team"]["team_id"]))
+    for venue in ("BINANCE", "BYBIT"):
+        service.create_exchange_account(
+            actor_id=admin,
+            account_id="shared-history-account",
+            venue=venue,
+            label=f"{venue} history",
+            credentials=None,
+            idempotency_key=f"capital-history-{venue.lower()}",
+            now=now,
+        )
+        service.record_account_equity(
+            account_id="shared-history-account",
+            venue=venue,
+            equity=Decimal("1000"),
+            available_balance=Decimal("900"),
+            currency="USDT",
+            known=True,
+            actor_id=admin,
+            environment=ExecutionEnvironment.LIVE,
+            observed_at=now,
+            now=now,
+        )
+    owner_id = service.create_managed_user(
+        "capital-history-owner",
+        [Role.TREASURY_ADMIN],
+        admin,
+        "shared-history-account",
+        "BINANCE",
+        "ordinary-user-password",
+        now=now,
+    )
+    token = bind_api_client_context(
+        ApiClientRequestContext(
+            owner_user_id=owner_id,
+            api_client_id=UUID("00000000-0000-0000-0000-000000000123"),
+            workspace_id=workspace_id,
+            team_id=team_id,
+        )
+    )
+    try:
+        center = TradingQueries(service.database).capital_center(owner_id)
+    finally:
+        reset_api_client_context(token)
+
+    assert {(item["location_id"], item["venue"]) for item in center["history"]} == {
+        ("shared-history-account", "BINANCE")
+    }

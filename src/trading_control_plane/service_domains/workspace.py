@@ -39,6 +39,7 @@ class WorkspaceService(ServiceComponent):
                 active=True,
                 trading_enabled=True,
                 execution_mode=TeamExecutionMode.LIVE.value,
+                execution_mode_locked_at=now,
                 version=1,
                 created_at=now,
                 updated_at=now,

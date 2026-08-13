@@ -57,7 +57,7 @@ def test_initial_schema_round_trip_and_metadata_match(database: Database) -> Non
     assert differences == []
 
 
-def test_legacy_role_bearing_agent_migrates_to_owner_inherited_api_client(
+def test_legacy_role_bearing_agent_migrates_to_owner_inherited_api_key(
     database: Database,
 ) -> None:
     config = Config("alembic.ini")
@@ -215,8 +215,8 @@ def test_legacy_role_bearing_agent_migrates_to_owner_inherited_api_client(
 
         assert client is not None
         assert client.owner_user_id == owner_id
-        assert client.account_id == "legacy-agent-account"
-        assert client.venue == "BINANCE"
+        assert client.account_id is None
+        assert client.venue is None
         assert client.state == "ACTIVE"
         assert legacy_user is not None and legacy_user.active is False
         assert copied_roles == []
@@ -225,6 +225,8 @@ def test_legacy_role_bearing_agent_migrates_to_owner_inherited_api_client(
         assert migrated_audit.api_client_id == legacy_id
     assert authenticated["user_id"] == owner_id
     assert authenticated["api_client_id"] == legacy_id
+    assert authenticated["account_id"] is None
+    assert authenticated["venue"] is None
 
 
 def test_initial_schema_seeds_only_disabled_capability_gates(database: Database) -> None:
@@ -450,7 +452,10 @@ def test_team_execution_mode_migration_round_trip(database: Database) -> None:
     command.upgrade(config, "head")
     with database.engine.connect() as connection:
         columns = {item["name"] for item in inspect(connection).get_columns("teams")}
-        checks = {item["name"] for item in inspect(connection).get_check_constraints("teams")}
+        checks = {
+            item["name"]: item["sqltext"]
+            for item in inspect(connection).get_check_constraints("teams")
+        }
         revision = connection.exec_driver_sql(
             "SELECT version_num FROM alembic_version"
         ).scalar_one()
@@ -459,6 +464,7 @@ def test_team_execution_mode_migration_round_trip(database: Database) -> None:
     assert revision == REQUIRED_SCHEMA_REVISION
     assert "execution_mode" in columns
     assert "ck_teams_execution_mode" in checks
+    assert "TESTNET" in str(checks["ck_teams_execution_mode"])
     assert differences == []
 
 
@@ -481,6 +487,40 @@ def test_team_execution_environment_lock_migration_round_trip(database: Database
     assert revision == REQUIRED_SCHEMA_REVISION
     assert "execution_mode_locked_at" in columns
     assert differences == []
+
+
+def test_user_rbac_scope_migration_backfills_team_lock_and_exact_report_scope(
+    database: Database,
+) -> None:
+    now = datetime.now(UTC)
+    service = TradingService(database)
+    service.bootstrap_admin("scope-migration-admin", now=now)
+    config = Config("alembic.ini")
+
+    command.downgrade(config, "20260812_0039")
+    with database.engine.begin() as connection:
+        connection.execute(text("UPDATE teams SET execution_mode_locked_at = NULL"))
+    command.upgrade(config, "head")
+
+    with database.engine.connect() as connection:
+        client_columns = {
+            item["name"]: item for item in inspect(connection).get_columns("api_clients")
+        }
+        client_fks = {item["name"] for item in inspect(connection).get_foreign_keys("api_clients")}
+        client_indexes = {item["name"] for item in inspect(connection).get_indexes("api_clients")}
+        report_columns = {
+            item["name"] for item in inspect(connection).get_columns("analytics_reports")
+        }
+        unlocked = connection.execute(
+            text("SELECT count(*) FROM teams WHERE execution_mode_locked_at IS NULL")
+        ).scalar_one()
+
+    assert client_columns["account_id"]["nullable"] is True
+    assert client_columns["venue"]["nullable"] is True
+    assert "fk_api_clients_exchange_account_scope" not in client_fks
+    assert "ix_api_clients_team" in client_indexes
+    assert "account_scopes" in report_columns
+    assert unlocked == 0
 
 
 def test_agent_credential_migration_backfills_internal_services_and_round_trips(

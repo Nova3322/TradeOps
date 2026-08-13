@@ -9,41 +9,24 @@ from trading_control_plane.service_core import *
 class ApiClientService(ServiceComponent):
     def _token_digest(self, client_id: UUID, version: int, token: str) -> str:
         purpose = (
-            "agent-api-token"
-            if token.startswith(f"{AGENT_TOKEN_MARKER}.")
-            else "api-client-token"
+            "agent-api-token" if token.startswith(f"{AGENT_TOKEN_MARKER}.") else "api-client-token"
         )
         return self.credential_cipher.secret_fingerprint(
             token,
             purpose=f"{purpose}:{client_id}:v{version}",
         )
 
-    def _owner_scope(
+    def _owner_context(
         self,
         session: Session,
         *,
         owner_id: UUID,
         workspace_id: UUID,
         team_id: UUID,
-        account_id: str,
-        venue: str,
-    ) -> tuple[User, Workspace, Team, ExchangeAccount]:
-        normalized_account, normalized_venue, _label = self.facade._exchange_account_definition(
-            account_id,
-            venue,
-            account_id,
-        )
+    ) -> tuple[User, Workspace, Team]:
         owner = session.get(User, owner_id)
         workspace = session.get(Workspace, workspace_id)
         team = session.get(Team, team_id)
-        account = session.scalar(
-            select(ExchangeAccount).where(
-                ExchangeAccount.team_id == team_id,
-                ExchangeAccount.account_id == normalized_account,
-                ExchangeAccount.venue == normalized_venue,
-                ExchangeAccount.active,
-            )
-        )
         if (
             owner is None
             or not owner.active
@@ -53,9 +36,8 @@ class ApiClientService(ServiceComponent):
             or team is None
             or not team.active
             or team.workspace_id != workspace_id
-            or account is None
         ):
-            _reject("API_CLIENT_SCOPE_INVALID", "owner or requested scope is unavailable")
+            _reject("API_CLIENT_SCOPE_INVALID", "owner or requested Team context is unavailable")
         workspace_membership = session.scalar(
             select(WorkspaceMembership).where(
                 WorkspaceMembership.workspace_id == workspace_id,
@@ -76,25 +58,19 @@ class ApiClientService(ServiceComponent):
                 RoleAssignment.team_id == team_id,
             )
         ).all()
-        applicable = [
-            assignment
-            for assignment in assignments
-            if (assignment.account_scope is None or assignment.account_scope == account.account_id)
-            and (assignment.venue_scope is None or assignment.venue_scope == account.venue)
-        ]
-        if workspace_membership is None or team_membership is None or not applicable:
+        if workspace_membership is None or team_membership is None or not assignments:
             _reject(
                 "API_CLIENT_SCOPE_INVALID",
-                "owner has no active membership and business role in the requested scope",
+                "owner has no active membership and business role in the requested Team",
             )
-        return owner, workspace, team, account
+        return owner, workspace, team
 
     @staticmethod
     def _require_human_request() -> None:
         if current_api_client_context() is not None:
             _reject(
                 "HUMAN_WEB_CONFIRMATION_REQUIRED",
-                "API Client lifecycle changes require an interactive HUMAN session",
+                "API Key lifecycle changes require an interactive HUMAN session",
             )
 
     def authenticate_api_client_token(self, token: str, *, now: datetime) -> dict[str, Any]:
@@ -102,26 +78,24 @@ class ApiClientService(ServiceComponent):
         with self.database.session_factory.begin() as session:
             client = session.get(ApiClient, client_id, with_for_update=True)
             if client is None or client.state != ApiClientState.ACTIVE.value:
-                _reject("AGENT_TOKEN_INVALID", "API Client credential is invalid")
+                _reject("AGENT_TOKEN_INVALID", "API Key credential is invalid")
             expected = self._token_digest(client.api_client_id, client.token_version, token)
             if not hmac.compare_digest(expected, client.token_digest):
-                _reject("AGENT_TOKEN_INVALID", "API Client credential is invalid")
+                _reject("AGENT_TOKEN_INVALID", "API Key credential is invalid")
             if client.token_expires_at <= now:
-                _reject("AGENT_TOKEN_EXPIRED", "API Client credential has expired")
+                _reject("AGENT_TOKEN_EXPIRED", "API Key has expired")
             try:
-                owner, workspace, team, account = self._owner_scope(
+                owner, workspace, team = self._owner_context(
                     session,
                     owner_id=client.owner_user_id,
                     workspace_id=client.workspace_id,
                     team_id=client.team_id,
-                    account_id=client.account_id,
-                    venue=client.venue,
                 )
             except DomainRejected as exc:
                 if exc.code == "API_CLIENT_SCOPE_INVALID":
                     _reject(
                         "AGENT_TOKEN_INVALID",
-                        "API Client owner permission or scope is no longer active",
+                        "API Key owner permission or Team context is no longer active",
                     )
                 raise
             client.token_last_used_at = now
@@ -135,8 +109,8 @@ class ApiClientService(ServiceComponent):
                 "api_client_name": client.name,
                 "workspace_id": workspace.workspace_id,
                 "team_id": team.team_id,
-                "account_id": account.account_id,
-                "venue": account.venue,
+                "account_id": None,
+                "venue": None,
             }
 
     def create_api_client(
@@ -145,8 +119,8 @@ class ApiClientService(ServiceComponent):
         name: str,
         workspace_id: UUID,
         team_id: UUID,
-        account_id: str,
-        venue: str,
+        account_id: str | None = None,
+        venue: str | None = None,
         expires_in_days: int,
         idempotency_key: str,
         actor_id: UUID,
@@ -161,23 +135,22 @@ class ApiClientService(ServiceComponent):
         ):
             _reject("API_CLIENT_INVALID", "client name or credential lifetime is invalid")
         with self.database.session_factory.begin() as session:
-            _owner, workspace, team, account = self._owner_scope(
+            _owner, workspace, team = self._owner_context(
                 session,
                 owner_id=actor_id,
                 workspace_id=workspace_id,
                 team_id=team_id,
-                account_id=account_id,
-                venue=venue,
             )
             caller = f"{actor_id}:api-clients"
             payload = {
                 "name": normalized_name,
                 "workspace_id": str(workspace.workspace_id),
                 "team_id": str(team.team_id),
-                "account_id": account.account_id,
-                "venue": account.venue,
                 "expires_in_days": expires_in_days,
             }
+            # Legacy create payloads may still include Account/Venue fields. They are
+            # accepted for wire compatibility but never narrow the user's RBAC.
+            del account_id, venue
             digest, replay = self.transactions._idempotency(
                 session,
                 caller_id=caller,
@@ -187,13 +160,16 @@ class ApiClientService(ServiceComponent):
             )
             if replay is not None:
                 return {**replay, "token": None, "display_once": False, "replayed": True}
-            if session.scalar(
-                select(ApiClient).where(
-                    ApiClient.owner_user_id == actor_id,
-                    ApiClient.name == normalized_name,
+            if (
+                session.scalar(
+                    select(ApiClient).where(
+                        ApiClient.owner_user_id == actor_id,
+                        ApiClient.name == normalized_name,
+                    )
                 )
-            ) is not None:
-                _reject("API_CLIENT_NAME_CONFLICT", "this API Client name already exists")
+                is not None
+            ):
+                _reject("API_CLIENT_NAME_CONFLICT", "this API Key name already exists")
             client_id = uuid4()
             issued = issue_api_client_token(client_id)
             expires_at = now + timedelta(days=expires_in_days)
@@ -203,8 +179,8 @@ class ApiClientService(ServiceComponent):
                 name=normalized_name,
                 workspace_id=workspace.workspace_id,
                 team_id=team.team_id,
-                account_id=account.account_id,
-                venue=account.venue,
+                account_id=None,
+                venue=None,
                 state=ApiClientState.ACTIVE.value,
                 token_digest=self._token_digest(client_id, 1, issued.token),
                 token_hint=issued.hint,
@@ -233,7 +209,7 @@ class ApiClientService(ServiceComponent):
                 client=client,
                 actor_id=actor_id,
                 event_type="API_CLIENT_CREATED",
-                reason=f"scope={account.account_id}:{account.venue};token_version=1",
+                reason="scope_model=USER_RBAC;token_version=1",
                 idempotency_key=idempotency_key,
                 now=now,
             )
@@ -242,13 +218,15 @@ class ApiClientService(ServiceComponent):
     @staticmethod
     def _client_response(client: ApiClient) -> dict[str, Any]:
         return {
+            "api_key_id": str(client.api_client_id),
             "api_client_id": str(client.api_client_id),
             "name": client.name,
             "owner_user_id": str(client.owner_user_id),
             "workspace_id": str(client.workspace_id),
             "team_id": str(client.team_id),
-            "account_id": client.account_id,
-            "venue": client.venue,
+            "account_id": None,
+            "venue": None,
+            "scope_model": "USER_RBAC",
             "state": client.state,
             "version": client.version,
             "token_hint": client.token_hint,
@@ -280,7 +258,6 @@ class ApiClientService(ServiceComponent):
             idempotency_key=idempotency_key,
             workspace_id=client.workspace_id,
             team_id=client.team_id,
-            account_id=client.account_id,
             now=now,
         )
 
@@ -313,15 +290,14 @@ class ApiClientService(ServiceComponent):
             if replay is not None:
                 return replay
             if client.state == ApiClientState.REVOKED.value:
-                _reject("API_CLIENT_REVOKED", "a revoked API Client cannot be re-enabled")
+                _reject("API_CLIENT_REVOKED", "a revoked API Key cannot be re-enabled")
             if client.version != expected_version:
-                _reject("VERSION_CONFLICT", "API Client changed; refresh before updating")
-            client.state = (
-                ApiClientState.ACTIVE.value if active else ApiClientState.DISABLED.value
-            )
+                _reject("VERSION_CONFLICT", "API Key changed; refresh before updating")
+            client.state = ApiClientState.ACTIVE.value if active else ApiClientState.DISABLED.value
             client.version += 1
             client.updated_at = now
             response = {
+                "api_key_id": str(client.api_client_id),
                 "api_client_id": str(client.api_client_id),
                 "state": client.state,
                 "version": client.version,
@@ -358,7 +334,7 @@ class ApiClientService(ServiceComponent):
     ) -> dict[str, Any]:
         self._require_human_request()
         if not 1 <= expires_in_days <= 365:
-            _reject("API_CLIENT_INVALID", "client credential lifetime is invalid")
+            _reject("API_CLIENT_INVALID", "API Key lifetime is invalid")
         with self.database.session_factory.begin() as session:
             client = self._owned_client(session, api_client_id, actor_id, lock=True)
             caller = f"{actor_id}:api-clients"
@@ -377,9 +353,9 @@ class ApiClientService(ServiceComponent):
             if replay is not None:
                 return {**replay, "token": None, "display_once": False, "replayed": True}
             if client.state == ApiClientState.REVOKED.value:
-                _reject("API_CLIENT_REVOKED", "a revoked API Client cannot rotate credentials")
+                _reject("API_CLIENT_REVOKED", "a revoked API Key cannot rotate credentials")
             if client.token_version != expected_token_version:
-                _reject("VERSION_CONFLICT", "API Client token changed; refresh before rotating")
+                _reject("VERSION_CONFLICT", "API Key changed; refresh before rotating")
             next_version = client.token_version + 1
             issued = issue_api_client_token(api_client_id)
             expires_at = now + timedelta(days=expires_in_days)
@@ -439,13 +415,14 @@ class ApiClientService(ServiceComponent):
             if replay is not None:
                 return replay
             if client.version != expected_version:
-                _reject("VERSION_CONFLICT", "API Client changed; refresh before revoking")
+                _reject("VERSION_CONFLICT", "API Key changed; refresh before revoking")
             if client.state != ApiClientState.REVOKED.value:
                 client.state = ApiClientState.REVOKED.value
                 client.revoked_at = now
                 client.version += 1
                 client.updated_at = now
             response = {
+                "api_key_id": str(client.api_client_id),
                 "api_client_id": str(client.api_client_id),
                 "state": client.state,
                 "version": client.version,
@@ -487,7 +464,7 @@ class ApiClientService(ServiceComponent):
             statement = statement.with_for_update()
         client = session.scalar(statement)
         if client is None:
-            _reject("API_CLIENT_NOT_FOUND", "API Client does not belong to this user")
+            _reject("API_CLIENT_NOT_FOUND", "API Key does not belong to this user")
         return client
 
     # Compatibility aliases preserve old integrations while changing their
@@ -507,7 +484,7 @@ class ApiClientService(ServiceComponent):
         actor_id: UUID,
         now: datetime,
     ) -> dict[str, Any]:
-        del roles
+        del roles, account_scope, venue_scope
         with self.database.session_factory() as session:
             owner = session.get(User, actor_id)
             if owner is None or owner.active_workspace_id is None or owner.active_team_id is None:
@@ -518,8 +495,6 @@ class ApiClientService(ServiceComponent):
             name=username,
             workspace_id=workspace_id,
             team_id=team_id,
-            account_id=account_scope,
-            venue=venue_scope,
             expires_in_days=expires_in_days,
             idempotency_key=idempotency_key,
             actor_id=actor_id,
@@ -539,11 +514,7 @@ class ApiClientService(ServiceComponent):
         actor_id: UUID,
         now: datetime,
     ) -> dict[str, Any]:
-        del roles
-        with self.database.session_factory() as session:
-            client = self._owned_client(session, agent_id, actor_id, lock=False)
-            if client.account_id != account_scope or client.venue != venue_scope:
-                _reject("API_CLIENT_SCOPE_IMMUTABLE", "create a new client to change its scope")
+        del roles, account_scope, venue_scope
         return self.update_api_client_state(
             agent_id,
             active=active,

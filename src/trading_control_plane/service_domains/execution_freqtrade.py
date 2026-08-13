@@ -346,7 +346,12 @@ class FreqtradeRecoveryExecutionService(ServiceComponent):
                 return existing_exit.intent_id
             if campaign.status == CampaignStatus.CLOSED.value:
                 _reject("CAMPAIGN_ALREADY_CLOSED", "closed campaigns require no recovery")
-            policy = session.scalar(select(RiskPolicy).where(RiskPolicy.active))
+            policy = session.scalar(
+                select(RiskPolicy).where(
+                    RiskPolicy.team_id == campaign.team_id,
+                    RiskPolicy.active,
+                )
+            )
             position = session.scalar(
                 select(Position)
                 .where(

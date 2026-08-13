@@ -21,7 +21,7 @@ from test_shadow_mode import (
 from trading_control_plane.binance_execution import BinancePortfolioMarginClient
 from trading_control_plane.capital import MockCapitalTransferAdapter
 from trading_control_plane.database import Database
-from trading_control_plane.domain import DomainRejected, ExecutionEnvironment
+from trading_control_plane.domain import DomainRejected, ExecutionEnvironment, Role
 from trading_control_plane.freqtrade import FreqtradeWorkerClient
 from trading_control_plane.hyperliquid_execution import HyperliquidLiveClient
 from trading_control_plane.models import (
@@ -35,6 +35,7 @@ from trading_control_plane.models import (
 )
 from trading_control_plane.quantstats_adapter import QuantStatsReportAdapter
 from trading_control_plane.queries import TradingQueries
+from trading_control_plane.report_engines import ReportArtifact
 
 ROOT = Path(__file__).resolve().parents[2]
 _FIXTURE_SPEC = importlib.util.spec_from_file_location(
@@ -242,15 +243,91 @@ def test_live_dataset_uses_trusted_nav_and_never_mixes_shadow(database: Database
     assert len(live.returns) == 3
     assert len(live.transactions) == 1
     assert live.transactions[0].quantity == Decimal("0.25")
-    assert live.transactions[0].idempotency_key == (
-        "LIVE:paper-1:BINANCE:live-partial-fill-1"
-    )
+    assert live.transactions[0].idempotency_key == ("LIVE:paper-1:BINANCE:live-partial-fill-1")
     assert live.coverage["transaction_count"] == 1
+    assert live.coverage["positions_complete"] is False
+    assert live.metadata["position_history_source"] == (
+        "CURRENT_STATE_ONLY_NO_HISTORICAL_SNAPSHOTS"
+    )
+    assert live.scope.account_venues == (("paper-1", "BINANCE"),)
     assert all(point.currency == "USD" for point in live.nav_series)
     assert "TEAM_SHADOW_ACCOUNT" not in live.metadata["source_facts"]
     with database.session_factory() as session:
         team = session.get(Team, ids["team"])
         assert team is not None and team.execution_mode == "SHADOW"
+
+
+def test_live_report_access_checks_exact_account_and_venue_pair(database: Database) -> None:
+    service, ids = activate_shadow(database)
+    service.create_exchange_account(
+        actor_id=ids["admin"],
+        account_id="paper-1",
+        venue="BYBIT",
+        label="Same identifier on a different venue",
+        credentials=None,
+        idempotency_key="analytics-bybit-account",
+        now=START,
+    )
+    for offset in range(4):
+        observed_at = START + timedelta(days=offset)
+        service.record_account_equity(
+            account_id="paper-1",
+            venue="BYBIT",
+            equity=Decimal("40000") + Decimal(offset * 100),
+            available_balance=Decimal("40000") + Decimal(offset * 100),
+            currency="USDT",
+            known=True,
+            actor_id=ids["admin"],
+            environment=ExecutionEnvironment.LIVE,
+            observed_at=observed_at,
+            now=START + timedelta(days=4),
+        )
+    dataset = TradingQueries(database).analytics_dataset(
+        ids["admin"],
+        "LIVE",
+        account_id="paper-1",
+        venue="BYBIT",
+        generation=None,
+        from_time=START,
+        to_time=START + timedelta(days=3),
+    )
+    assert dataset.scope.account_venues == (("paper-1", "BYBIT"),)
+    persisted = service.persist_analytics_report(
+        ids["admin"],
+        dataset,
+        ReportArtifact(
+            engine="QUANTSTATS",
+            library="QuantStats",
+            library_version="0.0.81",
+            html="<html><body>exact scope fixture</body></html>",
+            metrics={},
+            chart_count=0,
+            readiness={
+                "RETURNS_READY": False,
+                "POSITIONS_READY": False,
+                "TRANSACTIONS_READY": True,
+                "BENCHMARK_READY": False,
+            },
+        ),
+        "exact-account-venue-report",
+        now=START + timedelta(days=5),
+    )
+    restricted_id = service.create_managed_user(
+        "binance-report-reader",
+        [Role.OBSERVER],
+        ids["admin"],
+        "paper-1",
+        "BINANCE",
+        "ordinary-user-password",
+        now=START + timedelta(days=5),
+    )
+
+    with pytest.raises(DomainRejected) as rejected:
+        TradingQueries(database).analytics_report(
+            restricted_id,
+            UUID(persisted["report_id"]),
+        )
+    assert rejected.value.code == "ANALYTICS_ACCOUNT_SCOPE_DENIED"
 
 
 def test_quantstats_api_is_scoped_offline_and_preserves_legacy_results(
@@ -368,8 +445,8 @@ def test_quantstats_api_is_scoped_offline_and_preserves_legacy_results(
                     "environment": "SHADOW",
                     "account_id": "other-team-account",
                     "generation": 1,
-                        "from_time": (START + timedelta(hours=1)).isoformat(),
-                        "to_time": (START + timedelta(days=31, hours=1)).isoformat(),
+                    "from_time": (START + timedelta(hours=1)).isoformat(),
+                    "to_time": (START + timedelta(days=31, hours=1)).isoformat(),
                 },
             )
             assert denied.status_code == 422
@@ -399,9 +476,7 @@ def test_quantstats_failure_does_not_affect_trading_or_legacy_results(
             with patch.object(
                 QuantStatsReportAdapter,
                 "render",
-                side_effect=DomainRejected(
-                    "QUANTSTATS_REPORT_FAILED", "isolated report failure"
-                ),
+                side_effect=DomainRejected("QUANTSTATS_REPORT_FAILED", "isolated report failure"),
             ):
                 failed = await client.get(
                     "/api/results/quantstats",
@@ -450,9 +525,10 @@ def test_dual_report_tasks_persist_real_artifacts_and_are_idempotent(
             await login(client, "shadow-admin")
             catalog = await client.get("/api/results/report-engines")
             assert catalog.status_code == 200
-            assert {
-                item["engine"] for item in catalog.json()["data"]["engines"]
-            } == {"QUANTSTATS", "PYFOLIO"}
+            assert {item["engine"] for item in catalog.json()["data"]["engines"]} == {
+                "QUANTSTATS",
+                "PYFOLIO",
+            }
             report_ids: list[str] = []
             for engine in ("QUANTSTATS", "PYFOLIO"):
                 payload = {
@@ -550,12 +626,17 @@ def test_dual_report_tasks_persist_real_artifacts_and_are_idempotent(
                 assert capital_write.call_count == 0
             with database.session_factory() as session:
                 assert session.scalar(select(func.count()).select_from(AnalyticsReport)) == 2
-                assert session.scalar(
-                    select(func.count()).select_from(AuditEvent).where(
-                        AuditEvent.object_id.in_(report_ids),
-                        AuditEvent.event_type == "ANALYTICS_REPORT_GENERATED",
+                assert (
+                    session.scalar(
+                        select(func.count())
+                        .select_from(AuditEvent)
+                        .where(
+                            AuditEvent.object_id.in_(report_ids),
+                            AuditEvent.event_type == "ANALYTICS_REPORT_GENERATED",
+                        )
                     )
-                ) == 2
+                    == 2
+                )
 
     asyncio.run(scenario())
 
@@ -609,7 +690,5 @@ def test_report_artifact_is_denied_after_active_team_changes(database: Database)
         assert user is not None
         user.active_team_id = other_team_id
     with pytest.raises(DomainRejected) as rejected:
-        TradingQueries(database).analytics_report(
-            ids["admin"], UUID(persisted["report_id"])
-        )
+        TradingQueries(database).analytics_report(ids["admin"], UUID(persisted["report_id"]))
     assert rejected.value.code == "ANALYTICS_REPORT_NOT_FOUND"

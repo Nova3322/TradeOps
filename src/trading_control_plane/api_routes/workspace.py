@@ -406,9 +406,7 @@ class _WorkspaceRoutes:
                 )
             }
 
-        @self.app.post(
-            "/api/trading-mode/shadow/positions/{shadow_position_id}/protections"
-        )
+        @self.app.post("/api/trading-mode/shadow/positions/{shadow_position_id}/protections")
         def create_shadow_protection(
             shadow_position_id: UUID,
             payload: ShadowProtectionCreateRequest,
@@ -551,6 +549,7 @@ class _WorkspaceRoutes:
             )
             return {"user_id": str(user_id), "data": self.queries().managed_users(identity.user_id)}
 
+        @self.app.get("/api/profile/api-keys")
         @self.app.get("/api/profile/api-clients")
         def api_clients(
             identity: SessionIdentity = self.identity_dependency,
@@ -561,6 +560,7 @@ class _WorkspaceRoutes:
                 "as_of": _now().isoformat(),
             }
 
+        @self.app.get("/api/profile/api-key-contexts")
         @self.app.get("/api/profile/api-client-scopes")
         def api_client_scopes(
             identity: SessionIdentity = self.identity_dependency,
@@ -571,6 +571,7 @@ class _WorkspaceRoutes:
                 "as_of": _now().isoformat(),
             }
 
+        @self.app.post("/api/profile/api-keys")
         @self.app.post("/api/profile/api-clients")
         def create_api_client(
             payload: ApiClientCreateRequest,
@@ -593,6 +594,7 @@ class _WorkspaceRoutes:
                 "data": self.queries().api_clients(identity.user_id, now=_now()),
             }
 
+        @self.app.put("/api/profile/api-keys/{api_client_id}/state")
         @self.app.put("/api/profile/api-clients/{api_client_id}/state")
         def update_api_client_state(
             api_client_id: UUID,
@@ -613,6 +615,7 @@ class _WorkspaceRoutes:
                 "data": self.queries().api_clients(identity.user_id, now=_now()),
             }
 
+        @self.app.post("/api/profile/api-keys/{api_client_id}/rotations")
         @self.app.post("/api/profile/api-clients/{api_client_id}/token-rotations")
         def rotate_api_client_token(
             api_client_id: UUID,
@@ -633,6 +636,7 @@ class _WorkspaceRoutes:
                 "data": self.queries().api_clients(identity.user_id, now=_now()),
             }
 
+        @self.app.post("/api/profile/api-keys/{api_client_id}/revoke")
         @self.app.post("/api/profile/api-clients/{api_client_id}/revoke")
         def revoke_api_client(
             api_client_id: UUID,
@@ -652,6 +656,7 @@ class _WorkspaceRoutes:
                 "data": self.queries().api_clients(identity.user_id, now=_now()),
             }
 
+        @self.app.get("/api/api-key/connection")
         @self.app.get("/api/api-client/connection")
         def api_client_connection(
             identity: SessionIdentity = self.identity_dependency,
@@ -659,15 +664,18 @@ class _WorkspaceRoutes:
             if not self.is_agent_identity(identity):
                 raise DomainRejected(
                     "AGENT_IDENTITY_REQUIRED",
-                    "this endpoint requires an API Client Bearer credential",
+                    "this endpoint requires an API Key Bearer credential",
                 )
             context = self.queries().user_context(identity.user_id)
             return {
                 "connected": True,
                 "owner_user_id": str(identity.user_id),
+                "api_key_id": str(identity.api_client_id),
                 "api_client_id": str(identity.api_client_id),
+                "api_key_name": identity.api_client_name,
                 "api_client_name": identity.api_client_name,
                 "scope": context["api_client_scope"],
+                "context": context["api_client_scope"],
                 "effective_roles": context["roles"],
                 "permissions_source": "HUMAN_DYNAMIC",
                 "as_of": _now().isoformat(),

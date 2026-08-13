@@ -95,6 +95,48 @@ const ENGLISH_EXACT = new Map(Object.entries({
   '两次输入的新密码不一致。':'The new-password entries do not match.', '密码已更新；其他旧会话已撤销':'Password updated; older sessions have been revoked',
   '只读用户':'Observer', '提案发起人':'Proposer', '审核人':'Reviewer', '交易运维人员':'Trading operator',
   '资金管理员':'Treasury administrator', '系统管理员':'Super administrator',
+  'API 接入':'API access', 'API Key':'API Key', '管理自己的用户凭证':'Manage your user credentials',
+  '个人中心 · 开发者接入':'Personal center · Developer access', '几分钟内完成认证、只读连接和范围校验。完整字段以当前 OpenAPI 合同为唯一真源。':'Authenticate, validate read-only access, and verify context in minutes. The current OpenAPI contract is the sole source of truth.',
+  '个可连接':'available', '快速开始':'Quickstart', '先验证连接，再读取业务数据':'Validate the connection before reading business data',
+  '使用 Bearer Token 连接；不要同时发送登录 Cookie。第一个请求返回当前 API Key 的身份、所属 Team 上下文和用户动态角色。':'Connect with a Bearer API Key and do not send a login Cookie at the same time. The first request returns the API Key identity, Team context, and dynamic user roles.',
+  '当前 BASE_URL':'Current BASE_URL', '认证方式':'Authentication', '第一个只读请求':'First read-only request',
+  '成功条件':'Success criteria', '创建用户凭证':'Create a user credential', '权限':'Permissions', '范围':'Scope', '生命周期':'Lifecycle',
+  '复制 cURL':'Copy cURL', '复制提示词':'Copy instructions', 'Python 标准库':'Python standard library', '复制 Python':'Copy Python',
+  '可连接':'Available', '详情':'Details',
+  '动态继承所属用户在当前 Team 的有效角色，不复制权限。':"Dynamically inherits the owner's current roles in this Team; permissions are never copied.",
+  '只固定 Workspace / Team 上下文；Account / Venue 由用户当前 RBAC 逐资源校验。':"Only the Workspace / Team context is fixed. Account / Venue access is checked per resource against the user's current RBAC.",
+  '调用示例':'Usage examples', '按同一权限模型调用 API':'Call the API with the same permission model', '可复制的 API 调用规则':'Copy-ready API usage rules',
+  '安全边界':'Safety boundaries', '客户端提示不能越过服务端控制':'Client instructions cannot override server controls',
+  'API Key 与所属用户是同一审核主体。服务端权限、独立审核、风险政策、数据时效和危险 Gate 始终是最终边界。':'The API Key and its owner are the same review subject. Server permissions, independent review, risk policy, freshness, and dangerous-operation gates remain authoritative.',
+  '完整接口':'Complete API', 'OpenAPI 是唯一接口合同':'OpenAPI is the sole API contract', '打开 OpenAPI JSON':'Open OpenAPI JSON', '查看完整接入指南':'Open the complete access guide',
+  '常用只读接口':'Common read-only endpoint', '用途':'Purpose', '要求':'Requirement', '我的接入':'My API Keys',
+  '创建 API Key':'Create API Key', '选择 Workspace / Team；明文仅显示一次':'Choose Workspace / Team; plaintext is displayed once', 'API Key 名称':'API Key name', 'Token 有效天数':'Credential lifetime in days',
+  '创建并显示一次 Token':'Create and display once', '尚未创建 API Key':'No API Key has been created', '选择 Workspace / Team 后创建；每次请求都使用你的当前业务 RBAC。':'Choose a Workspace / Team to create one. Every request uses your current business RBAC.',
+  '测试连接 Token':'Test API Key', '轮换 Token':'Rotate API Key', '永久撤销 API Key？':'Permanently revoke this API Key?', '停用 API Key？':'Disable this API Key?', '重新启用 API Key？':'Re-enable this API Key?',
+  'Token 摘要':'API Key hint', '最近使用':'Last used', '测试连接':'Test connection', '停用':'Disable', '重新启用':'Re-enable', '撤销':'Revoke', '粘贴此 API Key':'Paste this API Key',
+  '权限真源：所属用户当前业务 RBAC。每次请求按资源重新检查所属用户当前的 Team、Account、Venue 和角色；API Key 不保存独立权限或账户范围。当前状态：AVAILABLE。':"Permission source: the owner's current business RBAC. Every request rechecks the owner's current Team, Account, Venue, and role access per resource. The API Key stores no independent permissions or account scope. Current status: AVAILABLE.",
+  '权限真源：':'Permission source: ', '所属用户当前业务 RBAC。每次请求按资源重新检查所属用户当前的 Team、Account、Venue 和角色；API Key 不保存独立权限或账户范围。当前状态：AVAILABLE。':"The owner's current business RBAC. Every request rechecks the owner's current Team, Account, Venue, and role access per resource. The API Key stores no independent permissions or account scope. Current status: AVAILABLE.",
+  'HTTP 200，并且 scope 中的 Workspace、Team 与预期一致，且 scope_model=USER_RBAC。':'HTTP 200 with the expected Workspace and Team, and scope_model=USER_RBAC.',
+  '，并且 scope 中的 Workspace、Team 与预期一致，且 scope_model=USER_RBAC。':'and scope has the expected Workspace and Team with scope_model=USER_RBAC.',
+  'API Key 明文只在创建或轮换成功时显示一次。页面此后只保留不可逆摘要、版本、有效期与最近使用时间。':'Plaintext is displayed only after API Key creation or rotation. The page then retains only a one-way hint, version, expiry, and last-used time.',
+  '1–365 天，可停用、轮换或永久撤销；旧 Token 立即失效。':'1–365 days. The key can be disabled, rotated, or permanently revoked; the previous credential expires immediately.',
+  '权限始终等于所属用户当前 RBAC；API Key 只固定 Workspace / Team 上下文，不设置独立 Account / Venue Scope。Token 可停用、轮换或永久撤销；资金、管理、风控恢复和需人工确认的动作仍须在网页完成。':"Permissions always equal the owner's current RBAC. The API Key fixes only a Workspace / Team context and has no independent Account / Venue scope. Capital, administration, risk restoration, and confirmation-required actions remain interactive.",
+  '当前没有可创建 API Key 的团队上下文':'No Team context is available for a new API Key', '请联系团队管理员配置有效成员关系和业务角色。':'Ask a team administrator to configure active membership and business roles.',
+  '调用规则默认只读，并要求每次任务核对权限、环境、来源和时间。示例只使用占位符，不包含任何真实凭据。':'The usage rules start read-only and require every task to verify permissions, environment, source, and time. Examples contain placeholders only.',
+  '只读默认':'Read-only by default', '文字区分':'Explicit labeling', '失败即阻断':'Fail closed', '默认安全':'Safe by default', '危险能力':'Dangerous capabilities', '数据时效':'Data freshness',
+  '从 GET 接口开始；写操作必须得到明确授权，并按当前 OpenAPI 请求体提供唯一 idempotency_key。':'Start with GET endpoints. Writes require explicit authorization and a unique idempotency_key in the current OpenAPI request body.',
+  '从 GET 接口开始；写操作必须得到明确授权，并按当前 OpenAPI 请求体提供唯一':'Start with GET endpoints. Writes require explicit authorization and a unique',
+  '环境字段必须显式读取和保留；SHADOW 结果不得描述成真实成交、持仓或资金。':'Read and preserve environment fields explicitly. SHADOW results must not be described as real fills, positions, or capital.',
+  '环境字段必须显式读取和保留；':'Read and preserve environment fields explicitly;', '结果不得描述成真实成交、持仓或资金。':'results must not be described as real fills, positions, or capital.',
+  '检查 as_of、observed_at、fetched_at 与 data_status。缺失、过期或限流不等于实时，也不等于 0。':'Check as_of, observed_at, fetched_at, and data_status. Missing, stale, or rate-limited data is neither real-time nor zero.',
+  '检查':'Check', '。缺失、过期或限流不等于实时，也不等于 0。':'. Missing, stale, or rate-limited data is neither real-time nor zero.',
+  'LIVE_ORDER_SEND、CAPITAL_TRANSFER、自动加仓和资金自动化 Gate 默认关闭；不处理密码、交易所密钥、签名材料或广播秘密。':'LIVE_ORDER_SEND, CAPITAL_TRANSFER, automatic scaling, and capital automation gates are disabled by default. Never handle passwords, exchange secrets, signing material, or broadcast secrets.',
+  '、自动加仓和资金自动化 Gate 默认关闭；不处理密码、交易所密钥、签名材料或广播秘密。':', automatic scaling, and capital automation gates are disabled by default. Never handle passwords, exchange secrets, signing material, or broadcast secrets.', '默认关闭':'Disabled by default',
+  '指南只维护接入流程和安全原则，不重复维护全部请求字段。字段、枚举、查询参数和响应模型以运行中的 OpenAPI 为准。':'This guide covers access and safety principles without duplicating all request fields. Use the running OpenAPI for fields, enums, parameters, and response models.',
+  '验证 API Key、动态角色和 Team 上下文':'Validate the API Key, dynamic roles, and Team context', '有效 Token':'Valid API Key', '读取当前团队可见的合约目录':'Read instruments visible to the current Team', '已认证':'Authenticated',
+  '读取带来源与时效状态的机会快照':'Read opportunity snapshots with source and freshness', '读取当前范围提案':'Read currently authorized proposals', '读取交易任务':'Read trades', '按环境读取实际结果':'Read actual results by environment', '按环境读取审计时间线':'Read the audit timeline by environment',
+  '当前仅部分列表接口提供 limit：通知为 1–200，审计为 1–500。不要自行假设 cursor、offset 或 page 参数；以 OpenAPI 为准。':'Only some list endpoints provide limit: notifications 1–200 and audit 1–500. Do not assume cursor, offset, or page parameters; use OpenAPI.',
+  '当前仅部分列表接口提供':'Only some list endpoints provide', '：通知为 1–200，审计为 1–500。不要自行假设':': notifications 1–200 and audit 1–500. Do not assume', '、':',', '与':'and', '或':'or', '参数；以 OpenAPI 为准。':'parameters; use OpenAPI.',
   '主导航':'Main navigation', '工作台':'Workspace', '空间配置':'Space setup', '治理与安全':'Governance and safety', '交易流程':'Trade workflow', '运行与风控':'Operations and risk', '团队设置':'Team settings', '当前范围':'Current scope', '当前任务':'Current tasks', '实时信号':'Live signals', '实时机会':'Live opportunities', 'Webhook 信号':'Webhook signals', '提案管理':'Proposals', '审核队列':'Review queue',
   '交易任务':'Trades', '绩效报表':'Performance reports', '交易模式':'Trading mode', '影子模式':'Shadow mode', '通知中心':'Notification center', '风险控制':'Risk controls', '系统状态':'System status', '资金':'Capital', '异常':'Exceptions',
   '交易账户':'Exchange accounts', '成员权限':'Access control',
@@ -574,6 +616,7 @@ const ENGLISH_PATTERNS = [
   [/^(\d+) 项阻断，查看详情$/, '$1 blockers; view details'],
   [/^(\d+) 项敞口不确定$/, '$1 exposure issues'], [/^(\d+) 项未一致$/, '$1 reconciliation issues'],
   [/^(\d+) 名启用成员$/, '$1 active users'], [/^(\d+) 个结果$/, '$1 results'], [/^(\d+) 条记录$/, '$1 records'],
+  [/^(\d+) 个可连接$/, '$1 available'],
   [/^显示 (\d+) \/ (\d+) 个机会$/, 'Showing $1 of $2 opportunities'], [/^(\d+) 分钟$/, '$1 minutes'],
   [/^截止 (.+)$/, 'As of $1'], [/^数据截止 (.+)$/, 'Data as of $1'], [/^完成于 (.+)$/, 'Completed $1'],
   [/^最近数据 (.+)$/, 'Latest data $1'], [/^创建于 (.+)$/, 'Created $1'], [/^版本 (\d+)$/, 'Version $1'],
@@ -998,10 +1041,10 @@ const apiErrorGuidance = {
   PASSWORD_UNCHANGED:'新密码必须与当前密码不同。',
   AUTH_VERSION_CONFLICT:'登录身份已变化，请刷新页面后重新验证。',
   PASSWORD_AUTH_REQUIRED:'当前会话不是密码登录，请使用密码重新登录后修改。',
-  AGENT_TOKEN_INVALID:'该 API Client Token 已失效、已轮换或不匹配。请使用当前 Token。',
-  AGENT_TOKEN_EXPIRED:'该 API Client Token 已到期。请在网页中轮换 Token。',
-  API_CLIENT_RATE_LIMITED:'该 API Client 请求过于频繁，请稍后重试。',
-  API_CLIENT_REVOKED:'该 API Client 已永久撤销；需要接入时请创建新的 Client。',
+  AGENT_TOKEN_INVALID:'该 API Key 已失效、已轮换或不匹配。请使用当前凭证。',
+  AGENT_TOKEN_EXPIRED:'该 API Key 已到期。请在网页中轮换凭证。',
+  API_CLIENT_RATE_LIMITED:'该 API Key 请求过于频繁，请稍后重试。',
+  API_CLIENT_REVOKED:'该 API Key 已永久撤销；需要接入时请创建新的 API Key。',
   RISK_POLICY_MISSING:'风险政策尚未配置，因此系统已暂停创建和执行新增风险。请联系系统管理员完成配置。',
   PERPTAPE_NOT_CONFIGURED:'Perptape 尚未配置。人工提案仍可使用，外部机会将在完成配置后恢复。',
   PERPTAPE_UNAVAILABLE:'暂时无法连接 Perptape。人工提案仍可使用，请稍后重新检查外部机会。',
@@ -1088,7 +1131,7 @@ const currentWorkspaceMembership = () => (session?.workspaces || []).find(
   workspace => workspace.workspace_id === session?.active_workspace?.workspace_id
 );
 const routeCapability = (path) => {
-  if (path === '/' || path === '/workspaces' || path === '/home' || path === '/profile/api-access' || path === '/admin/agents') return null;
+  if (path === '/' || path === '/workspaces' || path === '/home' || path === '/profile/api-keys' || path === '/profile/api-access' || path === '/admin/agents') return null;
   if (path === '/capital') return 'capital.view';
   if (path === '/opportunities/defaults') return 'proposal.create';
   if (path === '/opportunities') return 'opportunity.view';
@@ -1533,7 +1576,7 @@ async function route() {
     return;
   }
   setShell(true);
-  const teamSetupPaths = new Set(['/admin/users', '/admin/agents', '/profile/api-access', '/venues', '/signals', '/webhook-signals', '/notifications', '/risk', '/shadow', '/trading-mode']);
+  const teamSetupPaths = new Set(['/admin/users', '/admin/agents', '/profile/api-keys', '/profile/api-access', '/venues', '/signals', '/webhook-signals', '/notifications', '/risk', '/shadow', '/trading-mode']);
   if (!session.active_workspace || !session.active_team || (!session.active_team.trading_enabled && !teamSetupPaths.has(path) && !path.startsWith('/venues/'))) {
     renderScopeSetup();
     enhanceRenderedPage();
@@ -1576,7 +1619,7 @@ async function route() {
     }
     else if (path === '/venues/shadow') await renderVenueShadowAccount();
     else if (path === '/admin/users') await renderAccessManagement();
-    else if (path === '/profile/api-access' || path === '/admin/agents') await renderApiAccess();
+    else if (path === '/profile/api-keys' || path === '/profile/api-access' || path === '/admin/agents') await renderApiAccess();
     else {
       const campaignMatch = path.match(/^\/campaigns\/([0-9a-f-]+)$/i);
       const proposalMatch = path.match(/^\/proposals\/([0-9a-f-]+)$/i);

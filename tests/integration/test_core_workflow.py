@@ -43,6 +43,7 @@ from trading_control_plane.models import (
     RiskDecision,
     RiskPolicy,
     RiskReservation,
+    Team,
     TradingAuthorization,
     VenueFill,
     VenueOrder,
@@ -92,6 +93,14 @@ def seed(service: TradingService) -> dict[str, UUID]:
         max_fact_age=timedelta(seconds=30),
         now=NOW,
     )
+    context = TradingQueries(service.database).user_context(admin)
+    with service.database.session_factory.begin() as session:
+        team = session.get(Team, UUID(str(context["active_team"]["team_id"])), with_for_update=True)
+        assert team is not None
+        # Exercise the retained pre-lock SHADOW compatibility workflow. Fresh
+        # bootstrap and migrated Teams are always locked and use the unified ledger.
+        team.execution_mode = "SHADOW"
+        team.execution_mode_locked_at = None
     position = service.record_position(
         "acct-1",
         "BINANCE",
@@ -510,9 +519,12 @@ def test_admin_cleanup_expires_cross_proposer_manual_duplicates_with_audit(
         for index, actor_id in enumerate((ids["proposer"], second_proposer))
     ]
 
-    assert service.expire_duplicate_active_manual_proposals(
-        actor_id=ids["admin"], now=NOW + timedelta(minutes=2)
-    ) == 1
+    assert (
+        service.expire_duplicate_active_manual_proposals(
+            actor_id=ids["admin"], now=NOW + timedelta(minutes=2)
+        )
+        == 1
+    )
     with pytest.raises(DomainRejected, match="SELF_REVIEW_FORBIDDEN"):
         service.review_proposal(
             proposal_ids[0],
@@ -591,10 +603,7 @@ def test_self_review_is_forbidden_and_high_risk_needs_two_reviewers(
         queries.list_proposals(ids["reviewer_one"], now=NOW)[0]["actionable_for_current_user"]
         is False
     )
-    assert (
-        reviewer_two_summary["actionable_for_current_user"]
-        is True
-    )
+    assert reviewer_two_summary["actionable_for_current_user"] is True
     assert (
         queries.proposal_detail(ids["reviewer_one"], proposal_id, now=NOW)[
             "actionable_for_current_user"
@@ -1075,12 +1084,8 @@ def test_sender_fencing_rejects_old_owner_after_reconciled_takeover(
 
     assert second > first
     with pytest.raises(DomainRejected, match="FENCING_TOKEN_REJECTED"):
-        service.validate_sender(
-            "acct-1:BINANCE", "worker-a", first, ids["operator"], takeover_time
-        )
-    service.validate_sender(
-        "acct-1:BINANCE", "worker-b", second, ids["operator"], takeover_time
-    )
+        service.validate_sender("acct-1:BINANCE", "worker-a", first, ids["operator"], takeover_time)
+    service.validate_sender("acct-1:BINANCE", "worker-b", second, ids["operator"], takeover_time)
 
 
 def test_active_intent_blocks_duplicate_reduce_only_intent(service: TradingService) -> None:

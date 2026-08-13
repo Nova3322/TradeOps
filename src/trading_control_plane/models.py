@@ -52,7 +52,7 @@ class Team(Base):
         UniqueConstraint("workspace_id", "slug", name="uq_teams_workspace_slug"),
         CheckConstraint("version >= 1", name="ck_teams_version"),
         CheckConstraint(
-            "execution_mode IN ('SETUP','SHADOW','LIVE')",
+            "execution_mode IN ('SETUP','SHADOW','TESTNET','LIVE')",
             name="ck_teams_execution_mode",
         ),
         Index("ix_teams_workspace_active", "workspace_id", "active"),
@@ -217,6 +217,7 @@ class AnalyticsReport(Base):
     generation: Mapped[int | None] = mapped_column(Integer, nullable=True)
     account_ids: Mapped[list[str]] = mapped_column(JSONB, nullable=False)
     venues: Mapped[list[str]] = mapped_column(JSONB, nullable=False)
+    account_scopes: Mapped[list[dict[str, str]]] = mapped_column(JSONB, nullable=False)
     from_time: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     to_time: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     status: Mapped[str] = mapped_column(String(16), nullable=False)
@@ -494,18 +495,8 @@ class ApiClient(Base):
             name="ck_api_clients_revocation_shape",
         ),
         UniqueConstraint("owner_user_id", "name", name="uq_api_clients_owner_name"),
-        ForeignKeyConstraint(
-            ["team_id", "account_id", "venue"],
-            [
-                "exchange_accounts.team_id",
-                "exchange_accounts.account_id",
-                "exchange_accounts.venue",
-            ],
-            name="fk_api_clients_exchange_account_scope",
-            ondelete="RESTRICT",
-        ),
         Index("ix_api_clients_owner_state", "owner_user_id", "state"),
-        Index("ix_api_clients_team_scope", "team_id", "account_id", "venue"),
+        Index("ix_api_clients_team", "team_id"),
     )
 
     api_client_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid4)
@@ -519,8 +510,10 @@ class ApiClient(Base):
     team_id: Mapped[UUID] = mapped_column(
         ForeignKey("teams.team_id", ondelete="RESTRICT"), nullable=False
     )
-    account_id: Mapped[str] = mapped_column(String(120), nullable=False)
-    venue: Mapped[str] = mapped_column(String(64), nullable=False)
+    # Retained as nullable legacy columns so existing API payload/response shapes
+    # remain compatible. Authorization never reads these values.
+    account_id: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    venue: Mapped[str | None] = mapped_column(String(64), nullable=True)
     state: Mapped[str] = mapped_column(String(16), nullable=False, default="ACTIVE")
     token_digest: Mapped[str] = mapped_column(String(64), nullable=False)
     token_hint: Mapped[str] = mapped_column(String(32), nullable=False)

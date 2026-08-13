@@ -6,6 +6,7 @@ from decimal import Decimal
 from uuid import UUID, uuid4
 
 import pytest
+from conftest import set_test_team_environment
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy import select
 
@@ -271,6 +272,7 @@ def test_proposal_chain_defaults_to_active_team_and_denies_cross_team_access(
     now = datetime.now(UTC)
     service = TradingService(database)
     admin_id = service.bootstrap_admin("team-chain-admin", now=now)
+    set_test_team_environment(database, admin_id, "SHADOW")
     context = TradingQueries(database).user_context(admin_id)
     default_workspace_id = UUID(str(context["active_workspace"]["workspace_id"]))
     default_team_id = UUID(str(context["active_team"]["team_id"]))
@@ -325,6 +327,7 @@ def test_proposal_chain_defaults_to_active_team_and_denies_cross_team_access(
         team = session.get(Team, team_b, with_for_update=True)
         assert team is not None
         team.trading_enabled = True
+        team.execution_mode = "SHADOW"
 
     proposal_b = service.create_proposal(
         actor_id=admin_id,
