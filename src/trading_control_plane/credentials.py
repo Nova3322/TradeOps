@@ -57,9 +57,7 @@ def scoped_secret_aad(
     purpose: str,
     credential_version: int,
 ) -> bytes:
-    return (
-        f"tradingops:{purpose}:{team_id}:{object_id}:{credential_version}"
-    ).encode()
+    return (f"tradingops:{purpose}:{team_id}:{object_id}:{credential_version}").encode()
 
 
 @dataclass(frozen=True, slots=True)
@@ -267,8 +265,10 @@ class CredentialCipher:
                 credential_version=credential_version,
             ),
         )
-        if not isinstance(decoded, dict) or set(decoded) != {"secret"} or not isinstance(
-            decoded["secret"], str
+        if (
+            not isinstance(decoded, dict)
+            or set(decoded) != {"secret"}
+            or not isinstance(decoded["secret"], str)
         ):
             raise DomainRejected(
                 "CREDENTIAL_ENVELOPE_INVALID", "credential envelope payload is invalid"

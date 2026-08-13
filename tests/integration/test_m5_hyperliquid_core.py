@@ -6,7 +6,7 @@ from decimal import Decimal
 from typing import Any
 from uuid import UUID
 
-from conftest import set_test_team_environment
+from conftest import add_exchange_account_fixture, set_test_team_environment
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy import select
@@ -149,6 +149,7 @@ def seed(service: TradingService, *, key: str) -> dict[str, UUID]:
     now = datetime.now(UTC)
     admin = service.bootstrap_admin(f"{key}-admin", now=now)
     set_test_team_environment(service.database, admin, "TESTNET")
+    add_exchange_account_fixture(service.database, admin, ACCOUNT_ID, "HYPERLIQUID")
     proposer = service.create_user(f"{key}-proposer", admin, now=now)
     reviewer_one = service.create_user(f"{key}-reviewer-1", admin, now=now)
     reviewer_two = service.create_user(f"{key}-reviewer-2", admin, now=now)

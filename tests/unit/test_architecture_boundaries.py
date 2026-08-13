@@ -50,7 +50,6 @@ def test_lifecycle_service_components_remain_bounded() -> None:
         "execution_facts.py",
         "execution_freqtrade.py",
         "execution_intent.py",
-        "execution_shadow.py",
         "execution_venue.py",
         "risk_authorization.py",
         "risk_policy.py",

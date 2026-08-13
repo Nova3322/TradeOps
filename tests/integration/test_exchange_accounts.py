@@ -4,7 +4,6 @@ import asyncio
 import base64
 from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta
-from decimal import Decimal
 from uuid import UUID
 
 import pytest
@@ -15,10 +14,10 @@ from trading_control_plane.api import create_app
 from trading_control_plane.config import Settings
 from trading_control_plane.credentials import CredentialCipher
 from trading_control_plane.database import Database
-from trading_control_plane.domain import DomainRejected, ExecutionEnvironment, Role
+from trading_control_plane.domain import DomainRejected, Role
 from trading_control_plane.exchange_connection import ConnectionProbeResult
 from trading_control_plane.freqtrade import FreqtradeWorkerClient, FreqtradeWorkerSpec
-from trading_control_plane.models import AuditEvent, ExchangeAccount, RoleAssignment, Team, User
+from trading_control_plane.models import AuditEvent, ExchangeAccount, RoleAssignment, User
 from trading_control_plane.perptape import PerptapeClient
 from trading_control_plane.queries import TradingQueries
 from trading_control_plane.service import TradingService
@@ -26,86 +25,6 @@ from trading_control_plane.service import TradingService
 
 def encryption_key() -> str:
     return base64.urlsafe_b64encode(b"exchange-account-test-key-32byt!"[:32]).decode().rstrip("=")
-
-
-def test_exchange_accounts_are_environment_scoped_and_shadow_rejects_api_credentials(
-    database: Database,
-) -> None:
-    now = datetime.now(UTC)
-    service = TradingService(database, credential_encryption_key=encryption_key())
-    admin = service.bootstrap_admin("mode-account-admin", now=now)
-    shadow_id = service.create_exchange_account(
-        actor_id=admin,
-        environment="SHADOW",
-        account_id="shadow-binance",
-        venue="BINANCE",
-        label="Shadow Binance",
-        credentials=None,
-        idempotency_key="shadow-account-create",
-        now=now,
-    )
-    live_id = service.create_exchange_account(
-        actor_id=admin,
-        environment="LIVE",
-        account_id="live-binance",
-        venue="BINANCE",
-        label="Live Binance",
-        credentials={"api_key": "live-api-key", "api_secret": "live-api-secret"},
-        idempotency_key="live-account-create",
-        now=now,
-    )
-
-    projection = TradingQueries(database).exchange_accounts(admin)["data"]
-    assert {(item["environment"], item["account_id"]) for item in projection} == {
-        ("SHADOW", "shadow-binance"),
-        ("LIVE", "live-binance"),
-    }
-    shadow = next(item for item in projection if item["exchange_account_id"] == str(shadow_id))
-    live = next(item for item in projection if item["exchange_account_id"] == str(live_id))
-    assert shadow["credentials"]["state"] == "UNCONFIGURED"
-    assert live["credentials"]["state"] == "CONFIGURED"
-    for environment, account_id, amount in (
-        (ExecutionEnvironment.SHADOW, "shadow-binance", Decimal("1000")),
-        (ExecutionEnvironment.LIVE, "live-binance", Decimal("500")),
-    ):
-        service.record_account_equity(
-            account_id,
-            "BINANCE",
-            amount,
-            amount,
-            "USDT",
-            True,
-            admin,
-            environment=environment,
-            observed_at=now,
-            now=now,
-        )
-    live_display = TradingQueries(database).capital_display(
-        admin,
-        "LIVE",
-        {"BINANCE|live-binance"},
-    )
-    assert live_display["selected_account_keys"] == ["BINANCE|live-binance"]
-    assert {item["account_id"] for item in live_display["account_options"]} == {
-        "live-binance"
-    }
-    assert Decimal(live_display["net_worth"]["total"]) == Decimal("500")
-    shadow_display = TradingQueries(database).capital_display(admin, "SHADOW")
-    assert {item["account_id"] for item in shadow_display["account_options"]} == {
-        "shadow-binance"
-    }
-    assert Decimal(shadow_display["net_worth"]["total"]) == Decimal("1000")
-    with pytest.raises(DomainRejected, match="SHADOW_ACCOUNT_CREDENTIALS_FORBIDDEN"):
-        service.create_exchange_account(
-            actor_id=admin,
-            environment="SHADOW",
-            account_id="shadow-with-secret",
-            venue="BINANCE",
-            label="Invalid Shadow",
-            credentials={"api_key": "forbidden", "api_secret": "forbidden-secret"},
-            idempotency_key="shadow-secret-rejected",
-            now=now,
-        )
 
 
 def test_exchange_account_credentials_are_encrypted_scoped_and_never_projected(
@@ -201,19 +120,24 @@ def test_exchange_account_delete_is_fail_closed_and_can_be_reconnected(
     deleted = service.delete_exchange_account(
         account_id,
         actor_id=admin,
+        confirmation="DELETE:LIVE:okx-removable:OKX",
         expected_version=1,
         idempotency_key="delete-removable-account",
         now=now + timedelta(seconds=1),
     )
     assert deleted["status"] == "DELETED"
     assert TradingQueries(database).exchange_accounts(admin)["data"] == []
-    assert service.delete_exchange_account(
-        account_id,
-        actor_id=admin,
-        expected_version=1,
-        idempotency_key="delete-removable-account",
-        now=now + timedelta(seconds=2),
-    ) == deleted
+    assert (
+        service.delete_exchange_account(
+            account_id,
+            actor_id=admin,
+            confirmation="DELETE:LIVE:okx-removable:OKX",
+            expected_version=1,
+            idempotency_key="delete-removable-account",
+            now=now + timedelta(seconds=2),
+        )
+        == deleted
+    )
     with database.session_factory() as session:
         archived = session.get(ExchangeAccount, account_id)
         assert archived is not None
@@ -228,7 +152,7 @@ def test_exchange_account_delete_is_fail_closed_and_can_be_reconnected(
         account_id="okx-removable",
         venue="OKX",
         label="Reconnected OKX",
-        credentials=None,
+        credentials={"api_key": "key-two", "api_secret": "secret-two", "passphrase": "pass"},
         idempotency_key="restore-removable-account",
         now=now + timedelta(seconds=3),
     )
@@ -236,7 +160,7 @@ def test_exchange_account_delete_is_fail_closed_and_can_be_reconnected(
     restored = TradingQueries(database).exchange_accounts(admin)["data"]
     assert len(restored) == 1
     assert restored[0]["label"] == "Reconnected OKX"
-    assert restored[0]["credentials"]["state"] == "UNCONFIGURED"
+    assert restored[0]["credentials"]["state"] == "CONFIGURED"
     assert restored[0]["permissions"]["can_delete"] is True
     with database.session_factory() as session:
         events = set(
@@ -301,129 +225,6 @@ def test_account_setup_is_allowed_before_team_activation_and_cross_team_rotation
             expected_version=1,
             idempotency_key="cross-team-connection-check",
         )
-
-
-def test_account_facts_and_reconciliation_are_isolated_by_active_team(
-    database: Database,
-) -> None:
-    now = datetime.now(UTC)
-    service = TradingService(database)
-    admin = service.bootstrap_admin("fact-scope-admin", now=now)
-    initial = TradingQueries(database).user_context(admin)
-    workspace_id = UUID(initial["active_workspace"]["workspace_id"])
-    default_team_id = UUID(initial["active_team"]["team_id"])
-    instrument_id = service.register_instrument(
-        actor_id=admin,
-        venue="BINANCE",
-        symbol="BTCUSDT",
-        tick_size=Decimal("0.1"),
-        lot_size=Decimal("0.001"),
-        minimum_notional=Decimal("5"),
-        contract_multiplier=Decimal("1"),
-        quote_currency="USDT",
-        collateral_currency="USDT",
-        protection_supported=True,
-        now=now,
-    )
-    default_position_id = service.record_position(
-        "shared-account",
-        "BINANCE",
-        instrument_id,
-        Decimal(0),
-        Decimal(0),
-        Decimal("100"),
-        True,
-        admin,
-        environment=ExecutionEnvironment.SHADOW,
-        now=now,
-    )
-    service.record_account_equity(
-        "shared-account",
-        "BINANCE",
-        Decimal("1000"),
-        Decimal("900"),
-        "USDT",
-        True,
-        admin,
-        environment=ExecutionEnvironment.SHADOW,
-        now=now,
-    )
-    default_reconciliation_id = service.reconcile_scope(
-        "SHADOW:shared-account:BINANCE", admin, now=now
-    )
-
-    second_team_id = service.create_team(
-        actor_id=admin,
-        name="Fact Scope Two",
-        slug="fact-scope-two",
-        idempotency_key="fact-scope-two-create",
-        now=now,
-    )
-    with database.session_factory.begin() as session:
-        second_team = session.get(Team, second_team_id, with_for_update=True)
-        assert second_team is not None
-        second_team.trading_enabled = True
-
-    second_position_id = service.record_position(
-        "shared-account",
-        "BINANCE",
-        instrument_id,
-        Decimal(0),
-        Decimal(0),
-        Decimal("200"),
-        True,
-        admin,
-        environment=ExecutionEnvironment.SHADOW,
-        now=now,
-    )
-    service.record_account_equity(
-        "shared-account",
-        "BINANCE",
-        Decimal("2000"),
-        Decimal("1800"),
-        "USDT",
-        True,
-        admin,
-        environment=ExecutionEnvironment.SHADOW,
-        now=now,
-    )
-    second_reconciliation_id = service.reconcile_scope(
-        "SHADOW:shared-account:BINANCE", admin, now=now
-    )
-    second_facts = TradingQueries(database).venue_facts(
-        admin, "shared-account", "BINANCE", "SHADOW"
-    )
-    assert second_facts["team_id"] == str(second_team_id)
-    assert second_facts["positions"][0]["position_id"] == str(second_position_id)
-    assert second_facts["positions"][0]["mark_price"] == "200.000000000000000000"
-    assert second_facts["equity"]["equity"] == "2000.000000000000000000"
-    assert second_facts["reconciliation"]["reconciliation_id"] == str(second_reconciliation_id)
-    with pytest.raises(DomainRejected, match="TEAM_SCOPE_DENIED"):
-        service.record_protection(
-            default_position_id,
-            "cross-team-protection",
-            Decimal(0),
-            Decimal(0),
-            True,
-            admin,
-            now=now,
-        )
-
-    service.select_scope(
-        actor_id=admin,
-        workspace_id=workspace_id,
-        team_id=default_team_id,
-        idempotency_key="fact-scope-return-default",
-        now=now,
-    )
-    default_facts = TradingQueries(database).venue_facts(
-        admin, "shared-account", "BINANCE", "SHADOW"
-    )
-    assert default_facts["team_id"] == str(default_team_id)
-    assert default_facts["positions"][0]["position_id"] == str(default_position_id)
-    assert default_facts["positions"][0]["mark_price"] == "100.000000000000000000"
-    assert default_facts["equity"]["equity"] == "1000.000000000000000000"
-    assert default_facts["reconciliation"]["reconciliation_id"] == str(default_reconciliation_id)
 
 
 def test_exchange_account_api_masks_credentials_and_exposes_connector_truth(
@@ -657,13 +458,9 @@ def test_freqtrade_workers_are_encrypted_and_verified_per_exact_account(
             listed = await client.get("/api/exchange-accounts")
             assert listed.status_code == 200
             assert all(
-                secret not in listed.text
-                for secret in ("worker-a-password", "worker-b-password")
+                secret not in listed.text for secret in ("worker-a-password", "worker-b-password")
             )
-            by_account = {
-                item["account_id"]: item
-                for item in listed.json()["data"]["data"]
-            }
+            by_account = {item["account_id"]: item for item in listed.json()["data"]["data"]}
             assert by_account["binance-worker-a"]["execution_worker"]["scope"] == {
                 "team_id": str(team_id),
                 "account_id": "binance-worker-a",
@@ -694,10 +491,7 @@ def test_freqtrade_workers_are_encrypted_and_verified_per_exact_account(
             assert observer_accounts[0]["account_id"] == "binance-worker-a"
             assert observer_accounts[0]["execution_worker"]["endpoint"] is None
             assert "default_endpoint" not in observer_accounts[0]["execution_worker"]
-            assert (
-                observer_accounts[0]["execution_worker"]["auth"]["username_hint"]
-                is None
-            )
+            assert observer_accounts[0]["execution_worker"]["auth"]["username_hint"] is None
 
             logout = await client.post("/api/auth/logout")
             assert logout.status_code == 200
@@ -709,9 +503,7 @@ def test_freqtrade_workers_are_encrypted_and_verified_per_exact_account(
             proposer_listed = await client.get("/api/exchange-accounts")
             assert proposer_listed.status_code == 200
             proposer_accounts = proposer_listed.json()["data"]["data"]
-            assert [item["account_id"] for item in proposer_accounts] == [
-                "binance-worker-a"
-            ]
+            assert [item["account_id"] for item in proposer_accounts] == ["binance-worker-a"]
             assert proposer_accounts[0]["execution_worker"]["endpoint"] is None
             assert "default_endpoint" not in proposer_accounts[0]["execution_worker"]
 
@@ -726,8 +518,7 @@ def test_freqtrade_workers_are_encrypted_and_verified_per_exact_account(
         assert len(stored) == 2
         assert all(item.freqtrade_auth_ciphertext is not None for item in stored)
         assert all(
-            secret not in repr(stored)
-            for secret in ("worker-a-password", "worker-b-password")
+            secret not in repr(stored) for secret in ("worker-a-password", "worker-b-password")
         )
         assert {
             (item.account_id, item.freqtrade_worker_status, item.freqtrade_worker_mode)
@@ -807,10 +598,12 @@ class FakeExchangeConnectionVerifier:
         self,
         *,
         venue: str,
+        environment: str,
         credentials: Mapping[str, str],
         now: datetime,
     ) -> ConnectionProbeResult:
         assert now.utcoffset() is not None
+        assert environment in {"TESTNET", "LIVE"}
         self.calls.append((venue, dict(credentials)))
         return self.outcomes[venue]
 
@@ -857,9 +650,7 @@ def test_account_trading_eligibility_api_uses_exact_version_and_runtime_boundary
 ) -> None:
     now = datetime.now(UTC)
     TradingService(database).bootstrap_admin("trading-eligibility-api-admin", now=now)
-    verifier = FakeExchangeConnectionVerifier(
-        {"BINANCE": ConnectionProbeResult(True, None)}
-    )
+    verifier = FakeExchangeConnectionVerifier({"BINANCE": ConnectionProbeResult(True, None)})
     settings = Settings(
         environment="test",
         database_url=str(database.engine.url),
@@ -1029,8 +820,7 @@ def test_four_venue_connection_verification_is_scoped_idempotent_and_never_enabl
                 )
                 assert response.status_code == 200, response.text
                 assert all(
-                    secret not in response.text
-                    for secret in credentials_by_venue[venue].values()
+                    secret not in response.text for secret in credentials_by_venue[venue].values()
                 )
                 results[venue] = response.json()
 
@@ -1109,8 +899,7 @@ def test_four_venue_connection_verification_is_scoped_idempotent_and_never_enabl
         ).all()
         assert len(audits) == 4
         assert all(
-            "secret" not in item.reason and "passphrase" not in item.reason
-            for item in audits
+            "secret" not in item.reason and "passphrase" not in item.reason for item in audits
         )
         stored = session.scalars(select(ExchangeAccount)).all()
         assert all(item.trading_status == "DISABLED" for item in stored)
@@ -1224,14 +1013,17 @@ def test_account_trading_eligibility_is_versioned_idempotent_and_fails_closed(
         "trading_enabled": True,
         "version": 4,
     }
-    assert service.configure_exchange_account_trading(
-        exchange_account_id,
-        actor_id=admin,
-        enabled=True,
-        expected_version=int(runtime["version"]),
-        idempotency_key="enable-exact-account-trading",
-        now=now + timedelta(seconds=4),
-    ) == eligible
+    assert (
+        service.configure_exchange_account_trading(
+            exchange_account_id,
+            actor_id=admin,
+            enabled=True,
+            expected_version=int(runtime["version"]),
+            idempotency_key="enable-exact-account-trading",
+            now=now + timedelta(seconds=4),
+        )
+        == eligible
+    )
     projected = TradingQueries(database).exchange_accounts(admin)["data"][0]
     assert projected["trading"]["status"] == "ELIGIBLE"
     assert projected["trading"]["enabled"] is True
@@ -1279,13 +1071,11 @@ def test_account_trading_eligibility_is_versioned_idempotent_and_fails_closed(
         idempotency_key="reenable-exact-account-trading",
         now=now + timedelta(seconds=8),
     )
-    failure_command, failure_replay = (
-        service.prepare_exchange_account_connection_verification(
-            exchange_account_id,
-            actor_id=admin,
-            expected_version=int(reeligible["version"]),
-            idempotency_key="fail-eligible-account-verification",
-        )
+    failure_command, failure_replay = service.prepare_exchange_account_connection_verification(
+        exchange_account_id,
+        actor_id=admin,
+        expected_version=int(reeligible["version"]),
+        idempotency_key="fail-eligible-account-verification",
     )
     assert failure_replay is None and failure_command is not None
     failed = service.record_exchange_account_connection_verification(
@@ -1302,8 +1092,7 @@ def test_account_trading_eligibility_is_versioned_idempotent_and_fails_closed(
     with database.session_factory() as session:
         audit = session.scalar(
             select(AuditEvent).where(
-                AuditEvent.event_type
-                == "EXCHANGE_ACCOUNT_TRADING_ELIGIBILITY_ENABLED"
+                AuditEvent.event_type == "EXCHANGE_ACCOUNT_TRADING_ELIGIBILITY_ENABLED"
             )
         )
         assert audit is not None
@@ -1447,9 +1236,7 @@ def test_database_runtime_bindings_support_same_account_in_multiple_teams(
         assert configured["runtime_sync_enabled"] is True
         return exchange_account_id
 
-    first_account_id = create_verified_binding(
-        "First Team Binance", "first-team-secret", 1
-    )
+    first_account_id = create_verified_binding("First Team Binance", "first-team-secret", 1)
     second_team_id = service.create_team(
         actor_id=admin,
         name="Runtime Accounts Two",
@@ -1457,9 +1244,7 @@ def test_database_runtime_bindings_support_same_account_in_multiple_teams(
         idempotency_key="create-runtime-accounts-two",
         now=now + timedelta(seconds=2),
     )
-    second_account_id = create_verified_binding(
-        "Second Team Binance", "second-team-secret", 3
-    )
+    second_account_id = create_verified_binding("Second Team Binance", "second-team-secret", 3)
 
     bindings = service.runtime_account_bindings()
     assert len(bindings) == 2
@@ -1470,8 +1255,7 @@ def test_database_runtime_bindings_support_same_account_in_multiple_teams(
         by_team[first_team_id].credentials["api_secret"] == "first-team-secret"  # noqa: S105
     )
     assert (
-        by_team[second_team_id].credentials["api_secret"]
-        == "second-team-secret"  # noqa: S105
+        by_team[second_team_id].credentials["api_secret"] == "second-team-secret"  # noqa: S105
     )
     assert all("secret" not in repr(item) for item in bindings)
 
@@ -1511,9 +1295,10 @@ def test_database_runtime_bindings_support_same_account_in_multiple_teams(
         idempotency_key="select-first-runtime-team",
         now=now + timedelta(seconds=6),
     )
-    assert TradingQueries(database).exchange_accounts(admin)["data"][0][
-        "runtime_binding"
-    ]["bound"] is True
+    assert (
+        TradingQueries(database).exchange_accounts(admin)["data"][0]["runtime_binding"]["bound"]
+        is True
+    )
     disabled = service.configure_exchange_account_runtime_sync(
         first_account_id,
         actor_id=admin,

@@ -92,7 +92,7 @@ def test_team_signal_source_perptape_key_and_signed_webhook_flow(
     now = datetime.now(UTC)
     service = TradingService(database, credential_encryption_key=encryption_key())
     admin = service.bootstrap_admin("signal-admin", now=now)
-    set_test_team_environment(database, admin, "SHADOW")
+    set_test_team_environment(database, admin, "TESTNET")
     instrument_id = service.register_instrument(
         actor_id=admin,
         venue="BINANCE",
@@ -108,11 +108,11 @@ def test_team_signal_source_perptape_key_and_signed_webhook_flow(
     )
     service.create_exchange_account(
         actor_id=admin,
-        environment="SHADOW",
+        environment="TESTNET",
         account_id="signal-account",
         venue="BINANCE",
         label="Signal Account",
-        credentials=None,
+        credentials={"api_key": "signal-testnet-key", "api_secret": "signal-testnet-secret"},
         idempotency_key="signal-account-create",
         now=now,
     )
@@ -332,7 +332,7 @@ def test_team_signal_source_perptape_key_and_signed_webhook_flow(
             assert listed.json()["data"][0]["proposal"] is None
 
             proposal_request = {
-                "environment": "SHADOW",
+                "environment": "TESTNET",
                 "account_id": "signal-account",
                 "instrument_id": str(instrument_id),
                 "risk_tier": "LOW",
@@ -360,7 +360,7 @@ def test_team_signal_source_perptape_key_and_signed_webhook_flow(
             consumed = await client.post(
                 f"/api/signals/{event_id}/proposals",
                 json={
-                    "environment": "SHADOW",
+                    "environment": "TESTNET",
                     "account_id": "signal-account",
                     "instrument_id": str(instrument_id),
                     "risk_tier": "LOW",
@@ -425,7 +425,7 @@ def test_team_signal_source_perptape_key_and_signed_webhook_flow(
             report = await client.get(
                 "/api/results",
                 params={
-                    "environment": "SHADOW",
+                    "environment": "TESTNET",
                     "strategy_id": "breakout-model",
                     "strategy_version": "2026.08",
                     "signal_source_mode": "WEBHOOK",
@@ -457,7 +457,7 @@ def test_multiple_webhooks_coexist_with_perptape_and_retain_source_history(
     now = datetime.now(UTC)
     service = TradingService(database, credential_encryption_key=encryption_key())
     admin = service.bootstrap_admin("multi-signal-admin", now=now)
-    set_test_team_environment(database, admin, "SHADOW")
+    set_test_team_environment(database, admin, "TESTNET")
     instrument_id = service.register_instrument(
         actor_id=admin,
         venue="BINANCE",
@@ -722,7 +722,7 @@ def test_multiple_webhooks_coexist_with_perptape_and_retain_source_history(
             stale_proposal = await client.post(
                 f"/api/signals/{second_event_id}/proposals",
                 json={
-                    "environment": "SHADOW",
+                    "environment": "TESTNET",
                     "account_id": "signal-account",
                     "instrument_id": str(instrument_id),
                     "risk_tier": "LOW",

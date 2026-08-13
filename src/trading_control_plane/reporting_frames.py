@@ -46,11 +46,7 @@ def analytics_frames(dataset: AnalyticsDataset) -> AnalyticsFrames:
         name="returns",
         dtype="float64",
     )
-    equity_points = tuple(
-        item
-        for item in dataset.nav_series
-        if item.source_id != f"SHADOW_ACCOUNT:{dataset.scope.generation}:INITIAL"
-    )
+    equity_points = dataset.nav_series
     equity = pd.Series(
         [float(item.equity) for item in equity_points],
         index=_utc_index([item.observed_at for item in equity_points]),
@@ -84,9 +80,7 @@ def analytics_frames(dataset: AnalyticsDataset) -> AnalyticsFrames:
             "symbol": item.symbol,
             "amount": float(item.signed_amount),
             "price": float(item.price),
-            "txn_dollars": float(
-                -item.signed_amount * item.price * item.contract_multiplier
-            ),
+            "txn_dollars": float(-item.signed_amount * item.price * item.contract_multiplier),
             "commission": float(item.fee),
             "fill_id": item.fill_id,
         }

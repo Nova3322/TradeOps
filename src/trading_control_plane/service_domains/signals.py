@@ -1594,7 +1594,7 @@ class SignalService(ServiceComponent):
                             ExchangeAccount.environment
                             == (
                                 team.execution_mode
-                                if team.execution_mode in {"SHADOW", "TESTNET", "LIVE"}
+                                if team.execution_mode in {"TESTNET", "LIVE"}
                                 else "LIVE"
                             ),
                             ExchangeAccount.account_id == account_id,

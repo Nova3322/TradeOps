@@ -685,7 +685,7 @@ class NotificationDispatcher:
                     purpose=(
                         f"notification-route:{route.channel.lower()}"
                         if route.environment == "LIVE"
-                        else f"notification-route:shadow:{route.channel.lower()}"
+                        else f"notification-route:testnet:{route.channel.lower()}"
                     ),
                     credential_version=route.credential_version,
                 )

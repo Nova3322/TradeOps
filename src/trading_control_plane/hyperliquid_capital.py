@@ -29,9 +29,7 @@ HYPERLIQUID_BRIDGE2_ADDRESS = "0x2df1c51e09aecf9cacb7bc98cb1742757f163df7"
 ARBITRUM_NATIVE_USDC_ADDRESS = "0xaf88d065e77c8cc2239327c5edb3a432268e5831"
 USDC_DECIMALS = 6
 ERC20_TRANSFER_SELECTOR = "a9059cbb"
-ERC20_TRANSFER_TOPIC = (
-    "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"
-)
+ERC20_TRANSFER_TOPIC = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"
 OFFICIAL_API_HOSTS = frozenset({"api.hyperliquid.xyz", "api.hyperliquid-testnet.xyz"})
 ADDRESS_PATTERN = re.compile(r"^0x[0-9a-fA-F]{40}$")
 HASH_PATTERN = re.compile(r"^0x[0-9a-fA-F]{64}$")
@@ -114,9 +112,7 @@ def _default_info_fetcher(url: str, payload: JsonObject, timeout: float) -> Any:
         ) from exc
 
 
-def _default_rpc_fetcher(
-    rpc_url: str, method: str, params: list[object], timeout: float
-) -> Any:
+def _default_rpc_fetcher(rpc_url: str, method: str, params: list[object], timeout: float) -> Any:
     request = urllib.request.Request(  # noqa: S310
         rpc_url,
         data=json.dumps(
@@ -159,9 +155,7 @@ class HyperliquidCapitalGateway:
 
     def _info(self, base_url: str, payload: JsonObject) -> Any:
         official = _require_official_api(base_url)
-        return self._info_fetcher(
-            f"{official}/info", payload, self._timeout_seconds
-        )
+        return self._info_fetcher(f"{official}/info", payload, self._timeout_seconds)
 
     def _agent_relationship(
         self,
@@ -297,9 +291,7 @@ class HyperliquidCapitalGateway:
                 "Hyperliquid did not return a valid current withdrawable balance",
             ) from exc
         if withdrawable < value + CURRENT_WITHDRAWAL_FEE:
-            spot_state = self._info(
-                base_url, {"type": "spotClearinghouseState", "user": main}
-            )
+            spot_state = self._info(base_url, {"type": "spotClearinghouseState", "user": main})
             balances = spot_state.get("balances") if isinstance(spot_state, dict) else None
             if not isinstance(balances, list):
                 _reject(
@@ -517,9 +509,7 @@ class HyperliquidCapitalGateway:
             [transaction_hash],
             self._timeout_seconds,
         )
-        latest = self._rpc_fetcher(
-            trusted_rpc, "eth_blockNumber", [], self._timeout_seconds
-        )
+        latest = self._rpc_fetcher(trusted_rpc, "eth_blockNumber", [], self._timeout_seconds)
         if not isinstance(receipt, dict) or not isinstance(transaction, dict):
             _reject("ARBITRUM_RECEIPT_NOT_CONFIRMED", "transaction is not yet confirmed")
         try:
@@ -578,9 +568,7 @@ class HyperliquidCapitalGateway:
             [transaction_hash],
             self._timeout_seconds,
         )
-        latest = self._rpc_fetcher(
-            trusted_rpc, "eth_blockNumber", [], self._timeout_seconds
-        )
+        latest = self._rpc_fetcher(trusted_rpc, "eth_blockNumber", [], self._timeout_seconds)
         if not isinstance(receipt, dict):
             _reject("ARBITRUM_RECEIPT_NOT_CONFIRMED", "transaction is not yet confirmed")
         try:
@@ -655,9 +643,7 @@ class HyperliquidCapitalGateway:
             [transaction_hash],
             self._timeout_seconds,
         )
-        latest = self._rpc_fetcher(
-            trusted_rpc, "eth_blockNumber", [], self._timeout_seconds
-        )
+        latest = self._rpc_fetcher(trusted_rpc, "eth_blockNumber", [], self._timeout_seconds)
         if not isinstance(receipt, dict):
             _reject("ARBITRUM_RECEIPT_NOT_CONFIRMED", "transaction is not yet confirmed")
         try:

@@ -273,12 +273,8 @@ class OkxReadOnlyClient:
             )
         marks = self._mark_prices()
         balance = self._private_get("/api/v5/account/balance", {}, now=now)
-        positions = self._private_get(
-            "/api/v5/account/positions", {"instType": "SWAP"}, now=now
-        )
-        orders = self._private_get(
-            "/api/v5/trade/orders-pending", {"instType": "SWAP"}, now=now
-        )
+        positions = self._private_get("/api/v5/account/positions", {"instType": "SWAP"}, now=now)
+        orders = self._private_get("/api/v5/trade/orders-pending", {"instType": "SWAP"}, now=now)
         algo_orders = tuple(
             item
             for order_type in ("conditional", "oco", "trigger", "move_order_stop")
@@ -314,9 +310,7 @@ class OkxReadOnlyClient:
             target_symbols.add(next(iter(sorted(catalog))))
         equity = self._parse_equity(balance, now)
         history_error = (
-            "OKX_RESPONSE_INCOMPLETE"
-            if fills_incomplete or funding_incomplete
-            else None
+            "OKX_RESPONSE_INCOMPLETE" if fills_incomplete or funding_incomplete else None
         )
         snapshots: list[VenueReadOnlySnapshot] = []
         for symbol in sorted(target_symbols):
@@ -331,14 +325,10 @@ class OkxReadOnlyClient:
                     observed_at=now,
                     instrument=catalog[symbol],
                     orders=tuple(parsed_orders),
-                    fills=(
-                        () if history_error else self._parse_fills(fills, symbol, now)
-                    ),
+                    fills=(() if history_error else self._parse_fills(fills, symbol, now)),
                     position=position,
                     equity=equity,
-                    funding=(
-                        () if history_error else self._parse_funding(funding, symbol, now)
-                    ),
+                    funding=(() if history_error else self._parse_funding(funding, symbol, now)),
                     protection=self._select_protection(tuple(parsed_orders), position),
                     history_error_code=history_error,
                 )
@@ -387,9 +377,7 @@ class OkxReadOnlyClient:
             if item.get("instId") not in catalog and _decimal(item.get("pos", 0), "pos") != 0
         ]
         unsupported_orders = [
-            item
-            for item in (*orders, *algo_orders)
-            if item.get("instId") not in catalog
+            item for item in (*orders, *algo_orders) if item.get("instId") not in catalog
         ]
         if unsupported_positions or unsupported_orders:
             raise DomainRejected(
@@ -470,8 +458,7 @@ class OkxReadOnlyClient:
                 raise DomainRejected("OKX_RESPONSE_INVALID", "OKX order side is invalid")
             ordered = _positive_decimal(item.get("sz"), "sz") * multiplier
             filled = (
-                _decimal(item.get("accFillSz", 0), "accFillSz", minimum=Decimal(0))
-                * multiplier
+                _decimal(item.get("accFillSz", 0), "accFillSz", minimum=Decimal(0)) * multiplier
             )
             if filled > ordered:
                 raise DomainRejected("OKX_RESPONSE_INVALID", "OKX filled size exceeds order size")
@@ -576,9 +563,7 @@ class OkxReadOnlyClient:
                 continue
             payment_id = str(item.get("billId") or "")
             if not payment_id:
-                raise DomainRejected(
-                    "OKX_RESPONSE_INVALID", "OKX funding identity is incomplete"
-                )
+                raise DomainRejected("OKX_RESPONSE_INVALID", "OKX funding identity is incomplete")
             result.append(
                 VenueFunding(
                     payment_id=payment_id,

@@ -74,11 +74,8 @@ class _CapitalRoutes:
         ) -> dict[str, Any]:
             return {
                 "data": {
-                    environment: self.service().direct_capital_configuration(
-                        identity.user_id,
-                        environment,
-                    )
-                    for environment in ("SHADOW", "LIVE")
+                    "TESTNET": None,
+                    "LIVE": self.service().direct_capital_configuration(identity.user_id, "LIVE"),
                 },
                 "can_manage": self.service().can_user(identity.user_id, "access.manage"),
             }
@@ -156,40 +153,38 @@ class _CapitalRoutes:
             accounts: str | None = None,
             identity: SessionIdentity = self.identity_dependency,
         ) -> dict[str, Any]:
-            if environment is None:
-                return {
-                    "data": self.capital_snapshot(identity.user_id),
-                    "as_of": _now().isoformat(),
-                }
-            normalized_environment = environment.strip().upper()
+            context = self.queries().user_context(identity.user_id)
+            current_environment = str(context["active_team"]["execution_mode"]).upper()
+            if current_environment not in {"TESTNET", "LIVE"}:
+                raise DomainRejected(
+                    "TEAM_SETUP_INCOMPLETE",
+                    "team must select TESTNET or LIVE before viewing capital",
+                )
+            if environment is not None and environment.strip().upper() != current_environment:
+                raise DomainRejected(
+                    "CAPITAL_ENVIRONMENT_MISMATCH",
+                    "capital environment is owned by the team current mode",
+                )
             selected = {value for value in (accounts or "").split(",") if value}
             display = self.queries().capital_display(
-                identity.user_id,
-                normalized_environment,
-                selected,
+                identity.user_id, current_environment, selected
             )
-            if normalized_environment == "LIVE":
+            if current_environment == "LIVE":
                 data = self.capital_snapshot(identity.user_id)
             else:
-                config = self.service().direct_capital_configuration(
-                    identity.user_id,
-                    normalized_environment,
-                )
                 data = {
                     "real_transfer_gate": "DISABLED",
-                    "real_transfer_reason": "shadow display does not permit capital transfer",
-                    "in_transit": "0",
+                    "real_transfer_reason": "test mode never enables real capital transfer",
+                    "in_transit": None,
                     "proposals": [],
                     "transfers": [],
                     "direct_operations": [],
                     "automation": {"gates": {}, "policies": []},
                     "direct_configuration": {
                         "can_manage": False,
-                        "treasury_provider": (
-                            "NOTILT_VAULT" if config is None else config["treasury_provider"]
-                        ),
-                        "network": "ARBITRUM" if config is None else config["network"],
-                        "asset": "USDC" if config is None else config["asset"],
+                        "treasury_provider": None,
+                        "network": None,
+                        "asset": None,
                     },
                 }
             data.update(display)
@@ -239,8 +234,7 @@ class _CapitalRoutes:
             direct_vault = merged["vault_address"]
             if (
                 payload.environment == "LIVE"
-                and
-                selected_provider is CapitalTreasuryProvider.NOTILT_VAULT
+                and selected_provider is CapitalTreasuryProvider.NOTILT_VAULT
                 and trusted_vault is not None
                 and direct_vault is not None
                 and str(direct_vault).lower() != trusted_vault.lower()
@@ -263,8 +257,7 @@ class _CapitalRoutes:
             ):
                 if (
                     payload.environment == "LIVE"
-                    and
-                    configured_account is not None
+                    and configured_account is not None
                     and runtime_account is not None
                     and configured_account != runtime_account
                 ):

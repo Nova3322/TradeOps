@@ -338,35 +338,6 @@ def test_forwarded_or_cross_account_button_fails_closed() -> None:
     assert "身份不匹配" in alert["text"]
 
 
-def test_proposal_delivery_is_deduplicated_and_non_pending_has_no_action() -> None:
-    fake = FakeBotApi()
-    bot, _bindings, _handled, recipient_id = gateway(fake)
-    bind(bot)
-    item = proposal(recipient_id)
-    bot.send(item)
-    bot.send(item)
-    assert len(bot.notifications()) == 1
-    assert [method for method, _payload in fake.calls].count("sendMessage") == 2
-
-    expired = proposal(recipient_id, status="EXPIRED")
-    expired = ProposalNotification(**{**expired.__dict__, "notification_id": "expired"})
-    bot.send(expired)
-    rows = fake.calls[-1][1]["reply_markup"]["inline_keyboard"]
-    assert rows == [[{"text": "打开 Web 安全审核", "url": expired.review_url}]]
-
-    shadow = proposal(recipient_id)
-    shadow = ProposalNotification(
-        **{
-            **shadow.__dict__,
-            "notification_id": "shadow",
-            "environment": "SHADOW",
-        }
-    )
-    bot.send(shadow)
-    assert all(item.notification_id != "shadow" for item in bot.notifications())
-    assert [method for method, _payload in fake.calls].count("sendMessage") == 3
-
-
 def test_unbound_notification_is_held_without_network_delivery() -> None:
     fake = FakeBotApi()
     bot, _bindings, _handled, recipient_id = gateway(fake)

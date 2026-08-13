@@ -29,7 +29,7 @@ class ExecutionQueries(QueryComponent):
         from_time: datetime | None = None,
         to_time: datetime | None = None,
     ) -> dict[str, Any]:
-        if environment not in {"SHADOW", "TESTNET", "LIVE"}:
+        if environment not in {"TESTNET", "LIVE"}:
             raise DomainRejected("ENVIRONMENT_INVALID", "results require an exact environment")
         if signal_source_mode not in {None, "PERPTAPE", "WEBHOOK", "MANUAL", "SYSTEM"}:
             raise DomainRejected(
@@ -129,26 +129,11 @@ class ExecutionQueries(QueryComponent):
                     if intent_ids
                     else []
                 )
-                shadow_fills = (
-                    session.scalars(
-                        select(ShadowFill)
-                        .join(
-                            ShadowOrder,
-                            ShadowOrder.shadow_order_id == ShadowFill.shadow_order_id,
-                        )
-                        .where(ShadowOrder.campaign_id == campaign.campaign_id)
-                        .order_by(ShadowFill.executed_at, ShadowFill.shadow_fill_id)
-                    ).all()
-                    if environment == "SHADOW"
-                    else []
-                )
                 funding = session.scalars(
                     select(FundingPayment).where(FundingPayment.campaign_id == campaign.campaign_id)
                 ).all()
                 currency = "UNKNOWN" if instrument is None else instrument.collateral_currency
-                fees = sum((item.fee for item in fills), Decimal(0)) + sum(
-                    (item.fee for item in shadow_fills), Decimal(0)
-                )
+                fees = sum((item.fee for item in fills), Decimal(0))
                 slippage = sum((item.slippage_cost for item in fills), Decimal(0))
                 funding_total = sum((item.amount for item in funding), Decimal(0))
                 total_bucket = totals.setdefault(
@@ -175,7 +160,6 @@ class ExecutionQueries(QueryComponent):
                         "team_id": str(team_id),
                         "environment": campaign.environment,
                         "actuality": {
-                            "SHADOW": "SYNTHETIC_RECORDED_FACTS",
                             "TESTNET": "NON_PRODUCTION_RECORDED_FACTS",
                             "LIVE": "LIVE_RECORDED_FACTS",
                         }[campaign.environment],
@@ -218,11 +202,8 @@ class ExecutionQueries(QueryComponent):
                             None if attribution is None else attribution["strategy_version"]
                         ),
                         "risk_tier": None if proposal is None else proposal.risk_tier,
-                        "fill_count": len(fills) + len(shadow_fills),
-                        "filled_quantity": str(
-                            sum((item.quantity for item in fills), Decimal(0))
-                            + sum((item.quantity for item in shadow_fills), Decimal(0))
-                        ),
+                        "fill_count": len(fills),
+                        "filled_quantity": str(sum((item.quantity for item in fills), Decimal(0))),
                         "realized_pnl": str(campaign.realized_pnl),
                         "unrealized_pnl": str(campaign.unrealized_pnl),
                         "final_pnl": str(campaign.final_pnl),
@@ -493,8 +474,7 @@ class ExecutionQueries(QueryComponent):
                     "to": _iso(to_time),
                 },
                 "environment_notice": {
-                    "SHADOW": "Synthetic facts; not exchange execution or profit",
-                    "TESTNET": "Recorded non-production facts; not live profit",
+                    "TESTNET": "Recorded exchange test-environment facts; not live profit",
                     "LIVE": "Recorded LIVE facts; no profitability guarantee",
                 }[environment],
                 "campaigns": rows,
@@ -521,7 +501,7 @@ class ExecutionQueries(QueryComponent):
     def audit_timeline(
         self, user_id: UUID, environment: str, *, limit: int = 200
     ) -> list[dict[str, Any]]:
-        if environment not in {"SHADOW", "TESTNET", "LIVE"}:
+        if environment not in {"TESTNET", "LIVE"}:
             raise DomainRejected("ENVIRONMENT_INVALID", "audit requires an exact environment")
         workspace_id, team_id = self.facade._active_scope_ids(user_id)
         with self.database.session_factory() as session:
@@ -843,196 +823,6 @@ class ExecutionQueries(QueryComponent):
                 result.append(summary)
             return result
 
-    def shadow_workspace(self, user_id: UUID) -> dict[str, Any]:
-        """Project team-scoped virtual capital without exposing live credentials."""
-
-        workspace_id, team_id = self.facade._active_scope_ids(user_id)
-        activation = self.service.shadow_activation_status(user_id)
-        with self.database.session_factory() as session:
-            team = session.get(Team, team_id)
-            if team is None or not team.active or team.workspace_id != workspace_id:
-                raise DomainRejected("TEAM_SCOPE_DENIED", "active team is unavailable")
-
-            def granted(action: str, account_id: str, venue: str) -> bool:
-                return self.service.can_user(user_id, action, account_id, venue)
-
-            accounts = [
-                item
-                for item in session.scalars(
-                    select(ExchangeAccount)
-                    .where(ExchangeAccount.team_id == team_id, ExchangeAccount.active)
-                    .order_by(
-                        ExchangeAccount.venue,
-                        ExchangeAccount.label,
-                        ExchangeAccount.account_id,
-                    )
-                ).all()
-                if granted("venue.view", item.account_id, item.venue)
-            ]
-            equities = session.scalars(
-                select(AccountEquity).where(
-                    AccountEquity.team_id == team_id,
-                    AccountEquity.environment == "SHADOW",
-                )
-            ).all()
-            positions = session.execute(
-                select(Position, Instrument)
-                .join(Instrument, Instrument.instrument_id == Position.instrument_id)
-                .where(
-                    Position.team_id == team_id,
-                    Position.environment == "SHADOW",
-                )
-                .order_by(Position.venue, Position.account_id, Instrument.symbol)
-            ).all()
-            campaigns = session.execute(
-                select(Campaign, Instrument)
-                .outerjoin(Instrument, Instrument.instrument_id == Campaign.instrument_id)
-                .where(
-                    Campaign.team_id == team_id,
-                    Campaign.environment == "SHADOW",
-                )
-                .order_by(Campaign.updated_at.desc(), Campaign.campaign_id)
-            ).all()
-            occupied = {
-                (account_id, venue): Decimal(str(amount))
-                for account_id, venue, amount in session.execute(
-                    select(
-                        Campaign.account_id,
-                        Campaign.venue,
-                        func.coalesce(func.sum(RiskReservation.amount), 0),
-                    )
-                    .join(Campaign, Campaign.campaign_id == RiskReservation.campaign_id)
-                    .where(
-                        Campaign.team_id == team_id,
-                        Campaign.environment == "SHADOW",
-                        RiskReservation.status.in_(("RESERVED", "OPEN", "UNKNOWN")),
-                    )
-                    .group_by(Campaign.account_id, Campaign.venue)
-                ).all()
-            }
-            instrument_rows = session.scalars(
-                select(Instrument)
-                .where(
-                    Instrument.active,
-                    Instrument.collateral_currency.in_(tuple(USD_STABLE_ASSETS)),
-                    Instrument.quote_currency == Instrument.collateral_currency,
-                )
-                .order_by(Instrument.venue, Instrument.symbol)
-            ).all()
-            gates = {
-                item.capability_key: item.status
-                for item in session.scalars(
-                    select(CapabilityGate).where(
-                        CapabilityGate.capability_key.in_(
-                            ("LIVE_ORDER_SEND", "CAPITAL_TRANSFER", "SIGNING", "BROADCAST")
-                        )
-                    )
-                ).all()
-            }
-
-            equity_by_scope: dict[tuple[str, str], list[AccountEquity]] = {}
-            for item in equities:
-                equity_by_scope.setdefault((item.account_id, item.venue), []).append(item)
-            position_by_scope: dict[tuple[str, str], list[tuple[Position, Instrument]]] = {}
-            for position, instrument in positions:
-                position_by_scope.setdefault((position.account_id, position.venue), []).append(
-                    (position, instrument)
-                )
-
-            account_rows: list[dict[str, Any]] = []
-            for account in accounts:
-                scope = (account.account_id, account.venue)
-                scope_equities = equity_by_scope.get(scope, [])
-                scope_occupied = occupied.get(scope, Decimal(0))
-                account_rows.append(
-                    {
-                        "exchange_account_id": str(account.exchange_account_id),
-                        "account_id": account.account_id,
-                        "venue": account.venue,
-                        "label": account.label,
-                        "connection_status": account.connection_status,
-                        "trading_status": account.trading_status,
-                        "credential_state": (
-                            "UNCONFIGURED"
-                            if account.credential_version == 0
-                            else "CONFIGURED_REDACTED"
-                        ),
-                        "can_initialize": granted(
-                            "account.manage", account.account_id, account.venue
-                        ),
-                        "occupied_risk": str(scope_occupied),
-                        "virtual_capital": [
-                            {
-                                "account_equity_id": str(item.account_equity_id),
-                                "currency": item.currency,
-                                "equity": str(item.equity),
-                                "available_balance": str(item.available_balance),
-                                "risk_available": str(
-                                    max(Decimal(0), item.available_balance - scope_occupied)
-                                ),
-                                "fact_status": item.fact_status,
-                                "control_status": item.control_status,
-                                "observed_at": _iso(item.observed_at),
-                            }
-                            for item in scope_equities
-                        ],
-                        "positions": [
-                            {
-                                "position_id": str(position.position_id),
-                                "instrument_id": str(position.instrument_id),
-                                "symbol": instrument.symbol,
-                                "quantity": str(position.quantity),
-                                "average_entry_price": str(position.average_entry_price),
-                                "mark_price": str(position.mark_price),
-                                "fact_status": position.fact_status,
-                                "observed_at": _iso(position.observed_at),
-                            }
-                            for position, instrument in position_by_scope.get(scope, [])
-                        ],
-                        "instruments": [
-                            {
-                                "instrument_id": str(item.instrument_id),
-                                "symbol": item.symbol,
-                                "currency": item.collateral_currency,
-                                "tick_size": str(item.tick_size),
-                                "lot_size": str(item.lot_size),
-                            }
-                            for item in instrument_rows
-                            if item.venue == account.venue
-                        ],
-                    }
-                )
-
-            campaign_rows = []
-            for campaign, instrument in campaigns:
-                if not granted("view", campaign.account_id, campaign.venue):
-                    continue
-                campaign_summary = self._campaign_summary(campaign, instrument)
-                campaign_summary["workspace_id"] = str(workspace_id)
-                campaign_rows.append(campaign_summary)
-
-            return {
-                "workspace_id": str(workspace_id),
-                "team_id": str(team_id),
-                "team_name": team.name,
-                "execution_mode": team.execution_mode,
-                "trading_enabled": team.trading_enabled,
-                "version": team.version,
-                "activation": activation,
-                "safety_boundary": {
-                    "environment": "SHADOW",
-                    "capital": "VIRTUAL_ONLY",
-                    "venue_connectors_used": False,
-                    "live_order_send": False,
-                    "funding": False,
-                    "signing": False,
-                    "broadcast": False,
-                    "runtime_gate_status": gates,
-                },
-                "accounts": account_rows,
-                "campaigns": campaign_rows,
-            }
-
     def campaign_detail(self, user_id: UUID, campaign_id: UUID) -> dict[str, Any]:
         workspace_id, team_id = self.facade._active_scope_ids(user_id)
         with self.database.session_factory() as session:
@@ -1065,31 +855,11 @@ class ExecutionQueries(QueryComponent):
                 if intent_ids
                 else []
             )
-            shadow_orders = (
-                session.scalars(
-                    select(ShadowOrder).where(ShadowOrder.order_intent_id.in_(intent_ids))
-                ).all()
-                if intent_ids and campaign.environment == "SHADOW"
-                else []
-            )
             fills = session.scalars(
                 select(VenueFill)
                 .where(VenueFill.campaign_id == campaign_id)
                 .order_by(VenueFill.executed_at, VenueFill.venue_fill_fact_id)
             ).all()
-            shadow_fills = (
-                session.scalars(
-                    select(ShadowFill)
-                    .join(
-                        ShadowOrder,
-                        ShadowOrder.shadow_order_id == ShadowFill.shadow_order_id,
-                    )
-                    .where(ShadowOrder.campaign_id == campaign_id)
-                    .order_by(ShadowFill.executed_at, ShadowFill.shadow_fill_id)
-                ).all()
-                if campaign.environment == "SHADOW"
-                else []
-            )
             position = session.scalar(
                 select(Position).where(
                     Position.team_id == campaign.team_id,
@@ -1108,54 +878,12 @@ class ExecutionQueries(QueryComponent):
                 if position is not None
                 else None
             )
-            shadow_position = None
-            shadow_protection = None
-            if campaign.environment == "SHADOW":
-                active_shadow_account = session.scalar(
-                    select(TeamShadowAccount).where(
-                        TeamShadowAccount.team_id == campaign.team_id,
-                        TeamShadowAccount.status == "ACTIVE",
-                    )
-                )
-                shadow_instrument = session.scalar(
-                    select(ShadowInstrument).where(
-                        ShadowInstrument.team_id == campaign.team_id,
-                        ShadowInstrument.catalog_instrument_id == campaign.instrument_id,
-                    )
-                )
-                if active_shadow_account is not None and shadow_instrument is not None:
-                    shadow_position = session.scalar(
-                        select(ShadowPosition).where(
-                            ShadowPosition.shadow_account_id
-                            == active_shadow_account.shadow_account_id,
-                            ShadowPosition.generation == active_shadow_account.generation,
-                            ShadowPosition.shadow_instrument_id
-                            == shadow_instrument.shadow_instrument_id,
-                        )
-                    )
-                if shadow_position is not None:
-                    shadow_protection = session.scalar(
-                        select(ShadowOrder).where(
-                            ShadowOrder.campaign_id == campaign.campaign_id,
-                            ShadowOrder.shadow_position_id == shadow_position.shadow_position_id,
-                            ShadowOrder.order_type == "PROTECTION",
-                            ShadowOrder.status.in_(("OPEN", "TRIGGERED")),
-                        )
-                    )
-            effective_position = shadow_position if shadow_position is not None else position
-            effective_protection = (
-                shadow_protection if shadow_protection is not None else protection
-            )
             funding = session.scalars(
                 select(FundingPayment)
                 .where(FundingPayment.campaign_id == campaign_id)
                 .order_by(FundingPayment.paid_at)
             ).all()
-            scope = (
-                f"{campaign.account_id}:{campaign.venue}"
-                if campaign.environment == "SHADOW"
-                else f"{campaign.environment}:{campaign.account_id}:{campaign.venue}"
-            )
+            scope = f"{campaign.environment}:{campaign.account_id}:{campaign.venue}"
             reconciliation = session.scalar(
                 select(ReconciliationRun)
                 .where(
@@ -1167,7 +895,6 @@ class ExecutionQueries(QueryComponent):
             )
             lease = session.get(SenderLease, (campaign.team_id, scope))
             orders_by_intent = {item.order_intent_id: item for item in orders}
-            shadow_orders_by_intent = {item.order_intent_id: item for item in shadow_orders}
             result = self._campaign_summary(campaign, instrument)
             result["workspace_id"] = str(workspace_id)
             result.update(
@@ -1240,10 +967,6 @@ class ExecutionQueries(QueryComponent):
                                 workspace_id=workspace_id,
                                 team_id=campaign.team_id,
                                 account_id=campaign.account_id,
-                            )
-                            or self._shadow_order_summary(
-                                shadow_orders_by_intent.get(item.intent_id),
-                                workspace_id=workspace_id,
                             ),
                         }
                         for item in intents
@@ -1265,86 +988,30 @@ class ExecutionQueries(QueryComponent):
                             "executed_at": _iso(item.executed_at),
                         }
                         for item in fills
-                    ]
-                    + [
-                        {
-                            "fill_id": str(item.shadow_fill_id),
-                            "workspace_id": str(workspace_id),
-                            "team_id": str(campaign.team_id),
-                            "account_id": campaign.account_id,
-                            "venue_fill_id": f"shadow:{item.shadow_fill_id}",
-                            "intent_id": str(
-                                next(
-                                    order.order_intent_id
-                                    for order in shadow_orders
-                                    if order.shadow_order_id == item.shadow_order_id
-                                )
-                            ),
-                            "side": item.side,
-                            "quantity": str(item.quantity),
-                            "price": str(item.price),
-                            "fee": str(item.fee),
-                            "fee_currency": "U",
-                            "slippage_cost": "0",
-                            "executed_at": _iso(item.executed_at),
-                        }
-                        for item in shadow_fills
                     ],
                     "position": None
-                    if effective_position is None
+                    if position is None
                     else {
-                        "position_id": str(
-                            effective_position.shadow_position_id
-                            if isinstance(effective_position, ShadowPosition)
-                            else effective_position.position_id
-                        ),
+                        "position_id": str(position.position_id),
                         "workspace_id": str(workspace_id),
                         "team_id": str(campaign.team_id),
                         "account_id": campaign.account_id,
-                        "quantity": str(effective_position.quantity),
-                        "average_entry_price": str(effective_position.average_entry_price),
-                        "mark_price": str(effective_position.mark_price),
-                        "fact_status": (
-                            "KNOWN"
-                            if isinstance(effective_position, ShadowPosition)
-                            else effective_position.fact_status
-                        ),
-                        "observed_at": _iso(
-                            effective_position.updated_at
-                            if isinstance(effective_position, ShadowPosition)
-                            else effective_position.observed_at
-                        ),
+                        "quantity": str(position.quantity),
+                        "average_entry_price": str(position.average_entry_price),
+                        "mark_price": str(position.mark_price),
+                        "fact_status": position.fact_status,
+                        "observed_at": _iso(position.observed_at),
                     },
                     "protection": None
-                    if effective_protection is None
+                    if protection is None
                     else {
-                        "protection_id": str(
-                            effective_protection.shadow_order_id
-                            if isinstance(effective_protection, ShadowOrder)
-                            else effective_protection.protection_id
-                        ),
-                        "venue_order_id": (
-                            f"shadow:{effective_protection.shadow_order_id}"
-                            if isinstance(effective_protection, ShadowOrder)
-                            else effective_protection.venue_order_id
-                        ),
-                        "quantity": str(effective_protection.quantity),
-                        "trigger_price": str(effective_protection.trigger_price),
-                        "status": (
-                            "ACTIVE"
-                            if isinstance(effective_protection, ShadowOrder)
-                            else effective_protection.status
-                        ),
-                        "fully_covered": (
-                            True
-                            if isinstance(effective_protection, ShadowOrder)
-                            else effective_protection.fully_covered
-                        ),
-                        "observed_at": _iso(
-                            effective_protection.updated_at
-                            if isinstance(effective_protection, ShadowOrder)
-                            else effective_protection.observed_at
-                        ),
+                        "protection_id": str(protection.protection_id),
+                        "venue_order_id": protection.venue_order_id,
+                        "quantity": str(protection.quantity),
+                        "trigger_price": str(protection.trigger_price),
+                        "status": protection.status,
+                        "fully_covered": protection.fully_covered,
+                        "observed_at": _iso(protection.observed_at),
                     },
                     "funding": [
                         {
@@ -1439,30 +1106,6 @@ class ExecutionQueries(QueryComponent):
             return campaign.campaign_id
 
     @staticmethod
-    def _shadow_order_summary(
-        order: ShadowOrder | None,
-        *,
-        workspace_id: UUID | None = None,
-    ) -> dict[str, Any] | None:
-        if order is None:
-            return None
-        return {
-            "venue_order_fact_id": str(order.shadow_order_id),
-            "workspace_id": None if workspace_id is None else str(workspace_id),
-            "team_id": str(order.team_id),
-            "account_id": order.source_account_id,
-            "venue_order_id": f"shadow:{order.shadow_order_id}",
-            "client_order_id": f"shadow:{order.shadow_order_id}",
-            "status": order.status,
-            "side": order.side,
-            "order_type": order.order_type,
-            "reduce_only": order.reduce_only,
-            "ordered_quantity": str(order.quantity),
-            "filled_quantity": str(order.filled_quantity),
-            "observed_at": _iso(order.updated_at),
-            "generation": order.generation,
-        }
-
     @staticmethod
     def _order_summary(
         order: VenueOrder | None,

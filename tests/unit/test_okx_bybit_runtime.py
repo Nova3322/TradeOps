@@ -43,9 +43,7 @@ def test_okx_reader_normalizes_contracts_and_complete_account_facts() -> None:
         if parsed.path == "/api/v5/public/mark-price":
             return _okx_response([{"instId": "BTC-USDT-SWAP", "markPx": "50000"}])
         if parsed.path == "/api/v5/account/balance":
-            return _okx_response(
-                [{"totalEq": "1000", "availEq": "750", "uTime": "1786437000000"}]
-            )
+            return _okx_response([{"totalEq": "1000", "availEq": "750", "uTime": "1786437000000"}])
         if parsed.path == "/api/v5/account/positions":
             return _okx_response(
                 [
@@ -159,9 +157,7 @@ def test_okx_reader_fails_closed_on_unsupported_swap_exposure() -> None:
         if parsed.path == "/api/v5/account/balance":
             return _okx_response([{"totalEq": "1000", "availEq": "750"}])
         if parsed.path == "/api/v5/account/positions":
-            return _okx_response(
-                [{"instId": "BTC-USDC-SWAP", "pos": "1", "posSide": "long"}]
-            )
+            return _okx_response([{"instId": "BTC-USDC-SWAP", "pos": "1", "posSide": "long"}])
         return _okx_response([])
 
     client = OkxReadOnlyClient(
@@ -183,9 +179,7 @@ def test_okx_history_pagination_uses_bill_identity_and_is_bounded() -> None:
         query = dict(urllib.parse.parse_qsl(parsed.query))
         cursors.append(query.get("after"))
         if "after" not in query:
-            return _okx_response(
-                [{"billId": str(200 - index)} for index in range(100)]
-            )
+            return _okx_response([{"billId": str(200 - index)} for index in range(100)])
         assert query["after"] == "101"
         return _okx_response([{"billId": "100"}])
 

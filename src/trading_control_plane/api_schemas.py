@@ -157,34 +157,25 @@ class TeamCreateRequest(BaseModel):
     idempotency_key: str = Field(min_length=1, max_length=160)
 
 
-class TeamShadowActivationRequest(BaseModel):
-    confirmation: Literal["SWITCH_TO_SHADOW"]
-    expected_version: int = Field(ge=1)
-    idempotency_key: str = Field(min_length=1, max_length=160)
-
-
 class TeamTradingModeRequest(BaseModel):
-    mode: Literal["LIVE", "SHADOW"]
-    confirmation: Literal["SWITCH_TO_LIVE", "SWITCH_TO_SHADOW"]
+    mode: Literal["TESTNET", "LIVE"]
+    confirmation: Literal["SWITCH_TO_TESTNET", "I_CONFIRM_LIVE_PRODUCTION_MONEY"]
     expected_version: int = Field(ge=1)
     idempotency_key: str = Field(min_length=1, max_length=160)
 
     @model_validator(mode="after")
     def confirmation_matches_mode(self) -> TeamTradingModeRequest:
-        if self.confirmation != f"SWITCH_TO_{self.mode}":
-            raise ValueError("confirmation must match selected trading mode")
+        expected = (
+            "SWITCH_TO_TESTNET" if self.mode == "TESTNET" else "I_CONFIRM_LIVE_PRODUCTION_MONEY"
+        )
+        if self.confirmation != expected:
+            raise ValueError("confirmation must match selected execution mode")
         return self
-
-
-class ShadowAccountResetRequest(BaseModel):
-    confirmation: Literal["RESET_TO_100000_U"]
-    expected_version: int = Field(ge=1)
-    idempotency_key: str = Field(min_length=1, max_length=160)
 
 
 class AnalyticsReportCreateRequest(BaseModel):
     engine: Literal["QUANTSTATS", "PYFOLIO"]
-    environment: Literal["SHADOW", "LIVE"]
+    environment: Literal["TESTNET", "LIVE"]
     account_id: str | None = Field(default=None, min_length=1, max_length=120)
     venue: VenueScope | None = None
     generation: int | None = Field(default=None, ge=1)
@@ -194,92 +185,11 @@ class AnalyticsReportCreateRequest(BaseModel):
 
     @model_validator(mode="after")
     def validate_report_scope(self) -> AnalyticsReportCreateRequest:
-        if self.environment == "SHADOW" and (self.account_id is not None or self.venue is not None):
-            raise ValueError("SHADOW reports use the Team unified virtual account")
-        if self.environment == "LIVE" and self.generation is not None:
-            raise ValueError("LIVE reports do not have a SHADOW generation")
+        if self.generation is not None:
+            raise ValueError("TESTNET and LIVE reports do not use ledger generations")
+        if (self.account_id is None) != (self.venue is None):
+            raise ValueError("account_id and venue must be provided together")
         return self
-
-
-class ShadowOrderCreateRequest(BaseModel):
-    account_id: str = Field(min_length=1, max_length=120)
-    venue: VenueScope
-    symbol: str | None = Field(default=None, min_length=1, max_length=120)
-    catalog_instrument_id: UUID | None = None
-    side: Literal["BUY", "SELL"]
-    order_type: Literal["MARKET", "LIMIT"]
-    quantity: Decimal = Field(gt=0)
-    limit_price: Decimal | None = Field(default=None, gt=0)
-    latest_price: Decimal | None = None
-    observed_at: datetime | None = None
-    price_tick: Decimal | None = None
-    quantity_step: Decimal | None = None
-    contract_multiplier: Decimal | None = None
-    is_derivative: bool = True
-    fee_bps: Decimal = Field(default=Decimal("4"), ge=0, le=100)
-    slippage_bps: Decimal = Field(default=Decimal("2"), ge=0, le=500)
-    idempotency_key: str = Field(min_length=1, max_length=160)
-
-    @model_validator(mode="after")
-    def validate_order_shape(self) -> ShadowOrderCreateRequest:
-        if self.symbol is None and self.catalog_instrument_id is None:
-            raise ValueError("symbol or catalog_instrument_id is required")
-        if self.order_type == "LIMIT" and self.limit_price is None:
-            raise ValueError("LIMIT order requires limit_price")
-        if self.order_type == "MARKET" and self.limit_price is not None:
-            raise ValueError("MARKET order cannot include limit_price")
-        return self
-
-
-class ShadowOrderMatchRequest(BaseModel):
-    expected_version: int = Field(ge=1)
-    latest_price: Decimal | None = None
-    observed_at: datetime | None = None
-    price_tick: Decimal | None = None
-    quantity_step: Decimal | None = None
-    contract_multiplier: Decimal | None = None
-    is_derivative: bool = True
-    fee_bps: Decimal = Field(default=Decimal("4"), ge=0, le=100)
-    slippage_bps: Decimal = Field(default=Decimal("2"), ge=0, le=500)
-    idempotency_key: str = Field(min_length=1, max_length=160)
-
-
-class ShadowProtectionCreateRequest(BaseModel):
-    trigger_type: Literal["STOP_LOSS", "TAKE_PROFIT"]
-    execution_type: Literal["MARKET", "LIMIT"]
-    trigger_price: Decimal = Field(gt=0)
-    limit_price: Decimal | None = Field(default=None, gt=0)
-    idempotency_key: str = Field(min_length=1, max_length=160)
-
-    @model_validator(mode="after")
-    def validate_protection_shape(self) -> ShadowProtectionCreateRequest:
-        if self.execution_type == "LIMIT" and self.limit_price is None:
-            raise ValueError("LIMIT protection requires limit_price")
-        if self.execution_type == "MARKET" and self.limit_price is not None:
-            raise ValueError("MARKET protection cannot include limit_price")
-        return self
-
-
-class ShadowScopeInitializeRequest(BaseModel):
-    account_id: str = Field(min_length=1, max_length=120)
-    venue: VenueScope
-    instrument_id: UUID
-    currency: str = Field(min_length=1, max_length=32, pattern=r"^[A-Za-z0-9._-]+$")
-    initial_equity: Decimal | None = Field(default=None, gt=0)
-    idempotency_key: str = Field(min_length=1, max_length=160)
-
-    @field_validator("currency")
-    @classmethod
-    def normalize_currency(cls, value: str) -> str:
-        return value.upper()
-
-
-class ShadowSimulationRequest(BaseModel):
-    expected_version: int = Field(ge=1)
-    reference_price: Decimal = Field(gt=0)
-    fee_bps: Decimal = Field(default=Decimal("4"), ge=0, le=100)
-    slippage_bps: Decimal = Field(default=Decimal("2"), ge=0, le=500)
-    idempotency_key: str = Field(min_length=1, max_length=160)
 
 
 class TeamMemberInviteRequest(BaseModel):
@@ -327,15 +237,29 @@ class ExchangeCredentialRequest(BaseModel):
 
 
 class ExchangeAccountCreateRequest(BaseModel):
-    environment: Literal["SHADOW", "LIVE"] = "LIVE"
+    environment: Literal["TESTNET", "LIVE"] = "LIVE"
     account_id: str = Field(min_length=1, max_length=120)
     venue: VenueScope
     label: str | None = Field(default=None, min_length=1, max_length=120)
-    credentials: ExchangeCredentialRequest | None = None
+    credentials: ExchangeCredentialRequest
     idempotency_key: str = Field(min_length=1, max_length=160)
 
 
 class ExchangeAccountDeleteRequest(BaseModel):
+    confirmation: str = Field(min_length=1, max_length=160)
+    expected_version: int = Field(ge=1)
+    idempotency_key: str = Field(min_length=1, max_length=160)
+
+
+class ExchangeAccountUpdateRequest(BaseModel):
+    label: str = Field(min_length=1, max_length=120)
+    expected_version: int = Field(ge=1)
+    idempotency_key: str = Field(min_length=1, max_length=160)
+
+
+class ExchangeAccountStateRequest(BaseModel):
+    enabled: bool
+    confirmation: str = Field(min_length=1, max_length=160)
     expected_version: int = Field(ge=1)
     idempotency_key: str = Field(min_length=1, max_length=160)
 
@@ -501,7 +425,7 @@ class NotificationRouteConfigurationRequest(BaseModel):
 
 
 class NotificationRouteWriteRequest(BaseModel):
-    environment: Literal["SHADOW", "LIVE"] = "LIVE"
+    environment: Literal["TESTNET", "LIVE"] = "LIVE"
     name: str = Field(min_length=1, max_length=120)
     channel: NotificationChannel
     event_types: list[NotificationEventType] = Field(min_length=1, max_length=6)
@@ -553,7 +477,7 @@ class WebhookSignalPayload(BaseModel):
 
 
 class SignalProposalRequest(BaseModel):
-    environment: Literal["SHADOW", "TESTNET", "LIVE"] = "SHADOW"
+    environment: Literal["TESTNET", "LIVE"] | None = None
     account_id: str = Field(min_length=1, max_length=120)
     instrument_id: UUID
     risk_tier: RiskTier
@@ -565,7 +489,7 @@ class SignalProposalRequest(BaseModel):
 
 
 class ManualProposalRequest(BaseModel):
-    environment: Literal["SHADOW", "TESTNET", "LIVE"] = "SHADOW"
+    environment: Literal["TESTNET", "LIVE"] | None = None
     account_id: str = Field(min_length=1, max_length=120)
     venue: str = Field(min_length=1, max_length=64)
     instrument_id: UUID
@@ -605,7 +529,7 @@ class ManualProposalRequest(BaseModel):
 
 
 class SystemProposalRequest(BaseModel):
-    environment: Literal["SHADOW", "TESTNET", "LIVE"] = "SHADOW"
+    environment: Literal["TESTNET", "LIVE"] | None = None
     account_id: str = Field(min_length=1, max_length=120)
     risk_tier: RiskTier
     quantity: Decimal = Field(gt=0)
@@ -634,7 +558,7 @@ class SystemProposalRequest(BaseModel):
 
 
 class AgentProposalRequest(BaseModel):
-    environment: Literal["SHADOW", "TESTNET", "LIVE"] = "SHADOW"
+    environment: Literal["TESTNET", "LIVE"] | None = None
     account_id: str = Field(min_length=1, max_length=120)
     venue: VenueScope
     instrument_id: UUID
@@ -764,14 +688,7 @@ class SenderLeaseRequest(BaseModel):
     lease_seconds: int = Field(default=60, ge=5, le=300)
 
 
-class ShadowSendRequest(BaseModel):
-    execution_scope: str = Field(min_length=3, max_length=255)
-    owner_id: str = Field(min_length=1, max_length=255)
-    fencing_token: int = Field(ge=1)
-    venue_order_id: str = Field(min_length=1, max_length=255)
-
-
-class ShadowFillRequest(BaseModel):
+class VenueFillRequest(BaseModel):
     venue_fill_id: str = Field(min_length=1, max_length=255)
     side: Literal["BUY", "SELL"]
     quantity: Decimal = Field(gt=0)
@@ -820,7 +737,7 @@ class AccountEquityFactRequest(BaseModel):
 
 
 class CapitalBalanceFactRequest(BaseModel):
-    environment: Literal["SHADOW", "TESTNET"] = "TESTNET"
+    environment: Literal["TESTNET", "LIVE"] = "TESTNET"
     location_type: Literal["VAULT", "VENUE"]
     location_id: str = Field(min_length=1, max_length=160)
     venue: str = Field(min_length=1, max_length=64)
@@ -849,7 +766,7 @@ class CapitalBalanceFactRequest(BaseModel):
 
 
 class TransferProposalRequest(BaseModel):
-    environment: Literal["SHADOW", "TESTNET", "LIVE"] = "TESTNET"
+    environment: Literal["TESTNET", "LIVE"] = "TESTNET"
     direction: CapitalDirection
     account_id: str = Field(min_length=1, max_length=120)
     venue: str = Field(min_length=1, max_length=64)
@@ -999,7 +916,7 @@ class DirectCapitalBinanceReceiptRequest(BaseModel):
 
 
 class DirectCapitalConfigurationRequest(BaseModel):
-    environment: Literal["SHADOW", "LIVE"] = "LIVE"
+    environment: Literal["LIVE"] = "LIVE"
     network: Literal["ARBITRUM"] = "ARBITRUM"
     asset: Literal["USDC"] = "USDC"
     treasury_provider: CapitalTreasuryProvider | None = None
@@ -1074,7 +991,7 @@ class CapitalTransferObservationRequest(BaseModel):
 
 
 class CapitalScopeReconciliationRequest(BaseModel):
-    environment: Literal["SHADOW", "TESTNET"] = "TESTNET"
+    environment: Literal["TESTNET", "LIVE"] = "TESTNET"
     account_id: str = Field(min_length=1, max_length=120)
     venue: str = Field(min_length=1, max_length=64)
 
@@ -1085,7 +1002,7 @@ class CapitalScopeReconciliationRequest(BaseModel):
 
 
 class CapitalAutomationPolicyRequest(BaseModel):
-    environment: Literal["SHADOW", "TESTNET"] = "TESTNET"
+    environment: Literal["TESTNET", "LIVE"] = "TESTNET"
     account_id: str = Field(min_length=1, max_length=120)
     venue: str = Field(min_length=1, max_length=64)
     vault_id: str = Field(min_length=1, max_length=160)

@@ -6,12 +6,13 @@ from decimal import Decimal
 from typing import Any
 from uuid import UUID, uuid4
 
-from conftest import set_test_team_environment
+from conftest import add_exchange_account_fixture, set_test_team_environment
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy import func, select
 
 from trading_control_plane.api import create_app
+from trading_control_plane.binance_execution import BinanceTestnetOrder
 from trading_control_plane.config import Settings
 from trading_control_plane.database import Database
 from trading_control_plane.domain import (
@@ -30,10 +31,30 @@ from trading_control_plane.service import TradingService
 from trading_control_plane.telegram import MockTelegramGateway
 
 
+class AcceptedBinanceTestnetClient:
+    configured = True
+
+    def ensure_order(self, command: Any, *, now: datetime) -> BinanceTestnetOrder:
+        return BinanceTestnetOrder(
+            order_id=f"fixture-{command.client_order_id}",
+            client_order_id=command.client_order_id,
+            status="SENT",
+            side=command.side,
+            order_type="MARKET",
+            ordered_quantity=command.quantity,
+            filled_quantity=Decimal(0),
+            stop_price=Decimal(0),
+            reduce_only=command.reduce_only,
+            close_position=False,
+            observed_at=now,
+        )
+
+
 def seed_authorized_campaign(service: TradingService) -> dict[str, UUID]:
     now = datetime.now(UTC)
     admin = service.bootstrap_admin("admin", now=now)
-    set_test_team_environment(service.database, admin, "SHADOW")
+    set_test_team_environment(service.database, admin, "TESTNET")
+    add_exchange_account_fixture(service.database, admin, "acct-1", "BINANCE")
     proposer = service.create_user("proposer", admin, now=now)
     reviewer_one = service.create_user("reviewer-1", admin, now=now)
     reviewer_two = service.create_user("reviewer-2", admin, now=now)
@@ -140,6 +161,10 @@ def app(database: Database, telegram: MockTelegramGateway) -> FastAPI:
         allow_mock_identity=True,
         session_signing_secret="m2-test-signing-secret-that-is-long-enough",  # noqa: S106
         public_base_url="http://test",
+        execution_backend="DIRECT_LEGACY",
+        binance_testnet_order_send_enabled=True,
+        binance_testnet_api_key="fixture-key",
+        binance_testnet_api_secret="fixture-secret",  # noqa: S106
         _env_file=None,
     )
     perptape = PerptapeClient(
@@ -148,7 +173,13 @@ def app(database: Database, telegram: MockTelegramGateway) -> FastAPI:
         contract_version="breakouts-v1",
         cache_ttl=timedelta(minutes=1),
     )
-    return create_app(settings, database, perptape, telegram)
+    return create_app(
+        settings,
+        database,
+        perptape,
+        telegram,
+        binance_testnet_client=AcceptedBinanceTestnetClient(),  # type: ignore[arg-type]
+    )
 
 
 async def login(client: AsyncClient) -> None:
@@ -168,7 +199,7 @@ def intent_payload(ids: dict[str, UUID], key: str = "m2-initial") -> dict[str, A
     }
 
 
-async def run_shadow_campaign_flow(database: Database, telegram: MockTelegramGateway) -> None:
+async def run_testnet_campaign_flow(database: Database, telegram: MockTelegramGateway) -> None:
     ids = seed_authorized_campaign(TradingService(database))
     async with AsyncClient(
         transport=ASGITransport(app=app(database, telegram)), base_url="http://test"
@@ -205,19 +236,18 @@ async def run_shadow_campaign_flow(database: Database, telegram: MockTelegramGat
         lease = await client.post(
             "/api/sender-leases",
             json={
-                "execution_scope": "acct-1:BINANCE",
+                "execution_scope": "TESTNET:acct-1:BINANCE",
                 "owner_id": "m2-web-worker",
                 "lease_seconds": 120,
             },
         )
         assert lease.status_code == 200, lease.text
         sent = await client.post(
-            f"/api/intents/{opening_intent}/shadow-send",
+            f"/api/intents/{opening_intent}/binance-testnet/send",
             json={
-                "execution_scope": "acct-1:BINANCE",
+                "execution_scope": "TESTNET:acct-1:BINANCE",
                 "owner_id": "m2-web-worker",
                 "fencing_token": lease.json()["fencing_token"],
-                "venue_order_id": "m2-shadow-open",
             },
         )
         assert sent.status_code == 200, sent.text
@@ -251,7 +281,7 @@ async def run_shadow_campaign_flow(database: Database, telegram: MockTelegramGat
             f"/api/campaigns/{campaign_id}/protection",
             json={
                 "position_id": position.json()["position_id"],
-                "venue_order_id": "m2-shadow-stop",
+                "venue_order_id": "m2-testnet-stop",
                 "quantity": "1",
                 "trigger_price": "90",
                 "fully_covered": True,
@@ -295,12 +325,11 @@ async def run_shadow_campaign_flow(database: Database, telegram: MockTelegramGat
         assert reduction.status_code == 200, reduction.text
         exit_intent = reduction.json()["intent_id"]
         exit_send = await client.post(
-            f"/api/intents/{exit_intent}/shadow-send",
+            f"/api/intents/{exit_intent}/binance-testnet/send",
             json={
-                "execution_scope": "acct-1:BINANCE",
+                "execution_scope": "TESTNET:acct-1:BINANCE",
                 "owner_id": "m2-web-worker",
                 "fencing_token": lease.json()["fencing_token"],
-                "venue_order_id": "m2-shadow-exit",
             },
         )
         assert exit_send.status_code == 200, exit_send.text
@@ -332,7 +361,7 @@ async def run_shadow_campaign_flow(database: Database, telegram: MockTelegramGat
         assert flat.status_code == 200, flat.text
         reconcile = await client.post(
             f"/api/campaigns/{campaign_id}/reconcile",
-            json={"execution_scope": "acct-1:BINANCE"},
+            json={"execution_scope": "TESTNET:acct-1:BINANCE"},
         )
         assert reconcile.status_code == 200, reconcile.text
         assert reconcile.json()["detail"]["reconciliation"]["status"] == "MATCH"
@@ -354,9 +383,9 @@ async def run_shadow_campaign_flow(database: Database, telegram: MockTelegramGat
         }
         events = [item.event_type for item in telegram.campaign_notifications()]
         assert events == [
-            "SHADOW_FILL_RECORDED",
+            "TESTNET_FILL_RECORDED",
             "PROTECTION_ACTIVE",
-            "SHADOW_FILL_RECORDED",
+            "TESTNET_FILL_RECORDED",
             "CAMPAIGN_CLOSED",
         ]
         for web_path in (
@@ -377,10 +406,6 @@ async def run_shadow_campaign_flow(database: Database, telegram: MockTelegramGat
         assert session.scalar(select(func.count()).select_from(RiskReservation)) == 1
 
 
-def test_shadow_campaign_api_runs_full_operator_flow(database: Database) -> None:
-    asyncio.run(run_shadow_campaign_flow(database, MockTelegramGateway()))
-
-
 async def run_unknown_flow(database: Database) -> None:
     ids = seed_authorized_campaign(TradingService(database))
     gateway = MockTelegramGateway()
@@ -397,18 +422,17 @@ async def run_unknown_flow(database: Database) -> None:
         lease = await client.post(
             "/api/sender-leases",
             json={
-                "execution_scope": "acct-1:BINANCE",
+                "execution_scope": "TESTNET:acct-1:BINANCE",
                 "owner_id": "unknown-worker",
                 "lease_seconds": 60,
             },
         )
         await client.post(
-            f"/api/intents/{intent_id}/shadow-send",
+            f"/api/intents/{intent_id}/binance-testnet/send",
             json={
-                "execution_scope": "acct-1:BINANCE",
+                "execution_scope": "TESTNET:acct-1:BINANCE",
                 "owner_id": "unknown-worker",
                 "fencing_token": lease.json()["fencing_token"],
-                "venue_order_id": "unknown-order",
             },
         )
         unknown = await client.post(
@@ -492,7 +516,7 @@ def test_exception_view_marks_active_facts_stale_but_ignores_closed_history(
         session.add(
             ReconciliationRun(
                 team_id=campaign.team_id,
-                execution_scope="acct-1:BINANCE",
+                execution_scope="TESTNET:acct-1:BINANCE",
                 campaign_id=opening.campaign_id,
                 status="MATCH",
                 is_computed=True,

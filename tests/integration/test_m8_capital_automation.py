@@ -353,11 +353,10 @@ def test_capital_automation_api_exposes_disabled_gates_and_policy(
             center = await client.get("/api/capital")
             assert center.status_code == 200
             automation = center.json()["data"]["automation"]
-            assert automation["gates"] == {
-                "AUTO_PROFIT_SWEEP": "DISABLED",
-                "AUTO_OPERATING_REFILL": "DISABLED",
-            }
-            assert automation["policies"][0]["policy_id"] == policy_id
+            # Testnet capital is exchange-sourced and must not project production
+            # transfer automation controls or policies into the Capital page.
+            assert automation["gates"] == {}
+            assert automation["policies"] == []
             denied = await client.post(
                 f"/api/capital/automation/policies/{policy_id}/evaluate",
                 json={

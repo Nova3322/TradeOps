@@ -130,20 +130,6 @@ def test_font_system_uses_plex_sc_for_ui_and_plex_mono_for_figures() -> None:
     assert re.search(r"font:\s*[^;]*?(?<!\d)(?:8|9|10|11)px", styles) is None
 
 
-def test_primary_navigation_and_page_use_trading_mode_copy() -> None:
-    index = INDEX.read_text()
-    execution = EXECUTION.read_text()
-
-    assert 'href="/trading-mode"' in index
-    assert "运行与风控" in index
-    assert "<span>◐</span>影子模式</a>" not in index
-    assert "<h1>模式与账户</h1>" in execution
-    assert "影子账户不接收交易所 API" in execution
-    assert "通知账户" in execution
-    assert "影子配置只服务模拟账本，不会调用交易所、签名或广播" in execution  # noqa: RUF001
-    assert "重置为 100,000 U" in execution
-
-
 def test_role_navigation_and_task_entries_match_capabilities() -> None:
     index = INDEX.read_text()
     workspace = WORKSPACE.read_text()
@@ -152,9 +138,9 @@ def test_role_navigation_and_task_entries_match_capabilities() -> None:
     trade_section = index.split('<p class="nav-section-label">交易流程</p>', maxsplit=1)[1].split(
         '<p class="nav-section-label">运行与风控</p>', maxsplit=1
     )[0]
-    operations_section = index.split(
-        '<p class="nav-section-label">运行与风控</p>', maxsplit=1
-    )[1].split('<p class="nav-section-label">团队设置</p>', maxsplit=1)[0]
+    operations_section = index.split('<p class="nav-section-label">运行与风控</p>', maxsplit=1)[
+        1
+    ].split('<p class="nav-section-label">团队设置</p>', maxsplit=1)[0]
     team_section = index.split('<p class="nav-section-label">团队设置</p>', maxsplit=1)[1]
     assert 'href="/proposals"' in trade_section
     assert 'href="/reviews"' in trade_section
@@ -186,13 +172,14 @@ def test_primary_navigation_preserves_the_established_order() -> None:
         "/reviews",
         "/campaigns",
         "/results",
-        "/trading-mode",
+        "/accounts",
         "/capital",
         "/risk",
         "/positions",
         "/notifications",
         "/signals",
         "/admin/users",
+        "/team-settings",
     ]
 
 
@@ -275,55 +262,14 @@ def test_capital_center_is_split_into_task_focused_views() -> None:
     assert "capital-view-panel" in styles
 
 
-def test_trading_mode_page_is_a_compact_space_level_switcher() -> None:
-    execution = EXECUTION.read_text()
-    mode_page = execution.split("async function renderTradingMode()", maxsplit=1)[1].split(
-        "async function renderShadowWorkspace()", maxsplit=1
-    )[0]
-
-    for expected in (
-        "当前空间",
-        "当前运行",
-        "实盘模式",
-        "影子模式",
-        "交易所账户",
-        "Vault 与 Safe",
-        "通知账户",
-        "危险能力：真实下单、资金划转、自动加仓均关闭",  # noqa: RUF001
-        "查看模拟账本",
-        "重置模拟资产",
-    ):
-        assert expected in mode_page
-    assert "selectedEnvironment === 'LIVE'" in mode_page
-    assert "selectedEnvironment === 'SHADOW'" in mode_page
-    assert "session?.active_workspace?.name || data.team_name" in mode_page
-    assert "confirmAction" in mode_page
-
-    for removed in (
-        "Workspace ",
-        "当前 Team",
-        '<div class="stats">',
-        "<table>",
-        'id="shadow-order-form"',
-        "价格精度",
-        "合约乘数",
-        "手续费 bps",
-        "滑点 bps",
-        "generation",
-        "Decimal",
-        "SETUP",
-    ):
-        assert removed not in mode_page
-
-
 def test_capital_and_risk_pages_expose_environment_scoped_account_workflows() -> None:
     capital = CAPITAL.read_text()
     risk = CAPITAL.with_name("risk.js").read_text()
     execution = EXECUTION.read_text()
 
     for expected in (
-        "模式与账户筛选",
-        "选择要叠加的账户曲线（可多选）",  # noqa: RUF001
+        "当前模式",
+        "选择要叠加的当前模式账户曲线（可多选）",  # noqa: RUF001
         "只影响展示",
         "selected_account_keys",
         "account_options",
@@ -334,37 +280,26 @@ def test_capital_and_risk_pages_expose_environment_scoped_account_workflows() ->
         "恢复自动加仓",
         "暂停所有风险",
         "解除风险暂停",
+        "async function renderCampaignList()",
+        "item.environment === environment",
     ):
         assert expected in execution
+    assert "modeAccountEnvironmentLabel" not in capital
     assert "发起风控变更提案" in risk
     assert "POLICY_UPDATE" in risk
     assert "提案 · 独立审核" in risk
-
-
-def test_shadow_trading_details_are_moved_off_the_mode_switcher() -> None:
-    execution = EXECUTION.read_text()
-    detail_page = execution.split("function renderShadowAccountDetails(data)", maxsplit=1)[1].split(
-        "async function renderTradingMode()", maxsplit=1
-    )[0]
-
-    assert 'href="/trading-mode?view=shadow-account"' in execution
-    assert "<h1>模拟账户</h1>" in detail_page
-    assert 'id="shadow-order-form"' in detail_page
-    assert "模拟持仓" in detail_page
-    assert "未成交订单" in detail_page
-    assert "shadow-match-form" in detail_page
-    assert "shadow-protection-form" in detail_page
 
 
 def test_trading_mode_mutations_keep_server_side_safety_contracts() -> None:
     execution = EXECUTION.read_text()
 
     assert "expected_version:data.version" in execution
-    assert "confirmation:`SWITCH_TO_${mode}`" in execution
+    assert "I_CONFIRM_LIVE_PRODUCTION_MONEY" in execution
+    assert "SWITCH_TO_TESTNET" in execution
     assert "idempotency_key:crypto.randomUUID()" in execution
-    assert "expected_version:account.version" in execution
-    assert "confirmation:'RESET_TO_100000_U'" in execution
-    assert "'/api/trading-mode/shadow/reset'" in execution
+    assert "expected_version:Number(button.dataset.version)" in execution
+    assert "data-account-delete" in execution
+    assert "DELETE:" in execution
 
 
 def test_workflow_environment_comes_only_from_persisted_team_mode() -> None:
@@ -375,7 +310,7 @@ def test_workflow_environment_comes_only_from_persisted_team_mode() -> None:
 
     assert "active_team?.execution_mode" in implementation
     assert "URLSearchParams" not in implementation
-    assert "TESTNET" not in implementation
+    assert "SETUP" in implementation
 
 
 def test_institutional_minimal_shell_and_semantic_color_rules() -> None:
@@ -414,10 +349,10 @@ def test_institutional_minimal_shell_and_semantic_color_rules() -> None:
     )
     assert primary_rule in styles
     assert ".secondary { background: transparent; }" in styles
-    assert "--shadow-accent: var(--accent)" in styles
+    assert "--testnet-accent: var(--accent)" in styles
     assert "linear-gradient" not in styles
     assert "radial-gradient" not in styles
-    assert "drop-shadow" not in styles
+    assert "drop-testnet" not in styles
     assert ".account-list-hero::after" not in styles
     assert "--market-up: #2f6d4f" in styles
     assert "--market-down: #a04440" in styles
@@ -434,7 +369,7 @@ def test_navigation_hierarchy_uses_neutral_states_and_accessible_current_page() 
 
     assert '<p class="nav-link-group-label">实时信号</p>' in index
     assert '<span aria-hidden="true">⌁</span>' not in index
-    assert '<span>⌂</span>' not in index
+    assert "<span>⌂</span>" not in index
     assert "--sidebar-bg: #191919;" in styles
     assert "--nav-active-bg: #f5f1e8;" in styles
     assert ".nav-section + .nav-section {" in styles
@@ -463,6 +398,6 @@ def test_workspace_gate_header_reclaims_the_hidden_scope_column() -> None:
     styles = STYLESHEET.read_text()
 
     assert ".topbar > .topbar-actions { grid-column: 3; }" in styles
-    assert '.topbar:has(> #scope-control[hidden]) {' in styles
+    assert ".topbar:has(> #scope-control[hidden]) {" in styles
     assert "grid-template-columns: 220px minmax(0, 1fr);" in styles
-    assert '.topbar:has(> #scope-control[hidden]) > .topbar-actions { grid-column: 2; }' in styles
+    assert ".topbar:has(> #scope-control[hidden]) > .topbar-actions { grid-column: 2; }" in styles

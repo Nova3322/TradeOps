@@ -6,9 +6,9 @@ import json
 import secrets
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
-from unittest.mock import patch
 from uuid import UUID
 
+from conftest import set_test_team_environment
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient, Response
 from sqlalchemy import select
@@ -27,12 +27,6 @@ from trading_control_plane.models import (
     User,
 )
 from trading_control_plane.perptape import PerptapeClient
-from trading_control_plane.queries import TradingQueries
-from trading_control_plane.request_context import (
-    ApiClientRequestContext,
-    bind_api_client_context,
-    reset_api_client_context,
-)
 from trading_control_plane.service import TradingService
 
 
@@ -67,6 +61,7 @@ def test_user_owned_api_key_dynamic_rbac_scope_audit_and_token_lifecycle(
     now = datetime.now(UTC)
     service = TradingService(database, credential_encryption_key=encryption_key())
     admin_id = service.bootstrap_admin("api-client-admin", now=now)
+    set_test_team_environment(database, admin_id, "TESTNET")
     instrument_id = service.register_instrument(
         actor_id=admin_id,
         venue="BINANCE",
@@ -82,21 +77,21 @@ def test_user_owned_api_key_dynamic_rbac_scope_audit_and_token_lifecycle(
     )
     first_account_uuid = service.create_exchange_account(
         actor_id=admin_id,
-        environment="SHADOW",
+        environment="TESTNET",
         account_id="paper-api-1",
         venue="BINANCE",
         label="Primary API Key account",
-        credentials=None,
+        credentials={"api_key": "testnet-key-one", "api_secret": "testnet-secret-one"},
         idempotency_key="api-account-one",
         now=now,
     )
     service.create_exchange_account(
         actor_id=admin_id,
-        environment="SHADOW",
+        environment="TESTNET",
         account_id="paper-api-2",
         venue="BINANCE",
         label="Second RBAC account",
-        credentials=None,
+        credentials={"api_key": "testnet-key-two", "api_secret": "testnet-secret-two"},
         idempotency_key="api-account-two",
         now=now,
     )
@@ -105,20 +100,7 @@ def test_user_owned_api_key_dynamic_rbac_scope_audit_and_token_lifecycle(
         assert admin is not None and admin.active_team_id is not None
         team = session.get(Team, admin.active_team_id)
         assert team is not None
-        assert team.execution_mode == "LIVE"
-        assert team.execution_mode_locked_at == now
-        team_id = team.team_id
-        team_version = team.version
-    switched = service.set_team_execution_mode(
-        actor_id=admin_id,
-        team_id=team_id,
-        mode="SHADOW",
-        confirmation="SWITCH_TO_SHADOW",
-        expected_version=team_version,
-        idempotency_key="api-key-shadow-mode",
-        now=now,
-    )
-    assert switched["execution_mode"] == "SHADOW"
+        assert team.execution_mode == "TESTNET"
     owner_id = service.create_managed_user(
         "api-owner",
         [Role.OBSERVER, Role.PROPOSER, Role.REVIEWER],
@@ -232,7 +214,7 @@ def test_user_owned_api_key_dynamic_rbac_scope_audit_and_token_lifecycle(
         assert connection.json()["scope"]["scope_model"] == "USER_RBAC"
 
         proposal_payload = {
-            "environment": "SHADOW",
+            "environment": "TESTNET",
             "account_id": "paper-api-1",
             "venue": "BINANCE",
             "instrument_id": str(instrument_id),
@@ -394,22 +376,6 @@ def test_user_owned_api_key_dynamic_rbac_scope_audit_and_token_lifecycle(
             )
             assert denied.status_code == 403
             assert denied.json()["error"]["code"] == "RBAC_DENIED"
-
-        context_token = bind_api_client_context(
-            ApiClientRequestContext(
-                owner_user_id=owner_id,
-                api_client_id=UUID(alpha_id),
-                workspace_id=UUID(connection.json()["scope"]["workspace_id"]),
-                team_id=UUID(connection.json()["scope"]["team_id"]),
-            )
-        )
-        try:
-            queries = TradingQueries(database)
-            with patch.object(queries.service, "shadow_activation_status", return_value={}):
-                shadow = queries.shadow_workspace(owner_id)
-        finally:
-            reset_api_client_context(context_token)
-        assert [item["account_id"] for item in shadow["accounts"]] == ["paper-api-1"]
 
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as admin:
             login = await admin.post("/api/auth/mock/login", json={"username": "api-client-admin"})

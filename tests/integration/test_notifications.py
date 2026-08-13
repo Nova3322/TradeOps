@@ -300,13 +300,16 @@ def test_notification_route_delete_clears_secret_cancels_queue_and_allows_name_r
     )
     assert deleted["status"] == "DELETED"
     assert TradingQueries(database).notification_center(admin)["routes"] == []
-    assert service.delete_notification_route(
-        actor_id=admin,
-        notification_route_id=route_id,
-        expected_version=1,
-        idempotency_key="delete-notification-route",
-        now=now + timedelta(seconds=2),
-    ) == deleted
+    assert (
+        service.delete_notification_route(
+            actor_id=admin,
+            notification_route_id=route_id,
+            expected_version=1,
+            idempotency_key="delete-notification-route",
+            now=now + timedelta(seconds=2),
+        )
+        == deleted
+    )
     with database.session_factory() as session:
         route = session.get(NotificationRoute, route_id)
         delivery = session.get(NotificationDelivery, delivery_id)

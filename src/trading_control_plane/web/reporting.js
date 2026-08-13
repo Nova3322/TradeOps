@@ -56,23 +56,19 @@ async function renderActualResults() {
   const requestedEngine = current.get('engine') || 'QUANTSTATS';
   const engine = engines.some(item => item.engine === requestedEngine && item.available) ? requestedEngine : engines.find(item => item.available)?.engine;
   const selectedEngine = engines.find(item => item.engine === engine);
-  const modeDefault = ['SHADOW','LIVE'].includes(options.current_trading_mode) ? options.current_trading_mode : 'SHADOW';
-  const environment = ['SHADOW','LIVE'].includes(current.get('environment')) ? current.get('environment') : modeDefault;
+  const modeDefault = ['TESTNET','LIVE'].includes(options.current_trading_mode) ? options.current_trading_mode : 'TESTNET';
+  const environment = ['TESTNET','LIVE'].includes(current.get('environment')) ? current.get('environment') : modeDefault;
   const defaults = quantStatsDefaultRange();
   const fromTime = current.get('from_time') || defaults.from_time;
   const toTime = current.get('to_time') || defaults.to_time;
-  const requestedGeneration = Number(current.get('generation'));
-  const activeGeneration = options.shadow_generations.find(item => item.status === 'ACTIVE')?.generation;
-  const generation = Number.isInteger(requestedGeneration) && requestedGeneration > 0 ? requestedGeneration : activeGeneration;
   const selectedAccount = current.get('account_id') || '';
   const selectedVenue = current.get('venue') || '';
   const accountOptions = options.accounts.map(item => `<option value="${escapeHtml(item.account_id)}" data-venue="${escapeHtml(item.venue)}" ${selectedAccount === item.account_id && (!selectedVenue || selectedVenue === item.venue) ? 'selected' : ''}>${escapeHtml(item.label)} · ${escapeHtml(fmtVenueLabel(item.venue))}</option>`).join('');
-  const generationOptions = options.shadow_generations.map(item => `<option value="${item.generation}" ${generation === item.generation ? 'selected' : ''}>generation ${item.generation} · ${escapeHtml(fmtStatus(item.status))}</option>`).join('');
   const engineOptions = engines.map(item => `<option value="${item.engine}" ${engine === item.engine ? 'selected' : ''} ${item.available ? '' : 'disabled'}>${escapeHtml(item.label)} · ${item.available ? escapeHtml(item.version) : escapeHtml(item.error_code)}</option>`).join('');
   main.innerHTML = `<section class="page results-page quantstats-page"><header class="page-head"><div><p class="eyebrow">${escapeHtml(options.scope.workspace_name)} · ${escapeHtml(options.scope.team_name)}</p><h1>绩效报表</h1><p class="lede">QuantStats 与 Pyfolio Reloaded 使用同一份可信净值、收益率、成交、持仓、手续费及基准数据；订单仅用于执行与审计。</p></div><button class="secondary" data-refresh>刷新</button></header>
     <article class="source-status ${options.current_trading_mode === 'LIVE' ? 'tone-attention' : ''}"><div><p class="eyebrow">当前交易模式</p><h2>${escapeHtml(fmtEnvironment(options.current_trading_mode))}</h2><p>报表环境只查询历史，不改变 Team 模式，也不会开启交易、资金、签名或广播能力。</p></div><span class="status-pill">${escapeHtml(options.dataset_version)}</span></article>
-    <form id="results-filter-form" class="form-panel compact-form result-filters"><div class="field-grid"><label>报表引擎<select name="engine">${engineOptions}</select></label><label>环境<select name="environment"><option value="SHADOW" ${environment === 'SHADOW' ? 'selected' : ''}>影子模式</option><option value="LIVE" ${environment === 'LIVE' ? 'selected' : ''}>生产历史</option></select></label><label>账户<select name="account_id" ${environment === 'SHADOW' ? 'disabled' : ''}><option value="">全部有权限账户</option>${accountOptions}</select></label><label>交易所<select name="venue" ${environment === 'SHADOW' ? 'disabled' : ''}><option value="">全部</option>${['BINANCE','HYPERLIQUID','OKX','BYBIT'].map(value => `<option value="${value}" ${selectedVenue === value ? 'selected' : ''}>${escapeHtml(fmtVenueLabel(value))}</option>`).join('')}</select></label><label>SHADOW generation<select name="generation" ${environment === 'LIVE' ? 'disabled' : ''}>${generationOptions}</select></label><label>起始时间<input name="from_time" type="datetime-local" value="${escapeHtml(resultDateTimeInput(fromTime))}" required></label><label>截止时间<input name="to_time" type="datetime-local" value="${escapeHtml(resultDateTimeInput(toTime))}" required></label></div><div class="form-actions"><button class="primary" type="submit">生成 ${escapeHtml(selectedEngine?.label || engine)} 报表</button></div></form>
-    <section class="quantstats-status" data-quantstats-status><div class="loading-card"><span class="spinner"></span><b>正在生成只读报表</b><p>服务端正在验证净值连续性、现金流、估值、范围和 generation。</p></div></section>
+    <form id="results-filter-form" class="form-panel compact-form result-filters"><div class="field-grid"><label>报表引擎<select name="engine">${engineOptions}</select></label><label>环境<select name="environment"><option value="TESTNET" ${environment === 'TESTNET' ? 'selected' : ''}>测试模式</option><option value="LIVE" ${environment === 'LIVE' ? 'selected' : ''}>生产历史</option></select></label><label>账户<select name="account_id"><option value="">全部有权限账户</option>${accountOptions}</select></label><label>交易所<select name="venue"><option value="">全部</option>${['BINANCE','HYPERLIQUID','OKX','BYBIT'].map(value => `<option value="${value}" ${selectedVenue === value ? 'selected' : ''}>${escapeHtml(fmtVenueLabel(value))}</option>`).join('')}</select></label><label>起始时间<input name="from_time" type="datetime-local" value="${escapeHtml(resultDateTimeInput(fromTime))}" required></label><label>截止时间<input name="to_time" type="datetime-local" value="${escapeHtml(resultDateTimeInput(toTime))}" required></label></div><div class="form-actions"><button class="primary" type="submit">生成 ${escapeHtml(selectedEngine?.label || engine)} 报表</button></div></form>
+    <section class="quantstats-status" data-quantstats-status><div class="loading-card"><span class="spinner"></span><b>正在生成只读报表</b><p>服务端正在验证净值连续性、现金流、估值和环境范围。</p></div></section>
     <section class="quantstats-report-shell" data-quantstats-report hidden><div class="section-heading"><div><p class="eyebrow">${escapeHtml(selectedEngine?.label || engine)} · UTC 24/7 · 365 periods/year</p><h2>完整绩效报表</h2><p data-quantstats-coverage></p></div><div class="form-actions"><a class="secondary" data-report-view target="_blank" rel="noopener">新窗口查看</a><a class="primary" data-report-download>下载 HTML</a></div></div><div class="stats report-common-metrics" data-report-metrics></div><iframe class="quantstats-frame" title="${escapeHtml(selectedEngine?.label || engine)} 完整绩效报表" sandbox="allow-same-origin" referrerpolicy="no-referrer"></iframe></section>
   </section>`;
   document.querySelector('[data-refresh]')?.addEventListener('click', route);
@@ -81,7 +77,7 @@ async function renderActualResults() {
     const form = event.currentTarget;
     const values = Object.fromEntries(new FormData(form));
     const next = new URLSearchParams({engine:values.engine,environment:values.environment});
-    ['venue','account_id','generation'].forEach(key => { if (values[key]) next.set(key, values[key]); });
+    ['venue','account_id'].forEach(key => { if (values[key]) next.set(key, values[key]); });
     ['from_time','to_time'].forEach(key => {
       if (values[key]) next.set(key, new Date(values[key]).toISOString());
     });
@@ -90,9 +86,8 @@ async function renderActualResults() {
   });
   try {
     const body = {engine,environment,from_time:fromTime,to_time:toTime,idempotency_key:crypto.randomUUID()};
-    if (environment === 'SHADOW' && generation) body.generation = generation;
-    if (environment === 'LIVE' && selectedAccount) body.account_id = selectedAccount;
-    if (environment === 'LIVE' && selectedVenue) body.venue = selectedVenue;
+    if (selectedAccount) body.account_id = selectedAccount;
+    if (selectedVenue) body.venue = selectedVenue;
     const response = await api('/api/results/reports', {method:'POST',body:JSON.stringify(body)});
     const data = response.data;
     const readiness = data.metadata.readiness;
@@ -171,11 +166,11 @@ async function renderNotifications() {
   const counts = data.delivery_status_counts || {};
   const waiting = (counts.PENDING || 0) + (counts.RETRY_WAIT || 0) + (counts.SENDING || 0);
   const attention = (counts.DEAD_LETTER || 0) + (counts.OUTCOME_UNKNOWN || 0);
-  const createForm = data.can_manage ? '<div class="callout"><b>通知账户统一在“模式与账户”配置。</b><p>影子与实盘通知账户相互隔离；这里仅保留投递监控与历史。</p><a class="secondary" href="/trading-mode" data-link>前往模式与账户</a></div>' : '';
+  const createForm = data.can_manage ? '<div class="callout"><b>通知账户统一在“账户管理”配置。</b><p>测试与实盘通知账户相互隔离；这里仅保留投递监控与历史。</p><a class="secondary" href="/accounts" data-link>前往账户管理</a></div>' : '';
   const routeCards = data.routes.map(item => {
     const destination = item.configuration_metadata?.destination_hint || '已加密配置';
     const eventTags = item.event_types.map(eventType => `<span class="tag">${escapeHtml(notificationEventLabel(eventType))}</span>`).join('');
-    return `<article class="card notification-route-card"><div class="card-heading"><div><p class="eyebrow">${escapeHtml(modeAccountEnvironmentLabel(item.environment || 'LIVE'))} · ${escapeHtml(notificationChannelLabel(item.channel))} · ${escapeHtml(destination)}</p><h2>${escapeHtml(item.name)}</h2></div><span class="status-pill ${item.enabled ? 'status-APPROVED' : 'status-DISABLED'}">${item.enabled ? '已启用' : '已停用'}</span></div><div class="tag-row">${eventTags}</div><dl class="definition-grid">${definition('配置状态', 'AES-256-GCM 加密')}${definition('路由 / 凭据版本', `${item.version} / ${item.credential_version}`)}${definition('最近更新', fmtDate(item.updated_at))}</dl>${data.can_manage ? '<a class="secondary" href="/trading-mode" data-link>管理通知账户</a>' : ''}</article>`;
+    return `<article class="card notification-route-card"><div class="card-heading"><div><p class="eyebrow">${escapeHtml(executionModeLabel(item.environment || 'LIVE'))} · ${escapeHtml(notificationChannelLabel(item.channel))} · ${escapeHtml(destination)}</p><h2>${escapeHtml(item.name)}</h2></div><span class="status-pill ${item.enabled ? 'status-APPROVED' : 'status-DISABLED'}">${item.enabled ? '已启用' : '已停用'}</span></div><div class="tag-row">${eventTags}</div><dl class="definition-grid">${definition('配置状态', 'AES-256-GCM 加密')}${definition('路由 / 凭据版本', `${item.version} / ${item.credential_version}`)}${definition('最近更新', fmtDate(item.updated_at))}</dl>${data.can_manage ? '<a class="secondary" href="/accounts" data-link>管理通知账户</a>' : ''}</article>`;
   }).join('');
   const deliveryRows = data.deliveries.map(item => {
     const route = routesById.get(item.notification_route_id);

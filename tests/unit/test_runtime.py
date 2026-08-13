@@ -152,6 +152,7 @@ def test_database_binding_supervisor_builds_exact_scoped_read_only_workers() -> 
         service_principal_username="runtime-team-account",
         account_id="binance-team-main",
         venue="BINANCE",
+        environment="TESTNET",
         account_version=3,
         credential_version=1,
         credentials={"api_key": "fixture-key", "api_secret": "fixture-secret"},
@@ -220,9 +221,7 @@ def test_database_binding_supervisor_builds_exact_scoped_read_only_workers() -> 
     assert report.successful is True
     assert report.to_dict()["binding_source"] == "DATABASE_ENVELOPE"
     assert report.sources == {
-        f"{team_id}:BINANCE:binance-team-main": SourceSyncResult(
-            "SUCCESS", items_observed=2
-        ),
+        f"{team_id}:BINANCE:binance-team-main": SourceSyncResult("SUCCESS", items_observed=2),
         f"{team_id}:PERPTAPE": SourceSyncResult("SUCCESS", items_observed=4),
     }
     assert len(built) == 2
@@ -363,6 +362,7 @@ def test_database_binding_supervisor_keeps_okx_secrets_out_of_settings() -> None
         service_principal_username="runtime-okx-account",
         account_id="okx-team-main",
         venue="OKX",
+        environment="LIVE",
         account_version=3,
         credential_version=1,
         credentials={
@@ -415,17 +415,16 @@ def test_runtime_rate_limit_cooldown_skips_only_until_retry_deadline() -> None:
         }
     )
 
-    cooldown = worker._rate_limit_cooldown(
-        "HYPERLIQUID", actor_id=uuid4(), now=now
-    )
+    cooldown = worker._rate_limit_cooldown("HYPERLIQUID", actor_id=uuid4(), now=now)
 
     assert cooldown == SourceSyncResult(
         "SKIPPED",
         error_code="HYPERLIQUID_RATE_LIMITED_COOLDOWN",
     )
-    assert worker._rate_limit_cooldown(
-        "HYPERLIQUID", actor_id=uuid4(), now=now + timedelta(minutes=2)
-    ) is None
+    assert (
+        worker._rate_limit_cooldown("HYPERLIQUID", actor_id=uuid4(), now=now + timedelta(minutes=2))
+        is None
+    )
 
 
 def test_runtime_rate_limit_cooldown_fails_open_to_a_real_probe_on_bad_metadata() -> None:
@@ -437,11 +436,14 @@ def test_runtime_rate_limit_cooldown_fails_open_to_a_real_probe_on_bad_metadata(
         }
     )
 
-    assert worker._rate_limit_cooldown(
-        "HYPERLIQUID",
-        actor_id=uuid4(),
-        now=datetime(2026, 8, 5, tzinfo=UTC),
-    ) is None
+    assert (
+        worker._rate_limit_cooldown(
+            "HYPERLIQUID",
+            actor_id=uuid4(),
+            now=datetime(2026, 8, 5, tzinfo=UTC),
+        )
+        is None
+    )
 
 
 def test_skipped_capital_sources_cannot_be_hidden_by_a_fresh_complete_snapshot() -> None:

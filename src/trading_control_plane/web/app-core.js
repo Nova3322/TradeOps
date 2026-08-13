@@ -126,7 +126,7 @@ const ENGLISH_EXACT = new Map(Object.entries({
   '只读默认':'Read-only by default', '文字区分':'Explicit labeling', '失败即阻断':'Fail closed', '默认安全':'Safe by default', '危险能力':'Dangerous capabilities', '数据时效':'Data freshness',
   '从 GET 接口开始；写操作必须得到明确授权，并按当前 OpenAPI 请求体提供唯一 idempotency_key。':'Start with GET endpoints. Writes require explicit authorization and a unique idempotency_key in the current OpenAPI request body.',
   '从 GET 接口开始；写操作必须得到明确授权，并按当前 OpenAPI 请求体提供唯一':'Start with GET endpoints. Writes require explicit authorization and a unique',
-  '环境字段必须显式读取和保留；SHADOW 结果不得描述成真实成交、持仓或资金。':'Read and preserve environment fields explicitly. SHADOW results must not be described as real fills, positions, or capital.',
+  '环境字段必须显式读取和保留；TESTNET 结果不得描述成真实成交、持仓或资金。':'Read and preserve environment fields explicitly. TESTNET results must not be described as real fills, positions, or capital.',
   '环境字段必须显式读取和保留；':'Read and preserve environment fields explicitly;', '结果不得描述成真实成交、持仓或资金。':'results must not be described as real fills, positions, or capital.',
   '检查 as_of、observed_at、fetched_at 与 data_status。缺失、过期或限流不等于实时，也不等于 0。':'Check as_of, observed_at, fetched_at, and data_status. Missing, stale, or rate-limited data is neither real-time nor zero.',
   '检查':'Check', '。缺失、过期或限流不等于实时，也不等于 0。':'. Missing, stale, or rate-limited data is neither real-time nor zero.',
@@ -138,8 +138,8 @@ const ENGLISH_EXACT = new Map(Object.entries({
   '当前仅部分列表接口提供 limit：通知为 1–200，审计为 1–500。不要自行假设 cursor、offset 或 page 参数；以 OpenAPI 为准。':'Only some list endpoints provide limit: notifications 1–200 and audit 1–500. Do not assume cursor, offset, or page parameters; use OpenAPI.',
   '当前仅部分列表接口提供':'Only some list endpoints provide', '：通知为 1–200，审计为 1–500。不要自行假设':': notifications 1–200 and audit 1–500. Do not assume', '、':',', '与':'and', '或':'or', '参数；以 OpenAPI 为准。':'parameters; use OpenAPI.',
   '主导航':'Main navigation', '工作台':'Workspace', '空间配置':'Space setup', '治理与安全':'Governance and safety', '交易流程':'Trade workflow', '运行与风控':'Operations and risk', '团队设置':'Team settings', '当前范围':'Current scope', '当前任务':'Current tasks', '实时信号':'Live signals', '实时机会':'Live opportunities', 'Webhook 信号':'Webhook signals', '提案管理':'Proposals', '审核队列':'Review queue',
-  '交易任务':'Trades', '绩效报表':'Performance reports', '交易模式':'Trading mode', '影子模式':'Shadow mode', '通知中心':'Notification center', '风险控制':'Risk controls', '系统状态':'System status', '资金':'Capital', '异常':'Exceptions',
-  '交易账户':'Exchange accounts', '模式与账户':'Mode & accounts', '风控中心':'Risk center', '成员权限':'Access control',
+  '交易任务':'Trades', '绩效报表':'Performance reports', '交易模式':'Trading mode', '测试模式':'Testnet mode', '通知中心':'Notification center', '风险控制':'Risk controls', '系统状态':'System status', '资金':'Capital', '异常':'Exceptions',
+  '交易账户':'Exchange accounts', '账户管理':'Account management', '风控中心':'Risk center', '成员权限':'Access control',
   '业务数据库已连接':'Business database connected', '数据缺失时自动阻止交易':'Missing data blocks trading automatically', '跳到主要内容':'Skip to main content',
   '退出当前会话':'Sign out', '正在读取当前事实…':'Loading current data…',
   '突破榜单机会':'Breakout opportunity', '保存候选并提交审核':'Save candidate and submit for review',
@@ -165,7 +165,7 @@ const ENGLISH_EXACT = new Map(Object.entries({
   '先确认服务负载与网络状态，再重新检查；写入超时必须先核对权威状态。':'Check service load and network health before retrying. After a write timeout, verify the authoritative state first.',
   '当前页面不会加载团队或账户数据，也不会开放任何操作。':'This page will not load team or account data and exposes no actions.',
   '团队管理员':'Team administrator', '返回当前任务，或由团队管理员核对岗位、账户与交易所范围。':'Return to current tasks, or ask a team administrator to verify the role, account, and venue scope.',
-  '新增风险、影子启用及相关写入保持阻断；既有减仓与退出边界不因页面提示而改变。':'New risk, Shadow activation, and related writes remain blocked. Existing reduction and exit boundaries are unchanged by this page.',
+  '新增风险、测试启用及相关写入保持阻断；既有减仓与退出边界不因页面提示而改变。':'New risk, Testnet activation, and related writes remain blocked. Existing reduction and exit boundaries are unchanged by this page.',
   '保存当前团队的版本化风险政策后重新检查。':'Save a versioned risk policy for the current team, then retry.',
   '本页事实不可用；依赖这些事实的操作保持阻断。':'Page facts are unavailable; actions depending on them remain blocked.',
   '当前功能负责人或系统管理员':'Feature owner or system administrator', '根据上方原因恢复所需事实后重新检查。':'Restore the required facts described above, then retry.',
@@ -227,7 +227,7 @@ const ENGLISH_EXACT = new Map(Object.entries({
   '等待审核':'Waiting for review', '高风险':'High risk', '30 分钟内到期':'Expires within 30 minutes',
   '需两人审核':'Two reviewers required', '最早到期':'Earliest expiry',
   '待我审核':'Assigned to me', '搜索标的':'Search instrument', '全部方向':'All directions', '来源':'Source', '全部来源':'All sources', '系统机会':'System opportunity', '人工判断':'Manual thesis', '个结果':'results', '查看详情':'View details', '返回审核队列':'Back to review queue', '批准提案':'Approve proposal', '拒绝提案':'Reject proposal',
-  '方向 / 交易规模':'Direction / trade size', '审核进度':'Review progress', '仍需你的独立判断':'Still needs your independent decision', '审核范围':'Review scope', '审核环境范围':'Review environment scope', '选择审核环境':'Select review environment', '生产':'Production', '影子':'Shadow',
+  '方向 / 交易规模':'Direction / trade size', '审核进度':'Review progress', '仍需你的独立判断':'Still needs your independent decision', '审核范围':'Review scope', '审核环境范围':'Review environment scope', '选择审核环境':'Select review environment', '生产':'Production', '测试':'Testnet',
   'Perptape 机会':'Perptape opportunity', 'Live environment · LIVE · Perptape 机会':'Live environment · LIVE · Perptape opportunity', '提案已保存':'Proposal saved', '提案流程':'Proposal workflow', '等待判断':'Awaiting decision', '风险检查':'Risk check', '尚未运行':'Not run', '短期授权':'Short-lived authorization', '尚未签发':'Not issued', '未签发':'Not issued',
   '交易判断摘要':'Trading thesis summary', '这笔交易要做什么':'What this trade intends to do', '估算名义价值':'Estimated notional', '合约数量':'Contract quantity', '初仓':'Initial entry', '失效位置':'Invalidation level', '距触发':'From trigger', '生产账户范围':'Production account scope', '加仓触发价':'Scale-in trigger price', '创建时来源快照':'Source snapshot at creation', '创建时可用':'Available at creation', '快照时间':'Snapshot time',
   '已保存参数':'Saved parameters', '提案范围':'Proposal scope', '不可编辑':'Read only', '限价':'Limit price', '来源候选':'Source candidate', '来源快照时间':'Source snapshot time',
@@ -236,8 +236,8 @@ const ENGLISH_EXACT = new Map(Object.entries({
   '批准或拒绝前都需要再次确认；不会直接下单。':'Approval or rejection requires final confirmation; neither places an order.', '系统允许开多少':'How much the system may open', '等待审核通过':'Waiting for approval',
   '风险检查会读取服务端最新仓位、权益、受管资金、保护和总风险容量。':'The risk check reads current server-side positions, equity, governed capital, protection, and total risk capacity.', '限时授权':'Time-limited authorization', '这份许可还能做什么':'What this authorization permits', '风险通过后可签发':'Available only after risk passes',
   '授权同时限制有效期、数量、风险金额、权限范围和可用加仓次数。':'Authorization is bounded by expiry, quantity, risk amount, permission scope, and available scale-ins.',
-  '生产与影子提案保持独立标记；切换筛选不会改变团队交易模式。':'Production and Shadow proposals remain distinctly labelled. Filtering does not change the team trading mode.',
-  '统一汇总当前团队内需要你独立判断、尚未到期且尚未投票的提案。生产与影子环境始终分开标记；批准不等于下单。':'This inbox combines current-team proposals that still need your independent decision, have not expired, and have not received your vote. Production and Shadow stay distinctly labelled; approval never places an order.',
+  '生产与测试提案保持独立标记；切换筛选不会改变团队交易模式。':'Production and Testnet proposals remain distinctly labelled. Filtering does not change the team trading mode.',
+  '统一汇总当前团队内需要你独立判断、尚未到期且尚未投票的提案。生产与测试环境始终分开标记；批准不等于下单。':'This inbox combines current-team proposals that still need your independent decision, have not expired, and have not received your vote. Production and Testnet stay distinctly labelled; approval never places an order.',
   '风险':'Risk', '全部档位':'All levels', '提交时间':'Submitted', '到期':'Expires', '状态':'Status',
   '数量':'Quantity', '最多':'Up to', '人工':'Manual', '版本':'Version', '当前没有待你审核的提案':'No proposals are waiting for your review',
   '当前没有进行中的提案':'No active proposals', '当前没有历史提案':'No proposal history',
@@ -558,13 +558,13 @@ const ENGLISH_EXACT = new Map(Object.entries({
   'Telegram 私聊机器人最近一次长轮询成功；批准和拒绝仍需二次确认并写入统一审计。':'The Telegram direct-message bot completed its latest long poll. Approvals and rejections still require confirmation and are written to the shared audit log.',
   '团队启用状态':'Team activation status', '团队启用路径':'Team activation path', '服务端前置条件':'Server-enforced prerequisites',
   '成员与职责':'Members and duties', '信号源':'Signal source', '交易账户范围':'Exchange account scope',
-  '版本化风控':'Versioned risk controls', '明确进入影子模式':'Explicitly enter Shadow mode',
+  '版本化风控':'Versioned risk controls', '明确进入测试模式':'Explicitly enter Testnet mode',
   '已满足':'Satisfied', '需处理':'Action required', '等待前置条件':'Waiting for prerequisites',
   '责任角色':'Responsible role', '处理此项 →':'Resolve this item →', '查看此项 →':'View this item →',
   '配置成员权限':'Configure member access', '查看信号源设置':'View signal-source settings',
   '查看交易账户':'View exchange accounts', '查看风险配置':'View risk controls',
-  '创建第一笔影子提案':'Create the first Shadow proposal', '查看影子报表':'View Shadow reports',
-  '初始化虚拟资金':'Initialize virtual capital', '团队管理员':'Team administrator',
+  '创建第一笔测试提案':'Create the first Testnet proposal', '查看测试报表':'View Testnet reports',
+  '初始化交易所测试资产':'Initialize virtual capital', '团队管理员':'Team administrator',
   '交易运维或团队管理员':'Trading operator or team administrator', '未知服务端阻断':'Unknown server blocker',
   '提案、独立审核与交易运维职责已在至少一个精确账户范围内形成闭环。':'Proposal creation, independent review, and trading operations form a complete control loop for at least one exact account scope.',
   '当前团队已启用且只启用一种信号源模式。':'Exactly one signal-source mode is enabled for the current team.',
@@ -576,18 +576,58 @@ const ENGLISH_EXACT = new Map(Object.entries({
   '先登记至少一个当前团队交易账户':'Register at least one exchange account for the current team',
   '至少配置两名不同成员承担提案与独立审核':'Assign proposal and independent-review duties to two different members',
   '至少配置一名交易运维人员':'Assign at least one trading operator',
-  '全部服务端前置条件已满足；仍需团队管理员明确启用，系统不会自动打开业务能力。':'All server prerequisites are satisfied. A team administrator must still enable Shadow mode explicitly; the system never opens business capabilities automatically.',
+  '全部服务端前置条件已满足；仍需团队管理员明确启用，系统不会自动打开业务能力。':'All server prerequisites are satisfied. A team administrator must still enable Testnet mode explicitly; the system never opens business capabilities automatically.',
   '按下面的依赖顺序处理。每项都标明影响、责任角色和下一步；缺少任何一项都会保持交易关闭。':'Resolve the dependencies below in order. Every item states its impact, owner, and next step; any missing item keeps trading closed.',
-  '当前团队只允许 SHADOW 对象；真实订单、资金、签名和广播仍由服务端双重阻断。':'This team accepts Shadow objects only. Live orders, funding, signing, and broadcast remain blocked by the server.',
-  '缺口不会放宽生产或影子边界；按依赖顺序补齐后再运行完整模拟链路。':'The gap does not relax Production or Shadow boundaries. Resolve it in dependency order before running the full simulation flow.',
-  '生产与影子事实按环境、团队、账户、场所和标的分别存储；影子操作不会成为真实发送输入。':'Production and Shadow facts are stored separately by environment, team, account, venue, and instrument. Shadow actions never become live-send inputs.',
+  '当前团队只允许 TESTNET 对象；真实订单、资金、签名和广播仍由服务端双重阻断。':'This team accepts Testnet objects only. Live orders, funding, signing, and broadcast remain blocked by the server.',
+  '缺口不会放宽生产或测试边界；按依赖顺序补齐后再运行完整模拟链路。':'The gap does not relax Production or Testnet boundaries. Resolve it in dependency order before running the full simulation flow.',
+  '生产与测试事实按环境、团队、账户、场所和标的分别存储；测试操作不会成为真实发送输入。':'Production and Testnet facts are stored separately by environment, team, account, venue, and instrument. Testnet actions never become live-send inputs.',
   '此清单直接投影':'This checklist directly projects',
-  '返回的阻断码；页面不自行放宽条件。通知路由可独立配置，但不是当前影子启用的服务端门槛。':'blocker codes. The page never relaxes them. Notification routes are configured separately and are not a server prerequisite for Shadow activation.',
+  '返回的阻断码；页面不自行放宽条件。通知路由可独立配置，但不是当前测试启用的服务端门槛。':'blocker codes. The page never relaxes them. Notification routes are configured separately and are not a server prerequisite for Testnet activation.',
+  '当前模式':'Current mode', '待配置':'Setup required', '生产模式':'Production mode',
+  '团队实际执行环境只在这里切换；账户、资金、提案和交易任务页面均为只读显示。':'The Team execution environment can be switched only here. Account, capital, proposal, and trade pages show it read only.',
+  '订单会发送到交易所生产服务器并影响真实资金。':'Orders are sent to the exchange production server and affect real funds.',
+  '订单会发送到交易所测试服务器，仅代表交易所测试资产。':'Orders are sent to the exchange Testnet server and represent test assets only.',
+  '完成账户、连接、运行服务和风险政策配置后，由管理员选择运行模式。':'After accounts, connections, runtime services, and risk policy are configured, an administrator selects the operating mode.',
+  '目标模式账户准备状态':'Target-mode account readiness', '已就绪':'Ready', '尚未就绪':'Not ready',
+  '测试模式 · 交易所测试环境':'Testnet mode · Exchange Testnet', '生产模式 · 真实资金环境':'Production mode · Real-funds environment',
+  '切换审计':'Switch audit', '最近一次模式切换':'Latest mode switch', '最近切换人':'Last switched by', '最近切换时间':'Last switched at', '切换阻断原因':'Switch blockers',
+  '尚无记录':'No record', '无':'None', '目标账户、凭据、风险政策、来源订单/仓位和运行服务检查通过。':'Target accounts, credentials, risk policy, source orders and positions, and runtime services passed readiness checks.',
+  '等待服务端准备度检查':'Waiting for server readiness checks', '受控切换':'Controlled switch',
+  '切换不会开启实盘下单、自动加仓或资金划转；旧环境未执行授权和订单意图会失效，历史提案环境保持不变。':'Switching does not enable live order sending, automatic scaling, or capital transfers. Unexecuted authorizations and intents in the previous environment expire; proposal history keeps its original environment.',
+  '输入确认文案':'Enter confirmation text', '切换到生产模式':'Switch to Production mode', '切换到测试模式':'Switch to Testnet mode',
+  '普通成员只能查看当前模式；需要系统管理员或 team.manage 权限执行切换。':'Regular members can only view the current mode. A system administrator or administrator with team.manage permission must perform the switch.',
+  '目标环境没有已添加账户':'No account is configured for the target environment', '账户凭据、连接或运行服务尚未就绪':'Account credentials, connection, or runtime service is not ready',
+  '当前团队尚未配置风险政策':'The current Team has no risk policy', '来源环境存在执行中的订单意图':'The source environment has executing order intents',
+  '来源环境存在未结束或状态未知订单':'The source environment has open or unknown orders', '来源环境存在未平仓或状态未知仓位':'The source environment has open or unknown positions',
+  '提前配置测试和生产账户；实际执行环境始终由服务端读取团队当前模式。':'Configure Testnet and Production accounts in advance. The server always derives the execution environment from the Team current mode.',
+  '账户配置范围':'Account configuration scope', '这里切换的只是账户配置范围，不会改变团队当前运行模式。实际模式切换请前往团队设置。':'This switches only the account configuration scope and does not change the Team current mode. Go to Team settings to switch the actual mode.',
+  '前往团队设置':'Open Team settings', '测试账户':'Testnet accounts', '生产账户':'Production accounts', '交易所测试环境 API':'Exchange Testnet API', '真实资金环境 API':'Real-funds API',
+  '尚未添加此环境账户':'No account has been added for this environment', '添加并验证账户后，团队才具备切换到该模式的前置条件。':'Add and verify an account before the Team can switch to this mode.',
+  '这里的选择只影响展示，不会切换运行环境或改变交易能力。':'This selection affects display only; it never switches the runtime environment or changes trading capabilities.',
+  '前往团队设置查看当前模式':'Open Team settings to view current mode', '测试环境资金':'Testnet capital',
+  '仅代表交易所测试资产，不显示 Vault、Safe、生产提现地址或真实资金划转。':'Represents exchange Testnet assets only. Vault, Safe, Production withdrawal addresses, and real capital transfers are hidden.',
+  '选择要叠加的当前模式账户曲线（可多选）':'Select current-mode account series (multiple allowed)', '当前模式尚未添加账户，请先前往“账户管理”。':'No account exists in the current mode. Add one in Account management first.',
+  '应用账户曲线':'Apply account series', '账户多选只影响资金曲线展示，不改变团队运行模式或交易权限。':'Account selection affects capital charts only. It does not change the Team mode or trading permissions.',
+  '当前所选账户总净值':'Current selected-account net worth', '当前不可汇总':'Current total unavailable', '所选账户数据可信，可用于当前汇总':'Selected-account data is trusted and can be totaled', '当前汇总已阻断':'Current total is blocked', '需关注':'Attention required',
+  '资金净值趋势':'Capital net-worth trend', '每个账户一条独立曲线，并提供所选账户汇总。缺失、过期、错位和断档都不会补零或强行连线。':'Each account has an independent series plus a selected-account total. Missing, stale, misaligned, and gapped data is never zero-filled or forcibly connected.',
+  '尚无可绘制的资金历史；缺失数据不会补零。':'No capital history can be plotted; missing data is never zero-filled.',
+  '每个交易任务覆盖一笔交易从授权、风险占用和下单意图，到成交、保护、减仓、对账与最终结果的完整生命周期。':'Each trade covers the full lifecycle from authorization, risk reservation, and order intent through fills, protection, reductions, reconciliation, and final outcome.',
+  '交易任务记录':'Trade records', '建仓中 / 持仓中':'Opening / Open', '运行范围':'Runtime scope', '提案通过独立审核、实时风险检查和短期授权后，交易运维人员才能在同一环境发起订单。':'Only after independent review, real-time risk checks, and short-lived authorization may a trading operator submit an order in the same environment.',
 }));
 
 const ENGLISH_PATTERNS = [
-  [/^(生产|影子)环境 · (LIVE|SHADOW) · Perptape 机会$/, (_match, label, environment) => `${label === '生产' ? 'Production' : 'Shadow'} environment · ${environment} · Perptape opportunity`],
-  [/^(币安|Binance) · (生产|影子)账户范围 · 提案 (.+) · 版本 (\d+)$/, (_match, venue, environment, proposal, version) => `${venue === '币安' ? 'Binance' : venue} · ${environment === '生产' ? 'Production' : 'Shadow'} account scope · Proposal ${proposal} · Version ${version}`],
+  [/^团队设置 · (.+)$/, 'Team settings · $1'],
+  [/^切换到(测试模式|生产模式) · (.+)$/, (_match, mode, environment) => `Switch to ${mode === '测试模式' ? 'Testnet mode' : 'Production mode'} · ${environment === '交易所测试环境' ? 'Exchange Testnet' : 'Real-funds environment'}`],
+  [/^(\d+) \u7c7b\u963b\u65ad$/, '$1 blocker categories'],
+  [/^(\d+) \u9879$/, '$1 items'],
+  [/^(\u6d4b\u8bd5\u6a21\u5f0f|\u751f\u4ea7\u6a21\u5f0f) \u00b7 (\d+) \u4e2a\u914d\u7f6e$/, (_match, mode, count) => `${mode === '\u6d4b\u8bd5\u6a21\u5f0f' ? 'Testnet mode' : 'Production mode'} \u00b7 ${count} configurations`],
+  [/^(\u6d4b\u8bd5\u6a21\u5f0f|\u751f\u4ea7\u6a21\u5f0f)\u8d44\u91d1 \u00b7 \u591a\u8d26\u6237\u53ea\u8bfb\u4e8b\u5b9e$/, (_match, mode) => `${mode === '\u6d4b\u8bd5\u6a21\u5f0f' ? 'Testnet' : 'Production'} capital \u00b7 Multi-account read-only facts`],
+  [/^(\u6d4b\u8bd5\u6a21\u5f0f|\u751f\u4ea7\u6a21\u5f0f) \u00b7 \u73af\u5883\u4e0d\u53ef\u8de8\u8d8a$/, (_match, mode) => `${mode === '\u6d4b\u8bd5\u6a21\u5f0f' ? 'Testnet mode' : 'Production mode'} \u00b7 Environment locked`],
+  [/^\u5f53\u524d\u6ca1\u6709(\u6d4b\u8bd5\u6a21\u5f0f|\u751f\u4ea7\u6a21\u5f0f)\u4ea4\u6613\u4efb\u52a1$/, (_match, mode) => `No ${mode === '\u6d4b\u8bd5\u6a21\u5f0f' ? 'Testnet' : 'Production'} trades`],
+  [/^(\d+) \u4e2a\u6240\u9009\u8d26\u6237\u66f2\u7ebf$/, '$1 selected-account series'],
+  [/^\u5f53\u524d\u6a21\u5f0f\uff1a(\u6d4b\u8bd5\u6a21\u5f0f|\u751f\u4ea7\u6a21\u5f0f|\u5f85\u914d\u7f6e)$/, (_match, mode) => `Current mode: ${mode === '\u6d4b\u8bd5\u6a21\u5f0f' ? 'Testnet mode' : mode === '\u751f\u4ea7\u6a21\u5f0f' ? 'Production mode' : 'Setup required'}`],
+  [/^(生产|测试)环境 · (LIVE|TESTNET) · Perptape 机会$/, (_match, label, environment) => `${label === '生产' ? 'Production' : 'Testnet'} environment · ${environment} · Perptape opportunity`],
+  [/^(币安|Binance) · (生产|测试)账户范围 · 提案 (.+) · 版本 (\d+)$/, (_match, venue, environment, proposal, version) => `${venue === '币安' ? 'Binance' : venue} · ${environment === '生产' ? 'Production' : 'Testnet'} account scope · Proposal ${proposal} · Version ${version}`],
   [/^剩余 (值|\d+) 小时 (值|\d+) 分钟$/, '$1 hours $2 minutes remaining'],
   [/^(\d+) 小时 (\d+) 分钟$/, '$1 hours $2 minutes'],
   [/^(.+) · 剩余 (\d+) 小时 (\d+) 分钟$/, '$1 · $2 hours $3 minutes remaining'],
@@ -607,11 +647,11 @@ const ENGLISH_PATTERNS = [
   [/^最多损失 (.+)$/, 'Maximum loss $1'],
   [/^已 (\d+) \/ (\d+)$/, '$1 of $2'],
   [/^剩余 (\d+) 小时 (\d+) 分钟$/, '$1 hours $2 minutes remaining'],
-  [/^当前没有运行阻断。生产 (\d+) 笔，影子 (\d+) 笔；打开队列逐项判断，批准不会直接产生订单。$/, 'There is no runtime blocker. Production: $1; Shadow: $2. Review each proposal in the inbox; approval never places an order.'],
-  [/^生产 (\d+) · 影子 (\d+)$/, 'Production $1 · Shadow $2'],
-  [/^最早一笔到期于 (.+)。生产 (\d+) 笔，影子 (\d+) 笔。$/, 'The earliest expires at $1. Production: $2; Shadow: $3.'],
-  [/^(\d+) 笔将在 30 分钟内到期。生产 (\d+) 笔，影子 (\d+) 笔。$/, '$1 proposals expire within 30 minutes. Production: $2; Shadow: $3.'],
-  [/^当前筛选：生产 (\d+) 笔 · 影子 (\d+) 笔；系统机会 (\d+) 笔 · 人工判断 (\d+) 笔。这里只统计你尚未投票、仍在有效期内的提案。$/, 'Current filter: Production $1 · Shadow $2; system opportunities $3 · manual theses $4. Only unexpired proposals that have not received your vote are counted.'],
+  [/^当前没有运行阻断。生产 (\d+) 笔，测试 (\d+) 笔；打开队列逐项判断，批准不会直接产生订单。$/, 'There is no runtime blocker. Production: $1; Testnet: $2. Review each proposal in the inbox; approval never places an order.'],
+  [/^生产 (\d+) · 测试 (\d+)$/, 'Production $1 · Testnet $2'],
+  [/^最早一笔到期于 (.+)。生产 (\d+) 笔，测试 (\d+) 笔。$/, 'The earliest expires at $1. Production: $2; Testnet: $3.'],
+  [/^(\d+) 笔将在 30 分钟内到期。生产 (\d+) 笔，测试 (\d+) 笔。$/, '$1 proposals expire within 30 minutes. Production: $2; Testnet: $3.'],
+  [/^当前筛选：生产 (\d+) 笔 · 测试 (\d+) 笔；系统机会 (\d+) 笔 · 人工判断 (\d+) 笔。这里只统计你尚未投票、仍在有效期内的提案。$/, 'Current filter: Production $1 · Testnet $2; system opportunities $3 · manual theses $4. Only unexpired proposals that have not received your vote are counted.'],
   [/^(\d+) 个交易任务$/, '$1 trades'], [/^(\d+) 项阻断$/, '$1 blockers'], [/^(\d+) 项需要处理$/, '$1 issues require action'],
   [/^(\d+) 项阻断，查看详情$/, '$1 blockers; view details'],
   [/^(\d+) 项敞口不确定$/, '$1 exposure issues'], [/^(\d+) 项未一致$/, '$1 reconciliation issues'],
@@ -631,8 +671,8 @@ const ENGLISH_PATTERNS = [
   [/^等待生产身份源绑定 · 创建于 (.+)$/, 'Waiting for production identity binding · created $1'],
   [/^(\d+) 项总阻断$/, '$1 total blockers'],
   [/^(\d+) 项条件仍需完成$/, '$1 prerequisites remain'],
-  [/^生产团队仍有 (\d+) 项影子准备度缺口$/, 'Production Shadow-readiness gaps: $1'],
-  [/^(\d+) 个影子交易任务已进入可复盘链路$/, '$1 Shadow trades are ready for review'],
+  [/^生产团队仍有 (\d+) 项测试准备度缺口$/, 'Production Testnet-readiness gaps: $1'],
+  [/^(\d+) 个测试交易任务已进入可复盘链路$/, '$1 Testnet trades are ready for review'],
   [/^(\d+) 个运行中交易任务$/, '$1 active trades'],
   [/^已读取 (\d+) 个候选，可用于机会筛选和提案。$/, '$1 candidates loaded and available for opportunity screening and proposals.'],
   [/^只读 · 最近数据 (.+)$/, 'Read only · latest data $1'],
@@ -736,7 +776,7 @@ function translateChineseText(value) {
     .replace(/([\u3400-\u9fff])\s+突破榜单/g, '$1突破榜单')
     .replace(/突破榜单\s+([\u3400-\u9fff])/g, '突破榜单$1')
     .replace(/\bLIVE\b/g, '实盘')
-    .replace(/\bSHADOW\b/g, '模拟')
+    .replace(/\bTESTNET\b/g, '模拟')
     .replace(/\bTESTNET\b/g, '测试网')
     .replace(/([\u3400-\u9fff）])\s+([\u3400-\u9fff（])/g, '$1$2');
 }
@@ -806,10 +846,10 @@ const sideEnglishLabels = {BUY:'Buy',SELL:'Sell'};
 const capitalDirectionLabels = {VAULT_TO_VENUE:'资金库转入交易所',VENUE_TO_VAULT:'交易所转回资金库'};
 const capitalPurposeLabels = {AUTO_PROFIT_SWEEP:'自动归集利润',AUTO_OPERATING_REFILL:'自动补充运营资金',MANUAL:'人工调配资金'};
 const capitalTransportLabels = {MOCK:'模拟执行',NOTILT_UNSIGNED_HANDOFF:'NoTilt 未签名交接'};
-const environmentLabels = {LIVE:'生产环境',SHADOW:'影子模式',TESTNET:'测试网',production:'生产环境',test:'测试环境',development:'开发环境',local:'本地环境'};
+const environmentLabels = {LIVE:'生产模式',TESTNET:'测试模式',production:'生产环境',test:'测试环境',development:'开发环境',local:'本地环境'};
 const currentWorkflowEnvironment = () => {
   const persistedMode = session?.active_team?.execution_mode;
-  return ['LIVE','SHADOW'].includes(persistedMode) ? persistedMode : 'SETUP';
+  return ['LIVE','TESTNET'].includes(persistedMode) ? persistedMode : 'SETUP';
 };
 const roleLabels = {OBSERVER:'只读用户',PROPOSER:'提案发起人',REVIEWER:'审核人',OPERATOR:'交易运维人员',TREASURY_ADMIN:'资金管理员',SYSTEM_ADMIN:'系统管理员',SYSTEM:'系统'};
 const readinessLabels = {READY:'可用',DEGRADED:'数据不完整',INCOMPLETE:'数据不完整',STALE:'数据已过期'};
@@ -864,11 +904,11 @@ const fmtSide = (value) => currentLanguage === 'en'
   : sideLabels[value] || value || '未知方向';
 const deploymentEnvironmentLabels = {
   LOCAL:'本地运行', TEST:'测试运行', PRODUCTION:'生产运行',
-  LIVE:'真实环境', TESTNET:'测试网', SHADOW:'影子模式',
+  LIVE:'生产模式', TESTNET:'测试模式',
 };
 const deploymentEnvironmentEnglishLabels = {
   LOCAL:'Local runtime', TEST:'Test runtime', PRODUCTION:'Production runtime',
-  LIVE:'Live environment', TESTNET:'Testnet', SHADOW:'Shadow mode',
+  LIVE:'Production mode', TESTNET:'Test mode',
 };
 const fmtEnvironment = (value, withCode = false) => {
   const code = String(value || '').trim().toUpperCase();
@@ -1141,7 +1181,7 @@ const routeCapability = (path) => {
   if (path === '/reviews') return 'proposal.review';
   if (path === '/proposals' || path.startsWith('/proposals/')) return 'proposal.view';
   if (path === '/campaigns' || path.startsWith('/campaigns/') || path === '/orders' || path === '/exceptions') return 'operations.view';
-  if (path === '/shadow' || path === '/trading-mode') return 'venue.view';
+  if (path === '/accounts' || path === '/trading-mode' || path === '/team-settings') return 'venue.view';
   if (path === '/results') return 'results.view';
   if (path === '/notifications') return 'notification.view';
   if (path === '/positions' || path === '/risk') return 'system.view';
@@ -1374,7 +1414,7 @@ function errorStateGuidance(error) {
   };
   if (error?.code === 'RISK_POLICY_MISSING') return {
     title:'风险政策尚未配置', reason,
-    impact:'新增风险、影子启用及相关写入保持阻断；既有减仓与退出边界不因页面提示而改变。',
+    impact:'新增风险、测试启用及相关写入保持阻断；既有减仓与退出边界不因页面提示而改变。',
     owner:'系统管理员',
     next:'保存当前团队的版本化风险政策后重新检查。',
   };
@@ -1576,7 +1616,7 @@ async function route() {
     return;
   }
   setShell(true);
-  const teamSetupPaths = new Set(['/admin/users', '/admin/agents', '/profile/api-keys', '/profile/api-access', '/venues', '/signals', '/webhook-signals', '/notifications', '/risk', '/shadow', '/trading-mode']);
+  const teamSetupPaths = new Set(['/admin/users', '/admin/agents', '/profile/api-keys', '/profile/api-access', '/accounts', '/team-settings', '/venues', '/signals', '/webhook-signals', '/notifications', '/risk', '/trading-mode']);
   if (!session.active_workspace || !session.active_team || (!session.active_team.trading_enabled && !teamSetupPaths.has(path) && !path.startsWith('/venues/'))) {
     renderScopeSetup();
     enhanceRenderedPage();
@@ -1602,7 +1642,9 @@ async function route() {
       await renderProposalList(null, historyMode ? '历史提案' : '当前提案', historyMode);
     }
     else if (path === '/campaigns') await renderCampaignList();
-    else if (path === '/shadow' || path === '/trading-mode') await renderTradingMode();
+    else if (path === '/accounts') await renderAccountManagement();
+    else if (path === '/team-settings') await renderTeamSettings();
+    else if (path === '/trading-mode') { history.replaceState({}, '', '/accounts'); await renderAccountManagement(); }
     else if (path === '/results') await renderActualResults();
     else if (path === '/notifications') await renderNotifications();
     else if (path === '/campaigns/alerts') await renderRuntimeAlerts();
@@ -1611,13 +1653,12 @@ async function route() {
     else if (path === '/risk') await renderCampaignFacts('risk');
     else if (path === '/capital') await renderCapitalCenter();
     else if (path === '/exceptions') { history.replaceState({}, '', '/campaigns/alerts'); await renderRuntimeAlerts(); }
-    else if (path === '/venues') { history.replaceState({}, '', '/trading-mode'); await renderTradingMode(); }
+    else if (path === '/venues') { history.replaceState({}, '', '/accounts'); await renderAccountManagement(); }
     else if (path === '/venues/binance' || path === '/venues/hyperliquid') {
       const legacyVenue = path.endsWith('/hyperliquid') ? 'HYPERLIQUID' : 'BINANCE';
       history.replaceState({}, '', `/venues?venue=${legacyVenue}`);
       await renderVenueAccounts();
     }
-    else if (path === '/venues/shadow') await renderVenueShadowAccount();
     else if (path === '/admin/users') await renderAccessManagement();
     else if (path === '/profile/api-keys' || path === '/profile/api-access' || path === '/admin/agents') await renderApiAccess();
     else {

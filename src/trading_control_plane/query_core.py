@@ -47,14 +47,9 @@ from trading_control_plane.models import (
     RoleAssignment,
     RuntimeSourceHealth,
     SenderLease,
-    ShadowFill,
-    ShadowInstrument,
-    ShadowOrder,
-    ShadowPosition,
     SignalEvent,
     Team,
     TeamMembership,
-    TeamShadowAccount,
     TradingAuthorization,
     TransferAuthorization,
     TransferProposal,
@@ -229,8 +224,6 @@ def _proposal_execution_status(
     return "AWAITING_LAUNCH"
 
 
-
-
 __all__ = [
     "NOTIFICATION_TEMPLATES",
     "ROLE_ACTIONS",
@@ -278,13 +271,8 @@ __all__ = [
     "SenderLease",
     "ServicePrincipalKind",
     "Session",
-    "ShadowFill",
-    "ShadowInstrument",
-    "ShadowOrder",
-    "ShadowPosition",
     "Team",
     "TeamMembership",
-    "TeamShadowAccount",
     "TradingAuthorization",
     "TransferAuthorization",
     "TransferProposal",

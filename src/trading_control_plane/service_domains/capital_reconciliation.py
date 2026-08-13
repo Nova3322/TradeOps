@@ -34,11 +34,6 @@ class ReconciliationCapitalService(ServiceComponent):
     ) -> UUID:
         if location_type not in {"VAULT", "VENUE"}:
             _reject("CAPITAL_LOCATION_INVALID", "capital location must be VAULT or VENUE")
-        if environment is ExecutionEnvironment.LIVE:
-            _reject(
-                "CAPITAL_LIVE_FACT_DISABLED",
-                "LIVE capital facts require a configured read-only adapter",
-            )
         if observed_at > now:
             _reject("FACT_TIME_INVALID", "capital observation cannot be in the future")
         if withdrawable_balance > available_balance or available_balance > equity:
@@ -66,6 +61,15 @@ class ReconciliationCapitalService(ServiceComponent):
                 location_id if location_type == "VENUE" else None,
                 venue if location_type == "VENUE" else None,
             )
+            actor = session.get(User, actor_id)
+            if environment is ExecutionEnvironment.LIVE and not (
+                (actor is not None and actor.principal_type == PrincipalType.SERVICE.value)
+                or current_api_client_context() is not None
+            ):
+                _reject(
+                    "CAPITAL_LIVE_FACT_DISABLED",
+                    "LIVE capital facts require a configured read-only adapter",
+                )
             if location_type == "VENUE":
                 self.facade._ensure_exchange_account_reference(
                     session,

@@ -55,51 +55,6 @@ function exchangeAccountCreatePanel(registry) {
   return `<dialog id="connect-account-dialog" class="account-create-dialog" aria-labelledby="connect-account-title"><form id="exchange-account-form" class="dialog-form"><div class="dialog-head"><div><p class="eyebrow">实盘账户</p><h2 id="connect-account-title">接入交易账户</h2><p class="subtle">登记当前空间内的交易所账户并加密保存凭据。</p></div><button class="icon-button" type="button" data-close-account-create aria-label="关闭接入账户窗口">×</button></div><div class="field-grid"><label>交易所<select name="venue"><option value="BINANCE">Binance</option><option value="HYPERLIQUID">Hyperliquid</option><option value="OKX">OKX</option><option value="BYBIT">Bybit</option></select></label><label>内部账户 ID<input name="account_id" maxlength="120" placeholder="例如 binance-space-a-01" required></label><label>显示名称<input name="label" maxlength="120" placeholder="例如 主策略账户"></label></div><fieldset class="exchange-credential-fields"><legend>加密凭据</legend><div class="field-grid" data-create-credential-fields>${exchangeCredentialFields('BINANCE')}</div></fieldset><p class="safety-note">账户、权限和审计仅归属当前空间；创建不会开启交易、资金、签名或广播。</p><div class="form-error" role="alert"></div><div class="dialog-actions"><button class="secondary" type="button" data-close-account-create>取消</button><button class="primary">登记并加密保存</button></div></form></dialog>`;
 }
 
-function shadowAccountListState(data) {
-  const active = data?.execution_mode === 'SHADOW' && Boolean(data.shadow_account);
-  return active
-    ? {label:'模拟运行中', tone:'status-APPROVED', action:'管理模拟账户'}
-    : {label:'尚未启用', tone:'status-DISABLED', action:'配置模拟账户'};
-}
-
-function shadowAccountCard(data) {
-  const state = shadowAccountListState(data);
-  const account = data?.shadow_account;
-  const asset = account ? `${fmtNumber(account.equity)} U` : '等待初始化';
-  const activity = account ? `${Number(data.position_count || 0)} 个持仓 · ${Number(data.open_order_count || 0)} 个未成交` : '启用影子模式后自动初始化';
-  return `<article class="card exchange-account-card is-shadow-account"><div class="account-card-head"><span class="account-venue-mark is-shadow" aria-hidden="true">S</span><div><div class="account-card-kicker"><span class="account-kind-badge">模拟账户</span><span>内部账本</span></div><h2>空间模拟账户</h2><p>不连接交易所，不使用实盘凭据</p></div><span class="status-pill ${state.tone}">${state.label}</span></div><dl class="account-list-facts"><div><dt>账户类型</dt><dd>SHADOW 模拟</dd></div><div><dt>模拟资产</dt><dd>${escapeHtml(asset)}</dd></div><div><dt>当前活动</dt><dd>${escapeHtml(activity)}</dd></div></dl><a class="primary account-primary-action" href="/venues/shadow" data-link>${state.action}<span aria-hidden="true">→</span></a></article>`;
-}
-
-async function renderVenueShadowAccount() {
-  const response = await api('/api/trading-mode');
-  const data = response.data;
-  if (data.execution_mode === 'SHADOW' && data.shadow_account) {
-    renderShadowAccountDetails(data);
-    const page = main.querySelector('.shadow-workspace');
-    page?.classList.add('venue-shadow-account-page');
-    const back = page?.querySelector('.page-head > a.secondary');
-    if (back) {
-      back.href = '/venues';
-      back.textContent = '返回交易账户';
-    }
-    return;
-  }
-  main.innerHTML = `<section class="page venue-shadow-account-page"><div class="detail-back-row"><a class="row-link" href="/venues" data-link>← 返回交易账户</a><span class="account-kind-badge">模拟账户</span></div><header class="page-head"><div><p class="eyebrow">当前空间 · ${escapeHtml(data.team_name)}</p><h1>配置模拟账户</h1><p class="lede">模拟账户使用独立内部账本，不读取交易所凭据，也不会向交易所发送订单。</p></div></header><article class="card shadow-account-setup-card"><span class="account-venue-mark is-shadow" aria-hidden="true">S</span><div><p class="eyebrow">SHADOW</p><h2>模拟账户尚未启用</h2><p class="subtle">切换到影子模式后，服务端会为当前空间初始化 100,000 U 模拟资产；真实下单、资金划转和自动加仓仍保持关闭。</p><div class="form-error" role="alert"></div><button class="primary" type="button" data-enable-shadow-account>启用模拟账户</button></div></article></section>`;
-  document.querySelector('[data-enable-shadow-account]')?.addEventListener('click', async event => {
-    const confirmed = await confirmAction({title:'启用当前空间的模拟账户？', message:'当前空间会切换到影子模式并初始化内部模拟账本；不会开启真实下单、资金划转、签名或广播。', confirmLabel:'确认启用模拟账户'});
-    if (!confirmed) return;
-    const trigger = event.currentTarget;
-    await withPending(trigger, '启用中…', async () => {
-      try {
-        const result = await api(`/api/teams/${data.team_id}/trading-mode`, {method:'PUT', body:JSON.stringify({mode:'SHADOW', confirmation:'SWITCH_TO_SHADOW', expected_version:data.version, idempotency_key:crypto.randomUUID()})});
-        session = result.session;
-        showToast('模拟账户已启用；真实交易能力保持关闭');
-        await route();
-      } catch (error) { showApiError(error, main.querySelector('.form-error')); }
-    });
-  });
-}
-
 function exchangeAccountDetailConfiguration(item) {
   const credentials = item.credentials || {};
   const permissions = item.permissions || {};
@@ -275,47 +230,7 @@ function bindExchangeAccountForms() {
 }
 
 async function renderVenueAccounts() {
-  const params = new URLSearchParams(location.search);
-  const selectedVenue = (params.get('venue') || 'ALL').toUpperCase();
-  const venue = ['ALL','SHADOW','BINANCE','HYPERLIQUID','OKX','BYBIT'].includes(selectedVenue) ? selectedVenue : 'ALL';
-  const [accountResult, runtime, tradingModeResult] = await Promise.all([
-    api('/api/exchange-accounts'),
-    api('/api/runtime/status').catch(error => [403, 409].includes(error.status) ? null : Promise.reject(error)),
-    api('/api/trading-mode'),
-  ]);
-  const registry = accountResult.data;
-  const tradingMode = tradingModeResult.data;
-  const allAccounts = registry.data || [];
-  const fixtureAccounts = allAccounts.filter(isFixtureExchangeAccount);
-  const productionAccounts = allAccounts.filter(item => !isFixtureExchangeAccount(item));
-  const visibleAccounts = venue === 'ALL' ? productionAccounts : venue === 'SHADOW' ? [] : productionAccounts.filter(item => item.venue === venue);
-  const showShadowAccount = venue === 'ALL' || venue === 'SHADOW';
-  const anomalousAccounts = productionAccounts.filter(item => exchangeAccountListState(item, runtime).anomaly);
-  const liveCards = visibleAccounts.map(item => {
-    const state = exchangeAccountListState(item, runtime);
-    const path = exchangeAccountPath(item);
-    const venueLabel = exchangeVenueLabels[item.venue] || item.venue;
-    const deleteAction = item.permissions?.can_delete ? `<button class="danger account-delete-action" type="button" data-delete-exchange-account="${escapeHtml(item.exchange_account_id)}" data-account-label="${escapeHtml(item.label)}" data-version="${item.version}">删除</button>` : '';
-    return `<article class="card exchange-account-card"><div class="account-card-head"><span class="account-venue-mark venue-${escapeHtml(item.venue)}" aria-hidden="true">${escapeHtml(venueLabel.slice(0, 1))}</span><div><div class="account-card-kicker"><span class="account-kind-badge is-live">实盘账户</span><span>${escapeHtml(item.account_id)}</span></div><h2>${escapeHtml(item.label)}</h2><p>${escapeHtml(venueLabel)} · 精确账户隔离</p></div><span class="status-pill ${state.tone}">${escapeHtml(state.label)}</span></div><dl class="account-list-facts"><div><dt>交易所</dt><dd>${escapeHtml(venueLabel)}</dd></div><div><dt>连接状态</dt><dd>${escapeHtml(state.label)}</dd></div><div><dt>${state.latestAt ? '最近同步或检查' : '数据新鲜度'}</dt><dd>${state.latestAt ? fmtDate(state.latestAt) : '尚无同步记录'}</dd></div></dl><div class="account-card-actions"><a class="primary account-primary-action" href="${path}#${state.anchor}" data-link>${escapeHtml(state.action)}<span aria-hidden="true">→</span></a>${deleteAction}</div></article>`;
-  }).join('');
-  const cards = `${showShadowAccount ? shadowAccountCard(tradingMode) : ''}${liveCards}`;
-  const filterOptions = [['ALL','全部账户'],['SHADOW','模拟账户'], ...Object.entries(exchangeVenueLabels)];
-  const spaceName = session?.active_team?.name || session?.active_team?.slug || '未选择空间';
-  const visibleCount = visibleAccounts.length + (showShadowAccount ? 1 : 0);
-  main.innerHTML = `<section class="page venue-account-list-page"><header class="account-list-hero"><div><p class="eyebrow">当前空间 · ${escapeHtml(spaceName)}</p><h1>交易账户</h1><p class="lede">实盘账户与模拟账户统一管理。连接、凭据和账户数据在各自详情页维护。</p></div><button class="primary account-connect-button" type="button" data-open-account-create ${registry.can_manage ? '' : 'hidden'}><span aria-hidden="true">＋</span> 接入实盘账户</button></header><div class="account-list-stats"><div><small>账户总数</small><b>${productionAccounts.length + 1}</b><span>${productionAccounts.length} 实盘 · 1 模拟</span></div><div><small>实盘异常</small><b class="${anomalousAccounts.length ? 'warning-text' : 'direction-long'}">${anomalousAccounts.length}</b><span>${anomalousAccounts.length ? '需要处理连接或同步' : '连接与同步正常'}</span></div><div><small>模拟账户</small><b>${tradingMode.execution_mode === 'SHADOW' && tradingMode.shadow_account ? '运行中' : '未启用'}</b><span>独立内部账本</span></div></div><section class="account-list-section"><div class="account-list-section-head"><div><p class="eyebrow">账户目录</p><h2>选择要管理的账户</h2></div><label>账户筛选<select data-account-venue-filter>${filterOptions.map(([value, label]) => `<option value="${value}" ${venue === value ? 'selected' : ''}>${label}</option>`).join('')}</select></label></div>${fixtureAccounts.length ? `<p class="fixture-account-note">${fixtureAccounts.length} 个测试 Fixture 账户已隐藏，不计入账户总数。</p>` : ''}${cards ? `<div class="exchange-account-grid">${cards}</div>` : '<div class="callout tone-attention"><b>当前筛选下没有实盘账户。</b><p>可从页面顶部接入一个交易所账户。</p></div>'}<p class="account-list-result">显示 ${visibleCount} 个账户</p></section>${exchangeAccountCreatePanel(registry)}</section>`;
-  document.querySelector('[data-account-venue-filter]')?.addEventListener('change', event => {
-    const nextVenue = event.currentTarget.value;
-    history.pushState({}, '', nextVenue === 'ALL' ? '/venues' : `/venues?venue=${encodeURIComponent(nextVenue)}`);
-    route();
-  });
-  document.querySelector('[data-open-account-create]')?.addEventListener('click', () => {
-    const accountDialog = document.querySelector('#connect-account-dialog');
-    accountDialog?.showModal();
-    accountDialog?.querySelector('select, input')?.focus();
-  });
-  document.querySelectorAll('[data-close-account-create]').forEach(button => button.addEventListener('click', () => document.querySelector('#connect-account-dialog')?.close()));
-  document.querySelector('#connect-account-dialog')?.addEventListener('click', event => { if (event.target === event.currentTarget) event.currentTarget.close(); });
-  bindExchangeAccountForms();
+  return renderAccountManagement();
 }
 
 async function renderVenueAccountDetail(requestedAccountId) {

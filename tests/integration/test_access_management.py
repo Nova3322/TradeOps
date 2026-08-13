@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from datetime import UTC, datetime, timedelta
 
+from conftest import add_exchange_account_fixture
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy import select
 
@@ -153,9 +154,10 @@ async def exercise_access_management(database: Database) -> None:
         await stale_session_client.aclose()
         replay = await client.post("/api/auth/password", json=password_change_payload)
         assert replay.status_code == 200, replay.text
-        assert replay.json()["session"]["auth_version"] == password_change.json()["session"][
-            "auth_version"
-        ]
+        assert (
+            replay.json()["session"]["auth_version"]
+            == password_change.json()["session"]["auth_version"]
+        )
         assert (await client.get("/api/auth/session")).status_code == 200
         with database.session_factory() as session:
             password_audit = session.scalar(
@@ -296,22 +298,13 @@ def test_only_system_admin_manages_members_while_admin_keeps_highest_permissions
 async def exercise_six_identity_permission_matrix(database: Database) -> None:
     service = TradingService(database)
     admin_id = service.bootstrap_admin("matrix-admin", now=datetime.now(UTC))
-    now = datetime.now(UTC)
     for venue, account_id in (
         ("BINANCE", "acct-live"),
         ("HYPERLIQUID", "acct-hl"),
         ("OKX", "acct-okx"),
         ("BYBIT", "acct-bybit"),
     ):
-        service.create_exchange_account(
-            actor_id=admin_id,
-            account_id=account_id,
-            venue=venue,
-            label=f"{venue} matrix account",
-            credentials=None,
-            idempotency_key=f"matrix-{venue.lower()}-account",
-            now=now,
-        )
+        add_exchange_account_fixture(service.database, admin_id, account_id, venue)
     app = access_app(database)
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as admin_http:
         await login(admin_http, "matrix-admin")

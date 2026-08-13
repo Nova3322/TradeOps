@@ -37,7 +37,6 @@ from trading_control_plane.service_domains.execution_freqtrade import (
     FreqtradeRecoveryExecutionService,
 )
 from trading_control_plane.service_domains.execution_intent import IntentExecutionService
-from trading_control_plane.service_domains.execution_shadow import ShadowExecutionService
 from trading_control_plane.service_domains.execution_venue import VenueCommandExecutionService
 from trading_control_plane.service_domains.proposals import ProposalService
 from trading_control_plane.service_domains.risk_authorization import AuthorizationRiskService
@@ -53,12 +52,8 @@ from trading_control_plane.service_transactions import TransactionService
 class TradingService:
     """Compatibility facade over typed, lifecycle-focused service components."""
 
-    _validate_add_candidate = staticmethod(
-        AuthorizationRiskService._validate_add_candidate
-    )
-    _canonical_restore_scopes = staticmethod(
-        RecoveryRiskService._canonical_restore_scopes
-    )
+    _validate_add_candidate = staticmethod(AuthorizationRiskService._validate_add_candidate)
+    _canonical_restore_scopes = staticmethod(RecoveryRiskService._canonical_restore_scopes)
 
     def __init__(
         self,
@@ -92,7 +87,6 @@ class TradingService:
         self._execution_venue = VenueCommandExecutionService(self.runtime, self)
         self._execution_facts = FactIngestionExecutionService(self.runtime, self)
         self._execution_campaign = CampaignExecutionService(self.runtime, self)
-        self._execution_shadow = ShadowExecutionService(self.runtime, self)
         self._trading_mode = TradingModeService(self.runtime, self)
         self._execution_freqtrade = FreqtradeRecoveryExecutionService(self.runtime, self)
         self._capital_direct = DirectOperationCapitalService(self.runtime, self)
@@ -106,6 +100,8 @@ class TradingService:
         self._ensure_exchange_account_reference = self._accounts._ensure_exchange_account_reference
         self.create_exchange_account = self._accounts.create_exchange_account
         self.delete_exchange_account = self._accounts.delete_exchange_account
+        self.update_exchange_account = self._accounts.update_exchange_account
+        self.set_exchange_account_state = self._accounts.set_exchange_account_state
         self.rotate_exchange_account_credentials = (
             self._accounts.rotate_exchange_account_credentials
         )
@@ -136,6 +132,7 @@ class TradingService:
         self.start_freqtrade_live_dispatch = self._accounts.start_freqtrade_live_dispatch
         self.freqtrade_dispatch_external_id = self._accounts.freqtrade_dispatch_external_id
         self.runtime_account_bindings = self._accounts.runtime_account_bindings
+        self.execution_account_binding = self._accounts.execution_account_binding
         self.perptape_runtime_bindings = self._accounts.perptape_runtime_bindings
         self.validate_runtime_account_binding = self._accounts.validate_runtime_account_binding
         self.validate_perptape_runtime_binding = self._accounts.validate_perptape_runtime_binding
@@ -213,9 +210,6 @@ class TradingService:
         self.set_capability_gate = self._capital_automation.set_capability_gate
         self.create_order_intent = self._execution_intent.create_order_intent
         self._consume_add_unit = self._execution_intent._consume_add_unit
-        self._simulate_linked_shadow_intent = (
-            self._trading_mode._simulate_linked_shadow_intent
-        )
         self.mark_intent_unknown = self._execution_intent.mark_intent_unknown
         self.release_unfilled_intent = self._execution_intent.release_unfilled_intent
         self.acquire_sender = self._execution_intent.acquire_sender
@@ -298,16 +292,8 @@ class TradingService:
         )
         self.prepare_live_protection_cancel = self._execution_venue.prepare_live_protection_cancel
         self.record_live_protection_cancel = self._execution_venue.record_live_protection_cancel
-        self.initialize_shadow_scope = self._execution_shadow.initialize_shadow_scope
-        self.simulate_shadow_execution = self._execution_shadow.simulate_shadow_execution
-        self.record_shadow_order = self._execution_shadow.record_shadow_order
         self.trading_mode_status = self._trading_mode.trading_mode_status
         self.set_team_execution_mode = self._trading_mode.set_team_execution_mode
-        self.create_shadow_order = self._trading_mode.create_shadow_order
-        self.match_shadow_order = self._trading_mode.match_shadow_order
-        self.create_shadow_protection = self._trading_mode.create_shadow_protection
-        self.reset_shadow_account = self._trading_mode.reset_shadow_account
-        self.record_fill = self._execution_facts.record_fill
         self.record_position = self._execution_facts.record_position
         self.record_protection = self._execution_facts.record_protection
         self._record_account_equity_observation = (
@@ -347,7 +333,6 @@ class TradingService:
         self.create_automatic_exit_intent = self._execution_campaign.create_automatic_exit_intent
         self.close_campaign = self._execution_campaign.close_campaign
         self.refresh_campaign_pnl = self._execution_campaign.refresh_campaign_pnl
-        self._apply_shadow_pnl_delta = self._execution_campaign._apply_shadow_pnl_delta
         self._update_campaign_pnl = self._execution_campaign._update_campaign_pnl
         self.proposal_default_config = self._proposals.proposal_default_config
         self._proposal_default_payload = self._proposals._proposal_default_payload
@@ -411,9 +396,7 @@ class TradingService:
         self._ensure_signal_service_principal = self._signals._ensure_signal_service_principal
         self.create_signal_source = self._signals.create_signal_source
         self.update_signal_source_details = self._signals.update_signal_source_details
-        self.rotate_signal_source_credential = (
-            self._signals.rotate_signal_source_credential
-        )
+        self.rotate_signal_source_credential = self._signals.rotate_signal_source_credential
         self.set_signal_source_enabled = self._signals.set_signal_source_enabled
         self.record_signal_source_test = self._signals.record_signal_source_test
         self.delete_signal_source = self._signals.delete_signal_source
@@ -461,9 +444,6 @@ class TradingService:
         self._scope_slug = self._workspace._scope_slug
         self.create_workspace = self._workspace.create_workspace
         self.create_team = self._workspace.create_team
-        self._shadow_activation_blockers = self._workspace._shadow_activation_blockers
-        self.shadow_activation_status = self._workspace.shadow_activation_status
-        self.activate_team_shadow_mode = self._workspace.activate_team_shadow_mode
         self.select_scope = self._workspace.select_scope
         self.create_user = self._workspace.create_user
         self.create_managed_user = self._workspace.create_managed_user

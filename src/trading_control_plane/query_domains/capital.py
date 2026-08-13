@@ -229,10 +229,10 @@ class CapitalQueries(QueryComponent):
         """Return environment-scoped, multi-account read-only capital facts for charts."""
 
         normalized_environment = environment.strip().upper()
-        if normalized_environment not in {"SHADOW", "LIVE"}:
+        if normalized_environment not in {"TESTNET", "LIVE"}:
             raise DomainRejected(
                 "CAPITAL_ENVIRONMENT_INVALID",
-                "environment must be SHADOW or LIVE",
+                "capital display requires TESTNET or LIVE",
             )
         workspace_id, team_id = self.facade._active_scope_ids(user_id)
         with self.database.session_factory() as session:
@@ -274,12 +274,16 @@ class CapitalQueries(QueryComponent):
                 for item in accounts
                 if self.service.can_user(user_id, "capital.view", item.account_id, item.venue)
             }
-            config = session.scalar(
-                select(DirectCapitalConfiguration).where(
-                    DirectCapitalConfiguration.team_id == team_id,
-                    DirectCapitalConfiguration.environment == normalized_environment,
-                    DirectCapitalConfiguration.active,
+            config = (
+                session.scalar(
+                    select(DirectCapitalConfiguration).where(
+                        DirectCapitalConfiguration.team_id == team_id,
+                        DirectCapitalConfiguration.environment == "LIVE",
+                        DirectCapitalConfiguration.active,
+                    )
                 )
+                if normalized_environment == "LIVE"
+                else None
             )
             if config is not None:
                 treasury_account = (
@@ -322,17 +326,8 @@ class CapitalQueries(QueryComponent):
                 if not can_view:
                     continue
                 key = key_for(item.location_type, item.venue, item.account_id)
-                options.setdefault(
-                    key,
-                    {
-                        "key": key,
-                        "account_id": item.account_id,
-                        "venue": item.venue,
-                        "location_type": item.location_type,
-                        "label": "链上金库" if item.location_type == "VAULT" else item.account_id,
-                        "environment": normalized_environment,
-                    },
-                )
+                if key not in options:
+                    continue
             requested = set(selected_account_keys or ())
             selected = requested.intersection(options) if requested else set(options)
             now = datetime.now(UTC)
@@ -348,7 +343,7 @@ class CapitalQueries(QueryComponent):
             issues: set[str] = set()
             for item in balances:
                 key = key_for(item.location_type, item.venue, item.account_id)
-                if key not in selected:
+                if key not in options or key not in selected:
                     continue
                 valuation_time = item.observed_at
                 if item.currency.upper() in USD_STABLE_ASSETS:

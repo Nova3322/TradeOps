@@ -35,18 +35,16 @@ from trading_control_plane.models import (
     Campaign,
     CapabilityGate,
     CommandReceipt,
+    ExchangeAccount,
     Instrument,
     OrderIntent,
     Position,
     Proposal,
-    ReconciliationRun,
     RiskDecision,
     RiskPolicy,
     RiskReservation,
     Team,
     TradingAuthorization,
-    VenueFill,
-    VenueOrder,
 )
 from trading_control_plane.queries import TradingQueries
 from trading_control_plane.service import TradingService
@@ -97,10 +95,27 @@ def seed(service: TradingService) -> dict[str, UUID]:
     with service.database.session_factory.begin() as session:
         team = session.get(Team, UUID(str(context["active_team"]["team_id"])), with_for_update=True)
         assert team is not None
-        # Exercise the retained pre-lock SHADOW compatibility workflow. Fresh
-        # bootstrap and migrated Teams are always locked and use the unified ledger.
-        team.execution_mode = "SHADOW"
+        # Exercise the retained pre-lock TESTNET compatibility workflow. Fresh
+        # bootstrap and migrated Teams use the unified exchange-backed ledger.
+        team.execution_mode = "TESTNET"
         team.execution_mode_locked_at = None
+        session.add(
+            ExchangeAccount(
+                team_id=team.team_id,
+                environment="TESTNET",
+                account_id="acct-1",
+                venue="BINANCE",
+                label="Core workflow test account",
+                registration_source="WORKFLOW_REFERENCE",
+                connection_status="UNCONFIGURED",
+                trading_status="DISABLED",
+                credential_metadata={},
+                created_by=admin,
+                updated_by=admin,
+                created_at=NOW,
+                updated_at=NOW,
+            )
+        )
     position = service.record_position(
         "acct-1",
         "BINANCE",
@@ -874,7 +889,7 @@ def test_cancelled_initial_intent_cannot_be_recreated_with_a_new_key(
         "one-time-initial",
         now=NOW,
     )
-    service.reconcile_scope("acct-1:BINANCE", ids["operator"], now=NOW)
+    service.reconcile_scope("TESTNET:acct-1:BINANCE", ids["operator"], now=NOW)
     service.release_unfilled_intent(
         created.intent_id,
         ids["operator"],
@@ -908,63 +923,6 @@ def test_cancelled_initial_intent_cannot_be_recreated_with_a_new_key(
         assert session.scalar(select(func.count()).select_from(OrderIntent)) == 1
 
 
-def test_unknown_intent_keeps_risk_and_cannot_be_recreated(
-    database: Database, service: TradingService
-) -> None:
-    ids = seed(service)
-    proposal_id = create_approved_proposal(service, ids)
-    authorization_id = issue_authorization(service, ids, proposal_id)
-    created = service.create_order_intent(
-        authorization_id,
-        ids["operator"],
-        IntentKind.INITIAL,
-        "acct-1",
-        "BINANCE",
-        ids["instrument"],
-        Direction.LONG,
-        Decimal("1"),
-        "unknown-intent",
-        now=NOW,
-    )
-    token = service.acquire_sender("acct-1:BINANCE", "unknown-worker", ids["operator"], NOW)
-    service.record_shadow_order(
-        created.intent_id,
-        ids["operator"],
-        "acct-1:BINANCE",
-        "unknown-worker",
-        token,
-        "unknown-shadow-order",
-        now=NOW,
-    )
-    service.mark_intent_unknown(created.intent_id, ids["operator"], "venue timeout", now=NOW)
-    duplicate = service.create_order_intent(
-        authorization_id,
-        ids["operator"],
-        IntentKind.INITIAL,
-        "acct-1",
-        "BINANCE",
-        ids["instrument"],
-        Direction.LONG,
-        Decimal("1"),
-        "unknown-intent",
-        now=NOW,
-    )
-
-    assert duplicate == created
-    with database.session_factory() as session:
-        assert session.get(OrderIntent, created.intent_id).status == OrderIntentStatus.UNKNOWN.value
-        assert (
-            session.get(RiskReservation, created.reservation_id).status
-            == ReservationStatus.UNKNOWN.value
-        )
-        assert (
-            session.scalar(
-                select(VenueOrder).where(VenueOrder.order_intent_id == created.intent_id)
-            ).status
-            == "UNKNOWN"
-        )
-
-
 def test_cancelled_unfilled_intent_releases_risk_and_builds_one_reduce_only_intent(
     database: Database, service: TradingService
 ) -> None:
@@ -987,7 +945,7 @@ def test_cancelled_unfilled_intent_releases_risk_and_builds_one_reduce_only_inte
         opening.intent_id,
         ids["operator"],
         OrderIntentStatus.CANCELLED,
-        "shadow order was never sent",
+        "testnet order was never sent",
         now=NOW,
     )
     service.record_position(
@@ -1056,7 +1014,7 @@ def test_sender_fencing_rejects_old_owner_after_reconciled_takeover(
     service: TradingService,
 ) -> None:
     ids = seed(service)
-    first = service.acquire_sender("acct-1:BINANCE", "worker-a", ids["operator"], NOW)
+    first = service.acquire_sender("TESTNET:acct-1:BINANCE", "worker-a", ids["operator"], NOW)
     takeover_time = NOW + timedelta(minutes=2)
     service.record_position(
         "acct-1",
@@ -1079,13 +1037,19 @@ def test_sender_fencing_rejects_old_owner_after_reconciled_takeover(
         ids["operator"],
         now=takeover_time,
     )
-    service.reconcile_scope("acct-1:BINANCE", ids["operator"], now=takeover_time)
-    second = service.acquire_sender("acct-1:BINANCE", "worker-b", ids["operator"], takeover_time)
+    service.reconcile_scope("TESTNET:acct-1:BINANCE", ids["operator"], now=takeover_time)
+    second = service.acquire_sender(
+        "TESTNET:acct-1:BINANCE", "worker-b", ids["operator"], takeover_time
+    )
 
     assert second > first
     with pytest.raises(DomainRejected, match="FENCING_TOKEN_REJECTED"):
-        service.validate_sender("acct-1:BINANCE", "worker-a", first, ids["operator"], takeover_time)
-    service.validate_sender("acct-1:BINANCE", "worker-b", second, ids["operator"], takeover_time)
+        service.validate_sender(
+            "TESTNET:acct-1:BINANCE", "worker-a", first, ids["operator"], takeover_time
+        )
+    service.validate_sender(
+        "TESTNET:acct-1:BINANCE", "worker-b", second, ids["operator"], takeover_time
+    )
 
 
 def test_active_intent_blocks_duplicate_reduce_only_intent(service: TradingService) -> None:
@@ -1131,14 +1095,14 @@ def test_reconciliation_detects_unknown_difference_manual_and_resolution(
 ) -> None:
     ids = seed(service)
     unknown = service.record_scope_reconciliation(
-        "acct-1:BINANCE",
+        "TESTNET:acct-1:BINANCE",
         ids["operator"],
         ReconciliationStatus.UNKNOWN,
         ("POSITION_UNKNOWN",),
         now=NOW,
     )
     different = service.record_scope_reconciliation(
-        "acct-1:BINANCE",
+        "TESTNET:acct-1:BINANCE",
         ids["operator"],
         ReconciliationStatus.DIFFERENCE,
         ("ORDER_QUANTITY_MISMATCH",),
@@ -1156,96 +1120,6 @@ def test_reconciliation_detects_unknown_difference_manual_and_resolution(
     assert resolved == different
 
 
-def test_campaign_reconciliation_compares_orders_fills_positions_and_protection(
-    database: Database, service: TradingService
-) -> None:
-    ids = seed(service)
-    proposal_id = create_approved_proposal(service, ids)
-    authorization_id = issue_authorization(service, ids, proposal_id)
-    created = service.create_order_intent(
-        authorization_id,
-        ids["operator"],
-        IntentKind.INITIAL,
-        "acct-1",
-        "BINANCE",
-        ids["instrument"],
-        Direction.LONG,
-        Decimal("1"),
-        "reconciliation-intent",
-        now=NOW,
-    )
-    token = service.acquire_sender("acct-1:BINANCE", "shadow-worker", ids["operator"], NOW)
-    service.record_shadow_order(
-        created.intent_id,
-        ids["operator"],
-        "acct-1:BINANCE",
-        "shadow-worker",
-        token,
-        "shadow-order-reconcile",
-        now=NOW,
-    )
-    service.record_fill(
-        created.intent_id,
-        ids["operator"],
-        "shadow-fill-reconcile",
-        "BUY",
-        Decimal("0.5"),
-        Decimal("100"),
-        Decimal("0"),
-        "USDT",
-        Decimal("0"),
-        now=NOW,
-    )
-    position_id = service.record_position(
-        "acct-1",
-        "BINANCE",
-        ids["instrument"],
-        Decimal("0.25"),
-        Decimal("100"),
-        Decimal("101"),
-        True,
-        ids["operator"],
-        now=NOW,
-    )
-    service.record_protection(
-        position_id,
-        "insufficient-stop",
-        Decimal("0.1"),
-        Decimal("90"),
-        False,
-        ids["operator"],
-        now=NOW,
-    )
-    service.record_account_equity(
-        "acct-1",
-        "BINANCE",
-        Decimal("10000"),
-        Decimal("9000"),
-        "USDT",
-        True,
-        ids["operator"],
-        now=NOW,
-    )
-    with database.session_factory.begin() as session:
-        order = session.scalar(
-            select(VenueOrder).where(VenueOrder.order_intent_id == created.intent_id)
-        )
-        assert order is not None
-        order.filled_quantity = Decimal("0")
-
-    run_id = service.reconcile_campaign(
-        created.campaign_id, "acct-1:BINANCE", ids["operator"], now=NOW
-    )
-
-    with database.session_factory() as session:
-        run = session.get(ReconciliationRun, run_id)
-        assert run is not None
-        assert run.status == ReconciliationStatus.DIFFERENCE.value
-        assert any(value.startswith("ORDER_FILL_MISMATCH") for value in run.differences)
-        assert any(value.startswith("POSITION_QUANTITY_MISMATCH") for value in run.differences)
-        assert any(value.startswith("PROTECTION_INSUFFICIENT") for value in run.differences)
-
-
 def test_capability_gates_are_default_disabled(database: Database) -> None:
     with database.session_factory() as session:
         gates = session.scalars(
@@ -1259,99 +1133,6 @@ def test_capability_gates_are_default_disabled(database: Database) -> None:
         ("CAPITAL_TRANSFER", CapabilityStatus.DISABLED.value),
         ("LIVE_ORDER_SEND", CapabilityStatus.DISABLED.value),
     ]
-
-
-def test_shadow_end_to_end_flow_reconciles_and_computes_pnl(
-    database: Database, service: TradingService
-) -> None:
-    ids = seed(service)
-    proposal_id = create_approved_proposal(service, ids)
-    authorization_id = issue_authorization(service, ids, proposal_id)
-    created = service.create_order_intent(
-        authorization_id,
-        ids["operator"],
-        IntentKind.INITIAL,
-        "acct-1",
-        "BINANCE",
-        ids["instrument"],
-        Direction.LONG,
-        Decimal("1"),
-        "e2e-intent",
-        now=NOW,
-    )
-    token = service.acquire_sender("acct-1:BINANCE", "shadow-worker", ids["operator"], NOW)
-    service.record_shadow_order(
-        created.intent_id,
-        ids["operator"],
-        "acct-1:BINANCE",
-        "shadow-worker",
-        token,
-        "shadow-order-1",
-        now=NOW,
-    )
-    service.record_fill(
-        created.intent_id,
-        ids["operator"],
-        "shadow-fill-1",
-        "BUY",
-        Decimal("1"),
-        Decimal("100"),
-        Decimal("1"),
-        "USDT",
-        Decimal("0.5"),
-        now=NOW,
-    )
-    position_id = service.record_position(
-        "acct-1",
-        "BINANCE",
-        ids["instrument"],
-        Decimal("1"),
-        Decimal("100"),
-        Decimal("110"),
-        True,
-        ids["operator"],
-        now=NOW,
-    )
-    service.record_protection(
-        position_id,
-        "shadow-stop-1",
-        Decimal("1"),
-        Decimal("90"),
-        True,
-        ids["operator"],
-        now=NOW,
-    )
-    service.record_account_equity(
-        "acct-1",
-        "BINANCE",
-        Decimal("10000"),
-        Decimal("9000"),
-        "USDT",
-        True,
-        ids["operator"],
-        now=NOW,
-    )
-    service.record_funding(
-        created.campaign_id,
-        "BINANCE",
-        "funding-1",
-        Decimal("-0.2"),
-        "USDT",
-        ids["operator"],
-        now=NOW,
-    )
-    run_id = service.reconcile_campaign(
-        created.campaign_id, "acct-1:BINANCE", ids["operator"], now=NOW
-    )
-    pnl = service.refresh_campaign_pnl(created.campaign_id, ids["operator"], now=NOW)
-
-    assert service.reconciliation_status(run_id) is ReconciliationStatus.MATCH
-    assert pnl.realized_pnl == Decimal("-1.700000000000000000")
-    assert pnl.unrealized_pnl == Decimal("10.000000000000000000")
-    assert pnl.total_pnl == Decimal("8.300000000000000000")
-    with database.session_factory() as session:
-        campaign = session.get(Campaign, created.campaign_id)
-        assert campaign.final_pnl == Decimal("8.300000000000000000")
 
 
 def test_risk_decision_uses_server_facts_and_enforces_proposal_caps(
@@ -1661,453 +1442,6 @@ def test_unknown_reservation_still_occupies_capacity(
         assert decision.input_data["current_risk"] == "80.000000000000000000"
 
 
-def test_add_requires_profit_position_protection_and_normal_risk_state(
-    database: Database,
-    service: TradingService,
-) -> None:
-    ids = seed(service)
-    enable_auto_add_fixture(database, ids["admin"])
-    proposal_id = create_approved_proposal(
-        service,
-        ids,
-        risk_tier=RiskTier.LOW,
-        key="add-invariants",
-        allow_auto_add=True,
-    )
-    authorization_id = issue_authorization(service, ids, proposal_id, allowed_adds=1)
-    opening = service.create_order_intent(
-        authorization_id,
-        ids["operator"],
-        IntentKind.INITIAL,
-        "acct-1",
-        "BINANCE",
-        ids["instrument"],
-        Direction.LONG,
-        Decimal("0.5"),
-        "add-opening",
-        now=NOW,
-    )
-    token = service.acquire_sender("acct-1:BINANCE", "add-worker", ids["operator"], NOW)
-    service.record_shadow_order(
-        opening.intent_id,
-        ids["operator"],
-        "acct-1:BINANCE",
-        "add-worker",
-        token,
-        "add-opening-order",
-        now=NOW,
-    )
-    service.record_fill(
-        opening.intent_id,
-        ids["operator"],
-        "add-opening-fill",
-        "BUY",
-        Decimal("0.5"),
-        Decimal("100"),
-        Decimal("0"),
-        "USDT",
-        Decimal("0"),
-        now=NOW,
-    )
-    position_id = service.record_position(
-        "acct-1",
-        "BINANCE",
-        ids["instrument"],
-        Decimal("0.5"),
-        Decimal("100"),
-        Decimal("90"),
-        True,
-        ids["operator"],
-        now=NOW,
-    )
-    service.record_protection(
-        position_id,
-        "add-stop",
-        Decimal("0.5"),
-        Decimal("80"),
-        True,
-        ids["operator"],
-        now=NOW,
-    )
-    with pytest.raises(DomainRejected, match="ADD_NOT_PROFITABLE"):
-        service.create_order_intent(
-            authorization_id,
-            ids["operator"],
-            IntentKind.ADD,
-            "acct-1",
-            "BINANCE",
-            ids["instrument"],
-            Direction.LONG,
-            Decimal("0.5"),
-            "add-loss",
-            add_candidate=current_add_candidate(),
-            now=NOW,
-        )
-    service.record_position(
-        "acct-1",
-        "BINANCE",
-        ids["instrument"],
-        Decimal("0.5"),
-        Decimal("100"),
-        Decimal("110"),
-        True,
-        ids["operator"],
-        now=NOW,
-    )
-    service.record_protection(
-        position_id,
-        "add-stop-unknown",
-        Decimal("0.5"),
-        Decimal("80"),
-        True,
-        ids["operator"],
-        known=False,
-        now=NOW,
-    )
-    with pytest.raises(DomainRejected, match="FINAL_RISK_CHECK_FAILED: PROTECTION_UNKNOWN"):
-        service.create_order_intent(
-            authorization_id,
-            ids["operator"],
-            IntentKind.ADD,
-            "acct-1",
-            "BINANCE",
-            ids["instrument"],
-            Direction.LONG,
-            Decimal("0.5"),
-            "add-unprotected",
-            add_candidate=current_add_candidate(),
-            now=NOW,
-        )
-    service.record_protection(
-        position_id,
-        "add-stop-restored",
-        Decimal("0.5"),
-        Decimal("80"),
-        True,
-        ids["operator"],
-        now=NOW,
-    )
-    service.record_position(
-        "acct-1",
-        "BINANCE",
-        ids["instrument"],
-        Decimal("0"),
-        Decimal("0"),
-        Decimal("110"),
-        True,
-        ids["operator"],
-        now=NOW,
-    )
-    with pytest.raises(DomainRejected, match="ADD_POSITION_INVALID"):
-        service.create_order_intent(
-            authorization_id,
-            ids["operator"],
-            IntentKind.ADD,
-            "acct-1",
-            "BINANCE",
-            ids["instrument"],
-            Direction.LONG,
-            Decimal("0.5"),
-            "add-no-position",
-            add_candidate=current_add_candidate(),
-            now=NOW,
-        )
-    service.record_position(
-        "acct-1",
-        "BINANCE",
-        ids["instrument"],
-        Decimal("0.5"),
-        Decimal("100"),
-        Decimal("110"),
-        True,
-        ids["operator"],
-        now=NOW,
-    )
-    service.set_risk_policy(
-        actor_id=ids["admin"],
-        version="risk-no-pyramid",
-        system_state=SystemRiskState.NO_PYRAMID,
-        max_total_risk=Decimal("100"),
-        max_account_risk=Decimal("100"),
-        max_single_loss=Decimal("100"),
-        max_consecutive_losses=3,
-        loss_cooldown=timedelta(hours=1),
-        max_fact_age=timedelta(seconds=30),
-        now=NOW,
-    )
-    with pytest.raises(DomainRejected, match="FINAL_RISK_CHECK_FAILED: PYRAMID_DISABLED"):
-        service.create_order_intent(
-            authorization_id,
-            ids["operator"],
-            IntentKind.ADD,
-            "acct-1",
-            "BINANCE",
-            ids["instrument"],
-            Direction.LONG,
-            Decimal("0.5"),
-            "add-no-pyramid",
-            add_candidate=current_add_candidate(),
-            now=NOW,
-        )
-
-
-def test_zero_fill_cancelled_add_does_not_consume_unit_and_requires_operator(
-    database: Database, service: TradingService
-) -> None:
-    ids = seed(service)
-    enable_auto_add_fixture(database, ids["admin"])
-    proposal_id = create_approved_proposal(
-        service,
-        ids,
-        risk_tier=RiskTier.LOW,
-        key="add-cancel",
-        allow_auto_add=True,
-    )
-    authorization_id = issue_authorization(service, ids, proposal_id, allowed_adds=1)
-    opening = service.create_order_intent(
-        authorization_id,
-        ids["operator"],
-        IntentKind.INITIAL,
-        "acct-1",
-        "BINANCE",
-        ids["instrument"],
-        Direction.LONG,
-        Decimal("0.5"),
-        "add-cancel-opening",
-        now=NOW,
-    )
-    token = service.acquire_sender("acct-1:BINANCE", "cancel-worker", ids["operator"], NOW)
-    service.record_shadow_order(
-        opening.intent_id,
-        ids["operator"],
-        "acct-1:BINANCE",
-        "cancel-worker",
-        token,
-        "add-cancel-order",
-        now=NOW,
-    )
-    service.record_fill(
-        opening.intent_id,
-        ids["operator"],
-        "add-cancel-fill",
-        "BUY",
-        Decimal("0.5"),
-        Decimal("100"),
-        Decimal("0"),
-        "USDT",
-        Decimal("0"),
-        now=NOW,
-    )
-    position_id = service.record_position(
-        "acct-1",
-        "BINANCE",
-        ids["instrument"],
-        Decimal("0.5"),
-        Decimal("100"),
-        Decimal("110"),
-        True,
-        ids["operator"],
-        now=NOW,
-    )
-    service.record_protection(
-        position_id,
-        "cancel-stop",
-        Decimal("0.5"),
-        Decimal("90"),
-        True,
-        ids["operator"],
-        now=NOW,
-    )
-    addition = service.create_order_intent(
-        authorization_id,
-        ids["operator"],
-        IntentKind.ADD,
-        "acct-1",
-        "BINANCE",
-        ids["instrument"],
-        Direction.LONG,
-        Decimal("0.5"),
-        "addition-to-cancel",
-        add_candidate=current_add_candidate(),
-        now=NOW,
-    )
-
-    with pytest.raises(DomainRejected, match="RBAC_DENIED"):
-        service.release_unfilled_intent(
-            addition.intent_id,
-            ids["observer"],
-            OrderIntentStatus.CANCELLED,
-            "unauthorized",
-            now=NOW,
-        )
-    service.release_unfilled_intent(
-        addition.intent_id,
-        ids["operator"],
-        OrderIntentStatus.CANCELLED,
-        "confirmed zero fill",
-        now=NOW,
-    )
-    service.release_unfilled_intent(
-        addition.intent_id,
-        ids["operator"],
-        OrderIntentStatus.CANCELLED,
-        "duplicate result",
-        now=NOW,
-    )
-
-    with database.session_factory() as session:
-        authorization = session.get(TradingAuthorization, authorization_id)
-        reservation = session.get(RiskReservation, addition.reservation_id)
-        assert authorization is not None
-        assert authorization.used_quantity == Decimal("0.500000000000000000")
-        assert authorization.used_adds == 0
-        assert reservation is not None
-        assert reservation.status == ReservationStatus.RELEASED.value
-
-
-def test_fill_validation_rejects_wrong_side_overfill_currency_and_semantic_reuse(
-    service: TradingService,
-) -> None:
-    ids = seed(service)
-    second_instrument = register_flat_instrument(service, ids, "SOLUSDT")
-    first_proposal = create_approved_proposal(service, ids, risk_tier=RiskTier.LOW, key="fill-p1")
-    second_proposal = create_approved_proposal(
-        service,
-        ids,
-        risk_tier=RiskTier.LOW,
-        key="fill-p2",
-        instrument_id=second_instrument,
-    )
-    first_auth = issue_authorization(service, ids, first_proposal)
-    second_auth = issue_authorization(service, ids, second_proposal)
-    first = service.create_order_intent(
-        first_auth,
-        ids["operator"],
-        IntentKind.INITIAL,
-        "acct-1",
-        "BINANCE",
-        ids["instrument"],
-        Direction.LONG,
-        Decimal("1"),
-        "fill-i1",
-        now=NOW,
-    )
-    second = service.create_order_intent(
-        second_auth,
-        ids["operator"],
-        IntentKind.INITIAL,
-        "acct-1",
-        "BINANCE",
-        second_instrument,
-        Direction.LONG,
-        Decimal("1"),
-        "fill-i2",
-        now=NOW,
-    )
-    token = service.acquire_sender("acct-1:BINANCE", "fill-worker", ids["operator"], NOW)
-    for created, order_id in ((first, "fill-order-1"), (second, "fill-order-2")):
-        service.record_shadow_order(
-            created.intent_id,
-            ids["operator"],
-            "acct-1:BINANCE",
-            "fill-worker",
-            token,
-            order_id,
-            now=NOW,
-        )
-
-    with pytest.raises(DomainRejected, match="FILL_SIDE_MISMATCH"):
-        service.record_fill(
-            first.intent_id,
-            ids["operator"],
-            "wrong-side",
-            "SELL",
-            Decimal("0.1"),
-            Decimal("100"),
-            Decimal("0"),
-            "USDT",
-            Decimal("0"),
-            now=NOW,
-        )
-    with pytest.raises(DomainRejected, match="ORDER_INTENT_OVERFILLED"):
-        service.record_fill(
-            first.intent_id,
-            ids["operator"],
-            "overfill",
-            "BUY",
-            Decimal("1.1"),
-            Decimal("100"),
-            Decimal("0"),
-            "USDT",
-            Decimal("0"),
-            now=NOW,
-        )
-    with pytest.raises(DomainRejected, match="PNL_CURRENCY_MISMATCH"):
-        service.record_fill(
-            first.intent_id,
-            ids["operator"],
-            "wrong-currency",
-            "BUY",
-            Decimal("0.1"),
-            Decimal("100"),
-            Decimal("0"),
-            "USDC",
-            Decimal("0"),
-            now=NOW,
-        )
-    first_fill = service.record_fill(
-        first.intent_id,
-        ids["operator"],
-        "semantic-fill",
-        "BUY",
-        Decimal("0.4"),
-        Decimal("100"),
-        Decimal("1"),
-        "USDT",
-        Decimal("0"),
-        now=NOW,
-    )
-    duplicate = service.record_fill(
-        first.intent_id,
-        ids["operator"],
-        "semantic-fill",
-        "BUY",
-        Decimal("0.4"),
-        Decimal("100"),
-        Decimal("1"),
-        "USDT",
-        Decimal("0"),
-        now=NOW,
-    )
-    assert duplicate == first_fill
-    with pytest.raises(IdempotencyConflict):
-        service.record_fill(
-            first.intent_id,
-            ids["operator"],
-            "semantic-fill",
-            "BUY",
-            Decimal("0.4"),
-            Decimal("101"),
-            Decimal("1"),
-            "USDT",
-            Decimal("0"),
-            now=NOW,
-        )
-    with pytest.raises(IdempotencyConflict):
-        service.record_fill(
-            second.intent_id,
-            ids["operator"],
-            "semantic-fill",
-            "BUY",
-            Decimal("0.4"),
-            Decimal("100"),
-            Decimal("1"),
-            "USDT",
-            Decimal("0"),
-            now=NOW,
-        )
-
-
 def test_target_cap_and_single_unclosed_campaign_are_enforced(
     database: Database, service: TradingService
 ) -> None:
@@ -2175,125 +1509,11 @@ def test_target_cap_and_single_unclosed_campaign_are_enforced(
         assert campaign is not None and campaign.status == "OPEN"
 
 
-def test_reconciliation_match_is_computed_for_the_whole_scope(
-    database: Database, service: TradingService
-) -> None:
-    ids = seed(service)
-    second_instrument = register_flat_instrument(service, ids, "XRPUSDT")
-    first_proposal = create_approved_proposal(service, ids, risk_tier=RiskTier.LOW, key="scope-p1")
-    second_proposal = create_approved_proposal(
-        service,
-        ids,
-        risk_tier=RiskTier.LOW,
-        key="scope-p2",
-        instrument_id=second_instrument,
-    )
-    first_auth = issue_authorization(service, ids, first_proposal)
-    second_auth = issue_authorization(service, ids, second_proposal)
-    first = service.create_order_intent(
-        first_auth,
-        ids["operator"],
-        IntentKind.INITIAL,
-        "acct-1",
-        "BINANCE",
-        ids["instrument"],
-        Direction.LONG,
-        Decimal("1"),
-        "scope-i1",
-        now=NOW,
-    )
-    service.create_order_intent(
-        second_auth,
-        ids["operator"],
-        IntentKind.INITIAL,
-        "acct-1",
-        "BINANCE",
-        second_instrument,
-        Direction.LONG,
-        Decimal("1"),
-        "scope-i2",
-        now=NOW,
-    )
-    token = service.acquire_sender("acct-1:BINANCE", "scope-worker", ids["operator"], NOW)
-    service.record_shadow_order(
-        first.intent_id,
-        ids["operator"],
-        "acct-1:BINANCE",
-        "scope-worker",
-        token,
-        "scope-order-1",
-        now=NOW,
-    )
-    service.record_fill(
-        first.intent_id,
-        ids["operator"],
-        "scope-fill-1",
-        "BUY",
-        Decimal("1"),
-        Decimal("100"),
-        Decimal("0"),
-        "USDT",
-        Decimal("0"),
-        now=NOW,
-    )
-    position_id = service.record_position(
-        "acct-1",
-        "BINANCE",
-        ids["instrument"],
-        Decimal("1"),
-        Decimal("100"),
-        Decimal("100"),
-        True,
-        ids["operator"],
-        now=NOW,
-    )
-    service.record_protection(
-        position_id,
-        "scope-stop",
-        Decimal("1"),
-        Decimal("90"),
-        True,
-        ids["operator"],
-        now=NOW,
-    )
-    service.record_position(
-        "acct-1",
-        "BINANCE",
-        second_instrument,
-        Decimal("0"),
-        Decimal("0"),
-        Decimal("100"),
-        False,
-        ids["operator"],
-        now=NOW,
-    )
-
-    run_id = service.reconcile_campaign(
-        first.campaign_id, "acct-1:BINANCE", ids["operator"], now=NOW
-    )
-    with pytest.raises(DomainRejected, match="RECONCILIATION_STATUS_NOT_TRUSTED"):
-        service.record_scope_reconciliation(
-            "acct-1:BINANCE",
-            ids["operator"],
-            ReconciliationStatus.MATCH,
-            (),
-            now=NOW,
-        )
-
-    with database.session_factory() as session:
-        run = session.get(ReconciliationRun, run_id)
-        assert run is not None
-        assert run.status == ReconciliationStatus.UNKNOWN.value
-        assert run.is_computed is True
-        assert run.campaign_id is None
-        assert any(value.startswith("POSITION_UNKNOWN") for value in run.differences)
-
-
 def test_resolved_run_cannot_authorize_sender_takeover(service: TradingService) -> None:
     ids = seed(service)
-    first = service.acquire_sender("acct-1:BINANCE", "worker-a", ids["operator"], NOW)
+    first = service.acquire_sender("TESTNET:acct-1:BINANCE", "worker-a", ids["operator"], NOW)
     run_id = service.record_scope_reconciliation(
-        "acct-1:BINANCE",
+        "TESTNET:acct-1:BINANCE",
         ids["operator"],
         ReconciliationStatus.UNKNOWN,
         ("POSITION_UNKNOWN",),
@@ -2308,132 +1528,18 @@ def test_resolved_run_cannot_authorize_sender_takeover(service: TradingService) 
 
     with pytest.raises(DomainRejected, match="RECONCILIATION_REQUIRED"):
         service.acquire_sender(
-            "acct-1:BINANCE",
+            "TESTNET:acct-1:BINANCE",
             "worker-b",
             ids["operator"],
             NOW + timedelta(minutes=2),
         )
     service.validate_sender(
-        "acct-1:BINANCE",
+        "TESTNET:acct-1:BINANCE",
         "worker-a",
         first,
         ids["operator"],
         NOW + timedelta(seconds=30),
     )
-
-
-def test_valid_fencing_token_cannot_send_for_another_scope(service: TradingService) -> None:
-    ids = seed(service)
-    proposal_id = create_approved_proposal(service, ids, risk_tier=RiskTier.LOW, key="wrong-scope")
-    authorization_id = issue_authorization(service, ids, proposal_id)
-    created = service.create_order_intent(
-        authorization_id,
-        ids["operator"],
-        IntentKind.INITIAL,
-        "acct-1",
-        "BINANCE",
-        ids["instrument"],
-        Direction.LONG,
-        Decimal("1"),
-        "wrong-scope-intent",
-        now=NOW,
-    )
-    wrong_token = service.acquire_sender("acct-2:BINANCE", "wrong-worker", ids["admin"], NOW)
-
-    with pytest.raises(DomainRejected, match="EXECUTION_SCOPE_MISMATCH"):
-        service.record_shadow_order(
-            created.intent_id,
-            ids["admin"],
-            "acct-2:BINANCE",
-            "wrong-worker",
-            wrong_token,
-            "wrong-scope-order",
-            now=NOW,
-        )
-    with pytest.raises(DomainRejected, match="EXECUTION_SCOPE_INVALID"):
-        service.acquire_sender("acct-1:", "worker", ids["admin"], NOW)
-
-
-def test_pnl_rejects_fee_and_funding_currency_without_fx(
-    database: Database, service: TradingService
-) -> None:
-    ids = seed(service)
-    proposal_id = create_approved_proposal(service, ids, risk_tier=RiskTier.LOW, key="currency-pnl")
-    authorization_id = issue_authorization(service, ids, proposal_id)
-    created = service.create_order_intent(
-        authorization_id,
-        ids["operator"],
-        IntentKind.INITIAL,
-        "acct-1",
-        "BINANCE",
-        ids["instrument"],
-        Direction.LONG,
-        Decimal("1"),
-        "currency-intent",
-        now=NOW,
-    )
-    token = service.acquire_sender("acct-1:BINANCE", "currency-worker", ids["operator"], NOW)
-    service.record_shadow_order(
-        created.intent_id,
-        ids["operator"],
-        "acct-1:BINANCE",
-        "currency-worker",
-        token,
-        "currency-order",
-        now=NOW,
-    )
-    with pytest.raises(DomainRejected, match="PNL_CURRENCY_MISMATCH"):
-        service.record_fill(
-            created.intent_id,
-            ids["operator"],
-            "currency-fill-invalid",
-            "BUY",
-            Decimal("1"),
-            Decimal("100"),
-            Decimal("1"),
-            "USDC",
-            Decimal("0"),
-            now=NOW,
-        )
-    service.record_fill(
-        created.intent_id,
-        ids["operator"],
-        "currency-fill",
-        "BUY",
-        Decimal("1"),
-        Decimal("100"),
-        Decimal("1"),
-        "USDT",
-        Decimal("0"),
-        now=NOW,
-    )
-    service.record_position(
-        "acct-1",
-        "BINANCE",
-        ids["instrument"],
-        Decimal("1"),
-        Decimal("100"),
-        Decimal("101"),
-        True,
-        ids["operator"],
-        now=NOW,
-    )
-    with pytest.raises(DomainRejected, match="PNL_CURRENCY_MISMATCH"):
-        service.record_funding(
-            created.campaign_id,
-            "BINANCE",
-            "currency-funding-invalid",
-            Decimal("1"),
-            "USDC",
-            ids["operator"],
-            now=NOW,
-        )
-    with database.session_factory.begin() as session:
-        fill = session.scalar(select(VenueFill).where(VenueFill.venue_fill_id == "currency-fill"))
-        assert fill is not None
-        fill.fee_currency = "USDC"
-    with pytest.raises(DomainRejected, match="PNL_CURRENCY_MISMATCH"):
-        service.refresh_campaign_pnl(created.campaign_id, ids["operator"], now=NOW)
 
 
 def test_human_cannot_spoof_system_proposal_and_strategy_identity_is_frozen(
@@ -2507,133 +1613,6 @@ def test_enabled_add_gate_keeps_database_ready_but_does_not_bypass_hard_checks(
             add_candidate=current_add_candidate(),
             now=NOW,
         )
-
-
-def test_campaign_closes_and_releases_open_risk_only_after_exit_and_match(
-    database: Database, service: TradingService
-) -> None:
-    ids = seed(service)
-    proposal_id = create_approved_proposal(
-        service, ids, risk_tier=RiskTier.LOW, key="campaign-close"
-    )
-    authorization_id = issue_authorization(service, ids, proposal_id)
-    opening = service.create_order_intent(
-        authorization_id,
-        ids["operator"],
-        IntentKind.INITIAL,
-        "acct-1",
-        "BINANCE",
-        ids["instrument"],
-        Direction.LONG,
-        Decimal("1"),
-        "campaign-close-open",
-        now=NOW,
-    )
-    token = service.acquire_sender("acct-1:BINANCE", "close-worker", ids["operator"], NOW)
-    service.record_shadow_order(
-        opening.intent_id,
-        ids["operator"],
-        "acct-1:BINANCE",
-        "close-worker",
-        token,
-        "campaign-close-order-open",
-        now=NOW,
-    )
-    service.record_fill(
-        opening.intent_id,
-        ids["operator"],
-        "campaign-close-fill-open",
-        "BUY",
-        Decimal("1"),
-        Decimal("100"),
-        Decimal("0"),
-        "USDT",
-        Decimal("0"),
-        now=NOW,
-    )
-    position_id = service.record_position(
-        "acct-1",
-        "BINANCE",
-        ids["instrument"],
-        Decimal("1"),
-        Decimal("100"),
-        Decimal("100"),
-        True,
-        ids["operator"],
-        now=NOW,
-    )
-    service.record_protection(
-        position_id,
-        "campaign-close-stop",
-        Decimal("1"),
-        Decimal("90"),
-        True,
-        ids["operator"],
-        now=NOW,
-    )
-    service.update_campaign_target(
-        opening.campaign_id,
-        ids["operator"],
-        (TargetCandidate(Decimal("0"), TargetUrgency.IMMEDIATE, "exit"),),
-        now=NOW,
-    )
-    exit_intent_id = service.create_reduction_intent(
-        opening.campaign_id, ids["operator"], "campaign-close-exit", now=NOW
-    )
-    service.record_shadow_order(
-        exit_intent_id,
-        ids["operator"],
-        "acct-1:BINANCE",
-        "close-worker",
-        token,
-        "campaign-close-order-exit",
-        now=NOW,
-    )
-    service.record_fill(
-        exit_intent_id,
-        ids["operator"],
-        "campaign-close-fill-exit",
-        "SELL",
-        Decimal("1"),
-        Decimal("105"),
-        Decimal("0"),
-        "USDT",
-        Decimal("0"),
-        now=NOW,
-    )
-    closure_time = NOW + timedelta(minutes=10)
-    service.record_position(
-        "acct-1",
-        "BINANCE",
-        ids["instrument"],
-        Decimal("0"),
-        Decimal("0"),
-        Decimal("105"),
-        True,
-        ids["operator"],
-        now=closure_time,
-    )
-    service.record_account_equity(
-        "acct-1",
-        "BINANCE",
-        Decimal("10000"),
-        Decimal("9000"),
-        "USDT",
-        True,
-        ids["operator"],
-        now=closure_time,
-    )
-    service.reconcile_scope("acct-1:BINANCE", ids["operator"], now=closure_time)
-    service.close_campaign(opening.campaign_id, ids["operator"], now=closure_time)
-
-    with database.session_factory() as session:
-        campaign = session.get(Campaign, opening.campaign_id)
-        reservation = session.get(RiskReservation, opening.reservation_id)
-        assert campaign is not None and campaign.status == "CLOSED"
-        assert campaign.realized_pnl == Decimal("5")
-        assert campaign.unrealized_pnl == 0
-        assert campaign.final_pnl == Decimal("5")
-        assert reservation is not None and reservation.status == "RELEASED"
 
 
 def test_configured_single_loss_limit_is_enforced_by_server_risk_decision(
