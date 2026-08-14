@@ -966,11 +966,12 @@ function translateChineseText(value) {
     .replaceAll('Freqtrade worker', 'Freqtrade 执行进程')
     .replaceAll(' worker', ' 执行进程')
     .replaceAll('dry-run', '仿真模式')
+    .replaceAll('Fail closed', '失败即阻断')
+    .replaceAll('fail-closed', '失败即阻断')
     .replaceAll('Web 审核', '网页端审核')
     .replace(/([\u3400-\u9fff])\s+突破榜单/g, '$1突破榜单')
     .replace(/突破榜单\s+([\u3400-\u9fff])/g, '突破榜单$1')
     .replace(/\bLIVE\b/g, '实盘')
-    .replace(/\bTESTNET\b/g, '模拟')
     .replace(/\bTESTNET\b/g, '测试网')
     .replace(/([\u3400-\u9fff）])\s+([\u3400-\u9fff（])/g, '$1$2');
 }
