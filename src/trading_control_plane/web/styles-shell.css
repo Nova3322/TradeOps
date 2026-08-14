@@ -29,13 +29,14 @@
 .topbar:has(> #scope-control[hidden]) > .topbar-actions { grid-column: 2; }
 .header-preferences {
   min-width: 0;
+  flex: 0 0 auto;
   display: flex;
   align-items: center;
   gap: 0;
   border: 1px solid var(--line);
   border-radius: 3px;
 }
-.header-preferences .preference-select { width: 104px; display: block; }
+.header-preferences .preference-select { width: 140px; display: block; }
 .header-preferences .preference-select:last-child { width: 116px; }
 .header-preferences .preference-select + .preference-select { border-left: 1px solid var(--line); }
 .header-preferences .preference-trigger {
@@ -219,9 +220,9 @@
   .desktop-nav-toggle { display: none; }
   .topbar { grid-template-columns: 190px minmax(180px, 210px) minmax(0, 1fr); }
   .topbar:has(> #scope-control[hidden]) { grid-template-columns: 190px minmax(0, 1fr); }
-  .current-date { display: inline-flex; }
+  .current-date { display: none; }
   .topbar-actions { padding-inline: 14px; gap: 8px; }
-  .header-preferences .preference-select { width: 72px; }
+  .header-preferences .preference-select { width: 84px; }
   .header-preferences .preference-select:last-child { width: 88px; }
   .header-preferences .preference-label { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
   .nav-backdrop:not([hidden]) { background: rgba(0, 0, 0, .48); backdrop-filter: none; }

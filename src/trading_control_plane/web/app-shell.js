@@ -19,6 +19,7 @@ function renderWorkspaceSwitcher() {
       return `<button class="workspace-switcher-option ${selected ? 'is-active' : ''}" type="button" role="menuitem" data-switch-workspace="${escapeHtml(workspace.workspace_id)}" data-switch-team="${escapeHtml(teamId || '')}"><span class="workspace-option-avatar" aria-hidden="true">${escapeHtml(workspace.name.slice(0, 1).toUpperCase())}</span><span><b>${escapeHtml(workspace.name)}</b><small>${escapeHtml(`${workspace.member_count ?? 0} 名成员`)}</small></span><strong>${selected ? '当前' : '进入'}</strong></button>`;
     }).join('')}</div>
     <div class="workspace-switcher-menu-actions"><a href="/" data-link role="menuitem">创建新工作区</a><a href="/" data-link role="menuitem">查看所有工作区</a></div>`;
+  applyLanguageToDocument(scopeSwitcherMenu);
 }
 
 function closeWorkspaceSwitcher({restoreFocus = false} = {}) {
