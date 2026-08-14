@@ -193,6 +193,49 @@ def test_mode_switch_is_team_managed_versioned_audited_and_keeps_dangerous_gates
         assert audit.environment == "TESTNET"
 
 
+def test_unready_target_account_is_an_execution_advisory_not_a_mode_switch_blocker(
+    database: Database,
+) -> None:
+    service, ids = prepare_testnet_mode(database)
+    now = ids["now"]
+    assert isinstance(now, datetime)
+    service.create_exchange_account(
+        actor_id=ids["admin"],
+        environment=ExecutionEnvironment.LIVE,
+        account_id="mode-live-unready",
+        venue="BINANCE",
+        label="Mode Live Unready",
+        credentials={"api_key": "live-key", "api_secret": "live-secret"},
+        idempotency_key="mode-live-unready-account",
+        now=now,
+    )
+
+    status = service.trading_mode_status(actor_id=ids["admin"], now=now)
+    readiness = status["target_readiness"]["LIVE"]
+    assert readiness["ready"] is False
+    assert readiness["execution_ready"] is False
+    assert readiness["switch_allowed"] is True
+    assert readiness["blockers"] == []
+    assert readiness["advisories"] == [{"code": "TARGET_ACCOUNT_NOT_READY", "count": 1}]
+    assert set(readiness["rejected_accounts"][0]["reasons"]) >= {
+        "CONNECTION_NOT_VERIFIED",
+        "TRADING_NOT_ELIGIBLE",
+        "RUNTIME_SERVICE_NOT_READY",
+    }
+
+    changed = service.set_team_execution_mode(
+        actor_id=ids["admin"],
+        team_id=ids["team_id"],
+        mode="LIVE",
+        confirmation="I_CONFIRM_LIVE_PRODUCTION_MONEY",
+        expected_version=ids["team_version"],
+        idempotency_key="switch-live-with-unready-account",
+        now=now,
+    )
+    assert changed["execution_mode"] == "LIVE"
+    assert changed["dangerous_capabilities_changed"] is False
+
+
 def test_runtime_enums_proposal_environment_and_removed_endpoints_are_testnet_live_only(
     database: Database,
 ) -> None:

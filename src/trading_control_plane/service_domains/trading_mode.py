@@ -128,10 +128,11 @@ class TradingModeService(ServiceComponent):
                 ready_accounts.append(payload)
 
         blockers: list[dict[str, Any]] = []
+        advisories: list[dict[str, Any]] = []
         if not accounts:
-            blockers.append({"code": "TARGET_ACCOUNT_MISSING", "count": 1})
+            advisories.append({"code": "TARGET_ACCOUNT_MISSING", "count": 1})
         elif not ready_accounts:
-            blockers.append({"code": "TARGET_ACCOUNT_NOT_READY", "count": len(accounts)})
+            advisories.append({"code": "TARGET_ACCOUNT_NOT_READY", "count": len(accounts)})
         risk_policy = session.scalar(
             select(RiskPolicy).where(RiskPolicy.team_id == team.team_id, RiskPolicy.active)
         )
@@ -148,9 +149,15 @@ class TradingModeService(ServiceComponent):
             blockers.extend(self._source_blockers(session, team.team_id, team.execution_mode))
         return {
             "environment": environment,
-            "ready": not blockers,
+            # Account credentials, connection verification and runtime binding are
+            # execution prerequisites, not prerequisites for selecting a team mode.
+            # Order execution keeps enforcing those checks independently.
+            "ready": bool(ready_accounts) and not blockers,
+            "execution_ready": bool(ready_accounts),
+            "switch_allowed": not blockers,
             "ready_accounts": ready_accounts,
             "rejected_accounts": rejected_accounts,
+            "advisories": advisories,
             "blockers": blockers,
         }
 
