@@ -450,7 +450,7 @@ async function renderCapitalCenter() {
   const searchParams = new URLSearchParams(location.search);
   const displayEnvironment = currentWorkflowEnvironment();
   if (!['TESTNET','LIVE'].includes(displayEnvironment)) {
-    main.innerHTML = `<section class="page"><div class="callout"><b>团队尚未选择运行模式</b><p>请由管理员前往团队设置完成测试模式或生产模式配置。</p><a class="primary" href="/team-settings" data-link>前往团队设置</a></div></section>`;
+    main.innerHTML = `<section class="page"><div class="callout"><b>团队尚未选择运行模式</b><p>请由管理员前往模式设置选择测试模式或生产模式。</p><a class="primary" href="/team-settings" data-link>前往模式设置</a></div></section>`;
     return;
   }
   const requestedAccounts = searchParams.getAll('account');
@@ -584,7 +584,7 @@ async function renderCapitalCenter() {
   const accountFilters = accountOptions.map(option => `<label class="capital-account-option"><input type="checkbox" name="account" value="${escapeHtml(option.key)}" ${selectedAccountKeys.has(option.key) ? 'checked' : ''}><span><b>${escapeHtml(option.label)}</b><small>${escapeHtml(option.location_type === 'VAULT' ? '链上金库' : fmtVenueLabel(option.venue))}</small></span></label>`).join('');
   const displayControls = document.createElement('section');
   displayControls.className = 'card capital-display-controls';
-  displayControls.innerHTML = `<div class="card-heading"><div><p class="eyebrow">当前模式</p><h2>${executionModeLabel(displayEnvironment)}</h2></div><a class="secondary" href="/team-settings" data-link>前往团队设置查看当前模式</a></div>${displayEnvironment === 'TESTNET' ? '<div class="callout tone-attention"><b>测试环境资金</b><p>仅代表交易所测试资产，不显示 Vault、Safe、生产提现地址或真实资金划转。</p></div>' : ''}<form id="capital-account-filter-form"><fieldset><legend>选择要叠加的当前模式账户曲线（可多选）</legend><div class="capital-account-options">${accountFilters || '<p class="subtle">当前模式尚未添加账户，请先前往“账户管理”。</p>'}</div></fieldset><div class="form-error" role="alert"></div><button class="primary" ${accountOptions.length ? '' : 'disabled'}>应用账户曲线</button></form><p class="safety-note">账户多选只影响资金曲线展示，不改变团队运行模式或交易权限。</p>`
+  displayControls.innerHTML = `<div class="card-heading"><div><p class="eyebrow">当前模式</p><h2>${executionModeLabel(displayEnvironment)}</h2></div><a class="secondary" href="/team-settings" data-link>前往模式设置查看当前模式</a></div>${displayEnvironment === 'TESTNET' ? '<div class="callout tone-attention"><b>测试环境资金</b><p>仅代表交易所测试资产，不显示 Vault、Safe、生产提现地址或真实资金划转。</p></div>' : ''}<form id="capital-account-filter-form"><fieldset><legend>选择要叠加的当前模式账户曲线（可多选）</legend><div class="capital-account-options">${accountFilters || '<p class="subtle">当前模式尚未添加账户，请先前往“账户管理”。</p>'}</div></fieldset><div class="form-error" role="alert"></div><button class="primary" ${accountOptions.length ? '' : 'disabled'}>应用账户曲线</button></form><p class="safety-note">账户多选只影响资金曲线展示，不改变团队运行模式或交易权限。</p>`
   pageHead.after(displayControls);
   const legacyStats = main.querySelector('.capital-page > .stats');
   legacyStats.outerHTML = `<section class="capital-overview" aria-label="当前资金净值"><article class="capital-total-card ${netWorth.complete ? 'is-current' : 'is-limited'}"><small>当前所选账户总净值</small><b>${escapeHtml(totalHeadline)}</b><p>${escapeHtml(totalSupporting)}</p></article><div class="capital-source-cards">${sourceCards}</div></section><section class="capital-trust-panel ${netWorth.complete ? 'is-current' : 'is-limited'}"><div><b>${netWorth.complete ? '所选账户数据可信，可用于当前汇总' : '当前汇总已阻断'}</b><p>${escapeHtml(trustCopy)}</p></div><span>${netWorth.complete ? '完整' : '需关注'}</span></section>`;

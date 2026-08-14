@@ -140,8 +140,8 @@ def test_role_navigation_and_task_entries_match_capabilities() -> None:
     )[0]
     operations_section = index.split('<p class="nav-section-label">运行与风控</p>', maxsplit=1)[
         1
-    ].split('<p class="nav-section-label">团队设置</p>', maxsplit=1)[0]
-    team_section = index.split('<p class="nav-section-label">团队设置</p>', maxsplit=1)[1]
+    ].split('<p class="nav-section-label">团队配置</p>', maxsplit=1)[0]
+    team_section = index.split('<p class="nav-section-label">团队配置</p>', maxsplit=1)[1]
     assert 'href="/proposals"' in trade_section
     assert 'href="/reviews"' in trade_section
     assert 'href="/campaigns"' in trade_section
@@ -181,6 +181,25 @@ def test_primary_navigation_preserves_the_established_order() -> None:
         "/admin/users",
         "/team-settings",
     ]
+    assert (
+        '<a href="/team-settings" data-link data-nav-capability="venue.view">模式设置</a>'
+        in index
+    )
+
+
+def test_setup_team_routes_render_the_requested_page_without_repeating_creation_panels() -> None:
+    app_core = APP_CORE.read_text()
+    execution = EXECUTION.read_text()
+
+    route = app_core.split("async function route()", maxsplit=1)[1]
+    assert "teamSetupPaths" not in route
+    assert "!session.active_workspace || !session.active_team" in route
+    assert "!session.active_team.trading_enabled" not in route
+    assert "renderScopeSetup();" in route
+    assert "模式设置" in execution
+    assert "switchAllowed ? '' : 'disabled'" in execution
+    assert "账户凭据" in execution
+    assert "不阻止切换团队模式" in execution
 
 
 def test_hierarchy_pass_uses_neutral_surfaces_readable_type_and_one_primary_action() -> None:
@@ -208,7 +227,7 @@ def test_hierarchy_pass_uses_neutral_surfaces_readable_type_and_one_primary_acti
     assert '<p class="nav-section-label">工作台</p>' in index
     assert '<p class="nav-section-label">交易流程</p>' in index
     assert '<p class="nav-section-label">运行与风控</p>' in index
-    assert '<p class="nav-section-label">团队设置</p>' in index
+    assert '<p class="nav-section-label">团队配置</p>' in index
     assert '<a class="text-link" href="/proposals"' in workspace
     assert '<a class="secondary" href="/opportunities"' in workspace
 

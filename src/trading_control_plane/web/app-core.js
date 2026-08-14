@@ -137,7 +137,7 @@ const ENGLISH_EXACT = new Map(Object.entries({
   '读取带来源与时效状态的机会快照':'Read opportunity snapshots with source and freshness', '读取当前范围提案':'Read currently authorized proposals', '读取交易任务':'Read trades', '按环境读取实际结果':'Read actual results by environment', '按环境读取审计时间线':'Read the audit timeline by environment',
   '当前仅部分列表接口提供 limit：通知为 1–200，审计为 1–500。不要自行假设 cursor、offset 或 page 参数；以 OpenAPI 为准。':'Only some list endpoints provide limit: notifications 1–200 and audit 1–500. Do not assume cursor, offset, or page parameters; use OpenAPI.',
   '当前仅部分列表接口提供':'Only some list endpoints provide', '：通知为 1–200，审计为 1–500。不要自行假设':': notifications 1–200 and audit 1–500. Do not assume', '、':',', '与':'and', '或':'or', '参数；以 OpenAPI 为准。':'parameters; use OpenAPI.',
-  '主导航':'Main navigation', '工作台':'Workspace', '空间配置':'Space setup', '治理与安全':'Governance and safety', '交易流程':'Trade workflow', '运行与风控':'Operations and risk', '团队设置':'Team settings', '当前范围':'Current scope', '当前任务':'Current tasks', '实时信号':'Live signals', '实时机会':'Live opportunities', 'Webhook 信号':'Webhook signals', '提案管理':'Proposals', '审核队列':'Review queue',
+  '主导航':'Main navigation', '工作台':'Workspace', '空间配置':'Space setup', '治理与安全':'Governance and safety', '交易流程':'Trade workflow', '运行与风控':'Operations and risk', '团队配置':'Team configuration', '模式设置':'Mode settings', '当前范围':'Current scope', '当前任务':'Current tasks', '实时信号':'Live signals', '实时机会':'Live opportunities', 'Webhook 信号':'Webhook signals', '提案管理':'Proposals', '审核队列':'Review queue',
   '交易任务':'Trades', '绩效报表':'Performance reports', '交易模式':'Trading mode', '测试模式':'Testnet mode', '通知中心':'Notification center', '风险控制':'Risk controls', '系统状态':'System status', '资金':'Capital', '异常':'Exceptions',
   '交易账户':'Exchange accounts', '账户管理':'Account management', '风控中心':'Risk center', '成员权限':'Access control',
   '业务数据库已连接':'Business database connected', '数据缺失时自动阻止交易':'Missing data blocks trading automatically', '跳到主要内容':'Skip to main content',
@@ -587,24 +587,27 @@ const ENGLISH_EXACT = new Map(Object.entries({
   '团队实际执行环境只在这里切换；账户、资金、提案和交易任务页面均为只读显示。':'The Team execution environment can be switched only here. Account, capital, proposal, and trade pages show it read only.',
   '订单会发送到交易所生产服务器并影响真实资金。':'Orders are sent to the exchange production server and affect real funds.',
   '订单会发送到交易所测试服务器，仅代表交易所测试资产。':'Orders are sent to the exchange Testnet server and represent test assets only.',
-  '完成账户、连接、运行服务和风险政策配置后，由管理员选择运行模式。':'After accounts, connections, runtime services, and risk policy are configured, an administrator selects the operating mode.',
-  '目标模式账户准备状态':'Target-mode account readiness', '已就绪':'Ready', '尚未就绪':'Not ready',
+  '配置风险政策后，由管理员选择测试或生产模式；账户凭据、连接和运行服务只影响订单执行准备。':'After configuring the risk policy, an administrator selects Testnet or Production mode. Account credentials, connection, and runtime services affect order execution readiness only.',
+  '目标模式交易准备状态':'Target-mode execution readiness', '执行已就绪':'Execution ready', '执行尚未就绪':'Execution not ready',
   '测试模式 · 交易所测试环境':'Testnet mode · Exchange Testnet', '生产模式 · 真实资金环境':'Production mode · Real-funds environment',
   '切换审计':'Switch audit', '最近一次模式切换':'Latest mode switch', '最近切换人':'Last switched by', '最近切换时间':'Last switched at', '切换阻断原因':'Switch blockers',
-  '尚无记录':'No record', '无':'None', '目标账户、凭据、风险政策、来源订单/仓位和运行服务检查通过。':'Target accounts, credentials, risk policy, source orders and positions, and runtime services passed readiness checks.',
-  '等待服务端准备度检查':'Waiting for server readiness checks', '受控切换':'Controlled switch',
+  '尚无记录':'No record', '无':'None', '模式切换条件已通过；账户执行条件仍由下单链路独立校验。':'Mode-switch conditions passed. The order path still validates account execution prerequisites independently.',
+  '等待服务端切换检查':'Waiting for server switch checks', '受控切换':'Controlled switch',
   '切换不会开启实盘下单、自动加仓或资金划转；旧环境未执行授权和订单意图会失效，历史提案环境保持不变。':'Switching does not enable live order sending, automatic scaling, or capital transfers. Unexecuted authorizations and intents in the previous environment expire; proposal history keeps its original environment.',
   '输入确认文案':'Enter confirmation text', '切换到生产模式':'Switch to Production mode', '切换到测试模式':'Switch to Testnet mode',
   '普通成员只能查看当前模式；需要系统管理员或 team.manage 权限执行切换。':'Regular members can only view the current mode. A system administrator or administrator with team.manage permission must perform the switch.',
   '目标环境没有已添加账户':'No account is configured for the target environment', '账户凭据、连接或运行服务尚未就绪':'Account credentials, connection, or runtime service is not ready',
   '当前团队尚未配置风险政策':'The current Team has no risk policy', '来源环境存在执行中的订单意图':'The source environment has executing order intents',
   '来源环境存在未结束或状态未知订单':'The source environment has open or unknown orders', '来源环境存在未平仓或状态未知仓位':'The source environment has open or unknown positions',
+  '账户凭据、连接和运行服务状态只影响下单准备，不阻止切换团队模式。':'Account credentials, connection, and runtime service status affect order readiness only and do not block switching the Team mode.',
+  '执行准备提示':'Execution readiness notice', '这些项目不会阻止模式切换；在处理完成前，订单发送仍会失败关闭。':'These items do not block a mode switch. Order sending remains fail closed until they are resolved.',
   '提前配置测试和生产账户；实际执行环境始终由服务端读取团队当前模式。':'Configure Testnet and Production accounts in advance. The server always derives the execution environment from the Team current mode.',
-  '账户配置范围':'Account configuration scope', '这里切换的只是账户配置范围，不会改变团队当前运行模式。实际模式切换请前往团队设置。':'This switches only the account configuration scope and does not change the Team current mode. Go to Team settings to switch the actual mode.',
-  '前往团队设置':'Open Team settings', '测试账户':'Testnet accounts', '生产账户':'Production accounts', '交易所测试环境 API':'Exchange Testnet API', '真实资金环境 API':'Real-funds API',
-  '尚未添加此环境账户':'No account has been added for this environment', '添加并验证账户后，团队才具备切换到该模式的前置条件。':'Add and verify an account before the Team can switch to this mode.',
+  '账户配置范围':'Account configuration scope', '这里切换的只是账户配置范围，不会改变团队当前运行模式。实际模式切换请前往模式设置。':'This switches only the account configuration scope and does not change the Team current mode. Go to Mode settings to switch the actual mode.',
+  '前往模式设置':'Open Mode settings', '测试账户':'Testnet accounts', '生产账户':'Production accounts', '交易所测试环境 API':'Exchange Testnet API', '真实资金环境 API':'Real-funds API',
+  '尚未添加此环境账户':'No account has been added for this environment', '添加并验证账户后，交易执行才会就绪；账户配置不影响模式选择。':'Add and verify an account to make execution ready. Account configuration does not affect mode selection.',
   '这里的选择只影响展示，不会切换运行环境或改变交易能力。':'This selection affects display only; it never switches the runtime environment or changes trading capabilities.',
-  '前往团队设置查看当前模式':'Open Team settings to view current mode', '测试环境资金':'Testnet capital',
+  '前往模式设置查看当前模式':'Open Mode settings to view current mode', '测试环境资金':'Testnet capital',
+  '请由管理员前往模式设置选择测试模式或生产模式。':'Ask an administrator to select Testnet or Production mode in Mode settings.',
   '仅代表交易所测试资产，不显示 Vault、Safe、生产提现地址或真实资金划转。':'Represents exchange Testnet assets only. Vault, Safe, Production withdrawal addresses, and real capital transfers are hidden.',
   '选择要叠加的当前模式账户曲线（可多选）':'Select current-mode account series (multiple allowed)', '当前模式尚未添加账户，请先前往“账户管理”。':'No account exists in the current mode. Add one in Account management first.',
   '应用账户曲线':'Apply account series', '账户多选只影响资金曲线展示，不改变团队运行模式或交易权限。':'Account selection affects capital charts only. It does not change the Team mode or trading permissions.',
@@ -616,7 +619,7 @@ const ENGLISH_EXACT = new Map(Object.entries({
 }));
 
 const ENGLISH_PATTERNS = [
-  [/^团队设置 · (.+)$/, 'Team settings · $1'],
+  [/^模式设置 · (.+)$/, 'Mode settings · $1'],
   [/^切换到(测试模式|生产模式) · (.+)$/, (_match, mode, environment) => `Switch to ${mode === '测试模式' ? 'Testnet mode' : 'Production mode'} · ${environment === '交易所测试环境' ? 'Exchange Testnet' : 'Real-funds environment'}`],
   [/^(\d+) \u7c7b\u963b\u65ad$/, '$1 blocker categories'],
   [/^(\d+) \u9879$/, '$1 items'],
@@ -1616,8 +1619,7 @@ async function route() {
     return;
   }
   setShell(true);
-  const teamSetupPaths = new Set(['/admin/users', '/admin/agents', '/profile/api-keys', '/profile/api-access', '/accounts', '/team-settings', '/venues', '/signals', '/webhook-signals', '/notifications', '/risk', '/trading-mode']);
-  if (!session.active_workspace || !session.active_team || (!session.active_team.trading_enabled && !teamSetupPaths.has(path) && !path.startsWith('/venues/'))) {
+  if (!session.active_workspace || !session.active_team) {
     renderScopeSetup();
     enhanceRenderedPage();
     return;
