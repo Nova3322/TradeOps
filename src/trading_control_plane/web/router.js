@@ -13,13 +13,19 @@ async function bootstrap() {
 }
 
 function notFoundView(path) {
-  if (path.startsWith('/campaigns/')) {
-    return '<section class="empty-state"><div><p class="eyebrow">交易任务</p><h2>该交易任务不存在</h2><p>链接可能已失效，或记录不属于当前团队与环境。</p><a class="primary" href="/campaigns" data-link>返回交易任务</a></div></section>';
-  }
-  if (path.startsWith('/proposals/')) {
-    return '<section class="empty-state"><div><p class="eyebrow">提案管理</p><h2>该提案不存在</h2><p>链接可能已失效，或记录不属于当前团队与环境。</p><a class="primary" href="/proposals" data-link>返回提案列表</a></div></section>';
-  }
-  return '<section class="empty-state"><div><p class="eyebrow">导航</p><h2>页面不存在</h2><p>链接可能已失效，请从当前任务重新进入。</p><a class="primary" href="/home" data-link>返回当前任务</a></div></section>';
+  const context = path.startsWith('/campaigns/')
+    ? {eyebrow:'交易任务', title:'该交易任务不存在', copy:'链接可能已失效，或记录不属于当前团队与环境。', href:'/campaigns', action:'返回交易任务'}
+    : path.startsWith('/proposals/')
+      ? {eyebrow:'提案管理', title:'该提案不存在', copy:'链接可能已失效，或记录不属于当前团队与环境。', href:'/proposals', action:'返回提案列表'}
+      : path.startsWith('/venues/')
+        ? {eyebrow:'账户管理', title:'账户不存在或不在当前空间', copy:'请返回账户列表，选择当前身份可见的账户。', href:'/accounts', action:'返回账户列表'}
+        : {eyebrow:'导航', title:'页面不存在', copy:'链接可能已失效，请从当前任务重新进入。', href:'/home', action:'返回当前任务'};
+  return `<section class="access-boundary-state missing-resource-state" role="status" aria-labelledby="missing-resource-title"><div>
+    <div class="access-boundary-heading"><div><p class="eyebrow">${context.eyebrow}</p><h2 id="missing-resource-title" data-error-heading tabindex="-1">${context.title}</h2></div><span class="status-pill">记录不可用</span></div>
+    <p class="access-boundary-copy">${context.copy}</p>
+    <dl class="access-boundary-facts"><div><dt>安全边界</dt><dd>仅保留当前团队与环境范围</dd></div><div><dt>处理结果</dt><dd>未执行任何写入操作</dd></div></dl>
+    <div class="access-boundary-actions"><a class="primary" href="${context.href}" data-link>${context.action}</a>${context.href === '/home' ? '' : '<a class="secondary" href="/home" data-link>返回当前任务</a>'}</div>
+  </div></section>`;
 }
 
 function accessDeniedView(requiredCapability) {
@@ -116,7 +122,7 @@ async function route() {
       if (!error.handled) handleUnauthorizedResponse();
       return;
     }
-    main.innerHTML = errorView(error);
+    main.innerHTML = error.status === 404 ? notFoundView(path) : errorView(error);
     enhanceRenderedPage();
     main.querySelector('[data-error-heading]')?.focus();
   }

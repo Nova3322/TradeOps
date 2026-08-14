@@ -111,6 +111,7 @@ const ENGLISH_EXACT = new Map(Object.entries({
   '本页事实不可用；依赖这些事实的操作保持阻断。':'Page facts are unavailable; actions depending on them remain blocked.',
   '当前功能负责人或系统管理员':'Feature owner or system administrator', '根据上方原因恢复所需事实后重新检查。':'Restore the required facts described above, then retry.',
   '页面不存在':'Page not found', '返回机会页':'Back to Opportunities', '内部访问':'Internal access',
+  '记录不可用':'Record unavailable', '处理结果':'Result', '仅保留当前团队与环境范围':'Limited to the current Team and environment', '未执行任何写入操作':'No write operation was performed',
   '导航':'Navigation', '该交易任务不存在':'This trade does not exist', '该提案不存在':'This proposal does not exist',
   '链接可能已失效，或记录不属于当前团队与环境。':'The link may have expired, or the record may not belong to the current Team and environment.',
   '链接可能已失效，请从当前任务重新进入。':'The link may have expired. Return to Current tasks and try again.', '返回提案列表':'Back to proposals',
