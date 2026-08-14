@@ -1267,7 +1267,7 @@ dialog::backdrop { background: rgba(4, 12, 10, .56); backdrop-filter: blur(3px);
   .form-actions { flex-wrap: wrap; gap: 8px; }
   .form-actions > :is(button, a) { max-width: 100%; white-space: normal; text-align: center; }
   .webhook-source-tabs { flex-wrap: wrap; overflow-x: visible; padding-bottom: 0; }
-  .mode-accounts-page .empty-state { min-height: 240px; }
+  .mode-accounts-page .empty-state:not(.compact-empty-state) { min-height: 240px; }
   .signal-source-facts { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .webhook-signal-facts { grid-template-columns: 1fr; }
   .webhook-signal-filters { grid-template-columns: 1fr; }
@@ -1311,8 +1311,9 @@ dialog::backdrop { background: rgba(4, 12, 10, .56); backdrop-filter: blur(3px);
   .capital-section-tabs { display: grid; grid-template-columns: 1fr; width: 100%; }
   .capital-gate-summary { width: 100%; min-width: 0; }
   .capital-source-cards { grid-template-columns: 1fr; }
-  .capital-worth-card { grid-template-columns: minmax(0, 1fr) auto; align-items: center; }
-  .capital-worth-card p { grid-column: 1 / -1; }
+  .capital-worth-card { grid-template-columns: 1fr; align-items: start; }
+  .capital-worth-card > span { width: auto; max-width: 100%; justify-self: start; line-height: 1.4; }
+  .capital-worth-card p { grid-column: auto; }
   .capital-chart-panel { padding: 14px 10px; }
   .chart-head { display: grid; gap: 10px; }
   .capital-chart-meta { display: grid; }
