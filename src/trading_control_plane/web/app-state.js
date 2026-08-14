@@ -13,14 +13,13 @@ const scopeControl = document.querySelector('#scope-control');
 const scopeSwitcher = document.querySelector('#scope-switcher');
 const scopeSwitcherMenu = document.querySelector('#workspace-switcher-menu');
 const environmentBadge = document.querySelector('#environment-badge');
-const sidebarEnvironment = document.querySelector('[data-current-environment]');
-const sidebarMode = document.querySelector('[data-current-mode]');
 const preferenceSelects = new Map(
   [...document.querySelectorAll('[data-preference-select]')].map(element => [element.dataset.preferenceSelect, element]),
 );
 const themeColorMeta = document.querySelector('meta[name="theme-color"]');
 const currentDate = document.querySelector('#current-date');
 const mobileNavToggle = document.querySelector('#mobile-nav-toggle');
+const desktopNavToggle = document.querySelector('#desktop-nav-toggle');
 const mobileSessionSummary = document.querySelector('#mobile-session-summary');
 const navBackdrop = document.querySelector('#nav-backdrop');
 const dialog = document.querySelector('#system-proposal-dialog');
@@ -47,6 +46,7 @@ let mobileNavFocusToken = 0;
 const REQUEST_TIMEOUT_MS = 15000;
 const LANGUAGE_STORAGE_KEY = 'trading-language';
 const THEME_STORAGE_KEY = 'trading-theme';
+const DESKTOP_NAV_STORAGE_KEY = 'trading-desktop-nav-collapsed';
 const PREFERENCE_OPTIONS = Object.freeze({
   language:Object.freeze([
     Object.freeze({value:'zh-CN', label:'中文'}),

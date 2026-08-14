@@ -29,6 +29,7 @@ function closeWorkspaceSwitcher({restoreFocus = false} = {}) {
 
 function setShell(loggedIn, {workspaceGate = false} = {}) {
   sidebar.hidden = !loggedIn || workspaceGate;
+  desktopNavToggle.hidden = !loggedIn || workspaceGate;
   userMenu.hidden = !loggedIn;
   scopeControl.hidden = !loggedIn || workspaceGate;
   mobileNavToggle.hidden = !loggedIn || workspaceGate;
@@ -62,6 +63,7 @@ function setShell(loggedIn, {workspaceGate = false} = {}) {
   closeUserMenu();
   closeWorkspaceSwitcher();
   closeMobileNav({restoreFocus:false});
+  syncDesktopNavigation();
 }
 
 function errorView(error, retry = true) {
@@ -148,8 +150,29 @@ function closeMobileNav({restoreFocus = true} = {}) {
   if (restoreFocus && !mobileNavToggle.hidden) mobileNavToggle.focus();
 }
 
+function desktopNavigationCollapsedPreference() {
+  return localStorage.getItem(DESKTOP_NAV_STORAGE_KEY) === 'true';
+}
+
+function setDesktopNavigationCollapsed(collapsed, {persist = false} = {}) {
+  const desktop = matchMedia('(min-width: 1101px)').matches;
+  const active = Boolean(collapsed && desktop && session && !sidebar.hidden);
+  document.querySelector('.app-shell')?.classList.toggle('sidebar-collapsed', active);
+  desktopNavToggle.setAttribute('aria-expanded', String(!active));
+  const label = localizedText(active ? '展开主导航' : '收起主导航');
+  desktopNavToggle.setAttribute('aria-label', label);
+  desktopNavToggle.title = label;
+  desktopNavToggle.querySelector('span').textContent = active ? '›' : '‹';
+  if (persist) localStorage.setItem(DESKTOP_NAV_STORAGE_KEY, String(Boolean(collapsed)));
+}
+
+function syncDesktopNavigation() {
+  setDesktopNavigationCollapsed(desktopNavigationCollapsedPreference());
+}
+
 function syncNavigationMode() {
   closeMobileNav({restoreFocus:false});
+  syncDesktopNavigation();
 }
 
 function bindLinkedRows() {

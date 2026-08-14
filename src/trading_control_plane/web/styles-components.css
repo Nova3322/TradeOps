@@ -575,3 +575,51 @@ p, li, dd, td { font-size: 14px; }
   .preference-option,
   .user-menu-logout
 ) { font-size: 13px; }
+
+/* Restore the compact multi-account capital picker used before the shell split. */
+.capital-account-picker { border: 1px solid var(--line); border-radius: 3px; background: var(--panel); }
+.capital-account-picker > summary { min-height: 42px; display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 9px 12px; cursor: pointer; }
+.capital-account-picker > summary small { color: var(--muted); }
+.capital-account-picker-panel { padding: 12px; border-top: 1px solid var(--line); }
+.capital-account-picker-tools { display: grid; grid-template-columns: minmax(180px, 1fr) 160px auto auto; gap: 8px; align-items: end; }
+.capital-account-picker-tools .secondary { min-height: 38px; }
+.capital-account-options { display: grid; grid-template-columns: 1fr; gap: 0; max-height: 360px; margin: 10px 0 0; overflow-y: auto; }
+.capital-account-option { display: grid; grid-template-columns: 18px 8px minmax(0, 1fr); gap: 9px; align-items: center; min-height: 50px; padding: 7px 8px; border: 0; border-top: 1px solid var(--line); border-radius: 0; background: transparent; cursor: pointer; }
+.capital-account-option:has(input:checked) { border-color: var(--line); background: var(--panel-soft); }
+.capital-account-option:has(input:focus-visible) { outline: 2px solid var(--accent); outline-offset: -2px; }
+.capital-account-option input { width: 17px; min-width: 17px; height: 17px; min-height: 17px; margin: 0; padding: 0; accent-color: var(--accent); }
+.capital-account-option span { display: grid; gap: 2px; min-width: 0; }
+.capital-account-option b,
+.capital-account-option small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.capital-account-option small { color: var(--muted); }
+.capital-account-option em { color: var(--danger); font-size: 12px; font-style: normal; }
+.capital-account-option.is-disabled { cursor: not-allowed; opacity: .68; }
+.capital-account-color { width: 8px; height: 8px; border-radius: 50%; background: var(--account-color, var(--muted)); }
+.capital-account-color.color-0, .capital-account-tag.color-0 { --account-color: var(--chart-source-1); }
+.capital-account-color.color-1, .capital-account-tag.color-1 { --account-color: var(--chart-source-2); }
+.capital-account-color.color-2, .capital-account-tag.color-2 { --account-color: var(--chart-source-3); }
+.capital-account-color.color-3, .capital-account-tag.color-3 { --account-color: var(--chart-source-4); }
+.capital-account-color.color-4, .capital-account-tag.color-4 { --account-color: var(--chart-source-5); }
+.capital-account-color.color-5, .capital-account-tag.color-5 { --account-color: var(--chart-source-6); }
+.capital-trend-toggle.series-color-0 { --trend-color: var(--chart-source-1); }
+.capital-trend-toggle.series-color-1 { --trend-color: var(--chart-source-2); }
+.capital-trend-toggle.series-color-2 { --trend-color: var(--chart-source-3); }
+.capital-trend-toggle.series-color-3 { --trend-color: var(--chart-source-4); }
+.capital-trend-toggle.series-color-4 { --trend-color: var(--chart-source-5); }
+.capital-trend-toggle.series-color-5 { --trend-color: var(--chart-source-6); }
+.capital-trend-toggle.series-color-6 { --trend-color: var(--chart-total); }
+.capital-account-tags { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
+.capital-account-tag { display: inline-flex; align-items: center; gap: 7px; min-height: 30px; max-width: 240px; padding: 4px 8px 4px 10px; border: 1px solid var(--account-color); border-radius: 999px; color: var(--ink); background: transparent; cursor: pointer; }
+.capital-account-tag span:first-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.capital-account-tag b { color: var(--muted); }
+
+@media (max-width: 780px) {
+  .capital-account-picker-panel { position: fixed; inset: auto 0 0; z-index: 80; max-height: 72dvh; overflow-y: auto; padding: 14px; border: 1px solid var(--line); border-radius: 3px 3px 0 0; background: var(--panel); }
+  .capital-account-picker-tools { grid-template-columns: 1fr 1fr; }
+  .capital-account-picker-tools input { grid-column: 1 / -1; }
+}
+
+@media (max-width: 430px) {
+  .capital-account-picker-tools { grid-template-columns: 1fr; }
+  .capital-account-picker-tools input { grid-column: auto; }
+}

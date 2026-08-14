@@ -12,8 +12,8 @@
     <link rel="preload" href="/assets/fonts/IBMPlexSansSC-SemiBold.woff2" as="font" type="font/woff2" crossorigin>
     <link rel="preload" href="/assets/fonts/IBMPlexMono-Regular.woff2" as="font" type="font/woff2" crossorigin>
     <link rel="preload" href="/assets/fonts/IBMPlexMono-SemiBold.woff2" as="font" type="font/woff2" crossorigin>
-    <link rel="stylesheet" href="/assets/styles-base.css?v=1">
-    <link rel="stylesheet" href="/assets/styles-components.css?v=1">
+    <link rel="stylesheet" href="/assets/styles-base.css?v=2">
+    <link rel="stylesheet" href="/assets/styles-components.css?v=2">
     <link rel="stylesheet" href="/assets/styles-api-access.css?v=1">
     <link rel="stylesheet" href="/assets/styles-shell.css?v=1">
     <title>交易控制台</title>
@@ -112,15 +112,11 @@
         </nav>
         <div class="sidebar-foot">
           <div id="mobile-session-summary" class="mobile-session-summary"></div>
-          <div class="sidebar-environment" aria-label="当前环境">
-            <small>当前环境</small>
-            <strong data-current-environment>环境未确认</strong>
-            <span data-current-mode>当前模式：待配置</span>
-          </div>
           <div>业务数据库已连接</div>
           <div>数据缺失时自动阻止交易</div>
         </div>
       </aside>
+      <button id="desktop-nav-toggle" class="desktop-nav-toggle" type="button" aria-controls="sidebar" aria-expanded="true" aria-label="收起主导航" title="收起主导航" hidden><span aria-hidden="true">‹</span></button>
       <button id="nav-backdrop" class="nav-backdrop" type="button" aria-label="关闭主导航" hidden></button>
 
       <main id="main" class="main-content" tabindex="-1">
@@ -174,21 +170,21 @@
       </form>
     </dialog>
     <div id="toast" class="toast" role="status" aria-live="polite"></div>
-    <script defer src="/assets/app-state.js?v=1"></script>
-    <script defer src="/assets/i18n.js?v=1"></script>
+    <script defer src="/assets/app-state.js?v=2"></script>
+    <script defer src="/assets/i18n.js?v=2"></script>
     <script defer src="/assets/shared.js?v=2"></script>
     <script defer src="/assets/session.js?v=1"></script>
     <script defer src="/assets/api-client.js?v=2"></script>
-    <script defer src="/assets/app-shell.js?v=1"></script>
+    <script defer src="/assets/app-shell.js?v=2"></script>
     <script defer src="/assets/workspace.js?v=181"></script>
     <script defer src="/assets/signals.js?v=177"></script>
     <script defer src="/assets/proposals.js?v=175"></script>
     <script defer src="/assets/risk.js?v=170"></script>
     <script defer src="/assets/execution.js?v=177"></script>
-    <script defer src="/assets/capital.js?v=175"></script>
+    <script defer src="/assets/capital.js?v=176"></script>
     <script defer src="/assets/reporting.js?v=175"></script>
     <script defer src="/assets/accounts.js?v=174"></script>
     <script defer src="/assets/router.js?v=1"></script>
-    <script defer src="/assets/app.js?v=175"></script>
+    <script defer src="/assets/app.js?v=176"></script>
   </body>
 </html>

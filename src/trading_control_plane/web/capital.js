@@ -1,3 +1,5 @@
+let capitalSeriesColorIndex = {TOTAL:6};
+
 function partitionCapitalRecords(records) {
   return {
     live: records.filter(item => item.environment === 'LIVE'),
@@ -373,11 +375,17 @@ async function renderCapitalCenter() {
     main.innerHTML = `<section class="page"><div class="callout"><b>团队尚未选择运行模式</b><p>请由管理员前往模式设置选择测试模式或生产模式。</p><a class="primary" href="/team-settings" data-link>前往模式设置</a></div></section>`;
     return;
   }
-  const requestedAccounts = searchParams.getAll('account');
+  const selectionStorageKey = `tradingops.capital.accounts.${session?.active_team?.team_id || 'active'}.${displayEnvironment}`;
+  let requestedAccounts = searchParams.getAll('account');
+  if (!requestedAccounts.length) {
+    try { requestedAccounts = JSON.parse(localStorage.getItem(selectionStorageKey) || '[]'); } catch (_error) { requestedAccounts = []; }
+  }
   const accountQuery = requestedAccounts.length ? `?accounts=${encodeURIComponent(requestedAccounts.join(','))}` : '';
   const result = await api(`/api/capital${accountQuery}`);
   const item = result.data;
   const accountOptions = item.account_options || [];
+  capitalSeriesColorIndex = Object.fromEntries(accountOptions.map((option, index) => [option.key, index % 6]));
+  capitalSeriesColorIndex.TOTAL = 6;
   const selectedAccountKeys = new Set(item.selected_account_keys || []);
   selectedAccountKeys.forEach(key => { if (capitalTrendVisibility[key] === undefined) capitalTrendVisibility[key] = true; });
   const directConfiguration = item.direct_configuration || {};
@@ -413,7 +421,7 @@ async function renderCapitalCenter() {
       ? (fallbackPoint ? `所选范围无数据 · 最后记录 ${fmtDate(fallbackPoint.time)}` : '等待数据')
       : `${formatCapitalUsd(latestPoint.value)} · ${series.source === 'TOTAL' ? (current ? '当前汇总' : '历史汇总') : presentation.state} · ${fmtDate(latestPoint.time)}`;
     const displayLabel = currentLanguage === 'en' && series.source === 'TOTAL' ? 'Combined total' : series.label;
-    return `<label class="capital-trend-toggle trend-${escapeHtml(series.source)} ${latestPoint ? '' : 'is-missing'}"><input type="checkbox" data-capital-trend="${escapeHtml(series.source)}" ${latestPoint && capitalTrendVisibility[series.source] ? 'checked' : ''} ${latestPoint ? '' : 'disabled'}><i aria-hidden="true"></i><span><b translate="no">${escapeHtml(displayLabel)}</b><small>${escapeHtml(summary)}</small></span></label>`;
+    return `<label class="capital-trend-toggle series-color-${capitalSeriesColorIndex[series.source] ?? 0} ${latestPoint ? '' : 'is-missing'}"><input type="checkbox" data-capital-trend="${escapeHtml(series.source)}" ${latestPoint && capitalTrendVisibility[series.source] ? 'checked' : ''} ${latestPoint ? '' : 'disabled'}><i aria-hidden="true"></i><span><b translate="no">${escapeHtml(displayLabel)}</b><small>${escapeHtml(summary)}</small></span></label>`;
   }).join('');
   const totalSeries = allHistorySeries.find(series => series.source === 'TOTAL');
   const latestCompleteTotal = totalSeries?.points.at(-1) || null;
@@ -495,7 +503,8 @@ async function renderCapitalCenter() {
   const emptyBalanceMessage = displayEnvironment === 'TESTNET'
     ? '尚无测试环境资金数据。'
     : '尚无生产环境资金数据。';
-  const accountFilters = accountOptions.map(option => `<label class="capital-account-option"><input type="checkbox" name="account" value="${escapeHtml(option.key)}" ${selectedAccountKeys.has(option.key) ? 'checked' : ''}><span><b>${escapeHtml(option.label)}</b><small>${escapeHtml(option.location_type === 'VAULT' ? '链上金库' : fmtVenueLabel(option.venue))}</small></span></label>`).join('');
+  const accountFilters = accountOptions.map((option, index) => `<label class="capital-account-option ${option.selectable ? '' : 'is-disabled'}"><input type="checkbox" name="account" value="${escapeHtml(option.key)}" ${selectedAccountKeys.has(option.key) ? 'checked' : ''} ${option.selectable ? '' : 'disabled'}><i class="capital-account-color color-${index % 6}" aria-hidden="true"></i><span><b title="${escapeHtml(option.label)}">${escapeHtml(option.label)}</b><small>${escapeHtml(option.location_type === 'VAULT' ? '链上金库' : fmtVenueLabel(option.venue))} · ${escapeHtml(option.account_id.length > 10 ? `${option.account_id.slice(0,4)}…${option.account_id.slice(-4)}` : option.account_id)} · ${escapeHtml(fmtStatus(option.connection_status))} · ${escapeHtml(option.last_sync_at ? fmtDate(option.last_sync_at) : '尚未同步')}</small>${option.disabled_reason ? `<em>${escapeHtml(option.disabled_reason)}</em>` : ''}</span></label>`).join('');
+  const selectedTags = accountOptions.filter(option => selectedAccountKeys.has(option.key)).map(option => `<button class="capital-account-tag color-${capitalSeriesColorIndex[option.key]}" type="button" data-remove-capital-account="${escapeHtml(option.key)}"><span>${escapeHtml(option.label)}</span><b aria-hidden="true">×</b><span class="sr-only">移除 ${escapeHtml(option.label)}</span></button>`).join('');
   const activeCapitalView = capitalViewSelection();
   const capitalViewHref = view => {
     const params = new URLSearchParams();
@@ -518,7 +527,7 @@ async function renderCapitalCenter() {
     </div>` : '';
   main.innerHTML = `<section class="page capital-page">
     <header class="page-head capital-page-head"><div><p class="eyebrow">${fmtExecutionMode(displayEnvironment)}资金 · 多账户只读事实</p><h1>资金中心</h1><p class="lede">按测试/实盘独立账户集多选展示资金曲线。这里的选择只影响展示，不会切换运行环境或改变交易能力。</p></div>${displayEnvironment === 'LIVE' ? `<div class="capital-gate-summary"><small>生产资金操作</small><b>${escapeHtml(fmtStatus(item.real_transfer_gate || 'DISABLED'))}</b><span>在途 / 占用 ${fmtNumber(liveInTransit)} USDC</span></div>` : ''}</header>
-    <section class="card capital-display-controls"><div class="card-heading"><div><p class="eyebrow">当前模式</p><h2>${fmtExecutionMode(displayEnvironment)}</h2></div><a class="secondary" href="/team-settings" data-link>前往模式设置查看当前模式</a></div>${displayEnvironment === 'TESTNET' ? '<div class="callout tone-attention"><b>测试环境资金</b><p>仅代表交易所测试资产，不显示 Vault、Safe、生产提现地址或真实资金划转。</p></div>' : ''}<form id="capital-account-filter-form"><fieldset><legend>选择要叠加的当前模式账户曲线（可多选）</legend><div class="capital-account-options">${accountFilters || '<p class="subtle">当前模式尚未添加账户，请先前往“账户管理”。</p>'}</div></fieldset><div class="form-error" role="alert"></div><button class="primary" ${accountOptions.length ? '' : 'disabled'}>应用账户曲线</button></form><p class="safety-note">账户多选只影响资金曲线展示，不改变团队运行模式或交易权限。</p></section>
+    <section class="card capital-display-controls"><div class="card-heading"><div><p class="eyebrow">曲线展示范围</p><h2>${fmtExecutionMode(displayEnvironment)}账户</h2></div><a class="text-button" href="/team-settings" data-link>前往模式设置查看当前模式</a></div>${displayEnvironment === 'TESTNET' ? '<p class="safety-note"><b>测试资产，不代表真实资金。</b> 本页不显示 Vault、Safe 或真实资金划转。</p>' : ''}<details class="capital-account-picker"><summary><span>已选 ${selectedAccountKeys.size} 个账户</span><small>搜索与多选</small></summary><div class="capital-account-picker-panel"><div class="capital-account-picker-tools"><input type="search" data-capital-account-search placeholder="搜索账户名称或 ID" aria-label="搜索账户"><select data-capital-venue-filter aria-label="按交易所筛选"><option value="">全部交易所</option>${[...new Set(accountOptions.map(option => option.venue))].map(venue => `<option value="${escapeHtml(venue)}">${escapeHtml(venue === 'VAULT' ? '链上金库' : fmtVenueLabel(venue))}</option>`).join('')}</select><button class="secondary" type="button" data-capital-select-all>全选</button><button class="secondary" type="button" data-capital-clear>清空</button></div><div class="capital-account-options">${accountFilters || '<p class="subtle">当前模式尚未添加有效账户，请先前往账户管理。</p>'}</div></div></details><div class="capital-account-tags" aria-label="已选账户">${selectedTags || '<span class="subtle">尚未选择账户</span>'}</div><p class="microcopy">首次进入默认选择第一个有效账户；之后恢复你在当前团队和环境中的上次选择。账户多选只影响曲线展示。</p></section>
     <nav class="section-tabs capital-section-tabs" aria-label="资金中心页面">${capitalNavigation}</nav>
     <div class="capital-view-panel" data-capital-view-panel="overview" aria-labelledby="capital-view-tab-overview" role="region" ${hidden('overview')}>
       <section class="capital-overview" aria-label="当前资金净值"><article class="capital-total-card ${netWorth.complete ? 'is-current' : 'is-limited'}"><small>当前所选账户总净值</small><b>${escapeHtml(totalHeadline)}</b><p>${escapeHtml(totalSupporting)}</p></article><div class="capital-source-cards">${sourceCards}</div></section>
@@ -528,16 +537,28 @@ async function renderCapitalCenter() {
     </div>${livePanels}
   </section>`;
   if (activeCapitalView === 'overview') drawCapitalChart(visibleHistorySeries);
-  document.querySelector('#capital-account-filter-form')?.addEventListener('submit', event => {
-    event.preventDefault();
-    const selected = new FormData(event.currentTarget).getAll('account');
-    const error = event.currentTarget.querySelector('.form-error');
-    if (!selected.length) { error.textContent = '请至少选择一个账户用于资金曲线。'; return; }
+  const applyAccountSelection = selected => {
+    localStorage.setItem(selectionStorageKey, JSON.stringify(selected));
     const next = new URLSearchParams();
-    selected.forEach(value => next.append('account', value));
-    history.pushState({}, '', `/capital?${next.toString()}`);
+    (selected.length ? selected : ['__NONE__']).forEach(value => next.append('account', value));
+    if (activeCapitalView !== 'overview' && displayEnvironment === 'LIVE') next.set('view', activeCapitalView);
+    history.replaceState({}, '', `/capital?${next.toString()}`);
     route();
-  });
+  };
+  document.querySelectorAll('.capital-account-option input').forEach(input => input.addEventListener('change', () => applyAccountSelection([...document.querySelectorAll('.capital-account-option input:checked')].map(item => item.value))));
+  document.querySelectorAll('[data-remove-capital-account]').forEach(button => button.addEventListener('click', () => applyAccountSelection([...selectedAccountKeys].filter(key => key !== button.dataset.removeCapitalAccount))));
+  document.querySelector('[data-capital-select-all]')?.addEventListener('click', () => applyAccountSelection(accountOptions.filter(option => option.selectable).map(option => option.key)));
+  document.querySelector('[data-capital-clear]')?.addEventListener('click', () => applyAccountSelection([]));
+  const filterAccounts = () => {
+    const query = (document.querySelector('[data-capital-account-search]')?.value || '').toLowerCase();
+    const venue = document.querySelector('[data-capital-venue-filter]')?.value || '';
+    document.querySelectorAll('.capital-account-option').forEach((row, index) => {
+      const option = accountOptions[index];
+      row.hidden = !(`${option.label} ${option.account_id}`.toLowerCase().includes(query) && (!venue || option.venue === venue));
+    });
+  };
+  document.querySelector('[data-capital-account-search]')?.addEventListener('input', filterAccounts);
+  document.querySelector('[data-capital-venue-filter]')?.addEventListener('change', filterAccounts);
   bindCapitalActions(historySeries, {
     history:item.history || [],
     alignmentToleranceSeconds:netWorth.alignment_tolerance_seconds || 60,
@@ -566,7 +587,7 @@ function drawCapitalChart(series) {
     context.fillText('请至少选择一条有数据的曲线', width / 2, height / 2);
     return;
   }
-  const colors = ['--chart-source-1','--chart-source-2','--chart-source-3','--chart-total'].map(name => styles.getPropertyValue(name).trim());
+  const colors = ['--chart-source-1','--chart-source-2','--chart-source-3','--chart-source-4','--chart-source-5','--chart-source-6','--chart-total'].map(name => styles.getPropertyValue(name).trim());
   const times = allPoints.map(point => point.time);
   const minimumTime = Math.min(...times);
   const maximumTime = Math.max(...times);
@@ -608,7 +629,7 @@ function drawCapitalChart(series) {
     if (!item.points.length) return;
     const band = bands.find(candidate => candidate.items.includes(item));
     if (!band) return;
-    const colorIndex = ({BINANCE:0, HYPERLIQUID:1, VAULT:2, TOTAL:3})[item.source];
+    const colorIndex = capitalSeriesColorIndex[item.source];
     const color = colors[colorIndex ?? seriesIndex] || colors[0];
     const projected = item.points.map(point => ({...point, x:x(point.time), y:band.y(point.value)}));
     const points = compactCapitalChartPoints(projected);
