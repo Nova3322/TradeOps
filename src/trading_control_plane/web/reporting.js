@@ -45,6 +45,7 @@ function resizeQuantStatsFrame(frame) {
 async function renderActualResults() {
   const current = new URLSearchParams(location.search);
   const catalogResponse = await api('/api/results/report-engines');
+  const canViewCapitalSeries = hasCapability('capital.view');
   const options = catalogResponse.data.options;
   const engines = catalogResponse.data.engines;
   const requestedEngine = current.get('engine') || 'QUANTSTATS';
@@ -60,14 +61,14 @@ async function renderActualResults() {
   const accountOptions = options.accounts.map(item => `<option value="${escapeHtml(item.account_id)}" data-venue="${escapeHtml(item.venue)}" ${selectedAccount === item.account_id && (!selectedVenue || selectedVenue === item.venue) ? 'selected' : ''}>${escapeHtml(item.label)} · ${escapeHtml(fmtVenueLabel(item.venue))}</option>`).join('');
   const engineOptions = engines.map(item => `<option value="${item.engine}" ${engine === item.engine ? 'selected' : ''} ${item.available ? '' : 'disabled'}>${escapeHtml(item.label)} · ${item.available ? escapeHtml(item.version) : escapeHtml(item.error_code)}</option>`).join('');
   main.innerHTML = `<section class="page results-page quantstats-page"><header class="page-head"><div><p class="eyebrow">${escapeHtml(options.scope.workspace_name)} · ${escapeHtml(options.scope.team_name)}</p><h1>绩效报表</h1><p class="lede">QuantStats 与 Pyfolio Reloaded 使用同一份可信净值、收益率、成交、持仓、手续费及基准数据；订单仅用于执行与审计。</p></div><button class="secondary" data-refresh>刷新</button></header>
-    <section class="performance-capital-panel" data-capital-performance><div class="loading-card"><span class="spinner"></span><b>正在加载资金绩效曲线</b><p>按当前模式和已授权账户读取可信资金事实。</p></div></section>
+    ${canViewCapitalSeries ? '<section class="performance-capital-panel" data-capital-performance><div class="loading-card"><span class="spinner"></span><b>正在加载资金绩效曲线</b><p>按当前模式和已授权账户读取可信资金事实。</p></div></section>' : ''}
     <form id="results-filter-form" class="form-panel compact-form result-filters"><div class="field-grid"><label>报表引擎<select name="engine">${engineOptions}</select></label><label>环境<select name="environment"><option value="TESTNET" ${environment === 'TESTNET' ? 'selected' : ''}>测试模式</option><option value="LIVE" ${environment === 'LIVE' ? 'selected' : ''}>生产历史</option></select></label><label>账户<select name="account_id"><option value="">全部有权限账户</option>${accountOptions}</select></label><label>交易所<select name="venue"><option value="">全部</option>${['BINANCE','HYPERLIQUID','OKX','BYBIT'].map(value => `<option value="${value}" ${selectedVenue === value ? 'selected' : ''}>${escapeHtml(fmtVenueLabel(value))}</option>`).join('')}</select></label><label>起始时间<input name="from_time" type="datetime-local" value="${escapeHtml(resultDateTimeInput(fromTime))}" required></label><label>截止时间<input name="to_time" type="datetime-local" value="${escapeHtml(resultDateTimeInput(toTime))}" required></label></div><div class="form-actions"><button class="primary" type="submit">生成 ${escapeHtml(selectedEngine?.label || engine)} 报表</button></div></form>
     <section class="quantstats-status" data-quantstats-status><div class="loading-card"><span class="spinner"></span><b>正在生成只读报表</b><p>服务端正在验证净值连续性、现金流、估值和环境范围。</p></div></section>
     <section class="quantstats-report-shell" data-quantstats-report hidden><div class="section-heading"><div><p class="eyebrow">${escapeHtml(selectedEngine?.label || engine)} · UTC 24/7 · 365 periods/year</p><h2>完整绩效报表</h2><p data-quantstats-coverage></p></div><div class="form-actions"><a class="secondary" data-report-view target="_blank" rel="noopener">新窗口查看</a><a class="primary" data-report-download>下载 HTML</a></div></div><div class="stats report-common-metrics" data-report-metrics></div><iframe class="quantstats-frame" title="${escapeHtml(selectedEngine?.label || engine)} 完整绩效报表" sandbox="allow-same-origin" referrerpolicy="no-referrer"></iframe></section>
   </section>`;
   applyLanguageToDocument(main);
   document.querySelector('[data-refresh]')?.addEventListener('click', route);
-  await renderCapitalPerformancePanel();
+  if (canViewCapitalSeries) await renderCapitalPerformancePanel();
   applyLanguageToDocument(main);
   document.querySelector('#results-filter-form')?.addEventListener('submit', event => {
     event.preventDefault();
