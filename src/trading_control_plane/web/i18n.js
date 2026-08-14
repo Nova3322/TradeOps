@@ -721,7 +721,7 @@ const ENGLISH_EXACT = new Map(Object.entries({
   '例如 team-risk-2026-08-v1':'For example team-risk-2026-08-v1', '例如 提案审核群':'For example Proposal review group', '由 BotFather 签发':'Issued by BotFather', '不会回显':'Never displayed again',
   '例如 TradingView BTC':'For example TradingView BTC', '例如 kelly':'For example kelly', '例如 reviewer-li':'For example reviewer-li',
   // Expanded administrative forms.
-  '显示名称':'Display name', '金库编号':'Vault ID', '金库地址':'Vault address', '币安默认账户':'Default Binance account', '币安白名单入金地址':'Binance allowlisted deposit address', '币安受限提现地址':'Binance restricted withdrawal address', '默认账户':'Default account', '单次金额上限（USDC）':'Per-operation limit (USDC)', '最大费用上限（USDC）':'Maximum fee (USDC)',
+  '账户 ID':'Account ID', '显示名称':'Display name', '金库编号':'Vault ID', '金库地址':'Vault address', '币安默认账户':'Default Binance account', '币安白名单入金地址':'Binance allowlisted deposit address', '币安受限提现地址':'Binance restricted withdrawal address', '默认账户':'Default account', '单次金额上限（USDC）':'Per-operation limit (USDC)', '最大费用上限（USDC）':'Maximum fee (USDC)',
   '政策版本':'Policy version', '最大连续亏损次数':'Maximum consecutive losses', '亏损冷却期（秒）':'Loss cooldown (seconds)', '事实最大时效（秒）':'Maximum fact age (seconds)', '系统已经恢复，或申请冻结的控制版本已被后续操作替代。':'The system has already been restored, or a later operation replaced the frozen control version.',
   '路由名称':'Route name', '通知渠道':'Notification channel', '路由状态':'Route status', '目标 Chat ID':'Target Chat ID',
   '类型':'Type', '名称':'Name', '签名密钥（留空由服务端生成）':'Signing secret (leave blank to generate on the server)', '最大时效（秒）':'Maximum age (seconds)', '新 Perptape API Key':'New Perptape API Key', '新密钥（留空由服务端生成）':'New secret (leave blank to generate on the server)',
