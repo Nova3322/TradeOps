@@ -220,6 +220,7 @@
   .desktop-nav-toggle { display: none; }
   .topbar { grid-template-columns: 190px minmax(180px, 210px) minmax(0, 1fr); }
   .topbar:has(> #scope-control[hidden]) { grid-template-columns: 190px minmax(0, 1fr); }
+  .topbar .workspace-switcher-action { display: none; }
   .current-date { display: none; }
   .topbar-actions { padding-inline: 14px; gap: 8px; }
   .header-preferences .preference-select { width: 84px; }
