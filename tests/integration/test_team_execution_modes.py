@@ -53,6 +53,38 @@ def mode_app(database: Database) -> FastAPI:
     return create_app(settings, database, perptape)
 
 
+def test_setup_team_keeps_read_only_pages_visible_without_opening_actions(
+    database: Database,
+) -> None:
+    service = TradingService(database, credential_encryption_key=encryption_key())
+    admin = service.bootstrap_admin("setup-read-only-admin", now=datetime.now(UTC))
+    with database.session_factory.begin() as session:
+        team = session.scalar(select(Team).where(Team.created_by == admin).with_for_update())
+        assert team is not None
+        team.execution_mode = TeamExecutionMode.SETUP.value
+        team.trading_enabled = False
+
+    for action in (
+        "view",
+        "proposal.view",
+        "operations.view",
+        "results.view",
+        "capital.view",
+        "opportunity.view",
+        "system.view",
+    ):
+        assert service.can_user(admin, action) is True
+
+    for action in (
+        "proposal.create",
+        "proposal.review",
+        "authorization.issue",
+        "order.send",
+        "capital.execute",
+    ):
+        assert service.can_user(admin, action) is False
+
+
 def prepare_testnet_mode(database: Database) -> tuple[TradingService, dict[str, object]]:
     now = datetime.now(UTC)
     service = TradingService(database, credential_encryption_key=encryption_key())

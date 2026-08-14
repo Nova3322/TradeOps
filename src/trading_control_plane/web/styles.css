@@ -1394,6 +1394,38 @@ dialog::backdrop { background: rgba(4, 12, 10, .56); backdrop-filter: blur(3px);
 .mode-choice small { color: var(--muted); line-height: 1.55; }
 .mode-choice.is-selected { border-color: var(--testnet-accent); }
 .mode-choice.live-choice { border-color: var(--danger); background: var(--panel); }
+.mode-switch-console { margin-top: 20px; padding: 22px; border: 1px solid var(--line); border-radius: 5px; background: var(--panel); }
+.mode-switch-console .section-heading { margin-bottom: 16px; }
+.mode-switch-options { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+.mode-switch-option { min-width: 0; display: grid; gap: 12px; padding: 18px; border: 1px solid var(--line); border-radius: 5px; background: var(--panel-soft); color: var(--ink); text-align: left; cursor: pointer; }
+.mode-switch-option:hover:not(:disabled), .mode-switch-option:focus-visible { border-color: color-mix(in srgb, var(--accent) 48%, var(--line)); background: var(--accent-2); }
+.mode-switch-option.is-selected { border-color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); }
+.mode-switch-option.is-live.is-selected { border-color: color-mix(in srgb, var(--danger) 68%, var(--line)); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--danger) 68%, var(--line)); }
+.mode-switch-option:disabled { cursor: default; opacity: .7; }
+.mode-switch-option-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.mode-switch-option b { font-size: 17px; }
+.mode-switch-option small { color: var(--muted); line-height: 1.55; }
+.mode-switch-target { margin-top: 14px; border-left: 3px solid var(--accent); }
+.mode-switch-target.is-live { border-left-color: var(--danger); }
+.mode-switch-target-head { display: flex; align-items: start; justify-content: space-between; gap: 16px; }
+.mode-switch-status-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; margin: 18px 0; }
+.mode-switch-status-grid > div { display: grid; gap: 5px; padding: 14px; border: 1px solid var(--line); border-radius: 5px; background: var(--panel-soft); }
+.mode-switch-status-grid small, .mode-switch-status-grid span { color: var(--muted); }
+.mode-switch-advisories { margin: 14px 0; padding: 12px 14px; border: 1px solid var(--line); border-radius: 5px; background: var(--panel-soft); }
+.mode-switch-advisories summary { cursor: pointer; font-weight: 600; }
+.mode-switch-form { margin-top: 18px; }
+.mode-production-confirm { max-width: 760px; }
+.mode-confirmation-copy { display: flex; align-items: end; justify-content: space-between; gap: 12px; margin-bottom: 12px; padding: 12px 14px; border: 1px solid var(--line); border-radius: 5px; background: var(--panel-soft); }
+.mode-confirmation-copy > div { display: grid; gap: 5px; min-width: 0; }
+.mode-confirmation-copy span { color: var(--muted); font-size: 12px; font-weight: 600; }
+.mode-confirmation-copy code { overflow-wrap: anywhere; }
+.mode-switch-submit { min-width: 220px; margin-top: 12px; }
+.mode-switch-audit { margin-top: 14px; padding: 0; }
+.mode-switch-audit > summary { display: flex; align-items: center; justify-content: space-between; gap: 14px; padding: 16px 18px; cursor: pointer; list-style: none; }
+.mode-switch-audit > summary::-webkit-details-marker { display: none; }
+.mode-switch-audit > summary span { display: grid; gap: 4px; }
+.mode-switch-audit > summary small { color: var(--muted); }
+.mode-switch-audit-body { padding: 0 18px 18px; border-top: 1px solid var(--line); }
 .mode-selector-card { margin-bottom: 28px; }
 .mode-account-grid, .mode-notification-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; margin-top: 14px; }
 .mode-account-config { margin: 14px 0; }
@@ -1443,8 +1475,11 @@ dialog::backdrop { background: rgba(4, 12, 10, .56); backdrop-filter: blur(3px);
 }
 
 @media (max-width: 780px) {
-  .testnet-account-grid, .testnet-safety-grid, .mode-layout, .mode-choice-grid, .mode-account-grid, .mode-notification-grid, .capital-account-options, .trading-mode-page .stats { grid-template-columns: 1fr; }
+  .testnet-account-grid, .testnet-safety-grid, .mode-layout, .mode-choice-grid, .mode-account-grid, .mode-notification-grid, .mode-switch-options, .mode-switch-status-grid, .capital-account-options, .trading-mode-page .stats { grid-template-columns: 1fr; }
   .mode-choice { min-height: 0; }
+  .mode-switch-console { padding: 16px; }
+  .mode-switch-target-head, .mode-confirmation-copy { align-items: stretch; flex-direction: column; }
+  .mode-switch-submit { width: 100%; min-width: 0; }
   .testnet-match-form, .testnet-protection-form { min-width: 0; }
   .readiness-item { grid-template-columns: 32px minmax(0, 1fr); gap: 10px; align-items: start; }
   .readiness-marker { width: 28px; height: 28px; }

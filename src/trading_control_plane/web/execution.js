@@ -95,20 +95,53 @@ async function renderTeamSettings() {
   const activeSpaceName = session?.active_team?.name || '当前团队';
   const response = await api('/api/trading-mode'); const data = response.data;
   const current = executionModeLabel(data.execution_mode);
-  const target = data.execution_mode === 'LIVE' ? 'TESTNET' : 'LIVE';
-  const readiness = data.target_readiness?.[target] || {ready:false,execution_ready:false,switch_allowed:false,blockers:[],advisories:[]};
-  const executionReady = readiness.execution_ready ?? readiness.ready;
-  const switchAllowed = readiness.switch_allowed ?? readiness.ready;
-  const blockers = readiness.blockers || [];
-  const advisories = readiness.advisories || [];
-  const confirmation = target === 'LIVE' ? 'I_CONFIRM_LIVE_PRODUCTION_MONEY' : 'SWITCH_TO_TESTNET';
-  const targetCopy = target === 'LIVE' ? '生产模式 · 真实资金环境' : '测试模式 · 交易所测试环境';
+  let selectedTarget = data.execution_mode === 'LIVE'
+    ? 'TESTNET'
+    : data.execution_mode === 'TESTNET' ? 'LIVE' : 'TESTNET';
+  const modeOption = (mode, title, copy) => {
+    const isCurrent = data.execution_mode === mode;
+    const isSelected = selectedTarget === mode;
+    return `<button class="mode-switch-option ${mode === 'LIVE' ? 'is-live' : 'is-testnet'} ${isSelected ? 'is-selected' : ''}" type="button" data-mode-target="${mode}" aria-pressed="${isSelected}" ${isCurrent ? 'disabled aria-current="true"' : ''}><span class="mode-switch-option-head"><b>${title}</b><span class="status-pill">${isCurrent ? '当前使用' : mode === 'LIVE' ? '真实资金' : '测试服务器'}</span></span><small>${copy}</small></button>`;
+  };
   main.innerHTML = `<section class="page team-settings-page"><header class="page-head"><div><p class="eyebrow">模式设置 · ${escapeHtml(activeSpaceName)}</p><h1>模式设置</h1><p class="lede">团队实际执行环境只在这里切换；账户、资金、提案和交易任务页面均为只读显示。</p></div><span class="status-pill ${data.execution_mode === 'LIVE' ? 'status-ATTENTION' : 'status-APPROVED'}">${escapeHtml(current)}</span></header>
-    <div class="mode-account-grid"><article class="card"><p class="eyebrow">当前模式</p><h2>${escapeHtml(current)}</h2><p>${escapeHtml(executionModeNotice(data.execution_mode))}</p></article><article class="card"><p class="eyebrow">目标模式交易准备状态</p><h2>${executionReady ? '执行已就绪' : '执行尚未就绪'}</h2><p>${escapeHtml(targetCopy)}</p><p class="safety-note">账户凭据、连接和运行服务状态只影响下单准备，不阻止切换团队模式。</p></article></div>
-    <article class="card"><div class="card-heading"><div><p class="eyebrow">切换审计</p><h2>最近一次模式切换</h2></div></div><dl class="definition-grid">${definition('最近切换人', data.last_switched_by || '尚无记录')}${definition('最近切换时间', data.last_switched_at ? fmtDate(data.last_switched_at) : '尚无记录')}${definition('切换阻断原因', switchAllowed ? '无' : `${blockers.length} 类阻断`)}</dl>${switchAllowed ? '<p class="callout is-success">模式切换条件已通过；账户执行条件仍由下单链路独立校验。</p>' : `<ul class="status-list">${readinessItems(blockers) || '<li><span>等待服务端切换检查</span></li>'}</ul>`}${advisories.length ? `<div class="callout tone-attention"><b>执行准备提示</b><ul class="status-list">${readinessItems(advisories)}</ul><p>这些项目不会阻止模式切换；在处理完成前，订单发送仍会失败关闭。</p></div>` : ''}</article>
-    <article class="card"><div class="card-heading"><div><p class="eyebrow">受控切换</p><h2>切换到${escapeHtml(targetCopy)}</h2></div></div><p class="safety-note">切换不会开启实盘下单、自动加仓或资金划转；旧环境未执行授权和订单意图会失效，历史提案环境保持不变。</p>${data.can_manage ? `<form id="team-mode-switch-form"><label>输入确认文案 <code>${confirmation}</code><input name="confirmation" autocomplete="off" required></label><div class="form-error" role="alert"></div><button class="${target === 'LIVE' ? 'danger' : 'primary'}" ${switchAllowed ? '' : 'disabled'}>切换到${executionModeLabel(target)}</button></form>` : '<p class="callout">普通成员只能查看当前模式；需要系统管理员或 team.manage 权限执行切换。</p>'}</article></section>`;
-  const form = document.querySelector('#team-mode-switch-form');
-  form?.addEventListener('submit', async event => { event.preventDefault(); const confirmed = await confirmAction({title:`确认切换到${executionModeLabel(target)}？`, message:target === 'LIVE' ? '生产模式订单会影响真实资金；危险能力仍保持独立关闭。' : '测试模式订单会发送到交易所测试服务器。', confirmLabel:'确认切换'}); if (!confirmed) return; await submitForm(form, () => api(`/api/teams/${data.team_id}/trading-mode`, {method:'PUT', body:JSON.stringify({mode:target, confirmation:form.elements.confirmation.value.trim(), expected_version:data.version, idempotency_key:crypto.randomUUID()})}), {success:`已切换到${executionModeLabel(target)}`, onSuccess:route}); });
+    <section class="mode-switch-console" aria-labelledby="mode-switch-title"><div class="section-heading"><div><p class="eyebrow">当前模式：${escapeHtml(current)}</p><h2 id="mode-switch-title">选择要切换到的模式</h2><p>先选择测试或生产，再在同一区域确认。当前模式不可重复提交。</p></div></div><div class="mode-switch-options" role="group" aria-label="选择目标模式">${modeOption('TESTNET', '测试模式', '订单发送到交易所测试服务器，不影响真实资金。')}${modeOption('LIVE', '生产模式', '订单发送到交易所生产服务器，可能影响真实资金。')}</div><div id="team-mode-target-panel" aria-live="polite"></div></section>
+    <details class="card mode-switch-audit"><summary><span><b>最近一次模式切换与审计</b><small>${data.last_switched_at ? `${escapeHtml(data.last_switched_by || '未知')} · ${fmtDate(data.last_switched_at)}` : '尚无切换记录'}</small></span><strong>查看详情</strong></summary><div class="mode-switch-audit-body"><dl class="definition-grid">${definition('最近切换人', data.last_switched_by || '尚无记录')}${definition('最近切换时间', data.last_switched_at ? fmtDate(data.last_switched_at) : '尚无记录')}</dl><p class="safety-note">所有切换、失效与阻断结果继续写入审计记录。</p></div></details></section>`;
+
+  const renderTargetPanel = target => {
+    const panel = document.querySelector('#team-mode-target-panel');
+    const readiness = data.target_readiness?.[target] || {ready:false,execution_ready:false,switch_allowed:false,blockers:[],advisories:[]};
+    const executionReady = readiness.execution_ready ?? readiness.ready;
+    const switchAllowed = readiness.switch_allowed ?? readiness.ready;
+    const blockers = readiness.blockers || [];
+    const advisories = readiness.advisories || [];
+    const confirmation = target === 'LIVE' ? 'I_CONFIRM_LIVE_PRODUCTION_MONEY' : 'SWITCH_TO_TESTNET';
+    const targetCopy = target === 'LIVE' ? '生产模式 · 真实资金环境' : '测试模式 · 交易所测试环境';
+    const confirmationField = target === 'LIVE'
+      ? `<div class="mode-production-confirm"><div class="mode-confirmation-copy"><div><span>生产确认文案</span><code>${confirmation}</code></div><button class="secondary" type="button" data-copy-mode-confirmation>复制文案</button></div><label for="team-mode-confirmation">粘贴或输入上方文案<input id="team-mode-confirmation" name="confirmation" autocomplete="off" autocapitalize="off" spellcheck="false" required aria-describedby="mode-confirmation-help"></label><p id="mode-confirmation-help" class="microcopy">完全一致后才会解锁生产模式切换按钮。</p></div>`
+      : `<input name="confirmation" type="hidden" value="${confirmation}"><p class="callout is-success">测试模式不要求输入确认文案；点击按钮后仍会进行一次最终确认。</p>`;
+    panel.innerHTML = `<article class="card mode-switch-target ${target === 'LIVE' ? 'is-live' : 'is-testnet'}"><div class="mode-switch-target-head"><div><p class="eyebrow">目标模式</p><h2>${escapeHtml(targetCopy)}</h2></div><span class="status-pill ${switchAllowed ? 'status-APPROVED' : 'status-DENY'}">${switchAllowed ? '可以切换' : '暂不能切换'}</span></div><div class="mode-switch-status-grid"><div><small>模式切换</small><b>${switchAllowed ? '条件已通过' : `${blockers.length} 类阻断`}</b><span>${switchAllowed ? '可继续最终确认' : '处理阻断后再试'}</span></div><div><small>下单准备</small><b>${executionReady ? '执行已就绪' : '切换后仍不可下单'}</b><span>${executionReady ? '下单时仍会再次校验' : '账户条件由下单链路独立检查'}</span></div></div>${blockers.length ? `<div class="callout is-warning"><b>必须先处理</b><ul class="status-list">${readinessItems(blockers)}</ul></div>` : ''}${advisories.length ? `<details class="mode-switch-advisories"><summary>查看 ${advisories.reduce((sum, item) => sum + Number(item.count || 0), 0)} 项下单准备提示</summary><ul class="status-list">${readinessItems(advisories)}</ul><p>这些项目不阻止模式切换；处理完成前，订单发送仍会失败关闭。</p></details>` : ''}<p class="safety-note">切换不会开启实盘下单、自动加仓或资金划转；旧环境未执行授权和订单意图会失效，历史提案环境保持不变。</p>${data.can_manage ? `<form id="team-mode-switch-form" class="mode-switch-form">${confirmationField}<div class="form-error" role="alert"></div><button class="mode-switch-submit ${target === 'LIVE' ? 'danger' : 'primary'}" ${switchAllowed && target !== 'LIVE' ? '' : 'disabled'}>切换到${executionModeLabel(target)}</button></form>` : '<p class="callout">普通成员只能查看当前模式；需要系统管理员或 team.manage 权限执行切换。</p>'}</article>`;
+    const form = document.querySelector('#team-mode-switch-form');
+    const submit = form?.querySelector('.mode-switch-submit');
+    const input = form?.elements.confirmation;
+    if (target === 'LIVE' && input && submit) {
+      const syncSubmitState = () => { submit.disabled = !switchAllowed || input.value.trim() !== confirmation; };
+      input.addEventListener('input', syncSubmitState);
+      syncSubmitState();
+      form.querySelector('[data-copy-mode-confirmation]')?.addEventListener('click', async () => { try { await navigator.clipboard.writeText(confirmation); showToast('生产确认文案已复制'); input.focus(); } catch (_error) { input.focus(); showToast('浏览器未允许复制，请手动输入确认文案'); } });
+    }
+    form?.addEventListener('submit', async event => { event.preventDefault(); const confirmed = await confirmAction({title:`确认切换到${executionModeLabel(target)}？`, message:target === 'LIVE' ? '生产模式订单会影响真实资金；危险能力仍保持独立关闭。' : '测试模式订单会发送到交易所测试服务器。', confirmLabel:'确认切换'}); if (!confirmed) return; await submitForm(form, () => api(`/api/teams/${data.team_id}/trading-mode`, {method:'PUT', body:JSON.stringify({mode:target, confirmation:form.elements.confirmation.value.trim(), expected_version:data.version, idempotency_key:crypto.randomUUID()})}), {success:`已切换到${executionModeLabel(target)}`, onSuccess:route}); });
+  };
+  const updateTarget = target => {
+    selectedTarget = target;
+    document.querySelectorAll('[data-mode-target]').forEach(button => {
+      const selected = button.dataset.modeTarget === target;
+      button.classList.toggle('is-selected', selected);
+      button.setAttribute('aria-pressed', String(selected));
+    });
+    renderTargetPanel(target);
+  };
+  document.querySelectorAll('[data-mode-target]:not(:disabled)').forEach(button => button.addEventListener('click', () => updateTarget(button.dataset.modeTarget)));
+  updateTarget(selectedTarget);
 }
 
 function systemHealthCard({title, status, copy, tone = 'success', meta = ''}) {

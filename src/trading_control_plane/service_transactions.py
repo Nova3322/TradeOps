@@ -371,6 +371,8 @@ class TransactionService:
         session: Session,
         user_id: UUID,
         action: str,
+        *,
+        allow_setup: bool = False,
     ) -> Team:
         """Require an active-team grant; the eventual write rechecks object scope."""
 
@@ -386,7 +388,7 @@ class TransactionService:
 
         _user, _workspace, team = self._active_scope(session, user_id)
         assert team is not None
-        if not team.trading_enabled and action not in TEAM_SETUP_ACTIONS:
+        if not team.trading_enabled and action not in TEAM_SETUP_ACTIONS and not allow_setup:
             _reject(
                 "TEAM_NOT_OPERATIONAL",
                 "team data scope is not ready; configure scoped accounts and risk policy first",

@@ -1603,15 +1603,18 @@ def main(argv: Sequence[str] | None = None) -> int:
                 )
             )
             return 0
-        binding_supervisor = RuntimeBindingSupervisor(
-            settings=settings,
-            database=database,
-            worker_factory=build_runtime_worker,
-        )
+        # Continuous synchronization must keep discovering database bindings.
+        # Choosing the legacy environment-backed worker only once at process
+        # startup leaves newly configured Team accounts and Perptape keys
+        # invisible until a manual restart and can keep using stale deployment
+        # credentials.  The supervisor refreshes the binding set every cycle.
         worker = (
-            binding_supervisor
+            RuntimeBindingSupervisor(
+                settings=settings,
+                database=database,
+                worker_factory=build_runtime_worker,
+            )
             if settings.runtime_sync_enabled
-            and bool(getattr(binding_supervisor, "has_bindings", lambda: True)())
             else build_runtime_worker(settings, database)
         )
         if args.once:
