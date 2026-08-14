@@ -91,6 +91,8 @@ const ENGLISH_EXACT = new Map(Object.entries({
   '取消':'Cancel', '按此配置创建':'Create with these settings', '请再次确认':'Confirm again', '确认此操作？':'Confirm this action?',
   '取消并关闭':'Cancel and close', '确认并继续':'Confirm and continue', '权限范围':'Permission scope',
   '当前职责不包含这个页面':'This page is outside your assigned role', '返回当前任务':'Back to current tasks', '进入资金中心':'Open Capital',
+  '已按岗位限制':'Restricted by role', '所需权限':'Required permission', '权限来源':'Permission source', '数据处理':'Data handling',
+  '当前团队岗位与资源范围':'Current Team role and resource scope', '未读取受限页面数据':'Restricted page data was not loaded',
   '查看信号源':'View signal sources', '查看机会':'View opportunities', '查看提案':'View proposals', '查看绩效报表':'View performance reports', '查看通知中心':'View notifications', '查看系统状态':'View system status', '查看交易账户':'View exchange accounts', '发起提案':'Create proposals', '独立审核':'Independent review', '成员权限管理':'Access management',
   '运行状态 · 已安全阻断':'Runtime status · safely blocked', '连接已中断':'Connection interrupted', '读取超时':'Request timed out',
   '当前范围没有访问权限':'Current scope does not have access', '当前数据无法读取':'Current data cannot be loaded', '风险政策尚未配置':'Risk policy is not configured',
