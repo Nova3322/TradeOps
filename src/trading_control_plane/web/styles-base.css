@@ -957,7 +957,20 @@ textarea { resize: vertical; }
 .risk-condition-details, .risk-request-history { margin: 18px 0; border: 1px solid var(--line); border-radius: 14px; background: var(--panel); }
 .risk-condition-details[open] > summary, .risk-request-history[open] > summary { border-bottom: 1px solid var(--line); }
 .risk-condition-content, .risk-request-history > .stack { padding: 18px 20px 20px; }
+.risk-policy-editor { margin: 18px 0; }
+.risk-policy-editor[open] > summary { border-bottom: 1px solid var(--line); }
+.risk-policy-editor > .toolbox-content { padding-top: 20px; }
 .risk-condition-section-head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; margin: 12px 0 10px; }
+.risk-condition-table { table-layout: fixed; }
+.risk-condition-table th:nth-child(1) { width: 18%; }
+.risk-condition-table th:nth-child(2) { width: 92px; }
+.risk-condition-table th:nth-child(3) { width: 34%; }
+.risk-condition-table th:nth-child(4) { width: 128px; }
+.risk-condition-table th:nth-child(5) { width: auto; }
+.risk-condition-table td { vertical-align: top; line-height: 1.55; overflow-wrap: anywhere; }
+.risk-condition-table td:nth-child(2) { white-space: nowrap; }
+.risk-condition-table td:nth-child(2) .status-pill { min-width: 60px; justify-content: center; white-space: nowrap; }
+.risk-condition-table td:nth-child(4) { word-break: keep-all; }
 .risk-passed-conditions { margin-top: 14px; border: 1px solid var(--line); border-radius: 12px; background: var(--panel-strong); }
 .risk-passed-conditions > summary { padding: 12px 14px; }
 .risk-passed-conditions[open] > summary { border-bottom: 1px solid var(--line); }

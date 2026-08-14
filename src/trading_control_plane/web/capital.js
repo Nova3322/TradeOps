@@ -447,6 +447,29 @@ async function renderCapitalPerformancePanel() {
   });
 }
 
+function renderDirectCapitalConfigurationEditor(directConfiguration, selectedTreasuryProvider) {
+  if (!directConfiguration.can_manage) return '';
+  const configuredPlaceholder = value => value ? '已配置；留空保持当前值' : '尚未配置';
+  const version = directConfiguration.version
+    ? `版本 ${directConfiguration.version} · ${escapeHtml(directConfiguration.updated_by_username || '系统管理员')} · ${fmtDate(directConfiguration.effective_at)}`
+    : '尚无数据库配置；当前读取安全环境配置';
+  return `<details class="card direct-capital-config-editor">
+    <summary><span><b>配置 Vault、Safe 与资金路径</b><small>${version}</small></span><strong>管理员配置</strong></summary>
+    <form id="direct-capital-config-form" class="toolbox-content compact-form">
+      <p class="safety-note">先选择一个链上金库，系统只使用该金库创建之后的资金操作。这里只接收公开地址和账户范围；不得输入 API secret、私钥、种子、钱包密码或签名令牌。</p>
+      <fieldset class="treasury-provider-choice"><legend>1. 选择链上金库</legend>
+        <label><input type="radio" name="treasury_provider" value="NOTILT_VAULT" ${selectedTreasuryProvider === 'NOTILT_VAULT' ? 'checked' : ''}><span><b>NoTilt Vault</b><small>使用 NoTilt 金库预算、延迟与官方 SDK</small></span></label>
+        <label><input type="radio" name="treasury_provider" value="SAFE_SPENDING_LIMIT" ${selectedTreasuryProvider === 'SAFE_SPENDING_LIMIT' ? 'checked' : ''}><span><b>Safe Spending Limits</b><small>使用 Safe Allowance Module 的 delegate 额度</small></span></label>
+      </fieldset>
+      <p class="provider-guidance" data-provider-guidance></p>
+      <section class="capital-config-section" data-provider-fields="NOTILT_VAULT"><h3>NoTilt Vault 配置</h3><p>只填写 NoTilt 金库编号和金库地址。</p><div class="field-grid"><label>NoTilt 金库编号<input name="vault_id" autocomplete="off" placeholder="${configuredPlaceholder(directConfiguration.vault_id_configured)}"></label><label>NoTilt 金库地址<input name="vault_address" autocomplete="off" placeholder="${configuredPlaceholder(directConfiguration.vault_address_configured)}"></label></div></section>
+      <section class="capital-config-section" data-provider-fields="SAFE_SPENDING_LIMIT"><h3>Safe Spending Limits 配置</h3><p>只填写公开的 Safe Smart Account 与 delegate 地址。</p><div class="field-grid"><label>Safe Smart Account<input name="safe_address" autocomplete="off" placeholder="${configuredPlaceholder(directConfiguration.safe_address_configured)}"></label><label>Safe Spending Limit delegate<input name="safe_delegate_address" autocomplete="off" placeholder="${configuredPlaceholder(directConfiguration.safe_delegate_configured)}"></label></div></section>
+      <section class="capital-config-section common-capital-fields"><h3>2. 共用账户与安全边界</h3><p>无论选择哪个链上金库，币安、Hyperliquid、自有地址和金额限制都共用。</p><div class="field-grid"><label>授权自有 Arbitrum 地址<input name="owned_arbitrum_address" autocomplete="off" placeholder="${configuredPlaceholder(directConfiguration.owned_arbitrum_address_configured)}"></label><label>币安默认账户<input name="binance_account_id" autocomplete="off" placeholder="${configuredPlaceholder(directConfiguration.binance_account_configured)}"></label><label>币安白名单入金地址<input name="binance_deposit_address" autocomplete="off" placeholder="${configuredPlaceholder(directConfiguration.binance_whitelist_destination_configured)}"></label><label>币安受限提现地址<input name="binance_withdrawal_address" autocomplete="off" placeholder="${configuredPlaceholder(directConfiguration.binance_withdrawal_destination_configured)}"></label><label>Hyperliquid 默认账户<input name="hyperliquid_account_id" autocomplete="off" placeholder="${configuredPlaceholder(directConfiguration.hyperliquid_account_configured)}"></label><label>Hyperliquid Bridge 地址<input name="hyperliquid_bridge_address" autocomplete="off" placeholder="${configuredPlaceholder(directConfiguration.hyperliquid_contract_configured)}"></label><label>单次金额上限（USDC）<input name="max_amount" type="number" step="any" min="0.000001" placeholder="留空保持当前值"></label><label>最大费用上限（USDC）<input name="max_fee" type="number" step="any" min="0" placeholder="留空保持当前值"></label></div></section>
+      <div class="form-error" role="alert"></div><div class="form-actions"><button class="primary">保存并使用此链上金库</button></div>
+    </form>
+  </details>`;
+}
+
 async function renderCapitalCenter() {
   const displayEnvironment = currentWorkflowEnvironment();
   if (!['TESTNET','LIVE'].includes(displayEnvironment)) {
@@ -460,7 +483,7 @@ async function renderCapitalCenter() {
   const selectedTreasuryProviderLabel = selectedTreasuryProvider === 'SAFE_SPENDING_LIMIT' ? 'Safe Spending Limits' : 'NoTilt Vault';
   const transfers = partitionCapitalRecords(item.transfers);
   const liveInTransit = liveCapitalInTransit(transfers.live);
-  const directConfigurationEditor = directConfiguration.can_manage ? `<div class="callout"><b>账户配置已集中管理。</b><p>交易所、Vault、Safe、提取地址与私钥均在“账户管理”按测试/实盘分别配置。</p><a class="secondary" href="/accounts?environment=${displayEnvironment}" data-link>前往账户管理</a></div>` : '';
+  const directConfigurationEditor = renderDirectCapitalConfigurationEditor(directConfiguration, selectedTreasuryProvider);
   const directPathCards = DIRECT_CAPITAL_PATHS.map(path => `<article class="capital-route-card"><div class="capital-route-meta"><span>固定路径</span><strong>${escapeHtml(path.badge)}</strong></div><div class="capital-route-flow"><b>${escapeHtml(path.from)}</b><span aria-hidden="true">→</span><b>${escapeHtml(path.to)}</b></div><p>${escapeHtml(path.copy)}</p><ol>${path.steps.map(step => `<li>${escapeHtml(step)}</li>`).join('')}</ol><button class="secondary capital-route-action" type="button" data-open-capital-path="${escapeHtml(path.path)}">${escapeHtml(path.action)}</button></article>`).join('');
   const directCapitalDialog = `<dialog id="direct-capital-dialog" aria-labelledby="direct-capital-title"><form id="direct-capital-form" class="dialog-form" data-direct-capital-form="" data-treasury-provider="${escapeHtml(selectedTreasuryProvider)}"><div class="dialog-head"><div><p class="eyebrow">资金路径安全预检</p><h2 id="direct-capital-title" data-capital-path-title>选择资金路径</h2></div><button type="button" class="icon-button" data-close-capital-dialog aria-label="关闭">×</button></div><p class="subtle" data-capital-path-copy></p><div class="selected-provider-summary"><small>当前链上金库</small><b>${escapeHtml(selectedTreasuryProviderLabel)}</b><span>如需切换，请由管理员先保存新的资金路径配置。</span></div><input name="path" type="hidden"><label>金额（USDC）<input name="amount" type="number" step="any" min="0.000001" required placeholder="输入划转金额"></label><label class="direct-capital-confirm"><input name="final_confirmed" type="checkbox" required><span>我已核对资金方向与金额</span></label><p class="safety-note">提交只会重新校验地址、网络、资产、额度和实时安全开关。任何条件缺失都会阻断；系统不会签名、广播或发送资金。</p><div class="form-error" role="alert"></div><div class="dialog-actions"><button type="button" class="secondary" data-close-capital-dialog>取消</button><button class="primary" type="submit">最终确认并检查</button></div></form></dialog>`;
   const directRows = (item.direct_operations || []).map(operation => {
