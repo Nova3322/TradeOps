@@ -42,12 +42,15 @@ function accountCard(item) {
 async function renderAccountManagement() {
   const activeSpaceName = session?.active_team?.name || '当前团队';
   const params = new URLSearchParams(location.search);
-  const selectedEnvironment = params.get('environment') === 'LIVE' ? 'LIVE' : 'TESTNET';
   const [modeResponse, accountResponse] = await Promise.all([
     api('/api/trading-mode'),
     api('/api/exchange-accounts'),
   ]);
   const mode = modeResponse.data;
+  const requestedEnvironment = params.get('environment');
+  const selectedEnvironment = ['TESTNET', 'LIVE'].includes(requestedEnvironment)
+    ? requestedEnvironment
+    : mode.execution_mode === 'LIVE' ? 'LIVE' : 'TESTNET';
   const accountData = accountResponse.data;
   const accounts = (accountData.data || []).filter(item => item.environment === selectedEnvironment);
   const canManage = Boolean(accountData.can_manage);
@@ -56,7 +59,7 @@ async function renderAccountManagement() {
   const createForm = canManage ? `<details class="card operation-toolbox"><summary><span><b>${createAccountLabel}</b><small>凭据将绑定团队、环境、交易所和账户</small></span><strong>展开</strong></summary><form id="exchange-account-create-form" class="toolbox-content"><div class="field-grid"><label>交易所<select name="venue">${venueOptions}</select></label><label>账户 ID<input name="account_id" required maxlength="120"></label><label>显示名称<input name="label" required maxlength="120"></label></div><div class="field-grid" data-create-credentials></div><p class="safety-note">测试凭据只会加载到 TESTNET Adapter；生产凭据只会加载到 LIVE Adapter。</p><div class="form-error" role="alert"></div><button class="primary">添加账户</button></form></details>` : '';
   main.innerHTML = `<section class="page trading-mode-page mode-accounts-page"><header class="page-head"><div><p class="eyebrow">当前空间 · ${escapeHtml(activeSpaceName)}</p><h1>账户管理</h1><p class="lede">提前配置测试和生产账户；实际执行环境始终由服务端读取团队当前模式。</p></div><span class="status-pill ${mode.execution_mode === 'LIVE' ? 'status-ATTENTION' : 'status-APPROVED'}">当前模式：${fmtExecutionMode(mode.execution_mode)}</span></header>
     <article class="callout"><b>账户配置范围</b><p>这里切换的只是账户配置范围，不会改变团队当前运行模式。实际模式切换请前往模式设置。</p><a class="secondary" href="/team-settings" data-link>前往模式设置</a></article>
-    <nav class="mode-choice-grid" aria-label="账户配置范围"><a class="mode-choice ${selectedEnvironment === 'TESTNET' ? 'is-selected' : ''}" href="/accounts?environment=TESTNET" data-link aria-current="${selectedEnvironment === 'TESTNET' ? 'page' : 'false'}"><b>测试账户</b><small>交易所测试环境 API</small></a><a class="mode-choice ${selectedEnvironment === 'LIVE' ? 'is-selected live-choice' : ''}" href="/accounts?environment=LIVE" data-link aria-current="${selectedEnvironment === 'LIVE' ? 'page' : 'false'}"><b>生产账户</b><small>真实资金环境 API</small></a></nav>
+    <nav class="mode-choice-grid" aria-label="账户配置范围"><a class="mode-choice ${selectedEnvironment === 'TESTNET' ? 'is-selected' : ''}" href="/accounts?environment=TESTNET" data-link ${selectedEnvironment === 'TESTNET' ? 'aria-current="page"' : ''}><span class="mode-choice-head"><b>测试账户</b>${selectedEnvironment === 'TESTNET' ? '<span class="mode-choice-current">当前范围</span>' : ''}</span><small>交易所测试环境 API</small></a><a class="mode-choice live-choice ${selectedEnvironment === 'LIVE' ? 'is-selected' : ''}" href="/accounts?environment=LIVE" data-link ${selectedEnvironment === 'LIVE' ? 'aria-current="page"' : ''}><span class="mode-choice-head"><b>生产账户</b>${selectedEnvironment === 'LIVE' ? '<span class="mode-choice-current">当前范围</span>' : ''}</span><small>真实资金环境 API</small></a></nav>
     ${createForm}<section><div class="section-heading"><div><p class="eyebrow">${fmtExecutionMode(selectedEnvironment)} · ${accounts.length} 个配置</p><h2>交易所账户</h2></div></div>${accounts.length ? `<div class="mode-account-grid">${accounts.map(accountCard).join('')}</div>` : '<div class="empty-state compact-empty-state mode-account-empty-state"><div><h2>尚未添加此环境账户</h2><p>添加并验证账户后，交易执行才会就绪；账户配置不影响模式选择。</p></div></div>'}</section>
     </section>`;
   const create = document.querySelector('#exchange-account-create-form');
