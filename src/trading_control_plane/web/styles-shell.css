@@ -228,6 +228,7 @@
 }
 
 @media (max-width: 780px) {
+  body.nav-open { overflow: hidden; }
   .desktop-nav-toggle { display: none; }
   .topbar { grid-template-columns: auto minmax(82px, 1fr) auto; }
   .topbar:has(> #scope-control[hidden]) { grid-template-columns: auto minmax(0, 1fr); }
@@ -245,7 +246,7 @@
   .header-preferences { gap: 0; }
   .header-preferences .preference-select,
   .header-preferences .preference-select:last-child { width: 66px; }
-  .header-preferences .preference-trigger { min-height: 38px; padding: 0 6px; }
+  .header-preferences .preference-trigger { min-height: 44px; padding: 0 6px; }
   .header-preferences .preference-label { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
   .header-preferences [data-preference-value] { font-size: 12px; }
   .header-preferences .preference-menu { max-width: calc(100vw - 20px); }
@@ -253,7 +254,12 @@
   .sidebar { top: 64px; height: calc(100dvh - 64px); }
   .sidebar nav { display: block; }
   .sidebar nav a,
-  .sidebar nav .nav-child-link { min-height: 42px; font-size: 14px; }
+  .sidebar nav .nav-child-link { min-height: 44px; font-size: 14px; }
+  .page :is(.primary, .secondary, .danger, .text-button),
+  .review-environment-tabs a,
+  .webhook-source-tabs button,
+  .capital-account-tag { min-height: 44px; }
+  .preset-row .text-button { min-width: 44px; padding-inline: 8px; }
   .nav-backdrop:not([hidden]) { background: rgba(0, 0, 0, .48); backdrop-filter: none; }
 }
 
