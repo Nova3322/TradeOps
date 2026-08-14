@@ -33,6 +33,40 @@ function quantStatsDefaultRange() {
   return {from_time:start.toISOString(), to_time:end.toISOString()};
 }
 
+function analyticsReportErrorPresentation(error) {
+  const code = error?.code || 'ANALYTICS_NOT_READY';
+  if (code.includes('TIME_BOUNDARY')) return {
+    title:'所选区间缺少边界净值',
+    copy:'起始日或截止日没有可信净值点，因此本次报表没有生成。',
+    next:'调整时间范围，确保开始和结束日期都有账户净值记录。',
+  };
+  if (code.includes('HISTORY_INSUFFICIENT') || code.includes('NAV_CONTINUITY') || code.includes('RETURNS_NOT_READY')) return {
+    title:'净值历史尚不足',
+    copy:'当前可信净值记录不足以形成连续收益率，因此本次报表没有生成。',
+    next:'缩短时间范围，或等待账户净值同步覆盖所选日期。',
+  };
+  if (code.includes('ACCOUNT_SCOPE')) return {
+    title:'所选账户范围不可用',
+    copy:'当前身份、环境或交易所范围内没有可用于生成报表的账户事实。',
+    next:'重新选择有权限的账户与环境后再检查。',
+  };
+  if (code.includes('CURRENCY_CONVERSION') || code.includes('POSITION_VALUATION') || code.includes('CASHFLOW') || code.includes('BENCHMARK_COVERAGE')) return {
+    title:'估值事实尚不完整',
+    copy:'汇率、仓位、现金流或基准事实存在缺口，因此系统拒绝生成可能误导的收益率。',
+    next:'等待缺失事实同步完成，或选择数据完整的账户和时间范围。',
+  };
+  if (code.includes('FORBIDDEN') || code.includes('SCOPE_CHANGED')) return {
+    title:'报表范围已经变化',
+    copy:'当前权限或团队范围与请求发起时不一致，因此本次报表没有生成。',
+    next:'刷新页面并按当前可见范围重新选择条件。',
+  };
+  return {
+    title:'报表暂不可生成',
+    copy:'服务端没有确认本次报表所需的全部可信事实。',
+    next:'调整筛选条件后重新检查；问题持续存在时再查看技术详情。',
+  };
+}
+
 function resizeQuantStatsFrame(frame) {
   try {
     const height = frame.contentDocument?.documentElement?.scrollHeight;
@@ -107,7 +141,14 @@ async function renderActualResults() {
     frame.src = data.artifact.view_url;
   } catch (error) {
     const status = document.querySelector('[data-quantstats-status]');
-    status.innerHTML = `<div class="callout tone-attention"><b>报表数据未就绪 · ${escapeHtml(error.code || 'ANALYTICS_NOT_READY')}</b><p>${escapeHtml(error.message || '服务端拒绝使用不完整事实生成收益率。')}</p><p class="subtle">系统没有补零、推测净值或使用成交盈亏伪造收益率。</p></div>`;
+    const presentation = analyticsReportErrorPresentation(error);
+    status.innerHTML = `<div class="callout tone-attention analytics-error-state" role="status" aria-labelledby="analytics-error-title"><div class="analytics-error-heading"><div><p class="eyebrow">数据完整性保护</p><h2 id="analytics-error-title">${escapeHtml(presentation.title)}</h2></div><span class="status-pill">未生成</span></div><p>${escapeHtml(presentation.copy)}</p><div class="analytics-error-next"><b>下一步</b><span>${escapeHtml(presentation.next)}</span></div><div class="analytics-error-actions"><button class="secondary" type="button" data-report-adjust>调整时间范围</button><button class="secondary" type="button" data-report-retry>重新检查</button></div><p class="subtle">系统没有补零、推测净值或使用成交盈亏伪造收益率。</p><details class="technical-details"><summary>查看技术详情</summary><code class="technical-id" translate="no">${escapeHtml(error.code || 'ANALYTICS_NOT_READY')}</code><p>${escapeHtml(error.message || '服务端拒绝使用不完整事实生成收益率。')}</p></details></div>`;
+    status.querySelector('[data-report-adjust]')?.addEventListener('click', () => {
+      const input = document.querySelector('#results-filter-form [name="from_time"]');
+      document.querySelector('#results-filter-form')?.scrollIntoView({block:'start'});
+      input?.focus({preventScroll:true});
+    });
+    status.querySelector('[data-report-retry]')?.addEventListener('click', route);
   }
   applyLanguageToDocument(main);
 }

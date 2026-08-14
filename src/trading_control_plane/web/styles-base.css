@@ -472,6 +472,16 @@ button:disabled { opacity: .52; cursor: not-allowed; }
 .quantstats-page .result-filters .field-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 .quantstats-status { min-width: 0; }
 .quantstats-readiness { display: flex; flex-wrap: wrap; gap: 8px; }
+.analytics-error-state { display: grid; gap: 14px; padding: 20px; }
+.analytics-error-state > * { margin: 0; }
+.analytics-error-heading { display: flex; align-items: start; justify-content: space-between; gap: 16px; }
+.analytics-error-heading h2 { margin: 3px 0 0; font-size: 19px; }
+.analytics-error-next { display: grid; gap: 4px; padding: 12px 14px; border: 1px solid var(--line); border-radius: 10px; background: var(--panel-strong); }
+.analytics-error-next span { color: var(--muted); line-height: 1.55; }
+.analytics-error-actions { display: flex; flex-wrap: wrap; gap: 10px; }
+.analytics-error-state .technical-details { margin-top: 0; }
+.analytics-error-state .technical-details code { display: block; width: fit-content; max-width: 100%; margin-top: 10px; overflow-wrap: anywhere; color: var(--danger); }
+.analytics-error-state .technical-details p { margin: 8px 0 0; overflow-wrap: anywhere; }
 .quantstats-report-shell { min-width: 0; overflow: hidden; border: 1px solid var(--line); border-radius: 15px; background: var(--panel); }
 .quantstats-report-shell .section-heading { margin: 0; padding: 18px 20px; border-bottom: 1px solid var(--line); }
 .quantstats-frame { display: block; width: 100%; min-width: 0; min-height: 780px; border: 0; background: var(--panel); }
@@ -1167,6 +1177,9 @@ dialog::backdrop { background: rgba(4, 12, 10, .56); backdrop-filter: blur(3px);
   .source-status, .venue-scope-card { grid-template-columns: 1fr; }
   .system-health-grid, .permission-grid, .access-principle-grid, .scope-grid, .scope-creation-grid, .scope-context-card, .account-capability-split, .account-detail-config-grid, .notification-route-grid, .agent-fact-strip, .api-client-test { grid-template-columns: 1fr; }
   .quantstats-page .result-filters .field-grid { grid-template-columns: 1fr; }
+  .analytics-error-heading { align-items: start; }
+  .analytics-error-actions { display: grid; grid-template-columns: 1fr 1fr; }
+  .analytics-error-actions button { width: 100%; }
   .quantstats-report-shell .section-heading { display: grid; align-items: start; gap: 10px; padding: 15px; }
   .quantstats-frame { min-height: 900px; }
   .report-common-metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
