@@ -34,7 +34,10 @@ document.addEventListener('click', (event) => {
   if (!userMenu.contains(event.target)) closeUserMenu();
 });
 window.addEventListener('popstate', route);
-window.addEventListener('resize', syncNavigationMode);
+window.addEventListener('resize', () => {
+  syncNavigationMode();
+  syncPreferenceDisplayValues();
+});
 mobileNavToggle.addEventListener('mousedown', (event) => event.preventDefault());
 mobileNavToggle.addEventListener('click', () => sidebar.classList.contains('open') ? closeMobileNav() : openMobileNav());
 mobileNavToggle.addEventListener('keydown', (event) => {
@@ -112,6 +115,23 @@ function preferenceOptionLabel(kind, option) {
   return kind === 'language' ? option.label : localizedText(option.label);
 }
 
+function preferenceDisplayLabel(kind, option) {
+  const label = preferenceOptionLabel(kind, option);
+  return kind === 'language' && option?.value === 'en' && matchMedia('(max-width: 560px)').matches
+    ? 'EN'
+    : label;
+}
+
+function syncPreferenceDisplayValues() {
+  preferenceSelects.forEach((_select, kind) => {
+    const {value} = preferenceElements(kind);
+    const options = PREFERENCE_OPTIONS[kind] || [];
+    const selectedValue = activePreferenceValue(kind);
+    const selected = options.find(option => option.value === selectedValue) || options[0];
+    value.textContent = selected ? preferenceDisplayLabel(kind, selected) : '—';
+  });
+}
+
 function activePreferenceValue(kind) {
   return kind === 'language' ? currentLanguage : currentThemePreference;
 }
@@ -122,14 +142,14 @@ function renderPreferenceDropdown(kind) {
   const selectedValue = activePreferenceValue(kind);
   menu.innerHTML = options.map(option => `<button class="preference-option" type="button" role="option" tabindex="-1" data-preference-option="${escapeHtml(option.value)}" aria-selected="${String(option.value === selectedValue)}">${escapeHtml(preferenceOptionLabel(kind, option))}</button>`).join('');
   const selected = options.find(option => option.value === selectedValue) || options[0];
-  value.textContent = selected ? preferenceOptionLabel(kind, selected) : '—';
+  value.textContent = selected ? preferenceDisplayLabel(kind, selected) : '—';
 }
 
 function updatePreferenceDropdown(kind, selectedValue) {
   const {value, menu} = preferenceElements(kind);
   const options = PREFERENCE_OPTIONS[kind] || [];
   const selected = options.find(option => option.value === selectedValue) || options[0];
-  value.textContent = selected ? preferenceOptionLabel(kind, selected) : '—';
+  value.textContent = selected ? preferenceDisplayLabel(kind, selected) : '—';
   menu.querySelectorAll('[data-preference-option]').forEach(option => {
     option.setAttribute('aria-selected', String(option.dataset.preferenceOption === selectedValue));
   });
