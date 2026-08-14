@@ -208,7 +208,8 @@ async function renderVenueAccountDetail(requestedAccountId) {
   const decodedAccountId = decodeURIComponent(requestedAccountId);
   const account = (registry.data || []).find(item => item.account_id === decodedAccountId || item.exchange_account_id === decodedAccountId);
   if (!account) {
-    main.innerHTML = '<section class="empty-state"><div><p class="eyebrow">交易账户</p><h2>账户不存在或不在当前空间</h2><p>请返回账户列表，选择当前身份可见的账户。</p><a class="primary" href="/accounts?environment=LIVE" data-link>返回账户列表</a></div></section>';
+    main.innerHTML = notFoundView(location.pathname);
+    main.querySelector('[data-error-heading]')?.focus();
     return;
   }
   const venue = account.venue;

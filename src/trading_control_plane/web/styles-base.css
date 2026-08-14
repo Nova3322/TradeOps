@@ -1018,6 +1018,8 @@ pre { max-width: 100%; overflow: auto; background: var(--bg); padding: 13px; bor
 .access-boundary-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 24px; }
 .access-boundary-heading h2 { margin: 4px 0 0; color: var(--ink); }
 .access-boundary-heading h2:focus-visible { outline: 3px solid color-mix(in srgb, var(--accent) 42%, transparent); outline-offset: 5px; }
+.missing-resource-state > div { border-left-color: var(--muted); }
+.missing-resource-state [data-error-heading]:focus { outline: 0; box-shadow: none; }
 .access-boundary-copy { max-width: 650px; margin: 14px 0 0; line-height: 1.7; }
 .access-boundary-facts { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; margin: 22px 0; }
 .access-boundary-facts > div { min-width: 0; padding: 13px 15px; border: 1px solid var(--line); border-radius: 10px; background: var(--panel-soft); }
@@ -1027,7 +1029,7 @@ pre { max-width: 100%; overflow: auto; background: var(--bg); padding: 13px; bor
 .error-state { padding: 24px; text-align: left; }
 .error-state > div { width: min(680px, 100%); padding: 28px; border: 1px solid var(--line); border-left: 4px solid var(--danger); border-radius: 16px; background: var(--panel); box-shadow: var(--testnet-quiet); }
 .error-state h2 { margin: 6px 0 10px; }
-.error-state h2:focus-visible { outline: 3px solid color-mix(in srgb, var(--accent) 42%, transparent); outline-offset: 5px; }
+.error-state h2[data-error-heading]:focus { outline: 0; box-shadow: none; }
 .error-state-reason { margin: 0; line-height: 1.7; }
 .error-state-guidance { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; margin: 20px 0; }
 .error-state-guidance > div { min-width: 0; padding: 12px 14px; border: 1px solid var(--line); border-radius: 10px; background: var(--panel-soft); }
