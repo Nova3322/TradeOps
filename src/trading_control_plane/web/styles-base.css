@@ -1011,6 +1011,17 @@ pre { max-width: 100%; overflow: auto; background: var(--bg); padding: 13px; bor
 @keyframes loading-sweep { to { background-position: -180% 0; } }
 @media (prefers-reduced-motion: reduce) { .loading-skeleton span { animation: none; } }
 .empty-state h2, .error-state h2 { color: var(--ink); }
+.access-boundary-state { min-height: 480px; display: grid; place-items: center; padding: 24px; color: var(--muted); }
+.access-boundary-state > div { width: min(760px, 100%); padding: 30px; border: 1px solid var(--line); border-left: 4px solid var(--accent); border-radius: 16px; background: var(--panel); box-shadow: var(--testnet-quiet); }
+.access-boundary-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 24px; }
+.access-boundary-heading h2 { margin: 4px 0 0; color: var(--ink); }
+.access-boundary-heading h2:focus-visible { outline: 3px solid color-mix(in srgb, var(--accent) 42%, transparent); outline-offset: 5px; }
+.access-boundary-copy { max-width: 650px; margin: 14px 0 0; line-height: 1.7; }
+.access-boundary-facts { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; margin: 22px 0; }
+.access-boundary-facts > div { min-width: 0; padding: 13px 15px; border: 1px solid var(--line); border-radius: 10px; background: var(--panel-soft); }
+.access-boundary-facts dt { color: var(--muted); font-size: 12px; font-weight: 600; letter-spacing: .04em; }
+.access-boundary-facts dd { margin: 5px 0 0; color: var(--ink); font-size: 12px; line-height: 1.5; overflow-wrap: anywhere; }
+.access-boundary-actions { display: flex; flex-wrap: wrap; gap: 10px; }
 .error-state { padding: 24px; text-align: left; }
 .error-state > div { width: min(680px, 100%); padding: 28px; border: 1px solid var(--line); border-left: 4px solid var(--danger); border-radius: 16px; background: var(--panel); box-shadow: var(--testnet-quiet); }
 .error-state h2 { margin: 6px 0 10px; }
@@ -1298,6 +1309,11 @@ dialog::backdrop { background: rgba(4, 12, 10, .56); backdrop-filter: blur(3px);
   .error-state > div { padding: 22px 18px; }
   .error-state-guidance { grid-template-columns: 1fr; }
   .error-state-actions { display: grid; }
+  .access-boundary-state { min-height: 360px; padding: 16px 0; }
+  .access-boundary-state > div { padding: 22px 18px; }
+  .access-boundary-heading { gap: 14px; }
+  .access-boundary-facts { grid-template-columns: 1fr; }
+  .access-boundary-actions { display: grid; }
   .proposal-list-tools label:first-child, .proposal-list-tools > span { grid-column: auto; }
   .source-facts.manual-source { grid-template-columns: 1fr; }
   .review-actions { grid-template-columns: 1fr; }

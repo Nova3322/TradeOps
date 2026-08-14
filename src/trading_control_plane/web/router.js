@@ -22,6 +22,17 @@ function notFoundView(path) {
   return '<section class="empty-state"><div><p class="eyebrow">导航</p><h2>页面不存在</h2><p>链接可能已失效，请从当前任务重新进入。</p><a class="primary" href="/home" data-link>返回当前任务</a></div></section>';
 }
 
+function accessDeniedView(requiredCapability) {
+  const roles = roleNames().map(role => localizedText(fmtRole(role)));
+  const roleSummary = roles.join(' / ') || localizedText('未分配角色');
+  return `<section class="access-boundary-state" role="status" aria-labelledby="access-boundary-title"><div>
+    <div class="access-boundary-heading"><div><p class="eyebrow">权限范围</p><h2 id="access-boundary-title" tabindex="-1">当前职责不包含这个页面</h2></div><span class="status-pill">已按岗位限制</span></div>
+    <p class="access-boundary-copy">此页面需要“${escapeHtml(capabilityLabel(requiredCapability))}”权限。侧栏只展示当前身份可用入口；直接打开链接也不会绕过服务端权限。</p>
+    <dl class="access-boundary-facts"><div><dt>当前身份</dt><dd>${escapeHtml(roleSummary)}</dd></div><div><dt>所需权限</dt><dd>${escapeHtml(localizedText(capabilityLabel(requiredCapability)))}</dd></div><div><dt>权限来源</dt><dd>当前团队岗位与资源范围</dd></div><div><dt>数据处理</dt><dd>未读取受限页面数据</dd></div></dl>
+    <div class="access-boundary-actions"><a class="secondary" href="/home" data-link>返回当前任务</a>${hasCapability('opportunity.view') ? '<a class="primary" href="/opportunities" data-link>查看机会</a>' : ''}${hasCapability('capital.view') ? '<a class="primary" href="/capital" data-link>进入资金中心</a>' : ''}</div>
+  </div></section>`;
+}
+
 async function route() {
   if (location.pathname !== '/opportunities') stopOpportunityStream();
   window.scrollTo(0, 0);
@@ -49,7 +60,7 @@ async function route() {
   }
   const requiredCapability = routeCapability(path);
   if (requiredCapability && !hasCapability(requiredCapability)) {
-    main.innerHTML = `<section class="empty-state"><div><p class="eyebrow">权限范围</p><h2>当前职责不包含这个页面</h2><p>此页面需要“${escapeHtml(capabilityLabel(requiredCapability))}”权限。侧栏只展示当前身份可用入口；直接打开链接也不会绕过服务端权限。</p><div class="toolbar empty-actions"><a class="secondary" href="/home" data-link>返回当前任务</a>${hasCapability('capital.view') ? '<a class="primary" href="/capital" data-link>进入资金中心</a>' : ''}</div></div></section>`;
+    main.innerHTML = accessDeniedView(requiredCapability);
     enhanceRenderedPage();
     return;
   }
