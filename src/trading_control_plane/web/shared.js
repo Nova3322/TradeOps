@@ -78,8 +78,8 @@ const connectionEnglishCopy = {
 };
 const venueModeLabels = {USER_DATA_READ_ONLY:'账户数据只读',INFO_READ_ONLY:'账户数据只读',READ_ONLY:'只读'};
 const accountModeLabels = {PORTFOLIO_MARGIN:'统一账户',MAIN_ACCOUNT:'主账户',SUBACCOUNT:'子账户'};
-const fmtIntentKind = (value) => intentKindLabels[value] || value || '未知意图';
-const fmtDirection = (value) => directionLabels[value] || value || '未知方向';
+const fmtIntentKind = (value) => localizedText(intentKindLabels[value] || value || '未知意图');
+const fmtDirection = (value) => localizedText(directionLabels[value] || value || '未知方向');
 const fmtSide = (value) => currentLanguage === 'en'
   ? sideEnglishLabels[value] || value || 'Unknown side'
   : sideLabels[value] || value || '未知方向';
@@ -289,8 +289,8 @@ const apiErrorGuidance = {
   NOTILT_FACT_STALE:'NoTilt 实时额度已过期，请刷新资金事实后重试。',
   NOTILT_RELEASE_LIMIT_EXCEEDED:'金额超过 NoTilt 当前实时可释放上限，请降低金额或等待额度恢复。',
 };
-const fmtStatus = (value) => statusLabels[value] || value || '未知';
-const fmtRisk = (value) => riskLabels[value] || value || '未知';
+const fmtStatus = (value) => localizedText(statusLabels[value] || value || '未知');
+const fmtRisk = (value) => localizedText(riskLabels[value] || value || '未知');
 const riskGuidance = (reason) => riskReasonGuidance[reason] || {label:'风险检查未通过',action:'查看当前风险事实，处理阻塞后重新检查。'};
 const friendlyApiError = (error) => {
   if (error?.code === 'EXCHANGE_ACCOUNT_DELETE_BLOCKED') {
