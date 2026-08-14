@@ -238,6 +238,7 @@ const ENGLISH_EXACT = new Map(Object.entries({
   '这里展示草稿、等待审核和已批准但仍需跟踪的提案；批准后仍须完成实时风险检查与短期授权。':'Drafts, pending reviews, and approved proposals that still require follow-up appear here. Approval still requires live risk checks and short-lived authorization.',
   '这里只展示仍在草稿或等待审核中的提案；批准后进入历史，后续交易生命周期由交易运维接手。':'Only drafts and pending reviews appear here. Approved proposals move to History and are handed to trading operations.',
   '这里只保留已进入交易任务的已批准提案，以及已过期或已拒绝记录；待启动提案仍留在当前列表。':'Approved proposals that have entered a trade, plus expired or rejected records, appear here. Proposals awaiting setup remain current.',
+  '筛选提案':'Filter proposals', '按标的、方向、风险与来源缩小结果':'Narrow by symbol, direction, risk, and source', '按标的、方向、风险与状态缩小结果':'Narrow by symbol, direction, risk, and status',
   '交易系统状态':'Trading system status', '刷新状态':'Refresh status', '查看风险控制':'View risk controls', '当前结论':'Current conclusion',
   '仓位、保护与对账监控':'Position, protection, and reconciliation monitoring', '当前身份未读取交易任务详情':'Trade details were not loaded for this identity', '运行中的交易任务正在持续监控':'Active trades are being monitored continuously', '当前无运行中任务，4 项监控检查已收起':'No active trades; 4 monitoring checks are collapsed', '当前无运行中任务，正在显示 4 项监控检查':'No active trades; showing 4 monitoring checks', '收起':'Collapse', '查看详情':'View details',
   '无需立即动作':'No immediate action', '核心服务':'Core services', '开仓与加仓':'Entry and scaling',

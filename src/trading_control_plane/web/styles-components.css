@@ -208,6 +208,10 @@ h2 { font-size: 21px; }
   border-radius: 0;
   background: transparent;
 }
+.proposal-filter-disclosure > summary { display: none; }
+@media (min-width: 781px) {
+  .proposal-filter-disclosure:not([open]) > .proposal-list-tools { display: grid; }
+}
 .proposal-table { border-radius: 3px; }
 .proposal-environment,
 .direction-pill,
@@ -315,6 +319,15 @@ dialog { border-radius: 5px; }
   .review-environment-tabs { gap: 12px; }
   .review-environment-tabs a { justify-content: center; }
   .proposal-list-tools { padding-inline: 0; }
+  .proposal-filter-disclosure { margin-bottom: 12px; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); }
+  .proposal-filter-disclosure > summary { display: flex; align-items: center; padding: 10px 0; }
+  .proposal-filter-disclosure > summary > span { display: grid; gap: 1px; }
+  .proposal-filter-disclosure > summary small { color: var(--muted); font-size: 11px; font-weight: 500; }
+  .proposal-filter-disclosure > summary strong { display: grid; justify-items: end; gap: 1px; color: var(--muted); font-size: 12px; white-space: nowrap; }
+  .proposal-filter-disclosure .proposal-filter-when-open { display: none; }
+  .proposal-filter-disclosure[open] .proposal-filter-when-closed { display: none; }
+  .proposal-filter-disclosure[open] .proposal-filter-when-open { display: inline; }
+  .proposal-filter-disclosure[open] > summary { margin-bottom: 2px; }
   .proposal-table tr,
   .risk-condition-details tr,
   .connection-status-table tr,

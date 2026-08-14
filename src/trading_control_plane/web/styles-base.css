@@ -1116,7 +1116,7 @@ dialog::backdrop { background: rgba(4, 12, 10, .56); backdrop-filter: blur(3px);
   .filter-panel { grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; padding: 17px; }
   .webhook-signal-filters { grid-template-columns: repeat(3, minmax(0, 1fr)); }
   .timeframe-filter { grid-column: span 2; justify-content: flex-start; gap: 8px; }
-  .proposal-list-tools { grid-template-columns: minmax(220px, 1fr) 140px 140px; }
+  .proposal-list-tools { grid-template-columns: minmax(220px, 1fr) repeat(3, minmax(120px, 140px)); }
   .proposal-list-tools > span { grid-column: 1 / -1; }
   .signal-source-grid { grid-template-columns: 1fr; }
 }
@@ -1143,7 +1143,7 @@ dialog::backdrop { background: rgba(4, 12, 10, .56); backdrop-filter: blur(3px);
   .home-status .primary { width: fit-content; }
   .campaign-truth-grid { grid-template-columns: 1fr 1fr; }
   .proposal-preview, .proposal-actions-column { position: static; }
-  .proposal-list-tools { grid-template-columns: minmax(220px, 1fr) 140px 140px; }
+  .proposal-list-tools { grid-template-columns: minmax(220px, 1fr) repeat(3, minmax(120px, 140px)); }
   .proposal-list-tools > span { grid-column: 1 / -1; }
   .workflow-stepper { grid-template-columns: 1fr 1fr; }
   .workflow-stepper li:nth-child(2) { border-right: 0; }
