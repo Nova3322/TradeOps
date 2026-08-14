@@ -1261,6 +1261,8 @@ dialog::backdrop { background: rgba(4, 12, 10, .56); backdrop-filter: blur(3px);
 }
 
 @media (max-width: 480px) {
+  .form-actions { flex-wrap: wrap; gap: 8px; }
+  .form-actions > :is(button, a) { max-width: 100%; white-space: normal; text-align: center; }
   .signal-source-facts { grid-template-columns: 1fr; }
   .webhook-signal-facts { grid-template-columns: 1fr; }
   .webhook-signal-filters { grid-template-columns: 1fr; }
