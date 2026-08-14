@@ -49,7 +49,7 @@ function setShell(loggedIn, {workspaceGate = false} = {}) {
     userMenuWorkspace.textContent = session.active_workspace?.name || localizedText('未选择 Workspace');
     userMenuTeam.textContent = session.active_team?.name || localizedText('未选择团队');
     userMenuRole.textContent = localizedText(primaryRole ? fmtRole(primaryRole) : '未分配角色');
-    mobileSessionSummary.textContent = scopeDetail;
+    mobileSessionSummary.innerHTML = `<strong>${escapeHtml(session.username)} · ${escapeHtml(localizedText(primaryRole ? fmtRole(primaryRole) : '未分配角色'))}</strong><span>${escapeHtml(scopeDetail)}</span>`;
     mobileSessionSummary.title = identityDetail;
     document.querySelectorAll('[data-nav-capability]').forEach(link => {
       link.hidden = !hasCapability(link.dataset.navCapability);

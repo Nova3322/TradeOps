@@ -68,6 +68,7 @@
 .sidebar nav a:hover { background: var(--panel-soft); transform: none; }
 .sidebar nav a.active { border-left-color: var(--accent); background: var(--accent-2); color: var(--accent); }
 .sidebar-foot { margin-left: 18px; padding: 16px 4px; font-size: 12px; line-height: 1.5; }
+.mobile-logout-button { display: none; }
 .sidebar-environment { border-radius: 3px; }
 
 .main-content { padding: 42px clamp(28px, 3.2vw, 52px) 76px; }
@@ -291,6 +292,10 @@ dialog { border-radius: 5px; }
   .current-date, .env-badge, .identity-chip { display: none; }
   .mobile-nav-toggle:not([hidden]) { grid-column: 3; grid-row: 1; min-width: 48px; min-height: 40px; margin-right: 10px; border-radius: 3px; padding: 0 10px; background: transparent; font-size: 12px; }
   .sidebar { padding-top: 20px; border-radius: 0; box-shadow: var(--testnet); }
+  .mobile-session-summary { display: grid; gap: 3px; }
+  .mobile-session-summary strong { color: var(--ink); font-size: 12px; }
+  .mobile-session-summary span { color: var(--muted); font-size: 11px; font-weight: 400; }
+  .mobile-logout-button { min-height: 44px; display: inline-flex; align-items: center; justify-content: center; border: 1px solid var(--line); border-radius: 3px; background: transparent; color: var(--ink); font: inherit; font-weight: 600; cursor: pointer; }
   .main-content { padding: 28px 16px max(52px, env(safe-area-inset-bottom)); }
   .page-head { margin-bottom: 24px; padding-bottom: 22px; }
   h1 { font-size: clamp(33px, 10vw, 42px); }
@@ -336,6 +341,10 @@ dialog { border-radius: 5px; }
   .stats { grid-template-columns: 1fr; }
   .stat:nth-child(even) { border-left: 0; }
   .stat + .stat { border-top: 1px solid var(--line); }
+  .proposal-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .proposal-stats .stat { min-height: 94px; padding: 14px 12px; }
+  .proposal-stats .stat:nth-child(even) { border-left: 1px solid var(--line); }
+  .proposal-stats .stat:nth-child(n + 3) { border-top: 1px solid var(--line); }
   .home-priority { grid-template-columns: 24px minmax(0, 1fr); }
   .review-environment-tabs { width: 100%; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 6px; }
   .section-tabs { gap: 14px; overflow-x: auto; }

@@ -21,6 +21,7 @@ const currentDate = document.querySelector('#current-date');
 const mobileNavToggle = document.querySelector('#mobile-nav-toggle');
 const desktopNavToggle = document.querySelector('#desktop-nav-toggle');
 const mobileSessionSummary = document.querySelector('#mobile-session-summary');
+const mobileLogoutButton = document.querySelector('#mobile-logout-button');
 const navBackdrop = document.querySelector('#nav-backdrop');
 const dialog = document.querySelector('#system-proposal-dialog');
 const confirmDialog = document.querySelector('#confirm-dialog');
