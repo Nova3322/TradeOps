@@ -599,7 +599,7 @@ const ENGLISH_EXACT = new Map(Object.entries({
   '测试模式不要求输入确认文案；点击按钮后仍会进行一次最终确认。':'Testnet does not require typed confirmation. A final confirmation still appears after clicking the button.',
   '最近一次模式切换与审计':'Latest mode switch and audit', '尚无切换记录':'No switch record', '查看详情':'View details', '所有切换、失效与阻断结果继续写入审计记录。':'All switches, invalidations, and blocked results continue to be written to the audit log.',
   '提前配置测试和生产账户；实际执行环境始终由服务端读取团队当前模式。':'Configure Testnet and Production accounts in advance. The server always derives the execution environment from the Team current mode.',
-  '账户配置范围':'Account configuration scope', '这里切换的只是账户配置范围，不会改变团队当前运行模式。实际模式切换请前往模式设置。':'This switches only the account configuration scope and does not change the Team current mode. Go to Mode settings to switch the actual mode.',
+  '账户配置范围':'Account configuration scope', '当前范围':'Current scope', '这里切换的只是账户配置范围，不会改变团队当前运行模式。实际模式切换请前往模式设置。':'This switches only the account configuration scope and does not change the Team current mode. Go to Mode settings to switch the actual mode.',
   '前往模式设置':'Open Mode settings', '测试账户':'Testnet accounts', '生产账户':'Production accounts', '交易所测试环境 API':'Exchange Testnet API', '真实资金环境 API':'Real-funds API',
   '尚未添加此环境账户':'No account has been added for this environment', '添加并验证账户后，交易执行才会就绪；账户配置不影响模式选择。':'Add and verify an account to make execution ready. Account configuration does not affect mode selection.',
   '这里的选择只影响展示，不会切换运行环境或改变交易能力。':'This selection affects display only; it never switches the runtime environment or changes trading capabilities.',
