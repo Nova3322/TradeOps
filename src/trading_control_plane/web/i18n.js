@@ -180,7 +180,7 @@ const ENGLISH_EXACT = new Map(Object.entries({
   '待我审核':'Assigned to me', '搜索标的':'Search instrument', '全部方向':'All directions', '来源':'Source', '全部来源':'All sources', '系统机会':'System opportunity', '人工判断':'Manual thesis', '个结果':'results', '显示更多':'Show more', '已显示全部':'All shown', '查看详情':'View details', '返回审核队列':'Back to review queue', '批准提案':'Approve proposal', '拒绝提案':'Reject proposal',
   '方向 / 交易规模':'Direction / trade size', '审核进度':'Review progress', '仍需你的独立判断':'Still needs your independent decision', '审核范围':'Review scope', '审核环境范围':'Review environment scope', '选择审核环境':'Select review environment', '生产':'Production', '测试':'Testnet',
   'Perptape 机会':'Perptape opportunity', 'Live environment · LIVE · Perptape 机会':'Live environment · LIVE · Perptape opportunity', '提案已保存':'Proposal saved', '提案流程':'Proposal workflow', '等待判断':'Awaiting decision', '风险检查':'Risk check', '尚未运行':'Not run', '短期授权':'Short-lived authorization', '尚未签发':'Not issued', '未签发':'Not issued',
-  '交易判断摘要':'Trading thesis summary', '这笔交易要做什么':'What this trade intends to do', '估算名义价值':'Estimated notional', '合约数量':'Contract quantity', '初仓':'Initial entry', '失效位置':'Invalidation level', '距触发':'From trigger', '生产账户范围':'Production account scope', '加仓触发价':'Scale-in trigger price', '创建时来源快照':'Source snapshot at creation', '创建时可用':'Available at creation', '快照时间':'Snapshot time',
+  '交易判断摘要':'Trading thesis summary', '这笔交易要做什么':'What this trade intends to do', '估算名义价值':'Estimated notional', '合约数量':'Contract quantity', '初仓':'Initial entry', '失效位置':'Invalidation level', '距触发':'From trigger', '测试账户范围':'Testnet account scope', '生产账户范围':'Production account scope', '加仓触发价':'Scale-in trigger price', '创建时来源快照':'Source snapshot at creation', '创建时可用':'Available at creation', '快照时间':'Snapshot time',
   '已保存参数':'Saved parameters', '提案范围':'Proposal scope', '不可编辑':'Read only', '限价':'Limit price', '来源候选':'Source candidate', '来源快照时间':'Source snapshot time',
   '审核历史':'Review history', '尚无审核记录':'No review record yet', '审核人的独立判断会按时间出现在这里。':'Independent reviewer decisions appear here chronologically.',
   '需要你的独立判断':'Your independent decision is required', '审核意见':'Review note', '说明你核对了什么，以及判断依据':'State what you checked and the basis for your decision', '已核对交易逻辑、保存参数与最大风险边界':'Checked the trade thesis, saved parameters, and maximum-risk boundary',
@@ -781,7 +781,9 @@ const ENGLISH_PATTERNS = [
   [/^(\d+) \u4e2a\u6240\u9009\u8d26\u6237\u66f2\u7ebf$/, '$1 selected-account series'],
   [/^\u5f53\u524d\u6a21\u5f0f\uff1a(\u6d4b\u8bd5\u6a21\u5f0f|\u751f\u4ea7\u6a21\u5f0f|\u5f85\u914d\u7f6e)$/, (_match, mode) => `Current mode: ${mode === '\u6d4b\u8bd5\u6a21\u5f0f' ? 'Testnet mode' : mode === '\u751f\u4ea7\u6a21\u5f0f' ? 'Production mode' : 'Setup required'}`],
   [/^(生产|测试)环境 · (LIVE|TESTNET) · Perptape 机会$/, (_match, label, environment) => `${label === '生产' ? 'Production' : 'Testnet'} environment · ${environment} · Perptape opportunity`],
-  [/^(币安|Binance) · (生产|测试)账户范围 · 提案 (.+) · 版本 (\d+)$/, (_match, venue, environment, proposal, version) => `${venue === '币安' ? 'Binance' : venue} · ${environment === '生产' ? 'Production' : 'Testnet'} account scope · Proposal ${proposal} · Version ${version}`],
+  [/^(生产模式|测试模式) · (LIVE|TESTNET) · Perptape 机会$/, (_match, mode, environment) => `${mode === '生产模式' ? 'Production mode' : 'Testnet mode'} · ${environment} · Perptape opportunity`],
+  [/^(Production mode|Testnet mode) · (LIVE|TESTNET) · Perptape 机会$/, '$1 · $2 · Perptape opportunity'],
+  [/^(.+) · (生产|测试)账户范围 · 提案 (.+) · 版本 (\d+)$/, (_match, venue, environment, proposal, version) => `${venue.replace('币安', 'Binance')} · ${environment === '生产' ? 'Production' : 'Testnet'} account scope · Proposal ${proposal} · Version ${version}`],
   [/^剩余 (值|\d+) 小时 (值|\d+) 分钟$/, '$1 hours $2 minutes remaining'],
   [/^(\d+) 小时 (\d+) 分钟$/, '$1 hours $2 minutes'],
   [/^(.+) · 剩余 (\d+) 小时 (\d+) 分钟$/, '$1 · $2 hours $3 minutes remaining'],
@@ -895,7 +897,7 @@ function translateEnglishText(value) {
     if (/[\u3400-\u9fff]/.test(translated)) translated = canonical;
   }
   if (!/[\u3400-\u9fff]/.test(translated)) {
-    translated = translated.replaceAll('，', ',').replaceAll('；', ';').replaceAll('：', ':').replaceAll('。', '.').replaceAll('（', '(').replaceAll('）', ')');
+    translated = translated.replaceAll('，', ',').replaceAll('、', ', ').replaceAll('；', ';').replaceAll('：', ':').replaceAll('。', '.').replaceAll('（', '(').replaceAll('）', ')');
   }
   return source.replace(trimmed, translated);
 }
