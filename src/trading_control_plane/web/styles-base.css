@@ -520,6 +520,13 @@ button:disabled { opacity: .52; cursor: not-allowed; }
 .tone-attention .health-indicator { background: var(--warning); }
 .tone-danger .health-indicator { background: var(--danger); }
 .system-health-card > p { min-height: 54px; margin: 15px 0 0; color: var(--muted); font-size: 12px; line-height: 1.55; }
+.system-monitoring-disclosure { margin: -14px 0 32px; }
+.system-monitoring-disclosure > summary { align-items: center; }
+.system-monitoring-disclosure > summary strong { white-space: nowrap; }
+.system-monitoring-disclosure .when-open { display: none; }
+.system-monitoring-disclosure[open] .when-closed { display: none; }
+.system-monitoring-disclosure[open] .when-open { display: inline; }
+.system-monitoring-disclosure > .system-health-grid { margin: 0; padding: 16px 20px 20px; }
 .exception-code-list { display: flex; flex-wrap: wrap; gap: 8px; }
 .exception-code-list span { padding: 8px 10px; border: 1px solid color-mix(in srgb, var(--danger) 26%, var(--line)); border-radius: 9px; background: color-mix(in srgb, var(--danger) 5%, var(--panel)); color: var(--danger); font-size: 12px; font-weight: 600; }
 .access-principles { margin-bottom: 18px; }
@@ -1176,6 +1183,9 @@ dialog::backdrop { background: rgba(4, 12, 10, .56); backdrop-filter: blur(3px);
   .field-grid, .detail-layout, .definition-grid, .compose-layout, .proposal-detail-layout, .campaign-command, .home-status { grid-template-columns: 1fr; }
   .source-status, .venue-scope-card { grid-template-columns: 1fr; }
   .system-health-grid, .permission-grid, .access-principle-grid, .scope-grid, .scope-creation-grid, .scope-context-card, .account-capability-split, .account-detail-config-grid, .notification-route-grid, .agent-fact-strip, .api-client-test { grid-template-columns: 1fr; }
+  .system-monitoring-disclosure { margin-top: -12px; }
+  .system-monitoring-disclosure > summary { align-items: flex-start; }
+  .system-monitoring-disclosure > .system-health-grid { padding: 12px; }
   .quantstats-page .result-filters .field-grid { grid-template-columns: 1fr; }
   .analytics-error-heading { align-items: start; }
   .analytics-error-actions { display: grid; grid-template-columns: 1fr 1fr; }
