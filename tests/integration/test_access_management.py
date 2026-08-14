@@ -216,7 +216,10 @@ async def exercise_access_management(database: Database) -> None:
         assert (await client.get("/api/campaigns")).status_code == 403
         assert (await client.get("/api/capital")).status_code == 403
         assert (await client.get("/api/admin/users")).status_code == 403
-        assert (await client.get("/admin/users")).status_code == 403
+        member_shell = await client.get("/admin/users")
+        assert member_shell.status_code == 200
+        assert "text/html" in member_shell.headers["content-type"]
+        assert "reviewer-only" not in member_shell.text
 
         await login(client, "mixed-non-admin")
         assert (await client.get("/api/capital")).status_code == 200
@@ -347,7 +350,6 @@ async def exercise_six_identity_permission_matrix(database: Database) -> None:
             "/api/venues/bybit/facts?account_id=acct-bybit",
             "/api/capital",
             "/api/admin/users",
-            "/admin/users",
         )
         allowed = {
             "matrix-admin": set(endpoints),
@@ -395,6 +397,9 @@ async def exercise_six_identity_permission_matrix(database: Database) -> None:
                         endpoint,
                         response.text,
                     )
+                member_shell = await member_http.get("/admin/users")
+                assert member_shell.status_code == 200
+                assert "text/html" in member_shell.headers["content-type"]
                 if username != "matrix-admin":
                     denied = await member_http.get("/api/admin/users")
                     assert "matrix-admin" not in denied.text

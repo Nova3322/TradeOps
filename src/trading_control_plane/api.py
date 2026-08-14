@@ -1554,19 +1554,13 @@ def create_app(
                 media_type="text/markdown; charset=utf-8",
             )
 
-        @app.get("/admin/users", include_in_schema=False)
-        def managed_users_web(
-            identity: SessionIdentity = identity_dependency,
-        ) -> FileResponse:
-            require_capability(identity, "access.manage")
-            return FileResponse(WEB_ROOT / "index.html")
-
         @app.get("/", include_in_schema=False)
         @app.get("/home", include_in_schema=False)
         @app.get("/workspaces", include_in_schema=False)
         @app.get("/profile/api-keys", include_in_schema=False)
         @app.get("/profile/api-access", include_in_schema=False)
         @app.get("/admin/agents", include_in_schema=False)
+        @app.get("/admin/users", include_in_schema=False)
         @app.get("/opportunities", include_in_schema=False)
         @app.get("/webhook-signals", include_in_schema=False)
         @app.get("/signals", include_in_schema=False)
