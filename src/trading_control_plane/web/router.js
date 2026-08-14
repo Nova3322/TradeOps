@@ -66,7 +66,7 @@ async function route() {
   }
   main.innerHTML = `<section class="loading-state" role="status" aria-live="polite" aria-label="正在读取当前事实">
     <div class="loading-state-copy"><span class="spinner" aria-hidden="true"></span><div><b>正在读取当前事实…</b><p>正在核对当前空间、权限与服务端数据。</p></div></div>
-    <div class="loading-skeleton" aria-hidden="true"><span></span><span></span><span></span></div>
+    <div class="loading-skeleton" aria-hidden="true"><span class="loading-title"></span><span class="loading-lede"></span><div class="loading-stat-row"><span></span><span></span><span></span><span></span></div><span class="loading-panel"></span></div>
   </section>`;
   applyLanguageToDocument(main);
   try {
