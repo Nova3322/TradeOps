@@ -272,11 +272,23 @@ async function renderSystemStatus() {
   const cards = [
     systemHealthCard({title:'核心服务', status:health.ready ? '服务可用' : '服务不可用', tone:health.ready ? 'success' : 'danger', copy:health.ready ? '业务数据库和交易服务运行正常。' : '核心服务检查失败；不能把缺失响应当成正常。', meta:'数据缺失时自动阻止交易'}),
     systemHealthCard({title:'开仓与加仓', status:entryStatus, tone:entryOpen ? (addOpen ? 'success' : 'attention') : 'danger', copy:entryCopy, meta:restoreConditions.ready ? '每笔新增风险仍会重新检查账户、交易所与授权' : `${restoreConditions.blockers?.length || blockedRiskChecks.length} 项实时条件待处理；查看风险控制了解精确原因`}),
-    ...monitoringCards,
     systemHealthCard({title:'交易执行底座', status:workersReady ? '精确账户 Worker 已验证' : workersDisabled ? 'Freqtrade 执行进程未启动' : 'Freqtrade 执行进程检查未通过', tone:workersReady || workersDisabled ? 'attention' : 'danger', copy:executionCopy, meta:workersReady ? (freqtrade.live_order_send ? '真实订单发送已启用；账户资格、风险、授权与发送者租约仍会逐项复核' : '精确账户验证已通过；LIVE_ORDER_SEND 保持关闭') : workersDisabled ? `${configuredWorkers.length ? '数据库绑定已保留；' : ''}FREQTRADE_WORKERS_ENABLED 与 LIVE_ORDER_SEND 保持关闭` : '身份、模式或精确账户绑定不一致时禁止发送'}),
     systemHealthCard({title:'Telegram 审核通知', status:telegramStatus, tone:telegramHealthy ? 'success' : 'attention', copy:telegramHealthy ? 'Telegram 私聊机器人最近一次长轮询成功；批准和拒绝仍需二次确认并写入统一审计。' : telegramFailureCopy, meta:telegramHealthy ? `最近成功 ${fmtDate(telegramPolling.last_success_at)}` : '网页端审核队列保持可用；资金、订单、风险开关与权限操作不对 Telegram 机器人开放'}),
     systemHealthCard({title:'Perptape 机会源', status:perptapeStatus, tone:perptapeTone, copy:perptapeAvailable ? `已读取 ${Number(opportunityHealth?.data?.length ?? perptape.candidate_count ?? 0)} 个候选，可用于机会筛选和提案。` : perptape.configured ? 'Perptape 已配置，但最近数据尚未形成可用连接结论。现有交易任务不受影响，新的外部机会不可用。' : 'Perptape 尚未配置；人工提案仍可使用。', meta:`只读 · 最近数据 ${fmtDate(perptape.last_fetched_at)}`}),
   ].join('');
+  const monitoringIssueCount = protectionIssues.length + exposureIssues.length + reconciliationIssues.length + unknownIntents + dispatchingIntents;
+  const monitoringOpen = activeMonitoring || monitoringIssueCount > 0 || !canViewOperations;
+  const monitoringSummary = !canViewOperations
+    ? '当前身份未读取交易任务详情'
+    : monitoringIssueCount
+      ? `${monitoringIssueCount} 项监控结果需要处理`
+      : activeMonitoring
+        ? '运行中的交易任务正在持续监控'
+        : '当前无运行中任务，4 项监控检查已收起';
+  const monitoringSummaryMarkup = canViewOperations && !activeMonitoring && !monitoringIssueCount
+    ? '<small><span class="when-closed">当前无运行中任务，4 项监控检查已收起</span><span class="when-open">当前无运行中任务，正在显示 4 项监控检查</span></small>'
+    : `<small>${escapeHtml(monitoringSummary)}</small>`;
+  const monitoringDisclosure = `<details class="card create-member-panel system-monitoring-disclosure" ${monitoringOpen ? 'open' : ''}><summary><span><b>仓位、保护与对账监控</b>${monitoringSummaryMarkup}</span><strong><span class="when-closed">查看详情</span><span class="when-open">收起</span></strong></summary><div class="system-health-grid">${monitoringCards.join('')}</div></details>`;
   const connectionLabels = {
     BINANCE:['币安','生产账户','/venues?venue=BINANCE','查看账户数据 →'],
     HYPERLIQUID:['Hyperliquid','生产账户','/venues?venue=HYPERLIQUID','查看账户数据 →'],
@@ -353,9 +365,10 @@ async function renderSystemStatus() {
             : !perptapeAvailable && hasCapability('opportunity.view')
               ? '<a class="secondary" href="/opportunities" data-link>查看 Perptape</a>'
               : '<span class="status-pill status-APPROVED">无需立即动作</span>';
-  main.innerHTML = `<section class="page system-status-page"><header class="page-head"><div><p class="eyebrow">交易系统状态</p><h1>系统状态</h1><p class="lede">这里直接说明系统能否工作、哪些能力受限，以及是否需要处理。绿色表示当前证据正常；黄色表示能力受限；红色表示必须先处理；灰色表示当前没有监控对象。</p></div><div class="toolbar"><button class="secondary" data-refresh>刷新状态</button><a class="secondary" href="/risk" data-link>查看风控中心</a></div></header>
+  main.innerHTML = `<section class="page system-status-page"><header class="page-head"><div><p class="eyebrow">交易系统状态</p><h1>系统状态</h1><p class="lede">这里直接说明系统能否工作、哪些能力受限，以及是否需要处理。绿色表示当前证据正常；黄色表示能力受限；红色表示必须先处理；灰色表示当前没有监控对象。</p></div><div class="toolbar"><button class="secondary" data-refresh>刷新状态</button></div></header>
     <article class="home-status tone-${overallTone}"><div><p class="eyebrow">当前结论</p><h2>${escapeHtml(verdictTitle)}</h2><p>${escapeHtml(verdictCopy)}</p></div>${verdictAction}</article>
     <div class="system-health-grid">${cards}</div>
+    ${monitoringDisclosure}
     <section><div class="section-heading"><div><p class="eyebrow">外部数据连接</p><h2>生产数据与资金连接</h2></div><span class="status-pill">${availableSources} / ${connectionSourceCount} 可用</span></div><div class="table-scroll-hint connection-scroll-hint" data-table-hint>左右滑动查看完整连接状态</div><div class="table-wrap connection-status-table"><table><thead><tr><th>数据源</th><th>读取状态与处理建议</th><th>运行范围</th><th>可用能力</th><th></th></tr></thead><tbody>${connectionRows}</tbody></table></div></section>
     ${codes.size ? `<section><div class="section-heading"><div><p class="eyebrow">交易任务运行告警</p><h2>需要处理的问题类型</h2></div><a class="secondary" href="/campaigns/alerts" data-link>查看运行告警</a></div><div class="exception-code-list">${[...codes].sort().map(code => `<span>${escapeHtml(explainException(code).title)}</span>`).join('')}</div></section>` : ''}
   </section>`;
