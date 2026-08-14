@@ -567,8 +567,14 @@ const ENGLISH_EXACT = new Map(Object.entries({
   '始终由人控钱包或有效多签确认':'Always confirmed by a human-controlled wallet or valid multisig', '尚未就绪':'Not ready',
   'NoTilt Vault 用于受控资金保管与固定路径划转。页面只显示配置状态，不回显合约地址、Agent 范围或凭据。':'NoTilt Vault provides controlled custody and fixed-path transfers. The page shows configuration state without revealing contract addresses, Agent scope, or credentials.',
   'Safe Spending Limits 使用 Safe、delegate 与可信 RPC 范围。控制台只读取额度与回执，不接收或保存钱包签名。':'Safe Spending Limits uses scoped Safe, delegate, and trusted RPC settings. The console reads allowances and receipts but never accepts or stores wallet signatures.',
-  '账户配置已集中管理。':'Account configuration is managed centrally.', '交易所、Vault、Safe、提取地址与私钥均在“账户管理”按测试/实盘分别配置。':'Configure exchange accounts, Vault, Safe, withdrawal addresses, and private keys separately for Testnet and Production in Account management.', '前往账户管理':'Open Account management',
+  '配置 Vault、Safe 与资金路径':'Configure Vault, Safe, and capital paths', '先选择一个链上金库，系统只使用该金库创建之后的资金操作。这里只接收公开地址和账户范围；不得输入 API secret、私钥、种子、钱包密码或签名令牌。':'Choose one on-chain treasury. Only that treasury is used for subsequent capital operations. Enter public addresses and account scope only; never enter API secrets, private keys, seed phrases, wallet passwords, or signing tokens.',
+  '1. 选择链上金库':'1. Choose an on-chain treasury', '使用 NoTilt 金库预算、延迟与官方 SDK':'Use NoTilt Vault budgets, delays, and the official SDK', '使用 Safe Allowance Module 的 delegate 额度':'Use delegate allowances from the Safe Allowance Module',
+  'NoTilt Vault 配置':'NoTilt Vault configuration', '只填写 NoTilt 金库编号和金库地址。':'Enter only the NoTilt Vault ID and address.', 'Safe Spending Limits 配置':'Safe Spending Limits configuration', '只填写公开的 Safe Smart Account 与 delegate 地址。':'Enter only the public Safe Smart Account and delegate addresses.',
+  '2. 共用账户与安全边界':'2. Shared accounts and safety boundaries', '无论选择哪个链上金库，币安、Hyperliquid、自有地址和金额限制都共用。':'Binance, Hyperliquid, owned-address, and amount limits are shared across treasury providers.', '保存并使用此链上金库':'Save and use this treasury',
   '受控资金路径':'Controlled capital paths', 'Vault / Safe 与交易所':'Vault / Safe and exchanges', '先选路径，再填写金额；每次都会重新校验地址、网络、资产、额度、实时状态和安全开关。':'Choose a path, then enter an amount. Every attempt revalidates addresses, network, asset, limits, live status, and safety gates.',
+  '日常风控':'Routine risk controls', '日常风控设置':'Routine risk settings', '修改':'Edit', '点击后修改限额与事实时效':'Click to edit limits and fact freshness',
+  '新建团队通知路由':'Create Team notification route', '按环境选择渠道与事件，凭据独立加密保存':'Choose a channel and events by environment; credentials are encrypted separately', '开始配置':'Configure',
+  '基础设置':'Basic settings', '路由只在所选环境接收事件':'The route receives events only from the selected environment', '订阅事件':'Subscribed events', '选择需要进入此路由的团队事件':'Choose Team events for this route', '加密渠道配置':'Encrypted channel settings', '敏感字段保存后永不回显':'Sensitive fields are never shown after saving',
   '选择链上金库':'Choose on-chain treasury', '额度预检':'Limit preflight', '已选账户':'Selected accounts', '尚无所选账户同一时间口径的完整记录':'No complete, time-aligned record exists for the selected accounts.', '资金数据尚未完整。当前汇总保持关闭，可信的单账户曲线仍保留。':'Capital data is incomplete. The current total remains blocked while trusted individual-account series remain visible.', '净值趋势':'Net-worth trend', '尚无有效时间范围':'No valid time range', '所选账户汇总':'Selected-account total', '等待数据':'Waiting for data',
   '筛选信号':'Filter signals', '筛选机会':'Filter opportunities', '发生时间':'Occurred at', '接收时间':'Received at', '策略':'Strategy', '版本':'Version', '周期':'Timeframe', '价格':'Price', '新鲜度':'Freshness', '提案已阻断':'Proposal blocked',
   '每个交易任务覆盖一笔交易从授权、风险占用和下单意图，到成交、保护、减仓、对账与最终结果的完整生命周期。':'Each trade covers the full lifecycle from authorization, risk reservation, and order intent through fills, protection, reductions, reconciliation, and final outcome.',
@@ -577,6 +583,7 @@ const ENGLISH_EXACT = new Map(Object.entries({
 
 const ENGLISH_PATTERNS = [
   [/^模式设置 · (.+)$/, 'Mode settings · $1'],
+  [/^当前版本 · (.+)$/, 'Current version · $1'],
   [/^(测试模式|生产模式) · 账户净值$/, (_match, mode) => `${mode === '测试模式' ? 'Testnet mode' : 'Production mode'} · Account net worth`],
   [/^(测试模式|生产模式) · 资金保管$/, (_match, mode) => `${mode === '测试模式' ? 'Testnet mode' : 'Production mode'} · Capital custody`],
   [/^(\d+) 个账户$/, '$1 accounts'],
