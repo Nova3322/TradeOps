@@ -43,7 +43,10 @@ async function route() {
     enhanceRenderedPage();
     return;
   }
-  main.innerHTML = '<section class="loading-state"><span class="spinner"></span><p>正在读取当前事实…</p></section>';
+  main.innerHTML = `<section class="loading-state" role="status" aria-live="polite" aria-label="正在读取当前事实">
+    <div class="loading-state-copy"><span class="spinner" aria-hidden="true"></span><div><b>正在读取当前事实…</b><p>正在核对当前空间、权限与服务端数据。</p></div></div>
+    <div class="loading-skeleton" aria-hidden="true"><span></span><span></span><span></span></div>
+  </section>`;
   try {
     if (path === '/home') await renderHome();
     else if (path === '/signals') await renderSignalSources();
