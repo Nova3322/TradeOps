@@ -698,6 +698,7 @@ const ENGLISH_EXACT = new Map(Object.entries({
   '检查范围：运行中的生产交易任务；未发现结果未知、数据过期、保护不足或对账差异。已关闭记录不会重新计入当前待办。':'Scope: active Production trades. No unknown outcomes, stale data, protection gaps, or reconciliation differences were found. Closed records remain excluded from current tasks.',
   '查看交易任务':'View trades', '已撤销':'Revoked',
   '资金曲线暂未就绪':'Capital series is not ready', '当前身份没有查看或执行此操作的权限。':'Your role does not have permission to view or perform this operation.', '重新加载':'Reload',
+  '链上私钥不进入控制台；真实币安提现继续受专用开关和 CAPITAL_TRANSFER 双重门禁。':'Private keys never enter the console; real Binance withdrawals remain gated by the dedicated switch and CAPITAL_TRANSFER.',
   '仅最高管理员可以直接恢复':'Only a super administrator can restore directly', '当前身份不是交易运维人员':'Your role is not a trading operator', '当前身份不是独立审核人员':'Your role is not an independent reviewer', '由资金管理员处理':'Handled by a treasury administrator', '当前身份可以查看服务端事实，但没有信号源管理权限。':'You can view server facts but cannot manage signal sources.',
   '已切换工作区；团队、成员与权限范围已重新加载':'Workspace switched; Team, membership, and permission scope reloaded',
   // Hidden, loading, error, and expanded-control states.
@@ -719,6 +720,7 @@ const ENGLISH_EXACT = new Map(Object.entries({
 }));
 
 const ENGLISH_PATTERNS = [
+  [/^当前提供方：(.+)。$/, 'Current provider: $1.'],
   [/^([✓○]) (补全交易意图|交易意图完整)$/, (_match, mark, state) => `${mark} ${state === '交易意图完整' ? 'Trading intent complete' : 'Complete the trading intent'}`],
   [/^([✓○]) (补全风险边界|风险边界完整)$/, (_match, mark, state) => `${mark} ${state === '风险边界完整' ? 'Risk limits complete' : 'Complete the risk limits'}`],
   [/^✓ 只创建提案，不直接下单$/, '✓ Creates a proposal only; no order is placed'],

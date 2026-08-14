@@ -881,6 +881,7 @@ tr:last-child td { border-bottom: 0; }
 tr[data-href] { cursor: pointer; }
 tr[data-href]:hover { background: color-mix(in srgb, var(--accent-2) 55%, transparent); }
 .row-link { display: inline-flex; margin-top: 7px; color: var(--accent); font-size: 12px; font-weight: 600; text-decoration: underline; text-underline-offset: 3px; }
+.proposal-table .row-link { display: flex; width: max-content; }
 .table-scroll-hint { display: none; }
 .form-panel { background: var(--panel); border: 1px solid var(--line); border-radius: 16px; padding: clamp(20px, 4vw, 34px); max-width: 880px; }
 .field-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
