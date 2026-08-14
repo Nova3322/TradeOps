@@ -12,6 +12,16 @@ async function bootstrap() {
   await route();
 }
 
+function notFoundView(path) {
+  if (path.startsWith('/campaigns/')) {
+    return '<section class="empty-state"><div><p class="eyebrow">交易任务</p><h2>该交易任务不存在</h2><p>链接可能已失效，或记录不属于当前团队与环境。</p><a class="primary" href="/campaigns" data-link>返回交易任务</a></div></section>';
+  }
+  if (path.startsWith('/proposals/')) {
+    return '<section class="empty-state"><div><p class="eyebrow">提案管理</p><h2>该提案不存在</h2><p>链接可能已失效，或记录不属于当前团队与环境。</p><a class="primary" href="/proposals" data-link>返回提案列表</a></div></section>';
+  }
+  return '<section class="empty-state"><div><p class="eyebrow">导航</p><h2>页面不存在</h2><p>链接可能已失效，请从当前任务重新进入。</p><a class="primary" href="/home" data-link>返回当前任务</a></div></section>';
+}
+
 async function route() {
   if (location.pathname !== '/opportunities') stopOpportunityStream();
   window.scrollTo(0, 0);
@@ -87,7 +97,7 @@ async function route() {
       if (venueAccountMatch) await renderVenueAccountDetail(venueAccountMatch[1]);
       else if (campaignMatch) await renderCampaignDetail(campaignMatch[1]);
       else if (proposalMatch) await renderProposalDetail(proposalMatch[1]);
-      else main.innerHTML = '<section class="empty-state"><div><h2>页面不存在</h2><a class="primary" href="/opportunities" data-link>返回机会页</a></div></section>';
+      else main.innerHTML = notFoundView(path);
     }
     enhanceRenderedPage();
   } catch (error) {
