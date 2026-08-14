@@ -529,7 +529,7 @@ button:disabled { opacity: .52; cursor: not-allowed; }
 .system-monitoring-disclosure > .system-health-grid { margin: 0; padding: 16px 20px 20px; }
 .exception-code-list { display: flex; flex-wrap: wrap; gap: 8px; }
 .exception-code-list span { padding: 8px 10px; border: 1px solid color-mix(in srgb, var(--danger) 26%, var(--line)); border-radius: 9px; background: color-mix(in srgb, var(--danger) 5%, var(--panel)); color: var(--danger); font-size: 12px; font-weight: 600; }
-.access-principles { margin-bottom: 18px; }
+.access-principles { margin-bottom: 18px; padding: 0; overflow: hidden; }
 .scope-creation-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; margin: 18px 0 26px; }
 .scope-create-form { display: grid; align-content: start; gap: 14px; margin: 0; }
 .scope-create-form h2, .scope-create-form p { margin: 0; }
@@ -544,8 +544,17 @@ button:disabled { opacity: .52; cursor: not-allowed; }
 .scope-team-row:hover, .scope-team-row.is-active { border-color: color-mix(in srgb, var(--accent) 42%, var(--line)); background: var(--accent-2); }
 .scope-team-row b, .scope-team-row small { display: block; }
 .scope-team-row small { margin-top: 4px; color: var(--muted); font-size: 12px; }
-.access-principles h2 { margin-bottom: 14px; }
+.access-principles > summary { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 18px 20px; cursor: pointer; list-style: none; }
+.access-principles > summary::-webkit-details-marker { display: none; }
+.access-principles > summary b, .access-principles > summary small { display: block; }
+.access-principles > summary small { margin-top: 5px; color: var(--muted); font-size: 12px; font-weight: 400; }
+.access-principles > summary strong { white-space: nowrap; }
+.access-principles > summary .when-open { display: none; }
+.access-principles[open] > summary { border-bottom: 1px solid var(--line); }
+.access-principles[open] > summary .when-closed { display: none; }
+.access-principles[open] > summary .when-open { display: inline; }
 .access-principle-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
+.access-principles > .access-principle-grid { padding: 16px 20px 20px; }
 .access-principle-grid p { margin: 0; padding: 14px; border-radius: 11px; background: var(--bg); }
 .access-principle-grid b, .access-principle-grid span { display: block; }
 .access-principle-grid b { margin-bottom: 6px; font-size: 12px; }
