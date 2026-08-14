@@ -1268,7 +1268,7 @@ dialog::backdrop { background: rgba(4, 12, 10, .56); backdrop-filter: blur(3px);
   .form-actions > :is(button, a) { max-width: 100%; white-space: normal; text-align: center; }
   .webhook-source-tabs { flex-wrap: wrap; overflow-x: visible; padding-bottom: 0; }
   .mode-accounts-page .empty-state { min-height: 240px; }
-  .signal-source-facts { grid-template-columns: 1fr; }
+  .signal-source-facts { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .webhook-signal-facts { grid-template-columns: 1fr; }
   .webhook-signal-filters { grid-template-columns: 1fr; }
   .signal-source-actions { display: grid; grid-template-columns: 1fr; }
@@ -1322,6 +1322,10 @@ dialog::backdrop { background: rgba(4, 12, 10, .56); backdrop-filter: blur(3px);
   .capital-trend-toggle { padding: 8px; }
   .capital-page > .stats { grid-template-columns: 1fr; }
   .capital-route-flow b { font-size: 16px; }
+}
+
+@media (max-width: 360px) {
+  .signal-source-facts { grid-template-columns: 1fr; }
 }
 
 @media (prefers-reduced-motion: reduce) {
