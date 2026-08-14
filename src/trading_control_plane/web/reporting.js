@@ -65,8 +65,10 @@ async function renderActualResults() {
     <section class="quantstats-status" data-quantstats-status><div class="loading-card"><span class="spinner"></span><b>正在生成只读报表</b><p>服务端正在验证净值连续性、现金流、估值和环境范围。</p></div></section>
     <section class="quantstats-report-shell" data-quantstats-report hidden><div class="section-heading"><div><p class="eyebrow">${escapeHtml(selectedEngine?.label || engine)} · UTC 24/7 · 365 periods/year</p><h2>完整绩效报表</h2><p data-quantstats-coverage></p></div><div class="form-actions"><a class="secondary" data-report-view target="_blank" rel="noopener">新窗口查看</a><a class="primary" data-report-download>下载 HTML</a></div></div><div class="stats report-common-metrics" data-report-metrics></div><iframe class="quantstats-frame" title="${escapeHtml(selectedEngine?.label || engine)} 完整绩效报表" sandbox="allow-same-origin" referrerpolicy="no-referrer"></iframe></section>
   </section>`;
+  applyLanguageToDocument(main);
   document.querySelector('[data-refresh]')?.addEventListener('click', route);
   await renderCapitalPerformancePanel();
+  applyLanguageToDocument(main);
   document.querySelector('#results-filter-form')?.addEventListener('submit', event => {
     event.preventDefault();
     const form = event.currentTarget;
@@ -106,6 +108,7 @@ async function renderActualResults() {
     const status = document.querySelector('[data-quantstats-status]');
     status.innerHTML = `<div class="callout tone-attention"><b>报表数据未就绪 · ${escapeHtml(error.code || 'ANALYTICS_NOT_READY')}</b><p>${escapeHtml(error.message || '服务端拒绝使用不完整事实生成收益率。')}</p><p class="subtle">系统没有补零、推测净值或使用成交盈亏伪造收益率。</p></div>`;
   }
+  applyLanguageToDocument(main);
 }
 
 const notificationChannelLabel = value => ({TELEGRAM:'Telegram',SLACK:'Slack',LARK:'飞书 / Lark',EMAIL:'邮件'}[value] || value);
