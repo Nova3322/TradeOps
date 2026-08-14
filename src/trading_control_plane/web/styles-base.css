@@ -954,8 +954,9 @@ textarea { resize: vertical; }
 .campaign-truth-grid .truth-danger b { color: var(--danger); }
 .campaign-command-layout { display: grid; grid-template-columns: minmax(0, 1.35fr) minmax(300px, .65fr); gap: 16px; align-items: start; }
 .operation-toolbox { padding: 0; overflow: hidden; }
-.operation-toolbox > summary { display: flex; align-items: center; justify-content: space-between; padding: 18px 20px; cursor: pointer; list-style-position: inside; }
-.operation-toolbox > summary span { display: inline-grid; gap: 4px; }
+.operation-toolbox > summary { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 18px 20px; cursor: pointer; list-style-position: inside; }
+.operation-toolbox > summary > span { min-width: 0; display: inline-grid; gap: 4px; }
+.operation-toolbox > summary > strong { flex: 0 0 auto; white-space: nowrap; }
 .operation-toolbox > summary small { color: var(--muted); font-size: 12px; font-weight: 400; }
 .toolbox-content { padding: 0 20px 20px; }
 .risk-condition-details, .risk-request-history { margin: 18px 0; border: 1px solid var(--line); border-radius: 14px; background: var(--panel); }
