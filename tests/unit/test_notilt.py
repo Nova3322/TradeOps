@@ -112,7 +112,6 @@ def test_gateway_maps_registry_deployment_and_vault_budget() -> None:
     gateway = NoTiltGateway(executor=executor)
 
     assert gateway.resolve_assignment(42161, AGENT) == (VAULT, True)
-    assert gateway.verify_deployment(42161)["result"] == {"active": True}
     snapshot = gateway.read_vault(42161, VAULT, AGENT)
 
     assert snapshot.chain == "ARBITRUM"

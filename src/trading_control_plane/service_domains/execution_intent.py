@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from trading_control_plane.repositories.execution import find_position_for_scope
 from trading_control_plane.service_component import ServiceComponent
 
 # The domain implementation intentionally consumes the explicit service_core export surface.
@@ -76,7 +77,7 @@ class IntentExecutionService(ServiceComponent):
                 payload={**payload, "team_id": str(active_team.team_id)},
             )
             if response is not None:
-                return self.facade._intent_creation(response)
+                return self._intent_creation(response)
             self.transactions._lock_risk_capacity(session, authorization.team_id)
             authorization = session.get(
                 TradingAuthorization,
@@ -86,7 +87,7 @@ class IntentExecutionService(ServiceComponent):
             )
             if authorization is None:
                 _reject("AUTHORIZATION_INACTIVE", "authorization is missing or inactive")
-            policy = self.facade._active_risk_policy(session, authorization.team_id)
+            policy = self._active_risk_policy(session, authorization.team_id)
             auto_add_gate: CapabilityGate | None = None
             if kind is IntentKind.ADD:
                 auto_add_gate = session.get(CapabilityGate, "AUTO_ADD", with_for_update=True)
@@ -134,11 +135,11 @@ class IntentExecutionService(ServiceComponent):
                         "this frozen proposal already produced its one initial intent",
                     )
 
-            occupied_risk = self.facade._occupied_risk(session, proposal.team_id)
+            occupied_risk = self._occupied_risk(session, proposal.team_id)
             risk_amount = authorization.risk_limit * quantity / authorization.quantity_limit
             if risk_amount <= 0 or risk_amount > authorization.risk_limit:
                 _reject("AUTHORIZATION_RISK_EXCEEDED", "request exceeds risk authorization")
-            inputs, _, _, effective_max_total_risk = self.facade._server_risk_context(
+            inputs, _, _, effective_max_total_risk = self._server_risk_context(
                 session,
                 proposal=proposal,
                 policy=policy,
@@ -149,7 +150,7 @@ class IntentExecutionService(ServiceComponent):
                 now=now,
             )
             final_outcome = evaluate_risk(
-                self.facade._risk_policy_input(
+                self._risk_policy_input(
                     policy,
                     effective_max_total_risk=(
                         effective_max_total_risk
@@ -237,7 +238,7 @@ class IntentExecutionService(ServiceComponent):
                 instrument = session.get(Instrument, proposal.instrument_id)
                 if instrument is None:
                     _reject("INSTRUMENT_UNAVAILABLE", "proposal instrument is unavailable")
-                self.facade._validate_add_candidate(
+                self._validate_add_candidate(
                     proposal=proposal,
                     instrument=instrument,
                     candidate=add_candidate,
@@ -275,7 +276,7 @@ class IntentExecutionService(ServiceComponent):
             )
             if active is not None:
                 _reject("ACTIVE_ORDER_INTENT", "campaign already has unresolved intent")
-            occupied_account_risk = self.facade._occupied_risk(
+            occupied_account_risk = self._occupied_risk(
                 session,
                 proposal.team_id,
                 account_id=proposal.account_id,
@@ -309,7 +310,7 @@ class IntentExecutionService(ServiceComponent):
                 kind=kind.value,
                 side=side,
                 quantity=quantity,
-                limit_price=self.facade._proposal_limit_price(proposal),
+                limit_price=self._proposal_limit_price(proposal),
                 reduce_only=False,
                 trigger_source=(
                     None if add_candidate is None else f"PERPTAPE:{add_candidate.candidate_id}"
@@ -551,15 +552,7 @@ class IntentExecutionService(ServiceComponent):
                         RiskPolicy.active,
                     )
                 )
-                position = session.scalar(
-                    select(Position).where(
-                        Position.team_id == campaign.team_id,
-                        Position.account_id == campaign.account_id,
-                        Position.venue == campaign.venue,
-                        Position.environment == campaign.environment,
-                        Position.instrument_id == campaign.instrument_id,
-                    )
-                )
+                position = find_position_for_scope(session, campaign)
                 scope = _scope_key(campaign.environment, campaign.account_id, campaign.venue)
                 latest_reconciliation = session.scalar(
                     select(ReconciliationRun)
@@ -575,7 +568,7 @@ class IntentExecutionService(ServiceComponent):
                     and position is not None
                     and position.fact_status == FactStatus.KNOWN.value
                     and position.quantity == 0
-                    and not self.facade._fact_is_stale(
+                    and not self._fact_is_stale(
                         position.observed_at,
                         now,
                         timedelta(seconds=policy.max_fact_age_seconds),
@@ -596,7 +589,7 @@ class IntentExecutionService(ServiceComponent):
                     )
                     if authorization is not None:
                         authorization.active = False
-                    self.facade._update_campaign_pnl(session, campaign, position, now=now)
+                    self._update_campaign_pnl(session, campaign, position, now=now)
             venue_order = session.scalar(
                 select(VenueOrder).where(VenueOrder.order_intent_id == intent_id)
             )
@@ -820,7 +813,7 @@ class IntentExecutionService(ServiceComponent):
                 "LIVE venue action requires an active LIVE team",
             )
         assert account.runtime_service_principal_id is not None
-        self.facade._require_exact_runtime_principal(
+        self._require_exact_runtime_principal(
             session,
             principal_id=account.runtime_service_principal_id,
             team=team,

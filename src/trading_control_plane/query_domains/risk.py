@@ -9,7 +9,7 @@ from trading_control_plane.query_core import *
 class RiskQueries(QueryComponent):
     def list_exceptions(self, user_id: UUID, *, now: datetime) -> list[dict[str, Any]]:
         exceptions: list[dict[str, Any]] = []
-        _workspace_id, team_id = self.facade._active_scope_ids(user_id)
+        _workspace_id, team_id = self._active_scope_ids(user_id)
         with self.database.session_factory() as session:
             risk_policy = session.scalar(
                 select(RiskPolicy).where(
@@ -20,10 +20,10 @@ class RiskQueries(QueryComponent):
             max_fact_age = timedelta(
                 seconds=(risk_policy.max_fact_age_seconds if risk_policy is not None else 300)
             )
-        for campaign in self.facade.list_campaigns(user_id):
+        for campaign in self.list_campaigns(user_id):
             if campaign["status"] == "CLOSED":
                 continue
-            detail = self.facade.campaign_detail(user_id, UUID(str(campaign["campaign_id"])))
+            detail = self.campaign_detail(user_id, UUID(str(campaign["campaign_id"])))
             campaign_id = str(campaign["campaign_id"])
             campaign_occurred_at = str(campaign["updated_at"] or campaign["created_at"])
             if campaign["status"] == "UNKNOWN":

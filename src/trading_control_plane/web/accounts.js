@@ -19,10 +19,6 @@ function exchangeCredentialFields(venue, prefix = '') {
 
 const exchangeVenueLabels = {BINANCE:'Binance',HYPERLIQUID:'Hyperliquid',OKX:'OKX',BYBIT:'Bybit'};
 
-function exchangeAccountPath(item) {
-  return `/venues/${encodeURIComponent(item.account_id)}`;
-}
-
 function isFixtureExchangeAccount(item) {
   const identity = `${item.account_id || ''} ${item.label || ''}`;
   return /(^|[-_\s])(fixture|test|demo|sample|sandbox)([-_\s]|$)/i.test(identity) || /(测试|样本|演示)/.test(identity);
@@ -30,29 +26,6 @@ function isFixtureExchangeAccount(item) {
 
 function exchangeAccountRuntimeHealth(runtime, item) {
   return runtime?.data?.source_health?.[`${item.venue}:${item.account_id}`] || null;
-}
-
-function exchangeAccountListState(item, runtime) {
-  const health = exchangeAccountRuntimeHealth(runtime, item);
-  const credentialsConfigured = item.credentials?.state === 'CONFIGURED';
-  const connectionVerified = item.connection?.status === 'VERIFIED';
-  const runtimeBound = Boolean(item.runtime_binding?.bound);
-  const processRuntimeEnabled = Boolean(runtime?.data?.external_boundaries?.runtime_sync?.enabled);
-  const syncHealthy = health?.status === 'SUCCESS' && runtimeBound && processRuntimeEnabled;
-  const latestAt = health?.last_success_at || health?.checked_at || item.connection?.last_verified_at || item.connection?.checked_at || item.updated_at;
-  if (!item.active) return {label:'账户已停用', tone:'status-DISABLED', anomaly:true, latestAt, action:'查看停用状态', anchor:'status'};
-  if (!credentialsConfigured) return {label:'凭据未配置', tone:'status-DENY', anomaly:true, latestAt, action:'配置凭据', anchor:'credentials'};
-  if (!connectionVerified) return {label:'连接待验证', tone:'status-RETRY_WAIT', anomaly:true, latestAt, action:'验证连接', anchor:'connection'};
-  if (!runtimeBound) return {label:'已验证 · 同步关闭', tone:'status-RETRY_WAIT', anomaly:true, latestAt, action:'启用连续同步', anchor:'connection'};
-  if (!processRuntimeEnabled) return {label:'同步进程关闭', tone:'status-RETRY_WAIT', anomaly:true, latestAt, action:'查看同步设置', anchor:'connection'};
-  if (!health) return {label:'等待首次同步', tone:'status-RETRY_WAIT', anomaly:true, latestAt, action:'查看同步状态', anchor:'history'};
-  if (!syncHealthy) return {label:'同步异常', tone:'status-DENY', anomaly:true, latestAt, action:'排查同步异常', anchor:'history'};
-  return {label:'只读同步正常', tone:'status-APPROVED', anomaly:false, latestAt, action:'查看最新数据', anchor:'history'};
-}
-
-function exchangeAccountCreatePanel(registry) {
-  if (!registry.can_manage) return '';
-  return `<dialog id="connect-account-dialog" class="account-create-dialog" aria-labelledby="connect-account-title"><form id="exchange-account-form" class="dialog-form"><div class="dialog-head"><div><p class="eyebrow">实盘账户</p><h2 id="connect-account-title">接入交易账户</h2><p class="subtle">登记当前空间内的交易所账户并加密保存凭据。</p></div><button class="icon-button" type="button" data-close-account-create aria-label="关闭接入账户窗口">×</button></div><div class="field-grid"><label>交易所<select name="venue"><option value="BINANCE">Binance</option><option value="HYPERLIQUID">Hyperliquid</option><option value="OKX">OKX</option><option value="BYBIT">Bybit</option></select></label><label>内部账户 ID<input name="account_id" maxlength="120" placeholder="例如 binance-space-a-01" required></label><label>显示名称<input name="label" maxlength="120" placeholder="例如 主策略账户"></label></div><fieldset class="exchange-credential-fields"><legend>加密凭据</legend><div class="field-grid" data-create-credential-fields>${exchangeCredentialFields('BINANCE')}</div></fieldset><p class="safety-note">账户、权限和审计仅归属当前空间；创建不会开启交易、资金、签名或广播。</p><div class="form-error" role="alert"></div><div class="dialog-actions"><button class="secondary" type="button" data-close-account-create>取消</button><button class="primary">登记并加密保存</button></div></form></dialog>`;
 }
 
 function exchangeAccountDetailConfiguration(item) {
@@ -227,10 +200,6 @@ function bindExchangeAccountForms() {
       await route();
     } catch (error) { showApiError(error); }
   }));
-}
-
-async function renderVenueAccounts() {
-  return renderAccountManagement();
 }
 
 async function renderVenueAccountDetail(requestedAccountId) {

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from trading_control_plane.repositories.execution import find_position_for_scope
 from trading_control_plane.service_component import ServiceComponent
 
 # The domain implementation intentionally consumes the explicit service_core export surface.
@@ -300,17 +301,7 @@ class ReconciliationRiskService(ServiceComponent):
                     ):
                         differences.append(f"INTENT_FILL_STATE_MISMATCH:{intent.intent_id}")
 
-                position = session.scalar(
-                    select(Position)
-                    .where(
-                        Position.team_id == campaign.team_id,
-                        Position.account_id == campaign.account_id,
-                        Position.venue == campaign.venue,
-                        Position.environment == campaign.environment,
-                        Position.instrument_id == campaign.instrument_id,
-                    )
-                    .with_for_update()
-                )
+                position = find_position_for_scope(session, campaign, for_update=True)
                 if position is None or position.fact_status != FactStatus.KNOWN.value:
                     unknown.append(f"POSITION_UNKNOWN:{scope_suffix}")
                     continue

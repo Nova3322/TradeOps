@@ -398,7 +398,6 @@ async def run_testnet_campaign_flow(database: Database, telegram: MockTelegramGa
         ):
             web = await client.get(web_path)
             assert web.status_code == 200, web.text
-            assert "<title>交易控制台</title>" in web.text
 
     with database.session_factory() as session:
         assert session.scalar(select(func.count()).select_from(Campaign)) == 1

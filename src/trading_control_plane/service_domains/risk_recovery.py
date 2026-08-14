@@ -145,7 +145,7 @@ class RecoveryRiskService(ServiceComponent):
                 elif source_health.status != "SUCCESS":
                     failure_code = source_health.error_code or "READ_ONLY_PROBE_FAILED"
                     blockers.add(f"READ_ONLY_SOURCE_FAILED:{prefix}:{failure_code}")
-                elif self.facade._fact_is_stale(source_health.checked_at, now, max_age):
+                elif self._fact_is_stale(source_health.checked_at, now, max_age):
                     blockers.add(f"READ_ONLY_SOURCE_STALE:{prefix}")
             equity = session.scalar(
                 select(AccountEquity).where(
@@ -159,7 +159,7 @@ class RecoveryRiskService(ServiceComponent):
                 blockers.add(f"ACCOUNT_EQUITY_MISSING:{prefix}")
             elif equity.fact_status != FactStatus.KNOWN.value:
                 blockers.add(f"ACCOUNT_EQUITY_UNKNOWN:{prefix}")
-            elif self.facade._fact_is_stale(equity.observed_at, now, max_age):
+            elif self._fact_is_stale(equity.observed_at, now, max_age):
                 blockers.add(f"ACCOUNT_EQUITY_STALE:{prefix}")
 
             positions = session.scalars(
@@ -176,7 +176,7 @@ class RecoveryRiskService(ServiceComponent):
                 if position.fact_status != FactStatus.KNOWN.value:
                     blockers.add(f"POSITION_UNKNOWN:{prefix}")
                     continue
-                if self.facade._fact_is_stale(position.observed_at, now, max_age):
+                if self._fact_is_stale(position.observed_at, now, max_age):
                     blockers.add(f"POSITION_STALE:{prefix}")
                 if position.quantity == 0:
                     continue
@@ -192,7 +192,7 @@ class RecoveryRiskService(ServiceComponent):
                     or protection.quantity < abs(position.quantity)
                 ):
                     blockers.add(f"PROTECTION_INCOMPLETE:{prefix}")
-                elif self.facade._fact_is_stale(protection.observed_at, now, max_age):
+                elif self._fact_is_stale(protection.observed_at, now, max_age):
                     blockers.add(f"PROTECTION_STALE:{prefix}")
 
             execution_scope = _scope_key(environment.value, account_id, venue)
@@ -219,7 +219,7 @@ class RecoveryRiskService(ServiceComponent):
             ):
                 blockers.add(f"COMPUTED_RECONCILIATION_MATCH_REQUIRED:{prefix}")
             elif (
-                self.facade._fact_is_stale(reconciliation.completed_at, now, max_age)
+                self._fact_is_stale(reconciliation.completed_at, now, max_age)
                 or reconciliation.completed_at < latest_source_at
             ):
                 blockers.add(f"RECONCILIATION_STALE:{prefix}")
@@ -828,7 +828,7 @@ class RecoveryRiskService(ServiceComponent):
             if response is not None:
                 return _as_uuid(str(response["request_id"]))
             self.transactions._lock_risk_capacity(session, team.team_id)
-            policy = self.facade._active_risk_policy(session, team.team_id)
+            policy = self._active_risk_policy(session, team.team_id)
             gate = session.get(CapabilityGate, "AUTO_ADD", with_for_update=True)
             if gate is None:
                 _reject("CAPABILITY_GATE_NOT_FOUND", "AUTO_ADD gate is missing")
@@ -1031,7 +1031,7 @@ class RecoveryRiskService(ServiceComponent):
                 return RiskPolicyChangeStatus(str(response["status"]))
             if request.version != expected_version:
                 _reject("VERSION_CONFLICT", "restore request changed before review")
-            policy = self.facade._active_risk_policy(session, request.team_id)
+            policy = self._active_risk_policy(session, request.team_id)
             gate = session.get(CapabilityGate, "AUTO_ADD")
             if gate is None:
                 _reject("CAPABILITY_GATE_NOT_FOUND", "AUTO_ADD gate is missing")
@@ -1171,7 +1171,7 @@ class RecoveryRiskService(ServiceComponent):
             if request.requester_id == actor_id:
                 _reject("SELF_EXECUTION_FORBIDDEN", "requester cannot execute their restore")
             self.transactions._lock_risk_capacity(session, request.team_id)
-            policy = self.facade._active_risk_policy(session, request.team_id)
+            policy = self._active_risk_policy(session, request.team_id)
             gate = session.get(CapabilityGate, "AUTO_ADD", with_for_update=True)
             if gate is None:
                 _reject("CAPABILITY_GATE_NOT_FOUND", "AUTO_ADD gate is missing")
@@ -1381,7 +1381,7 @@ class RecoveryRiskService(ServiceComponent):
             if response is not None:
                 return _as_uuid(str(response["policy_id"]))
             self.transactions._lock_risk_capacity(session, team.team_id)
-            policy = self.facade._active_risk_policy(session, team.team_id)
+            policy = self._active_risk_policy(session, team.team_id)
             if policy.system_state == SystemRiskState.NORMAL.value:
                 _reject("RISK_CONTROL_ALREADY_NORMAL", "risk policy is already normal")
             gate = session.get(CapabilityGate, "AUTO_ADD", with_for_update=True)

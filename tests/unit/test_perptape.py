@@ -146,7 +146,6 @@ def test_real_breakout_contract_maps_to_narrow_trading_candidates_and_caches() -
     detail_query = parse_qs(urlparse(first[0].detail_url).query)
     assert detail_query["ex"] == ["BN"]
     assert detail_query["q"] == ["BN:BTCUSDT"]
-    assert client.get_candidate(first[0].candidate_id, now=NOW) == first[0]
 
 
 def test_persisted_legacy_market_scan_link_is_repaired_without_mutating_identity() -> None:
@@ -226,10 +225,6 @@ def test_candidate_identity_distinguishes_contracts_with_same_canonical_symbol()
     assert [candidate.symbol for candidate in candidates] == ["BTCUSDT", "BTCUSDC"]
     assert len({candidate.candidate_id for candidate in candidates}) == 2
     assert len({perptape_legacy_candidate_id(candidate) for candidate in candidates}) == 1
-    assert all(
-        client.get_candidate(candidate.candidate_id, now=NOW) == candidate
-        for candidate in candidates
-    )
 
 
 def test_opportunity_identity_rejects_malformed_binance_symbol_without_guessing() -> None:
@@ -495,19 +490,6 @@ def test_forced_refresh_bypasses_the_normal_snapshot_cache_for_gap_recovery() ->
     client.refresh(now=NOW + timedelta(seconds=1), force=True)
 
     assert calls == 2
-
-
-def test_candidate_lookup_does_not_invent_missing_source_fact() -> None:
-    client = PerptapeClient(
-        base_url="https://perptape.com",
-        api_key="key",
-        contract_version="breakouts-v1",
-        cache_ttl=timedelta(minutes=1),
-        fetcher=lambda _url, _headers, _timeout: response(),
-    )
-
-    with pytest.raises(DomainRejected, match="PERPTAPE_CANDIDATE_NOT_FOUND"):
-        client.get_candidate("pt_missing", now=NOW)
 
 
 def test_invalid_candidate_fact_fails_closed() -> None:

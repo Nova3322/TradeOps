@@ -97,43 +97,6 @@ function capitalSourcePresentation(netWorth, source, latestPoint) {
   };
 }
 
-function renderUnsignedPlanSummary(transfer) {
-  const plans = transfer.planned_transactions || [];
-  if (!plans.length) return '';
-  const actionLabels = {
-    approve:'批准资产额度', deposit:'存入资金库', requestWhitelistRelease:'申请释放资金',
-    executeWhitelistRelease:'执行资金释放', cancelWhitelistRelease:'取消资金释放',
-  };
-  const rows = plans.map(plan => `<li><b>${escapeHtml(actionLabels[plan.function_name] || '链上资金操作')}</b><span>链 ${escapeHtml(plan.chain_id)} · 目标 ${escapeHtml(plan.to)} · 原生币金额 ${escapeHtml(plan.value || '0')}</span></li>`).join('');
-  return `<details class="wallet-handoff"><summary>${plans.length} 笔交易等待独立钱包确认</summary><ul>${rows}</ul><p class="subtle">资产 ${escapeHtml(transfer.asset)} · 划转 ${fmtNumber(transfer.gross_amount)} · 资金库 ${escapeHtml(transfer.source_id)}</p><button class="secondary" type="button" data-copy-plan="${escapeHtml(transfer.capital_transfer_id)}">复制给独立钱包</button></details>`;
-}
-
-function capitalSourceSlots(balances, onchainProvider, onchainConfigured) {
-  const liveBalances = partitionCapitalRecords(balances).live;
-  const onchainLabel = onchainProvider === 'SAFE_SPENDING_LIMIT'
-    ? '链上金库 · Safe Spending Limits'
-    : '链上金库 · NoTilt Vault';
-  return LIVE_CAPITAL_SOURCES.flatMap(source => {
-    const facts = liveBalances.filter(balance => (
-      source.key === 'VAULT'
-        ? balance.location_type === 'VAULT'
-        : balance.location_type === 'VENUE' && balance.venue === source.key
-    ));
-    if (facts.length) return source.key === 'VAULT'
-      ? facts.map(fact => ({...fact, source_label:onchainLabel}))
-      : facts;
-    return [{
-      environment:'LIVE', location_type:source.location_type, location_id:'—', venue:source.key,
-      asset:'USD', confirmed_available:null, source_reserved:null, effective_available:null,
-      usd_equity:null, control_status:'MISSING', deposit_status:'UNKNOWN', observed_at:null,
-      fact_status:'MISSING', missing_detail:source.key === 'VAULT'
-        ? (onchainConfigured ? `${onchainLabel} 已配置但未同步` : `${onchainLabel} 尚未配置`)
-        : '未同步',
-      source_label:source.key === 'VAULT' ? onchainLabel : source.label,
-    }];
-  });
-}
-
 function capitalBalanceRows(balances, issues = []) {
   return balances.map(balance => {
     const missing = balance.fact_status === 'MISSING';
@@ -313,36 +276,6 @@ function capitalAxisDomain(values) {
   return {minimum:midpoint - range / 2, maximum:midpoint + range / 2, range};
 }
 
-function capitalSeriesChange(series) {
-  const points = series?.points || [];
-  if (points.length < 2) return null;
-  const previous = points.at(-2);
-  const latest = points.at(-1);
-  if (latest.breakBefore) return null;
-  const delta = latest.value - previous.value;
-  const percentage = previous.value === 0 ? null : delta / previous.value * 100;
-  return {
-    delta, percentage, time:latest.time,
-    anomalous:(percentage !== null && Math.abs(percentage) >= 1),
-  };
-}
-
-function capitalSeriesLargestChange(series) {
-  const points = series?.points || [];
-  let largest = null;
-  for (let index = 1; index < points.length; index += 1) {
-    if (points[index].breakBefore) continue;
-    const previous = points[index - 1];
-    const latest = points[index];
-    const delta = latest.value - previous.value;
-    const percentage = previous.value === 0 ? null : delta / previous.value * 100;
-    if (!largest || Math.abs(delta) > Math.abs(largest.delta)) {
-      largest = {delta, percentage, time:latest.time};
-    }
-  }
-  return largest;
-}
-
 function formatDirectCapitalBlocker(code) {
   return ({
     CAPITAL_VAULT_ID_MISSING:'未配置生产资金库编号',
@@ -433,19 +366,6 @@ function capitalViewSelection(search = location.search) {
   return ['routes','activity'].includes(requested) ? requested : 'overview';
 }
 
-function groupCapitalView(nodes, view, activeView) {
-  const available = nodes.filter(Boolean);
-  if (!available.length) return null;
-  const panel = document.createElement('div');
-  panel.className = 'capital-view-panel';
-  panel.dataset.capitalViewPanel = view;
-  panel.setAttribute('aria-labelledby', `capital-view-tab-${view}`);
-  panel.hidden = view !== activeView;
-  available[0].before(panel);
-  available.forEach(node => panel.append(node));
-  return panel;
-}
-
 async function renderCapitalCenter() {
   const searchParams = new URLSearchParams(location.search);
   const displayEnvironment = currentWorkflowEnvironment();
@@ -468,7 +388,6 @@ async function renderCapitalCenter() {
   const balances = partitionCapitalRecords(item.balances);
   const transfers = partitionCapitalRecords(item.transfers);
   const liveInTransit = liveCapitalInTransit(transfers.live);
-  const venueNetWorth = Object.entries(netWorth.venues || {}).map(([venue, value]) => `<div class="stat"><small>${escapeHtml(venue)} 净值</small><b>${fmtNumber(value)} ${escapeHtml(netWorth.currency)}</b></div>`).join('');
   const allHistorySeries = capitalHistorySeries(
     item.history || [],
     netWorth.alignment_tolerance_seconds || 60,
@@ -531,7 +450,6 @@ async function renderCapitalCenter() {
     : `${issueDetails.join('；') || '资金数据尚未完整'}。影响：当前所选账户总净值不计算，但其他有效单线继续保留。`) + probeDetail;
   const displayedBalances = displayEnvironment === 'TESTNET' ? balances.testnet : balances.live;
   const liveBalanceRows = capitalBalanceRows(displayedBalances, netWorth.issues);
-  const configuredPlaceholder = value => value ? '已配置；留空保持当前值' : '尚未配置';
   const directConfigurationEditor = directConfiguration.can_manage ? `<div class="callout"><b>账户配置已集中管理。</b><p>交易所、Vault、Safe、提取地址与私钥均在“账户管理”按测试/实盘分别配置。</p><a class="secondary" href="/accounts?environment=${displayEnvironment}" data-link>前往账户管理</a></div>` : '';
   const directPathCards = DIRECT_CAPITAL_PATHS.map(path => `<article class="capital-route-card"><div class="capital-route-meta"><span>固定路径</span><strong>${escapeHtml(path.badge)}</strong></div><div class="capital-route-flow"><b>${escapeHtml(path.from)}</b><span aria-hidden="true">→</span><b>${escapeHtml(path.to)}</b></div><p>${escapeHtml(path.copy)}</p><ol>${path.steps.map(step => `<li>${escapeHtml(step)}</li>`).join('')}</ol><button class="secondary capital-route-action" type="button" data-open-capital-path="${escapeHtml(path.path)}">${escapeHtml(path.action)}</button></article>`).join('');
   const directCapitalDialog = `<dialog id="direct-capital-dialog" aria-labelledby="direct-capital-title"><form id="direct-capital-form" class="dialog-form" data-direct-capital-form="" data-treasury-provider="${escapeHtml(selectedTreasuryProvider)}"><div class="dialog-head"><div><p class="eyebrow">资金路径安全预检</p><h2 id="direct-capital-title" data-capital-path-title>选择资金路径</h2></div><button type="button" class="icon-button" data-close-capital-dialog aria-label="关闭">×</button></div><p class="subtle" data-capital-path-copy></p><div class="selected-provider-summary"><small>当前链上金库</small><b>${escapeHtml(selectedTreasuryProviderLabel)}</b><span>如需切换，请由管理员先保存新的资金路径配置。</span></div><input name="path" type="hidden"><label>金额（USDC）<input name="amount" type="number" step="any" min="0.000001" required placeholder="输入划转金额"></label><label class="direct-capital-confirm"><input name="final_confirmed" type="checkbox" required><span>我已核对资金方向与金额</span></label><p class="safety-note">提交只会重新校验地址、网络、资产、额度和实时安全开关。任何条件缺失都会阻断；系统不会签名、广播或发送资金。</p><div class="form-error" role="alert"></div><div class="dialog-actions"><button type="button" class="secondary" data-close-capital-dialog>取消</button><button class="primary" type="submit">最终确认并检查</button></div></form></dialog>`;
@@ -577,27 +495,7 @@ async function renderCapitalCenter() {
   const emptyBalanceMessage = displayEnvironment === 'TESTNET'
     ? '尚无测试环境资金数据。'
     : '尚无生产环境资金数据。';
-  main.innerHTML = `<section class="page capital-page"><header class="page-head"><div><p class="eyebrow">生产资金 · 缺失即阻断 · 不代签不广播</p><h1>资金中心</h1><p class="lede">只保留四条明确资金路径。每次操作都先最终确认，再校验地址、网络、金额、额度和实时安全开关；当前缺少生产参数时只记录阻断与阶段，不会生成订单、签名或发送资金。</p></div></header><div class="stats"><div class="stat"><small>三方总净值</small><b>${fmtNumber(netWorth.total)} ${escapeHtml(netWorth.currency)}</b></div><div class="stat"><small>资金库</small><b>${fmtNumber(netWorth.vault)} ${escapeHtml(netWorth.currency)}</b></div>${venueNetWorth}<div class="stat"><small>净值状态</small><b style="font-size:14px">${escapeHtml(fmtStatus(netWorth.complete ? 'CURRENT' : 'INCOMPLETE'))}</b></div><div class="stat"><small>资金操作</small><b style="font-size:14px">${escapeHtml(fmtStatus(item.real_transfer_gate || 'DISABLED'))}</b></div><div class="stat"><small>在途 / 占用</small><b>${fmtNumber(liveInTransit)}</b></div></div><section class="capital-chart-panel"><div class="chart-head"><div><p class="eyebrow">资金统计</p><h2>资金净值趋势</h2><p class="subtle">固定四条线：币安、Hyperliquid、链上金库和三方汇总。缺失来源显示“等待数据”，不会补成 0；历史曲线不会冒充当前净值。</p></div><b>${fmtNumber(netWorth.total)} <small>${escapeHtml(netWorth.currency)}</small></b></div>${hasHistory ? `<canvas id="capital-chart" height="260" aria-label="币安、Hyperliquid、链上金库和三方汇总四条资金趋势"></canvas>` : '<div class="chart-empty">完成生产资金同步后才显示曲线；缺失数据不会补零。</div>'}<div class="chart-legend" role="group" aria-label="选择显示的资金曲线">${chartLegend}</div></section>${netWorth.complete ? '' : `<div class="callout"><b>净值不完整：</b>${escapeHtml([...new Set((netWorth.issues || []).map(formatCapitalIssue))].join('；') || '尚无资金数据')}</div>`}<section><h2>资金位置</h2><p class="subtle">固定展示三处资金；缺失金额显示为“—”，历史快照不会计入当前净值。</p>${capitalBalanceTable(liveBalanceRows, emptyBalanceMessage)}</section><article class="card"><div class="card-heading"><div><p class="eyebrow">生产配置预检</p><h2>只显示是否配置，不回显地址或凭据</h2></div><span class="status-pill">单账户模式</span></div><dl class="definition-grid">${definition('网络 / 资产', `${directConfiguration.network || '—'} / ${directConfiguration.asset || '—'}`)}${definition('当前链上金库', selectedTreasuryProviderLabel)}${definition('链上金库状态', selectedProviderStatus)}${definition('自有钱包', directConfiguration.owned_arbitrum_address_configured ? '已配置' : '未配置')}${definition('币安账户与地址', directConfiguration.binance_account_configured && directConfiguration.binance_whitelist_destination_configured && directConfiguration.binance_withdrawal_destination_configured ? '已配置' : '不完整')}${definition('币安专用资金 API', directConfiguration.binance_capital_credentials_configured ? '已加载（不回显）' : '未加载')}${definition('币安真实提现提交', directConfiguration.binance_capital_submission_enabled && item.real_transfer_gate === 'ENABLED' ? '已启用' : '关闭；仅可预检')}${definition('Hyperliquid 路径', directConfiguration.hyperliquid_account_configured && directConfiguration.hyperliquid_contract_configured ? '已配置' : '不完整')}${definition('金额 / 费用上限', directConfiguration.limits_configured ? '已配置' : '未配置')}${definition('签名 / 广播', '币安只使用专用受限 API；链上签名交给人控钱包或有效多签，服务端不读取私钥')}</dl></article><section class="capital-routes-section"><div class="card-heading"><div><p class="eyebrow">四条直达路径</p><h2>选择资金从哪里到哪里</h2><p class="subtle">先选路径，再在一个确认窗口里填写金额；安全说明不再重复四遍。</p></div><span class="status-pill ${item.real_transfer_gate === 'ENABLED' ? 'status-APPROVED' : 'status-DISABLED'}">${escapeHtml(fmtStatus(item.real_transfer_gate || 'DISABLED'))}</span></div>${directConfigurationEditor}<div class="callout direct-capital-boundary" data-provider-boundary><b>统一安全边界：</b>系统只使用当前选定的 ${escapeHtml(selectedTreasuryProviderLabel)}；每条路径都重新校验地址、网络、资产、额度、实时状态与安全开关。链上私钥不进入控制台；真实币安提现还需专用开关和 CAPITAL_TRANSFER 双重开启。</div><div class="capital-route-grid">${directPathCards}</div></section>${directCapitalDialog}<section><h2>操作日志、阶段与回执</h2>${directRows ? `<div class="table-wrap is-scrollable capital-operation-table"><table><thead><tr><th>操作</th><th>路径 / 金额</th><th>阶段</th><th>状态 / 回执</th><th>精确阻断</th></tr></thead><tbody>${directRows}</tbody></table></div>` : '<div class="callout">尚无直达资金操作。提交一次最终确认后，会在这里记录校验结果。</div>'}</section><section><h2>历史资金划转</h2><p class="subtle">旧流程只保留为只读审计记录，不再是四条直达操作的必经界面。</p>${legacyRows ? `<div class="table-wrap is-scrollable capital-history-table"><table><thead><tr><th>记录</th><th>方向</th><th>金额</th><th>状态</th><th>外部回执</th></tr></thead><tbody>${legacyRows}</tbody></table></div>` : '<div class="callout">尚无历史资金划转。</div>'}</section></section>`;
-  const pageHead = main.querySelector('.capital-page > .page-head');
-  pageHead.classList.add('capital-page-head');
-  pageHead.innerHTML = `<div><p class="eyebrow">${executionModeLabel(displayEnvironment)}资金 · 多账户只读事实</p><h1>资金中心</h1><p class="lede">按测试/实盘独立账户集多选展示资金曲线。这里的选择只影响展示，不会切换运行环境或改变交易能力。</p></div><div class="capital-gate-summary"><small>生产资金操作</small><b>${escapeHtml(fmtStatus(item.real_transfer_gate || 'DISABLED'))}</b><span>在途 / 占用 ${fmtNumber(liveInTransit)} USDC</span></div>`;
   const accountFilters = accountOptions.map(option => `<label class="capital-account-option"><input type="checkbox" name="account" value="${escapeHtml(option.key)}" ${selectedAccountKeys.has(option.key) ? 'checked' : ''}><span><b>${escapeHtml(option.label)}</b><small>${escapeHtml(option.location_type === 'VAULT' ? '链上金库' : fmtVenueLabel(option.venue))}</small></span></label>`).join('');
-  const displayControls = document.createElement('section');
-  displayControls.className = 'card capital-display-controls';
-  displayControls.innerHTML = `<div class="card-heading"><div><p class="eyebrow">当前模式</p><h2>${executionModeLabel(displayEnvironment)}</h2></div><a class="secondary" href="/team-settings" data-link>前往模式设置查看当前模式</a></div>${displayEnvironment === 'TESTNET' ? '<div class="callout tone-attention"><b>测试环境资金</b><p>仅代表交易所测试资产，不显示 Vault、Safe、生产提现地址或真实资金划转。</p></div>' : ''}<form id="capital-account-filter-form"><fieldset><legend>选择要叠加的当前模式账户曲线（可多选）</legend><div class="capital-account-options">${accountFilters || '<p class="subtle">当前模式尚未添加账户，请先前往“账户管理”。</p>'}</div></fieldset><div class="form-error" role="alert"></div><button class="primary" ${accountOptions.length ? '' : 'disabled'}>应用账户曲线</button></form><p class="safety-note">账户多选只影响资金曲线展示，不改变团队运行模式或交易权限。</p>`
-  pageHead.after(displayControls);
-  const legacyStats = main.querySelector('.capital-page > .stats');
-  legacyStats.outerHTML = `<section class="capital-overview" aria-label="当前资金净值"><article class="capital-total-card ${netWorth.complete ? 'is-current' : 'is-limited'}"><small>当前所选账户总净值</small><b>${escapeHtml(totalHeadline)}</b><p>${escapeHtml(totalSupporting)}</p></article><div class="capital-source-cards">${sourceCards}</div></section><section class="capital-trust-panel ${netWorth.complete ? 'is-current' : 'is-limited'}"><div><b>${netWorth.complete ? '所选账户数据可信，可用于当前汇总' : '当前汇总已阻断'}</b><p>${escapeHtml(trustCopy)}</p></div><span>${netWorth.complete ? '完整' : '需关注'}</span></section>`;
-  const chartPanel = main.querySelector('.capital-chart-panel');
-  chartPanel.innerHTML = `<div class="chart-head"><div><p class="eyebrow">资金净值趋势</p><h2>${selectedAccountKeys.size} 个所选账户曲线</h2><p class="subtle">每个账户一条独立曲线，并提供所选账户汇总。缺失、过期、错位和断档都不会补零或强行连线。</p></div></div><div class="capital-chart-meta"><span data-capital-range-coverage>${escapeHtml(chartCoverage)}</span><span>断档按实际采样节奏的 3 倍判定（至少 ${Number(netWorth.history_gap_tolerance_seconds || 300)} 秒）；纵轴至少保留 0.05% 观察范围</span></div><div class="chart-legend" role="group" aria-label="选择显示的资金曲线">${chartLegend}</div>${hasHistory ? `<div class="capital-chart-wrap"><canvas id="capital-chart" height="300" aria-label="所选账户及汇总 USD 资金趋势"></canvas><div class="capital-chart-tooltip" role="status" hidden></div></div>` : '<div class="chart-empty">尚无可绘制的资金历史；缺失数据不会补零。</div>'}${capitalHistoryRangeControl}`;
-  const legacyIncomplete = chartPanel.nextElementSibling?.classList.contains('callout') ? chartPanel.nextElementSibling : null;
-  legacyIncomplete?.remove();
-  const capitalPositionsHeading = [...main.querySelectorAll('section > h2')].find(heading => heading.textContent === '资金位置');
-  if (capitalPositionsHeading) {
-    capitalPositionsHeading.textContent = '资金位置明细';
-    const detail = capitalPositionsHeading.nextElementSibling;
-    if (detail?.classList.contains('subtle')) detail.textContent = 'USD 金额统一精度：小额四位、大额两位；原资产余额保留在明细中。历史快照不会计入当前净值。';
-  }
   const activeCapitalView = capitalViewSelection();
   const capitalViewHref = view => {
     const params = new URLSearchParams();
@@ -605,40 +503,30 @@ async function renderCapitalCenter() {
     if (view !== 'overview') params.set('view', view);
     return `/capital?${params.toString()}`;
   };
-  if (displayEnvironment === 'TESTNET') {
-    main.querySelector('.capital-page-head .capital-gate-summary')?.remove();
-    main.querySelector('.capital-routes-section')?.remove();
-    main.querySelector('#direct-capital-dialog')?.remove();
-    [...main.querySelectorAll('.capital-page > article.card')].forEach(card => card.remove());
-    [...main.querySelectorAll('.capital-page > section')].filter(section => ['操作日志、阶段与回执','历史资金划转'].includes(section.querySelector(':scope > h2')?.textContent || '')).forEach(section => section.remove());
-  }
-  const capitalNavigation = document.createElement('nav');
-  capitalNavigation.className = 'section-tabs capital-section-tabs';
-  capitalNavigation.setAttribute('aria-label', '资金中心页面');
-  capitalNavigation.innerHTML = displayEnvironment === 'TESTNET'
+  const capitalNavigation = displayEnvironment === 'TESTNET'
     ? `<a id="capital-view-tab-overview" class="active" href="${capitalViewHref('overview')}" data-link aria-current="page"><span>资金总览</span><b>${netWorth.complete ? '完整' : '需关注'}</b></a>`
     : `<a id="capital-view-tab-overview" class="${activeCapitalView === 'overview' ? 'active' : ''}" href="${capitalViewHref('overview')}" data-link ${activeCapitalView === 'overview' ? 'aria-current="page"' : ''}><span>资金总览</span><b>${netWorth.complete ? '完整' : '需关注'}</b></a><a id="capital-view-tab-routes" class="${activeCapitalView === 'routes' ? 'active' : ''}" href="${capitalViewHref('routes')}" data-link ${activeCapitalView === 'routes' ? 'aria-current="page"' : ''}><span>资金路径</span><b>${escapeHtml(fmtStatus(item.real_transfer_gate || 'DISABLED'))}</b></a><a id="capital-view-tab-activity" class="${activeCapitalView === 'activity' ? 'active' : ''}" href="${capitalViewHref('activity')}" data-link ${activeCapitalView === 'activity' ? 'aria-current="page"' : ''}><span>操作与回执</span><b>${Number(item.direct_operations?.length || 0)}</b></a>`;
-  displayControls.after(capitalNavigation);
-  const overviewPanel = groupCapitalView([
-    main.querySelector('.capital-overview'),
-    main.querySelector('.capital-trust-panel'),
-    chartPanel,
-    capitalPositionsHeading?.closest('section'),
-  ], 'overview', activeCapitalView);
-  const configurationCard = [...main.querySelectorAll('.capital-page > article.card')].find(card => card.querySelector('h2')?.textContent === '只显示是否配置，不回显地址或凭据');
-  const routesPanel = groupCapitalView([
-    configurationCard,
-    main.querySelector('.capital-routes-section'),
-  ], 'routes', activeCapitalView);
-  const operationHeading = [...main.querySelectorAll('.capital-page > section > h2')].find(heading => heading.textContent === '操作日志、阶段与回执');
-  const historyHeading = [...main.querySelectorAll('.capital-page > section > h2')].find(heading => heading.textContent === '历史资金划转');
-  const activityPanel = groupCapitalView([
-    operationHeading?.closest('section'),
-    historyHeading?.closest('section'),
-  ], 'activity', activeCapitalView);
-  [overviewPanel, routesPanel, activityPanel].filter(Boolean).forEach(panel => {
-    panel.setAttribute('role', 'region');
-  });
+  const hidden = view => view === activeCapitalView ? '' : 'hidden';
+  const livePanels = displayEnvironment === 'LIVE' ? `
+    <div class="capital-view-panel" data-capital-view-panel="routes" aria-labelledby="capital-view-tab-routes" role="region" ${hidden('routes')}>
+      <article class="card"><div class="card-heading"><div><p class="eyebrow">生产配置预检</p><h2>只显示是否配置，不回显地址或凭据</h2></div><span class="status-pill">单账户模式</span></div><dl class="definition-grid">${definition('网络 / 资产', `${directConfiguration.network || '—'} / ${directConfiguration.asset || '—'}`)}${definition('当前链上金库', selectedTreasuryProviderLabel)}${definition('链上金库状态', selectedProviderStatus)}${definition('自有钱包', directConfiguration.owned_arbitrum_address_configured ? '已配置' : '未配置')}${definition('币安账户与地址', directConfiguration.binance_account_configured && directConfiguration.binance_whitelist_destination_configured && directConfiguration.binance_withdrawal_destination_configured ? '已配置' : '不完整')}${definition('币安专用资金 API', directConfiguration.binance_capital_credentials_configured ? '已加载（不回显）' : '未加载')}${definition('币安真实提现提交', directConfiguration.binance_capital_submission_enabled && item.real_transfer_gate === 'ENABLED' ? '已启用' : '关闭；仅可预检')}${definition('Hyperliquid 路径', directConfiguration.hyperliquid_account_configured && directConfiguration.hyperliquid_contract_configured ? '已配置' : '不完整')}${definition('金额 / 费用上限', directConfiguration.limits_configured ? '已配置' : '未配置')}${definition('签名 / 广播', '币安只使用专用受限 API；链上签名交给人控钱包或有效多签，服务端不读取私钥')}</dl></article>
+      <section class="capital-routes-section"><div class="card-heading"><div><p class="eyebrow">四条直达路径</p><h2>选择资金从哪里到哪里</h2><p class="subtle">先选路径，再在一个确认窗口里填写金额；安全说明不再重复四遍。</p></div><span class="status-pill ${item.real_transfer_gate === 'ENABLED' ? 'status-APPROVED' : 'status-DISABLED'}">${escapeHtml(fmtStatus(item.real_transfer_gate || 'DISABLED'))}</span></div>${directConfigurationEditor}<div class="callout direct-capital-boundary" data-provider-boundary><b>统一安全边界：</b>系统只使用当前选定的 ${escapeHtml(selectedTreasuryProviderLabel)}；每条路径都重新校验地址、网络、资产、额度、实时状态与安全开关。链上私钥不进入控制台；真实币安提现还需专用开关和 CAPITAL_TRANSFER 双重开启。</div><div class="capital-route-grid">${directPathCards}</div></section>
+    </div>${directCapitalDialog}
+    <div class="capital-view-panel" data-capital-view-panel="activity" aria-labelledby="capital-view-tab-activity" role="region" ${hidden('activity')}>
+      <section><h2>操作日志、阶段与回执</h2>${directRows ? `<div class="table-wrap is-scrollable capital-operation-table"><table><thead><tr><th>操作</th><th>路径 / 金额</th><th>阶段</th><th>状态 / 回执</th><th>精确阻断</th></tr></thead><tbody>${directRows}</tbody></table></div>` : '<div class="callout">尚无直达资金操作。提交一次最终确认后，会在这里记录校验结果。</div>'}</section>
+      <section><h2>历史资金划转</h2><p class="subtle">旧流程只保留为只读审计记录，不再是四条直达操作的必经界面。</p>${legacyRows ? `<div class="table-wrap is-scrollable capital-history-table"><table><thead><tr><th>记录</th><th>方向</th><th>金额</th><th>状态</th><th>外部回执</th></tr></thead><tbody>${legacyRows}</tbody></table></div>` : '<div class="callout">尚无历史资金划转。</div>'}</section>
+    </div>` : '';
+  main.innerHTML = `<section class="page capital-page">
+    <header class="page-head capital-page-head"><div><p class="eyebrow">${fmtExecutionMode(displayEnvironment)}资金 · 多账户只读事实</p><h1>资金中心</h1><p class="lede">按测试/实盘独立账户集多选展示资金曲线。这里的选择只影响展示，不会切换运行环境或改变交易能力。</p></div>${displayEnvironment === 'LIVE' ? `<div class="capital-gate-summary"><small>生产资金操作</small><b>${escapeHtml(fmtStatus(item.real_transfer_gate || 'DISABLED'))}</b><span>在途 / 占用 ${fmtNumber(liveInTransit)} USDC</span></div>` : ''}</header>
+    <section class="card capital-display-controls"><div class="card-heading"><div><p class="eyebrow">当前模式</p><h2>${fmtExecutionMode(displayEnvironment)}</h2></div><a class="secondary" href="/team-settings" data-link>前往模式设置查看当前模式</a></div>${displayEnvironment === 'TESTNET' ? '<div class="callout tone-attention"><b>测试环境资金</b><p>仅代表交易所测试资产，不显示 Vault、Safe、生产提现地址或真实资金划转。</p></div>' : ''}<form id="capital-account-filter-form"><fieldset><legend>选择要叠加的当前模式账户曲线（可多选）</legend><div class="capital-account-options">${accountFilters || '<p class="subtle">当前模式尚未添加账户，请先前往“账户管理”。</p>'}</div></fieldset><div class="form-error" role="alert"></div><button class="primary" ${accountOptions.length ? '' : 'disabled'}>应用账户曲线</button></form><p class="safety-note">账户多选只影响资金曲线展示，不改变团队运行模式或交易权限。</p></section>
+    <nav class="section-tabs capital-section-tabs" aria-label="资金中心页面">${capitalNavigation}</nav>
+    <div class="capital-view-panel" data-capital-view-panel="overview" aria-labelledby="capital-view-tab-overview" role="region" ${hidden('overview')}>
+      <section class="capital-overview" aria-label="当前资金净值"><article class="capital-total-card ${netWorth.complete ? 'is-current' : 'is-limited'}"><small>当前所选账户总净值</small><b>${escapeHtml(totalHeadline)}</b><p>${escapeHtml(totalSupporting)}</p></article><div class="capital-source-cards">${sourceCards}</div></section>
+      <section class="capital-trust-panel ${netWorth.complete ? 'is-current' : 'is-limited'}"><div><b>${netWorth.complete ? '所选账户数据可信，可用于当前汇总' : '当前汇总已阻断'}</b><p>${escapeHtml(trustCopy)}</p></div><span>${netWorth.complete ? '完整' : '需关注'}</span></section>
+      <section class="capital-chart-panel"><div class="chart-head"><div><p class="eyebrow">资金净值趋势</p><h2>${selectedAccountKeys.size} 个所选账户曲线</h2><p class="subtle">每个账户一条独立曲线，并提供所选账户汇总。缺失、过期、错位和断档都不会补零或强行连线。</p></div></div><div class="capital-chart-meta"><span data-capital-range-coverage>${escapeHtml(chartCoverage)}</span><span>断档按实际采样节奏的 3 倍判定（至少 ${Number(netWorth.history_gap_tolerance_seconds || 300)} 秒）；纵轴至少保留 0.05% 观察范围</span></div><div class="chart-legend" role="group" aria-label="选择显示的资金曲线">${chartLegend}</div>${hasHistory ? `<div class="capital-chart-wrap"><canvas id="capital-chart" height="300" aria-label="所选账户及汇总 USD 资金趋势"></canvas><div class="capital-chart-tooltip" role="status" hidden></div></div>` : '<div class="chart-empty">尚无可绘制的资金历史；缺失数据不会补零。</div>'}${capitalHistoryRangeControl}</section>
+      <section><h2>资金位置明细</h2><p class="subtle">USD 金额统一精度：小额四位、大额两位；原资产余额保留在明细中。历史快照不会计入当前净值。</p>${capitalBalanceTable(liveBalanceRows, emptyBalanceMessage)}</section>
+    </div>${livePanels}
+  </section>`;
   if (activeCapitalView === 'overview') drawCapitalChart(visibleHistorySeries);
   document.querySelector('#capital-account-filter-form')?.addEventListener('submit', event => {
     event.preventDefault();

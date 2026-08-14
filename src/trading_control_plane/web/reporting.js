@@ -33,12 +33,6 @@ function quantStatsDefaultRange() {
   return {from_time:start.toISOString(), to_time:end.toISOString()};
 }
 
-function quantStatsThemeHtml(reportHtml) {
-  const theme = document.documentElement.dataset.theme;
-  if (!['light','dark'].includes(theme)) return reportHtml;
-  return reportHtml.replace(/<body\b/i, `<body data-tradingops-theme="${theme}"`);
-}
-
 function resizeQuantStatsFrame(frame) {
   try {
     const height = frame.contentDocument?.documentElement?.scrollHeight;
@@ -115,16 +109,6 @@ async function renderActualResults() {
 const notificationChannelLabel = value => ({TELEGRAM:'Telegram',SLACK:'Slack',LARK:'飞书 / Lark',EMAIL:'邮件'}[value] || value);
 const notificationEventLabel = value => ({PROPOSAL_REVIEW_REQUIRED:'提案等待独立审核',RISK_DECISION_RECORDED:'风险决策已记录',CAMPAIGN_STATUS_CHANGED:'交易任务状态变化',CAPITAL_STATUS_CHANGED:'资金流程状态变化',SIGNAL_EVENT_RECEIVED:'收到团队信号',CONNECTION_CHECK_FAILED:'账户连接验证失败',TEST_NOTIFICATION:'渠道测试'}[value] || value);
 
-function notificationEventOptions(catalog, selected = []) {
-  const enabled = new Set(selected);
-  return catalog.map(item => {
-    const active = item.integration_status === 'ACTIVE';
-    const checked = enabled.has(item.event_type);
-    const help = active ? `模板 ${item.template_key} v${item.template_version}` : item.blocker;
-    return `<label class="notification-event-option ${active ? '' : 'is-blocked'}"><input type="checkbox" name="event_types" value="${escapeHtml(item.event_type)}" ${checked ? 'checked' : ''} ${active ? '' : 'disabled'}><span><b>${escapeHtml(notificationEventLabel(item.event_type))}</b><small>${escapeHtml(help)}</small></span></label>`;
-  }).join('');
-}
-
 function notificationConfigurationFields(channel, {required = false} = {}) {
   const requiredAttr = required ? 'required' : '';
   const secret = 'type="password" autocomplete="new-password"';
@@ -170,7 +154,7 @@ async function renderNotifications() {
   const routeCards = data.routes.map(item => {
     const destination = item.configuration_metadata?.destination_hint || '已加密配置';
     const eventTags = item.event_types.map(eventType => `<span class="tag">${escapeHtml(notificationEventLabel(eventType))}</span>`).join('');
-    return `<article class="card notification-route-card"><div class="card-heading"><div><p class="eyebrow">${escapeHtml(executionModeLabel(item.environment || 'LIVE'))} · ${escapeHtml(notificationChannelLabel(item.channel))} · ${escapeHtml(destination)}</p><h2>${escapeHtml(item.name)}</h2></div><span class="status-pill ${item.enabled ? 'status-APPROVED' : 'status-DISABLED'}">${item.enabled ? '已启用' : '已停用'}</span></div><div class="tag-row">${eventTags}</div><dl class="definition-grid">${definition('配置状态', 'AES-256-GCM 加密')}${definition('路由 / 凭据版本', `${item.version} / ${item.credential_version}`)}${definition('最近更新', fmtDate(item.updated_at))}</dl>${data.can_manage ? '<a class="secondary" href="/accounts" data-link>管理通知账户</a>' : ''}</article>`;
+    return `<article class="card notification-route-card"><div class="card-heading"><div><p class="eyebrow">${escapeHtml(fmtExecutionMode(item.environment || 'LIVE'))} · ${escapeHtml(notificationChannelLabel(item.channel))} · ${escapeHtml(destination)}</p><h2>${escapeHtml(item.name)}</h2></div><span class="status-pill ${item.enabled ? 'status-APPROVED' : 'status-DISABLED'}">${item.enabled ? '已启用' : '已停用'}</span></div><div class="tag-row">${eventTags}</div><dl class="definition-grid">${definition('配置状态', 'AES-256-GCM 加密')}${definition('路由 / 凭据版本', `${item.version} / ${item.credential_version}`)}${definition('最近更新', fmtDate(item.updated_at))}</dl>${data.can_manage ? '<a class="secondary" href="/accounts" data-link>管理通知账户</a>' : ''}</article>`;
   }).join('');
   const deliveryRows = data.deliveries.map(item => {
     const route = routesById.get(item.notification_route_id);

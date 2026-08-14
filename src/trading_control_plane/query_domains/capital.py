@@ -7,42 +7,6 @@ from trading_control_plane.query_core import *
 
 
 class CapitalQueries(QueryComponent):
-    def treasury_reviewers_for_transfer(self, transfer_proposal_id: UUID) -> list[User]:
-        with self.database.session_factory() as session:
-            proposal = session.get(TransferProposal, transfer_proposal_id)
-            if proposal is None:
-                raise DomainRejected(
-                    "TRANSFER_PROPOSAL_NOT_FOUND", "transfer proposal does not exist"
-                )
-            assignments = session.scalars(
-                select(RoleAssignment)
-                .join(
-                    TeamMembership,
-                    and_(
-                        TeamMembership.team_id == RoleAssignment.team_id,
-                        TeamMembership.user_id == RoleAssignment.user_id,
-                    ),
-                )
-                .where(
-                    RoleAssignment.team_id == proposal.team_id,
-                    RoleAssignment.role == Role.TREASURY_ADMIN.value,
-                    TeamMembership.active,
-                )
-            ).all()
-            reviewer_ids = {
-                item.user_id
-                for item in assignments
-                if (item.account_scope is None or item.account_scope == proposal.account_id)
-                and (item.venue_scope is None or item.venue_scope == proposal.venue)
-                and item.user_id != proposal.proposer_id
-            }
-            users = session.scalars(
-                select(User).where(User.user_id.in_(reviewer_ids), User.active)
-            ).all()
-            for user in users:
-                session.expunge(user)
-            return list(users)
-
     def treasury_users(self, team_id: UUID, account_id: str, venue: str) -> list[User]:
         with self.database.session_factory() as session:
             assignments = session.scalars(
@@ -74,7 +38,7 @@ class CapitalQueries(QueryComponent):
             return list(users)
 
     def transfer_proposal_version(self, user_id: UUID, transfer_proposal_id: UUID) -> int:
-        _workspace_id, team_id = self.facade._active_scope_ids(user_id)
+        _workspace_id, team_id = self._active_scope_ids(user_id)
         with self.database.session_factory() as session:
             proposal = session.get(TransferProposal, transfer_proposal_id)
             if proposal is None:
@@ -116,7 +80,7 @@ class CapitalQueries(QueryComponent):
         }
 
     def transfer_proposal_detail(self, user_id: UUID, transfer_proposal_id: UUID) -> dict[str, Any]:
-        workspace_id, team_id = self.facade._active_scope_ids(user_id)
+        workspace_id, team_id = self._active_scope_ids(user_id)
         with self.database.session_factory() as session:
             proposal = session.get(TransferProposal, transfer_proposal_id)
             if proposal is None:
@@ -205,7 +169,7 @@ class CapitalQueries(QueryComponent):
         }
 
     def capital_transfer_detail(self, user_id: UUID, capital_transfer_id: UUID) -> dict[str, Any]:
-        workspace_id, team_id = self.facade._active_scope_ids(user_id)
+        workspace_id, team_id = self._active_scope_ids(user_id)
         with self.database.session_factory() as session:
             transfer = session.get(CapitalTransfer, capital_transfer_id)
             if transfer is None:
@@ -234,7 +198,7 @@ class CapitalQueries(QueryComponent):
                 "CAPITAL_ENVIRONMENT_INVALID",
                 "capital display requires TESTNET or LIVE",
             )
-        workspace_id, team_id = self.facade._active_scope_ids(user_id)
+        workspace_id, team_id = self._active_scope_ids(user_id)
         with self.database.session_factory() as session:
             assignments = session.scalars(
                 select(RoleAssignment).where(
@@ -472,7 +436,7 @@ class CapitalQueries(QueryComponent):
         authoritative_live_treasury_account_id: str | None = None,
         require_authoritative_live_treasury: bool = False,
     ) -> dict[str, Any]:
-        workspace_id, team_id = self.facade._active_scope_ids(user_id)
+        workspace_id, team_id = self._active_scope_ids(user_id)
         with self.database.session_factory() as session:
             now = datetime.now(UTC)
             authoritative_accounts = {

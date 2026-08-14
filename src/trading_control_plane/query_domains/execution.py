@@ -4,6 +4,7 @@ from trading_control_plane.query_component import QueryComponent
 
 # ruff: noqa: F403, F405
 from trading_control_plane.query_core import *
+from trading_control_plane.repositories.execution import find_position_for_scope
 
 
 class ExecutionQueries(QueryComponent):
@@ -43,7 +44,7 @@ class ExecutionQueries(QueryComponent):
             )
         if from_time is not None and to_time is not None and from_time > to_time:
             raise DomainRejected("TIME_RANGE_INVALID", "results from_time must not exceed to_time")
-        workspace_id, team_id = self.facade._active_scope_ids(user_id)
+        workspace_id, team_id = self._active_scope_ids(user_id)
         with self.database.session_factory() as session:
             campaign_query = select(Campaign).where(
                 Campaign.environment == environment,
@@ -503,7 +504,7 @@ class ExecutionQueries(QueryComponent):
     ) -> list[dict[str, Any]]:
         if environment not in {"TESTNET", "LIVE"}:
             raise DomainRejected("ENVIRONMENT_INVALID", "audit requires an exact environment")
-        workspace_id, team_id = self.facade._active_scope_ids(user_id)
+        workspace_id, team_id = self._active_scope_ids(user_id)
         with self.database.session_factory() as session:
             object_ids: set[str] = set()
             proposals = [
@@ -677,7 +678,7 @@ class ExecutionQueries(QueryComponent):
             ]
 
     def runtime_snapshot(self, user_id: UUID) -> dict[str, Any]:
-        _workspace_id, team_id = self.facade._active_scope_ids(user_id)
+        _workspace_id, team_id = self._active_scope_ids(user_id)
         with self.database.session_factory() as session:
             gates = session.scalars(
                 select(CapabilityGate).order_by(CapabilityGate.capability_key)
@@ -781,7 +782,7 @@ class ExecutionQueries(QueryComponent):
         account_id: str | None = None,
         venue: str | None = None,
     ) -> dict[str, Any] | None:
-        _workspace_id, team_id = self.facade._active_scope_ids(user_id)
+        _workspace_id, team_id = self._active_scope_ids(user_id)
         with self.database.session_factory() as session:
             item = session.scalar(
                 select(RuntimeSourceHealth).where(
@@ -806,7 +807,7 @@ class ExecutionQueries(QueryComponent):
             }
 
     def list_campaigns(self, user_id: UUID) -> list[dict[str, Any]]:
-        workspace_id, team_id = self.facade._active_scope_ids(user_id)
+        workspace_id, team_id = self._active_scope_ids(user_id)
         with self.database.session_factory() as session:
             values = session.execute(
                 select(Campaign, Instrument)
@@ -824,7 +825,7 @@ class ExecutionQueries(QueryComponent):
             return result
 
     def campaign_detail(self, user_id: UUID, campaign_id: UUID) -> dict[str, Any]:
-        workspace_id, team_id = self.facade._active_scope_ids(user_id)
+        workspace_id, team_id = self._active_scope_ids(user_id)
         with self.database.session_factory() as session:
             campaign = session.get(Campaign, campaign_id)
             if campaign is None:
@@ -860,15 +861,7 @@ class ExecutionQueries(QueryComponent):
                 .where(VenueFill.campaign_id == campaign_id)
                 .order_by(VenueFill.executed_at, VenueFill.venue_fill_fact_id)
             ).all()
-            position = session.scalar(
-                select(Position).where(
-                    Position.team_id == campaign.team_id,
-                    Position.account_id == campaign.account_id,
-                    Position.venue == campaign.venue,
-                    Position.environment == campaign.environment,
-                    Position.instrument_id == campaign.instrument_id,
-                )
-            )
+            position = find_position_for_scope(session, campaign)
             protection = (
                 session.scalar(
                     select(ProtectionOrder).where(
@@ -1091,7 +1084,7 @@ class ExecutionQueries(QueryComponent):
             return result
 
     def campaign_id_for_intent(self, user_id: UUID, intent_id: UUID) -> UUID:
-        _workspace_id, team_id = self.facade._active_scope_ids(user_id)
+        _workspace_id, team_id = self._active_scope_ids(user_id)
         with self.database.session_factory() as session:
             intent = session.get(OrderIntent, intent_id)
             if intent is None:

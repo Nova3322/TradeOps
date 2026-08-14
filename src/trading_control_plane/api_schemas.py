@@ -688,16 +688,6 @@ class SenderLeaseRequest(BaseModel):
     lease_seconds: int = Field(default=60, ge=5, le=300)
 
 
-class VenueFillRequest(BaseModel):
-    venue_fill_id: str = Field(min_length=1, max_length=255)
-    side: Literal["BUY", "SELL"]
-    quantity: Decimal = Field(gt=0)
-    price: Decimal = Field(gt=0)
-    fee: Decimal = Field(default=Decimal(0), ge=0)
-    fee_currency: str = Field(min_length=1, max_length=32)
-    slippage_cost: Decimal = Field(default=Decimal(0), ge=0)
-
-
 class IntentUnknownRequest(BaseModel):
     reason: str = Field(min_length=2, max_length=1_000)
 

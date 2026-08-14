@@ -60,7 +60,7 @@ class AnalyticsQueries(QueryComponent):
         }
 
     def analytics_report(self, user_id: UUID, report_id: UUID) -> dict[str, Any]:
-        workspace_id, team_id = self.facade._active_scope_ids(user_id)
+        workspace_id, team_id = self._active_scope_ids(user_id)
         with self.database.session_factory() as session:
             report = session.scalar(
                 select(AnalyticsReport).where(
@@ -149,7 +149,7 @@ class AnalyticsQueries(QueryComponent):
         return start, end
 
     def analytics_report_options(self, user_id: UUID) -> dict[str, Any]:
-        workspace_id, team_id = self.facade._active_scope_ids(user_id)
+        workspace_id, team_id = self._active_scope_ids(user_id)
         with self.database.session_factory() as session:
             team = session.get(Team, team_id)
             workspace = session.get(Workspace, workspace_id)
@@ -197,7 +197,7 @@ class AnalyticsQueries(QueryComponent):
         to_time: datetime | None,
     ) -> AnalyticsDataset:
         start, end = self._validate_request(environment, from_time, to_time)
-        workspace_id, team_id = self.facade._active_scope_ids(user_id)
+        workspace_id, team_id = self._active_scope_ids(user_id)
         with self.database.session_factory() as session:
             team = session.get(Team, team_id)
             if team is None or not team.active:

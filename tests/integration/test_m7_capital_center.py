@@ -10,6 +10,7 @@ from conftest import add_exchange_account_fixture, set_test_team_environment
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy import select
+from workflow_builder import ActorSpec, WorkflowFixture
 
 from trading_control_plane.api import create_app
 from trading_control_plane.capital import MockCapitalTransferAdapter
@@ -24,7 +25,6 @@ from trading_control_plane.domain import (
     IdempotencyConflict,
     ReviewDecision,
     Role,
-    SystemRiskState,
 )
 from trading_control_plane.models import AccountEquity
 from trading_control_plane.notilt import (
@@ -44,11 +44,43 @@ from trading_control_plane.telegram import MockTelegramGateway
 
 def seed(service: TradingService) -> dict[str, UUID]:
     now = datetime.now(UTC) - timedelta(seconds=2)
-    admin = service.bootstrap_admin("admin", now=now)
-    set_test_team_environment(service.database, admin, "TESTNET")
-    add_exchange_account_fixture(
-        service.database, admin, "acct-1", "BINANCE", environment="TESTNET"
+    fixture = WorkflowFixture.create(
+        service,
+        now=now,
+        admin_username="admin",
+        account_id="acct-1",
+        venue="BINANCE",
+        actors=(
+            ActorSpec(
+                "proposer",
+                "treasury-proposer",
+                Role.TREASURY_ADMIN,
+                scoped=False,
+            ),
+            ActorSpec(
+                "reviewer_one",
+                "treasury-reviewer-1",
+                Role.TREASURY_ADMIN,
+                scoped=False,
+            ),
+            ActorSpec(
+                "reviewer_two",
+                "treasury-reviewer-2",
+                Role.TREASURY_ADMIN,
+                scoped=False,
+            ),
+            ActorSpec("operator", "operator", Role.OPERATOR),
+        ),
+        symbol="BTCUSDT",
+        tick_size=Decimal("0.1"),
+        lot_size=Decimal("0.001"),
+        minimum_notional=Decimal("5"),
+        quote_currency="USDT",
+        risk_version="m7-risk-v1",
+        max_fact_age=timedelta(minutes=5),
+        record_facts=False,
     )
+    admin = fixture.ids["admin"]
     add_exchange_account_fixture(
         service.database, admin, "binance-main", "BINANCE", environment="LIVE"
     )
@@ -65,52 +97,20 @@ def seed(service: TradingService) -> dict[str, UUID]:
         "HYPERLIQUID",
         environment="LIVE",
     )
-    proposer = service.create_user("treasury-proposer", admin, now=now)
-    reviewer_one = service.create_user("treasury-reviewer-1", admin, now=now)
-    reviewer_two = service.create_user("treasury-reviewer-2", admin, now=now)
-    operator = service.create_user("operator", admin, now=now)
-    for user_id in (proposer, reviewer_one, reviewer_two):
-        service.assign_role(user_id, Role.TREASURY_ADMIN, admin, now=now)
-    service.assign_role(operator, Role.OPERATOR, admin, "acct-1", "BINANCE", now=now)
-    instrument = service.register_instrument(
-        actor_id=admin,
-        venue="BINANCE",
-        symbol="BTCUSDT",
-        tick_size=Decimal("0.1"),
-        lot_size=Decimal("0.001"),
-        minimum_notional=Decimal("5"),
-        contract_multiplier=Decimal(1),
-        quote_currency="USDT",
-        collateral_currency="USDT",
-        protection_supported=True,
-        now=now,
-    )
-    service.set_risk_policy(
-        actor_id=admin,
-        version="m7-risk-v1",
-        system_state=SystemRiskState.NORMAL,
-        max_total_risk=Decimal("100"),
-        max_account_risk=Decimal("100"),
-        max_single_loss=Decimal("100"),
-        max_consecutive_losses=3,
-        loss_cooldown=timedelta(hours=1),
-        max_fact_age=timedelta(minutes=5),
-        now=now,
-    )
     service.record_position(
         "acct-1",
         "BINANCE",
-        instrument,
+        fixture.ids["instrument"],
         Decimal(0),
         Decimal(0),
         Decimal("100"),
         True,
-        operator,
+        fixture.ids["operator"],
         environment=ExecutionEnvironment.TESTNET,
         now=now,
     )
     service.record_capital_balance(
-        actor_id=proposer,
+        actor_id=fixture.ids["proposer"],
         environment=ExecutionEnvironment.TESTNET,
         location_type="VAULT",
         location_id="vault-1",
@@ -128,7 +128,7 @@ def seed(service: TradingService) -> dict[str, UUID]:
         now=now,
     )
     service.record_capital_balance(
-        actor_id=proposer,
+        actor_id=fixture.ids["proposer"],
         environment=ExecutionEnvironment.TESTNET,
         location_type="VENUE",
         location_id="acct-1",
@@ -145,14 +145,7 @@ def seed(service: TradingService) -> dict[str, UUID]:
         observed_at=now,
         now=now,
     )
-    return {
-        "admin": admin,
-        "proposer": proposer,
-        "reviewer_one": reviewer_one,
-        "reviewer_two": reviewer_two,
-        "operator": operator,
-        "instrument": instrument,
-    }
+    return fixture.ids
 
 
 def approved_transfer(
@@ -420,9 +413,7 @@ def test_live_net_worth_and_risk_capital_combine_two_venues_and_vault(
             await login(client, "treasury-proposer")
             response = await client.get(
                 "/api/capital",
-                params={
-                    "accounts": "BINANCE|binance-main,HYPERLIQUID|hyperliquid-main"
-                },
+                params={"accounts": "BINANCE|binance-main,HYPERLIQUID|hyperliquid-main"},
             )
             assert response.status_code == 200
             payload = response.json()["data"]
@@ -534,16 +525,17 @@ def test_capital_center_uses_only_the_selected_onchain_treasury(
         require_authoritative_live_treasury=True,
     )
     assert center["net_worth"]["vault"] == "30.000000000000000000"
-    assert len(
-        [
-            item
-            for item in center["balances"]
-            if item["environment"] == "LIVE" and item["location_type"] == "VAULT"
-        ]
-    ) == 1
-    assert len(
-        [item for item in center["history"] if item["location_type"] == "VAULT"]
-    ) == 1
+    assert (
+        len(
+            [
+                item
+                for item in center["balances"]
+                if item["environment"] == "LIVE" and item["location_type"] == "VAULT"
+            ]
+        )
+        == 1
+    )
+    assert len([item for item in center["history"] if item["location_type"] == "VAULT"]) == 1
     assert selected_vault not in str(center)
     assert other_vault not in str(center)
 
@@ -555,12 +547,26 @@ def test_live_net_worth_rejects_time_misaligned_sources(
     set_test_team_environment(database, ids["admin"], "LIVE")
     now = datetime.now(UTC)
     service.record_account_equity(
-        "binance-main", "BINANCE", Decimal("10"), Decimal("10"), "USDT", True,
-        ids["admin"], environment=ExecutionEnvironment.LIVE, now=now,
+        "binance-main",
+        "BINANCE",
+        Decimal("10"),
+        Decimal("10"),
+        "USDT",
+        True,
+        ids["admin"],
+        environment=ExecutionEnvironment.LIVE,
+        now=now,
     )
     service.record_account_equity(
-        "hyperliquid-main", "HYPERLIQUID", Decimal("20"), Decimal("20"), "USDC", True,
-        ids["admin"], environment=ExecutionEnvironment.LIVE, now=now - timedelta(seconds=90),
+        "hyperliquid-main",
+        "HYPERLIQUID",
+        Decimal("20"),
+        Decimal("20"),
+        "USDC",
+        True,
+        ids["admin"],
+        environment=ExecutionEnvironment.LIVE,
+        now=now - timedelta(seconds=90),
     )
     vault = "0x1111111111111111111111111111111111111111"
     agent = "0x2222222222222222222222222222222222222222"
@@ -1362,7 +1368,6 @@ def test_capital_api_requires_treasury_step_up_and_telegram_is_notification_only
 
             page = await client.get("/capital")
             assert page.status_code == 200
-            assert "<title>交易控制台</title>" in page.text
 
     asyncio.run(scenario())
 

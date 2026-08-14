@@ -72,10 +72,7 @@ class ProposalService(ServiceComponent):
             # Feed synchronization remains read-only while setup is incomplete.
             # Never expose the automatic proposal policy until the Team has
             # explicitly entered TESTNET or LIVE and passed its operational gates.
-            if (
-                not team.trading_enabled
-                or team.execution_mode == TeamExecutionMode.SETUP.value
-            ):
+            if not team.trading_enabled or team.execution_mode == TeamExecutionMode.SETUP.value:
                 return None
             source = session.scalar(
                 select(TeamSignalSource).where(
@@ -300,7 +297,7 @@ class ProposalService(ServiceComponent):
                         "SIGNAL_RUNTIME_BINDING_INVALID",
                         "Perptape runtime bindings only create system signal proposals",
                     )
-                self.facade._lock_perptape_runtime_binding(session, perptape_runtime_binding)
+                self._lock_perptape_runtime_binding(session, perptape_runtime_binding)
             team = self.transactions._require_role(session, actor_id, operation, account_id, venue)
             if team.execution_mode not in {
                 TeamExecutionMode.TESTNET.value,
@@ -429,7 +426,7 @@ class ProposalService(ServiceComponent):
                     "SIGNAL_PROPOSAL_MISMATCH",
                     "proposal instrument, venue and direction must match the frozen signal",
                 )
-            self.facade._ensure_exchange_account_reference(
+            self._ensure_exchange_account_reference(
                 session,
                 team=team,
                 actor_id=actor_id,
@@ -902,7 +899,7 @@ class ProposalService(ServiceComponent):
         expired = False
         with self.database.session_factory.begin() as session:
             if perptape_runtime_binding is not None:
-                self.facade._lock_perptape_runtime_binding(session, perptape_runtime_binding)
+                self._lock_perptape_runtime_binding(session, perptape_runtime_binding)
             proposal = session.get(Proposal, proposal_id, with_for_update=True)
             if proposal is None:
                 _reject("PROPOSAL_NOT_FOUND", "proposal does not exist")

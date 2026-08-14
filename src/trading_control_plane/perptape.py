@@ -1207,12 +1207,6 @@ class PerptapeClient:
             )
             return self._feed
 
-    def get_candidate(self, candidate_id: str, *, now: datetime) -> PerptapeCandidate:
-        for candidate in self.list_candidates(now=now):
-            if candidate.candidate_id == candidate_id:
-                return candidate
-        raise DomainRejected("PERPTAPE_CANDIDATE_NOT_FOUND", "candidate is no longer available")
-
     @staticmethod
     def _parse_feed_times(value: dict[str, Any], *, now: datetime) -> tuple[datetime, datetime]:
         now = normalize_perptape_datetime(now)

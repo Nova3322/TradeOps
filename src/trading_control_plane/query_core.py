@@ -14,12 +14,10 @@ from trading_control_plane.domain import (
     DomainRejected,
     PrincipalType,
     Role,
-    ServicePrincipalKind,
 )
 from trading_control_plane.models import (
     AccountEquity,
     AccountEquityObservation,
-    AnalyticsEquitySnapshot,
     AnalyticsReport,
     ApiClient,
     Approval,
@@ -233,7 +231,6 @@ __all__ = [
     "UUID",
     "AccountEquity",
     "AccountEquityObservation",
-    "AnalyticsEquitySnapshot",
     "AnalyticsReport",
     "Any",
     "ApiClient",
@@ -269,7 +266,6 @@ __all__ = [
     "RoleAssignment",
     "RuntimeSourceHealth",
     "SenderLease",
-    "ServicePrincipalKind",
     "Session",
     "Team",
     "TeamMembership",

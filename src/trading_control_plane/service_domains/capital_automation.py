@@ -69,7 +69,7 @@ class AutomationCapitalService(ServiceComponent):
         operation = "capital.policy.manage"
         with self.database.session_factory.begin() as session:
             team = self.transactions._require_role(session, actor_id, operation, account_id, venue)
-            self.facade._ensure_exchange_account_reference(
+            self._ensure_exchange_account_reference(
                 session,
                 team=team,
                 actor_id=actor_id,
@@ -220,7 +220,7 @@ class AutomationCapitalService(ServiceComponent):
                     )
                 },
             )
-            self.facade._assert_capital_scope_flat(
+            self._assert_capital_scope_flat(
                 session,
                 team_id=team.team_id,
                 environment=policy.environment,
@@ -304,7 +304,7 @@ class AutomationCapitalService(ServiceComponent):
                     "CAPITAL_AUTOMATION_ALREADY_PENDING",
                     "another capital operation owns this scope",
                 )
-            venue_fact = self.facade._capital_balance(
+            venue_fact = self._capital_balance(
                 session,
                 team_id=team.team_id,
                 environment=policy.environment,
@@ -314,7 +314,7 @@ class AutomationCapitalService(ServiceComponent):
                 asset=policy.asset,
                 lock=True,
             )
-            vault_fact = self.facade._capital_balance(
+            vault_fact = self._capital_balance(
                 session,
                 team_id=team.team_id,
                 environment=policy.environment,

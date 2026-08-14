@@ -45,7 +45,7 @@ class FactIngestionExecutionService(ServiceComponent):
                     "position environment must match the server-owned team current mode",
                 )
             environment = actual_environment
-            self.facade._ensure_exchange_account_reference(
+            self._ensure_exchange_account_reference(
                 session,
                 team=team,
                 actor_id=actor_id,
@@ -275,7 +275,7 @@ class FactIngestionExecutionService(ServiceComponent):
                     "equity environment must match the server-owned team current mode",
                 )
             environment = actual_environment
-            self.facade._ensure_exchange_account_reference(
+            self._ensure_exchange_account_reference(
                 session,
                 team=team,
                 actor_id=actor_id,
@@ -594,7 +594,7 @@ class FactIngestionExecutionService(ServiceComponent):
 
         with self.database.session_factory.begin() as session:
             if runtime_binding is not None:
-                self.facade._lock_runtime_account_binding(session, runtime_binding)
+                self._lock_runtime_account_binding(session, runtime_binding)
             persisted: dict[str, Any] = {}
             for snapshot in sorted(snapshots, key=lambda item: item.symbol):
                 persisted[snapshot.symbol] = self._ingest_read_only_snapshot(
@@ -787,7 +787,7 @@ class FactIngestionExecutionService(ServiceComponent):
             team = self.transactions._require_role(
                 session, actor_id, "venue.record", account_id, venue
             )
-            self.facade._ensure_exchange_account_reference(
+            self._ensure_exchange_account_reference(
                 session,
                 team=team,
                 actor_id=actor_id,
@@ -1215,7 +1215,7 @@ class FactIngestionExecutionService(ServiceComponent):
                 if filled > bound_order.filled_quantity:
                     bound_order.filled_quantity = filled
                 if filled > 0:
-                    self.facade._consume_add_unit(session, bound_intent)
+                    self._consume_add_unit(session, bound_intent)
                 previous = bound_intent.status
                 release_updated_intent = False
                 terminal = {
@@ -1234,7 +1234,7 @@ class FactIngestionExecutionService(ServiceComponent):
                             reservation.version += 1
                     bound_campaign.status = CampaignStatus.UNKNOWN.value
                 elif bound_order.status in terminal and filled == 0:
-                    self.facade._release_zero_fill_in_session(
+                    self._release_zero_fill_in_session(
                         session,
                         bound_intent,
                         terminal[bound_order.status],

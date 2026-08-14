@@ -14,9 +14,7 @@ from trading_control_plane.analytics import (
     CanonicalFill,
     Cashflow,
     NavPoint,
-    PositionSnapshot,
     ReturnPoint,
-    canonicalize_venue_snapshot,
     deduplicate_fills,
     derive_24_7_returns,
 )
@@ -29,117 +27,8 @@ from trading_control_plane.quantstats_adapter import (
 )
 from trading_control_plane.report_engines import render_report
 from trading_control_plane.reporting_frames import analytics_frames as shared_analytics_frames
-from trading_control_plane.venue_read_only import (
-    VenueEquity,
-    VenueFill,
-    VenueFunding,
-    VenueInstrument,
-    VenueOrder,
-    VenuePosition,
-    VenueReadOnlySnapshot,
-)
 
 NOW = datetime(2026, 8, 1, tzinfo=UTC)
-
-
-def venue_snapshot() -> VenueReadOnlySnapshot:
-    return VenueReadOnlySnapshot(
-        symbol="BTCUSDT",
-        observed_at=NOW,
-        instrument=VenueInstrument(
-            symbol="BTCUSDT",
-            tick_size=Decimal("0.1"),
-            lot_size=Decimal("0.001"),
-            minimum_notional=Decimal("5"),
-            quote_currency="USDT",
-            collateral_currency="USDT",
-            active=True,
-        ),
-        orders=(
-            VenueOrder(
-                order_id="order-1",
-                client_order_id="client-1",
-                status="PARTIALLY_FILLED",
-                side="BUY",
-                order_type="LIMIT",
-                ordered_quantity=Decimal("2"),
-                filled_quantity=Decimal("1"),
-                stop_price=Decimal(0),
-                reduce_only=False,
-                close_position=False,
-                observed_at=NOW,
-            ),
-        ),
-        fills=(
-            VenueFill(
-                fill_id="fill-1",
-                order_id="order-1",
-                side="BUY",
-                quantity=Decimal("1"),
-                price=Decimal("25000"),
-                fee=Decimal("10"),
-                fee_currency="USDT",
-                executed_at=NOW,
-            ),
-        ),
-        position=VenuePosition(
-            quantity=Decimal("1"),
-            average_entry_price=Decimal("25000"),
-            mark_price=Decimal("25100"),
-            observed_at=NOW,
-        ),
-        equity=VenueEquity(
-            equity=Decimal("100100"),
-            available_balance=Decimal("75000"),
-            currency="USDT",
-            observed_at=NOW,
-        ),
-        funding=(
-            VenueFunding(
-                payment_id="funding-1",
-                amount=Decimal("-2"),
-                currency="USDT",
-                paid_at=NOW,
-            ),
-        ),
-        protection=None,
-    )
-
-
-@pytest.mark.parametrize("venue", ("BINANCE", "HYPERLIQUID", "OKX", "BYBIT"))
-def test_venue_adapters_canonicalize_orders_fills_positions_and_cashflows(
-    venue: str,
-) -> None:
-    result = canonicalize_venue_snapshot(
-        venue=venue,
-        account_id="account-1",
-        environment="LIVE",
-        snapshot=venue_snapshot(),
-        contract_multiplier=Decimal("0.01"),
-    )
-
-    assert result.orders[0].venue == venue
-    assert result.orders[0].quantity == Decimal("2")
-    assert result.orders[0].status == "PARTIALLY_FILLED"
-    fill = result.fills[0]
-    assert fill.signed_amount == Decimal("1")
-    assert fill.notional == Decimal("250")
-    assert fill.fee == Decimal("10")
-    assert fill.idempotency_key == f"LIVE:account-1:{venue}:fill-1"
-    assert result.positions[0] == PositionSnapshot(
-        account_id="account-1",
-        venue=venue,
-        environment="LIVE",
-        observed_at=NOW,
-        symbol="BTCUSDT",
-        signed_quantity=Decimal("1"),
-        mark_price=Decimal("25100"),
-        market_value=Decimal("251"),
-        gross_exposure=Decimal("251"),
-        net_exposure=Decimal("251"),
-    )
-    assert [item.cashflow_type for item in result.cashflows] == ["FEE", "FUNDING"]
-    assert all(item.performance_impact for item in result.cashflows)
 
 
 def test_duplicate_fill_is_processed_at_most_once() -> None:

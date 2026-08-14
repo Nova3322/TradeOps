@@ -297,9 +297,7 @@ def test_testnet_report_apis_are_offline_idempotent_and_persist_real_artifacts(
                 assert data["status"] == "READY"
                 assert data["engine"] == engine
                 assert data["environment"] == "TESTNET"
-                assert data["account_scopes"] == [
-                    {"account_id": "acct-1", "venue": "BINANCE"}
-                ]
+                assert data["account_scopes"] == [{"account_id": "acct-1", "venue": "BINANCE"}]
                 assert data["chart_count"] > 0
                 report_id = data["report_id"]
                 report_ids.append(report_id)

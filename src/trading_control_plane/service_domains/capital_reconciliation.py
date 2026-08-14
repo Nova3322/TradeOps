@@ -71,7 +71,7 @@ class ReconciliationCapitalService(ServiceComponent):
                     "LIVE capital facts require a configured read-only adapter",
                 )
             if location_type == "VENUE":
-                self.facade._ensure_exchange_account_reference(
+                self._ensure_exchange_account_reference(
                     session,
                     team=team,
                     actor_id=actor_id,
@@ -133,7 +133,7 @@ class ReconciliationCapitalService(ServiceComponent):
                 fact.fact_status = FactStatus.KNOWN.value if known else FactStatus.UNKNOWN.value
                 fact.observed_at = observed_at
                 fact.updated_at = now
-            self.facade._record_account_equity_observation(session, fact, recorded_at=now)
+            self._record_account_equity_observation(session, fact, recorded_at=now)
             self.transactions._audit(
                 session,
                 actor_id=str(actor_id),

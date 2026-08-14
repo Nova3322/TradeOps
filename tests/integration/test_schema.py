@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import base64
+import secrets
 from datetime import UTC, datetime, timedelta
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 from alembic import command
@@ -11,7 +12,7 @@ from alembic.config import Config
 from alembic.migration import MigrationContext
 from sqlalchemy import inspect, select, text
 
-from trading_control_plane.agent import issue_agent_token
+from trading_control_plane.agent import AGENT_TOKEN_MARKER, IssuedAgentToken
 from trading_control_plane.credentials import CredentialCipher
 from trading_control_plane.database import REQUIRED_SCHEMA_REVISION, Base, Database
 from trading_control_plane.models import (
@@ -22,6 +23,14 @@ from trading_control_plane.models import (
     User,
 )
 from trading_control_plane.service import TradingService
+
+
+def issue_legacy_agent_token(agent_id: UUID) -> IssuedAgentToken:
+    secret = secrets.token_urlsafe(32)
+    return IssuedAgentToken(
+        token=f"{AGENT_TOKEN_MARKER}.{agent_id}.{secret}",
+        hint=f"{AGENT_TOKEN_MARKER}.…{secret[-4:]}",
+    )
 
 
 def test_initial_schema_round_trip_and_metadata_match(database: Database) -> None:
@@ -71,7 +80,7 @@ def test_legacy_role_bearing_agent_migrates_to_owner_inherited_api_key(
 
     command.downgrade(config, "20260811_0031")
     legacy_id = uuid4()
-    issued = issue_agent_token(legacy_id)
+    issued = issue_legacy_agent_token(legacy_id)
     digest = CredentialCipher(encryption_key).secret_fingerprint(
         issued.token,
         purpose=f"agent-api-token:{legacy_id}:v1",

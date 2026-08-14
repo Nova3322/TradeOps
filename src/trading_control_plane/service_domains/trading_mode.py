@@ -18,14 +18,6 @@ class TradingModeService(ServiceComponent):
     }
 
     @staticmethod
-    def _require_human_request() -> None:
-        if current_api_client_context() is not None:
-            _reject(
-                "HUMAN_WEB_CONFIRMATION_REQUIRED",
-                "execution mode changes require an interactive human web session",
-            )
-
-    @staticmethod
     def _account_environment_valid(account: ExchangeAccount) -> bool:
         metadata = account.credential_metadata or {}
         return metadata.get("environment") == account.environment
@@ -226,7 +218,9 @@ class TradingModeService(ServiceComponent):
         idempotency_key: str,
         now: datetime,
     ) -> dict[str, Any]:
-        self._require_human_request()
+        _require_human_web_session(
+            "execution mode changes require an interactive human web session"
+        )
         normalized_mode = mode.strip().upper()
         if normalized_mode not in self._CONFIRMATIONS:
             _reject("TEAM_MODE_INVALID", "execution mode must be TESTNET or LIVE")

@@ -125,7 +125,6 @@ from trading_control_plane.api_schemas import (
     TransferAuthorizationRequest,
     TransferProposalRequest,
     TransferReviewRequest,
-    VenueFillRequest,
     WebhookSignalPayload,
     WorkspaceCreateRequest,
 )
@@ -639,7 +638,6 @@ __all__ = [
     "TransferProposalRequest",
     "TransferReviewRequest",
     "ValidationError",
-    "VenueFillRequest",
     "WebSocket",
     "WebSocketDisconnect",
     "WebhookSignalPayload",

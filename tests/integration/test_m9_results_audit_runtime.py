@@ -116,9 +116,7 @@ def test_results_are_environment_separated_and_derive_costs_curve_and_audit(
     assert team_metrics["profit_loss_ratio"] is None
     assert team_metrics["maximum_drawdown"] == "0"
     assert team_metrics["percentage_return"] is None
-    assert team_metrics["availability"]["percentage_metrics"] == (
-        "OPENING_CAPITAL_UNAVAILABLE"
-    )
+    assert team_metrics["availability"]["percentage_metrics"] == ("OPENING_CAPITAL_UNAVAILABLE")
     assert results["dimensions"]["account"][0]["scope"] == {
         "account_id": "acct-1",
         "venue": "BINANCE",
@@ -320,6 +318,5 @@ def test_results_audit_and_runtime_api_do_not_mix_environments_or_expose_secrets
             assert "private_key" not in serialized
             web = await client.get("/results")
             assert web.status_code == 200
-            assert "<title>交易控制台</title>" in web.text
 
     asyncio.run(scenario())
