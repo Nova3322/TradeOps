@@ -167,7 +167,7 @@ function capitalHistorySeries(history, alignmentToleranceSeconds = 60, gapTolera
     }
   });
   return [...sourceSeries, {
-    source:'TOTAL', label:'所选账户汇总',
+    source:'TOTAL', label:localizedText('所选账户汇总'),
     points:totalPoints,
     alignmentToleranceSeconds:Number(alignmentToleranceSeconds) || 60,
     latestCompleteAt:totalPoints.at(-1)?.time || null,
