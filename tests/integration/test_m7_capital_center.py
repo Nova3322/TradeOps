@@ -417,6 +417,14 @@ def test_live_net_worth_and_risk_capital_combine_two_venues_and_vault(
             )
             assert response.status_code == 200
             payload = response.json()["data"]
+            options = {item["key"]: item for item in payload["account_options"]}
+            assert payload["selected_account_keys"] == [
+                "BINANCE|binance-main",
+                "HYPERLIQUID|hyperliquid-main",
+            ]
+            assert options["BINANCE|binance-main"]["selectable"] is True
+            assert options["BINANCE|binance-main"]["last_sync_at"] == now.isoformat()
+            assert options["HYPERLIQUID|hyperliquid-main"]["disabled_reason"] is None
             assert {
                 item["location_id"]
                 for item in payload["balances"]

@@ -213,6 +213,19 @@ class CapitalQueries(QueryComponent):
             ):
                 raise DomainRejected("RBAC_DENIED", "capital center access is not assigned")
 
+            scope_access: dict[tuple[str | None, str | None], bool] = {}
+
+            def can_view_scope(account_id: str | None = None, venue: str | None = None) -> bool:
+                scope = (account_id, venue)
+                if scope not in scope_access:
+                    scope_access[scope] = self.service.can_user(
+                        user_id,
+                        "capital.view",
+                        account_id,
+                        venue,
+                    )
+                return scope_access[scope]
+
             def key_for(location_type: str, venue: str, account_id: str) -> str:
                 prefix = "VAULT" if location_type == "VAULT" else venue.upper()
                 return f"{prefix}|{account_id}"
@@ -226,7 +239,7 @@ class CapitalQueries(QueryComponent):
                 )
                 .order_by(ExchangeAccount.venue, ExchangeAccount.label)
             ).all()
-            options: dict[str, dict[str, str]] = {
+            options: dict[str, dict[str, Any]] = {
                 key_for("VENUE", item.venue, item.account_id): {
                     "key": key_for("VENUE", item.venue, item.account_id),
                     "account_id": item.account_id,
@@ -234,9 +247,17 @@ class CapitalQueries(QueryComponent):
                     "location_type": "VENUE",
                     "label": item.label,
                     "environment": normalized_environment,
+                    "connection_status": item.connection_status,
+                    "last_sync_at": _iso(item.last_connection_check_at),
+                    "selectable": False,
+                    "disabled_reason": (
+                        item.connection_error_code or "尚无可采信的资金数据"
+                        if item.connection_status == "VERIFIED"
+                        else (item.connection_error_code or "账户连接尚未验证")
+                    ),
                 }
                 for item in accounts
-                if self.service.can_user(user_id, "capital.view", item.account_id, item.venue)
+                if can_view_scope(item.account_id, item.venue)
             }
             config = (
                 session.scalar(
@@ -268,6 +289,10 @@ class CapitalQueries(QueryComponent):
                             else "NoTilt Vault"
                         ),
                         "environment": normalized_environment,
+                        "connection_status": "VERIFIED",
+                        "last_sync_at": None,
+                        "selectable": False,
+                        "disabled_reason": "尚无可采信的资金数据",
                     }
             balances = session.scalars(
                 select(AccountEquity)
@@ -283,17 +308,26 @@ class CapitalQueries(QueryComponent):
             ).all()
             for item in balances:
                 can_view = (
-                    self.service.can_user(user_id, "capital.view", item.account_id, item.venue)
+                    can_view_scope(item.account_id, item.venue)
                     if item.location_type == "VENUE"
-                    else self.service.can_user(user_id, "capital.view")
+                    else can_view_scope()
                 )
                 if not can_view:
                     continue
                 key = key_for(item.location_type, item.venue, item.account_id)
                 if key not in options:
                     continue
+                if item.fact_status == "KNOWN":
+                    options[key]["selectable"] = True
+                    options[key]["disabled_reason"] = None
+                    options[key]["last_sync_at"] = _iso(item.observed_at)
             requested = set(selected_account_keys or ())
-            selected = requested.intersection(options) if requested else set(options)
+            selectable = {
+                key for key, option in options.items() if option.get("selectable", False)
+            }
+            selected = requested.intersection(selectable) if requested else set()
+            if not requested and selectable:
+                selected = {next(key for key in options if key in selectable)}
             now = datetime.now(UTC)
             risk_policy = session.scalar(
                 select(RiskPolicy).where(RiskPolicy.team_id == team_id, RiskPolicy.active)
@@ -374,12 +408,7 @@ class CapitalQueries(QueryComponent):
             history = []
             for item in observations:
                 key = key_for(item.location_type, item.venue, item.account_id)
-                if key not in selected or not self.service.can_user(
-                    user_id,
-                    "capital.view",
-                    item.account_id,
-                    item.venue,
-                ):
+                if key not in selected or not can_view_scope(item.account_id, item.venue):
                     continue
                 history.append(
                     {
@@ -480,6 +509,19 @@ class CapitalQueries(QueryComponent):
             ):
                 raise DomainRejected("RBAC_DENIED", "capital center access is not assigned")
 
+            scope_access: dict[tuple[str | None, str | None], bool] = {}
+
+            def can_view_scope(account_id: str | None = None, venue: str | None = None) -> bool:
+                scope = (account_id, venue)
+                if scope not in scope_access:
+                    scope_access[scope] = self.service.can_user(
+                        user_id,
+                        "capital.view",
+                        account_id,
+                        venue,
+                    )
+                return scope_access[scope]
+
             def can_view_history(item: AccountEquityObservation) -> bool:
                 if not is_authoritative_live_venue(
                     item.environment,
@@ -494,12 +536,7 @@ class CapitalQueries(QueryComponent):
                     item.account_id,
                 ):
                     return False
-                return self.service.can_user(
-                    user_id,
-                    "capital.view",
-                    item.account_id,
-                    item.venue,
-                )
+                return can_view_scope(item.account_id, item.venue)
 
             balances = session.scalars(
                 select(AccountEquity)
@@ -587,7 +624,7 @@ class CapitalQueries(QueryComponent):
             visible_transfers = [
                 item
                 for item in transfers
-                if self.service.can_user(user_id, "capital.view", item.account_id, item.venue)
+                if can_view_scope(item.account_id, item.venue)
             ]
             occupied_statuses = {
                 "SOURCE_RESERVED",
@@ -622,9 +659,9 @@ class CapitalQueries(QueryComponent):
                 ):
                     continue
                 can_view = (
-                    self.service.can_user(user_id, "capital.view", item.account_id, item.venue)
+                    can_view_scope(item.account_id, item.venue)
                     if item.location_type == "VENUE"
-                    else self.service.can_user(user_id, "capital.view")
+                    else can_view_scope()
                 )
                 if not can_view:
                     continue

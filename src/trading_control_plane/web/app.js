@@ -43,6 +43,10 @@ mobileNavToggle.addEventListener('keydown', (event) => {
   if (sidebar.classList.contains('open')) closeMobileNav();
   else openMobileNav();
 });
+desktopNavToggle.addEventListener('click', () => {
+  const collapsed = document.querySelector('.app-shell')?.classList.contains('sidebar-collapsed');
+  setDesktopNavigationCollapsed(!collapsed, {persist:true});
+});
 navBackdrop.addEventListener('click', () => closeMobileNav());
 scopeSwitcher.addEventListener('click', () => {
   const opening = scopeSwitcherMenu.hidden;

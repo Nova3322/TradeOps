@@ -25,7 +25,7 @@ let focusNextRouteHeading = false;
 
 const ENGLISH_EXACT = new Map(Object.entries({
   '交易控制台':'Trading Console', '交易控制台首页':'Trading Console home', '生产交易管理':'Production trading operations', '受控交易运营':'Controlled trading operations', '生产环境':'Production', '当前环境':'Current environment', '环境未确认':'Environment unconfirmed',
-  '中英切换':'Chinese / English', '切换中英文':'Switch between Chinese and English', '切换':'Switch', '主题偏好':'Theme preference', '语言':'Language', '主题':'Theme', '界面语言':'Language', '主题模式':'Theme', '跟随系统':'System', '浅色':'Light', '深色':'Dark', '菜单':'Menu',
+  '中英切换':'Chinese / English', '切换中英文':'Switch between Chinese and English', '切换':'Switch', '主题偏好':'Theme preference', '语言':'Language', '主题':'Theme', '界面语言':'Language', '主题模式':'Theme', '跟随系统':'System', '浅色':'Light', '深色':'Dark', '菜单':'Menu', '收起主导航':'Collapse main navigation', '展开主导航':'Expand main navigation',
   '用户菜单':'User menu', '登录身份':'Sign-in identity', '密码登录':'Password sign-in', '内部会话':'Internal session',
   '当前工作区':'Current workspace', '当前空间':'Current space', '当前团队':'Current team', '当前职责':'Current role', '个人设置':'Personal settings', '个人偏好':'Preferences',
   '安全':'Security', '修改登录密码':'Change sign-in password', '展开':'Expand', '当前密码':'Current password', '新密码':'New password', '确认新密码':'Confirm new password',
