@@ -157,6 +157,16 @@ def test_role_navigation_and_task_entries_match_capabilities() -> None:
     assert "当前身份保持只读" in signals
 
 
+def test_perptape_starting_or_polling_fallback_is_not_reported_as_auth_failure() -> None:
+    signals = SIGNALS.read_text()
+
+    assert "['WEBSOCKET_FAILED','POLLING_FAILED'].includes(source.runtime?.state)" in signals
+    assert "source.mode !== 'PERPTAPE' && source.health?.last_error_code" in signals
+    assert "source.health?.last_error_code || ['WEBSOCKET_FAILED'" not in signals
+    assert "['TESTNET','LIVE'].includes(currentWorkflowEnvironment())" in signals
+    assert "canCreateOpportunityProposal() ? api('/api/proposal-defaults')" in signals
+
+
 def test_primary_navigation_preserves_the_established_order() -> None:
     index = INDEX.read_text()
     navigation = index.split('<nav aria-label="主导航">', maxsplit=1)[1].split(
@@ -197,9 +207,9 @@ def test_setup_team_routes_render_the_requested_page_without_repeating_creation_
     assert "!session.active_team.trading_enabled" not in route
     assert "renderScopeSetup();" in route
     assert "模式设置" in execution
-    assert "switchAllowed ? '' : 'disabled'" in execution
+    assert "switchAllowed && target !== 'LIVE' ? '' : 'disabled'" in execution
     assert "账户凭据" in execution
-    assert "不阻止切换团队模式" in execution
+    assert "这些项目不阻止模式切换" in execution
 
 
 def test_navigation_keeps_current_deployment_and_team_mode_visible() -> None:
@@ -332,6 +342,29 @@ def test_trading_mode_mutations_keep_server_side_safety_contracts() -> None:
     assert "expected_version:Number(button.dataset.version)" in execution
     assert "data-account-delete" in execution
     assert "DELETE:" in execution
+
+
+def test_trading_mode_switcher_is_direct_accessible_and_keeps_live_confirmation() -> None:
+    execution = EXECUTION.read_text()
+    styles = STYLESHEET.read_text()
+
+    for expected in (
+        'role="group" aria-label="选择目标模式"',
+        'data-mode-target="${mode}"',
+        "modeOption('TESTNET'",
+        "modeOption('LIVE'",
+        "data.execution_mode === 'TESTNET' ? 'LIVE' : 'TESTNET'",
+        'aria-pressed=',
+        '当前模式不可重复提交',
+        '测试模式不要求输入确认文案',
+        'I_CONFIRM_LIVE_PRODUCTION_MONEY',
+        'input.addEventListener(\'input\', syncSubmitState)',
+        'await confirmAction(',
+    ):
+        assert expected in execution
+    assert ".mode-switch-options" in styles
+    assert ".mode-switch-option:focus-visible" in styles
+    assert ".mode-switch-submit" in styles
 
 
 def test_workflow_environment_comes_only_from_persisted_team_mode() -> None:

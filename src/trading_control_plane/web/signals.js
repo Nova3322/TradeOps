@@ -1,5 +1,9 @@
 let signalSourceCredentialReveal = null;
 
+const canCreateOpportunityProposal = () => (
+  hasCapability('proposal.create') && ['TESTNET','LIVE'].includes(currentWorkflowEnvironment())
+);
+
 function signalSourceCredentialLabel(source) {
   if (source.credential?.state === 'CONFIGURED') return `已加密 · v${source.credential.version} · ${source.credential.key_hint || '仅存脱敏指纹'}`;
   if (source.credential?.state === 'RUNTIME_FALLBACK') return '部署级兼容 Key · 尚未绑定空间凭据';
@@ -21,7 +25,7 @@ function signalSourceFreshnessLabel(state) {
 
 function signalSourceStatus(source) {
   if (!source.enabled) return {label:'已停用', tone:'status-DISABLED'};
-  if (source.health?.last_error_code || ['WEBSOCKET_FAILED','POLLING_FAILED'].includes(source.runtime?.state)) return {label:'检查失败', tone:'status-REJECTED'};
+  if (['WEBSOCKET_FAILED','POLLING_FAILED'].includes(source.runtime?.state) || (source.mode !== 'PERPTAPE' && source.health?.last_error_code)) return {label:'检查失败', tone:'status-REJECTED'};
   if (source.mode === 'PERPTAPE' && ['STALE','WAITING','NOT_CONFIGURED'].includes(source.perptape?.data_status)) return {label:'等待 / 降级', tone:'status-PENDING_REVIEW'};
   if (source.runtime?.state === 'POLLING_FALLBACK' || source.runtime?.state === 'WEBSOCKET_STARTING') return {label:'降级运行', tone:'status-PENDING_REVIEW'};
   return {label:'已启用', tone:'status-APPROVED'};
@@ -316,7 +320,7 @@ function renderOpportunitySnapshot(result, sourceError = null, preservedFilters 
   opportunities = (result?.data || []).map(item => ({...item, retry_at:result?.retry_at || null}));
   opportunityGroups = groupOpportunities(opportunities);
   const items = opportunityGroups;
-  const canPropose = hasCapability('proposal.create');
+  const canPropose = canCreateOpportunityProposal();
   const venues = [...new Set(items.map(item => item.venue).filter(Boolean))].sort();
   const optionTags = values => values.map(value => `<option value="${escapeHtml(value)}">${escapeHtml(fmtVenueLabel(value))}</option>`).join('');
   const counts = opportunitySnapshotCounts(opportunities, items);
@@ -413,7 +417,7 @@ async function renderOpportunities() {
   let sourceError = null;
   const [opportunityResponse, defaultResponse, sourceResponse] = await Promise.allSettled([
     api('/api/opportunities'),
-    hasCapability('proposal.create') ? api('/api/proposal-defaults') : Promise.resolve(null),
+    canCreateOpportunityProposal() ? api('/api/proposal-defaults') : Promise.resolve(null),
     api('/api/signal-source'),
   ]);
   if (defaultResponse.status === 'fulfilled') {
@@ -478,7 +482,8 @@ async function renderOpportunityDefaults() {
 
 function opportunityCard(item) {
   const directionClass = item.direction === 'LONG' ? 'direction-long' : 'direction-short';
-  const canPropose = hasCapability('proposal.create');
+  const canPropose = hasCapability('proposal.create')
+    && (typeof currentWorkflowEnvironment !== 'function' || ['TESTNET','LIVE'].includes(currentWorkflowEnvironment()));
   const grouped = Array.isArray(item.candidates);
   const actionCandidateId = grouped ? item.action_candidate_id : (item.proposal_eligible ? item.candidate_id : null);
   const candidateEligible = Boolean(actionCandidateId) && item.proposal_eligible;

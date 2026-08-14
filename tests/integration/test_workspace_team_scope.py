@@ -136,9 +136,9 @@ def test_workspace_and_team_roles_are_selected_and_calculated_independently(
             alpha_id = alpha.json()["team_id"]
             assert alpha.json()["session"]["active_team"]["trading_enabled"] is False
             assert [item["role"] for item in alpha.json()["session"]["roles"]] == ["SYSTEM_ADMIN"]
-            blocked_business = await client.get("/api/proposals")
-            assert blocked_business.status_code == 403, blocked_business.text
-            assert blocked_business.json()["error"]["code"] == "RBAC_DENIED"
+            read_only_business = await client.get("/api/proposals")
+            assert read_only_business.status_code == 200, read_only_business.text
+            assert read_only_business.json()["data"] == []
 
             kelly = await client.post(
                 "/api/admin/users",

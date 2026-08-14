@@ -927,17 +927,6 @@ def create_app(
 
     def current_perptape_candidates(*, user_id: UUID, now: datetime) -> list[PerptapeCandidate]:
         runtime = service().perptape_source_runtime(user_id)
-        team_api_key = runtime["api_key"]
-        if team_api_key is not None:
-            cache_key = (UUID(str(runtime["signal_source_id"])), int(runtime["version"]))
-            client = team_perptape_clients.get(cache_key)
-            if client is None:
-                client = resolved_perptape.with_api_key(str(team_api_key))
-                for stale_key in tuple(team_perptape_clients):
-                    if stale_key[0] == cache_key[0]:
-                        team_perptape_clients.pop(stale_key, None)
-                team_perptape_clients[cache_key] = client
-            return client.list_candidates(now=now)
         if resolved_settings.runtime_sync_enabled:
             feed = queries().perptape_feed(user_id)
             if feed is None:
@@ -961,6 +950,17 @@ def create_app(
                     "runtime Perptape feed is stale or uses another contract version",
                 )
             return list(feed.candidates)
+        team_api_key = runtime["api_key"]
+        if team_api_key is not None:
+            cache_key = (UUID(str(runtime["signal_source_id"])), int(runtime["version"]))
+            client = team_perptape_clients.get(cache_key)
+            if client is None:
+                client = resolved_perptape.with_api_key(str(team_api_key))
+                for stale_key in tuple(team_perptape_clients):
+                    if stale_key[0] == cache_key[0]:
+                        team_perptape_clients.pop(stale_key, None)
+                team_perptape_clients[cache_key] = client
+            return client.list_candidates(now=now)
         return resolved_perptape.list_candidates(now=now)
 
     def current_perptape_candidate(

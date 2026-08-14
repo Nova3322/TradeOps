@@ -544,6 +544,14 @@ class SignalService(ServiceComponent):
             source.credential_ciphertext = encrypted.ciphertext
             source.credential_metadata = encrypted.metadata
             source.credential_version = credential_version
+            if mode is SignalSourceMode.PERPTAPE and source.enabled:
+                principal = self._ensure_signal_service_principal(
+                    session,
+                    team=team,
+                    actor_id=actor_id,
+                    now=now,
+                )
+                source.service_principal_id = principal.user_id
             source.version += 1
             source.updated_by = actor_id
             source.updated_at = now
@@ -696,6 +704,18 @@ class SignalService(ServiceComponent):
                 _reject("VERSION_CONFLICT", "signal source changed before connection test")
             if source.credential_ciphertext is None and source.mode == "WEBHOOK":
                 _reject("SIGNAL_SOURCE_NOT_CONFIGURED", "Webhook signature secret is missing")
+            if (
+                succeeded
+                and source.enabled
+                and source.mode == SignalSourceMode.PERPTAPE.value
+            ):
+                principal = self._ensure_signal_service_principal(
+                    session,
+                    team=team,
+                    actor_id=actor_id,
+                    now=now,
+                )
+                source.service_principal_id = principal.user_id
             source.last_checked_at = now
             source.last_success_at = now if succeeded else source.last_success_at
             source.last_error_code = normalized_error

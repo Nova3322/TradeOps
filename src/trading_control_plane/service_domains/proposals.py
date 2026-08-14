@@ -64,8 +64,19 @@ class ProposalService(ServiceComponent):
                     "automatic proposal policy is restricted to an active service principal",
                 )
             team = self.transactions._require_action_assignment(
-                session, actor_id, "proposal.create"
+                session,
+                actor_id,
+                "proposal.create",
+                allow_setup=True,
             )
+            # Feed synchronization remains read-only while setup is incomplete.
+            # Never expose the automatic proposal policy until the Team has
+            # explicitly entered TESTNET or LIVE and passed its operational gates.
+            if (
+                not team.trading_enabled
+                or team.execution_mode == TeamExecutionMode.SETUP.value
+            ):
+                return None
             source = session.scalar(
                 select(TeamSignalSource).where(
                     TeamSignalSource.team_id == team.team_id,
