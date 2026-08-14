@@ -355,7 +355,7 @@ const ENGLISH_EXACT = new Map(Object.entries({
   '划转总额':'Gross amount', '状态 / 对账':'Status / reconciliation', '外部引用':'External reference',
   '运行告警':'Runtime alerts', '刷新当前数据':'Refresh data', '阻断问题':'Blocking issues', '结果未知':'Unknown outcome',
   '数据过期':'Stale data', '恢复队列':'Recovery queue', '下一步：':'Next: ', '打开交易任务并按顺序处理':'Open trade and follow the steps',
-  '当前运行中的交易任务没有阻断异常':'No blocking exceptions in active trades', '成员权限':'Access control', '权限分离原则':'Separation of duties',
+  '当前运行中的交易任务没有阻断异常':'No blocking exceptions in active trades', '成员权限':'Access control', '权限分离原则':'Separation of duties', '审核、交易、资金与身份保持独立授权':'Keep review, trading, capital, and identity independently authorized',
   '审核与发起分开':'Proposal and review are separate', '交易与资金分开':'Trading and treasury are separate',
   '身份与权限分开':'Identity and authorization are separate', '新增内部成员':'Add internal member', '展开':'Expand',
   '账户范围':'Account scope', '交易所范围':'Exchange scope', '常用模板':'Role templates', '只审核':'Review only',
