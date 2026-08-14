@@ -581,7 +581,7 @@ const ENGLISH_EXACT = new Map(Object.entries({
   '每个交易任务覆盖一笔交易从授权、风险占用和下单意图，到成交、保护、减仓、对账与最终结果的完整生命周期。':'Each trade covers the full lifecycle from authorization, risk reservation, and order intent through fills, protection, reductions, reconciliation, and final outcome.',
   '交易任务记录':'Trade records', '建仓中 / 持仓中':'Opening / Open', '运行范围':'Runtime scope', '提案通过独立审核、实时风险检查和短期授权后，交易运维人员才能在同一环境发起订单。':'Only after independent review, real-time risk checks, and short-lived authorization may a trading operator submit an order in the same environment.',
   // Shell and shared overlays.
-  '工作区':'Workspace', '进入':'Open', '创建新工作区':'Create workspace', '查看所有工作区':'View all workspaces', '中文':'Chinese', '个人中心':'Profile',
+  '工作区':'Workspace', '当前':'Current', '进入':'Open', '创建新工作区':'Create workspace', '查看所有工作区':'View all workspaces', '中文':'Chinese', '个人中心':'Profile',
   '当前卡片配置':'Current proposal defaults', '正在读取服务端默认配置':'Loading server defaults', '请选择':'Select',
   // Home.
   '无运行告警 / 无需处理':'No runtime alerts / no action needed', '真实下单已关闭 · 自动加仓已关闭':'Live order sending disabled · Automatic scaling disabled',
@@ -652,6 +652,17 @@ const ENGLISH_EXACT = new Map(Object.entries({
   '资金曲线暂未就绪':'Capital series is not ready', '当前身份没有查看或执行此操作的权限。':'Your role does not have permission to view or perform this operation.', '重新加载':'Reload',
   '仅最高管理员可以直接恢复':'Only a super administrator can restore directly', '当前身份不是交易运维人员':'Your role is not a trading operator', '当前身份不是独立审核人员':'Your role is not an independent reviewer', '由资金管理员处理':'Handled by a treasury administrator', '当前身份可以查看服务端事实，但没有信号源管理权限。':'You can view server facts but cannot manage signal sources.',
   '已切换工作区；团队、成员与权限范围已重新加载':'Workspace switched; Team, membership, and permission scope reloaded',
+  // Hidden, loading, error, and expanded-control states.
+  '刷新':'Refresh', '关闭主导航':'Close main navigation', '正在读取当前事实':'Loading current data', '选择目标模式':'Select target mode',
+  '系统暂时无法完成请求，请稍后重试；如果问题持续存在，请联系系统管理员。':'The request could not be completed. Try again shortly; contact a system administrator if the issue persists.',
+  '正在加载资金绩效曲线':'Loading capital performance series', '按当前模式和已授权账户读取可信资金事实。':'Loading trusted capital facts for the current mode and authorized accounts.',
+  'Perptape 信号概览':'Perptape signal overview', 'Webhook 信号源':'Webhook signal sources', '审核中':'In review', '币种':'Market',
+  '例如 BTC、XYZ100':'For example BTC or XYZ100', '有效时间（小时，至少 8 小时）':'Validity (hours, at least 8)',
+  '搜索账户':'Search accounts', '按交易所筛选':'Filter by venue', '所选账户及汇总 USD 资金趋势':'Selected-account and combined USD capital trend', '资金曲线时间范围':'Capital-series time range', '拖动选择资金曲线时间范围':'Drag to select the capital-series time range',
+  'NoTilt 金库编号':'NoTilt Vault ID', 'NoTilt 金库地址':'NoTilt Vault address', 'Hyperliquid 默认账户':'Default Hyperliquid account',
+  '已配置；留空保持当前值':'Configured; leave blank to keep the current value', '留空保持当前值':'Leave blank to keep the current value',
+  '例如 team-risk-2026-08-v1':'For example team-risk-2026-08-v1', '例如 提案审核群':'For example Proposal review group', '由 BotFather 签发':'Issued by BotFather', '不会回显':'Never displayed again',
+  '例如 TradingView BTC':'For example TradingView BTC', '例如 kelly':'For example kelly', '例如 reviewer-li':'For example reviewer-li',
   // Expanded administrative forms.
   '显示名称':'Display name', '金库编号':'Vault ID', '金库地址':'Vault address', '币安默认账户':'Default Binance account', '币安白名单入金地址':'Binance allowlisted deposit address', '币安受限提现地址':'Binance restricted withdrawal address', '默认账户':'Default account', '单次金额上限（USDC）':'Per-operation limit (USDC)', '最大费用上限（USDC）':'Maximum fee (USDC)',
   '政策版本':'Policy version', '最大连续亏损次数':'Maximum consecutive losses', '亏损冷却期（秒）':'Loss cooldown (seconds)', '事实最大时效（秒）':'Maximum fact age (seconds)', '系统已经恢复，或申请冻结的控制版本已被后续操作替代。':'The system has already been restored, or a later operation replaced the frozen control version.',
@@ -671,7 +682,10 @@ const ENGLISH_PATTERNS = [
   [/^(\d+) 条已结束或已失效记录，不计入当前待办$/, '$1 completed or expired records; excluded from current tasks'],
   [/^最近成功 尚无成功记录 · 最近错误 无$/, 'Latest success None · Latest error None'],
   [/^新一轮信号正在补齐：(.+)。当前仍使用 (.+) 的完整快照；创建时会再次校验。$/, 'A new signal cycle is filling in: $1. The complete snapshot from $2 remains active and is revalidated when creating a proposal.'],
-  [/^(\d+) 名成员 · (管理员|成员|创建者)$/, (_match, count, role) => `${count} members · ${{管理员:'Administrator',成员:'Member',创建者:'Creator'}[role]}`],
+  [/^(\d+) 名成员 · (管理员|成员|创建者)$/, (_match, count, role) => `${count} ${count === '1' ? 'member' : 'members'} · ${{管理员:'Administrator',成员:'Member',创建者:'Creator'}[role]}`],
+  [/^(\d+) 名成员$/, (_match, count) => `${count} ${count === '1' ? 'member' : 'members'}`],
+  [/^(\d+) 个可用$/, '$1 available'],
+  [/^(QuantStats|Pyfolio Reloaded) 完整绩效报表$/, '$1 full performance report'],
   [/^(.+) 已创建并可使用账户密码登录$/, '$1 was created and can sign in with an account password'],
   [/^将“(.+)”移出当前团队？$/, 'Remove “$1” from this Team?'],
   [/^(.+) 已移出当前团队；用户身份与其他团队未改变$/, '$1 was removed from this Team; the user identity and other Teams are unchanged'],
