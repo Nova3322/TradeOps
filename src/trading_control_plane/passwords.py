@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import base64
 import hashlib
 import hmac
 import secrets
@@ -8,6 +7,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 
 from trading_control_plane.domain import DomainRejected
+from trading_control_plane.security_encoding import urlsafe_decode, urlsafe_encode
 
 SCRYPT_N = 1 << 14
 SCRYPT_R = 8
@@ -15,14 +15,6 @@ SCRYPT_P = 1
 SALT_BYTES = 16
 KEY_BYTES = 32
 MAX_MEMORY = 64 * 1024 * 1024
-
-
-def _encode(value: bytes) -> str:
-    return base64.urlsafe_b64encode(value).rstrip(b"=").decode("ascii")
-
-
-def _decode(value: str) -> bytes:
-    return base64.urlsafe_b64decode(value + "=" * (-len(value) % 4))
 
 
 class PasswordHasher:
@@ -43,7 +35,10 @@ class PasswordHasher:
             dklen=KEY_BYTES,
             maxmem=MAX_MEMORY,
         )
-        return f"scrypt$n={SCRYPT_N},r={SCRYPT_R},p={SCRYPT_P}${_encode(salt)}${_encode(digest)}"
+        return (
+            f"scrypt$n={SCRYPT_N},r={SCRYPT_R},p={SCRYPT_P}"
+            f"${urlsafe_encode(salt)}${urlsafe_encode(digest)}"
+        )
 
     def verify(self, password: str, encoded: str) -> bool:
         try:
@@ -54,10 +49,10 @@ class PasswordHasher:
             n, r, p = int(values["n"]), int(values["r"]), int(values["p"])
             if (n, r, p) != (SCRYPT_N, SCRYPT_R, SCRYPT_P):
                 return False
-            expected = _decode(digest_text)
+            expected = urlsafe_decode(digest_text)
             actual = hashlib.scrypt(
                 password.encode("utf-8"),
-                salt=_decode(salt_text),
+                salt=urlsafe_decode(salt_text),
                 n=n,
                 r=r,
                 p=p,

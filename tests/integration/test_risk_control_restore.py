@@ -7,15 +7,14 @@ from threading import Barrier
 from uuid import UUID
 
 import pytest
-from conftest import add_exchange_account_fixture, set_test_team_environment
 from sqlalchemy import select
+from workflow_builder import ActorSpec, WorkflowFixture
 
 from trading_control_plane.database import Database
 from trading_control_plane.domain import (
     CapabilityStatus,
     Direction,
     DomainRejected,
-    ExecutionEnvironment,
     IntentKind,
     ProposalSource,
     ReviewDecision,
@@ -37,73 +36,27 @@ SCOPE = (("TESTNET", "acct-1", "BINANCE"),)
 
 
 def seed(service: TradingService) -> dict[str, UUID]:
-    admin = service.bootstrap_admin("risk-admin", now=NOW)
-    set_test_team_environment(service.database, admin, "TESTNET")
-    add_exchange_account_fixture(service.database, admin, "acct-1", "BINANCE")
-    proposer = service.create_user("risk-proposer", admin, now=NOW)
-    reviewer_one = service.create_user("risk-reviewer-1", admin, now=NOW)
-    reviewer_two = service.create_user("risk-reviewer-2", admin, now=NOW)
-    operator = service.create_user("risk-operator", admin, now=NOW)
-    service.assign_role(proposer, Role.PROPOSER, admin, "acct-1", "BINANCE", now=NOW)
-    service.assign_role(reviewer_one, Role.REVIEWER, admin, now=NOW)
-    service.assign_role(reviewer_two, Role.REVIEWER, admin, now=NOW)
-    service.assign_role(operator, Role.OPERATOR, admin, "acct-1", "BINANCE", now=NOW)
-    instrument = service.register_instrument(
-        actor_id=admin,
+    fixture = WorkflowFixture.create(
+        service,
+        now=NOW,
+        admin_username="risk-admin",
+        account_id="acct-1",
         venue="BINANCE",
+        actors=(
+            ActorSpec("proposer", "risk-proposer", Role.PROPOSER),
+            ActorSpec("reviewer_one", "risk-reviewer-1", Role.REVIEWER, scoped=False),
+            ActorSpec("reviewer_two", "risk-reviewer-2", Role.REVIEWER, scoped=False),
+            ActorSpec("operator", "risk-operator", Role.OPERATOR),
+        ),
         symbol="BTCUSDT",
         tick_size=Decimal("0.1"),
         lot_size=Decimal("0.001"),
         minimum_notional=Decimal("5"),
-        contract_multiplier=Decimal("1"),
         quote_currency="USDT",
-        collateral_currency="USDT",
-        protection_supported=True,
-        now=NOW,
-    )
-    service.set_risk_policy(
-        actor_id=admin,
-        version="risk-restore-v1",
-        system_state=SystemRiskState.NORMAL,
-        max_total_risk=Decimal("100"),
-        max_account_risk=Decimal("100"),
-        max_single_loss=Decimal("100"),
-        max_consecutive_losses=3,
-        loss_cooldown=timedelta(hours=1),
+        risk_version="risk-restore-v1",
         max_fact_age=timedelta(hours=2),
-        now=NOW,
     )
-    service.record_position(
-        "acct-1",
-        "BINANCE",
-        instrument,
-        Decimal("0"),
-        Decimal("0"),
-        Decimal("100"),
-        True,
-        operator,
-        environment=ExecutionEnvironment.TESTNET,
-        now=NOW,
-    )
-    service.record_account_equity(
-        "acct-1",
-        "BINANCE",
-        Decimal("10000"),
-        Decimal("9000"),
-        "USDT",
-        True,
-        operator,
-        environment=ExecutionEnvironment.TESTNET,
-        now=NOW,
-    )
-    return {
-        "admin": admin,
-        "proposer": proposer,
-        "reviewer_one": reviewer_one,
-        "reviewer_two": reviewer_two,
-        "operator": operator,
-        "instrument": instrument,
-    }
+    return fixture.ids
 
 
 def enable_auto_add_for_test(database: Database, admin: UUID, *, now: datetime) -> None:

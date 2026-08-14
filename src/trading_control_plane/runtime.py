@@ -1261,11 +1261,6 @@ class RuntimeBindingSupervisor:
     def dependencies_in_use(self) -> bool:
         return any(handle.thread.is_alive() for handle in self._perptape_streams.values())
 
-    def has_bindings(self) -> bool:
-        return bool(
-            self.service.runtime_account_bindings() or self.service.perptape_runtime_bindings()
-        )
-
     def _account_worker(self, binding: PreparedRuntimeAccountBinding) -> RuntimeSyncWorker:
         updates: dict[str, Any] = {
             "runtime_sync_service_username": binding.service_principal_username,

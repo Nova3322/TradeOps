@@ -11,6 +11,7 @@ from conftest import add_exchange_account_fixture, set_test_team_environment
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy import func, select
+from workflow_builder import ActorSpec, WorkflowFixture
 
 from trading_control_plane.api import create_app
 from trading_control_plane.binance import BinanceInstrument
@@ -20,7 +21,6 @@ from trading_control_plane.domain import (
     ProposalSource,
     RiskTier,
     Role,
-    SystemRiskState,
 )
 from trading_control_plane.models import (
     AuditEvent,
@@ -35,77 +35,35 @@ from trading_control_plane.telegram import MockTelegramGateway
 
 def seed(service: TradingService) -> dict[str, UUID]:
     now = datetime.now(UTC)
-    admin = service.bootstrap_admin("admin", now=now)
-    set_test_team_environment(service.database, admin, "TESTNET")
-    add_exchange_account_fixture(service.database, admin, "acct-1", "BINANCE")
-    proposer = service.create_user("proposer", admin, now=now)
-    reviewer_one = service.create_user("reviewer-1", admin, now=now)
-    reviewer_two = service.create_user("reviewer-2", admin, now=now)
-    operator = service.create_user("operator", admin, now=now)
-    perptape = service.create_service_principal("perptape", admin, now=now)
-    runtime_sync = service.create_service_principal("runtime-sync", admin, now=now)
-    service.assign_role(proposer, Role.PROPOSER, admin, "acct-1", "BINANCE", now=now)
-    service.assign_role(reviewer_one, Role.REVIEWER, admin, "acct-1", "BINANCE", now=now)
-    service.assign_role(reviewer_two, Role.REVIEWER, admin, "acct-1", "BINANCE", now=now)
-    service.assign_role(operator, Role.OPERATOR, admin, "acct-1", "BINANCE", now=now)
-    service.assign_role(perptape, Role.PROPOSER, admin, "acct-1", "BINANCE", now=now)
-    service.assign_role(runtime_sync, Role.OPERATOR, admin, "acct-1", "BINANCE", now=now)
-    instrument = service.register_instrument(
-        actor_id=admin,
+    fixture = WorkflowFixture.create(
+        service,
+        now=now,
+        admin_username="admin",
+        account_id="acct-1",
         venue="BINANCE",
+        actors=(
+            ActorSpec("proposer", "proposer", Role.PROPOSER),
+            ActorSpec("reviewer_one", "reviewer-1", Role.REVIEWER),
+            ActorSpec("reviewer_two", "reviewer-2", Role.REVIEWER),
+            ActorSpec("operator", "operator", Role.OPERATOR),
+            ActorSpec("perptape", "perptape", Role.PROPOSER, service_principal=True),
+            ActorSpec(
+                "runtime_sync",
+                "runtime-sync",
+                Role.OPERATOR,
+                service_principal=True,
+            ),
+        ),
         symbol="BTCUSDT",
         tick_size=Decimal("0.1"),
         lot_size=Decimal("0.001"),
         minimum_notional=Decimal("5"),
-        contract_multiplier=Decimal("1"),
         quote_currency="USDT",
-        collateral_currency="USDT",
-        protection_supported=True,
-        now=now,
-    )
-    service.set_risk_policy(
-        actor_id=admin,
-        version="m1-risk-v1",
-        system_state=SystemRiskState.NORMAL,
-        max_total_risk=Decimal("100"),
-        max_account_risk=Decimal("100"),
-        max_single_loss=Decimal("100"),
-        max_consecutive_losses=3,
-        loss_cooldown=timedelta(hours=1),
+        risk_version="m1-risk-v1",
         max_fact_age=timedelta(minutes=5),
-        now=now,
+        mark_price=Decimal("120000"),
     )
-    service.record_position(
-        "acct-1",
-        "BINANCE",
-        instrument,
-        Decimal("0"),
-        Decimal("0"),
-        Decimal("120000"),
-        True,
-        operator,
-        now=now,
-    )
-    service.record_account_equity(
-        "acct-1",
-        "BINANCE",
-        Decimal("10000"),
-        Decimal("9000"),
-        "USDT",
-        True,
-        operator,
-        now=now,
-    )
-    return {
-        "admin": admin,
-        "proposer": proposer,
-        "reviewer_one": reviewer_one,
-        "reviewer_two": reviewer_two,
-        "operator": operator,
-        "perptape": perptape,
-        "runtime_sync": runtime_sync,
-        "instrument": instrument,
-    }
+    return fixture.ids
 
 
 def add_live_account(service: TradingService, ids: dict[str, UUID]) -> str:
@@ -233,8 +191,6 @@ def app(
     database: Database,
     telegram: MockTelegramGateway,
     client: PerptapeClient | None = None,
-    *,
-    catalog_active: bool = True,
 ) -> FastAPI:
     settings = Settings(
         environment="test",
@@ -247,26 +203,11 @@ def app(
         _env_file=None,
     )
 
-    class StaticBinanceCatalog:
-        configured = True
-
-        def read_instrument(self, symbol: str) -> BinanceInstrument:
-            return BinanceInstrument(
-                symbol=symbol,
-                tick_size=Decimal("0.1"),
-                lot_size=Decimal("0.001"),
-                minimum_notional=Decimal("5"),
-                quote_currency="USDC" if symbol.endswith("USDC") else "USDT",
-                collateral_currency="USDC" if symbol.endswith("USDC") else "USDT",
-                active=catalog_active,
-            )
-
     return create_app(
         settings,
         database,
         client or perptape_client(),
         telegram,
-        binance_client=StaticBinanceCatalog(),  # type: ignore[arg-type]
     )
 
 
@@ -559,7 +500,6 @@ def test_opportunity_rejects_exact_but_inactive_catalog_instrument(
                     database,
                     MockTelegramGateway(),
                     perptape_client(),
-                    catalog_active=False,
                 )
             ),
             base_url="http://test",

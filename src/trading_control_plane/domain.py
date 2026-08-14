@@ -84,11 +84,6 @@ class SignalSourceMode(StrEnum):
     WEBHOOK = "WEBHOOK"
 
 
-class SignalProvider(StrEnum):
-    TRADINGVIEW = "TRADINGVIEW"
-    MODEL = "MODEL"
-
-
 class SignalEventStatus(StrEnum):
     RECEIVED = "RECEIVED"
     PROPOSAL_CREATED = "PROPOSAL_CREATED"

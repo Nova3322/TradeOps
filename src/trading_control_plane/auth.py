@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import base64
 import hashlib
 import hmac
 import json
@@ -10,14 +9,7 @@ from typing import Any
 from uuid import UUID
 
 from trading_control_plane.domain import DomainRejected
-
-
-def _encode(value: bytes) -> str:
-    return base64.urlsafe_b64encode(value).rstrip(b"=").decode("ascii")
-
-
-def _decode(value: str) -> bytes:
-    return base64.urlsafe_b64decode(value + "=" * (-len(value) % 4))
+from trading_control_plane.security_encoding import urlsafe_decode, urlsafe_encode
 
 
 @dataclass(frozen=True)
@@ -45,15 +37,6 @@ class ActionGrant:
     authentication_method: str
 
 
-@dataclass(frozen=True)
-class ActionReference:
-    user_id: UUID
-    action: str
-    object_id: UUID
-    object_version: int
-    expires_at: datetime
-
-
 class SignedTokenService:
     """Small signed-token boundary used by non-production identity and future IdP callbacks."""
 
@@ -61,17 +44,19 @@ class SignedTokenService:
         self._secret = secret.encode("utf-8")
 
     def _sign(self, payload: dict[str, Any]) -> str:
-        body = _encode(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode())
-        signature = _encode(hmac.new(self._secret, body.encode(), hashlib.sha256).digest())
+        body = urlsafe_encode(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode())
+        signature = urlsafe_encode(hmac.new(self._secret, body.encode(), hashlib.sha256).digest())
         return f"{body}.{signature}"
 
     def _verify(self, token: str) -> dict[str, Any]:
         try:
             body, signature = token.split(".", 1)
-            expected = _encode(hmac.new(self._secret, body.encode(), hashlib.sha256).digest())
+            expected = urlsafe_encode(
+                hmac.new(self._secret, body.encode(), hashlib.sha256).digest()
+            )
             if not hmac.compare_digest(signature, expected):
                 raise ValueError
-            value = json.loads(_decode(body))
+            value = json.loads(urlsafe_decode(body))
         except (ValueError, UnicodeDecodeError, json.JSONDecodeError) as exc:
             raise DomainRejected("AUTH_TOKEN_INVALID", "authentication token is invalid") from exc
         if not isinstance(value, dict):
@@ -159,61 +144,6 @@ class SignedTokenService:
                 "object_version": object_version,
                 "exp": int((now + ttl).timestamp()),
             }
-        )
-
-    def issue_action_reference(
-        self,
-        *,
-        user_id: UUID,
-        action: str,
-        object_id: UUID,
-        object_version: int,
-        now: datetime,
-        ttl: timedelta,
-    ) -> str:
-        return self._sign(
-            {
-                "kind": "action-reference",
-                "sub": str(user_id),
-                "action": action,
-                "object_id": str(object_id),
-                "object_version": object_version,
-                "exp": int((now + ttl).timestamp()),
-            }
-        )
-
-    def verify_action_reference(
-        self,
-        token: str,
-        *,
-        user_id: UUID,
-        action: str,
-        object_id: UUID,
-        object_version: int,
-        now: datetime,
-    ) -> ActionReference:
-        payload = self._verify(token)
-        expires_at = datetime.fromtimestamp(int(payload.get("exp", 0)), tz=UTC)
-        expected = {
-            "kind": "action-reference",
-            "sub": str(user_id),
-            "action": action,
-            "object_id": str(object_id),
-            "object_version": object_version,
-        }
-        if any(payload.get(key) != value for key, value in expected.items()):
-            raise DomainRejected(
-                "ACTION_REFERENCE_SCOPE_INVALID",
-                "action reference does not match this user or campaign version",
-            )
-        if expires_at <= now:
-            raise DomainRejected("ACTION_REFERENCE_EXPIRED", "action reference has expired")
-        return ActionReference(
-            user_id=user_id,
-            action=action,
-            object_id=object_id,
-            object_version=object_version,
-            expires_at=expires_at,
         )
 
     def verify_action_grant(

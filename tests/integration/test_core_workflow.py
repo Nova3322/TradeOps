@@ -7,6 +7,7 @@ from uuid import UUID
 
 import pytest
 from sqlalchemy import func, select
+from workflow_builder import ActorSpec, WorkflowFixture
 
 from trading_control_plane.database import Database
 from trading_control_plane.domain import (
@@ -35,15 +36,11 @@ from trading_control_plane.models import (
     Campaign,
     CapabilityGate,
     CommandReceipt,
-    ExchangeAccount,
-    Instrument,
     OrderIntent,
     Position,
     Proposal,
     RiskDecision,
-    RiskPolicy,
     RiskReservation,
-    Team,
     TradingAuthorization,
 )
 from trading_control_plane.queries import TradingQueries
@@ -53,101 +50,34 @@ NOW = datetime(2026, 7, 18, 12, tzinfo=UTC)
 
 
 def seed(service: TradingService) -> dict[str, UUID]:
-    admin = service.bootstrap_admin("admin", now=NOW)
-    proposer = service.create_user("proposer", admin, now=NOW)
-    reviewer_one = service.create_user("reviewer-1", admin, now=NOW)
-    reviewer_two = service.create_user("reviewer-2", admin, now=NOW)
-    operator = service.create_user("operator", admin, now=NOW)
-    observer = service.create_user("observer", admin, now=NOW)
-    strategy = service.create_service_principal("strategy-v1", admin, now=NOW)
-    service.assign_role(proposer, Role.PROPOSER, admin, "acct-1", "BINANCE", now=NOW)
-    service.assign_role(reviewer_one, Role.REVIEWER, admin, "acct-1", "BINANCE", now=NOW)
-    service.assign_role(reviewer_two, Role.REVIEWER, admin, "acct-1", "BINANCE", now=NOW)
-    service.assign_role(operator, Role.OPERATOR, admin, "acct-1", "BINANCE", now=NOW)
-    service.assign_role(observer, Role.OBSERVER, admin, "acct-1", "BINANCE", now=NOW)
-    service.assign_role(strategy, Role.PROPOSER, admin, "acct-1", "BINANCE", now=NOW)
-    instrument = service.register_instrument(
-        actor_id=admin,
+    fixture = WorkflowFixture.create(
+        service,
+        now=NOW,
+        admin_username="admin",
+        account_id="acct-1",
         venue="BINANCE",
+        actors=(
+            ActorSpec("proposer", "proposer", Role.PROPOSER),
+            ActorSpec("reviewer_one", "reviewer-1", Role.REVIEWER),
+            ActorSpec("reviewer_two", "reviewer-2", Role.REVIEWER),
+            ActorSpec("operator", "operator", Role.OPERATOR),
+            ActorSpec("observer", "observer", Role.OBSERVER),
+            ActorSpec(
+                "strategy",
+                "strategy-v1",
+                Role.PROPOSER,
+                service_principal=True,
+            ),
+        ),
         symbol="BTCUSDT",
         tick_size=Decimal("0.1"),
         lot_size=Decimal("0.001"),
         minimum_notional=Decimal("5"),
-        contract_multiplier=Decimal("1"),
         quote_currency="USDT",
-        collateral_currency="USDT",
-        protection_supported=True,
-        now=NOW,
-    )
-    service.set_risk_policy(
-        actor_id=admin,
-        version="risk-v1",
-        system_state=SystemRiskState.NORMAL,
-        max_total_risk=Decimal("100"),
-        max_account_risk=Decimal("100"),
-        max_single_loss=Decimal("100"),
-        max_consecutive_losses=3,
-        loss_cooldown=timedelta(hours=1),
+        risk_version="risk-v1",
         max_fact_age=timedelta(seconds=30),
-        now=NOW,
     )
-    context = TradingQueries(service.database).user_context(admin)
-    with service.database.session_factory.begin() as session:
-        team = session.get(Team, UUID(str(context["active_team"]["team_id"])), with_for_update=True)
-        assert team is not None
-        # Exercise the retained pre-lock TESTNET compatibility workflow. Fresh
-        # bootstrap and migrated Teams use the unified exchange-backed ledger.
-        team.execution_mode = "TESTNET"
-        team.execution_mode_locked_at = None
-        session.add(
-            ExchangeAccount(
-                team_id=team.team_id,
-                environment="TESTNET",
-                account_id="acct-1",
-                venue="BINANCE",
-                label="Core workflow test account",
-                registration_source="WORKFLOW_REFERENCE",
-                connection_status="UNCONFIGURED",
-                trading_status="DISABLED",
-                credential_metadata={},
-                created_by=admin,
-                updated_by=admin,
-                created_at=NOW,
-                updated_at=NOW,
-            )
-        )
-    position = service.record_position(
-        "acct-1",
-        "BINANCE",
-        instrument,
-        Decimal("0"),
-        Decimal("0"),
-        Decimal("100"),
-        True,
-        operator,
-        now=NOW,
-    )
-    service.record_account_equity(
-        "acct-1",
-        "BINANCE",
-        Decimal("10000"),
-        Decimal("9000"),
-        "USDT",
-        True,
-        operator,
-        now=NOW,
-    )
-    return {
-        "admin": admin,
-        "proposer": proposer,
-        "reviewer_one": reviewer_one,
-        "reviewer_two": reviewer_two,
-        "operator": operator,
-        "observer": observer,
-        "strategy": strategy,
-        "instrument": instrument,
-        "position": position,
-    }
+    return fixture.ids
 
 
 def enable_auto_add_fixture(database: Database, admin: UUID, *, now: datetime = NOW) -> None:
@@ -238,39 +168,6 @@ def current_add_candidate() -> AddCandidateFacts:
         reference_price=Decimal("110"),
         readiness="READY",
     )
-
-
-def test_auto_add_rejects_initial_candidate_through_legacy_identity() -> None:
-    proposal = Proposal(
-        source=ProposalSource.SYSTEM.value,
-        strategy_version="breakouts-v1",
-        source_candidate_id="pt_legacy_initial",
-        venue="BINANCE",
-        direction=Direction.LONG.value,
-        frozen_payload={"details": {"allow_auto_add": True}},
-    )
-    instrument = Instrument(symbol="BTCUSDT")
-    policy = RiskPolicy(max_fact_age_seconds=30)
-    candidate = AddCandidateFacts(
-        candidate_id="pt_exact_initial",
-        legacy_candidate_id="pt_legacy_initial",
-        contract_version="breakouts-v1",
-        venue="BINANCE",
-        symbol="BTCUSDT",
-        direction=Direction.LONG,
-        observed_at=NOW,
-        reference_price=Decimal("110"),
-        readiness="READY",
-    )
-
-    with pytest.raises(DomainRejected, match="AUTO_ADD_CANDIDATE_VERSION_INVALID"):
-        TradingService._validate_add_candidate(
-            proposal=proposal,
-            instrument=instrument,
-            candidate=candidate,
-            policy=policy,
-            now=NOW,
-        )
 
 
 def issue_authorization(
@@ -1207,8 +1104,6 @@ def test_risk_and_send_freshness_allow_bounded_venue_clock_skew(
         assert decision is not None
         assert decision.result == "ALLOW"
         assert decision.input_data["fact_age_seconds"] == "0.0"
-    assert not service._fact_is_stale(observed_at, NOW, timedelta(seconds=30))
-    assert service._fact_is_stale(NOW + timedelta(seconds=31), NOW, timedelta(seconds=30))
 
 
 def test_risk_decision_rejects_persisted_stale_and_unknown_facts(

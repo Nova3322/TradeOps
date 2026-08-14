@@ -399,7 +399,7 @@ class PolicyRiskService(ServiceComponent):
                 and unit_price > 0
                 and value is not None
                 and value >= 0
-                and not self.facade._fact_is_stale(valuation_time, now, max_age)
+                and not self._fact_is_stale(valuation_time, now, max_age)
             )
             known = known and row_known
             if row_known:
@@ -513,7 +513,7 @@ class PolicyRiskService(ServiceComponent):
         source_current = proposal.environment != ExecutionEnvironment.LIVE.value or (
             source_health is not None
             and source_health.status == "SUCCESS"
-            and not self.facade._fact_is_stale(source_health.checked_at, now, max_age)
+            and not self._fact_is_stale(source_health.checked_at, now, max_age)
         )
 
         position_known = position is not None and position.fact_status == FactStatus.KNOWN.value

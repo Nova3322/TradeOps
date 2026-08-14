@@ -8,7 +8,7 @@ from trading_control_plane.query_core import *
 
 class AccountQueries(QueryComponent):
     def exchange_accounts(self, actor_id: UUID) -> dict[str, Any]:
-        workspace_id, team_id = self.facade._active_scope_ids(actor_id)
+        workspace_id, team_id = self._active_scope_ids(actor_id)
         with self.database.session_factory() as session:
             assignments = session.scalars(
                 select(RoleAssignment).where(
@@ -202,7 +202,7 @@ class AccountQueries(QueryComponent):
     ) -> dict[str, Any]:
         if not self.service.can_user(user_id, "view", account_id, venue):
             raise DomainRejected("RBAC_DENIED", "venue facts are outside the current scope")
-        workspace_id, team_id = self.facade._active_scope_ids(user_id)
+        workspace_id, team_id = self._active_scope_ids(user_id)
         with self.database.session_factory() as session:
             account = session.scalar(
                 select(ExchangeAccount.exchange_account_id).where(

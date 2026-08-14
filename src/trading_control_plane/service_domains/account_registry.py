@@ -294,7 +294,7 @@ def delete_exchange_account(
                 "EXCHANGE_ACCOUNT_DELETE_BLOCKED",
                 ";".join(f"{item['code']}={item['count']}" for item in blockers),
             )
-        self.facade._set_internal_principal_active(
+        self._set_internal_principal_active(
             session,
             account.runtime_service_principal_id,
             False,
@@ -506,7 +506,7 @@ def set_exchange_account_state(
         if not enabled:
             account.runtime_sync_enabled = False
             account.trading_status = "DISABLED"
-            self.facade._set_internal_principal_active(
+            self._set_internal_principal_active(
                 session, account.runtime_service_principal_id, False
             )
         account.version += 1

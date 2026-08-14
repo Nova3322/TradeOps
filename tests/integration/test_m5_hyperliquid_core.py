@@ -6,27 +6,20 @@ from decimal import Decimal
 from typing import Any
 from uuid import UUID
 
-from conftest import add_exchange_account_fixture, set_test_team_environment
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy import select
+from workflow_builder import ActorSpec, WorkflowFixture
 
 from trading_control_plane.api import create_app
 from trading_control_plane.config import Settings
 from trading_control_plane.database import Database
 from trading_control_plane.domain import (
     CampaignStatus,
-    Direction,
     DomainRejected,
-    ExecutionEnvironment,
-    IntentKind,
     OrderIntentStatus,
-    ProposalSource,
     ReservationStatus,
-    ReviewDecision,
-    RiskTier,
     Role,
-    SystemRiskState,
     TargetCandidate,
     TargetUrgency,
 )
@@ -147,117 +140,38 @@ class MutableHyperliquidReader:
 
 def seed(service: TradingService, *, key: str) -> dict[str, UUID]:
     now = datetime.now(UTC)
-    admin = service.bootstrap_admin(f"{key}-admin", now=now)
-    set_test_team_environment(service.database, admin, "TESTNET")
-    add_exchange_account_fixture(service.database, admin, ACCOUNT_ID, "HYPERLIQUID")
-    proposer = service.create_user(f"{key}-proposer", admin, now=now)
-    reviewer_one = service.create_user(f"{key}-reviewer-1", admin, now=now)
-    reviewer_two = service.create_user(f"{key}-reviewer-2", admin, now=now)
-    operator = service.create_user(f"{key}-operator", admin, now=now)
-    for user_id, role in (
-        (proposer, Role.PROPOSER),
-        (reviewer_one, Role.REVIEWER),
-        (reviewer_two, Role.REVIEWER),
-        (operator, Role.OPERATOR),
-    ):
-        service.assign_role(user_id, role, admin, ACCOUNT_ID, "HYPERLIQUID", now=now)
-    instrument = service.register_instrument(
-        actor_id=admin,
+    fixture = WorkflowFixture.create(
+        service,
+        now=now,
+        admin_username=f"{key}-admin",
+        account_id=ACCOUNT_ID,
         venue="HYPERLIQUID",
+        actors=tuple(
+            ActorSpec(name, f"{key}-{username}", role)
+            for name, username, role in (
+                ("proposer", "proposer", Role.PROPOSER),
+                ("reviewer_one", "reviewer-1", Role.REVIEWER),
+                ("reviewer_two", "reviewer-2", Role.REVIEWER),
+                ("operator", "operator", Role.OPERATOR),
+            )
+        ),
         symbol="BTC",
         tick_size=Decimal("0.1"),
         lot_size=Decimal("0.00001"),
         minimum_notional=Decimal(10),
-        contract_multiplier=Decimal(1),
         quote_currency="USDC",
-        collateral_currency="USDC",
-        protection_supported=True,
-        now=now,
-    )
-    service.set_risk_policy(
-        actor_id=admin,
-        version=f"{key}-risk-v1",
-        system_state=SystemRiskState.NORMAL,
-        max_total_risk=Decimal(100),
-        max_account_risk=Decimal(100),
-        max_single_loss=Decimal(100),
-        max_consecutive_losses=3,
-        loss_cooldown=timedelta(hours=1),
+        risk_version=f"{key}-risk-v1",
         max_fact_age=timedelta(minutes=10),
-        now=now,
+        mark_price=Decimal(100),
     )
-    service.record_position(
-        ACCOUNT_ID,
-        "HYPERLIQUID",
-        instrument,
-        Decimal(0),
-        Decimal(0),
-        Decimal(100),
-        True,
-        operator,
-        environment=ExecutionEnvironment.TESTNET,
-        now=now,
-    )
-    service.record_account_equity(
-        ACCOUNT_ID,
-        "HYPERLIQUID",
-        Decimal(10_000),
-        Decimal(9_000),
-        "USDC",
-        True,
-        operator,
-        environment=ExecutionEnvironment.TESTNET,
-        now=now,
-    )
-    proposal = service.create_proposal(
-        actor_id=proposer,
-        source=ProposalSource.MANUAL,
-        risk_tier=RiskTier.HIGH,
-        account_id=ACCOUNT_ID,
-        venue="HYPERLIQUID",
-        instrument_id=instrument,
-        direction=Direction.LONG,
-        quantity=Decimal(1),
-        max_risk=Decimal(40),
-        expires_at=now + timedelta(hours=2),
-        idempotency_key=f"{key}-proposal",
-        environment=ExecutionEnvironment.TESTNET,
+    proposal = fixture.approved_proposal(
+        key=key,
         details={"limit_price": "100", "invalidation_price": "95"},
-        now=now,
     )
-    service.submit_proposal(proposal, proposer, now=now)
-    service.review_proposal(proposal, reviewer_one, ReviewDecision.APPROVE, "first", now=now)
-    service.review_proposal(proposal, reviewer_two, ReviewDecision.APPROVE, "second", now=now)
-    service.decide_risk(
-        proposal_id=proposal,
-        actor_id=operator,
-        kind=IntentKind.INITIAL,
-        idempotency_key=f"{key}-risk",
-        now=now,
-    )
-    authorization = service.issue_authorization(
-        proposal_id=proposal,
-        actor_id=operator,
-        expires_at=now + timedelta(minutes=30),
-        allowed_adds=0,
-        idempotency_key=f"{key}-authorization",
-        now=now,
-    )
-    opening = service.create_order_intent(
-        authorization,
-        operator,
-        IntentKind.INITIAL,
-        ACCOUNT_ID,
-        "HYPERLIQUID",
-        instrument,
-        Direction.LONG,
-        Decimal(1),
-        f"{key}-opening",
-        now=now,
-    )
+    opening = fixture.opening_order(proposal=proposal, key=key)
     return {
-        "operator": operator,
-        "instrument": instrument,
+        "operator": fixture.ids["operator"],
+        "instrument": fixture.ids["instrument"],
         "campaign": opening.campaign_id,
         "reservation": opening.reservation_id,
         "opening": opening.intent_id,

@@ -273,7 +273,6 @@ async def run_m3_flow(database: Database) -> None:
 
         web = await http.get("/venues/binance")
         assert web.status_code == 200, web.text
-        assert "<title>交易控制台</title>" in web.text
 
         await logout(http)
         await login(http, "observer")

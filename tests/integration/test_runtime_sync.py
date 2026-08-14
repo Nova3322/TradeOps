@@ -1660,7 +1660,6 @@ def test_database_bound_supervisor_persists_account_facts_without_trading(
         worker_factory=worker_factory,
     )
 
-    assert supervisor.has_bindings() is True
     report = supervisor.run_once(started_at=NOW, completed_at=NOW)
 
     assert report.successful is True

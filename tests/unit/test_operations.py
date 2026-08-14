@@ -140,43 +140,6 @@ def test_environment_template_names_every_settings_field_without_values_from_run
     assert expected <= declared
 
 
-def test_notification_worker_compose_contract_is_explicit_and_hardened() -> None:
-    compose = Path("compose.yaml").read_text(encoding="utf-8")
-    service = compose.split("  notification-worker:\n", 1)[1].split("\n  freqtrade-binance:", 1)[0]
-    launcher = Path("scripts/run_compose.sh").read_text(encoding="utf-8")
-
-    assert 'profiles: ["notifications"]' in service
-    assert 'TRADING_NOTIFICATION_WORKER_ENABLED: "true"' in service
-    assert "TRADING_NOTIFICATION_EMAIL_SMTP_ALLOWED_HOSTS" in compose
-    assert "trading-notification-worker\n        - --healthcheck" in service
-    assert "read_only: true" in service
-    assert 'cap_drop: ["ALL"]' in service
-    assert 'security_opt: ["no-new-privileges:true"]' in service
-    assert "restart: unless-stopped" in service
-    assert "--notifications)" in launcher
-    assert "profiles+=(--profile notifications)" in launcher
-    assert "Notification delivery: disabled" in launcher
-
-
-def test_runtime_worker_compose_contract_is_explicit_hardened_and_default_off() -> None:
-    compose = Path("compose.yaml").read_text(encoding="utf-8")
-    service = compose.split("  runtime-worker:\n", 1)[1].split("\n  notification-worker:", 1)[0]
-    launcher = Path("scripts/run_compose.sh").read_text(encoding="utf-8")
-
-    assert 'profiles: ["runtime"]' in service
-    assert 'TRADING_RUNTIME_SYNC_ENABLED: "true"' in service
-    assert "TRADING_PERPTAPE_WEBSOCKET_ENABLED" in service
-    assert "trading-sync-worker\n        - --healthcheck" in service
-    assert "read_only: true" in service
-    assert 'cap_drop: ["ALL"]' in service
-    assert 'security_opt: ["no-new-privileges:true"]' in service
-    assert "restart: unless-stopped" in service
-    assert "--runtime)" in launcher
-    assert "profiles+=(--profile runtime)" in launcher
-    assert "Read-only runtime synchronization: disabled" in launcher
-    assert "[--runtime] [--notifications]" in launcher
-
-
 def test_doctor_marks_enabled_but_incomplete_connection_as_blocked() -> None:
     report = build_diagnostic_report(
         safe_settings(

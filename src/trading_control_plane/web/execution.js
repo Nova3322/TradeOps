@@ -2,7 +2,7 @@ async function renderCampaignList() {
   const result = await api('/api/campaigns');
   const environment = currentWorkflowEnvironment();
   const items = (result.data || []).filter(item => item.environment === environment);
-  const modeLabel = executionModeLabel(environment);
+  const modeLabel = fmtExecutionMode(environment);
   const environmentCopy = environment === 'LIVE'
     ? '订单会发送到交易所生产服务器并影响真实资金。'
     : '订单会发送到交易所测试服务器，仅代表交易所测试资产。';
@@ -10,16 +10,6 @@ async function renderCampaignList() {
     <div class="stats"><div class="stat"><small>交易任务记录</small><b>${items.length}</b></div><div class="stat"><small>建仓中 / 持仓中</small><b>${items.filter(item => ['OPEN','OPENING'].includes(item.status)).length}</b></div><div class="stat"><small>结果未知</small><b>${items.filter(item => item.status === 'UNKNOWN').length}</b></div><div class="stat"><small>运行范围</small><b style="font-size:14px">${escapeHtml(modeLabel)}</b></div></div>
     ${items.length ? `<div class="table-wrap campaign-list-table"><table><thead><tr><th>标的 / 方向</th><th>账户 / 场所</th><th>仓位目标</th><th>状态</th><th>最终盈亏</th><th>更新时间</th></tr></thead><tbody>${items.map(item => `<tr data-href="/campaigns/${item.campaign_id}"><td data-label="标的 / 方向"><b>${escapeHtml(item.symbol || '标的未配置')}</b><br><span class="${item.direction === 'LONG' ? 'direction-long' : 'direction-short'}">${escapeHtml(fmtDirection(item.direction))}</span><br><a class="row-link" href="/campaigns/${item.campaign_id}" data-link>${shortId(item.campaign_id)} · 查看详情</a></td><td data-label="账户 / 场所">${escapeHtml(fmtDefaultAccountLabel(item.account_id))}<br><span class="subtle">${escapeHtml(fmtVenueLabel(item.venue))}</span></td><td data-label="仓位目标">${escapeHtml(campaignTargetLabel(item))}</td><td data-label="状态"><b class="status-${escapeHtml(item.status)}">${escapeHtml(fmtStatus(item.status))}</b></td><td data-label="最终盈亏">${escapeHtml(campaignPnlLabel(item, item.final_pnl))}</td><td data-label="更新时间">${fmtDate(item.updated_at)}</td></tr>`).join('')}</tbody></table></div>` : `<section class="empty-state"><div><h2>当前没有${escapeHtml(modeLabel)}交易任务</h2><p>提案通过独立审核、实时风险检查和短期授权后，交易运维人员才能在同一环境发起订单。</p></div></section>`}</section>`;
   bindLinkedRows();
-}
-
-function executionModeLabel(mode) {
-  return mode === 'LIVE' ? '生产模式' : mode === 'TESTNET' ? '测试模式' : '待配置';
-}
-
-function executionModeNotice(mode) {
-  if (mode === 'LIVE') return '订单会发送到交易所生产服务器并影响真实资金。';
-  if (mode === 'TESTNET') return '订单会发送到交易所测试服务器，仅代表交易所测试资产。';
-  return '配置风险政策后，由管理员选择测试或生产模式；账户凭据、连接和运行服务只影响订单执行准备。';
 }
 
 function accountCredentialFields(venue, prefix = '') {
@@ -36,7 +26,7 @@ function credentialsFromForm(form, prefix = '') {
 }
 
 function accountCard(item) {
-  const mode = executionModeLabel(item.environment);
+  const mode = fmtExecutionMode(item.environment);
   const disabled = !item.active;
   const permissions = item.permissions || {};
   const unsupported = item.environment === 'TESTNET' && !['BINANCE','HYPERLIQUID'].includes(item.venue);
@@ -64,13 +54,13 @@ async function renderAccountManagement() {
   const accounts = (accountData.data || []).filter(item => item.environment === selectedEnvironment);
   const canManage = Boolean(accountData.can_manage);
   const venueOptions = (accountData.supported_venues || []).map(venue => `<option value="${venue}" ${selectedEnvironment === 'TESTNET' && !['BINANCE','HYPERLIQUID'].includes(venue) ? 'disabled' : ''}>${escapeHtml(fmtVenueLabel(venue))}${selectedEnvironment === 'TESTNET' && !['BINANCE','HYPERLIQUID'].includes(venue) ? ' · 暂不支持测试环境执行' : ''}</option>`).join('');
-  const createForm = canManage ? `<details class="card operation-toolbox"><summary><span><b>添加${executionModeLabel(selectedEnvironment)}账户</b><small>凭据将绑定团队、环境、交易所和账户</small></span><strong>展开</strong></summary><form id="exchange-account-create-form" class="toolbox-content"><div class="field-grid"><label>交易所<select name="venue">${venueOptions}</select></label><label>账户 ID<input name="account_id" required maxlength="120"></label><label>显示名称<input name="label" required maxlength="120"></label></div><div class="field-grid" data-create-credentials></div><p class="safety-note">测试凭据只会加载到 TESTNET Adapter；生产凭据只会加载到 LIVE Adapter。</p><div class="form-error" role="alert"></div><button class="primary">添加账户</button></form></details>` : '';
+  const createForm = canManage ? `<details class="card operation-toolbox"><summary><span><b>添加${fmtExecutionMode(selectedEnvironment)}账户</b><small>凭据将绑定团队、环境、交易所和账户</small></span><strong>展开</strong></summary><form id="exchange-account-create-form" class="toolbox-content"><div class="field-grid"><label>交易所<select name="venue">${venueOptions}</select></label><label>账户 ID<input name="account_id" required maxlength="120"></label><label>显示名称<input name="label" required maxlength="120"></label></div><div class="field-grid" data-create-credentials></div><p class="safety-note">测试凭据只会加载到 TESTNET Adapter；生产凭据只会加载到 LIVE Adapter。</p><div class="form-error" role="alert"></div><button class="primary">添加账户</button></form></details>` : '';
   const liveCapital = selectedEnvironment === 'LIVE' ? `<section><div class="section-heading"><div><p class="eyebrow">仅生产环境</p><h2>Vault、Safe 与资金路径</h2><p>生产金库合约、提取白名单和私钥继续使用加密信封，页面永不回显。</p></div></div><article class="card"><p>${capitalConfigurations.data?.LIVE ? '生产资金路径已配置，可在资金中心查看当前可信事实。' : '尚未配置生产 Vault / Safe 资金路径。'}</p><a class="secondary" href="/capital" data-link>查看生产资金路径</a></article></section>` : `<section><article class="callout"><b>测试账户不配置真实资金路径</b><p>测试模式不显示生产 Vault、Safe、提现白名单或真实资金划转配置。</p></article></section>`;
   const notificationRows = (notifications.data || []).filter(item => item.environment === selectedEnvironment).map(item => `<li><b>${escapeHtml(item.name)}</b><span>${escapeHtml(item.channel)} · ${item.enabled ? '已启用' : '已停用'}</span></li>`).join('');
-  main.innerHTML = `<section class="page trading-mode-page mode-accounts-page"><header class="page-head"><div><p class="eyebrow">当前空间 · ${escapeHtml(activeSpaceName)}</p><h1>账户管理</h1><p class="lede">提前配置测试和生产账户；实际执行环境始终由服务端读取团队当前模式。</p></div><span class="status-pill ${mode.execution_mode === 'LIVE' ? 'status-ATTENTION' : 'status-APPROVED'}">当前模式：${executionModeLabel(mode.execution_mode)}</span></header>
+  main.innerHTML = `<section class="page trading-mode-page mode-accounts-page"><header class="page-head"><div><p class="eyebrow">当前空间 · ${escapeHtml(activeSpaceName)}</p><h1>账户管理</h1><p class="lede">提前配置测试和生产账户；实际执行环境始终由服务端读取团队当前模式。</p></div><span class="status-pill ${mode.execution_mode === 'LIVE' ? 'status-ATTENTION' : 'status-APPROVED'}">当前模式：${fmtExecutionMode(mode.execution_mode)}</span></header>
     <article class="callout"><b>账户配置范围</b><p>这里切换的只是账户配置范围，不会改变团队当前运行模式。实际模式切换请前往模式设置。</p><a class="secondary" href="/team-settings" data-link>前往模式设置</a></article>
     <nav class="mode-choice-grid" aria-label="账户配置范围"><a class="mode-choice ${selectedEnvironment === 'TESTNET' ? 'is-selected' : ''}" href="/accounts?environment=TESTNET" data-link aria-current="${selectedEnvironment === 'TESTNET' ? 'page' : 'false'}"><b>测试账户</b><small>交易所测试环境 API</small></a><a class="mode-choice ${selectedEnvironment === 'LIVE' ? 'is-selected live-choice' : ''}" href="/accounts?environment=LIVE" data-link aria-current="${selectedEnvironment === 'LIVE' ? 'page' : 'false'}"><b>生产账户</b><small>真实资金环境 API</small></a></nav>
-    ${createForm}<section><div class="section-heading"><div><p class="eyebrow">${executionModeLabel(selectedEnvironment)} · ${accounts.length} 个配置</p><h2>交易所账户</h2></div></div>${accounts.length ? `<div class="mode-account-grid">${accounts.map(accountCard).join('')}</div>` : '<div class="empty-state"><div><h2>尚未添加此环境账户</h2><p>添加并验证账户后，交易执行才会就绪；账户配置不影响模式选择。</p></div></div>'}</section>${liveCapital}
+    ${createForm}<section><div class="section-heading"><div><p class="eyebrow">${fmtExecutionMode(selectedEnvironment)} · ${accounts.length} 个配置</p><h2>交易所账户</h2></div></div>${accounts.length ? `<div class="mode-account-grid">${accounts.map(accountCard).join('')}</div>` : '<div class="empty-state"><div><h2>尚未添加此环境账户</h2><p>添加并验证账户后，交易执行才会就绪；账户配置不影响模式选择。</p></div></div>'}</section>${liveCapital}
     <section><div class="section-heading"><div><p class="eyebrow">按环境隔离</p><h2>通知账户</h2></div></div><article class="card"><ul class="status-list">${notificationRows || '<li><span>当前范围尚未配置通知账户</span></li>'}</ul><a class="secondary" href="/notifications" data-link>管理通知账户</a></article></section></section>`;
   const create = document.querySelector('#exchange-account-create-form');
   if (create) {
@@ -94,7 +84,7 @@ function readinessItems(items) {
 async function renderTeamSettings() {
   const activeSpaceName = session?.active_team?.name || '当前团队';
   const response = await api('/api/trading-mode'); const data = response.data;
-  const current = executionModeLabel(data.execution_mode);
+  const current = fmtExecutionMode(data.execution_mode);
   let selectedTarget = data.execution_mode === 'LIVE'
     ? 'TESTNET'
     : data.execution_mode === 'TESTNET' ? 'LIVE' : 'TESTNET';
@@ -119,7 +109,7 @@ async function renderTeamSettings() {
     const confirmationField = target === 'LIVE'
       ? `<div class="mode-production-confirm"><div class="mode-confirmation-copy"><div><span>生产确认文案</span><code>${confirmation}</code></div><button class="secondary" type="button" data-copy-mode-confirmation>复制文案</button></div><label for="team-mode-confirmation">粘贴或输入上方文案<input id="team-mode-confirmation" name="confirmation" autocomplete="off" autocapitalize="off" spellcheck="false" required aria-describedby="mode-confirmation-help"></label><p id="mode-confirmation-help" class="microcopy">完全一致后才会解锁生产模式切换按钮。</p></div>`
       : `<input name="confirmation" type="hidden" value="${confirmation}"><p class="callout is-success">测试模式不要求输入确认文案；点击按钮后仍会进行一次最终确认。</p>`;
-    panel.innerHTML = `<article class="card mode-switch-target ${target === 'LIVE' ? 'is-live' : 'is-testnet'}"><div class="mode-switch-target-head"><div><p class="eyebrow">目标模式</p><h2>${escapeHtml(targetCopy)}</h2></div><span class="status-pill ${switchAllowed ? 'status-APPROVED' : 'status-DENY'}">${switchAllowed ? '可以切换' : '暂不能切换'}</span></div><div class="mode-switch-status-grid"><div><small>模式切换</small><b>${switchAllowed ? '条件已通过' : `${blockers.length} 类阻断`}</b><span>${switchAllowed ? '可继续最终确认' : '处理阻断后再试'}</span></div><div><small>下单准备</small><b>${executionReady ? '执行已就绪' : '切换后仍不可下单'}</b><span>${executionReady ? '下单时仍会再次校验' : '账户条件由下单链路独立检查'}</span></div></div>${blockers.length ? `<div class="callout is-warning"><b>必须先处理</b><ul class="status-list">${readinessItems(blockers)}</ul></div>` : ''}${advisories.length ? `<details class="mode-switch-advisories"><summary>查看 ${advisories.reduce((sum, item) => sum + Number(item.count || 0), 0)} 项下单准备提示</summary><ul class="status-list">${readinessItems(advisories)}</ul><p>这些项目不阻止模式切换；处理完成前，订单发送仍会失败关闭。</p></details>` : ''}<p class="safety-note">切换不会开启实盘下单、自动加仓或资金划转；旧环境未执行授权和订单意图会失效，历史提案环境保持不变。</p>${data.can_manage ? `<form id="team-mode-switch-form" class="mode-switch-form">${confirmationField}<div class="form-error" role="alert"></div><button class="mode-switch-submit ${target === 'LIVE' ? 'danger' : 'primary'}" ${switchAllowed && target !== 'LIVE' ? '' : 'disabled'}>切换到${executionModeLabel(target)}</button></form>` : '<p class="callout">普通成员只能查看当前模式；需要系统管理员或 team.manage 权限执行切换。</p>'}</article>`;
+    panel.innerHTML = `<article class="card mode-switch-target ${target === 'LIVE' ? 'is-live' : 'is-testnet'}"><div class="mode-switch-target-head"><div><p class="eyebrow">目标模式</p><h2>${escapeHtml(targetCopy)}</h2></div><span class="status-pill ${switchAllowed ? 'status-APPROVED' : 'status-DENY'}">${switchAllowed ? '可以切换' : '暂不能切换'}</span></div><div class="mode-switch-status-grid"><div><small>模式切换</small><b>${switchAllowed ? '条件已通过' : `${blockers.length} 类阻断`}</b><span>${switchAllowed ? '可继续最终确认' : '处理阻断后再试'}</span></div><div><small>下单准备</small><b>${executionReady ? '执行已就绪' : '切换后仍不可下单'}</b><span>${executionReady ? '下单时仍会再次校验' : '账户条件由下单链路独立检查'}</span></div></div>${blockers.length ? `<div class="callout is-warning"><b>必须先处理</b><ul class="status-list">${readinessItems(blockers)}</ul></div>` : ''}${advisories.length ? `<details class="mode-switch-advisories"><summary>查看 ${advisories.reduce((sum, item) => sum + Number(item.count || 0), 0)} 项下单准备提示</summary><ul class="status-list">${readinessItems(advisories)}</ul><p>这些项目不阻止模式切换；处理完成前，订单发送仍会失败关闭。</p></details>` : ''}<p class="safety-note">切换不会开启实盘下单、自动加仓或资金划转；旧环境未执行授权和订单意图会失效，历史提案环境保持不变。</p>${data.can_manage ? `<form id="team-mode-switch-form" class="mode-switch-form">${confirmationField}<div class="form-error" role="alert"></div><button class="mode-switch-submit ${target === 'LIVE' ? 'danger' : 'primary'}" ${switchAllowed && target !== 'LIVE' ? '' : 'disabled'}>切换到${fmtExecutionMode(target)}</button></form>` : '<p class="callout">普通成员只能查看当前模式；需要系统管理员或 team.manage 权限执行切换。</p>'}</article>`;
     const form = document.querySelector('#team-mode-switch-form');
     const submit = form?.querySelector('.mode-switch-submit');
     const input = form?.elements.confirmation;
@@ -129,7 +119,7 @@ async function renderTeamSettings() {
       syncSubmitState();
       form.querySelector('[data-copy-mode-confirmation]')?.addEventListener('click', async () => { try { await navigator.clipboard.writeText(confirmation); showToast('生产确认文案已复制'); input.focus(); } catch (_error) { input.focus(); showToast('浏览器未允许复制，请手动输入确认文案'); } });
     }
-    form?.addEventListener('submit', async event => { event.preventDefault(); const confirmed = await confirmAction({title:`确认切换到${executionModeLabel(target)}？`, message:target === 'LIVE' ? '生产模式订单会影响真实资金；危险能力仍保持独立关闭。' : '测试模式订单会发送到交易所测试服务器。', confirmLabel:'确认切换'}); if (!confirmed) return; await submitForm(form, () => api(`/api/teams/${data.team_id}/trading-mode`, {method:'PUT', body:JSON.stringify({mode:target, confirmation:form.elements.confirmation.value.trim(), expected_version:data.version, idempotency_key:crypto.randomUUID()})}), {success:`已切换到${executionModeLabel(target)}`, onSuccess:route}); });
+    form?.addEventListener('submit', async event => { event.preventDefault(); const confirmed = await confirmAction({title:`确认切换到${fmtExecutionMode(target)}？`, message:target === 'LIVE' ? '生产模式订单会影响真实资金；危险能力仍保持独立关闭。' : '测试模式订单会发送到交易所测试服务器。', confirmLabel:'确认切换'}); if (!confirmed) return; await submitForm(form, () => api(`/api/teams/${data.team_id}/trading-mode`, {method:'PUT', body:JSON.stringify({mode:target, confirmation:form.elements.confirmation.value.trim(), expected_version:data.version, idempotency_key:crypto.randomUUID()})}), {success:`已切换到${fmtExecutionMode(target)}`, onSuccess:route}); });
   };
   const updateTarget = target => {
     selectedTarget = target;
@@ -428,11 +418,6 @@ async function renderCampaignFacts(mode) {
   });
 }
 
-const LIVE_CAPITAL_SOURCES = [
-  {key:'BINANCE', location_type:'VENUE', label:'Binance'},
-  {key:'HYPERLIQUID', location_type:'VENUE', label:'Hyperliquid'},
-  {key:'VAULT', location_type:'VAULT', label:'链上金库'},
-];
 const CAPITAL_CHART_RANGE_MAX = 1000;
 const DIRECT_CAPITAL_PATHS = [
   {path:'VAULT_TO_BINANCE', from:'链上金库', to:'币安', badge:'二选一', action:'检查转入币安条件', copy:'选择 NoTilt Vault 或 Safe Spending Limits，再按对应额度规则转入币安。', steps:['选择链上金库','实时额度预检','人控确认','进入币安']},
@@ -587,4 +572,3 @@ async function campaignAction(path, body, {button = null, pendingLabel = '处理
   };
   return button ? withPending(button, pendingLabel, run) : run();
 }
-async function submitNamedForm(event, path) { event.preventDefault(); await campaignAction(path, Object.fromEntries(new FormData(event.currentTarget)), {button:event.submitter}); }

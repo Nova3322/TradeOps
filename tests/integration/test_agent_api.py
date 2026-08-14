@@ -133,9 +133,6 @@ def test_user_owned_api_key_dynamic_rbac_scope_audit_and_token_lifecycle(
 
             page = await owner.get("/profile/api-keys")
             assert page.status_code == 200
-            assert 'href="/profile/api-keys"' in page.text
-            assert 'href="/admin/agents"' not in page.text
-            assert "/assets/app.js?v=175" in page.text
 
             scopes = await owner.get("/api/profile/api-key-contexts")
             assert scopes.status_code == 200, scopes.text

@@ -215,7 +215,7 @@ class DirectOperationCapitalService(ServiceComponent):
             ):
                 if configured_account_id is None:
                     continue
-                self.facade._ensure_exchange_account_reference(
+                self._ensure_exchange_account_reference(
                     session,
                     team=team,
                     actor_id=actor_id,
@@ -392,7 +392,7 @@ class DirectOperationCapitalService(ServiceComponent):
                 account_environment = (
                     team.execution_mode if team.execution_mode in {"TESTNET", "LIVE"} else "LIVE"
                 )
-                self.facade._ensure_exchange_account_reference(
+                self._ensure_exchange_account_reference(
                     session,
                     team=team,
                     actor_id=actor_id,

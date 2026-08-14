@@ -46,7 +46,7 @@ class AuthorizationRiskService(ServiceComponent):
             if response is not None:
                 return _as_uuid(str(response["authorization_id"]))
             self.transactions._lock_risk_capacity(session, proposal.team_id)
-            policy = self.facade._active_risk_policy(session, proposal.team_id)
+            policy = self._active_risk_policy(session, proposal.team_id)
             if policy.system_state != SystemRiskState.NORMAL.value:
                 _reject(
                     "AUTHORIZATION_RISK_STATE_INVALID",
@@ -436,7 +436,7 @@ class AuthorizationRiskService(ServiceComponent):
             if response is not None:
                 return SystemRiskState(str(response["system_state"]))
             self.transactions._lock_risk_capacity(session, team.team_id)
-            policy = self.facade._active_risk_policy(session, team.team_id)
+            policy = self._active_risk_policy(session, team.team_id)
             if policy.system_state != SystemRiskState.KILL_SWITCH.value:
                 policy.system_state = SystemRiskState.REDUCE_ONLY.value
                 policy.revision += 1
@@ -511,7 +511,7 @@ class AuthorizationRiskService(ServiceComponent):
             if response is not None:
                 return
             self.transactions._lock_risk_capacity(session, team.team_id)
-            policy = self.facade._active_risk_policy(session, team.team_id)
+            policy = self._active_risk_policy(session, team.team_id)
             if policy.system_state != SystemRiskState.NORMAL.value:
                 _reject("RISK_RESTORE_BLOCKED", "risk policy must be NORMAL")
             gate = session.get(CapabilityGate, "AUTO_ADD", with_for_update=True)

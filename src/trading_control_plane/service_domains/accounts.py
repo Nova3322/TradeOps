@@ -1254,7 +1254,7 @@ class AccountService(ServiceComponent):
             team = self.transactions._require_role(
                 session, actor_id, "venue.record", account_id, venue
             )
-            self.facade._validate_sender(
+            self._validate_sender(
                 session,
                 team.team_id,
                 execution_scope,
@@ -1284,7 +1284,7 @@ class AccountService(ServiceComponent):
                     "LIVE_ORDER_SEND_DISABLED",
                     "LIVE order send requires the explicit capability gate",
                 )
-            account = self.facade._require_exchange_account_live_ready(
+            account = self._require_exchange_account_live_ready(
                 session,
                 team_id=team.team_id,
                 account_id=account_id,
@@ -1401,7 +1401,7 @@ class AccountService(ServiceComponent):
                 campaign.venue,
                 team_id=campaign.team_id,
             )
-            self.facade._validate_sender(
+            self._validate_sender(
                 session,
                 campaign.team_id,
                 execution_scope,
@@ -1415,7 +1415,7 @@ class AccountService(ServiceComponent):
                     "LIVE_ORDER_SEND_DISABLED",
                     "LIVE order send requires the explicit capability gate",
                 )
-            account = self.facade._require_exchange_account_live_ready(
+            account = self._require_exchange_account_live_ready(
                 session,
                 team_id=campaign.team_id,
                 account_id=campaign.account_id,
@@ -1716,25 +1716,6 @@ class AccountService(ServiceComponent):
                     )
                 )
             return tuple(bindings)
-
-    def validate_runtime_account_binding(self, binding: PreparedRuntimeAccountBinding) -> None:
-        with self.database.session_factory() as session:
-            account = session.get(ExchangeAccount, binding.exchange_account_id)
-            if (
-                account is None
-                or account.team_id != binding.team_id
-                or account.account_id != binding.account_id
-                or account.venue != binding.venue
-                or account.environment != binding.environment
-                or not account.runtime_sync_enabled
-                or account.runtime_service_principal_id != binding.service_principal_id
-                or account.version != binding.account_version
-                or account.credential_version != binding.credential_version
-            ):
-                _reject(
-                    "RUNTIME_BINDING_CHANGED",
-                    "the database-bound runtime account changed during synchronization",
-                )
 
     def validate_perptape_runtime_binding(self, binding: PreparedPerptapeRuntimeBinding) -> None:
         with self.database.session_factory() as session:

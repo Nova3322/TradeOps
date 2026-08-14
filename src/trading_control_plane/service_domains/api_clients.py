@@ -7,6 +7,10 @@ from trading_control_plane.service_core import *
 
 
 class ApiClientService(ServiceComponent):
+    @staticmethod
+    def _require_api_client_human_session() -> None:
+        _require_human_web_session("API Key lifecycle changes require an interactive HUMAN session")
+
     def _token_digest(self, client_id: UUID, version: int, token: str) -> str:
         purpose = (
             "agent-api-token" if token.startswith(f"{AGENT_TOKEN_MARKER}.") else "api-client-token"
@@ -65,14 +69,6 @@ class ApiClientService(ServiceComponent):
             )
         return owner, workspace, team
 
-    @staticmethod
-    def _require_human_request() -> None:
-        if current_api_client_context() is not None:
-            _reject(
-                "HUMAN_WEB_CONFIRMATION_REQUIRED",
-                "API Key lifecycle changes require an interactive HUMAN session",
-            )
-
     def authenticate_api_client_token(self, token: str, *, now: datetime) -> dict[str, Any]:
         client_id = parse_api_client_token(token)
         with self.database.session_factory.begin() as session:
@@ -126,7 +122,7 @@ class ApiClientService(ServiceComponent):
         actor_id: UUID,
         now: datetime,
     ) -> dict[str, Any]:
-        self._require_human_request()
+        self._require_api_client_human_session()
         normalized_name = name.strip()
         if (
             normalized_name != name
@@ -271,7 +267,7 @@ class ApiClientService(ServiceComponent):
         actor_id: UUID,
         now: datetime,
     ) -> dict[str, Any]:
-        self._require_human_request()
+        self._require_api_client_human_session()
         with self.database.session_factory.begin() as session:
             client = self._owned_client(session, api_client_id, actor_id, lock=True)
             caller = f"{actor_id}:api-clients"
@@ -332,7 +328,7 @@ class ApiClientService(ServiceComponent):
         actor_id: UUID,
         now: datetime,
     ) -> dict[str, Any]:
-        self._require_human_request()
+        self._require_api_client_human_session()
         if not 1 <= expires_in_days <= 365:
             _reject("API_CLIENT_INVALID", "API Key lifetime is invalid")
         with self.database.session_factory.begin() as session:
@@ -397,7 +393,7 @@ class ApiClientService(ServiceComponent):
         actor_id: UUID,
         now: datetime,
     ) -> dict[str, Any]:
-        self._require_human_request()
+        self._require_api_client_human_session()
         with self.database.session_factory.begin() as session:
             client = self._owned_client(session, api_client_id, actor_id, lock=True)
             caller = f"{actor_id}:api-clients"
@@ -466,11 +462,6 @@ class ApiClientService(ServiceComponent):
         if client is None:
             _reject("API_CLIENT_NOT_FOUND", "API Key does not belong to this user")
         return client
-
-    # Compatibility aliases preserve old integrations while changing their
-    # authorization semantics to HUMAN inheritance.
-    def authenticate_agent_token(self, token: str, *, now: datetime) -> dict[str, Any]:
-        return self.authenticate_api_client_token(token, now=now)
 
     def create_agent(
         self,

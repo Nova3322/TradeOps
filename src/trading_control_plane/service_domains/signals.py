@@ -255,7 +255,7 @@ class SignalService(ServiceComponent):
                     ),
                 ]
             )
-        principal = self.facade._require_exact_runtime_principal(
+        principal = self._require_exact_runtime_principal(
             session,
             principal_id=principal.user_id,
             team=team,
@@ -266,7 +266,7 @@ class SignalService(ServiceComponent):
             error_message="the dedicated signal principal is outside the active team",
             allow_inactive=True,
         )
-        self.facade._set_internal_principal_active(session, principal.user_id, True)
+        self._set_internal_principal_active(session, principal.user_id, True)
         return principal
 
     def create_signal_source(
@@ -625,7 +625,7 @@ class SignalService(ServiceComponent):
                         )
                         source.service_principal_id = principal.user_id
                     elif source.service_principal_id is not None:
-                        self.facade._set_internal_principal_active(
+                        self._set_internal_principal_active(
                             session, source.service_principal_id, False
                         )
                 source.enabled = enabled
@@ -704,11 +704,7 @@ class SignalService(ServiceComponent):
                 _reject("VERSION_CONFLICT", "signal source changed before connection test")
             if source.credential_ciphertext is None and source.mode == "WEBHOOK":
                 _reject("SIGNAL_SOURCE_NOT_CONFIGURED", "Webhook signature secret is missing")
-            if (
-                succeeded
-                and source.enabled
-                and source.mode == SignalSourceMode.PERPTAPE.value
-            ):
+            if succeeded and source.enabled and source.mode == SignalSourceMode.PERPTAPE.value:
                 principal = self._ensure_signal_service_principal(
                     session,
                     team=team,
@@ -912,7 +908,7 @@ class SignalService(ServiceComponent):
                 else None
             )
             if previous_principal_id is not None and principal is None:
-                self.facade._set_internal_principal_active(
+                self._set_internal_principal_active(
                     session,
                     previous_principal_id,
                     False,
@@ -1565,9 +1561,9 @@ class SignalService(ServiceComponent):
                     "runtime health cannot bind an account and signal source together",
                 )
             if runtime_account_binding is not None:
-                self.facade._lock_runtime_account_binding(session, runtime_account_binding)
+                self._lock_runtime_account_binding(session, runtime_account_binding)
             if perptape_runtime_binding is not None:
-                self.facade._lock_perptape_runtime_binding(session, perptape_runtime_binding)
+                self._lock_perptape_runtime_binding(session, perptape_runtime_binding)
             principal = session.get(User, actor_id)
             if (
                 principal is None
@@ -1739,7 +1735,7 @@ class SignalService(ServiceComponent):
             _reject("PERPTAPE_RESPONSE_INVALID", "Perptape feed metadata is inconsistent")
         with self.database.session_factory.begin() as session:
             if runtime_binding is not None:
-                self.facade._lock_perptape_runtime_binding(session, runtime_binding)
+                self._lock_perptape_runtime_binding(session, runtime_binding)
             _actor, workspace, team = self.transactions._active_scope(session, actor_id)
             assert team is not None
             self.transactions._require_role(
@@ -1877,69 +1873,6 @@ class SignalService(ServiceComponent):
             )
             return instrument.instrument_id
 
-    def upsert_venue_instrument(
-        self,
-        *,
-        actor_id: UUID,
-        account_id: str,
-        venue: str,
-        symbol: str,
-        tick_size: Decimal,
-        lot_size: Decimal,
-        minimum_notional: Decimal,
-        quote_currency: str,
-        collateral_currency: str,
-        active: bool,
-        now: datetime,
-    ) -> UUID:
-        """Refresh a read-only venue contract catalog entry from official venue metadata."""
-
-        with self.database.session_factory.begin() as session:
-            self.transactions._require_role(session, actor_id, "venue.record", account_id, venue)
-            instrument = session.scalar(
-                select(Instrument)
-                .where(Instrument.venue == venue, Instrument.symbol == symbol)
-                .with_for_update()
-            )
-            event_type = "INSTRUMENT_REGISTERED"
-            if instrument is None:
-                instrument = Instrument(
-                    venue=venue,
-                    symbol=symbol,
-                    tick_size=tick_size,
-                    lot_size=lot_size,
-                    minimum_notional=minimum_notional,
-                    contract_multiplier=Decimal(1),
-                    quote_currency=quote_currency,
-                    collateral_currency=collateral_currency,
-                    active=active,
-                    protection_supported=True,
-                    updated_at=now,
-                )
-                session.add(instrument)
-                session.flush()
-            else:
-                event_type = "INSTRUMENT_REFRESHED"
-                instrument.tick_size = tick_size
-                instrument.lot_size = lot_size
-                instrument.minimum_notional = minimum_notional
-                instrument.quote_currency = quote_currency
-                instrument.collateral_currency = collateral_currency
-                instrument.active = active
-                instrument.updated_at = now
-            self.transactions._audit(
-                session,
-                actor_id=str(actor_id),
-                event_type=event_type,
-                object_type="Instrument",
-                object_id=instrument.instrument_id,
-                reason=f"OFFICIAL_VENUE_METADATA:{venue}:{symbol}",
-                correlation_id=uuid4(),
-                object_version=1,
-                now=now,
-            )
-            return instrument.instrument_id
-
     def synchronize_active_venue_instruments(
         self,
         *,
@@ -1978,7 +1911,7 @@ class SignalService(ServiceComponent):
 
         with self.database.session_factory.begin() as session:
             if runtime_binding is not None:
-                self.facade._lock_runtime_account_binding(session, runtime_binding)
+                self._lock_runtime_account_binding(session, runtime_binding)
             self.transactions._require_role(session, actor_id, "venue.record", account_id, venue)
             existing = {
                 instrument.symbol: instrument

@@ -21,11 +21,8 @@ from sqlalchemy.orm import Session
 
 from trading_control_plane.agent import (
     AGENT_TOKEN_MARKER,
-    issue_agent_token,
     issue_api_client_token,
-    parse_agent_token,
     parse_api_client_token,
-    validate_agent_roles,
 )
 from trading_control_plane.binance import BinanceInstrument, BinanceReadOnlySnapshot
 from trading_control_plane.binance_execution import (
@@ -113,7 +110,6 @@ from trading_control_plane.metrics import (
 from trading_control_plane.models import (
     AccountEquity,
     AccountEquityObservation,
-    AnalyticsEquitySnapshot,
     AnalyticsReport,
     ApiClient,
     Approval,
@@ -458,6 +454,11 @@ def _reject(code: str, detail: str) -> NoReturn:
     raise DomainRejected(code, detail)
 
 
+def _require_human_web_session(detail: str) -> None:
+    if current_api_client_context() is not None:
+        _reject("HUMAN_WEB_CONFIRMATION_REQUIRED", detail)
+
+
 def _normalize_venue_scope(venue_scope: str | None) -> str | None:
     if venue_scope is None:
         return None
@@ -645,7 +646,6 @@ __all__ = [
     "AccountEquity",
     "AccountEquityObservation",
     "AddCandidateFacts",
-    "AnalyticsEquitySnapshot",
     "AnalyticsReport",
     "Any",
     "ApiClient",
@@ -770,6 +770,7 @@ __all__ = [
     "_normalize_venue_scope",
     "_proposal_manual_execution_key",
     "_reject",
+    "_require_human_web_session",
     "_scope_key",
     "_scope_parts",
     "_semantic_hash",
@@ -789,14 +790,12 @@ __all__ = [
     "func",
     "hashlib",
     "hmac",
-    "issue_agent_token",
     "issue_api_client_token",
     "json",
     "normalize_notification_event_types",
     "normalize_perptape_datetime",
     "notification_template",
     "nullcontext",
-    "parse_agent_token",
     "parse_api_client_token",
     "parse_hip3_dexes",
     "perptape_snapshot_identity",
@@ -808,7 +807,6 @@ __all__ = [
     "update",
     "uuid4",
     "uuid5",
-    "validate_agent_roles",
     "validate_notification_configuration",
     "validate_notification_payload",
     "validate_perptape_feed_payload",

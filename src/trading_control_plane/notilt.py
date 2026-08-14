@@ -434,9 +434,6 @@ class NoTiltGateway:
             )
         return vault, active
 
-    def verify_deployment(self, chain_id: int) -> JsonObject:
-        return self._call("verify-deployment", chain_id)
-
     def read_vault(self, chain_id: int, vault: str, agent: str) -> NoTiltVaultSnapshot:
         value = self._call("read-vault", chain_id, vault=vault, agent=agent)
         raw_budgets = value.get("budgets")

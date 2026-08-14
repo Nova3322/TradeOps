@@ -15,7 +15,7 @@ class ProposalQueries(QueryComponent):
         now: datetime | None = None,
     ) -> list[dict[str, Any]]:
         current_time = now or datetime.now(UTC)
-        workspace_id, team_id = self.facade._active_scope_ids(user_id)
+        workspace_id, team_id = self._active_scope_ids(user_id)
         with self.database.session_factory() as session:
             statement = (
                 select(Proposal, Instrument)
@@ -91,7 +91,7 @@ class ProposalQueries(QueryComponent):
                 if not self.service.can_user(user_id, "view", proposal.account_id, proposal.venue):
                     continue
                 effective_status = _effective_proposal_status(proposal, current_time)
-                summary = self.facade._proposal_summary(proposal, instrument)
+                summary = self._proposal_summary(proposal, instrument)
                 summary["workspace_id"] = str(workspace_id)
                 summary["proposer_username"] = proposer_names.get(proposal.proposer_id)
                 summary["status"] = effective_status
@@ -127,7 +127,7 @@ class ProposalQueries(QueryComponent):
     ) -> list[dict[str, Any]]:
         """Return the current visible Perptape proposal occupying each trading scope."""
 
-        workspace_id, team_id = self.facade._active_scope_ids(user_id)
+        workspace_id, team_id = self._active_scope_ids(user_id)
         with self.database.session_factory() as session:
             values = session.execute(
                 select(Proposal, Instrument)
@@ -178,7 +178,7 @@ class ProposalQueries(QueryComponent):
         now: datetime | None = None,
     ) -> dict[str, Any]:
         current_time = now or datetime.now(UTC)
-        workspace_id, team_id = self.facade._active_scope_ids(user_id)
+        workspace_id, team_id = self._active_scope_ids(user_id)
         with self.database.session_factory() as session:
             proposal = session.get(Proposal, proposal_id)
             if proposal is None:
@@ -239,7 +239,7 @@ class ProposalQueries(QueryComponent):
             risk_equity = risk_inputs.get("equity")
             risk_capital = risk_inputs.get("managed_capital", {})
             risk_protection = risk_inputs.get("protection")
-            result = self.facade._proposal_summary(
+            result = self._proposal_summary(
                 proposal, session.get(Instrument, proposal.instrument_id)
             )
             result["workspace_id"] = str(workspace_id)
