@@ -612,14 +612,97 @@ p, li, dd, td { font-size: 14px; }
 .capital-account-tag { display: inline-flex; align-items: center; gap: 7px; min-height: 30px; max-width: 240px; padding: 4px 8px 4px 10px; border: 1px solid var(--account-color); border-radius: 999px; color: var(--ink); background: transparent; cursor: pointer; }
 .capital-account-tag span:first-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .capital-account-tag b { color: var(--muted); }
+.performance-capital-panel { margin: 24px 0 30px; padding: 20px; border: 1px solid var(--line); border-radius: 3px; background: var(--panel); }
+.performance-capital-panel .capital-overview { margin-top: 16px; }
+.performance-capital-panel .capital-chart-panel { margin-top: 12px; border: 1px solid var(--line); }
+.capital-provider-section { margin-bottom: 30px; }
+.capital-provider-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; margin: 16px 0; }
+.capital-provider-card { border-radius: 3px; }
+.capital-provider-card.is-selected { border-color: color-mix(in srgb, var(--accent) 48%, var(--line)); box-shadow: inset 3px 0 0 var(--accent); }
+.capital-provider-card > p { min-height: 48px; color: var(--muted); font-size: 13px; line-height: 1.55; }
+.capital-activity-disclosure { margin-top: 26px; border: 1px solid var(--line); border-radius: 3px; background: var(--panel); }
+.capital-activity-disclosure > summary { display: flex; align-items: center; justify-content: space-between; gap: 16px; min-height: 48px; padding: 11px 15px; cursor: pointer; font-weight: 650; }
+.capital-activity-disclosure > summary small { color: var(--muted); font-weight: 500; }
+.capital-activity-disclosure > div { padding: 18px; border-top: 1px solid var(--line); }
+.capital-testnet-empty { border: 1px solid var(--line); border-radius: 3px; }
+
+/* Dense signal surfaces keep directional color useful without turning the page into a heatmap. */
+.signal-filter-drawer { margin: 12px 0; border: 1px solid var(--line); border-radius: 3px; background: var(--panel); }
+.signal-filter-drawer > summary { display: flex; align-items: center; justify-content: space-between; gap: 16px; min-height: 42px; padding: 9px 12px; cursor: pointer; }
+.signal-filter-drawer > summary span { font-weight: 650; }
+.signal-filter-drawer > summary small { color: var(--muted); }
+.signal-filter-drawer > .filter-panel { margin: 0; border: 0; border-top: 1px solid var(--line); border-radius: 0; }
+.signal-summary-strip { display: grid; grid-template-columns: minmax(180px, 1.5fr) repeat(3, minmax(90px, .5fr)); margin: 0 0 12px; border: 1px solid var(--line); border-radius: 3px; background: var(--panel); }
+.signal-summary-strip > span { display: grid; grid-template-columns: auto auto 1fr; gap: 8px; align-items: baseline; min-width: 0; padding: 10px 12px; }
+.signal-summary-strip > span + span { border-left: 1px solid var(--line); }
+.signal-summary-strip small { color: var(--muted); }
+.signal-summary-strip b { font-size: 17px; }
+.signal-summary-strip em { overflow: hidden; color: var(--muted); font-size: 12px; font-style: normal; text-overflow: ellipsis; white-space: nowrap; }
+.opportunity-card-grid { grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; }
+.opportunity-card { display: flex; min-width: 0; min-height: 252px; flex-direction: column; padding: 14px 14px 12px; border-radius: 3px; }
+.opportunity-card-head { align-items: start; }
+.opportunity-symbol-line { display: flex; align-items: baseline; gap: 9px; min-width: 0; }
+.opportunity-symbol-line .symbol { overflow: hidden; font-size: 19px; text-overflow: ellipsis; white-space: nowrap; }
+.opportunity-symbol-line time { flex: 0 0 auto; color: var(--muted); font-size: 12px; }
+.opportunity-card .opportunity-signals { margin: 12px 0; }
+.opportunity-facts { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; margin: 3px 0 12px; }
+.opportunity-facts span { min-width: 0; }
+.opportunity-facts small, .opportunity-facts b { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.opportunity-facts small { color: var(--muted); }
+.opportunity-facts b { margin-top: 4px; font-size: 12px; }
+.opportunity-card .link-row { margin-top: auto; margin-bottom: 8px; gap: 12px; }
+.opportunity-card .link-row .text-button { font-size: 12px; }
+.opportunity-card .proposal-actions { padding-top: 8px; }
+.webhook-signal-list { gap: 10px; }
+.webhook-signal-card { padding: 0; border-radius: 3px; }
+.webhook-signal-main { display: grid; grid-template-columns: minmax(180px, 1.15fr) minmax(0, 3.3fr) auto; gap: 22px; align-items: center; padding: 15px 18px; }
+.webhook-signal-identity { min-width: 0; }
+.webhook-signal-identity > div { display: flex; align-items: center; gap: 12px; }
+.webhook-signal-identity h2 { margin: 0; font-size: 20px; }
+.webhook-signal-identity small { display: block; margin-top: 5px; overflow: hidden; color: var(--muted); text-overflow: ellipsis; white-space: nowrap; }
+.webhook-signal-primary-facts { display: grid; grid-template-columns: 1.5fr .7fr .7fr .8fr 1fr 1.25fr; gap: 14px; margin: 0; }
+.webhook-signal-primary-facts > div { min-width: 0; }
+.webhook-signal-primary-facts dt, .webhook-signal-primary-facts dd { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.webhook-signal-primary-facts dt { color: var(--muted); }
+.webhook-signal-primary-facts dd { margin: 4px 0 0; font-size: 13px; }
+.webhook-proposal-state { justify-self: end; white-space: nowrap; }
+.webhook-signal-meta { display: flex; flex-wrap: wrap; gap: 12px 30px; padding: 9px 18px; border-top: 1px solid var(--line); color: var(--muted); font-size: 12px; }
+.webhook-signal-meta b { color: var(--ink); font-weight: 500; }
+.webhook-signal-integrity { margin-left: auto; }
+.webhook-signal-card > .secondary, .webhook-signal-card > .operation-toolbox, .webhook-signal-card > .safety-note { margin: 0 18px 14px; }
+
+@media (max-width: 1280px) {
+  .opportunity-card-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .webhook-signal-main { grid-template-columns: minmax(180px, .9fr) minmax(0, 2.1fr) auto; gap: 16px; }
+  .webhook-signal-primary-facts { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+}
+
+@media (max-width: 1024px) {
+  .opportunity-card-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .webhook-signal-main { grid-template-columns: minmax(180px, 1fr) minmax(0, 2fr); }
+  .webhook-proposal-state { grid-column: 1 / -1; justify-self: start; }
+}
 
 @media (max-width: 780px) {
+  .performance-capital-panel { margin-inline: -2px; padding: 14px; }
+  .capital-provider-grid { grid-template-columns: 1fr; }
+  .signal-summary-strip { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .signal-summary-strip > span:nth-child(3) { border-left: 0; border-top: 1px solid var(--line); }
+  .signal-summary-strip > span:nth-child(4) { border-top: 1px solid var(--line); }
+  .opportunity-card-grid { grid-template-columns: 1fr; }
+  .webhook-signal-main { grid-template-columns: 1fr; gap: 13px; }
+  .webhook-signal-primary-facts { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .webhook-proposal-state { grid-column: auto; }
+  .webhook-signal-integrity { width: 100%; margin-left: 0; }
   .capital-account-picker-panel { position: fixed; inset: auto 0 0; z-index: 80; max-height: 72dvh; overflow-y: auto; padding: 14px; border: 1px solid var(--line); border-radius: 3px 3px 0 0; background: var(--panel); }
   .capital-account-picker-tools { grid-template-columns: 1fr 1fr; }
   .capital-account-picker-tools input { grid-column: 1 / -1; }
 }
 
 @media (max-width: 430px) {
+  .signal-filter-drawer > summary small { display: none; }
+  .opportunity-facts { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .webhook-signal-primary-facts { grid-template-columns: 1fr 1fr; }
   .capital-account-picker-tools { grid-template-columns: 1fr; }
   .capital-account-picker-tools input { grid-column: auto; }
 }
