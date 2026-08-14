@@ -22,7 +22,7 @@ async function renderManualProposal() {
         <label>失效价格<span class="field-help">到达后交易逻辑不再成立</span><input name="invalidation_price" type="number" step="any" min="0" required></label>
       </div></section>
       <details class="advanced-form"><summary><span>高级执行参数</span><small>分批入场、限价、自动加仓与有效期</small></summary><div class="field-grid">
-        <label>初仓金额（<span data-position-currency>USDT</span>）<input name="initial_position_notional" type="number" step="any" min="0" placeholder="默认等于最大持仓金额"></label>
+        <label><span class="field-label">初仓金额（<span data-position-currency>USDT</span>）</span><input name="initial_position_notional" type="number" step="any" min="0" placeholder="默认等于最大持仓金额"></label>
         <label>限价（可选）<input name="limit_price" type="number" step="any" min="0"></label>
         <label>允许自动加仓<select name="allow_auto_add"><option value="false" selected>否</option><option value="true">是</option></select></label>
         <label>可用加仓次数<select name="requested_adds"><option value="0" selected>0</option><option value="1">1</option><option value="2">2</option><option value="3">3</option></select></label>
