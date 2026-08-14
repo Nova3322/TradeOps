@@ -202,6 +202,19 @@ def test_setup_team_routes_render_the_requested_page_without_repeating_creation_
     assert "不阻止切换团队模式" in execution
 
 
+def test_navigation_keeps_current_deployment_and_team_mode_visible() -> None:
+    index = INDEX.read_text()
+    app_core = APP_CORE.read_text()
+
+    assert 'class="sidebar-environment" aria-label="当前环境"' in index
+    assert "data-current-environment" in index
+    assert "data-current-mode" in index
+    assert "authStatus?.environment" in app_core
+    assert "session?.active_team?.execution_mode" in app_core
+    assert "updateEnvironmentIndicators();" in app_core
+    assert "environmentBadge.textContent" in app_core
+
+
 def test_hierarchy_pass_uses_neutral_surfaces_readable_type_and_one_primary_action() -> None:
     styles = STYLESHEET.read_text()
     index = INDEX.read_text()

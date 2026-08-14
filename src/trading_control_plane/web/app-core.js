@@ -13,6 +13,8 @@ const scopeControl = document.querySelector('#scope-control');
 const scopeSwitcher = document.querySelector('#scope-switcher');
 const scopeSwitcherMenu = document.querySelector('#workspace-switcher-menu');
 const environmentBadge = document.querySelector('#environment-badge');
+const sidebarEnvironment = document.querySelector('[data-current-environment]');
+const sidebarMode = document.querySelector('[data-current-mode]');
 const preferenceSelects = new Map(
   [...document.querySelectorAll('[data-preference-select]')].map(element => [element.dataset.preferenceSelect, element]),
 );
@@ -86,7 +88,7 @@ let currentThemePreference = 'system';
 let focusNextRouteHeading = false;
 
 const ENGLISH_EXACT = new Map(Object.entries({
-  '交易控制台':'Trading Console', '交易控制台首页':'Trading Console home', '生产交易管理':'Production trading operations', '受控交易运营':'Controlled trading operations', '生产环境':'Production',
+  '交易控制台':'Trading Console', '交易控制台首页':'Trading Console home', '生产交易管理':'Production trading operations', '受控交易运营':'Controlled trading operations', '生产环境':'Production', '当前环境':'Current environment', '环境未确认':'Environment unconfirmed',
   '中英切换':'Chinese / English', '切换中英文':'Switch between Chinese and English', '切换':'Switch', '主题偏好':'Theme preference', '语言':'Language', '主题':'Theme', '界面语言':'Language', '主题模式':'Theme', '跟随系统':'System', '浅色':'Light', '深色':'Dark', '菜单':'Menu',
   '用户菜单':'User menu', '登录身份':'Sign-in identity', '密码登录':'Password sign-in', '内部会话':'Internal session',
   '当前工作区':'Current workspace', '当前空间':'Current space', '当前团队':'Current team', '当前职责':'Current role', '个人设置':'Personal settings', '个人偏好':'Preferences',
@@ -921,6 +923,19 @@ const fmtEnvironment = (value, withCode = false) => {
   const label = labels[code] || (currentLanguage === 'en' ? 'Unknown environment' : '环境未确认');
   return withCode && code ? `${label} · ${code}` : label;
 };
+function updateEnvironmentIndicators() {
+  const deploymentLabel = fmtEnvironment(authStatus?.environment);
+  const teamMode = session?.active_team?.execution_mode;
+  const modeLabel = ['LIVE','TESTNET'].includes(teamMode)
+    ? fmtEnvironment(teamMode)
+    : localizedText('待配置');
+  environmentBadge.textContent = `${localizedText('当前环境')}：${deploymentLabel}`;
+  environmentBadge.dataset.environment = String(authStatus?.environment || 'unknown').toLowerCase();
+  environmentBadge.setAttribute('aria-label', `${localizedText('当前环境')}：${deploymentLabel}`);
+  environmentBadge.title = `${deploymentLabel} · ${modeLabel}`;
+  sidebarEnvironment.textContent = deploymentLabel;
+  sidebarMode.textContent = `${localizedText('当前模式')}：${modeLabel}`;
+}
 const fmtVenueLabel = (value) => currentLanguage === 'en'
   ? ({BINANCE:'Binance', HYPERLIQUID:'Hyperliquid', OKX:'OKX', BYBIT:'Bybit', '币安':'Binance', '链上永续':'Hyperliquid'}[value] || value || 'Unknown venue')
   : ({BINANCE:'币安', HYPERLIQUID:'Hyperliquid', OKX:'OKX', BYBIT:'Bybit', '币安':'币安', '链上永续':'Hyperliquid'}[value] || value || '交易所未配置');
@@ -1360,6 +1375,7 @@ function setShell(loggedIn, {workspaceGate = false} = {}) {
   scopeControl.hidden = !loggedIn || workspaceGate;
   mobileNavToggle.hidden = !loggedIn || workspaceGate;
   if (loggedIn) {
+    updateEnvironmentIndicators();
     renderWorkspaceSwitcher();
     const rolePriority = ['SYSTEM_ADMIN','TREASURY_ADMIN','OPERATOR','REVIEWER','PROPOSER','OBSERVER'];
     const primaryRole = rolePriority.find(role => roleNames().includes(role));
@@ -1586,8 +1602,7 @@ function formNumber(value, fallback = '') {
 
 async function bootstrap() {
   authStatus = await api('/api/auth/status');
-  environmentBadge.textContent = fmtEnvironment(authStatus?.environment);
-  environmentBadge.dataset.environment = String(authStatus?.environment || 'unknown').toLowerCase();
+  updateEnvironmentIndicators();
   try {
     const result = await api('/api/auth/session');
     session = result.session;

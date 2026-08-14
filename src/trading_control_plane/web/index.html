@@ -12,7 +12,7 @@
     <link rel="preload" href="/assets/fonts/IBMPlexSansSC-SemiBold.woff2" as="font" type="font/woff2" crossorigin>
     <link rel="preload" href="/assets/fonts/IBMPlexMono-Regular.woff2" as="font" type="font/woff2" crossorigin>
     <link rel="preload" href="/assets/fonts/IBMPlexMono-SemiBold.woff2" as="font" type="font/woff2" crossorigin>
-    <link rel="stylesheet" href="/assets/styles.css?v=94">
+    <link rel="stylesheet" href="/assets/styles.css?v=95">
     <title>交易控制台</title>
   </head>
   <body>
@@ -109,6 +109,11 @@
         </nav>
         <div class="sidebar-foot">
           <div id="mobile-session-summary" class="mobile-session-summary"></div>
+          <div class="sidebar-environment" aria-label="当前环境">
+            <small>当前环境</small>
+            <strong data-current-environment>环境未确认</strong>
+            <span data-current-mode>当前模式：待配置</span>
+          </div>
           <div>业务数据库已连接</div>
           <div>数据缺失时自动阻止交易</div>
         </div>
@@ -166,7 +171,7 @@
       </form>
     </dialog>
     <div id="toast" class="toast" role="status" aria-live="polite"></div>
-    <script defer src="/assets/app-core.js?v=204"></script>
+    <script defer src="/assets/app-core.js?v=205"></script>
     <script defer src="/assets/workspace.js?v=181"></script>
     <script defer src="/assets/signals.js?v=175"></script>
     <script defer src="/assets/proposals.js?v=175"></script>
