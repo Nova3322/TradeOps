@@ -630,6 +630,12 @@ const ENGLISH_EXACT = new Map(Object.entries({
   // Shell and shared overlays.
   '工作区':'Workspace', '当前':'Current', '进入':'Open', '创建新工作区':'Create workspace', '查看所有工作区':'View all workspaces', '中文':'Chinese', '个人中心':'Profile',
   '当前卡片配置':'Current proposal defaults', '正在读取服务端默认配置':'Loading server defaults', '请选择':'Select',
+  '机会 · 管理员设置':'Opportunities · Administrator settings', '默认提案配置':'Default proposal settings', '这里只管理“一键创建”和之后新鲜多周期信号使用的默认值。每张卡片的高级配置只覆盖当前提案，人工提案不使用这里的参数。':'Manage defaults for one-click creation and future fresh multi-timeframe signals here. Advanced settings on a card apply only to that proposal; manual proposals do not use these defaults.',
+  '当前生效版本':'Active version', '已生效':'Active', '生效时间':'Effective from', '新建版本':'Create new version', '首次配置':'Initial setup', '修改之后的新提案默认值':'Defaults for future proposals', '配置安全默认值':'Configure safe defaults',
+  '名义仓位（USDT）':'Notional value (USDT)', '失效距离（基点）':'Invalidation distance (bps)', '自动提案阈值':'Automatic proposal threshold', '至少 3 个不同周期':'At least 3 distinct timeframes', '4 个不同周期':'4 distinct timeframes', '自动创建多周期冻结待审核提案':'Automatically create frozen multi-timeframe proposals for review', '默认理由':'Default rationale',
+  '提案至少保留 8 小时。自动提案只会进入待审核队列；不会自动审核、授权、创建订单或下单。阈值变更只影响之后观察到的新鲜信号。':'Proposals remain valid for at least 8 hours. Automatic proposals enter the review queue only; they are never automatically approved, authorized, converted to order intents, or sent. Threshold changes affect only future fresh signals.', '保存新版本':'Save new version',
+  '最高管理员保存首个版本后，一键创建才会启用；系统不会猜测账户、风险或金额。':'One-click creation becomes available only after a super administrator saves the first version. The system never guesses the account, risk, or amount.', '只读：':'Read only:', '当前身份可以查看默认值，但只有系统管理员可以修改全局配置。':'This role can view the defaults, but only a system administrator can change the global configuration.',
+  '环境不可跨越':'Environment locked', '账户净值':'Account net worth', '资金保管':'Capital custody',
   // Home.
   '无运行告警 / 无需处理':'No runtime alerts / no action needed', '真实下单已关闭 · 自动加仓已关闭':'Live order sending disabled · Automatic scaling disabled',
   '独立审核队列':'Independent review queue', '打开审核队列 →':'Open review queue →', '查看 Perptape 机会':'View Perptape opportunities', '创建人工提案 →':'Create manual proposal →',
@@ -734,8 +740,11 @@ const ENGLISH_EXACT = new Map(Object.entries({
 const ENGLISH_PATTERNS = [
   [/^生产模式 · (\d+) 个配置$/, 'Production mode · $1 configurations'],
   [/^测试模式 · (\d+) 个配置$/, 'Testnet mode · $1 configurations'],
-  [/^生产模式 · (.+)$/, 'Production mode · $1'],
-  [/^测试模式 · (.+)$/, 'Testnet mode · $1'],
+  [/^生产模式 · (.+)$/, (_match, suffix) => `Production mode · ${translateEnglishText(suffix)}`],
+  [/^测试模式 · (.+)$/, (_match, suffix) => `Testnet mode · ${translateEnglishText(suffix)}`],
+  [/^版本 v(\d+)$/, 'Version v$1'],
+  [/^(.+) USDT 名义仓位 · 最大风险 (.+) · 有效期 (.+) 小时 · 自动提案开启（(\d+) 周期）$/, '$1 USDT notional · Maximum risk $2 · Valid for $3 hours · Automatic proposals on ($4 timeframes)'],
+  [/^(.+) USDT 名义仓位 · 最大风险 (.+) · 有效期 (.+) 小时 · 自动提案关闭$/, '$1 USDT notional · Maximum risk $2 · Valid for $3 hours · Automatic proposals off'],
   [/^账户版本 (\d+)$/, 'Account version $1'],
   [/^最近保存 (.+)$/, 'Last saved $1'],
   [/^未配置 · (.+) · 仅绑定 (.+)$/, 'Not configured · $1 · Bound only to $2'],
