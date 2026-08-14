@@ -99,33 +99,6 @@ function capitalSourcePresentation(netWorth, source, latestPoint) {
   };
 }
 
-function capitalBalanceRows(balances, issues = []) {
-  return balances.map(balance => {
-    const missing = balance.fact_status === 'MISSING';
-    const source = balance.location_type === 'VAULT' ? 'VAULT' : balance.venue;
-    const valuationIssue = capitalSourceIssue(issues, source);
-    const historical = !missing && balance.valuation_current === false;
-    const sourceLabel = balance.source_label || (balance.location_type === 'VAULT'
-      ? 'Vault'
-      : ({BINANCE:'Binance', HYPERLIQUID:'Hyperliquid'}[balance.venue] || balance.venue || '交易所'));
-    const state = missing
-      ? `<b class="capital-status-missing">数据缺失</b><br><span class="subtle">${escapeHtml(balance.missing_detail)}</span>`
-      : historical
-        ? `<b class="capital-status-missing">历史快照</b><br><span class="subtle">${escapeHtml(valuationIssue || '当前美元估值不可采信')}；不计入当前净值</span><br><span class="subtle">${escapeHtml(fmtStatus(balance.control_status))} / ${escapeHtml(fmtStatus(balance.deposit_status))}</span>`
-        : `<b>当前估值</b><br><span class="subtle">${escapeHtml(fmtStatus(balance.control_status))} / ${escapeHtml(fmtStatus(balance.deposit_status))}</span>`;
-    const accountScope = balance.location_type === 'VAULT'
-      ? (missing ? '等待配置' : '已配置范围')
-      : '默认账户';
-    return `<tr${missing || historical ? ' class="capital-missing-row"' : ''}><td data-label="资金位置"><b translate="no">${escapeHtml(sourceLabel)}</b></td><td data-label="账户范围">${escapeHtml(accountScope)}</td><td data-label="已确认可用">${fmtNumber(balance.confirmed_available)} ${escapeHtml(balance.asset)}</td><td data-label="美元净值">${balance.usd_equity === null ? '未知' : `${formatCapitalUsd(balance.usd_equity)}`}</td><td data-label="源端预留">${fmtNumber(balance.source_reserved)}</td><td data-label="有效可用"><b>${fmtNumber(balance.effective_available)}</b></td><td data-label="数据状态">${state}</td><td data-label="更新时间">${missing ? '—' : fmtDate(balance.observed_at)}</td></tr>`;
-  }).join('');
-}
-
-function capitalBalanceTable(rows, emptyMessage) {
-  return rows
-    ? `<div class="table-scroll-hint capital-balance-scroll-hint">左右滑动查看完整资金数据</div><div class="table-wrap is-scrollable capital-balance-table"><table><thead><tr><th>资金位置</th><th>账户范围</th><th>已确认可用</th><th>美元净值</th><th>源端预留</th><th>有效可用</th><th>数据状态</th><th>更新时间</th></tr></thead><tbody>${rows}</tbody></table></div>`
-    : `<div class="callout">${escapeHtml(emptyMessage)}</div>`;
-}
-
 function capitalHistorySeries(history, alignmentToleranceSeconds = 60, gapToleranceSeconds = 300) {
   const sourceDefinitions = [...new Map(history.map(item => {
     const key = item.source || (item.location_type === 'VAULT' ? 'VAULT' : item.venue);
@@ -363,53 +336,43 @@ function formatDirectCapitalStage(code) {
   }[code] || code);
 }
 
-function capitalViewSelection(search = location.search) {
-  const requested = new URLSearchParams(search).get('view');
-  return ['routes','activity'].includes(requested) ? requested : 'overview';
-}
-
-async function renderCapitalCenter() {
-  const searchParams = new URLSearchParams(location.search);
+async function renderCapitalPerformancePanel() {
+  const host = document.querySelector('[data-capital-performance]');
+  if (!host) return;
   const displayEnvironment = currentWorkflowEnvironment();
   if (!['TESTNET','LIVE'].includes(displayEnvironment)) {
-    main.innerHTML = `<section class="page"><div class="callout"><b>团队尚未选择运行模式</b><p>请由管理员前往模式设置选择测试模式或生产模式。</p><a class="primary" href="/team-settings" data-link>前往模式设置</a></div></section>`;
+    host.innerHTML = '<div class="callout"><b>团队尚未选择运行模式</b><p>选择测试或生产模式后，这里会按当前环境加载账户净值曲线。</p></div>';
     return;
   }
-  const selectionStorageKey = `tradingops.capital.accounts.${session?.active_team?.team_id || 'active'}.${displayEnvironment}`;
-  let requestedAccounts = searchParams.getAll('account');
+  const searchParams = new URLSearchParams(location.search);
+  const selectionStorageKey = `tradingops.performance.capital.accounts.${session?.active_team?.team_id || 'active'}.${displayEnvironment}`;
+  let requestedAccounts = searchParams.getAll('capital_account');
   if (!requestedAccounts.length) {
     try { requestedAccounts = JSON.parse(localStorage.getItem(selectionStorageKey) || '[]'); } catch (_error) { requestedAccounts = []; }
   }
-  const accountQuery = requestedAccounts.length ? `?accounts=${encodeURIComponent(requestedAccounts.join(','))}` : '';
-  const result = await api(`/api/capital${accountQuery}`);
+  const accountQuery = requestedAccounts.length ? `&accounts=${encodeURIComponent(requestedAccounts.join(','))}` : '';
+  let result;
+  try {
+    result = await api(`/api/capital?environment=${displayEnvironment}${accountQuery}`);
+  } catch (error) {
+    host.innerHTML = `<div class="callout tone-attention"><b>资金曲线暂未就绪</b><p>${escapeHtml(friendlyApiError(error))}</p><button class="secondary" type="button" data-retry-capital-performance>重新加载</button></div>`;
+    host.querySelector('[data-retry-capital-performance]')?.addEventListener('click', renderCapitalPerformancePanel);
+    return;
+  }
   const item = result.data;
   const accountOptions = item.account_options || [];
   capitalSeriesColorIndex = Object.fromEntries(accountOptions.map((option, index) => [option.key, index % 6]));
   capitalSeriesColorIndex.TOTAL = 6;
   const selectedAccountKeys = new Set(item.selected_account_keys || []);
   selectedAccountKeys.forEach(key => { if (capitalTrendVisibility[key] === undefined) capitalTrendVisibility[key] = true; });
-  const directConfiguration = item.direct_configuration || {};
   const netWorth = item.net_worth || {currency:'USD', venues:{}, vault:null, total:null, complete:false, issues:[]};
+  const directConfiguration = item.direct_configuration || {};
   const selectedTreasuryProvider = directConfiguration.treasury_provider || 'NOTILT_VAULT';
-  const selectedTreasuryProviderLabel = selectedTreasuryProvider === 'SAFE_SPENDING_LIMIT' ? 'Safe Spending Limits' : 'NoTilt Vault';
-  const selectedOnchainSeriesLabel = `链上金库 · ${selectedTreasuryProviderLabel}`;
-  const balances = partitionCapitalRecords(item.balances);
-  const transfers = partitionCapitalRecords(item.transfers);
-  const liveInTransit = liveCapitalInTransit(transfers.live);
-  const allHistorySeries = capitalHistorySeries(
-    item.history || [],
-    netWorth.alignment_tolerance_seconds || 60,
-    netWorth.history_gap_tolerance_seconds || 300,
-  );
+  const selectedOnchainSeriesLabel = `链上金库 · ${selectedTreasuryProvider === 'SAFE_SPENDING_LIMIT' ? 'Safe' : 'Vault'}`;
+  const allHistorySeries = capitalHistorySeries(item.history || [], netWorth.alignment_tolerance_seconds || 60, netWorth.history_gap_tolerance_seconds || 300);
   const historySelection = capitalHistoryRange(item.history || [], capitalChartRangeValue);
-  const historySeries = capitalHistorySeries(
-    historySelection.history,
-    netWorth.alignment_tolerance_seconds || 60,
-    netWorth.history_gap_tolerance_seconds || 300,
-  );
-  [...allHistorySeries, ...historySeries].forEach(series => {
-    if (series.source === 'VAULT') series.label = selectedOnchainSeriesLabel;
-  });
+  const historySeries = capitalHistorySeries(historySelection.history, netWorth.alignment_tolerance_seconds || 60, netWorth.history_gap_tolerance_seconds || 300);
+  [...allHistorySeries, ...historySeries].forEach(series => { if (series.source === 'VAULT') series.label = selectedOnchainSeriesLabel; });
   const visibleHistorySeries = historySeries.filter(series => capitalTrendVisibility[series.source]);
   const hasHistory = historySeries.some(series => series.points.length);
   const chartLegend = historySeries.map(series => {
@@ -420,14 +383,11 @@ async function renderCapitalCenter() {
     const summary = !latestPoint
       ? (fallbackPoint ? `所选范围无数据 · 最后记录 ${fmtDate(fallbackPoint.time)}` : '等待数据')
       : `${formatCapitalUsd(latestPoint.value)} · ${series.source === 'TOTAL' ? (current ? '当前汇总' : '历史汇总') : presentation.state} · ${fmtDate(latestPoint.time)}`;
-    const displayLabel = currentLanguage === 'en' && series.source === 'TOTAL' ? 'Combined total' : series.label;
-    return `<label class="capital-trend-toggle series-color-${capitalSeriesColorIndex[series.source] ?? 0} ${latestPoint ? '' : 'is-missing'}"><input type="checkbox" data-capital-trend="${escapeHtml(series.source)}" ${latestPoint && capitalTrendVisibility[series.source] ? 'checked' : ''} ${latestPoint ? '' : 'disabled'}><i aria-hidden="true"></i><span><b translate="no">${escapeHtml(displayLabel)}</b><small>${escapeHtml(summary)}</small></span></label>`;
+    return `<label class="capital-trend-toggle series-color-${capitalSeriesColorIndex[series.source] ?? 0} ${latestPoint ? '' : 'is-missing'}"><input type="checkbox" data-capital-trend="${escapeHtml(series.source)}" ${latestPoint && capitalTrendVisibility[series.source] ? 'checked' : ''} ${latestPoint ? '' : 'disabled'}><i aria-hidden="true"></i><span><b translate="no">${escapeHtml(series.label)}</b><small>${escapeHtml(summary)}</small></span></label>`;
   }).join('');
   const totalSeries = allHistorySeries.find(series => series.source === 'TOTAL');
   const latestCompleteTotal = totalSeries?.points.at(-1) || null;
-  const totalHeadline = netWorth.total !== null && netWorth.total !== undefined
-    ? formatCapitalUsd(netWorth.total)
-    : '当前不可汇总';
+  const totalHeadline = netWorth.total !== null && netWorth.total !== undefined ? formatCapitalUsd(netWorth.total) : '当前不可汇总';
   const totalSupporting = netWorth.complete
     ? `所选账户同一时间口径 · ${fmtDate(netWorth.as_of)}`
     : latestCompleteTotal
@@ -438,26 +398,68 @@ async function renderCapitalCenter() {
     label:option.location_type === 'VAULT' ? option.label : `${fmtVenueLabel(option.venue)} · ${option.label}`,
   })).map(source => {
     const sourceSeries = historySeries.find(series => series.source === source.source);
-    const latestPoint = sourceSeries?.points.at(-1)
-      || allHistorySeries.find(series => series.source === source.source)?.points.at(-1);
+    const latestPoint = sourceSeries?.points.at(-1) || allHistorySeries.find(series => series.source === source.source)?.points.at(-1);
     const presentation = capitalSourcePresentation(netWorth, source.source, latestPoint);
     const cardState = presentation.aligned ? (presentation.nearExpiry ? 'is-aging' : 'is-current') : 'is-limited';
-    return `<article class="capital-worth-card ${cardState}"><div><small translate="no">${escapeHtml(source.label)}</small><b>${formatCapitalUsd(presentation.value)}</b></div><span>${escapeHtml(presentation.state)}</span><p>${presentation.observedAt ? `${escapeHtml(presentation.freshness)} · ${fmtDate(presentation.observedAt)}` : '尚无有效时间'}<br>数据来源：<span translate="no">${escapeHtml(source.label)}</span> 只读账户</p></article>`;
+    return `<article class="capital-worth-card ${cardState}"><div><small translate="no">${escapeHtml(source.label)}</small><b>${formatCapitalUsd(presentation.value)}</b></div><span>${escapeHtml(presentation.state)}</span><p>${presentation.observedAt ? `${escapeHtml(presentation.freshness)} · ${fmtDate(presentation.observedAt)}` : '尚无有效时间'}</p></article>`;
   }).join('');
-  const chartCoverage = capitalHistoryCoverage(historySeries, historySelection);
-  const issueDetails = [...new Set((netWorth.issues || []).map(issue => {
-    const source = String(issue).split(':')[1];
-    const lastTime = source && netWorth.source_as_of?.[source];
-    return `${formatCapitalIssue(issue)}${lastTime ? `（最后记录 ${fmtDate(lastTime)}）` : ''}`;
-  }))];
-  const probeDetail = netWorth.onchain_probe?.status === 'FAILED'
-    ? ` 当前${selectedOnchainSeriesLabel}只读探针失败（${netWorth.onchain_probe.error_code || '未知错误'}）；页面仅保留仍在有效期内的最近快照。`
-    : '';
-  const trustCopy = (netWorth.complete
+  const issueDetails = [...new Set((netWorth.issues || []).map(formatCapitalIssue))];
+  const trustCopy = netWorth.complete
     ? '所选账户数据完整、新鲜且时间对齐，可以计算当前汇总。'
-    : `${issueDetails.join('；') || '资金数据尚未完整'}。影响：当前所选账户总净值不计算，但其他有效单线继续保留。`) + probeDetail;
-  const displayedBalances = displayEnvironment === 'TESTNET' ? balances.testnet : balances.live;
-  const liveBalanceRows = capitalBalanceRows(displayedBalances, netWorth.issues);
+    : `${issueDetails.join('；') || '资金数据尚未完整'}。当前汇总保持关闭，可信的单账户曲线仍保留。`;
+  const accountFilters = accountOptions.map((option, index) => `<label class="capital-account-option ${option.selectable ? '' : 'is-disabled'}"><input type="checkbox" name="capital_account" value="${escapeHtml(option.key)}" ${selectedAccountKeys.has(option.key) ? 'checked' : ''} ${option.selectable ? '' : 'disabled'}><i class="capital-account-color color-${index % 6}" aria-hidden="true"></i><span><b title="${escapeHtml(option.label)}">${escapeHtml(option.label)}</b><small>${escapeHtml(option.location_type === 'VAULT' ? '链上金库' : fmtVenueLabel(option.venue))} · ${escapeHtml(option.account_id)} · ${escapeHtml(fmtStatus(option.connection_status))}</small>${option.disabled_reason ? `<em>${escapeHtml(option.disabled_reason)}</em>` : ''}</span></label>`).join('');
+  const selectedTags = accountOptions.filter(option => selectedAccountKeys.has(option.key)).map(option => `<button class="capital-account-tag color-${capitalSeriesColorIndex[option.key]}" type="button" data-remove-capital-account="${escapeHtml(option.key)}"><span>${escapeHtml(option.label)}</span><b aria-hidden="true">×</b><span class="sr-only">移除 ${escapeHtml(option.label)}</span></button>`).join('');
+  const capitalRangeText = historySelection.complete ? '全部历史' : `最近 ${formatCapitalRangeDuration(historySelection.duration)}`;
+  const rangeControl = hasHistory ? `<div class="capital-history-range" aria-label="资金曲线时间范围"><div class="capital-history-range-copy"><small>时间范围</small><output for="capital-history-range" data-capital-range-label>${escapeHtml(capitalRangeText)}</output></div><div class="capital-history-range-slider"><input id="capital-history-range" type="range" data-capital-history-range min="1" max="${CAPITAL_CHART_RANGE_MAX}" step="1" value="${Number(capitalChartRangeValue)}" aria-label="拖动选择资金曲线时间范围" aria-valuetext="${escapeHtml(capitalRangeText)}"><div aria-hidden="true"><span>较短</span><span>全部</span></div></div></div>` : '';
+  host.innerHTML = `<div class="section-heading"><div><p class="eyebrow">${escapeHtml(fmtExecutionMode(displayEnvironment))} · 账户净值</p><h2>资金绩效曲线</h2><p class="subtle">账户选择只影响绩效展示，不改变团队模式、交易权限或资金能力。</p></div><span class="status-pill">${selectedAccountKeys.size} 个账户</span></div>
+    <details class="capital-account-picker"><summary><span>选择要叠加的账户曲线</span><small>已选 ${selectedAccountKeys.size} 个，可多选</small></summary><div class="capital-account-picker-panel"><div class="capital-account-picker-tools"><input type="search" data-capital-account-search placeholder="搜索账户名称或 ID" aria-label="搜索账户"><select data-capital-venue-filter aria-label="按交易所筛选"><option value="">全部交易所</option>${[...new Set(accountOptions.map(option => option.venue))].map(venue => `<option value="${escapeHtml(venue)}">${escapeHtml(venue === 'VAULT' ? '链上金库' : fmtVenueLabel(venue))}</option>`).join('')}</select><button class="secondary" type="button" data-capital-select-all>全选</button><button class="secondary" type="button" data-capital-clear>清空</button></div><div class="capital-account-options">${accountFilters || '<p class="subtle">当前模式尚未添加有效账户。</p>'}</div></div></details><div class="capital-account-tags" aria-label="已选账户">${selectedTags || '<span class="subtle">尚未选择账户</span>'}</div>
+    <section class="capital-overview" aria-label="当前资金净值"><article class="capital-total-card ${netWorth.complete ? 'is-current' : 'is-limited'}"><small>当前所选账户总净值</small><b>${escapeHtml(totalHeadline)}</b><p>${escapeHtml(totalSupporting)}</p></article><div class="capital-source-cards">${sourceCards}</div></section>
+    <section class="capital-trust-panel ${netWorth.complete ? 'is-current' : 'is-limited'}"><div><b>${netWorth.complete ? '所选账户数据可信，可用于当前汇总' : '当前汇总已阻断'}</b><p>${escapeHtml(trustCopy)}</p></div><span>${netWorth.complete ? '完整' : '需关注'}</span></section>
+    <section class="capital-chart-panel"><div class="chart-head"><div><p class="eyebrow">净值趋势</p><h3>所选账户独立曲线与可信汇总</h3><p class="subtle">缺失、过期、错位和断档不会补零或强行连线。</p></div></div><div class="capital-chart-meta"><span data-capital-range-coverage>${escapeHtml(capitalHistoryCoverage(historySeries, historySelection))}</span><span>数据来自当前模式对应交易所只读事实</span></div><div class="chart-legend" role="group" aria-label="选择显示的资金曲线">${chartLegend}</div>${hasHistory ? '<div class="capital-chart-wrap"><canvas id="capital-chart" height="300" aria-label="所选账户及汇总 USD 资金趋势"></canvas><div class="capital-chart-tooltip" role="status" hidden></div></div>' : '<div class="chart-empty">尚无可绘制的资金历史；缺失数据不会补零。</div>'}${rangeControl}</section>`;
+  drawCapitalChart(visibleHistorySeries);
+  const applyAccountSelection = selected => {
+    localStorage.setItem(selectionStorageKey, JSON.stringify(selected));
+    const next = new URLSearchParams(location.search);
+    next.delete('capital_account');
+    (selected.length ? selected : ['__NONE__']).forEach(value => next.append('capital_account', value));
+    history.replaceState({}, '', `/results?${next.toString()}`);
+    renderCapitalPerformancePanel();
+  };
+  host.querySelectorAll('.capital-account-option input').forEach(input => input.addEventListener('change', () => applyAccountSelection([...host.querySelectorAll('.capital-account-option input:checked')].map(option => option.value))));
+  host.querySelectorAll('[data-remove-capital-account]').forEach(button => button.addEventListener('click', () => applyAccountSelection([...selectedAccountKeys].filter(key => key !== button.dataset.removeCapitalAccount))));
+  host.querySelector('[data-capital-select-all]')?.addEventListener('click', () => applyAccountSelection(accountOptions.filter(option => option.selectable).map(option => option.key)));
+  host.querySelector('[data-capital-clear]')?.addEventListener('click', () => applyAccountSelection([]));
+  const filterAccounts = () => {
+    const query = (host.querySelector('[data-capital-account-search]')?.value || '').toLowerCase();
+    const venue = host.querySelector('[data-capital-venue-filter]')?.value || '';
+    host.querySelectorAll('.capital-account-option').forEach((row, index) => {
+      const option = accountOptions[index];
+      row.hidden = !(`${option.label} ${option.account_id}`.toLowerCase().includes(query) && (!venue || option.venue === venue));
+    });
+  };
+  host.querySelector('[data-capital-account-search]')?.addEventListener('input', filterAccounts);
+  host.querySelector('[data-capital-venue-filter]')?.addEventListener('change', filterAccounts);
+  bindCapitalPerformanceChart(historySeries, {
+    history:item.history || [],
+    alignmentToleranceSeconds:netWorth.alignment_tolerance_seconds || 60,
+    gapToleranceSeconds:netWorth.history_gap_tolerance_seconds || 300,
+    selectedOnchainSeriesLabel,
+  });
+}
+
+async function renderCapitalCenter() {
+  const displayEnvironment = currentWorkflowEnvironment();
+  if (!['TESTNET','LIVE'].includes(displayEnvironment)) {
+    main.innerHTML = `<section class="page"><div class="callout"><b>团队尚未选择运行模式</b><p>请由管理员前往模式设置选择测试模式或生产模式。</p><a class="primary" href="/team-settings" data-link>前往模式设置</a></div></section>`;
+    return;
+  }
+  const result = await api(`/api/capital?environment=${displayEnvironment}`);
+  const item = result.data;
+  const directConfiguration = item.direct_configuration || {};
+  const selectedTreasuryProvider = directConfiguration.treasury_provider || 'NOTILT_VAULT';
+  const selectedTreasuryProviderLabel = selectedTreasuryProvider === 'SAFE_SPENDING_LIMIT' ? 'Safe Spending Limits' : 'NoTilt Vault';
+  const transfers = partitionCapitalRecords(item.transfers);
+  const liveInTransit = liveCapitalInTransit(transfers.live);
   const directConfigurationEditor = directConfiguration.can_manage ? `<div class="callout"><b>账户配置已集中管理。</b><p>交易所、Vault、Safe、提取地址与私钥均在“账户管理”按测试/实盘分别配置。</p><a class="secondary" href="/accounts?environment=${displayEnvironment}" data-link>前往账户管理</a></div>` : '';
   const directPathCards = DIRECT_CAPITAL_PATHS.map(path => `<article class="capital-route-card"><div class="capital-route-meta"><span>固定路径</span><strong>${escapeHtml(path.badge)}</strong></div><div class="capital-route-flow"><b>${escapeHtml(path.from)}</b><span aria-hidden="true">→</span><b>${escapeHtml(path.to)}</b></div><p>${escapeHtml(path.copy)}</p><ol>${path.steps.map(step => `<li>${escapeHtml(step)}</li>`).join('')}</ol><button class="secondary capital-route-action" type="button" data-open-capital-path="${escapeHtml(path.path)}">${escapeHtml(path.action)}</button></article>`).join('');
   const directCapitalDialog = `<dialog id="direct-capital-dialog" aria-labelledby="direct-capital-title"><form id="direct-capital-form" class="dialog-form" data-direct-capital-form="" data-treasury-provider="${escapeHtml(selectedTreasuryProvider)}"><div class="dialog-head"><div><p class="eyebrow">资金路径安全预检</p><h2 id="direct-capital-title" data-capital-path-title>选择资金路径</h2></div><button type="button" class="icon-button" data-close-capital-dialog aria-label="关闭">×</button></div><p class="subtle" data-capital-path-copy></p><div class="selected-provider-summary"><small>当前链上金库</small><b>${escapeHtml(selectedTreasuryProviderLabel)}</b><span>如需切换，请由管理员先保存新的资金路径配置。</span></div><input name="path" type="hidden"><label>金额（USDC）<input name="amount" type="number" step="any" min="0.000001" required placeholder="输入划转金额"></label><label class="direct-capital-confirm"><input name="final_confirmed" type="checkbox" required><span>我已核对资金方向与金额</span></label><p class="safety-note">提交只会重新校验地址、网络、资产、额度和实时安全开关。任何条件缺失都会阻断；系统不会签名、广播或发送资金。</p><div class="form-error" role="alert"></div><div class="dialog-actions"><button type="button" class="secondary" data-close-capital-dialog>取消</button><button class="primary" type="submit">最终确认并检查</button></div></form></dialog>`;
@@ -498,73 +500,18 @@ async function renderCapitalCenter() {
     : selectedTreasuryProvider === 'SAFE_SPENDING_LIMIT'
       ? '缺少 Safe、delegate 或可信 RPC'
       : '缺少官方金库或 Agent 范围';
-  const capitalRangeText = historySelection.complete ? '全部历史' : `最近 ${formatCapitalRangeDuration(historySelection.duration)}`;
-  const capitalHistoryRangeControl = hasHistory ? `<div class="capital-history-range" aria-label="资金曲线时间范围"><div class="capital-history-range-copy"><small>时间范围</small><output for="capital-history-range" data-capital-range-label>${escapeHtml(capitalRangeText)}</output></div><div class="capital-history-range-slider"><input id="capital-history-range" type="range" data-capital-history-range min="1" max="${CAPITAL_CHART_RANGE_MAX}" step="1" value="${Number(capitalChartRangeValue)}" aria-label="拖动选择资金曲线时间范围" aria-valuetext="${escapeHtml(capitalRangeText)}"><div aria-hidden="true"><span>较短</span><span>全部</span></div></div></div>` : '';
-  const emptyBalanceMessage = displayEnvironment === 'TESTNET'
-    ? '尚无测试环境资金数据。'
-    : '尚无生产环境资金数据。';
-  const accountFilters = accountOptions.map((option, index) => `<label class="capital-account-option ${option.selectable ? '' : 'is-disabled'}"><input type="checkbox" name="account" value="${escapeHtml(option.key)}" ${selectedAccountKeys.has(option.key) ? 'checked' : ''} ${option.selectable ? '' : 'disabled'}><i class="capital-account-color color-${index % 6}" aria-hidden="true"></i><span><b title="${escapeHtml(option.label)}">${escapeHtml(option.label)}</b><small>${escapeHtml(option.location_type === 'VAULT' ? '链上金库' : fmtVenueLabel(option.venue))} · ${escapeHtml(option.account_id.length > 10 ? `${option.account_id.slice(0,4)}…${option.account_id.slice(-4)}` : option.account_id)} · ${escapeHtml(fmtStatus(option.connection_status))} · ${escapeHtml(option.last_sync_at ? fmtDate(option.last_sync_at) : '尚未同步')}</small>${option.disabled_reason ? `<em>${escapeHtml(option.disabled_reason)}</em>` : ''}</span></label>`).join('');
-  const selectedTags = accountOptions.filter(option => selectedAccountKeys.has(option.key)).map(option => `<button class="capital-account-tag color-${capitalSeriesColorIndex[option.key]}" type="button" data-remove-capital-account="${escapeHtml(option.key)}"><span>${escapeHtml(option.label)}</span><b aria-hidden="true">×</b><span class="sr-only">移除 ${escapeHtml(option.label)}</span></button>`).join('');
-  const activeCapitalView = capitalViewSelection();
-  const capitalViewHref = view => {
-    const params = new URLSearchParams();
-    selectedAccountKeys.forEach(key => params.append('account', key));
-    if (view !== 'overview') params.set('view', view);
-    return `/capital?${params.toString()}`;
-  };
-  const capitalNavigation = displayEnvironment === 'TESTNET'
-    ? `<a id="capital-view-tab-overview" class="active" href="${capitalViewHref('overview')}" data-link aria-current="page"><span>资金总览</span><b>${netWorth.complete ? '完整' : '需关注'}</b></a>`
-    : `<a id="capital-view-tab-overview" class="${activeCapitalView === 'overview' ? 'active' : ''}" href="${capitalViewHref('overview')}" data-link ${activeCapitalView === 'overview' ? 'aria-current="page"' : ''}><span>资金总览</span><b>${netWorth.complete ? '完整' : '需关注'}</b></a><a id="capital-view-tab-routes" class="${activeCapitalView === 'routes' ? 'active' : ''}" href="${capitalViewHref('routes')}" data-link ${activeCapitalView === 'routes' ? 'aria-current="page"' : ''}><span>资金路径</span><b>${escapeHtml(fmtStatus(item.real_transfer_gate || 'DISABLED'))}</b></a><a id="capital-view-tab-activity" class="${activeCapitalView === 'activity' ? 'active' : ''}" href="${capitalViewHref('activity')}" data-link ${activeCapitalView === 'activity' ? 'aria-current="page"' : ''}><span>操作与回执</span><b>${Number(item.direct_operations?.length || 0)}</b></a>`;
-  const hidden = view => view === activeCapitalView ? '' : 'hidden';
-  const livePanels = displayEnvironment === 'LIVE' ? `
-    <div class="capital-view-panel" data-capital-view-panel="routes" aria-labelledby="capital-view-tab-routes" role="region" ${hidden('routes')}>
-      <article class="card"><div class="card-heading"><div><p class="eyebrow">生产配置预检</p><h2>只显示是否配置，不回显地址或凭据</h2></div><span class="status-pill">单账户模式</span></div><dl class="definition-grid">${definition('网络 / 资产', `${directConfiguration.network || '—'} / ${directConfiguration.asset || '—'}`)}${definition('当前链上金库', selectedTreasuryProviderLabel)}${definition('链上金库状态', selectedProviderStatus)}${definition('自有钱包', directConfiguration.owned_arbitrum_address_configured ? '已配置' : '未配置')}${definition('币安账户与地址', directConfiguration.binance_account_configured && directConfiguration.binance_whitelist_destination_configured && directConfiguration.binance_withdrawal_destination_configured ? '已配置' : '不完整')}${definition('币安专用资金 API', directConfiguration.binance_capital_credentials_configured ? '已加载（不回显）' : '未加载')}${definition('币安真实提现提交', directConfiguration.binance_capital_submission_enabled && item.real_transfer_gate === 'ENABLED' ? '已启用' : '关闭；仅可预检')}${definition('Hyperliquid 路径', directConfiguration.hyperliquid_account_configured && directConfiguration.hyperliquid_contract_configured ? '已配置' : '不完整')}${definition('金额 / 费用上限', directConfiguration.limits_configured ? '已配置' : '未配置')}${definition('签名 / 广播', '币安只使用专用受限 API；链上签名交给人控钱包或有效多签，服务端不读取私钥')}</dl></article>
-      <section class="capital-routes-section"><div class="card-heading"><div><p class="eyebrow">四条直达路径</p><h2>选择资金从哪里到哪里</h2><p class="subtle">先选路径，再在一个确认窗口里填写金额；安全说明不再重复四遍。</p></div><span class="status-pill ${item.real_transfer_gate === 'ENABLED' ? 'status-APPROVED' : 'status-DISABLED'}">${escapeHtml(fmtStatus(item.real_transfer_gate || 'DISABLED'))}</span></div>${directConfigurationEditor}<div class="callout direct-capital-boundary" data-provider-boundary><b>统一安全边界：</b>系统只使用当前选定的 ${escapeHtml(selectedTreasuryProviderLabel)}；每条路径都重新校验地址、网络、资产、额度、实时状态与安全开关。链上私钥不进入控制台；真实币安提现还需专用开关和 CAPITAL_TRANSFER 双重开启。</div><div class="capital-route-grid">${directPathCards}</div></section>
-    </div>${directCapitalDialog}
-    <div class="capital-view-panel" data-capital-view-panel="activity" aria-labelledby="capital-view-tab-activity" role="region" ${hidden('activity')}>
-      <section><h2>操作日志、阶段与回执</h2>${directRows ? `<div class="table-wrap is-scrollable capital-operation-table"><table><thead><tr><th>操作</th><th>路径 / 金额</th><th>阶段</th><th>状态 / 回执</th><th>精确阻断</th></tr></thead><tbody>${directRows}</tbody></table></div>` : '<div class="callout">尚无直达资金操作。提交一次最终确认后，会在这里记录校验结果。</div>'}</section>
-      <section><h2>历史资金划转</h2><p class="subtle">旧流程只保留为只读审计记录，不再是四条直达操作的必经界面。</p>${legacyRows ? `<div class="table-wrap is-scrollable capital-history-table"><table><thead><tr><th>记录</th><th>方向</th><th>金额</th><th>状态</th><th>外部回执</th></tr></thead><tbody>${legacyRows}</tbody></table></div>` : '<div class="callout">尚无历史资金划转。</div>'}</section>
-    </div>` : '';
-  main.innerHTML = `<section class="page capital-page">
-    <header class="page-head capital-page-head"><div><p class="eyebrow">${fmtExecutionMode(displayEnvironment)}资金 · 多账户只读事实</p><h1>资金中心</h1><p class="lede">按测试/实盘独立账户集多选展示资金曲线。这里的选择只影响展示，不会切换运行环境或改变交易能力。</p></div>${displayEnvironment === 'LIVE' ? `<div class="capital-gate-summary"><small>生产资金操作</small><b>${escapeHtml(fmtStatus(item.real_transfer_gate || 'DISABLED'))}</b><span>在途 / 占用 ${fmtNumber(liveInTransit)} USDC</span></div>` : ''}</header>
-    <section class="card capital-display-controls"><div class="card-heading"><div><p class="eyebrow">曲线展示范围</p><h2>${fmtExecutionMode(displayEnvironment)}账户</h2></div><a class="text-button" href="/team-settings" data-link>前往模式设置查看当前模式</a></div>${displayEnvironment === 'TESTNET' ? '<p class="safety-note"><b>测试资产，不代表真实资金。</b> 本页不显示 Vault、Safe 或真实资金划转。</p>' : ''}<details class="capital-account-picker"><summary><span>已选 ${selectedAccountKeys.size} 个账户</span><small>搜索与多选</small></summary><div class="capital-account-picker-panel"><div class="capital-account-picker-tools"><input type="search" data-capital-account-search placeholder="搜索账户名称或 ID" aria-label="搜索账户"><select data-capital-venue-filter aria-label="按交易所筛选"><option value="">全部交易所</option>${[...new Set(accountOptions.map(option => option.venue))].map(venue => `<option value="${escapeHtml(venue)}">${escapeHtml(venue === 'VAULT' ? '链上金库' : fmtVenueLabel(venue))}</option>`).join('')}</select><button class="secondary" type="button" data-capital-select-all>全选</button><button class="secondary" type="button" data-capital-clear>清空</button></div><div class="capital-account-options">${accountFilters || '<p class="subtle">当前模式尚未添加有效账户，请先前往账户管理。</p>'}</div></div></details><div class="capital-account-tags" aria-label="已选账户">${selectedTags || '<span class="subtle">尚未选择账户</span>'}</div><p class="microcopy">首次进入默认选择第一个有效账户；之后恢复你在当前团队和环境中的上次选择。账户多选只影响曲线展示。</p></section>
-    <nav class="section-tabs capital-section-tabs" aria-label="资金中心页面">${capitalNavigation}</nav>
-    <div class="capital-view-panel" data-capital-view-panel="overview" aria-labelledby="capital-view-tab-overview" role="region" ${hidden('overview')}>
-      <section class="capital-overview" aria-label="当前资金净值"><article class="capital-total-card ${netWorth.complete ? 'is-current' : 'is-limited'}"><small>当前所选账户总净值</small><b>${escapeHtml(totalHeadline)}</b><p>${escapeHtml(totalSupporting)}</p></article><div class="capital-source-cards">${sourceCards}</div></section>
-      <section class="capital-trust-panel ${netWorth.complete ? 'is-current' : 'is-limited'}"><div><b>${netWorth.complete ? '所选账户数据可信，可用于当前汇总' : '当前汇总已阻断'}</b><p>${escapeHtml(trustCopy)}</p></div><span>${netWorth.complete ? '完整' : '需关注'}</span></section>
-      <section class="capital-chart-panel"><div class="chart-head"><div><p class="eyebrow">资金净值趋势</p><h2>${selectedAccountKeys.size} 个所选账户曲线</h2><p class="subtle">每个账户一条独立曲线，并提供所选账户汇总。缺失、过期、错位和断档都不会补零或强行连线。</p></div></div><div class="capital-chart-meta"><span data-capital-range-coverage>${escapeHtml(chartCoverage)}</span><span>断档按实际采样节奏的 3 倍判定（至少 ${Number(netWorth.history_gap_tolerance_seconds || 300)} 秒）；纵轴至少保留 0.05% 观察范围</span></div><div class="chart-legend" role="group" aria-label="选择显示的资金曲线">${chartLegend}</div>${hasHistory ? `<div class="capital-chart-wrap"><canvas id="capital-chart" height="300" aria-label="所选账户及汇总 USD 资金趋势"></canvas><div class="capital-chart-tooltip" role="status" hidden></div></div>` : '<div class="chart-empty">尚无可绘制的资金历史；缺失数据不会补零。</div>'}${capitalHistoryRangeControl}</section>
-      <section><h2>资金位置明细</h2><p class="subtle">USD 金额统一精度：小额四位、大额两位；原资产余额保留在明细中。历史快照不会计入当前净值。</p>${capitalBalanceTable(liveBalanceRows, emptyBalanceMessage)}</section>
-    </div>${livePanels}
-  </section>`;
-  if (activeCapitalView === 'overview') drawCapitalChart(visibleHistorySeries);
-  const applyAccountSelection = selected => {
-    localStorage.setItem(selectionStorageKey, JSON.stringify(selected));
-    const next = new URLSearchParams();
-    (selected.length ? selected : ['__NONE__']).forEach(value => next.append('account', value));
-    if (activeCapitalView !== 'overview' && displayEnvironment === 'LIVE') next.set('view', activeCapitalView);
-    history.replaceState({}, '', `/capital?${next.toString()}`);
-    route();
-  };
-  document.querySelectorAll('.capital-account-option input').forEach(input => input.addEventListener('change', () => applyAccountSelection([...document.querySelectorAll('.capital-account-option input:checked')].map(item => item.value))));
-  document.querySelectorAll('[data-remove-capital-account]').forEach(button => button.addEventListener('click', () => applyAccountSelection([...selectedAccountKeys].filter(key => key !== button.dataset.removeCapitalAccount))));
-  document.querySelector('[data-capital-select-all]')?.addEventListener('click', () => applyAccountSelection(accountOptions.filter(option => option.selectable).map(option => option.key)));
-  document.querySelector('[data-capital-clear]')?.addEventListener('click', () => applyAccountSelection([]));
-  const filterAccounts = () => {
-    const query = (document.querySelector('[data-capital-account-search]')?.value || '').toLowerCase();
-    const venue = document.querySelector('[data-capital-venue-filter]')?.value || '';
-    document.querySelectorAll('.capital-account-option').forEach((row, index) => {
-      const option = accountOptions[index];
-      row.hidden = !(`${option.label} ${option.account_id}`.toLowerCase().includes(query) && (!venue || option.venue === venue));
-    });
-  };
-  document.querySelector('[data-capital-account-search]')?.addEventListener('input', filterAccounts);
-  document.querySelector('[data-capital-venue-filter]')?.addEventListener('change', filterAccounts);
-  bindCapitalActions(historySeries, {
-    history:item.history || [],
-    alignmentToleranceSeconds:netWorth.alignment_tolerance_seconds || 60,
-    gapToleranceSeconds:netWorth.history_gap_tolerance_seconds || 300,
-    selectedOnchainSeriesLabel,
-  });
+  const vaultReady = Boolean(directConfiguration.notilt_scope_configured);
+  const safeReady = Boolean(directConfiguration.safe_spending_scope_configured);
+  const providerCards = `<div class="capital-provider-grid">
+    <article class="card capital-provider-card ${selectedTreasuryProvider === 'NOTILT_VAULT' ? 'is-selected' : ''}"><div class="card-heading"><div><p class="eyebrow">生产链上金库</p><h2>Vault</h2></div><span class="status-pill ${vaultReady ? 'status-APPROVED' : 'status-DISABLED'}">${vaultReady ? '已配置' : '待配置'}</span></div><p>NoTilt Vault 用于受控资金保管与固定路径划转。页面只显示配置状态，不回显合约地址、Agent 范围或凭据。</p><dl class="definition-grid">${definition('当前使用', selectedTreasuryProvider === 'NOTILT_VAULT' ? '是' : '否')}${definition('官方 SDK', directConfiguration.notilt_sdk_available ? '可用' : '未就绪')}${definition('Vault 范围', vaultReady ? '已验证' : '不完整')}${definition('签名 / 广播', '始终由人控钱包或有效多签确认')}</dl></article>
+    <article class="card capital-provider-card ${selectedTreasuryProvider === 'SAFE_SPENDING_LIMIT' ? 'is-selected' : ''}"><div class="card-heading"><div><p class="eyebrow">生产多签金库</p><h2>Safe</h2></div><span class="status-pill ${safeReady ? 'status-APPROVED' : 'status-DISABLED'}">${safeReady ? '已配置' : '待配置'}</span></div><p>Safe Spending Limits 使用 Safe、delegate 与可信 RPC 范围。控制台只读取额度与回执，不接收或保存钱包签名。</p><dl class="definition-grid">${definition('当前使用', selectedTreasuryProvider === 'SAFE_SPENDING_LIMIT' ? '是' : '否')}${definition('Safe Gateway', directConfiguration.safe_gateway_available ? '可用' : '未就绪')}${definition('Safe / delegate', directConfiguration.safe_address_configured && directConfiguration.safe_delegate_configured ? '已配置' : '不完整')}${definition('Spending Limit', safeReady ? '可读取' : '尚未就绪')}</dl></article>
+  </div>`;
+  const liveContent = `<section class="capital-provider-section"><div class="section-heading"><div><p class="eyebrow">Vault / Safe</p><h2>生产资金保管</h2><p>资金中心只保留 Vault、Safe 和相关受控资金路径；账户汇总与净值曲线已移至绩效报表。</p></div><a class="secondary" href="/results" data-link>查看绩效曲线</a></div>${providerCards}${directConfigurationEditor}</section>
+    <section class="capital-routes-section"><div class="card-heading"><div><p class="eyebrow">受控资金路径</p><h2>Vault / Safe 与交易所</h2><p class="subtle">先选路径，再填写金额；每次都会重新校验地址、网络、资产、额度、实时状态和安全开关。</p></div><span class="status-pill ${item.real_transfer_gate === 'ENABLED' ? 'status-APPROVED' : 'status-DISABLED'}">${escapeHtml(fmtStatus(item.real_transfer_gate || 'DISABLED'))}</span></div><div class="callout direct-capital-boundary" data-provider-boundary><b>当前提供方：${escapeHtml(selectedTreasuryProviderLabel)}。</b> 链上私钥不进入控制台；真实币安提现继续受专用开关和 CAPITAL_TRANSFER 双重门禁。</div><div class="capital-route-grid">${directPathCards}</div></section>${directCapitalDialog}
+    <details class="capital-activity-disclosure"><summary><span>操作与回执</span><small>${Number(item.direct_operations?.length || 0)} 条直达操作</small></summary><div><section><h2>操作日志、阶段与回执</h2>${directRows ? `<div class="table-wrap is-scrollable capital-operation-table"><table><thead><tr><th>操作</th><th>路径 / 金额</th><th>阶段</th><th>状态 / 回执</th><th>精确阻断</th></tr></thead><tbody>${directRows}</tbody></table></div>` : '<div class="callout">尚无直达资金操作。</div>'}</section>${legacyRows ? `<section><h2>历史资金划转</h2><div class="table-wrap is-scrollable capital-history-table"><table><thead><tr><th>记录</th><th>方向</th><th>金额</th><th>状态</th><th>外部回执</th></tr></thead><tbody>${legacyRows}</tbody></table></div></section>` : ''}</div></details>`;
+  const testnetContent = `<section class="empty-state compact-empty capital-testnet-empty"><div><p class="eyebrow">生产专属</p><h2>Vault 与 Safe 不适用于测试模式</h2><p>测试资产、交易所账户汇总与净值曲线请在绩效报表查看；测试模式不显示生产资金路径。</p><div class="toolbar empty-actions"><a class="primary" href="/results" data-link>前往绩效报表</a><a class="secondary" href="/team-settings" data-link>查看当前模式</a></div></div></section>`;
+  main.innerHTML = `<section class="page capital-page"><header class="page-head capital-page-head"><div><p class="eyebrow">${fmtExecutionMode(displayEnvironment)} · 资金保管</p><h1>资金中心</h1><p class="lede">集中查看 Vault、Safe 与生产资金路径；资金账户汇总和曲线统一在绩效报表展示。</p></div>${displayEnvironment === 'LIVE' ? `<div class="capital-gate-summary"><small>生产资金操作</small><b>${escapeHtml(fmtStatus(item.real_transfer_gate || 'DISABLED'))}</b><span>在途 / 占用 ${fmtNumber(liveInTransit)} USDC</span></div>` : ''}</header>${displayEnvironment === 'LIVE' ? liveContent : testnetContent}</section>`;
+  bindCapitalActions();
 }
 
 function drawCapitalChart(series) {
@@ -686,7 +633,7 @@ function drawCapitalChart(series) {
   canvas.onpointerleave = () => { if (tooltip) tooltip.hidden = true; };
 }
 
-function bindCapitalActions(historySeries = [], rangeContext = null) {
+function bindCapitalPerformanceChart(historySeries = [], rangeContext = null) {
   let activeHistorySeries = historySeries;
   const redrawCapitalHistory = () => {
     drawCapitalChart(activeHistorySeries.filter(series => capitalTrendVisibility[series.source]));
@@ -733,6 +680,9 @@ function bindCapitalActions(historySeries = [], rangeContext = null) {
     });
     capitalChartResizeObserver.observe(chartCanvas);
   }
+}
+
+function bindCapitalActions() {
   document.querySelectorAll('[data-capital-preview]').forEach(button => button.addEventListener('click', async event => {
     const target = event.currentTarget;
     const isSafe = target.dataset.previewProvider === 'SAFE_SPENDING_LIMIT';
