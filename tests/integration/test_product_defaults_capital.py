@@ -514,6 +514,113 @@ def test_safe_spending_limit_provider_is_selected_audited_and_never_signed(
     assert "CAPITAL_SAFE_SPENDING_PREVIEW_PREPARED" in events
 
 
+def test_vault_and_safe_configurations_persist_while_current_provider_switches(
+    database: Database,
+) -> None:
+    service = TradingService(database)
+    now = datetime.now(UTC)
+    admin = service.bootstrap_admin("dual-treasury-admin", now=now)
+    _add_live_accounts(database, admin)
+
+    async def scenario() -> None:
+        async with AsyncClient(
+            transport=ASGITransport(app=_app(database)),
+            base_url="http://test",
+        ) as client:
+            await _login(client, "dual-treasury-admin")
+            safe_selected = await client.put(
+                "/api/capital/direct-configuration",
+                json={
+                    "treasury_provider": "SAFE_SPENDING_LIMIT",
+                    "vault_id": "vault-1",
+                    "vault_address": "0x1111111111111111111111111111111111111111",
+                    "safe_address": "0x7777777777777777777777777777777777777777",
+                    "safe_delegate_address": "0x8888888888888888888888888888888888888888",
+                    "binance_withdrawal_address": (
+                        "0x7777777777777777777777777777777777777777"
+                    ),
+                    "idempotency_key": "dual-treasury-safe-selected",
+                },
+            )
+            assert safe_selected.status_code == 200, safe_selected.text
+            direct = safe_selected.json()["data"]["direct_configuration"]
+            assert direct["treasury_provider"] == "SAFE_SPENDING_LIMIT"
+            assert direct["configured_providers"] == [
+                "NOTILT_VAULT",
+                "SAFE_SPENDING_LIMIT",
+            ]
+            assert direct["vault_id_configured"] is True
+            assert direct["vault_address_configured"] is True
+            assert direct["safe_address_configured"] is True
+            assert direct["safe_delegate_configured"] is True
+
+            vault_selected = await client.put(
+                "/api/capital/direct-configuration",
+                json={
+                    "treasury_provider": "NOTILT_VAULT",
+                    "binance_withdrawal_address": (
+                        "0x1111111111111111111111111111111111111111"
+                    ),
+                    "idempotency_key": "dual-treasury-vault-selected",
+                },
+            )
+            assert vault_selected.status_code == 200, vault_selected.text
+            direct = vault_selected.json()["data"]["direct_configuration"]
+            assert direct["treasury_provider"] == "NOTILT_VAULT"
+            assert direct["configured_providers"] == [
+                "NOTILT_VAULT",
+                "SAFE_SPENDING_LIMIT",
+            ]
+            assert direct["vault_address_configured"] is True
+            assert direct["safe_address_configured"] is True
+            assert direct["safe_delegate_configured"] is True
+            assert "0x1111111111111111111111111111111111111111" not in vault_selected.text
+            assert "0x7777777777777777777777777777777777777777" not in vault_selected.text
+
+            vault_operation = await client.post(
+                "/api/capital/direct-operations",
+                json={
+                    "path": "VAULT_TO_BINANCE",
+                    "amount": "10",
+                    "final_confirmed": True,
+                    "idempotency_key": "dual-treasury-vault-operation",
+                },
+            )
+            assert vault_operation.status_code == 200, vault_operation.text
+            assert vault_operation.json()["treasury_provider"] == "NOTILT_VAULT"
+
+            safe_reselected = await client.put(
+                "/api/capital/direct-configuration",
+                json={
+                    "treasury_provider": "SAFE_SPENDING_LIMIT",
+                    "binance_withdrawal_address": (
+                        "0x7777777777777777777777777777777777777777"
+                    ),
+                    "idempotency_key": "dual-treasury-safe-reselected",
+                },
+            )
+            assert safe_reselected.status_code == 200, safe_reselected.text
+            direct = safe_reselected.json()["data"]["direct_configuration"]
+            assert direct["configured_providers"] == [
+                "NOTILT_VAULT",
+                "SAFE_SPENDING_LIMIT",
+            ]
+
+            safe_operation = await client.post(
+                "/api/capital/direct-operations",
+                json={
+                    "path": "VAULT_TO_BINANCE",
+                    "amount": "10",
+                    "final_confirmed": True,
+                    "idempotency_key": "dual-treasury-safe-operation",
+                },
+            )
+            assert safe_operation.status_code == 200, safe_operation.text
+            assert safe_operation.json()["treasury_provider"] == "SAFE_SPENDING_LIMIT"
+
+    asyncio.run(scenario())
+
+
 def test_binance_restricted_withdrawal_runs_frozen_preflight_submission_and_dual_receipt(
     database: Database,
 ) -> None:
