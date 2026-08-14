@@ -338,9 +338,10 @@ dialog { border-radius: 5px; }
 
 @media (max-width: 420px) {
   .main-content { padding-inline: 14px; }
-  .stats { grid-template-columns: 1fr; }
-  .stat:nth-child(even) { border-left: 0; }
-  .stat + .stat { border-top: 1px solid var(--line); }
+  .stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .stat:nth-child(even) { border-left: 1px solid var(--line); }
+  .stat + .stat { border-top: 0; }
+  .stat:nth-child(n + 3) { border-top: 1px solid var(--line); }
   .proposal-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .proposal-stats .stat { min-height: 94px; padding: 14px 12px; }
   .proposal-stats .stat:nth-child(even) { border-left: 1px solid var(--line); }
@@ -348,6 +349,12 @@ dialog { border-radius: 5px; }
   .home-priority { grid-template-columns: 24px minmax(0, 1fr); }
   .review-environment-tabs { width: 100%; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 6px; }
   .section-tabs { gap: 14px; overflow-x: auto; }
+}
+
+@media (max-width: 360px) {
+  .stats:not(.proposal-stats) { grid-template-columns: 1fr; }
+  .stats:not(.proposal-stats) .stat:nth-child(even) { border-left: 0; }
+  .stats:not(.proposal-stats) .stat + .stat { border-top: 1px solid var(--line); }
 }
 
 /* Continuous UX pass: compact mobile records and reliable touch targets. */
