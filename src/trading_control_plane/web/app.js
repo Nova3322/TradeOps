@@ -75,17 +75,21 @@ document.querySelector('#system-proposal-form').addEventListener('submit', async
   try { const result = await api(`/api/opportunities/${candidateId}/proposals`, {method:'POST', body:JSON.stringify(data)}); dialog.close(); showToast('系统机会提案已冻结并进入审核'); navigate(`/proposals/${result.proposal_id}`); }
   catch (error) { showApiError(error, form.querySelector('#system-form-error')); }
 });
-document.querySelector('#logout-button').addEventListener('click', async (event) => withPending(event.currentTarget, '退出中…', async () => {
-  cancelMobileNavFocus();
-  try {
-    await api('/api/auth/logout', {method:'POST'});
-    session = null;
-    sessionAuthenticationMethod = '';
-    setShell(false);
-    history.replaceState({}, '', '/');
-    await route();
-  } catch (error) { showApiError(error); }
-}));
+async function logoutCurrentSession(button) {
+  return withPending(button, '退出中…', async () => {
+    cancelMobileNavFocus();
+    try {
+      await api('/api/auth/logout', {method:'POST'});
+      session = null;
+      sessionAuthenticationMethod = '';
+      setShell(false);
+      history.replaceState({}, '', '/');
+      await route();
+    } catch (error) { showApiError(error); }
+  });
+}
+document.querySelector('#logout-button').addEventListener('click', event => logoutCurrentSession(event.currentTarget));
+mobileLogoutButton?.addEventListener('click', event => logoutCurrentSession(event.currentTarget));
 function closeUserMenu({restoreFocus = false} = {}) {
   userMenuPanel.hidden = true;
   identityChip.setAttribute('aria-expanded', 'false');
