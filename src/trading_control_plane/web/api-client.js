@@ -117,3 +117,20 @@ function showApiError(error, target = null) {
   if (target) target.textContent = localizedText(message);
   else showToast(message, 'error');
 }
+
+async function submitForm(form, request, {success = '', onSuccess = null} = {}) {
+  const errorTarget = form.querySelector('.form-error');
+  if (errorTarget) errorTarget.textContent = '';
+  const submitter = form.querySelector('button[type="submit"], button:not([type])');
+  return withPending(submitter, '处理中…', async () => {
+    try {
+      const result = await request();
+      if (success) showToast(success);
+      if (onSuccess) await onSuccess(result);
+      return result;
+    } catch (error) {
+      showApiError(error, errorTarget);
+      return undefined;
+    }
+  });
+}

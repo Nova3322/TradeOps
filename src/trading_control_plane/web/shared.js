@@ -106,10 +106,10 @@ function updateEnvironmentIndicators() {
   const modeLabel = ['LIVE','TESTNET'].includes(teamMode)
     ? fmtEnvironment(teamMode)
     : localizedText('待配置');
-  environmentBadge.textContent = `${localizedText('当前环境')}：${deploymentLabel}`;
-  environmentBadge.dataset.environment = String(authStatus?.environment || 'unknown').toLowerCase();
-  environmentBadge.setAttribute('aria-label', `${localizedText('当前环境')}：${deploymentLabel}`);
-  environmentBadge.title = `${deploymentLabel} · ${modeLabel}`;
+  environmentBadge.textContent = `${localizedText('当前模式')}：${modeLabel}`;
+  environmentBadge.dataset.environment = String(teamMode || 'setup').toLowerCase();
+  environmentBadge.setAttribute('aria-label', `${localizedText('当前模式')}：${modeLabel}`);
+  environmentBadge.title = `${localizedText('当前模式')}：${modeLabel} · ${localizedText('当前环境')}：${deploymentLabel}`;
   sidebarEnvironment.textContent = deploymentLabel;
   sidebarMode.textContent = `${localizedText('当前模式')}：${modeLabel}`;
 }
@@ -278,6 +278,9 @@ const apiErrorGuidance = {
   WORKSPACE_ACCESS_DENIED:'你不是该 Workspace 的有效成员，系统已拒绝切换。',
   CAPABILITY_FORBIDDEN:'当前身份没有查看或执行此操作的权限。',
   LIVE_SCOPE_CONFIGURATION_REQUIRED:'实盘账户或交易所范围尚未配置完整。',
+  EXCHANGE_ACCOUNT_NOT_FOUND:'账户已删除、已停用或不属于当前团队，请刷新账户列表后重试。',
+  SECOND_CONFIRMATION_REQUIRED:'二次确认内容与当前账户不一致，请刷新页面后重新确认。',
+  VERSION_CONFLICT:'页面数据已更新，请刷新后再执行操作。',
   NOTILT_RELEASE_BUDGET_MISSING:'当前资产没有可用的 NoTilt 实时额度，系统不会生成释放请求。',
   NOTILT_RELEASE_SCOPE_MISMATCH:'NoTilt 实时资金范围与已配置金库不一致，请由系统管理员核对配置。',
   NOTILT_VAULT_UNTRUSTED:'当前金库不在 NoTilt 官方可信部署目录中，系统已阻断。',
@@ -291,6 +294,19 @@ const fmtStatus = (value) => statusLabels[value] || value || '未知';
 const fmtRisk = (value) => riskLabels[value] || value || '未知';
 const riskGuidance = (reason) => riskReasonGuidance[reason] || {label:'风险检查未通过',action:'查看当前风险事实，处理阻塞后重新检查。'};
 const friendlyApiError = (error) => {
+  if (error?.code === 'EXCHANGE_ACCOUNT_DELETE_BLOCKED') {
+    const labels = {
+      UNFINISHED_PROPOSALS:'未完成提案', ACTIVE_TRADING_AUTHORIZATIONS:'有效交易授权',
+      UNFINISHED_ORDER_INTENTS:'未完成订单意图', UNFINISHED_VENUE_ORDERS:'未结束订单',
+      OPEN_OR_UNKNOWN_POSITIONS:'未平仓或状态未知仓位', RUNNING_CAPITAL_TRANSFERS:'运行中资金任务',
+      RUNNING_DIRECT_CAPITAL_OPERATIONS:'运行中资金操作',
+    };
+    const details = String(error.message || '').split(';').map(item => {
+      const [code, count] = item.split('=');
+      return labels[code] ? `${labels[code]} ${count} 项` : '';
+    }).filter(Boolean).join('、');
+    return `账户暂不能删除：${details || '仍存在业务引用'}。请先结束这些引用后重试。`;
+  }
   const risk = riskReasonGuidance[error?.code] || riskReasonGuidance[error?.message];
   if (risk) return `${risk.label}：${risk.action}`;
   if (actionErrorGuidance[error?.code]) return actionErrorGuidance[error.code];
