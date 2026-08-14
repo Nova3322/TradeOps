@@ -648,7 +648,7 @@ const ENGLISH_EXACT = new Map(Object.entries({
   // Perptape and Webhook signal pages.
   'Perptape · 上游 WebSocket 实时流':'Perptape · Upstream live WebSocket stream',
   '实时流汇总同一币对、同一方向的多个突破周期。同一轮卡片、状态和按钮都来自同一个服务端事实快照；创建时仍会重新校验。':'The live stream groups breakout timeframes for the same market and direction. Cards, status, and actions come from one server snapshot and are revalidated when a proposal is created.',
-  '状态、交易所、币对、周期、方向与市场规模':'Status, venue, market, timeframe, direction, and market size', '覆盖币对':'Markets covered', '方向机会':'Directional opportunities', '完整周期':'Complete timeframes', '可新建':'Actionable',
+  '状态、交易所、币对、周期、方向与市场规模':'Status, venue, market, timeframe, direction, and market size', '覆盖币对':'Markets covered', '方向机会':'Directional opportunities', '完整周期':'Complete timeframes', '可新建':'Actionable', '可交易':'Tradable',
   '默认显示可新建机会；其他状态可在筛选中切换。':'Actionable opportunities are shown by default; use the filters to view other states.', '尝试切换机会状态、降低筛选门槛，或者清除部分筛选。':'Change the opportunity state, lower thresholds, or clear some filters.',
   'Webhook · 空间隔离':'Webhook · Space isolated', '只展示当前空间通过签名、时效、重放、幂等和格式校验的 Webhook 信号。Perptape 保留在独立页面，不在这里聚合、去重或混排。':'Only Webhook signals that pass signature, freshness, replay, idempotency, and format checks for this space appear here. Perptape remains on its own page and is never mixed into this feed.',
   '策略系统 A':'Strategy system A', '量化模型 B':'Quant model B', '交易所、币种、方向、周期、新鲜度与提案状态':'Venue, market, direction, timeframe, freshness, and proposal status',

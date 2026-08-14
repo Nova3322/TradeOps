@@ -877,6 +877,8 @@ p, li, dd, td { font-size: 14px; }
   .notification-create-footer .form-actions { justify-content: stretch; }
   .notification-create-footer .primary { width: 100%; }
   .signal-summary-strip { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .signal-summary-strip > span:first-child { grid-template-columns: minmax(0, 1fr) auto; }
+  .signal-summary-strip > span:first-child em { grid-column: 1 / -1; overflow: visible; line-height: 1.35; text-overflow: clip; white-space: normal; }
   .signal-summary-strip > span:nth-child(3) { border-left: 0; border-top: 1px solid var(--line); }
   .signal-summary-strip > span:nth-child(4) { border-top: 1px solid var(--line); }
   .opportunity-head-tools { align-items: stretch; width: 100%; }
