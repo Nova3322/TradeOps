@@ -297,6 +297,18 @@ def test_exchange_account_api_masks_credentials_and_exposes_connector_truth(
             page = await client.get("/venues")
             assert page.status_code == 200
             assert "api-secret-never-return" not in page.text
+            deleted = await client.request(
+                "DELETE",
+                f"/api/exchange-accounts/{item['exchange_account_id']}",
+                json={
+                    "confirmation": "DELETE:LIVE:binance-api-main:BINANCE",
+                    "expected_version": item["version"],
+                    "idempotency_key": "api-account-delete",
+                },
+            )
+            assert deleted.status_code == 200, deleted.text
+            assert deleted.json()["status"] == "DELETED"
+            assert deleted.json()["data"]["data"] == []
 
     asyncio.run(scenario())
 

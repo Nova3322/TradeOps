@@ -268,6 +268,38 @@ def test_unready_target_account_is_an_execution_advisory_not_a_mode_switch_block
     assert changed["dangerous_capabilities_changed"] is False
 
 
+def test_mode_switch_api_returns_the_updated_session_context(database: Database) -> None:
+    _service, ids = prepare_testnet_mode(database)
+    app = mode_app(database)
+
+    async def scenario() -> None:
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            login = await client.post("/api/auth/mock/login", json={"username": "mode-admin"})
+            assert login.status_code == 200, login.text
+            current = await client.get("/api/trading-mode")
+            assert current.status_code == 200, current.text
+            assert current.json()["data"]["execution_mode"] == "SETUP"
+
+            changed = await client.put(
+                f"/api/teams/{ids['team_id']}/trading-mode",
+                json={
+                    "mode": "TESTNET",
+                    "confirmation": "SWITCH_TO_TESTNET",
+                    "expected_version": current.json()["data"]["version"],
+                    "idempotency_key": "api-switch-testnet",
+                },
+            )
+            assert changed.status_code == 200, changed.text
+            assert changed.json()["data"]["execution_mode"] == "TESTNET"
+            assert changed.json()["session"]["active_team"]["execution_mode"] == "TESTNET"
+
+            refreshed = await client.get("/api/trading-mode")
+            assert refreshed.status_code == 200, refreshed.text
+            assert refreshed.json()["data"]["execution_mode"] == "TESTNET"
+
+    asyncio.run(scenario())
+
+
 def test_runtime_enums_proposal_environment_and_removed_endpoints_are_testnet_live_only(
     database: Database,
 ) -> None:
