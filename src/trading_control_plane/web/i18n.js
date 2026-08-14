@@ -662,6 +662,15 @@ const ENGLISH_EXACT = new Map(Object.entries({
   '当前没有运行告警或运行中交易任务':'No runtime alerts or active trades', '当前身份只查看市场与运行事实，不能启动交易、审核提案或改变风险状态。可以继续观察机会。':'Your role can view market and runtime facts but cannot start trades, review proposals, or change risk state. You can continue monitoring opportunities.', '当前身份不是审核人':'Your role is not a reviewer', '继续观察，不必为了操作而操作':'Continue monitoring; no action is needed', '当前身份可以观察机会，但不能创建提案；如有判断请交由提案发起人保存参数。':'You can monitor opportunities but cannot create proposals. Ask a proposal creator to save a thesis when needed.',
   '只读模式：当前身份可以查看、筛选候选并打开外部图表，但不能创建或修改提案。':'Read-only mode: you can view and filter opportunities and open external charts, but cannot create or edit proposals.', '默认显示可交易机会；其他状态可在筛选中切换。':'Actionable opportunities are shown by default; use filters to view other states.',
   '只读模式：':'Read-only mode:', '当前身份可以查看、筛选候选并打开外部图表，但不能创建或修改提案。':'You can view and filter opportunities and open external charts, but cannot create or edit proposals.',
+  '交易任务监控':'Trade monitoring', '当前身份不读取任务详情':'Trade details are not available to this role',
+  '系统状态仍展示风险政策、外部连接、执行底座和通知健康；运行任务、保护与对账详情由交易运维人员查看。':'System status still shows risk policy, external connections, execution infrastructure, and notification health. Active-trade, protection, and reconciliation details are available to trading operators.',
+  '未读取任务数据，不能据此判断任务数量或异常数量':'Trade data was not loaded, so trade and exception counts cannot be inferred.', '身份、模式或精确账户绑定不一致时禁止发送':'Sending is blocked when identity, mode, or exact account binding does not match.',
+  '由交易运维人员查看':'Handled by a trading operator', '由机会创建者查看':'Handled by an opportunity creator',
+  '连接状态未知':'Connection status unknown', '已配置，但最近数据尚未形成可用连接结论。现有交易任务不受影响，新的外部机会不可用。':'Configured, but recent data does not yet provide a usable connection result. Existing trades are unaffected; new external opportunities remain unavailable.',
+  '交易任务 · 运行告警详情':'Trades · Runtime alert details', '只展示运行中生产交易任务需要人工处理的问题；风险恢复、资金异常和系统健康分别保留在各自页面。':'Shows only issues requiring human action for active Production trades. Risk restoration, capital exceptions, and system health remain on their dedicated pages.',
+  '返回交易任务':'Back to trades', '运行问题':'Runtime issues', '无运行告警 / 当前无需处理':'No runtime alerts / no action needed',
+  '检查范围：运行中的生产交易任务；未发现结果未知、数据过期、保护不足或对账差异。已关闭记录不会重新计入当前待办。':'Scope: active Production trades. No unknown outcomes, stale data, protection gaps, or reconciliation differences were found. Closed records remain excluded from current tasks.',
+  '查看交易任务':'View trades', '已撤销':'Revoked',
   '资金曲线暂未就绪':'Capital series is not ready', '当前身份没有查看或执行此操作的权限。':'Your role does not have permission to view or perform this operation.', '重新加载':'Reload',
   '仅最高管理员可以直接恢复':'Only a super administrator can restore directly', '当前身份不是交易运维人员':'Your role is not a trading operator', '当前身份不是独立审核人员':'Your role is not an independent reviewer', '由资金管理员处理':'Handled by a treasury administrator', '当前身份可以查看服务端事实，但没有信号源管理权限。':'You can view server facts but cannot manage signal sources.',
   '已切换工作区；团队、成员与权限范围已重新加载':'Workspace switched; Team, membership, and permission scope reloaded',
@@ -684,6 +693,8 @@ const ENGLISH_EXACT = new Map(Object.entries({
 }));
 
 const ENGLISH_PATTERNS = [
+  [/^最近检查 (.+)$/, 'Last checked $1'],
+  [/^最近检查：(.+)$/, 'Last checked: $1'],
   [/^(\d+) 笔提案等待你的独立审核$/, '$1 proposals require your independent review'],
   [/^(\d+) 笔提案和 1 项风险恢复待办$/, '$1 proposals and 1 risk-restoration task require action'],
   [/^(\d+) 笔非本人提案等待判断$/, '$1 proposals from other authors await a decision'],
@@ -793,7 +804,7 @@ const ENGLISH_PATTERNS = [
   [/^当前没有运行阻断。生产 (\d+) 笔，测试 (\d+) 笔；打开队列逐项判断，批准不会直接产生订单。$/, 'There is no runtime blocker. Production: $1; Testnet: $2. Review each proposal in the inbox; approval never places an order.'],
   [/^生产 (\d+) · 测试 (\d+)$/, 'Production $1 · Testnet $2'],
   [/^最早一笔到期于 (.+)。生产 (\d+) 笔，测试 (\d+) 笔。$/, 'The earliest expires at $1. Production: $2; Testnet: $3.'],
-  [/^(\d+) 笔将在 30 分钟内到期。生产 (\d+) 笔，测试 (\d+) 笔。$/, '$1 proposals expire within 30 minutes. Production: $2; Testnet: $3.'],
+  [/^(\d+) 笔将在 30 分钟内到期。\s*生产 (\d+) 笔，测试 (\d+) 笔。$/, '$1 proposals expire within 30 minutes. Production: $2; Testnet: $3.'],
   [/^当前筛选：生产 (\d+) 笔 · 测试 (\d+) 笔；系统机会 (\d+) 笔 · 人工判断 (\d+) 笔。这里只统计你尚未投票、仍在有效期内的提案。$/, 'Current filter: Production $1 · Testnet $2; system opportunities $3 · manual theses $4. Only unexpired proposals that have not received your vote are counted.'],
   [/^(\d+) 个交易任务$/, '$1 trades'], [/^(\d+) 项阻断$/, '$1 blockers'], [/^(\d+) 项需要处理$/, '$1 issues require action'],
   [/^(\d+) 项阻断，查看详情$/, '$1 blockers; view details'],
