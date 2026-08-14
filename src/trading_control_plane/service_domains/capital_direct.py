@@ -161,20 +161,6 @@ class DirectOperationCapitalService(ServiceComponent):
             )
         if treasury_provider not in {"NOTILT_VAULT", "SAFE_SPENDING_LIMIT"}:
             _reject("CAPITAL_CONFIGURATION_INVALID", "funding provider is unsupported")
-        if treasury_provider == "NOTILT_VAULT":
-            safe_address = None
-            safe_delegate_address = None
-        else:
-            vault_id = None
-            vault_address = None
-        payload.update(
-            {
-                "vault_id": vault_id,
-                "vault_address": vault_address,
-                "safe_address": safe_address,
-                "safe_delegate_address": safe_delegate_address,
-            }
-        )
         if max_amount is not None and max_amount <= 0:
             _reject("CAPITAL_CONFIGURATION_INVALID", "maximum amount must be positive")
         if max_fee is not None and max_fee < 0:

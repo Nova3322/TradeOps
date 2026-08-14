@@ -695,6 +695,28 @@ p, li, dd, td { font-size: 14px; }
 .signal-source-catalog[open] [data-catalog-expanded] { display: inline; }
 .signal-source-catalog[open] > summary { border-bottom: 1px solid var(--line); }
 .signal-source-catalog-content { padding: 16px; }
+.signal-source-card { padding: 0; }
+.signal-source-card > summary { display: flex; align-items: center; justify-content: space-between; gap: 16px; min-height: 112px; padding: 16px; cursor: pointer; list-style: none; }
+.signal-source-card > summary::-webkit-details-marker { display: none; }
+.signal-source-card-summary > span:first-child { display: grid; gap: 5px; min-width: 0; }
+.signal-source-card-summary strong { overflow: hidden; font-size: 22px; text-overflow: ellipsis; white-space: nowrap; }
+.signal-source-card-summary small { overflow: hidden; color: var(--muted); font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
+.signal-source-card-summary-state { display: flex; flex: 0 0 auto; flex-direction: column; align-items: flex-end; gap: 11px; }
+.signal-source-card-summary-state > b { color: var(--muted); font-size: 12px; }
+.signal-source-card-summary-state > b::before { content: '\25B8'; margin-right: 6px; }
+.signal-source-card[open] .signal-source-card-summary-state > b::before { content: '\25BE'; }
+.signal-source-card [data-source-expanded] { display: none; }
+.signal-source-card[open] [data-source-collapsed] { display: none; }
+.signal-source-card[open] [data-source-expanded] { display: inline; }
+.signal-source-card[open] > summary { border-bottom: 1px solid var(--line); background: var(--panel-soft); }
+.signal-source-card-content { padding: 0 16px 16px; }
+.capital-provider-config-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; margin-top: 16px; }
+.capital-provider-config-grid .capital-config-section { margin: 0; padding: 15px; border: 1px solid var(--line); border-radius: 3px; background: var(--panel); }
+.capital-provider-config-grid .capital-config-section.is-selected-provider { border-color: color-mix(in srgb, var(--accent) 48%, var(--line)); box-shadow: inset 3px 0 0 var(--accent); }
+.capital-config-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; margin-bottom: 12px; }
+.capital-config-heading p { margin: 5px 0 0; color: var(--muted); font-size: 12px; }
+.capital-config-heading > span { flex: 0 0 auto; padding: 4px 7px; border: 1px solid var(--line); border-radius: 999px; color: var(--muted); font-size: 11px; font-weight: 650; }
+.capital-config-section.is-selected-provider .capital-config-heading > span { border-color: color-mix(in srgb, var(--accent) 45%, var(--line)); background: var(--accent-2); color: var(--accent); }
 .opportunity-card-grid { grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; }
 .opportunity-card { display: flex; min-width: 0; min-height: 252px; flex-direction: column; padding: 14px 14px 12px; border-radius: 3px; }
 .opportunity-card-head { align-items: start; }
@@ -742,7 +764,8 @@ p, li, dd, td { font-size: 14px; }
 
 @media (max-width: 780px) {
   .performance-capital-panel { margin-inline: -2px; padding: 14px; }
-  .capital-provider-grid { grid-template-columns: 1fr; }
+  .capital-provider-grid,
+  .capital-provider-config-grid { grid-template-columns: 1fr; }
   .notification-create-basics,
   .notification-event-grid { grid-template-columns: 1fr; }
   .notification-create-footer { grid-template-columns: 1fr; }
@@ -756,6 +779,9 @@ p, li, dd, td { font-size: 14px; }
   .signal-source-catalog > summary { align-items: flex-start; min-height: 68px; padding: 13px 14px; }
   .signal-source-catalog > summary strong { font-size: 18px; }
   .signal-source-catalog-content { padding: 10px; }
+  .signal-source-card > summary { align-items: flex-start; min-height: 96px; padding: 14px; }
+  .signal-source-card-summary-state { gap: 8px; }
+  .signal-source-card-summary small { max-width: 54vw; }
   .opportunity-card-grid { grid-template-columns: 1fr; }
   .webhook-signal-main { grid-template-columns: 1fr; gap: 13px; }
   .webhook-signal-primary-facts { grid-template-columns: repeat(2, minmax(0, 1fr)); }

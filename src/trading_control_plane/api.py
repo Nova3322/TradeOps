@@ -562,10 +562,14 @@ def create_app(
             else resolved_settings.notilt_vaults.get(configured_chain_id)
         )
         selected_provider = direct_settings.capital_direct_treasury_provider
+        configured_notilt_address = (
+            direct_settings.capital_direct_vault_address or configured_vault
+        )
+        configured_safe_address = direct_settings.capital_direct_safe_address
         selected_treasury_account_id = (
-            direct_settings.capital_direct_safe_address
+            configured_safe_address
             if selected_provider == "SAFE_SPENDING_LIMIT"
-            else direct_settings.capital_direct_vault_address or configured_vault
+            else configured_notilt_address
         )
         safe_scope_ready = (
             direct_settings.safe_spending_enabled
@@ -576,7 +580,7 @@ def create_app(
         notilt_scope_ready = (
             direct_settings.notilt_enabled
             and direct_settings.notilt_agent_address is not None
-            and selected_treasury_account_id is not None
+            and configured_notilt_address is not None
         )
         selected_scope_ready = (
             safe_scope_ready if selected_provider == "SAFE_SPENDING_LIMIT" else notilt_scope_ready
@@ -638,7 +642,7 @@ def create_app(
         snapshot["net_worth"]["onchain_provider"] = selected_provider
         snapshot["net_worth"]["onchain_probe"] = onchain_probe
         snapshot["direct_configuration"] = {
-            "single_account_mode": True,
+            "single_account_mode": False,
             "source": "VERSIONED_DATABASE" if saved_config is not None else "ENVIRONMENT",
             "version": None if saved_config is None else saved_config["version"],
             "effective_at": None if saved_config is None else saved_config["effective_at"],
@@ -649,6 +653,14 @@ def create_app(
             "asset": direct_settings.capital_direct_asset,
             "network": direct_settings.capital_direct_network,
             "treasury_provider": direct_settings.capital_direct_treasury_provider,
+            "configured_providers": [
+                provider
+                for provider, configured in (
+                    ("NOTILT_VAULT", configured_notilt_address is not None),
+                    ("SAFE_SPENDING_LIMIT", configured_safe_address is not None),
+                )
+                if configured
+            ],
             "selected_onchain_account_configured": selected_treasury_account_id is not None,
             "vault_id_configured": direct_settings.capital_direct_vault_id is not None,
             "vault_address_configured": (direct_settings.capital_direct_vault_address is not None),
@@ -681,7 +693,7 @@ def create_app(
             "notilt_sdk_available": resolved_notilt.available,
             "notilt_scope_configured": (
                 resolved_settings.notilt_enabled
-                and configured_vault is not None
+                and configured_notilt_address is not None
                 and resolved_settings.notilt_agent_address is not None
             ),
             "safe_spending_enabled": direct_settings.safe_spending_enabled,

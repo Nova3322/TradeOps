@@ -456,16 +456,16 @@ function renderDirectCapitalConfigurationEditor(directConfiguration, selectedTre
   return `<details class="card direct-capital-config-editor">
     <summary><span><b>配置 Vault、Safe 与资金路径</b><small>${version}</small></span><strong>管理员配置</strong></summary>
     <form id="direct-capital-config-form" class="toolbox-content compact-form">
-      <p class="safety-note">先选择一个链上金库，系统只使用该金库创建之后的资金操作。这里只接收公开地址和账户范围；不得输入 API secret、私钥、种子、钱包密码或签名令牌。</p>
-      <fieldset class="treasury-provider-choice"><legend>1. 选择链上金库</legend>
+      <p class="safety-note">NoTilt Vault 与 Safe 可以同时接入并分别保存。选择项只决定之后新建的资金操作使用哪个金库，未选中的金库配置会继续保留。这里只接收公开地址和账户范围；不得输入 API secret、私钥、种子、钱包密码或签名令牌。</p>
+      <fieldset class="treasury-provider-choice"><legend>1. 选择当前使用的链上金库</legend>
         <label><input type="radio" name="treasury_provider" value="NOTILT_VAULT" ${selectedTreasuryProvider === 'NOTILT_VAULT' ? 'checked' : ''}><span><b>NoTilt Vault</b><small>使用 NoTilt 金库预算、延迟与官方 SDK</small></span></label>
         <label><input type="radio" name="treasury_provider" value="SAFE_SPENDING_LIMIT" ${selectedTreasuryProvider === 'SAFE_SPENDING_LIMIT' ? 'checked' : ''}><span><b>Safe Spending Limits</b><small>使用 Safe Allowance Module 的 delegate 额度</small></span></label>
       </fieldset>
       <p class="provider-guidance" data-provider-guidance></p>
-      <section class="capital-config-section" data-provider-fields="NOTILT_VAULT"><h3>NoTilt Vault 配置</h3><p>只填写 NoTilt 金库编号和金库地址。</p><div class="field-grid"><label>NoTilt 金库编号<input name="vault_id" autocomplete="off" placeholder="${configuredPlaceholder(directConfiguration.vault_id_configured)}"></label><label>NoTilt 金库地址<input name="vault_address" autocomplete="off" placeholder="${configuredPlaceholder(directConfiguration.vault_address_configured)}"></label></div></section>
-      <section class="capital-config-section" data-provider-fields="SAFE_SPENDING_LIMIT"><h3>Safe Spending Limits 配置</h3><p>只填写公开的 Safe Smart Account 与 delegate 地址。</p><div class="field-grid"><label>Safe Smart Account<input name="safe_address" autocomplete="off" placeholder="${configuredPlaceholder(directConfiguration.safe_address_configured)}"></label><label>Safe Spending Limit delegate<input name="safe_delegate_address" autocomplete="off" placeholder="${configuredPlaceholder(directConfiguration.safe_delegate_configured)}"></label></div></section>
-      <section class="capital-config-section common-capital-fields"><h3>2. 共用账户与安全边界</h3><p>无论选择哪个链上金库，币安、Hyperliquid、自有地址和金额限制都共用。</p><div class="field-grid"><label>授权自有 Arbitrum 地址<input name="owned_arbitrum_address" autocomplete="off" placeholder="${configuredPlaceholder(directConfiguration.owned_arbitrum_address_configured)}"></label><label>币安默认账户<input name="binance_account_id" autocomplete="off" placeholder="${configuredPlaceholder(directConfiguration.binance_account_configured)}"></label><label>币安白名单入金地址<input name="binance_deposit_address" autocomplete="off" placeholder="${configuredPlaceholder(directConfiguration.binance_whitelist_destination_configured)}"></label><label>币安受限提现地址<input name="binance_withdrawal_address" autocomplete="off" placeholder="${configuredPlaceholder(directConfiguration.binance_withdrawal_destination_configured)}"></label><label>Hyperliquid 默认账户<input name="hyperliquid_account_id" autocomplete="off" placeholder="${configuredPlaceholder(directConfiguration.hyperliquid_account_configured)}"></label><label>Hyperliquid Bridge 地址<input name="hyperliquid_bridge_address" autocomplete="off" placeholder="${configuredPlaceholder(directConfiguration.hyperliquid_contract_configured)}"></label><label>单次金额上限（USDC）<input name="max_amount" type="number" step="any" min="0.000001" placeholder="留空保持当前值"></label><label>最大费用上限（USDC）<input name="max_fee" type="number" step="any" min="0" placeholder="留空保持当前值"></label></div></section>
-      <div class="form-error" role="alert"></div><div class="form-actions"><button class="primary">保存并使用此链上金库</button></div>
+      <div class="capital-provider-config-grid"><section class="capital-config-section" data-provider-fields="NOTILT_VAULT"><div class="capital-config-heading"><div><h3>NoTilt Vault 配置</h3><p>填写 NoTilt 金库编号和金库地址。</p></div><span data-provider-role>已接入备用</span></div><div class="field-grid"><label>NoTilt 金库编号<input name="vault_id" autocomplete="off" placeholder="${configuredPlaceholder(directConfiguration.vault_id_configured)}"></label><label>NoTilt 金库地址<input name="vault_address" autocomplete="off" placeholder="${configuredPlaceholder(directConfiguration.vault_address_configured)}"></label></div></section>
+      <section class="capital-config-section" data-provider-fields="SAFE_SPENDING_LIMIT"><div class="capital-config-heading"><div><h3>Safe Spending Limits 配置</h3><p>填写公开的 Safe Smart Account 与 delegate 地址。</p></div><span data-provider-role>已接入备用</span></div><div class="field-grid"><label>Safe Smart Account<input name="safe_address" autocomplete="off" placeholder="${configuredPlaceholder(directConfiguration.safe_address_configured)}"></label><label>Safe Spending Limit delegate<input name="safe_delegate_address" autocomplete="off" placeholder="${configuredPlaceholder(directConfiguration.safe_delegate_configured)}"></label></div></section></div>
+      <section class="capital-config-section common-capital-fields"><h3>2. 共用账户与安全边界</h3><p>两种链上金库共用币安、Hyperliquid、自有地址和金额限制；新操作只引用当前使用的金库。</p><div class="field-grid"><label>授权自有 Arbitrum 地址<input name="owned_arbitrum_address" autocomplete="off" placeholder="${configuredPlaceholder(directConfiguration.owned_arbitrum_address_configured)}"></label><label>币安默认账户<input name="binance_account_id" autocomplete="off" placeholder="${configuredPlaceholder(directConfiguration.binance_account_configured)}"></label><label>币安白名单入金地址<input name="binance_deposit_address" autocomplete="off" placeholder="${configuredPlaceholder(directConfiguration.binance_whitelist_destination_configured)}"></label><label>币安受限提现地址<input name="binance_withdrawal_address" autocomplete="off" placeholder="${configuredPlaceholder(directConfiguration.binance_withdrawal_destination_configured)}"></label><label>Hyperliquid 默认账户<input name="hyperliquid_account_id" autocomplete="off" placeholder="${configuredPlaceholder(directConfiguration.hyperliquid_account_configured)}"></label><label>Hyperliquid Bridge 地址<input name="hyperliquid_bridge_address" autocomplete="off" placeholder="${configuredPlaceholder(directConfiguration.hyperliquid_contract_configured)}"></label><label>单次金额上限（USDC）<input name="max_amount" type="number" step="any" min="0.000001" placeholder="留空保持当前值"></label><label>最大费用上限（USDC）<input name="max_fee" type="number" step="any" min="0" placeholder="留空保持当前值"></label></div></section>
+      <div class="form-error" role="alert"></div><div class="form-actions"><button class="primary">保存配置并切换当前金库</button></div>
     </form>
   </details>`;
 }
@@ -836,15 +836,14 @@ function bindCapitalActions() {
     const provider = directCapitalConfigForm.elements.treasury_provider.value;
     directCapitalConfigForm.querySelectorAll('[data-provider-fields]').forEach(section => {
       const active = section.dataset.providerFields === provider;
-      section.hidden = !active;
-      section.querySelectorAll('input').forEach(input => { input.disabled = !active; });
+      section.classList.toggle('is-selected-provider', active);
+      const role = section.querySelector('[data-provider-role]');
+      if (role) role.textContent = active ? '当前使用' : '已接入备用';
     });
     const guidance = directCapitalConfigForm.querySelector('[data-provider-guidance]');
-    if (guidance) guidance.textContent = provider === 'SAFE_SPENDING_LIMIT'
-      ? '当前选择 Safe Spending Limits：只需配置 Safe Smart Account 和 delegate；NoTilt 字段不会保存，也不会参与资金操作。'
-      : '当前选择 NoTilt Vault：只需配置 NoTilt 金库编号和地址；Safe 字段不会保存，也不会参与资金操作。';
+    if (guidance) guidance.textContent = `当前使用 ${provider === 'SAFE_SPENDING_LIMIT' ? 'Safe Spending Limits' : 'NoTilt Vault'}；NoTilt 与 Safe 的配置都会独立保存，未选中的金库不会参与新建资金操作。`;
     const boundary = document.querySelector('[data-provider-boundary]');
-    if (boundary) boundary.innerHTML = `<b>统一安全边界：</b>系统只使用当前选定的 ${provider === 'SAFE_SPENDING_LIMIT' ? 'Safe Spending Limits' : 'NoTilt Vault'}；每条路径都重新校验地址、网络、资产、额度、实时状态与安全开关，且不在服务内签名或广播。`;
+    if (boundary) boundary.innerHTML = `<b>当前使用：${provider === 'SAFE_SPENDING_LIMIT' ? 'Safe Spending Limits' : 'NoTilt Vault'}。</b> 两种金库可同时保持接入；每条新路径只冻结当前金库，并重新校验地址、网络、资产、额度、实时状态与安全开关，且不在服务内签名或广播。`;
   };
   directCapitalConfigForm?.querySelectorAll('input[name="treasury_provider"]').forEach(input => input.addEventListener('change', syncTreasuryProviderFields));
   syncTreasuryProviderFields();
