@@ -576,6 +576,7 @@ const ENGLISH_EXACT = new Map(Object.entries({
   '切换不会开启实盘下单、自动加仓或资金划转；旧环境未执行授权和订单意图会失效，历史提案环境保持不变。':'Switching does not enable live order sending, automatic scaling, or capital transfers. Unexecuted authorizations and intents in the previous environment expire; proposal history keeps its original environment.',
   '输入确认文案':'Enter confirmation text', '切换到生产模式':'Switch to Production mode', '切换到测试模式':'Switch to Testnet mode',
   '普通成员只能查看当前模式；需要系统管理员或 team.manage 权限执行切换。':'Regular members can only view the current mode. A system administrator or administrator with team.manage permission must perform the switch.',
+  '当前身份为只读查看；模式选择和准备状态仅向有切换权限的管理员开放。':'This role is read only. Mode selection and readiness details are available only to administrators with switch permission.',
   '目标环境没有已添加账户':'No account is configured for the target environment', '账户凭据、连接或运行服务尚未就绪':'Account credentials, connection, or runtime service is not ready',
   '当前团队尚未配置风险政策':'The current Team has no risk policy', '来源环境存在执行中的订单意图':'The source environment has executing order intents',
   '来源环境存在未结束或状态未知订单':'The source environment has open or unknown orders', '来源环境存在未平仓或状态未知仓位':'The source environment has open or unknown positions',

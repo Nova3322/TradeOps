@@ -81,16 +81,18 @@ async function renderTeamSettings() {
   const activeSpaceName = session?.active_team?.name || '当前团队';
   const response = await api('/api/trading-mode'); const data = response.data;
   const current = fmtExecutionMode(data.execution_mode);
-  let selectedTarget = data.execution_mode === 'LIVE'
-    ? 'TESTNET'
-    : data.execution_mode === 'TESTNET' ? 'LIVE' : 'TESTNET';
+  let selectedTarget = data.can_manage
+    ? (data.execution_mode === 'LIVE'
+      ? 'TESTNET'
+      : data.execution_mode === 'TESTNET' ? 'LIVE' : 'TESTNET')
+    : data.execution_mode;
   const modeOption = (mode, title, copy) => {
     const isCurrent = data.execution_mode === mode;
     const isSelected = selectedTarget === mode;
-    return `<button class="mode-switch-option ${mode === 'LIVE' ? 'is-live' : 'is-testnet'} ${isSelected ? 'is-selected' : ''}" type="button" data-mode-target="${mode}" aria-pressed="${isSelected}" ${isCurrent ? 'disabled aria-current="true"' : ''}><span class="mode-switch-option-head"><b>${title}</b><span class="status-pill">${isCurrent ? '当前使用' : mode === 'LIVE' ? '真实资金' : '测试服务器'}</span></span><small>${copy}</small></button>`;
+    return `<button class="mode-switch-option ${mode === 'LIVE' ? 'is-live' : 'is-testnet'} ${isSelected ? 'is-selected' : ''}" type="button" data-mode-target="${mode}" aria-pressed="${isSelected}" ${isCurrent ? 'aria-current="true"' : ''} ${isCurrent || !data.can_manage ? 'disabled' : ''}><span class="mode-switch-option-head"><b>${title}</b><span class="status-pill">${isCurrent ? '当前使用' : mode === 'LIVE' ? '真实资金' : '测试服务器'}</span></span><small>${copy}</small></button>`;
   };
   main.innerHTML = `<section class="page team-settings-page"><header class="page-head"><div><p class="eyebrow">模式设置 · ${escapeHtml(activeSpaceName)}</p><h1>模式设置</h1><p class="lede">团队实际执行环境只在这里切换；账户、资金、提案和交易任务页面均为只读显示。</p></div><span class="status-pill ${data.execution_mode === 'LIVE' ? 'status-ATTENTION' : 'status-APPROVED'}">${escapeHtml(current)}</span></header>
-    <section class="mode-switch-console" aria-labelledby="mode-switch-title"><div class="section-heading"><div><p class="eyebrow">当前模式：${escapeHtml(current)}</p><h2 id="mode-switch-title">选择要切换到的模式</h2><p>先选择测试或生产，再在同一区域确认。当前模式不可重复提交。</p></div></div><div class="mode-switch-options" role="group" aria-label="选择目标模式">${modeOption('TESTNET', '测试模式', '订单发送到交易所测试服务器，不影响真实资金。')}${modeOption('LIVE', '生产模式', '订单发送到交易所生产服务器，可能影响真实资金。')}</div><div id="team-mode-target-panel" aria-live="polite"></div></section>
+    <section class="mode-switch-console" aria-labelledby="mode-switch-title"><div class="section-heading"><div><p class="eyebrow">当前模式：${escapeHtml(current)}</p><h2 id="mode-switch-title">${data.can_manage ? '选择要切换到的模式' : '当前模式'}</h2><p>${data.can_manage ? '先选择测试或生产，再在同一区域确认。当前模式不可重复提交。' : '普通成员只能查看当前模式；需要系统管理员或 team.manage 权限执行切换。'}</p></div></div><div class="mode-switch-options" role="group" aria-label="${data.can_manage ? '选择目标模式' : '当前模式'}">${modeOption('TESTNET', '测试模式', '订单发送到交易所测试服务器，不影响真实资金。')}${modeOption('LIVE', '生产模式', '订单发送到交易所生产服务器，可能影响真实资金。')}</div><div id="team-mode-target-panel" aria-live="polite"></div></section>
     <details class="card mode-switch-audit"><summary><span><b>最近一次模式切换与审计</b><small>${data.last_switched_at ? `${escapeHtml(data.last_switched_by || '未知')} · ${fmtDate(data.last_switched_at)}` : '尚无切换记录'}</small></span><strong>查看详情</strong></summary><div class="mode-switch-audit-body"><dl class="definition-grid">${definition('最近切换人', data.last_switched_by || '尚无记录')}${definition('最近切换时间', data.last_switched_at ? fmtDate(data.last_switched_at) : '尚无记录')}</dl><p class="safety-note">所有切换、失效与阻断结果继续写入审计记录。</p></div></details></section>`;
 
   const renderTargetPanel = target => {
@@ -126,6 +128,10 @@ async function renderTeamSettings() {
     });
     renderTargetPanel(target);
   };
+  if (!data.can_manage) {
+    document.querySelector('#team-mode-target-panel').innerHTML = '<p class="callout">当前身份为只读查看；模式选择和准备状态仅向有切换权限的管理员开放。</p>';
+    return;
+  }
   document.querySelectorAll('[data-mode-target]:not(:disabled)').forEach(button => button.addEventListener('click', () => updateTarget(button.dataset.modeTarget)));
   updateTarget(selectedTarget);
 }
