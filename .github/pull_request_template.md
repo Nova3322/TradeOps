@@ -7,7 +7,7 @@
 ## Safety
 
 - [ ] Server authorization, risk, idempotency, account scope, and audit remain authoritative.
-- [ ] SHADOW, TESTNET, and LIVE data and side effects remain explicitly isolated.
+- [ ] TESTNET and LIVE data and side effects remain explicitly isolated; SETUP is not used as an execution environment.
 - [ ] No secret, production data, unredacted log, or unrelated artifact is included.
 
 ## Contributor terms

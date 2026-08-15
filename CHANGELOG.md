@@ -7,6 +7,19 @@ Semantic Versioning where compatible with migration and API contracts.
 
 ### Changed
 
+- Replaced the retired SHADOW simulator with strict TESTNET/LIVE runtime scope;
+  `SETUP` remains an internal unconfigured Team state only.
+- Moved the only Team mode switch to Mode Settings and kept Account Management
+  as a TESTNET/LIVE configuration filter with environment-scoped credential,
+  lifecycle, and deletion checks.
+- Kept Perptape opportunities separate from signed Webhook signals, linked
+  opportunity details to the upstream market scanner, and aligned directional
+  presentation across responsive themes.
+- Assigned Vault/Safe configuration to the Capital Center while Performance
+  Reports owns multi-account equity history, trusted aggregation, range control,
+  and fullscreen chart presentation.
+- Allowed NoTilt Vault and Safe Spending Limits to remain configured together
+  while selecting exactly one provider for each newly frozen capital operation.
 - Prepared the repository for public release with a GPL-3.0-only plus commercial
   dual-license model.
 - Added public onboarding, API/AI integration, governance, support, security,

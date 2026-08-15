@@ -28,7 +28,7 @@ TradingOPS differentiates through the combination of:
 - current-role and exact Workspace/Team/Account/Venue enforcement;
 - persistent capability gates separate from process configuration;
 - idempotent commands, unknown-outcome recovery, and reconciliation;
-- explicit SHADOW/LIVE provenance and data freshness semantics; and
+- explicit TESTNET/LIVE provenance and data freshness semantics; and
 - audit evidence that ties decisions to execution and capital facts.
 
 This comparison is architectural, not a claim of feature parity. Product

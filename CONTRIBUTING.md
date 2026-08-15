@@ -22,8 +22,11 @@ production.
   execution, receipt, and audit sources before adding another entity or store.
 - Server-side authorization, independent review, scope, risk, idempotency, and
   audit checks are authoritative. UI visibility is not authorization.
-- Keep SHADOW, TESTNET, and LIVE explicit and isolated. Missing, stale, or
-  rate-limited data is neither real-time data nor zero.
+- Keep TESTNET and LIVE explicit and isolated across accounts, credentials,
+  proposals, authorizations, orders, positions, capital facts, and analytics.
+  `SETUP` is not an execution environment, and removed simulation paths must not
+  return as compatibility fallbacks. Missing, stale, or rate-limited data is
+  neither real-time data nor zero.
 - New external side effects require durable idempotency, query-before-retry,
   unknown-outcome handling, reconciliation, audit, and disabled-by-default
   process and database gates.

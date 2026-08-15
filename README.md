@@ -2,8 +2,9 @@
 
 **Fail-closed trading governance and operations control plane**
 
-[简体中文](README.zh-CN.md) · [API quickstart](docs/API_QUICKSTART.md) ·
-[Architecture](docs/ARCHITECTURE.md) · [Security](SECURITY.md) ·
+[简体中文](README.zh-CN.md) · [Operations console](docs/OPERATIONS_CONSOLE.md) ·
+[API quickstart](docs/API_QUICKSTART.md) · [Architecture](docs/ARCHITECTURE.md) ·
+[Security](SECURITY.md) ·
 [License](#license)
 
 TradingOPS sits between strategy engines and real execution. It turns candidate
@@ -44,6 +45,9 @@ strategy or signal
   is neither real-time data nor zero.
 - **Controlled execution** — external effects require explicit process and
   persistent database gates, idempotency, and reconciliation.
+- **Two execution environments** — user-selectable operation is limited to
+  TESTNET and LIVE. `SETUP` is an internal unconfigured state, not a trading
+  environment, and the removed SHADOW simulator is not a runtime fallback.
 - **User-owned API Keys** — Credentials inherit the owner's current RBAC
   dynamically; Account and Venue access is checked per resource.
 
@@ -69,8 +73,19 @@ Open <http://127.0.0.1:8014>. The generated local password is stored at:
 
 The file is mode `0600`, `.local/` is ignored, external integrations are off,
 and every dangerous capability gate remains disabled. Start with read-only data
-and SHADOW workflows. Do not add exchange or wallet credentials until you have
-reviewed [`SECURITY.md`](SECURITY.md) and the runtime boundary.
+or verified exchange TESTNET credentials. Do not add production exchange or
+treasury configuration until you have reviewed [`SECURITY.md`](SECURITY.md) and
+the runtime boundary.
+
+For an isolated Compose console with the read-only synchronization worker:
+
+```bash
+TRADING_PUBLIC_PORT=8022 ./scripts/run_compose.sh --runtime
+```
+
+This opens <http://127.0.0.1:8022>. The `--runtime` profile enables read-only
+fact synchronization only; it does not enable order send, capital movement,
+signing, broadcast, or automation gates.
 
 ### Health and API
 
@@ -83,6 +98,10 @@ open http://127.0.0.1:8014/openapi.json
 API/AI onboarding is in [`docs/API_QUICKSTART.md`](docs/API_QUICKSTART.md) and
 [`docs/AI_API_QUICKSTART.md`](docs/AI_API_QUICKSTART.md). The running
 `/openapi.json` document is the only complete interface contract.
+
+The current page ownership, TESTNET/LIVE mode behavior, signal presentation,
+account lifecycle, capital-provider selection, and performance chart behavior
+are documented in [`docs/OPERATIONS_CONSOLE.md`](docs/OPERATIONS_CONSOLE.md).
 
 ## Architecture
 

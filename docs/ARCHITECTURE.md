@@ -34,9 +34,42 @@ audit trail                         idempotent execution adapter
 - The proposer and reviewer are independent subjects; self-review is rejected.
 - Requests that may create external effects require durable idempotency and
   explicit handling of unknown outcomes.
-- SHADOW, TESTNET, and LIVE facts and side effects remain separate.
+- Runtime execution facts and side effects are isolated between TESTNET and
+  LIVE. `SETUP` is a Team configuration state only; it is not an execution
+  environment. The retired SHADOW ledger is absent from current domain enums,
+  services, routes, and database head.
 - Missing, stale, lost, or rate-limited data blocks unsafe claims and actions.
 - Client UI, API prompts, and Agent role names never override server policy.
+
+## Mode and account boundary
+
+- **Mode Settings** is the only console page that changes the Team execution
+  mode. Switching requires `team.manage`, an interactive session, confirmation,
+  `expected_version`, idempotency, readiness checks, and audit evidence.
+- **Account Management** can configure TESTNET and LIVE accounts ahead of time,
+  but its environment selector is only a configuration filter. Execution always
+  derives the environment from the Team's persisted current mode.
+- Account and credential identity is scoped by Team, environment, Venue, and
+  account ID. TESTNET credentials never load into LIVE adapters and LIVE
+  credentials never load into TESTNET adapters.
+- A mode switch invalidates unexecuted authorization and intent from the source
+  environment without rewriting historical proposal environments. It does not
+  enable `LIVE_ORDER_SEND`, automation, or capital movement.
+
+## Console data ownership
+
+- Perptape opportunities and signed Webhook signals remain separate feeds.
+  Perptape detail links open the upstream market scanner; Webhook freshness and
+  proposal eligibility remain server facts.
+- The Capital Center owns production NoTilt Vault and Safe Spending Limits
+  configuration. Both providers may remain configured while one is selected for
+  each newly frozen direct-capital operation.
+- Performance Reports owns account-equity history, trusted aggregation, gap
+  rendering, range selection, and fullscreen chart presentation. Selecting
+  accounts changes only the report display.
+
+See [Operations console behavior](OPERATIONS_CONSOLE.md) for the page-level
+contract.
 
 ## Default side-effect state
 

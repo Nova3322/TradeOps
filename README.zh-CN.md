@@ -2,8 +2,9 @@
 
 **Fail-closed 交易治理与运营控制平面**
 
-[English](README.md) · [API 快速接入](docs/API_QUICKSTART.md) ·
-[AI/API 中文指南](docs/AI_API_QUICKSTART.md) · [安全政策](SECURITY.md)
+[English](README.md) · [运营控制台说明](docs/OPERATIONS_CONSOLE.zh-CN.md) ·
+[API 快速接入](docs/API_QUICKSTART.md) · [AI/API 中文指南](docs/AI_API_QUICKSTART.md) ·
+[安全政策](SECURITY.md)
 
 TradingOPS 位于策略引擎与真实执行之间，负责把候选交易意图转化为冻结提案、独立审核、有限授权、风险阻断、可审计执行与资金对账。
 
@@ -28,6 +29,8 @@ TradingOPS 位于策略引擎与真实执行之间，负责把候选交易意图
 - **独立审核**：提案发起人不能审核自己的提案。
 - **Fail-closed 风险控制**：缺失、陈旧、丢失、不完整或限流数据不等于实时数据，也不等于零。
 - **受控执行**：外部副作用必须同时通过进程开关、持久化 Gate、幂等和对账。
+- **两种执行环境**：普通用户只可选择 TESTNET 测试模式与 LIVE 生产模式；
+  `SETUP` 仅用于尚未完成配置的内部状态，已删除的 SHADOW 模拟系统不会作为回退路径。
 - **HUMAN 所属 API Client**：Token 动态继承当前岗位，并固定在一个 Workspace、Team、Account 和 Venue。
 
 ## 五分钟安全启动
@@ -49,7 +52,16 @@ uv sync --frozen
 .local/passwords/trading-admin
 ```
 
-该目录不会进入 Git；外部集成、下单、资金、签名和广播默认关闭。新用户应先使用只读数据和 SHADOW 流程。
+该目录不会进入 Git；外部集成、下单、资金、签名和广播默认关闭。新用户应先使用只读数据或经过验证的交易所 TESTNET 凭据。
+
+需要在独立 Compose 控制台中同时启动只读同步 Worker 时，可运行：
+
+```bash
+TRADING_PUBLIC_PORT=8022 ./scripts/run_compose.sh --runtime
+```
+
+控制台地址为 <http://127.0.0.1:8022>。`--runtime` 只开启只读事实同步，不会开启
+下单、资金划转、签名、广播或自动化 Gate。
 
 ```bash
 curl http://127.0.0.1:8014/health/live
@@ -60,6 +72,9 @@ open http://127.0.0.1:8014/openapi.json
 完整字段以运行中的 `/openapi.json` 为唯一真源。接入说明见
 [`docs/API_QUICKSTART.md`](docs/API_QUICKSTART.md) 和
 [`docs/AI_API_QUICKSTART.md`](docs/AI_API_QUICKSTART.md)。
+
+当前页面职责、TESTNET/LIVE 模式、信号展示、账户生命周期、金库选择和绩效曲线
+行为见 [`docs/OPERATIONS_CONSOLE.zh-CN.md`](docs/OPERATIONS_CONSOLE.zh-CN.md)。
 
 ## 产品边界与竞品关系
 
