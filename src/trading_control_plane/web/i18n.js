@@ -35,7 +35,7 @@ const ENGLISH_EXACT = new Map(Object.entries({
   '资金管理员':'Treasury administrator', '系统管理员':'Super administrator',
   'API 接入':'API access', 'API Key':'API Key', '管理自己的用户凭证':'Manage your user credentials',
   '个人中心 · 开发者接入':'Personal center · Developer access', '几分钟内完成认证、只读连接和范围校验。完整字段以当前 OpenAPI 合同为唯一真源。':'Authenticate, validate read-only access, and verify context in minutes. The current OpenAPI contract is the sole source of truth.',
-  '个可连接':'available', '快速开始':'Quickstart', '先验证连接，再读取业务数据':'Validate the connection before reading business data',
+  '个可连接':'available', '已验证':'Verified', '快速开始':'Quickstart', '先验证连接，再读取业务数据':'Validate the connection before reading business data',
   '使用 Bearer Token 连接；不要同时发送登录 Cookie。第一个请求返回当前 API Key 的身份、所属 Team 上下文和用户动态角色。':'Connect with a Bearer API Key and do not send a login Cookie at the same time. The first request returns the API Key identity, Team context, and dynamic user roles.',
   '当前 BASE_URL':'Current BASE_URL', '认证方式':'Authentication', '第一个只读请求':'First read-only request',
   '成功条件':'Success criteria', '创建用户凭证':'Create a user credential', '权限':'Permissions', '范围':'Scope', '生命周期':'Lifecycle',
