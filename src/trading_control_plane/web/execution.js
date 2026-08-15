@@ -235,6 +235,26 @@ async function renderSystemStatus() {
             ? '连接状态未知'
             : '尚未配置';
   const perptapeTone = perptapeAvailable ? 'success' : perptape.configured ? 'attention' : 'danger';
+  const perptapeTransport = perptape.transport || {};
+  const perptapeTransportLabel = ({
+    WEBSOCKET_LIVE:'WebSocket 实时流',
+    WEBSOCKET_STARTING:'WebSocket 启动中',
+    POLLING_FALLBACK:'HTTPS 轮询回退',
+    POLLING_ONLY:'HTTPS 定时轮询',
+    WEBSOCKET_FAILED:'WebSocket 不可用',
+    POLLING_FAILED:'HTTPS 轮询失败',
+    WAITING:'等待首次同步',
+  })[perptapeTransport.state] || '接入状态未知';
+  const perptapeTransportIssue = ({
+    PERPTAPE_WEBSOCKET_HEALTH_STALE:'WebSocket 健康检查已过期',
+    PERPTAPE_WEBSOCKET_UNAVAILABLE:'WebSocket 当前不可用',
+    PERPTAPE_POLLING_FAILED:'HTTPS 轮询失败',
+  })[perptapeTransport.error_code] || perptapeTransport.error_code || '';
+  const perptapeCopy = perptapeAvailable
+    ? `当前接入：${perptapeTransportLabel}。已读取 ${Number(opportunityHealth?.data?.length ?? perptape.candidate_count ?? 0)} 个候选，可用于机会筛选和提案。`
+    : perptape.configured
+      ? `当前接入：${perptapeTransportLabel}。Perptape 已配置，但最近数据尚未形成可用连接结论；新的外部机会不可用。`
+      : 'Perptape 尚未配置；人工提案仍可使用。';
   const accountBoundWorkers = Array.isArray(freqtrade?.account_bindings) ? freqtrade.account_bindings : [];
   const configuredWorkers = accountBoundWorkers.filter(worker => worker.configured);
   const verifiedWorkers = configuredWorkers.filter(worker => worker.status === 'VERIFIED');
@@ -277,7 +297,7 @@ async function renderSystemStatus() {
     systemHealthCard({title:'开仓与加仓', status:entryStatus, tone:entryOpen ? (addOpen ? 'success' : 'attention') : 'danger', copy:entryCopy, meta:restoreConditions.ready ? '每笔新增风险仍会重新检查账户、交易所与授权' : `${restoreConditions.blockers?.length || blockedRiskChecks.length} 项实时条件待处理；查看风险控制了解精确原因`}),
     systemHealthCard({title:'交易执行底座', status:workersReady ? '精确账户 Worker 已验证' : workersDisabled ? 'Freqtrade 执行进程未启动' : 'Freqtrade 执行进程检查未通过', tone:workersReady || workersDisabled ? 'attention' : 'danger', copy:executionCopy, meta:workersReady ? (freqtrade.live_order_send ? '真实订单发送已启用；账户资格、风险、授权与发送者租约仍会逐项复核' : '精确账户验证已通过；LIVE_ORDER_SEND 保持关闭') : workersDisabled ? `${configuredWorkers.length ? '数据库绑定已保留；' : ''}FREQTRADE_WORKERS_ENABLED 与 LIVE_ORDER_SEND 保持关闭` : '身份、模式或精确账户绑定不一致时禁止发送'}),
     systemHealthCard({title:'Telegram 审核通知', status:telegramStatus, tone:telegramHealthy ? 'success' : 'attention', copy:telegramHealthy ? 'Telegram 私聊机器人最近一次长轮询成功；批准和拒绝仍需二次确认并写入统一审计。' : telegramFailureCopy, meta:telegramHealthy ? `最近成功 ${fmtDate(telegramPolling.last_success_at)}` : '网页端审核队列保持可用；资金、订单、风险开关与权限操作不对 Telegram 机器人开放'}),
-    systemHealthCard({title:'Perptape 机会源', status:perptapeStatus, tone:perptapeTone, copy:perptapeAvailable ? `已读取 ${Number(opportunityHealth?.data?.length ?? perptape.candidate_count ?? 0)} 个候选，可用于机会筛选和提案。` : perptape.configured ? 'Perptape 已配置，但最近数据尚未形成可用连接结论。现有交易任务不受影响，新的外部机会不可用。' : 'Perptape 尚未配置；人工提案仍可使用。', meta:`只读 · 最近数据 ${fmtDate(perptape.last_fetched_at)}`}),
+    systemHealthCard({title:'Perptape 机会源', status:perptapeStatus, tone:perptapeTone, copy:perptapeCopy, meta:`只读 · 最近数据 ${fmtDate(perptape.last_fetched_at)}${perptapeTransportIssue ? ` · ${perptapeTransportIssue}` : ''}`}),
   ].join('');
   const monitoringIssueCount = protectionIssues.length + exposureIssues.length + reconciliationIssues.length + unknownIntents + dispatchingIntents;
   const monitoringOpen = activeMonitoring || monitoringIssueCount > 0 || !canViewOperations;
@@ -447,6 +467,7 @@ const DIRECT_CAPITAL_PATHS = [
 let capitalTrendVisibility = {TOTAL:true};
 let capitalChartRangeValue = CAPITAL_CHART_RANGE_MAX;
 let capitalChartResizeObserver = null;
+let capitalChartOverlayAbortController = null;
 const OCCUPIED_CAPITAL_TRANSFER_STATUSES = new Set([
   'SOURCE_RESERVED', 'SUBMITTED', 'IN_FLIGHT', 'DESTINATION_CONFIRMED',
   'UNKNOWN', 'MANUAL_REQUIRED',

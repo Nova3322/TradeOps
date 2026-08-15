@@ -917,6 +917,7 @@ tr[data-href]:hover { background: color-mix(in srgb, var(--accent-2) 55%, transp
 .field-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
 label { display: grid; gap: 7px; color: var(--muted); font-size: 12px; font-weight: 600; }
 input, select, textarea { width: 100%; min-height: var(--control-height); color: var(--ink); background: var(--panel-strong); border: 1px solid var(--line); border-radius: var(--radius-sm); padding: 10px 12px; outline: none; }
+input:is([type="checkbox"], [type="radio"]) { width: 16px; min-width: 16px; height: 16px; min-height: 16px; margin: 0; padding: 0; border: 0; accent-color: var(--accent); }
 input:focus, select:focus, textarea:focus { border-color: var(--accent); outline: 2px solid var(--accent); outline-offset: 1px; box-shadow: none; }
 textarea { resize: vertical; }
 .form-actions { margin-top: 22px; display: flex; justify-content: flex-end; }

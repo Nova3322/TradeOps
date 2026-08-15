@@ -420,7 +420,7 @@ async function renderCapitalPerformancePanel() {
     <details class="capital-account-picker"><summary><span>选择要叠加的账户曲线</span><small>已选 ${selectedAccountKeys.size} 个，可多选</small></summary><div class="capital-account-picker-panel"><div class="capital-account-picker-tools"><input type="search" data-capital-account-search placeholder="搜索账户名称或 ID" aria-label="搜索账户"><select data-capital-venue-filter aria-label="按交易所筛选"><option value="">全部交易所</option>${[...new Set(accountOptions.map(option => option.venue))].map(venue => `<option value="${escapeHtml(venue)}">${escapeHtml(venue === 'VAULT' ? '链上金库' : fmtVenueLabel(venue))}</option>`).join('')}</select><button class="secondary" type="button" data-capital-select-all>全选</button><button class="secondary" type="button" data-capital-clear>清空</button></div><div class="capital-account-options">${accountFilters || '<p class="subtle">当前模式尚未添加有效账户。</p>'}</div></div></details><div class="capital-account-tags" aria-label="已选账户">${selectedTags || '<span class="subtle">尚未选择账户</span>'}</div>
     <section class="capital-overview" aria-label="当前资金净值"><article class="capital-total-card ${netWorth.complete ? 'is-current' : 'is-limited'}"><small>当前所选账户总净值</small><b>${escapeHtml(totalHeadline)}</b><p>${escapeHtml(totalSupporting)}</p></article><div class="capital-source-cards">${sourceCards}</div></section>
     <section class="capital-trust-panel ${netWorth.complete ? 'is-current' : 'is-limited'}"><div><b>${netWorth.complete ? '所选账户数据可信，可用于当前汇总' : '当前汇总已阻断'}</b><p>${escapeHtml(trustCopy)}</p></div><span>${netWorth.complete ? '完整' : '需关注'}</span></section>
-    <section class="capital-chart-panel"><div class="chart-head"><div><p class="eyebrow">净值趋势</p><h3>所选账户独立曲线与可信汇总</h3><p class="subtle">缺失、过期、错位和断档不会补零或强行连线。</p></div></div><div class="capital-chart-meta"><span data-capital-range-coverage>${escapeHtml(capitalHistoryCoverage(historySeries, historySelection))}</span><span>数据来自当前模式对应交易所只读事实</span></div><div class="chart-legend" role="group" aria-label="选择显示的资金曲线">${chartLegend}</div>${hasHistory ? '<div class="capital-chart-wrap"><canvas id="capital-chart" height="300" aria-label="所选账户及汇总 USD 资金趋势"></canvas><div class="capital-chart-tooltip" role="status" hidden></div></div>' : '<div class="chart-empty">尚无可绘制的资金历史；缺失数据不会补零。</div>'}${rangeControl}</section>`;
+    <section class="capital-chart-panel" tabindex="-1"><div class="chart-head"><div><p class="eyebrow">净值趋势</p><h3>所选账户独立曲线与可信汇总</h3><p class="subtle">缺失、过期、错位和断档不会补零或强行连线。</p></div>${hasHistory ? '<button class="secondary capital-chart-expand" type="button" data-capital-chart-expand aria-pressed="false" aria-label="放大资金曲线"><span data-expand-label>全屏查看</span></button>' : ''}</div><div class="capital-chart-meta"><span data-capital-range-coverage>${escapeHtml(capitalHistoryCoverage(historySeries, historySelection))}</span><span>数据来自当前模式对应交易所只读事实</span></div><div class="chart-legend" role="group" aria-label="选择显示的资金曲线">${chartLegend}</div>${hasHistory ? '<div class="capital-chart-wrap"><canvas id="capital-chart" height="300" aria-label="所选账户及汇总 USD 资金趋势"></canvas><div class="capital-chart-tooltip" role="status" hidden></div></div>' : '<div class="chart-empty">尚无可绘制的资金历史；缺失数据不会补零。</div>'}${rangeControl}</section>`;
   drawCapitalChart(visibleHistorySeries);
   const applyAccountSelection = selected => {
     localStorage.setItem(selectionStorageKey, JSON.stringify(selected));
@@ -548,7 +548,8 @@ function drawCapitalChart(series) {
   const allPoints = series.flatMap(item => item.points);
   const ratio = window.devicePixelRatio || 1;
   const width = canvas.clientWidth;
-  const height = width < 520 ? 270 : 300;
+  const expanded = canvas.closest('.capital-chart-panel')?.classList.contains('is-expanded');
+  const height = expanded ? Math.max(360, Math.min(window.innerHeight - 300, 720)) : width < 520 ? 270 : 300;
   canvas.width = width * ratio; canvas.height = height * ratio;
   const context = canvas.getContext('2d'); context.scale(ratio, ratio);
   const styles = getComputedStyle(document.documentElement);
@@ -696,6 +697,24 @@ function bindCapitalPerformanceChart(historySeries = [], rangeContext = null) {
     capitalTrendVisibility[event.currentTarget.dataset.capitalTrend] = event.currentTarget.checked;
     redrawCapitalHistory();
   }));
+  capitalChartOverlayAbortController?.abort();
+  capitalChartOverlayAbortController = new AbortController();
+  const chartPanel = document.querySelector('.capital-chart-panel');
+  const expandButton = document.querySelector('[data-capital-chart-expand]');
+  const setChartExpanded = expanded => {
+    if (!chartPanel || !expandButton) return;
+    chartPanel.classList.toggle('is-expanded', expanded);
+    document.body.classList.toggle('capital-chart-expanded', expanded);
+    expandButton.setAttribute('aria-pressed', String(expanded));
+    expandButton.setAttribute('aria-label', localizedText(expanded ? '退出资金曲线全屏' : '放大资金曲线'));
+    const label = expandButton.querySelector('[data-expand-label]');
+    if (label) label.textContent = localizedText(expanded ? '退出全屏' : '全屏查看');
+    requestAnimationFrame(redrawCapitalHistory);
+  };
+  expandButton?.addEventListener('click', () => setChartExpanded(!chartPanel.classList.contains('is-expanded')));
+  document.addEventListener('keydown', event => {
+    if (event.key === 'Escape' && chartPanel?.classList.contains('is-expanded')) setChartExpanded(false);
+  }, {signal:capitalChartOverlayAbortController.signal});
   capitalChartResizeObserver?.disconnect();
   const chartCanvas = document.querySelector('#capital-chart');
   if (chartCanvas && typeof ResizeObserver !== 'undefined') {

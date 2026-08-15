@@ -41,6 +41,9 @@ function accessDeniedView(requiredCapability) {
 
 async function route() {
   if (location.pathname !== '/opportunities') stopOpportunityStream();
+  capitalChartOverlayAbortController?.abort();
+  capitalChartOverlayAbortController = null;
+  document.body.classList.remove('capital-chart-expanded');
   window.scrollTo(0, 0);
   updateActiveNav();
   closeMobileNav({restoreFocus:false});
