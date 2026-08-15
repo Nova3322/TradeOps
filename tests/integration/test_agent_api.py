@@ -55,6 +55,111 @@ def api_client_app(database: Database) -> FastAPI:
     return create_app(settings, database, perptape)
 
 
+def test_api_key_creation_is_limited_to_the_current_workspace_and_team(
+    database: Database,
+) -> None:
+    now = datetime.now(UTC)
+    service = TradingService(database, credential_encryption_key=encryption_key())
+    admin_id = service.bootstrap_admin("api-current-scope-admin", now=now)
+    with database.session_factory() as session:
+        admin = session.get(User, admin_id)
+        assert admin is not None
+        default_workspace_id = admin.active_workspace_id
+        default_team_id = admin.active_team_id
+        assert default_workspace_id is not None and default_team_id is not None
+
+    other_workspace_id = service.create_workspace(
+        actor_id=admin_id,
+        name="Other API Workspace",
+        slug="other-api-workspace",
+        idempotency_key="other-api-workspace",
+        now=now,
+    )
+    other_team_id = service.create_team(
+        actor_id=admin_id,
+        name="Other API Team",
+        slug="other-api-team",
+        idempotency_key="other-api-team",
+        now=now,
+    )
+    service.select_scope(
+        actor_id=admin_id,
+        workspace_id=default_workspace_id,
+        team_id=default_team_id,
+        idempotency_key="return-api-default-scope",
+        now=now,
+    )
+    owner_id = service.create_managed_user(
+        "api-current-scope-owner",
+        [Role.OBSERVER],
+        admin_id,
+        None,
+        None,
+        "ordinary-user-password",
+        now=now,
+    )
+    app = api_client_app(database)
+
+    async def scenario() -> None:
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            login = await client.post(
+                "/api/auth/mock/login",
+                json={"username": "api-current-scope-admin"},
+            )
+            assert login.status_code == 200, login.text
+            rejected = await client.post(
+                "/api/profile/api-keys",
+                json={
+                    "name": "wrong-workspace",
+                    "workspace_id": str(other_workspace_id),
+                    "team_id": str(other_team_id),
+                    "expires_in_days": 30,
+                    "idempotency_key": "wrong-workspace-api-key",
+                },
+            )
+            assert rejected.status_code == 422, rejected.text
+            assert rejected.json()["error"]["code"] == "API_CLIENT_SCOPE_INVALID"
+
+            created = await client.post(
+                "/api/profile/api-keys",
+                json={
+                    "name": "current-workspace",
+                    "workspace_id": str(default_workspace_id),
+                    "team_id": str(default_team_id),
+                    "expires_in_days": 30,
+                    "idempotency_key": "current-workspace-api-key",
+                },
+            )
+            assert created.status_code == 200, created.text
+            assert created.json()["result"]["workspace_id"] == str(default_workspace_id)
+            assert created.json()["result"]["team_id"] == str(default_team_id)
+
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as owner:
+            login = await owner.post(
+                "/api/auth/mock/login",
+                json={"username": "api-current-scope-owner"},
+            )
+            assert login.status_code == 200, login.text
+            owner_session = login.json()["session"]
+            owner_key = await owner.post(
+                "/api/profile/api-keys",
+                json={
+                    "name": "owner-only-key",
+                    "workspace_id": owner_session["active_workspace"]["workspace_id"],
+                    "team_id": owner_session["active_team"]["team_id"],
+                    "expires_in_days": 30,
+                    "idempotency_key": "owner-only-api-key",
+                },
+            )
+            assert owner_key.status_code == 200, owner_key.text
+            assert owner_key.json()["result"]["owner_user_id"] == str(owner_id)
+            inventory = await owner.get("/api/profile/api-keys")
+            assert inventory.status_code == 200, inventory.text
+            assert [item["name"] for item in inventory.json()["data"]] == ["owner-only-key"]
+
+    asyncio.run(scenario())
+
+
 def test_user_owned_api_key_dynamic_rbac_scope_audit_and_token_lifecycle(
     database: Database,
 ) -> None:
@@ -179,6 +284,10 @@ def test_user_owned_api_key_dynamic_rbac_scope_audit_and_token_lifecycle(
 
             listed = await owner.get("/api/profile/api-keys")
             assert listed.status_code == 200, listed.text
+            assert {item["name"] for item in listed.json()["data"]} == {
+                "owner-alpha",
+                "owner-beta",
+            }
             assert {item["permissions_source"] for item in listed.json()["data"]} == {
                 "HUMAN_DYNAMIC"
             }

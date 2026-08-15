@@ -32,7 +32,7 @@ const currentWorkflowEnvironment = () => {
   const persistedMode = session?.active_team?.execution_mode;
   return ['LIVE','TESTNET'].includes(persistedMode) ? persistedMode : 'SETUP';
 };
-const roleLabels = {OBSERVER:'只读用户',PROPOSER:'提案发起人',REVIEWER:'审核人',OPERATOR:'交易运维人员',TREASURY_ADMIN:'资金管理员',SYSTEM_ADMIN:'系统管理员',SYSTEM:'系统'};
+const roleLabels = {OBSERVER:'只读用户',PROPOSER:'提案发起人',REVIEWER:'审核人',OPERATOR:'风险管理',TREASURY_ADMIN:'资金管理员',SYSTEM_ADMIN:'系统管理员',SYSTEM:'系统'};
 const readinessLabels = {READY:'可用',DEGRADED:'数据不完整',INCOMPLETE:'数据不完整',STALE:'数据已过期'};
 const connectionCategoryLabels = {
   READ_ONLY_CONNECTED:'只读已连接',
@@ -266,7 +266,7 @@ const apiErrorGuidance = {
   PERPTAPE_UNAVAILABLE:'暂时无法连接 Perptape。人工提案仍可使用，请稍后重新检查外部机会。',
   PERPTAPE_RUNTIME_FEED_MISSING:'Perptape 正在等待首次同步，请稍后重新检查。',
   PERPTAPE_RUNTIME_FEED_STALE:'Perptape 最近数据已经过期，系统不会把旧候选当成实时机会。',
-  PERPTAPE_CACHE_INVALID:'Perptape 已保存的数据无法读取，请联系交易运维人员处理。',
+  PERPTAPE_CACHE_INVALID:'Perptape 已保存的数据无法读取，请联系风险管理人员处理。',
   INSTRUMENT_UNAVAILABLE:'该交易合约尚未进入可交易合约目录，暂时不能创建提案。',
   RBAC_DENIED:'当前身份没有查看或执行此操作的权限。',
   TEAM_NOT_OPERATIONAL:'当前团队仍处于安全配置阶段。请先完成团队账户、风险政策和数据范围配置。',

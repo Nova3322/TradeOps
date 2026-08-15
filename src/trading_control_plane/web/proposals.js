@@ -156,7 +156,7 @@ async function renderProposalList(status, title, historyMode = false) {
     : `<section class="empty-state"><div><h2>${historyMode ? '当前没有历史提案' : '当前没有进行中的提案'}</h2><p>${historyMode ? '已批准、已过期或已拒绝的提案会保留在这里供审计。' : canPropose ? '可以从机会页一键创建，或提交一份人工提案。' : '当前作用域内还没有需要继续跟踪的提案。'}</p>${historyMode ? '<a class="secondary" href="/proposals" data-link>返回当前提案</a>' : createActions}</div></section>`;
   const proposalScopeCopy = operationsView
     ? '这里展示草稿、等待审核，以及仍在启动窗口内的已批准提案；批准后仍须完成实时风险检查与短期授权。'
-    : '这里只展示仍在草稿或等待审核中的提案；批准后进入历史，后续交易生命周期由交易运维接手。';
+    : '这里只展示仍在草稿或等待审核中的提案；批准后进入历史，后续交易生命周期由风险管理接手。';
   const proposalHistoryCopy = operationsView
     ? '这里保留已进入交易任务的提案、启动窗口已过期的批准记录，以及已过期或已拒绝记录；仍可启动的提案留在当前列表。'
     : '这里只保留已批准、已过期或已拒绝的审计记录，不会把历史数量混入当前待办。';
@@ -300,7 +300,7 @@ async function renderProposalDetail(id) {
         : item.status === 'APPROVED' && (!riskDone || riskDenied)
           ? riskDenied
             ? {title:riskHelp.label, copy:riskHelp.action, tone:'danger'}
-            : {title:'下一步：运行风险检查', copy:'审核已完成，交易运维人员需要基于最新账户数据运行风险检查。', tone:'attention'}
+            : {title:'下一步：运行风险检查', copy:'审核已完成，风险管理人员需要基于最新账户数据运行风险检查。', tone:'attention'}
         : needsFreshRisk
           ? {title:'短期授权已经失效', copy:'重新读取当前账户事实并运行风险检查；通过后才能签发新的短期授权。', tone:'danger'}
         : needsAuthorization
