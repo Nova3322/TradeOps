@@ -13,7 +13,8 @@ function formatControlBlocker(value) {
     HYPERLIQUID_RATE_LIMITED:'Hyperliquid 只读接口限流，系统会按计划重试',
     BINANCE_AUTH_FAILED:'币安只读鉴权或权限检查失败',
     HYPERLIQUID_AUTH_FAILED:'Hyperliquid 只读鉴权或权限检查失败',
-  }[detail] || (detail ? `只读检查未成功（错误代码：${detail}）` : '只读检查未成功'));
+    TEAM_NOT_OPERATIONAL:'团队尚未完成安全配置，暂不执行只读检查',
+  }[detail] || (detail ? '只读检查未成功；请在系统状态查看技术详情' : '只读检查未成功'));
   return ({
     LIVE_SCOPE_CONFIGURATION_REQUIRED:'生产账户范围未配置：至少配置一个明确的 LIVE 账户与交易所',
     KILL_SWITCH_MANUAL_RECOVERY_REQUIRED:'系统处于紧急停止：必须先完成人工处置，不能从本页恢复',
