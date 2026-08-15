@@ -677,7 +677,7 @@ const ENGLISH_EXACT = new Map(Object.entries({
   '默认显示可新建机会；其他状态可在筛选中切换。':'Actionable opportunities are shown by default; use the filters to view other states.', '尝试切换机会状态、降低筛选门槛，或者清除部分筛选。':'Change the opportunity state, lower thresholds, or clear some filters.',
   'Webhook · 空间隔离':'Webhook · Space isolated', '只展示当前空间通过签名、时效、重放、幂等和格式校验的 Webhook 信号。Perptape 保留在独立页面，不在这里聚合、去重或混排。':'Only Webhook signals that pass signature, freshness, replay, idempotency, and format checks for this space appear here. Perptape remains on its own page and is never mixed into this feed.',
   '策略系统 A':'Strategy system A', '量化模型 B':'Quant model B', '交易所、币种、方向、周期、新鲜度与提案状态':'Venue, market, direction, timeframe, freshness, and proposal status',
-  '新鲜':'Current', '已过期':'Expired', '已阻断':'Blocked', '已创建':'Created', '⚠ 信号已超过来源时效窗口':'Signal is outside the source freshness window', '信号已超过来源时效窗口 信号记录仍保留且不会触发自动审核或下单。':'The signal record remains available but cannot trigger automatic review or order submission.',
+  '新鲜':'Current', '已过期':'Expired', '已阻断':'Blocked', '已创建':'Created', '⚠ 信号已超过来源时效窗口':'Signal is outside the source freshness window',
   // Proposal list.
   '这里展示草稿、等待审核，以及仍在启动窗口内的已批准提案；批准后仍须完成实时风险检查与短期授权。':'Drafts, pending reviews, and approved proposals still inside their launch window appear here. Approval still requires real-time risk checks and short-lived authorization.', '草稿':'Draft', '已拒绝':'Rejected',
   // Performance reports.

@@ -87,28 +87,22 @@ def validate_perptape_websocket_url(value: str) -> str:
     return value
 
 
-def build_perptape_breakout_url(
+def build_perptape_market_scan_url(
     *,
     base_url: str,
     source_exchange: str,
+    canonical_symbol: str,
     symbol: str,
 ) -> str:
-    """Build a Perptape breakout URL from its public exact-symbol contract.
+    """Build the Perptape market scanner URL for an exact source symbol."""
 
-    Perptape's market page only performs substring search, so ``AINUSDT`` can
-    incorrectly select ``GRIFFAINUSDT`` when the exact contract is absent from
-    that table.  Its breakout board officially indexes ``exchange:symbol`` and
-    therefore provides an exact, source-aligned destination for a breakout
-    candidate.
-    """
-
-    return f"{base_url.rstrip('/')}/breakouts?" + urllib.parse.urlencode(
+    return f"{base_url.rstrip('/')}/markets?" + urllib.parse.urlencode(
         {
             "ex": source_exchange,
-            "q": f"{source_exchange}:{symbol}",
+            "q": f"{source_exchange}:{canonical_symbol}:{symbol}",
             "utm_source": "trading_console",
             "utm_medium": "opportunity",
-            "utm_campaign": "breakout_signal_symbol",
+            "utm_campaign": "market_scan_symbol",
             "lang": "zh-CN",
         }
     )
@@ -118,23 +112,30 @@ def _repair_perptape_source_url(
     value: str,
     *,
     source_exchange: str,
+    canonical_symbol: str,
     symbol: str,
 ) -> str:
-    """Repair persisted console links that used the ambiguous market search."""
+    """Keep persisted console links on the exact-symbol market scanner."""
 
     parsed = urllib.parse.urlparse(value)
     query = urllib.parse.parse_qs(parsed.query)
+    expected_query = f"{source_exchange}:{canonical_symbol}:{symbol}"
     if (
         parsed.scheme == "https"
         and parsed.hostname == PERPTAPE_OFFICIAL_HOST
         and parsed.path in {"/markets", "/breakouts"}
         and query.get("utm_source") == ["trading_console"]
         and query.get("utm_campaign") in (["market_scan_symbol"], ["breakout_signal_symbol"])
-        and (parsed.path != "/breakouts" or query.get("q") != [f"{source_exchange}:{symbol}"])
+        and (
+            parsed.path != "/markets"
+            or query.get("q") != [expected_query]
+            or query.get("utm_campaign") != ["market_scan_symbol"]
+        )
     ):
-        return build_perptape_breakout_url(
+        return build_perptape_market_scan_url(
             base_url=f"https://{PERPTAPE_OFFICIAL_HOST}",
             source_exchange=source_exchange,
+            canonical_symbol=canonical_symbol,
             symbol=symbol,
         )
     return value
@@ -197,6 +198,12 @@ class PerptapeCandidate:
         value["threshold"] = None if self.threshold is None else str(self.threshold)
         value["quote_volume"] = None if self.quote_volume is None else str(self.quote_volume)
         value["open_interest"] = None if self.open_interest is None else str(self.open_interest)
+        value["detail_url"] = build_perptape_market_scan_url(
+            base_url=f"https://{PERPTAPE_OFFICIAL_HOST}",
+            source_exchange=self.source_exchange,
+            canonical_symbol=self.canonical_symbol,
+            symbol=self.symbol,
+        )
         return value
 
     @classmethod
@@ -240,6 +247,7 @@ class PerptapeCandidate:
                 detail_url=_repair_perptape_source_url(
                     str(value["detail_url"]),
                     source_exchange=source_exchange,
+                    canonical_symbol=canonical_symbol,
                     symbol=symbol,
                 ),
                 quote_volume=(
@@ -1382,9 +1390,10 @@ class PerptapeClient:
             rationale=f"Perptape {source_direction} breakout on {timeframe}",
             data_health="CURRENT" if readiness == "ready" else "DEGRADED",
             readiness=readiness.upper(),
-            detail_url=build_perptape_breakout_url(
+            detail_url=build_perptape_market_scan_url(
                 base_url=self._base_url,
                 source_exchange=exchange,
+                canonical_symbol=canonical_symbol,
                 symbol=symbol,
             ),
             quote_volume=quote_volume,

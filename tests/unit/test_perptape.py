@@ -140,15 +140,14 @@ def test_real_breakout_contract_maps_to_narrow_trading_candidates_and_caches() -
     assert first[0].candidate_id.startswith("pt_")
     assert first[0].quote_volume == 1_000_000
     assert first[0].open_interest == 500_000
-    assert first[0].detail_url.startswith("https://perptape.com/breakouts?")
-    assert "utm_campaign=breakout_signal_symbol" in first[0].detail_url
-    assert "/markets?" not in first[0].detail_url
+    assert first[0].detail_url.startswith("https://perptape.com/markets?")
+    assert "utm_campaign=market_scan_symbol" in first[0].detail_url
     detail_query = parse_qs(urlparse(first[0].detail_url).query)
     assert detail_query["ex"] == ["BN"]
-    assert detail_query["q"] == ["BN:BTCUSDT"]
+    assert detail_query["q"] == ["BN:BTC:BTCUSDT"]
 
 
-def test_persisted_legacy_market_scan_link_is_repaired_without_mutating_identity() -> None:
+def test_persisted_market_scan_link_keeps_exact_symbol_without_mutating_identity() -> None:
     candidate = parsed_feed().candidates[0]
     value = candidate.to_dict()
     value["detail_url"] = (
@@ -162,9 +161,26 @@ def test_persisted_legacy_market_scan_link_is_repaired_without_mutating_identity
 
     assert restored.candidate_id == candidate.candidate_id
     assert detail_query["ex"] == ["BN"]
-    assert urlparse(restored.detail_url).path == "/breakouts"
-    assert detail_query["q"] == ["BN:BTCUSDT"]
-    assert detail_query["utm_campaign"] == ["breakout_signal_symbol"]
+    assert urlparse(restored.detail_url).path == "/markets"
+    assert detail_query["q"] == ["BN:BTC:BTCUSDT"]
+    assert detail_query["utm_campaign"] == ["market_scan_symbol"]
+
+
+def test_persisted_breakout_link_is_repaired_to_market_scan() -> None:
+    candidate = parsed_feed().candidates[0]
+    value = candidate.to_dict()
+    value["detail_url"] = (
+        "https://perptape.com/breakouts?"
+        "ex=BN&q=BN%3ABTCUSDT&utm_source=trading_console&"
+        "utm_medium=opportunity&utm_campaign=breakout_signal_symbol&lang=zh-CN"
+    )
+
+    restored = PerptapeCandidate.from_dict(value)
+    detail_query = parse_qs(urlparse(restored.detail_url).query)
+
+    assert urlparse(restored.detail_url).path == "/markets"
+    assert detail_query["q"] == ["BN:BTC:BTCUSDT"]
+    assert detail_query["utm_campaign"] == ["market_scan_symbol"]
 
 
 def test_hyperliquid_hip3_chart_link_preserves_namespace() -> None:

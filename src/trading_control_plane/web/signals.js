@@ -100,7 +100,7 @@ function webhookSignalCard(item, canPropose) {
     ? `<a class="secondary" href="/proposals/${item.proposal.proposal_id}" data-link>查看提案 · ${escapeHtml(fmtStatus(item.proposal.status))}</a>`
     : canPropose && item.proposal_eligibility === 'ELIGIBLE' && options
       ? `<details class="operation-toolbox"><summary><span><b>手动创建冻结提案</b><small>仍需独立审核、服务端风控与交易授权</small></span><strong>展开</strong></summary><form class="toolbox-content signal-proposal-form" data-signal-event-id="${escapeHtml(item.signal_event_id)}"><div class="field-grid"><label>账户<input name="account_id" required></label><label>合约<select name="instrument_id">${options}</select></label><label>环境<input name="environment" value="${escapeHtml(currentWorkflowEnvironment())}" readonly aria-describedby="signal-environment-note"></label><label>风险档位<select name="risk_tier"><option value="LOW">低</option><option value="MEDIUM">中</option><option value="HIGH">高</option></select></label><label>数量<input name="quantity" type="number" step="any" min="0.000000000000000001" required></label><label>最大风险<input name="max_risk" type="number" step="any" min="0.000000000000000001" required></label><label>有效时间（分钟）<input name="expires_in_minutes" type="number" min="480" max="1440" value="480" required></label></div><p id="signal-environment-note" class="microcopy">环境由服务端按团队当前模式固化，不能在此切换。</p><label>人工判断理由<textarea name="rationale" minlength="10" rows="3" required></textarea></label><div class="form-error" role="alert"></div><div class="form-actions"><button class="primary">创建并提交独立审核</button></div></form></details>`
-      : `<p class="safety-note">${escapeHtml(blocker === '无' ? '服务端未开放当前信号的提案操作。' : blocker)} 信号记录仍保留且不会触发自动审核或下单。</p>`;
+      : '';
   return `<article class="card webhook-signal-card" aria-label="${escapeHtml(`${item.symbol} · ${fmtDirection(item.direction)} · ${sourceName}`)}" data-signal-direction="${escapeHtml(item.direction)}" data-signal-event-id="${escapeHtml(item.signal_event_id)}" data-signal-source-id="${escapeHtml(item.signal_source_id)}">
     <div class="webhook-signal-main">
       <div class="webhook-signal-identity"><div><h2>${escapeHtml(item.symbol)}</h2><span class="tag ${directionClass}">${escapeHtml(fmtDirection(item.direction))}</span></div><small>${escapeHtml(sourceName)}${item.signal_source_deleted ? ' · 已删除' : ''}</small></div>
@@ -480,6 +480,17 @@ async function renderOpportunityDefaults() {
   bindProposalDefaultForm();
 }
 
+function opportunityMarketScanUrl(item) {
+  const url = new URL('https://perptape.com/markets');
+  url.searchParams.set('ex', item.source_exchange);
+  url.searchParams.set('q', `${item.source_exchange}:${item.canonical_symbol}:${item.symbol}`);
+  url.searchParams.set('utm_source', 'trading_console');
+  url.searchParams.set('utm_medium', 'opportunity');
+  url.searchParams.set('utm_campaign', 'market_scan_symbol');
+  url.searchParams.set('lang', currentLanguage === 'en' ? 'en' : 'zh-CN');
+  return url.toString();
+}
+
 function opportunityCard(item) {
   const directionClass = item.direction === 'LONG' ? 'direction-long' : 'direction-short';
   const canPropose = hasCapability('proposal.create')
@@ -546,7 +557,7 @@ function opportunityCard(item) {
   return `<article class="card opportunity-card" aria-label="${escapeHtml(`${item.symbol} · ${fmtVenueLabel(item.venue)} · ${fmtDirection(item.direction)}`)}" data-opportunity-card="${escapeHtml(cardId)}" data-opportunity-direction="${escapeHtml(item.direction)}" data-opportunity-state="${viewState}"><div class="card-top opportunity-card-head"><div><div class="opportunity-symbol-line"><div class="symbol">${escapeHtml(item.symbol)}</div><time>${escapeHtml(fmtDate(item.triggered_at))}</time></div><span class="subtle">${escapeHtml(fmtVenueLabel(item.venue))}</span></div><span class="tag ${directionClass}">${escapeHtml(fmtDirection(item.direction))}</span></div>
     <div class="opportunity-signals" aria-label="突破周期">${signals}</div>
     <div class="opportunity-facts"><span><small>参考价格</small><b>${fmtNumber(item.reference_price)}</b></span><span><small>行情状态</small><b class="${marketDataCurrent ? 'direction-long' : 'warning-text'}">${escapeHtml(marketStatus)}</b></span><span><small>成交量</small><b>${fmtCompact(item.quote_volume)}</b></span><span><small>持仓量</small><b>${fmtCompact(item.open_interest)}</b></span></div>
-    ${activeProposalCopy}${partialCopy ? `<p class="safety-note opportunity-status-note">${escapeHtml(partialCopy)}</p>` : ''}${blockedStatusCopy}${!activeProposal && canPropose && canUseCandidate && !proposalDefaults.configured ? `<p class="danger-note opportunity-status-note"><b>一键创建关闭：</b>${escapeHtml(oneClickBlocker)}；仍可使用当前卡片的高级配置。</p>` : ''}<div class="link-row"><a class="text-button" href="${escapeHtml(item.detail_url)}" target="_blank" rel="noreferrer">突破详情 ↗</a><a class="text-button" href="${escapeHtml(item.chart_url)}" target="_blank" rel="noreferrer">交易所图表 ↗</a></div>${activeProposal ? `<div class="card-actions proposal-actions"><a class="secondary" href="/proposals/${escapeHtml(activeProposal.proposal_id)}" data-link>查看待审核提案</a></div>` : canPropose && canUseCandidate ? `<div class="card-actions proposal-actions"><button class="secondary" data-advanced-system="${escapeHtml(actionCandidateId)}">高级配置</button><button class="primary" data-create-system="${escapeHtml(actionCandidateId)}" ${canCreateProposal ? '' : 'disabled'} title="${escapeHtml(oneClickBlocker)}">一键创建</button></div>` : ''}</article>`;
+    ${activeProposalCopy}${partialCopy ? `<p class="safety-note opportunity-status-note">${escapeHtml(partialCopy)}</p>` : ''}${blockedStatusCopy}${!activeProposal && canPropose && canUseCandidate && !proposalDefaults.configured ? `<p class="danger-note opportunity-status-note"><b>一键创建关闭：</b>${escapeHtml(oneClickBlocker)}；仍可使用当前卡片的高级配置。</p>` : ''}<div class="link-row"><a class="text-button" href="${escapeHtml(opportunityMarketScanUrl(item))}" target="_blank" rel="noreferrer">突破详情 ↗</a><a class="text-button" href="${escapeHtml(item.chart_url)}" target="_blank" rel="noreferrer">交易所图表 ↗</a></div>${activeProposal ? `<div class="card-actions proposal-actions"><a class="secondary" href="/proposals/${escapeHtml(activeProposal.proposal_id)}" data-link>查看待审核提案</a></div>` : canPropose && canUseCandidate ? `<div class="card-actions proposal-actions"><button class="secondary" data-advanced-system="${escapeHtml(actionCandidateId)}">高级配置</button><button class="primary" data-create-system="${escapeHtml(actionCandidateId)}" ${canCreateProposal ? '' : 'disabled'} title="${escapeHtml(oneClickBlocker)}">一键创建</button></div>` : ''}</article>`;
 }
 
 function openSystemDialog(candidateId) {

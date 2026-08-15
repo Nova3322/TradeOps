@@ -548,8 +548,7 @@ function drawCapitalChart(series) {
   const allPoints = series.flatMap(item => item.points);
   const ratio = window.devicePixelRatio || 1;
   const width = canvas.clientWidth;
-  const expanded = canvas.closest('.capital-chart-panel')?.classList.contains('is-expanded');
-  const height = expanded ? Math.max(360, Math.min(window.innerHeight - 300, 720)) : width < 520 ? 270 : 300;
+  const height = Math.max(1, canvas.clientHeight || (width < 520 ? 300 : 420));
   canvas.width = width * ratio; canvas.height = height * ratio;
   const context = canvas.getContext('2d'); context.scale(ratio, ratio);
   const styles = getComputedStyle(document.documentElement);
