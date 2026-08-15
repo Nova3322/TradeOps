@@ -1383,8 +1383,9 @@ dialog::backdrop { background: rgba(4, 12, 10, .56); backdrop-filter: blur(3px);
   .capital-chart-meta { display: grid; }
   .capital-history-range { grid-template-columns: 1fr; gap: 9px; }
   #capital-chart { height: 270px; }
-  .chart-legend { grid-template-columns: 1fr 1fr; }
+  .chart-legend { grid-template-columns: 1fr; }
   .capital-trend-toggle { padding: 8px; }
+  .capital-trend-toggle small { overflow: visible; text-overflow: clip; white-space: normal; overflow-wrap: anywhere; }
   .capital-page > .stats { grid-template-columns: 1fr; }
   .capital-route-flow b { font-size: 16px; }
 }
