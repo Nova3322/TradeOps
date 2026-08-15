@@ -88,6 +88,15 @@
   box-shadow: none;
 }
 .current-date { padding-right: 0; border-right: 0; }
+.topbar .env-badge {
+  min-height: 39px;
+  padding: 0 12px;
+  border-color: var(--line);
+  border-radius: 3px;
+  background: transparent;
+  color: var(--ink);
+  letter-spacing: 0;
+}
 
 .app-shell { transition: grid-template-columns .18s ease; }
 .desktop-nav-toggle {
