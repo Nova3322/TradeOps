@@ -800,7 +800,7 @@ const ENGLISH_PATTERNS = [
   [/^剩余 (\d+) 小时$/, (_match, hours) => `${hours} ${hours === '1' ? 'hour' : 'hours'} remaining`],
   [/^剩余 (\d+) 分钟$/, (_match, minutes) => `${minutes} ${minutes === '1' ? 'minute' : 'minutes'} remaining`],
   [/^当前版本 · (.+)；点击后修改限额与事实时效$/, 'Current version · $1; click to edit limits and fact freshness'],
-  [/^交易所只读探针失败（(.+)）：只读检查未成功（错误代码：(.+)）$/, (_match, scope, code) => `Exchange read-only probe failed (${scope.replace('币安', 'Binance')}): read-only check unsuccessful (error code: ${code})`],
+  [/^交易所只读探针失败（(.+)）：(.+)$/, (_match, scope, reason) => `Exchange read-only probe failed (${scope.replace('币安', 'Binance')}): ${{'币安只读接口限流，系统会按计划重试':'Binance read-only API rate-limited; the system will retry on schedule','Hyperliquid 只读接口限流，系统会按计划重试':'Hyperliquid read-only API rate-limited; the system will retry on schedule','币安只读鉴权或权限检查失败':'Binance read-only authentication or permission check failed','Hyperliquid 只读鉴权或权限检查失败':'Hyperliquid read-only authentication or permission check failed','团队尚未完成安全配置，暂不执行只读检查':'the Team safety setup is incomplete, so the read-only probe is paused','只读检查未成功；请在系统状态查看技术详情':'read-only check unsuccessful; open System status for technical details'}[reason] || 'read-only check unsuccessful'}`],
   [/^账户权益事实已过期（(.+)）$/, (_match, scope) => `Account equity facts are stale (${scope.replace('币安', 'Binance')})`],
   [/^仓位事实已过期（(.+)）$/, (_match, scope) => `Position facts are stale (${scope.replace('币安', 'Binance')})`],
   [/^计算型对账早于最新事实或已过期（(.+)）$/, (_match, scope) => `Computed reconciliation predates the latest facts or is stale (${scope.replace('币安', 'Binance')})`],
