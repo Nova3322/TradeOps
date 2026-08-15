@@ -483,7 +483,7 @@ async function renderOpportunityDefaults() {
 function opportunityMarketScanUrl(item) {
   const url = new URL('https://perptape.com/markets');
   url.searchParams.set('ex', item.source_exchange);
-  url.searchParams.set('q', `${item.source_exchange}:${item.canonical_symbol}:${item.symbol}`);
+  url.searchParams.set('q', item.symbol);
   url.searchParams.set('utm_source', 'trading_console');
   url.searchParams.set('utm_medium', 'opportunity');
   url.searchParams.set('utm_campaign', 'market_scan_symbol');

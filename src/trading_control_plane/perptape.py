@@ -91,7 +91,6 @@ def build_perptape_market_scan_url(
     *,
     base_url: str,
     source_exchange: str,
-    canonical_symbol: str,
     symbol: str,
 ) -> str:
     """Build the Perptape market scanner URL for an exact source symbol."""
@@ -99,7 +98,7 @@ def build_perptape_market_scan_url(
     return f"{base_url.rstrip('/')}/markets?" + urllib.parse.urlencode(
         {
             "ex": source_exchange,
-            "q": f"{source_exchange}:{canonical_symbol}:{symbol}",
+            "q": symbol,
             "utm_source": "trading_console",
             "utm_medium": "opportunity",
             "utm_campaign": "market_scan_symbol",
@@ -112,14 +111,13 @@ def _repair_perptape_source_url(
     value: str,
     *,
     source_exchange: str,
-    canonical_symbol: str,
     symbol: str,
 ) -> str:
     """Keep persisted console links on the exact-symbol market scanner."""
 
     parsed = urllib.parse.urlparse(value)
     query = urllib.parse.parse_qs(parsed.query)
-    expected_query = f"{source_exchange}:{canonical_symbol}:{symbol}"
+    expected_query = symbol
     if (
         parsed.scheme == "https"
         and parsed.hostname == PERPTAPE_OFFICIAL_HOST
@@ -135,7 +133,6 @@ def _repair_perptape_source_url(
         return build_perptape_market_scan_url(
             base_url=f"https://{PERPTAPE_OFFICIAL_HOST}",
             source_exchange=source_exchange,
-            canonical_symbol=canonical_symbol,
             symbol=symbol,
         )
     return value
@@ -201,7 +198,6 @@ class PerptapeCandidate:
         value["detail_url"] = build_perptape_market_scan_url(
             base_url=f"https://{PERPTAPE_OFFICIAL_HOST}",
             source_exchange=self.source_exchange,
-            canonical_symbol=self.canonical_symbol,
             symbol=self.symbol,
         )
         return value
@@ -247,7 +243,6 @@ class PerptapeCandidate:
                 detail_url=_repair_perptape_source_url(
                     str(value["detail_url"]),
                     source_exchange=source_exchange,
-                    canonical_symbol=canonical_symbol,
                     symbol=symbol,
                 ),
                 quote_volume=(
@@ -1393,7 +1388,6 @@ class PerptapeClient:
             detail_url=build_perptape_market_scan_url(
                 base_url=self._base_url,
                 source_exchange=exchange,
-                canonical_symbol=canonical_symbol,
                 symbol=symbol,
             ),
             quote_volume=quote_volume,

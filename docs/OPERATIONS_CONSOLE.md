@@ -58,8 +58,9 @@ Perptape and Webhook are separate signal products:
   breakout periods from the current snapshot, and keeps filters in a compact
   drawer. Long symbols use the restrained positive color and short symbols the
   restrained negative color. **Breakout details** opens the Perptape market
-  scanner for the exact exchange and symbol; exchange charts remain a separate
-  link.
+  scanner for the exact exchange and raw venue symbol (for example,
+  `PROVEUSDT`); the query does not prepend exchange or canonical-symbol
+  identifiers. Exchange charts remain a separate link.
 - **Webhook Signals** lists only events that passed the configured source's
   signature, request-time, nonce/replay, idempotency, size, version, and format
   checks. Stale records remain visible as facts but cannot silently become
