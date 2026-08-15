@@ -1,7 +1,47 @@
-/* API access quickstart — editorial, scoped, and documentation-first. */
+/* API access quickstart — action-first, scoped, and complete in one page. */
 .api-access-page { max-width: 1180px; }
 .api-access-head { align-items: end; padding-bottom: 34px; }
 .api-access-head .lede { max-width: 760px; }
+.api-access-actions { display: flex; align-items: center; gap: 10px; }
+.api-guide-nav {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: -16px 0 26px;
+}
+.api-guide-nav a {
+  padding: 8px 11px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 600;
+  text-decoration: none;
+}
+.api-guide-nav a:hover,
+.api-guide-nav a:focus-visible { border-color: var(--ink); color: var(--ink); }
+.api-credential-workspace {
+  margin-bottom: 38px;
+  padding: 26px;
+  border: 1px solid var(--ink);
+  border-radius: var(--radius-lg);
+  background: var(--panel);
+  scroll-margin-top: 90px;
+}
+.api-credential-workspace > header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 24px;
+  padding-bottom: 20px;
+  border-bottom: 1px solid var(--line);
+}
+.api-credential-workspace > header h2 { margin: 3px 0 7px; font-size: clamp(24px, 2.4vw, 32px); }
+.api-credential-workspace > header p:last-child { margin: 0; color: var(--muted); font-size: 14px; }
+.api-token-create-form { padding-top: 22px; }
+.api-token-create-form .field-grid { margin-bottom: 14px; }
+.api-token-create-form .microcopy { max-width: 900px; }
+.api-token-create-form > button { margin-top: 4px; }
 .api-guide-section {
   display: grid;
   grid-template-columns: 48px minmax(0, 1fr);
@@ -55,9 +95,6 @@
 .api-boundary-list.compact b,
 .api-boundary-list.compact span { display: block; }
 .api-boundary-list.compact b { margin-bottom: 7px; }
-.api-token-create { margin: 20px 0 30px; border: 1px solid var(--line); background: transparent; }
-.api-token-create > summary { padding: 16px 18px; }
-.api-token-create .toolbox-content { padding: 20px 18px; }
 .api-client-heading { margin-top: 30px; }
 .api-client-heading h3 { font-size: 22px; }
 .api-client-empty { min-height: 150px; }
@@ -75,6 +112,11 @@
 
 @media (max-width: 780px) {
   .api-access-head { padding-bottom: 26px; }
+  .api-access-actions { width: 100%; justify-content: space-between; }
+  .api-guide-nav { margin-top: -10px; }
+  .api-credential-workspace { margin-bottom: 28px; padding: 20px 16px; }
+  .api-credential-workspace > header { display: grid; gap: 12px; }
+  .api-token-create-form .field-grid { grid-template-columns: 1fr; }
   .api-guide-section { grid-template-columns: 1fr; gap: 10px; padding: 32px 0 38px; }
   .api-guide-index { padding-top: 0; }
   .api-guide-content > header { margin-bottom: 20px; }

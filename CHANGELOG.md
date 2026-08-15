@@ -13,8 +13,10 @@ Semantic Versioning where compatible with migration and API contracts.
   as a TESTNET/LIVE configuration filter with environment-scoped credential,
   lifecycle, and deletion checks.
 - Kept Perptape opportunities separate from signed Webhook signals, linked
-  opportunity details to the upstream market scanner, and aligned directional
-  presentation across responsive themes.
+  opportunity details to the upstream market scanner using its raw symbol-only
+  query, and aligned directional presentation across responsive themes.
+- Made API Key creation a visible first action on the API access page and kept
+  the complete onboarding guide in-page, with OpenAPI as the field contract.
 - Assigned Vault/Safe configuration to the Capital Center while Performance
   Reports owns multi-account equity history, trusted aggregation, range control,
   and fullscreen chart presentation.

@@ -28,6 +28,7 @@ from trading_control_plane.perptape import (
     PerptapeFeedSnapshot,
     PerptapeRateLimited,
     bound_perptape_feed_snapshot,
+    build_perptape_market_scan_url,
     merge_incomplete_perptape_candidates,
     normalize_perptape_datetime,
     perptape_candidate_identity_is_displayable,
@@ -38,6 +39,19 @@ from trading_control_plane.perptape import (
 )
 
 NOW = datetime(2026, 7, 19, 8, tzinfo=UTC)
+
+
+def test_market_scan_url_uses_plain_symbol_query() -> None:
+    url = build_perptape_market_scan_url(
+        base_url="https://perptape.com",
+        source_exchange="BN",
+        symbol="PROVEUSDT",
+    )
+
+    query = parse_qs(urlparse(url).query)
+    assert urlparse(url).path == "/markets"
+    assert query["ex"] == ["BN"]
+    assert query["q"] == ["PROVEUSDT"]
 
 
 def parsed_feed() -> PerptapeFeedSnapshot:
@@ -144,7 +158,7 @@ def test_real_breakout_contract_maps_to_narrow_trading_candidates_and_caches() -
     assert "utm_campaign=market_scan_symbol" in first[0].detail_url
     detail_query = parse_qs(urlparse(first[0].detail_url).query)
     assert detail_query["ex"] == ["BN"]
-    assert detail_query["q"] == ["BN:BTC:BTCUSDT"]
+    assert detail_query["q"] == ["BTCUSDT"]
 
 
 def test_persisted_market_scan_link_keeps_exact_symbol_without_mutating_identity() -> None:
@@ -162,7 +176,7 @@ def test_persisted_market_scan_link_keeps_exact_symbol_without_mutating_identity
     assert restored.candidate_id == candidate.candidate_id
     assert detail_query["ex"] == ["BN"]
     assert urlparse(restored.detail_url).path == "/markets"
-    assert detail_query["q"] == ["BN:BTC:BTCUSDT"]
+    assert detail_query["q"] == ["BTCUSDT"]
     assert detail_query["utm_campaign"] == ["market_scan_symbol"]
 
 
@@ -179,7 +193,7 @@ def test_persisted_breakout_link_is_repaired_to_market_scan() -> None:
     detail_query = parse_qs(urlparse(restored.detail_url).query)
 
     assert urlparse(restored.detail_url).path == "/markets"
-    assert detail_query["q"] == ["BN:BTC:BTCUSDT"]
+    assert detail_query["q"] == ["BTCUSDT"]
     assert detail_query["utm_campaign"] == ["market_scan_symbol"]
 
 
