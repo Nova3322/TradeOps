@@ -8,7 +8,7 @@ async function renderCampaignList() {
     : '订单会发送到交易所测试服务器，仅代表交易所测试资产。';
   main.innerHTML = `<section class="page"><header class="page-head"><div><p class="eyebrow">${escapeHtml(modeLabel)} · 环境不可跨越</p><h1>交易任务</h1><p class="lede"><span>每个交易任务覆盖一笔交易从授权、风险占用和下单意图，到成交、保护、减仓、对账与最终结果的完整生命周期。</span> <span>${escapeHtml(environmentCopy)}</span></p></div><div class="toolbar"><a class="secondary" href="/campaigns/alerts" data-link>运行告警</a><a class="secondary" href="/proposals" data-link>查看提案</a></div></header>
     <div class="stats"><div class="stat"><small>交易任务记录</small><b>${items.length}</b></div><div class="stat"><small>建仓中 / 持仓中</small><b>${items.filter(item => ['OPEN','OPENING'].includes(item.status)).length}</b></div><div class="stat"><small>结果未知</small><b>${items.filter(item => item.status === 'UNKNOWN').length}</b></div><div class="stat"><small>运行范围</small><b style="font-size:14px">${escapeHtml(modeLabel)}</b></div></div>
-    ${items.length ? `<div class="table-wrap campaign-list-table"><table><thead><tr><th>标的 / 方向</th><th>账户 / 场所</th><th>仓位目标</th><th>状态</th><th>最终盈亏</th><th>更新时间</th></tr></thead><tbody>${items.map(item => `<tr data-href="/campaigns/${item.campaign_id}"><td data-label="标的 / 方向"><b>${escapeHtml(item.symbol || '标的未配置')}</b><br><span class="${item.direction === 'LONG' ? 'direction-long' : 'direction-short'}">${escapeHtml(fmtDirection(item.direction))}</span><br><a class="row-link" href="/campaigns/${item.campaign_id}" data-link>${shortId(item.campaign_id)} · 查看详情</a></td><td data-label="账户 / 场所">${escapeHtml(fmtDefaultAccountLabel(item.account_id))}<br><span class="subtle">${escapeHtml(fmtVenueLabel(item.venue))}</span></td><td data-label="仓位目标">${escapeHtml(campaignTargetLabel(item))}</td><td data-label="状态"><b class="status-${escapeHtml(item.status)}">${escapeHtml(fmtStatus(item.status))}</b></td><td data-label="最终盈亏">${escapeHtml(campaignPnlLabel(item, item.final_pnl))}</td><td data-label="更新时间">${fmtDate(item.updated_at)}</td></tr>`).join('')}</tbody></table></div>` : `<section class="empty-state"><div><h2>当前没有${escapeHtml(modeLabel)}交易任务</h2><p>提案通过独立审核、实时风险检查和短期授权后，交易运维人员才能在同一环境发起订单。</p></div></section>`}</section>`;
+    ${items.length ? `<div class="table-wrap campaign-list-table"><table><thead><tr><th>标的 / 方向</th><th>账户 / 场所</th><th>仓位目标</th><th>状态</th><th>最终盈亏</th><th>更新时间</th></tr></thead><tbody>${items.map(item => `<tr data-href="/campaigns/${item.campaign_id}"><td data-label="标的 / 方向"><b>${escapeHtml(item.symbol || '标的未配置')}</b><br><span class="${item.direction === 'LONG' ? 'direction-long' : 'direction-short'}">${escapeHtml(fmtDirection(item.direction))}</span><br><a class="row-link" href="/campaigns/${item.campaign_id}" data-link>${shortId(item.campaign_id)} · 查看详情</a></td><td data-label="账户 / 场所">${escapeHtml(fmtDefaultAccountLabel(item.account_id))}<br><span class="subtle">${escapeHtml(fmtVenueLabel(item.venue))}</span></td><td data-label="仓位目标">${escapeHtml(campaignTargetLabel(item))}</td><td data-label="状态"><b class="status-${escapeHtml(item.status)}">${escapeHtml(fmtStatus(item.status))}</b></td><td data-label="最终盈亏">${escapeHtml(campaignPnlLabel(item, item.final_pnl))}</td><td data-label="更新时间">${fmtDate(item.updated_at)}</td></tr>`).join('')}</tbody></table></div>` : `<section class="empty-state"><div><h2>当前没有${escapeHtml(modeLabel)}交易任务</h2><p>提案通过独立审核、实时风险检查和短期授权后，风险管理人员才能在同一环境发起订单。</p></div></section>`}</section>`;
   bindLinkedRows();
 }
 
@@ -290,7 +290,7 @@ async function renderSystemStatus() {
     systemHealthCard({title:'风险敞口监控', status:!activeMonitoring ? '当前无监控对象' : exposureIssues.length ? `${exposureIssues.length} 项敞口不确定` : '监控正常', tone:!activeMonitoring ? 'neutral' : exposureIssues.length ? 'danger' : 'success', copy:!activeMonitoring ? '有交易任务进入运行后，系统会检查仓位和风险占用。' : exposureIssues.length ? '仓位或风险占用存在未知或过期数据，系统会阻止新增风险。' : '当前没有仓位未知、仓位过期或风险占用未知。', meta:`${exceptions.length} 项总阻断`}),
     systemHealthCard({title:'对账监控', status:!activeMonitoring ? '暂无对账对象' : reconciliationIssues.length ? `${reconciliationIssues.length} 项未一致` : '对账一致', tone:!activeMonitoring ? 'neutral' : reconciliationIssues.length ? 'attention' : 'success', copy:!activeMonitoring ? '当前没有运行中的交易任务需要对账。' : reconciliationIssues.length ? '至少一个权限范围存在差异、未知、过期或需要人工处理。' : '运行中的交易任务没有派生对账异常。', meta:'只有计算结果为“对账一致”才可作为恢复依据'}),
   ] : [
-    systemHealthCard({title:'交易任务监控', status:'当前身份不读取任务详情', tone:'neutral', copy:'系统状态仍展示风险政策、外部连接、执行底座和通知健康；运行任务、保护与对账详情由交易运维人员查看。', meta:'未读取任务数据，不能据此判断任务数量或异常数量'}),
+    systemHealthCard({title:'交易任务监控', status:'当前身份不读取任务详情', tone:'neutral', copy:'系统状态仍展示风险政策、外部连接、执行底座和通知健康；运行任务、保护与对账详情由风险管理人员查看。', meta:'未读取任务数据，不能据此判断任务数量或异常数量'}),
   ];
   const cards = [
     systemHealthCard({title:'核心服务', status:health.ready ? '服务可用' : '服务不可用', tone:health.ready ? 'success' : 'danger', copy:health.ready ? '业务数据库和交易服务运行正常。' : '核心服务检查失败；不能把缺失响应当成正常。', meta:'数据缺失时自动阻止交易'}),
@@ -339,7 +339,7 @@ async function renderSystemStatus() {
       ? '由资金管理员处理'
       : key === 'PERPTAPE'
         ? '由机会创建者查看'
-        : '由交易运维人员查看';
+        : '由风险管理人员查看';
     const action = hasCapability(destinationCapability)
       ? `<a class="text-button" href="${label[2]}" data-link>${label[3]}</a>`
       : `<span class="subtle">${restrictedOwner}</span>`;
@@ -382,7 +382,7 @@ async function renderSystemStatus() {
       : (!workersReady || !tradingConnectionsReady) && canViewVenues
         ? '<a class="secondary" href="/accounts" data-link>查看账户管理</a>'
         : !workersReady || !tradingConnectionsReady
-          ? '<span class="status-pill">由系统管理员或交易运维人员处理</span>'
+          ? '<span class="status-pill">由系统管理员或风险管理人员处理</span>'
           : !telegramHealthy
             ? '<a class="secondary" href="/reviews" data-link>使用网页端审核</a>'
             : !perptapeAvailable && hasCapability('opportunity.view')
@@ -531,18 +531,18 @@ function campaignNextStep(item, active, truth) {
   const filledIntent = item.intents.some(intent => intent.status === 'FILLED');
   if (item.status === 'CLOSED') return {key:'done', tone:'success', title:'交易任务已完成并关闭', copy:'风险预留已释放，成交与对账记录保留在当前交易任务中。', action:'<a class="secondary" href="/campaigns" data-link>返回交易任务</a>'};
   if (active?.status === 'DISPATCHING') return {key:'dispatch', tone:'attention', title:'已持久派发，等待原结果确认', copy:'系统已冻结 Worker、账户版本和发送者范围；现在只查询同一派发，不会再次触发订单写入。', action:'<a class="secondary" href="/campaigns/alerts" data-link>查看派发告警</a><p class="microcopy">不要创建第二个意图；查询超时会转为结果未知并继续占用风险。</p>'};
-  if (active?.status === 'UNKNOWN') return {key:'reconcile', tone:'danger', title:'结果不确定，先对账', copy:'风险继续占用，禁止重发、加仓或释放；先核对交易所订单、成交、仓位和保护。', action:canOperate ? '<button class="danger" data-reconcile>立即运行对账</button>' : '<p class="microcopy">等待交易运维人员运行对账。</p>'};
+  if (active?.status === 'UNKNOWN') return {key:'reconcile', tone:'danger', title:'结果不确定，先对账', copy:'风险继续占用，禁止重发、加仓或释放；先核对交易所订单、成交、仓位和保护。', action:canOperate ? '<button class="danger" data-reconcile>立即运行对账</button>' : '<p class="microcopy">等待风险管理人员运行对账。</p>'};
   if (active?.status === 'READY') return item.environment === 'LIVE'
     ? {key:'intent', tone:'attention', title:`等待${fmtIntentKind(active.kind)}发送`, copy:'实盘意图只能由受控发送进程在控制开关、短期授权和有效租约内推进；页面不会合成交易所回执。', action:'<a class="secondary" href="/campaigns/alerts" data-link>查看运行告警</a><p class="microcopy">若超过预期仍未推进，再按告警事实处理；不要重复创建意图。</p>'}
-    : {key:'intent', tone:'attention', title:`记录${fmtIntentKind(active.kind)}发送结果`, copy:'当前只有这个意图可以推进；获取发送租约后记录模拟订单，不会连接交易所。', action:canOperate ? operationForm(active, item) : '<p class="microcopy">等待交易运维人员处理待发送意图。</p>'};
-  if (active && ['SENT','PARTIALLY_FILLED'].includes(active.status)) return {key:'intent', tone:'attention', title:`确认${fmtIntentKind(active.kind)}成交结果`, copy:'先记录已确认成交，或在确实无法判断时标记为“结果未知”；不要创建第二个意图。', action:canOperate ? operationForm(active, item) : '<p class="microcopy">等待交易运维人员记录成交结果。</p>'};
+    : {key:'intent', tone:'attention', title:`记录${fmtIntentKind(active.kind)}发送结果`, copy:'当前只有这个意图可以推进；获取发送租约后记录模拟订单，不会连接交易所。', action:canOperate ? operationForm(active, item) : '<p class="microcopy">等待风险管理人员处理待发送意图。</p>'};
+  if (active && ['SENT','PARTIALLY_FILLED'].includes(active.status)) return {key:'intent', tone:'attention', title:`确认${fmtIntentKind(active.kind)}成交结果`, copy:'先记录已确认成交，或在确实无法判断时标记为“结果未知”；不要创建第二个意图。', action:canOperate ? operationForm(active, item) : '<p class="microcopy">等待风险管理人员记录成交结果。</p>'};
   if (!truth.positionCurrent && filledIntent) return {key:'position', tone:'attention', title:'同步成交后的当前仓位', copy:'成交已经记录，但仓位数据早于最新成交或尚未确认；在此之前不能判断保护和下一步。', action:canRecordSyntheticFacts ? positionFactForm(item) : `<a class="secondary" href="${venueFactsHref}" data-link>查看交易账户</a><p class="microcopy">生产仓位只能来自交易所只读事实，不能在页面手工补写。</p>`};
   if (truth.hasPosition && !truth.protectionReady) return {key:'protection', tone:'danger', title:'先补齐足额原生保护', copy:'当前有仓位但保护缺失、未知或不足。优先确认保护；若无法保护，使用下方减仓或退出。', action:canRecordSyntheticFacts ? protectionFactForm(item) : '<a class="secondary" href="/campaigns/alerts" data-link>查看保护告警</a><p class="microcopy">生产保护只能来自受控执行与交易所事实，页面不会手工伪造。</p>'};
-  if (!truth.reconciliationMatched) return {key:'reconcile', tone:'attention', title:'运行对账确认当前数据', copy:'只有意图、订单、成交、仓位和保护一致后，才适合继续管理或关闭交易任务。', action:canOperate ? '<button class="primary" data-reconcile>运行当前范围对账</button>' : '<p class="microcopy">等待交易运维人员运行对账。</p>'};
-  if (truth.flatKnown && truth.exitTerminal && truth.riskClosable) return {key:'close', tone:'success', title:'仓位已清零，可以关闭交易任务', copy:'退出结果终结且对账一致；关闭后会释放剩余风险预留并把结果固定到审计记录。', action:canOperate ? '<button class="primary" data-close-campaign>关闭交易任务</button>' : '<p class="microcopy">等待交易运维人员关闭交易任务。</p>'};
+  if (!truth.reconciliationMatched) return {key:'reconcile', tone:'attention', title:'运行对账确认当前数据', copy:'只有意图、订单、成交、仓位和保护一致后，才适合继续管理或关闭交易任务。', action:canOperate ? '<button class="primary" data-reconcile>运行当前范围对账</button>' : '<p class="microcopy">等待风险管理人员运行对账。</p>'};
+  if (truth.flatKnown && truth.exitTerminal && truth.riskClosable) return {key:'close', tone:'success', title:'仓位已清零，可以关闭交易任务', copy:'退出结果终结且对账一致；关闭后会释放剩余风险预留并把结果固定到审计记录。', action:canOperate ? '<button class="primary" data-close-campaign>关闭交易任务</button>' : '<p class="microcopy">等待风险管理人员关闭交易任务。</p>'};
   if (truth.flatKnown) return {key:'close-blocked', tone:'danger', title:'平仓事实仍缺少关闭证据', copy:'仓位虽然为 0，但退出意图或风险预留尚未终结。不要直接释放风险；先查看运行告警确认原因。', action:'<a class="secondary" href="/campaigns/alerts" data-link>查看运行告警</a>'};
   if (truth.hasPosition) return {key:'hold', tone:'success', title:'仓位已确认且保护完整', copy:'当前没有必须处理的异常。继续观察；需要时可使用下方减仓或退出，加仓仍需通过全部门控。', action:'<span class="status-pill status-APPROVED">当前无需动作</span>'};
-  return {key:'reconcile', tone:'attention', title:'确认当前范围数据', copy:'当前没有可确认仓位；先运行对账，避免把缺失数据误认为已经平仓。', action:canOperate ? '<button class="primary" data-reconcile>运行当前范围对账</button>' : '<p class="microcopy">等待交易运维人员运行对账。</p>'};
+  return {key:'reconcile', tone:'attention', title:'确认当前范围数据', copy:'当前没有可确认仓位；先运行对账，避免把缺失数据误认为已经平仓。', action:canOperate ? '<button class="primary" data-reconcile>运行当前范围对账</button>' : '<p class="microcopy">等待风险管理人员运行对账。</p>'};
 }
 
 function intentCard(intent, environment = 'TESTNET') { const dispatch = intent.dispatch ? `<p class="subtle">受控派发 · ${escapeHtml(intent.dispatch.backend)} · 账户版本 ${escapeHtml(intent.dispatch.account_version)} · ${fmtDate(intent.dispatch.started_at)}</p>` : ''; return `<div class="intent-row"><div><b>${escapeHtml(fmtIntentKind(intent.kind))} · ${escapeHtml(fmtSide(intent.side))} ${fmtNumber(intent.quantity)}</b><br><span class="subtle">${shortId(intent.intent_id)} · ${intent.reduce_only ? '只减仓' : '会增加风险'} · ${fmtDate(intent.updated_at)}</span></div><b class="status-${escapeHtml(intent.status)}">${escapeHtml(fmtStatus(intent.status))}</b></div>${dispatch}${intent.order ? `<p class="subtle">${escapeHtml(fmtEnvironment(environment, true))}订单 ${escapeHtml(intent.order.venue_order_id)} · 已成交 ${fmtNumber(intent.order.filled_quantity)} / ${fmtNumber(intent.order.ordered_quantity)}</p>` : ''}`; }

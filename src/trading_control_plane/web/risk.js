@@ -54,7 +54,7 @@ function formatRiskActionReason(value, conditions = {blockers:[]}) {
     SYSTEM_ADMIN_REQUIRED:'仅最高管理员可以直接恢复',
     SYSTEM_ALREADY_NORMAL:'无需恢复：风险政策当前为正常状态',
     REALTIME_CONDITIONS_BLOCKED:`实时安全条件未全部通过（${blockerCount} 项）`,
-    OPERATOR_REQUIRED:'当前身份不是交易运维人员',
+    OPERATOR_REQUIRED:'当前身份没有风险管理权限',
     RESTORE_REQUEST_ALREADY_ACTIVE:'已有一条恢复申请正在处理',
     INDEPENDENT_REVIEWER_REQUIRED:'当前身份不是独立审核人员',
     NO_REVIEWABLE_REQUEST:'当前没有可由你独立审核的恢复申请',
@@ -79,7 +79,7 @@ function renderRiskControlPanel(control) {
   const policy = control.policy;
   const gate = control.auto_add_gate;
   const canConfigurePolicy = Boolean(control.actions?.configure_policy?.allowed);
-  if (!policy) return `<section class="risk-control-overview"><article class="home-status tone-attention"><div><p class="eyebrow">Fail closed</p><h2>当前团队尚无风险政策</h2><p>服务端不会读取其他团队的全局政策，也不会允许提案进入新增风险执行链路。</p></div><span class="status-pill status-DENY">新增风险阻断</span></article>${renderRiskPolicyConfiguration(null, canConfigurePolicy)}</section>`;
+  if (!policy) return `<section class="risk-control-overview"><article class="home-status tone-attention"><div><p class="eyebrow">安全保护</p><h2>当前团队尚无风险政策</h2><p>系统不会读取其他团队的风险政策，也不会允许提案进入新增风险执行链路。</p></div><span class="status-pill status-DENY">新增风险阻断</span></article>${renderRiskPolicyConfiguration(null, canConfigurePolicy)}</section>`;
   const conditions = control.restore_conditions;
   const restoreGateLabel = conditions.ready ? '实时条件全部通过' : `${conditions.blockers.length} 项阻塞`;
   const blockedScopeCount = new Set((conditions.checks || [])

@@ -131,12 +131,20 @@ class ApiClientService(ServiceComponent):
         ):
             _reject("API_CLIENT_INVALID", "client name or credential lifetime is invalid")
         with self.database.session_factory.begin() as session:
-            _owner, workspace, team = self._owner_context(
+            owner, workspace, team = self._owner_context(
                 session,
                 owner_id=actor_id,
                 workspace_id=workspace_id,
                 team_id=team_id,
             )
+            if (
+                owner.active_workspace_id != workspace.workspace_id
+                or owner.active_team_id != team.team_id
+            ):
+                _reject(
+                    "API_CLIENT_SCOPE_INVALID",
+                    "switch to the requested Workspace and Team before creating an API Key",
+                )
             caller = f"{actor_id}:api-clients"
             payload = {
                 "name": normalized_name,

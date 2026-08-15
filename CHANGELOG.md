@@ -15,8 +15,11 @@ Semantic Versioning where compatible with migration and API contracts.
 - Kept Perptape opportunities separate from signed Webhook signals, linked
   opportunity details to the upstream market scanner using its raw symbol-only
   query, and aligned directional presentation across responsive themes.
-- Made API Key creation a visible first action on the API access page and kept
-  the complete onboarding guide in-page, with OpenAPI as the field contract.
+- Made API Key creation a visible, collapsed-on-load action bound to the current
+  Workspace and Team, limited inventory to the current owner's keys, and kept
+  OpenAPI as the complete field contract.
+- Renamed the member-access OPERATOR preset to Risk Management and clarified its
+  reviewed risk-policy, pause, authorization, reduction, and reconciliation duties.
 - Assigned Vault/Safe configuration to the Capital Center while Performance
   Reports owns multi-account equity history, trusted aggregation, range control,
   and fullscreen chart presentation.

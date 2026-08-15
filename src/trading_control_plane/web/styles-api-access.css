@@ -22,26 +22,48 @@
 .api-guide-nav a:focus-visible { border-color: var(--ink); color: var(--ink); }
 .api-credential-workspace {
   margin-bottom: 38px;
-  padding: 26px;
   border: 1px solid var(--ink);
   border-radius: var(--radius-lg);
   background: var(--panel);
   scroll-margin-top: 90px;
 }
-.api-credential-workspace > header {
+.api-credential-workspace > summary {
   display: flex;
-  align-items: flex-start;
+  align-items: center;
   justify-content: space-between;
   gap: 24px;
-  padding-bottom: 20px;
-  border-bottom: 1px solid var(--line);
+  padding: 20px 24px;
+  cursor: pointer;
+  list-style: none;
 }
-.api-credential-workspace > header h2 { margin: 3px 0 7px; font-size: clamp(24px, 2.4vw, 32px); }
-.api-credential-workspace > header p:last-child { margin: 0; color: var(--muted); font-size: 14px; }
+.api-credential-workspace > summary::-webkit-details-marker { display: none; }
+.api-credential-workspace > summary > span:first-child { display: grid; gap: 4px; }
+.api-credential-workspace > summary strong { font-size: clamp(20px, 2vw, 26px); }
+.api-credential-workspace > summary small { color: var(--muted); font-size: 13px; font-weight: 400; }
+.api-credential-summary-state { display: flex; align-items: center; gap: 12px; }
+.api-credential-summary-state > b { font-size: 13px; }
+.api-credential-workspace:not([open]) .when-open,
+.api-credential-workspace[open] .when-closed { display: none; }
+.api-credential-workspace[open] > summary { border-bottom: 1px solid var(--line); }
+.api-credential-content { padding: 0 24px 24px; }
 .api-token-create-form { padding-top: 22px; }
 .api-token-create-form .field-grid { margin-bottom: 14px; }
 .api-token-create-form .microcopy { max-width: 900px; }
 .api-token-create-form > button { margin-top: 4px; }
+.api-current-scope {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr)) auto;
+  gap: 12px;
+  align-items: center;
+  margin-bottom: 18px;
+  padding: 14px 16px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  background: var(--bg);
+}
+.api-current-scope > span { display: grid; gap: 3px; min-width: 0; }
+.api-current-scope small { color: var(--muted); font-size: 11px; }
+.api-current-scope b { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 14px; }
 .api-guide-section {
   display: grid;
   grid-template-columns: 48px minmax(0, 1fr);
@@ -114,8 +136,12 @@
   .api-access-head { padding-bottom: 26px; }
   .api-access-actions { width: 100%; justify-content: space-between; }
   .api-guide-nav { margin-top: -10px; }
-  .api-credential-workspace { margin-bottom: 28px; padding: 20px 16px; }
-  .api-credential-workspace > header { display: grid; gap: 12px; }
+  .api-credential-workspace { margin-bottom: 28px; }
+  .api-credential-workspace > summary { align-items: flex-start; padding: 17px 16px; }
+  .api-credential-summary-state { align-items: flex-end; flex-direction: column; }
+  .api-credential-content { padding: 0 16px 20px; }
+  .api-current-scope { grid-template-columns: 1fr; }
+  .api-current-scope > a { width: max-content; }
   .api-token-create-form .field-grid { grid-template-columns: 1fr; }
   .api-guide-section { grid-template-columns: 1fr; gap: 10px; padding: 32px 0 38px; }
   .api-guide-index { padding-top: 0; }

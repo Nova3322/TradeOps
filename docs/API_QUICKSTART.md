@@ -10,9 +10,11 @@ but it has no independent Account or Venue scope and stores no role copy. Every
 request uses the owning user's current RBAC permissions; resource APIs check the
 exact Team, Account, and Venue at request time.
 
-Create a key from **user menu → API Key**. Plaintext is displayed once after
-creation or rotation. Store it in a secret manager, never in source, prompts,
-screenshots, chat, or logs.
+Create a key from **user menu → API Key** by opening the collapsed creation
+panel. Creation always uses the current Workspace and Team; switch context
+first to create a key elsewhere. "My API Keys" lists only keys created by the
+current account. Plaintext is displayed once after creation or rotation. Store
+it in a secret manager, never in source, prompts, screenshots, chat, or logs.
 
 ```bash
 export BASE_URL="BASE_URL"
