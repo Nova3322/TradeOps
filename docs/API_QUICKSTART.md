@@ -38,11 +38,17 @@ Start with read-only endpoints such as `/api/instruments`, `/api/opportunities`,
 environment, source, and freshness fields. Missing, stale, lost, incomplete, or
 rate-limited data is neither real-time data nor numeric zero.
 
-`SHADOW` is simulated. `LIVE` identifies a production environment but does not
-enable execution. Writes require the current user permission, exact resource
-authorization, idempotency, independent review, risk checks, and every
-server-side gate. `LIVE_ORDER_SEND`, `CAPITAL_TRANSFER`, `SIGNING`, and
-`BROADCAST` remain disabled unless separately enabled through governed controls.
+The current execution environments are `TESTNET` and `LIVE`; `SETUP` is an
+internal Team configuration state and is not valid proposal or order scope.
+The server derives new proposal, authorization, intent, and execution scope from
+the Team's persisted current mode. A client-supplied conflicting environment is
+rejected rather than used as a routing instruction.
+
+`LIVE` identifies a production environment but does not enable execution.
+Writes require the current user permission, exact resource authorization,
+idempotency, independent review, risk checks, and every server-side gate.
+`LIVE_ORDER_SEND`, `CAPITAL_TRANSFER`, `SIGNING`, and `BROADCAST` remain disabled
+unless separately enabled through governed controls.
 
 API Key lifecycle operations require an interactive user session. A key may be
 disabled, rotated, or permanently revoked; owner deactivation or RBAC removal
