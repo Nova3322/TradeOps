@@ -278,7 +278,7 @@ const apiErrorGuidance = {
   CAPABILITY_FORBIDDEN:'当前身份没有查看或执行此操作的权限。',
   LIVE_SCOPE_CONFIGURATION_REQUIRED:'实盘账户或交易所范围尚未配置完整。',
   EXCHANGE_ACCOUNT_NOT_FOUND:'账户已删除、已停用或不属于当前团队，请刷新账户列表后重试。',
-  DEFAULT_ACCOUNT_REQUIRED:'资金路径账户必须与当前生产运行绑定的默认账户一致，请在账户管理中核对后重试。',
+  DEFAULT_ACCOUNT_REQUIRED:'请从账户管理的生产账户下拉列表重新选择。系统校验不可变账户 ID，不使用可编辑的显示名称。',
   CAPITAL_CONFIGURATION_FEE_LIMIT_INVALID:'最大费用上限必须低于单次金额上限，请调整后重新保存。',
   CAPITAL_BINANCE_WITHDRAWAL_ADDRESS_SCOPE_MISMATCH:'币安受限提现地址必须与当前使用的链上金库地址完全一致。使用 Safe 时请填写 Safe Smart Account；使用 NoTilt 时请填写 NoTilt 金库地址。',
   NOTILT_VAULT_SCOPE_MISMATCH:'NoTilt 金库地址与当前可信生产范围不一致，请核对金库地址后重试。',
@@ -294,6 +294,25 @@ const apiErrorGuidance = {
   NOTILT_RELEASE_LIMIT_EXCEEDED:'金额超过 NoTilt 当前实时可释放上限，请降低金额或等待额度恢复。',
 };
 const fmtStatus = (value) => localizedText(statusLabels[value] || value || '未知');
+const exchangeConnectionErrorLabels = {
+  BINANCE_AUTHENTICATION_FAILED:'币安拒绝了凭据、只读权限或出口 IP 范围',
+  BINANCE_TIMESTAMP_REJECTED:'币安拒绝了请求时间；系统会使用官方服务器时间重试',
+  BINANCE_RATE_LIMITED:'币安只读接口正在限流，请稍后重试',
+  BINANCE_READ_ONLY_UNAVAILABLE:'币安官方只读接口暂时不可达',
+  BINANCE_RESPONSE_INVALID:'币安返回了当前适配器无法采信的响应',
+  READ_ONLY_PROBE_FAILED:'只读连接检查失败',
+};
+const exchangeConnectionErrorEnglishLabels = {
+  BINANCE_AUTHENTICATION_FAILED:'Binance rejected the credential, read permission, or egress IP scope',
+  BINANCE_TIMESTAMP_REJECTED:'Binance rejected the request time; the system will retry with official server time',
+  BINANCE_RATE_LIMITED:'The Binance read-only API is rate-limiting requests; retry later',
+  BINANCE_READ_ONLY_UNAVAILABLE:'The official Binance read-only API is currently unreachable',
+  BINANCE_RESPONSE_INVALID:'Binance returned a response the current adapter cannot trust',
+  READ_ONLY_PROBE_FAILED:'The read-only connection probe failed',
+};
+const fmtExchangeConnectionError = value => currentLanguage === 'en'
+  ? exchangeConnectionErrorEnglishLabels[value] || value || 'No diagnostic is available'
+  : exchangeConnectionErrorLabels[value] || value || '暂无可用诊断';
 const fmtRisk = (value) => localizedText(riskLabels[value] || value || '未知');
 const riskGuidance = (reason) => riskReasonGuidance[reason] || {label:'风险检查未通过',action:'查看当前风险事实，处理阻塞后重新检查。'};
 const friendlyApiError = (error) => {

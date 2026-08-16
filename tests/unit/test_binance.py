@@ -409,6 +409,26 @@ def test_binance_transport_classifies_signed_api_error_body(
         binance._default_fetcher("https://fapi.binance.com/fapi/v3/balance", {}, 1.0)
 
 
+def test_binance_transport_distinguishes_timestamp_rejection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    error = urllib.error.HTTPError(
+        "https://fapi.binance.com/fapi/v3/balance",
+        400,
+        "bad request",
+        {},
+        io.BytesIO(b'{"code":-1021,"msg":"timestamp outside recvWindow"}'),
+    )
+
+    def reject(*_args: object, **_kwargs: object) -> UrlResponse:
+        raise error
+
+    monkeypatch.setattr(urllib.request, "urlopen", reject)
+
+    with pytest.raises(DomainRejected, match="BINANCE_TIMESTAMP_REJECTED"):
+        binance._default_fetcher("https://fapi.binance.com/fapi/v3/balance", {}, 1.0)
+
+
 def test_default_binance_read_transports_parse_and_fail_closed(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

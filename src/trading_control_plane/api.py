@@ -641,6 +641,39 @@ def create_app(
         )
         snapshot["net_worth"]["onchain_provider"] = selected_provider
         snapshot["net_worth"]["onchain_probe"] = onchain_probe
+        can_manage_direct_configuration = service().can_user(user_id, "access.manage")
+        exchange_account_options: list[dict[str, Any]] = []
+        if can_manage_direct_configuration:
+            runtime_accounts = {
+                "BINANCE": resolved_settings.runtime_binance_account_id,
+                "HYPERLIQUID": resolved_settings.runtime_hyperliquid_account_id,
+            }
+            configured_accounts = {
+                "BINANCE": direct_settings.capital_direct_binance_account_id,
+                "HYPERLIQUID": direct_settings.capital_direct_hyperliquid_account_id,
+            }
+            for account in queries().exchange_accounts(user_id)["data"]:
+                if (
+                    account["environment"] != "LIVE"
+                    or account["venue"] not in runtime_accounts
+                    or not account["active"]
+                ):
+                    continue
+                venue = str(account["venue"])
+                account_id = str(account["account_id"])
+                runtime_default = runtime_accounts[venue]
+                exchange_account_options.append(
+                    {
+                        "venue": venue,
+                        "account_id": account_id,
+                        "label": str(account["label"]),
+                        "connection_status": str(account["connection"]["status"]),
+                        "runtime_default": (
+                            runtime_default is not None and account_id == runtime_default
+                        ),
+                        "configured": account_id == configured_accounts[venue],
+                    }
+                )
         snapshot["direct_configuration"] = {
             "single_account_mode": False,
             "source": "VERSIONED_DATABASE" if saved_config is not None else "ENVIRONMENT",
@@ -649,7 +682,8 @@ def create_app(
             "updated_by_username": (
                 None if saved_config is None else saved_config["updated_by_username"]
             ),
-            "can_manage": service().can_user(user_id, "access.manage"),
+            "can_manage": can_manage_direct_configuration,
+            "exchange_account_options": exchange_account_options,
             "asset": direct_settings.capital_direct_asset,
             "network": direct_settings.capital_direct_network,
             "treasury_provider": direct_settings.capital_direct_treasury_provider,

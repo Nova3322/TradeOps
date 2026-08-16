@@ -30,6 +30,7 @@ def test_binance_connection_probe_is_one_signed_read_without_fact_ingestion() ->
         api_key="key-1234",
         api_secret="secret-5678",  # noqa: S106 - inert signing fixture
         fetcher=fetcher,
+        server_time_fetcher=lambda _timeout: 1_723_000_000_123,
     )
 
     client.verify_connection(now=NOW)
@@ -41,6 +42,7 @@ def test_binance_connection_probe_is_one_signed_read_without_fact_ingestion() ->
     assert parsed.path == "/fapi/v3/balance"
     assert headers == {"X-MBX-APIKEY": "key-1234"}
     assert timeout == 5.0
+    assert query["timestamp"] == "1723000000123"
     unsigned = urllib.parse.urlencode(
         {
             "recvWindow": query["recvWindow"],
