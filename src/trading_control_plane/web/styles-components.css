@@ -751,6 +751,13 @@ p, li, dd, td { font-size: 14px; }
   .performance-capital-panel .capital-chart-panel.is-expanded #capital-chart { height: 100%; }
 }
 .capital-provider-section { margin-bottom: 30px; }
+.capital-network-scope { display: grid; grid-template-columns: minmax(180px, .72fr) minmax(150px, .58fr) minmax(0, 2.7fr); margin: 14px 0 16px; overflow: hidden; border: 1px solid var(--line); border-radius: 3px; background: var(--panel); }
+.capital-network-scope > div { min-width: 0; padding: 10px 13px; }
+.capital-network-scope > div + div { border-left: 1px solid var(--line); }
+.capital-network-scope dt { color: var(--muted); font-size: 11px; font-weight: 600; line-height: 1.4; }
+.capital-network-scope dd { margin: 3px 0 0; color: var(--ink); font-size: 12px; font-weight: 600; line-height: 1.45; overflow-wrap: anywhere; }
+.capital-network-scope-note { background: var(--panel-soft); }
+.capital-network-scope-note dd { color: var(--muted); font-weight: 500; }
 .capital-provider-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; margin: 16px 0; }
 .capital-provider-card { border-radius: 3px; }
 .capital-provider-card.is-selected { border-color: color-mix(in srgb, var(--accent) 48%, var(--line)); box-shadow: inset 3px 0 0 var(--accent); }
@@ -900,6 +907,8 @@ p, li, dd, td { font-size: 14px; }
   .performance-capital-panel { margin-inline: -2px; padding: 14px; }
   .capital-provider-grid,
   .capital-provider-config-grid { grid-template-columns: 1fr; }
+  .capital-network-scope { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .capital-network-scope-note { grid-column: 1 / -1; border-top: 1px solid var(--line); border-left: 0 !important; }
   .notification-create-basics,
   .notification-event-grid { grid-template-columns: 1fr; }
   .notification-create-footer { grid-template-columns: 1fr; }
