@@ -621,6 +621,63 @@ def test_vault_and_safe_configurations_persist_while_current_provider_switches(
     asyncio.run(scenario())
 
 
+def test_safe_configuration_validation_returns_actionable_error_codes(
+    database: Database,
+) -> None:
+    service = TradingService(database)
+    now = datetime.now(UTC)
+    admin = service.bootstrap_admin("safe-validation-admin", now=now)
+    _add_live_accounts(database, admin)
+
+    async def scenario() -> None:
+        async with AsyncClient(
+            transport=ASGITransport(app=_app(database)),
+            base_url="http://test",
+        ) as client:
+            await _login(client, "safe-validation-admin")
+            invalid_fee = await client.put(
+                "/api/capital/direct-configuration",
+                json={
+                    "treasury_provider": "SAFE_SPENDING_LIMIT",
+                    "safe_address": "0x7777777777777777777777777777777777777777",
+                    "safe_delegate_address": "0x8888888888888888888888888888888888888888",
+                    "binance_withdrawal_address": (
+                        "0x7777777777777777777777777777777777777777"
+                    ),
+                    "max_amount": "1",
+                    "max_fee": "1",
+                    "idempotency_key": "safe-invalid-fee",
+                },
+            )
+            assert invalid_fee.status_code == 422, invalid_fee.text
+            assert (
+                invalid_fee.json()["error"]["code"]
+                == "CAPITAL_CONFIGURATION_FEE_LIMIT_INVALID"
+            )
+
+            mismatched_withdrawal = await client.put(
+                "/api/capital/direct-configuration",
+                json={
+                    "treasury_provider": "SAFE_SPENDING_LIMIT",
+                    "safe_address": "0x7777777777777777777777777777777777777777",
+                    "safe_delegate_address": "0x8888888888888888888888888888888888888888",
+                    "binance_withdrawal_address": (
+                        "0x9999999999999999999999999999999999999999"
+                    ),
+                    "max_amount": "10",
+                    "max_fee": "1",
+                    "idempotency_key": "safe-mismatched-withdrawal",
+                },
+            )
+            assert mismatched_withdrawal.status_code == 422, mismatched_withdrawal.text
+            assert (
+                mismatched_withdrawal.json()["error"]["code"]
+                == "CAPITAL_BINANCE_WITHDRAWAL_ADDRESS_SCOPE_MISMATCH"
+            )
+
+    asyncio.run(scenario())
+
+
 def test_binance_restricted_withdrawal_runs_frozen_preflight_submission_and_dual_receipt(
     database: Database,
 ) -> None:
