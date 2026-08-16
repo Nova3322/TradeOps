@@ -205,9 +205,7 @@ def test_exact_binance_deposit_and_withdrawal_receipts_are_verified() -> None:
 
 def test_travel_rule_scope_fails_closed_instead_of_using_wrong_endpoint() -> None:
     values = responses()
-    values["/sapi/v1/localentity/questionnaire-requirements"] = {
-        "questionnaireCountryCode": "AE"
-    }
+    values["/sapi/v1/localentity/questionnaire-requirements"] = {"questionnaireCountryCode": "AE"}
     with pytest.raises(DomainRejected) as caught:
         gateway(values).prepare_withdrawal(
             destination=DESTINATION,

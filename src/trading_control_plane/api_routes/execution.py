@@ -9,6 +9,7 @@ from trading_control_plane.api_core import (
     AutoAddRequest,
     AutomaticExitRequest,
     BinanceTestnetActionRequest,
+    BinanceTestnetClient,
     BinanceTestnetOrder,
     BinanceTestnetProtectionRequest,
     CampaignTargetRequest,
@@ -19,6 +20,7 @@ from trading_control_plane.api_core import (
     FreqtradeExitCommand,
     FreqtradeLiveActionRequest,
     FundingFactRequest,
+    HyperliquidTestnetClient,
     HyperliquidTestnetProtectionRequest,
     IntentKind,
     IntentReleaseRequest,
@@ -37,15 +39,13 @@ from trading_control_plane.api_core import (
     RiskTightenRequest,
     SenderLeaseRequest,
     SessionIdentity,
-    ShadowFillRequest,
-    ShadowSendRequest,
-    ShadowSimulationRequest,
     TargetCandidate,
     TelegramBotGateway,
     __version__,
     _now,
     _perptape_runtime_status,
     _perptape_transport_status,
+    build_hyperliquid_signer,
     datetime,
     freqtrade_pair,
     perptape_legacy_candidate_id,
@@ -74,10 +74,16 @@ class _ExecutionRoutes:
         self.rejected_testnet_order = dependencies.rejected_testnet_order
         self.require_binance_testnet = dependencies.require_binance_testnet
         self.resolved_binance_testnet = dependencies.binance_testnet
+        self.binance_testnet_uses_database_credentials = (
+            dependencies.binance_testnet_uses_database_credentials
+        )
         self.unknown_testnet_protection = dependencies.unknown_testnet_protection
         self.rejected_hyperliquid_order = dependencies.rejected_hyperliquid_order
         self.require_hyperliquid_testnet = dependencies.require_hyperliquid_testnet
         self.resolved_hyperliquid_testnet = dependencies.hyperliquid_testnet
+        self.hyperliquid_testnet_uses_database_credentials = (
+            dependencies.hyperliquid_testnet_uses_database_credentials
+        )
         self.unknown_hyperliquid_protection = dependencies.unknown_hyperliquid_protection
         self.require_binance_live = dependencies.require_binance_live
         self.resolved_binance_live = dependencies.binance_live
@@ -89,6 +95,47 @@ class _ExecutionRoutes:
         self.resolved_telegram = dependencies.telegram
         self.require_freqtrade_live_enabled = dependencies.require_freqtrade_live_enabled
         self.require_freqtrade_live_worker = dependencies.require_freqtrade_live_worker
+
+    def _binance_testnet_client(self, actor_id: UUID, execution_scope: str) -> BinanceTestnetClient:
+        if not self.binance_testnet_uses_database_credentials:
+            return self.resolved_binance_testnet
+        binding = self.service().execution_account_binding(
+            actor_id=actor_id,
+            execution_scope=execution_scope,
+            expected_venue="BINANCE",
+        )
+        return BinanceTestnetClient(
+            base_url=self.resolved_settings.binance_testnet_base_url,
+            api_key=binding.credentials.get("api_key"),
+            api_secret=binding.credentials.get("api_secret"),
+            recv_window_ms=self.resolved_settings.binance_recv_window_ms,
+        )
+
+    def _hyperliquid_testnet_client(
+        self,
+        actor_id: UUID,
+        execution_scope: str,
+    ) -> HyperliquidTestnetClient:
+        if not self.hyperliquid_testnet_uses_database_credentials:
+            return self.resolved_hyperliquid_testnet
+        binding = self.service().execution_account_binding(
+            actor_id=actor_id,
+            execution_scope=execution_scope,
+            expected_venue="HYPERLIQUID",
+        )
+        credentials = binding.credentials
+        account_address = credentials.get("account_address")
+        signer = build_hyperliquid_signer(
+            credentials.get("api_wallet_private_key"),
+            api_wallet_address=credentials.get("api_wallet_address"),
+            active_pool=None,
+            is_mainnet=False,
+        )
+        return HyperliquidTestnetClient(
+            base_url=self.resolved_settings.hyperliquid_testnet_base_url,
+            account_address=account_address,
+            signer=signer,
+        )
 
     def register_campaign_control(self) -> None:
         @self.app.get("/api/campaigns")
@@ -295,6 +342,19 @@ class _ExecutionRoutes:
             )
             return {"status": "DISABLED"}
 
+        @self.app.post("/api/operations/auto-add/enable")
+        def enable_global_auto_add(
+            payload: RiskTightenRequest,
+            identity: SessionIdentity = self.identity_dependency,
+        ) -> dict[str, str]:
+            self.service().enable_global_auto_add(
+                identity.user_id,
+                payload.idempotency_key,
+                reason=payload.reason,
+                now=_now(),
+            )
+            return {"status": "ENABLED"}
+
         @self.app.post("/api/operations/pause-new-risk")
         def pause_new_risk(
             payload: RiskTightenRequest,
@@ -350,7 +410,7 @@ class _ExecutionRoutes:
                 identity.user_id,
                 now=_now(),
             )
-            return {"position_id": str(position_id), "environment": "SHADOW"}
+            return {"position_id": str(position_id)}
 
         @self.app.post("/api/facts/account-equity")
         def record_account_equity(
@@ -367,7 +427,7 @@ class _ExecutionRoutes:
                 identity.user_id,
                 now=_now(),
             )
-            return {"account_equity_id": str(fact_id), "environment": "SHADOW"}
+            return {"account_equity_id": str(fact_id)}
 
         @self.app.post("/api/sender-leases")
         def acquire_sender(
@@ -389,28 +449,6 @@ class _ExecutionRoutes:
                 "expires_at": (now + timedelta(seconds=payload.lease_seconds)).isoformat(),
             }
 
-        @self.app.post("/api/intents/{intent_id}/shadow-send")
-        def shadow_send(
-            intent_id: UUID,
-            payload: ShadowSendRequest,
-            identity: SessionIdentity = self.identity_dependency,
-        ) -> dict[str, Any]:
-            campaign_id = self.queries().campaign_id_for_intent(identity.user_id, intent_id)
-            fact_id = self.service().record_shadow_order(
-                intent_id,
-                identity.user_id,
-                payload.execution_scope,
-                payload.owner_id,
-                payload.fencing_token,
-                payload.venue_order_id,
-                now=_now(),
-            )
-            return {
-                "venue_order_fact_id": str(fact_id),
-                "environment": "SHADOW",
-                "detail": self.queries().campaign_detail(identity.user_id, campaign_id),
-            }
-
     def register_binance_testnet(self) -> None:
         @self.app.post("/api/intents/{intent_id}/binance-testnet/send")
         def send_binance_testnet_order(
@@ -428,8 +466,9 @@ class _ExecutionRoutes:
                 payload.fencing_token,
                 now=now,
             )
+            client = self._binance_testnet_client(identity.user_id, payload.execution_scope)
             try:
-                result = self.resolved_binance_testnet.ensure_order(command, now=now)
+                result = client.ensure_order(command, now=now)
             except DomainRejected as exc:
                 if exc.code == "BINANCE_TESTNET_REJECTED":
                     self.service().record_binance_testnet_order(
@@ -488,8 +527,9 @@ class _ExecutionRoutes:
                 payload.fencing_token,
                 now=now,
             )
+            client = self._binance_testnet_client(identity.user_id, payload.execution_scope)
             try:
-                result = self.resolved_binance_testnet.cancel_order(command, now=now)
+                result = client.cancel_order(command, now=now)
             except DomainRejected as exc:
                 if exc.code != "BINANCE_TESTNET_UNAVAILABLE":
                     self.service().record_binance_testnet_unknown(
@@ -548,7 +588,8 @@ class _ExecutionRoutes:
                 payload.fencing_token,
                 now=now,
             )
-            result = self.resolved_binance_testnet.recover_order(command, now=now)
+            client = self._binance_testnet_client(identity.user_id, payload.execution_scope)
+            result = client.recover_order(command, now=now)
             if result is not None:
                 self.service().record_binance_testnet_order(
                     intent_id,
@@ -584,8 +625,9 @@ class _ExecutionRoutes:
                 payload.trigger_price,
                 now=now,
             )
+            client = self._binance_testnet_client(identity.user_id, payload.execution_scope)
             try:
-                result = self.resolved_binance_testnet.ensure_protection(command, now=now)
+                result = client.ensure_protection(command, now=now)
             except DomainRejected as exc:
                 if exc.code != "BINANCE_TESTNET_UNAVAILABLE":
                     self.service().record_binance_testnet_protection(
@@ -633,8 +675,9 @@ class _ExecutionRoutes:
                 payload.fencing_token,
                 now=now,
             )
+            client = self._hyperliquid_testnet_client(identity.user_id, payload.execution_scope)
             try:
-                result = self.resolved_hyperliquid_testnet.ensure_order(command, now=now)
+                result = client.ensure_order(command, now=now)
             except DomainRejected as exc:
                 if exc.code == "HYPERLIQUID_TESTNET_REJECTED":
                     self.service().record_hyperliquid_testnet_order(
@@ -698,8 +741,9 @@ class _ExecutionRoutes:
                 payload.fencing_token,
                 now=now,
             )
+            client = self._hyperliquid_testnet_client(identity.user_id, payload.execution_scope)
             try:
-                result = self.resolved_hyperliquid_testnet.cancel_order(command, now=now)
+                result = client.cancel_order(command, now=now)
             except DomainRejected as exc:
                 if exc.code not in {
                     "HYPERLIQUID_TESTNET_UNAVAILABLE",
@@ -762,7 +806,8 @@ class _ExecutionRoutes:
                 payload.fencing_token,
                 now=now,
             )
-            result = self.resolved_hyperliquid_testnet.recover_order(command, now=now)
+            client = self._hyperliquid_testnet_client(identity.user_id, payload.execution_scope)
+            result = client.recover_order(command, now=now)
             if result is not None:
                 self.service().record_hyperliquid_testnet_order(
                     intent_id,
@@ -800,8 +845,9 @@ class _ExecutionRoutes:
                 payload.limit_price,
                 now=now,
             )
+            client = self._hyperliquid_testnet_client(identity.user_id, payload.execution_scope)
             try:
-                result = self.resolved_hyperliquid_testnet.ensure_protection(command, now=now)
+                result = client.ensure_protection(command, now=now)
             except DomainRejected as exc:
                 if exc.code not in {
                     "HYPERLIQUID_TESTNET_UNAVAILABLE",
@@ -1337,62 +1383,6 @@ class _ExecutionRoutes:
             }
 
     def register_fact_campaign(self) -> None:
-        @self.app.post("/api/intents/{intent_id}/fills")
-        def record_fill(
-            intent_id: UUID,
-            payload: ShadowFillRequest,
-            identity: SessionIdentity = self.identity_dependency,
-        ) -> dict[str, Any]:
-            campaign_id = self.queries().campaign_id_for_intent(identity.user_id, intent_id)
-            fact_id = self.service().record_fill(
-                intent_id,
-                identity.user_id,
-                payload.venue_fill_id,
-                payload.side,
-                payload.quantity,
-                payload.price,
-                payload.fee,
-                payload.fee_currency,
-                payload.slippage_cost,
-                now=_now(),
-            )
-            self.notify_campaign(
-                identity.user_id,
-                campaign_id,
-                "SHADOW_FILL_RECORDED",
-                payload.venue_fill_id,
-                "SHADOW 成交事实已记录；没有向交易场所发送订单。",  # noqa: RUF001
-            )
-            return {
-                "venue_fill_fact_id": str(fact_id),
-                "environment": "SHADOW",
-                "detail": self.queries().campaign_detail(identity.user_id, campaign_id),
-            }
-
-        @self.app.post("/api/intents/{intent_id}/shadow-simulations")
-        def simulate_shadow_execution(
-            intent_id: UUID,
-            payload: ShadowSimulationRequest,
-            identity: SessionIdentity = self.identity_dependency,
-        ) -> dict[str, Any]:
-            result = self.service().simulate_shadow_execution(
-                intent_id=intent_id,
-                actor_id=identity.user_id,
-                expected_version=payload.expected_version,
-                reference_price=payload.reference_price,
-                fee_bps=payload.fee_bps,
-                slippage_bps=payload.slippage_bps,
-                idempotency_key=payload.idempotency_key,
-                now=_now(),
-            )
-            return {
-                "result": result,
-                "detail": self.queries().campaign_detail(
-                    identity.user_id,
-                    UUID(str(result["campaign_id"])),
-                ),
-            }
-
         @self.app.post("/api/intents/{intent_id}/unknown")
         def mark_intent_unknown(
             intent_id: UUID,
@@ -1404,7 +1394,6 @@ class _ExecutionRoutes:
                 intent_id,
                 identity.user_id,
                 payload.reason,
-                required_environment=ExecutionEnvironment.SHADOW,
                 now=_now(),
             )
             self.notify_campaign(
@@ -1428,7 +1417,6 @@ class _ExecutionRoutes:
                 identity.user_id,
                 OrderIntentStatus(payload.terminal_status),
                 payload.reason,
-                required_environment=ExecutionEnvironment.SHADOW,
                 now=_now(),
             )
             return self.queries().campaign_detail(identity.user_id, campaign_id)
@@ -1448,7 +1436,6 @@ class _ExecutionRoutes:
                 payload.fully_covered,
                 identity.user_id,
                 campaign_id=campaign_id,
-                required_environment=ExecutionEnvironment.SHADOW,
                 known=payload.known,
                 now=_now(),
             )
@@ -1462,7 +1449,7 @@ class _ExecutionRoutes:
                 campaign_id,
                 event_type,
                 f"{payload.position_id}:{payload.venue_order_id}",
-                "SHADOW 仓位保护事实已记录。",
+                "交易所仓位保护事实已记录。",
             )
             return {
                 "protection_id": str(protection_id),
@@ -1482,7 +1469,6 @@ class _ExecutionRoutes:
                 payload.amount,
                 payload.currency,
                 identity.user_id,
-                required_environment=ExecutionEnvironment.SHADOW,
                 now=_now(),
             )
             return {
@@ -1624,14 +1610,14 @@ class _ExecutionRoutes:
                 campaign_id,
                 "CAMPAIGN_CLOSED",
                 str(campaign_id),
-                "仓位归零且对账 MATCH，SHADOW Campaign 已关闭。",  # noqa: RUF001
+                "仓位归零且对账 MATCH, Campaign 已关闭。",
             )
             return self.queries().campaign_detail(identity.user_id, campaign_id)
 
     def register_runtime(self) -> None:
         @self.app.get("/api/results")
         def actual_results(
-            environment: str = Query(default="SHADOW", pattern="^(SHADOW|TESTNET|LIVE)$"),
+            environment: str = Query(default="TESTNET", pattern="^(TESTNET|LIVE)$"),
             source: str | None = Query(default=None, pattern="^(SYSTEM|MANUAL)$"),
             source_type: str | None = Query(default=None, min_length=1, max_length=120),
             source_candidate_id: str | None = Query(default=None, min_length=1, max_length=160),
@@ -1758,8 +1744,7 @@ class _ExecutionRoutes:
                 headers={
                     "Cache-Control": "private, no-store",
                     "Content-Security-Policy": (
-                        "sandbox; default-src 'none'; img-src data:; "
-                        "style-src 'unsafe-inline'"
+                        "sandbox; default-src 'none'; img-src data:; style-src 'unsafe-inline'"
                     ),
                     "X-Content-Type-Options": "nosniff",
                 },
@@ -1771,9 +1756,7 @@ class _ExecutionRoutes:
             identity: SessionIdentity = self.identity_dependency,
         ) -> Response:
             self.require_capability(identity, "results.view")
-            artifact, engine = self.queries().analytics_report_artifact(
-                identity.user_id, report_id
-            )
+            artifact, engine = self.queries().analytics_report_artifact(identity.user_id, report_id)
             return Response(
                 content=artifact,
                 media_type="text/html",
@@ -1783,8 +1766,7 @@ class _ExecutionRoutes:
                         f'attachment; filename="tradingops-{engine}-{report_id}.html"'
                     ),
                     "Content-Security-Policy": (
-                        "sandbox; default-src 'none'; img-src data:; "
-                        "style-src 'unsafe-inline'"
+                        "sandbox; default-src 'none'; img-src data:; style-src 'unsafe-inline'"
                     ),
                     "X-Content-Type-Options": "nosniff",
                 },
@@ -1792,11 +1774,9 @@ class _ExecutionRoutes:
 
         @self.app.get("/api/results/quantstats")
         def quantstats_report(
-            environment: str = Query(pattern="^(SHADOW|LIVE)$"),
+            environment: str = Query(pattern="^(TESTNET|LIVE)$"),
             account_id: str | None = Query(default=None, min_length=1, max_length=120),
-            venue: str | None = Query(
-                default=None, pattern="^(BINANCE|HYPERLIQUID|OKX|BYBIT)$"
-            ),
+            venue: str | None = Query(default=None, pattern="^(BINANCE|HYPERLIQUID|OKX|BYBIT)$"),
             generation: int | None = Query(default=None, ge=1),
             from_time: datetime | None = None,
             to_time: datetime | None = None,
@@ -1839,7 +1819,7 @@ class _ExecutionRoutes:
 
         @self.app.get("/api/audit")
         def audit_timeline(
-            environment: str = Query(default="SHADOW", pattern="^(SHADOW|TESTNET|LIVE)$"),
+            environment: str = Query(default="TESTNET", pattern="^(TESTNET|LIVE)$"),
             limit: int = Query(default=200, ge=1, le=500),
             identity: SessionIdentity = self.identity_dependency,
         ) -> dict[str, Any]:

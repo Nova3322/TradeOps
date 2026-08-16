@@ -330,12 +330,6 @@ class HyperliquidReadOnlyClient:
     def fact_environment(self) -> str:
         return "TESTNET" if self._host == "api.hyperliquid-testnet.xyz" else "LIVE"
 
-    def read_instrument(self, symbol: str) -> HyperliquidInstrument:
-        dex = self._symbol_dex(symbol)
-        meta_contexts = self._info({"type": "metaAndAssetCtxs", "dex": dex})
-        instrument, _mark_price = self._parse_instrument(meta_contexts, symbol, dex=dex)
-        return instrument
-
     def _symbol_dex(self, symbol: str) -> str:
         if _is_core_symbol(symbol):
             return ""

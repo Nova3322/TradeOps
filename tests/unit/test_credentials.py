@@ -120,9 +120,10 @@ def test_exchange_credential_fingerprint_is_keyed_and_purpose_bound() -> None:
         purpose="exchange-account.create",
     )
 
-    assert fingerprint != hashlib.sha256(
-        b'{"api_key":"key","api_secret":"guessable-secret"}'
-    ).hexdigest()
+    assert (
+        fingerprint
+        != hashlib.sha256(b'{"api_key":"key","api_secret":"guessable-secret"}').hexdigest()
+    )
     assert fingerprint == cipher.exchange_credentials_fingerprint(
         credentials,
         venue="BINANCE",

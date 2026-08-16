@@ -653,6 +653,7 @@ class NotificationDispatcher:
                 .where(
                     NotificationRoute.notification_route_id == delivery.notification_route_id,
                     NotificationRoute.team_id == delivery.team_id,
+                    NotificationRoute.deleted_at.is_(None),
                 )
                 .with_for_update()
             )
@@ -681,7 +682,11 @@ class NotificationDispatcher:
                     route.configuration_ciphertext,
                     team_id=route.team_id,
                     object_id=route.notification_route_id,
-                    purpose=f"notification-route:{route.channel.lower()}",
+                    purpose=(
+                        f"notification-route:{route.channel.lower()}"
+                        if route.environment == "LIVE"
+                        else f"notification-route:testnet:{route.channel.lower()}"
+                    ),
                     credential_version=route.credential_version,
                 )
                 decoded = json.loads(raw_configuration)

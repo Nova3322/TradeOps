@@ -1,4 +1,4 @@
-# TradingOPS API Key quickstart
+# TradeOps API Key quickstart
 
 The running [`/openapi.json`](/openapi.json) document is the complete API
 contract. This guide covers authentication and safety semantics.
@@ -10,9 +10,11 @@ but it has no independent Account or Venue scope and stores no role copy. Every
 request uses the owning user's current RBAC permissions; resource APIs check the
 exact Team, Account, and Venue at request time.
 
-Create a key from **user menu → API Key**. Plaintext is displayed once after
-creation or rotation. Store it in a secret manager, never in source, prompts,
-screenshots, chat, or logs.
+Create a key from **user menu → API Key** by opening the collapsed creation
+panel. Creation always uses the current Workspace and Team; switch context
+first to create a key elsewhere. "My API Keys" lists only keys created by the
+current account. Plaintext is displayed once after creation or rotation. Store
+it in a secret manager, never in source, prompts, screenshots, chat, or logs.
 
 ```bash
 export BASE_URL="BASE_URL"
@@ -38,11 +40,17 @@ Start with read-only endpoints such as `/api/instruments`, `/api/opportunities`,
 environment, source, and freshness fields. Missing, stale, lost, incomplete, or
 rate-limited data is neither real-time data nor numeric zero.
 
-`SHADOW` is simulated. `LIVE` identifies a production environment but does not
-enable execution. Writes require the current user permission, exact resource
-authorization, idempotency, independent review, risk checks, and every
-server-side gate. `LIVE_ORDER_SEND`, `CAPITAL_TRANSFER`, `SIGNING`, and
-`BROADCAST` remain disabled unless separately enabled through governed controls.
+The current execution environments are `TESTNET` and `LIVE`; `SETUP` is an
+internal Team configuration state and is not valid proposal or order scope.
+The server derives new proposal, authorization, intent, and execution scope from
+the Team's persisted current mode. A client-supplied conflicting environment is
+rejected rather than used as a routing instruction.
+
+`LIVE` identifies a production environment but does not enable execution.
+Writes require the current user permission, exact resource authorization,
+idempotency, independent review, risk checks, and every server-side gate.
+`LIVE_ORDER_SEND`, `CAPITAL_TRANSFER`, `SIGNING`, and `BROADCAST` remain disabled
+unless separately enabled through governed controls.
 
 API Key lifecycle operations require an interactive user session. A key may be
 disabled, rotated, or permanently revoked; owner deactivation or RBAC removal

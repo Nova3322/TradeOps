@@ -1,36 +1,84 @@
-# TradingOPS
+# TradeOps
 
-**Fail-closed 交易治理与运营控制平面**
+**所有交易行为进入真实账户前的控制层。**
 
-[English](README.md) · [API 快速接入](docs/API_QUICKSTART.md) ·
-[AI/API 中文指南](docs/AI_API_QUICKSTART.md) · [安全政策](SECURITY.md)
+TradeOps 是交易员、交易 Bot 和 AI Agent 与交易所账户之间的开源交易控制层。TradeOps 让交易员、交易 Bot 和 AI Agent 的每笔交易先经过确定性规则、必要审批和完整审计，再发送到交易所。
 
-TradingOPS 位于策略引擎与真实执行之间，负责把候选交易意图转化为冻结提案、独立审核、有限授权、风险阻断、可审计执行与资金对账。
+[English](README.md) · [本地运行](#本地运行) · [文档](docs/README.md) ·
+[API 快速接入](docs/API_QUICKSTART.md) · [安全政策](SECURITY.md)
 
-> 它不是策略市场、托管钱包、交易所或自动盈利系统。
+> **当前状态：Alpha，可自托管。** 测试模式与生产模式复用同一套提案、审核、风控、执行、对账和审计流程。生产下单及所有资金能力仍由独立 Gate 控制，并在新安装中默认关闭。
 
-![使用合成样本的 TradingOPS API 接入页面](artifacts/public/api-access-1440.png)
+![TradeOps 独立审核队列](artifacts/public/review-queue.png)
 
-## 核心流程
+## 它解决什么问题
+
+交易所连接器和资深交易员都不能代替权限系统。缺少控制层时：
+
+- 交易员可能选错账户、标的、方向或数量；
+- 人工订单可能超过团队批准的风险额度；
+- 提交人与审批人可能没有真正分离；
+- 人工订单和 Bot 订单可能争抢同一个仓位或亏损预算；
+- 管理员可能临时扩大权限，却没有留下完整审批记录；
+- 程序重试可能造成重复下单；
+- AI Agent 可能提交异常仓位或杠杆请求。
+
+因此，所有能够发起交易的主体都进入同一条控制链。
+
+TradeOps 在交易意图与交易所账户之间建立服务端强制执行的决策边界：
+
+1. 人、交易 Bot 或 AI Agent 提交交易提案。
+2. TradeOps 固化关键条款，并检查工作空间、团队、账户、环境、数据时效和已配置的风险限制。
+3. 确定性规则选择处理结果：明确规则允许时自动批准、转交独立人工审批，或直接拒绝。当前 Alpha 版本的可执行提案仍全部要求独立人工审批，自动批准尚未启用。
+4. 审核通过后生成短时、账户范围固定的交易授权；审核通过本身不会发送订单。
+5. 操作人员通过提案固化的测试或生产适配器执行。
+6. 系统核对交易所结果，并把提案、决策、命令、回执和异常路径写入审计记录。
 
 ```text
-策略或信号
-  -> 来源与时效校验
-  -> 冻结提案
-  -> 独立审核
-  -> 范围、风险与能力 Gate
-  -> 幂等执行适配器
-  -> 对账与审计证据
+Trader / 交易 Bot / 策略程序 / AI Agent
+  -> 交易提案
+  -> 确定性规则检查
+  -> 自动批准 / 人工审批 / 拒绝
+  -> 受控执行
+  -> 交易所对账
+  -> 审计记录
 ```
 
-- **Workspace / Team 隔离**：成员、岗位、账户和业务数据由服务端按当前范围检查。
-- **冻结提案**：审核前固定关键交易条款和版本。
-- **独立审核**：提案发起人不能审核自己的提案。
-- **Fail-closed 风险控制**：缺失、陈旧、丢失、不完整或限流数据不等于实时数据，也不等于零。
-- **受控执行**：外部副作用必须同时通过进程开关、持久化 Gate、幂等和对账。
-- **HUMAN 所属 API Client**：Token 动态继承当前岗位，并固定在一个 Workspace、Team、Account 和 Venue。
+## 当前已经实现的控制
 
-## 五分钟安全启动
+- **范围隔离**：工作空间、团队、环境、交易所和账户范围由服务端检查，不信任客户端自行声明。
+- **风险政策**：团队、账户和单笔风险上限；连续亏损冷却；禁止加仓、只减仓、暂停和 Kill Switch 状态。
+- **独立审核**：版本化提案、批准/拒绝、禁止自审和短时交易授权。
+- **防重复执行**：幂等、持久化能力 Gate、超时处理、未知结果恢复、取消、同步和对账。
+- **事实缺失即阻断**：缺失、陈旧、丢失、不完整或限流的数据不会被当成实时数据，也不会自动补成零。
+- **完整追溯**：操作者、原因、范围、环境、决策、命令和执行结果保留在同一条审计链路中。
+
+## 人、Bot 与 Agent
+
+- 同时进行人工交易并运行多个交易 Bot 的专业交易员。
+- 由 Trader、Reviewer、Risk Manager 和 Administrator 组成的小型加密交易团队。
+- 做市、套利、量化和自动化交易团队。
+- 希望将 AI Agent 接入交易账户、但不授予无限执行权的开发者。
+
+每个 Human、Bot、策略程序和 AI Agent 都应拥有独立身份、权限、额度和审计记录。**Trader** 提交人工或策略辅助提案，**Reviewer** 作出独立决定，**Risk Manager** 设置并处理风险规则，**Administrator** 管理成员与系统范围，但不拥有未记录的临时绕过能力。
+
+API Key 归属于具体用户，动态继承当前 RBAC，并固定在一个工作空间和团队。人工交易和自动化交易都不能绕过规则、审批、执行 Gate 或账户范围。
+
+## 当前集成边界
+
+| 集成 | 当前状态 |
+| --- | --- |
+| Binance | 已有测试与生产账户事实、下单/取消、恢复和对账适配路径；凭据及生产 Gate 需按部署配置。 |
+| Hyperliquid | 已有测试与生产账户事实、下单/取消、恢复和对账适配路径；凭据及生产 Gate 需按部署配置。 |
+| Perptape | 支持配置信号接入、时效检查、标准化和创建提案前重检。 |
+| 签名 Webhook | 支持签名、Nonce、防重放、时效、幂等和载荷校验。 |
+| Telegram | 支持团队通知路由和独立通知 Worker。 |
+| Bot / AI Agent API | 用户所属 API Key、提案型接入和服务端 RBAC/范围检查。 |
+| Vault / Safe | 已有生产资金路径配置；签名、广播和资金划转必须单独配置并启用。 |
+
+仓库还包含可选通知渠道适配器。Freqtrade、Hummingbot、NautilusTrader 和 QuantConnect LEAN 的正式引擎契约仍属于路线图，不作为当前开箱即用集成宣传。
+
+## 本地运行
 
 需要 Python 3.12+、[uv](https://docs.astral.sh/uv/)、Docker 与 Docker Compose。
 
@@ -43,13 +91,15 @@ uv sync --frozen
 ./scripts/run_local.sh
 ```
 
-打开 <http://127.0.0.1:8014>。自动生成的本地密码保存在：
+打开 <http://127.0.0.1:8014>。本地密码保存在 `.local/passwords/trading-admin`，权限为 `0600`；`.local/` 不会进入 Git。外部集成和危险能力 Gate 默认关闭。
 
-```text
-.local/passwords/trading-admin
+需要同时启动只读同步 Worker 时：
+
+```bash
+TRADING_PUBLIC_PORT=8022 ./scripts/run_compose.sh --runtime
 ```
 
-该目录不会进入 Git；外部集成、下单、资金、签名和广播默认关闭。新用户应先使用只读数据和 SHADOW 流程。
+`--runtime` 仅开启只读事实同步，不会开启下单、资金划转、钱包签名、广播或自动化。
 
 ```bash
 curl http://127.0.0.1:8014/health/live
@@ -57,20 +107,38 @@ curl http://127.0.0.1:8014/health/ready
 open http://127.0.0.1:8014/openapi.json
 ```
 
-完整字段以运行中的 `/openapi.json` 为唯一真源。接入说明见
-[`docs/API_QUICKSTART.md`](docs/API_QUICKSTART.md) 和
-[`docs/AI_API_QUICKSTART.md`](docs/AI_API_QUICKSTART.md)。
+Bot/API 接入见 [`docs/API_QUICKSTART.md`](docs/API_QUICKSTART.md)。运行中的 `/openapi.json` 是完整接口契约。
 
-## 产品边界与竞品关系
+## 产品界面
 
-Freqtrade、Hummingbot、NautilusTrader 和 QuantConnect LEAN 主要覆盖策略、回测、组合、连接器或执行引擎，优先作为 TradingOPS 的集成生态。Fireblocks 与策略审批和资金治理部分重合，但同时提供钱包与密钥基础设施；TradingOPS 不托管密钥。Talos 是覆盖连接、执行、组合、结算和交易后流程的更完整机构平台，属于更直接的相邻竞品。
+以下截图使用本地样本数据展示当前控制台流程，不代表生产就绪状态，也不构成收益展示。
 
-基于官方资料的完整比较见
-[`docs/COMPETITIVE_POSITIONING.md`](docs/COMPETITIVE_POSITIONING.md)。
+<table>
+  <tr>
+    <td><img src="artifacts/public/opportunity-snapshot.png" alt="Perptape 实时机会"></td>
+    <td><img src="artifacts/public/webhook-signals.png" alt="经过校验的 Webhook 信号"></td>
+  </tr>
+  <tr>
+    <td><img src="artifacts/public/current-proposals.png" alt="当前交易提案"></td>
+    <td><img src="artifacts/public/capital-center.png" alt="生产资金中心"></td>
+  </tr>
+</table>
 
-## 不可降低的安全边界
+## TradeOps 不是什么
 
-以下持久化能力在新安装中必须保持 `DISABLED`：
+TradeOps 不是行情终端、K 线工具、策略回测平台、跟单服务、喊单平台、自动赚钱机器人、资产托管平台、基金管理系统或投资顾问。它不承诺盈利、保本，也不承诺避免全部运营或交易损失。
+
+交易终端解决“在哪里交易”，执行算法优化“怎样成交”，钱包权限系统控制“谁能转移资金”。TradeOps 解决的是“这笔交易是否允许执行、需要谁批准、违反了什么规则，以及交易所最终发生了什么”。
+
+它不会被描述为 Talos、Fireblocks、Elwood 或基金 PMS 的完整替代品。相邻产品边界见 [`docs/COMPETITIVE_POSITIONING.md`](docs/COMPETITIVE_POSITIONING.md)。
+
+## 部署与信任边界
+
+TradeOps 开源并支持自托管。PostgreSQL 保存身份、岗位、提案、审核、授权、Gate、回执和审计状态。交易所凭据加密保存，提交后不会由 API 回显；交易本身不需要提现权限。
+
+当前仓库没有交付一个独立封装的“本地执行 Agent”，也不能据此声称远程控制平面在技术上永远无法绕过本地硬限制。这仍是设计方向，而非当前保证。真实资金生产就绪取决于具体部署。
+
+新安装中以下持久化能力保持 `DISABLED`：
 
 - `AUTO_ADD`
 - `AUTO_OPERATING_REFILL`
@@ -78,11 +146,19 @@ Freqtrade、Hummingbot、NautilusTrader 和 QuantConnect LEAN 主要覆盖策略
 - `CAPITAL_TRANSFER`
 - `LIVE_ORDER_SEND`
 
-页面按钮、岗位名称、AI Prompt、环境标签或进程健康都不能替代服务端授权。不得提交 `.env.local`、`.local/`、数据库转储、私有策略、真实账户或余额、原始日志和未脱敏截图。完整规则见 [`docs/PUBLICATION_BOUNDARY.md`](docs/PUBLICATION_BOUNDARY.md)。
+页面按钮、岗位名称、环境标签、进程健康或 AI 输出不能代替服务端授权。配置真实账户前，请阅读 [`SECURITY.md`](SECURITY.md) 和 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)。
 
-## 成熟度
+## 项目与文档
 
-TradingOPS 当前为 **pre-1.0**。仓库已经包含 Workspace/Team 隔离、审核、风险、执行、资金、审计与 API Client 的测试基础，但任何真实资金生产就绪都取决于独立部署、配置、监控、备份、法律与安全验收。
+TradeOps 当前为 pre-1.0。部署方仍需独立完成威胁建模、供应商配置、监控、备份、事件响应、法律义务和真实资金验收。
+
+- [文档首页](docs/README.md)
+- [运营控制台](docs/OPERATIONS_CONSOLE.zh-CN.md)
+- [架构与安全不变量](docs/ARCHITECTURE.md)
+- [路线图](ROADMAP.md)
+- [参与贡献](CONTRIBUTING.md)
+- [安全政策](SECURITY.md)
+- [支持](SUPPORT.md)
 
 ## 许可证
 
@@ -90,10 +166,8 @@ TradingOPS 当前为 **pre-1.0**。仓库已经包含 Workspace/Team 隔离、�
 GPL-3.0-only OR LicenseRef-TradingOPS-Commercial-1.0
 ```
 
-GPL 允许商业使用、修改和分发，但传播受覆盖作品时需要遵守 GPLv3 的源码与 copyleft 义务。需要闭源集成、专有分发或其他协商条款的用户可以选择单独商业许可证。
+GPL 允许商业使用、修改和分发，但传播受覆盖作品时需要遵守 GPLv3。需要闭源集成、专有分发或协商条款的用户可以选择单独商业许可证。
 
-商业许可联系：`COMMERCIAL_EMAIL`。安全问题请通过 `SECURITY_EMAIL` 或仓库的私有安全公告渠道报告。
+商业许可：`COMMERCIAL_EMAIL`。安全问题请通过 `SECURITY_EMAIL` 或仓库的私有安全公告渠道报告。
 
-详见 [`LICENSE`](LICENSE)、[GPLv3 正文](LICENSES/GPL-3.0-only.txt)、
-[商业许可证说明](LICENSES/LicenseRef-TradingOPS-Commercial-1.0.txt)、
-[`CLA.md`](CLA.md) 与 [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md)。
+详见 [`LICENSE`](LICENSE)、[GPLv3 正文](LICENSES/GPL-3.0-only.txt)、[商业许可证说明](LICENSES/LicenseRef-TradingOPS-Commercial-1.0.txt) 和 [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md)。

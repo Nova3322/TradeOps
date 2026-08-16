@@ -34,11 +34,6 @@ class ReconciliationCapitalService(ServiceComponent):
     ) -> UUID:
         if location_type not in {"VAULT", "VENUE"}:
             _reject("CAPITAL_LOCATION_INVALID", "capital location must be VAULT or VENUE")
-        if environment is ExecutionEnvironment.LIVE:
-            _reject(
-                "CAPITAL_LIVE_FACT_DISABLED",
-                "LIVE capital facts require a configured read-only adapter",
-            )
         if observed_at > now:
             _reject("FACT_TIME_INVALID", "capital observation cannot be in the future")
         if withdrawable_balance > available_balance or available_balance > equity:
@@ -66,13 +61,23 @@ class ReconciliationCapitalService(ServiceComponent):
                 location_id if location_type == "VENUE" else None,
                 venue if location_type == "VENUE" else None,
             )
+            actor = session.get(User, actor_id)
+            if environment is ExecutionEnvironment.LIVE and not (
+                (actor is not None and actor.principal_type == PrincipalType.SERVICE.value)
+                or current_api_client_context() is not None
+            ):
+                _reject(
+                    "CAPITAL_LIVE_FACT_DISABLED",
+                    "LIVE capital facts require a configured read-only adapter",
+                )
             if location_type == "VENUE":
-                self.facade._ensure_exchange_account_reference(
+                self._ensure_exchange_account_reference(
                     session,
                     team=team,
                     actor_id=actor_id,
                     account_id=location_id,
                     venue=venue,
+                    environment=environment.value,
                     now=now,
                 )
             fact = session.scalar(
@@ -128,7 +133,7 @@ class ReconciliationCapitalService(ServiceComponent):
                 fact.fact_status = FactStatus.KNOWN.value if known else FactStatus.UNKNOWN.value
                 fact.observed_at = observed_at
                 fact.updated_at = now
-            self.facade._record_account_equity_observation(session, fact, recorded_at=now)
+            self._record_account_equity_observation(session, fact, recorded_at=now)
             self.transactions._audit(
                 session,
                 actor_id=str(actor_id),

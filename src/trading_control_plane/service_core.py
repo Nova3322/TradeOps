@@ -16,16 +16,13 @@ from decimal import Decimal
 from typing import Any, NoReturn
 from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 
-from sqlalchemy import delete, func, select, text
+from sqlalchemy import delete, func, select, text, update
 from sqlalchemy.orm import Session
 
 from trading_control_plane.agent import (
     AGENT_TOKEN_MARKER,
-    issue_agent_token,
     issue_api_client_token,
-    parse_agent_token,
     parse_api_client_token,
-    validate_agent_roles,
 )
 from trading_control_plane.binance import BinanceInstrument, BinanceReadOnlySnapshot
 from trading_control_plane.binance_execution import (
@@ -113,7 +110,6 @@ from trading_control_plane.metrics import (
 from trading_control_plane.models import (
     AccountEquity,
     AccountEquityObservation,
-    AnalyticsEquitySnapshot,
     AnalyticsReport,
     ApiClient,
     Approval,
@@ -144,14 +140,9 @@ from trading_control_plane.models import (
     RoleAssignment,
     RuntimeSourceHealth,
     SenderLease,
-    ShadowFill,
-    ShadowInstrument,
-    ShadowOrder,
-    ShadowPosition,
     SignalEvent,
     Team,
     TeamMembership,
-    TeamShadowAccount,
     TeamSignalSource,
     TradingAuthorization,
     TransferAuthorization,
@@ -186,14 +177,6 @@ from trading_control_plane.perptape import (
     validate_perptape_feed_payload,
 )
 from trading_control_plane.request_context import current_api_client_context
-from trading_control_plane.shadow import (
-    apply_shadow_fill,
-    apply_shadow_ledger_fill,
-    quantize_shadow_step,
-    quote_shadow_execution,
-    shadow_limit_crossed,
-    shadow_protection_triggered,
-)
 from trading_control_plane.venue_read_only import VenueInstrument, VenueReadOnlySnapshot
 
 CAPITAL_HISTORY_MIN_INTERVAL = timedelta(minutes=1)
@@ -214,6 +197,11 @@ TEAM_SETUP_ACTIONS = frozenset(
         "account.manage",
         "account.credentials.manage",
         "system.view",
+        "view",
+        "proposal.view",
+        "operations.view",
+        "results.view",
+        "capital.view",
         "risk_policy.manage",
         "signal.view",
         "signal.manage",
@@ -289,6 +277,7 @@ class PreparedExchangeConnectionVerification:
     team_id: UUID
     account_id: str
     venue: str
+    environment: str
     account_version: int
     credential_version: int
     credentials: dict[str, str] = field(repr=False)
@@ -303,6 +292,21 @@ class PreparedRuntimeAccountBinding:
     service_principal_username: str
     account_id: str
     venue: str
+    environment: str
+    account_version: int
+    credential_version: int
+    credentials: dict[str, str] = field(repr=False)
+
+
+@dataclass(frozen=True, slots=True)
+class PreparedExecutionAccountBinding:
+    """Version-pinned account credentials for one exact environment adapter."""
+
+    exchange_account_id: UUID
+    team_id: UUID
+    account_id: str
+    venue: str
+    environment: str
     account_version: int
     credential_version: int
     credentials: dict[str, str] = field(repr=False)
@@ -450,6 +454,11 @@ def _reject(code: str, detail: str) -> NoReturn:
     raise DomainRejected(code, detail)
 
 
+def _require_human_web_session(detail: str) -> None:
+    if current_api_client_context() is not None:
+        _reject("HUMAN_WEB_CONFIRMATION_REQUIRED", detail)
+
+
 def _normalize_venue_scope(venue_scope: str | None) -> str | None:
     if venue_scope is None:
         return None
@@ -573,19 +582,12 @@ def _as_uuid(value: str) -> UUID:
 
 
 def _scope_key(environment: str, account_id: str, venue: str) -> str:
-    return (
-        f"{account_id}:{venue}"
-        if environment == ExecutionEnvironment.SHADOW.value
-        else f"{environment}:{account_id}:{venue}"
-    )
+    return f"{environment}:{account_id}:{venue}"
 
 
 def _scope_parts(execution_scope: str) -> tuple[ExecutionEnvironment, str, str]:
     parts = execution_scope.split(":")
-    if len(parts) == 2:
-        environment = ExecutionEnvironment.SHADOW
-        account_id, venue = parts
-    elif len(parts) == 3:
+    if len(parts) == 3:
         try:
             environment = ExecutionEnvironment(parts[0])
         except ValueError:
@@ -594,7 +596,7 @@ def _scope_parts(execution_scope: str) -> tuple[ExecutionEnvironment, str, str]:
     else:
         _reject(
             "EXECUTION_SCOPE_INVALID",
-            "execution scope must be account:venue or environment:account:venue",
+            "execution scope must be environment:account:venue",
         )
     if not account_id or not venue or account_id.strip() != account_id or venue.strip() != venue:
         _reject("EXECUTION_SCOPE_INVALID", "execution scope must contain non-empty exact parts")
@@ -644,7 +646,6 @@ __all__ = [
     "AccountEquity",
     "AccountEquityObservation",
     "AddCandidateFacts",
-    "AnalyticsEquitySnapshot",
     "AnalyticsReport",
     "Any",
     "ApiClient",
@@ -737,10 +738,6 @@ __all__ = [
     "Sequence",
     "ServicePrincipalKind",
     "Session",
-    "ShadowFill",
-    "ShadowInstrument",
-    "ShadowOrder",
-    "ShadowPosition",
     "SignalEvent",
     "SignalEventStatus",
     "SignalSourceMode",
@@ -751,7 +748,6 @@ __all__ = [
     "Team",
     "TeamExecutionMode",
     "TeamMembership",
-    "TeamShadowAccount",
     "TeamSignalSource",
     "TradingAuthorization",
     "TransferAuthorization",
@@ -774,13 +770,12 @@ __all__ = [
     "_normalize_venue_scope",
     "_proposal_manual_execution_key",
     "_reject",
+    "_require_human_web_session",
     "_scope_key",
     "_scope_parts",
     "_semantic_hash",
     "_system_proposal_strategy_family",
     "apply_perptape_feed_delta",
-    "apply_shadow_fill",
-    "apply_shadow_ledger_fill",
     "base64",
     "binascii",
     "bound_perptape_feed_snapshot",
@@ -795,29 +790,23 @@ __all__ = [
     "func",
     "hashlib",
     "hmac",
-    "issue_agent_token",
     "issue_api_client_token",
     "json",
     "normalize_notification_event_types",
     "normalize_perptape_datetime",
     "notification_template",
     "nullcontext",
-    "parse_agent_token",
     "parse_api_client_token",
     "parse_hip3_dexes",
     "perptape_snapshot_identity",
-    "quantize_shadow_step",
-    "quote_shadow_execution",
     "re",
     "select",
     "select_target_position",
-    "shadow_limit_crossed",
-    "shadow_protection_triggered",
     "text",
     "timedelta",
+    "update",
     "uuid4",
     "uuid5",
-    "validate_agent_roles",
     "validate_notification_configuration",
     "validate_notification_payload",
     "validate_perptape_feed_payload",

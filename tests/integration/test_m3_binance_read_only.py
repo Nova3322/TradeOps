@@ -5,6 +5,7 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from uuid import UUID
 
+from conftest import add_exchange_account_fixture, set_test_team_environment
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy import func, select
@@ -115,6 +116,7 @@ class StaticBinanceReadOnlyClient:
 def seed(service: TradingService) -> dict[str, UUID]:
     now = datetime.now(UTC)
     admin = service.bootstrap_admin("admin", now=now)
+    add_exchange_account_fixture(service.database, admin, "acct-live", "BINANCE")
     operator = service.create_user("operator", admin, now=now)
     observer = service.create_user("observer", admin, now=now)
     service.assign_role(operator, Role.OPERATOR, admin, "acct-live", "BINANCE", now=now)
@@ -214,11 +216,27 @@ async def run_m3_flow(database: Database) -> None:
         assert result["facts"]["orders"][0]["intent_id"] is None
         instrument_id = UUID(result["persisted"]["instrument_id"])
 
-        # The same account/instrument can hold independent SHADOW facts without
+        # A separate TESTNET account can hold the same instrument without
         # overwriting or being included in the LIVE reconciliation.
         now = datetime.now(UTC)
+        service.assign_role(
+            ids["operator"],
+            Role.OPERATOR,
+            ids["admin"],
+            "acct-testnet",
+            "BINANCE",
+            now=now,
+        )
+        add_exchange_account_fixture(
+            service.database,
+            ids["admin"],
+            "acct-testnet",
+            "BINANCE",
+            environment="TESTNET",
+        )
+        set_test_team_environment(service.database, ids["admin"], "TESTNET")
         service.record_position(
-            "acct-live",
+            "acct-testnet",
             "BINANCE",
             instrument_id,
             Decimal(0),
@@ -226,20 +244,21 @@ async def run_m3_flow(database: Database) -> None:
             Decimal("61000"),
             True,
             ids["operator"],
-            environment=ExecutionEnvironment.SHADOW,
+            environment=ExecutionEnvironment.TESTNET,
             now=now,
         )
         service.record_account_equity(
-            "acct-live",
+            "acct-testnet",
             "BINANCE",
             Decimal("1000"),
             Decimal("1000"),
             "USDT",
             True,
             ids["operator"],
-            environment=ExecutionEnvironment.SHADOW,
+            environment=ExecutionEnvironment.TESTNET,
             now=now,
         )
+        set_test_team_environment(service.database, ids["admin"], "LIVE")
 
         duplicate = await http.post(
             "/api/venues/binance/sync",
@@ -254,7 +273,6 @@ async def run_m3_flow(database: Database) -> None:
 
         web = await http.get("/venues/binance")
         assert web.status_code == 200, web.text
-        assert "<title>交易控制台</title>" in web.text
 
         await logout(http)
         await login(http, "observer")
@@ -322,9 +340,9 @@ async def run_m3_flow(database: Database) -> None:
         assert session.scalar(select(func.count()).select_from(VenueFill)) == 1
         assert session.scalar(select(func.count()).select_from(FundingPayment)) == 1
         live_position = session.scalar(select(Position).where(Position.environment == "LIVE"))
-        shadow_position = session.scalar(select(Position).where(Position.environment == "SHADOW"))
+        testnet_position = session.scalar(select(Position).where(Position.environment == "TESTNET"))
         assert live_position is not None and live_position.quantity == Decimal("0.5")
-        assert shadow_position is not None and shadow_position.quantity == 0
+        assert testnet_position is not None and testnet_position.quantity == 0
 
 
 def test_binance_read_only_sync_persists_dedupes_reconciles_and_isolates_environment(

@@ -133,14 +133,6 @@ def connection_capability_matrix(
             "boundary": "Unified USDT linear facts only; unsupported exposure fails closed",
         },
         {
-            "capability": "SHADOW_EXECUTION",
-            "providers": ["INTERNAL_SIMULATOR"],
-            "implementation": "IMPLEMENTED",
-            "deployment_state": "TEAM_CONFIGURATION",
-            "external_side_effect": "NONE",
-            "boundary": "database-only SHADOW facts cannot call venue or capital adapters",
-        },
-        {
             "capability": "FREQTRADE_EXECUTION",
             "providers": ["BINANCE", "HYPERLIQUID", "OKX", "BYBIT"],
             "implementation": "IMPLEMENTED_TEAM_ACCOUNT_BOUND_UNCERTIFIED",
@@ -164,8 +156,7 @@ def connection_capability_matrix(
             "deployment_state": _deployment_state(
                 enabled=settings.freqtrade_live_order_send_enabled,
                 configured=any(
-                    int(worker_binding_counts.get(venue, 0)) > 0
-                    for venue in ("OKX", "BYBIT")
+                    int(worker_binding_counts.get(venue, 0)) > 0 for venue in ("OKX", "BYBIT")
                 ),
             ),
             "external_side_effect": "ORDER_SEND",

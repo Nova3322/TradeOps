@@ -9,7 +9,6 @@ from typing import Any
 from uuid import UUID
 
 from trading_control_plane.domain import DomainRejected
-from trading_control_plane.venue_read_only import VenueReadOnlySnapshot
 
 ANALYTICS_DATASET_VERSION = "analytics-dataset/v1"
 CRYPTO_CALENDAR = "UTC_24_7"
@@ -52,41 +51,38 @@ class AnalyticsScope:
     generation: int | None = None
 
     def __post_init__(self) -> None:
-        if self.environment not in {"SHADOW", "LIVE"}:
-            _reject("ANALYTICS_ENVIRONMENT_INVALID", "analytics supports only SHADOW or LIVE")
+        if self.environment not in {"TESTNET", "LIVE"}:
+            _reject("ANALYTICS_ENVIRONMENT_INVALID", "analytics supports TESTNET or LIVE")
         start = _utc(self.from_time, "from_time")
         end = _utc(self.to_time, "to_time")
         if start >= end:
             _reject("ANALYTICS_TIME_RANGE_INVALID", "from_time must be earlier than to_time")
-        if self.environment == "SHADOW" and self.generation is None:
-            _reject("ANALYTICS_GENERATION_REQUIRED", "SHADOW analytics requires one generation")
-        if self.environment == "SHADOW" and self.account_venues:
+        if self.generation is not None:
+            _reject(
+                "ANALYTICS_GENERATION_FORBIDDEN",
+                "TESTNET and LIVE analytics do not use ledger generations",
+            )
+        exact_scopes = tuple(sorted(set(self.account_venues)))
+        if not exact_scopes:
+            _reject(
+                "ANALYTICS_ACCOUNT_SCOPE_REQUIRED",
+                "analytics requires exact account and venue scopes",
+            )
+        if exact_scopes != self.account_venues:
             _reject(
                 "ANALYTICS_ACCOUNT_SCOPE_INVALID",
-                "SHADOW analytics cannot contain LIVE account and venue scopes",
+                "analytics account and venue scopes must be unique and sorted",
             )
-        if self.environment == "LIVE":
-            exact_scopes = tuple(sorted(set(self.account_venues)))
-            if not exact_scopes:
-                _reject(
-                    "ANALYTICS_ACCOUNT_SCOPE_REQUIRED",
-                    "LIVE analytics requires exact account and venue scopes",
-                )
-            if exact_scopes != self.account_venues:
-                _reject(
-                    "ANALYTICS_ACCOUNT_SCOPE_INVALID",
-                    "LIVE analytics account and venue scopes must be unique and sorted",
-                )
-            if tuple(sorted({item[0] for item in exact_scopes})) != self.account_ids:
-                _reject(
-                    "ANALYTICS_ACCOUNT_SCOPE_INVALID",
-                    "account_ids must match exact account and venue scopes",
-                )
-            if tuple(sorted({item[1] for item in exact_scopes})) != self.venues:
-                _reject(
-                    "ANALYTICS_ACCOUNT_SCOPE_INVALID",
-                    "venues must match exact account and venue scopes",
-                )
+        if tuple(sorted({item[0] for item in exact_scopes})) != self.account_ids:
+            _reject(
+                "ANALYTICS_ACCOUNT_SCOPE_INVALID",
+                "account_ids must match exact account and venue scopes",
+            )
+        if tuple(sorted({item[1] for item in exact_scopes})) != self.venues:
+            _reject(
+                "ANALYTICS_ACCOUNT_SCOPE_INVALID",
+                "venues must match exact account and venue scopes",
+            )
 
 
 @dataclass(frozen=True, slots=True)
@@ -186,133 +182,6 @@ class AnalyticsDataset:
     cashflows: tuple[Cashflow, ...] = ()
     coverage: dict[str, Any] = field(default_factory=dict)
     metadata: dict[str, Any] = field(default_factory=dict)
-
-
-@dataclass(frozen=True, slots=True)
-class CanonicalSnapshot:
-    orders: tuple[CanonicalOrder, ...]
-    fills: tuple[CanonicalFill, ...]
-    positions: tuple[PositionSnapshot, ...]
-    cashflows: tuple[Cashflow, ...]
-
-
-def canonicalize_venue_snapshot(
-    *,
-    venue: str,
-    account_id: str,
-    environment: str,
-    snapshot: VenueReadOnlySnapshot,
-    contract_multiplier: Decimal,
-) -> CanonicalSnapshot:
-    """Convert any read-only venue Adapter snapshot into report-library-neutral facts."""
-
-    normalized_venue = venue.strip().upper()
-    if normalized_venue not in {"BINANCE", "HYPERLIQUID", "OKX", "BYBIT"}:
-        _reject("ANALYTICS_VENUE_INVALID", "unsupported venue for canonical analytics")
-    if environment not in {"SHADOW", "TESTNET", "LIVE"}:
-        _reject("ANALYTICS_ENVIRONMENT_INVALID", "canonical facts require an exact environment")
-    multiplier = _positive(contract_multiplier, "contract_multiplier")
-    settlement = snapshot.instrument.collateral_currency.upper()
-    symbol = snapshot.symbol.upper()
-    orders: list[CanonicalOrder] = []
-    for order in snapshot.orders:
-        raw_limit = getattr(order, "limit_price", None)
-        limit_price = None
-        if raw_limit is not None:
-            candidate = Decimal(str(raw_limit))
-            limit_price = candidate if candidate > 0 else None
-        orders.append(
-            CanonicalOrder(
-                account_id=account_id,
-                venue=normalized_venue,
-                environment=environment,
-                symbol=symbol,
-                side=order.side.upper(),
-                order_type=order.order_type.upper(),
-                quantity=_finite(order.ordered_quantity, "ordered_quantity"),
-                limit_price=limit_price,
-                reduce_only=order.reduce_only,
-                status=order.status.upper(),
-                order_id=order.order_id,
-                client_order_id=order.client_order_id or None,
-                observed_at=_utc(order.observed_at, "order.observed_at"),
-            )
-        )
-    fills: list[CanonicalFill] = []
-    cashflows: list[Cashflow] = []
-    seen_fill_keys: set[str] = set()
-    for fill in snapshot.fills:
-        quantity = _positive(fill.quantity, "fill.quantity")
-        price = _positive(fill.price, "fill.price")
-        signed = quantity if fill.side.upper() == "BUY" else -quantity
-        canonical = CanonicalFill(
-            account_id=account_id,
-            venue=normalized_venue,
-            environment=environment,
-            symbol=symbol,
-            fill_id=fill.fill_id,
-            order_id=fill.order_id,
-            signed_amount=signed,
-            quantity=quantity,
-            price=price,
-            contract_multiplier=multiplier,
-            notional=abs(quantity * price * multiplier),
-            fee=_finite(fill.fee, "fill.fee"),
-            fee_currency=fill.fee_currency.upper(),
-            realized_pnl=None,
-            settlement_currency=settlement,
-            executed_at=_utc(fill.executed_at, "fill.executed_at"),
-        )
-        if canonical.idempotency_key in seen_fill_keys:
-            continue
-        seen_fill_keys.add(canonical.idempotency_key)
-        fills.append(canonical)
-        cashflows.append(
-            Cashflow(
-                account_id=account_id,
-                venue=normalized_venue,
-                environment=environment,
-                cashflow_id=f"FEE:{canonical.idempotency_key}",
-                cashflow_type="FEE",
-                amount=-canonical.fee,
-                currency=canonical.fee_currency,
-                occurred_at=canonical.executed_at,
-                performance_impact=True,
-            )
-        )
-    position = snapshot.position
-    position_quantity = _finite(position.quantity, "position.quantity")
-    mark_price = _positive(position.mark_price, "position.mark_price")
-    market_value = position_quantity * mark_price * multiplier
-    positions = (
-        PositionSnapshot(
-            account_id=account_id,
-            venue=normalized_venue,
-            environment=environment,
-            observed_at=_utc(position.observed_at, "position.observed_at"),
-            symbol=symbol,
-            signed_quantity=position_quantity,
-            mark_price=mark_price,
-            market_value=market_value,
-            gross_exposure=abs(market_value),
-            net_exposure=market_value,
-        ),
-    )
-    for funding in snapshot.funding:
-        cashflows.append(
-            Cashflow(
-                account_id=account_id,
-                venue=normalized_venue,
-                environment=environment,
-                cashflow_id=f"FUNDING:{environment}:{account_id}:{normalized_venue}:{funding.payment_id}",
-                cashflow_type="FUNDING",
-                amount=_finite(funding.amount, "funding.amount"),
-                currency=funding.currency.upper(),
-                occurred_at=_utc(funding.paid_at, "funding.paid_at"),
-                performance_impact=True,
-            )
-        )
-    return CanonicalSnapshot(tuple(orders), tuple(fills), positions, tuple(cashflows))
 
 
 def derive_24_7_returns(

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from trading_control_plane.repositories.execution import find_position_for_scope
 from trading_control_plane.service_component import ServiceComponent
 
 # The domain implementation intentionally consumes the explicit service_core export surface.
@@ -37,17 +38,7 @@ class CampaignExecutionService(ServiceComponent):
             )
             if policy is None:
                 _reject("RISK_POLICY_MISSING", "target update requires an active policy")
-            position = session.scalar(
-                select(Position)
-                .where(
-                    Position.team_id == campaign.team_id,
-                    Position.account_id == campaign.account_id,
-                    Position.venue == campaign.venue,
-                    Position.environment == campaign.environment,
-                    Position.instrument_id == campaign.instrument_id,
-                )
-                .with_for_update()
-            )
+            position = find_position_for_scope(session, campaign, for_update=True)
             if position is None or position.fact_status != FactStatus.KNOWN.value:
                 _reject("POSITION_UNKNOWN", "target update requires a known position")
             if now - position.observed_at > timedelta(seconds=policy.max_fact_age_seconds):
@@ -103,15 +94,7 @@ class CampaignExecutionService(ServiceComponent):
                 campaign.venue,
                 team_id=campaign.team_id,
             )
-            position = session.scalar(
-                select(Position).where(
-                    Position.team_id == campaign.team_id,
-                    Position.account_id == campaign.account_id,
-                    Position.venue == campaign.venue,
-                    Position.environment == campaign.environment,
-                    Position.instrument_id == campaign.instrument_id,
-                )
-            )
+            position = find_position_for_scope(session, campaign)
             if position is None or position.fact_status != FactStatus.KNOWN.value:
                 _reject("POSITION_UNKNOWN", "reduction requires current known position")
             policy = session.scalar(
@@ -300,23 +283,13 @@ class CampaignExecutionService(ServiceComponent):
             if limit_price is not None and (not limit_price.is_finite() or limit_price <= 0):
                 _reject("ORDER_LIMIT_PRICE_INVALID", "explicit exit limit must be positive")
             proposal = session.get(Proposal, campaign.proposal_id)
-            position = session.scalar(
-                select(Position)
-                .where(
-                    Position.team_id == campaign.team_id,
-                    Position.account_id == campaign.account_id,
-                    Position.venue == campaign.venue,
-                    Position.environment == campaign.environment,
-                    Position.instrument_id == campaign.instrument_id,
-                )
-                .with_for_update()
-            )
-            policy = self.facade._active_risk_policy(session, campaign.team_id)
+            position = find_position_for_scope(session, campaign, for_update=True)
+            policy = self._active_risk_policy(session, campaign.team_id)
             if proposal is None or policy is None:
                 _reject("CAMPAIGN_MANAGEMENT_INVALID", "campaign management facts are incomplete")
             if position is None or position.fact_status != FactStatus.KNOWN.value:
                 _reject("POSITION_UNKNOWN", "automatic exit requires a known current position")
-            if self.facade._fact_is_stale(
+            if self._fact_is_stale(
                 position.observed_at,
                 now,
                 timedelta(seconds=policy.max_fact_age_seconds),
@@ -458,23 +431,13 @@ class CampaignExecutionService(ServiceComponent):
                     RiskPolicy.active,
                 )
             )
-            position = session.scalar(
-                select(Position)
-                .where(
-                    Position.team_id == campaign.team_id,
-                    Position.account_id == campaign.account_id,
-                    Position.venue == campaign.venue,
-                    Position.environment == campaign.environment,
-                    Position.instrument_id == campaign.instrument_id,
-                )
-                .with_for_update()
-            )
+            position = find_position_for_scope(session, campaign, for_update=True)
             if (
                 policy is None
                 or position is None
                 or position.fact_status != FactStatus.KNOWN.value
                 or position.quantity != 0
-                or self.facade._fact_is_stale(
+                or self._fact_is_stale(
                     position.observed_at,
                     now,
                     timedelta(seconds=policy.max_fact_age_seconds),
@@ -527,16 +490,7 @@ class CampaignExecutionService(ServiceComponent):
                 for reservation in reservations
             ):
                 _reject("RISK_RESERVATION_UNRESOLVED", "campaign risk is not confirmed closed")
-            previous_pnl = campaign.final_pnl
             self._update_campaign_pnl(session, campaign, position, now=now)
-            self._apply_shadow_pnl_delta(
-                session,
-                campaign=campaign,
-                previous_pnl=previous_pnl,
-                actor_id=actor_id,
-                correlation_id=uuid4(),
-                now=now,
-            )
             for reservation in reservations:
                 if reservation.status == ReservationStatus.OPEN.value:
                     reservation.status = ReservationStatus.RELEASED.value
@@ -592,18 +546,9 @@ class CampaignExecutionService(ServiceComponent):
                 .where(VenueFill.campaign_id == campaign_id)
                 .order_by(VenueFill.executed_at, VenueFill.venue_fill_fact_id)
             ).all()
-            position = session.scalar(
-                select(Position).where(
-                    Position.team_id == campaign.team_id,
-                    Position.account_id == campaign.account_id,
-                    Position.venue == campaign.venue,
-                    Position.environment == campaign.environment,
-                    Position.instrument_id == campaign.instrument_id,
-                )
-            )
+            position = find_position_for_scope(session, campaign)
             if position is None or position.fact_status != FactStatus.KNOWN.value:
                 _reject("POSITION_UNKNOWN", "PnL requires known current position")
-            previous_pnl = campaign.final_pnl
             result = self._update_campaign_pnl(
                 session,
                 campaign,
@@ -611,87 +556,7 @@ class CampaignExecutionService(ServiceComponent):
                 fills=fills,
                 now=now,
             )
-            self._apply_shadow_pnl_delta(
-                session,
-                campaign=campaign,
-                previous_pnl=previous_pnl,
-                actor_id=actor_id,
-                correlation_id=uuid4(),
-                now=now,
-            )
             return result
-
-    def _apply_shadow_pnl_delta(
-        self,
-        session: Session,
-        *,
-        campaign: Campaign,
-        previous_pnl: Decimal,
-        actor_id: UUID,
-        correlation_id: UUID,
-        now: datetime,
-        equity: AccountEquity | None = None,
-    ) -> None:
-        if campaign.environment != ExecutionEnvironment.SHADOW.value:
-            return
-        instrument = session.get(Instrument, campaign.instrument_id)
-        if instrument is None:
-            _reject("INSTRUMENT_UNAVAILABLE", "campaign instrument is missing")
-        if equity is None:
-            equity = session.scalar(
-                select(AccountEquity)
-                .where(
-                    AccountEquity.team_id == campaign.team_id,
-                    AccountEquity.account_id == campaign.account_id,
-                    AccountEquity.venue == campaign.venue,
-                    AccountEquity.environment == ExecutionEnvironment.SHADOW.value,
-                    AccountEquity.currency == instrument.collateral_currency,
-                )
-                .with_for_update()
-            )
-        if (
-            equity is None
-            or equity.fact_status != FactStatus.KNOWN.value
-            or equity.control_status != "CONTROLLED"
-        ):
-            _reject(
-                "SHADOW_EQUITY_REQUIRED",
-                "SHADOW PnL requires known controlled virtual equity",
-            )
-        delta = campaign.final_pnl - previous_pnl
-        if delta == 0:
-            return
-        next_equity = equity.equity + delta
-        next_available = equity.available_balance + delta
-        if next_equity < 0 or next_available < 0:
-            _reject(
-                "SHADOW_CAPITAL_EXHAUSTED",
-                "simulated loss exceeds the remaining virtual capital",
-            )
-        equity.equity = next_equity
-        equity.available_balance = next_available
-        equity.valuation_currency = "USD"
-        equity.valuation_price = Decimal(1)
-        equity.valuation_equity = next_equity
-        equity.valuation_observed_at = now
-        equity.fact_status = FactStatus.KNOWN.value
-        equity.observed_at = now
-        equity.updated_at = now
-        self.facade._record_account_equity_observation(session, equity, recorded_at=now)
-        self.transactions._audit(
-            session,
-            actor_id=str(actor_id),
-            event_type="SHADOW_EQUITY_MARKED_TO_MODEL",
-            object_type="AccountEquity",
-            object_id=equity.account_equity_id,
-            reason=f"campaign={campaign.campaign_id};pnl_delta={delta}",
-            correlation_id=correlation_id,
-            object_version=campaign.target_version,
-            workspace_id=None,
-            team_id=campaign.team_id,
-            account_id=campaign.account_id,
-            now=now,
-        )
 
     def _update_campaign_pnl(
         self,

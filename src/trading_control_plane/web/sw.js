@@ -1,7 +1,15 @@
-const CACHE = 'trading-shell-v173';
+const CACHE = 'trading-shell-v220';
 const SHELL = [
-  '/assets/styles.css',
-  '/assets/app-core.js',
+  '/assets/styles-base.css',
+  '/assets/styles-components.css',
+  '/assets/styles-api-access.css',
+  '/assets/styles-shell.css',
+  '/assets/app-state.js',
+  '/assets/i18n.js',
+  '/assets/shared.js',
+  '/assets/session.js',
+  '/assets/api-client.js',
+  '/assets/app-shell.js',
   '/assets/workspace.js',
   '/assets/signals.js',
   '/assets/proposals.js',
@@ -10,6 +18,7 @@ const SHELL = [
   '/assets/capital.js',
   '/assets/reporting.js',
   '/assets/accounts.js',
+  '/assets/router.js',
   '/assets/app.js',
   '/assets/fonts/IBMPlexSansSC-Regular.woff2',
   '/assets/fonts/IBMPlexSansSC-SemiBold.woff2',

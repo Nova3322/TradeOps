@@ -45,15 +45,11 @@ def test_performance_metrics_use_closed_results_and_fail_closed_for_percentages(
     assert len(metrics["curve"]) == 3
     assert metrics["percentage_return"] is None
     assert metrics["percentage_drawdown"] is None
-    assert metrics["availability"]["percentage_metrics"] == (
-        "OPENING_CAPITAL_UNAVAILABLE"
-    )
+    assert metrics["availability"]["percentage_metrics"] == ("OPENING_CAPITAL_UNAVAILABLE")
 
 
 def test_performance_metrics_distinguish_zero_from_unavailable() -> None:
-    metrics = _performance_metrics(
-        [report_row("flat", "CLOSED", "0", "2026-08-10T03:00:00+00:00")]
-    )
+    metrics = _performance_metrics([report_row("flat", "CLOSED", "0", "2026-08-10T03:00:00+00:00")])
 
     assert metrics["net_pnl"] == "0"
     assert metrics["closed_net_pnl"] == "0"

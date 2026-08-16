@@ -8,145 +8,6 @@ from trading_control_plane.service_core import *
 
 
 class FactIngestionExecutionService(ServiceComponent):
-    def record_fill(
-        self,
-        intent_id: UUID,
-        actor_id: UUID,
-        venue_fill_id: str,
-        side: str,
-        quantity: Decimal,
-        price: Decimal,
-        fee: Decimal,
-        fee_currency: str,
-        slippage_cost: Decimal,
-        *,
-        now: datetime,
-    ) -> UUID:
-        with self.database.session_factory.begin() as session:
-            intent = session.get(OrderIntent, intent_id, with_for_update=True)
-            if intent is None:
-                _reject("ORDER_INTENT_NOT_FOUND", "intent does not exist")
-            campaign = session.get(Campaign, intent.campaign_id)
-            if campaign is None:
-                _reject("CAMPAIGN_NOT_FOUND", "intent campaign is missing")
-            if campaign.environment != ExecutionEnvironment.SHADOW.value:
-                _reject("SHADOW_SCOPE_REQUIRED", "synthetic fill recording is SHADOW-only")
-            team = self.transactions._require_role(
-                session,
-                actor_id,
-                "venue.record",
-                campaign.account_id,
-                campaign.venue,
-                team_id=campaign.team_id,
-            )
-            self.transactions._require_team_environment(team, ExecutionEnvironment.SHADOW)
-            if team.execution_mode_locked_at is not None:
-                _reject(
-                    "SHADOW_LEGACY_EXECUTION_RETIRED",
-                    "mode-locked Teams use atomic unified shadow fills only",
-                )
-            existing = session.scalar(
-                select(VenueFill).where(
-                    VenueFill.team_id == campaign.team_id,
-                    VenueFill.environment == campaign.environment,
-                    VenueFill.account_id == campaign.account_id,
-                    VenueFill.venue == campaign.venue,
-                    VenueFill.venue_fill_id == venue_fill_id,
-                )
-            )
-            if existing is not None:
-                if (
-                    existing.order_intent_id == intent_id
-                    and existing.campaign_id == campaign.campaign_id
-                    and existing.side == side
-                    and existing.quantity == quantity
-                    and existing.price == price
-                    and existing.fee == fee
-                    and existing.fee_currency == fee_currency
-                    and existing.slippage_cost == slippage_cost
-                ):
-                    return existing.venue_fill_fact_id
-                raise IdempotencyConflict
-            if intent.status not in {
-                OrderIntentStatus.SENT.value,
-                OrderIntentStatus.PARTIALLY_FILLED.value,
-            }:
-                _reject("ORDER_INTENT_NOT_FILLABLE", "fill requires a sent active intent")
-            if side != intent.side:
-                _reject("FILL_SIDE_MISMATCH", "fill side must match the order intent")
-            if quantity <= 0 or price <= 0 or fee < 0 or slippage_cost < 0:
-                _reject("FILL_INVALID", "fill amounts and price are invalid")
-            instrument = session.get(Instrument, campaign.instrument_id)
-            if instrument is None or fee_currency != instrument.collateral_currency:
-                _reject("PNL_CURRENCY_MISMATCH", "fill fee currency lacks an FX conversion")
-            venue_order = session.scalar(
-                select(VenueOrder).where(VenueOrder.order_intent_id == intent_id)
-            )
-            if venue_order is None or venue_order.venue != campaign.venue:
-                _reject("VENUE_ORDER_MISSING", "fill must reference a known venue order")
-            current_filled = session.execute(
-                select(func.coalesce(func.sum(VenueFill.quantity), 0)).where(
-                    VenueFill.order_intent_id == intent_id
-                )
-            ).scalar_one()
-            if current_filled + quantity > intent.quantity:
-                _reject("ORDER_INTENT_OVERFILLED", "cumulative fill exceeds intent quantity")
-            fact = VenueFill(
-                team_id=campaign.team_id,
-                venue=campaign.venue,
-                venue_fill_id=venue_fill_id,
-                order_intent_id=intent_id,
-                campaign_id=campaign.campaign_id,
-                account_id=campaign.account_id,
-                environment=campaign.environment,
-                instrument_id=campaign.instrument_id,
-                side=side,
-                quantity=quantity,
-                price=price,
-                fee=fee,
-                fee_currency=fee_currency,
-                slippage_cost=slippage_cost,
-                executed_at=now,
-            )
-            session.add(fact)
-            session.flush()
-            total_filled = current_filled + quantity
-            self.facade._consume_add_unit(session, intent)
-            previous = intent.status
-            if total_filled == intent.quantity:
-                intent.status = OrderIntentStatus.FILLED.value
-                venue_order.status = VenueOrderStatus.FILLED.value
-            else:
-                intent.status = OrderIntentStatus.PARTIALLY_FILLED.value
-                venue_order.status = VenueOrderStatus.PARTIALLY_FILLED.value
-            venue_order.filled_quantity = total_filled
-            venue_order.observed_at = now
-            venue_order.updated_at = now
-            intent.updated_at = now
-            intent.version += 1
-            if intent.reservation_id is not None:
-                reservation = session.get(RiskReservation, intent.reservation_id)
-                if reservation is not None:
-                    reservation.status = ReservationStatus.OPEN.value
-                    reservation.updated_at = now
-                    reservation.version += 1
-            if intent.kind in {IntentKind.INITIAL.value, IntentKind.ADD.value}:
-                campaign.status = CampaignStatus.OPEN.value
-            campaign.updated_at = now
-            self.transactions._audit(
-                session,
-                actor_id=str(actor_id),
-                event_type="VENUE_FILL_RECORDED",
-                object_type="VenueFill",
-                object_id=fact.venue_fill_fact_id,
-                reason=venue_fill_id,
-                correlation_id=intent.correlation_id,
-                object_version=1,
-                now=now,
-            )
-            INTENT_TRANSITIONS.labels(previous, intent.status).inc()
-            return fact.venue_fill_fact_id
-
     def record_position(
         self,
         account_id: str,
@@ -158,7 +19,7 @@ class FactIngestionExecutionService(ServiceComponent):
         known: bool,
         actor_id: UUID,
         *,
-        environment: ExecutionEnvironment = ExecutionEnvironment.SHADOW,
+        environment: ExecutionEnvironment | None = None,
         observed_at: datetime | None = None,
         now: datetime,
     ) -> UUID:
@@ -169,21 +30,28 @@ class FactIngestionExecutionService(ServiceComponent):
             team = self.transactions._require_role(
                 session, actor_id, "venue.record", account_id, venue
             )
-            if (
-                environment is ExecutionEnvironment.SHADOW
-                and team.execution_mode == TeamExecutionMode.SHADOW.value
-                and team.execution_mode_locked_at is not None
-            ):
+            if team.execution_mode not in {
+                TeamExecutionMode.TESTNET.value,
+                TeamExecutionMode.LIVE.value,
+            }:
                 _reject(
-                    "SHADOW_FACTS_SIMULATOR_MANAGED",
-                    "active team SHADOW positions are managed by the simulator",
+                    "TEAM_SETUP_INCOMPLETE",
+                    "team must select TESTNET or LIVE before recording venue facts",
                 )
-            self.facade._ensure_exchange_account_reference(
+            actual_environment = ExecutionEnvironment(team.execution_mode)
+            if environment is not None and environment is not actual_environment:
+                _reject(
+                    "FACT_ENVIRONMENT_MISMATCH",
+                    "position environment must match the server-owned team current mode",
+                )
+            environment = actual_environment
+            self._ensure_exchange_account_reference(
                 session,
                 team=team,
                 actor_id=actor_id,
                 account_id=account_id,
                 venue=venue,
+                environment=environment.value,
                 now=now,
             )
             position = session.scalar(
@@ -381,7 +249,7 @@ class FactIngestionExecutionService(ServiceComponent):
         known: bool,
         actor_id: UUID,
         *,
-        environment: ExecutionEnvironment = ExecutionEnvironment.SHADOW,
+        environment: ExecutionEnvironment | None = None,
         observed_at: datetime | None = None,
         now: datetime,
     ) -> UUID:
@@ -392,21 +260,28 @@ class FactIngestionExecutionService(ServiceComponent):
             team = self.transactions._require_role(
                 session, actor_id, "venue.record", account_id, venue
             )
-            if (
-                environment is ExecutionEnvironment.SHADOW
-                and team.execution_mode == TeamExecutionMode.SHADOW.value
-                and team.execution_mode_locked_at is not None
-            ):
+            if team.execution_mode not in {
+                TeamExecutionMode.TESTNET.value,
+                TeamExecutionMode.LIVE.value,
+            }:
                 _reject(
-                    "SHADOW_FACTS_SIMULATOR_MANAGED",
-                    "active team SHADOW equity is managed by initialization and the simulator",
+                    "TEAM_SETUP_INCOMPLETE",
+                    "team must select TESTNET or LIVE before recording venue facts",
                 )
-            self.facade._ensure_exchange_account_reference(
+            actual_environment = ExecutionEnvironment(team.execution_mode)
+            if environment is not None and environment is not actual_environment:
+                _reject(
+                    "FACT_ENVIRONMENT_MISMATCH",
+                    "equity environment must match the server-owned team current mode",
+                )
+            environment = actual_environment
+            self._ensure_exchange_account_reference(
                 session,
                 team=team,
                 actor_id=actor_id,
                 account_id=account_id,
                 venue=venue,
+                environment=environment.value,
                 now=now,
             )
             fact = session.scalar(
@@ -429,9 +304,7 @@ class FactIngestionExecutionService(ServiceComponent):
                     available_balance=available_balance,
                     currency=currency,
                     location_type="VENUE",
-                    control_status=(
-                        "CONTROLLED" if environment is ExecutionEnvironment.SHADOW else "READ_ONLY"
-                    ),
+                    control_status="READ_ONLY",
                     deposit_status="READY",
                     valuation_currency="USD" if stable else None,
                     valuation_price=Decimal(1) if stable else None,
@@ -447,10 +320,9 @@ class FactIngestionExecutionService(ServiceComponent):
                 fact.equity = equity
                 fact.available_balance = available_balance
                 fact.currency = currency
-                if environment is ExecutionEnvironment.SHADOW:
-                    fact.location_type = "VENUE"
-                    fact.control_status = "CONTROLLED"
-                    fact.deposit_status = "READY"
+                fact.location_type = "VENUE"
+                fact.control_status = "READ_ONLY"
+                fact.deposit_status = "READY"
                 fact.valuation_currency = "USD" if stable else None
                 fact.valuation_price = Decimal(1) if stable else None
                 fact.valuation_equity = equity if stable else None
@@ -722,7 +594,7 @@ class FactIngestionExecutionService(ServiceComponent):
 
         with self.database.session_factory.begin() as session:
             if runtime_binding is not None:
-                self.facade._lock_runtime_account_binding(session, runtime_binding)
+                self._lock_runtime_account_binding(session, runtime_binding)
             persisted: dict[str, Any] = {}
             for snapshot in sorted(snapshots, key=lambda item: item.symbol):
                 persisted[snapshot.symbol] = self._ingest_read_only_snapshot(
@@ -915,12 +787,13 @@ class FactIngestionExecutionService(ServiceComponent):
             team = self.transactions._require_role(
                 session, actor_id, "venue.record", account_id, venue
             )
-            self.facade._ensure_exchange_account_reference(
+            self._ensure_exchange_account_reference(
                 session,
                 team=team,
                 actor_id=actor_id,
                 account_id=account_id,
                 venue=venue,
+                environment=environment.value,
                 now=now,
             )
             instrument = session.scalar(
@@ -1342,7 +1215,7 @@ class FactIngestionExecutionService(ServiceComponent):
                 if filled > bound_order.filled_quantity:
                     bound_order.filled_quantity = filled
                 if filled > 0:
-                    self.facade._consume_add_unit(session, bound_intent)
+                    self._consume_add_unit(session, bound_intent)
                 previous = bound_intent.status
                 release_updated_intent = False
                 terminal = {
@@ -1361,7 +1234,7 @@ class FactIngestionExecutionService(ServiceComponent):
                             reservation.version += 1
                     bound_campaign.status = CampaignStatus.UNKNOWN.value
                 elif bound_order.status in terminal and filled == 0:
-                    self.facade._release_zero_fill_in_session(
+                    self._release_zero_fill_in_session(
                         session,
                         bound_intent,
                         terminal[bound_order.status],

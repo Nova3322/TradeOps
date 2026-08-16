@@ -56,14 +56,12 @@ class ApiClientState(StrEnum):
 
 
 class ExecutionEnvironment(StrEnum):
-    SHADOW = "SHADOW"
     TESTNET = "TESTNET"
     LIVE = "LIVE"
 
 
 class TeamExecutionMode(StrEnum):
     SETUP = "SETUP"
-    SHADOW = "SHADOW"
     TESTNET = "TESTNET"
     LIVE = "LIVE"
 
@@ -84,11 +82,6 @@ class ProposalStatus(StrEnum):
 class SignalSourceMode(StrEnum):
     PERPTAPE = "PERPTAPE"
     WEBHOOK = "WEBHOOK"
-
-
-class SignalProvider(StrEnum):
-    TRADINGVIEW = "TRADINGVIEW"
-    MODEL = "MODEL"
 
 
 class SignalEventStatus(StrEnum):

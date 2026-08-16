@@ -1,7 +1,7 @@
 {
-  "name": "交易控制台",
-  "short_name": "交易控制台",
-  "description": "生产交易与风险管理控制台",
+  "name": "TradeOps 交易控制层",
+  "short_name": "TradeOps",
+  "description": "交易员、交易 Bot 和 AI Agent 与交易所账户之间的规则、审批、执行、对账和审计控制层",
   "start_url": "/",
   "display": "standalone",
   "background_color": "#f1f4f0",

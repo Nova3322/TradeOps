@@ -100,7 +100,7 @@ class NoTiltCapitalService(ServiceComponent):
                     fact.fact_status = FactStatus.KNOWN.value
                     fact.observed_at = budget.block_timestamp
                     fact.updated_at = now
-                self.facade._record_account_equity_observation(session, fact, recorded_at=now)
+                self._record_account_equity_observation(session, fact, recorded_at=now)
                 self.transactions._audit(
                     session,
                     actor_id=str(actor_id),
@@ -200,7 +200,7 @@ class NoTiltCapitalService(ServiceComponent):
                     AccountEquityObservation.observed_at == observed_at,
                 )
             )
-            self.facade._record_account_equity_observation(session, fact, recorded_at=now)
+            self._record_account_equity_observation(session, fact, recorded_at=now)
             if observation_exists is None:
                 self.transactions._audit(
                     session,

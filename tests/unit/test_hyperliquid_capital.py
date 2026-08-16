@@ -42,9 +42,7 @@ def test_withdraw3_checks_agent_scope_and_falls_back_to_unsigned_human_wallet() 
     assert [request["type"] for request in requests] == ["clearinghouseState", "userRole"]
     assert artifact["kind"] == "HYPERLIQUID_WITHDRAW3_TYPED_REQUEST"
     assert artifact["agentWallet"]["authorized"] is True
-    assert artifact["agentWallet"]["capability"] == (
-        "TRADING_AGENT_ONLY_MANUAL_WALLET_FALLBACK"
-    )
+    assert artifact["agentWallet"]["capability"] == ("TRADING_AGENT_ONLY_MANUAL_WALLET_FALLBACK")
     assert artifact["fallbackReason"] == "WITHDRAW3_REQUIRES_USER_SIGNED_ACTION"
     assert artifact["typedData"]["primaryType"] == "HyperliquidTransaction:Withdraw"
     assert artifact["exchangeRequestTemplate"]["signature"] is None
@@ -109,12 +107,8 @@ def test_spot_usdc_shortfall_builds_user_signed_class_transfer_before_withdraw3(
     assert artifact["kind"] == "HYPERLIQUID_USD_CLASS_TRANSFER_TYPED_REQUEST"
     assert artifact["amount"] == "81"
     assert artifact["action"]["toPerp"] is True
-    assert artifact["typedData"]["primaryType"] == (
-        "HyperliquidTransaction:UsdClassTransfer"
-    )
-    assert artifact["nextRequiredAction"] == (
-        "REVALIDATE_WITHDRAWABLE_THEN_BUILD_WITHDRAW3"
-    )
+    assert artifact["typedData"]["primaryType"] == ("HyperliquidTransaction:UsdClassTransfer")
+    assert artifact["nextRequiredAction"] == ("REVALIDATE_WITHDRAWABLE_THEN_BUILD_WITHDRAW3")
     assert artifact["signing"] is False and artifact["broadcast"] is False
 
 
@@ -173,9 +167,7 @@ def test_receipts_require_exact_public_ledger_and_arbitrum_evidence() -> None:
         assert method == "eth_blockNumber"
         return "0x78"
 
-    gateway = HyperliquidCapitalGateway(
-        info_fetcher=info_fetcher, rpc_fetcher=rpc_fetcher
-    )
+    gateway = HyperliquidCapitalGateway(info_fetcher=info_fetcher, rpc_fetcher=rpc_fetcher)
     ledger = gateway.verify_hyperliquid_ledger(
         base_url="https://api.hyperliquid.xyz",
         main_account=MAIN,
@@ -218,9 +210,7 @@ def test_withdrawal_credit_matches_bridge_transfer_log() -> None:
         assert method == "eth_blockNumber"
         return "0x78"
 
-    receipt = HyperliquidCapitalGateway(
-        rpc_fetcher=rpc_fetcher
-    ).verify_arbitrum_usdc_credit(
+    receipt = HyperliquidCapitalGateway(rpc_fetcher=rpc_fetcher).verify_arbitrum_usdc_credit(
         rpc_url="https://rpc.example.invalid",
         transaction_hash=HASH,
         sender=HYPERLIQUID_BRIDGE2_ADDRESS,

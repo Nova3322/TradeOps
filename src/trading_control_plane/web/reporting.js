@@ -33,10 +33,38 @@ function quantStatsDefaultRange() {
   return {from_time:start.toISOString(), to_time:end.toISOString()};
 }
 
-function quantStatsThemeHtml(reportHtml) {
-  const theme = document.documentElement.dataset.theme;
-  if (!['light','dark'].includes(theme)) return reportHtml;
-  return reportHtml.replace(/<body\b/i, `<body data-tradingops-theme="${theme}"`);
+function analyticsReportErrorPresentation(error) {
+  const code = error?.code || 'ANALYTICS_NOT_READY';
+  if (code.includes('TIME_BOUNDARY')) return {
+    title:'所选区间缺少边界净值',
+    copy:'起始日或截止日没有可信净值点，因此本次报表没有生成。',
+    next:'调整时间范围，确保开始和结束日期都有账户净值记录。',
+  };
+  if (code.includes('HISTORY_INSUFFICIENT') || code.includes('NAV_CONTINUITY') || code.includes('RETURNS_NOT_READY')) return {
+    title:'净值历史尚不足',
+    copy:'当前可信净值记录不足以形成连续收益率，因此本次报表没有生成。',
+    next:'缩短时间范围，或等待账户净值同步覆盖所选日期。',
+  };
+  if (code.includes('ACCOUNT_SCOPE')) return {
+    title:'所选账户范围不可用',
+    copy:'当前身份、环境或交易所范围内没有可用于生成报表的账户事实。',
+    next:'重新选择有权限的账户与环境后再检查。',
+  };
+  if (code.includes('CURRENCY_CONVERSION') || code.includes('POSITION_VALUATION') || code.includes('CASHFLOW') || code.includes('BENCHMARK_COVERAGE')) return {
+    title:'估值事实尚不完整',
+    copy:'汇率、仓位、现金流或基准事实存在缺口，因此系统拒绝生成可能误导的收益率。',
+    next:'等待缺失事实同步完成，或选择数据完整的账户和时间范围。',
+  };
+  if (code.includes('FORBIDDEN') || code.includes('SCOPE_CHANGED')) return {
+    title:'报表范围已经变化',
+    copy:'当前权限或团队范围与请求发起时不一致，因此本次报表没有生成。',
+    next:'刷新页面并按当前可见范围重新选择条件。',
+  };
+  return {
+    title:'报表暂不可生成',
+    copy:'服务端没有确认本次报表所需的全部可信事实。',
+    next:'调整筛选条件后重新检查；问题持续存在时再查看技术详情。',
+  };
 }
 
 function resizeQuantStatsFrame(frame) {
@@ -51,37 +79,38 @@ function resizeQuantStatsFrame(frame) {
 async function renderActualResults() {
   const current = new URLSearchParams(location.search);
   const catalogResponse = await api('/api/results/report-engines');
+  const canViewCapitalSeries = hasCapability('capital.view');
   const options = catalogResponse.data.options;
   const engines = catalogResponse.data.engines;
   const requestedEngine = current.get('engine') || 'QUANTSTATS';
   const engine = engines.some(item => item.engine === requestedEngine && item.available) ? requestedEngine : engines.find(item => item.available)?.engine;
   const selectedEngine = engines.find(item => item.engine === engine);
-  const modeDefault = ['SHADOW','LIVE'].includes(options.current_trading_mode) ? options.current_trading_mode : 'SHADOW';
-  const environment = ['SHADOW','LIVE'].includes(current.get('environment')) ? current.get('environment') : modeDefault;
+  const modeDefault = ['TESTNET','LIVE'].includes(options.current_trading_mode) ? options.current_trading_mode : 'TESTNET';
+  const environment = ['TESTNET','LIVE'].includes(current.get('environment')) ? current.get('environment') : modeDefault;
   const defaults = quantStatsDefaultRange();
   const fromTime = current.get('from_time') || defaults.from_time;
   const toTime = current.get('to_time') || defaults.to_time;
-  const requestedGeneration = Number(current.get('generation'));
-  const activeGeneration = options.shadow_generations.find(item => item.status === 'ACTIVE')?.generation;
-  const generation = Number.isInteger(requestedGeneration) && requestedGeneration > 0 ? requestedGeneration : activeGeneration;
   const selectedAccount = current.get('account_id') || '';
   const selectedVenue = current.get('venue') || '';
   const accountOptions = options.accounts.map(item => `<option value="${escapeHtml(item.account_id)}" data-venue="${escapeHtml(item.venue)}" ${selectedAccount === item.account_id && (!selectedVenue || selectedVenue === item.venue) ? 'selected' : ''}>${escapeHtml(item.label)} · ${escapeHtml(fmtVenueLabel(item.venue))}</option>`).join('');
-  const generationOptions = options.shadow_generations.map(item => `<option value="${item.generation}" ${generation === item.generation ? 'selected' : ''}>generation ${item.generation} · ${escapeHtml(fmtStatus(item.status))}</option>`).join('');
   const engineOptions = engines.map(item => `<option value="${item.engine}" ${engine === item.engine ? 'selected' : ''} ${item.available ? '' : 'disabled'}>${escapeHtml(item.label)} · ${item.available ? escapeHtml(item.version) : escapeHtml(item.error_code)}</option>`).join('');
   main.innerHTML = `<section class="page results-page quantstats-page"><header class="page-head"><div><p class="eyebrow">${escapeHtml(options.scope.workspace_name)} · ${escapeHtml(options.scope.team_name)}</p><h1>绩效报表</h1><p class="lede">QuantStats 与 Pyfolio Reloaded 使用同一份可信净值、收益率、成交、持仓、手续费及基准数据；订单仅用于执行与审计。</p></div><button class="secondary" data-refresh>刷新</button></header>
-    <article class="source-status ${options.current_trading_mode === 'LIVE' ? 'tone-attention' : ''}"><div><p class="eyebrow">当前交易模式</p><h2>${escapeHtml(fmtEnvironment(options.current_trading_mode))}</h2><p>报表环境只查询历史，不改变 Team 模式，也不会开启交易、资金、签名或广播能力。</p></div><span class="status-pill">${escapeHtml(options.dataset_version)}</span></article>
-    <form id="results-filter-form" class="form-panel compact-form result-filters"><div class="field-grid"><label>报表引擎<select name="engine">${engineOptions}</select></label><label>环境<select name="environment"><option value="SHADOW" ${environment === 'SHADOW' ? 'selected' : ''}>影子模式</option><option value="LIVE" ${environment === 'LIVE' ? 'selected' : ''}>生产历史</option></select></label><label>账户<select name="account_id" ${environment === 'SHADOW' ? 'disabled' : ''}><option value="">全部有权限账户</option>${accountOptions}</select></label><label>交易所<select name="venue" ${environment === 'SHADOW' ? 'disabled' : ''}><option value="">全部</option>${['BINANCE','HYPERLIQUID','OKX','BYBIT'].map(value => `<option value="${value}" ${selectedVenue === value ? 'selected' : ''}>${escapeHtml(fmtVenueLabel(value))}</option>`).join('')}</select></label><label>SHADOW generation<select name="generation" ${environment === 'LIVE' ? 'disabled' : ''}>${generationOptions}</select></label><label>起始时间<input name="from_time" type="datetime-local" value="${escapeHtml(resultDateTimeInput(fromTime))}" required></label><label>截止时间<input name="to_time" type="datetime-local" value="${escapeHtml(resultDateTimeInput(toTime))}" required></label></div><div class="form-actions"><button class="primary" type="submit">生成 ${escapeHtml(selectedEngine?.label || engine)} 报表</button></div></form>
-    <section class="quantstats-status" data-quantstats-status><div class="loading-card"><span class="spinner"></span><b>正在生成只读报表</b><p>服务端正在验证净值连续性、现金流、估值、范围和 generation。</p></div></section>
+    ${canViewCapitalSeries ? '<section class="performance-capital-panel" data-capital-performance><div class="loading-card"><span class="spinner"></span><b>正在加载资金绩效曲线</b><p>按当前模式和已授权账户读取可信资金事实。</p></div></section>' : ''}
+    <form id="results-filter-form" class="form-panel compact-form result-filters"><div class="field-grid"><label>报表引擎<select name="engine">${engineOptions}</select></label><label>环境<select name="environment"><option value="TESTNET" ${environment === 'TESTNET' ? 'selected' : ''}>测试模式</option><option value="LIVE" ${environment === 'LIVE' ? 'selected' : ''}>生产历史</option></select></label><label>账户<select name="account_id"><option value="">全部有权限账户</option>${accountOptions}</select></label><label>交易所<select name="venue"><option value="">全部</option>${['BINANCE','HYPERLIQUID','OKX','BYBIT'].map(value => `<option value="${value}" ${selectedVenue === value ? 'selected' : ''}>${escapeHtml(fmtVenueLabel(value))}</option>`).join('')}</select></label><label>起始时间<input name="from_time" type="datetime-local" value="${escapeHtml(resultDateTimeInput(fromTime))}" required></label><label>截止时间<input name="to_time" type="datetime-local" value="${escapeHtml(resultDateTimeInput(toTime))}" required></label></div><div class="form-actions"><button class="primary" type="submit">生成 ${escapeHtml(selectedEngine?.label || engine)} 报表</button></div></form>
+    <section class="quantstats-status" data-quantstats-status><div class="loading-card"><span class="spinner"></span><b>正在生成只读报表</b><p>服务端正在验证净值连续性、现金流、估值和环境范围。</p></div></section>
     <section class="quantstats-report-shell" data-quantstats-report hidden><div class="section-heading"><div><p class="eyebrow">${escapeHtml(selectedEngine?.label || engine)} · UTC 24/7 · 365 periods/year</p><h2>完整绩效报表</h2><p data-quantstats-coverage></p></div><div class="form-actions"><a class="secondary" data-report-view target="_blank" rel="noopener">新窗口查看</a><a class="primary" data-report-download>下载 HTML</a></div></div><div class="stats report-common-metrics" data-report-metrics></div><iframe class="quantstats-frame" title="${escapeHtml(selectedEngine?.label || engine)} 完整绩效报表" sandbox="allow-same-origin" referrerpolicy="no-referrer"></iframe></section>
   </section>`;
+  applyLanguageToDocument(main);
   document.querySelector('[data-refresh]')?.addEventListener('click', route);
+  if (canViewCapitalSeries) await renderCapitalPerformancePanel();
+  applyLanguageToDocument(main);
   document.querySelector('#results-filter-form')?.addEventListener('submit', event => {
     event.preventDefault();
     const form = event.currentTarget;
     const values = Object.fromEntries(new FormData(form));
     const next = new URLSearchParams({engine:values.engine,environment:values.environment});
-    ['venue','account_id','generation'].forEach(key => { if (values[key]) next.set(key, values[key]); });
+    current.getAll('capital_account').forEach(value => next.append('capital_account', value));
+    ['venue','account_id'].forEach(key => { if (values[key]) next.set(key, values[key]); });
     ['from_time','to_time'].forEach(key => {
       if (values[key]) next.set(key, new Date(values[key]).toISOString());
     });
@@ -90,9 +119,8 @@ async function renderActualResults() {
   });
   try {
     const body = {engine,environment,from_time:fromTime,to_time:toTime,idempotency_key:crypto.randomUUID()};
-    if (environment === 'SHADOW' && generation) body.generation = generation;
-    if (environment === 'LIVE' && selectedAccount) body.account_id = selectedAccount;
-    if (environment === 'LIVE' && selectedVenue) body.venue = selectedVenue;
+    if (selectedAccount) body.account_id = selectedAccount;
+    if (selectedVenue) body.venue = selectedVenue;
     const response = await api('/api/results/reports', {method:'POST',body:JSON.stringify(body)});
     const data = response.data;
     const readiness = data.metadata.readiness;
@@ -113,21 +141,24 @@ async function renderActualResults() {
     frame.src = data.artifact.view_url;
   } catch (error) {
     const status = document.querySelector('[data-quantstats-status]');
-    status.innerHTML = `<div class="callout tone-attention"><b>报表数据未就绪 · ${escapeHtml(error.code || 'ANALYTICS_NOT_READY')}</b><p>${escapeHtml(error.message || '服务端拒绝使用不完整事实生成收益率。')}</p><p class="subtle">系统没有补零、推测净值或使用成交盈亏伪造收益率。</p></div>`;
+    const presentation = analyticsReportErrorPresentation(error);
+    status.innerHTML = `<div class="callout tone-attention analytics-error-state" role="status" aria-labelledby="analytics-error-title"><div class="analytics-error-heading"><div><p class="eyebrow">数据完整性保护</p><h2 id="analytics-error-title">${escapeHtml(presentation.title)}</h2></div><span class="status-pill">未生成</span></div><p>${escapeHtml(presentation.copy)}</p><div class="analytics-error-next"><b>下一步</b><span>${escapeHtml(presentation.next)}</span></div><div class="analytics-error-actions"><button class="secondary" type="button" data-report-adjust>调整时间范围</button><button class="secondary" type="button" data-report-retry>重新检查</button></div><p class="subtle">系统没有补零、推测净值或使用成交盈亏伪造收益率。</p><details class="technical-details"><summary>查看技术详情</summary><code class="technical-id" translate="no">${escapeHtml(error.code || 'ANALYTICS_NOT_READY')}</code><p>${escapeHtml(error.message || '服务端拒绝使用不完整事实生成收益率。')}</p></details></div>`;
+    status.querySelector('[data-report-adjust]')?.addEventListener('click', () => {
+      const input = document.querySelector('#results-filter-form [name="from_time"]');
+      document.querySelector('#results-filter-form')?.scrollIntoView({block:'start'});
+      input?.focus({preventScroll:true});
+    });
+    status.querySelector('[data-report-retry]')?.addEventListener('click', route);
   }
+  applyLanguageToDocument(main);
 }
 
 const notificationChannelLabel = value => ({TELEGRAM:'Telegram',SLACK:'Slack',LARK:'飞书 / Lark',EMAIL:'邮件'}[value] || value);
 const notificationEventLabel = value => ({PROPOSAL_REVIEW_REQUIRED:'提案等待独立审核',RISK_DECISION_RECORDED:'风险决策已记录',CAMPAIGN_STATUS_CHANGED:'交易任务状态变化',CAPITAL_STATUS_CHANGED:'资金流程状态变化',SIGNAL_EVENT_RECEIVED:'收到团队信号',CONNECTION_CHECK_FAILED:'账户连接验证失败',TEST_NOTIFICATION:'渠道测试'}[value] || value);
 
 function notificationEventOptions(catalog, selected = []) {
-  const enabled = new Set(selected);
-  return catalog.map(item => {
-    const active = item.integration_status === 'ACTIVE';
-    const checked = enabled.has(item.event_type);
-    const help = active ? `模板 ${item.template_key} v${item.template_version}` : item.blocker;
-    return `<label class="notification-event-option ${active ? '' : 'is-blocked'}"><input type="checkbox" name="event_types" value="${escapeHtml(item.event_type)}" ${checked ? 'checked' : ''} ${active ? '' : 'disabled'}><span><b>${escapeHtml(notificationEventLabel(item.event_type))}</b><small>${escapeHtml(help)}</small></span></label>`;
-  }).join('');
+  const selectedEvents = new Set(selected);
+  return catalog.filter(item => item.integration_status === 'ACTIVE').map(item => `<label class="check-card"><input type="checkbox" name="event_types" value="${escapeHtml(item.event_type)}" ${selectedEvents.has(item.event_type) ? 'checked' : ''}><span><b>${escapeHtml(notificationEventLabel(item.event_type))}</b><small>${escapeHtml(item.description)}</small></span></label>`).join('');
 }
 
 function notificationConfigurationFields(channel, {required = false} = {}) {
@@ -154,6 +185,7 @@ function notificationRoutePayload(form) {
     ? Object.fromEntries(fieldNames.filter(name => data[name]).map(name => [name, name === 'smtp_port' ? Number(data[name]) : data[name]]))
     : {};
   return {
+    environment:data.environment,
     name:data.name,
     channel,
     event_types:new FormData(form).getAll('event_types'),
@@ -171,12 +203,13 @@ async function renderNotifications() {
   const counts = data.delivery_status_counts || {};
   const waiting = (counts.PENDING || 0) + (counts.RETRY_WAIT || 0) + (counts.SENDING || 0);
   const attention = (counts.DEAD_LETTER || 0) + (counts.OUTCOME_UNKNOWN || 0);
-  const createForm = data.can_manage ? `<details class="card notification-route-create"><summary><span><b>新建团队通知路由</b><small>每条路由只接收所选事件, 凭据独立加密保存</small></span><strong>展开</strong></summary><form id="notification-route-create-form" class="toolbox-content" data-version="0" data-channel="TELEGRAM"><div class="field-grid"><label>路由名称<input name="name" maxlength="120" required placeholder="例如 提案审核群"></label><label>通知渠道<select name="channel"><option value="TELEGRAM">Telegram</option><option value="SLACK">Slack</option><option value="LARK">飞书 / Lark</option><option value="EMAIL">邮件</option></select></label><label>路由状态<select name="enabled"><option value="true">启用</option><option value="false">停用</option></select></label></div><fieldset><legend>订阅事件</legend><div class="notification-event-grid">${notificationEventOptions(data.event_catalog, defaultEvents)}</div></fieldset><fieldset><legend>加密渠道配置</legend><div class="field-grid" data-notification-create-config>${notificationConfigurationFields('TELEGRAM', {required:true})}</div></fieldset><p class="safety-note">保存只建立通知路由。通知进程没有交易、资金、签名或广播接口；API 和页面只返回脱敏目的地。</p><div class="form-error" role="alert"></div><div class="form-actions"><button class="primary" type="submit">加密保存路由</button></div></form></details>` : '';
+  const defaultEnvironment = currentWorkflowEnvironment() === 'LIVE' ? 'LIVE' : 'TESTNET';
+  const createForm = data.can_manage ? `<details class="card notification-route-create"><summary><span class="notification-create-summary"><span class="notification-create-icon" aria-hidden="true">＋</span><span><b>新建团队通知路由</b><small>按环境选择渠道与事件，凭据独立加密保存</small></span></span><strong>开始配置</strong></summary><form id="notification-route-create-form" class="toolbox-content notification-create-form" data-version="0" data-channel="TELEGRAM"><section class="notification-form-section"><div class="notification-section-heading"><span>01</span><div><b>基础设置</b><small>路由只在所选环境接收事件</small></div></div><div class="field-grid notification-create-basics"><label>环境<select name="environment"><option value="TESTNET" ${defaultEnvironment === 'TESTNET' ? 'selected' : ''}>测试模式</option><option value="LIVE" ${defaultEnvironment === 'LIVE' ? 'selected' : ''}>生产模式</option></select></label><label>路由名称<input name="name" maxlength="120" required placeholder="例如 提案审核群"></label><label>通知渠道<select name="channel"><option value="TELEGRAM">Telegram</option><option value="SLACK">Slack</option><option value="LARK">飞书 / Lark</option><option value="EMAIL">邮件</option></select></label><label>路由状态<select name="enabled"><option value="true">启用</option><option value="false">停用</option></select></label></div></section><fieldset class="notification-form-section notification-events-section"><legend><span>02</span><span><b>订阅事件</b><small>选择需要进入此路由的团队事件</small></span></legend><div class="notification-event-grid">${notificationEventOptions(data.event_catalog, defaultEvents)}</div></fieldset><fieldset class="notification-form-section notification-credentials-section"><legend><span>03</span><span><b>加密渠道配置</b><small>敏感字段保存后永不回显</small></span></legend><div class="field-grid" data-notification-create-config>${notificationConfigurationFields('TELEGRAM', {required:true})}</div></fieldset><footer class="notification-create-footer"><p class="safety-note">保存只建立通知路由。通知进程没有交易、资金、签名或广播接口；API 和页面只返回脱敏目的地。</p><div class="form-error" role="alert"></div><div class="form-actions"><button class="primary" type="submit">加密保存路由</button></div></footer></form></details>` : '';
   const routeCards = data.routes.map(item => {
     const destination = item.configuration_metadata?.destination_hint || '已加密配置';
     const eventTags = item.event_types.map(eventType => `<span class="tag">${escapeHtml(notificationEventLabel(eventType))}</span>`).join('');
-    if (!data.can_manage) return `<article class="card notification-route-card"><div class="card-heading"><div><p class="eyebrow">${escapeHtml(notificationChannelLabel(item.channel))} · ${escapeHtml(destination)}</p><h2>${escapeHtml(item.name)}</h2></div><span class="status-pill ${item.enabled ? 'status-APPROVED' : 'status-DISABLED'}">${item.enabled ? '已启用' : '已停用'}</span></div><div class="tag-row">${eventTags}</div><dl class="definition-grid">${definition('配置状态', 'AES-256-GCM 加密')}${definition('路由 / 凭据版本', `${item.version} / ${item.credential_version}`)}${definition('最近更新', fmtDate(item.updated_at))}</dl></article>`;
-    return `<article class="card notification-route-card"><div class="card-heading"><div><p class="eyebrow">${escapeHtml(notificationChannelLabel(item.channel))} · ${escapeHtml(destination)}</p><h2>${escapeHtml(item.name)}</h2></div><span class="status-pill ${item.enabled ? 'status-APPROVED' : 'status-DISABLED'}">${item.enabled ? '已启用' : '已停用'}</span></div><form class="notification-route-form" data-route-id="${escapeHtml(item.notification_route_id)}" data-version="${item.version}" data-channel="${escapeHtml(item.channel)}"><div class="field-grid"><label>路由名称<input name="name" value="${escapeHtml(item.name)}" maxlength="120" required></label><label>通知渠道<input value="${escapeHtml(notificationChannelLabel(item.channel))}" disabled><input name="channel" type="hidden" value="${escapeHtml(item.channel)}"></label><label>路由状态<select name="enabled"><option value="true" ${item.enabled ? 'selected' : ''}>启用</option><option value="false" ${item.enabled ? '' : 'selected'}>停用</option></select></label></div><fieldset><legend>订阅事件</legend><div class="notification-event-grid">${notificationEventOptions(data.event_catalog, item.event_types)}</div></fieldset><details class="notification-credential-rotate"><summary><span><b>轮换加密渠道配置</b><small>留空则保留当前凭据版本</small></span><strong>展开</strong></summary><div class="field-grid">${notificationConfigurationFields(item.channel)}</div></details><div class="form-error" role="alert"></div><div class="form-actions"><button class="secondary" type="button" data-notification-test ${item.enabled ? '' : 'disabled title="先启用并保存路由"'}>加入测试队列</button><button class="primary" type="submit">保存路由版本</button></div></form></article>`;
+    if (!data.can_manage) return `<article class="card notification-route-card"><div class="card-heading"><div><p class="eyebrow">${escapeHtml(fmtExecutionMode(item.environment || 'LIVE'))} · ${escapeHtml(notificationChannelLabel(item.channel))} · ${escapeHtml(destination)}</p><h2>${escapeHtml(item.name)}</h2></div><span class="status-pill ${item.enabled ? 'status-APPROVED' : 'status-DISABLED'}">${item.enabled ? '已启用' : '已停用'}</span></div><div class="tag-row">${eventTags}</div><dl class="definition-grid">${definition('配置状态', 'AES-256-GCM 加密')}${definition('路由 / 凭据版本', `${item.version} / ${item.credential_version}`)}${definition('最近更新', fmtDate(item.updated_at))}</dl></article>`;
+    return `<article class="card notification-route-card"><div class="card-heading"><div><p class="eyebrow">${escapeHtml(fmtExecutionMode(item.environment || 'LIVE'))} · ${escapeHtml(notificationChannelLabel(item.channel))} · ${escapeHtml(destination)}</p><h2>${escapeHtml(item.name)}</h2></div><span class="status-pill ${item.enabled ? 'status-APPROVED' : 'status-DISABLED'}">${item.enabled ? '已启用' : '已停用'}</span></div><form class="notification-route-form" data-route-id="${escapeHtml(item.notification_route_id)}" data-route-name="${escapeHtml(item.name)}" data-version="${item.version}" data-channel="${escapeHtml(item.channel)}"><input name="environment" type="hidden" value="${escapeHtml(item.environment || 'LIVE')}"><div class="field-grid"><label>路由名称<input name="name" value="${escapeHtml(item.name)}" maxlength="120" required></label><label>通知渠道<input value="${escapeHtml(notificationChannelLabel(item.channel))}" disabled><input name="channel" type="hidden" value="${escapeHtml(item.channel)}"></label><label>路由状态<select name="enabled"><option value="true" ${item.enabled ? 'selected' : ''}>启用</option><option value="false" ${item.enabled ? '' : 'selected'}>停用</option></select></label></div><fieldset><legend>订阅事件</legend><div class="notification-event-grid">${notificationEventOptions(data.event_catalog, item.event_types)}</div></fieldset><details class="notification-credential-rotate"><summary><span><b>轮换加密渠道配置</b><small>留空则保留当前凭据版本</small></span><strong>展开</strong></summary><div class="field-grid">${notificationConfigurationFields(item.channel)}</div></details><div class="form-error" role="alert"></div><div class="form-actions"><button class="secondary" type="button" data-notification-test ${item.enabled ? '' : 'disabled title="先启用并保存路由"'}>加入测试队列</button><button class="primary" type="submit">保存路由版本</button><button class="danger" type="button" data-delete-notification-route>删除路由</button></div></form></article>`;
   }).join('');
   const deliveryRows = data.deliveries.map(item => {
     const route = routesById.get(item.notification_route_id);
@@ -228,5 +261,17 @@ async function renderNotifications() {
         await route();
       } catch (error) { showApiError(error, form.querySelector('.form-error')); }
     }));
+    form.querySelector('[data-delete-notification-route]')?.addEventListener('click', async event => {
+      const trigger = event.currentTarget;
+      const confirmed = await confirmAction({title:`删除通知路由“${form.dataset.routeName}”？`, message:'路由会停止接收新事件，加密渠道凭据会被清除，等待或重试中的投递会取消；已发送与历史投递记录继续保留。正在发送的投递完成前服务端会阻断删除。', confirmLabel:'确认删除路由'});
+      if (!confirmed) return;
+      await withPending(trigger, '删除中…', async () => {
+        try {
+          await api(`/api/notification-routes/${form.dataset.routeId}`, {method:'DELETE', body:JSON.stringify({expected_version:Number(form.dataset.version), idempotency_key:crypto.randomUUID()})});
+          showToast('通知路由已删除；历史投递记录已保留');
+          await route();
+        } catch (error) { showApiError(error, form.querySelector('.form-error')); }
+      });
+    });
   });
 }

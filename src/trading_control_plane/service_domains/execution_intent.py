@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from trading_control_plane.repositories.execution import find_position_for_scope
 from trading_control_plane.service_component import ServiceComponent
 
 # The domain implementation intentionally consumes the explicit service_core export surface.
@@ -65,7 +66,7 @@ class IntentExecutionService(ServiceComponent):
                         Proposal.proposal_id == authorization.proposal_id
                     )
                 )
-                or ExecutionEnvironment.SHADOW.value
+                or ""
             )
             self.transactions._require_team_environment(active_team, proposal_environment)
             digest, response = self.transactions._idempotency(
@@ -76,7 +77,7 @@ class IntentExecutionService(ServiceComponent):
                 payload={**payload, "team_id": str(active_team.team_id)},
             )
             if response is not None:
-                return self.facade._intent_creation(response)
+                return self._intent_creation(response)
             self.transactions._lock_risk_capacity(session, authorization.team_id)
             authorization = session.get(
                 TradingAuthorization,
@@ -86,7 +87,7 @@ class IntentExecutionService(ServiceComponent):
             )
             if authorization is None:
                 _reject("AUTHORIZATION_INACTIVE", "authorization is missing or inactive")
-            policy = self.facade._active_risk_policy(session, authorization.team_id)
+            policy = self._active_risk_policy(session, authorization.team_id)
             auto_add_gate: CapabilityGate | None = None
             if kind is IntentKind.ADD:
                 auto_add_gate = session.get(CapabilityGate, "AUTO_ADD", with_for_update=True)
@@ -134,11 +135,11 @@ class IntentExecutionService(ServiceComponent):
                         "this frozen proposal already produced its one initial intent",
                     )
 
-            occupied_risk = self.facade._occupied_risk(session, proposal.team_id)
+            occupied_risk = self._occupied_risk(session, proposal.team_id)
             risk_amount = authorization.risk_limit * quantity / authorization.quantity_limit
             if risk_amount <= 0 or risk_amount > authorization.risk_limit:
                 _reject("AUTHORIZATION_RISK_EXCEEDED", "request exceeds risk authorization")
-            inputs, _, _, effective_max_total_risk = self.facade._server_risk_context(
+            inputs, _, _, effective_max_total_risk = self._server_risk_context(
                 session,
                 proposal=proposal,
                 policy=policy,
@@ -149,7 +150,7 @@ class IntentExecutionService(ServiceComponent):
                 now=now,
             )
             final_outcome = evaluate_risk(
-                self.facade._risk_policy_input(
+                self._risk_policy_input(
                     policy,
                     effective_max_total_risk=(
                         effective_max_total_risk
@@ -163,58 +164,19 @@ class IntentExecutionService(ServiceComponent):
                 reason = final_outcome.reasons[0] if final_outcome.reasons else "RISK_REJECTED"
                 _reject("FINAL_RISK_CHECK_FAILED", reason)
 
-            position: Position | None = None
-            shadow_position: ShadowPosition | None = None
-            shadow_account: TeamShadowAccount | None = None
-            unified_shadow = (
-                proposal.environment == ExecutionEnvironment.SHADOW.value
-                and active_team.execution_mode_locked_at is not None
+            position = session.scalar(
+                select(Position)
+                .where(
+                    Position.team_id == proposal.team_id,
+                    Position.account_id == account_id,
+                    Position.venue == venue,
+                    Position.environment == proposal.environment,
+                    Position.instrument_id == instrument_id,
+                )
+                .with_for_update()
             )
-            if unified_shadow:
-                shadow_account = session.scalar(
-                    select(TeamShadowAccount)
-                    .where(
-                        TeamShadowAccount.team_id == proposal.team_id,
-                        TeamShadowAccount.status == "ACTIVE",
-                    )
-                    .with_for_update()
-                )
-                if shadow_account is None:
-                    _reject(
-                        "SHADOW_ACCOUNT_MISSING",
-                        "Team virtual account is not initialized",
-                    )
-                shadow_instrument = session.scalar(
-                    select(ShadowInstrument).where(
-                        ShadowInstrument.team_id == proposal.team_id,
-                        ShadowInstrument.catalog_instrument_id == instrument_id,
-                    )
-                )
-                if shadow_instrument is not None:
-                    shadow_position = session.scalar(
-                        select(ShadowPosition)
-                        .where(
-                            ShadowPosition.shadow_account_id == shadow_account.shadow_account_id,
-                            ShadowPosition.generation == shadow_account.generation,
-                            ShadowPosition.shadow_instrument_id
-                            == shadow_instrument.shadow_instrument_id,
-                        )
-                        .with_for_update()
-                    )
-            else:
-                position = session.scalar(
-                    select(Position)
-                    .where(
-                        Position.team_id == proposal.team_id,
-                        Position.account_id == account_id,
-                        Position.venue == venue,
-                        Position.environment == proposal.environment,
-                        Position.instrument_id == instrument_id,
-                    )
-                    .with_for_update()
-                )
-                if position is None or position.fact_status != FactStatus.KNOWN.value:
-                    _reject("POSITION_UNKNOWN", "new risk requires a current known position fact")
+            if position is None or position.fact_status != FactStatus.KNOWN.value:
+                _reject("POSITION_UNKNOWN", "new risk requires a current known position fact")
 
             campaign = session.scalar(
                 select(Campaign)
@@ -223,13 +185,7 @@ class IntentExecutionService(ServiceComponent):
             )
             campaign_created = campaign is None
             if kind is IntentKind.INITIAL:
-                if unified_shadow:
-                    current_quantity = (
-                        Decimal(0) if shadow_position is None else shadow_position.quantity
-                    )
-                else:
-                    assert position is not None
-                    current_quantity = position.quantity
+                current_quantity = position.quantity
                 if current_quantity != 0:
                     _reject("POSITION_NOT_FLAT", "INITIAL requires a confirmed flat position")
                 conflicting_campaign = session.scalar(
@@ -282,7 +238,7 @@ class IntentExecutionService(ServiceComponent):
                 instrument = session.get(Instrument, proposal.instrument_id)
                 if instrument is None:
                     _reject("INSTRUMENT_UNAVAILABLE", "proposal instrument is unavailable")
-                self.facade._validate_add_candidate(
+                self._validate_add_candidate(
                     proposal=proposal,
                     instrument=instrument,
                     candidate=add_candidate,
@@ -299,7 +255,7 @@ class IntentExecutionService(ServiceComponent):
                 }:
                     _reject("ADD_CAMPAIGN_REQUIRED", "ADD requires an existing known campaign")
                 expected_long = campaign.direction == Direction.LONG.value
-                current_position = shadow_position if unified_shadow else position
+                current_position = position
                 if (
                     current_position is None
                     or current_position.quantity == 0
@@ -320,23 +276,12 @@ class IntentExecutionService(ServiceComponent):
             )
             if active is not None:
                 _reject("ACTIVE_ORDER_INTENT", "campaign already has unresolved intent")
-            occupied_account_risk = self.facade._occupied_risk(
+            occupied_account_risk = self._occupied_risk(
                 session,
                 proposal.team_id,
                 account_id=proposal.account_id,
                 venue=proposal.venue,
             )
-            if unified_shadow:
-                assert shadow_account is not None
-                risk_available = max(
-                    Decimal(0),
-                    shadow_account.available_balance - occupied_account_risk,
-                )
-                if risk_amount > risk_available:
-                    _reject(
-                        "SHADOW_CAPITAL_INSUFFICIENT",
-                        "requested risk exceeds unreserved virtual capital",
-                    )
             if (
                 policy.max_account_risk is None
                 or policy.max_single_loss is None
@@ -358,12 +303,6 @@ class IntentExecutionService(ServiceComponent):
             session.add(reservation)
             session.flush()
             side = "BUY" if direction is Direction.LONG else "SELL"
-            legacy_position_id = None
-            legacy_position_observed_at = None
-            if not unified_shadow:
-                assert position is not None
-                legacy_position_id = position.position_id
-                legacy_position_observed_at = position.observed_at
             intent = OrderIntent(
                 campaign_id=campaign.campaign_id,
                 authorization_id=authorization_id,
@@ -371,7 +310,7 @@ class IntentExecutionService(ServiceComponent):
                 kind=kind.value,
                 side=side,
                 quantity=quantity,
-                limit_price=self.facade._proposal_limit_price(proposal),
+                limit_price=self._proposal_limit_price(proposal),
                 reduce_only=False,
                 trigger_source=(
                     None if add_candidate is None else f"PERPTAPE:{add_candidate.candidate_id}"
@@ -379,8 +318,8 @@ class IntentExecutionService(ServiceComponent):
                 trigger_observed_at=(None if add_candidate is None else add_candidate.observed_at),
                 add_unit_consumed=False,
                 target_version=None,
-                position_id=legacy_position_id,
-                position_observed_at=legacy_position_observed_at,
+                position_id=position.position_id,
+                position_observed_at=position.observed_at,
                 status=OrderIntentStatus.READY.value,
                 semantic_hash=digest,
                 actor_id=str(actor_id),
@@ -613,15 +552,7 @@ class IntentExecutionService(ServiceComponent):
                         RiskPolicy.active,
                     )
                 )
-                position = session.scalar(
-                    select(Position).where(
-                        Position.team_id == campaign.team_id,
-                        Position.account_id == campaign.account_id,
-                        Position.venue == campaign.venue,
-                        Position.environment == campaign.environment,
-                        Position.instrument_id == campaign.instrument_id,
-                    )
-                )
+                position = find_position_for_scope(session, campaign)
                 scope = _scope_key(campaign.environment, campaign.account_id, campaign.venue)
                 latest_reconciliation = session.scalar(
                     select(ReconciliationRun)
@@ -637,7 +568,7 @@ class IntentExecutionService(ServiceComponent):
                     and position is not None
                     and position.fact_status == FactStatus.KNOWN.value
                     and position.quantity == 0
-                    and not self.facade._fact_is_stale(
+                    and not self._fact_is_stale(
                         position.observed_at,
                         now,
                         timedelta(seconds=policy.max_fact_age_seconds),
@@ -658,7 +589,7 @@ class IntentExecutionService(ServiceComponent):
                     )
                     if authorization is not None:
                         authorization.active = False
-                    self.facade._update_campaign_pnl(session, campaign, position, now=now)
+                    self._update_campaign_pnl(session, campaign, position, now=now)
             venue_order = session.scalar(
                 select(VenueOrder).where(VenueOrder.order_intent_id == intent_id)
             )
@@ -850,6 +781,7 @@ class IntentExecutionService(ServiceComponent):
         account = session.scalar(
             select(ExchangeAccount).where(
                 ExchangeAccount.team_id == team_id,
+                ExchangeAccount.environment == "LIVE",
                 ExchangeAccount.account_id == account_id,
                 ExchangeAccount.venue == venue,
             )
@@ -881,7 +813,7 @@ class IntentExecutionService(ServiceComponent):
                 "LIVE venue action requires an active LIVE team",
             )
         assert account.runtime_service_principal_id is not None
-        self.facade._require_exact_runtime_principal(
+        self._require_exact_runtime_principal(
             session,
             principal_id=account.runtime_service_principal_id,
             team=team,

@@ -84,9 +84,6 @@ class TransactionService:
                     "CapitalTransfer": CapitalTransfer,
                     "DirectCapitalOperation": DirectCapitalOperation,
                     "CapitalAutomationPolicy": CapitalAutomationPolicy,
-                    "ShadowOrder": ShadowOrder,
-                    "ShadowFill": ShadowFill,
-                    "ShadowPosition": ShadowPosition,
                 }
                 model = direct_account_models.get(object_type)
                 if model is not None:
@@ -338,38 +335,21 @@ class TransactionService:
 
     @staticmethod
     def _require_team_environment(team: Team, environment: ExecutionEnvironment) -> None:
-        mode = (
-            TeamExecutionMode.LIVE.value
-            if team.execution_mode == TeamExecutionMode.SETUP.value and team.trading_enabled
-            else team.execution_mode
-        )
+        mode = team.execution_mode
         if mode == TeamExecutionMode.SETUP.value:
             _reject(
                 "TEAM_SETUP_INCOMPLETE",
-                "team must complete setup and explicitly enter SHADOW mode",
+                "team must complete setup and explicitly select TESTNET or LIVE",
             )
         if environment.value != mode:
-            if mode == TeamExecutionMode.SHADOW.value:
-                _reject(
-                    "TEAM_SHADOW_ONLY",
-                    "Team mode is locked to SHADOW; TESTNET and LIVE workflows are blocked",
-                )
             if mode == TeamExecutionMode.TESTNET.value:
                 _reject(
                     "TEAM_TESTNET_ONLY",
-                    "Team mode is locked to TESTNET; SHADOW and LIVE workflows are blocked",
+                    "Team mode is locked to TESTNET; LIVE workflows are blocked",
                 )
             _reject(
                 "TEAM_LIVE_ONLY",
-                "Team mode is locked to LIVE; SHADOW and TESTNET workflows are blocked",
-            )
-        if (
-            mode == TeamExecutionMode.SHADOW.value
-            and environment is not ExecutionEnvironment.SHADOW
-        ):
-            _reject(
-                "TEAM_SHADOW_ONLY",
-                "team is isolated to SHADOW; TESTNET and LIVE workflows are blocked",
+                "Team mode is locked to LIVE; TESTNET workflows are blocked",
             )
 
     def can_user(
@@ -391,6 +371,8 @@ class TransactionService:
         session: Session,
         user_id: UUID,
         action: str,
+        *,
+        allow_setup: bool = False,
     ) -> Team:
         """Require an active-team grant; the eventual write rechecks object scope."""
 
@@ -406,7 +388,7 @@ class TransactionService:
 
         _user, _workspace, team = self._active_scope(session, user_id)
         assert team is not None
-        if not team.trading_enabled and action not in TEAM_SETUP_ACTIONS:
+        if not team.trading_enabled and action not in TEAM_SETUP_ACTIONS and not allow_setup:
             _reject(
                 "TEAM_NOT_OPERATIONAL",
                 "team data scope is not ready; configure scoped accounts and risk policy first",
@@ -429,6 +411,7 @@ class TransactionService:
         *,
         actor_id: UUID,
         notification_route_id: UUID | None,
+        environment: str = "LIVE",
         name: str,
         channel: str,
         event_types: list[str],
@@ -439,6 +422,9 @@ class TransactionService:
         now: datetime,
     ) -> dict[str, Any]:
         normalized_name = " ".join(name.strip().split())
+        normalized_environment = environment.strip().upper()
+        if normalized_environment not in {"TESTNET", "LIVE"}:
+            _reject("NOTIFICATION_ROUTE_INVALID", "environment must be TESTNET or LIVE")
         normalized_channel = channel.strip().upper()
         normalized_events = normalize_notification_event_types(event_types)
         if not normalized_name or len(normalized_name) > 120:
@@ -456,6 +442,7 @@ class TransactionService:
                     .where(
                         NotificationRoute.notification_route_id == notification_route_id,
                         NotificationRoute.team_id == team.team_id,
+                        NotificationRoute.deleted_at.is_(None),
                     )
                     .with_for_update()
                 )
@@ -469,6 +456,11 @@ class TransactionService:
                 _reject(
                     "NOTIFICATION_ROUTE_CHANNEL_IMMUTABLE",
                     "create a new route to change notification channel",
+                )
+            if route is not None and route.environment != normalized_environment:
+                _reject(
+                    "NOTIFICATION_ROUTE_ENVIRONMENT_IMMUTABLE",
+                    "create a new route to change notification environment",
                 )
             route_id = (
                 uuid5(
@@ -499,6 +491,7 @@ class TransactionService:
                 )
             payload = {
                 "notification_route_id": str(route_id),
+                "environment": normalized_environment,
                 "name": normalized_name,
                 "channel": normalized_channel,
                 "event_types": normalized_events,
@@ -527,8 +520,10 @@ class TransactionService:
             name_conflict = session.scalar(
                 select(NotificationRoute.notification_route_id).where(
                     NotificationRoute.team_id == team.team_id,
+                    NotificationRoute.environment == normalized_environment,
                     NotificationRoute.name == normalized_name,
                     NotificationRoute.notification_route_id != route_id,
+                    NotificationRoute.deleted_at.is_(None),
                 )
             )
             if name_conflict is not None:
@@ -544,7 +539,11 @@ class TransactionService:
                     _canonical(normalized_configuration),
                     team_id=team.team_id,
                     object_id=route_id,
-                    purpose=f"notification-route:{normalized_channel.lower()}",
+                    purpose=(
+                        f"notification-route:{normalized_channel.lower()}"
+                        if normalized_environment == "LIVE"
+                        else f"notification-route:testnet:{normalized_channel.lower()}"
+                    ),
                     credential_version=credential_version,
                 )
                 ciphertext = encrypted.ciphertext
@@ -553,6 +552,7 @@ class TransactionService:
                 route = NotificationRoute(
                     notification_route_id=route_id,
                     team_id=team.team_id,
+                    environment=normalized_environment,
                     name=normalized_name,
                     channel=normalized_channel,
                     event_types=normalized_events,
@@ -569,6 +569,7 @@ class TransactionService:
                 session.add(route)
             else:
                 route.name = normalized_name
+                route.environment = normalized_environment
                 route.event_types = normalized_events
                 route.enabled = enabled
                 route.configuration_ciphertext = ciphertext
@@ -604,6 +605,118 @@ class TransactionService:
                     f"credential_version={route.credential_version}"
                 ),
                 correlation_id=correlation_id,
+                object_version=route.version,
+                idempotency_key=idempotency_key,
+                workspace_id=team.workspace_id,
+                team_id=team.team_id,
+                now=now,
+            )
+            return response
+
+    def delete_notification_route(
+        self,
+        *,
+        actor_id: UUID,
+        notification_route_id: UUID,
+        expected_version: int,
+        idempotency_key: str,
+        now: datetime,
+    ) -> dict[str, Any]:
+        """Archive a route, clear its secret, and retain immutable delivery history."""
+
+        with self.database.session_factory.begin() as session:
+            team = self._require_role(session, actor_id, "notification.manage")
+            route = session.scalar(
+                select(NotificationRoute)
+                .where(
+                    NotificationRoute.notification_route_id == notification_route_id,
+                    NotificationRoute.team_id == team.team_id,
+                )
+                .with_for_update()
+            )
+            if route is None:
+                _reject(
+                    "NOTIFICATION_ROUTE_NOT_FOUND",
+                    "notification route does not exist in the active team",
+                )
+            caller = f"{actor_id}:{team.team_id}"
+            payload = {
+                "notification_route_id": str(notification_route_id),
+                "expected_version": expected_version,
+            }
+            digest, replay = self._idempotency(
+                session,
+                caller_id=caller,
+                operation=f"notification-route.delete:{notification_route_id}",
+                idempotency_key=idempotency_key,
+                payload=payload,
+            )
+            if replay is not None:
+                return replay
+            if route.deleted_at is not None:
+                _reject(
+                    "NOTIFICATION_ROUTE_NOT_FOUND",
+                    "notification route does not exist in the active team",
+                )
+            if route.version != expected_version:
+                _reject("VERSION_CONFLICT", "notification route changed before deletion")
+            sending = session.scalar(
+                select(NotificationDelivery.notification_delivery_id)
+                .where(
+                    NotificationDelivery.team_id == team.team_id,
+                    NotificationDelivery.notification_route_id == notification_route_id,
+                    NotificationDelivery.status == "SENDING",
+                )
+                .limit(1)
+            )
+            if sending is not None:
+                _reject(
+                    "NOTIFICATION_ROUTE_DELETE_BLOCKED",
+                    "wait for the in-flight notification attempt to reach a known outcome",
+                )
+            session.execute(
+                update(NotificationDelivery)
+                .where(
+                    NotificationDelivery.team_id == team.team_id,
+                    NotificationDelivery.notification_route_id == notification_route_id,
+                    NotificationDelivery.status.in_(["PENDING", "RETRY_WAIT"]),
+                )
+                .values(
+                    status="CANCELLED",
+                    last_error_code="NOTIFICATION_ROUTE_DELETED",
+                    updated_at=now,
+                )
+            )
+            route.enabled = False
+            route.configuration_ciphertext = "deleted"
+            route.configuration_metadata = {"deleted": True}
+            route.deleted_at = now
+            route.deleted_by = actor_id
+            route.version += 1
+            route.updated_by = actor_id
+            route.updated_at = now
+            response = {
+                "notification_route_id": str(notification_route_id),
+                "status": "DELETED",
+                "version": route.version,
+            }
+            self._save_receipt(
+                session,
+                caller_id=caller,
+                operation=f"notification-route.delete:{notification_route_id}",
+                idempotency_key=idempotency_key,
+                semantic_hash=digest,
+                response=response,
+                now=now,
+            )
+            self._audit(
+                session,
+                actor_id=str(actor_id),
+                event_type="NOTIFICATION_ROUTE_DELETED",
+                object_type="NotificationRoute",
+                object_id=notification_route_id,
+                reason="enabled=false;credential=cleared;delivery_history_retained=true",
+                correlation_id=uuid4(),
                 object_version=route.version,
                 idempotency_key=idempotency_key,
                 workspace_id=team.workspace_id,
@@ -664,7 +777,10 @@ class TransactionService:
         route_query = select(NotificationRoute).where(
             NotificationRoute.team_id == team.team_id,
             NotificationRoute.enabled,
+            NotificationRoute.deleted_at.is_(None),
         )
+        if environment is not None:
+            route_query = route_query.where(NotificationRoute.environment == environment)
         if target_route_id is not None:
             route_query = route_query.where(
                 NotificationRoute.notification_route_id == target_route_id
@@ -875,6 +991,7 @@ class TransactionService:
                 select(NotificationRoute).where(
                     NotificationRoute.team_id == team.team_id,
                     NotificationRoute.notification_route_id == notification_route_id,
+                    NotificationRoute.deleted_at.is_(None),
                 )
             )
             if route is None:

@@ -13,8 +13,6 @@ from trading_control_plane.api_schemas import (
     ManualProposalRequest,
     NotificationRouteWriteRequest,
     ProposalDefaultConfigRequest,
-    ShadowScopeInitializeRequest,
-    ShadowSimulationRequest,
     SystemProposalRequest,
     TeamMemberInviteRequest,
     TransferProposalRequest,
@@ -155,40 +153,6 @@ def test_trade_proposals_and_defaults_require_at_least_eight_hours() -> None:
                 "expires_in_minutes": 120,
                 "rationale": "too short for human review",
                 "idempotency_key": "short-default",
-            }
-        )
-
-
-def test_shadow_schemas_normalize_currency_and_bound_costs() -> None:
-    scope = ShadowScopeInitializeRequest.model_validate(
-        {
-            "account_id": "sim-1",
-            "venue": "BYBIT",
-            "instrument_id": "00000000-0000-0000-0000-000000000001",
-            "currency": "usdt",
-            "initial_equity": "10000",
-            "idempotency_key": "shadow-scope",
-        }
-    )
-    simulation = ShadowSimulationRequest.model_validate(
-        {
-            "expected_version": 1,
-            "reference_price": "100",
-            "idempotency_key": "shadow-fill",
-        }
-    )
-
-    assert scope.currency == "USDT"
-    assert simulation.fee_bps == Decimal("4")
-    assert simulation.slippage_bps == Decimal("2")
-
-    with pytest.raises(ValidationError):
-        ShadowSimulationRequest.model_validate(
-            {
-                "expected_version": 1,
-                "reference_price": "100",
-                "slippage_bps": "501",
-                "idempotency_key": "invalid-shadow-fill",
             }
         )
 

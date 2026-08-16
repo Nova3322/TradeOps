@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from datetime import UTC, datetime, timedelta
 
+from conftest import add_exchange_account_fixture
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy import select
 
@@ -153,9 +154,10 @@ async def exercise_access_management(database: Database) -> None:
         await stale_session_client.aclose()
         replay = await client.post("/api/auth/password", json=password_change_payload)
         assert replay.status_code == 200, replay.text
-        assert replay.json()["session"]["auth_version"] == password_change.json()["session"][
-            "auth_version"
-        ]
+        assert (
+            replay.json()["session"]["auth_version"]
+            == password_change.json()["session"]["auth_version"]
+        )
         assert (await client.get("/api/auth/session")).status_code == 200
         with database.session_factory() as session:
             password_audit = session.scalar(
@@ -214,7 +216,10 @@ async def exercise_access_management(database: Database) -> None:
         assert (await client.get("/api/campaigns")).status_code == 403
         assert (await client.get("/api/capital")).status_code == 403
         assert (await client.get("/api/admin/users")).status_code == 403
-        assert (await client.get("/admin/users")).status_code == 403
+        member_shell = await client.get("/admin/users")
+        assert member_shell.status_code == 200
+        assert "text/html" in member_shell.headers["content-type"]
+        assert "reviewer-only" not in member_shell.text
 
         await login(client, "mixed-non-admin")
         assert (await client.get("/api/capital")).status_code == 200
@@ -248,9 +253,43 @@ async def exercise_access_management(database: Database) -> None:
         assert team_disabled_login.json()["session"]["active_team"] is None
         assert team_disabled_login.json()["session"]["roles"] == []
 
+        await login(client, "admin")
+        remove_payload = {"idempotency_key": "remove-reviewer-from-team"}
+        removed = await client.request(
+            "DELETE",
+            f"/api/admin/team-members/{reviewer_id}",
+            json=remove_payload,
+        )
+        assert removed.status_code == 200, removed.text
+        assert removed.json()["status"] == "REMOVED"
+        assert all(item["user_id"] != reviewer_id for item in removed.json()["data"])
+        replay = await client.request(
+            "DELETE",
+            f"/api/admin/team-members/{reviewer_id}",
+            json=remove_payload,
+        )
+        assert replay.status_code == 200, replay.text
+        readded = await client.post(
+            "/api/admin/team-members",
+            json={
+                "username": "reviewer-only",
+                "roles": ["REVIEWER"],
+                "account_scope": "acct-live",
+                "venue_scope": "BINANCE",
+                "idempotency_key": "readd-reviewer-to-team",
+            },
+        )
+        assert readded.status_code == 200, readded.text
+        assert any(item["user_id"] == reviewer_id for item in readded.json()["data"])
+
     with database.session_factory() as session:
         event_types = set(session.scalars(select(AuditEvent.event_type)).all())
-        assert {"USER_ACCESS_CREATED", "USER_ACCESS_UPDATED"} <= event_types
+        assert {
+            "USER_ACCESS_CREATED",
+            "USER_ACCESS_UPDATED",
+            "TEAM_MEMBER_REMOVED",
+            "TEAM_MEMBER_ADDED",
+        } <= event_types
 
 
 def test_only_system_admin_manages_members_while_admin_keeps_highest_permissions(
@@ -262,22 +301,13 @@ def test_only_system_admin_manages_members_while_admin_keeps_highest_permissions
 async def exercise_six_identity_permission_matrix(database: Database) -> None:
     service = TradingService(database)
     admin_id = service.bootstrap_admin("matrix-admin", now=datetime.now(UTC))
-    now = datetime.now(UTC)
     for venue, account_id in (
         ("BINANCE", "acct-live"),
         ("HYPERLIQUID", "acct-hl"),
         ("OKX", "acct-okx"),
         ("BYBIT", "acct-bybit"),
     ):
-        service.create_exchange_account(
-            actor_id=admin_id,
-            account_id=account_id,
-            venue=venue,
-            label=f"{venue} matrix account",
-            credentials=None,
-            idempotency_key=f"matrix-{venue.lower()}-account",
-            now=now,
-        )
+        add_exchange_account_fixture(service.database, admin_id, account_id, venue)
     app = access_app(database)
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as admin_http:
         await login(admin_http, "matrix-admin")
@@ -320,7 +350,6 @@ async def exercise_six_identity_permission_matrix(database: Database) -> None:
             "/api/venues/bybit/facts?account_id=acct-bybit",
             "/api/capital",
             "/api/admin/users",
-            "/admin/users",
         )
         allowed = {
             "matrix-admin": set(endpoints),
@@ -368,6 +397,9 @@ async def exercise_six_identity_permission_matrix(database: Database) -> None:
                         endpoint,
                         response.text,
                     )
+                member_shell = await member_http.get("/admin/users")
+                assert member_shell.status_code == 200
+                assert "text/html" in member_shell.headers["content-type"]
                 if username != "matrix-admin":
                     denied = await member_http.get("/api/admin/users")
                     assert "matrix-admin" not in denied.text

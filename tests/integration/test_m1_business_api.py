@@ -7,10 +7,11 @@ from decimal import Decimal
 from typing import Any
 from uuid import UUID
 
-from conftest import set_test_team_environment
+from conftest import add_exchange_account_fixture, set_test_team_environment
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy import func, select
+from workflow_builder import ActorSpec, WorkflowFixture
 
 from trading_control_plane.api import create_app
 from trading_control_plane.binance import BinanceInstrument
@@ -20,15 +21,11 @@ from trading_control_plane.domain import (
     ProposalSource,
     RiskTier,
     Role,
-    SystemRiskState,
 )
 from trading_control_plane.models import (
     AuditEvent,
     Instrument,
-    OrderIntent,
     Proposal,
-    RiskDecision,
-    TradingAuthorization,
 )
 from trading_control_plane.perptape import PerptapeClient, perptape_legacy_candidate_id
 from trading_control_plane.queries import TradingQueries
@@ -38,76 +35,57 @@ from trading_control_plane.telegram import MockTelegramGateway
 
 def seed(service: TradingService) -> dict[str, UUID]:
     now = datetime.now(UTC)
-    admin = service.bootstrap_admin("admin", now=now)
-    set_test_team_environment(service.database, admin, "SHADOW")
-    proposer = service.create_user("proposer", admin, now=now)
-    reviewer_one = service.create_user("reviewer-1", admin, now=now)
-    reviewer_two = service.create_user("reviewer-2", admin, now=now)
-    operator = service.create_user("operator", admin, now=now)
-    perptape = service.create_service_principal("perptape", admin, now=now)
-    runtime_sync = service.create_service_principal("runtime-sync", admin, now=now)
-    service.assign_role(proposer, Role.PROPOSER, admin, "acct-1", "BINANCE", now=now)
-    service.assign_role(reviewer_one, Role.REVIEWER, admin, "acct-1", "BINANCE", now=now)
-    service.assign_role(reviewer_two, Role.REVIEWER, admin, "acct-1", "BINANCE", now=now)
-    service.assign_role(operator, Role.OPERATOR, admin, "acct-1", "BINANCE", now=now)
-    service.assign_role(perptape, Role.PROPOSER, admin, "acct-1", "BINANCE", now=now)
-    service.assign_role(runtime_sync, Role.OPERATOR, admin, "acct-1", "BINANCE", now=now)
-    instrument = service.register_instrument(
-        actor_id=admin,
+    fixture = WorkflowFixture.create(
+        service,
+        now=now,
+        admin_username="admin",
+        account_id="acct-1",
         venue="BINANCE",
+        actors=(
+            ActorSpec("proposer", "proposer", Role.PROPOSER),
+            ActorSpec("reviewer_one", "reviewer-1", Role.REVIEWER),
+            ActorSpec("reviewer_two", "reviewer-2", Role.REVIEWER),
+            ActorSpec("operator", "operator", Role.OPERATOR),
+            ActorSpec("perptape", "perptape", Role.PROPOSER, service_principal=True),
+            ActorSpec(
+                "runtime_sync",
+                "runtime-sync",
+                Role.OPERATOR,
+                service_principal=True,
+            ),
+        ),
         symbol="BTCUSDT",
         tick_size=Decimal("0.1"),
         lot_size=Decimal("0.001"),
         minimum_notional=Decimal("5"),
-        contract_multiplier=Decimal("1"),
         quote_currency="USDT",
-        collateral_currency="USDT",
-        protection_supported=True,
-        now=now,
-    )
-    service.set_risk_policy(
-        actor_id=admin,
-        version="m1-risk-v1",
-        system_state=SystemRiskState.NORMAL,
-        max_total_risk=Decimal("100"),
-        max_account_risk=Decimal("100"),
-        max_single_loss=Decimal("100"),
-        max_consecutive_losses=3,
-        loss_cooldown=timedelta(hours=1),
+        risk_version="m1-risk-v1",
         max_fact_age=timedelta(minutes=5),
-        now=now,
+        mark_price=Decimal("120000"),
     )
-    service.record_position(
-        "acct-1",
+    return fixture.ids
+
+
+def add_live_account(service: TradingService, ids: dict[str, UUID]) -> str:
+    account_id = "live-acct-1"
+    now = datetime.now(UTC)
+    add_exchange_account_fixture(
+        service.database,
+        ids["admin"],
+        account_id,
         "BINANCE",
-        instrument,
-        Decimal("0"),
-        Decimal("0"),
-        Decimal("120000"),
-        True,
-        operator,
-        now=now,
+        environment="LIVE",
     )
-    service.record_account_equity(
-        "acct-1",
-        "BINANCE",
-        Decimal("10000"),
-        Decimal("9000"),
-        "USDT",
-        True,
-        operator,
-        now=now,
-    )
-    return {
-        "admin": admin,
-        "proposer": proposer,
-        "reviewer_one": reviewer_one,
-        "reviewer_two": reviewer_two,
-        "operator": operator,
-        "perptape": perptape,
-        "runtime_sync": runtime_sync,
-        "instrument": instrument,
-    }
+    for key, role in (
+        ("proposer", Role.PROPOSER),
+        ("reviewer_one", Role.REVIEWER),
+        ("reviewer_two", Role.REVIEWER),
+        ("operator", Role.OPERATOR),
+        ("perptape", Role.PROPOSER),
+        ("runtime_sync", Role.OPERATOR),
+    ):
+        service.assign_role(ids[key], role, ids["admin"], account_id, "BINANCE", now=now)
+    return account_id
 
 
 def perptape_client() -> PerptapeClient:
@@ -213,8 +191,6 @@ def app(
     database: Database,
     telegram: MockTelegramGateway,
     client: PerptapeClient | None = None,
-    *,
-    catalog_active: bool = True,
 ) -> FastAPI:
     settings = Settings(
         environment="test",
@@ -227,26 +203,11 @@ def app(
         _env_file=None,
     )
 
-    class StaticBinanceCatalog:
-        configured = True
-
-        def read_instrument(self, symbol: str) -> BinanceInstrument:
-            return BinanceInstrument(
-                symbol=symbol,
-                tick_size=Decimal("0.1"),
-                lot_size=Decimal("0.001"),
-                minimum_notional=Decimal("5"),
-                quote_currency="USDC" if symbol.endswith("USDC") else "USDT",
-                collateral_currency="USDC" if symbol.endswith("USDC") else "USDT",
-                active=catalog_active,
-            )
-
     return create_app(
         settings,
         database,
         client or perptape_client(),
         telegram,
-        binance_client=StaticBinanceCatalog(),  # type: ignore[arg-type]
     )
 
 
@@ -308,8 +269,9 @@ def test_team_risk_policy_api_versions_explicit_limits_and_rejects_non_admin(
                     "idempotency_key": "m1-risk-policy-loosened",
                 },
             )
-            assert loosened.status_code == 422
-            assert loosened.json()["error"]["code"] == "REVIEWED_POLICY_CHANGE_REQUIRED"
+            assert loosened.status_code == 200, loosened.text
+            loosened_policy = (await client.get("/api/risk-controls")).json()["policy"]
+            assert loosened_policy["revision"] == 3
 
             await login(client, "proposer")
             denied = await client.put(
@@ -322,7 +284,7 @@ def test_team_risk_policy_api_versions_explicit_limits_and_rejects_non_admin(
                     "max_consecutive_losses": 2,
                     "loss_cooldown_seconds": 7200,
                     "max_fact_age_seconds": 200,
-                    "expected_revision": 2,
+                    "expected_revision": 3,
                     "reason": "attempt outside assigned team risk administration",
                     "idempotency_key": "forbidden-risk-policy",
                 },
@@ -538,7 +500,6 @@ def test_opportunity_rejects_exact_but_inactive_catalog_instrument(
                     database,
                     MockTelegramGateway(),
                     perptape_client(),
-                    catalog_active=False,
                 )
             ),
             base_url="http://test",
@@ -802,176 +763,11 @@ def test_api_reuses_exact_legacy_proposal_without_deduplicating_another_contract
     )
 
 
-def test_perptape_to_review_to_risk_and_authorization_api_flow(
-    database: Database, service: TradingService
-) -> None:
-    seed(service)
-    telegram = MockTelegramGateway()
-
-    async def scenario() -> str:
-        async with AsyncClient(
-            transport=ASGITransport(app=app(database, telegram)), base_url="http://test"
-        ) as client:
-            await login(client, "proposer")
-            opportunities = await client.get("/api/opportunities")
-            assert opportunities.status_code == 200, opportunities.text
-            candidate = opportunities.json()["data"][0]
-            assert candidate["direction"] == "LONG"
-            assert candidate["proposal_eligible"] is True
-            assert candidate["proposal_blocker"] is None
-            payload = {
-                "account_id": "acct-1",
-                "risk_tier": "LOW",
-                "quantity": "1",
-                "max_risk": "40",
-                "expires_in_minutes": 480,
-                "invalidation_price": "118000",
-                "rationale": "review Perptape breakout",
-            }
-            created = await client.post(
-                f"/api/opportunities/{candidate['candidate_id']}/proposals", json=payload
-            )
-            assert created.status_code == 200, created.text
-            proposal = created.json()
-            assert proposal["source"] == "SYSTEM"
-            assert proposal["environment"] == "SHADOW"
-            assert proposal["status"] == "PENDING_REVIEW"
-            assert proposal["source_candidate_id"] == candidate["candidate_id"]
-            assert proposal["symbol"] == "BTCUSDT"
-            assert proposal["proposer_username"] == "perptape"
-            assert proposal["quote_currency"] == "USDT"
-            assert proposal["collateral_currency"] == "USDT"
-            proposal_id = proposal["proposal_id"]
-            version = proposal["version"]
-
-            listed = await client.get("/api/proposals?proposal_status=PENDING_REVIEW")
-            assert listed.status_code == 200, listed.text
-            assert listed.json()["data"][0]["symbol"] == "BTCUSDT"
-            assert listed.json()["data"][0]["proposer_username"] == "perptape"
-            assert listed.json()["data"][0]["collateral_currency"] == "USDT"
-            assert listed.json()["data"][0]["estimated_notional"] == "120000.000000000000000000"
-            assert listed.json()["data"][0]["campaign_id"] is None
-
-            duplicate = await client.post(
-                f"/api/opportunities/{candidate['candidate_id']}/proposals", json=payload
-            )
-            assert duplicate.status_code == 200
-            assert duplicate.json()["proposal_id"] == proposal_id
-            assert len(telegram.notifications()) == 2
-
-            await logout(client)
-            await login(client, "reviewer-1")
-            notifications = await client.get("/api/telegram/mock/notifications")
-            assert notifications.status_code == 200
-            assert notifications.json()["transport"] == "MOCK_ONLY"
-            notification = notifications.json()["data"][0]
-
-            no_grant = await client.post(
-                f"/api/proposals/{proposal_id}/reviews",
-                json={
-                    "decision": "APPROVE",
-                    "reason": "checked",
-                    "expected_version": version,
-                },
-            )
-            assert no_grant.status_code == 403
-            assert no_grant.json()["error"]["code"] == "ACTION_GRANT_REQUIRED"
-
-            reference_is_not_grant = await client.post(
-                f"/api/proposals/{proposal_id}/reviews",
-                json={
-                    "decision": "APPROVE",
-                    "reason": "checked",
-                    "expected_version": version,
-                    "action_grant": notification["review_code"],
-                },
-            )
-            assert reference_is_not_grant.status_code == 403
-            assert reference_is_not_grant.json()["error"]["code"] == ("ACTION_GRANT_SCOPE_INVALID")
-
-            step_up = await client.post(
-                "/api/auth/mock/step-up",
-                json={
-                    "action": "proposal.approve",
-                    "object_id": proposal_id,
-                    "object_version": version,
-                },
-            )
-            assert step_up.status_code == 200
-            approved = await client.post(
-                f"/api/proposals/{proposal_id}/reviews",
-                json={
-                    "decision": "APPROVE",
-                    "reason": "checked",
-                    "expected_version": version,
-                    "action_grant": step_up.json()["action_grant"],
-                },
-            )
-            assert approved.status_code == 200, approved.text
-            assert approved.json()["status"] == "APPROVED"
-            assert approved.json()["detail"]["approvals"][0]["reviewer_username"] == ("reviewer-1")
-
-            replay = await client.post(
-                f"/api/proposals/{proposal_id}/reviews",
-                json={
-                    "decision": "APPROVE",
-                    "reason": "checked",
-                    "expected_version": version,
-                    "action_grant": step_up.json()["action_grant"],
-                },
-            )
-            assert replay.status_code == 409
-            assert replay.json()["error"]["code"] == "VERSION_CONFLICT"
-
-            await logout(client)
-            await login(client, "operator")
-            risk = await client.post(
-                f"/api/proposals/{proposal_id}/risk-decisions",
-                json={"idempotency_key": "api-risk-1"},
-            )
-            assert risk.status_code == 200, risk.text
-            risk_detail = risk.json()["detail"]["risk_decision"]
-            assert risk_detail["result"] == "ALLOW"
-            assert risk_detail["created_at"] is not None
-            assert Decimal(risk_detail["context"]["requested_quantity"]) == 1
-            assert risk_detail["context"]["position_status"] == "KNOWN"
-            assert risk_detail["context"]["equity_status"] == "KNOWN"
-            assert risk_detail["context"]["managed_capital_known"] is True
-            assert risk_detail["context"]["protection_status"] == "NOT_REQUIRED"
-            authorization = await client.post(
-                f"/api/proposals/{proposal_id}/authorizations",
-                json={
-                    "idempotency_key": "api-authorization-1",
-                    "expires_in_minutes": 30,
-                    "allowed_adds": 0,
-                },
-            )
-            assert authorization.status_code == 200, authorization.text
-            detail = authorization.json()["detail"]
-            assert detail["authorization"]["allowed_adds"] == 0
-            assert Decimal(detail["authorization"]["used_quantity"]) == 0
-            assert Decimal(detail["authorization"]["remaining_quantity"]) == 1
-            assert detail["authorization"]["created_at"] is not None
-            assert detail["initial_entry"] is None
-            return proposal_id
-
-    proposal_id = asyncio.run(scenario())
-
-    with database.session_factory() as session:
-        proposal = session.get(Proposal, UUID(proposal_id))
-        assert proposal is not None
-        assert proposal.strategy_id == "perptape"
-        assert proposal.strategy_version == "breakouts-v1"
-        assert session.scalar(select(func.count()).select_from(Proposal)) == 1
-        assert session.scalar(select(func.count()).select_from(RiskDecision)) == 1
-        assert session.scalar(select(func.count()).select_from(TradingAuthorization)) == 1
-        assert session.scalar(select(func.count()).select_from(OrderIntent)) == 0
-
-
 def test_perptape_candidate_can_start_as_explicit_live_proposal(
     database: Database, service: TradingService
 ) -> None:
     ids = seed(service)
+    live_account_id = add_live_account(service, ids)
     set_test_team_environment(database, ids["admin"], "LIVE")
     telegram = MockTelegramGateway()
 
@@ -986,7 +782,7 @@ def test_perptape_candidate_can_start_as_explicit_live_proposal(
                 f"/api/opportunities/{candidate['candidate_id']}/proposals",
                 json={
                     "environment": "LIVE",
-                    "account_id": "acct-1",
+                    "account_id": live_account_id,
                     "risk_tier": "LOW",
                     "quantity": "0.001",
                     "max_risk": "1",
@@ -1006,6 +802,7 @@ def test_high_risk_review_refreshes_only_the_remaining_reviewer_notification(
     database: Database, service: TradingService
 ) -> None:
     ids = seed(service)
+    live_account_id = add_live_account(service, ids)
     set_test_team_environment(database, ids["admin"], "LIVE")
     telegram = MockTelegramGateway()
 
@@ -1018,7 +815,7 @@ def test_high_risk_review_refreshes_only_the_remaining_reviewer_notification(
                 "/api/proposals/manual",
                 json={
                     "environment": "LIVE",
-                    "account_id": "acct-1",
+                    "account_id": live_account_id,
                     "venue": "BINANCE",
                     "instrument_id": str(ids["instrument"]),
                     "direction": "LONG",
@@ -1101,133 +898,11 @@ def test_high_risk_review_refreshes_only_the_remaining_reviewer_notification(
     asyncio.run(scenario())
 
 
-def test_manual_api_is_idempotent_and_semantic_conflicts_are_explicit(
-    database: Database, service: TradingService
-) -> None:
-    ids = seed(service)
-    second_proposer = service.create_user("proposer-2", ids["admin"], now=datetime.now(UTC))
-    service.assign_role(
-        second_proposer,
-        Role.PROPOSER,
-        ids["admin"],
-        "acct-1",
-        "BINANCE",
-        now=datetime.now(UTC),
-    )
-    service.assign_role(
-        second_proposer,
-        Role.REVIEWER,
-        ids["admin"],
-        "acct-1",
-        "BINANCE",
-        now=datetime.now(UTC),
-    )
-    telegram = MockTelegramGateway()
-
-    async def scenario() -> None:
-        async with AsyncClient(
-            transport=ASGITransport(app=app(database, telegram)), base_url="http://test"
-        ) as client:
-            await login(client, "proposer")
-            payload = {
-                "account_id": "acct-1",
-                "venue": "BINANCE",
-                "instrument_id": str(ids["instrument"]),
-                "direction": "LONG",
-                "risk_tier": "MEDIUM",
-                "quantity": "0.1",
-                "max_risk": "20",
-                "expires_in_minutes": 480,
-                "trigger_price": "120000",
-                "limit_price": None,
-                "invalidation_price": "118000",
-                "rationale": "manual reviewed setup",
-                "idempotency_key": "manual-api-1",
-            }
-            first = await client.post("/api/proposals/manual", json=payload)
-            second = await client.post("/api/proposals/manual", json=payload)
-            assert first.status_code == 200, first.text
-            assert second.status_code == 200
-            assert first.json()["proposal_id"] == second.json()["proposal_id"]
-            assert len(telegram.notifications()) == 3
-
-            same_trade = {
-                **payload,
-                "idempotency_key": "manual-api-2",
-                "rationale": "same frozen trade with different human commentary",
-            }
-            reused = await client.post("/api/proposals/manual", json=same_trade)
-            assert reused.status_code == 200
-            assert reused.json()["proposal_id"] == first.json()["proposal_id"]
-            assert len(telegram.notifications()) == 3
-
-            await login(client, "proposer-2")
-            cross_proposer = await client.post(
-                "/api/proposals/manual",
-                json={**payload, "idempotency_key": "manual-api-cross-proposer"},
-            )
-            assert cross_proposer.status_code == 200
-            assert cross_proposer.json()["proposal_id"] == first.json()["proposal_id"]
-            assert cross_proposer.json()["actionable_for_current_user"] is False
-            assert len(telegram.notifications()) == 3
-            eligible_reviewer_ids = {
-                item.user_id
-                for item in TradingQueries(database).reviewers_for_proposal(
-                    UUID(first.json()["proposal_id"])
-                )
-            }
-            assert second_proposer not in eligible_reviewer_ids
-            self_review = await client.post(
-                f"/api/proposals/{first.json()['proposal_id']}/reviews",
-                json={
-                    "decision": "REJECT",
-                    "reason": "must not review a proposal I tried to create",
-                    "expected_version": first.json()["version"],
-                },
-            )
-            assert self_review.status_code == 403
-            assert self_review.json()["error"]["code"] == "SELF_REVIEW_FORBIDDEN"
-            await login(client, "proposer")
-
-            live_scope = await client.post(
-                "/api/proposals/manual",
-                json={**payload, "idempotency_key": "manual-api-live", "environment": "LIVE"},
-            )
-            assert live_scope.status_code == 422
-            assert live_scope.json()["error"]["code"] == "TEAM_SHADOW_ONLY"
-            assert len(telegram.notifications()) == 3
-
-            conflict = await client.post(
-                "/api/proposals/manual", json={**payload, "quantity": "0.2"}
-            )
-            assert conflict.status_code == 409
-            assert conflict.json()["error"]["code"] == "IDEMPOTENCY_CONFLICT"
-
-            distinct = await client.post(
-                "/api/proposals/manual",
-                json={**payload, "idempotency_key": "manual-api-3", "quantity": "0.2"},
-            )
-            assert distinct.status_code == 200
-            assert distinct.json()["proposal_id"] != first.json()["proposal_id"]
-            assert len(telegram.notifications()) == 6
-
-    asyncio.run(scenario())
-    with database.session_factory() as session:
-        assert session.scalar(select(func.count()).select_from(Proposal)) == 2
-        assert (
-            session.scalar(
-                select(func.count())
-                .select_from(AuditEvent)
-                .where(AuditEvent.event_type == "PROPOSAL_DUPLICATE_REUSED")
-            )
-            == 2
-        )
-
-
 def test_manual_proposal_accepts_u_margin_amount_and_resolves_frozen_quantity(
     database: Database, service: TradingService
 ) -> None:
     ids = seed(service)
+    live_account_id = add_live_account(service, ids)
     set_test_team_environment(database, ids["admin"], "LIVE")
     service.register_instrument(
         actor_id=ids["admin"],
@@ -1260,7 +935,7 @@ def test_manual_proposal_accepts_u_margin_amount_and_resolves_frozen_quantity(
 
             payload = {
                 "environment": "LIVE",
-                "account_id": "acct-1",
+                "account_id": live_account_id,
                 "venue": "BINANCE",
                 "instrument_id": str(ids["instrument"]),
                 "direction": "LONG",

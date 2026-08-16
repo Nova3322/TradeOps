@@ -60,7 +60,7 @@ class AnalyticsQueries(QueryComponent):
         }
 
     def analytics_report(self, user_id: UUID, report_id: UUID) -> dict[str, Any]:
-        workspace_id, team_id = self.facade._active_scope_ids(user_id)
+        workspace_id, team_id = self._active_scope_ids(user_id)
         with self.database.session_factory() as session:
             report = session.scalar(
                 select(AnalyticsReport).where(
@@ -74,7 +74,7 @@ class AnalyticsQueries(QueryComponent):
                     "ANALYTICS_REPORT_NOT_FOUND",
                     "report is outside the active Workspace and Team scope",
                 )
-            if report.environment == "LIVE":
+            if report.environment in {"TESTNET", "LIVE"}:
                 exact_scopes = report.account_scopes
                 if not exact_scopes or any(
                     not isinstance(item, dict)
@@ -120,10 +120,10 @@ class AnalyticsQueries(QueryComponent):
         from_time: datetime | None,
         to_time: datetime | None,
     ) -> tuple[datetime, datetime]:
-        if environment not in {"SHADOW", "LIVE"}:
+        if environment not in {"TESTNET", "LIVE"}:
             raise DomainRejected(
                 "ANALYTICS_ENVIRONMENT_INVALID",
-                "QuantStats history requires SHADOW or LIVE",
+                "analytics history requires TESTNET or LIVE",
             )
         if from_time is None or to_time is None:
             raise DomainRejected(
@@ -149,7 +149,7 @@ class AnalyticsQueries(QueryComponent):
         return start, end
 
     def analytics_report_options(self, user_id: UUID) -> dict[str, Any]:
-        workspace_id, team_id = self.facade._active_scope_ids(user_id)
+        workspace_id, team_id = self._active_scope_ids(user_id)
         with self.database.session_factory() as session:
             team = session.get(Team, team_id)
             workspace = session.get(Workspace, workspace_id)
@@ -163,11 +163,6 @@ class AnalyticsQueries(QueryComponent):
                 ).all()
                 if self.service.can_user(user_id, "view", account.account_id, account.venue)
             ]
-            generations = session.scalars(
-                select(TeamShadowAccount)
-                .where(TeamShadowAccount.team_id == team_id)
-                .order_by(TeamShadowAccount.generation.desc())
-            ).all()
             return {
                 "scope": {
                     "workspace_id": str(workspace_id),
@@ -176,23 +171,15 @@ class AnalyticsQueries(QueryComponent):
                     "team_name": team.name,
                 },
                 "current_trading_mode": team.execution_mode,
-                "environments": ["SHADOW", "LIVE"],
+                "environments": ["TESTNET", "LIVE"],
                 "accounts": [
                     {
                         "account_id": item.account_id,
                         "venue": item.venue,
                         "label": item.label,
+                        "environment": item.environment,
                     }
                     for item in accounts
-                ],
-                "shadow_generations": [
-                    {
-                        "generation": item.generation,
-                        "status": item.status,
-                        "created_at": item.created_at.astimezone(UTC).isoformat(),
-                        "updated_at": item.updated_at.astimezone(UTC).isoformat(),
-                    }
-                    for item in generations
                 ],
                 "dataset_version": ANALYTICS_DATASET_VERSION,
                 "calendar": CRYPTO_CALENDAR,
@@ -210,27 +197,17 @@ class AnalyticsQueries(QueryComponent):
         to_time: datetime | None,
     ) -> AnalyticsDataset:
         start, end = self._validate_request(environment, from_time, to_time)
-        workspace_id, team_id = self.facade._active_scope_ids(user_id)
+        workspace_id, team_id = self._active_scope_ids(user_id)
         with self.database.session_factory() as session:
             team = session.get(Team, team_id)
             if team is None or not team.active:
                 raise DomainRejected("TEAM_SCOPE_DENIED", "active Team is unavailable")
-            if environment == "SHADOW":
-                return self._shadow_dataset(
-                    session,
-                    workspace_id=workspace_id,
-                    team=team,
-                    account_id=account_id,
-                    venue=venue,
-                    generation=generation,
-                    start=start,
-                    end=end,
-                )
-            return self._live_dataset(
+            return self._venue_dataset(
                 session,
                 user_id=user_id,
                 workspace_id=workspace_id,
                 team=team,
+                environment=environment,
                 account_id=account_id,
                 venue=venue,
                 generation=generation,
@@ -238,247 +215,14 @@ class AnalyticsQueries(QueryComponent):
                 end=end,
             )
 
-    def _shadow_dataset(
-        self,
-        session: Session,
-        *,
-        workspace_id: UUID,
-        team: Team,
-        account_id: str | None,
-        venue: str | None,
-        generation: int | None,
-        start: datetime,
-        end: datetime,
-    ) -> AnalyticsDataset:
-        if account_id not in {None, "TEAM_SHADOW"} or venue not in {None, "TRADINGOPS"}:
-            raise DomainRejected(
-                "ANALYTICS_SHADOW_SCOPE_INVALID",
-                "SHADOW uses the Team unified virtual account",
-            )
-        account_statement = select(TeamShadowAccount).where(
-            TeamShadowAccount.team_id == team.team_id
-        )
-        if generation is None:
-            account_statement = account_statement.where(TeamShadowAccount.status == "ACTIVE")
-        else:
-            account_statement = account_statement.where(TeamShadowAccount.generation == generation)
-        shadow_account = session.scalar(account_statement)
-        if shadow_account is None:
-            raise DomainRejected(
-                "ANALYTICS_GENERATION_NOT_FOUND", "SHADOW generation is unavailable"
-            )
-        selected_generation = shadow_account.generation
-        snapshot_rows = session.scalars(
-            select(AnalyticsEquitySnapshot)
-            .where(
-                AnalyticsEquitySnapshot.team_id == team.team_id,
-                AnalyticsEquitySnapshot.environment == "SHADOW",
-                AnalyticsEquitySnapshot.generation == selected_generation,
-                AnalyticsEquitySnapshot.observed_at >= start,
-                AnalyticsEquitySnapshot.observed_at <= end,
-            )
-            .order_by(
-                AnalyticsEquitySnapshot.observed_at,
-                AnalyticsEquitySnapshot.snapshot_id,
-            )
-        ).all()
-        fixture_rows = [
-            row
-            for row in snapshot_rows
-            if row.source_kind.startswith("TRADINGOPS_SHADOW_ANALYTICS_")
-        ]
-        if fixture_rows:
-            snapshot_rows = fixture_rows
-        nav = tuple(
-            NavPoint(row.observed_at, row.equity, row.currency, row.source_id)
-            for row in snapshot_rows
-        )
-        returns = derive_24_7_returns(
-            nav_series=nav,
-            external_cashflows=(),
-            from_time=start,
-            to_time=end,
-        )
-        position_rows = session.execute(
-            select(ShadowPosition, ShadowInstrument)
-            .join(
-                ShadowInstrument,
-                ShadowInstrument.shadow_instrument_id == ShadowPosition.shadow_instrument_id,
-            )
-            .where(
-                ShadowPosition.team_id == team.team_id,
-                ShadowPosition.generation == selected_generation,
-                ShadowPosition.updated_at >= start,
-                ShadowPosition.updated_at <= end,
-            )
-            .order_by(ShadowPosition.updated_at, ShadowPosition.shadow_position_id)
-        ).all()
-        positions: list[PositionSnapshot] = []
-        for position, instrument in position_rows:
-            multiplier = instrument.contract_multiplier
-            if multiplier is None or multiplier <= 0:
-                raise DomainRejected(
-                    "ANALYTICS_CONTRACT_SPEC_MISSING",
-                    "SHADOW position contract multiplier is unavailable",
-                )
-            market_value = position.quantity * position.mark_price * multiplier
-            positions.append(
-                PositionSnapshot(
-                    account_id="TEAM_SHADOW",
-                    venue=position.venue,
-                    environment="SHADOW",
-                    observed_at=position.updated_at,
-                    symbol=instrument.symbol,
-                    signed_quantity=position.quantity,
-                    mark_price=position.mark_price,
-                    market_value=market_value,
-                    gross_exposure=abs(market_value),
-                    net_exposure=market_value,
-                )
-            )
-        historical_positions: list[PositionSnapshot] = []
-        fill_rows = session.execute(
-            select(ShadowFill, ShadowOrder, ShadowInstrument)
-            .join(ShadowOrder, ShadowOrder.shadow_order_id == ShadowFill.shadow_order_id)
-            .join(
-                ShadowInstrument,
-                ShadowInstrument.shadow_instrument_id == ShadowFill.shadow_instrument_id,
-            )
-            .where(
-                ShadowFill.team_id == team.team_id,
-                ShadowFill.generation == selected_generation,
-                ShadowFill.executed_at >= start,
-                ShadowFill.executed_at <= end,
-            )
-            .order_by(ShadowFill.executed_at, ShadowFill.shadow_fill_id)
-        ).all()
-        fills_list: list[CanonicalFill] = []
-        for fill, order, instrument in fill_rows:
-            multiplier = instrument.contract_multiplier
-            if multiplier is None or multiplier <= 0:
-                raise DomainRejected(
-                    "ANALYTICS_CONTRACT_SPEC_MISSING",
-                    "SHADOW Fill contract multiplier is unavailable",
-                )
-            fills_list.append(
-                CanonicalFill(
-                    account_id="TEAM_SHADOW",
-                    venue=order.venue,
-                    environment="SHADOW",
-                    symbol=instrument.symbol,
-                    fill_id=str(fill.shadow_fill_id),
-                    order_id=str(fill.shadow_order_id),
-                    signed_amount=(fill.quantity if fill.side == "BUY" else -fill.quantity),
-                    quantity=fill.quantity,
-                    price=fill.price,
-                    contract_multiplier=multiplier,
-                    notional=fill.notional,
-                    fee=fill.fee,
-                    fee_currency="U",
-                    realized_pnl=fill.realized_pnl,
-                    settlement_currency="U",
-                    executed_at=fill.executed_at,
-                )
-            )
-        fills = deduplicate_fills(tuple(fills_list))
-        running_quantities: dict[tuple[str, str], Decimal] = defaultdict(Decimal)
-        for fill in fills:
-            key = (fill.venue, fill.symbol)
-            running_quantities[key] += fill.signed_amount
-            market_value = running_quantities[key] * fill.price * fill.contract_multiplier
-            historical_positions.append(
-                PositionSnapshot(
-                    account_id="TEAM_SHADOW",
-                    venue=fill.venue,
-                    environment="SHADOW",
-                    observed_at=fill.executed_at,
-                    symbol=fill.symbol,
-                    signed_quantity=running_quantities[key],
-                    mark_price=fill.price,
-                    market_value=market_value,
-                    gross_exposure=abs(market_value),
-                    net_exposure=market_value,
-                    source_fill_id=fill.fill_id,
-                )
-            )
-        order_rows = session.execute(
-            select(ShadowOrder, ShadowInstrument)
-            .join(
-                ShadowInstrument,
-                ShadowInstrument.shadow_instrument_id == ShadowOrder.shadow_instrument_id,
-            )
-            .where(
-                ShadowOrder.team_id == team.team_id,
-                ShadowOrder.generation == selected_generation,
-                ShadowOrder.created_at >= start,
-                ShadowOrder.created_at <= end,
-            )
-            .order_by(ShadowOrder.created_at, ShadowOrder.shadow_order_id)
-        ).all()
-        orders = tuple(
-            CanonicalOrder(
-                account_id="TEAM_SHADOW",
-                venue=order.venue,
-                environment="SHADOW",
-                symbol=instrument.symbol,
-                side=order.side,
-                order_type=order.order_type,
-                quantity=order.quantity,
-                limit_price=order.limit_price,
-                reduce_only=order.reduce_only,
-                status=order.status,
-                order_id=str(order.shadow_order_id),
-                client_order_id=None,
-                observed_at=order.updated_at,
-            )
-            for order, instrument in order_rows
-        )
-        cashflows = tuple(
-            Cashflow(
-                account_id="TEAM_SHADOW",
-                venue=fill.venue,
-                environment="SHADOW",
-                cashflow_id=f"FEE:{fill.idempotency_key}",
-                cashflow_type="FEE",
-                amount=-fill.fee,
-                currency="U",
-                occurred_at=fill.executed_at,
-                performance_impact=True,
-            )
-            for fill in fills
-        )
-        scope = AnalyticsScope(
-            workspace_id=workspace_id,
-            team_id=team.team_id,
-            team_name=team.name,
-            environment="SHADOW",
-            account_ids=("TEAM_SHADOW",),
-            venues=("TRADINGOPS",),
-            account_venues=(),
-            generation=selected_generation,
-            from_time=start,
-            to_time=end,
-        )
-        return self._dataset(
-            scope=scope,
-            nav=nav,
-            external_cashflows=(),
-            returns=returns,
-            positions=tuple(historical_positions + positions),
-            fills=fills,
-            orders=orders,
-            cashflows=cashflows,
-            sources={"TEAM_SHADOW_ACCOUNT", "SHADOW_ORDER", "SHADOW_FILL"},
-            positions_complete=True,
-        )
-
-    def _live_dataset(
+    def _venue_dataset(
         self,
         session: Session,
         *,
         user_id: UUID,
         workspace_id: UUID,
         team: Team,
+        environment: str,
         account_id: str | None,
         venue: str | None,
         generation: int | None,
@@ -487,10 +231,11 @@ class AnalyticsQueries(QueryComponent):
     ) -> AnalyticsDataset:
         if generation is not None:
             raise DomainRejected(
-                "ANALYTICS_GENERATION_FORBIDDEN", "LIVE history has no SHADOW generation"
+                "ANALYTICS_GENERATION_FORBIDDEN", "TESTNET and LIVE history has no generation"
             )
         account_query = select(ExchangeAccount).where(
             ExchangeAccount.team_id == team.team_id,
+            ExchangeAccount.environment == environment,
             ExchangeAccount.active,
         )
         if account_id is not None:
@@ -507,7 +252,7 @@ class AnalyticsQueries(QueryComponent):
         if not accounts:
             raise DomainRejected(
                 "ANALYTICS_ACCOUNT_SCOPE_EMPTY",
-                "no authorized LIVE account is available for this report",
+                "no authorized requested-environment account is available for this report",
             )
         if account_id is not None and not any(item.account_id == account_id for item in accounts):
             raise DomainRejected(
@@ -518,7 +263,7 @@ class AnalyticsQueries(QueryComponent):
             select(AccountEquityObservation)
             .where(
                 AccountEquityObservation.team_id == team.team_id,
-                AccountEquityObservation.environment == "LIVE",
+                AccountEquityObservation.environment == environment,
                 AccountEquityObservation.location_type == "VENUE",
                 tuple_(
                     AccountEquityObservation.account_id,
@@ -532,10 +277,11 @@ class AnalyticsQueries(QueryComponent):
                 AccountEquityObservation.observation_id,
             )
         ).all()
-        nav = self._aggregate_live_nav(observations)
-        external_cashflows = self._live_external_cashflows(
+        nav = self._aggregate_venue_nav(observations)
+        external_cashflows = self._venue_external_cashflows(
             session,
             team_id=team.team_id,
+            environment=environment,
             account_keys=account_keys,
             start=start,
             end=end,
@@ -553,7 +299,7 @@ class AnalyticsQueries(QueryComponent):
             select(Position)
             .where(
                 Position.team_id == team.team_id,
-                Position.environment == "LIVE",
+                Position.environment == environment,
                 tuple_(Position.account_id, Position.venue).in_(account_keys),
                 Position.observed_at >= start,
                 Position.observed_at <= end,
@@ -563,7 +309,7 @@ class AnalyticsQueries(QueryComponent):
         if any(item.fact_status != "KNOWN" for item in position_facts):
             raise DomainRejected(
                 "ANALYTICS_POSITION_VALUATION_MISSING",
-                "LIVE position valuation is unknown",
+                "venue position valuation is unknown",
             )
         positions: list[PositionSnapshot] = []
         for position_fact in position_facts:
@@ -571,7 +317,7 @@ class AnalyticsQueries(QueryComponent):
             if instrument is None or position_fact.mark_price <= 0:
                 raise DomainRejected(
                     "ANALYTICS_POSITION_VALUATION_MISSING",
-                    "LIVE position instrument or mark price is missing",
+                    "venue position instrument or mark price is missing",
                 )
             market_value = (
                 position_fact.quantity * position_fact.mark_price * instrument.contract_multiplier
@@ -580,7 +326,7 @@ class AnalyticsQueries(QueryComponent):
                 PositionSnapshot(
                     account_id=position_fact.account_id,
                     venue=position_fact.venue,
-                    environment="LIVE",
+                    environment=environment,
                     observed_at=position_fact.observed_at,
                     symbol=instrument.symbol,
                     signed_quantity=position_fact.quantity,
@@ -594,7 +340,7 @@ class AnalyticsQueries(QueryComponent):
             select(VenueFill)
             .where(
                 VenueFill.team_id == team.team_id,
-                VenueFill.environment == "LIVE",
+                VenueFill.environment == environment,
                 tuple_(VenueFill.account_id, VenueFill.venue).in_(account_keys),
                 VenueFill.executed_at >= start,
                 VenueFill.executed_at <= end,
@@ -606,13 +352,13 @@ class AnalyticsQueries(QueryComponent):
             instrument = instruments.get(fill_fact.instrument_id)
             if instrument is None:
                 raise DomainRejected(
-                    "ANALYTICS_INSTRUMENT_MISSING", "LIVE Fill instrument is missing"
+                    "ANALYTICS_INSTRUMENT_MISSING", "venue Fill instrument is missing"
                 )
             fills.append(
                 CanonicalFill(
                     account_id=fill_fact.account_id,
                     venue=fill_fact.venue,
-                    environment="LIVE",
+                    environment=environment,
                     symbol=instrument.symbol,
                     fill_id=fill_fact.venue_fill_id,
                     order_id=(
@@ -641,7 +387,7 @@ class AnalyticsQueries(QueryComponent):
             select(VenueOrder)
             .where(
                 VenueOrder.team_id == team.team_id,
-                VenueOrder.environment == "LIVE",
+                VenueOrder.environment == environment,
                 tuple_(VenueOrder.account_id, VenueOrder.venue).in_(account_keys),
                 VenueOrder.observed_at >= start,
                 VenueOrder.observed_at <= end,
@@ -652,7 +398,7 @@ class AnalyticsQueries(QueryComponent):
             CanonicalOrder(
                 account_id=fact.account_id,
                 venue=fact.venue,
-                environment="LIVE",
+                environment=environment,
                 symbol=(
                     instruments[fact.instrument_id].symbol
                     if fact.instrument_id in instruments
@@ -674,7 +420,7 @@ class AnalyticsQueries(QueryComponent):
             select(FundingPayment)
             .where(
                 FundingPayment.team_id == team.team_id,
-                FundingPayment.environment == "LIVE",
+                FundingPayment.environment == environment,
                 tuple_(FundingPayment.account_id, FundingPayment.venue).in_(account_keys),
                 FundingPayment.paid_at >= start,
                 FundingPayment.paid_at <= end,
@@ -686,7 +432,7 @@ class AnalyticsQueries(QueryComponent):
                 Cashflow(
                     account_id=fill.account_id,
                     venue=fill.venue,
-                    environment="LIVE",
+                    environment=environment,
                     cashflow_id=f"FEE:{fill.idempotency_key}",
                     cashflow_type="FEE",
                     amount=-fill.fee,
@@ -700,7 +446,7 @@ class AnalyticsQueries(QueryComponent):
                 Cashflow(
                     account_id=item.account_id,
                     venue=item.venue,
-                    environment="LIVE",
+                    environment=environment,
                     cashflow_id=(
                         f"FUNDING:LIVE:{item.account_id}:{item.venue}:{item.venue_payment_id}"
                     ),
@@ -717,7 +463,7 @@ class AnalyticsQueries(QueryComponent):
             workspace_id=workspace_id,
             team_id=team.team_id,
             team_name=team.name,
-            environment="LIVE",
+            environment=environment,
             account_ids=tuple(sorted({item.account_id for item in accounts})),
             venues=tuple(sorted({item.venue for item in accounts})),
             account_venues=tuple(sorted({(item.account_id, item.venue) for item in accounts})),
@@ -746,7 +492,7 @@ class AnalyticsQueries(QueryComponent):
         )
 
     @staticmethod
-    def _aggregate_live_nav(
+    def _aggregate_venue_nav(
         observations: Sequence[AccountEquityObservation],
     ) -> tuple[NavPoint, ...]:
         by_source_day: dict[tuple[str, str, str], dict[Any, AccountEquityObservation]] = (
@@ -785,10 +531,11 @@ class AnalyticsQueries(QueryComponent):
         return tuple(result)
 
     @staticmethod
-    def _live_external_cashflows(
+    def _venue_external_cashflows(
         session: Session,
         *,
         team_id: UUID,
+        environment: str,
         account_keys: set[tuple[str, str]],
         start: datetime,
         end: datetime,
@@ -797,7 +544,7 @@ class AnalyticsQueries(QueryComponent):
             select(CapitalTransfer)
             .where(
                 CapitalTransfer.team_id == team_id,
-                CapitalTransfer.environment == "LIVE",
+                CapitalTransfer.environment == environment,
                 CapitalTransfer.status == "SETTLED",
                 tuple_(CapitalTransfer.account_id, CapitalTransfer.venue).in_(account_keys),
                 CapitalTransfer.observed_at >= start,
@@ -827,7 +574,7 @@ class AnalyticsQueries(QueryComponent):
                 Cashflow(
                     account_id=item.account_id,
                     venue=item.venue,
-                    environment="LIVE",
+                    environment=environment,
                     cashflow_id=f"CAPITAL_TRANSFER:{item.capital_transfer_id}",
                     cashflow_type=cashflow_type,
                     amount=amount,
