@@ -1,7 +1,22 @@
-# TradingOPS Roadmap
+# TradeOps Roadmap
 
 Roadmap items describe intent, not commitments. Every milestone preserves
 fail-closed defaults and server-side enforcement.
+
+## Current product baseline
+
+- TESTNET and LIVE proposal, independent review, deterministic risk,
+  authorization, execution, reconciliation, and audit workflow
+- Binance and Hyperliquid adapter paths with environment-scoped credentials
+- Perptape and signed Webhook signal intake
+- user-owned identities and API Keys for human, bot, strategy-program, and
+  AI-agent proposal access
+- Telegram notification routes and optional additional channel adapters
+- self-hosted operations console with dangerous capabilities disabled by default
+
+These items still require deployment-specific credentials, provider readiness,
+and operator acceptance. A separately packaged Local Execution Agent with
+non-bypassable local hard limits is not part of the current baseline.
 
 ## 0.1 — Public foundation
 

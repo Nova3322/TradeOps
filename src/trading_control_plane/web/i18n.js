@@ -24,7 +24,7 @@ let currentThemePreference = 'system';
 let focusNextRouteHeading = false;
 
 const ENGLISH_EXACT = new Map(Object.entries({
-  '交易控制台':'Trading Console', '交易控制台首页':'Trading Console home', '生产交易管理':'Production trading operations', '受控交易运营':'Controlled trading operations', '生产环境':'Production', '当前环境':'Current environment', '环境未确认':'Environment unconfirmed',
+  '交易控制台':'Trading Console', '交易控制台首页':'Trading Console home', 'TradeOps 首页':'TradeOps home', '交易控制层':'Trading control layer', '生产交易管理':'Production trading operations', '受控交易运营':'Controlled trading operations', '生产环境':'Production', '当前环境':'Current environment', '环境未确认':'Environment unconfirmed',
   '中英切换':'Chinese / English', '切换中英文':'Switch between Chinese and English', '切换':'Switch', '主题偏好':'Theme preference', '语言':'Language', '主题':'Theme', '界面语言':'Language', '主题模式':'Theme', '跟随系统':'System', '浅色':'Light', '深色':'Dark', '菜单':'Menu', '收起主导航':'Collapse main navigation', '展开主导航':'Expand main navigation',
   '用户菜单':'User menu', '登录身份':'Sign-in identity', '密码登录':'Password sign-in', '内部会话':'Internal session',
   '当前工作区':'Current workspace', '当前空间':'Current space', '当前团队':'Current team', '当前职责':'Current role', '个人设置':'Personal settings', '个人偏好':'Preferences',
@@ -114,15 +114,15 @@ const ENGLISH_EXACT = new Map(Object.entries({
   '保存当前团队的版本化风险政策后重新检查。':'Save a versioned risk policy for the current team, then retry.',
   '本页事实不可用；依赖这些事实的操作保持阻断。':'Page facts are unavailable; actions depending on them remain blocked.',
   '当前功能负责人或系统管理员':'Feature owner or system administrator', '根据上方原因恢复所需事实后重新检查。':'Restore the required facts described above, then retry.',
-  '页面不存在':'Page not found', '返回机会页':'Back to Opportunities', '内部访问':'Internal access',
+  '页面不存在':'Page not found', '返回机会页':'Back to Opportunities', '内部访问':'Internal access', '自托管交易控制层':'Self-hosted trading control layer', '开源交易控制层':'Open-source trading control layer',
   '记录不可用':'Record unavailable', '处理结果':'Result', '仅保留当前团队与环境范围':'Limited to the current Team and environment', '未执行任何写入操作':'No write operation was performed',
   '导航':'Navigation', '该交易任务不存在':'This trade does not exist', '该提案不存在':'This proposal does not exist',
   '链接可能已失效，或记录不属于当前团队与环境。':'The link may have expired, or the record may not belong to the current Team and environment.',
   '链接可能已失效，请从当前任务重新进入。':'The link may have expired. Return to Current tasks and try again.', '返回提案列表':'Back to proposals',
   '流程已终止':'Workflow ended', '提案已到期':'Proposal expired', '该提案不能继续扩大风险。条件改变后需创建新提案。':'This proposal cannot add more risk. Create a new proposal if conditions change.',
   '这里保留已进入交易任务的提案、启动窗口已过期的批准记录，以及已过期或已拒绝记录；仍可启动的提案留在当前列表。':'This history keeps proposals that entered a trade, approved proposals whose launch window expired, and expired or rejected records. Proposals that can still launch remain in the current list.',
-  '进入交易控制台':'Open Trading Console', '账户密码验证':'Account password',
-  '账户':'Account', '密码':'Password', '登录':'Sign in', '请输入账户名':'Enter your account name',
+  '进入交易控制台':'Open Trading Console', '让自动化交易先经过规则、审批和审计':'Put policy, approval, and audit before automated trading', '所有交易行为进入真实账户前的控制层':'Control every trade before it reaches an exchange account.', '账户密码验证':'Account password',
+  '账户':'Account', '密码':'Password', '登录':'Sign in', '登录控制台':'Sign in to the console', '请输入账户名':'Enter your account name',
   '请输入密码':'Enter your password', '用户名或密码不正确。':'Incorrect account name or password.',
   '登录尝试过多，请稍后再试。':'Too many sign-in attempts. Try again later.',
   '审核工作台':'Review workspace', '当前没有需要你审核的提案':'There are no proposals waiting for your review',
@@ -363,7 +363,7 @@ const ENGLISH_EXACT = new Map(Object.entries({
   '审核与发起分开':'Proposal and review are separate', '风险与资金分开':'Risk and treasury are separate',
   '身份与权限分开':'Identity and authorization are separate', '新增成员':'Add member', '展开':'Expand',
   '账户范围':'Account scope', '交易所范围':'Exchange scope', '常用模板':'Role templates', '只审核':'Review only',
-  '无需操作':'No action required', '当前身份保持只读；Perptape 恢复后会自动重连。如需形成提案，请联系提案发起人。':'This role remains read only. TradingOPS reconnects automatically after Perptape recovers; contact a proposer to create a proposal.',
+  '无需操作':'No action required', '当前身份保持只读；Perptape 恢复后会自动重连。如需形成提案，请联系提案发起人。':'This role remains read only. TradeOps reconnects automatically after Perptape recovers; contact a proposer to create a proposal.',
   '只发起提案':'Propose only', '风险管理':'Risk management', '创建成员':'Create member', '当前用户':'Current users',
   '现有成员':'Existing members', '已启用':'Enabled', '已停用':'Disabled', '保存权限':'Save access',
   '检查失败':'Check failed', '等待恢复':'Waiting', '降级运行':'Degraded',
@@ -733,7 +733,7 @@ const ENGLISH_EXACT = new Map(Object.entries({
   '当前不需要执行“恢复”；若系统再次进入受限状态，必须先解决这些问题。每笔新增风险仍会按所属账户事实与交易所只读状态重新检查，失败即拒绝。':'No restoration action is currently required. If the system becomes restricted again, resolve these issues first. Every risk-increasing action is still rechecked against its account facts and exchange read-only state and is rejected on failure.',
   '变更理由':'Change reason',
   // Authentication, workspace entry, and role-specific states.
-  '使用管理员分配的账户和密码登录。系统不开放外部注册。':'Sign in with the account and password assigned by an administrator. External registration is disabled.',
+  '使用管理员分配的账户和密码登录。系统不开放外部注册。':'Sign in with the account and password assigned by an administrator. External registration is disabled.', 'TradeOps 位于交易员、交易 Bot、AI Agent 与交易所账户之间。登录后可按已分配的团队职责提交、审核或执行交易提案。':'TradeOps sits between traders, trading bots, AI agents, and exchange accounts. Sign in to propose, review, or execute trades within your assigned team role.', 'TradeOps 让交易员、交易 Bot 和 AI Agent 的每笔交易先经过确定性规则、必要审批和完整审计，再发送到交易所。':'Apply the same policies, approvals, execution controls, and audit trail to trades submitted by humans, bots, and AI agents.', '使用管理员分配的账户登录；当前版本不开放自助注册。':'Sign in with an administrator-assigned account; self-service registration is not available in the current release.',
   '账户名':'Account name', '初始密码':'Initial password', '现有账户名':'Existing account name', '账户范围':'Account scope', '交易所范围':'Venue scope', '常用模板':'Role templates', '只读观察':'Read-only observer', '只审核':'Review only', '只发起提案':'Propose only', '风险管理':'Risk management', '资金管理':'Capital management',
   '重置密码':'Reset password', '留空则不修改':'Leave blank to keep the current password', '允许进入当前团队并使用已分配权限':'Allow access to this Team with assigned permissions',
   '该成员在当前团队的岗位和访问范围会被删除，当前团队的会话权限立即失效；用户身份、密码、其他团队成员关系与历史审计记录都会保留。':'The member roles and access scope in this Team will be removed immediately. The user identity, password, memberships in other Teams, and audit history remain.', '确认移出团队':'Confirm removal',
@@ -1062,7 +1062,9 @@ const localizedText = (value) => currentLanguage === 'en' ? translateEnglishText
 
 function applyLanguageToDocument(root = document.body) {
   document.documentElement.lang = currentLanguage;
-  document.title = currentLanguage === 'en' ? 'Trading Console' : '交易控制台';
+  document.title = currentLanguage === 'en'
+    ? 'TradeOps | Control every trade before it reaches an exchange account'
+    : 'TradeOps｜所有交易行为进入真实账户前的控制层';
   if (currentDate) {
     currentDate.dateTime = new Date().toISOString().slice(0, 10);
     currentDate.textContent = new Intl.DateTimeFormat(currentLanguage, {

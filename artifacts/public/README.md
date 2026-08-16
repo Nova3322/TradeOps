@@ -1,9 +1,15 @@
-# Public artifacts
+# Public product screenshots
 
-Only one representative, sanitized product screenshot captured from synthetic
-fixtures is retained here. `api-access-1440.png` contains no Token plaintext,
-exchange credential, real account, balance, personal identifier, private log,
-or production status.
+These screenshots were supplied from the latest local TradeOps console review
+and replace the previous API-access image:
 
-Responsive acceptance screenshots for 1024, 430, and 390 are generated as
-temporary test artifacts and are not stored in the repository.
+- `opportunity-snapshot.png` — Perptape opportunity feed
+- `webhook-signals.png` — validated Webhook signal feed
+- `current-proposals.png` — current trade proposals
+- `review-queue.png` — independent review queue
+- `capital-center.png` — Vault/Safe capital configuration boundary
+
+They are product-interface examples. They do not prove production readiness,
+real-account connectivity, profit, principal protection, or the prevention of
+trading losses. Responsive acceptance screenshots remain temporary test
+artifacts and are not stored here.
