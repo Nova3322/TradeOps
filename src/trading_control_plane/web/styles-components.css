@@ -855,6 +855,13 @@ p, li, dd, td { font-size: 14px; }
 .capital-config-heading p { margin: 5px 0 0; color: var(--muted); font-size: 12px; }
 .capital-config-heading > span { flex: 0 0 auto; padding: 4px 7px; border: 1px solid var(--line); border-radius: 999px; color: var(--muted); font-size: 11px; font-weight: 650; }
 .capital-config-section.is-selected-provider .capital-config-heading > span { border-color: color-mix(in srgb, var(--accent) 45%, var(--line)); background: var(--accent-2); color: var(--accent); }
+.common-capital-fields .field-grid > label { min-width: 0; }
+@media (min-width: 781px) {
+  .common-capital-fields .field-grid > label { display: flex; flex-direction: column; align-self: stretch; }
+  .common-capital-fields .field-grid > label > input { flex: 0 0 auto; margin-top: auto; }
+  .common-capital-fields .field-grid > label > small { min-height: 18px; line-height: 1.45; }
+  .common-capital-fields .field-grid > label:not(:has(> small))::after { content: ""; min-height: 18px; }
+}
 .opportunity-card-grid { grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; }
 .opportunity-card { display: flex; min-width: 0; min-height: 252px; flex-direction: column; padding: 14px 14px 12px; border-radius: 3px; }
 .opportunity-card-head { align-items: start; }
