@@ -11,6 +11,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
+from functools import partial
 from typing import Any
 
 from trading_control_plane.domain import DomainRejected
@@ -20,8 +21,11 @@ JsonFetcher = Callable[[str, dict[str, str], float], JsonValue]
 ServerTimeFetcher = Callable[[float], int]
 
 
-def _default_server_time_fetcher(timeout: float) -> int:
-    request = urllib.request.Request("https://fapi.binance.com/fapi/v1/time", method="GET")
+def _server_time_from(base_url: str, timeout: float) -> int:
+    request = urllib.request.Request(  # noqa: S310 - caller pins the official Binance host
+        f"{base_url.rstrip('/')}/fapi/v1/time",
+        method="GET",
+    )
     last_error: BaseException | None = None
     for attempt in range(3):
         try:
@@ -39,6 +43,10 @@ def _default_server_time_fetcher(timeout: float) -> int:
     raise DomainRejected(
         "BINANCE_READ_ONLY_UNAVAILABLE", "Binance server time is unavailable"
     ) from last_error
+
+
+def _default_server_time_fetcher(timeout: float) -> int:
+    return _server_time_from("https://fapi.binance.com", timeout)
 
 
 def _default_fetcher(url: str, headers: dict[str, str], timeout: float) -> JsonValue:
@@ -62,6 +70,8 @@ def _default_fetcher(url: str, headers: dict[str, str], timeout: float) -> JsonV
                 pass
             if exc.code in {401, 403} or exchange_code in {-2014, -2015, -1022}:
                 code = "BINANCE_AUTHENTICATION_FAILED"
+            elif exchange_code == -1021:
+                code = "BINANCE_TIMESTAMP_REJECTED"
             elif exc.code == 429 or exchange_code == -1003:
                 code = "BINANCE_RATE_LIMITED"
             else:
@@ -213,12 +223,17 @@ class BinanceReadOnlyClient:
         api_secret: str | None,
         recv_window_ms: int = 5_000,
         fetcher: JsonFetcher = _default_fetcher,
+        server_time_fetcher: ServerTimeFetcher | None = None,
     ) -> None:
         self._base_url = base_url.rstrip("/")
         self._api_key = api_key
         self._api_secret = api_secret
         self._recv_window_ms = recv_window_ms
         self._fetcher = fetcher
+        self._server_time_fetcher = server_time_fetcher or partial(
+            _server_time_from,
+            self._base_url,
+        )
 
     @property
     def configured(self) -> bool:
@@ -258,10 +273,11 @@ class BinanceReadOnlyClient:
     def verify_connection(self, *, now: datetime) -> None:
         """Authenticate one USD-M account read without persisting account facts."""
 
+        del now
         raw = self._signed_get(
             "/fapi/v3/balance",
             {},
-            timestamp_ms=int(now.timestamp() * 1000),
+            timestamp_ms=self._server_time_fetcher(5.0),
         )
         if not isinstance(raw, list) or not all(isinstance(item, dict) for item in raw):
             raise DomainRejected(

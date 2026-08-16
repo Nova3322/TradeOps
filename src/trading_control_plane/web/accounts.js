@@ -111,7 +111,7 @@ function bindExchangeAccountForms() {
     const body = {expected_version:Number(form.dataset.version), idempotency_key:crypto.randomUUID()};
     try {
       const result = await withPending(event.submitter, '只读验证中…', () => api(`/api/exchange-accounts/${form.dataset.exchangeAccountId}/connection-verifications`, {method:'POST', body:JSON.stringify(body)}));
-      showToast(result.connection?.status === 'VERIFIED' ? '只读连接验证成功；交易能力仍保持关闭' : `连接验证失败：${result.connection?.error_code || 'READ_ONLY_PROBE_FAILED'}`);
+      showToast(result.connection?.status === 'VERIFIED' ? '只读连接验证成功；交易能力仍保持关闭' : `连接验证失败：${fmtExchangeConnectionError(result.connection?.error_code)}`);
       await route();
     } catch (error) { showApiError(error, form.querySelector('.form-error')); }
   }));

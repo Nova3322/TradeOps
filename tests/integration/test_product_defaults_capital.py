@@ -32,6 +32,7 @@ from trading_control_plane.models import (
     Approval,
     AuditEvent,
     DirectCapitalOperation,
+    ExchangeAccount,
     OrderIntent,
     TradingAuthorization,
 )
@@ -89,6 +90,8 @@ def _app(
     hyperliquid_capital_gateway: HyperliquidCapitalGateway | None = None,
     binance_capital_gateway: BinanceCapitalGateway | None = None,
     binance_capital_withdraw_enabled: bool = False,
+    runtime_binance_account_id: str | None = None,
+    runtime_hyperliquid_account_id: str | None = None,
 ):
     settings = Settings(
         environment="test",
@@ -96,6 +99,8 @@ def _app(
         allow_mock_identity=True,
         session_signing_secret="product-flows-test-signing-secret",  # noqa: S106
         runtime_sync_enabled=True,
+        runtime_binance_account_id=runtime_binance_account_id,
+        runtime_hyperliquid_account_id=runtime_hyperliquid_account_id,
         capital_direct_vault_id="vault-1",
         capital_direct_vault_address="0x1111111111111111111111111111111111111111",
         capital_direct_owned_arbitrum_address="0x2222222222222222222222222222222222222222",
@@ -140,6 +145,82 @@ def _app(
         hyperliquid_capital_gateway=hyperliquid_capital_gateway,
         binance_capital_gateway=binance_capital_gateway,
     )
+
+
+def test_capital_configuration_projects_canonical_runtime_accounts_with_display_names(
+    database: Database,
+) -> None:
+    service = TradingService(database)
+    now = datetime.now(UTC)
+    admin = service.bootstrap_admin("capital-account-selector-admin", now=now)
+    _add_live_accounts(database, admin)
+    with database.session_factory.begin() as session:
+        binance = session.scalar(
+            select(ExchangeAccount).where(
+                ExchangeAccount.account_id == "binance-main",
+                ExchangeAccount.venue == "BINANCE",
+            )
+        )
+        assert binance is not None
+        binance.label = "acct-1-xpd"
+
+    async def scenario() -> None:
+        async with AsyncClient(
+            transport=ASGITransport(
+                app=_app(
+                    database,
+                    runtime_binance_account_id="binance-main",
+                    runtime_hyperliquid_account_id="hyperliquid-main",
+                )
+            ),
+            base_url="http://test",
+        ) as client:
+            await _login(client, "capital-account-selector-admin")
+            response = await client.get("/api/capital", params={"environment": "LIVE"})
+            assert response.status_code == 200, response.text
+            options = response.json()["data"]["direct_configuration"][
+                "exchange_account_options"
+            ]
+            by_scope = {(item["venue"], item["account_id"]): item for item in options}
+            assert by_scope[("BINANCE", "binance-main")] == {
+                "venue": "BINANCE",
+                "account_id": "binance-main",
+                "label": "acct-1-xpd",
+                "connection_status": "UNCONFIGURED",
+                "runtime_default": True,
+                "configured": True,
+            }
+            assert by_scope[("BINANCE", "acct-live")]["runtime_default"] is False
+            assert by_scope[("HYPERLIQUID", "hyperliquid-main")]["runtime_default"] is True
+
+            display_name = await client.put(
+                "/api/capital/direct-configuration",
+                json={
+                    "binance_account_id": "acct-1-xpd",
+                    "idempotency_key": "reject-display-name-as-account-id",
+                },
+            )
+            assert display_name.status_code == 422, display_name.text
+            assert display_name.json()["error"]["code"] == "DEFAULT_ACCOUNT_REQUIRED"
+
+            canonical_id = await client.put(
+                "/api/capital/direct-configuration",
+                json={
+                    "binance_account_id": "binance-main",
+                    "idempotency_key": "accept-canonical-runtime-account-id",
+                },
+            )
+            assert canonical_id.status_code == 200, canonical_id.text
+            selected = canonical_id.json()["data"]["direct_configuration"][
+                "exchange_account_options"
+            ]
+            assert next(
+                item
+                for item in selected
+                if item["venue"] == "BINANCE" and item["runtime_default"]
+            )["configured"] is True
+
+    asyncio.run(scenario())
 
 
 def test_hyperliquid_withdrawal_auto_falls_back_to_wallet_and_settles_only_after_receipts(
