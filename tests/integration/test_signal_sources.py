@@ -86,13 +86,75 @@ def signal_app(database: Database, fetch_headers: list[dict[str, str]]):
     return create_app(settings, database, perptape)
 
 
+def test_setup_team_syncs_bound_perptape_without_creating_automatic_proposals(
+    database: Database,
+) -> None:
+    now = datetime.now(UTC)
+    service = TradingService(database, credential_encryption_key=encryption_key())
+    admin = service.bootstrap_admin("setup-signal-admin", now=now)
+    perptape_secret = secrets.token_urlsafe(24)
+    service.configure_signal_source(
+        actor_id=admin,
+        mode=SignalSourceMode.PERPTAPE,
+        secret=perptape_secret,
+        enabled=True,
+        webhook_max_age_seconds=300,
+        expected_version=1,
+        idempotency_key="setup-team-perptape-config",
+        now=now,
+    )
+
+    binding = service.perptape_runtime_bindings()[0]
+
+    assert binding.api_key == perptape_secret
+    assert service.proposal_automation_config(binding.service_principal_id) is None
+
+
+def test_successful_perptape_connection_test_repairs_legacy_runtime_principal(
+    database: Database,
+) -> None:
+    now = datetime.now(UTC)
+    service = TradingService(database, credential_encryption_key=encryption_key())
+    admin = service.bootstrap_admin("repair-signal-admin", now=now)
+    service.configure_signal_source(
+        actor_id=admin,
+        mode=SignalSourceMode.PERPTAPE,
+        secret=secrets.token_urlsafe(24),
+        enabled=True,
+        webhook_max_age_seconds=300,
+        expected_version=1,
+        idempotency_key="repair-perptape-config",
+        now=now,
+    )
+    source = service.signal_source_status(admin)["source"]
+    source_id = UUID(source["signal_source_id"])
+    with database.session_factory.begin() as session:
+        persisted = session.get(TeamSignalSource, source_id, with_for_update=True)
+        assert persisted is not None
+        persisted.service_principal_id = None
+
+    result = service.record_signal_source_test(
+        source_id,
+        actor_id=admin,
+        succeeded=True,
+        error_code=None,
+        expected_version=source["version"],
+        idempotency_key="repair-perptape-test",
+        now=now + timedelta(seconds=1),
+    )
+
+    assert result["status"] == "SUCCESS"
+    binding = service.perptape_runtime_bindings()[0]
+    assert binding.signal_source_id == source_id
+
+
 def test_team_signal_source_perptape_key_and_signed_webhook_flow(
     database: Database,
 ) -> None:
     now = datetime.now(UTC)
     service = TradingService(database, credential_encryption_key=encryption_key())
     admin = service.bootstrap_admin("signal-admin", now=now)
-    set_test_team_environment(database, admin, "SHADOW")
+    set_test_team_environment(database, admin, "TESTNET")
     instrument_id = service.register_instrument(
         actor_id=admin,
         venue="BINANCE",
@@ -108,10 +170,11 @@ def test_team_signal_source_perptape_key_and_signed_webhook_flow(
     )
     service.create_exchange_account(
         actor_id=admin,
+        environment="TESTNET",
         account_id="signal-account",
         venue="BINANCE",
         label="Signal Account",
-        credentials=None,
+        credentials={"api_key": "signal-testnet-key", "api_secret": "signal-testnet-secret"},
         idempotency_key="signal-account-create",
         now=now,
     )
@@ -331,7 +394,7 @@ def test_team_signal_source_perptape_key_and_signed_webhook_flow(
             assert listed.json()["data"][0]["proposal"] is None
 
             proposal_request = {
-                "environment": "SHADOW",
+                "environment": "TESTNET",
                 "account_id": "signal-account",
                 "instrument_id": str(instrument_id),
                 "risk_tier": "LOW",
@@ -359,7 +422,7 @@ def test_team_signal_source_perptape_key_and_signed_webhook_flow(
             consumed = await client.post(
                 f"/api/signals/{event_id}/proposals",
                 json={
-                    "environment": "SHADOW",
+                    "environment": "TESTNET",
                     "account_id": "signal-account",
                     "instrument_id": str(instrument_id),
                     "risk_tier": "LOW",
@@ -424,7 +487,7 @@ def test_team_signal_source_perptape_key_and_signed_webhook_flow(
             report = await client.get(
                 "/api/results",
                 params={
-                    "environment": "SHADOW",
+                    "environment": "TESTNET",
                     "strategy_id": "breakout-model",
                     "strategy_version": "2026.08",
                     "signal_source_mode": "WEBHOOK",
@@ -456,7 +519,7 @@ def test_multiple_webhooks_coexist_with_perptape_and_retain_source_history(
     now = datetime.now(UTC)
     service = TradingService(database, credential_encryption_key=encryption_key())
     admin = service.bootstrap_admin("multi-signal-admin", now=now)
-    set_test_team_environment(database, admin, "SHADOW")
+    set_test_team_environment(database, admin, "TESTNET")
     instrument_id = service.register_instrument(
         actor_id=admin,
         venue="BINANCE",
@@ -721,7 +784,7 @@ def test_multiple_webhooks_coexist_with_perptape_and_retain_source_history(
             stale_proposal = await client.post(
                 f"/api/signals/{second_event_id}/proposals",
                 json={
-                    "environment": "SHADOW",
+                    "environment": "TESTNET",
                     "account_id": "signal-account",
                     "instrument_id": str(instrument_id),
                     "risk_tier": "LOW",

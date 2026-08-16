@@ -727,7 +727,7 @@ class RuntimeSyncWorker:
                 binding.account_id,
                 binding.service_principal_id,
                 snapshots,
-                environment=ExecutionEnvironment.LIVE,
+                environment=ExecutionEnvironment(binding.environment),
                 runtime_binding=binding,
                 now=now,
             )
@@ -736,7 +736,7 @@ class RuntimeSyncWorker:
                 binding.account_id,
                 binding.service_principal_id,
                 snapshots,
-                environment=ExecutionEnvironment.LIVE,
+                environment=ExecutionEnvironment(binding.environment),
                 runtime_binding=binding,
                 now=now,
             )
@@ -752,8 +752,7 @@ class RuntimeSyncWorker:
             source_error_code=(
                 None
                 if persisted["history_error_code"] is None
-                else f"{binding.venue}_HISTORY_INCOMPLETE:"
-                f"{persisted['history_error_code']}"
+                else f"{binding.venue}_HISTORY_INCOMPLETE:{persisted['history_error_code']}"
             ),
         )
         return int(persisted["positions_covered"])
@@ -954,8 +953,7 @@ class RuntimeSyncWorker:
         now: datetime,
     ) -> SourceSyncResult:
         if (
-            binding.service_principal_username
-            != self.settings.runtime_sync_service_username
+            binding.service_principal_username != self.settings.runtime_sync_service_username
             or (
                 binding.venue in {"BINANCE", "HYPERLIQUID"}
                 and binding.account_id
@@ -1263,12 +1261,6 @@ class RuntimeBindingSupervisor:
     def dependencies_in_use(self) -> bool:
         return any(handle.thread.is_alive() for handle in self._perptape_streams.values())
 
-    def has_bindings(self) -> bool:
-        return bool(
-            self.service.runtime_account_bindings()
-            or self.service.perptape_runtime_bindings()
-        )
-
     def _account_worker(self, binding: PreparedRuntimeAccountBinding) -> RuntimeSyncWorker:
         updates: dict[str, Any] = {
             "runtime_sync_service_username": binding.service_principal_username,
@@ -1280,8 +1272,23 @@ class RuntimeBindingSupervisor:
             ),
             "binance_read_only_enabled": binding.venue == "BINANCE",
             "hyperliquid_read_only_enabled": binding.venue == "HYPERLIQUID",
-            "binance_fact_environment": "LIVE",
-            "hyperliquid_fact_environment": "LIVE",
+            "binance_fact_environment": binding.environment,
+            "hyperliquid_fact_environment": binding.environment,
+            "binance_account_mode": (
+                "STANDARD"
+                if binding.environment == "TESTNET"
+                else self.settings.binance_account_mode
+            ),
+            "binance_futures_base_url": (
+                self.settings.binance_testnet_base_url
+                if binding.environment == "TESTNET"
+                else self.settings.binance_futures_base_url
+            ),
+            "hyperliquid_base_url": (
+                self.settings.hyperliquid_testnet_base_url
+                if binding.environment == "TESTNET"
+                else self.settings.hyperliquid_live_base_url
+            ),
             "perptape_api_key": None,
             "perptape_websocket_enabled": False,
             "notilt_enabled": False,
@@ -1294,9 +1301,7 @@ class RuntimeBindingSupervisor:
         elif binding.venue == "HYPERLIQUID":
             updates.update(
                 hyperliquid_account_address=binding.credentials.get("account_address"),
-                hyperliquid_api_wallet_address=binding.credentials.get(
-                    "api_wallet_address"
-                ),
+                hyperliquid_api_wallet_address=binding.credentials.get("api_wallet_address"),
                 hyperliquid_api_wallet_private_key=None,
             )
         worker = self.worker_factory(self.settings.model_copy(update=updates), self.database)
@@ -1310,9 +1315,7 @@ class RuntimeBindingSupervisor:
             installer(binding)
         return worker
 
-    def _perptape_worker(
-        self, binding: PreparedPerptapeRuntimeBinding
-    ) -> RuntimeSyncWorker:
+    def _perptape_worker(self, binding: PreparedPerptapeRuntimeBinding) -> RuntimeSyncWorker:
         scoped = self.settings.model_copy(
             update={
                 "perptape_api_key": binding.api_key,
@@ -1510,21 +1513,14 @@ class RuntimeBindingSupervisor:
         if signal_bindings is None:
             signal_bindings = self.service.perptape_runtime_bindings()
         for account_binding in account_bindings:
-            key = (
-                f"{account_binding.team_id}:{account_binding.venue}:"
-                f"{account_binding.account_id}"
-            )
-            results[key] = self._account_worker(
-                account_binding
-            ).run_bound_account_once(
+            key = f"{account_binding.team_id}:{account_binding.venue}:{account_binding.account_id}"
+            results[key] = self._account_worker(account_binding).run_bound_account_once(
                 account_binding,
                 now=started_at,
             )
         for signal_binding in signal_bindings:
             key = f"{signal_binding.team_id}:PERPTAPE"
-            results[key] = self._perptape_worker(
-                signal_binding
-            ).run_bound_perptape_once(
+            results[key] = self._perptape_worker(signal_binding).run_bound_perptape_once(
                 signal_binding,
                 now=started_at,
             )
@@ -1602,15 +1598,18 @@ def main(argv: Sequence[str] | None = None) -> int:
                 )
             )
             return 0
-        binding_supervisor = RuntimeBindingSupervisor(
-            settings=settings,
-            database=database,
-            worker_factory=build_runtime_worker,
-        )
+        # Continuous synchronization must keep discovering database bindings.
+        # Choosing the legacy environment-backed worker only once at process
+        # startup leaves newly configured Team accounts and Perptape keys
+        # invisible until a manual restart and can keep using stale deployment
+        # credentials.  The supervisor refreshes the binding set every cycle.
         worker = (
-            binding_supervisor
+            RuntimeBindingSupervisor(
+                settings=settings,
+                database=database,
+                worker_factory=build_runtime_worker,
+            )
             if settings.runtime_sync_enabled
-            and bool(getattr(binding_supervisor, "has_bindings", lambda: True)())
             else build_runtime_worker(settings, database)
         )
         if args.once:

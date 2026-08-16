@@ -152,6 +152,7 @@ def test_database_binding_supervisor_builds_exact_scoped_read_only_workers() -> 
         service_principal_username="runtime-team-account",
         account_id="binance-team-main",
         venue="BINANCE",
+        environment="TESTNET",
         account_version=3,
         credential_version=1,
         credentials={"api_key": "fixture-key", "api_secret": "fixture-secret"},
@@ -220,9 +221,7 @@ def test_database_binding_supervisor_builds_exact_scoped_read_only_workers() -> 
     assert report.successful is True
     assert report.to_dict()["binding_source"] == "DATABASE_ENVELOPE"
     assert report.sources == {
-        f"{team_id}:BINANCE:binance-team-main": SourceSyncResult(
-            "SUCCESS", items_observed=2
-        ),
+        f"{team_id}:BINANCE:binance-team-main": SourceSyncResult("SUCCESS", items_observed=2),
         f"{team_id}:PERPTAPE": SourceSyncResult("SUCCESS", items_observed=4),
     }
     assert len(built) == 2
@@ -363,6 +362,7 @@ def test_database_binding_supervisor_keeps_okx_secrets_out_of_settings() -> None
         service_principal_username="runtime-okx-account",
         account_id="okx-team-main",
         venue="OKX",
+        environment="LIVE",
         account_version=3,
         credential_version=1,
         credentials={
@@ -415,17 +415,16 @@ def test_runtime_rate_limit_cooldown_skips_only_until_retry_deadline() -> None:
         }
     )
 
-    cooldown = worker._rate_limit_cooldown(
-        "HYPERLIQUID", actor_id=uuid4(), now=now
-    )
+    cooldown = worker._rate_limit_cooldown("HYPERLIQUID", actor_id=uuid4(), now=now)
 
     assert cooldown == SourceSyncResult(
         "SKIPPED",
         error_code="HYPERLIQUID_RATE_LIMITED_COOLDOWN",
     )
-    assert worker._rate_limit_cooldown(
-        "HYPERLIQUID", actor_id=uuid4(), now=now + timedelta(minutes=2)
-    ) is None
+    assert (
+        worker._rate_limit_cooldown("HYPERLIQUID", actor_id=uuid4(), now=now + timedelta(minutes=2))
+        is None
+    )
 
 
 def test_runtime_rate_limit_cooldown_fails_open_to_a_real_probe_on_bad_metadata() -> None:
@@ -437,11 +436,14 @@ def test_runtime_rate_limit_cooldown_fails_open_to_a_real_probe_on_bad_metadata(
         }
     )
 
-    assert worker._rate_limit_cooldown(
-        "HYPERLIQUID",
-        actor_id=uuid4(),
-        now=datetime(2026, 8, 5, tzinfo=UTC),
-    ) is None
+    assert (
+        worker._rate_limit_cooldown(
+            "HYPERLIQUID",
+            actor_id=uuid4(),
+            now=datetime(2026, 8, 5, tzinfo=UTC),
+        )
+        is None
+    )
 
 
 def test_skipped_capital_sources_cannot_be_hidden_by_a_fresh_complete_snapshot() -> None:
@@ -1052,6 +1054,56 @@ def test_runtime_continuous_cli_installs_stop_handlers_and_disposes(
     assert installed_signals == [runtime_module.signal.SIGINT, runtime_module.signal.SIGTERM]
     assert worker.cycles == 1
     assert database.disposed is True
+
+
+def test_runtime_continuous_cli_discovers_bindings_added_after_startup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = Settings(
+        database_url="postgresql+psycopg://unused:unused@127.0.0.1/unused",
+        runtime_sync_enabled=True,
+        _env_file=None,
+    )
+
+    class FakeDatabase:
+        def is_ready(self) -> tuple[bool, str | None]:
+            return True, None
+
+        def dispose(self) -> None:
+            return None
+
+    class FakeSupervisor:
+        cycles = 0
+
+        def has_bindings(self) -> bool:
+            return False
+
+        def run_forever(self, stop_event: Any) -> None:
+            self.cycles += 1
+            stop_event.set()
+
+    supervisor = FakeSupervisor()
+    legacy_worker_built = False
+
+    def build_legacy_worker(_settings: Settings, _database: Any) -> Any:
+        nonlocal legacy_worker_built
+        legacy_worker_built = True
+        return SimpleNamespace(run_forever=lambda _stop: None)
+
+    monkeypatch.setattr(runtime_module, "get_settings", lambda: settings)
+    monkeypatch.setattr(runtime_module, "Database", lambda _url: FakeDatabase())
+    monkeypatch.setattr(runtime_module, "build_runtime_worker", build_legacy_worker)
+    monkeypatch.setattr(
+        runtime_module,
+        "RuntimeBindingSupervisor",
+        lambda **_kwargs: supervisor,
+    )
+    monkeypatch.setattr(runtime_module, "configure_logging", lambda _level: None)
+    monkeypatch.setattr(runtime_module.signal, "signal", lambda *_args: None)
+
+    assert runtime_module.main([]) == 0
+    assert supervisor.cycles == 1
+    assert legacy_worker_built is False
 
 
 def test_runtime_healthcheck_reports_supervised_process_without_external_probe(

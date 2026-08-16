@@ -15,6 +15,7 @@ RUN groupadd --system tradingops \
 WORKDIR /app
 COPY --from=uv /uv /uvx /bin/
 COPY pyproject.toml uv.lock README.md ./
+COPY docs ./docs
 COPY alembic.ini ./
 COPY migrations ./migrations
 COPY scripts ./scripts

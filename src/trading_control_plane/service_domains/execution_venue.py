@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from trading_control_plane.repositories.execution import find_position_for_scope
 from trading_control_plane.service_component import ServiceComponent
 
 # The domain implementation intentionally consumes the explicit service_core export surface.
@@ -47,7 +48,7 @@ class VenueCommandExecutionService(ServiceComponent):
         campaign = session.get(Campaign, intent.campaign_id)
         if campaign is None:
             _reject("CAMPAIGN_NOT_FOUND", "intent campaign is missing")
-        self.facade._validate_sender(
+        self._validate_sender(
             session,
             campaign.team_id,
             execution_scope,
@@ -77,7 +78,7 @@ class VenueCommandExecutionService(ServiceComponent):
                     "LIVE_ORDER_SEND_DISABLED",
                     "LIVE order send requires the explicit capability gate",
                 )
-            self.facade._require_exchange_account_live_ready(
+            self._require_exchange_account_live_ready(
                 session,
                 team_id=campaign.team_id,
                 account_id=campaign.account_id,
@@ -152,15 +153,7 @@ class VenueCommandExecutionService(ServiceComponent):
                 _reject("REDUCE_ONLY", "new-risk venue send is blocked")
             if state is SystemRiskState.NO_PYRAMID and intent.kind == IntentKind.ADD.value:
                 _reject("PYRAMID_DISABLED", "Add venue send is blocked")
-            position = session.scalar(
-                select(Position).where(
-                    Position.team_id == campaign.team_id,
-                    Position.account_id == campaign.account_id,
-                    Position.venue == campaign.venue,
-                    Position.environment == campaign.environment,
-                    Position.instrument_id == campaign.instrument_id,
-                )
-            )
+            position = find_position_for_scope(session, campaign)
             equity = session.scalar(
                 select(AccountEquity).where(
                     AccountEquity.team_id == campaign.team_id,
@@ -174,13 +167,13 @@ class VenueCommandExecutionService(ServiceComponent):
             if (
                 position is None
                 or position.fact_status != FactStatus.KNOWN.value
-                or self.facade._fact_is_stale(position.observed_at, now, max_age)
+                or self._fact_is_stale(position.observed_at, now, max_age)
             ):
                 _reject("POSITION_UNKNOWN", "new-risk venue send requires a fresh position")
             if (
                 equity is None
                 or equity.fact_status != FactStatus.KNOWN.value
-                or self.facade._fact_is_stale(equity.observed_at, now, max_age)
+                or self._fact_is_stale(equity.observed_at, now, max_age)
             ):
                 _reject("EQUITY_UNKNOWN", "new-risk venue send requires fresh equity")
             if environment is ExecutionEnvironment.LIVE:
@@ -195,13 +188,13 @@ class VenueCommandExecutionService(ServiceComponent):
                 if (
                     source_health is None
                     or source_health.status != "SUCCESS"
-                    or self.facade._fact_is_stale(source_health.checked_at, now, max_age)
+                    or self._fact_is_stale(source_health.checked_at, now, max_age)
                 ):
                     _reject(
                         "READ_ONLY_SOURCE_UNAVAILABLE",
                         "new-risk venue send requires a current successful read-only probe",
                     )
-            capital_known, managed_capital_usd, _, _ = self.facade._managed_capital_context(
+            capital_known, managed_capital_usd, _, _ = self._managed_capital_context(
                 session,
                 team_id=campaign.team_id,
                 environment=campaign.environment,
@@ -213,8 +206,8 @@ class VenueCommandExecutionService(ServiceComponent):
                     "MANAGED_CAPITAL_UNKNOWN",
                     "new-risk venue send requires fresh total managed capital",
                 )
-            occupied_risk = self.facade._occupied_risk(session, campaign.team_id)
-            occupied_account_risk = self.facade._occupied_risk(
+            occupied_risk = self._occupied_risk(session, campaign.team_id)
+            occupied_account_risk = self._occupied_risk(
                 session,
                 campaign.team_id,
                 account_id=campaign.account_id,
@@ -242,7 +235,7 @@ class VenueCommandExecutionService(ServiceComponent):
                     or protection.status != ProtectionStatus.ACTIVE.value
                     or not protection.fully_covered
                     or protection.quantity < abs(position.quantity)
-                    or self.facade._fact_is_stale(protection.observed_at, now, max_age)
+                    or self._fact_is_stale(protection.observed_at, now, max_age)
                 ):
                     _reject("PROTECTION_UNKNOWN", "Add venue send requires current protection")
             if (
@@ -703,7 +696,7 @@ class VenueCommandExecutionService(ServiceComponent):
             campaign = session.get(Campaign, intent.campaign_id, with_for_update=True)
             if campaign is None:
                 _reject("CAMPAIGN_NOT_FOUND", "intent campaign is missing")
-            self.facade._validate_sender(
+            self._validate_sender(
                 session,
                 campaign.team_id,
                 execution_scope,
@@ -802,7 +795,7 @@ class VenueCommandExecutionService(ServiceComponent):
                 fact.updated_at = now
 
             if result.filled_quantity > 0:
-                self.facade._consume_add_unit(session, intent)
+                self._consume_add_unit(session, intent)
             previous = intent.status
             terminal = {
                 VenueOrderStatus.CANCELLED.value: OrderIntentStatus.CANCELLED,
@@ -961,7 +954,7 @@ class VenueCommandExecutionService(ServiceComponent):
             campaign = session.get(Campaign, intent.campaign_id, with_for_update=True)
             if campaign is None:
                 _reject("CAMPAIGN_NOT_FOUND", "intent campaign is missing")
-            self.facade._validate_sender(
+            self._validate_sender(
                 session,
                 campaign.team_id,
                 execution_scope,
@@ -1096,7 +1089,7 @@ class VenueCommandExecutionService(ServiceComponent):
             campaign = session.get(Campaign, campaign_id)
             if campaign is None:
                 _reject("CAMPAIGN_NOT_FOUND", "campaign does not exist")
-            self.facade._validate_sender(
+            self._validate_sender(
                 session,
                 campaign.team_id,
                 execution_scope,
@@ -1129,7 +1122,7 @@ class VenueCommandExecutionService(ServiceComponent):
                         "LIVE_ORDER_SEND_DISABLED",
                         "LIVE protection requires the explicit capability gate",
                     )
-                self.facade._require_exchange_account_live_ready(
+                self._require_exchange_account_live_ready(
                     session,
                     team_id=campaign.team_id,
                     account_id=campaign.account_id,
@@ -1137,15 +1130,7 @@ class VenueCommandExecutionService(ServiceComponent):
                 )
             if trigger_price <= 0:
                 _reject("PROTECTION_TRIGGER_INVALID", "protection trigger must be positive")
-            position = session.scalar(
-                select(Position).where(
-                    Position.team_id == campaign.team_id,
-                    Position.account_id == campaign.account_id,
-                    Position.venue == campaign.venue,
-                    Position.environment == campaign.environment,
-                    Position.instrument_id == campaign.instrument_id,
-                )
-            )
+            position = find_position_for_scope(session, campaign)
             policy = session.scalar(
                 select(RiskPolicy).where(
                     RiskPolicy.team_id == campaign.team_id,
@@ -1157,7 +1142,7 @@ class VenueCommandExecutionService(ServiceComponent):
                 or position.fact_status != FactStatus.KNOWN.value
                 or position.quantity == 0
                 or policy is None
-                or self.facade._fact_is_stale(
+                or self._fact_is_stale(
                     position.observed_at,
                     now,
                     timedelta(seconds=policy.max_fact_age_seconds),
@@ -1207,7 +1192,7 @@ class VenueCommandExecutionService(ServiceComponent):
             campaign = session.get(Campaign, campaign_id)
             if campaign is None:
                 _reject("CAMPAIGN_NOT_FOUND", "campaign does not exist")
-            self.facade._validate_sender(
+            self._validate_sender(
                 session,
                 campaign.team_id,
                 execution_scope,
@@ -1230,17 +1215,7 @@ class VenueCommandExecutionService(ServiceComponent):
                 campaign.venue,
                 team_id=campaign.team_id,
             )
-            position = session.scalar(
-                select(Position)
-                .where(
-                    Position.team_id == campaign.team_id,
-                    Position.account_id == campaign.account_id,
-                    Position.venue == campaign.venue,
-                    Position.environment == campaign.environment,
-                    Position.instrument_id == campaign.instrument_id,
-                )
-                .with_for_update()
-            )
+            position = find_position_for_scope(session, campaign, for_update=True)
             if position is None or position.quantity == 0:
                 _reject("POSITION_UNKNOWN", "protection result requires a nonzero position")
             if (
@@ -1401,19 +1376,7 @@ class VenueCommandExecutionService(ServiceComponent):
             )
         with self.database.session_factory() as session:
             campaign = session.get(Campaign, campaign_id)
-            position = (
-                None
-                if campaign is None
-                else session.scalar(
-                    select(Position).where(
-                        Position.team_id == campaign.team_id,
-                        Position.account_id == campaign.account_id,
-                        Position.venue == campaign.venue,
-                        Position.environment == campaign.environment,
-                        Position.instrument_id == campaign.instrument_id,
-                    )
-                )
-            )
+            position = None if campaign is None else find_position_for_scope(session, campaign)
             instrument = (
                 None if campaign is None else session.get(Instrument, campaign.instrument_id)
             )
@@ -1693,7 +1656,7 @@ class VenueCommandExecutionService(ServiceComponent):
             campaign = session.get(Campaign, campaign_id)
             if campaign is None:
                 _reject("CAMPAIGN_NOT_FOUND", "campaign does not exist")
-            self.facade._validate_sender(
+            self._validate_sender(
                 session,
                 campaign.team_id,
                 execution_scope,
@@ -1722,7 +1685,7 @@ class VenueCommandExecutionService(ServiceComponent):
                     "LIVE_ORDER_SEND_DISABLED",
                     "LIVE protection cancel requires the explicit capability gate",
                 )
-            self.facade._require_exchange_account_live_ready(
+            self._require_exchange_account_live_ready(
                 session,
                 team_id=campaign.team_id,
                 account_id=campaign.account_id,
@@ -1733,15 +1696,7 @@ class VenueCommandExecutionService(ServiceComponent):
                     "PROTECTION_CANCEL_UNSAFE",
                     "native protection can only be removed after the campaign target is zero",
                 )
-            position = session.scalar(
-                select(Position).where(
-                    Position.team_id == campaign.team_id,
-                    Position.account_id == campaign.account_id,
-                    Position.venue == campaign.venue,
-                    Position.environment == campaign.environment,
-                    Position.instrument_id == campaign.instrument_id,
-                )
-            )
+            position = find_position_for_scope(session, campaign)
             protection = (
                 None
                 if position is None
@@ -1802,7 +1757,7 @@ class VenueCommandExecutionService(ServiceComponent):
             campaign = session.get(Campaign, campaign_id)
             if campaign is None:
                 _reject("CAMPAIGN_NOT_FOUND", "campaign does not exist")
-            self.facade._validate_sender(
+            self._validate_sender(
                 session,
                 campaign.team_id,
                 execution_scope,
@@ -1825,15 +1780,7 @@ class VenueCommandExecutionService(ServiceComponent):
                 campaign.venue,
                 team_id=campaign.team_id,
             )
-            position = session.scalar(
-                select(Position).where(
-                    Position.team_id == campaign.team_id,
-                    Position.account_id == campaign.account_id,
-                    Position.venue == campaign.venue,
-                    Position.environment == campaign.environment,
-                    Position.instrument_id == campaign.instrument_id,
-                )
-            )
+            position = find_position_for_scope(session, campaign)
             protection = (
                 None
                 if position is None

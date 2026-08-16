@@ -12,36 +12,71 @@ class DirectOperationCapitalService(ServiceComponent):
     def _direct_capital_configuration_payload(
         config: DirectCapitalConfiguration,
         updater: User | None,
+        *,
+        include_sensitive_addresses: bool = False,
     ) -> dict[str, Any]:
-        return {
+        payload = {
             "config_id": str(config.config_id),
             "version": config.version,
+            "environment": config.environment,
             "network": config.network,
             "asset": config.asset,
             "treasury_provider": config.treasury_provider,
             "vault_id": config.vault_id,
-            "vault_address": config.vault_address,
-            "owned_arbitrum_address": config.owned_arbitrum_address,
+            "vault_address_configured": config.vault_address is not None,
+            "owned_arbitrum_address_configured": (config.owned_arbitrum_address is not None),
             "binance_account_id": config.binance_account_id,
-            "binance_deposit_address": config.binance_deposit_address,
-            "binance_withdrawal_address": config.binance_withdrawal_address,
+            "binance_deposit_address_configured": (config.binance_deposit_address is not None),
+            "binance_withdrawal_address_configured": (
+                config.binance_withdrawal_address is not None
+            ),
             "hyperliquid_account_id": config.hyperliquid_account_id,
-            "hyperliquid_bridge_address": config.hyperliquid_bridge_address,
-            "safe_address": config.safe_address,
-            "safe_delegate_address": config.safe_delegate_address,
+            "hyperliquid_bridge_address_configured": (
+                config.hyperliquid_bridge_address is not None
+            ),
+            "safe_address_configured": config.safe_address is not None,
+            "safe_delegate_address_configured": config.safe_delegate_address is not None,
+            "vault_withdrawal_private_key_configured": (config.vault_withdrawal_key_version > 0),
+            "safe_withdrawal_private_key_configured": (config.safe_withdrawal_key_version > 0),
             "max_amount": None if config.max_amount is None else str(config.max_amount),
             "max_fee": None if config.max_fee is None else str(config.max_fee),
             "updated_by": str(config.updated_by),
             "updated_by_username": None if updater is None else updater.username,
             "effective_at": config.effective_at.isoformat(),
         }
+        if include_sensitive_addresses:
+            payload.update(
+                {
+                    "vault_address": config.vault_address,
+                    "owned_arbitrum_address": config.owned_arbitrum_address,
+                    "binance_deposit_address": config.binance_deposit_address,
+                    "binance_withdrawal_address": config.binance_withdrawal_address,
+                    "hyperliquid_bridge_address": config.hyperliquid_bridge_address,
+                    "safe_address": config.safe_address,
+                    "safe_delegate_address": config.safe_delegate_address,
+                }
+            )
+        return payload
 
-    def direct_capital_configuration(self, actor_id: UUID) -> dict[str, Any] | None:
+    def direct_capital_configuration(
+        self,
+        actor_id: UUID,
+        environment: str = "LIVE",
+        *,
+        include_sensitive_addresses: bool = False,
+    ) -> dict[str, Any] | None:
+        normalized_environment = environment.strip().upper()
+        if normalized_environment != "LIVE":
+            _reject(
+                "CAPITAL_CONFIGURATION_INVALID",
+                "direct capital configuration is available only in LIVE",
+            )
         with self.database.session_factory() as session:
             team = self.transactions._require_role(session, actor_id, "capital.view")
             config = session.scalar(
                 select(DirectCapitalConfiguration).where(
                     DirectCapitalConfiguration.team_id == team.team_id,
+                    DirectCapitalConfiguration.environment == normalized_environment,
                     DirectCapitalConfiguration.active,
                 )
             )
@@ -50,6 +85,7 @@ class DirectOperationCapitalService(ServiceComponent):
             return self._direct_capital_configuration_payload(
                 config,
                 session.get(User, config.updated_by),
+                include_sensitive_addresses=include_sensitive_addresses,
             )
 
     def set_direct_capital_configuration(
@@ -57,6 +93,7 @@ class DirectOperationCapitalService(ServiceComponent):
         actor_id: UUID,
         idempotency_key: str,
         *,
+        environment: str = "LIVE",
         network: str,
         asset: str,
         treasury_provider: str,
@@ -70,12 +107,21 @@ class DirectOperationCapitalService(ServiceComponent):
         hyperliquid_bridge_address: str | None,
         safe_address: str | None = None,
         safe_delegate_address: str | None = None,
+        vault_withdrawal_private_key: str | None = None,
+        safe_withdrawal_private_key: str | None = None,
         max_amount: Decimal | None,
         max_fee: Decimal | None,
         now: datetime,
     ) -> UUID:
-        operation = "capital.configuration.manage"
+        normalized_environment = environment.strip().upper()
+        if normalized_environment != "LIVE":
+            _reject(
+                "CAPITAL_CONFIGURATION_INVALID",
+                "direct capital configuration is available only in LIVE",
+            )
+        operation = f"capital.configuration.manage:{normalized_environment}"
         payload = {
+            "environment": normalized_environment,
             "network": network,
             "asset": asset,
             "treasury_provider": treasury_provider,
@@ -89,6 +135,22 @@ class DirectOperationCapitalService(ServiceComponent):
             "hyperliquid_bridge_address": hyperliquid_bridge_address,
             "safe_address": safe_address,
             "safe_delegate_address": safe_delegate_address,
+            "vault_withdrawal_key_semantics": (
+                None
+                if vault_withdrawal_private_key is None
+                else self.credential_cipher.secret_fingerprint(
+                    vault_withdrawal_private_key,
+                    purpose=f"capital-vault-withdrawal:{normalized_environment}",
+                )
+            ),
+            "safe_withdrawal_key_semantics": (
+                None
+                if safe_withdrawal_private_key is None
+                else self.credential_cipher.secret_fingerprint(
+                    safe_withdrawal_private_key,
+                    purpose=f"capital-safe-withdrawal:{normalized_environment}",
+                )
+            ),
             "max_amount": None if max_amount is None else str(max_amount),
             "max_fee": None if max_fee is None else str(max_fee),
         }
@@ -99,20 +161,6 @@ class DirectOperationCapitalService(ServiceComponent):
             )
         if treasury_provider not in {"NOTILT_VAULT", "SAFE_SPENDING_LIMIT"}:
             _reject("CAPITAL_CONFIGURATION_INVALID", "funding provider is unsupported")
-        if treasury_provider == "NOTILT_VAULT":
-            safe_address = None
-            safe_delegate_address = None
-        else:
-            vault_id = None
-            vault_address = None
-        payload.update(
-            {
-                "vault_id": vault_id,
-                "vault_address": vault_address,
-                "safe_address": safe_address,
-                "safe_delegate_address": safe_delegate_address,
-            }
-        )
         if max_amount is not None and max_amount <= 0:
             _reject("CAPITAL_CONFIGURATION_INVALID", "maximum amount must be positive")
         if max_fee is not None and max_fee < 0:
@@ -153,12 +201,13 @@ class DirectOperationCapitalService(ServiceComponent):
             ):
                 if configured_account_id is None:
                     continue
-                self.facade._ensure_exchange_account_reference(
+                self._ensure_exchange_account_reference(
                     session,
                     team=team,
                     actor_id=actor_id,
                     account_id=configured_account_id,
                     venue=configured_venue,
+                    environment=normalized_environment,
                     now=now,
                 )
             digest, response = self.transactions._idempotency(
@@ -174,6 +223,7 @@ class DirectOperationCapitalService(ServiceComponent):
                 select(DirectCapitalConfiguration)
                 .where(
                     DirectCapitalConfiguration.team_id == team.team_id,
+                    DirectCapitalConfiguration.environment == normalized_environment,
                     DirectCapitalConfiguration.active,
                 )
                 .with_for_update()
@@ -181,9 +231,48 @@ class DirectOperationCapitalService(ServiceComponent):
             next_version = 1 if current is None else current.version + 1
             if current is not None:
                 current.active = False
+            vault_key_version = (0 if current is None else current.vault_withdrawal_key_version) + (
+                1 if vault_withdrawal_private_key is not None else 0
+            )
+            safe_key_version = (0 if current is None else current.safe_withdrawal_key_version) + (
+                1 if safe_withdrawal_private_key is not None else 0
+            )
+            vault_key_ciphertext = (
+                None if current is None else current.vault_withdrawal_key_ciphertext
+            )
+            vault_key_metadata = (
+                {} if current is None else dict(current.vault_withdrawal_key_metadata or {})
+            )
+            safe_key_ciphertext = (
+                None if current is None else current.safe_withdrawal_key_ciphertext
+            )
+            safe_key_metadata = (
+                {} if current is None else dict(current.safe_withdrawal_key_metadata or {})
+            )
+            if vault_withdrawal_private_key is not None:
+                encrypted_vault_key = self.credential_cipher.encrypt_secret(
+                    vault_withdrawal_private_key,
+                    team_id=team.team_id,
+                    object_id=team.team_id,
+                    purpose=f"capital-vault-withdrawal:{normalized_environment}",
+                    credential_version=vault_key_version,
+                )
+                vault_key_ciphertext = encrypted_vault_key.ciphertext
+                vault_key_metadata = encrypted_vault_key.metadata
+            if safe_withdrawal_private_key is not None:
+                encrypted_safe_key = self.credential_cipher.encrypt_secret(
+                    safe_withdrawal_private_key,
+                    team_id=team.team_id,
+                    object_id=team.team_id,
+                    purpose=f"capital-safe-withdrawal:{normalized_environment}",
+                    credential_version=safe_key_version,
+                )
+                safe_key_ciphertext = encrypted_safe_key.ciphertext
+                safe_key_metadata = encrypted_safe_key.metadata
             config = DirectCapitalConfiguration(
                 team_id=team.team_id,
                 version=next_version,
+                environment=normalized_environment,
                 active=True,
                 network=network,
                 asset=asset,
@@ -198,6 +287,12 @@ class DirectOperationCapitalService(ServiceComponent):
                 hyperliquid_bridge_address=hyperliquid_bridge_address,
                 safe_address=safe_address,
                 safe_delegate_address=safe_delegate_address,
+                vault_withdrawal_key_ciphertext=vault_key_ciphertext,
+                vault_withdrawal_key_metadata=vault_key_metadata,
+                vault_withdrawal_key_version=vault_key_version,
+                safe_withdrawal_key_ciphertext=safe_key_ciphertext,
+                safe_withdrawal_key_metadata=safe_key_metadata,
+                safe_withdrawal_key_version=safe_key_version,
                 max_amount=max_amount,
                 max_fee=max_fee,
                 updated_by=actor_id,
@@ -222,7 +317,8 @@ class DirectOperationCapitalService(ServiceComponent):
                 object_type="DirectCapitalConfiguration",
                 object_id=config.config_id,
                 reason=(
-                    f"version={config.version}; network=ARBITRUM; asset=USDC; "
+                    f"environment={normalized_environment};version={config.version}; "
+                    "network=ARBITRUM; asset=USDC; "
                     f"treasury_provider={treasury_provider}"
                 ),
                 correlation_id=uuid4(),
@@ -279,12 +375,16 @@ class DirectOperationCapitalService(ServiceComponent):
                 plan.venue,
             )
             if plan.account_id is not None:
-                self.facade._ensure_exchange_account_reference(
+                account_environment = (
+                    team.execution_mode if team.execution_mode in {"TESTNET", "LIVE"} else "LIVE"
+                )
+                self._ensure_exchange_account_reference(
                     session,
                     team=team,
                     actor_id=actor_id,
                     account_id=plan.account_id,
                     venue=plan.venue,
+                    environment=account_environment,
                     now=now,
                 )
             digest, response = self.transactions._idempotency(

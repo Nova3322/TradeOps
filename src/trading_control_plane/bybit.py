@@ -207,9 +207,7 @@ class BybitReadOnlyClient:
             if cursor is None:
                 return rows
             if cursor in seen:
-                raise DomainRejected(
-                    "BYBIT_RESPONSE_INVALID", "Bybit pagination cursor repeated"
-                )
+                raise DomainRejected("BYBIT_RESPONSE_INVALID", "Bybit pagination cursor repeated")
             seen.add(cursor)
         raise DomainRejected(
             "BYBIT_RESPONSE_INCOMPLETE", "Bybit response exceeded the bounded page limit"
@@ -362,12 +360,8 @@ class BybitReadOnlyClient:
                 {"category": "linear", "settleCoin": "USDC", "limit": "200"},
                 now=now,
             ),
-            *self._pages(
-                "/v5/position/list", {"category": "inverse", "limit": "200"}, now=now
-            ),
-            *self._pages(
-                "/v5/position/list", {"category": "option", "limit": "200"}, now=now
-            ),
+            *self._pages("/v5/position/list", {"category": "inverse", "limit": "200"}, now=now),
+            *self._pages("/v5/position/list", {"category": "option", "limit": "200"}, now=now),
         ]
         unsupported_orders = [
             *self._pages(
@@ -375,12 +369,8 @@ class BybitReadOnlyClient:
                 {"category": "linear", "settleCoin": "USDC", "limit": "50"},
                 now=now,
             ),
-            *self._pages(
-                "/v5/order/realtime", {"category": "inverse", "limit": "50"}, now=now
-            ),
-            *self._pages(
-                "/v5/order/realtime", {"category": "option", "limit": "50"}, now=now
-            ),
+            *self._pages("/v5/order/realtime", {"category": "inverse", "limit": "50"}, now=now),
+            *self._pages("/v5/order/realtime", {"category": "option", "limit": "50"}, now=now),
         ]
         if any(_decimal(item.get("size", 0), "size") != 0 for item in unsupported_positions):
             raise DomainRejected(
@@ -393,9 +383,7 @@ class BybitReadOnlyClient:
                 "Bybit continuous facts require no unsupported derivative orders",
             )
 
-    def _mark_prices(
-        self, catalog: dict[str, VenueInstrument]
-    ) -> dict[str, Decimal]:
+    def _mark_prices(self, catalog: dict[str, VenueInstrument]) -> dict[str, Decimal]:
         result = self._public_result("/v5/market/tickers", {"category": "linear"})
         marks = {
             str(item.get("symbol")): _positive_decimal(item.get("markPrice"), "markPrice")
@@ -435,16 +423,13 @@ class BybitReadOnlyClient:
         return {
             str(item["symbol"])
             for item in rows
-            if item.get("symbol") in catalog
-            and _decimal(item.get("size", 0), "size") != 0
+            if item.get("symbol") in catalog and _decimal(item.get("size", 0), "size") != 0
         }
 
     def _parse_equity(self, result: dict[str, Any], now: datetime) -> VenueEquity:
         rows = self._rows(result, "wallet balance")
         if len(rows) != 1 or rows[0].get("accountType") != "UNIFIED":
-            raise DomainRejected(
-                "BYBIT_RESPONSE_INVALID", "Bybit Unified equity is ambiguous"
-            )
+            raise DomainRejected("BYBIT_RESPONSE_INVALID", "Bybit Unified equity is ambiguous")
         item = rows[0]
         return VenueEquity(
             equity=_decimal(item.get("totalEquity"), "totalEquity", minimum=Decimal(0)),
@@ -521,9 +506,7 @@ class BybitReadOnlyClient:
             order_id = str(item.get("orderId") or "")
             side = str(item.get("side", "")).upper()
             if not order_id or side not in {"BUY", "SELL"}:
-                raise DomainRejected(
-                    "BYBIT_RESPONSE_INVALID", "Bybit order identity is invalid"
-                )
+                raise DomainRejected("BYBIT_RESPONSE_INVALID", "Bybit order identity is invalid")
             ordered = _positive_decimal(item.get("qty"), "qty")
             filled = _decimal(item.get("cumExecQty", 0), "cumExecQty", minimum=Decimal(0))
             if filled > ordered:
@@ -575,9 +558,7 @@ class BybitReadOnlyClient:
                 )
             )
         if any(not item.fill_id or not item.order_id for item in result):
-            raise DomainRejected(
-                "BYBIT_RESPONSE_INVALID", "Bybit fill identity is incomplete"
-            )
+            raise DomainRejected("BYBIT_RESPONSE_INVALID", "Bybit fill identity is incomplete")
         return tuple(result)
 
     @staticmethod

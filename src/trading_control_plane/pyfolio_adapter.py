@@ -18,9 +18,7 @@ from trading_control_plane.domain import DomainRejected
 from trading_control_plane.reporting_frames import AnalyticsFrames, analytics_frames
 
 os.environ.setdefault("MPLBACKEND", "Agg")
-os.environ.setdefault(
-    "MPLCONFIGDIR", str(Path(tempfile.gettempdir()) / "tradingops-matplotlib")
-)
+os.environ.setdefault("MPLCONFIGDIR", str(Path(tempfile.gettempdir()) / "tradingops-matplotlib"))
 
 
 @dataclass(frozen=True, slots=True)
@@ -106,9 +104,7 @@ class PyfolioReportAdapter:
                     ),
                     "max_drawdown": _finite(stats["Max drawdown"], name="maximum drawdown"),
                     "win_rate": _finite((frames.returns > 0).mean(), name="win rate"),
-                    "fees": _finite(
-                        frames.transactions["commission"].sum(), name="fees"
-                    ),
+                    "fees": _finite(frames.transactions["commission"].sum(), name="fees"),
                 }
                 charts = [
                     (
@@ -188,8 +184,8 @@ figure h2{font-size:16px}img{display:block;width:100%;height:auto}
                 (
                     '<!doctype html><html><head><meta charset="utf-8">',
                     '<meta http-equiv="Content-Security-Policy" ',
-                    'content="default-src \'none\'; img-src data:; ',
-                    'style-src \'unsafe-inline\'">',
+                    "content=\"default-src 'none'; img-src data:; ",
+                    "style-src 'unsafe-inline'\">",
                     '<meta name="viewport" content="width=device-width,initial-scale=1">',
                     f"<title>{safe_title}</title><style>{styles}</style></head><body>",
                     f"<header><h1>{safe_title}</h1><p>pyfolio-reloaded ",

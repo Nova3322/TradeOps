@@ -145,7 +145,7 @@ class RecoveryRiskService(ServiceComponent):
                 elif source_health.status != "SUCCESS":
                     failure_code = source_health.error_code or "READ_ONLY_PROBE_FAILED"
                     blockers.add(f"READ_ONLY_SOURCE_FAILED:{prefix}:{failure_code}")
-                elif self.facade._fact_is_stale(source_health.checked_at, now, max_age):
+                elif self._fact_is_stale(source_health.checked_at, now, max_age):
                     blockers.add(f"READ_ONLY_SOURCE_STALE:{prefix}")
             equity = session.scalar(
                 select(AccountEquity).where(
@@ -159,7 +159,7 @@ class RecoveryRiskService(ServiceComponent):
                 blockers.add(f"ACCOUNT_EQUITY_MISSING:{prefix}")
             elif equity.fact_status != FactStatus.KNOWN.value:
                 blockers.add(f"ACCOUNT_EQUITY_UNKNOWN:{prefix}")
-            elif self.facade._fact_is_stale(equity.observed_at, now, max_age):
+            elif self._fact_is_stale(equity.observed_at, now, max_age):
                 blockers.add(f"ACCOUNT_EQUITY_STALE:{prefix}")
 
             positions = session.scalars(
@@ -176,7 +176,7 @@ class RecoveryRiskService(ServiceComponent):
                 if position.fact_status != FactStatus.KNOWN.value:
                     blockers.add(f"POSITION_UNKNOWN:{prefix}")
                     continue
-                if self.facade._fact_is_stale(position.observed_at, now, max_age):
+                if self._fact_is_stale(position.observed_at, now, max_age):
                     blockers.add(f"POSITION_STALE:{prefix}")
                 if position.quantity == 0:
                     continue
@@ -192,7 +192,7 @@ class RecoveryRiskService(ServiceComponent):
                     or protection.quantity < abs(position.quantity)
                 ):
                     blockers.add(f"PROTECTION_INCOMPLETE:{prefix}")
-                elif self.facade._fact_is_stale(protection.observed_at, now, max_age):
+                elif self._fact_is_stale(protection.observed_at, now, max_age):
                     blockers.add(f"PROTECTION_STALE:{prefix}")
 
             execution_scope = _scope_key(environment.value, account_id, venue)
@@ -219,7 +219,7 @@ class RecoveryRiskService(ServiceComponent):
             ):
                 blockers.add(f"COMPUTED_RECONCILIATION_MATCH_REQUIRED:{prefix}")
             elif (
-                self.facade._fact_is_stale(reconciliation.completed_at, now, max_age)
+                self._fact_is_stale(reconciliation.completed_at, now, max_age)
                 or reconciliation.completed_at < latest_source_at
             ):
                 blockers.add(f"RECONCILIATION_STALE:{prefix}")
@@ -552,7 +552,10 @@ class RecoveryRiskService(ServiceComponent):
             restricted = policy.system_state != SystemRiskState.NORMAL.value
 
             def request_superseded(item: RiskControlChangeRequest) -> bool:
-                return not restricted or self._risk_restore_request_drifted(item, policy, gate)
+                return bool(
+                    (item.change_type == "RESUME_NEW_RISK" and not restricted)
+                    or self._risk_restore_request_drifted(item, policy, gate)
+                )
 
             def effective_request_status(item: RiskControlChangeRequest) -> str:
                 if item.status in {
@@ -594,7 +597,10 @@ class RecoveryRiskService(ServiceComponent):
                 and active_request is not None
                 and active_request.status == RiskPolicyChangeStatus.APPROVED.value
                 and active_request.requester_id != actor_id
-                and not blockers
+                and (
+                    active_request.change_type not in {"RESUME_NEW_RISK", "ENABLE_AUTO_ADD"}
+                    or not blockers
+                )
                 and active_request.execute_after <= now
             )
             return {
@@ -699,6 +705,8 @@ class RecoveryRiskService(ServiceComponent):
                         "superseded_by_control_state": request_superseded(item),
                         "version": item.version,
                         "reason": item.reason,
+                        "change_type": item.change_type,
+                        "requested_policy": item.requested_policy,
                         "restore_auto_add": item.restore_auto_add,
                         "require_live_scope": item.require_live_scope,
                         "source_policy_id": str(item.source_policy_id),
@@ -751,14 +759,28 @@ class RecoveryRiskService(ServiceComponent):
         *,
         reason: str,
         restore_auto_add: bool,
+        change_type: str = "RESUME_NEW_RISK",
+        requested_policy: dict[str, str | int] | None = None,
         configured_scopes: tuple[tuple[str, str, str], ...],
         require_live_scope: bool = False,
         now: datetime,
     ) -> UUID:
         operation = "risk.restore.request"
+        normalized_change_type = change_type.strip().upper()
+        if normalized_change_type not in {
+            "POLICY_UPDATE",
+            "DISABLE_AUTO_ADD",
+            "ENABLE_AUTO_ADD",
+            "PAUSE_NEW_RISK",
+            "RESUME_NEW_RISK",
+        }:
+            _reject("RISK_CHANGE_TYPE_INVALID", "risk control change type is unsupported")
+        requested_policy = requested_policy or {}
         payload = {
             "reason": reason,
             "restore_auto_add": restore_auto_add,
+            "change_type": normalized_change_type,
+            "requested_policy": requested_policy,
             "configured_scopes": configured_scopes,
             "require_live_scope": require_live_scope,
         }
@@ -806,19 +828,53 @@ class RecoveryRiskService(ServiceComponent):
             if response is not None:
                 return _as_uuid(str(response["request_id"]))
             self.transactions._lock_risk_capacity(session, team.team_id)
-            policy = self.facade._active_risk_policy(session, team.team_id)
+            policy = self._active_risk_policy(session, team.team_id)
             gate = session.get(CapabilityGate, "AUTO_ADD", with_for_update=True)
             if gate is None:
                 _reject("CAPABILITY_GATE_NOT_FOUND", "AUTO_ADD gate is missing")
-            if policy.system_state == SystemRiskState.KILL_SWITCH.value:
+            if (
+                normalized_change_type in {"RESUME_NEW_RISK", "ENABLE_AUTO_ADD"}
+                and policy.system_state == SystemRiskState.KILL_SWITCH.value
+            ):
                 _reject(
                     "KILL_SWITCH_MANUAL_RECOVERY_REQUIRED",
                     "KILL_SWITCH cannot be resumed through the reviewed restore workflow",
                 )
-            if policy.system_state == SystemRiskState.NORMAL.value and (
-                not restore_auto_add or gate.status == CapabilityStatus.ENABLED.value
+            if (
+                normalized_change_type == "RESUME_NEW_RISK"
+                and policy.system_state == SystemRiskState.NORMAL.value
             ):
                 _reject("RISK_CONTROL_ALREADY_NORMAL", "the requested controls are already open")
+            if (
+                normalized_change_type == "ENABLE_AUTO_ADD"
+                and gate.status == CapabilityStatus.ENABLED.value
+            ):
+                _reject("RISK_CONTROL_ALREADY_NORMAL", "AUTO_ADD is already enabled")
+            if (
+                normalized_change_type == "DISABLE_AUTO_ADD"
+                and gate.status == CapabilityStatus.DISABLED.value
+            ):
+                _reject("RISK_CONTROL_ALREADY_TIGHTENED", "AUTO_ADD is already disabled")
+            if (
+                normalized_change_type == "PAUSE_NEW_RISK"
+                and policy.system_state != SystemRiskState.NORMAL.value
+            ):
+                _reject("RISK_CONTROL_ALREADY_TIGHTENED", "new risk is already paused")
+            if normalized_change_type == "POLICY_UPDATE":
+                required_policy_fields = {
+                    "version",
+                    "max_total_risk",
+                    "max_account_risk",
+                    "max_single_loss",
+                    "max_consecutive_losses",
+                    "loss_cooldown_seconds",
+                    "max_fact_age_seconds",
+                }
+                if set(requested_policy) != required_policy_fields:
+                    _reject(
+                        "RISK_POLICY_INVALID",
+                        "reviewed policy changes require every versioned risk limit",
+                    )
             existing_requests = list(
                 session.scalars(
                     select(RiskControlChangeRequest)
@@ -873,9 +929,14 @@ class RecoveryRiskService(ServiceComponent):
                     ExecutionEnvironment.LIVE.value if require_live_scope else None
                 ),
             )
+            restoring = normalized_change_type in {"RESUME_NEW_RISK", "ENABLE_AUTO_ADD"}
             last_tighten_at = max(
                 policy.updated_at,
-                gate.updated_at if restore_auto_add else policy.updated_at,
+                (
+                    gate.updated_at
+                    if normalized_change_type == "ENABLE_AUTO_ADD"
+                    else policy.updated_at
+                ),
             )
             request = RiskControlChangeRequest(
                 team_id=team.team_id,
@@ -884,6 +945,8 @@ class RecoveryRiskService(ServiceComponent):
                 version=1,
                 reason=reason,
                 restore_auto_add=restore_auto_add,
+                change_type=normalized_change_type,
+                requested_policy=requested_policy,
                 require_live_scope=require_live_scope,
                 source_policy_id=policy.policy_id,
                 source_policy_version=policy.version,
@@ -893,7 +956,9 @@ class RecoveryRiskService(ServiceComponent):
                 required_scopes=scopes,
                 resulting_policy_id=None,
                 correlation_id=uuid4(),
-                execute_after=max(now, last_tighten_at + RISK_RESTORE_COOLDOWN),
+                execute_after=(
+                    max(now, last_tighten_at + RISK_RESTORE_COOLDOWN) if restoring else now
+                ),
                 expires_at=now + RISK_RESTORE_TTL,
                 executed_at=None,
                 created_at=now,
@@ -966,14 +1031,14 @@ class RecoveryRiskService(ServiceComponent):
                 return RiskPolicyChangeStatus(str(response["status"]))
             if request.version != expected_version:
                 _reject("VERSION_CONFLICT", "restore request changed before review")
-            policy = self.facade._active_risk_policy(session, request.team_id)
+            policy = self._active_risk_policy(session, request.team_id)
             gate = session.get(CapabilityGate, "AUTO_ADD")
             if gate is None:
                 _reject("CAPABILITY_GATE_NOT_FOUND", "AUTO_ADD gate is missing")
             if (
-                policy.system_state == SystemRiskState.NORMAL.value
-                or self._risk_restore_request_drifted(request, policy, gate)
-            ):
+                request.change_type == "RESUME_NEW_RISK"
+                and policy.system_state == SystemRiskState.NORMAL.value
+            ) or self._risk_restore_request_drifted(request, policy, gate):
                 _reject(
                     "RISK_RESTORE_CONTROL_DRIFT",
                     "restore request no longer matches current controls",
@@ -1106,7 +1171,7 @@ class RecoveryRiskService(ServiceComponent):
             if request.requester_id == actor_id:
                 _reject("SELF_EXECUTION_FORBIDDEN", "requester cannot execute their restore")
             self.transactions._lock_risk_capacity(session, request.team_id)
-            policy = self.facade._active_risk_policy(session, request.team_id)
+            policy = self._active_risk_policy(session, request.team_id)
             gate = session.get(CapabilityGate, "AUTO_ADD", with_for_update=True)
             if gate is None:
                 _reject("CAPABILITY_GATE_NOT_FOUND", "AUTO_ADD gate is missing")
@@ -1129,35 +1194,109 @@ class RecoveryRiskService(ServiceComponent):
                     "RISK_RESTORE_SCOPE_DRIFT",
                     "LIVE scope requirement changed after the request",
                 )
-            blockers = self._risk_restore_blockers(
-                session,
-                policy,
-                request.required_scopes,
-                require_live_scope=request.require_live_scope,
-                now=now,
-            )
-            if blockers:
-                _reject("RISK_RESTORE_BLOCKED", ",".join(blockers))
-            policy.active = False
-            next_revision = policy.revision + 1
-            restored = RiskPolicy(
-                team_id=request.team_id,
-                version=f"restore-{next_revision}-{request.request_id.hex[:12]}",
-                revision=next_revision,
-                system_state=SystemRiskState.NORMAL.value,
-                max_total_risk=policy.max_total_risk,
-                max_account_risk=policy.max_account_risk,
-                max_single_loss=policy.max_single_loss,
-                max_consecutive_losses=policy.max_consecutive_losses,
-                loss_cooldown_seconds=policy.loss_cooldown_seconds,
-                max_fact_age_seconds=policy.max_fact_age_seconds,
-                reason=request.reason,
-                active=True,
-                updated_by=str(actor_id),
-                updated_at=now,
-            )
-            session.add(restored)
-            session.flush()
+            if request.change_type in {"RESUME_NEW_RISK", "ENABLE_AUTO_ADD"}:
+                blockers = self._risk_restore_blockers(
+                    session,
+                    policy,
+                    request.required_scopes,
+                    require_live_scope=request.require_live_scope,
+                    now=now,
+                )
+                if blockers:
+                    _reject("RISK_RESTORE_BLOCKED", ",".join(blockers))
+            resulting_policy = policy
+            if request.change_type == "RESUME_NEW_RISK":
+                policy.active = False
+                next_revision = policy.revision + 1
+                resulting_policy = RiskPolicy(
+                    team_id=request.team_id,
+                    version=f"restore-{next_revision}-{request.request_id.hex[:12]}",
+                    revision=next_revision,
+                    system_state=SystemRiskState.NORMAL.value,
+                    max_total_risk=policy.max_total_risk,
+                    max_account_risk=policy.max_account_risk,
+                    max_single_loss=policy.max_single_loss,
+                    max_consecutive_losses=policy.max_consecutive_losses,
+                    loss_cooldown_seconds=policy.loss_cooldown_seconds,
+                    max_fact_age_seconds=policy.max_fact_age_seconds,
+                    reason=request.reason,
+                    active=True,
+                    updated_by=str(actor_id),
+                    updated_at=now,
+                )
+                session.add(resulting_policy)
+                session.flush()
+            elif request.change_type == "POLICY_UPDATE":
+                requested = request.requested_policy
+                values = (
+                    Decimal(str(requested.get("max_total_risk", "0"))),
+                    Decimal(str(requested.get("max_account_risk", "0"))),
+                    Decimal(str(requested.get("max_single_loss", "0"))),
+                )
+                total, account, single = values
+                consecutive = int(requested.get("max_consecutive_losses", 0))
+                cooldown = int(requested.get("loss_cooldown_seconds", 0))
+                max_age = int(requested.get("max_fact_age_seconds", 0))
+                version = str(requested.get("version", ""))
+                if (
+                    not version
+                    or len(version) > 120
+                    or any(not value.is_finite() or value <= 0 for value in values)
+                    or account > total
+                    or single > account
+                    or consecutive <= 0
+                    or cooldown <= 0
+                    or max_age <= 0
+                ):
+                    _reject("RISK_POLICY_INVALID", "reviewed risk limits are invalid")
+                if session.scalar(
+                    select(RiskPolicy.policy_id).where(
+                        RiskPolicy.team_id == request.team_id,
+                        RiskPolicy.version == version,
+                    )
+                ):
+                    _reject("RISK_POLICY_VERSION_CONFLICT", "risk policy version already exists")
+                policy.active = False
+                resulting_policy = RiskPolicy(
+                    team_id=request.team_id,
+                    version=version,
+                    revision=policy.revision + 1,
+                    system_state=policy.system_state,
+                    max_total_risk=total,
+                    max_account_risk=account,
+                    max_single_loss=single,
+                    max_consecutive_losses=consecutive,
+                    loss_cooldown_seconds=cooldown,
+                    max_fact_age_seconds=max_age,
+                    reason=request.reason,
+                    active=True,
+                    updated_by=str(actor_id),
+                    updated_at=now,
+                )
+                session.add(resulting_policy)
+                session.flush()
+            elif request.change_type == "PAUSE_NEW_RISK":
+                if policy.system_state == SystemRiskState.KILL_SWITCH.value:
+                    _reject("RISK_CONTROL_ALREADY_TIGHTENED", "KILL_SWITCH is already stricter")
+                policy.system_state = SystemRiskState.REDUCE_ONLY.value
+                policy.revision += 1
+                policy.reason = request.reason
+                policy.updated_by = str(actor_id)
+                policy.updated_at = now
+            elif request.change_type == "ENABLE_AUTO_ADD":
+                if policy.system_state != SystemRiskState.NORMAL.value:
+                    _reject("RISK_RESTORE_BLOCKED", "risk policy must be NORMAL")
+                gate.status = CapabilityStatus.ENABLED.value
+                gate.reason = request.reason
+                gate.operator_id = str(actor_id)
+                gate.version += 1
+                gate.updated_at = now
+            elif request.change_type == "DISABLE_AUTO_ADD":
+                gate.status = CapabilityStatus.DISABLED.value
+                gate.reason = request.reason
+                gate.operator_id = str(actor_id)
+                gate.version += 1
+                gate.updated_at = now
             authorizations = session.scalars(
                 select(TradingAuthorization)
                 .where(
@@ -1172,11 +1311,11 @@ class RecoveryRiskService(ServiceComponent):
                 if authorization.add_revoked_at is None:
                     authorization.add_revoked_at = now
             request.status = RiskPolicyChangeStatus.EXECUTED.value
-            request.resulting_policy_id = restored.policy_id
+            request.resulting_policy_id = resulting_policy.policy_id
             request.executed_at = now
             request.updated_at = now
             request.version += 1
-            result = {"policy_id": str(restored.policy_id), "request_id": str(request_id)}
+            result = {"policy_id": str(resulting_policy.policy_id), "request_id": str(request_id)}
             self.transactions._save_receipt(
                 session,
                 caller_id=f"{actor_id}:{request.team_id}",
@@ -1189,7 +1328,7 @@ class RecoveryRiskService(ServiceComponent):
             self.transactions._audit(
                 session,
                 actor_id=str(actor_id),
-                event_type="RISK_RESTORE_EXECUTED",
+                event_type="RISK_CONTROL_CHANGE_EXECUTED",
                 object_type="RiskControlChangeRequest",
                 object_id=request.request_id,
                 reason=request.reason,
@@ -1198,7 +1337,7 @@ class RecoveryRiskService(ServiceComponent):
                 idempotency_key=idempotency_key,
                 now=now,
             )
-            return restored.policy_id
+            return resulting_policy.policy_id
 
     def direct_restore_risk_controls(
         self,
@@ -1242,7 +1381,7 @@ class RecoveryRiskService(ServiceComponent):
             if response is not None:
                 return _as_uuid(str(response["policy_id"]))
             self.transactions._lock_risk_capacity(session, team.team_id)
-            policy = self.facade._active_risk_policy(session, team.team_id)
+            policy = self._active_risk_policy(session, team.team_id)
             if policy.system_state == SystemRiskState.NORMAL.value:
                 _reject("RISK_CONTROL_ALREADY_NORMAL", "risk policy is already normal")
             gate = session.get(CapabilityGate, "AUTO_ADD", with_for_update=True)

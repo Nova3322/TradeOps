@@ -63,12 +63,13 @@ class TransferCapitalService(ServiceComponent):
         operation = "capital.propose"
         with self.database.session_factory.begin() as session:
             team = self.transactions._require_role(session, actor_id, operation, account_id, venue)
-            self.facade._ensure_exchange_account_reference(
+            self._ensure_exchange_account_reference(
                 session,
                 team=team,
                 actor_id=actor_id,
                 account_id=account_id,
                 venue=venue,
+                environment=environment.value,
                 now=now,
             )
             digest, response = self.transactions._idempotency(
@@ -434,7 +435,7 @@ class TransferCapitalService(ServiceComponent):
                         "CAPABILITY_DISABLED",
                         "CAPITAL_TRANSFER must be explicitly enabled before a LIVE reservation",
                     )
-            self.facade._assert_capital_scope_flat(
+            self._assert_capital_scope_flat(
                 session,
                 team_id=team.team_id,
                 environment=authorization.environment,
@@ -478,7 +479,7 @@ class TransferCapitalService(ServiceComponent):
                     )
                 },
             )
-            source = self.facade._capital_balance(
+            source = self._capital_balance(
                 session,
                 team_id=team.team_id,
                 environment=authorization.environment,
@@ -488,7 +489,7 @@ class TransferCapitalService(ServiceComponent):
                 asset=authorization.asset,
                 lock=True,
             )
-            destination = self.facade._capital_balance(
+            destination = self._capital_balance(
                 session,
                 team_id=team.team_id,
                 environment=authorization.environment,

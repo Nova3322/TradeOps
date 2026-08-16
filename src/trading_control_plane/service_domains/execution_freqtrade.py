@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from trading_control_plane.repositories.execution import find_position_for_scope
 from trading_control_plane.service_component import ServiceComponent
 
 # The domain implementation intentionally consumes the explicit service_core export surface.
@@ -26,7 +27,7 @@ class FreqtradeRecoveryExecutionService(ServiceComponent):
         if environment is not ExecutionEnvironment.LIVE:
             _reject("FREQTRADE_LIVE_SCOPE_REQUIRED", "Freqtrade LIVE requires a LIVE scope")
         with self.database.session_factory() as session:
-            base = self.facade._binance_testnet_command(
+            base = self._binance_testnet_command(
                 session,
                 intent_id,
                 actor_id,
@@ -59,15 +60,7 @@ class FreqtradeRecoveryExecutionService(ServiceComponent):
                     max_quantity=base.quantity,
                     client_order_id=base.client_order_id,
                 )
-            position = session.scalar(
-                select(Position).where(
-                    Position.team_id == campaign.team_id,
-                    Position.account_id == campaign.account_id,
-                    Position.venue == campaign.venue,
-                    Position.environment == campaign.environment,
-                    Position.instrument_id == campaign.instrument_id,
-                )
-            )
+            position = find_position_for_scope(session, campaign)
             if position is None or position.mark_price <= 0:
                 _reject(
                     "POSITION_UNKNOWN",
@@ -140,7 +133,7 @@ class FreqtradeRecoveryExecutionService(ServiceComponent):
             venue = campaign.venue
             side = intent.side
             reduce_only = intent.reduce_only
-        fact_id = self.facade.record_binance_testnet_order(
+        fact_id = self.record_binance_testnet_order(
             intent_id,
             actor_id,
             execution_scope,
@@ -178,7 +171,7 @@ class FreqtradeRecoveryExecutionService(ServiceComponent):
         else:
             position_quantity = Decimal(0)
             average_entry_price = Decimal(0)
-        self.facade.record_position(
+        self.record_position(
             campaign.account_id,
             campaign.venue,
             campaign.instrument_id,
@@ -213,7 +206,7 @@ class FreqtradeRecoveryExecutionService(ServiceComponent):
             side = intent.side
             reduce_only = intent.reduce_only
             venue = campaign.venue
-        self.facade.record_binance_testnet_unknown(
+        self.record_binance_testnet_unknown(
             intent_id,
             actor_id,
             execution_scope,
@@ -251,7 +244,7 @@ class FreqtradeRecoveryExecutionService(ServiceComponent):
         environment, _account_id, venue = _scope_parts(execution_scope)
         if environment is not ExecutionEnvironment.LIVE:
             _reject("FREQTRADE_LIVE_SCOPE_REQUIRED", "Freqtrade protection requires LIVE")
-        command = self.facade.prepare_binance_testnet_protection(
+        command = self.prepare_binance_testnet_protection(
             campaign_id,
             actor_id,
             execution_scope,
@@ -262,7 +255,7 @@ class FreqtradeRecoveryExecutionService(ServiceComponent):
             environment=ExecutionEnvironment.LIVE,
             now=now,
         )
-        return self.facade.record_binance_testnet_protection(
+        return self.record_binance_testnet_protection(
             campaign_id,
             actor_id,
             execution_scope,
@@ -352,23 +345,13 @@ class FreqtradeRecoveryExecutionService(ServiceComponent):
                     RiskPolicy.active,
                 )
             )
-            position = session.scalar(
-                select(Position)
-                .where(
-                    Position.team_id == campaign.team_id,
-                    Position.account_id == campaign.account_id,
-                    Position.venue == campaign.venue,
-                    Position.environment == campaign.environment,
-                    Position.instrument_id == campaign.instrument_id,
-                )
-                .with_for_update()
-            )
+            position = find_position_for_scope(session, campaign, for_update=True)
             if (
                 policy is None
                 or position is None
                 or position.fact_status != FactStatus.KNOWN.value
                 or position.quantity != 0
-                or self.facade._fact_is_stale(
+                or self._fact_is_stale(
                     position.observed_at,
                     now,
                     timedelta(seconds=policy.max_fact_age_seconds),

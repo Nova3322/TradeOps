@@ -46,9 +46,7 @@ def test_exact_catalog_symbols_map_to_freqtrade_ccxt_pairs() -> None:
         ("BYBIT", "BTCUSDC"),
     ],
 )
-def test_okx_bybit_pair_mapping_rejects_non_exact_linear_symbols(
-    venue: str, symbol: str
-) -> None:
+def test_okx_bybit_pair_mapping_rejects_non_exact_linear_symbols(venue: str, symbol: str) -> None:
     with pytest.raises(DomainRejected, match="FREQTRADE_INSTRUMENT_UNSUPPORTED"):
         freqtrade_pair(venue, symbol)
 
@@ -63,9 +61,7 @@ def test_portfolio_margin_balance_uses_unified_account_not_negative_um_subwallet
         stake_currency="USDT",
     )
 
-    assert normalized == {
-        "USDT": {"free": 9.98196712, "used": 0.0, "total": 9.98196712}
-    }
+    assert normalized == {"USDT": {"free": 9.98196712, "used": 0.0, "total": 9.98196712}}
 
 
 @pytest.mark.parametrize(
@@ -242,9 +238,7 @@ def test_worker_probe_fails_closed_on_scope_mismatch() -> None:
 
 
 @pytest.mark.parametrize(("venue", "exchange"), [("OKX", "okx"), ("BYBIT", "bybit")])
-def test_worker_probe_accepts_exact_okx_bybit_exchange_scope(
-    venue: str, exchange: str
-) -> None:
+def test_worker_probe_accepts_exact_okx_bybit_exchange_scope(venue: str, exchange: str) -> None:
     def fetcher(
         url: str,
         method: str,

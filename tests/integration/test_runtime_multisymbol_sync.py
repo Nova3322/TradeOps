@@ -9,6 +9,7 @@ from typing import Any
 from uuid import UUID
 
 import pytest
+from conftest import add_exchange_account_fixture
 from sqlalchemy import func, select
 
 from trading_control_plane.binance import (
@@ -127,6 +128,13 @@ def ingest(
     now: datetime,
     *snapshots: BinanceReadOnlySnapshot,
 ) -> dict[str, Any]:
+    add_exchange_account_fixture(
+        service.database,
+        actor,
+        account_id,
+        "BINANCE",
+        environment=environment.value,
+    )
     return service.ingest_binance_read_only_account_snapshot(
         account_id,
         actor,
@@ -210,6 +218,13 @@ def ingest_hyperliquid(
     now: datetime,
     *snapshots: HyperliquidReadOnlySnapshot,
 ) -> dict[str, Any]:
+    add_exchange_account_fixture(
+        service.database,
+        actor,
+        "account-a",
+        "HYPERLIQUID",
+        environment="LIVE",
+    )
     return service.ingest_hyperliquid_read_only_account_snapshot(
         "account-a",
         actor,
@@ -300,7 +315,7 @@ def test_complete_account_snapshot_covers_multisymbol_close_empty_idempotency_an
     ingest(
         service,
         actor,
-        "account-a",
+        "account-a-testnet",
         ExecutionEnvironment.TESTNET,
         NOW,
         snapshot("ETHUSDT", Decimal(4), NOW),
@@ -333,7 +348,7 @@ def test_complete_account_snapshot_covers_multisymbol_close_empty_idempotency_an
     assert scoped_positions(database, account_id="account-b", environment="LIVE")[
         "ETHUSDT"
     ].quantity == Decimal(3)
-    assert scoped_positions(database, account_id="account-a", environment="TESTNET")[
+    assert scoped_positions(database, account_id="account-a-testnet", environment="TESTNET")[
         "ETHUSDT"
     ].quantity == Decimal(4)
 

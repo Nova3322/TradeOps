@@ -356,275 +356,6 @@ class WorkspaceService(ServiceComponent):
             )
             return team.team_id
 
-    @staticmethod
-    def _shadow_activation_blockers(session: Session, team: Team) -> list[str]:
-        blockers: list[str] = []
-        source = session.scalar(
-            select(TeamSignalSource)
-            .where(
-                TeamSignalSource.team_id == team.team_id,
-                TeamSignalSource.deleted_at.is_(None),
-                TeamSignalSource.enabled,
-            )
-            .limit(1)
-        )
-        if source is None:
-            blockers.append("SIGNAL_SOURCE_REQUIRED")
-        policy = session.scalar(
-            select(RiskPolicy).where(
-                RiskPolicy.team_id == team.team_id,
-                RiskPolicy.active,
-            )
-        )
-        if policy is None:
-            blockers.append("RISK_POLICY_REQUIRED")
-        elif any(
-            value is None
-            for value in (
-                policy.max_account_risk,
-                policy.max_single_loss,
-                policy.max_consecutive_losses,
-                policy.loss_cooldown_seconds,
-            )
-        ):
-            blockers.append("RISK_LIMITS_REQUIRED")
-        accounts = session.scalars(
-            select(ExchangeAccount).where(
-                ExchangeAccount.team_id == team.team_id,
-                ExchangeAccount.active,
-            )
-        ).all()
-        if not accounts:
-            blockers.append("EXCHANGE_ACCOUNT_REQUIRED")
-
-        member_ids = set(
-            session.scalars(
-                select(TeamMembership.user_id)
-                .join(User, User.user_id == TeamMembership.user_id)
-                .where(
-                    TeamMembership.team_id == team.team_id,
-                    TeamMembership.active,
-                    User.active,
-                )
-            )
-        )
-        assignments = session.scalars(
-            select(RoleAssignment).where(
-                RoleAssignment.team_id == team.team_id,
-                RoleAssignment.user_id.in_(member_ids),
-            )
-        ).all()
-
-        def scoped_users(action: str, account: ExchangeAccount) -> set[UUID]:
-            return {
-                assignment.user_id
-                for assignment in assignments
-                if (
-                    assignment.account_scope is None
-                    or assignment.account_scope == account.account_id
-                )
-                and (assignment.venue_scope is None or assignment.venue_scope == account.venue)
-                and (
-                    action in ROLE_ACTIONS[Role(assignment.role)]
-                    or "*" in ROLE_ACTIONS[Role(assignment.role)]
-                )
-            }
-
-        independent_ready = any(
-            any(
-                proposer != reviewer
-                for proposer in scoped_users("proposal.create", account)
-                for reviewer in scoped_users("proposal.review", account)
-            )
-            for account in accounts
-        )
-        operator_ready = any(scoped_users("order.prepare", account) for account in accounts)
-        if not independent_ready:
-            blockers.append("INDEPENDENT_REVIEWER_REQUIRED")
-        if not operator_ready:
-            blockers.append("OPERATOR_REQUIRED")
-        return blockers
-
-    def shadow_activation_status(self, actor_id: UUID) -> dict[str, Any]:
-        with self.database.session_factory() as session:
-            team = self.transactions._require_role(session, actor_id, "team.view")
-            assignments = session.scalars(
-                select(RoleAssignment).where(
-                    RoleAssignment.team_id == team.team_id,
-                    RoleAssignment.user_id == actor_id,
-                )
-            ).all()
-            blockers = self._shadow_activation_blockers(session, team)
-            return {
-                "workspace_id": str(team.workspace_id),
-                "team_id": str(team.team_id),
-                "team_name": team.name,
-                "execution_mode": team.execution_mode,
-                "trading_enabled": team.trading_enabled,
-                "version": team.version,
-                "blockers": blockers,
-                "ready": not blockers,
-                "can_activate": any(
-                    "team.manage" in ROLE_ACTIONS[Role(item.role)]
-                    or "*" in ROLE_ACTIONS[Role(item.role)]
-                    for item in assignments
-                ),
-            }
-
-    def activate_team_shadow_mode(
-        self,
-        *,
-        actor_id: UUID,
-        team_id: UUID,
-        expected_version: int,
-        idempotency_key: str,
-        now: datetime,
-    ) -> dict[str, Any]:
-        operation = "team.shadow.activate"
-        payload = {
-            "team_id": str(team_id),
-            "expected_version": expected_version,
-            "execution_mode": TeamExecutionMode.SHADOW.value,
-        }
-        with self.database.session_factory.begin() as session:
-            active_team = self.transactions._require_role(
-                session, actor_id, "team.manage", team_id=team_id
-            )
-            digest, replay = self.transactions._idempotency(
-                session,
-                caller_id=f"{actor_id}:{active_team.team_id}",
-                operation=operation,
-                idempotency_key=idempotency_key,
-                payload=payload,
-            )
-            if replay is not None:
-                return replay
-            team = session.get(Team, team_id, with_for_update=True)
-            if team is None or team.team_id != active_team.team_id:
-                _reject("TEAM_SCOPE_DENIED", "team is outside the active scope")
-            if team.version != expected_version:
-                _reject("VERSION_CONFLICT", "team changed before SHADOW activation")
-            if team.execution_mode == TeamExecutionMode.LIVE.value:
-                _reject("TEAM_MODE_TRANSITION_INVALID", "LIVE teams do not downgrade here")
-            already_active = team.execution_mode == TeamExecutionMode.SHADOW.value
-            if not already_active:
-                blockers = self._shadow_activation_blockers(session, team)
-                if blockers:
-                    _reject(
-                        "TEAM_SHADOW_PREREQUISITES_MISSING",
-                        ",".join(blockers),
-                    )
-                team.execution_mode = TeamExecutionMode.SHADOW.value
-                team.execution_mode_locked_at = now
-                team.trading_enabled = True
-                team.version += 1
-                team.updated_at = now
-            shadow_account = session.scalar(
-                select(TeamShadowAccount).where(
-                    TeamShadowAccount.team_id == team.team_id,
-                    TeamShadowAccount.status == "ACTIVE",
-                )
-            )
-            shadow_account_created = shadow_account is None
-            if shadow_account is None:
-                latest_generation = session.scalar(
-                    select(func.max(TeamShadowAccount.generation)).where(
-                        TeamShadowAccount.team_id == team.team_id
-                    )
-                )
-                shadow_account = TeamShadowAccount(
-                    team_id=team.team_id,
-                    generation=int(latest_generation or 0) + 1,
-                    initial_equity=Decimal("100000"),
-                    equity=Decimal("100000"),
-                    available_balance=Decimal("100000"),
-                    realized_pnl=Decimal(0),
-                    unrealized_pnl=Decimal(0),
-                    fees_paid=Decimal(0),
-                    status="ACTIVE",
-                    version=1,
-                    created_at=now,
-                    updated_at=now,
-                )
-                session.add(shadow_account)
-                session.flush()
-                session.add(
-                    AnalyticsEquitySnapshot(
-                        team_id=team.team_id,
-                        environment=ExecutionEnvironment.SHADOW.value,
-                        account_id="TEAM_SHADOW",
-                        venue="TRADINGOPS",
-                        generation=shadow_account.generation,
-                        equity=shadow_account.equity,
-                        currency="U",
-                        source_kind="TEAM_SHADOW_ACCOUNT",
-                        source_id=f"{shadow_account.shadow_account_id}:{shadow_account.version}",
-                        version=shadow_account.version,
-                        fact_metadata={
-                            "shadow_account_id": str(shadow_account.shadow_account_id),
-                            "initial_equity": str(shadow_account.initial_equity),
-                        },
-                        observed_at=now,
-                        recorded_at=now,
-                    )
-                )
-            result = {
-                "team_id": str(team.team_id),
-                "execution_mode": team.execution_mode,
-                "trading_enabled": team.trading_enabled,
-                "version": team.version,
-            }
-            self.transactions._save_receipt(
-                session,
-                caller_id=f"{actor_id}:{active_team.team_id}",
-                operation=operation,
-                idempotency_key=idempotency_key,
-                semantic_hash=digest,
-                response=result,
-                now=now,
-            )
-            self.transactions._audit(
-                session,
-                actor_id=str(actor_id),
-                event_type="TEAM_SHADOW_MODE_ACTIVATED",
-                object_type="Team",
-                object_id=team.team_id,
-                reason=(
-                    "already active; no state change"
-                    if already_active
-                    else "setup passed; LIVE, funding, signing and broadcast remain off"
-                ),
-                correlation_id=uuid4(),
-                object_version=team.version,
-                idempotency_key=idempotency_key,
-                workspace_id=team.workspace_id,
-                team_id=team.team_id,
-                now=now,
-            )
-            if shadow_account_created:
-                self.transactions._audit(
-                    session,
-                    actor_id=str(actor_id),
-                    event_type="SHADOW_ACCOUNT_INITIALIZED",
-                    object_type="TeamShadowAccount",
-                    object_id=shadow_account.shadow_account_id,
-                    reason="generation=1;initial_equity=100000",
-                    correlation_id=uuid4(),
-                    object_version=shadow_account.version,
-                    idempotency_key=idempotency_key,
-                    workspace_id=team.workspace_id,
-                    team_id=team.team_id,
-                    environment=ExecutionEnvironment.SHADOW.value,
-                    generation=shadow_account.generation,
-                    rule_summary={
-                        "initial_equity": "100000",
-                        "capital_unit": "USDT_EQUIVALENT",
-                        "status": "ACTIVE",
-                    },
-                    now=now,
-                )
-            return result
-
     def select_scope(
         self,
         *,
@@ -1080,6 +811,120 @@ class WorkspaceService(ServiceComponent):
                 object_version=1,
                 now=now,
             )
+
+    def remove_team_member(
+        self,
+        *,
+        user_id: UUID,
+        actor_id: UUID,
+        idempotency_key: str,
+        now: datetime,
+    ) -> dict[str, str]:
+        """Remove one human from the active team without deleting their identity or other teams."""
+
+        if user_id == actor_id:
+            _reject(
+                "SELF_ACCESS_CHANGE_DENIED",
+                "a system administrator cannot remove their own active team membership",
+            )
+        with self.database.session_factory.begin() as session:
+            self.transactions._require_role(session, actor_id, "user.manage")
+            _actor, workspace, team = self.transactions._active_scope(session, actor_id)
+            assert workspace is not None and team is not None
+            caller = f"{actor_id}:{team.team_id}"
+            payload = {"team_id": str(team.team_id), "user_id": str(user_id)}
+            digest, replay = self.transactions._idempotency(
+                session,
+                caller_id=caller,
+                operation="team.member.remove",
+                idempotency_key=idempotency_key,
+                payload=payload,
+            )
+            if replay is not None:
+                return {key: str(value) for key, value in replay.items()}
+            user = session.get(User, user_id, with_for_update=True)
+            if user is None or user.principal_type != PrincipalType.HUMAN.value:
+                _reject("USER_NOT_FOUND", "the managed human user does not exist")
+            membership = session.scalar(
+                select(TeamMembership)
+                .where(
+                    TeamMembership.team_id == team.team_id,
+                    TeamMembership.user_id == user_id,
+                )
+                .with_for_update()
+            )
+            if membership is None:
+                _reject("TEAM_MEMBER_NOT_FOUND", "the user is not a member of the active team")
+            current_roles = {
+                Role(item.role)
+                for item in session.scalars(
+                    select(RoleAssignment).where(
+                        RoleAssignment.user_id == user_id,
+                        RoleAssignment.team_id == team.team_id,
+                    )
+                ).all()
+            }
+            if Role.SYSTEM_ADMIN in current_roles:
+                active_admins = session.scalar(
+                    select(func.count(func.distinct(User.user_id)))
+                    .select_from(User)
+                    .join(RoleAssignment, RoleAssignment.user_id == User.user_id)
+                    .join(
+                        TeamMembership,
+                        (TeamMembership.user_id == User.user_id)
+                        & (TeamMembership.team_id == RoleAssignment.team_id),
+                    )
+                    .where(
+                        User.active,
+                        TeamMembership.active,
+                        RoleAssignment.team_id == team.team_id,
+                        RoleAssignment.role == Role.SYSTEM_ADMIN.value,
+                    )
+                )
+                if int(active_admins or 0) <= 1:
+                    _reject(
+                        "LAST_SYSTEM_ADMIN_REQUIRED",
+                        "the last active system administrator cannot be removed",
+                    )
+            session.execute(
+                delete(RoleAssignment).where(
+                    RoleAssignment.user_id == user_id,
+                    RoleAssignment.team_id == team.team_id,
+                )
+            )
+            membership_id = membership.membership_id
+            session.delete(membership)
+            if user.active_team_id == team.team_id:
+                user.active_team_id = None
+            response = {
+                "user_id": str(user_id),
+                "team_id": str(team.team_id),
+                "status": "REMOVED",
+            }
+            self.transactions._audit(
+                session,
+                actor_id=str(actor_id),
+                event_type="TEAM_MEMBER_REMOVED",
+                object_type="TeamMembership",
+                object_id=membership_id,
+                reason=f"user={user_id};identity_retained=true;other_teams_retained=true",
+                correlation_id=uuid4(),
+                idempotency_key=idempotency_key,
+                object_version=1,
+                workspace_id=workspace.workspace_id,
+                team_id=team.team_id,
+                now=now,
+            )
+            self.transactions._save_receipt(
+                session,
+                caller_id=caller,
+                operation="team.member.remove",
+                idempotency_key=idempotency_key,
+                semantic_hash=digest,
+                response=response,
+                now=now,
+            )
+            return response
 
     def change_own_password(
         self,

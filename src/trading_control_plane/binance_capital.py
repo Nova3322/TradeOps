@@ -192,22 +192,6 @@ class BinanceCapitalGateway:
             _reject("BINANCE_CAPITAL_NETWORK_BUSY", "Binance reports USDC Arbitrum as busy")
         return coin, network
 
-    def read_status(self) -> dict[str, Any]:
-        permissions = self._permissions()
-        _, network = self._network()
-        return {
-            "configured": True,
-            "readPermission": True,
-            "withdrawPermission": permissions.get("enableWithdrawals") is True,
-            "ipRestricted": permissions.get("ipRestrict") is True,
-            "depositEnabled": network.get("depositEnable") is True,
-            "withdrawEnabled": network.get("withdrawEnable") is True,
-            "networkBusy": network.get("busy") is True,
-            "asset": SUPPORTED_ASSET,
-            "network": SUPPORTED_NETWORK,
-            "checkedAt": datetime.now(UTC).isoformat(),
-        }
-
     def prepare_deposit(
         self,
         *,

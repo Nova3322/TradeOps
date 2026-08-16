@@ -4,7 +4,18 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
     <meta name="theme-color" content="#101010">
-    <meta name="description" content="生产交易提案、审核、执行、资金与风险控制台">
+    <meta name="description" content="TradeOps 是交易员、交易 Bot 和 AI Agent 与交易所账户之间的开源交易控制层，让人工与自动化交易统一经过规则、审批、执行、对账和审计。">
+    <meta property="og:type" content="website">
+    <meta property="og:site_name" content="TradeOps">
+    <meta property="og:locale" content="zh_CN">
+    <meta property="og:locale:alternate" content="en_US">
+    <meta property="og:title" content="TradeOps｜所有交易行为进入真实账户前的控制层">
+    <meta property="og:description" content="对交易员、交易 Bot 和 AI Agent 提交的交易应用相同的规则、审批、执行控制和审计记录。">
+    <meta property="og:image" content="https://raw.githubusercontent.com/nineheavens223-sys/TradeOps/main/artifacts/public/review-queue.png">
+    <meta name="twitter:card" content="summary_large_image">
+    <meta name="twitter:title" content="TradeOps｜所有交易行为进入真实账户前的控制层">
+    <meta name="twitter:description" content="人工与自动化交易统一经过确定性规则、必要审批、受控执行、对账和审计。">
+    <meta name="twitter:image" content="https://raw.githubusercontent.com/nineheavens223-sys/TradeOps/main/artifacts/public/review-queue.png">
     <link rel="manifest" href="/manifest.webmanifest">
     <link rel="icon" href="/assets/tradingops-logo.png" type="image/png">
     <link rel="apple-touch-icon" href="/assets/tradingops-logo.png">
@@ -12,16 +23,19 @@
     <link rel="preload" href="/assets/fonts/IBMPlexSansSC-SemiBold.woff2" as="font" type="font/woff2" crossorigin>
     <link rel="preload" href="/assets/fonts/IBMPlexMono-Regular.woff2" as="font" type="font/woff2" crossorigin>
     <link rel="preload" href="/assets/fonts/IBMPlexMono-SemiBold.woff2" as="font" type="font/woff2" crossorigin>
-    <link rel="stylesheet" href="/assets/styles.css?v=93">
-    <title>交易控制台</title>
+    <link rel="stylesheet" href="/assets/styles-base.css?v=18">
+    <link rel="stylesheet" href="/assets/styles-components.css?v=20">
+    <link rel="stylesheet" href="/assets/styles-api-access.css?v=3">
+    <link rel="stylesheet" href="/assets/styles-shell.css?v=11">
+    <title>TradeOps｜所有交易行为进入真实账户前的控制层</title>
   </head>
   <body>
     <a class="skip-link" href="#main">跳到主要内容</a>
     <div class="app-shell">
       <header class="topbar">
-        <a class="brand" href="/" data-link aria-label="交易控制台首页">
+        <a class="brand" href="/" data-link aria-label="TradeOps 首页">
           <span class="brand-mark" aria-hidden="true"><img src="/assets/tradingops-logo.png" alt=""></span>
-          <span><b>交易控制台</b><small>受控交易运营</small></span>
+          <span><b>TradeOps</b><small>交易控制层</small></span>
         </a>
         <div id="scope-control" class="workspace-switcher" hidden>
           <button id="scope-switcher" class="workspace-switcher-trigger" type="button" aria-haspopup="menu" aria-expanded="false" aria-controls="workspace-switcher-menu">
@@ -94,29 +108,34 @@
           </div>
           <div class="nav-section" data-nav-section>
             <p class="nav-section-label">运行与风控</p>
-            <a href="/trading-mode" data-link data-nav-capability="venue.view">交易模式</a>
-            <a href="/venues" data-link data-nav-capability="venue.view">交易账户</a>
+            <a href="/accounts" data-link data-nav-capability="venue.view">账户管理</a>
             <a href="/capital" data-link data-nav-capability="capital.view">资金中心</a>
-            <a href="/risk" data-link data-nav-capability="system.view">风险控制</a>
+            <a href="/risk" data-link data-nav-capability="system.view">风控中心</a>
             <a href="/positions" data-link data-nav-capability="system.view">系统状态</a>
             <a href="/notifications" data-link data-nav-capability="notification.view">通知中心</a>
           </div>
           <div class="nav-section" data-nav-section>
-            <p class="nav-section-label">团队设置</p>
+            <p class="nav-section-label">团队配置</p>
             <a href="/signals" data-link data-nav-capability="signal.view">信号源</a>
             <a href="/admin/users" data-link data-nav-capability="access.manage">成员权限</a>
+            <a href="/team-settings" data-link data-nav-capability="venue.view">模式设置</a>
           </div>
         </nav>
         <div class="sidebar-foot">
           <div id="mobile-session-summary" class="mobile-session-summary"></div>
+          <button id="mobile-logout-button" class="mobile-logout-button" type="button">退出当前会话</button>
           <div>业务数据库已连接</div>
           <div>数据缺失时自动阻止交易</div>
         </div>
       </aside>
+      <button id="desktop-nav-toggle" class="desktop-nav-toggle" type="button" aria-controls="sidebar" aria-expanded="true" aria-label="收起主导航" title="收起主导航" hidden><span aria-hidden="true">‹</span></button>
       <button id="nav-backdrop" class="nav-backdrop" type="button" aria-label="关闭主导航" hidden></button>
 
       <main id="main" class="main-content" tabindex="-1">
-        <section class="loading-state"><span class="spinner"></span><p>正在读取当前事实…</p></section>
+        <section class="loading-state" role="status" aria-live="polite" aria-label="正在读取当前事实">
+          <div class="loading-state-copy"><span class="spinner" aria-hidden="true"></span><div><b>正在读取当前事实…</b><p>正在核对当前空间、权限与服务端数据。</p></div></div>
+          <div class="loading-skeleton" aria-hidden="true"><span></span><span></span><span></span></div>
+        </section>
       </main>
     </div>
 
@@ -166,15 +185,21 @@
       </form>
     </dialog>
     <div id="toast" class="toast" role="status" aria-live="polite"></div>
-    <script defer src="/assets/app-core.js?v=198"></script>
-    <script defer src="/assets/workspace.js?v=179"></script>
-    <script defer src="/assets/signals.js?v=174"></script>
-    <script defer src="/assets/proposals.js?v=175"></script>
-    <script defer src="/assets/risk.js?v=170"></script>
-    <script defer src="/assets/execution.js?v=170"></script>
-    <script defer src="/assets/capital.js?v=173"></script>
-    <script defer src="/assets/reporting.js?v=172"></script>
-    <script defer src="/assets/accounts.js?v=173"></script>
-    <script defer src="/assets/app.js?v=175"></script>
+    <script defer src="/assets/app-state.js?v=3"></script>
+    <script defer src="/assets/i18n.js?v=51"></script>
+    <script defer src="/assets/shared.js?v=6"></script>
+    <script defer src="/assets/session.js?v=2"></script>
+    <script defer src="/assets/api-client.js?v=2"></script>
+    <script defer src="/assets/app-shell.js?v=4"></script>
+    <script defer src="/assets/workspace.js?v=184"></script>
+    <script defer src="/assets/signals.js?v=193"></script>
+    <script defer src="/assets/proposals.js?v=182"></script>
+    <script defer src="/assets/risk.js?v=174"></script>
+    <script defer src="/assets/execution.js?v=186"></script>
+    <script defer src="/assets/capital.js?v=182"></script>
+    <script defer src="/assets/reporting.js?v=180"></script>
+    <script defer src="/assets/accounts.js?v=176"></script>
+    <script defer src="/assets/router.js?v=5"></script>
+    <script defer src="/assets/app.js?v=178"></script>
   </body>
 </html>

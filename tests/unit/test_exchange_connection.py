@@ -47,9 +47,10 @@ def test_binance_connection_probe_is_one_signed_read_without_fact_ingestion() ->
             "timestamp": query["timestamp"],
         }
     )
-    assert query["signature"] == hmac.new(
-        b"secret-5678", unsigned.encode(), hashlib.sha256
-    ).hexdigest()
+    assert (
+        query["signature"]
+        == hmac.new(b"secret-5678", unsigned.encode(), hashlib.sha256).hexdigest()
+    )
 
 
 def test_hyperliquid_connection_probe_uses_only_public_account_info() -> None:
@@ -135,9 +136,7 @@ def test_bybit_connection_probe_uses_official_v5_signature_contract() -> None:
         "X-BAPI-API-KEY": "bybit-key",
         "X-BAPI-TIMESTAMP": timestamp,
         "X-BAPI-RECV-WINDOW": "5000",
-        "X-BAPI-SIGN": hmac.new(
-            b"bybit-secret", payload.encode(), hashlib.sha256
-        ).hexdigest(),
+        "X-BAPI-SIGN": hmac.new(b"bybit-secret", payload.encode(), hashlib.sha256).hexdigest(),
     }
     assert timeout == 5.0
 

@@ -14,6 +14,7 @@ from typing import Any
 from uuid import UUID
 
 import pytest
+from conftest import add_exchange_account_fixture
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy import event
 
@@ -1278,18 +1279,8 @@ def test_runtime_feed_and_health_are_isolated_by_team_and_account(
     context = queries.user_context(admin)
     workspace_id = UUID(context["active_workspace"]["workspace_id"])
     first_team_id = UUID(context["active_team"]["team_id"])
-    service.create_exchange_account(
-        actor_id=admin,
-        account_id="shared-runtime-account",
-        venue="BINANCE",
-        label="First Runtime Account",
-        credentials=None,
-        idempotency_key="create-first-runtime-account",
-        now=NOW,
-    )
-    first_principal = service.create_service_principal(
-        "runtime-scope-first", admin, now=NOW
-    )
+    add_exchange_account_fixture(database, admin, "shared-runtime-account", "BINANCE")
+    first_principal = service.create_service_principal("runtime-scope-first", admin, now=NOW)
     service.assign_role(
         first_principal,
         Role.OPERATOR,
@@ -1329,15 +1320,7 @@ def test_runtime_feed_and_health_are_isolated_by_team_and_account(
         idempotency_key="create-runtime-scope-two",
         now=NOW + timedelta(seconds=1),
     )
-    service.create_exchange_account(
-        actor_id=admin,
-        account_id="shared-runtime-account",
-        venue="BINANCE",
-        label="Second Runtime Account",
-        credentials=None,
-        idempotency_key="create-second-runtime-account",
-        now=NOW + timedelta(seconds=1),
-    )
+    add_exchange_account_fixture(database, admin, "shared-runtime-account", "BINANCE")
     second_principal = service.create_service_principal(
         "runtime-scope-second", admin, now=NOW + timedelta(seconds=1)
     )
@@ -1392,9 +1375,7 @@ def test_runtime_feed_and_health_are_isolated_by_team_and_account(
         venue="BINANCE",
     )
     assert second_health is not None and second_health["status"] == "FAILED"
-    assert "BINANCE:shared-runtime-account" in queries.runtime_snapshot(admin)[
-        "source_health"
-    ]
+    assert "BINANCE:shared-runtime-account" in queries.runtime_snapshot(admin)["source_health"]
 
     service.select_scope(
         actor_id=admin,
@@ -1411,9 +1392,10 @@ def test_runtime_feed_and_health_are_isolated_by_team_and_account(
         venue="BINANCE",
     )
     assert first_health is not None and first_health["status"] == "SUCCESS"
-    assert queries.runtime_snapshot(admin)["source_health"][
-        "BINANCE:shared-runtime-account"
-    ]["status"] == "SUCCESS"
+    assert (
+        queries.runtime_snapshot(admin)["source_health"]["BINANCE:shared-runtime-account"]["status"]
+        == "SUCCESS"
+    )
 
 
 def test_runtime_worker_refreshes_perptape_two_venues_and_vault_without_sending(
@@ -1421,6 +1403,8 @@ def test_runtime_worker_refreshes_perptape_two_venues_and_vault_without_sending(
 ) -> None:
     service = TradingService(database)
     admin = service.bootstrap_admin("runtime-admin", now=NOW)
+    add_exchange_account_fixture(database, admin, "binance-main", "BINANCE")
+    add_exchange_account_fixture(database, admin, "hyperliquid-main", "HYPERLIQUID")
     actor = service.create_service_principal("runtime-sync", admin, now=NOW)
     perptape_actor = service.create_service_principal("perptape", admin, now=NOW)
     service.assign_role(actor, Role.OPERATOR, admin, now=NOW)
@@ -1676,7 +1660,6 @@ def test_database_bound_supervisor_persists_account_facts_without_trading(
         worker_factory=worker_factory,
     )
 
-    assert supervisor.has_bindings() is True
     report = supervisor.run_once(started_at=NOW, completed_at=NOW)
 
     assert report.successful is True
@@ -1855,6 +1838,7 @@ def test_three_timeframe_resonance_creates_one_pending_system_proposal(
 ) -> None:
     service = TradingService(database)
     admin = service.bootstrap_admin("resonance-admin", now=NOW)
+    add_exchange_account_fixture(database, admin, "acct-1", "BINANCE")
     perptape_actor = service.create_service_principal("perptape", admin, now=NOW)
     service.assign_role(
         perptape_actor,

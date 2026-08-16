@@ -15,7 +15,6 @@ __pycache__
 artifacts
 build
 dist
-docs
 htmlcov
 logs
 node_modules

@@ -19,10 +19,6 @@ function exchangeCredentialFields(venue, prefix = '') {
 
 const exchangeVenueLabels = {BINANCE:'Binance',HYPERLIQUID:'Hyperliquid',OKX:'OKX',BYBIT:'Bybit'};
 
-function exchangeAccountPath(item) {
-  return `/venues/${encodeURIComponent(item.account_id)}`;
-}
-
 function isFixtureExchangeAccount(item) {
   const identity = `${item.account_id || ''} ${item.label || ''}`;
   return /(^|[-_\s])(fixture|test|demo|sample|sandbox)([-_\s]|$)/i.test(identity) || /(测试|样本|演示)/.test(identity);
@@ -30,74 +26,6 @@ function isFixtureExchangeAccount(item) {
 
 function exchangeAccountRuntimeHealth(runtime, item) {
   return runtime?.data?.source_health?.[`${item.venue}:${item.account_id}`] || null;
-}
-
-function exchangeAccountListState(item, runtime) {
-  const health = exchangeAccountRuntimeHealth(runtime, item);
-  const credentialsConfigured = item.credentials?.state === 'CONFIGURED';
-  const connectionVerified = item.connection?.status === 'VERIFIED';
-  const runtimeBound = Boolean(item.runtime_binding?.bound);
-  const processRuntimeEnabled = Boolean(runtime?.data?.external_boundaries?.runtime_sync?.enabled);
-  const syncHealthy = health?.status === 'SUCCESS' && runtimeBound && processRuntimeEnabled;
-  const latestAt = health?.last_success_at || health?.checked_at || item.connection?.last_verified_at || item.connection?.checked_at || item.updated_at;
-  if (!item.active) return {label:'账户已停用', tone:'status-DISABLED', anomaly:true, latestAt, action:'查看停用状态', anchor:'status'};
-  if (!credentialsConfigured) return {label:'凭据未配置', tone:'status-DENY', anomaly:true, latestAt, action:'配置凭据', anchor:'credentials'};
-  if (!connectionVerified) return {label:'连接待验证', tone:'status-RETRY_WAIT', anomaly:true, latestAt, action:'验证连接', anchor:'connection'};
-  if (!runtimeBound) return {label:'已验证 · 同步关闭', tone:'status-RETRY_WAIT', anomaly:true, latestAt, action:'启用连续同步', anchor:'connection'};
-  if (!processRuntimeEnabled) return {label:'同步进程关闭', tone:'status-RETRY_WAIT', anomaly:true, latestAt, action:'查看同步设置', anchor:'connection'};
-  if (!health) return {label:'等待首次同步', tone:'status-RETRY_WAIT', anomaly:true, latestAt, action:'查看同步状态', anchor:'history'};
-  if (!syncHealthy) return {label:'同步异常', tone:'status-DENY', anomaly:true, latestAt, action:'排查同步异常', anchor:'history'};
-  return {label:'只读同步正常', tone:'status-APPROVED', anomaly:false, latestAt, action:'查看最新数据', anchor:'history'};
-}
-
-function exchangeAccountCreatePanel(registry) {
-  if (!registry.can_manage) return '';
-  return `<dialog id="connect-account-dialog" class="account-create-dialog" aria-labelledby="connect-account-title"><form id="exchange-account-form" class="dialog-form"><div class="dialog-head"><div><p class="eyebrow">实盘账户</p><h2 id="connect-account-title">接入交易账户</h2><p class="subtle">登记当前空间内的交易所账户并加密保存凭据。</p></div><button class="icon-button" type="button" data-close-account-create aria-label="关闭接入账户窗口">×</button></div><div class="field-grid"><label>交易所<select name="venue"><option value="BINANCE">Binance</option><option value="HYPERLIQUID">Hyperliquid</option><option value="OKX">OKX</option><option value="BYBIT">Bybit</option></select></label><label>内部账户 ID<input name="account_id" maxlength="120" placeholder="例如 binance-space-a-01" required></label><label>显示名称<input name="label" maxlength="120" placeholder="例如 主策略账户"></label></div><fieldset class="exchange-credential-fields"><legend>加密凭据</legend><div class="field-grid" data-create-credential-fields>${exchangeCredentialFields('BINANCE')}</div></fieldset><p class="safety-note">账户、权限和审计仅归属当前空间；创建不会开启交易、资金、签名或广播。</p><div class="form-error" role="alert"></div><div class="dialog-actions"><button class="secondary" type="button" data-close-account-create>取消</button><button class="primary">登记并加密保存</button></div></form></dialog>`;
-}
-
-function shadowAccountListState(data) {
-  const active = data?.execution_mode === 'SHADOW' && Boolean(data.shadow_account);
-  return active
-    ? {label:'模拟运行中', tone:'status-APPROVED', action:'管理模拟账户'}
-    : {label:'尚未启用', tone:'status-DISABLED', action:'配置模拟账户'};
-}
-
-function shadowAccountCard(data) {
-  const state = shadowAccountListState(data);
-  const account = data?.shadow_account;
-  const asset = account ? `${fmtNumber(account.equity)} U` : '等待初始化';
-  const activity = account ? `${Number(data.position_count || 0)} 个持仓 · ${Number(data.open_order_count || 0)} 个未成交` : '启用影子模式后自动初始化';
-  return `<article class="card exchange-account-card is-shadow-account"><div class="account-card-head"><span class="account-venue-mark is-shadow" aria-hidden="true">S</span><div><div class="account-card-kicker"><span class="account-kind-badge">模拟账户</span><span>内部账本</span></div><h2>空间模拟账户</h2><p>不连接交易所，不使用实盘凭据</p></div><span class="status-pill ${state.tone}">${state.label}</span></div><dl class="account-list-facts"><div><dt>账户类型</dt><dd>SHADOW 模拟</dd></div><div><dt>模拟资产</dt><dd>${escapeHtml(asset)}</dd></div><div><dt>当前活动</dt><dd>${escapeHtml(activity)}</dd></div></dl><a class="primary account-primary-action" href="/venues/shadow" data-link>${state.action}<span aria-hidden="true">→</span></a></article>`;
-}
-
-async function renderVenueShadowAccount() {
-  const response = await api('/api/trading-mode');
-  const data = response.data;
-  if (data.execution_mode === 'SHADOW' && data.shadow_account) {
-    renderShadowAccountDetails(data);
-    const page = main.querySelector('.shadow-workspace');
-    page?.classList.add('venue-shadow-account-page');
-    const back = page?.querySelector('.page-head > a.secondary');
-    if (back) {
-      back.href = '/venues';
-      back.textContent = '返回交易账户';
-    }
-    return;
-  }
-  main.innerHTML = `<section class="page venue-shadow-account-page"><div class="detail-back-row"><a class="row-link" href="/venues" data-link>← 返回交易账户</a><span class="account-kind-badge">模拟账户</span></div><header class="page-head"><div><p class="eyebrow">当前空间 · ${escapeHtml(data.team_name)}</p><h1>配置模拟账户</h1><p class="lede">模拟账户使用独立内部账本，不读取交易所凭据，也不会向交易所发送订单。</p></div></header><article class="card shadow-account-setup-card"><span class="account-venue-mark is-shadow" aria-hidden="true">S</span><div><p class="eyebrow">SHADOW</p><h2>模拟账户尚未启用</h2><p class="subtle">切换到影子模式后，服务端会为当前空间初始化 100,000 U 模拟资产；真实下单、资金划转和自动加仓仍保持关闭。</p><div class="form-error" role="alert"></div><button class="primary" type="button" data-enable-shadow-account>启用模拟账户</button></div></article></section>`;
-  document.querySelector('[data-enable-shadow-account]')?.addEventListener('click', async event => {
-    const confirmed = await confirmAction({title:'启用当前空间的模拟账户？', message:'当前空间会切换到影子模式并初始化内部模拟账本；不会开启真实下单、资金划转、签名或广播。', confirmLabel:'确认启用模拟账户'});
-    if (!confirmed) return;
-    const trigger = event.currentTarget;
-    await withPending(trigger, '启用中…', async () => {
-      try {
-        const result = await api(`/api/teams/${data.team_id}/trading-mode`, {method:'PUT', body:JSON.stringify({mode:'SHADOW', confirmation:'SWITCH_TO_SHADOW', expected_version:data.version, idempotency_key:crypto.randomUUID()})});
-        session = result.session;
-        showToast('模拟账户已启用；真实交易能力保持关闭');
-        await route();
-      } catch (error) { showApiError(error, main.querySelector('.form-error')); }
-    });
-  });
 }
 
 function exchangeAccountDetailConfiguration(item) {
@@ -146,7 +74,7 @@ function exchangeAccountDetailConfiguration(item) {
   const tradingControl = permissions.can_manage_trading
     ? `<form class="exchange-trading-form" data-exchange-account-id="${escapeHtml(item.exchange_account_id)}" data-version="${item.version}" data-enabled="${tradingEligible ? 'true' : 'false'}"><button class="${tradingEligible ? 'secondary' : 'danger'}" type="submit" aria-describedby="${tradingHelpId}" ${canConfigureTrading ? '' : 'disabled'}>${tradingConfigured ? '停用账户交易资格' : '启用账户交易资格'}</button><small id="${tradingHelpId}">${escapeHtml(tradingReason)}</small><div class="form-error" role="alert"></div></form>`
     : '';
-  return `<section class="account-detail-config" aria-labelledby="account-config-title"><div class="section-heading"><div><p class="eyebrow">账户设置</p><h2 id="account-config-title">连接与凭据</h2></div><span class="subtle">账户版本 ${item.version}</span></div><div class="account-detail-config-grid"><article id="credentials" class="card account-config-card"><p class="eyebrow">凭据配置与轮换</p><h2>${credentials.state === 'CONFIGURED' ? '凭据已加密保存' : '凭据尚未配置'}</h2><p class="subtle">${credentials.state === 'CONFIGURED' ? `${credentials.key_hint || '已脱敏'} · 版本 ${credentials.version}` : '配置后仍需单独验证连接。'}</p>${credentialControl}</article><article id="connection" class="card account-config-card"><p class="eyebrow">连接与连续同步</p><h2>${item.connection?.status === 'VERIFIED' ? '只读连接已验证' : '只读连接待验证'}</h2><dl class="definition-grid">${definition('最近检查', fmtDate(item.connection?.checked_at))}${definition('最近验证成功', fmtDate(item.connection?.last_verified_at))}${definition('连续同步', runtimeBound ? '已绑定' : '未绑定')}${definition('交易资格', item.trading?.enabled ? '账户级已允许' : '保持关闭')}</dl>${verificationControl}${runtimeControl}</article></div><details class="card account-advanced-settings"><summary><span><b>Worker 与交易资格高级设置</b><small>${escapeHtml(workerStatus)} · ${escapeHtml(executionWorker.mode || 'UNCONFIGURED')} · 仅绑定 ${escapeHtml(item.account_id)}</small></span><strong>展开</strong></summary><div class="toolbox-content"><dl class="definition-grid">${definition('绑定范围', `${item.account_id} · ${item.venue}`)}${definition('Worker', executionWorker.name || '未配置')}${definition('端点', executionWorker.endpoint || '未配置或无权查看')}${definition('最近验证', fmtDate(executionWorker.last_verified_at))}${definition('错误代码', executionWorker.error_code || '无')}${definition('真实订单发送', '本页不提供；服务端 Gate 独立控制')}</dl>${workerVerify}${workerControl}${tradingControl}</div></details></section>`;
+  return `<section class="account-detail-config" aria-labelledby="account-config-title"><div class="section-heading"><div><p class="eyebrow">账户设置</p><h2 id="account-config-title">连接与凭据</h2></div><span class="subtle">账户版本 ${item.version}</span></div><div class="account-detail-config-grid"><article id="credentials" class="card account-config-card"><p class="eyebrow">凭据配置与轮换</p><h2>${credentials.state === 'CONFIGURED' ? '凭据已加密保存' : '凭据尚未配置'}</h2><p class="subtle">${credentials.state === 'CONFIGURED' ? `${credentials.key_hint || '已脱敏'} · 版本 ${credentials.version}` : '配置后仍需单独验证连接。'}</p>${credentialControl}</article><article id="connection" class="card account-config-card"><p class="eyebrow">连接与连续同步</p><h2>${item.connection?.status === 'VERIFIED' ? '只读连接已验证' : '只读连接待验证'}</h2><dl class="definition-grid">${definition('最近检查', fmtDate(item.connection?.checked_at))}${definition('最近验证成功', fmtDate(item.connection?.last_verified_at))}${definition('连续同步', runtimeBound ? '已绑定' : '未绑定')}${definition('交易资格', item.trading?.enabled ? '账户级已允许' : '保持关闭')}</dl>${verificationControl}${runtimeControl}</article></div><details class="card account-advanced-settings"><summary><span><b>Worker 与交易资格高级设置</b><small>${escapeHtml(workerStatus)} · ${escapeHtml(fmtStatus(executionWorker.mode || 'UNCONFIGURED'))} · 仅绑定 ${escapeHtml(item.account_id)}</small></span><strong>展开</strong></summary><div class="toolbox-content"><dl class="definition-grid">${definition('绑定范围', `${item.account_id} · ${item.venue}`)}${definition('Worker', executionWorker.name || '未配置')}${definition('端点', executionWorker.endpoint || '未配置或无权查看')}${definition('最近验证', fmtDate(executionWorker.last_verified_at))}${definition('错误代码', executionWorker.error_code || '无')}${definition('真实订单发送', '本页不提供；服务端 Gate 独立控制')}</dl>${workerVerify}${workerControl}${tradingControl}</div></details></section>`;
 }
 
 function credentialPayload(form, venue) {
@@ -256,49 +184,22 @@ function bindExchangeAccountForms() {
       await route();
     } catch (error) { showApiError(error, form.querySelector('.form-error')); }
   }));
-}
-
-async function renderVenueAccounts() {
-  const params = new URLSearchParams(location.search);
-  const selectedVenue = (params.get('venue') || 'ALL').toUpperCase();
-  const venue = ['ALL','SHADOW','BINANCE','HYPERLIQUID','OKX','BYBIT'].includes(selectedVenue) ? selectedVenue : 'ALL';
-  const [accountResult, runtime, tradingModeResult] = await Promise.all([
-    api('/api/exchange-accounts'),
-    api('/api/runtime/status').catch(error => [403, 409].includes(error.status) ? null : Promise.reject(error)),
-    api('/api/trading-mode'),
-  ]);
-  const registry = accountResult.data;
-  const tradingMode = tradingModeResult.data;
-  const allAccounts = registry.data || [];
-  const fixtureAccounts = allAccounts.filter(isFixtureExchangeAccount);
-  const productionAccounts = allAccounts.filter(item => !isFixtureExchangeAccount(item));
-  const visibleAccounts = venue === 'ALL' ? productionAccounts : venue === 'SHADOW' ? [] : productionAccounts.filter(item => item.venue === venue);
-  const showShadowAccount = venue === 'ALL' || venue === 'SHADOW';
-  const anomalousAccounts = productionAccounts.filter(item => exchangeAccountListState(item, runtime).anomaly);
-  const liveCards = visibleAccounts.map(item => {
-    const state = exchangeAccountListState(item, runtime);
-    const path = exchangeAccountPath(item);
-    const venueLabel = exchangeVenueLabels[item.venue] || item.venue;
-    return `<article class="card exchange-account-card"><div class="account-card-head"><span class="account-venue-mark venue-${escapeHtml(item.venue)}" aria-hidden="true">${escapeHtml(venueLabel.slice(0, 1))}</span><div><div class="account-card-kicker"><span class="account-kind-badge is-live">实盘账户</span><span>${escapeHtml(item.account_id)}</span></div><h2>${escapeHtml(item.label)}</h2><p>${escapeHtml(venueLabel)} · 精确账户隔离</p></div><span class="status-pill ${state.tone}">${escapeHtml(state.label)}</span></div><dl class="account-list-facts"><div><dt>交易所</dt><dd>${escapeHtml(venueLabel)}</dd></div><div><dt>连接状态</dt><dd>${escapeHtml(state.label)}</dd></div><div><dt>${state.latestAt ? '最近同步或检查' : '数据新鲜度'}</dt><dd>${state.latestAt ? fmtDate(state.latestAt) : '尚无同步记录'}</dd></div></dl><a class="primary account-primary-action" href="${path}#${state.anchor}" data-link>${escapeHtml(state.action)}<span aria-hidden="true">→</span></a></article>`;
-  }).join('');
-  const cards = `${showShadowAccount ? shadowAccountCard(tradingMode) : ''}${liveCards}`;
-  const filterOptions = [['ALL','全部账户'],['SHADOW','模拟账户'], ...Object.entries(exchangeVenueLabels)];
-  const spaceName = session?.active_team?.name || session?.active_team?.slug || '未选择空间';
-  const visibleCount = visibleAccounts.length + (showShadowAccount ? 1 : 0);
-  main.innerHTML = `<section class="page venue-account-list-page"><header class="account-list-hero"><div><p class="eyebrow">当前空间 · ${escapeHtml(spaceName)}</p><h1>交易账户</h1><p class="lede">实盘账户与模拟账户统一管理。连接、凭据和账户数据在各自详情页维护。</p></div><button class="primary account-connect-button" type="button" data-open-account-create ${registry.can_manage ? '' : 'hidden'}><span aria-hidden="true">＋</span> 接入实盘账户</button></header><div class="account-list-stats"><div><small>账户总数</small><b>${productionAccounts.length + 1}</b><span>${productionAccounts.length} 实盘 · 1 模拟</span></div><div><small>实盘异常</small><b class="${anomalousAccounts.length ? 'warning-text' : 'direction-long'}">${anomalousAccounts.length}</b><span>${anomalousAccounts.length ? '需要处理连接或同步' : '连接与同步正常'}</span></div><div><small>模拟账户</small><b>${tradingMode.execution_mode === 'SHADOW' && tradingMode.shadow_account ? '运行中' : '未启用'}</b><span>独立内部账本</span></div></div><section class="account-list-section"><div class="account-list-section-head"><div><p class="eyebrow">账户目录</p><h2>选择要管理的账户</h2></div><label>账户筛选<select data-account-venue-filter>${filterOptions.map(([value, label]) => `<option value="${value}" ${venue === value ? 'selected' : ''}>${label}</option>`).join('')}</select></label></div>${fixtureAccounts.length ? `<p class="fixture-account-note">${fixtureAccounts.length} 个测试 Fixture 账户已隐藏，不计入账户总数。</p>` : ''}${cards ? `<div class="exchange-account-grid">${cards}</div>` : '<div class="callout tone-attention"><b>当前筛选下没有实盘账户。</b><p>可从页面顶部接入一个交易所账户。</p></div>'}<p class="account-list-result">显示 ${visibleCount} 个账户</p></section>${exchangeAccountCreatePanel(registry)}</section>`;
-  document.querySelector('[data-account-venue-filter]')?.addEventListener('change', event => {
-    const nextVenue = event.currentTarget.value;
-    history.pushState({}, '', nextVenue === 'ALL' ? '/venues' : `/venues?venue=${encodeURIComponent(nextVenue)}`);
-    route();
-  });
-  document.querySelector('[data-open-account-create]')?.addEventListener('click', () => {
-    const accountDialog = document.querySelector('#connect-account-dialog');
-    accountDialog?.showModal();
-    accountDialog?.querySelector('select, input')?.focus();
-  });
-  document.querySelectorAll('[data-close-account-create]').forEach(button => button.addEventListener('click', () => document.querySelector('#connect-account-dialog')?.close()));
-  document.querySelector('#connect-account-dialog')?.addEventListener('click', event => { if (event.target === event.currentTarget) event.currentTarget.close(); });
-  bindExchangeAccountForms();
+  document.querySelectorAll('[data-delete-exchange-account]').forEach(button => button.addEventListener('click', async event => {
+    const trigger = event.currentTarget;
+    const confirmed = await confirmAction({
+      title:`删除实盘账户“${trigger.dataset.accountLabel}”？`,
+      message:'账户会从当前空间移除，并立即停用连续同步、交易资格、Worker 和加密凭据。历史订单、成交、资金记录与审计仍会保留；有运行中交易任务或未决资金操作时服务端会阻断删除。',
+      confirmLabel:'确认删除账户',
+    });
+    if (!confirmed) return;
+    const body = {expected_version:Number(trigger.dataset.version), idempotency_key:crypto.randomUUID()};
+    try {
+      await withPending(trigger, '删除中…', () => api(`/api/exchange-accounts/${trigger.dataset.deleteExchangeAccount}`, {method:'DELETE', body:JSON.stringify(body)}));
+      showToast('实盘账户已删除；历史交易与审计记录已保留');
+      history.pushState({}, '', '/accounts?environment=LIVE');
+      await route();
+    } catch (error) { showApiError(error); }
+  }));
 }
 
 async function renderVenueAccountDetail(requestedAccountId) {
@@ -307,7 +208,8 @@ async function renderVenueAccountDetail(requestedAccountId) {
   const decodedAccountId = decodeURIComponent(requestedAccountId);
   const account = (registry.data || []).find(item => item.account_id === decodedAccountId || item.exchange_account_id === decodedAccountId);
   if (!account) {
-    main.innerHTML = '<section class="empty-state"><div><p class="eyebrow">交易账户</p><h2>账户不存在或不在当前空间</h2><p>请返回账户列表，选择当前身份可见的账户。</p><a class="primary" href="/venues" data-link>返回账户列表</a></div></section>';
+    main.innerHTML = notFoundView(location.pathname);
+    main.querySelector('[data-error-heading]')?.focus();
     return;
   }
   const venue = account.venue;
@@ -443,7 +345,8 @@ async function renderVenueAccountDetail(requestedAccountId) {
             ? '实时账户事实不可用；仅展示最后快照'
             : '无法验证实时连接；仅展示已保存事实';
   const fixtureBadge = isFixtureExchangeAccount(account) ? '<span class="status-pill status-RETRY_WAIT">测试 Fixture</span>' : '';
-  main.innerHTML = `<section class="page venue-facts-page venue-account-detail-page"><div class="detail-back-row"><a class="row-link" href="/venues" data-link>← 返回账户列表</a>${fixtureBadge}</div><header class="page-head"><div><p class="eyebrow">${escapeHtml(exchangeVenueLabels[venue] || venue)} · ${escapeHtml(accountId)}</p><h1>${escapeHtml(account.label)}</h1><p class="lede">当前空间内的精确账户配置、连接状态与历史快照。</p></div><button class="secondary" data-refresh>刷新当前状态</button></header>${exchangeAccountDetailConfiguration(account)}<section id="status" class="account-status-history"><div class="section-heading"><div><p class="eyebrow">账户状态及历史快照</p><h2>连接与数据</h2></div><span class="subtle">最近保存 ${fmtDate(lastSync)}</span></div><div class="stats venue-status-stats"><div class="stat"><small>连接状态</small><b class="${connected ? 'direction-long' : 'warning-text'}">${escapeHtml(connectionLabel)}</b><span>${escapeHtml(connectionSummary)}</span></div><div class="stat"><small>运行模式</small><b>${currentLanguage === 'en' ? 'Production account · read-only' : '生产账户 · 只读'}</b><span>${escapeHtml(venueDetail)} · ${escapeHtml(executionDetail)}</span></div><div class="stat"><small>账户范围</small><b>当前空间</b><span>${escapeHtml(exchangeVenueLabels[venue])} · ${escapeHtml(accountId)} · 精确空间/账户范围</span></div><div class="stat"><small>${snapshotMode ? '最后快照' : '事实新鲜度'}</small><b>${fmtDate(lastSync)}</b><span>${lastSync ? snapshotMode ? '连接受限；以下数据不是实时事实' : '最近保存时间；连接探针另行校验' : '尚无已保存事实'}</span></div></div>
+  const deleteAction = account.permissions?.can_delete ? `<button class="danger" type="button" data-delete-exchange-account="${escapeHtml(account.exchange_account_id)}" data-account-label="${escapeHtml(account.label)}" data-version="${account.version}">删除实盘账户</button>` : '';
+  main.innerHTML = `<section class="page venue-facts-page venue-account-detail-page"><div class="detail-back-row"><a class="row-link" href="/accounts?environment=LIVE" data-link>← 返回账户列表</a>${fixtureBadge}</div><header class="page-head"><div><p class="eyebrow">${escapeHtml(exchangeVenueLabels[venue] || venue)} · ${escapeHtml(accountId)}</p><h1>${escapeHtml(account.label)}</h1><p class="lede">当前空间内的精确账户配置、连接状态与历史快照。</p></div><div class="toolbar"><button class="secondary" data-refresh>刷新当前状态</button>${deleteAction}</div></header>${exchangeAccountDetailConfiguration(account)}<section id="status" class="account-status-history"><div class="section-heading"><div><p class="eyebrow">账户状态及历史快照</p><h2>连接与数据</h2></div><span class="subtle">最近保存 ${fmtDate(lastSync)}</span></div><div class="stats venue-status-stats"><div class="stat"><small>连接状态</small><b class="${connected ? 'direction-long' : 'warning-text'}">${escapeHtml(connectionLabel)}</b><span>${escapeHtml(connectionSummary)}</span></div><div class="stat"><small>运行模式</small><b>${currentLanguage === 'en' ? 'Production account · read-only' : '生产账户 · 只读'}</b><span>${escapeHtml(venueDetail)} · ${escapeHtml(executionDetail)}</span></div><div class="stat"><small>账户范围</small><b>当前空间</b><span>${escapeHtml(exchangeVenueLabels[venue])} · ${escapeHtml(accountId)} · 精确空间/账户范围</span></div><div class="stat"><small>${snapshotMode ? '最后快照' : '事实新鲜度'}</small><b>${fmtDate(lastSync)}</b><span>${lastSync ? snapshotMode ? '连接受限；以下数据不是实时事实' : '最近保存时间；连接探针另行校验' : '尚无已保存事实'}</span></div></div>
     <article class="account-sync-note ${connected ? 'is-active' : ''}"><span class="status-dot"></span><div><b>${currentLanguage === 'en' ? 'Connection check' : '连接检查'}</b><p>${escapeHtml(connectionReason)}</p><span class="system-health-meta">${escapeHtml(connectionProbeEvidence)}</span>${connectionEvidence}</div></article>
     <article class="account-sync-note ${status.automatic_sync_enabled && connected ? 'is-active' : ''}"><span class="status-dot"></span><div><b>${status.automatic_sync_enabled && connected ? '账户数据自动同步' : status.automatic_sync_enabled ? '自动同步等待连接恢复' : '账户自动更新尚未启用'}</b><p>${escapeHtml(automaticSyncCopy)}</p></div></article>
     ${snapshotMode ? `<article class="danger-note venue-snapshot-warning"><b>当前连接不可用，以下仅为最后一次保存快照</b><p>这些余额、仓位、订单与成交不能作为实时交易依据。恢复只读连接并完成新一轮同步后，页面才会重新标记为当前事实。</p></article>` : ''}

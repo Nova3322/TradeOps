@@ -118,7 +118,7 @@ class SignalQueries(QueryComponent):
             return legacy_candidate_id
 
     def perptape_feed(self, user_id: UUID) -> PerptapeFeedSnapshot | None:
-        _workspace_id, team_id = self.facade._active_scope_ids(user_id)
+        _workspace_id, team_id = self._active_scope_ids(user_id)
         with self.database.session_factory() as session:
             feed = session.get(PerptapeFeed, (team_id, "BREAKOUTS"))
             if feed is None:

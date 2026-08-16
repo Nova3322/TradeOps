@@ -9,7 +9,7 @@ from trading_control_plane.query_core import *
 class RiskQueries(QueryComponent):
     def list_exceptions(self, user_id: UUID, *, now: datetime) -> list[dict[str, Any]]:
         exceptions: list[dict[str, Any]] = []
-        _workspace_id, team_id = self.facade._active_scope_ids(user_id)
+        _workspace_id, team_id = self._active_scope_ids(user_id)
         with self.database.session_factory() as session:
             risk_policy = session.scalar(
                 select(RiskPolicy).where(
@@ -20,10 +20,10 @@ class RiskQueries(QueryComponent):
             max_fact_age = timedelta(
                 seconds=(risk_policy.max_fact_age_seconds if risk_policy is not None else 300)
             )
-        for campaign in self.facade.list_campaigns(user_id):
+        for campaign in self.list_campaigns(user_id):
             if campaign["status"] == "CLOSED":
                 continue
-            detail = self.facade.campaign_detail(user_id, UUID(str(campaign["campaign_id"])))
+            detail = self.campaign_detail(user_id, UUID(str(campaign["campaign_id"])))
             campaign_id = str(campaign["campaign_id"])
             campaign_occurred_at = str(campaign["updated_at"] or campaign["created_at"])
             if campaign["status"] == "UNKNOWN":
@@ -185,62 +185,62 @@ class RiskQueries(QueryComponent):
         guidance = {
             "CAMPAIGN_UNKNOWN": (
                 "CRITICAL",
-                "交易运维",
+                "风险管理",
                 "任务结果未知会阻断新增风险",
                 "核对交易所事实并完成计算型对账",
             ),
             "RISK_RESERVATION_UNKNOWN": (
                 "CRITICAL",
-                "交易运维",
+                "风险管理",
                 "风险占用无法安全释放",
                 "核对订单结果并重新计算风险预留",
             ),
             "ORDER_INTENT_UNKNOWN": (
                 "CRITICAL",
-                "交易运维",
+                "风险管理",
                 "可能存在未确认订单结果",
                 "先同步订单与成交，再处理未知意图",  # noqa: RUF001
             ),
             "POSITION_UNKNOWN": (
                 "CRITICAL",
-                "交易运维",
+                "风险管理",
                 "无法确认真实仓位",
                 "同步该账户与标的的仓位事实",
             ),
             "POSITION_STALE": (
                 "HIGH",
-                "交易运维",
+                "风险管理",
                 "仓位事实可能不再代表当前状态",
                 "刷新仓位后重新对账",
             ),
             "PROTECTION_UNKNOWN": (
                 "CRITICAL",
-                "交易运维",
+                "风险管理",
                 "无法确认持仓保护是否有效",
                 "同步或补齐保护单事实",
             ),
             "PROTECTION_STALE": (
                 "HIGH",
-                "交易运维",
+                "风险管理",
                 "保护事实可能已经变化",
                 "刷新保护单并确认足额覆盖",
             ),
             "PROTECTION_INSUFFICIENT": (
                 "CRITICAL",
-                "交易运维",
+                "风险管理",
                 "现有持仓未被足额保护",
                 "按交易任务允许的降险路径补齐保护或退出",
             ),
             "RECONCILIATION_STALE": (
                 "HIGH",
-                "交易运维",
+                "风险管理",
                 "旧对账早于最新仓位或订单事实",
                 "用最新事实重新运行计算型对账",
             ),
         }
         for item in exceptions:
             code = str(item["code"])
-            default = ("HIGH", "交易运维", "运行事实存在不一致", "检查差异并重新运行计算型对账")
+            default = ("HIGH", "风险管理", "运行事实存在不一致", "检查差异并重新运行计算型对账")
             severity, owner_role, impact, next_action = guidance.get(code, default)
             item.update(
                 {

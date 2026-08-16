@@ -14,12 +14,10 @@ from trading_control_plane.domain import (
     DomainRejected,
     PrincipalType,
     Role,
-    ServicePrincipalKind,
 )
 from trading_control_plane.models import (
     AccountEquity,
     AccountEquityObservation,
-    AnalyticsEquitySnapshot,
     AnalyticsReport,
     ApiClient,
     Approval,
@@ -28,6 +26,7 @@ from trading_control_plane.models import (
     CapabilityGate,
     CapitalAutomationPolicy,
     CapitalTransfer,
+    DirectCapitalConfiguration,
     DirectCapitalOperation,
     ExchangeAccount,
     FundingPayment,
@@ -46,14 +45,9 @@ from trading_control_plane.models import (
     RoleAssignment,
     RuntimeSourceHealth,
     SenderLease,
-    ShadowFill,
-    ShadowInstrument,
-    ShadowOrder,
-    ShadowPosition,
     SignalEvent,
     Team,
     TeamMembership,
-    TeamShadowAccount,
     TradingAuthorization,
     TransferAuthorization,
     TransferProposal,
@@ -228,8 +222,6 @@ def _proposal_execution_status(
     return "AWAITING_LAUNCH"
 
 
-
-
 __all__ = [
     "NOTIFICATION_TEMPLATES",
     "ROLE_ACTIONS",
@@ -239,7 +231,6 @@ __all__ = [
     "UUID",
     "AccountEquity",
     "AccountEquityObservation",
-    "AnalyticsEquitySnapshot",
     "AnalyticsReport",
     "Any",
     "ApiClient",
@@ -251,6 +242,7 @@ __all__ = [
     "CapitalAutomationPolicy",
     "CapitalTransfer",
     "Decimal",
+    "DirectCapitalConfiguration",
     "DirectCapitalOperation",
     "DomainRejected",
     "ExchangeAccount",
@@ -274,15 +266,9 @@ __all__ = [
     "RoleAssignment",
     "RuntimeSourceHealth",
     "SenderLease",
-    "ServicePrincipalKind",
     "Session",
-    "ShadowFill",
-    "ShadowInstrument",
-    "ShadowOrder",
-    "ShadowPosition",
     "Team",
     "TeamMembership",
-    "TeamShadowAccount",
     "TradingAuthorization",
     "TransferAuthorization",
     "TransferProposal",

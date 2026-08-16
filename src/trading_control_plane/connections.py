@@ -171,9 +171,7 @@ def project_runtime_connections(
     )
     notilt_identity = "COMPLETE" if settings.notilt_agent_address else "MISSING"
     perptape_credentials = (
-        "COMPLETE"
-        if database_perptape_configured or settings.perptape_api_key
-        else "MISSING"
+        "COMPLETE" if database_perptape_configured or settings.perptape_api_key else "MISSING"
     )
     return {
         "BINANCE": _projection(
@@ -198,8 +196,7 @@ def project_runtime_connections(
                 else settings.hyperliquid_read_only_enabled
             ),
             credential_state=hyperliquid_identity,
-            config_complete=database_hyperliquid
-            or bool(settings.runtime_hyperliquid_account_id),
+            config_complete=database_hyperliquid or bool(settings.runtime_hyperliquid_account_id),
             health=_latest_health(source_health, "HYPERLIQUID"),
             owner_role="系统管理员",
             write_process_enabled=(

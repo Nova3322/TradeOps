@@ -8,7 +8,7 @@ from trading_control_plane.query_core import *
 
 class AccountQueries(QueryComponent):
     def exchange_accounts(self, actor_id: UUID) -> dict[str, Any]:
-        workspace_id, team_id = self.facade._active_scope_ids(actor_id)
+        workspace_id, team_id = self._active_scope_ids(actor_id)
         with self.database.session_factory() as session:
             assignments = session.scalars(
                 select(RoleAssignment).where(
@@ -26,7 +26,10 @@ class AccountQueries(QueryComponent):
                 raise DomainRejected("RBAC_DENIED", "exchange account visibility is not assigned")
             accounts = session.scalars(
                 select(ExchangeAccount)
-                .where(ExchangeAccount.team_id == team_id)
+                .where(
+                    ExchangeAccount.team_id == team_id,
+                    ExchangeAccount.deleted_at.is_(None),
+                )
                 .order_by(ExchangeAccount.venue, ExchangeAccount.label, ExchangeAccount.account_id)
             ).all()
             visible = [
@@ -57,6 +60,7 @@ class AccountQueries(QueryComponent):
                 can_manage_credentials = granted(item, "account.credentials.manage")
                 projection["permissions"] = {
                     "can_manage": granted(item, "account.manage"),
+                    "can_delete": granted(item, "account.manage"),
                     "can_manage_trading": granted(item, "account.manage"),
                     "can_manage_credentials": can_manage_credentials,
                     "can_verify_connection": can_manage_credentials,
@@ -115,6 +119,7 @@ class AccountQueries(QueryComponent):
             "team_id": str(item.team_id),
             "account_id": item.account_id,
             "venue": item.venue,
+            "environment": item.environment,
             "label": item.label,
             "registration_source": item.registration_source,
             "active": item.active,
@@ -197,11 +202,12 @@ class AccountQueries(QueryComponent):
     ) -> dict[str, Any]:
         if not self.service.can_user(user_id, "view", account_id, venue):
             raise DomainRejected("RBAC_DENIED", "venue facts are outside the current scope")
-        workspace_id, team_id = self.facade._active_scope_ids(user_id)
+        workspace_id, team_id = self._active_scope_ids(user_id)
         with self.database.session_factory() as session:
             account = session.scalar(
                 select(ExchangeAccount.exchange_account_id).where(
                     ExchangeAccount.team_id == team_id,
+                    ExchangeAccount.environment == environment,
                     ExchangeAccount.account_id == account_id,
                     ExchangeAccount.venue == venue,
                 )

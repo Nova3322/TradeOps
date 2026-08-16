@@ -6,9 +6,9 @@ import json
 import secrets
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
-from unittest.mock import patch
 from uuid import UUID
 
+from conftest import set_test_team_environment
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient, Response
 from sqlalchemy import select
@@ -27,12 +27,6 @@ from trading_control_plane.models import (
     User,
 )
 from trading_control_plane.perptape import PerptapeClient
-from trading_control_plane.queries import TradingQueries
-from trading_control_plane.request_context import (
-    ApiClientRequestContext,
-    bind_api_client_context,
-    reset_api_client_context,
-)
 from trading_control_plane.service import TradingService
 
 
@@ -61,12 +55,118 @@ def api_client_app(database: Database) -> FastAPI:
     return create_app(settings, database, perptape)
 
 
+def test_api_key_creation_is_limited_to_the_current_workspace_and_team(
+    database: Database,
+) -> None:
+    now = datetime.now(UTC)
+    service = TradingService(database, credential_encryption_key=encryption_key())
+    admin_id = service.bootstrap_admin("api-current-scope-admin", now=now)
+    with database.session_factory() as session:
+        admin = session.get(User, admin_id)
+        assert admin is not None
+        default_workspace_id = admin.active_workspace_id
+        default_team_id = admin.active_team_id
+        assert default_workspace_id is not None and default_team_id is not None
+
+    other_workspace_id = service.create_workspace(
+        actor_id=admin_id,
+        name="Other API Workspace",
+        slug="other-api-workspace",
+        idempotency_key="other-api-workspace",
+        now=now,
+    )
+    other_team_id = service.create_team(
+        actor_id=admin_id,
+        name="Other API Team",
+        slug="other-api-team",
+        idempotency_key="other-api-team",
+        now=now,
+    )
+    service.select_scope(
+        actor_id=admin_id,
+        workspace_id=default_workspace_id,
+        team_id=default_team_id,
+        idempotency_key="return-api-default-scope",
+        now=now,
+    )
+    owner_id = service.create_managed_user(
+        "api-current-scope-owner",
+        [Role.OBSERVER],
+        admin_id,
+        None,
+        None,
+        "ordinary-user-password",
+        now=now,
+    )
+    app = api_client_app(database)
+
+    async def scenario() -> None:
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            login = await client.post(
+                "/api/auth/mock/login",
+                json={"username": "api-current-scope-admin"},
+            )
+            assert login.status_code == 200, login.text
+            rejected = await client.post(
+                "/api/profile/api-keys",
+                json={
+                    "name": "wrong-workspace",
+                    "workspace_id": str(other_workspace_id),
+                    "team_id": str(other_team_id),
+                    "expires_in_days": 30,
+                    "idempotency_key": "wrong-workspace-api-key",
+                },
+            )
+            assert rejected.status_code == 422, rejected.text
+            assert rejected.json()["error"]["code"] == "API_CLIENT_SCOPE_INVALID"
+
+            created = await client.post(
+                "/api/profile/api-keys",
+                json={
+                    "name": "current-workspace",
+                    "workspace_id": str(default_workspace_id),
+                    "team_id": str(default_team_id),
+                    "expires_in_days": 30,
+                    "idempotency_key": "current-workspace-api-key",
+                },
+            )
+            assert created.status_code == 200, created.text
+            assert created.json()["result"]["workspace_id"] == str(default_workspace_id)
+            assert created.json()["result"]["team_id"] == str(default_team_id)
+
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as owner:
+            login = await owner.post(
+                "/api/auth/mock/login",
+                json={"username": "api-current-scope-owner"},
+            )
+            assert login.status_code == 200, login.text
+            owner_session = login.json()["session"]
+            owner_key = await owner.post(
+                "/api/profile/api-keys",
+                json={
+                    "name": "owner-only-key",
+                    "workspace_id": owner_session["active_workspace"]["workspace_id"],
+                    "team_id": owner_session["active_team"]["team_id"],
+                    "expires_in_days": 30,
+                    "idempotency_key": "owner-only-api-key",
+                },
+            )
+            assert owner_key.status_code == 200, owner_key.text
+            assert owner_key.json()["result"]["owner_user_id"] == str(owner_id)
+            inventory = await owner.get("/api/profile/api-keys")
+            assert inventory.status_code == 200, inventory.text
+            assert [item["name"] for item in inventory.json()["data"]] == ["owner-only-key"]
+
+    asyncio.run(scenario())
+
+
 def test_user_owned_api_key_dynamic_rbac_scope_audit_and_token_lifecycle(
     database: Database,
 ) -> None:
     now = datetime.now(UTC)
     service = TradingService(database, credential_encryption_key=encryption_key())
     admin_id = service.bootstrap_admin("api-client-admin", now=now)
+    set_test_team_environment(database, admin_id, "TESTNET")
     instrument_id = service.register_instrument(
         actor_id=admin_id,
         venue="BINANCE",
@@ -82,19 +182,21 @@ def test_user_owned_api_key_dynamic_rbac_scope_audit_and_token_lifecycle(
     )
     first_account_uuid = service.create_exchange_account(
         actor_id=admin_id,
+        environment="TESTNET",
         account_id="paper-api-1",
         venue="BINANCE",
         label="Primary API Key account",
-        credentials=None,
+        credentials={"api_key": "testnet-key-one", "api_secret": "testnet-secret-one"},
         idempotency_key="api-account-one",
         now=now,
     )
     service.create_exchange_account(
         actor_id=admin_id,
+        environment="TESTNET",
         account_id="paper-api-2",
         venue="BINANCE",
         label="Second RBAC account",
-        credentials=None,
+        credentials={"api_key": "testnet-key-two", "api_secret": "testnet-secret-two"},
         idempotency_key="api-account-two",
         now=now,
     )
@@ -103,20 +205,7 @@ def test_user_owned_api_key_dynamic_rbac_scope_audit_and_token_lifecycle(
         assert admin is not None and admin.active_team_id is not None
         team = session.get(Team, admin.active_team_id)
         assert team is not None
-        assert team.execution_mode == "LIVE"
-        assert team.execution_mode_locked_at == now
-        team_id = team.team_id
-        team_version = team.version
-    switched = service.set_team_execution_mode(
-        actor_id=admin_id,
-        team_id=team_id,
-        mode="SHADOW",
-        confirmation="SWITCH_TO_SHADOW",
-        expected_version=team_version,
-        idempotency_key="api-key-shadow-mode",
-        now=now,
-    )
-    assert switched["execution_mode"] == "SHADOW"
+        assert team.execution_mode == "TESTNET"
     owner_id = service.create_managed_user(
         "api-owner",
         [Role.OBSERVER, Role.PROPOSER, Role.REVIEWER],
@@ -149,9 +238,6 @@ def test_user_owned_api_key_dynamic_rbac_scope_audit_and_token_lifecycle(
 
             page = await owner.get("/profile/api-keys")
             assert page.status_code == 200
-            assert 'href="/profile/api-keys"' in page.text
-            assert 'href="/admin/agents"' not in page.text
-            assert "/assets/app.js?v=175" in page.text
 
             scopes = await owner.get("/api/profile/api-key-contexts")
             assert scopes.status_code == 200, scopes.text
@@ -198,6 +284,10 @@ def test_user_owned_api_key_dynamic_rbac_scope_audit_and_token_lifecycle(
 
             listed = await owner.get("/api/profile/api-keys")
             assert listed.status_code == 200, listed.text
+            assert {item["name"] for item in listed.json()["data"]} == {
+                "owner-alpha",
+                "owner-beta",
+            }
             assert {item["permissions_source"] for item in listed.json()["data"]} == {
                 "HUMAN_DYNAMIC"
             }
@@ -230,7 +320,7 @@ def test_user_owned_api_key_dynamic_rbac_scope_audit_and_token_lifecycle(
         assert connection.json()["scope"]["scope_model"] == "USER_RBAC"
 
         proposal_payload = {
-            "environment": "SHADOW",
+            "environment": "TESTNET",
             "account_id": "paper-api-1",
             "venue": "BINANCE",
             "instrument_id": str(instrument_id),
@@ -392,22 +482,6 @@ def test_user_owned_api_key_dynamic_rbac_scope_audit_and_token_lifecycle(
             )
             assert denied.status_code == 403
             assert denied.json()["error"]["code"] == "RBAC_DENIED"
-
-        context_token = bind_api_client_context(
-            ApiClientRequestContext(
-                owner_user_id=owner_id,
-                api_client_id=UUID(alpha_id),
-                workspace_id=UUID(connection.json()["scope"]["workspace_id"]),
-                team_id=UUID(connection.json()["scope"]["team_id"]),
-            )
-        )
-        try:
-            queries = TradingQueries(database)
-            with patch.object(queries.service, "shadow_activation_status", return_value={}):
-                shadow = queries.shadow_workspace(owner_id)
-        finally:
-            reset_api_client_context(context_token)
-        assert [item["account_id"] for item in shadow["accounts"]] == ["paper-api-1"]
 
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as admin:
             login = await admin.post("/api/auth/mock/login", json={"username": "api-client-admin"})

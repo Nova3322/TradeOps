@@ -34,7 +34,10 @@ document.addEventListener('click', (event) => {
   if (!userMenu.contains(event.target)) closeUserMenu();
 });
 window.addEventListener('popstate', route);
-window.addEventListener('resize', syncNavigationMode);
+window.addEventListener('resize', () => {
+  syncNavigationMode();
+  syncPreferenceDisplayValues();
+});
 mobileNavToggle.addEventListener('mousedown', (event) => event.preventDefault());
 mobileNavToggle.addEventListener('click', () => sidebar.classList.contains('open') ? closeMobileNav() : openMobileNav());
 mobileNavToggle.addEventListener('keydown', (event) => {
@@ -42,6 +45,10 @@ mobileNavToggle.addEventListener('keydown', (event) => {
   event.preventDefault();
   if (sidebar.classList.contains('open')) closeMobileNav();
   else openMobileNav();
+});
+desktopNavToggle.addEventListener('click', () => {
+  const collapsed = document.querySelector('.app-shell')?.classList.contains('sidebar-collapsed');
+  setDesktopNavigationCollapsed(!collapsed, {persist:true});
 });
 navBackdrop.addEventListener('click', () => closeMobileNav());
 scopeSwitcher.addEventListener('click', () => {
@@ -68,17 +75,21 @@ document.querySelector('#system-proposal-form').addEventListener('submit', async
   try { const result = await api(`/api/opportunities/${candidateId}/proposals`, {method:'POST', body:JSON.stringify(data)}); dialog.close(); showToast('系统机会提案已冻结并进入审核'); navigate(`/proposals/${result.proposal_id}`); }
   catch (error) { showApiError(error, form.querySelector('#system-form-error')); }
 });
-document.querySelector('#logout-button').addEventListener('click', async (event) => withPending(event.currentTarget, '退出中…', async () => {
-  cancelMobileNavFocus();
-  try {
-    await api('/api/auth/logout', {method:'POST'});
-    session = null;
-    sessionAuthenticationMethod = '';
-    setShell(false);
-    history.replaceState({}, '', '/');
-    await route();
-  } catch (error) { showApiError(error); }
-}));
+async function logoutCurrentSession(button) {
+  return withPending(button, '退出中…', async () => {
+    cancelMobileNavFocus();
+    try {
+      await api('/api/auth/logout', {method:'POST'});
+      session = null;
+      sessionAuthenticationMethod = '';
+      setShell(false);
+      history.replaceState({}, '', '/');
+      await route();
+    } catch (error) { showApiError(error); }
+  });
+}
+document.querySelector('#logout-button').addEventListener('click', event => logoutCurrentSession(event.currentTarget));
+mobileLogoutButton?.addEventListener('click', event => logoutCurrentSession(event.currentTarget));
 function closeUserMenu({restoreFocus = false} = {}) {
   userMenuPanel.hidden = true;
   identityChip.setAttribute('aria-expanded', 'false');
@@ -108,6 +119,23 @@ function preferenceOptionLabel(kind, option) {
   return kind === 'language' ? option.label : localizedText(option.label);
 }
 
+function preferenceDisplayLabel(kind, option) {
+  const label = preferenceOptionLabel(kind, option);
+  return kind === 'language' && option?.value === 'en' && matchMedia('(max-width: 560px)').matches
+    ? 'EN'
+    : label;
+}
+
+function syncPreferenceDisplayValues() {
+  preferenceSelects.forEach((_select, kind) => {
+    const {value} = preferenceElements(kind);
+    const options = PREFERENCE_OPTIONS[kind] || [];
+    const selectedValue = activePreferenceValue(kind);
+    const selected = options.find(option => option.value === selectedValue) || options[0];
+    value.textContent = selected ? preferenceDisplayLabel(kind, selected) : '—';
+  });
+}
+
 function activePreferenceValue(kind) {
   return kind === 'language' ? currentLanguage : currentThemePreference;
 }
@@ -118,14 +146,14 @@ function renderPreferenceDropdown(kind) {
   const selectedValue = activePreferenceValue(kind);
   menu.innerHTML = options.map(option => `<button class="preference-option" type="button" role="option" tabindex="-1" data-preference-option="${escapeHtml(option.value)}" aria-selected="${String(option.value === selectedValue)}">${escapeHtml(preferenceOptionLabel(kind, option))}</button>`).join('');
   const selected = options.find(option => option.value === selectedValue) || options[0];
-  value.textContent = selected ? preferenceOptionLabel(kind, selected) : '—';
+  value.textContent = selected ? preferenceDisplayLabel(kind, selected) : '—';
 }
 
 function updatePreferenceDropdown(kind, selectedValue) {
   const {value, menu} = preferenceElements(kind);
   const options = PREFERENCE_OPTIONS[kind] || [];
   const selected = options.find(option => option.value === selectedValue) || options[0];
-  value.textContent = selected ? preferenceOptionLabel(kind, selected) : '—';
+  value.textContent = selected ? preferenceDisplayLabel(kind, selected) : '—';
   menu.querySelectorAll('[data-preference-option]').forEach(option => {
     option.setAttribute('aria-selected', String(option.dataset.preferenceOption === selectedValue));
   });

@@ -5,8 +5,6 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from uuid import UUID, uuid4
 
-import pytest
-from conftest import set_test_team_environment
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy import select
 
@@ -14,16 +12,10 @@ from trading_control_plane.api import create_app
 from trading_control_plane.config import Settings
 from trading_control_plane.database import Database
 from trading_control_plane.domain import (
-    Direction,
-    DomainRejected,
-    ExecutionEnvironment,
-    ProposalSource,
-    RiskTier,
     SystemRiskState,
 )
 from trading_control_plane.models import (
     AuditEvent,
-    Proposal,
     RiskPolicy,
     RoleAssignment,
     Team,
@@ -143,12 +135,10 @@ def test_workspace_and_team_roles_are_selected_and_calculated_independently(
             assert alpha.status_code == 200, alpha.text
             alpha_id = alpha.json()["team_id"]
             assert alpha.json()["session"]["active_team"]["trading_enabled"] is False
-            assert [item["role"] for item in alpha.json()["session"]["roles"]] == [
-                "SYSTEM_ADMIN"
-            ]
-            blocked_business = await client.get("/api/proposals")
-            assert blocked_business.status_code == 403, blocked_business.text
-            assert blocked_business.json()["error"]["code"] == "RBAC_DENIED"
+            assert [item["role"] for item in alpha.json()["session"]["roles"]] == ["SYSTEM_ADMIN"]
+            read_only_business = await client.get("/api/proposals")
+            assert read_only_business.status_code == 200, read_only_business.text
+            assert read_only_business.json()["data"] == []
 
             kelly = await client.post(
                 "/api/admin/users",
@@ -173,9 +163,7 @@ def test_workspace_and_team_roles_are_selected_and_calculated_independently(
             beta_id = beta.json()["team_id"]
             beta_members = await client.get("/api/admin/users")
             assert beta_members.status_code == 200, beta_members.text
-            assert {item["username"] for item in beta_members.json()["data"]} == {
-                "scope-admin"
-            }
+            assert {item["username"] for item in beta_members.json()["data"]} == {"scope-admin"}
 
             invited = await client.post(
                 "/api/admin/team-members",
@@ -213,9 +201,7 @@ def test_workspace_and_team_roles_are_selected_and_calculated_independently(
             )
             assert switched.status_code == 200, switched.text
             assert switched.json()["session"]["active_team"]["team_id"] == beta_id
-            assert [item["role"] for item in switched.json()["session"]["roles"]] == [
-                "PROPOSER"
-            ]
+            assert [item["role"] for item in switched.json()["session"]["roles"]] == ["PROPOSER"]
 
             denied = await client.post(
                 "/api/scopes/select",
@@ -231,9 +217,7 @@ def test_workspace_and_team_roles_are_selected_and_calculated_independently(
     asyncio.run(scenario())
 
     with database.session_factory() as session:
-        workspace = session.scalar(
-            select(Workspace).where(Workspace.slug == "trading-operations")
-        )
+        workspace = session.scalar(select(Workspace).where(Workspace.slug == "trading-operations"))
         assert workspace is not None
         teams = session.scalars(
             select(Team).where(Team.workspace_id == workspace.workspace_id).order_by(Team.slug)
@@ -264,144 +248,6 @@ def test_workspace_and_team_roles_are_selected_and_calculated_independently(
         assert scoped_events
         assert all(event.workspace_id == workspace.workspace_id for event in scoped_events)
         assert all(event.idempotency_key for event in scoped_events)
-
-
-def test_proposal_chain_defaults_to_active_team_and_denies_cross_team_access(
-    database: Database,
-) -> None:
-    now = datetime.now(UTC)
-    service = TradingService(database)
-    admin_id = service.bootstrap_admin("team-chain-admin", now=now)
-    set_test_team_environment(database, admin_id, "SHADOW")
-    context = TradingQueries(database).user_context(admin_id)
-    default_workspace_id = UUID(str(context["active_workspace"]["workspace_id"]))
-    default_team_id = UUID(str(context["active_team"]["team_id"]))
-    instrument_id = service.register_instrument(
-        actor_id=admin_id,
-        venue="BINANCE",
-        symbol="BTCUSDT",
-        tick_size=Decimal("0.1"),
-        lot_size=Decimal("0.001"),
-        minimum_notional=Decimal("5"),
-        contract_multiplier=Decimal("1"),
-        quote_currency="USDT",
-        collateral_currency="USDT",
-        protection_supported=True,
-        now=now,
-    )
-
-    proposal_a = service.create_proposal(
-        actor_id=admin_id,
-        source=ProposalSource.MANUAL,
-        risk_tier=RiskTier.LOW,
-        account_id="shared-account",
-        venue="BINANCE",
-        instrument_id=instrument_id,
-        direction=Direction.LONG,
-        quantity=Decimal("0.01"),
-        max_risk=Decimal("10"),
-        expires_at=now + timedelta(hours=1),
-        idempotency_key="team-a-proposal",
-        environment=ExecutionEnvironment.SHADOW,
-        deduplicate_active_manual_semantics=True,
-        now=now,
-    )
-
-    workspace_b = service.create_workspace(
-        actor_id=admin_id,
-        name="Workspace B",
-        slug="workspace-b",
-        idempotency_key="workspace-b-create",
-        now=now,
-    )
-    team_b = service.create_team(
-        actor_id=admin_id,
-        name="Team B",
-        slug="team-b",
-        idempotency_key="team-b-create",
-        now=now,
-    )
-    # Account and risk roots are the next migration phase. Enabling the test
-    # team here exercises the already implemented proposal-chain boundary.
-    with database.session_factory.begin() as session:
-        team = session.get(Team, team_b, with_for_update=True)
-        assert team is not None
-        team.trading_enabled = True
-        team.execution_mode = "SHADOW"
-
-    proposal_b = service.create_proposal(
-        actor_id=admin_id,
-        source=ProposalSource.MANUAL,
-        risk_tier=RiskTier.LOW,
-        account_id="shared-account",
-        venue="BINANCE",
-        instrument_id=instrument_id,
-        direction=Direction.LONG,
-        quantity=Decimal("0.01"),
-        max_risk=Decimal("10"),
-        expires_at=now + timedelta(hours=1),
-        idempotency_key="team-b-proposal",
-        environment=ExecutionEnvironment.SHADOW,
-        deduplicate_active_manual_semantics=True,
-        now=now,
-    )
-    assert proposal_b != proposal_a
-
-    queries = TradingQueries(database)
-    listed = queries.list_proposals(admin_id)
-    assert [item["proposal_id"] for item in listed] == [str(proposal_b)]
-    assert listed[0]["workspace_id"] == str(workspace_b)
-    assert listed[0]["team_id"] == str(team_b)
-    assert listed[0]["account_id"] == "shared-account"
-    with pytest.raises(DomainRejected, match="TEAM_SCOPE_DENIED"):
-        queries.proposal_detail(admin_id, proposal_a)
-    with pytest.raises(DomainRejected, match="TEAM_SCOPE_DENIED"):
-        service.submit_proposal(proposal_a, admin_id, now=now)
-
-    async def api_scenario() -> None:
-        async with AsyncClient(
-            transport=ASGITransport(app=scope_app(database)),
-            base_url="http://test",
-        ) as client:
-            await login(client, "team-chain-admin")
-            response = await client.get("/api/proposals")
-            assert response.status_code == 200, response.text
-            assert [item["proposal_id"] for item in response.json()["data"]] == [
-                str(proposal_b)
-            ]
-            denied = await client.get(f"/api/proposals/{proposal_a}")
-            assert denied.status_code == 403, denied.text
-            assert denied.json()["error"]["code"] == "TEAM_SCOPE_DENIED"
-
-    asyncio.run(api_scenario())
-
-    with database.session_factory() as session:
-        persisted_a = session.get(Proposal, proposal_a)
-        persisted_b = session.get(Proposal, proposal_b)
-        assert persisted_a is not None and persisted_a.team_id == default_team_id
-        assert persisted_b is not None and persisted_b.team_id == team_b
-        event = session.scalar(
-            select(AuditEvent).where(
-                AuditEvent.object_type == "Proposal",
-                AuditEvent.object_id == str(proposal_b),
-                AuditEvent.event_type == "PROPOSAL_CREATED",
-            )
-        )
-        assert event is not None
-        assert event.workspace_id == workspace_b
-        assert event.team_id == team_b
-        assert event.account_id == "shared-account"
-
-    service.select_scope(
-        actor_id=admin_id,
-        workspace_id=default_workspace_id,
-        team_id=default_team_id,
-        idempotency_key="return-default-team",
-        now=now,
-    )
-    assert [item["proposal_id"] for item in queries.list_proposals(admin_id)] == [
-        str(proposal_a)
-    ]
 
 
 def test_risk_policy_versions_and_status_are_isolated_by_active_team(

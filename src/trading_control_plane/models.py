@@ -52,7 +52,7 @@ class Team(Base):
         UniqueConstraint("workspace_id", "slug", name="uq_teams_workspace_slug"),
         CheckConstraint("version >= 1", name="ck_teams_version"),
         CheckConstraint(
-            "execution_mode IN ('SETUP','SHADOW','TESTNET','LIVE')",
+            "execution_mode IN ('SETUP','TESTNET','LIVE')",
             name="ck_teams_execution_mode",
         ),
         Index("ix_teams_workspace_active", "workspace_id", "active"),
@@ -71,45 +71,9 @@ class Team(Base):
     execution_mode_locked_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
-    version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
-    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
-
-
-class TeamShadowAccount(Base):
-    __tablename__ = "team_shadow_accounts"
-    __table_args__ = (
-        CheckConstraint("generation >= 1", name="ck_team_shadow_accounts_generation"),
-        CheckConstraint(
-            "initial_equity = 100000 AND equity >= 0 AND available_balance >= 0",
-            name="ck_team_shadow_accounts_balances",
-        ),
-        CheckConstraint("fees_paid >= 0", name="ck_team_shadow_accounts_fees_nonnegative"),
-        CheckConstraint("status IN ('ACTIVE','ARCHIVED')", name="ck_team_shadow_accounts_status"),
-        CheckConstraint("version >= 1", name="ck_team_shadow_accounts_version"),
-        UniqueConstraint("team_id", "generation", name="uq_team_shadow_accounts_generation"),
-        Index(
-            "uq_team_shadow_accounts_active",
-            "team_id",
-            unique=True,
-            postgresql_where=text("status = 'ACTIVE'"),
-        ),
+    execution_mode_updated_by: Mapped[UUID | None] = mapped_column(
+        ForeignKey("users.user_id", ondelete="RESTRICT"), nullable=True
     )
-
-    shadow_account_id: Mapped[UUID] = mapped_column(
-        Uuid(as_uuid=True), primary_key=True, default=uuid4
-    )
-    team_id: Mapped[UUID] = mapped_column(
-        ForeignKey("teams.team_id", ondelete="RESTRICT"), nullable=False
-    )
-    generation: Mapped[int] = mapped_column(Integer, nullable=False)
-    initial_equity: Mapped[Decimal] = mapped_column(AMOUNT, nullable=False)
-    equity: Mapped[Decimal] = mapped_column(AMOUNT, nullable=False)
-    available_balance: Mapped[Decimal] = mapped_column(AMOUNT, nullable=False)
-    realized_pnl: Mapped[Decimal] = mapped_column(AMOUNT, nullable=False)
-    unrealized_pnl: Mapped[Decimal] = mapped_column(AMOUNT, nullable=False)
-    fees_paid: Mapped[Decimal] = mapped_column(AMOUNT, nullable=False)
-    status: Mapped[str] = mapped_column(String(16), nullable=False)
     version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
@@ -119,12 +83,11 @@ class AnalyticsEquitySnapshot(Base):
     __tablename__ = "analytics_equity_snapshots"
     __table_args__ = (
         CheckConstraint(
-            "environment IN ('SHADOW','LIVE')",
+            "environment IN ('TESTNET','LIVE')",
             name="ck_analytics_equity_snapshots_environment",
         ),
         CheckConstraint(
-            "(environment = 'SHADOW' AND generation IS NOT NULL) OR "
-            "(environment = 'LIVE' AND generation IS NULL)",
+            "generation IS NULL",
             name="ck_analytics_equity_snapshots_generation",
         ),
         CheckConstraint("equity >= 0", name="ck_analytics_equity_snapshots_equity"),
@@ -173,12 +136,11 @@ class AnalyticsReport(Base):
             name="ck_analytics_reports_engine",
         ),
         CheckConstraint(
-            "environment IN ('SHADOW','LIVE')",
+            "environment IN ('TESTNET','LIVE')",
             name="ck_analytics_reports_environment",
         ),
         CheckConstraint(
-            "(environment = 'SHADOW' AND generation IS NOT NULL) OR "
-            "(environment = 'LIVE' AND generation IS NULL)",
+            "generation IS NULL",
             name="ck_analytics_reports_generation",
         ),
         CheckConstraint("status IN ('READY','FAILED')", name="ck_analytics_reports_status"),
@@ -235,62 +197,16 @@ class AnalyticsReport(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
 
-class ShadowInstrument(Base):
-    __tablename__ = "shadow_instruments"
-    __table_args__ = (
-        CheckConstraint(
-            "venue IN ('BINANCE','HYPERLIQUID','OKX','BYBIT')",
-            name="ck_shadow_instruments_venue",
-        ),
-        CheckConstraint(
-            "price_tick IS NULL OR price_tick > 0", name="ck_shadow_instruments_price_tick"
-        ),
-        CheckConstraint(
-            "quantity_step IS NULL OR quantity_step > 0",
-            name="ck_shadow_instruments_quantity_step",
-        ),
-        CheckConstraint(
-            "contract_multiplier IS NULL OR contract_multiplier > 0",
-            name="ck_shadow_instruments_multiplier",
-        ),
-        CheckConstraint(
-            "latest_price IS NULL OR latest_price > 0",
-            name="ck_shadow_instruments_latest_price",
-        ),
-        CheckConstraint("version >= 1", name="ck_shadow_instruments_version"),
-        UniqueConstraint("team_id", "venue", "symbol", name="uq_shadow_instruments_scope"),
-    )
-
-    shadow_instrument_id: Mapped[UUID] = mapped_column(
-        Uuid(as_uuid=True), primary_key=True, default=uuid4
-    )
-    team_id: Mapped[UUID] = mapped_column(
-        ForeignKey("teams.team_id", ondelete="RESTRICT"), nullable=False
-    )
-    catalog_instrument_id: Mapped[UUID | None] = mapped_column(
-        ForeignKey("instruments.instrument_id", ondelete="SET NULL"), nullable=True
-    )
-    venue: Mapped[str] = mapped_column(String(64), nullable=False)
-    symbol: Mapped[str] = mapped_column(String(120), nullable=False)
-    price_tick: Mapped[Decimal | None] = mapped_column(AMOUNT, nullable=True)
-    quantity_step: Mapped[Decimal | None] = mapped_column(AMOUNT, nullable=True)
-    contract_multiplier: Mapped[Decimal | None] = mapped_column(AMOUNT, nullable=True)
-    is_derivative: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
-    latest_price: Mapped[Decimal | None] = mapped_column(AMOUNT, nullable=True)
-    price_observed_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True
-    )
-    version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
-    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
-
-
 class ExchangeAccount(Base):
     __tablename__ = "exchange_accounts"
     __table_args__ = (
         CheckConstraint(
             "venue IN ('BINANCE','HYPERLIQUID','OKX','BYBIT')",
             name="ck_exchange_accounts_venue",
+        ),
+        CheckConstraint(
+            "environment IN ('TESTNET','LIVE')",
+            name="ck_exchange_accounts_environment",
         ),
         CheckConstraint(
             "connection_status IN ('UNCONFIGURED','NOT_VERIFIED','VERIFIED','FAILED','STALE')",
@@ -345,11 +261,18 @@ class ExchangeAccount(Base):
         ),
         UniqueConstraint(
             "team_id",
+            "environment",
             "account_id",
             "venue",
-            name="uq_exchange_accounts_team_account_venue",
+            name="uq_exchange_accounts_team_environment_account_venue",
         ),
         Index("ix_exchange_accounts_team_active", "team_id", "active"),
+        Index(
+            "ix_exchange_accounts_team_environment_active",
+            "team_id",
+            "environment",
+            "active",
+        ),
         Index(
             "ix_exchange_accounts_runtime_sync",
             "team_id",
@@ -366,6 +289,7 @@ class ExchangeAccount(Base):
     )
     account_id: Mapped[str] = mapped_column(String(120), nullable=False)
     venue: Mapped[str] = mapped_column(String(64), nullable=False)
+    environment: Mapped[str] = mapped_column(String(16), nullable=False, default="LIVE")
     label: Mapped[str] = mapped_column(String(120), nullable=False)
     registration_source: Mapped[str] = mapped_column(String(32), nullable=False)
     connection_status: Mapped[str] = mapped_column(String(32), nullable=False)
@@ -411,6 +335,10 @@ class ExchangeAccount(Base):
     updated_by: Mapped[UUID] = mapped_column(ForeignKey("users.user_id"), nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    deleted_by: Mapped[UUID | None] = mapped_column(
+        ForeignKey("users.user_id", ondelete="RESTRICT"), nullable=True
+    )
 
 
 class User(Base):
@@ -728,13 +656,24 @@ class NotificationRoute(Base):
             name="ck_notification_routes_channel",
         ),
         CheckConstraint(
+            "environment IN ('TESTNET','LIVE')",
+            name="ck_notification_routes_environment",
+        ),
+        CheckConstraint(
             "jsonb_typeof(event_types) = 'array'", name="ck_notification_routes_events"
         ),
         CheckConstraint("version >= 1", name="ck_notification_routes_version"),
         CheckConstraint(
             "credential_version >= 1", name="ck_notification_routes_credential_version"
         ),
-        UniqueConstraint("team_id", "name", name="uq_notification_routes_team_name"),
+        Index(
+            "uq_notification_routes_team_active_name",
+            "team_id",
+            "environment",
+            "name",
+            unique=True,
+            postgresql_where=text("deleted_at IS NULL"),
+        ),
         UniqueConstraint(
             "team_id", "notification_route_id", name="uq_notification_routes_team_identity"
         ),
@@ -748,6 +687,7 @@ class NotificationRoute(Base):
         ForeignKey("teams.team_id", ondelete="CASCADE"), nullable=False
     )
     name: Mapped[str] = mapped_column(String(120), nullable=False)
+    environment: Mapped[str] = mapped_column(String(16), nullable=False, default="LIVE")
     channel: Mapped[str] = mapped_column(String(16), nullable=False)
     event_types: Mapped[list[str]] = mapped_column(JSONB, nullable=False)
     enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
@@ -759,6 +699,10 @@ class NotificationRoute(Base):
     updated_by: Mapped[UUID] = mapped_column(ForeignKey("users.user_id"), nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    deleted_by: Mapped[UUID | None] = mapped_column(
+        ForeignKey("users.user_id", ondelete="RESTRICT"), nullable=True
+    )
 
 
 class NotificationDelivery(Base):
@@ -910,9 +854,7 @@ class Proposal(Base):
     __tablename__ = "proposals"
     __table_args__ = (
         CheckConstraint("source IN ('SYSTEM','MANUAL')", name="ck_proposals_source"),
-        CheckConstraint(
-            "environment IN ('SHADOW','TESTNET','LIVE')", name="ck_proposals_environment"
-        ),
+        CheckConstraint("environment IN ('TESTNET','LIVE')", name="ck_proposals_environment"),
         CheckConstraint("risk_tier IN ('LOW','MEDIUM','HIGH')", name="ck_proposals_risk_tier"),
         CheckConstraint("direction IN ('LONG','SHORT')", name="ck_proposals_direction"),
         CheckConstraint(
@@ -929,9 +871,10 @@ class Proposal(Base):
         Index("ix_proposals_team_status_expires", "team_id", "status", "expires_at"),
         UniqueConstraint("team_id", "proposal_id", name="uq_proposals_team_identity"),
         ForeignKeyConstraint(
-            ["team_id", "account_id", "venue"],
+            ["team_id", "environment", "account_id", "venue"],
             [
                 "exchange_accounts.team_id",
+                "exchange_accounts.environment",
                 "exchange_accounts.account_id",
                 "exchange_accounts.venue",
             ],
@@ -965,7 +908,7 @@ class Proposal(Base):
         ForeignKey("teams.team_id", ondelete="RESTRICT"), nullable=False
     )
     source: Mapped[str] = mapped_column(String(16), nullable=False)
-    environment: Mapped[str] = mapped_column(String(16), nullable=False, default="SHADOW")
+    environment: Mapped[str] = mapped_column(String(16), nullable=False, default="TESTNET")
     proposer_id: Mapped[UUID] = mapped_column(ForeignKey("users.user_id"), nullable=False)
     strategy_id: Mapped[str | None] = mapped_column(String(120), nullable=True)
     strategy_version: Mapped[str | None] = mapped_column(String(120), nullable=True)
@@ -1045,9 +988,10 @@ class RuntimeSourceHealth(Base):
     __tablename__ = "runtime_source_health"
     __table_args__ = (
         ForeignKeyConstraint(
-            ["team_id", "account_id", "venue"],
+            ["team_id", "environment", "account_id", "venue"],
             [
                 "exchange_accounts.team_id",
+                "exchange_accounts.environment",
                 "exchange_accounts.account_id",
                 "exchange_accounts.venue",
             ],
@@ -1057,6 +1001,7 @@ class RuntimeSourceHealth(Base):
         UniqueConstraint(
             "team_id",
             "source_name",
+            "environment",
             "account_id",
             "venue",
             name="uq_runtime_source_health_scope",
@@ -1080,6 +1025,12 @@ class RuntimeSourceHealth(Base):
             "('BINANCE','HYPERLIQUID','OKX','BYBIT'))",
             name="ck_runtime_source_health_account_scope",
         ),
+        CheckConstraint(
+            "(account_id IS NULL AND venue IS NULL AND environment IS NULL) OR "
+            "(account_id IS NOT NULL AND venue IS NOT NULL "
+            "AND environment IN ('TESTNET','LIVE'))",
+            name="ck_runtime_source_health_environment",
+        ),
         Index("ix_runtime_source_health_team_checked", "team_id", "checked_at"),
     )
 
@@ -1090,6 +1041,7 @@ class RuntimeSourceHealth(Base):
         ForeignKey("teams.team_id", ondelete="CASCADE"), nullable=False
     )
     source_name: Mapped[str] = mapped_column(String(64), nullable=False)
+    environment: Mapped[str | None] = mapped_column(String(16), nullable=True)
     account_id: Mapped[str | None] = mapped_column(String(120), nullable=True)
     venue: Mapped[str | None] = mapped_column(String(64), nullable=True)
     status: Mapped[str] = mapped_column(String(16), nullable=False)
@@ -1111,9 +1063,10 @@ class TransferProposal(Base):
             name="uq_transfer_proposals_team_identity",
         ),
         ForeignKeyConstraint(
-            ["team_id", "account_id", "venue"],
+            ["team_id", "environment", "account_id", "venue"],
             [
                 "exchange_accounts.team_id",
+                "exchange_accounts.environment",
                 "exchange_accounts.account_id",
                 "exchange_accounts.venue",
             ],
@@ -1121,7 +1074,7 @@ class TransferProposal(Base):
             ondelete="RESTRICT",
         ),
         CheckConstraint(
-            "environment IN ('SHADOW','TESTNET','LIVE')",
+            "environment IN ('TESTNET','LIVE')",
             name="ck_transfer_proposals_environment",
         ),
         CheckConstraint(
@@ -1256,7 +1209,7 @@ class TransferAuthorization(Base):
             name="uq_transfer_authorizations_proposal",
         ),
         CheckConstraint(
-            "environment IN ('SHADOW','TESTNET','LIVE')",
+            "environment IN ('TESTNET','LIVE')",
             name="ck_transfer_authorizations_environment",
         ),
         CheckConstraint(
@@ -1319,9 +1272,10 @@ class CapitalTransfer(Base):
             ondelete="RESTRICT",
         ),
         ForeignKeyConstraint(
-            ["team_id", "account_id", "venue"],
+            ["team_id", "environment", "account_id", "venue"],
             [
                 "exchange_accounts.team_id",
+                "exchange_accounts.environment",
                 "exchange_accounts.account_id",
                 "exchange_accounts.venue",
             ],
@@ -1425,10 +1379,15 @@ class DirectCapitalConfiguration(Base):
     __table_args__ = (
         UniqueConstraint(
             "team_id",
+            "environment",
             "version",
-            name="uq_direct_capital_configurations_version",
+            name="uq_direct_capital_configurations_environment_version",
         ),
         CheckConstraint("version >= 1", name="ck_direct_capital_configuration_version"),
+        CheckConstraint(
+            "environment = 'LIVE'",
+            name="ck_direct_capital_configuration_environment",
+        ),
         CheckConstraint("network = 'ARBITRUM'", name="ck_direct_capital_configuration_network"),
         CheckConstraint("asset = 'USDC'", name="ck_direct_capital_configuration_asset"),
         CheckConstraint(
@@ -1443,9 +1402,20 @@ class DirectCapitalConfiguration(Base):
             "max_fee IS NULL OR max_fee >= 0",
             name="ck_direct_capital_configuration_max_fee",
         ),
+        CheckConstraint(
+            "(vault_withdrawal_key_ciphertext IS NULL AND vault_withdrawal_key_version = 0) OR "
+            "(vault_withdrawal_key_ciphertext IS NOT NULL AND vault_withdrawal_key_version >= 1)",
+            name="ck_direct_capital_configuration_vault_key",
+        ),
+        CheckConstraint(
+            "(safe_withdrawal_key_ciphertext IS NULL AND safe_withdrawal_key_version = 0) OR "
+            "(safe_withdrawal_key_ciphertext IS NOT NULL AND safe_withdrawal_key_version >= 1)",
+            name="ck_direct_capital_configuration_safe_key",
+        ),
         Index(
             "uq_direct_capital_configuration_active",
             "team_id",
+            "environment",
             "active",
             unique=True,
             postgresql_where=text("active"),
@@ -1457,6 +1427,7 @@ class DirectCapitalConfiguration(Base):
         ForeignKey("teams.team_id", ondelete="RESTRICT"), nullable=False
     )
     version: Mapped[int] = mapped_column(Integer, nullable=False)
+    environment: Mapped[str] = mapped_column(String(16), nullable=False, default="LIVE")
     active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     network: Mapped[str] = mapped_column(String(64), nullable=False, default="ARBITRUM")
     asset: Mapped[str] = mapped_column(String(32), nullable=False, default="USDC")
@@ -1473,6 +1444,16 @@ class DirectCapitalConfiguration(Base):
     hyperliquid_bridge_address: Mapped[str | None] = mapped_column(String(42), nullable=True)
     safe_address: Mapped[str | None] = mapped_column(String(42), nullable=True)
     safe_delegate_address: Mapped[str | None] = mapped_column(String(42), nullable=True)
+    vault_withdrawal_key_ciphertext: Mapped[str | None] = mapped_column(Text, nullable=True)
+    vault_withdrawal_key_metadata: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, nullable=False, default=dict
+    )
+    vault_withdrawal_key_version: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    safe_withdrawal_key_ciphertext: Mapped[str | None] = mapped_column(Text, nullable=True)
+    safe_withdrawal_key_metadata: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, nullable=False, default=dict
+    )
+    safe_withdrawal_key_version: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     max_amount: Mapped[Decimal | None] = mapped_column(AMOUNT, nullable=True)
     max_fee: Mapped[Decimal | None] = mapped_column(AMOUNT, nullable=True)
     updated_by: Mapped[UUID] = mapped_column(ForeignKey("users.user_id"), nullable=False)
@@ -1483,15 +1464,17 @@ class DirectCapitalOperation(Base):
     __tablename__ = "direct_capital_operations"
     __table_args__ = (
         ForeignKeyConstraint(
-            ["team_id", "account_id", "venue"],
+            ["team_id", "environment", "account_id", "venue"],
             [
                 "exchange_accounts.team_id",
+                "exchange_accounts.environment",
                 "exchange_accounts.account_id",
                 "exchange_accounts.venue",
             ],
             name="fk_direct_capital_operations_team_exchange_account",
             ondelete="RESTRICT",
         ),
+        CheckConstraint("environment = 'LIVE'", name="ck_direct_capital_operations_live"),
         CheckConstraint(
             "path IN ('VAULT_TO_BINANCE','VAULT_TO_HYPERLIQUID',"
             "'BINANCE_TO_VAULT','HYPERLIQUID_TO_VAULT')",
@@ -1529,6 +1512,9 @@ class DirectCapitalOperation(Base):
     team_id: Mapped[UUID] = mapped_column(
         ForeignKey("teams.team_id", ondelete="RESTRICT"), nullable=False
     )
+    environment: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="LIVE", server_default="LIVE"
+    )
     treasury_provider: Mapped[str] = mapped_column(
         String(32), nullable=False, default="NOTILT_VAULT"
     )
@@ -1562,9 +1548,10 @@ class CapitalAutomationPolicy(Base):
     __tablename__ = "capital_automation_policies"
     __table_args__ = (
         ForeignKeyConstraint(
-            ["team_id", "account_id", "venue"],
+            ["team_id", "environment", "account_id", "venue"],
             [
                 "exchange_accounts.team_id",
+                "exchange_accounts.environment",
                 "exchange_accounts.account_id",
                 "exchange_accounts.venue",
             ],
@@ -1580,7 +1567,7 @@ class CapitalAutomationPolicy(Base):
             name="uq_capital_automation_policies_scope",
         ),
         CheckConstraint(
-            "environment IN ('SHADOW','TESTNET')",
+            "environment IN ('TESTNET','LIVE')",
             name="ck_capital_automation_policies_environment",
         ),
         CheckConstraint(
@@ -1693,6 +1680,11 @@ class RiskControlChangeRequest(Base):
             "status IN ('PENDING_REVIEW','APPROVED','REJECTED','EXPIRED','EXECUTED')",
             name="ck_risk_control_change_requests_status",
         ),
+        CheckConstraint(
+            "change_type IN ('POLICY_UPDATE','DISABLE_AUTO_ADD','ENABLE_AUTO_ADD',"
+            "'PAUSE_NEW_RISK','RESUME_NEW_RISK')",
+            name="ck_risk_control_change_requests_change_type",
+        ),
         CheckConstraint("version >= 1", name="ck_risk_control_change_requests_version"),
         CheckConstraint(
             "source_policy_revision >= 1 AND source_auto_add_version >= 1",
@@ -1733,6 +1725,8 @@ class RiskControlChangeRequest(Base):
     )
     requester_id: Mapped[UUID] = mapped_column(ForeignKey("users.user_id"), nullable=False)
     status: Mapped[str] = mapped_column(String(32), nullable=False)
+    change_type: Mapped[str] = mapped_column(String(32), nullable=False, default="RESUME_NEW_RISK")
+    requested_policy: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
     version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
     reason: Mapped[str] = mapped_column(Text, nullable=False)
     restore_auto_add: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
@@ -1801,7 +1795,7 @@ class TradingAuthorization(Base):
         ),
         CheckConstraint("direction IN ('LONG','SHORT')", name="ck_authorizations_direction"),
         CheckConstraint(
-            "environment IN ('SHADOW','TESTNET','LIVE')",
+            "environment IN ('TESTNET','LIVE')",
             name="ck_authorizations_environment",
         ),
         CheckConstraint("quantity_limit > 0", name="ck_authorizations_quantity_positive"),
@@ -1853,9 +1847,7 @@ class Campaign(Base):
         UniqueConstraint("authorization_id", name="uq_campaigns_authorization"),
         UniqueConstraint("team_id", "campaign_id", name="uq_campaigns_team_identity"),
         CheckConstraint("direction IN ('LONG','SHORT')", name="ck_campaigns_direction"),
-        CheckConstraint(
-            "environment IN ('SHADOW','TESTNET','LIVE')", name="ck_campaigns_environment"
-        ),
+        CheckConstraint("environment IN ('TESTNET','LIVE')", name="ck_campaigns_environment"),
         CheckConstraint(
             "status IN ('OPENING','OPEN','REDUCING','CLOSING','CLOSED','UNKNOWN')",
             name="ck_campaigns_status",
@@ -2068,200 +2060,6 @@ class CommandReceipt(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
 
-class ShadowPosition(Base):
-    __tablename__ = "shadow_positions"
-    __table_args__ = (
-        CheckConstraint("generation >= 1", name="ck_shadow_positions_generation"),
-        CheckConstraint(
-            "average_entry_price >= 0 AND mark_price > 0",
-            name="ck_shadow_positions_prices",
-        ),
-        CheckConstraint(
-            "status IN ('OPEN','CLOSED','ARCHIVED')", name="ck_shadow_positions_status"
-        ),
-        CheckConstraint("version >= 1", name="ck_shadow_positions_version"),
-        UniqueConstraint(
-            "team_id",
-            "generation",
-            "shadow_instrument_id",
-            name="uq_shadow_positions_generation_instrument",
-        ),
-        ForeignKeyConstraint(
-            ["team_id", "source_account_id", "venue"],
-            [
-                "exchange_accounts.team_id",
-                "exchange_accounts.account_id",
-                "exchange_accounts.venue",
-            ],
-            name="fk_shadow_positions_exchange_account",
-            ondelete="RESTRICT",
-        ),
-        Index("ix_shadow_positions_active", "team_id", "generation", "status"),
-    )
-
-    shadow_position_id: Mapped[UUID] = mapped_column(
-        Uuid(as_uuid=True), primary_key=True, default=uuid4
-    )
-    shadow_account_id: Mapped[UUID] = mapped_column(
-        ForeignKey("team_shadow_accounts.shadow_account_id", ondelete="RESTRICT"),
-        nullable=False,
-    )
-    team_id: Mapped[UUID] = mapped_column(
-        ForeignKey("teams.team_id", ondelete="RESTRICT"), nullable=False
-    )
-    generation: Mapped[int] = mapped_column(Integer, nullable=False)
-    shadow_instrument_id: Mapped[UUID] = mapped_column(
-        ForeignKey("shadow_instruments.shadow_instrument_id", ondelete="RESTRICT"),
-        nullable=False,
-    )
-    source_account_id: Mapped[str] = mapped_column(String(120), nullable=False)
-    venue: Mapped[str] = mapped_column(String(64), nullable=False)
-    quantity: Mapped[Decimal] = mapped_column(AMOUNT, nullable=False)
-    average_entry_price: Mapped[Decimal] = mapped_column(AMOUNT, nullable=False)
-    mark_price: Mapped[Decimal] = mapped_column(AMOUNT, nullable=False)
-    realized_pnl: Mapped[Decimal] = mapped_column(AMOUNT, nullable=False)
-    unrealized_pnl: Mapped[Decimal] = mapped_column(AMOUNT, nullable=False)
-    status: Mapped[str] = mapped_column(String(16), nullable=False)
-    version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
-    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
-
-
-class ShadowOrder(Base):
-    __tablename__ = "shadow_orders"
-    __table_args__ = (
-        CheckConstraint("generation >= 1", name="ck_shadow_orders_generation"),
-        CheckConstraint("side IN ('BUY','SELL')", name="ck_shadow_orders_side"),
-        CheckConstraint(
-            "order_type IN ('MARKET','LIMIT','PROTECTION')", name="ck_shadow_orders_type"
-        ),
-        CheckConstraint(
-            "status IN ('OPEN','TRIGGERED','FILLED','CANCELLED','BLOCKED')",
-            name="ck_shadow_orders_status",
-        ),
-        CheckConstraint(
-            "quantity > 0 AND filled_quantity >= 0 AND filled_quantity <= quantity",
-            name="ck_shadow_orders_quantities",
-        ),
-        CheckConstraint("fee >= 0", name="ck_shadow_orders_fee"),
-        CheckConstraint(
-            "(order_type = 'LIMIT' AND limit_price IS NOT NULL AND limit_price > 0) OR "
-            "(order_type = 'MARKET' AND limit_price IS NULL) OR "
-            "(order_type = 'PROTECTION' AND trigger_price IS NOT NULL "
-            "AND trigger_type IN ('STOP_LOSS','TAKE_PROFIT') "
-            "AND execution_type IN ('MARKET','LIMIT') "
-            "AND ((execution_type = 'LIMIT' AND limit_price IS NOT NULL AND limit_price > 0) "
-            "OR (execution_type = 'MARKET' AND limit_price IS NULL)))",
-            name="ck_shadow_orders_shape",
-        ),
-        CheckConstraint(
-            "(order_type = 'PROTECTION' AND reduce_only) OR order_type <> 'PROTECTION'",
-            name="ck_shadow_orders_protection_reduce_only",
-        ),
-        CheckConstraint("version >= 1", name="ck_shadow_orders_version"),
-        ForeignKeyConstraint(
-            ["team_id", "source_account_id", "venue"],
-            [
-                "exchange_accounts.team_id",
-                "exchange_accounts.account_id",
-                "exchange_accounts.venue",
-            ],
-            name="fk_shadow_orders_exchange_account",
-            ondelete="RESTRICT",
-        ),
-        UniqueConstraint("order_intent_id", name="uq_shadow_orders_intent"),
-        UniqueConstraint(
-            "team_id", "generation", "idempotency_key", name="uq_shadow_orders_idempotency"
-        ),
-        Index("ix_shadow_orders_open", "team_id", "generation", "status"),
-    )
-
-    shadow_order_id: Mapped[UUID] = mapped_column(
-        Uuid(as_uuid=True), primary_key=True, default=uuid4
-    )
-    shadow_account_id: Mapped[UUID] = mapped_column(
-        ForeignKey("team_shadow_accounts.shadow_account_id", ondelete="RESTRICT"),
-        nullable=False,
-    )
-    team_id: Mapped[UUID] = mapped_column(
-        ForeignKey("teams.team_id", ondelete="RESTRICT"), nullable=False
-    )
-    generation: Mapped[int] = mapped_column(Integer, nullable=False)
-    shadow_instrument_id: Mapped[UUID] = mapped_column(
-        ForeignKey("shadow_instruments.shadow_instrument_id", ondelete="RESTRICT"),
-        nullable=False,
-    )
-    source_account_id: Mapped[str] = mapped_column(String(120), nullable=False)
-    venue: Mapped[str] = mapped_column(String(64), nullable=False)
-    campaign_id: Mapped[UUID | None] = mapped_column(
-        ForeignKey("campaigns.campaign_id", ondelete="SET NULL"), nullable=True
-    )
-    order_intent_id: Mapped[UUID | None] = mapped_column(
-        ForeignKey("order_intents.intent_id", ondelete="SET NULL"), nullable=True
-    )
-    shadow_position_id: Mapped[UUID | None] = mapped_column(
-        ForeignKey("shadow_positions.shadow_position_id", ondelete="SET NULL"), nullable=True
-    )
-    side: Mapped[str] = mapped_column(String(8), nullable=False)
-    order_type: Mapped[str] = mapped_column(String(16), nullable=False)
-    quantity: Mapped[Decimal] = mapped_column(AMOUNT, nullable=False)
-    limit_price: Mapped[Decimal | None] = mapped_column(AMOUNT, nullable=True)
-    trigger_price: Mapped[Decimal | None] = mapped_column(AMOUNT, nullable=True)
-    trigger_type: Mapped[str | None] = mapped_column(String(16), nullable=True)
-    execution_type: Mapped[str | None] = mapped_column(String(16), nullable=True)
-    reduce_only: Mapped[bool] = mapped_column(Boolean, nullable=False)
-    status: Mapped[str] = mapped_column(String(16), nullable=False)
-    filled_quantity: Mapped[Decimal] = mapped_column(AMOUNT, nullable=False)
-    fill_price: Mapped[Decimal | None] = mapped_column(AMOUNT, nullable=True)
-    fee: Mapped[Decimal] = mapped_column(AMOUNT, nullable=False)
-    realized_pnl: Mapped[Decimal] = mapped_column(AMOUNT, nullable=False)
-    correlation_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), nullable=False)
-    idempotency_key: Mapped[str] = mapped_column(String(160), nullable=False)
-    version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
-    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
-
-
-class ShadowFill(Base):
-    __tablename__ = "shadow_fills"
-    __table_args__ = (
-        CheckConstraint("generation >= 1", name="ck_shadow_fills_generation"),
-        CheckConstraint("side IN ('BUY','SELL')", name="ck_shadow_fills_side"),
-        CheckConstraint(
-            "quantity > 0 AND price > 0 AND notional > 0 AND fee >= 0",
-            name="ck_shadow_fills_amounts",
-        ),
-        UniqueConstraint("shadow_order_id", name="uq_shadow_fills_order"),
-        Index("ix_shadow_fills_team_time", "team_id", "generation", "executed_at"),
-    )
-
-    shadow_fill_id: Mapped[UUID] = mapped_column(
-        Uuid(as_uuid=True), primary_key=True, default=uuid4
-    )
-    shadow_order_id: Mapped[UUID] = mapped_column(
-        ForeignKey("shadow_orders.shadow_order_id", ondelete="RESTRICT"), nullable=False
-    )
-    shadow_account_id: Mapped[UUID] = mapped_column(
-        ForeignKey("team_shadow_accounts.shadow_account_id", ondelete="RESTRICT"),
-        nullable=False,
-    )
-    team_id: Mapped[UUID] = mapped_column(
-        ForeignKey("teams.team_id", ondelete="RESTRICT"), nullable=False
-    )
-    generation: Mapped[int] = mapped_column(Integer, nullable=False)
-    shadow_instrument_id: Mapped[UUID] = mapped_column(
-        ForeignKey("shadow_instruments.shadow_instrument_id", ondelete="RESTRICT"),
-        nullable=False,
-    )
-    side: Mapped[str] = mapped_column(String(8), nullable=False)
-    quantity: Mapped[Decimal] = mapped_column(AMOUNT, nullable=False)
-    price: Mapped[Decimal] = mapped_column(AMOUNT, nullable=False)
-    notional: Mapped[Decimal] = mapped_column(AMOUNT, nullable=False)
-    fee: Mapped[Decimal] = mapped_column(AMOUNT, nullable=False)
-    realized_pnl: Mapped[Decimal] = mapped_column(AMOUNT, nullable=False)
-    executed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
-
-
 class VenueOrder(Base):
     __tablename__ = "venue_orders"
     __table_args__ = (
@@ -2288,7 +2086,7 @@ class VenueOrder(Base):
             name="ck_venue_orders_status",
         ),
         CheckConstraint(
-            "environment IN ('SHADOW','TESTNET','LIVE')",
+            "environment IN ('TESTNET','LIVE')",
             name="ck_venue_orders_environment",
         ),
         CheckConstraint("ordered_quantity >= 0", name="ck_venue_orders_quantity_nonnegative"),
@@ -2302,9 +2100,10 @@ class VenueOrder(Base):
             "instrument_id",
         ),
         ForeignKeyConstraint(
-            ["team_id", "account_id", "venue"],
+            ["team_id", "environment", "account_id", "venue"],
             [
                 "exchange_accounts.team_id",
+                "exchange_accounts.environment",
                 "exchange_accounts.account_id",
                 "exchange_accounts.venue",
             ],
@@ -2350,7 +2149,7 @@ class VenueFill(Base):
             name="uq_venue_fills_external",
         ),
         CheckConstraint(
-            "environment IN ('SHADOW','TESTNET','LIVE')",
+            "environment IN ('TESTNET','LIVE')",
             name="ck_venue_fills_environment",
         ),
         CheckConstraint("side IN ('BUY','SELL')", name="ck_venue_fills_side"),
@@ -2368,9 +2167,10 @@ class VenueFill(Base):
             "instrument_id",
         ),
         ForeignKeyConstraint(
-            ["team_id", "account_id", "venue"],
+            ["team_id", "environment", "account_id", "venue"],
             [
                 "exchange_accounts.team_id",
+                "exchange_accounts.environment",
                 "exchange_accounts.account_id",
                 "exchange_accounts.venue",
             ],
@@ -2416,14 +2216,13 @@ class Position(Base):
             "instrument_id",
             name="uq_positions_scope",
         ),
-        CheckConstraint(
-            "environment IN ('SHADOW','TESTNET','LIVE')", name="ck_positions_environment"
-        ),
+        CheckConstraint("environment IN ('TESTNET','LIVE')", name="ck_positions_environment"),
         CheckConstraint("fact_status IN ('KNOWN','UNKNOWN')", name="ck_positions_fact_status"),
         ForeignKeyConstraint(
-            ["team_id", "account_id", "venue"],
+            ["team_id", "environment", "account_id", "venue"],
             [
                 "exchange_accounts.team_id",
+                "exchange_accounts.environment",
                 "exchange_accounts.account_id",
                 "exchange_accounts.venue",
             ],
@@ -2489,7 +2288,7 @@ class AccountEquity(Base):
             name="uq_account_equities_team_identity",
         ),
         CheckConstraint(
-            "environment IN ('SHADOW','TESTNET','LIVE')",
+            "environment IN ('TESTNET','LIVE')",
             name="ck_account_equities_environment",
         ),
         CheckConstraint("fact_status IN ('KNOWN','UNKNOWN')", name="ck_account_equities_status"),
@@ -2564,7 +2363,7 @@ class AccountEquityObservation(Base):
             name="uq_account_equity_observations_fact_time",
         ),
         CheckConstraint(
-            "environment IN ('SHADOW','TESTNET','LIVE')",
+            "environment IN ('TESTNET','LIVE')",
             name="ck_account_equity_observations_environment",
         ),
         CheckConstraint(
@@ -2633,7 +2432,7 @@ class FundingPayment(Base):
             name="uq_funding_payments_external",
         ),
         CheckConstraint(
-            "environment IN ('SHADOW','TESTNET','LIVE')",
+            "environment IN ('TESTNET','LIVE')",
             name="ck_funding_payments_environment",
         ),
         Index("ix_funding_payments_campaign_time", "campaign_id", "paid_at"),
@@ -2646,9 +2445,10 @@ class FundingPayment(Base):
             "instrument_id",
         ),
         ForeignKeyConstraint(
-            ["team_id", "account_id", "venue"],
+            ["team_id", "environment", "account_id", "venue"],
             [
                 "exchange_accounts.team_id",
+                "exchange_accounts.environment",
                 "exchange_accounts.account_id",
                 "exchange_accounts.venue",
             ],
@@ -2754,7 +2554,7 @@ class AuditEvent(Base):
         Index("ix_audit_events_team_created", "team_id", "created_at"),
         Index("ix_audit_events_api_client_created", "api_client_id", "created_at"),
         CheckConstraint(
-            "environment IS NULL OR environment IN ('SHADOW','TESTNET','LIVE')",
+            "environment IS NULL OR environment IN ('TESTNET','LIVE')",
             name="ck_audit_events_environment",
         ),
         CheckConstraint(

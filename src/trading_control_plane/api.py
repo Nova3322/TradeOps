@@ -505,8 +505,15 @@ def create_app(
             confirmation_timeout_seconds=(resolved_settings.freqtrade_confirmation_timeout_seconds),
         )
 
-    def effective_direct_capital_settings(user_id: UUID) -> tuple[Settings, dict[str, Any] | None]:
-        config = service().direct_capital_configuration(user_id)
+    def effective_direct_capital_settings(
+        user_id: UUID,
+        environment: str = "LIVE",
+    ) -> tuple[Settings, dict[str, Any] | None]:
+        config = service().direct_capital_configuration(
+            user_id,
+            environment,
+            include_sensitive_addresses=True,
+        )
         if config is None:
             return resolved_settings, None
         return (
@@ -555,10 +562,14 @@ def create_app(
             else resolved_settings.notilt_vaults.get(configured_chain_id)
         )
         selected_provider = direct_settings.capital_direct_treasury_provider
+        configured_notilt_address = (
+            direct_settings.capital_direct_vault_address or configured_vault
+        )
+        configured_safe_address = direct_settings.capital_direct_safe_address
         selected_treasury_account_id = (
-            direct_settings.capital_direct_safe_address
+            configured_safe_address
             if selected_provider == "SAFE_SPENDING_LIMIT"
-            else direct_settings.capital_direct_vault_address or configured_vault
+            else configured_notilt_address
         )
         safe_scope_ready = (
             direct_settings.safe_spending_enabled
@@ -569,7 +580,7 @@ def create_app(
         notilt_scope_ready = (
             direct_settings.notilt_enabled
             and direct_settings.notilt_agent_address is not None
-            and selected_treasury_account_id is not None
+            and configured_notilt_address is not None
         )
         selected_scope_ready = (
             safe_scope_ready if selected_provider == "SAFE_SPENDING_LIMIT" else notilt_scope_ready
@@ -631,7 +642,7 @@ def create_app(
         snapshot["net_worth"]["onchain_provider"] = selected_provider
         snapshot["net_worth"]["onchain_probe"] = onchain_probe
         snapshot["direct_configuration"] = {
-            "single_account_mode": True,
+            "single_account_mode": False,
             "source": "VERSIONED_DATABASE" if saved_config is not None else "ENVIRONMENT",
             "version": None if saved_config is None else saved_config["version"],
             "effective_at": None if saved_config is None else saved_config["effective_at"],
@@ -642,6 +653,14 @@ def create_app(
             "asset": direct_settings.capital_direct_asset,
             "network": direct_settings.capital_direct_network,
             "treasury_provider": direct_settings.capital_direct_treasury_provider,
+            "configured_providers": [
+                provider
+                for provider, configured in (
+                    ("NOTILT_VAULT", configured_notilt_address is not None),
+                    ("SAFE_SPENDING_LIMIT", configured_safe_address is not None),
+                )
+                if configured
+            ],
             "selected_onchain_account_configured": selected_treasury_account_id is not None,
             "vault_id_configured": direct_settings.capital_direct_vault_id is not None,
             "vault_address_configured": (direct_settings.capital_direct_vault_address is not None),
@@ -674,7 +693,7 @@ def create_app(
             "notilt_sdk_available": resolved_notilt.available,
             "notilt_scope_configured": (
                 resolved_settings.notilt_enabled
-                and configured_vault is not None
+                and configured_notilt_address is not None
                 and resolved_settings.notilt_agent_address is not None
             ),
             "safe_spending_enabled": direct_settings.safe_spending_enabled,
@@ -834,7 +853,7 @@ def create_app(
     identity_dependency = Depends(current_identity)
 
     def notify_reviewers(
-        proposal_id: UUID, proposal_version: int, environment: str = "SHADOW"
+        proposal_id: UUID, proposal_version: int, environment: str = "TESTNET"
     ) -> None:
         for reviewer in queries().reviewers_for_proposal(proposal_id):
             detail = queries().proposal_detail(reviewer.user_id, proposal_id)
@@ -920,17 +939,6 @@ def create_app(
 
     def current_perptape_candidates(*, user_id: UUID, now: datetime) -> list[PerptapeCandidate]:
         runtime = service().perptape_source_runtime(user_id)
-        team_api_key = runtime["api_key"]
-        if team_api_key is not None:
-            cache_key = (UUID(str(runtime["signal_source_id"])), int(runtime["version"]))
-            client = team_perptape_clients.get(cache_key)
-            if client is None:
-                client = resolved_perptape.with_api_key(str(team_api_key))
-                for stale_key in tuple(team_perptape_clients):
-                    if stale_key[0] == cache_key[0]:
-                        team_perptape_clients.pop(stale_key, None)
-                team_perptape_clients[cache_key] = client
-            return client.list_candidates(now=now)
         if resolved_settings.runtime_sync_enabled:
             feed = queries().perptape_feed(user_id)
             if feed is None:
@@ -954,6 +962,17 @@ def create_app(
                     "runtime Perptape feed is stale or uses another contract version",
                 )
             return list(feed.candidates)
+        team_api_key = runtime["api_key"]
+        if team_api_key is not None:
+            cache_key = (UUID(str(runtime["signal_source_id"])), int(runtime["version"]))
+            client = team_perptape_clients.get(cache_key)
+            if client is None:
+                client = resolved_perptape.with_api_key(str(team_api_key))
+                for stale_key in tuple(team_perptape_clients):
+                    if stale_key[0] == cache_key[0]:
+                        team_perptape_clients.pop(stale_key, None)
+                team_perptape_clients[cache_key] = client
+            return client.list_candidates(now=now)
         return resolved_perptape.list_candidates(now=now)
 
     def current_perptape_candidate(
@@ -1067,7 +1086,7 @@ def create_app(
         event_type: str,
         event_key: str,
         summary: str,
-        environment: str = "SHADOW",
+        environment: str = "TESTNET",
     ) -> None:
         detail = queries().campaign_detail(recipient_id, campaign_id)
         campaign_version = int(detail["target_version"])
@@ -1106,16 +1125,11 @@ def create_app(
             )
 
     def require_binance_testnet() -> None:
-        if resolved_settings.execution_backend != "DIRECT_LEGACY":
-            raise DomainRejected(
-                "DIRECT_EXECUTION_RETIRED",
-                "direct Binance sending is retired; execution belongs to the Freqtrade worker",
-            )
         if not resolved_settings.binance_testnet_order_send_enabled:
             raise DomainRejected(
                 "BINANCE_TESTNET_DISABLED", "Binance testnet order send is explicitly disabled"
             )
-        if not resolved_binance_testnet.configured:
+        if binance_testnet_client is not None and not resolved_binance_testnet.configured:
             raise DomainRejected(
                 "BINANCE_TESTNET_NOT_CONFIGURED", "Binance testnet credentials are not configured"
             )
@@ -1138,17 +1152,12 @@ def create_app(
             )
 
     def require_hyperliquid_testnet() -> None:
-        if resolved_settings.execution_backend != "DIRECT_LEGACY":
-            raise DomainRejected(
-                "DIRECT_EXECUTION_RETIRED",
-                "direct Hyperliquid sending is retired; execution belongs to the Freqtrade worker",
-            )
         if not resolved_settings.hyperliquid_testnet_order_send_enabled:
             raise DomainRejected(
                 "HYPERLIQUID_TESTNET_DISABLED",
                 "Hyperliquid Core testnet order send is explicitly disabled",
             )
-        if not resolved_hyperliquid_testnet.configured:
+        if hyperliquid_testnet_client is not None and not resolved_hyperliquid_testnet.configured:
             raise DomainRejected(
                 "HYPERLIQUID_TESTNET_NOT_CONFIGURED",
                 "Hyperliquid testnet account and injected signer are not configured",
@@ -1484,10 +1493,12 @@ def create_app(
             require_hyperliquid_testnet=require_hyperliquid_testnet,
             binance_live=resolved_binance_live,
             binance_testnet=resolved_binance_testnet,
+            binance_testnet_uses_database_credentials=(binance_testnet_client is None),
             freqtrade_workers=resolved_freqtrade_workers,
             hyperliquid=resolved_hyperliquid,
             hyperliquid_live=resolved_hyperliquid_live,
             hyperliquid_testnet=resolved_hyperliquid_testnet,
+            hyperliquid_testnet_uses_database_credentials=(hyperliquid_testnet_client is None),
             notilt=resolved_notilt,
             telegram=resolved_telegram,
             unknown_hyperliquid_protection=unknown_hyperliquid_protection,
@@ -1543,19 +1554,13 @@ def create_app(
                 media_type="text/markdown; charset=utf-8",
             )
 
-        @app.get("/admin/users", include_in_schema=False)
-        def managed_users_web(
-            identity: SessionIdentity = identity_dependency,
-        ) -> FileResponse:
-            require_capability(identity, "access.manage")
-            return FileResponse(WEB_ROOT / "index.html")
-
         @app.get("/", include_in_schema=False)
         @app.get("/home", include_in_schema=False)
         @app.get("/workspaces", include_in_schema=False)
         @app.get("/profile/api-keys", include_in_schema=False)
         @app.get("/profile/api-access", include_in_schema=False)
         @app.get("/admin/agents", include_in_schema=False)
+        @app.get("/admin/users", include_in_schema=False)
         @app.get("/opportunities", include_in_schema=False)
         @app.get("/webhook-signals", include_in_schema=False)
         @app.get("/signals", include_in_schema=False)
@@ -1572,8 +1577,9 @@ def create_app(
         @app.get("/capital", include_in_schema=False)
         @app.get("/results", include_in_schema=False)
         @app.get("/notifications", include_in_schema=False)
+        @app.get("/accounts", include_in_schema=False)
+        @app.get("/team-settings", include_in_schema=False)
         @app.get("/trading-mode", include_in_schema=False)
-        @app.get("/shadow", include_in_schema=False)
         @app.get("/venues", include_in_schema=False)
         @app.get("/venues/binance", include_in_schema=False)
         @app.get("/venues/hyperliquid", include_in_schema=False)
