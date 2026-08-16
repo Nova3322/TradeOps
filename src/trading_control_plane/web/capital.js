@@ -469,8 +469,8 @@ function renderDirectCapitalConfigurationEditor(directConfiguration, selectedTre
       <p class="provider-guidance" data-provider-guidance></p>
       <div class="capital-provider-config-grid"><section class="capital-config-section" data-provider-fields="NOTILT_VAULT"><div class="capital-config-heading"><div><h3>NoTilt Vault 配置</h3><p>填写 NoTilt 金库编号和金库地址。</p></div><span data-provider-role>已接入备用</span></div><div class="field-grid"><label>NoTilt 金库编号<input name="vault_id" autocomplete="off" placeholder="${configuredPlaceholder(directConfiguration.vault_id_configured)}"></label><label>NoTilt 金库地址<input name="vault_address" autocomplete="off" placeholder="${configuredPlaceholder(directConfiguration.vault_address_configured)}"></label></div></section>
       <section class="capital-config-section" data-provider-fields="SAFE_SPENDING_LIMIT"><div class="capital-config-heading"><div><h3>Safe Spending Limits 配置</h3><p>填写公开的 Safe Smart Account 与 delegate 地址。</p></div><span data-provider-role>已接入备用</span></div><div class="field-grid"><label>Safe Smart Account<input name="safe_address" autocomplete="off" placeholder="${configuredPlaceholder(directConfiguration.safe_address_configured)}"></label><label>Safe Spending Limit delegate<input name="safe_delegate_address" autocomplete="off" placeholder="${configuredPlaceholder(directConfiguration.safe_delegate_configured)}"></label></div></section></div>
-      <section class="capital-config-section common-capital-fields"><h3>2. 共用账户与安全边界</h3><p>两种链上金库共用币安、Hyperliquid、自有地址和金额限制；新操作只引用当前使用的金库。</p><div class="field-grid"><label>授权自有 Arbitrum 地址<input name="owned_arbitrum_address" autocomplete="off" placeholder="${configuredPlaceholder(directConfiguration.owned_arbitrum_address_configured)}"></label><label>币安默认账户<input name="binance_account_id" autocomplete="off" placeholder="${configuredPlaceholder(directConfiguration.binance_account_configured)}"></label><label>币安白名单入金地址<input name="binance_deposit_address" autocomplete="off" placeholder="${configuredPlaceholder(directConfiguration.binance_whitelist_destination_configured)}"></label><label>币安受限提现地址<input name="binance_withdrawal_address" autocomplete="off" placeholder="${configuredPlaceholder(directConfiguration.binance_withdrawal_destination_configured)}"></label><label>Hyperliquid 默认账户<input name="hyperliquid_account_id" autocomplete="off" placeholder="${configuredPlaceholder(directConfiguration.hyperliquid_account_configured)}"></label><label>Hyperliquid Bridge 地址<input name="hyperliquid_bridge_address" autocomplete="off" placeholder="${configuredPlaceholder(directConfiguration.hyperliquid_contract_configured)}"></label><label>单次金额上限（USDC）<input name="max_amount" type="number" step="any" min="0.000001" placeholder="留空保持当前值"></label><label>最大费用上限（USDC）<input name="max_fee" type="number" step="any" min="0" placeholder="留空保持当前值"></label></div></section>
-      <div class="form-error" role="alert"></div><div class="form-actions"><button class="primary">保存配置并切换当前金库</button></div>
+      <section class="capital-config-section common-capital-fields"><h3>2. 共用账户与安全边界</h3><p>两种链上金库共用币安、Hyperliquid、自有地址和金额限制；新操作只引用当前使用的金库。</p><div class="field-grid"><label>授权自有 Arbitrum 地址<input name="owned_arbitrum_address" autocomplete="off" placeholder="${configuredPlaceholder(directConfiguration.owned_arbitrum_address_configured)}"></label><label>币安默认账户<input name="binance_account_id" autocomplete="off" placeholder="${configuredPlaceholder(directConfiguration.binance_account_configured)}"></label><label>币安白名单入金地址<input name="binance_deposit_address" autocomplete="off" placeholder="${configuredPlaceholder(directConfiguration.binance_whitelist_destination_configured)}"></label><label>币安受限提现地址<input name="binance_withdrawal_address" autocomplete="off" placeholder="${configuredPlaceholder(directConfiguration.binance_withdrawal_destination_configured)}"><small data-withdrawal-scope-help></small></label><label>Hyperliquid 默认账户<input name="hyperliquid_account_id" autocomplete="off" placeholder="${configuredPlaceholder(directConfiguration.hyperliquid_account_configured)}"></label><label>Hyperliquid Bridge 地址<input name="hyperliquid_bridge_address" autocomplete="off" placeholder="${configuredPlaceholder(directConfiguration.hyperliquid_contract_configured)}"></label><label>单次金额上限（USDC）<input name="max_amount" type="number" step="any" min="0.000001" placeholder="留空保持当前值"></label><label>最大费用上限（USDC）<input name="max_fee" type="number" step="any" min="0" placeholder="留空保持当前值"><small>必须低于单次金额上限</small></label></div></section>
+      <div class="form-error" role="alert" tabindex="-1"></div><div class="form-actions"><button class="primary">保存配置并切换当前金库</button></div>
     </form>
   </details>`;
 }
@@ -865,6 +865,10 @@ function bindCapitalActions() {
     });
     const guidance = directCapitalConfigForm.querySelector('[data-provider-guidance]');
     if (guidance) guidance.textContent = `当前使用 ${provider === 'SAFE_SPENDING_LIMIT' ? 'Safe Spending Limits' : 'NoTilt Vault'}；NoTilt 与 Safe 的配置都会独立保存，未选中的金库不会参与新建资金操作。`;
+    const withdrawalScopeHelp = directCapitalConfigForm.querySelector('[data-withdrawal-scope-help]');
+    if (withdrawalScopeHelp) withdrawalScopeHelp.textContent = localizedText(provider === 'SAFE_SPENDING_LIMIT'
+      ? '必须与当前 Safe Smart Account 完全一致'
+      : '必须与当前 NoTilt 金库地址完全一致');
     const boundary = document.querySelector('[data-provider-boundary]');
     if (boundary) boundary.innerHTML = `<b>当前使用：${provider === 'SAFE_SPENDING_LIMIT' ? 'Safe Spending Limits' : 'NoTilt Vault'}。</b> 两种金库可同时保持接入；每条新路径只冻结当前金库，并重新校验地址、网络、资产、额度、实时状态与安全开关，且不在服务内签名或广播。`;
   };
@@ -874,6 +878,26 @@ function bindCapitalActions() {
     event.preventDefault();
     const form = event.currentTarget;
     const values = Object.fromEntries([...new FormData(form).entries()].filter(([, value]) => String(value).trim()));
+    const errorBox = form.querySelector('.form-error');
+    errorBox.textContent = '';
+    const maxAmount = values.max_amount === undefined ? null : Number(values.max_amount);
+    const maxFee = values.max_fee === undefined ? null : Number(values.max_fee);
+    if (maxAmount !== null && maxFee !== null && maxFee >= maxAmount) {
+      errorBox.textContent = localizedText('最大费用上限必须低于单次金额上限，请调整后重新保存。');
+      errorBox.focus();
+      return;
+    }
+    const selectedTreasuryAddress = values.treasury_provider === 'SAFE_SPENDING_LIMIT'
+      ? values.safe_address
+      : values.vault_address;
+    if (selectedTreasuryAddress && values.binance_withdrawal_address
+      && String(selectedTreasuryAddress).toLowerCase() !== String(values.binance_withdrawal_address).toLowerCase()) {
+      errorBox.textContent = localizedText(values.treasury_provider === 'SAFE_SPENDING_LIMIT'
+        ? '币安受限提现地址必须与当前 Safe Smart Account 完全一致，请核对后重新保存。'
+        : '币安受限提现地址必须与当前 NoTilt 金库地址完全一致，请核对后重新保存。');
+      errorBox.focus();
+      return;
+    }
     values.network = 'ARBITRUM'; values.asset = 'USDC'; values.idempotency_key = crypto.randomUUID();
     const confirmed = await confirmAction({title:'保存新的资金路径配置版本？', message:'系统只保存公开账户范围、地址和额度，不接收任何密钥或签名材料。新版本只影响之后创建的资金操作；现有操作继续使用冻结引用。', confirmLabel:'确认保存配置'});
     if (!confirmed) return;
@@ -882,7 +906,7 @@ function bindCapitalActions() {
         await api('/api/capital/direct-configuration', {method:'PUT', body:JSON.stringify(values)});
         showToast('资金路径配置新版本已保存并写入审计');
         await route();
-      } catch (error) { showApiError(error, form.querySelector('.form-error')); }
+      } catch (error) { showApiError(error, errorBox); errorBox.focus(); }
     });
   });
   const directCapitalDialog = document.querySelector('#direct-capital-dialog');

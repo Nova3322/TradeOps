@@ -167,7 +167,7 @@ class DirectOperationCapitalService(ServiceComponent):
             _reject("CAPITAL_CONFIGURATION_INVALID", "maximum fee cannot be negative")
         if max_amount is not None and max_fee is not None and max_fee >= max_amount:
             _reject(
-                "CAPITAL_CONFIGURATION_INVALID",
+                "CAPITAL_CONFIGURATION_FEE_LIMIT_INVALID",
                 "maximum fee must be lower than maximum amount",
             )
         selected_treasury_address = (
