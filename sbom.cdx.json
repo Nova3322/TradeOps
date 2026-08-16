@@ -2,7 +2,7 @@
   "$schema": "http://cyclonedx.org/schema/bom-1.5.schema.json",
   "bomFormat": "CycloneDX",
   "specVersion": "1.5",
-  "serialNumber": "urn:uuid:afae8a96-543b-5528-bd19-638a57cf0bb4",
+  "serialNumber": "urn:uuid:c12540ec-e782-5b00-b50b-9c39d784a4a3",
   "version": 1,
   "metadata": {
     "component": {
@@ -19,7 +19,7 @@
     "properties": [
       {
         "name": "tradingops:lock-sha256",
-        "value": "3cc3304f28c11c9c095e0b794863165559162f348aeca9151cfc8e45dc0ca805"
+        "value": "477333952ec576af101c0567d63a5796b55a400d85f53cf42a2c111d7d71f55d"
       },
       {
         "name": "tradingops:generation",

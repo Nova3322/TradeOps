@@ -1,4 +1,4 @@
-# TradingOPS API Key 快速接入
+# TradeOps API Key 快速接入
 
 完整接口合同以运行中的 [`/openapi.json`](/openapi.json) 为唯一真源。
 

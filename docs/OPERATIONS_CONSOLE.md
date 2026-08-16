@@ -1,7 +1,7 @@
 # Operations console behavior
 
 This document records the current page ownership and safety behavior implemented
-by the local TradingOPS console. The running `/openapi.json` remains the complete
+by the local TradeOps console. The running `/openapi.json` remains the complete
 API contract; this guide describes how the product exposes that contract.
 
 ## Execution mode

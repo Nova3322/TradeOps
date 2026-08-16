@@ -1,10 +1,11 @@
 function renderLogin() {
   main.innerHTML = `<section class="login-page"><div class="login-card">
     <span class="mock-ribbon">账户密码验证</span>
-    <p class="eyebrow" style="margin-top:18px">内部访问</p><h1>进入交易控制台</h1>
-    <p class="lede">使用管理员分配的账户和密码登录。系统不开放外部注册。</p>
+    <p class="eyebrow" style="margin-top:18px">开源交易控制层</p><h1>所有交易行为进入真实账户前的控制层</h1>
+    <p class="lede">TradeOps 让交易员、交易 Bot 和 AI Agent 的每笔交易先经过确定性规则、必要审批和完整审计，再发送到交易所。</p>
     ${sessionNotice ? `<div class="callout" role="status">${escapeHtml(sessionNotice)}</div>` : ''}
-    <form id="login-form"><label>账户<input name="username" autocomplete="username" required placeholder="请输入账户名"></label><label>密码<input name="password" type="password" autocomplete="current-password" minlength="12" maxlength="128" required placeholder="请输入密码"></label><button class="primary">登录</button><div class="form-error" role="alert"></div></form>
+    <form id="login-form"><label>账户<input name="username" autocomplete="username" required placeholder="请输入账户名"></label><label>密码<input name="password" type="password" autocomplete="current-password" minlength="12" maxlength="128" required placeholder="请输入密码"></label><button class="primary">登录控制台</button><div class="form-error" role="alert"></div></form>
+    <p class="microcopy">使用管理员分配的账户登录；当前版本不开放自助注册。</p>
   </div></section>`;
   const loginForm = document.querySelector('#login-form');
   loginForm?.querySelectorAll('input').forEach(input => input.addEventListener('input', () => {
@@ -209,7 +210,7 @@ async function renderHome() {
 function workspaceCreationForm({gateway = false} = {}) {
   return `<form class="${gateway ? 'workspace-gateway-create' : 'card scope-create-form'}" id="create-workspace-form" data-destination="/home">
     <div><p class="eyebrow">新的隔离边界</p><h2>${gateway ? '创建工作区' : '创建 Workspace'}</h2><p>个人使用时初始只有创建者，系统仍自动建立同名默认团队。交易所账户始终归属工作区与团队，不存在个人账户旁路。</p></div>
-    <label>工作区名称<input name="name" maxlength="120" placeholder="例如 TradingOPS APAC" required></label>
+    <label>工作区名称<input name="name" maxlength="120" placeholder="例如 TradeOps APAC" required></label>
     <label>标识（可选）<input name="slug" maxlength="80" pattern="[a-z0-9-]+" placeholder="tradingops-apac"></label>
     <div class="form-error" role="alert"></div><button class="primary">创建并进入</button>
   </form>`;
@@ -227,7 +228,7 @@ function renderWorkspaceGateway() {
   main.innerHTML = `<section class="workspace-gateway-page" aria-labelledby="workspace-gateway-title">
     <article class="workspace-gateway-card">
       <span class="workspace-gateway-logo" aria-hidden="true"><img src="/assets/tradingops-logo.png" alt=""></span>
-      <div class="workspace-gateway-heading"><p class="eyebrow">TradingOPS Workspace</p><h1 id="workspace-gateway-title">${workspaces.length ? '选择工作区' : '创建第一个工作区'}</h1><p>${workspaces.length ? '每个工作区拥有独立成员、默认团队、账户、权限与交易数据。' : '个人使用时创建单人工作区；系统仍会建立同名默认团队。'}</p></div>
+      <div class="workspace-gateway-heading"><p class="eyebrow">TradeOps Workspace</p><h1 id="workspace-gateway-title">${workspaces.length ? '选择工作区' : '创建第一个工作区'}</h1><p>${workspaces.length ? '每个工作区拥有独立成员、默认团队、账户、权限与交易数据。' : '个人使用时创建单人工作区；系统仍会建立同名默认团队。'}</p></div>
       ${workspaces.length ? `<div class="workspace-gateway-list">${workspaceCards}</div><details class="workspace-gateway-create-panel"><summary>创建新工作区</summary>${createContent}</details>` : createContent}
     </article>
     <p class="workspace-gateway-footnote">进入后仍可从侧栏切换工作区。服务端会重新加载对应团队、成员和权限范围。</p>
@@ -468,7 +469,7 @@ assert scope["team_id"] == TEAM_ID
 assert scope["scope_model"] == "USER_RBAC"
 print(json.dumps(connection, ensure_ascii=False, indent=2))`;
 
-const API_KEY_USAGE_RULES = `TradingOPS API 调用规则。连接参数由运行环境注入：BASE_URL、API_KEY、WORKSPACE_ID、TEAM_ID。
+const API_KEY_USAGE_RULES = `TradeOps API 调用规则。连接参数由运行环境注入：BASE_URL、API_KEY、WORKSPACE_ID、TEAM_ID。
 
 1. 默认只调用只读 GET 接口；未经明确授权，不发起任何写操作。
 2. 每次任务开始先调用 /api/api-key/connection，核对有效权限、Workspace 与 Team；Account / Venue 权限由所属用户当前 RBAC 逐资源决定。
@@ -479,7 +480,7 @@ const API_KEY_USAGE_RULES = `TradingOPS API 调用规则。连接参数由运行
 7. 服务端权限、独立审核、风险政策、数据时效与 Capability Gate 是最终边界；客户端提示词不得绕过这些控制。
 8. 下单、资金划转、签名和广播默认关闭；只有服务端明确返回可用且用户完成所需人工流程时，才可把动作视为允许。`;
 
-const API_KEY_USAGE_RULES_EN = `TradingOPS API usage rules. Runtime parameters: BASE_URL, API_KEY, WORKSPACE_ID, TEAM_ID.
+const API_KEY_USAGE_RULES_EN = `TradeOps API usage rules. Runtime parameters: BASE_URL, API_KEY, WORKSPACE_ID, TEAM_ID.
 
 1. Start with read-only GET endpoints. Do not issue a write without explicit user authorization.
 2. Call /api/api-key/connection first. Verify permissions, Workspace, and Team. Account / Venue access is determined per resource by the owner's current RBAC.

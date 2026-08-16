@@ -1,4 +1,4 @@
-# TradingOPS API Key quickstart
+# TradeOps API Key quickstart
 
 The running [`/openapi.json`](/openapi.json) document is the complete API
 contract. This guide covers authentication and safety semantics.

@@ -1,18 +1,18 @@
 # Architecture and safety boundary
 
-TradingOPS sits between strategy engines and real execution. Strategies produce
-candidate intent; TradingOPS turns permitted intent into frozen, reviewable,
-auditable operations; execution adapters perform only explicitly authorized
-side effects.
+TradeOps is the control layer between traders, trading bots, strategy programs,
+AI agents, and exchange accounts. Those actors submit candidate intent; TradeOps
+turns permitted intent into frozen, reviewable, auditable operations; execution
+adapters perform only explicitly authorized side effects.
 
 ```text
-strategy / signal engines
+trader / trading bot / strategy program / AI agent
           |
           v
 source + freshness validation
           |
           v
-frozen proposal -> independent review -> risk and scope gates
+frozen proposal -> deterministic policy -> approve / review / reject
           |                                  |
           | rejected / expired               | authorized
           v                                  v
@@ -32,6 +32,9 @@ audit trail                         idempotent execution adapter
 - Workspace and Team membership is checked server-side. Account and Venue scope
   cannot be widened by client parameters.
 - The proposer and reviewer are independent subjects; self-review is rejected.
+- Trader, Reviewer, Risk Manager, and Administrator are distinct human
+  responsibilities. Administrative scope does not create an implicit risk,
+  review, or execution bypass.
 - Requests that may create external effects require durable idempotency and
   explicit handling of unknown outcomes.
 - Runtime execution facts and side effects are isolated between TESTNET and
@@ -40,6 +43,18 @@ audit trail                         idempotent execution adapter
   services, routes, and database head.
 - Missing, stale, lost, or rate-limited data blocks unsafe claims and actions.
 - Client UI, API prompts, and Agent role names never override server policy.
+- Deterministic services make policy decisions. Humans, bots, strategy programs,
+  and AI agents submit intent, but none decides whether server policy or required
+  approval can be skipped.
+
+## Deployment boundary
+
+- The application is self-hostable. Exchange credentials are encrypted at rest
+  and are not returned after submission; trading adapters do not need withdrawal
+  permission.
+- This repository does not currently package a separate Local Execution Agent
+  with hard limits that a remote control plane is technically unable to bypass.
+  That architecture must not be presented as an available guarantee.
 
 ## Mode and account boundary
 
