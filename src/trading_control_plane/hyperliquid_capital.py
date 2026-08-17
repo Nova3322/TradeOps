@@ -253,6 +253,39 @@ class HyperliquidCapitalGateway:
             "broadcast": False,
         }
 
+    def prepare_arbitrum_usdc_transfer(
+        self,
+        *,
+        sender: str,
+        destination: str,
+        amount: str | Decimal,
+        now: datetime,
+    ) -> JsonObject:
+        """Build one exact native-USDC transfer for an independent browser wallet."""
+
+        source = _address(sender, "authorized Arbitrum sender")
+        target = _address(destination, "authorized Arbitrum destination")
+        value = _amount(amount)
+        raw = _raw_usdc(value)
+        return {
+            "kind": "ARBITRUM_USDC_UNSIGNED_TRANSACTION",
+            "chainId": ARBITRUM_CHAIN_ID,
+            "network": "ARBITRUM",
+            "from": source,
+            "to": ARBITRUM_NATIVE_USDC_ADDRESS,
+            "token": ARBITRUM_NATIVE_USDC_ADDRESS,
+            "recipient": target,
+            "method": "ERC20.transfer",
+            "amount": str(value),
+            "amountRaw": str(raw),
+            "value": "0",
+            "data": _erc20_transfer_data(target, raw),
+            "preparedAt": now.astimezone(UTC).isoformat(),
+            "expiresAt": (now + timedelta(minutes=5)).astimezone(UTC).isoformat(),
+            "signing": False,
+            "broadcast": False,
+        }
+
     def prepare_withdrawal(
         self,
         *,

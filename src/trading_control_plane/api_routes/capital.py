@@ -625,6 +625,26 @@ class _CapitalRoutes:
                         "deposit receipt does not match path",
                     )
                 assert payload.transaction_hash is not None
+                submission_code = (
+                    "NOTILT_DESTINATION_TRANSFER_SUBMITTED_BY_HUMAN_WALLET"
+                    if context["treasury_provider"] == "NOTILT_VAULT"
+                    else "TREASURY_WITHDRAWAL_SUBMITTED_BY_HUMAN_WALLET"
+                )
+                submitted = next(
+                    (
+                        stage
+                        for stage in reversed(context["stages"])
+                        if stage.get("code") == submission_code
+                    ),
+                    None,
+                )
+                if submitted is None or str(
+                    submitted.get("transaction_hash", "")
+                ).lower() != payload.transaction_hash.lower():
+                    raise DomainRejected(
+                        "BINANCE_CAPITAL_RECEIPT_REFERENCE_MISMATCH",
+                        "Binance deposit receipt does not match the wallet-submitted transfer",
+                    )
                 destination = direct_settings.capital_direct_binance_deposit_address
                 if destination is None:
                     raise DomainRejected(
@@ -736,6 +756,14 @@ class _CapitalRoutes:
                 DirectCapitalPath.VAULT_TO_BINANCE,
                 DirectCapitalPath.VAULT_TO_HYPERLIQUID,
             }:
+                if (
+                    path is DirectCapitalPath.VAULT_TO_HYPERLIQUID
+                    and str(context["destination_reference"]).lower() != agent.lower()
+                ):
+                    raise DomainRejected(
+                        "NOTILT_AGENT_DESTINATION_MISMATCH",
+                        "NoTilt agent must equal the authorized Hyperliquid funding wallet",
+                    )
                 max_fact_age_seconds = int(
                     self.capital_snapshot(identity.user_id)["net_worth"]["max_fact_age_seconds"]
                 )
@@ -798,6 +826,15 @@ class _CapitalRoutes:
                 expected_version=payload.expected_version,
                 final_confirmed=payload.final_confirmed,
                 transactions=transactions,
+                wallet_address=(
+                    agent
+                    if path
+                    in {
+                        DirectCapitalPath.VAULT_TO_BINANCE,
+                        DirectCapitalPath.VAULT_TO_HYPERLIQUID,
+                    }
+                    else str(context["source_reference"])
+                ),
                 idempotency_key=payload.idempotency_key,
                 now=now,
             )
@@ -812,10 +849,265 @@ class _CapitalRoutes:
                 "execution_blocked": bool(blockers),
                 "blockers": blockers,
                 "transactions": [item.to_dict() for item in transactions],
+                "wallet_address": agent if path in {
+                    DirectCapitalPath.VAULT_TO_BINANCE,
+                    DirectCapitalPath.VAULT_TO_HYPERLIQUID,
+                } else context["source_reference"],
                 "next_step": (
                     "Resolve every blocker and re-read live source receipts before a human wallet "
                     "may confirm any transaction."
                 ),
+                "data": self.capital_snapshot(identity.user_id),
+            }
+
+        @self.app.post(
+            "/api/capital/direct-operations/{operation_id}/notilt-release-execution-preview"
+        )
+        def prepare_direct_notilt_release_execution(
+            operation_id: UUID,
+            payload: DirectCapitalUnsignedPlanRequest,
+            identity: SessionIdentity = self.identity_dependency,
+        ) -> dict[str, Any]:
+            now = _now()
+            context = self.service().direct_capital_operation_context(
+                operation_id, identity.user_id, now=now
+            )
+            if int(context["version"]) != payload.expected_version:
+                raise DomainRejected(
+                    "VERSION_CONFLICT", "direct capital operation changed; refresh"
+                )
+            if context["treasury_provider"] != "NOTILT_VAULT" or context["path"] not in {
+                DirectCapitalPath.VAULT_TO_BINANCE.value,
+                DirectCapitalPath.VAULT_TO_HYPERLIQUID.value,
+            }:
+                raise DomainRejected(
+                    "NOTILT_RELEASE_NOT_EXECUTABLE",
+                    "NoTilt release execution does not match this capital path",
+                )
+            request_receipt = next(
+                (
+                    stage.get("evidence")
+                    for stage in reversed(context["stages"])
+                    if stage.get("code") == "NOTILT_RELEASE_REQUEST_RECEIPT_CONFIRMED"
+                ),
+                None,
+            )
+            if not isinstance(request_receipt, dict):
+                raise DomainRejected(
+                    "NOTILT_RELEASE_NOT_EXECUTABLE",
+                    "verify the NoTilt release request receipt before execution",
+                )
+            try:
+                execute_after = datetime.fromisoformat(str(request_receipt["execute_after"]))
+                expires_at = datetime.fromisoformat(str(request_receipt["expires_at"]))
+                request_id = str(request_receipt["request_id"])
+            except (KeyError, TypeError, ValueError) as exc:
+                raise DomainRejected(
+                    "NOTILT_RECEIPT_INVALID", "stored NoTilt release receipt is invalid"
+                ) from exc
+            if now < execute_after:
+                raise DomainRejected(
+                    "NOTILT_RELEASE_NOT_UNLOCKED",
+                    f"NoTilt release unlocks at {execute_after.isoformat()}",
+                )
+            if now >= expires_at:
+                raise DomainRejected("NOTILT_RELEASE_EXPIRED", "NoTilt release request expired")
+            chain_id = self.notilt_chain_id_for_network(str(context["network"]))
+            agent, vault = self.configured_notilt_scope(chain_id)
+            transaction = self.resolved_notilt.prepare_release_execution(
+                chain_id=chain_id,
+                vault=vault,
+                agent=agent,
+                request_id=request_id,
+            )
+            version = self.service().record_direct_capital_unsigned_preview(
+                operation_id,
+                identity.user_id,
+                expected_version=payload.expected_version,
+                final_confirmed=payload.final_confirmed,
+                transactions=(transaction,),
+                wallet_address=agent,
+                idempotency_key=payload.idempotency_key,
+                now=now,
+                preview_kind="RELEASE_EXECUTION",
+            )
+            return {
+                "operation_id": str(operation_id),
+                "version": version,
+                "preview_kind": "AGENT_RELEASE_EXECUTION",
+                "signing": False,
+                "broadcast": False,
+                "transactions": [transaction.to_dict()],
+                "wallet_address": agent,
+                "data": self.capital_snapshot(identity.user_id),
+            }
+
+        @self.app.post("/api/capital/direct-operations/{operation_id}/notilt-release-receipt")
+        def verify_direct_notilt_release_receipt(
+            operation_id: UUID,
+            payload: DirectCapitalTreasuryReceiptRequest,
+            identity: SessionIdentity = self.identity_dependency,
+        ) -> dict[str, Any]:
+            now = _now()
+            context = self.service().direct_capital_operation_context(
+                operation_id, identity.user_id, now=now
+            )
+            if int(context["version"]) != payload.expected_version:
+                raise DomainRejected(
+                    "VERSION_CONFLICT", "direct capital operation changed; refresh"
+                )
+            execution_submission = next(
+                (
+                    stage
+                    for stage in reversed(context["stages"])
+                    if stage.get("code")
+                    == "NOTILT_RELEASE_EXECUTION_SUBMITTED_BY_HUMAN_WALLET"
+                ),
+                None,
+            )
+            receipt_kind = "RELEASE_EXECUTION" if execution_submission else "RELEASE_REQUEST"
+            submission = execution_submission or next(
+                (
+                    stage
+                    for stage in reversed(context["stages"])
+                    if stage.get("code")
+                    == "TREASURY_WITHDRAWAL_SUBMITTED_BY_HUMAN_WALLET"
+                ),
+                None,
+            )
+            if submission is None or str(submission.get("transaction_hash", "")).lower() != (
+                payload.transaction_hash.lower()
+            ):
+                raise DomainRejected(
+                    "NOTILT_RECEIPT_REFERENCE_MISMATCH",
+                    "receipt does not match the latest NoTilt wallet transaction",
+                )
+            chain_id = self.notilt_chain_id_for_network(str(context["network"]))
+            agent, vault = self.configured_notilt_scope(chain_id)
+            request_receipt = next(
+                (
+                    stage.get("evidence")
+                    for stage in reversed(context["stages"])
+                    if stage.get("code") == "NOTILT_RELEASE_REQUEST_RECEIPT_CONFIRMED"
+                ),
+                None,
+            )
+            request_id = (
+                str(request_receipt.get("request_id"))
+                if isinstance(request_receipt, dict)
+                else None
+            )
+            receipt = self.resolved_notilt.verify_receipt(
+                chain_id=chain_id,
+                vault=vault,
+                agent=agent,
+                receipt_kind=receipt_kind,
+                transaction_hash=payload.transaction_hash,
+                min_confirmations=self.effective_direct_capital_settings(identity.user_id)[
+                    0
+                ].notilt_min_confirmations[chain_id],
+                asset=str(context["asset"]) if receipt_kind == "RELEASE_REQUEST" else None,
+                amount=(
+                    str(context["min_received"])
+                    if receipt_kind == "RELEASE_REQUEST"
+                    else None
+                ),
+                request_id=request_id if receipt_kind == "RELEASE_EXECUTION" else None,
+            )
+            evidence = {
+                "kind": f"NOTILT_{receipt_kind}_RECEIPT",
+                "transaction_hash": receipt.transaction_hash,
+                "request_id": receipt.request_id or request_id,
+                "block_number": receipt.block_number,
+                "confirmations": receipt.confirmations,
+                "execute_after": (
+                    None if receipt.execute_after is None else receipt.execute_after.isoformat()
+                ),
+                "expires_at": (
+                    None if receipt.expires_at is None else receipt.expires_at.isoformat()
+                ),
+                "net_amount": (
+                    None if receipt.net_amount is None else str(receipt.net_amount)
+                ),
+                "fee": None if receipt.fee is None else str(receipt.fee),
+            }
+            version = self.service().record_direct_capital_notilt_receipt(
+                operation_id,
+                identity.user_id,
+                expected_version=payload.expected_version,
+                receipt_kind=receipt_kind,
+                evidence=evidence,
+                idempotency_key=payload.idempotency_key,
+                now=now,
+            )
+            return {
+                "operation_id": str(operation_id),
+                "version": version,
+                "receipt_kind": receipt_kind,
+                "receipt": evidence,
+                "data": self.capital_snapshot(identity.user_id),
+            }
+
+        @self.app.post(
+            "/api/capital/direct-operations/{operation_id}/notilt-destination-preview"
+        )
+        def prepare_direct_notilt_destination_transfer(
+            operation_id: UUID,
+            payload: DirectCapitalUnsignedPlanRequest,
+            identity: SessionIdentity = self.identity_dependency,
+        ) -> dict[str, Any]:
+            now = _now()
+            context = self.service().direct_capital_operation_context(
+                operation_id, identity.user_id, now=now
+            )
+            if int(context["version"]) != payload.expected_version:
+                raise DomainRejected(
+                    "VERSION_CONFLICT", "direct capital operation changed; refresh"
+                )
+            if (
+                context["treasury_provider"] != "NOTILT_VAULT"
+                or context["path"] != DirectCapitalPath.VAULT_TO_BINANCE.value
+                or not any(
+                    stage.get("code") == "NOTILT_RELEASE_EXECUTION_RECEIPT_CONFIRMED"
+                    for stage in context["stages"]
+                )
+            ):
+                raise DomainRejected(
+                    "NOTILT_RELEASE_NOT_EXECUTABLE",
+                    "verify the NoTilt release execution before transferring to Binance",
+                )
+            direct_settings, _ = self.effective_direct_capital_settings(identity.user_id)
+            agent, _ = self.configured_notilt_scope(
+                self.notilt_chain_id_for_network(str(context["network"]))
+            )
+            destination = direct_settings.capital_direct_binance_deposit_address
+            if destination is None or str(context["destination_reference"]).lower() != (
+                destination.lower()
+            ):
+                raise DomainRejected(
+                    "BINANCE_CAPITAL_DESTINATION_MISMATCH",
+                    "frozen Binance deposit address no longer matches configuration",
+                )
+            artifact = self.resolved_hyperliquid_capital.prepare_arbitrum_usdc_transfer(
+                sender=agent,
+                destination=destination,
+                amount=str(context["min_received"]),
+                now=now,
+            )
+            version = self.service().record_direct_capital_notilt_destination_preview(
+                operation_id,
+                identity.user_id,
+                expected_version=payload.expected_version,
+                artifact=artifact,
+                idempotency_key=payload.idempotency_key,
+                now=now,
+            )
+            return {
+                "operation_id": str(operation_id),
+                "version": version,
+                "artifact": artifact,
+                "signing": False,
+                "broadcast": False,
                 "data": self.capital_snapshot(identity.user_id),
             }
 
@@ -908,9 +1200,68 @@ class _CapitalRoutes:
                 "blockers": blockers,
                 "signature_request": artifact,
                 "next_step": (
-                    "A human-controlled delegate wallet must review and sign the exact hash; "
-                    "this service cannot sign or broadcast."
+                    "The connected wallet must review and submit this exact transaction; "
+                    "the control plane stores no private key or signature material."
                 ),
+                "data": self.capital_snapshot(identity.user_id),
+            }
+
+        @self.app.post(
+            "/api/capital/direct-operations/{operation_id}/treasury-withdrawal-receipt"
+        )
+        def verify_direct_treasury_withdrawal_receipt(
+            operation_id: UUID,
+            payload: DirectCapitalTreasuryReceiptRequest,
+            identity: SessionIdentity = self.identity_dependency,
+        ) -> dict[str, Any]:
+            now = _now()
+            context = self.service().direct_capital_operation_context(
+                operation_id, identity.user_id, now=now
+            )
+            if int(context["version"]) != payload.expected_version:
+                raise DomainRejected(
+                    "VERSION_CONFLICT", "direct capital operation changed; refresh"
+                )
+            if (
+                context["path"] != DirectCapitalPath.VAULT_TO_HYPERLIQUID.value
+                or context["treasury_provider"] != "SAFE_SPENDING_LIMIT"
+            ):
+                raise DomainRejected(
+                    "TREASURY_RECEIPT_STAGE_INVALID",
+                    "source receipt is only valid for Safe to Hyperliquid paths",
+                )
+            direct_settings, _ = self.effective_direct_capital_settings(identity.user_id)
+            safe = direct_settings.capital_direct_safe_address
+            owned = direct_settings.capital_direct_owned_arbitrum_address
+            rpc_url = (
+                direct_settings.capital_arbitrum_rpc_url
+                or direct_settings.safe_spending_arbitrum_rpc_url
+            )
+            if safe is None or owned is None or rpc_url is None:
+                raise DomainRejected(
+                    "SAFE_SPENDING_LIMIT_NOT_CONFIGURED",
+                    "Safe, owned wallet and trusted Arbitrum RPC are required",
+                )
+            evidence = self.resolved_hyperliquid_capital.verify_arbitrum_usdc_transfer(
+                rpc_url=rpc_url,
+                transaction_hash=payload.transaction_hash,
+                sender=safe,
+                recipient=owned,
+                amount=str(context["min_received"]),
+                min_confirmations=direct_settings.notilt_arbitrum_min_confirmations,
+            )
+            version = self.service().record_direct_capital_treasury_withdrawal_receipt(
+                operation_id,
+                identity.user_id,
+                expected_version=payload.expected_version,
+                evidence=evidence,
+                idempotency_key=payload.idempotency_key,
+                now=now,
+            )
+            return {
+                "operation_id": str(operation_id),
+                "version": version,
+                "receipt": evidence,
                 "data": self.capital_snapshot(identity.user_id),
             }
 

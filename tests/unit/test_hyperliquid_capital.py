@@ -85,6 +85,24 @@ def test_bridge_deposit_is_fixed_to_native_usdc_and_official_bridge() -> None:
     assert mismatched_bridge.value.code == "HYPERLIQUID_BRIDGE_UNTRUSTED"
 
 
+def test_exact_arbitrum_usdc_transfer_is_ready_for_browser_wallet() -> None:
+    artifact = HyperliquidCapitalGateway().prepare_arbitrum_usdc_transfer(
+        sender=MAIN,
+        destination=AGENT,
+        amount="12.5",
+        now=NOW,
+    )
+
+    assert artifact["kind"] == "ARBITRUM_USDC_UNSIGNED_TRANSACTION"
+    assert artifact["from"] == MAIN
+    assert artifact["to"] == ARBITRUM_NATIVE_USDC_ADDRESS
+    assert artifact["recipient"] == AGENT
+    assert artifact["amountRaw"] == "12500000"
+    assert artifact["data"].startswith("0xa9059cbb")
+    assert artifact["data"][34:74] == AGENT[2:]
+    assert artifact["signing"] is False and artifact["broadcast"] is False
+
+
 def test_spot_usdc_shortfall_builds_user_signed_class_transfer_before_withdraw3() -> None:
     def fetcher(_url: str, payload: dict[str, object], _timeout: float) -> object:
         if payload["type"] == "clearinghouseState":

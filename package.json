@@ -10,7 +10,8 @@
   },
   "scripts": {
     "test:notilt": "node --test tests/notilt_gateway.test.mjs",
-    "test:safe-spending": "node --test tests/safe_spending_gateway.test.mjs"
+    "test:safe-spending": "node --test tests/safe_spending_gateway.test.mjs",
+    "test:capital-wallet": "node --test tests/capital_wallet_ux.test.mjs"
   },
   "dependencies": {
     "@notilt/sdk": "0.2.0",

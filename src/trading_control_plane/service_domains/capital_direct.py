@@ -506,8 +506,10 @@ class DirectOperationCapitalService(ServiceComponent):
         expected_version: int,
         final_confirmed: bool,
         transactions: tuple[NoTiltUnsignedTransaction, ...],
+        wallet_address: str,
         idempotency_key: str,
         now: datetime,
+        preview_kind: str = "INITIAL",
     ) -> int:
         if not final_confirmed:
             _reject(
@@ -534,7 +536,9 @@ class DirectOperationCapitalService(ServiceComponent):
                 "operation_id": str(operation_id),
                 "expected_version": expected_version,
                 "transactions": serialized,
+                "wallet_address": wallet_address,
                 "final_confirmed": True,
+                "preview_kind": preview_kind,
             }
             digest, response = self.transactions._idempotency(
                 session,
@@ -556,15 +560,33 @@ class DirectOperationCapitalService(ServiceComponent):
                 DirectCapitalPath.HYPERLIQUID_TO_VAULT.value,
             }:
                 _reject("CAPITAL_DIRECT_PATH_INVALID", "direct capital path is unsupported")
-            allowed_functions = (
-                {"requestWhitelistRelease"}
-                if item.path
-                in {
-                    DirectCapitalPath.VAULT_TO_BINANCE.value,
-                    DirectCapitalPath.VAULT_TO_HYPERLIQUID.value,
+            outbound = item.path in {
+                DirectCapitalPath.VAULT_TO_BINANCE.value,
+                DirectCapitalPath.VAULT_TO_HYPERLIQUID.value,
+            }
+            if preview_kind == "RELEASE_EXECUTION":
+                if not outbound or not any(
+                    stage.get("code") == "NOTILT_RELEASE_REQUEST_RECEIPT_CONFIRMED"
+                    for stage in item.stages
+                ):
+                    _reject(
+                        "NOTILT_RELEASE_NOT_EXECUTABLE",
+                        "verified NoTilt release request is required before execution",
+                    )
+                allowed_functions = {"executeWhitelistRelease"}
+                stage_code = "NOTILT_UNSIGNED_RELEASE_EXECUTION_PREVIEW"
+            elif preview_kind == "INITIAL":
+                allowed_functions = {"requestWhitelistRelease"} if outbound else {
+                    "approve",
+                    "deposit",
                 }
-                else {"approve", "deposit"}
-            )
+                stage_code = (
+                    "NOTILT_UNSIGNED_RELEASE_REQUEST_PREVIEW"
+                    if outbound
+                    else "NOTILT_UNSIGNED_DEPOSIT_PREVIEW"
+                )
+            else:
+                _reject("NOTILT_PLAN_INVALID", "NoTilt preview kind is unsupported")
             if any(
                 transaction.function_name not in allowed_functions for transaction in transactions
             ):
@@ -572,17 +594,13 @@ class DirectOperationCapitalService(ServiceComponent):
                     "NOTILT_PLAN_INVALID",
                     "NoTilt SDK preview contains a function outside the fixed path",
                 )
-            stage_code = (
-                "NOTILT_UNSIGNED_RELEASE_REQUEST_PREVIEW"
-                if "requestWhitelistRelease" in allowed_functions
-                else "NOTILT_UNSIGNED_DEPOSIT_PREVIEW"
-            )
             item.stages = [
                 *item.stages,
                 {
                     "code": stage_code,
                     "status": "READY_FOR_HUMAN_REVIEW",
                     "transactions": serialized,
+                    "wallet_address": wallet_address,
                     "prepared_at": now.isoformat(),
                     "broadcast": False,
                 },
@@ -606,6 +624,112 @@ class DirectOperationCapitalService(ServiceComponent):
                 object_type="DirectCapitalOperation",
                 object_id=operation_id,
                 reason=f"{stage_code}; signing=false; broadcast=false",
+                correlation_id=item.correlation_id,
+                object_version=item.version,
+                idempotency_key=idempotency_key,
+                now=now,
+            )
+            return item.version
+
+    def record_direct_capital_notilt_destination_preview(
+        self,
+        operation_id: UUID,
+        actor_id: UUID,
+        *,
+        expected_version: int,
+        artifact: dict[str, Any],
+        idempotency_key: str,
+        now: datetime,
+    ) -> int:
+        if (
+            artifact.get("kind") != "ARBITRUM_USDC_UNSIGNED_TRANSACTION"
+            or artifact.get("signing") is not False
+            or artifact.get("broadcast") is not False
+        ):
+            _reject("NOTILT_PLAN_INVALID", "NoTilt destination transfer is invalid")
+        operation = "capital.direct.notilt_destination_preview"
+        with self.database.session_factory.begin() as session:
+            item = session.get(DirectCapitalOperation, operation_id, with_for_update=True)
+            if item is None:
+                _reject("CAPITAL_DIRECT_OPERATION_NOT_FOUND", "direct capital operation is missing")
+            self.transactions._require_role(
+                session,
+                actor_id,
+                "capital.execute",
+                item.account_id,
+                item.venue,
+                team_id=item.team_id,
+            )
+            payload = {
+                "operation_id": str(operation_id),
+                "expected_version": expected_version,
+                "artifact": artifact,
+            }
+            digest, response = self.transactions._idempotency(
+                session,
+                caller_id=f"{actor_id}:{item.team_id}",
+                operation=operation,
+                idempotency_key=idempotency_key,
+                payload=payload,
+            )
+            if response is not None:
+                return int(response["version"])
+            if item.version != expected_version:
+                _reject("VERSION_CONFLICT", "direct capital operation changed; refresh first")
+            if item.expires_at <= now:
+                _reject("CAPITAL_DIRECT_OPERATION_EXPIRED", "direct capital operation expired")
+            if (
+                item.treasury_provider != "NOTILT_VAULT"
+                or item.path != DirectCapitalPath.VAULT_TO_BINANCE.value
+                or not any(
+                    stage.get("code") == "NOTILT_RELEASE_EXECUTION_RECEIPT_CONFIRMED"
+                    for stage in item.stages
+                )
+            ):
+                _reject(
+                    "NOTILT_RELEASE_NOT_EXECUTABLE",
+                    "verified NoTilt release execution is required before destination transfer",
+                )
+            if (
+                str(artifact.get("recipient", "")).lower()
+                != str(item.destination_reference or "").lower()
+                or str(artifact.get("amount")) != str(item.min_received or item.amount)
+            ):
+                _reject(
+                    "NOTILT_PLAN_INVALID",
+                    "NoTilt destination transfer changed the frozen destination or amount",
+                )
+            item.stages = [
+                *item.stages,
+                {
+                    "code": "NOTILT_DESTINATION_TRANSFER_PREVIEW",
+                    "status": "READY_FOR_HUMAN_REVIEW",
+                    "artifact": artifact,
+                    "prepared_at": now.isoformat(),
+                    "signing": False,
+                    "broadcast": False,
+                },
+            ]
+            item.status = "UNSIGNED_PLAN_READY"
+            item.version += 1
+            item.updated_at = now
+            result = {"operation_id": str(operation_id), "version": item.version}
+            self.transactions._save_receipt(
+                session,
+                caller_id=f"{actor_id}:{item.team_id}",
+                operation=operation,
+                idempotency_key=idempotency_key,
+                semantic_hash=digest,
+                response=result,
+                now=now,
+            )
+            self.transactions._audit(
+                session,
+                actor_id=str(actor_id),
+                event_type="CAPITAL_NOTILT_DESTINATION_PREVIEW_PREPARED",
+                object_type="DirectCapitalOperation",
+                object_id=operation_id,
+                reason="exact-native-usdc-transfer; signing=false; broadcast=false",
                 correlation_id=item.correlation_id,
                 object_version=item.version,
                 idempotency_key=idempotency_key,
@@ -666,6 +790,15 @@ class DirectOperationCapitalService(ServiceComponent):
             if artifact_kind != expected_kind:
                 _reject(
                     "SAFE_PLAN_DIRECTION_INVALID", "Safe artifact does not match path direction"
+                )
+            required_transaction_fields = {"from", "to", "data", "value"}
+            if outbound and (
+                signature_request.get("calldataReady") is not True
+                or any(not signature_request.get(field) for field in required_transaction_fields)
+            ):
+                _reject(
+                    "SAFE_PLAN_INVALID",
+                    "Safe allowance preflight must contain an exact wallet transaction",
                 )
             payload = {
                 "operation_id": str(operation_id),
@@ -932,7 +1065,16 @@ class DirectOperationCapitalService(ServiceComponent):
             if item.expires_at <= now:
                 _reject("CAPITAL_DIRECT_OPERATION_EXPIRED", "direct capital operation expired")
             allowed_stages = {
-                DirectCapitalPath.VAULT_TO_HYPERLIQUID.value: {"HYPERLIQUID_DEPOSIT"},
+                DirectCapitalPath.VAULT_TO_BINANCE.value: {
+                    "TREASURY_WITHDRAWAL",
+                    "NOTILT_RELEASE_EXECUTION",
+                    "NOTILT_DESTINATION_TRANSFER",
+                },
+                DirectCapitalPath.VAULT_TO_HYPERLIQUID.value: {
+                    "TREASURY_WITHDRAWAL",
+                    "NOTILT_RELEASE_EXECUTION",
+                    "HYPERLIQUID_DEPOSIT",
+                },
                 DirectCapitalPath.HYPERLIQUID_TO_VAULT.value: {
                     "HYPERLIQUID_WITHDRAWAL",
                     "HYPERLIQUID_CLASS_TRANSFER",
@@ -944,6 +1086,22 @@ class DirectOperationCapitalService(ServiceComponent):
                     "CAPITAL_WALLET_STAGE_INVALID",
                     "wallet result does not match the frozen capital path",
                 )
+            if stage == "TREASURY_WITHDRAWAL":
+                treasury_preview_codes = {
+                    "NOTILT_UNSIGNED_RELEASE_REQUEST_PREVIEW",
+                    "SAFE_ALLOWANCE_SIGNATURE_REQUEST_READY",
+                }
+            elif stage == "TREASURY_DEPOSIT":
+                treasury_preview_codes = {
+                    "NOTILT_UNSIGNED_DEPOSIT_PREVIEW",
+                    "SAFE_DEPOSIT_UNSIGNED_TRANSACTION_READY",
+                }
+            elif stage == "NOTILT_RELEASE_EXECUTION":
+                treasury_preview_codes = {"NOTILT_UNSIGNED_RELEASE_EXECUTION_PREVIEW"}
+            elif stage == "NOTILT_DESTINATION_TRANSFER":
+                treasury_preview_codes = {"NOTILT_DESTINATION_TRANSFER_PREVIEW"}
+            else:
+                treasury_preview_codes = set()
             preview = (
                 next(
                     (
@@ -951,14 +1109,17 @@ class DirectOperationCapitalService(ServiceComponent):
                         for existing in reversed(item.stages)
                         if isinstance(existing, dict)
                         and str(existing.get("code", ""))
-                        in {
-                            "NOTILT_UNSIGNED_DEPOSIT_PREVIEW",
-                            "SAFE_DEPOSIT_UNSIGNED_TRANSACTION_READY",
-                        }
+                        in treasury_preview_codes
                     ),
                     None,
                 )
-                if stage == "TREASURY_DEPOSIT"
+                if stage
+                in {
+                    "TREASURY_DEPOSIT",
+                    "TREASURY_WITHDRAWAL",
+                    "NOTILT_RELEASE_EXECUTION",
+                    "NOTILT_DESTINATION_TRANSFER",
+                }
                 else next(
                     (
                         existing
@@ -975,7 +1136,7 @@ class DirectOperationCapitalService(ServiceComponent):
                     "HYPERLIQUID_CAPITAL_PREFLIGHT_REQUIRED",
                     "prepare a current unsigned wallet request before recording a wallet result",
                 )
-            if outcome == "SUBMITTED" and stage != "TREASURY_DEPOSIT":
+            if outcome == "SUBMITTED" and stage.startswith("HYPERLIQUID_"):
                 try:
                     preview_expires_at = datetime.fromisoformat(
                         str(preview["artifact"]["expiresAt"])
@@ -989,6 +1150,42 @@ class DirectOperationCapitalService(ServiceComponent):
                     _reject(
                         "HYPERLIQUID_CAPITAL_PREFLIGHT_EXPIRED",
                         "wallet request expired; rebuild it from current facts before signing",
+                    )
+            if outcome == "SUBMITTED" and stage == "NOTILT_RELEASE_EXECUTION":
+                release_receipt = next(
+                    (
+                        existing.get("evidence")
+                        for existing in reversed(item.stages)
+                        if existing.get("code")
+                        == "NOTILT_RELEASE_REQUEST_RECEIPT_CONFIRMED"
+                    ),
+                    None,
+                )
+                try:
+                    release_expires_at = datetime.fromisoformat(
+                        str(release_receipt["expires_at"])
+                    )
+                except (KeyError, TypeError, ValueError) as exc:
+                    raise DomainRejected(
+                        "NOTILT_RECEIPT_INVALID",
+                        "stored NoTilt release window is invalid",
+                    ) from exc
+                if release_expires_at <= now:
+                    _reject("NOTILT_RELEASE_EXPIRED", "NoTilt release request expired")
+            if outcome == "SUBMITTED" and stage == "NOTILT_DESTINATION_TRANSFER":
+                try:
+                    preview_expires_at = datetime.fromisoformat(
+                        str(preview["artifact"]["expiresAt"])
+                    )
+                except (KeyError, TypeError, ValueError) as exc:
+                    raise DomainRejected(
+                        "NOTILT_PLAN_INVALID",
+                        "stored NoTilt destination transfer is invalid",
+                    ) from exc
+                if preview_expires_at <= now:
+                    _reject(
+                        "NOTILT_DESTINATION_PREFLIGHT_EXPIRED",
+                        "destination transfer expired; rebuild it before signing",
                     )
             if outcome == "CANCELLED":
                 item.stages = [
@@ -1044,6 +1241,262 @@ class DirectOperationCapitalService(ServiceComponent):
                 object_type="DirectCapitalOperation",
                 object_id=operation_id,
                 reason=f"stage={stage}; outcome={outcome}; no-signature-material-stored",
+                correlation_id=item.correlation_id,
+                object_version=item.version,
+                idempotency_key=idempotency_key,
+                now=now,
+            )
+            return item.version
+
+    def record_direct_capital_treasury_withdrawal_receipt(
+        self,
+        operation_id: UUID,
+        actor_id: UUID,
+        *,
+        expected_version: int,
+        evidence: dict[str, Any],
+        idempotency_key: str,
+        now: datetime,
+    ) -> int:
+        operation = "capital.direct.treasury_withdrawal_receipt"
+        with self.database.session_factory.begin() as session:
+            item = session.get(DirectCapitalOperation, operation_id, with_for_update=True)
+            if item is None:
+                _reject("CAPITAL_DIRECT_OPERATION_NOT_FOUND", "direct capital operation is missing")
+            self.transactions._require_role(
+                session,
+                actor_id,
+                "capital.execute",
+                item.account_id,
+                item.venue,
+                team_id=item.team_id,
+            )
+            payload = {
+                "operation_id": str(operation_id),
+                "expected_version": expected_version,
+                "evidence": evidence,
+            }
+            digest, response = self.transactions._idempotency(
+                session,
+                caller_id=f"{actor_id}:{item.team_id}",
+                operation=operation,
+                idempotency_key=idempotency_key,
+                payload=payload,
+            )
+            if response is not None:
+                return int(response["version"])
+            if item.version != expected_version:
+                _reject("VERSION_CONFLICT", "direct capital operation changed; refresh first")
+            if (
+                item.path != DirectCapitalPath.VAULT_TO_HYPERLIQUID.value
+                or item.treasury_provider != "SAFE_SPENDING_LIMIT"
+            ):
+                _reject(
+                    "TREASURY_RECEIPT_STAGE_INVALID",
+                    "Safe source receipt does not match this capital path",
+                )
+            submitted = next(
+                (
+                    stage
+                    for stage in reversed(item.stages)
+                    if stage.get("code")
+                    == "TREASURY_WITHDRAWAL_SUBMITTED_BY_HUMAN_WALLET"
+                ),
+                None,
+            )
+            evidence_hash = str(
+                evidence.get("transactionHash") or evidence.get("transaction_hash") or ""
+            ).lower()
+            if submitted is None or evidence_hash != str(
+                submitted.get("transaction_hash", "")
+            ).lower():
+                _reject(
+                    "TREASURY_RECEIPT_REFERENCE_MISMATCH",
+                    "Safe receipt does not match the wallet-submitted transfer",
+                )
+            code = "TREASURY_WITHDRAWAL_RECEIPT_CONFIRMED"
+            if not any(stage.get("code") == code for stage in item.stages):
+                item.stages = [
+                    *item.stages,
+                    {
+                        "code": code,
+                        "status": "CONFIRMED",
+                        "evidence": evidence,
+                        "verified_at": now.isoformat(),
+                    },
+                ]
+                item.version += 1
+            item.status = "AWAITING_RECEIPT"
+            item.receipt_status = "PENDING"
+            item.updated_at = now
+            result = {"operation_id": str(operation_id), "version": item.version}
+            self.transactions._save_receipt(
+                session,
+                caller_id=f"{actor_id}:{item.team_id}",
+                operation=operation,
+                idempotency_key=idempotency_key,
+                semantic_hash=digest,
+                response=result,
+                now=now,
+            )
+            self.transactions._audit(
+                session,
+                actor_id=str(actor_id),
+                event_type="CAPITAL_TREASURY_WITHDRAWAL_RECEIPT_VERIFIED",
+                object_type="DirectCapitalOperation",
+                object_id=operation_id,
+                reason="safe-to-owned-wallet; public-receipt-verified",
+                correlation_id=item.correlation_id,
+                object_version=item.version,
+                idempotency_key=idempotency_key,
+                now=now,
+            )
+            return item.version
+
+    def record_direct_capital_notilt_receipt(
+        self,
+        operation_id: UUID,
+        actor_id: UUID,
+        *,
+        expected_version: int,
+        receipt_kind: str,
+        evidence: dict[str, Any],
+        idempotency_key: str,
+        now: datetime,
+    ) -> int:
+        if receipt_kind not in {"RELEASE_REQUEST", "RELEASE_EXECUTION"}:
+            _reject("NOTILT_RECEIPT_STATE_INVALID", "NoTilt receipt kind is unsupported")
+        operation = "capital.direct.notilt_receipt"
+        with self.database.session_factory.begin() as session:
+            item = session.get(DirectCapitalOperation, operation_id, with_for_update=True)
+            if item is None:
+                _reject("CAPITAL_DIRECT_OPERATION_NOT_FOUND", "direct capital operation is missing")
+            self.transactions._require_role(
+                session,
+                actor_id,
+                "capital.execute",
+                item.account_id,
+                item.venue,
+                team_id=item.team_id,
+            )
+            if item.treasury_provider != "NOTILT_VAULT" or item.path not in {
+                DirectCapitalPath.VAULT_TO_BINANCE.value,
+                DirectCapitalPath.VAULT_TO_HYPERLIQUID.value,
+            }:
+                _reject(
+                    "NOTILT_RECEIPT_SCOPE_MISMATCH",
+                    "NoTilt release receipt does not match the frozen capital path",
+                )
+            payload = {
+                "operation_id": str(operation_id),
+                "expected_version": expected_version,
+                "receipt_kind": receipt_kind,
+                "evidence": evidence,
+            }
+            digest, response = self.transactions._idempotency(
+                session,
+                caller_id=f"{actor_id}:{item.team_id}",
+                operation=operation,
+                idempotency_key=idempotency_key,
+                payload=payload,
+            )
+            if response is not None:
+                return int(response["version"])
+            if item.version != expected_version:
+                _reject("VERSION_CONFLICT", "direct capital operation changed; refresh first")
+            if item.expires_at <= now:
+                _reject("CAPITAL_DIRECT_OPERATION_EXPIRED", "direct capital operation expired")
+            submission_code = (
+                "TREASURY_WITHDRAWAL_SUBMITTED_BY_HUMAN_WALLET"
+                if receipt_kind == "RELEASE_REQUEST"
+                else "NOTILT_RELEASE_EXECUTION_SUBMITTED_BY_HUMAN_WALLET"
+            )
+            submitted = next(
+                (
+                    stage
+                    for stage in reversed(item.stages)
+                    if stage.get("code") == submission_code
+                ),
+                None,
+            )
+            evidence_hash = str(evidence.get("transaction_hash", "")).lower()
+            if submitted is None or evidence_hash != str(
+                submitted.get("transaction_hash", "")
+            ).lower():
+                _reject(
+                    "NOTILT_RECEIPT_REFERENCE_MISMATCH",
+                    "NoTilt receipt does not match the recorded wallet transaction",
+                )
+            if receipt_kind == "RELEASE_EXECUTION" and not any(
+                stage.get("code") == "NOTILT_RELEASE_REQUEST_RECEIPT_CONFIRMED"
+                for stage in item.stages
+            ):
+                _reject(
+                    "NOTILT_RELEASE_NOT_EXECUTABLE",
+                    "verified NoTilt release request is required before execution",
+                )
+            if receipt_kind == "RELEASE_REQUEST":
+                request_id = str(evidence.get("request_id", ""))
+                try:
+                    execute_after = datetime.fromisoformat(str(evidence["execute_after"]))
+                    expires_at = datetime.fromisoformat(str(evidence["expires_at"]))
+                except (KeyError, TypeError, ValueError) as exc:
+                    raise DomainRejected(
+                        "NOTILT_RECEIPT_INVALID",
+                        "NoTilt release receipt has invalid protocol timing",
+                    ) from exc
+                if not request_id.startswith("0x") or len(request_id) != 66:
+                    _reject("NOTILT_RECEIPT_INVALID", "NoTilt request id is invalid")
+                if execute_after >= expires_at or expires_at <= now:
+                    _reject("NOTILT_RECEIPT_INVALID", "NoTilt release window is invalid")
+                item.execute_after = execute_after
+                stage_code = "NOTILT_RELEASE_REQUEST_RECEIPT_CONFIRMED"
+                item.status = "AWAITING_RECEIPT"
+            else:
+                request_receipt = next(
+                    stage
+                    for stage in reversed(item.stages)
+                    if stage.get("code") == "NOTILT_RELEASE_REQUEST_RECEIPT_CONFIRMED"
+                )
+                if evidence.get("request_id") != request_receipt.get("evidence", {}).get(
+                    "request_id"
+                ):
+                    _reject(
+                        "NOTILT_RECEIPT_REFERENCE_MISMATCH",
+                        "NoTilt execution receipt request id changed",
+                    )
+                stage_code = "NOTILT_RELEASE_EXECUTION_RECEIPT_CONFIRMED"
+                item.status = "AWAITING_RECEIPT"
+            if not any(stage.get("code") == stage_code for stage in item.stages):
+                item.stages = [
+                    *item.stages,
+                    {
+                        "code": stage_code,
+                        "status": "CONFIRMED",
+                        "evidence": evidence,
+                        "verified_at": now.isoformat(),
+                    },
+                ]
+                item.version += 1
+            item.receipt_status = "PENDING"
+            item.updated_at = now
+            result = {"operation_id": str(operation_id), "version": item.version}
+            self.transactions._save_receipt(
+                session,
+                caller_id=f"{actor_id}:{item.team_id}",
+                operation=operation,
+                idempotency_key=idempotency_key,
+                semantic_hash=digest,
+                response=result,
+                now=now,
+            )
+            self.transactions._audit(
+                session,
+                actor_id=str(actor_id),
+                event_type=f"CAPITAL_NOTILT_{receipt_kind}_RECEIPT_VERIFIED",
+                object_type="DirectCapitalOperation",
+                object_id=operation_id,
+                reason="public-receipt-verified; no-signature-material-stored",
                 correlation_id=item.correlation_id,
                 object_version=item.version,
                 idempotency_key=idempotency_key,

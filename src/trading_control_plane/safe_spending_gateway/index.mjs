@@ -48,7 +48,12 @@ export async function executeOperation(input,{client:givenClient}={}) {
   if(!value.moduleEnabled) throw new Error("Safe Allowance Module is not enabled.");
   if(requested>value.available || requested>value.balance) throw new Error("Requested amount exceeds the current Safe spending limit or balance.");
   const transferHash=await client.readContract({address:value.trusted.module,abi:value.trusted.abi,functionName:"generateTransferHash",args:[safe,USDC.address,recipient,requested,zeroAddress,0n,value.nonce]});
-  return {kind:"SAFE_ALLOWANCE_SIGNATURE_REQUEST",...base,recipient,amount:requested.toString(),transferHash,signing:false,broadcast:false,calldataReady:false,nextStep:"Human delegate wallet signs this exact hash and submits the reviewed Allowance Module call."};
+  const data=encodeFunctionData({
+    abi:value.trusted.abi,
+    functionName:"executeAllowanceTransfer",
+    args:[safe,USDC.address,recipient,requested,zeroAddress,0n,delegate,"0x"],
+  });
+  return {kind:"SAFE_ALLOWANCE_SIGNATURE_REQUEST",...base,recipient,amount:requested.toString(),transferHash,from:delegate,to:value.trusted.module,value:"0",data,signing:false,broadcast:false,calldataReady:true,nextStep:"The connected delegate wallet reviews and submits this exact Allowance Module transaction."};
 }
 
 async function main(){try{let raw="";for await(const chunk of process.stdin)raw+=chunk;const data=await executeOperation(JSON.parse(raw));process.stdout.write(JSON.stringify({ok:true,data}));}catch(error){process.stdout.write(JSON.stringify({ok:false,error:{code:"SAFE_GATEWAY_REJECTED",message:String(error?.message||error).replace(/[\r\n]+/g," ").slice(0,400)}}));process.exitCode=1;}}
