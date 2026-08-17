@@ -148,8 +148,18 @@ def build_direct_capital_plan(
         blockers.append("CAPITAL_TRANSFER_GATE_DISABLED")
 
     max_fee = settings.capital_direct_max_fee
-    min_received = None if max_fee is None or amount <= max_fee else amount - max_fee
-    if max_fee is not None and amount <= max_fee:
+    fee_is_deducted_from_usdc = path in {
+        DirectCapitalPath.BINANCE_TO_VAULT,
+        DirectCapitalPath.HYPERLIQUID_TO_VAULT,
+    }
+    min_received = (
+        None
+        if max_fee is None
+        else amount - max_fee
+        if fee_is_deducted_from_usdc
+        else amount
+    )
+    if fee_is_deducted_from_usdc and max_fee is not None and amount <= max_fee:
         blockers.append("CAPITAL_MIN_RECEIVED_INVALID")
 
     execute_after: datetime | None = None

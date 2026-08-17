@@ -165,3 +165,33 @@ def test_safe_spending_limits_are_a_parallel_fail_closed_provider() -> None:
     assert "CAPITAL_TRANSFER_GATE_DISABLED" in plan.blockers
     assert plan.execute_after is None
     assert plan.stages[0]["code"] == "READ_SAFE_SPENDING_LIMIT"
+
+
+def test_safe_outbound_gas_does_not_reduce_the_usdc_received_amount() -> None:
+    settings = Settings(
+        database_url="postgresql+psycopg://user:pass@localhost/trading",
+        safe_spending_enabled=True,
+        safe_spending_arbitrum_rpc_url="https://example.invalid",
+        capital_direct_safe_address="0x1111111111111111111111111111111111111111",
+        capital_direct_safe_delegate_address="0x2222222222222222222222222222222222222222",
+        capital_direct_owned_arbitrum_address="0x1111111111111111111111111111111111111111",
+        capital_direct_hyperliquid_account_id="hyperliquid-main",
+        capital_direct_hyperliquid_bridge_address=(
+            "0x2df1c51e09aecf9cacb7bc98cb1742757f163df7"
+        ),
+        capital_direct_max_amount=Decimal(100),
+        capital_direct_max_fee=Decimal(1),
+        _env_file=None,
+    )
+
+    plan = build_direct_capital_plan(
+        path=DirectCapitalPath.VAULT_TO_HYPERLIQUID,
+        treasury_provider=CapitalTreasuryProvider.SAFE_SPENDING_LIMIT,
+        amount=Decimal(1),
+        settings=settings,
+        capital_transfer_gate="ENABLED",
+        now=datetime(2026, 8, 17, tzinfo=UTC),
+    )
+
+    assert plan.min_received == Decimal(1)
+    assert "CAPITAL_MIN_RECEIVED_INVALID" not in plan.blockers

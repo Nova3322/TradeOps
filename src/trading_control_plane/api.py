@@ -611,12 +611,14 @@ def create_app(
                 )
                 scale = Decimal(10) ** 6
                 observed_at = datetime.fromtimestamp(int(str(safe_fact["blockTimestamp"])), UTC)
+                safe_balance = Decimal(str(safe_fact["balance"])) / scale
+                safe_available_limit = Decimal(str(safe_fact["available"])) / scale
                 service().record_safe_spending_snapshot(
                     actor_id=user_id,
                     safe_address=safe_address,
                     asset="USDC",
-                    balance=Decimal(str(safe_fact["balance"])) / scale,
-                    available_limit=Decimal(str(safe_fact["available"])) / scale,
+                    balance=safe_balance,
+                    available_limit=safe_available_limit,
                     module_enabled=bool(safe_fact["moduleEnabled"]),
                     observed_at=observed_at,
                     now=_now(),
@@ -626,7 +628,16 @@ def create_app(
             except (KeyError, TypeError, ValueError, ArithmeticError):
                 onchain_probe.update(status="FAILED", error_code="SAFE_RESPONSE_INVALID")
             else:
-                onchain_probe.update(status="SUCCESS", error_code=None)
+                onchain_probe.update(
+                    status="SUCCESS",
+                    error_code=None,
+                    module_enabled=bool(safe_fact["moduleEnabled"]),
+                    available_limit=str(safe_available_limit),
+                    balance=str(safe_balance),
+                    reset_time_minutes=int(str(safe_fact["resetTimeMinutes"])),
+                    nonce=str(safe_fact["nonce"]),
+                    observed_at=observed_at.isoformat(),
+                )
         snapshot = queries().capital_center(
             user_id,
             authoritative_live_accounts=authoritative_live_accounts(),
@@ -642,6 +653,52 @@ def create_app(
         snapshot["net_worth"]["onchain_provider"] = selected_provider
         snapshot["net_worth"]["onchain_probe"] = onchain_probe
         can_manage_direct_configuration = service().can_user(user_id, "access.manage")
+        notilt_provider_configured = bool(
+            direct_settings.capital_direct_vault_id
+            and direct_settings.capital_direct_vault_address
+        )
+        safe_provider_configured = bool(
+            direct_settings.capital_direct_safe_address
+            and direct_settings.capital_direct_safe_delegate_address
+        )
+        public_configuration_values = (
+            {
+                "vault_id": direct_settings.capital_direct_vault_id,
+                "vault_address": direct_settings.capital_direct_vault_address,
+                "owned_arbitrum_address": (
+                    direct_settings.capital_direct_owned_arbitrum_address
+                ),
+                "binance_account_id": direct_settings.capital_direct_binance_account_id,
+                "binance_deposit_address": (
+                    direct_settings.capital_direct_binance_deposit_address
+                ),
+                "binance_withdrawal_address": (
+                    direct_settings.capital_direct_binance_withdrawal_address
+                ),
+                "hyperliquid_account_id": (
+                    direct_settings.capital_direct_hyperliquid_account_id
+                ),
+                "hyperliquid_bridge_address": (
+                    direct_settings.capital_direct_hyperliquid_bridge_address
+                ),
+                "safe_address": direct_settings.capital_direct_safe_address,
+                "safe_delegate_address": (
+                    direct_settings.capital_direct_safe_delegate_address
+                ),
+                "max_amount": (
+                    None
+                    if direct_settings.capital_direct_max_amount is None
+                    else str(direct_settings.capital_direct_max_amount)
+                ),
+                "max_fee": (
+                    None
+                    if direct_settings.capital_direct_max_fee is None
+                    else str(direct_settings.capital_direct_max_fee)
+                ),
+            }
+            if can_manage_direct_configuration
+            else {}
+        )
         snapshot["direct_configuration"] = {
             "single_account_mode": False,
             "source": "VERSIONED_DATABASE" if saved_config is not None else "ENVIRONMENT",
@@ -651,20 +708,22 @@ def create_app(
                 None if saved_config is None else saved_config["updated_by_username"]
             ),
             "can_manage": can_manage_direct_configuration,
+            **public_configuration_values,
             "asset": direct_settings.capital_direct_asset,
             "network": direct_settings.capital_direct_network,
             "treasury_provider": direct_settings.capital_direct_treasury_provider,
             "configured_providers": [
                 provider
                 for provider, configured in (
-                    ("NOTILT_VAULT", configured_notilt_address is not None),
-                    ("SAFE_SPENDING_LIMIT", configured_safe_address is not None),
+                    ("NOTILT_VAULT", notilt_provider_configured),
+                    ("SAFE_SPENDING_LIMIT", safe_provider_configured),
                 )
                 if configured
             ],
             "selected_onchain_account_configured": selected_treasury_account_id is not None,
             "vault_id_configured": direct_settings.capital_direct_vault_id is not None,
             "vault_address_configured": (direct_settings.capital_direct_vault_address is not None),
+            "notilt_provider_configured": notilt_provider_configured,
             "owned_arbitrum_address_configured": (
                 direct_settings.capital_direct_owned_arbitrum_address is not None
             ),
@@ -709,6 +768,7 @@ def create_app(
             "safe_delegate_configured": (
                 direct_settings.capital_direct_safe_delegate_address is not None
             ),
+            "safe_provider_configured": safe_provider_configured,
             "signing": False,
             "broadcast": False,
         }
