@@ -68,6 +68,18 @@ class _CapitalRoutes:
         self.resolved_capital_transfer = dependencies.capital_transfer
         self.token_service = dependencies.token_service
 
+    def _direct_action_snapshot(self, actor_id: UUID) -> dict[str, Any]:
+        """Return current DB state without repeating slow external capital probes.
+
+        Direct-operation mutations already perform the exact Safe, Binance, Hyperliquid,
+        or Arbitrum check required by their stage.  Re-running the full capital page
+        snapshot before returning can exceed the browser deadline after a wallet has
+        signed or submitted, which makes a successful action look like an unknown
+        failure and encourages unsafe retries.
+        """
+
+        return self.queries().capital_center(actor_id)
+
     def _binance_capital_gateway(
         self,
         *,
@@ -500,7 +512,7 @@ class _CapitalRoutes:
                 "status": plan.status,
                 "treasury_provider": plan.treasury_provider.value,
                 "blockers": list(plan.blockers),
-                "data": self.capital_snapshot(identity.user_id),
+                "data": self._direct_action_snapshot(identity.user_id),
             }
 
     def register_direct_binance(self) -> None:
@@ -581,7 +593,7 @@ class _CapitalRoutes:
                 "submission_enabled": direct_settings.binance_capital_withdraw_enabled,
                 "signing_material_returned": False,
                 "transfer_submitted": False,
-                "data": self.capital_snapshot(identity.user_id),
+                "data": self._direct_action_snapshot(identity.user_id),
             }
 
         @self.app.post("/api/capital/direct-operations/{operation_id}/binance-submit")
@@ -609,7 +621,7 @@ class _CapitalRoutes:
                     "BINANCE_CAPITAL_SUBMISSION_DISABLED",
                     "Binance capital withdrawal transport is explicitly disabled",
                 )
-            if self.capital_snapshot(identity.user_id)["real_transfer_gate"] != "ENABLED":
+            if self._direct_action_snapshot(identity.user_id)["real_transfer_gate"] != "ENABLED":
                 raise DomainRejected(
                     "CAPITAL_TRANSFER_GATE_DISABLED",
                     "durable CAPITAL_TRANSFER gate is disabled",
@@ -644,7 +656,7 @@ class _CapitalRoutes:
                 "version": version,
                 "submission": submission,
                 "credentials_returned": False,
-                "data": self.capital_snapshot(identity.user_id),
+                "data": self._direct_action_snapshot(identity.user_id),
             }
 
         @self.app.post("/api/capital/direct-operations/{operation_id}/binance-receipt")
@@ -778,7 +790,7 @@ class _CapitalRoutes:
                 "version": version,
                 "receipt": evidence,
                 "settlement": "CONFIRMED",
-                "data": self.capital_snapshot(identity.user_id),
+                "data": self._direct_action_snapshot(identity.user_id),
             }
 
     def register_direct_treasury(self) -> None:
@@ -934,7 +946,7 @@ class _CapitalRoutes:
                     "Resolve every blocker and re-read live source receipts before a human wallet "
                     "may confirm any transaction."
                 ),
-                "data": self.capital_snapshot(identity.user_id),
+                "data": self._direct_action_snapshot(identity.user_id),
             }
 
         @self.app.post(
@@ -1016,7 +1028,7 @@ class _CapitalRoutes:
                 "broadcast": False,
                 "transactions": [transaction.to_dict()],
                 "wallet_address": agent,
-                "data": self.capital_snapshot(identity.user_id),
+                "data": self._direct_action_snapshot(identity.user_id),
             }
 
         @self.app.post("/api/capital/direct-operations/{operation_id}/notilt-release-receipt")
@@ -1122,7 +1134,7 @@ class _CapitalRoutes:
                 "version": version,
                 "receipt_kind": receipt_kind,
                 "receipt": evidence,
-                "data": self.capital_snapshot(identity.user_id),
+                "data": self._direct_action_snapshot(identity.user_id),
             }
 
         @self.app.post(
@@ -1185,7 +1197,7 @@ class _CapitalRoutes:
                 "artifact": artifact,
                 "signing": False,
                 "broadcast": False,
-                "data": self.capital_snapshot(identity.user_id),
+                "data": self._direct_action_snapshot(identity.user_id),
             }
 
         @self.app.post("/api/capital/direct-operations/{operation_id}/safe-spending-preview")
@@ -1280,7 +1292,7 @@ class _CapitalRoutes:
                     "The connected wallet must review and submit this exact transaction; "
                     "the control plane stores no private key or signature material."
                 ),
-                "data": self.capital_snapshot(identity.user_id),
+                "data": self._direct_action_snapshot(identity.user_id),
             }
 
         @self.app.post(
@@ -1343,7 +1355,7 @@ class _CapitalRoutes:
                 "operation_id": str(operation_id),
                 "version": version,
                 "receipt": evidence,
-                "data": self.capital_snapshot(identity.user_id),
+                "data": self._direct_action_snapshot(identity.user_id),
             }
 
     def register_direct_hyperliquid(self) -> None:
@@ -1458,7 +1470,7 @@ class _CapitalRoutes:
                     "amount, fee and method before signing. This service stores no signature "
                     "material."
                 ),
-                "data": self.capital_snapshot(identity.user_id),
+                "data": self._direct_action_snapshot(identity.user_id),
             }
 
         @self.app.post("/api/capital/direct-operations/{operation_id}/wallet-submission")
@@ -1485,7 +1497,7 @@ class _CapitalRoutes:
                 "version": version,
                 "outcome": payload.outcome,
                 "signing_material_stored": False,
-                "data": self.capital_snapshot(identity.user_id),
+                "data": self._direct_action_snapshot(identity.user_id),
             }
 
         @self.app.post("/api/capital/direct-operations/{operation_id}/hyperliquid-receipt")
@@ -1660,7 +1672,7 @@ class _CapitalRoutes:
                     if updated_context["status"] == "SETTLED"
                     else "HYPERLIQUID_LEG_CONFIRMED_TREASURY_RECEIPT_STILL_REQUIRED"
                 ),
-                "data": self.capital_snapshot(identity.user_id),
+                "data": self._direct_action_snapshot(identity.user_id),
             }
 
     def register_reconciliation_automation(self) -> None:
@@ -1760,7 +1772,7 @@ class _CapitalRoutes:
                 "version": version,
                 "receipt": evidence,
                 "settlement": "SETTLED_IF_ALL_HYPERLIQUID_AND_TREASURY_RECEIPTS_CONFIRMED",
-                "data": self.capital_snapshot(identity.user_id),
+                "data": self._direct_action_snapshot(identity.user_id),
             }
 
         @self.app.post("/api/capital/balances/mock")

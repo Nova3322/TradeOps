@@ -9,6 +9,8 @@ const source = fs.readFileSync(
 
 test("capital operations open the connected wallet and record public evidence automatically", () => {
   for (const marker of [
+    "eip6963:requestProvider",
+    "eip6963:announceProvider",
     "eth_requestAccounts",
     "wallet_switchEthereumChain",
     "eth_sendTransaction",
@@ -18,6 +20,8 @@ test("capital operations open the connected wallet and record public evidence au
     assert.equal(source.includes(marker), true, marker);
   }
   assert.equal(source.includes("`/api/capital?environment=${displayEnvironment}`, {\n    timeoutMs:45_000"), true);
+  assert.equal(source.includes("WALLET_PROVIDER_NOT_AVAILABLE"), true);
+  assert.equal(source.includes("timeoutMs:45_000"), true);
 });
 
 test("operation history has no second confirmation or manual hash forms", () => {
