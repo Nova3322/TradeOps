@@ -269,6 +269,8 @@ def test_hyperliquid_withdrawal_auto_falls_back_to_wallet_and_settles_only_after
                 "moduleEnabled": True,
                 "balance": "90000000",
                 "available": "80000000",
+                "resetTimeMinutes": "1440",
+                "nonce": "7",
                 "blockTimestamp": str(int(now.timestamp())),
             }
         assert payload["operation"] == "prepare-deposit"
@@ -438,6 +440,8 @@ def test_safe_spending_limit_provider_is_selected_audited_and_never_signed(
                 "moduleEnabled": True,
                 "balance": "90000000",
                 "available": "80000000",
+                "resetTimeMinutes": "1440",
+                "nonce": "7",
                 "blockTimestamp": str(int(now.timestamp())),
             }
         if payload["operation"] == "prepare-deposit":
@@ -498,6 +502,12 @@ def test_safe_spending_limit_provider_is_selected_audited_and_never_signed(
                 "provider": "SAFE_SPENDING_LIMIT",
                 "status": "SUCCESS",
                 "error_code": None,
+                "module_enabled": True,
+                "available_limit": "80",
+                "balance": "90",
+                "reset_time_minutes": 1440,
+                "nonce": "7",
+                "observed_at": now.replace(microsecond=0).isoformat(),
             }
             assert net_worth["vault"] == "90.000000000000000000"
             assert {
@@ -505,7 +515,12 @@ def test_safe_spending_limit_provider_is_selected_audited_and_never_signed(
                 for item in configured.json()["data"]["balances"]
                 if item["location_type"] == "VAULT"
             } == {"selected-onchain-treasury"}
-            assert "0x7777777777777777777777777777777777777777" not in configured.text
+            assert direct_config["safe_address"] == (
+                "0x7777777777777777777777777777777777777777"
+            )
+            assert direct_config["safe_delegate_address"] == (
+                "0x8888888888888888888888888888888888888888"
+            )
 
             await _login(client, "safe-provider-treasury")
             created = await client.post(
@@ -612,6 +627,13 @@ def test_vault_and_safe_configurations_persist_while_current_provider_switches(
             assert direct["vault_address_configured"] is True
             assert direct["safe_address_configured"] is True
             assert direct["safe_delegate_configured"] is True
+            assert direct["vault_id"] == "vault-1"
+            assert direct["vault_address"] == (
+                "0x1111111111111111111111111111111111111111"
+            )
+            assert direct["safe_address"] == (
+                "0x7777777777777777777777777777777777777777"
+            )
 
             vault_selected = await client.put(
                 "/api/capital/direct-configuration",
@@ -633,8 +655,12 @@ def test_vault_and_safe_configurations_persist_while_current_provider_switches(
             assert direct["vault_address_configured"] is True
             assert direct["safe_address_configured"] is True
             assert direct["safe_delegate_configured"] is True
-            assert "0x1111111111111111111111111111111111111111" not in vault_selected.text
-            assert "0x7777777777777777777777777777777777777777" not in vault_selected.text
+            assert direct["vault_address"] == (
+                "0x1111111111111111111111111111111111111111"
+            )
+            assert direct["safe_address"] == (
+                "0x7777777777777777777777777777777777777777"
+            )
 
             vault_operation = await client.post(
                 "/api/capital/direct-operations",
@@ -676,6 +702,21 @@ def test_vault_and_safe_configurations_persist_while_current_provider_switches(
             )
             assert safe_operation.status_code == 200, safe_operation.text
             assert safe_operation.json()["treasury_provider"] == "SAFE_SPENDING_LIMIT"
+
+            cleared = await client.put(
+                "/api/capital/direct-configuration",
+                json={
+                    "treasury_provider": "SAFE_SPENDING_LIMIT",
+                    "clear_notilt_configuration": True,
+                    "idempotency_key": "dual-treasury-clear-unused-notilt",
+                },
+            )
+            assert cleared.status_code == 200, cleared.text
+            direct = cleared.json()["data"]["direct_configuration"]
+            assert direct["configured_providers"] == ["SAFE_SPENDING_LIMIT"]
+            assert direct["notilt_provider_configured"] is False
+            assert direct["vault_id"] is None
+            assert direct["vault_address"] is None
 
     asyncio.run(scenario())
 
@@ -1362,8 +1403,11 @@ def test_direct_binance_return_does_not_build_redundant_notilt_wallet_deposit(
             )
             assert configured.status_code == 200, configured.text
             assert configured.json()["data"]["direct_configuration"]["version"] == 1
-            assert configured.json()["data"]["direct_configuration"]["can_manage"] is True
-            assert "0x1111111111111111111111111111111111111111" not in configured.text
+            direct = configured.json()["data"]["direct_configuration"]
+            assert direct["can_manage"] is True
+            assert direct["vault_address"] == (
+                "0x1111111111111111111111111111111111111111"
+            )
 
             await _login(client, "notilt-direct-treasury")
             denied_config = await client.put(

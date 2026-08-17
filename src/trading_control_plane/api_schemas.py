@@ -920,6 +920,8 @@ class DirectCapitalConfigurationRequest(BaseModel):
     hyperliquid_bridge_address: str | None = None
     safe_address: str | None = None
     safe_delegate_address: str | None = None
+    clear_notilt_configuration: bool = False
+    clear_safe_configuration: bool = False
     vault_withdrawal_private_key: SecretStr | None = Field(
         default=None, min_length=32, max_length=512
     )
@@ -929,6 +931,20 @@ class DirectCapitalConfigurationRequest(BaseModel):
     max_amount: Decimal | None = Field(default=None, gt=0)
     max_fee: Decimal | None = Field(default=None, ge=0)
     idempotency_key: str = Field(min_length=1, max_length=160)
+
+    @model_validator(mode="after")
+    def validate_provider_clear(self) -> DirectCapitalConfigurationRequest:
+        if (
+            self.treasury_provider is CapitalTreasuryProvider.NOTILT_VAULT
+            and self.clear_notilt_configuration
+        ):
+            raise ValueError("the selected NoTilt provider configuration cannot be cleared")
+        if (
+            self.treasury_provider is CapitalTreasuryProvider.SAFE_SPENDING_LIMIT
+            and self.clear_safe_configuration
+        ):
+            raise ValueError("the selected Safe provider configuration cannot be cleared")
+        return self
 
     @field_validator(
         "vault_address",

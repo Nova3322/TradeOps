@@ -205,6 +205,8 @@ class _CapitalRoutes:
                     "environment",
                     "vault_withdrawal_private_key",
                     "safe_withdrawal_private_key",
+                    "clear_notilt_configuration",
+                    "clear_safe_configuration",
                 },
                 exclude_none=True,
             )
@@ -229,7 +231,29 @@ class _CapitalRoutes:
                 field: supplied.get(field, getattr(direct_settings, setting_name))
                 for field, setting_name in field_map.items()
             }
+            if payload.clear_notilt_configuration:
+                merged["vault_id"] = None
+                merged["vault_address"] = None
+            if payload.clear_safe_configuration:
+                merged["safe_address"] = None
+                merged["safe_delegate_address"] = None
             selected_provider = CapitalTreasuryProvider(str(merged["treasury_provider"]))
+            if (
+                selected_provider is CapitalTreasuryProvider.NOTILT_VAULT
+                and payload.clear_notilt_configuration
+            ):
+                raise DomainRejected(
+                    "CAPITAL_SELECTED_PROVIDER_CLEAR_FORBIDDEN",
+                    "switch to Safe before clearing the NoTilt configuration",
+                )
+            if (
+                selected_provider is CapitalTreasuryProvider.SAFE_SPENDING_LIMIT
+                and payload.clear_safe_configuration
+            ):
+                raise DomainRejected(
+                    "CAPITAL_SELECTED_PROVIDER_CLEAR_FORBIDDEN",
+                    "switch to NoTilt before clearing the Safe configuration",
+                )
             trusted_vault = self.resolved_settings.notilt_vaults.get(42161)
             direct_vault = merged["vault_address"]
             if (
