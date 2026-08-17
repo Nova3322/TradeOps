@@ -716,17 +716,6 @@ button:disabled { opacity: .52; cursor: not-allowed; }
 .capital-blockers { margin-bottom: 8px; }
 .capital-blockers summary { color: var(--warning); cursor: pointer; font-weight: 600; }
 .capital-blockers p { max-width: 42rem; margin: 8px 0 0; color: var(--muted); line-height: 1.55; }
-.capital-transfer-continuations { margin: 0 0 16px; padding: 16px; border: 1px solid var(--line); background: var(--panel); }
-.capital-transfer-continuations-heading, .capital-transfer-continuation { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
-.capital-transfer-continuations-heading { margin-bottom: 12px; }
-.capital-transfer-continuations-heading h3 { margin: 2px 0 0; font-size: 16px; }
-.capital-transfer-continuations-heading > span { color: var(--muted); font-size: 12px; }
-.capital-transfer-continuation-list { display: grid; gap: 8px; }
-.capital-transfer-continuation { padding: 12px; border: 1px solid var(--line); background: var(--surface); }
-.capital-transfer-continuation > div:first-child { display: grid; gap: 3px; min-width: 0; }
-.capital-transfer-continuation small, .capital-transfer-continuation span { color: var(--muted); font-size: 12px; }
-.capital-transfer-continuation b { overflow-wrap: anywhere; }
-.capital-transfer-continuation-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 6px 12px; }
 .capital-wallet-handoff { margin-top: 10px; border: 1px solid var(--line); border-radius: 10px; background: var(--panel); }
 .capital-wallet-handoff > summary { cursor: pointer; padding: 10px 12px; color: var(--accent); font-weight: 600; }
 .capital-wallet-handoff[open] > summary { border-bottom: 1px solid var(--line); }

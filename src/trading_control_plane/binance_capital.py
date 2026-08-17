@@ -62,7 +62,7 @@ def _official_base_url(value: str) -> str:
 
 
 def _ordered_official_base_urls(preferred: str) -> tuple[str, ...]:
-    return (preferred, *(item for item in OFFICIAL_BINANCE_BASE_URLS if item != preferred))[:3]
+    return preferred, *(item for item in OFFICIAL_BINANCE_BASE_URLS if item != preferred)
 
 
 def _evm_address(value: str, *, field: str) -> str:
@@ -185,6 +185,7 @@ class BinanceCapitalGateway:
             else (self._active_base_url,)
         )
         last_error: BaseException | None = None
+        last_exchange_rejection: DomainRejected | None = None
         for attempt, base_url in enumerate(base_urls):
             prepared = dict(semantic_params)
             prepared["recvWindow"] = str(self._recv_window_ms)
@@ -239,10 +240,24 @@ class BinanceCapitalGateway:
                 else:
                     error_code = "BINANCE_CAPITAL_API_REJECTED"
                     detail = f"Binance Wallet API rejected the request (code={code or 'UNKNOWN'})"
-                raise DomainRejected(
-                    error_code,
-                    detail,
-                ) from exc
+                last_error = exc
+                rejection = DomainRejected(error_code, detail)
+                if (
+                    method == "GET"
+                    and attempt + 1 < len(base_urls)
+                    and (code in {-2014, -2015, -1021} or exc.code >= 500)
+                ):
+                    # Binance occasionally rejects a signed USER_DATA read on one
+                    # documented edge while the same freshly signed request succeeds
+                    # on another official edge.  GET probes are side-effect free, so
+                    # fail over without weakening any permission, IP, address, balance,
+                    # fee, quota, Travel Rule, or network check.  Withdrawal POSTs are
+                    # still single-attempt because their outcome could be unknown.
+                    last_exchange_rejection = rejection
+                    if code == -1021:
+                        self._clock_synchronized_at = 0.0
+                    continue
+                raise rejection from exc
             except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as exc:
                 last_error = exc
                 if attempt + 1 < len(base_urls):
@@ -251,10 +266,14 @@ class BinanceCapitalGateway:
                     # POST withdrawal submission is never retried because its outcome
                     # could be unknown after a transport failure.
                     continue
+                if last_exchange_rejection is not None:
+                    raise last_exchange_rejection from exc
                 raise DomainRejected(
                     "BINANCE_CAPITAL_API_UNAVAILABLE",
                     "Binance Wallet API did not return a valid bounded response",
                 ) from exc
+        if last_exchange_rejection is not None:
+            raise last_exchange_rejection from last_error
         raise DomainRejected(
             "BINANCE_CAPITAL_API_UNAVAILABLE",
             "Binance Wallet API did not return a valid bounded response",
