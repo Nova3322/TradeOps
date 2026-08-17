@@ -479,9 +479,13 @@ def test_safe_spending_limit_provider_is_selected_audited_and_never_signed(
             "amount": "99000000",
             "nonce": "7",
             "transferHash": "0x" + "ab" * 32,
+            "from": payload["delegate"],
+            "to": "0x9999999999999999999999999999999999999999",
+            "value": "0",
+            "data": "0x" + "12" * 68,
             "signing": False,
             "broadcast": False,
-            "calldataReady": False,
+            "calldataReady": True,
         }
 
     async def scenario() -> None:
@@ -560,10 +564,33 @@ def test_safe_spending_limit_provider_is_selected_audited_and_never_signed(
             assert preview.status_code == 200, preview.text
             body = preview.json()
             assert body["signing"] is False and body["broadcast"] is False
-            assert body["signature_request"]["calldataReady"] is False
+            assert body["signature_request"]["calldataReady"] is True
             assert "SAFE_ALLOWANCE_PREFLIGHT_REQUIRED" not in body["blockers"]
             assert "BINANCE_DEPOSIT_PREFLIGHT_REQUIRED" in body["blockers"]
             assert body["data"]["real_transfer_gate"] == "DISABLED"
+            wallet_submission = await client.post(
+                f"/api/capital/direct-operations/{operation_id}/wallet-submission",
+                json={
+                    "expected_version": body["version"],
+                    "stage": "TREASURY_WITHDRAWAL",
+                    "outcome": "SUBMITTED",
+                    "transaction_hash": "0x" + "cd" * 32,
+                    "final_confirmed": True,
+                    "idempotency_key": "safe-provider-wallet-submit",
+                },
+            )
+            assert wallet_submission.status_code == 200, wallet_submission.text
+            submitted_operation = next(
+                item
+                for item in wallet_submission.json()["data"]["direct_operations"]
+                if item["operation_id"] == operation_id
+            )
+            assert submitted_operation["stages"][-1]["code"] == (
+                "TREASURY_WITHDRAWAL_SUBMITTED_BY_HUMAN_WALLET"
+            )
+            assert submitted_operation["stages"][-1]["transaction_hash"] == (
+                "0x" + "cd" * 32
+            )
 
             inbound = await client.post(
                 "/api/capital/direct-operations",
@@ -598,10 +625,11 @@ def test_safe_spending_limit_provider_is_selected_audited_and_never_signed(
         )
         assert operation is not None
         assert operation.treasury_provider == "SAFE_SPENDING_LIMIT"
-        assert operation.version == 2
+        assert operation.version == 3
         assert session.query(OrderIntent).count() == 0
         events = set(session.scalars(select(AuditEvent.event_type)).all())
     assert "CAPITAL_SAFE_SPENDING_PREVIEW_PREPARED" in events
+    assert "CAPITAL_HUMAN_WALLET_SUBMISSION_RECORDED" in events
 
 
 def test_vault_and_safe_configurations_persist_while_current_provider_switches(
@@ -1830,3 +1858,212 @@ def test_direct_notilt_release_rereads_live_agent_budget_before_unsigned_preview
         assert (operation.stages[-1]["code"] == "NOTILT_UNSIGNED_RELEASE_REQUEST_PREVIEW") is (
             expected_code is None
         )
+
+
+def test_direct_notilt_release_wallet_flow_reaches_exact_binance_destination(
+    database: Database,
+) -> None:
+    service = TradingService(database)
+    now = datetime.now(UTC)
+    admin = service.bootstrap_admin("notilt-wallet-flow-admin", now=now)
+    _add_live_accounts(database, admin)
+    request_hash = "0x" + "12" * 32
+    execution_hash = "0x" + "34" * 32
+    destination_hash = "0x" + "56" * 32
+    request_id = "0x" + "78" * 32
+
+    def executor(payload: dict[str, object]) -> dict[str, object]:
+        operation = str(payload["operation"])
+        if operation == "read-vault":
+            return {
+                "chain": "arbitrum",
+                "vault": "0x1111111111111111111111111111111111111111",
+                "agent": "0x5555555555555555555555555555555555555555",
+                "budgets": [
+                    {
+                        "blockNumber": "123",
+                        "blockTimestamp": str(int(now.timestamp())),
+                        "vault": "0x1111111111111111111111111111111111111111",
+                        "agent": "0x5555555555555555555555555555555555555555",
+                        "owner": "0x7777777777777777777777777777777777777777",
+                        "asset": {
+                            "address": "0x6666666666666666666666666666666666666666",
+                            "symbol": "USDC",
+                            "decimals": 6,
+                            "native": False,
+                        },
+                        "isOfficialVault": True,
+                        "isActiveWhitelist": True,
+                        "assignedWhitelistVault": (
+                            "0x1111111111111111111111111111111111111111"
+                        ),
+                        "balance": "100000000",
+                        "maxReleaseNet": "100000000",
+                        "pendingNet": "0",
+                        "panicLocked": False,
+                        "dailyReleaseRate": "0",
+                        "dailyFeeRate": "0",
+                    }
+                ],
+            }
+        if operation == "prepare-release-request":
+            return {
+                "transaction": {
+                    "chainId": 42161,
+                    "to": "0x1111111111111111111111111111111111111111",
+                    "data": "0x1234",
+                    "value": "0",
+                    "contract": "vault",
+                    "functionName": "requestWhitelistRelease",
+                    "summary": "Request exact NoTilt release",
+                }
+            }
+        if operation == "prepare-release-execution":
+            assert payload["requestId"] == request_id
+            return {
+                "chainId": 42161,
+                "to": "0x1111111111111111111111111111111111111111",
+                "data": "0xabcd",
+                "value": "0",
+                "contract": "vault",
+                "functionName": "executeWhitelistRelease",
+                "summary": "Execute exact NoTilt release",
+            }
+        assert operation == "verify-receipt"
+        receipt_kind = str(payload["receiptKind"])
+        base = {
+            "receiptKind": receipt_kind,
+            "chainId": 42161,
+            "chain": "arbitrum",
+            "transactionHash": payload["transactionHash"],
+            "vault": "0x1111111111111111111111111111111111111111",
+            "agent": "0x5555555555555555555555555555555555555555",
+            "blockNumber": "456",
+            "blockTimestamp": str(int(now.timestamp())),
+            "confirmations": 12,
+        }
+        if receipt_kind == "RELEASE_REQUEST":
+            base.update(
+                {
+                    "asset": "USDC",
+                    "requestId": request_id,
+                    "netAmount": "100",
+                    "fee": "0.1",
+                    "executeAfter": str(int((now - timedelta(seconds=1)).timestamp())),
+                    "expiresAt": str(int((now + timedelta(hours=1)).timestamp())),
+                }
+            )
+        else:
+            base["requestId"] = request_id
+        return base
+
+    async def scenario() -> None:
+        async with AsyncClient(
+            transport=ASGITransport(
+                app=_app(database, notilt_gateway=NoTiltGateway(executor=executor))
+            ),
+            base_url="http://test",
+        ) as client:
+            await _login(client, "notilt-wallet-flow-admin")
+            created = await client.post(
+                "/api/capital/direct-operations",
+                json={
+                    "path": "VAULT_TO_BINANCE",
+                    "amount": "100",
+                    "final_confirmed": True,
+                    "idempotency_key": "notilt-wallet-flow",
+                },
+            )
+            operation_id = created.json()["operation_id"]
+            preview = await client.post(
+                f"/api/capital/direct-operations/{operation_id}/notilt-unsigned-preview",
+                json={
+                    "expected_version": 1,
+                    "final_confirmed": True,
+                    "idempotency_key": "notilt-request-preview",
+                },
+            )
+            assert preview.status_code == 200, preview.text
+            request_submission = await client.post(
+                f"/api/capital/direct-operations/{operation_id}/wallet-submission",
+                json={
+                    "expected_version": preview.json()["version"],
+                    "stage": "TREASURY_WITHDRAWAL",
+                    "outcome": "SUBMITTED",
+                    "transaction_hash": request_hash,
+                    "final_confirmed": True,
+                    "idempotency_key": "notilt-request-wallet",
+                },
+            )
+            request_receipt = await client.post(
+                f"/api/capital/direct-operations/{operation_id}/notilt-release-receipt",
+                json={
+                    "expected_version": request_submission.json()["version"],
+                    "transaction_hash": request_hash,
+                    "idempotency_key": "notilt-request-receipt",
+                },
+            )
+            assert request_receipt.status_code == 200, request_receipt.text
+            execution_preview = await client.post(
+                f"/api/capital/direct-operations/{operation_id}/notilt-release-execution-preview",
+                json={
+                    "expected_version": request_receipt.json()["version"],
+                    "final_confirmed": True,
+                    "idempotency_key": "notilt-execution-preview",
+                },
+            )
+            assert execution_preview.status_code == 200, execution_preview.text
+            execution_submission = await client.post(
+                f"/api/capital/direct-operations/{operation_id}/wallet-submission",
+                json={
+                    "expected_version": execution_preview.json()["version"],
+                    "stage": "NOTILT_RELEASE_EXECUTION",
+                    "outcome": "SUBMITTED",
+                    "transaction_hash": execution_hash,
+                    "final_confirmed": True,
+                    "idempotency_key": "notilt-execution-wallet",
+                },
+            )
+            execution_receipt = await client.post(
+                f"/api/capital/direct-operations/{operation_id}/notilt-release-receipt",
+                json={
+                    "expected_version": execution_submission.json()["version"],
+                    "transaction_hash": execution_hash,
+                    "idempotency_key": "notilt-execution-receipt",
+                },
+            )
+            assert execution_receipt.status_code == 200, execution_receipt.text
+            destination_preview = await client.post(
+                f"/api/capital/direct-operations/{operation_id}/notilt-destination-preview",
+                json={
+                    "expected_version": execution_receipt.json()["version"],
+                    "final_confirmed": True,
+                    "idempotency_key": "notilt-destination-preview",
+                },
+            )
+            assert destination_preview.status_code == 200, destination_preview.text
+            artifact = destination_preview.json()["artifact"]
+            assert artifact["from"] == "0x5555555555555555555555555555555555555555"
+            assert artifact["recipient"] == "0x3333333333333333333333333333333333333333"
+            assert artifact["amount"] == "100.000000000000000000"
+            destination_submission = await client.post(
+                f"/api/capital/direct-operations/{operation_id}/wallet-submission",
+                json={
+                    "expected_version": destination_preview.json()["version"],
+                    "stage": "NOTILT_DESTINATION_TRANSFER",
+                    "outcome": "SUBMITTED",
+                    "transaction_hash": destination_hash,
+                    "final_confirmed": True,
+                    "idempotency_key": "notilt-destination-wallet",
+                },
+            )
+            assert destination_submission.status_code == 200, destination_submission.text
+
+    asyncio.run(scenario())
+    with database.session_factory() as session:
+        operation = session.scalar(select(DirectCapitalOperation))
+        assert operation is not None
+        assert operation.stages[-1]["code"] == (
+            "NOTILT_DESTINATION_TRANSFER_SUBMITTED_BY_HUMAN_WALLET"
+        )
+        assert operation.version == 9

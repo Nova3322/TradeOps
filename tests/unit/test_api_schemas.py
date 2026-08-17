@@ -7,6 +7,8 @@ from trading_control_plane.api_schemas import (
     AgentAccessRequest,
     AgentCreateRequest,
     AgentProposalRequest,
+    DirectCapitalHyperliquidReceiptRequest,
+    DirectCapitalWalletSubmissionRequest,
     FreqtradeLiveActionRequest,
     ManagedUserAccessRequest,
     ManagedUserCreateRequest,
@@ -17,6 +19,56 @@ from trading_control_plane.api_schemas import (
     TeamMemberInviteRequest,
     TransferProposalRequest,
 )
+
+
+def test_direct_wallet_submission_accepts_automatic_public_evidence() -> None:
+    treasury = DirectCapitalWalletSubmissionRequest.model_validate(
+        {
+            "expected_version": 2,
+            "stage": "TREASURY_WITHDRAWAL",
+            "outcome": "SUBMITTED",
+            "transaction_hash": "0x" + "ab" * 32,
+            "final_confirmed": True,
+            "idempotency_key": "wallet-treasury-withdrawal",
+        }
+    )
+    hyperliquid = DirectCapitalWalletSubmissionRequest.model_validate(
+        {
+            "expected_version": 3,
+            "stage": "HYPERLIQUID_WITHDRAWAL",
+            "outcome": "SUBMITTED",
+            "nonce": 1_700_000_000_000,
+            "final_confirmed": True,
+            "idempotency_key": "wallet-hyperliquid-withdrawal",
+        }
+    )
+    notilt_execution = DirectCapitalWalletSubmissionRequest.model_validate(
+        {
+            "expected_version": 4,
+            "stage": "NOTILT_RELEASE_EXECUTION",
+            "outcome": "SUBMITTED",
+            "transaction_hash": "0x" + "cd" * 32,
+            "final_confirmed": True,
+            "idempotency_key": "wallet-notilt-release-execution",
+        }
+    )
+
+    assert treasury.transaction_hash == "0x" + "ab" * 32
+    assert hyperliquid.action_hash is None
+    assert notilt_execution.transaction_hash == "0x" + "cd" * 32
+
+
+def test_hyperliquid_withdrawal_receipt_can_match_by_nonce_without_manual_hash() -> None:
+    request = DirectCapitalHyperliquidReceiptRequest.model_validate(
+        {
+            "expected_version": 4,
+            "stage": "HYPERLIQUID_WITHDRAWAL_LEDGER",
+            "nonce": 1_700_000_000_000,
+            "idempotency_key": "verify-withdrawal-ledger",
+        }
+    )
+
+    assert request.action_hash is None
 
 
 def proposal_payload() -> dict[str, object]:

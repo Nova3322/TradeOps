@@ -822,6 +822,9 @@ class DirectCapitalWalletSubmissionRequest(BaseModel):
         "HYPERLIQUID_WITHDRAWAL",
         "HYPERLIQUID_CLASS_TRANSFER",
         "TREASURY_DEPOSIT",
+        "TREASURY_WITHDRAWAL",
+        "NOTILT_RELEASE_EXECUTION",
+        "NOTILT_DESTINATION_TRANSFER",
     ]
     outcome: Literal["SUBMITTED", "CANCELLED"]
     transaction_hash: str | None = Field(default=None, pattern=r"^0x[0-9a-fA-F]{64}$")
@@ -836,14 +839,20 @@ class DirectCapitalWalletSubmissionRequest(BaseModel):
             if self.transaction_hash is not None or self.action_hash is not None:
                 raise ValueError("cancelled wallet requests cannot include transaction evidence")
             return self
-        if self.stage in {"HYPERLIQUID_DEPOSIT", "TREASURY_DEPOSIT"} and (
+        if self.stage in {
+            "HYPERLIQUID_DEPOSIT",
+            "TREASURY_DEPOSIT",
+            "TREASURY_WITHDRAWAL",
+            "NOTILT_RELEASE_EXECUTION",
+            "NOTILT_DESTINATION_TRANSFER",
+        } and (
             self.transaction_hash is None
         ):
             raise ValueError("onchain wallet submission requires an Arbitrum transaction hash")
         if self.stage in {"HYPERLIQUID_WITHDRAWAL", "HYPERLIQUID_CLASS_TRANSFER"} and (
-            self.action_hash is None or self.nonce is None
+            self.nonce is None
         ):
-            raise ValueError("Hyperliquid withdrawal submission requires action hash and nonce")
+            raise ValueError("Hyperliquid withdrawal submission requires the signed action nonce")
         return self
 
 
@@ -865,8 +874,8 @@ class DirectCapitalHyperliquidReceiptRequest(BaseModel):
     def validate_receipt_reference(self) -> DirectCapitalHyperliquidReceiptRequest:
         if self.stage.endswith("ARBITRUM") and self.transaction_hash is None:
             raise ValueError("Arbitrum receipt verification requires a transaction hash")
-        if self.stage.endswith("LEDGER") and self.action_hash is None:
-            raise ValueError("Hyperliquid ledger verification requires an action hash")
+        if self.stage == "HYPERLIQUID_DEPOSIT_LEDGER" and self.action_hash is None:
+            raise ValueError("Hyperliquid deposit ledger verification requires the deposit hash")
         if (
             self.stage
             in {

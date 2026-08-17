@@ -31,13 +31,17 @@ test("reads the official Arbitrum Safe allowance without signing",async()=>{
   assert.equal(value.nonce,"7");
 });
 
-test("builds an exact human signature request and never calldata or broadcast",async()=>{
+test("builds an exact delegate wallet transaction without signing or broadcast",async()=>{
   const value=await executeOperation({operation:"prepare-spend",...base,recipient:RECIPIENT,amount:"25"},{client:client()});
   assert.equal(value.kind,"SAFE_ALLOWANCE_SIGNATURE_REQUEST");
   assert.equal(value.transferHash,HASH);
   assert.equal(value.signing,false);
   assert.equal(value.broadcast,false);
-  assert.equal(value.calldataReady,false);
+  assert.equal(value.calldataReady,true);
+  assert.equal(value.from,DELEGATE);
+  assert.equal(value.to,value.module);
+  assert.equal(value.value,"0");
+  assert.match(value.data,/^0x[0-9a-f]+$/);
 });
 
 test("fails closed for disabled module and over-limit amount",async()=>{
