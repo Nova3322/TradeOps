@@ -92,8 +92,7 @@ async function route() {
     }
     else if (path === '/campaigns') await renderCampaignList();
     else if (path === '/accounts') await renderAccountManagement();
-    else if (path === '/team-settings') await renderTeamSettings();
-    else if (path === '/trading-mode') { history.replaceState({}, '', '/accounts'); await renderAccountManagement(); }
+    else if (path === '/team-settings' || path === '/trading-mode') { history.replaceState({}, '', '/home'); await renderHome(); }
     else if (path === '/results') await renderActualResults();
     else if (path === '/notifications') await renderNotifications();
     else if (path === '/campaigns/alerts') await renderRuntimeAlerts();

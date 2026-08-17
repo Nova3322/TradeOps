@@ -107,10 +107,13 @@ function updateEnvironmentIndicators() {
     ? fmtEnvironment(teamMode)
     : localizedText('待配置');
   const labelSeparator = currentLanguage === 'en' ? ': ' : '：';
-  environmentBadge.textContent = `${localizedText('当前模式')}${labelSeparator}${modeLabel}`;
+  environmentModeValue.textContent = modeLabel;
   environmentBadge.dataset.environment = String(teamMode || 'setup').toLowerCase();
   environmentBadge.setAttribute('aria-label', `${localizedText('当前模式')}${labelSeparator}${modeLabel}`);
   environmentBadge.title = `${localizedText('当前模式')}${labelSeparator}${modeLabel} · ${localizedText('当前环境')}${labelSeparator}${deploymentLabel}`;
+  const canOpenModeSwitcher = Boolean(session && hasCapability('venue.view'));
+  environmentBadge.disabled = !canOpenModeSwitcher;
+  if (!canOpenModeSwitcher) environmentBadge.setAttribute('aria-expanded', 'false');
 }
 const fmtVenueLabel = (value) => currentLanguage === 'en'
   ? ({BINANCE:'Binance', HYPERLIQUID:'Hyperliquid', OKX:'OKX', BYBIT:'Bybit', '币安':'Binance', '链上永续':'Hyperliquid'}[value] || value || 'Unknown venue')

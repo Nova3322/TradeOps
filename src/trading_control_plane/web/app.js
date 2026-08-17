@@ -17,6 +17,12 @@ function updateActiveNav() {
 }
 
 document.addEventListener('click', (event) => {
+  const modeSwitchControl = event.target.closest('[data-open-mode-switch]');
+  if (modeSwitchControl) {
+    event.preventDefault();
+    openTeamModeDialog();
+    return;
+  }
   const workspaceOption = event.target.closest('[data-switch-workspace]');
   if (workspaceOption) {
     event.preventDefault();
@@ -70,6 +76,8 @@ document.addEventListener('keydown', (event) => {
   if (event.key === 'Escape' && !userMenuPanel.hidden) closeUserMenu({restoreFocus:true});
 });
 document.querySelectorAll('[data-close-dialog]').forEach(button => button.addEventListener('click', () => dialog.close()));
+teamModeDialog.querySelector('[data-close-mode-switch]')?.addEventListener('click', () => closeTeamModeDialog({restoreFocus:true}));
+teamModeDialog.addEventListener('close', () => environmentBadge.setAttribute('aria-expanded', 'false'));
 document.querySelector('#system-proposal-form').addEventListener('submit', async (event) => {
   event.preventDefault(); const form = event.currentTarget; const data = Object.fromEntries(new FormData(form)); const candidateId = data.candidate_id; delete data.candidate_id; data.environment = currentWorkflowEnvironment(); data.configuration_mode = 'ADVANCED_OVERRIDE'; data.default_config_version = null; data.expires_in_minutes = Number(data.expires_in_hours) * 60; delete data.expires_in_hours; data.initial_quantity = data.initial_quantity || null; data.add_trigger_price = data.add_trigger_price || null; data.allow_auto_add = data.allow_auto_add === 'true'; data.requested_adds = Number(data.requested_adds);
   try { const result = await api(`/api/opportunities/${candidateId}/proposals`, {method:'POST', body:JSON.stringify(data)}); dialog.close(); showToast('系统机会提案已冻结并进入审核'); navigate(`/proposals/${result.proposal_id}`); }

@@ -27,7 +27,7 @@ const currentWorkspaceMembership = () => (session?.workspaces || []).find(
   workspace => workspace.workspace_id === session?.active_workspace?.workspace_id
 );
 const routeCapability = (path) => {
-  if (path === '/' || path === '/workspaces' || path === '/home' || path === '/profile/api-keys' || path === '/profile/api-access' || path === '/admin/agents') return null;
+  if (path === '/' || path === '/workspaces' || path === '/home' || path === '/team-settings' || path === '/trading-mode' || path === '/profile/api-keys' || path === '/profile/api-access' || path === '/admin/agents') return null;
   if (path === '/capital') return 'capital.view';
   if (path === '/opportunities/defaults') return 'proposal.create';
   if (path === '/opportunities') return 'opportunity.view';
@@ -37,7 +37,7 @@ const routeCapability = (path) => {
   if (path === '/reviews') return 'proposal.review';
   if (path === '/proposals' || path.startsWith('/proposals/')) return 'proposal.view';
   if (path === '/campaigns' || path.startsWith('/campaigns/') || path === '/orders' || path === '/exceptions') return 'operations.view';
-  if (path === '/accounts' || path === '/trading-mode' || path === '/team-settings') return 'venue.view';
+  if (path === '/accounts') return 'venue.view';
   if (path === '/results') return 'results.view';
   if (path === '/notifications') return 'notification.view';
   if (path === '/positions' || path === '/risk') return 'system.view';
