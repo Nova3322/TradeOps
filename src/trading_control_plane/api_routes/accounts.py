@@ -237,6 +237,7 @@ class _AccountsRoutes:
                 actor_id=identity.user_id,
                 expected_version=payload.expected_version,
                 idempotency_key=payload.idempotency_key,
+                now=_now(),
             )
             if replay is not None:
                 result = replay

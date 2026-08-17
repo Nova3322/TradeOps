@@ -414,6 +414,7 @@ def create_app(
                 "error": {
                     "code": exc.code,
                     "message": exc.detail,
+                    **({"details": exc.metadata} if exc.metadata is not None else {}),
                     "retryable": exc.code
                     in {
                         "PERPTAPE_UNAVAILABLE",
@@ -421,6 +422,9 @@ def create_app(
                         "PERPTAPE_CACHE_UNAVAILABLE",
                         "PERPTAPE_CACHE_STALE",
                         "BINANCE_READ_ONLY_UNAVAILABLE",
+                        "BINANCE_RATE_LIMITED",
+                        "BINANCE_CONNECTION_RETRY_DEFERRED",
+                        "BINANCE_CAPITAL_RATE_LIMITED",
                         "BINANCE_LIVE_UNAVAILABLE",
                         "BINANCE_LIVE_OUTCOME_UNKNOWN",
                         "HYPERLIQUID_READ_ONLY_UNAVAILABLE",

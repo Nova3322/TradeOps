@@ -12,13 +12,61 @@ from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
 from functools import partial
-from typing import Any
+from typing import Any, cast
 
+from trading_control_plane.binance_errors import (
+    BinanceApiRejected,
+    classify_binance_rate_limit,
+)
 from trading_control_plane.domain import DomainRejected
 
 JsonValue = dict[str, Any] | list[dict[str, Any]]
 JsonFetcher = Callable[[str, dict[str, str], float], JsonValue]
 ServerTimeFetcher = Callable[[float], int]
+
+
+def _binance_http_error(exc: urllib.error.HTTPError) -> tuple[int | None, str | None]:
+    try:
+        raw = json.loads(exc.read())
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return None, None
+    if not isinstance(raw, dict):
+        return None, None
+    raw_code = raw.get("code")
+    try:
+        code = (
+            int(raw_code)
+            if isinstance(raw_code, (int, str)) and not isinstance(raw_code, bool)
+            else None
+        )
+    except (TypeError, ValueError):
+        code = None
+    message = None if raw.get("msg") is None else str(raw["msg"])
+    return code, message
+
+
+def _raise_rate_limit(
+    exc: urllib.error.HTTPError,
+    *,
+    exchange_code: int | None,
+    exchange_message: str | None,
+) -> None:
+    diagnostic = classify_binance_rate_limit(
+        http_status=exc.code,
+        binance_error_code=exchange_code,
+        binance_error_message=exchange_message,
+        headers=cast(dict[str, str], exc.headers or {}),
+    )
+    label = {
+        "ORDINARY_RATE_LIMIT": "ordinary request rate limit",
+        "REQUEST_WEIGHT_EXCEEDED": "request weight limit",
+        "IP_TEMPORARILY_BANNED": "temporary IP ban",
+    }[diagnostic.category]
+    raise BinanceApiRejected(
+        "BINANCE_RATE_LIMITED",
+        f"Binance {label}; retry after next_retry_at",
+        diagnostic,
+    ) from exc
 
 
 def _server_time_from(base_url: str, timeout: float) -> int:
@@ -32,6 +80,19 @@ def _server_time_from(base_url: str, timeout: float) -> int:
             with urllib.request.urlopen(request, timeout=timeout) as response:  # noqa: S310
                 raw = json.loads(response.read())
             return int(raw["serverTime"])
+        except urllib.error.HTTPError as exc:
+            exchange_code, exchange_message = _binance_http_error(exc)
+            if exc.code in {418, 429} or exchange_code == -1003:
+                _raise_rate_limit(
+                    exc,
+                    exchange_code=exchange_code,
+                    exchange_message=exchange_message,
+                )
+            last_error = exc
+            if attempt < 2 and exc.code >= 500:
+                time.sleep(0.25 * 2**attempt)
+                continue
+            break
         except (urllib.error.URLError, TimeoutError) as exc:
             last_error = exc
             if attempt < 2:
@@ -59,21 +120,17 @@ def _default_fetcher(url: str, headers: dict[str, str], timeout: float) -> JsonV
                 body = response.read()
             break
         except urllib.error.HTTPError as exc:
-            exchange_code: int | None = None
-            try:
-                error_body = json.loads(exc.read())
-                if isinstance(error_body, dict):
-                    raw_code = error_body.get("code")
-                    if isinstance(raw_code, (int, str)) and not isinstance(raw_code, bool):
-                        exchange_code = int(raw_code)
-            except (json.JSONDecodeError, TypeError, ValueError):
-                pass
+            exchange_code, exchange_message = _binance_http_error(exc)
             if exc.code in {401, 403} or exchange_code in {-2014, -2015, -1022}:
                 code = "BINANCE_AUTHENTICATION_FAILED"
             elif exchange_code == -1021:
                 code = "BINANCE_TIMESTAMP_REJECTED"
-            elif exc.code == 429 or exchange_code == -1003:
-                code = "BINANCE_RATE_LIMITED"
+            elif exc.code in {418, 429} or exchange_code == -1003:
+                _raise_rate_limit(
+                    exc,
+                    exchange_code=exchange_code,
+                    exchange_message=exchange_message,
+                )
             else:
                 code = "BINANCE_READ_ONLY_UNAVAILABLE"
             if exc.code >= 500 and attempt < 2:

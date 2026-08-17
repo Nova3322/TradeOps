@@ -1288,12 +1288,24 @@ class DirectOperationCapitalService(ServiceComponent):
             if item.version != expected_version:
                 _reject("VERSION_CONFLICT", "direct capital operation changed; refresh first")
             if (
-                item.path != DirectCapitalPath.VAULT_TO_HYPERLIQUID.value
+                item.path
+                not in {
+                    DirectCapitalPath.VAULT_TO_HYPERLIQUID.value,
+                    DirectCapitalPath.VAULT_TO_BINANCE.value,
+                }
                 or item.treasury_provider != "SAFE_SPENDING_LIMIT"
             ):
                 _reject(
                     "TREASURY_RECEIPT_STAGE_INVALID",
                     "Safe source receipt does not match this capital path",
+                )
+            if item.path == DirectCapitalPath.VAULT_TO_BINANCE.value and not any(
+                stage.get("code") == "BINANCE_DEPOSIT_PREFLIGHT_READY"
+                for stage in item.stages
+            ):
+                _reject(
+                    "BINANCE_DEPOSIT_PREFLIGHT_REQUIRED",
+                    "confirm the current exact Binance deposit address before settlement",
                 )
             submitted = next(
                 (
@@ -1326,8 +1338,27 @@ class DirectOperationCapitalService(ServiceComponent):
                     },
                 ]
                 item.version += 1
-            item.status = "AWAITING_RECEIPT"
-            item.receipt_status = "PENDING"
+            if item.path == DirectCapitalPath.VAULT_TO_BINANCE.value:
+                item.status = "SETTLED"
+                item.receipt_status = "CONFIRMED"
+                item.blockers = [
+                    blocker
+                    for blocker in item.blockers
+                    if blocker
+                    not in {
+                        "BINANCE_DEPOSIT_RECEIPT_REQUIRED",
+                        "TREASURY_SOURCE_RECEIPT_REQUIRED",
+                        "HUMAN_WALLET_CONFIRMATION_CANCELLED",
+                    }
+                ]
+            else:
+                item.status = "AWAITING_RECEIPT"
+                item.receipt_status = "PENDING"
+                item.blockers = [
+                    blocker
+                    for blocker in item.blockers
+                    if blocker != "TREASURY_SOURCE_RECEIPT_REQUIRED"
+                ]
             item.updated_at = now
             result = {"operation_id": str(operation_id), "version": item.version}
             self.transactions._save_receipt(
@@ -1345,7 +1376,10 @@ class DirectOperationCapitalService(ServiceComponent):
                 event_type="CAPITAL_TREASURY_WITHDRAWAL_RECEIPT_VERIFIED",
                 object_type="DirectCapitalOperation",
                 object_id=operation_id,
-                reason="safe-to-owned-wallet; public-receipt-verified",
+                reason=(
+                    f"safe-to-frozen-destination; path={item.path}; "
+                    f"public-receipt-verified; settled={item.status == 'SETTLED'}"
+                ),
                 correlation_id=item.correlation_id,
                 object_version=item.version,
                 idempotency_key=idempotency_key,
@@ -1739,6 +1773,21 @@ class DirectOperationCapitalService(ServiceComponent):
                         if blocker
                         not in {
                             "TREASURY_DESTINATION_RECEIPT_REQUIRED",
+                            "HYPERLIQUID_HUMAN_WALLET_CONFIRMATION_REQUIRED",
+                        }
+                    ]
+                elif (
+                    item.path == DirectCapitalPath.VAULT_TO_HYPERLIQUID.value
+                    and "TREASURY_WITHDRAWAL_RECEIPT_CONFIRMED" in confirmed
+                ):
+                    item.status = "SETTLED"
+                    item.receipt_status = "CONFIRMED"
+                    item.blockers = [
+                        blocker
+                        for blocker in item.blockers
+                        if blocker
+                        not in {
+                            "TREASURY_SOURCE_RECEIPT_REQUIRED",
                             "HYPERLIQUID_HUMAN_WALLET_CONFIRMATION_REQUIRED",
                         }
                     ]

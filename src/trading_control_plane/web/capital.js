@@ -542,6 +542,84 @@ async function prepareAndSubmitBinanceWithdrawal({operationId, version}) {
   });
 }
 
+const PUBLIC_RECEIPT_PENDING_CODES = new Set([
+  'ARBITRUM_RECEIPT_NOT_CONFIRMED',
+  'ARBITRUM_RECEIPT_UNAVAILABLE',
+  'HYPERLIQUID_RECEIPT_NOT_CONFIRMED',
+]);
+
+const waitForPublicReceipt = milliseconds => new Promise(resolve => setTimeout(resolve, milliseconds));
+
+async function retryDirectPublicReceipt(request, {attempts = 20, delayMs = 3000} = {}) {
+  let lastPendingError = null;
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    try {
+      return await request();
+    } catch (error) {
+      if (!PUBLIC_RECEIPT_PENDING_CODES.has(error?.code)) throw error;
+      lastPendingError = error;
+      if (attempt + 1 < attempts) await waitForPublicReceipt(delayMs);
+    }
+  }
+  return {pending:true, error:lastPendingError};
+}
+
+async function verifyTreasuryWithdrawalReceipt({operationId, version, transactionHash}) {
+  return retryDirectPublicReceipt(() => api(`/api/capital/direct-operations/${operationId}/treasury-withdrawal-receipt`, {
+    method:'POST',
+    body:JSON.stringify({
+      expected_version:Number(version),
+      transaction_hash:transactionHash,
+      idempotency_key:crypto.randomUUID(),
+    }),
+  }));
+}
+
+async function verifyHyperliquidDepositReceipts({operationId, version, transactionHash}) {
+  const chain = await retryDirectPublicReceipt(() => api(`/api/capital/direct-operations/${operationId}/hyperliquid-receipt`, {
+    method:'POST',
+    body:JSON.stringify({
+      expected_version:Number(version),
+      stage:'HYPERLIQUID_DEPOSIT_ARBITRUM',
+      transaction_hash:transactionHash,
+      idempotency_key:crypto.randomUUID(),
+    }),
+  }));
+  if (chain.pending) return chain;
+  return retryDirectPublicReceipt(() => api(`/api/capital/direct-operations/${operationId}/hyperliquid-receipt`, {
+    method:'POST',
+    body:JSON.stringify({
+      expected_version:Number(chain.version),
+      stage:'HYPERLIQUID_DEPOSIT_LEDGER',
+      action_hash:transactionHash,
+      idempotency_key:crypto.randomUUID(),
+    }),
+  }), {attempts:24, delayMs:5000});
+}
+
+async function continueSafeOutboundExecution({operationId, version, path, transactionHash}) {
+  const treasuryReceipt = await verifyTreasuryWithdrawalReceipt({
+    operationId, version, transactionHash,
+  });
+  if (treasuryReceipt.pending || path === 'VAULT_TO_BINANCE') {
+    return {kind:'WALLET', result:treasuryReceipt, receiptPending:Boolean(treasuryReceipt.pending)};
+  }
+  const hyperliquidAction = await prepareHyperliquidWalletAction({
+    operationId, version:treasuryReceipt.version,
+  });
+  const hyperliquidSubmission = await executeDirectWalletAction(hyperliquidAction);
+  const hyperliquidReceipt = await verifyHyperliquidDepositReceipts({
+    operationId,
+    version:hyperliquidSubmission.recorded.version,
+    transactionHash:hyperliquidSubmission.evidence.transaction_hash,
+  });
+  return {
+    kind:'WALLET',
+    result:hyperliquidSubmission,
+    receiptPending:Boolean(hyperliquidReceipt.pending),
+  };
+}
+
 async function startDirectCapitalExecution({operationId, version, path, treasuryProvider}) {
   if (path === 'BINANCE_TO_VAULT') {
     return {kind:'BINANCE', result:await prepareAndSubmitBinanceWithdrawal({operationId, version})};
@@ -561,7 +639,16 @@ async function startDirectCapitalExecution({operationId, version, path, treasury
   const action = await prepareTreasuryWalletAction({
     operationId, version:currentVersion, path, treasuryProvider,
   });
-  return {kind:'WALLET', result:await executeDirectWalletAction(action)};
+  const treasurySubmission = await executeDirectWalletAction(action);
+  if (treasuryProvider !== 'SAFE_SPENDING_LIMIT') {
+    return {kind:'WALLET', result:treasurySubmission};
+  }
+  return continueSafeOutboundExecution({
+    operationId,
+    version:treasurySubmission.recorded.version,
+    path,
+    transactionHash:treasurySubmission.evidence.transaction_hash,
+  });
 }
 
 function formatDirectCapitalStage(code) {
@@ -782,7 +869,19 @@ async function renderCapitalCenter() {
   const transfers = partitionCapitalRecords(item.transfers);
   const liveInTransit = liveCapitalInTransit(transfers.live);
   const directConfigurationEditor = renderDirectCapitalConfigurationEditor(directConfiguration, selectedTreasuryProvider);
-  const directPathCards = DIRECT_CAPITAL_PATHS.map(path => `<article class="capital-route-card"><div class="capital-route-meta"><span>固定路径</span><strong>${escapeHtml(path.badge)}</strong></div><div class="capital-route-flow"><b>${escapeHtml(path.from)}</b><span aria-hidden="true">→</span><b>${escapeHtml(path.to)}</b></div><p>${escapeHtml(path.copy)}</p><ol>${path.steps.map(step => `<li>${escapeHtml(step)}</li>`).join('')}</ol><button class="secondary capital-route-action" type="button" data-open-capital-path="${escapeHtml(path.path)}">${escapeHtml(path.action)}</button></article>`).join('');
+  const directPathCards = DIRECT_CAPITAL_PATHS.map(path => {
+    const resumable = (item.direct_operations || []).find(operation => {
+      if (operation.path !== path.path || operation.treasury_provider !== 'SAFE_SPENDING_LIMIT' || operation.status === 'SETTLED') return false;
+      const stages = operation.stages || [];
+      const sourceSubmission = [...stages].reverse().find(stage => stage.code === 'TREASURY_WITHDRAWAL_SUBMITTED_BY_HUMAN_WALLET');
+      const targetSubmission = stages.some(stage => stage.code === 'HYPERLIQUID_DEPOSIT_SUBMITTED_BY_HUMAN_WALLET');
+      return Boolean(sourceSubmission?.transaction_hash && !targetSubmission && ['VAULT_TO_BINANCE','VAULT_TO_HYPERLIQUID'].includes(path.path));
+    });
+    const sourceSubmission = resumable && [...(resumable.stages || [])].reverse().find(stage => stage.code === 'TREASURY_WITHDRAWAL_SUBMITTED_BY_HUMAN_WALLET');
+    const resumeAttributes = resumable ? ` data-resume-capital-operation="${escapeHtml(resumable.operation_id)}" data-operation-version="${Number(resumable.version)}" data-transaction-hash="${escapeHtml(sourceSubmission.transaction_hash)}"` : '';
+    const actionLabel = resumable ? (path.path === 'VAULT_TO_HYPERLIQUID' ? '继续已提取资金并充值' : '核对已提交链上划转') : path.action;
+    return `<article class="capital-route-card"><div class="capital-route-meta"><span>固定路径</span><strong>${escapeHtml(path.badge)}</strong></div><div class="capital-route-flow"><b>${escapeHtml(path.from)}</b><span aria-hidden="true">→</span><b>${escapeHtml(path.to)}</b></div><p>${escapeHtml(path.copy)}</p><ol>${path.steps.map(step => `<li>${escapeHtml(step)}</li>`).join('')}</ol><button class="secondary capital-route-action" type="button" data-open-capital-path="${escapeHtml(path.path)}"${resumeAttributes}>${escapeHtml(actionLabel)}</button></article>`;
+  }).join('');
   const directCapitalDialog = `<dialog id="direct-capital-dialog" aria-labelledby="direct-capital-title"><form id="direct-capital-form" class="dialog-form" data-direct-capital-form="" data-treasury-provider="${escapeHtml(selectedTreasuryProvider)}"><div class="dialog-head"><div><p class="eyebrow">资金路径确认</p><h2 id="direct-capital-title" data-capital-path-title>选择资金路径</h2></div><button type="button" class="icon-button" data-close-capital-dialog aria-label="关闭">×</button></div><p class="subtle" data-capital-path-copy></p><div class="selected-provider-summary"><small>当前链上金库</small><b>${escapeHtml(selectedTreasuryProviderLabel)}</b><span>如需切换，请由管理员先保存新的资金路径配置。</span></div><input name="path" type="hidden"><label>金额（USDC）<input name="amount" type="number" step="any" min="0.000001" required placeholder="输入划转金额"></label><p class="safety-note">点击“确认并继续”即确认当前资金方向与金额。系统先完成实时预检：链上操作直接唤起钱包由你签名；币安转出通过受限 API 直接提交。任何条件缺失仍会阻断。</p><div class="form-error" role="alert"></div><div class="dialog-actions"><button type="button" class="secondary" data-close-capital-dialog>取消</button><button class="primary" type="submit">确认并继续</button></div></form></dialog>`;
   const directRows = (item.direct_operations || []).map(operation => {
     const pathDefinition = DIRECT_CAPITAL_PATHS.find(path => path.path === operation.path);
@@ -1326,7 +1425,23 @@ function bindCapitalActions() {
   });
   const directCapitalDialog = document.querySelector('#direct-capital-dialog');
   const directCapitalForm = document.querySelector('#direct-capital-form');
-  document.querySelectorAll('[data-open-capital-path]').forEach(button => button.addEventListener('click', event => {
+  document.querySelectorAll('[data-open-capital-path]').forEach(button => button.addEventListener('click', async event => {
+    const target = event.currentTarget;
+    if (target.dataset.resumeCapitalOperation) {
+      await withPending(target, '正在核对链上回执…', async () => {
+        try {
+          const result = await continueSafeOutboundExecution({
+            operationId:target.dataset.resumeCapitalOperation,
+            version:Number(target.dataset.operationVersion),
+            path:target.dataset.openCapitalPath,
+            transactionHash:target.dataset.transactionHash,
+          });
+          showToast(result.receiptPending ? '交易已提交，链上或 Hyperliquid 公开回执仍在确认' : '链上回执已确认，资金路径已完成');
+          await route();
+        } catch (error) { showApiError(error); await route(); }
+      });
+      return;
+    }
     const path = DIRECT_CAPITAL_PATHS.find(item => item.path === event.currentTarget.dataset.openCapitalPath);
     if (!path || !directCapitalDialog || !directCapitalForm) return;
     directCapitalForm.reset();

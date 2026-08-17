@@ -1843,6 +1843,7 @@ class AccountService(ServiceComponent):
         actor_id: UUID,
         expected_version: int,
         idempotency_key: str,
+        now: datetime | None = None,
     ) -> tuple[PreparedExchangeConnectionVerification | None, dict[str, Any] | None]:
         """Authorize and decrypt a version-pinned probe after checking for a replay."""
         with self.database.session_factory.begin() as session:
@@ -1884,6 +1885,20 @@ class AccountService(ServiceComponent):
                 _reject("EXCHANGE_ACCOUNT_INACTIVE", "exchange account is inactive")
             if account.version != expected_version:
                 _reject("VERSION_CONFLICT", "exchange account version changed")
+            diagnostics = (account.credential_metadata or {}).get("last_connection_error")
+            if account.venue == "BINANCE" and isinstance(diagnostics, dict):
+                raw_next_retry = diagnostics.get("next_retry_at")
+                try:
+                    next_retry_at = datetime.fromisoformat(str(raw_next_retry))
+                except (TypeError, ValueError):
+                    next_retry_at = None
+                current_time = (now or datetime.now(UTC)).astimezone(UTC)
+                if next_retry_at is not None and current_time < next_retry_at.astimezone(UTC):
+                    raise DomainRejected(
+                        "BINANCE_CONNECTION_RETRY_DEFERRED",
+                        "Binance connection verification is deferred until next_retry_at",
+                        metadata=dict(diagnostics),
+                    )
             if account.credentials_ciphertext is None or account.credential_version < 1:
                 _reject(
                     "EXCHANGE_ACCOUNT_CREDENTIALS_MISSING",
@@ -1987,6 +2002,14 @@ class AccountService(ServiceComponent):
                 )
             account.connection_status = "VERIFIED" if outcome.success else "FAILED"
             account.connection_error_code = error_code
+            credential_metadata = dict(account.credential_metadata or {})
+            if outcome.success:
+                credential_metadata.pop("last_connection_error", None)
+            elif outcome.diagnostics is not None:
+                credential_metadata["last_connection_error"] = dict(outcome.diagnostics)
+            else:
+                credential_metadata.pop("last_connection_error", None)
+            account.credential_metadata = credential_metadata
             account.last_connection_check_at = now
             if outcome.success:
                 account.last_verified_at = now
@@ -2013,6 +2036,11 @@ class AccountService(ServiceComponent):
                         None
                         if account.last_verified_at is None
                         else account.last_verified_at.astimezone(UTC).isoformat()
+                    ),
+                    **(
+                        {"diagnostics": outcome.diagnostics}
+                        if not outcome.success and outcome.diagnostics is not None
+                        else {}
                     ),
                 },
                 "trading": {
@@ -2064,6 +2092,16 @@ class AccountService(ServiceComponent):
                         "venue": account.venue,
                         "connection_status": account.connection_status,
                         "error_code": error_code,
+                        "error_category": (
+                            None
+                            if outcome.diagnostics is None
+                            else outcome.diagnostics.get("category")
+                        ),
+                        "next_retry_at": (
+                            None
+                            if outcome.diagnostics is None
+                            else outcome.diagnostics.get("next_retry_at")
+                        ),
                         "trading_status": account.trading_status,
                     },
                     object_type="ExchangeAccount",

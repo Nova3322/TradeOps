@@ -11,8 +11,13 @@ import urllib.request
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal, InvalidOperation
-from typing import Any, NoReturn
+from typing import Any, NoReturn, cast
 
+from trading_control_plane.binance_errors import (
+    BinanceApiDiagnostic,
+    BinanceApiRejected,
+    classify_binance_rate_limit,
+)
 from trading_control_plane.domain import DomainRejected
 
 JsonValue = Any
@@ -71,6 +76,26 @@ def _evm_address(value: str, *, field: str) -> str:
     return value.lower()
 
 
+def _binance_http_error(exc: urllib.error.HTTPError) -> tuple[int | None, str | None]:
+    try:
+        raw = json.loads(exc.read())
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return None, None
+    if not isinstance(raw, dict):
+        return None, None
+    raw_code = raw.get("code")
+    try:
+        code = (
+            int(raw_code)
+            if isinstance(raw_code, (int, str)) and not isinstance(raw_code, bool)
+            else None
+        )
+    except (TypeError, ValueError):
+        code = None
+    message = None if raw.get("msg") is None else str(raw["msg"])
+    return code, message
+
+
 class BinanceCapitalGateway:
     """Restricted Binance Wallet API boundary.
 
@@ -89,6 +114,7 @@ class BinanceCapitalGateway:
         timeout_seconds: float = 8,
         transport: Transport | None = None,
         clock_ms: Callable[[], int] | None = None,
+        rate_limit_state: dict[str, BinanceApiDiagnostic] | None = None,
     ) -> None:
         self._base_url = _official_base_url(base_url)
         self._active_base_url = self._base_url
@@ -100,6 +126,7 @@ class BinanceCapitalGateway:
         self._clock_ms = clock_ms or (lambda: int(time.time() * 1000))
         self._clock_offset_ms = 0
         self._clock_synchronized_at = 0.0
+        self._rate_limit_state = rate_limit_state if rate_limit_state is not None else {}
 
     def __repr__(self) -> str:
         return (
@@ -121,6 +148,50 @@ class BinanceCapitalGateway:
             timeout_seconds=self._timeout_seconds,
             transport=self._transport,
             clock_ms=self._clock_ms,
+            rate_limit_state=self._rate_limit_state,
+        )
+
+    def _rate_limit_key(self) -> str:
+        return hashlib.sha256(str(self._api_key or "").encode()).hexdigest()
+
+    def _enforce_rate_limit_backoff(self) -> None:
+        diagnostic = self._rate_limit_state.get(self._rate_limit_key())
+        if diagnostic is None or datetime.now(UTC) >= diagnostic.next_retry_at:
+            return
+        labels = {
+            "ORDINARY_RATE_LIMIT": "ordinary request rate limit",
+            "REQUEST_WEIGHT_EXCEEDED": "request weight limit",
+            "IP_TEMPORARILY_BANNED": "temporary IP ban",
+        }
+        raise BinanceApiRejected(
+            "BINANCE_CAPITAL_RATE_LIMITED",
+            f"Binance {labels[diagnostic.category]}; retry after next_retry_at",
+            diagnostic,
+        )
+
+    def _rate_limit_rejection(
+        self,
+        exc: urllib.error.HTTPError,
+        *,
+        binance_error_code: int | None,
+        binance_error_message: str | None,
+    ) -> BinanceApiRejected:
+        diagnostic = classify_binance_rate_limit(
+            http_status=exc.code,
+            binance_error_code=binance_error_code,
+            binance_error_message=binance_error_message,
+            headers=cast(dict[str, str], exc.headers or {}),
+        )
+        self._rate_limit_state[self._rate_limit_key()] = diagnostic
+        label = {
+            "ORDINARY_RATE_LIMIT": "ordinary request rate limit",
+            "REQUEST_WEIGHT_EXCEEDED": "request weight limit",
+            "IP_TEMPORARILY_BANNED": "temporary IP ban",
+        }[diagnostic.category]
+        return BinanceApiRejected(
+            "BINANCE_CAPITAL_RATE_LIMITED",
+            f"Binance {label}; retry after next_retry_at",
+            diagnostic,
         )
 
     def _timestamp_ms(self) -> int:
@@ -143,6 +214,15 @@ class BinanceCapitalGateway:
                         raw = json.loads(response.read())
                     server_time = int(raw["serverTime"])
                     break
+                except urllib.error.HTTPError as exc:
+                    code, message = _binance_http_error(exc)
+                    if exc.code in {418, 429} or code == -1003:
+                        raise self._rate_limit_rejection(
+                            exc,
+                            binance_error_code=code,
+                            binance_error_message=message,
+                        ) from exc
+                    last_error = exc
                 except (
                     KeyError,
                     TypeError,
@@ -169,6 +249,7 @@ class BinanceCapitalGateway:
             )
         assert self._api_key is not None
         assert self._api_secret is not None
+        self._enforce_rate_limit_backoff()
         semantic_params = {
             key: str(value) for key, value in (params or {}).items() if value is not None
         }
@@ -218,11 +299,7 @@ class BinanceCapitalGateway:
                 self._active_base_url = base_url
                 return result
             except urllib.error.HTTPError as exc:
-                try:
-                    raw = json.loads(exc.read())
-                    code = raw.get("code") if isinstance(raw, dict) else None
-                except (json.JSONDecodeError, UnicodeDecodeError):
-                    code = None
+                code, message = _binance_http_error(exc)
                 if code in {-2014, -2015} or exc.code in {401, 403}:
                     error_code = "BINANCE_CAPITAL_AUTHORIZATION_REJECTED"
                     detail = (
@@ -232,8 +309,11 @@ class BinanceCapitalGateway:
                     error_code = "BINANCE_CAPITAL_TIMESTAMP_REJECTED"
                     detail = "Binance rejected the signed request timestamp"
                 elif code == -1003 or exc.code in {418, 429}:
-                    error_code = "BINANCE_CAPITAL_RATE_LIMITED"
-                    detail = "Binance rate limited the capital API request"
+                    raise self._rate_limit_rejection(
+                        exc,
+                        binance_error_code=code,
+                        binance_error_message=message,
+                    ) from exc
                 elif exc.code >= 500:
                     error_code = "BINANCE_CAPITAL_API_UNAVAILABLE"
                     detail = "Binance Wallet API returned a server error"

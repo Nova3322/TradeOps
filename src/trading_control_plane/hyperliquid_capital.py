@@ -8,8 +8,9 @@ import urllib.request
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal, InvalidOperation
-from typing import Any, NoReturn
+from typing import Any, NoReturn, cast
 
+import requests
 from hyperliquid.utils.signing import (  # type: ignore[import-untyped]
     USD_CLASS_TRANSFER_SIGN_TYPES,
     WITHDRAW_SIGN_TYPES,
@@ -113,19 +114,20 @@ def _default_info_fetcher(url: str, payload: JsonObject, timeout: float) -> Any:
 
 
 def _default_rpc_fetcher(rpc_url: str, method: str, params: list[object], timeout: float) -> Any:
-    request = urllib.request.Request(  # noqa: S310
-        rpc_url,
-        data=json.dumps(
-            {"jsonrpc": "2.0", "id": 1, "method": method, "params": params},
-            separators=(",", ":"),
-        ).encode(),
-        headers={"Content-Type": "application/json"},
-        method="POST",
-    )
     try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:  # noqa: S310
-            body = json.loads(response.read())
-    except (json.JSONDecodeError, urllib.error.URLError, TimeoutError) as exc:
+        response = requests.post(
+            rpc_url,
+            json={
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": method,
+                "params": cast(Any, list(params)),
+            },
+            timeout=timeout,
+        )
+        response.raise_for_status()
+        body = response.json()
+    except (requests.RequestException, requests.JSONDecodeError) as exc:
         raise DomainRejected(
             "ARBITRUM_RECEIPT_UNAVAILABLE",
             "trusted Arbitrum RPC did not return a valid bounded response",

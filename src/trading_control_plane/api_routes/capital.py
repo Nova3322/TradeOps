@@ -1223,30 +1223,34 @@ class _CapitalRoutes:
                     "VERSION_CONFLICT", "direct capital operation changed; refresh"
                 )
             if (
-                context["path"] != DirectCapitalPath.VAULT_TO_HYPERLIQUID.value
+                context["path"]
+                not in {
+                    DirectCapitalPath.VAULT_TO_HYPERLIQUID.value,
+                    DirectCapitalPath.VAULT_TO_BINANCE.value,
+                }
                 or context["treasury_provider"] != "SAFE_SPENDING_LIMIT"
             ):
                 raise DomainRejected(
                     "TREASURY_RECEIPT_STAGE_INVALID",
-                    "source receipt is only valid for Safe to Hyperliquid paths",
+                    "source receipt is only valid for outbound Safe capital paths",
                 )
             direct_settings, _ = self.effective_direct_capital_settings(identity.user_id)
             safe = direct_settings.capital_direct_safe_address
-            owned = direct_settings.capital_direct_owned_arbitrum_address
+            destination = context["destination_reference"]
             rpc_url = (
                 direct_settings.capital_arbitrum_rpc_url
                 or direct_settings.safe_spending_arbitrum_rpc_url
             )
-            if safe is None or owned is None or rpc_url is None:
+            if safe is None or destination is None or rpc_url is None:
                 raise DomainRejected(
                     "SAFE_SPENDING_LIMIT_NOT_CONFIGURED",
-                    "Safe, owned wallet and trusted Arbitrum RPC are required",
+                    "Safe, frozen destination and trusted Arbitrum RPC are required",
                 )
-            evidence = self.resolved_hyperliquid_capital.verify_arbitrum_usdc_transfer(
+            evidence = self.resolved_hyperliquid_capital.verify_arbitrum_usdc_credit(
                 rpc_url=rpc_url,
                 transaction_hash=payload.transaction_hash,
                 sender=safe,
-                recipient=owned,
+                recipient=str(destination),
                 amount=str(context["min_received"]),
                 min_confirmations=direct_settings.notilt_arbitrum_min_confirmations,
             )
@@ -1313,6 +1317,16 @@ class _CapitalRoutes:
                     "a Hyperliquid main account or resolvable authorized API wallet is required",
                 )
             if path is DirectCapitalPath.VAULT_TO_HYPERLIQUID:
+                if not any(
+                    isinstance(stage, dict)
+                    and stage.get("code") == "TREASURY_WITHDRAWAL_RECEIPT_CONFIRMED"
+                    for stage in context["stages"]
+                ):
+                    raise DomainRejected(
+                        "TREASURY_SOURCE_RECEIPT_REQUIRED",
+                        "confirm the exact Safe source transfer before preparing the bridge "
+                        "deposit",
+                    )
                 artifact = self.resolved_hyperliquid_capital.prepare_deposit(
                     base_url=direct_settings.hyperliquid_base_url,
                     main_account=main_account,
@@ -1534,11 +1548,18 @@ class _CapitalRoutes:
                 idempotency_key=payload.idempotency_key,
                 now=now,
             )
+            updated_context = self.service().direct_capital_operation_context(
+                operation_id, identity.user_id, now=now
+            )
             return {
                 "operation_id": str(operation_id),
                 "version": version,
                 "receipt": evidence,
-                "settlement": "HYPERLIQUID_LEG_CONFIRMED_TREASURY_RECEIPT_STILL_REQUIRED",
+                "settlement": (
+                    "CONFIRMED"
+                    if updated_context["status"] == "SETTLED"
+                    else "HYPERLIQUID_LEG_CONFIRMED_TREASURY_RECEIPT_STILL_REQUIRED"
+                ),
                 "data": self.capital_snapshot(identity.user_id),
             }
 
