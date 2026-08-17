@@ -549,6 +549,23 @@ def create_app(
 
     def capital_snapshot(user_id: UUID) -> dict[str, Any]:
         direct_settings, saved_config = effective_direct_capital_settings(user_id)
+        binance_account_id = direct_settings.capital_direct_binance_account_id
+        database_binance_capital_credentials = False
+        if binance_account_id is not None:
+            try:
+                database_binance_capital_credentials = (
+                    service().capital_account_credentials_configured(
+                        actor_id=user_id,
+                        account_id=binance_account_id,
+                        venue="BINANCE",
+                        environment="LIVE",
+                    )
+                )
+            except DomainRejected:
+                database_binance_capital_credentials = False
+        binance_capital_credentials_configured = bool(
+            resolved_binance_capital.configured or database_binance_capital_credentials
+        )
         configured_chain_id: int | None
         try:
             configured_chain_id = notilt_chain_id_for_network(
@@ -736,7 +753,16 @@ def create_app(
             "binance_withdrawal_destination_configured": (
                 direct_settings.capital_direct_binance_withdrawal_address is not None
             ),
-            "binance_capital_credentials_configured": resolved_binance_capital.configured,
+            "binance_capital_credentials_configured": (
+                binance_capital_credentials_configured
+            ),
+            "binance_capital_credentials_source": (
+                "ACCOUNT_MANAGEMENT"
+                if database_binance_capital_credentials
+                else "ENVIRONMENT"
+                if resolved_binance_capital.configured
+                else None
+            ),
             "binance_capital_submission_enabled": (
                 direct_settings.binance_capital_withdraw_enabled
             ),

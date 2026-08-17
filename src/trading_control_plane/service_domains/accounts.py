@@ -6,6 +6,8 @@ from trading_control_plane.service_component import ServiceComponent
 # ruff: noqa: F403, F405
 from trading_control_plane.service_core import *
 from trading_control_plane.service_domains.account_registry import (
+    capital_account_binding,
+    capital_account_credentials_configured,
     delete_exchange_account,
     exchange_account_definition,
     execution_account_binding,
@@ -16,6 +18,8 @@ from trading_control_plane.service_domains.account_registry import (
 
 class AccountService(ServiceComponent):
     _exchange_account_definition = staticmethod(exchange_account_definition)
+    capital_account_binding = capital_account_binding
+    capital_account_credentials_configured = capital_account_credentials_configured
     delete_exchange_account = delete_exchange_account
     execution_account_binding = execution_account_binding
     update_exchange_account = update_exchange_account

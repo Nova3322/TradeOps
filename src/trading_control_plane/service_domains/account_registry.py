@@ -122,6 +122,126 @@ def execution_account_binding(
         )
 
 
+def capital_account_credentials_configured(
+    self: ServiceComponent,
+    *,
+    actor_id: UUID,
+    account_id: str,
+    venue: str,
+    environment: str,
+) -> bool:
+    """Report whether the exact capital account has verified encrypted credentials.
+
+    This read path intentionally does not decrypt credential material.  It is used by
+    the capital-center snapshot and plan builder so an account-managed credential can
+    satisfy the capital preflight without copying secrets into process environment
+    variables.
+    """
+    normalized_venue = venue.strip().upper()
+    normalized_environment = environment.strip().upper()
+    with self.database.session_factory() as session:
+        team = self.transactions._require_role(
+            session,
+            actor_id,
+            "capital.view",
+            account_id,
+            normalized_venue,
+        )
+        if team.execution_mode != normalized_environment:
+            return False
+        account = session.scalar(
+            select(ExchangeAccount).where(
+                ExchangeAccount.team_id == team.team_id,
+                ExchangeAccount.environment == normalized_environment,
+                ExchangeAccount.account_id == account_id,
+                ExchangeAccount.venue == normalized_venue,
+                ExchangeAccount.deleted_at.is_(None),
+            )
+        )
+        return bool(
+            account is not None
+            and account.active
+            and account.connection_status == "VERIFIED"
+            and account.credentials_ciphertext is not None
+            and account.credential_version >= 1
+            and (account.credential_metadata or {}).get("environment")
+            == normalized_environment
+        )
+
+
+def capital_account_binding(
+    self: ServiceComponent,
+    *,
+    actor_id: UUID,
+    account_id: str,
+    venue: str,
+    environment: str,
+) -> PreparedExecutionAccountBinding:
+    """Decrypt only the exact verified account selected by a capital operation."""
+    normalized_venue = venue.strip().upper()
+    normalized_environment = environment.strip().upper()
+    with self.database.session_factory() as session:
+        team = self.transactions._require_role(
+            session,
+            actor_id,
+            "capital.execute",
+            account_id,
+            normalized_venue,
+        )
+        if team.execution_mode != normalized_environment:
+            _reject(
+                "CAPITAL_ACCOUNT_ENVIRONMENT_MISMATCH",
+                "capital credentials must match the team's current execution mode",
+            )
+        account = session.scalar(
+            select(ExchangeAccount).where(
+                ExchangeAccount.team_id == team.team_id,
+                ExchangeAccount.environment == normalized_environment,
+                ExchangeAccount.account_id == account_id,
+                ExchangeAccount.venue == normalized_venue,
+                ExchangeAccount.deleted_at.is_(None),
+            )
+        )
+        if account is None or not account.active:
+            _reject("CAPITAL_ACCOUNT_NOT_FOUND", "the exact capital account is not active")
+        if (
+            account.connection_status != "VERIFIED"
+            or account.credentials_ciphertext is None
+            or account.credential_version < 1
+        ):
+            _reject(
+                "CAPITAL_ACCOUNT_CREDENTIALS_NOT_READY",
+                "capital operations require verified encrypted account credentials",
+            )
+        if (account.credential_metadata or {}).get("environment") != normalized_environment:
+            _reject(
+                "CREDENTIAL_ENVIRONMENT_MISMATCH",
+                "stored credentials do not match the capital account environment",
+            )
+        credentials = self.credential_cipher.decrypt(
+            account.credentials_ciphertext,
+            team_id=account.team_id,
+            exchange_account_id=account.exchange_account_id,
+            venue=account.venue,
+            credential_version=account.credential_version,
+        )
+        if not credentials.get("api_key") or not credentials.get("api_secret"):
+            _reject(
+                "CAPITAL_ACCOUNT_CREDENTIALS_NOT_READY",
+                "capital account credentials are incomplete",
+            )
+        return PreparedExecutionAccountBinding(
+            exchange_account_id=account.exchange_account_id,
+            team_id=account.team_id,
+            account_id=account.account_id,
+            venue=account.venue,
+            environment=account.environment,
+            account_version=account.version,
+            credential_version=account.credential_version,
+            credentials=credentials,
+        )
+
+
 def delete_exchange_account(
     self: ServiceComponent,
     exchange_account_id: UUID,

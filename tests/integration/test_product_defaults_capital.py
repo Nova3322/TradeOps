@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -90,14 +91,22 @@ def _app(
     hyperliquid_capital_gateway: HyperliquidCapitalGateway | None = None,
     binance_capital_gateway: BinanceCapitalGateway | None = None,
     binance_capital_withdraw_enabled: bool = False,
+    binance_capital_environment_credentials: bool | None = None,
+    credential_encryption_key: str | None = None,
     runtime_binance_account_id: str | None = None,
     runtime_hyperliquid_account_id: str | None = None,
 ):
+    environment_capital_credentials = (
+        binance_capital_withdraw_enabled
+        if binance_capital_environment_credentials is None
+        else binance_capital_environment_credentials
+    )
     settings = Settings(
         environment="test",
         database_url=str(database.engine.url),
         allow_mock_identity=True,
         session_signing_secret="product-flows-test-signing-secret",  # noqa: S106
+        credential_encryption_key=credential_encryption_key,
         runtime_sync_enabled=True,
         runtime_binance_account_id=runtime_binance_account_id,
         runtime_hyperliquid_account_id=runtime_hyperliquid_account_id,
@@ -108,10 +117,10 @@ def _app(
         capital_direct_binance_deposit_address=("0x3333333333333333333333333333333333333333"),
         capital_direct_binance_withdrawal_address=("0x1111111111111111111111111111111111111111"),
         binance_capital_api_key=(
-            "test-binance-capital-key" if binance_capital_withdraw_enabled else None
+            "test-binance-capital-key" if environment_capital_credentials else None
         ),
         binance_capital_api_secret=(
-            "test-binance-capital-secret" if binance_capital_withdraw_enabled else None
+            "test-binance-capital-secret" if environment_capital_credentials else None
         ),
         binance_capital_withdraw_enabled=binance_capital_withdraw_enabled,
         capital_direct_hyperliquid_account_id="hyperliquid-main",
@@ -521,6 +530,11 @@ def test_safe_spending_limit_provider_is_selected_audited_and_never_signed(
             assert direct_config["safe_delegate_address"] == (
                 "0x8888888888888888888888888888888888888888"
             )
+            refreshed = await client.get("/api/capital")
+            assert refreshed.status_code == 200, refreshed.text
+            assert refreshed.json()["data"]["net_worth"]["onchain_probe"]["status"] == (
+                "SUCCESS"
+            )
 
             await _login(client, "safe-provider-treasury")
             created = await client.post(
@@ -547,6 +561,8 @@ def test_safe_spending_limit_provider_is_selected_audited_and_never_signed(
             body = preview.json()
             assert body["signing"] is False and body["broadcast"] is False
             assert body["signature_request"]["calldataReady"] is False
+            assert "SAFE_ALLOWANCE_PREFLIGHT_REQUIRED" not in body["blockers"]
+            assert "BINANCE_DEPOSIT_PREFLIGHT_REQUIRED" in body["blockers"]
             assert body["data"]["real_transfer_gate"] == "DISABLED"
 
             inbound = await client.post(
@@ -960,6 +976,142 @@ def test_binance_restricted_withdrawal_runs_frozen_preflight_submission_and_dual
         "CAPITAL_BINANCE_WITHDRAWAL_SUBMITTED",
         "CAPITAL_BINANCE_RECEIPT_VERIFIED",
     }.issubset(events)
+
+
+def test_binance_capital_uses_verified_account_managed_credentials_and_keeps_invalid_fee_plan(
+    database: Database,
+) -> None:
+    credential_key = base64.urlsafe_b64encode(
+        b"capital-account-test-key-32-byte"[:32]
+    ).decode().rstrip("=")
+    service = TradingService(database, credential_encryption_key=credential_key)
+    now = datetime.now(UTC)
+    admin_id = service.bootstrap_admin("database-capital-admin", now=now)
+    exchange_account_id = service.create_exchange_account(
+        actor_id=admin_id,
+        account_id="binance-main",
+        venue="BINANCE",
+        label="Main Binance",
+        credentials={"api_key": "database-key", "api_secret": "database-secret"},
+        idempotency_key="database-capital-account",
+        now=now,
+    )
+    with database.session_factory.begin() as session:
+        account = session.get(ExchangeAccount, exchange_account_id)
+        assert account is not None
+        account.connection_status = "VERIFIED"
+        account.last_connection_check_at = now
+        account.last_verified_at = now
+    service.set_capability_gate(
+        "CAPITAL_TRANSFER",
+        CapabilityStatus.ENABLED,
+        "account-managed credential integration test",
+        admin_id,
+        now=now,
+    )
+
+    destination = "0x1111111111111111111111111111111111111111"
+    calls: list[tuple[str, str, dict[str, str]]] = []
+
+    def transport(method: str, path: str, params: dict[str, str], _timeout: float):
+        calls.append((method, path, params))
+        if path == "/sapi/v1/account/apiRestrictions":
+            return {"ipRestrict": True, "enableReading": True, "enableWithdrawals": True}
+        if path == "/sapi/v1/capital/config/getall":
+            return [
+                {
+                    "coin": "USDC",
+                    "free": "100",
+                    "networkList": [
+                        {
+                            "network": "ARBITRUM",
+                            "depositEnable": True,
+                            "withdrawEnable": True,
+                            "busy": False,
+                            "withdrawTag": False,
+                            "withdrawFee": "0.1",
+                            "withdrawMin": "1",
+                            "withdrawMax": "1000",
+                        }
+                    ],
+                }
+            ]
+        if path == "/sapi/v1/capital/withdraw/address/list":
+            return [
+                {
+                    "coin": "USDC",
+                    "network": "ARBITRUM",
+                    "address": destination,
+                    "whiteStatus": True,
+                }
+            ]
+        if path == "/sapi/v1/localentity/questionnaire-requirements":
+            return "NIL"
+        if path == "/sapi/v1/capital/withdraw/quota":
+            return {"wdQuota": "1000", "usedWdQuota": "0"}
+        raise AssertionError(path)
+
+    async def scenario() -> None:
+        async with AsyncClient(
+            transport=ASGITransport(
+                app=_app(
+                    database,
+                    binance_capital_gateway=BinanceCapitalGateway(transport=transport),
+                    binance_capital_withdraw_enabled=True,
+                    binance_capital_environment_credentials=False,
+                    credential_encryption_key=credential_key,
+                )
+            ),
+            base_url="http://test",
+        ) as client:
+            await _login(client, "database-capital-admin")
+            center = await client.get("/api/capital")
+            assert center.status_code == 200, center.text
+            configuration = center.json()["data"]["direct_configuration"]
+            assert configuration["binance_capital_credentials_configured"] is True
+            assert configuration["binance_capital_credentials_source"] == "ACCOUNT_MANAGEMENT"
+            assert configuration["binance_capital_submission_enabled"] is True
+
+            invalid_fee = await client.post(
+                "/api/capital/direct-operations",
+                json={
+                    "path": "BINANCE_TO_VAULT",
+                    "amount": "0.1",
+                    "final_confirmed": True,
+                    "idempotency_key": "database-capital-invalid-fee",
+                },
+            )
+            assert invalid_fee.status_code == 200, invalid_fee.text
+            assert "CAPITAL_MIN_RECEIVED_INVALID" in invalid_fee.json()["blockers"]
+            assert "BINANCE_CAPITAL_CREDENTIALS_MISSING" not in invalid_fee.json()["blockers"]
+
+            created = await client.post(
+                "/api/capital/direct-operations",
+                json={
+                    "path": "BINANCE_TO_VAULT",
+                    "amount": "25",
+                    "final_confirmed": True,
+                    "idempotency_key": "database-capital-create",
+                },
+            )
+            assert created.status_code == 200, created.text
+            assert "BINANCE_CAPITAL_CREDENTIALS_MISSING" not in created.json()["blockers"]
+            preview = await client.post(
+                f"/api/capital/direct-operations/{created.json()['operation_id']}/binance-preview",
+                json={
+                    "expected_version": 1,
+                    "final_confirmed": True,
+                    "idempotency_key": "database-capital-preview",
+                },
+            )
+            assert preview.status_code == 200, preview.text
+            assert preview.json()["credentials_configured"] is True
+            assert preview.json()["artifact"]["withdrawPermission"] is True
+            assert "database-secret" not in preview.text
+
+    asyncio.run(scenario())
+    assert calls
+    assert all("signature" not in params for _, _, params in calls)
 
 
 def test_proposal_defaults_and_direct_capital_are_permissioned_audited_and_blocked(

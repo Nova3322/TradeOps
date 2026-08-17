@@ -706,6 +706,7 @@ __all__ = [
     "PnlBreakdown",
     "Position",
     "PreparedExchangeConnectionVerification",
+    "PreparedExecutionAccountBinding",
     "PreparedFreqtradeDispatch",
     "PreparedFreqtradeWorkerBinding",
     "PreparedPerptapeRuntimeBinding",

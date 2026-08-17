@@ -75,6 +75,7 @@ def build_direct_capital_plan(
     amount: Decimal,
     settings: Settings,
     capital_transfer_gate: str | None,
+    binance_capital_credentials_configured: bool | None = None,
     now: datetime,
 ) -> DirectCapitalPlan:
     """Build a fully explicit, non-broadcasting capital path plan."""
@@ -131,9 +132,12 @@ def build_direct_capital_plan(
             and withdrawal_address.lower() != vault_address.lower()
         ):
             blockers.append("CAPITAL_BINANCE_WITHDRAWAL_ADDRESS_SCOPE_MISMATCH")
-    if venue == "BINANCE" and not (
-        settings.binance_capital_api_key and settings.binance_capital_api_secret
-    ):
+    binance_credentials_ready = (
+        bool(settings.binance_capital_api_key and settings.binance_capital_api_secret)
+        if binance_capital_credentials_configured is None
+        else binance_capital_credentials_configured
+    )
+    if venue == "BINANCE" and not binance_credentials_ready:
         blockers.append("BINANCE_CAPITAL_CREDENTIALS_MISSING")
     for code, value in required.items():
         if not value:
@@ -152,14 +156,17 @@ def build_direct_capital_plan(
         DirectCapitalPath.BINANCE_TO_VAULT,
         DirectCapitalPath.HYPERLIQUID_TO_VAULT,
     }
+    invalid_min_received = (
+        fee_is_deducted_from_usdc and max_fee is not None and amount <= max_fee
+    )
     min_received = (
         None
-        if max_fee is None
+        if max_fee is None or invalid_min_received
         else amount - max_fee
         if fee_is_deducted_from_usdc
         else amount
     )
-    if fee_is_deducted_from_usdc and max_fee is not None and amount <= max_fee:
+    if invalid_min_received:
         blockers.append("CAPITAL_MIN_RECEIVED_INVALID")
 
     execute_after: datetime | None = None
@@ -172,7 +179,12 @@ def build_direct_capital_plan(
             {"code": "HUMAN_DELEGATE_SIGNATURE_AND_SUBMISSION", "status": "BLOCKED"},
             {"code": "VERIFY_SAFE_TRANSFER_RECEIPT", "status": "BLOCKED"},
         )
-        blockers.append("SAFE_ALLOWANCE_PREFLIGHT_REQUIRED")
+        blockers.extend(
+            (
+                "SAFE_ALLOWANCE_PREFLIGHT_REQUIRED",
+                "BINANCE_DEPOSIT_PREFLIGHT_REQUIRED",
+            )
+        )
     elif is_safe and path is DirectCapitalPath.VAULT_TO_HYPERLIQUID:
         stages = (
             {"code": "READ_SAFE_SPENDING_LIMIT", "status": "BLOCKED"},

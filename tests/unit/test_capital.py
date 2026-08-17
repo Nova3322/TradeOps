@@ -195,3 +195,31 @@ def test_safe_outbound_gas_does_not_reduce_the_usdc_received_amount() -> None:
 
     assert plan.min_received == Decimal(1)
     assert "CAPITAL_MIN_RECEIVED_INVALID" not in plan.blockers
+
+
+def test_binance_account_managed_credentials_satisfy_plan_without_env_secrets() -> None:
+    settings = Settings(
+        database_url="postgresql+psycopg://user:pass@localhost/trading",
+        capital_direct_vault_id="vault-1",
+        capital_direct_vault_address="0x1111111111111111111111111111111111111111",
+        capital_direct_binance_account_id="binance-main",
+        capital_direct_binance_withdrawal_address=(
+            "0x1111111111111111111111111111111111111111"
+        ),
+        capital_direct_max_amount=Decimal(100),
+        capital_direct_max_fee=Decimal(1),
+        _env_file=None,
+    )
+
+    plan = build_direct_capital_plan(
+        path=DirectCapitalPath.BINANCE_TO_VAULT,
+        amount=Decimal("0.1"),
+        settings=settings,
+        capital_transfer_gate="ENABLED",
+        binance_capital_credentials_configured=True,
+        now=datetime(2026, 8, 17, tzinfo=UTC),
+    )
+
+    assert "BINANCE_CAPITAL_CREDENTIALS_MISSING" not in plan.blockers
+    assert "CAPITAL_MIN_RECEIVED_INVALID" in plan.blockers
+    assert plan.min_received is None
