@@ -83,6 +83,8 @@ class BinanceCapitalGateway:
         self._timeout_seconds = min(15.0, max(1.0, timeout_seconds))
         self._transport = transport
         self._clock_ms = clock_ms or (lambda: int(time.time() * 1000))
+        self._clock_offset_ms = 0
+        self._clock_synchronized_at = 0.0
 
     def __repr__(self) -> str:
         return (
@@ -94,6 +96,49 @@ class BinanceCapitalGateway:
     def configured(self) -> bool:
         return bool(self._api_key and self._api_secret)
 
+    def with_credentials(self, *, api_key: str, api_secret: str) -> BinanceCapitalGateway:
+        """Bind a short-lived exact-account credential without changing transport policy."""
+        return BinanceCapitalGateway(
+            base_url=self._base_url,
+            api_key=api_key,
+            api_secret=api_secret,
+            recv_window_ms=self._recv_window_ms,
+            timeout_seconds=self._timeout_seconds,
+            transport=self._transport,
+            clock_ms=self._clock_ms,
+        )
+
+    def _timestamp_ms(self) -> int:
+        if self._transport is not None:
+            return self._clock_ms()
+        monotonic_now = time.monotonic()
+        if monotonic_now - self._clock_synchronized_at > 30:
+            request = urllib.request.Request(  # noqa: S310
+                f"{self._base_url}/api/v3/time",
+                method="GET",
+            )
+            try:
+                with urllib.request.urlopen(  # noqa: S310
+                    request, timeout=self._timeout_seconds
+                ) as response:
+                    raw = json.loads(response.read())
+                server_time = int(raw["serverTime"])
+            except (
+                KeyError,
+                TypeError,
+                ValueError,
+                urllib.error.URLError,
+                TimeoutError,
+                json.JSONDecodeError,
+            ) as exc:
+                raise DomainRejected(
+                    "BINANCE_CAPITAL_TIME_SYNC_FAILED",
+                    "Binance server time could not be synchronized before a signed request",
+                ) from exc
+            self._clock_offset_ms = server_time - self._clock_ms()
+            self._clock_synchronized_at = monotonic_now
+        return self._clock_ms() + self._clock_offset_ms
+
     def _request(self, method: str, path: str, params: dict[str, object] | None = None) -> Any:
         if not self.configured:
             _reject(
@@ -104,7 +149,7 @@ class BinanceCapitalGateway:
         assert self._api_secret is not None
         prepared = {key: str(value) for key, value in (params or {}).items() if value is not None}
         prepared["recvWindow"] = str(self._recv_window_ms)
-        prepared["timestamp"] = str(self._clock_ms())
+        prepared["timestamp"] = str(self._timestamp_ms())
         query = urllib.parse.urlencode(prepared)
         signature = hmac.new(self._api_secret.encode(), query.encode(), hashlib.sha256).hexdigest()
         signed_query = f"{query}&signature={signature}"

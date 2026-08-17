@@ -5,6 +5,7 @@ from trading_control_plane.api_core import (
     SUPPORTED_NOTILT_CHAINS,
     UUID,
     Any,
+    BinanceCapitalGateway,
     CapitalAutomationEvaluateRequest,
     CapitalAutomationPolicyRequest,
     CapitalBalanceFactRequest,
@@ -66,6 +67,34 @@ class _CapitalRoutes:
         self.queries = common.queries
         self.resolved_capital_transfer = dependencies.capital_transfer
         self.token_service = dependencies.token_service
+
+    def _binance_capital_gateway(
+        self,
+        *,
+        actor_id: UUID,
+        account_id: str | None,
+    ) -> BinanceCapitalGateway:
+        """Resolve the exact selected account credential for a bounded capital call."""
+        if account_id:
+            try:
+                binding = self.service().capital_account_binding(
+                    actor_id=actor_id,
+                    account_id=account_id,
+                    venue="BINANCE",
+                    environment="LIVE",
+                )
+            except DomainRejected as exc:
+                if self.resolved_binance_capital.configured and exc.code in {
+                    "CAPITAL_ACCOUNT_NOT_FOUND",
+                    "CAPITAL_ACCOUNT_CREDENTIALS_NOT_READY",
+                }:
+                    return self.resolved_binance_capital
+                raise
+            return self.resolved_binance_capital.with_credentials(
+                api_key=binding.credentials["api_key"],
+                api_secret=binding.credentials["api_secret"],
+            )
+        return self.resolved_binance_capital
 
     def register_configuration(self) -> None:
         @self.app.get("/api/capital/direct-configurations")
@@ -187,7 +216,17 @@ class _CapitalRoutes:
                         "asset": None,
                     },
                 }
+            authoritative_net_worth_metadata = {
+                key: data.get("net_worth", {}).get(key)
+                for key in (
+                    "history_expected_interval_seconds",
+                    "onchain_provider",
+                    "onchain_probe",
+                )
+                if key in data.get("net_worth", {})
+            }
             data.update(display)
+            data.setdefault("net_worth", {}).update(authoritative_net_worth_metadata)
             return {"data": data, "as_of": _now().isoformat()}
 
         @self.app.put("/api/capital/direct-configuration")
@@ -394,6 +433,11 @@ class _CapitalRoutes:
                 amount=payload.amount,
                 settings=direct_settings,
                 capital_transfer_gate=center["real_transfer_gate"],
+                binance_capital_credentials_configured=bool(
+                    center["direct_configuration"][
+                        "binance_capital_credentials_configured"
+                    ]
+                ),
                 now=now,
             )
             operation_id = self.service().create_direct_capital_operation(
@@ -435,6 +479,10 @@ class _CapitalRoutes:
                     "BINANCE_CAPITAL_PATH_INVALID", "this operation does not contain a Binance leg"
                 )
             direct_settings, _ = self.effective_direct_capital_settings(identity.user_id)
+            binance_capital = self._binance_capital_gateway(
+                actor_id=identity.user_id,
+                account_id=(None if context["account_id"] is None else str(context["account_id"])),
+            )
             if path is DirectCapitalPath.VAULT_TO_BINANCE:
                 destination = direct_settings.capital_direct_binance_deposit_address
                 source = context["source_reference"]
@@ -443,7 +491,7 @@ class _CapitalRoutes:
                         "BINANCE_CAPITAL_SCOPE_MISSING",
                         "frozen treasury source and Binance deposit address are required",
                     )
-                artifact = self.resolved_binance_capital.prepare_deposit(
+                artifact = binance_capital.prepare_deposit(
                     expected_address=destination,
                     amount=Decimal(str(context["min_received"])),
                     source_address=str(source),
@@ -462,7 +510,7 @@ class _CapitalRoutes:
                         "BINANCE_CAPITAL_DESTINATION_MISMATCH",
                         "frozen treasury destination does not match Binance configuration",
                     )
-                artifact = self.resolved_binance_capital.prepare_withdrawal(
+                artifact = binance_capital.prepare_withdrawal(
                     destination=destination,
                     amount=Decimal(str(context["amount"])),
                     max_fee=Decimal(str(max_fee)),
@@ -481,7 +529,7 @@ class _CapitalRoutes:
                 "operation_id": str(operation_id),
                 "version": version,
                 "artifact": artifact,
-                "credentials_configured": self.resolved_binance_capital.configured,
+                "credentials_configured": binance_capital.configured,
                 "submission_enabled": direct_settings.binance_capital_withdraw_enabled,
                 "signing_material_returned": False,
                 "transfer_submitted": False,
@@ -530,7 +578,11 @@ class _CapitalRoutes:
                 raise DomainRejected(
                     "BINANCE_CAPITAL_PREFLIGHT_REQUIRED", "current live preflight is required"
                 )
-            submission = self.resolved_binance_capital.submit_withdrawal(preflight, now=now)
+            binance_capital = self._binance_capital_gateway(
+                actor_id=identity.user_id,
+                account_id=(None if context["account_id"] is None else str(context["account_id"])),
+            )
+            submission = binance_capital.submit_withdrawal(preflight, now=now)
             version = self.service().record_direct_capital_binance_submission(
                 operation_id,
                 identity.user_id,
@@ -562,6 +614,10 @@ class _CapitalRoutes:
                     "VERSION_CONFLICT", "direct capital operation changed; refresh"
                 )
             direct_settings, _ = self.effective_direct_capital_settings(identity.user_id)
+            binance_capital = self._binance_capital_gateway(
+                actor_id=identity.user_id,
+                account_id=(None if context["account_id"] is None else str(context["account_id"])),
+            )
             if payload.stage == "BINANCE_DEPOSIT":
                 if context["path"] != DirectCapitalPath.VAULT_TO_BINANCE.value:
                     raise DomainRejected(
@@ -574,7 +630,7 @@ class _CapitalRoutes:
                     raise DomainRejected(
                         "BINANCE_CAPITAL_SCOPE_MISSING", "Binance deposit address is missing"
                     )
-                evidence = self.resolved_binance_capital.verify_deposit(
+                evidence = binance_capital.verify_deposit(
                     transaction_hash=payload.transaction_hash,
                     destination=destination,
                     amount=Decimal(str(context["min_received"])),
@@ -595,7 +651,7 @@ class _CapitalRoutes:
                         "BINANCE_CAPITAL_SCOPE_MISSING",
                         "frozen treasury destination and trusted Arbitrum RPC are required",
                     )
-                withdrawal = self.resolved_binance_capital.verify_withdrawal(
+                withdrawal = binance_capital.verify_withdrawal(
                     order_id=str(operation_id),
                     destination=destination,
                     amount=Decimal(str(context["amount"])),
@@ -833,7 +889,10 @@ class _CapitalRoutes:
                 idempotency_key=payload.idempotency_key,
                 now=now,
             )
-            blockers = list(context["blockers"])
+            updated_context = self.service().direct_capital_operation_context(
+                operation_id, identity.user_id, now=now
+            )
+            blockers = list(updated_context["blockers"])
             return {
                 "operation_id": str(operation_id),
                 "version": version,

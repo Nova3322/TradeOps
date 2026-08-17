@@ -309,10 +309,10 @@ class Settings(BaseSettings):
             raise ValueError("Binance read-only key and secret must be configured together")
         if bool(self.binance_capital_api_key) != bool(self.binance_capital_api_secret):
             raise ValueError("Binance capital key and secret must be configured together")
-        if self.binance_capital_withdraw_enabled and not (
-            self.binance_capital_api_key and self.binance_capital_api_secret
-        ):
-            raise ValueError("enabled Binance capital withdrawal requires dedicated credentials")
+        # The withdrawal transport may use the exact verified encrypted credential
+        # selected in Account Management.  Route-level checks still require either
+        # that binding or the dedicated environment credential before any preflight
+        # or submission can run.
         direct_send_enabled = any(
             (
                 self.binance_live_order_send_enabled,

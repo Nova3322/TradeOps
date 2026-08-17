@@ -701,6 +701,17 @@ class DirectOperationCapitalService(ServiceComponent):
                     "broadcast": False,
                 },
             ]
+            item.blockers = [
+                blocker
+                for blocker in item.blockers
+                if blocker
+                not in {
+                    "SAFE_ALLOWANCE_PREFLIGHT_REQUIRED",
+                    "SAFE_SPENDING_LIMIT_NOT_CONFIGURED",
+                }
+            ]
+            if not item.blockers:
+                item.status = "UNSIGNED_PLAN_READY"
             item.version += 1
             item.updated_at = now
             result = {"operation_id": str(operation_id), "version": item.version}
@@ -1392,6 +1403,8 @@ class DirectOperationCapitalService(ServiceComponent):
                     "BINANCE_RESTRICTED_WITHDRAWAL_PREFLIGHT_REQUIRED",
                 }
             ]
+            if not item.blockers:
+                item.status = "UNSIGNED_PLAN_READY"
             item.version += 1
             item.updated_at = now
             result = {"operation_id": str(operation_id), "version": item.version}
