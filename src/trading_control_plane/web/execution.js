@@ -58,7 +58,7 @@ async function renderAccountManagement() {
   const createAccountLabel = selectedEnvironment === 'LIVE' ? '添加生产账户' : '添加测试账户';
   const createForm = canManage ? `<details class="card operation-toolbox"><summary><span><b>${createAccountLabel}</b><small>同时填写精确账户 ID 和账户名称</small></span><strong>展开</strong></summary><form id="exchange-account-create-form" class="toolbox-content"><div class="field-grid"><label>交易所<select name="venue">${venueOptions}</select></label><label>账户 ID（创建后不可修改）<input name="account_id" required maxlength="120" autocomplete="off" autocapitalize="off" spellcheck="false"></label><label>账户名称<input name="label" required maxlength="120" autocomplete="off"></label></div><p class="field-help">账户 ID 必须与服务端运行绑定一致；账户名称仅用于页面识别，可在创建后修改。</p><div class="field-grid" data-create-credentials></div><p class="safety-note">测试凭据只会加载到 TESTNET Adapter；生产凭据只会加载到 LIVE Adapter。</p><div class="form-error" role="alert"></div><button class="primary">添加账户</button></form></details>` : '';
   main.innerHTML = `<section class="page trading-mode-page mode-accounts-page"><header class="page-head"><div><p class="eyebrow">当前空间 · ${escapeHtml(activeSpaceName)}</p><h1>账户管理</h1><p class="lede">提前配置测试和生产账户；实际执行环境始终由服务端读取团队当前模式。</p></div><span class="status-pill ${mode.execution_mode === 'LIVE' ? 'status-ATTENTION' : 'status-APPROVED'}">当前模式：${fmtExecutionMode(mode.execution_mode)}</span></header>
-    <article class="callout"><b>账户配置范围</b><p>这里切换的只是账户配置范围，不会改变团队当前运行模式。实际模式切换请前往模式设置。</p><a class="secondary" href="/team-settings" data-link>前往模式设置</a></article>
+    <article class="callout"><b>账户配置范围</b><p>这里切换的只是账户配置范围，不会改变团队当前运行模式。实际模式切换请使用页眉“当前模式”。</p><button class="secondary" type="button" data-open-mode-switch>切换当前模式</button></article>
     <nav class="mode-choice-grid" aria-label="账户配置范围"><a class="mode-choice ${selectedEnvironment === 'TESTNET' ? 'is-selected' : ''}" href="/accounts?environment=TESTNET" data-link ${selectedEnvironment === 'TESTNET' ? 'aria-current="page"' : ''}><span class="mode-choice-head"><b>测试账户</b>${selectedEnvironment === 'TESTNET' ? '<span class="mode-choice-current">当前范围</span>' : ''}</span><small>交易所测试环境 API</small></a><a class="mode-choice live-choice ${selectedEnvironment === 'LIVE' ? 'is-selected' : ''}" href="/accounts?environment=LIVE" data-link ${selectedEnvironment === 'LIVE' ? 'aria-current="page"' : ''}><span class="mode-choice-head"><b>生产账户</b>${selectedEnvironment === 'LIVE' ? '<span class="mode-choice-current">当前范围</span>' : ''}</span><small>真实资金环境 API</small></a></nav>
     ${createForm}<section><div class="section-heading"><div><p class="eyebrow">${fmtExecutionMode(selectedEnvironment)} · ${accounts.length} 个配置</p><h2>交易所账户</h2></div></div>${accounts.length ? `<div class="mode-account-grid">${accounts.map(accountCard).join('')}</div>` : '<div class="empty-state compact-empty-state mode-account-empty-state"><div><h2>尚未添加此环境账户</h2><p>添加并验证账户后，交易执行才会就绪；账户配置不影响模式选择。</p></div></div>'}</section>
     </section>`;
@@ -81,10 +81,17 @@ function readinessItems(items) {
   return (items || []).map(item => `<li><b>${escapeHtml(labels[item.code] || item.code)}</b><span>${item.count} 项</span></li>`).join('');
 }
 
-async function renderTeamSettings() {
+function closeTeamModeDialog({restoreFocus = false} = {}) {
+  teamModeDialogRequestToken += 1;
+  if (teamModeDialog.open) teamModeDialog.close();
+  environmentBadge.setAttribute('aria-expanded', 'false');
+  if (restoreFocus && !environmentBadge.disabled) environmentBadge.focus({preventScroll:true});
+}
+
+function renderTeamModeDialog(data) {
   const activeSpaceName = session?.active_team?.name || '当前团队';
-  const response = await api('/api/trading-mode'); const data = response.data;
   const current = fmtExecutionMode(data.execution_mode);
+  const modeSeparator = currentLanguage === 'en' ? ': ' : '：';
   let selectedTarget = data.can_manage
     ? (data.execution_mode === 'LIVE'
       ? 'TESTNET'
@@ -95,12 +102,11 @@ async function renderTeamSettings() {
     const isSelected = selectedTarget === mode;
     return `<button class="mode-switch-option ${mode === 'LIVE' ? 'is-live' : 'is-testnet'} ${isSelected ? 'is-selected' : ''}" type="button" data-mode-target="${mode}" aria-pressed="${isSelected}" ${isCurrent ? 'aria-current="true"' : ''} ${isCurrent || !data.can_manage ? 'disabled' : ''}><span class="mode-switch-option-head"><b>${title}</b><span class="status-pill">${isCurrent ? '当前使用' : mode === 'LIVE' ? '真实资金' : '测试服务器'}</span></span><small>${copy}</small></button>`;
   };
-  main.innerHTML = `<section class="page team-settings-page"><header class="page-head"><div><p class="eyebrow">模式设置 · ${escapeHtml(activeSpaceName)}</p><h1>模式设置</h1><p class="lede">团队实际执行环境只在这里切换；账户、资金、提案和交易任务页面均为只读显示。</p></div><span class="status-pill ${data.execution_mode === 'LIVE' ? 'status-ATTENTION' : 'status-APPROVED'}">${escapeHtml(current)}</span></header>
-    <section class="mode-switch-console" aria-labelledby="mode-switch-title"><div class="section-heading"><div><p class="eyebrow">当前模式：${escapeHtml(current)}</p><h2 id="mode-switch-title">${data.can_manage ? '选择要切换到的模式' : '当前模式'}</h2><p>${data.can_manage ? '先选择测试或生产，再在同一区域确认。当前模式不可重复提交。' : '普通成员只能查看当前模式；需要系统管理员或 team.manage 权限执行切换。'}</p></div></div><div class="mode-switch-options" role="group" aria-label="${data.can_manage ? '选择目标模式' : '当前模式'}">${modeOption('TESTNET', '测试模式', '订单发送到交易所测试服务器，不影响真实资金。')}${modeOption('LIVE', '生产模式', '订单发送到交易所生产服务器，可能影响真实资金。')}</div><div id="team-mode-target-panel" aria-live="polite"></div></section>
-    <details class="card mode-switch-audit"><summary><span><b>最近一次模式切换与审计</b><small>${data.last_switched_at ? `${escapeHtml(data.last_switched_by || '未知')} · ${fmtDate(data.last_switched_at)}` : '尚无切换记录'}</small></span><strong>查看详情</strong></summary><div class="mode-switch-audit-body"><dl class="definition-grid">${definition('最近切换人', data.last_switched_by || '尚无记录')}${definition('最近切换时间', data.last_switched_at ? fmtDate(data.last_switched_at) : '尚无记录')}</dl><p class="safety-note">所有切换、失效与阻断结果继续写入审计记录。</p></div></details></section>`;
+  teamModeDialogContent.innerHTML = `<section class="mode-switch-console" aria-labelledby="mode-switch-title"><div class="section-heading"><div><p class="eyebrow"><span>${escapeHtml(activeSpaceName)}</span> · <span>当前模式</span>${modeSeparator}<span>${escapeHtml(current)}</span></p><h3 id="mode-switch-title">${data.can_manage ? '选择要切换到的模式' : '当前模式'}</h3><p>${data.can_manage ? '先选择测试或生产，再在同一区域确认。当前模式不可重复提交。' : '普通成员只能查看当前模式；需要系统管理员或 team.manage 权限执行切换。'}</p></div></div><div class="mode-switch-options" role="group" aria-label="${data.can_manage ? '选择目标模式' : '当前模式'}">${modeOption('TESTNET', '测试模式', '订单发送到交易所测试服务器，不影响真实资金。')}${modeOption('LIVE', '生产模式', '订单发送到交易所生产服务器，可能影响真实资金。')}</div><div id="team-mode-target-panel" aria-live="polite"></div></section>
+    <details class="card mode-switch-audit"><summary><span><b>最近一次模式切换与审计</b><small>${data.last_switched_at ? `${escapeHtml(data.last_switched_by || '未知')} · ${fmtDate(data.last_switched_at)}` : '尚无切换记录'}</small></span><strong>查看详情</strong></summary><div class="mode-switch-audit-body"><dl class="definition-grid">${definition('最近切换人', data.last_switched_by || '尚无记录')}${definition('最近切换时间', data.last_switched_at ? fmtDate(data.last_switched_at) : '尚无记录')}</dl><p class="safety-note">所有切换、失效与阻断结果继续写入审计记录。</p></div></details>`;
 
   const renderTargetPanel = target => {
-    const panel = document.querySelector('#team-mode-target-panel');
+    const panel = teamModeDialogContent.querySelector('#team-mode-target-panel');
     const readiness = data.target_readiness?.[target] || {ready:false,execution_ready:false,switch_allowed:false,blockers:[],advisories:[]};
     const executionReady = readiness.execution_ready ?? readiness.ready;
     const switchAllowed = readiness.switch_allowed ?? readiness.ready;
@@ -112,7 +118,7 @@ async function renderTeamSettings() {
       ? `<div class="mode-production-confirm"><div class="mode-confirmation-copy"><div><span>生产确认文案</span><code>${confirmation}</code></div><button class="secondary" type="button" data-copy-mode-confirmation>复制文案</button></div><label for="team-mode-confirmation">粘贴或输入上方文案<input id="team-mode-confirmation" name="confirmation" autocomplete="off" autocapitalize="off" spellcheck="false" required aria-describedby="mode-confirmation-help"></label><p id="mode-confirmation-help" class="microcopy">完全一致后才会解锁生产模式切换按钮。</p></div>`
       : `<input name="confirmation" type="hidden" value="${confirmation}"><p class="callout is-success">测试模式不要求输入确认文案；点击按钮后仍会进行一次最终确认。</p>`;
     panel.innerHTML = `<article class="card mode-switch-target ${target === 'LIVE' ? 'is-live' : 'is-testnet'}"><div class="mode-switch-target-head"><div><p class="eyebrow">目标模式</p><h2>${escapeHtml(targetCopy)}</h2></div><span class="status-pill ${switchAllowed ? 'status-APPROVED' : 'status-DENY'}">${switchAllowed ? '可以切换' : '暂不能切换'}</span></div><div class="mode-switch-status-grid"><div><small>模式切换</small><b>${switchAllowed ? '条件已通过' : `${blockers.length} 类阻断`}</b><span>${switchAllowed ? '可继续最终确认' : '处理阻断后再试'}</span></div><div><small>下单准备</small><b>${executionReady ? '执行已就绪' : '切换后仍不可下单'}</b><span>${executionReady ? '下单时仍会再次校验' : '账户条件由下单链路独立检查'}</span></div></div>${blockers.length ? `<div class="callout is-warning"><b>必须先处理</b><ul class="status-list">${readinessItems(blockers)}</ul></div>` : ''}${advisories.length ? `<details class="mode-switch-advisories"><summary>查看 ${advisories.reduce((sum, item) => sum + Number(item.count || 0), 0)} 项下单准备提示</summary><ul class="status-list">${readinessItems(advisories)}</ul><p>这些项目不阻止模式切换；处理完成前，订单发送仍会失败关闭。</p></details>` : ''}<p class="safety-note">切换不会开启实盘下单、自动加仓或资金划转；旧环境未执行授权和订单意图会失效，历史提案环境保持不变。</p>${data.can_manage ? `<form id="team-mode-switch-form" class="mode-switch-form">${confirmationField}<div class="form-error" role="alert"></div><button class="mode-switch-submit ${target === 'LIVE' ? 'danger' : 'primary'}" ${switchAllowed && target !== 'LIVE' ? '' : 'disabled'}>切换到${fmtExecutionMode(target)}</button></form>` : '<p class="callout">普通成员只能查看当前模式；需要系统管理员或 team.manage 权限执行切换。</p>'}</article>`;
-    const form = document.querySelector('#team-mode-switch-form');
+    const form = teamModeDialogContent.querySelector('#team-mode-switch-form');
     const submit = form?.querySelector('.mode-switch-submit');
     const input = form?.elements.confirmation;
     if (target === 'LIVE' && input && submit) {
@@ -121,23 +127,47 @@ async function renderTeamSettings() {
       syncSubmitState();
       form.querySelector('[data-copy-mode-confirmation]')?.addEventListener('click', async () => { try { await navigator.clipboard.writeText(confirmation); showToast('生产确认文案已复制'); input.focus(); } catch (_error) { input.focus(); showToast('浏览器未允许复制，请手动输入确认文案'); } });
     }
-    form?.addEventListener('submit', async event => { event.preventDefault(); const confirmed = await confirmAction({title:`确认切换到${fmtExecutionMode(target)}？`, message:target === 'LIVE' ? '生产模式订单会影响真实资金；危险能力仍保持独立关闭。' : '测试模式订单会发送到交易所测试服务器。', confirmLabel:'确认切换'}); if (!confirmed) return; await submitForm(form, () => api(`/api/teams/${data.team_id}/trading-mode`, {method:'PUT', body:JSON.stringify({mode:target, confirmation:form.elements.confirmation.value.trim(), expected_version:data.version, idempotency_key:crypto.randomUUID()})}), {success:`已切换到${fmtExecutionMode(target)}`, onSuccess:async result => { if (result?.session) session = result.session; updateEnvironmentIndicators(); setShell(true); await route(); }}); });
+    form?.addEventListener('submit', async event => { event.preventDefault(); const confirmed = await confirmAction({title:`确认切换到${fmtExecutionMode(target)}？`, message:target === 'LIVE' ? '生产模式订单会影响真实资金；危险能力仍保持独立关闭。' : '测试模式订单会发送到交易所测试服务器。', confirmLabel:'确认切换'}); if (!confirmed) return; await submitForm(form, () => api(`/api/teams/${data.team_id}/trading-mode`, {method:'PUT', body:JSON.stringify({mode:target, confirmation:form.elements.confirmation.value.trim(), expected_version:data.version, idempotency_key:crypto.randomUUID()})}), {success:`已切换到${fmtExecutionMode(target)}`, onSuccess:async result => { if (result?.session) session = result.session; closeTeamModeDialog(); updateEnvironmentIndicators(); setShell(true); await route(); }}); });
   };
   const updateTarget = target => {
     selectedTarget = target;
-    document.querySelectorAll('[data-mode-target]').forEach(button => {
+    teamModeDialogContent.querySelectorAll('[data-mode-target]').forEach(button => {
       const selected = button.dataset.modeTarget === target;
       button.classList.toggle('is-selected', selected);
       button.setAttribute('aria-pressed', String(selected));
     });
     renderTargetPanel(target);
+    applyLanguageToDocument(teamModeDialogContent);
   };
   if (!data.can_manage) {
-    document.querySelector('#team-mode-target-panel').innerHTML = '<p class="callout">当前身份为只读查看；模式选择和准备状态仅向有切换权限的管理员开放。</p>';
+    teamModeDialogContent.querySelector('#team-mode-target-panel').innerHTML = '<p class="callout">当前身份为只读查看；模式选择和准备状态仅向有切换权限的管理员开放。</p>';
+    applyLanguageToDocument(teamModeDialogContent);
     return;
   }
-  document.querySelectorAll('[data-mode-target]:not(:disabled)').forEach(button => button.addEventListener('click', () => updateTarget(button.dataset.modeTarget)));
+  teamModeDialogContent.querySelectorAll('[data-mode-target]:not(:disabled)').forEach(button => button.addEventListener('click', () => updateTarget(button.dataset.modeTarget)));
   updateTarget(selectedTarget);
+}
+
+async function openTeamModeDialog() {
+  if (!session || !hasCapability('venue.view') || environmentBadge.disabled) return;
+  closeUserMenu();
+  closePreferenceDropdowns();
+  closeWorkspaceSwitcher();
+  const requestToken = ++teamModeDialogRequestToken;
+  teamModeDialogContent.innerHTML = '<section class="loading-state mode-switch-loading" role="status"><div class="loading-state-copy"><span class="spinner" aria-hidden="true"></span><div><b>正在读取当前模式…</b><p>正在核对切换权限、风险政策和当前执行事实。</p></div></div></section>';
+  environmentBadge.setAttribute('aria-expanded', 'true');
+  if (!teamModeDialog.open) teamModeDialog.showModal();
+  applyLanguageToDocument(teamModeDialog);
+  try {
+    const response = await api('/api/trading-mode');
+    if (requestToken !== teamModeDialogRequestToken || !teamModeDialog.open) return;
+    renderTeamModeDialog(response.data);
+  } catch (error) {
+    if (requestToken !== teamModeDialogRequestToken || !teamModeDialog.open || error.handled) return;
+    teamModeDialogContent.innerHTML = `<section class="error-state mode-switch-error" role="alert"><div><p class="eyebrow">运行模式 · 已安全阻断</p><h3>当前模式状态读取失败</h3><p>${escapeHtml(friendlyApiError(error))}</p><button class="secondary" type="button" data-retry-mode-switch>重新检查</button></div></section>`;
+    teamModeDialogContent.querySelector('[data-retry-mode-switch]')?.addEventListener('click', openTeamModeDialog);
+    applyLanguageToDocument(teamModeDialogContent);
+  }
 }
 
 function systemHealthCard({title, status, copy, tone = 'success', meta = ''}) {

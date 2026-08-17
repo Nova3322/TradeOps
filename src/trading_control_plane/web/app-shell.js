@@ -34,8 +34,8 @@ function setShell(loggedIn, {workspaceGate = false} = {}) {
   userMenu.hidden = !loggedIn;
   scopeControl.hidden = !loggedIn || workspaceGate;
   mobileNavToggle.hidden = !loggedIn || workspaceGate;
+  updateEnvironmentIndicators();
   if (loggedIn) {
-    updateEnvironmentIndicators();
     renderWorkspaceSwitcher();
     const rolePriority = ['SYSTEM_ADMIN','TREASURY_ADMIN','OPERATOR','REVIEWER','PROPOSER','OBSERVER'];
     const primaryRole = rolePriority.find(role => roleNames().includes(role));
