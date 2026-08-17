@@ -429,6 +429,60 @@ def test_binance_transport_distinguishes_timestamp_rejection(
         binance._default_fetcher("https://fapi.binance.com/fapi/v3/balance", {}, 1.0)
 
 
+def test_binance_read_only_transport_preserves_rate_limit_details(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    error = urllib.error.HTTPError(
+        "https://fapi.binance.com/fapi/v3/balance",
+        418,
+        "banned",
+        {"Retry-After": "90", "X-MBX-USED-WEIGHT-1M": "2400"},
+        io.BytesIO(b'{"code":-1003,"msg":"IP banned until 1786190490000"}'),
+    )
+
+    def reject(*_args: object, **_kwargs: object) -> UrlResponse:
+        raise error
+
+    monkeypatch.setattr(urllib.request, "urlopen", reject)
+
+    with pytest.raises(DomainRejected) as caught:
+        binance._default_fetcher("https://fapi.binance.com/fapi/v3/balance", {}, 1.0)
+
+    assert caught.value.code == "BINANCE_RATE_LIMITED"
+    assert caught.value.metadata is not None
+    assert caught.value.metadata["category"] == "IP_TEMPORARILY_BANNED"
+    assert caught.value.metadata["http_status"] == 418
+    assert caught.value.metadata["binance_error_code"] == -1003
+    assert caught.value.metadata["retry_after_seconds"] == 90
+
+
+def test_binance_server_time_rate_limit_is_not_retried(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = 0
+
+    def reject(*_args: object, **_kwargs: object) -> UrlResponse:
+        nonlocal calls
+        calls += 1
+        raise urllib.error.HTTPError(
+            "https://fapi.binance.com/fapi/v1/time",
+            429,
+            "limited",
+            {"Retry-After": "30", "X-MBX-USED-WEIGHT-1M": "1200"},
+            io.BytesIO(b'{"code":-1003,"msg":"Too much request weight used"}'),
+        )
+
+    monkeypatch.setattr(urllib.request, "urlopen", reject)
+
+    with pytest.raises(DomainRejected) as caught:
+        binance._server_time_from("https://fapi.binance.com", 1.0)
+
+    assert caught.value.code == "BINANCE_RATE_LIMITED"
+    assert caught.value.metadata is not None
+    assert caught.value.metadata["category"] == "REQUEST_WEIGHT_EXCEEDED"
+    assert calls == 1
+
+
 def test_default_binance_read_transports_parse_and_fail_closed(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -23,6 +23,7 @@ dependencies = [
   "pydantic-settings>=2.12,<3",
   "pyfolio-reloaded==0.9.9",
   "quantstats==0.0.81",
+  "requests>=2.32,<3",
   "sqlalchemy>=2.0.51,<2.1",
   "uvicorn[standard]>=0.40,<1",
   "websockets>=15,<17",

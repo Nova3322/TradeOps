@@ -456,6 +456,105 @@ def test_wallet_api_rejections_have_actionable_non_sensitive_codes(
     assert "sensitive detail" not in caught.value.detail
 
 
+@pytest.mark.parametrize(
+    ("http_status", "exchange_code", "message", "expected_category"),
+    [
+        (429, -1015, "Too many requests", "ORDINARY_RATE_LIMIT"),
+        (429, -1003, "Too much request weight used", "REQUEST_WEIGHT_EXCEEDED"),
+        (418, -1003, "IP banned until 1786190520000", "IP_TEMPORARILY_BANNED"),
+    ],
+)
+def test_wallet_api_rate_limits_record_exact_diagnostics_and_enforce_backoff(
+    monkeypatch,
+    http_status: int,
+    exchange_code: int,
+    message: str,
+    expected_category: str,
+) -> None:
+    calls = 0
+
+    def urlopen(request, *, timeout):
+        nonlocal calls
+        calls += 1
+        raise urllib.error.HTTPError(
+            request.full_url,
+            http_status,
+            "limited",
+            {
+                "Retry-After": "45",
+                "X-MBX-USED-WEIGHT-1M": "1200",
+                "X-MBX-ORDER-COUNT-10S": "8",
+            },
+            io.BytesIO(f'{{"code":{exchange_code},"msg":"{message}"}}'.encode()),
+        )
+
+    monkeypatch.setattr("urllib.request.urlopen", urlopen)
+    client = BinanceCapitalGateway(
+        api_key="capital-key",
+        api_secret="capital-secret",  # noqa: S106
+        clock_ms=lambda: 1_786_190_400_000,
+    )
+    client._clock_synchronized_at = time.monotonic()
+
+    with pytest.raises(DomainRejected) as caught:
+        client._request("GET", "/sapi/v1/account/apiRestrictions")
+
+    assert caught.value.code == "BINANCE_CAPITAL_RATE_LIMITED"
+    assert caught.value.metadata is not None
+    assert caught.value.metadata == {
+        **caught.value.metadata,
+        "category": expected_category,
+        "http_status": http_status,
+        "binance_error_code": exchange_code,
+        "binance_error_message": message,
+        "retry_after_seconds": 45,
+        "rate_limit_headers": {
+            "Retry-After": "45",
+            "X-MBX-USED-WEIGHT-1M": "1200",
+            "X-MBX-ORDER-COUNT-10S": "8",
+        },
+    }
+    with pytest.raises(DomainRejected) as deferred:
+        client._request("GET", "/sapi/v1/account/apiRestrictions")
+    assert deferred.value.metadata == caught.value.metadata
+    assert calls == 1
+
+
+def test_wallet_api_time_sync_rate_limit_stops_failover_and_enforces_backoff(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = 0
+
+    def urlopen(request, *, timeout):
+        nonlocal calls
+        calls += 1
+        raise urllib.error.HTTPError(
+            request.full_url,
+            418,
+            "banned",
+            {"Retry-After": "120", "X-MBX-USED-WEIGHT-1M": "2400"},
+            io.BytesIO(b'{"code":-1003,"msg":"IP banned until 1786190520000"}'),
+        )
+
+    monkeypatch.setattr("urllib.request.urlopen", urlopen)
+    client = BinanceCapitalGateway(
+        api_key="capital-key",
+        api_secret="capital-secret",  # noqa: S106
+        clock_ms=lambda: 1_786_190_400_000,
+    )
+
+    with pytest.raises(DomainRejected) as caught:
+        client._request("GET", "/sapi/v1/account/apiRestrictions")
+    assert caught.value.code == "BINANCE_CAPITAL_RATE_LIMITED"
+    assert caught.value.metadata is not None
+    assert caught.value.metadata["category"] == "IP_TEMPORARILY_BANNED"
+
+    with pytest.raises(DomainRejected) as deferred:
+        client._request("GET", "/sapi/v1/account/apiRestrictions")
+    assert deferred.value.metadata == caught.value.metadata
+    assert calls == 1
+
+
 def test_withdrawal_post_is_never_retried_after_transport_failure(monkeypatch) -> None:
     calls = 0
 

@@ -49,3 +49,16 @@ test("NoTilt protocol delay keeps one-click wallet continuation without manual e
     assert.equal(source.includes(marker), true, marker);
   }
 });
+
+test("Safe outbound flow verifies source receipt and completes the Hyperliquid second leg", () => {
+  for (const marker of [
+    "verifyTreasuryWithdrawalReceipt",
+    "continueSafeOutboundExecution",
+    "verifyHyperliquidDepositReceipts",
+    "TREASURY_WITHDRAWAL_RECEIPT_CONFIRMED",
+    "继续已提取资金并充值",
+  ]) {
+    assert.equal(source.includes(marker), true, marker);
+  }
+  assert.ok(source.indexOf("verifyTreasuryWithdrawalReceipt") < source.indexOf("prepareHyperliquidWalletAction", source.indexOf("async function continueSafeOutboundExecution")));
+});

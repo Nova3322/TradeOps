@@ -130,6 +130,11 @@ class AccountQueries(QueryComponent):
                 "checked_at": _iso(item.last_connection_check_at),
                 "last_verified_at": _iso(item.last_verified_at),
                 "read_only_capability": item.connection_status == "VERIFIED",
+                **(
+                    {"diagnostics": metadata["last_connection_error"]}
+                    if isinstance(metadata.get("last_connection_error"), dict)
+                    else {}
+                ),
             },
             "trading": {
                 "status": item.trading_status,

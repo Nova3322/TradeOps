@@ -19,6 +19,7 @@ from trading_control_plane.okx import OkxReadOnlyClient
 class ConnectionProbeResult:
     success: bool
     error_code: str | None
+    diagnostics: dict[str, object] | None = None
 
 
 class ExchangeConnectionVerifier(Protocol):
@@ -109,7 +110,11 @@ class ReadOnlyExchangeConnectionVerifier:
             else:
                 raise DomainRejected("EXCHANGE_VENUE_UNSUPPORTED", "exchange venue is unsupported")
         except DomainRejected as exc:
-            return ConnectionProbeResult(success=False, error_code=exc.code)
+            return ConnectionProbeResult(
+                success=False,
+                error_code=exc.code,
+                diagnostics=None if exc.metadata is None else dict(exc.metadata),
+            )
         except (KeyError, ValueError):
             return ConnectionProbeResult(
                 success=False,

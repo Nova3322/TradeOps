@@ -73,6 +73,7 @@ async function api(path, options = {}) {
       || `HTTP ${response.status}`
     );
     error.code = data?.error?.code || detailError?.code || data?.detail?.error_code || `HTTP_${response.status}`;
+    error.details = data?.error?.details || detailError?.details || data?.detail?.details || null;
     error.status = response.status;
     error.handled = response.status === 401 && handleUnauthorizedResponse();
     throw error;

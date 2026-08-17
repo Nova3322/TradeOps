@@ -929,6 +929,66 @@ def test_four_venue_connection_verification_is_scoped_idempotent_and_never_enabl
     assert "api_wallet_private_key" not in hyperliquid_binding.credentials
 
 
+def test_binance_connection_rate_limit_diagnostics_are_persisted_and_defer_reprobe(
+    database: Database,
+) -> None:
+    now = datetime.now(UTC)
+    service = TradingService(database, credential_encryption_key=encryption_key())
+    admin = service.bootstrap_admin("binance-rate-limit-admin", now=now)
+    account_id = service.create_exchange_account(
+        actor_id=admin,
+        account_id="binance-rate-limited",
+        venue="BINANCE",
+        label="Binance Rate Limited",
+        credentials={"api_key": "rate-key", "api_secret": "rate-secret"},
+        idempotency_key="binance-rate-limit-create",
+        now=now,
+    )
+    prepared, replay = service.prepare_exchange_account_connection_verification(
+        account_id,
+        actor_id=admin,
+        expected_version=1,
+        idempotency_key="binance-rate-limit-first-probe",
+        now=now,
+    )
+    assert replay is None and prepared is not None
+    diagnostics: dict[str, object] = {
+        "category": "REQUEST_WEIGHT_EXCEEDED",
+        "http_status": 429,
+        "binance_error_code": -1003,
+        "binance_error_message": "Too much request weight used",
+        "retry_after_seconds": 60,
+        "rate_limit_headers": {
+            "Retry-After": "60",
+            "X-MBX-USED-WEIGHT-1M": "1200",
+        },
+        "failed_at": now.isoformat(),
+        "next_retry_at": (now + timedelta(seconds=60)).isoformat(),
+    }
+    result = service.record_exchange_account_connection_verification(
+        prepared,
+        ConnectionProbeResult(False, "BINANCE_RATE_LIMITED", diagnostics),
+        actor_id=admin,
+        idempotency_key="binance-rate-limit-first-probe",
+        now=now,
+    )
+
+    assert result["connection"]["error_code"] == "BINANCE_RATE_LIMITED"
+    assert result["connection"]["diagnostics"] == diagnostics
+    projected = TradingQueries(database).exchange_accounts(admin)["data"][0]
+    assert projected["connection"]["diagnostics"] == diagnostics
+    with pytest.raises(DomainRejected) as deferred:
+        service.prepare_exchange_account_connection_verification(
+            account_id,
+            actor_id=admin,
+            expected_version=2,
+            idempotency_key="binance-rate-limit-early-reprobe",
+            now=now + timedelta(seconds=30),
+        )
+    assert deferred.value.code == "BINANCE_CONNECTION_RETRY_DEFERRED"
+    assert deferred.value.metadata == diagnostics
+
+
 def test_connection_result_is_not_committed_after_credential_rotation(database: Database) -> None:
     now = datetime.now(UTC)
     service = TradingService(database, credential_encryption_key=encryption_key())

@@ -11,9 +11,12 @@ MONEY_QUANTUM: Final = Decimal("0.000000000000000001")
 
 
 class DomainRejected(RuntimeError):
-    def __init__(self, code: str, detail: str) -> None:
+    def __init__(
+        self, code: str, detail: str, *, metadata: dict[str, object] | None = None
+    ) -> None:
         self.code = code
         self.detail = detail
+        self.metadata = metadata
         super().__init__(f"{code}: {detail}")
 
 

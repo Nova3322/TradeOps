@@ -345,6 +345,21 @@ const exchangeConnectionErrorEnglishLabels = {
 const fmtExchangeConnectionError = value => currentLanguage === 'en'
   ? exchangeConnectionErrorEnglishLabels[value] || value || 'No diagnostic is available'
   : exchangeConnectionErrorLabels[value] || value || '暂无可用诊断';
+const binanceLimitCategoryLabels = {
+  ORDINARY_RATE_LIMIT:'普通请求限流',
+  REQUEST_WEIGHT_EXCEEDED:'请求权重超限',
+  IP_TEMPORARILY_BANNED:'IP 临时封禁',
+};
+function fmtBinanceConnectionDiagnostic(connection) {
+  const diagnostics = connection?.diagnostics;
+  if (!diagnostics) return fmtExchangeConnectionError(connection?.error_code);
+  const category = binanceLimitCategoryLabels[diagnostics.category] || diagnostics.category;
+  const retryAt = diagnostics.next_retry_at ? fmtDate(diagnostics.next_retry_at) : '稍后';
+  const status = diagnostics.http_status ? `HTTP ${diagnostics.http_status}` : 'HTTP 状态未知';
+  const code = diagnostics.binance_error_code === null || diagnostics.binance_error_code === undefined
+    ? 'Binance code 未返回' : `Binance ${diagnostics.binance_error_code}`;
+  return `${category}（${status}，${code}）；建议 ${retryAt} 后重试`;
+}
 const fmtRisk = (value) => localizedText(riskLabels[value] || value || '未知');
 const riskGuidance = (reason) => riskReasonGuidance[reason] || {label:'风险检查未通过',action:'查看当前风险事实，处理阻塞后重新检查。'};
 const friendlyApiError = (error) => {
@@ -364,6 +379,9 @@ const friendlyApiError = (error) => {
   const risk = riskReasonGuidance[error?.code] || riskReasonGuidance[error?.message];
   if (risk) return `${risk.label}：${risk.action}`;
   if (actionErrorGuidance[error?.code]) return actionErrorGuidance[error.code];
+  if (['BINANCE_CAPITAL_RATE_LIMITED','BINANCE_CONNECTION_RETRY_DEFERRED'].includes(error?.code) && error?.details) {
+    return fmtBinanceConnectionDiagnostic({error_code:error.code, diagnostics:error.details});
+  }
   if (apiErrorGuidance[error?.code]) return apiErrorGuidance[error.code];
   if (['REQUEST_TIMEOUT','REQUEST_ABORTED','NETWORK_ERROR'].includes(error?.code) && error?.message) return error.message;
   return '系统暂时无法完成请求，请稍后重试；如果问题持续存在，请联系系统管理员。';

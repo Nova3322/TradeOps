@@ -5,6 +5,7 @@ from decimal import Decimal
 
 import pytest
 
+from trading_control_plane import hyperliquid_capital
 from trading_control_plane.domain import DomainRejected
 from trading_control_plane.hyperliquid_capital import (
     ARBITRUM_NATIVE_USDC_ADDRESS,
@@ -237,3 +238,32 @@ def test_withdrawal_credit_matches_bridge_transfer_log() -> None:
         min_confirmations=20,
     )
     assert receipt["kind"] == "ARBITRUM_USDC_CREDIT_RECEIPT"
+
+
+def test_default_rpc_transport_uses_bounded_requests_client(monkeypatch) -> None:
+    calls: list[tuple[str, dict[str, object], float]] = []
+
+    class Response:
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict[str, object]:
+            return {"jsonrpc": "2.0", "id": 1, "result": "0x78"}
+
+    def post(url: str, *, json: dict[str, object], timeout: float) -> Response:
+        calls.append((url, json, timeout))
+        return Response()
+
+    monkeypatch.setattr(hyperliquid_capital.requests, "post", post)
+    gateway = HyperliquidCapitalGateway(timeout_seconds=4)
+
+    assert gateway._rpc_fetcher(
+        "https://arb1.arbitrum.io/rpc", "eth_blockNumber", [], 4
+    ) == "0x78"
+    assert calls == [
+        (
+            "https://arb1.arbitrum.io/rpc",
+            {"jsonrpc": "2.0", "id": 1, "method": "eth_blockNumber", "params": []},
+            4,
+        )
+    ]
