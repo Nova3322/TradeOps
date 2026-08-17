@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import time
+import urllib.error
 from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
@@ -215,3 +217,67 @@ def test_travel_rule_scope_fails_closed_instead_of_using_wrong_endpoint() -> Non
             now=NOW,
         )
     assert caught.value.code == "BINANCE_CAPITAL_TRAVEL_RULE_REQUIRED"
+
+
+def test_read_only_wallet_request_retries_once_with_fresh_server_time(monkeypatch) -> None:
+    class Response:
+        def __init__(self, body: bytes) -> None:
+            self.body = body
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args) -> None:
+            return None
+
+        def read(self) -> bytes:
+            return self.body
+
+    wallet_calls = 0
+
+    def urlopen(request, *, timeout):
+        nonlocal wallet_calls
+        assert timeout == 8
+        if request.full_url.endswith("/api/v3/time"):
+            return Response(b'{"serverTime":1786190400000}')
+        wallet_calls += 1
+        if wallet_calls == 1:
+            raise urllib.error.URLError("transient TLS failure")
+        return Response(b'{"ok":true}')
+
+    monkeypatch.setattr("urllib.request.urlopen", urlopen)
+    client = BinanceCapitalGateway(
+        api_key="capital-key",
+        api_secret="capital-secret",  # noqa: S106 - inert fixture credential
+        clock_ms=lambda: 1_786_190_400_000,
+    )
+    client._clock_synchronized_at = time.monotonic()
+
+    result = client._request("GET", "/sapi/v1/account/apiRestrictions")
+
+    assert result == {"ok": True}
+    assert wallet_calls == 2
+
+
+def test_withdrawal_post_is_never_retried_after_transport_failure(monkeypatch) -> None:
+    calls = 0
+
+    def urlopen(_request, *, timeout):
+        nonlocal calls
+        assert timeout == 8
+        calls += 1
+        raise urllib.error.URLError("submission outcome unknown")
+
+    monkeypatch.setattr("urllib.request.urlopen", urlopen)
+    client = BinanceCapitalGateway(
+        api_key="capital-key",
+        api_secret="capital-secret",  # noqa: S106 - inert fixture credential
+        clock_ms=lambda: 1_786_190_400_000,
+    )
+    client._clock_synchronized_at = time.monotonic()
+
+    with pytest.raises(DomainRejected) as caught:
+        client._request("POST", "/sapi/v1/capital/withdraw/apply")
+
+    assert caught.value.code == "BINANCE_CAPITAL_API_UNAVAILABLE"
+    assert calls == 1

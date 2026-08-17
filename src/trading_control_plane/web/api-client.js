@@ -1,12 +1,15 @@
 async function api(path, options = {}) {
   const method = (options.method || 'GET').toUpperCase();
   const mutation = !['GET', 'HEAD'].includes(method);
+  const requestTimeoutMs = Math.max(1000, Number(options.timeoutMs || REQUEST_TIMEOUT_MS));
+  const requestOptions = {...options};
+  delete requestOptions.timeoutMs;
   const controller = new AbortController();
   let didTimeout = false;
   const timeout = setTimeout(() => {
     didTimeout = true;
     controller.abort();
-  }, REQUEST_TIMEOUT_MS);
+  }, requestTimeoutMs);
   const externalSignal = options.signal;
   const abortFromExternalSignal = () => controller.abort(externalSignal.reason);
   if (externalSignal) {
@@ -18,7 +21,7 @@ async function api(path, options = {}) {
   try {
     response = await fetch(path, {
       credentials: 'same-origin',
-      ...options,
+      ...requestOptions,
       signal: controller.signal,
       headers: {'content-type': 'application/json', ...(options.headers || {})}
     });
@@ -38,9 +41,10 @@ async function api(path, options = {}) {
         abortedError.status = 499;
         throw abortedError;
       }
+      const timeoutSeconds = Math.round(requestTimeoutMs / 1000);
       const message = mutation
-        ? '操作在 15 秒内未收到确认。这是可恢复错误：按钮已恢复；请先刷新当前页面并核对权威状态，确认结果后再决定是否重试。'
-        : '读取超过 15 秒，请检查网络或服务状态后重试';
+        ? `操作在 ${timeoutSeconds} 秒内未收到确认。这是可恢复错误：按钮已恢复；请先刷新当前页面并核对权威状态，确认结果后再决定是否重试。`
+        : `读取超过 ${timeoutSeconds} 秒，请检查网络或服务状态后重试`;
       const timeoutError = new Error(message);
       timeoutError.code = 'REQUEST_TIMEOUT';
       timeoutError.status = 408;

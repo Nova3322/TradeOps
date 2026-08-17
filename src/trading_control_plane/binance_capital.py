@@ -147,51 +147,67 @@ class BinanceCapitalGateway:
             )
         assert self._api_key is not None
         assert self._api_secret is not None
-        prepared = {key: str(value) for key, value in (params or {}).items() if value is not None}
-        prepared["recvWindow"] = str(self._recv_window_ms)
-        prepared["timestamp"] = str(self._timestamp_ms())
-        query = urllib.parse.urlencode(prepared)
-        signature = hmac.new(self._api_secret.encode(), query.encode(), hashlib.sha256).hexdigest()
-        signed_query = f"{query}&signature={signature}"
+        semantic_params = {
+            key: str(value) for key, value in (params or {}).items() if value is not None
+        }
         if self._transport is not None:
             # Tests receive the unsigned semantic parameters only. Secret, API key,
             # signature and headers never cross this injection boundary.
+            prepared = dict(semantic_params)
+            prepared["recvWindow"] = str(self._recv_window_ms)
+            prepared["timestamp"] = str(self._timestamp_ms())
             return self._transport(method, path, dict(prepared), self._timeout_seconds)
-        url = f"{self._base_url}{path}"
-        body: bytes | None = None
-        if method == "GET":
-            url = f"{url}?{signed_query}"
-        else:
-            body = signed_query.encode()
-        request = urllib.request.Request(  # noqa: S310
-            url,
-            data=body,
-            method=method,
-            headers={
-                "X-MBX-APIKEY": self._api_key,
-                "Content-Type": "application/x-www-form-urlencoded",
-            },
-        )
-        try:
-            with urllib.request.urlopen(  # noqa: S310
-                request, timeout=self._timeout_seconds
-            ) as response:
-                return json.loads(response.read())
-        except urllib.error.HTTPError as exc:
+        attempts = 2 if method == "GET" else 1
+        for attempt in range(attempts):
+            prepared = dict(semantic_params)
+            prepared["recvWindow"] = str(self._recv_window_ms)
+            prepared["timestamp"] = str(self._timestamp_ms())
+            query = urllib.parse.urlencode(prepared)
+            signature = hmac.new(
+                self._api_secret.encode(), query.encode(), hashlib.sha256
+            ).hexdigest()
+            signed_query = f"{query}&signature={signature}"
+            url = f"{self._base_url}{path}"
+            body: bytes | None = None
+            if method == "GET":
+                url = f"{url}?{signed_query}"
+            else:
+                body = signed_query.encode()
+            request = urllib.request.Request(  # noqa: S310
+                url,
+                data=body,
+                method=method,
+                headers={
+                    "X-MBX-APIKEY": self._api_key,
+                    "Content-Type": "application/x-www-form-urlencoded",
+                },
+            )
             try:
-                raw = json.loads(exc.read())
-                code = raw.get("code") if isinstance(raw, dict) else None
-            except (json.JSONDecodeError, UnicodeDecodeError):
-                code = None
-            raise DomainRejected(
-                "BINANCE_CAPITAL_API_REJECTED",
-                f"Binance Wallet API rejected the request (code={code or 'UNKNOWN'})",
-            ) from exc
-        except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as exc:
-            raise DomainRejected(
-                "BINANCE_CAPITAL_API_UNAVAILABLE",
-                "Binance Wallet API did not return a valid bounded response",
-            ) from exc
+                with urllib.request.urlopen(  # noqa: S310
+                    request, timeout=self._timeout_seconds
+                ) as response:
+                    return json.loads(response.read())
+            except urllib.error.HTTPError as exc:
+                try:
+                    raw = json.loads(exc.read())
+                    code = raw.get("code") if isinstance(raw, dict) else None
+                except (json.JSONDecodeError, UnicodeDecodeError):
+                    code = None
+                raise DomainRejected(
+                    "BINANCE_CAPITAL_API_REJECTED",
+                    f"Binance Wallet API rejected the request (code={code or 'UNKNOWN'})",
+                ) from exc
+            except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as exc:
+                if attempt + 1 < attempts:
+                    # GET probes are side-effect free. Refresh time and signature before
+                    # one bounded retry; POST withdrawal submission is never retried.
+                    self._clock_synchronized_at = 0.0
+                    continue
+                raise DomainRejected(
+                    "BINANCE_CAPITAL_API_UNAVAILABLE",
+                    "Binance Wallet API did not return a valid bounded response",
+                ) from exc
+        raise AssertionError("unreachable")
 
     def _permissions(self) -> dict[str, Any]:
         raw = self._request("GET", "/sapi/v1/account/apiRestrictions")
