@@ -194,12 +194,16 @@ def test_team_mode_switch_is_in_the_header_and_legacy_page_is_removed() -> None:
 
     assert shell.status_code == 200
     assert 'id="environment-badge"' in shell.text
-    assert "data-open-mode-switch" in shell.text
-    assert 'id="team-mode-dialog"' in shell.text
+    assert 'aria-haspopup="listbox"' in shell.text
+    assert 'id="team-mode-menu"' in shell.text
+    assert 'id="team-mode-dialog"' not in shell.text
     assert 'href="/team-settings"' not in shell.text
     assert execution.status_code == 200
-    assert "async function openTeamModeDialog()" in execution.text
+    assert "async function openTeamModeDropdown" in execution.text
+    assert "function initializeTeamModeDropdown()" in execution.text
     assert "I_CONFIRM_LIVE_PRODUCTION_MONEY" in execution.text
+    assert "openTeamModeDialog" not in execution.text
+    assert "team-mode-switch-form" not in execution.text
     assert "renderTeamSettings" not in execution.text
     assert router.status_code == 200
     assert "path === '/team-settings' || path === '/trading-mode'" in router.text
