@@ -96,6 +96,29 @@ class _CapitalRoutes:
             )
         return self.resolved_binance_capital
 
+    def _hyperliquid_capital_settings(
+        self,
+        *,
+        actor_id: UUID,
+        account_id: str | None,
+        direct_settings: Any,
+    ) -> Any:
+        """Bind capital signing previews to the selected DB account, never a stale env label."""
+        if not account_id:
+            return direct_settings
+        binding = self.service().capital_account_binding(
+            actor_id=actor_id,
+            account_id=account_id,
+            venue="HYPERLIQUID",
+            environment="LIVE",
+        )
+        return direct_settings.model_copy(
+            update={
+                "hyperliquid_account_address": binding.credentials.get("account_address"),
+                "hyperliquid_api_wallet_address": binding.credentials.get("api_wallet_address"),
+            }
+        )
+
     def register_configuration(self) -> None:
         @self.app.get("/api/capital/direct-configurations")
         def direct_capital_configurations(
@@ -427,8 +450,33 @@ class _CapitalRoutes:
                     "CAPITAL_TREASURY_PROVIDER_MISMATCH",
                     "capital operation must use the administrator-selected funding provider",
                 )
+            requested_path = DirectCapitalPath(payload.path)
+            if requested_path in {
+                DirectCapitalPath.VAULT_TO_HYPERLIQUID,
+                DirectCapitalPath.HYPERLIQUID_TO_VAULT,
+            }:
+                direct_settings = self._hyperliquid_capital_settings(
+                    actor_id=identity.user_id,
+                    account_id=direct_settings.capital_direct_hyperliquid_account_id,
+                    direct_settings=direct_settings,
+                )
+                hyperliquid_main = resolve_hyperliquid_main_account(
+                    base_url=direct_settings.hyperliquid_base_url,
+                    account_address=direct_settings.hyperliquid_account_address,
+                    api_wallet_address=direct_settings.hyperliquid_api_wallet_address,
+                )
+                if hyperliquid_main is None:
+                    raise DomainRejected(
+                        "HYPERLIQUID_MAIN_ACCOUNT_MISSING",
+                        "the selected Hyperliquid account does not expose a main account address",
+                    )
+                # Freeze the actual Hyperliquid main wallet as the path handoff address.
+                # Safe's delegate remains an independent signer and may send directly to it.
+                direct_settings = direct_settings.model_copy(
+                    update={"capital_direct_owned_arbitrum_address": hyperliquid_main}
+                )
             plan = build_direct_capital_plan(
-                path=DirectCapitalPath(payload.path),
+                path=requested_path,
                 treasury_provider=selected_provider,
                 amount=payload.amount,
                 settings=direct_settings,
@@ -650,11 +698,40 @@ class _CapitalRoutes:
                     raise DomainRejected(
                         "BINANCE_CAPITAL_SCOPE_MISSING", "Binance deposit address is missing"
                     )
-                evidence = binance_capital.verify_deposit(
+                deposit_evidence = binance_capital.verify_deposit(
                     transaction_hash=payload.transaction_hash,
                     destination=destination,
                     amount=Decimal(str(context["min_received"])),
                 )
+                preflight = next(
+                    (
+                        stage.get("artifact")
+                        for stage in reversed(context["stages"])
+                        if stage.get("code") == "BINANCE_DEPOSIT_PREFLIGHT_READY"
+                    ),
+                    None,
+                )
+                if not isinstance(preflight, dict):
+                    raise DomainRejected(
+                        "BINANCE_CAPITAL_PREFLIGHT_REQUIRED",
+                        "the frozen Binance deposit preflight is missing",
+                    )
+                try:
+                    prepared_at = datetime.fromisoformat(str(preflight["preparedAt"]))
+                except (KeyError, TypeError, ValueError) as exc:
+                    raise DomainRejected(
+                        "BINANCE_CAPITAL_PREFLIGHT_INVALID",
+                        "the frozen Binance deposit preflight timestamp is invalid",
+                    ) from exc
+                internal_transfer = binance_capital.complete_deposit_to_usdm(
+                    amount=Decimal(str(context["min_received"])),
+                    prepared_at=prepared_at,
+                    now=now,
+                )
+                evidence = {
+                    "deposit": deposit_evidence,
+                    "internalTransfer": internal_transfer,
+                }
             else:
                 if context["path"] != DirectCapitalPath.BINANCE_TO_VAULT.value:
                     raise DomainRejected(
@@ -1294,6 +1371,11 @@ class _CapitalRoutes:
                     "this capital operation does not contain a Hyperliquid leg",
                 )
             direct_settings, _ = self.effective_direct_capital_settings(identity.user_id)
+            direct_settings = self._hyperliquid_capital_settings(
+                actor_id=identity.user_id,
+                account_id=(None if context["account_id"] is None else str(context["account_id"])),
+                direct_settings=direct_settings,
+            )
             bridge = direct_settings.capital_direct_hyperliquid_bridge_address
             owned = direct_settings.capital_direct_owned_arbitrum_address
             if bridge is None or owned is None:
@@ -1316,6 +1398,7 @@ class _CapitalRoutes:
                     "HYPERLIQUID_MAIN_ACCOUNT_MISSING",
                     "a Hyperliquid main account or resolvable authorized API wallet is required",
                 )
+            path_wallet = main_account
             if path is DirectCapitalPath.VAULT_TO_HYPERLIQUID:
                 if not any(
                     isinstance(stage, dict)
@@ -1331,7 +1414,7 @@ class _CapitalRoutes:
                     base_url=direct_settings.hyperliquid_base_url,
                     main_account=main_account,
                     api_wallet_address=direct_settings.hyperliquid_api_wallet_address,
-                    owned_arbitrum_address=owned,
+                    owned_arbitrum_address=path_wallet,
                     bridge_address=bridge,
                     amount=str(context["min_received"]),
                     now=now,
@@ -1341,7 +1424,11 @@ class _CapitalRoutes:
                     base_url=direct_settings.hyperliquid_base_url,
                     main_account=main_account,
                     api_wallet_address=direct_settings.hyperliquid_api_wallet_address,
-                    destination=owned,
+                    destination=(
+                        str(context["destination_reference"])
+                        if context["treasury_provider"] == "SAFE_SPENDING_LIMIT"
+                        else owned
+                    ),
                     amount=str(context["amount"]),
                     max_fee=context["max_fee"],
                     now=now,
@@ -1416,6 +1503,11 @@ class _CapitalRoutes:
                     "VERSION_CONFLICT", "direct capital operation changed; refresh"
                 )
             direct_settings, _ = self.effective_direct_capital_settings(identity.user_id)
+            direct_settings = self._hyperliquid_capital_settings(
+                actor_id=identity.user_id,
+                account_id=(None if context["account_id"] is None else str(context["account_id"])),
+                direct_settings=direct_settings,
+            )
             main_account = resolve_hyperliquid_main_account(
                 base_url=direct_settings.hyperliquid_base_url,
                 account_address=direct_settings.hyperliquid_account_address,
@@ -1525,19 +1617,27 @@ class _CapitalRoutes:
                     evidence = self.resolved_hyperliquid_capital.verify_arbitrum_usdc_transfer(
                         rpc_url=rpc_url,
                         transaction_hash=str(payload.transaction_hash),
-                        sender=owned,
+                        sender=str(artifact["from"]),
                         recipient=bridge,
                         amount=str(artifact["amount"]),
                         min_confirmations=direct_settings.notilt_arbitrum_min_confirmations,
                     )
                 else:
-                    evidence = self.resolved_hyperliquid_capital.verify_arbitrum_usdc_credit(
-                        rpc_url=rpc_url,
-                        transaction_hash=str(payload.transaction_hash),
-                        sender=bridge,
-                        recipient=owned,
-                        amount=str(artifact["amount"]),
-                        min_confirmations=direct_settings.notilt_arbitrum_min_confirmations,
+                    receipt_kwargs = {
+                        "rpc_url": rpc_url,
+                        "sender": bridge,
+                        "recipient": str(artifact["destination"]),
+                        "amount": str(artifact["amount"]),
+                        "min_confirmations": direct_settings.notilt_arbitrum_min_confirmations,
+                    }
+                    evidence = (
+                        self.resolved_hyperliquid_capital.verify_arbitrum_usdc_credit(
+                            transaction_hash=str(payload.transaction_hash), **receipt_kwargs
+                        )
+                        if payload.transaction_hash is not None
+                        else self.resolved_hyperliquid_capital.find_arbitrum_usdc_credit(
+                            prepared_at=prepared_at, **receipt_kwargs
+                        )
                     )
             version = self.service().record_direct_capital_hyperliquid_receipt(
                 operation_id,

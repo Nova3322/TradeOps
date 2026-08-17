@@ -225,7 +225,11 @@ def capital_account_binding(
             venue=account.venue,
             credential_version=account.credential_version,
         )
-        if not credentials.get("api_key") or not credentials.get("api_secret"):
+        required_fields = {
+            "BINANCE": ("api_key", "api_secret"),
+            "HYPERLIQUID": ("account_address", "api_wallet_address"),
+        }.get(normalized_venue, ("api_key", "api_secret"))
+        if any(not credentials.get(field) for field in required_fields):
             _reject(
                 "CAPITAL_ACCOUNT_CREDENTIALS_NOT_READY",
                 "capital account credentials are incomplete",

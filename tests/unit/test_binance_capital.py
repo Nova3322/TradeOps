@@ -27,6 +27,7 @@ def responses(*, ip_restrict: bool = True, destination: str = DESTINATION) -> di
             "ipRestrict": ip_restrict,
             "enableReading": True,
             "enableWithdrawals": True,
+            "enableInternalTransfer": True,
         },
         "/sapi/v1/capital/config/getall": [
             {
@@ -145,6 +146,32 @@ def test_withdrawal_submission_is_idempotent_and_uses_fixed_order_id() -> None:
     values = responses()
     values["/sapi/v1/capital/withdraw/history"] = []
     values["/sapi/v1/capital/withdraw/apply"] = {"id": "withdrawal-1"}
+    transfer_submitted = False
+
+    def transfer_response(method: str, params: dict[str, str]) -> dict[str, object]:
+        nonlocal transfer_submitted
+        if method == "POST":
+            transfer_submitted = True
+            return {"tranId": 12345}
+        return {
+            "rows": (
+                [
+                    {
+                        "asset": "USDC",
+                        "type": "UMFUTURE_MAIN",
+                        "amount": "25",
+                        "status": "CONFIRMED",
+                        "tranId": 12345,
+                        "timestamp": int(NOW.timestamp() * 1000),
+                    }
+                ]
+                if transfer_submitted
+                else []
+            )
+        }
+
+    values["/sapi/v1/asset/transfer"] = transfer_response
+    values["/sapi/v3/asset/getUserAsset"] = [{"asset": "USDC", "free": "275"}]
     client = gateway(values, calls)
     artifact = client.prepare_withdrawal(
         destination=DESTINATION,
@@ -161,6 +188,61 @@ def test_withdrawal_submission_is_idempotent_and_uses_fixed_order_id() -> None:
     assert submit[0] == "POST"
     assert submit[2]["withdrawOrderId"] == "operation-1"
     assert submit[2]["address"] == DESTINATION
+    transfer = next(call for call in calls if call[:2] == ("POST", "/sapi/v1/asset/transfer"))
+    assert transfer[2]["type"] == "UMFUTURE_MAIN"
+    assert result["internalTransfer"]["status"] == "CONFIRMED"
+
+
+def test_credited_deposit_is_moved_from_spot_to_usdm_once() -> None:
+    calls: list[tuple[str, str, dict[str, str]]] = []
+    values = responses()
+    transfer_submitted = False
+
+    def transfer_response(method: str, params: dict[str, str]) -> dict[str, object]:
+        nonlocal transfer_submitted
+        if method == "POST":
+            transfer_submitted = True
+            return {"tranId": 67890}
+        return {
+            "rows": (
+                [
+                    {
+                        "asset": "USDC",
+                        "type": "MAIN_UMFUTURE",
+                        "amount": "10",
+                        "status": "CONFIRMED",
+                        "tranId": 67890,
+                        "timestamp": int(NOW.timestamp() * 1000),
+                    }
+                ]
+                if transfer_submitted
+                else []
+            )
+        }
+
+    values["/sapi/v1/asset/transfer"] = transfer_response
+    result = gateway(values, calls).complete_deposit_to_usdm(
+        amount=Decimal("10"), prepared_at=NOW, now=NOW
+    )
+
+    assert result["type"] == "MAIN_UMFUTURE"
+    assert result["status"] == "CONFIRMED"
+    assert len([call for call in calls if call[:2] == ("POST", "/sapi/v1/asset/transfer")]) == 1
+
+
+def test_universal_transfer_permission_is_required_for_capital_paths() -> None:
+    values = responses()
+    values["/sapi/v1/account/apiRestrictions"]["enableInternalTransfer"] = False
+
+    with pytest.raises(DomainRejected) as caught:
+        gateway(values).prepare_deposit(
+            expected_address=DESTINATION,
+            amount=Decimal("10"),
+            source_address=SOURCE,
+            now=NOW,
+        )
+
+    assert caught.value.code == "BINANCE_INTERNAL_TRANSFER_PERMISSION_DISABLED"
 
 
 def test_exact_binance_deposit_and_withdrawal_receipts_are_verified() -> None:

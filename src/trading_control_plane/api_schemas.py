@@ -872,8 +872,8 @@ class DirectCapitalHyperliquidReceiptRequest(BaseModel):
 
     @model_validator(mode="after")
     def validate_receipt_reference(self) -> DirectCapitalHyperliquidReceiptRequest:
-        if self.stage.endswith("ARBITRUM") and self.transaction_hash is None:
-            raise ValueError("Arbitrum receipt verification requires a transaction hash")
+        if self.stage == "HYPERLIQUID_DEPOSIT_ARBITRUM" and self.transaction_hash is None:
+            raise ValueError("Hyperliquid deposit receipt verification requires a transaction hash")
         if self.stage == "HYPERLIQUID_DEPOSIT_LEDGER" and self.action_hash is None:
             raise ValueError("Hyperliquid deposit ledger verification requires the deposit hash")
         if (

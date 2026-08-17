@@ -59,6 +59,7 @@ def test_mock_capital_adapter_is_deterministic_and_never_live() -> None:
                 "WAIT_10_MINUTES",
                 "REVALIDATE_RELEASE",
                 "TRANSFER_TO_AUTHORIZED_BINANCE_ADDRESS",
+                "TRANSFER_BINANCE_SPOT_TO_USDM",
             ],
         ),
         (
@@ -84,6 +85,7 @@ def test_mock_capital_adapter_is_deterministic_and_never_live() -> None:
             DirectCapitalPath.BINANCE_TO_VAULT,
             [
                 "RESTRICTED_BINANCE_WITHDRAWAL_TO_SELECTED_TREASURY",
+                "TRANSFER_BINANCE_USDM_TO_SPOT",
                 "VERIFY_BINANCE_WITHDRAWAL_RECEIPT",
                 "VERIFY_SELECTED_TREASURY_CREDIT",
             ],

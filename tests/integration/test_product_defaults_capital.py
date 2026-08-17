@@ -42,11 +42,34 @@ from trading_control_plane.perptape import PerptapeClient, PerptapeFeedSnapshot
 from trading_control_plane.safe_spending import SafeSpendingGateway
 from trading_control_plane.service import TradingService
 
+TEST_CREDENTIAL_KEY = base64.urlsafe_b64encode(
+    b"capital-hyperliquid-test-key-000"
+).decode().rstrip("=")
+
 
 def _add_live_accounts(database: Database, admin: UUID) -> None:
     add_exchange_account_fixture(database, admin, "binance-main", "BINANCE")
-    add_exchange_account_fixture(database, admin, "hyperliquid-main", "HYPERLIQUID")
     add_exchange_account_fixture(database, admin, "acct-live", "BINANCE")
+    service = TradingService(database, credential_encryption_key=TEST_CREDENTIAL_KEY)
+    account_pk = service.create_exchange_account(
+        actor_id=admin,
+        account_id="hyperliquid-main",
+        venue="HYPERLIQUID",
+        label="Hyperliquid LIVE integration account",
+        credentials={
+            "account_address": "0x2222222222222222222222222222222222222222",
+            "api_wallet_address": "0x6666666666666666666666666666666666666666",
+            "api_wallet_private_key": "0x" + "11" * 32,
+        },
+        idempotency_key="hyperliquid-live-integration-account",
+        now=datetime.now(UTC),
+    )
+    with database.session_factory.begin() as session:
+        account = session.get(ExchangeAccount, account_pk)
+        assert account is not None
+        account.connection_status = "VERIFIED"
+        account.last_connection_check_at = datetime.now(UTC)
+        account.last_verified_at = datetime.now(UTC)
 
 
 async def _login(client: AsyncClient, username: str) -> None:
@@ -106,7 +129,7 @@ def _app(
         database_url=str(database.engine.url),
         allow_mock_identity=True,
         session_signing_secret="product-flows-test-signing-secret",  # noqa: S106
-        credential_encryption_key=credential_encryption_key,
+        credential_encryption_key=credential_encryption_key or TEST_CREDENTIAL_KEY,
         runtime_sync_enabled=True,
         runtime_binance_account_id=runtime_binance_account_id,
         runtime_hyperliquid_account_id=runtime_hyperliquid_account_id,
@@ -220,7 +243,6 @@ def test_hyperliquid_withdrawal_auto_falls_back_to_wallet_and_settles_only_after
     state: dict[str, object] = {}
     withdrawal_hash = "0x" + "ab" * 32
     withdrawal_arbitrum_hash = "0x" + "cd" * 32
-    treasury_hash = "0x" + "ef" * 32
     main = "0x2222222222222222222222222222222222222222"
     agent = "0x6666666666666666666666666666666666666666"
     safe = "0x7777777777777777777777777777777777777777"
@@ -246,30 +268,26 @@ def test_hyperliquid_withdrawal_auto_falls_back_to_wallet_and_settles_only_after
         ]
 
     bridge_topic = f"0x{HYPERLIQUID_BRIDGE2_ADDRESS[2:].rjust(64, '0')}"
-    main_topic = f"0x{main[2:].rjust(64, '0')}"
-    safe_transfer_data = "0xa9059cbb" + safe[2:].rjust(64, "0") + hex(99_000_000)[2:].rjust(64, "0")
+    safe_topic = f"0x{safe[2:].rjust(64, '0')}"
 
     def rpc_fetcher(_url: str, method: str, params: list[object], _timeout: float) -> object:
         tx_hash = str(params[0]) if params else ""
         if method == "eth_blockNumber":
             return "0x78"
         if method == "eth_getTransactionReceipt":
-            if tx_hash == withdrawal_arbitrum_hash:
-                return {
-                    "status": "0x1",
-                    "blockNumber": "0x64",
-                    "logs": [
-                        {
-                            "address": ARBITRUM_NATIVE_USDC_ADDRESS,
-                            "topics": [ERC20_TRANSFER_TOPIC, bridge_topic, main_topic],
-                            "data": hex(100_000_000),
-                        }
-                    ],
-                }
-            assert tx_hash == treasury_hash
-            return {"status": "0x1", "blockNumber": "0x64", "logs": []}
-        assert method == "eth_getTransactionByHash" and tx_hash == treasury_hash
-        return {"from": main, "to": ARBITRUM_NATIVE_USDC_ADDRESS, "input": safe_transfer_data}
+            assert tx_hash == withdrawal_arbitrum_hash
+            return {
+                "status": "0x1",
+                "blockNumber": "0x64",
+                "logs": [
+                    {
+                        "address": ARBITRUM_NATIVE_USDC_ADDRESS,
+                        "topics": [ERC20_TRANSFER_TOPIC, bridge_topic, safe_topic],
+                        "data": hex(100_000_000),
+                    }
+                ],
+            }
+        raise AssertionError(method)
 
     def safe_executor(payload: dict[str, object]) -> dict[str, object]:
         if payload["operation"] == "read-limit":
@@ -282,20 +300,7 @@ def test_hyperliquid_withdrawal_auto_falls_back_to_wallet_and_settles_only_after
                 "nonce": "7",
                 "blockTimestamp": str(int(now.timestamp())),
             }
-        assert payload["operation"] == "prepare-deposit"
-        return {
-            "kind": "SAFE_ERC20_DEPOSIT_UNSIGNED_TRANSACTION",
-            "chainId": 42161,
-            "safe": safe,
-            "sender": main,
-            "token": ARBITRUM_NATIVE_USDC_ADDRESS,
-            "amount": "99000000",
-            "to": ARBITRUM_NATIVE_USDC_ADDRESS,
-            "value": "0",
-            "data": safe_transfer_data,
-            "signing": False,
-            "broadcast": False,
-        }
+        raise AssertionError(payload["operation"])
 
     async def scenario() -> None:
         app = _app(
@@ -344,6 +349,7 @@ def test_hyperliquid_withdrawal_auto_falls_back_to_wallet_and_settles_only_after
             state["nonce"] = artifact["nonce"]
             assert preview.json()["automatic_fallback"] is True
             assert preview.json()["agent_wallet"]["authorized"] is True
+            assert artifact["destination"] == safe
             assert artifact["signing"] is False and artifact["broadcast"] is False
             assert preview.json()["data"]["real_transfer_gate"] == "DISABLED"
 
@@ -381,46 +387,15 @@ def test_hyperliquid_withdrawal_auto_falls_back_to_wallet_and_settles_only_after
                 },
             )
             assert arbitrum.status_code == 200, arbitrum.text
-            assert arbitrum.json()["settlement"].endswith("TREASURY_RECEIPT_STILL_REQUIRED")
-
-            safe_preview = await client.post(
-                f"/api/capital/direct-operations/{operation_id}/safe-spending-preview",
-                json={
-                    "expected_version": 5,
-                    "final_confirmed": True,
-                    "idempotency_key": "hl-capital-safe-preview",
-                },
-            )
-            assert safe_preview.status_code == 200, safe_preview.text
-            treasury_submitted = await client.post(
-                f"/api/capital/direct-operations/{operation_id}/wallet-submission",
-                json={
-                    "expected_version": 6,
-                    "stage": "TREASURY_DEPOSIT",
-                    "outcome": "SUBMITTED",
-                    "transaction_hash": treasury_hash,
-                    "final_confirmed": True,
-                    "idempotency_key": "hl-capital-treasury-submitted",
-                },
-            )
-            assert treasury_submitted.status_code == 200, treasury_submitted.text
-            treasury = await client.post(
-                f"/api/capital/direct-operations/{operation_id}/treasury-receipt",
-                json={
-                    "expected_version": 7,
-                    "transaction_hash": treasury_hash,
-                    "idempotency_key": "hl-capital-treasury-receipt",
-                },
-            )
-            assert treasury.status_code == 200, treasury.text
+            assert arbitrum.json()["settlement"] == "CONFIRMED"
             operation = next(
                 item
-                for item in treasury.json()["data"]["direct_operations"]
+                for item in arbitrum.json()["data"]["direct_operations"]
                 if item["operation_id"] == operation_id
             )
             assert operation["status"] == "SETTLED"
             assert operation["receipt_status"] == "CONFIRMED"
-            assert treasury.json()["data"]["real_transfer_gate"] == "DISABLED"
+            assert arbitrum.json()["data"]["real_transfer_gate"] == "DISABLED"
 
     asyncio.run(scenario())
     with database.session_factory() as session:
@@ -428,7 +403,7 @@ def test_hyperliquid_withdrawal_auto_falls_back_to_wallet_and_settles_only_after
     assert "CAPITAL_HYPERLIQUID_WALLET_REQUEST_PREPARED" in events
     assert "CAPITAL_HUMAN_WALLET_SUBMISSION_RECORDED" in events
     assert "CAPITAL_HYPERLIQUID_RECEIPT_VERIFIED" in events
-    assert "CAPITAL_TREASURY_DESTINATION_RECEIPT_VERIFIED" in events
+    assert "CAPITAL_TREASURY_DESTINATION_RECEIPT_VERIFIED" not in events
 
 
 def test_safe_to_hyperliquid_requires_source_receipt_then_settles_both_legs(
@@ -717,9 +692,10 @@ def test_safe_spending_limit_provider_is_selected_audited_and_never_signed(
 
     binance_responses: dict[str, object] = {
         "/sapi/v1/account/apiRestrictions": {
-            "ipRestrict": True,
-            "enableReading": True,
-            "enableWithdrawals": True,
+                "ipRestrict": True,
+                "enableReading": True,
+                "enableWithdrawals": True,
+                "enableInternalTransfer": True,
         },
         "/sapi/v1/capital/config/getall": [
             {
@@ -1150,12 +1126,18 @@ def test_binance_restricted_withdrawal_runs_frozen_preflight_submission_and_dual
     tx_hash = "0x" + "ab" * 32
     calls: list[tuple[str, str, dict[str, str]]] = []
     submitted = False
+    internal_transferred = False
 
     def transport(method: str, path: str, params: dict[str, str], _timeout: float):
-        nonlocal submitted
+        nonlocal internal_transferred, submitted
         calls.append((method, path, params))
         if path == "/sapi/v1/account/apiRestrictions":
-            return {"ipRestrict": True, "enableReading": True, "enableWithdrawals": True}
+            return {
+                "ipRestrict": True,
+                "enableReading": True,
+                "enableWithdrawals": True,
+                "enableInternalTransfer": True,
+            }
         if path == "/sapi/v1/capital/config/getall":
             return [
                 {
@@ -1188,6 +1170,29 @@ def test_binance_restricted_withdrawal_runs_frozen_preflight_submission_and_dual
             return "NIL"
         if path == "/sapi/v1/capital/withdraw/quota":
             return {"wdQuota": "1000", "usedWdQuota": "0"}
+        if path == "/sapi/v1/asset/transfer":
+            if method == "POST":
+                assert params["type"] == "UMFUTURE_MAIN"
+                internal_transferred = True
+                return {"tranId": 12345}
+            return {
+                "rows": (
+                    [
+                        {
+                            "asset": "USDC",
+                            "type": "UMFUTURE_MAIN",
+                            "amount": "25",
+                            "status": "CONFIRMED",
+                            "tranId": 12345,
+                            "timestamp": int(now.timestamp() * 1000),
+                        }
+                    ]
+                    if internal_transferred
+                    else []
+                )
+            }
+        if path == "/sapi/v3/asset/getUserAsset":
+            return [{"asset": "USDC", "free": "125"}]
         if path == "/sapi/v1/capital/withdraw/apply":
             assert method == "POST"
             assert params["address"] == destination
@@ -1354,7 +1359,12 @@ def test_binance_capital_uses_verified_account_managed_credentials_and_keeps_inv
     def transport(method: str, path: str, params: dict[str, str], _timeout: float):
         calls.append((method, path, params))
         if path == "/sapi/v1/account/apiRestrictions":
-            return {"ipRestrict": True, "enableReading": True, "enableWithdrawals": True}
+            return {
+                "ipRestrict": True,
+                "enableReading": True,
+                "enableWithdrawals": True,
+                "enableInternalTransfer": True,
+            }
         if path == "/sapi/v1/capital/config/getall":
             return [
                 {
