@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import io
 import time
 import urllib.error
 from datetime import UTC, datetime
@@ -219,7 +220,7 @@ def test_travel_rule_scope_fails_closed_instead_of_using_wrong_endpoint() -> Non
     assert caught.value.code == "BINANCE_CAPITAL_TRAVEL_RULE_REQUIRED"
 
 
-def test_read_only_wallet_request_retries_once_with_fresh_server_time(monkeypatch) -> None:
+def test_read_only_wallet_request_fails_over_once_to_an_official_host(monkeypatch) -> None:
     class Response:
         def __init__(self, body: bytes) -> None:
             self.body = body
@@ -257,6 +258,112 @@ def test_read_only_wallet_request_retries_once_with_fresh_server_time(monkeypatc
 
     assert result == {"ok": True}
     assert wallet_calls == 2
+
+
+def test_server_time_fails_over_across_documented_official_hosts(monkeypatch) -> None:
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args) -> None:
+            return None
+
+        def read(self) -> bytes:
+            return b'{"serverTime":1786190400123}'
+
+    calls: list[tuple[str, float]] = []
+
+    def urlopen(request, *, timeout):
+        calls.append((request.full_url, timeout))
+        if request.full_url.startswith("https://api.binance.com/"):
+            raise urllib.error.URLError("transient TLS EOF")
+        return Response()
+
+    monkeypatch.setattr("urllib.request.urlopen", urlopen)
+    client = BinanceCapitalGateway(
+        api_key="capital-key",
+        api_secret="capital-secret",  # noqa: S106 - inert fixture credential
+        clock_ms=lambda: 1_786_190_400_000,
+    )
+
+    assert client._timestamp_ms() == 1_786_190_400_123
+    assert calls == [
+        ("https://api.binance.com/api/v3/time", 4.0),
+        ("https://api1.binance.com/api/v3/time", 4.0),
+    ]
+
+
+def test_wallet_get_fails_over_and_reuses_reachable_official_host(monkeypatch) -> None:
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args) -> None:
+            return None
+
+        def read(self) -> bytes:
+            return b'{"ok":true}'
+
+    calls: list[str] = []
+
+    def urlopen(request, *, timeout):
+        assert timeout == 8
+        calls.append(request.full_url)
+        if request.full_url.startswith("https://api.binance.com/"):
+            raise urllib.error.URLError("transient TLS EOF")
+        return Response()
+
+    monkeypatch.setattr("urllib.request.urlopen", urlopen)
+    client = BinanceCapitalGateway(
+        api_key="capital-key",
+        api_secret="capital-secret",  # noqa: S106 - inert fixture credential
+        clock_ms=lambda: 1_786_190_400_000,
+    )
+    client._clock_synchronized_at = time.monotonic()
+
+    assert client._request("GET", "/sapi/v1/account/apiRestrictions") == {"ok": True}
+    assert client._request("GET", "/sapi/v1/capital/config/getall") == {"ok": True}
+
+    assert calls[0].startswith("https://api.binance.com/")
+    assert calls[1].startswith("https://api1.binance.com/")
+    assert calls[2].startswith("https://api1.binance.com/")
+
+
+@pytest.mark.parametrize(
+    ("http_status", "exchange_code", "expected_code"),
+    [
+        (400, -2015, "BINANCE_CAPITAL_AUTHORIZATION_REJECTED"),
+        (400, -1021, "BINANCE_CAPITAL_TIMESTAMP_REJECTED"),
+        (429, -1003, "BINANCE_CAPITAL_RATE_LIMITED"),
+        (500, -1000, "BINANCE_CAPITAL_API_UNAVAILABLE"),
+    ],
+)
+def test_wallet_api_rejections_have_actionable_non_sensitive_codes(
+    monkeypatch, http_status: int, exchange_code: int, expected_code: str
+) -> None:
+    def urlopen(request, *, timeout):
+        assert timeout == 8
+        raise urllib.error.HTTPError(
+            request.full_url,
+            http_status,
+            "rejected",
+            {},
+            io.BytesIO(f'{{"code":{exchange_code},"msg":"sensitive detail"}}'.encode()),
+        )
+
+    monkeypatch.setattr("urllib.request.urlopen", urlopen)
+    client = BinanceCapitalGateway(
+        api_key="capital-key",
+        api_secret="capital-secret",  # noqa: S106 - inert fixture credential
+        clock_ms=lambda: 1_786_190_400_000,
+    )
+    client._clock_synchronized_at = time.monotonic()
+
+    with pytest.raises(DomainRejected) as caught:
+        client._request("GET", "/sapi/v1/account/apiRestrictions")
+
+    assert caught.value.code == expected_code
+    assert "sensitive detail" not in caught.value.detail
 
 
 def test_withdrawal_post_is_never_retried_after_transport_failure(monkeypatch) -> None:
