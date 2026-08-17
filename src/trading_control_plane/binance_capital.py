@@ -18,7 +18,17 @@ from trading_control_plane.domain import DomainRejected
 JsonValue = Any
 Transport = Callable[[str, str, dict[str, str], float], JsonValue]
 
-OFFICIAL_BINANCE_HOSTS = frozenset({"api.binance.com"})
+OFFICIAL_BINANCE_BASE_URLS = (
+    "https://api.binance.com",
+    "https://api1.binance.com",
+    "https://api-gcp.binance.com",
+    "https://api2.binance.com",
+    "https://api3.binance.com",
+    "https://api4.binance.com",
+)
+OFFICIAL_BINANCE_HOSTS = frozenset(
+    urllib.parse.urlparse(base_url).hostname for base_url in OFFICIAL_BINANCE_BASE_URLS
+)
 EVM_ADDRESS = re.compile(r"^0x[0-9a-fA-F]{40}$")
 TX_HASH = re.compile(r"^0x[0-9a-fA-F]{64}$")
 SUPPORTED_ASSET = "USDC"
@@ -46,9 +56,13 @@ def _official_base_url(value: str) -> str:
     if parsed.scheme != "https" or parsed.hostname not in OFFICIAL_BINANCE_HOSTS:
         _reject(
             "BINANCE_CAPITAL_API_UNTRUSTED",
-            "capital operations require the official https://api.binance.com host",
+            "capital operations require an official Binance HTTPS API host",
         )
     return value.rstrip("/")
+
+
+def _ordered_official_base_urls(preferred: str) -> tuple[str, ...]:
+    return (preferred, *(item for item in OFFICIAL_BINANCE_BASE_URLS if item != preferred))[:3]
 
 
 def _evm_address(value: str, *, field: str) -> str:
@@ -77,6 +91,7 @@ class BinanceCapitalGateway:
         clock_ms: Callable[[], int] | None = None,
     ) -> None:
         self._base_url = _official_base_url(base_url)
+        self._active_base_url = self._base_url
         self._api_key = api_key
         self._api_secret = api_secret
         self._recv_window_ms = min(60_000, max(1_000, recv_window_ms))
@@ -88,7 +103,7 @@ class BinanceCapitalGateway:
 
     def __repr__(self) -> str:
         return (
-            "BinanceCapitalGateway(base_url='https://api.binance.com', "
+            f"BinanceCapitalGateway(base_url='{self._base_url}', "
             f"configured={self.configured}, timeout_seconds={self._timeout_seconds})"
         )
 
@@ -113,28 +128,35 @@ class BinanceCapitalGateway:
             return self._clock_ms()
         monotonic_now = time.monotonic()
         if monotonic_now - self._clock_synchronized_at > 30:
-            request = urllib.request.Request(  # noqa: S310
-                f"{self._base_url}/api/v3/time",
-                method="GET",
-            )
-            try:
-                with urllib.request.urlopen(  # noqa: S310
-                    request, timeout=self._timeout_seconds
-                ) as response:
-                    raw = json.loads(response.read())
-                server_time = int(raw["serverTime"])
-            except (
-                KeyError,
-                TypeError,
-                ValueError,
-                urllib.error.URLError,
-                TimeoutError,
-                json.JSONDecodeError,
-            ) as exc:
+            server_time: int | None = None
+            last_error: BaseException | None = None
+            time_timeout = min(4.0, self._timeout_seconds)
+            for base_url in _ordered_official_base_urls(self._active_base_url):
+                request = urllib.request.Request(  # noqa: S310
+                    f"{base_url}/api/v3/time",
+                    method="GET",
+                )
+                try:
+                    with urllib.request.urlopen(  # noqa: S310
+                        request, timeout=time_timeout
+                    ) as response:
+                        raw = json.loads(response.read())
+                    server_time = int(raw["serverTime"])
+                    break
+                except (
+                    KeyError,
+                    TypeError,
+                    ValueError,
+                    urllib.error.URLError,
+                    TimeoutError,
+                    json.JSONDecodeError,
+                ) as exc:
+                    last_error = exc
+            if server_time is None:
                 raise DomainRejected(
                     "BINANCE_CAPITAL_TIME_SYNC_FAILED",
                     "Binance server time could not be synchronized before a signed request",
-                ) from exc
+                ) from last_error
             self._clock_offset_ms = server_time - self._clock_ms()
             self._clock_synchronized_at = monotonic_now
         return self._clock_ms() + self._clock_offset_ms
@@ -157,8 +179,13 @@ class BinanceCapitalGateway:
             prepared["recvWindow"] = str(self._recv_window_ms)
             prepared["timestamp"] = str(self._timestamp_ms())
             return self._transport(method, path, dict(prepared), self._timeout_seconds)
-        attempts = 2 if method == "GET" else 1
-        for attempt in range(attempts):
+        base_urls = (
+            _ordered_official_base_urls(self._active_base_url)
+            if method == "GET"
+            else (self._active_base_url,)
+        )
+        last_error: BaseException | None = None
+        for attempt, base_url in enumerate(base_urls):
             prepared = dict(semantic_params)
             prepared["recvWindow"] = str(self._recv_window_ms)
             prepared["timestamp"] = str(self._timestamp_ms())
@@ -167,7 +194,7 @@ class BinanceCapitalGateway:
                 self._api_secret.encode(), query.encode(), hashlib.sha256
             ).hexdigest()
             signed_query = f"{query}&signature={signature}"
-            url = f"{self._base_url}{path}"
+            url = f"{base_url}{path}"
             body: bytes | None = None
             if method == "GET":
                 url = f"{url}?{signed_query}"
@@ -186,28 +213,52 @@ class BinanceCapitalGateway:
                 with urllib.request.urlopen(  # noqa: S310
                     request, timeout=self._timeout_seconds
                 ) as response:
-                    return json.loads(response.read())
+                    result = json.loads(response.read())
+                self._active_base_url = base_url
+                return result
             except urllib.error.HTTPError as exc:
                 try:
                     raw = json.loads(exc.read())
                     code = raw.get("code") if isinstance(raw, dict) else None
                 except (json.JSONDecodeError, UnicodeDecodeError):
                     code = None
+                if code in {-2014, -2015} or exc.code in {401, 403}:
+                    error_code = "BINANCE_CAPITAL_AUTHORIZATION_REJECTED"
+                    detail = (
+                        "Binance rejected the capital API key, source IP, or endpoint permission"
+                    )
+                elif code == -1021:
+                    error_code = "BINANCE_CAPITAL_TIMESTAMP_REJECTED"
+                    detail = "Binance rejected the signed request timestamp"
+                elif code == -1003 or exc.code in {418, 429}:
+                    error_code = "BINANCE_CAPITAL_RATE_LIMITED"
+                    detail = "Binance rate limited the capital API request"
+                elif exc.code >= 500:
+                    error_code = "BINANCE_CAPITAL_API_UNAVAILABLE"
+                    detail = "Binance Wallet API returned a server error"
+                else:
+                    error_code = "BINANCE_CAPITAL_API_REJECTED"
+                    detail = f"Binance Wallet API rejected the request (code={code or 'UNKNOWN'})"
                 raise DomainRejected(
-                    "BINANCE_CAPITAL_API_REJECTED",
-                    f"Binance Wallet API rejected the request (code={code or 'UNKNOWN'})",
+                    error_code,
+                    detail,
                 ) from exc
             except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as exc:
-                if attempt + 1 < attempts:
-                    # GET probes are side-effect free. Refresh time and signature before
-                    # one bounded retry; POST withdrawal submission is never retried.
-                    self._clock_synchronized_at = 0.0
+                last_error = exc
+                if attempt + 1 < len(base_urls):
+                    # GET probes are side-effect free. Re-sign against the next bounded
+                    # Binance official API host while retaining the fresh clock offset.
+                    # POST withdrawal submission is never retried because its outcome
+                    # could be unknown after a transport failure.
                     continue
                 raise DomainRejected(
                     "BINANCE_CAPITAL_API_UNAVAILABLE",
                     "Binance Wallet API did not return a valid bounded response",
                 ) from exc
-        raise AssertionError("unreachable")
+        raise DomainRejected(
+            "BINANCE_CAPITAL_API_UNAVAILABLE",
+            "Binance Wallet API did not return a valid bounded response",
+        ) from last_error
 
     def _permissions(self) -> dict[str, Any]:
         raw = self._request("GET", "/sapi/v1/account/apiRestrictions")

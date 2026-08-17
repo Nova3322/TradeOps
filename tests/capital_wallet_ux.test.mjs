@@ -17,6 +17,7 @@ test("capital operations open the connected wallet and record public evidence au
   ]) {
     assert.equal(source.includes(marker), true, marker);
   }
+  assert.equal(source.includes("`/api/capital?environment=${displayEnvironment}`, {\n    timeoutMs:45_000"), true);
 });
 
 test("operation history has no second confirmation or manual hash forms", () => {
@@ -32,6 +33,10 @@ test("operation history has no second confirmation or manual hash forms", () => 
   }
   assert.equal(source.includes("prepareAndSubmitBinanceWithdrawal"), true);
   assert.equal(source.includes("币安转出通过受限 API 直接提交"), true);
+  assert.equal(source.includes("capital-operation-actions"), false);
+  assert.equal(source.includes("capital-transfer-continuations"), true);
+  assert.equal(source.includes('<div class="capital-transfer-continuation-actions">${operationActions}</div>'), true);
+  assert.equal(source.includes("operation.status !== 'BLOCKED' && blockerCodes.length === 0"), true);
 });
 
 test("NoTilt protocol delay keeps one-click wallet continuation without manual evidence", () => {
