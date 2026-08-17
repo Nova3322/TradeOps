@@ -307,26 +307,114 @@ const ARBITRUM_WALLET_CHAIN = {
 };
 let directCapitalWalletActions = new Map();
 
-function walletProvider() {
-  if (!window.ethereum?.request) throw new Error('请先在浏览器中连接支持 Arbitrum One 的钱包。');
-  return window.ethereum;
+const announcedCapitalWalletProviders = [];
+window.addEventListener('eip6963:announceProvider', event => {
+  const provider = event?.detail?.provider;
+  if (!provider?.request || announcedCapitalWalletProviders.some(item => item.provider === provider)) return;
+  announcedCapitalWalletProviders.push({provider, info:event.detail.info || {}});
+});
+window.dispatchEvent(new Event('eip6963:requestProvider'));
+
+function capitalWalletError(code, message, cause = null) {
+  const error = new Error(message);
+  error.code = code;
+  if (cause) error.cause = cause;
+  return error;
+}
+
+function capitalWalletProviders() {
+  const providers = [];
+  const add = (provider, info = {}) => {
+    if (provider?.request && !providers.some(item => item.provider === provider)) providers.push({provider, info});
+  };
+  (Array.isArray(window.ethereum?.providers) ? window.ethereum.providers : []).forEach(provider => add(provider));
+  add(window.ethereum);
+  announcedCapitalWalletProviders.forEach(item => add(item.provider, item.info));
+  return providers;
+}
+
+function isWalletCancellation(error) {
+  const message = String(error?.message || '').toLowerCase();
+  return Number(error?.code) === 4001 || error?.code === 'ACTION_REJECTED'
+    || message.includes('user rejected') || message.includes('user denied');
+}
+
+function normalizeCapitalWalletError(error) {
+  if (error?.code && ['WALLET_', 'HYPERLIQUID_'].some(prefix => String(error.code).startsWith(prefix))) return error;
+  const message = String(error?.message || '').toLowerCase();
+  if (message.includes('insufficient funds') || message.includes('insufficient balance')) {
+    return capitalWalletError('WALLET_GAS_INSUFFICIENT', '当前钱包没有足够的 Arbitrum ETH 支付 Gas。', error);
+  }
+  if (Number(error?.code) === -32002 || message.includes('already pending')) {
+    return capitalWalletError('WALLET_REQUEST_PENDING', '钱包中已有待处理请求，请先在钱包里完成或取消。', error);
+  }
+  if (Number(error?.code) === 4100 || message.includes('unauthorized')) {
+    return capitalWalletError('WALLET_ACCOUNT_ACCESS_DENIED', '钱包尚未授权 TradeOps 读取当前账户。', error);
+  }
+  return capitalWalletError('WALLET_REQUEST_FAILED', '钱包没有接受本次请求，请打开钱包查看具体提示后重试。', error);
+}
+
+async function walletProvider(expectedAddress) {
+  const candidates = capitalWalletProviders();
+  if (!candidates.length) {
+    throw capitalWalletError(
+      'WALLET_PROVIDER_NOT_AVAILABLE',
+      '当前标签页没有检测到钱包。请允许钱包扩展访问 127.0.0.1，并刷新后重试。',
+    );
+  }
+  if (expectedAddress) {
+    for (const candidate of candidates) {
+      try {
+        const accounts = await candidate.provider.request({method:'eth_accounts'});
+        if (String(accounts?.[0] || '').toLowerCase() === String(expectedAddress).toLowerCase()) {
+          return candidate.provider;
+        }
+      } catch (_error) { /* The interactive request below remains authoritative. */ }
+    }
+  }
+  if (candidates.length > 1) {
+    throw capitalWalletError(
+      'WALLET_PROVIDER_SELECTION_REQUIRED',
+      '检测到多个钱包，但没有钱包连接到本次要求的账户。请在目标钱包中连接当前站点后重试。',
+    );
+  }
+  return candidates[0].provider;
 }
 
 async function connectedArbitrumWallet(expectedAddress) {
-  const provider = walletProvider();
-  const accounts = await provider.request({method:'eth_requestAccounts'});
-  const account = String(accounts?.[0] || '');
-  if (!/^0x[0-9a-fA-F]{40}$/.test(account)) throw new Error('钱包没有返回有效的账户地址。');
-  if (expectedAddress && account.toLowerCase() !== String(expectedAddress).toLowerCase()) {
-    throw new Error(`请在钱包中切换到本次操作要求的账户 ${expectedAddress}。`);
+  const provider = await walletProvider(expectedAddress);
+  let accounts;
+  try {
+    accounts = await provider.request({method:'eth_requestAccounts'});
+  } catch (error) {
+    if (isWalletCancellation(error)) throw error;
+    throw normalizeCapitalWalletError(error);
   }
-  const currentChain = await provider.request({method:'eth_chainId'});
+  const account = String(accounts?.[0] || '');
+  if (!/^0x[0-9a-fA-F]{40}$/.test(account)) {
+    throw capitalWalletError('WALLET_ACCOUNT_INVALID', '钱包没有返回有效的账户地址。');
+  }
+  if (expectedAddress && account.toLowerCase() !== String(expectedAddress).toLowerCase()) {
+    throw capitalWalletError('WALLET_ACCOUNT_MISMATCH', `请在钱包中切换到本次操作要求的账户 ${expectedAddress}。`);
+  }
+  let currentChain;
+  try {
+    currentChain = await provider.request({method:'eth_chainId'});
+  } catch (error) {
+    throw normalizeCapitalWalletError(error);
+  }
   if (String(currentChain).toLowerCase() !== ARBITRUM_WALLET_CHAIN.chainId) {
     try {
       await provider.request({method:'wallet_switchEthereumChain', params:[{chainId:ARBITRUM_WALLET_CHAIN.chainId}]});
     } catch (error) {
-      if (Number(error?.code) !== 4902) throw error;
-      await provider.request({method:'wallet_addEthereumChain', params:[ARBITRUM_WALLET_CHAIN]});
+      if (isWalletCancellation(error)) throw error;
+      if (Number(error?.code) !== 4902) throw normalizeCapitalWalletError(error);
+      try {
+        await provider.request({method:'wallet_addEthereumChain', params:[ARBITRUM_WALLET_CHAIN]});
+      } catch (addError) {
+        if (isWalletCancellation(addError)) throw addError;
+        throw capitalWalletError('WALLET_NETWORK_SWITCH_FAILED', '钱包未能切换到 Arbitrum One。', addError);
+      }
     }
   }
   return {provider, account};
@@ -365,19 +453,39 @@ async function submitHyperliquidWalletAction(artifact) {
     return {transaction_hash:await sendWalletTransaction(artifact, artifact.from)};
   }
   const {provider, account} = await connectedArbitrumWallet(artifact.account);
-  const signature = await provider.request({
-    method:'eth_signTypedData_v4',
-    params:[account, JSON.stringify(artifact.typedData)],
-  });
-  const response = await fetch(artifact.exchangeEndpoint, {
-    method:'POST',
-    headers:{'content-type':'application/json'},
-    body:JSON.stringify({...artifact.exchangeRequestTemplate, signature:splitWalletSignature(signature)}),
-  });
+  let signature;
+  try {
+    signature = await provider.request({
+      method:'eth_signTypedData_v4',
+      params:[account, JSON.stringify(artifact.typedData)],
+    });
+  } catch (error) {
+    if (isWalletCancellation(error)) throw error;
+    throw normalizeCapitalWalletError(error);
+  }
+  let response;
+  try {
+    response = await fetch(artifact.exchangeEndpoint, {
+      method:'POST',
+      headers:{'content-type':'application/json'},
+      body:JSON.stringify({...artifact.exchangeRequestTemplate, signature:splitWalletSignature(signature)}),
+    });
+  } catch (error) {
+    throw capitalWalletError(
+      'HYPERLIQUID_BROWSER_SUBMISSION_UNAVAILABLE',
+      '钱包签名已完成，但浏览器未能连接 Hyperliquid 官方提交端点。请先核对 Hyperliquid 记录，确认未提交后再重试。',
+      error,
+    );
+  }
   let body = null;
   try { body = await response.json(); } catch (_error) { body = null; }
   if (!response.ok || body?.status === 'err' || body?.response?.type === 'error') {
-    throw new Error(body?.response || body?.error || `Hyperliquid 提交失败（HTTP ${response.status}）。`);
+    const rejection = capitalWalletError(
+      response.status === 429 ? 'HYPERLIQUID_RATE_LIMITED' : 'HYPERLIQUID_SUBMISSION_REJECTED',
+      `Hyperliquid 官方端点拒绝了请求（HTTP ${response.status}）。`,
+    );
+    rejection.details = body;
+    throw rejection;
   }
   return {nonce:Number(artifact.nonce), action_hash:body?.response?.data?.hash || body?.data?.hash || undefined};
 }
@@ -412,14 +520,14 @@ async function executeDirectWalletAction(action) {
       evidence = {transaction_hash:transactionHash};
     }
   } catch (error) {
-    if (Number(error?.code) === 4001) {
+    if (isWalletCancellation(error)) {
       if (!submittedHashes.length) {
         await recordDirectWalletOutcome({...action, outcome:'CANCELLED'});
         throw new Error('已取消钱包确认，资金未发送。');
       }
       throw new Error(`已取消后续钱包确认；前序交易 ${submittedHashes.at(-1)} 已提交，流程保持暂停并等待公开回执。`);
     }
-    throw error;
+    throw normalizeCapitalWalletError(error);
   }
   const recorded = await recordDirectWalletOutcome({...action, outcome:'SUBMITTED', evidence});
   return {recorded, evidence};
@@ -518,6 +626,7 @@ async function prepareNoTiltDestinationTransfer({operationId, version}) {
 async function prepareHyperliquidWalletAction({operationId, version}) {
   const preview = await api(`/api/capital/direct-operations/${operationId}/hyperliquid-preview`, {
     method:'POST',
+    timeoutMs:45_000,
     body:JSON.stringify({expected_version:Number(version), final_confirmed:true, idempotency_key:crypto.randomUUID()}),
   });
   const action = walletActionFromHyperliquidPreview({operationId, preview});
@@ -571,6 +680,7 @@ async function retryDirectPublicReceipt(request, {attempts = 20, delayMs = 3000}
 async function verifyTreasuryWithdrawalReceipt({operationId, version, transactionHash}) {
   return retryDirectPublicReceipt(() => api(`/api/capital/direct-operations/${operationId}/treasury-withdrawal-receipt`, {
     method:'POST',
+    timeoutMs:60_000,
     body:JSON.stringify({
       expected_version:Number(version),
       transaction_hash:transactionHash,
@@ -582,6 +692,7 @@ async function verifyTreasuryWithdrawalReceipt({operationId, version, transactio
 async function verifyHyperliquidDepositReceipts({operationId, version, transactionHash}) {
   const chain = await retryDirectPublicReceipt(() => api(`/api/capital/direct-operations/${operationId}/hyperliquid-receipt`, {
     method:'POST',
+    timeoutMs:30_000,
     body:JSON.stringify({
       expected_version:Number(version),
       stage:'HYPERLIQUID_DEPOSIT_ARBITRUM',
@@ -592,6 +703,7 @@ async function verifyHyperliquidDepositReceipts({operationId, version, transacti
   if (chain.pending) return chain;
   return retryDirectPublicReceipt(() => api(`/api/capital/direct-operations/${operationId}/hyperliquid-receipt`, {
     method:'POST',
+    timeoutMs:30_000,
     body:JSON.stringify({
       expected_version:Number(chain.version),
       stage:'HYPERLIQUID_DEPOSIT_LEDGER',
@@ -604,6 +716,7 @@ async function verifyHyperliquidDepositReceipts({operationId, version, transacti
 async function verifyHyperliquidWithdrawalReceipts({operationId, version, actionHash, nonce}) {
   const ledger = await retryDirectPublicReceipt(() => api(`/api/capital/direct-operations/${operationId}/hyperliquid-receipt`, {
     method:'POST',
+    timeoutMs:30_000,
     body:JSON.stringify({
       expected_version:Number(version),
       stage:'HYPERLIQUID_WITHDRAWAL_LEDGER',
@@ -615,6 +728,7 @@ async function verifyHyperliquidWithdrawalReceipts({operationId, version, action
   if (ledger.pending) return ledger;
   return retryDirectPublicReceipt(() => api(`/api/capital/direct-operations/${operationId}/hyperliquid-receipt`, {
     method:'POST',
+    timeoutMs:30_000,
     body:JSON.stringify({
       expected_version:Number(ledger.version),
       stage:'HYPERLIQUID_WITHDRAWAL_ARBITRUM',
