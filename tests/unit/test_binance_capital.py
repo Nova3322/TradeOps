@@ -9,7 +9,10 @@ from typing import Any
 
 import pytest
 
-from trading_control_plane.binance_capital import BinanceCapitalGateway
+from trading_control_plane.binance_capital import (
+    OFFICIAL_BINANCE_BASE_URLS,
+    BinanceCapitalGateway,
+)
 from trading_control_plane.domain import DomainRejected
 
 DESTINATION = "0x1111111111111111111111111111111111111111"
@@ -329,6 +332,80 @@ def test_wallet_get_fails_over_and_reuses_reachable_official_host(monkeypatch) -
     assert calls[2].startswith("https://api1.binance.com/")
 
 
+def test_wallet_get_fails_over_after_edge_auth_rejection(monkeypatch) -> None:
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args) -> None:
+            return None
+
+        def read(self) -> bytes:
+            return b'{"ok":true}'
+
+    calls: list[str] = []
+
+    def urlopen(request, *, timeout):
+        assert timeout == 8
+        calls.append(request.full_url)
+        if request.full_url.startswith("https://api.binance.com/"):
+            raise urllib.error.HTTPError(
+                request.full_url,
+                400,
+                "rejected",
+                {},
+                io.BytesIO(b'{"code":-2015,"msg":"edge rejected"}'),
+            )
+        return Response()
+
+    monkeypatch.setattr("urllib.request.urlopen", urlopen)
+    client = BinanceCapitalGateway(
+        api_key="capital-key",
+        api_secret="capital-secret",  # noqa: S106 - inert fixture credential
+        clock_ms=lambda: 1_786_190_400_000,
+    )
+    client._clock_synchronized_at = time.monotonic()
+
+    assert client._request("GET", "/sapi/v1/account/apiRestrictions") == {"ok": True}
+    assert calls[0].startswith("https://api.binance.com/")
+    assert calls[1].startswith("https://api1.binance.com/")
+    assert client._active_base_url == "https://api1.binance.com"
+
+
+def test_wallet_get_preserves_actionable_exchange_rejection_after_edge_outage(
+    monkeypatch,
+) -> None:
+    calls = 0
+
+    def urlopen(request, *, timeout):
+        nonlocal calls
+        assert timeout == 8
+        calls += 1
+        if calls == 1:
+            raise urllib.error.HTTPError(
+                request.full_url,
+                400,
+                "rejected",
+                {},
+                io.BytesIO(b'{"code":-2015,"msg":"edge rejected"}'),
+            )
+        raise urllib.error.URLError("next official edge unavailable")
+
+    monkeypatch.setattr("urllib.request.urlopen", urlopen)
+    client = BinanceCapitalGateway(
+        api_key="capital-key",
+        api_secret="capital-secret",  # noqa: S106 - inert fixture credential
+        clock_ms=lambda: 1_786_190_400_000,
+    )
+    client._clock_synchronized_at = time.monotonic()
+
+    with pytest.raises(DomainRejected) as caught:
+        client._request("GET", "/sapi/v1/account/apiRestrictions")
+
+    assert caught.value.code == "BINANCE_CAPITAL_AUTHORIZATION_REJECTED"
+    assert calls == len(OFFICIAL_BINANCE_BASE_URLS)
+
+
 @pytest.mark.parametrize(
     ("http_status", "exchange_code", "expected_code"),
     [
@@ -341,7 +418,20 @@ def test_wallet_get_fails_over_and_reuses_reachable_official_host(monkeypatch) -
 def test_wallet_api_rejections_have_actionable_non_sensitive_codes(
     monkeypatch, http_status: int, exchange_code: int, expected_code: str
 ) -> None:
+    class TimeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args) -> None:
+            return None
+
+        def read(self) -> bytes:
+            return b'{"serverTime":1786190400000}'
+
     def urlopen(request, *, timeout):
+        if request.full_url.endswith("/api/v3/time"):
+            assert timeout == 4.0
+            return TimeResponse()
         assert timeout == 8
         raise urllib.error.HTTPError(
             request.full_url,

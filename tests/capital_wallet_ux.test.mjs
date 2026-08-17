@@ -34,9 +34,9 @@ test("operation history has no second confirmation or manual hash forms", () => 
   assert.equal(source.includes("prepareAndSubmitBinanceWithdrawal"), true);
   assert.equal(source.includes("币安转出通过受限 API 直接提交"), true);
   assert.equal(source.includes("capital-operation-actions"), false);
-  assert.equal(source.includes("capital-transfer-continuations"), true);
-  assert.equal(source.includes('<div class="capital-transfer-continuation-actions">${operationActions}</div>'), true);
-  assert.equal(source.includes("operation.status !== 'BLOCKED' && blockerCodes.length === 0"), true);
+  assert.equal(source.includes("capital-transfer-continuations"), false);
+  assert.equal(source.includes("待继续划转"), false);
+  assert.equal(source.includes("在划转区完成下一步"), false);
 });
 
 test("NoTilt protocol delay keeps one-click wallet continuation without manual evidence", () => {
