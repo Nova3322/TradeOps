@@ -40,6 +40,8 @@ SUPPORTED_ASSET = "USDC"
 SUPPORTED_NETWORK = "ARBITRUM"
 SUCCESSFUL_WITHDRAWAL_STATUS = 6
 SUCCESSFUL_DEPOSIT_STATUS = 1
+SPOT_TO_USDM = "MAIN_UMFUTURE"
+USDM_TO_SPOT = "UMFUTURE_MAIN"
 
 
 def _reject(code: str, detail: str) -> NoReturn:
@@ -367,6 +369,153 @@ class BinanceCapitalGateway:
             _reject("BINANCE_CAPITAL_READING_DISABLED", "API key read permission is disabled")
         return raw
 
+    def _spot_available(self) -> Decimal:
+        raw = self._request(
+            "POST",
+            "/sapi/v3/asset/getUserAsset",
+            {"asset": SUPPORTED_ASSET, "needBtcValuation": "false"},
+        )
+        if not isinstance(raw, list):
+            _reject("BINANCE_CAPITAL_RESPONSE_INVALID", "spot asset response is invalid")
+        item = next(
+            (
+                candidate
+                for candidate in raw
+                if isinstance(candidate, dict) and candidate.get("asset") == SUPPORTED_ASSET
+            ),
+            None,
+        )
+        if item is None:
+            return Decimal(0)
+        return _decimal(
+            item.get("free"), code="BINANCE_CAPITAL_RESPONSE_INVALID", field="spot balance"
+        )
+
+    def _find_universal_transfer(
+        self,
+        *,
+        transfer_type: str,
+        amount: Decimal,
+        prepared_at: datetime,
+        now: datetime,
+    ) -> dict[str, Any] | None:
+        raw = self._request(
+            "GET",
+            "/sapi/v1/asset/transfer",
+            {
+                "type": transfer_type,
+                "startTime": max(0, int(prepared_at.timestamp() * 1000) - 1_000),
+                "endTime": int(now.timestamp() * 1000) + 1_000,
+                "current": 1,
+                "size": 100,
+            },
+        )
+        rows = raw.get("rows") if isinstance(raw, dict) else None
+        if not isinstance(rows, list):
+            _reject(
+                "BINANCE_CAPITAL_RESPONSE_INVALID",
+                "universal transfer history response is invalid",
+            )
+        matches = []
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            try:
+                observed_amount = Decimal(str(row.get("amount")))
+            except (InvalidOperation, TypeError, ValueError):
+                continue
+            if (
+                row.get("asset") == SUPPORTED_ASSET
+                and row.get("type") == transfer_type
+                and observed_amount == amount
+                and str(row.get("status", "")).upper() == "CONFIRMED"
+            ):
+                matches.append(row)
+        if len(matches) > 1:
+            _reject(
+                "BINANCE_INTERNAL_TRANSFER_AMBIGUOUS",
+                "more than one matching Binance internal transfer was found in the frozen window",
+            )
+        if not matches:
+            return None
+        row = matches[0]
+        return {
+            "type": transfer_type,
+            "asset": SUPPORTED_ASSET,
+            "amount": str(amount),
+            "status": "CONFIRMED",
+            "tranId": row.get("tranId"),
+            "timestamp": row.get("timestamp"),
+        }
+
+    def _ensure_universal_transfer(
+        self,
+        *,
+        transfer_type: str,
+        amount: Decimal,
+        prepared_at: datetime,
+        now: datetime,
+    ) -> dict[str, Any]:
+        value = _decimal(amount, code="BINANCE_CAPITAL_AMOUNT_INVALID", field="amount")
+        if value <= 0:
+            _reject("BINANCE_CAPITAL_AMOUNT_INVALID", "internal transfer amount must be positive")
+        existing = self._find_universal_transfer(
+            transfer_type=transfer_type,
+            amount=value,
+            prepared_at=prepared_at,
+            now=now,
+        )
+        if existing is not None:
+            return existing
+        try:
+            raw = self._request(
+                "POST",
+                "/sapi/v1/asset/transfer",
+                {"type": transfer_type, "asset": SUPPORTED_ASSET, "amount": str(value)},
+            )
+        except DomainRejected as exc:
+            if exc.code == "BINANCE_CAPITAL_API_UNAVAILABLE":
+                raise DomainRejected(
+                    "BINANCE_INTERNAL_TRANSFER_SUBMISSION_UNKNOWN",
+                    "Binance internal transfer response was unavailable; reconcile history "
+                    "before retrying",
+                ) from exc
+            raise
+        if not isinstance(raw, dict) or raw.get("tranId") is None:
+            _reject(
+                "BINANCE_INTERNAL_TRANSFER_SUBMISSION_UNKNOWN",
+                "Binance did not return an internal transfer id; reconcile history before retrying",
+            )
+        confirmed = self._find_universal_transfer(
+            transfer_type=transfer_type,
+            amount=value,
+            prepared_at=prepared_at,
+            now=now,
+        )
+        if confirmed is None:
+            raise DomainRejected(
+                "BINANCE_INTERNAL_TRANSFER_PENDING",
+                "Binance accepted the internal transfer but its confirmed history is not "
+                "visible yet",
+            )
+        return confirmed
+
+    def complete_deposit_to_usdm(
+        self, *, amount: Decimal, prepared_at: datetime, now: datetime
+    ) -> dict[str, Any]:
+        permissions = self._permissions()
+        if permissions.get("enableInternalTransfer") is not True:
+            _reject(
+                "BINANCE_INTERNAL_TRANSFER_PERMISSION_DISABLED",
+                "Binance API key must enable Permits Universal Transfer",
+            )
+        return self._ensure_universal_transfer(
+            transfer_type=SPOT_TO_USDM,
+            amount=amount,
+            prepared_at=prepared_at,
+            now=now,
+        )
+
     def _network(self) -> tuple[dict[str, Any], dict[str, Any]]:
         raw = self._request("GET", "/sapi/v1/capital/config/getall")
         if not isinstance(raw, list):
@@ -414,6 +563,11 @@ class BinanceCapitalGateway:
         destination = _evm_address(expected_address, field="configured Binance deposit address")
         source = _evm_address(source_address, field="authorized source wallet")
         permissions = self._permissions()
+        if permissions.get("enableInternalTransfer") is not True:
+            _reject(
+                "BINANCE_INTERNAL_TRANSFER_PERMISSION_DISABLED",
+                "Binance API key must enable Permits Universal Transfer",
+            )
         _, network = self._network()
         if network.get("depositEnable") is not True:
             _reject("BINANCE_CAPITAL_DEPOSIT_DISABLED", "USDC Arbitrum deposits are disabled")
@@ -471,6 +625,11 @@ class BinanceCapitalGateway:
                 "BINANCE_CAPITAL_WITHDRAW_PERMISSION_DISABLED",
                 "dedicated Binance API key does not have withdrawal permission",
             )
+        if permissions.get("enableInternalTransfer") is not True:
+            _reject(
+                "BINANCE_INTERNAL_TRANSFER_PERMISSION_DISABLED",
+                "Binance API key must enable Permits Universal Transfer",
+            )
         coin, network = self._network()
         if network.get("withdrawEnable") is not True:
             _reject("BINANCE_CAPITAL_WITHDRAW_DISABLED", "USDC Arbitrum withdrawals are disabled")
@@ -521,10 +680,11 @@ class BinanceCapitalGateway:
             _reject(
                 "BINANCE_CAPITAL_FEE_LIMIT_EXCEEDED", "current fee exceeds the frozen fee limit"
             )
-        if value > available:
-            _reject(
-                "BINANCE_CAPITAL_BALANCE_INSUFFICIENT", "Binance free USDC balance is insufficient"
-            )
+        # Binance withdrawals are funded from Spot.  This product's trading capital
+        # lives in USD-M Futures, so every frozen withdrawal first moves the exact
+        # requested amount to Spot instead of silently consuming an unrelated Spot
+        # balance.
+        internal_transfer_amount = value
         quota = self._request("GET", "/sapi/v1/capital/withdraw/quota")
         if not isinstance(quota, dict):
             _reject("BINANCE_CAPITAL_RESPONSE_INVALID", "withdrawal quota response is invalid")
@@ -550,6 +710,11 @@ class BinanceCapitalGateway:
             "withdrawPermission": True,
             "allowlisted": True,
             "travelRuleRequired": False,
+            "spotAvailableObserved": str(available),
+            "internalTransferType": (
+                USDM_TO_SPOT if internal_transfer_amount > 0 else None
+            ),
+            "internalTransferAmount": str(internal_transfer_amount),
             "preparedAt": now.astimezone(UTC).isoformat(),
             "expiresAt": (now + timedelta(minutes=2)).astimezone(UTC).isoformat(),
             "submission": False,
@@ -578,6 +743,30 @@ class BinanceCapitalGateway:
         )
         if isinstance(existing, list) and existing:
             return self._normalize_withdrawal(existing[0], expected_order_id=order_id)
+        try:
+            prepared_at = datetime.fromisoformat(str(artifact["preparedAt"]))
+            transfer_amount = Decimal(str(artifact.get("internalTransferAmount", "0")))
+        except (KeyError, InvalidOperation, TypeError, ValueError) as exc:
+            raise DomainRejected(
+                "BINANCE_CAPITAL_PREFLIGHT_INVALID", "stored internal transfer plan is invalid"
+            ) from exc
+        internal_transfer = None
+        if transfer_amount > 0:
+            internal_transfer = self._ensure_universal_transfer(
+                transfer_type=USDM_TO_SPOT,
+                amount=transfer_amount,
+                prepared_at=prepared_at,
+                now=now,
+            )
+            expected_spot = Decimal(str(artifact.get("spotAvailableObserved", "0"))) + Decimal(
+                str(artifact["amount"])
+            )
+            if self._spot_available() < expected_spot:
+                raise DomainRejected(
+                    "BINANCE_INTERNAL_TRANSFER_PENDING",
+                    "USD-M Futures to Spot transfer is not reflected in the withdrawable "
+                    "balance yet",
+                )
         raw = self._request(
             "POST",
             "/sapi/v1/capital/withdraw/apply",
@@ -600,6 +789,7 @@ class BinanceCapitalGateway:
             "withdrawOrderId": order_id,
             "status": "SUBMITTED",
             "submittedAt": now.astimezone(UTC).isoformat(),
+            "internalTransfer": internal_transfer,
         }
 
     def _normalize_withdrawal(

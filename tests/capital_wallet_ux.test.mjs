@@ -62,3 +62,17 @@ test("Safe outbound flow verifies source receipt and completes the Hyperliquid s
   }
   assert.ok(source.indexOf("verifyTreasuryWithdrawalReceipt") < source.indexOf("prepareHyperliquidWalletAction", source.indexOf("async function continueSafeOutboundExecution")));
 });
+
+test("exchange receipts and Binance wallet-class transfers complete automatically", () => {
+  for (const marker of [
+    "verifyHyperliquidWithdrawalReceipts",
+    "verifyBinanceReceipt",
+    "BINANCE_INTERNAL_TRANSFER_PENDING",
+    "TRANSFER_BINANCE_USDM_TO_SPOT",
+    "TRANSFER_BINANCE_SPOT_TO_USDM",
+    "链上确认中",
+    "链上已确认",
+  ]) {
+    assert.equal(source.includes(marker), true, marker);
+  }
+});

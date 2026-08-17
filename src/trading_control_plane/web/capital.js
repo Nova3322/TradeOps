@@ -531,7 +531,7 @@ async function prepareAndSubmitBinanceWithdrawal({operationId, version}) {
     timeoutMs:60_000,
     body:JSON.stringify({expected_version:Number(version), final_confirmed:true, idempotency_key:crypto.randomUUID()}),
   });
-  return api(`/api/capital/direct-operations/${operationId}/binance-submit`, {
+  return retryDirectPublicReceipt(() => api(`/api/capital/direct-operations/${operationId}/binance-submit`, {
     method:'POST',
     body:JSON.stringify({
       expected_version:Number(preview.version),
@@ -539,13 +539,17 @@ async function prepareAndSubmitBinanceWithdrawal({operationId, version}) {
       confirmation_phrase:'CONFIRM_BINANCE_WITHDRAWAL',
       idempotency_key:crypto.randomUUID(),
     }),
-  });
+  }), {attempts:20, delayMs:1000});
 }
 
 const PUBLIC_RECEIPT_PENDING_CODES = new Set([
   'ARBITRUM_RECEIPT_NOT_CONFIRMED',
   'ARBITRUM_RECEIPT_UNAVAILABLE',
   'HYPERLIQUID_RECEIPT_NOT_CONFIRMED',
+  'BINANCE_CAPITAL_RECEIPT_NOT_FOUND',
+  'BINANCE_CAPITAL_WITHDRAWAL_PENDING',
+  'BINANCE_CAPITAL_DEPOSIT_PENDING',
+  'BINANCE_INTERNAL_TRANSFER_PENDING',
 ]);
 
 const waitForPublicReceipt = milliseconds => new Promise(resolve => setTimeout(resolve, milliseconds));
@@ -597,12 +601,56 @@ async function verifyHyperliquidDepositReceipts({operationId, version, transacti
   }), {attempts:24, delayMs:5000});
 }
 
+async function verifyHyperliquidWithdrawalReceipts({operationId, version, actionHash, nonce}) {
+  const ledger = await retryDirectPublicReceipt(() => api(`/api/capital/direct-operations/${operationId}/hyperliquid-receipt`, {
+    method:'POST',
+    body:JSON.stringify({
+      expected_version:Number(version),
+      stage:'HYPERLIQUID_WITHDRAWAL_LEDGER',
+      action_hash:actionHash || undefined,
+      nonce:Number(nonce),
+      idempotency_key:crypto.randomUUID(),
+    }),
+  }), {attempts:30, delayMs:2000});
+  if (ledger.pending) return ledger;
+  return retryDirectPublicReceipt(() => api(`/api/capital/direct-operations/${operationId}/hyperliquid-receipt`, {
+    method:'POST',
+    body:JSON.stringify({
+      expected_version:Number(ledger.version),
+      stage:'HYPERLIQUID_WITHDRAWAL_ARBITRUM',
+      idempotency_key:crypto.randomUUID(),
+    }),
+  }), {attempts:80, delayMs:5000});
+}
+
+async function verifyBinanceReceipt({operationId, version, stage, transactionHash}) {
+  return retryDirectPublicReceipt(() => api(`/api/capital/direct-operations/${operationId}/binance-receipt`, {
+    method:'POST',
+    timeoutMs:60_000,
+    body:JSON.stringify({
+      expected_version:Number(version),
+      stage,
+      transaction_hash:transactionHash || undefined,
+      idempotency_key:crypto.randomUUID(),
+    }),
+  }), {attempts:120, delayMs:3000});
+}
+
 async function continueSafeOutboundExecution({operationId, version, path, transactionHash}) {
   const treasuryReceipt = await verifyTreasuryWithdrawalReceipt({
     operationId, version, transactionHash,
   });
-  if (treasuryReceipt.pending || path === 'VAULT_TO_BINANCE') {
+  if (treasuryReceipt.pending) {
     return {kind:'WALLET', result:treasuryReceipt, receiptPending:Boolean(treasuryReceipt.pending)};
+  }
+  if (path === 'VAULT_TO_BINANCE') {
+    const binanceReceipt = await verifyBinanceReceipt({
+      operationId,
+      version:treasuryReceipt.version,
+      stage:'BINANCE_DEPOSIT',
+      transactionHash,
+    });
+    return {kind:'BINANCE', result:binanceReceipt, receiptPending:Boolean(binanceReceipt.pending)};
   }
   const hyperliquidAction = await prepareHyperliquidWalletAction({
     operationId, version:treasuryReceipt.version,
@@ -622,11 +670,27 @@ async function continueSafeOutboundExecution({operationId, version, path, transa
 
 async function startDirectCapitalExecution({operationId, version, path, treasuryProvider}) {
   if (path === 'BINANCE_TO_VAULT') {
-    return {kind:'BINANCE', result:await prepareAndSubmitBinanceWithdrawal({operationId, version})};
+    const submitted = await prepareAndSubmitBinanceWithdrawal({operationId, version});
+    if (submitted.pending) {
+      return {kind:'BINANCE', result:submitted, receiptPending:true};
+    }
+    const receipt = await verifyBinanceReceipt({
+      operationId,
+      version:submitted.version,
+      stage:'BINANCE_WITHDRAWAL',
+    });
+    return {kind:'BINANCE', result:submitted, receiptPending:Boolean(receipt.pending)};
   }
   if (path === 'HYPERLIQUID_TO_VAULT') {
     const action = await prepareHyperliquidWalletAction({operationId, version});
-    return {kind:'WALLET', result:await executeDirectWalletAction(action)};
+    const submitted = await executeDirectWalletAction(action);
+    const receipt = await verifyHyperliquidWithdrawalReceipts({
+      operationId,
+      version:submitted.recorded.version,
+      actionHash:submitted.evidence.action_hash,
+      nonce:submitted.evidence.nonce,
+    });
+    return {kind:'WALLET', result:submitted, receiptPending:Boolean(receipt.pending)};
   }
   let currentVersion = Number(version);
   if (path === 'VAULT_TO_BINANCE') {
@@ -658,6 +722,7 @@ function formatDirectCapitalStage(code) {
     VAULT_RELEASE_TO_AUTHORIZED_OWNED_ADDRESS:'释放至已授权自有地址',
     DEPOSIT_TO_HYPERLIQUID_CONTRACT:'存入 Hyperliquid 合约',
     WITHDRAW_FROM_HYPERLIQUID_CONTRACT:'从 Hyperliquid 合约提回',
+    WITHDRAW_DIRECTLY_TO_SAFE:'Hyperliquid 直接提回 Safe',
     RECEIVE_AT_AUTHORIZED_OWNED_ADDRESS:'到达已授权自有地址',
     PREPARE_NOTILT_SDK_DEPOSIT:'由 NoTilt 官方 SDK 构建最低必要无签名入金序列',
     HUMAN_WALLET_CONFIRMATION:'独立人控钱包逐笔核对与确认',
@@ -666,6 +731,8 @@ function formatDirectCapitalStage(code) {
     RESTRICTED_BINANCE_WITHDRAWAL_TO_AUTHORIZED_OWNED_ADDRESS:'币安受限提现至已授权自有地址',
     RESTRICTED_BINANCE_WITHDRAWAL_TO_SELECTED_TREASURY:'币安受限提现至当前链上金库',
     VERIFY_BINANCE_WITHDRAWAL_RECEIPT:'校验币安提现状态与交易哈希',
+    TRANSFER_BINANCE_USDM_TO_SPOT:'币安合约账户划转至现货账户',
+    TRANSFER_BINANCE_SPOT_TO_USDM:'币安现货入账后划转至合约账户',
     VERIFY_SELECTED_TREASURY_CREDIT:'校验当前链上金库到账',
     NOTILT_UNSIGNED_RELEASE_REQUEST_PREVIEW:'NoTilt 释放请求无签名预检',
     NOTILT_RELEASE_REQUEST_RECEIPT_CONFIRMED:'NoTilt 释放请求回执已验证',
@@ -997,8 +1064,19 @@ async function renderCapitalCenter() {
     const notiltBoundary = notiltPreview ? `<details class="capital-wallet-handoff"><summary>NoTilt Vault 钱包确认</summary><div class="wallet-handoff-facts"><b>${safeOutbound ? 'NoTilt 释放请求已构建' : 'NoTilt 入金交易序列已构建'}</b><span>签名账户：${escapeHtml(notiltPreview.wallet_address || '连接钱包')}</span><span>交易数：${Number(notiltPreview.transactions?.length || 0)}</span><p>${safeOutbound ? '释放请求确认后会校验公开回执；协议解锁时操作按钮再次直接唤起钱包执行释放。' : '操作按钮按固定交易顺序直接唤起钱包；每笔均由用户在钱包中核对并签名。'}</p></div></details>` : '';
     const walletBoundary = hyperliquidPreview ? `<details class="capital-wallet-handoff"><summary>Hyperliquid 钱包确认</summary><div class="wallet-handoff-facts"><b>${hyperliquidPreview.artifact.kind === 'HYPERLIQUID_WITHDRAW3_TYPED_REQUEST' ? 'withdraw3 签名请求' : hyperliquidPreview.artifact.kind === 'HYPERLIQUID_USD_CLASS_TRANSFER_TYPED_REQUEST' ? '主账户资金归集签名请求' : 'Arbitrum USDC 入金请求'}</b><span>金额：${escapeHtml(hyperliquidPreview.artifact.amount)} USDC</span><span>账户：${escapeHtml(hyperliquidPreview.artifact.account || hyperliquidPreview.artifact.from || '')}</span><p>操作按钮直接唤起主钱包或有效多签；链上交易和 EIP-712 请求都只在钱包中确认。</p></div></details>` : '';
     const treasuryWallet = operation.path === 'HYPERLIQUID_TO_VAULT' && providerPreviewReady ? `<details class="capital-wallet-handoff"><summary>最终存入${operation.treasury_provider === 'SAFE_SPENDING_LIMIT' ? ' Safe' : ' NoTilt Vault'}</summary><p class="subtle">${treasuryReceiptConfirmed ? '链上金库到账已验证。' : '等待操作按钮自动继续或验证公开回执。'}</p></details>` : '';
-    const operationStatus = operation.status === 'BLOCKED' && pendingPreflights.length && !hardBlockers.length ? '等待安全预检' : fmtStatus(operation.status);
-    return `<tr><td data-label="操作">${shortId(operation.operation_id)}<br><span class="subtle">${fmtDate(operation.final_confirmed_at)}</span></td><td data-label="路径 / 金额"><b>${escapeHtml(label)}</b><br><span class="subtle">${operation.treasury_provider === 'SAFE_SPENDING_LIMIT' ? 'Safe Spending Limits' : 'NoTilt Vault'}</span><br><span class="subtle">${fmtNumber(operation.amount)} ${escapeHtml(operation.asset)}</span></td><td data-label="阶段">${escapeHtml(stages || '尚无阶段')}</td><td data-label="状态 / 回执"><b>${escapeHtml(operationStatus)}</b><br><span class="subtle">回执：${escapeHtml(fmtStatus(operation.receipt_status))}</span></td><td data-label="精确阻断">${blockerDetails}${safeBoundary}${notiltBoundary}${walletBoundary}${binanceBoundary}${treasuryWallet}</td></tr>`;
+    const chainConfirmed = frozenStages.some(stage => stage.status === 'CONFIRMED' && (stage.code.includes('ARBITRUM') || stage.code === 'TREASURY_WITHDRAWAL_RECEIPT_CONFIRMED' || stage.code.startsWith('BINANCE_') && stage.code.endsWith('_RECEIPT_CONFIRMED')));
+    const chainSubmitted = frozenStages.some(stage => stage.transaction_hash || stage.submission?.transactionHash);
+    const operationStatus = operation.status === 'SETTLED'
+      ? fmtStatus(operation.status)
+      : chainConfirmed
+        ? '链上已确认'
+        : chainSubmitted && operation.status === 'AWAITING_RECEIPT'
+          ? '链上确认中'
+          : operation.status === 'BLOCKED' && pendingPreflights.length && !hardBlockers.length
+            ? '等待安全预检'
+            : fmtStatus(operation.status);
+    const receiptStatus = operation.status === 'SETTLED' ? fmtStatus(operation.receipt_status) : chainConfirmed ? '链上已确认，后续入账处理中' : chainSubmitted ? '链上确认中' : fmtStatus(operation.receipt_status);
+    return `<tr><td data-label="操作">${shortId(operation.operation_id)}<br><span class="subtle">${fmtDate(operation.final_confirmed_at)}</span></td><td data-label="路径 / 金额"><b>${escapeHtml(label)}</b><br><span class="subtle">${operation.treasury_provider === 'SAFE_SPENDING_LIMIT' ? 'Safe Spending Limits' : 'NoTilt Vault'}</span><br><span class="subtle">${fmtNumber(operation.amount)} ${escapeHtml(operation.asset)}</span></td><td data-label="阶段">${escapeHtml(stages || '尚无阶段')}</td><td data-label="状态 / 回执"><b>${escapeHtml(operationStatus)}</b><br><span class="subtle">回执：${escapeHtml(receiptStatus)}</span></td><td data-label="精确阻断">${blockerDetails}${safeBoundary}${notiltBoundary}${walletBoundary}${binanceBoundary}${treasuryWallet}</td></tr>`;
   }).join('');
   const legacyRows = transfers.live.map(transfer => `<tr><td data-label="记录">${shortId(transfer.capital_transfer_id)}</td><td data-label="方向">${escapeHtml(fmtCapitalDirection(transfer.direction))}</td><td data-label="金额">${fmtNumber(transfer.gross_amount)} ${escapeHtml(transfer.asset)}</td><td data-label="状态">${escapeHtml(fmtStatus(transfer.status))}</td><td data-label="外部回执">${escapeHtml(transfer.external_transfer_id || '未提交')}</td></tr>`).join('');
   const selectedProviderReady = selectedTreasuryProvider === 'SAFE_SPENDING_LIMIT'

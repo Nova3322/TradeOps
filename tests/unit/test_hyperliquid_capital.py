@@ -104,7 +104,7 @@ def test_exact_arbitrum_usdc_transfer_is_ready_for_browser_wallet() -> None:
     assert artifact["signing"] is False and artifact["broadcast"] is False
 
 
-def test_spot_usdc_shortfall_builds_user_signed_class_transfer_before_withdraw3() -> None:
+def test_withdrawable_shortfall_does_not_build_internal_class_transfer() -> None:
     def fetcher(_url: str, payload: dict[str, object], _timeout: float) -> object:
         if payload["type"] == "clearinghouseState":
             return {"withdrawable": "20"}
@@ -113,22 +113,18 @@ def test_spot_usdc_shortfall_builds_user_signed_class_transfer_before_withdraw3(
         assert payload["type"] == "userRole"
         return {"role": "agent", "data": {"user": MAIN}}
 
-    artifact = HyperliquidCapitalGateway(info_fetcher=fetcher).prepare_withdrawal(
-        base_url="https://api.hyperliquid.xyz",
-        main_account=MAIN,
-        api_wallet_address=AGENT,
-        destination=MAIN,
-        amount="100",
-        max_fee="1",
-        now=NOW,
-    )
+    with pytest.raises(DomainRejected) as caught:
+        HyperliquidCapitalGateway(info_fetcher=fetcher).prepare_withdrawal(
+            base_url="https://api.hyperliquid.xyz",
+            main_account=MAIN,
+            api_wallet_address=AGENT,
+            destination=MAIN,
+            amount="100",
+            max_fee="1",
+            now=NOW,
+        )
 
-    assert artifact["kind"] == "HYPERLIQUID_USD_CLASS_TRANSFER_TYPED_REQUEST"
-    assert artifact["amount"] == "81"
-    assert artifact["action"]["toPerp"] is True
-    assert artifact["typedData"]["primaryType"] == ("HyperliquidTransaction:UsdClassTransfer")
-    assert artifact["nextRequiredAction"] == ("REVALIDATE_WITHDRAWABLE_THEN_BUILD_WITHDRAW3")
-    assert artifact["signing"] is False and artifact["broadcast"] is False
+    assert caught.value.code == "HYPERLIQUID_WITHDRAWABLE_INSUFFICIENT"
 
 
 def test_deposit_rejects_account_mismatch_minimum_and_excess_precision() -> None:
@@ -238,6 +234,54 @@ def test_withdrawal_credit_matches_bridge_transfer_log() -> None:
         min_confirmations=20,
     )
     assert receipt["kind"] == "ARBITRUM_USDC_CREDIT_RECEIPT"
+
+
+def test_withdrawal_credit_can_be_discovered_without_exchange_evm_hash() -> None:
+    recipient_topic = f"0x{MAIN[2:].rjust(64, '0')}"
+    bridge_topic = f"0x{HYPERLIQUID_BRIDGE2_ADDRESS[2:].rjust(64, '0')}"
+    calls: list[tuple[str, list[object]]] = []
+
+    def rpc_fetcher(_url: str, method: str, params: list[object], _timeout: float) -> object:
+        calls.append((method, params))
+        if method == "eth_blockNumber":
+            return "0x78"
+        if method == "eth_getBlockByNumber":
+            return {"timestamp": hex(int(NOW.timestamp()) + 60)}
+        if method == "eth_getLogs":
+            return [
+                {
+                    "address": ARBITRUM_NATIVE_USDC_ADDRESS,
+                    "topics": [ERC20_TRANSFER_TOPIC, bridge_topic, recipient_topic],
+                    "data": hex(9_000_000),
+                    "blockNumber": "0x64",
+                    "transactionHash": HASH,
+                }
+            ]
+        assert method == "eth_getTransactionReceipt"
+        return {
+            "status": "0x1",
+            "blockNumber": "0x64",
+            "logs": [
+                {
+                    "address": ARBITRUM_NATIVE_USDC_ADDRESS,
+                    "topics": [ERC20_TRANSFER_TOPIC, bridge_topic, recipient_topic],
+                    "data": hex(9_000_000),
+                }
+            ],
+        }
+
+    receipt = HyperliquidCapitalGateway(rpc_fetcher=rpc_fetcher).find_arbitrum_usdc_credit(
+        rpc_url="https://rpc.example.invalid",
+        sender=HYPERLIQUID_BRIDGE2_ADDRESS,
+        recipient=MAIN,
+        amount="9",
+        prepared_at=NOW,
+        min_confirmations=20,
+    )
+
+    assert receipt["transactionHash"] == HASH
+    log_filter = next(params[0] for method, params in calls if method == "eth_getLogs")
+    assert log_filter["topics"] == [ERC20_TRANSFER_TOPIC, bridge_topic, recipient_topic]
 
 
 def test_default_rpc_transport_uses_bounded_requests_client(monkeypatch) -> None:

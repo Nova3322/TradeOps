@@ -1763,7 +1763,10 @@ class DirectOperationCapitalService(ServiceComponent):
                     )
                 elif (
                     item.path == DirectCapitalPath.HYPERLIQUID_TO_VAULT.value
-                    and "TREASURY_DESTINATION_RECEIPT_CONFIRMED" in confirmed
+                    and (
+                        item.treasury_provider == "SAFE_SPENDING_LIMIT"
+                        or "TREASURY_DESTINATION_RECEIPT_CONFIRMED" in confirmed
+                    )
                 ):
                     item.status = "SETTLED"
                     item.receipt_status = "CONFIRMED"

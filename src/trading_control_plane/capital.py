@@ -178,6 +178,7 @@ def build_direct_capital_plan(
             {"code": "BUILD_SAFE_ALLOWANCE_SIGNATURE_REQUEST", "status": "BLOCKED"},
             {"code": "HUMAN_DELEGATE_SIGNATURE_AND_SUBMISSION", "status": "BLOCKED"},
             {"code": "VERIFY_SAFE_TRANSFER_RECEIPT", "status": "BLOCKED"},
+            {"code": "TRANSFER_BINANCE_SPOT_TO_USDM", "status": "BLOCKED"},
         )
         blockers.extend(
             (
@@ -202,8 +203,7 @@ def build_direct_capital_plan(
     elif is_safe and path is DirectCapitalPath.HYPERLIQUID_TO_VAULT:
         stages = (
             {"code": "WITHDRAW_FROM_HYPERLIQUID_CONTRACT", "status": "BLOCKED"},
-            {"code": "RECEIVE_AT_AUTHORIZED_OWNED_ADDRESS", "status": "BLOCKED"},
-            {"code": "BUILD_EXACT_USDC_TRANSFER_TO_SAFE", "status": "BLOCKED"},
+            {"code": "WITHDRAW_DIRECTLY_TO_SAFE", "status": "BLOCKED"},
             {"code": "HUMAN_WALLET_CONFIRMATION", "status": "BLOCKED"},
             {"code": "VERIFY_SAFE_BALANCE_RECEIPT", "status": "BLOCKED"},
         )
@@ -214,6 +214,7 @@ def build_direct_capital_plan(
                 "code": "RESTRICTED_BINANCE_WITHDRAWAL_TO_SELECTED_TREASURY",
                 "status": "BLOCKED",
             },
+            {"code": "TRANSFER_BINANCE_USDM_TO_SPOT", "status": "BLOCKED"},
             {"code": "VERIFY_BINANCE_WITHDRAWAL_RECEIPT", "status": "BLOCKED"},
             {"code": "VERIFY_SELECTED_TREASURY_CREDIT", "status": "BLOCKED"},
         )
@@ -229,6 +230,7 @@ def build_direct_capital_plan(
             },
             {"code": "REVALIDATE_RELEASE", "status": "BLOCKED"},
             {"code": "TRANSFER_TO_AUTHORIZED_BINANCE_ADDRESS", "status": "BLOCKED"},
+            {"code": "TRANSFER_BINANCE_SPOT_TO_USDM", "status": "BLOCKED"},
         )
         blockers.append("BINANCE_DEPOSIT_PREFLIGHT_REQUIRED")
     elif path is DirectCapitalPath.VAULT_TO_HYPERLIQUID:
@@ -259,6 +261,7 @@ def build_direct_capital_plan(
                 "code": "RESTRICTED_BINANCE_WITHDRAWAL_TO_SELECTED_TREASURY",
                 "status": "BLOCKED",
             },
+            {"code": "TRANSFER_BINANCE_USDM_TO_SPOT", "status": "BLOCKED"},
             {"code": "VERIFY_BINANCE_WITHDRAWAL_RECEIPT", "status": "BLOCKED"},
             {"code": "VERIFY_SELECTED_TREASURY_CREDIT", "status": "BLOCKED"},
         )

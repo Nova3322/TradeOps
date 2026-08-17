@@ -12,7 +12,6 @@ from typing import Any, NoReturn, cast
 
 import requests
 from hyperliquid.utils.signing import (  # type: ignore[import-untyped]
-    USD_CLASS_TRANSFER_SIGN_TYPES,
     WITHDRAW_SIGN_TYPES,
     user_signed_payload,
 )
@@ -326,80 +325,10 @@ class HyperliquidCapitalGateway:
                 "Hyperliquid did not return a valid current withdrawable balance",
             ) from exc
         if withdrawable < value + CURRENT_WITHDRAWAL_FEE:
-            spot_state = self._info(base_url, {"type": "spotClearinghouseState", "user": main})
-            balances = spot_state.get("balances") if isinstance(spot_state, dict) else None
-            if not isinstance(balances, list):
-                _reject(
-                    "HYPERLIQUID_WITHDRAWABLE_INSUFFICIENT",
-                    "withdrawable balance is insufficient and spot USDC is unavailable",
-                )
-            spot_available = Decimal(0)
-            for balance in balances:
-                if not isinstance(balance, dict) or balance.get("coin") != "USDC":
-                    continue
-                try:
-                    spot_available = Decimal(str(balance.get("total"))) - Decimal(
-                        str(balance.get("hold", "0"))
-                    )
-                except (InvalidOperation, TypeError, ValueError) as exc:
-                    raise DomainRejected(
-                        "HYPERLIQUID_RESPONSE_INVALID",
-                        "Hyperliquid spot USDC balance is invalid",
-                    ) from exc
-                break
-            transfer_amount = value + CURRENT_WITHDRAWAL_FEE - withdrawable
-            if spot_available < transfer_amount:
-                _reject(
-                    "HYPERLIQUID_WITHDRAWABLE_INSUFFICIENT",
-                    "combined current perp withdrawable and spot USDC do not cover amount plus fee",
-                )
-            relationship = self._agent_relationship(
-                base_url=base_url,
-                main_account=main,
-                api_wallet_address=api_wallet_address,
+            _reject(
+                "HYPERLIQUID_WITHDRAWABLE_INSUFFICIENT",
+                "current Hyperliquid withdrawable balance does not cover amount plus fee",
             )
-            nonce = int(now.timestamp() * 1000)
-            transfer_action = {
-                "type": "usdClassTransfer",
-                "hyperliquidChain": (
-                    "Mainnet" if official.endswith("hyperliquid.xyz") else "Testnet"
-                ),
-                "signatureChainId": HYPERLIQUID_SIGNATURE_CHAIN_ID,
-                "amount": str(transfer_amount),
-                "toPerp": True,
-                "nonce": nonce,
-            }
-            return {
-                "kind": "HYPERLIQUID_USD_CLASS_TRANSFER_TYPED_REQUEST",
-                "account": main,
-                "amount": str(transfer_amount),
-                "withdrawalAmountAfterRevalidation": str(value),
-                "expectedFee": str(CURRENT_WITHDRAWAL_FEE),
-                "maxFee": None if fee_limit is None else str(fee_limit),
-                "spotAvailableObserved": str(spot_available),
-                "withdrawableObserved": str(withdrawable),
-                "nonce": nonce,
-                "action": transfer_action,
-                "typedData": user_signed_payload(
-                    "HyperliquidTransaction:UsdClassTransfer",
-                    USD_CLASS_TRANSFER_SIGN_TYPES,
-                    transfer_action,
-                ),
-                "exchangeEndpoint": f"{official}/exchange",
-                "exchangeRequestTemplate": {
-                    "action": transfer_action,
-                    "nonce": nonce,
-                    "signature": None,
-                },
-                "agentWallet": relationship,
-                "walletBoundary": "MAIN_OR_VALID_MULTISIG",
-                "fallbackReason": "USD_CLASS_TRANSFER_REQUIRES_USER_SIGNED_ACTION",
-                "nextRequiredAction": "REVALIDATE_WITHDRAWABLE_THEN_BUILD_WITHDRAW3",
-                "preparedAt": now.astimezone(UTC).isoformat(),
-                "expiresAt": (now + timedelta(minutes=5)).astimezone(UTC).isoformat(),
-                "signing": False,
-                "broadcast": False,
-            }
         relationship = self._agent_relationship(
             base_url=base_url,
             main_account=main,
@@ -653,6 +582,99 @@ class HyperliquidCapitalGateway:
             "token": token,
             "amount": str(value),
         }
+
+    def find_arbitrum_usdc_credit(
+        self,
+        *,
+        rpc_url: str,
+        sender: str,
+        recipient: str,
+        amount: str | Decimal,
+        prepared_at: datetime,
+        min_confirmations: int,
+        expected_token: str = ARBITRUM_NATIVE_USDC_ADDRESS,
+    ) -> JsonObject:
+        """Discover an exact Bridge2 credit when Hyperliquid does not expose its EVM tx hash."""
+
+        trusted_rpc = _require_rpc_url(rpc_url)
+        source = _address(sender, "USDC source")
+        target = _address(recipient, "USDC recipient")
+        token = _address(expected_token, "USDC token")
+        value = _amount(amount)
+        latest_raw = self._rpc_fetcher(
+            trusted_rpc, "eth_blockNumber", [], self._timeout_seconds
+        )
+        latest_block_raw = self._rpc_fetcher(
+            trusted_rpc, "eth_getBlockByNumber", ["latest", False], self._timeout_seconds
+        )
+        if not isinstance(latest_block_raw, dict):
+            _reject("ARBITRUM_RECEIPT_UNAVAILABLE", "latest Arbitrum block is unavailable")
+        try:
+            latest = int(str(latest_raw), 16)
+            latest_timestamp = int(str(latest_block_raw.get("timestamp")), 16)
+        except (TypeError, ValueError) as exc:
+            raise DomainRejected(
+                "ARBITRUM_RECEIPT_INVALID", "latest Arbitrum block metadata is invalid"
+            ) from exc
+        elapsed_seconds = max(0, latest_timestamp - int(prepared_at.timestamp()))
+        # Arbitrum blocks are sub-second.  Keep the query bounded to the operation
+        # window while leaving ample margin for provider clock skew and finalization.
+        lookback = min(60_000, max(4_000, elapsed_seconds * 8 + 2_000))
+        expected_source_topic = f"0x{source[2:].rjust(64, '0')}"
+        expected_target_topic = f"0x{target[2:].rjust(64, '0')}"
+        logs = self._rpc_fetcher(
+            trusted_rpc,
+            "eth_getLogs",
+            [
+                {
+                    "fromBlock": hex(max(0, latest - lookback)),
+                    "toBlock": "latest",
+                    "address": token,
+                    "topics": [
+                        ERC20_TRANSFER_TOPIC,
+                        expected_source_topic,
+                        expected_target_topic,
+                    ],
+                }
+            ],
+            self._timeout_seconds,
+        )
+        if not isinstance(logs, list):
+            _reject("ARBITRUM_RECEIPT_UNAVAILABLE", "Arbitrum log query is unavailable")
+        matches: list[str] = []
+        expected_raw = _raw_usdc(value)
+        for log in logs:
+            if not isinstance(log, dict):
+                continue
+            try:
+                observed_raw = int(str(log.get("data")), 16)
+                block_number = int(str(log.get("blockNumber")), 16)
+            except (TypeError, ValueError):
+                continue
+            tx_hash = str(log.get("transactionHash", "")).lower()
+            if (
+                observed_raw == expected_raw
+                and HASH_PATTERN.fullmatch(tx_hash) is not None
+                and latest - block_number + 1 >= min_confirmations
+            ):
+                matches.append(tx_hash)
+        unique = list(dict.fromkeys(matches))
+        if not unique:
+            _reject("ARBITRUM_RECEIPT_NOT_CONFIRMED", "withdrawal is not yet chain-confirmed")
+        if len(unique) > 1:
+            _reject(
+                "ARBITRUM_RECEIPT_MISMATCH",
+                "multiple exact Bridge2 credits matched the frozen operation window",
+            )
+        return self.verify_arbitrum_usdc_credit(
+            rpc_url=trusted_rpc,
+            transaction_hash=unique[0],
+            sender=source,
+            recipient=target,
+            amount=value,
+            min_confirmations=min_confirmations,
+            expected_token=token,
+        )
 
     def verify_arbitrum_usdc_credit_from_any_sender(
         self,
