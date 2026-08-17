@@ -104,7 +104,7 @@ function handleUnauthorizedResponse() {
   toast.setAttribute('role', 'status');
   toast.setAttribute('aria-live', 'polite');
   if (dialog.open) dialog.close();
-  if (teamModeDialog.open) teamModeDialog.close();
+  closeTeamModeDropdown();
   if (confirmDialog.open) confirmDialog.close();
   setShell(false);
   renderLogin();

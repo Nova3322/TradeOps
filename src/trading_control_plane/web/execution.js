@@ -76,98 +76,143 @@ async function renderAccountManagement() {
   bindLinkedRows();
 }
 
-function readinessItems(items) {
-  const labels = {TARGET_ACCOUNT_MISSING:'目标环境没有已添加账户',TARGET_ACCOUNT_NOT_READY:'账户凭据、连接或运行服务尚未就绪',RISK_POLICY_MISSING:'当前团队尚未配置风险政策',SOURCE_ORDER_INTENTS_ACTIVE:'来源环境存在执行中的订单意图',SOURCE_ORDERS_OPEN_OR_UNKNOWN:'来源环境存在未结束或状态未知订单',SOURCE_POSITIONS_OPEN_OR_UNKNOWN:'来源环境存在未平仓或状态未知仓位'};
-  return (items || []).map(item => `<li><b>${escapeHtml(labels[item.code] || item.code)}</b><span>${item.count} 项</span></li>`).join('');
-}
-
-function closeTeamModeDialog({restoreFocus = false} = {}) {
-  teamModeDialogRequestToken += 1;
-  if (teamModeDialog.open) teamModeDialog.close();
+function closeTeamModeDropdown({restoreFocus = false} = {}) {
+  if (teamModeMenu.hidden) return false;
+  teamModeDropdownRequestToken += 1;
+  teamModeMenu.hidden = true;
   environmentBadge.setAttribute('aria-expanded', 'false');
   if (restoreFocus && !environmentBadge.disabled) environmentBadge.focus({preventScroll:true});
+  return true;
 }
 
-function renderTeamModeDialog(data) {
-  const activeSpaceName = session?.active_team?.name || '当前团队';
-  const current = fmtExecutionMode(data.execution_mode);
-  const modeSeparator = currentLanguage === 'en' ? ': ' : '：';
-  let selectedTarget = data.can_manage
-    ? (data.execution_mode === 'LIVE'
-      ? 'TESTNET'
-      : data.execution_mode === 'TESTNET' ? 'LIVE' : 'TESTNET')
-    : data.execution_mode;
-  const modeOption = (mode, title, copy) => {
-    const isCurrent = data.execution_mode === mode;
-    const isSelected = selectedTarget === mode;
-    return `<button class="mode-switch-option ${mode === 'LIVE' ? 'is-live' : 'is-testnet'} ${isSelected ? 'is-selected' : ''}" type="button" data-mode-target="${mode}" aria-pressed="${isSelected}" ${isCurrent ? 'aria-current="true"' : ''} ${isCurrent || !data.can_manage ? 'disabled' : ''}><span class="mode-switch-option-head"><b>${title}</b><span class="status-pill">${isCurrent ? '当前使用' : mode === 'LIVE' ? '真实资金' : '测试服务器'}</span></span><small>${copy}</small></button>`;
-  };
-  teamModeDialogContent.innerHTML = `<section class="mode-switch-console" aria-labelledby="mode-switch-title"><div class="section-heading"><div><p class="eyebrow"><span>${escapeHtml(activeSpaceName)}</span> · <span>当前模式</span>${modeSeparator}<span>${escapeHtml(current)}</span></p><h3 id="mode-switch-title">${data.can_manage ? '选择要切换到的模式' : '当前模式'}</h3><p>${data.can_manage ? '先选择测试或生产，再在同一区域确认。当前模式不可重复提交。' : '普通成员只能查看当前模式；需要系统管理员或 team.manage 权限执行切换。'}</p></div></div><div class="mode-switch-options" role="group" aria-label="${data.can_manage ? '选择目标模式' : '当前模式'}">${modeOption('TESTNET', '测试模式', '订单发送到交易所测试服务器，不影响真实资金。')}${modeOption('LIVE', '生产模式', '订单发送到交易所生产服务器，可能影响真实资金。')}</div><div id="team-mode-target-panel" aria-live="polite"></div></section>
-    <details class="card mode-switch-audit"><summary><span><b>最近一次模式切换与审计</b><small>${data.last_switched_at ? `${escapeHtml(data.last_switched_by || '未知')} · ${fmtDate(data.last_switched_at)}` : '尚无切换记录'}</small></span><strong>查看详情</strong></summary><div class="mode-switch-audit-body"><dl class="definition-grid">${definition('最近切换人', data.last_switched_by || '尚无记录')}${definition('最近切换时间', data.last_switched_at ? fmtDate(data.last_switched_at) : '尚无记录')}</dl><p class="safety-note">所有切换、失效与阻断结果继续写入审计记录。</p></div></details>`;
-
-  const renderTargetPanel = target => {
-    const panel = teamModeDialogContent.querySelector('#team-mode-target-panel');
-    const readiness = data.target_readiness?.[target] || {ready:false,execution_ready:false,switch_allowed:false,blockers:[],advisories:[]};
-    const executionReady = readiness.execution_ready ?? readiness.ready;
-    const switchAllowed = readiness.switch_allowed ?? readiness.ready;
-    const blockers = readiness.blockers || [];
-    const advisories = readiness.advisories || [];
-    const confirmation = target === 'LIVE' ? 'I_CONFIRM_LIVE_PRODUCTION_MONEY' : 'SWITCH_TO_TESTNET';
-    const targetCopy = target === 'LIVE' ? '生产模式 · 真实资金环境' : '测试模式 · 交易所测试环境';
-    const confirmationField = target === 'LIVE'
-      ? `<div class="mode-production-confirm"><div class="mode-confirmation-copy"><div><span>生产确认文案</span><code>${confirmation}</code></div><button class="secondary" type="button" data-copy-mode-confirmation>复制文案</button></div><label for="team-mode-confirmation">粘贴或输入上方文案<input id="team-mode-confirmation" name="confirmation" autocomplete="off" autocapitalize="off" spellcheck="false" required aria-describedby="mode-confirmation-help"></label><p id="mode-confirmation-help" class="microcopy">完全一致后才会解锁生产模式切换按钮。</p></div>`
-      : `<input name="confirmation" type="hidden" value="${confirmation}"><p class="callout is-success">测试模式不要求输入确认文案；点击按钮后仍会进行一次最终确认。</p>`;
-    panel.innerHTML = `<article class="card mode-switch-target ${target === 'LIVE' ? 'is-live' : 'is-testnet'}"><div class="mode-switch-target-head"><div><p class="eyebrow">目标模式</p><h2>${escapeHtml(targetCopy)}</h2></div><span class="status-pill ${switchAllowed ? 'status-APPROVED' : 'status-DENY'}">${switchAllowed ? '可以切换' : '暂不能切换'}</span></div><div class="mode-switch-status-grid"><div><small>模式切换</small><b>${switchAllowed ? '条件已通过' : `${blockers.length} 类阻断`}</b><span>${switchAllowed ? '可继续最终确认' : '处理阻断后再试'}</span></div><div><small>下单准备</small><b>${executionReady ? '执行已就绪' : '切换后仍不可下单'}</b><span>${executionReady ? '下单时仍会再次校验' : '账户条件由下单链路独立检查'}</span></div></div>${blockers.length ? `<div class="callout is-warning"><b>必须先处理</b><ul class="status-list">${readinessItems(blockers)}</ul></div>` : ''}${advisories.length ? `<details class="mode-switch-advisories"><summary>查看 ${advisories.reduce((sum, item) => sum + Number(item.count || 0), 0)} 项下单准备提示</summary><ul class="status-list">${readinessItems(advisories)}</ul><p>这些项目不阻止模式切换；处理完成前，订单发送仍会失败关闭。</p></details>` : ''}<p class="safety-note">切换不会开启实盘下单、自动加仓或资金划转；旧环境未执行授权和订单意图会失效，历史提案环境保持不变。</p>${data.can_manage ? `<form id="team-mode-switch-form" class="mode-switch-form">${confirmationField}<div class="form-error" role="alert"></div><button class="mode-switch-submit ${target === 'LIVE' ? 'danger' : 'primary'}" ${switchAllowed && target !== 'LIVE' ? '' : 'disabled'}>切换到${fmtExecutionMode(target)}</button></form>` : '<p class="callout">普通成员只能查看当前模式；需要系统管理员或 team.manage 权限执行切换。</p>'}</article>`;
-    const form = teamModeDialogContent.querySelector('#team-mode-switch-form');
-    const submit = form?.querySelector('.mode-switch-submit');
-    const input = form?.elements.confirmation;
-    if (target === 'LIVE' && input && submit) {
-      const syncSubmitState = () => { submit.disabled = !switchAllowed || input.value.trim() !== confirmation; };
-      input.addEventListener('input', syncSubmitState);
-      syncSubmitState();
-      form.querySelector('[data-copy-mode-confirmation]')?.addEventListener('click', async () => { try { await navigator.clipboard.writeText(confirmation); showToast('生产确认文案已复制'); input.focus(); } catch (_error) { input.focus(); showToast('浏览器未允许复制，请手动输入确认文案'); } });
-    }
-    form?.addEventListener('submit', async event => { event.preventDefault(); const confirmed = await confirmAction({title:`确认切换到${fmtExecutionMode(target)}？`, message:target === 'LIVE' ? '生产模式订单会影响真实资金；危险能力仍保持独立关闭。' : '测试模式订单会发送到交易所测试服务器。', confirmLabel:'确认切换'}); if (!confirmed) return; await submitForm(form, () => api(`/api/teams/${data.team_id}/trading-mode`, {method:'PUT', body:JSON.stringify({mode:target, confirmation:form.elements.confirmation.value.trim(), expected_version:data.version, idempotency_key:crypto.randomUUID()})}), {success:`已切换到${fmtExecutionMode(target)}`, onSuccess:async result => { if (result?.session) session = result.session; closeTeamModeDialog(); updateEnvironmentIndicators(); setShell(true); await route(); }}); });
-  };
-  const updateTarget = target => {
-    selectedTarget = target;
-    teamModeDialogContent.querySelectorAll('[data-mode-target]').forEach(button => {
-      const selected = button.dataset.modeTarget === target;
-      button.classList.toggle('is-selected', selected);
-      button.setAttribute('aria-pressed', String(selected));
-    });
-    renderTargetPanel(target);
-    applyLanguageToDocument(teamModeDialogContent);
-  };
-  if (!data.can_manage) {
-    teamModeDialogContent.querySelector('#team-mode-target-panel').innerHTML = '<p class="callout">当前身份为只读查看；模式选择和准备状态仅向有切换权限的管理员开放。</p>';
-    applyLanguageToDocument(teamModeDialogContent);
-    return;
-  }
-  teamModeDialogContent.querySelectorAll('[data-mode-target]:not(:disabled)').forEach(button => button.addEventListener('click', () => updateTarget(button.dataset.modeTarget)));
-  updateTarget(selectedTarget);
+function teamModeOptionDisabled(data, mode) {
+  if (mode === data.execution_mode) return false;
+  const readiness = data.target_readiness?.[mode];
+  return !data.can_manage || !(readiness?.switch_allowed ?? readiness?.ready);
 }
 
-async function openTeamModeDialog() {
+function renderTeamModeDropdown(data, {focus = 'selected'} = {}) {
+  teamModeSnapshot = data;
+  const modes = [
+    {value:'TESTNET', label:'测试模式'},
+    {value:'LIVE', label:'生产模式'},
+  ];
+  teamModeMenu.innerHTML = modes.map(mode => {
+    const selected = mode.value === data.execution_mode;
+    const disabled = teamModeOptionDisabled(data, mode.value);
+    return `<button class="preference-option mode-preference-option" type="button" role="option" tabindex="-1" data-mode-option="${mode.value}" aria-selected="${String(selected)}" ${disabled ? 'disabled aria-disabled="true"' : ''}>${escapeHtml(mode.label)}</button>`;
+  }).join('');
+  applyLanguageToDocument(teamModeMenu);
+  const options = [...teamModeMenu.querySelectorAll('[data-mode-option]:not(:disabled)')];
+  const selectedIndex = Math.max(0, options.findIndex(option => option.getAttribute('aria-selected') === 'true'));
+  const index = focus === 'first' ? 0 : focus === 'last' ? options.length - 1 : selectedIndex;
+  options[index]?.focus({preventScroll:true});
+}
+
+async function openTeamModeDropdown({focus = 'selected'} = {}) {
   if (!session || !hasCapability('venue.view') || environmentBadge.disabled) return;
   closeUserMenu();
   closePreferenceDropdowns();
   closeWorkspaceSwitcher();
-  const requestToken = ++teamModeDialogRequestToken;
-  teamModeDialogContent.innerHTML = '<section class="loading-state mode-switch-loading" role="status"><div class="loading-state-copy"><span class="spinner" aria-hidden="true"></span><div><b>正在读取当前模式…</b><p>正在核对切换权限、风险政策和当前执行事实。</p></div></div></section>';
+  const requestToken = ++teamModeDropdownRequestToken;
+  teamModeMenu.innerHTML = '<div class="mode-preference-status" role="status">正在读取当前模式…</div>';
+  teamModeMenu.hidden = false;
   environmentBadge.setAttribute('aria-expanded', 'true');
-  if (!teamModeDialog.open) teamModeDialog.showModal();
-  applyLanguageToDocument(teamModeDialog);
+  applyLanguageToDocument(teamModeMenu);
   try {
     const response = await api('/api/trading-mode');
-    if (requestToken !== teamModeDialogRequestToken || !teamModeDialog.open) return;
-    renderTeamModeDialog(response.data);
+    if (requestToken !== teamModeDropdownRequestToken || teamModeMenu.hidden) return;
+    renderTeamModeDropdown(response.data, {focus});
   } catch (error) {
-    if (requestToken !== teamModeDialogRequestToken || !teamModeDialog.open || error.handled) return;
-    teamModeDialogContent.innerHTML = `<section class="error-state mode-switch-error" role="alert"><div><p class="eyebrow">运行模式 · 已安全阻断</p><h3>当前模式状态读取失败</h3><p>${escapeHtml(friendlyApiError(error))}</p><button class="secondary" type="button" data-retry-mode-switch>重新检查</button></div></section>`;
-    teamModeDialogContent.querySelector('[data-retry-mode-switch]')?.addEventListener('click', openTeamModeDialog);
-    applyLanguageToDocument(teamModeDialogContent);
+    if (requestToken !== teamModeDropdownRequestToken || teamModeMenu.hidden || error.handled) return;
+    teamModeMenu.innerHTML = `<div class="mode-preference-status" role="alert">当前模式状态读取失败</div><button class="preference-option" type="button" data-retry-mode-switch>重新检查</button>`;
+    applyLanguageToDocument(teamModeMenu);
   }
+}
+
+function moveTeamModeFocus(currentOption, key) {
+  const options = [...teamModeMenu.querySelectorAll('[data-mode-option]:not(:disabled), [data-retry-mode-switch]')];
+  if (!options.length) return;
+  const currentIndex = Math.max(0, options.indexOf(currentOption));
+  const targetIndex = key === 'Home'
+    ? 0
+    : key === 'End'
+      ? options.length - 1
+      : (currentIndex + (key === 'ArrowDown' ? 1 : -1) + options.length) % options.length;
+  options[targetIndex].focus({preventScroll:true});
+}
+
+async function selectTeamMode(mode, button) {
+  const data = teamModeSnapshot;
+  if (!data || button.disabled) return;
+  if (mode === data.execution_mode) {
+    closeTeamModeDropdown({restoreFocus:true});
+    return;
+  }
+  const originalLabel = button.textContent;
+  button.disabled = true;
+  button.textContent = localizedText('处理中…');
+  try {
+    const result = await api(`/api/teams/${data.team_id}/trading-mode`, {
+      method:'PUT',
+      body:JSON.stringify({
+        mode,
+        confirmation:mode === 'LIVE' ? 'I_CONFIRM_LIVE_PRODUCTION_MONEY' : 'SWITCH_TO_TESTNET',
+        expected_version:data.version,
+        idempotency_key:crypto.randomUUID(),
+      }),
+    });
+    if (result?.session) session = result.session;
+    closeTeamModeDropdown();
+    updateEnvironmentIndicators();
+    setShell(true);
+    showToast(`已切换到${fmtExecutionMode(mode)}`);
+    await route();
+  } catch (error) {
+    if (error.handled) return;
+    button.textContent = originalLabel;
+    button.disabled = false;
+    showApiError(error);
+    await openTeamModeDropdown();
+  }
+}
+
+function initializeTeamModeDropdown() {
+  environmentBadge.addEventListener('click', () => {
+    if (teamModeMenu.hidden) openTeamModeDropdown();
+    else closeTeamModeDropdown({restoreFocus:true});
+  });
+  environmentBadge.addEventListener('keydown', event => {
+    if (!['ArrowDown', 'ArrowUp'].includes(event.key)) return;
+    event.preventDefault();
+    openTeamModeDropdown({focus:event.key === 'ArrowUp' ? 'last' : 'selected'});
+  });
+  teamModeMenu.addEventListener('click', event => {
+    const retry = event.target.closest('[data-retry-mode-switch]');
+    if (retry) {
+      openTeamModeDropdown();
+      return;
+    }
+    const option = event.target.closest('[data-mode-option]');
+    if (option) selectTeamMode(option.dataset.modeOption, option);
+  });
+  teamModeMenu.addEventListener('keydown', event => {
+    const option = event.target.closest('[data-mode-option], [data-retry-mode-switch]');
+    if (!option) return;
+    if (['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key)) {
+      event.preventDefault();
+      moveTeamModeFocus(option, event.key);
+    } else if (['Enter', ' '].includes(event.key)) {
+      event.preventDefault();
+      option.click();
+    } else if (event.key === 'Escape') {
+      event.preventDefault();
+      event.stopPropagation();
+      closeTeamModeDropdown({restoreFocus:true});
+    } else if (event.key === 'Tab') {
+      closeTeamModeDropdown();
+    }
+  });
 }
 
 function systemHealthCard({title, status, copy, tone = 'success', meta = ''}) {
