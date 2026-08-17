@@ -147,7 +147,7 @@ def _app(
     )
 
 
-def test_capital_configuration_projects_canonical_runtime_accounts_with_display_names(
+def test_capital_configuration_requires_canonical_runtime_account_ids_not_display_names(
     database: Database,
 ) -> None:
     service = TradingService(database)
@@ -176,23 +176,6 @@ def test_capital_configuration_projects_canonical_runtime_accounts_with_display_
             base_url="http://test",
         ) as client:
             await _login(client, "capital-account-selector-admin")
-            response = await client.get("/api/capital", params={"environment": "LIVE"})
-            assert response.status_code == 200, response.text
-            options = response.json()["data"]["direct_configuration"][
-                "exchange_account_options"
-            ]
-            by_scope = {(item["venue"], item["account_id"]): item for item in options}
-            assert by_scope[("BINANCE", "binance-main")] == {
-                "venue": "BINANCE",
-                "account_id": "binance-main",
-                "label": "acct-1-xpd",
-                "connection_status": "UNCONFIGURED",
-                "runtime_default": True,
-                "configured": True,
-            }
-            assert by_scope[("BINANCE", "acct-live")]["runtime_default"] is False
-            assert by_scope[("HYPERLIQUID", "hyperliquid-main")]["runtime_default"] is True
-
             display_name = await client.put(
                 "/api/capital/direct-configuration",
                 json={
@@ -211,14 +194,9 @@ def test_capital_configuration_projects_canonical_runtime_accounts_with_display_
                 },
             )
             assert canonical_id.status_code == 200, canonical_id.text
-            selected = canonical_id.json()["data"]["direct_configuration"][
-                "exchange_account_options"
-            ]
-            assert next(
-                item
-                for item in selected
-                if item["venue"] == "BINANCE" and item["runtime_default"]
-            )["configured"] is True
+            assert canonical_id.json()["data"]["direct_configuration"][
+                "binance_account_configured"
+            ] is True
 
     asyncio.run(scenario())
 

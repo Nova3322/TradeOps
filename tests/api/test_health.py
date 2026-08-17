@@ -170,6 +170,21 @@ def test_venue_account_detail_route_serves_the_spa_shell() -> None:
     assert response.headers["content-type"].startswith("text/html")
 
 
+def test_account_assets_use_explicit_account_id_inputs() -> None:
+    app = create_app(settings(), FakeDatabase(ready=False))
+
+    capital = get(app, "/assets/capital.js")
+    accounts = get(app, "/assets/execution.js")
+
+    assert capital.status_code == 200
+    assert "const exchangeAccountInput" in capital.text
+    assert '<input name="${name}"' in capital.text
+    assert "exchangeAccountSelect" not in capital.text
+    assert accounts.status_code == 200
+    assert "账户 ID（创建后不可修改）" in accounts.text  # noqa: RUF001
+    assert "同时填写精确账户 ID 和账户名称" in accounts.text
+
+
 def test_mock_login_is_not_available_unless_explicitly_enabled() -> None:
     async def post() -> Response:
         app = create_app(settings(), FakeDatabase())

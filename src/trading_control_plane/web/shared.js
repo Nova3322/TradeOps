@@ -278,7 +278,7 @@ const apiErrorGuidance = {
   CAPABILITY_FORBIDDEN:'当前身份没有查看或执行此操作的权限。',
   LIVE_SCOPE_CONFIGURATION_REQUIRED:'实盘账户或交易所范围尚未配置完整。',
   EXCHANGE_ACCOUNT_NOT_FOUND:'账户已删除、已停用或不属于当前团队，请刷新账户列表后重试。',
-  DEFAULT_ACCOUNT_REQUIRED:'请从账户管理的生产账户下拉列表重新选择。系统校验不可变账户 ID，不使用可编辑的显示名称。',
+  DEFAULT_ACCOUNT_REQUIRED:'请填写与服务端生产运行绑定完全一致的账户 ID。系统校验不可变 account_id，不使用可编辑的账户名称。',
   CAPITAL_CONFIGURATION_FEE_LIMIT_INVALID:'最大费用上限必须低于单次金额上限，请调整后重新保存。',
   CAPITAL_BINANCE_WITHDRAWAL_ADDRESS_SCOPE_MISMATCH:'币安受限提现地址必须与当前使用的链上金库地址完全一致。使用 Safe 时请填写 Safe Smart Account；使用 NoTilt 时请填写 NoTilt 金库地址。',
   NOTILT_VAULT_SCOPE_MISMATCH:'NoTilt 金库地址与当前可信生产范围不一致，请核对金库地址后重试。',
