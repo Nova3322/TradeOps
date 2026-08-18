@@ -382,6 +382,10 @@ class CcxtProFactAdapter:
     def __repr__(self) -> str:
         return f"CcxtProFactAdapter(scope={self.scope.key!r})"
 
+    @property
+    def metrics(self) -> FactAdapterMetrics:
+        return self._metrics.freeze()
+
     def _capability(self, name: str) -> bool:
         capabilities = getattr(self._exchange, "has", {})
         return isinstance(capabilities, Mapping) and capabilities.get(name) is True
@@ -1250,6 +1254,7 @@ class FactAdapterRegistry:
         *,
         identity: tuple[str, ...],
         append_only: bool = False,
+        metrics: _MutableMetrics | None = None,
     ) -> tuple[JsonObject, ...]:
         if not isinstance(incoming, list) or any(not isinstance(row, dict) for row in incoming):
             raise DomainRejected(
@@ -1276,6 +1281,8 @@ class FactAdapterRegistry:
                 current_time = str(current.get("observed_at") or "")
                 incoming_time = str(row.get("observed_at") or "")
                 if current_time and incoming_time and incoming_time < current_time:
+                    if metrics is not None:
+                        metrics.out_of_order_events += 1
                     continue
             merged[row_key] = dict(row)
         return tuple(merged[item] for item in sorted(merged))
@@ -1294,17 +1301,23 @@ class FactAdapterRegistry:
         fills = snapshot.fills
         balances = snapshot.balances
         marks = snapshot.marks
+        adapter_metrics = getattr(state.adapter, "_metrics", None)
+        mutable_metrics = (
+            adapter_metrics if isinstance(adapter_metrics, _MutableMetrics) else None
+        )
         if kind == "POSITION":
             positions = self._merge_rows(
                 positions,
                 payload.get("positions"),
                 identity=("native_symbol", "side"),
+                metrics=mutable_metrics,
             )
         elif kind == "ORDER":
             orders = self._merge_rows(
                 orders,
                 payload.get("orders"),
                 identity=("order_id",),
+                metrics=mutable_metrics,
             )
         elif kind == "FILL":
             fills = self._merge_rows(
@@ -1312,18 +1325,21 @@ class FactAdapterRegistry:
                 payload.get("fills"),
                 identity=("fill_id",),
                 append_only=True,
+                metrics=mutable_metrics,
             )
         elif kind == "BALANCE":
             balances = self._merge_rows(
                 balances,
                 payload.get("balances"),
                 identity=("currency",),
+                metrics=mutable_metrics,
             )
         elif kind == "MARK":
             marks = self._merge_rows(
                 marks,
                 payload.get("marks"),
                 identity=("native_symbol",),
+                metrics=mutable_metrics,
             )
         else:
             return
@@ -1342,7 +1358,9 @@ class FactAdapterRegistry:
             funding=snapshot.funding,
             account_status=snapshot.account_status,
             unknown_fields=snapshot.unknown_fields,
-            metrics=snapshot.metrics,
+            metrics=(
+                snapshot.metrics if mutable_metrics is None else mutable_metrics.freeze()
+            ),
         )
 
     async def publish(

@@ -342,8 +342,8 @@ class PolicyRiskService(ServiceComponent):
             remaining.append(max(timedelta(0), latest_loss_at + cooldown - now))
         return team_streak, account_streak, max(remaining, default=timedelta(0))
 
+    @staticmethod
     def _managed_capital_context(
-        self,
         session: Session,
         *,
         team_id: UUID,
@@ -409,7 +409,7 @@ class PolicyRiskService(ServiceComponent):
                 and unit_price > 0
                 and value is not None
                 and value >= 0
-                and not self._fact_is_stale(valuation_time, now, max_age)
+                and not fact_is_stale(valuation_time, now, max_age)
             )
             known = known and row_known
             if row_known:

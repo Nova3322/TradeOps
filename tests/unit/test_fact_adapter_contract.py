@@ -725,3 +725,196 @@ def test_increment_persistence_is_coalesced_without_losing_latest_state() -> Non
         await registry.close()
 
     asyncio.run(scenario())
+
+
+def test_non_authoritative_position_increment_preserves_absent_positions_until_snapshot() -> None:
+    async def scenario() -> None:
+        adapter = CcxtProFactAdapter(
+            _scope(),
+            credentials=_credentials("BINANCE"),
+            exchange_factory=lambda *_args: FakeCcxtAccountWideExchange(),
+            clock=lambda: _NOW,
+        )
+        registry = FactAdapterRegistry()
+        await registry.register(adapter)
+        initial = await adapter.snapshot(reason="INITIAL")
+        await registry.publish_snapshot(initial)
+
+        await registry.publish(
+            adapter.scope.key,
+            "POSITION",
+            {
+                "positions": [
+                    {
+                        **next(
+                            row for row in initial.positions if row["native_symbol"] == "BTCUSDT"
+                        ),
+                        "quantity": "-0.003",
+                        "observed_at": (_NOW + timedelta(seconds=2)).isoformat(),
+                    }
+                ]
+            },
+        )
+        increment = await registry.latest(adapter.scope.key, stale_after=timedelta(days=1))
+        assert {row["native_symbol"] for row in increment.positions} == {
+            "BTCUSDT",
+            "ETHUSDT",
+        }
+        assert next(
+            row for row in increment.positions if row["native_symbol"] == "ETHUSDT"
+        )["quantity"] == "0.001"
+
+        authoritative = replace(
+            initial,
+            observed_at=datetime.now(UTC) + timedelta(seconds=1),
+            reason="PERIODIC_RECONCILIATION",
+            positions=tuple(
+                row for row in initial.positions if row["native_symbol"] == "BTCUSDT"
+            ),
+        )
+        await registry.publish_snapshot(authoritative)
+        normalized = normalize_fact_adapter_snapshot(
+            await registry.latest(adapter.scope.key, stale_after=timedelta(days=1))
+        )
+        assert next(item for item in normalized if item.symbol == "ETHUSDT").position.quantity == 0
+        await registry.close()
+
+    asyncio.run(scenario())
+
+
+def test_out_of_order_increment_is_ignored_and_reported_by_adapter_metrics() -> None:
+    async def scenario() -> None:
+        adapter = CcxtProFactAdapter(
+            _scope(),
+            credentials=_credentials("BINANCE"),
+            exchange_factory=lambda *_args: FakeCcxtProExchange(),
+            clock=lambda: _NOW,
+        )
+        registry = FactAdapterRegistry()
+        await registry.register(adapter)
+        initial = await adapter.snapshot(reason="INITIAL")
+        await registry.publish_snapshot(initial)
+        base = initial.positions[0]
+        await registry.publish(
+            adapter.scope.key,
+            "POSITION",
+            {
+                "positions": [
+                    {
+                        **base,
+                        "quantity": "-0.003",
+                        "observed_at": (_NOW + timedelta(seconds=2)).isoformat(),
+                    }
+                ]
+            },
+        )
+        await registry.publish(
+            adapter.scope.key,
+            "POSITION",
+            {
+                "positions": [
+                    {
+                        **base,
+                        "quantity": "-9",
+                        "observed_at": (_NOW + timedelta(seconds=1)).isoformat(),
+                    }
+                ]
+            },
+        )
+
+        current = await registry.latest(adapter.scope.key, stale_after=timedelta(days=1))
+        assert current.positions[0]["quantity"] == "-0.003"
+        assert adapter.metrics.out_of_order_events == 1
+        await registry.close()
+
+    asyncio.run(scenario())
+
+
+def test_periodic_reconciliation_and_multi_team_scope_identity_are_explicit() -> None:
+    async def scenario() -> None:
+        first = CcxtProFactAdapter(
+            _scope(account_id="shared-account"),
+            credentials=_credentials("BINANCE"),
+            exchange_factory=lambda *_args: FakeCcxtProExchange(),
+            clock=lambda: _NOW,
+        )
+        second_scope = replace(
+            _scope(account_id="shared-account"),
+            workspace_id="workspace-b",
+            team_id="team-b",
+        )
+        second = CcxtProFactAdapter(
+            second_scope,
+            credentials=_credentials("BINANCE"),
+            exchange_factory=lambda *_args: FakeCcxtProExchange(),
+            clock=lambda: _NOW,
+        )
+        registry = FactAdapterRegistry()
+        await registry.register(first)
+        await registry.register(second)
+        await registry.publish_snapshot(await first.snapshot(reason="INITIAL"))
+        periodic = await first.snapshot(reason="PERIODIC_RECONCILIATION")
+        await registry.publish_snapshot(periodic)
+        await registry.publish_snapshot(await second.snapshot(reason="INITIAL"))
+
+        assert len(await registry.scope_keys()) == 2
+        assert first.scope.key != second.scope.key
+        assert periodic.metrics.periodic_reconciliations == 1
+        assert (await registry.latest(first.scope.key, stale_after=timedelta(days=1))).scope == (
+            first.scope
+        )
+        assert (await registry.latest(second.scope.key, stale_after=timedelta(days=1))).scope == (
+            second.scope
+        )
+        await registry.close()
+
+    asyncio.run(scenario())
+
+
+def test_mark_burst_coalesces_to_one_persistence_callback_with_latest_value() -> None:
+    async def scenario() -> None:
+        adapter = CcxtProFactAdapter(
+            _scope(),
+            credentials=_credentials("BINANCE"),
+            exchange_factory=lambda *_args: FakeCcxtProExchange(),
+            clock=lambda: _NOW,
+        )
+        registry = FactAdapterRegistry()
+        await registry.register(adapter)
+        await registry.publish_snapshot(await adapter.snapshot(reason="INITIAL"))
+        persisted: list[ExchangeFactSnapshot] = []
+
+        async def callback(snapshot: ExchangeFactSnapshot) -> None:
+            persisted.append(snapshot)
+
+        supervisor = FactStreamSupervisor(
+            registry,
+            adapter,
+            snapshot_callback=callback,
+            persistence_coalesce_seconds=0.05,
+        )
+        await supervisor._persist_current()
+        for mark in ("60001", "60002"):
+            await registry.publish(
+                adapter.scope.key,
+                "MARK",
+                {
+                    "marks": [
+                        {
+                            "symbol": "BTC/USDT:USDT",
+                            "native_symbol": "BTCUSDT",
+                            "mark_price": mark,
+                            "observed_at": _NOW.isoformat(),
+                        }
+                    ]
+                },
+            )
+            await supervisor._schedule_callback()
+        await asyncio.sleep(0.06)
+
+        assert len(persisted) == 2
+        assert persisted[-1].reason == "WEBSOCKET_INCREMENT"
+        assert persisted[-1].marks[0]["mark_price"] == "60002"
+        await registry.close()
+
+    asyncio.run(scenario())

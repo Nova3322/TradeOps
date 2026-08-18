@@ -1036,12 +1036,14 @@ class _ExecutionRoutes:
             self.require_freqtrade_enabled()
             execution_service = self.service()
             now = _now()
+            campaign_id = self.queries().campaign_id_for_intent(identity.user_id, intent_id)
             binding = execution_service.freqtrade_worker_binding(
                 actor_id=identity.user_id,
                 execution_scope=payload.execution_scope,
                 owner_id=payload.owner_id,
                 fencing_token=payload.fencing_token,
                 now=now,
+                campaign_id=campaign_id,
             )
             worker = self.require_freqtrade_worker(binding)
             command = execution_service.prepare_freqtrade_order(
@@ -1099,7 +1101,6 @@ class _ExecutionRoutes:
                 idempotency_key=payload.idempotency_key,
                 now=_now(),
             )
-            campaign_id = self.queries().campaign_id_for_intent(identity.user_id, intent_id)
             if dispatch.mode == "COMPLETED":
                 return {
                     "backend": "FREQTRADE",
