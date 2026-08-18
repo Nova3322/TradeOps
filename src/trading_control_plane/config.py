@@ -101,6 +101,14 @@ class Settings(BaseSettings):
     runtime_sync_enabled: bool = False
     runtime_sync_interval_seconds: int = Field(default=60, ge=30, le=3_600)
     runtime_sync_service_username: str = "runtime-sync"
+    fact_adapter_enabled: bool = False
+    fact_adapter_host: str = "127.0.0.1"
+    fact_adapter_port: int = Field(default=8010, ge=1, le=65_535)
+    fact_adapter_bearer_token: str | None = Field(default=None, min_length=32, repr=False)
+    fact_adapter_binding_refresh_seconds: int = Field(default=60, ge=30, le=3_600)
+    fact_adapter_stale_after_seconds: int = Field(default=90, ge=15, le=900)
+    fact_adapter_reconciliation_seconds: int = Field(default=300, ge=30, le=3_600)
+    fact_adapter_fallback_seconds: int = Field(default=60, ge=30, le=900)
     notification_worker_enabled: bool = False
     notification_worker_interval_seconds: int = Field(default=15, ge=5, le=300)
     notification_worker_batch_size: int = Field(default=50, ge=1, le=200)
@@ -109,12 +117,15 @@ class Settings(BaseSettings):
     runtime_binance_symbol: str = "BTCUSDT"
     runtime_hyperliquid_account_id: str | None = None
     runtime_hyperliquid_symbol: str = "BTC"
+    runtime_okx_symbol: str = "BTC-USDT-SWAP"
+    runtime_bybit_symbol: str = "BTCUSDT"
     execution_backend: Literal["FREQTRADE", "DIRECT_LEGACY"] = "FREQTRADE"
     freqtrade_workers_enabled: bool = False
     freqtrade_binance_worker_url: str = "http://127.0.0.1:8081"
     freqtrade_hyperliquid_worker_url: str = "http://127.0.0.1:8082"
     freqtrade_api_username: str | None = None
     freqtrade_api_password: str | None = Field(default=None, repr=False)
+    freqtrade_ws_token: str | None = Field(default=None, repr=False)
     freqtrade_timeout_seconds: float = Field(default=5, ge=1, le=15)
     freqtrade_confirmation_timeout_seconds: float = Field(default=90, ge=10, le=120)
     freqtrade_hyperliquid_hip3_dexes: str = "xyz"
@@ -130,6 +141,7 @@ class Settings(BaseSettings):
     binance_capital_base_url: str = "https://api.binance.com"
     binance_capital_api_key: str | None = Field(default=None, repr=False)
     binance_capital_api_secret: str | None = Field(default=None, repr=False)
+    binance_capital_account_id: str | None = None
     binance_capital_timeout_seconds: float = Field(default=8, ge=1, le=15)
     binance_capital_withdraw_enabled: bool = False
     binance_live_order_send_enabled: bool = False
@@ -309,10 +321,29 @@ class Settings(BaseSettings):
             raise ValueError("Binance read-only key and secret must be configured together")
         if bool(self.binance_capital_api_key) != bool(self.binance_capital_api_secret):
             raise ValueError("Binance capital key and secret must be configured together")
-        # The withdrawal transport may use the exact verified encrypted credential
-        # selected in Account Management.  Route-level checks still require either
-        # that binding or the dedicated environment credential before any preflight
-        # or submission can run.
+        if bool(self.binance_capital_api_key) != bool(self.binance_capital_account_id):
+            raise ValueError(
+                "Binance capital credentials require an exact dedicated capital account ID"
+            )
+        if self.execution_backend == "DIRECT_LEGACY" and self.environment in {
+            "staging",
+            "production",
+        }:
+            raise ValueError(
+                "DIRECT_LEGACY is restricted to isolated local compatibility tests; "
+                "staging and production execution require FREQTRADE"
+            )
+        if self.fact_adapter_enabled and (
+            not self.runtime_sync_enabled
+            or not self.credential_encryption_key
+            or not self.fact_adapter_bearer_token
+        ):
+            raise ValueError(
+                "enabled fact adapter requires runtime sync, credential encryption and "
+                "an internal bearer token"
+            )
+        # Trading/fact credentials are never reused for capital operations.  The
+        # dedicated capital envelope is bound to one exact runtime account ID.
         direct_send_enabled = any(
             (
                 self.binance_live_order_send_enabled,

@@ -337,6 +337,7 @@ def create_app(
                 base_url=resolved_settings.freqtrade_binance_worker_url,
                 username=resolved_settings.freqtrade_api_username,
                 password=resolved_settings.freqtrade_api_password,
+                ws_token=resolved_settings.freqtrade_ws_token,
             ),
             timeout_seconds=resolved_settings.freqtrade_timeout_seconds,
             confirmation_timeout_seconds=(resolved_settings.freqtrade_confirmation_timeout_seconds),
@@ -348,6 +349,7 @@ def create_app(
                 base_url=resolved_settings.freqtrade_hyperliquid_worker_url,
                 username=resolved_settings.freqtrade_api_username,
                 password=resolved_settings.freqtrade_api_password,
+                ws_token=resolved_settings.freqtrade_ws_token,
                 hip3_dexes=resolved_settings.hyperliquid_hip3_dexes,
             ),
             timeout_seconds=resolved_settings.freqtrade_timeout_seconds,
@@ -515,6 +517,7 @@ def create_app(
                 base_url=binding.worker_url,
                 username=binding.username,
                 password=binding.password,
+                ws_token=binding.ws_token,
                 hip3_dexes=binding.hip3_dexes,
                 exchange_account_id=str(binding.exchange_account_id),
                 team_id=str(binding.team_id),
@@ -569,21 +572,10 @@ def create_app(
     def capital_snapshot(user_id: UUID) -> dict[str, Any]:
         direct_settings, saved_config = effective_direct_capital_settings(user_id)
         binance_account_id = direct_settings.capital_direct_binance_account_id
-        database_binance_capital_credentials = False
-        if binance_account_id is not None:
-            try:
-                database_binance_capital_credentials = (
-                    service().capital_account_credentials_configured(
-                        actor_id=user_id,
-                        account_id=binance_account_id,
-                        venue="BINANCE",
-                        environment="LIVE",
-                    )
-                )
-            except DomainRejected:
-                database_binance_capital_credentials = False
         binance_capital_credentials_configured = bool(
-            resolved_binance_capital.configured or database_binance_capital_credentials
+            resolved_binance_capital.configured
+            and binance_account_id is not None
+            and binance_account_id == resolved_settings.binance_capital_account_id
         )
         configured_chain_id: int | None
         try:
@@ -763,10 +755,8 @@ def create_app(
             ),
             "binance_capital_credentials_configured": (binance_capital_credentials_configured),
             "binance_capital_credentials_source": (
-                "ACCOUNT_MANAGEMENT"
-                if database_binance_capital_credentials
-                else "ENVIRONMENT"
-                if resolved_binance_capital.configured
+                "DEDICATED_ENVIRONMENT"
+                if binance_capital_credentials_configured
                 else None
             ),
             "binance_capital_submission_enabled": (
@@ -1218,6 +1208,11 @@ def create_app(
             )
 
     def require_binance_testnet() -> None:
+        if resolved_settings.execution_backend != "DIRECT_LEGACY":
+            raise DomainRejected(
+                "DIRECT_EXECUTION_RETIRED",
+                "direct Binance sending is retired; execution belongs to the Freqtrade worker",
+            )
         if not resolved_settings.binance_testnet_order_send_enabled:
             raise DomainRejected(
                 "BINANCE_TESTNET_DISABLED", "Binance testnet order send is explicitly disabled"
@@ -1245,6 +1240,11 @@ def create_app(
             )
 
     def require_hyperliquid_testnet() -> None:
+        if resolved_settings.execution_backend != "DIRECT_LEGACY":
+            raise DomainRejected(
+                "DIRECT_EXECUTION_RETIRED",
+                "direct Hyperliquid sending is retired; execution belongs to the Freqtrade worker",
+            )
         if not resolved_settings.hyperliquid_testnet_order_send_enabled:
             raise DomainRejected(
                 "HYPERLIQUID_TESTNET_DISABLED",

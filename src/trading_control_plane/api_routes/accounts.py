@@ -328,6 +328,7 @@ class _AccountsRoutes:
                 expected_version=payload.expected_version,
                 idempotency_key=payload.idempotency_key,
                 now=_now(),
+                ws_token=payload.plaintext_ws_token(),
             )
             return {
                 **result,
@@ -467,6 +468,12 @@ class _AccountsRoutes:
             payload: BinanceReadOnlySyncRequest,
             identity: SessionIdentity = self.identity_dependency,
         ) -> dict[str, Any]:
+            if self.resolved_settings.fact_adapter_enabled:
+                raise DomainRejected(
+                    "LEGACY_FACT_SYNC_RETIRED",
+                    "manual venue polling is retired while the account-scoped "
+                    "fact adapter is active",
+                )
             self.require_default_venue_account(payload.account_id, "BINANCE")
             if not self.resolved_settings.binance_read_only_enabled:
                 raise DomainRejected(
@@ -509,6 +516,12 @@ class _AccountsRoutes:
             payload: BinanceReadOnlySyncRequest,
             identity: SessionIdentity = self.identity_dependency,
         ) -> dict[str, Any]:
+            if self.resolved_settings.fact_adapter_enabled:
+                raise DomainRejected(
+                    "LEGACY_FACT_SYNC_RETIRED",
+                    "manual venue polling is retired while the account-scoped "
+                    "fact adapter is active",
+                )
             self.require_binance_testnet()
             if not self.resolved_binance_testnet_reader.configured:
                 raise DomainRejected(
@@ -645,6 +658,12 @@ class _AccountsRoutes:
             payload: HyperliquidReadOnlySyncRequest,
             identity: SessionIdentity = self.identity_dependency,
         ) -> dict[str, Any]:
+            if self.resolved_settings.fact_adapter_enabled:
+                raise DomainRejected(
+                    "LEGACY_FACT_SYNC_RETIRED",
+                    "manual venue polling is retired while the account-scoped "
+                    "fact adapter is active",
+                )
             self.require_default_venue_account(payload.account_id, "HYPERLIQUID")
             if not self.resolved_settings.hyperliquid_read_only_enabled:
                 raise DomainRejected(

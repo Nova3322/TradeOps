@@ -49,6 +49,29 @@
     "stoploss_on_exchange_interval": 30
   },
   "unfilledtimeout": {"entry": 1, "exit": 1, "unit": "minutes"},
+  "telegram": {
+    "enabled": false,
+    "token": "",
+    "chat_id": "",
+    "authorized_users": [],
+    "allow_custom_messages": true,
+    "notification_settings": {
+      "status": "on",
+      "warning": "on",
+      "startup": "on",
+      "entry": "on",
+      "entry_fill": "on",
+      "entry_cancel": "on",
+      "exit": "on",
+      "exit_fill": "on",
+      "exit_cancel": "on",
+      "protection_trigger": "on",
+      "protection_trigger_global": "on",
+      "strategy_msg": "on",
+      "show_candle": "off"
+    },
+    "reload": false
+  },
   "api_server": {
     "enabled": true,
     "listen_ip_address": "0.0.0.0",
@@ -56,6 +79,7 @@
     "verbosity": "error",
     "enable_openapi": false,
     "jwt_secret_key": "local-live-smoke-jwt-override-required",
+    "ws_token": "overridden-by-environment",
     "CORS_origins": [],
     "username": "overridden-by-environment",
     "password": "overridden-by-environment"

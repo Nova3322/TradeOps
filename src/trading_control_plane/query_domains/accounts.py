@@ -299,6 +299,9 @@ class AccountQueries(QueryComponent):
                     "state": ("CONFIGURED" if item.freqtrade_auth_version > 0 else "UNCONFIGURED"),
                     "version": item.freqtrade_auth_version,
                     "username_hint": (item.freqtrade_auth_metadata or {}).get("username_hint"),
+                    "rpc_websocket_configured": bool(
+                        (item.freqtrade_auth_metadata or {}).get("ws_configured")
+                    ),
                 },
                 "live_ready": (
                     item.freqtrade_worker_mode == "LIVE"

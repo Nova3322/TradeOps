@@ -328,6 +328,7 @@ class PreparedFreqtradeWorkerBinding:
     username: str = field(repr=False)
     password: str = field(repr=False)
     hip3_dexes: tuple[str, ...] = ()
+    ws_token: str | None = field(default=None, repr=False)
 
 
 @dataclass(frozen=True, slots=True)

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+import json
 import sys
 from decimal import Decimal
 from pathlib import Path
@@ -11,9 +13,11 @@ import trading_control_plane.freqtrade as freqtrade_module
 from trading_control_plane.domain import DomainRejected
 from trading_control_plane.freqtrade import (
     FreqtradeEntryCommand,
+    FreqtradeRpcMessage,
     FreqtradeWorkerClient,
     FreqtradeWorkerSpec,
     freqtrade_pair,
+    parse_freqtrade_rpc_message,
     parse_hip3_dexes,
     validate_worker_url,
 )
@@ -24,6 +28,112 @@ from portfolio_margin_compat import (  # noqa: E402
     normalize_portfolio_margin_account,
     upgrade_portfolio_margin_algo_request,
 )
+
+
+class _FakeFreqtradeWebSocket:
+    def __init__(self, frames: list[str]) -> None:
+        self.frames = frames
+        self.sent: list[str] = []
+
+    async def __aenter__(self) -> _FakeFreqtradeWebSocket:
+        return self
+
+    async def __aexit__(self, *_args: object) -> None:
+        return None
+
+    async def send(self, value: str) -> None:
+        self.sent.append(value)
+
+    def __aiter__(self):
+        async def values():
+            for frame in self.frames:
+                yield frame
+
+        return values()
+
+
+def test_freqtrade_rpc_websocket_uses_official_message_endpoint() -> None:
+    observed: dict[str, object] = {}
+    socket = _FakeFreqtradeWebSocket(
+        ['{"type":"entry","data":{"trade_id":42,"order_id":"order-1"}}']
+    )
+
+    def connector(url: str, timeout: float) -> _FakeFreqtradeWebSocket:
+        observed.update(url=url, timeout=timeout)
+        return socket
+
+    client = FreqtradeWorkerClient(
+        FreqtradeWorkerSpec(
+            name="binance-rpc",
+            venue="BINANCE",
+            base_url="http://127.0.0.1:8083",
+            username="control-plane",
+            password="fixture-password",  # noqa: S106
+            ws_token="fixture-rpc-token-0123456789",  # noqa: S106
+        ),
+        websocket_connector=connector,
+    )
+
+    async def collect() -> list[FreqtradeRpcMessage]:
+        return [message async for message in client.rpc_messages()]
+
+    messages = asyncio.run(collect())
+    assert observed == {
+        "url": (
+            "ws://127.0.0.1:8083/api/v1/message/ws?"
+            "token=fixture-rpc-token-0123456789"
+        ),
+        "timeout": 5,
+    }
+    assert len(messages) == 1
+    message = messages[0]
+    assert message.event_type == "entry"
+    assert message.payload == {"trade_id": 42, "order_id": "order-1"}
+    assert len(message.idempotency_key) == 64
+    assert "fixture-rpc-token" not in repr(client.spec)
+    subscription = json.loads(socket.sent[0])
+    assert subscription["type"] == "subscribe"
+    assert {"entry", "entry_fill", "exit", "exit_fill", "protection_trigger"}.issubset(
+        subscription["data"]
+    )
+
+
+def test_freqtrade_rpc_message_contract_fails_closed() -> None:
+    with pytest.raises(DomainRejected, match="FREQTRADE_RPC_MESSAGE_INVALID"):
+        parse_freqtrade_rpc_message('{"type":"entry","data":[]}')
+
+    client = FreqtradeWorkerClient(
+        FreqtradeWorkerSpec(
+            name="binance-rpc",
+            venue="BINANCE",
+            base_url="http://127.0.0.1:8083",
+            username="control-plane",
+            password="fixture-password",  # noqa: S106
+        )
+    )
+    with pytest.raises(DomainRejected, match="FREQTRADE_RPC_AUTH_NOT_CONFIGURED"):
+        client.rpc_websocket_url()
+
+
+@pytest.mark.parametrize(
+    "config_name",
+    [
+        "config-binance.json",
+        "config-hyperliquid.json",
+        "config-binance-live-smoke.json",
+        "config-hyperliquid-live-smoke.json",
+    ],
+)
+def test_freqtrade_telegram_is_notification_only(config_name: str) -> None:
+    config = json.loads((PATCHES.parent / config_name).read_text())
+    telegram = config["telegram"]
+
+    assert telegram["enabled"] is False
+    assert telegram["authorized_users"] == []
+    assert telegram["reload"] is False
+    assert telegram["notification_settings"]["entry_fill"] == "on"
+    assert telegram["notification_settings"]["exit_fill"] == "on"
+    assert telegram["notification_settings"]["protection_trigger"] == "on"
 
 
 def test_exact_catalog_symbols_map_to_freqtrade_ccxt_pairs() -> None:

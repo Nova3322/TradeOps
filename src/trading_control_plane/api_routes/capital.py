@@ -86,25 +86,18 @@ class _CapitalRoutes:
         actor_id: UUID,
         account_id: str | None,
     ) -> BinanceCapitalGateway:
-        """Resolve the exact selected account credential for a bounded capital call."""
-        if account_id:
-            try:
-                binding = self.service().capital_account_binding(
-                    actor_id=actor_id,
-                    account_id=account_id,
-                    venue="BINANCE",
-                    environment="LIVE",
-                )
-            except DomainRejected as exc:
-                if self.resolved_binance_capital.configured and exc.code in {
-                    "CAPITAL_ACCOUNT_NOT_FOUND",
-                    "CAPITAL_ACCOUNT_CREDENTIALS_NOT_READY",
-                }:
-                    return self.resolved_binance_capital
-                raise
-            return self.resolved_binance_capital.with_credentials(
-                api_key=binding.credentials["api_key"],
-                api_secret=binding.credentials["api_secret"],
+        """Resolve only the separately configured exact-account capital credential."""
+        del actor_id
+        configured_account_id = self.resolved_settings.binance_capital_account_id
+        if not self.resolved_binance_capital.configured or configured_account_id is None:
+            raise DomainRejected(
+                "BINANCE_CAPITAL_CREDENTIALS_NOT_READY",
+                "dedicated Binance capital credentials are not configured",
+            )
+        if account_id != configured_account_id:
+            raise DomainRejected(
+                "BINANCE_CAPITAL_ACCOUNT_MISMATCH",
+                "the capital credential is outside the exact runtime account scope",
             )
         return self.resolved_binance_capital
 

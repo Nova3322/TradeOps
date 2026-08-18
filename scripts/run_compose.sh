@@ -64,6 +64,7 @@ values = {
     ),
     "TRADING_SESSION_SIGNING_SECRET": secrets.token_urlsafe(48),
     "TRADING_CREDENTIAL_ENCRYPTION_KEY": credential_key,
+    "TRADING_FACT_ADAPTER_BEARER_TOKEN": secrets.token_urlsafe(48),
     "TRADING_LOCAL_ADMIN_PASSWORD": admin_password,
     "TRADING_LOCAL_ADMIN_USERNAME": os.environ.get(
         "TRADING_LOCAL_ADMIN_USERNAME", "trading-admin"
@@ -79,10 +80,17 @@ password_path.chmod(0o600)
 PY
 fi
 
+if ! grep -q '^TRADING_FACT_ADAPTER_BEARER_TOKEN=.' "$env_file"; then
+  umask 077
+  printf 'TRADING_FACT_ADAPTER_BEARER_TOKEN=%s\n' "$(python3 -c 'import secrets; print(secrets.token_urlsafe(48))')" >>"$env_file"
+  chmod 600 "$env_file"
+fi
+
 required_variables=(
   TRADING_DATABASE_URL
   TRADING_SESSION_SIGNING_SECRET
   TRADING_CREDENTIAL_ENCRYPTION_KEY
+  TRADING_FACT_ADAPTER_BEARER_TOKEN
   TRADING_LOCAL_ADMIN_PASSWORD
   TRADING_LOCAL_ADMIN_USERNAME
 )

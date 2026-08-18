@@ -15,7 +15,8 @@ classifiers = [
 ]
 dependencies = [
   "alembic>=1.18.5,<2",
-  "cryptography>=50,<51",
+  "ccxt==4.5.70",
+  "cryptography>=49,<51",
   "fastapi>=0.128,<1",
   "hyperliquid-python-sdk>=0.24,<0.25",
   "prometheus-client>=0.23,<1",
@@ -40,6 +41,7 @@ trading-api = "trading_control_plane.__main__:main"
 trading-doctor = "trading_control_plane.operations:main"
 trading-notification-worker = "trading_control_plane.notification_runtime:main"
 trading-sync-worker = "trading_control_plane.runtime:main"
+trading-fact-adapter = "trading_control_plane.fact_adapter_runtime:main"
 
 [dependency-groups]
 dev = [

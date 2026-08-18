@@ -8,6 +8,34 @@ from trading_control_plane.service_core import *
 
 
 class FactIngestionExecutionService(ServiceComponent):
+    def ingest_normalized_read_only_account_snapshot(
+        self,
+        account_id: str,
+        actor_id: UUID,
+        snapshots: tuple[VenueReadOnlySnapshot, ...],
+        *,
+        venue: str,
+        environment: ExecutionEnvironment,
+        runtime_binding: PreparedRuntimeAccountBinding,
+        now: datetime,
+    ) -> dict[str, Any]:
+        """Persist the exchange-neutral fact-adapter contract for an exact binding."""
+
+        if venue not in SUPPORTED_EXCHANGE_VENUES or runtime_binding.venue != venue:
+            _reject(
+                "FACT_ADAPTER_SCOPE_MISMATCH",
+                "normalized facts are outside the exact supported account scope",
+            )
+        return self._ingest_read_only_account_snapshot(
+            account_id,
+            actor_id,
+            snapshots,
+            venue=venue,
+            environment=environment,
+            runtime_binding=runtime_binding,
+            now=now,
+        )
+
     def binance_history_cursors(
         self,
         account_id: str,
