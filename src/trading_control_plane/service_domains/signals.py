@@ -1670,8 +1670,18 @@ class SignalService(ServiceComponent):
                 )
                 retry_at = None
                 if status == "FAILED" and error_code is not None and "RATE_LIMITED" in error_code:
-                    retry_seconds = min(300, 60 * (2 ** min(consecutive_failures - 1, 3)))
-                    retry_at = now + timedelta(seconds=retry_seconds)
+                    raw_retry_at = result.get("retry_at")
+                    try:
+                        retry_at = (
+                            None
+                            if raw_retry_at is None
+                            else datetime.fromisoformat(str(raw_retry_at)).astimezone(UTC)
+                        )
+                    except ValueError:
+                        retry_at = None
+                    if retry_at is None or retry_at <= now:
+                        retry_seconds = min(300, 60 * (2 ** min(consecutive_failures - 1, 3)))
+                        retry_at = now + timedelta(seconds=retry_seconds)
                 last_success_at = (
                     now
                     if status == "SUCCESS"

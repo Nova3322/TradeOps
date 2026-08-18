@@ -6,7 +6,7 @@ import io
 import urllib.error
 import urllib.parse
 import urllib.request
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Any
 
@@ -16,6 +16,10 @@ from trading_control_plane import binance
 from trading_control_plane.binance import (
     BinancePortfolioMarginReadOnlyClient,
     BinanceReadOnlyClient,
+)
+from trading_control_plane.binance_errors import (
+    BinanceRequestState,
+    classify_binance_rate_limit,
 )
 from trading_control_plane.domain import DomainRejected
 
@@ -174,6 +178,86 @@ def test_user_data_contract_is_get_only_signed_and_maps_all_required_facts() -> 
     assert snapshot.protection.trigger_price == Decimal("59000")
     assert not hasattr(client, "send_order")
     assert not hasattr(client, "post")
+
+
+def test_runtime_snapshot_uses_cached_catalog_and_incremental_history_budget() -> None:
+    client, calls = client_with_contract(payloads())
+    cursor = NOW - timedelta(minutes=2)
+    client.set_history_cursors({"BTCUSDT": {"fills": cursor, "funding": cursor}})
+
+    assert [item.symbol for item in client.read_active_instruments()] == ["BTCUSDT"]
+    first = client.read_account_snapshots(("BTCUSDT",), now=NOW)
+    first_count = len(calls)
+    second = client.read_account_snapshots(("BTCUSDT",), now=NOW + timedelta(minutes=1))
+
+    assert first_count == 6
+    assert len(calls) - first_count == 3
+    assert first[0].orders and first[0].fills and first[0].funding
+    assert second[0].orders and second[0].fills == () and second[0].funding == ()
+    paths = [urllib.parse.urlparse(url).path for url, _headers, _timeout in calls]
+    assert paths.count("/fapi/v1/exchangeInfo") == 1
+    assert paths.count("/fapi/v1/userTrades") == 1
+    assert paths.count("/fapi/v1/income") == 1
+    history_queries = [
+        dict(urllib.parse.parse_qsl(urllib.parse.urlparse(url).query))
+        for url, _headers, _timeout in calls
+        if urllib.parse.urlparse(url).path in {"/fapi/v1/userTrades", "/fapi/v1/income"}
+    ]
+    expected_start = str(int((cursor - timedelta(minutes=5)).timestamp() * 1000))
+    assert all(query["startTime"] == expected_start for query in history_queries)
+
+
+def test_shared_binance_cooldown_blocks_every_account_until_expiry() -> None:
+    calls = 0
+
+    def fetch(_url: str, _headers: dict[str, str], _timeout: float) -> dict[str, Any]:
+        nonlocal calls
+        calls += 1
+        return {"ok": True}
+
+    now = datetime.now(UTC)
+    state = BinanceRequestState()
+    state.record_rate_limit(
+        classify_binance_rate_limit(
+            http_status=429,
+            binance_error_code=-1003,
+            binance_error_message="Too much request weight used",
+            headers={"retry-after": "60", "x-mbx-used-weight-1m": "2400"},
+            failed_at=now,
+        ),
+        host="fapi.binance.com",
+    )
+    for api_key in ("account-a", "account-b"):
+        client = BinanceReadOnlyClient(
+            base_url="https://fapi.binance.example",
+            api_key=api_key,
+            api_secret="secret",  # noqa: S106
+            fetcher=fetch,
+            request_state=state,
+        )
+        with pytest.raises(DomainRejected, match="BINANCE_RATE_LIMITED"):
+            client._signed_get("/fapi/v3/balance", {}, timestamp_ms=1)
+    assert calls == 0
+
+    expired = BinanceRequestState()
+    expired.record_rate_limit(
+        classify_binance_rate_limit(
+            http_status=429,
+            binance_error_code=-1003,
+            binance_error_message="Too much request weight used",
+            headers={"Retry-After": "1"},
+            failed_at=now - timedelta(seconds=2),
+        )
+    )
+    client = BinanceReadOnlyClient(
+        base_url="https://fapi.binance.example",
+        api_key="account-c",
+        api_secret="secret",  # noqa: S106
+        fetcher=fetch,
+        request_state=expired,
+    )
+    assert client._signed_get("/fapi/v3/balance", {}, timestamp_ms=1) == {"ok": True}
+    assert calls == 1
 
 
 def test_active_catalog_uses_complete_official_exchange_info_and_omits_inactive() -> None:
@@ -456,6 +540,19 @@ def test_binance_read_only_transport_preserves_rate_limit_details(
     assert caught.value.metadata["retry_after_seconds"] == 90
 
 
+def test_binance_retry_after_preserves_multi_day_ip_ban() -> None:
+    diagnostic = classify_binance_rate_limit(
+        http_status=418,
+        binance_error_code=-1003,
+        binance_error_message="IP banned",
+        headers={"Retry-After": "259200"},
+        failed_at=NOW,
+    )
+
+    assert diagnostic.retry_after_seconds == 259_200
+    assert diagnostic.next_retry_at == NOW + timedelta(days=3)
+
+
 def test_binance_server_time_rate_limit_is_not_retried(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -614,6 +711,86 @@ def test_portfolio_margin_reader_uses_papi_and_maps_unified_account_facts() -> N
         )
 
 
+def test_portfolio_margin_runtime_request_and_weight_budget_is_reduced() -> None:
+    observed_ms = int(NOW.timestamp() * 1_000)
+    responses: dict[str, dict[str, Any] | list[dict[str, Any]]] = {
+        "/fapi/v1/exchangeInfo": payloads()["/fapi/v1/exchangeInfo"],
+        "/fapi/v1/premiumIndex": {"symbol": "BTCUSDT", "markPrice": "61000"},
+        "/papi/v1/um/account": {
+            "positions": [
+                {
+                    "symbol": "BTCUSDT",
+                    "positionSide": "BOTH",
+                    "positionAmt": "0.25",
+                    "entryPrice": "60000",
+                }
+            ]
+        },
+        "/papi/v1/account": {
+            "accountEquity": "1025",
+            "totalAvailableBalance": "800",
+            "updateTime": observed_ms,
+        },
+        "/papi/v1/um/openOrders": [],
+        "/papi/v1/um/algo/openAlgoOrders": [],
+        "/papi/v1/um/userTrades": payloads()["/fapi/v1/userTrades"],
+        "/papi/v1/um/income": payloads()["/fapi/v1/income"],
+    }
+    request_paths: list[str] = []
+    time_requests = 0
+
+    def fetch(
+        url: str, _headers: dict[str, str], _timeout: float
+    ) -> dict[str, Any] | list[dict[str, Any]]:
+        path = urllib.parse.urlparse(url).path
+        request_paths.append(path)
+        return responses[path]
+
+    def server_time(_timeout: float) -> int:
+        nonlocal time_requests
+        time_requests += 1
+        return observed_ms
+
+    state = BinanceRequestState()
+    client = BinancePortfolioMarginReadOnlyClient(
+        base_url="https://papi.binance.com",
+        api_key="unified-key",
+        api_secret="unified-secret",  # noqa: S106
+        fetcher=fetch,
+        server_time_fetcher=server_time,
+        request_state=state,
+    )
+
+    assert [item.symbol for item in client.read_active_instruments()] == ["BTCUSDT"]
+    first = client.read_account_snapshots(("BTCUSDT",), now=NOW)
+    first_requests = len(request_paths) + time_requests
+    first_paths = list(request_paths)
+
+    # Simulate the next 60-second runtime tick; the shared time cache is only
+    # promised for 30 seconds, so this comparison includes one fresh time read.
+    state.record_time_offset(0, synchronized_at=datetime.now(UTC) - timedelta(seconds=31))
+    client.read_account_snapshots(("BTCUSDT",), now=NOW + timedelta(minutes=1))
+    steady_requests = len(request_paths) + time_requests - first_requests
+    steady_paths = request_paths[len(first_paths) :]
+
+    assert first[0].orders == () and first[0].fills and first[0].funding
+    assert first_requests == 9  # legacy: 10 requests every minute
+    assert steady_requests == 6
+    assert "/papi/v1/um/userTrades" not in steady_paths
+    assert "/papi/v1/um/income" not in steady_paths
+    assert first_paths.count("/fapi/v1/exchangeInfo") == 1
+
+    # Current official IP weights for the exact one-symbol path: time 1,
+    # exchangeInfo 1, UM account 5, account 20, both all-symbol order reads
+    # 40 each, premiumIndex 1, userTrades 5 and income 30.
+    legacy_weight_per_minute = 144
+    first_weight = 143
+    steady_current_weight = 107
+    amortized_weight_per_minute = steady_current_weight + (35 / 10) + (1 / 30)
+    assert first_weight < legacy_weight_per_minute
+    assert amortized_weight_per_minute < 111
+
+
 def test_portfolio_margin_account_snapshot_covers_all_positions_without_refetching_account() -> (
     None
 ):
@@ -708,8 +885,19 @@ def test_portfolio_margin_account_snapshot_covers_all_positions_without_refetchi
     assert dict(calls)["/papi/v1/um/openOrders"].get("symbol") is None
 
     collateral_by_symbol["ETHUSDT"] = "USDC"
+    cached = client.read_account_snapshots(("BTCUSDT",), now=NOW + timedelta(minutes=1))
+    assert all(item.equity.currency == "USDT" for item in cached)
+    assert [path for path, _query in calls].count("/fapi/v1/exchangeInfo") == 2
+
+    uncached_client = BinancePortfolioMarginReadOnlyClient(
+        base_url="https://papi.binance.com",
+        api_key="unified-key",
+        api_secret="unified-secret",  # noqa: S106
+        fetcher=fetch,
+        server_time_fetcher=lambda _timeout: observed_ms,
+    )
     with pytest.raises(DomainRejected, match="BINANCE_ACCOUNT_EQUITY_AMBIGUOUS"):
-        client.read_account_snapshots(("BTCUSDT",), now=NOW)
+        uncached_client.read_account_snapshots(("BTCUSDT",), now=NOW)
 
 
 @pytest.mark.parametrize("failed_history_leg", [0, 2, 5])

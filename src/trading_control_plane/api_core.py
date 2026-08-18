@@ -379,7 +379,14 @@ def _domain_status(code: str) -> int:
         return status.HTTP_400_BAD_REQUEST
     if code.endswith("_NOT_FOUND"):
         return status.HTTP_404_NOT_FOUND
-    if code in {"PERPTAPE_RATE_LIMITED", "API_CLIENT_RATE_LIMITED"}:
+    if code in {
+        "PERPTAPE_RATE_LIMITED",
+        "API_CLIENT_RATE_LIMITED",
+        "BINANCE_RATE_LIMITED",
+        "BINANCE_CAPITAL_RATE_LIMITED",
+        "BINANCE_CONNECTION_WEIGHT_HEADROOM_DEFERRED",
+        "BINANCE_CAPITAL_WEIGHT_HEADROOM_DEFERRED",
+    }:
         return status.HTTP_429_TOO_MANY_REQUESTS
     if code in {
         "IDEMPOTENCY_CONFLICT",
@@ -407,6 +414,7 @@ def _domain_status(code: str) -> int:
         "FREQTRADE_DISPATCH_ALREADY_STARTED",
         "API_CLIENT_NAME_CONFLICT",
         "API_CLIENT_REVOKED",
+        "BINANCE_RECEIPT_CHECK_IN_PROGRESS",
     }:
         return status.HTTP_409_CONFLICT
     if code in {

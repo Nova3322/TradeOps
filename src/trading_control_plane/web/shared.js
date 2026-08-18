@@ -351,6 +351,8 @@ const exchangeConnectionErrorLabels = {
   BINANCE_AUTHENTICATION_FAILED:'币安拒绝了凭据、只读权限或出口 IP 范围',
   BINANCE_TIMESTAMP_REJECTED:'币安拒绝了请求时间；系统会使用官方服务器时间重试',
   BINANCE_RATE_LIMITED:'币安只读接口正在限流，请稍后重试',
+  BINANCE_CONNECTION_WEIGHT_HEADROOM_DEFERRED:'币安只读连接验证已为请求权重余量延后',
+  BINANCE_CAPITAL_WEIGHT_HEADROOM_DEFERRED:'币安低优先级回执核对已为请求权重余量延后',
   BINANCE_READ_ONLY_UNAVAILABLE:'币安官方只读接口暂时不可达',
   BINANCE_RESPONSE_INVALID:'币安返回了当前适配器无法采信的响应',
   READ_ONLY_PROBE_FAILED:'只读连接检查失败',
@@ -359,6 +361,8 @@ const exchangeConnectionErrorEnglishLabels = {
   BINANCE_AUTHENTICATION_FAILED:'Binance rejected the credential, read permission, or egress IP scope',
   BINANCE_TIMESTAMP_REJECTED:'Binance rejected the request time; the system will retry with official server time',
   BINANCE_RATE_LIMITED:'The Binance read-only API is rate-limiting requests; retry later',
+  BINANCE_CONNECTION_WEIGHT_HEADROOM_DEFERRED:'Binance deferred the read-only connection check to preserve request-weight headroom',
+  BINANCE_CAPITAL_WEIGHT_HEADROOM_DEFERRED:'Binance deferred the low-priority receipt check to preserve request-weight headroom',
   BINANCE_READ_ONLY_UNAVAILABLE:'The official Binance read-only API is currently unreachable',
   BINANCE_RESPONSE_INVALID:'Binance returned a response the current adapter cannot trust',
   READ_ONLY_PROBE_FAILED:'The read-only connection probe failed',
@@ -374,8 +378,12 @@ const binanceLimitCategoryLabels = {
 function fmtBinanceConnectionDiagnostic(connection) {
   const diagnostics = connection?.diagnostics;
   if (!diagnostics) return fmtExchangeConnectionError(connection?.error_code);
-  const category = binanceLimitCategoryLabels[diagnostics.category] || diagnostics.category;
   const retryAt = diagnostics.next_retry_at ? fmtDate(diagnostics.next_retry_at) : '稍后';
+  if (!diagnostics.category) {
+    const summary = fmtExchangeConnectionError(connection?.error_code);
+    return diagnostics.next_retry_at ? `${summary}；建议 ${retryAt} 后重试` : summary;
+  }
+  const category = binanceLimitCategoryLabels[diagnostics.category] || diagnostics.category;
   const status = diagnostics.http_status ? `HTTP ${diagnostics.http_status}` : 'HTTP 状态未知';
   const code = diagnostics.binance_error_code === null || diagnostics.binance_error_code === undefined
     ? 'Binance code 未返回' : `Binance ${diagnostics.binance_error_code}`;
@@ -400,7 +408,7 @@ const friendlyApiError = (error) => {
   const risk = riskReasonGuidance[error?.code] || riskReasonGuidance[error?.message];
   if (risk) return `${risk.label}：${risk.action}`;
   if (actionErrorGuidance[error?.code]) return actionErrorGuidance[error.code];
-  if (['BINANCE_CAPITAL_RATE_LIMITED','BINANCE_CONNECTION_RETRY_DEFERRED'].includes(error?.code) && error?.details) {
+  if (['BINANCE_CAPITAL_RATE_LIMITED','BINANCE_CONNECTION_RETRY_DEFERRED','BINANCE_CONNECTION_WEIGHT_HEADROOM_DEFERRED','BINANCE_CAPITAL_WEIGHT_HEADROOM_DEFERRED'].includes(error?.code) && error?.details) {
     return fmtBinanceConnectionDiagnostic({error_code:error.code, diagnostics:error.details});
   }
   if (['HYPERLIQUID_SUBMISSION_REJECTED','HYPERLIQUID_RATE_LIMITED'].includes(error?.code) && error?.message) {

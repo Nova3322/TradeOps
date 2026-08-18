@@ -494,9 +494,7 @@ class _CapitalRoutes:
                 settings=direct_settings,
                 capital_transfer_gate=center["real_transfer_gate"],
                 binance_capital_credentials_configured=bool(
-                    center["direct_configuration"][
-                        "binance_capital_credentials_configured"
-                    ]
+                    center["direct_configuration"]["binance_capital_credentials_configured"]
                 ),
                 now=now,
             )
@@ -678,120 +676,138 @@ class _CapitalRoutes:
                 actor_id=identity.user_id,
                 account_id=(None if context["account_id"] is None else str(context["account_id"])),
             )
-            if payload.stage == "BINANCE_DEPOSIT":
-                if context["path"] != DirectCapitalPath.VAULT_TO_BINANCE.value:
-                    raise DomainRejected(
-                        "BINANCE_CAPITAL_RECEIPT_STAGE_INVALID",
-                        "deposit receipt does not match path",
+            poll_token = payload.idempotency_key
+            self.service().acquire_direct_capital_binance_receipt_poll(
+                operation_id,
+                identity.user_id,
+                expected_version=payload.expected_version,
+                stage=payload.stage,
+                token=poll_token,
+                now=now,
+            )
+            try:
+                if payload.stage == "BINANCE_DEPOSIT":
+                    if context["path"] != DirectCapitalPath.VAULT_TO_BINANCE.value:
+                        raise DomainRejected(
+                            "BINANCE_CAPITAL_RECEIPT_STAGE_INVALID",
+                            "deposit receipt does not match path",
+                        )
+                    assert payload.transaction_hash is not None
+                    submission_code = (
+                        "NOTILT_DESTINATION_TRANSFER_SUBMITTED_BY_HUMAN_WALLET"
+                        if context["treasury_provider"] == "NOTILT_VAULT"
+                        else "TREASURY_WITHDRAWAL_SUBMITTED_BY_HUMAN_WALLET"
                     )
-                assert payload.transaction_hash is not None
-                submission_code = (
-                    "NOTILT_DESTINATION_TRANSFER_SUBMITTED_BY_HUMAN_WALLET"
-                    if context["treasury_provider"] == "NOTILT_VAULT"
-                    else "TREASURY_WITHDRAWAL_SUBMITTED_BY_HUMAN_WALLET"
-                )
-                submitted = next(
-                    (
-                        stage
-                        for stage in reversed(context["stages"])
-                        if stage.get("code") == submission_code
-                    ),
-                    None,
-                )
-                if submitted is None or str(
-                    submitted.get("transaction_hash", "")
-                ).lower() != payload.transaction_hash.lower():
-                    raise DomainRejected(
-                        "BINANCE_CAPITAL_RECEIPT_REFERENCE_MISMATCH",
-                        "Binance deposit receipt does not match the wallet-submitted transfer",
+                    submitted = next(
+                        (
+                            stage
+                            for stage in reversed(context["stages"])
+                            if stage.get("code") == submission_code
+                        ),
+                        None,
                     )
-                destination = direct_settings.capital_direct_binance_deposit_address
-                if destination is None:
-                    raise DomainRejected(
-                        "BINANCE_CAPITAL_SCOPE_MISSING", "Binance deposit address is missing"
+                    if (
+                        submitted is None
+                        or str(submitted.get("transaction_hash", "")).lower()
+                        != payload.transaction_hash.lower()
+                    ):
+                        raise DomainRejected(
+                            "BINANCE_CAPITAL_RECEIPT_REFERENCE_MISMATCH",
+                            "Binance deposit receipt does not match the wallet-submitted transfer",
+                        )
+                    destination = direct_settings.capital_direct_binance_deposit_address
+                    if destination is None:
+                        raise DomainRejected(
+                            "BINANCE_CAPITAL_SCOPE_MISSING", "Binance deposit address is missing"
+                        )
+                    deposit_evidence = binance_capital.verify_deposit(
+                        transaction_hash=payload.transaction_hash,
+                        destination=destination,
+                        amount=Decimal(str(context["min_received"])),
                     )
-                deposit_evidence = binance_capital.verify_deposit(
-                    transaction_hash=payload.transaction_hash,
-                    destination=destination,
-                    amount=Decimal(str(context["min_received"])),
-                )
-                preflight = next(
-                    (
-                        stage.get("artifact")
-                        for stage in reversed(context["stages"])
-                        if stage.get("code") == "BINANCE_DEPOSIT_PREFLIGHT_READY"
-                    ),
-                    None,
-                )
-                if not isinstance(preflight, dict):
-                    raise DomainRejected(
-                        "BINANCE_CAPITAL_PREFLIGHT_REQUIRED",
-                        "the frozen Binance deposit preflight is missing",
+                    preflight = next(
+                        (
+                            stage.get("artifact")
+                            for stage in reversed(context["stages"])
+                            if stage.get("code") == "BINANCE_DEPOSIT_PREFLIGHT_READY"
+                        ),
+                        None,
                     )
-                try:
-                    prepared_at = datetime.fromisoformat(str(preflight["preparedAt"]))
-                except (KeyError, TypeError, ValueError) as exc:
-                    raise DomainRejected(
-                        "BINANCE_CAPITAL_PREFLIGHT_INVALID",
-                        "the frozen Binance deposit preflight timestamp is invalid",
-                    ) from exc
-                internal_transfer = binance_capital.complete_deposit_to_usdm(
-                    amount=Decimal(str(context["min_received"])),
-                    prepared_at=prepared_at,
-                    now=now,
-                )
-                evidence = {
-                    "deposit": deposit_evidence,
-                    "internalTransfer": internal_transfer,
-                }
-            else:
-                if context["path"] != DirectCapitalPath.BINANCE_TO_VAULT.value:
-                    raise DomainRejected(
-                        "BINANCE_CAPITAL_RECEIPT_STAGE_INVALID",
-                        "withdrawal receipt does not match path",
+                    if not isinstance(preflight, dict):
+                        raise DomainRejected(
+                            "BINANCE_CAPITAL_PREFLIGHT_REQUIRED",
+                            "the frozen Binance deposit preflight is missing",
+                        )
+                    try:
+                        prepared_at = datetime.fromisoformat(str(preflight["preparedAt"]))
+                    except (KeyError, TypeError, ValueError) as exc:
+                        raise DomainRejected(
+                            "BINANCE_CAPITAL_PREFLIGHT_INVALID",
+                            "the frozen Binance deposit preflight timestamp is invalid",
+                        ) from exc
+                    internal_transfer = binance_capital.complete_deposit_to_usdm(
+                        amount=Decimal(str(context["min_received"])),
+                        prepared_at=prepared_at,
+                        now=now,
                     )
-                destination = direct_settings.capital_direct_binance_withdrawal_address
-                rpc_url = (
-                    direct_settings.capital_arbitrum_rpc_url
-                    or direct_settings.safe_spending_arbitrum_rpc_url
-                )
-                if destination is None or rpc_url is None:
-                    raise DomainRejected(
-                        "BINANCE_CAPITAL_SCOPE_MISSING",
-                        "frozen treasury destination and trusted Arbitrum RPC are required",
+                    evidence = {
+                        "deposit": deposit_evidence,
+                        "internalTransfer": internal_transfer,
+                    }
+                else:
+                    if context["path"] != DirectCapitalPath.BINANCE_TO_VAULT.value:
+                        raise DomainRejected(
+                            "BINANCE_CAPITAL_RECEIPT_STAGE_INVALID",
+                            "withdrawal receipt does not match path",
+                        )
+                    destination = direct_settings.capital_direct_binance_withdrawal_address
+                    rpc_url = (
+                        direct_settings.capital_arbitrum_rpc_url
+                        or direct_settings.safe_spending_arbitrum_rpc_url
                     )
-                withdrawal = binance_capital.verify_withdrawal(
-                    order_id=str(operation_id),
-                    destination=destination,
-                    amount=Decimal(str(context["amount"])),
-                )
-                transaction_hash = str(withdrawal["transactionHash"])
-                chain = (
-                    self.resolved_hyperliquid_capital.verify_arbitrum_usdc_credit_from_any_sender(
+                    if destination is None or rpc_url is None:
+                        raise DomainRejected(
+                            "BINANCE_CAPITAL_SCOPE_MISSING",
+                            "frozen treasury destination and trusted Arbitrum RPC are required",
+                        )
+                    withdrawal = binance_capital.verify_withdrawal(
+                        order_id=str(operation_id),
+                        destination=destination,
+                        amount=Decimal(str(context["amount"])),
+                    )
+                    transaction_hash = str(withdrawal["transactionHash"])
+                    chain_gateway = self.resolved_hyperliquid_capital
+                    chain = chain_gateway.verify_arbitrum_usdc_credit_from_any_sender(
                         rpc_url=rpc_url,
                         transaction_hash=transaction_hash,
                         recipient=destination,
                         amount=str(context["amount"]),
                         min_confirmations=direct_settings.notilt_arbitrum_min_confirmations,
                     )
+                    evidence = {"binance": withdrawal, "arbitrum": chain}
+                version = self.service().record_direct_capital_binance_receipt(
+                    operation_id,
+                    identity.user_id,
+                    expected_version=payload.expected_version,
+                    stage=payload.stage,
+                    evidence=evidence,
+                    idempotency_key=payload.idempotency_key,
+                    now=now,
                 )
-                evidence = {"binance": withdrawal, "arbitrum": chain}
-            version = self.service().record_direct_capital_binance_receipt(
-                operation_id,
-                identity.user_id,
-                expected_version=payload.expected_version,
-                stage=payload.stage,
-                evidence=evidence,
-                idempotency_key=payload.idempotency_key,
-                now=now,
-            )
-            return {
-                "operation_id": str(operation_id),
-                "version": version,
-                "receipt": evidence,
-                "settlement": "CONFIRMED",
-                "data": self._direct_action_snapshot(identity.user_id),
-            }
+                return {
+                    "operation_id": str(operation_id),
+                    "version": version,
+                    "receipt": evidence,
+                    "settlement": "CONFIRMED",
+                    "data": self._direct_action_snapshot(identity.user_id),
+                }
+            finally:
+                self.service().release_direct_capital_binance_receipt_poll(
+                    operation_id,
+                    stage=payload.stage,
+                    token=poll_token,
+                    now=_now(),
+                )
 
     def register_direct_treasury(self) -> None:
         @self.app.post("/api/capital/direct-operations/{operation_id}/notilt-unsigned-preview")
@@ -938,10 +954,13 @@ class _CapitalRoutes:
                 "execution_blocked": bool(blockers),
                 "blockers": blockers,
                 "transactions": [item.to_dict() for item in transactions],
-                "wallet_address": agent if path in {
+                "wallet_address": agent
+                if path
+                in {
                     DirectCapitalPath.VAULT_TO_BINANCE,
                     DirectCapitalPath.VAULT_TO_HYPERLIQUID,
-                } else context["source_reference"],
+                }
+                else context["source_reference"],
                 "next_step": (
                     "Resolve every blocker and re-read live source receipts before a human wallet "
                     "may confirm any transaction."
@@ -1049,8 +1068,7 @@ class _CapitalRoutes:
                 (
                     stage
                     for stage in reversed(context["stages"])
-                    if stage.get("code")
-                    == "NOTILT_RELEASE_EXECUTION_SUBMITTED_BY_HUMAN_WALLET"
+                    if stage.get("code") == "NOTILT_RELEASE_EXECUTION_SUBMITTED_BY_HUMAN_WALLET"
                 ),
                 None,
             )
@@ -1059,8 +1077,7 @@ class _CapitalRoutes:
                 (
                     stage
                     for stage in reversed(context["stages"])
-                    if stage.get("code")
-                    == "TREASURY_WITHDRAWAL_SUBMITTED_BY_HUMAN_WALLET"
+                    if stage.get("code") == "TREASURY_WITHDRAWAL_SUBMITTED_BY_HUMAN_WALLET"
                 ),
                 None,
             )
@@ -1097,9 +1114,7 @@ class _CapitalRoutes:
                 ].notilt_min_confirmations[chain_id],
                 asset=str(context["asset"]) if receipt_kind == "RELEASE_REQUEST" else None,
                 amount=(
-                    str(context["min_received"])
-                    if receipt_kind == "RELEASE_REQUEST"
-                    else None
+                    str(context["min_received"]) if receipt_kind == "RELEASE_REQUEST" else None
                 ),
                 request_id=request_id if receipt_kind == "RELEASE_EXECUTION" else None,
             )
@@ -1115,9 +1130,7 @@ class _CapitalRoutes:
                 "expires_at": (
                     None if receipt.expires_at is None else receipt.expires_at.isoformat()
                 ),
-                "net_amount": (
-                    None if receipt.net_amount is None else str(receipt.net_amount)
-                ),
+                "net_amount": (None if receipt.net_amount is None else str(receipt.net_amount)),
                 "fee": None if receipt.fee is None else str(receipt.fee),
             }
             version = self.service().record_direct_capital_notilt_receipt(
@@ -1137,9 +1150,7 @@ class _CapitalRoutes:
                 "data": self._direct_action_snapshot(identity.user_id),
             }
 
-        @self.app.post(
-            "/api/capital/direct-operations/{operation_id}/notilt-destination-preview"
-        )
+        @self.app.post("/api/capital/direct-operations/{operation_id}/notilt-destination-preview")
         def prepare_direct_notilt_destination_transfer(
             operation_id: UUID,
             payload: DirectCapitalUnsignedPlanRequest,
@@ -1295,9 +1306,7 @@ class _CapitalRoutes:
                 "data": self._direct_action_snapshot(identity.user_id),
             }
 
-        @self.app.post(
-            "/api/capital/direct-operations/{operation_id}/treasury-withdrawal-receipt"
-        )
+        @self.app.post("/api/capital/direct-operations/{operation_id}/treasury-withdrawal-receipt")
         def verify_direct_treasury_withdrawal_receipt(
             operation_id: UUID,
             payload: DirectCapitalTreasuryReceiptRequest,
@@ -1634,8 +1643,7 @@ class _CapitalRoutes:
                         else "CLASS_TRANSFER"
                         if "CLASS_TRANSFER" in payload.stage
                         else "CCTP_WITHDRAWAL"
-                        if artifact.get("kind")
-                        == "HYPERLIQUID_CCTP_WITHDRAWAL_TYPED_REQUEST"
+                        if artifact.get("kind") == "HYPERLIQUID_CCTP_WITHDRAWAL_TYPED_REQUEST"
                         else "WITHDRAWAL"
                     ),
                     amount=str(receipt_amount),
@@ -1663,10 +1671,7 @@ class _CapitalRoutes:
                         amount=str(artifact["amount"]),
                         min_confirmations=direct_settings.notilt_arbitrum_min_confirmations,
                     )
-                elif (
-                    artifact.get("kind")
-                    == "HYPERLIQUID_CCTP_WITHDRAWAL_TYPED_REQUEST"
-                ):
+                elif artifact.get("kind") == "HYPERLIQUID_CCTP_WITHDRAWAL_TYPED_REQUEST":
                     evidence = self.resolved_hyperliquid_capital.find_cctp_withdrawal_credit(
                         rpc_url=rpc_url,
                         main_account=main_account,

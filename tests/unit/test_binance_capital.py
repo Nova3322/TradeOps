@@ -3,6 +3,7 @@ from __future__ import annotations
 import io
 import time
 import urllib.error
+import urllib.parse
 from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
@@ -13,6 +14,7 @@ from trading_control_plane.binance_capital import (
     OFFICIAL_BINANCE_BASE_URLS,
     BinanceCapitalGateway,
 )
+from trading_control_plane.binance_errors import BinanceRequestState
 from trading_control_plane.domain import DomainRejected
 
 DESTINATION = "0x1111111111111111111111111111111111111111"
@@ -229,6 +231,32 @@ def test_credited_deposit_is_moved_from_spot_to_usdm_once() -> None:
     assert result["type"] == "MAIN_UMFUTURE"
     assert result["status"] == "CONFIRMED"
     assert len([call for call in calls if call[:2] == ("POST", "/sapi/v1/asset/transfer")]) == 1
+
+
+def test_pending_internal_transfer_is_reconciled_without_duplicate_post() -> None:
+    calls: list[tuple[str, str, dict[str, str]]] = []
+    values = responses()
+    values["/sapi/v1/asset/transfer"] = {
+        "rows": [
+            {
+                "asset": "USDC",
+                "type": "MAIN_UMFUTURE",
+                "amount": "10",
+                "status": "PENDING",
+                "tranId": 67890,
+                "timestamp": int(NOW.timestamp() * 1000),
+            }
+        ]
+    }
+    client = gateway(values, calls)
+
+    for _attempt in range(2):
+        with pytest.raises(DomainRejected) as caught:
+            client.complete_deposit_to_usdm(amount=Decimal("10"), prepared_at=NOW, now=NOW)
+        assert caught.value.code == "BINANCE_INTERNAL_TRANSFER_PENDING"
+
+    assert len([call for call in calls if call[:2] == ("POST", "/sapi/v1/asset/transfer")]) == 0
+    assert len([call for call in calls if call[:2] == ("GET", "/sapi/v1/asset/transfer")]) == 2
 
 
 def test_false_api_restriction_flag_does_not_override_actual_transfer_endpoint() -> None:
@@ -591,6 +619,7 @@ def test_wallet_api_rate_limits_record_exact_diagnostics_and_enforce_backoff(
                 "Retry-After": "45",
                 "X-MBX-USED-WEIGHT-1M": "1200",
                 "X-MBX-ORDER-COUNT-10S": "8",
+                "X-SAPI-USED-IP-WEIGHT-1M": "345",
             },
             io.BytesIO(f'{{"code":{exchange_code},"msg":"{message}"}}'.encode()),
         )
@@ -619,6 +648,7 @@ def test_wallet_api_rate_limits_record_exact_diagnostics_and_enforce_backoff(
             "Retry-After": "45",
             "X-MBX-USED-WEIGHT-1M": "1200",
             "X-MBX-ORDER-COUNT-10S": "8",
+            "X-SAPI-USED-IP-WEIGHT-1M": "345",
         },
     }
     with pytest.raises(DomainRejected) as deferred:
@@ -684,3 +714,72 @@ def test_withdrawal_post_is_never_retried_after_transport_failure(monkeypatch) -
 
     assert caught.value.code == "BINANCE_CAPITAL_API_UNAVAILABLE"
     assert calls == 1
+
+
+def test_short_lived_account_gateways_share_one_recent_server_time(monkeypatch) -> None:
+    class Response:
+        def __init__(self, body: bytes) -> None:
+            self.body = body
+            self.headers = {"X-MBX-USED-WEIGHT-1M": "12"}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args) -> None:
+            return None
+
+        def read(self) -> bytes:
+            return self.body
+
+    paths: list[str] = []
+
+    def urlopen(request, *, timeout):
+        del timeout
+        path = urllib.parse.urlparse(request.full_url).path
+        paths.append(path)
+        if path == "/api/v3/time":
+            return Response(b'{"serverTime":1786190400123}')
+        return Response(b'{"ok":true}')
+
+    monkeypatch.setattr("urllib.request.urlopen", urlopen)
+    state = BinanceRequestState()
+    base = BinanceCapitalGateway(
+        clock_ms=lambda: 1_786_190_400_000,
+        request_state=state,
+    )
+    first = base.with_credentials(api_key="account-a", api_secret="secret-a")  # noqa: S106
+    second = base.with_credentials(api_key="account-b", api_secret="secret-b")  # noqa: S106
+
+    assert first._request("GET", "/sapi/v1/account/apiRestrictions") == {"ok": True}
+    assert second._request("GET", "/sapi/v1/account/apiRestrictions") == {"ok": True}
+    assert paths.count("/api/v3/time") == 1
+    assert paths.count("/sapi/v1/account/apiRestrictions") == 2
+
+
+def test_receipt_read_is_deferred_before_transport_near_weight_limit() -> None:
+    calls = 0
+
+    def transport(_method: str, _path: str, _params: dict[str, str], _timeout: float) -> Any:
+        nonlocal calls
+        calls += 1
+        return []
+
+    state = BinanceRequestState()
+    state.record_response_headers({"X-SAPI-USED-IP-WEIGHT-1M": "1920"})
+    client = BinanceCapitalGateway(
+        api_key="capital-key",
+        api_secret="capital-secret",  # noqa: S106
+        transport=transport,
+        request_state=state,
+    )
+
+    with pytest.raises(DomainRejected) as caught:
+        client.verify_withdrawal(
+            order_id="operation-1",
+            destination=DESTINATION,
+            amount=Decimal("10"),
+        )
+
+    assert caught.value.code == "BINANCE_CAPITAL_WEIGHT_HEADROOM_DEFERRED"
+    assert caught.value.metadata is not None and caught.value.metadata["next_retry_at"]
+    assert calls == 0

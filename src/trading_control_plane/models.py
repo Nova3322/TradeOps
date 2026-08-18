@@ -1054,6 +1054,34 @@ class RuntimeSourceHealth(Base):
     updated_by: Mapped[UUID] = mapped_column(ForeignKey("users.user_id"), nullable=False)
 
 
+class BinanceApiState(Base):
+    """One deployment-wide Binance request budget and clock state.
+
+    Binance request-weight bans are IP-scoped, so this row intentionally has no
+    team, account, or API-key dimension.
+    """
+
+    __tablename__ = "binance_api_state"
+
+    scope_key: Mapped[str] = mapped_column(String(64), primary_key=True)
+    host: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    diagnostic: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
+    next_retry_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    rate_limit_headers: Mapped[dict[str, str]] = mapped_column(JSONB, nullable=False, default=dict)
+    headers_observed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    clock_offset_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    clock_synchronized_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    probe_owner: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    probe_started_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
 class TransferProposal(Base):
     __tablename__ = "transfer_proposals"
     __table_args__ = (
@@ -1533,6 +1561,11 @@ class DirectCapitalOperation(Base):
     destination_reference: Mapped[str | None] = mapped_column(String(255), nullable=True)
     stages: Mapped[list[dict[str, Any]]] = mapped_column(JSONB, nullable=False)
     blockers: Mapped[list[str]] = mapped_column(JSONB, nullable=False)
+    receipt_poll_stage: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    receipt_poll_started_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    receipt_poll_token: Mapped[str | None] = mapped_column(String(160), nullable=True)
     execute_after: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     final_confirmed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)

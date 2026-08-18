@@ -108,6 +108,8 @@ from trading_control_plane.api_routes.risk import register_risk_routes
 from trading_control_plane.api_routes.signals import register_signals_routes
 from trading_control_plane.api_routes.system import register_system_routes
 from trading_control_plane.api_routes.workspace import register_workspace_routes
+from trading_control_plane.binance_errors import BinanceRequestState
+from trading_control_plane.binance_state import DatabaseBinanceRequestState
 from trading_control_plane.request_context import (
     ApiClientRequestContext,
     bind_api_client_context,
@@ -140,6 +142,11 @@ def create_app(
     resolved_settings.validate_runtime_security()
     configure_logging(resolved_settings.log_level)
     resolved_database = database or Database(resolved_settings.database_url)
+    binance_request_state = (
+        DatabaseBinanceRequestState(resolved_database)
+        if isinstance(resolved_database, Database)
+        else BinanceRequestState()
+    )
     token_service = SignedTokenService(resolved_settings.session_signing_secret)
     password_hasher = PasswordHasher()
     login_limiter = LoginAttemptLimiter()
@@ -231,6 +238,7 @@ def create_app(
             api_key=resolved_settings.binance_api_key,
             api_secret=resolved_settings.binance_api_secret,
             recv_window_ms=resolved_settings.binance_recv_window_ms,
+            request_state=binance_request_state,
         )
         if resolved_settings.binance_account_mode == "PORTFOLIO_MARGIN"
         else BinanceReadOnlyClient(
@@ -238,6 +246,7 @@ def create_app(
             api_key=resolved_settings.binance_api_key,
             api_secret=resolved_settings.binance_api_secret,
             recv_window_ms=resolved_settings.binance_recv_window_ms,
+            request_state=binance_request_state,
         )
     )
     direct_execution_enabled = resolved_settings.execution_backend == "DIRECT_LEGACY"
@@ -362,9 +371,12 @@ def create_app(
         api_secret=resolved_settings.binance_capital_api_secret,
         recv_window_ms=resolved_settings.binance_recv_window_ms,
         timeout_seconds=resolved_settings.binance_capital_timeout_seconds,
+        request_state=binance_request_state,
     )
+    resolved_binance_capital.attach_request_state(binance_request_state)
     resolved_exchange_connection_verifier = (
-        exchange_connection_verifier or ReadOnlyExchangeConnectionVerifier()
+        exchange_connection_verifier
+        or ReadOnlyExchangeConnectionVerifier(request_state=binance_request_state)
     )
 
     @asynccontextmanager
@@ -425,6 +437,9 @@ def create_app(
                         "BINANCE_RATE_LIMITED",
                         "BINANCE_CONNECTION_RETRY_DEFERRED",
                         "BINANCE_CAPITAL_RATE_LIMITED",
+                        "BINANCE_CONNECTION_WEIGHT_HEADROOM_DEFERRED",
+                        "BINANCE_CAPITAL_WEIGHT_HEADROOM_DEFERRED",
+                        "BINANCE_RECEIPT_CHECK_IN_PROGRESS",
                         "BINANCE_LIVE_UNAVAILABLE",
                         "BINANCE_LIVE_OUTCOME_UNKNOWN",
                         "HYPERLIQUID_READ_ONLY_UNAVAILABLE",
@@ -583,9 +598,7 @@ def create_app(
             else resolved_settings.notilt_vaults.get(configured_chain_id)
         )
         selected_provider = direct_settings.capital_direct_treasury_provider
-        configured_notilt_address = (
-            direct_settings.capital_direct_vault_address or configured_vault
-        )
+        configured_notilt_address = direct_settings.capital_direct_vault_address or configured_vault
         configured_safe_address = direct_settings.capital_direct_safe_address
         selected_treasury_account_id = (
             configured_safe_address
@@ -675,8 +688,7 @@ def create_app(
         snapshot["net_worth"]["onchain_probe"] = onchain_probe
         can_manage_direct_configuration = service().can_user(user_id, "access.manage")
         notilt_provider_configured = bool(
-            direct_settings.capital_direct_vault_id
-            and direct_settings.capital_direct_vault_address
+            direct_settings.capital_direct_vault_id and direct_settings.capital_direct_vault_address
         )
         safe_provider_configured = bool(
             direct_settings.capital_direct_safe_address
@@ -686,26 +698,18 @@ def create_app(
             {
                 "vault_id": direct_settings.capital_direct_vault_id,
                 "vault_address": direct_settings.capital_direct_vault_address,
-                "owned_arbitrum_address": (
-                    direct_settings.capital_direct_owned_arbitrum_address
-                ),
+                "owned_arbitrum_address": (direct_settings.capital_direct_owned_arbitrum_address),
                 "binance_account_id": direct_settings.capital_direct_binance_account_id,
-                "binance_deposit_address": (
-                    direct_settings.capital_direct_binance_deposit_address
-                ),
+                "binance_deposit_address": (direct_settings.capital_direct_binance_deposit_address),
                 "binance_withdrawal_address": (
                     direct_settings.capital_direct_binance_withdrawal_address
                 ),
-                "hyperliquid_account_id": (
-                    direct_settings.capital_direct_hyperliquid_account_id
-                ),
+                "hyperliquid_account_id": (direct_settings.capital_direct_hyperliquid_account_id),
                 "hyperliquid_bridge_address": (
                     direct_settings.capital_direct_hyperliquid_bridge_address
                 ),
                 "safe_address": direct_settings.capital_direct_safe_address,
-                "safe_delegate_address": (
-                    direct_settings.capital_direct_safe_delegate_address
-                ),
+                "safe_delegate_address": (direct_settings.capital_direct_safe_delegate_address),
                 "max_amount": (
                     None
                     if direct_settings.capital_direct_max_amount is None
@@ -757,9 +761,7 @@ def create_app(
             "binance_withdrawal_destination_configured": (
                 direct_settings.capital_direct_binance_withdrawal_address is not None
             ),
-            "binance_capital_credentials_configured": (
-                binance_capital_credentials_configured
-            ),
+            "binance_capital_credentials_configured": (binance_capital_credentials_configured),
             "binance_capital_credentials_source": (
                 "ACCOUNT_MANAGEMENT"
                 if database_binance_capital_credentials
