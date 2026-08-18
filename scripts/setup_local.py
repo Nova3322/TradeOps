@@ -15,6 +15,15 @@ from trading_control_plane.models import CapabilityGate, RoleAssignment, User
 from trading_control_plane.service import TradingService
 
 LOCAL_USERNAME_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,119}$")
+PRESERVABLE_ENABLED_CAPABILITY_GATES = frozenset(
+    {
+        "AUTO_ADD",
+        "AUTO_OPERATING_REFILL",
+        "AUTO_PROFIT_SWEEP",
+        "CAPITAL_TRANSFER",
+        "LIVE_ORDER_SEND",
+    }
+)
 
 
 def _local_username(variable: str, default: str) -> str:
@@ -22,6 +31,19 @@ def _local_username(variable: str, default: str) -> str:
     if not LOCAL_USERNAME_PATTERN.fullmatch(value):
         raise RuntimeError(f"{variable} must be a safe 1-120 character local identifier")
     return value
+
+
+def _preserved_enabled_capability_gates() -> frozenset[str]:
+    raw = os.environ.get("TRADING_LOCAL_PRESERVE_ENABLED_CAPABILITY_GATES", "")
+    requested = frozenset(item.strip() for item in raw.split(",") if item.strip())
+    unknown = requested - PRESERVABLE_ENABLED_CAPABILITY_GATES
+    if unknown:
+        joined = ", ".join(sorted(unknown))
+        raise RuntimeError(
+            "TRADING_LOCAL_PRESERVE_ENABLED_CAPABILITY_GATES contains unknown gates: "
+            f"{joined}"
+        )
+    return requested
 
 
 def _user_id(database: Database, username: str):
@@ -83,6 +105,8 @@ def _ensure_role(
 
 def main() -> None:
     settings = get_settings()
+    preserved_enabled_gates = _preserved_enabled_capability_gates()
+    preserved_active_gates: set[str] = set()
     owner_username = _local_username("TRADING_LOCAL_ADMIN_USERNAME", "trading-admin")
     proposer_username = _local_username("TRADING_LOCAL_PROPOSER_USERNAME", "trading-proposer")
     second_reviewer_username = _local_username(
@@ -159,6 +183,9 @@ def main() -> None:
                 )
             ).all()
         for gate in enabled_gates:
+            if gate.capability_key in preserved_enabled_gates:
+                preserved_active_gates.add(gate.capability_key)
+                continue
             service.set_capability_gate(
                 gate.capability_key,
                 CapabilityStatus.DISABLED,
@@ -168,6 +195,11 @@ def main() -> None:
             )
     finally:
         database.dispose()
+    if preserved_active_gates:
+        print(
+            "Preserved explicitly authorized capability gates: "
+            + ", ".join(sorted(preserved_active_gates))
+        )
     print("Local database and internal human/service principals are ready.")
 
 
