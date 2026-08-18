@@ -1815,6 +1815,17 @@ def test_database_bound_okx_bybit_facts_use_exact_account_scope_without_trading(
     worker._database_account_reader = Reader()  # type: ignore[assignment]
     worker._database_account_scope = (venue, account_id)
 
+    normalized = service.ingest_normalized_read_only_account_snapshot(
+        account_id,
+        binding.service_principal_id,
+        (snapshot,),
+        venue=venue,
+        environment=ExecutionEnvironment.LIVE,
+        runtime_binding=binding,
+        now=NOW,
+    )
+    assert tuple(normalized["symbols"]) == (symbol,)
+
     result = worker.run_bound_account_once(binding, now=NOW)
 
     assert result.status == "SUCCESS"

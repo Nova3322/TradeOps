@@ -1546,7 +1546,11 @@ class RuntimeBindingSupervisor:
         )
         results: dict[str, SourceSyncResult] = {}
         if account_bindings is None:
-            account_bindings = self.service.runtime_account_bindings()
+            account_bindings = (
+                ()
+                if self.settings.fact_adapter_enabled
+                else self.service.runtime_account_bindings()
+            )
         if signal_bindings is None:
             signal_bindings = self.service.perptape_runtime_bindings()
         for account_binding in account_bindings:
@@ -1570,7 +1574,11 @@ class RuntimeBindingSupervisor:
     def run_forever(self, stop_event: threading.Event) -> None:
         try:
             while not stop_event.is_set():
-                account_bindings = self.service.runtime_account_bindings()
+                account_bindings = (
+                    ()
+                    if self.settings.fact_adapter_enabled
+                    else self.service.runtime_account_bindings()
+                )
                 signal_bindings = self.service.perptape_runtime_bindings()
                 started_at = normalize_perptape_operational_datetime(self.clock())
                 if self.settings.perptape_websocket_enabled:

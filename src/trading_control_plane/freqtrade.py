@@ -8,7 +8,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from collections.abc import Callable
+from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
@@ -19,6 +19,22 @@ from trading_control_plane.domain import DomainRejected
 JsonObject = dict[str, Any]
 JsonValue = JsonObject | list[Any]
 JsonFetcher = Callable[[str, str, JsonObject | None, dict[str, str], float], JsonValue]
+WebSocketConnector = Callable[[str, float], Any]
+
+FREQTRADE_TRANSACTION_RPC_TYPES = (
+    "entry",
+    "entry_fill",
+    "entry_cancel",
+    "exit",
+    "exit_fill",
+    "exit_cancel",
+    "protection_trigger",
+    "protection_trigger_global",
+    "strategy_msg",
+    "status",
+    "startup",
+    "warning",
+)
 
 BINANCE_PERPETUAL_PATTERN = re.compile(r"^(?P<base>[^\s/:]{1,64})USDT$")
 OKX_PERPETUAL_PATTERN = re.compile(r"^(?P<base>[A-Z0-9]{1,64})-USDT-SWAP$")
@@ -147,6 +163,17 @@ def _default_fetcher(
     return value
 
 
+def _default_websocket_connector(url: str, timeout: float) -> Any:
+    from websockets.asyncio.client import connect
+
+    return connect(
+        url,
+        open_timeout=timeout,
+        close_timeout=timeout,
+        max_size=1_000_000,
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class FreqtradeWorkerSpec:
     name: str
@@ -154,6 +181,7 @@ class FreqtradeWorkerSpec:
     base_url: str
     username: str | None
     password: str | None = field(repr=False)
+    ws_token: str | None = field(default=None, repr=False)
     hip3_dexes: tuple[str, ...] = ()
     exchange_account_id: str | None = None
     team_id: str | None = None
@@ -208,6 +236,59 @@ class FreqtradeTrade:
     entry_order_id: str | None
     exit_order_id: str | None
     observed_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class FreqtradeRpcMessage:
+    event_type: str
+    payload: JsonObject
+    observed_at: datetime
+
+    @property
+    def idempotency_key(self) -> str:
+        encoded = json.dumps(
+            {"event_type": self.event_type, "payload": self.payload},
+            sort_keys=True,
+            separators=(",", ":"),
+            default=str,
+        ).encode()
+        import hashlib
+
+        return hashlib.sha256(encoded).hexdigest()
+
+
+def parse_freqtrade_rpc_message(raw: str | bytes) -> FreqtradeRpcMessage:
+    try:
+        value = json.loads(raw)
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+        raise DomainRejected(
+            "FREQTRADE_RPC_MESSAGE_INVALID",
+            "Freqtrade RPC WebSocket returned invalid JSON",
+        ) from exc
+    if not isinstance(value, dict):
+        raise DomainRejected(
+            "FREQTRADE_RPC_MESSAGE_INVALID",
+            "Freqtrade RPC WebSocket message must be an object",
+        )
+    event_type = value.get("type")
+    if not isinstance(event_type, str) or not event_type or len(event_type) > 120:
+        raise DomainRejected(
+            "FREQTRADE_RPC_MESSAGE_INVALID",
+            "Freqtrade RPC WebSocket message type is invalid",
+        )
+    payload = value.get("data")
+    if payload is None:
+        payload = {key: item for key, item in value.items() if key != "type"}
+    if not isinstance(payload, dict):
+        raise DomainRejected(
+            "FREQTRADE_RPC_MESSAGE_INVALID",
+            "Freqtrade RPC WebSocket message data is invalid",
+        )
+    return FreqtradeRpcMessage(
+        event_type=event_type,
+        payload=payload,
+        observed_at=datetime.now(UTC),
+    )
 
 
 def _decimal(raw: Any, field_name: str, *, positive: bool = False) -> Decimal:
@@ -366,6 +447,7 @@ class FreqtradeWorkerClient:
         timeout_seconds: float = 5,
         confirmation_timeout_seconds: float = 90,
         fetcher: JsonFetcher = _default_fetcher,
+        websocket_connector: WebSocketConnector = _default_websocket_connector,
     ) -> None:
         if timeout_seconds <= 0 or confirmation_timeout_seconds < 10:
             raise ValueError("Freqtrade timeouts are outside their bounded range")
@@ -375,6 +457,7 @@ class FreqtradeWorkerClient:
             base_url=validate_worker_url(spec.base_url),
             username=spec.username,
             password=spec.password,
+            ws_token=spec.ws_token,
             hip3_dexes=spec.hip3_dexes,
             exchange_account_id=spec.exchange_account_id,
             team_id=spec.team_id,
@@ -383,6 +466,56 @@ class FreqtradeWorkerClient:
         self.timeout_seconds = timeout_seconds
         self.confirmation_timeout_seconds = confirmation_timeout_seconds
         self._fetcher = fetcher
+        self._websocket_connector = websocket_connector
+
+    def rpc_websocket_url(self) -> str:
+        if not self.spec.ws_token:
+            raise DomainRejected(
+                "FREQTRADE_RPC_AUTH_NOT_CONFIGURED",
+                "Freqtrade RPC WebSocket token is not configured",
+            )
+        parsed = urllib.parse.urlparse(self.spec.base_url)
+        scheme = "wss" if parsed.scheme == "https" else "ws"
+        query = urllib.parse.urlencode({"token": self.spec.ws_token})
+        return urllib.parse.urlunparse(
+            (scheme, parsed.netloc, "/api/v1/message/ws", "", query, "")
+        )
+
+    async def rpc_messages(
+        self,
+        event_types: tuple[str, ...] = FREQTRADE_TRANSACTION_RPC_TYPES,
+    ) -> AsyncIterator[FreqtradeRpcMessage]:
+        """Yield official Freqtrade RPC messages; account facts still come from CCXT Pro."""
+
+        if (
+            not event_types
+            or len(event_types) != len(set(event_types))
+            or any(not item or len(item) > 120 for item in event_types)
+        ):
+            raise ValueError("Freqtrade RPC subscriptions must be non-empty unique event types")
+        url = self.rpc_websocket_url()
+        try:
+            async with self._websocket_connector(url, self.timeout_seconds) as websocket:
+                await websocket.send(
+                    json.dumps(
+                        {"type": "subscribe", "data": list(event_types)},
+                        separators=(",", ":"),
+                    )
+                )
+                async for raw in websocket:
+                    if not isinstance(raw, (str, bytes)):
+                        raise DomainRejected(
+                            "FREQTRADE_RPC_MESSAGE_INVALID",
+                            "Freqtrade RPC WebSocket returned an invalid frame",
+                        )
+                    yield parse_freqtrade_rpc_message(raw)
+        except DomainRejected:
+            raise
+        except Exception as exc:
+            raise DomainRejected(
+                "FREQTRADE_RPC_UNAVAILABLE",
+                "Freqtrade RPC WebSocket could not be consumed within its bounded connection",
+            ) from exc
 
     def _request(
         self,

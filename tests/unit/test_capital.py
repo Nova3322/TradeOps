@@ -106,6 +106,7 @@ def test_direct_capital_paths_are_explicit_and_never_broadcast(
         capital_direct_binance_withdrawal_address=("0x1111111111111111111111111111111111111111"),
         binance_capital_api_key="capital-key",
         binance_capital_api_secret="capital-secret",  # noqa: S106 - inert fixture credential
+        binance_capital_account_id="binance-main",
         capital_direct_hyperliquid_account_id="hyperliquid-main",
         capital_direct_hyperliquid_bridge_address=("0x4444444444444444444444444444444444444444"),
         capital_direct_max_amount=Decimal(1000),

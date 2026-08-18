@@ -33,6 +33,11 @@ from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 from pydantic import ValidationError
 
 from trading_control_plane import __version__
+from trading_control_plane.adapters.binance_capital import BinanceCapitalGateway
+from trading_control_plane.adapters.hyperliquid_capital import (
+    HYPERLIQUID_BRIDGE2_ADDRESS,
+    HyperliquidCapitalGateway,
+)
 from trading_control_plane.api_schemas import (
     AccountEquityFactRequest,
     AgentAccessRequest,
@@ -133,7 +138,6 @@ from trading_control_plane.binance import (
     BinancePortfolioMarginReadOnlyClient,
     BinanceReadOnlyClient,
 )
-from trading_control_plane.binance_capital import BinanceCapitalGateway
 from trading_control_plane.binance_execution import (
     BinancePortfolioMarginClient,
     BinanceTestnetClient,
@@ -177,10 +181,6 @@ from trading_control_plane.freqtrade import (
 from trading_control_plane.hyperliquid import (
     HyperliquidReadOnlyClient,
     resolve_hyperliquid_main_account,
-)
-from trading_control_plane.hyperliquid_capital import (
-    HYPERLIQUID_BRIDGE2_ADDRESS,
-    HyperliquidCapitalGateway,
 )
 from trading_control_plane.hyperliquid_execution import (
     HyperliquidLiveClient,

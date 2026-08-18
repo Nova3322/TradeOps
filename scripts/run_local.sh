@@ -44,6 +44,7 @@ PY
 ensure_local_secret "$local_secret_dir/session-signing" token
 ensure_local_secret "$local_secret_dir/credential-encryption" base64-32
 ensure_local_secret "$local_secret_dir/freqtrade-password" token
+ensure_local_secret "$local_secret_dir/freqtrade-ws-token" token
 
 # Local console startup is read-only regardless of values in a shared secret file.
 export TRADING_DATABASE_URL="${TRADING_LOCAL_DATABASE_URL:-postgresql+psycopg://trading:local-trading-only@127.0.0.1:5434/trading_local}"
@@ -62,6 +63,7 @@ export TRADING_PUBLIC_BASE_URL="${TRADING_PUBLIC_BASE_URL:-http://127.0.0.1:${TR
 export TRADING_FREQTRADE_WORKERS_ENABLED="${TRADING_LOCAL_FREQTRADE_WORKERS_ENABLED:-false}"
 export TRADING_FREQTRADE_API_USERNAME="${TRADING_FREQTRADE_API_USERNAME:-trading-control}"
 export TRADING_FREQTRADE_API_PASSWORD="${TRADING_FREQTRADE_API_PASSWORD:-$(<"$local_secret_dir/freqtrade-password")}"
+export TRADING_FREQTRADE_WS_TOKEN="${TRADING_FREQTRADE_WS_TOKEN:-$(<"$local_secret_dir/freqtrade-ws-token")}"
 
 export TRADING_LOCAL_ADMIN_USERNAME="${TRADING_LOCAL_ADMIN_USERNAME:-trading-admin}"
 if [[ ! "$TRADING_LOCAL_ADMIN_USERNAME" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,119}$ ]]; then

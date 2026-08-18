@@ -121,7 +121,7 @@ def _app(
     runtime_hyperliquid_account_id: str | None = None,
 ):
     environment_capital_credentials = (
-        binance_capital_withdraw_enabled
+        binance_capital_withdraw_enabled or binance_capital_gateway is not None
         if binance_capital_environment_credentials is None
         else binance_capital_environment_credentials
     )
@@ -145,6 +145,9 @@ def _app(
         ),
         binance_capital_api_secret=(
             "test-binance-capital-secret" if environment_capital_credentials else None
+        ),
+        binance_capital_account_id=(
+            "binance-main" if environment_capital_credentials else None
         ),
         binance_capital_withdraw_enabled=binance_capital_withdraw_enabled,
         capital_direct_hyperliquid_account_id="hyperliquid-main",
@@ -1389,7 +1392,7 @@ def test_binance_restricted_withdrawal_runs_frozen_preflight_submission_and_dual
     }.issubset(events)
 
 
-def test_binance_capital_uses_live_fee_for_small_account_managed_withdrawal(
+def test_binance_capital_uses_live_fee_with_dedicated_exact_account_credential(
     database: Database,
 ) -> None:
     credential_key = (
@@ -1416,7 +1419,7 @@ def test_binance_capital_uses_live_fee_for_small_account_managed_withdrawal(
     service.set_capability_gate(
         "CAPITAL_TRANSFER",
         CapabilityStatus.ENABLED,
-        "account-managed credential integration test",
+        "dedicated capital credential integration test",
         admin_id,
         now=now,
     )
@@ -1475,9 +1478,13 @@ def test_binance_capital_uses_live_fee_for_small_account_managed_withdrawal(
             transport=ASGITransport(
                 app=_app(
                     database,
-                    binance_capital_gateway=BinanceCapitalGateway(transport=transport),
+                    binance_capital_gateway=BinanceCapitalGateway(
+                        api_key="dedicated-capital-key",
+                        api_secret="dedicated-capital-secret",  # noqa: S106
+                        transport=transport,
+                    ),
                     binance_capital_withdraw_enabled=True,
-                    binance_capital_environment_credentials=False,
+                    binance_capital_environment_credentials=True,
                     credential_encryption_key=credential_key,
                 )
             ),
@@ -1488,7 +1495,10 @@ def test_binance_capital_uses_live_fee_for_small_account_managed_withdrawal(
             assert center.status_code == 200, center.text
             configuration = center.json()["data"]["direct_configuration"]
             assert configuration["binance_capital_credentials_configured"] is True
-            assert configuration["binance_capital_credentials_source"] == "ACCOUNT_MANAGEMENT"
+            assert (
+                configuration["binance_capital_credentials_source"]
+                == "DEDICATED_ENVIRONMENT"
+            )
             assert configuration["binance_capital_submission_enabled"] is True
 
             small_withdrawal = await client.post(

@@ -202,6 +202,20 @@ def test_live_senders_remain_default_off_and_require_explicit_credentials() -> N
     explicit.validate_runtime_security()
 
 
+@pytest.mark.parametrize("environment", ["staging", "production"])
+def test_direct_legacy_execution_is_never_a_deployable_backend(environment: str) -> None:
+    settings = Settings(
+        database_url="postgresql+psycopg://user:pass@localhost/trading",
+        environment=environment,
+        execution_backend="DIRECT_LEGACY",
+        session_signing_secret="deployment-session-secret-0123456789",  # noqa: S106
+        _env_file=None,
+    )
+
+    with pytest.raises(ValueError, match="production execution require FREQTRADE"):
+        settings.validate_runtime_security()
+
+
 def test_notilt_uses_public_agent_and_three_fixed_mainnet_vault_slots() -> None:
     database_url = "postgresql+psycopg://user:pass@localhost/trading"
     agent = "0x1111111111111111111111111111111111111111"

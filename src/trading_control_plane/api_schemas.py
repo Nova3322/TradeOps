@@ -298,6 +298,7 @@ class FreqtradeWorkerConfigureRequest(BaseModel):
     base_url: str | None = Field(default=None, min_length=1, max_length=2_048)
     username: SecretStr | None = Field(default=None, min_length=1, max_length=120)
     password: SecretStr | None = Field(default=None, min_length=1, max_length=2_048)
+    ws_token: SecretStr | None = Field(default=None, min_length=16, max_length=2_048)
     hip3_dexes: list[str] = Field(default_factory=list, max_length=32)
     expected_version: int = Field(ge=1)
     idempotency_key: str = Field(min_length=1, max_length=160)
@@ -313,8 +314,10 @@ class FreqtradeWorkerConfigureRequest(BaseModel):
                 "configured workers require name, base_url, username and password; "
                 "unconfigured workers must omit them"
             )
-        if not configured and self.hip3_dexes:
-            raise ValueError("unconfigured workers must not include HIP-3 DEX scope")
+        if not configured and (self.hip3_dexes or self.ws_token is not None):
+            raise ValueError(
+                "unconfigured workers must not include WebSocket or HIP-3 configuration"
+            )
         if len(self.hip3_dexes) != len(set(self.hip3_dexes)):
             raise ValueError("hip3_dexes must not contain duplicates")
         return self
@@ -324,6 +327,9 @@ class FreqtradeWorkerConfigureRequest(BaseModel):
 
     def plaintext_password(self) -> str | None:
         return None if self.password is None else self.password.get_secret_value()
+
+    def plaintext_ws_token(self) -> str | None:
+        return None if self.ws_token is None else self.ws_token.get_secret_value()
 
 
 class FreqtradeWorkerVerifyRequest(BaseModel):

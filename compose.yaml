@@ -30,6 +30,7 @@ services:
       TRADING_LOCAL_PRESERVE_ENABLED_CAPABILITY_GATES: ${TRADING_LOCAL_PRESERVE_ENABLED_CAPABILITY_GATES:-}
       TRADING_ALLOW_MOCK_IDENTITY: "false"
       TRADING_RUNTIME_SYNC_ENABLED: "false"
+      TRADING_FACT_ADAPTER_ENABLED: "false"
       TRADING_NOTIFICATION_WORKER_ENABLED: "false"
       TRADING_NOTIFICATION_EMAIL_SMTP_ALLOWED_HOSTS: ${TRADING_NOTIFICATION_EMAIL_SMTP_ALLOWED_HOSTS:-}
       TRADING_PERPTAPE_WEBSOCKET_ENABLED: "false"
@@ -120,6 +121,8 @@ services:
     environment:
       <<: *control-plane-environment
       TRADING_RUNTIME_SYNC_ENABLED: "true"
+      TRADING_FACT_ADAPTER_ENABLED: "true"
+      TRADING_FACT_ADAPTER_BEARER_TOKEN: ${TRADING_FACT_ADAPTER_BEARER_TOKEN:?set by scripts/run_compose.sh}
       TRADING_PERPTAPE_WEBSOCKET_ENABLED: ${TRADING_PERPTAPE_WEBSOCKET_ENABLED:-false}
     depends_on:
       setup:
@@ -136,6 +139,42 @@ services:
       timeout: 10s
       retries: 3
       start_period: 5s
+    init: true
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+    cap_drop: ["ALL"]
+    security_opt: ["no-new-privileges:true"]
+    restart: unless-stopped
+    stop_grace_period: 45s
+
+  fact-adapter:
+    build:
+      context: .
+    profiles: ["runtime"]
+    command: ["uv", "run", "--no-sync", "trading-fact-adapter"]
+    environment:
+      <<: *control-plane-environment
+      TRADING_RUNTIME_SYNC_ENABLED: "true"
+      TRADING_FACT_ADAPTER_ENABLED: "true"
+      TRADING_FACT_ADAPTER_HOST: 0.0.0.0
+      TRADING_FACT_ADAPTER_PORT: 8010
+      TRADING_FACT_ADAPTER_BEARER_TOKEN: ${TRADING_FACT_ADAPTER_BEARER_TOKEN:?set by scripts/run_compose.sh}
+    depends_on:
+      setup:
+        condition: service_completed_successfully
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - >-
+          import urllib.request;
+          urllib.request.urlopen('http://127.0.0.1:8010/health/ready', timeout=2).read()
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
     init: true
     read_only: true
     tmpfs:
@@ -191,6 +230,11 @@ services:
     environment:
       FREQTRADE__API_SERVER__USERNAME: ${TRADING_FREQTRADE_API_USERNAME:-trading-control}
       FREQTRADE__API_SERVER__PASSWORD: ${TRADING_FREQTRADE_API_PASSWORD:-local-dry-run-only}
+      FREQTRADE__API_SERVER__WS_TOKEN: ${TRADING_FREQTRADE_WS_TOKEN:-local-dry-run-rpc-token}
+      FREQTRADE__TELEGRAM__ENABLED: ${TRADING_FREQTRADE_TELEGRAM_ENABLED:-false}
+      FREQTRADE__TELEGRAM__TOKEN: ${TRADING_FREQTRADE_TELEGRAM_TOKEN:-}
+      FREQTRADE__TELEGRAM__CHAT_ID: ${TRADING_FREQTRADE_TELEGRAM_CHAT_ID:-}
+      FREQTRADE__TELEGRAM__AUTHORIZED_USERS: "[]"
     ports:
       - "127.0.0.1:8081:8080"
     volumes:
@@ -212,6 +256,11 @@ services:
     environment:
       FREQTRADE__API_SERVER__USERNAME: ${TRADING_FREQTRADE_API_USERNAME:-trading-control}
       FREQTRADE__API_SERVER__PASSWORD: ${TRADING_FREQTRADE_API_PASSWORD:-local-dry-run-only}
+      FREQTRADE__API_SERVER__WS_TOKEN: ${TRADING_FREQTRADE_WS_TOKEN:-local-dry-run-rpc-token}
+      FREQTRADE__TELEGRAM__ENABLED: ${TRADING_FREQTRADE_TELEGRAM_ENABLED:-false}
+      FREQTRADE__TELEGRAM__TOKEN: ${TRADING_FREQTRADE_TELEGRAM_TOKEN:-}
+      FREQTRADE__TELEGRAM__CHAT_ID: ${TRADING_FREQTRADE_TELEGRAM_CHAT_ID:-}
+      FREQTRADE__TELEGRAM__AUTHORIZED_USERS: "[]"
     ports:
       - "127.0.0.1:8082:8080"
     volumes:
@@ -235,6 +284,11 @@ services:
       FREQTRADE__API_SERVER__USERNAME: ${TRADING_FREQTRADE_API_USERNAME:-trading-control}
       FREQTRADE__API_SERVER__PASSWORD: ${TRADING_FREQTRADE_API_PASSWORD:-local-live-smoke-only}
       FREQTRADE__API_SERVER__JWT_SECRET_KEY: ${TRADING_FREQTRADE_LIVE_JWT_SECRET:-local-live-smoke-jwt-override-required}
+      FREQTRADE__API_SERVER__WS_TOKEN: ${TRADING_FREQTRADE_WS_TOKEN:-local-live-smoke-rpc-token}
+      FREQTRADE__TELEGRAM__ENABLED: ${TRADING_FREQTRADE_TELEGRAM_ENABLED:-false}
+      FREQTRADE__TELEGRAM__TOKEN: ${TRADING_FREQTRADE_TELEGRAM_TOKEN:-}
+      FREQTRADE__TELEGRAM__CHAT_ID: ${TRADING_FREQTRADE_TELEGRAM_CHAT_ID:-}
+      FREQTRADE__TELEGRAM__AUTHORIZED_USERS: "[]"
       FREQTRADE__DRY_RUN: ${TRADING_FREQTRADE_BINANCE_LIVE_DRY_RUN:-true}
       FREQTRADE__FORCE_ENTRY_ENABLE: ${TRADING_FREQTRADE_BINANCE_FORCE_ENTRY_ENABLE:-false}
       FREQTRADE__INITIAL_STATE: ${TRADING_FREQTRADE_BINANCE_INITIAL_STATE:-stopped}
@@ -263,6 +317,11 @@ services:
       FREQTRADE__API_SERVER__USERNAME: ${TRADING_FREQTRADE_API_USERNAME:-trading-control}
       FREQTRADE__API_SERVER__PASSWORD: ${TRADING_FREQTRADE_API_PASSWORD:-local-live-smoke-only}
       FREQTRADE__API_SERVER__JWT_SECRET_KEY: ${TRADING_FREQTRADE_LIVE_JWT_SECRET:-local-live-smoke-jwt-override-required}
+      FREQTRADE__API_SERVER__WS_TOKEN: ${TRADING_FREQTRADE_WS_TOKEN:-local-live-smoke-rpc-token}
+      FREQTRADE__TELEGRAM__ENABLED: ${TRADING_FREQTRADE_TELEGRAM_ENABLED:-false}
+      FREQTRADE__TELEGRAM__TOKEN: ${TRADING_FREQTRADE_TELEGRAM_TOKEN:-}
+      FREQTRADE__TELEGRAM__CHAT_ID: ${TRADING_FREQTRADE_TELEGRAM_CHAT_ID:-}
+      FREQTRADE__TELEGRAM__AUTHORIZED_USERS: "[]"
       FREQTRADE__DRY_RUN: ${TRADING_FREQTRADE_HYPERLIQUID_LIVE_DRY_RUN:-true}
       FREQTRADE__FORCE_ENTRY_ENABLE: ${TRADING_FREQTRADE_HYPERLIQUID_FORCE_ENTRY_ENABLE:-false}
       FREQTRADE__INITIAL_STATE: ${TRADING_FREQTRADE_HYPERLIQUID_INITIAL_STATE:-stopped}

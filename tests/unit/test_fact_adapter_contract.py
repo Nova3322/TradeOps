@@ -1,0 +1,650 @@
+from __future__ import annotations
+
+import asyncio
+import base64
+from collections.abc import Mapping
+from dataclasses import replace
+from datetime import UTC, datetime, timedelta
+from decimal import Decimal
+from typing import Any
+from uuid import UUID
+
+import pytest
+from fastapi.testclient import TestClient
+
+from trading_control_plane.adapters.facts import (
+    CcxtProFactAdapter,
+    ExchangeFactEvent,
+    ExchangeFactSnapshot,
+    FactAdapterRegistry,
+    FactAdapterScope,
+    FactStreamSupervisor,
+)
+from trading_control_plane.config import Settings
+from trading_control_plane.domain import DomainRejected
+from trading_control_plane.fact_adapter_api import create_fact_adapter_app
+from trading_control_plane.fact_adapter_ingestion import normalize_fact_adapter_snapshot
+from trading_control_plane.fact_adapter_runtime import FactAdapterRuntime
+from trading_control_plane.service import PreparedRuntimeAccountBinding
+
+_TOKEN = "fact-adapter-contract-token-0123456789"  # noqa: S105
+_NOW = datetime(2026, 8, 18, 1, 2, 3, tzinfo=UTC)
+
+
+class FakeCcxtProExchange:
+    def __init__(self) -> None:
+        self.has = {
+            "fetchBalance": True,
+            "fetchPositions": True,
+            "fetchOpenOrders": True,
+            "fetchMyTrades": True,
+            "fetchFundingHistory": True,
+            "fetchFundingRates": True,
+            "fetchStatus": True,
+            "fetchTickers": True,
+            "watchBalance": True,
+            "watchPositions": True,
+            "watchOrders": True,
+            "watchMyTrades": True,
+            "watchTickers": True,
+        }
+        self.markets: dict[str, Mapping[str, Any]] = {}
+        self.closed = False
+
+    async def load_markets(self) -> Mapping[str, Any]:
+        self.markets = {
+            "BTC/USDT:USDT": {
+                "id": "BTCUSDT",
+                "active": True,
+                "contract": True,
+                "linear": True,
+                "contractSize": 0.001,
+                "precision": {"amount": 1, "price": 0.1},
+                "limits": {"amount": {"min": 1}, "cost": {"min": 5}},
+                "quote": "USDT",
+                "settle": "USDT",
+            }
+        }
+        return self.markets
+
+    async def fetch_balance(self) -> Mapping[str, Any]:
+        return {
+            "free": {"USDT": 90, "UNKNOWN": None},
+            "used": {"USDT": 10, "UNKNOWN": None},
+            "total": {"USDT": 100, "UNKNOWN": None},
+        }
+
+    async def fetch_positions(self) -> list[Mapping[str, Any]]:
+        return [
+            {
+                "symbol": "BTC/USDT:USDT",
+                "contracts": 2,
+                "side": "short",
+                "entryPrice": 61_000,
+                "markPrice": 60_000,
+                "unrealizedPnl": 2,
+                "liquidationPrice": 81_000,
+                "marginMode": "cross",
+                "timestamp": int(_NOW.timestamp() * 1_000),
+            }
+        ]
+
+    async def fetch_open_orders(self) -> list[Mapping[str, Any]]:
+        return [
+            {
+                "id": "external-order",
+                "symbol": "BTC/USDT:USDT",
+                "amount": 3,
+                "filled": 1,
+                "side": "buy",
+                "type": "limit",
+                "status": "open",
+                "price": 59_000,
+                "timestamp": int(_NOW.timestamp() * 1_000),
+            }
+        ]
+
+    async def fetch_my_trades(
+        self,
+        symbol: str | None,
+        since: int,
+        limit: int,
+    ) -> list[Mapping[str, Any]]:
+        assert symbol is None and since > 0 and limit == 1_000
+        return [
+            {
+                "id": "external-fill",
+                "order": "external-order",
+                "symbol": "BTC/USDT:USDT",
+                "amount": 1,
+                "price": 60_000,
+                "side": "buy",
+                "fee": {"cost": 0.1, "currency": "USDT"},
+                "timestamp": int(_NOW.timestamp() * 1_000),
+            }
+        ]
+
+    async def fetch_funding_history(
+        self,
+        symbol: str | None,
+        since: int,
+        limit: int,
+    ) -> list[Mapping[str, Any]]:
+        assert symbol is None and since > 0 and limit == 1_000
+        return [
+            {
+                "id": "funding-1",
+                "symbol": "BTC/USDT:USDT",
+                "amount": -0.25,
+                "code": "USDT",
+                "timestamp": int(_NOW.timestamp() * 1_000),
+            }
+        ]
+
+    async def fetch_funding_rates(
+        self, symbols: list[str]
+    ) -> Mapping[str, Mapping[str, Any]]:
+        return {
+            symbols[0]: {
+                "symbol": symbols[0],
+                "fundingRate": 0.0001,
+                "nextFundingTimestamp": int((_NOW + timedelta(hours=8)).timestamp() * 1_000),
+                "timestamp": int(_NOW.timestamp() * 1_000),
+            }
+        }
+
+    async def fetch_status(self) -> Mapping[str, Any]:
+        return {"status": "ok", "updated": int(_NOW.timestamp() * 1_000)}
+
+    async def fetch_tickers(
+        self, symbols: list[str]
+    ) -> Mapping[str, Mapping[str, Any]]:
+        return {
+            symbols[0]: {
+                "symbol": symbols[0],
+                "markPrice": 60_000,
+                "timestamp": int(_NOW.timestamp() * 1_000),
+            }
+        }
+
+    async def watch_balance(self) -> Mapping[str, Any]:
+        return await self.fetch_balance()
+
+    async def close(self) -> None:
+        self.closed = True
+
+
+class FakeCcxtRestOnlyExchange(FakeCcxtProExchange):
+    def __init__(self) -> None:
+        super().__init__()
+        for capability in (
+            "watchBalance",
+            "watchPositions",
+            "watchOrders",
+            "watchMyTrades",
+            "watchTickers",
+        ):
+            self.has[capability] = False
+
+
+class FakeCcxtReconnectingExchange(FakeCcxtRestOnlyExchange):
+    def __init__(self) -> None:
+        super().__init__()
+        self.has["watchBalance"] = True
+        self.watch_calls = 0
+        self.steady_state = asyncio.Event()
+
+    async def watch_balance(self) -> Mapping[str, Any]:
+        self.watch_calls += 1
+        if self.watch_calls == 1:
+            raise OSError("fixture disconnect")
+        if self.watch_calls == 2:
+            return await self.fetch_balance()
+        self.steady_state.set()
+        await asyncio.Event().wait()
+        raise AssertionError("unreachable")
+
+
+class FakeCcxtAccountWideExchange(FakeCcxtProExchange):
+    async def load_markets(self) -> Mapping[str, Any]:
+        markets = dict(await super().load_markets())
+        markets["ETH/USDT:USDT"] = {
+            **markets["BTC/USDT:USDT"],
+            "id": "ETHUSDT",
+        }
+        self.markets = markets
+        return markets
+
+    async def fetch_positions(self) -> list[Mapping[str, Any]]:
+        positions = list(await super().fetch_positions())
+        positions.append(
+            {
+                "symbol": "ETH/USDT:USDT",
+                "contracts": 1,
+                "side": "long",
+                "entryPrice": 3_000,
+                "markPrice": 3_100,
+                "unrealizedPnl": 100,
+                "liquidationPrice": 2_000,
+                "marginMode": "cross",
+                "timestamp": int(_NOW.timestamp() * 1_000),
+            }
+        )
+        return positions
+
+    async def fetch_tickers(
+        self, symbols: list[str]
+    ) -> Mapping[str, Mapping[str, Any]]:
+        return {
+            symbol: {
+                "symbol": symbol,
+                "markPrice": 60_000 if symbol.startswith("BTC") else 3_100,
+                "timestamp": int(_NOW.timestamp() * 1_000),
+            }
+            for symbol in symbols
+        }
+
+
+def _scope(venue: str = "BINANCE", *, account_id: str = "account-a") -> FactAdapterScope:
+    return FactAdapterScope(
+        workspace_id="workspace-a",
+        team_id="team-a",
+        account_id=account_id,
+        venue=venue,  # type: ignore[arg-type]
+        environment="TESTNET",
+        symbols=("BTC/USDT:USDT",),
+        account_mode="PORTFOLIO_MARGIN" if venue == "BINANCE" else "STANDARD",
+    )
+
+
+def _credentials(venue: str) -> Mapping[str, str]:
+    if venue == "HYPERLIQUID":
+        return {"account_address": "0x0000000000000000000000000000000000000001"}
+    if venue == "OKX":
+        return {"api_key": "key", "api_secret": "secret", "passphrase": "pass"}
+    return {"api_key": "key", "api_secret": "secret"}
+
+
+@pytest.mark.parametrize("venue", ["BINANCE", "HYPERLIQUID", "OKX", "BYBIT"])
+def test_ccxt_pro_fact_contract_normalizes_all_supported_venues(venue: str) -> None:
+    exchange = FakeCcxtProExchange()
+    observed: dict[str, object] = {}
+
+    def factory(
+        scope: FactAdapterScope,
+        credentials: Mapping[str, str],
+        options: Mapping[str, Any],
+    ) -> FakeCcxtProExchange:
+        observed.update(scope=scope, credentials=dict(credentials), options=dict(options))
+        return exchange
+
+    adapter = CcxtProFactAdapter(
+        _scope(venue),
+        credentials=_credentials(venue),
+        exchange_factory=factory,
+        clock=lambda: _NOW,
+    )
+    snapshot = asyncio.run(adapter.snapshot(reason="INITIAL"))
+
+    assert snapshot.data_status == "CURRENT"
+    assert snapshot.positions[0]["quantity"] == "-0.002"
+    assert snapshot.positions[0]["unrealized_pnl"] == "2"
+    assert snapshot.orders[0]["order_id"] == "external-order"
+    assert snapshot.fills[0]["fill_id"] == "external-fill"
+    assert snapshot.marks[0]["mark_price"] == "60000"
+    assert {row["kind"] for row in snapshot.funding} == {"PAYMENT", "RATE"}
+    assert snapshot.account_status == {
+        "status": "ok",
+        "updated": int(_NOW.timestamp() * 1_000),
+    }
+    assert snapshot.unknown_fields == ()
+    assert set(snapshot.metrics.rest_requests) == {
+        "fetchBalance",
+        "fetchFundingHistory",
+        "fetchFundingRates",
+        "fetchMyTrades",
+        "fetchOpenOrders",
+        "fetchPositions",
+        "fetchStatus",
+        "fetchTickers",
+        "loadMarkets",
+    }
+    assert set(adapter.watch_channels) == {"BALANCE", "POSITION", "ORDER", "FILL", "MARK"}
+    assert "api_wallet_private_key" not in observed["credentials"]  # type: ignore[operator]
+    if venue == "BINANCE":
+        assert observed["options"] == {
+            "defaultType": "swap",
+            "papi": True,
+            "portfolioMargin": True,
+        }
+    elif venue == "HYPERLIQUID":
+        assert observed["options"] == {
+            "defaultType": "swap",
+            "fetchMarkets": {"types": ["swap"], "hip3": {"dexes": []}},
+        }
+
+    normalized = normalize_fact_adapter_snapshot(snapshot)
+    assert normalized[0].symbol == "BTCUSDT"
+    assert normalized[0].position.quantity == Decimal("-0.002")
+    assert normalized[0].orders[0].status == "SENT"
+    assert normalized[0].fills[0].fill_id == "external-fill"
+    assert normalized[0].equity.equity == Decimal(100)
+
+
+def test_fact_adapter_rejects_trading_signing_material() -> None:
+    with pytest.raises(DomainRejected, match="FACT_ADAPTER_CREDENTIAL_SCOPE_INVALID"):
+        CcxtProFactAdapter(
+            _scope("HYPERLIQUID"),
+            credentials={
+                "account_address": "0x0000000000000000000000000000000000000001",
+                "api_wallet_private_key": "must-not-enter-fact-adapter",
+            },
+            exchange_factory=lambda *_args: FakeCcxtProExchange(),
+        )
+
+
+def test_hyperliquid_fact_adapter_loads_only_configured_hip3_dexes() -> None:
+    observed: dict[str, Any] = {}
+    scope = replace(
+        _scope("HYPERLIQUID"),
+        symbols=("BTC/USDC:USDC", "XYZ-TSLA/USDC:USDC"),
+    )
+
+    CcxtProFactAdapter(
+        scope,
+        credentials=_credentials("HYPERLIQUID"),
+        exchange_factory=lambda _scope, _credentials, options: (
+            observed.update(options=dict(options)) or FakeCcxtProExchange()
+        ),
+    )
+
+    assert observed["options"] == {
+        "defaultType": "swap",
+        "fetchMarkets": {"types": ["swap", "hip3"], "hip3": {"dexes": ["xyz"]}},
+    }
+
+
+def test_fact_snapshot_includes_non_freqtrade_account_positions() -> None:
+    exchange = FakeCcxtAccountWideExchange()
+    adapter = CcxtProFactAdapter(
+        _scope(),
+        credentials=_credentials("BINANCE"),
+        exchange_factory=lambda *_args: exchange,
+        clock=lambda: _NOW,
+    )
+
+    snapshot = asyncio.run(adapter.snapshot(reason="INITIAL"))
+
+    assert snapshot.scope.symbols == ("BTC/USDT:USDT",)
+    assert {row["native_symbol"] for row in snapshot.instruments} == {
+        "BTCUSDT",
+        "ETHUSDT",
+    }
+    assert {row["native_symbol"] for row in snapshot.positions} == {
+        "BTCUSDT",
+        "ETHUSDT",
+    }
+    normalized = normalize_fact_adapter_snapshot(snapshot)
+    assert {item.symbol for item in normalized} == {"BTCUSDT", "ETHUSDT"}
+
+
+def test_registry_deduplicates_and_fails_closed_on_sequence_errors() -> None:
+    async def scenario() -> None:
+        adapter = CcxtProFactAdapter(
+            _scope(),
+            credentials=_credentials("BINANCE"),
+            exchange_factory=lambda *_args: FakeCcxtProExchange(),
+            clock=lambda: _NOW,
+        )
+        registry = FactAdapterRegistry()
+        await registry.register(adapter)
+        snapshot = await adapter.snapshot(reason="INITIAL")
+        await registry.publish_snapshot(snapshot)
+        payload = {
+            "positions": [
+                {
+                    "symbol": "BTC/USDT:USDT",
+                    "native_symbol": "BTCUSDT",
+                    "side": "long",
+                    "quantity": "1",
+                }
+            ]
+        }
+        first = await registry.publish(adapter.scope.key, "POSITION", payload)
+        duplicate = await registry.publish(adapter.scope.key, "POSITION", payload)
+        assert first is not None
+        assert duplicate is None
+
+        external = ExchangeFactEvent(
+            scope=adapter.scope,
+            stream_id="external",
+            sequence=7,
+            kind="ORDER",
+            observed_at=_NOW,
+            payload={"orders": [{"order_id": "one"}]},
+            snapshot_version=1,
+        )
+        assert await registry.consume_external(external) == "APPLIED"
+        assert await registry.consume_external(external) == "DUPLICATE"
+        gap = ExchangeFactEvent(
+            scope=adapter.scope,
+            stream_id="external",
+            sequence=9,
+            kind="ORDER",
+            observed_at=_NOW,
+            payload={"orders": [{"order_id": "two"}]},
+            snapshot_version=1,
+        )
+        with pytest.raises(DomainRejected, match="FACT_EVENT_SEQUENCE_GAP"):
+            await registry.consume_external(gap)
+        older = ExchangeFactEvent(
+            scope=adapter.scope,
+            stream_id="external",
+            sequence=6,
+            kind="ORDER",
+            observed_at=_NOW,
+            payload={"orders": [{"order_id": "old"}]},
+            snapshot_version=1,
+        )
+        with pytest.raises(DomainRejected, match="FACT_EVENT_OUT_OF_ORDER"):
+            await registry.consume_external(older)
+        await registry.close()
+
+    asyncio.run(scenario())
+
+
+def test_snapshot_api_and_websocket_are_authenticated_and_scope_isolated() -> None:
+    async def prepare() -> FactAdapterRegistry:
+        adapter = CcxtProFactAdapter(
+            _scope(),
+            credentials=_credentials("BINANCE"),
+            exchange_factory=lambda *_args: FakeCcxtProExchange(),
+            clock=lambda: _NOW,
+        )
+        registry = FactAdapterRegistry()
+        await registry.register(adapter)
+        await registry.publish_snapshot(await adapter.snapshot(reason="INITIAL"))
+        return registry
+
+    registry = asyncio.run(prepare())
+    app = create_fact_adapter_app(registry=registry, bearer_token=_TOKEN)
+    client = TestClient(app)
+    query = {
+        "workspace_id": "workspace-a",
+        "team_id": "team-a",
+        "account_id": "account-a",
+        "venue": "BINANCE",
+        "environment": "TESTNET",
+    }
+
+    assert client.get("/facts/snapshot", params=query).status_code == 401
+    response = client.get(
+        "/facts/snapshot",
+        params=query,
+        headers={"Authorization": f"Bearer {_TOKEN}"},
+    )
+    assert response.status_code == 200
+    assert response.json()["scope"]["account_id"] == "account-a"
+    other = {**query, "account_id": "account-b"}
+    assert (
+        client.get(
+            "/facts/snapshot",
+            params=other,
+            headers={"Authorization": f"Bearer {_TOKEN}"},
+        ).json()["error"]["code"]
+        == "FACT_SNAPSHOT_UNKNOWN"
+    )
+    with client:
+        with client.websocket_connect(
+            "/facts/ws",
+            params={**query, "after_sequence": 99, "after_stream_id": "old-stream"},
+            headers={"Authorization": f"Bearer {_TOKEN}"},
+        ) as websocket:
+            event = websocket.receive_json()
+            assert event["kind"] == "SNAPSHOT"
+            assert event["scope"]["account_id"] == "account-a"
+            assert event["resume"] == {
+                "status": "STREAM_RESET_COMPENSATED",
+                "requested_after_sequence": 99,
+                "requested_stream_id": "old-stream",
+            }
+
+
+def test_snapshot_freshness_marks_old_data_stale_without_zeroing_unknowns() -> None:
+    async def scenario() -> None:
+        adapter = CcxtProFactAdapter(
+            _scope(),
+            credentials=_credentials("BINANCE"),
+            exchange_factory=lambda *_args: FakeCcxtProExchange(),
+            clock=lambda: _NOW - timedelta(hours=1),
+        )
+        registry = FactAdapterRegistry()
+        await registry.register(adapter)
+        snapshot = await adapter.snapshot(reason="INITIAL")
+        await registry.publish_snapshot(snapshot)
+        stale = await registry.latest(adapter.scope.key, stale_after=timedelta(seconds=30))
+        assert stale.data_status == "STALE"
+        assert stale.positions[0]["quantity"] == "-0.002"
+        assert all(row["currency"] != "UNKNOWN" for row in stale.balances)
+        await registry.close()
+
+    asyncio.run(scenario())
+
+
+def test_runtime_reuses_one_connection_and_rotates_on_credential_version() -> None:
+    async def scenario() -> None:
+        binding = PreparedRuntimeAccountBinding(
+            exchange_account_id=UUID("00000000-0000-0000-0000-000000000001"),
+            workspace_id=UUID("00000000-0000-0000-0000-000000000002"),
+            team_id=UUID("00000000-0000-0000-0000-000000000003"),
+            service_principal_id=UUID("00000000-0000-0000-0000-000000000004"),
+            service_principal_username="runtime-sync",
+            account_id="account-a",
+            venue="BINANCE",
+            environment="TESTNET",
+            account_version=1,
+            credential_version=1,
+            credentials={"api_key": "key-a", "api_secret": "secret-a"},
+        )
+        bindings = [binding]
+        exchanges: list[FakeCcxtRestOnlyExchange] = []
+
+        def factory(
+            _scope: FactAdapterScope,
+            _credentials: Mapping[str, str],
+            _options: Mapping[str, Any],
+        ) -> FakeCcxtRestOnlyExchange:
+            exchange = FakeCcxtRestOnlyExchange()
+            exchanges.append(exchange)
+            return exchange
+
+        settings = Settings(
+            environment="test",
+            database_url="postgresql+psycopg://user:pass@localhost/trading",
+            runtime_sync_enabled=True,
+            credential_encryption_key=base64.urlsafe_b64encode(b"a" * 32).decode(),
+            fact_adapter_enabled=True,
+            fact_adapter_bearer_token=_TOKEN,
+            _env_file=None,  # type: ignore[call-arg]
+        )
+        registry = FactAdapterRegistry()
+        runtime = FactAdapterRuntime(
+            settings=settings,
+            registry=registry,
+            binding_provider=lambda: tuple(bindings),
+            symbol_provider=lambda venue: ("BTCUSDT",) if venue == "BINANCE" else (),
+            exchange_factory=factory,
+        )
+        await runtime.reconcile_once()
+        assert len(await registry.scope_keys()) == 1
+        assert len(exchanges) == 1
+
+        await runtime.reconcile_once()
+        assert len(exchanges) == 1
+
+        bindings[0] = replace(
+            binding,
+            account_version=2,
+            credential_version=2,
+            credentials={"api_key": "key-b", "api_secret": "secret-b"},
+        )
+        await runtime.reconcile_once()
+        assert exchanges[0].closed is True
+        assert len(exchanges) == 2
+        assert len(await registry.scope_keys()) == 1
+        await runtime.close()
+        assert exchanges[1].closed is True
+
+    asyncio.run(scenario())
+
+
+def test_websocket_disconnect_reconnects_then_rest_compensates_before_increment() -> None:
+    async def scenario() -> None:
+        exchange = FakeCcxtReconnectingExchange()
+        adapter = CcxtProFactAdapter(
+            _scope(),
+            credentials=_credentials("BINANCE"),
+            exchange_factory=lambda *_args: exchange,
+            clock=lambda: _NOW,
+        )
+        registry = FactAdapterRegistry()
+        await registry.register(adapter)
+        callbacks: list[str] = []
+        callback_event = asyncio.Event()
+        delays: list[float] = []
+
+        async def callback(snapshot: ExchangeFactSnapshot) -> None:
+            callbacks.append(snapshot.reason)
+            if snapshot.reason == "WEBSOCKET_INCREMENT":
+                callback_event.set()
+
+        async def sleeper(delay: float) -> None:
+            delays.append(delay)
+
+        supervisor = FactStreamSupervisor(
+            registry,
+            adapter,
+            reconnect_initial_seconds=0.1,
+            reconnect_max_seconds=1,
+            sleeper=sleeper,
+            snapshot_callback=callback,
+        )
+        task = asyncio.create_task(supervisor.run())
+        await asyncio.wait_for(exchange.steady_state.wait(), timeout=1)
+        await asyncio.wait_for(callback_event.wait(), timeout=1)
+        current = await registry.latest(adapter.scope.key, stale_after=timedelta(days=1))
+        assert callbacks == [
+            "INITIAL",
+            "RECONNECT_COMPENSATION",
+            "WEBSOCKET_INCREMENT",
+        ]
+        assert delays == [0.1]
+        assert current.reason == "WEBSOCKET_INCREMENT"
+        assert current.snapshot_version == 3
+        assert current.metrics.rest_compensations == 1
+        supervisor.stop()
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        await registry.close()
+
+    asyncio.run(scenario())

@@ -760,7 +760,11 @@ class AccountService(ServiceComponent):
             return result
 
     @staticmethod
-    def _freqtrade_auth_payload(username: str, password: str) -> str:
+    def _freqtrade_auth_payload(
+        username: str,
+        password: str,
+        ws_token: str | None = None,
+    ) -> str:
         normalized_username = username.strip()
         if (
             not normalized_username
@@ -776,15 +780,26 @@ class AccountService(ServiceComponent):
                 "FREQTRADE_WORKER_AUTH_INVALID",
                 "Freqtrade password must be non-empty without surrounding whitespace",
             )
+        if ws_token is not None and (
+            len(ws_token) < 16 or ws_token.strip() != ws_token or len(ws_token) > 2_048
+        ):
+            _reject(
+                "FREQTRADE_WORKER_AUTH_INVALID",
+                "Freqtrade RPC WebSocket token must contain 16-2048 characters",
+            )
         return json.dumps(
-            {"password": password, "username": normalized_username},
+            {
+                "password": password,
+                "username": normalized_username,
+                **({"ws_token": ws_token} if ws_token is not None else {}),
+            },
             sort_keys=True,
             separators=(",", ":"),
             ensure_ascii=True,
         )
 
     @staticmethod
-    def _parse_freqtrade_auth_payload(payload: str) -> tuple[str, str]:
+    def _parse_freqtrade_auth_payload(payload: str) -> tuple[str, str, str | None]:
         try:
             decoded = json.loads(payload)
         except json.JSONDecodeError as exc:
@@ -794,14 +809,22 @@ class AccountService(ServiceComponent):
             ) from exc
         if (
             not isinstance(decoded, dict)
-            or set(decoded) != {"username", "password"}
+            or set(decoded) not in (
+                {"username", "password"},
+                {"username", "password", "ws_token"},
+            )
             or not all(isinstance(value, str) for value in decoded.values())
         ):
             _reject(
                 "FREQTRADE_WORKER_AUTH_INVALID",
                 "Freqtrade worker authentication envelope is invalid",
             )
-        return str(decoded["username"]), str(decoded["password"])
+        ws_token = decoded.get("ws_token")
+        return (
+            str(decoded["username"]),
+            str(decoded["password"]),
+            None if ws_token is None else str(ws_token),
+        )
 
     def configure_exchange_account_freqtrade_worker(
         self,
@@ -817,6 +840,7 @@ class AccountService(ServiceComponent):
         expected_version: int,
         idempotency_key: str,
         now: datetime,
+        ws_token: str | None = None,
     ) -> dict[str, Any]:
         """Configure one encrypted Worker binding for one exact exchange account."""
         normalized_mode = mode.upper()
@@ -828,7 +852,10 @@ class AccountService(ServiceComponent):
         normalized_hip3: tuple[str, ...] = ()
         if normalized_mode == "UNCONFIGURED":
             if (
-                any(value is not None for value in (name, base_url, username, password))
+                any(
+                    value is not None
+                    for value in (name, base_url, username, password, ws_token)
+                )
                 or hip3_dexes
             ):
                 _reject(
@@ -856,7 +883,7 @@ class AccountService(ServiceComponent):
                     "FREQTRADE_WORKER_AUTH_INVALID",
                     "Freqtrade worker username and password are required together",
                 )
-            auth_payload = self._freqtrade_auth_payload(username, password)
+            auth_payload = self._freqtrade_auth_payload(username, password, ws_token)
             try:
                 normalized_hip3 = parse_hip3_dexes(",".join(hip3_dexes))
             except ValueError as exc:
@@ -962,6 +989,7 @@ class AccountService(ServiceComponent):
                     "username_hint": (
                         username if len(username) <= 2 else f"{username[0]}•••{username[-1]}"
                     ),
+                    "ws_configured": ws_token is not None,
                 }
                 account.freqtrade_auth_version = next_auth_version
                 account.freqtrade_hip3_dexes = list(normalized_hip3)
@@ -1101,7 +1129,7 @@ class AccountService(ServiceComponent):
             purpose="freqtrade-worker-auth",
             credential_version=account.freqtrade_auth_version,
         )
-        username, password = self._parse_freqtrade_auth_payload(payload)
+        username, password, ws_token = self._parse_freqtrade_auth_payload(payload)
         return PreparedFreqtradeWorkerBinding(
             exchange_account_id=account.exchange_account_id,
             workspace_id=workspace_id,
@@ -1117,6 +1145,7 @@ class AccountService(ServiceComponent):
             username=username,
             password=password,
             hip3_dexes=tuple(account.freqtrade_hip3_dexes or []),
+            ws_token=ws_token,
         )
 
     def record_exchange_account_freqtrade_verification(
