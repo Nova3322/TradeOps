@@ -223,7 +223,7 @@ def test_receipts_require_exact_public_ledger_and_arbitrum_evidence() -> None:
             {
                 "time": int(NOW.timestamp() * 1000),
                 "hash": HASH,
-                "delta": {"type": "withdraw", "usdc": "9", "nonce": 42, "fee": "1"},
+                "delta": {"type": "withdraw", "usdc": "9", "nonce": 42_000, "fee": "1"},
             }
         ]
 
@@ -257,6 +257,8 @@ def test_receipts_require_exact_public_ledger_and_arbitrum_evidence() -> None:
         now=NOW,
     )
     assert ledger["kind"] == "HYPERLIQUID_WITHDRAW_LEDGER_RECEIPT"
+    assert ledger["nonce"] == 42_000
+    assert ledger["signedNonce"] == 42
     transfer = gateway.verify_arbitrum_usdc_transfer(
         rpc_url="https://rpc.example.invalid",
         transaction_hash=HASH,

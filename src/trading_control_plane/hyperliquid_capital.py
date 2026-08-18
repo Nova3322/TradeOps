@@ -482,7 +482,12 @@ class HyperliquidCapitalGateway:
                 continue
             if observed_amount != value:
                 continue
-            if nonce is not None and observed_nonce != nonce:
+            # Hyperliquid currently exposes the signed withdraw3 timestamp in
+            # milliseconds, while the corresponding non-funding ledger delta
+            # can expose the same nonce in microseconds. Accept only those two
+            # exact representations so the receipt stays bound to the signed
+            # action without leaving it permanently pending.
+            if nonce is not None and observed_nonce not in {nonce, nonce * 1_000}:
                 continue
             return {
                 "kind": f"HYPERLIQUID_{expected_type.upper()}_LEDGER_RECEIPT",
@@ -490,6 +495,7 @@ class HyperliquidCapitalGateway:
                 "time": observed_time,
                 "amount": str(observed_amount),
                 "nonce": observed_nonce,
+                "signedNonce": nonce,
                 "fee": None if delta.get("fee") is None else str(delta.get("fee")),
                 "verifiedAt": now.astimezone(UTC).isoformat(),
             }

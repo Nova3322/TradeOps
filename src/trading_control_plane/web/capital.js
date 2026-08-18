@@ -307,6 +307,47 @@ const ARBITRUM_WALLET_CHAIN = {
   blockExplorerUrls:['https://arbiscan.io'],
 };
 let directCapitalWalletActions = new Map();
+const directCapitalReceiptReconciliations = new Map();
+
+function directCapitalCurrentPhase(operation) {
+  const stages = operation?.stages || [];
+  const confirmed = new Set(stages.filter(stage => stage.status === 'CONFIRMED').map(stage => stage.code));
+  const submitted = stages.some(stage => String(stage.code || '').endsWith('_SUBMITTED_BY_HUMAN_WALLET')
+    || stage.code === 'BINANCE_RESTRICTED_WITHDRAWAL_SUBMITTED');
+  if (operation?.status === 'SETTLED') return '资金路径已完成，公开回执已确认';
+  if (confirmed.has('HYPERLIQUID_WITHDRAWAL_ARBITRUM_CONFIRMED')) return 'Safe 已到账，正在完成最终状态同步';
+  if (confirmed.has('HYPERLIQUID_WITHDRAWAL_LEDGER_CONFIRMED')) return 'Hyperliquid 提现已确认，正在等待 Arbitrum / Safe 到账';
+  if (submitted && operation?.path === 'HYPERLIQUID_TO_VAULT') return '钱包提交成功，正在核对 Hyperliquid 账本';
+  if (submitted) return '资金操作已提交，正在核对公开回执';
+  if (operation?.status === 'BLOCKED') return '安全预检尚未通过，未提交资金操作';
+  return '资金操作已创建，正在准备下一步';
+}
+
+function directCapitalReceiptHash(operation) {
+  const confirmed = [...(operation?.stages || [])].reverse().find(stage =>
+    ['HYPERLIQUID_WITHDRAWAL_ARBITRUM_CONFIRMED','TREASURY_DESTINATION_RECEIPT_CONFIRMED','BINANCE_WITHDRAWAL_RECEIPT_CONFIRMED','BINANCE_DEPOSIT_RECEIPT_CONFIRMED'].includes(stage.code));
+  return confirmed?.evidence?.transactionHash || confirmed?.evidence?.transaction_hash || '';
+}
+
+function renderDirectCapitalLiveProgress(operations) {
+  const operation = (operations || [])[0];
+  if (!operation) return '<div data-capital-live-progress></div>';
+  const path = DIRECT_CAPITAL_PATHS.find(item => item.path === operation.path);
+  const label = path ? `${path.from} → ${path.to}` : operation.path;
+  const tone = operation.status === 'SETTLED' ? 'is-success' : operation.status === 'BLOCKED' ? 'is-warning' : '';
+  const hash = directCapitalReceiptHash(operation);
+  const receiptLink = /^0x[0-9a-fA-F]{64}$/.test(hash)
+    ? `<a href="https://arbiscan.io/tx/${escapeHtml(hash)}" target="_blank" rel="noopener">查看 Arbitrum 回执</a>`
+    : '';
+  return `<div class="callout capital-live-progress ${tone}" data-capital-live-progress><div><small>最近一次资金操作</small><b>${escapeHtml(label)} · ${fmtNumber(operation.amount)} ${escapeHtml(operation.asset)}</b><span>${escapeHtml(directCapitalCurrentPhase(operation))}</span></div><div><span>操作 ${shortId(operation.operation_id)} · ${escapeHtml(fmtDate(operation.updated_at || operation.final_confirmed_at))}</span>${receiptLink}</div></div>`;
+}
+
+function setDirectCapitalLiveProgress(message) {
+  const host = document.querySelector('[data-capital-live-progress]');
+  if (!host) return;
+  const status = host.querySelector('div:first-child span');
+  if (status) status.textContent = message;
+}
 
 const announcedCapitalWalletProviders = [];
 window.addEventListener('eip6963:announceProvider', event => {
@@ -724,6 +765,7 @@ async function verifyHyperliquidDepositReceipts({operationId, version, transacti
 }
 
 async function verifyHyperliquidWithdrawalReceipts({operationId, version, actionHash, nonce}) {
+  setDirectCapitalLiveProgress('钱包提交成功，正在核对 Hyperliquid 账本');
   const ledger = await retryDirectPublicReceipt(() => api(`/api/capital/direct-operations/${operationId}/hyperliquid-receipt`, {
     method:'POST',
     timeoutMs:30_000,
@@ -736,7 +778,8 @@ async function verifyHyperliquidWithdrawalReceipts({operationId, version, action
     }),
   }), {attempts:30, delayMs:2000});
   if (ledger.pending) return ledger;
-  return retryDirectPublicReceipt(() => api(`/api/capital/direct-operations/${operationId}/hyperliquid-receipt`, {
+  setDirectCapitalLiveProgress('Hyperliquid 提现已确认，正在等待 Arbitrum / Safe 到账');
+  const chain = await retryDirectPublicReceipt(() => api(`/api/capital/direct-operations/${operationId}/hyperliquid-receipt`, {
     method:'POST',
     timeoutMs:30_000,
     body:JSON.stringify({
@@ -745,6 +788,39 @@ async function verifyHyperliquidWithdrawalReceipts({operationId, version, action
       idempotency_key:crypto.randomUUID(),
     }),
   }), {attempts:80, delayMs:5000});
+  if (!chain.pending) setDirectCapitalLiveProgress('Safe 已到账，公开回执已确认');
+  return chain;
+}
+
+function reconcilePendingHyperliquidWithdrawals(operations) {
+  (operations || []).filter(operation => (
+    operation.path === 'HYPERLIQUID_TO_VAULT'
+    && operation.status === 'AWAITING_RECEIPT'
+  )).slice(0, 3).forEach(operation => {
+    if (directCapitalReceiptReconciliations.has(operation.operation_id)) return;
+    const stages = operation.stages || [];
+    const submission = [...stages].reverse().find(stage => stage.code === 'HYPERLIQUID_WITHDRAWAL_SUBMITTED_BY_HUMAN_WALLET');
+    const settled = stages.some(stage => stage.code === 'HYPERLIQUID_WITHDRAWAL_ARBITRUM_CONFIRMED');
+    if (!submission?.nonce || settled) return;
+    const job = verifyHyperliquidWithdrawalReceipts({
+      operationId:operation.operation_id,
+      version:Number(operation.version),
+      actionHash:submission.action_hash,
+      nonce:Number(submission.nonce),
+    }).then(async receipt => {
+      if (receipt.pending) {
+        setDirectCapitalLiveProgress('公开回执仍在确认；页面会保持当前操作，稍后自动继续核对');
+        setTimeout(() => route(), 15_000);
+        return;
+      }
+      showToast('Safe 已到账，Hyperliquid 与 Arbitrum 回执均已确认');
+      await route();
+    }).catch(async error => {
+      if (error?.code === 'VERSION_CONFLICT') setTimeout(() => route(), 0);
+      else if (!PUBLIC_RECEIPT_PENDING_CODES.has(error?.code)) showApiError(error);
+    }).finally(() => directCapitalReceiptReconciliations.delete(operation.operation_id));
+    directCapitalReceiptReconciliations.set(operation.operation_id, job);
+  });
 }
 
 async function verifyBinanceReceipt({operationId, version, stage, transactionHash}) {
@@ -808,13 +884,8 @@ async function startDirectCapitalExecution({operationId, version, path, treasury
   if (path === 'HYPERLIQUID_TO_VAULT') {
     const action = await prepareHyperliquidWalletAction({operationId, version});
     const submitted = await executeDirectWalletAction(action);
-    const receipt = await verifyHyperliquidWithdrawalReceipts({
-      operationId,
-      version:submitted.recorded.version,
-      actionHash:submitted.evidence.action_hash,
-      nonce:submitted.evidence.nonce,
-    });
-    return {kind:'WALLET', result:submitted, receiptPending:Boolean(receipt.pending)};
+    setDirectCapitalLiveProgress('钱包提交成功，正在核对 Hyperliquid 账本');
+    return {kind:'WALLET', result:submitted, receiptPending:true};
   }
   let currentVersion = Number(version);
   if (path === 'VAULT_TO_BINANCE') {
@@ -1078,7 +1149,7 @@ async function renderCapitalCenter() {
   const directRows = (item.direct_operations || []).map(operation => {
     const pathDefinition = DIRECT_CAPITAL_PATHS.find(path => path.path === operation.path);
     const label = pathDefinition ? `${pathDefinition.from} → ${pathDefinition.to}` : operation.path;
-    const stages = (operation.stages || []).map(stage => formatDirectCapitalStage(stage.code)).join(' → ');
+    const stages = directCapitalCurrentPhase(operation);
     const blockerCodes = operation.blockers || [];
     const blockers = blockerCodes.map(formatDirectCapitalBlocker);
     const pendingPreflights = blockerCodes.filter(code => DIRECT_CAPITAL_PREFLIGHT_BLOCKERS.has(code));
@@ -1190,7 +1261,8 @@ async function renderCapitalCenter() {
     const walletBoundary = hyperliquidPreview ? `<details class="capital-wallet-handoff"><summary>Hyperliquid 钱包确认</summary><div class="wallet-handoff-facts"><b>${hyperliquidPreview.artifact.kind === 'HYPERLIQUID_WITHDRAW3_TYPED_REQUEST' ? 'withdraw3 签名请求' : hyperliquidPreview.artifact.kind === 'HYPERLIQUID_USD_CLASS_TRANSFER_TYPED_REQUEST' ? '主账户资金归集签名请求' : 'Arbitrum USDC 入金请求'}</b><span>金额：${escapeHtml(hyperliquidPreview.artifact.amount)} USDC</span><span>账户：${escapeHtml(hyperliquidPreview.artifact.account || hyperliquidPreview.artifact.from || '')}</span><p>操作按钮直接唤起主钱包或有效多签；链上交易和 EIP-712 请求都只在钱包中确认。</p></div></details>` : '';
     const treasuryWallet = operation.path === 'HYPERLIQUID_TO_VAULT' && providerPreviewReady ? `<details class="capital-wallet-handoff"><summary>最终存入${operation.treasury_provider === 'SAFE_SPENDING_LIMIT' ? ' Safe' : ' NoTilt Vault'}</summary><p class="subtle">${treasuryReceiptConfirmed ? '链上金库到账已验证。' : '等待操作按钮自动继续或验证公开回执。'}</p></details>` : '';
     const chainConfirmed = frozenStages.some(stage => stage.status === 'CONFIRMED' && (stage.code.includes('ARBITRUM') || stage.code === 'TREASURY_WITHDRAWAL_RECEIPT_CONFIRMED' || stage.code.startsWith('BINANCE_') && stage.code.endsWith('_RECEIPT_CONFIRMED')));
-    const chainSubmitted = frozenStages.some(stage => stage.transaction_hash || stage.submission?.transactionHash);
+    const chainSubmitted = frozenStages.some(stage => stage.transaction_hash || stage.submission?.transactionHash
+      || String(stage.code || '').endsWith('_SUBMITTED_BY_HUMAN_WALLET'));
     const operationStatus = operation.status === 'SETTLED'
       ? fmtStatus(operation.status)
       : chainConfirmed
@@ -1225,11 +1297,12 @@ async function renderCapitalCenter() {
   </div>`;
   const capitalNetworkScope = `<dl class="capital-network-scope" aria-label="资金网络与结算资产"><div><dt>资金网络</dt><dd>Arbitrum One（Chain ID 42161）</dd></div><div><dt>结算资产</dt><dd>原生 USDC</dd></div><div class="capital-network-scope-note"><dt>支持范围</dt><dd>当前默认仅支持 Arbitrum One 原生 USDC，不支持 USDT、其他网络资产或跨链版本 USDC。</dd></div></dl>`;
   const liveContent = `<section class="capital-provider-section"><div class="section-heading"><div><p class="eyebrow">Vault / Safe</p><h2>生产资金保管</h2><p>资金中心只保留 Vault、Safe 和相关受控资金路径；账户汇总与净值曲线已移至绩效报表。</p></div><a class="secondary" href="/results" data-link>查看绩效曲线</a></div>${capitalNetworkScope}${providerCards}${directConfigurationEditor}</section>
-    <section class="capital-routes-section"><div class="card-heading"><div><p class="eyebrow">受控资金路径</p><h2>Vault / Safe 与交易所</h2><p class="subtle">先选路径，再填写金额；每次都会重新校验地址、网络、资产、额度、实时状态和安全开关。</p></div><span class="status-pill ${item.real_transfer_gate === 'ENABLED' ? 'status-APPROVED' : 'status-DISABLED'}">${escapeHtml(fmtStatus(item.real_transfer_gate || 'DISABLED'))}</span></div><div class="callout direct-capital-boundary" data-provider-boundary><b>当前提供方：${escapeHtml(selectedTreasuryProviderLabel)}。</b> 链上私钥不进入控制台；真实币安提现继续受专用开关和 CAPITAL_TRANSFER 双重门禁。</div><div class="capital-route-grid">${directPathCards}</div></section>${directCapitalDialog}
+    <section class="capital-routes-section"><div class="card-heading"><div><p class="eyebrow">受控资金路径</p><h2>Vault / Safe 与交易所</h2><p class="subtle">先选路径，再填写金额；每次都会重新校验地址、网络、资产、额度、实时状态和安全开关。</p></div><span class="status-pill ${item.real_transfer_gate === 'ENABLED' ? 'status-APPROVED' : 'status-DISABLED'}">${escapeHtml(fmtStatus(item.real_transfer_gate || 'DISABLED'))}</span></div>${renderDirectCapitalLiveProgress(item.direct_operations)}<div class="callout direct-capital-boundary" data-provider-boundary><b>当前提供方：${escapeHtml(selectedTreasuryProviderLabel)}。</b> 链上私钥不进入控制台；真实币安提现继续受专用开关和 CAPITAL_TRANSFER 双重门禁。</div><div class="capital-route-grid">${directPathCards}</div></section>${directCapitalDialog}
     <details class="capital-activity-disclosure"><summary><span>操作与回执</span><small>${Number(item.direct_operations?.length || 0)} 条直达操作</small></summary><div><section><h2>操作日志、阶段与回执</h2>${directRows ? `<div class="table-wrap is-scrollable capital-operation-table"><table><thead><tr><th>操作</th><th>路径 / 金额</th><th>阶段</th><th>状态 / 回执</th><th>精确阻断</th></tr></thead><tbody>${directRows}</tbody></table></div>` : '<div class="callout">尚无直达资金操作。</div>'}</section>${legacyRows ? `<section><h2>历史资金划转</h2><div class="table-wrap is-scrollable capital-history-table"><table><thead><tr><th>记录</th><th>方向</th><th>金额</th><th>状态</th><th>外部回执</th></tr></thead><tbody>${legacyRows}</tbody></table></div></section>` : ''}</div></details>`;
   const testnetContent = `<section class="empty-state compact-empty capital-testnet-empty"><div><p class="eyebrow">生产专属</p><h2>Vault 与 Safe 不适用于测试模式</h2><p>测试资产、交易所账户汇总与净值曲线请在绩效报表查看；测试模式不显示生产资金路径。</p><div class="toolbar empty-actions"><a class="primary" href="/results" data-link>前往绩效报表</a>${hasCapability('venue.view') ? '<button class="secondary" type="button" data-open-mode-switch>查看当前模式</button>' : ''}</div></div></section>`;
   main.innerHTML = `<section class="page capital-page"><header class="page-head capital-page-head"><div><p class="eyebrow">${fmtExecutionMode(displayEnvironment)} · 资金保管</p><h1>资金中心</h1><p class="lede">集中查看 Vault、Safe 与生产资金路径；资金账户汇总和曲线统一在绩效报表展示。</p></div>${displayEnvironment === 'LIVE' ? `<div class="capital-gate-summary"><small>生产资金操作</small><b>${escapeHtml(fmtStatus(item.real_transfer_gate || 'DISABLED'))}</b><span>在途 / 占用 ${fmtNumber(liveInTransit)} USDC</span></div>` : ''}</header>${displayEnvironment === 'LIVE' ? liveContent : testnetContent}</section>`;
   bindCapitalActions();
+  if (displayEnvironment === 'LIVE') reconcilePendingHyperliquidWithdrawals(item.direct_operations);
 }
 
 function drawCapitalChart(series) {

@@ -1218,10 +1218,15 @@ class DirectOperationCapitalService(ServiceComponent):
                 ]
                 item.status = "AWAITING_RECEIPT"
                 item.receipt_status = "PENDING"
+                resolved_submission_blockers = {"HUMAN_WALLET_CONFIRMATION_CANCELLED"}
+                if stage.startswith("HYPERLIQUID_"):
+                    resolved_submission_blockers.add(
+                        "HYPERLIQUID_HUMAN_WALLET_CONFIRMATION_REQUIRED"
+                    )
                 item.blockers = [
                     blocker
                     for blocker in item.blockers
-                    if blocker != "HUMAN_WALLET_CONFIRMATION_CANCELLED"
+                    if blocker not in resolved_submission_blockers
                 ]
                 event_type = "CAPITAL_HUMAN_WALLET_SUBMISSION_RECORDED"
             item.version += 1

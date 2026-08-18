@@ -83,3 +83,17 @@ test("exchange receipts and Binance wallet-class transfers complete automaticall
     assert.equal(source.includes(marker), true, marker);
   }
 });
+
+test("latest capital operation stays visible and pending Hyperliquid receipts resume automatically", () => {
+  for (const marker of [
+    "renderDirectCapitalLiveProgress",
+    "directCapitalCurrentPhase",
+    "reconcilePendingHyperliquidWithdrawals",
+    "钱包提交成功，正在核对 Hyperliquid 账本",
+    "Hyperliquid 提现已确认，正在等待 Arbitrum / Safe 到账",
+    "Safe 已到账，公开回执已确认",
+    "查看 Arbitrum 回执",
+  ]) {
+    assert.equal(source.includes(marker), true, marker);
+  }
+});
