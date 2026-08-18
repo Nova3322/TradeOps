@@ -18,6 +18,8 @@ test("capital operations open the connected wallet and record public evidence au
     "eth_sendTransaction",
     "eth_signTypedData_v4",
     "recordDirectWalletOutcome",
+    "hyperliquidSubmissionReason",
+    "资金记录未标记为已提交",
   ]) {
     assert.equal(source.includes(marker), true, marker);
   }
@@ -98,7 +100,39 @@ test("latest capital operation stays visible and pending Hyperliquid receipts re
     "Hyperliquid 提现已确认，正在等待 Arbitrum / Safe 到账",
     "Safe 已到账，公开回执已确认",
     "查看 Arbitrum 回执",
+    "reconcilePendingHyperliquidDeposits",
+    "Hyperliquid 入金已提交，回执核对暂缓",
+    "系统不会重复发送",
   ]) {
     assert.equal(source.includes(marker), true, marker);
   }
+});
+
+test("operation receipts open by default and paginate at bounded 50 or 100 rows", () => {
+  for (const marker of [
+    'class="capital-activity-disclosure" open',
+    "capitalOperationsPageSize = 50",
+    'value="50"',
+    'value="100"',
+    "data-capital-operation-page-size",
+    "data-capital-operation-page",
+    "directOperations.slice(",
+  ]) {
+    assert.equal(source.includes(marker), true, marker);
+  }
+  assert.equal(source.includes('value="200"'), false);
+});
+
+test("wallet and blocker details use one structured assurance panel", () => {
+  for (const marker of [
+    "renderCapitalOperationAssurance",
+    "renderCapitalHandoffCard",
+    "capital-operation-details",
+    "capital-handoff-grid",
+    "校验 / 签名",
+    "查看校验与签名摘要",
+  ]) {
+    assert.equal(source.includes(marker), true, marker);
+  }
+  assert.equal(source.includes('<details class="capital-wallet-handoff">'), false);
 });

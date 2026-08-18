@@ -19,6 +19,16 @@ MAIN = "0x1111111111111111111111111111111111111111"
 AGENT = "0x2222222222222222222222222222222222222222"
 HASH = "0x" + "ab" * 32
 NOW = datetime(2026, 8, 8, 8, 0, tzinfo=UTC)
+USDC_ASSET_ID = "0x6d1e7cde53ba9467b783cb7c530ce054"
+SPOT_META = {
+    "tokens": [
+        {
+            "name": "USDC",
+            "tokenId": USDC_ASSET_ID,
+            "isCanonical": True,
+        }
+    ]
+}
 
 
 def test_cctp_withdrawal_uses_current_route_and_unsigned_human_wallet() -> None:
@@ -44,6 +54,8 @@ def test_cctp_withdrawal_uses_current_route_and_unsigned_human_wallet() -> None:
                 "fee": "0",
                 "userHasSentTx": True,
             }
+        if payload["type"] == "spotMeta":
+            return SPOT_META
         assert payload == {"type": "userRole", "user": AGENT}
         return {"role": "agent", "data": {"user": MAIN}}
 
@@ -63,6 +75,7 @@ def test_cctp_withdrawal_uses_current_route_and_unsigned_human_wallet() -> None:
         "clearinghouseState",
         "preTransferCheck",
         "userRole",
+        "spotMeta",
     ]
     assert artifact["kind"] == "HYPERLIQUID_CCTP_WITHDRAWAL_TYPED_REQUEST"
     assert artifact["withdrawalRoute"] == "CCTP"
@@ -76,6 +89,8 @@ def test_cctp_withdrawal_uses_current_route_and_unsigned_human_wallet() -> None:
     )
     assert artifact["action"]["destinationChainId"] == 3
     assert artifact["action"]["gasLimit"] == 200_000
+    assert artifact["action"]["token"] == f"USDC:{USDC_ASSET_ID}"
+    assert artifact["typedData"]["message"]["token"] == f"USDC:{USDC_ASSET_ID}"
     assert artifact["exchangeRequestTemplate"]["isFrontend"] is True
     assert artifact["exchangeRequestTemplate"]["signature"] is None
     assert artifact["signing"] is False
@@ -231,6 +246,8 @@ def test_unified_account_withdrawal_uses_available_spot_usdc() -> None:
             }
         if request_type == "preTransferCheck":
             return {"isSanctioned": False, "userExists": True, "fee": "0"}
+        if request_type == "spotMeta":
+            return SPOT_META
         assert request_type == "userRole"
         return {"role": "agent", "data": {"user": MAIN}}
 
@@ -250,6 +267,7 @@ def test_unified_account_withdrawal_uses_available_spot_usdc() -> None:
         "spotClearinghouseState",
         "preTransferCheck",
         "userRole",
+        "spotMeta",
     ]
     assert artifact["withdrawableObserved"] == "10.00"
     assert artifact["withdrawableSource"] == "UNIFIED_SPOT_USDC"

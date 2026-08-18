@@ -41,6 +41,7 @@ CCTP_WITHDRAWAL_FEE = Decimal("0.2")
 CCTP_DESTINATION_CHAIN_ID = 3
 CCTP_DESTINATION_SENTINEL = "0x2000000000000000000000000000000000000000"
 CCTP_INDEXER_URL = "https://indexer.api.across.to/hyperliquid-transfers"
+TOKEN_ID_PATTERN = re.compile(r"^0x[0-9a-fA-F]{32}$")
 SEND_TO_EVM_WITH_DATA_SIGN_TYPES = [
     {"name": "hyperliquidChain", "type": "string"},
     {"name": "token", "type": "string"},
@@ -197,6 +198,36 @@ class HyperliquidCapitalGateway:
     def _info(self, base_url: str, payload: JsonObject) -> Any:
         official = _require_official_api(base_url)
         return self._info_fetcher(f"{official}/info", payload, self._timeout_seconds)
+
+    def _canonical_spot_token(self, *, base_url: str, name: str) -> str:
+        """Resolve the current canonical ``tokenName:tokenId`` exchange identifier."""
+
+        raw = self._info(base_url, {"type": "spotMeta"})
+        tokens = raw.get("tokens") if isinstance(raw, dict) else None
+        if not isinstance(tokens, list):
+            _reject(
+                "HYPERLIQUID_SPOT_METADATA_INVALID",
+                "Hyperliquid did not return current spot token metadata",
+            )
+        matches = [
+            token
+            for token in tokens
+            if isinstance(token, dict)
+            and str(token.get("name", "")).upper() == name.upper()
+            and token.get("isCanonical") is True
+        ]
+        if len(matches) != 1:
+            _reject(
+                "HYPERLIQUID_SPOT_TOKEN_UNKNOWN",
+                f"Hyperliquid did not return one canonical {name} token",
+            )
+        token_id = str(matches[0].get("tokenId", ""))
+        if TOKEN_ID_PATTERN.fullmatch(token_id) is None:
+            _reject(
+                "HYPERLIQUID_SPOT_METADATA_INVALID",
+                f"Hyperliquid returned an invalid canonical {name} token id",
+            )
+        return f"{name.upper()}:{token_id.lower()}"
 
     def arbitrum_usdc_balance(self, *, rpc_url: str, address: str) -> Decimal:
         """Read the exact native-USDC balance before opening a deposit wallet request."""
@@ -489,11 +520,15 @@ class HyperliquidCapitalGateway:
         nonce = int(now.timestamp() * 1000)
         hyperliquid_chain = "Mainnet" if official.endswith("hyperliquid.xyz") else "Testnet"
         if withdrawal_route == "cctp":
+            # The exchange endpoint does not accept the display symbol here.
+            # User-signed sendToEvmWithData actions require the full current
+            # tokenName:tokenId identifier returned by spotMeta.
+            usdc_token = self._canonical_spot_token(base_url=base_url, name="USDC")
             action = {
                 "type": "sendToEvmWithData",
                 "hyperliquidChain": hyperliquid_chain,
                 "signatureChainId": ARBITRUM_SIGNATURE_CHAIN_ID,
-                "token": "USDC",
+                "token": usdc_token,
                 "amount": _decimal_text(value),
                 "sourceDex": "spot" if withdrawable_source == "UNIFIED_SPOT_USDC" else "",
                 "destinationRecipient": target,

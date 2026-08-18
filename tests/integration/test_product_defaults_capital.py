@@ -257,6 +257,16 @@ def test_hyperliquid_withdrawal_auto_falls_back_to_wallet_and_settles_only_after
             return {"withdrawable": "1000"}
         if payload["type"] == "preTransferCheck":
             return {"isSanctioned": False, "userExists": True, "fee": "0"}
+        if payload["type"] == "spotMeta":
+            return {
+                "tokens": [
+                    {
+                        "name": "USDC",
+                        "tokenId": "0x6d1e7cde53ba9467b783cb7c530ce054",
+                        "isCanonical": True,
+                    }
+                ]
+            }
         if payload["type"] == "userRole":
             assert payload["user"] == agent
             return {"role": "agent", "data": {"user": main}}
