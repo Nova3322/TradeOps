@@ -6,6 +6,10 @@ const source = fs.readFileSync(
   new URL("../src/trading_control_plane/web/capital.js", import.meta.url),
   "utf8",
 );
+const router = fs.readFileSync(
+  new URL("../src/trading_control_plane/web/router.js", import.meta.url),
+  "utf8",
+);
 
 test("capital operations open the connected wallet and record public evidence automatically", () => {
   for (const marker of [
@@ -127,12 +131,42 @@ test("wallet and blocker details use one structured assurance panel", () => {
   for (const marker of [
     "renderCapitalOperationAssurance",
     "renderCapitalHandoffCard",
-    "capital-operation-details",
+    "capital-assurance-dialog",
+    "data-capital-assurance-record",
+    "data-operation-id",
     "capital-handoff-grid",
     "校验 / 签名",
-    "查看校验与签名摘要",
+    "查看记录",
   ]) {
     assert.equal(source.includes(marker), true, marker);
   }
+  assert.equal(source.includes("capital-operation-details"), false);
   assert.equal(source.includes('<details class="capital-wallet-handoff">'), false);
+});
+
+test("same-route and background refreshes preserve the viewport without a loading-page flash", () => {
+  for (const marker of [
+    "renderedRouteKey",
+    "preserveView",
+    "backgroundRefresh",
+    "restoreRouteViewport",
+    "if (!preserveView)",
+  ]) {
+    assert.equal(router.includes(marker), true, marker);
+  }
+  assert.equal(source.includes("scheduleCapitalBackgroundRefresh"), true);
+  assert.equal(source.includes("capitalPageHasActiveInteraction"), true);
+  assert.equal(source.includes("host.dataset.operationId"), true);
+  assert.equal(source.includes("setTimeout(() => route()"), false);
+});
+
+test("Safe to Hyperliquid confirms the first transaction without reporting a receipt delay as failure", () => {
+  for (const marker of [
+    "continuationScheduled:true",
+    "directCapitalExecutionSuccessMessage",
+    "第一笔链上交易已提交；到账后会自动打开 Hyperliquid 入金钱包确认",
+    "reconcilePendingSafeHyperliquidDeposits",
+  ]) {
+    assert.equal(source.includes(marker), true, marker);
+  }
 });

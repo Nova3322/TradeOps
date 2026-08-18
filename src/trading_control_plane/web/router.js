@@ -12,6 +12,16 @@ async function bootstrap() {
   await route();
 }
 
+let renderedRouteKey = '';
+
+function routeKey() {
+  return `${location.pathname}${location.search}`;
+}
+
+function restoreRouteViewport(position) {
+  requestAnimationFrame(() => window.scrollTo(position.left, position.top));
+}
+
 function notFoundView(path) {
   const context = path.startsWith('/campaigns/')
     ? {eyebrow:'交易任务', title:'该交易任务不存在', copy:'链接可能已失效，或记录不属于当前团队与环境。', href:'/campaigns', action:'返回交易任务'}
@@ -39,45 +49,57 @@ function accessDeniedView(requiredCapability) {
   </div></section>`;
 }
 
-async function route() {
+async function route(options = {}) {
+  const requestedRouteKey = routeKey();
+  const navigationRequested = focusNextRouteHeading || renderedRouteKey !== requestedRouteKey;
+  const preserveView = options?.preserveView ?? !navigationRequested;
+  const backgroundRefresh = Boolean(options?.backgroundRefresh);
+  const viewport = {left:window.scrollX, top:window.scrollY};
+  const finishRender = () => {
+    renderedRouteKey = routeKey();
+    enhanceRenderedPage();
+    if (preserveView) restoreRouteViewport(viewport);
+  };
   if (location.pathname !== '/opportunities') stopOpportunityStream();
   capitalChartOverlayAbortController?.abort();
   capitalChartOverlayAbortController = null;
   document.body.classList.remove('capital-chart-expanded');
-  window.scrollTo(0, 0);
+  if (!preserveView) window.scrollTo(0, 0);
   updateActiveNav();
   closeMobileNav({restoreFocus:false});
   main.setAttribute('aria-busy', 'true');
   if (!session) {
     setShell(false);
     renderLogin();
-    enhanceRenderedPage();
+    finishRender();
     return;
   }
   const path = location.pathname;
   if (path === '/' || path === '/workspaces') {
     setShell(true, {workspaceGate:true});
     renderWorkspaceGateway();
-    enhanceRenderedPage();
+    finishRender();
     return;
   }
   setShell(true);
   if (!session.active_workspace || !session.active_team) {
     renderScopeSetup();
-    enhanceRenderedPage();
+    finishRender();
     return;
   }
   const requiredCapability = routeCapability(path);
   if (requiredCapability && !hasCapability(requiredCapability)) {
     main.innerHTML = accessDeniedView(requiredCapability);
-    enhanceRenderedPage();
+    finishRender();
     return;
   }
-  main.innerHTML = `<section class="loading-state" role="status" aria-live="polite" aria-label="正在读取当前事实">
-    <div class="loading-state-copy"><span class="spinner" aria-hidden="true"></span><div><b>正在读取当前事实…</b><p>正在核对当前空间、权限与服务端数据。</p></div></div>
-    <div class="loading-skeleton" aria-hidden="true"><span class="loading-title"></span><span class="loading-lede"></span><div class="loading-stat-row"><span></span><span></span><span></span><span></span></div><span class="loading-panel"></span></div>
-  </section>`;
-  applyLanguageToDocument(main);
+  if (!preserveView) {
+    main.innerHTML = `<section class="loading-state" role="status" aria-live="polite" aria-label="正在读取当前事实">
+      <div class="loading-state-copy"><span class="spinner" aria-hidden="true"></span><div><b>正在读取当前事实…</b><p>正在核对当前空间、权限与服务端数据。</p></div></div>
+      <div class="loading-skeleton" aria-hidden="true"><span class="loading-title"></span><span class="loading-lede"></span><div class="loading-stat-row"><span></span><span></span><span></span><span></span></div><span class="loading-panel"></span></div>
+    </section>`;
+    applyLanguageToDocument(main);
+  }
   try {
     if (path === '/home') await renderHome();
     else if (path === '/signals') await renderSignalSources();
@@ -130,14 +152,19 @@ async function route() {
       else if (proposalMatch) await renderProposalDetail(proposalMatch[1]);
       else main.innerHTML = notFoundView(path);
     }
-    enhanceRenderedPage();
+    finishRender();
   } catch (error) {
     if (error.status === 401) {
       if (!error.handled) handleUnauthorizedResponse();
       return;
     }
+    if (backgroundRefresh && preserveView) {
+      main.removeAttribute('aria-busy');
+      restoreRouteViewport(viewport);
+      return;
+    }
     main.innerHTML = error.status === 404 ? notFoundView(path) : errorView(error);
-    enhanceRenderedPage();
-    main.querySelector('[data-error-heading]')?.focus();
+    finishRender();
+    main.querySelector('[data-error-heading]')?.focus({preventScroll:true});
   }
 }

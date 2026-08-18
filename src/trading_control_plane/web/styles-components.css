@@ -872,28 +872,38 @@ p, li, dd, td { font-size: 14px; }
 .capital-operation-heading { display: flex; align-items: end; justify-content: space-between; gap: 18px; margin-bottom: 14px; }
 .capital-operation-heading h2 { margin: 0; }
 .capital-operation-heading p { margin: 5px 0 0; color: var(--muted); font-size: 12px; }
-.capital-operation-table table { min-width: 1320px; table-layout: fixed; }
-.capital-operation-table th:nth-child(1) { width: 10%; }
-.capital-operation-table th:nth-child(2) { width: 15%; }
-.capital-operation-table th:nth-child(3) { width: 31%; }
-.capital-operation-table th:nth-child(4) { width: 13%; }
-.capital-operation-table th:nth-child(5) { width: 31%; }
+.capital-operation-table table { min-width: 1120px; table-layout: fixed; }
+.capital-operation-table th:nth-child(1) { width: 11%; }
+.capital-operation-table th:nth-child(2) { width: 17%; }
+.capital-operation-table th:nth-child(3) { width: 36%; }
+.capital-operation-table th:nth-child(4) { width: 16%; }
+.capital-operation-table th:nth-child(5) { width: 20%; }
 .capital-operation-assurance { min-width: 0; display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 4px 9px; align-items: center; }
 .capital-assurance-state { width: max-content; padding: 4px 8px; border: 1px solid var(--line); border-radius: 999px; color: var(--muted); background: var(--panel-soft); font-size: 11px; font-weight: 700; letter-spacing: .02em; }
 .capital-operation-assurance.is-blocked .capital-assurance-state { border-color: color-mix(in srgb, var(--danger) 35%, var(--line)); color: var(--danger); background: color-mix(in srgb, var(--danger) 8%, var(--panel)); }
 .capital-operation-assurance.is-pending .capital-assurance-state { border-color: color-mix(in srgb, var(--warning) 38%, var(--line)); color: var(--warning); background: color-mix(in srgb, var(--warning) 8%, var(--panel)); }
 .capital-operation-assurance.is-ready .capital-assurance-state { border-color: color-mix(in srgb, var(--success) 34%, var(--line)); color: var(--success); background: color-mix(in srgb, var(--success) 7%, var(--panel)); }
 .capital-operation-assurance > small { min-width: 0; color: var(--muted); font-size: 11px; line-height: 1.4; }
-.capital-operation-details { grid-column: 1 / -1; min-width: 0; margin-top: 5px; border: 1px solid var(--line); border-radius: 3px; background: color-mix(in srgb, var(--panel-soft) 42%, var(--panel)); overflow: hidden; }
-.capital-operation-details > summary { min-height: 38px; display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 8px 10px; cursor: pointer; list-style: none; color: var(--ink); font-size: 12px; font-weight: 650; }
-.capital-operation-details > summary::-webkit-details-marker { display: none; }
-.capital-operation-details > summary:hover { background: var(--panel-soft); }
-.capital-operation-details > summary:focus { outline: none; }
-.capital-operation-details > summary:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; border-radius: 2px; }
-.capital-operation-details > summary i { width: 7px; height: 7px; flex: 0 0 7px; border-right: 1.5px solid currentColor; border-bottom: 1.5px solid currentColor; transform: rotate(45deg) translateY(-2px); transition: transform .16s ease; }
-.capital-operation-details[open] > summary { border-bottom: 1px solid var(--line); background: var(--panel-soft); }
-.capital-operation-details[open] > summary i { transform: rotate(225deg) translate(-1px, -1px); }
-.capital-operation-details > div { display: grid; gap: 10px; padding: 10px; }
+.capital-assurance-trigger { grid-column: 1 / -1; width: max-content; min-height: 34px; margin-top: 5px; padding: 6px 10px; font-size: 11px; }
+.capital-assurance-dialog { width: min(860px, calc(100% - 32px)); max-height: min(760px, calc(100dvh - 48px)); border-radius: 10px; overflow: hidden; }
+.capital-assurance-dialog-shell { display: grid; grid-template-rows: auto auto minmax(0, 1fr) auto; max-height: min(760px, calc(100dvh - 48px)); }
+.capital-assurance-dialog-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 20px; padding: 22px 24px 18px; border-bottom: 1px solid var(--line); }
+.capital-assurance-dialog-head h2 { margin: 3px 0 0; font-size: 22px; line-height: 1.3; }
+.capital-assurance-dialog-head [data-capital-assurance-meta] { display: block; margin-top: 5px; color: var(--muted); font-size: 12px; }
+.capital-assurance-dialog-status { display: flex; align-items: center; gap: 10px; padding: 12px 24px; border-bottom: 1px solid var(--line); background: var(--panel-soft); }
+.capital-assurance-dialog-status p { margin: 0; color: var(--muted); font-size: 12px; }
+.capital-assurance-dialog-status.is-blocked { background: color-mix(in srgb, var(--danger) 6%, var(--panel)); }
+.capital-assurance-dialog-status.is-pending { background: color-mix(in srgb, var(--warning) 7%, var(--panel)); }
+.capital-assurance-dialog-status.is-ready { background: color-mix(in srgb, var(--success) 6%, var(--panel)); }
+.capital-assurance-dialog-content { min-height: 0; display: grid; gap: 12px; padding: 18px 24px; overflow: auto; overscroll-behavior: contain; }
+.capital-assurance-dialog-content .capital-handoff-grid { gap: 12px; }
+.capital-assurance-dialog-content .capital-handoff-card { padding: 15px; border-radius: 6px; background: color-mix(in srgb, var(--panel-soft) 28%, var(--panel)); }
+.capital-assurance-dialog-content .capital-handoff-card header b { font-size: 14px; }
+.capital-assurance-dialog-content .capital-handoff-card dl { gap: 9px; }
+.capital-assurance-dialog-content .capital-handoff-card dt,
+.capital-assurance-dialog-content .capital-handoff-card dd,
+.capital-assurance-dialog-content .capital-handoff-card p { font-size: 12px; }
+.capital-assurance-dialog-shell > footer { display: flex; justify-content: flex-end; padding: 14px 24px 18px; border-top: 1px solid var(--line); }
 .capital-operation-blocker-panel { padding: 10px 11px; border-left: 3px solid var(--warning); background: color-mix(in srgb, var(--warning) 7%, var(--panel)); }
 .capital-operation-blocker-panel b { font-size: 12px; }
 .capital-operation-blocker-panel ul { display: grid; gap: 5px; margin: 7px 0 0; padding-left: 17px; color: var(--muted); font-size: 11px; line-height: 1.5; }
@@ -926,7 +936,12 @@ p, li, dd, td { font-size: 14px; }
   .capital-operation-table td[data-label="校验 / 签名"] { display: block; }
   .capital-operation-table td[data-label="校验 / 签名"]::before { display: block; margin-bottom: 8px; }
   .capital-operation-assurance { min-width: 0; }
-  .capital-operation-details > summary { align-items: flex-start; }
+  .capital-assurance-dialog { width: calc(100% - 16px); max-height: calc(100dvh - 16px); }
+  .capital-assurance-dialog-shell { max-height: calc(100dvh - 16px); }
+  .capital-assurance-dialog-head { padding: 17px 16px 14px; }
+  .capital-assurance-dialog-status { align-items: flex-start; padding: 10px 16px; }
+  .capital-assurance-dialog-content { padding: 14px 16px; }
+  .capital-assurance-dialog-shell > footer { padding: 12px 16px 16px; }
   .capital-handoff-card dl > div { grid-template-columns: 64px minmax(0, 1fr); }
   .capital-operation-pagination > div { display: grid; grid-template-columns: 1fr 1fr; }
   .capital-operation-pagination label { grid-column: 1 / -1; }
