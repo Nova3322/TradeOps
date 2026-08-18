@@ -5,9 +5,6 @@ import os
 import re
 import shutil
 import subprocess
-import urllib.error
-import urllib.parse
-import urllib.request
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -25,12 +22,8 @@ SUPPORTED_NOTILT_CHAINS = {
 
 JsonObject = dict[str, Any]
 GatewayExecutor = Callable[[JsonObject], JsonObject]
-PriceFetcher = Callable[[str, float], JsonObject]
 USD_STABLE_ASSETS = frozenset({"USD", "USDC", "USDT", "USDT0"})
-NATIVE_PRICE_SYMBOLS = {
-    "ETH": "ETHUSDT",
-    "BNB": "BNBUSDT",
-}
+SUPPORTED_NATIVE_PRICE_ASSETS = frozenset({"ETH", "BNB"})
 EVM_ADDRESS_PATTERN = re.compile(r"^0x[0-9a-fA-F]{40}$")
 HASH_PATTERN = re.compile(r"^0x[0-9a-fA-F]{64}$")
 
@@ -259,42 +252,18 @@ class UsdValuation:
     observed_at: datetime
 
 
-def _default_price_fetcher(url: str, timeout: float) -> JsonObject:
-    request = urllib.request.Request(  # noqa: S310
-        url,
-        headers={"User-Agent": "trading-control-plane/1.0"},
-        method="GET",
-    )
-    try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:  # noqa: S310
-            body = response.read()
-    except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError) as exc:
-        raise DomainRejected(
-            "NOTILT_VALUATION_UNAVAILABLE",
-            "USD valuation price is unavailable",
-        ) from exc
-    try:
-        value = json.loads(body)
-    except json.JSONDecodeError as exc:
-        raise DomainRejected(
-            "NOTILT_VALUATION_INVALID",
-            "USD valuation source returned invalid JSON",
-        ) from exc
-    if not isinstance(value, dict):
-        raise DomainRejected(
-            "NOTILT_VALUATION_INVALID",
-            "USD valuation source returned an invalid response",
-        )
-    return value
-
-
 class NoTiltUsdValuator:
-    """Value the fixed NoTilt catalog without accepting caller-selected price endpoints."""
+    """Value NoTilt assets only from persisted account-scoped fact-adapter marks."""
 
-    def __init__(self, fetcher: PriceFetcher = _default_price_fetcher) -> None:
-        self._fetcher = fetcher
-
-    def value(self, asset: str, amount: Decimal, *, now: datetime) -> UsdValuation:
+    def value(
+        self,
+        asset: str,
+        amount: Decimal,
+        *,
+        now: datetime,
+        mark_price: Decimal | None = None,
+        mark_observed_at: datetime | None = None,
+    ) -> UsdValuation:
         if amount < 0:
             raise DomainRejected(
                 "NOTILT_VALUATION_INVALID",
@@ -305,30 +274,26 @@ class NoTiltUsdValuator:
             return UsdValuation(Decimal(1), amount, now)
         if amount == 0:
             return UsdValuation(Decimal(1), Decimal(0), now)
-        symbol = NATIVE_PRICE_SYMBOLS.get(normalized)
-        if symbol is None:
+        if normalized not in SUPPORTED_NATIVE_PRICE_ASSETS:
             raise DomainRejected(
                 "NOTILT_VALUATION_UNSUPPORTED",
                 "NoTilt asset has no approved USD valuation source",
             )
-        query = urllib.parse.urlencode({"symbol": symbol})
-        raw = self._fetcher(f"https://fapi.binance.com/fapi/v1/premiumIndex?{query}", 5.0)
-        try:
-            if raw.get("symbol") != symbol:
-                raise ValueError
-            price = Decimal(str(raw["markPrice"]))
-            observed_at = datetime.fromtimestamp(int(raw["time"]) / 1_000, UTC)
-        except (InvalidOperation, KeyError, OSError, OverflowError, TypeError, ValueError) as exc:
+        if mark_price is None or mark_observed_at is None:
             raise DomainRejected(
-                "NOTILT_VALUATION_INVALID",
-                "USD valuation source returned invalid price facts",
-            ) from exc
-        if price <= 0 or observed_at > now + timedelta(seconds=30):
-            raise DomainRejected(
-                "NOTILT_VALUATION_INVALID",
-                "USD valuation price or timestamp is invalid",
+                "NOTILT_VALUATION_UNAVAILABLE",
+                "a persisted account-scoped mark fact is required for USD valuation",
             )
-        return UsdValuation(price, amount * price, observed_at)
+        if (
+            mark_price <= 0
+            or mark_observed_at > now + timedelta(seconds=30)
+            or now - mark_observed_at > timedelta(minutes=5)
+        ):
+            raise DomainRejected(
+                "NOTILT_VALUATION_INVALID",
+                "the persisted USD valuation mark is invalid or stale",
+            )
+        return UsdValuation(mark_price, amount * mark_price, mark_observed_at)
 
 
 def _amount(value: Any, decimals: int, field: str) -> Decimal:

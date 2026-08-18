@@ -22,8 +22,6 @@ def access_app(database: Database):
         allow_mock_identity=True,
         session_signing_secret="access-test-signing-secret-that-is-long-enough",  # noqa: S106
         public_base_url="http://test",
-        runtime_binance_account_id="acct-live",
-        runtime_hyperliquid_account_id="acct-hl",
         _env_file=None,
     )
     perptape = PerptapeClient(
@@ -330,6 +328,20 @@ async def exercise_six_identity_permission_matrix(database: Database) -> None:
             assert response.status_code == 200, response.text
             member_ids[username] = response.json()["user_id"]
 
+        registry_response = await admin_http.get("/api/exchange-accounts")
+        assert registry_response.status_code == 200, registry_response.text
+        exchange_account_ids = {
+            item["account_id"]: item["exchange_account_id"]
+            for item in registry_response.json()["data"]["data"]
+        }
+        exchange_endpoints = tuple(
+            endpoint
+            for account_id in ("acct-live", "acct-hl", "acct-okx", "acct-bybit")
+            for endpoint in (
+                f"/api/exchange-accounts/{exchange_account_ids[account_id]}/facts",
+                f"/api/exchange-accounts/{exchange_account_ids[account_id]}/fact-health",
+            )
+        )
         endpoints = (
             "/api/opportunities",
             "/api/proposal-defaults",
@@ -338,16 +350,7 @@ async def exercise_six_identity_permission_matrix(database: Database) -> None:
             "/api/campaign-exceptions",
             "/api/runtime/status",
             "/api/risk-controls",
-            "/api/venues/binance/status",
-            "/api/venues/binance/live/status",
-            "/api/venues/binance/testnet/status",
-            "/api/venues/hyperliquid/status",
-            "/api/venues/hyperliquid/live/status",
-            "/api/venues/hyperliquid/testnet/status",
-            "/api/venues/binance/facts?account_id=acct-live",
-            "/api/venues/hyperliquid/facts?account_id=acct-hl",
-            "/api/venues/okx/facts?account_id=acct-okx",
-            "/api/venues/bybit/facts?account_id=acct-bybit",
+            *exchange_endpoints,
             "/api/capital",
             "/api/admin/users",
         )
@@ -371,16 +374,7 @@ async def exercise_six_identity_permission_matrix(database: Database) -> None:
                 "/api/campaign-exceptions",
                 "/api/runtime/status",
                 "/api/risk-controls",
-                "/api/venues/binance/status",
-                "/api/venues/binance/live/status",
-                "/api/venues/binance/testnet/status",
-                "/api/venues/hyperliquid/status",
-                "/api/venues/hyperliquid/live/status",
-                "/api/venues/hyperliquid/testnet/status",
-                "/api/venues/binance/facts?account_id=acct-live",
-                "/api/venues/hyperliquid/facts?account_id=acct-hl",
-                "/api/venues/okx/facts?account_id=acct-okx",
-                "/api/venues/bybit/facts?account_id=acct-bybit",
+                *exchange_endpoints,
             },
         }
         for username, permitted in allowed.items():

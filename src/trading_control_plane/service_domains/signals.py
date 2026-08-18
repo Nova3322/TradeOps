@@ -1602,6 +1602,7 @@ class SignalService(ServiceComponent):
                 requested_scope = (scopes or {}).get(source_name)
                 account_id: str | None = None
                 venue: str | None = None
+                environment: str | None = None
                 if requested_scope is not None:
                     account_id, venue = requested_scope
                     account = session.scalar(
@@ -1622,6 +1623,7 @@ class SignalService(ServiceComponent):
                             "RUNTIME_HEALTH_SCOPE_INVALID",
                             "runtime source health account is outside the principal team",
                         )
+                    environment = account.environment
                     assignment = session.scalar(
                         select(RoleAssignment).where(
                             RoleAssignment.team_id == team.team_id,
@@ -1651,6 +1653,7 @@ class SignalService(ServiceComponent):
                     .where(
                         RuntimeSourceHealth.team_id == team.team_id,
                         RuntimeSourceHealth.source_name == source_name,
+                        RuntimeSourceHealth.environment == environment,
                         RuntimeSourceHealth.account_id == account_id,
                         RuntimeSourceHealth.venue == venue,
                     )
@@ -1694,6 +1697,7 @@ class SignalService(ServiceComponent):
                         RuntimeSourceHealth(
                             team_id=team.team_id,
                             source_name=source_name,
+                            environment=environment,
                             account_id=account_id,
                             venue=venue,
                             status=status,
@@ -1889,7 +1893,7 @@ class SignalService(ServiceComponent):
         actor_id: UUID,
         account_id: str,
         venue: str,
-        instruments: Sequence[BinanceInstrument | HyperliquidInstrument | VenueInstrument],
+        instruments: Sequence[VenueInstrument],
         hip3_dexes: tuple[str, ...] = (),
         runtime_binding: PreparedRuntimeAccountBinding | None = None,
         now: datetime,

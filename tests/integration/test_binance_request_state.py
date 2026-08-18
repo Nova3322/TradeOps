@@ -4,7 +4,7 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
-from trading_control_plane.binance_capital import BinanceCapitalGateway
+from trading_control_plane.adapters.binance_capital import BinanceCapitalGateway
 from trading_control_plane.binance_errors import classify_binance_rate_limit
 from trading_control_plane.binance_state import (
     BINANCE_DEPLOYMENT_SCOPE,

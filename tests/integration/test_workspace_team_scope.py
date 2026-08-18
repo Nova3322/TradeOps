@@ -34,8 +34,6 @@ def scope_app(database: Database):
         allow_mock_identity=True,
         session_signing_secret="scope-test-signing-secret-that-is-long-enough",  # noqa: S106
         public_base_url="http://test",
-        runtime_binance_account_id="acct-live",
-        runtime_hyperliquid_account_id="acct-hl",
         _env_file=None,
     )
     return create_app(

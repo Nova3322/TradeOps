@@ -199,6 +199,35 @@ class HyperliquidCapitalGateway:
         official = _require_official_api(base_url)
         return self._info_fetcher(f"{official}/info", payload, self._timeout_seconds)
 
+    def resolve_main_account(
+        self,
+        *,
+        base_url: str,
+        account_address: str | None,
+        api_wallet_address: str | None,
+    ) -> str | None:
+        """Resolve the owning account inside the isolated capital boundary."""
+
+        if account_address is not None:
+            return _address(account_address, "Hyperliquid main account")
+        if api_wallet_address is None:
+            return None
+        wallet = _address(api_wallet_address, "Hyperliquid API wallet")
+        raw = self._info(base_url, {"type": "userRole", "user": wallet})
+        if not isinstance(raw, dict) or raw.get("role") != "agent":
+            _reject(
+                "HYPERLIQUID_ACCOUNT_UNRESOLVED",
+                "configured API wallet is not an authorized Hyperliquid agent",
+            )
+        data = raw.get("data")
+        user = data.get("user") if isinstance(data, dict) else None
+        if not isinstance(user, str):
+            _reject(
+                "HYPERLIQUID_ACCOUNT_UNRESOLVED",
+                "Hyperliquid agent role omitted its owning main account",
+            )
+        return _address(user, "Hyperliquid main account")
+
     def _canonical_spot_token(self, *, base_url: str, name: str) -> str:
         """Resolve the current canonical ``tokenName:tokenId`` exchange identifier."""
 
@@ -395,20 +424,14 @@ class HyperliquidCapitalGateway:
         value = _amount(amount)
         routing = self._info(base_url, {"type": "usdcRouting"})
         withdrawal_route = (
-            str(routing.get("withdrawalRoute", "")).lower()
-            if isinstance(routing, dict)
-            else ""
+            str(routing.get("withdrawalRoute", "")).lower() if isinstance(routing, dict) else ""
         )
         if withdrawal_route not in {"cctp", "bridge"}:
             _reject(
                 "HYPERLIQUID_WITHDRAWAL_ROUTE_UNKNOWN",
                 "Hyperliquid did not return a supported current USDC withdrawal route",
             )
-        protocol_fee = (
-            CCTP_WITHDRAWAL_FEE
-            if withdrawal_route == "cctp"
-            else LEGACY_WITHDRAWAL_FEE
-        )
+        protocol_fee = CCTP_WITHDRAWAL_FEE if withdrawal_route == "cctp" else LEGACY_WITHDRAWAL_FEE
         try:
             fee_limit = None if max_fee is None else Decimal(str(max_fee))
         except (InvalidOperation, TypeError, ValueError) as exc:
@@ -434,6 +457,11 @@ class HyperliquidCapitalGateway:
                 ),
                 None,
             )
+            if usdc is None:
+                raise DomainRejected(
+                    "HYPERLIQUID_WITHDRAWABLE_UNKNOWN",
+                    "Hyperliquid did not return a unified-account USDC balance",
+                )
             try:
                 withdrawable = Decimal(str(usdc["total"])) - Decimal(str(usdc["hold"]))
             except (InvalidOperation, KeyError, TypeError, ValueError) as exc:
@@ -503,9 +531,7 @@ class HyperliquidCapitalGateway:
                     "Hyperliquid returned an invalid CCTP activation fee",
                 )
         required_balance = (
-            value + activation_fee
-            if withdrawal_route == "cctp"
-            else value + LEGACY_WITHDRAWAL_FEE
+            value + activation_fee if withdrawal_route == "cctp" else value + LEGACY_WITHDRAWAL_FEE
         )
         if withdrawable < required_balance:
             _reject(
@@ -697,9 +723,7 @@ class HyperliquidCapitalGateway:
             # action without leaving it permanently pending.
             if nonce is not None:
                 valid_nonces = (
-                    {nonce}
-                    if receipt_kind == "CCTP_WITHDRAWAL"
-                    else {nonce, nonce * 1_000}
+                    {nonce} if receipt_kind == "CCTP_WITHDRAWAL" else {nonce, nonce * 1_000}
                 )
                 if observed_nonce not in valid_nonces:
                     continue
@@ -876,9 +900,7 @@ class HyperliquidCapitalGateway:
         target = _address(recipient, "USDC recipient")
         token = _address(expected_token, "USDC token")
         value = _amount(amount)
-        latest_raw = self._rpc_fetcher(
-            trusted_rpc, "eth_blockNumber", [], self._timeout_seconds
-        )
+        latest_raw = self._rpc_fetcher(trusted_rpc, "eth_blockNumber", [], self._timeout_seconds)
         latest_block_raw = self._rpc_fetcher(
             trusted_rpc, "eth_getBlockByNumber", ["latest", False], self._timeout_seconds
         )

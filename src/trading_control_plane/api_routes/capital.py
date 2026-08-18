@@ -1,11 +1,15 @@
 from __future__ import annotations
 
+from trading_control_plane.adapters.capital import (
+    CapitalOperation,
+    CapitalScope,
+    CapitalVenue,
+)
 from trading_control_plane.api_core import (
     HYPERLIQUID_BRIDGE2_ADDRESS,
     SUPPORTED_NOTILT_CHAINS,
     UUID,
     Any,
-    BinanceCapitalGateway,
     CapitalAutomationEvaluateRequest,
     CapitalAutomationPolicyRequest,
     CapitalBalanceFactRequest,
@@ -38,7 +42,6 @@ from trading_control_plane.api_core import (
     _now,
     build_direct_capital_plan,
     datetime,
-    resolve_hyperliquid_main_account,
     status,
     timedelta,
 )
@@ -57,8 +60,7 @@ class _CapitalRoutes:
         self.resolved_settings = common.settings
         self.service = common.service
         self.sync_configured_notilt_vault = dependencies.sync_configured_notilt_vault
-        self.resolved_binance_capital = dependencies.binance_capital
-        self.resolved_hyperliquid_capital = dependencies.hyperliquid_capital
+        self.capital_adapter_resolver = dependencies.capital_adapter_resolver
         self.configured_notilt_scope = dependencies.configured_notilt_scope
         self.notilt_chain_id_for_network = dependencies.notilt_chain_id_for_network
         self.resolved_safe_spending = dependencies.safe_spending
@@ -80,26 +82,56 @@ class _CapitalRoutes:
 
         return self.queries().capital_center(actor_id)
 
-    def _binance_capital_gateway(
+    def _capital_scope(
         self,
         *,
         actor_id: UUID,
         account_id: str | None,
-    ) -> BinanceCapitalGateway:
-        """Resolve only the separately configured exact-account capital credential."""
-        del actor_id
-        configured_account_id = self.resolved_settings.binance_capital_account_id
-        if not self.resolved_binance_capital.configured or configured_account_id is None:
+        venue: CapitalVenue,
+    ) -> CapitalScope:
+        if not account_id:
             raise DomainRejected(
-                "BINANCE_CAPITAL_CREDENTIALS_NOT_READY",
-                "dedicated Binance capital credentials are not configured",
+                "CAPITAL_ACCOUNT_SCOPE_MISSING",
+                "capital operations require an exact runtime account ID",
             )
-        if account_id != configured_account_id:
-            raise DomainRejected(
-                "BINANCE_CAPITAL_ACCOUNT_MISMATCH",
-                "the capital credential is outside the exact runtime account scope",
-            )
-        return self.resolved_binance_capital
+        account = self.queries().capital_account_scope(
+            actor_id,
+            account_id,
+            venue,
+            "LIVE",
+        )
+        return CapitalScope(
+            workspace_id=account["workspace_id"],
+            team_id=account["team_id"],
+            account_id=account_id,
+            venue=venue,
+            environment="LIVE",
+            account_mode=account["account_mode"],
+        )
+
+    def _capital_call(
+        self,
+        *,
+        actor_id: UUID,
+        account_id: str | None,
+        venue: CapitalVenue,
+        operation: CapitalOperation,
+        parameters: dict[str, Any],
+    ) -> Any:
+        scope = self._capital_scope(actor_id=actor_id, account_id=account_id, venue=venue)
+        return self.capital_adapter_resolver(scope).execute(operation, parameters).value
+
+    @staticmethod
+    def _context_venue(context: dict[str, Any]) -> CapitalVenue:
+        path = str(context["path"])
+        if "BINANCE" in path:
+            return "BINANCE"
+        if "HYPERLIQUID" in path:
+            return "HYPERLIQUID"
+        raise DomainRejected(
+            "CAPITAL_ACCOUNT_SCOPE_MISSING",
+            "capital path has no exact exchange-account scope",
+        )
 
     def _hyperliquid_capital_settings(
         self,
@@ -108,21 +140,14 @@ class _CapitalRoutes:
         account_id: str | None,
         direct_settings: Any,
     ) -> Any:
-        """Bind capital signing previews to the selected DB account, never a stale env label."""
-        if not account_id:
-            return direct_settings
-        binding = self.service().capital_account_binding(
-            actor_id=actor_id,
-            account_id=account_id,
-            venue="HYPERLIQUID",
-            environment="LIVE",
-        )
-        return direct_settings.model_copy(
-            update={
-                "hyperliquid_account_address": binding.credentials.get("account_address"),
-                "hyperliquid_api_wallet_address": binding.credentials.get("api_wallet_address"),
-            }
-        )
+        """Validate the dedicated capital scope without decrypting fact credentials."""
+        if account_id != direct_settings.capital_direct_hyperliquid_account_id:
+            raise DomainRejected(
+                "HYPERLIQUID_CAPITAL_ACCOUNT_MISMATCH",
+                "the selected account does not match the dedicated capital configuration",
+            )
+        self._capital_scope(actor_id=actor_id, account_id=account_id, venue="HYPERLIQUID")
+        return direct_settings
 
     def register_configuration(self) -> None:
         @self.app.get("/api/capital/direct-configurations")
@@ -334,28 +359,6 @@ class _CapitalRoutes:
                     "NOTILT_VAULT_SCOPE_MISMATCH",
                     "direct capital Vault must match the configured trusted NoTilt scope",
                 )
-            for venue, configured_account, runtime_account in (
-                (
-                    "BINANCE",
-                    merged["binance_account_id"],
-                    self.resolved_settings.runtime_binance_account_id,
-                ),
-                (
-                    "HYPERLIQUID",
-                    merged["hyperliquid_account_id"],
-                    self.resolved_settings.runtime_hyperliquid_account_id,
-                ),
-            ):
-                if (
-                    payload.environment == "LIVE"
-                    and configured_account is not None
-                    and runtime_account is not None
-                    and configured_account != runtime_account
-                ):
-                    raise DomainRejected(
-                        "DEFAULT_ACCOUNT_REQUIRED",
-                        f"{venue} capital account must match the single configured default account",
-                    )
             config_id = self.service().set_direct_capital_configuration(
                 identity.user_id,
                 payload.idempotency_key,
@@ -465,10 +468,16 @@ class _CapitalRoutes:
                     account_id=direct_settings.capital_direct_hyperliquid_account_id,
                     direct_settings=direct_settings,
                 )
-                hyperliquid_main = resolve_hyperliquid_main_account(
-                    base_url=direct_settings.hyperliquid_base_url,
-                    account_address=direct_settings.hyperliquid_account_address,
-                    api_wallet_address=direct_settings.hyperliquid_api_wallet_address,
+                hyperliquid_main = self._capital_call(
+                    actor_id=identity.user_id,
+                    account_id=direct_settings.capital_direct_hyperliquid_account_id,
+                    venue="HYPERLIQUID",
+                    operation=CapitalOperation.HYPERLIQUID_RESOLVE_MAIN,
+                    parameters={
+                        "base_url": direct_settings.hyperliquid_base_url,
+                        "account_address": direct_settings.hyperliquid_account_address,
+                        "api_wallet_address": direct_settings.hyperliquid_api_wallet_address,
+                    },
                 )
                 if hyperliquid_main is None:
                     raise DomainRejected(
@@ -530,9 +539,8 @@ class _CapitalRoutes:
                     "BINANCE_CAPITAL_PATH_INVALID", "this operation does not contain a Binance leg"
                 )
             direct_settings, _ = self.effective_direct_capital_settings(identity.user_id)
-            binance_capital = self._binance_capital_gateway(
-                actor_id=identity.user_id,
-                account_id=(None if context["account_id"] is None else str(context["account_id"])),
+            capital_account_id = (
+                None if context["account_id"] is None else str(context["account_id"])
             )
             if path is DirectCapitalPath.VAULT_TO_BINANCE:
                 destination = direct_settings.capital_direct_binance_deposit_address
@@ -542,11 +550,17 @@ class _CapitalRoutes:
                         "BINANCE_CAPITAL_SCOPE_MISSING",
                         "frozen treasury source and Binance deposit address are required",
                     )
-                artifact = binance_capital.prepare_deposit(
-                    expected_address=destination,
-                    amount=Decimal(str(context["min_received"])),
-                    source_address=str(source),
-                    now=now,
+                artifact = self._capital_call(
+                    actor_id=identity.user_id,
+                    account_id=capital_account_id,
+                    venue="BINANCE",
+                    operation=CapitalOperation.BINANCE_PREPARE_DEPOSIT,
+                    parameters={
+                        "expected_address": destination,
+                        "amount": Decimal(str(context["min_received"])),
+                        "source_address": str(source),
+                        "now": now,
+                    },
                 )
             else:
                 destination = direct_settings.capital_direct_binance_withdrawal_address
@@ -561,12 +575,18 @@ class _CapitalRoutes:
                         "BINANCE_CAPITAL_DESTINATION_MISMATCH",
                         "frozen treasury destination does not match Binance configuration",
                     )
-                artifact = binance_capital.prepare_withdrawal(
-                    destination=destination,
-                    amount=Decimal(str(context["amount"])),
-                    max_fee=Decimal(str(max_fee)),
-                    operation_id=str(operation_id),
-                    now=now,
+                artifact = self._capital_call(
+                    actor_id=identity.user_id,
+                    account_id=capital_account_id,
+                    venue="BINANCE",
+                    operation=CapitalOperation.BINANCE_PREPARE_WITHDRAWAL,
+                    parameters={
+                        "destination": destination,
+                        "amount": Decimal(str(context["amount"])),
+                        "max_fee": Decimal(str(max_fee)),
+                        "operation_id": str(operation_id),
+                        "now": now,
+                    },
                 )
             version = self.service().record_direct_capital_binance_preview(
                 operation_id,
@@ -580,7 +600,7 @@ class _CapitalRoutes:
                 "operation_id": str(operation_id),
                 "version": version,
                 "artifact": artifact,
-                "credentials_configured": binance_capital.configured,
+                "credentials_configured": True,
                 "submission_enabled": direct_settings.binance_capital_withdraw_enabled,
                 "signing_material_returned": False,
                 "transfer_submitted": False,
@@ -629,11 +649,19 @@ class _CapitalRoutes:
                 raise DomainRejected(
                     "BINANCE_CAPITAL_PREFLIGHT_REQUIRED", "current live preflight is required"
                 )
-            binance_capital = self._binance_capital_gateway(
+            submission = self._capital_call(
                 actor_id=identity.user_id,
-                account_id=(None if context["account_id"] is None else str(context["account_id"])),
+                account_id=(
+                    None if context["account_id"] is None else str(context["account_id"])
+                ),
+                venue="BINANCE",
+                operation=CapitalOperation.BINANCE_SUBMIT_WITHDRAWAL,
+                parameters={
+                    "artifact": preflight,
+                    "now": now,
+                    "operation_id": str(operation_id),
+                },
             )
-            submission = binance_capital.submit_withdrawal(preflight, now=now)
             version = self.service().record_direct_capital_binance_submission(
                 operation_id,
                 identity.user_id,
@@ -665,9 +693,8 @@ class _CapitalRoutes:
                     "VERSION_CONFLICT", "direct capital operation changed; refresh"
                 )
             direct_settings, _ = self.effective_direct_capital_settings(identity.user_id)
-            binance_capital = self._binance_capital_gateway(
-                actor_id=identity.user_id,
-                account_id=(None if context["account_id"] is None else str(context["account_id"])),
+            capital_account_id = (
+                None if context["account_id"] is None else str(context["account_id"])
             )
             poll_token = payload.idempotency_key
             self.service().acquire_direct_capital_binance_receipt_poll(
@@ -713,10 +740,16 @@ class _CapitalRoutes:
                         raise DomainRejected(
                             "BINANCE_CAPITAL_SCOPE_MISSING", "Binance deposit address is missing"
                         )
-                    deposit_evidence = binance_capital.verify_deposit(
-                        transaction_hash=payload.transaction_hash,
-                        destination=destination,
-                        amount=Decimal(str(context["min_received"])),
+                    deposit_evidence = self._capital_call(
+                        actor_id=identity.user_id,
+                        account_id=capital_account_id,
+                        venue="BINANCE",
+                        operation=CapitalOperation.BINANCE_VERIFY_DEPOSIT,
+                        parameters={
+                            "transaction_hash": payload.transaction_hash,
+                            "destination": destination,
+                            "amount": Decimal(str(context["min_received"])),
+                        },
                     )
                     preflight = next(
                         (
@@ -738,10 +771,17 @@ class _CapitalRoutes:
                             "BINANCE_CAPITAL_PREFLIGHT_INVALID",
                             "the frozen Binance deposit preflight timestamp is invalid",
                         ) from exc
-                    internal_transfer = binance_capital.complete_deposit_to_usdm(
-                        amount=Decimal(str(context["min_received"])),
-                        prepared_at=prepared_at,
-                        now=now,
+                    internal_transfer = self._capital_call(
+                        actor_id=identity.user_id,
+                        account_id=capital_account_id,
+                        venue="BINANCE",
+                        operation=CapitalOperation.BINANCE_COMPLETE_DEPOSIT,
+                        parameters={
+                            "amount": Decimal(str(context["min_received"])),
+                            "prepared_at": prepared_at,
+                            "now": now,
+                            "operation_id": str(operation_id),
+                        },
                     )
                     evidence = {
                         "deposit": deposit_evidence,
@@ -763,19 +803,32 @@ class _CapitalRoutes:
                             "BINANCE_CAPITAL_SCOPE_MISSING",
                             "frozen treasury destination and trusted Arbitrum RPC are required",
                         )
-                    withdrawal = binance_capital.verify_withdrawal(
-                        order_id=str(operation_id),
-                        destination=destination,
-                        amount=Decimal(str(context["amount"])),
+                    withdrawal = self._capital_call(
+                        actor_id=identity.user_id,
+                        account_id=capital_account_id,
+                        venue="BINANCE",
+                        operation=CapitalOperation.BINANCE_VERIFY_WITHDRAWAL,
+                        parameters={
+                            "order_id": str(operation_id),
+                            "destination": destination,
+                            "amount": Decimal(str(context["amount"])),
+                        },
                     )
                     transaction_hash = str(withdrawal["transactionHash"])
-                    chain_gateway = self.resolved_hyperliquid_capital
-                    chain = chain_gateway.verify_arbitrum_usdc_credit_from_any_sender(
-                        rpc_url=rpc_url,
-                        transaction_hash=transaction_hash,
-                        recipient=destination,
-                        amount=str(context["amount"]),
-                        min_confirmations=direct_settings.notilt_arbitrum_min_confirmations,
+                    chain = self._capital_call(
+                        actor_id=identity.user_id,
+                        account_id=capital_account_id,
+                        venue="BINANCE",
+                        operation=CapitalOperation.HYPERLIQUID_VERIFY_ARBITRUM_CREDIT_ANY,
+                        parameters={
+                            "rpc_url": rpc_url,
+                            "transaction_hash": transaction_hash,
+                            "recipient": destination,
+                            "amount": str(context["amount"]),
+                            "min_confirmations": (
+                                direct_settings.notilt_arbitrum_min_confirmations
+                            ),
+                        },
                     )
                     evidence = {"binance": withdrawal, "arbitrum": chain}
                 version = self.service().record_direct_capital_binance_receipt(
@@ -1181,11 +1234,19 @@ class _CapitalRoutes:
                     "BINANCE_CAPITAL_DESTINATION_MISMATCH",
                     "frozen Binance deposit address no longer matches configuration",
                 )
-            artifact = self.resolved_hyperliquid_capital.prepare_arbitrum_usdc_transfer(
-                sender=agent,
-                destination=destination,
-                amount=str(context["min_received"]),
-                now=now,
+            artifact = self._capital_call(
+                actor_id=identity.user_id,
+                account_id=(
+                    None if context["account_id"] is None else str(context["account_id"])
+                ),
+                venue=self._context_venue(context),
+                operation=CapitalOperation.HYPERLIQUID_PREPARE_ARBITRUM_TRANSFER,
+                parameters={
+                    "sender": agent,
+                    "destination": destination,
+                    "amount": str(context["min_received"]),
+                    "now": now,
+                },
             )
             version = self.service().record_direct_capital_notilt_destination_preview(
                 operation_id,
@@ -1337,13 +1398,21 @@ class _CapitalRoutes:
                     "SAFE_SPENDING_LIMIT_NOT_CONFIGURED",
                     "Safe, frozen destination and trusted Arbitrum RPC are required",
                 )
-            evidence = self.resolved_hyperliquid_capital.verify_arbitrum_usdc_credit(
-                rpc_url=rpc_url,
-                transaction_hash=payload.transaction_hash,
-                sender=safe,
-                recipient=str(destination),
-                amount=str(context["min_received"]),
-                min_confirmations=direct_settings.notilt_arbitrum_min_confirmations,
+            evidence = self._capital_call(
+                actor_id=identity.user_id,
+                account_id=(
+                    None if context["account_id"] is None else str(context["account_id"])
+                ),
+                venue=self._context_venue(context),
+                operation=CapitalOperation.HYPERLIQUID_VERIFY_ARBITRUM_CREDIT,
+                parameters={
+                    "rpc_url": rpc_url,
+                    "transaction_hash": payload.transaction_hash,
+                    "sender": safe,
+                    "recipient": str(destination),
+                    "amount": str(context["min_received"]),
+                    "min_confirmations": direct_settings.notilt_arbitrum_min_confirmations,
+                },
             )
             version = self.service().record_direct_capital_treasury_withdrawal_receipt(
                 operation_id,
@@ -1402,10 +1471,19 @@ class _CapitalRoutes:
                     "HYPERLIQUID_BRIDGE_UNTRUSTED",
                     "configured bridge does not match the official Arbitrum Bridge2 deployment",
                 )
-            main_account = resolve_hyperliquid_main_account(
-                base_url=direct_settings.hyperliquid_base_url,
-                account_address=direct_settings.hyperliquid_account_address,
-                api_wallet_address=direct_settings.hyperliquid_api_wallet_address,
+            capital_account_id = (
+                None if context["account_id"] is None else str(context["account_id"])
+            )
+            main_account = self._capital_call(
+                actor_id=identity.user_id,
+                account_id=capital_account_id,
+                venue="HYPERLIQUID",
+                operation=CapitalOperation.HYPERLIQUID_RESOLVE_MAIN,
+                parameters={
+                    "base_url": direct_settings.hyperliquid_base_url,
+                    "account_address": direct_settings.hyperliquid_account_address,
+                    "api_wallet_address": direct_settings.hyperliquid_api_wallet_address,
+                },
             )
             if main_account is None:
                 raise DomainRejected(
@@ -1439,9 +1517,12 @@ class _CapitalRoutes:
                         "a trusted Arbitrum RPC is required before preparing the bridge deposit",
                     )
                 required = Decimal(str(context["min_received"]))
-                balance = self.resolved_hyperliquid_capital.arbitrum_usdc_balance(
-                    rpc_url=rpc_url,
-                    address=frozen_wallet,
+                balance = self._capital_call(
+                    actor_id=identity.user_id,
+                    account_id=capital_account_id,
+                    venue="HYPERLIQUID",
+                    operation=CapitalOperation.HYPERLIQUID_ARBITRUM_BALANCE,
+                    parameters={"rpc_url": rpc_url, "address": frozen_wallet},
                 )
                 if balance < required:
                     raise DomainRejected(
@@ -1449,28 +1530,40 @@ class _CapitalRoutes:
                         "the frozen Hyperliquid main wallet no longer holds the confirmed "
                         "deposit amount",
                     )
-                artifact = self.resolved_hyperliquid_capital.prepare_deposit(
-                    base_url=direct_settings.hyperliquid_base_url,
-                    main_account=main_account,
-                    api_wallet_address=direct_settings.hyperliquid_api_wallet_address,
-                    owned_arbitrum_address=frozen_wallet,
-                    bridge_address=bridge,
-                    amount=str(context["min_received"]),
-                    now=now,
+                artifact = self._capital_call(
+                    actor_id=identity.user_id,
+                    account_id=capital_account_id,
+                    venue="HYPERLIQUID",
+                    operation=CapitalOperation.HYPERLIQUID_PREPARE_DEPOSIT,
+                    parameters={
+                        "base_url": direct_settings.hyperliquid_base_url,
+                        "main_account": main_account,
+                        "api_wallet_address": direct_settings.hyperliquid_api_wallet_address,
+                        "owned_arbitrum_address": frozen_wallet,
+                        "bridge_address": bridge,
+                        "amount": str(context["min_received"]),
+                        "now": now,
+                    },
                 )
             else:
-                artifact = self.resolved_hyperliquid_capital.prepare_withdrawal(
-                    base_url=direct_settings.hyperliquid_base_url,
-                    main_account=main_account,
-                    api_wallet_address=direct_settings.hyperliquid_api_wallet_address,
-                    destination=(
-                        str(context["destination_reference"])
-                        if context["treasury_provider"] == "SAFE_SPENDING_LIMIT"
-                        else owned
-                    ),
-                    amount=str(context["amount"]),
-                    max_fee=context["max_fee"],
-                    now=now,
+                artifact = self._capital_call(
+                    actor_id=identity.user_id,
+                    account_id=capital_account_id,
+                    venue="HYPERLIQUID",
+                    operation=CapitalOperation.HYPERLIQUID_PREPARE_WITHDRAWAL,
+                    parameters={
+                        "base_url": direct_settings.hyperliquid_base_url,
+                        "main_account": main_account,
+                        "api_wallet_address": direct_settings.hyperliquid_api_wallet_address,
+                        "destination": (
+                            str(context["destination_reference"])
+                            if context["treasury_provider"] == "SAFE_SPENDING_LIMIT"
+                            else owned
+                        ),
+                        "amount": str(context["amount"]),
+                        "max_fee": context["max_fee"],
+                        "now": now,
+                    },
                 )
             version = self.service().record_direct_capital_hyperliquid_preview(
                 operation_id,
@@ -1547,10 +1640,19 @@ class _CapitalRoutes:
                 account_id=(None if context["account_id"] is None else str(context["account_id"])),
                 direct_settings=direct_settings,
             )
-            main_account = resolve_hyperliquid_main_account(
-                base_url=direct_settings.hyperliquid_base_url,
-                account_address=direct_settings.hyperliquid_account_address,
-                api_wallet_address=direct_settings.hyperliquid_api_wallet_address,
+            capital_account_id = (
+                None if context["account_id"] is None else str(context["account_id"])
+            )
+            main_account = self._capital_call(
+                actor_id=identity.user_id,
+                account_id=capital_account_id,
+                venue="HYPERLIQUID",
+                operation=CapitalOperation.HYPERLIQUID_RESOLVE_MAIN,
+                parameters={
+                    "base_url": direct_settings.hyperliquid_base_url,
+                    "account_address": direct_settings.hyperliquid_account_address,
+                    "api_wallet_address": direct_settings.hyperliquid_api_wallet_address,
+                },
             )
             owned = direct_settings.capital_direct_owned_arbitrum_address
             bridge = direct_settings.capital_direct_hyperliquid_bridge_address
@@ -1627,23 +1729,30 @@ class _CapitalRoutes:
                 )
             if payload.stage.endswith("LEDGER"):
                 receipt_amount = artifact["amount"]
-                evidence = self.resolved_hyperliquid_capital.verify_hyperliquid_ledger(
-                    base_url=direct_settings.hyperliquid_base_url,
-                    main_account=main_account,
-                    receipt_kind=(
-                        "DEPOSIT"
-                        if "DEPOSIT" in payload.stage
-                        else "CLASS_TRANSFER"
-                        if "CLASS_TRANSFER" in payload.stage
-                        else "CCTP_WITHDRAWAL"
-                        if artifact.get("kind") == "HYPERLIQUID_CCTP_WITHDRAWAL_TYPED_REQUEST"
-                        else "WITHDRAWAL"
-                    ),
-                    amount=str(receipt_amount),
-                    prepared_at=prepared_at,
-                    nonce=payload.nonce,
-                    action_hash=payload.action_hash,
-                    now=now,
+                evidence = self._capital_call(
+                    actor_id=identity.user_id,
+                    account_id=capital_account_id,
+                    venue="HYPERLIQUID",
+                    operation=CapitalOperation.HYPERLIQUID_VERIFY_LEDGER,
+                    parameters={
+                        "base_url": direct_settings.hyperliquid_base_url,
+                        "main_account": main_account,
+                        "receipt_kind": (
+                            "DEPOSIT"
+                            if "DEPOSIT" in payload.stage
+                            else "CLASS_TRANSFER"
+                            if "CLASS_TRANSFER" in payload.stage
+                            else "CCTP_WITHDRAWAL"
+                            if artifact.get("kind")
+                            == "HYPERLIQUID_CCTP_WITHDRAWAL_TYPED_REQUEST"
+                            else "WITHDRAWAL"
+                        ),
+                        "amount": str(receipt_amount),
+                        "prepared_at": prepared_at,
+                        "nonce": payload.nonce,
+                        "action_hash": payload.action_hash,
+                        "now": now,
+                    },
                 )
             else:
                 rpc_url = (
@@ -1656,22 +1765,38 @@ class _CapitalRoutes:
                         "a trusted Arbitrum RPC is required for public receipt verification",
                     )
                 if payload.stage == "HYPERLIQUID_DEPOSIT_ARBITRUM":
-                    evidence = self.resolved_hyperliquid_capital.verify_arbitrum_usdc_transfer(
-                        rpc_url=rpc_url,
-                        transaction_hash=str(payload.transaction_hash),
-                        sender=str(artifact["from"]),
-                        recipient=bridge,
-                        amount=str(artifact["amount"]),
-                        min_confirmations=direct_settings.notilt_arbitrum_min_confirmations,
+                    evidence = self._capital_call(
+                        actor_id=identity.user_id,
+                        account_id=capital_account_id,
+                        venue="HYPERLIQUID",
+                        operation=CapitalOperation.HYPERLIQUID_VERIFY_ARBITRUM_TRANSFER,
+                        parameters={
+                            "rpc_url": rpc_url,
+                            "transaction_hash": str(payload.transaction_hash),
+                            "sender": str(artifact["from"]),
+                            "recipient": bridge,
+                            "amount": str(artifact["amount"]),
+                            "min_confirmations": (
+                                direct_settings.notilt_arbitrum_min_confirmations
+                            ),
+                        },
                     )
                 elif artifact.get("kind") == "HYPERLIQUID_CCTP_WITHDRAWAL_TYPED_REQUEST":
-                    evidence = self.resolved_hyperliquid_capital.find_cctp_withdrawal_credit(
-                        rpc_url=rpc_url,
-                        main_account=main_account,
-                        nonce=int(artifact["nonce"]),
-                        recipient=str(artifact["destination"]),
-                        amount=str(artifact["minReceived"]),
-                        min_confirmations=direct_settings.notilt_arbitrum_min_confirmations,
+                    evidence = self._capital_call(
+                        actor_id=identity.user_id,
+                        account_id=capital_account_id,
+                        venue="HYPERLIQUID",
+                        operation=CapitalOperation.HYPERLIQUID_FIND_CCTP_CREDIT,
+                        parameters={
+                            "rpc_url": rpc_url,
+                            "main_account": main_account,
+                            "nonce": int(artifact["nonce"]),
+                            "recipient": str(artifact["destination"]),
+                            "amount": str(artifact["minReceived"]),
+                            "min_confirmations": (
+                                direct_settings.notilt_arbitrum_min_confirmations
+                            ),
+                        },
                     )
                 else:
                     receipt_kwargs = {
@@ -1685,14 +1810,24 @@ class _CapitalRoutes:
                         "amount": str(artifact.get("minReceived", context["min_received"])),
                         "min_confirmations": direct_settings.notilt_arbitrum_min_confirmations,
                     }
-                    evidence = (
-                        self.resolved_hyperliquid_capital.verify_arbitrum_usdc_credit(
-                            transaction_hash=str(payload.transaction_hash), **receipt_kwargs
-                        )
+                    operation = (
+                        CapitalOperation.HYPERLIQUID_VERIFY_ARBITRUM_CREDIT
                         if payload.transaction_hash is not None
-                        else self.resolved_hyperliquid_capital.find_arbitrum_usdc_credit(
-                            prepared_at=prepared_at, **receipt_kwargs
-                        )
+                        else CapitalOperation.HYPERLIQUID_FIND_ARBITRUM_CREDIT
+                    )
+                    evidence = self._capital_call(
+                        actor_id=identity.user_id,
+                        account_id=capital_account_id,
+                        venue="HYPERLIQUID",
+                        operation=operation,
+                        parameters={
+                            **receipt_kwargs,
+                            **(
+                                {"transaction_hash": str(payload.transaction_hash)}
+                                if payload.transaction_hash is not None
+                                else {"prepared_at": prepared_at}
+                            ),
+                        },
                     )
             version = self.service().record_direct_capital_hyperliquid_receipt(
                 operation_id,
@@ -1794,13 +1929,23 @@ class _CapitalRoutes:
                         "Safe address and trusted Arbitrum RPC are required for receipt "
                         "verification",
                     )
-                evidence = self.resolved_hyperliquid_capital.verify_arbitrum_usdc_transfer(
-                    rpc_url=rpc_url,
-                    transaction_hash=payload.transaction_hash,
-                    sender=owned,
-                    recipient=safe,
-                    amount=str(context["min_received"]),
-                    min_confirmations=direct_settings.notilt_arbitrum_min_confirmations,
+                evidence = self._capital_call(
+                    actor_id=identity.user_id,
+                    account_id=(
+                        None if context["account_id"] is None else str(context["account_id"])
+                    ),
+                    venue=self._context_venue(context),
+                    operation=CapitalOperation.HYPERLIQUID_VERIFY_ARBITRUM_TRANSFER,
+                    parameters={
+                        "rpc_url": rpc_url,
+                        "transaction_hash": payload.transaction_hash,
+                        "sender": owned,
+                        "recipient": safe,
+                        "amount": str(context["min_received"]),
+                        "min_confirmations": (
+                            direct_settings.notilt_arbitrum_min_confirmations
+                        ),
+                    },
                 )
             version = self.service().record_direct_capital_treasury_receipt(
                 operation_id,

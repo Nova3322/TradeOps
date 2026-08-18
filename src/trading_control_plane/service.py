@@ -35,7 +35,6 @@ from trading_control_plane.service_domains.execution_freqtrade import (
     FreqtradeRecoveryExecutionService,
 )
 from trading_control_plane.service_domains.execution_intent import IntentExecutionService
-from trading_control_plane.service_domains.execution_venue import VenueCommandExecutionService
 from trading_control_plane.service_domains.proposals import ProposalService
 from trading_control_plane.service_domains.risk_authorization import AuthorizationRiskService
 from trading_control_plane.service_domains.risk_policy import PolicyRiskService
@@ -59,7 +58,6 @@ class TradingService(
     RecoveryRiskService,
     ReconciliationRiskService,
     IntentExecutionService,
-    VenueCommandExecutionService,
     FactIngestionExecutionService,
     CampaignExecutionService,
     TradingModeService,
@@ -79,15 +77,10 @@ class TradingService(
         self,
         database: Database,
         *,
-        authoritative_live_accounts: dict[str, str] | None = None,
         credential_encryption_key: str | None = None,
     ) -> None:
         credential_cipher = CredentialCipher(credential_encryption_key)
         self.runtime = ServiceRuntime(
             database=database,
             credential_cipher=credential_cipher,
-            authoritative_live_accounts={
-                venue.upper(): account_id
-                for venue, account_id in (authoritative_live_accounts or {}).items()
-            },
         )

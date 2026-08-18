@@ -218,31 +218,33 @@ async function renderVenueAccountDetail(requestedAccountId) {
     return;
   }
   const venue = account.venue;
-  const endpoint = venue.toLowerCase();
-  const legacyStatusRequest = ['BINANCE','HYPERLIQUID'].includes(venue)
-    ? api(`/api/venues/${endpoint}/status`).catch(error => [403, 409].includes(error.status) ? null : Promise.reject(error))
-    : Promise.resolve(null);
-  const [legacyStatus, runtime, factsResult] = await Promise.all([
-    legacyStatusRequest,
+  const [runtime, factsResult, health] = await Promise.all([
     api('/api/runtime/status').catch(error => [403, 409].includes(error.status) ? null : Promise.reject(error)),
-    api(`/api/venues/${endpoint}/facts?account_id=${encodeURIComponent(account.account_id)}`),
+    api(`/api/exchange-accounts/${encodeURIComponent(account.exchange_account_id)}/facts`),
+    api(`/api/exchange-accounts/${encodeURIComponent(account.exchange_account_id)}/fact-health`),
   ]);
   const accountId = account.account_id;
   const facts = factsResult.data;
   const processRuntimeEnabled = Boolean(runtime?.data?.external_boundaries?.runtime_sync?.enabled);
-  const status = legacyStatus || {
+  const status = {
     venue,
-    execution_backend:'UNAVAILABLE',
+    execution_backend:'FREQTRADE',
     worker_configured:false,
     automatic_sync_enabled:Boolean(processRuntimeEnabled && account?.runtime_binding?.bound),
     automatic_sync_interval_seconds:runtime?.data?.external_boundaries?.runtime_sync?.interval_seconds || 0,
     default_account_id:accountId,
-    fact_environment:'LIVE',
+    fact_environment:account.environment,
   };
   status.automatic_sync_enabled = Boolean(processRuntimeEnabled && account.runtime_binding?.bound);
   status.default_account_id = accountId;
   const aggregateConnection = runtime?.data?.connections?.[venue] || null;
-  const exactHealth = exchangeAccountRuntimeHealth(runtime, account);
+  const persistedHealth = health?.data
+    ? {
+        ...health.data,
+        status:health.data.runtime_status || (health.data.data_status === 'CURRENT' ? 'SUCCESS' : 'FAILED'),
+      }
+    : null;
+  const exactHealth = persistedHealth || exchangeAccountRuntimeHealth(runtime, account);
   const connection = exactHealth
     ? {
         ...aggregateConnection,

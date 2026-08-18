@@ -461,20 +461,24 @@ class CapitalQueries(QueryComponent):
         self,
         user_id: UUID,
         *,
-        authoritative_live_accounts: dict[str, str] | None = None,
         authoritative_live_treasury_account_id: str | None = None,
         require_authoritative_live_treasury: bool = False,
     ) -> dict[str, Any]:
         workspace_id, team_id = self._active_scope_ids(user_id)
         with self.database.session_factory() as session:
             now = datetime.now(UTC)
-            authoritative_accounts = {
-                venue.upper(): account_id
-                for venue, account_id in (authoritative_live_accounts or {}).items()
-                if account_id
-            }
+            active_live_accounts = set(
+                session.execute(
+                    select(ExchangeAccount.account_id, ExchangeAccount.venue).where(
+                        ExchangeAccount.team_id == team_id,
+                        ExchangeAccount.environment == "LIVE",
+                        ExchangeAccount.active.is_(True),
+                        ExchangeAccount.deleted_at.is_(None),
+                    )
+                ).all()
+            )
 
-            def is_authoritative_live_venue(
+            def is_active_live_venue(
                 environment: str,
                 location_type: str,
                 venue: str,
@@ -482,8 +486,7 @@ class CapitalQueries(QueryComponent):
             ) -> bool:
                 if environment != "LIVE" or location_type != "VENUE":
                     return True
-                expected = authoritative_accounts.get(venue.upper())
-                return expected is None or expected == account_id
+                return (account_id, venue) in active_live_accounts
 
             def is_authoritative_live_treasury(
                 environment: str,
@@ -523,7 +526,7 @@ class CapitalQueries(QueryComponent):
                 return scope_access[scope]
 
             def can_view_history(item: AccountEquityObservation) -> bool:
-                if not is_authoritative_live_venue(
+                if not is_active_live_venue(
                     item.environment,
                     item.location_type,
                     item.venue,
@@ -579,19 +582,6 @@ class CapitalQueries(QueryComponent):
                 AccountEquityObservation.team_id == team_id,
                 AccountEquityObservation.environment == "LIVE",
             )
-            if authoritative_accounts:
-                authoritative_history_scopes = [
-                    AccountEquityObservation.location_type == "VAULT",
-                    *[
-                        and_(
-                            AccountEquityObservation.location_type == "VENUE",
-                            func.upper(AccountEquityObservation.venue) == venue,
-                            AccountEquityObservation.account_id == account_id,
-                        )
-                        for venue, account_id in authoritative_accounts.items()
-                    ],
-                ]
-                observation_query = observation_query.where(or_(*authoritative_history_scopes))
             if require_authoritative_live_treasury:
                 observation_query = observation_query.where(
                     or_(
@@ -645,7 +635,7 @@ class CapitalQueries(QueryComponent):
             latest_live_source_times: dict[str, datetime] = {}
             current_live_source_times: dict[str, datetime] = {}
             for item in balances:
-                if not is_authoritative_live_venue(
+                if not is_active_live_venue(
                     item.environment,
                     item.location_type,
                     item.venue,

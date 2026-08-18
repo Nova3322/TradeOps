@@ -26,7 +26,7 @@ from trading_control_plane.domain import (
     ReviewDecision,
     Role,
 )
-from trading_control_plane.models import AccountEquity
+from trading_control_plane.models import AccountEquity, ExchangeAccount
 from trading_control_plane.notilt import (
     NoTiltAssetBudget,
     NoTiltGateway,
@@ -86,16 +86,6 @@ def seed(service: TradingService) -> dict[str, UUID]:
     )
     add_exchange_account_fixture(
         service.database, admin, "hyperliquid-main", "HYPERLIQUID", environment="LIVE"
-    )
-    add_exchange_account_fixture(
-        service.database, admin, "retired-binance-account", "BINANCE", environment="LIVE"
-    )
-    add_exchange_account_fixture(
-        service.database,
-        admin,
-        "retired-hyperliquid-account",
-        "HYPERLIQUID",
-        environment="LIVE",
     )
     service.record_position(
         "acct-1",
@@ -355,6 +345,16 @@ def test_live_net_worth_and_risk_capital_combine_two_venues_and_vault(
     assert total == Decimal("90")
     assert {item.get("location_type") for item in facts} >= {"VENUE", "VAULT"}
 
+    add_exchange_account_fixture(
+        database, ids["admin"], "retired-binance-account", "BINANCE", environment="LIVE"
+    )
+    add_exchange_account_fixture(
+        database,
+        ids["admin"],
+        "retired-hyperliquid-account",
+        "HYPERLIQUID",
+        environment="LIVE",
+    )
     service.record_account_equity(
         "retired-binance-account",
         "BINANCE",
@@ -377,13 +377,18 @@ def test_live_net_worth_and_risk_capital_combine_two_venues_and_vault(
         environment=ExecutionEnvironment.LIVE,
         now=now,
     )
-    single_account_center = TradingQueries(database).capital_center(
-        ids["proposer"],
-        authoritative_live_accounts={
-            "BINANCE": "binance-main",
-            "HYPERLIQUID": "hyperliquid-main",
-        },
-    )
+    with database.session_factory.begin() as session:
+        retired = session.scalars(
+            select(ExchangeAccount).where(
+                ExchangeAccount.account_id.in_(
+                    {"retired-binance-account", "retired-hyperliquid-account"}
+                )
+            )
+        ).all()
+        assert len(retired) == 2
+        for account in retired:
+            account.active = False
+    single_account_center = TradingQueries(database).capital_center(ids["proposer"])
     live_venue_balances = [
         item
         for item in single_account_center["balances"]
@@ -401,12 +406,7 @@ def test_live_net_worth_and_risk_capital_combine_two_venues_and_vault(
     async def api_scope_scenario() -> None:
         async with AsyncClient(
             transport=ASGITransport(
-                app=build_app(
-                    database,
-                    MockTelegramGateway(),
-                    runtime_binance_account_id="binance-main",
-                    runtime_hyperliquid_account_id="hyperliquid-main",
-                )
+                app=build_app(database, MockTelegramGateway())
             ),
             base_url="http://test",
         ) as client:
@@ -435,13 +435,7 @@ def test_live_net_worth_and_risk_capital_combine_two_venues_and_vault(
             )
 
     asyncio.run(api_scope_scenario())
-    authoritative_service = TradingService(
-        database,
-        authoritative_live_accounts={
-            "BINANCE": "binance-main",
-            "HYPERLIQUID": "hyperliquid-main",
-        },
-    )
+    authoritative_service = TradingService(database)
     with database.session_factory() as session:
         known, total, facts, _ = authoritative_service._managed_capital_context(
             session,
@@ -484,13 +478,7 @@ def test_live_net_worth_and_risk_capital_combine_two_venues_and_vault(
         )
         assert stale_binance is not None
         stale_binance.observed_at = now - timedelta(days=1)
-    stale_center = TradingQueries(database).capital_center(
-        ids["proposer"],
-        authoritative_live_accounts={
-            "BINANCE": "binance-main",
-            "HYPERLIQUID": "hyperliquid-main",
-        },
-    )
+    stale_center = TradingQueries(database).capital_center(ids["proposer"])
     assert stale_center["net_worth"]["venues"]["BINANCE"] is None
     assert stale_center["net_worth"]["total"] is None
     assert stale_center["net_worth"]["issues"].count("STALE_LIVE_SOURCE:BINANCE") == 1
@@ -1048,9 +1036,6 @@ def test_capital_contract_rejects_unsafe_facts_reviews_and_transitions(
 def build_app(
     database: Database,
     telegram: MockTelegramGateway,
-    *,
-    runtime_binance_account_id: str | None = None,
-    runtime_hyperliquid_account_id: str | None = None,
 ) -> FastAPI:
     settings = Settings(
         environment="test",
@@ -1058,8 +1043,6 @@ def build_app(
         allow_mock_identity=True,
         session_signing_secret="m7-test-signing-secret-that-is-long-enough",  # noqa: S106
         public_base_url="http://test",
-        runtime_binance_account_id=runtime_binance_account_id,
-        runtime_hyperliquid_account_id=runtime_hyperliquid_account_id,
         _env_file=None,
     )
     perptape = PerptapeClient(

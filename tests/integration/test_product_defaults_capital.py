@@ -12,8 +12,16 @@ from conftest import add_exchange_account_fixture
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy import select
 
+from trading_control_plane.adapters.binance_capital import BinanceCapitalGateway
+from trading_control_plane.adapters.capital import ProductionCapitalAdapterFactory
+from trading_control_plane.adapters.hyperliquid_capital import (
+    ARBITRUM_NATIVE_USDC_ADDRESS,
+    CCTP_DESTINATION_SENTINEL,
+    ERC20_TRANSFER_TOPIC,
+    HYPERLIQUID_BRIDGE2_ADDRESS,
+    HyperliquidCapitalGateway,
+)
 from trading_control_plane.api import create_app
-from trading_control_plane.binance_capital import BinanceCapitalGateway
 from trading_control_plane.config import Settings
 from trading_control_plane.database import Database
 from trading_control_plane.domain import (
@@ -21,13 +29,6 @@ from trading_control_plane.domain import (
     DirectCapitalPath,
     ExecutionEnvironment,
     Role,
-)
-from trading_control_plane.hyperliquid_capital import (
-    ARBITRUM_NATIVE_USDC_ADDRESS,
-    CCTP_DESTINATION_SENTINEL,
-    ERC20_TRANSFER_TOPIC,
-    HYPERLIQUID_BRIDGE2_ADDRESS,
-    HyperliquidCapitalGateway,
 )
 from trading_control_plane.models import (
     AccountEquityObservation,
@@ -117,8 +118,6 @@ def _app(
     binance_capital_withdraw_enabled: bool = False,
     binance_capital_environment_credentials: bool | None = None,
     credential_encryption_key: str | None = None,
-    runtime_binance_account_id: str | None = None,
-    runtime_hyperliquid_account_id: str | None = None,
 ):
     environment_capital_credentials = (
         binance_capital_withdraw_enabled or binance_capital_gateway is not None
@@ -132,8 +131,6 @@ def _app(
         session_signing_secret="product-flows-test-signing-secret",  # noqa: S106
         credential_encryption_key=credential_encryption_key or TEST_CREDENTIAL_KEY,
         runtime_sync_enabled=True,
-        runtime_binance_account_id=runtime_binance_account_id,
-        runtime_hyperliquid_account_id=runtime_hyperliquid_account_id,
         capital_direct_vault_id="vault-1",
         capital_direct_vault_address="0x1111111111111111111111111111111111111111",
         capital_direct_owned_arbitrum_address="0x2222222222222222222222222222222222222222",
@@ -172,14 +169,24 @@ def _app(
         contract_version="breakouts-v1",
         cache_ttl=timedelta(minutes=1),
     )
+    binance_gateway = binance_capital_gateway or BinanceCapitalGateway(
+        api_key=settings.binance_capital_api_key,
+        api_secret=settings.binance_capital_api_secret,
+    )
+    hyperliquid_gateway = hyperliquid_capital_gateway or HyperliquidCapitalGateway()
     return create_app(
         settings,
         database,
         perptape,
         notilt_gateway=notilt_gateway,
         safe_spending_gateway=safe_spending_gateway,
-        hyperliquid_capital_gateway=hyperliquid_capital_gateway,
-        binance_capital_gateway=binance_capital_gateway,
+        capital_adapter_factory=ProductionCapitalAdapterFactory(
+            binance_account_id=settings.binance_capital_account_id,
+            binance_api_key=settings.binance_capital_api_key,
+            binance_api_secret=settings.binance_capital_api_secret,
+            binance_gateway=binance_gateway,
+            hyperliquid_gateway=hyperliquid_gateway,
+        ),
     )
 
 
@@ -203,11 +210,7 @@ def test_capital_configuration_requires_canonical_runtime_account_ids_not_displa
     async def scenario() -> None:
         async with AsyncClient(
             transport=ASGITransport(
-                app=_app(
-                    database,
-                    runtime_binance_account_id="binance-main",
-                    runtime_hyperliquid_account_id="hyperliquid-main",
-                )
+                    app=_app(database)
             ),
             base_url="http://test",
         ) as client:
@@ -219,8 +222,8 @@ def test_capital_configuration_requires_canonical_runtime_account_ids_not_displa
                     "idempotency_key": "reject-display-name-as-account-id",
                 },
             )
-            assert display_name.status_code == 422, display_name.text
-            assert display_name.json()["error"]["code"] == "DEFAULT_ACCOUNT_REQUIRED"
+            assert display_name.status_code == 404, display_name.text
+            assert display_name.json()["error"]["code"] == "EXCHANGE_ACCOUNT_NOT_FOUND"
 
             canonical_id = await client.put(
                 "/api/capital/direct-configuration",

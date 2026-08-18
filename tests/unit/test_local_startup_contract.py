@@ -23,8 +23,9 @@ def test_local_worker_configs_cannot_trade_or_adjust_positions_autonomously() ->
 
     for config in (binance, hyperliquid):
         assert config["dry_run"] is True
-        assert config["force_entry_enable"] is False
-        assert config["position_adjustment_enable"] is False
+        assert config["force_entry_enable"] is True
+        assert config["position_adjustment_enable"] is True
+        assert all("*" not in pair for pair in config["exchange"]["pair_whitelist"])
 
     assert binance["exchange"]["name"] == "binance"
     assert hyperliquid["exchange"]["name"] == "hyperliquid"

@@ -5,15 +5,15 @@ from decimal import Decimal
 
 import pytest
 
-from trading_control_plane import hyperliquid_capital
-from trading_control_plane.domain import DomainRejected
-from trading_control_plane.hyperliquid_capital import (
+from trading_control_plane.adapters import hyperliquid_capital
+from trading_control_plane.adapters.hyperliquid_capital import (
     ARBITRUM_NATIVE_USDC_ADDRESS,
     CCTP_DESTINATION_SENTINEL,
     ERC20_TRANSFER_TOPIC,
     HYPERLIQUID_BRIDGE2_ADDRESS,
     HyperliquidCapitalGateway,
 )
+from trading_control_plane.domain import DomainRejected
 
 MAIN = "0x1111111111111111111111111111111111111111"
 AGENT = "0x2222222222222222222222222222222222222222"

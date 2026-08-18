@@ -11,7 +11,7 @@
   "timeframe": "5m",
   "initial_state": "stopped",
   "process_only_new_candles": true,
-  "position_adjustment_enable": false,
+  "position_adjustment_enable": true,
   "force_entry_enable": false,
   "cancel_open_orders_on_exit": true,
   "stoploss": -0.01,

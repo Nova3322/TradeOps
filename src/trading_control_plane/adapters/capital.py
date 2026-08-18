@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from enum import StrEnum
-from typing import Any, Literal, Protocol
+from typing import Any, ClassVar, Literal, Protocol
 
 from trading_control_plane.domain import DomainRejected
 
@@ -17,6 +17,23 @@ class CapitalOperation(StrEnum):
     FETCH_WITHDRAWALS = "FETCH_WITHDRAWALS"
     ADD_MARGIN = "ADD_MARGIN"
     REDUCE_MARGIN = "REDUCE_MARGIN"
+    BINANCE_PREPARE_DEPOSIT = "BINANCE_PREPARE_DEPOSIT"
+    BINANCE_PREPARE_WITHDRAWAL = "BINANCE_PREPARE_WITHDRAWAL"
+    BINANCE_SUBMIT_WITHDRAWAL = "BINANCE_SUBMIT_WITHDRAWAL"
+    BINANCE_VERIFY_DEPOSIT = "BINANCE_VERIFY_DEPOSIT"
+    BINANCE_COMPLETE_DEPOSIT = "BINANCE_COMPLETE_DEPOSIT"
+    BINANCE_VERIFY_WITHDRAWAL = "BINANCE_VERIFY_WITHDRAWAL"
+    HYPERLIQUID_RESOLVE_MAIN = "HYPERLIQUID_RESOLVE_MAIN"
+    HYPERLIQUID_ARBITRUM_BALANCE = "HYPERLIQUID_ARBITRUM_BALANCE"
+    HYPERLIQUID_PREPARE_DEPOSIT = "HYPERLIQUID_PREPARE_DEPOSIT"
+    HYPERLIQUID_PREPARE_WITHDRAWAL = "HYPERLIQUID_PREPARE_WITHDRAWAL"
+    HYPERLIQUID_PREPARE_ARBITRUM_TRANSFER = "HYPERLIQUID_PREPARE_ARBITRUM_TRANSFER"
+    HYPERLIQUID_VERIFY_LEDGER = "HYPERLIQUID_VERIFY_LEDGER"
+    HYPERLIQUID_VERIFY_ARBITRUM_TRANSFER = "HYPERLIQUID_VERIFY_ARBITRUM_TRANSFER"
+    HYPERLIQUID_VERIFY_ARBITRUM_CREDIT = "HYPERLIQUID_VERIFY_ARBITRUM_CREDIT"
+    HYPERLIQUID_VERIFY_ARBITRUM_CREDIT_ANY = "HYPERLIQUID_VERIFY_ARBITRUM_CREDIT_ANY"
+    HYPERLIQUID_FIND_ARBITRUM_CREDIT = "HYPERLIQUID_FIND_ARBITRUM_CREDIT"
+    HYPERLIQUID_FIND_CCTP_CREDIT = "HYPERLIQUID_FIND_CCTP_CREDIT"
 
 
 @dataclass(frozen=True, slots=True)
@@ -26,6 +43,7 @@ class CapitalScope:
     account_id: str
     venue: CapitalVenue
     environment: Literal["TESTNET", "LIVE"]
+    account_mode: str = "STANDARD"
 
     def __post_init__(self) -> None:
         for name, value in (
@@ -35,6 +53,16 @@ class CapitalScope:
         ):
             if not value or value != value.strip() or len(value) > 160:
                 raise ValueError(f"capital adapter {name} is invalid")
+        allowed_modes = (
+            {"STANDARD", "PORTFOLIO_MARGIN"}
+            if self.venue == "BINANCE"
+            else {"STANDARD"}
+        )
+        if self.account_mode not in allowed_modes:
+            raise DomainRejected(
+                "CAPITAL_ACCOUNT_MODE_UNSUPPORTED",
+                "the account mode is not supported for the selected capital exchange",
+            )
 
 
 @dataclass(frozen=True, slots=True)
@@ -47,6 +75,7 @@ class CapitalCredential:
 
 
 CapitalExchangeFactory = Callable[[CapitalScope, CapitalCredential], Any]
+CapitalAdapterFactory = Callable[[CapitalScope], "CapitalAdapter"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -113,6 +142,8 @@ class CapitalAdapter:
             CapitalOperation.WITHDRAW,
             CapitalOperation.ADD_MARGIN,
             CapitalOperation.REDUCE_MARGIN,
+            CapitalOperation.BINANCE_SUBMIT_WITHDRAWAL,
+            CapitalOperation.BINANCE_COMPLETE_DEPOSIT,
         }
         if operation in write_operations:
             operation_id = parameters.get("operation_id")
@@ -202,70 +233,47 @@ _UNIFIED_CAPABILITIES: dict[CapitalOperation, str] = {
     CapitalOperation.ADD_MARGIN: "addMargin",
     CapitalOperation.REDUCE_MARGIN: "reduceMargin",
 }
-_VERIFIED_UNIFIED_CONTRACTS: dict[CapitalVenue, frozenset[CapitalOperation]] = {
-    "BINANCE": frozenset(
-        {
-            CapitalOperation.TRANSFER,
-            CapitalOperation.WITHDRAW,
-            CapitalOperation.FETCH_DEPOSITS,
-            CapitalOperation.FETCH_WITHDRAWALS,
-            CapitalOperation.ADD_MARGIN,
-            CapitalOperation.REDUCE_MARGIN,
-        }
-    ),
-    "HYPERLIQUID": frozenset(
-        {
-            CapitalOperation.TRANSFER,
-            CapitalOperation.WITHDRAW,
-            CapitalOperation.FETCH_DEPOSITS,
-            CapitalOperation.FETCH_WITHDRAWALS,
-        }
-    ),
-    "OKX": frozenset(
-        {
-            CapitalOperation.TRANSFER,
-            CapitalOperation.WITHDRAW,
-            CapitalOperation.FETCH_DEPOSITS,
-            CapitalOperation.FETCH_WITHDRAWALS,
-            CapitalOperation.ADD_MARGIN,
-            CapitalOperation.REDUCE_MARGIN,
-        }
-    ),
-    "BYBIT": frozenset(
-        {
-            CapitalOperation.TRANSFER,
-            CapitalOperation.WITHDRAW,
-            CapitalOperation.FETCH_DEPOSITS,
-            CapitalOperation.FETCH_WITHDRAWALS,
-        }
-    ),
-}
 
 
 class CcxtUnifiedCapitalBackend:
-    """CCXT unified capital calls gated by an explicit venue contract matrix."""
+    """CCXT unified calls gated by advertised methods and a live read-only probe."""
 
     name = "CCXT_UNIFIED"
 
     def __init__(self, exchange: Any) -> None:
         self._exchange = exchange
+        self._read_probe: bool | None = None
 
     def probe(self, scope: CapitalScope, operation: CapitalOperation) -> CapabilityProbe:
-        capability = _UNIFIED_CAPABILITIES[operation]
-        method_name = _UNIFIED_METHODS[operation]
+        capability = _UNIFIED_CAPABILITIES.get(operation)
+        method_name = _UNIFIED_METHODS.get(operation)
+        if capability is None or method_name is None:
+            return CapabilityProbe(
+                supported=False,
+                contract="ccxt.unified.unsupported",
+                reason="operation has no CCXT unified contract",
+            )
         advertised = getattr(self._exchange, "has", {})
         callable_method = callable(getattr(self._exchange, method_name, None))
-        verified = operation in _VERIFIED_UNIFIED_CONTRACTS[scope.venue]
-        supported = (
+        declared = (
             isinstance(advertised, Mapping)
             and advertised.get(capability) is True
             and callable_method
-            and verified
         )
+        if declared and self._read_probe is None:
+            try:
+                load_markets = self._exchange.load_markets
+                fetch_balance = self._exchange.fetch_balance
+                markets = load_markets()
+                balance = fetch_balance()
+                self._read_probe = isinstance(markets, Mapping) and isinstance(balance, Mapping)
+            except Exception:
+                self._read_probe = False
+        supported = declared and self._read_probe is True
         return CapabilityProbe(
             supported=supported,
             contract=f"ccxt.unified.{method_name}",
-            reason=None if supported else "capability or venue contract is not verified",
+            reason=None if supported else "capability or live read-only probe is not verified",
         )
 
     def execute(
@@ -321,6 +329,13 @@ def build_ccxt_capital_backend(
                 "secret": values.get("api_secret", ""),
                 "options": {"defaultType": "swap"},
             }
+            if (
+                selected_scope.venue == "BINANCE"
+                and selected_scope.account_mode == "PORTFOLIO_MARGIN"
+            ):
+                configuration["options"].update(
+                    {"papi": True, "portfolioMargin": True}
+                )
             if selected_scope.venue == "OKX":
                 configuration["password"] = values.get("passphrase", "")
             if selected_scope.venue == "HYPERLIQUID":
@@ -372,15 +387,242 @@ class CallableCapitalBackend:
         return self._executor(scope, operation, parameters)
 
 
+class ProductionCapitalAdapterFactory:
+    """Build an exact-scope adapter from dedicated capital-only custody."""
+
+    _NATIVE_METHODS: ClassVar[
+        dict[CapitalOperation, tuple[CapitalVenue, str]]
+    ] = {
+        CapitalOperation.BINANCE_PREPARE_DEPOSIT: ("BINANCE", "prepare_deposit"),
+        CapitalOperation.BINANCE_PREPARE_WITHDRAWAL: ("BINANCE", "prepare_withdrawal"),
+        CapitalOperation.BINANCE_SUBMIT_WITHDRAWAL: ("BINANCE", "submit_withdrawal"),
+        CapitalOperation.BINANCE_VERIFY_DEPOSIT: ("BINANCE", "verify_deposit"),
+        CapitalOperation.BINANCE_COMPLETE_DEPOSIT: ("BINANCE", "complete_deposit_to_usdm"),
+        CapitalOperation.BINANCE_VERIFY_WITHDRAWAL: ("BINANCE", "verify_withdrawal"),
+        CapitalOperation.HYPERLIQUID_RESOLVE_MAIN: ("HYPERLIQUID", "resolve_main_account"),
+        CapitalOperation.HYPERLIQUID_ARBITRUM_BALANCE: (
+            "HYPERLIQUID",
+            "arbitrum_usdc_balance",
+        ),
+        CapitalOperation.HYPERLIQUID_PREPARE_DEPOSIT: (
+            "HYPERLIQUID",
+            "prepare_deposit",
+        ),
+        CapitalOperation.HYPERLIQUID_PREPARE_WITHDRAWAL: (
+            "HYPERLIQUID",
+            "prepare_withdrawal",
+        ),
+        CapitalOperation.HYPERLIQUID_PREPARE_ARBITRUM_TRANSFER: (
+            "HYPERLIQUID",
+            "prepare_arbitrum_usdc_transfer",
+        ),
+        CapitalOperation.HYPERLIQUID_VERIFY_LEDGER: (
+            "HYPERLIQUID",
+            "verify_hyperliquid_ledger",
+        ),
+        CapitalOperation.HYPERLIQUID_VERIFY_ARBITRUM_TRANSFER: (
+            "HYPERLIQUID",
+            "verify_arbitrum_usdc_transfer",
+        ),
+        CapitalOperation.HYPERLIQUID_VERIFY_ARBITRUM_CREDIT: (
+            "HYPERLIQUID",
+            "verify_arbitrum_usdc_credit",
+        ),
+        CapitalOperation.HYPERLIQUID_VERIFY_ARBITRUM_CREDIT_ANY: (
+            "HYPERLIQUID",
+            "verify_arbitrum_usdc_credit_from_any_sender",
+        ),
+        CapitalOperation.HYPERLIQUID_FIND_ARBITRUM_CREDIT: (
+            "HYPERLIQUID",
+            "find_arbitrum_usdc_credit",
+        ),
+        CapitalOperation.HYPERLIQUID_FIND_CCTP_CREDIT: (
+            "HYPERLIQUID",
+            "find_cctp_withdrawal_credit",
+        ),
+    }
+    _GENERIC_CHAIN_OPERATIONS: ClassVar[frozenset[CapitalOperation]] = frozenset({
+        CapitalOperation.HYPERLIQUID_PREPARE_ARBITRUM_TRANSFER,
+        CapitalOperation.HYPERLIQUID_VERIFY_ARBITRUM_TRANSFER,
+        CapitalOperation.HYPERLIQUID_VERIFY_ARBITRUM_CREDIT,
+        CapitalOperation.HYPERLIQUID_VERIFY_ARBITRUM_CREDIT_ANY,
+        CapitalOperation.HYPERLIQUID_FIND_ARBITRUM_CREDIT,
+    })
+
+    def __init__(
+        self,
+        *,
+        binance_account_id: str | None,
+        binance_api_key: str | None,
+        binance_api_secret: str | None,
+        binance_gateway: Any,
+        hyperliquid_gateway: Any,
+        exchange_factory: CapitalExchangeFactory | None = None,
+    ) -> None:
+        self.binance_account_id = binance_account_id
+        self.binance_api_key = binance_api_key
+        self.binance_api_secret = binance_api_secret
+        self.binance_gateway = binance_gateway
+        self.hyperliquid_gateway = hyperliquid_gateway
+        self.exchange_factory = exchange_factory
+
+    def __call__(self, scope: CapitalScope) -> CapitalAdapter:
+        if scope.venue == "BINANCE":
+            configured = any(
+                value is not None
+                for value in (
+                    self.binance_account_id,
+                    self.binance_api_key,
+                    self.binance_api_secret,
+                )
+            )
+            credentials_ready = all(
+                bool(value)
+                for value in (
+                    self.binance_account_id,
+                    self.binance_api_key,
+                    self.binance_api_secret,
+                )
+            )
+            if configured and (
+                not credentials_ready or scope.account_id != self.binance_account_id
+            ):
+                raise DomainRejected(
+                    "BINANCE_CAPITAL_CREDENTIALS_NOT_READY",
+                    "dedicated Binance capital credentials do not match the exact account",
+                )
+            credential = CapitalCredential(
+                account_id=scope.account_id,
+                venue="BINANCE",
+                purpose="CAPITAL",
+                values=(
+                    {
+                        "api_key": str(self.binance_api_key),
+                        "api_secret": str(self.binance_api_secret),
+                    }
+                    if credentials_ready
+                    else {}
+                ),
+                permissions=(
+                    frozenset({"READ", "TRANSFER", "WITHDRAW"})
+                    if credentials_ready
+                    else frozenset({"READ"})
+                ),
+            )
+            gateways: dict[CapitalVenue, Any] = {
+                "BINANCE": self.binance_gateway,
+                "HYPERLIQUID": self.hyperliquid_gateway,
+            }
+        elif scope.venue == "HYPERLIQUID":
+            credential = CapitalCredential(
+                account_id=scope.account_id,
+                venue="HYPERLIQUID",
+                purpose="CAPITAL",
+                values={},
+                permissions=frozenset({"READ", "TRANSFER"}),
+            )
+            gateways = {"HYPERLIQUID": self.hyperliquid_gateway}
+        else:
+            raise DomainRejected(
+                "CAPITAL_CREDENTIALS_NOT_READY",
+                "no dedicated capital credential is configured for the exact account",
+            )
+
+        contracts = {
+            (
+                scope.venue if operation in self._GENERIC_CHAIN_OPERATIONS else venue,
+                operation,
+            ): f"native.restricted.{method}"
+            for operation, (venue, method) in self._NATIVE_METHODS.items()
+            if venue == scope.venue or operation in self._GENERIC_CHAIN_OPERATIONS
+        }
+
+        def execute_native(
+            selected_scope: CapitalScope,
+            operation: CapitalOperation,
+            parameters: Mapping[str, Any],
+        ) -> Any:
+            venue, method_name = self._NATIVE_METHODS[operation]
+            if (
+                venue != selected_scope.venue
+                and operation not in self._GENERIC_CHAIN_OPERATIONS
+            ):
+                raise DomainRejected(
+                    "CAPITAL_BACKEND_SCOPE_MISMATCH",
+                    "capital fallback is outside the exact venue scope",
+                )
+            kwargs = dict(parameters)
+            if operation in {
+                CapitalOperation.BINANCE_SUBMIT_WITHDRAWAL,
+                CapitalOperation.BINANCE_COMPLETE_DEPOSIT,
+            }:
+                kwargs.pop("operation_id", None)
+            return getattr(gateways[venue], method_name)(**kwargs)
+
+        backends: list[CapitalBackend] = []
+        if credential.values:
+            backends.append(
+                build_ccxt_capital_backend(
+                    scope,
+                    credential,
+                    exchange_factory=self.exchange_factory,
+                )
+            )
+        backends.append(
+            CallableCapitalBackend(
+                name="NATIVE_RESTRICTED",
+                contracts=contracts,
+                executor=execute_native,
+            )
+        )
+        return CapitalAdapter(scope=scope, credential=credential, backends=backends)
+
+
+def build_production_capital_adapter_factory(
+    *,
+    binance_account_id: str | None,
+    binance_api_key: str | None,
+    binance_api_secret: str | None,
+    binance_base_url: str,
+    binance_recv_window_ms: int,
+    binance_timeout_seconds: float,
+    binance_request_state: Any,
+) -> ProductionCapitalAdapterFactory:
+    """Construct native fallbacks only inside the isolated capital package."""
+
+    from trading_control_plane.adapters.binance_capital import BinanceCapitalGateway
+    from trading_control_plane.adapters.hyperliquid_capital import HyperliquidCapitalGateway
+
+    binance = BinanceCapitalGateway(
+        base_url=binance_base_url,
+        api_key=binance_api_key,
+        api_secret=binance_api_secret,
+        recv_window_ms=binance_recv_window_ms,
+        timeout_seconds=binance_timeout_seconds,
+        request_state=binance_request_state,
+    )
+    binance.attach_request_state(binance_request_state)
+    return ProductionCapitalAdapterFactory(
+        binance_account_id=binance_account_id,
+        binance_api_key=binance_api_key,
+        binance_api_secret=binance_api_secret,
+        binance_gateway=binance,
+        hyperliquid_gateway=HyperliquidCapitalGateway(timeout_seconds=5),
+    )
+
+
 __all__ = [
     "CallableCapitalBackend",
     "CapabilityProbe",
     "CapitalAdapter",
+    "CapitalAdapterFactory",
     "CapitalBackend",
     "CapitalCredential",
     "CapitalOperation",
     "CapitalResult",
     "CapitalScope",
     "CcxtUnifiedCapitalBackend",
+    "ProductionCapitalAdapterFactory",
     "build_ccxt_capital_backend",
+    "build_production_capital_adapter_factory",
 ]

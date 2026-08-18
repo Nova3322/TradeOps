@@ -9,7 +9,7 @@ from trading_control_plane.api_schemas import (
     AgentProposalRequest,
     DirectCapitalHyperliquidReceiptRequest,
     DirectCapitalWalletSubmissionRequest,
-    FreqtradeLiveActionRequest,
+    FreqtradeActionRequest,
     ManagedUserAccessRequest,
     ManagedUserCreateRequest,
     ManualProposalRequest,
@@ -88,7 +88,7 @@ def proposal_payload() -> dict[str, object]:
 
 
 def test_freqtrade_live_dispatch_requires_an_explicit_idempotency_key() -> None:
-    request = FreqtradeLiveActionRequest.model_validate(
+    request = FreqtradeActionRequest.model_validate(
         {
             "execution_scope": "LIVE:acct-1:BINANCE",
             "owner_id": "execution-worker-1",
@@ -99,7 +99,7 @@ def test_freqtrade_live_dispatch_requires_an_explicit_idempotency_key() -> None:
 
     assert request.idempotency_key == "dispatch-intent-1"
     with pytest.raises(ValidationError):
-        FreqtradeLiveActionRequest.model_validate(
+        FreqtradeActionRequest.model_validate(
             {
                 "execution_scope": "LIVE:acct-1:BINANCE",
                 "owner_id": "execution-worker-1",

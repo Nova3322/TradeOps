@@ -1,16 +1,15 @@
 from __future__ import annotations
 
+# AccountService is composed with execution boundary methods by TradingService.
+# mypy: disable-error-code=attr-defined
 from trading_control_plane.service_component import ServiceComponent
 
 # The domain implementation intentionally consumes the explicit service_core export surface.
 # ruff: noqa: F403, F405
 from trading_control_plane.service_core import *
 from trading_control_plane.service_domains.account_registry import (
-    capital_account_binding,
-    capital_account_credentials_configured,
     delete_exchange_account,
     exchange_account_definition,
-    execution_account_binding,
     set_exchange_account_state,
     update_exchange_account,
 )
@@ -18,10 +17,7 @@ from trading_control_plane.service_domains.account_registry import (
 
 class AccountService(ServiceComponent):
     _exchange_account_definition = staticmethod(exchange_account_definition)
-    capital_account_binding = capital_account_binding
-    capital_account_credentials_configured = capital_account_credentials_configured
     delete_exchange_account = delete_exchange_account
-    execution_account_binding = execution_account_binding
     update_exchange_account = update_exchange_account
     set_exchange_account_state = set_exchange_account_state
 
@@ -78,6 +74,7 @@ class AccountService(ServiceComponent):
         environment: str = "LIVE",
         account_id: str,
         venue: str,
+        account_mode: str = "STANDARD",
         label: str | None,
         credentials: dict[str, str],
         idempotency_key: str,
@@ -87,6 +84,7 @@ class AccountService(ServiceComponent):
             self._exchange_account_definition(account_id, venue, label)
         )
         normalized_environment = environment.strip().upper()
+        normalized_account_mode = account_mode.strip().upper()
         if normalized_environment not in {"TESTNET", "LIVE"}:
             _reject("EXCHANGE_ACCOUNT_INVALID", "account environment is unsupported")
         if normalized_environment == "TESTNET" and normalized_venue not in {
@@ -96,6 +94,13 @@ class AccountService(ServiceComponent):
             _reject(
                 "TESTNET_EXECUTION_UNSUPPORTED",
                 "this exchange does not support test-environment execution",
+            )
+        if normalized_account_mode not in {"STANDARD", "PORTFOLIO_MARGIN"} or (
+            normalized_account_mode == "PORTFOLIO_MARGIN" and normalized_venue != "BINANCE"
+        ):
+            _reject(
+                "EXCHANGE_ACCOUNT_MODE_UNSUPPORTED",
+                "the account mode is not supported for the selected exchange",
             )
         if not credentials:
             _reject(
@@ -124,6 +129,7 @@ class AccountService(ServiceComponent):
                 "environment": normalized_environment,
                 "account_id": normalized_account_id,
                 "venue": normalized_venue,
+                "account_mode": normalized_account_mode,
                 "label": normalized_label,
                 "credential_semantics": credential_semantics,
             }
@@ -188,6 +194,7 @@ class AccountService(ServiceComponent):
                 "endpoint_family": (
                     "TESTNET_OFFICIAL" if normalized_environment == "TESTNET" else "LIVE_OFFICIAL"
                 ),
+                "account_mode": normalized_account_mode,
             }
             account.credential_version = 1
             account.connection_error_code = None
@@ -311,6 +318,9 @@ class AccountService(ServiceComponent):
                 "environment": account.environment,
                 "endpoint_family": (
                     "TESTNET_OFFICIAL" if account.environment == "TESTNET" else "LIVE_OFFICIAL"
+                ),
+                "account_mode": str(
+                    (account.credential_metadata or {}).get("account_mode", "STANDARD")
                 ),
             }
             account.credential_version = next_credential_version
@@ -883,6 +893,11 @@ class AccountService(ServiceComponent):
                     "FREQTRADE_WORKER_AUTH_INVALID",
                     "Freqtrade worker username and password are required together",
                 )
+            if ws_token is None:
+                _reject(
+                    "FREQTRADE_RPC_AUTH_REQUIRED",
+                    "a Freqtrade RPC WebSocket token is required for supervised reconciliation",
+                )
             auth_payload = self._freqtrade_auth_payload(username, password, ws_token)
             try:
                 normalized_hip3 = parse_hip3_dexes(",".join(hip3_dexes))
@@ -924,6 +939,12 @@ class AccountService(ServiceComponent):
                 _reject(
                     "FREQTRADE_HIP3_SCOPE_INVALID",
                     "HIP-3 DEX scope is only valid for Hyperliquid workers",
+                )
+            expected_mode = "LIVE" if account.environment == "LIVE" else "DRY_RUN"
+            if normalized_mode not in {"UNCONFIGURED", expected_mode}:
+                _reject(
+                    "FREQTRADE_WORKER_MODE_MISMATCH",
+                    "the worker mode must match the exact exchange-account environment",
                 )
             auth_semantics = (
                 None
@@ -1101,7 +1122,7 @@ class AccountService(ServiceComponent):
         account: ExchangeAccount,
         workspace_id: UUID,
         *,
-        require_live_verified: bool = False,
+        expected_mode: str | None = None,
     ) -> PreparedFreqtradeWorkerBinding:
         if (
             account.venue not in SUPPORTED_EXCHANGE_VENUES
@@ -1115,12 +1136,13 @@ class AccountService(ServiceComponent):
                 "FREQTRADE_WORKER_NOT_CONFIGURED",
                 "the exact exchange account has no configured Freqtrade worker",
             )
-        if require_live_verified and (
-            account.freqtrade_worker_mode != "LIVE" or account.freqtrade_worker_status != "VERIFIED"
+        if expected_mode is not None and (
+            account.freqtrade_worker_mode != expected_mode
+            or account.freqtrade_worker_status != "VERIFIED"
         ):
             _reject(
                 "FREQTRADE_WORKER_NOT_VERIFIED",
-                "LIVE execution requires a verified LIVE worker bound to the exact account",
+                "execution requires a verified worker in the exact account mode",
             )
         payload = self.credential_cipher.decrypt_secret(
             account.freqtrade_auth_ciphertext,
@@ -1136,6 +1158,7 @@ class AccountService(ServiceComponent):
             team_id=account.team_id,
             account_id=account.account_id,
             venue=account.venue,
+            environment=account.environment,
             account_version=account.version,
             worker_name=account.freqtrade_worker_name,
             worker_url=account.freqtrade_worker_url,
@@ -1146,6 +1169,7 @@ class AccountService(ServiceComponent):
             password=password,
             hip3_dexes=tuple(account.freqtrade_hip3_dexes or []),
             ws_token=ws_token,
+            service_principal_id=account.runtime_service_principal_id,
         )
 
     def record_exchange_account_freqtrade_verification(
@@ -1204,6 +1228,7 @@ class AccountService(ServiceComponent):
                 or account.team_id != binding.team_id
                 or account.account_id != binding.account_id
                 or account.venue != binding.venue
+                or account.environment != binding.environment
                 or account.freqtrade_auth_version != binding.auth_version
                 or account.freqtrade_worker_name != binding.worker_name
                 or account.freqtrade_worker_url != binding.worker_url
@@ -1270,7 +1295,7 @@ class AccountService(ServiceComponent):
             )
             return result
 
-    def freqtrade_live_worker_binding(
+    def freqtrade_worker_binding(
         self,
         *,
         actor_id: UUID,
@@ -1281,8 +1306,9 @@ class AccountService(ServiceComponent):
         campaign_id: UUID | None = None,
     ) -> PreparedFreqtradeWorkerBinding:
         environment, account_id, venue = _scope_parts(execution_scope)
-        if environment is not ExecutionEnvironment.LIVE:
-            _reject("FREQTRADE_LIVE_SCOPE_REQUIRED", "Freqtrade LIVE requires a LIVE scope")
+        expected_worker_mode = (
+            "LIVE" if environment is ExecutionEnvironment.LIVE else "DRY_RUN"
+        )
         with self.database.session_factory() as session:
             team = self.transactions._require_role(
                 session, actor_id, "venue.record", account_id, venue
@@ -1311,22 +1337,51 @@ class AccountService(ServiceComponent):
                         "EXECUTION_SCOPE_MISMATCH",
                         "Freqtrade worker scope does not match the campaign",
                     )
-            live_gate = session.get(CapabilityGate, "LIVE_ORDER_SEND")
-            if live_gate is None or live_gate.status != CapabilityStatus.ENABLED.value:
-                _reject(
-                    "LIVE_ORDER_SEND_DISABLED",
-                    "LIVE order send requires the explicit capability gate",
+            if environment is ExecutionEnvironment.LIVE:
+                live_gate = session.get(CapabilityGate, "LIVE_ORDER_SEND")
+                if live_gate is None or live_gate.status != CapabilityStatus.ENABLED.value:
+                    _reject(
+                        "LIVE_ORDER_SEND_DISABLED",
+                        "LIVE order send requires the explicit capability gate",
+                    )
+                account = self._require_exchange_account_live_ready(
+                    session,
+                    team_id=team.team_id,
+                    account_id=account_id,
+                    venue=venue,
                 )
-            account = self._require_exchange_account_live_ready(
-                session,
-                team_id=team.team_id,
-                account_id=account_id,
-                venue=venue,
-            )
+            else:
+                account = session.scalar(
+                    select(ExchangeAccount).where(
+                        ExchangeAccount.team_id == team.team_id,
+                        ExchangeAccount.environment == environment.value,
+                        ExchangeAccount.account_id == account_id,
+                        ExchangeAccount.venue == venue,
+                    )
+                )
+                if (
+                    account is None
+                    or not account.active
+                    or account.connection_status != "VERIFIED"
+                    or account.trading_status != "ELIGIBLE"
+                    or not account.runtime_sync_enabled
+                ):
+                    _reject(
+                        "EXCHANGE_ACCOUNT_TRADING_NOT_READY",
+                        "TESTNET execution requires an exact verified account binding",
+                    )
+                if (
+                    not team.trading_enabled
+                    or team.execution_mode != TeamExecutionMode.TESTNET.value
+                ):
+                    _reject(
+                        "TEAM_TESTNET_MODE_REQUIRED",
+                        "TESTNET execution requires an active TESTNET team",
+                    )
             return self._prepared_freqtrade_worker_binding(
                 account,
                 team.workspace_id,
-                require_live_verified=True,
+                expected_mode=expected_worker_mode,
             )
 
     def validate_freqtrade_worker_binding(
@@ -1343,7 +1398,7 @@ class AccountService(ServiceComponent):
                 or account.version != binding.account_version
                 or account.freqtrade_worker_name != binding.worker_name
                 or account.freqtrade_worker_url != binding.worker_url
-                or account.freqtrade_worker_mode != "LIVE"
+                or account.freqtrade_worker_mode != binding.worker_mode
                 or account.freqtrade_worker_status != "VERIFIED"
                 or account.freqtrade_auth_version != binding.auth_version
             ):
@@ -1352,7 +1407,7 @@ class AccountService(ServiceComponent):
                     "the exact account-bound Freqtrade worker changed before execution",
                 )
 
-    def start_freqtrade_live_dispatch(
+    def start_freqtrade_dispatch(
         self,
         intent_id: UUID,
         *,
@@ -1375,10 +1430,10 @@ class AccountService(ServiceComponent):
         if owner_id != owner_id.strip() or not owner_id:
             _reject("SENDER_OWNER_INVALID", "sender owner identity is invalid")
         if isinstance(command, FreqtradeEntryCommand):
-            if external_trade_id is not None:
+            if command.position_adjustment == (external_trade_id is None):
                 _reject(
                     "FREQTRADE_DISPATCH_IDENTITY_INVALID",
-                    "entry dispatch must not pre-bind an external trade identity",
+                    "only an Add dispatch must bind the exact existing Freqtrade trade",
                 )
             command_payload = {
                 "kind": "ENTRY",
@@ -1387,6 +1442,8 @@ class AccountService(ServiceComponent):
                 "max_quantity": str(command.max_quantity),
                 "enter_tag": command.enter_tag,
                 "client_order_id": command.client_order_id,
+                "position_adjustment": command.position_adjustment,
+                "external_trade_id": external_trade_id,
             }
         else:
             normalized_external_id = "" if external_trade_id is None else external_trade_id.strip()
@@ -1405,18 +1462,20 @@ class AccountService(ServiceComponent):
                 "max_quantity": str(command.max_quantity),
                 "client_order_id": command.client_order_id,
                 "external_trade_id": normalized_external_id,
+                "close_all": command.close_all,
             }
         environment, account_id, venue = _scope_parts(execution_scope)
-        if environment is not ExecutionEnvironment.LIVE:
-            _reject("FREQTRADE_LIVE_SCOPE_REQUIRED", "Freqtrade LIVE requires a LIVE scope")
-        operation = f"freqtrade-live.dispatch:{intent_id}"
+        expected_worker_mode = (
+            "LIVE" if environment is ExecutionEnvironment.LIVE else "DRY_RUN"
+        )
+        operation = f"freqtrade.dispatch:{intent_id}"
         with self.database.session_factory.begin() as session:
             intent = session.get(OrderIntent, intent_id, with_for_update=True)
             campaign = None if intent is None else session.get(Campaign, intent.campaign_id)
             if intent is None or campaign is None:
                 _reject("ORDER_INTENT_NOT_FOUND", "Freqtrade intent campaign is unavailable")
             if (
-                campaign.environment != ExecutionEnvironment.LIVE.value
+                campaign.environment != environment.value
                 or campaign.account_id != account_id
                 or campaign.venue != venue
                 or execution_scope
@@ -1442,27 +1501,49 @@ class AccountService(ServiceComponent):
                 fencing_token,
                 now,
             )
-            live_gate = session.get(CapabilityGate, "LIVE_ORDER_SEND")
-            if live_gate is None or live_gate.status != CapabilityStatus.ENABLED.value:
-                _reject(
-                    "LIVE_ORDER_SEND_DISABLED",
-                    "LIVE order send requires the explicit capability gate",
+            if environment is ExecutionEnvironment.LIVE:
+                live_gate = session.get(CapabilityGate, "LIVE_ORDER_SEND")
+                if live_gate is None or live_gate.status != CapabilityStatus.ENABLED.value:
+                    _reject(
+                        "LIVE_ORDER_SEND_DISABLED",
+                        "LIVE order send requires the explicit capability gate",
+                    )
+                account = self._require_exchange_account_live_ready(
+                    session,
+                    team_id=campaign.team_id,
+                    account_id=campaign.account_id,
+                    venue=campaign.venue,
                 )
-            account = self._require_exchange_account_live_ready(
-                session,
-                team_id=campaign.team_id,
-                account_id=campaign.account_id,
-                venue=campaign.venue,
-            )
+            else:
+                account = session.scalar(
+                    select(ExchangeAccount).where(
+                        ExchangeAccount.team_id == campaign.team_id,
+                        ExchangeAccount.environment == environment.value,
+                        ExchangeAccount.account_id == campaign.account_id,
+                        ExchangeAccount.venue == campaign.venue,
+                        ExchangeAccount.active,
+                    )
+                )
+                if (
+                    account is None
+                    or account.connection_status != "VERIFIED"
+                    or account.trading_status != "ELIGIBLE"
+                    or not account.runtime_sync_enabled
+                ):
+                    _reject(
+                        "EXCHANGE_ACCOUNT_TRADING_NOT_READY",
+                        "TESTNET execution requires an exact verified account binding",
+                    )
             if (
                 binding.exchange_account_id != account.exchange_account_id
                 or binding.team_id != account.team_id
                 or binding.account_id != account.account_id
                 or binding.venue != account.venue
+                or binding.environment != account.environment
                 or binding.account_version != account.version
                 or binding.worker_name != account.freqtrade_worker_name
                 or binding.worker_url != account.freqtrade_worker_url
-                or binding.worker_mode != "LIVE"
+                or binding.worker_mode != expected_worker_mode
                 or binding.worker_status != "VERIFIED"
                 or binding.auth_version != account.freqtrade_auth_version
             ):
@@ -1507,17 +1588,22 @@ class AccountService(ServiceComponent):
                         "FREQTRADE_DISPATCH_SNAPSHOT_CHANGED",
                         "persisted Freqtrade dispatch scope changed before recovery",
                     )
-                if isinstance(command, FreqtradeExitCommand) and (
-                    intent.dispatch_external_id != external_trade_id
+                if (
+                    not (
+                        isinstance(command, FreqtradeEntryCommand)
+                        and not command.position_adjustment
+                    )
+                    and intent.dispatch_external_id != external_trade_id
                 ):
                     _reject(
                         "FREQTRADE_DISPATCH_SNAPSHOT_CHANGED",
-                        "persisted Freqtrade exit identity changed before recovery",
+                        "persisted Freqtrade trade identity changed before recovery",
                     )
                 if intent.status == OrderIntentStatus.FILLED.value:
                     mode = "COMPLETED"
                 elif intent.status in {
                     OrderIntentStatus.DISPATCHING.value,
+                    OrderIntentStatus.PARTIALLY_FILLED.value,
                     OrderIntentStatus.UNKNOWN.value,
                 }:
                     mode = "QUERY_ONLY"
@@ -1530,6 +1616,7 @@ class AccountService(ServiceComponent):
                     mode=mode,
                     external_trade_id=intent.dispatch_external_id,
                     intent_version=intent.version,
+                    started_at=intent.dispatch_started_at or intent.updated_at,
                 )
             if intent.dispatch_backend is not None:
                 _reject(
@@ -1569,7 +1656,7 @@ class AccountService(ServiceComponent):
             self.transactions._audit(
                 session,
                 actor_id=str(actor_id),
-                event_type="FREQTRADE_LIVE_DISPATCH_STARTED",
+                event_type="FREQTRADE_DISPATCH_STARTED",
                 object_type="OrderIntent",
                 object_id=intent.intent_id,
                 reason=(
@@ -1589,6 +1676,7 @@ class AccountService(ServiceComponent):
                 mode="SEND",
                 external_trade_id=intent.dispatch_external_id,
                 intent_version=intent.version,
+                started_at=now,
             )
 
     def freqtrade_dispatch_external_id(
@@ -1692,11 +1780,72 @@ class AccountService(ServiceComponent):
                         account_id=account.account_id,
                         venue=account.venue,
                         environment=account.environment,
+                        account_mode=str(
+                            (account.credential_metadata or {}).get(
+                                "account_mode", "STANDARD"
+                            )
+                        ),
                         account_version=account.version,
                         credential_version=account.credential_version,
                         credentials=credentials,
+                        hip3_dexes=tuple(account.freqtrade_hip3_dexes or []),
                     )
                 )
+            return tuple(bindings)
+
+    def runtime_freqtrade_worker_bindings(
+        self,
+    ) -> tuple[PreparedFreqtradeWorkerBinding, ...]:
+        """Return verified RPC bindings pinned to each exact runtime account."""
+
+        with self.database.session_factory() as session:
+            accounts = session.scalars(
+                select(ExchangeAccount)
+                .where(
+                    ExchangeAccount.runtime_sync_enabled,
+                    ExchangeAccount.active.is_(True),
+                    ExchangeAccount.deleted_at.is_(None),
+                    ExchangeAccount.connection_status == "VERIFIED",
+                    ExchangeAccount.freqtrade_worker_status == "VERIFIED",
+                    ExchangeAccount.freqtrade_worker_mode.in_(("DRY_RUN", "LIVE")),
+                )
+                .order_by(
+                    ExchangeAccount.team_id,
+                    ExchangeAccount.venue,
+                    ExchangeAccount.account_id,
+                )
+            ).all()
+            bindings: list[PreparedFreqtradeWorkerBinding] = []
+            for account in accounts:
+                team = session.get(Team, account.team_id)
+                if team is None or not team.active or account.runtime_service_principal_id is None:
+                    _reject(
+                        "FREQTRADE_RUNTIME_BINDING_INVALID",
+                        "a verified Freqtrade worker lost its exact runtime principal",
+                    )
+                self._require_exact_runtime_principal(
+                    session,
+                    principal_id=account.runtime_service_principal_id,
+                    team=team,
+                    role=Role.OPERATOR,
+                    account_id=account.account_id,
+                    venue=account.venue,
+                    error_code="FREQTRADE_RUNTIME_BINDING_INVALID",
+                    error_message=(
+                        "the Freqtrade RPC principal is outside its exact account scope"
+                    ),
+                )
+                binding = self._prepared_freqtrade_worker_binding(
+                    account,
+                    team.workspace_id,
+                    expected_mode=account.freqtrade_worker_mode,
+                )
+                if binding.ws_token is None:
+                    _reject(
+                        "FREQTRADE_RPC_AUTH_REQUIRED",
+                        "a verified Freqtrade worker has no RPC WebSocket token",
+                    )
+                bindings.append(binding)
             return tuple(bindings)
 
     def perptape_runtime_bindings(self) -> tuple[PreparedPerptapeRuntimeBinding, ...]:
@@ -1876,7 +2025,7 @@ class AccountService(ServiceComponent):
     ) -> tuple[PreparedExchangeConnectionVerification | None, dict[str, Any] | None]:
         """Authorize and decrypt a version-pinned probe after checking for a replay."""
         with self.database.session_factory.begin() as session:
-            _actor, _workspace, active_team = self.transactions._active_scope(session, actor_id)
+            _actor, workspace, active_team = self.transactions._active_scope(session, actor_id)
             assert active_team is not None
             account = session.scalar(
                 select(ExchangeAccount).where(
@@ -1954,10 +2103,14 @@ class AccountService(ServiceComponent):
             return (
                 PreparedExchangeConnectionVerification(
                     exchange_account_id=account.exchange_account_id,
+                    workspace_id=workspace.workspace_id,
                     team_id=account.team_id,
                     account_id=account.account_id,
                     venue=account.venue,
                     environment=account.environment,
+                    account_mode=str(
+                        (account.credential_metadata or {}).get("account_mode", "STANDARD")
+                    ),
                     account_version=account.version,
                     credential_version=account.credential_version,
                     credentials=credentials,

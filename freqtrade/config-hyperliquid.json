@@ -11,15 +11,15 @@
   "timeframe": "5m",
   "initial_state": "running",
   "process_only_new_candles": true,
-  "position_adjustment_enable": false,
-  "force_entry_enable": false,
+  "position_adjustment_enable": true,
+  "force_entry_enable": true,
   "cancel_open_orders_on_exit": true,
   "exchange": {
     "name": "hyperliquid",
     "walletAddress": "",
     "privateKey": "",
     "hip3_dexes": ["xyz"],
-    "pair_whitelist": [".*/USDC:USDC"],
+    "pair_whitelist": ["BTC/USDC:USDC", "XYZ-TSLA/USDC:USDC"],
     "pair_blacklist": []
   },
   "pairlists": [{"method": "StaticPairList"}],

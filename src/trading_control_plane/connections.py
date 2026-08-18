@@ -151,75 +151,28 @@ def project_runtime_connections(
     database_perptape_configured: bool = False,
 ) -> dict[str, dict[str, Any]]:
     binding_counts = database_binding_counts or {}
-    database_binance = int(binding_counts.get("BINANCE", 0)) > 0
-    database_hyperliquid = int(binding_counts.get("HYPERLIQUID", 0)) > 0
-    database_okx = int(binding_counts.get("OKX", 0)) > 0
-    database_bybit = int(binding_counts.get("BYBIT", 0)) > 0
-    binance_credentials = (
-        "COMPLETE"
-        if database_binance or (settings.binance_api_key and settings.binance_api_secret)
-        else "PARTIAL"
-        if settings.binance_api_key or settings.binance_api_secret
-        else "MISSING"
-    )
-    hyperliquid_identity = (
-        "COMPLETE"
-        if database_hyperliquid
-        or settings.hyperliquid_account_address
-        or settings.hyperliquid_api_wallet_address
-        else "MISSING"
-    )
     notilt_identity = "COMPLETE" if settings.notilt_agent_address else "MISSING"
     perptape_credentials = (
         "COMPLETE" if database_perptape_configured or settings.perptape_api_key else "MISSING"
     )
+    exchange_connections = {
+        venue: _projection(
+            enabled=settings.fact_adapter_enabled and int(binding_counts.get(venue, 0)) > 0,
+            credential_state=(
+                "COMPLETE" if int(binding_counts.get(venue, 0)) > 0 else "MISSING"
+            ),
+            config_complete=int(binding_counts.get(venue, 0)) > 0,
+            health=_latest_health(source_health, venue),
+            owner_role="系统管理员",
+            write_process_enabled=(
+                settings.freqtrade_workers_enabled
+                and int(binding_counts.get(venue, 0)) > 0
+            ),
+        )
+        for venue in ("BINANCE", "HYPERLIQUID", "OKX", "BYBIT")
+    }
     return {
-        "BINANCE": _projection(
-            enabled=(
-                settings.runtime_sync_enabled
-                if database_binance
-                else settings.binance_read_only_enabled
-            ),
-            credential_state=binance_credentials,
-            config_complete=database_binance or bool(settings.runtime_binance_account_id),
-            health=_latest_health(source_health, "BINANCE"),
-            owner_role="系统管理员",
-            write_process_enabled=(
-                settings.binance_live_order_send_enabled
-                or settings.binance_testnet_order_send_enabled
-            ),
-        ),
-        "HYPERLIQUID": _projection(
-            enabled=(
-                settings.runtime_sync_enabled
-                if database_hyperliquid
-                else settings.hyperliquid_read_only_enabled
-            ),
-            credential_state=hyperliquid_identity,
-            config_complete=database_hyperliquid or bool(settings.runtime_hyperliquid_account_id),
-            health=_latest_health(source_health, "HYPERLIQUID"),
-            owner_role="系统管理员",
-            write_process_enabled=(
-                settings.hyperliquid_live_order_send_enabled
-                or settings.hyperliquid_testnet_order_send_enabled
-            ),
-        ),
-        "OKX": _projection(
-            enabled=settings.runtime_sync_enabled and database_okx,
-            credential_state="COMPLETE" if database_okx else "MISSING",
-            config_complete=database_okx,
-            health=_latest_health(source_health, "OKX"),
-            owner_role="系统管理员",
-            write_process_enabled=False,
-        ),
-        "BYBIT": _projection(
-            enabled=settings.runtime_sync_enabled and database_bybit,
-            credential_state="COMPLETE" if database_bybit else "MISSING",
-            config_complete=database_bybit,
-            health=_latest_health(source_health, "BYBIT"),
-            owner_role="系统管理员",
-            write_process_enabled=False,
-        ),
+        **exchange_connections,
         "PERPTAPE": _projection(
             enabled=(
                 settings.runtime_sync_enabled

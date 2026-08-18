@@ -57,6 +57,15 @@ class FakeCcxtCapitalExchange:
             "reduceMargin": False,
         }
         self.calls: list[tuple[tuple[Any, ...], Mapping[str, Any]]] = []
+        self.read_probes = 0
+
+    def load_markets(self) -> Mapping[str, object]:
+        self.read_probes += 1
+        return {"BTC/USDT:USDT": {}}
+
+    def fetch_balance(self) -> Mapping[str, object]:
+        self.read_probes += 1
+        return {"USDT": {"free": "1"}}
 
     def transfer(self, *args: Any, **kwargs: Any) -> Mapping[str, str]:
         self.calls.append((args, kwargs))
@@ -91,6 +100,7 @@ def test_capital_contract_prefers_verified_ccxt_unified_interface(venue: str) ->
     assert result.value == {"id": "transfer-1", "status": "ok"}
     assert fallbacks == []
     assert len(exchange.calls) == 1
+    assert exchange.read_probes == 2
 
 
 def test_capital_contract_falls_back_only_after_explicit_unsupported_probe() -> None:

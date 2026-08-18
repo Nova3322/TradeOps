@@ -11,14 +11,14 @@
   "timeframe": "5m",
   "initial_state": "running",
   "process_only_new_candles": true,
-  "position_adjustment_enable": false,
-  "force_entry_enable": false,
+  "position_adjustment_enable": true,
+  "force_entry_enable": true,
   "cancel_open_orders_on_exit": true,
   "exchange": {
     "name": "binance",
     "key": "",
     "secret": "",
-    "pair_whitelist": [".*/USDT:USDT"],
+    "pair_whitelist": ["BTC/USDT:USDT"],
     "pair_blacklist": []
   },
   "pairlists": [{"method": "StaticPairList"}],

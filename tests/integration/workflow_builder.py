@@ -200,6 +200,7 @@ class WorkflowFixture:
         key: str,
         quantity: Decimal = Decimal(1),
         direction: Direction = Direction.LONG,
+        allowed_adds: int = 0,
     ):
         self.service.decide_risk(
             proposal_id=proposal,
@@ -212,7 +213,7 @@ class WorkflowFixture:
             proposal_id=proposal,
             actor_id=self.ids["operator"],
             expires_at=self.now + timedelta(minutes=30),
-            allowed_adds=0,
+            allowed_adds=allowed_adds,
             idempotency_key=f"{key}-authorization",
             now=self.now,
         )

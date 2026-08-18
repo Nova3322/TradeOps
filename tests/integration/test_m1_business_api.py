@@ -14,7 +14,6 @@ from sqlalchemy import func, select
 from workflow_builder import ActorSpec, WorkflowFixture
 
 from trading_control_plane.api import create_app
-from trading_control_plane.binance import BinanceInstrument
 from trading_control_plane.config import Settings
 from trading_control_plane.database import Database
 from trading_control_plane.domain import (
@@ -31,6 +30,7 @@ from trading_control_plane.perptape import PerptapeClient, perptape_legacy_candi
 from trading_control_plane.queries import TradingQueries
 from trading_control_plane.service import TradingService
 from trading_control_plane.telegram import MockTelegramGateway
+from trading_control_plane.venue_read_only import VenueInstrument
 
 
 def seed(service: TradingService) -> dict[str, UUID]:
@@ -317,12 +317,15 @@ def test_freqtrade_backend_status_is_explicit_and_order_send_remains_closed(
             assert payload["backend"] == "FREQTRADE"
             assert payload["workers_enabled"] is False
             assert payload["direct_venue_send"] is False
-            assert payload["live_order_send"] is False
-            assert [(item["venue"], item["status"]) for item in payload["workers"]] == [
-                ("BINANCE", "DISABLED"),
-                ("HYPERLIQUID", "DISABLED"),
-            ]
-            assert payload["workers"][1]["hip3_dexes"] == ["xyz"]
+            assert payload["live_order_send"] == "DATABASE_GATE"
+            assert payload["workers"] == []
+            assert len(payload["account_bindings"]) == 1
+            binding = payload["account_bindings"][0]
+            assert binding["account_id"] == "acct-1"
+            assert binding["mode"] == "UNCONFIGURED"
+            assert binding["status"] == "UNCONFIGURED"
+            assert binding["endpoint"] is None
+            assert binding["order_send"] is False
 
     asyncio.run(scenario())
 
@@ -422,7 +425,7 @@ def test_official_catalog_sync_activates_current_contracts_and_deactivates_absen
         account_id="acct-1",
         venue="BINANCE",
         instruments=(
-            BinanceInstrument(
+            VenueInstrument(
                 symbol="BTCUSDT",
                 tick_size=Decimal("0.1"),
                 lot_size=Decimal("0.001"),
@@ -431,7 +434,7 @@ def test_official_catalog_sync_activates_current_contracts_and_deactivates_absen
                 collateral_currency="USDT",
                 active=True,
             ),
-            BinanceInstrument(
+            VenueInstrument(
                 symbol="TUTUSDT",
                 tick_size=Decimal("0.00001"),
                 lot_size=Decimal("1"),
@@ -456,7 +459,7 @@ def test_official_catalog_sync_activates_current_contracts_and_deactivates_absen
         account_id="acct-1",
         venue="BINANCE",
         instruments=(
-            BinanceInstrument(
+            VenueInstrument(
                 symbol="TUTUSDT",
                 tick_size=Decimal("0.00001"),
                 lot_size=Decimal("1"),

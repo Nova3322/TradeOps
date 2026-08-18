@@ -365,12 +365,22 @@ class PolicyRiskService(ServiceComponent):
             )
             .with_for_update()
         ).all()
-        if self.authoritative_live_accounts and environment == ExecutionEnvironment.LIVE.value:
+        if environment == ExecutionEnvironment.LIVE.value:
+            active_accounts = set(
+                session.execute(
+                    select(ExchangeAccount.account_id, ExchangeAccount.venue).where(
+                        ExchangeAccount.team_id == team_id,
+                        ExchangeAccount.environment == ExecutionEnvironment.LIVE.value,
+                        ExchangeAccount.active.is_(True),
+                        ExchangeAccount.deleted_at.is_(None),
+                    )
+                ).all()
+            )
             rows = [
                 row
                 for row in rows
                 if row.location_type != "VENUE"
-                or self.authoritative_live_accounts.get(row.venue) == row.account_id
+                or (row.account_id, row.venue) in active_accounts
             ]
         if not rows:
             return False, Decimal(0), [], now

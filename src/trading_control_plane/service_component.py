@@ -12,7 +12,6 @@ from trading_control_plane.service_transactions import TransactionService
 class ServiceRuntime:
     database: Database
     credential_cipher: CredentialCipher
-    authoritative_live_accounts: dict[str, str]
 
 
 class ServiceComponent:
@@ -27,10 +26,6 @@ class ServiceComponent:
     @property
     def credential_cipher(self) -> CredentialCipher:
         return self.runtime.credential_cipher
-
-    @property
-    def authoritative_live_accounts(self) -> dict[str, str]:
-        return self.runtime.authoritative_live_accounts
 
     @property
     def transactions(self) -> TransactionService:

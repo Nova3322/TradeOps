@@ -2,30 +2,15 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import datetime
 from typing import Any, Protocol
 from uuid import UUID
 
 from fastapi import FastAPI
 
+from trading_control_plane.adapters.capital import CapitalAdapter, CapitalScope
 from trading_control_plane.api_core import (
-    BinanceCapitalGateway,
-    BinancePortfolioMarginClient,
-    BinancePortfolioMarginReadOnlyClient,
-    BinanceReadOnlyClient,
-    BinanceTestnetClient,
-    BinanceTestnetOrder,
-    BinanceTestnetOrderCommand,
-    BinanceTestnetProtectionCommand,
     ExchangeConnectionVerifier,
     FreqtradeWorkerClient,
-    HyperliquidCapitalGateway,
-    HyperliquidLiveClient,
-    HyperliquidReadOnlyClient,
-    HyperliquidTestnetClient,
-    HyperliquidTestnetOrder,
-    HyperliquidTestnetOrderCommand,
-    HyperliquidTestnetProtectionCommand,
     LoginAttemptLimiter,
     MockCapitalTransferAdapter,
     NoTiltGateway,
@@ -55,10 +40,19 @@ class RequireCapability(Protocol):
 
 ServiceFactory = Callable[[], TradingService]
 QueryFactory = Callable[[], TradingQueries]
-ConfiguredRiskScopes = Callable[[], tuple[tuple[str, str, str], ...]]
+CapitalAdapterResolver = Callable[[CapitalScope], CapitalAdapter]
+ConfiguredRiskScopes = Callable[[UUID], tuple[tuple[str, str, str], ...]]
 CurrentPerptapeCandidate = Callable[..., PerptapeCandidate]
 CurrentPerptapeCandidates = Callable[..., list[PerptapeCandidate]]
 OpportunitySnapshot = Callable[..., dict[str, Any]]
+
+
+class EffectiveDirectCapitalSettings(Protocol):
+    def __call__(
+        self,
+        user_id: UUID,
+        environment: str = "LIVE",
+    ) -> tuple[Settings, dict[str, Any] | None]: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -94,19 +88,8 @@ class WorkspaceRouteDependencies:
 @dataclass(frozen=True, slots=True)
 class AccountRouteDependencies:
     common: AuthenticatedRouteDependencies
-    database_bound_venue_facts: Callable[[str, str, SessionIdentity], dict[str, Any]]
     freqtrade_client_for_binding: Callable[[PreparedFreqtradeWorkerBinding], FreqtradeWorkerClient]
-    require_binance_testnet: Callable[[], None]
-    require_default_venue_account: Callable[[str, str], None]
-    require_registered_or_default_venue_account: Callable[[SessionIdentity, str, str], None]
-    binance: BinanceReadOnlyClient | BinancePortfolioMarginReadOnlyClient
-    binance_live: BinancePortfolioMarginClient
-    binance_testnet: BinanceTestnetClient
-    binance_testnet_reader: BinanceReadOnlyClient
     exchange_connection_verifier: ExchangeConnectionVerifier
-    hyperliquid: HyperliquidReadOnlyClient
-    hyperliquid_live: HyperliquidLiveClient
-    hyperliquid_testnet: HyperliquidTestnetClient
 
 
 @dataclass(frozen=True, slots=True)
@@ -139,32 +122,11 @@ class ExecutionRouteDependencies:
     current_perptape_candidate: CurrentPerptapeCandidate
     current_perptape_candidates: CurrentPerptapeCandidates
     notify_campaign: Callable[..., None]
-    rejected_hyperliquid_order: Callable[
-        [HyperliquidTestnetOrderCommand, datetime], HyperliquidTestnetOrder
-    ]
-    rejected_testnet_order: Callable[[BinanceTestnetOrderCommand, datetime], BinanceTestnetOrder]
-    require_binance_live: Callable[[], None]
-    require_binance_testnet: Callable[[], None]
-    require_freqtrade_live_enabled: Callable[[], None]
-    require_freqtrade_live_worker: Callable[[PreparedFreqtradeWorkerBinding], FreqtradeWorkerClient]
-    require_hyperliquid_live: Callable[[], None]
-    require_hyperliquid_testnet: Callable[[], None]
-    binance_live: BinancePortfolioMarginClient
-    binance_testnet: BinanceTestnetClient
-    binance_testnet_uses_database_credentials: bool
+    require_freqtrade_enabled: Callable[[], None]
+    require_freqtrade_worker: Callable[[PreparedFreqtradeWorkerBinding], FreqtradeWorkerClient]
     freqtrade_workers: tuple[FreqtradeWorkerClient, ...]
-    hyperliquid: HyperliquidReadOnlyClient
-    hyperliquid_live: HyperliquidLiveClient
-    hyperliquid_testnet: HyperliquidTestnetClient
-    hyperliquid_testnet_uses_database_credentials: bool
     notilt: NoTiltGateway
     telegram: TelegramGateway
-    unknown_hyperliquid_protection: Callable[
-        [HyperliquidTestnetProtectionCommand, datetime], HyperliquidTestnetOrder
-    ]
-    unknown_testnet_protection: Callable[
-        [BinanceTestnetProtectionCommand, datetime], BinanceTestnetOrder
-    ]
 
 
 @dataclass(frozen=True, slots=True)
@@ -172,12 +134,11 @@ class CapitalRouteDependencies:
     common: AuthenticatedRouteDependencies
     capital_snapshot: Callable[[UUID], dict[str, Any]]
     configured_notilt_scope: Callable[[int], tuple[str, str]]
-    effective_direct_capital_settings: Callable[[UUID], tuple[Settings, dict[str, Any] | None]]
+    effective_direct_capital_settings: EffectiveDirectCapitalSettings
     notify_capital: Callable[..., None]
     notilt_chain_id_for_network: Callable[[str], int]
-    binance_capital: BinanceCapitalGateway
+    capital_adapter_resolver: CapitalAdapterResolver
     capital_transfer: MockCapitalTransferAdapter
-    hyperliquid_capital: HyperliquidCapitalGateway
     notilt: NoTiltGateway
     safe_spending: SafeSpendingGateway
     sync_configured_notilt_vault: Callable[..., tuple[int, dict[str, Any]]]
