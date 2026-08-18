@@ -1,12 +1,10 @@
 function navigate(path) { focusNextRouteHeading = true; history.pushState({}, '', path); route(); }
 function updateActiveNav() {
-  const proposalSource = new URLSearchParams(location.search).get('from');
   document.querySelectorAll('#sidebar nav a').forEach((link) => {
     const href = link.getAttribute('href');
     const active = location.pathname === href
       || (href === '/venues' && location.pathname.startsWith('/venues/'))
-      || (href === '/reviews' && location.pathname.startsWith('/proposals/') && proposalSource === 'reviews')
-      || (href === '/proposals' && location.pathname.startsWith('/proposals/') && proposalSource !== 'reviews')
+      || (href === '/reviews' && /^\/proposals\/[0-9a-f-]+$/i.test(location.pathname))
       || (href === '/campaigns' && location.pathname.startsWith('/campaigns/'));
     link.classList.toggle('active', active);
     if (active) {

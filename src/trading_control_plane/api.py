@@ -1662,6 +1662,7 @@ def create_app(
         @app.get("/campaigns", include_in_schema=False)
         @app.get("/campaigns/alerts", include_in_schema=False)
         @app.get("/positions", include_in_schema=False)
+        @app.get("/system", include_in_schema=False)
         @app.get("/orders", include_in_schema=False)
         @app.get("/risk", include_in_schema=False)
         @app.get("/exceptions", include_in_schema=False)

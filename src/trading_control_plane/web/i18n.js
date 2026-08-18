@@ -80,7 +80,7 @@ const ENGLISH_EXACT = new Map(Object.entries({
   '当前仅部分列表接口提供 limit：通知为 1–200，审计为 1–500。不要自行假设 cursor、offset 或 page 参数；以 OpenAPI 为准。':'Only some list endpoints provide limit: notifications 1–200 and audit 1–500. Do not assume cursor, offset, or page parameters; use OpenAPI.',
   '当前仅部分列表接口提供':'Only some list endpoints provide', '：通知为 1–200，审计为 1–500。不要自行假设':': notifications 1–200 and audit 1–500. Do not assume', '、':',', '与':'and', '或':'or', '参数；以 OpenAPI 为准。':'parameters; use OpenAPI.',
   '主导航':'Main navigation', '工作台':'Workspace', '空间配置':'Space setup', '治理与安全':'Governance and safety', '交易流程':'Trade workflow', '运行与风控':'Operations and risk', '团队配置':'Team configuration', '当前范围':'Current scope', '当前任务':'Current tasks', '实时信号':'Live signals', '实时机会':'Live opportunities', 'Webhook 信号':'Webhook signals', '提案管理':'Proposals', '审核队列':'Review queue',
-  '交易任务':'Trades', '绩效报表':'Performance reports', '交易模式':'Trading mode', '测试模式':'Testnet mode', '通知中心':'Notification center', '风险控制':'Risk controls', '系统状态':'System status', '资金':'Capital', '异常':'Exceptions',
+  '交易任务':'Trades', '当前持仓':'Current positions', '绩效报表':'Performance reports', '交易模式':'Trading mode', '测试模式':'Testnet mode', '通知中心':'Notification center', '风险控制':'Risk controls', '系统状态':'System status', '资金':'Capital', '异常':'Exceptions',
   '交易账户':'Exchange accounts', '交易所账户':'Exchange accounts', '账户管理':'Account management', '风控中心':'Risk center', '成员权限':'Access control',
   '业务数据库已连接':'Business database connected', '数据缺失时自动阻止交易':'Missing data blocks trading automatically', '跳到主要内容':'Skip to main content',
   '退出当前会话':'Sign out', '正在读取当前事实…':'Loading current data…',
@@ -98,6 +98,9 @@ const ENGLISH_EXACT = new Map(Object.entries({
   '已按岗位限制':'Restricted by role', '所需权限':'Required permission', '权限来源':'Permission source', '数据处理':'Data handling',
   '当前团队岗位与资源范围':'Current Team role and resource scope', '未读取受限页面数据':'Restricted page data was not loaded',
   '查看信号源':'View signal sources', '查看机会':'View opportunities', '查看提案':'View proposals', '查看绩效报表':'View performance reports', '查看通知中心':'View notifications', '查看系统状态':'View system status', '查看交易账户':'View exchange accounts', '发起提案':'Create proposals', '独立审核':'Independent review', '成员权限管理':'Access management',
+  '账户只读事实':'Read-only account facts', '先完成团队交易模式配置，再读取对应环境的账户持仓。':'Configure the Team trading mode before loading positions for that environment.', '当前模式尚未配置':'The current mode is not configured', '页面没有读取或推测任何账户持仓。':'The page did not load or estimate any account position.', '前往账户管理':'Open account management',
+  '多账户只读事实':'Multi-account read-only facts', '统一展示当前团队内有权限账户的非零持仓；可按交易所、账户、方向和未实现盈亏筛选。本页只读，不提供手动平仓或订单操作。':'View non-zero positions for authorized accounts in the current Team and filter by exchange, account, direction, and unrealized PnL. This page is read-only and has no manual close or order actions.', '刷新持仓':'Refresh positions', '仅统计非零仓位事实':'Only non-zero position facts are counted', '涉及账户':'Accounts with positions', '持仓账户 / 可见账户':'Position accounts / visible accounts', '多头 / 空头':'Long / short', '按仓位数量正负判断':'Derived from the sign of position quantity', '未知事实不计为实时盈亏':'Unknown facts are not counted as live PnL',
+  '筛选持仓':'Filter positions', '交易所、账户、方向和未实现盈亏':'Exchange, account, direction, and unrealized PnL', '全部账户':'All accounts', '多空':'Side', '盈利':'Profit', '亏损':'Loss', '持平':'Flat', '入场价 / 标记价':'Entry / mark price', '方向 / 数量':'Side / quantity', '现有仓位事实包含未知状态，不能据此确认账户空仓。':'Some position facts are unknown, so the accounts cannot be confirmed flat.', '当前可见账户没有非零持仓。':'Visible accounts have no non-zero positions.', '当前没有可展示的持仓':'No positions to display', '查看账户状态':'View account status', '没有符合筛选的持仓':'No positions match the filters', '请调整或清除筛选条件。':'Adjust or clear the filters.', '数据来自服务端最近保存的账户事实；请结合数据状态与更新时间判断时效。未知事实不会被当作 0，本页没有平仓按钮。':'Data comes from the latest server-saved account facts. Use the status and observation time to assess freshness. Unknown facts are not treated as zero, and this page has no close-position button.',
   '运行状态 · 已安全阻断':'Runtime status · safely blocked', '连接已中断':'Connection interrupted', '读取超时':'Request timed out',
   '当前范围没有访问权限':'Current scope does not have access', '当前数据无法读取':'Current data cannot be loaded', '风险政策尚未配置':'Risk policy is not configured',
   '当前 Workspace 和团队':'Current Workspace and team', '选择团队':'Select team',
@@ -806,6 +809,8 @@ const ENGLISH_EXACT = new Map(Object.entries({
 }));
 
 const ENGLISH_PATTERNS = [
+  [/^(生产模式|测试模式) · (LIVE|TESTNET) · 多账户只读事实$/, (_match, mode, environment) => `${mode === '生产模式' ? 'Production mode' : 'Testnet mode'} · ${environment} · Multi-account read-only facts`],
+  [/^(.+) · (Binance|Hyperliquid|OKX|Bybit) · 已停用$/, '$1 · $2 · Disabled'],
   [/^(.+) · (.+) · 当前生产默认$/, '$1 · $2 · Current Production default'],
   [/^(.+) · (.+) · 非当前生产默认$/, '$1 · $2 · Not the current Production default'],
   [/^连接测试失败：(.+)$/, 'Connection test failed: $1'],
