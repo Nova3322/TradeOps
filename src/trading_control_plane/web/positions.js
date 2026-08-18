@@ -45,20 +45,32 @@ async function renderCurrentPositions() {
   const emptyCopy = Number(summary.unknown_count || 0) > 0
     ? '现有仓位事实包含未知状态，不能据此确认账户空仓。'
     : '当前可见账户没有非零持仓。';
+  const filters = positions.length ? `<details class="proposal-filter-disclosure position-filter-disclosure" ${window.matchMedia('(min-width: 781px)').matches ? 'open' : ''}>
+      <summary><span><b>筛选持仓</b><small>交易所、账户、方向和未实现盈亏</small></span><strong><span><b data-position-visible-count>${positions.length}</b> / ${positions.length} 个结果</span><span class="proposal-filter-when-closed">展开</span><span class="proposal-filter-when-open">收起</span></strong></summary>
+      <div class="position-filter-panel">
+        <div class="position-filter-heading"><div><b>筛选持仓</b><small>交易所、账户、方向和未实现盈亏</small></div><div class="position-filter-actions"><span role="status" aria-live="polite"><b data-position-visible-count>${positions.length}</b> / ${positions.length} 个结果</span><button class="text-button" type="button" data-position-reset disabled>清除筛选</button></div></div>
+        <div class="position-list-tools"><label><span>交易所</span><select id="position-venue" autocomplete="off"><option value="">全部交易所</option>${['BINANCE','HYPERLIQUID','OKX','BYBIT'].map(venue => `<option value="${venue}">${escapeHtml(fmtVenueLabel(venue))}</option>`).join('')}</select></label><label><span>账户</span><select id="position-account" autocomplete="off"><option value="">全部账户</option>${accountOptions}</select></label><label><span>多空</span><select id="position-direction" autocomplete="off"><option value="">全部方向</option><option value="LONG">做多</option><option value="SHORT">做空</option></select></label><label><span>未实现盈亏</span><select id="position-pnl" autocomplete="off"><option value="">全部</option><option value="PROFIT">盈利</option><option value="LOSS">亏损</option><option value="FLAT">持平</option><option value="UNKNOWN">结果未知</option></select></label><button class="text-button position-filter-reset-mobile" type="button" data-position-reset disabled>清除筛选</button></div>
+      </div>
+    </details>` : '';
 
   main.innerHTML = `<section class="page current-positions-page"><header class="page-head"><div><p class="eyebrow">${escapeHtml(fmtEnvironment(environment, true))} · 多账户只读事实</p><h1>当前持仓</h1><p class="lede">统一展示当前团队内有权限账户的非零持仓；可按交易所、账户、方向和未实现盈亏筛选。本页只读，不提供手动平仓或订单操作。</p></div><div class="toolbar"><button class="secondary" type="button" data-refresh>刷新持仓</button></div></header>
     <div class="stats position-stats"><div class="stat"><small>当前持仓</small><b>${Number(summary.position_count || 0)}</b><span>仅统计非零仓位事实</span></div><div class="stat"><small>涉及账户</small><b>${Number(summary.account_count || 0)} / ${accounts.length}</b><span>持仓账户 / 可见账户</span></div><div class="stat"><small>多头 / 空头</small><b>${Number(summary.long_count || 0)} / ${Number(summary.short_count || 0)}</b><span>按仓位数量正负判断</span></div><div class="stat"><small>结果未知</small><b class="${Number(summary.unknown_count || 0) ? 'warning-text' : ''}">${Number(summary.unknown_count || 0)}</b><span>未知事实不计为实时盈亏</span></div></div>
-    <details class="proposal-filter-disclosure position-filter-disclosure" ${window.matchMedia('(min-width: 781px)').matches ? 'open' : ''}><summary><span><b>筛选持仓</b><small>交易所、账户、方向和未实现盈亏</small></span><strong><span><b data-position-count>${positions.length}</b> 个结果</span><span class="proposal-filter-when-closed">展开</span><span class="proposal-filter-when-open">收起</span></strong></summary><div class="position-list-tools"><label>交易所<select id="position-venue"><option value="">全部交易所</option>${['BINANCE','HYPERLIQUID','OKX','BYBIT'].map(venue => `<option value="${venue}">${escapeHtml(fmtVenueLabel(venue))}</option>`).join('')}</select></label><label>账户<select id="position-account"><option value="">全部账户</option>${accountOptions}</select></label><label>多空<select id="position-direction"><option value="">全部方向</option><option value="LONG">做多</option><option value="SHORT">做空</option></select></label><label>未实现盈亏<select id="position-pnl"><option value="">全部</option><option value="PROFIT">盈利</option><option value="LOSS">亏损</option><option value="FLAT">持平</option><option value="UNKNOWN">结果未知</option></select></label><span role="status" aria-live="polite"><b data-position-visible-count>${positions.length}</b> / <b data-position-count>${positions.length}</b> 个结果</span></div></details>
-    ${positions.length ? `<div class="table-wrap position-table"><table><thead><tr><th>交易所</th><th>账户</th><th>标的</th><th>方向 / 数量</th><th>入场价 / 标记价</th><th>未实现盈亏</th><th>数据状态</th></tr></thead><tbody>${rows}</tbody></table></div><section id="position-filter-empty" class="empty-state compact-empty" hidden><div><h2>没有符合筛选的持仓</h2><p>请调整或清除筛选条件。</p></div></section>` : `<section class="empty-state"><div><h2>当前没有可展示的持仓</h2><p>${escapeHtml(emptyCopy)}</p><a class="secondary" href="/accounts" data-link>查看账户状态</a></div></section>`}
+    ${filters}
+    ${positions.length ? `<div id="position-list" class="table-wrap position-table"><table><thead><tr><th>交易所</th><th>账户</th><th>标的</th><th>方向 / 数量</th><th>入场价 / 标记价</th><th>未实现盈亏</th><th>数据状态</th></tr></thead><tbody>${rows}</tbody></table></div><section id="position-filter-empty" class="empty-state compact-empty" hidden><div><h2>没有符合筛选的持仓</h2><p>请调整或清除筛选条件。</p></div></section>` : `<section class="empty-state"><div><h2>当前没有可展示的持仓</h2><p>${escapeHtml(emptyCopy)}</p><a class="secondary" href="/accounts" data-link>查看账户状态</a></div></section>`}
     <p class="safety-note position-read-only-note">数据来自服务端最近保存的账户事实；请结合数据状态与更新时间判断时效。未知事实不会被当作 0，本页没有平仓按钮。</p></section>`;
 
   document.querySelector('[data-refresh]')?.addEventListener('click', route);
   if (!positions.length) return;
+  const filterControls = ['#position-venue','#position-account','#position-direction','#position-pnl']
+    .map(selector => document.querySelector(selector));
+  const resetButtons = document.querySelectorAll('[data-position-reset]');
+  filterControls.forEach(control => { control.value = ''; });
   const applyFilters = () => {
     const venue = document.querySelector('#position-venue').value;
     const account = document.querySelector('#position-account').value;
     const direction = document.querySelector('#position-direction').value;
     const pnl = document.querySelector('#position-pnl').value;
+    const active = Boolean(venue || account || direction || pnl);
     let visible = 0;
     document.querySelectorAll('[data-position-row]').forEach(row => {
       const matches = (!venue || row.dataset.venue === venue)
@@ -68,11 +80,18 @@ async function renderCurrentPositions() {
       row.hidden = !matches;
       if (matches) visible += 1;
     });
-    document.querySelectorAll('[data-position-count]').forEach(node => { node.textContent = visible; });
-    document.querySelector('[data-position-visible-count]').textContent = visible;
+    document.querySelectorAll('[data-position-visible-count]').forEach(node => { node.textContent = visible; });
+    document.querySelector('.position-filter-panel').classList.toggle('has-active-filters', active);
+    resetButtons.forEach(button => { button.disabled = !active; });
+    document.querySelector('#position-list').hidden = visible === 0;
     document.querySelector('#position-filter-empty').hidden = visible !== 0;
   };
-  ['#position-venue','#position-account','#position-direction','#position-pnl'].forEach(selector => {
-    document.querySelector(selector).addEventListener('input', applyFilters);
+  filterControls.forEach(control => control.addEventListener('input', applyFilters));
+  resetButtons.forEach(button => {
+    button.addEventListener('click', () => {
+      filterControls.forEach(control => { control.value = ''; });
+      applyFilters();
+    });
   });
+  applyFilters();
 }

@@ -208,25 +208,46 @@ h2 { font-size: 21px; }
   border-radius: 0;
   background: transparent;
 }
+.position-filter-disclosure { margin: 18px 0 14px; }
+.position-filter-panel {
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  background: var(--panel);
+  box-shadow: var(--testnet-quiet);
+}
+.position-filter-panel.has-active-filters { border-color: color-mix(in srgb, var(--accent) 40%, var(--line)); }
+.position-filter-heading {
+  min-height: 54px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px;
+  padding: 10px 14px;
+}
+.position-filter-heading > div:first-child { display: grid; gap: 1px; }
+.position-filter-heading > div:first-child > b { font-size: 13px; }
+.position-filter-heading small { color: var(--muted); font-size: 11px; font-weight: 500; }
+.position-filter-actions { display: flex; align-items: center; gap: 12px; color: var(--muted); font-size: 12px; white-space: nowrap; }
+.position-filter-actions .text-button { min-height: 32px; padding: 4px 6px; }
 .position-list-tools {
   display: grid;
-  grid-template-columns: repeat(4, minmax(130px, 1fr)) auto;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 160px), 1fr));
   gap: 10px;
   align-items: end;
-  padding: 14px 0;
+  padding: 12px 14px 14px;
   border-top: 1px solid var(--line);
+  background: color-mix(in srgb, var(--panel-soft) 52%, transparent);
 }
-.position-list-tools > span {
-  align-self: center;
-  color: var(--muted);
-  font-size: 12px;
-  white-space: nowrap;
-}
+.position-list-tools label { min-width: 0; display: grid; gap: 5px; color: var(--muted); font-weight: 600; }
+.position-list-tools select { width: 100%; min-width: 0; min-height: 40px; background: var(--panel-strong); }
+.position-filter-reset-mobile { display: none; }
 .position-table { border-radius: 3px; }
 .position-read-only-note { margin-top: 16px; }
 .proposal-filter-disclosure > summary { display: none; }
 @media (min-width: 781px) {
   .proposal-filter-disclosure:not([open]) > :is(.proposal-list-tools, .position-list-tools) { display: grid; }
+  .position-filter-disclosure:not([open]) > .position-filter-panel { display: block; }
 }
 .proposal-table { border-radius: 3px; }
 .proposal-environment,
@@ -372,6 +393,19 @@ dialog { border-radius: 5px; }
   .proposal-filter-disclosure[open] .proposal-filter-when-closed { display: none; }
   .proposal-filter-disclosure[open] .proposal-filter-when-open { display: inline; }
   .proposal-filter-disclosure[open] > summary { margin-bottom: 2px; }
+  .position-filter-disclosure { border: 0; }
+  .position-filter-disclosure > summary {
+    padding: 11px 12px;
+    border: 1px solid var(--line);
+    border-radius: var(--radius-md);
+    background: var(--panel);
+  }
+  .position-filter-disclosure[open] > summary { margin-bottom: 0; border-radius: var(--radius-md) var(--radius-md) 0 0; }
+  .position-filter-panel { border-top: 0; border-radius: 0 0 var(--radius-md) var(--radius-md); box-shadow: none; }
+  .position-filter-heading { display: none; }
+  .position-list-tools { padding: 12px; border-top: 0; background: color-mix(in srgb, var(--panel-soft) 52%, transparent); }
+  .position-filter-reset-mobile { grid-column: 1 / -1; justify-self: start; min-height: 34px; padding: 4px 0; }
+  .position-filter-panel.has-active-filters .position-filter-reset-mobile { display: inline-flex; }
   .proposal-table tr,
   .position-table tr,
   .risk-condition-details tr,
@@ -484,8 +518,7 @@ dialog { border-radius: 5px; }
     border-bottom: 1px solid var(--line);
   }
 
-  .position-list-tools { grid-template-columns: 1fr 1fr; }
-  .position-list-tools > span { grid-column: 1 / -1; }
+  .position-list-tools { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 
   .proposal-table td > .row-link,
   .campaign-list-table td > .row-link { grid-column: auto; }
@@ -499,8 +532,7 @@ dialog { border-radius: 5px; }
   .proposal-list-tools,
   .position-list-tools { grid-template-columns: 1fr; }
   .proposal-list-tools label:first-child,
-  .proposal-list-tools > span,
-  .position-list-tools > span { grid-column: auto; }
+  .proposal-list-tools > span { grid-column: auto; }
 }
 
 /* Visual hierarchy pass: quieter navigation, readable Chinese, and one clear action. */

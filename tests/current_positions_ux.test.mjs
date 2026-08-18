@@ -32,6 +32,7 @@ test("current positions are read-only and expose all requested filters", () => {
     'id="position-account"',
     'id="position-direction"',
     'id="position-pnl"',
+    'data-position-reset',
     'data-position-row',
     'renderCurrentPositions',
   ]) assert.equal(positions.includes(marker), true, marker);
@@ -40,4 +41,13 @@ test("current positions are read-only and expose all requested filters", () => {
   assert.equal(router.includes("path === '/positions'"), true);
   assert.equal(router.includes('await renderCurrentPositions()'), true);
   assert.equal(session.includes("if (path === '/positions') return 'venue.view'"), true);
+});
+
+test("current positions start unfiltered, hide useless filters for an empty portfolio, and reset as one action", () => {
+  assert.equal(positions.includes("const filters = positions.length ?"), true);
+  assert.equal(positions.includes("filterControls.forEach(control => { control.value = ''; });"), true);
+  assert.equal(positions.includes("resetButtons.forEach(button => { button.disabled = !active; })"), true);
+  assert.equal(positions.includes("document.querySelector('#position-list').hidden = visible === 0"), true);
+  assert.equal(positions.includes("document.querySelectorAll('[data-position-visible-count]')"), true);
+  assert.equal(positions.includes("applyFilters();"), true);
 });
